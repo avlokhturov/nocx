@@ -254,7 +254,6 @@ export class Tab {
       this._title = this._defaultTitle
       this.titleSpan.textContent = this._defaultTitle
     }
-
   }
 
   /**
@@ -572,7 +571,6 @@ export class Tab {
           this.markActivity()
         }
       })
-
 
       // ── Clipboard ────────────────────────────────────────────────────
       // The renderer reports facts and never touches the clipboard (AD-6).

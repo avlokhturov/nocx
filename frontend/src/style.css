@@ -60,9 +60,15 @@ body {
 }
 
 /* When the active tab is in alt-screen mode (e.g. vim, htop, less),
-   hide the tabbar so the terminal gets the full window and doesn't
-   overlap the macOS traffic lights. */
+   keep the tabbar visible as a backdrop for the macOS traffic lights
+   but hide all tab content. The tabbar sits above the fullscreen xterm
+   via z-index so the traffic lights don't overlap terminal content. */
 #app.alt-screen .tabbar {
+  z-index: 101;
+}
+#app.alt-screen .tabs-container,
+#app.alt-screen .tabbar-spacer,
+#app.alt-screen .tab-add {
   display: none;
 }
 
@@ -708,39 +714,8 @@ body {
   color: #f7768e;
 }
 
-.nocx-editor-submit {
-  /* Centred vertically against the whole input block on the right edge
-     (item 2). Absolute inside .nocx-editor (its positioning context). */
-  position: absolute;
-  right: 14px;
-  top: 50%;
-  transform: translateY(-50%);
-  z-index: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  border: 1px solid #414868;
-  border-radius: 6px;
-  background: #292e42;
-  color: #7aa2f7;
-  padding: 0;
-  font-size: 15px;
-  line-height: 1;
-  cursor: pointer;
-  flex: none;
-}
-
-.nocx-editor-submit:hover {
-  background: #363b54;
-}
-
 .nocx-editor-input {
   width: 100%;
-  /* Clear the absolutely-positioned submit button on the right (item 2) so a
-     long or multi-line command never slides underneath it. */
-  padding-right: 44px;
   background: transparent;
   color: #c0caf5;
   border: none;
@@ -870,6 +845,7 @@ body {
 .xterm-live-container {
   flex: none;
   overflow: hidden;
+  transition: height 120ms ease;
 }
 
 /* --- Idle: fully hidden. The marker-only prompt line carries no visual
@@ -1005,7 +981,7 @@ body {
    (owner directives). */
 .cmd-header-text {
   font-family: var(--nocx-mono);
-  font-size: 16px;
+  font-size: 14px;
   color: #c0caf5;
   white-space: pre-wrap;
   overflow-wrap: break-word;
@@ -1066,7 +1042,7 @@ body {
 .cmd-output {
   padding: 2px 0 6px 0;
   font-family: var(--nocx-mono);
-  font-size: 16px;
+  font-size: 14px;
   line-height: 1.2;
   color: #c0caf5;
   /* pre-wrap: long lines wrap at the viewport edge (warp behavior) instead
@@ -1081,6 +1057,7 @@ body {
 /* Each terminal line in the output. */
 .term-line {
   display: block;
+  font-size: 14px;
   min-height: 1.2em;
 }
 

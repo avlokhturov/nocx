@@ -119,21 +119,6 @@ describe('CommandEditor', () => {
     expect(ta.rows).toBe(10)
   })
 
-  it('clicking the submit button submits and clears (same as Enter)', () => {
-    const { ed, container, submit } = setup()
-    ed.show()
-    const ta = container.querySelector('textarea')!
-    ta.value = 'echo hi'
-
-    const btn = container.querySelector('.nocx-editor-submit') as HTMLButtonElement
-    expect(btn).not.toBeNull()
-    btn.click()
-
-    expect(submit).toHaveBeenCalledWith('echo hi')
-    expect(ta.value).toBe('')
-    expect(ed.isVisible).toBe(false)
-  })
-
   it('setCwd updates the cwd chip text', () => {
     const { ed, container } = setup()
     ed.show()
@@ -165,7 +150,6 @@ describe('CommandEditor', () => {
     const { ed, container, ta } = setup()
     ed.show()
     expect(ed.rootContains(ta)).toBe(true)
-    expect(ed.rootContains(container.querySelector('.nocx-editor-submit'))).toBe(true)
     expect(ed.rootContains(container.querySelector('.nocx-editor-cwd'))).toBe(true)
   })
 

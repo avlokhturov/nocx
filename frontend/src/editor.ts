@@ -36,23 +36,8 @@ export class CommandEditor {
 
     this.timeChip = document.createElement('span')
     this.timeChip.className = 'nocx-chip nocx-editor-time'
-
-    const submitBtn = document.createElement('button')
-    submitBtn.className = 'nocx-editor-submit'
-    submitBtn.textContent = '→'
-    // preventDefault on mousedown so clicking the button never blurs the
-    // textarea (WebKit does not focus buttons on click, so the textarea would
-    // otherwise lose focus first); the click still fires and submits.
-    submitBtn.addEventListener('mousedown', (e) => e.preventDefault())
-    submitBtn.addEventListener('click', () => this.submit())
-
     this.chrome.append(this.cwdChip, this.timeChip)
     this.root.appendChild(this.chrome)
-
-    // The submit button is a direct child of the editor root (not the chrome
-    // row) so it can sit vertically centred against the whole input block on
-    // the right edge, the way Warp places its run affordance (item 2).
-    this.root.appendChild(submitBtn)
 
     // ── Textarea ────────────────────────────────────────────────────────
     this.ta = document.createElement('textarea')
@@ -66,13 +51,19 @@ export class CommandEditor {
     this.root.appendChild(this.ta)
   }
 
-  /** Update the time chip to the given ISO-ish timestamp. */
+  /** Update the time chip with date, weekday and time. */
   setTime(ts: Date): void {
-    this.timeChip.textContent = ts.toLocaleTimeString([], {
+    const datePart = ts.toLocaleDateString([], {
+      weekday: 'short',
+      month: 'short',
+      day: 'numeric',
+    })
+    const timePart = ts.toLocaleTimeString([], {
       hour: '2-digit',
       minute: '2-digit',
       second: '2-digit',
     })
+    this.timeChip.textContent = `${datePart} ${timePart}`
   }
 
   mount(container: HTMLElement): void {
@@ -179,7 +170,7 @@ export class CommandEditor {
   }
 
   /** Whether the editor's root element contains `el`. Used to scope the
-   *  focus-bounce so clicks on the submit button / textarea / cwd chip
+   *  focus-bounce so clicks on the textarea / cwd chip
    *  are not swallowed. */
   rootContains(el: Node | null): boolean {
     return this.root.contains(el)
