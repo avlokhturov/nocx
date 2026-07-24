@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>nocx DOM Scrollback Spike</title>
+    <style>
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+      html,
+      body {
+        height: 100%;
+        overflow: hidden;
+        background: #1a1b26;
+        color: #c0caf5;
+        font-family: 'JetBrains Mono', 'Fira Code', monospace;
+        font-size: 14px;
+      }
+      #app {
+        display: flex;
+        flex-direction: column;
+        height: 100%;
+      }
+
+      /* Toolbar */
+      #toolbar {
+        display: flex;
+        gap: 8px;
+        padding: 4px 8px;
+        background: #24283b;
+        border-bottom: 1px solid #414868;
+        align-items: center;
+        flex-shrink: 0;
+      }
+      #toolbar button {
+        background: #414868;
+        color: #c0caf5;
+        border: none;
+        padding: 4px 12px;
+        border-radius: 4px;
+        cursor: pointer;
+        font-family: inherit;
+        font-size: 12px;
+      }
+      #toolbar button:hover {
+        background: #565f89;
+      }
+      #toolbar button.running {
+        background: #f7768e;
+      }
+      #status {
+        font-size: 12px;
+        color: #9ece6a;
+        margin-left: auto;
+      }
+
+      /* Scrollback area */
+      #scrollback-area {
+        flex: 1;
+        overflow-y: auto;
+        overflow-x: hidden;
+        position: relative;
+      }
+      #scrollback-inner {
+        padding-bottom: 8px;
+      }
+
+      /* DOM command blocks */
+      .cmd-block {
+        border-bottom: 1px solid #414868;
+        margin: 0;
+      }
+      .cmd-block .cmd-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 4px 8px;
+        background: #1e2030;
+        color: #7aa2f7;
+        font-size: 13px;
+        font-weight: 600;
+        border-bottom: 1px solid #292e42;
+        user-select: none;
+      }
+      .cmd-block .cmd-header .cmd-exit {
+        margin-left: auto;
+        font-size: 11px;
+        padding: 1px 6px;
+        border-radius: 3px;
+      }
+      .cmd-block .cmd-header .cmd-exit.ok {
+        color: #9ece6a;
+      }
+      .cmd-block .cmd-header .cmd-exit.fail {
+        color: #f7768e;
+      }
+      .cmd-block .cmd-output {
+        padding: 2px 8px;
+        white-space: pre;
+        font-size: 14px;
+        line-height: 1.5;
+        overflow-x: auto;
+      }
+      .cmd-block .cmd-output .term-line {
+        display: block;
+        min-height: 1.5em;
+      }
+
+      /* Live region marker */
+      #live-region {
+        position: relative;
+      }
+
+      /* xterm container */
+      #xterm-container {
+        position: relative;
+        width: 100%;
+      }
+      #xterm-container.fullscreen {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        z-index: 100;
+        background: #1a1b26;
+      }
+
+      /* Spinner for running block */
+      .running-indicator {
+        display: inline-block;
+        width: 12px;
+        height: 12px;
+        border: 2px solid #414868;
+        border-top-color: #7aa2f7;
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+        margin-right: 4px;
+      }
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+
+      /* Status bar */
+      #perf-bar {
+        padding: 2px 8px;
+        font-size: 11px;
+        color: #565f89;
+        background: #24283b;
+        border-top: 1px solid #414868;
+        flex-shrink: 0;
+        display: flex;
+        gap: 16px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <div id="toolbar">
+        <button id="btn-connect">Connect</button>
+        <button id="btn-clear-blocks">Clear Blocks</button>
+        <button id="btn-perf-test">10k Perf Test</button>
+        <span id="status">disconnected</span>
+      </div>
+      <div id="scrollback-area">
+        <div id="scrollback-inner">
+          <div id="live-region"></div>
+          <div id="xterm-container"></div>
+        </div>
+      </div>
+      <div id="perf-bar">
+        <span id="perf-blocks">blocks: 0</span>
+        <span id="perf-nodes">DOM nodes: 0</span>
+        <span id="perf-serialize">last serialize: -</span>
+        <span id="perf-scroll">scroll: -</span>
+      </div>
+    </div>
+    <script type="module" src="/src/spike/dom-scrollback.ts"></script>
+  </body>
+</html>
