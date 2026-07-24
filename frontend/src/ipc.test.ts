@@ -164,6 +164,14 @@ describe('connect', () => {
     await connecting
   })
 
+  it('can dial a non-default host (plain-browser dev path)', async () => {
+    const client = new WSClient()
+    const connecting = client.connect(1234, 'vm-agents')
+    expect(socket().url).toBe('ws://vm-agents:1234/session')
+    socket().serverAccepts()
+    await connecting
+  })
+
   it('asks for arraybuffer frames, not blobs', async () => {
     const client = new WSClient()
     const connecting = client.connect(9876)

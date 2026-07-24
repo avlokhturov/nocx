@@ -169,6 +169,21 @@ export interface TerminalRenderer {
 
   /** The DOM element the renderer mounted into — the gutter overlays it. */
   readonly paneElement?: HTMLElement
+
+  /**
+   * For DOM scrollback serialization. Returns the active buffer line at
+   * the given absolute index. The returned object satisfies xterm's
+   * IBufferLine interface for length, getCell(), isWrapped. Undefined
+   * when the renderer does not support buffer access (e.g. wterm).
+   */
+  getBufferLine?(line: number): import('@xterm/xterm').IBufferLine | undefined
+
+  /**
+   * Clear the visible xterm viewport. Used after freezing a block to
+   * prevent output duplication between DOM blocks and the xterm grid.
+   * Does NOT clear scrollback — only the visible viewport rows.
+   */
+  clearViewport?(): void
 }
 
 /** Adapter over an xterm IMarker, exposing only what the gutter needs. */

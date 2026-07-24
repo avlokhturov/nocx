@@ -243,14 +243,18 @@ export class WSClient {
 
   // Reconnect state.
   private _port = 0
+  private _host = '127.0.0.1'
   private _closingDeliberately = false
   private _backoffMs = MIN_BACKOFF_MS
   private _reconnectTimer: ReturnType<typeof setTimeout> | null = null
 
   // connect resolves when the WebSocket handshake completes. Sessions are
-  // not open yet — call openSession() next to get a SessionHandle.
-  connect(port: number): Promise<void> {
+  // not open yet — call openSession() next to get a SessionHandle. The host
+  // defaults to loopback (the Wails shell serves the page locally); the
+  // plain-browser dev path overrides it with the page's own hostname.
+  connect(port: number, host = '127.0.0.1'): Promise<void> {
     this._port = port
+    this._host = host
     this._closingDeliberately = false
     this._backoffMs = MIN_BACKOFF_MS
     this.sessions.clear()
@@ -260,7 +264,7 @@ export class WSClient {
 
   private _connectInternal(): Promise<void> {
     return new Promise((resolve, reject) => {
-      this.ws = new WebSocket(`ws://127.0.0.1:${this._port}/session`)
+      this.ws = new WebSocket(`ws://${this._host}:${this._port}/session`)
       this.ws.binaryType = 'arraybuffer'
       this.pendingOpens.clear()
       this.pendingAttaches.clear()

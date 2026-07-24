@@ -11,6 +11,7 @@ import { shouldCopy, type ClipboardAccess, type ClipboardGate } from './clipboar
 import type { ClipboardBanner } from './banner'
 import { CommandLedger } from './command-ledger'
 import type { MarkerAdapter } from './renderers/types'
+import { ScrollbackController } from './scrollback/controller'
 
 // How long the grid must hold still before the PTY is told about it.
 // Dragging a window edge walks the grid through every intermediate size,
@@ -85,11 +86,15 @@ export class Tab {
   private session: SessionHandle | null = null
   private editor: CommandEditor | null = null
   private shellTarget: ShellInputTarget | null = null
+  private scrollback: ScrollbackController | null = null
   private nativeMode = false
   private started = false
   private ledger: CommandLedger | null = null
+  /** Pending command text set by the editor, consumed by the C marker. */
+  private _pendingCommand = ''
   /** Per-record markers (B2): each record owns its own marker, keyed by record id. */
   private _markers = new Map<number, MarkerAdapter>()
+  private _globalKeydown: ((e: KeyboardEvent) => void) | null = null
   private _cwd = '~'
   private _host = ''
 
@@ -258,7 +263,15 @@ export class Tab {
 
     try {
       const renderer = createRenderer(this.rendererName)
-      await renderer.mount(this.pane)
+
+      // ── DOM scrollback controller ───────────────────────────────────────
+      this.scrollback = new ScrollbackController({
+        pane: this.pane,
+        renderer,
+        now: () => performance.now(),
+      })
+
+      await renderer.mount(this.scrollback.mountTarget)
 
       this.cols = renderer.cols
       this.rows = renderer.rows
@@ -279,6 +292,9 @@ export class Tab {
       this.shellTarget = new ShellInputTarget((data: string) => this.session!.send(data))
       this.editor = new CommandEditor({
         submit: (doc: string) => {
+          // Store the pending command text for the upcoming OSC 133 C marker.
+          this._pendingCommand = doc
+
           // Anchor the block at the COMMAND row NOW, while the terminal cursor
           // still sits on the (marker-only) prompt line the command is about to
           // be echoed onto. Deferring to the next OSC 133 C anchored the glyph
@@ -297,6 +313,9 @@ export class Tab {
               })
             }
           }
+          // Detect `clear` and clear DOM blocks.
+          this.scrollback?.maybeClear(doc)
+
           submitCommand(doc, {
             dispatchSubmit: () => this.inputState.dispatch({ type: 'submit' }),
             focusGrid: () => renderer.focus(),
@@ -309,6 +328,10 @@ export class Tab {
       })
       this.editor.mount(this.pane)
 
+      // The editor is an in-flow flex child at the bottom of the pane (see
+      // .pane / .nocx-editor in style.css) — the scrollback area ends above
+      // it by construction, so no overlay padding hacks are needed.
+
       renderer.onCommandMarker((marker) => {
         this.inputState.dispatch({ type: 'marker', kind: marker.kind })
         // OSC 133 D carries the exit code of the just-finished command.
@@ -319,12 +342,32 @@ export class Tab {
         }
         // Feed the command ledger.
         this.ledger?.onMarker(marker.kind, marker.exitCode)
+
+        // ── DOM scrollback block lifecycle ────────────────────────────
+        if (marker.kind === 'C') {
+          // Create a running block with the pending command text.
+          this.scrollback?.onCommandStart(this._pendingCommand, this._cwd, marker.line)
+        } else if (marker.kind === 'D') {
+          // Freeze the running block: serialize output from the xterm buffer.
+          if (renderer.getBufferLine) {
+            const getLine = (y: number) => renderer.getBufferLine!(y)
+            this.scrollback?.onCommandEnd(getLine, marker.line, marker.exitCode ?? null)
+            // Trim xterm viewport so output isn't duplicated between DOM
+            // blocks and the xterm grid. The prompt re-renders on the next
+            // shell cycle.
+            renderer.clearViewport?.()
+          }
+        }
       })
 
       renderer.onBufferChange((type) => {
         this._bufferType = type
         this.inputState.dispatch({ type: 'buffer', buffer: type })
-        // markers when buffer type changes.
+        if (type === 'alternate') {
+          this.scrollback?.enterFullscreen()
+        } else {
+          this.scrollback?.exitFullscreen()
+        }
       })
 
       this.inputState.onChange((m) => {
@@ -332,26 +375,97 @@ export class Tab {
         if (shouldShowEditor(m.owned, this.nativeMode)) {
           this.editor!.show()
           renderer.setReadOnly(true)
+          this.scrollback?.setIdle()
+        } else if (m.state === 'RUNNING_RAW') {
+          this.editor!.hide()
+          renderer.setReadOnly(false)
+          renderer.focus()
+          this.scrollback?.setRunning()
         } else {
           this.editor!.hide()
           renderer.setReadOnly(false)
           renderer.focus()
+          this.scrollback?.setIdle()
         }
       })
 
-      // ── Focus bounce ───────────────────────────────────────────────
+      // ── Focus bounce (P0-4) ────────────────────────────────────────
       // When the editor owns input, typing must stay in the textarea even
-      // when the user clicks into the terminal (text selection still works
-      // because disableStdin only blocks keyboard, not mouse). Bounce
-      // focus back to the editor so keystrokes don't leak to the PTY.
+      // when the user clicks outside it — but NOT when clicking the xterm
+      // live region (needed for TUIs and text selection).
       //
-      // Scoped to fire only when focus lands OUTSIDE the editor root —
-      // clicks on the submit button, textarea, or cwd chip must not
-      // bounce (item 5). That restores: clickable submit button, native
-      // double-click word selection, and Ctrl+A then click to deselect.
+      // Three rules:
+      // (a) Clicking the editor card focuses the textarea.
+      // (b) Typing printable chars while focus is outside xterm redirects.
+      // (c) Clicking the xterm live region keeps focus there.
       this.pane.addEventListener('focusin', () => {
-        if (this.editor?.isVisible && !this.editor.rootContains(document.activeElement)) {
-          this.editor.focus()
+        if (!this.editor?.isVisible) return
+        const active = document.activeElement
+        // Don't bounce if focus is in the editor or the xterm live container.
+        if (
+          active &&
+          (this.editor.rootContains(active) || this.scrollback?.xtermLiveContainer.contains(active))
+        )
+          return
+        this.editor.focus()
+      })
+
+      // Click anywhere on the editor card focuses the textarea (P0-4a).
+      this.editor.root.addEventListener('click', () => {
+        this.editor?.focus()
+      })
+
+      // Redirect printable keystrokes to the editor when it owns input
+      // and focus has drifted elsewhere (P0-4b).
+      // ALSO redirect when a block is selected: typing deselects the
+      // block and focuses the editor (P0-4: warp behavior).
+      // NOTE: attached at document level — after a click on a DOM block
+      // the focus is on <body>, and keydown targeted at <body> never
+      // bubbles through this.pane (pane is a DESCENDANT of body, not an
+      // ancestor), so a pane-level listener would never fire.
+      this._globalKeydown = (e: KeyboardEvent) => {
+        if (!this.pane.isConnected) return
+        // If a block is selected, typing a printable character redirects
+        // to the editor and deselects the block (P0-4: warp behavior).
+        if (this.scrollback && this.scrollback.selectedBlockId !== null) {
+          if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+            e.preventDefault()
+            this.scrollback.deselectBlocks()
+            if (this.editor?.isVisible) {
+              this.editor.focus()
+              this.editor.insertText(e.key)
+            }
+            return
+          }
+          // Escape deselects the block without typing (P0-4).
+          if (e.key === 'Escape') {
+            this.scrollback.deselectBlocks()
+            e.preventDefault()
+            return
+          }
+        }
+
+        if (!this.editor?.isVisible) return
+        // Only redirect printable characters (no modifiers).
+        if (e.key.length !== 1 || e.ctrlKey || e.metaKey || e.altKey) return
+        const active = document.activeElement
+        // Don't steal from xterm (needed for TUIs). Don't steal from
+        // the editor itself.
+        if (
+          active &&
+          (this.scrollback?.xtermLiveContainer.contains(active) || this.editor.rootContains(active))
+        )
+          return
+        // Focus the editor and let the key event propagate normally.
+        this.editor.focus()
+      }
+      document.addEventListener('keydown', this._globalKeydown)
+
+      // ── Click empty space in scrollback area deselects blocks (P1-8) ──
+      this.scrollback?.scrollbackArea.addEventListener('mousedown', (e) => {
+        // If click target is NOT inside any .cmd-block, deselect all.
+        if (!(e.target as HTMLElement).closest('.cmd-block')) {
+          this.scrollback?.deselectBlocks()
         }
       })
 
@@ -366,6 +480,25 @@ export class Tab {
         if (shouldCopy(text)) {
           this.clipboard.writeText(text).catch((e) => {
             console.warn('nocx: clipboard write failed (editor selection)', e)
+          })
+        }
+      })
+
+      // ── DOM block copy-on-select (P0-5) ───────────────────────────
+      // When the user selects text in DOM block output (.cmd-output),
+      // copy the selection to clipboard on mouseup — parity with the
+      // old xterm copy-on-select behavior. Header clicks don't start
+      // text selections (user-select:none on .cmd-header).
+      this.scrollback?.scrollbackArea.addEventListener('mouseup', () => {
+        const sel = window.getSelection()
+        if (!sel || sel.isCollapsed) return
+        const text = sel.toString()
+        if (!text) return
+        // Only copy if the selection is inside our scrollback area.
+        if (!this.scrollback?.scrollbackArea.contains(sel.anchorNode)) return
+        if (shouldCopy(text)) {
+          this.clipboard.writeText(text).catch((e) => {
+            console.warn('nocx: clipboard write failed (block selection)', e)
           })
         }
       })
@@ -566,9 +699,14 @@ export class Tab {
   }
 
   close(): void {
+    if (this._globalKeydown) {
+      document.removeEventListener('keydown', this._globalKeydown)
+      this._globalKeydown = null
+    }
     this.session?.close()
     this.renderer?.dispose()
     this.editor?.dispose()
+    this.scrollback?.dispose()
     this._disposeAllMarkers()
     this.ledger = null
   }

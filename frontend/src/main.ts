@@ -104,15 +104,19 @@ async function main() {
 
   // Bound Go method — no startup-event race. Guarded so the renderers still
   // mount without a Wails runtime (plain browser), where GetWSPort throws.
+  // In that dev path the backend lives on the page's own host (e.g. a remote
+  // dev VM), not necessarily on loopback.
   let port = 9876
+  let host: string | undefined
   try {
     port = await GetWSPort()
   } catch {
+    host = location.hostname
     console.warn('nocx: no Wails runtime, using fallback WS port', port)
   }
 
   const client = new WSClient()
-  await client.connect(port)
+  await client.connect(port, host)
 
   // TabManager opens the first tab and activates it in the constructor.
   // The renderer is selected via ?r=xterm|wterm inside TabManager.

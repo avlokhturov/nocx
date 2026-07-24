@@ -15,7 +15,7 @@ export interface EditorActions {
 }
 
 export class CommandEditor {
-  private root: HTMLElement
+  readonly root: HTMLElement
   private ta: HTMLTextAreaElement
   private chrome: HTMLElement
   private cwdChip: HTMLElement
@@ -30,7 +30,7 @@ export class CommandEditor {
     this.chrome.className = 'nocx-editor-chrome'
 
     this.cwdChip = document.createElement('span')
-    this.cwdChip.className = 'nocx-editor-cwd'
+    this.cwdChip.className = 'nocx-chip nocx-editor-cwd'
     this.cwdChip.textContent = '📁 ~'
 
     const submitBtn = document.createElement('button')
