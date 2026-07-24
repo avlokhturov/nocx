@@ -5,8 +5,13 @@ import { detectAgentStatus, type AgentStatus } from './agent-status'
 import { InputStateController } from './input-state'
 import { CommandEditor } from './editor'
 import { ShellInputTarget } from './input-target'
+import { submitCommand } from './submit'
+import { shouldShowEditor, NATIVE_RESTORE } from './native-mode'
 import { shouldCopy, type ClipboardAccess, type ClipboardGate } from './clipboard'
 import type { ClipboardBanner } from './banner'
+import { CommandLedger } from './command-ledger'
+import type { MarkerAdapter } from './renderers/types'
+import { ScrollbackController } from './scrollback/controller'
 
 // How long the grid must hold still before the PTY is told about it.
 // Dragging a window edge walks the grid through every intermediate size,
@@ -16,10 +21,6 @@ import type { ClipboardBanner } from './banner'
 // locally as fast as the renderer likes, but only tell the PTY the size
 // the drag actually settled on.
 const RESIZE_SETTLE_MS = 80
-
-// ADR-0006: OFF by default; flip only after the native-mode escape +
-// readiness gating land.
-const ENHANCED_INPUT = false
 
 // Shown only until the session reports where it started; a tab named after a
 // generic word tells the user nothing once there are three of them.
@@ -85,7 +86,17 @@ export class Tab {
   private session: SessionHandle | null = null
   private editor: CommandEditor | null = null
   private shellTarget: ShellInputTarget | null = null
+  private scrollback: ScrollbackController | null = null
+  private nativeMode = false
   private started = false
+  private ledger: CommandLedger | null = null
+  /** Pending command text set by the editor, consumed by the C marker. */
+  private _pendingCommand = ''
+  /** Per-record markers (B2): each record owns its own marker, keyed by record id. */
+  private _markers = new Map<number, MarkerAdapter>()
+  private _globalKeydown: ((e: KeyboardEvent) => void) | null = null
+  private _cwd = '~'
+  private _host = ''
 
   // _readyPromise resolves true when the renderer mounts and the PTY session
   // opens; resolves false when start() throws. Never rejects. It stays pending
@@ -228,8 +239,10 @@ export class Tab {
    */
   updateCwd(path: string): void {
     this._cwdFromOSC7 = true
+    this._cwd = path
     this._defaultTitle = directoryLabel(path)
     this.button.title = cwdTooltip(path, true)
+    this.editor?.setCwd(path)
 
     // If no program has set a title, the visible title tracks the cwd.
     if (!this._programTitle) {
@@ -250,14 +263,259 @@ export class Tab {
 
     try {
       const renderer = createRenderer(this.rendererName)
-      await renderer.mount(this.pane)
+
+      // ── DOM scrollback controller ───────────────────────────────────────
+      this.scrollback = new ScrollbackController({
+        pane: this.pane,
+        renderer,
+        now: () => performance.now(),
+      })
+
+      await renderer.mount(this.scrollback.mountTarget)
 
       this.cols = renderer.cols
       this.rows = renderer.rows
 
+      // ── Command ledger (ADR-0008) ────────────────────────────────────────
+      this.ledger = new CommandLedger({ now: () => performance.now() })
+
+      // ── Wire input ownership BEFORE opening the session ─────────────────
+      // A marker-only (invisible) prompt can never paint before the editor
+      // exists (nocx-4ff.10). These listeners are pure state wiring — they
+      // fire only after the session opens and markers arrive.
+
+      // ShellInputTarget references this.session lazily so it can be created
+      // before openSession resolves. submit() is only called while the editor
+      // is shown, which can only happen after markers arrive from the PTY.
+      // paste() delegates bracketed-paste wrapping to the engine (correct for
+      // mode 2004); sendRaw carries the CR. session is referenced lazily.
+      this.shellTarget = new ShellInputTarget((data: string) => this.session!.send(data))
+      this.editor = new CommandEditor({
+        submit: (doc: string) => {
+          // Store the pending command text for the upcoming OSC 133 C marker.
+          this._pendingCommand = doc
+
+          // Anchor the block at the COMMAND row NOW, while the terminal cursor
+          // still sits on the (marker-only) prompt line the command is about to
+          // be echoed onto. Deferring to the next OSC 133 C anchored the glyph
+          // on the command's first OUTPUT line instead — one row too low, so
+          // every landmark drifted below its command (item 1).
+          if (this.ledger) {
+            let markerLine: () => number | undefined = () => undefined
+            const rec = this.ledger.open(doc, this._cwd, this._host, () => markerLine())
+            const m = renderer.registerMarker?.()
+            if (m) {
+              markerLine = () => m.line()
+              this._markers.set(rec.id, m)
+              m.onDispose(() => {
+                this.ledger?.dispose(rec.id)
+                this._markers.delete(rec.id)
+              })
+            }
+          }
+          // Detect `clear` and clear DOM blocks.
+          this.scrollback?.maybeClear(doc)
+
+          submitCommand(doc, {
+            dispatchSubmit: () => this.inputState.dispatch({ type: 'submit' }),
+            focusGrid: () => renderer.focus(),
+            sendDoc: (d) => void this.shellTarget!.submit(d),
+          })
+        },
+        // Ctrl-C at the editor prompt: interrupt the shell so a fresh prompt
+        // returns (the editor already cleared its composed line).
+        cancel: () => this.session?.send('\x03'),
+      })
+      this.editor.mount(this.pane)
+
+      // The editor is an in-flow flex child at the bottom of the pane (see
+      // .pane / .nocx-editor in style.css) — the scrollback area ends above
+      // it by construction, so no overlay padding hacks are needed.
+
+      renderer.onCommandMarker((marker) => {
+        this.inputState.dispatch({ type: 'marker', kind: marker.kind })
+        // OSC 133 D carries the exit code of the just-finished command.
+        // Stored for future consumers: command blocks, success/failure
+        // colouring, activity indicator refinement.
+        if (marker.kind === 'D' && marker.exitCode !== undefined) {
+          this._lastExitCode = marker.exitCode
+        }
+        // Feed the command ledger.
+        this.ledger?.onMarker(marker.kind, marker.exitCode)
+
+        // ── DOM scrollback block lifecycle ────────────────────────────
+        if (marker.kind === 'C') {
+          // Create a running block with the pending command text.
+          this.scrollback?.onCommandStart(this._pendingCommand, this._cwd, marker.line)
+        } else if (marker.kind === 'D') {
+          // Freeze the running block: serialize output from the xterm buffer.
+          if (renderer.getBufferLine) {
+            const getLine = (y: number) => renderer.getBufferLine!(y)
+            this.scrollback?.onCommandEnd(getLine, marker.line, marker.exitCode ?? null)
+            // Trim xterm viewport so output isn't duplicated between DOM
+            // blocks and the xterm grid. The prompt re-renders on the next
+            // shell cycle.
+            renderer.clearViewport?.()
+          }
+        }
+      })
+
+      renderer.onBufferChange((type) => {
+        this._bufferType = type
+        this.inputState.dispatch({ type: 'buffer', buffer: type })
+        if (type === 'alternate') {
+          this.scrollback?.enterFullscreen()
+        } else {
+          this.scrollback?.exitFullscreen()
+        }
+      })
+
+      this.inputState.onChange((m) => {
+        console.debug('nocx: input-state', m.state, 'trusted=', m.trusted, 'owned=', m.owned)
+        if (shouldShowEditor(m.owned, this.nativeMode)) {
+          this.editor!.show()
+          renderer.setReadOnly(true)
+          this.scrollback?.setIdle()
+        } else if (m.state === 'RUNNING_RAW') {
+          this.editor!.hide()
+          renderer.setReadOnly(false)
+          renderer.focus()
+          this.scrollback?.setRunning()
+        } else {
+          this.editor!.hide()
+          renderer.setReadOnly(false)
+          renderer.focus()
+          this.scrollback?.setIdle()
+        }
+      })
+
+      // ── Focus bounce (P0-4) ────────────────────────────────────────
+      // When the editor owns input, typing must stay in the textarea even
+      // when the user clicks outside it — but NOT when clicking the xterm
+      // live region (needed for TUIs and text selection).
+      //
+      // Three rules:
+      // (a) Clicking the editor card focuses the textarea.
+      // (b) Typing printable chars while focus is outside xterm redirects.
+      // (c) Clicking the xterm live region keeps focus there.
+      this.pane.addEventListener('focusin', () => {
+        if (!this.editor?.isVisible) return
+        const active = document.activeElement
+        // Don't bounce if focus is in the editor or the xterm live container.
+        if (
+          active &&
+          (this.editor.rootContains(active) || this.scrollback?.xtermLiveContainer.contains(active))
+        )
+          return
+        this.editor.focus()
+      })
+
+      // Click anywhere on the editor card focuses the textarea (P0-4a).
+      this.editor.root.addEventListener('click', () => {
+        this.editor?.focus()
+      })
+
+      // Redirect printable keystrokes to the editor when it owns input
+      // and focus has drifted elsewhere (P0-4b).
+      // ALSO redirect when a block is selected: typing deselects the
+      // block and focuses the editor (P0-4: warp behavior).
+      // NOTE: attached at document level — after a click on a DOM block
+      // the focus is on <body>, and keydown targeted at <body> never
+      // bubbles through this.pane (pane is a DESCENDANT of body, not an
+      // ancestor), so a pane-level listener would never fire.
+      this._globalKeydown = (e: KeyboardEvent) => {
+        if (!this.pane.isConnected) return
+        // If a block is selected, typing a printable character redirects
+        // to the editor and deselects the block (P0-4: warp behavior).
+        if (this.scrollback && this.scrollback.selectedBlockId !== null) {
+          if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+            e.preventDefault()
+            this.scrollback.deselectBlocks()
+            if (this.editor?.isVisible) {
+              this.editor.focus()
+              this.editor.insertText(e.key)
+            }
+            return
+          }
+          // Escape deselects the block without typing (P0-4).
+          if (e.key === 'Escape') {
+            this.scrollback.deselectBlocks()
+            e.preventDefault()
+            return
+          }
+        }
+
+        if (!this.editor?.isVisible) return
+        // Only redirect printable characters (no modifiers).
+        if (e.key.length !== 1 || e.ctrlKey || e.metaKey || e.altKey) return
+        const active = document.activeElement
+        // Don't steal from xterm (needed for TUIs). Don't steal from
+        // the editor itself.
+        if (
+          active &&
+          (this.scrollback?.xtermLiveContainer.contains(active) || this.editor.rootContains(active))
+        )
+          return
+        // Focus the editor and let the key event propagate normally.
+        this.editor.focus()
+      }
+      document.addEventListener('keydown', this._globalKeydown)
+
+      // ── Click empty space in scrollback area deselects blocks (P1-8) ──
+      this.scrollback?.scrollbackArea.addEventListener('mousedown', (e) => {
+        // If click target is NOT inside any .cmd-block, deselect all.
+        if (!(e.target as HTMLElement).closest('.cmd-block')) {
+          this.scrollback?.deselectBlocks()
+        }
+      })
+
+      // ── Editor copy-on-select (item 6) ─────────────────────────────
+      // Same rules as the terminal: copy-on-select + shouldCopy policy.
+      this.editor.textarea.addEventListener('mouseup', () => {
+        const ta = this.editor!.textarea
+        const start = ta.selectionStart
+        const end = ta.selectionEnd
+        if (start === end) return
+        const text = ta.value.slice(start, end)
+        if (shouldCopy(text)) {
+          this.clipboard.writeText(text).catch((e) => {
+            console.warn('nocx: clipboard write failed (editor selection)', e)
+          })
+        }
+      })
+
+      // ── DOM block copy-on-select (P0-5) ───────────────────────────
+      // When the user selects text in DOM block output (.cmd-output),
+      // copy the selection to clipboard on mouseup — parity with the
+      // old xterm copy-on-select behavior. Header clicks don't start
+      // text selections (user-select:none on .cmd-header).
+      this.scrollback?.scrollbackArea.addEventListener('mouseup', () => {
+        const sel = window.getSelection()
+        if (!sel || sel.isCollapsed) return
+        const text = sel.toString()
+        if (!text) return
+        // Only copy if the selection is inside our scrollback area.
+        if (!this.scrollback?.scrollbackArea.contains(sel.anchorNode)) return
+        if (shouldCopy(text)) {
+          this.clipboard.writeText(text).catch((e) => {
+            console.warn('nocx: clipboard write failed (block selection)', e)
+          })
+        }
+      })
+
       // Open the session at the renderer's actual grid size. Per AD-1/AD-7,
       // the PTY is created at this size — never spawn-then-resize.
-      const session = await this.client.openSession(this.cols, this.rows)
+      // Enhanced input (DOM editor + marker-only prompt) is always on; the shell
+      // fails open to a plain terminal when markers are absent (ADR-0004/0006).
+      const session = await this.client.openSession(this.cols, this.rows, true)
+      this.session = session
+
+      // Store the initial cwd for the command ledger.
+      this._cwd = session.cwd
+      this._host = ''
+
+      // Seed the editor cwd chip with the initial cwd.
+      this.editor?.setCwd(session.cwd)
 
       // The directory names the tab until a program sets a title; from here
       // on OSC 7 keeps it following `cd` (nocx-5mn.2).
@@ -280,10 +538,17 @@ export class Tab {
       session.onExit((sid: string) => {
         console.log('nocx: session exited:', sid)
         this.inputState.dispatch({ type: 'exit' })
+        // B3: fail-open — finalize running records, dispose per-record
+        // markers.
+        this.ledger?.finalizeOpen()
+        this._disposeAllMarkers()
       })
       session.onReset(() => {
         renderer.reset()
         this.inputState.dispatch({ type: 'reset' })
+        // B3: fail-open — same as exit.
+        this.ledger?.finalizeOpen()
+        this._disposeAllMarkers()
       })
 
       renderer.onData((data: string) => session.send(data))
@@ -293,48 +558,12 @@ export class Tab {
       renderer.onCwd(({ path }) => {
         this.updateCwd(path)
       })
-      renderer.onBufferChange((type) => {
-        this._bufferType = type
-        this.inputState.dispatch({ type: 'buffer', buffer: type })
-      })
       renderer.onBell(() => {
         // Bell is always attention-worthy, even in the alternate buffer.
         if (!this.button.classList.contains('active')) {
           this.markActivity()
         }
       })
-      renderer.onCommandMarker((marker) => {
-        this.inputState.dispatch({ type: 'marker', kind: marker.kind })
-        // OSC 133 D carries the exit code of the just-finished command.
-        // Stored for future consumers: command blocks, success/failure
-        // colouring, activity indicator refinement.
-        if (marker.kind === 'D' && marker.exitCode !== undefined) {
-          this._lastExitCode = marker.exitCode
-        }
-      })
-
-      this.inputState.onChange((m) => {
-        console.debug('nocx: input-state', m.state, 'trusted=', m.trusted, 'owned=', m.owned)
-        if (!ENHANCED_INPUT) return
-        if (m.owned) this.editor!.show()
-        else {
-          this.editor!.hide()
-          renderer.focus()
-        }
-      })
-
-      // ── Command editor (DOM textarea) ────────────────────────────────
-      // Wired behind ENHANCED_INPUT (ADR-0006 §5: fail-open). When the flag
-      // is on, ownership (A→B) gives the editor focus; typing + Enter submits
-      // via ShellInputTarget's atomic handoff (hide-before-send → bracketed
-      // paste + CR). When the flag is off, keys flow unchanged to the PTY.
-      this.shellTarget = new ShellInputTarget((data: string) => session.send(data))
-      this.editor = new CommandEditor({
-        submit: (doc: string) => {
-          void this.shellTarget!.submit(doc)
-        },
-      })
-      this.editor.mount(this.pane)
 
       // ── Clipboard ────────────────────────────────────────────────────
       // The renderer reports facts and never touches the clipboard (AD-6).
@@ -389,9 +618,18 @@ export class Tab {
           .readText()
           .then((text) => {
             if (!text) return
-            // Multi-line paste is confirmed before it reaches the terminal,
-            // except in the alternate screen — a full-screen program is not
-            // a shell prompt. This is Tabby's exact condition.
+            // At the prompt the editor owns input and the grid is read-only
+            // (setReadOnly), so a paste must land in the composed command, not
+            // the disabled terminal. The editor is a composer — a multi-line
+            // paste is expected and needs no confirm.
+            if (this.editor?.isVisible) {
+              this.editor.insertText(text)
+              return
+            }
+            // Otherwise the terminal owns input (a running program). Multi-line
+            // paste is confirmed before it reaches the terminal, except in the
+            // alternate screen — a full-screen program is not a shell prompt.
+            // This is Tabby's exact condition.
             if (text.includes('\n') && this._bufferType === 'normal') {
               if (!window.confirm('Paste multi-line text?')) return
             }
@@ -419,11 +657,27 @@ export class Tab {
         this.cols = cols
         this.rows = rows
         clearTimeout(this.resizeTimer)
-        this.resizeTimer = window.setTimeout(() => session.sendResize(cols, rows), RESIZE_SETTLE_MS)
+        this.resizeTimer = window.setTimeout(() => {
+          session.sendResize(cols, rows)
+        }, RESIZE_SETTLE_MS)
       })
 
       this.renderer = renderer
-      this.session = session
+
+      // ── Native-mode escape (Ctrl/Cmd+Shift+.) ─────────────────────────
+      // Latch this tab to raw mode forever: hide the editor, focus the grid,
+      // and ask the shell to restore a visible prompt (nocx-4ff.9).
+      this.pane.addEventListener('keydown', (e: KeyboardEvent) => {
+        if (e.key === '.' && (e.metaKey || e.ctrlKey) && e.shiftKey) {
+          e.preventDefault()
+          e.stopPropagation()
+          this.nativeMode = true
+          this.editor?.hide()
+          this.renderer?.focus()
+          this.session?.send(NATIVE_RESTORE)
+        }
+      })
+
       this._readyResolve(true)
       console.log(`nocx: tab ready (renderer=${this.rendererName})`, { sid: session.sessionId })
     } catch (err) {
@@ -445,9 +699,21 @@ export class Tab {
   }
 
   close(): void {
+    if (this._globalKeydown) {
+      document.removeEventListener('keydown', this._globalKeydown)
+      this._globalKeydown = null
+    }
     this.session?.close()
     this.renderer?.dispose()
     this.editor?.dispose()
+    this.scrollback?.dispose()
+    this._disposeAllMarkers()
+    this.ledger = null
+  }
+
+  private _disposeAllMarkers(): void {
+    for (const m of this._markers.values()) m.dispose()
+    this._markers.clear()
   }
 }
 

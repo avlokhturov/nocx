@@ -35,6 +35,13 @@ var localeVars = []string{"LC_ALL=", "LC_CTYPE=", "LANG="}
 // Deliberately a precise list rather than a CLAUDE* wildcard: stripping
 // something like an API key would break the very tool we are trying to fix.
 // It grows as other launchers are found.
+//
+// NO_COLOR= and TERM= belong to the same class of leak: coding agents run
+// nocx's dev harness with TERM=dumb / NO_COLOR=1 in their tool environment,
+// and every spawned shell then tells its TUIs "no colors here" — claude
+// renders black-and-white. A terminal emulator declares color capability
+// itself (TERM=xterm-256color + COLORTERM=truecolor are appended below);
+// the launcher's opinion must not leak into the PTY.
 var launcherSessionVars = []string{
 	"CLAUDECODE=",
 	"CLAUDE_CODE_ENTRYPOINT=",
@@ -43,6 +50,8 @@ var launcherSessionVars = []string{
 	"CLAUDE_CODE_CHILD_SESSION=",
 	"CLAUDE_PID=",
 	"CLAUDE_EFFORT=",
+	"NO_COLOR=",
+	"TERM=",
 }
 
 func scrubLauncherSession(env []string) []string {
@@ -109,6 +118,7 @@ func NewLocal(logger log.Logger, cfg Config, opts ...Option) (*LocalPty, error) 
 	env := withUTF8Locale(append(
 		scrubLauncherSession(os.Environ()),
 		"TERM=xterm-256color",
+		"COLORTERM=truecolor",
 	))
 	env = append(env, cfg.Env...)
 	cmd.Env = env

@@ -8,7 +8,9 @@ import tseslint from 'typescript-eslint'
 import prettier from 'eslint-config-prettier'
 
 export default tseslint.config(
-  { ignores: ['dist/**', 'wailsjs/**'] },
+  // src/spike is the throwaway spike sandbox (kept as a design playground,
+  // see spike/dom-scrollback/) — deliberately not held to the lint bar.
+  { ignores: ['dist/**', 'wailsjs/**', 'src/spike/**'] },
   js.configs.recommended,
   ...tseslint.configs.recommendedTypeChecked,
   {

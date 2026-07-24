@@ -170,6 +170,10 @@ func TestScrubLauncherSession(t *testing.T) {
 		"CLAUDE_CODE_CHILD_SESSION=1",
 		"CLAUDE_CODE_SESSION_ID=abc",
 		"CLAUDE_PID=123",
+		// Coding agents export these for their own tools; leaking them into a
+		// PTY makes TUIs render black-and-white.
+		"TERM=dumb",
+		"NO_COLOR=1",
 		"HOME=/Users/someone",
 		// Not a session marker: stripping a credential would break the very
 		// tool this fix exists for.
@@ -178,7 +182,7 @@ func TestScrubLauncherSession(t *testing.T) {
 
 	got := scrubLauncherSession(env)
 
-	for _, unwanted := range []string{"CLAUDECODE=", "CLAUDE_CODE_CHILD_SESSION=", "CLAUDE_CODE_SESSION_ID=", "CLAUDE_PID="} {
+	for _, unwanted := range []string{"CLAUDECODE=", "CLAUDE_CODE_CHILD_SESSION=", "CLAUDE_CODE_SESSION_ID=", "CLAUDE_PID=", "TERM=", "NO_COLOR="} {
 		for _, kv := range got {
 			if strings.HasPrefix(kv, unwanted) {
 				t.Errorf("launcher session marker survived: %q", kv)

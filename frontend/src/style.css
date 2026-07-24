@@ -4,6 +4,13 @@
   box-sizing: border-box;
 }
 
+:root {
+  /* Keep --nocx-mono identical to FONT_FAMILY in renderers/font.ts. */
+  --nocx-ui: ui-sans-serif, -apple-system, 'SF Pro Text', system-ui, sans-serif;
+  --nocx-mono:
+    ui-monospace, 'SF Mono', Menlo, Monaco, 'Apple Color Emoji', 'Apple Symbols', monospace;
+}
+
 html,
 body {
   margin: 0;
@@ -15,6 +22,7 @@ body {
 }
 
 #app {
+  font-family: var(--nocx-mono);
   display: flex;
   flex-direction: column;
   width: 100%;
@@ -43,12 +51,9 @@ body {
   padding: 0 0 0 78px;
   background: #16161e;
   border-bottom: 1px solid #2a2b3d;
-  font:
-    12px/1 ui-sans-serif,
-    -apple-system,
-    'SF Pro Text',
-    system-ui,
-    sans-serif;
+  font-family: var(--nocx-mono);
+  font-size: 11px;
+  line-height: 1;
   -webkit-user-select: none;
   user-select: none;
   overflow: hidden;
@@ -312,10 +317,15 @@ body {
   background: #1a1b26;
   visibility: hidden;
   pointer-events: none;
+  /* Flex column: the scrollback layout takes all remaining space and the
+     command editor sits in flow at the bottom (no absolute overlay, so the
+     scrollbar ends above the editor and blocks never slide underneath). */
+  display: flex;
+  flex-direction: column;
   /* Breathing room, as every other terminal has: text hard against the window
-     edge reads as broken. The renderer measures this padded box, so the grid
-     shrinks to match instead of being clipped. */
-  padding: 6px 10px;
+     edge reads as broken. Only horizontal padding; the scrollback layout
+     handles vertical spacing internally (P1-7). */
+  padding: 0 10px;
 
   /* Defence in depth against the Wails webview context menu. The
      contextmenu handler calls preventDefault, which is sufficient in a
@@ -336,11 +346,9 @@ body {
   margin: 0;
   padding: 16px;
   color: #f7768e;
-  font:
-    13px/1.5 ui-monospace,
-    'SF Mono',
-    Menlo,
-    monospace;
+  font-family: var(--nocx-mono);
+  font-size: 13px;
+  line-height: 1.5;
   white-space: pre-wrap;
 }
 
@@ -420,12 +428,9 @@ body {
   border-left: 3px solid #e0af68;
   border-bottom: 1px solid #2a2b3d;
   color: #c0caf5;
-  font:
-    13px/1.4 ui-sans-serif,
-    -apple-system,
-    'SF Pro Text',
-    system-ui,
-    sans-serif;
+  font-family: var(--nocx-mono);
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .clipboard-banner-message {
@@ -445,12 +450,9 @@ body {
   padding: 4px 10px;
   border: 0;
   border-radius: 4px;
-  font:
-    12px/1 ui-sans-serif,
-    -apple-system,
-    'SF Pro Text',
-    system-ui,
-    sans-serif;
+  font-family: var(--nocx-mono);
+  font-size: 11px;
+  line-height: 1;
   cursor: pointer;
   white-space: nowrap;
 }
@@ -494,11 +496,9 @@ body {
   align-items: center;
   gap: 6px;
   padding: 0 12px;
-  font:
-    11px/1 ui-sans-serif,
-    -apple-system,
-    'SF Pro Text',
-    system-ui;
+  font-family: var(--nocx-mono);
+  font-size: 10px;
+  line-height: 1;
   color: #a9b1d6;
   white-space: nowrap;
   --wails-draggable: no-drag;
@@ -544,21 +544,490 @@ body {
 /* ── Command editor (DOM textarea) ──────────────────────────────────── */
 
 .nocx-editor {
+  /* In-flow flex child at the bottom of the pane (the pane is a flex
+     column). No absolute overlay: the scrollback area ends above the
+     editor by construction, the pane scrollbar stops at its top edge,
+     and multi-line growth pushes the scrollback up naturally.
+     position:relative re-establishes the containing block for the
+     absolutely-positioned submit button inside. */
+  position: relative;
+  flex: none;
+  background: #16161e;
+  border-top: 1px solid #292e42;
+  border-left: 3px solid #7aa2f7;
+  padding: 10px 14px 12px;
+}
+
+.nocx-editor-chrome {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+  font-family: var(--nocx-mono);
+  font-size: 11px;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* ── Chip — the standard metadata component (owner directive). ─────────
+   One component for every chip in the app: the editor's cwd pill and the
+   block-header metadata (cwd, duration, exit status). Variants only
+   change the text color. */
+.nocx-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  background: #292e42;
+  border-radius: 5px;
+  padding: 3px 9px;
+  font-family: var(--nocx-mono);
+  font-size: 12px;
+  color: #7aa2f7;
+  cursor: default;
+  -webkit-user-select: none;
+  user-select: none;
+  flex: none;
+}
+
+.nocx-chip-muted {
+  color: #a9b1d6;
+}
+
+.nocx-chip-ok {
+  color: #9ece6a;
+}
+
+.nocx-chip-fail {
+  color: #f7768e;
+}
+
+.nocx-editor-submit {
+  /* Centred vertically against the whole input block on the right edge
+     (item 2). Absolute inside .nocx-editor (its positioning context). */
   position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  padding: 4px 8px;
-  background: #1a1b26;
+  right: 14px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid #414868;
+  border-radius: 6px;
+  background: #292e42;
+  color: #7aa2f7;
+  padding: 0;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  flex: none;
+}
+
+.nocx-editor-submit:hover {
+  background: #363b54;
 }
 
 .nocx-editor-input {
   width: 100%;
+  /* Clear the absolutely-positioned submit button on the right (item 2) so a
+     long or multi-line command never slides underneath it. */
+  padding-right: 44px;
   background: transparent;
   color: #c0caf5;
   border: none;
   outline: none;
-  font-family: inherit;
-  font-size: inherit;
+  font-family: var(--nocx-mono);
+  font-size: 14px;
+  line-height: 1.2;
   resize: none;
+}
+
+/* ── Command-ledger gutter glyphs (ADR-0008) ────────────────────────── */
+/* Base geometry (3px vertical bar at left edge) is set inline by
+   gutter.ts. Status sets the look. Restraint is the rule: a routine
+   successful command is calm and present, not shouting — strong colour is
+   reserved for running, failure, interruption and focus. No green "success
+   confetti". */
+
+.nocx-gutter-glyph {
+  background: #565f89;
+  opacity: 0.4;
+  transition: opacity 120ms ease;
+}
+
+.nocx-gutter-success {
+  background: #565f89; /* neutral, not green */
+  opacity: 0.5; /* visible but calm */
+}
+
+.nocx-gutter-running {
+  background: #7aa2f7; /* accent blue */
+  opacity: 0.95;
+}
+
+.nocx-gutter-failure {
+  background: #f7768e; /* red — a failure earns attention */
+  opacity: 1;
+}
+
+.nocx-gutter-interrupted {
+  background: #ff9e64; /* amber */
+  opacity: 0.9;
+}
+
+.nocx-gutter-unknown {
+  background: #565f89;
+  opacity: 0.4;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .nocx-gutter-running {
+    animation: nocx-gutter-pulse 1.4s ease-in-out infinite;
+  }
+}
+
+@keyframes nocx-gutter-pulse {
+  0%,
+  100% {
+    opacity: 0.5;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* ── DOM scrollback layout ──────────────────────────────────────────── */
+
+/* Flex column: scrollback area fills available space, live region sits
+   at the bottom. The pane's absolute-positioned editor overlays the
+   bottom strip. */
+.scrollback-layout {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* Scrollback area: scrollable container for frozen DOM blocks. Takes all
+   remaining vertical space. flex-end bottom-anchors content so new blocks
+   appear just above the live region (P1-6). */
+.scrollback-area {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  /* Reserve the scrollbar lane so the scrollbar never overlaps blocks. */
+  scrollbar-gutter: stable;
+  display: flex;
+  flex-direction: column;
+  /* NO justify-content:flex-end here — content overflowing at the top of a
+     flex-end container is unreachable by scrolling (classic flexbox
+     quirk). Bottom-anchoring is done via margin-top:auto on the inner
+     wrapper instead, which keeps the scroll origin correct. */
+}
+
+/* The inner wrapper holds blocks + the live-region container in flow. */
+.scrollback-inner {
+  display: flex;
+  flex-direction: column;
+  /* Bottom-anchor the content when it's shorter than the scroll area
+     (empty space at top, newest block above the live region/editor).
+     margin-top:auto keeps the scroll origin correct, unlike
+     justify-content:flex-end on the scroller. */
+  margin-top: auto;
+}
+
+/* Divider between last frozen block and the live region — subtle
+   low-contrast horizontal rule. Only shown when blocks exist AND we
+   are not in fullscreen. */
+.scrollback-separator {
+  flex: none;
+  height: 1px;
+  background: #242538;
+  margin: 0;
+  border-radius: 0;
+}
+
+/* ── Live region (two-layer: clip container + stable inner) ─────────── */
+
+/* Outer clip container: mode-dependent height clips the xterm view.
+   overflow:hidden allows the inner wrapper to keep a stable size while
+   only the visible slice changes — the xterm grid never collapses to
+   1 row (P0-1 fix). */
+.xterm-live-container {
+  flex: none;
+  overflow: hidden;
+}
+
+/* --- Idle: fully hidden. The marker-only prompt line carries no visual
+   information (the DOM editor owns input), so the live region collapses
+   to zero height instead of showing a redundant strip (owner directive).
+   The inner wrapper keeps its stable min-height, so the xterm grid is
+   unaffected. */
+.xterm-live-container.live-idle {
+  height: 0;
+}
+
+/* --- Running: show several rows of live command output. */
+.xterm-live-container.live-running {
+  height: 140px;
+}
+
+/* --- Alt-screen: xterm fills the full viewport, scrollback hidden (P0-2). */
+.xterm-live-container.live-fullscreen {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 100;
+  height: auto;
+}
+
+/* Inner wrapper: always has a stable min-height so xterm.fit() produces
+   a sane grid even when the clip container is 36px tall. xterm mounts
+   into this element, not the clip container. overflow:hidden is
+   defence-in-depth against xterm artifacts leaking below the clip
+   (P1-5: stray bar below tabs). */
+.xterm-inner {
+  min-height: 140px;
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+/* Fullscreen: override min-height so xterm fills the viewport. */
+.xterm-inner.inner-fullscreen {
+  min-height: auto;
+}
+
+/* During fullscreen, hide the DOM blocks and separator but NOT the
+   xterm-live-container (which is position:fixed and must stay visible).
+   display:none on an ancestor would hide fixed descendants too (P0-2). */
+.scrollback-inner.inner-fullscreen-mode > .cmd-block,
+.scrollback-inner.inner-fullscreen-mode > .scrollback-separator {
+  display: none;
+}
+
+/* ── Command blocks ─────────────────────────────────────────────────── */
+
+/* Flat warp-style blocks (P0-1 design pivot). No card background, no
+   border, no border-radius, no shadow. Blocks are separated by a subtle
+   horizontal divider line. Hover/selected use a subtle background tint. */
+.cmd-block {
+  margin: 0;
+  border: 0;
+  border-top: 1px solid #242538;
+  border-radius: 0;
+  background: transparent;
+  /* content-visibility:auto lets the browser skip painting off-screen
+     blocks, keeping scroll smooth even with thousands of lines. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 48px;
+  /* overflow must be visible so the overflow menu is not clipped (P1-6). */
+  overflow: visible;
+  cursor: pointer;
+  /* position: relative anchors the overflow menu within the block. */
+  position: relative;
+}
+
+/* First block: no top divider (it would double with the area edge). */
+.cmd-block:first-child {
+  border-top: 0;
+}
+
+/* Hover: subtle background tint across the full block width (warp-like). */
+.cmd-block:hover {
+  background: rgba(192, 202, 245, 0.03);
+}
+
+/* Selected block: brighter background tint (P1-8: single-select). */
+.cmd-block.cmd-block-selected {
+  background: rgba(122, 162, 247, 0.06);
+}
+
+.cmd-block.cmd-block-selected:hover {
+  background: rgba(122, 162, 247, 0.09);
+}
+
+/* Running block: no special styling beyond the header spinner. */
+
+/* Command block header row — compact, plain muted text (warp-like).
+   No background, no bottom border, no pill/chip styling. */
+.cmd-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 3px 0;
+  background: transparent;
+  border: 0;
+  font-family: var(--nocx-mono);
+  font-size: 12px;
+  pointer-events: auto;
+  /* Metadata (chips, ⋮) is not selectable; the command text re-enables
+     selection below (owner directive: mouse + double-click word select). */
+  -webkit-user-select: none;
+  user-select: none;
+  gap: 8px;
+  color: #565f89;
+}
+
+.cmd-header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.cmd-header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
+/* Command text in the header — prominent mono. Multi-line commands render
+   one line per row (warp behavior), same font size as the block output
+   (owner directives). */
+.cmd-header-text {
+  font-family: var(--nocx-mono);
+  font-size: 16px;
+  color: #c0caf5;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  min-width: 0;
+  flex: 1 1 auto;
+  /* Command text is mouse-selectable (double-click selects a word). */
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* CWD chip in the block header — layout only; visuals come from the
+   standard .nocx-chip component. */
+.cmd-header-cwd {
+  flex: none;
+}
+
+/* Duration chip — fixed width + tabular figures so the column never
+   shifts between blocks (owner directive). Text centered via .nocx-chip. */
+.cmd-header-duration {
+  font-variant-numeric: tabular-nums;
+  min-width: 52px;
+}
+
+/* Spinner while running — a pulse dot. */
+.cmd-header-spinner {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #7aa2f7;
+  opacity: 0.6;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .cmd-header-spinner {
+    animation: cmd-spin-pulse 1.2s ease-in-out infinite;
+  }
+}
+
+@keyframes cmd-spin-pulse {
+  0%,
+  100% {
+    opacity: 0.4;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* Exit status chip — fixed width so the column aligns across blocks
+   (owner directive); colors come from .nocx-chip-ok / .nocx-chip-fail.
+   Text centered via .nocx-chip. */
+.cmd-header-exit {
+  min-width: 44px;
+}
+
+/* Output area inside a block. Selectable text for copy-on-select. */
+.cmd-output {
+  padding: 2px 0 6px 0;
+  font-family: var(--nocx-mono);
+  font-size: 16px;
+  line-height: 1.2;
+  color: #c0caf5;
+  /* pre-wrap: long lines wrap at the viewport edge (warp behavior) instead
+     of being clipped. */
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  overflow-x: auto;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* Each terminal line in the output. */
+.term-line {
+  display: block;
+  min-height: 1.2em;
+}
+
+/* ── Block overflow menu (P2-9) ─────────────────────────────────────── */
+
+.cmd-overflow-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: #565f89;
+  font-family: var(--nocx-mono);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  flex: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.cmd-overflow-btn:hover {
+  background: #292e42;
+  color: #a9b1d6;
+}
+
+/* Overflow menu — rendered at body level with position:fixed so it floats
+   above all blocks and scroll containers (P1-6 fix). z-index must be higher
+   than the editor (z-index:20) and the fullscreen xterm (z-index:100). */
+.cmd-overflow-menu {
+  z-index: 200;
+  background: #1a1b26;
+  border: 1px solid #292e42;
+  border-radius: 6px;
+  padding: 4px 0;
+  min-width: 160px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+}
+
+.cmd-overflow-menu-item {
+  display: block;
+  width: 100%;
+  padding: 6px 12px;
+  border: 0;
+  background: transparent;
+  color: #c0caf5;
+  font-family: var(--nocx-mono);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.cmd-overflow-menu-item:hover {
+  background: #292e42;
 }
