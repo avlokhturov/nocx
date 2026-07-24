@@ -117,14 +117,22 @@ export class CommandEditor {
 
   // ── visibility ────────────────────────────────────────────────────────
 
+  /** True once the editor has been shown at least once. After that, hide()
+   *  uses visibility:hidden so the editor's BOX stays in the flex layout —
+   *  display:none would hand its height back to the scrollback area and the
+   *  whole pane would jump on every command start/end (owner report). */
+  private _shownOnce = false
+
   show(): void {
+    this._shownOnce = true
     this.root.style.display = ''
+    this.root.style.visibility = 'visible'
     this.ta.focus()
   }
 
   /** Focus the textarea if the editor is visible. Safe to call when hidden. */
   focus(): void {
-    if (this.root.style.display !== 'none') this.ta.focus()
+    if (this.isVisible) this.ta.focus()
   }
 
   /**
@@ -146,11 +154,15 @@ export class CommandEditor {
 
   hide(): void {
     this.ta.blur()
-    this.root.style.display = 'none'
+    if (this._shownOnce) {
+      this.root.style.visibility = 'hidden'
+    } else {
+      this.root.style.display = 'none'
+    }
   }
 
   get isVisible(): boolean {
-    return this.root.style.display !== 'none'
+    return this.root.style.display !== 'none' && this.root.style.visibility !== 'hidden'
   }
 
   /** Whether the editor's root element contains `el`. Used to scope the
