@@ -109,6 +109,13 @@ func TestPreflight_AppImageSet(t *testing.T) {
 }
 
 func TestPreflight_AppImageSetButReadOnlyDir(t *testing.T) {
+	// Permission bits do not stop root (CAP_DAC_OVERRIDE), and the
+	// pre-commit container runs as root — the read-only dir is writable
+	// there and Preflight rightly finds nothing to complain about.
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: chmod-based read-only does not apply")
+	}
+
 	dir := t.TempDir()
 	appImagePath := filepath.Join(dir, "nocx.AppImage")
 	installPath := appImagePath
