@@ -19,6 +19,7 @@ export class CommandEditor {
   private ta: HTMLTextAreaElement
   private chrome: HTMLElement
   private cwdChip: HTMLElement
+  private timeChip: HTMLElement
 
   constructor(private readonly actions: EditorActions) {
     this.root = document.createElement('div')
@@ -33,6 +34,9 @@ export class CommandEditor {
     this.cwdChip.className = 'nocx-chip nocx-editor-cwd'
     this.cwdChip.textContent = '📁 ~'
 
+    this.timeChip = document.createElement('span')
+    this.timeChip.className = 'nocx-chip nocx-editor-time'
+
     const submitBtn = document.createElement('button')
     submitBtn.className = 'nocx-editor-submit'
     submitBtn.textContent = '→'
@@ -42,7 +46,7 @@ export class CommandEditor {
     submitBtn.addEventListener('mousedown', (e) => e.preventDefault())
     submitBtn.addEventListener('click', () => this.submit())
 
-    this.chrome.append(this.cwdChip)
+    this.chrome.append(this.cwdChip, this.timeChip)
     this.root.appendChild(this.chrome)
 
     // The submit button is a direct child of the editor root (not the chrome
@@ -60,6 +64,15 @@ export class CommandEditor {
     // Auto-grow: resize rows to fit content (1..MAX_ROWS).
     this.ta.addEventListener('input', this.onInput)
     this.root.appendChild(this.ta)
+  }
+
+  /** Update the time chip to the given ISO-ish timestamp. */
+  setTime(ts: Date): void {
+    this.timeChip.textContent = ts.toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    })
   }
 
   mount(container: HTMLElement): void {

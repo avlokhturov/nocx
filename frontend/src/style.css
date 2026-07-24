@@ -59,6 +59,13 @@ body {
   overflow: hidden;
 }
 
+/* When the active tab is in alt-screen mode (e.g. vim, htop, less),
+   hide the tabbar so the terminal gets the full window and doesn't
+   overlap the macOS traffic lights. */
+#app.alt-screen .tabbar {
+  display: none;
+}
+
 /* ── Tabs container ── non-growing, holds tab buttons ────────────────── */
 
 .tabs-container {
@@ -186,6 +193,7 @@ body {
   text-overflow: ellipsis;
   min-width: 0;
   align-self: center;
+  font-size: 13px;
 }
 
 /* Title fade under close button on hover (nocx-56w).
@@ -741,6 +749,10 @@ body {
   font-size: 14px;
   line-height: 1.2;
   resize: none;
+  padding: 2px 8px 4px;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  word-break: break-word;
 }
 
 /* ── Command-ledger gutter glyphs (ADR-0008) ────────────────────────── */

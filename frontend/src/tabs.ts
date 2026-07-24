@@ -79,6 +79,11 @@ export class Tab {
   private _hasActivity = false
   private _agentStatus: AgentStatus | null = null
   private _bufferType: 'normal' | 'alternate' = 'normal'
+  onBufferChange?: (type: 'normal' | 'alternate') => void
+
+  get bufferType(): 'normal' | 'alternate' {
+    return this._bufferType
+  }
   private _cwdFromOSC7 = false
   private _lastExitCode: number | null = null
   private inputState = new InputStateController()
@@ -249,6 +254,7 @@ export class Tab {
       this._title = this._defaultTitle
       this.titleSpan.textContent = this._defaultTitle
     }
+
   }
 
   /**
@@ -368,11 +374,12 @@ export class Tab {
         } else {
           this.scrollback?.exitFullscreen()
         }
+        this.onBufferChange?.(type)
       })
-
       this.inputState.onChange((m) => {
         console.debug('nocx: input-state', m.state, 'trusted=', m.trusted, 'owned=', m.owned)
         if (shouldShowEditor(m.owned, this.nativeMode)) {
+          this.editor!.setTime(new Date())
           this.editor!.show()
           renderer.setReadOnly(true)
           this.scrollback?.setIdle()
@@ -558,12 +565,14 @@ export class Tab {
       renderer.onCwd(({ path }) => {
         this.updateCwd(path)
       })
+
       renderer.onBell(() => {
         // Bell is always attention-worthy, even in the alternate buffer.
         if (!this.button.classList.contains('active')) {
           this.markActivity()
         }
       })
+
 
       // ── Clipboard ────────────────────────────────────────────────────
       // The renderer reports facts and never touches the clipboard (AD-6).
@@ -822,6 +831,14 @@ export class TabManager {
       this.nextTabId++,
     )
 
+    // Track alt-screen state for the traffic-light overlap fix.
+    // When the active tab enters alt-screen, hide the tabbar so the
+    // terminal gets the full window and doesn't overlap the macOS
+    // window controls.
+    tab.onBufferChange = () => {
+      if (tab === this.activeTab) this.syncAltScreenClass()
+    }
+
     this.tabs.push(tab)
     // Append to the tabs container (addBtn sits after the container).
     this.tabsContainer.append(tab.button)
@@ -850,6 +867,15 @@ export class TabManager {
     this.refreshIndices()
     void this.activate(tab)
     return tab
+  }
+
+  /** Toggle a CSS class on #app when the active tab is in alt-screen mode,
+   *  so the tabbar hides and the terminal gets the full window without
+   *  overlapping the macOS traffic lights. */
+  private syncAltScreenClass(): void {
+    const app = document.getElementById('app')
+    if (!app) return
+    app.classList.toggle('alt-screen', this.activeTab?.bufferType === 'alternate')
   }
 
   /**
@@ -898,6 +924,7 @@ export class TabManager {
     await tab.start()
     tab.refreshAtlas()
     tab.focus()
+    this.syncAltScreenClass()
   }
 
   /** Activate the tab at a 0-based position. */
