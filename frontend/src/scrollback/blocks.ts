@@ -96,26 +96,18 @@ function createHeader(
 ): HTMLElement {
   const header = div('cmd-header')
 
-  // Left: command text + cwd label
-  const left = div('cmd-header-left')
+  // ── Chips row (above command text): cwd left, duration+exit right ──
+  const chipsRow = div('cmd-header-chips')
 
-  // Command text — prominent mono
-  const cmdSpan = document.createElement('span')
-  cmdSpan.className = 'cmd-header-text'
-  cmdSpan.textContent = command || '(empty)'
-  left.appendChild(cmdSpan)
-
-  // CWD — standard chip component (owner directive: all metadata are chips)
+  // CWD — standard chip component
   if (cwd) {
     const cwdEl = document.createElement('span')
     cwdEl.className = 'nocx-chip cmd-header-cwd'
     cwdEl.textContent = `📁 ${cwdLabel(cwd)}`
-    left.appendChild(cwdEl)
+    chipsRow.appendChild(cwdEl)
   }
 
-  header.appendChild(left)
-
-  // Right: duration + exit status
+  // Right: duration + exit status (or spinner while running)
   const right = div('cmd-header-right')
 
   if (status === 'running') {
@@ -141,7 +133,15 @@ function createHeader(
     }
   }
 
-  header.appendChild(right)
+  chipsRow.appendChild(right)
+  header.appendChild(chipsRow)
+
+  // ── Command text (below chips) ─────────────────────────────────────
+  const cmdSpan = document.createElement('span')
+  cmdSpan.className = 'cmd-header-text'
+  cmdSpan.textContent = command || '(empty)'
+  header.appendChild(cmdSpan)
+
   return header
 }
 

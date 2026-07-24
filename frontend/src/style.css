@@ -945,8 +945,8 @@ body {
    No background, no bottom border, no pill/chip styling. */
 .cmd-header {
   display: flex;
-  justify-content: space-between;
-  align-items: center;
+  flex-direction: column;
+  gap: 2px;
   padding: 3px 0;
   background: transparent;
   border: 0;
@@ -957,18 +957,15 @@ body {
      selection below (owner directive: mouse + double-click word select). */
   -webkit-user-select: none;
   user-select: none;
-  gap: 8px;
   color: #565f89;
 }
 
-.cmd-header-left {
+.cmd-header-chips {
   display: flex;
+  justify-content: space-between;
   align-items: center;
   gap: 8px;
-  min-width: 0;
-  flex: 1 1 auto;
 }
-
 .cmd-header-right {
   display: flex;
   align-items: center;
@@ -985,8 +982,6 @@ body {
   color: #c0caf5;
   white-space: pre-wrap;
   overflow-wrap: break-word;
-  min-width: 0;
-  flex: 1 1 auto;
   /* Command text is mouse-selectable (double-click selects a word). */
   -webkit-user-select: text;
   user-select: text;
