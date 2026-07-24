@@ -2,6 +2,7 @@ import './style.css'
 import { GetWSPort, CheckForUpdate, ApplyUpdate, ReportHealthy } from '../wailsjs/go/main/WailsApp'
 import { WSClient } from './ipc'
 import { TabManager } from './tabs'
+import { SidebarImpl } from './sidebar'
 import { createClipboardAccess, ClipboardGate } from './clipboard'
 import { ClipboardBannerImpl } from './banner'
 
@@ -86,7 +87,22 @@ class UpdateNotice {
 async function main() {
   const bar = document.getElementById('tabbar')
   const panes = document.getElementById('panes')
-  if (!bar || !panes) throw new Error('#tabbar / #panes not found')
+  const activityBar = document.getElementById('activitybar')
+  const sidebarPanel = document.getElementById('sidebar')
+  if (!bar || !panes || !activityBar || !sidebarPanel) {
+    throw new Error('#tabbar / #panes / #activitybar / #sidebar not found')
+  }
+
+  // App-shell sidebar (nocx-8yg.9) — VS Code-style activity bar plus a
+  // collapsible panel. One placeholder view for now: the region is the
+  // future home of the SSH host list, saved sessions, vault, and settings.
+  new SidebarImpl(activityBar, sidebarPanel, [
+    {
+      id: 'sessions',
+      title: 'Sessions',
+      icon: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3"/><path d="M13 15h4"/></svg>',
+    },
+  ])
 
   // Update notice — renders inline in the tab bar, right-aligned.
   const notice = new UpdateNotice(bar)

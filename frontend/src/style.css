@@ -296,6 +296,104 @@ body {
   background: #1f2030;
 }
 
+/* ── App body row: activity bar | sidebar | panes ────────────────────── */
+
+#body {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* ── Activity bar (VS Code-style icon strip) ─────────────────────────── */
+
+/* Chrome, not content: same surface as the tab strip. Never collapses —
+   collapsing the sidebar only hides the panel next to it. */
+#activitybar {
+  /* The terminal is never a drag handle, and neither is the icon strip —
+     only the tab strip moves the window (see --wails-draggable on .tabbar). */
+  --wails-draggable: no-drag;
+  flex: 0 0 auto;
+  width: 48px;
+  background: #16161e;
+  border-right: 1px solid #2a2b3d;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.activity-bar-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  width: 100%;
+  height: 48px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #565f89;
+  cursor: pointer;
+}
+
+.activity-bar-btn svg {
+  width: 24px;
+  height: 24px;
+}
+
+.activity-bar-btn:hover {
+  color: #a9b1d6;
+}
+
+/* Active view: brighter icon plus the VS Code left edge indicator. The
+   highlight is dropped while the panel is collapsed — the icon then reads
+   as "click to open", matching VS Code. */
+.activity-bar-btn.active {
+  color: #c0caf5;
+}
+
+.activity-bar-btn.active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: #7aa2f7;
+}
+
+/* ── Sidebar panel ───────────────────────────────────────────────────── */
+
+/* Surface, one step lighter than the terminal so the region reads as a
+   panel and not as more terminal (same colour the active tab uses). */
+#sidebar {
+  --wails-draggable: no-drag;
+  flex: 0 0 auto;
+  width: 240px;
+  background: #1f2235;
+  border-right: 1px solid #2a2b3d;
+  overflow: hidden;
+}
+
+/* display:none, not visibility: an explicit user toggle is allowed to
+   resize the terminal grid (unlike the clipboard banner, which overlays). */
+#sidebar.collapsed {
+  display: none;
+}
+
+.sidebar-title {
+  padding: 10px 16px;
+  font:
+    600 11px/1 ui-sans-serif,
+    -apple-system,
+    'SF Pro Text',
+    system-ui,
+    sans-serif;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #787c99;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
 /* ── Terminal panes ──────────────────────────────────────────────────── */
 
 #panes {
