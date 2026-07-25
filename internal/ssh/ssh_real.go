@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 
 	"github.com/shady2k/nocx/internal/log"
 	gossh "golang.org/x/crypto/ssh"
@@ -29,14 +28,16 @@ func WithSSHConfigPath(path string) RealClientOption {
 }
 
 // RealClient is a production SSH client that connects to remote hosts
-// via golang.org/x/crypto/ssh.
+// via golang.org/x/crypto/ssh. Connections are pooled and ref-counted
+// (AD-4): tabs targeting the same host+identity+route share one
+// authenticated ssh.Client, and the connection (including any jump
+// transport) closes when the last referencing tab closes.
 type RealClient struct {
 	log            log.Logger
 	knownHostsFile string
 	sshConfigPath  string
 
-	mu      sync.Mutex
-	clients []*gossh.Client
+	pool *ConnPool
 }
 
 // NewReal creates a RealClient with the given options.
@@ -51,6 +52,14 @@ func NewReal(logger log.Logger, opts ...RealClientOption) (*RealClient, error) {
 	for _, o := range opts {
 		o(rc)
 	}
+
+	rc.pool = NewConnPool(logger)
+	// The pool's default dial factory is the placeholder (it returns an
+	// error). Production Connects pass a per-call factory to AcquireDial so
+	// the dial sees the caller's credential store and key material — the key
+	// identifies the principal, the factory provides the credentials. Keeping
+	// p.dial as the placeholder means a bare Acquire (no factory) fails loud
+	// rather than silently dialing with the wrong identity.
 	return rc, nil
 }
 
@@ -76,40 +85,51 @@ func (rc *RealClient) Connect(ctx context.Context, host string, opts ...ConnectO
 			return nil, bindErr
 		}
 	}
-
-	d := &dialer{client: rc}
-	gclient, err := d.dial(ctx, host, resolved, cfg)
+	key := rc.poolKeyFor(resolved, cfg)
+	handle, err := rc.pool.AcquireDial(key, rc.dialForConnect(ctx, host, resolved, cfg))
 	if err != nil {
 		return nil, err
 	}
 
-	rc.mu.Lock()
-	rc.clients = append(rc.clients, gclient)
-	rc.mu.Unlock()
+	pconn, ok := handle.conn.(*pooledSSHConn)
+	if !ok {
+		// dialForConnect always returns a *pooledSSHConn; a different type
+		// means the pool's dial factory was overridden (tests). Release and bail.
+		rc.pool.Release(handle)
+		return nil, fmt.Errorf("internal: pooled connection is not a *pooledSSHConn (%T)", handle.conn)
+	}
+	gclient, ok := pconn.client.(*gossh.Client)
+	if !ok {
+		rc.pool.Release(handle)
+		return nil, fmt.Errorf("internal: pooled client is not *gossh.Client (%T)", pconn.client)
+	}
 
 	ch, err := rc.openShell(ctx, gclient, resolved, cfg)
 	if err != nil {
-		_ = gclient.Close()
+		// Failed to open the shell — release our reference so the connection
+		// can close if we were the only tab. Without this the failed Connect
+		// path leaks a pooled ref (and a jump transport) for the process life.
+		rc.pool.Release(handle)
 		return nil, err
 	}
 
+	// Wire the channel's close to release our pool reference. RealChannel.Close
+	// runs closeCb exactly once (sync.Once), so the handle is released exactly
+	// once even if the session errors and the tab then closes. Releasing the
+	// handle drops the target refcount; when it hits zero the pooledSSHConn
+	// closes the gossh.Client AND releases the jump handle, which closes the
+	// bastion when its own refcount hits zero. One Close per channel, one
+	// Release per handle, no leak.
+	ch.releasePoolRef = func() { rc.pool.Release(handle) }
 	return ch, nil
 }
 
-// Close implements SSH.Close.
+// Close implements SSH.Close. It closes every pooled connection regardless
+// of refcount — used during shutdown. Ordinary tab closure releases a
+// single handle via the channel's closeCb and never reaches here.
 func (rc *RealClient) Close() error {
-	rc.mu.Lock()
-	clients := rc.clients
-	rc.clients = nil
-	rc.mu.Unlock()
-
-	var lastErr error
-	for _, cl := range clients {
-		if err := cl.Close(); err != nil {
-			lastErr = err
-		}
-	}
-	return lastErr
+	rc.pool.CloseAll()
+	return nil
 }
 
 // hostKeyCallback builds a HostKeyCallback from known_hosts.
@@ -222,9 +242,11 @@ func (rc *RealClient) openShell(ctx context.Context, gclient *gossh.Client, reso
 
 	go func() {
 		_ = session.Wait()
-		ch.closeOnce.Do(func() {
-			close(ch.done)
-		})
+		// Remote session ended — release the pool reference. Close is
+		// idempotent (closeOnce), so if the tab already called Close this
+		// is a no-op; if not, it closes the session, drops the ref, and
+		// (for a jump-backed conn) releases the bastion handle.
+		_ = ch.Close()
 	}()
 
 	return ch, nil

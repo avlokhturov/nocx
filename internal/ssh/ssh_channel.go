@@ -20,6 +20,11 @@ type RealChannel struct {
 
 	closeOnce sync.Once
 	closeCb   func()
+	// releasePoolRef drops this channel's reference to the pooled ssh.Client.
+	// Set by RealClient.Connect; invoked once from Close (after closeOnce
+	// fires) so the connection closes when the last referencing tab closes,
+	// including the jump transport (AD-4). Nil for non-pooled channels.
+	releasePoolRef func()
 }
 
 func (c *RealChannel) Read(p []byte) (int, error) {
@@ -33,8 +38,13 @@ func (c *RealChannel) Write(p []byte) (int, error) {
 func (c *RealChannel) Close() error {
 	c.closeOnce.Do(func() {
 		close(c.done)
+		if c.closeCb != nil {
+			c.closeCb()
+		}
+		if c.releasePoolRef != nil {
+			c.releasePoolRef()
+		}
 	})
-	c.closeCb()
 	return nil
 }
 

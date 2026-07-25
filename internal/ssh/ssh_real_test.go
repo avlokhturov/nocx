@@ -31,13 +31,14 @@ type testSSHServer struct {
 	listener   net.Listener
 	addr       string
 
-	mu         sync.Mutex
-	ptyCols    uint16
-	ptyRows    uint16
-	ptyX       uint16
-	ptyY       uint16
-	shellCh    gossh.Channel
-	shellReady chan struct{}
+	mu           sync.Mutex
+	ptyCols      uint16
+	ptyRows      uint16
+	ptyX         uint16
+	ptyY         uint16
+	shellCh      gossh.Channel
+	shellReady   chan struct{}
+	shellReadyDo sync.Once
 	// windowChanged carries one signal per processed window-change request.
 	windowChanged chan struct{}
 }
@@ -144,7 +145,7 @@ func (s *testSSHServer) handleSession(ch gossh.Channel, reqs <-chan *gossh.Reque
 				s.mu.Lock()
 				s.shellCh = ch
 				s.mu.Unlock()
-				close(s.shellReady)
+				s.shellReadyDo.Do(func() { close(s.shellReady) })
 
 			default:
 				_ = req.Reply(false, nil)
@@ -650,5 +651,85 @@ func TestSSHConfig_ExplicitOptionBeatsConfig(t *testing.T) {
 	}
 	if string(buf[:n]) != "echo:ping" {
 		t.Fatalf("expected echo:ping, got %q", string(buf[:n]))
+	}
+}
+
+// TestPoolConnectionSharing proves the AD-4 contract end-to-end: two
+// Connects to the same host+user share one ssh.Client (pool.Count==1), and
+// both channels work independently. Closing both releases the connection
+// (pool.Count==0).
+func TestPoolConnectionSharing(t *testing.T) {
+	srv := startTestSSHServer(t)
+	defer srv.close()
+	khPath := writeKnownHosts(t, srv, srv.addr)
+
+	client, err := NewReal(
+		log.NewSlogAdapter(nil),
+		WithKnownHostsFile(khPath),
+	)
+	if err != nil {
+		t.Fatalf("NewReal: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	auth := []gossh.AuthMethod{gossh.PublicKeys(srv.userSigner)}
+
+	// Two Connects to the same host should share one connection.
+	ch1, err := client.Connect(context.Background(), srv.addr,
+		WithUser("test"), WithAuthMethods(auth), WithPTYSize(80, 24, 0, 0))
+	if err != nil {
+		t.Fatalf("Connect 1: %v", err)
+	}
+
+	ch2, err := client.Connect(context.Background(), srv.addr,
+		WithUser("test"), WithAuthMethods(auth), WithPTYSize(80, 24, 0, 0))
+	if err != nil {
+		t.Fatalf("Connect 2: %v", err)
+	}
+
+	if got := client.pool.Count(); got != 1 {
+		t.Fatalf("after 2 connects to same host, pool.Count()=%d, want 1 (shared)", got)
+	}
+
+	// Both channels work independently.
+	<-srv.shellReady
+	if _, err = ch1.Write([]byte("a")); err != nil {
+		t.Fatalf("ch1.Write: %v", err)
+	}
+	buf := make([]byte, 32)
+	var n int
+	n, err = ch1.Read(buf)
+	if err != nil {
+		t.Fatalf("ch1.Read: %v", err)
+	}
+	if string(buf[:n]) != "echo:a" {
+		t.Fatalf("ch1: want echo:a, got %q", string(buf[:n]))
+	}
+
+	if _, err = ch2.Write([]byte("b")); err != nil {
+		t.Fatalf("ch2.Write: %v", err)
+	}
+	n, err = ch2.Read(buf)
+	if err != nil {
+		t.Fatalf("ch2.Read: %v", err)
+	}
+	if string(buf[:n]) != "echo:b" {
+		t.Fatalf("ch2: want echo:b, got %q", string(buf[:n]))
+	}
+
+	// Close one — connection stays (the other still refs it).
+	if err := ch1.Close(); err != nil {
+		t.Fatalf("ch1.Close: %v", err)
+	}
+	if got := client.pool.Count(); got != 1 {
+		t.Fatalf("after 1 close, pool.Count()=%d, want 1 (still shared)", got)
+	}
+
+	// Close the last — connection released.
+	if err := ch2.Close(); err != nil {
+		t.Fatalf("ch2.Close: %v", err)
+	}
+	if got := client.pool.Count(); got != 0 {
+		t.Fatalf("after all closed, pool.Count()=%d, want 0", got)
 	}
 }
