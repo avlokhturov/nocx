@@ -12,9 +12,14 @@ import type { ClipboardBanner } from './banner'
 import { CommandLedger } from './command-ledger'
 import type { MarkerAdapter } from './renderers/types'
 import { ScrollbackController } from './scrollback/controller'
-import type { ProfileClient, SSHProfile } from './profiles'
+import type { ProfileClient, SSHProfile, SSHProfileOptions } from './profiles'
 import { ConnectionManagerViewImpl } from './connections'
-import { Log } from '../wailsjs/go/main/WailsApp'
+import { log } from './log'
+// Narrow local extension — SSHProfileOptions deliberately omits password
+// (it lives in the credential store), but the runtime connect flow carries it.
+interface SSHProfileConnectOpts extends SSHProfileOptions {
+  password?: string
+}
 
 // How long the grid must hold still before the PTY is told about it.
 // Dragging a window edge walks the grid through every intermediate size,
@@ -285,7 +290,7 @@ export class Tab {
    * it mounts.
    */
   async start(): Promise<void> {
-    Log('nocx: Tab.start() called, managerView: ' + !!this.managerView + ', started: ' + this.started)
+    log.info('nocx: Tab.start() called', { managerView: !!this.managerView, started: this.started })
     // Manager tabs host the connection manager UI, not a terminal.
     // Show the skeleton immediately on first activation (when the pane is
     // still empty); subsequent activations keep the user's form intact.
@@ -301,15 +306,18 @@ export class Tab {
     this.started = true
 
     // Wait for pane to become visible and have proper dimensions
-    await new Promise(resolve => requestAnimationFrame(resolve))
+    await new Promise((resolve) => requestAnimationFrame(resolve))
 
     try {
-      Log('nocx: creating renderer')
+      log.info('nocx: creating renderer')
       const renderer = createRenderer(this.rendererName)
 
       // Log pane dimensions before mounting
       const paneRect = this.pane.getBoundingClientRect()
-      Log('nocx: pane dimensions before mount: ' + paneRect.width + 'x' + paneRect.height)
+      log.info('nocx: pane dimensions before mount', {
+        width: paneRect.width,
+        height: paneRect.height,
+      })
 
       // ── DOM scrollback controller ───────────────────────────────────────
       this.scrollback = new ScrollbackController({
@@ -318,9 +326,9 @@ export class Tab {
         now: () => performance.now(),
       })
 
-      Log('nocx: mounting renderer')
+      log.info('nocx: mounting renderer')
       await renderer.mount(this.scrollback.mountTarget)
-      Log('nocx: renderer mounted, cols: ' + renderer.cols + ', rows: ' + renderer.rows)
+      log.info('nocx: renderer mounted', { cols: renderer.cols, rows: renderer.rows })
 
       this.cols = renderer.cols
       this.rows = renderer.rows
@@ -557,7 +565,6 @@ export class Tab {
       // the PTY/channel is created at this size — never spawn-then-resize.
       // Enhanced input (DOM editor + marker-only prompt) is always on for local
       // sessions; the shell fails open to a plain terminal when markers are absent (ADR-0004/0006).
-      Log('nocx: opening session, sshOpts: ' + JSON.stringify(this.sshOpts))
       const session = this.sshOpts
         ? await this.client.openSSHSession(this.cols, this.rows, this.sshOpts.host, {
             user: this.sshOpts.user,
@@ -573,8 +580,7 @@ export class Tab {
           })
         : await this.client.openSession(this.cols, this.rows, true)
       this.session = session
-      Log('nocx: session opened, sid: ' + session.sessionId + ' cwd: ' + (session.cwd || ''))
-      Log('nocx: session opened, sid: ' + session.sessionId + ' cwd: ' + (session.cwd || ''))
+      log.info('nocx: session opened', { sid: session.sessionId, cwd: session.cwd || '' })
 
       // Store the initial cwd for the command ledger.
       this._cwd = session.cwd || ''
@@ -598,7 +604,7 @@ export class Tab {
       this.titleSpan.textContent = this._title = this._defaultTitle
 
       session.onData((data: string) => {
-        Log('nocx: session data received, length: ' + data.length)
+        log.debug('nocx: session data received', { length: data.length })
         renderer.write(data)
         // Normal-buffer output on a background tab lights the indicator.
         // Full-screen TUIs repaint constantly in the alternate buffer —
@@ -608,7 +614,7 @@ export class Tab {
         }
       })
       session.onExit((sid: string) => {
-        Log('nocx: session exited: ' + sid)
+        log.info('nocx: session exited', { sid })
         this.inputState.dispatch({ type: 'exit' })
         // B3: fail-open — finalize running records, dispose per-record markers.
         this.ledger?.finalizeOpen()
@@ -754,14 +760,14 @@ export class Tab {
 
       this.session = session
       this._readyResolve(true)
-      Log('nocx: tab ready (renderer=' + this.rendererName + '), sid: ' + session.sessionId)
+      log.info('nocx: tab ready', { renderer: this.rendererName, sid: session.sessionId })
     } catch (err) {
       const notice = document.createElement('pre')
       notice.className = 'pane-error'
       notice.textContent = `Tab ${this.id} failed to start:\n\n${err instanceof Error ? err.message : String(err)}`
       this.pane.replaceChildren(notice)
       this._readyResolve(false)
-      Log(`nocx: tab ${this.id} failed: ${err}`)
+      log.error('nocx: tab failed', { id: this.id, error: String(err) })
     }
   }
 
@@ -885,6 +891,11 @@ export class TabManager {
     }))
   }
 
+  /** Find a Tab by id, for sidebar interactions that need the actual Tab object. */
+  findTab(id: number): Tab | undefined {
+    return this.tabs.find((t) => t.id === id)
+  }
+
   /** Callback fired when tabs change (added, removed, title changed). */
   onTabsChanged?: () => void
 
@@ -909,9 +920,20 @@ export class TabManager {
   /** Create a new SSH tab targeting the given host, activate it. */
   newSSHTab(
     host: string,
-    opts?: { user?: string; port?: number; keyFile?: string; password?: string; authMode?: string; jumpHost?: string; jumpPort?: number; jumpUser?: string; jumpPassword?: string; jumpAuthMode?: string },
+    opts?: {
+      user?: string
+      port?: number
+      keyFile?: string
+      password?: string
+      authMode?: string
+      jumpHost?: string
+      jumpPort?: number
+      jumpUser?: string
+      jumpPassword?: string
+      jumpAuthMode?: string
+    },
   ): Tab {
-    Log('nocx: newSSHTab called host: ' + host + ' jumpHost: ' + (opts?.jumpHost || ''))
+    log.info('nocx: newSSHTab called', { host, jumpHost: opts?.jumpHost || '' })
     return this.createTab({ host, ...opts })
   }
 
@@ -942,17 +964,18 @@ export class TabManager {
 
     const cmView = new ConnectionManagerViewImpl(tab.pane, this.profileClient)
     cmView.onConnect = (profile: SSHProfile) => {
-      Log('nocx: onConnect called jumpHost: ' + (profile.options as any).jumpHost + ' profile: ' + profile.name)
-      this.newSSHTab(profile.options.host, {
-        user: profile.options.user,
-        port: profile.options.port,
-        authMode: profile.options.auth,
-        password: (profile.options as any).password,
-        jumpHost: (profile.options as any).jumpHost,
-        jumpPort: (profile.options as any).jumpPort,
-        jumpUser: (profile.options as any).jumpUser,
-        jumpPassword: (profile.options as any).jumpPassword,
-        jumpAuthMode: (profile.options as any).jumpAuthMode,
+      const connectOpts = profile.options as SSHProfileConnectOpts
+      log.info('nocx: onConnect called', { jumpHost: connectOpts.jumpHost, profile: profile.name })
+      this.newSSHTab(connectOpts.host, {
+        user: connectOpts.user,
+        port: connectOpts.port,
+        authMode: connectOpts.auth,
+        password: connectOpts.password,
+        jumpHost: connectOpts.jumpHost,
+        jumpPort: connectOpts.jumpPort,
+        jumpUser: connectOpts.jumpUser,
+        jumpPassword: connectOpts.jumpPassword,
+        jumpAuthMode: connectOpts.jumpAuthMode,
       })
     }
 
@@ -1127,7 +1150,11 @@ export class TabManager {
 
   /** Activate a tab: show its pane, focus its renderer. */
   async activate(tab: Tab): Promise<void> {
-    Log('nocx: TabManager.activate() called tabId: ' + tab.id + ' isManager: ' + !!tab.managerView + ' isActive: ' + (tab === this.activeTab))
+    log.info('nocx: TabManager.activate() called', {
+      tabId: tab.id,
+      isManager: !!tab.managerView,
+      isActive: tab === this.activeTab,
+    })
     if (tab === this.activeTab) {
       tab.focus()
       return
@@ -1136,7 +1163,7 @@ export class TabManager {
     this.activeTab?.setActive(false)
     this.activeTab = tab
     tab.setActive(true)
-    Log('nocx: tab.setActive(true) called, pane classes: ' + tab.pane.className)
+    log.info('nocx: tab.setActive(true) called', { paneClasses: tab.pane.className })
 
     await tab.start()
     tab.refreshAtlas()

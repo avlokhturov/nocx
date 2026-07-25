@@ -61,9 +61,9 @@ func main() {
 		Mac: &mac.Options{
 			TitleBar: mac.TitleBarHidden(),
 		},
-		Debug: options.Debug{
-			OpenInspectorOnStartup: true,
-		},
+		// DevTools/Inspector is off by default in production builds.
+		// Enable locally for debugging: OpenInspectorOnStartup: true.
+		Debug:      options.Debug{},
 		OnStartup:  wailsApp.startup,
 		OnShutdown: wailsApp.shutdown,
 		Bind: []interface{}{

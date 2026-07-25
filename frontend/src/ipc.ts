@@ -544,7 +544,18 @@ export class WSClient {
     cols: number,
     rows: number,
     host: string,
-    opts?: { user?: string; port?: number; keyFile?: string; password?: string; authMode?: string; jumpHost?: string; jumpPort?: number; jumpUser?: string; jumpPassword?: string; jumpAuthMode?: string },
+    opts?: {
+      user?: string
+      port?: number
+      keyFile?: string
+      password?: string
+      authMode?: string
+      jumpHost?: string
+      jumpPort?: number
+      jumpUser?: string
+      jumpPassword?: string
+      jumpAuthMode?: string
+    },
   ): Promise<SessionHandle> {
     return new Promise((resolve, reject) => {
       const id = nextID()

@@ -1,5 +1,6 @@
 import './style.css'
-import { GetWSPort, CheckForUpdate, ApplyUpdate, ReportHealthy, Log } from '../wailsjs/go/main/WailsApp'
+import { GetWSPort, CheckForUpdate, ApplyUpdate, ReportHealthy } from '../wailsjs/go/main/WailsApp'
+import { log } from './log'
 import { WSClient } from './ipc'
 import { TabManager } from './tabs'
 import { SidebarImpl } from './sidebar'
@@ -8,7 +9,7 @@ import { ClipboardBannerImpl } from './banner'
 import { ProfileClient } from './profiles'
 
 async function main() {
-  Log('nocx: main() called')
+  log.info('nocx: main() called')
   const panes = document.getElementById('panes')
   const activityBar = document.getElementById('activitybar')
   const sidebarPanel = document.getElementById('sidebar')
@@ -61,7 +62,7 @@ async function main() {
       icon: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 17H7A5 5 0 0 1 7 7h2"/><path d="M15 7h2a5 5 0 1 1 0 10h-2"/><line x1="8" y1="12" x2="16" y2="12"/></svg>',
       action: 'tab',
       onActivate: () => {
-        Log('nocx: opening Connections tab')
+        log.info('nocx: opening Connections tab')
         tm.newManagerTab()
       },
     },
@@ -74,7 +75,7 @@ async function main() {
         // Sessions panel shows open tabs from TabManager
         const header = document.createElement('div')
         header.className = 'sidebar-sessions-header'
-        
+
         const title = document.createElement('div')
         title.className = 'sidebar-section-title'
         title.textContent = 'Open Sessions'
@@ -106,7 +107,7 @@ async function main() {
             const item = document.createElement('div')
             item.className = 'sidebar-session-item'
             if (tab.isActive) item.classList.add('active')
-            
+
             const titleSpan = document.createElement('span')
             titleSpan.className = 'sidebar-session-title'
             titleSpan.textContent = tab.title
@@ -119,8 +120,7 @@ async function main() {
             closeBtn.addEventListener('click', (e) => {
               e.stopPropagation()
               // Find the actual Tab object and close it
-              const allTabs = (tm as any).tabs
-              const actualTab = allTabs.find((t: any) => t.id === tab.id)
+              const actualTab = tm.findTab(tab.id)
               if (actualTab) {
                 tm.closeTab(actualTab)
               }
@@ -129,10 +129,13 @@ async function main() {
 
             item.addEventListener('click', () => {
               // Find the actual Tab object and activate it
-              const allTabs = (tm as any).tabs
-              const actualTab = allTabs.find((t: any) => t.id === tab.id)
+              const actualTab = tm.findTab(tab.id)
               if (actualTab) {
-                void tm.activate(actualTab)
+                tm.activate(actualTab).catch((err: unknown) => {
+                  log.error('nocx: tab activation failed', {
+                    error: err instanceof Error ? err.message : String(err),
+                  })
+                })
               }
             })
             list.append(item)
@@ -173,14 +176,15 @@ async function main() {
     link.textContent = 'release notes'
     const btn = document.createElement('button')
     btn.textContent = 'Update'
-    btn.addEventListener('click', async () => {
+    btn.addEventListener('click', () => {
       notice.textContent = 'Downloading update…'
-      try {
-        await ApplyUpdate()
-        notice.textContent = 'Restart to apply'
-      } catch (err) {
-        notice.textContent = `Update failed: ${err instanceof Error ? err.message : String(err)}`
-      }
+      ApplyUpdate()
+        .then(() => {
+          notice.textContent = 'Restart to apply'
+        })
+        .catch((err) => {
+          notice.textContent = `Update failed: ${err instanceof Error ? err.message : String(err)}`
+        })
     })
     notice.append(span, ' ', link, ' ', btn)
   }
@@ -211,4 +215,4 @@ async function main() {
   }, DAY_MS)
 }
 
-main().catch((err) => Log(`nocx: main error: ${(err as Error).message}`))
+main().catch((err) => log.error('nocx: main error', { message: (err as Error).message }))

@@ -141,16 +141,6 @@ func authMethodsFromChain(chain []authChainEntry) []gossh.AuthMethod {
 	return methods
 }
 
-// hasKind checks if the chain contains a specific auth method kind.
-func hasKind(chain []authChainEntry, kind authMethodKind) bool {
-	for _, entry := range chain {
-		if entry.kind == kind {
-			return true
-		}
-	}
-	return false
-}
-
 // lookupKeyPassphrase resolves a private-key passphrase by hash from the credential store.
 func (rc *RealClient) lookupKeyPassphrase(store credential.CredentialStore, hash credential.KeyHash) (string, error) {
 	if store == nil {

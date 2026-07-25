@@ -83,6 +83,25 @@ close it. Auto-push (`dolt.auto-push`) stays off on purpose: upstream warns that
 pushes to a git-protocol Dolt remote can corrupt or strand remote history. If claim races
 ever become routine, the fix is a shared Dolt sql-server, not a shorter interval (nocx-wj4).
 
+## Git authority
+
+Agents have **standing authority to commit and push** on this repo. This overrides the
+"Conservative (default)" profile in the managed Beads block below — that block defers to
+repository instructions, and this is one. It lives here rather than inside the block
+because the block is regenerated from a hash and edits to it are lost.
+
+Allowed without asking, every session: `git commit`, `git push`, `bd close`,
+`bd dolt push`, and running the quality gates. Branch first if you are on `main`.
+
+**Merging a pull request always requires explicit approval.** Not a green-CI one, not
+your own, not a one-line one — the user has to ask for it in that session. Authority to
+commit and push is not authority to merge, and approval to merge one PR does not carry
+to the next.
+
+Run the full local gate before pushing, not only the part you touched: `gofumpt -l .`,
+`golangci-lint run`, `go test -race ./...`, plus `npx prettier --check .`, `npx eslint .`,
+`npx tsc --noEmit`, `npx vitest run` for frontend changes.
+
 ## Engineering rules (non-negotiable)
 
 - **Interface-first + DI.** Every module lives behind an interface, wired at a single

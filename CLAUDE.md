@@ -1,6 +1,9 @@
 # CLAUDE.md
 
-Agent working rules for this repo live in **[AGENTS.md](AGENTS.md)** — read it first.
+Agent working rules for this repo live in **[AGENTS.md](AGENTS.md)** — it is the operating
+contract, including the git authority rules. It is imported here, so it is always in context:
+
+@AGENTS.md
 
 Sources of truth: [`docs/vision.md`](docs/vision.md) (what & why) and
 [`docs/architecture.md`](docs/architecture.md) (the binding architecture spine).

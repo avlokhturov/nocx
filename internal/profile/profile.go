@@ -51,9 +51,9 @@ type Base struct {
 // username/auth/keyPath are resolved from the credential at connect time.
 // If empty, inline User/Auth/PrivateKeys are used (legacy mode).
 type SSHProfileOptions struct {
-	Host              string   `json:"host"`
-	Port              int      `json:"port,omitempty"`
-	CredentialID      string   `json:"credentialId,omitempty"` // Link to Credential.ID
+	Host         string `json:"host"`
+	Port         int    `json:"port,omitempty"`
+	CredentialID string `json:"credentialId,omitempty"` // Link to Credential.ID
 	// Inline fields (used only if CredentialID is empty)
 	User              string   `json:"user,omitempty"`
 	Auth              AuthMode `json:"auth,omitempty"`
@@ -98,9 +98,9 @@ type ProfileGroup struct {
 // keyed by Credential.ID.
 type Credential struct {
 	ID       string   `json:"id"`
-	Name     string   `json:"name"`     // Display name (e.g. "work-github")
-	Username string   `json:"username"` // SSH username
-	Auth     AuthMode `json:"auth"`     // Auth method: password, publicKey, agent, keyboardInteractive
+	Name     string   `json:"name"`              // Display name (e.g. "work-github")
+	Username string   `json:"username"`          // SSH username
+	Auth     AuthMode `json:"auth"`              // Auth method: password, publicKey, agent, keyboardInteractive
 	KeyPath  string   `json:"keyPath,omitempty"` // Private key path (only for publicKey auth)
 	// Optional: bind to specific host (empty = works for any host)
 	Host string `json:"host,omitempty"`

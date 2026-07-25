@@ -7,6 +7,7 @@
 import {
   type ProfileClient,
   type SSHProfile,
+  type SSHProfileOptions,
   type ProfileGroup,
   type AuthMode,
   type Credential,
@@ -14,13 +15,18 @@ import {
   resolveGroupPath,
   newProfileID,
 } from './profiles'
-import { Log } from '../wailsjs/go/main/WailsApp'
+import { log } from './log'
 
 // ConnectionManagerView is the injectable interface — tests can stub the DOM.
 export interface ConnectionManagerView {
   show(): void
   refresh(): Promise<void>
   onConnect?: (profile: SSHProfile) => void
+}
+
+/** Options shape at connection time: extends SSHProfileOptions with runtime-only fields. */
+interface ResolvedSSHOptions extends SSHProfileOptions {
+  password?: string
 }
 
 export class ConnectionManagerViewImpl implements ConnectionManagerView {
@@ -32,6 +38,8 @@ export class ConnectionManagerViewImpl implements ConnectionManagerView {
   private selectedID = ''
   private editing: SSHProfile | null = null
   private editingCredential: Credential | null = null
+  // Tracks password input elements across credential-form render/save cycles.
+  private passwordInputMap = new WeakMap<HTMLElement, HTMLInputElement>()
 
   onConnect?: (profile: SSHProfile) => void
 
@@ -49,7 +57,7 @@ export class ConnectionManagerViewImpl implements ConnectionManagerView {
       this.profiles = (await this.client.listProfiles()) ?? []
       this.groups = (await this.client.listGroups()) ?? []
       this.credentials = (await this.client.listCredentials()) ?? []
-    } catch (err) {
+    } catch {
       this.profiles = this.profiles ?? []
       this.groups = this.groups ?? []
       this.credentials = this.credentials ?? []
@@ -64,78 +72,77 @@ export class ConnectionManagerViewImpl implements ConnectionManagerView {
   // --- render ---
 
   private render(): void {
-    Log('nocx: render() called, profiles: ' + this.profiles.length + ', editing: ' + (this.editing?.name || 'null'))
+    log.info('nocx: render() called', {
+      profileCount: this.profiles.length,
+      editing: this.editing?.name || null,
+    })
     if (!this.container) {
       return
     }
-    
-    try {
-      this.container.replaceChildren()
 
-      // Header with action buttons.
-      const header = document.createElement('div')
-      header.className = 'cm-header'
+    this.container.replaceChildren()
 
-      const title = document.createElement('h1')
-      title.textContent = 'Connections'
-      header.append(title)
+    // Header with action buttons.
+    const header = document.createElement('div')
+    header.className = 'cm-header'
 
-      const importBtn = document.createElement('button')
-      importBtn.textContent = 'Import from Tabby'
-      importBtn.title = 'Import SSH profiles from a Tabby config.yml'
-      importBtn.onclick = () => {
-        this.handleImport()
-      }
-      header.append(importBtn)
+    const title = document.createElement('h1')
+    title.textContent = 'Connections'
+    header.append(title)
 
-      const credBtn = document.createElement('button')
-      credBtn.textContent = 'Saved credentials'
-      credBtn.title = 'Manage saved passwords (keychain)'
-      credBtn.onclick = () => {
-        this.showCredentialsPanel()
-      }
-      header.append(credBtn)
+    const importBtn = document.createElement('button')
+    importBtn.textContent = 'Import from Tabby'
+    importBtn.title = 'Import SSH profiles from a Tabby config.yml'
+    importBtn.onclick = () => {
+      this.handleImport()
+    }
+    header.append(importBtn)
 
-      const newBtn = document.createElement('button')
-      newBtn.className = 'cm-primary'
-      newBtn.textContent = '+ New connection'
-      newBtn.onclick = () => {
-        this.startNewProfile()
-      }
-      header.append(newBtn)
+    const credBtn = document.createElement('button')
+    credBtn.textContent = 'Saved credentials'
+    credBtn.title = 'Manage saved passwords (keychain)'
+    credBtn.onclick = () => {
+      this.showCredentialsPanel()
+    }
+    header.append(credBtn)
 
-      this.container.append(header)
+    const newBtn = document.createElement('button')
+    newBtn.className = 'cm-primary'
+    newBtn.textContent = '+ New connection'
+    newBtn.onclick = () => {
+      this.startNewProfile()
+    }
+    header.append(newBtn)
 
-      const body = document.createElement('div')
-      body.className = 'cm-body'
+    this.container.append(header)
 
-      // List panel.
-      body.append(this.renderList())
+    const body = document.createElement('div')
+    body.className = 'cm-body'
 
-      // Form panel.
-      const formPanel = document.createElement('div')
-      formPanel.className = 'cm-form-panel'
-      
-      if (this.editingCredential) {
-        formPanel.append(this.renderCredentialForm(this.editingCredential))
-      } else if (this.editing) {
-        formPanel.append(this.renderForm(this.editing))
-      } else if (this.selectedID) {
-        const p = this.profiles.find((x) => x.id === this.selectedID)
-        if (p) {
-          formPanel.append(this.renderForm(p))
-        } else {
-          formPanel.append(this.renderEmpty())
-        }
+    // List panel.
+    body.append(this.renderList())
+
+    // Form panel.
+    const formPanel = document.createElement('div')
+    formPanel.className = 'cm-form-panel'
+
+    if (this.editingCredential) {
+      formPanel.append(this.renderCredentialForm(this.editingCredential))
+    } else if (this.editing) {
+      formPanel.append(this.renderForm(this.editing))
+    } else if (this.selectedID) {
+      const p = this.profiles.find((x) => x.id === this.selectedID)
+      if (p) {
+        formPanel.append(this.renderForm(p))
       } else {
         formPanel.append(this.renderEmpty())
       }
-      body.append(formPanel)
-
-      this.container.append(body)
-    } catch (err) {
-      throw err
+    } else {
+      formPanel.append(this.renderEmpty())
     }
+    body.append(formPanel)
+
+    this.container.append(body)
   }
 
   private renderList(): HTMLElement {
@@ -225,20 +232,22 @@ export class ConnectionManagerViewImpl implements ConnectionManagerView {
 
   private renderListItem(p: SSHProfile, _groupPath: string[]): HTMLElement {
     void _groupPath
-    Log('nocx: renderListItem id: ' + p.id + ', jumpHost: ' + p.options.jumpHost)
+    log.info('nocx: renderListItem', { id: p.id, jumpHost: p.options.jumpHost })
     const item = document.createElement('div')
     item.className = 'cm-item'
     if (p.id === this.selectedID) item.classList.add('cm-selected')
     item.addEventListener('click', () => {
-      Log('nocx: profile clicked. id=' + p.id + ', jumpHost=' + p.options.jumpHost)
+      log.info('nocx: profile clicked', { id: p.id, jumpHost: p.options.jumpHost })
       this.selectedID = p.id
       this.editing = null
       this.editingCredential = null
       this.render()
     })
-    item.addEventListener('dblclick', async () => {
+    item.addEventListener('dblclick', () => {
       // Double-click: quick connect
-      await this.quickConnect(p)
+      void this.quickConnect(p).catch((err) =>
+        log.error('Quick connect failed', { error: String(err) }),
+      )
     })
 
     const info = document.createElement('div')
@@ -252,76 +261,78 @@ export class ConnectionManagerViewImpl implements ConnectionManagerView {
     meta.textContent = `${p.options.user || '?'}@${p.options.host}:${port}`
     info.append(name, meta)
     item.append(info)
-    
+
     // Quick connect button
     const connectBtn = document.createElement('button')
     connectBtn.className = 'cm-quick-connect'
     connectBtn.textContent = 'SSH'
     connectBtn.title = 'Quick connect'
-    connectBtn.addEventListener('click', async (e) => {
+    connectBtn.addEventListener('click', (e) => {
       e.stopPropagation()
-      await this.quickConnect(p)
+      void this.quickConnect(p).catch((err) =>
+        log.error('Quick connect failed', { error: String(err) }),
+      )
     })
     item.append(connectBtn)
-    
+
     return item
   }
 
   private async quickConnect(p: SSHProfile): Promise<void> {
     const profileToConnect = this.cloneProfile(p)
-    
+
     // Resolve credential if credentialId is set
     if (profileToConnect.options.credentialId) {
-      const cred = this.credentials.find(c => c.id === profileToConnect.options.credentialId)
+      const cred = this.credentials.find((c) => c.id === profileToConnect.options.credentialId)
       if (cred) {
         profileToConnect.options.user = cred.username
         profileToConnect.options.auth = cred.auth
-        
+
         // Load password from credential store
         try {
           const password = await this.client.lookupPassword(cred.id)
           if (password) {
-            ;(profileToConnect.options as any).password = password
+            ;(profileToConnect.options as ResolvedSSHOptions).password = password
           }
         } catch (err) {
-          Log('Failed to load password:' + ": " + err)
+          log.error('Failed to load password', { error: String(err) })
         }
       }
     }
-    
+
     // Resolve jump host credentials if jumpHost is set
     if (profileToConnect.options.jumpHost) {
-      const jumpProfile = this.profiles.find(p => p.id === profileToConnect.options.jumpHost)
+      const jumpProfile = this.profiles.find((p) => p.id === profileToConnect.options.jumpHost)
       if (jumpProfile) {
         // Use jump profile's host and port as the actual jump host
-        ;(profileToConnect.options as any).jumpHost = jumpProfile.options.host
-        ;(profileToConnect.options as any).jumpPort = jumpProfile.options.port
-        
+        profileToConnect.options.jumpHost = jumpProfile.options.host
+        profileToConnect.options.jumpPort = jumpProfile.options.port
+
         // Resolve jump host credential
         if (jumpProfile.options.credentialId) {
-          const jumpCred = this.credentials.find(c => c.id === jumpProfile.options.credentialId)
+          const jumpCred = this.credentials.find((c) => c.id === jumpProfile.options.credentialId)
           if (jumpCred) {
-            ;(profileToConnect.options as any).jumpUser = jumpCred.username
-            ;(profileToConnect.options as any).jumpAuthMode = jumpCred.auth
-            
+            profileToConnect.options.jumpUser = jumpCred.username
+            profileToConnect.options.jumpAuthMode = jumpCred.auth
+
             // Load jump host password
             try {
               const jumpPassword = await this.client.lookupPassword(jumpCred.id)
               if (jumpPassword) {
-                ;(profileToConnect.options as any).jumpPassword = jumpPassword
+                profileToConnect.options.jumpPassword = jumpPassword
               }
             } catch (err) {
-              Log('Failed to load jump host password:' + ": " + err)
+              log.error('Failed to load jump host password', { error: String(err) })
             }
           }
         } else {
           // Use inline credentials from jump profile
-          ;(profileToConnect.options as any).jumpUser = jumpProfile.options.user
-          ;(profileToConnect.options as any).jumpAuthMode = jumpProfile.options.auth
+          profileToConnect.options.jumpUser = jumpProfile.options.user
+          profileToConnect.options.jumpAuthMode = jumpProfile.options.auth
         }
       }
     }
-    
+
     this.onConnect?.(profileToConnect)
   }
 
@@ -337,11 +348,11 @@ export class ConnectionManagerViewImpl implements ConnectionManagerView {
   // --- form (all SSH settings) ---
 
   private renderForm(profile: SSHProfile): HTMLElement {
-    Log('nocx: renderForm called for profile: ' + profile.name + ', id: ' + profile.id)
+    log.info('nocx: renderForm called', { name: profile.name, id: profile.id })
     const form = document.createElement('div')
     form.className = 'cm-form'
 
-    const isNew = profile.id === '' || !this.profiles.some(p => p.id === profile.id)
+    const isNew = profile.id === '' || !this.profiles.some((p) => p.id === profile.id)
 
     // Basic section.
     const basic = document.createElement('div')
@@ -424,7 +435,8 @@ export class ConnectionManagerViewImpl implements ConnectionManagerView {
       authHint.style.color = '#565f89'
       authHint.style.fontSize = '12px'
       authHint.style.marginBottom = '12px'
-      authHint.textContent = 'Tip: Create a Credential above to reuse auth settings across connections.'
+      authHint.textContent =
+        'Tip: Create a Credential above to reuse auth settings across connections.'
       auth.append(authHint)
 
       // Auth mode radio group.
@@ -469,10 +481,14 @@ export class ConnectionManagerViewImpl implements ConnectionManagerView {
         info.style.background = 'rgba(122, 162, 247, 0.1)'
         info.style.borderRadius = '6px'
         info.style.color = '#c0caf5'
-        info.innerHTML = `
-          <strong>Using Credential:</strong> ${cred.name}<br>
-          <small>Username: ${cred.username} | Auth: ${authModeLabel(cred.auth)}</small>
-        `
+        const strong = document.createElement('strong')
+        strong.textContent = 'Using Credential: '
+        const nameSpan = document.createElement('span')
+        nameSpan.textContent = cred.name
+        const lineBreak = document.createElement('br')
+        const small = document.createElement('small')
+        small.textContent = `Username: ${cred.username} | Auth: ${authModeLabel(cred.auth)}`
+        info.append(strong, nameSpan, lineBreak, small)
         credInfo.append(info)
       }
       form.append(credInfo)
@@ -499,7 +515,7 @@ export class ConnectionManagerViewImpl implements ConnectionManagerView {
         profile.options.readyTimeout = v
       }),
     )
-    
+
     // Jump host selector - dropdown of profiles with canBeJumpServer=true
     const jumpHostField = document.createElement('div')
     jumpHostField.className = 'cm-field'
@@ -512,16 +528,18 @@ export class ConnectionManagerViewImpl implements ConnectionManagerView {
     jumpHostSelect.style.border = '1px solid #2a2b3d'
     jumpHostSelect.style.borderRadius = '4px'
     jumpHostSelect.style.color = '#c0caf5'
-    
+
     const jumpNoneOption = document.createElement('option')
     jumpNoneOption.value = ''
     jumpNoneOption.textContent = '— None —'
     jumpHostSelect.append(jumpNoneOption)
-    
+
     // Get profiles that can be jump servers
-    const jumpServerProfiles = this.profiles.filter(p => p.options.canBeJumpServer)
-    Log('nocx: jumpServerProfiles: ' + jumpServerProfiles.map(p => p.id + ':' + p.name).join(', '))
-    Log('nocx: current jumpHost: ' + profile.options.jumpHost)
+    const jumpServerProfiles = this.profiles.filter((p) => p.options.canBeJumpServer)
+    log.info('nocx: jumpServerProfiles', {
+      profiles: jumpServerProfiles.map((p) => p.id + ':' + p.name).join(', '),
+    })
+    log.info('nocx: current jumpHost', { jumpHost: profile.options.jumpHost })
     for (const p of jumpServerProfiles) {
       const option = document.createElement('option')
       option.value = p.id
@@ -529,26 +547,30 @@ export class ConnectionManagerViewImpl implements ConnectionManagerView {
       option.selected = profile.options.jumpHost === p.id
       jumpHostSelect.append(option)
     }
-    
+
     jumpHostSelect.addEventListener('change', () => {
       profile.options.jumpHost = jumpHostSelect.value
     })
-    
+
     jumpHostField.append(jumpHostLabel, jumpHostSelect)
     adv.append(jumpHostField)
-    
+
     adv.append(
       this.checkboxField('Agent forward', profile.options.agentForward ?? false, (v) => {
         profile.options.agentForward = v
       }),
     )
-    
+
     adv.append(
-      this.checkboxField('Can be used as jump server', profile.options.canBeJumpServer ?? false, (v) => {
-        profile.options.canBeJumpServer = v
-      }),
+      this.checkboxField(
+        'Can be used as jump server',
+        profile.options.canBeJumpServer ?? false,
+        (v) => {
+          profile.options.canBeJumpServer = v
+        },
+      ),
     )
-    
+
     form.append(adv)
 
     // Actions.
@@ -558,63 +580,67 @@ export class ConnectionManagerViewImpl implements ConnectionManagerView {
     const connectBtn = document.createElement('button')
     connectBtn.className = 'cm-connect'
     connectBtn.textContent = 'Connect'
-    connectBtn.addEventListener('click', async () => {
-      Log('nocx: Connect button clicked, jumpHost: ' + profile.options.jumpHost)
-      const profileToConnect = this.cloneProfile(profile)
-      
-      // Resolve credential if credentialId is set
-      if (profileToConnect.options.credentialId) {
-        const cred = this.credentials.find(c => c.id === profileToConnect.options.credentialId)
-        if (cred) {
-          profileToConnect.options.user = cred.username
-          profileToConnect.options.auth = cred.auth
-          
-          // Load password from credential store
-          try {
-            const password = await this.client.lookupPassword(cred.id)
-            if (password) {
-              ;(profileToConnect.options as any).password = password
-            }
-          } catch (err) {
-            Log('Failed to load password:' + ": " + err)
-          }
-        }
-      }
-      
-      // Resolve jump host credentials if jumpHost is set
-      if (profileToConnect.options.jumpHost) {
-        const jumpProfile = this.profiles.find(p => p.id === profileToConnect.options.jumpHost)
-        if (jumpProfile) {
-          // Use jump profile's host and port as the actual jump host
-          ;(profileToConnect.options as any).jumpHost = jumpProfile.options.host
-          ;(profileToConnect.options as any).jumpPort = jumpProfile.options.port
-          
-          // Resolve jump host credential
-          if (jumpProfile.options.credentialId) {
-            const jumpCred = this.credentials.find(c => c.id === jumpProfile.options.credentialId)
-            if (jumpCred) {
-              ;(profileToConnect.options as any).jumpUser = jumpCred.username
-              ;(profileToConnect.options as any).jumpAuthMode = jumpCred.auth
-              
-              // Load jump host password
-              try {
-                const jumpPassword = await this.client.lookupPassword(jumpCred.id)
-                if (jumpPassword) {
-                  ;(profileToConnect.options as any).jumpPassword = jumpPassword
-                }
-              } catch (err) {
-                Log('Failed to load jump host password:' + ": " + err)
+    connectBtn.addEventListener('click', () => {
+      void (async () => {
+        log.info('nocx: Connect button clicked', { jumpHost: profile.options.jumpHost })
+        const profileToConnect = this.cloneProfile(profile)
+
+        // Resolve credential if credentialId is set
+        if (profileToConnect.options.credentialId) {
+          const cred = this.credentials.find((c) => c.id === profileToConnect.options.credentialId)
+          if (cred) {
+            profileToConnect.options.user = cred.username
+            profileToConnect.options.auth = cred.auth
+
+            // Load password from credential store
+            try {
+              const password = await this.client.lookupPassword(cred.id)
+              if (password) {
+                ;(profileToConnect.options as ResolvedSSHOptions).password = password
               }
+            } catch (err) {
+              log.error('Failed to load password', { error: String(err) })
             }
-          } else {
-            // Use inline credentials from jump profile
-            ;(profileToConnect.options as any).jumpUser = jumpProfile.options.user
-            ;(profileToConnect.options as any).jumpAuthMode = jumpProfile.options.auth
           }
         }
-      }
-      
-      this.onConnect?.(profileToConnect)
+
+        // Resolve jump host credentials if jumpHost is set
+        if (profileToConnect.options.jumpHost) {
+          const jumpProfile = this.profiles.find((p) => p.id === profileToConnect.options.jumpHost)
+          if (jumpProfile) {
+            // Use jump profile's host and port as the actual jump host
+            profileToConnect.options.jumpHost = jumpProfile.options.host
+            profileToConnect.options.jumpPort = jumpProfile.options.port
+
+            // Resolve jump host credential
+            if (jumpProfile.options.credentialId) {
+              const jumpCred = this.credentials.find(
+                (c) => c.id === jumpProfile.options.credentialId,
+              )
+              if (jumpCred) {
+                profileToConnect.options.jumpUser = jumpCred.username
+                profileToConnect.options.jumpAuthMode = jumpCred.auth
+
+                // Load jump host password
+                try {
+                  const jumpPassword = await this.client.lookupPassword(jumpCred.id)
+                  if (jumpPassword) {
+                    profileToConnect.options.jumpPassword = jumpPassword
+                  }
+                } catch (err) {
+                  log.error('Failed to load jump host password', { error: String(err) })
+                }
+              }
+            } else {
+              // Use inline credentials from jump profile
+              profileToConnect.options.jumpUser = jumpProfile.options.user
+              profileToConnect.options.jumpAuthMode = jumpProfile.options.auth
+            }
+          }
+        }
+
+        this.onConnect?.(profileToConnect)
+      })().catch((err) => log.error('Connect failed', { error: String(err) }))
     })
     actions.append(connectBtn)
 
@@ -622,7 +648,7 @@ export class ConnectionManagerViewImpl implements ConnectionManagerView {
     saveBtn.className = 'cm-save'
     saveBtn.textContent = isNew ? 'Create' : 'Save'
     saveBtn.addEventListener('click', () => {
-      Log('nocx: saveBtn clicked, isNew: ' + isNew + ', profile.id: ' + profile.id)
+      log.info('nocx: saveBtn clicked', { isNew, id: profile.id })
       void this.saveProfile(profile)
     })
     actions.append(saveBtn)
@@ -797,7 +823,7 @@ export class ConnectionManagerViewImpl implements ConnectionManagerView {
       section.append(pwField)
 
       // Store reference for save handler
-      ;(form as any)._passwordInput = pwInput
+      this.passwordInputMap.set(form, pwInput)
     }
 
     // Private key field — visible when auth is publicKey.
@@ -864,7 +890,7 @@ export class ConnectionManagerViewImpl implements ConnectionManagerView {
 
   private async saveCredential(credential: Credential, form: HTMLElement): Promise<void> {
     if (!credential.name || !credential.username) {
-      Log('Name and username are required')
+      log.warn('Name and username are required')
       return
     }
 
@@ -873,7 +899,7 @@ export class ConnectionManagerViewImpl implements ConnectionManagerView {
 
       // Save password to keychain if auth is password and password was entered.
       if (credential.auth === 'password') {
-        const pwInput = (form as any)._passwordInput as HTMLInputElement
+        const pwInput = this.passwordInputMap.get(form) ?? null
         if (pwInput && pwInput.value) {
           await this.client.savePassword(credential.id, pwInput.value)
         }
@@ -882,7 +908,7 @@ export class ConnectionManagerViewImpl implements ConnectionManagerView {
       this.editingCredential = null
       await this.refresh()
     } catch (err) {
-      Log('Failed to save: ' + (err as Error).message)
+      log.error('Failed to save', { message: (err as Error).message })
     }
   }
 
@@ -892,24 +918,24 @@ export class ConnectionManagerViewImpl implements ConnectionManagerView {
       await this.client.deleteCredential(credential.id)
       this.editingCredential = null
       await this.refresh()
-    } catch (err) {
+    } catch {
       // Silent fail
     }
   }
 
   private async saveProfile(profile: SSHProfile): Promise<void> {
-    Log('nocx: saveProfile called. id=' + profile.id + ', jumpHost=' + profile.options.jumpHost)
+    log.info('nocx: saveProfile called', { id: profile.id, jumpHost: profile.options.jumpHost })
     if (!profile.id) {
       profile.id = newProfileID('ssh', profile.name)
     }
     try {
       await this.client.createProfile(profile)
-      Log(`nocx: profile saved successfully. id=${profile.id}`)
+      log.info('nocx: profile saved successfully', { id: profile.id })
       this.selectedID = profile.id
       this.editing = null
       await this.refresh()
     } catch (err) {
-      Log(`Failed to save: ${(err as Error).message}`)
+      log.error('Failed to save', { message: (err as Error).message })
     }
   }
 
@@ -920,7 +946,7 @@ export class ConnectionManagerViewImpl implements ConnectionManagerView {
       this.selectedID = ''
       this.editing = null
       await this.refresh()
-    } catch (err) {
+    } catch {
       // Silent fail
     }
   }
@@ -936,11 +962,11 @@ export class ConnectionManagerViewImpl implements ConnectionManagerView {
         this.client
           .importTabby(text)
           .then((count) => {
-            Log(`Imported ${count} SSH profiles from Tabby config`)
+            log.info('Imported SSH profiles from Tabby config', { count })
             return this.refresh()
           })
           .catch((err: unknown) => {
-            Log('Import failed: ' + (err as Error).message)
+            log.error('Import failed', { message: (err as Error).message })
           }),
       )
     })

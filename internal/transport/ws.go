@@ -3,6 +3,7 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -416,7 +417,7 @@ func (s *WSServer) readLoop(ctx context.Context, wconn *wsConn, state *connState
 
 func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state *connState, data []byte) {
 	if !isJSONObject(data) {
-		s.log.Warn("jsonrpc invalid request", "data", string(data))
+		s.log.Warn("jsonrpc invalid request", "len", len(data))
 		resp := newJSONRPCError(json.RawMessage("null"), -32600, "Invalid Request")
 		_ = wconn.writeJSON(resp)
 		return
@@ -424,7 +425,18 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 
 	var req jsonrpcRequest
 	if err := json.Unmarshal(data, &req); err != nil {
-		s.log.Warn("jsonrpc parse error", "data", string(data))
+		// Transport-wide rule: any control frame may carry a secret, so none
+		// are logged verbatim. Log size and error category only.
+		category := "parse_error"
+		var syntaxErr *json.SyntaxError
+		var typeErr *json.UnmarshalTypeError
+		switch {
+		case errors.As(err, &syntaxErr):
+			category = "syntax_error"
+		case errors.As(err, &typeErr):
+			category = "type_error"
+		}
+		s.log.Warn("jsonrpc parse error", "len", len(data), "category", category)
 		resp := newJSONRPCError(json.RawMessage("null"), -32700, "Parse error")
 		_ = wconn.writeJSON(resp)
 		return

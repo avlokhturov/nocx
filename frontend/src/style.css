@@ -821,7 +821,9 @@ body {
   align-items: center;
   justify-content: center;
   opacity: 0;
-  transition: opacity 0.15s ease, background 0.15s ease;
+  transition:
+    opacity 0.15s ease,
+    background 0.15s ease;
 }
 
 .sidebar-session-item:hover .sidebar-session-close {
@@ -888,11 +890,11 @@ body {
   opacity: 0.5;
 }
 
-.tab[draggable="true"] {
+.tab[draggable='true'] {
   cursor: grab;
 }
 
-.tab[draggable="true"]:active {
+.tab[draggable='true']:active {
   cursor: grabbing;
 }
 
