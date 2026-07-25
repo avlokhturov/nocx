@@ -184,3 +184,47 @@ func TestUpgradeRejectedForWrongHost(t *testing.T) {
 		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusForbidden)
 	}
 }
+
+// The shipped webview sends a wails:// Origin, not an http one. Before this was
+// handled, the app was refused by its own policy 32 times per CI run while the
+// tests attributed the resulting failures to a flaky suite.
+func TestLoopbackPolicyAcceptsTheWailsWebview(t *testing.T) {
+	p := LoopbackOriginPolicy{}
+	const host = "127.0.0.1:49308"
+
+	cases := []struct {
+		name   string
+		origin string
+		want   bool
+	}{
+		// Captured verbatim from the CI e2e job on macos-latest.
+		{"dev webview, with the asset-server port", "wails://wails.localhost:34115", true},
+		// A packaged build has no dev server, so no port. Pinning the full
+		// string above would pass CI and reject the shipped app.
+		{"packaged webview, no port", "wails://wails.localhost", true},
+		{"browser dev path", "http://localhost:5173", true},
+		{"port-forwarded verification loop", "http://127.0.0.1:9876", true},
+		{"non-browser caller sends no Origin", "", true},
+
+		{"hostname must match, not merely the scheme", "wails://evil.localhost", false},
+		{"scheme must match, not merely the host", "https://wails.localhost", false},
+		{"a foreign page is still refused", "https://evil.example", false},
+		{"a page cannot borrow the name over http", "http://wails.localhost.evil.example", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := p.Allow(tc.origin, host); got != tc.want {
+				t.Errorf("Allow(%q, %q) = %v, want %v", tc.origin, host, got, tc.want)
+			}
+		})
+	}
+}
+
+// The Host check is independent of the Origin one: a wails:// Origin does not
+// excuse a non-loopback Host, or DNS rebinding would walk straight through.
+func TestWailsOriginStillRequiresLoopbackHost(t *testing.T) {
+	p := LoopbackOriginPolicy{}
+	if p.Allow("wails://wails.localhost", "attacker.example:8080") {
+		t.Fatal("a wails Origin must not excuse a foreign Host")
+	}
+}

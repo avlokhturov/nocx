@@ -54,9 +54,25 @@ type OriginPolicy interface {
 	Allow(origin, host string) bool
 }
 
-// LoopbackOriginPolicy is the development policy: the app is reached over
-// loopback, either directly or through a forwarded port, so the Origin is an
-// ordinary http(s) loopback URL rather than any Wails scheme.
+// wailsOriginScheme and wailsOriginHost are what the shipped webview actually
+// sends, captured from a real run rather than guessed:
+//
+//	origin=wails://wails.localhost:34115  host=127.0.0.1:49308
+//
+// Read off the CI e2e job on macos-latest, where `wails dev` runs the real
+// WKWebView alongside Playwright's browser. The port is the dev asset server's
+// and is absent in a packaged build, which is why matching ignores it — pinning
+// the full string would pass in CI and reject the app in release, the exact
+// failure this policy was warned about.
+const (
+	wailsOriginScheme = "wails"
+	wailsOriginHost   = "wails.localhost"
+)
+
+// LoopbackOriginPolicy is the development policy. Two shapes are legitimate:
+// the app's own webview, which sends the wails:// scheme, and an ordinary
+// http(s) loopback URL — the browser dev path and the port-forwarded
+// verification loop.
 //
 // An absent Origin is allowed. Browsers always send one on a WebSocket
 // handshake, so absence means the caller is not a page — and a non-browser
@@ -75,10 +91,30 @@ func (LoopbackOriginPolicy) Allow(origin, host string) bool {
 	if err != nil {
 		return false
 	}
+	if isWailsWebviewOrigin(u) {
+		return true
+	}
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return false
 	}
 	return hostIsLoopback(u.Host)
+}
+
+// isWailsWebviewOrigin reports whether an Origin is the app's own webview.
+//
+// Scheme and hostname must both match; the port is ignored because it exists
+// only under `wails dev`. A browser page cannot forge this — no page is served
+// from a wails:// origin — so accepting it costs nothing against the threat the
+// Origin check exists for, which is a foreign page driving the socket.
+func isWailsWebviewOrigin(u *url.URL) bool {
+	if u.Scheme != wailsOriginScheme {
+		return false
+	}
+	h := u.Hostname()
+	if h == "" { // wails://wails.localhost parses the host into Opaque on some forms
+		h = strings.TrimPrefix(u.Opaque, "//")
+	}
+	return h == wailsOriginHost
 }
 
 // PinnedOriginPolicy is the production policy: exactly the origins the shipped
