@@ -8,9 +8,11 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -93,16 +95,24 @@ func (s *testSSHServer) acceptLoop(config *gossh.ServerConfig) {
 	go gossh.DiscardRequests(reqs)
 
 	for newChan := range chans {
-		if newChan.ChannelType() != "session" {
+		switch newChan.ChannelType() {
+		case "session":
+			ch, reqs, err := newChan.Accept()
+			if err != nil {
+				s.t.Logf("test server accept channel: %v", err)
+				return
+			}
+			go s.handleSession(ch, reqs)
+		case "direct-tcpip":
+			ch, reqs, err := newChan.Accept()
+			if err != nil {
+				s.t.Logf("test server accept direct-tcpip: %v", err)
+				continue
+			}
+			go s.handleDirectTCPIP(ch, reqs, newChan.ExtraData())
+		default:
 			_ = newChan.Reject(gossh.UnknownChannelType, "unknown channel type")
-			continue
 		}
-		ch, reqs, err := newChan.Accept()
-		if err != nil {
-			s.t.Logf("test server accept channel: %v", err)
-			return
-		}
-		go s.handleSession(ch, reqs)
 	}
 
 	_ = sshConn.Close()
@@ -167,6 +177,52 @@ func (s *testSSHServer) handleSession(ch gossh.Channel, reqs <-chan *gossh.Reque
 			return
 		}
 	}
+}
+
+// handleDirectTCPIP handles a "direct-tcpip" channel (jump-host forwarding).
+// It connects to the target specified in extraData and proxies data between
+// the channel and the target connection.
+func (s *testSSHServer) handleDirectTCPIP(ch gossh.Channel, reqs <-chan *gossh.Request, extraData []byte) {
+	defer func() { _ = ch.Close() }()
+
+	// Parse extraData: dest-addr (string), dest-port (uint32),
+	// originator-addr (string), originator-port (uint32).
+	r := bytes.NewReader(extraData)
+	hostLen := readUint32(r)
+	hostBytes := make([]byte, hostLen)
+	if _, err := r.Read(hostBytes); err != nil {
+		return
+	}
+	host := string(hostBytes)
+	port := readUint32(r)
+
+	targetAddr := net.JoinHostPort(host, strconv.Itoa(int(port)))
+	targetConn, err := net.Dial("tcp", targetAddr)
+	if err != nil {
+		s.t.Logf("direct-tcpip: dial target %s: %v", targetAddr, err)
+		return
+	}
+	defer func() { _ = targetConn.Close() }()
+
+	go gossh.DiscardRequests(reqs)
+
+	// Bidirectional copy.
+	done := make(chan struct{}, 2)
+	go func() {
+		_, _ = ioCopy(targetConn, ch)
+		done <- struct{}{}
+	}()
+	go func() {
+		_, _ = ioCopy(ch, targetConn)
+		done <- struct{}{}
+	}()
+	<-done
+}
+
+// ioCopy copies from src to dst, closing the write side of dst when done.
+func ioCopy(dst io.WriteCloser, src io.Reader) (written int64, err error) {
+	defer func() { _ = dst.Close() }()
+	return io.Copy(dst, src)
 }
 
 func parsePTYReq(payload []byte) (cols, rows, xp, yp uint16) {

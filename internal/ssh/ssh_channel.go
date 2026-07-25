@@ -53,15 +53,49 @@ func (c *RealChannel) Done() <-chan struct{} {
 }
 
 // Resize sends a window-change request to the remote end.
-func (c *RealChannel) Resize(_ context.Context, cols, rows, xpixel, ypixel uint16) error {
+//
+// It checks the channel's done signal first: after disconnect (AD-7), Resize
+// returns *ErrDisconnected immediately instead of blocking on the now-dead
+// transport. The context is checked before the request and observed during
+// the SendRequest call via a goroutine watchdog — if ctx cancels while
+// SendRequest blocks (e.g. on a congested transport), Resize returns
+// ctx.Err() promptly. The goroutine is drain-safe because the buffered
+// channel guarantees the send always succeeds.
+func (c *RealChannel) Resize(ctx context.Context, cols, rows, xpixel, ypixel uint16) error {
+	select {
+	case <-c.done:
+		return &ErrDisconnected{}
+	default:
+	}
+
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	wcMsg := ptyWindowChangeMsg{
 		Columns: uint32(cols),
 		Rows:    uint32(rows),
 		Width:   uint32(xpixel),
 		Height:  uint32(ypixel),
 	}
-	_, err := c.session.SendRequest("window-change", false, gossh.Marshal(&wcMsg))
-	return err
+
+	type result struct {
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		_, err := c.session.SendRequest("window-change", false, gossh.Marshal(&wcMsg))
+		ch <- result{err}
+	}()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.done:
+		return &ErrDisconnected{}
+	case r := <-ch:
+		return r.err
+	}
 }
 
 // ---------------------------------------------------------------------------

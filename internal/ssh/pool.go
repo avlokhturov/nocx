@@ -1,6 +1,7 @@
 package ssh
 
 import (
+	"context"
 	"fmt"
 	"sync"
 
@@ -158,11 +159,17 @@ func NewConnPool(logger log.Logger) *ConnPool {
 // and reuse. Each Acquire increments the ref count and returns a fresh
 // handle with its own release guard.
 //
+// ctx applies only while WAITING for an in-flight dial started by another
+// goroutine. The dial itself runs with its own context (captured by the
+// dial factory closure). Cancelling ctx while waiting returns ctx.Err();
+// the goroutine is cleanly removed from the waiter set without touching
+// the pool state.
+//
 // Production callers use AcquireDial so the dial factory sees the caller's
 // credential store / key material (which the key alone cannot recover);
 // Acquire is retained for tests and the simple factory path.
-func (p *ConnPool) Acquire(key poolKey) (*poolHandle, error) {
-	return p.acquire(key, p.dial)
+func (p *ConnPool) Acquire(ctx context.Context, key poolKey) (*poolHandle, error) {
+	return p.acquire(ctx, key, p.dial)
 }
 
 // AcquireDial is Acquire with a per-call dial factory. On a cache miss the
@@ -173,16 +180,23 @@ func (p *ConnPool) Acquire(key poolKey) (*poolHandle, error) {
 // calls with the same key share one connection regardless of which factory
 // dialed; the first dialer's factory wins and the key guarantees the result
 // is the same principal.
-func (p *ConnPool) AcquireDial(key poolKey, dial func(key poolKey) (sshClientConn, error)) (*poolHandle, error) {
+func (p *ConnPool) AcquireDial(ctx context.Context, key poolKey, dial func(key poolKey) (sshClientConn, error)) (*poolHandle, error) {
 	if dial == nil {
 		dial = p.dial
 	}
-	return p.acquire(key, dial)
+	return p.acquire(ctx, key, dial)
 }
 
 // acquire is the shared core. dial is the factory to use on a cache miss;
 // it is ignored on a hit. The dial runs without holding the pool mutex.
-func (p *ConnPool) acquire(key poolKey, dial func(key poolKey) (sshClientConn, error)) (*poolHandle, error) {
+//
+// Waiters on an in-flight dial watch ctx.Done() alongside the done channel:
+// if the context cancels before the dialer finishes, the waiter returns
+// ctx.Err() without touching pool state. The first dialer's context is
+// embedded in the dial closure — cancellation there propagates through
+// the dial logic (dialDirect/dialViaJumpHost) and acquire cleans up the
+// dialInProgress slot before waking waiters.
+func (p *ConnPool) acquire(ctx context.Context, key poolKey, dial func(key poolKey) (sshClientConn, error)) (*poolHandle, error) {
 	p.mu.Lock()
 	if entry, ok := p.pool[key]; ok {
 		entry.ref.n++
@@ -191,11 +205,15 @@ func (p *ConnPool) acquire(key poolKey, dial func(key poolKey) (sshClientConn, e
 	}
 
 	// No existing entry — check if another goroutine is already dialing this
-	// key. If so, wait on its done channel and reuse the result.
+	// key. If so, wait on its done channel (with ctx cancellation) and reuse.
 	if dialing, exists := p.dialing[key]; exists {
 		p.mu.Unlock()
-		<-dialing.done // wait for the dial to finish
-		return p.acquire(key, dial)
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-dialing.done:
+		}
+		return p.acquire(ctx, key, dial)
 	}
 
 	// We're the first — register a dial-in-progress and dial without holding

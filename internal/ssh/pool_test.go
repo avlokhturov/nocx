@@ -1,6 +1,7 @@
 package ssh
 
 import (
+	"context"
 	"sync"
 	"testing"
 	"time"
@@ -39,7 +40,7 @@ func TestPoolAcquireCreatesAndReuses(t *testing.T) {
 		return &fakeClient{}, nil
 	}
 
-	c1, err := pool.Acquire(key)
+	c1, err := pool.Acquire(context.Background(), key)
 	if err != nil {
 		t.Fatalf("Acquire 1: %v", err)
 	}
@@ -47,7 +48,7 @@ func TestPoolAcquireCreatesAndReuses(t *testing.T) {
 		t.Errorf("after first Acquire, dialCount = %d, want 1", dialCount)
 	}
 
-	_, err = pool.Acquire(key)
+	_, err = pool.Acquire(context.Background(), key)
 	if err != nil {
 		t.Fatalf("Acquire 2: %v", err)
 	}
@@ -68,8 +69,8 @@ func TestPoolReleaseClosesOnLastRef(t *testing.T) {
 		return fc, nil
 	}
 
-	c1, _ := pool.Acquire(key)
-	c2, _ := pool.Acquire(key)
+	c1, _ := pool.Acquire(context.Background(), key)
+	c2, _ := pool.Acquire(context.Background(), key)
 	pool.Release(c1)
 	// Should still be open (2 refs → 1).
 	if fc.getCloseCount() != 0 {
@@ -94,8 +95,8 @@ func TestPoolDifferentKeysDialSeparately(t *testing.T) {
 		return &fakeClient{}, nil
 	}
 
-	_, _ = pool.Acquire(key1)
-	_, _ = pool.Acquire(key2)
+	_, _ = pool.Acquire(context.Background(), key1)
+	_, _ = pool.Acquire(context.Background(), key2)
 
 	if dialCount != 2 {
 		t.Errorf("dialCount = %d, want 2 (different keys = different conns)", dialCount)
@@ -112,10 +113,10 @@ func TestPoolAcquireAfterReleaseReusesUntilClosed(t *testing.T) {
 		return &fakeClient{}, nil
 	}
 
-	c1, _ := pool.Acquire(key)
+	c1, _ := pool.Acquire(context.Background(), key)
 	pool.Release(c1)
 	// After release (last ref), the conn is closed. New acquire should dial.
-	c2, _ := pool.Acquire(key)
+	c2, _ := pool.Acquire(context.Background(), key)
 	if dialCount != 2 {
 		t.Errorf("dialCount = %d, want 2 (should re-dial after close)", dialCount)
 	}
@@ -141,7 +142,7 @@ func TestPoolConcurrentAcquireSameKey(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, _ = pool.Acquire(key)
+			_, _ = pool.Acquire(context.Background(), key)
 		}()
 	}
 	wg.Wait()
@@ -161,8 +162,8 @@ func TestPoolKeyByHostAndIdentity(t *testing.T) {
 	}
 
 	// Same host+user, different port → different key.
-	_, _ = pool.Acquire(poolKey{host: "h", user: "u", port: 22})
-	_, _ = pool.Acquire(poolKey{host: "h", user: "u", port: 2222})
+	_, _ = pool.Acquire(context.Background(), poolKey{host: "h", user: "u", port: 22})
+	_, _ = pool.Acquire(context.Background(), poolKey{host: "h", user: "u", port: 2222})
 
 	if len(dialed) != 2 {
 		t.Errorf("expected 2 dials (different port), got %d", len(dialed))
@@ -196,8 +197,8 @@ func TestPoolDoubleReleaseCannotCloseLiveChannel(t *testing.T) {
 		return fc, nil
 	}
 
-	a, _ := pool.Acquire(key)
-	b, _ := pool.Acquire(key) // refcount now 2
+	a, _ := pool.Acquire(context.Background(), key)
+	b, _ := pool.Acquire(context.Background(), key) // refcount now 2
 
 	// Double-release A. With the once guard, only the first takes effect.
 	pool.Release(a)
@@ -228,7 +229,7 @@ func TestPoolDoubleReleaseIsIdempotentPerHandle(t *testing.T) {
 		return fc, nil
 	}
 
-	h, _ := pool.Acquire(key) // refcount 1
+	h, _ := pool.Acquire(context.Background(), key) // refcount 1
 	for range 5 {
 		pool.Release(h)
 	}
@@ -257,8 +258,8 @@ func TestPoolDistinctIdentitiesGetSeparateConnections(t *testing.T) {
 	}
 
 	base := poolKey{host: "prod.example.com", user: "ops", port: 22}
-	_, _ = pool.Acquire(poolKey{host: base.host, port: base.port, user: base.user, identity: "cred:victim:1"})
-	_, _ = pool.Acquire(poolKey{host: base.host, port: base.port, user: base.user, identity: "cred:attacker:1"})
+	_, _ = pool.Acquire(context.Background(), poolKey{host: base.host, port: base.port, user: base.user, identity: "cred:victim:1"})
+	_, _ = pool.Acquire(context.Background(), poolKey{host: base.host, port: base.port, user: base.user, identity: "cred:attacker:1"})
 
 	if len(dialed) != 2 {
 		t.Fatalf("distinct identities dialed %d connections, want 2 (principal isolation)", len(dialed))
@@ -281,8 +282,8 @@ func TestPoolSameIdentitySharesOneConnection(t *testing.T) {
 	}
 
 	key := poolKey{host: "prod.example.com", user: "ops", port: 22, identity: "cred:ops:1"}
-	a, _ := pool.Acquire(key)
-	b, _ := pool.Acquire(key)
+	a, _ := pool.Acquire(context.Background(), key)
+	b, _ := pool.Acquire(context.Background(), key)
 
 	if dialCount != 1 {
 		t.Fatalf("same identity dialed %d times, want 1 (shared connection)", dialCount)
@@ -310,8 +311,8 @@ func TestPoolJumpRouteSeparatesFromDirect(t *testing.T) {
 
 	direct := poolKey{host: "t", user: "u", port: 22, identity: "id", jumpRoute: ""}
 	viaJump := poolKey{host: "t", user: "u", port: 22, identity: "id", jumpRoute: "bastion@b:22/id"}
-	_, _ = pool.Acquire(direct)
-	_, _ = pool.Acquire(viaJump)
+	_, _ = pool.Acquire(context.Background(), direct)
+	_, _ = pool.Acquire(context.Background(), viaJump)
 
 	if len(dialed) != 2 {
 		t.Fatalf("direct vs jump-routed dialed %d, want 2 (route isolation)", len(dialed))
@@ -342,7 +343,7 @@ func TestPoolJumpTransportClosesWithLastTarget(t *testing.T) {
 		}
 		// Target dial: acquire the bastion from the pool, return a
 		// pooledSSHConn whose Close releases the bastion handle.
-		bh, err := pool.Acquire(jumpKey)
+		bh, err := pool.Acquire(context.Background(), jumpKey)
 		if err != nil {
 			return nil, err
 		}
@@ -356,13 +357,13 @@ func TestPoolJumpTransportClosesWithLastTarget(t *testing.T) {
 
 	// Acquire the target — this dials the bastion (refcount 1) then the
 	// target (refcount 1), and the target holds a bastion ref.
-	target, err := pool.Acquire(targetKey)
+	target, err := pool.Acquire(context.Background(), targetKey)
 	if err != nil {
 		t.Fatalf("Acquire target: %v", err)
 	}
 
 	// A second target through the same bastion shares the bastion connection.
-	target2, err := pool.Acquire(targetKey)
+	target2, err := pool.Acquire(context.Background(), targetKey)
 	if err != nil {
 		t.Fatalf("Acquire target2: %v", err)
 	}
@@ -419,7 +420,7 @@ func TestPoolConcurrentAcquireRelease(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			h, err := pool.Acquire(key)
+			h, err := pool.Acquire(context.Background(), key)
 			if err != nil {
 				t.Errorf("Acquire: %v", err)
 				return
@@ -454,7 +455,7 @@ func TestPoolConcurrentDoubleRelease(t *testing.T) {
 	const goroutines = 10
 	handles := make([]*poolHandle, goroutines)
 	for i := range handles {
-		handles[i], _ = pool.Acquire(key)
+		handles[i], _ = pool.Acquire(context.Background(), key)
 	}
 
 	var wg sync.WaitGroup

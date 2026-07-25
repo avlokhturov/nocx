@@ -100,3 +100,13 @@ func (e *ErrCredentialBindingMismatch) Error() string {
 	return fmt.Sprintf("credential %s is bound to %s:%d but the %s resolves to %s:%d — refusing to submit it",
 		e.CredentialID, e.BoundHost, e.BoundPort, hop, e.ResolvedHost, e.ResolvedPort)
 }
+
+// ErrDisconnected is returned when an operation is attempted on a channel
+// whose underlying SSH connection has been closed. It is distinguishable
+// from a transient network error — this channel is permanently dead.
+// Callers can check for it with errors.As.
+type ErrDisconnected struct{}
+
+func (e *ErrDisconnected) Error() string {
+	return "ssh channel disconnected"
+}

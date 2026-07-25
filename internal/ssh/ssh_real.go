@@ -86,7 +86,7 @@ func (rc *RealClient) Connect(ctx context.Context, host string, opts ...ConnectO
 		}
 	}
 	key := rc.poolKeyFor(resolved, cfg)
-	handle, err := rc.pool.AcquireDial(key, rc.dialForConnect(ctx, host, resolved, cfg))
+	handle, err := rc.pool.AcquireDial(ctx, key, rc.dialForConnect(ctx, host, resolved, cfg))
 	if err != nil {
 		return nil, err
 	}
