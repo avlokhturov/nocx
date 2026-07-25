@@ -541,26 +541,10 @@ export class WSClient {
     })
   }
 
-  // openSSHSession opens an SSH session instead of a local PTY. The host
-  // may be an alias resolved via ~/.ssh/config. Optional overrides for
-  // user/port/keyFile/password/authMode are sent in the open params.
-  openSSHSession(
-    cols: number,
-    rows: number,
-    host: string,
-    opts?: {
-      user?: string
-      port?: number
-      keyFile?: string
-      password?: string
-      authMode?: string
-      jumpHost?: string
-      jumpPort?: number
-      jumpUser?: string
-      jumpPassword?: string
-      jumpAuthMode?: string
-    },
-  ): Promise<SessionHandle> {
+  // openSSHSession opens an SSH session via a profile ID. The backend
+  // resolves host, credentials and jump host from the profile store.
+  // Passwords are never sent over the wire.
+  openSSHSession(cols: number, rows: number, profileId: string): Promise<SessionHandle> {
     return new Promise((resolve, reject) => {
       const id = nextID()
       this.pendingOpens.set(id, {
@@ -578,17 +562,7 @@ export class WSClient {
             xpixel: 0,
             ypixel: 0,
             kind: 'ssh',
-            host,
-            user: opts?.user ?? '',
-            port: opts?.port ?? 0,
-            keyFile: opts?.keyFile ?? '',
-            password: opts?.password ?? '',
-            authMode: opts?.authMode ?? '',
-            jumpHost: opts?.jumpHost ?? '',
-            jumpPort: opts?.jumpPort ?? 0,
-            jumpUser: opts?.jumpUser ?? '',
-            jumpPassword: opts?.jumpPassword ?? '',
-            jumpAuthMode: opts?.jumpAuthMode ?? '',
+            profileId,
           },
         }),
       )

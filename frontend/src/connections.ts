@@ -7,7 +7,6 @@
 import {
   type ProfileClient,
   type SSHProfile,
-  type SSHProfileOptions,
   type ProfileGroup,
   type AuthMode,
   type Credential,
@@ -22,11 +21,6 @@ export interface ConnectionManagerView {
   show(): void
   refresh(): Promise<void>
   onConnect?: (profile: SSHProfile) => void
-}
-
-/** Options shape at connection time: extends SSHProfileOptions with runtime-only fields. */
-interface ResolvedSSHOptions extends SSHProfileOptions {
-  password?: string
 }
 
 export class ConnectionManagerViewImpl implements ConnectionManagerView {
@@ -245,9 +239,7 @@ export class ConnectionManagerViewImpl implements ConnectionManagerView {
     })
     item.addEventListener('dblclick', () => {
       // Double-click: quick connect
-      void this.quickConnect(p).catch((err) =>
-        log.error('Quick connect failed', { error: String(err) }),
-      )
+      this.quickConnect(p)
     })
 
     const info = document.createElement('div')
@@ -269,71 +261,16 @@ export class ConnectionManagerViewImpl implements ConnectionManagerView {
     connectBtn.title = 'Quick connect'
     connectBtn.addEventListener('click', (e) => {
       e.stopPropagation()
-      void this.quickConnect(p).catch((err) =>
-        log.error('Quick connect failed', { error: String(err) }),
-      )
+      this.quickConnect(p)
     })
     item.append(connectBtn)
 
     return item
   }
 
-  private async quickConnect(p: SSHProfile): Promise<void> {
-    const profileToConnect = this.cloneProfile(p)
-
-    // Resolve credential if credentialId is set
-    if (profileToConnect.options.credentialId) {
-      const cred = this.credentials.find((c) => c.id === profileToConnect.options.credentialId)
-      if (cred) {
-        profileToConnect.options.user = cred.username
-        profileToConnect.options.auth = cred.auth
-
-        // Load password from credential store
-        try {
-          const password = await this.client.lookupPassword(cred.id)
-          if (password) {
-            ;(profileToConnect.options as ResolvedSSHOptions).password = password
-          }
-        } catch (err) {
-          log.error('Failed to load password', { error: String(err) })
-        }
-      }
-    }
-
-    // Resolve jump host credentials if jumpHost is set
-    if (profileToConnect.options.jumpHost) {
-      const jumpProfile = this.profiles.find((p) => p.id === profileToConnect.options.jumpHost)
-      if (jumpProfile) {
-        // Use jump profile's host and port as the actual jump host
-        profileToConnect.options.jumpHost = jumpProfile.options.host
-        profileToConnect.options.jumpPort = jumpProfile.options.port
-
-        // Resolve jump host credential
-        if (jumpProfile.options.credentialId) {
-          const jumpCred = this.credentials.find((c) => c.id === jumpProfile.options.credentialId)
-          if (jumpCred) {
-            profileToConnect.options.jumpUser = jumpCred.username
-            profileToConnect.options.jumpAuthMode = jumpCred.auth
-
-            // Load jump host password
-            try {
-              const jumpPassword = await this.client.lookupPassword(jumpCred.id)
-              if (jumpPassword) {
-                profileToConnect.options.jumpPassword = jumpPassword
-              }
-            } catch (err) {
-              log.error('Failed to load jump host password', { error: String(err) })
-            }
-          }
-        } else {
-          // Use inline credentials from jump profile
-          profileToConnect.options.jumpUser = jumpProfile.options.user
-          profileToConnect.options.jumpAuthMode = jumpProfile.options.auth
-        }
-      }
-    }
-
-    this.onConnect?.(profileToConnect)
+  private quickConnect(p: SSHProfile): void {
+    // Credential resolution and jump host resolution now happen server-side.
+    this.onConnect?.(p)
   }
 
   private renderEmpty(): HTMLElement {
@@ -581,66 +518,8 @@ export class ConnectionManagerViewImpl implements ConnectionManagerView {
     connectBtn.className = 'cm-connect'
     connectBtn.textContent = 'Connect'
     connectBtn.addEventListener('click', () => {
-      void (async () => {
-        log.info('nocx: Connect button clicked', { jumpHost: profile.options.jumpHost })
-        const profileToConnect = this.cloneProfile(profile)
-
-        // Resolve credential if credentialId is set
-        if (profileToConnect.options.credentialId) {
-          const cred = this.credentials.find((c) => c.id === profileToConnect.options.credentialId)
-          if (cred) {
-            profileToConnect.options.user = cred.username
-            profileToConnect.options.auth = cred.auth
-
-            // Load password from credential store
-            try {
-              const password = await this.client.lookupPassword(cred.id)
-              if (password) {
-                ;(profileToConnect.options as ResolvedSSHOptions).password = password
-              }
-            } catch (err) {
-              log.error('Failed to load password', { error: String(err) })
-            }
-          }
-        }
-
-        // Resolve jump host credentials if jumpHost is set
-        if (profileToConnect.options.jumpHost) {
-          const jumpProfile = this.profiles.find((p) => p.id === profileToConnect.options.jumpHost)
-          if (jumpProfile) {
-            // Use jump profile's host and port as the actual jump host
-            profileToConnect.options.jumpHost = jumpProfile.options.host
-            profileToConnect.options.jumpPort = jumpProfile.options.port
-
-            // Resolve jump host credential
-            if (jumpProfile.options.credentialId) {
-              const jumpCred = this.credentials.find(
-                (c) => c.id === jumpProfile.options.credentialId,
-              )
-              if (jumpCred) {
-                profileToConnect.options.jumpUser = jumpCred.username
-                profileToConnect.options.jumpAuthMode = jumpCred.auth
-
-                // Load jump host password
-                try {
-                  const jumpPassword = await this.client.lookupPassword(jumpCred.id)
-                  if (jumpPassword) {
-                    profileToConnect.options.jumpPassword = jumpPassword
-                  }
-                } catch (err) {
-                  log.error('Failed to load jump host password', { error: String(err) })
-                }
-              }
-            } else {
-              // Use inline credentials from jump profile
-              profileToConnect.options.jumpUser = jumpProfile.options.user
-              profileToConnect.options.jumpAuthMode = jumpProfile.options.auth
-            }
-          }
-        }
-
-        this.onConnect?.(profileToConnect)
-      })().catch((err) => log.error('Connect failed', { error: String(err) }))
+      // Credential resolution and jump host resolution now happen server-side.
+      this.onConnect?.(profile)
     })
     actions.append(connectBtn)
 
@@ -971,10 +850,6 @@ export class ConnectionManagerViewImpl implements ConnectionManagerView {
       )
     })
     input.click()
-  }
-
-  private cloneProfile(p: SSHProfile): SSHProfile {
-    return JSON.parse(JSON.stringify(p)) as SSHProfile
   }
 }
 

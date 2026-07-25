@@ -110,10 +110,6 @@ func (rc *RealClient) addAgentMethods(chain *[]authChainEntry) {
 }
 
 func (rc *RealClient) addPasswordMethods(chain *[]authChainEntry, cfg *ConnectConfig) {
-	if cfg.Password != "" {
-		*chain = append(*chain, authChainEntry{kind: kindSavedPassword, method: gossh.Password(cfg.Password), password: cfg.Password})
-	}
-
 	if cfg.Credentials != nil {
 		if stored, err := cfg.Credentials.LookupPassword(cfg.CredIdentity); err == nil && stored != "" {
 			*chain = append(*chain, authChainEntry{kind: kindSavedPassword, method: gossh.Password(stored), password: stored})
@@ -124,8 +120,10 @@ func (rc *RealClient) addPasswordMethods(chain *[]authChainEntry, cfg *ConnectCo
 }
 
 func (rc *RealClient) addKeyboardInteractiveMethods(chain *[]authChainEntry, cfg *ConnectConfig) {
-	if cfg.Password != "" {
-		*chain = append(*chain, authChainEntry{kind: kindKeyboardInteractive, password: cfg.Password})
+	if cfg.Credentials != nil {
+		if stored, err := cfg.Credentials.LookupPassword(cfg.CredIdentity); err == nil && stored != "" {
+			*chain = append(*chain, authChainEntry{kind: kindKeyboardInteractive, password: stored})
+		}
 	}
 	*chain = append(*chain, authChainEntry{kind: kindKeyboardInteractive})
 }

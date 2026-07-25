@@ -37,7 +37,6 @@ type ConnectConfig struct {
 	User            string
 	Port            int
 	KeyFile         string
-	Password        string
 	UseAgent        bool
 	Cols            uint16
 	Rows            uint16
@@ -58,9 +57,14 @@ type ConnectConfig struct {
 	JumpPort int
 	// Jump host credentials — loaded from jump server's profile.
 	JumpUser     string
-	JumpPassword string
 	JumpKeyFile  string
 	JumpAuthMode string
+
+	// JumpCredentials, when set, enables late-bind of the jump host's
+	// password from the credential store. Separate from the target's
+	// Credentials so each hop resolves independently.
+	JumpCredentials  credential.CredentialStore
+	JumpCredIdentity credential.Identity
 
 	// Credentials, when set, enables late-bind of stored passwords by
 	// CredIdentity. The credential store is the seam between the profile
@@ -81,11 +85,6 @@ func WithPort(port int) ConnectOption {
 // WithKeyFile sets an explicit private key path for authentication.
 func WithKeyFile(path string) ConnectOption {
 	return func(c *ConnectConfig) { c.KeyFile = path }
-}
-
-// WithPassword sets password authentication.
-func WithPassword(password string) ConnectOption {
-	return func(c *ConnectConfig) { c.Password = password }
 }
 
 // WithAgent enables ssh-agent authentication (default when no key or password
@@ -126,13 +125,23 @@ func WithAuthMode(mode string) ConnectOption {
 }
 
 // WithJumpHost sets the jump host configuration for SSH connection.
-func WithJumpHost(host string, port int, user, password, authMode string) ConnectOption {
+// Password authentication for the jump host comes from JumpCredentials
+// (late-bound via the credential store), never as plaintext.
+func WithJumpHost(host string, port int, user, authMode string) ConnectOption {
 	return func(c *ConnectConfig) {
 		c.JumpHost = host
 		c.JumpPort = port
 		c.JumpUser = user
-		c.JumpPassword = password
 		c.JumpAuthMode = authMode
+	}
+}
+
+// WithJumpCredentials injects a credential store for late-bind of the jump
+// host's password by identity. Mirrors WithCredentials but for the jump hop.
+func WithJumpCredentials(store credential.CredentialStore, id credential.Identity) ConnectOption {
+	return func(c *ConnectConfig) {
+		c.JumpCredentials = store
+		c.JumpCredIdentity = id
 	}
 }
 

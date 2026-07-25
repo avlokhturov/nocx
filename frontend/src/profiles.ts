@@ -275,7 +275,4 @@ export class ProfileClient {
   hasPassword(credentialId: string): Promise<boolean> {
     return this.call('credentials.hasPassword', { credentialId })
   }
-  lookupPassword(credentialId: string): Promise<string> {
-    return this.call('credentials.lookupPassword', { credentialId })
-  }
 }

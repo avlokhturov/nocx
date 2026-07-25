@@ -66,12 +66,28 @@ type WSServer struct {
 	profiles    profile.ProfileStore
 	credentials credential.CredentialStore
 
+	// Profile resolver maps profile IDs to SSH connect configs.
+	resolver   ProfileResolver
+	resolverOK bool
+
 	// ringsMu protects rx and stopped. One sessionRx per session;
 	// keyed by session.ID. When stopped is true, getOrCreateRx returns nil
 	// so no new rings are created after the server begins shutting down.
 	ringsMu sync.Mutex
 	rx      map[session.ID]*sessionRx
 	stopped bool
+}
+
+// ProfileResolver maps a profile ID to an SSH host and connect config.
+// Passwords are never carried in the returned config — they are late-bound
+// via the credential store wired into ConnectConfig.
+type ProfileResolver interface {
+	Resolve(profileID string) (host string, cfg *ssh.ConnectConfig, err error)
+}
+
+// WithProfileResolver attaches a profile resolver for SSH connection setup.
+func WithProfileResolver(r ProfileResolver) WSServerOption {
+	return func(s *WSServer) { s.resolver = r; s.resolverOK = true }
 }
 
 // WSServerOption configures a WSServer.
@@ -335,22 +351,13 @@ type openParams struct {
 	YPixel   uint16 `json:"ypixel"`
 	Enhanced bool   `json:"enhanced"`
 
-	// SSH fields — when Kind="ssh", the session opens an SSH channel
-	// instead of a local PTY. Host is the target (may be an alias resolved
-	// via ~/.ssh/config). User/Port/KeyFile/Password/AuthMode are optional
-	// overrides; when empty, the backend resolves from ~/.ssh/config.
-	Kind         string `json:"kind,omitempty"`         // "local" (default) or "ssh"
-	Host         string `json:"host,omitempty"`         // SSH target
-	User         string `json:"user,omitempty"`         // SSH user override
-	Port         int    `json:"port,omitempty"`         // SSH port override
-	KeyFile      string `json:"keyFile,omitempty"`      // SSH key file path
-	Password     string `json:"password,omitempty"`     // SSH password (fallback)
-	AuthMode     string `json:"authMode,omitempty"`     // SSH auth filter (null=Auto)
-	JumpHost     string `json:"jumpHost,omitempty"`     // SSH jump host (hostname)
-	JumpPort     int    `json:"jumpPort,omitempty"`     // SSH jump host port
-	JumpUser     string `json:"jumpUser,omitempty"`     // Jump host user
-	JumpPassword string `json:"jumpPassword,omitempty"` // Jump host password
-	JumpAuthMode string `json:"jumpAuthMode,omitempty"` // Jump host auth mode
+	// SSH fields — when Kind="ssh", the session opens an SSH channel.
+	// ProfileID identifies the SSH profile to connect to; the backend
+	// resolves host, credentials and jump host from the profile store.
+	// Passwords are never carried in the open params — they are late-bound
+	// inside the SSH auth chain from the credential store.
+	Kind      string `json:"kind,omitempty"`
+	ProfileID string `json:"profileId,omitempty"`
 }
 
 // resizeParams is the payload of the "resize" RPC method.
@@ -496,9 +503,8 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 	case "credentials.list", "credentials.create", "credentials.update", "credentials.delete":
 		s.handleCredentialCRUDMethod(wconn, req)
 	case "credentials.savePassword", "credentials.deletePassword",
-		"credentials.lookupPassword", "credentials.hasPassword",
-		"credentials.saveKeyPassphrase", "credentials.deleteKeyPassphrase",
-		"credentials.lookupKeyPassphrase":
+		"credentials.hasPassword",
+		"credentials.saveKeyPassphrase", "credentials.deleteKeyPassphrase":
 		s.handleCredentialMethod(wconn, req)
 	default:
 		resp := newJSONRPCError(req.ID, -32601, "Method not found")
@@ -533,30 +539,35 @@ func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connSta
 
 	// SSH session — when kind="ssh", open a remote channel instead of local PTY.
 	if params.Kind == "ssh" {
-		s.log.Info("SSH open params", "host", params.Host, "user", params.User, "jumpHost", params.JumpHost, "jumpPort", params.JumpPort)
-		if params.Host == "" {
-			resp := newJSONRPCError(req.ID, -32602, "Invalid params: host required for ssh session")
+		if !s.resolverOK {
+			resp := newJSONRPCError(req.ID, -32603, "SSH sessions not available (no profile resolver wired)")
 			_ = wconn.writeJSON(resp)
 			return
 		}
-		cfg.Kind = session.KindRemote
-		cfg.Host = params.Host
-		cfg.Remote = &ssh.ConnectConfig{
-			User:         params.User,
-			Port:         params.Port,
-			KeyFile:      params.KeyFile,
-			Password:     params.Password,
-			AuthMode:     params.AuthMode,
-			JumpHost:     params.JumpHost,
-			JumpPort:     params.JumpPort,
-			JumpUser:     params.JumpUser,
-			JumpPassword: params.JumpPassword,
-			JumpAuthMode: params.JumpAuthMode,
-			Cols:         params.Cols,
-			Rows:         params.Rows,
-			XPixel:       params.XPixel,
-			YPixel:       params.YPixel,
+		if params.ProfileID == "" {
+			resp := newJSONRPCError(req.ID, -32602, "Invalid params: profileId required for ssh session")
+			_ = wconn.writeJSON(resp)
+			return
 		}
+
+		host, remote, err := s.resolver.Resolve(params.ProfileID)
+		if err != nil {
+			s.log.Error("profile resolve failed", "profileId", params.ProfileID, "error", err)
+			resp := newJSONRPCError(req.ID, -32603, err.Error())
+			_ = wconn.writeJSON(resp)
+			return
+		}
+
+		remote.Cols = params.Cols
+		remote.Rows = params.Rows
+		remote.XPixel = params.XPixel
+		remote.YPixel = params.YPixel
+
+		s.log.Info("SSH open via profile", "profileId", params.ProfileID, "host", host, "user", remote.User)
+
+		cfg.Kind = session.KindRemote
+		cfg.Host = host
+		cfg.Remote = remote
 	}
 
 	sess, err := s.registry.Open(ctx, cfg)
@@ -1114,25 +1125,6 @@ func (s *WSServer) handleCredentialMethod(wconn *wsConn, req jsonrpcRequest) {
 			return
 		}
 		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(has)))
-	case "credentials.lookupPassword":
-		var params struct {
-			CredentialID string              `json:"credentialId"`
-			Identity     credential.Identity `json:"identity"` // Legacy
-		}
-		if err := json.Unmarshal(req.Params, &params); err != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
-			return
-		}
-		identity := params.Identity
-		if params.CredentialID != "" {
-			identity = credential.Identity{User: params.CredentialID}
-		}
-		pw, err := s.credentials.LookupPassword(identity)
-		if err != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
-			return
-		}
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(pw)))
 	case "credentials.saveKeyPassphrase":
 		var params struct {
 			Hash       credential.KeyHash `json:"hash"`
@@ -1160,20 +1152,6 @@ func (s *WSServer) handleCredentialMethod(wconn *wsConn, req jsonrpcRequest) {
 			return
 		}
 		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(true)))
-	case "credentials.lookupKeyPassphrase":
-		var params struct {
-			Hash credential.KeyHash `json:"hash"`
-		}
-		if err := json.Unmarshal(req.Params, &params); err != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
-			return
-		}
-		pp, err := s.credentials.LookupKeyPassphrase(params.Hash)
-		if err != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
-			return
-		}
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(pp)))
 	}
 }
 

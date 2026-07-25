@@ -255,9 +255,6 @@ func sshOptionsFromConfig(cfg *ssh.ConnectConfig) []ssh.ConnectOption {
 	if cfg.KeyFile != "" {
 		opts = append(opts, ssh.WithKeyFile(cfg.KeyFile))
 	}
-	if cfg.Password != "" {
-		opts = append(opts, ssh.WithPassword(cfg.Password))
-	}
 	if cfg.UseAgent {
 		opts = append(opts, ssh.WithAgent())
 	}
@@ -268,7 +265,10 @@ func sshOptionsFromConfig(cfg *ssh.ConnectConfig) []ssh.ConnectOption {
 		opts = append(opts, ssh.WithAuthMode(cfg.AuthMode))
 	}
 	if cfg.JumpHost != "" {
-		opts = append(opts, ssh.WithJumpHost(cfg.JumpHost, cfg.JumpPort, cfg.JumpUser, cfg.JumpPassword, cfg.JumpAuthMode))
+		opts = append(opts, ssh.WithJumpHost(cfg.JumpHost, cfg.JumpPort, cfg.JumpUser, cfg.JumpAuthMode))
+	}
+	if cfg.JumpCredentials != nil {
+		opts = append(opts, ssh.WithJumpCredentials(cfg.JumpCredentials, cfg.JumpCredIdentity))
 	}
 	if cfg.Credentials != nil {
 		opts = append(opts, ssh.WithCredentials(cfg.Credentials, cfg.CredIdentity))

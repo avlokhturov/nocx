@@ -108,12 +108,13 @@ func (d *dialer) dialViaJumpHost(ctx context.Context, cfg *ConnectConfig, resolv
 // connectToJumpHost establishes a connection to the jump server with context support.
 func (d *dialer) connectToJumpHost(ctx context.Context, cfg *ConnectConfig) (*gossh.Client, error) {
 	jumpCfg := &ConnectConfig{
-		User:     cfg.JumpUser,
-		Port:     cfg.JumpPort,
-		Password: cfg.JumpPassword,
-		KeyFile:  cfg.JumpKeyFile,
-		AuthMode: cfg.JumpAuthMode,
-		JumpHost: "",
+		User:         cfg.JumpUser,
+		Port:         cfg.JumpPort,
+		KeyFile:      cfg.JumpKeyFile,
+		AuthMode:     cfg.JumpAuthMode,
+		JumpHost:     "",
+		Credentials:  cfg.JumpCredentials,
+		CredIdentity: cfg.JumpCredIdentity,
 	}
 
 	jumpResolved, err := d.client.resolveConfig(cfg.JumpHost, jumpCfg)

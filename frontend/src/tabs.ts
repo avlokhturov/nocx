@@ -12,14 +12,9 @@ import type { ClipboardBanner } from './banner'
 import { CommandLedger } from './command-ledger'
 import type { MarkerAdapter } from './renderers/types'
 import { ScrollbackController } from './scrollback/controller'
-import type { ProfileClient, SSHProfile, SSHProfileOptions } from './profiles'
+import type { ProfileClient, SSHProfile } from './profiles'
 import { ConnectionManagerViewImpl } from './connections'
 import { log } from './log'
-// Narrow local extension — SSHProfileOptions deliberately omits password
-// (it lives in the credential store), but the runtime connect flow carries it.
-interface SSHProfileConnectOpts extends SSHProfileOptions {
-  password?: string
-}
 
 // How long the grid must hold still before the PTY is told about it.
 // Dragging a window edge walks the grid through every intermediate size,
@@ -132,17 +127,9 @@ export class Tab {
     private readonly banner: ClipboardBanner,
     id: number,
     private readonly sshOpts?: {
+      profileId: string
       host: string
       user?: string
-      port?: number
-      keyFile?: string
-      password?: string
-      authMode?: string
-      jumpHost?: string
-      jumpPort?: number
-      jumpUser?: string
-      jumpPassword?: string
-      jumpAuthMode?: string
     },
   ) {
     this.id = id
@@ -566,18 +553,7 @@ export class Tab {
       // Enhanced input (DOM editor + marker-only prompt) is always on for local
       // sessions; the shell fails open to a plain terminal when markers are absent (ADR-0004/0006).
       const session = this.sshOpts
-        ? await this.client.openSSHSession(this.cols, this.rows, this.sshOpts.host, {
-            user: this.sshOpts.user,
-            port: this.sshOpts.port,
-            keyFile: this.sshOpts.keyFile,
-            password: this.sshOpts.password,
-            authMode: this.sshOpts.authMode,
-            jumpHost: this.sshOpts.jumpHost,
-            jumpPort: this.sshOpts.jumpPort,
-            jumpUser: this.sshOpts.jumpUser,
-            jumpPassword: this.sshOpts.jumpPassword,
-            jumpAuthMode: this.sshOpts.jumpAuthMode,
-          })
+        ? await this.client.openSSHSession(this.cols, this.rows, this.sshOpts.profileId)
         : await this.client.openSession(this.cols, this.rows, true)
       this.session = session
       log.info('nocx: session opened', { sid: session.sessionId, cwd: session.cwd || '' })
@@ -917,24 +893,10 @@ export class TabManager {
     return this.createTab(undefined)
   }
 
-  /** Create a new SSH tab targeting the given host, activate it. */
-  newSSHTab(
-    host: string,
-    opts?: {
-      user?: string
-      port?: number
-      keyFile?: string
-      password?: string
-      authMode?: string
-      jumpHost?: string
-      jumpPort?: number
-      jumpUser?: string
-      jumpPassword?: string
-      jumpAuthMode?: string
-    },
-  ): Tab {
-    log.info('nocx: newSSHTab called', { host, jumpHost: opts?.jumpHost || '' })
-    return this.createTab({ host, ...opts })
+  /** Create a new SSH tab targeting the given profile, activate it. */
+  newSSHTab(profileId: string, host: string, user?: string): Tab {
+    log.info('nocx: newSSHTab called', { profileId, host })
+    return this.createTab({ profileId, host, user })
   }
 
   /** Create or activate the Connections manager tab. */
@@ -956,27 +918,10 @@ export class TabManager {
       this.nextTabId++,
     )
 
-    // Override: this tab is a manager, not a terminal. Set the title
-    // immediately and mark the pane so CSS can drop terminal padding.
-    tab.updateTitle('Connection Manager')
-    tab.button.title = 'Connection Manager'
-    tab.pane.classList.add('pane-manager')
-
     const cmView = new ConnectionManagerViewImpl(tab.pane, this.profileClient)
     cmView.onConnect = (profile: SSHProfile) => {
-      const connectOpts = profile.options as SSHProfileConnectOpts
-      log.info('nocx: onConnect called', { jumpHost: connectOpts.jumpHost, profile: profile.name })
-      this.newSSHTab(connectOpts.host, {
-        user: connectOpts.user,
-        port: connectOpts.port,
-        authMode: connectOpts.auth,
-        password: connectOpts.password,
-        jumpHost: connectOpts.jumpHost,
-        jumpPort: connectOpts.jumpPort,
-        jumpUser: connectOpts.jumpUser,
-        jumpPassword: connectOpts.jumpPassword,
-        jumpAuthMode: connectOpts.jumpAuthMode,
-      })
+      log.info('nocx: onConnect called', { profileId: profile.id, profile: profile.name })
+      this.newSSHTab(profile.id, profile.options.host, profile.options.user)
     }
 
     // Stash the view so start() can render it into the pane on activation.
@@ -1028,20 +973,8 @@ export class TabManager {
     return tab
   }
 
-  /** Internal: create a tab with optional SSH params. */
-  private createTab(sshOpts?: {
-    host: string
-    user?: string
-    port?: number
-    keyFile?: string
-    password?: string
-    authMode?: string
-    jumpHost?: string
-    jumpPort?: number
-    jumpUser?: string
-    jumpPassword?: string
-    jumpAuthMode?: string
-  }): Tab {
+  /** Internal: create a tab with optional SSH params (display-only). */
+  private createTab(sshOpts?: { profileId: string; host: string; user?: string }): Tab {
     const tab = new Tab(
       this.client,
       this.rendererName,

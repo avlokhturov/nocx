@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 
 	"github.com/shady2k/nocx/internal/config"
+	"github.com/shady2k/nocx/internal/connection"
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
@@ -87,6 +88,7 @@ func New(opts ...Option) (*App, error) {
 	tpOpts := []transport.WSServerOption{
 		transport.WithProfileStore(profileStore),
 		transport.WithCredentialStore(credStore),
+		transport.WithProfileResolver(connection.NewResolver(profileStore, credStore)),
 	}
 	if o.wsAddr != "" {
 		tpOpts = append(tpOpts, transport.WithListenAddr(o.wsAddr))

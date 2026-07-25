@@ -20,16 +20,26 @@ import (
 // Defined in ssh_real.go; tests reference the same constants.
 
 func TestAuthChainOrderAuto(t *testing.T) {
+	keyring.MockInit()
 	rc := newTestRealClient(t)
 
-	// With a key file set + password set + agent available, Auto (auth="")
+	// With a key file set + credential store wired + agent available, Auto
 	// should include: publicKey, agent, savedPassword, keyboardInteractive,
 	// promptPassword (in that relative order).
 	dir := t.TempDir()
 	keyPath := writeTestKey(t, dir)
 
+	store := credential.NewKeychain()
+	id := credential.Identity{User: "alice", Host: "h", Port: 22}
+	if err := store.SavePassword(id, "pw123"); err != nil {
+		t.Fatalf("SavePassword: %v", err)
+	}
+
 	resolved := &resolvedConfig{identityFile: keyPath, user: "alice", hostName: "h"}
-	cfg := &ConnectConfig{Password: "pw123"}
+	cfg := &ConnectConfig{
+		Credentials:  store,
+		CredIdentity: id,
+	}
 
 	chain, err := rc.buildAuthChain(resolved, cfg)
 	if err != nil {
@@ -66,14 +76,21 @@ func TestAuthChainOrderAuto(t *testing.T) {
 }
 
 func TestAuthChainFilterByAuthMode(t *testing.T) {
+	keyring.MockInit()
 	rc := newTestRealClient(t)
 	dir := t.TempDir()
 	keyPath := writeTestKey(t, dir)
 
+	store := credential.NewKeychain()
+	id := credential.Identity{User: "alice", Host: "h", Port: 22}
+	if err := store.SavePassword(id, "pw"); err != nil {
+		t.Fatalf("SavePassword: %v", err)
+	}
+
 	resolved := &resolvedConfig{identityFile: keyPath, user: "alice", hostName: "h"}
 
 	// auth=password should EXCLUDE publicKey bucket, include password buckets.
-	cfg := &ConnectConfig{Password: "pw", AuthMode: "password"}
+	cfg := &ConnectConfig{Credentials: store, CredIdentity: id, AuthMode: "password"}
 	chain, err := rc.buildAuthChain(resolved, cfg)
 	if err != nil {
 		t.Fatalf("buildAuthChain: %v", err)
@@ -85,7 +102,7 @@ func TestAuthChainFilterByAuthMode(t *testing.T) {
 	}
 
 	// auth=publicKey should EXCLUDE password buckets, include publicKey.
-	cfg2 := &ConnectConfig{Password: "pw", AuthMode: "publicKey"}
+	cfg2 := &ConnectConfig{Credentials: store, CredIdentity: id, AuthMode: "publicKey"}
 	chain2, err := rc.buildAuthChain(resolved, cfg2)
 	if err != nil {
 		t.Fatalf("buildAuthChain auth=publicKey: %v", err)
