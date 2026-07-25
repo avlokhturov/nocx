@@ -203,6 +203,20 @@ skipping it leaves collaborators on a backlog that looks current and is not. If
 genuine sync failure stops the push and says so, and `git push --no-verify`
 overrides it.
 
+The post-merge and post-rewrite hooks are the other direction: they run
+`bd dolt pull`, so `git pull` brings in your colleagues' issue changes the same
+way it brings in their code. Two hooks because git splits the work — a
+fast-forward `git pull` (with or without `--rebase`) triggers post-merge, while
+`git pull --rebase` with local commits to replay triggers post-rewrite instead.
+There is no post-checkout hook on purpose: branch switching is far too frequent
+to pay a network round trip for. Unlike the push side these never block you — a
+failed or slow pull warns and lets the merge stand, because the cost is a stale
+backlog, not a lost one. Verify the policy with
+`sh scripts/test-beads-pull-hook.sh`.
+
+Claiming a task is the one moment where that background freshness is not enough;
+`AGENTS.md` has the three-step claim protocol.
+
 All four frontend gates FAIL with an actionable message if `node_modules` is absent (run `cd frontend && npm ci`).
 
 Run locally without committing: `make ci` (close mirror of CI — runs the same static analysis and tests, but validates against your existing `node_modules` rather than reinstalling).
@@ -259,7 +273,8 @@ See `AGENTS.md` for the full workflow.
 ```
 AGENTS.md               — binding contributor contract
 Makefile                — lint, format, test, build, dev, ci, hooks
-.githooks/pre-commit    — pre-commit hook (POSIX sh)
+.githooks/              — quality gate + tracker sync (POSIX sh)
+scripts/                — dev utilities (glyph probe, hook policy test)
 .github/workflows/      — CI workflows
 
 docs/                   — living docs (vision, architecture, decisions/)

@@ -54,12 +54,34 @@ and is not, which is precisely the failure this setup exists to prevent.
 
 ## How we work
 
-1. Take a `ready` task from beads (`bd ready`); mark it in-progress.
+1. Take a `ready` task from beads — claim it with the three-step protocol below, not a bare
+   `bd update --claim`.
 2. Read the relevant `AD`(s) in `docs/architecture.md` before touching a boundary.
 3. **TDD**: red → green → refactor. Write the failing test first.
 4. Keep it green: language-specific format, lint, and tests all pass (pre-commit runs them).
    The pre-commit hook is the gate on every commit; CI validates release branches and tags.
 5. Update the task in beads; record any non-obvious decision as an ADR in `docs/decisions/`.
+
+### Claiming work on a shared backlog
+
+Several people work this repo from their own machines against one shared issue database
+(`refs/dolt/data` on the git remote). Claim in three steps, never just the middle one:
+
+```bash
+bd dolt pull                # see who took what since your last sync
+bd ready && bd update <id> --claim
+bd dolt push                # publish the claim now, not at your next git push
+```
+
+`git pull` refreshes the backlog on its own (`.githooks/post-merge`, `post-rewrite`), and
+`git push` publishes it (`.githooks/pre-push`). The explicit pull/push above exists because
+claiming is the one moment where minutes of staleness cost somebody a duplicated afternoon.
+
+**A claim is not a lock.** Two people can claim the same bead from two clones; both pushes
+land, Dolt merges them, last write wins. The protocol shrinks the race window — it does not
+close it. Auto-push (`dolt.auto-push`) stays off on purpose: upstream warns that concurrent
+pushes to a git-protocol Dolt remote can corrupt or strand remote history. If claim races
+ever become routine, the fix is a shared Dolt sql-server, not a shorter interval (nocx-wj4).
 
 ## Engineering rules (non-negotiable)
 

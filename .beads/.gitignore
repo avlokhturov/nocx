@@ -65,6 +65,13 @@ backup/
 # Per-project environment file (Dolt connection config, GH#2520)
 .env
 
+# Audit trail (field-change log). Untracked on purpose: bd appends to it on
+# every mutation, so a tracked copy is dirty after any bd command and turns
+# every session into a chore(beads) commit. The history itself is not lost —
+# Dolt holds it, and `bd history <id>` reads it back. Unlike issues.jsonl this
+# file is not a bootstrap source: `bd bootstrap` never reads it.
+interactions.jsonl
+
 # Legacy files (from pre-Dolt versions)
 *.db
 *.db?*
