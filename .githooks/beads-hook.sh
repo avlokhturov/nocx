@@ -62,6 +62,65 @@ push_beads_state() {
     return "$bd_exit"
 }
 
+# Refresh the local issue database from the Dolt remote when git brings in
+# somebody else's work.
+#
+# Failure policy is deliberately the OPPOSITE of push_beads_state. A failed push
+# means your state never left the machine while everything looks fine locally —
+# worth stopping for. A failed pull means you keep the backlog you already had,
+# and blocking somebody's merge over that is a worse bug than the staleness. So
+# every branch here returns 0; the hook only ever warns.
+#
+# Timeout is shorter than the push side (60s vs 300s) because this one sits in
+# front of an interactive command. A pull that needs longer than a minute is not
+# worth making a person watch — they will get the data on the next pull, and the
+# claim protocol in AGENTS.md pulls again at the moment it actually matters.
+#
+# Calls bd dolt pull directly, for the same reason the push side does. Re-tested
+# on bd 1.1.0 (2026-07-25, nocx-wj4), both shims still decline to move data:
+# 'bd hooks run post-merge' prints "skipping JSONL import because sync.remote is
+# configured" and performs no Dolt pull at all, and 'bd hooks run pre-push' is
+# still the silent no-op nocx-lte measured on 1.0.5 — refs/dolt/data does not
+# move. Worth re-testing again on the next bd upgrade.
+pull_beads_state() {
+    command -v bd >/dev/null 2>&1 || return 0
+
+    BD_GIT_HOOK=1
+    export BD_GIT_HOOK
+    timeout_secs=${BEADS_PULL_TIMEOUT:-60}
+
+    # Never call bd bare: these hooks run under `set -eu` and a nonzero exit
+    # would kill the script before the policy below could look at it.
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$timeout_secs" bd dolt pull >/dev/null 2>&1 && bd_exit=0 || bd_exit=$?
+    elif command -v gtimeout >/dev/null 2>&1; then
+        gtimeout "$timeout_secs" bd dolt pull >/dev/null 2>&1 && bd_exit=0 || bd_exit=$?
+    else
+        bd dolt pull >/dev/null 2>&1 && bd_exit=0 || bd_exit=$?
+    fi
+
+    case $bd_exit in
+        0)
+            return 0
+            ;;
+        3)
+            # No beads database in this clone. Not this repo's business to insist.
+            return 0
+            ;;
+        124 | 142)
+            # 124 from timeout, 142 when a shell reports SIGALRM instead.
+            printf "\nWARN: beads pull timed out after %ss — backlog may be stale.\n" \
+                "$timeout_secs" >&2
+            return 0
+            ;;
+    esac
+
+    printf "\nWARN: bd dolt pull exited %s — your backlog may be behind the team's.\n" \
+        "$bd_exit" >&2
+    printf "      Run 'bd dolt pull' when convenient. This merge is unaffected.\n" >&2
+    return 0
+}
+
 # Write .beads/issues.jsonl and stage it, so the commit carries the issue state
 # it describes.
 #
