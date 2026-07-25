@@ -14,7 +14,11 @@ import (
 )
 
 func main() {
-	a, err := app.New()
+	opts := []app.Option{}
+	if addr := os.Getenv("NOCX_WS_ADDR"); addr != "" {
+		opts = append(opts, app.WithWSAddr(addr))
+	}
+	a, err := app.New(opts...)
 	if err != nil {
 		panic(err)
 	}

@@ -36,7 +36,24 @@ func (a *App) Log(message string) {
 	a.Logger.Info("frontend: " + message)
 }
 
-func New() (*App, error) {
+type Option func(*optionSet)
+
+type optionSet struct {
+	wsAddr string
+}
+
+// WithWSAddr pins the WebSocket listen address instead of the default
+// 127.0.0.1:0. Dev-only; shipped code should never set this.
+func WithWSAddr(addr string) Option {
+	return func(o *optionSet) { o.wsAddr = addr }
+}
+
+func New(opts ...Option) (*App, error) {
+	var o optionSet
+	for _, opt := range opts {
+		opt(&o)
+	}
+
 	slogger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	logger := log.NewSlogAdapter(slogger)
 
@@ -67,11 +84,14 @@ func New() (*App, error) {
 	}
 	credStore := credential.NewKeychain()
 
-	tp := transport.NewWSServer(
-		logger, sess,
+	tpOpts := []transport.WSServerOption{
 		transport.WithProfileStore(profileStore),
 		transport.WithCredentialStore(credStore),
-	)
+	}
+	if o.wsAddr != "" {
+		tpOpts = append(tpOpts, transport.WithListenAddr(o.wsAddr))
+	}
+	tp := transport.NewWSServer(logger, sess, tpOpts...)
 
 	app := &App{
 		Logger:           logger,
