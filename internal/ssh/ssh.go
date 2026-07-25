@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 
+	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
 	gossh "golang.org/x/crypto/ssh"
 )
@@ -45,6 +46,28 @@ type ConnectConfig struct {
 	AuthMethods     []gossh.AuthMethod
 	KeyExchanges    []string
 	RemoteInstaller RemoteInstaller
+
+	// AuthMode controls which auth buckets are tried (null=Auto with full
+	// fallback-chain; a specific value restricts which buckets are attempted).
+	// Mirrors Tabby's profile.options.auth enum.
+	AuthMode string
+
+	// JumpHost is the profile name or ID of the jump server to use.
+	JumpHost string
+	// JumpPort is the port of the jump server (0 means use default 22).
+	JumpPort int
+	// Jump host credentials — loaded from jump server's profile.
+	JumpUser     string
+	JumpPassword string
+	JumpKeyFile  string
+	JumpAuthMode string
+
+	// Credentials, when set, enables late-bind of stored passwords by
+	// CredIdentity. The credential store is the seam between the profile
+	// manager (clear data) and the secret store — never call it directly
+	// from frontend code.
+	Credentials  credential.CredentialStore
+	CredIdentity credential.Identity
 }
 
 func WithUser(user string) ConnectOption {
@@ -93,6 +116,34 @@ func WithAuthMethods(auths []gossh.AuthMethod) ConnectOption {
 // shell with the integration activated.
 func WithRemoteInstaller(ri RemoteInstaller) ConnectOption {
 	return func(c *ConnectConfig) { c.RemoteInstaller = ri }
+}
+
+// WithAuthMode sets the auth-method filter for the connection (null=Auto).
+// A specific value ("password"/"publicKey"/"agent"/"keyboardInteractive")
+// restricts which auth buckets are attempted in the fallback chain.
+func WithAuthMode(mode string) ConnectOption {
+	return func(c *ConnectConfig) { c.AuthMode = mode }
+}
+
+// WithJumpHost sets the jump host configuration for SSH connection.
+func WithJumpHost(host string, port int, user, password, authMode string) ConnectOption {
+	return func(c *ConnectConfig) {
+		c.JumpHost = host
+		c.JumpPort = port
+		c.JumpUser = user
+		c.JumpPassword = password
+		c.JumpAuthMode = authMode
+	}
+}
+
+// WithCredentials injects a credential store for late-bind of stored
+// passwords by identity. The store is the seam between the profile manager
+// and the secret store.
+func WithCredentials(store credential.CredentialStore, id credential.Identity) ConnectOption {
+	return func(c *ConnectConfig) {
+		c.Credentials = store
+		c.CredIdentity = id
+	}
 }
 
 type Stub struct {

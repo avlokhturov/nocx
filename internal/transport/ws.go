@@ -9,8 +9,12 @@ import (
 	"sync"
 
 	"github.com/gorilla/websocket"
+	"github.com/shady2k/nocx/internal/credential"
+	"github.com/shady2k/nocx/internal/importer"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/ssh"
 )
 
 // sessionRx wraps a session's output ring together with the current attached
@@ -46,6 +50,12 @@ type WSServer struct {
 	listener net.Listener
 	upgrader websocket.Upgrader
 
+	// Optional profile/credential stores for the connection-manager control
+	// plane (profiles.*, groups.*, credentials.*). When nil, those methods
+	// return a JSON-RPC error.
+	profiles    profile.ProfileStore
+	credentials credential.CredentialStore
+
 	// ringsMu protects rx and stopped. One sessionRx per session;
 	// keyed by session.ID. When stopped is true, getOrCreateRx returns nil
 	// so no new rings are created after the server begins shutting down.
@@ -54,8 +64,23 @@ type WSServer struct {
 	stopped bool
 }
 
-func NewWSServer(logger log.Logger, reg session.Registry) *WSServer {
-	return &WSServer{
+// WSServerOption configures a WSServer.
+type WSServerOption func(*WSServer)
+
+// WithProfileStore attaches a profile store to the server, enabling the
+// profiles.* and groups.* JSON-RPC methods.
+func WithProfileStore(ps profile.ProfileStore) WSServerOption {
+	return func(s *WSServer) { s.profiles = ps }
+}
+
+// WithCredentialStore attaches a credential store, enabling the
+// credentials.* JSON-RPC methods.
+func WithCredentialStore(cs credential.CredentialStore) WSServerOption {
+	return func(s *WSServer) { s.credentials = cs }
+}
+
+func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption) *WSServer {
+	s := &WSServer{
 		log:      logger,
 		registry: reg,
 		upgrader: websocket.Upgrader{
@@ -63,6 +88,10 @@ func NewWSServer(logger log.Logger, reg session.Registry) *WSServer {
 		},
 		rx: make(map[session.ID]*sessionRx),
 	}
+	for _, o := range opts {
+		o(s)
+	}
+	return s
 }
 
 func (s *WSServer) Start(ctx context.Context) error {
@@ -279,6 +308,23 @@ type openParams struct {
 	XPixel   uint16 `json:"xpixel"`
 	YPixel   uint16 `json:"ypixel"`
 	Enhanced bool   `json:"enhanced"`
+
+	// SSH fields — when Kind="ssh", the session opens an SSH channel
+	// instead of a local PTY. Host is the target (may be an alias resolved
+	// via ~/.ssh/config). User/Port/KeyFile/Password/AuthMode are optional
+	// overrides; when empty, the backend resolves from ~/.ssh/config.
+	Kind         string `json:"kind,omitempty"`         // "local" (default) or "ssh"
+	Host         string `json:"host,omitempty"`         // SSH target
+	User         string `json:"user,omitempty"`         // SSH user override
+	Port         int    `json:"port,omitempty"`         // SSH port override
+	KeyFile      string `json:"keyFile,omitempty"`      // SSH key file path
+	Password     string `json:"password,omitempty"`     // SSH password (fallback)
+	AuthMode     string `json:"authMode,omitempty"`     // SSH auth filter (null=Auto)
+	JumpHost     string `json:"jumpHost,omitempty"`     // SSH jump host (hostname)
+	JumpPort     int    `json:"jumpPort,omitempty"`     // SSH jump host port
+	JumpUser     string `json:"jumpUser,omitempty"`     // Jump host user
+	JumpPassword string `json:"jumpPassword,omitempty"` // Jump host password
+	JumpAuthMode string `json:"jumpAuthMode,omitempty"` // Jump host auth mode
 }
 
 // resizeParams is the payload of the "resize" RPC method.
@@ -401,6 +447,19 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.handleAttach(ctx, wconn, state, req)
 	case "ack":
 		s.handleAck(req)
+	case "profiles.list", "profiles.create", "profiles.update", "profiles.delete":
+		s.handleProfileMethod(wconn, req)
+	case "profiles.importTabby":
+		s.handleImportTabby(wconn, req)
+	case "groups.list", "groups.create", "groups.update", "groups.delete":
+		s.handleGroupMethod(wconn, req)
+	case "credentials.list", "credentials.create", "credentials.update", "credentials.delete":
+		s.handleCredentialCRUDMethod(wconn, req)
+	case "credentials.savePassword", "credentials.deletePassword",
+		"credentials.lookupPassword", "credentials.hasPassword",
+		"credentials.saveKeyPassphrase", "credentials.deleteKeyPassphrase",
+		"credentials.lookupKeyPassphrase":
+		s.handleCredentialMethod(wconn, req)
 	default:
 		resp := newJSONRPCError(req.ID, -32601, "Method not found")
 		_ = wconn.writeJSON(resp)
@@ -423,14 +482,44 @@ func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connSta
 		return
 	}
 
-	sess, err := s.registry.Open(ctx, session.Config{
+	cfg := session.Config{
 		Kind:     session.KindLocal,
 		Cols:     params.Cols,
 		Rows:     params.Rows,
 		XPixel:   params.XPixel,
 		YPixel:   params.YPixel,
 		Enhanced: params.Enhanced,
-	})
+	}
+
+	// SSH session — when kind="ssh", open a remote channel instead of local PTY.
+	if params.Kind == "ssh" {
+		s.log.Info("SSH open params", "host", params.Host, "user", params.User, "jumpHost", params.JumpHost, "jumpPort", params.JumpPort)
+		if params.Host == "" {
+			resp := newJSONRPCError(req.ID, -32602, "Invalid params: host required for ssh session")
+			_ = wconn.writeJSON(resp)
+			return
+		}
+		cfg.Kind = session.KindRemote
+		cfg.Host = params.Host
+		cfg.Remote = &ssh.ConnectConfig{
+			User:         params.User,
+			Port:         params.Port,
+			KeyFile:      params.KeyFile,
+			Password:     params.Password,
+			AuthMode:     params.AuthMode,
+			JumpHost:     params.JumpHost,
+			JumpPort:     params.JumpPort,
+			JumpUser:     params.JumpUser,
+			JumpPassword: params.JumpPassword,
+			JumpAuthMode: params.JumpAuthMode,
+			Cols:         params.Cols,
+			Rows:         params.Rows,
+			XPixel:       params.XPixel,
+			YPixel:       params.YPixel,
+		}
+	}
+
+	sess, err := s.registry.Open(ctx, cfg)
 	if err != nil {
 		s.log.Error("failed to open session", "error", err)
 		resp := newJSONRPCError(req.ID, -32603, "Internal error")
@@ -791,4 +880,306 @@ func (s *WSServer) closeSession(sid session.ID) {
 	}
 	s.removeRx(sid)
 	_ = s.registry.Close(sid)
+}
+
+// --- profile/group/credential control-plane handlers ---------------------
+//
+// These methods back the connection-manager JSON-RPC calls (AD-1 control
+// plane). Each returns a JSON-RPC error (-32601) when the relevant store is
+// not wired (WithProfileStore/WithCredentialStore not called).
+
+func (s *WSServer) handleProfileMethod(wconn *wsConn, req jsonrpcRequest) {
+	if s.profiles == nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "profiles not available"))
+		return
+	}
+	switch req.Method {
+	case "profiles.list":
+		profs, err := s.profiles.LoadProfiles()
+		if err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+			return
+		}
+		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(profs)))
+	case "profiles.create", "profiles.update":
+		var p profile.SSHProfile
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+			return
+		}
+		if err := s.profiles.SaveProfile(p); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+			return
+		}
+		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(p)))
+	case "profiles.delete":
+		var params struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+			return
+		}
+		if err := s.profiles.DeleteProfile(params.ID); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+			return
+		}
+		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(true)))
+	}
+}
+
+func (s *WSServer) handleGroupMethod(wconn *wsConn, req jsonrpcRequest) {
+	if s.profiles == nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "groups not available"))
+		return
+	}
+	switch req.Method {
+	case "groups.list":
+		groups, err := s.profiles.LoadGroups()
+		if err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+			return
+		}
+		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(groups)))
+	case "groups.create", "groups.update":
+		var g profile.ProfileGroup
+		if err := json.Unmarshal(req.Params, &g); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+			return
+		}
+		if err := s.profiles.SaveGroup(g); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+			return
+		}
+		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(g)))
+	case "groups.delete":
+		var params struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+			return
+		}
+		if err := s.profiles.DeleteGroup(params.ID); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+			return
+		}
+		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(true)))
+	}
+}
+
+func (s *WSServer) handleCredentialCRUDMethod(wconn *wsConn, req jsonrpcRequest) {
+	if s.profiles == nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "profiles not available"))
+		return
+	}
+	switch req.Method {
+	case "credentials.list":
+		creds, err := s.profiles.LoadCredentials()
+		if err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+			return
+		}
+		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(creds)))
+	case "credentials.create", "credentials.update":
+		var c profile.Credential
+		if err := json.Unmarshal(req.Params, &c); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+			return
+		}
+		if c.ID == "" {
+			c.ID = profile.NewCredentialID(c.Name)
+		}
+		if err := s.profiles.SaveCredential(c); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+			return
+		}
+		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(c)))
+	case "credentials.delete":
+		var params struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(req.Params, &params); err != nil || params.ID == "" {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: id required"))
+			return
+		}
+		if err := s.profiles.DeleteCredential(params.ID); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+			return
+		}
+		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(true)))
+	}
+}
+
+func (s *WSServer) handleCredentialMethod(wconn *wsConn, req jsonrpcRequest) {
+	if s.credentials == nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "credentials not available"))
+		return
+	}
+	switch req.Method {
+	case "credentials.savePassword":
+		var params struct {
+			CredentialID string              `json:"credentialId"`
+			Identity     credential.Identity `json:"identity"` // Legacy
+			Password     string              `json:"password"`
+		}
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+			return
+		}
+		// Support both credentialId (new) and identity (legacy).
+		identity := params.Identity
+		if params.CredentialID != "" {
+			identity = credential.Identity{User: params.CredentialID}
+		}
+		if err := s.credentials.SavePassword(identity, params.Password); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+			return
+		}
+		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(true)))
+	case "credentials.deletePassword":
+		var params struct {
+			CredentialID string              `json:"credentialId"`
+			Identity     credential.Identity `json:"identity"` // Legacy
+		}
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+			return
+		}
+		identity := params.Identity
+		if params.CredentialID != "" {
+			identity = credential.Identity{User: params.CredentialID}
+		}
+		if err := s.credentials.DeletePassword(identity); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+			return
+		}
+		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(true)))
+	case "credentials.hasPassword":
+		var params struct {
+			CredentialID string              `json:"credentialId"`
+			Identity     credential.Identity `json:"identity"` // Legacy
+		}
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+			return
+		}
+		identity := params.Identity
+		if params.CredentialID != "" {
+			identity = credential.Identity{User: params.CredentialID}
+		}
+		has, err := s.credentials.HasPassword(identity)
+		if err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+			return
+		}
+		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(has)))
+	case "credentials.lookupPassword":
+		var params struct {
+			CredentialID string              `json:"credentialId"`
+			Identity     credential.Identity `json:"identity"` // Legacy
+		}
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+			return
+		}
+		identity := params.Identity
+		if params.CredentialID != "" {
+			identity = credential.Identity{User: params.CredentialID}
+		}
+		pw, err := s.credentials.LookupPassword(identity)
+		if err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+			return
+		}
+		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(pw)))
+	case "credentials.saveKeyPassphrase":
+		var params struct {
+			Hash       credential.KeyHash `json:"hash"`
+			Passphrase string             `json:"passphrase"`
+		}
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+			return
+		}
+		if err := s.credentials.SaveKeyPassphrase(params.Hash, params.Passphrase); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+			return
+		}
+		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(true)))
+	case "credentials.deleteKeyPassphrase":
+		var params struct {
+			Hash credential.KeyHash `json:"hash"`
+		}
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+			return
+		}
+		if err := s.credentials.DeleteKeyPassphrase(params.Hash); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+			return
+		}
+		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(true)))
+	case "credentials.lookupKeyPassphrase":
+		var params struct {
+			Hash credential.KeyHash `json:"hash"`
+		}
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+			return
+		}
+		pp, err := s.credentials.LookupKeyPassphrase(params.Hash)
+		if err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+			return
+		}
+		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(pp)))
+	}
+}
+
+// handleImportTabby parses a Tabby config YAML and imports SSH profiles +
+// groups into the wired ProfileStore. Returns the number of profiles imported.
+// Deduplicates by host+port+user on re-import.
+func (s *WSServer) handleImportTabby(wconn *wsConn, req jsonrpcRequest) {
+	if s.profiles == nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "profiles not available"))
+		return
+	}
+	var params struct {
+		Config string `json:"config"`
+	}
+	if err := json.Unmarshal(req.Params, &params); err != nil || params.Config == "" {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: config (YAML string) required"))
+		return
+	}
+
+	cfg, err := importer.ParseTabbyConfig([]byte(params.Config))
+	if err != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Parse Tabby config: "+err.Error()))
+		return
+	}
+
+	countBefore, _ := s.profiles.LoadProfiles()
+	before := len(countBefore)
+	if err := importer.ImportGroups(cfg, s.profiles); err != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Import groups: "+err.Error()))
+		return
+	}
+	if err := importer.ImportProfiles(cfg, s.profiles, "ssh"); err != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Import profiles: "+err.Error()))
+		return
+	}
+	after, _ := s.profiles.LoadProfiles()
+	imported := len(after) - before
+	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(imported)))
+}
+
+// mustMarshal serializes v to JSON, panicking on error (only used for
+// values we construct ourselves, which are always serializable).
+func mustMarshal(v any) json.RawMessage {
+	out, err := json.Marshal(v)
+	if err != nil {
+		return json.RawMessage("null")
+	}
+	return out
 }

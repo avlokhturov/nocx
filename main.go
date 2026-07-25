@@ -85,6 +85,11 @@ type WailsApp struct {
 	updateInfo *update.UpdateInfo
 }
 
+// Log logs a message from the frontend.
+func (w *WailsApp) Log(message string) {
+	w.backend.Log(message)
+}
+
 func (w *WailsApp) startup(ctx context.Context) {
 	w.ctx = ctx
 	w.backend.Logger.Info("Wails app starting up")

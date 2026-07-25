@@ -10,4 +10,6 @@ export function GetUpdateState():Promise<string>;
 
 export function GetWSPort():Promise<number>;
 
+export function Log(arg1:string):Promise<void>;
+
 export function ReportHealthy():Promise<void>;

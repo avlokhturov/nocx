@@ -285,7 +285,6 @@ export class Tab {
    * it mounts.
    */
   async start(): Promise<void> {
-    Log('nocx: Tab.start() called, managerView: ' + !!this.managerView + ', started: ' + this.started)
     // Manager tabs host the connection manager UI, not a terminal.
     // Show the skeleton immediately on first activation (when the pane is
     // still empty); subsequent activations keep the user's form intact.
@@ -300,16 +299,8 @@ export class Tab {
     if (this.started) return
     this.started = true
 
-    // Wait for pane to become visible and have proper dimensions
-    await new Promise(resolve => requestAnimationFrame(resolve))
-
     try {
-      Log('nocx: creating renderer')
       const renderer = createRenderer(this.rendererName)
-
-      // Log pane dimensions before mounting
-      const paneRect = this.pane.getBoundingClientRect()
-      Log('nocx: pane dimensions before mount: ' + paneRect.width + 'x' + paneRect.height)
 
       // ── DOM scrollback controller ───────────────────────────────────────
       this.scrollback = new ScrollbackController({
@@ -318,9 +309,7 @@ export class Tab {
         now: () => performance.now(),
       })
 
-      Log('nocx: mounting renderer')
       await renderer.mount(this.scrollback.mountTarget)
-      Log('nocx: renderer mounted, cols: ' + renderer.cols + ', rows: ' + renderer.rows)
 
       this.cols = renderer.cols
       this.rows = renderer.rows
@@ -557,7 +546,6 @@ export class Tab {
       // the PTY/channel is created at this size — never spawn-then-resize.
       // Enhanced input (DOM editor + marker-only prompt) is always on for local
       // sessions; the shell fails open to a plain terminal when markers are absent (ADR-0004/0006).
-      Log('nocx: opening session, sshOpts: ' + JSON.stringify(this.sshOpts))
       const session = this.sshOpts
         ? await this.client.openSSHSession(this.cols, this.rows, this.sshOpts.host, {
             user: this.sshOpts.user,
@@ -573,8 +561,6 @@ export class Tab {
           })
         : await this.client.openSession(this.cols, this.rows, true)
       this.session = session
-      Log('nocx: session opened, sid: ' + session.sessionId + ' cwd: ' + (session.cwd || ''))
-      Log('nocx: session opened, sid: ' + session.sessionId + ' cwd: ' + (session.cwd || ''))
 
       // Store the initial cwd for the command ledger.
       this._cwd = session.cwd || ''
@@ -598,7 +584,6 @@ export class Tab {
       this.titleSpan.textContent = this._title = this._defaultTitle
 
       session.onData((data: string) => {
-        Log('nocx: session data received, length: ' + data.length)
         renderer.write(data)
         // Normal-buffer output on a background tab lights the indicator.
         // Full-screen TUIs repaint constantly in the alternate buffer —
@@ -876,18 +861,6 @@ export class TabManager {
     return this.tabs.length
   }
 
-  /** Returns information about all open tabs for sidebar display. */
-  getTabs(): Array<{ id: number; title: string; isActive: boolean }> {
-    return this.tabs.map((tab) => ({
-      id: tab.id,
-      title: tab.title || 'Terminal',
-      isActive: tab === this.activeTab,
-    }))
-  }
-
-  /** Callback fired when tabs change (added, removed, title changed). */
-  onTabsChanged?: () => void
-
   /**
    * Resolves when the initial tab's renderer mounts and its PTY session
    * opens. Rejects when the initial tab's start() threw — a broken tab
@@ -915,16 +888,8 @@ export class TabManager {
     return this.createTab({ host, ...opts })
   }
 
-  /** Create or activate the Connections manager tab. */
+  /** Create a Connections manager tab — shows the profile/credential UI. */
   newManagerTab(): Tab {
-    // Check if Connection Manager tab already exists
-    const existingManagerTab = this.tabs.find((t) => t.managerView !== null)
-    if (existingManagerTab) {
-      // Just activate the existing tab
-      void this.activate(existingManagerTab)
-      return existingManagerTab
-    }
-
     const tab = new Tab(
       this.client,
       this.rendererName,
@@ -936,8 +901,8 @@ export class TabManager {
 
     // Override: this tab is a manager, not a terminal. Set the title
     // immediately and mark the pane so CSS can drop terminal padding.
-    tab.updateTitle('Connection Manager')
-    tab.button.title = 'Connection Manager'
+    tab.titleSpan.textContent = 'Connections'
+    tab.button.title = 'Connection manager'
     tab.pane.classList.add('pane-manager')
 
     const cmView = new ConnectionManagerViewImpl(tab.pane, this.profileClient)
@@ -1079,7 +1044,6 @@ export class TabManager {
 
     this.refreshIndices()
     void this.activate(tab)
-    this.onTabsChanged?.()
     return tab
   }
 
@@ -1107,7 +1071,6 @@ export class TabManager {
     tab.pane.remove()
     tab.button.remove()
     this.tabs.splice(index, 1)
-    this.onTabsChanged?.()
 
     // Closing the last tab opens a fresh one immediately so the window
     // is never empty (decision: no start page / empty state).
@@ -1142,7 +1105,6 @@ export class TabManager {
     tab.refreshAtlas()
     tab.focus()
     this.syncAltScreenClass()
-    this.onTabsChanged?.()
   }
 
   /** Activate the tab at a 0-based position. */

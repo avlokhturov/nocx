@@ -9,13 +9,18 @@
  * (nocx-8yg.9), so the shell layout never has to be restructured for them.
  */
 
-/** A view the activity bar can show. Content mounting arrives with the
- *  first real view; today the panel shows the view title only. */
+/** A view the activity bar can show. */
 export interface SidebarView {
   readonly id: string
   readonly title: string
   /** Inline SVG markup for the activity-bar icon. */
   readonly icon: string
+  /** Action type: 'panel' shows content in sidebar, 'tab' opens a full-screen tab. */
+  readonly action: 'panel' | 'tab'
+  /** For 'panel': mount function called when view becomes active. */
+  readonly mount?: (panel: HTMLElement) => void
+  /** For 'tab': callback when button is clicked. */
+  readonly onActivate?: () => void
 }
 
 export interface Sidebar {
@@ -41,7 +46,9 @@ export class SidebarImpl implements Sidebar {
   private _activeViewId: string
   private readonly _views = new Map<string, SidebarView>()
   private readonly _buttons = new Map<string, HTMLElement>()
+  private readonly _contentContainers = new Map<string, HTMLElement>()
   private readonly _title: HTMLElement
+  private _currentContent: HTMLElement | null = null
 
   constructor(
     bar: HTMLElement,
@@ -61,14 +68,25 @@ export class SidebarImpl implements Sidebar {
       btn.title = view.title
       btn.setAttribute('aria-label', view.title)
       btn.innerHTML = view.icon
-      btn.addEventListener('click', () => this._activate(view.id))
+      btn.addEventListener('click', () => this._handleClick(view))
       bar.append(btn)
       this._buttons.set(view.id, btn)
+
+      // For 'panel' views: create content container and mount
+      if (view.action === 'panel' && view.mount) {
+        const container = document.createElement('div')
+        container.className = 'sidebar-content'
+        container.dataset.view = view.id
+        container.style.display = 'none'
+        this._panel.append(container)
+        this._contentContainers.set(view.id, container)
+        view.mount(container)
+      }
     }
 
     this._title = document.createElement('div')
     this._title.className = 'sidebar-title'
-    this._panel.append(this._title)
+    this._panel.prepend(this._title)
 
     document.addEventListener('keydown', (e) => {
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key === 'b') {
@@ -77,6 +95,18 @@ export class SidebarImpl implements Sidebar {
     })
 
     this._render()
+  }
+
+  private _handleClick(view: SidebarView): void {
+    if (view.action === 'tab') {
+      // Tab action: close all panel views, trigger tab callback
+      this._activeViewId = ''
+      view.onActivate?.()
+      this._render()
+      return
+    }
+    // Panel action: normal sidebar behavior
+    this._activate(view.id)
   }
 
   get collapsed(): boolean {
@@ -108,8 +138,17 @@ export class SidebarImpl implements Sidebar {
   private _render(): void {
     this._title.textContent = this._views.get(this._activeViewId)?.title ?? ''
     this._panel.classList.toggle('collapsed', this._collapsed)
+    // Update active state for all buttons — only the current active view gets the class
     for (const [id, btn] of this._buttons) {
-      btn.classList.toggle('active', id === this._activeViewId && !this._collapsed)
+      if (id === this._activeViewId && !this._collapsed) {
+        btn.classList.add('active')
+      } else {
+        btn.classList.remove('active')
+      }
+    }
+    // Show/hide content containers
+    for (const [id, container] of this._contentContainers) {
+      container.style.display = id === this._activeViewId && !this._collapsed ? 'block' : 'none'
     }
   }
 }

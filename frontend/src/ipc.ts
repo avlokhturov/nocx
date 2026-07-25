@@ -234,6 +234,13 @@ export class SessionHandle {
 
 export class WSClient {
   private ws: WebSocket | null = null
+
+  // rawSocket returns the underlying WebSocket for sharing with sub-clients
+  // (e.g. ProfileClient shares the same connection for control-plane calls).
+  rawSocket(): WebSocket {
+    if (!this.ws) throw new Error('WebSocket not connected')
+    return this.ws
+  }
   private sessions = new Map<string, SessionState>()
   private pendingOpens = new Map<number, PendingOpen>()
   private pendingAttaches = new Map<number, PendingAttach>()
@@ -525,6 +532,49 @@ export class WSClient {
           id,
           method: 'open',
           params: { cols, rows, xpixel: 0, ypixel: 0, enhanced },
+        }),
+      )
+    })
+  }
+
+  // openSSHSession opens an SSH session instead of a local PTY. The host
+  // may be an alias resolved via ~/.ssh/config. Optional overrides for
+  // user/port/keyFile/password/authMode are sent in the open params.
+  openSSHSession(
+    cols: number,
+    rows: number,
+    host: string,
+    opts?: { user?: string; port?: number; keyFile?: string; password?: string; authMode?: string; jumpHost?: string; jumpPort?: number; jumpUser?: string; jumpPassword?: string; jumpAuthMode?: string },
+  ): Promise<SessionHandle> {
+    return new Promise((resolve, reject) => {
+      const id = nextID()
+      this.pendingOpens.set(id, {
+        resolve: (sid: string, cwd: string) => resolve(new SessionHandle(this, sid, cwd)),
+        reject,
+      })
+      this.ws!.send(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id,
+          method: 'open',
+          params: {
+            cols,
+            rows,
+            xpixel: 0,
+            ypixel: 0,
+            kind: 'ssh',
+            host,
+            user: opts?.user ?? '',
+            port: opts?.port ?? 0,
+            keyFile: opts?.keyFile ?? '',
+            password: opts?.password ?? '',
+            authMode: opts?.authMode ?? '',
+            jumpHost: opts?.jumpHost ?? '',
+            jumpPort: opts?.jumpPort ?? 0,
+            jumpUser: opts?.jumpUser ?? '',
+            jumpPassword: opts?.jumpPassword ?? '',
+            jumpAuthMode: opts?.jumpAuthMode ?? '',
+          },
         }),
       )
     })

@@ -1,0 +1,49 @@
+version: 8
+profiles:
+  - id: "ssh:custom:prod-web1:11111111-2222-3333-4444-555555555555"
+    type: ssh
+    name: prod-web1
+    group: g-prod
+    options:
+      host: prod-web1.example.com
+      port: 22
+      user: deploy
+      auth: password
+      password: fallback-pw
+      keepaliveInterval: 5000
+  - id: "ssh:custom:dev-box:22222222-3333-4444-5555-666666666666"
+    type: ssh
+    name: dev-box
+    group: g-dev
+    options:
+      host: dev.example.com
+      port: 2222
+      user: admin
+      auth: publicKey
+      privateKeys:
+        - vault://dev-key-1
+  - id: "ssh:custom:agent-host:33333333-4444-5555-6666-777777777777"
+    type: ssh
+    name: agent-host
+    options:
+      host: agent.example.com
+      port: 22
+      user: alice
+      auth: agent
+groups:
+  - id: g-prod
+    name: Production
+  - id: g-dev
+    name: Development
+    parentGroupId: g-prod
+  - id: g-standalone
+    name: Standalone
+profileDefaults:
+  ssh:
+    keepaliveInterval: 10000
+vault:
+  version: 1
+  contents: ""
+  keySalt: ""
+  iv: ""
+  encrypted: false

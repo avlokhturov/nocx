@@ -92,8 +92,15 @@ func IDToBytes(id ID) ([16]byte, error) {
 type Reg struct {
 	log      log.Logger
 	ptf      PTYFactory
+	ssh      SSHFactory
 	mu       sync.Mutex
 	sessions map[ID]*realSession
+}
+
+// SSHFactory creates SSH connections (AD-4). Injected at the composition
+// root so tests can stub it.
+type SSHFactory interface {
+	Connect(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.Channel, error)
 }
 
 func New(logger log.Logger, ptf PTYFactory) *Reg {
@@ -104,21 +111,40 @@ func New(logger log.Logger, ptf PTYFactory) *Reg {
 	}
 }
 
-func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
-	if cfg.Kind == KindRemote {
-		return nil, fmt.Errorf("remote (SSH) sessions are not implemented")
-	}
+// WithSSHFactory injects an SSH factory, enabling KindRemote sessions.
+func (r *Reg) WithSSHFactory(f SSHFactory) *Reg {
+	r.ssh = f
+	return r
+}
 
-	pt, err := r.ptf.NewPTY(ctx, pty.Config{
-		Cwd:      cfg.Cwd,
-		Cols:     cfg.Cols,
-		Rows:     cfg.Rows,
-		XPixel:   cfg.XPixel,
-		YPixel:   cfg.YPixel,
-		Enhanced: cfg.Enhanced,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("open session: %w", err)
+func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
+	var ch Channel
+	var err error
+
+	if cfg.Kind == KindRemote {
+		if r.ssh == nil {
+			return nil, fmt.Errorf("SSH sessions not available (no SSH factory wired)")
+		}
+		if cfg.Remote == nil {
+			return nil, fmt.Errorf("remote session requires ConnectConfig")
+		}
+		ch, err = r.ssh.Connect(ctx, cfg.Host, sshOptionsFromConfig(cfg.Remote)...)
+		if err != nil {
+			return nil, fmt.Errorf("ssh connect: %w", err)
+		}
+	} else {
+		pt, perr := r.ptf.NewPTY(ctx, pty.Config{
+			Cwd:      cfg.Cwd,
+			Cols:     cfg.Cols,
+			Rows:     cfg.Rows,
+			XPixel:   cfg.XPixel,
+			YPixel:   cfg.YPixel,
+			Enhanced: cfg.Enhanced,
+		})
+		if perr != nil {
+			return nil, fmt.Errorf("open session: %w", perr)
+		}
+		ch = pt
 	}
 
 	id := NewID()
@@ -126,7 +152,7 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 		id:   id,
 		kind: cfg.Kind,
 		cwd:  resolveSessionCwd(cfg.Cwd),
-		pty:  pt,
+		ch:   ch,
 		log:  r.log.With("session_id", string(id)),
 	}
 
@@ -134,7 +160,7 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 	r.sessions[id] = s
 	r.mu.Unlock()
 
-	r.log.Info("session opened", "id", string(id))
+	r.log.Info("session opened", "id", string(id), "kind", kindName(cfg.Kind))
 	return s, nil
 }
 
@@ -206,11 +232,58 @@ func abbreviateHome(dir string) string {
 	return dir
 }
 
+func kindName(k Kind) string {
+	switch k {
+	case KindLocal:
+		return "local"
+	case KindRemote:
+		return "ssh"
+	default:
+		return "unknown"
+	}
+}
+
+// sshOptionsFromConfig converts a ssh.ConnectConfig into ConnectOptions.
+func sshOptionsFromConfig(cfg *ssh.ConnectConfig) []ssh.ConnectOption {
+	var opts []ssh.ConnectOption
+	if cfg.User != "" {
+		opts = append(opts, ssh.WithUser(cfg.User))
+	}
+	if cfg.Port > 0 {
+		opts = append(opts, ssh.WithPort(cfg.Port))
+	}
+	if cfg.KeyFile != "" {
+		opts = append(opts, ssh.WithKeyFile(cfg.KeyFile))
+	}
+	if cfg.Password != "" {
+		opts = append(opts, ssh.WithPassword(cfg.Password))
+	}
+	if cfg.UseAgent {
+		opts = append(opts, ssh.WithAgent())
+	}
+	if cfg.Cols > 0 || cfg.Rows > 0 {
+		opts = append(opts, ssh.WithPTYSize(cfg.Cols, cfg.Rows, cfg.XPixel, cfg.YPixel))
+	}
+	if cfg.AuthMode != "" {
+		opts = append(opts, ssh.WithAuthMode(cfg.AuthMode))
+	}
+	if cfg.JumpHost != "" {
+		opts = append(opts, ssh.WithJumpHost(cfg.JumpHost, cfg.JumpPort, cfg.JumpUser, cfg.JumpPassword, cfg.JumpAuthMode))
+	}
+	if cfg.Credentials != nil {
+		opts = append(opts, ssh.WithCredentials(cfg.Credentials, cfg.CredIdentity))
+	}
+	if cfg.RemoteInstaller != nil {
+		opts = append(opts, ssh.WithRemoteInstaller(cfg.RemoteInstaller))
+	}
+	return opts
+}
+
 type realSession struct {
 	id        ID
 	kind      Kind
 	cwd       string
-	pty       pty.Pty
+	ch        Channel
 	log       log.Logger
 	handler   OutputHandler
 	handlerMu sync.Mutex
@@ -222,22 +295,22 @@ func (s *realSession) Kind() Kind  { return s.kind }
 func (s *realSession) Cwd() string { return s.cwd }
 
 func (s *realSession) Write(p []byte) (int, error) {
-	return s.pty.Write(p)
+	return s.ch.Write(p)
 }
 
 func (s *realSession) Resize(ctx context.Context, cols, rows, xpixel, ypixel uint16) error {
-	return s.pty.Resize(ctx, cols, rows, xpixel, ypixel)
+	return s.ch.Resize(ctx, cols, rows, xpixel, ypixel)
 }
 
 func (s *realSession) Done() <-chan struct{} {
-	return s.pty.Done()
+	return s.ch.Done()
 }
 
 func (s *realSession) Close() error {
 	var err error
 	s.closeOnce.Do(func() {
 		s.log.Debug("closing session")
-		err = s.pty.Close()
+		err = s.ch.Close()
 	})
 	return err
 }
@@ -264,7 +337,7 @@ func (s *realSession) readPump(ctx context.Context) {
 		default:
 		}
 
-		n, err := s.pty.Read(buf)
+		n, err := s.ch.Read(buf)
 		if err != nil {
 			if err != io.EOF {
 				s.log.Debug("pty read error", "error", err)

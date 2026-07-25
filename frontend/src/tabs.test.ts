@@ -945,6 +945,14 @@ describe('TabManager', () => {
     const banner = makeBanner()
 
     const { TabManager } = await import('./tabs')
+    const profileClient = {
+      list: () => Promise.resolve([]),
+      get: () => Promise.resolve(null),
+      create: () => Promise.resolve(''),
+      update: () => Promise.resolve(),
+      delete: () => Promise.resolve(),
+      connect: () => Promise.resolve(''),
+    } as unknown as import('./profiles').ProfileClient
     const manager = new TabManager(
       bar,
       panes,
@@ -952,6 +960,7 @@ describe('TabManager', () => {
       clipboard,
       gate,
       banner,
+      profileClient,
     )
 
     // initialTabReady must reject — a genuinely broken tab is not "ready".
