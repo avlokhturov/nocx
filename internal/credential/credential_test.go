@@ -1,6 +1,8 @@
 package credential
 
 import (
+	"encoding/hex"
+	"strings"
 	"testing"
 )
 
@@ -176,4 +178,150 @@ func TestCredentialStoreInterface(t *testing.T) {
 		t.Fatal("NewCredentialStore returned nil")
 	}
 	var _ CredentialStore = store
+}
+
+// ---------------------------------------------------------------------------
+// AEAD tamper-detection tests (TDD: these must FAIL on current CBC code
+// where they detect the vulnerability — tampering should always be caught).
+// ---------------------------------------------------------------------------
+
+func TestVaultTamperedCiphertextRejected(t *testing.T) {
+	v := newTestVault(t)
+	_ = v.Unlock("test-passphrase")
+	_ = v.SaveSecret(VaultSecret{
+		Type:  SecretTypePassword,
+		Key:   VaultKey{User: "alice", Host: "example.com", Port: 22},
+		Value: "s3cr3t",
+	})
+
+	raw, err := v.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	// Flip a byte in the ciphertext portion (not the nonce or tag).
+	contents, _ := hex.DecodeString(raw.Contents)
+	if len(contents) < 20 {
+		t.Fatalf("contents too short: %d bytes", len(contents))
+	}
+	contents[12] ^= 0x01 // flip a bit just past the 12-byte nonce
+	raw.Contents = hex.EncodeToString(contents)
+
+	v2 := newTestVault(t)
+	err = v2.Unmarshal(raw, "test-passphrase")
+	if err == nil {
+		t.Fatal("tampered ciphertext should be rejected, but decryption succeeded")
+	}
+}
+
+func TestVaultTamperedTagRejected(t *testing.T) {
+	v := newTestVault(t)
+	_ = v.Unlock("test-passphrase")
+	_ = v.SaveSecret(VaultSecret{
+		Type:  SecretTypePassword,
+		Key:   VaultKey{User: "alice", Host: "example.com", Port: 22},
+		Value: "s3cr3t",
+	})
+
+	raw, err := v.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	// Flip a byte in the tag area (last 16 bytes of GCM output).
+	contents, _ := hex.DecodeString(raw.Contents)
+	if len(contents) < 28 {
+		t.Fatalf("contents too short: %d bytes", len(contents))
+	}
+	contents[len(contents)-1] ^= 0x01
+	raw.Contents = hex.EncodeToString(contents)
+
+	v2 := newTestVault(t)
+	err = v2.Unmarshal(raw, "test-passphrase")
+	if err == nil {
+		t.Fatal("tampered tag should be rejected, but decryption succeeded")
+	}
+}
+
+func TestVaultTamperedVersionRejected(t *testing.T) {
+	v := newTestVault(t)
+	_ = v.Unlock("test-passphrase")
+	_ = v.SaveSecret(VaultSecret{
+		Type:  SecretTypePassword,
+		Key:   VaultKey{User: "alice", Host: "example.com", Port: 22},
+		Value: "s3cr3t",
+	})
+
+	raw, err := v.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	// Change the version field.
+	raw.Version = 999
+
+	v2 := newTestVault(t)
+	err = v2.Unmarshal(raw, "test-passphrase")
+	if err == nil {
+		t.Fatal("tampered version should be rejected, but decryption succeeded")
+	}
+}
+
+func TestVaultOldFormatRefused(t *testing.T) {
+	// A version=1 StoredVault (old CBC format). Must be refused with
+	// a clear message, not a confusing decrypt error.
+	v1 := &StoredVault{
+		Version:  1,
+		Contents: "deadbeef",
+		KeySalt:  "aabbccdd",
+		IV:       "00112233445566778899aabbccddeeff",
+	}
+
+	v := newTestVault(t)
+	err := v.Unmarshal(v1, "any-passphrase")
+	if err == nil {
+		t.Fatal("version-1 vault should be refused")
+	}
+	// The error must say *why* — not a generic "wrong passphrase".
+	if !strings.Contains(err.Error(), "version") && !strings.Contains(err.Error(), "format") {
+		t.Errorf("error should mention version/format, got: %v", err)
+	}
+}
+
+func TestVaultWrongPasswordIndistinguishableFromTamper(t *testing.T) {
+	v := newTestVault(t)
+	_ = v.Unlock("correct-passphrase")
+	_ = v.SaveSecret(VaultSecret{
+		Type:  SecretTypePassword,
+		Key:   VaultKey{User: "alice", Host: "example.com", Port: 22},
+		Value: "s3cr3t",
+	})
+
+	raw, err := v.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	// Wrong password.
+	vWrong := newTestVault(t)
+	wrongErr := vWrong.Unmarshal(raw, "wrong-passphrase")
+	if wrongErr == nil {
+		t.Fatal("wrong passphrase should fail")
+	}
+
+	// Tampered contents.
+	contents, _ := hex.DecodeString(raw.Contents)
+	contents[len(contents)-1] ^= 0x01
+	raw.Contents = hex.EncodeToString(contents)
+
+	vTampered := newTestVault(t)
+	tamperErr := vTampered.Unmarshal(raw, "correct-passphrase")
+	if tamperErr == nil {
+		t.Fatal("tampered vault should fail")
+	}
+
+	// Same error message for both paths (indistinguishable to caller).
+	if wrongErr.Error() != tamperErr.Error() {
+		t.Errorf("wrong-password and tampered-data errors must be indistinguishable:\n  wrong:   %v\n  tamper:  %v", wrongErr, tamperErr)
+	}
 }

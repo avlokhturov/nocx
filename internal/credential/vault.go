@@ -17,16 +17,23 @@ const (
 	pbkdfIterations = 100_000
 	saltLength      = 8  // 64 bits
 	keyLength       = 32 // 256 bits for AES-256
-	ivLength        = 16 // 128 bits for AES-CBC
+	vaultVersion    = 2  // current vault format: AES-256-GCM with authenticated version
+	legacyVersion   = 1  // deprecated: AES-256-CBC, unauthenticated
 )
 
-// StoredVault is the on-disk encrypted vault: the ciphertext, salt, and IV.
+// StoredVault is the on-disk encrypted vault.
+//
+// Format version 2 (current): AES-256-GCM. Contents = hex(nonce || ciphertext || tag).
+// Nonce is 12 bytes (GCM standard), generated fresh from crypto/rand per Marshal.
+// The version, salt, and KDF parameters are passed as GCM additional authenticated
+// data (AAD) so an attacker cannot swap them without detection.
+//
 // The passphrase is never stored — it is held in memory only while unlocked.
 type StoredVault struct {
 	Version  int    `json:"version"`
-	Contents string `json:"contents"` // hex-encoded AES-256-CBC ciphertext
-	KeySalt  string `json:"keySalt"`  // hex-encoded PBKDF2 salt
-	IV       string `json:"iv"`       // hex-encoded AES IV
+	Contents string `json:"contents"` // hex(nonce || AES-256-GCM ciphertext+tag)
+	KeySalt  string `json:"keySalt"`  // hex-encoded PBKDF2 salt (8 bytes)
+	IV       string `json:"iv"`       // unused in v2, kept for backward JSON compat
 }
 
 // vaultData is the plaintext JSON inside the vault.
@@ -80,6 +87,9 @@ func (v *Vault) IsOpen() bool {
 
 // Marshal serializes the current data into an encrypted StoredVault using
 // the held passphrase. Returns nil if the vault is not unlocked.
+//
+// Uses AES-256-GCM (format version 2). A fresh random salt and nonce are
+// generated per call, so even identical plaintext produces a different blob.
 func (v *Vault) Marshal() (*StoredVault, error) {
 	if v.passphrase == "" {
 		return nil, errors.New("vault is locked")
@@ -89,10 +99,6 @@ func (v *Vault) Marshal() (*StoredVault, error) {
 	if err != nil {
 		return nil, fmt.Errorf("generate salt: %w", err)
 	}
-	iv, err := randomBytes(ivLength)
-	if err != nil {
-		return nil, fmt.Errorf("generate IV: %w", err)
-	}
 
 	key := deriveKey(v.passphrase, salt)
 
@@ -101,16 +107,15 @@ func (v *Vault) Marshal() (*StoredVault, error) {
 		return nil, fmt.Errorf("marshal vault data: %w", err)
 	}
 
-	ciphertext, err := encryptAESCBC(key, iv, plaintext)
+	ciphertext, err := encryptGCM(key, plaintext, salt)
 	if err != nil {
 		return nil, fmt.Errorf("encrypt vault: %w", err)
 	}
 
 	return &StoredVault{
-		Version:  1,
+		Version:  vaultVersion,
 		Contents: hex.EncodeToString(ciphertext),
 		KeySalt:  hex.EncodeToString(salt),
-		IV:       hex.EncodeToString(iv),
 	}, nil
 }
 
@@ -129,13 +134,19 @@ func (v *Vault) decrypt() error {
 		return errors.New("vault is locked")
 	}
 
+	switch v.store.Version {
+	case legacyVersion:
+		return fmt.Errorf("vault format version 1 is no longer supported (unauthenticated AES-CBC); " +
+			"delete the vault file and create a new one with a fresh passphrase")
+	case vaultVersion:
+		// proceed
+	default:
+		return fmt.Errorf("unknown vault format version %d", v.store.Version)
+	}
+
 	salt, err := hex.DecodeString(v.store.KeySalt)
 	if err != nil {
 		return fmt.Errorf("decode salt: %w", err)
-	}
-	iv, err := hex.DecodeString(v.store.IV)
-	if err != nil {
-		return fmt.Errorf("decode IV: %w", err)
 	}
 	ciphertext, err := hex.DecodeString(v.store.Contents)
 	if err != nil {
@@ -144,9 +155,10 @@ func (v *Vault) decrypt() error {
 
 	key := deriveKey(v.passphrase, salt)
 
-	plaintext, err := decryptAESCBC(key, iv, ciphertext)
+	plaintext, err := decryptGCM(key, ciphertext, salt)
 	if err != nil {
-		return fmt.Errorf("decrypt vault (wrong passphrase?): %w", err)
+		// Do not distinguish wrong-passphrase from tampered data.
+		return errors.New("decrypt failed: wrong passphrase or corrupted vault")
 	}
 
 	if err := json.Unmarshal(plaintext, &v.data); err != nil {
@@ -251,48 +263,104 @@ func pbkdf2(password, salt []byte, iter, keyLen int) []byte {
 	return dk[:keyLen]
 }
 
-func encryptAESCBC(key, iv, plaintext []byte) ([]byte, error) {
+// encryptGCM encrypts plaintext with AES-256-GCM.
+//
+// # AEAD construction
+//
+// AES-256-GCM was chosen over alternatives:
+//   - ChaCha20-Poly1305: Go's x/crypto implements it, but AES-GCM is in stdlib
+//     and benefits from hardware acceleration (AES-NI) on all modern CPUs.
+//   - AES-GCM-SIV: would tolerate nonce misuse, but we generate a fresh random
+//     nonce per encryption, so nonce reuse is not a concern.
+//   - XChaCha20-Poly1305: larger nonce, but 96-bit random nonce with GCM is
+//     safe for the number of encryptions a vault sees (<< 2^32).
+//
+// # Nonce generation and reuse prevention
+//
+// The nonce is 12 bytes from crypto/rand, generated fresh per Marshal call.
+// A new random salt is also generated per Marshal, so even when encrypting the
+// same plaintext with the same passphrase, the derived key differs and the
+// nonce is unique. The birthday bound for random 96-bit nonces is ~2^48
+// encryptions before collision probability becomes significant — far beyond
+// the lifetime of a vault file.
+//
+// # Authenticated data
+//
+// The GCM additional authenticated data (AAD) binds the salt and KDF
+// parameters to the ciphertext. An attacker who swaps the salt, iterations,
+// or key length in a stored blob will cause GCM authentication to fail,
+// producing the same error as a wrong passphrase.
+//
+// AAD encoding (16 bytes):
+//
+//	version (4 bytes, big-endian) ||
+//	salt (8 bytes, raw) ||
+//	iterations (4 bytes, big-endian) ||
+//	keyLength (1 byte)
+//
+// The version in AAD mirrors the StoredVault.Version field; GCM
+// authenticates it so version-tampering is detected.
+func encryptGCM(key, plaintext, salt []byte) ([]byte, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, err
 	}
-	mode := cipher.NewCBCEncrypter(block, iv)
-
-	// PKCS7 padding.
-	padLen := aes.BlockSize - len(plaintext)%aes.BlockSize
-	padded := make([]byte, len(plaintext)+padLen)
-	copy(padded, plaintext)
-	for i := len(plaintext); i < len(padded); i++ {
-		padded[i] = byte(padLen)
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
 	}
 
-	ciphertext := make([]byte, len(padded))
-	mode.CryptBlocks(ciphertext, padded)
-	return ciphertext, nil
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, fmt.Errorf("generate nonce: %w", err)
+	}
+
+	aad := buildAAD(salt)
+	// gcm.Seal appends to dst: nonce || ciphertext || tag
+	return gcm.Seal(nonce, nonce, plaintext, aad), nil
 }
 
-func decryptAESCBC(key, iv, ciphertext []byte) ([]byte, error) {
+// decryptGCM decrypts ciphertext (nonce || ciphertext || tag) with AES-256-GCM.
+// Returns an error indistinguishable from wrong-passphrase when authentication fails.
+func decryptGCM(key, ciphertext, salt []byte) ([]byte, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, err
 	}
-	if len(ciphertext)%aes.BlockSize != 0 {
-		return nil, errors.New("ciphertext is not a multiple of block size")
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
 	}
 
-	mode := cipher.NewCBCDecrypter(block, iv)
-	plaintext := make([]byte, len(ciphertext))
-	mode.CryptBlocks(plaintext, ciphertext)
+	nonceSize := gcm.NonceSize()
+	if len(ciphertext) < nonceSize {
+		return nil, errors.New("ciphertext too short")
+	}
 
-	// Remove PKCS7 padding.
-	if len(plaintext) == 0 {
-		return nil, errors.New("empty plaintext")
-	}
-	padLen := int(plaintext[len(plaintext)-1])
-	if padLen == 0 || padLen > aes.BlockSize || padLen > len(plaintext) {
-		return nil, errors.New("invalid padding")
-	}
-	return plaintext[:len(plaintext)-padLen], nil
+	nonce, ct := ciphertext[:nonceSize], ciphertext[nonceSize:]
+	aad := buildAAD(salt)
+	return gcm.Open(nil, nonce, ct, aad)
+}
+
+// buildAAD constructs the GCM additional authenticated data from the
+// salt and KDF parameters. Format:
+//
+//	version (4 bytes BE) || salt (8 bytes) || iterations (4 bytes BE) || keyLength (1 byte)
+func buildAAD(salt []byte) []byte {
+	aad := make([]byte, 4+8+4+1) // 17 bytes
+	ver := uint32(vaultVersion)
+	aad[0] = byte(ver >> 24)
+	aad[1] = byte(ver >> 16)
+	aad[2] = byte(ver >> 8)
+	aad[3] = byte(ver)
+	copy(aad[4:12], salt)
+	iter := uint32(pbkdfIterations)
+	aad[12] = byte(iter >> 24)
+	aad[13] = byte(iter >> 16)
+	aad[14] = byte(iter >> 8)
+	aad[15] = byte(iter)
+	aad[16] = byte(keyLength)
+	return aad
 }
 
 func randomBytes(n int) ([]byte, error) {
