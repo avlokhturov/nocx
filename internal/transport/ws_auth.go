@@ -172,14 +172,33 @@ func (s *WSServer) authorize(w http.ResponseWriter, r *http.Request) bool {
 		policy = LoopbackOriginPolicy{}
 	}
 	if !policy.Allow(r.Header.Get("Origin"), r.Host) {
-		// Deliberately not logged with the Origin value at info level: it is
-		// attacker-controlled text.
-		s.log.Warn("ws upgrade rejected", "reason", "origin_or_host")
+		// Origin and Host ARE logged, despite being attacker-controlled. The
+		// first version of this omitted them on the grounds that untrusted text
+		// does not belong in logs, and that cost an afternoon: 36 rejections per
+		// CI run with no way to tell a genuine attack from our own client being
+		// refused, which is the failure this policy is most likely to produce.
+		// A rejection nobody can diagnose is worse than one that quotes what it
+		// rejected. slog quotes and escapes the values, so the log-injection
+		// concern is handled by the encoder rather than by discarding evidence.
+		// Neither header carries a secret — the token travels in a different one
+		// and is never logged.
+		s.log.Warn("ws upgrade rejected",
+			"reason", "origin_or_host",
+			"origin", r.Header.Get("Origin"),
+			"host", r.Host,
+			"path", r.URL.Path)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return false
 	}
 	if !s.tokenOffered(r) {
-		s.log.Warn("ws upgrade rejected", "reason", "token")
+		// The token itself is never logged; how many subprotocols were offered
+		// distinguishes "client sent nothing" from "client sent a wrong value",
+		// which are different bugs.
+		s.log.Warn("ws upgrade rejected",
+			"reason", "token",
+			"origin", r.Header.Get("Origin"),
+			"host", r.Host,
+			"protocols_offered", len(r.Header.Values("Sec-WebSocket-Protocol")))
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return false
 	}
