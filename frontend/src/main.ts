@@ -8,20 +8,92 @@ import { createClipboardAccess, ClipboardGate } from './clipboard'
 import { ClipboardBannerImpl } from './banner'
 import { ProfileClient } from './profiles'
 
+/**
+ * Renders the auto-update notice in the tab bar. The notice is a small,
+ * non-modal element that shows update availability, download progress,
+ * and pending-restart state. It renders from state — bound Go calls are
+ * idempotent.
+ */
+class UpdateNotice {
+  private readonly el: HTMLDivElement
+
+  constructor(private bar: HTMLElement) {
+    this.el = document.createElement('div')
+    this.el.className = 'update-notice'
+    this.el.style.display = 'none'
+    this.bar.append(this.el)
+  }
+
+  /** Show an update is available with a link to release notes. */
+  showAvailable(version: string, notesUrl: string): void {
+    this.el.style.display = 'flex'
+    this.el.innerHTML = ''
+    const span = document.createElement('span')
+    span.textContent = `nocx ${version} available`
+    const link = document.createElement('a')
+    link.href = notesUrl
+    link.target = '_blank'
+    link.rel = 'noopener'
+    link.textContent = 'release notes'
+    link.className = 'update-notes-link'
+    const btn = document.createElement('button')
+    btn.textContent = 'Update'
+    btn.className = 'update-apply-btn'
+    btn.addEventListener('click', () => {
+      void this.apply()
+    })
+    this.el.append(span, ' · ', link, ' ', btn)
+  }
+
+  /** Show the busy/downloading state. */
+  showDownloading(): void {
+    this.el.style.display = 'flex'
+    this.el.innerHTML = ''
+    this.el.textContent = 'Downloading update…'
+    this.el.className = 'update-notice downloading'
+  }
+
+  /** Show pending restart state after a successful apply. */
+  showPendingRestart(version: string): void {
+    this.el.style.display = 'flex'
+    this.el.innerHTML = ''
+    this.el.textContent = `nocx ${version} installed — restart to apply`
+    this.el.className = 'update-notice pending'
+  }
+
+  /** Show an error message. */
+  showError(msg: string): void {
+    this.el.style.display = 'flex'
+    this.el.innerHTML = ''
+    this.el.textContent = `Update failed: ${msg}`
+    this.el.className = 'update-notice error'
+  }
+
+  private async apply(): Promise<void> {
+    this.showDownloading()
+    try {
+      await ApplyUpdate()
+      // After a successful apply, show pending restart.
+      this.showPendingRestart('') // version unknown here; Go can enrich later
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      this.showError(msg)
+    }
+  }
+}
+
 async function main() {
   log.info('nocx: main() called')
+  const bar = document.getElementById('tabbar')
   const panes = document.getElementById('panes')
   const activityBar = document.getElementById('activitybar')
   const sidebarPanel = document.getElementById('sidebar')
-  if (!panes || !activityBar || !sidebarPanel) {
-    throw new Error('#panes / #activitybar / #sidebar not found')
+  if (!bar || !panes || !activityBar || !sidebarPanel) {
+    throw new Error('#tabbar / #panes / #activitybar / #sidebar not found')
   }
 
-  // Update notice — renders in sidebar panel
-  const notice = document.createElement('div')
-  notice.className = 'update-notice-sidebar'
-  notice.style.display = 'none'
-  sidebarPanel.prepend(notice)
+  // Update notice — renders inline in the tab bar, right-aligned.
+  const notice = new UpdateNotice(bar)
 
   const clipboard = createClipboardAccess()
   const gate = new ClipboardGate()
@@ -44,17 +116,16 @@ async function main() {
   await client.connect(port, host)
 
   const profileClient = new ProfileClient(client.rawSocket())
-  // TabManager manages tabs logic (no UI — tabs are shown in sidebar)
-  // Create a hidden container for TabManager internal UI
-  const hiddenBar = document.createElement('div')
-  hiddenBar.style.display = 'none'
-  document.body.append(hiddenBar)
-  const tm = new TabManager(hiddenBar, panes, client, clipboard, gate, banner, profileClient)
+  // TabManager opens the first tab and activates it in the constructor.
+  // The renderer is selected via ?r=xterm|wterm inside TabManager.
+  const tm = new TabManager(bar, panes, client, clipboard, gate, banner, profileClient)
 
   // App-shell sidebar (nocx-8yg.9) — VS Code-style activity bar plus a
   // collapsible panel. Two views:
-  // - Connections: opens a full-screen tab with connection manager
-  // - Sessions: shows sidebar panel with saved sessions list
+  // - Connections: opens the SSH connection manager as a full-screen tab.
+  // - Sessions: placeholder, as on main. It is deliberately empty: the tab
+  //   list lives in the tab bar. Making the sidebar a second home for tabs is
+  //   the subject of epic nocx-d3q (configurable placement), not of this branch.
   new SidebarImpl(activityBar, sidebarPanel, [
     {
       id: 'connections',
@@ -71,83 +142,6 @@ async function main() {
       title: 'Sessions',
       icon: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3"/><path d="M13 15h4"/></svg>',
       action: 'panel',
-      mount: (panel: HTMLElement) => {
-        // Sessions panel shows open tabs from TabManager
-        const header = document.createElement('div')
-        header.className = 'sidebar-sessions-header'
-
-        const title = document.createElement('div')
-        title.className = 'sidebar-section-title'
-        title.textContent = 'Open Sessions'
-        header.append(title)
-
-        const addBtn = document.createElement('button')
-        addBtn.className = 'sidebar-add-btn'
-        addBtn.textContent = '+'
-        addBtn.title = 'New tab'
-        addBtn.addEventListener('click', () => {
-          tm.newTab()
-        })
-        header.append(addBtn)
-
-        panel.append(header)
-
-        const list = document.createElement('div')
-        list.className = 'sidebar-sessions-list'
-        panel.append(list)
-
-        const renderSessions = () => {
-          const tabs = tm.getTabs()
-          list.innerHTML = ''
-          if (tabs.length === 0) {
-            list.textContent = 'No open sessions'
-            return
-          }
-          for (const tab of tabs) {
-            const item = document.createElement('div')
-            item.className = 'sidebar-session-item'
-            if (tab.isActive) item.classList.add('active')
-
-            const titleSpan = document.createElement('span')
-            titleSpan.className = 'sidebar-session-title'
-            titleSpan.textContent = tab.title
-            item.append(titleSpan)
-
-            const closeBtn = document.createElement('button')
-            closeBtn.className = 'sidebar-session-close'
-            closeBtn.textContent = '×'
-            closeBtn.title = 'Close'
-            closeBtn.addEventListener('click', (e) => {
-              e.stopPropagation()
-              // Find the actual Tab object and close it
-              const actualTab = tm.findTab(tab.id)
-              if (actualTab) {
-                tm.closeTab(actualTab)
-              }
-            })
-            item.append(closeBtn)
-
-            item.addEventListener('click', () => {
-              // Find the actual Tab object and activate it
-              const actualTab = tm.findTab(tab.id)
-              if (actualTab) {
-                tm.activate(actualTab).catch((err: unknown) => {
-                  log.error('nocx: tab activation failed', {
-                    error: err instanceof Error ? err.message : String(err),
-                  })
-                })
-              }
-            })
-            list.append(item)
-          }
-        }
-
-        // Initial render
-        renderSessions()
-
-        // Subscribe to tab changes
-        tm.onTabsChanged = renderSessions
-      },
     },
   ])
 
@@ -163,37 +157,11 @@ async function main() {
     },
   )
 
-  // Update notice functions
-  const showUpdateAvailable = (version: string, notesUrl: string) => {
-    notice.style.display = 'flex'
-    notice.innerHTML = ''
-    const span = document.createElement('span')
-    span.textContent = `nocx ${version} available`
-    const link = document.createElement('a')
-    link.href = notesUrl
-    link.target = '_blank'
-    link.rel = 'noopener'
-    link.textContent = 'release notes'
-    const btn = document.createElement('button')
-    btn.textContent = 'Update'
-    btn.addEventListener('click', () => {
-      notice.textContent = 'Downloading update…'
-      ApplyUpdate()
-        .then(() => {
-          notice.textContent = 'Restart to apply'
-        })
-        .catch((err) => {
-          notice.textContent = `Update failed: ${err instanceof Error ? err.message : String(err)}`
-        })
-    })
-    notice.append(span, ' ', link, ' ', btn)
-  }
-
   // Check for updates. Failures are silent (airplane mode, DNS hiccup, etc.).
   try {
     const info = await CheckForUpdate()
     if (info) {
-      showUpdateAvailable(info.Version, info.NotesURL)
+      notice.showAvailable(info.Version, info.NotesURL)
     }
   } catch {
     // Silent — automatic check failures are not surfaced to the user.
@@ -206,7 +174,7 @@ async function main() {
       try {
         const info = await CheckForUpdate()
         if (info) {
-          showUpdateAvailable(info.Version, info.NotesURL)
+          notice.showAvailable(info.Version, info.NotesURL)
         }
       } catch {
         // Silent.
