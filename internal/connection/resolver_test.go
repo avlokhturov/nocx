@@ -313,3 +313,126 @@ func TestResolver_JumpHostInlineMode(t *testing.T) {
 		t.Error("JumpCredentials should be nil for inline jump")
 	}
 }
+
+//nolint:errcheck
+func TestResolver_CarriesTargetBinding(t *testing.T) {
+	// The attack: a credential bound to host A is linked by a profile
+	// pointing at host B. The resolver must surface the credential's bound
+	// host/port on the ConnectConfig so internal/ssh can refuse it after
+	// resolving the alias. The resolver does not decide the refusal — it
+	// carries the binding (connection is where it is known) for ssh to
+	// enforce (where the effective target is known).
+	ps := newStubProfileStore()
+	cs := newStubCredentialStore()
+
+	_ = ps.SaveCredential(profile.Credential{
+		ID:       "cred:victim:1",
+		Name:     "victim",
+		Username: "victim",
+		Auth:     "password",
+		Host:     "good.example.com",
+		Port:     22,
+	})
+	_ = ps.SaveProfile(profile.SSHProfile{
+		Base: profile.Base{ID: "profile:attack", Name: "attack"},
+		Options: profile.SSHProfileOptions{
+			Host:         "evil.example.com", // attacker-controlled, != bound
+			Port:         22,
+			CredentialID: "cred:victim:1",
+		},
+	})
+
+	r := NewResolver(ps, cs)
+	_, cfg, err := r.Resolve("profile:attack")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if cfg.BoundHost != "good.example.com" {
+		t.Errorf("BoundHost = %q, want good.example.com (the credential's bound host, not the profile's)", cfg.BoundHost)
+	}
+	if cfg.BoundPort != 22 {
+		t.Errorf("BoundPort = %d, want 22", cfg.BoundPort)
+	}
+	if cfg.Credentials == nil {
+		t.Fatal("Credentials must be wired so ssh enforces the binding")
+	}
+}
+
+//nolint:errcheck
+func TestResolver_UnboundCredentialSurfacesEmpty(t *testing.T) {
+	// An unbound credential (Host == "") reaches the resolver's output with
+	// BoundHost empty, so internal/ssh refuses it as ErrCredentialNotBound.
+	// The resolver does NOT refuse here — the refusal is ssh's job, after it
+	// knows the effective target — but the empty binding must travel through
+	// intact rather than being defaulted or masked.
+	ps := newStubProfileStore()
+	cs := newStubCredentialStore()
+
+	_ = ps.SaveCredential(profile.Credential{
+		ID: "cred:unbound:1", Name: "unbound", Username: "u", Auth: "password",
+		// Host intentionally empty — the pre-T5 "any host" hole.
+	})
+	_ = ps.SaveProfile(profile.SSHProfile{
+		Base:    profile.Base{ID: "profile:u", Name: "u"},
+		Options: profile.SSHProfileOptions{Host: "any.example.com", CredentialID: "cred:unbound:1"},
+	})
+
+	r := NewResolver(ps, cs)
+	_, cfg, err := r.Resolve("profile:u")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if cfg.BoundHost != "" {
+		t.Errorf("BoundHost = %q, want empty (unbound credential must surface as empty)", cfg.BoundHost)
+	}
+	if cfg.BoundPort != 0 {
+		t.Errorf("BoundPort = %d, want 0", cfg.BoundPort)
+	}
+}
+
+//nolint:errcheck
+func TestResolver_CarriesJumpBinding(t *testing.T) {
+	// The jump credential's binding is carried separately on the config,
+	// for ssh to enforce against the jump host's resolved name — independent
+	// of the target's binding. A target-bound credential must not satisfy
+	// the jump binding and vice versa.
+	ps := newStubProfileStore()
+	cs := newStubCredentialStore()
+
+	_ = ps.SaveCredential(profile.Credential{
+		ID: "cred:jump:1", Name: "jump", Username: "j", Auth: "password",
+		Host: "bastion-a.example.com", Port: 2222,
+	})
+	_ = ps.SaveProfile(profile.SSHProfile{
+		Base:    profile.Base{ID: "profile:jump", Name: "jump"},
+		Options: profile.SSHProfileOptions{Host: "bastion-b.example.com", CredentialID: "cred:jump:1"},
+	})
+
+	_ = ps.SaveCredential(profile.Credential{
+		ID: "cred:tgt:1", Name: "tgt", Username: "t", Auth: "password",
+		Host: "target.example.com",
+	})
+	_ = ps.SaveProfile(profile.SSHProfile{
+		Base: profile.Base{ID: "profile:tgt", Name: "tgt"},
+		Options: profile.SSHProfileOptions{
+			Host:         "target.example.com",
+			CredentialID: "cred:tgt:1",
+			JumpHost:     "profile:jump",
+		},
+	})
+
+	r := NewResolver(ps, cs)
+	_, cfg, err := r.Resolve("profile:tgt")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if cfg.JumpBoundHost != "bastion-a.example.com" {
+		t.Errorf("JumpBoundHost = %q, want bastion-a.example.com (the jump credential's bound host)", cfg.JumpBoundHost)
+	}
+	if cfg.JumpBoundPort != 2222 {
+		t.Errorf("JumpBoundPort = %d, want 2222", cfg.JumpBoundPort)
+	}
+	if cfg.BoundHost != "target.example.com" {
+		t.Errorf("BoundHost = %q, want target.example.com (target binding independent of jump)", cfg.BoundHost)
+	}
+}

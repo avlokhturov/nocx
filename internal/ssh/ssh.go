@@ -60,6 +60,28 @@ type ConnectConfig struct {
 	JumpKeyFile  string
 	JumpAuthMode string
 
+	// BoundHost/BoundPort carry the host a linked credential is bound to
+	// (from profile.Credential), set by the resolver. internal/ssh enforces
+	// them after resolveConfig against the *resolved* hostname and effective
+	// port — never the alias the renderer chose. Binding on the alias is
+	// unsound: ~/.ssh/config can map "Host myserver" to "HostName
+	// evil.example.com", so a binding satisfiable by a name the attacker
+	// chooses is not a binding (nocx-mon/PR11-T5). An empty BoundHost means
+	// the credential is unbound and is REFUSED at connect time — "any host"
+	// is exactly the credential-redirection hole. An unset BoundPort (0)
+	// means "this host, any port": host is the load-bearing identity; making
+	// port mandatory would break every existing host-only credential harder
+	// than the hole it would close. Stated exception, not a silent gap.
+	BoundHost string
+	BoundPort int
+
+	// JumpBoundHost/JumpBoundPort are the jump credential's binding, enforced
+	// against the jump host's resolved name and effective port independently
+	// of the target — a target-bound credential must not satisfy the jump
+	// binding and vice versa.
+	JumpBoundHost string
+	JumpBoundPort int
+
 	// JumpCredentials, when set, enables late-bind of the jump host's
 	// password from the credential store. Separate from the target's
 	// Credentials so each hop resolves independently.

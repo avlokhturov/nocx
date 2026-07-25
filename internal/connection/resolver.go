@@ -82,12 +82,22 @@ func (r *Resolver) buildConfig(prof *profile.SSHProfile, visited map[string]bool
 		cfg.AuthMode = string(cred.Auth)
 		cfg.KeyFile = cred.KeyPath
 
+		// Carry the credential's binding down for internal/ssh to enforce
+		// after resolveConfig. connection is where the binding is known
+		// (from profile.Credential); ssh is where the effective target is
+		// known. Neither layer alone has both facts, so the check straddles
+		// them (nocx-mon/PR11-T5). An empty BoundHost reaches ssh as empty
+		// and is refused there — "any host" is the redirection hole.
+		cfg.BoundHost = cred.Host
+		cfg.BoundPort = cred.Port
+
 		// Wire credential store for late-bound password resolution.
 		// Identity is keyed by credential ID (matching frontend's savePassword path).
 		cfg.Credentials = r.credentials
 		cfg.CredIdentity = credential.Identity{User: prof.Options.CredentialID}
 	} else {
-		// Inline mode: use profile's own fields.
+		// Inline mode: use profile's own fields. No stored secret, no
+		// binding to enforce — there is nothing for an attacker to redirect.
 		cfg.User = prof.Options.User
 		cfg.AuthMode = string(prof.Options.Auth)
 	}
@@ -118,6 +128,11 @@ func (r *Resolver) buildConfig(prof *profile.SSHProfile, visited map[string]bool
 		if jumpCfg.Credentials != nil {
 			cfg.JumpCredentials = jumpCfg.Credentials
 			cfg.JumpCredIdentity = jumpCfg.CredIdentity
+			// Carry the jump credential's binding for ssh to enforce
+			// against the jump host's resolved name/port, separately from
+			// the target (nocx-mon/PR11-T5).
+			cfg.JumpBoundHost = jumpCfg.BoundHost
+			cfg.JumpBoundPort = jumpCfg.BoundPort
 		}
 	}
 

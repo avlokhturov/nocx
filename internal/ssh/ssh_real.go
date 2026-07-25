@@ -66,6 +66,17 @@ func (rc *RealClient) Connect(ctx context.Context, host string, opts ...ConnectO
 		return nil, fmt.Errorf("resolve config for %s: %w", host, err)
 	}
 
+	// Enforce the credential binding BEFORE any dial. Only a linked
+	// credential (Credentials != nil) carries a binding to check; inline
+	// auth has no stored secret to redirect. The check sees the resolved
+	// hostname/effective port, so an alias remapped via HostName cannot
+	// slip a bound credential past its target (nocx-mon/PR11-T5).
+	if cfg.Credentials != nil {
+		if bindErr := checkBinding(cfg.BoundHost, cfg.BoundPort, resolved, cfg.CredIdentity.User, false); bindErr != nil {
+			return nil, bindErr
+		}
+	}
+
 	d := &dialer{client: rc}
 	gclient, err := d.dial(ctx, host, resolved, cfg)
 	if err != nil {

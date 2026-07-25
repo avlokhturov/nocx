@@ -121,6 +121,15 @@ func (d *dialer) connectToJumpHost(ctx context.Context, cfg *ConnectConfig) (*go
 	if err != nil {
 		return nil, fmt.Errorf("resolve jump host config: %w", err)
 	}
+	// Enforce the jump credential's binding against the jump host's resolved
+	// name/effective port, independently of the target. JumpCredentials is
+	// the newer, easier-to-miss path (nocx-mon/PR11-T5): a jump credential
+	// bound to one bastion must not be submittable to another.
+	if jumpCfg.Credentials != nil {
+		if bindErr := checkBinding(cfg.JumpBoundHost, cfg.JumpBoundPort, jumpResolved, jumpCfg.CredIdentity.User, true); bindErr != nil {
+			return nil, bindErr
+		}
+	}
 
 	jumpChain, err := d.client.buildAuthChain(jumpResolved, jumpCfg)
 	if err != nil {
