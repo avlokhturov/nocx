@@ -61,9 +61,9 @@ func main() {
 		Mac: &mac.Options{
 			TitleBar: mac.TitleBarHidden(),
 		},
-		Debug: options.Debug{
-			OpenInspectorOnStartup: true,
-		},
+		// DevTools/Inspector is off by default in production builds.
+		// Enable locally for debugging: OpenInspectorOnStartup: true.
+		Debug:      options.Debug{},
 		OnStartup:  wailsApp.startup,
 		OnShutdown: wailsApp.shutdown,
 		Bind: []interface{}{
@@ -83,6 +83,11 @@ type WailsApp struct {
 	// updateInfo holds the most recent Check result. Apply takes no
 	// arguments — it applies the update that Check already verified.
 	updateInfo *update.UpdateInfo
+}
+
+// Log logs a message from the frontend.
+func (w *WailsApp) Log(message string) {
+	w.backend.Log(message)
 }
 
 func (w *WailsApp) startup(ctx context.Context) {
@@ -149,6 +154,10 @@ func (w *WailsApp) shutdown(ctx context.Context) {
 
 func (w *WailsApp) GetWSPort() int {
 	return w.backend.WSPort()
+}
+
+func (w *WailsApp) GetWSToken() string {
+	return w.backend.WSToken()
 }
 
 // CheckForUpdate fetches and verifies the signed release manifest.

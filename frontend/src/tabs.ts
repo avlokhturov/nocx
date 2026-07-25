@@ -12,6 +12,9 @@ import type { ClipboardBanner } from './banner'
 import { CommandLedger } from './command-ledger'
 import type { MarkerAdapter } from './renderers/types'
 import { ScrollbackController } from './scrollback/controller'
+import type { ProfileClient, SSHProfile } from './profiles'
+import { ConnectionManagerViewImpl } from './connections'
+import { log } from './log'
 
 // How long the grid must hold still before the PTY is told about it.
 // Dragging a window edge walks the grid through every intermediate size,
@@ -113,6 +116,9 @@ export class Tab {
   rows = 0
   private resizeTimer: number | undefined
 
+  /** When set, this tab hosts a ConnectionManagerView instead of a terminal. */
+  managerView: ConnectionManagerViewImpl | null = null
+
   constructor(
     private readonly client: WSClient,
     private readonly rendererName: RendererName,
@@ -120,6 +126,11 @@ export class Tab {
     private readonly gate: ClipboardGate,
     private readonly banner: ClipboardBanner,
     id: number,
+    private readonly sshOpts?: {
+      profileId: string
+      host: string
+      user?: string
+    },
   ) {
     this.id = id
     this._readyPromise = new Promise<boolean>((resolve) => {
@@ -182,6 +193,9 @@ export class Tab {
       this.indicator.classList.add('tab-activity')
     }
   }
+
+  /** Callback for when session exits — set by TabManager to close the tab. */
+  onSessionExit?: () => void
 
   get agentStatus(): AgentStatus | null {
     return this._agentStatus
@@ -263,11 +277,34 @@ export class Tab {
    * it mounts.
    */
   async start(): Promise<void> {
+    log.info('nocx: Tab.start() called', { managerView: !!this.managerView, started: this.started })
+    // Manager tabs host the connection manager UI, not a terminal.
+    // Show the skeleton immediately on first activation (when the pane is
+    // still empty); subsequent activations keep the user's form intact.
+    if (this.managerView) {
+      if (this.pane.children.length === 0) {
+        this.managerView.show()
+        await this.managerView.refresh()
+      }
+      return
+    }
+
     if (this.started) return
     this.started = true
 
+    // Wait for pane to become visible and have proper dimensions
+    await new Promise((resolve) => requestAnimationFrame(resolve))
+
     try {
+      log.info('nocx: creating renderer')
       const renderer = createRenderer(this.rendererName)
+
+      // Log pane dimensions before mounting
+      const paneRect = this.pane.getBoundingClientRect()
+      log.info('nocx: pane dimensions before mount', {
+        width: paneRect.width,
+        height: paneRect.height,
+      })
 
       // ── DOM scrollback controller ───────────────────────────────────────
       this.scrollback = new ScrollbackController({
@@ -276,7 +313,9 @@ export class Tab {
         now: () => performance.now(),
       })
 
+      log.info('nocx: mounting renderer')
       await renderer.mount(this.scrollback.mountTarget)
+      log.info('nocx: renderer mounted', { cols: renderer.cols, rows: renderer.rows })
 
       this.cols = renderer.cols
       this.rows = renderer.rows
@@ -510,29 +549,38 @@ export class Tab {
       })
 
       // Open the session at the renderer's actual grid size. Per AD-1/AD-7,
-      // the PTY is created at this size — never spawn-then-resize.
-      // Enhanced input (DOM editor + marker-only prompt) is always on; the shell
-      // fails open to a plain terminal when markers are absent (ADR-0004/0006).
-      const session = await this.client.openSession(this.cols, this.rows, true)
+      // the PTY/channel is created at this size — never spawn-then-resize.
+      // Enhanced input (DOM editor + marker-only prompt) is always on for local
+      // sessions; the shell fails open to a plain terminal when markers are absent (ADR-0004/0006).
+      const session = this.sshOpts
+        ? await this.client.openSSHSession(this.cols, this.rows, this.sshOpts.profileId)
+        : await this.client.openSession(this.cols, this.rows, true)
       this.session = session
+      log.info('nocx: session opened', { sid: session.sessionId, cwd: session.cwd || '' })
 
       // Store the initial cwd for the command ledger.
-      this._cwd = session.cwd
-      this._host = ''
+      this._cwd = session.cwd || ''
+      this._host = this.sshOpts?.host || ''
 
       // Seed the editor cwd chip with the initial cwd.
-      this.editor?.setCwd(session.cwd)
+      this.editor?.setCwd(session.cwd || '')
 
       // The directory names the tab until a program sets a title; from here
-      // on OSC 7 keeps it following `cd` (nocx-5mn.2).
-      this._defaultTitle = directoryLabel(session.cwd)
+      // on OSC 7 keeps it following `cd` (nocx-5mn.2). For SSH tabs, show
+      // the host as the title instead.
+      if (this.sshOpts) {
+        this._defaultTitle = this.sshOpts.host
+        this.button.title = `SSH ${this.sshOpts.user ? this.sshOpts.user + '@' : ''}${this.sshOpts.host}`
+      } else {
+        this._defaultTitle = directoryLabel(session.cwd)
+        this.button.title = cwdTooltip(session.cwd, false)
+      }
       // First paint of the label: it stayed empty until the name existed
-      // (nocx-83a). Nothing can have set a title before this point — onTitle is
-      // subscribed below, after this await.
+      // (nocx-83a).
       this.titleSpan.textContent = this._title = this._defaultTitle
-      this.button.title = cwdTooltip(session.cwd, false)
 
       session.onData((data: string) => {
+        log.debug('nocx: session data received', { length: data.length })
         renderer.write(data)
         // Normal-buffer output on a background tab lights the indicator.
         // Full-screen TUIs repaint constantly in the alternate buffer —
@@ -542,12 +590,13 @@ export class Tab {
         }
       })
       session.onExit((sid: string) => {
-        console.log('nocx: session exited:', sid)
+        log.info('nocx: session exited', { sid })
         this.inputState.dispatch({ type: 'exit' })
-        // B3: fail-open — finalize running records, dispose per-record
-        // markers.
+        // B3: fail-open — finalize running records, dispose per-record markers.
         this.ledger?.finalizeOpen()
         this._disposeAllMarkers()
+        // Close the tab when session exits.
+        this.onSessionExit?.()
       })
       session.onReset(() => {
         renderer.reset()
@@ -685,15 +734,16 @@ export class Tab {
         }
       })
 
+      this.session = session
       this._readyResolve(true)
-      console.log(`nocx: tab ready (renderer=${this.rendererName})`, { sid: session.sessionId })
+      log.info('nocx: tab ready', { renderer: this.rendererName, sid: session.sessionId })
     } catch (err) {
       const notice = document.createElement('pre')
       notice.className = 'pane-error'
       notice.textContent = `Tab ${this.id} failed to start:\n\n${err instanceof Error ? err.message : String(err)}`
       this.pane.replaceChildren(notice)
       this._readyResolve(false)
-      console.error(`nocx: tab ${this.id} failed`, err)
+      log.error('nocx: tab failed', { id: this.id, error: String(err) })
     }
   }
 
@@ -750,6 +800,7 @@ export class TabManager {
   private readonly clipboard: ClipboardAccess
   private readonly gate: ClipboardGate
   private readonly banner: ClipboardBanner
+  private readonly profileClient: ProfileClient
   private readonly addBtn: HTMLButtonElement
   private readonly tabsContainer: HTMLElement
   private readonly _initialTabReady: Promise<void>
@@ -761,6 +812,7 @@ export class TabManager {
     clipboard: ClipboardAccess,
     gate: ClipboardGate,
     banner: ClipboardBanner,
+    profileClient: ProfileClient,
   ) {
     this.bar = bar
     this.panes = panes
@@ -769,6 +821,7 @@ export class TabManager {
     this.clipboard = clipboard
     this.gate = gate
     this.banner = banner
+    this.profileClient = profileClient
 
     bar.setAttribute('role', 'tablist')
     bar.classList.add('tabbar')
@@ -805,6 +858,23 @@ export class TabManager {
     return this.tabs.length
   }
 
+  /** Returns information about all open tabs for sidebar display. */
+  getTabs(): Array<{ id: number; title: string; isActive: boolean }> {
+    return this.tabs.map((tab) => ({
+      id: tab.id,
+      title: tab.title || 'Terminal',
+      isActive: tab === this.activeTab,
+    }))
+  }
+
+  /** Find a Tab by id, for sidebar interactions that need the actual Tab object. */
+  findTab(id: number): Tab | undefined {
+    return this.tabs.find((t) => t.id === id)
+  }
+
+  /** Callback fired when tabs change (added, removed, title changed). */
+  onTabsChanged?: () => void
+
   /**
    * Resolves when the initial tab's renderer mounts and its PTY session
    * opens. Rejects when the initial tab's start() threw — a broken tab
@@ -820,6 +890,25 @@ export class TabManager {
 
   /** Create a new tab, activate it. */
   newTab(): Tab {
+    return this.createTab(undefined)
+  }
+
+  /** Create a new SSH tab targeting the given profile, activate it. */
+  newSSHTab(profileId: string, host: string, user?: string): Tab {
+    log.info('nocx: newSSHTab called', { profileId, host })
+    return this.createTab({ profileId, host, user })
+  }
+
+  /** Create or activate the Connections manager tab. */
+  newManagerTab(): Tab {
+    // Check if Connection Manager tab already exists
+    const existingManagerTab = this.tabs.find((t) => t.managerView !== null)
+    if (existingManagerTab) {
+      // Just activate the existing tab
+      void this.activate(existingManagerTab)
+      return existingManagerTab
+    }
+
     const tab = new Tab(
       this.client,
       this.rendererName,
@@ -827,6 +916,73 @@ export class TabManager {
       this.gate,
       this.banner,
       this.nextTabId++,
+    )
+
+    const cmView = new ConnectionManagerViewImpl(tab.pane, this.profileClient)
+    cmView.onConnect = (profile: SSHProfile) => {
+      log.info('nocx: onConnect called', { profileId: profile.id, profile: profile.name })
+      this.newSSHTab(profile.id, profile.options.host, profile.options.user)
+    }
+
+    // Stash the view so start() can render it into the pane on activation.
+    tab.managerView = cmView
+
+    // Set up session exit handler to close the tab
+    tab.onSessionExit = () => this.closeTab(tab)
+
+    this.tabs.push(tab)
+    this.tabsContainer.append(tab.button)
+    this.panes.append(tab.pane)
+
+    tab.button.addEventListener('click', () => {
+      void this.activate(tab)
+    })
+    tab.closeBtn.addEventListener('click', (e: MouseEvent) => {
+      e.stopPropagation()
+      this.closeTab(tab)
+    })
+    tab.button.addEventListener('mousedown', (e: MouseEvent) => {
+      if (e.button === 1) {
+        e.preventDefault()
+        this.closeTab(tab)
+      }
+    })
+
+    // Drag and drop for tab reordering
+    tab.button.draggable = true
+    tab.button.addEventListener('dragstart', (e: DragEvent) => {
+      e.dataTransfer?.setData('text/plain', String(tab.id))
+      tab.button.classList.add('dragging')
+    })
+    tab.button.addEventListener('dragend', () => {
+      tab.button.classList.remove('dragging')
+    })
+    tab.button.addEventListener('dragover', (e: DragEvent) => {
+      e.preventDefault()
+    })
+    tab.button.addEventListener('drop', (e: DragEvent) => {
+      e.preventDefault()
+      const draggedId = Number(e.dataTransfer?.getData('text/plain'))
+      if (draggedId !== tab.id) {
+        this.reorderTab(draggedId, tab.id)
+      }
+    })
+
+    this.refreshIndices()
+    void this.activate(tab)
+    return tab
+  }
+
+  /** Internal: create a tab with optional SSH params (display-only). */
+  private createTab(sshOpts?: { profileId: string; host: string; user?: string }): Tab {
+    const tab = new Tab(
+      this.client,
+      this.rendererName,
+      this.clipboard,
+      this.gate,
+      this.banner,
+      this.nextTabId++,
+      sshOpts,
     )
 
     // Track alt-screen state for the traffic-light overlap fix.
@@ -841,6 +997,9 @@ export class TabManager {
     // Append to the tabs container (addBtn sits after the container).
     this.tabsContainer.append(tab.button)
     this.panes.append(tab.pane)
+
+    // Set up session exit handler to close the tab
+    tab.onSessionExit = () => this.closeTab(tab)
 
     // Click → activate. The close button's own handler calls stopPropagation,
     // so close-button clicks never reach here.
@@ -862,8 +1021,29 @@ export class TabManager {
       }
     })
 
+    // Drag and drop for tab reordering
+    tab.button.draggable = true
+    tab.button.addEventListener('dragstart', (e: DragEvent) => {
+      e.dataTransfer?.setData('text/plain', String(tab.id))
+      tab.button.classList.add('dragging')
+    })
+    tab.button.addEventListener('dragend', () => {
+      tab.button.classList.remove('dragging')
+    })
+    tab.button.addEventListener('dragover', (e: DragEvent) => {
+      e.preventDefault()
+    })
+    tab.button.addEventListener('drop', (e: DragEvent) => {
+      e.preventDefault()
+      const draggedId = Number(e.dataTransfer?.getData('text/plain'))
+      if (draggedId !== tab.id) {
+        this.reorderTab(draggedId, tab.id)
+      }
+    })
+
     this.refreshIndices()
     void this.activate(tab)
+    this.onTabsChanged?.()
     return tab
   }
 
@@ -891,6 +1071,7 @@ export class TabManager {
     tab.pane.remove()
     tab.button.remove()
     this.tabs.splice(index, 1)
+    this.onTabsChanged?.()
 
     // Closing the last tab opens a fresh one immediately so the window
     // is never empty (decision: no start page / empty state).
@@ -910,6 +1091,11 @@ export class TabManager {
 
   /** Activate a tab: show its pane, focus its renderer. */
   async activate(tab: Tab): Promise<void> {
+    log.info('nocx: TabManager.activate() called', {
+      tabId: tab.id,
+      isManager: !!tab.managerView,
+      isActive: tab === this.activeTab,
+    })
     if (tab === this.activeTab) {
       tab.focus()
       return
@@ -918,11 +1104,13 @@ export class TabManager {
     this.activeTab?.setActive(false)
     this.activeTab = tab
     tab.setActive(true)
+    log.info('nocx: tab.setActive(true) called', { paneClasses: tab.pane.className })
 
     await tab.start()
     tab.refreshAtlas()
     tab.focus()
     this.syncAltScreenClass()
+    this.onTabsChanged?.()
   }
 
   /** Activate the tab at a 0-based position. */
@@ -934,6 +1122,24 @@ export class TabManager {
   /** Close the currently-active tab. */
   closeActiveTab(): void {
     if (this.activeTab) this.closeTab(this.activeTab)
+  }
+
+  /** Reorder tabs: move draggedId to before targetId. */
+  reorderTab(draggedId: number, targetId: number): void {
+    const draggedIndex = this.tabs.findIndex((t) => t.id === draggedId)
+    const targetIndex = this.tabs.findIndex((t) => t.id === targetId)
+    if (draggedIndex === -1 || targetIndex === -1) return
+
+    const [draggedTab] = this.tabs.splice(draggedIndex, 1)
+    this.tabs.splice(targetIndex, 0, draggedTab)
+
+    // Reorder DOM elements
+    this.tabsContainer.innerHTML = ''
+    for (const tab of this.tabs) {
+      this.tabsContainer.append(tab.button)
+    }
+
+    this.refreshIndices()
   }
 
   private refreshIndices(): void {

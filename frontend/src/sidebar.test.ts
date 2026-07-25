@@ -7,8 +7,8 @@ import { SidebarImpl, SidebarView } from './sidebar'
 // collapses the panel; clicking any icon while collapsed re-opens it.
 
 const VIEWS: SidebarView[] = [
-  { id: 'sessions', title: 'Sessions', icon: '<svg id="icon-sessions" />' },
-  { id: 'settings', title: 'Settings', icon: '<svg id="icon-settings" />' },
+  { id: 'sessions', title: 'Sessions', icon: '<svg id="icon-sessions" />', action: 'panel' },
+  { id: 'settings', title: 'Settings', icon: '<svg id="icon-settings" />', action: 'panel' },
 ]
 
 function mount(): { bar: HTMLElement; panel: HTMLElement } {

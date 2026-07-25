@@ -14,7 +14,11 @@ import (
 )
 
 func main() {
-	a, err := app.New()
+	opts := []app.Option{}
+	if addr := os.Getenv("NOCX_WS_ADDR"); addr != "" {
+		opts = append(opts, app.WithWSAddr(addr))
+	}
+	a, err := app.New(opts...)
 	if err != nil {
 		panic(err)
 	}
@@ -23,8 +27,9 @@ func main() {
 	if err := a.Start(ctx); err != nil {
 		panic(err)
 	}
-	// Machine-readable line the runner greps for.
+	// Machine-readable lines the runner greps for.
 	fmt.Printf("WSPORT=%d\n", a.WSPort())
+	fmt.Printf("WSTOKEN=%s\n", a.WSToken())
 	_ = os.Stdout.Sync()
 
 	c := make(chan os.Signal, 1)

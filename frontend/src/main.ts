@@ -1,10 +1,18 @@
 import './style.css'
-import { GetWSPort, CheckForUpdate, ApplyUpdate, ReportHealthy } from '../wailsjs/go/main/WailsApp'
+import {
+  GetWSPort,
+  GetWSToken,
+  CheckForUpdate,
+  ApplyUpdate,
+  ReportHealthy,
+} from '../wailsjs/go/main/WailsApp'
+import { log } from './log'
 import { WSClient } from './ipc'
 import { TabManager } from './tabs'
 import { SidebarImpl } from './sidebar'
 import { createClipboardAccess, ClipboardGate } from './clipboard'
 import { ClipboardBannerImpl } from './banner'
+import { ProfileClient } from './profiles'
 
 /**
  * Renders the auto-update notice in the tab bar. The notice is a small,
@@ -67,10 +75,6 @@ class UpdateNotice {
     this.el.className = 'update-notice error'
   }
 
-  hide(): void {
-    this.el.style.display = 'none'
-  }
-
   private async apply(): Promise<void> {
     this.showDownloading()
     try {
@@ -85,6 +89,7 @@ class UpdateNotice {
 }
 
 async function main() {
+  log.info('nocx: main() called')
   const bar = document.getElementById('tabbar')
   const panes = document.getElementById('panes')
   const activityBar = document.getElementById('activitybar')
@@ -93,29 +98,11 @@ async function main() {
     throw new Error('#tabbar / #panes / #activitybar / #sidebar not found')
   }
 
-  // App-shell sidebar (nocx-8yg.9) — VS Code-style activity bar plus a
-  // collapsible panel. One placeholder view for now: the region is the
-  // future home of the SSH host list, saved sessions, vault, and settings.
-  new SidebarImpl(activityBar, sidebarPanel, [
-    {
-      id: 'sessions',
-      title: 'Sessions',
-      icon: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3"/><path d="M13 15h4"/></svg>',
-    },
-  ])
-
   // Update notice — renders inline in the tab bar, right-aligned.
   const notice = new UpdateNotice(bar)
 
-  // Clipboard access is constructed at the composition root and injected
-  // down (AD-8). No consumer calls the factory — a test can inject a fake.
   const clipboard = createClipboardAccess()
-
-  // OSC 52 gate — pure state, no DOM. Denied by default (Warp default).
   const gate = new ClipboardGate()
-
-  // Banner — raised once on the first blocked OSC 52 write. The real
-  // implementation manipulates the DOM; tests inject a fake.
   const banner = new ClipboardBannerImpl()
 
   // Bound Go method — no startup-event race. Guarded so the renderers still
@@ -123,20 +110,47 @@ async function main() {
   // In that dev path the backend lives on the page's own host (e.g. a remote
   // dev VM), not necessarily on loopback.
   let port = 9876
+  let token = ''
   let host: string | undefined
   try {
     port = await GetWSPort()
+    token = await GetWSToken()
   } catch {
     host = location.hostname
     console.warn('nocx: no Wails runtime, using fallback WS port', port)
   }
 
   const client = new WSClient()
-  await client.connect(port, host)
-
+  await client.connect(port, host, token)
+  const profileClient = new ProfileClient(client.rawSocket())
   // TabManager opens the first tab and activates it in the constructor.
   // The renderer is selected via ?r=xterm|wterm inside TabManager.
-  const tm = new TabManager(bar, panes, client, clipboard, gate, banner)
+  const tm = new TabManager(bar, panes, client, clipboard, gate, banner, profileClient)
+
+  // App-shell sidebar (nocx-8yg.9) — VS Code-style activity bar plus a
+  // collapsible panel. Two views:
+  // - Connections: opens the SSH connection manager as a full-screen tab.
+  // - Sessions: placeholder, as on main. It is deliberately empty: the tab
+  //   list lives in the tab bar. Making the sidebar a second home for tabs is
+  //   the subject of epic nocx-d3q (configurable placement), not of this branch.
+  new SidebarImpl(activityBar, sidebarPanel, [
+    {
+      id: 'connections',
+      title: 'Connections',
+      icon: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 17H7A5 5 0 0 1 7 7h2"/><path d="M15 7h2a5 5 0 1 1 0 10h-2"/><line x1="8" y1="12" x2="16" y2="12"/></svg>',
+      action: 'tab',
+      onActivate: () => {
+        log.info('nocx: opening Connections tab')
+        tm.newManagerTab()
+      },
+    },
+    {
+      id: 'sessions',
+      title: 'Sessions',
+      icon: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3"/><path d="M13 15h4"/></svg>',
+      action: 'panel',
+    },
+  ])
 
   // --- Auto-update: check on start, then every 24 h ---
 
@@ -176,4 +190,4 @@ async function main() {
   }, DAY_MS)
 }
 
-main().catch(console.error)
+main().catch((err) => log.error('nocx: main error', { message: (err as Error).message }))

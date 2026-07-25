@@ -3,14 +3,21 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
+	"os"
 	"sync"
 
 	"github.com/gorilla/websocket"
+	"github.com/shady2k/nocx/internal/credential"
+	"github.com/shady2k/nocx/internal/importer"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/ssh"
 )
 
 // sessionRx wraps a session's output ring together with the current attached
@@ -43,8 +50,26 @@ type WSServer struct {
 	registry session.Registry
 	server   *http.Server
 	port     int
-	listener net.Listener
-	upgrader websocket.Upgrader
+
+	// Per-launch capability token (bead nocx-hl3).
+	token       string
+	tokenSource io.Reader // entropy source; crypto/rand default
+	origins     OriginPolicy
+
+	// Override the listen address. Default 127.0.0.1:0.
+	listenAddr string
+	listener   net.Listener
+	upgrader   websocket.Upgrader
+
+	// Optional profile/credential stores for the connection-manager control
+	// plane (profiles.*, groups.*, credentials.*). When nil, those methods
+	// return a JSON-RPC error.
+	profiles    profile.ProfileStore
+	credentials credential.CredentialStore
+
+	// Profile resolver maps profile IDs to SSH connect configs.
+	resolver   ProfileResolver
+	resolverOK bool
 
 	// ringsMu protects rx and stopped. One sessionRx per session;
 	// keyed by session.ID. When stopped is true, getOrCreateRx returns nil
@@ -54,22 +79,69 @@ type WSServer struct {
 	stopped bool
 }
 
-func NewWSServer(logger log.Logger, reg session.Registry) *WSServer {
-	return &WSServer{
+// ProfileResolver maps a profile ID to an SSH host and connect config.
+// Passwords are never carried in the returned config — they are late-bound
+// via the credential store wired into ConnectConfig.
+type ProfileResolver interface {
+	Resolve(profileID string) (host string, cfg *ssh.ConnectConfig, err error)
+}
+
+// WithProfileResolver attaches a profile resolver for SSH connection setup.
+func WithProfileResolver(r ProfileResolver) WSServerOption {
+	return func(s *WSServer) { s.resolver = r; s.resolverOK = true }
+}
+
+// WSServerOption configures a WSServer.
+type WSServerOption func(*WSServer)
+
+// WithProfileStore attaches a profile store to the server, enabling the
+// profiles.* and groups.* JSON-RPC methods.
+func WithProfileStore(ps profile.ProfileStore) WSServerOption {
+	return func(s *WSServer) { s.profiles = ps }
+}
+
+// WithCredentialStore attaches a credential store, enabling the
+// credentials.* JSON-RPC methods.
+func WithCredentialStore(cs credential.CredentialStore) WSServerOption {
+	return func(s *WSServer) { s.credentials = cs }
+}
+
+func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption) *WSServer {
+	s := &WSServer{
 		log:      logger,
 		registry: reg,
 		upgrader: websocket.Upgrader{
+			// CheckOrigin is always permissive; our own authorize
+			// call handles origin/host policy before the upgrade.
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
-		rx: make(map[session.ID]*sessionRx),
+		rx:      make(map[session.ID]*sessionRx),
+		origins: LoopbackOriginPolicy{},
 	}
+	for _, o := range opts {
+		o(s)
+	}
+	return s
 }
 
 func (s *WSServer) Start(ctx context.Context) error {
+	// Fail closed: no entropy → no token → no connections.
+	if err := s.mintToken(); err != nil {
+		return err
+	}
+
+	// Configure the upgrader to accept only our token as the subprotocol,
+	// so it echoes the selected protocol on upgrade (RFC 6455).
+	s.upgrader.Subprotocols = []string{tokenProtocol(s.token)}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/session", s.handleSession)
 
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	addr := s.listenAddr
+	if addr == "" {
+		addr = "127.0.0.1:0"
+	}
+	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("ws listen: %w", err)
 	}
@@ -279,6 +351,14 @@ type openParams struct {
 	XPixel   uint16 `json:"xpixel"`
 	YPixel   uint16 `json:"ypixel"`
 	Enhanced bool   `json:"enhanced"`
+
+	// SSH fields — when Kind="ssh", the session opens an SSH channel.
+	// ProfileID identifies the SSH profile to connect to; the backend
+	// resolves host, credentials and jump host from the profile store.
+	// Passwords are never carried in the open params — they are late-bound
+	// inside the SSH auth chain from the credential store.
+	Kind      string `json:"kind,omitempty"`
+	ProfileID string `json:"profileId,omitempty"`
 }
 
 // resizeParams is the payload of the "resize" RPC method.
@@ -310,6 +390,9 @@ type ackParams struct {
 // --- HTTP handler ---------------------------------------------------------
 
 func (s *WSServer) handleSession(w http.ResponseWriter, r *http.Request) {
+	if !s.authorize(w, r) {
+		return
+	}
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		s.log.Error("ws upgrade", "error", err)
@@ -370,7 +453,7 @@ func (s *WSServer) readLoop(ctx context.Context, wconn *wsConn, state *connState
 
 func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state *connState, data []byte) {
 	if !isJSONObject(data) {
-		s.log.Warn("jsonrpc invalid request", "data", string(data))
+		s.log.Warn("jsonrpc invalid request", "len", len(data))
 		resp := newJSONRPCError(json.RawMessage("null"), -32600, "Invalid Request")
 		_ = wconn.writeJSON(resp)
 		return
@@ -378,7 +461,18 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 
 	var req jsonrpcRequest
 	if err := json.Unmarshal(data, &req); err != nil {
-		s.log.Warn("jsonrpc parse error", "data", string(data))
+		// Transport-wide rule: any control frame may carry a secret, so none
+		// are logged verbatim. Log size and error category only.
+		category := "parse_error"
+		var syntaxErr *json.SyntaxError
+		var typeErr *json.UnmarshalTypeError
+		switch {
+		case errors.As(err, &syntaxErr):
+			category = "syntax_error"
+		case errors.As(err, &typeErr):
+			category = "type_error"
+		}
+		s.log.Warn("jsonrpc parse error", "len", len(data), "category", category)
 		resp := newJSONRPCError(json.RawMessage("null"), -32700, "Parse error")
 		_ = wconn.writeJSON(resp)
 		return
@@ -401,6 +495,18 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.handleAttach(ctx, wconn, state, req)
 	case "ack":
 		s.handleAck(req)
+	case "profiles.list", "profiles.create", "profiles.update", "profiles.delete":
+		s.handleProfileMethod(wconn, req)
+	case "profiles.importTabby":
+		s.handleImportTabby(wconn, req)
+	case "groups.list", "groups.create", "groups.update", "groups.delete":
+		s.handleGroupMethod(wconn, req)
+	case "credentials.list", "credentials.create", "credentials.update", "credentials.delete":
+		s.handleCredentialCRUDMethod(wconn, req)
+	case "credentials.savePassword", "credentials.deletePassword",
+		"credentials.hasPassword",
+		"credentials.saveKeyPassphrase", "credentials.deleteKeyPassphrase":
+		s.handleCredentialMethod(wconn, req)
 	default:
 		resp := newJSONRPCError(req.ID, -32601, "Method not found")
 		_ = wconn.writeJSON(resp)
@@ -423,14 +529,49 @@ func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connSta
 		return
 	}
 
-	sess, err := s.registry.Open(ctx, session.Config{
+	cfg := session.Config{
 		Kind:     session.KindLocal,
 		Cols:     params.Cols,
 		Rows:     params.Rows,
 		XPixel:   params.XPixel,
 		YPixel:   params.YPixel,
 		Enhanced: params.Enhanced,
-	})
+	}
+
+	// SSH session — when kind="ssh", open a remote channel instead of local PTY.
+	if params.Kind == "ssh" {
+		if !s.resolverOK {
+			resp := newJSONRPCError(req.ID, -32603, "SSH sessions not available (no profile resolver wired)")
+			_ = wconn.writeJSON(resp)
+			return
+		}
+		if params.ProfileID == "" {
+			resp := newJSONRPCError(req.ID, -32602, "Invalid params: profileId required for ssh session")
+			_ = wconn.writeJSON(resp)
+			return
+		}
+
+		host, remote, err := s.resolver.Resolve(params.ProfileID)
+		if err != nil {
+			s.log.Error("profile resolve failed", "profileId", params.ProfileID, "error", err)
+			resp := newJSONRPCError(req.ID, -32603, err.Error())
+			_ = wconn.writeJSON(resp)
+			return
+		}
+
+		remote.Cols = params.Cols
+		remote.Rows = params.Rows
+		remote.XPixel = params.XPixel
+		remote.YPixel = params.YPixel
+
+		s.log.Info("SSH open via profile", "profileId", params.ProfileID, "host", host, "user", remote.User)
+
+		cfg.Kind = session.KindRemote
+		cfg.Host = host
+		cfg.Remote = remote
+	}
+
+	sess, err := s.registry.Open(ctx, cfg)
 	if err != nil {
 		s.log.Error("failed to open session", "error", err)
 		resp := newJSONRPCError(req.ID, -32603, "Internal error")
@@ -791,4 +932,407 @@ func (s *WSServer) closeSession(sid session.ID) {
 	}
 	s.removeRx(sid)
 	_ = s.registry.Close(sid)
+}
+
+// --- profile/group/credential control-plane handlers ---------------------
+//
+// These methods back the connection-manager JSON-RPC calls (AD-1 control
+// plane). Each returns a JSON-RPC error (-32601) when the relevant store is
+// not wired (WithProfileStore/WithCredentialStore not called).
+
+func (s *WSServer) handleProfileMethod(wconn *wsConn, req jsonrpcRequest) {
+	if s.profiles == nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "profiles not available"))
+		return
+	}
+	switch req.Method {
+	case "profiles.list":
+		profs, err := s.profiles.LoadProfiles()
+		if err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+			return
+		}
+		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(profs)))
+	case "profiles.create", "profiles.update":
+		var p profile.SSHProfile
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+			return
+		}
+		if err := s.profiles.SaveProfile(p); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+			return
+		}
+		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(p)))
+	case "profiles.delete":
+		var params struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+			return
+		}
+		if err := s.profiles.DeleteProfile(params.ID); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+			return
+		}
+		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(true)))
+	}
+}
+
+func (s *WSServer) handleGroupMethod(wconn *wsConn, req jsonrpcRequest) {
+	if s.profiles == nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "groups not available"))
+		return
+	}
+	switch req.Method {
+	case "groups.list":
+		groups, err := s.profiles.LoadGroups()
+		if err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+			return
+		}
+		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(groups)))
+	case "groups.create", "groups.update":
+		var g profile.ProfileGroup
+		if err := json.Unmarshal(req.Params, &g); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+			return
+		}
+		if err := s.profiles.SaveGroup(g); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+			return
+		}
+		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(g)))
+	case "groups.delete":
+		var params struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+			return
+		}
+		if err := s.profiles.DeleteGroup(params.ID); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+			return
+		}
+		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(true)))
+	}
+}
+
+func (s *WSServer) handleCredentialCRUDMethod(wconn *wsConn, req jsonrpcRequest) {
+	if s.profiles == nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "profiles not available"))
+		return
+	}
+	switch req.Method {
+	case "credentials.list":
+		creds, err := s.profiles.LoadCredentials()
+		if err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+			return
+		}
+		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(creds)))
+	case "credentials.create", "credentials.update":
+		var c profile.Credential
+		if err := json.Unmarshal(req.Params, &c); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+			return
+		}
+		if c.ID == "" {
+			c.ID = profile.NewCredentialID(c.Name)
+		}
+		if err := s.profiles.SaveCredential(c); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+			return
+		}
+		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(c)))
+	case "credentials.delete":
+		var params struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(req.Params, &params); err != nil || params.ID == "" {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: id required"))
+			return
+		}
+		if err := s.deleteCredentialCascade(params.ID); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+			return
+		}
+		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(true)))
+	}
+}
+
+func (s *WSServer) handleCredentialMethod(wconn *wsConn, req jsonrpcRequest) {
+	if s.credentials == nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "credentials not available"))
+		return
+	}
+	switch req.Method {
+	case "credentials.savePassword":
+		var params struct {
+			CredentialID string              `json:"credentialId"`
+			Identity     credential.Identity `json:"identity"` // Legacy
+			Password     string              `json:"password"`
+		}
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+			return
+		}
+		// Support both credentialId (new) and identity (legacy).
+		identity := params.Identity
+		if params.CredentialID != "" {
+			identity = credential.Identity{User: params.CredentialID}
+		}
+		if err := s.credentials.SavePassword(identity, params.Password); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+			return
+		}
+		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(true)))
+	case "credentials.deletePassword":
+		var params struct {
+			CredentialID string              `json:"credentialId"`
+			Identity     credential.Identity `json:"identity"` // Legacy
+		}
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+			return
+		}
+		identity := params.Identity
+		if params.CredentialID != "" {
+			identity = credential.Identity{User: params.CredentialID}
+		}
+		if err := s.credentials.DeletePassword(identity); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+			return
+		}
+		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(true)))
+	case "credentials.hasPassword":
+		var params struct {
+			CredentialID string              `json:"credentialId"`
+			Identity     credential.Identity `json:"identity"` // Legacy
+		}
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+			return
+		}
+		identity := params.Identity
+		if params.CredentialID != "" {
+			identity = credential.Identity{User: params.CredentialID}
+		}
+		has, err := s.credentials.HasPassword(identity)
+		if err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+			return
+		}
+		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(has)))
+	case "credentials.saveKeyPassphrase":
+		var params struct {
+			Hash       credential.KeyHash `json:"hash"`
+			Passphrase string             `json:"passphrase"`
+		}
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+			return
+		}
+		if err := s.credentials.SaveKeyPassphrase(params.Hash, params.Passphrase); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+			return
+		}
+		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(true)))
+	case "credentials.deleteKeyPassphrase":
+		var params struct {
+			Hash credential.KeyHash `json:"hash"`
+		}
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+			return
+		}
+		if err := s.credentials.DeleteKeyPassphrase(params.Hash); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+			return
+		}
+		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(true)))
+	}
+}
+
+// deleteCredentialCascade removes a credential's metadata and every secret
+// it references, in an order that cannot strand a secret.
+//
+// # The ordering trap
+//
+// The two secret kinds are keyed differently:
+//   - a password keys on Identity{User: credentialID} — derivable from the ID;
+//   - a key passphrase keys on KeyHash, derived from the key material, and
+//     the metadata stores only KeyPath.
+//
+// Once the metadata row is gone there is no KeyPath left, no hash can be
+// derived, and the passphrase is unreachable forever. So the metadata is
+// loaded BEFORE any deletion to recover KeyPath and derive the hash.
+//
+// # Order: metadata-first, then best-effort secrets (ADR-0011 §4)
+//
+// Metadata is deleted first and its deletion stands; secret deletion is
+// best-effort afterwards. A brief unreachable orphan (secret with no
+// metadata pointing at it) is safer than metadata pointing at a secret
+// that is gone: the orphan can be retried or swept by a future janitor,
+// while a dangling reference makes every connect attempt fail in a way the
+// user cannot diagnose. If secret deletion fails the error is returned to
+// the caller so the cascade is not silently incomplete, but the metadata
+// deletion is not rolled back — the credential is gone either way.
+//
+// # Missing secrets are not errors
+//
+// Deleting a credential that never had a password (or whose passphrase was
+// never saved) must succeed. Both backends (Keychain, Vault) treat
+// "already absent" as success, so no special-casing is needed here.
+//
+// # Multi-profile references
+//
+// The model allows several SSHProfileOptions.CredentialID values to point
+// at one credential. This cascade does NOT refuse when other profiles
+// reference the credential: the user asked to delete it, and refusing
+// would leave an orphaned-credential path the UI cannot recover from.
+// Surviving references become stale (their password/passphrase lookups
+// return empty), which is the same state a never-had-a-secret credential
+// is already in. Reference integrity is a separate work item; see the
+// task report (nocx-7l4) for the recorded compromise.
+//
+// # KeyPath unreadable
+//
+// If the credential references a KeyPath that can no longer be read (moved,
+// deleted, permission-denied), the passphrase entry cannot be reached for
+// deletion. Per ADR-0011 §4 the metadata deletion still stands; the
+// unreadable-key error is returned to the caller as the cascade result so
+// the orphan is observable, and a future janitor can sweep by hash.
+func (s *WSServer) deleteCredentialCascade(id string) error {
+	// Load the metadata BEFORE deleting it: KeyPath is needed to derive the
+	// key passphrase's KeyHash, and once the row is gone it is unrecoverable.
+	cred, ok, err := s.findCredentialByID(id)
+	if err != nil {
+		return fmt.Errorf("load credential %s: %w", id, err)
+	}
+
+	// Derive every secret key BEFORE deleting metadata, so a key-read
+	// failure is known while the metadata still exists. The password keys
+	// on the credential ID alone; the passphrase keys on the hash of the
+	// key file at KeyPath. We do NOT delete anything yet — this is the
+	// "derive everything you need, then remove" step from the task brief.
+	var keyHash credential.KeyHash // empty == no passphrase to delete
+	var keyReadErr error
+	if ok && cred.KeyPath != "" && s.credentials != nil {
+		keyHash, keyReadErr = deriveKeyHashFromPath(cred.KeyPath)
+	}
+
+	// Delete metadata first. Its deletion stands regardless of secret
+	// deletion outcome (ADR-0011 §4: a brief orphan beats a dangling ref).
+	if err := s.profiles.DeleteCredential(id); err != nil {
+		return fmt.Errorf("delete credential metadata %s: %w", id, err)
+	}
+
+	// No metadata found → nothing referenced any secret. Idempotent.
+	if !ok {
+		return nil
+	}
+
+	// Best-effort secret deletion. We attempt BOTH the password and the
+	// passphrase deletion even if one fails, so a single failure does not
+	// skip the other and leave it orphaned. Errors are aggregated and
+	// returned; metadata is already gone, so the credential does not come
+	// back — the caller sees the error and the orphan is observable.
+	if s.credentials == nil {
+		return nil
+	}
+	var errs []error
+	if err := s.credentials.DeletePassword(credential.Identity{User: id}); err != nil {
+		errs = append(errs, fmt.Errorf("delete password for %s: %w", id, err))
+	}
+	if cred.KeyPath != "" {
+		if keyReadErr != nil {
+			// Key file unreadable: the passphrase entry is unreachable for
+			// deletion. Metadata is already gone; record the error so the
+			// orphan is observable. Per ADR-0011 §4 this is the lesser
+			// failure (brief orphan > dangling reference).
+			errs = append(errs, fmt.Errorf("read key %s to delete passphrase: %w", cred.KeyPath, keyReadErr))
+		} else if err := s.credentials.DeleteKeyPassphrase(keyHash); err != nil {
+			errs = append(errs, fmt.Errorf("delete key passphrase for %s: %w", id, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// findCredentialByID loads a single credential by ID from the profile store.
+// ok is false (not an error) when no credential with that ID exists — that
+// is the idempotent-delete path. A store error is returned as-is.
+func (s *WSServer) findCredentialByID(id string) (profile.Credential, bool, error) {
+	creds, err := s.profiles.LoadCredentials()
+	if err != nil {
+		return profile.Credential{}, false, err
+	}
+	for _, c := range creds {
+		if c.ID == id {
+			return c, true, nil
+		}
+	}
+	return profile.Credential{}, false, nil
+}
+
+// deriveKeyHashFromPath reads the private key file and derives its KeyHash.
+// This is the delete-side counterpart of the save path: a passphrase saved
+// under HashKey(keyBytes) is reachable for deletion by re-reading the same
+// file. A missing or unreadable file is returned as an error so the caller
+// can report the orphan rather than silently dropping the cascade.
+func deriveKeyHashFromPath(path string) (credential.KeyHash, error) {
+	data, err := os.ReadFile(path) //nolint:gosec // path comes from user-configured credential metadata
+	if err != nil {
+		return "", err
+	}
+	return credential.HashKey(data), nil
+}
+
+// handleImportTabby parses a Tabby config YAML and imports SSH profiles +
+// groups into the wired ProfileStore. Returns the number of profiles imported.
+// Deduplicates by host+port+user on re-import.
+func (s *WSServer) handleImportTabby(wconn *wsConn, req jsonrpcRequest) {
+	if s.profiles == nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "profiles not available"))
+		return
+	}
+	var params struct {
+		Config string `json:"config"`
+	}
+	if err := json.Unmarshal(req.Params, &params); err != nil || params.Config == "" {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: config (YAML string) required"))
+		return
+	}
+
+	cfg, err := importer.ParseTabbyConfig([]byte(params.Config))
+	if err != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Parse Tabby config: "+err.Error()))
+		return
+	}
+
+	countBefore, _ := s.profiles.LoadProfiles()
+	before := len(countBefore)
+	if err := importer.ImportGroups(cfg, s.profiles); err != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Import groups: "+err.Error()))
+		return
+	}
+	if err := importer.ImportProfiles(cfg, s.profiles, "ssh"); err != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Import profiles: "+err.Error()))
+		return
+	}
+	after, _ := s.profiles.LoadProfiles()
+	imported := len(after) - before
+	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(imported)))
+}
+
+// mustMarshal serializes v to JSON, panicking on error (only used for
+// values we construct ourselves, which are always serializable).
+func mustMarshal(v any) json.RawMessage {
+	out, err := json.Marshal(v)
+	if err != nil {
+		return json.RawMessage("null")
+	}
+	return out
 }

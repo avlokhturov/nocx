@@ -29,7 +29,327 @@ body {
   height: 100%;
 }
 
+/* ── Connections view ─────────────────────────────────────────────────── */
+
+.cm-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 24px;
+  border-bottom: 1px solid #2a2b3d;
+  flex-shrink: 0;
+  position: relative;
+  z-index: 10;
+  pointer-events: auto;
+  --wails-draggable: no-drag;
+}
+
+.cm-header h1 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: #c0caf5;
+  flex: 1;
+}
+
+.cm-header button {
+  padding: 8px 16px;
+  background: #1f2335;
+  border: 1px solid #2a2b3d;
+  border-radius: 6px;
+  color: #c0caf5;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  transition: all 0.15s ease;
+  position: relative;
+  z-index: 11;
+  pointer-events: auto;
+  --wails-draggable: no-drag;
+}
+
+.cm-header button:hover {
+  background: #2a2b3d;
+  border-color: #7aa2f7;
+  color: #7aa2f7;
+}
+
+.cm-header button.cm-primary {
+  background: #7aa2f7;
+  border-color: #7aa2f7;
+  color: #1a1b26;
+}
+
+.cm-header button.cm-primary:hover {
+  background: #89b4fa;
+  border-color: #89b4fa;
+}
+
+.cm-header button.cm-close {
+  background: none;
+  border: none;
+  color: #565f89;
+  font-size: 20px;
+  padding: 4px 8px;
+}
+
+.cm-header button.cm-close:hover {
+  color: #f7768e;
+  background: none;
+}
+
+.cm-body {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+  --wails-draggable: no-drag;
+}
+
+.cm-list {
+  width: 320px;
+  border-right: 1px solid #2a2b3d;
+  overflow-y: auto;
+  padding: 8px 0;
+}
+
+.cm-list-empty {
+  padding: 32px 16px;
+  color: #565f89;
+  font-size: 13px;
+  text-align: center;
+}
+
+.cm-item {
+  display: flex;
+  align-items: center;
+  padding: 10px 16px;
+  cursor: pointer;
+  border-left: 3px solid transparent;
+  transition: background 0.1s;
+}
+
+.cm-item:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.cm-item.cm-selected {
+  background: rgba(122, 162, 247, 0.1);
+  border-left-color: #7aa2f7;
+}
+
+.cm-quick-connect {
+  padding: 4px 8px;
+  background: #7aa2f7;
+  border: none;
+  border-radius: 4px;
+  color: #1a1b26;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  margin-left: 8px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.cm-item:hover .cm-quick-connect {
+  opacity: 1;
+}
+
+.cm-quick-connect:hover {
+  background: #89b4fa;
+}
+
+.cm-item-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.cm-item-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: #c0caf5;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cm-item-meta {
+  font-size: 11px;
+  color: #565f89;
+  margin-top: 2px;
+}
+
+.cm-group-header {
+  padding: 10px 16px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #9d7cd8;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  user-select: none;
+}
+
+.cm-form-panel {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px 32px;
+}
+
+.cm-form {
+  max-width: 600px;
+}
+
+.cm-form-section {
+  margin-bottom: 32px;
+}
+
+.cm-form-section h2 {
+  font-size: 13px;
+  font-weight: 600;
+  color: #9d7cd8;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin: 0 0 16px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #2a2b3d;
+}
+
+.cm-field {
+  display: flex;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.cm-field label {
+  width: 160px;
+  font-size: 13px;
+  color: #a9b1d6;
+  flex-shrink: 0;
+}
+
+.cm-field input[type='text'],
+.cm-field input[type='number'],
+.cm-field input[type='password'] {
+  flex: 1;
+  padding: 8px 12px;
+  background: #16171e;
+  border: 1px solid #2a2b3d;
+  border-radius: 4px;
+  color: #c0caf5;
+  font-size: 13px;
+}
+
+.cm-field input:focus {
+  outline: none;
+  border-color: #7aa2f7;
+}
+
+.cm-field input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+  accent-color: #7aa2f7;
+}
+
+.cm-radio-group {
+  display: flex;
+  gap: 16px;
+  flex: 1;
+}
+
+.cm-radio-group label {
+  width: auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+
+.cm-keys-list {
+  flex: 1;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.cm-keys-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+}
+
+.cm-keys-list li button {
+  background: none;
+  border: none;
+  color: #f7768e;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 2px 4px;
+}
+
+.cm-form-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 24px;
+  padding-top: 16px;
+  border-top: 1px solid #2a2b3d;
+}
+
+.cm-form-actions button {
+  padding: 10px 24px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  border: 1px solid #2a2b3d;
+  background: #1f2335;
+  color: #c0caf5;
+  transition: all 0.15s ease;
+}
+
+.cm-form-actions button:hover {
+  background: #2a2b3d;
+}
+
+.cm-form-actions button.cm-save {
+  background: #7aa2f7;
+  border-color: #7aa2f7;
+  color: #1a1b26;
+}
+
+.cm-form-actions button.cm-save:hover {
+  background: #89b4fa;
+}
+
+.cm-form-actions button.cm-connect {
+  background: #9ece6a;
+  border-color: #9ece6a;
+  color: #1a1b26;
+}
+
+.cm-form-actions button.cm-connect:hover {
+  background: #b9d870;
+}
+
+.cm-form-actions button.cm-danger {
+  border-color: #f7768e;
+  color: #f7768e;
+}
+
+.cm-form-actions button.cm-danger:hover {
+  background: rgba(247, 118, 142, 0.1);
+}
+
 /* ── Tab bar (Tabby-inspired) ─────────────────────────────────────────── */
+
+.tab-connections {
+  color: #a9b1d6;
+  font-size: 16px;
+}
+
+.tab-connections:hover {
+  color: #7aa2f7;
+}
 
 /* The strip doubles as the window's title bar (mac.TitleBarHiddenInset in
    main.go), so it starts clear of the inset traffic lights. In a plain
@@ -419,6 +739,19 @@ body {
   min-height: 0;
 }
 
+/* Tab dragging */
+.tab.dragging {
+  opacity: 0.5;
+}
+
+.tab[draggable='true'] {
+  cursor: grab;
+}
+
+.tab[draggable='true']:active {
+  cursor: grabbing;
+}
+
 /* Inactive panes stay laid out (visibility, not display) so their renderers
    keep measuring a real size — a zero-size container makes every fit addon
    compute a bogus grid and reflow the shell on the way back. */
@@ -452,6 +785,23 @@ body {
 .pane.active {
   visibility: visible;
   pointer-events: auto;
+}
+
+/* Manager panes host the connection UI, not a terminal — no padding,
+    no absolute positioning offsets, let the content fill the space. */
+.pane-manager {
+  padding: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  --wails-draggable: no-drag;
+}
+
+/* Ensure manager panes receive clicks even if the .pane default
+   (pointer-events:none) somehow wins specificity. */
+.pane-manager.active {
+  pointer-events: auto !important;
+  visibility: visible !important;
 }
 
 .pane-error {

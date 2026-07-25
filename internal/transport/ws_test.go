@@ -45,7 +45,9 @@ func connectWS(t *testing.T, ws *WSServer) *websocket.Conn {
 	if err != nil {
 		t.Fatalf("parse url: %v", err)
 	}
-	conn, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
+	// Present the per-launch token so the auth gate passes.
+	d := websocket.Dialer{Subprotocols: []string{tokenProtocol(ws.Token())}}
+	conn, _, err := d.Dial(u.String(), nil)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}

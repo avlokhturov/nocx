@@ -62,6 +62,33 @@ and is not, which is precisely the failure this setup exists to prevent.
    The pre-commit hook is the gate on every commit; CI validates release branches and tags.
 5. Update the task in beads; record any non-obvious decision as an ADR in `docs/decisions/`.
 
+### Before you investigate: two cheap checks that beat reasoning
+
+Both of these were learned by skipping them and losing an afternoon.
+
+**Search the memories before fighting the environment.** `bd memories <keyword>`
+costs seconds. A session spent installing Xvfb, chasing an `EGL_BAD_PARAMETER`
+abort and rebuilding NixOS twice to get the Playwright suite running ended when
+`bd memories e2e` turned up a memory describing `cmd/devharness` plus the
+`NOCX_WS_PORT` shim in `e2e/harness.ts` — a headless path needing no wails, no
+GTK and no display at all. It had been in the repo the whole time. Memories are
+pull-based: nothing surfaces them for you, so ask.
+
+**When a branch behaves differently from `main`, diff it against `main` first.**
+Before measuring, instrumenting or theorising:
+
+```bash
+git diff origin/main...HEAD -- <path> | grep '^-'
+```
+
+A large feature commit can silently drop a line, and the symptom will look like
+anything but a deletion. `557e87d` (52 files, +8025/−605) removed one
+subscription — `tab.onBufferChange = () => … syncAltScreenClass()` — and the
+visible result was a Playwright click timing out on a button that hit-testing
+reported as visible. Reasoning about geometry and DOM measurement took hours;
+the removed-lines diff found it in a minute and, swept across the whole
+directory, proved nothing else had been lost.
+
 ### Claiming work on a shared backlog
 
 Several people work this repo from their own machines against one shared issue database
@@ -82,6 +109,25 @@ land, Dolt merges them, last write wins. The protocol shrinks the race window �
 close it. Auto-push (`dolt.auto-push`) stays off on purpose: upstream warns that concurrent
 pushes to a git-protocol Dolt remote can corrupt or strand remote history. If claim races
 ever become routine, the fix is a shared Dolt sql-server, not a shorter interval (nocx-wj4).
+
+## Git authority
+
+Agents have **standing authority to commit and push** on this repo. This overrides the
+"Conservative (default)" profile in the managed Beads block below — that block defers to
+repository instructions, and this is one. It lives here rather than inside the block
+because the block is regenerated from a hash and edits to it are lost.
+
+Allowed without asking, every session: `git commit`, `git push`, `bd close`,
+`bd dolt push`, and running the quality gates. Branch first if you are on `main`.
+
+**Merging a pull request always requires explicit approval.** Not a green-CI one, not
+your own, not a one-line one — the user has to ask for it in that session. Authority to
+commit and push is not authority to merge, and approval to merge one PR does not carry
+to the next.
+
+Run the full local gate before pushing, not only the part you touched: `gofumpt -l .`,
+`golangci-lint run`, `go test -race ./...`, plus `npx prettier --check .`, `npx eslint .`,
+`npx tsc --noEmit`, `npx vitest run` for frontend changes.
 
 ## Engineering rules (non-negotiable)
 

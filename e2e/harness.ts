@@ -11,19 +11,31 @@ export type { Page } from "@playwright/test";
 export const test = base.extend({
   page: async ({ page }, use) => {
     const port = process.env.NOCX_WS_PORT;
+    const token = process.env.NOCX_WS_TOKEN;
     if (port) {
-      await page.addInitScript((p) => {
-        (window as unknown as { go: unknown }).go = {
-          main: {
-            WailsApp: {
-              GetWSPort: () => Promise.resolve(Number(p)),
-              CheckForUpdate: () => Promise.resolve(null),
-              ReportHealthy: () => Promise.resolve(),
-              ApplyUpdate: () => Promise.resolve(),
+      if (!token) {
+        throw new Error(
+          "NOCX_WS_PORT set but NOCX_WS_TOKEN is missing; " +
+            "the token is the auth gate and an empty string is rejected. " +
+            "Export both or use `wails dev`.",
+        );
+      }
+      await page.addInitScript(
+        (opts: { p: string; t: string }) => {
+          (window as unknown as { go: unknown }).go = {
+            main: {
+              WailsApp: {
+                GetWSPort: () => Promise.resolve(Number(opts.p)),
+                GetWSToken: () => Promise.resolve(opts.t),
+                CheckForUpdate: () => Promise.resolve(null),
+                ReportHealthy: () => Promise.resolve(),
+                ApplyUpdate: () => Promise.resolve(),
+              },
             },
-          },
-        };
-      }, port);
+          };
+        },
+        { p: port, t: token },
+      );
     }
     await use(page);
   },

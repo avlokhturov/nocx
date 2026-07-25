@@ -104,3 +104,27 @@ Personal and honest: **"I built it and it works."** Concretely — I can daily-d
 - **SSH ↔ vault integration:** how the SSH client and the vault connect once the vault lands.
 - **"Ask an agent" (Phase 3):** precisely how natural-language queries reach a local / BYO AI from the terminal.
 - **Licensing:** confirm any obligations beyond those documented in the README License section (xterm.js MIT, @wterm/dom Apache 2.0).
+- **Agent orchestration as a plugin (undecided, not scheduled).** Coordinating several AI
+  agents is, mechanically, spawning processes in panes, reading and writing their streams,
+  and tracking their state — which is what a terminal already is. Existing tools bolt
+  orchestration onto a terminal; nocx would come from the other side, where orchestration
+  is a *view over sessions* rather than a separate thing. The substrate is largely built:
+  server-authoritative session IDs (AD-7), the session registry, the split data/control
+  planes (AD-1), and OSC 133 markers that already answer "did this command finish?" — which
+  is the same question as "is this agent done?".
+
+  The honest counterweight: the hard part of orchestration is not the terminal. It is
+  lifecycle semantics — task provenance, who owns a completion, what a heartbeat proves,
+  how a message reaches an agent that is busy rather than idle. Building on our own panes
+  would remove a class of bugs (stale pane handles after a restart, an empty pane being
+  indistinguishable from a dead worker, input delivered but never submitted) and would
+  inherit that harder class untouched. And the timing objection stands on its own: MVP is
+  not closed, so starting a second product now would repeat, at a larger scale, the mistake
+  of bundling unrelated work into unfinished work.
+
+  If this is ever pursued, the first step is smaller than a plugin and pays off either way:
+  make the session model orchestration-ready without building orchestration — session IDs
+  that survive a runtime restart, and a control-plane method to read a session's output and
+  detect command completion from the markers we already emit. Both are useful to the
+  terminal on their own merits, and they are most of what a plugin would need. Deciding to
+  build the plugin itself would warrant an ADR; recording the idea does not.

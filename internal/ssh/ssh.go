@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 
+	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
 	gossh "golang.org/x/crypto/ssh"
 )
@@ -36,7 +37,6 @@ type ConnectConfig struct {
 	User            string
 	Port            int
 	KeyFile         string
-	Password        string
 	UseAgent        bool
 	Cols            uint16
 	Rows            uint16
@@ -45,6 +45,55 @@ type ConnectConfig struct {
 	AuthMethods     []gossh.AuthMethod
 	KeyExchanges    []string
 	RemoteInstaller RemoteInstaller
+
+	// AuthMode controls which auth buckets are tried (null=Auto with full
+	// fallback-chain; a specific value restricts which buckets are attempted).
+	// Mirrors Tabby's profile.options.auth enum.
+	AuthMode string
+
+	// JumpHost is the profile name or ID of the jump server to use.
+	JumpHost string
+	// JumpPort is the port of the jump server (0 means use default 22).
+	JumpPort int
+	// Jump host credentials — loaded from jump server's profile.
+	JumpUser     string
+	JumpKeyFile  string
+	JumpAuthMode string
+
+	// BoundHost/BoundPort carry the host a linked credential is bound to
+	// (from profile.Credential), set by the resolver. internal/ssh enforces
+	// them after resolveConfig against the *resolved* hostname and effective
+	// port — never the alias the renderer chose. Binding on the alias is
+	// unsound: ~/.ssh/config can map "Host myserver" to "HostName
+	// evil.example.com", so a binding satisfiable by a name the attacker
+	// chooses is not a binding (nocx-mon/PR11-T5). An empty BoundHost means
+	// the credential is unbound and is REFUSED at connect time — "any host"
+	// is exactly the credential-redirection hole. An unset BoundPort (0)
+	// means "this host, any port": host is the load-bearing identity; making
+	// port mandatory would break every existing host-only credential harder
+	// than the hole it would close. Stated exception, not a silent gap.
+	BoundHost string
+	BoundPort int
+
+	// JumpBoundHost/JumpBoundPort are the jump credential's binding, enforced
+	// against the jump host's resolved name and effective port independently
+	// of the target — a target-bound credential must not satisfy the jump
+	// binding and vice versa.
+	JumpBoundHost string
+	JumpBoundPort int
+
+	// JumpCredentials, when set, enables late-bind of the jump host's
+	// password from the credential store. Separate from the target's
+	// Credentials so each hop resolves independently.
+	JumpCredentials  credential.CredentialStore
+	JumpCredIdentity credential.Identity
+
+	// Credentials, when set, enables late-bind of stored passwords by
+	// CredIdentity. The credential store is the seam between the profile
+	// manager (clear data) and the secret store — never call it directly
+	// from frontend code.
+	Credentials  credential.CredentialStore
+	CredIdentity credential.Identity
 }
 
 func WithUser(user string) ConnectOption {
@@ -58,11 +107,6 @@ func WithPort(port int) ConnectOption {
 // WithKeyFile sets an explicit private key path for authentication.
 func WithKeyFile(path string) ConnectOption {
 	return func(c *ConnectConfig) { c.KeyFile = path }
-}
-
-// WithPassword sets password authentication.
-func WithPassword(password string) ConnectOption {
-	return func(c *ConnectConfig) { c.Password = password }
 }
 
 // WithAgent enables ssh-agent authentication (default when no key or password
@@ -93,6 +137,44 @@ func WithAuthMethods(auths []gossh.AuthMethod) ConnectOption {
 // shell with the integration activated.
 func WithRemoteInstaller(ri RemoteInstaller) ConnectOption {
 	return func(c *ConnectConfig) { c.RemoteInstaller = ri }
+}
+
+// WithAuthMode sets the auth-method filter for the connection (null=Auto).
+// A specific value ("password"/"publicKey"/"agent"/"keyboardInteractive")
+// restricts which auth buckets are attempted in the fallback chain.
+func WithAuthMode(mode string) ConnectOption {
+	return func(c *ConnectConfig) { c.AuthMode = mode }
+}
+
+// WithJumpHost sets the jump host configuration for SSH connection.
+// Password authentication for the jump host comes from JumpCredentials
+// (late-bound via the credential store), never as plaintext.
+func WithJumpHost(host string, port int, user, authMode string) ConnectOption {
+	return func(c *ConnectConfig) {
+		c.JumpHost = host
+		c.JumpPort = port
+		c.JumpUser = user
+		c.JumpAuthMode = authMode
+	}
+}
+
+// WithJumpCredentials injects a credential store for late-bind of the jump
+// host's password by identity. Mirrors WithCredentials but for the jump hop.
+func WithJumpCredentials(store credential.CredentialStore, id credential.Identity) ConnectOption {
+	return func(c *ConnectConfig) {
+		c.JumpCredentials = store
+		c.JumpCredIdentity = id
+	}
+}
+
+// WithCredentials injects a credential store for late-bind of stored
+// passwords by identity. The store is the seam between the profile manager
+// and the secret store.
+func WithCredentials(store credential.CredentialStore, id credential.Identity) ConnectOption {
+	return func(c *ConnectConfig) {
+		c.Credentials = store
+		c.CredIdentity = id
+	}
 }
 
 type Stub struct {

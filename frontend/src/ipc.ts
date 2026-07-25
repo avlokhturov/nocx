@@ -234,16 +234,23 @@ export class SessionHandle {
 
 export class WSClient {
   private ws: WebSocket | null = null
+
+  // rawSocket returns the underlying WebSocket for sharing with sub-clients
+  // (e.g. ProfileClient shares the same connection for control-plane calls).
+  rawSocket(): WebSocket {
+    if (!this.ws) throw new Error('WebSocket not connected')
+    return this.ws
+  }
   private sessions = new Map<string, SessionState>()
   private pendingOpens = new Map<number, PendingOpen>()
   private pendingAttaches = new Map<number, PendingAttach>()
 
   // Ack throttle: one per session.
   private acks = new Map<string, AckThrottle>()
-
   // Reconnect state.
   private _port = 0
   private _host = '127.0.0.1'
+  private _token = ''
   private _closingDeliberately = false
   private _backoffMs = MIN_BACKOFF_MS
   private _reconnectTimer: ReturnType<typeof setTimeout> | null = null
@@ -252,19 +259,23 @@ export class WSClient {
   // not open yet — call openSession() next to get a SessionHandle. The host
   // defaults to loopback (the Wails shell serves the page locally); the
   // plain-browser dev path overrides it with the page's own hostname.
-  connect(port: number, host = '127.0.0.1'): Promise<void> {
+  // The token is the per-launch capability carried in Sec-WebSocket-Protocol.
+  connect(port: number, host = '127.0.0.1', token = ''): Promise<void> {
     this._port = port
     this._host = host
+    this._token = token
     this._closingDeliberately = false
     this._backoffMs = MIN_BACKOFF_MS
     this.sessions.clear()
     this.acks.clear()
     return this._connectInternal()
   }
-
   private _connectInternal(): Promise<void> {
     return new Promise((resolve, reject) => {
-      this.ws = new WebSocket(`ws://${this._host}:${this._port}/session`)
+      // The token travels in Sec-WebSocket-Protocol; the server echoes
+      // the selected subprotocol on upgrade (RFC 6455).
+      const subprotocol = `nocx.token.${this._token}`
+      this.ws = new WebSocket(`ws://${this._host}:${this._port}/session`, subprotocol)
       this.ws.binaryType = 'arraybuffer'
       this.pendingOpens.clear()
       this.pendingAttaches.clear()
@@ -525,6 +536,34 @@ export class WSClient {
           id,
           method: 'open',
           params: { cols, rows, xpixel: 0, ypixel: 0, enhanced },
+        }),
+      )
+    })
+  }
+
+  // openSSHSession opens an SSH session via a profile ID. The backend
+  // resolves host, credentials and jump host from the profile store.
+  // Passwords are never sent over the wire.
+  openSSHSession(cols: number, rows: number, profileId: string): Promise<SessionHandle> {
+    return new Promise((resolve, reject) => {
+      const id = nextID()
+      this.pendingOpens.set(id, {
+        resolve: (sid: string, cwd: string) => resolve(new SessionHandle(this, sid, cwd)),
+        reject,
+      })
+      this.ws!.send(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id,
+          method: 'open',
+          params: {
+            cols,
+            rows,
+            xpixel: 0,
+            ypixel: 0,
+            kind: 'ssh',
+            profileId,
+          },
         }),
       )
     })

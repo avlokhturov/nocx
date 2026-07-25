@@ -18,6 +18,14 @@ export function GetWSPort() {
   return window['go']['main']['WailsApp']['GetWSPort']();
 }
 
+export function GetWSToken() {
+  return window['go']['main']['WailsApp']['GetWSToken']();
+}
+
+export function Log(arg1) {
+  return window['go']['main']['WailsApp']['Log'](arg1);
+}
+
 export function ReportHealthy() {
   return window['go']['main']['WailsApp']['ReportHealthy']();
 }

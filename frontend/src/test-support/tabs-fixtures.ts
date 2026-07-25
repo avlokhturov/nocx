@@ -307,8 +307,20 @@ export async function mountTabManager(
   const cb = clipboard ?? makeClipboard()
   const g = gate ?? new (await import('../clipboard')).ClipboardGate()
   const bn = banner ?? makeBanner()
+  const pc = {
+    listProfiles: vi.fn().mockResolvedValue([]),
+    listGroups: vi.fn().mockResolvedValue([]),
+  }
   const { TabManager } = await import('../tabs')
-  const manager = new TabManager(bar, panes, c as unknown as import('../ipc').WSClient, cb, g, bn)
+  const manager = new TabManager(
+    bar,
+    panes,
+    c as unknown as import('../ipc').WSClient,
+    cb,
+    g,
+    bn,
+    pc as unknown as import('../profiles').ProfileClient,
+  )
   await vi.waitFor(() => {
     expect(c.openSession).toHaveBeenCalled()
   })
