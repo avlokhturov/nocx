@@ -69,7 +69,7 @@ blocks and the atomic-submit handoff are untouched.
 
 ## Scope
 
-**In:** W0–W7 below — the behaviour-preserving swap plus the seams the three dependent
+**In:** W1–W7 below — the behaviour-preserving swap plus the seams the three dependent
 epics need.
 
 **Out (tracked, not cut):**
@@ -195,7 +195,7 @@ reminders.
    the mouse dies inside the editor (`nocx-4ff.16`). Recorded as
    `.nocx-editor { z-index: 20 }`, but that rule is **not in the stylesheet**
    (`style.css:658` has no z-index; only comments at `:1086-1087` reference it). What
-   actually stacks the editor today is unknown — `nocx-0oc`. W0 must determine it,
+   actually stacks the editor today is unknown — `nocx-0oc`. W1 must determine it,
    because a CM6 swap changes the element tree underneath and could disturb whatever
    accident is currently holding.
 4. **Fail-open** — nothing in this epic may create a state where the editor is shown
@@ -206,24 +206,22 @@ reminders.
 
 ## Work items
 
-### W0 — De-risk spike (timeboxed, throwaway)
+### W0 — *(removed)*
 
-- **Change:** Mount a bare CM6 view in the editor slot behind a flag. Exercise, in this
-  order: focus interplay with xterm and the focus-bounce; keymap precedence for
-  Enter/Escape/Ctrl-C; IME composition; copy-on-select; auto-grow; and
-  `document.elementFromPoint` over the editor card.
-- **Why first:** the ownership machine is entirely focus-based while CM6 manages focus
-  itself. This is the one seam where an unpleasant surprise would change *how* we
-  migrate, and it is cheapest to find on day one.
-- **Acceptance:** a written findings note on the epic listing every surprise, and one
-  decision only — **can a CM6 adapter preserve the current single-target contract?**
-  *(An earlier draft asked W0 to choose between one view per target and one
-  reconfigured view. That is a question for `nocx-w7h`, which will have a second target;
-  asking it here contradicts the same YAGNI correction that removed W6.)*
-- **Test the real host.** The shipping runtime is WKWebView on macOS (AD-3). Playwright
-  drives Chromium, which cannot establish WKWebView IME or focus behaviour. The IME and
-  focus findings must be reproduced on the actual WebView or recorded as unverified.
-- The spike code is deleted, not merged.
+The de-risk spike is gone. Its deliverable was a findings note rather than working
+software, and it meant doing the integration twice — while deciding nothing that is not
+already decided, since CM6 is settled and W7 records it. **W1 behind a flag is the same
+experiment with the code kept**, and the seams the spike would have poked by hand are
+better expressed as things a test asserts.
+
+Its six checks became acceptance criteria on W1, verified *first*, before the rest of the
+swap is polished: focus interplay with xterm and both `rootContains` call sites; keymap
+precedence; IME composition; hit-testing over the editor card; geometry under
+`visibility:hidden`; and reproduction on WKWebView rather than only Chromium.
+
+If one of them turns out to demand a different migration shape, that is a finding on the
+epic and W1 is re-planned — the same outcome a spike would have produced, with working
+code already in hand.
 
 ### W1 — Swap the editor internals
 
@@ -335,24 +333,26 @@ no interface cost — W1's constructor-parameter extension list.
 
 | Risk | Mitigation |
 | --- | --- |
-| Focus interplay between CM6 and xterm; the ownership machine is focus-based | W0 tests it before any migration code is written |
+| Focus interplay between CM6 and xterm; the ownership machine is focus-based | first acceptance criterion on W1, verified before the rest of the swap is polished |
 | CM6's `defaultKeymap` shadows Enter / Escape / Ctrl-C | W2, `Prec.highest`, covered by unit tests |
 | IME composition broken by the document-level keydown redirect | W5 adds the first IME coverage this repo has had |
 | jsdom cannot test CM6 view behaviour | W5 forces the `nocx-foz` decision instead of leaving it implicit |
 | `insertText` double-inserts via the two redirect paths | W4 |
 | Scope creep turns a refactor into a feature epic and blocks three others | behaviour-preserving is an acceptance criterion, not an intention |
 | Undo semantics shift from native to CM6's history | accepted and documented in ADR-0010; visible but minor |
-| wterm renderer has **no** read-only: `renderers/wterm.ts:114` is a documented no-op ("@wterm/dom has no disableStdin"), so under wterm the prompt relies on focus alone while `tabs.ts:380-394` assumes `setReadOnly(true)` took effect | pre-existing asymmetry, not caused by this epic, but W0 must establish what stops wterm forwarding keystrokes while the editor owns input — otherwise "parity" is unverifiable and the claim is dropped from the epic |
+| wterm renderer has **no** read-only: `renderers/wterm.ts:114` is a documented no-op ("@wterm/dom has no disableStdin"), so under wterm the prompt relies on focus alone while `tabs.ts:380-394` assumes `setReadOnly(true)` took effect | pre-existing asymmetry, not caused by this epic, but W1 must establish what stops wterm forwarding keystrokes while the editor owns input — otherwise "parity" is unverifiable and the claim is dropped from the epic |
 | CM6 measures its own layout; the editor spends most of its life under `visibility:hidden` (`_shownOnce`) | explicit W1 acceptance criterion on size and focusability across a hide→show cycle |
 | Enter / Escape / Ctrl-C firing during IME composition | W2 handlers must ignore composing events; W5 asserts it |
 
 ## Build order and bead mapping
 
-`W0 (spike) → W7 (ADR-0010) → W1 → W2 → W3 → W4 → W5`
+`W7 (ADR-0010) → W1 → W6 → W2 → W3 → W4 → W5`
 
-W0 first because the focus seam decides *how* we migrate. W7 second because the ADR
-authorizes the migration and must exist before code contradicts ADR-0004 §3. Then the
-implementation, each item rewriting its own tests first per the TDD rule. W5 last
+W7 first because the ADR authorizes the migration and must exist before any code
+contradicts ADR-0004 §3. Then W1, whose acceptance criteria carry the risky seams the
+removed spike was meant to probe. W6 lands immediately after so the migration ships one
+visible improvement rather than none. Then the remaining items, each rewriting its own
+tests first per the TDD rule. W5 last
 collects what only a real browser can assert — it is not a cleanup step, it owns the
 IME coverage this repo has never had.
 
