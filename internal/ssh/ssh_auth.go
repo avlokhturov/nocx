@@ -31,9 +31,13 @@ const (
 
 // authChainEntry is one bucket in the ordered fallback chain.
 type authChainEntry struct {
-	kind     authMethodKind
-	method   gossh.AuthMethod
-	password string
+	kind   authMethodKind
+	method gossh.AuthMethod
+	// secret holds a stored password/passphrase for late-bind auth buckets.
+	// It is a credential.Secret so it cannot leak via logging or marshaling;
+	// auth methods read it through Use at auth time only (see
+	// passwordCallbackFromSecret).
+	secret credential.Secret
 }
 
 // buildAuthChain builds the ordered auth fallback chain, porting Tabby's
@@ -109,10 +113,29 @@ func (rc *RealClient) addAgentMethods(chain *[]authChainEntry) {
 	}
 }
 
+// passwordCallbackFromSecret builds a gossh.PasswordCallback that
+// materializes the plaintext through Secret.Use only when the SSH server
+// challenges for it — so the password lives in memory for the duration of
+// the callback, not for the lifetime of the chain. An empty secret returns
+// ("", nil), matching the previous empty-string behaviour.
+func passwordCallbackFromSecret(s credential.Secret) gossh.AuthMethod {
+	return gossh.PasswordCallback(func() (string, error) {
+		var pw string
+		if err := s.Use(func(b []byte) error { pw = string(b); return nil }); err != nil {
+			return "", err
+		}
+		return pw, nil
+	})
+}
+
 func (rc *RealClient) addPasswordMethods(chain *[]authChainEntry, cfg *ConnectConfig) {
 	if cfg.Credentials != nil {
-		if stored, err := cfg.Credentials.LookupPassword(cfg.CredIdentity); err == nil && stored != "" {
-			*chain = append(*chain, authChainEntry{kind: kindSavedPassword, method: gossh.Password(stored), password: stored})
+		if stored, err := cfg.Credentials.LookupPassword(cfg.CredIdentity); err == nil && !stored.IsEmpty() {
+			*chain = append(*chain, authChainEntry{
+				kind:   kindSavedPassword,
+				method: passwordCallbackFromSecret(stored),
+				secret: stored,
+			})
 		} else if err != nil {
 			rc.log.Debug("credential lookup failed", "error", err)
 		}
@@ -121,14 +144,13 @@ func (rc *RealClient) addPasswordMethods(chain *[]authChainEntry, cfg *ConnectCo
 
 func (rc *RealClient) addKeyboardInteractiveMethods(chain *[]authChainEntry, cfg *ConnectConfig) {
 	if cfg.Credentials != nil {
-		if stored, err := cfg.Credentials.LookupPassword(cfg.CredIdentity); err == nil && stored != "" {
-			*chain = append(*chain, authChainEntry{kind: kindKeyboardInteractive, password: stored})
+		if stored, err := cfg.Credentials.LookupPassword(cfg.CredIdentity); err == nil && !stored.IsEmpty() {
+			*chain = append(*chain, authChainEntry{kind: kindKeyboardInteractive, secret: stored})
 		}
 	}
 	*chain = append(*chain, authChainEntry{kind: kindKeyboardInteractive})
 }
 
-// authMethodsFromChain extracts the concrete gossh.AuthMethod values from the chain.
 func authMethodsFromChain(chain []authChainEntry) []gossh.AuthMethod {
 	var methods []gossh.AuthMethod
 	for _, entry := range chain {
@@ -139,10 +161,12 @@ func authMethodsFromChain(chain []authChainEntry) []gossh.AuthMethod {
 	return methods
 }
 
-// lookupKeyPassphrase resolves a private-key passphrase by hash from the credential store.
-func (rc *RealClient) lookupKeyPassphrase(store credential.CredentialStore, hash credential.KeyHash) (string, error) {
+// lookupKeyPassphrase resolves a private-key passphrase by hash from the
+// credential store. It returns a credential.Secret so the passphrase is
+// non-serializable; callers read it through Secret.Use.
+func (rc *RealClient) lookupKeyPassphrase(store credential.CredentialStore, hash credential.KeyHash) (credential.Secret, error) {
 	if store == nil {
-		return "", nil
+		return credential.Secret{}, nil
 	}
 	return store.LookupKeyPassphrase(hash)
 }

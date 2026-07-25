@@ -36,9 +36,60 @@ type StoredVault struct {
 	IV       string `json:"iv"`       // unused in v2, kept for backward JSON compat
 }
 
-// vaultData is the plaintext JSON inside the vault.
+// vaultData is the in-memory plaintext state of the vault. It holds
+// VaultSecret values (whose Value is a non-serializable Secret) and is
+// converted to vaultDataDTO at the encryption boundary in Marshal.
 type vaultData struct {
-	Secrets []VaultSecret `json:"secrets,omitempty"`
+	Secrets []VaultSecret
+}
+
+// vaultDataDTO is the serializable shape of vaultData: the same key
+// fields plus a plaintext value string. It exists only at the marshal /
+// decrypt boundary so the encrypted blob can be serialized without going
+// through VaultSecret.Value (a Secret that refuses MarshalJSON). The
+// plaintext is written from inside vault.Marshal's Secret.Use callback and
+// read back into a Secret during decrypt — never handed out as a string.
+type vaultDataDTO struct {
+	Secrets []vaultSecretDTO `json:"secrets,omitempty"`
+}
+
+// vaultSecretDTO is the on-disk shape of a single VaultSecret.
+type vaultSecretDTO struct {
+	Type  SecretType `json:"type"`
+	Key   VaultKey   `json:"key"`
+	Value string     `json:"value"`
+}
+
+// toDTO converts the in-memory vaultData (with non-serializable Secrets)
+// into a serializable DTO by reading each secret's plaintext through
+// Secret.Use. This is the one place the vault materializes plaintext for
+// encryption; the bytes live only for the duration of the Marshal call.
+func (d vaultData) toDTO() (vaultDataDTO, error) {
+	out := vaultDataDTO{Secrets: make([]vaultSecretDTO, len(d.Secrets))}
+	for i, s := range d.Secrets {
+		dto := vaultSecretDTO{Type: s.Type, Key: s.Key}
+		if err := s.Value.Use(func(b []byte) error {
+			// Copy into a string for the DTO. This is the unavoidable
+			// plaintext copy at the encryption boundary — it lives only
+			// until json.Marshal returns and encryptGCM consumes it.
+			dto.Value = string(b)
+			return nil
+		}); err != nil {
+			return vaultDataDTO{}, fmt.Errorf("marshal secret %d: %w", i, err)
+		}
+		out.Secrets[i] = dto
+	}
+	return out, nil
+}
+
+// fromDTO converts a decrypted DTO back into in-memory vaultData, wrapping
+// each plaintext value in a Secret so it is again non-serializable.
+func (vaultDataDTO) fromDTO(dto vaultDataDTO) vaultData {
+	out := vaultData{Secrets: make([]VaultSecret, len(dto.Secrets))}
+	for i, s := range dto.Secrets {
+		out.Secrets[i] = VaultSecret{Type: s.Type, Key: s.Key, Value: NewSecret(s.Value)}
+	}
+	return out
 }
 
 // Vault is a passphrase-encrypted secret store. It holds secrets in memory
@@ -90,6 +141,8 @@ func (v *Vault) IsOpen() bool {
 //
 // Uses AES-256-GCM (format version 2). A fresh random salt and nonce are
 // generated per call, so even identical plaintext produces a different blob.
+// The in-memory VaultSecrets (with non-serializable Secret values) are
+// converted to a private DTO via Secret.Use at this boundary only.
 func (v *Vault) Marshal() (*StoredVault, error) {
 	if v.passphrase == "" {
 		return nil, errors.New("vault is locked")
@@ -102,7 +155,14 @@ func (v *Vault) Marshal() (*StoredVault, error) {
 
 	key := deriveKey(v.passphrase, salt)
 
-	plaintext, err := json.Marshal(v.data)
+	// Materialize plaintext through Secret.Use at this boundary only. The
+	// DTO's string values live just long enough for json.Marshal + GCM
+	// encryption; they are never handed out beyond this function.
+	dto, err := v.data.toDTO()
+	if err != nil {
+		return nil, fmt.Errorf("marshal vault data: %w", err)
+	}
+	plaintext, err := json.Marshal(dto)
 	if err != nil {
 		return nil, fmt.Errorf("marshal vault data: %w", err)
 	}
@@ -161,9 +221,13 @@ func (v *Vault) decrypt() error {
 		return errors.New("decrypt failed: wrong passphrase or corrupted vault")
 	}
 
-	if err := json.Unmarshal(plaintext, &v.data); err != nil {
+	// Unmarshal into the DTO (plaintext strings) then wrap each value in a
+	// Secret so the in-memory state is again non-serializable.
+	var dto vaultDataDTO
+	if err := json.Unmarshal(plaintext, &dto); err != nil {
 		return fmt.Errorf("parse decrypted vault data: %w", err)
 	}
+	v.data = vaultDataDTO{}.fromDTO(dto)
 	return nil
 }
 

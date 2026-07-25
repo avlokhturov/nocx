@@ -67,8 +67,8 @@ func newStubCredentialStore() *stubCredentialStore {
 	return &stubCredentialStore{passwords: make(map[string]string)}
 }
 
-func (s *stubCredentialStore) LookupPassword(id credential.Identity) (string, error) {
-	return s.passwords[id.User], nil
+func (s *stubCredentialStore) LookupPassword(id credential.Identity) (credential.Secret, error) {
+	return credential.NewSecret(s.passwords[id.User]), nil
 }
 
 func (s *stubCredentialStore) SavePassword(id credential.Identity, password string) error {
@@ -86,8 +86,8 @@ func (s *stubCredentialStore) HasPassword(id credential.Identity) (bool, error) 
 	return ok, nil
 }
 
-func (s *stubCredentialStore) LookupKeyPassphrase(hash credential.KeyHash) (string, error) {
-	return "", nil
+func (s *stubCredentialStore) LookupKeyPassphrase(hash credential.KeyHash) (credential.Secret, error) {
+	return credential.Secret{}, nil
 }
 
 func (s *stubCredentialStore) SaveKeyPassphrase(hash credential.KeyHash, passphrase string) error {

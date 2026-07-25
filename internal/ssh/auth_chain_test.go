@@ -167,8 +167,15 @@ func TestAuthChainLateBindCredential(t *testing.T) {
 	// Late-bind should inject the stored password as a savedPassword bucket.
 	foundStored := false
 	for _, m := range chain {
-		if m.kind == kindSavedPassword && m.password == "stored-secret" {
-			foundStored = true
+		if m.kind == kindSavedPassword {
+			if err := m.secret.Use(func(b []byte) error {
+				if string(b) == "stored-secret" {
+					foundStored = true
+				}
+				return nil
+			}); err != nil {
+				t.Fatalf("secret.Use: %v", err)
+			}
 		}
 	}
 	if !foundStored {
@@ -220,8 +227,12 @@ func TestResolvePrivateKeyPassphraseByHash(t *testing.T) {
 	if err != nil {
 		t.Fatalf("lookupKeyPassphrase: %v", err)
 	}
-	if got != "my-passphrase" {
-		t.Errorf("passphrase = %q, want my-passphrase", got)
+	var gotPw string
+	if err := got.Use(func(b []byte) error { gotPw = string(b); return nil }); err != nil {
+		t.Fatalf("passphrase Use: %v", err)
+	}
+	if gotPw != "my-passphrase" {
+		t.Errorf("passphrase = %q, want my-passphrase", gotPw)
 	}
 }
 

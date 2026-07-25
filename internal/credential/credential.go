@@ -20,9 +20,10 @@ type KeyHash string
 // interface is the single chokepoint, dual-path: encrypted vault or
 // OS keychain (both implement this interface).
 type CredentialStore interface {
-	// LookupPassword returns the stored password for the identity, or
-	// nil/empty if none is stored.
-	LookupPassword(id Identity) (string, error)
+	// LookupPassword returns the stored password for the identity, or an
+	// empty Secret if none is stored. The password is wrapped in a Secret
+	// so it cannot be serialized by accident; use Secret.Use to read it.
+	LookupPassword(id Identity) (Secret, error)
 	// SavePassword stores (or updates) the password for the identity.
 	SavePassword(id Identity, password string) error
 	// DeletePassword removes the stored password for the identity.
@@ -30,8 +31,9 @@ type CredentialStore interface {
 	// HasPassword reports whether a password is stored for the identity.
 	HasPassword(id Identity) (bool, error)
 
-	// LookupKeyPassphrase returns the stored passphrase for the key hash.
-	LookupKeyPassphrase(hash KeyHash) (string, error)
+	// LookupKeyPassphrase returns the stored passphrase for the key hash,
+	// or an empty Secret if none is stored. Use Secret.Use to read it.
+	LookupKeyPassphrase(hash KeyHash) (Secret, error)
 	// SaveKeyPassphrase stores (or updates) the passphrase for the key hash.
 	SaveKeyPassphrase(hash KeyHash, passphrase string) error
 	// DeleteKeyPassphrase removes the stored passphrase for the key hash.
@@ -56,11 +58,14 @@ type VaultKey struct {
 	Hash string
 }
 
-// VaultSecret is a single secret entry in the vault.
+// VaultSecret is a single secret entry in the vault. The Value is a Secret
+// so it cannot be serialized by accident — see secret.go. The vault
+// persists through a private DTO that materializes plaintext only inside
+// the encryption callback (vault.Marshal).
 type VaultSecret struct {
 	Type  SecretType `json:"type"`
 	Key   VaultKey   `json:"key"`
-	Value string     `json:"value"`
+	Value Secret     `json:"value"`
 }
 
 // matches checks whether the stored secret's key matches the lookup key
@@ -88,21 +93,21 @@ func NewCredentialStore(v *Vault) CredentialStore {
 	return &vaultCredentialAdapter{vault: v}
 }
 
-func (a *vaultCredentialAdapter) LookupPassword(id Identity) (string, error) {
+func (a *vaultCredentialAdapter) LookupPassword(id Identity) (Secret, error) {
 	key := VaultKey{User: id.User, Host: id.Host, Port: id.Port}
 	s, err := a.vault.GetSecret(SecretTypePassword, key)
 	if err != nil {
-		return "", err
+		return Secret{}, err
 	}
 	if s == nil {
-		return "", nil
+		return Secret{}, nil
 	}
 	return s.Value, nil
 }
 
 func (a *vaultCredentialAdapter) SavePassword(id Identity, password string) error {
 	key := VaultKey{User: id.User, Host: id.Host, Port: id.Port}
-	return a.vault.SaveSecret(VaultSecret{Type: SecretTypePassword, Key: key, Value: password})
+	return a.vault.SaveSecret(VaultSecret{Type: SecretTypePassword, Key: key, Value: NewSecret(password)})
 }
 
 func (a *vaultCredentialAdapter) DeletePassword(id Identity) error {
@@ -119,13 +124,13 @@ func (a *vaultCredentialAdapter) HasPassword(id Identity) (bool, error) {
 	return s != nil, nil
 }
 
-func (a *vaultCredentialAdapter) LookupKeyPassphrase(hash KeyHash) (string, error) {
+func (a *vaultCredentialAdapter) LookupKeyPassphrase(hash KeyHash) (Secret, error) {
 	s, err := a.vault.GetSecret(SecretTypeKeyPassphrase, VaultKey{Hash: string(hash)})
 	if err != nil {
-		return "", err
+		return Secret{}, err
 	}
 	if s == nil {
-		return "", nil
+		return Secret{}, nil
 	}
 	return s.Value, nil
 }
@@ -134,7 +139,7 @@ func (a *vaultCredentialAdapter) SaveKeyPassphrase(hash KeyHash, passphrase stri
 	return a.vault.SaveSecret(VaultSecret{
 		Type:  SecretTypeKeyPassphrase,
 		Key:   VaultKey{Hash: string(hash)},
-		Value: passphrase,
+		Value: NewSecret(passphrase),
 	})
 }
 

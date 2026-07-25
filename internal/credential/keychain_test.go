@@ -27,9 +27,7 @@ func TestKeychainPasswordRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LookupPassword: %v", err)
 	}
-	if got != "secret123" {
-		t.Errorf("LookupPassword = %q, want secret123", got)
-	}
+	secretEquals(t, got, "secret123")
 }
 
 func TestKeychainPasswordNotFound(t *testing.T) {
@@ -41,7 +39,7 @@ func TestKeychainPasswordNotFound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LookupPassword on missing should not error: %v", err)
 	}
-	if got != "" {
+	if !got.IsEmpty() {
 		t.Errorf("LookupPassword on missing = %q, want empty", got)
 	}
 	has, _ := kc.HasPassword(id)
@@ -58,9 +56,7 @@ func TestKeychainPasswordUpdate(t *testing.T) {
 	_ = kc.SavePassword(id, "first")
 	_ = kc.SavePassword(id, "second")
 	got, _ := kc.LookupPassword(id)
-	if got != "second" {
-		t.Errorf("after update = %q, want second", got)
-	}
+	secretEquals(t, got, "second")
 }
 
 func TestKeychainPasswordDelete(t *testing.T) {
@@ -73,7 +69,7 @@ func TestKeychainPasswordDelete(t *testing.T) {
 		t.Fatalf("DeletePassword: %v", err)
 	}
 	got, _ := kc.LookupPassword(id)
-	if got != "" {
+	if !got.IsEmpty() {
 		t.Errorf("after delete = %q, want empty", got)
 	}
 	has, _ := kc.HasPassword(id)
@@ -94,9 +90,7 @@ func TestKeychainKeyPassphraseRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LookupKeyPassphrase: %v", err)
 	}
-	if got != "passphrase-x" {
-		t.Errorf("LookupKeyPassphrase = %q, want passphrase-x", got)
-	}
+	secretEquals(t, got, "passphrase-x")
 }
 
 func TestKeychainKeyPassphraseDelete(t *testing.T) {
@@ -109,7 +103,7 @@ func TestKeychainKeyPassphraseDelete(t *testing.T) {
 		t.Fatalf("DeleteKeyPassphrase: %v", err)
 	}
 	got, _ := kc.LookupKeyPassphrase(hash)
-	if got != "" {
+	if !got.IsEmpty() {
 		t.Errorf("after delete = %q, want empty", got)
 	}
 }

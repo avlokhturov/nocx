@@ -34,15 +34,15 @@ func keychainKeyForConnection(id Identity) string {
 	return keychainServicePrefix + id.Host
 }
 
-func (k *Keychain) LookupPassword(id Identity) (string, error) {
+func (k *Keychain) LookupPassword(id Identity) (Secret, error) {
 	v, err := keyring.Get(keychainKeyForConnection(id), id.User)
 	if err != nil {
 		if err == keyring.ErrNotFound {
-			return "", nil
+			return Secret{}, nil
 		}
-		return "", fmt.Errorf("keychain lookup password: %w", err)
+		return Secret{}, fmt.Errorf("keychain lookup password: %w", err)
 	}
-	return v, nil
+	return NewSecret(v), nil
 }
 
 func (k *Keychain) SavePassword(id Identity, password string) error {
@@ -73,15 +73,15 @@ func (k *Keychain) HasPassword(id Identity) (bool, error) {
 	return true, nil
 }
 
-func (k *Keychain) LookupKeyPassphrase(hash KeyHash) (string, error) {
+func (k *Keychain) LookupKeyPassphrase(hash KeyHash) (Secret, error) {
 	v, err := keyring.Get(keychainKeyPassphraseService, string(hash))
 	if err != nil {
 		if err == keyring.ErrNotFound {
-			return "", nil
+			return Secret{}, nil
 		}
-		return "", fmt.Errorf("keychain lookup passphrase: %w", err)
+		return Secret{}, fmt.Errorf("keychain lookup passphrase: %w", err)
 	}
-	return v, nil
+	return NewSecret(v), nil
 }
 
 func (k *Keychain) SaveKeyPassphrase(hash KeyHash, passphrase string) error {
