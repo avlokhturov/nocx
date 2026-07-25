@@ -1,5 +1,11 @@
 import './style.css'
-import { GetWSPort, CheckForUpdate, ApplyUpdate, ReportHealthy } from '../wailsjs/go/main/WailsApp'
+import {
+  GetWSPort,
+  GetWSToken,
+  CheckForUpdate,
+  ApplyUpdate,
+  ReportHealthy,
+} from '../wailsjs/go/main/WailsApp'
 import { log } from './log'
 import { WSClient } from './ipc'
 import { TabManager } from './tabs'
@@ -104,17 +110,18 @@ async function main() {
   // In that dev path the backend lives on the page's own host (e.g. a remote
   // dev VM), not necessarily on loopback.
   let port = 9876
+  let token = ''
   let host: string | undefined
   try {
     port = await GetWSPort()
+    token = await GetWSToken()
   } catch {
     host = location.hostname
     console.warn('nocx: no Wails runtime, using fallback WS port', port)
   }
 
   const client = new WSClient()
-  await client.connect(port, host)
-
+  await client.connect(port, host, token)
   const profileClient = new ProfileClient(client.rawSocket())
   // TabManager opens the first tab and activates it in the constructor.
   // The renderer is selected via ?r=xterm|wterm inside TabManager.

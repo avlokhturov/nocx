@@ -123,6 +123,10 @@ func (a *App) WSPort() int {
 	return a.Transport.Port()
 }
 
+func (a *App) WSToken() string {
+	return a.Transport.Token()
+}
+
 // sshFactoryAdapter adapts ssh.SSH to session.SSHFactory.
 type sshFactoryAdapter struct {
 	client ssh.SSH

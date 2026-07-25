@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"sync"
@@ -48,8 +49,16 @@ type WSServer struct {
 	registry session.Registry
 	server   *http.Server
 	port     int
-	listener net.Listener
-	upgrader websocket.Upgrader
+
+	// Per-launch capability token (bead nocx-hl3).
+	token       string
+	tokenSource io.Reader // entropy source; crypto/rand default
+	origins     OriginPolicy
+
+	// Override the listen address. Default 127.0.0.1:0.
+	listenAddr string
+	listener   net.Listener
+	upgrader   websocket.Upgrader
 
 	// Optional profile/credential stores for the connection-manager control
 	// plane (profiles.*, groups.*, credentials.*). When nil, those methods
@@ -85,9 +94,12 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 		log:      logger,
 		registry: reg,
 		upgrader: websocket.Upgrader{
+			// CheckOrigin is always permissive; our own authorize
+			// call handles origin/host policy before the upgrade.
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
-		rx: make(map[session.ID]*sessionRx),
+		rx:      make(map[session.ID]*sessionRx),
+		origins: LoopbackOriginPolicy{},
 	}
 	for _, o := range opts {
 		o(s)
@@ -96,10 +108,23 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 }
 
 func (s *WSServer) Start(ctx context.Context) error {
+	// Fail closed: no entropy → no token → no connections.
+	if err := s.mintToken(); err != nil {
+		return err
+	}
+
+	// Configure the upgrader to accept only our token as the subprotocol,
+	// so it echoes the selected protocol on upgrade (RFC 6455).
+	s.upgrader.Subprotocols = []string{tokenProtocol(s.token)}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/session", s.handleSession)
 
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	addr := s.listenAddr
+	if addr == "" {
+		addr = "127.0.0.1:0"
+	}
+	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("ws listen: %w", err)
 	}
@@ -357,6 +382,9 @@ type ackParams struct {
 // --- HTTP handler ---------------------------------------------------------
 
 func (s *WSServer) handleSession(w http.ResponseWriter, r *http.Request) {
+	if !s.authorize(w, r) {
+		return
+	}
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		s.log.Error("ws upgrade", "error", err)

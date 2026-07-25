@@ -247,10 +247,10 @@ export class WSClient {
 
   // Ack throttle: one per session.
   private acks = new Map<string, AckThrottle>()
-
   // Reconnect state.
   private _port = 0
   private _host = '127.0.0.1'
+  private _token = ''
   private _closingDeliberately = false
   private _backoffMs = MIN_BACKOFF_MS
   private _reconnectTimer: ReturnType<typeof setTimeout> | null = null
@@ -259,19 +259,23 @@ export class WSClient {
   // not open yet — call openSession() next to get a SessionHandle. The host
   // defaults to loopback (the Wails shell serves the page locally); the
   // plain-browser dev path overrides it with the page's own hostname.
-  connect(port: number, host = '127.0.0.1'): Promise<void> {
+  // The token is the per-launch capability carried in Sec-WebSocket-Protocol.
+  connect(port: number, host = '127.0.0.1', token = ''): Promise<void> {
     this._port = port
     this._host = host
+    this._token = token
     this._closingDeliberately = false
     this._backoffMs = MIN_BACKOFF_MS
     this.sessions.clear()
     this.acks.clear()
     return this._connectInternal()
   }
-
   private _connectInternal(): Promise<void> {
     return new Promise((resolve, reject) => {
-      this.ws = new WebSocket(`ws://${this._host}:${this._port}/session`)
+      // The token travels in Sec-WebSocket-Protocol; the server echoes
+      // the selected subprotocol on upgrade (RFC 6455).
+      const subprotocol = `nocx.token.${this._token}`
+      this.ws = new WebSocket(`ws://${this._host}:${this._port}/session`, subprotocol)
       this.ws.binaryType = 'arraybuffer'
       this.pendingOpens.clear()
       this.pendingAttaches.clear()

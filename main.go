@@ -156,6 +156,10 @@ func (w *WailsApp) GetWSPort() int {
 	return w.backend.WSPort()
 }
 
+func (w *WailsApp) GetWSToken() string {
+	return w.backend.WSToken()
+}
+
 // CheckForUpdate fetches and verifies the signed release manifest.
 // Returns an update description if a newer version is available,
 // or null when already current or on a dev build.
