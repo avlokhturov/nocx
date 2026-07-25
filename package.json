@@ -22,6 +22,6 @@
   },
   "homepage": "https://github.com/shady2k/nocx#readme",
   "devDependencies": {
-    "@playwright/test": "^1.61.1"
+    "@playwright/test": "1.61.1"
   }
 }

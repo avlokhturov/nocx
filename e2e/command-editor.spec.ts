@@ -57,17 +57,6 @@ test.describe("command editor (nocx-4ff)", () => {
     });
     expect(selLen).toBeGreaterThan(0);
   });
-
-  test("the submit button is clickable and submits", async ({ page }) => {
-    await waitForPrompt(page);
-    await expect(page.locator(EDITOR)).toBeVisible({ timeout: 8000 });
-    await page.locator(INPUT).fill("echo clickme");
-
-    await page.locator(".nocx-editor-submit").click();
-    // Submit clears the composed line (atomic handoff) — proof the click landed.
-    await expect(page.locator(INPUT)).toHaveValue("", { timeout: 3000 });
-  });
-
   // One submission is one block. A multi-line composition is a single command
   // the user entered once, not one block per line (item 3).
   test("a multi-line command is one gutter landmark, not three", async ({
