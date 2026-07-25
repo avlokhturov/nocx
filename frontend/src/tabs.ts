@@ -1052,6 +1052,14 @@ export class TabManager {
       sshOpts,
     )
 
+    // Track alt-screen state for the traffic-light overlap fix.
+    // When the active tab enters alt-screen, hide the tabbar so the
+    // terminal gets the full window and doesn't overlap the macOS
+    // window controls.
+    tab.onBufferChange = () => {
+      if (tab === this.activeTab) this.syncAltScreenClass()
+    }
+
     this.tabs.push(tab)
     // Append to the tabs container (addBtn sits after the container).
     this.tabsContainer.append(tab.button)
