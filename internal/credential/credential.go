@@ -1,5 +1,10 @@
 package credential
 
+import (
+	"crypto/sha512"
+	"encoding/hex"
+)
+
 // Identity identifies an SSH connection for credential lookup.
 // A credential is addressed by the connection identity {user, host, port},
 // never embedded in a profile. This is the core seam between the profile
@@ -14,6 +19,24 @@ type Identity struct {
 // sha512 hash of the key contents — decoupled from connection identity
 // so one key's passphrase can be reused across hosts.
 type KeyHash string
+
+// HashKey derives the KeyHash for a private key from its raw bytes. The
+// format is "sha512:<hex(sha512(key))>" — a stable, content-addressed key
+// that survives key moves and is independent of the file path. This is the
+// canonical derivation both the save path (when a passphrase is first
+// stored) and the delete path (when a credential referencing the key is
+// removed) must use, so a secret saved under HashKey(data) is reachable
+// for deletion by re-reading the same key file.
+//
+// Hashing the raw bytes (not the path) means renaming or moving a key does
+// not orphan its passphrase. Two credentials pointing at the same file
+// share one passphrase entry; the credential delete cascade deletes it
+// when the first credential goes — a documented compromise recorded in the
+// delete-cascade handler, since the model has no secret reference count.
+func HashKey(key []byte) KeyHash {
+	sum := sha512.Sum512(key)
+	return KeyHash("sha512:" + hex.EncodeToString(sum[:]))
+}
 
 // CredentialStore is the seam between the profile manager (clear data)
 // and the secret store. SSH never calls the vault directly — this

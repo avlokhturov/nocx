@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"sync"
 
 	"github.com/gorilla/websocket"
@@ -1054,7 +1055,7 @@ func (s *WSServer) handleCredentialCRUDMethod(wconn *wsConn, req jsonrpcRequest)
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: id required"))
 			return
 		}
-		if err := s.profiles.DeleteCredential(params.ID); err != nil {
+		if err := s.deleteCredentialCascade(params.ID); err != nil {
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
 			return
 		}
@@ -1153,6 +1154,140 @@ func (s *WSServer) handleCredentialMethod(wconn *wsConn, req jsonrpcRequest) {
 		}
 		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(true)))
 	}
+}
+
+// deleteCredentialCascade removes a credential's metadata and every secret
+// it references, in an order that cannot strand a secret.
+//
+// # The ordering trap
+//
+// The two secret kinds are keyed differently:
+//   - a password keys on Identity{User: credentialID} — derivable from the ID;
+//   - a key passphrase keys on KeyHash, derived from the key material, and
+//     the metadata stores only KeyPath.
+//
+// Once the metadata row is gone there is no KeyPath left, no hash can be
+// derived, and the passphrase is unreachable forever. So the metadata is
+// loaded BEFORE any deletion to recover KeyPath and derive the hash.
+//
+// # Order: metadata-first, then best-effort secrets (ADR-0011 §4)
+//
+// Metadata is deleted first and its deletion stands; secret deletion is
+// best-effort afterwards. A brief unreachable orphan (secret with no
+// metadata pointing at it) is safer than metadata pointing at a secret
+// that is gone: the orphan can be retried or swept by a future janitor,
+// while a dangling reference makes every connect attempt fail in a way the
+// user cannot diagnose. If secret deletion fails the error is returned to
+// the caller so the cascade is not silently incomplete, but the metadata
+// deletion is not rolled back — the credential is gone either way.
+//
+// # Missing secrets are not errors
+//
+// Deleting a credential that never had a password (or whose passphrase was
+// never saved) must succeed. Both backends (Keychain, Vault) treat
+// "already absent" as success, so no special-casing is needed here.
+//
+// # Multi-profile references
+//
+// The model allows several SSHProfileOptions.CredentialID values to point
+// at one credential. This cascade does NOT refuse when other profiles
+// reference the credential: the user asked to delete it, and refusing
+// would leave an orphaned-credential path the UI cannot recover from.
+// Surviving references become stale (their password/passphrase lookups
+// return empty), which is the same state a never-had-a-secret credential
+// is already in. Reference integrity is a separate work item; see the
+// task report (nocx-7l4) for the recorded compromise.
+//
+// # KeyPath unreadable
+//
+// If the credential references a KeyPath that can no longer be read (moved,
+// deleted, permission-denied), the passphrase entry cannot be reached for
+// deletion. Per ADR-0011 §4 the metadata deletion still stands; the
+// unreadable-key error is returned to the caller as the cascade result so
+// the orphan is observable, and a future janitor can sweep by hash.
+func (s *WSServer) deleteCredentialCascade(id string) error {
+	// Load the metadata BEFORE deleting it: KeyPath is needed to derive the
+	// key passphrase's KeyHash, and once the row is gone it is unrecoverable.
+	cred, ok, err := s.findCredentialByID(id)
+	if err != nil {
+		return fmt.Errorf("load credential %s: %w", id, err)
+	}
+
+	// Derive every secret key BEFORE deleting metadata, so a key-read
+	// failure is known while the metadata still exists. The password keys
+	// on the credential ID alone; the passphrase keys on the hash of the
+	// key file at KeyPath. We do NOT delete anything yet — this is the
+	// "derive everything you need, then remove" step from the task brief.
+	var keyHash credential.KeyHash // empty == no passphrase to delete
+	var keyReadErr error
+	if ok && cred.KeyPath != "" && s.credentials != nil {
+		keyHash, keyReadErr = deriveKeyHashFromPath(cred.KeyPath)
+	}
+
+	// Delete metadata first. Its deletion stands regardless of secret
+	// deletion outcome (ADR-0011 §4: a brief orphan beats a dangling ref).
+	if err := s.profiles.DeleteCredential(id); err != nil {
+		return fmt.Errorf("delete credential metadata %s: %w", id, err)
+	}
+
+	// No metadata found → nothing referenced any secret. Idempotent.
+	if !ok {
+		return nil
+	}
+
+	// Best-effort secret deletion. We attempt BOTH the password and the
+	// passphrase deletion even if one fails, so a single failure does not
+	// skip the other and leave it orphaned. Errors are aggregated and
+	// returned; metadata is already gone, so the credential does not come
+	// back — the caller sees the error and the orphan is observable.
+	if s.credentials == nil {
+		return nil
+	}
+	var errs []error
+	if err := s.credentials.DeletePassword(credential.Identity{User: id}); err != nil {
+		errs = append(errs, fmt.Errorf("delete password for %s: %w", id, err))
+	}
+	if cred.KeyPath != "" {
+		if keyReadErr != nil {
+			// Key file unreadable: the passphrase entry is unreachable for
+			// deletion. Metadata is already gone; record the error so the
+			// orphan is observable. Per ADR-0011 §4 this is the lesser
+			// failure (brief orphan > dangling reference).
+			errs = append(errs, fmt.Errorf("read key %s to delete passphrase: %w", cred.KeyPath, keyReadErr))
+		} else if err := s.credentials.DeleteKeyPassphrase(keyHash); err != nil {
+			errs = append(errs, fmt.Errorf("delete key passphrase for %s: %w", id, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// findCredentialByID loads a single credential by ID from the profile store.
+// ok is false (not an error) when no credential with that ID exists — that
+// is the idempotent-delete path. A store error is returned as-is.
+func (s *WSServer) findCredentialByID(id string) (profile.Credential, bool, error) {
+	creds, err := s.profiles.LoadCredentials()
+	if err != nil {
+		return profile.Credential{}, false, err
+	}
+	for _, c := range creds {
+		if c.ID == id {
+			return c, true, nil
+		}
+	}
+	return profile.Credential{}, false, nil
+}
+
+// deriveKeyHashFromPath reads the private key file and derives its KeyHash.
+// This is the delete-side counterpart of the save path: a passphrase saved
+// under HashKey(keyBytes) is reachable for deletion by re-reading the same
+// file. A missing or unreadable file is returned as an error so the caller
+// can report the orphan rather than silently dropping the cascade.
+func deriveKeyHashFromPath(path string) (credential.KeyHash, error) {
+	data, err := os.ReadFile(path) //nolint:gosec // path comes from user-configured credential metadata
+	if err != nil {
+		return "", err
+	}
+	return credential.HashKey(data), nil
 }
 
 // handleImportTabby parses a Tabby config YAML and imports SSH profiles +

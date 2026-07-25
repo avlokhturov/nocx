@@ -1,6 +1,7 @@
 package credential
 
 import (
+	"crypto/sha512"
 	"encoding/hex"
 	"encoding/json"
 	"strings"
@@ -298,5 +299,28 @@ func TestVaultWrongPasswordIndistinguishableFromTamper(t *testing.T) {
 	// Same error message for both paths (indistinguishable to caller).
 	if wrongErr.Error() != tamperErr.Error() {
 		t.Errorf("wrong-password and tampered-data errors must be indistinguishable:\n  wrong:   %v\n  tamper:  %v", wrongErr, tamperErr)
+	}
+}
+
+func TestHashKey(t *testing.T) {
+	key := []byte("pretend-private-key-bytes")
+	h := HashKey(key)
+
+	// Format contract: sha512:<hex(sha512(key))>.
+	if !strings.HasPrefix(string(h), "sha512:") {
+		t.Fatalf("HashKey = %q, want sha512: prefix", h)
+	}
+	sum := sha512.Sum512(key)
+	want := "sha512:" + hex.EncodeToString(sum[:])
+	if string(h) != want {
+		t.Errorf("HashKey = %q, want %q", h, want)
+	}
+
+	// Stable and content-addressed: same bytes → same hash, different bytes → different.
+	if got := HashKey(key); got != h {
+		t.Errorf("HashKey not stable: %q vs %q", got, h)
+	}
+	if HashKey([]byte("different")) == h {
+		t.Error("HashKey collided for different inputs")
 	}
 }
