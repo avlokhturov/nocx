@@ -109,7 +109,6 @@ describe('SettingsViewImpl', () => {
     mockReady(client)
 
     await view.refresh()
-
     const headings = container.querySelectorAll('.st-section-heading')
     const texts = Array.from(headings).map((h) => h.textContent)
     expect(texts).toContain('Terminal')

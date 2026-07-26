@@ -1,809 +1,260 @@
-import { WSClient, type SessionHandle } from './ipc'
-import { createRenderer, resolveRendererName, type RendererName } from './renderers'
-import type { TerminalRenderer } from './renderers/types'
+// ═══════════════════════════════════════════════════════════════════════════
+// Tab and TabManager — chrome, lifecycle, and tab-model management.
+//
+// Tab is chrome-only: it owns the pane, display state, and delegates content
+// lifecycle to a TabContent instance. It implements TabHost so content can
+// push title, tooltip, attention, and close requests upward.
+//
+// TabManager owns the ordered tab model, activation rules, and MRU stack.
+// It constructs content, creates tabs, and wires tab-chrome intents.
+// ═══════════════════════════════════════════════════════════════════════════
+
+import type { WSClient } from './ipc'
 import { detectAgentStatus, type AgentStatus } from './agent-status'
-import { InputStateController } from './input-state'
-import { CommandEditor } from './editor'
-import { ShellInputTarget } from './input-target'
-import { submitCommand } from './submit'
-import { shouldShowEditor, NATIVE_RESTORE } from './native-mode'
-import { shouldCopy, type ClipboardAccess, type ClipboardGate } from './clipboard'
+import { type ClipboardAccess, type ClipboardGate } from './clipboard'
 import type { ClipboardBanner } from './banner'
-import { CommandLedger } from './command-ledger'
-import type { MarkerAdapter } from './renderers/types'
-import { ScrollbackController } from './scrollback/controller'
-import type { ProfileClient, SSHProfile } from './profiles'
-import { ConnectionManagerViewImpl } from './connections'
+import type { ProfileClient } from './profiles'
 import { log } from './log'
+import type { TabStrip } from './tab-strip'
+import type { TabHost, TabContent, ContentDescriptor, ContentViewport } from './tab-content'
+import { SURFACE_TERMINAL } from './tab-content'
+import { TerminalContent } from './terminal-content'
 
-// How long the grid must hold still before the PTY is told about it.
-// Dragging a window edge walks the grid through every intermediate size,
-// and each one forwarded straight to the PTY is another SIGWINCH — the
-// TUI repaints itself from scratch for a size that is already stale,
-// dozens of times per drag, which is what shreds the screen. Repaint
-// locally as fast as the renderer likes, but only tell the PTY the size
-// the drag actually settled on.
-const RESIZE_SETTLE_MS = 80
+// ═══════════════════════════════════════════════════════════════════════════
+// Tab — chrome and lifecycle, delegates content to TabContent
+// ═══════════════════════════════════════════════════════════════════════════
 
-// Shown only until the session reports where it started; a tab named after a
-// generic word tells the user nothing once there are three of them.
-const FALLBACK_TITLE = 'Terminal'
-
-/**
- * Names a tab after its directory, the way every other terminal does. Keeps
- * the tail, which is the informative end of a path — the CSS ellipsis cuts
- * from the right, so handing it a long path would hide exactly the part worth
- * reading. '~' stays as itself: that is already the shortest true answer.
- *
- * The label says nothing about where the cwd came from — surfacing the
- * session-open fallback (AD-5) is cwdTooltip's job, where there is room to
- * say it in words.
- */
-function directoryLabel(cwd: string): string {
-  const path = cwd.trim().replace(/\/+$/, '')
-  if (!path) return FALLBACK_TITLE
-  const parts = path.split('/').filter(Boolean)
-  if (path === '~' || parts.length === 0) return path || FALLBACK_TITLE
-  return parts.slice(-2).join('/')
-}
-
-/**
- * Tooltip for a cwd. When the value comes from session open (no OSC 7 yet)
- * the tooltip surfaces that fact (AD-5 fallback visibility).
- */
-function cwdTooltip(cwd: string, fromOSC7: boolean): string {
-  if (!cwd) return ''
-  return fromOSC7 ? cwd : `${cwd} (initial cwd)`
-}
-
-const DEFAULT_RENDERER: RendererName = resolveRendererName()
-
-export class Tab {
+export class Tab implements TabHost {
   readonly id: number
-
   readonly pane = document.createElement('div')
-  readonly button = document.createElement('div')
-  readonly closeBtn = document.createElement('button')
-  readonly indexLabel = document.createElement('span')
-  readonly titleSpan = document.createElement('span')
-  /** Agent state icon: spinner while working, dot when waiting on the user. */
-  readonly statusIcon = document.createElement('span')
-  /** Centres the status icon and the title as one unit, the way Warp does. */
-  readonly label = document.createElement('span')
-  /** Active-tab indicator (top bar) / activity indicator (bottom bar) */
-  readonly indicator = document.createElement('div')
 
-  // Empty, matching the label the constructor paints: a tab has no name until
-  // its session reports a directory (nocx-83a). Seeding this with FALLBACK_TITLE
-  // would make the getter claim a name the user never sees.
+  /** Model-level descriptor: surface type, singleton key, restore info. */
+  readonly descriptor: ContentDescriptor
+
+  readonly content: TabContent
+
+  // ── Display state (read by TabStrip via TabView) ─────────────────────
+
+  private _active = false
+  onDisplayChange: (() => void) | null = null
+
   private _title = ''
-  private _defaultTitle = FALLBACK_TITLE
   private _programTitle = ''
   private _hasActivity = false
   private _agentStatus: AgentStatus | null = null
-  private _bufferType: 'normal' | 'alternate' = 'normal'
-  onBufferChange?: (type: 'normal' | 'alternate') => void
+  private _tooltip = ''
+  private _disposed = false
+  private _mountAbort = new AbortController()
+  // ── B.5 geometry authority ──────────────────────────────────────────
+  private _viewportObserver: ResizeObserver | null = null
+  private _latestViewport: ContentViewport | null = null
+  private _viewportRafPending = false
+  private _mountStarted = false
 
-  get bufferType(): 'normal' | 'alternate' {
-    return this._bufferType
-  }
-  private _cwdFromOSC7 = false
-  private _lastExitCode: number | null = null
-  private inputState = new InputStateController()
-  private renderer: TerminalRenderer | null = null
-  private session: SessionHandle | null = null
-  private editor: CommandEditor | null = null
-  private shellTarget: ShellInputTarget | null = null
-  private scrollback: ScrollbackController | null = null
-  private nativeMode = false
-  private started = false
-  private ledger: CommandLedger | null = null
-  /** Pending command text set by the editor, consumed by the C marker. */
-  private _pendingCommand = ''
-  /** Per-record markers (B2): each record owns its own marker, keyed by record id. */
-  private _markers = new Map<number, MarkerAdapter>()
-  private _globalKeydown: ((e: KeyboardEvent) => void) | null = null
-  private _cwd = '~'
-  private _host = ''
-
-  // _readyPromise resolves true when the renderer mounts and the PTY session
-  // opens; resolves false when start() throws. Never rejects. It stays pending
-  // until start() is called, so consumers can await it for the honest
-  // did-it-actually-start signal (see §7.5 of distribution-and-updates-design).
-  private readonly _readyPromise: Promise<boolean>
-  private _readyResolve!: (value: boolean) => void
-  cols = 0
-  rows = 0
-  private resizeTimer: number | undefined
-
-  /** When set, this tab hosts a ConnectionManagerView instead of a terminal. */
-  managerView: ConnectionManagerViewImpl | null = null
-
-  constructor(
-    private readonly client: WSClient,
-    private readonly rendererName: RendererName,
-    private readonly clipboard: ClipboardAccess,
-    private readonly gate: ClipboardGate,
-    private readonly banner: ClipboardBanner,
-    id: number,
-    private readonly sshOpts?: {
-      profileId: string
-      host: string
-      user?: string
-    },
-  ) {
+  constructor(content: TabContent, descriptor: ContentDescriptor, id: number) {
     this.id = id
-    this._readyPromise = new Promise<boolean>((resolve) => {
-      this._readyResolve = resolve
-    })
+    this.content = content
+    this.descriptor = descriptor
 
     this.pane.className = 'pane'
     this.pane.id = `pane-${id}`
     this.pane.setAttribute('role', 'tabpanel')
-
-    this.button.className = 'tab'
-    this.button.setAttribute('role', 'tab')
-    this.button.setAttribute('aria-controls', this.pane.id)
-    this.button.setAttribute('data-tab-id', String(id))
-
-    this.indicator.className = 'tab-indicator'
-
-    this.indexLabel.className = 'tab-index'
-    this.indexLabel.textContent = String(id)
-
-    this.statusIcon.className = 'tab-status'
-    this.label.className = 'tab-label'
-
-    this.titleSpan.className = 'tab-title'
-    // Title is empty until start() resolves with the real directory name.
-    // Setting 'Terminal' here would paint a placeholder that flashes before
-    // the real name lands (nocx-83a).
-
-    this.closeBtn.className = 'tab-close'
-    this.closeBtn.textContent = '×'
-    this.closeBtn.setAttribute('aria-label', 'Close tab')
-
-    this.label.append(this.statusIcon, this.titleSpan)
-    this.button.append(this.indexLabel, this.label, this.closeBtn, this.indicator)
-    this.setActive(false)
   }
 
-  setActive(active: boolean): void {
-    this.pane.classList.toggle('active', active)
-    this.button.classList.toggle('active', active)
-    this.button.setAttribute('aria-selected', String(active))
-    if (active) {
-      this._hasActivity = false
-      this.indicator.classList.remove('tab-activity')
-    }
-  }
+  // ── TabView conformance ───────────────────────────────────────────────
 
   get title(): string {
     return this._title
+  }
+
+  /** Display title: falls back to descriptor.defaultTitle when empty. */
+  get displayTitle(): string {
+    return this._title || this.descriptor.defaultTitle
   }
 
   get hasActivity(): boolean {
     return this._hasActivity
   }
 
-  /** Called when this background tab receives output. */
-  private markActivity(): void {
-    if (!this._hasActivity) {
-      this._hasActivity = true
-      this.indicator.classList.add('tab-activity')
-    }
-  }
-
-  /** Callback for when session exits — set by TabManager to close the tab. */
-  onSessionExit?: () => void
-
   get agentStatus(): AgentStatus | null {
     return this._agentStatus
   }
 
-  get lastExitCode(): number | null {
-    return this._lastExitCode
+  get tooltip(): string {
+    return this._tooltip
   }
 
-  /**
-   * Resolves true when the renderer mounts and the PTY session opens;
-   * resolves false when start() throws. Never rejects. Stays pending
-   * until start() is called.
-   */
-  get ready(): Promise<boolean> {
-    return this._readyPromise
+  get paneId(): string {
+    return this.pane.id
   }
 
-  /**
-   * A coding agent runs as a single shell command, so OSC 133 command
-   * boundaries (nocx-5mn.4) cannot see inside it — but the agent publishes its
-   * state in the title, and we already receive that. When the title says
-   * nothing about an agent the status clears and the byte-level activity rule
-   * takes over again.
-   */
+  setActive(active: boolean): void {
+    this._active = active
+    this.pane.classList.toggle('active', active)
+    if (active) {
+      this._hasActivity = false
+    }
+    this.onDisplayChange?.()
+  }
+
+  // ── TabHost ───────────────────────────────────────────────────────────
+
+  setTitle(title: string): void {
+    if (this._disposed) return
+
+    // A TUI clears the title on the way out by emitting OSC 0/2 with empty
+    // string. Classify before falling back: the marker lives in the raw
+    // title, and an empty title is the shell clearing it — not an agent state.
+    this.updateAgentStatus(title)
+
+    this._programTitle = title.trim()
+    const next = this._programTitle || this.descriptor.defaultTitle
+    if (next !== this._title) {
+      this._title = next
+      this.onDisplayChange?.()
+    }
+  }
+
+  /** Terminal-content-only: update tooltip from cwd or SSH info.
+   *  Not on TabHost — wired through TerminalContent's constructor. */
+  updateTooltip(tooltip: string): void {
+    if (this._disposed) return
+    this._tooltip = tooltip
+    this.onDisplayChange?.()
+  }
+
+  requestAttention(): void {
+    if (this._disposed) return
+    this.markActivity()
+  }
+
+  requestClose(): void {
+    if (this._disposed) return
+    this.onCloseRequested?.()
+  }
+
+  /** Called when the content (terminal session) wants the tab closed. */
+  onCloseRequested?: () => void
+
+  // ── Lifecycle ─────────────────────────────────────────────────────────
+
+  /** Mount the content into this tab's pane. Called by TabManager on
+   *  first activation. Enables viewport delivery after mount completes (B.5). */
+  async start(): Promise<void> {
+    log.info('nocx: Tab.start() called', { id: this.id })
+    this._mountStarted = true
+    await this.content.mount(this.pane, this, this._mountAbort.signal)
+    // B.5: replay the latest buffered viewport, or measure now if none yet.
+    if (this._latestViewport) {
+      this.content.viewportChanged(this._latestViewport)
+    } else {
+      this._deliverViewport()
+    }
+  }
+
+  focus(): void {
+    this.content.focus()
+  }
+
+  close(): void {
+    this._disposed = true
+    this._mountAbort.abort()
+    this._viewportObserver?.disconnect()
+    this._viewportObserver = null
+    this.content.dispose()
+  }
+  // ── Internals ─────────────────────────────────────────────────────────
+
+  private markActivity(): void {
+    if (this._disposed) return
+    if (!this._hasActivity) {
+      this._hasActivity = true
+      this.onDisplayChange?.()
+    }
+  }
+
   private updateAgentStatus(title: string): void {
+    if (this._disposed) return
     const next = detectAgentStatus(title)
     if (next === this._agentStatus) return
     this._agentStatus = next
-    this.button.classList.toggle('working', next === 'working')
-    this.button.classList.toggle('waiting', next === 'idle')
-
-    // An agent that stopped working is asking for you — the one event the
-    // activity underline exists to announce. The byte-level rule cannot see
-    // it: the agent repaints inside the alternate buffer, which is exactly
-    // what that rule suppresses (nocx-5mf).
-    if (next === 'idle' && !this.button.classList.contains('active')) {
+    if (next === 'idle' && !this._active) {
       this.markActivity()
     }
   }
 
-  updateTitle(title: string): void {
-    // A TUI clears the title on the way out by emitting OSC 0/2 with an empty
-    // string. Taken literally that blanks the tab; kept as-is it would leave a
-    // plain shell still labelled "Claude Code". Fall back to the default name.
-    // Classify before falling back: the marker lives in the raw title, and an
-    // empty title is the shell clearing it, which is not an agent state.
-    this.updateAgentStatus(title)
+  // ── B.5 geometry authority ──────────────────────────────────────────
 
-    this._programTitle = title.trim()
-    const next = this._programTitle || this._defaultTitle
-    this._title = next
-    this.titleSpan.textContent = next
+  /**
+   * Start observing the pane element for resize. Called when the pane
+   * enters the DOM (TabManager.addTab). ResizeObserver callbacks are
+   * coalesced per animation frame and suppressed after disposal.
+   */
+  setupViewportObserver(): void {
+    if (this._viewportObserver) return
+    const observer = new ResizeObserver((entries) => {
+      if (this._disposed) return
+      const entry = entries[entries.length - 1]
+      if (!entry) return
+      const { width, height } = entry.contentRect
+      // Never send a misleading zero rectangle for hidden/inactive tabs (B.5).
+      if (width === 0 && height === 0) return
+      // Coalesce per animation frame: only one delivery per frame.
+      if (this._viewportRafPending) return
+      this._viewportRafPending = true
+      requestAnimationFrame(() => {
+        this._viewportRafPending = false
+        this._deliverViewport()
+      })
+    })
+    observer.observe(this.pane)
+    this._viewportObserver = observer
   }
 
   /**
-   * Called when the VT frontend parses OSC 7 (AD-6). Updates the cwd-based
-   * tab name and the tooltip. If no program has set a title, the visible
-   * tab title follows the cwd immediately.
+   * Measure the pane and deliver the viewport to content, but only after
+   * mount has started and before disposal (B.5 delivery rules).
    */
-  updateCwd(path: string): void {
-    this._cwdFromOSC7 = true
-    this._cwd = path
-    this._defaultTitle = directoryLabel(path)
-    this.button.title = cwdTooltip(path, true)
-    this.editor?.setCwd(path)
-
-    // If no program has set a title, the visible title tracks the cwd.
-    if (!this._programTitle) {
-      this._title = this._defaultTitle
-      this.titleSpan.textContent = this._defaultTitle
-    }
-  }
-
-  /**
-   * Mounted lazily on first activation, so a freshly-created tab costs nothing
-   * until it is visited. Panes keep their layout box while inactive
-   * (visibility, not display), so the renderer measures a real size the moment
-   * it mounts.
-   */
-  async start(): Promise<void> {
-    log.info('nocx: Tab.start() called', { managerView: !!this.managerView, started: this.started })
-    // Manager tabs host the connection manager UI, not a terminal.
-    // Show the skeleton immediately on first activation (when the pane is
-    // still empty); subsequent activations keep the user's form intact.
-    if (this.managerView) {
-      if (this.pane.children.length === 0) {
-        this.managerView.show()
-        await this.managerView.refresh()
-      }
+  private _deliverViewport(): void {
+    if (this._disposed || !this._mountStarted) return
+    const rect = this.pane.getBoundingClientRect()
+    if (rect.width === 0 && rect.height === 0) return
+    const dpr = window.devicePixelRatio || 1
+    const vp: ContentViewport = { width: rect.width, height: rect.height, devicePixelRatio: dpr }
+    // Suppress equal consecutive rectangles (B.5).
+    const prev = this._latestViewport
+    if (
+      prev &&
+      prev.width === vp.width &&
+      prev.height === vp.height &&
+      prev.devicePixelRatio === vp.devicePixelRatio
+    ) {
       return
     }
-
-    if (this.started) return
-    this.started = true
-
-    // Wait for pane to become visible and have proper dimensions
-    await new Promise((resolve) => requestAnimationFrame(resolve))
-
-    try {
-      log.info('nocx: creating renderer')
-      const renderer = createRenderer(this.rendererName)
-
-      // Log pane dimensions before mounting
-      const paneRect = this.pane.getBoundingClientRect()
-      log.info('nocx: pane dimensions before mount', {
-        width: paneRect.width,
-        height: paneRect.height,
-      })
-
-      // ── DOM scrollback controller ───────────────────────────────────────
-      this.scrollback = new ScrollbackController({
-        pane: this.pane,
-        renderer,
-        now: () => performance.now(),
-      })
-
-      log.info('nocx: mounting renderer')
-      await renderer.mount(this.scrollback.mountTarget)
-      log.info('nocx: renderer mounted', { cols: renderer.cols, rows: renderer.rows })
-
-      this.cols = renderer.cols
-      this.rows = renderer.rows
-
-      // ── Command ledger (ADR-0008) ────────────────────────────────────────
-      this.ledger = new CommandLedger({ now: () => performance.now() })
-
-      // ── Wire input ownership BEFORE opening the session ─────────────────
-      // A marker-only (invisible) prompt can never paint before the editor
-      // exists (nocx-4ff.10). These listeners are pure state wiring — they
-      // fire only after the session opens and markers arrive.
-
-      // ShellInputTarget references this.session lazily so it can be created
-      // before openSession resolves. submit() is only called while the editor
-      // is shown, which can only happen after markers arrive from the PTY.
-      // paste() delegates bracketed-paste wrapping to the engine (correct for
-      // mode 2004); sendRaw carries the CR. session is referenced lazily.
-      this.shellTarget = new ShellInputTarget((data: string) => this.session!.send(data))
-      this.editor = new CommandEditor({
-        submit: (doc: string) => {
-          // Store the pending command text for the upcoming OSC 133 C marker.
-          this._pendingCommand = doc
-
-          // Anchor the block at the COMMAND row NOW, while the terminal cursor
-          // still sits on the (marker-only) prompt line the command is about to
-          // be echoed onto. Deferring to the next OSC 133 C anchored the glyph
-          // on the command's first OUTPUT line instead — one row too low, so
-          // every landmark drifted below its command (item 1).
-          if (this.ledger) {
-            let markerLine: () => number | undefined = () => undefined
-            const rec = this.ledger.open(doc, this._cwd, this._host, () => markerLine())
-            const m = renderer.registerMarker?.()
-            if (m) {
-              markerLine = () => m.line()
-              this._markers.set(rec.id, m)
-              m.onDispose(() => {
-                this.ledger?.dispose(rec.id)
-                this._markers.delete(rec.id)
-              })
-            }
-          }
-          // Detect `clear` and clear DOM blocks.
-          this.scrollback?.maybeClear(doc)
-
-          submitCommand(doc, {
-            dispatchSubmit: () => this.inputState.dispatch({ type: 'submit' }),
-            focusGrid: () => renderer.focus(),
-            sendDoc: (d) => void this.shellTarget!.submit(d),
-          })
-        },
-        // Ctrl-C at the editor prompt: interrupt the shell so a fresh prompt
-        // returns (the editor already cleared its composed line).
-        cancel: () => this.session?.send('\x03'),
-      })
-      this.editor.mount(this.pane)
-
-      // The editor is an in-flow flex child at the bottom of the pane (see
-      // .pane / .nocx-editor in style.css) — the scrollback area ends above
-      // it by construction, so no overlay padding hacks are needed.
-
-      renderer.onCommandMarker((marker) => {
-        this.inputState.dispatch({ type: 'marker', kind: marker.kind })
-        // OSC 133 D carries the exit code of the just-finished command.
-        // Stored for future consumers: command blocks, success/failure
-        // colouring, activity indicator refinement.
-        if (marker.kind === 'D' && marker.exitCode !== undefined) {
-          this._lastExitCode = marker.exitCode
-        }
-        // Feed the command ledger.
-        this.ledger?.onMarker(marker.kind, marker.exitCode)
-
-        // ── DOM scrollback block lifecycle ────────────────────────────
-        if (marker.kind === 'C') {
-          // Create a running block with the pending command text.
-          this.scrollback?.onCommandStart(this._pendingCommand, this._cwd, marker.line)
-        } else if (marker.kind === 'D') {
-          // Freeze the running block: serialize output from the xterm buffer.
-          if (renderer.getBufferLine) {
-            const getLine = (y: number) => renderer.getBufferLine!(y)
-            this.scrollback?.onCommandEnd(getLine, marker.line, marker.exitCode ?? null)
-            // Trim xterm viewport so output isn't duplicated between DOM
-            // blocks and the xterm grid. The prompt re-renders on the next
-            // shell cycle.
-            renderer.clearViewport?.()
-          }
-        }
-      })
-
-      renderer.onBufferChange((type) => {
-        this._bufferType = type
-        this.inputState.dispatch({ type: 'buffer', buffer: type })
-        if (type === 'alternate') {
-          this.scrollback?.enterFullscreen()
-        } else {
-          this.scrollback?.exitFullscreen()
-        }
-        this.onBufferChange?.(type)
-      })
-      this.inputState.onChange((m) => {
-        console.debug('nocx: input-state', m.state, 'trusted=', m.trusted, 'owned=', m.owned)
-        if (shouldShowEditor(m.owned, this.nativeMode)) {
-          this.editor!.setTime(new Date())
-          this.editor!.show()
-          renderer.setReadOnly(true)
-          this.scrollback?.setIdle()
-        } else if (m.state === 'RUNNING_RAW') {
-          this.editor!.hide()
-          renderer.setReadOnly(false)
-          renderer.focus()
-          this.scrollback?.setRunning()
-        } else {
-          this.editor!.hide()
-          renderer.setReadOnly(false)
-          renderer.focus()
-          this.scrollback?.setIdle()
-        }
-      })
-
-      // ── Focus bounce (P0-4) ────────────────────────────────────────
-      // When the editor owns input, typing must stay in the textarea even
-      // when the user clicks outside it — but NOT when clicking the xterm
-      // live region (needed for TUIs and text selection).
-      //
-      // Three rules:
-      // (a) Clicking the editor card focuses the textarea.
-      // (b) Typing printable chars while focus is outside xterm redirects.
-      // (c) Clicking the xterm live region keeps focus there.
-      this.pane.addEventListener('focusin', () => {
-        if (!this.editor?.isVisible) return
-        const active = document.activeElement
-        // Don't bounce if focus is in the editor or the xterm live container.
-        if (
-          active &&
-          (this.editor.rootContains(active) || this.scrollback?.xtermLiveContainer.contains(active))
-        )
-          return
-        this.editor.focus()
-      })
-
-      // Click anywhere on the editor card focuses the textarea (P0-4a).
-      this.editor.root.addEventListener('click', () => {
-        this.editor?.focus()
-      })
-
-      // Redirect printable keystrokes to the editor when it owns input
-      // and focus has drifted elsewhere (P0-4b).
-      // ALSO redirect when a block is selected: typing deselects the
-      // block and focuses the editor (P0-4: warp behavior).
-      // NOTE: attached at document level — after a click on a DOM block
-      // the focus is on <body>, and keydown targeted at <body> never
-      // bubbles through this.pane (pane is a DESCENDANT of body, not an
-      // ancestor), so a pane-level listener would never fire.
-      this._globalKeydown = (e: KeyboardEvent) => {
-        if (!this.pane.isConnected) return
-        // If a block is selected, typing a printable character redirects
-        // to the editor and deselects the block (P0-4: warp behavior).
-        if (this.scrollback && this.scrollback.selectedBlockId !== null) {
-          if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
-            e.preventDefault()
-            this.scrollback.deselectBlocks()
-            if (this.editor?.isVisible) {
-              this.editor.focus()
-              this.editor.insertText(e.key)
-            }
-            return
-          }
-          // Escape deselects the block without typing (P0-4).
-          if (e.key === 'Escape') {
-            this.scrollback.deselectBlocks()
-            e.preventDefault()
-            return
-          }
-        }
-
-        if (!this.editor?.isVisible) return
-        // Only redirect printable characters (no modifiers).
-        if (e.key.length !== 1 || e.ctrlKey || e.metaKey || e.altKey) return
-        const active = document.activeElement
-        // Don't steal from xterm (needed for TUIs). Don't steal from
-        // the editor itself.
-        if (
-          active &&
-          (this.scrollback?.xtermLiveContainer.contains(active) || this.editor.rootContains(active))
-        )
-          return
-        // Focus the editor and let the key event propagate normally.
-        this.editor.focus()
-      }
-      document.addEventListener('keydown', this._globalKeydown)
-
-      // ── Click empty space in scrollback area deselects blocks (P1-8) ──
-      this.scrollback?.scrollbackArea.addEventListener('mousedown', (e) => {
-        // If click target is NOT inside any .cmd-block, deselect all.
-        if (!(e.target as HTMLElement).closest('.cmd-block')) {
-          this.scrollback?.deselectBlocks()
-        }
-      })
-
-      // ── Editor copy-on-select (item 6) ─────────────────────────────
-      // Same rules as the terminal: copy-on-select + shouldCopy policy.
-      this.editor.textarea.addEventListener('mouseup', () => {
-        const ta = this.editor!.textarea
-        const start = ta.selectionStart
-        const end = ta.selectionEnd
-        if (start === end) return
-        const text = ta.value.slice(start, end)
-        if (shouldCopy(text)) {
-          this.clipboard.writeText(text).catch((e) => {
-            console.warn('nocx: clipboard write failed (editor selection)', e)
-          })
-        }
-      })
-
-      // ── DOM block copy-on-select (P0-5) ───────────────────────────
-      // When the user selects text in DOM block output (.cmd-output),
-      // copy the selection to clipboard on mouseup — parity with the
-      // old xterm copy-on-select behavior. Header clicks don't start
-      // text selections (user-select:none on .cmd-header).
-      this.scrollback?.scrollbackArea.addEventListener('mouseup', () => {
-        const sel = window.getSelection()
-        if (!sel || sel.isCollapsed) return
-        const text = sel.toString()
-        if (!text) return
-        // Only copy if the selection is inside our scrollback area.
-        if (!this.scrollback?.scrollbackArea.contains(sel.anchorNode)) return
-        if (shouldCopy(text)) {
-          this.clipboard.writeText(text).catch((e) => {
-            console.warn('nocx: clipboard write failed (block selection)', e)
-          })
-        }
-      })
-
-      // Open the session at the renderer's actual grid size. Per AD-1/AD-7,
-      // the PTY/channel is created at this size — never spawn-then-resize.
-      // Enhanced input (DOM editor + marker-only prompt) is always on for local
-      // sessions; the shell fails open to a plain terminal when markers are absent (ADR-0004/0006).
-      const session = this.sshOpts
-        ? await this.client.openSSHSession(this.cols, this.rows, this.sshOpts.profileId)
-        : await this.client.openSession(this.cols, this.rows, true)
-      this.session = session
-      log.info('nocx: session opened', { sid: session.sessionId, cwd: session.cwd || '' })
-
-      // Store the initial cwd for the command ledger.
-      this._cwd = session.cwd || ''
-      this._host = this.sshOpts?.host || ''
-
-      // Seed the editor cwd chip with the initial cwd.
-      this.editor?.setCwd(session.cwd || '')
-
-      // The directory names the tab until a program sets a title; from here
-      // on OSC 7 keeps it following `cd` (nocx-5mn.2). For SSH tabs, show
-      // the host as the title instead.
-      if (this.sshOpts) {
-        this._defaultTitle = this.sshOpts.host
-        this.button.title = `SSH ${this.sshOpts.user ? this.sshOpts.user + '@' : ''}${this.sshOpts.host}`
-      } else {
-        this._defaultTitle = directoryLabel(session.cwd)
-        this.button.title = cwdTooltip(session.cwd, false)
-      }
-      // First paint of the label: it stayed empty until the name existed
-      // (nocx-83a).
-      this.titleSpan.textContent = this._title = this._defaultTitle
-
-      session.onData((data: string) => {
-        log.debug('nocx: session data received', { length: data.length })
-        renderer.write(data)
-        // Normal-buffer output on a background tab lights the indicator.
-        // Full-screen TUIs repaint constantly in the alternate buffer —
-        // that is not news. A bell in either buffer still counts.
-        if (this._bufferType === 'normal' && !this.button.classList.contains('active')) {
-          this.markActivity()
-        }
-      })
-      session.onExit((sid: string) => {
-        log.info('nocx: session exited', { sid })
-        this.inputState.dispatch({ type: 'exit' })
-        // B3: fail-open — finalize running records, dispose per-record markers.
-        this.ledger?.finalizeOpen()
-        this._disposeAllMarkers()
-        // Close the tab when session exits.
-        this.onSessionExit?.()
-      })
-      session.onReset(() => {
-        renderer.reset()
-        this.inputState.dispatch({ type: 'reset' })
-        // B3: fail-open — same as exit.
-        this.ledger?.finalizeOpen()
-        this._disposeAllMarkers()
-      })
-
-      renderer.onData((data: string) => session.send(data))
-      renderer.onTitle((title: string) => {
-        this.updateTitle(title)
-      })
-      renderer.onCwd(({ path }) => {
-        this.updateCwd(path)
-      })
-
-      renderer.onBell(() => {
-        // Bell is always attention-worthy, even in the alternate buffer.
-        if (!this.button.classList.contains('active')) {
-          this.markActivity()
-        }
-      })
-
-      // ── Clipboard ────────────────────────────────────────────────────
-      // The renderer reports facts and never touches the clipboard (AD-6).
-      // Policy — copy-on-select, OSC 52 notification, multi-line confirm —
-      // lives here, above the renderer boundary.
-
-      // Copy on select: write non-empty selection text to the clipboard.
-      renderer.onSelectionChange((text) => {
-        if (shouldCopy(text)) {
-          this.clipboard.writeText(text).catch((e) => {
-            console.warn('nocx: clipboard write failed (selection)', e)
-          })
-        }
-      })
-
-      // OSC 52 write: denied by default (Warp's default). The first
-      // blocked attempt raises a banner across the top of the window
-      // with the remedy built in. Once the user allows, writes are
-      // silent — the user consented.
-      renderer.onClipboardWrite((text) => {
-        // Already allowed — write directly, no notification.
-        if (this.gate.granted) {
-          this.clipboard.writeText(text).catch((e) => {
-            console.warn('nocx: clipboard write failed (OSC 52)', e)
-          })
-          return
-        }
-
-        // Suppressed — silently drop.
-        if (this.gate.suppressed) return
-
-        // Banner already shown — silently drop.
-        if (this.banner.shown) return
-
-        // First blocked write: raise the banner and wait for the user.
-        void this.banner.show().then((choice) => {
-          if (choice === 'allow') {
-            this.gate.allow()
-            this.clipboard.writeText(text).catch((e) => {
-              console.warn('nocx: clipboard write failed (OSC 52)', e)
-            })
-          } else if (choice === 'suppress') {
-            this.gate.suppress()
-          }
-          // dismiss: do nothing — neither grant nor suppress.
-        })
-      })
-
-      // Paste on right-click AND middle-click (Tabby, Warp).
-      const doPaste = () => {
-        this.clipboard
-          .readText()
-          .then((text) => {
-            if (!text) return
-            // At the prompt the editor owns input and the grid is read-only
-            // (setReadOnly), so a paste must land in the composed command, not
-            // the disabled terminal. The editor is a composer — a multi-line
-            // paste is expected and needs no confirm.
-            if (this.editor?.isVisible) {
-              this.editor.insertText(text)
-              return
-            }
-            // Otherwise the terminal owns input (a running program). Multi-line
-            // paste is confirmed before it reaches the terminal, except in the
-            // alternate screen — a full-screen program is not a shell prompt.
-            // This is Tabby's exact condition.
-            if (text.includes('\n') && this._bufferType === 'normal') {
-              if (!window.confirm('Paste multi-line text?')) return
-            }
-            renderer.paste(text)
-          })
-          .catch((e) => {
-            console.warn('nocx: clipboard read failed (paste)', e)
-          })
-      }
-
-      this.pane.addEventListener('contextmenu', (e: MouseEvent) => {
-        e.preventDefault()
-        doPaste()
-      })
-
-      this.pane.addEventListener('mousedown', (e: MouseEvent) => {
-        if (e.button === 1) {
-          e.preventDefault()
-          doPaste()
-        }
-      })
-
-      renderer.onResize((cols: number, rows: number) => {
-        if (cols === this.cols && rows === this.rows) return
-        this.cols = cols
-        this.rows = rows
-        clearTimeout(this.resizeTimer)
-        this.resizeTimer = window.setTimeout(() => {
-          session.sendResize(cols, rows)
-        }, RESIZE_SETTLE_MS)
-      })
-
-      this.renderer = renderer
-
-      // ── Native-mode escape (Ctrl/Cmd+Shift+.) ─────────────────────────
-      // Latch this tab to raw mode forever: hide the editor, focus the grid,
-      // and ask the shell to restore a visible prompt (nocx-4ff.9).
-      this.pane.addEventListener('keydown', (e: KeyboardEvent) => {
-        if (e.key === '.' && (e.metaKey || e.ctrlKey) && e.shiftKey) {
-          e.preventDefault()
-          e.stopPropagation()
-          this.nativeMode = true
-          this.editor?.hide()
-          this.renderer?.focus()
-          this.session?.send(NATIVE_RESTORE)
-        }
-      })
-
-      this.session = session
-      this._readyResolve(true)
-      log.info('nocx: tab ready', { renderer: this.rendererName, sid: session.sessionId })
-    } catch (err) {
-      const notice = document.createElement('pre')
-      notice.className = 'pane-error'
-      notice.textContent = `Tab ${this.id} failed to start:\n\n${err instanceof Error ? err.message : String(err)}`
-      this.pane.replaceChildren(notice)
-      this._readyResolve(false)
-      log.error('nocx: tab failed', { id: this.id, error: String(err) })
-    }
-  }
-
-  refreshAtlas(): void {
-    this.renderer?.refreshAtlas()
-  }
-
-  focus(): void {
-    this.renderer?.focus()
-  }
-
-  close(): void {
-    if (this._globalKeydown) {
-      document.removeEventListener('keydown', this._globalKeydown)
-      this._globalKeydown = null
-    }
-    this.session?.close()
-    this.renderer?.dispose()
-    this.editor?.dispose()
-    this.scrollback?.dispose()
-    this._disposeAllMarkers()
-    this.ledger = null
-  }
-
-  private _disposeAllMarkers(): void {
-    for (const m of this._markers.values()) m.dispose()
-    this._markers.clear()
+    this._latestViewport = vp
+    this.content.viewportChanged(vp)
   }
 }
 
-/**
- * Manages a dynamic list of numbered terminal tabs, each backed by a session
- * on a shared WSClient. One renderer type is used for all tabs in a window
- * (resolved via ?r=xterm|wterm at construction time).
- *
- * Behaviour invariants:
- *  - Closing the last tab immediately opens a fresh one, so the window
- *    is never empty (no start page — see tabs.ts newTab()).
- *  - A background tab shows the activity indicator on normal-buffer
- *    output or on bell (BEL). Alternate-buffer repaints (full-screen
- *    TUIs) do not light it — a bell is the TUI's way to ask for attention.
- *  - Titles come live from the shell via TerminalRenderer.onTitle().
- *    They are untrusted: set via textContent, never innerHTML, and
- *    truncated with CSS, never by cutting the string.
- */
+// ═══════════════════════════════════════════════════════════════════════════
+// TabManager — ordered tab model, activation rules, MRU
+// ═══════════════════════════════════════════════════════════════════════════
+
 export class TabManager {
   private readonly tabs: Tab[] = []
   private nextTabId = 1
   private activeTab: Tab | null = null
-  private readonly bar: HTMLElement
   private readonly panes: HTMLElement
   private readonly client: WSClient
-  private readonly rendererName: RendererName
   private readonly clipboard: ClipboardAccess
   private readonly gate: ClipboardGate
   private readonly banner: ClipboardBanner
   private readonly profileClient: ProfileClient
-  private readonly addBtn: HTMLButtonElement
-  private readonly tabsContainer: HTMLElement
+  private readonly tabStrip: TabStrip
   private readonly _initialTabReady: Promise<void>
+
+  /** MRU stack: most-recently-activated tab ids. */
+  private readonly recentTabIds: number[] = []
 
   constructor(
     bar: HTMLElement,
@@ -813,44 +264,40 @@ export class TabManager {
     gate: ClipboardGate,
     banner: ClipboardBanner,
     profileClient: ProfileClient,
+    tabStrip: TabStrip,
   ) {
-    this.bar = bar
     this.panes = panes
     this.client = client
-    this.rendererName = DEFAULT_RENDERER
     this.clipboard = clipboard
     this.gate = gate
     this.banner = banner
     this.profileClient = profileClient
+    this.tabStrip = tabStrip
 
-    bar.setAttribute('role', 'tablist')
-    bar.classList.add('tabbar')
+    // Wire TabStrip intents.
+    this.tabStrip.onActivate = (id) => {
+      const tab = this.tabs.find((t) => t.id === id)
+      if (tab) void this.activate(tab)
+    }
+    this.tabStrip.onClose = (id) => {
+      const tab = this.tabs.find((t) => t.id === id)
+      if (tab) this.closeTab(tab)
+    }
+    this.tabStrip.onNewTab = () => this.newTab()
+    this.tabStrip.onReorder = (fromId, toId) => this.reorderTab(fromId, toId)
 
-    // Non-growing tabs container — holds tab buttons.
-    this.tabsContainer = document.createElement('div')
-    this.tabsContainer.className = 'tabs-container'
-    bar.append(this.tabsContainer)
-
-    // + button — sits immediately after the last tab, before the spacer.
-    this.addBtn = document.createElement('button')
-    this.addBtn.className = 'tab-add'
-    this.addBtn.textContent = '+'
-    this.addBtn.setAttribute('aria-label', 'New tab')
-    this.addBtn.addEventListener('click', () => this.newTab())
-    bar.append(this.addBtn)
-
-    // Flexible spacer — absorbs leftover width so tabs never stretch.
-    const spacer = document.createElement('div')
-    spacer.className = 'tabbar-spacer'
-    bar.append(spacer)
+    tabStrip.mount(bar)
 
     // Open the initial tab — the window is never empty.
     const initialTab = this.newTab()
-    this._initialTabReady = initialTab.ready.then((ok) => {
+
+    // _initialTabReady stays owned by TerminalContent.ready, not "first tab
+    // mounted". A non-terminal first tab MUST NOT be able to report healthy.
+    const initialContent = initialTab.content as TerminalContent
+    this._initialTabReady = initialContent.ready.then((ok) => {
       if (!ok) throw new Error('initial tab failed to start')
     })
 
-    // Capture phase: the active terminal swallows keys once they reach it.
     window.addEventListener('keydown', this.onKeydown, true)
   }
 
@@ -858,242 +305,150 @@ export class TabManager {
     return this.tabs.length
   }
 
-  /** Returns information about all open tabs for sidebar display. */
   getTabs(): Array<{ id: number; title: string; isActive: boolean }> {
     return this.tabs.map((tab) => ({
       id: tab.id,
-      title: tab.title || 'Terminal',
+      title: tab.displayTitle,
       isActive: tab === this.activeTab,
     }))
   }
 
-  /** Find a Tab by id, for sidebar interactions that need the actual Tab object. */
   findTab(id: number): Tab | undefined {
     return this.tabs.find((t) => t.id === id)
   }
 
-  /** Callback fired when tabs change (added, removed, title changed). */
   onTabsChanged?: () => void
 
-  /**
-   * Resolves when the initial tab's renderer mounts and its PTY session
-   * opens. Rejects when the initial tab's start() threw — a broken tab
-   * is not "ready" even though the UI shows a .pane-error notice.
-   *
-   * This is the signal §7.5 of distribution-and-updates-design uses to
-   * gate the updater health check: ReportHealthy() is only called after
-   * this promise resolves.
-   */
   get initialTabReady(): Promise<void> {
     return this._initialTabReady
   }
 
-  /** Create a new tab, activate it. */
+  // ── Tab creation ──────────────────────────────────────────────────────
+
+  /** Create a new local terminal tab and activate it. */
   newTab(): Tab {
-    return this.createTab(undefined)
-  }
-
-  /** Create a new SSH tab targeting the given profile, activate it. */
-  newSSHTab(profileId: string, host: string, user?: string): Tab {
-    log.info('nocx: newSSHTab called', { profileId, host })
-    return this.createTab({ profileId, host, user })
-  }
-
-  /** Create or activate the Connections manager tab. */
-  newManagerTab(): Tab {
-    // Check if Connection Manager tab already exists
-    const existingManagerTab = this.tabs.find((t) => t.managerView !== null)
-    if (existingManagerTab) {
-      // Just activate the existing tab
-      void this.activate(existingManagerTab)
-      return existingManagerTab
-    }
-
-    const tab = new Tab(
+    const tabRef = { current: undefined as Tab | undefined }
+    const content = new TerminalContent(
       this.client,
-      this.rendererName,
       this.clipboard,
       this.gate,
       this.banner,
-      this.nextTabId++,
+      (tooltip) => tabRef.current?.updateTooltip(tooltip),
+      (inAlt) => {
+        if (tabRef.current === this.activeTab) this.syncAltScreenClass(inAlt)
+      },
     )
-
-    const cmView = new ConnectionManagerViewImpl(tab.pane, this.profileClient)
-    cmView.onConnect = (profile: SSHProfile) => {
-      log.info('nocx: onConnect called', { profileId: profile.id, profile: profile.name })
-      this.newSSHTab(profile.id, profile.options.host, profile.options.user)
+    const descriptor: ContentDescriptor = {
+      surfaceType: SURFACE_TERMINAL,
+      singletonKey: null,
+      restoreDescriptor: { type: 'local' },
+      supportsAttention: true,
+      defaultTitle: 'Terminal',
     }
-
-    // Stash the view so start() can render it into the pane on activation.
-    tab.managerView = cmView
-
-    // Set up session exit handler to close the tab
-    tab.onSessionExit = () => this.closeTab(tab)
-
-    this.tabs.push(tab)
-    this.tabsContainer.append(tab.button)
-    this.panes.append(tab.pane)
-
-    tab.button.addEventListener('click', () => {
-      void this.activate(tab)
-    })
-    tab.closeBtn.addEventListener('click', (e: MouseEvent) => {
-      e.stopPropagation()
-      this.closeTab(tab)
-    })
-    tab.button.addEventListener('mousedown', (e: MouseEvent) => {
-      if (e.button === 1) {
-        e.preventDefault()
-        this.closeTab(tab)
-      }
-    })
-
-    // Drag and drop for tab reordering
-    tab.button.draggable = true
-    tab.button.addEventListener('dragstart', (e: DragEvent) => {
-      e.dataTransfer?.setData('text/plain', String(tab.id))
-      tab.button.classList.add('dragging')
-    })
-    tab.button.addEventListener('dragend', () => {
-      tab.button.classList.remove('dragging')
-    })
-    tab.button.addEventListener('dragover', (e: DragEvent) => {
-      e.preventDefault()
-    })
-    tab.button.addEventListener('drop', (e: DragEvent) => {
-      e.preventDefault()
-      const draggedId = Number(e.dataTransfer?.getData('text/plain'))
-      if (draggedId !== tab.id) {
-        this.reorderTab(draggedId, tab.id)
-      }
-    })
-
-    this.refreshIndices()
-    void this.activate(tab)
+    const tab = this.addTab(content, descriptor)
+    tabRef.current = tab
     return tab
   }
 
-  /** Internal: create a tab with optional SSH params (display-only). */
-  private createTab(sshOpts?: { profileId: string; host: string; user?: string }): Tab {
-    const tab = new Tab(
+  newSSHTab(profileId: string, host: string, user?: string): Tab {
+    log.info('nocx: newSSHTab called', { profileId, host })
+    const sshOpts = { profileId, host, user }
+    const tabRef = { current: undefined as Tab | undefined }
+    const content = new TerminalContent(
       this.client,
-      this.rendererName,
       this.clipboard,
       this.gate,
       this.banner,
-      this.nextTabId++,
+      (tooltip) => tabRef.current?.updateTooltip(tooltip),
+      (inAlt) => {
+        if (tabRef.current === this.activeTab) this.syncAltScreenClass(inAlt)
+      },
       sshOpts,
     )
-
-    // Track alt-screen state for the traffic-light overlap fix.
-    // When the active tab enters alt-screen, hide the tabbar so the
-    // terminal gets the full window and doesn't overlap the macOS
-    // window controls.
-    tab.onBufferChange = () => {
-      if (tab === this.activeTab) this.syncAltScreenClass()
+    const descriptor: ContentDescriptor = {
+      surfaceType: SURFACE_TERMINAL,
+      singletonKey: null,
+      restoreDescriptor: { type: 'ssh', profileId, host, user },
+      supportsAttention: true,
+      defaultTitle: host,
     }
+    const tab = this.addTab(content, descriptor)
+    tabRef.current = tab
+    return tab
+  }
+  /**
+   * Open a tab with the given content, deduplicating by singletonKey.
+   * If a tab with the same singletonKey already exists, activates it.
+   */
+  openTab(content: TabContent, descriptor: ContentDescriptor): Tab {
+    if (descriptor.singletonKey) {
+      const existing = this.tabs.find((t) => t.descriptor.singletonKey === descriptor.singletonKey)
+      if (existing) {
+        void this.activate(existing)
+        return existing
+      }
+    }
+    return this.addTab(content, descriptor)
+  }
+
+  /** Internal: create a Tab, wire lifecycle, add to model, activate. */
+  private addTab(content: TabContent, descriptor: ContentDescriptor): Tab {
+    const tab = new Tab(content, descriptor, this.nextTabId++)
 
     this.tabs.push(tab)
-    // Append to the tabs container (addBtn sits after the container).
-    this.tabsContainer.append(tab.button)
     this.panes.append(tab.pane)
+    // B.5: start observing pane geometry once it's in the DOM.
+    tab.setupViewportObserver()
 
-    // Set up session exit handler to close the tab
-    tab.onSessionExit = () => this.closeTab(tab)
-
-    // Click → activate. The close button's own handler calls stopPropagation,
-    // so close-button clicks never reach here.
-    tab.button.addEventListener('click', () => {
-      void this.activate(tab)
-    })
-
-    // Close button click → close.
-    tab.closeBtn.addEventListener('click', (e: MouseEvent) => {
-      e.stopPropagation()
-      this.closeTab(tab)
-    })
-
-    // Middle-click on tab → close.
-    tab.button.addEventListener('mousedown', (e: MouseEvent) => {
-      if (e.button === 1) {
-        e.preventDefault()
-        this.closeTab(tab)
-      }
-    })
-
-    // Drag and drop for tab reordering
-    tab.button.draggable = true
-    tab.button.addEventListener('dragstart', (e: DragEvent) => {
-      e.dataTransfer?.setData('text/plain', String(tab.id))
-      tab.button.classList.add('dragging')
-    })
-    tab.button.addEventListener('dragend', () => {
-      tab.button.classList.remove('dragging')
-    })
-    tab.button.addEventListener('dragover', (e: DragEvent) => {
-      e.preventDefault()
-    })
-    tab.button.addEventListener('drop', (e: DragEvent) => {
-      e.preventDefault()
-      const draggedId = Number(e.dataTransfer?.getData('text/plain'))
-      if (draggedId !== tab.id) {
-        this.reorderTab(draggedId, tab.id)
-      }
-    })
-
-    this.refreshIndices()
+    tab.onCloseRequested = () => this.closeTab(tab)
+    this.tabStrip.addTab(tab)
     void this.activate(tab)
     this.onTabsChanged?.()
     return tab
   }
 
-  /** Toggle a CSS class on #app when the active tab is in alt-screen mode,
-   *  so the tabbar hides and the terminal gets the full window without
-   *  overlapping the macOS traffic lights. */
-  private syncAltScreenClass(): void {
+  /** Toggle #app alt-screen class based on active terminal buffer type. */
+  private syncAltScreenClass(inAlt: boolean): void {
     const app = document.getElementById('app')
     if (!app) return
-    app.classList.toggle('alt-screen', this.activeTab?.bufferType === 'alternate')
+    app.classList.toggle('alt-screen', inAlt)
   }
 
   /**
-   * Close a tab, its session, and its DOM elements. If the closed tab was the
-   * active one, the neighbour at the same visual position (or the previous one)
-   * is activated. Closing the last tab opens a fresh one immediately.
+   * Close a tab. If it was the active tab, activates the MRU tab.
+   * Closing the last tab opens a fresh terminal — view tabs have no
+   * restoreDescriptor and are never the automatic replacement.
    */
   closeTab(tab: Tab): void {
     const index = this.tabs.indexOf(tab)
     if (index === -1) return
 
     const wasActive = tab === this.activeTab
+    this.removeFromRecent(tab.id)
 
     tab.close()
     tab.pane.remove()
-    tab.button.remove()
+    this.tabStrip.removeTab(tab.id)
     this.tabs.splice(index, 1)
     this.onTabsChanged?.()
 
-    // Closing the last tab opens a fresh one immediately so the window
-    // is never empty (decision: no start page / empty state).
     if (this.tabs.length === 0) {
       this.newTab()
       return
     }
 
-    this.refreshIndices()
-
     if (wasActive) {
-      // Activate neighbour: prefer the tab at the same index, or the previous.
-      const neighbourIndex = Math.min(index, this.tabs.length - 1)
-      void this.activate(this.tabs[neighbourIndex])
+      const mruTab = this.popRecent()
+      if (mruTab) {
+        void this.activate(mruTab)
+      }
     }
   }
 
-  /** Activate a tab: show its pane, focus its renderer. */
+  /** Activate a tab: show its pane, mount content, focus. */
   async activate(tab: Tab): Promise<void> {
     log.info('nocx: TabManager.activate() called', {
       tabId: tab.id,
-      isManager: !!tab.managerView,
       isActive: tab === this.activeTab,
     })
     if (tab === this.activeTab) {
@@ -1101,58 +456,74 @@ export class TabManager {
       return
     }
 
+    if (this.activeTab) {
+      this.pushRecent(this.activeTab.id)
+    }
+
     this.activeTab?.setActive(false)
     this.activeTab = tab
     tab.setActive(true)
-    log.info('nocx: tab.setActive(true) called', { paneClasses: tab.pane.className })
+
+    this.removeFromRecent(tab.id)
+    this.tabStrip.setActive(tab.id)
+
+    log.info('nocx: tab.setActive(true) called', {
+      paneClasses: tab.pane.className,
+    })
 
     await tab.start()
-    tab.refreshAtlas()
     tab.focus()
-    this.syncAltScreenClass()
     this.onTabsChanged?.()
   }
 
-  /** Activate the tab at a 0-based position. */
   activateByIndex(index: number): void {
     const tab = this.tabs[index]
     if (tab) void this.activate(tab)
   }
 
-  /** Close the currently-active tab. */
   closeActiveTab(): void {
     if (this.activeTab) this.closeTab(this.activeTab)
   }
 
-  /** Reorder tabs: move draggedId to before targetId. */
   reorderTab(draggedId: number, targetId: number): void {
     const draggedIndex = this.tabs.findIndex((t) => t.id === draggedId)
     const targetIndex = this.tabs.findIndex((t) => t.id === targetId)
     if (draggedIndex === -1 || targetIndex === -1) return
 
     const [draggedTab] = this.tabs.splice(draggedIndex, 1)
-    this.tabs.splice(targetIndex, 0, draggedTab)
+    const adjustedTarget = draggedIndex < targetIndex ? targetIndex - 1 : targetIndex
+    this.tabs.splice(adjustedTarget, 0, draggedTab)
 
-    // Reorder DOM elements
-    this.tabsContainer.innerHTML = ''
-    for (const tab of this.tabs) {
-      this.tabsContainer.append(tab.button)
+    this.tabStrip.reorder(this.tabs)
+  }
+
+  // ── MRU helpers ──────────────────────────────────────────────────────
+
+  private pushRecent(id: number): void {
+    this.removeFromRecent(id)
+    this.recentTabIds.push(id)
+  }
+
+  private popRecent(): Tab | undefined {
+    while (this.recentTabIds.length > 0) {
+      const id = this.recentTabIds.pop()!
+      const tab = this.tabs.find((t) => t.id === id)
+      if (tab) return tab
     }
-
-    this.refreshIndices()
+    return undefined
   }
 
-  private refreshIndices(): void {
-    this.tabs.forEach((tab, i) => {
-      tab.indexLabel.textContent = String(i + 1)
-    })
+  private removeFromRecent(id: number): void {
+    const idx = this.recentTabIds.indexOf(id)
+    if (idx !== -1) this.recentTabIds.splice(idx, 1)
   }
+
+  // ── Keyboard shortcuts ───────────────────────────────────────────────
 
   private readonly onKeydown = (e: KeyboardEvent): void => {
     const mod = e.metaKey || e.ctrlKey
     if (!mod || e.altKey) return
 
-    // Cmd/Ctrl+T — new tab
     if (e.key === 't') {
       e.preventDefault()
       e.stopPropagation()
@@ -1160,7 +531,6 @@ export class TabManager {
       return
     }
 
-    // Cmd/Ctrl+W — close tab
     if (e.key === 'w') {
       e.preventDefault()
       e.stopPropagation()
@@ -1168,7 +538,7 @@ export class TabManager {
       return
     }
 
-    // Cmd/Ctrl+1..9 — switch to tab by visual index
+    // Cmd/Ctrl+1..9 — switch to tab by visual index (all tabs).
     const keyNum = Number(e.key)
     if (Number.isInteger(keyNum) && keyNum >= 1 && keyNum <= 9 && keyNum <= this.tabs.length) {
       e.preventDefault()

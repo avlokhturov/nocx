@@ -5,10 +5,29 @@
 //
 // State is derived from typed declarations + snapshot.  No literal setting
 // key appears anywhere in this file.
+//
+// Row DOM ids: keyToDomId(key) = 'st-setting-' + encodeURIComponent(key).
+// encodeURIComponent does NOT escape '.', so st-setting-clipboard.osc52Suppressed
+// is a valid HTML5 id but splits into id + class inside a raw CSS selector.
+// Use getElementById or CSS.escape — never querySelector('#' + id).
 
 import { log } from './log'
 import { ProfileClient } from './profiles'
 import { SettingsObserver } from './settings-observer'
+
+/** Stable DOM id for a setting row, derived from the declaration key.
+ *
+ *  Keys are opaque strings — assertValidKey in Go checks only non-empty and
+ *  uniqueness — so the character set is unconstrained. encodeURIComponent is
+ *  injective: every distinct key maps to a distinct id. Dots, underscores and
+ *  hyphens pass through as-is (valid in HTML5 ids); everything else is
+ *  percent-encoded, which is also valid.
+ *
+ *  It does NOT escape '.', so use getElementById or CSS.escape — never a raw
+ *  querySelector('#' + id), where 'st-setting-a.b' parses as id plus class. */
+export function keyToDomId(key: string): string {
+  return 'st-setting-' + encodeURIComponent(key)
+}
 
 export interface Declaration {
   key: string
@@ -27,6 +46,10 @@ export interface Declaration {
 export interface SettingsView {
   show(): void
   refresh(): Promise<void>
+  /** Current declarations, as returned by the last successful refresh. */
+  getDeclarations(): Declaration[]
+  /** Unique sections in declaration order. */
+  getSections(): string[]
 }
 
 const enum LoadState {
@@ -71,6 +94,22 @@ export class SettingsViewImpl implements SettingsView {
         void this.boundRefresh()
       })
     }
+  }
+
+  getDeclarations(): Declaration[] {
+    return [...this.declarations]
+  }
+
+  getSections(): string[] {
+    const seen = new Set<string>()
+    const sections: string[] = []
+    for (const d of this.declarations) {
+      if (!seen.has(d.section)) {
+        seen.add(d.section)
+        sections.push(d.section)
+      }
+    }
+    return sections
   }
 
   show(): void {
@@ -182,9 +221,9 @@ export class SettingsViewImpl implements SettingsView {
 
       const heading = document.createElement('h2')
       heading.className = 'st-section-heading'
+      heading.id = 'st-section-' + encodeURIComponent(section)
       heading.textContent = section
       sectionEl.append(heading)
-
       for (const decl of decls) {
         const row = this.renderControl(decl)
         sectionEl.append(row)
@@ -669,6 +708,10 @@ export class SettingsViewImpl implements SettingsView {
    *  Uses a key→element map instead of CSS selector interpolation:
    *  keys may contain dots, which break querySelector. */
   private rerenderRow(key: string): void {
+    // Instance-scoped map, not getElementById: Settings now lives in a tab that
+    // can be closed and reopened, so a detached row from a previous mount could
+    // still answer a document-wide id lookup. The keyToDomId ids stay on the
+    // rows for deep links.
     const oldRow = this.rowMap.get(key)
     if (!oldRow) return
     const decl = this.declarations.find((d) => d.key === key)
@@ -691,16 +734,4 @@ export class SettingsViewImpl implements SettingsView {
   _loadStateForTest(): string {
     return this.loadState
   }
-}
-
-// --- module-level helper ---
-
-/** Derive a stable DOM id from a setting key.  Keys are opaque strings
- *  (assertValidKey in Go checks non-empty + uniqueness) so the character
- *  set is unconstrained.  encodeURIComponent produces an injective encoding:
- *  every distinct key maps to a distinct id.  Dots, underscores, and hyphens
- *  pass through as-is (valid in HTML5 id attributes); everything else is
- *  percent-encoded, which is also valid in HTML5 id. */
-function keyToDomId(key: string): string {
-  return 'st-setting-' + encodeURIComponent(key)
 }
