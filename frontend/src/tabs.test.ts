@@ -12,6 +12,7 @@ import {
   FIXTURE_DIRECTORY_LABEL,
   type RendererMock,
 } from './test-support/tabs-fixtures'
+import { TabManager } from './tabs'
 import { ClipboardGate } from './clipboard'
 import type { TerminalContent } from './terminal-content'
 import {
@@ -80,6 +81,29 @@ describe('TabManager', () => {
 
   // ── opening a tab creates a session and a pane ────────────────────────
 
+  it('constructing a TabManager creates no tab and mounts nothing', async () => {
+    const { bar, panes } = setupTabBarDOM()
+    const c = makeClient()
+    const cb = makeClipboard()
+    const g = new ClipboardGate()
+    const bn = makeBanner()
+    const pc = {
+      listProfiles: vi.fn().mockResolvedValue([]),
+      listGroups: vi.fn().mockResolvedValue([]),
+    }
+    const { HorizontalTabStrip } = await import('./tab-strip')
+    const tabStrip = new HorizontalTabStrip()
+    const manager = new TabManager(bar, panes, c as never, cb, g, bn, pc as never, tabStrip)
+
+    expect(bar.querySelectorAll('.tab').length).toBe(0)
+
+    // Model state is also empty — no tabs registered.
+    expect(manager.tabCount).toBe(0)
+    expect(panes.querySelectorAll('.pane').length).toBe(0)
+    expect(c.openSession).not.toHaveBeenCalled()
+    // Strip is not yet mounted — no DOM children in the bar.
+    expect(bar.children.length).toBe(0)
+  })
   it('opens a session when a tab is created and activated', async () => {
     const { client, bar, panes } = await mountTabManager()
 
@@ -1032,6 +1056,10 @@ describe('TabManager', () => {
       profileClient,
       tabStrip,
     )
+    // Open the initial tab explicitly — the constructor mounts nothing.
+    // Don't await: openInitialTab returns the _initialTabReady promise;
+    // we assert the rejection through that same promise below.
+    void manager.openInitialTab()
 
     // initialTabReady must reject — a genuinely broken tab is not "ready".
     // expect().rejects attaches the handler synchronously, so the rejection

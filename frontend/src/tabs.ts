@@ -271,7 +271,7 @@ export class TabManager {
   private readonly gate: ClipboardGate
   private readonly banner: ClipboardBanner
   private readonly profileClient: ProfileClient
-  private readonly _initialTabReady: Promise<void>
+  private _initialTabReady: Promise<void> | undefined
   private tabStrip: TabStrip
   private readonly bar: HTMLElement
   /** MRU stack: most-recently-activated tab ids. */
@@ -297,28 +297,7 @@ export class TabManager {
     this.bar = bar
 
     // Wire TabStrip intents.
-    this.tabStrip.onActivate = (id) => {
-      const tab = this.tabs.find((t) => t.id === id)
-      if (tab) void this.activate(tab)
-    }
-    this.tabStrip.onClose = (id) => {
-      const tab = this.tabs.find((t) => t.id === id)
-      if (tab) this.closeTab(tab)
-    }
-    this.tabStrip.onNewTab = () => this.newTab()
-    this.tabStrip.onReorder = (fromId, toId) => this.reorderTab(fromId, toId)
-
-    tabStrip.mount(bar)
-
-    // Open the initial tab — the window is never empty.
-    const initialTab = this.newTab()
-
-    // _initialTabReady stays owned by TerminalContent.ready, not "first tab
-    // mounted". A non-terminal first tab MUST NOT be able to report healthy.
-    const initialContent = initialTab.content as TerminalContent
-    this._initialTabReady = initialContent.ready.then((ok) => {
-      if (!ok) throw new Error('initial tab failed to start')
-    })
+    this.wireStrip(tabStrip)
 
     window.addEventListener('keydown', this.onKeydown, true)
   }
@@ -328,9 +307,24 @@ export class TabManager {
   }
 
   get initialTabReady(): Promise<void> {
+    if (!this._initialTabReady) {
+      throw new Error('initialTabReady accessed before openInitialTab')
+    }
     return this._initialTabReady
   }
 
+  /** Mount the tab strip and open the initial terminal tab.
+   *  Called exactly once by the composition root.
+   *  `initialTabReady` resolves only from terminal content content. */
+  openInitialTab(): Promise<void> {
+    this.tabStrip.mount(this.bar)
+    const initialTab = this.newTab()
+    const initialContent = initialTab.content as TerminalContent
+    this._initialTabReady = initialContent.ready.then((ok) => {
+      if (!ok) throw new Error('initial tab failed to start')
+    })
+    return this._initialTabReady
+  }
   // ── Tab creation ──────────────────────────────────────────────────────
 
   /** Create a new local terminal tab and activate it. */

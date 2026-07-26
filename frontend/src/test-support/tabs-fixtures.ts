@@ -7,7 +7,7 @@
 // See AD-7: sessionId is server-authoritative, cwd is set once at session
 // open. The fake must carry both.
 
-import { vi, expect } from 'vitest'
+import { vi } from 'vitest'
 import type {
   CommandMarkerCallback,
   CwdCallback,
@@ -293,9 +293,8 @@ export function setupTabBarDOM(): { bar: HTMLElement; panes: HTMLElement } {
 }
 
 /**
- * Full setup: create DOM, construct TabManager with the given client
- * (or a fresh makeClient() if none provided), and wait until the initial
- * session has been opened.
+ * Full setup: create DOM, construct TabManager, and open the initial tab.
+ * Callers must await; the returned manager has one terminal tab active.
  */
 export async function mountTabManager(
   client?: ClientFake,
@@ -334,8 +333,7 @@ export async function mountTabManager(
     pc as unknown as import('../profiles').ProfileClient,
     tabStrip,
   )
-  await vi.waitFor(() => {
-    expect(c.openSession).toHaveBeenCalled()
-  })
+  // Open the initial tab explicitly — the constructor mounts nothing.
+  await manager.openInitialTab()
   return { bar, panes, manager, client: c, clipboard: cb, gate: g, banner: bn, tabStrip }
 }
