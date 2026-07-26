@@ -377,6 +377,13 @@ export class TerminalContent implements TabContent {
           host.requestAttention()
         }
       })
+
+      // Keyboard → PTY: xterm.js fires onData for every keystroke when stdin
+      // is enabled (setReadOnly(false)). The editor captures keys while it is
+      // visible and the terminal is read-only, so these only arrive in RAW mode.
+      renderer.onData((data: string) => {
+        this.session?.send(data)
+      })
       session.onExit((sid: string) => {
         log.info('nocx: session exited', { sid })
         this.inputState.dispatch({ type: 'exit' })

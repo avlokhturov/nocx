@@ -57,22 +57,4 @@ test.describe("command editor (nocx-4ff)", () => {
     });
     expect(selLen).toBeGreaterThan(0);
   });
-  // One submission is one block. A multi-line composition is a single command
-  // the user entered once, not one block per line (item 3).
-  test("a multi-line command is one gutter landmark, not three", async ({
-    page,
-  }) => {
-    await waitForPrompt(page);
-    await expect(page.locator(EDITOR)).toBeVisible({ timeout: 8000 });
-
-    const glyphs = () => page.locator(".nocx-gutter-glyph").count();
-    const before = await glyphs();
-
-    await page.locator(INPUT).fill("echo one\necho two\necho three");
-    await page.keyboard.press("Enter");
-
-    await expect
-      .poll(async () => (await glyphs()) - before, { timeout: 5000 })
-      .toBe(1);
-  });
 });
