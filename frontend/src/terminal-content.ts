@@ -66,11 +66,11 @@ export class TerminalContent implements TabContent {
   private _lastExitCode: number | null = null
   private _bufferType: 'normal' | 'alternate' = 'normal'
   private nativeMode = false
-  private started = false
   private _disposed = false
   private mountAbortController: AbortController | null = null
   private resizeTimer: number | undefined
   private host: TabHost | null = null
+  private _target: HTMLElement | null = null
 
   // ── Title composition ────────────────────────────────────────────────
   // Title = programTitle || cwdTitle || 'Terminal'
@@ -125,8 +125,8 @@ export class TerminalContent implements TabContent {
   // ── TabContent ──────────────────────────────────────────────────────────
 
   async mount(target: HTMLElement, host: TabHost, signal: AbortSignal): Promise<void> {
-    if (this.started || this._disposed) return
-    this.started = true
+    if (this._disposed) return
+    this._target = target
     this.host = host
 
     // Wire the signal: if the tab is disposed during mount, abort.
@@ -544,6 +544,12 @@ export class TerminalContent implements TabContent {
 
   focus(): void {
     this.renderer?.focus()
+  }
+
+  setVisible(visible: boolean): void {
+    if (this._target) {
+      this._target.classList.toggle('active', visible)
+    }
   }
 
   refreshAtlas(): void {

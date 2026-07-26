@@ -64,6 +64,9 @@ export interface TabContent {
   /** Tear down all resources. Idempotent. Cancels an in-flight mount
    *  through the AbortSignal passed to mount() (B.6). */
   dispose(): void
+  /** Show or hide the content without remounting it.
+   *  Never triggers a remount, WebGL context churn, or session teardown. */
+  setVisible(visible: boolean): void
 }
 
 // ── Model state (B.8) ─────────────────────────────────────────────────────

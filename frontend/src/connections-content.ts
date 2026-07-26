@@ -9,6 +9,8 @@ import type { TabHost, TabContent, ContentViewport } from './tab-content'
 
 export class ConnectionsContent implements TabContent {
   private view: ConnectionManagerViewImpl | null = null
+  private _target: HTMLElement | null = null
+
   private _disposed = false
 
   constructor(private readonly profileClient: ProfileClient) {}
@@ -18,6 +20,7 @@ export class ConnectionsContent implements TabContent {
 
   async mount(target: HTMLElement, host: TabHost, signal: AbortSignal): Promise<void> {
     if (this._disposed || this.view) return
+    this._target = target
 
     if (signal.aborted) return
 
@@ -38,6 +41,13 @@ export class ConnectionsContent implements TabContent {
     // Connections view is a scrolling container — no viewport-specific
     // behaviour.
   }
+
+  setVisible(visible: boolean): void {
+    if (this._target) {
+      this._target.classList.toggle('active', visible)
+    }
+  }
+
   focus(): void {
     // Connections view has no primary input to focus.
   }

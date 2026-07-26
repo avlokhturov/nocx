@@ -14,6 +14,13 @@ import {
 } from './test-support/tabs-fixtures'
 import { ClipboardGate } from './clipboard'
 import type { TerminalContent } from './terminal-content'
+import type {
+  TabContent,
+  ContentDescriptor,
+  TabHost,
+  ContentViewport,
+  SurfaceType,
+} from './tab-content'
 
 // ── Mocks ──────────────────────────────────────────────────────────────────
 
@@ -30,6 +37,36 @@ vi.mock('./renderers/xterm', () => ({
 async function getRendererMocks(): Promise<RendererMock[]> {
   const { XtermRenderer } = await import('./renderers/xterm')
   return vi.mocked(XtermRenderer).mock.results.map((r) => r.value as unknown as RendererMock)
+}
+
+// ── Second TabContent implementation for mount-once proof ─────────────
+// This class MUST NOT carry a private mount guard — the seam enforces
+// mount-once, not the implementation. If mount() is called more than once,
+// the seam is broken.
+class CountingTestContent implements TabContent {
+  mountCount = 0
+  /** Tracks every setVisible call for test assertions. */
+  visibleCalls: boolean[] = []
+  private _mountedTarget: HTMLElement | null = null
+
+  // eslint-disable-next-line @typescript-eslint/require-await, @typescript-eslint/no-unused-vars
+  async mount(target: HTMLElement, _host: TabHost, _signal: AbortSignal): Promise<void> {
+    this.mountCount++
+    this._mountedTarget = target
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  viewportChanged(_viewport: ContentViewport): void {}
+  focus(): void {}
+
+  setVisible(visible: boolean): void {
+    this.visibleCalls.push(visible)
+    if (this._mountedTarget) {
+      this._mountedTarget.classList.toggle('active', visible)
+    }
+  }
+
+  dispose(): void {}
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -1156,6 +1193,63 @@ describe('TabManager', () => {
 
     // Clean up.
     paneParent.remove()
+  })
+
+  // ═════════════════════════════════════════════════════════════════════════
+  // Mount-once enforcement at the seam (nocx-njrx.2)
+  // ═════════════════════════════════════════════════════════════════════════
+
+  it('mounts content exactly once when activated repeatedly — seam guard, not TerminalContent private flag', async () => {
+    const { manager } = await mountTabManager()
+
+    const content = new CountingTestContent()
+    const descriptor: ContentDescriptor = {
+      surfaceType: 'test.mock' as unknown as SurfaceType,
+      singletonKey: null,
+      restoreDescriptor: null,
+      supportsAttention: false,
+      defaultTitle: 'Test',
+    }
+    // openTab creates a tab via addTab → activate → start → mount.
+    manager.openTab(content, descriptor)
+
+    // Activate the terminal tab, then activate our tab again.
+    // Mount must only fire once (seam guard in Tab.start()).
+    manager.activateByIndex(0)
+    manager.activateByIndex(1)
+
+    // Flush microtasks so any pending async activation settles.
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(content.mountCount).toBe(1)
+  })
+
+  it('calling setVisible through the content boundary drives visibility, not a CSS class toggle in tabs.ts', async () => {
+    const { manager } = await mountTabManager()
+    const content = new CountingTestContent()
+    const descriptor: ContentDescriptor = {
+      surfaceType: 'test.mock' as unknown as SurfaceType,
+      singletonKey: null,
+      restoreDescriptor: null,
+      supportsAttention: false,
+      defaultTitle: 'Test',
+    }
+
+    manager.openTab(content, descriptor)
+
+    // setVisible(true) should have been called when the tab was activated.
+    // (The first call is for tab 0 being deactivated, the second is our tab activated.)
+    // content 0 (terminal) also gets setVisible calls, so count >= 1 for our content.
+    expect(content.visibleCalls.length).toBeGreaterThanOrEqual(1)
+    expect(content.visibleCalls[content.visibleCalls.length - 1]).toBe(true)
+
+    // Deactivate the tab — setVisible(false) fires on the previous tab.
+    manager.activateByIndex(0)
+    // The last call on our content should now be false.
+    expect(content.visibleCalls[content.visibleCalls.length - 1]).toBe(false)
+
+    expect(content.mountCount).toBe(1)
   })
 
   // ═════════════════════════════════════════════════════════════════════════

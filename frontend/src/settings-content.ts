@@ -29,6 +29,8 @@ export class SettingsContent implements TabContent {
   private container: HTMLElement | null = null
   private rail: HTMLElement | null = null
   private contentEl: HTMLElement | null = null
+  private _target: HTMLElement | null = null
+
   private searchInput: HTMLInputElement | null = null
   private modifiedToggle: HTMLInputElement | null = null
   private sectionList: HTMLElement | null = null
@@ -45,6 +47,7 @@ export class SettingsContent implements TabContent {
   async mount(target: HTMLElement, host: TabHost, signal: AbortSignal): Promise<void> {
     if (this._disposed || this.container) return
     if (signal.aborted) return
+    this._target = target
 
     host.setTitle('Settings')
 
@@ -121,6 +124,12 @@ export class SettingsContent implements TabContent {
     if (!this.container) return
     const narrow = viewport.width < NARROW_BREAKPOINT_PX
     this.container.classList.toggle('st-narrow', narrow)
+  }
+
+  setVisible(visible: boolean): void {
+    if (this._target) {
+      this._target.classList.toggle('active', visible)
+    }
   }
 
   dispose(): void {

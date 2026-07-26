@@ -90,6 +90,8 @@ export class Tab implements TabHost {
   setActive(active: boolean): void {
     this._active = active
     this.pane.classList.toggle('active', active)
+    // Notify content of visibility change for internal state management (AD-6 corollary).
+    this.content.setVisible(active)
     if (active) {
       this._hasActivity = false
     }
@@ -138,10 +140,12 @@ export class Tab implements TabHost {
   // ── Lifecycle ─────────────────────────────────────────────────────────
 
   /** Mount the content into this tab's pane. Called by TabManager on
-   *  first activation. Enables viewport delivery after mount completes (B.5). */
+   *  first activation. Suppressed after first call — mount-once is enforced
+   *  at the seam, not by the content implementation (nocx-njrx.2). */
   async start(): Promise<void> {
-    log.info('nocx: Tab.start() called', { id: this.id })
+    if (this._mountStarted) return
     this._mountStarted = true
+    log.info('nocx: Tab.start() called', { id: this.id })
     await this.content.mount(this.pane, this, this._mountAbort.signal)
     // B.5: replay the latest buffered viewport, or measure now if none yet.
     if (this._latestViewport) {
