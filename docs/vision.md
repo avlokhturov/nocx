@@ -26,8 +26,9 @@ Settings (`nocx-8v51`) was the fourth and closed on 2026-07-26. This table is a 
 a maintained list: the live answer is `bd list --status in_progress --type epic`, and where
 the two disagree the command is right.
 
-After the foundation, the order is: editor core on CodeMirror 6 and Warp-style command blocks
-→ SSH client → secrets vault → shell integration and Warpify → everything else. That order is
+After the foundation, the order is: editor core on CodeMirror 6, Warp-style command blocks and
+shell integration → terminal core, terminal UI and the SSH client → secrets vault → Warpify →
+everything else. Every `mvp`-labelled epic comes before every deferred one. That order is
 recorded as `blocks` edges between the epics, so `bd ready` reveals each stage on its own as
 the previous one closes; `bd epic status` shows the whole board. The twelve epics behind the
 current front are parked, not cancelled — nothing was deleted and no scope was dropped.
@@ -80,27 +81,39 @@ Flawless rendering of modern agent TUIs is **table-stakes**, not the differentia
 
 The differentiator is the **combination**, all local and in one customizable app:
 
-**Ghostty-grade rendering + integrated SSH manager + (Phase 2) secrets vault + (Phase 2) Warpify-style UX + GUI configuration — no cloud.**
+**Ghostty-grade rendering + integrated SSH manager + secrets vault + Warpify-style UX + GUI configuration — no cloud.**
+
+All five are in v1 as of 2026-07-26. The vault and the Warpify-style UX used to be deferred
+to Phase 2, which meant v1 would have shipped the parts competitors already have and none of
+the parts they do not.
 
 No competitor covers this whole set locally: Ghostty renders but lacks the vault/SSH-manager/GUI-config; Tabby has vault + SSH but a weak engine; Warp has the UX but needs the cloud.
 
 ## 5. MVP scope
 
+Revised 2026-07-26: the secrets vault and the Warpify-style UX moved from PHASE 2 into v1.
+The bet in section 4 is the *combination*, and those two are the half of it the strong
+engines do not have — shipping without them ships neither half of the wedge. The epics
+carrying `mvp` in beads are the authoritative list; this section is the prose version of it.
+
 ### IN v1
-- Terminal engine that renders modern agent TUIs flawlessly (true-color, mouse-passthrough, bracketed-paste for TUI fidelity)
-- Tabs; duplicate tab; restore tabs on restart
-- Copy folder path; new-tab-in-same-cwd
-- SSH client (basic — *not* the vault)
-- Change font + size; switch color schemes
+- Terminal engine that renders modern agent TUIs flawlessly (true-color, mouse-passthrough, bracketed-paste for TUI fidelity) — `nocx-pxq`
+- Tabs; duplicate tab; restore tabs on restart — `nocx-v1pr`
+- Copy folder path; new-tab-in-same-cwd (OSC 7) — `nocx-5mn`
+- SSH client — `nocx-9le`
+- Change font + size; switch color schemes; hotkeys / keybindings; clickable links/paths (OSC 8, cmd+click) — `nocx-8yg`
 - Copy-on-mouse-select; right-click paste
-- Hotkeys / keybindings
-- Clickable links/paths (OSC 8, cmd+click)
+- Command editor on CodeMirror 6 — `nocx-2gf`
+- Warp-style command blocks — `nocx-4ff`
+- Secrets vault — `nocx-25k9`
+- Warpify-style UX extended into nested shells — `nocx-pu4`
+- Persistence, so any of the above survives a restart — `nocx-6ek`
 
 ### PHASE 2 (deferred)
-- Secrets vault
-- Warpify-style UX (blocks / completions / input-editor extended into nested shells)
 - Splits / panes
 - Scrollback + find-in-output (search)
+- Semantic command line: in-band validation, completion, ghost-text — `nocx-w7h`
+- Configurable vertical tab placement — `nocx-d3q`
 
 ### OUT (non-goals)
 - Cloud sync
@@ -111,8 +124,8 @@ No competitor covers this whole set locally: Ghostty renders but lacks the vault
 
 Phases as one-liners. The detailed, executable backlog lives in **beads**, not in this doc.
 
-- **Phase 1 — MVP.** Local terminal with agent-TUI-grade rendering, tabs/cwd features, basic SSH client, GUI config. macOS.
-- **Phase 2 — Comfort layer.** Secrets vault + Warpify-style UX + splits/panes + scrollback search.
+- **Phase 1 — MVP.** Local terminal with agent-TUI-grade rendering, tabs/cwd features, SSH client, GUI config, a CodeMirror 6 command editor with Warp-style blocks, the secrets vault, and Warpify-style UX in nested shells. macOS.
+- **Phase 2 — Comfort layer.** Splits/panes + scrollback search + the semantic command line.
 - **Phase 3 — Ask an agent + reach.** Natural-language query from the terminal to any AI model the user chooses — bring-your-own, including a fully local model; expand to Windows / Linux.
 
 ## 7. Tech stack
@@ -141,7 +154,7 @@ Personal and honest: **"I built it and it works."** Concretely — I can daily-d
 
 ## 11. Open questions / assumptions to confirm
 
-- **Vault (Phase 2):** single-machine, no sync (confirmed). Exact crypto/UX is a Phase-2 implementation decision — how secrets are stored, encrypted, and surfaced (e.g. OS keychain vs. app-managed encrypted store).
+- **Vault (now in v1):** single-machine, no sync (confirmed). Still open: how the master key is held and where secrets are surfaced from — OS keychain vs. app-managed encrypted store. That decision belongs in `nocx-25k9` as an ADR before any vault UI is built; the store itself already exists from ADR-0011.
 - **SSH ↔ vault integration:** how the SSH client and the vault connect once the vault lands.
 - **"Ask an agent" (Phase 3):** precisely how natural-language queries reach a local / BYO AI from the terminal.
 - **Licensing:** confirm any obligations beyond those documented in the README License section (xterm.js MIT, @wterm/dom Apache 2.0).
