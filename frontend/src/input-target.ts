@@ -20,26 +20,21 @@ export interface InputTargetRegistry {
 
 // ShellInputTarget routes a submitted document to the active PTY using the
 // ADR-0004 §2 atomic handoff: the editor hides itself (caller's job), then the
-// whole command is sent as ONE bracketed paste followed by CR. zle/readline
-// paints the accepted command once as the committed transcript — no per-key
-// echo, no stty, no readline mirroring.
-//
-// When bracketed-paste mode IS on, \n within the paste is preserved as a
-// literal command separator, so bash executes every line — a multi-line
-// editor composition runs all commands, not just the last (nocx-4ff.14).
-// When mode IS off the wrappers leak but the shell interprets \n as accept-
-// line, which also executes every line.  Either way, the user gets the
-// entire composed command.
-const PASTE_START = '\x1b[200~'
-const PASTE_END = '\x1b[201~'
-
+// renderer pastes the complete document before raw CR accepts it. The renderer
+// owns mode-2004 wrapping because only the terminal engine knows whether the
+// running shell enabled bracketed paste. Newlines stay in the single document,
+// so multi-line compositions still execute every line (nocx-4ff.14).
 export class ShellInputTarget implements InputTarget {
   readonly id = 'shell'
   readonly label = 'Shell'
-  constructor(private readonly sendRaw: (data: string) => void) {}
+  constructor(
+    private readonly paste: (text: string) => void,
+    private readonly sendRaw: (data: string) => void,
+  ) {}
 
   submit(doc: string): Promise<void> {
-    this.sendRaw(`${PASTE_START}${doc}${PASTE_END}\r`)
+    this.paste(doc)
+    this.sendRaw('\r')
     return Promise.resolve()
   }
 }
