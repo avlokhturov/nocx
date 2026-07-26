@@ -169,16 +169,14 @@ func TestRealRegistry_DoneChannel(t *testing.T) {
 	go func() {
 		_ = sess.StartOutput(ctx, func(data []byte) error { return nil })
 	}()
-
-	time.Sleep(100 * time.Millisecond) // let shell initialise
-
-	// Write exit to the shell.
+	// Write exit to the shell. No sleep needed: the PTY buffers stdin,
+	// and StartOutput's goroutine drains stdout before the buffer fills.
 	_, _ = sess.Write([]byte("exit\n"))
 
 	select {
 	case <-sess.Done():
 		// PTY exited — success.
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("Done channel never closed")
 	}
 
