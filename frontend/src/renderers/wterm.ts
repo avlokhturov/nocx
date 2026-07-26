@@ -33,10 +33,7 @@ export class WtermRenderer implements TerminalRenderer {
     const term = new WTerm(container, {
       cols: 80,
       rows: 24,
-      autoResize: true, // ResizeObserver-driven fit, like xterm's FitAddon
-      onData: (data) => this.dataCb?.(data),
-      onTitle: (title) => this.titleCb?.(title),
-      onResize: (cols, rows) => this.resizeCb?.(cols, rows),
+      autoResize: false, // geometry authority is the presentation layer (B.5)
     })
     await term.init()
     this.term = term
@@ -129,5 +126,31 @@ export class WtermRenderer implements TerminalRenderer {
 
   get rows(): number {
     return this.term?.rows ?? 24
+  }
+
+  /**
+   * Fit the terminal grid to an explicit viewport from the presentation layer
+   * (B.5). Computes cols/rows from font-metric estimates — wterm has no public
+   * cell-measurement API. xterm.js provides real cell metrics via internal
+   * render-service dimensions; wterm's approximation uses FONT_SIZE directly.
+   *
+   * Limitation (nocx-au6): wterm cannot honour glyph-level metrics the way
+   * xterm can. The cols/rows computed here are best-effort and may differ
+   * from what wterm's private _measureCharSize would produce. When accurate
+   * grid sizing matters, use the xterm renderer.
+   */
+  fitViewport(viewport: { width: number; height: number }): void {
+    const t = this.term
+    if (!t || viewport.width <= 0 || viewport.height <= 0) return
+    // Monospace font approximation: cellWidth ≈ fontSize (em-advance),
+    // cellHeight = fontSize × lineHeight.
+    const cellWidth = FONT_SIZE
+    const cellHeight = FONT_SIZE * LINE_HEIGHT
+    if (cellWidth <= 0 || cellHeight <= 0) return
+    const cols = Math.max(1, Math.floor(viewport.width / cellWidth))
+    const rows = Math.max(1, Math.floor(viewport.height / cellHeight))
+    if (cols !== t.cols || rows !== t.rows) {
+      t.resize(cols, rows)
+    }
   }
 }

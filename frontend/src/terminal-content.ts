@@ -151,12 +151,6 @@ export class TerminalContent implements TabContent {
       log.info('nocx: creating renderer')
       const renderer = createRenderer(this.rendererName)
 
-      const paneRect = target.getBoundingClientRect()
-      log.info('nocx: pane dimensions before mount', {
-        width: paneRect.width,
-        height: paneRect.height,
-      })
-
       // ── DOM scrollback controller ───────────────────────────────────────
       this.scrollback = new ScrollbackController({
         pane: target,
@@ -510,9 +504,9 @@ export class TerminalContent implements TabContent {
       })
 
       // B.5: replay the latest viewport after async mount completes.
-      // The renderer's internal ResizeObserver handles actual fitting;
-      // TerminalContent.ready + _mounted serve as the post-mount signal
-      // for the presentation layer to re-deliver the real viewport.
+      // The presentation layer delivers viewports via viewportChanged;
+      // if one was buffered during mount, apply it now through the
+      // renderer's fitViewport path.
       if (this._latestViewport) {
         this.viewportChanged(this._latestViewport)
       }
@@ -534,9 +528,11 @@ export class TerminalContent implements TabContent {
   viewportChanged(viewport: ContentViewport): void {
     if (this._disposed) return
     this._latestViewport = viewport
-    // The renderer observes its own container for resize; viewportChanged
-    // stores the authoritative measurement from the presentation layer so
-    // it can be replayed after an async mount completes (B.5).
+    // Pass the authoritative viewport to the renderer (B.5).
+    // The renderer computes cols/rows from its own cell metrics.
+    if (this._mounted && this.renderer) {
+      this.renderer.fitViewport(viewport)
+    }
   }
 
   focus(): void {

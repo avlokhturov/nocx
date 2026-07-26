@@ -101,6 +101,7 @@ export function createRendererMock(): RendererMock {
     setReadOnly: vi.fn(),
     refreshAtlas: vi.fn(),
     focus: vi.fn(),
+    fitViewport: vi.fn(),
     cols: 80,
     rows: 24,
     _cbs: cbs,

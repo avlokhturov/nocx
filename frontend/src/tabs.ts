@@ -17,7 +17,7 @@ import type { ClipboardBanner } from './banner'
 import type { ProfileClient } from './profiles'
 import { log } from './log'
 import type { TabStrip } from './tab-strip'
-import type { TabHost, TabContent, ContentDescriptor } from './tab-content'
+import type { TabHost, TabContent, ContentDescriptor, ContentViewport } from './tab-content'
 import { SURFACE_TERMINAL } from './tab-content'
 import { TerminalContent } from './terminal-content'
 
@@ -48,6 +48,11 @@ export class Tab implements TabHost {
   private _tooltip = ''
   private _disposed = false
   private _mountAbort = new AbortController()
+  // ── B.5 geometry authority ──────────────────────────────────────────
+  private _viewportObserver: ResizeObserver | null = null
+  private _latestViewport: ContentViewport | null = null
+  private _viewportRafPending = false
+  private _mountStarted = false
 
   constructor(content: TabContent, descriptor: ContentDescriptor, id: number) {
     this.id = id
@@ -137,10 +142,17 @@ export class Tab implements TabHost {
   // ── Lifecycle ─────────────────────────────────────────────────────────
 
   /** Mount the content into this tab's pane. Called by TabManager on
-   *  first activation. Idempotent — second call is a no-op. */
+   *  first activation. Enables viewport delivery after mount completes (B.5). */
   async start(): Promise<void> {
     log.info('nocx: Tab.start() called', { id: this.id })
+    this._mountStarted = true
     await this.content.mount(this.pane, this, this._mountAbort.signal)
+    // B.5: replay the latest buffered viewport, or measure now if none yet.
+    if (this._latestViewport) {
+      this.content.viewportChanged(this._latestViewport)
+    } else {
+      this._deliverViewport()
+    }
   }
 
   focus(): void {
@@ -150,9 +162,10 @@ export class Tab implements TabHost {
   close(): void {
     this._disposed = true
     this._mountAbort.abort()
+    this._viewportObserver?.disconnect()
+    this._viewportObserver = null
     this.content.dispose()
   }
-
   // ── Internals ─────────────────────────────────────────────────────────
 
   private markActivity(): void {
@@ -171,7 +184,58 @@ export class Tab implements TabHost {
     if (next === 'idle' && !this._active) {
       this.markActivity()
     }
-    this.onDisplayChange?.()
+  }
+
+  // ── B.5 geometry authority ──────────────────────────────────────────
+
+  /**
+   * Start observing the pane element for resize. Called when the pane
+   * enters the DOM (TabManager.addTab). ResizeObserver callbacks are
+   * coalesced per animation frame and suppressed after disposal.
+   */
+  setupViewportObserver(): void {
+    if (this._viewportObserver) return
+    const observer = new ResizeObserver((entries) => {
+      if (this._disposed) return
+      const entry = entries[entries.length - 1]
+      if (!entry) return
+      const { width, height } = entry.contentRect
+      // Never send a misleading zero rectangle for hidden/inactive tabs (B.5).
+      if (width === 0 && height === 0) return
+      // Coalesce per animation frame: only one delivery per frame.
+      if (this._viewportRafPending) return
+      this._viewportRafPending = true
+      requestAnimationFrame(() => {
+        this._viewportRafPending = false
+        this._deliverViewport()
+      })
+    })
+    observer.observe(this.pane)
+    this._viewportObserver = observer
+  }
+
+  /**
+   * Measure the pane and deliver the viewport to content, but only after
+   * mount has started and before disposal (B.5 delivery rules).
+   */
+  private _deliverViewport(): void {
+    if (this._disposed || !this._mountStarted) return
+    const rect = this.pane.getBoundingClientRect()
+    if (rect.width === 0 && rect.height === 0) return
+    const dpr = window.devicePixelRatio || 1
+    const vp: ContentViewport = { width: rect.width, height: rect.height, devicePixelRatio: dpr }
+    // Suppress equal consecutive rectangles (B.5).
+    const prev = this._latestViewport
+    if (
+      prev &&
+      prev.width === vp.width &&
+      prev.height === vp.height &&
+      prev.devicePixelRatio === vp.devicePixelRatio
+    ) {
+      return
+    }
+    this._latestViewport = vp
+    this.content.viewportChanged(vp)
   }
 }
 
@@ -340,6 +404,8 @@ export class TabManager {
 
     this.tabs.push(tab)
     this.panes.append(tab.pane)
+    // B.5: start observing pane geometry once it's in the DOM.
+    tab.setupViewportObserver()
 
     tab.onCloseRequested = () => this.closeTab(tab)
     this.tabStrip.addTab(tab)

@@ -46,6 +46,14 @@ export type CommandMarkerCallback = (event: CommandMarkerEvent) => void
 
 export interface TerminalRenderer {
   mount(container: HTMLElement): Promise<void>
+  /**
+   * Fit the renderer to an explicit viewport delivered by the presentation
+   * layer (B.5). The renderer computes cols/rows from its real cell metrics
+   * and the given CSS-pixel dimensions. It MUST NOT independently measure
+   * container geometry.
+   */
+  fitViewport(viewport: { width: number; height: number }): void
+
   write(data: string): void
 
   // reset performs a full terminal reset: clears the display, scrollback,
