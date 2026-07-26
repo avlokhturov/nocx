@@ -140,6 +140,29 @@ reports max parallelism 7 for an epic whose real front is 3. It is useful for re
 shape of an epic, useless as a gate. An epic where every child sits in wave 1 has recorded
 no order at all, and that is what made `bd ready` unusable as a queue in the first place.
 
+**An epic is never left in plain `open`.** It is either blocked, which means parked, or
+`in_progress`, which means someone owns it. Both states keep it out of `bd ready`; plain
+`open` does not, and an unblocked open epic surfaces as claimable work. `bd create` makes
+epics `open`, so this is the step that gets forgotten — three freshly carved epics appeared
+in a bare `bd ready` within an hour of being created. Set the status when you create the
+epic, not when someone trips over it.
+
+**An epic is a unit of assignment.** It is handed to one person whole — never "this epic
+but not those three children". That is why `nocx-6ek` (Persistence) and `nocx-k0xk` (Quality
+gates) were closed and split: an epic named after an *area* can never finish, because every
+new bug in that area lands in it, so it can only ever be cherry-picked. Scope an epic to a
+deliverable whose DONE WHEN stops being false exactly once. More, smaller epics is the
+correct trade — the backlog went from 15 to 23 and that was the point, not a side effect.
+
+**Where a bug goes.** Inside a live deliverable, it is a child of that epic — `nocx-au6`
+belongs to deleting wterm because the seam lying about capabilities is part of that job. A
+bug that arrives from nowhere gets **no parent at all**: a standalone bug is legitimate and
+shows up in `bd ready` on its own. Do not file it under the nearest plausible epic — that
+reflex is exactly what grew the two area epics, one honest-looking parent at a time. If
+triage shows the bug is a symptom of something structural, it *becomes* an epic (or spawns
+one) and carries a `discovered-from` edge back to itself, the way `nocx-4ff` points at
+`nocx-gs0` and the way `nocx-bw2` anchored `nocx-rdkh`.
+
 **Epics are never workable, and claims are unassigned-only.** Always `--exclude-type epic`:
 an epic is a container and a synchronisation point, and claiming one is always a mistake.
 Always `-u` when listing and `--claim` when taking — that is what lets two agents work two
