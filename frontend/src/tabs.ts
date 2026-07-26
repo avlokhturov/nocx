@@ -15,6 +15,7 @@ import { ScrollbackController } from './scrollback/controller'
 import type { ProfileClient, SSHProfile } from './profiles'
 import { ConnectionManagerViewImpl } from './connections'
 import { log } from './log'
+import type { TabStrip } from './tab-strip'
 
 // How long the grid must hold still before the PTY is told about it.
 // Dragging a window edge walks the grid through every intermediate size,
@@ -62,16 +63,14 @@ export class Tab {
   readonly id: number
 
   readonly pane = document.createElement('div')
-  readonly button = document.createElement('div')
-  readonly closeBtn = document.createElement('button')
-  readonly indexLabel = document.createElement('span')
-  readonly titleSpan = document.createElement('span')
-  /** Agent state icon: spinner while working, dot when waiting on the user. */
-  readonly statusIcon = document.createElement('span')
-  /** Centres the status icon and the title as one unit, the way Warp does. */
-  readonly label = document.createElement('span')
-  /** Active-tab indicator (top bar) / activity indicator (bottom bar) */
-  readonly indicator = document.createElement('div')
+  // ── Display state (read by TabStrip via TabView) ─────────────────────
+
+  /** Whether this tab is currently the active one. Set by TabManager. */
+  private _active = false
+
+  /** Called by the TabStrip; Tab calls this whenever display state changes
+   *  so the TabStrip can re-read title, hasActivity, agentStatus, tooltip. */
+  onDisplayChange: (() => void) | null = null
 
   // Empty, matching the label the constructor paints: a tab has no name until
   // its session reports a directory (nocx-83a). Seeding this with FALLBACK_TITLE
@@ -105,6 +104,9 @@ export class Tab {
   private _globalKeydown: ((e: KeyboardEvent) => void) | null = null
   private _cwd = '~'
   private _host = ''
+  /** Tooltip for the tab button. Set by start() and updateCwd().
+   *  TabStrip reads this via TabView.tooltip. */
+  private _tooltip = ''
 
   // _readyPromise resolves true when the renderer mounts and the PTY session
   // opens; resolves false when start() throws. Never rejects. It stays pending
@@ -140,42 +142,14 @@ export class Tab {
     this.pane.className = 'pane'
     this.pane.id = `pane-${id}`
     this.pane.setAttribute('role', 'tabpanel')
-
-    this.button.className = 'tab'
-    this.button.setAttribute('role', 'tab')
-    this.button.setAttribute('aria-controls', this.pane.id)
-    this.button.setAttribute('data-tab-id', String(id))
-
-    this.indicator.className = 'tab-indicator'
-
-    this.indexLabel.className = 'tab-index'
-    this.indexLabel.textContent = String(id)
-
-    this.statusIcon.className = 'tab-status'
-    this.label.className = 'tab-label'
-
-    this.titleSpan.className = 'tab-title'
-    // Title is empty until start() resolves with the real directory name.
-    // Setting 'Terminal' here would paint a placeholder that flashes before
-    // the real name lands (nocx-83a).
-
-    this.closeBtn.className = 'tab-close'
-    this.closeBtn.textContent = '×'
-    this.closeBtn.setAttribute('aria-label', 'Close tab')
-
-    this.label.append(this.statusIcon, this.titleSpan)
-    this.button.append(this.indexLabel, this.label, this.closeBtn, this.indicator)
-    this.setActive(false)
   }
-
   setActive(active: boolean): void {
+    this._active = active
     this.pane.classList.toggle('active', active)
-    this.button.classList.toggle('active', active)
-    this.button.setAttribute('aria-selected', String(active))
     if (active) {
       this._hasActivity = false
-      this.indicator.classList.remove('tab-activity')
     }
+    this.onDisplayChange?.()
   }
 
   get title(): string {
@@ -186,11 +160,21 @@ export class Tab {
     return this._hasActivity
   }
 
+  /** Tooltip for the tab button. Read by TabStrip via TabView. */
+  get tooltip(): string {
+    return this._tooltip
+  }
+
+  /** The tabpanel element id. Satisfies TabView.paneId. */
+  get paneId(): string {
+    return this.pane.id
+  }
+
   /** Called when this background tab receives output. */
   private markActivity(): void {
     if (!this._hasActivity) {
       this._hasActivity = true
-      this.indicator.classList.add('tab-activity')
+      this.onDisplayChange?.()
     }
   }
 
@@ -225,18 +209,16 @@ export class Tab {
     const next = detectAgentStatus(title)
     if (next === this._agentStatus) return
     this._agentStatus = next
-    this.button.classList.toggle('working', next === 'working')
-    this.button.classList.toggle('waiting', next === 'idle')
 
     // An agent that stopped working is asking for you — the one event the
     // activity underline exists to announce. The byte-level rule cannot see
     // it: the agent repaints inside the alternate buffer, which is exactly
     // what that rule suppresses (nocx-5mf).
-    if (next === 'idle' && !this.button.classList.contains('active')) {
+    if (next === 'idle' && !this._active) {
       this.markActivity()
     }
+    this.onDisplayChange?.()
   }
-
   updateTitle(title: string): void {
     // A TUI clears the title on the way out by emitting OSC 0/2 with an empty
     // string. Taken literally that blanks the tab; kept as-is it would leave a
@@ -247,8 +229,10 @@ export class Tab {
 
     this._programTitle = title.trim()
     const next = this._programTitle || this._defaultTitle
-    this._title = next
-    this.titleSpan.textContent = next
+    if (next !== this._title) {
+      this._title = next
+      this.onDisplayChange?.()
+    }
   }
 
   /**
@@ -260,14 +244,14 @@ export class Tab {
     this._cwdFromOSC7 = true
     this._cwd = path
     this._defaultTitle = directoryLabel(path)
-    this.button.title = cwdTooltip(path, true)
+    this._tooltip = cwdTooltip(path, true)
     this.editor?.setCwd(path)
 
     // If no program has set a title, the visible title tracks the cwd.
     if (!this._programTitle) {
       this._title = this._defaultTitle
-      this.titleSpan.textContent = this._defaultTitle
     }
+    this.onDisplayChange?.()
   }
 
   /**
@@ -570,14 +554,15 @@ export class Tab {
       // the host as the title instead.
       if (this.sshOpts) {
         this._defaultTitle = this.sshOpts.host
-        this.button.title = `SSH ${this.sshOpts.user ? this.sshOpts.user + '@' : ''}${this.sshOpts.host}`
+        this._tooltip = `SSH ${this.sshOpts.user ? this.sshOpts.user + '@' : ''}${this.sshOpts.host}`
       } else {
         this._defaultTitle = directoryLabel(session.cwd)
-        this.button.title = cwdTooltip(session.cwd, false)
+        this._tooltip = cwdTooltip(session.cwd, false)
       }
       // First paint of the label: it stayed empty until the name existed
       // (nocx-83a).
-      this.titleSpan.textContent = this._title = this._defaultTitle
+      this._title = this._defaultTitle
+      this.onDisplayChange?.()
 
       session.onData((data: string) => {
         log.debug('nocx: session data received', { length: data.length })
@@ -585,7 +570,7 @@ export class Tab {
         // Normal-buffer output on a background tab lights the indicator.
         // Full-screen TUIs repaint constantly in the alternate buffer —
         // that is not news. A bell in either buffer still counts.
-        if (this._bufferType === 'normal' && !this.button.classList.contains('active')) {
+        if (this._bufferType === 'normal' && !this._active) {
           this.markActivity()
         }
       })
@@ -616,7 +601,7 @@ export class Tab {
 
       renderer.onBell(() => {
         // Bell is always attention-worthy, even in the alternate buffer.
-        if (!this.button.classList.contains('active')) {
+        if (!this._active) {
           this.markActivity()
         }
       })
@@ -793,7 +778,6 @@ export class TabManager {
   private readonly tabs: Tab[] = []
   private nextTabId = 1
   private activeTab: Tab | null = null
-  private readonly bar: HTMLElement
   private readonly panes: HTMLElement
   private readonly client: WSClient
   private readonly rendererName: RendererName
@@ -801,9 +785,13 @@ export class TabManager {
   private readonly gate: ClipboardGate
   private readonly banner: ClipboardBanner
   private readonly profileClient: ProfileClient
-  private readonly addBtn: HTMLButtonElement
-  private readonly tabsContainer: HTMLElement
+  private readonly tabStrip: TabStrip
   private readonly _initialTabReady: Promise<void>
+
+  /** MRU stack: most-recently-activated tab ids. Used when closing the
+   *  active tab to activate the previously-active tab, not the visual
+   *  neighbour. Adopted from Orca. */
+  private readonly recentTabIds: number[] = []
 
   constructor(
     bar: HTMLElement,
@@ -813,8 +801,8 @@ export class TabManager {
     gate: ClipboardGate,
     banner: ClipboardBanner,
     profileClient: ProfileClient,
+    tabStrip: TabStrip,
   ) {
-    this.bar = bar
     this.panes = panes
     this.client = client
     this.rendererName = DEFAULT_RENDERER
@@ -822,27 +810,21 @@ export class TabManager {
     this.gate = gate
     this.banner = banner
     this.profileClient = profileClient
+    this.tabStrip = tabStrip
 
-    bar.setAttribute('role', 'tablist')
-    bar.classList.add('tabbar')
+    // Wire TabStrip intents.
+    this.tabStrip.onActivate = (id) => {
+      const tab = this.tabs.find((t) => t.id === id)
+      if (tab) void this.activate(tab)
+    }
+    this.tabStrip.onClose = (id) => {
+      const tab = this.tabs.find((t) => t.id === id)
+      if (tab) this.closeTab(tab)
+    }
+    this.tabStrip.onNewTab = () => this.newTab()
+    this.tabStrip.onReorder = (fromId, toId) => this.reorderTab(fromId, toId)
 
-    // Non-growing tabs container — holds tab buttons.
-    this.tabsContainer = document.createElement('div')
-    this.tabsContainer.className = 'tabs-container'
-    bar.append(this.tabsContainer)
-
-    // + button — sits immediately after the last tab, before the spacer.
-    this.addBtn = document.createElement('button')
-    this.addBtn.className = 'tab-add'
-    this.addBtn.textContent = '+'
-    this.addBtn.setAttribute('aria-label', 'New tab')
-    this.addBtn.addEventListener('click', () => this.newTab())
-    bar.append(this.addBtn)
-
-    // Flexible spacer — absorbs leftover width so tabs never stretch.
-    const spacer = document.createElement('div')
-    spacer.className = 'tabbar-spacer'
-    bar.append(spacer)
+    tabStrip.mount(bar)
 
     // Open the initial tab — the window is never empty.
     const initialTab = this.newTab()
@@ -931,44 +913,9 @@ export class TabManager {
     tab.onSessionExit = () => this.closeTab(tab)
 
     this.tabs.push(tab)
-    this.tabsContainer.append(tab.button)
     this.panes.append(tab.pane)
+    this.tabStrip.addTab(tab)
 
-    tab.button.addEventListener('click', () => {
-      void this.activate(tab)
-    })
-    tab.closeBtn.addEventListener('click', (e: MouseEvent) => {
-      e.stopPropagation()
-      this.closeTab(tab)
-    })
-    tab.button.addEventListener('mousedown', (e: MouseEvent) => {
-      if (e.button === 1) {
-        e.preventDefault()
-        this.closeTab(tab)
-      }
-    })
-
-    // Drag and drop for tab reordering
-    tab.button.draggable = true
-    tab.button.addEventListener('dragstart', (e: DragEvent) => {
-      e.dataTransfer?.setData('text/plain', String(tab.id))
-      tab.button.classList.add('dragging')
-    })
-    tab.button.addEventListener('dragend', () => {
-      tab.button.classList.remove('dragging')
-    })
-    tab.button.addEventListener('dragover', (e: DragEvent) => {
-      e.preventDefault()
-    })
-    tab.button.addEventListener('drop', (e: DragEvent) => {
-      e.preventDefault()
-      const draggedId = Number(e.dataTransfer?.getData('text/plain'))
-      if (draggedId !== tab.id) {
-        this.reorderTab(draggedId, tab.id)
-      }
-    })
-
-    this.refreshIndices()
     void this.activate(tab)
     return tab
   }
@@ -994,54 +941,16 @@ export class TabManager {
     }
 
     this.tabs.push(tab)
-    // Append to the tabs container (addBtn sits after the container).
-    this.tabsContainer.append(tab.button)
+    // Pane must be in DOM before addTab so the TabStrip can set
+    // aria-labelledby on it via document.getElementById.
     this.panes.append(tab.pane)
 
     // Set up session exit handler to close the tab
     tab.onSessionExit = () => this.closeTab(tab)
 
-    // Click → activate. The close button's own handler calls stopPropagation,
-    // so close-button clicks never reach here.
-    tab.button.addEventListener('click', () => {
-      void this.activate(tab)
-    })
+    // TabStrip creates the button, wires events, subscribes to state changes.
+    this.tabStrip.addTab(tab)
 
-    // Close button click → close.
-    tab.closeBtn.addEventListener('click', (e: MouseEvent) => {
-      e.stopPropagation()
-      this.closeTab(tab)
-    })
-
-    // Middle-click on tab → close.
-    tab.button.addEventListener('mousedown', (e: MouseEvent) => {
-      if (e.button === 1) {
-        e.preventDefault()
-        this.closeTab(tab)
-      }
-    })
-
-    // Drag and drop for tab reordering
-    tab.button.draggable = true
-    tab.button.addEventListener('dragstart', (e: DragEvent) => {
-      e.dataTransfer?.setData('text/plain', String(tab.id))
-      tab.button.classList.add('dragging')
-    })
-    tab.button.addEventListener('dragend', () => {
-      tab.button.classList.remove('dragging')
-    })
-    tab.button.addEventListener('dragover', (e: DragEvent) => {
-      e.preventDefault()
-    })
-    tab.button.addEventListener('drop', (e: DragEvent) => {
-      e.preventDefault()
-      const draggedId = Number(e.dataTransfer?.getData('text/plain'))
-      if (draggedId !== tab.id) {
-        this.reorderTab(draggedId, tab.id)
-      }
-    })
-
-    this.refreshIndices()
     void this.activate(tab)
     this.onTabsChanged?.()
     return tab
@@ -1058,8 +967,8 @@ export class TabManager {
 
   /**
    * Close a tab, its session, and its DOM elements. If the closed tab was the
-   * active one, the neighbour at the same visual position (or the previous one)
-   * is activated. Closing the last tab opens a fresh one immediately.
+   * active one, the previously-active tab (MRU) is activated. Closing the
+   * last tab opens a fresh one immediately.
    */
   closeTab(tab: Tab): void {
     const index = this.tabs.indexOf(tab)
@@ -1067,9 +976,12 @@ export class TabManager {
 
     const wasActive = tab === this.activeTab
 
+    // Remove from MRU stack before closing.
+    this.removeFromRecent(tab.id)
+
     tab.close()
     tab.pane.remove()
-    tab.button.remove()
+    this.tabStrip.removeTab(tab.id)
     this.tabs.splice(index, 1)
     this.onTabsChanged?.()
 
@@ -1080,12 +992,12 @@ export class TabManager {
       return
     }
 
-    this.refreshIndices()
-
     if (wasActive) {
-      // Activate neighbour: prefer the tab at the same index, or the previous.
-      const neighbourIndex = Math.min(index, this.tabs.length - 1)
-      void this.activate(this.tabs[neighbourIndex])
+      // MRU: activate the previously-active tab, not the visual neighbour.
+      const mruTab = this.popRecent()
+      if (mruTab) {
+        void this.activate(mruTab)
+      }
     }
   }
 
@@ -1101,9 +1013,20 @@ export class TabManager {
       return
     }
 
+    // Push the previously-active tab onto the MRU stack.
+    if (this.activeTab) {
+      this.pushRecent(this.activeTab.id)
+    }
+
     this.activeTab?.setActive(false)
     this.activeTab = tab
     tab.setActive(true)
+
+    // Remove from MRU since it's now active (avoids stale entries).
+    this.removeFromRecent(tab.id)
+
+    this.tabStrip.setActive(tab.id)
+
     log.info('nocx: tab.setActive(true) called', { paneClasses: tab.pane.className })
 
     await tab.start()
@@ -1131,22 +1054,36 @@ export class TabManager {
     if (draggedIndex === -1 || targetIndex === -1) return
 
     const [draggedTab] = this.tabs.splice(draggedIndex, 1)
-    this.tabs.splice(targetIndex, 0, draggedTab)
+    // Adjust target index if the dragged tab was before it.
+    const adjustedTarget = draggedIndex < targetIndex ? targetIndex - 1 : targetIndex
+    this.tabs.splice(adjustedTarget, 0, draggedTab)
 
-    // Reorder DOM elements
-    this.tabsContainer.innerHTML = ''
-    for (const tab of this.tabs) {
-      this.tabsContainer.append(tab.button)
+    this.tabStrip.reorder(this.tabs)
+  }
+
+  // ── MRU helpers ──────────────────────────────────────────────────────
+
+  private pushRecent(id: number): void {
+    // Keep at most tab count entries; deduplicate.
+    this.removeFromRecent(id)
+    this.recentTabIds.push(id)
+  }
+
+  private popRecent(): Tab | undefined {
+    while (this.recentTabIds.length > 0) {
+      const id = this.recentTabIds.pop()!
+      const tab = this.tabs.find((t) => t.id === id)
+      if (tab) return tab
     }
-
-    this.refreshIndices()
+    return undefined
   }
 
-  private refreshIndices(): void {
-    this.tabs.forEach((tab, i) => {
-      tab.indexLabel.textContent = String(i + 1)
-    })
+  private removeFromRecent(id: number): void {
+    const idx = this.recentTabIds.indexOf(id)
+    if (idx !== -1) this.recentTabIds.splice(idx, 1)
   }
+
+  // ── Keyboard shortcuts ───────────────────────────────────────────────
 
   private readonly onKeydown = (e: KeyboardEvent): void => {
     const mod = e.metaKey || e.ctrlKey

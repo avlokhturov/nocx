@@ -301,6 +301,7 @@ export async function mountTabManager(
   clipboard: ClipboardFake
   gate: ClipboardGate
   banner: BannerFake
+  tabStrip: import('../tab-strip').TabStrip
 }> {
   const { bar, panes } = setupTabBarDOM()
   const c = client ?? makeClient()
@@ -312,6 +313,8 @@ export async function mountTabManager(
     listGroups: vi.fn().mockResolvedValue([]),
   }
   const { TabManager } = await import('../tabs')
+  const { HorizontalTabStrip } = await import('../tab-strip')
+  const tabStrip = new HorizontalTabStrip()
   const manager = new TabManager(
     bar,
     panes,
@@ -320,9 +323,10 @@ export async function mountTabManager(
     g,
     bn,
     pc as unknown as import('../profiles').ProfileClient,
+    tabStrip,
   )
   await vi.waitFor(() => {
     expect(c.openSession).toHaveBeenCalled()
   })
-  return { bar, panes, manager, client: c, clipboard: cb, gate: g, banner: bn }
+  return { bar, panes, manager, client: c, clipboard: cb, gate: g, banner: bn, tabStrip }
 }

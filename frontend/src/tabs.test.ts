@@ -97,6 +97,34 @@ describe('TabManager', () => {
     expect(remainingTabs[1].classList.contains('active')).toBe(true)
   })
 
+  it('closing the active tab activates the previously-active tab (MRU), not the visual neighbour', async () => {
+    const { client, manager, bar } = await mountTabManager()
+
+    manager.newTab()
+    manager.newTab()
+    await vi.waitFor(() => {
+      expect(client.openSession).toHaveBeenCalledTimes(3)
+    })
+
+    // Three tabs: [tab1, tab2, tab3]. Tab3 is active (last created).
+    // Activate 1 → 3 → 2 to build MRU: [1, 3].
+    manager.activateByIndex(0) // tab1
+    manager.activateByIndex(2) // tab3
+    manager.activateByIndex(1) // tab2
+
+    // Tab2 is active.
+    const beforeTabs = bar.querySelectorAll('.tab')
+    expect(beforeTabs[1].classList.contains('active')).toBe(true)
+
+    // Close tab2. MRU says tab3 should activate, not tab1 (visual neighbour).
+    manager.closeActiveTab()
+
+    const remainingTabs = bar.querySelectorAll('.tab')
+    expect(remainingTabs.length).toBe(2)
+    // tab3 should now be active (id 3, original index 2)
+    expect(remainingTabs[1].classList.contains('active')).toBe(true)
+  })
+
   // ── closing the last tab leaves exactly one fresh tab ─────────────────
 
   it('closing the last tab opens a fresh tab immediately', async () => {
@@ -945,6 +973,8 @@ describe('TabManager', () => {
     const banner = makeBanner()
 
     const { TabManager } = await import('./tabs')
+    const { HorizontalTabStrip } = await import('./tab-strip')
+    const tabStrip = new HorizontalTabStrip()
     const profileClient = {
       list: () => Promise.resolve([]),
       get: () => Promise.resolve(null),
@@ -961,6 +991,7 @@ describe('TabManager', () => {
       gate,
       banner,
       profileClient,
+      tabStrip,
     )
 
     // initialTabReady must reject — a genuinely broken tab is not "ready".

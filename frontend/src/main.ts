@@ -14,6 +14,7 @@ import { createClipboardAccess, ClipboardGate } from './clipboard'
 import { ClipboardBannerImpl } from './banner'
 import { ProfileClient } from './profiles'
 import { SettingsViewImpl } from './settings'
+import { HorizontalTabStrip } from './tab-strip'
 
 /**
  * Renders the auto-update notice in the tab bar. The notice is a small,
@@ -125,8 +126,8 @@ async function main() {
   await client.connect(port, host, token)
   const profileClient = new ProfileClient(client.rawSocket())
   // TabManager opens the first tab and activates it in the constructor.
-  // The renderer is selected via ?r=xterm|wterm inside TabManager.
-  const tm = new TabManager(bar, panes, client, clipboard, gate, banner, profileClient)
+  const tabStrip = new HorizontalTabStrip()
+  const tm = new TabManager(bar, panes, client, clipboard, gate, banner, profileClient, tabStrip)
 
   // App-shell sidebar (nocx-8yg.9) — VS Code-style activity bar plus a
   // collapsible panel. Two views:
