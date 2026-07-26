@@ -107,7 +107,7 @@ export type SaveOutcome =
 
 // ── Reset decision ─────────────────────────────────────────────────────────
 
-export type ResetReason = 'notOverridden' | 'noDefault'
+export type ResetReason = 'notOverridden'
 
 export interface ResetAllowed {
   canReset: true
@@ -168,38 +168,28 @@ export function recordSaveOutcome(
 /**
  * Determine whether a setting can be reset, based on its provenance.
  *
- * A setting is eligible for reset ONLY when:
- *   1. It has a default value (`hasDefault === true`) — secrets and
- *      defaultless declarations have nothing to reset *to*.
- *   2. The key is in the `overridden` set (provenance = customized).
+ * A setting is eligible for reset when its key is in the `overridden` set
+ * (provenance = customized).  The calling code also guards the UI by control
+ * type (secrets never render a provenance badge), but the function itself
+ * decides purely on provenance data.
  *
- * Public utility (renamed from `isCustomized`): extracting this means the
- * provenance logic is a single pure function rather than embedded in DOM
- * rendering code.  Tests prove the decision is correct without a DOM.
+ * Public utility: extracting this means the provenance logic is a single
+ * pure function rather than embedded in DOM rendering code.  Tests prove the
+ * decision is correct without a DOM.
  */
-export function canResetSetting(
-  overridden: ReadonlySet<string>,
-  key: string,
-  hasDefault: boolean,
-): ResetDecision {
-  if (!hasDefault) return { canReset: false, reason: 'noDefault' }
+export function canResetSetting(overridden: ReadonlySet<string>, key: string): ResetDecision {
   if (!overridden.has(key)) return { canReset: false, reason: 'notOverridden' }
   return { canReset: true }
 }
 
 /**
- * Apply an accepted snapshot to a settings mirror.
+ * Apply an accepted snapshot to produce a new settings mirror.
  *
  * Clears drafts and errors because a fresh snapshot represents the
  * authoritative server-side state — any previous in-flight edits are no
  * longer relevant.
  */
-export function applyAcceptedSnapshot(
-  _mirror: SettingsMirror,
-  snapshot: AcceptedSnapshot,
-): SettingsMirror {
-  // Clone the snapshot data so the mirror is not sharing references with the
-  // snapshot object.
+export function applyAcceptedSnapshot(snapshot: AcceptedSnapshot): SettingsMirror {
   return {
     values: { ...snapshot.values },
     draftValues: {},

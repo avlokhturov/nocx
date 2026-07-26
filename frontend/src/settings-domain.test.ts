@@ -144,34 +144,17 @@ describe('recordSaveOutcome', () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe('canResetSetting', () => {
-  it('allows reset when key is overridden and has a default', () => {
+  it('allows reset when key is overridden', () => {
     const overridden: ReadonlySet<string> = new Set(['terminal.fontSize'])
-    const r = canResetSetting(overridden, 'terminal.fontSize', true)
+    const r = canResetSetting(overridden, 'terminal.fontSize')
     expect(r.canReset).toBe(true)
   })
 
   it('denies reset when key is not overridden', () => {
-    const r = canResetSetting(new Set(), 'terminal.fontSize', true)
+    const r = canResetSetting(new Set(), 'terminal.fontSize')
     expect(r.canReset).toBe(false)
     if (!r.canReset) {
       expect(r.reason).toBe('notOverridden')
-    }
-  })
-
-  it('denies reset when key has no default (e.g. secret)', () => {
-    const overridden: ReadonlySet<string> = new Set(['ai.apiKey'])
-    const r = canResetSetting(overridden, 'ai.apiKey', false)
-    expect(r.canReset).toBe(false)
-    if (!r.canReset) {
-      expect(r.reason).toBe('noDefault')
-    }
-  })
-
-  it('denies reset when both not overridden and no default', () => {
-    const r = canResetSetting(new Set(), 'noDefaultKey', false)
-    expect(r.canReset).toBe(false)
-    if (!r.canReset) {
-      expect(r.reason).toBe('noDefault')
     }
   })
 })
@@ -286,53 +269,27 @@ describe('AcceptedSnapshot', () => {
 
 describe('applyAcceptedSnapshot', () => {
   it('replaces values and overridden from the accepted snapshot', () => {
-    const m = createMirror()
     const snap = AcceptedSnapshot.accept(0, {
       values: { k: 'v' },
       overridden: ['k'],
       revision: 2,
     })!
-    const next = applyAcceptedSnapshot(m, snap)
+    const next = applyAcceptedSnapshot(snap)
     expect(next.values).toEqual({ k: 'v' })
     expect(hasKeys(next.overridden, 'k')).toBe(true)
     expect(next.revision).toBe(2)
   })
 
   it('clears draftValues and errors on receiving a fresh snapshot', () => {
-    const m: SettingsMirror = {
-      values: { k: 'old' },
-      draftValues: { k: 'draft' },
-      overridden: new Set(['k']),
-      errors: { k: 'old error' },
-      revision: 1,
-    }
     const snap = AcceptedSnapshot.accept(1, {
       values: { k: 'new' },
       overridden: [],
       revision: 2,
     })!
-    const next = applyAcceptedSnapshot(m, snap)
+    const next = applyAcceptedSnapshot(snap)
     expect(next.draftValues).toEqual({})
     expect(next.errors).toEqual({})
     expect(next.values['k']).toBe('new')
     expect(next.overridden.size).toBe(0)
-  })
-
-  it('does not mutate the input mirror', () => {
-    const m: SettingsMirror = {
-      values: { k: 'old' },
-      draftValues: {},
-      overridden: new Set(['k']),
-      errors: {},
-      revision: 1,
-    }
-    const snap = AcceptedSnapshot.accept(1, {
-      values: { k: 'new' },
-      overridden: [],
-      revision: 2,
-    })!
-    void applyAcceptedSnapshot(m, snap)
-    expect(m.values['k']).toBe('old')
-    expect(hasKeys(m.overridden, 'k')).toBe(true)
   })
 })

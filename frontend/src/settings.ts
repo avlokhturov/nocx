@@ -112,7 +112,7 @@ export class SettingsViewImpl implements SettingsView {
     this.observer = observer ?? null
     this.onStateChanged = onStateChanged
     this.boundKeydown = this.handleKeydown.bind(this)
-    this.boundRefresh = () => this.refresh('resync')
+    this.boundRefresh = () => this.refresh((_rev, snap) => AcceptedSnapshot.reset(snap))
     this.container.addEventListener('keydown', this.boundKeydown)
     if (this.observer) {
       this.observer.start(() => {
@@ -192,7 +192,9 @@ export class SettingsViewImpl implements SettingsView {
     this.render()
   }
 
-  async refresh(mode: 'normal' | 'resync' = 'normal'): Promise<void> {
+  async refresh(
+    accept?: (currentRevision: number, snapshot: SettingsSnapshot) => AcceptedSnapshot | null,
+  ): Promise<void> {
     this.loadState = LoadState.Loading
     this.render()
     try {
@@ -202,19 +204,20 @@ export class SettingsViewImpl implements SettingsView {
       ])
       this.declarations = (desc.declarations as Declaration[]) ?? []
 
-      // Apply the snapshot through the revision policy gate
-      // (AcceptedSnapshot — authority-encoded type from settings-domain).
+      // Apply the snapshot through the revision policy supplied by the caller.
+      // Default (no policy) → monotonic revision check via AcceptedSnapshot.accept.
+      // The observer's reconnect path supplies AcceptedSnapshot.reset to bypass
+      // the monotonic check (in-memory revision counter may reset, ADR-0011 §A.1).
       const rawSnap: SettingsSnapshot = {
         values: snap.values ?? {},
         overridden: snap.overridden ?? [],
         revision: snap.revision ?? 0,
       }
-      const accepted =
-        mode === 'resync'
-          ? AcceptedSnapshot.reset(rawSnap)
-          : AcceptedSnapshot.accept(this.revision, rawSnap)
+      const accepted = accept
+        ? accept(this.revision, rawSnap)
+        : AcceptedSnapshot.accept(this.revision, rawSnap)
       if (accepted) {
-        const nextState = applyAcceptedSnapshot(this.toMirror(), accepted)
+        const nextState = applyAcceptedSnapshot(accepted)
         this.fromMirror(nextState)
         this.observer?.setRevision(nextState.revision)
       }
@@ -550,12 +553,6 @@ export class SettingsViewImpl implements SettingsView {
   }
 
   // --- derived state helpers ---
-
-  /** Customized is PROVENANCE: key is in the overridden set.  Not a
-   *  value-vs-default comparison — an override that happens to equal the
-   *  current default is still Customized (it pins the value against future
-   *  default changes, which is what export depends on). */
-
   // --- control renderers ---
 
   private renderToggle(decl: Declaration): HTMLElement {
@@ -649,12 +646,16 @@ export class SettingsViewImpl implements SettingsView {
 
   private renderProvenance(decl: Declaration): HTMLElement {
     const span = document.createElement('span')
-    const decision = canResetSetting(this.overridden, decl.key, true)
-    const customized = decision.canReset
+    // Customized is PROVENANCE: key is in the overridden set.  Not a
+    // value-vs-default comparison — an override that happens to equal the
+    // current default is still Customized (it pins the value against future
+    // default changes, which is what export depends on).
+    const customized = this.overridden.has(decl.key)
+    const decision = canResetSetting(this.overridden, decl.key)
     span.className = customized ? 'st-provenance st-customized' : 'st-provenance st-default'
     span.textContent = customized ? 'Customized' : 'Default'
 
-    if (customized) {
+    if (decision.canReset) {
       const resetBtn = document.createElement('button')
       resetBtn.className = 'st-reset-btn'
       resetBtn.textContent = 'Reset'
@@ -757,7 +758,7 @@ export class SettingsViewImpl implements SettingsView {
       }
       const accepted = AcceptedSnapshot.accept(this.revision, rawSnap)
       if (accepted) {
-        const nextState = applyAcceptedSnapshot(this.toMirror(), accepted)
+        const nextState = applyAcceptedSnapshot(accepted)
         this.fromMirror(nextState)
       }
     } catch (err) {
