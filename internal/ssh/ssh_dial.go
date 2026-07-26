@@ -65,12 +65,13 @@ func (rc *RealClient) poolKeyFor(resolved *resolvedConfig, cfg *ConnectConfig) p
 // dialed directly.
 func (rc *RealClient) jumpRouteKey(cfg *ConnectConfig) string {
 	jumpCfg := &ConnectConfig{
-		User:     cfg.JumpUser,
-		Port:     cfg.JumpPort,
-		KeyFile:  cfg.JumpKeyFile,
-		AuthMode: cfg.JumpAuthMode,
-		Secrets:  cfg.JumpSecrets,
-		SecretID: cfg.JumpSecretID,
+		User:               cfg.JumpUser,
+		Port:               cfg.JumpPort,
+		KeyFile:            cfg.JumpKeyFile,
+		AuthMode:           cfg.JumpAuthMode,
+		Secrets:            cfg.JumpSecrets,
+		SecretID:           cfg.JumpSecretID,
+		PassphraseSecretID: cfg.JumpPassphraseSecretID,
 	}
 	jumpResolved, err := rc.resolveConfig(cfg.JumpHost, jumpCfg)
 	if err != nil {
@@ -296,13 +297,14 @@ func (d *dialer) dialViaJumpHost(ctx context.Context, cfg *ConnectConfig, resolv
 // (to dial the target through).
 func (d *dialer) acquireJumpHost(ctx context.Context, cfg *ConnectConfig) (*poolHandle, *gossh.Client, error) {
 	jumpCfg := &ConnectConfig{
-		User:     cfg.JumpUser,
-		Port:     cfg.JumpPort,
-		KeyFile:  cfg.JumpKeyFile,
-		AuthMode: cfg.JumpAuthMode,
-		JumpHost: "",
-		Secrets:  cfg.JumpSecrets,
-		SecretID: cfg.JumpSecretID,
+		User:               cfg.JumpUser,
+		Port:               cfg.JumpPort,
+		KeyFile:            cfg.JumpKeyFile,
+		AuthMode:           cfg.JumpAuthMode,
+		JumpHost:           "",
+		Secrets:            cfg.JumpSecrets,
+		SecretID:           cfg.JumpSecretID,
+		PassphraseSecretID: cfg.JumpPassphraseSecretID,
 	}
 
 	jumpResolved, err := d.client.resolveConfig(cfg.JumpHost, jumpCfg)
