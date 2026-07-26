@@ -13,7 +13,13 @@ import { SidebarImpl } from './sidebar'
 import { createClipboardAccess, ClipboardGate } from './clipboard'
 import { ClipboardBannerImpl } from './banner'
 import { ProfileClient } from './profiles'
-import { SettingsViewImpl } from './settings'
+import { Dispatcher } from './dispatcher'
+import { SettingsContent, SURFACE_SETTINGS, SINGLETON_SETTINGS } from './settings-content'
+import { HorizontalTabStrip, VerticalTabStrip } from './tab-strip'
+import { ConnectionsContent } from './connections-content'
+import { SURFACE_CONNECTIONS, SINGLETON_CONNECTIONS } from './tab-content'
+import type { ContentDescriptor } from './tab-content'
+import { SettingsObserver } from './settings-observer'
 
 /**
  * Renders the auto-update notice in the tab bar. The notice is a small,
@@ -120,14 +126,56 @@ async function main() {
     host = location.hostname
     console.warn('nocx: no Wails runtime, using fallback WS port', port)
   }
-
-  const client = new WSClient()
+  const dispatcher = new Dispatcher()
+  const client = new WSClient(dispatcher)
   await client.connect(port, host, token)
-  const profileClient = new ProfileClient(client.rawSocket())
-  // TabManager opens the first tab and activates it in the constructor.
-  // The renderer is selected via ?r=xterm|wterm inside TabManager.
-  const tm = new TabManager(bar, panes, client, clipboard, gate, banner, profileClient)
+  const profileClient = new ProfileClient(dispatcher)
 
+  // The generated-screen invariant says no setting key appears in the frontend,
+  // and it is about the SCREEN: settings.ts and settings-content.ts render from
+  // declarations so a new setting costs one MustRegister* call in Go and zero
+  // frontend changes. The composition root is a different thing — a CONSUMER
+  // that acts on one specific setting — and a consumer has to name what it
+  // consumes. So the key is named here, deliberately, and only here.
+  //
+  // The alternative was tried and rejected: identifying the declaration by
+  // section "Interface" plus control "select" reads as key-free but is a latent
+  // bug, because it silently resolves to whichever select comes first in
+  // declaration order. nocx-8yg.6 (colour schemes) is already filed and would
+  // add exactly such a select to Interface, at which point tab placement would
+  // stop working with nothing on screen to say why.
+  const PLACEMENT_KEY = 'tab.placement'
+
+  let placement: unknown = 'horizontal'
+  try {
+    const snap = await profileClient.getSnapshot()
+    placement = snap.values[PLACEMENT_KEY] ?? 'horizontal'
+  } catch {
+    // Backend may not be ready yet — safe fallback.
+  }
+
+  const tabStrip = placement === 'vertical' ? new VerticalTabStrip() : new HorizontalTabStrip()
+  const tm = new TabManager(bar, panes, client, clipboard, gate, banner, profileClient, tabStrip)
+
+  // Live application through SettingsObserver: when the placement setting
+  // changes, refetch the snapshot and swap the strip in place.
+  const observer = new SettingsObserver(dispatcher)
+  observer.setRevision(0)
+  observer.start(() => {
+    void (async () => {
+      try {
+        const snap = await profileClient.getSnapshot()
+        observer.setRevision(snap.revision)
+        const next = snap.values[PLACEMENT_KEY] ?? 'horizontal'
+        if (next !== placement) {
+          placement = next
+          tm.replaceStrip(next === 'vertical' ? new VerticalTabStrip() : new HorizontalTabStrip())
+        }
+      } catch {
+        // Silently ignore — a settings fetch failure is not actionable here.
+      }
+    })()
+  })
   // App-shell sidebar (nocx-8yg.9) — VS Code-style activity bar plus a
   // collapsible panel. Two views:
   // - Connections: opens the SSH connection manager as a full-screen tab.
@@ -142,7 +190,19 @@ async function main() {
       action: 'tab',
       onActivate: () => {
         log.info('nocx: opening Connections tab')
-        tm.newManagerTab()
+        const content = new ConnectionsContent(profileClient)
+        const descriptor: ContentDescriptor = {
+          surfaceType: SURFACE_CONNECTIONS,
+          singletonKey: SINGLETON_CONNECTIONS,
+          restoreDescriptor: null,
+          supportsAttention: false,
+          defaultTitle: 'Connections',
+        }
+        content.onConnect = (profile) => {
+          log.info('nocx: onConnect called', { profileId: profile.id, profile: profile.name })
+          tm.newSSHTab(profile.id, profile.options.host, profile.options.user)
+        }
+        tm.openTab(content, descriptor)
       },
     },
     {
@@ -155,13 +215,37 @@ async function main() {
       id: 'settings',
       title: 'Settings',
       icon: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>',
-      action: 'panel',
-      mount: (panel) => {
-        const settingsView = new SettingsViewImpl(panel, profileClient)
-        void settingsView.refresh()
+      action: 'tab',
+      onActivate: () => {
+        log.info('nocx: opening Settings tab')
+        const content = new SettingsContent(profileClient)
+        const descriptor: ContentDescriptor = {
+          surfaceType: SURFACE_SETTINGS,
+          singletonKey: SINGLETON_SETTINGS,
+          restoreDescriptor: null,
+          supportsAttention: false,
+          defaultTitle: 'Settings',
+        }
+        tm.openTab(content, descriptor)
       },
     },
   ])
+
+  // Cmd/Ctrl+, opens or focuses the Settings tab.
+  document.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key === ',') {
+      e.preventDefault()
+      const content = new SettingsContent(profileClient)
+      const descriptor: ContentDescriptor = {
+        surfaceType: SURFACE_SETTINGS,
+        singletonKey: SINGLETON_SETTINGS,
+        restoreDescriptor: null,
+        supportsAttention: false,
+        defaultTitle: 'Settings',
+      }
+      tm.openTab(content, descriptor)
+    }
+  })
 
   // --- Auto-update: check on start, then every 24 h ---
 

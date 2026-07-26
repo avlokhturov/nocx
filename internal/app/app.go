@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/shady2k/nocx/internal/connection"
+	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
@@ -87,6 +88,8 @@ func New(opts ...Option) (*App, error) {
 		transport.WithCredentialStore(credStore),
 		transport.WithProfileResolver(connection.NewResolver(profileStore, profileStore, credStore)),
 		transport.WithSettingsRegistry(settingsRegistry),
+		transport.WithExportPaths(paths),
+		transport.WithExportContentDB(content.NewStub(logger)),
 	}
 	if o.wsAddr != "" {
 		tpOpts = append(tpOpts, transport.WithListenAddr(o.wsAddr))

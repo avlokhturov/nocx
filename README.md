@@ -291,7 +291,7 @@ internal/               — Go backend
 
 frontend/               — TypeScript frontend (xterm.js + Wails)
   src/
-    renderers/            xterm.js, wterm (switchable)
+    renderers/            xterm.js
     tabs.ts               tab manager + WS client
     ipc.ts                WebSocket protocol
     main.ts               app entry
@@ -354,5 +354,4 @@ TBD. Dependencies are MIT and Apache 2.0 — preserve their copyright notices:
   - © 2014–2016 SourceLair Private Company
   - © 2012–2013 Christopher Jeffrey
 - `@xterm/addon-*` — MIT, © The xterm.js authors (each addon LICENSE repeats its own line)
-- `@wterm/dom` — Apache 2.0 (no explicit copyright holder declared in package metadata or LICENSE)
 - `vite` — MIT, © 2019–present VoidZero Inc. and Vite contributors (devDependency, build-time only)

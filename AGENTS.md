@@ -308,8 +308,7 @@ This is orthogonal to the approval rule above: the slot decides *who merges next
 - **Backend:** Go — `pty`, `ssh` (via `golang.org/x/crypto/ssh`), `session`, `transport`,
   `config`. One core, multiple build targets.
 - **Frontend:** xterm.js (WebGL) + TypeScript UI. Terminal render state lives here (AD-6).
-  wterm remains switchable behind `TerminalRenderer` for re-testing — see
-  [ADR-0001](docs/decisions/0001-xterm-js-as-vt-frontend.md).
+  See [ADR-0001](docs/decisions/0001-xterm-js-as-vt-frontend.md) (amended 2026-07-26).
 - **Desktop shell:** Wails v2 (macOS first).
 - **Transport:** one WebSocket — raw **binary** data plane + **JSON-RPC 2.0** control plane (AD-1).
 

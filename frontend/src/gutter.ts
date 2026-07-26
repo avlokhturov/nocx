@@ -80,7 +80,6 @@ export class Gutter {
     this._renderer = renderer
 
     const pane = renderer.paneElement
-    if (!pane) return
 
     const el = document.createElement('div')
     el.className = 'nocx-gutter'
@@ -105,8 +104,8 @@ export class Gutter {
     this._el = el
 
     // Subscribe to sync events.
-    renderer.onScroll?.(() => this._scheduleSync())
-    renderer.onRender?.(() => this._scheduleSync())
+    renderer.onScroll(() => this._scheduleSync())
+    renderer.onRender(() => this._scheduleSync())
     // onResize is already wired by the Tab — we expose sync() for the caller.
   }
 
@@ -166,8 +165,8 @@ export class Gutter {
     const el = this._el
     if (!r || !el || this._disposed) return
 
-    const ch = r.cellHeight ?? 15
-    const vtl = r.viewportTopLine ?? 0
+    const ch = r.cellHeight
+    const vtl = r.viewportTopLine
     const rows = r.rows
 
     const positions = visibleGlyphs(this._records, vtl, rows, OVERSCAN)

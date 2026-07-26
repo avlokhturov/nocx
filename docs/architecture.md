@@ -9,7 +9,7 @@ updated: 2026-07-20
 
 ## Overview
 
-nocx is a local-first terminal that pairs a Ghostty-grade rendering engine with Tabby-style SSH ergonomics, delivered as a macOS desktop app for MVP. It is built as **one Go core** (PTY, SSH, session, config) decoupled over a WebSocket transport from an **xterm.js** (WebGL) frontend ([ADR-0001](decisions/0001-xterm-js-as-vt-frontend.md); wterm remains switchable behind the renderer interface), hosted by a **Wails v2** desktop shell that embeds the backend locally. The paradigm is **modular, layered, interface-first with dependency injection**: every module lives behind an interface, depends on abstractions, obeys SRP, and is wired at a single composition root — so any module is trivially replaceable and the same core can later serve a web target and a remote helper from additional build outputs.
+nocx is a local-first terminal that pairs a Ghostty-grade rendering engine with Tabby-style SSH ergonomics, delivered as a macOS desktop app for MVP. It is built as **one Go core** (PTY, SSH, session, config) decoupled over a WebSocket transport from an **xterm.js** (WebGL) frontend ([ADR-0001](decisions/0001-xterm-js-as-vt-frontend.md)), hosted by a **Wails v2** desktop shell that embeds the backend locally. The paradigm is **modular, layered, interface-first with dependency injection**: every module lives behind an interface, depends on abstractions, obeys SRP, and is wired at a single composition root — so any module is trivially replaceable and the same core can later serve a web target and a remote…
 
 ## Component Diagram
 
@@ -123,6 +123,7 @@ All decisions below are **[ADOPTED]**. Each carries stable IDs; do not re-litiga
 - Binds: all SSH connection handling.
 - Prevents: a spawn-`ssh` MVP that would need rewriting for the Phase-2 vault/profiles.
 - Rule: SSH sits behind a clean interface; honor `~/.ssh/config` via a config parser (e.g. `kevinburke/ssh_config`); SFTP via `pkg/sftp` later; the vault injects credentials through this library. The `ssh` module owns a **ref-counted `ssh.Client` connection pool** keyed by host+identity: channels multiplex over one connection, and the connection closes with the last tab that references it — preserving connection reuse and Phase-2 vault credential caching.
+  - Reusable credential target scope follows [ADR-0006](decisions/0006-reusable-credentials.md): empty host means any host; a non-empty host and optional port are checked against the resolved `HostName` and effective port before dialing, independently for target and jump credentials.
 
 **AD-5 — Two-tier shell-integration substrate.**
 - Binds: cwd/prompt/block metadata and the features that consume it.

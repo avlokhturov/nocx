@@ -3,13 +3,14 @@ package credential
 import (
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha512"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+
+	"golang.org/x/crypto/pbkdf2"
 )
 
 // Crypto constants (match Tabby's VaultService for portability).
@@ -257,38 +258,8 @@ func (v *Vault) DeleteSecret(id SecretID) error {
 	return nil
 }
 
-// deriveKey derives a 32-byte AES key from passphrase + salt via PBKDF2-HMAC-SHA512.
 func deriveKey(passphrase string, salt []byte) []byte {
-	return pbkdf2([]byte(passphrase), salt, pbkdfIterations, keyLength)
-}
-
-// pbkdf2 is a minimal PBKDF2 implementation (RFC 2898) using HMAC-SHA512.
-// We avoid the x/crypto/pbkdf2 dependency by inlining the core loop.
-func pbkdf2(password, salt []byte, iter, keyLen int) []byte {
-	hashLen := 64 // SHA-512 output length
-	numBlocks := (keyLen + hashLen - 1) / hashLen
-
-	var dk []byte
-	for block := 1; block <= numBlocks; block++ {
-		// U1 = PRF(Password, Salt || INT_32_BE(block))
-		prf := hmac.New(sha512.New, password)
-		prf.Write(salt)
-		prf.Write([]byte{byte(block >> 24), byte(block >> 16), byte(block >> 8), byte(block)})
-		u := prf.Sum(nil)
-		t := make([]byte, len(u))
-		copy(t, u)
-
-		for n := 2; n <= iter; n++ {
-			prf = hmac.New(sha512.New, password)
-			prf.Write(u)
-			u = prf.Sum(nil)
-			for i := range t {
-				t[i] ^= u[i]
-			}
-		}
-		dk = append(dk, t...)
-	}
-	return dk[:keyLen]
+	return pbkdf2.Key([]byte(passphrase), salt, pbkdfIterations, keyLength, sha512.New)
 }
 
 // encryptGCM encrypts plaintext with AES-256-GCM.

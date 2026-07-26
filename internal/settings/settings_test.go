@@ -197,27 +197,160 @@ func TestBoolGetSet(t *testing.T) {
 	}
 }
 
-// ── getAll excludes secrets ────────────────────────────────────────────
+// ── getSnapshot ─────────────────────────────────────────────────────────
 
-func TestGetAllExcludesSecrets(t *testing.T) {
+func TestGetSnapshot_ExcludesSecrets(t *testing.T) {
 	reg := settings.New(&fakeDoc{}, &fakeSecretStore{})
 
-	all, err := reg.GetAll()
+	snap, err := reg.GetSnapshot()
 	if err != nil {
-		t.Fatalf("GetAll: %v", err)
+		t.Fatalf("GetSnapshot: %v", err)
 	}
 
+	// Secret keys must be absent from both values and overridden.
 	for _, d := range reg.Descriptors() {
 		if d.Control() == settings.ControlSecret {
-			if _, ok := all[d.Key()]; ok {
-				t.Errorf("secret key %q present in getAll response", d.Key())
+			if _, ok := snap.Values[d.Key()]; ok {
+				t.Errorf("secret key %q present in snapshot values", d.Key())
+			}
+			for _, k := range snap.Overridden {
+				if k == d.Key() {
+					t.Errorf("secret key %q present in snapshot overridden", d.Key())
+				}
 			}
 		}
 	}
 
-	// Non-secret declarations must be present.
-	if _, ok := all["clipboard.osc52Suppressed"]; !ok {
-		t.Error("clipboard.osc52Suppressed missing from getAll")
+	// Non-secret declarations must be present in values.
+	if _, ok := snap.Values["clipboard.osc52Suppressed"]; !ok {
+		t.Error("clipboard.osc52Suppressed missing from snapshot values")
+	}
+}
+
+func TestGetSnapshot_OverriddenTracksStoredOverrides(t *testing.T) {
+	reg := settings.New(&fakeDoc{}, &fakeSecretStore{})
+
+	snap, err := reg.GetSnapshot()
+	if err != nil {
+		t.Fatalf("GetSnapshot: %v", err)
+	}
+	if len(snap.Overridden) != 0 {
+		t.Errorf("fresh registry should have zero overridden, got %v", snap.Overridden)
+	}
+
+	b := findBool(t, reg, "clipboard.osc52Suppressed")
+	if err = reg.SetBool(b, true); err != nil {
+		t.Fatalf("SetBool: %v", err)
+	}
+
+	snap, err = reg.GetSnapshot()
+	if err != nil {
+		t.Fatalf("GetSnapshot after set: %v", err)
+	}
+
+	found := false
+	for _, k := range snap.Overridden {
+		if k == "clipboard.osc52Suppressed" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("clipboard.osc52Suppressed missing from overridden after set")
+	}
+	if snap.Values["clipboard.osc52Suppressed"] != true {
+		t.Errorf("expected values[clipboard.osc52Suppressed]=true, got %v", snap.Values["clipboard.osc52Suppressed"])
+	}
+}
+
+func TestGetSnapshot_RevisionBumpsAfterMutation(t *testing.T) {
+	reg := settings.New(&fakeDoc{}, &fakeSecretStore{})
+
+	snap, err := reg.GetSnapshot()
+	if err != nil {
+		t.Fatalf("GetSnapshot: %v", err)
+	}
+	if snap.Revision != 0 {
+		t.Errorf("fresh registry revision should be 0, got %d", snap.Revision)
+	}
+
+	b := findBool(t, reg, "clipboard.osc52Suppressed")
+	if err = reg.SetBool(b, true); err != nil {
+		t.Fatalf("SetBool: %v", err)
+	}
+
+	snap, err = reg.GetSnapshot()
+	if err != nil {
+		t.Fatalf("GetSnapshot after set: %v", err)
+	}
+	if snap.Revision != 1 {
+		t.Errorf("revision should be 1 after one mutation, got %d", snap.Revision)
+	}
+
+	if err = reg.Reset(b); err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+
+	snap, err = reg.GetSnapshot()
+	if err != nil {
+		t.Fatalf("GetSnapshot after reset: %v", err)
+	}
+	if snap.Revision != 2 {
+		t.Errorf("revision should be 2 after two mutations, got %d", snap.Revision)
+	}
+}
+
+func TestGetSnapshot_RevisionBumpsAfterSecretMutation(t *testing.T) {
+	reg := settings.New(&fakeDoc{}, &fakeSecretStore{})
+
+	s := findSecret(t, reg, "test.secretExample")
+	if err := reg.SecretSet(s, "value"); err != nil {
+		t.Fatalf("SecretSet: %v", err)
+	}
+
+	snap, err := reg.GetSnapshot()
+	if err != nil {
+		t.Fatalf("GetSnapshot after secretSet: %v", err)
+	}
+	if snap.Revision != 1 {
+		t.Errorf("revision should be 1 after secret set, got %d", snap.Revision)
+	}
+
+	// Secret keys stay absent from values and overridden even after set.
+	if _, ok := snap.Values[s.Key()]; ok {
+		t.Errorf("secret key %q present in values after set", s.Key())
+	}
+	for _, k := range snap.Overridden {
+		if k == s.Key() {
+			t.Errorf("secret key %q present in overridden after set", s.Key())
+		}
+	}
+
+	if err = reg.SecretDelete(s); err != nil {
+		t.Fatalf("SecretDelete: %v", err)
+	}
+
+	snap, err = reg.GetSnapshot()
+	if err != nil {
+		t.Fatalf("GetSnapshot after secretDelete: %v", err)
+	}
+	if snap.Revision != 2 {
+		t.Errorf("revision should be 2 after secret delete, got %d", snap.Revision)
+	}
+}
+
+func TestGetSnapshot_DefaultsPresent(t *testing.T) {
+	reg := settings.New(&fakeDoc{}, &fakeSecretStore{})
+
+	snap, err := reg.GetSnapshot()
+	if err != nil {
+		t.Fatalf("GetSnapshot: %v", err)
+	}
+
+	// A declared non-secret with no stored override should have its default.
+	str := findString(t, reg, "test.stringExample")
+	if snap.Values[str.Key()] != "hello" {
+		t.Errorf("expected default 'hello' for test.stringExample, got %v", snap.Values[str.Key()])
 	}
 }
 

@@ -1,5 +1,4 @@
 import { Terminal } from '@xterm/xterm'
-import { FitAddon } from '@xterm/addon-fit'
 import { WebglAddon } from '@xterm/addon-webgl'
 import { CanvasAddon } from '@xterm/addon-canvas'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
@@ -27,7 +26,6 @@ type ClipboardWriteCallback = (text: string) => void
 // glyph atlas on every reflow. WebGL → Canvas → built-in DOM as fallbacks.
 
 const MAX_WEBGL_RECOVERY_ATTEMPTS = 3
-const RESIZE_MIN_INTERVAL = 32
 
 // On WebKitGTK (Linux/Wails) the compositor may not present a frame until the
 // window receives a user interaction, so xterm.js's rAF-scheduled repaint of
@@ -111,7 +109,6 @@ export function parseOsc133(payload: string): CommandMarker | null {
 
 export class XtermRenderer implements TerminalRenderer {
   private term: Terminal | null = null
-  private fit: FitAddon | null = null
   private webgl?: WebglAddon
   private canvas?: CanvasAddon
   private container: HTMLElement | null = null
@@ -180,9 +177,6 @@ export class XtermRenderer implements TerminalRenderer {
     })
     this.term = term
 
-    const fit = new FitAddon()
-    this.fit = fit
-    term.loadAddon(fit)
     term.loadAddon(new Unicode11Addon())
     term.unicode.activeVersion = '11'
 
@@ -190,26 +184,6 @@ export class XtermRenderer implements TerminalRenderer {
 
     await document.fonts?.ready
     this.attachWebGL()
-    this.safeFit()
-
-    let pending = false
-    let last = 0
-    const run = () => {
-      pending = false
-      last = Date.now()
-      this.safeFit()
-      // refreshAtlas performs a viewport-wide terminal refresh. After nocx-q18
-      // it no longer clears the texture atlas — fit() already handles atlas
-      // refresh via _refreshCharAtlas() during handleResize.
-      this.refreshAtlas()
-    }
-    new ResizeObserver(() => {
-      if (pending) return
-      pending = true
-      const wait = Math.max(0, RESIZE_MIN_INTERVAL - (Date.now() - last))
-      if (wait > 0) setTimeout(() => requestAnimationFrame(run), wait)
-      else requestAnimationFrame(run)
-    }).observe(container)
 
     // Linux/WebKitGTK: re-mark every row dirty on a timer so a render is
     // always pending. No-op on macOS/browsers where the compositor is healthy.
@@ -226,15 +200,45 @@ export class XtermRenderer implements TerminalRenderer {
     })
   }
 
-  private safeFit(): void {
-    const c = this.container
-    if (c && c.clientWidth > 0 && c.clientHeight > 0) {
-      try {
-        this.fit?.fit()
-      } catch {
-        /* transient mid-layout measure */
-      }
+  /**
+   * Fit the terminal grid to an explicit viewport from the presentation layer
+   * (B.5). Computes cols/rows from real cell metrics and the given CSS-pixel
+   * dimensions. Does NOT independently measure container geometry.
+   */
+  fitViewport(viewport: { width: number; height: number }): void {
+    const t = this.term
+    if (!t || viewport.width <= 0 || viewport.height <= 0) return
+    const cell = this._getCellDims()
+    if (!cell) return
+    const cols = Math.max(1, Math.floor(viewport.width / cell.width))
+    const rows = Math.max(1, Math.floor(viewport.height / cell.height))
+    if (cols !== t.cols || rows !== t.rows) {
+      t.resize(cols, rows)
     }
+  }
+
+  /**
+   * Real cell dimensions from the xterm render service (same source as FitAddon).
+   * Accesses internal xterm.js API not present on the public Terminal type.
+   */
+  private _getCellDims(): { width: number; height: number } | null {
+    const t = this.term
+    if (!t) return null
+    // xterm.js stores cell dimensions internally — unreachable via public API.
+    // Single unchecked cast to narrow local, then structural access only.
+    const internal = t as unknown as { _core: unknown }
+    const core = internal._core as
+      | { _renderService?: { dimensions?: { css?: { cell?: { width: number; height: number } } } } }
+      | undefined
+    const cell = core?._renderService?.dimensions?.css?.cell
+    if (cell && cell.width > 0 && cell.height > 0) return cell
+    // Fallback: measure the char-measure-element xterm creates for font metrics.
+    const el = t.element?.querySelector('.xterm-char-measure-element') as HTMLElement | null
+    if (el) {
+      const rect = el.getBoundingClientRect()
+      if (rect.width > 0 && rect.height > 0) return { width: rect.width, height: rect.height }
+    }
+    return null
   }
 
   private attachWebGL(): void {
@@ -362,7 +366,7 @@ export class XtermRenderer implements TerminalRenderer {
     // default rendering path (renderRows → _updateModel → getRasterizedGlyph)
     // draws glyphs to the atlas on demand, so clearing first buys nothing.
     //
-    // The resize path (safeFit → fit → handleResize) already refreshes the
+    // The resize path (fitViewport → resize) already refreshes the char atlas
     // char atlas via _refreshCharAtlas() which acquires a correctly-sized
     // atlas. The tab-activation path needs a viewport refresh because
     // terminal content may have changed while the tab was in the background.

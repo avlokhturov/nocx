@@ -254,14 +254,14 @@ func TestBinding_UnboundAllowed(t *testing.T) {
 	}
 	defer func() { _ = client.Close() }()
 
-	store := &credStub{pw: "x"}
+	store := &credStub{pw: testSSHPassword}
 
 	// No binding set — BoundHost stays "". ADR-0006: empty Host means the
-	// credential works for any host, so Connect succeeds.
+	// saved credential works for any host, so its password authenticates.
 	ch, err := client.Connect(
 		context.Background(), srv.addr,
 		WithUser("test"),
-		WithAuthMethods([]gossh.AuthMethod{gossh.PublicKeys(srv.userSigner)}),
+		WithAuthMode("password"),
 		WithCredentials(store, credential.NewSecretID()),
 	)
 	if err != nil {

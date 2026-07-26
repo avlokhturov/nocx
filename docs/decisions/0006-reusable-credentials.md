@@ -30,6 +30,31 @@ type Credential struct {
 }
 ```
 
+### Target Scope
+
+`Host` is an optional target scope, not a required identity field:
+
+- Empty `Host` means the credential may be used for any host. This is the
+  intentional reusable-credential default, not an invalid legacy state.
+- Non-empty `Host` is compared case-insensitively with the resolved `HostName`
+  after `~/.ssh/config` has been applied. Comparing with the user-provided alias
+  would not constrain where the credential is sent because an alias can remap
+  `HostName`.
+- `Port == 0` means any port on the scoped host. A non-zero port is compared
+  with the effective port after SSH config resolution. `Port` has no effect
+  when `Host` is empty.
+- Target and jump-host credentials are checked independently before either
+  connection is dialed. Legacy inline authentication has no reusable
+  credential scope to check.
+
+The renderer may create profiles and edit credential metadata, including this
+optional scope. Host scoping is therefore a user-selected safety constraint,
+not an authorization boundary against a hostile renderer. Secret values remain
+backend-only under ADR-0011. If a future host treats renderer compromise as an
+in-scope threat, it needs a separate trusted approval capability for submitting
+or re-scoping credentials; changing empty `Host` to mean "invalid" would break
+this ADR's reuse contract without establishing that boundary.
+
 ### Storage
 
 Credentials are stored in the profile store (JSON file) alongside SSH profiles. The actual secrets (passwords, key passphrases) remain in the OS keychain / encrypted vault, keyed by `Credential.ID` (not by Identity).
@@ -37,12 +62,14 @@ Credentials are stored in the profile store (JSON file) alongside SSH profiles. 
 When connecting, the SSH module resolves the credential:
 1. Load `Credential` by ID from the profile store
 2. Load secret from keychain by `Credential.ID`
-3. If `Credential` is host-bound, verify the connection matches
+3. If `Credential` is host-scoped, verify the resolved connection matches
+   before dialing
 
 ### UI Changes
 
 **Saved Credentials (УЗ) button:**
 - Opens a form to create/edit a Credential: name, username, auth method, secret (password or key path)
+- Labels host restriction as optional; leaving it empty clearly means "any host"
 - Shows a list of saved credentials with edit/delete actions
 - Secrets are stored in OS keychain, never in the profile store
 
