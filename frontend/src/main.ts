@@ -15,10 +15,11 @@ import { ClipboardBannerImpl } from './banner'
 import { ProfileClient } from './profiles'
 import { Dispatcher } from './dispatcher'
 import { SettingsContent, SURFACE_SETTINGS, SINGLETON_SETTINGS } from './settings-content'
-import { HorizontalTabStrip } from './tab-strip'
+import { HorizontalTabStrip, VerticalTabStrip } from './tab-strip'
 import { ConnectionsContent } from './connections-content'
 import { SURFACE_CONNECTIONS, SINGLETON_CONNECTIONS } from './tab-content'
 import type { ContentDescriptor } from './tab-content'
+import { SettingsObserver } from './settings-observer'
 
 /**
  * Renders the auto-update notice in the tab bar. The notice is a small,
@@ -129,10 +130,52 @@ async function main() {
   const client = new WSClient(dispatcher)
   await client.connect(port, host, token)
   const profileClient = new ProfileClient(dispatcher)
-  // TabManager opens the first tab and activates it in the constructor.
-  const tabStrip = new HorizontalTabStrip()
+
+  // The generated-screen invariant says no setting key appears in the frontend,
+  // and it is about the SCREEN: settings.ts and settings-content.ts render from
+  // declarations so a new setting costs one MustRegister* call in Go and zero
+  // frontend changes. The composition root is a different thing — a CONSUMER
+  // that acts on one specific setting — and a consumer has to name what it
+  // consumes. So the key is named here, deliberately, and only here.
+  //
+  // The alternative was tried and rejected: identifying the declaration by
+  // section "Interface" plus control "select" reads as key-free but is a latent
+  // bug, because it silently resolves to whichever select comes first in
+  // declaration order. nocx-8yg.6 (colour schemes) is already filed and would
+  // add exactly such a select to Interface, at which point tab placement would
+  // stop working with nothing on screen to say why.
+  const PLACEMENT_KEY = 'tab.placement'
+
+  let placement: unknown = 'horizontal'
+  try {
+    const snap = await profileClient.getSnapshot()
+    placement = snap.values[PLACEMENT_KEY] ?? 'horizontal'
+  } catch {
+    // Backend may not be ready yet — safe fallback.
+  }
+
+  const tabStrip = placement === 'vertical' ? new VerticalTabStrip() : new HorizontalTabStrip()
   const tm = new TabManager(bar, panes, client, clipboard, gate, banner, profileClient, tabStrip)
 
+  // Live application through SettingsObserver: when the placement setting
+  // changes, refetch the snapshot and swap the strip in place.
+  const observer = new SettingsObserver(dispatcher)
+  observer.setRevision(0)
+  observer.start(() => {
+    void (async () => {
+      try {
+        const snap = await profileClient.getSnapshot()
+        observer.setRevision(snap.revision)
+        const next = snap.values[PLACEMENT_KEY] ?? 'horizontal'
+        if (next !== placement) {
+          placement = next
+          tm.replaceStrip(next === 'vertical' ? new VerticalTabStrip() : new HorizontalTabStrip())
+        }
+      } catch {
+        // Silently ignore — a settings fetch failure is not actionable here.
+      }
+    })()
+  })
   // App-shell sidebar (nocx-8yg.9) — VS Code-style activity bar plus a
   // collapsible panel. Two views:
   // - Connections: opens the SSH connection manager as a full-screen tab.

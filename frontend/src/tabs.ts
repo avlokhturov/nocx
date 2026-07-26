@@ -250,9 +250,9 @@ export class TabManager {
   private readonly gate: ClipboardGate
   private readonly banner: ClipboardBanner
   private readonly profileClient: ProfileClient
-  private readonly tabStrip: TabStrip
   private readonly _initialTabReady: Promise<void>
-
+  private tabStrip: TabStrip
+  private readonly bar: HTMLElement
   /** MRU stack: most-recently-activated tab ids. */
   private readonly recentTabIds: number[] = []
 
@@ -273,6 +273,7 @@ export class TabManager {
     this.banner = banner
     this.profileClient = profileClient
     this.tabStrip = tabStrip
+    this.bar = bar
 
     // Wire TabStrip intents.
     this.tabStrip.onActivate = (id) => {
@@ -390,6 +391,50 @@ export class TabManager {
     this.tabStrip.addTab(tab)
     void this.activate(tab)
     return tab
+  }
+
+  /** Swap the TabStrip at runtime without restarting.  Transfers all
+   *  existing tabs to the new strip, wires intents, and preserves the
+   *  active-tab state.  The old strip's DOM is removed. */
+  replaceStrip(newStrip: TabStrip): void {
+    // Detach the old strip: clear intents so late callbacks are no-ops.
+    const old = this.tabStrip
+    old.onActivate = null
+    old.onClose = null
+    old.onNewTab = null
+    old.onReorder = null
+
+    // Clear the bar and mount the new strip.
+    this.bar.innerHTML = ''
+    newStrip.mount(this.bar)
+
+    // Transfer every existing tab into the new strip.
+    for (const tab of this.tabs) {
+      newStrip.addTab(tab)
+    }
+
+    // Wire new strip intents.
+    this.wireStrip(newStrip)
+
+    // Restore active-tab state.
+    if (this.activeTab) {
+      newStrip.setActive(this.activeTab.id)
+    }
+
+    this.tabStrip = newStrip
+  }
+
+  private wireStrip(strip: TabStrip): void {
+    strip.onActivate = (id) => {
+      const tab = this.tabs.find((t) => t.id === id)
+      if (tab) void this.activate(tab)
+    }
+    strip.onClose = (id) => {
+      const tab = this.tabs.find((t) => t.id === id)
+      if (tab) this.closeTab(tab)
+    }
+    strip.onNewTab = () => this.newTab()
+    strip.onReorder = (fromId, toId) => this.reorderTab(fromId, toId)
   }
 
   /** Toggle #app alt-screen class based on active terminal buffer type. */

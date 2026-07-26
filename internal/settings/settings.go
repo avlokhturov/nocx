@@ -464,6 +464,22 @@ var ClipboardOSC52Suppressed = MustRegisterBool(BoolSpec{
 	Default:     false,
 })
 
+// TabPlacement controls whether tabs render as a horizontal bar at the top
+// of the window or as a vertical list on the side. Horizontal is the default;
+// vertical matches the layout of the nocx-d3q epic.
+var TabPlacement = MustRegisterSelect(SelectSpec{
+	Key:         "tab.placement",
+	Section:     "Interface",
+	Label:       "Tab placement",
+	Description: "Horizontal displays tabs across the top of the window, as in a traditional terminal. Vertical lists tabs on the side, as in an IDE.",
+	DataClass:   PublicConfig,
+	Default:     "horizontal",
+	Options: []SelectOption{
+		{Value: "horizontal", Label: "Horizontal"},
+		{Value: "vertical", Label: "Vertical"},
+	},
+})
+
 // ── Document shape ─────────────────────────────────────────────────────
 
 const settingsDocName = "settings.json"
