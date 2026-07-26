@@ -15,6 +15,9 @@ import { ClipboardBannerImpl } from './banner'
 import { ProfileClient } from './profiles'
 import { SettingsViewImpl } from './settings'
 import { HorizontalTabStrip } from './tab-strip'
+import { ConnectionsContent } from './connections-content'
+import { SURFACE_CONNECTIONS, SINGLETON_CONNECTIONS } from './tab-content'
+import type { ContentDescriptor } from './tab-content'
 
 /**
  * Renders the auto-update notice in the tab bar. The notice is a small,
@@ -143,7 +146,19 @@ async function main() {
       action: 'tab',
       onActivate: () => {
         log.info('nocx: opening Connections tab')
-        tm.newManagerTab()
+        const content = new ConnectionsContent(profileClient)
+        const descriptor: ContentDescriptor = {
+          surfaceType: SURFACE_CONNECTIONS,
+          singletonKey: SINGLETON_CONNECTIONS,
+          restoreDescriptor: null,
+          supportsAttention: false,
+          defaultTitle: 'Connections',
+        }
+        content.onConnect = (profile) => {
+          log.info('nocx: onConnect called', { profileId: profile.id, profile: profile.name })
+          tm.newSSHTab(profile.id, profile.options.host, profile.options.user)
+        }
+        tm.openTab(content, descriptor)
       },
     },
     {

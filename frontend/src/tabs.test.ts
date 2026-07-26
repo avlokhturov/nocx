@@ -5,6 +5,7 @@ import {
   resetSessionCounter,
   mountTabManager,
   makeClient,
+  makeSession,
   makeClipboard,
   makeBanner,
   setupTabBarDOM,
@@ -12,6 +13,7 @@ import {
   type RendererMock,
 } from './test-support/tabs-fixtures'
 import { ClipboardGate } from './clipboard'
+import type { TerminalContent } from './terminal-content'
 
 // ── Mocks ──────────────────────────────────────────────────────────────────
 
@@ -1011,36 +1013,43 @@ describe('TabManager', () => {
   })
 
   it('Tab.ready resolves true for a genuinely started tab', async () => {
-    // mountTabManager starts the initial tab — its ready must resolve true.
-    const { client } = await mountTabManager()
-
-    // Access the initial Tab via the (newly exported) Tab class and the tabs array.
-    // The tabs array is private, but initialTabReady is derived from it — and
-    // initialTabReady resolved above, proving the Tab-level signal resolved true.
+    // initialTabReady resolved above, proving the content-level signal resolved true.
     //
-    // For a direct Tab.ready assertion, construct a Tab and drive it manually.
+    // For a direct content.ready assertion, construct TerminalContent + Tab manually.
+    const client = makeClient()
     const wsClient = client as unknown as import('./ipc').WSClient
     const { Tab } = await import('./tabs')
+    const { TerminalContent } = await import('./terminal-content')
+    const { SURFACE_TERMINAL } = await import('./tab-content')
 
     const clipboard = makeClipboard()
     const gate = new ClipboardGate()
     const banner = makeBanner()
-    const tab = new Tab(wsClient, 'xterm', clipboard, gate, banner, 99)
+    const content = new TerminalContent(wsClient, 'xterm', clipboard, gate, banner, () => {})
+    const tab = new Tab(
+      content,
+      {
+        surfaceType: SURFACE_TERMINAL,
+        singletonKey: null,
+        restoreDescriptor: { type: 'local' },
+        supportsAttention: true,
+        defaultTitle: 'Terminal',
+      },
+      99,
+    )
 
     // Before start(): ready must still be pending.
-    // Prove it by racing — if it were already settled the race would catch it.
-    const beforeStart = Promise.race([tab.ready.then(() => 'settled'), Promise.resolve('pending')])
+    const tc = tab.content as TerminalContent
+    const beforeStart = Promise.race([tc.ready.then(() => 'settled'), Promise.resolve('pending')])
     await expect(beforeStart).resolves.toBe('pending')
 
     // Now start it.
     const paneParent = document.createElement('div')
     paneParent.append(tab.pane)
-
-    // Simulate what activate() does — pane must be in the DOM for the renderer.
     await tab.start()
 
     // After a genuine start, ready must resolve to true.
-    await expect(tab.ready).resolves.toBe(true)
+    await expect(tc.ready).resolves.toBe(true)
 
     // Clean up.
     tab.close()
@@ -1054,20 +1063,31 @@ describe('TabManager', () => {
 
     const wsClient = client as unknown as import('./ipc').WSClient
     const { Tab } = await import('./tabs')
+    const { TerminalContent } = await import('./terminal-content')
+    const { SURFACE_TERMINAL } = await import('./tab-content')
 
     const clipboard = makeClipboard()
     const gate = new ClipboardGate()
     const banner = makeBanner()
-    const tab = new Tab(wsClient, 'xterm', clipboard, gate, banner, 99)
+    const content = new TerminalContent(wsClient, 'xterm', clipboard, gate, banner, () => {})
+    const tab = new Tab(
+      content,
+      {
+        surfaceType: SURFACE_TERMINAL,
+        singletonKey: null,
+        restoreDescriptor: { type: 'local' },
+        supportsAttention: true,
+        defaultTitle: 'Terminal',
+      },
+      99,
+    )
 
     const paneParent = document.createElement('div')
     paneParent.append(tab.pane)
-
-    // start() swallows the error for the UI but ready must reflect the failure.
     await tab.start()
 
-    // No throw from start(), but ready resolves false.
-    await expect(tab.ready).resolves.toBe(false)
+    const tc = tab.content as TerminalContent
+    await expect(tc.ready).resolves.toBe(false)
 
     // Verify the error notice is rendered.
     const errorNotice = tab.pane.querySelector('.pane-error')
@@ -1076,6 +1096,66 @@ describe('TabManager', () => {
 
     // Clean up.
     tab.close()
+    paneParent.remove()
+  })
+
+  it('dispose during async mount cancels before session opens (B.6 race)', async () => {
+    // The trap: closing a tab mid-mount must not let the finished mount
+    // open a PTY into a detached pane. Prove that dispose aborts the
+    let resolveSession!: (v: ReturnType<typeof makeSession>) => void
+    const delayedSession = new Promise<ReturnType<typeof makeSession>>((resolve) => {
+      resolveSession = resolve
+    })
+    const client = makeClient({
+      openSession: vi.fn(() => delayedSession),
+    })
+
+    const wsClient = client as unknown as import('./ipc').WSClient
+    const { Tab } = await import('./tabs')
+    const { TerminalContent } = await import('./terminal-content')
+    const { SURFACE_TERMINAL } = await import('./tab-content')
+
+    const clipboard = makeClipboard()
+    const gate = new ClipboardGate()
+    const banner = makeBanner()
+    const content = new TerminalContent(wsClient, 'xterm', clipboard, gate, banner, () => {})
+    const tab = new Tab(
+      content,
+      {
+        surfaceType: SURFACE_TERMINAL,
+        singletonKey: null,
+        restoreDescriptor: { type: 'local' },
+        supportsAttention: true,
+        defaultTitle: 'Terminal',
+      },
+      99,
+    )
+
+    const paneParent = document.createElement('div')
+    paneParent.append(tab.pane)
+
+    // Start mount but don't await — it blocks on delayedSession.
+    const mountPromise = tab.start()
+
+    // Let the mount get past renderer mounting and reach openSession.
+    await vi.waitFor(() => {
+      expect(client.openSession).toHaveBeenCalled()
+    })
+
+    // Dispose while mount is in-flight.
+    tab.close()
+    // Now let the session resolve.
+    const session = makeSession()
+    resolveSession(session)
+
+    // Mount should complete without throwing (error is caught internally).
+    await mountPromise
+
+    // The session must have been closed by dispose.
+    expect(session.close).toHaveBeenCalled()
+    expect(client.openSession).toHaveBeenCalledTimes(1)
+
+    // Clean up.
     paneParent.remove()
   })
 })
