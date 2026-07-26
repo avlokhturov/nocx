@@ -175,7 +175,10 @@ export class TerminalContent implements TabContent {
       this.ledger = new CommandLedger({ now: () => performance.now() })
 
       // ── Wire input ownership BEFORE opening the session ─────────────────
-      this.shellTarget = new ShellInputTarget((data: string) => this.session!.send(data))
+      this.shellTarget = new ShellInputTarget(
+        (data: string) => this.session!.send(data),
+        () => renderer.bracketedPasteMode,
+      )
       this.editor = new CommandEditor({
         submit: (doc: string) => {
           this._pendingCommand = doc

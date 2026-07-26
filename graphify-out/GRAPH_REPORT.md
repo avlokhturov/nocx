@@ -1,16 +1,16 @@
-# Graph Report - nocx  (2026-07-26)
+# Graph Report - main  (2026-07-26)
 
 ## Corpus Check
-- 714 files · ~686,368 words
+- 741 files · ~724,413 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 8199 nodes · 11273 edges · 676 communities (593 shown, 83 thin omitted)
-- Extraction: 91% EXTRACTED · 9% INFERRED · 0% AMBIGUOUS · INFERRED: 1010 edges (avg confidence: 0.8)
+- 8592 nodes · 12087 edges · 697 communities (607 shown, 90 thin omitted)
+- Extraction: 91% EXTRACTED · 9% INFERRED · 0% AMBIGUOUS · INFERRED: 1059 edges (avg confidence: 0.8)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `e890553a`
+- Built from commit: `99452ba3`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -57,13 +57,18 @@
 - Pre-push Hook (git)
 - Prepare-commit-msg Hook
 - Dependency Injection Paradigm
+- Clipboard E2E Spec
 - Pre-push Hook (.githooks)
 - Frontend CI Job
 - AD-2 Go Backend Core
 - Config Module Seam
+- Activity Bell E2E Spec
+- Activity E2E Spec
 - Click-focus E2E Spec
+- Tab Title E2E Spec
 - WailsApp Type Declaration
 - nocx Go Module Path
+- Playwright Config
 - scripts_exec_test.go
 - dom-scrollback.ts
 - 🎯 Story Context Quality Competition Prompt
@@ -536,6 +541,8 @@
 - .githooks/post-merge
 - post-rewrite
 - README.md
+- enhanced-input.spec.ts
+- tabs.spec.ts
 - Vault
 - tabs-fixtures.ts
 - Evidence
@@ -623,18 +630,38 @@
 - fakeGroupRepo
 - fakeProfileRepo
 - staticPaths
+- Worker brief — SETTINGS-1 (bead `nocx-r2hf`)
+- Worker brief — TABS-C: Settings as a dedicated tab (bead `nocx-h4e2`)
+- MockSocket
+- Worker brief — delete the wterm renderer (bead `nocx-k7kq`)
+- Worker brief — SETTINGS-3: settings change broadcast (bead `nocx-lsws`)
+- Number
+- SettingsView
+- Worker brief — make the e2e suite green (bead `nocx-bw2`)
+- Worker brief — TABS-3: the vertical tab panel, Warp-style (bead `nocx-d3q.3`)
+- Stub
+- resolvedConfig
+- ws_export.go
+- Resolver
+- pbkdf2_test.go
+- Worker brief — credential hygiene: two beads (`nocx-6ek.2`, `nocx-dcd`)
+- Worker brief — the Settings rail: modified-only filter and a narrow-viewport layout
+- Worker brief — TABS-1 remaining scope: the dead accessor surface (bead `nocx-d3q.1`)
+- .NewPTY
+- .NewPTY
+- fakeCredRepo
 
 ## God Nodes (most connected - your core abstractions)
 1. `NewSlogAdapter()` - 118 edges
-2. `connectWS()` - 59 edges
-3. `WSServer` - 57 edges
-4. `NewWSServer()` - 50 edges
-5. `SecretID` - 49 edges
-6. `Logger` - 44 edges
-7. `NewSecretID()` - 41 edges
-8. `newRegWithStub()` - 40 edges
-9. `ProfileClient` - 39 edges
-10. `TerminalRenderer` - 39 edges
+2. `connectWS()` - 64 edges
+3. `WSServer` - 63 edges
+4. `SecretID` - 52 edges
+5. `ProfileClient` - 50 edges
+6. `NewWSServer()` - 50 edges
+7. `Logger` - 44 edges
+8. `SettingsViewImpl` - 43 edges
+9. `NewSecretID()` - 42 edges
+10. `NewSecret()` - 40 edges
 
 ## Surprising Connections (you probably didn't know these)
 - `main()` --calls--> `Bool`  [INFERRED]
@@ -656,58 +683,58 @@
 - **Go core (one binary, multi-target) backend modules** — docs_architecture_pty, docs_architecture_ssh, docs_architecture_session, docs_architecture_transport, docs_architecture_config, docs_architecture_shellintegration [EXTRACTED 1.00]
 - **Switchable renderers behind TerminalRenderer interface** — docs_decisions_0001_xterm_js_as_vt_frontend_xterm_js, docs_decisions_0001_xterm_js_as_vt_frontend_ghostty_web, docs_decisions_0001_xterm_js_as_vt_frontend_wterm [INFERRED 0.85]
 
-## Communities (676 total, 83 thin omitted)
+## Communities (697 total, 90 thin omitted)
 
 ### Community 0 - "Binary Frame Codec (Go)"
-Cohesion: 0.22
-Nodes (48): IDToBytes(), NewWSServer(), assertSeq(), connectWS(), drainWithAcks(), Conn, T, WSServer (+40 more)
+Cohesion: 0.20
+Nodes (51): IDFromBytes(), IDToBytes(), NewWSServer(), assertSeq(), connectWS(), drainWithAcks(), Conn, Duration (+43 more)
 
 ### Community 1 - "Frontend Frame & IPC Client"
-Cohesion: 0.05
-Nodes (22): RFC-6455, DecodedFrame, decodeFrame(), encodeFrame(), hexToBytes(), isSessionID(), AckThrottle, AttachResult (+14 more)
+Cohesion: 0.06
+Nodes (17): DecodedFrame, decodeFrame(), encodeFrame(), hexToBytes(), isSessionID(), AckThrottle, AttachResult, SessionHandle (+9 more)
 
 ### Community 3 - "SSH Transport & Tests"
 Cohesion: 0.07
-Nodes (88): T, TestChannelInterfaceShape(), TestPtySatisfiesChannel(), TestSSHSatisfiesChannel(), sshOptionsFromConfig(), RealClient, T, newBindingClient() (+80 more)
+Nodes (84): sshOptionsFromConfig(), RealClient, T, newBindingClient(), TestBinding_AliasResolutionNotAlias(), TestBinding_HostAnyPortWhenPortUnset(), TestBinding_InlineAuthNotChecked(), TestBinding_JumpHostRefused() (+76 more)
 
 ### Community 4 - "WebSocket JSON-RPC Server"
-Cohesion: 0.20
-Nodes (6): Mutex, Once, ID, Session, connState, sessionRx
+Cohesion: 0.19
+Nodes (7): Context, Mutex, Once, ID, Session, connState, sessionRx
 
 ### Community 5 - "Local PTY & App Wiring"
-Cohesion: 0.12
-Nodes (21): Cmd, Config, Context, File, Mutex, NewLocal(), resolveCwd(), scrubLauncherSession() (+13 more)
+Cohesion: 0.16
+Nodes (10): Cmd, Config, Context, File, Mutex, NewLocal(), resolveCwd(), scrubLauncherSession() (+2 more)
 
 ### Community 6 - "Session Lifecycle & App"
-Cohesion: 0.12
-Nodes (16): abbreviateHome(), Channel, Context, Mutex, Once, kindName(), resolveSessionCwd(), syncDirectory() (+8 more)
+Cohesion: 0.10
+Nodes (18): abbreviateHome(), Channel, Context, Mutex, Once, kindName(), NewID(), resolveSessionCwd() (+10 more)
 
 ### Community 7 - "Architecture Spine & Tooling"
 Cohesion: 0.07
 Nodes (49): .beads/config.yaml — bd repo settings (JSONL auto-export, Dolt sync remote), Beads (bd) — AI-native, git-native issue tracker, Dolt database (versioned issue store; refs/dolt/data sync), CI backend job (macos-latest; gofumpt, golangci-lint, go test -race), CI pipeline (GitHub Actions; release/** + v* tags + dispatch), golangci-lint config (v1.64.8 schema; gofmt, govet, gosec, staticcheck…), AGENTS.md — working rules for AI agents on nocx, CLAUDE.md — pointer to AGENTS.md and sources of truth (+41 more)
 
 ### Community 8 - "Frontend Dependencies (xterm)"
-Cohesion: 0.04
-Nodes (45): eslint, eslint-config-prettier, dependencies, @wterm/dom, @xterm/addon-canvas, @xterm/addon-fit, @xterm/addon-unicode11, @xterm/addon-webgl (+37 more)
+Cohesion: 0.05
+Nodes (43): eslint, eslint-config-prettier, dependencies, @xterm/addon-canvas, @xterm/addon-fit, @xterm/addon-unicode11, @xterm/addon-webgl, @xterm/xterm (+35 more)
 
 ### Community 9 - "Config, Log & Shell Integration"
 Cohesion: 0.12
-Nodes (15): Context, traceIDFromContext(), Context, Registry, NewStub(), T, TestStub_ImplementsTransport(), TestStub_StartAndStop() (+7 more)
+Nodes (16): Context, traceIDFromContext(), Context, Registry, NewStub(), T, TestStub_ImplementsTransport(), TestStub_StartAndStop() (+8 more)
 
 ### Community 10 - "Wterm Renderer & Types"
-Cohesion: 0.10
-Nodes (4): DataCallback, ResizeCallback, TitleCallback, WtermRenderer
+Cohesion: 0.06
+Nodes (13): Dispatcher, LifecycleHandler, NotificationHandler, PendingCall, connectAndAccept(), lastSocket(), UTF8StreamDecoder, InvalidationHandler (+5 more)
 
 ### Community 11 - "SSH Real Client"
-Cohesion: 0.18
-Nodes (22): documentStore, T, newDocumentStore(), newTestModule(), TestDocumentStore_AtomicWrite(), TestDocumentStore_DirFsync(), TestDocumentStore_ReadNotFound(), TestDocumentStore_SymlinkRefusal() (+14 more)
+Cohesion: 0.17
+Nodes (23): syncDirectory(), documentStore, T, newDocumentStore(), newTestModule(), TestDocumentStore_AtomicWrite(), TestDocumentStore_DirFsync(), TestDocumentStore_ReadNotFound() (+15 more)
 
 ### Community 12 - "Renderer Factory & Tabs"
-Cohesion: 0.09
-Nodes (8): ClipboardAccess, ClipboardGate, RendererName, cwdTooltip(), directoryLabel(), Tab, TabManager, ClipboardFake
+Cohesion: 0.06
+Nodes (17): AgentStatus, detectAgentStatus(), SINGLETON_SETTINGS, SURFACE_SETTINGS, ADR-0011, ContentDescriptor, ContentViewport, SINGLETON_CONNECTIONS (+9 more)
 
 ### Community 13 - "Output Ring Buffer"
-Cohesion: 0.21
+Cohesion: 0.27
 Nodes (3): Context, Mutex, outputRing
 
 ### Community 14 - "Root Package Manifest"
@@ -718,17 +745,25 @@ Nodes (21): author, bugs, url, description, devDependencies, @playwright/test, d
 Cohesion: 0.10
 Nodes (20): compilerOptions, esModuleInterop, forceConsistentCasingInFileNames, isolatedModules, jsx, lib, module, moduleResolution (+12 more)
 
+### Community 16 - "Xterm Renderer"
+Cohesion: 0.08
+Nodes (4): isLinuxWebKit(), XtermRenderer, TabHost, TerminalContent
+
 ### Community 17 - "Clipboard & OSC 52"
-Cohesion: 0.17
-Nodes (8): BrowserClipboard, createClipboardAccess(), decodeOsc52(), NoopClipboard, shouldCopy(), WailsClipboard, ClipboardGetText(), ClipboardSetText()
+Cohesion: 0.07
+Nodes (25): ClipboardBanner, BrowserClipboard, ClipboardAccess, ClipboardGate, createClipboardAccess(), decodeOsc52(), NoopClipboard, shouldCopy() (+17 more)
 
 ### Community 18 - "Runtime Package Manifest"
 Cohesion: 0.11
 Nodes (18): author, bugs, url, description, homepage, keywords, license, main (+10 more)
 
 ### Community 19 - "PTY Interface & Stub"
-Cohesion: 0.15
-Nodes (14): Config, Context, NewStub(), T, TestStub_Close(), TestStub_DoneOpenBeforeClose(), TestStub_ImplementsInterface(), TestStub_Read_ReturnsEOF() (+6 more)
+Cohesion: 0.47
+Nodes (8): NewStub(), T, TestStub_Close(), TestStub_DoneOpenBeforeClose(), TestStub_ImplementsInterface(), TestStub_Read_ReturnsEOF(), TestStub_Resize(), TestStub_Write()
+
+### Community 21 - "TerminalRenderer Interface"
+Cohesion: 0.08
+Nodes (3): TerminalRenderer, LiveRegionMode, ScrollbackControllerOpts
 
 ### Community 22 - "Vite / Node TS Config"
 Cohesion: 0.12
@@ -781,6 +816,22 @@ Nodes (3): npx, playwright-test, run-test-mcp-server
 ### Community 35 - "Wails Event Subscriptions"
 Cohesion: 0.67
 Nodes (3): EventsOn(), EventsOnce(), EventsOnMultiple()
+
+### Community 43 - "Clipboard E2E Spec"
+Cohesion: 0.10
+Nodes (5): HorizontalTabStrip, FakeDataTransfer, mountStrip(), mountVerticalStrip(), VerticalTabStrip
+
+### Community 48 - "Activity Bell E2E Spec"
+Cohesion: 0.12
+Nodes (16): ConnectionManagerView, ConnectionsContent, AuthMode, BackupManifest, Base, BehaviorOnSessionEnd, buildGroupTree(), ImportResult (+8 more)
+
+### Community 49 - "Activity E2E Spec"
+Cohesion: 0.08
+Nodes (24): A.1 Snapshot contract, A.2 "Customized" is provenance, not value comparison, A.3 Control-plane dispatcher, A.4 Change propagation, B.1 What is wrong today, B.2 There are no `Tab` subclasses, B.3 The `TabStrip` presentation port, B.4 The `TabContent` seam (+16 more)
+
+### Community 52 - "Tab Title E2E Spec"
+Cohesion: 0.16
+Nodes (19): appendStatus(), base64ToBytes(), buildModeCard(), downloadBinary(), downloadJSON(), escapeHtml(), loadCardBody(), Mode (+11 more)
 
 ### Community 59 - "scripts_exec_test.go"
 Cohesion: 0.12
@@ -1107,16 +1158,16 @@ Cohesion: 0.10
 Nodes (19): Approach (a): Decoration at `x:0` + CSS `transform: translateX(-100%)`, Approach (b): Dedicated sibling gutter `<div>` overlaid on terminal container, **Approach (b): Dedicated sibling gutter `<div>` overlaid on the terminal container.**, Approach (c): Reserved left padding on terminal container, Does this map to AD-6?, Exact xterm 5.5 API calls the blocks milestone should use, Gutter-Geometry Feasibility Findings — Q1–Q4 + Recommendation, `IDecoration` (returned by registerDecoration) (+11 more)
 
 ### Community 142 - "CommandLedger"
-Cohesion: 0.13
-Nodes (7): CommandLedger, CommandStatus, createCycle(), CycleState, LedgerOpts, MarkerEvent, ADR-0008
+Cohesion: 0.09
+Nodes (13): CommandLedger, CommandRecord, CommandStatus, createCycle(), CycleState, LedgerOpts, MarkerEvent, ADR-0008 (+5 more)
 
 ### Community 143 - "SidebarImpl"
 Cohesion: 0.16
 Nodes (5): Sidebar, SidebarImpl, SidebarStorage, SidebarView, VIEWS
 
 ### Community 144 - "session_test.go"
-Cohesion: 0.12
-Nodes (16): assertValidKey(), MustRegisterBool(), MustRegisterNumber(), MustRegisterSecret(), MustRegisterSelect(), MustRegisterString(), toFloat64(), BoolSpec (+8 more)
+Cohesion: 0.14
+Nodes (17): assertValidKey(), descriptorByKey(), Descriptors(), MustRegisterBool(), MustRegisterNumber(), MustRegisterSecret(), MustRegisterSelect(), MustRegisterString() (+9 more)
 
 ### Community 145 - "Step 6: Final Assessment"
 Cohesion: 0.11
@@ -1167,8 +1218,8 @@ Cohesion: 0.11
 Nodes (18): 1. Begin Competitive Analysis, 2. Generate Competitive Analysis Content, 3. Present Analysis and Complete Option, 4. Handle Complete Selection, APPEND TO DOCUMENT:, COMPETITIVE ANALYSIS SEQUENCE:, COMPETITIVE RESEARCH PROTOCOLS:, Content Structure: (+10 more)
 
 ### Community 157 - "input-state.ts"
-Cohesion: 0.16
-Nodes (11): initialMachine(), InputEvent, InputState, InputStateController, Machine, reduce(), run(), ADR-0004 (+3 more)
+Cohesion: 0.10
+Nodes (17): initialMachine(), InputEvent, InputState, InputStateController, Machine, reduce(), run(), ADR-0004 (+9 more)
 
 ### Community 158 - "blocks.ts"
 Cohesion: 0.22
@@ -1214,17 +1265,13 @@ Nodes (17): 1. Check for Existing Project Context, 2. Discover Project Technolog
 Cohesion: 0.11
 Nodes (17): 1. Review Complete Context File, 2. Optimize for LLM Context, 3. Final Content Structure, 4. Present Completion Summary, 5. Final File Updates, 6. Completion Validation, 7. Completion Message, COMPLETION SEQUENCE: (+9 more)
 
-### Community 169 - "ScrollbackController"
-Cohesion: 0.14
-Nodes (4): GetLineFn, LiveRegionMode, ScrollbackController, ScrollbackControllerOpts
-
 ### Community 170 - "Pty"
 Cohesion: 0.08
 Nodes (26): CommandHistoryRepository, CommandRecord, CommandStatus, Conversation, ConversationRepository, convStub, histStub, Message (+18 more)
 
 ### Community 171 - "DecodeFrame"
-Cohesion: 0.18
-Nodes (15): IDFromBytes(), DecodeFrame(), T, TestDecodeFrameAtMinimumSize(), TestDecodeFrameBadMsgType(), TestDecodeFrameBadVersion(), TestDecodeFrameEmptyPayload(), TestDecodeFrameTooShort() (+7 more)
+Cohesion: 0.23
+Nodes (11): Context, Mutex, Once, ConnPool, dialInProgress, pooledSSHConn, poolEntry, poolHandle (+3 more)
 
 ### Community 172 - "DOM Scrollback Rendering Spike — Report"
 Cohesion: 0.11
@@ -1247,8 +1294,8 @@ Cohesion: 0.12
 Nodes (16): Additional Documentation, Conventions, Document Discovery - Full Epic Loading, Execution, Guidelines, Input Files, On Activation, Paths (+8 more)
 
 ### Community 177 - "ssh_real_test.go"
-Cohesion: 0.11
-Nodes (15): authModeLabel(), ConnectionManagerView, ConnectionManagerViewImpl, AuthMode, Base, BehaviorOnSessionEnd, buildGroupTree(), Credential (+7 more)
+Cohesion: 0.16
+Nodes (4): authModeLabel(), ConnectionManagerViewImpl, Credential, newProfileID()
 
 ### Community 178 - ".agents/skills/bmad-architecture/scripts/lint_spine.py"
 Cohesion: 0.23
@@ -1439,8 +1486,8 @@ Cohesion: 0.10
 Nodes (37): applyDefaults(), BuildGroupTree(), currentUser(), expandFromMap(), isNamespacedID(), mergeInto(), mergeSSHOptions(), NewCredentialID() (+29 more)
 
 ### Community 226 - "Updater"
-Cohesion: 0.26
-Nodes (10): Client, Context, PublicKey, Updater, NewGitHubManifestFetcher(), GitHubManifestFetcher, ManifestFetcher, Platform (+2 more)
+Cohesion: 0.22
+Nodes (11): NewPlatform(), Client, Context, PublicKey, Updater, NewGitHubManifestFetcher(), GitHubManifestFetcher, ManifestFetcher (+3 more)
 
 ### Community 227 - "Advanced Elicitation"
 Cohesion: 0.15
@@ -1639,8 +1686,8 @@ Cohesion: 0.17
 Nodes (11): Customer FAQ, Getting Started, {Headline}, How It Works, Internal FAQ, Q: {Hardest customer question first}, Q: {Hardest internal question first}, Q: {Next question} (+3 more)
 
 ### Community 276 - "ArtifactID"
-Cohesion: 0.13
-Nodes (7): Context, NewPlatform(), Context, NewPlatform(), ArtifactID, darwinPlatform, linuxPlatform
+Cohesion: 0.21
+Nodes (4): Context, NewPlatform(), ArtifactID, darwinPlatform
 
 ### Community 277 - "validate.ts"
 Cohesion: 0.32
@@ -1899,8 +1946,8 @@ Cohesion: 0.46
 Nodes (6): newOutputRing(), T, TestOutputRing_CancellableWaitForData(), TestOutputRing_WaitForDataAlreadyCancelled(), TestOutputRing_WaitForDataClosedRing(), TestOutputRing_WakeBroadcasts()
 
 ### Community 341 - ".Open"
-Cohesion: 0.12
-Nodes (15): isJSONObject(), RawMessage, ackParams, attachParams, closeParams, jsonrpcErrorObj, openParams, ProfileResolver (+7 more)
+Cohesion: 0.10
+Nodes (17): Conn, Request, ResponseWriter, isJSONObject(), newConnState(), newWSConn(), ackParams, attachParams (+9 more)
 
 ### Community 342 - "INSTRUCTIONS"
 Cohesion: 0.25
@@ -1983,8 +2030,8 @@ Cohesion: 0.25
 Nodes (8): ADR-0008 — Command blocks are a keyboard-first ledger, not cards, Consequences, Context, Credits, Decision, Deliberate divergences from Warp, First increment (this is what `nocx-4ff.5` becomes), Revisit when
 
 ### Community 362 - "submitCommand"
-Cohesion: 0.13
-Nodes (13): ADR-0001, AgentStatus, detectAgentStatus(), createRenderer(), resolveRendererName(), submitCommand(), SubmitDeps, ADR-0004 (+5 more)
+Cohesion: 0.26
+Nodes (18): New(), T, TestIDConversionRoundTrip(), TestIDToBytes_RejectsMalformed(), TestNewID_GeneratesUnique(), TestNewID_Is32HexChars(), TestOpenThreadsEnhancedIntoPTYConfig(), TestRealRegistry_CloseTwice_NoPanic() (+10 more)
 
 ### Community 363 - "nocx.bash"
 Cohesion: 0.32
@@ -2251,8 +2298,8 @@ Cohesion: 0.33
 Nodes (5): Global Constraints, Not in this milestone (tracked, not cut), Task 1: InputTarget types + registry, Task 2: ShellInputTarget — atomic-handoff submit, Warp Command Experience — M2a: InputTarget registry + ShellInputTarget — Implementation Plan
 
 ### Community 429 - "log_test.go"
-Cohesion: 0.14
-Nodes (39): NewSlogAdapter(), New(), NewID(), T, TestIDConversionRoundTrip(), TestIDToBytes_RejectsMalformed(), TestNewID_GeneratesUnique(), TestNewID_Is32HexChars() (+31 more)
+Cohesion: 0.16
+Nodes (29): NewSlogAdapter(), T, TestNewSlogAdapter_DoesNotPanic(), TestSlogAdapter_With(), TestSlogAdapter_WithContext(), TestTraceIDFromContext_EmptyWhenNotSet(), T, TestChannelInterfaceShape() (+21 more)
 
 ### Community 430 - "Generate Review Trail"
 Cohesion: 0.40
@@ -2446,33 +2493,37 @@ Nodes (3): main(), poll(), WSPORT
 Cohesion: 0.11
 Nodes (13): App, localPTYFactory, Option, optionSet, sshFactoryAdapter, main(), Channel, Context (+5 more)
 
-### Community 589 - "Vault"
-Cohesion: 0.14
-Nodes (13): StoredVault, Vault, vaultData, vaultDataDTO, VaultSecret, vaultSecretDTO, NewCredentialStore(), buildAAD() (+5 more)
+### Community 538 - "enhanced-input.spec.ts"
+Cohesion: 0.20
+Nodes (9): ClientConfig, Client, Conn, Context, Duration, RealClient, RealClient, isAuthError() (+1 more)
 
-### Community 590 - "tabs-fixtures.ts"
-Cohesion: 0.13
-Nodes (14): BannerChoice, ClipboardBanner, ClipboardBannerImpl, BannerFake, ClientFake, createRendererMock(), makeBanner(), makeClient() (+6 more)
+### Community 539 - "tabs.spec.ts"
+Cohesion: 0.29
+Nodes (6): copyRefs(), copyValues(), Mutex, change, ChangeNotifier, Registry
+
+### Community 589 - "Vault"
+Cohesion: 0.15
+Nodes (12): StoredVault, Vault, vaultData, vaultDataDTO, VaultSecret, vaultSecretDTO, NewCredentialStore(), buildAAD() (+4 more)
 
 ### Community 591 - "Evidence"
 Cohesion: 0.08
 Nodes (25): 1. `GetWSToken()` resolves a non-empty string inside the page, 2. Connection WITH the token opens, 3. Connection WITHOUT the token is rejected before the upgrade, 4. With `NOCX_WS_ADDR=127.0.0.1:9876`, devharness listens on 9876, Changes made, Cleanup, `cmd/devharness/main.go` — reads `NOCX_WS_ADDR`, Command (+17 more)
 
 ### Community 592 - "ws.go"
-Cohesion: 0.41
-Nodes (7): RawMessage, mustMarshal(), newJSONRPCError(), newJSONRPCResult(), jsonrpcRequest, jsonrpcResponse, wsConn
+Cohesion: 0.22
+Nodes (14): WSServer, CredentialStore, Listener, RawMessage, Reader, Server, WSServer, mustMarshal() (+6 more)
 
 ### Community 593 - "New"
 Cohesion: 0.14
-Nodes (6): descriptorByKey(), Descriptors(), descriptorToDeclaration(), Descriptor, Registry, Secret
+Nodes (4): descriptorToDeclaration(), Declaration, Secret, SettingsSnapshot
 
 ### Community 594 - "NewSecret"
 Cohesion: 0.26
 Nodes (19): T, TestSecretStoreVaultAdapter(), TestVaultDedupByID(), TestVaultDeleteSecret(), TestVaultEncryptDecryptRoundTrip(), TestVaultGetAbsentSecret(), TestVaultOldFormatRefused(), TestVaultSecretRefusesMarshal() (+11 more)
 
 ### Community 595 - "ConnectConfig"
-Cohesion: 0.05
-Nodes (46): ClientConfig, Resolver, SecretStore, HostKeyCallback, Credential, SSHProfile, Context, Mutex (+38 more)
+Cohesion: 0.20
+Nodes (12): SecretStore, authMethodsFromChain(), defaultKeyPaths(), AuthMethod, Secret, Signer, RealClient, passwordCallbackFromSecret() (+4 more)
 
 ### Community 596 - "ConnPool"
 Cohesion: 0.14
@@ -2483,8 +2534,8 @@ Cohesion: 0.11
 Nodes (18): Branch-Regression Analysis (2 tests), Cause hypothesis for the 2 regressions, CSP Verdict, Dead selector note, `e2e/activity-bell.spec.ts`, `e2e/activity.spec.ts`, `e2e/click-focus.spec.ts`, `e2e/clipboard.spec.ts` (+10 more)
 
 ### Community 598 - "ws_auth_test.go"
-Cohesion: 0.12
-Nodes (25): Request, ResponseWriter, WSServer, hostIsLoopback(), isWailsWebviewOrigin(), dialWith(), Conn, T (+17 more)
+Cohesion: 0.08
+Nodes (37): DecodeFrame(), T, TestDecodeFrameAtMinimumSize(), TestDecodeFrameBadMsgType(), TestDecodeFrameBadVersion(), TestDecodeFrameEmptyPayload(), TestDecodeFrameTooShort(), TestEncodeDecodeRoundTrip() (+29 more)
 
 ### Community 599 - "T6 — deleting a credential deletes its secrets (nocx-7l4, PR11-T6)"
 Cohesion: 0.12
@@ -2527,12 +2578,12 @@ Cohesion: 0.15
 Nodes (12): 1. `dialDirect` — context watchdog for `gossh.NewClientConn` (`ssh_dial.go`), 2. `dialViaJumpHost` — `DialContext` + watchdog (`ssh_dial.go`), 3. Pool `acquire` — context-aware waiters (`pool.go`), 4. `RealChannel.Resize` — context + disconnect detection (`ssh_channel.go`), 5. `ErrDisconnected` — new error type (`errors.go`), Changes, Compromises, Inherited fix: `closeOnce` already present (+4 more)
 
 ### Community 609 - "RealChannel"
-Cohesion: 0.17
-Nodes (8): buildTerminalModes(), Context, Once, Reader, WriteCloser, ptyReqMsg, ptyWindowChangeMsg, RealChannel
+Cohesion: 0.11
+Nodes (13): HostKeyCallback, buildTerminalModes(), Context, Once, Reader, WriteCloser, Channel, Client (+5 more)
 
 ### Community 610 - "newCascadeHarness"
-Cohesion: 0.34
-Nodes (11): Conn, Credential, T, WSServer, newCascadeHarness(), TestDeleteCascade_Idempotent(), TestDeleteCascade_KeyFileDeleted(), TestDeleteCascade_NoSecretsSucceeds() (+3 more)
+Cohesion: 0.31
+Nodes (10): Conn, Credential, T, WSServer, TestDeleteCascade_Idempotent(), TestDeleteCascade_KeyFileDeleted(), TestDeleteCascade_NoSecretsSucceeds(), TestDeleteCascade_RemovesKeyPassphrase() (+2 more)
 
 ### Community 611 - "W2a — reproduce the branch-only e2e failures locally, then test the CSP hypothesis"
 Cohesion: 0.17
@@ -2543,16 +2594,16 @@ Cohesion: 0.17
 Nodes (11): Environment, Ground rules, Prime suspect, Step 1 — baseline, Step 2 — the CSP experiment, Step 3 — if CSP is implicated, find the directive, Step 4 — write it up, W3 — reproduce the 5 branch-only e2e failures locally, then test the CSP hypothesis (+3 more)
 
 ### Community 613 - "jsonrpcCall"
-Cohesion: 0.16
-Nodes (27): New(), T, TestNew(), TestNew_AllModulesInjected(), TestStartShutdown(), TestWSPortBeforeStart(), NewJSONStore(), NewDocumentStore() (+19 more)
+Cohesion: 0.15
+Nodes (30): New(), T, TestNew(), TestNew_AllModulesInjected(), TestStartShutdown(), TestWSPortBeforeStart(), NewJSONStore(), NewDocumentStore() (+22 more)
 
 ### Community 614 - "pty_local_test.go"
-Cohesion: 0.19
-Nodes (22): fakeCredRepo, ExportConfiguration(), Credential, T, makeCredential(), makeGroup(), makeProfile(), TestBackup_ContentDBAbsent() (+14 more)
+Cohesion: 0.17
+Nodes (24): fakeProfileRepo, ExportConfiguration(), SSHProfile, T, makeCredential(), makeGroup(), makeProfile(), TestBackup_ContentDBAbsent() (+16 more)
 
 ### Community 615 - "newTestRealClient"
 Cohesion: 0.25
-Nodes (15): NewKeychain(), T, TestKeychainImplementsSecretStore(), RealClient, T, newTestRealClient(), TestAuthChainDefaultKeyDiscovery(), TestAuthChainExplicitMethodsBypass() (+7 more)
+Nodes (16): NewKeychain(), T, TestKeychainImplementsSecretStore(), RealClient, T, newTestRealClient(), TestAuthChainDefaultKeyDiscovery(), TestAuthChainExplicitMethodsBypass() (+8 more)
 
 ### Community 616 - "ADR-0006 — Reusable Credentials (УЗ) for SSH Connections"
 Cohesion: 0.18
@@ -2659,8 +2710,8 @@ Cohesion: 0.29
 Nodes (6): Key design decisions (documented in comments), Scope compromise (known), T8 Conn Pool — implementation report, Tests added (all pass under `-race`), Verification, What was done
 
 ### Community 642 - ".authorize"
-Cohesion: 0.12
-Nodes (13): RFC-3986, CommandMarker, CommandMarkerEvent, CwdCallback, CwdEvent, MarkerAdapter, ADR-0008, BellCallback (+5 more)
+Cohesion: 0.09
+Nodes (19): RFC-3986, CommandMarker, CommandMarkerCallback, CommandMarkerEvent, CwdCallback, CwdEvent, DataCallback, MarkerAdapter (+11 more)
 
 ### Community 643 - ".NewPTY"
 Cohesion: 0.29
@@ -2683,40 +2734,32 @@ Cohesion: 0.40
 Nodes (5): 1. CodeMirror 6 as the editor core, 2. The public API is the contract, 3. Auto-grow moves from arithmetic to layout, 4. Decoration sets belong to the active `InputTarget`, not to the editor, Decision
 
 ### Community 649 - "New"
-Cohesion: 0.22
-Nodes (21): New(), findBool(), findNumber(), findSecret(), findSelect(), findString(), Registry, T (+13 more)
+Cohesion: 0.21
+Nodes (25): New(), findBool(), findNumber(), findSecret(), findSelect(), findString(), Registry, T (+17 more)
 
 ### Community 650 - "jsonrpcCall"
-Cohesion: 0.28
-Nodes (19): T, WSServer, newSettingsWSServer(), TestSettingsDescribe_MethodNotFound_WhenNotWired(), TestSettingsDescribe_ReturnsDeclarations(), TestSettingsGetAll_ContainsNoSecret(), TestSettingsGetAll_ReturnsDefaults(), TestSettingsReset_RejectsSecret() (+11 more)
-
-### Community 651 - "String"
-Cohesion: 0.10
-Nodes (3): ControlKind, Declaration, String
+Cohesion: 0.18
+Nodes (30): callAndReadAll(), Conn, RawMessage, T, WSServer, newSettingsWSServer(), TestSettingsChanged_BroadcastAfterMutation(), TestSettingsChanged_DisconnectedClientNotLeaked() (+22 more)
 
 ### Community 653 - "Pty"
-Cohesion: 0.16
-Nodes (13): ReadWriteCloser, Config, Context, Stub, Config, Context, Stub, Pty (+5 more)
+Cohesion: 0.29
+Nodes (8): ReadWriteCloser, Config, Context, Stub, Pty, capturingPTYFactory, realPTYFactory, stubPTYFactory
 
 ### Community 654 - "Gutter"
-Cohesion: 0.22
-Nodes (6): CommandRecord, GlyphPosition, Gutter, statusClass(), ADR-0008, visibleGlyphs()
+Cohesion: 0.13
+Nodes (14): Bootstrap in your worktree, Explicitly NOT in this task, Files you own, Ground rules, Keyboard and ARIA belong here, not to a later retrofit, One behaviour change, taken from Orca, Read first, Safety net (+6 more)
 
 ### Community 655 - "JSONStore"
 Cohesion: 0.28
 Nodes (6): Credential, Mutex, ProfileGroup, SSHProfile, JSONStore, storeData
 
 ### Community 656 - "ExportPortableEncrypted"
-Cohesion: 0.25
-Nodes (15): ContentDB, PortableEncryptedDeps, PortableEncryptedExport, PortablePayload, PrivateContent, TestPortableEncrypted_NilContentDB(), TestPortableEncrypted_PrivateContentNotIncludedByDefault(), TestPortableEncrypted_WrongPassphrase() (+7 more)
+Cohesion: 0.24
+Nodes (15): ContentDB, PortableEncryptedDeps, PortableEncryptedExport, PortablePayload, PrivateContent, TestPortableEncrypted_NilContentDB(), TestPortableEncrypted_PrivateContentNotIncludedByDefault(), collectPrivateContent() (+7 more)
 
 ### Community 657 - "ProfileRepository"
-Cohesion: 0.19
-Nodes (13): ConfigExport, ConfigExportDeps, ImportDeps, ImportResult, SettingsProvider, Credential, ProfileGroup, SSHProfile (+5 more)
-
-### Community 658 - "WSServer"
-Cohesion: 0.22
-Nodes (7): Credential, CredentialStore, Listener, Reader, Server, WSServer, Upgrader
+Cohesion: 0.17
+Nodes (14): ConfigExport, ConfigExportDeps, ImportDeps, ImportResult, SettingsProvider, Credential, ProfileGroup, SSHProfile (+6 more)
 
 ### Community 660 - "DocumentStore"
 Cohesion: 0.22
@@ -2727,8 +2770,8 @@ Cohesion: 0.20
 Nodes (9): Control kinds, Data classes (ADR-0011 §3), Methods, Secret-class methods — set, delete, exists; never get (ADR-0011 §2), `settings.describe` → `{ declarations: Declaration[] }`, `settings.getAll` → `{ values: Record<string, unknown> }`, `settings.reset` `{ key: string }` → `{ ok: true }`, Settings RPC contract (coordinator-owned, frozen for wave 3) (+1 more)
 
 ### Community 663 - "Context"
-Cohesion: 0.22
-Nodes (6): Conn, Context, Request, ResponseWriter, newConnState(), newWSConn()
+Cohesion: 0.17
+Nodes (11): ADDENDUM from the coordinator — read this, it changes the shape of the task, Bootstrap, Delivery rules — all of these need tests, Files you own, Ground rules — two of these were violated last wave, read them twice, Read first, Situation, Verification — required, on the FINAL state of the tree (+3 more)
 
 ### Community 665 - "Worker brief — STORE-4 / bead `nocx-am4`: split ProfileStore by aggregate"
 Cohesion: 0.22
@@ -2739,8 +2782,8 @@ Cohesion: 0.22
 Nodes (8): Files owned by OTHER workers — do not touch, escalate instead, Files you own (nobody else touches them this wave), Ground rules, Report in `worker_done`, The secret control is the part to get right, Validation and errors, Worker brief — STORE-5b / bead `nocx-9m5`: the generated settings screen (frontend half), Your deliverable
 
 ### Community 667 - "ManifestFor"
-Cohesion: 0.46
-Nodes (6): BackupDeps, BackupManifest, Manifest, Mode, Backup(), ManifestFor()
+Cohesion: 0.36
+Nodes (7): BackupDeps, BackupManifest, Manifest, Mode, Backup(), ManifestFor(), Mode
 
 ### Community 669 - "Worker brief — STORE-5c / bead `nocx-9m5`: wire the settings registry to the wire"
 Cohesion: 0.25
@@ -2755,28 +2798,92 @@ Cohesion: 0.29
 Nodes (6): Files owned by OTHER workers — do not touch, escalate instead, Files you own (nobody else touches them this wave), Ground rules, Report in `worker_done`, Worker brief — STORE-5a / bead `nocx-9m5`: the settings registry (backend half), Your deliverable
 
 ### Community 672 - "log_test.go"
-Cohesion: 0.53
-Nodes (5): T, TestNewSlogAdapter_DoesNotPanic(), TestSlogAdapter_With(), TestSlogAdapter_WithContext(), TestTraceIDFromContext_EmptyWhenNotSet()
+Cohesion: 0.33
+Nodes (11): contains(), T, mustSpawn(), TestLocalPty_CloseTwice(), TestLocalPty_ImplementsInterface(), TestLocalPty_ReadReturnsOutput(), TestLocalPty_Resize(), TestLocalPty_SpawnAndWrite() (+3 more)
+
+### Community 674 - "fakeProfileRepo"
+Cohesion: 0.18
+Nodes (10): A judgement call that is yours to make and justify, Acceptance criteria, from the bead, Bootstrap, Files you own, Ground rules, Read first, The constraint that is not negotiable, The situation (+2 more)
+
+### Community 676 - "Worker brief — SETTINGS-1 (bead `nocx-r2hf`)"
+Cohesion: 0.18
+Nodes (10): Also fix, in the same code path (bead `nocx-q07f`, P1), Bootstrap in your worktree, Files you own, Ground rules, Invariant that must survive, Read first, The task, Verification — run all of it, in your own worktree (+2 more)
+
+### Community 677 - "Worker brief — TABS-C: Settings as a dedicated tab (bead `nocx-h4e2`)"
+Cohesion: 0.18
+Nodes (10): Bootstrap, Explicitly not in this task, Files you own, Ground rules, Read first, Verification — required, on the FINAL state of the tree, What already exists — build on it, do not rebuild it, What to build (+2 more)
+
+### Community 679 - "Worker brief — delete the wterm renderer (bead `nocx-k7kq`)"
+Cohesion: 0.20
+Nodes (9): A wart that disappears with the file — do not port it forward, Bootstrap, Docs — seven files, and one of them is a decision record, Files you own, Ground rules, Scope, already measured — verify it rather than trusting it, Verification, Why (+1 more)
+
+### Community 680 - "Worker brief — SETTINGS-3: settings change broadcast (bead `nocx-lsws`)"
+Cohesion: 0.20
+Nodes (9): Bootstrap, Explicitly not in this task, Files you own, Ground rules — two of these were violated last wave, read them twice, Read first, Situation, Verification — required, on the FINAL state of the tree, What to build (+1 more)
+
+### Community 683 - "Worker brief — make the e2e suite green (bead `nocx-bw2`)"
+Cohesion: 0.22
+Nodes (8): Files you own, Ground rules, The situation, measured, Two things that will save you an afternoon, Verification, What "green" means here, and what it does not, Why you are on a separate branch, Worker brief — make the e2e suite green (bead `nocx-bw2`)
+
+### Community 684 - "Worker brief — TABS-3: the vertical tab panel, Warp-style (bead `nocx-d3q.3`)"
+Cohesion: 0.22
+Nodes (8): Files you own, Ground rules, Reference, not template, Verification — you have this worktree to yourself, so run all of it, What already exists — build against it, do not reshape it, What to build, Why you come before the setting, Worker brief — TABS-3: the vertical tab panel, Warp-style (bead `nocx-d3q.3`)
+
+### Community 686 - "resolvedConfig"
+Cohesion: 0.33
+Nodes (6): checkBinding(), currentUser(), expandPath(), Config, RealClient, resolvedConfig
+
+### Community 687 - "ws_export.go"
+Cohesion: 0.22
+Nodes (7): RawMessage, Registry, exportImportParams, exportImportPortableParams, exportManifestParams, exportPortableEncryptedParams, settingsProviderAdapter
+
+### Community 688 - "Resolver"
+Cohesion: 0.43
+Nodes (3): Resolver, Credential, SSHProfile
+
+### Community 689 - "pbkdf2_test.go"
+Cohesion: 0.39
+Nodes (7): rfc6070Vector, T, pbkdf2LegacySHA512(), pbkdf2SHA1(), TestPBKDF2RFC6070(), TestPBKDF2VaultParamsSHA512(), TestPBKDF2XCryptoMatchesRFC6070()
+
+### Community 690 - "Worker brief — credential hygiene: two beads (`nocx-6ek.2`, `nocx-dcd`)"
+Cohesion: 0.25
+Nodes (7): Bead 1 — `nocx-dcd`: replace the hand-rolled PBKDF2, Bead 2 — `nocx-6ek.2`: encrypted keys never use their stored passphrase, Files you own, Ground rules, Read first, Verification — required, on the FINAL state of the tree, Worker brief — credential hygiene: two beads (`nocx-6ek.2`, `nocx-dcd`)
+
+### Community 691 - "Worker brief — the Settings rail: modified-only filter and a narrow-viewport layout"
+Cohesion: 0.25
+Nodes (7): Bead 1 — `nocx-wbtv`: surface the modified-only filter in the rail, Bead 2 — `nocx-v98h`: the narrow-viewport layout is missing entirely, Evidence, and being honest about it, Files you own, Ground rules, Verification — scoped, because you are sharing a worktree, Worker brief — the Settings rail: modified-only filter and a narrow-viewport layout
+
+### Community 692 - "Worker brief — TABS-1 remaining scope: the dead accessor surface (bead `nocx-d3q.1`)"
+Cohesion: 0.25
+Nodes (7): Files you own, Ground rules, The decision is yours, and it must be argued, Verification — scoped, because you are sharing a worktree, What is already done, so you do not redo it, What remains, and it is the whole task, Worker brief — TABS-1 remaining scope: the dead accessor surface (bead `nocx-d3q.1`)
+
+### Community 693 - ".NewPTY"
+Cohesion: 0.40
+Nodes (4): Config, WithExtraEnv(), Config, Option
+
+### Community 694 - ".NewPTY"
+Cohesion: 0.40
+Nodes (4): Config, Context, Stub, stubPTYFactory
 
 ## Knowledge Gaps
-- **3858 isolated node(s):** `$schema`, `title`, `description`, `type`, `workflow_version` (+3853 more)
+- **3988 isolated node(s):** `$schema`, `title`, `description`, `type`, `workflow_version` (+3983 more)
   These have ≤1 connection - possible missing edges or undocumented components.
-- **83 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **90 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `Logger` connect `Config, Log & Shell Integration` to `Binary Frame Codec (Go)`, `RealChannel`, `Updater`, `SSH Transport & Tests`, `Local PTY & App Wiring`, `Session Lifecycle & App`, `Pty`, `log_test.go`, `Pty`, `WSServer`, `devharness/main.go`, `PTY Interface & Stub`, `ConnectConfig`, `scripts_exec_test.go`, `testLogger`?**
-  _High betweenness centrality (0.010) - this node is a cross-community bridge._
-- **Why does `NewSlogAdapter()` connect `log_test.go` to `log_test.go`, `Binary Frame Codec (Go)`, `newCascadeHarness`, `SSH Transport & Tests`, `Local PTY & App Wiring`, `jsonrpcCall`, `newTestRealClient`, `updater_test.go`, `Config, Log & Shell Integration`, `jsonrpcCall`, `TestControlFrameLogging`, `PTY Interface & Stub`, `ws_auth_test.go`, `scripts_exec_test.go`?**
+- **Why does `NewSlogAdapter()` connect `log_test.go` to `log_test.go`, `Binary Frame Codec (Go)`, `SSH Transport & Tests`, `jsonrpcCall`, `newTestRealClient`, `updater_test.go`, `Config, Log & Shell Integration`, `submitCommand`, `jsonrpcCall`, `TestControlFrameLogging`, `PTY Interface & Stub`, `ws_auth_test.go`, `scripts_exec_test.go`?**
+  _High betweenness centrality (0.006) - this node is a cross-community bridge._
+- **Why does `Logger` connect `Config, Log & Shell Integration` to `Binary Frame Codec (Go)`, `RealChannel`, `Updater`, `SSH Transport & Tests`, `Local PTY & App Wiring`, `Session Lifecycle & App`, `Pty`, `submitCommand`, `DecodeFrame`, `log_test.go`, `Stub`, `Pty`, `ws.go`, `devharness/main.go`, `PTY Interface & Stub`, `scripts_exec_test.go`, `testLogger`?**
   _High betweenness centrality (0.005) - this node is a cross-community bridge._
-- **Why does `New()` connect `New` to `Binary Frame Codec (Go)`, `WebSocket JSON-RPC Server`, `Config, Log & Shell Integration`, `SSH Real Client`, `session_test.go`, `New`, `ConnectConfig`, `DocumentStore`, `Secret`?**
-  _High betweenness centrality (0.005) - this node is a cross-community bridge._
+- **Why does `testLogger()` connect `scripts_exec_test.go` to `Config, Log & Shell Integration`, `log_test.go`?**
+  _High betweenness centrality (0.003) - this node is a cross-community bridge._
 - **Are the 115 inferred relationships involving `NewSlogAdapter()` (e.g. with `New()` and `TestNewSlogAdapter_DoesNotPanic()`) actually correct?**
   _`NewSlogAdapter()` has 115 INFERRED edges - model-reasoned connections that need verification._
-- **Are the 22 inferred relationships involving `connectWS()` (e.g. with `newCascadeHarness()` and `TestControlFrameLogging()`) actually correct?**
-  _`connectWS()` has 22 INFERRED edges - model-reasoned connections that need verification._
-- **Are the 46 inferred relationships involving `NewWSServer()` (e.g. with `New()` and `startAuthServer()`) actually correct?**
-  _`NewWSServer()` has 46 INFERRED edges - model-reasoned connections that need verification._
+- **Are the 27 inferred relationships involving `connectWS()` (e.g. with `newCascadeHarness()` and `TestControlFrameLogging()`) actually correct?**
+  _`connectWS()` has 27 INFERRED edges - model-reasoned connections that need verification._
 - **Are the 7 inferred relationships involving `SecretID` (e.g. with `.buildConfig()` and `.deleteCredentialCascade()`) actually correct?**
   _`SecretID` has 7 INFERRED edges - model-reasoned connections that need verification._
+- **What connects `$schema`, `title`, `description` to the rest of the system?**
+  _3988 weakly-connected nodes found - possible documentation gaps or missing edges._
