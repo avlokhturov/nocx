@@ -27,7 +27,7 @@ async function disableWailsRuntime(page: import("@playwright/test").Page) {
         return undefined;
       },
       set(_value: unknown) {
-        /* swallowed */
+        void _value; /* swallowed */
       },
       configurable: true,
       enumerable: true,

@@ -1,4 +1,4 @@
-import { test, expect, type Page } from "./harness";
+import { test, expect } from './harness';
 
 // Regression guard for the shared half of nocx-d1f: with one tab, clicking the
 // window left the terminal unable to take input.
