@@ -1,11 +1,15 @@
 package transport
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/gorilla/websocket"
 
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
@@ -34,6 +38,15 @@ var testNumberKey = settings.MustRegisterNumber(settings.NumberSpec{
 	Default:     50,
 	Min:         f64ptr(0),
 	Max:         f64ptr(100),
+})
+
+var testStringKey = settings.MustRegisterString(settings.StringSpec{
+	Key:         "test.stringNotEmpty",
+	Section:     "Test",
+	Label:       "Non-Empty String",
+	Description: "A string setting whose validation rejects the empty string.",
+	Default:     "required",
+	DataClass:   settings.PublicConfig,
 })
 
 // ── fake secret store ──────────────────────────────────────────────────
@@ -538,5 +551,238 @@ func TestSettingsSet_ValidationErrorUnwraps(t *testing.T) {
 	ve := &settings.ValidationError{SettingKey: "test", Value: "bad", Message: "invalid"}
 	if !errors.Is(ve, settings.ErrValidation) {
 		t.Fatal("ValidationError does not unwrap to ErrValidation")
+	}
+}
+
+// ── helpers for notification tests ──────────────────────────────────────
+
+// rpcResult holds a decoded JSON-RPC response or notification.
+type rpcResult struct {
+	ID     int              `json:"id,omitempty"`
+	Result json.RawMessage  `json:"result,omitempty"`
+	Error  *jsonrpcErrorObj `json:"error,omitempty"`
+	Method string           `json:"method,omitempty"`
+	Params map[string]any   `json:"params,omitempty"`
+}
+
+// callAndReadAll sends a JSON-RPC request and reads all messages until the
+// response with matching id arrives. Returns the response and any
+// notifications that were received before it.
+func callAndReadAll(t *testing.T, conn *websocket.Conn, method string, params map[string]any, id int) (*rpcResult, []*rpcResult) {
+	t.Helper()
+	req, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      id,
+		"method":  method,
+		"params":  params,
+	})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, req); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+
+	var notifications []*rpcResult
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	for {
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		var msg rpcResult
+		if err := json.Unmarshal(data, &msg); err != nil {
+			continue
+		}
+		if msg.Method != "" {
+			notifications = append(notifications, &msg)
+			continue
+		}
+		if msg.ID == id {
+			return &msg, notifications
+		}
+	}
+}
+
+// ── settings.changed broadcast ──────────────────────────────────────────
+
+func TestSettingsChanged_BroadcastAfterMutation(t *testing.T) {
+	ws, cleanup := newSettingsWSServer(t)
+	defer cleanup()
+
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	resp, notifs := callAndReadAll(t, conn, "settings.set", map[string]any{
+		"key":   "clipboard.osc52Suppressed",
+		"value": true,
+	}, 1)
+
+	if resp.Error != nil {
+		t.Fatalf("settings.set error: %s", resp.Error.Message)
+	}
+
+	if len(notifs) != 1 {
+		t.Fatalf("expected 1 notification, got %d", len(notifs))
+	}
+	notif := notifs[0]
+	if notif.Method != "settings.changed" {
+		t.Fatalf("expected settings.changed, got %q", notif.Method)
+	}
+	if notif.Params == nil {
+		t.Fatal("params missing")
+	}
+	if _, ok := notif.Params["revision"]; !ok {
+		t.Error("revision missing from notification")
+	}
+	keys, ok := notif.Params["keys"].([]any)
+	if !ok {
+		t.Fatal("keys missing from notification")
+	}
+	if len(keys) != 1 || keys[0] != "clipboard.osc52Suppressed" {
+		t.Errorf("keys = %v, want [clipboard.osc52Suppressed]", keys)
+	}
+}
+
+func TestSettingsChanged_TwoClientsBothReceive(t *testing.T) {
+	ws, cleanup := newSettingsWSServer(t)
+	defer cleanup()
+
+	conn1 := connectWS(t, ws)
+	defer func() { _ = conn1.Close() }()
+	conn2 := connectWS(t, ws)
+	defer func() { _ = conn2.Close() }()
+
+	resp, notifs1 := callAndReadAll(t, conn1, "settings.set", map[string]any{
+		"key":   "clipboard.osc52Suppressed",
+		"value": true,
+	}, 1)
+	if resp.Error != nil {
+		t.Fatalf("settings.set error: %s", resp.Error.Message)
+	}
+	if len(notifs1) != 1 || notifs1[0].Method != "settings.changed" {
+		t.Error("conn1: expected settings.changed notification")
+	}
+
+	// conn2 must also receive the notification.
+	_ = conn2.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_, data, err := conn2.ReadMessage()
+	if err != nil {
+		t.Fatalf("conn2 read: %v", err)
+	}
+	var msg rpcResult
+	if err := json.Unmarshal(data, &msg); err != nil {
+		t.Fatalf("conn2 unmarshal: %v", err)
+	}
+	if msg.Method != "settings.changed" {
+		t.Errorf("conn2: expected settings.changed, got %q", msg.Method)
+	}
+}
+
+func TestSettingsChanged_DisconnectedClientNotLeaked(t *testing.T) {
+	ws, cleanup := newSettingsWSServer(t)
+	defer cleanup()
+
+	conn1 := connectWS(t, ws)
+	conn2 := connectWS(t, ws)
+
+	// Disconnect conn2 and wait for the server to process the close.
+	_ = conn2.Close()
+	time.Sleep(100 * time.Millisecond)
+
+	// Mutate from conn1.
+	resp, notifs := callAndReadAll(t, conn1, "settings.set", map[string]any{
+		"key":   "clipboard.osc52Suppressed",
+		"value": true,
+	}, 1)
+	if resp.Error != nil {
+		t.Fatalf("settings.set error: %s", resp.Error.Message)
+	}
+	if len(notifs) != 1 || notifs[0].Method != "settings.changed" {
+		t.Error("conn1: expected settings.changed")
+	}
+
+	// Mutate again — broadcast must not panic.
+	resp2, notifs2 := callAndReadAll(t, conn1, "settings.set", map[string]any{
+		"key":   "clipboard.osc52Suppressed",
+		"value": false,
+	}, 2)
+	if resp2.Error != nil {
+		t.Fatalf("second settings.set error: %s", resp2.Error.Message)
+	}
+	if len(notifs2) != 1 || notifs2[0].Method != "settings.changed" {
+		t.Error("conn1: expected second settings.changed")
+	}
+
+	_ = conn1.Close()
+}
+
+func TestSettingsChanged_SecretValueNotInNotification(t *testing.T) {
+	ws, cleanup := newSettingsWSServer(t)
+	defer cleanup()
+
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	resp, notifs := callAndReadAll(t, conn, "settings.secretSet", map[string]any{
+		"key":   testSecretKey.Key(),
+		"value": "super-secret-value-12345",
+	}, 1)
+	if resp.Error != nil {
+		t.Fatalf("settings.secretSet error: %s", resp.Error.Message)
+	}
+	if len(notifs) != 1 || notifs[0].Method != "settings.changed" {
+		t.Fatal("expected settings.changed notification")
+	}
+	notif := notifs[0]
+
+	// Serialise the full notification and check that the secret value
+	// does not appear anywhere.
+	raw, err := json.Marshal(notif)
+	if err != nil {
+		t.Fatalf("marshal notification: %v", err)
+	}
+	if bytes.Contains(raw, []byte("super-secret-value-12345")) {
+		t.Fatal("secret value found in settings.changed notification")
+	}
+	// The key name must be present (declared).
+	if !bytes.Contains(raw, []byte(testSecretKey.Key())) {
+		t.Error("secret key not found in notification; expected key presence")
+	}
+}
+
+func TestSettingsChanged_FailedMutationEmitsNothing(t *testing.T) {
+	ws, cleanup := newSettingsWSServer(t)
+	defer cleanup()
+
+	conn1 := connectWS(t, ws)
+	defer func() { _ = conn1.Close() }()
+	conn2 := connectWS(t, ws)
+	defer func() { _ = conn2.Close() }()
+
+	// Attempt an invalid mutation.
+	resp, notifs := callAndReadAll(t, conn1, "settings.set", map[string]any{
+		"key":   testStringKey.Key(),
+		"value": "",
+	}, 1)
+	if resp.Error == nil {
+		t.Fatal("expected validation error, got success")
+	}
+	if len(notifs) > 0 {
+		for _, n := range notifs {
+			if n.Method == "settings.changed" {
+				t.Error("conn1: received unexpected settings.changed after failed mutation")
+			}
+		}
+	}
+
+	// Verify conn2 receives nothing.
+	_ = conn2.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	_, data, err := conn2.ReadMessage()
+	if err == nil {
+		var msg rpcResult
+		if json.Unmarshal(data, &msg) == nil && msg.Method == "settings.changed" {
+			t.Error("conn2: received unexpected settings.changed after failed mutation")
+		}
 	}
 }

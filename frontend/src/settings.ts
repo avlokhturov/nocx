@@ -8,6 +8,7 @@
 
 import { log } from './log'
 import { ProfileClient } from './profiles'
+import { SettingsObserver } from './settings-observer'
 
 export interface Declaration {
   key: string
@@ -34,10 +35,10 @@ const enum LoadState {
   Failed = 'failed',
   Empty = 'empty',
 }
-
 export class SettingsViewImpl implements SettingsView {
   private container: HTMLElement
   private client: ProfileClient
+  private observer: SettingsObserver | null
   private declarations: Declaration[] = []
   private values: Record<string, unknown> = {}
   private draftValues: Record<string, unknown> = {}
@@ -55,12 +56,21 @@ export class SettingsViewImpl implements SettingsView {
   private loadState: LoadState = LoadState.Loading
   // Bound handler so we can remove the listener.
   private boundKeydown: (e: KeyboardEvent) => void
+  // Bound refresh so the observer can call it.
+  private boundRefresh: () => Promise<void>
 
-  constructor(container: HTMLElement, client: ProfileClient) {
+  constructor(container: HTMLElement, client: ProfileClient, observer?: SettingsObserver) {
     this.container = container
     this.client = client
+    this.observer = observer ?? null
     this.boundKeydown = this.handleKeydown.bind(this)
+    this.boundRefresh = this.refresh.bind(this)
     this.container.addEventListener('keydown', this.boundKeydown)
+    if (this.observer) {
+      this.observer.start(() => {
+        void this.boundRefresh()
+      })
+    }
   }
 
   show(): void {
@@ -79,6 +89,7 @@ export class SettingsViewImpl implements SettingsView {
       this.values = snap.values ?? {}
       this.overridden = new Set(snap.overridden ?? [])
       this.revision = snap.revision ?? 0
+      this.observer?.setRevision(snap.revision ?? 0)
       this.draftValues = {}
       this.errors = {}
 

@@ -129,12 +129,18 @@ export class Dispatcher {
 
   // --- Lifecycle subscriptions ---------------------------------------------
 
-  onConnect(handler: LifecycleHandler): void {
+  onConnect(handler: LifecycleHandler): () => void {
     this.connectHandlers.add(handler)
+    return () => {
+      this.connectHandlers.delete(handler)
+    }
   }
 
-  onDisconnect(handler: LifecycleHandler): void {
+  onDisconnect(handler: LifecycleHandler): () => void {
     this.disconnectHandlers.add(handler)
+    return () => {
+      this.disconnectHandlers.delete(handler)
+    }
   }
 
   // --- Accessors -----------------------------------------------------------
