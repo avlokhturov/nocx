@@ -1,12 +1,12 @@
 package profile
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/shady2k/nocx/internal/storage"
 )
 
 // ProfileStore is the persistence interface for profiles, groups, and credentials.
@@ -27,19 +27,30 @@ type ProfileStore interface {
 // The file format is:
 //
 //	{ "profiles": [...], "groups": [...] }
-//
-// Writes are atomic (temp file + rename) to prevent corruption on crash.
 type JSONStore struct {
-	path string
-	mu   sync.Mutex
+	docStore storage.DocumentStore
+	fileName string
+	mu       sync.Mutex
 }
 
-// NewJSONStore creates a JSONStore rooted at path.
+// NewJSONStore creates a JSONStore rooted at path (convenience constructor
+// used by tests and simple wiring). The path's directory component becomes
+// the DocumentStore root; the file component is the document name.
 func NewJSONStore(path string) *JSONStore {
-	return &JSONStore{path: path}
+	return &JSONStore{
+		docStore: storage.NewDocumentStore(filepath.Dir(path)),
+		fileName: filepath.Base(path),
+	}
 }
 
-// storeData is the on-disk JSON shape.
+// NewJSONStoreWithDocStore creates a JSONStore that reads and writes the
+// named document through the given DocumentStore. Prefer this constructor
+// when the DocumentStore is shared across multiple modules (composition-root
+// wiring per AD-8).
+func NewJSONStoreWithDocStore(docStore storage.DocumentStore, fileName string) *JSONStore {
+	return &JSONStore{docStore: docStore, fileName: fileName}
+}
+
 type storeData struct {
 	Profiles    []SSHProfile   `json:"profiles,omitempty"`
 	Groups      []ProfileGroup `json:"groups,omitempty"`
@@ -47,19 +58,13 @@ type storeData struct {
 }
 
 func (s *JSONStore) load() (*storeData, error) {
-	raw, err := os.ReadFile(s.path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return &storeData{}, nil
-		}
-		return nil, fmt.Errorf("read profile store %s: %w", s.path, err)
-	}
-	if len(raw) == 0 {
-		return &storeData{}, nil
-	}
 	var d storeData
-	if err := json.Unmarshal(raw, &d); err != nil {
-		return nil, fmt.Errorf("parse profile store %s: %w", s.path, err)
+	found, err := s.docStore.Read(s.fileName, &d)
+	if err != nil {
+		return nil, fmt.Errorf("read profile store: %w", err)
+	}
+	if !found {
+		return &storeData{}, nil
 	}
 	return &d, nil
 }
@@ -68,33 +73,7 @@ func (s *JSONStore) save(d *storeData) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
-		return fmt.Errorf("mkdir for profile store: %w", err)
-	}
-
-	raw, err := json.MarshalIndent(d, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal profile store: %w", err)
-	}
-
-	tmp, err := os.CreateTemp(filepath.Dir(s.path), ".profiles-*.tmp")
-	if err != nil {
-		return fmt.Errorf("create temp file: %w", err)
-	}
-	tmpName := tmp.Name()
-	defer func() { _ = os.Remove(tmpName) }()
-
-	if _, err := tmp.Write(raw); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("write temp file: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close temp file: %w", err)
-	}
-	if err := os.Rename(tmpName, s.path); err != nil {
-		return fmt.Errorf("rename temp to %s: %w", s.path, err)
-	}
-	return nil
+	return s.docStore.Write(s.fileName, d)
 }
 
 func (s *JSONStore) LoadProfiles() ([]SSHProfile, error) {

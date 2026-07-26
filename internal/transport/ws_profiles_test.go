@@ -186,23 +186,27 @@ func TestNoPlaintextSecretsOnWire(t *testing.T) {
 	cs := credential.NewKeychain()
 
 	// Save a credential with password auth (target).
+	tgtPWID := credential.NewSecretID()
+	_ = cs.Set(tgtPWID, credential.NewSecret(targetCanary))
 	_ = ps.SaveCredential(profile.Credential{
 		ID:       "cred:canary:aaa",
 		Name:     "canary-cred",
 		Username: "canary-user",
 		Auth:     "password",
+		SecretID: string(tgtPWID),
 	})
-	_ = cs.SavePassword(credential.Identity{User: "cred:canary:aaa"}, targetCanary)
 
-	// Save a jump credential (public key — password for the private key passphrase path).
+	// Save a jump credential (public key).
+	jumpPWID := credential.NewSecretID()
+	_ = cs.Set(jumpPWID, credential.NewSecret(jumpCanary))
 	_ = ps.SaveCredential(profile.Credential{
 		ID:       "cred:canary:bbb",
 		Name:     "jump-canary",
 		Username: "jump-canary-user",
 		Auth:     "publicKey",
 		KeyPath:  "/home/canary/.ssh/id_rsa",
+		SecretID: string(jumpPWID),
 	})
-	_ = cs.SavePassword(credential.Identity{User: "cred:canary:bbb"}, jumpCanary)
 
 	// Create a jump profile.
 	_ = ps.SaveProfile(profile.SSHProfile{

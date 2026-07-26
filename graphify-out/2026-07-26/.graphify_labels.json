@@ -647,5 +647,6 @@
   "645": "W6 — wire the devharness listen address and prove the token path works headless",
   "646": ".NewPTY",
   "647": "Decision",
-  "648": "Channel"
+  "648": "Channel",
+  "649": ".deleteCredentialCascade"
 }

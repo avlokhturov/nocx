@@ -82,18 +82,24 @@ type ConnectConfig struct {
 	JumpBoundHost string
 	JumpBoundPort int
 
-	// JumpCredentials, when set, enables late-bind of the jump host's
-	// password from the credential store. Separate from the target's
-	// Credentials so each hop resolves independently.
-	JumpCredentials  credential.CredentialStore
-	JumpCredIdentity credential.Identity
+	// JumpSecrets, when set, enables late-bind of the jump host's
+	// password from the SecretStore. Separate from the target's Secrets
+	// so each hop resolves independently.
+	JumpSecrets  credential.SecretStore
+	JumpSecretID credential.SecretID
+	// JumpPassphraseSecretID is the opaque reference to the jump host's key
+	// passphrase in the SecretStore.
+	JumpPassphraseSecretID credential.SecretID
 
-	// Credentials, when set, enables late-bind of stored passwords by
-	// CredIdentity. The credential store is the seam between the profile
+	// Secrets, when set, enables late-bind of stored passwords from the
+	// SecretStore by SecretID. The store is the seam between the profile
 	// manager (clear data) and the secret store — never call it directly
 	// from frontend code.
-	Credentials  credential.CredentialStore
-	CredIdentity credential.Identity
+	Secrets  credential.SecretStore
+	SecretID credential.SecretID
+	// PassphraseSecretID is the opaque reference to the stored key
+	// passphrase in the SecretStore.
+	PassphraseSecretID credential.SecretID
 }
 
 func WithUser(user string) ConnectOption {
@@ -158,22 +164,22 @@ func WithJumpHost(host string, port int, user, authMode string) ConnectOption {
 	}
 }
 
-// WithJumpCredentials injects a credential store for late-bind of the jump
-// host's password by identity. Mirrors WithCredentials but for the jump hop.
-func WithJumpCredentials(store credential.CredentialStore, id credential.Identity) ConnectOption {
+// WithJumpCredentials injects a SecretStore for late-bind of the jump
+// host's password by SecretID. Mirrors WithCredentials but for the jump hop.
+func WithJumpCredentials(store credential.SecretStore, id credential.SecretID) ConnectOption {
 	return func(c *ConnectConfig) {
-		c.JumpCredentials = store
-		c.JumpCredIdentity = id
+		c.JumpSecrets = store
+		c.JumpSecretID = id
 	}
 }
 
-// WithCredentials injects a credential store for late-bind of stored
-// passwords by identity. The store is the seam between the profile manager
+// WithCredentials injects a SecretStore for late-bind of stored
+// passwords by SecretID. The store is the seam between the profile manager
 // and the secret store.
-func WithCredentials(store credential.CredentialStore, id credential.Identity) ConnectOption {
+func WithCredentials(store credential.SecretStore, id credential.SecretID) ConnectOption {
 	return func(c *ConnectConfig) {
-		c.Credentials = store
-		c.CredIdentity = id
+		c.Secrets = store
+		c.SecretID = id
 	}
 }
 

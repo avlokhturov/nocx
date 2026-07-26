@@ -8,7 +8,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"os"
 	"sync"
 
 	"github.com/gorilla/websocket"
@@ -1032,11 +1031,21 @@ func (s *WSServer) handleCredentialCRUDMethod(wconn *wsConn, req jsonrpcRequest)
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
 			return
 		}
+		// Strip SecretID fields — the renderer must never see them (ADR-0011 SS2).
+		for i := range creds {
+			creds[i].SecretID = ""
+			creds[i].PassphraseSecretID = ""
+		}
 		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(creds)))
 	case "credentials.create", "credentials.update":
 		var c profile.Credential
 		if err := json.Unmarshal(req.Params, &c); err != nil {
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+			return
+		}
+		// Reject renderer-supplied SecretIDs — the backend owns them exclusively.
+		if c.SecretID != "" || c.PassphraseSecretID != "" {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "secretId/passphraseSecretId are backend-owned"))
 			return
 		}
 		if c.ID == "" {
@@ -1046,6 +1055,8 @@ func (s *WSServer) handleCredentialCRUDMethod(wconn *wsConn, req jsonrpcRequest)
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
 			return
 		}
+		c.SecretID = ""
+		c.PassphraseSecretID = ""
 		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(c)))
 	case "credentials.delete":
 		var params struct {
@@ -1071,56 +1082,40 @@ func (s *WSServer) handleCredentialMethod(wconn *wsConn, req jsonrpcRequest) {
 	switch req.Method {
 	case "credentials.savePassword":
 		var params struct {
-			CredentialID string              `json:"credentialId"`
-			Identity     credential.Identity `json:"identity"` // Legacy
-			Password     string              `json:"password"`
+			CredentialID string `json:"credentialId"`
+			Password     string `json:"password"`
 		}
-		if err := json.Unmarshal(req.Params, &params); err != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		if err := json.Unmarshal(req.Params, &params); err != nil || params.CredentialID == "" {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: credentialId required"))
 			return
 		}
-		// Support both credentialId (new) and identity (legacy).
-		identity := params.Identity
-		if params.CredentialID != "" {
-			identity = credential.Identity{User: params.CredentialID}
-		}
-		if err := s.credentials.SavePassword(identity, params.Password); err != nil {
+		if err := s.savePasswordForCredential(params.CredentialID, params.Password); err != nil {
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
 			return
 		}
 		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(true)))
 	case "credentials.deletePassword":
 		var params struct {
-			CredentialID string              `json:"credentialId"`
-			Identity     credential.Identity `json:"identity"` // Legacy
+			CredentialID string `json:"credentialId"`
 		}
-		if err := json.Unmarshal(req.Params, &params); err != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		if err := json.Unmarshal(req.Params, &params); err != nil || params.CredentialID == "" {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: credentialId required"))
 			return
 		}
-		identity := params.Identity
-		if params.CredentialID != "" {
-			identity = credential.Identity{User: params.CredentialID}
-		}
-		if err := s.credentials.DeletePassword(identity); err != nil {
+		if err := s.deletePasswordForCredential(params.CredentialID); err != nil {
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
 			return
 		}
 		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(true)))
 	case "credentials.hasPassword":
 		var params struct {
-			CredentialID string              `json:"credentialId"`
-			Identity     credential.Identity `json:"identity"` // Legacy
+			CredentialID string `json:"credentialId"`
 		}
-		if err := json.Unmarshal(req.Params, &params); err != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		if err := json.Unmarshal(req.Params, &params); err != nil || params.CredentialID == "" {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: credentialId required"))
 			return
 		}
-		identity := params.Identity
-		if params.CredentialID != "" {
-			identity = credential.Identity{User: params.CredentialID}
-		}
-		has, err := s.credentials.HasPassword(identity)
+		has, err := s.hasPasswordForCredential(params.CredentialID)
 		if err != nil {
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
 			return
@@ -1128,27 +1123,27 @@ func (s *WSServer) handleCredentialMethod(wconn *wsConn, req jsonrpcRequest) {
 		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(has)))
 	case "credentials.saveKeyPassphrase":
 		var params struct {
-			Hash       credential.KeyHash `json:"hash"`
-			Passphrase string             `json:"passphrase"`
+			CredentialID string `json:"credentialId"`
+			Passphrase   string `json:"passphrase"`
 		}
-		if err := json.Unmarshal(req.Params, &params); err != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		if err := json.Unmarshal(req.Params, &params); err != nil || params.CredentialID == "" {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: credentialId required"))
 			return
 		}
-		if err := s.credentials.SaveKeyPassphrase(params.Hash, params.Passphrase); err != nil {
+		if err := s.savePassphraseForCredential(params.CredentialID, params.Passphrase); err != nil {
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
 			return
 		}
 		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(true)))
 	case "credentials.deleteKeyPassphrase":
 		var params struct {
-			Hash credential.KeyHash `json:"hash"`
+			CredentialID string `json:"credentialId"`
 		}
-		if err := json.Unmarshal(req.Params, &params); err != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		if err := json.Unmarshal(req.Params, &params); err != nil || params.CredentialID == "" {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: credentialId required"))
 			return
 		}
-		if err := s.credentials.DeleteKeyPassphrase(params.Hash); err != nil {
+		if err := s.deletePassphraseForCredential(params.CredentialID); err != nil {
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
 			return
 		}
@@ -1156,72 +1151,173 @@ func (s *WSServer) handleCredentialMethod(wconn *wsConn, req jsonrpcRequest) {
 	}
 }
 
+// savePasswordForCredential stores a password secret and repoints the
+// credential's SecretID. The new secret is written under a fresh ID first,
+// then metadata is updated, then the old secret (if any) is best-effort
+// deleted — write-before-repoint prevents a crash from orphaning the new
+// secret.
+func (s *WSServer) savePasswordForCredential(credID, password string) error {
+	if s.profiles == nil {
+		return errors.New("profiles not available")
+	}
+	cred, ok, err := s.findCredentialByID(credID)
+	if err != nil {
+		return fmt.Errorf("load credential %s: %w", credID, err)
+	}
+	if !ok {
+		return fmt.Errorf("credential %s not found", credID)
+	}
+
+	newID := credential.NewSecretID()
+	if err := s.credentials.Set(newID, credential.NewSecret(password)); err != nil {
+		return fmt.Errorf("store secret: %w", err)
+	}
+
+	oldID := credential.SecretID(cred.SecretID)
+	cred.SecretID = string(newID)
+	if err := s.profiles.SaveCredential(cred); err != nil {
+		return fmt.Errorf("save credential metadata: %w", err)
+	}
+
+	// Best-effort delete of the old secret. The new one is already stored
+	// and metadata points at it, so this is purely garbage collection.
+	if oldID != "" {
+		_ = s.credentials.Delete(oldID)
+	}
+	return nil
+}
+
+// deletePasswordForCredential removes the stored password secret and clears
+// the credential's SecretID. The metadata update is the authoritative step;
+// secret deletion is best-effort afterward.
+func (s *WSServer) deletePasswordForCredential(credID string) error {
+	if s.profiles == nil {
+		return errors.New("profiles not available")
+	}
+	cred, ok, err := s.findCredentialByID(credID)
+	if err != nil {
+		return fmt.Errorf("load credential %s: %w", credID, err)
+	}
+	if !ok {
+		return fmt.Errorf("credential %s not found", credID)
+	}
+
+	oldID := credential.SecretID(cred.SecretID)
+	cred.SecretID = ""
+	if err := s.profiles.SaveCredential(cred); err != nil {
+		return fmt.Errorf("save credential metadata: %w", err)
+	}
+
+	if oldID != "" {
+		_ = s.credentials.Delete(oldID)
+	}
+	return nil
+}
+
+// hasPasswordForCredential checks whether a password secret exists for the
+// credential. Returns false when the credential is not found.
+func (s *WSServer) hasPasswordForCredential(credID string) (bool, error) {
+	if s.profiles == nil {
+		return false, nil
+	}
+	cred, ok, err := s.findCredentialByID(credID)
+	if err != nil {
+		return false, err
+	}
+	if !ok || cred.SecretID == "" {
+		return false, nil
+	}
+	return s.credentials.Exists(credential.SecretID(cred.SecretID))
+}
+
+// savePassphraseForCredential stores a key passphrase secret and repoints
+// the credential's PassphraseSecretID. Same write-before-repoint pattern as
+// savePasswordForCredential.
+func (s *WSServer) savePassphraseForCredential(credID, passphrase string) error {
+	if s.profiles == nil {
+		return errors.New("profiles not available")
+	}
+	cred, ok, err := s.findCredentialByID(credID)
+	if err != nil {
+		return fmt.Errorf("load credential %s: %w", credID, err)
+	}
+	if !ok {
+		return fmt.Errorf("credential %s not found", credID)
+	}
+
+	newID := credential.NewSecretID()
+	if err := s.credentials.Set(newID, credential.NewSecret(passphrase)); err != nil {
+		return fmt.Errorf("store passphrase: %w", err)
+	}
+
+	oldID := credential.SecretID(cred.PassphraseSecretID)
+	cred.PassphraseSecretID = string(newID)
+	if err := s.profiles.SaveCredential(cred); err != nil {
+		return fmt.Errorf("save credential metadata: %w", err)
+	}
+
+	if oldID != "" {
+		_ = s.credentials.Delete(oldID)
+	}
+	return nil
+}
+
+// deletePassphraseForCredential removes the stored key passphrase secret and
+// clears the credential's PassphraseSecretID.
+func (s *WSServer) deletePassphraseForCredential(credID string) error {
+	if s.profiles == nil {
+		return errors.New("profiles not available")
+	}
+	cred, ok, err := s.findCredentialByID(credID)
+	if err != nil {
+		return fmt.Errorf("load credential %s: %w", credID, err)
+	}
+	if !ok {
+		return fmt.Errorf("credential %s not found", credID)
+	}
+
+	oldID := credential.SecretID(cred.PassphraseSecretID)
+	cred.PassphraseSecretID = ""
+	if err := s.profiles.SaveCredential(cred); err != nil {
+		return fmt.Errorf("save credential metadata: %w", err)
+	}
+
+	if oldID != "" {
+		_ = s.credentials.Delete(oldID)
+	}
+	return nil
+}
+
 // deleteCredentialCascade removes a credential's metadata and every secret
 // it references, in an order that cannot strand a secret.
-//
-// # The ordering trap
-//
-// The two secret kinds are keyed differently:
-//   - a password keys on Identity{User: credentialID} — derivable from the ID;
-//   - a key passphrase keys on KeyHash, derived from the key material, and
-//     the metadata stores only KeyPath.
-//
-// Once the metadata row is gone there is no KeyPath left, no hash can be
-// derived, and the passphrase is unreachable forever. So the metadata is
-// loaded BEFORE any deletion to recover KeyPath and derive the hash.
 //
 // # Order: metadata-first, then best-effort secrets (ADR-0011 §4)
 //
 // Metadata is deleted first and its deletion stands; secret deletion is
 // best-effort afterwards. A brief unreachable orphan (secret with no
 // metadata pointing at it) is safer than metadata pointing at a secret
-// that is gone: the orphan can be retried or swept by a future janitor,
-// while a dangling reference makes every connect attempt fail in a way the
-// user cannot diagnose. If secret deletion fails the error is returned to
-// the caller so the cascade is not silently incomplete, but the metadata
-// deletion is not rolled back — the credential is gone either way.
+// that is gone. With SecretID, both secrets are reachable by their stable
+// IDs from the metadata — the private key file no longer needs to exist.
 //
 // # Missing secrets are not errors
 //
 // Deleting a credential that never had a password (or whose passphrase was
-// never saved) must succeed. Both backends (Keychain, Vault) treat
-// "already absent" as success, so no special-casing is needed here.
-//
-// # Multi-profile references
-//
-// The model allows several SSHProfileOptions.CredentialID values to point
-// at one credential. This cascade does NOT refuse when other profiles
-// reference the credential: the user asked to delete it, and refusing
-// would leave an orphaned-credential path the UI cannot recover from.
-// Surviving references become stale (their password/passphrase lookups
-// return empty), which is the same state a never-had-a-secret credential
-// is already in. Reference integrity is a separate work item; see the
-// task report (nocx-7l4) for the recorded compromise.
-//
-// # KeyPath unreadable
-//
-// If the credential references a KeyPath that can no longer be read (moved,
-// deleted, permission-denied), the passphrase entry cannot be reached for
-// deletion. Per ADR-0011 §4 the metadata deletion still stands; the
-// unreadable-key error is returned to the caller as the cascade result so
-// the orphan is observable, and a future janitor can sweep by hash.
+// never saved) must succeed. SecretStore.Delete treats "already absent" as
+// success, so no special-casing is needed.
 func (s *WSServer) deleteCredentialCascade(id string) error {
-	// Load the metadata BEFORE deleting it: KeyPath is needed to derive the
-	// key passphrase's KeyHash, and once the row is gone it is unrecoverable.
+	// Load the metadata BEFORE deleting it: SecretID and PassphraseSecretID
+	// are needed to reach the keychain entries, and once the row is gone
+	// they are unrecoverable.
 	cred, ok, err := s.findCredentialByID(id)
 	if err != nil {
 		return fmt.Errorf("load credential %s: %w", id, err)
 	}
 
-	// Derive every secret key BEFORE deleting metadata, so a key-read
-	// failure is known while the metadata still exists. The password keys
-	// on the credential ID alone; the passphrase keys on the hash of the
-	// key file at KeyPath. We do NOT delete anything yet — this is the
-	// "derive everything you need, then remove" step from the task brief.
-	var keyHash credential.KeyHash // empty == no passphrase to delete
-	var keyReadErr error
-	if ok && cred.KeyPath != "" && s.credentials != nil {
-		keyHash, keyReadErr = deriveKeyHashFromPath(cred.KeyPath)
+	// Read every SecretID BEFORE deleting metadata.
+	var pwID, ppID credential.SecretID
+	if ok {
+		pwID = credential.SecretID(cred.SecretID)
+		ppID = credential.SecretID(cred.PassphraseSecretID)
 	}
 
 	// Delete metadata first. Its deletion stands regardless of secret
@@ -1235,26 +1331,19 @@ func (s *WSServer) deleteCredentialCascade(id string) error {
 		return nil
 	}
 
-	// Best-effort secret deletion. We attempt BOTH the password and the
-	// passphrase deletion even if one fails, so a single failure does not
-	// skip the other and leave it orphaned. Errors are aggregated and
-	// returned; metadata is already gone, so the credential does not come
-	// back — the caller sees the error and the orphan is observable.
+	// Best-effort secret deletion. Attempt BOTH deletions even if one
+	// fails. Errors are aggregated; metadata is already gone.
 	if s.credentials == nil {
 		return nil
 	}
 	var errs []error
-	if err := s.credentials.DeletePassword(credential.Identity{User: id}); err != nil {
-		errs = append(errs, fmt.Errorf("delete password for %s: %w", id, err))
+	if pwID != "" {
+		if err := s.credentials.Delete(pwID); err != nil {
+			errs = append(errs, fmt.Errorf("delete password for %s: %w", id, err))
+		}
 	}
-	if cred.KeyPath != "" {
-		if keyReadErr != nil {
-			// Key file unreadable: the passphrase entry is unreachable for
-			// deletion. Metadata is already gone; record the error so the
-			// orphan is observable. Per ADR-0011 §4 this is the lesser
-			// failure (brief orphan > dangling reference).
-			errs = append(errs, fmt.Errorf("read key %s to delete passphrase: %w", cred.KeyPath, keyReadErr))
-		} else if err := s.credentials.DeleteKeyPassphrase(keyHash); err != nil {
+	if ppID != "" {
+		if err := s.credentials.Delete(ppID); err != nil {
 			errs = append(errs, fmt.Errorf("delete key passphrase for %s: %w", id, err))
 		}
 	}
@@ -1275,19 +1364,6 @@ func (s *WSServer) findCredentialByID(id string) (profile.Credential, bool, erro
 		}
 	}
 	return profile.Credential{}, false, nil
-}
-
-// deriveKeyHashFromPath reads the private key file and derives its KeyHash.
-// This is the delete-side counterpart of the save path: a passphrase saved
-// under HashKey(keyBytes) is reachable for deletion by re-reading the same
-// file. A missing or unreadable file is returned as an error so the caller
-// can report the orphan rather than silently dropping the cascade.
-func deriveKeyHashFromPath(path string) (credential.KeyHash, error) {
-	data, err := os.ReadFile(path) //nolint:gosec // path comes from user-configured credential metadata
-	if err != nil {
-		return "", err
-	}
-	return credential.HashKey(data), nil
 }
 
 // handleImportTabby parses a Tabby config YAML and imports SSH profiles +

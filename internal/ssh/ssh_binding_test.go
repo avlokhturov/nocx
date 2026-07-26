@@ -12,22 +12,17 @@ import (
 	gossh "golang.org/x/crypto/ssh"
 )
 
-// credStub is a minimal CredentialStore for binding tests: it reports a
-// stored password so Credentials != nil (the gate for the binding check)
+// credStub is a minimal SecretStore for binding tests: it reports a
+// stored password so Secrets != nil (the gate for the binding check)
 // without depending on the keyring.
 type credStub struct{ pw string }
 
-func (s *credStub) LookupPassword(_ credential.Identity) (credential.Secret, error) {
+func (s *credStub) Get(_ credential.SecretID) (credential.Secret, error) {
 	return credential.NewSecret(s.pw), nil
 }
-func (s *credStub) SavePassword(_ credential.Identity, _ string) error { return nil }
-func (s *credStub) DeletePassword(_ credential.Identity) error         { return nil }
-func (s *credStub) HasPassword(_ credential.Identity) (bool, error)    { return true, nil }
-func (s *credStub) LookupKeyPassphrase(_ credential.KeyHash) (credential.Secret, error) {
-	return credential.Secret{}, nil
-}
-func (s *credStub) SaveKeyPassphrase(_ credential.KeyHash, _ string) error { return nil }
-func (s *credStub) DeleteKeyPassphrase(_ credential.KeyHash) error         { return nil }
+func (s *credStub) Set(_ credential.SecretID, _ credential.Secret) error { return nil }
+func (s *credStub) Delete(_ credential.SecretID) error                   { return nil }
+func (s *credStub) Exists(_ credential.SecretID) (bool, error)           { return true, nil }
 
 // newBindingClient builds a RealClient pointed at an empty ssh_config so
 // resolution is deterministic (alias lookups come only from the config we
@@ -62,7 +57,7 @@ func TestBinding_RefusesMismatchedHost(t *testing.T) {
 	_, err := c.Connect(
 		context.Background(), unreachableHost,
 		WithUser("victim"),
-		WithCredentials(store, credential.Identity{User: "cred:victim:1"}),
+		WithCredentials(store, credential.NewSecretID()),
 		// Credential is bound to a different host than the one we dial.
 		withBinding("good.example.com", 0),
 	)
@@ -115,7 +110,7 @@ func TestBinding_AliasResolutionNotAlias(t *testing.T) {
 		context.Background(), "victim",
 		WithUser("test"),
 		WithAuthMethods([]gossh.AuthMethod{gossh.PublicKeys(srv.userSigner)}),
-		WithCredentials(store, credential.Identity{User: "cred:victim:1"}),
+		WithCredentials(store, credential.NewSecretID()),
 		withBinding("victim", 0),
 	)
 	var mismatch *ErrCredentialBindingMismatch
@@ -132,7 +127,7 @@ func TestBinding_AliasResolutionNotAlias(t *testing.T) {
 		context.Background(), "victim",
 		WithUser("test"),
 		WithAuthMethods([]gossh.AuthMethod{gossh.PublicKeys(srv.userSigner)}),
-		WithCredentials(store, credential.Identity{User: "cred:victim:1"}),
+		WithCredentials(store, credential.NewSecretID()),
 		withBinding(hostPortOnly(srv.addr), 0),
 	)
 	if err != nil {
@@ -174,10 +169,10 @@ func TestBinding_JumpHostRefused(t *testing.T) {
 		context.Background(), srv.addr,
 		WithUser("test"),
 		WithAuthMethods([]gossh.AuthMethod{gossh.PublicKeys(srv.userSigner)}),
-		WithCredentials(store, credential.Identity{User: "cred:target:1"}),
+		WithCredentials(store, credential.NewSecretID()),
 		withBinding(hostPortOnly(srv.addr), 0),
 		WithJumpHost("jumphost", 0, "test", "publicKey"),
-		WithJumpCredentials(store, credential.Identity{User: "cred:jump:1"}),
+		WithJumpCredentials(store, credential.NewSecretID()),
 		// Jump credential bound to a host the jump alias does NOT resolve to.
 		func(c *ConnectConfig) {
 			c.JumpBoundHost = "other-bastion.example.com"
@@ -230,7 +225,7 @@ func TestBinding_PortFromAlias(t *testing.T) {
 		context.Background(), "portalias",
 		WithUser("test"),
 		WithAuthMethods([]gossh.AuthMethod{gossh.PublicKeys(srv.userSigner)}),
-		WithCredentials(store, credential.Identity{User: "cred:victim:1"}),
+		WithCredentials(store, credential.NewSecretID()),
 		withBinding(hostPortOnly(srv.addr), 22),
 	)
 	var mismatch *ErrCredentialBindingMismatch
@@ -251,19 +246,20 @@ func TestBinding_PortFromAlias(t *testing.T) {
 func TestBinding_UnboundRefused(t *testing.T) {
 	c := newBindingClient(t)
 	store := &credStub{pw: "x"}
+	secretID := credential.NewSecretID()
 
 	_, err := c.Connect(
 		context.Background(), unreachableHost,
 		WithUser("victim"),
-		WithCredentials(store, credential.Identity{User: "cred:unbound:1"}),
+		WithCredentials(store, secretID),
 		// No binding set — BoundHost stays "".
 	)
 	var unbound *ErrCredentialNotBound
 	if !errors.As(err, &unbound) {
 		t.Fatalf("want ErrCredentialNotBound, got %T: %v", err, err)
 	}
-	if unbound.CredentialID != "cred:unbound:1" {
-		t.Errorf("CredentialID = %q, want cred:unbound:1", unbound.CredentialID)
+	if unbound.CredentialID != string(secretID) {
+		t.Errorf("CredentialID = %q, want %q", unbound.CredentialID, secretID)
 	}
 }
 
@@ -291,7 +287,7 @@ func TestBinding_HostAnyPortWhenPortUnset(t *testing.T) {
 		context.Background(), srv.addr,
 		WithUser("test"),
 		WithAuthMethods([]gossh.AuthMethod{gossh.PublicKeys(srv.userSigner)}),
-		WithCredentials(store, credential.Identity{User: "cred:hostonly:1"}),
+		WithCredentials(store, credential.NewSecretID()),
 		withBinding(hostPortOnly(srv.addr), 0),
 	)
 	if err != nil {
@@ -315,7 +311,7 @@ func TestBinding_InlineAuthNotChecked(t *testing.T) {
 	}
 	defer func() { _ = client.Close() }()
 
-	// No WithCredentials -> Credentials nil -> check skipped. BoundHost left
+	// No WithCredentials -> Secrets nil -> check skipped. BoundHost left
 	// empty would otherwise trip ErrCredentialNotBound; that it does not is
 	// exactly the point.
 	ch, err := client.Connect(

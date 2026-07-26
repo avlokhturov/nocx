@@ -129,26 +129,36 @@ func passwordCallbackFromSecret(s credential.Secret) gossh.AuthMethod {
 }
 
 func (rc *RealClient) addPasswordMethods(chain *[]authChainEntry, cfg *ConnectConfig) {
-	if cfg.Credentials != nil {
-		if stored, err := cfg.Credentials.LookupPassword(cfg.CredIdentity); err == nil && !stored.IsEmpty() {
+	if cfg.Secrets != nil && cfg.SecretID != "" {
+		if stored, err := cfg.Secrets.Get(cfg.SecretID); err == nil && !stored.IsEmpty() {
 			*chain = append(*chain, authChainEntry{
 				kind:   kindSavedPassword,
 				method: passwordCallbackFromSecret(stored),
 				secret: stored,
 			})
 		} else if err != nil {
-			rc.log.Debug("credential lookup failed", "error", err)
+			rc.log.Debug("secret lookup failed", "secretID", cfg.SecretID, "error", err)
 		}
 	}
 }
 
 func (rc *RealClient) addKeyboardInteractiveMethods(chain *[]authChainEntry, cfg *ConnectConfig) {
-	if cfg.Credentials != nil {
-		if stored, err := cfg.Credentials.LookupPassword(cfg.CredIdentity); err == nil && !stored.IsEmpty() {
+	if cfg.Secrets != nil && cfg.SecretID != "" {
+		if stored, err := cfg.Secrets.Get(cfg.SecretID); err == nil && !stored.IsEmpty() {
 			*chain = append(*chain, authChainEntry{kind: kindKeyboardInteractive, secret: stored})
 		}
 	}
 	*chain = append(*chain, authChainEntry{kind: kindKeyboardInteractive})
+}
+
+// lookupKeyPassphrase resolves a private-key passphrase by SecretID from the
+// SecretStore. It returns a credential.Secret so the passphrase is
+// non-serializable; callers read it through Secret.Use.
+func (rc *RealClient) lookupKeyPassphrase(store credential.SecretStore, id credential.SecretID) (credential.Secret, error) {
+	if store == nil || id == "" {
+		return credential.Secret{}, nil
+	}
+	return store.Get(id)
 }
 
 func authMethodsFromChain(chain []authChainEntry) []gossh.AuthMethod {
@@ -159,16 +169,6 @@ func authMethodsFromChain(chain []authChainEntry) []gossh.AuthMethod {
 		}
 	}
 	return methods
-}
-
-// lookupKeyPassphrase resolves a private-key passphrase by hash from the
-// credential store. It returns a credential.Secret so the passphrase is
-// non-serializable; callers read it through Secret.Use.
-func (rc *RealClient) lookupKeyPassphrase(store credential.CredentialStore, hash credential.KeyHash) (credential.Secret, error) {
-	if store == nil {
-		return credential.Secret{}, nil
-	}
-	return store.LookupKeyPassphrase(hash)
 }
 
 // agentAvailable checks whether SSH_AUTH_SOCK is set.

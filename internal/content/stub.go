@@ -1,0 +1,82 @@
+package content
+
+import (
+	"context"
+
+	"github.com/shady2k/nocx/internal/log"
+)
+
+// Stub is the no-op implementation of ContentDB. Every repository method logs
+// the call and returns ErrNotImplemented. It exists so the seam compiles and
+// can be injected before the SQLite implementation lands.
+type Stub struct {
+	log log.Logger
+}
+
+// NewStub creates a Stub that logs calls through logger.
+func NewStub(logger log.Logger) *Stub {
+	return &Stub{log: logger}
+}
+
+// convStub implements ConversationRepository for the stub.
+type convStub struct {
+	log log.Logger
+}
+
+func (s *convStub) Save(_ context.Context, conv Conversation) error {
+	s.log.Info("content stub: ConversationRepository.Save", "id", conv.ID)
+	return ErrNotImplemented
+}
+
+func (s *convStub) GetByID(_ context.Context, id string) (*Conversation, error) {
+	s.log.Info("content stub: ConversationRepository.GetByID", "id", id)
+	return nil, ErrNotImplemented
+}
+
+func (s *convStub) List(_ context.Context, limit int) ([]Conversation, error) {
+	s.log.Info("content stub: ConversationRepository.List", "limit", limit)
+	return nil, ErrNotImplemented
+}
+
+// histStub implements CommandHistoryRepository for the stub.
+type histStub struct {
+	log log.Logger
+}
+
+func (s *histStub) Add(_ context.Context, record CommandRecord) error {
+	s.log.Info("content stub: CommandHistoryRepository.Add", "command", record.Command)
+	return ErrNotImplemented
+}
+
+func (s *histStub) List(_ context.Context, limit int) ([]CommandRecord, error) {
+	s.log.Info("content stub: CommandHistoryRepository.List", "limit", limit)
+	return nil, ErrNotImplemented
+}
+
+func (s *histStub) GetByID(_ context.Context, id int64) (*CommandRecord, error) {
+	s.log.Info("content stub: CommandHistoryRepository.GetByID", "id", id)
+	return nil, ErrNotImplemented
+}
+
+func (s *histStub) FindByPrefix(_ context.Context, prefix string, limit int) ([]CommandRecord, error) {
+	s.log.Info("content stub: CommandHistoryRepository.FindByPrefix", "prefix", prefix, "limit", limit)
+	return nil, ErrNotImplemented
+}
+
+// Conversations returns a stub ConversationRepository.
+func (s *Stub) Conversations() ConversationRepository {
+	s.log.Info("content stub: Conversations called (no-op)")
+	return &convStub{log: s.log}
+}
+
+// CommandHistory returns a stub CommandHistoryRepository.
+func (s *Stub) CommandHistory() CommandHistoryRepository {
+	s.log.Info("content stub: CommandHistory called (no-op)")
+	return &histStub{log: s.log}
+}
+
+// Close is a no-op.
+func (s *Stub) Close() error {
+	s.log.Info("content stub: Close called (no-op)")
+	return nil
+}
