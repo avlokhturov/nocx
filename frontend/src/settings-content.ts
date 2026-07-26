@@ -16,8 +16,11 @@ export const SINGLETON_SETTINGS: SingletonKey = 'nocx.settings' as SingletonKey
 
 // ── Breakpoint ─────────────────────────────────────────────────────────
 
-/** Width below which the rail stacks above the content column. */
-const NARROW_BREAKPOINT_PX = 720
+/** Width below which the rail stacks above the content column.
+ *  Chosen so both columns remain usable: at 640 px the rail takes
+ *  240 px (its clamp floor), leaving 400 px for content — enough for
+ *  a 200 px (shrinkable) label column plus controls. */
+const NARROW_BREAKPOINT_PX = 640
 
 // ── SettingsContent ─────────────────────────────────────────────────────
 
@@ -26,6 +29,7 @@ export class SettingsContent implements TabContent {
   private rail: HTMLElement | null = null
   private contentEl: HTMLElement | null = null
   private searchInput: HTMLInputElement | null = null
+  private modifiedToggle: HTMLInputElement | null = null
   private sectionList: HTMLElement | null = null
   private settingsView: SettingsViewImpl | null = null
   private _disposed = false
@@ -63,6 +67,24 @@ export class SettingsContent implements TabContent {
     })
     this.rail.append(this.searchInput)
 
+    // Modified-only toggle
+    const filterDiv = document.createElement('div')
+    filterDiv.className = 'st-modified-rail'
+    const filterLabel = document.createElement('label')
+    filterLabel.className = 'st-modified-rail-label'
+    this.modifiedToggle = document.createElement('input')
+    this.modifiedToggle.type = 'checkbox'
+    this.modifiedToggle.addEventListener('change', () => {
+      this.settingsView?.setModifiedOnly(this.modifiedToggle!.checked)
+    })
+    filterLabel.append(this.modifiedToggle)
+    filterLabel.append(' Modified')
+    const countSpan = document.createElement('span')
+    countSpan.className = 'st-modified-rail-count'
+    filterLabel.append(countSpan)
+    filterDiv.append(filterLabel)
+    this.rail.append(filterDiv)
+
     // Section nav
     this.sectionList = document.createElement('ul')
     this.sectionList.className = 'st-section-nav'
@@ -74,13 +96,16 @@ export class SettingsContent implements TabContent {
     this.contentEl = document.createElement('div')
     this.contentEl.className = 'st-content'
 
-    this.settingsView = new SettingsViewImpl(this.contentEl, this.profileClient)
+    this.settingsView = new SettingsViewImpl(this.contentEl, this.profileClient, undefined, () =>
+      this.syncRailState(),
+    )
     root.append(this.contentEl)
 
     target.append(root)
     this.container = root
 
     await this.settingsView.refresh()
+    this.syncRailState()
     this.rebuildSectionNav()
     this.applyFilter()
   }
@@ -101,6 +126,7 @@ export class SettingsContent implements TabContent {
     this.rail = null
     this.contentEl = null
     this.searchInput = null
+    this.modifiedToggle = null
     this.sectionList = null
     this.settingsView = null
   }
@@ -200,17 +226,66 @@ export class SettingsContent implements TabContent {
 
     this.sectionList.replaceChildren()
 
+    const bySection = this.settingsView.getModifiedBySection()
+
     for (const section of this.settingsView.getSections()) {
       const li = document.createElement('li')
       li.className = 'st-section-nav-item'
+      li.dataset.section = section
 
       const btn = document.createElement('button')
       btn.className = 'st-section-nav-link'
       btn.textContent = section
+      const count = bySection.get(section)
+      if (count) {
+        const badge = document.createElement('span')
+        badge.className = 'st-section-nav-badge'
+        badge.textContent = String(count)
+        btn.append(badge)
+      }
       btn.addEventListener('click', () => this.scrollToSection(section))
       li.append(btn)
 
       this.sectionList.append(li)
+    }
+  }
+
+  /** Update the rail toggle checkbox, count, and section-nav badges
+   *  from the current SettingsViewImpl state.  Called via the
+   *  onStateChanged callback so save/reset/filter actions all
+   *  keep the rail in sync. */
+  private syncRailState(): void {
+    if (!this.settingsView) return
+    if (this.modifiedToggle) {
+      this.modifiedToggle.checked = this.settingsView.isModifiedOnly()
+    }
+    const count = this.settingsView.getModifiedCount()
+    const countSpan = this.rail?.querySelector<HTMLElement>('.st-modified-rail-count')
+    if (countSpan) {
+      countSpan.textContent = count > 0 ? ' (' + count + ')' : ''
+    }
+    // Patch section-nav badges in-place so the highlight is preserved.
+    const bySection = this.settingsView.getModifiedBySection()
+    for (const item of this.sectionList?.querySelectorAll<HTMLElement>('.st-section-nav-item') ??
+      []) {
+      const section = item.dataset.section
+      if (!section) continue
+      const count = bySection.get(section)
+      const badge = item.querySelector<HTMLElement>('.st-section-nav-badge')
+      if (count) {
+        if (badge) badge.textContent = String(count)
+        else {
+          const btn = item.querySelector('button')
+          if (btn) {
+            const newBadge = document.createElement('span')
+            newBadge.className = 'st-section-nav-badge'
+            newBadge.textContent = String(count)
+            btn.append(newBadge)
+          }
+        }
+      } else {
+        badge?.remove()
+      }
     }
   }
 
@@ -248,8 +323,7 @@ export class SettingsContent implements TabContent {
     }
 
     for (const item of this.sectionList.querySelectorAll<HTMLElement>('.st-section-nav-item')) {
-      const btn = item.querySelector('button')
-      const match = btn?.textContent === firstVisible
+      const match = item.dataset.section === firstVisible
       item.classList.toggle('st-section-nav-active', match)
     }
   }

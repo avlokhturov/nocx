@@ -50,6 +50,15 @@ export interface SettingsView {
   getDeclarations(): Declaration[]
   /** Unique sections in declaration order. */
   getSections(): string[]
+  /** Toggle modified-only filter.  Calls render() so the view reflects the
+   *  new filter state immediately. */
+  setModifiedOnly(val: boolean): void
+  /** Whether the modified-only filter is currently active. */
+  isModifiedOnly(): boolean
+  /** Count of overridden, non-secret declarations. */
+  getModifiedCount(): number
+  /** Per-section counts of overridden, non-secret declarations. */
+  getModifiedBySection(): ReadonlyMap<string, number>
 }
 
 const enum LoadState {
@@ -76,16 +85,23 @@ export class SettingsViewImpl implements SettingsView {
   private rowMap: Map<string, HTMLElement> = new Map()
   private searchQuery = ''
   private modifiedOnly = false
+  private onStateChanged?: () => void
   private loadState: LoadState = LoadState.Loading
   // Bound handler so we can remove the listener.
   private boundKeydown: (e: KeyboardEvent) => void
   // Bound refresh so the observer can call it.
   private boundRefresh: () => Promise<void>
 
-  constructor(container: HTMLElement, client: ProfileClient, observer?: SettingsObserver) {
+  constructor(
+    container: HTMLElement,
+    client: ProfileClient,
+    observer?: SettingsObserver,
+    onStateChanged?: () => void,
+  ) {
     this.container = container
     this.client = client
     this.observer = observer ?? null
+    this.onStateChanged = onStateChanged
     this.boundKeydown = this.handleKeydown.bind(this)
     this.boundRefresh = this.refresh.bind(this)
     this.container.addEventListener('keydown', this.boundKeydown)
@@ -110,6 +126,36 @@ export class SettingsViewImpl implements SettingsView {
       }
     }
     return sections
+  }
+
+  // ── modified-only filter ────────────────────────────────────────────
+
+  setModifiedOnly(val: boolean): void {
+    if (this.modifiedOnly === val) return
+    this.modifiedOnly = val
+    this.render()
+  }
+
+  isModifiedOnly(): boolean {
+    return this.modifiedOnly
+  }
+
+  getModifiedCount(): number {
+    let count = 0
+    for (const d of this.declarations) {
+      if (d.control !== 'secret' && this.overridden.has(d.key)) count++
+    }
+    return count
+  }
+
+  getModifiedBySection(): ReadonlyMap<string, number> {
+    const counts = new Map<string, number>()
+    for (const d of this.declarations) {
+      if (d.control !== 'secret' && this.overridden.has(d.key)) {
+        counts.set(d.section, (counts.get(d.section) ?? 0) + 1)
+      }
+    }
+    return counts
   }
 
   show(): void {
@@ -167,9 +213,11 @@ export class SettingsViewImpl implements SettingsView {
         return
       case LoadState.Failed:
         this.renderFailed()
+        this.onStateChanged?.()
         return
       case LoadState.Empty:
         this.renderStatus('st-empty', 'No settings declared.')
+        this.onStateChanged?.()
         return
     }
 
@@ -196,6 +244,7 @@ export class SettingsViewImpl implements SettingsView {
 
     if (this.declarations.length > 0 && filtered.length === 0) {
       this.renderStatus('st-nomatch', 'No settings match your search.')
+      this.onStateChanged?.()
       return
     }
 
@@ -234,6 +283,7 @@ export class SettingsViewImpl implements SettingsView {
     }
 
     this.container.append(wrapper)
+    this.onStateChanged?.()
   }
 
   private renderStatus(className: string, text: string): void {
@@ -288,8 +338,7 @@ export class SettingsViewImpl implements SettingsView {
     checkbox.type = 'checkbox'
     checkbox.checked = this.modifiedOnly
     checkbox.addEventListener('change', () => {
-      this.modifiedOnly = checkbox.checked
-      this.render()
+      this.setModifiedOnly(checkbox.checked)
     })
     label.append(checkbox)
     label.append(' Modified only (' + String(modifiedCount) + ')')

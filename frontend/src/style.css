@@ -1529,6 +1529,42 @@ body {
   color: #7aa2f7;
 }
 
+/* Modified-only count badge in the section nav. */
+.st-section-nav-badge {
+  float: right;
+  background: rgba(224, 175, 104, 0.12);
+  color: #e0af68;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  line-height: 1.4;
+}
+
+/* ── Modified-only toggle in the rail ──────────────────────────────── */
+
+.st-modified-rail {
+  margin-bottom: 14px;
+}
+
+.st-modified-rail-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: #a9b1d6;
+  cursor: pointer;
+}
+
+.st-modified-rail-label input[type='checkbox'] {
+  margin: 0;
+  accent-color: #7aa2f7;
+}
+
+.st-modified-rail-count {
+  color: #e0af68;
+  font-weight: 500;
+}
+
 /* ── Content column ──────────────────────────────────────────────────── */
 
 .st-content {
@@ -1552,6 +1588,10 @@ body {
   border-bottom: 1px solid #2a2b3d;
   padding: 14px 16px;
   max-height: 40vh;
+}
+
+.st-container.st-narrow .st-section-nav {
+  display: none;
 }
 
 .st-container.st-narrow .st-content {
@@ -1612,8 +1652,9 @@ body {
 }
 
 .st-label-col {
-  flex: 0 0 200px;
+  flex: 0 1 200px;
   padding-right: 16px;
+  min-width: 0;
 }
 
 .st-label-col label {
