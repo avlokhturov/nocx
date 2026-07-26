@@ -215,8 +215,8 @@ func TestResolvePrivateKeyPassphraseByHash(t *testing.T) {
 	rc := newTestRealClient(t)
 	store := credential.NewKeychain()
 
-	// Generate an encrypted key (simulated: we test the passphrase path,
-	// not real encryption — just verify the lookup/save contract).
+	// Verify the lookup/save contract: store a secret, retrieve it,
+	// confirm it is non-empty without revealing plaintext.
 	hash := credential.NewSecretID()
 	if err := store.Set(hash, credential.NewSecret("my-passphrase")); err != nil {
 		t.Fatalf("Set: %v", err)
@@ -226,12 +226,73 @@ func TestResolvePrivateKeyPassphraseByHash(t *testing.T) {
 	if err != nil {
 		t.Fatalf("lookupKeyPassphrase: %v", err)
 	}
-	var gotPw string
-	if err := got.Use(func(b []byte) error { gotPw = string(b); return nil }); err != nil {
-		t.Fatalf("passphrase Use: %v", err)
+	if got.IsEmpty() {
+		t.Error("lookupKeyPassphrase returned empty Secret for a stored passphrase")
 	}
-	if gotPw != "my-passphrase" {
-		t.Errorf("passphrase = %q, want my-passphrase", gotPw)
+}
+
+// TestLoadKeyWithStoredPassphrase verifies the full path: an encrypted
+// private key whose passphrase is stored in the SecretStore is successfully
+// parsed when loadKey is called with the matching ConnectConfig.
+func TestLoadKeyWithStoredPassphrase(t *testing.T) {
+	keyring.MockInit()
+	rc := newTestRealClient(t)
+	store := credential.NewKeychain()
+
+	dir := t.TempDir()
+	passphrase := "encrypted-key-passphrase"
+
+	// Generate and marshal an encrypted ed25519 key.
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	block, err := gossh.MarshalPrivateKeyWithPassphrase(priv, "", []byte(passphrase))
+	if err != nil {
+		t.Fatalf("marshal encrypted key: %v", err)
+	}
+	path := filepath.Join(dir, "encrypted_test_key")
+	if err = os.WriteFile(path, pem.EncodeToMemory(block), 0o600); err != nil {
+		t.Fatalf("write key: %v", err)
+	}
+
+	// Store the passphrase in the SecretStore.
+	id := credential.NewSecretID()
+	if err = store.Set(id, credential.NewSecret(passphrase)); err != nil {
+		t.Fatalf("store passphrase: %v", err)
+	}
+
+	// Without a config, loadKey returns ErrEncryptedKey (no passphrase available).
+	_, err = rc.loadKey(path, nil)
+	if err == nil {
+		t.Fatal("expected ErrEncryptedKey with nil config, got nil")
+	}
+	var encErr *ErrEncryptedKey
+	if !errors.As(err, &encErr) {
+		t.Fatalf("expected *ErrEncryptedKey, got %T: %v", err, err)
+	}
+
+	// With cfg but empty PassphraseSecretID, still ErrEncryptedKey.
+	cfgNoPass := &ConnectConfig{Secrets: store}
+	_, err = rc.loadKey(path, cfgNoPass)
+	if err == nil {
+		t.Fatal("expected ErrEncryptedKey with empty PassphraseSecretID, got nil")
+	}
+	if !errors.As(err, &encErr) {
+		t.Fatalf("expected *ErrEncryptedKey, got %T: %v", err, err)
+	}
+
+	// With cfg + valid PassphraseSecretID, the key parses successfully.
+	cfg := &ConnectConfig{
+		Secrets:            store,
+		PassphraseSecretID: id,
+	}
+	signer, err := rc.loadKey(path, cfg)
+	if err != nil {
+		t.Fatalf("loadKey with stored passphrase: %v", err)
+	}
+	if signer == nil {
+		t.Fatal("expected non-nil signer from encrypted key")
 	}
 }
 
