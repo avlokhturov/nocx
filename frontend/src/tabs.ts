@@ -48,7 +48,6 @@ export class Tab implements TabHost {
   // ── B.5 geometry authority ──────────────────────────────────────────
   private _viewportObserver: ResizeObserver | null = null
   private _latestViewport: ContentViewport | null = null
-  private _viewportRafPending = false
   private _mountStarted = false
 
   constructor(content: TabContent, descriptor: ContentDescriptor, id: number) {
@@ -186,9 +185,10 @@ export class Tab implements TabHost {
   // ── B.5 geometry authority ──────────────────────────────────────────
 
   /**
-   * Start observing the pane element for resize. Called when the pane
-   * enters the DOM (TabManager.addTab). ResizeObserver callbacks are
-   * coalesced per animation frame and suppressed after disposal.
+   * Start observing the pane element for resize. Called when the pane enters
+   * the DOM (TabManager.addTab). Delivery is synchronous — the browser already
+   * batches ResizeObserver entries once per frame — and suppressed after
+   * disposal. See the callback for why an extra frame was the bug, not the fix.
    */
   setupViewportObserver(): void {
     if (this._viewportObserver) return
@@ -199,13 +199,21 @@ export class Tab implements TabHost {
       const { width, height } = entry.contentRect
       // Never send a misleading zero rectangle for hidden/inactive tabs (B.5).
       if (width === 0 && height === 0) return
-      // Coalesce per animation frame: only one delivery per frame.
-      if (this._viewportRafPending) return
-      this._viewportRafPending = true
-      requestAnimationFrame(() => {
-        this._viewportRafPending = false
-        this._deliverViewport()
-      })
+      // Deliver synchronously. ResizeObserver already fires once per frame,
+      // after layout and before paint, with pending entries batched — so
+      // wrapping this in requestAnimationFrame coalesced nothing the browser
+      // had not coalesced already, it only deferred delivery to the NEXT
+      // frame. That extra frame IS the one-frame squeeze in nocx-dau: the grid
+      // stayed sized for the old rectangle while the pane had already been
+      // painted at the new one.
+      //
+      // Synchronous delivery inside a ResizeObserver callback risks a resize
+      // loop when delivery changes the observed element's own box. It does not
+      // here: the observer watches this.pane, sized by the flex layout, while
+      // delivery ends in the renderer resizing the terminal INSIDE the pane.
+      // The pane's contentRect is unaffected, so the callback cannot re-arm
+      // itself.
+      this._deliverViewport()
     })
     observer.observe(this.pane)
     this._viewportObserver = observer
