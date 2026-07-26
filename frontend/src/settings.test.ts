@@ -79,7 +79,7 @@ describe('SettingsViewImpl', () => {
 
   it('renders sections as headings from declarations', async () => {
     vi.spyOn(client, 'describeSettings').mockResolvedValue({ declarations: TEST_DECLARATIONS })
-    vi.spyOn(client, 'getAllSettings').mockResolvedValue({ values: {} })
+    vi.spyOn(client, 'getSnapshot').mockResolvedValue({ values: {}, overridden: [], revision: 0 })
     vi.spyOn(client, 'secretExists').mockResolvedValue({ exists: false })
 
     await view.refresh()
@@ -97,7 +97,11 @@ describe('SettingsViewImpl', () => {
 
   it('renders toggle control as a checkbox', async () => {
     vi.spyOn(client, 'describeSettings').mockResolvedValue({ declarations: TEST_DECLARATIONS })
-    vi.spyOn(client, 'getAllSettings').mockResolvedValue({ values: { 'app.confirmQuit': true } })
+    vi.spyOn(client, 'getSnapshot').mockResolvedValue({
+      values: { 'app.confirmQuit': true },
+      overridden: [],
+      revision: 0,
+    })
     vi.spyOn(client, 'secretExists').mockResolvedValue({ exists: false })
 
     await view.refresh()
@@ -111,8 +115,10 @@ describe('SettingsViewImpl', () => {
 
   it('renders text control as a text input', async () => {
     vi.spyOn(client, 'describeSettings').mockResolvedValue({ declarations: TEST_DECLARATIONS })
-    vi.spyOn(client, 'getAllSettings').mockResolvedValue({
+    vi.spyOn(client, 'getSnapshot').mockResolvedValue({
       values: { 'terminal.fontFamily': 'Fira Code' },
+      overridden: [],
+      revision: 0,
     })
     vi.spyOn(client, 'secretExists').mockResolvedValue({ exists: false })
 
@@ -127,7 +133,11 @@ describe('SettingsViewImpl', () => {
 
   it('renders number control with min/max attributes', async () => {
     vi.spyOn(client, 'describeSettings').mockResolvedValue({ declarations: TEST_DECLARATIONS })
-    vi.spyOn(client, 'getAllSettings').mockResolvedValue({ values: { 'terminal.fontSize': 18 } })
+    vi.spyOn(client, 'getSnapshot').mockResolvedValue({
+      values: { 'terminal.fontSize': 18 },
+      overridden: [],
+      revision: 0,
+    })
     vi.spyOn(client, 'secretExists').mockResolvedValue({ exists: false })
 
     await view.refresh()
@@ -142,11 +152,12 @@ describe('SettingsViewImpl', () => {
 
   it('renders select control with options', async () => {
     vi.spyOn(client, 'describeSettings').mockResolvedValue({ declarations: TEST_DECLARATIONS })
-    vi.spyOn(client, 'getAllSettings').mockResolvedValue({
+    vi.spyOn(client, 'getSnapshot').mockResolvedValue({
       values: { 'terminal.cursorStyle': 'bar' },
+      overridden: [],
+      revision: 0,
     })
     vi.spyOn(client, 'secretExists').mockResolvedValue({ exists: false })
-
     await view.refresh()
 
     const row = container.querySelector<HTMLElement>('.st-row[data-key="terminal\\.cursorStyle"]')
@@ -167,12 +178,14 @@ describe('SettingsViewImpl', () => {
 
   it('renders fallback when value is an object, never [object Object]', async () => {
     vi.spyOn(client, 'describeSettings').mockResolvedValue({ declarations: TEST_DECLARATIONS })
-    vi.spyOn(client, 'getAllSettings').mockResolvedValue({
+    vi.spyOn(client, 'getSnapshot').mockResolvedValue({
       values: {
         'terminal.fontFamily': { corrupt: 'object' },
         'terminal.fontSize': { also: 'bad' },
         'terminal.cursorStyle': { wrong: 'type' },
       },
+      overridden: [],
+      revision: 0,
     })
     vi.spyOn(client, 'secretExists').mockResolvedValue({ exists: false })
 
@@ -204,8 +217,10 @@ describe('SettingsViewImpl', () => {
 
   it('NaN fallback in renderNumber sends a number, never an object', async () => {
     vi.spyOn(client, 'describeSettings').mockResolvedValue({ declarations: TEST_DECLARATIONS })
-    vi.spyOn(client, 'getAllSettings').mockResolvedValue({
+    vi.spyOn(client, 'getSnapshot').mockResolvedValue({
       values: { 'terminal.fontSize': { corrupt: true } },
+      overridden: [],
+      revision: 0,
     })
     vi.spyOn(client, 'secretExists').mockResolvedValue({ exists: false })
     const setSpy = vi.spyOn(client, 'setSetting').mockResolvedValue({ ok: true })
@@ -253,7 +268,7 @@ describe('SettingsViewImpl', () => {
 
   it('renders secret as "not configured" when secretExists returns false', async () => {
     vi.spyOn(client, 'describeSettings').mockResolvedValue({ declarations: TEST_DECLARATIONS })
-    vi.spyOn(client, 'getAllSettings').mockResolvedValue({ values: {} })
+    vi.spyOn(client, 'getSnapshot').mockResolvedValue({ values: {}, overridden: [], revision: 0 })
     vi.spyOn(client, 'secretExists').mockResolvedValue({ exists: false })
 
     await view.refresh()
@@ -268,7 +283,7 @@ describe('SettingsViewImpl', () => {
 
   it('renders secret as "configured" when secretExists returns true', async () => {
     vi.spyOn(client, 'describeSettings').mockResolvedValue({ declarations: TEST_DECLARATIONS })
-    vi.spyOn(client, 'getAllSettings').mockResolvedValue({ values: {} })
+    vi.spyOn(client, 'getSnapshot').mockResolvedValue({ values: {}, overridden: [], revision: 0 })
     vi.spyOn(client, 'secretExists').mockResolvedValue({ exists: true })
 
     await view.refresh()
@@ -281,7 +296,7 @@ describe('SettingsViewImpl', () => {
 
   it('secret control has no input element — never renders a populated value', async () => {
     vi.spyOn(client, 'describeSettings').mockResolvedValue({ declarations: TEST_DECLARATIONS })
-    vi.spyOn(client, 'getAllSettings').mockResolvedValue({ values: {} })
+    vi.spyOn(client, 'getSnapshot').mockResolvedValue({ values: {}, overridden: [], revision: 0 })
     vi.spyOn(client, 'secretExists').mockResolvedValue({ exists: true })
 
     await view.refresh()
@@ -312,8 +327,10 @@ describe('SettingsViewImpl', () => {
 
   it('surfaces validation error on the offending control', async () => {
     vi.spyOn(client, 'describeSettings').mockResolvedValue({ declarations: TEST_DECLARATIONS })
-    vi.spyOn(client, 'getAllSettings').mockResolvedValue({
+    vi.spyOn(client, 'getSnapshot').mockResolvedValue({
       values: { 'terminal.fontSize': 14 },
+      overridden: [],
+      revision: 0,
     })
     vi.spyOn(client, 'secretExists').mockResolvedValue({ exists: false })
 
@@ -365,7 +382,7 @@ describe('SettingsViewImpl', () => {
     const withNovel = [...TEST_DECLARATIONS, novel]
 
     vi.spyOn(client, 'describeSettings').mockResolvedValue({ declarations: withNovel })
-    vi.spyOn(client, 'getAllSettings').mockResolvedValue({ values: {} })
+    vi.spyOn(client, 'getSnapshot').mockResolvedValue({ values: {}, overridden: [], revision: 0 })
     vi.spyOn(client, 'secretExists').mockResolvedValue({ exists: false })
 
     await view.refresh()
@@ -378,11 +395,72 @@ describe('SettingsViewImpl', () => {
     expect(input!.value).toBe('4')
   })
 
+  // --- Save-revert defects (nocx-q07f) ---
+
+  it('saveSetting updates this.values on success so rerender shows saved value', async () => {
+    vi.spyOn(client, 'describeSettings').mockResolvedValue({ declarations: TEST_DECLARATIONS })
+    vi.spyOn(client, 'getSnapshot').mockResolvedValue({ values: {}, overridden: [], revision: 0 })
+    vi.spyOn(client, 'secretExists').mockResolvedValue({ exists: false })
+    const setSpy = vi.spyOn(client, 'setSetting').mockResolvedValue({ ok: true })
+
+    await view.refresh()
+
+    // Change the toggle: start false, set true.
+    const row = container.querySelector<HTMLElement>('.st-row[data-key="app\\.confirmQuit"]')
+    const checkbox = row!.querySelector<HTMLInputElement>('input[type="checkbox"]')!
+    expect(checkbox.checked).toBe(false)
+
+    checkbox.checked = true
+    checkbox.dispatchEvent(new Event('change'))
+
+    await vi.waitFor(() => {
+      expect(setSpy).toHaveBeenCalled()
+    })
+
+    // After successful save, the rerendered checkbox should still be checked.
+    const updatedRow = container.querySelector<HTMLElement>('.st-row[data-key="app\\.confirmQuit"]')
+    const updatedCheckbox = updatedRow!.querySelector<HTMLInputElement>('input[type="checkbox"]')!
+    expect(updatedCheckbox.checked).toBe(true)
+  })
+
+  it('saveSetting preserves rejected input so user can edit rather than retype', async () => {
+    vi.spyOn(client, 'describeSettings').mockResolvedValue({ declarations: TEST_DECLARATIONS })
+    vi.spyOn(client, 'getSnapshot').mockResolvedValue({
+      values: { 'terminal.fontFamily': 'initial' },
+      overridden: [],
+      revision: 0,
+    })
+    vi.spyOn(client, 'secretExists').mockResolvedValue({ exists: false })
+    const setSpy = vi.spyOn(client, 'setSetting').mockRejectedValue(new Error('validation error'))
+
+    await view.refresh()
+
+    const row = container.querySelector<HTMLElement>('.st-row[data-key="terminal\\.fontFamily"]')
+    const input = row!.querySelector<HTMLInputElement>('input[type="text"]')!
+
+    // Type a rejected value.
+    input.value = 'rejected-input'
+    input.dispatchEvent(new Event('change'))
+
+    await vi.waitFor(() => {
+      expect(setSpy).toHaveBeenCalled()
+    })
+
+    // After failed save, the rejected input must still be visible.
+    const updatedRow = container.querySelector<HTMLElement>(
+      '.st-row[data-key="terminal\\.fontFamily"]',
+    )
+    const updatedInput = updatedRow!.querySelector<HTMLInputElement>('input[type="text"]')!
+    expect(updatedInput.value).toBe('rejected-input')
+
+    // The error must also be shown.
+    expect(updatedRow!.querySelector('.st-error')).toBeTruthy()
+  })
   // --- Empty state ---
 
   it('shows empty state when no declarations', async () => {
     vi.spyOn(client, 'describeSettings').mockResolvedValue({ declarations: [] })
-    vi.spyOn(client, 'getAllSettings').mockResolvedValue({ values: {} })
+    vi.spyOn(client, 'getSnapshot').mockResolvedValue({ values: {}, overridden: [], revision: 0 })
     vi.spyOn(client, 'secretExists').mockResolvedValue({ exists: false })
 
     await view.refresh()

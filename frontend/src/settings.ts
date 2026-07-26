@@ -30,6 +30,7 @@ export class SettingsViewImpl implements SettingsView {
   private client: ProfileClient
   private declarations: Declaration[] = []
   private values: Record<string, unknown> = {}
+  private draftValues: Record<string, unknown> = {}
   private secretStates: Record<string, boolean> = {}
   // Tracks per-key error messages displayed inline on the control.
   private errors: Record<string, string> = {}
@@ -47,8 +48,9 @@ export class SettingsViewImpl implements SettingsView {
     try {
       const desc = await this.client.describeSettings()
       this.declarations = (desc.declarations as Declaration[]) ?? []
-      const all = await this.client.getAllSettings()
-      this.values = all.values ?? {}
+      const snap = await this.client.getSnapshot()
+      this.values = snap.values ?? {}
+      this.draftValues = {}
       // Fetch secret existence for every secret-class declaration.
       this.secretStates = {}
       for (const d of this.declarations) {
@@ -169,6 +171,15 @@ export class SettingsViewImpl implements SettingsView {
     row.append(controlCol)
     return row
   }
+  /**
+   * Returns the effective value for a setting key: draft (rejected input) if
+   * present, else the committed value. Never falls through to the default —
+   * callers combine this with displayValue when needed.
+   */
+  private effectiveValue(key: string): unknown {
+    if (key in this.draftValues) return this.draftValues[key]
+    return this.values[key]
+  }
 
   /**
    * Returns a safe display string for a setting value.
@@ -231,7 +242,7 @@ export class SettingsViewImpl implements SettingsView {
   private renderToggle(decl: Declaration): HTMLElement {
     const input = document.createElement('input')
     input.type = 'checkbox'
-    input.checked = !!this.values[decl.key]
+    input.checked = !!this.effectiveValue(decl.key)
     input.addEventListener('change', () => {
       void this.saveSetting(decl.key, input.checked)
     })
@@ -241,7 +252,7 @@ export class SettingsViewImpl implements SettingsView {
   private renderText(decl: Declaration): HTMLElement {
     const input = document.createElement('input')
     input.type = 'text'
-    input.value = this.displayValue(this.values[decl.key], decl)
+    input.value = this.displayValue(this.effectiveValue(decl.key), decl)
     input.addEventListener('change', () => {
       void this.saveSetting(decl.key, input.value)
     })
@@ -251,14 +262,15 @@ export class SettingsViewImpl implements SettingsView {
   private renderNumber(decl: Declaration): HTMLElement {
     const input = document.createElement('input')
     input.type = 'number'
-    input.value = this.displayValue(this.values[decl.key], decl)
+    const eff = this.effectiveValue(decl.key)
+    input.value = this.displayValue(eff, decl)
     if (decl.min !== undefined) input.min = String(decl.min)
     if (decl.max !== undefined) input.max = String(decl.max)
     input.addEventListener('change', () => {
       const n = Number(input.value)
       void this.saveSetting(
         decl.key,
-        isNaN(n) ? Number(this.displayValue(this.values[decl.key], decl)) : n,
+        isNaN(n) ? Number(this.displayValue(this.effectiveValue(decl.key), decl)) : n,
       )
     })
     return input
@@ -266,7 +278,7 @@ export class SettingsViewImpl implements SettingsView {
 
   private renderSelect(decl: Declaration): HTMLElement {
     const select = document.createElement('select')
-    const current = this.displayValue(this.values[decl.key], decl)
+    const current = this.displayValue(this.effectiveValue(decl.key), decl)
     for (const opt of decl.options ?? []) {
       const option = document.createElement('option')
       option.value = opt.value
@@ -317,18 +329,24 @@ export class SettingsViewImpl implements SettingsView {
   // --- actions ---
 
   private async saveSetting(key: string, value: unknown): Promise<void> {
-    // Clear any previous error for this key before the call.
+    // Clear any previous error and draft for this key before the call.
     delete this.errors[key]
+    delete this.draftValues[key]
     try {
       await this.client.setSetting(key, value)
+      // Write the saved value into the authoritative map so the next
+      // rerender shows what was actually saved, not the pre-save value.
+      this.values[key] = value
     } catch (err) {
       // Validation failures arrive as JSON-RPC errors per the contract.
       this.errors[key] = (err as Error).message
+      // Preserve the rejected input in draft so the user can edit it
+      // rather than retype from scratch, without polluting this.values.
+      this.draftValues[key] = value
     }
     // Re-render just the affected row.
     this.rerenderRow(key)
   }
-
   private async saveSecret(key: string, value: string): Promise<void> {
     delete this.errors[key]
     try {

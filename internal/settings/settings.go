@@ -488,10 +488,19 @@ type settingsDoc struct {
 // Registry holds the runtime state of all settings: persisted values
 // (non-secret) in a DocumentStore and secret values in a SecretStore.
 type Registry struct {
-	doc     storage.DocumentStore
-	secrets credential.SecretStore
-	values  map[string]any
-	refs    map[string]credential.SecretID // secret key → SecretID
+	doc      storage.DocumentStore
+	secrets  credential.SecretStore
+	values   map[string]any
+	refs     map[string]credential.SecretID // secret key → SecretID
+	revision int                            // monotonic, in-memory, bumps only on successful mutation
+}
+
+// SettingsSnapshot is the wire contract for settings.getSnapshot.
+// Secret-class keys are absent from both Values and Overridden.
+type SettingsSnapshot struct {
+	Values     map[string]any `json:"values"`
+	Overridden []string       `json:"overridden"`
+	Revision   int            `json:"revision"`
 }
 
 // New creates a Registry backed by doc for non-secret values and secrets
@@ -606,8 +615,9 @@ func (r *Registry) GetBool(b *Bool) (bool, error) {
 
 // SetBool persists a bool setting value.
 func (r *Registry) SetBool(b *Bool, value bool) error {
-	r.values[b.key] = value
-	return r.save()
+	newValues := copyValues(r.values)
+	newValues[b.key] = value
+	return r.commitNonSecret(newValues)
 }
 
 // GetString returns the current value of a string setting, or its default.
@@ -628,8 +638,9 @@ func (r *Registry) SetString(s *String, value string) error {
 	if value == "" && s.default_ != "" {
 		return &ValidationError{SettingKey: s.key, Value: value, Message: "value must not be empty"}
 	}
-	r.values[s.key] = value
-	return r.save()
+	newValues := copyValues(r.values)
+	newValues[s.key] = value
+	return r.commitNonSecret(newValues)
 }
 
 // GetNumber returns the current value of a number setting, or its default.
@@ -658,8 +669,9 @@ func (r *Registry) SetNumber(n *Number, value float64) error {
 			Message: fmt.Sprintf("value %v above maximum %v", value, *n.max),
 		}
 	}
-	r.values[n.key] = value
-	return r.save()
+	newValues := copyValues(r.values)
+	newValues[n.key] = value
+	return r.commitNonSecret(newValues)
 }
 
 // GetSelect returns the current value of a select setting, or its default.
@@ -678,8 +690,9 @@ func (r *Registry) GetSelect(s *Select) (string, error) {
 func (r *Registry) SetSelect(s *Select, value string) error {
 	for _, opt := range s.options {
 		if opt.Value == value {
-			r.values[s.key] = value
-			return r.save()
+			newValues := copyValues(r.values)
+			newValues[s.key] = value
+			return r.commitNonSecret(newValues)
 		}
 	}
 	return &ValidationError{
@@ -688,23 +701,33 @@ func (r *Registry) SetSelect(s *Select, value string) error {
 	}
 }
 
-// ── getAll ─────────────────────────────────────────────────────────────
+// ── getSnapshot ─────────────────────────────────────────────────────────
 
-// GetAll returns current values for every non-secret setting. Secret-class
-// keys are never present, even as null (frozen contract).
-func (r *Registry) GetAll() (map[string]any, error) {
-	result := make(map[string]any, len(allDecls))
+// GetSnapshot returns the current snapshot of all non-secret settings:
+// effective values, which keys have stored overrides, and the current
+// revision. Secret-class keys are absent from both Values and Overridden.
+func (r *Registry) GetSnapshot() (SettingsSnapshot, error) {
+	values := make(map[string]any, len(allDecls))
+	var overridden []string
 	for _, d := range allDecls {
 		if d.Control() == ControlSecret {
 			continue
 		}
 		if v, ok := r.values[d.Key()]; ok {
-			result[d.Key()] = v
+			values[d.Key()] = v
+			overridden = append(overridden, d.Key())
 		} else {
-			result[d.Key()] = d.Default()
+			values[d.Key()] = d.Default()
 		}
 	}
-	return result, nil
+	if overridden == nil {
+		overridden = []string{}
+	}
+	return SettingsSnapshot{
+		Values:     values,
+		Overridden: overridden,
+		Revision:   r.revision,
+	}, nil
 }
 
 // ── Reset ──────────────────────────────────────────────────────────────
@@ -715,8 +738,9 @@ func (r *Registry) Reset(d Descriptor) error {
 	if d.Control() == ControlSecret {
 		return &ValidationError{SettingKey: d.Key(), Message: "cannot reset a secret-class setting"}
 	}
-	delete(r.values, d.Key())
-	return r.save()
+	newValues := copyValues(r.values)
+	delete(newValues, d.Key())
+	return r.commitNonSecret(newValues)
 }
 
 // ── Secret-class methods ───────────────────────────────────────────────
@@ -728,13 +752,14 @@ func (r *Registry) SecretSet(s *Secret, value string) error {
 	id, ok := r.refs[s.key]
 	if !ok {
 		id = credential.NewSecretID()
-		r.refs[s.key] = id
 	}
 	secret := credential.NewSecret(value)
 	if err := r.secrets.Set(id, secret); err != nil {
 		return fmt.Errorf("settings: secret set %q: %w", s.key, err)
 	}
-	return r.save()
+	newRefs := copyRefs(r.refs)
+	newRefs[s.key] = id
+	return r.commitWithRefs(r.values, newRefs)
 }
 
 // SecretDelete removes a secret-class setting value from the SecretStore
@@ -745,9 +770,10 @@ func (r *Registry) SecretDelete(s *Secret) error {
 		if err := r.secrets.Delete(id); err != nil {
 			slog.Warn("settings: secret delete failed (may be orphaned)", "key", s.key, "error", err)
 		}
-		delete(r.refs, s.key)
 	}
-	return r.save()
+	newRefs := copyRefs(r.refs)
+	delete(newRefs, s.key)
+	return r.commitWithRefs(r.values, newRefs)
 }
 
 // SecretExists reports whether a secret-class setting has a stored value.
@@ -761,19 +787,60 @@ func (r *Registry) SecretExists(s *Secret) (bool, error) {
 
 // ── Persistence ────────────────────────────────────────────────────────
 
-func (r *Registry) save() error {
+// commitNonSecret persists non-secret values (refs unchanged) and commits
+// the new state on success. On failure, the registry state is unchanged.
+func (r *Registry) commitNonSecret(values map[string]any) error {
+	if err := r.writeDoc(values, r.refs); err != nil {
+		return err
+	}
+	r.values = values
+	r.revision++
+	return nil
+}
+
+// commitWithRefs persists both values and secret refs, and commits the new
+// state on success. On failure, the registry state is unchanged.
+func (r *Registry) commitWithRefs(values map[string]any, refs map[string]credential.SecretID) error {
+	if err := r.writeDoc(values, refs); err != nil {
+		return err
+	}
+	r.values = values
+	r.refs = refs
+	r.revision++
+	return nil
+}
+
+// writeDoc serialises and writes the settings document without mutating
+// the registry.
+func (r *Registry) writeDoc(values map[string]any, refs map[string]credential.SecretID) error {
 	doc := settingsDoc{
 		SchemaVersion: int(settingsSchemaVersion),
-		Values:        r.values,
-		SecretRefs:    make(map[string]string, len(r.refs)),
+		Values:        values,
+		SecretRefs:    make(map[string]string, len(refs)),
 	}
-	for k, id := range r.refs {
+	for k, id := range refs {
 		doc.SecretRefs[k] = string(id)
 	}
 	return r.doc.Write(settingsDocName, doc)
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────
+
+func copyValues(src map[string]any) map[string]any {
+	dst := make(map[string]any, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
+func copyRefs(src map[string]credential.SecretID) map[string]credential.SecretID {
+	dst := make(map[string]credential.SecretID, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
 
 func toFloat64(v any) (float64, bool) {
 	switch n := v.(type) {

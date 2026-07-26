@@ -142,19 +142,21 @@ func TestSettingsDescribe_ReturnsDeclarations(t *testing.T) {
 	}
 }
 
-// ── settings.getAll ────────────────────────────────────────────────────
+// ── settings.getSnapshot ─────────────────────────────────────────────────
 
-func TestSettingsGetAll_ContainsNoSecret(t *testing.T) {
+func TestSettingsGetSnapshot_ContainsNoSecret(t *testing.T) {
 	ws, cleanup := newSettingsWSServer(t)
 	defer cleanup()
 
 	conn := connectWS(t, ws)
 	defer func() { _ = conn.Close() }()
 
-	resp := jsonrpcCall(t, conn, "settings.getAll", map[string]any{})
+	resp := jsonrpcCall(t, conn, "settings.getSnapshot", map[string]any{})
 	var env struct {
 		Result struct {
-			Values map[string]any `json:"values"`
+			Values     map[string]any `json:"values"`
+			Overridden []string       `json:"overridden"`
+			Revision   int            `json:"revision"`
 		} `json:"result"`
 		Error *jsonrpcErrorObj `json:"error,omitempty"`
 	}
@@ -164,27 +166,34 @@ func TestSettingsGetAll_ContainsNoSecret(t *testing.T) {
 	if env.Error != nil {
 		t.Fatalf("unexpected error: code=%d msg=%s", env.Error.Code, env.Error.Message)
 	}
-	// No secret-class key may appear.
+	// No secret-class key may appear in values or overridden.
 	for _, d := range settings.Descriptors() {
 		if d.Control() == "secret" {
 			if _, ok := env.Result.Values[d.Key()]; ok {
-				t.Errorf("secret key %q found in getAll values", d.Key())
+				t.Errorf("secret key %q found in snapshot values", d.Key())
+			}
+			for _, k := range env.Result.Overridden {
+				if k == d.Key() {
+					t.Errorf("secret key %q found in snapshot overridden", d.Key())
+				}
 			}
 		}
 	}
 }
 
-func TestSettingsGetAll_ReturnsDefaults(t *testing.T) {
+func TestSettingsGetSnapshot_ReturnsDefaults(t *testing.T) {
 	ws, cleanup := newSettingsWSServer(t)
 	defer cleanup()
 
 	conn := connectWS(t, ws)
 	defer func() { _ = conn.Close() }()
 
-	resp := jsonrpcCall(t, conn, "settings.getAll", map[string]any{})
+	resp := jsonrpcCall(t, conn, "settings.getSnapshot", map[string]any{})
 	var env struct {
 		Result struct {
-			Values map[string]any `json:"values"`
+			Values     map[string]any `json:"values"`
+			Overridden []string       `json:"overridden"`
+			Revision   int            `json:"revision"`
 		} `json:"result"`
 		Error *jsonrpcErrorObj `json:"error,omitempty"`
 	}
@@ -196,11 +205,14 @@ func TestSettingsGetAll_ReturnsDefaults(t *testing.T) {
 	}
 	v, ok := env.Result.Values["clipboard.osc52Suppressed"]
 	if !ok {
-		t.Fatal("clipboard.osc52Suppressed missing from getAll defaults")
+		t.Fatal("clipboard.osc52Suppressed missing from snapshot values")
 	}
 	bv, ok := v.(bool)
 	if !ok || bv {
 		t.Errorf("expected default false, got %v (%T)", v, v)
+	}
+	if env.Result.Revision < 0 {
+		t.Errorf("revision must be >= 0, got %d", env.Result.Revision)
 	}
 }
 

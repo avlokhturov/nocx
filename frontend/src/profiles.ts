@@ -286,8 +286,12 @@ export class ProfileClient {
   describeSettings(): Promise<{ declarations: unknown[] }> {
     return this.call('settings.describe', {})
   }
-  getAllSettings(): Promise<{ values: Record<string, unknown> }> {
-    return this.call('settings.getAll', {})
+  getSnapshot(): Promise<{
+    values: Record<string, unknown>
+    overridden: string[]
+    revision: number
+  }> {
+    return this.call('settings.getSnapshot', {})
   }
   setSetting(key: string, value: unknown): Promise<{ ok: true }> {
     return this.call('settings.set', { key, value })
