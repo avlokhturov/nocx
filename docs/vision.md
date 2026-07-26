@@ -19,19 +19,29 @@ The active tracks are the epics in status `in_progress`:
 | Epic | Track | What it moves |
 | --- | --- | --- |
 | `nocx-6ek` | Persistence | Storage capabilities and secrets as opaque references (ADR-0011) |
-| `nocx-8v51` | Settings | Snapshot contract with provenance, one control-plane dispatcher, change broadcast |
 | `nocx-v1pr` | Tabs | TabContent seam with a cancellable lifecycle; tab presentation extracted |
 | `nocx-k0xk` | Quality gates | The e2e suite and the per-commit gate — the thing that has to work before the rewrite can be trusted |
 
-This list is not maintained by hand: it is whatever `bd list --status in_progress --type epic`
-returns. The other eleven epics are parked, not cancelled — each is blocked on the three
-rewrite epics, so their work disappears from `bd ready` and comes back on its own when the
-rewrite lands. Nothing was deleted and no scope was dropped.
+Settings (`nocx-8v51`) was the fourth and closed on 2026-07-26. This table is a snapshot, not
+a maintained list: the live answer is `bd list --status in_progress --type epic`, and where
+the two disagree the command is right.
+
+After the foundation, the order is: editor core on CodeMirror 6 and Warp-style command blocks
+→ SSH client → secrets vault → shell integration and Warpify → everything else. That order is
+recorded as `blocks` edges between the epics, so `bd ready` reveals each stage on its own as
+the previous one closes; `bd epic status` shows the whole board. The twelve epics behind the
+current front are parked, not cancelled — nothing was deleted and no scope was dropped.
+
+**The textarea editor is not being extended.** It is being replaced by CodeMirror 6 under
+`nocx-2gf`. Work that polishes the textarea internals is obsolete by that decision; work that
+is product behaviour has to be re-asserted against CM6 afterwards.
 
 **Where to see the state.** `bd epic status` prints progress for all fifteen epics live from
-the dependency graph, and `bd ready --exclude-type epic` is the queue. A repo-visible page
-that needs no `bd` install is tracked as `nocx-lg6r`; until it exists, those two commands are
-the only honest view.
+the dependency graph, and `bd ready --exclude-type epic` is the queue. Those two commands
+are the view — there is deliberately no generated status page in the repo (`nocx-lg6r`,
+closed won't-do). Note that sections 5 and 6 below duplicate facts beads also owns and are
+not kept current (`nocx-mqav`, closed won't-do): read them as the original strategic intent,
+and this section plus the two commands for what is actually true today.
 
 **If you are an agent**, [AGENTS.md](../AGENTS.md#what-to-work-on-next) is binding on how to
 pick work. Short version: `bd ready --exclude-type epic -u`, take the top, claim it. Do not
