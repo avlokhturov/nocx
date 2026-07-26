@@ -16,6 +16,7 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/ssh"
 )
 
@@ -60,14 +61,19 @@ type WSServer struct {
 	listener   net.Listener
 	upgrader   websocket.Upgrader
 
-	// Optional profile/credential stores for the connection-manager control
-	// plane (profiles.*, groups.*, credentials.*). When nil, those methods
-	// return a JSON-RPC error.
-	profiles    profile.ProfileStore
+	// Optional profile/group/credential stores for the connection-manager
+	// control plane (profiles.*, groups.*, credentials.*). When nil, those
+	// methods return a JSON-RPC error.
+	profiles    profile.ProfileRepository
+	groups      profile.GroupRepository
+	credMeta    profile.CredentialMetadataRepository
 	credentials credential.CredentialStore
 
 	// Profile resolver maps profile IDs to SSH connect configs.
-	resolver   ProfileResolver
+	resolver ProfileResolver
+
+	// settings registry backs the settings.* JSON-RPC methods.
+	settings   *settings.Registry
 	resolverOK bool
 
 	// ringsMu protects rx and stopped. One sessionRx per session;
@@ -93,16 +99,35 @@ func WithProfileResolver(r ProfileResolver) WSServerOption {
 // WSServerOption configures a WSServer.
 type WSServerOption func(*WSServer)
 
-// WithProfileStore attaches a profile store to the server, enabling the
-// profiles.* and groups.* JSON-RPC methods.
-func WithProfileStore(ps profile.ProfileStore) WSServerOption {
-	return func(s *WSServer) { s.profiles = ps }
+// WithProfileRepository attaches a profile repository to the server, enabling
+// the profiles.* JSON-RPC methods.
+func WithProfileRepository(pr profile.ProfileRepository) WSServerOption {
+	return func(s *WSServer) { s.profiles = pr }
+}
+
+// WithGroupRepository attaches a group repository to the server, enabling the
+// groups.* JSON-RPC methods.
+func WithGroupRepository(gr profile.GroupRepository) WSServerOption {
+	return func(s *WSServer) { s.groups = gr }
+}
+
+// WithCredentialMetadataRepository attaches a credential metadata repository
+// to the server, enabling the credentials.create/update/delete/list JSON-RPC
+// methods.
+func WithCredentialMetadataRepository(cmr profile.CredentialMetadataRepository) WSServerOption {
+	return func(s *WSServer) { s.credMeta = cmr }
 }
 
 // WithCredentialStore attaches a credential store, enabling the
 // credentials.* JSON-RPC methods.
 func WithCredentialStore(cs credential.CredentialStore) WSServerOption {
 	return func(s *WSServer) { s.credentials = cs }
+}
+
+// WithSettingsRegistry attaches a settings registry to the server, enabling
+// the settings.* JSON-RPC methods.
+func WithSettingsRegistry(r *settings.Registry) WSServerOption {
+	return func(s *WSServer) { s.settings = r }
 }
 
 func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption) *WSServer {
@@ -506,6 +531,9 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		"credentials.hasPassword",
 		"credentials.saveKeyPassphrase", "credentials.deleteKeyPassphrase":
 		s.handleCredentialMethod(wconn, req)
+	case "settings.describe", "settings.getAll", "settings.set", "settings.reset",
+		"settings.secretSet", "settings.secretDelete", "settings.secretExists":
+		s.handleSettingsMethod(wconn, req)
 	default:
 		resp := newJSONRPCError(req.ID, -32601, "Method not found")
 		_ = wconn.writeJSON(resp)
@@ -937,7 +965,7 @@ func (s *WSServer) closeSession(sid session.ID) {
 //
 // These methods back the connection-manager JSON-RPC calls (AD-1 control
 // plane). Each returns a JSON-RPC error (-32601) when the relevant store is
-// not wired (WithProfileStore/WithCredentialStore not called).
+// not wired (WithProfileRepository/WithGroupRepository/WithCredentialMetadataRepository not called).
 
 func (s *WSServer) handleProfileMethod(wconn *wsConn, req jsonrpcRequest) {
 	if s.profiles == nil {
@@ -980,13 +1008,13 @@ func (s *WSServer) handleProfileMethod(wconn *wsConn, req jsonrpcRequest) {
 }
 
 func (s *WSServer) handleGroupMethod(wconn *wsConn, req jsonrpcRequest) {
-	if s.profiles == nil {
+	if s.groups == nil {
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "groups not available"))
 		return
 	}
 	switch req.Method {
 	case "groups.list":
-		groups, err := s.profiles.LoadGroups()
+		groups, err := s.groups.LoadGroups()
 		if err != nil {
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
 			return
@@ -998,7 +1026,7 @@ func (s *WSServer) handleGroupMethod(wconn *wsConn, req jsonrpcRequest) {
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
 			return
 		}
-		if err := s.profiles.SaveGroup(g); err != nil {
+		if err := s.groups.SaveGroup(g); err != nil {
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
 			return
 		}
@@ -1011,7 +1039,7 @@ func (s *WSServer) handleGroupMethod(wconn *wsConn, req jsonrpcRequest) {
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
 			return
 		}
-		if err := s.profiles.DeleteGroup(params.ID); err != nil {
+		if err := s.groups.DeleteGroup(params.ID); err != nil {
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
 			return
 		}
@@ -1020,13 +1048,13 @@ func (s *WSServer) handleGroupMethod(wconn *wsConn, req jsonrpcRequest) {
 }
 
 func (s *WSServer) handleCredentialCRUDMethod(wconn *wsConn, req jsonrpcRequest) {
-	if s.profiles == nil {
+	if s.credMeta == nil {
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "profiles not available"))
 		return
 	}
 	switch req.Method {
 	case "credentials.list":
-		creds, err := s.profiles.LoadCredentials()
+		creds, err := s.credMeta.LoadCredentials()
 		if err != nil {
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
 			return
@@ -1051,7 +1079,7 @@ func (s *WSServer) handleCredentialCRUDMethod(wconn *wsConn, req jsonrpcRequest)
 		if c.ID == "" {
 			c.ID = profile.NewCredentialID(c.Name)
 		}
-		if err := s.profiles.SaveCredential(c); err != nil {
+		if err := s.credMeta.SaveCredential(c); err != nil {
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
 			return
 		}
@@ -1157,7 +1185,7 @@ func (s *WSServer) handleCredentialMethod(wconn *wsConn, req jsonrpcRequest) {
 // deleted — write-before-repoint prevents a crash from orphaning the new
 // secret.
 func (s *WSServer) savePasswordForCredential(credID, password string) error {
-	if s.profiles == nil {
+	if s.credMeta == nil {
 		return errors.New("profiles not available")
 	}
 	cred, ok, err := s.findCredentialByID(credID)
@@ -1175,7 +1203,7 @@ func (s *WSServer) savePasswordForCredential(credID, password string) error {
 
 	oldID := credential.SecretID(cred.SecretID)
 	cred.SecretID = string(newID)
-	if err := s.profiles.SaveCredential(cred); err != nil {
+	if err := s.credMeta.SaveCredential(cred); err != nil {
 		return fmt.Errorf("save credential metadata: %w", err)
 	}
 
@@ -1191,7 +1219,7 @@ func (s *WSServer) savePasswordForCredential(credID, password string) error {
 // the credential's SecretID. The metadata update is the authoritative step;
 // secret deletion is best-effort afterward.
 func (s *WSServer) deletePasswordForCredential(credID string) error {
-	if s.profiles == nil {
+	if s.credMeta == nil {
 		return errors.New("profiles not available")
 	}
 	cred, ok, err := s.findCredentialByID(credID)
@@ -1204,7 +1232,7 @@ func (s *WSServer) deletePasswordForCredential(credID string) error {
 
 	oldID := credential.SecretID(cred.SecretID)
 	cred.SecretID = ""
-	if err := s.profiles.SaveCredential(cred); err != nil {
+	if err := s.credMeta.SaveCredential(cred); err != nil {
 		return fmt.Errorf("save credential metadata: %w", err)
 	}
 
@@ -1217,7 +1245,7 @@ func (s *WSServer) deletePasswordForCredential(credID string) error {
 // hasPasswordForCredential checks whether a password secret exists for the
 // credential. Returns false when the credential is not found.
 func (s *WSServer) hasPasswordForCredential(credID string) (bool, error) {
-	if s.profiles == nil {
+	if s.credMeta == nil {
 		return false, nil
 	}
 	cred, ok, err := s.findCredentialByID(credID)
@@ -1234,7 +1262,7 @@ func (s *WSServer) hasPasswordForCredential(credID string) (bool, error) {
 // the credential's PassphraseSecretID. Same write-before-repoint pattern as
 // savePasswordForCredential.
 func (s *WSServer) savePassphraseForCredential(credID, passphrase string) error {
-	if s.profiles == nil {
+	if s.credMeta == nil {
 		return errors.New("profiles not available")
 	}
 	cred, ok, err := s.findCredentialByID(credID)
@@ -1252,7 +1280,7 @@ func (s *WSServer) savePassphraseForCredential(credID, passphrase string) error 
 
 	oldID := credential.SecretID(cred.PassphraseSecretID)
 	cred.PassphraseSecretID = string(newID)
-	if err := s.profiles.SaveCredential(cred); err != nil {
+	if err := s.credMeta.SaveCredential(cred); err != nil {
 		return fmt.Errorf("save credential metadata: %w", err)
 	}
 
@@ -1265,7 +1293,7 @@ func (s *WSServer) savePassphraseForCredential(credID, passphrase string) error 
 // deletePassphraseForCredential removes the stored key passphrase secret and
 // clears the credential's PassphraseSecretID.
 func (s *WSServer) deletePassphraseForCredential(credID string) error {
-	if s.profiles == nil {
+	if s.credMeta == nil {
 		return errors.New("profiles not available")
 	}
 	cred, ok, err := s.findCredentialByID(credID)
@@ -1278,7 +1306,7 @@ func (s *WSServer) deletePassphraseForCredential(credID string) error {
 
 	oldID := credential.SecretID(cred.PassphraseSecretID)
 	cred.PassphraseSecretID = ""
-	if err := s.profiles.SaveCredential(cred); err != nil {
+	if err := s.credMeta.SaveCredential(cred); err != nil {
 		return fmt.Errorf("save credential metadata: %w", err)
 	}
 
@@ -1322,7 +1350,7 @@ func (s *WSServer) deleteCredentialCascade(id string) error {
 
 	// Delete metadata first. Its deletion stands regardless of secret
 	// deletion outcome (ADR-0011 §4: a brief orphan beats a dangling ref).
-	if err := s.profiles.DeleteCredential(id); err != nil {
+	if err := s.credMeta.DeleteCredential(id); err != nil {
 		return fmt.Errorf("delete credential metadata %s: %w", id, err)
 	}
 
@@ -1354,7 +1382,7 @@ func (s *WSServer) deleteCredentialCascade(id string) error {
 // ok is false (not an error) when no credential with that ID exists — that
 // is the idempotent-delete path. A store error is returned as-is.
 func (s *WSServer) findCredentialByID(id string) (profile.Credential, bool, error) {
-	creds, err := s.profiles.LoadCredentials()
+	creds, err := s.credMeta.LoadCredentials()
 	if err != nil {
 		return profile.Credential{}, false, err
 	}
@@ -1367,10 +1395,10 @@ func (s *WSServer) findCredentialByID(id string) (profile.Credential, bool, erro
 }
 
 // handleImportTabby parses a Tabby config YAML and imports SSH profiles +
-// groups into the wired ProfileStore. Returns the number of profiles imported.
-// Deduplicates by host+port+user on re-import.
+// groups into the wired profile and group repositories. Returns the number
+// of profiles imported.
 func (s *WSServer) handleImportTabby(wconn *wsConn, req jsonrpcRequest) {
-	if s.profiles == nil {
+	if s.profiles == nil || s.groups == nil {
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "profiles not available"))
 		return
 	}
@@ -1390,7 +1418,7 @@ func (s *WSServer) handleImportTabby(wconn *wsConn, req jsonrpcRequest) {
 
 	countBefore, _ := s.profiles.LoadProfiles()
 	before := len(countBefore)
-	if err := importer.ImportGroups(cfg, s.profiles); err != nil {
+	if err := importer.ImportGroups(cfg, s.groups); err != nil {
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Import groups: "+err.Error()))
 		return
 	}
@@ -1401,6 +1429,267 @@ func (s *WSServer) handleImportTabby(wconn *wsConn, req jsonrpcRequest) {
 	after, _ := s.profiles.LoadProfiles()
 	imported := len(after) - before
 	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(imported)))
+}
+
+// --- settings control-plane handlers -------------------------------------
+
+// findDescriptor looks up a setting declaration by key.
+func (s *WSServer) findDescriptor(key string) settings.Descriptor {
+	for _, d := range s.settings.Descriptors() {
+		if d.Key() == key {
+			return d
+		}
+	}
+	return nil
+}
+
+// handleSettingsMethod dispatches settings.* RPCs. Returns -32601 when the
+func (s *WSServer) handleSettingsMethod(wconn *wsConn, req jsonrpcRequest) {
+	if s.settings == nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "Method not found"))
+		return
+	}
+	switch req.Method {
+	case "settings.describe":
+		s.handleSettingsDescribe(wconn, req)
+	case "settings.getAll":
+		s.handleSettingsGetAll(wconn, req)
+	case "settings.set":
+		s.handleSettingsSet(wconn, req)
+	case "settings.reset":
+		s.handleSettingsReset(wconn, req)
+	case "settings.secretSet":
+		s.handleSettingsSecretSet(wconn, req)
+	case "settings.secretDelete":
+		s.handleSettingsSecretDelete(wconn, req)
+	case "settings.secretExists":
+		s.handleSettingsSecretExists(wconn, req)
+	}
+}
+
+func (s *WSServer) handleSettingsDescribe(wconn *wsConn, req jsonrpcRequest) {
+	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(map[string]any{
+		"declarations": s.settings.Declarations(),
+	})))
+}
+
+func (s *WSServer) handleSettingsGetAll(wconn *wsConn, req jsonrpcRequest) {
+	values, err := s.settings.GetAll()
+	if err != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "settings.getAll: "+err.Error()))
+		return
+	}
+	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(map[string]any{
+		"values": values,
+	})))
+}
+
+// settingsSetParams carries the key and the untyped value.
+type settingsSetParams struct {
+	Key   string          `json:"key"`
+	Value json.RawMessage `json:"value"`
+}
+
+func (s *WSServer) handleSettingsSet(wconn *wsConn, req jsonrpcRequest) {
+	var p settingsSetParams
+	if err := json.Unmarshal(req.Params, &p); err != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		return
+	}
+
+	desc := s.findDescriptor(p.Key)
+	if desc == nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Unknown setting: "+p.Key))
+		return
+	}
+	if desc.Control() == settings.ControlSecret {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Secret settings must use settings.secretSet"))
+		return
+	}
+
+	var setErr error
+	switch desc.Control() {
+	case settings.ControlToggle:
+		var b bool
+		if err := json.Unmarshal(p.Value, &b); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid value: expected boolean"))
+			return
+		}
+		bk, ok := desc.(*settings.Bool)
+		if !ok {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Setting "+p.Key+" is declared as a toggle but is not a Bool key"))
+			return
+		}
+		setErr = s.settings.SetBool(bk, b)
+	case settings.ControlText:
+		var str string
+		if err := json.Unmarshal(p.Value, &str); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid value: expected string"))
+			return
+		}
+		sk, ok := desc.(*settings.String)
+		if !ok {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Setting "+p.Key+" is declared as text but is not a String key"))
+			return
+		}
+		setErr = s.settings.SetString(sk, str)
+	case settings.ControlNumber:
+		var n float64
+		if err := json.Unmarshal(p.Value, &n); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid value: expected number"))
+			return
+		}
+		nk, ok := desc.(*settings.Number)
+		if !ok {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Setting "+p.Key+" is declared as a number but is not a Number key"))
+			return
+		}
+		setErr = s.settings.SetNumber(nk, n)
+	case settings.ControlSelect:
+		var str string
+		if err := json.Unmarshal(p.Value, &str); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid value: expected string"))
+			return
+		}
+		sk, ok := desc.(*settings.Select)
+		if !ok {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Setting "+p.Key+" is declared as a select but is not a Select key"))
+			return
+		}
+		setErr = s.settings.SetSelect(sk, str)
+	}
+
+	if setErr != nil {
+		if errors.Is(setErr, settings.ErrValidation) {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, setErr.Error()))
+			return
+		}
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, setErr.Error()))
+		return
+	}
+
+	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(map[string]bool{"ok": true})))
+}
+
+// settingsResetParams carries the key to reset.
+type settingsResetParams struct {
+	Key string `json:"key"`
+}
+
+func (s *WSServer) handleSettingsReset(wconn *wsConn, req jsonrpcRequest) {
+	var p settingsResetParams
+	if err := json.Unmarshal(req.Params, &p); err != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		return
+	}
+
+	desc := s.findDescriptor(p.Key)
+	if desc == nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Unknown setting: "+p.Key))
+		return
+	}
+
+	if err := s.settings.Reset(desc); err != nil {
+		if errors.Is(err, settings.ErrValidation) {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, err.Error()))
+			return
+		}
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "settings.reset: "+err.Error()))
+		return
+	}
+	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(map[string]bool{"ok": true})))
+}
+
+// settingsSecretSetParams carries the key and the secret value.
+type settingsSecretSetParams struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
+func (s *WSServer) handleSettingsSecretSet(wconn *wsConn, req jsonrpcRequest) {
+	var p settingsSecretSetParams
+	if err := json.Unmarshal(req.Params, &p); err != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		return
+	}
+
+	desc := s.findDescriptor(p.Key)
+	if desc == nil || desc.Control() != settings.ControlSecret {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Not a secret setting: "+p.Key))
+		return
+	}
+
+	sk, ok := desc.(*settings.Secret)
+	if !ok {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Setting "+p.Key+" is declared as secret but is not a Secret key"))
+		return
+	}
+	if err := s.settings.SecretSet(sk, p.Value); err != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "settings.secretSet: "+err.Error()))
+		return
+	}
+	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(map[string]bool{"ok": true})))
+}
+
+// settingsSecretDeleteParams carries the key to delete.
+type settingsSecretDeleteParams struct {
+	Key string `json:"key"`
+}
+
+func (s *WSServer) handleSettingsSecretDelete(wconn *wsConn, req jsonrpcRequest) {
+	var p settingsSecretDeleteParams
+	if err := json.Unmarshal(req.Params, &p); err != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		return
+	}
+
+	desc := s.findDescriptor(p.Key)
+	if desc == nil || desc.Control() != settings.ControlSecret {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Not a secret setting: "+p.Key))
+		return
+	}
+
+	sk, ok := desc.(*settings.Secret)
+	if !ok {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Setting "+p.Key+" is declared as secret but is not a Secret key"))
+		return
+	}
+	if err := s.settings.SecretDelete(sk); err != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "settings.secretDelete: "+err.Error()))
+		return
+	}
+	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(map[string]bool{"ok": true})))
+}
+
+// settingsSecretExistsParams carries the key to check.
+type settingsSecretExistsParams struct {
+	Key string `json:"key"`
+}
+
+func (s *WSServer) handleSettingsSecretExists(wconn *wsConn, req jsonrpcRequest) {
+	var p settingsSecretExistsParams
+	if err := json.Unmarshal(req.Params, &p); err != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		return
+	}
+
+	desc := s.findDescriptor(p.Key)
+	if desc == nil || desc.Control() != settings.ControlSecret {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Not a secret setting: "+p.Key))
+		return
+	}
+
+	sk, ok := desc.(*settings.Secret)
+	if !ok {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Setting "+p.Key+" is declared as secret but is not a Secret key"))
+		return
+	}
+	exists, err := s.settings.SecretExists(sk)
+	if err != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "settings.secretExists: "+err.Error()))
+		return
+	}
+	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(map[string]bool{"exists": exists})))
 }
 
 // mustMarshal serializes v to JSON, panicking on error (only used for

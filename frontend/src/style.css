@@ -1463,3 +1463,154 @@ body {
 .cmd-overflow-menu-item:hover {
   background: #292e42;
 }
+
+/* ── Settings view (generated from settings.describe) ─────────────────── */
+
+.st-view {
+  padding: 16px 24px;
+  color: #c0caf5;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+.st-empty {
+  padding: 24px;
+  color: #565f89;
+  font-style: italic;
+}
+
+.st-section {
+  margin-bottom: 28px;
+}
+
+.st-section-heading {
+  font-size: 13px;
+  font-weight: 600;
+  color: #7aa2f7;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #2a2b3d;
+  margin: 0 0 16px 0;
+}
+
+.st-row {
+  display: flex;
+  align-items: flex-start;
+  padding: 8px 0;
+  border-bottom: 1px solid rgba(42, 43, 61, 0.4);
+}
+
+.st-row:last-child {
+  border-bottom: none;
+}
+
+.st-label-col {
+  flex: 0 0 200px;
+  padding-right: 16px;
+}
+
+.st-label-col label {
+  display: block;
+  font-size: 13px;
+  font-weight: 500;
+  color: #c0caf5;
+}
+
+.st-description {
+  display: block;
+  font-size: 11px;
+  color: #565f89;
+  margin-top: 2px;
+}
+
+.st-control-col {
+  flex: 1;
+  min-width: 0;
+}
+
+.st-control-col input[type='text'],
+.st-control-col input[type='number'] {
+  width: 100%;
+  max-width: 320px;
+  padding: 6px 10px;
+  background: #1f2335;
+  border: 1px solid #2a2b3d;
+  border-radius: 4px;
+  color: #c0caf5;
+  font-size: 13px;
+}
+
+.st-control-col input:focus {
+  border-color: #7aa2f7;
+  outline: none;
+}
+
+.st-control-col input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+  accent-color: #7aa2f7;
+}
+
+.st-control-col select {
+  width: 100%;
+  max-width: 320px;
+  padding: 6px 10px;
+  background: #1f2335;
+  border: 1px solid #2a2b3d;
+  border-radius: 4px;
+  color: #c0caf5;
+  font-size: 13px;
+}
+
+.st-control-col select:focus {
+  border-color: #7aa2f7;
+  outline: none;
+}
+
+/* Secret control — status + actions, never an input. */
+
+.st-secret {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.st-secret-status {
+  font-size: 13px;
+  padding: 4px 10px;
+  border-radius: 4px;
+  background: rgba(122, 162, 247, 0.1);
+  color: #7aa2f7;
+}
+
+.st-secret button {
+  font-size: 12px;
+  padding: 4px 12px;
+  border: 1px solid #2a2b3d;
+  border-radius: 4px;
+  background: #1f2335;
+  color: #c0caf5;
+  cursor: pointer;
+}
+
+.st-secret button:hover {
+  background: #2a2b3d;
+}
+
+.st-secret .st-secret-clear {
+  border-color: rgba(247, 118, 142, 0.3);
+  color: #f7768e;
+}
+
+.st-secret .st-secret-clear:hover {
+  background: rgba(247, 118, 142, 0.1);
+}
+
+/* Error message on validation failure — inline on the control. */
+
+.st-error {
+  font-size: 11px;
+  color: #f7768e;
+  margin-top: 4px;
+}

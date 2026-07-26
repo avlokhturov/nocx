@@ -36,7 +36,7 @@ func newCascadeHarness(t *testing.T) *cascadeHarness {
 	ps := profile.NewJSONStore(dir + "/p.json")
 	cs := credential.NewKeychain()
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileStore(ps), WithCredentialStore(cs))
+		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps), WithCredentialStore(cs))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)

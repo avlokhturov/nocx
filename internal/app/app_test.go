@@ -33,9 +33,6 @@ func TestNew_AllModulesInjected(t *testing.T) {
 	if a.Transport == nil {
 		t.Error("Transport is nil")
 	}
-	if a.Config == nil {
-		t.Error("Config is nil")
-	}
 	if a.ShellIntegration == nil {
 		t.Error("ShellIntegration is nil")
 	}

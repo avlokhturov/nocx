@@ -18,13 +18,14 @@ import (
 
 // Resolver maps profile IDs to ssh.ConnectConfig with credential wiring.
 type Resolver struct {
-	profiles profile.ProfileStore
+	profiles profile.ProfileRepository
+	credMeta profile.CredentialMetadataRepository
 	secrets  credential.SecretStore
 }
 
 // NewResolver creates a Resolver backed by the given stores.
-func NewResolver(ps profile.ProfileStore, ss credential.SecretStore) *Resolver {
-	return &Resolver{profiles: ps, secrets: ss}
+func NewResolver(pr profile.ProfileRepository, cmr profile.CredentialMetadataRepository, ss credential.SecretStore) *Resolver {
+	return &Resolver{profiles: pr, credMeta: cmr, secrets: ss}
 }
 
 // Resolve maps a profile ID to a Resolved ready for SSH connection.
@@ -133,9 +134,9 @@ func (r *Resolver) buildConfig(prof *profile.SSHProfile, visited map[string]bool
 	return cfg, nil
 }
 
-// findCredential loads a credential by ID from the store.
+// findCredential loads a credential by ID from the credential metadata store.
 func (r *Resolver) findCredential(id string) (profile.Credential, error) {
-	creds, err := r.profiles.LoadCredentials()
+	creds, err := r.credMeta.LoadCredentials()
 	if err != nil {
 		return profile.Credential{}, fmt.Errorf("load credentials: %w", err)
 	}

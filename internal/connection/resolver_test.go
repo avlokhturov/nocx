@@ -7,7 +7,9 @@ import (
 	"github.com/shady2k/nocx/internal/profile"
 )
 
-// stubProfileStore implements profile.ProfileStore in memory.
+// stubProfileStore implements both profile.ProfileRepository and
+// profile.CredentialMetadataRepository in memory, for tests that
+// need both.
 type stubProfileStore struct {
 	profiles    map[string]profile.SSHProfile
 	credentials map[string]profile.Credential
@@ -19,6 +21,8 @@ func newStubProfileStore() *stubProfileStore {
 		credentials: make(map[string]profile.Credential),
 	}
 }
+
+// --- profile.ProfileRepository ---
 
 func (s *stubProfileStore) LoadProfiles() ([]profile.SSHProfile, error) {
 	out := make([]profile.SSHProfile, 0, len(s.profiles))
@@ -37,9 +41,9 @@ func (s *stubProfileStore) DeleteProfile(id string) error {
 	delete(s.profiles, id)
 	return nil
 }
-func (s *stubProfileStore) LoadGroups() ([]profile.ProfileGroup, error) { return nil, nil }
-func (s *stubProfileStore) SaveGroup(g profile.ProfileGroup) error      { return nil }
-func (s *stubProfileStore) DeleteGroup(id string) error                 { return nil }
+
+// --- profile.CredentialMetadataRepository ---
+
 func (s *stubProfileStore) LoadCredentials() ([]profile.Credential, error) {
 	out := make([]profile.Credential, 0, len(s.credentials))
 	for _, c := range s.credentials {
@@ -116,7 +120,7 @@ func TestResolver_CredentialMode(t *testing.T) {
 		},
 	})
 
-	r := NewResolver(ps, ss)
+	r := NewResolver(ps, ps, ss)
 	host, cfg, err := r.Resolve("profile:1")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
@@ -161,7 +165,7 @@ func TestResolver_InlineMode(t *testing.T) {
 		},
 	})
 
-	r := NewResolver(ps, ss)
+	r := NewResolver(ps, ps, ss)
 	host, cfg, err := r.Resolve("profile:inline")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
@@ -189,7 +193,7 @@ func TestResolver_UnknownProfile(t *testing.T) {
 	ps := newStubProfileStore()
 	ss := newStubSecretStore()
 
-	r := NewResolver(ps, ss)
+	r := NewResolver(ps, ps, ss)
 	_, _, err := r.Resolve("nonexistent")
 	if err == nil {
 		t.Fatal("expected error for unknown profile")
@@ -234,7 +238,7 @@ func TestResolver_JumpHost(t *testing.T) {
 		},
 	})
 
-	r := NewResolver(ps, ss)
+	r := NewResolver(ps, ps, ss)
 	host, cfg, err := r.Resolve("profile:tgt")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
@@ -294,7 +298,7 @@ func TestResolver_JumpHostInlineMode(t *testing.T) {
 		},
 	})
 
-	r := NewResolver(ps, ss)
+	r := NewResolver(ps, ps, ss)
 	host, cfg, err := r.Resolve("profile:tgt2")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
@@ -332,7 +336,7 @@ func TestResolver_CarriesTargetBinding(t *testing.T) {
 		Options: profile.SSHProfileOptions{Host: "bound.example.com", CredentialID: "cred:bound:aaa"},
 	})
 
-	r := NewResolver(ps, ss)
+	r := NewResolver(ps, ps, ss)
 	_, cfg, err := r.Resolve("profile:bound")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
@@ -367,7 +371,7 @@ func TestResolver_UnboundCredentialSurfacesEmpty(t *testing.T) {
 		Options: profile.SSHProfileOptions{Host: "any.example.com", CredentialID: "cred:unbound:bbb"},
 	})
 
-	r := NewResolver(ps, ss)
+	r := NewResolver(ps, ps, ss)
 	_, cfg, err := r.Resolve("profile:unbound")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
@@ -420,7 +424,7 @@ func TestResolver_CarriesJumpBinding(t *testing.T) {
 		Options: profile.SSHProfileOptions{Host: "tgt-bound.example.com", CredentialID: "cred:tgtbound:ddd", JumpHost: "profile:jumpb"},
 	})
 
-	r := NewResolver(ps, ss)
+	r := NewResolver(ps, ps, ss)
 	_, cfg, err := r.Resolve("profile:tgtb")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)

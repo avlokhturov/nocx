@@ -74,9 +74,9 @@ func ParseTabbyConfig(data []byte) (*TabbyConfig, error) {
 }
 
 // ImportProfiles imports profiles of the given type from a Tabby config into
-// the profile store. Deduplicates by host+port+user on re-import.
-func ImportProfiles(cfg *TabbyConfig, store profile.ProfileStore, typeFilter string) error {
-	existing, err := store.LoadProfiles()
+// the profile repository. Deduplicates by host+port+user on re-import.
+func ImportProfiles(cfg *TabbyConfig, repo profile.ProfileRepository, typeFilter string) error {
+	existing, err := repo.LoadProfiles()
 	if err != nil {
 		return fmt.Errorf("load existing profiles: %w", err)
 	}
@@ -94,15 +94,16 @@ func ImportProfiles(cfg *TabbyConfig, store profile.ProfileStore, typeFilter str
 		}
 		seen[key] = true
 
-		if err := store.SaveProfile(p); err != nil {
+		if err := repo.SaveProfile(p); err != nil {
 			return fmt.Errorf("save profile %q: %w", p.Name, err)
 		}
 	}
 	return nil
 }
 
-// ImportGroups imports profile groups from a Tabby config into the store.
-func ImportGroups(cfg *TabbyConfig, store profile.ProfileStore) error {
+// ImportGroups imports profile groups from a Tabby config into the
+// group repository.
+func ImportGroups(cfg *TabbyConfig, repo profile.GroupRepository) error {
 	for _, tg := range cfg.Groups {
 		g := profile.ProfileGroup{
 			ID:            tg.ID,
@@ -113,7 +114,7 @@ func ImportGroups(cfg *TabbyConfig, store profile.ProfileStore) error {
 			Defaults:      tg.Defaults,
 			Editable:      true,
 		}
-		if err := store.SaveGroup(g); err != nil {
+		if err := repo.SaveGroup(g); err != nil {
 			return fmt.Errorf("save group %q: %w", g.Name, err)
 		}
 	}
