@@ -54,8 +54,9 @@ and is not, which is precisely the failure this setup exists to prevent.
 
 ## How we work
 
-1. Take a `ready` task from beads — claim it with the three-step protocol below, not a bare
-   `bd update --claim`.
+1. Take the next task from beads — the one command in [What to work on
+   next](#what-to-work-on-next), not a bare `bd ready`, and claim it with the three-step
+   protocol below, not a bare `bd update --claim`.
 2. Read the relevant `AD`(s) in `docs/architecture.md` before touching a boundary.
 3. **TDD**: red → green → refactor. Write the failing test first.
 4. Keep it green: language-specific format, lint, and tests all pass (pre-commit runs them).
@@ -88,6 +89,65 @@ visible result was a Playwright click timing out on a button that hit-testing
 reported as visible. Reasoning about geometry and DOM measurement took hours;
 the removed-lines diff found it in a minute and, swept across the whole
 directory, proved nothing else had been lost.
+
+### What to work on next
+
+Asked to "keep going" with no further instruction, this is the whole answer:
+
+```bash
+bd ready --exclude-type epic -u -n 10
+```
+
+It returns 7 issues across the 4 active tracks, not the 68 it returned on 2026-07-26 before
+the backlog was sequenced (nocx-k0xk.1). Take the top one and claim it with the three-step
+protocol below. **If it returns nothing, that is an answer, not a bug** — every active
+track's front is occupied. Finish something in flight, or promote the next epic
+deliberately; do not go hunting for work with a wider query.
+
+Four invariants keep that command honest. Break one and the noise comes back.
+
+**Blocking an epic parks its whole track.** This is the load-bearing mechanic and it is not
+obvious: in beads, a blocked parent propagates to its children, so a child with no `blocks`
+edge of its own is still excluded from `bd ready` when its epic is blocked. Verify it rather
+than trusting this paragraph — `nocx-d3q.1` has no dependencies and is not ready, because
+`nocx-d3q` is blocked. So "we are not working on X right now" is recorded as an edge:
+
+```bash
+bd dep add <parked-epic> <active-epic>    # parked-epic depends on active-epic
+```
+
+`blocks` therefore carries two meanings — a technical dependency and a deliberate
+sequencing decision — and which one applies is recorded in the epic's own description, not
+inferred from the edge. Both mean the same thing operationally: not now.
+
+**The active track is an epic in `in_progress`; every other epic is blocked on them.** That
+is the only place "what matters now" is written down. Not a label (needs hand-syncing, goes
+stale silently), not priority (then priority stops meaning priority, and switching tracks
+means re-prioritising dozens of issues), not `deferred` (already used for knowledge beads —
+`bd list --label kb --status all`). Note that `blocked` is *computed*, never stored:
+`bd query "status=blocked"` returns nothing while `bd stats` counts 23. You cannot set it;
+you can only add the edge that causes it.
+
+**An epic is a DAG, not a bag.** Children are wired with `blocks` so the epic exposes at most
+three entry points. The check is the front itself:
+
+```bash
+bd ready --parent <epic> --exclude-type epic -n 100 --json | jq 'length'   # must be ≤ 3
+```
+
+Do **not** use `bd swarm validate` for this — it counts closed children in its waves, so it
+reports max parallelism 7 for an epic whose real front is 3. It is useful for reading the
+shape of an epic, useless as a gate. An epic where every child sits in wave 1 has recorded
+no order at all, and that is what made `bd ready` unusable as a queue in the first place.
+
+**Epics are never workable, and claims are unassigned-only.** Always `--exclude-type epic`:
+an epic is a container and a synchronisation point, and claiming one is always a mistake.
+Always `-u` when listing and `--claim` when taking — that is what lets two agents work two
+tracks at once without coordinating, neither able to pick up the other's work.
+
+When a track finishes, unparking is one deliberate act: close the epic, then wire the
+children of whichever epic becomes active — sequencing it *before* it goes `in_progress`,
+never after.
 
 ### Claiming work on a shared backlog
 
