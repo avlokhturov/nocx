@@ -277,7 +277,7 @@ export class TerminalContent implements TabContent {
       })
 
       this._globalKeydown = (e: KeyboardEvent) => {
-        if (!target.isConnected) return
+        if (!target.isConnected || !target.classList.contains('active')) return
         if (this.scrollback && this.scrollback.selectedBlockId !== null) {
           if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
             e.preventDefault()
