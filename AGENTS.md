@@ -99,13 +99,43 @@ somebody already argued out.
    area. Re-deciding a settled question inside a bugfix is how the settled question stops
    being settled.
 
-The failure this prevents, measured on 2026-07-26: PR #11 ("SSH Connection Manager")
-shows as **closed, unmerged** on GitHub, and its whole feature set — profiles, the
-credential vault, the refactored SSH client — is present on `main` anyway. It was not
-lost and it was not merged twice: it was reworked onto the ADR-0011 credential boundary
-and landed as PR #12. An agent who read only the closed PR would have concluded the work
-was dropped and rebuilt several thousand lines that already exist. `git log --all --grep`
-and checking whether the files exist on `main` answered it in under a minute.
+5. **Is the code you found actually reachable?** A file existing on `main` does not mean
+   the feature is in the product. `grep` finds definitions; it does not tell you whether
+   anything calls them, and a test calling them looks identical to a caller that matters.
+
+   ```bash
+   deadcode -filter 'nocx/internal/<pkg>' ./...   # unreachable from main(), tests excluded
+   grep -rn "New<Thing>(" --include=*.go . | grep -v _test   # who constructs it?
+   ```
+
+   Read the composition root — `internal/app/app.go` — and confirm the thing you are
+   about to work on is wired into it.
+
+The two failures this prevents, both measured on 2026-07-26 in one session:
+
+**Checks 1-4.** PR #11 ("SSH Connection Manager") shows as **closed, unmerged** on
+GitHub, and its feature set is on `main` anyway: its commit `557e87d` is an ancestor of
+`main`, and PR #12 later reworked it onto the ADR-0011 credential boundary. An agent
+reading only the closed PR would have concluded the work was dropped and rebuilt several
+thousand lines. `git log --all --grep` and `git merge-base --is-ancestor` answered it in
+a minute.
+
+**Check 5, learned by getting it wrong in that same session.** Having established the
+files were on `main`, the next claim made was "so the vault shipped". It did not.
+`internal/app/app.go:81` wires `credential.NewKeychain()`; `NewVault()` and
+`NewCredentialStore()` have no callers outside tests; `deadcode` reports all 26 functions
+of the vault — `Unlock`, `SaveSecret`, `deriveKey`, `encryptGCM` — as unreachable.
+Four hundred lines of working, well-tested crypto that no user can reach. The tests are
+what hid it: `unused` sees a test calling `NewVault` and correctly stays silent, which is
+why three closed beads (nocx-1vr, nocx-l7o, nocx-dcd) hardened a subsystem nothing
+executes. **Coverage proves a unit works. It says nothing about whether the product uses
+it.** See nocx-25k9.1 and nocx-ckoy.1.
+
+The root cause is worth naming, because it is cheap to repeat: the deferral was recorded
+in a code comment — `credential.go:14-19`, "only to avoid editing app.go in this wave" —
+and nowhere else. The wave ended and nothing asked for the comment back. **A `TODO` in
+source is not a task. If you defer something, file the bead before you write the
+comment.**
 
 ### Before you investigate: two cheap checks that beat reasoning
 
