@@ -1,7 +1,14 @@
-import { test as base } from '@playwright/test'
+import { test as base, expect as baseExpect, type Page } from '@playwright/test'
 
 export { expect } from '@playwright/test'
 export type { Page } from '@playwright/test'
+
+/** Wait until the prompt editor owns input and typing can safely begin. */
+export async function promptReady(page: Page): Promise<void> {
+  const input = page.locator('.nocx-editor-input')
+  await baseExpect(input).toBeVisible({ timeout: 10_000 })
+  await baseExpect(input).toBeFocused({ timeout: 10_000 })
+}
 
 // Shared e2e harness. When the suite runs against the headless
 // vite + devharness shim (NOCX_WS_PORT set) instead of `wails dev`, inject the

@@ -1,4 +1,4 @@
-import { test, expect } from './harness'
+import { test, expect, promptReady } from './harness'
 
 // Regression guard for the shared half of nocx-d1f: with one tab, clicking the
 // window left the terminal unable to take input.
@@ -26,8 +26,7 @@ const INPUT = '.nocx-editor-input'
 test('a click into the pane leaves the terminal taking keystrokes', async ({ page }) => {
   await page.goto('/')
   await expect(page.locator('.tab')).toHaveCount(1)
-  // The editor appears only after shell integration marks the prompt ready.
-  await expect(page.locator(INPUT)).toBeVisible({ timeout: 10_000 })
+  await promptReady(page)
 
   // Move focus off the editor first. Without this the assertion is vacuous:
   // the tab is focused on load, so a click that changed nothing would pass.

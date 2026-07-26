@@ -1,4 +1,4 @@
-import { test, expect } from './harness'
+import { test, expect, promptReady } from './harness'
 
 // Terminal clipboard e2e: copy-on-select, right-click paste.
 //
@@ -48,7 +48,7 @@ test.describe('copy-on-select', () => {
     await page.goto('/')
     await expect(page.locator('.tab')).toHaveCount(1)
 
-    await expect(page.locator(INPUT)).toBeVisible({ timeout: 10000 })
+    await promptReady(page)
 
     await page.context().grantPermissions(['clipboard-read', 'clipboard-write'])
 
@@ -66,11 +66,12 @@ test.describe('copy-on-select', () => {
     const block = page.locator('.cmd-block', { hasText: marker }).first()
     await expect(block).toBeVisible({ timeout: 5000 })
 
-    // Select the text inside the block via triple-click, which the
-    // scrollback mouseup handler copies to the clipboard.
-    const box = await block.boundingBox()
-    if (!box) throw new Error('cmd-block not found')
-    await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2, { clickCount: 3 })
+    // Let Playwright wait for the block's position to settle before selecting;
+    // measuring coordinates first can race the next prompt block being added.
+    await block.click({ clickCount: 3 })
+    await expect
+      .poll(() => page.evaluate(() => window.getSelection()?.toString() ?? ''), { timeout: 3000 })
+      .toContain(marker)
 
     await expect
       .poll(
@@ -96,7 +97,7 @@ test.describe('paste', () => {
     await page.goto('/')
     await expect(page.locator('.tab')).toHaveCount(1)
 
-    await expect(page.locator(INPUT)).toBeVisible({ timeout: 10000 })
+    await promptReady(page)
 
     await page.context().grantPermissions(['clipboard-read', 'clipboard-write'])
 

@@ -1,4 +1,4 @@
-import { test, expect } from './harness'
+import { test, expect, promptReady } from './harness'
 
 // nocx-4ff.4: verify that raw input routing works after an enhanced-input
 // submit — the editor must stay hidden while a program runs, and typed keys
@@ -11,7 +11,7 @@ test.describe('enhanced input raw routing', () => {
     await page.goto('/')
     await expect(page.locator('.tab')).toHaveCount(1)
 
-    await expect(page.locator(INPUT)).toBeVisible({ timeout: 10000 })
+    await promptReady(page)
 
     // Read a line into x, then print got-<x>. Completed command output is
     // frozen into a DOM scrollback block even though live xterm output is a
@@ -35,7 +35,7 @@ test.describe('enhanced input raw routing', () => {
     await page.goto('/')
     await expect(page.locator('.tab')).toHaveCount(1)
 
-    await expect(page.locator(INPUT)).toBeVisible({ timeout: 10000 })
+    await promptReady(page)
 
     // Type partial input then Ctrl-C to cancel.
     await page.keyboard.type('echo partial')
@@ -56,8 +56,7 @@ test.describe('enhanced input raw routing', () => {
     await expect(page.locator(INPUT)).toHaveAttribute('data-prompt-cycle', 'interrupted', {
       timeout: 5000,
     })
-    await expect(page.locator(INPUT)).toBeVisible({ timeout: 5000 })
-    await expect(page.locator(INPUT)).toBeFocused({ timeout: 5000 })
+    await promptReady(page)
     await expect(page.locator(INPUT)).toHaveValue('', {
       timeout: 5000,
     })
@@ -76,7 +75,7 @@ test.describe('enhanced input raw routing', () => {
     await page.goto('/')
     await expect(page.locator('.tab')).toHaveCount(1)
 
-    await expect(page.locator(INPUT)).toBeVisible({ timeout: 10000 })
+    await promptReady(page)
 
     // Run several commands back-to-back — each submit must leave the state
     // machine in RUNNING_RAW (owned:false) so the next prompt returns via
@@ -98,7 +97,7 @@ test.describe('enhanced input raw routing', () => {
       await expect(page.locator('.cmd-block', { hasText: marker }).first()).toBeVisible({
         timeout: 5000,
       })
-      await expect(page.locator(INPUT)).toBeVisible({ timeout: 5000 })
+      await promptReady(page)
     }
   })
 })
