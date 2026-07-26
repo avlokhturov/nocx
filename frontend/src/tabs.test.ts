@@ -47,25 +47,29 @@ class CountingTestContent extends BaseTabContent {
   mountCount = 0
   /** Tracks every setVisible call for test assertions. */
   visibleCalls: boolean[] = []
+  /** Ordered trace of lifecycle calls for ordering assertions. */
+  callLog: string[] = []
 
   // eslint-disable-next-line @typescript-eslint/require-await, @typescript-eslint/no-unused-vars
-  async mount(target: HTMLElement, _host: TabHost, _signal: AbortSignal): Promise<void> {
+  async mount(_target: HTMLElement, _host: TabHost, _signal: AbortSignal): Promise<void> {
     this.mountCount++
-    this._target = target
+    this.callLog.push('mount')
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  viewportChanged(_viewport: ContentViewport): void {}
+  viewportChanged(_viewport: ContentViewport): void {
+    this.callLog.push(`viewportChanged(${_viewport.width}x${_viewport.height})`)
+  }
+
   focus(): void {}
 
   setVisible(visible: boolean): void {
     this.visibleCalls.push(visible)
+    this.callLog.push(`setVisible(${visible})`)
     super.setVisible(visible)
   }
 
   dispose(): void {}
 }
-
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 describe('TabManager', () => {
@@ -1249,7 +1253,7 @@ describe('TabManager', () => {
     expect(content.mountCount).toBe(1)
   })
 
-  it('activating a tab before mount completes still applies visibility after mount', async () => {
+  it('pane is visible before mount when activated — pre-mount target makes setVisible meaningful from first activation', async () => {
     const { manager } = await mountTabManager()
     const content = new CountingTestContent()
     const descriptor: ContentDescriptor = {
@@ -1261,18 +1265,88 @@ describe('TabManager', () => {
     }
 
     // addTab fires void this.activate(tab) — mount is async even for
-    // CountingTestContent's sync body. Flush microtasks so the full
-    // activate() chain (setActive → start → mount → post-mount setVisible)
-    // completes before we assert.
+    // CountingTestContent's sync body. With pre-mount target set in the
+    // Tab constructor, setActive(true) already toggles the 'active' class
+    // before mount() resolves.
     const tab = manager.openTab(content, descriptor)
     await Promise.resolve()
     await Promise.resolve()
 
-    // The pane must have the 'active' class. This is the assertion that
-    // breaks if setVisible(true) was only called before mount (when _target
-    // was null) and not again after mount resolves.
+    // The pane must have the 'active' class from the first activation.
+    // This assertion breaks if setVisible(true) was called when _target
+    // was null (pre-mount target fix makes it non-null from construction).
     expect(tab.pane.classList.contains('active')).toBe(true)
     expect(content.mountCount).toBe(1)
+  })
+
+  it('ordering: setVisible(true) fires before mount, and first viewport gets non-zero rectangle when pane is visible', async () => {
+    // Construct a Tab directly (not through TabManager) so we control
+    // the activation order and can inspect the call log precisely.
+    const { Tab } = await import('./tabs')
+    const content = new CountingTestContent()
+    const descriptor: ContentDescriptor = {
+      surfaceType: 'test.mock' as unknown as SurfaceType,
+      singletonKey: null,
+      restoreDescriptor: null,
+      supportsAttention: false,
+      defaultTitle: 'Test',
+    }
+
+    // Tab constructor calls content.setTarget(this.pane) — _target is
+    // set before any activation.
+    const tab = new Tab(content, descriptor, 99)
+    expect(content.callLog).toEqual([]) // no lifecycle calls yet
+
+    // Append pane to DOM and stub getBoundingClientRect to return non-zero,
+    // so _deliverViewport does not suppress the first geometry delivery.
+    // Pattern copied from B.5 test at ~line 1370.
+    const paneParent = document.createElement('div')
+    paneParent.append(tab.pane)
+    Object.defineProperty(tab.pane, 'getBoundingClientRect', {
+      value: () => ({
+        width: 1024,
+        height: 768,
+        top: 0,
+        left: 0,
+        right: 1024,
+        bottom: 768,
+        x: 0,
+        y: 0,
+        toJSON: () => {},
+      }),
+      configurable: true,
+    })
+
+    // Activate before mount: setActive(true) → setVisible(true).
+    // With pre-mount target, this toggles 'active' immediately.
+    tab.setActive(true)
+    expect(tab.pane.classList.contains('active')).toBe(true)
+    expect(content.callLog).toContain('setVisible(true)')
+    expect(content.callLog.indexOf('mount')).toBe(-1) // mount not yet called
+    expect(content.mountCount).toBe(0)
+
+    // Now mount.
+    await tab.start()
+
+    // setVisible(true) was logged before mount.
+    const visibleIdx = content.callLog.indexOf('setVisible(true)')
+    const mountIdx = content.callLog.indexOf('mount')
+    expect(visibleIdx).toBeGreaterThanOrEqual(0)
+    expect(visibleIdx).toBeLessThan(mountIdx)
+
+    // The first viewportChanged must be delivered with non-zero dimensions
+    // (the pre-mount target makes the pane visible, so _deliverViewport
+    // measures the stubbed 1024×768 rect instead of a zero rect).
+    const vpCall = content.callLog.find((c) => c.startsWith('viewportChanged'))
+    expect(vpCall).toBeDefined()
+    expect(vpCall).toMatch(/viewportChanged\(1024x768\)/u)
+
+    // Mount exactly once.
+    expect(content.mountCount).toBe(1)
+
+    // Clean up.
+    tab.close()
+    paneParent.remove()
   })
 
   // ═════════════════════════════════════════════════════════════════════════

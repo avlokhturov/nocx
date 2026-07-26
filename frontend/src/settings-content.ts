@@ -48,7 +48,6 @@ export class SettingsContent extends BaseTabContent {
   async mount(target: HTMLElement, host: TabHost, signal: AbortSignal): Promise<void> {
     if (this._disposed || this.container) return
     if (signal.aborted) return
-    this._target = target
 
     host.setTitle('Settings')
 
