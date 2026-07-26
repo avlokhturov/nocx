@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { base64ToBytes } from './export-section'
+import { base64ToBytes } from './export-utils'
 
 // Portable encrypted export/import serialization round-trip.
 // Verifies the exact serialization the buttons use:

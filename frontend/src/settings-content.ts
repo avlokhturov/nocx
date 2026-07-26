@@ -7,7 +7,7 @@
 import { SettingsViewImpl, keyToDomId } from './settings'
 import type { ProfileClient } from './profiles'
 import { BaseTabContent, type TabHost, type ContentViewport } from './tab-content'
-import { renderExportSection } from './export-section'
+import { mountExportSection } from './export-section'
 import type { SurfaceType, SingletonKey } from './tab-content'
 
 // ── Registered surface constants (B.7) ─────────────────────────────────
@@ -38,6 +38,8 @@ export class SettingsContent extends BaseTabContent {
 
   /** Current search query, used to re-apply filter after re-render. */
   private _query = ''
+  /** Disposer for the export-section Solid island; null until mounted. */
+  private _disposeExportSection: (() => void) | null = null
 
   constructor(private readonly profileClient: ProfileClient) {
     super()
@@ -105,8 +107,10 @@ export class SettingsContent extends BaseTabContent {
     )
     root.append(this.contentEl)
 
-    // Export / backup / import section (ADR-0011 §7)
-    renderExportSection(this.contentEl, this.profileClient)
+    // Export / backup / import section (ADR-0011 §7). It is a Solid island
+    // until this surface itself migrates; keep its disposer so the root dies
+    // with the tab rather than outliving the DOM it renders into.
+    this._disposeExportSection = mountExportSection(this.contentEl, this.profileClient)
 
     target.append(root)
     this.container = root
@@ -128,6 +132,10 @@ export class SettingsContent extends BaseTabContent {
 
   dispose(): void {
     this._disposed = true
+    // Tear the Solid island down before its container leaves the document:
+    // an undisposed root keeps effects alive on detached nodes.
+    this._disposeExportSection?.()
+    this._disposeExportSection = null
     this.container?.remove()
     this.container = null
     this.rail = null
