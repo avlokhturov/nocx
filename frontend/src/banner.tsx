@@ -14,7 +14,11 @@
  * is the title bar, so an overlay there hides the tabs and the traffic
  * lights — and it never takes layout space, because shrinking the terminal
  * reflows the grid down to the PTY.
+ *
+ * SolidJS implementation (nocx-njrx.6): renders via solid-js/web render()
+ * into #panes, cleans up with the returned dispose function.
  */
+import { render } from 'solid-js/web'
 
 /** The three banner outcomes the caller acts on. */
 export type BannerChoice = 'allow' | 'suppress' | 'dismiss'
@@ -30,24 +34,57 @@ export interface ClipboardBanner {
 
   /**
    * Raise the banner across the top of the window. Resolves with the
-   * user's choice when one of the three affordances is clicked. The
-   * banner self-removes after the choice.
-   *
-   * If the banner is already showing, the call is a no-op that resolves
-   * immediately with 'dismiss' — a program emitting the sequence in a
-   * loop must not stack banners.
+   * user's choice once they interact. While the banner is on screen,
+   * further calls resolve immediately with 'dismiss' so a loop cannot
+   * stack multiple banners.
    */
   show(): Promise<BannerChoice>
 }
 
 /**
- * Real banner implementation — creates, shows and self-removes a DOM
- * element at the top of the window. Matches the existing CSS idiom
- * (tabbar colours, font stack, corner-radius).
+ * Solid component that renders the clipboard banner UI.
+ * Receives a callback for each of the three choices.
+ */
+function ClipboardBannerComponent(props: { onChoice: (choice: BannerChoice) => void }) {
+  return (
+    <div class="clipboard-banner">
+      <span class="clipboard-banner-message">
+        A terminal program tried to write to your clipboard. This is disabled by default for
+        security reasons, to protect against malicious software.
+      </span>
+      <div class="clipboard-banner-actions">
+        <button
+          class="clipboard-banner-btn clipboard-banner-allow"
+          onClick={() => props.onChoice('allow')}
+        >
+          Allow clipboard writes
+        </button>
+        <button
+          class="clipboard-banner-btn clipboard-banner-suppress"
+          onClick={() => props.onChoice('suppress')}
+        >
+          Don't show again
+        </button>
+        <button
+          class="clipboard-banner-btn clipboard-banner-dismiss"
+          aria-label="Dismiss"
+          onClick={() => props.onChoice('dismiss')}
+        >
+          ✕
+        </button>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Real banner implementation — renders a Solid component into #panes
+ * and self-disposes on choice, matching the imperative predecessor's
+ * DOM classes and behaviour exactly.
  */
 export class ClipboardBannerImpl implements ClipboardBanner {
   private _shown = false
-  private _el: HTMLElement | null = null
+  private _dispose: (() => void) | null = null
   private _resolve: ((choice: BannerChoice) => void) | null = null
 
   get shown(): boolean {
@@ -66,58 +103,26 @@ export class ClipboardBannerImpl implements ClipboardBanner {
 
     return new Promise<BannerChoice>((resolve) => {
       this._resolve = resolve
-      this._el = this._create()
-      // Overlay inside #panes, which is position:relative. Two constraints
-      // meet here and only this satisfies both:
-      //   - not over the top of the window: the tab strip IS the title bar
-      //     (nocx-cpp), so an overlay there hides the tabs and the traffic
-      //     lights along with them.
-      //   - not in the layout flow either: taking vertical space resizes the
-      //     terminal grid, which reflows the PTY and repaints whatever
-      //     full-screen program is running. A notice must not resize the
-      //     terminal underneath it.
-      document.getElementById('panes')?.append(this._el)
+      const container = document.getElementById('panes')
+      if (!container) {
+        // No #panes element — banner cannot render. Resolve immediately
+        // and reset state so the next show() can try again.
+        this._shown = false
+        this._resolve = null
+        resolve('dismiss')
+        return
+      }
+      this._dispose = render(
+        () => <ClipboardBannerComponent onChoice={(choice) => this._decide(choice)} />,
+        container,
+      )
     })
   }
 
-  private _create(): HTMLElement {
-    const banner = document.createElement('div')
-    banner.className = 'clipboard-banner'
-
-    const msg = document.createElement('span')
-    msg.className = 'clipboard-banner-message'
-    msg.textContent =
-      'A terminal program tried to write to your clipboard. ' +
-      'This is disabled by default for security reasons, to protect against malicious software.'
-
-    const actions = document.createElement('div')
-    actions.className = 'clipboard-banner-actions'
-
-    const allow = document.createElement('button')
-    allow.className = 'clipboard-banner-btn clipboard-banner-allow'
-    allow.textContent = 'Allow clipboard writes'
-    allow.addEventListener('click', () => this._decide('allow'))
-
-    const suppress = document.createElement('button')
-    suppress.className = 'clipboard-banner-btn clipboard-banner-suppress'
-    suppress.textContent = "Don't show again"
-    suppress.addEventListener('click', () => this._decide('suppress'))
-
-    const dismiss = document.createElement('button')
-    dismiss.className = 'clipboard-banner-btn clipboard-banner-dismiss'
-    dismiss.textContent = '✕'
-    dismiss.setAttribute('aria-label', 'Dismiss')
-    dismiss.addEventListener('click', () => this._decide('dismiss'))
-
-    actions.append(allow, suppress, dismiss)
-    banner.append(msg, actions)
-    return banner
-  }
-
   private _decide(choice: BannerChoice): void {
-    if (this._el) {
-      this._el.remove()
-      this._el = null
+    if (this._dispose) {
+      this._dispose()
+      this._dispose = null
     }
     // Lower the flag: it means "a banner is on screen right now", nothing
     // more. Leaving it raised turned dismiss into a permanent silence —
