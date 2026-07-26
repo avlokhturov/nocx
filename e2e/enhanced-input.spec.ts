@@ -1,4 +1,4 @@
-import { test, expect } from './harness'
+import { test, expect, promptReady } from './harness'
 
 // nocx-4ff.4: verify that raw input routing works after an enhanced-input
 // submit — the editor must stay hidden while a program runs, and typed keys
@@ -12,9 +12,7 @@ test.describe('enhanced input raw routing', () => {
     await expect(page.locator('.tab')).toHaveCount(1)
 
     // Wait for the shell to be ready (title populated).
-    await expect(page.locator(TITLE).first()).not.toHaveText('', {
-      timeout: 10000,
-    })
+    await promptReady(page)
 
     // read a line into x, then set the terminal TITLE to got-<x>. Assert on the
     // title, not the pane: xterm renders text to a WebGL canvas, so terminal
@@ -37,9 +35,7 @@ test.describe('enhanced input raw routing', () => {
     await page.goto('/')
     await expect(page.locator('.tab')).toHaveCount(1)
 
-    await expect(page.locator(TITLE).first()).not.toHaveText('', {
-      timeout: 10000,
-    })
+    await promptReady(page)
 
     // Type partial input then Ctrl-C to cancel.
     await page.keyboard.type('echo partial')
@@ -68,9 +64,7 @@ test.describe('enhanced input raw routing', () => {
     await page.goto('/')
     await expect(page.locator('.tab')).toHaveCount(1)
 
-    await expect(page.locator(TITLE).first()).not.toHaveText('', {
-      timeout: 10000,
-    })
+    await promptReady(page)
 
     // Run several commands back-to-back — each submit must leave the state
     // machine in RUNNING_RAW (owned:false) so the next prompt returns via

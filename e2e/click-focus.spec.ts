@@ -1,4 +1,4 @@
-import { test, expect } from './harness'
+import { test, expect, promptReady } from './harness'
 
 // Regression guard for the shared half of nocx-d1f: with one tab, clicking the
 // window left the terminal unable to take input.
@@ -26,10 +26,10 @@ const TITLE = '.tab-title'
 test('a click into the pane leaves the terminal taking keystrokes', async ({ page }) => {
   await page.goto('/')
   await expect(page.locator('.tab')).toHaveCount(1)
-  // Wait for the shell session to be ready.
-  await expect(page.locator(TITLE).first()).not.toHaveText('', {
-    timeout: 10_000,
-  })
+  // Wait for the prompt to be OWNED, not merely for a title. Ownership is what
+  // gives the editor focus, and blurring before that transition lands is a race
+  // this test loses — see promptReady() in the harness for the measurement.
+  await promptReady(page)
 
   // Move focus off the editor first. Without this the assertion is vacuous:
   // the tab is focused on load, so a click that changed nothing would pass.
