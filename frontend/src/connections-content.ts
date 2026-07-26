@@ -5,19 +5,23 @@
 
 import { ConnectionManagerViewImpl } from './connections'
 import type { ProfileClient, SSHProfile } from './profiles'
-import type { TabHost, TabContent, ContentViewport } from './tab-content'
+import { BaseTabContent, type TabHost, type ContentViewport } from './tab-content'
 
-export class ConnectionsContent implements TabContent {
+export class ConnectionsContent extends BaseTabContent {
   private view: ConnectionManagerViewImpl | null = null
+
   private _disposed = false
 
-  constructor(private readonly profileClient: ProfileClient) {}
+  constructor(private readonly profileClient: ProfileClient) {
+    super()
+  }
 
   /** Callback for when the user clicks Connect on a profile. */
   onConnect?: (profile: SSHProfile) => void
 
   async mount(target: HTMLElement, host: TabHost, signal: AbortSignal): Promise<void> {
     if (this._disposed || this.view) return
+    this._target = target
 
     if (signal.aborted) return
 
@@ -38,6 +42,7 @@ export class ConnectionsContent implements TabContent {
     // Connections view is a scrolling container — no viewport-specific
     // behaviour.
   }
+
   focus(): void {
     // Connections view has no primary input to focus.
   }

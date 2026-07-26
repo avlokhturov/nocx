@@ -89,7 +89,9 @@ export class Tab implements TabHost {
 
   setActive(active: boolean): void {
     this._active = active
-    this.pane.classList.toggle('active', active)
+    // Visibility crosses the seam through setVisible — the content
+    // toggles the 'active' class on its mount target (AD-6 corollary).
+    this.content.setVisible(active)
     if (active) {
       this._hasActivity = false
     }
@@ -138,16 +140,25 @@ export class Tab implements TabHost {
   // ── Lifecycle ─────────────────────────────────────────────────────────
 
   /** Mount the content into this tab's pane. Called by TabManager on
-   *  first activation. Enables viewport delivery after mount completes (B.5). */
+   *  first activation. Suppressed after first call — mount-once is enforced
+   *  at the seam, not by the content implementation (nocx-njrx.2). */
   async start(): Promise<void> {
-    log.info('nocx: Tab.start() called', { id: this.id })
+    if (this._mountStarted) return
     this._mountStarted = true
+    log.info('nocx: Tab.start() called', { id: this.id })
     await this.content.mount(this.pane, this, this._mountAbort.signal)
     // B.5: replay the latest buffered viewport, or measure now if none yet.
     if (this._latestViewport) {
       this.content.viewportChanged(this._latestViewport)
     } else {
       this._deliverViewport()
+    }
+    // Re-apply visibility now that mount has set the content's target (B.6).
+    // TabManager.setActive calls setVisible(true) before start(), so it is
+    // a no-op until mount provides the target element. Without this, a tab
+    // activated before its mount resolves would never get the 'active' class.
+    if (this._active) {
+      this.content.setVisible(true)
     }
   }
 

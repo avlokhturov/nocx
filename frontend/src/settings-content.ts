@@ -6,7 +6,7 @@
 
 import { SettingsViewImpl, keyToDomId } from './settings'
 import type { ProfileClient } from './profiles'
-import type { TabHost, TabContent, ContentViewport } from './tab-content'
+import { BaseTabContent, type TabHost, type ContentViewport } from './tab-content'
 import { renderExportSection } from './export-section'
 import type { SurfaceType, SingletonKey } from './tab-content'
 
@@ -25,10 +25,11 @@ const NARROW_BREAKPOINT_PX = 640
 
 // ── SettingsContent ─────────────────────────────────────────────────────
 
-export class SettingsContent implements TabContent {
+export class SettingsContent extends BaseTabContent {
   private container: HTMLElement | null = null
   private rail: HTMLElement | null = null
   private contentEl: HTMLElement | null = null
+
   private searchInput: HTMLInputElement | null = null
   private modifiedToggle: HTMLInputElement | null = null
   private sectionList: HTMLElement | null = null
@@ -38,13 +39,16 @@ export class SettingsContent implements TabContent {
   /** Current search query, used to re-apply filter after re-render. */
   private _query = ''
 
-  constructor(private readonly profileClient: ProfileClient) {}
+  constructor(private readonly profileClient: ProfileClient) {
+    super()
+  }
 
   // ── TabContent ───────────────────────────────────────────────────────
 
   async mount(target: HTMLElement, host: TabHost, signal: AbortSignal): Promise<void> {
     if (this._disposed || this.container) return
     if (signal.aborted) return
+    this._target = target
 
     host.setTitle('Settings')
 

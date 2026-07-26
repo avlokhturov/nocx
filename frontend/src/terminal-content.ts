@@ -16,7 +16,7 @@ import { CommandLedger } from './command-ledger'
 import { ScrollbackController } from './scrollback/controller'
 import { log } from './log'
 import type { WSClient, SessionHandle } from './ipc'
-import type { TabHost, TabContent, ContentViewport } from './tab-content'
+import { BaseTabContent, type TabHost, type ContentViewport } from './tab-content'
 
 // How long the grid must hold still before the PTY is told about it.
 const RESIZE_SETTLE_MS = 80
@@ -50,7 +50,7 @@ function cwdTooltip(cwd: string, fromOSC7: boolean): string {
  * ledger, input-state machine, and PTY resize policy. It receives geometry
  * through viewportChanged() — it NEVER interprets container geometry itself.
  */
-export class TerminalContent implements TabContent {
+export class TerminalContent extends BaseTabContent {
   private renderer: TerminalRenderer | null = null
   private session: SessionHandle | null = null
   private editor: CommandEditor | null = null
@@ -66,7 +66,6 @@ export class TerminalContent implements TabContent {
   private _lastExitCode: number | null = null
   private _bufferType: 'normal' | 'alternate' = 'normal'
   private nativeMode = false
-  private started = false
   private _disposed = false
   private mountAbortController: AbortController | null = null
   private resizeTimer: number | undefined
@@ -101,6 +100,7 @@ export class TerminalContent implements TabContent {
       user?: string
     },
   ) {
+    super()
     this._readyPromise = new Promise<boolean>((resolve) => {
       this._readyResolve = resolve
     })
@@ -125,8 +125,8 @@ export class TerminalContent implements TabContent {
   // ── TabContent ──────────────────────────────────────────────────────────
 
   async mount(target: HTMLElement, host: TabHost, signal: AbortSignal): Promise<void> {
-    if (this.started || this._disposed) return
-    this.started = true
+    if (this._disposed) return
+    this._target = target
     this.host = host
 
     // Wire the signal: if the tab is disposed during mount, abort.
