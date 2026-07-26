@@ -2,9 +2,21 @@
 // Renders controls by declaration.control kind, grouped by declaration.section.
 // A control:'secret' renders as configured/not-configured with Replace/Clear
 // actions; it never renders a populated input (ADR-0011 §2).
+//
+// Row DOM ids: keyToDomId(key) = 'st-setting-' + encodeURIComponent(key).
+// encodeURIComponent does NOT escape '.', so st-setting-clipboard.osc52Suppressed
+// is a valid HTML5 id but splits into id + class inside a raw CSS selector.
+// Use getElementById or CSS.escape — never querySelector('#' + id).
 
 import { log } from './log'
 import { ProfileClient } from './profiles'
+
+/** Stable DOM id for a setting row, derived from the declaration key.
+ *  encodeURIComponent does NOT escape '.', so use getElementById or
+ *  CSS.escape — never raw querySelector('#' + id). */
+export function keyToDomId(key: string): string {
+  return 'st-setting-' + encodeURIComponent(key)
+}
 
 export interface Declaration {
   key: string
@@ -23,6 +35,10 @@ export interface Declaration {
 export interface SettingsView {
   show(): void
   refresh(): Promise<void>
+  /** Current declarations, as returned by the last successful refresh. */
+  getDeclarations(): Declaration[]
+  /** Unique sections in declaration order. */
+  getSections(): string[]
 }
 
 export class SettingsViewImpl implements SettingsView {
@@ -37,6 +53,22 @@ export class SettingsViewImpl implements SettingsView {
   constructor(container: HTMLElement, client: ProfileClient) {
     this.container = container
     this.client = client
+  }
+
+  getDeclarations(): Declaration[] {
+    return [...this.declarations]
+  }
+
+  getSections(): string[] {
+    const seen = new Set<string>()
+    const sections: string[] = []
+    for (const d of this.declarations) {
+      if (!seen.has(d.section)) {
+        seen.add(d.section)
+        sections.push(d.section)
+      }
+    }
+    return sections
   }
 
   show(): void {
@@ -102,9 +134,9 @@ export class SettingsViewImpl implements SettingsView {
 
       const heading = document.createElement('h2')
       heading.className = 'st-section-heading'
+      heading.id = 'st-section-' + encodeURIComponent(section)
       heading.textContent = section
       sectionEl.append(heading)
-
       for (const decl of decls) {
         sectionEl.append(this.renderControl(decl))
       }
@@ -118,6 +150,7 @@ export class SettingsViewImpl implements SettingsView {
   private renderControl(decl: Declaration): HTMLElement {
     const row = document.createElement('div')
     row.className = 'st-row'
+    row.id = keyToDomId(decl.key)
     row.dataset.key = decl.key
 
     const labelCol = document.createElement('div')
@@ -353,7 +386,7 @@ export class SettingsViewImpl implements SettingsView {
 
   /** Re-render a single control row in-place without full DOM rebuild. */
   private rerenderRow(key: string): void {
-    const oldRow = this.container.querySelector<HTMLElement>(`.st-row[data-key="${key}"]`)
+    const oldRow = document.getElementById(keyToDomId(key))
     if (!oldRow) return
     const decl = this.declarations.find((d) => d.key === key)
     if (!decl) return
