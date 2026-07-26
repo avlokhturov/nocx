@@ -29,9 +29,11 @@ rewrite epics, so their work disappears from `bd ready` and comes back on its ow
 rewrite lands. Nothing was deleted and no scope was dropped.
 
 **Where to see the state.** `bd epic status` prints progress for all fifteen epics live from
-the dependency graph, and `bd ready --exclude-type epic` is the queue. A repo-visible page
-that needs no `bd` install is tracked as `nocx-lg6r`; until it exists, those two commands are
-the only honest view.
+the dependency graph, and `bd ready --exclude-type epic` is the queue. Those two commands
+are the view — there is deliberately no generated status page in the repo (`nocx-lg6r`,
+closed won't-do). Note that sections 5 and 6 below duplicate facts beads also owns and are
+not kept current (`nocx-mqav`, closed won't-do): read them as the original strategic intent,
+and this section plus the two commands for what is actually true today.
 
 **If you are an agent**, [AGENTS.md](../AGENTS.md#what-to-work-on-next) is binding on how to
 pick work. Short version: `bd ready --exclude-type epic -u`, take the top, claim it. Do not
