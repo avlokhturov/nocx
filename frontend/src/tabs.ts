@@ -305,20 +305,6 @@ export class TabManager {
     return this.tabs.length
   }
 
-  getTabs(): Array<{ id: number; title: string; isActive: boolean }> {
-    return this.tabs.map((tab) => ({
-      id: tab.id,
-      title: tab.displayTitle,
-      isActive: tab === this.activeTab,
-    }))
-  }
-
-  findTab(id: number): Tab | undefined {
-    return this.tabs.find((t) => t.id === id)
-  }
-
-  onTabsChanged?: () => void
-
   get initialTabReady(): Promise<void> {
     return this._initialTabReady
   }
@@ -403,7 +389,6 @@ export class TabManager {
     tab.onCloseRequested = () => this.closeTab(tab)
     this.tabStrip.addTab(tab)
     void this.activate(tab)
-    this.onTabsChanged?.()
     return tab
   }
 
@@ -430,7 +415,6 @@ export class TabManager {
     tab.pane.remove()
     this.tabStrip.removeTab(tab.id)
     this.tabs.splice(index, 1)
-    this.onTabsChanged?.()
 
     if (this.tabs.length === 0) {
       this.newTab()
@@ -473,7 +457,6 @@ export class TabManager {
 
     await tab.start()
     tab.focus()
-    this.onTabsChanged?.()
   }
 
   activateByIndex(index: number): void {

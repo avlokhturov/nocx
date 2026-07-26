@@ -1198,12 +1198,11 @@ describe('TabManager', () => {
       // Acceptance test: WHO calls viewportChanged? The presentation layer.
       // This test fails if setupViewportObserver is removed or if
       // viewportChanged is only called by content measuring itself.
-
-      const { manager } = await mountTabManager()
-      const tab = manager.findTab(1)!
+      const { manager, client } = await mountTabManager()
+      const tab = manager.newTab()
+      await vi.waitFor(() => expect(client.openSession).toHaveBeenCalledTimes(2))
       const renderers = await getRendererMocks()
-      const renderer = renderers[0]
-
+      const renderer = renderers[renderers.length - 1]
       // Before any observer fires, fitViewport must not have been called.
       // eslint-disable-next-line @typescript-eslint/unbound-method
       expect(renderer.fitViewport).not.toHaveBeenCalled()
@@ -1298,8 +1297,9 @@ describe('TabManager', () => {
     })
 
     it('equal consecutive rectangles are suppressed', async () => {
-      const { manager } = await mountTabManager()
-      const tab = manager.findTab(1)!
+      const { manager, client } = await mountTabManager()
+      const tab = manager.newTab()
+      await vi.waitFor(() => expect(client.openSession).toHaveBeenCalledTimes(2))
 
       Object.defineProperty(tab.pane, 'getBoundingClientRect', {
         value: () => ({
@@ -1321,12 +1321,13 @@ describe('TabManager', () => {
 
       const renderers = await getRendererMocks()
       // eslint-disable-next-line @typescript-eslint/unbound-method
-      expect(renderers[0].fitViewport).toHaveBeenCalledTimes(1)
+      expect(renderers[renderers.length - 1].fitViewport).toHaveBeenCalledTimes(1)
     })
 
     it('no callbacks after dispose', async () => {
-      const { manager } = await mountTabManager()
-      const tab = manager.findTab(1)!
+      const { manager, client } = await mountTabManager()
+      const tab = manager.newTab()
+      await vi.waitFor(() => expect(client.openSession).toHaveBeenCalledTimes(2))
       const renderers = await getRendererMocks()
 
       tab.close()
@@ -1342,12 +1343,13 @@ describe('TabManager', () => {
       spy.mockRestore()
 
       // eslint-disable-next-line @typescript-eslint/unbound-method
-      expect(renderers[0].fitViewport).not.toHaveBeenCalled()
+      expect(renderers[renderers.length - 1].fitViewport).not.toHaveBeenCalled()
     })
 
     it('hidden tab is not sent a misleading zero rectangle', async () => {
-      const { manager } = await mountTabManager()
-      const tab = manager.findTab(1)!
+      const { manager, client } = await mountTabManager()
+      const tab = manager.newTab()
+      await vi.waitFor(() => expect(client.openSession).toHaveBeenCalledTimes(2))
       const renderers = await getRendererMocks()
 
       Object.defineProperty(tab.pane, 'getBoundingClientRect', {
@@ -1369,7 +1371,7 @@ describe('TabManager', () => {
 
       // Must NOT deliver a zero viewport.
       // eslint-disable-next-line @typescript-eslint/unbound-method
-      expect(renderers[0].fitViewport).not.toHaveBeenCalled()
+      expect(renderers[renderers.length - 1].fitViewport).not.toHaveBeenCalled()
     })
   })
 })
