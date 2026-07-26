@@ -11,13 +11,13 @@ OpenCode, …) contributing to the repo. Read it before writing code.
   (`AD-1`…`AD-10`), module boundaries, the WebSocket protocol. **The ADs are binding.**
 - The task backlog lives in **beads** (`bd`), not in prose. Get work with `bd ready`.
 - **New here?** The [README setup](README.md#agent-tooling) is the full install guide —
-  the toolchain *and* the per-machine agent tooling (`bd`, the `beads-superpowers`
+  the toolchain _and_ the per-machine agent tooling (`bd`, the `beads-superpowers`
   plugin, and optional `graphify`). `make init` does not install any of it.
 
 ## First thing in a fresh clone
 
 Two kinds of setup, in order. **First, install the tooling on your machine** — the
-toolchain (Go, Node, Wails, `bd`) *and* the agent tooling that is not vendored:
+toolchain (Go, Node, Wails, `bd`) _and_ the agent tooling that is not vendored:
 the [`beads-superpowers`](https://github.com/DollarDill/beads-superpowers) Claude
 Code plugin (Superpowers skills + the `bd` session hooks) and, optionally,
 `graphify` for knowledge-graph code search. The [README](README.md#agent-tooling)
@@ -62,6 +62,50 @@ and is not, which is precisely the failure this setup exists to prevent.
 4. Keep it green: language-specific format, lint, and tests all pass (pre-commit runs them).
    The pre-commit hook is the gate on every commit; CI validates release branches and tags.
 5. Update the task in beads; record any non-obvious decision as an ADR in `docs/decisions/`.
+
+### Before you fix anything: find out whether it is already decided or already filed
+
+A bug report is a symptom, not a mandate to start editing. Four checks, in this order,
+before the first line of a fix. They are cheap; skipping them is how two agents ship two
+different answers to the same question, and how a "fix" quietly contradicts a decision
+somebody already argued out.
+
+1. **Is it already filed?** Search the tracker before creating anything or starting
+   anything.
+
+   ```bash
+   bd query "status=open" --json | jq -r '.[] | "\(.id) [\(.issue_type)] \(.title)"' | grep -i <keyword>
+   bd list --label <topic> --status all      # decisions, research and design beads
+   bd memories <keyword>                     # what a past session learned the hard way
+   ```
+
+   A hit is not automatically your task — read it. It may already be claimed, may be
+   blocked, or may record that the behaviour is deliberate. If the symptom you were
+   handed is a duplicate, say so and work the existing bead instead of opening a second
+   one; two beads for one defect is how a fix lands twice and conflicts with itself.
+
+2. **Is it deliberate?** Read [`docs/vision.md`](docs/vision.md) for what we are building
+   and what is explicitly out, and the epic that owns the area for what it declared out of
+   scope. Things that look broken often are not. The "Sessions" panel in the activity bar
+   is empty because a comment in `main.ts` says it is a deliberate placeholder — an agent
+   who "fixed" it would have invented a feature nobody asked for.
+
+3. **Which `AD` does it touch?** [`docs/architecture.md`](docs/architecture.md) is binding.
+   Check before, not after: a fix that routes PTY bytes through JSON-RPC or lets the
+   backend sniff the stream is not a fix. If the `AD` is genuinely wrong, change it
+   deliberately in the document — do not route around it in one module.
+
+4. **Was it decided in an ADR?** `ls docs/decisions/` and read the one that covers the
+   area. Re-deciding a settled question inside a bugfix is how the settled question stops
+   being settled.
+
+The failure this prevents, measured on 2026-07-26: PR #11 ("SSH Connection Manager")
+shows as **closed, unmerged** on GitHub, and its whole feature set — profiles, the
+credential vault, the refactored SSH client — is present on `main` anyway. It was not
+lost and it was not merged twice: it was reworked onto the ADR-0011 credential boundary
+and landed as PR #12. An agent who read only the closed PR would have concluded the work
+was dropped and rebuilt several thousand lines that already exist. `git log --all --grep`
+and checking whether the files exist on `main` answered it in under a minute.
 
 ### Before you investigate: two cheap checks that beat reasoning
 
@@ -130,7 +174,7 @@ through it.
 The invariants below keep that command honest. Break one and the noise comes back.
 
 **An epic blocks another only when they touch the same code.** Not "this is more important",
-not "this comes later in the plan" — the edge means *two people cannot hold these at once*.
+not "this comes later in the plan" — the edge means _two people cannot hold these at once_.
 Several epics being available simultaneously is normal and wanted; the only requirement is
 that they are disjoint, so two agents can take two epics without landing in the same files.
 
@@ -170,7 +214,7 @@ reports max parallelism 7 for an epic whose real front is 3. It is good for read
 of an epic and useless as a gate.
 
 **An epic has three states, and the third one is the useful one.** `in_progress` means
-somebody is working it *right now*. Blocked means parked, or waiting on its predecessor in
+somebody is working it _right now_. Blocked means parked, or waiting on its predecessor in
 someone's stream. Plain `open` and unblocked means **free to hand to a colleague** — and
 that is a feature, not an oversight:
 
@@ -185,7 +229,7 @@ The status has to describe reality; `--exclude-type epic` is what keeps epics ou
 task-level query.
 
 Corollary worth checking for, because it hides: a child sitting `in_progress` inside a
-*blocked* epic means work is happening in a frozen track. Usually it is a stale claim from
+_blocked_ epic means work is happening in a frozen track. Usually it is a stale claim from
 an earlier session rather than live work. `bd list --status in_progress` against the epic
 states finds them.
 
@@ -194,7 +238,7 @@ belongs to deleting wterm because the seam lying about capabilities is part of t
 bug that arrives from nowhere gets **no parent at all**: a standalone bug is legitimate and
 shows up in `bd ready` on its own. Do not file it under the nearest plausible epic — that
 reflex is exactly what grew the two area epics, one honest-looking parent at a time. If
-triage shows the bug is a symptom of something structural, it *becomes* an epic (or spawns
+triage shows the bug is a symptom of something structural, it _becomes_ an epic (or spawns
 one) and carries a `discovered-from` edge back to itself, the way `nocx-4ff` points at
 `nocx-gs0` and the way `nocx-bw2` anchored `nocx-rdkh`.
 
@@ -214,11 +258,11 @@ happening by accident.
    whole and finish it?
 2. Write a criterion that stops being false exactly once, and name what is deliberately out.
    This one is **enforced**, not advised: `validation.on-create` is `error`, so `bd create -t
-   epic` without acceptance criteria fails and creates nothing. Pass `--acceptance "..."`, or
+epic` without acceptance criteria fails and creates nothing. Pass `--acceptance "..."`, or
    put a `## Success Criteria` heading in the description — `bd lint` accepts either. An area
    of code has no such criterion by construction, which is precisely why `nocx-6ek` and
    `nocx-k0xk` could never close; the gate exists to stop the next one being created.
-3. Set the status deliberately. `bd create` leaves it `open`, which means *free to assign* —
+3. Set the status deliberately. `bd create` leaves it `open`, which means _free to assign_ —
    correct for a real backlog item, wrong if you already own it.
 4. Add `blocks` edges only against epics whose files it collides with (above).
 5. Label it `mvp`, `phase-2`, `phase-3` or `infra`, and check the ordering invariant still
@@ -241,6 +285,21 @@ bd dolt push                # publish the claim now, not at your next git push
 `git pull` refreshes the backlog on its own (`.githooks/post-merge`, `post-rewrite`), and
 `git push` publishes it (`.githooks/pre-push`). The explicit pull/push above exists because
 claiming is the one moment where minutes of staleness cost somebody a duplicated afternoon.
+
+**Publish every backlog write immediately, not at session close.** `bd dolt push` right
+after you create a bead, edit one, add a dependency edge, or close one — the same rule the
+claim protocol above states, applied to every write and not only to claims. An unpushed
+bead does not exist for anybody else: a colleague runs the queue command, does not see it,
+and files or works the same thing. Batch the writes if you like (`bd batch` is one
+transaction), then push once at the end of the batch — but do not carry them into the next
+task.
+
+```bash
+bd create ... && bd dep add ... && bd dolt push
+```
+
+The cost is a few seconds. The cost of skipping it is somebody else's afternoon, and it is
+paid by them rather than by you, which is exactly why the rule has to be written down.
 
 **A claim is not a lock.** Two people can claim the same bead from two clones; both pushes
 land, Dolt merges them, last write wins. The protocol shrinks the race window — it does not
@@ -284,8 +343,8 @@ the other's; beads calls this "multiple polecats racing to resolve conflicts and
 cascading conflicts". A worker that forgets the release strands everyone behind it, so
 release in the failure path too — `bd merge-slot check` tells you who is holding it.
 
-This is orthogonal to the approval rule above: the slot decides *who merges next*, never
-*whether* the merge is allowed.
+This is orthogonal to the approval rule above: the slot decides _who merges next_, never
+_whether_ the merge is allowed.
 
 ## Engineering rules (non-negotiable)
 
@@ -319,6 +378,7 @@ The VT-frontend risk was settled in
 Next risk to watch: run `bd ready`.
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:970c3bf2 -->
+
 ## Beads Issue Tracker
 
 This project uses **bd (beads)** for issue tracking. Run `bd prime` to see full workflow context and commands.
@@ -369,12 +429,15 @@ This protocol applies when ending a Beads implementation workflow. It is subordi
 5. **Hand off** - Summarize changes, validation, issue status, and any blocked sync/commit/push step
 
 **Critical rules:**
+
 - Explicit user or orchestrator instructions override this Beads block.
 - Do not commit or push without clear authority from the active profile or the current user request.
 - If a required sync or push is blocked, stop and report the exact command and error.
+
 <!-- END BEADS INTEGRATION -->
 
 <!-- BEGIN BEADS CODEX SETUP: generated by bd setup codex -->
+
 ## Beads Issue Tracker
 
 Use Beads (`bd`) for durable task tracking in repositories that include it. Use the `beads` skill at `.agents/skills/beads/SKILL.md` (project install) or `~/.agents/skills/beads/SKILL.md` (global install) for Beads workflow guidance, then use the `bd` CLI for issue operations.
