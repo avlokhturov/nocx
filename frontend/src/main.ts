@@ -13,6 +13,7 @@ import { SidebarImpl } from './sidebar'
 import { createClipboardAccess, ClipboardGate } from './clipboard'
 import { ClipboardBannerImpl } from './banner'
 import { ProfileClient } from './profiles'
+import { Dispatcher } from './dispatcher'
 import { SettingsViewImpl } from './settings'
 
 /**
@@ -120,10 +121,10 @@ async function main() {
     host = location.hostname
     console.warn('nocx: no Wails runtime, using fallback WS port', port)
   }
-
-  const client = new WSClient()
+  const dispatcher = new Dispatcher()
+  const client = new WSClient(dispatcher)
   await client.connect(port, host, token)
-  const profileClient = new ProfileClient(client.rawSocket())
+  const profileClient = new ProfileClient(dispatcher)
   // TabManager opens the first tab and activates it in the constructor.
   // The renderer is selected via ?r=xterm|wterm inside TabManager.
   const tm = new TabManager(bar, panes, client, clipboard, gate, banner, profileClient)

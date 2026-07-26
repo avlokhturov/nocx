@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { Dispatcher } from './dispatcher'
 import { SessionHandle, WSClient } from './ipc'
 import { FRAME_HEADER_SIZE, FRAME_VERSION, MSG_TYPE_DATA, encodeFrame } from './frame'
 
 // Must match the un-exported constants in ipc.ts.
 const ACK_INTERVAL_MS = 100
-const MIN_BACKOFF_MS = 250
 
 const SID = '0123456789abcdef0011223344556677'
 const OTHER_SID = 'ffffffffffffffffffffffffffffffff'
@@ -23,8 +23,29 @@ class MockWebSocket {
 
   onopen: (() => void) | null = null
   onerror: (() => void) | null = null
-  onclose: (() => void) | null = null
   onmessage: ((event: { data: unknown }) => void) | null = null
+  onclose: (() => void) | null = null
+
+  private _listeners = new Map<string, Set<(...args: unknown[]) => void>>()
+
+  addEventListener(type: string, fn: (...args: unknown[]) => void): void {
+    let s = this._listeners.get(type)
+    if (!s) {
+      s = new Set()
+      this._listeners.set(type, s)
+    }
+    s.add(fn)
+  }
+
+  removeEventListener(type: string, fn: (...args: unknown[]) => void): void {
+    this._listeners.get(type)?.delete(fn)
+  }
+
+  private _fire(type: string, event?: unknown): void {
+    for (const fn of this._listeners.get(type) ?? []) {
+      fn(event)
+    }
+  }
 
   constructor(readonly url: string) {
     MockWebSocket.last = this
@@ -37,11 +58,14 @@ class MockWebSocket {
   close(): void {
     this.closeCalled = true
     this.readyState = MockWebSocket.CLOSED
+    this.onclose?.()
+    this._fire('close')
   }
 
   serverAccepts(): void {
     this.readyState = MockWebSocket.OPEN
     this.onopen?.()
+    this._fire('open')
   }
 
   serverFails(): void {
@@ -51,14 +75,19 @@ class MockWebSocket {
   serverHangsUp(): void {
     this.readyState = MockWebSocket.CLOSED
     this.onclose?.()
+    this._fire('close')
   }
 
   deliverText(payload: unknown): void {
-    this.onmessage?.({ data: typeof payload === 'string' ? payload : JSON.stringify(payload) })
+    const event = { data: typeof payload === 'string' ? payload : JSON.stringify(payload) }
+    this.onmessage?.(event)
+    this._fire('message', event)
   }
 
   deliverBinary(data: ArrayBuffer): void {
-    this.onmessage?.({ data })
+    const event = { data }
+    this.onmessage?.(event)
+    this._fire('message', event)
   }
 
   requests(): { id?: number; method?: string; params?: Record<string, unknown> }[] {
@@ -82,12 +111,16 @@ function socket(): MockWebSocket {
   return ws
 }
 
+function mockDispatcher(): Dispatcher {
+  return new Dispatcher()
+}
+
 async function connectedSession(): Promise<{
   client: WSClient
   session: SessionHandle
   ws: MockWebSocket
 }> {
-  const client = new WSClient()
+  const client = new WSClient(mockDispatcher())
   const connecting = client.connect(9876)
   socket().serverAccepts()
   await connecting
@@ -106,7 +139,7 @@ async function twoSessions(): Promise<{
   sessionB: SessionHandle
   ws: MockWebSocket
 }> {
-  const client = new WSClient()
+  const client = new WSClient(mockDispatcher())
   const connecting = client.connect(9876)
   socket().serverAccepts()
   await connecting
@@ -144,7 +177,7 @@ afterEach(() => {
 
 describe('connect', () => {
   it('resolves once the handshake completes', async () => {
-    const client = new WSClient()
+    const client = new WSClient(mockDispatcher())
     let resolved = false
     const connecting = client.connect(9876).then(() => (resolved = true))
 
@@ -157,7 +190,7 @@ describe('connect', () => {
   })
 
   it('dials the local session endpoint on the given port', async () => {
-    const client = new WSClient()
+    const client = new WSClient(mockDispatcher())
     const connecting = client.connect(1234)
     expect(socket().url).toBe('ws://127.0.0.1:1234/session')
     socket().serverAccepts()
@@ -165,7 +198,7 @@ describe('connect', () => {
   })
 
   it('can dial a non-default host (plain-browser dev path)', async () => {
-    const client = new WSClient()
+    const client = new WSClient(mockDispatcher())
     const connecting = client.connect(1234, 'vm-agents')
     expect(socket().url).toBe('ws://vm-agents:1234/session')
     socket().serverAccepts()
@@ -173,7 +206,7 @@ describe('connect', () => {
   })
 
   it('asks for arraybuffer frames, not blobs', async () => {
-    const client = new WSClient()
+    const client = new WSClient(mockDispatcher())
     const connecting = client.connect(9876)
     expect(socket().binaryType).toBe('arraybuffer')
     socket().serverAccepts()
@@ -181,14 +214,14 @@ describe('connect', () => {
   })
 
   it('rejects when the socket errors', async () => {
-    const client = new WSClient()
+    const client = new WSClient(mockDispatcher())
     const connecting = client.connect(9876)
     socket().serverFails()
     await expect(connecting).rejects.toThrow('ws connection failed')
   })
 
   it('leaves the connection usable but with no sessions yet', async () => {
-    const client = new WSClient()
+    const client = new WSClient(mockDispatcher())
     const connecting = client.connect(9876)
     socket().serverAccepts()
     await connecting
@@ -198,7 +231,7 @@ describe('connect', () => {
 
 describe('openSession', () => {
   it('sends a JSON-RPC open carrying the initial grid size', async () => {
-    const client = new WSClient()
+    const client = new WSClient(mockDispatcher())
     const connecting = client.connect(9876)
     socket().serverAccepts()
     await connecting
@@ -212,7 +245,7 @@ describe('openSession', () => {
   })
 
   it('sends enhanced:true when openSession requests enhanced input (nocx-4ff.10)', async () => {
-    const client = new WSClient()
+    const client = new WSClient(mockDispatcher())
     const connecting = client.connect(9876)
     socket().serverAccepts()
     await connecting
@@ -229,7 +262,7 @@ describe('openSession', () => {
   })
 
   it('rejects on a JSON-RPC error response', async () => {
-    const client = new WSClient()
+    const client = new WSClient(mockDispatcher())
     const connecting = client.connect(9876)
     socket().serverAccepts()
     await connecting
@@ -246,7 +279,7 @@ describe('openSession', () => {
   })
 
   it('rejects a session-id the server should never have sent', async () => {
-    const client = new WSClient()
+    const client = new WSClient(mockDispatcher())
     const connecting = client.connect(9876)
     socket().serverAccepts()
     await connecting
@@ -259,7 +292,7 @@ describe('openSession', () => {
   })
 
   it('rejects — rather than hanging forever — when the socket dies mid-open', async () => {
-    const client = new WSClient()
+    const client = new WSClient(mockDispatcher())
     const connecting = client.connect(9876)
     socket().serverAccepts()
     await connecting
@@ -271,7 +304,7 @@ describe('openSession', () => {
   })
 
   it('ignores a response correlated to some other request id', async () => {
-    const client = new WSClient()
+    const client = new WSClient(mockDispatcher())
     const connecting = client.connect(9876)
     socket().serverAccepts()
     await connecting
@@ -289,7 +322,7 @@ describe('openSession', () => {
   })
 
   it('survives a control frame that is not JSON', async () => {
-    const client = new WSClient()
+    const client = new WSClient(mockDispatcher())
     const connecting = client.connect(9876)
     socket().serverAccepts()
     await connecting
@@ -383,7 +416,7 @@ describe('inbound data', () => {
   })
 
   it('starts each connection with a clean decoder', async () => {
-    const client = new WSClient()
+    const client = new WSClient(mockDispatcher())
     const connecting = client.connect(9876)
     socket().serverAccepts()
     await connecting
@@ -472,7 +505,7 @@ describe('close', () => {
   })
 
   it('is safe on a client that never connected', () => {
-    expect(() => new WSClient().close()).not.toThrow()
+    expect(() => new WSClient(mockDispatcher()).close()).not.toThrow()
   })
 })
 
@@ -686,7 +719,7 @@ describe('reconnect and reattach', () => {
   }
 
   it('retries with exponential backoff on unexpected socket drop', async () => {
-    const client = new WSClient()
+    const client = new WSClient(mockDispatcher())
     const { firstWS } = await connectedSessionWithBackoff(client)
 
     // Connection drops unexpectedly.
@@ -704,12 +737,12 @@ describe('reconnect and reattach', () => {
     await Promise.resolve()
 
     // After a successful reconnect, backoff resets to initial value.
-    expect(client.backoffMs).toBe(MIN_BACKOFF_MS)
+    expect(client.backoffMs).toBe(250)
     expect(client.connected).toBe(true)
   })
 
   it('stops retrying when close() is called deliberately', async () => {
-    const client = new WSClient()
+    const client = new WSClient(mockDispatcher())
     const { firstWS } = await connectedSessionWithBackoff(client)
 
     firstWS.serverHangsUp()
@@ -726,7 +759,7 @@ describe('reconnect and reattach', () => {
   })
 
   it('sends attach for each known session after reconnect', async () => {
-    const client = new WSClient()
+    const client = new WSClient(mockDispatcher())
     const { firstWS } = await connectedSessionWithBackoff(client)
 
     firstWS.serverHangsUp()
@@ -742,7 +775,7 @@ describe('reconnect and reattach', () => {
   })
 
   it('sends attach with the last received byte offset', async () => {
-    const client = new WSClient()
+    const client = new WSClient(mockDispatcher())
     const { firstWS } = await connectedSessionWithBackoff(client)
 
     firstWS.deliverBinary(encodeFrame(SID, new TextEncoder().encode('12345')))
@@ -762,7 +795,7 @@ describe('reconnect and reattach', () => {
   })
 
   it('continues without resetting on resumed response', async () => {
-    const client = new WSClient()
+    const client = new WSClient(mockDispatcher())
     const { session, firstWS } = await connectedSessionWithBackoff(client)
 
     let resetFired = false
@@ -788,7 +821,7 @@ describe('reconnect and reattach', () => {
   })
 
   it('fires reset callback and renames decoder on reset response', async () => {
-    const client = new WSClient()
+    const client = new WSClient(mockDispatcher())
     const { session, firstWS } = await connectedSessionWithBackoff(client)
 
     let resetFired = false
@@ -817,7 +850,7 @@ describe('reconnect and reattach', () => {
   // DEFECT 1 regression: recreating the decoder on reset prevents stale
   // mid-rune bytes from splicing onto the resynced stream (nocx-ao7).
   it('recreates the per-session decoder on reset so stale mid-rune bytes are discarded', async () => {
-    const client = new WSClient()
+    const client = new WSClient(mockDispatcher())
     const { session, firstWS } = await connectedSessionWithBackoff(client)
 
     // Feed the session a frame that ends mid-rune: the first byte of '€'
@@ -858,7 +891,7 @@ describe('reconnect and reattach', () => {
   })
 
   it('updates offset from reset response', async () => {
-    const client = new WSClient()
+    const client = new WSClient(mockDispatcher())
     const { firstWS } = await connectedSessionWithBackoff(client)
 
     const state = (client as unknown as { sessions: Map<string, { offset: number }> })
@@ -883,7 +916,7 @@ describe('reconnect and reattach', () => {
   })
 
   it('drops session locally on attach error', async () => {
-    const client = new WSClient()
+    const client = new WSClient(mockDispatcher())
     const { session, firstWS } = await connectedSessionWithBackoff(client)
 
     const exited: string[] = []
@@ -916,7 +949,7 @@ describe('reconnect and reattach', () => {
   })
 
   it('sends attach for multiple sessions on reconnect', async () => {
-    const client = new WSClient()
+    const client = new WSClient(mockDispatcher())
     const connecting = client.connect(9876)
     socket().serverAccepts()
     await connecting
