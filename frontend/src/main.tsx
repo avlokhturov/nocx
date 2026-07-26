@@ -6,6 +6,8 @@ import {
   ApplyUpdate,
   ReportHealthy,
 } from '../wailsjs/go/main/WailsApp'
+import { render } from 'solid-js/web'
+import App from './App'
 import { log } from './log'
 import { WSClient } from './ipc'
 import { TabManager } from './tabs'
@@ -97,13 +99,16 @@ class UpdateNotice {
 
 async function main() {
   log.info('nocx: main() called')
-  const bar = document.getElementById('tabbar')
-  const panes = document.getElementById('panes')
-  const activityBar = document.getElementById('activitybar')
-  const sidebarPanel = document.getElementById('sidebar')
-  if (!bar || !panes || !activityBar || !sidebarPanel) {
-    throw new Error('#tabbar / #panes / #activitybar / #sidebar not found')
-  }
+
+  // Single Solid root owns the shell. App renders the skeleton with empty
+  // hosts (#tabbar, #activitybar, #sidebar, #panes) that imperative code
+  // mounts into. Everything below is the composition root — no more DOM
+  // construction, no hand-wired layout.
+  render(() => <App />, document.getElementById('app')!)
+  const bar = document.getElementById('tabbar')!
+  const panes = document.getElementById('panes')!
+  const activityBar = document.getElementById('activitybar')!
+  const sidebarPanel = document.getElementById('sidebar')!
 
   // Update notice — renders inline in the tab bar, right-aligned.
   const notice = new UpdateNotice(bar)
