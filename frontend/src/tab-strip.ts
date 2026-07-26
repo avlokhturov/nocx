@@ -223,11 +223,16 @@ export class HorizontalTabStrip implements TabStrip {
       button.classList.toggle('active', active)
       button.setAttribute('aria-selected', String(active))
       button.tabIndex = active ? 0 : -1
-      if (active) {
-        // Clear activity indicator on activation (matching current behaviour).
-        const indicator = button.querySelector('.tab-indicator')
-        indicator?.classList.remove('tab-activity')
-      }
+    }
+    // Repaint after toggling .active so the newly-inactive tab's pending
+    // activity indicator shows — paintButton gates on !.active, which was
+    // still set during the setActive(false)-triggered repaint earlier in
+    // activate().  Without this repaint, the indicator stays hidden and a
+    // later bell (or other attention event) finds _hasActivity already true
+    // and never reaches onDisplayChange either.
+    for (const [id, tab] of this.views) {
+      const button = this.buttons.get(id)
+      if (button) this.paintButton(button, tab)
     }
   }
 
