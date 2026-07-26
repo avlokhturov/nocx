@@ -1,3 +1,5 @@
+import { Dispatcher } from './dispatcher'
+
 // Profile/group models + IPC client for the connection manager.
 // Mirrors the backend internal/profile package (nocx-fxs.1) and the
 // JSON-RPC control-plane methods wired in nocx-fxs.5.
@@ -181,49 +183,15 @@ export function newProfileID(type: string, name: string): string {
       : `nocx-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
   return `${type}:custom:${name}:${uuid}`
 }
-
 // ProfileClient is the JSON-RPC client for profile/group/credential CRUD.
 // It speaks the control-plane methods wired in nocx-fxs.5 (AD-1).
-//
-// ID-SPACE: ProfileClient uses IDs starting at 100000 to avoid collisions
-// with WSClient (ipc.ts), which starts at 1. Both share the same WebSocket
-// and both listen to ALL messages — an ID collision would make one client
-// swallow the other's response, causing the form to never open.
+// RPC dispatch is delegated to a shared Dispatcher so request-ID allocation
+// and response correlation are owned in one place.
 export class ProfileClient {
-  private ws: WebSocket
-  private nextID = 100000
-  private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>()
-
-  constructor(ws: WebSocket) {
-    this.ws = ws
-    ws.addEventListener('message', (ev) => this.onMessage(ev))
-  }
-
-  private onMessage(ev: MessageEvent): void {
-    if (typeof ev.data !== 'string') return
-    let msg: { id?: number; result?: unknown; error?: { code: number; message: string } }
-    try {
-      msg = JSON.parse(ev.data) as typeof msg
-    } catch {
-      return
-    }
-    if (msg.id === undefined) return
-    const p = this.pending.get(msg.id)
-    if (!p) return
-    this.pending.delete(msg.id)
-    if (msg.error) {
-      p.reject(new Error(msg.error.message))
-    } else {
-      p.resolve(msg.result)
-    }
-  }
+  constructor(private dispatcher: Dispatcher) {}
 
   private call<T>(method: string, params: unknown): Promise<T> {
-    return new Promise((resolve, reject) => {
-      const id = this.nextID++
-      this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject })
-      this.ws.send(JSON.stringify({ jsonrpc: '2.0', id, method, params }))
-    })
+    return this.dispatcher.call<T>(method, params)
   }
 
   listProfiles(): Promise<SSHProfile[]> {
@@ -286,8 +254,12 @@ export class ProfileClient {
   describeSettings(): Promise<{ declarations: unknown[] }> {
     return this.call('settings.describe', {})
   }
-  getAllSettings(): Promise<{ values: Record<string, unknown> }> {
-    return this.call('settings.getAll', {})
+  getSnapshot(): Promise<{
+    values: Record<string, unknown>
+    overridden: string[]
+    revision: number
+  }> {
+    return this.call('settings.getSnapshot', {})
   }
   setSetting(key: string, value: unknown): Promise<{ ok: true }> {
     return this.call('settings.set', { key, value })
@@ -304,4 +276,73 @@ export class ProfileClient {
   secretExists(key: string): Promise<{ exists: boolean }> {
     return this.call('settings.secretExists', { key })
   }
+  // ── Export/backup/import RPC methods ──────────────────────────────────
+
+  exportManifest(mode: string): Promise<ExportManifest> {
+    return this.call('export.manifest', { mode })
+  }
+
+  configExport(): Promise<ConfigExport> {
+    return this.call('export.configExport', {})
+  }
+
+  portableEncryptedExport(
+    passphrase: string,
+    includePrivateContent?: boolean,
+  ): Promise<PortableEncryptedExport> {
+    return this.call('export.portableEncrypted', {
+      passphrase,
+      includePrivateContent: includePrivateContent ?? false,
+    })
+  }
+
+  backup(): Promise<BackupManifest> {
+    return this.call('export.backup', {})
+  }
+
+  importConfig(data: ConfigExport): Promise<ImportResult> {
+    return this.call('export.import', { data })
+  }
+
+  importPortable(payloadBase64: string, passphrase: string): Promise<ImportResult> {
+    return this.call('export.importPortable', { payload: payloadBase64, passphrase })
+  }
+}
+
+// ── Export/backup/import types (ADR-0011 §7) ─────────────────────────────
+
+export interface ExportManifest {
+  mode: string
+  carries: string[]
+  omits: string[]
+  notes?: string[]
+}
+
+export interface ConfigExport {
+  profiles: SSHProfile[]
+  groups: ProfileGroup[]
+  credentials: Credential[]
+  settings?: Record<string, unknown>
+}
+
+export interface PortableEncryptedExport {
+  payload: string // base64-encoded NaCl secretbox ciphertext
+  includePrivateContent?: boolean
+}
+
+export interface BackupManifest {
+  mode: string
+  configDir: string
+  contentDbPath?: string
+  contentDbAbsent: boolean
+  secretsStatement: string
+  carries: string[]
+  omits: string[]
+}
+
+export interface ImportResult {
+  profilesImported: number
+  groupsImported: number
+  credentialsImported: number
+  unresolvedCredentials?: Credential[]
 }

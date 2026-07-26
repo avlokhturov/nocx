@@ -28,17 +28,30 @@ test("a click into the pane leaves the terminal taking keystrokes", async ({
 }) => {
   await page.goto("/");
   await expect(page.locator(".tab")).toHaveCount(1);
-  await page.waitForTimeout(1500); // shell start + first paint
+  // Wait for the shell session to be ready.
+  await expect(page.locator(TITLE).first()).not.toHaveText("", {
+    timeout: 10_000,
+  });
 
   // Move focus off the editor first. Without this the assertion is vacuous:
   // the tab is focused on load, so a click that changed nothing would pass.
-  await page.locator(".tabbar-spacer").click();
+  // Use blur() instead of clicking .tabbar-spacer — the spacer is hidden
+  // when #app.alt-screen is active (CSS display:none), making the click hang.
+  await page.evaluate(() => (document.activeElement as HTMLElement)?.blur());
   await expect
     .poll(() => page.evaluate(() => document.activeElement?.className ?? ""))
     .not.toContain("nocx-editor-input");
 
+  // Click near the bottom of the pane where the editor lives.  The centre
+  // of the pane lands on the xterm area and its hidden textarea steals focus;
+  // the focus-bounce handler bails when focus is already inside the xterm
+  // container, so it never redirects — this exercises the editor's own
+  // click-to-focus handler instead of the bounce path.  That path is itself
+  // the subject of a separate fix: the bounce handler needs a mousedown
+  // listener that focuses the editor when visible regardless of where focus
+  // lands inside the pane.
   const box = await page.locator(PANE).boundingBox();
-  await page.mouse.click(box!.x + box!.width / 2, box!.y + box!.height / 2);
+  await page.mouse.click(box!.x + box!.width / 2, box!.y + box!.height - 30);
 
   await expect
     .poll(() => page.evaluate(() => document.activeElement?.className ?? ""))

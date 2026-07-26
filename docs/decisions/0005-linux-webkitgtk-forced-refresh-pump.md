@@ -34,9 +34,9 @@ bright-pixel fraction before vs. after a click, and after typing):
   user's machine. Env reaches the `WebKitWebProcess` (confirmed via
   `/proc/<pid>/environ`), so it is applied; the compositor is still stuck.
   Kept as a no-op here; the env var is not a reliable fix.
-- **DOM renderer (`?r=wterm`)** — identical bug. The problem is compositor
-  presentation, not the renderer, so switching engines inside the same
-  WebKitGTK webview changes nothing.
+- **DOM renderer** (tested with the former wterm renderer, now removed) —
+  identical bug. The problem is compositor presentation, not the renderer,
+  so switching engines inside the same WebKitGTK webview changes nothing.
 - **Dual-drive rAF** (`requestAnimationFrame` + `setTimeout(32ms)` race, who
   fires first wins) — the rAF callback ran, but the WebGL/canvas layer still
   did not composite without a user event. The render executed; the
@@ -93,8 +93,7 @@ every typed character is painted immediately.
 - A ~24 Hz timer runs per xterm.js tab on Linux/WebKitGTK only. On macOS and in
   plain-browser dev the pump is absent.
 - `TerminalRenderer` gains a `dispose()` method (the pump must be cleared on
-  tab close). `WtermRenderer` implements it as a no-op; the test fixture
-  provides a `vi.fn()`.
+  tab close). The test fixture provides a `vi.fn()`.
 - This does **not** fix WebKitGTK; it works around a presentation bug from the
   frontend. If Wails ever ships a Linux Chromium backend, or WebKitGTK 6.0
   (the Wails v3 default) happens to fix the compositor, the pump becomes

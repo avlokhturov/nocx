@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./harness";
 
 // nocx-4ff.4: verify that raw input routing works after an enhanced-input
 // submit — the editor must stay hidden while a program runs, and typed keys
@@ -47,6 +47,16 @@ test.describe("enhanced input raw routing", () => {
     await page.keyboard.type("echo partial");
     await page.keyboard.press("Control+c");
 
+    // Wait for the editor to clear before typing the next command.
+    // Ctrl-C cancels input and clears the editor textarea synchronously
+    // in the DOM, but the PTY needs the signal to propagate before it
+    // is ready for the next command.  Polling toHaveValue('') covers
+    // both: the editor DOM is empty AND Playwright has observed the
+    // settled state before issuing the next keystroke batch.
+    await expect(page.locator('.nocx-editor-input')).toHaveValue('', {
+      timeout: 5000,
+    });
+
     // Type a complete command; it should work after Ctrl-C.
     const marker = `RW-${Date.now().toString(36)}`;
     await page.keyboard.type(
@@ -74,6 +84,17 @@ test.describe("enhanced input raw routing", () => {
     for (let i = 0; i < 3; i++) {
       await page.keyboard.type(`printf "\\033]0;MS-${i}\\007"`);
       await page.keyboard.press("Enter");
+      // Wait for this command's marker before sending the next.
+      // Without this gate the keystrokes for iteration i+1 can arrive
+      // while the shell is still executing iteration i — the editor
+      // input buffer and PTY stdin are not synchronised, and rapid
+      // submission races.  A duration wait is not correct here either:
+      // the only contract that matters is that each command has
+      // finished when we send the next.  expect() polls, so this
+      // converges as fast as the shell does.
+      await expect(page.locator(TITLE).first()).toHaveText(`MS-${i}`, {
+        timeout: 5000,
+      });
     }
 
     await expect(page.locator(TITLE).first()).toHaveText("MS-2", {

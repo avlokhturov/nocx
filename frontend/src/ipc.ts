@@ -1,17 +1,5 @@
 import { decodeFrame, encodeFrame, isSessionID } from './frame'
-
-let requestID = 0
-
-function nextID(): number {
-  requestID++
-  return requestID
-}
-
-// Reconnect backoff: start at 250 ms, double each attempt, cap at 5 s.
-// Jitter of up to 50 % of the current backoff is added so a reload storm
-// from many clients does not synchronise onto the server.
-const MIN_BACKOFF_MS = 250
-const MAX_BACKOFF_MS = 5000
+import { Dispatcher } from './dispatcher'
 
 // Ack throttle: at most one ack per session per ~100 ms. Per-frame acks on
 // a fast-scrolling terminal would flood the control plane with thousands of
@@ -130,34 +118,6 @@ class UTF8StreamDecoder {
   }
 }
 
-// The control-plane messages we receive, mirroring the JSON-RPC 2.0 contract
-// documented in internal/transport/frame.go. Every field is optional: this is
-// untrusted input off the socket, narrowed at each use.
-interface ControlMessage {
-  id?: number
-  method?: string
-  params?: { sessionId?: string }
-  result?: {
-    sessionId?: string
-    cwd?: string
-    resumed?: boolean
-    reset?: boolean
-    from?: number
-  }
-  error?: { code?: number; message?: string }
-}
-
-interface PendingOpen {
-  resolve: (sessionId: string, cwd: string) => void
-  reject: (err: Error) => void
-}
-
-interface PendingAttach {
-  sessionId: string
-  resolve: (result: { resumed?: boolean; reset?: boolean; from: number }) => void
-  reject: (err: Error) => void
-}
-
 interface AttachResult {
   resumed?: boolean
   reset?: boolean
@@ -233,66 +193,15 @@ export class SessionHandle {
 }
 
 export class WSClient {
-  private ws: WebSocket | null = null
-
-  // rawSocket returns the underlying WebSocket for sharing with sub-clients
-  // (e.g. ProfileClient shares the same connection for control-plane calls).
-  rawSocket(): WebSocket {
-    if (!this.ws) throw new Error('WebSocket not connected')
-    return this.ws
-  }
   private sessions = new Map<string, SessionState>()
-  private pendingOpens = new Map<number, PendingOpen>()
-  private pendingAttaches = new Map<number, PendingAttach>()
-
   // Ack throttle: one per session.
   private acks = new Map<string, AckThrottle>()
-  // Reconnect state.
-  private _port = 0
-  private _host = '127.0.0.1'
-  private _token = ''
-  private _closingDeliberately = false
-  private _backoffMs = MIN_BACKOFF_MS
-  private _reconnectTimer: ReturnType<typeof setTimeout> | null = null
 
-  // connect resolves when the WebSocket handshake completes. Sessions are
-  // not open yet — call openSession() next to get a SessionHandle. The host
-  // defaults to loopback (the Wails shell serves the page locally); the
-  // plain-browser dev path overrides it with the page's own hostname.
-  // The token is the per-launch capability carried in Sec-WebSocket-Protocol.
-  connect(port: number, host = '127.0.0.1', token = ''): Promise<void> {
-    this._port = port
-    this._host = host
-    this._token = token
-    this._closingDeliberately = false
-    this._backoffMs = MIN_BACKOFF_MS
-    this.sessions.clear()
-    this.acks.clear()
-    return this._connectInternal()
-  }
-  private _connectInternal(): Promise<void> {
-    return new Promise((resolve, reject) => {
-      // The token travels in Sec-WebSocket-Protocol; the server echoes
-      // the selected subprotocol on upgrade (RFC 6455).
-      const subprotocol = `nocx.token.${this._token}`
-      this.ws = new WebSocket(`ws://${this._host}:${this._port}/session`, subprotocol)
-      this.ws.binaryType = 'arraybuffer'
-      this.pendingOpens.clear()
-      this.pendingAttaches.clear()
-
-      this.ws.onopen = () => resolve()
-      this.ws.onerror = () => {
-        this.rejectAllPending('ws connection failed')
-        reject(new Error('ws connection failed'))
-      }
-      this.ws.onclose = () => {
-        this.rejectAllPending('ws closed')
-        if (!this._closingDeliberately) {
-          this._scheduleReconnect()
-        }
-      }
-
-      this.ws.onmessage = (event: MessageEvent) => {
+  constructor(private dispatcher: Dispatcher) {
+    // Wire binary frame handling and session reattach on every connect/reconnect.
+    this.dispatcher.onConnect(() => {
+      const ws = this.dispatcher.socket!
+      ws.onmessage = (event: MessageEvent) => {
         if (event.data instanceof ArrayBuffer) {
           const frame = decodeFrame(event.data)
           if (frame) {
@@ -316,30 +225,8 @@ export class WSClient {
               this._scheduleAck(frame.sessionId, state.offset)
             }
           }
-        } else if (typeof event.data === 'string') {
-          this.handleControlMessage(event.data)
         }
       }
-    })
-  }
-
-  // --- reconnect plumbing -------------------------------------------------
-
-  private _scheduleReconnect(): void {
-    if (this._reconnectTimer !== null) return
-    const jitter = Math.random() * this._backoffMs * 0.5
-    const delay = this._backoffMs + jitter
-    this._reconnectTimer = setTimeout(() => {
-      this._reconnectTimer = null
-      void this._tryReconnect()
-    }, delay)
-    this._backoffMs = Math.min(this._backoffMs * 2, MAX_BACKOFF_MS)
-  }
-
-  private async _tryReconnect(): Promise<void> {
-    try {
-      await this._connectInternal()
-      this._backoffMs = MIN_BACKOFF_MS
 
       // Reattach every session the client still knows about. Each attach
       // carries the last received byte offset so the server can replay
@@ -348,7 +235,7 @@ export class WSClient {
         this._sendAttach(sid, state.offset)
           .then((result) => {
             if (result.reset) {
-              state.offset = result.from
+              state.offset = result.from ?? 0
               // A reset means the client fell out of the ring — there
               // is a byte gap in the stream. If the last frame before
               // the drop ended mid-rune, the decoder is holding the
@@ -366,26 +253,28 @@ export class WSClient {
             this.sessions.delete(sid)
           })
       }
-    } catch {
-      if (!this._closingDeliberately) {
-        this._scheduleReconnect()
-      }
-    }
+    })
+
+    // Handle server-initiated exit notifications.
+    this.dispatcher.subscribe('exit', (params: unknown) => {
+      if (!params || typeof params !== 'object') return
+      const sid = (params as Record<string, unknown>).sessionId
+      if (typeof sid !== 'string') return
+      this._flushAck(sid)
+      this.sessions.get(sid)?.exitCallback?.(sid)
+      this.sessions.delete(sid)
+    })
   }
 
-  private _sendAttach(sessionId: string, offset: number): Promise<AttachResult> {
-    return new Promise((resolve, reject) => {
-      const id = nextID()
-      this.pendingAttaches.set(id, { sessionId, resolve, reject })
-      this.ws!.send(
-        JSON.stringify({
-          jsonrpc: '2.0',
-          id,
-          method: 'attach',
-          params: { sessionId, offset },
-        }),
-      )
-    })
+  // connect resolves when the WebSocket handshake completes. Sessions are
+  // not open yet — call openSession() next to get a SessionHandle. The host
+  // defaults to loopback (the Wails shell serves the page locally); the
+  // plain-browser dev path overrides it with the page's own hostname.
+  // The token is the per-launch capability carried in Sec-WebSocket-Protocol.
+  connect(port: number, host = '127.0.0.1', token = ''): Promise<void> {
+    this.sessions.clear()
+    this.acks.clear()
+    return this.dispatcher.connect(port, host, token)
   }
 
   // --- ack plumbing -------------------------------------------------------
@@ -420,102 +309,11 @@ export class WSClient {
   }
 
   private _sendAck(sessionId: string, offset: number): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
-    this.ws.send(
-      JSON.stringify({
-        jsonrpc: '2.0',
-        method: 'ack',
-        params: { sessionId, offset },
-      }),
-    )
+    this.dispatcher.notify('ack', { sessionId, offset })
   }
 
-  // --- control-plane handling ---------------------------------------------
+  // --- session opening ----------------------------------------------------
 
-  private handleControlMessage(data: string): void {
-    let msg: ControlMessage
-    try {
-      msg = JSON.parse(data) as ControlMessage
-    } catch {
-      return
-    }
-
-    // exit notification (has method, no id).
-    if (msg.method === 'exit' && msg.id === undefined) {
-      const sid = msg.params?.sessionId
-      if (sid) {
-        this._flushAck(sid)
-        this.sessions.get(sid)?.exitCallback?.(sid)
-        this.sessions.delete(sid)
-      }
-      return
-    }
-
-    if (msg.id !== undefined) {
-      // Pending openSession response.
-      const pendingOpen = this.pendingOpens.get(msg.id)
-      if (pendingOpen) {
-        if (msg.error) {
-          pendingOpen.reject(new Error(msg.error.message || 'open failed'))
-          this.pendingOpens.delete(msg.id)
-          return
-        }
-        const sid = msg.result?.sessionId
-        if (sid) {
-          if (!isSessionID(sid)) {
-            pendingOpen.reject(new Error(`nocx: invalid session-id from server: ${sid}`))
-            this.pendingOpens.delete(msg.id)
-            return
-          }
-          this.sessions.set(sid, {
-            decoder: new UTF8StreamDecoder(),
-            offset: 0,
-            dataCallback: null,
-            pendingData: '',
-            exitCallback: null,
-            resetCallback: null,
-          })
-          pendingOpen.resolve(sid, msg.result?.cwd ?? '')
-          this.pendingOpens.delete(msg.id)
-        }
-        return
-      }
-
-      // Pending attach response.
-      const pendingAttach = this.pendingAttaches.get(msg.id)
-      if (pendingAttach) {
-        if (msg.error) {
-          pendingAttach.reject(new Error(msg.error.message || 'attach failed'))
-          this.pendingAttaches.delete(msg.id)
-          return
-        }
-        const result = msg.result ?? {}
-        pendingAttach.resolve({
-          resumed: result.resumed,
-          reset: result.reset,
-          from: result.from ?? 0,
-        })
-        this.pendingAttaches.delete(msg.id)
-        return
-      }
-    }
-  }
-
-  private rejectAllPending(reason: string): void {
-    for (const pending of this.pendingOpens.values()) {
-      pending.reject(new Error(reason))
-    }
-    this.pendingOpens.clear()
-    for (const attach of this.pendingAttaches.values()) {
-      attach.reject(new Error(reason))
-    }
-    this.pendingAttaches.clear()
-  }
-
-  // openSession sends the JSON-RPC open request and resolves with a
-  // SessionHandle carrying the server-assigned sessionId. Per AD-7, the
-  // server assigns the authoritative id — nothing may be sent on the data
-  // plane for this session before this resolves.
   // openSession sends the JSON-RPC open request and resolves with a
   // SessionHandle carrying the server-assigned sessionId. Per AD-7, the
   // server assigns the authoritative id — nothing may be sent on the data
@@ -524,91 +322,101 @@ export class WSClient {
   // (ADR-0006); the frontend wires the editor BEFORE this call so no invisible
   // prompt gap can occur (nocx-4ff.10).
   openSession(cols: number, rows: number, enhanced: boolean): Promise<SessionHandle> {
-    return new Promise((resolve, reject) => {
-      const id = nextID()
-      this.pendingOpens.set(id, {
-        resolve: (sid: string, cwd: string) => resolve(new SessionHandle(this, sid, cwd)),
-        reject,
+    return this.dispatcher
+      .call<{ sessionId?: string; cwd?: string }>('open', {
+        cols,
+        rows,
+        xpixel: 0,
+        ypixel: 0,
+        enhanced,
       })
-      this.ws!.send(
-        JSON.stringify({
-          jsonrpc: '2.0',
-          id,
-          method: 'open',
-          params: { cols, rows, xpixel: 0, ypixel: 0, enhanced },
-        }),
-      )
-    })
+      .then((result) => {
+        const sid = result?.sessionId
+        if (!sid || !isSessionID(sid)) {
+          throw new Error(`nocx: invalid session-id from server: ${sid}`)
+        }
+        this.sessions.set(sid, {
+          decoder: new UTF8StreamDecoder(),
+          offset: 0,
+          dataCallback: null,
+          pendingData: '',
+          exitCallback: null,
+          resetCallback: null,
+        })
+        return new SessionHandle(this, sid, result?.cwd ?? '')
+      })
   }
 
   // openSSHSession opens an SSH session via a profile ID. The backend
   // resolves host, credentials and jump host from the profile store.
   // Passwords are never sent over the wire.
   openSSHSession(cols: number, rows: number, profileId: string): Promise<SessionHandle> {
-    return new Promise((resolve, reject) => {
-      const id = nextID()
-      this.pendingOpens.set(id, {
-        resolve: (sid: string, cwd: string) => resolve(new SessionHandle(this, sid, cwd)),
-        reject,
+    return this.dispatcher
+      .call<{ sessionId?: string; cwd?: string }>('open', {
+        cols,
+        rows,
+        xpixel: 0,
+        ypixel: 0,
+        kind: 'ssh',
+        profileId,
       })
-      this.ws!.send(
-        JSON.stringify({
-          jsonrpc: '2.0',
-          id,
-          method: 'open',
-          params: {
-            cols,
-            rows,
-            xpixel: 0,
-            ypixel: 0,
-            kind: 'ssh',
-            profileId,
-          },
-        }),
-      )
-    })
+      .then((result) => {
+        const sid = result?.sessionId
+        if (!sid || !isSessionID(sid)) {
+          throw new Error(`nocx: invalid session-id from server: ${sid}`)
+        }
+        this.sessions.set(sid, {
+          decoder: new UTF8StreamDecoder(),
+          offset: 0,
+          dataCallback: null,
+          pendingData: '',
+          exitCallback: null,
+          resetCallback: null,
+        })
+        return new SessionHandle(this, sid, result?.cwd ?? '')
+      })
   }
+
+  // --- reattach -----------------------------------------------------------
+
+  private _sendAttach(sessionId: string, offset: number): Promise<AttachResult> {
+    return this.dispatcher.call<AttachResult>('attach', { sessionId, offset })
+  }
+
+  // --- data plane ---------------------------------------------------------
 
   // sendToSession frames raw PTY input for one session. Drops silently if
   // the session is not in the map (AD-7: the client MUST NOT send data
   // frames for a session before the open result arrives, or after exit).
   sendToSession(sessionId: string, data: string): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
+    const ws = this.dispatcher.socket
+    if (!ws || ws.readyState !== WebSocket.OPEN) return
     if (!this.sessions.has(sessionId)) return
     const payload = new TextEncoder().encode(data)
     const frame = encodeFrame(sessionId, payload)
-    this.ws.send(frame)
+    ws.send(frame)
   }
 
   sendResize(sessionId: string, cols: number, rows: number): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
+    const ws = this.dispatcher.socket
+    if (!ws || ws.readyState !== WebSocket.OPEN) return
     if (!this.sessions.has(sessionId)) return
-    const id = nextID()
-    this.ws.send(
-      JSON.stringify({
-        jsonrpc: '2.0',
-        id,
-        method: 'resize',
-        params: { sessionId, cols, rows, xpixel: 0, ypixel: 0 },
-      }),
-    )
+    // Fire-and-forget — response is silently dropped.
+    void this.dispatcher
+      .call('resize', { sessionId, cols, rows, xpixel: 0, ypixel: 0 })
+      .catch(() => {})
   }
 
   closeSession(sessionId: string): void {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      const id = nextID()
-      this.ws.send(
-        JSON.stringify({
-          jsonrpc: '2.0',
-          id,
-          method: 'close',
-          params: { sessionId },
-        }),
-      )
+    const ws = this.dispatcher.socket
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      void this.dispatcher.call('close', { sessionId }).catch(() => {})
     }
     this._flushAck(sessionId)
     this.sessions.delete(sessionId)
   }
+
+  // --- session callbacks --------------------------------------------------
 
   onSessionData(sessionId: string, cb: (data: string) => void): void {
     const state = this.sessions.get(sessionId)
@@ -639,31 +447,25 @@ export class WSClient {
     }
   }
 
+  // --- accessors ----------------------------------------------------------
+
   get connected(): boolean {
-    return this.ws?.readyState === WebSocket.OPEN
+    return this.dispatcher.connected
   }
 
   // For test introspection only: the current reconnect backoff value.
   get backoffMs(): number {
-    return this._backoffMs
+    return this.dispatcher.backoffMs
   }
 
   // For test introspection only: whether the reconnect timer is pending.
   get reconnectPending(): boolean {
-    return this._reconnectTimer !== null
+    return this.dispatcher.reconnectPending
   }
 
   close(): void {
-    this._closingDeliberately = true
-    if (this._reconnectTimer !== null) {
-      clearTimeout(this._reconnectTimer)
-      this._reconnectTimer = null
-    }
-    this.ws?.close()
-    this.ws = null
+    this.dispatcher.close()
     this.sessions.clear()
-    this.pendingOpens.clear()
-    this.pendingAttaches.clear()
     for (const ack of this.acks.values()) {
       if (ack.timer !== null) clearTimeout(ack.timer)
     }
