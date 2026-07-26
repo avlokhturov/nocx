@@ -1,4 +1,4 @@
-import { test, expect } from './harness'
+import { test, expect, promptReady } from './harness'
 
 // Terminal clipboard e2e: copy-on-select, right-click paste.
 //
@@ -48,9 +48,7 @@ test.describe('copy-on-select', () => {
     await page.goto('/')
     await expect(page.locator('.tab')).toHaveCount(1)
 
-    await expect(page.locator(TITLE).first()).not.toHaveText('', {
-      timeout: 10000,
-    })
+    await promptReady(page)
 
     await page.context().grantPermissions(['clipboard-read', 'clipboard-write'])
 
@@ -116,9 +114,7 @@ test.describe('paste', () => {
     await page.goto('/')
     await expect(page.locator('.tab')).toHaveCount(1)
 
-    await expect(page.locator(TITLE).first()).not.toHaveText('', {
-      timeout: 10000,
-    })
+    await promptReady(page)
 
     await page.context().grantPermissions(['clipboard-read', 'clipboard-write'])
 
