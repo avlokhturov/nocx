@@ -1,5 +1,6 @@
 #!/bin/sh
-# Negative fixture gate — assert ALL required eslint-plugin-solid rules fire.
+# Negative fixture gate — assert ALL required eslint-plugin-solid rules fire,
+# and that at least one rule fires from a .ts file (not only .tsx).
 # Run from the frontend/ directory (e.g. via `npm run lint:fixture-check`).
 # Exits 0 if all rules fire, 1 otherwise.
 set -eu
@@ -38,5 +39,33 @@ if [ -n "$missing" ]; then
   exit 1
 fi
 
-echo "OK — all 7 solid lint rules fired"
+# Assert that solid/reactivity fires from a .ts file specifically — not merely
+# from somewhere in the fixture directory. The brief requires this because the
+# next epic deliverable (a Solid store) is .ts and the most dangerous silent
+# disable is a .ts-only regression that .tsx fixtures cannot catch.
+# As of eslint-plugin-solid 0.14.5, solid/reactivity fires in .ts for signal
+# reads in plain callbacks (no tracking scope).
+ts_reactivity=$(echo "$eslint_json" | node -e "
+let d='';
+process.stdin.resume();
+process.stdin.on('data',function(c){d+=c;});
+process.stdin.on('end',function(){
+  try {
+    var r=JSON.parse(d);
+    var ts=r.filter(function(f){return f.filePath.endsWith('.ts');});
+    var rules=[...new Set(ts.flatMap(function(f){return f.messages.map(function(m){return m.ruleId;}).filter(function(id){return id==='solid/reactivity';});}))];
+    rules.forEach(function(r){console.log(r);});
+  } catch(e) {
+    process.exit(2);
+  }
+});
+")
+
+if [ -z "$ts_reactivity" ]; then
+  echo "SOLID LINT FIXTURE GATE FAILED — solid/reactivity did not fire from a .ts file"
+  exit 1
+fi
+
+echo "OK — all 7 solid lint rules fired (solid/reactivity confirmed from .ts)"
 exit 0
+

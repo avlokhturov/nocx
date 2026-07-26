@@ -36,12 +36,12 @@ export default tseslint.config(
     files: ['lint-fixtures/**'],
     extends: [tseslint.configs.disableTypeChecked],
   },
-  // SolidJS lint rules (ADR-0012 §3). The flat/recommended config enables most
-  // of what we need; the rules below are the explicit minimum set and are set
-  // to "error" so a regression is not silent.
-  solid.configs['flat/recommended'],
+  // SolidJS lint rules (ADR-0012 §3). Combined with the recommended base
+  // from the plugin into a single files-restricted block so severity and
+  // scope cannot drift.
   {
-    files: ['**/*.tsx', '**/*.jsx'],
+    files: ['**/*.ts', '**/*.tsx', '**/*.jsx'],
+    extends: [solid.configs['flat/recommended']],
     rules: {
       'solid/no-destructure': 'error',
       'solid/reactivity': 'error',
