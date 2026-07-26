@@ -31,6 +31,20 @@ test('a click into the pane leaves the terminal taking keystrokes', async ({ pag
     timeout: 10_000,
   })
 
+  // Wait for the prompt to be OWNED before touching focus. This is a real
+  // precondition, not padding: ownership arrives asynchronously, and the
+  // transition calls editor.show(), which focuses the textarea. Blurring before
+  // it lands is a race the test loses — the transition simply takes focus back.
+  //
+  // Measured, not guessed. In CI run 30217202549 the trace puts blur() at
+  // t=73385ms and the two state lines at t=73423.9 (owned=false) and t=73424.1
+  // (owned=true) — 39ms later — after which the poll below burned its whole 5s
+  // against an editor that had legitimately re-focused. It passes on a fast
+  // machine only because the prompt settles long before the test arrives.
+  await expect
+    .poll(() => page.evaluate(() => document.activeElement?.className ?? ''))
+    .toContain('nocx-editor-input')
+
   // Move focus off the editor first. Without this the assertion is vacuous:
   // the tab is focused on load, so a click that changed nothing would pass.
   // Use blur() instead of clicking .tabbar-spacer — the spacer is hidden
