@@ -140,12 +140,25 @@ reports max parallelism 7 for an epic whose real front is 3. It is useful for re
 shape of an epic, useless as a gate. An epic where every child sits in wave 1 has recorded
 no order at all, and that is what made `bd ready` unusable as a queue in the first place.
 
-**An epic is never left in plain `open`.** It is either blocked, which means parked, or
-`in_progress`, which means someone owns it. Both states keep it out of `bd ready`; plain
-`open` does not, and an unblocked open epic surfaces as claimable work. `bd create` makes
-epics `open`, so this is the step that gets forgotten — three freshly carved epics appeared
-in a bare `bd ready` within an hour of being created. Set the status when you create the
-epic, not when someone trips over it.
+**An epic has three states, and the third one is the useful one.** `in_progress` means
+somebody is working it *right now*. Blocked means parked, or waiting on its predecessor in
+someone's stream. Plain `open` and unblocked means **free to hand to a colleague** — and
+that is a feature, not an oversight:
+
+```bash
+bd ready -t epic -u        # epics nobody owns and nothing blocks — what you can give away
+```
+
+Do not mark an epic `in_progress` to stop it appearing in a task listing. That is backwards,
+and it was done once here: three epics were flipped to `in_progress` purely to keep a bare
+`bd ready` clean, which then reported five active tracks when the owner was running three.
+The status has to describe reality; `--exclude-type epic` is what keeps epics out of a
+task-level query.
+
+Corollary worth checking for, because it hides: a child sitting `in_progress` inside a
+*blocked* epic means work is happening in a frozen track. Usually it is a stale claim from
+an earlier session rather than live work. `bd list --status in_progress` against the epic
+states finds them.
 
 **An epic is a unit of assignment.** It is handed to one person whole — never "this epic
 but not those three children". That is why `nocx-6ek` (Persistence) and `nocx-k0xk` (Quality
