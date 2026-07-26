@@ -262,6 +262,26 @@ Run the full local gate before pushing, not only the part you touched: `gofumpt 
 `golangci-lint run`, `go test -race ./...`, plus `npx prettier --check .`, `npx eslint .`,
 `npx tsc --noEmit`, `npx vitest run` for frontend changes.
 
+**Take the merge slot before integrating into `main`.** When several worktrees land in
+sequence, hold `nocx-merge-slot` for the whole merge-and-resolve, and release it whether
+you succeed or not:
+
+```bash
+bd merge-slot acquire     # blocks/queues if another agent holds it
+# merge, resolve conflicts, run the gate, push
+bd merge-slot release
+```
+
+It is an exclusive lock — `open` means free, `in_progress` means held, `metadata.holder`
+says who has it and `metadata.waiters` is the queue. Without it two agents resolve
+conflicts against a `main` that is moving underneath both, and each resolution invalidates
+the other's; beads calls this "multiple polecats racing to resolve conflicts and creating
+cascading conflicts". A worker that forgets the release strands everyone behind it, so
+release in the failure path too — `bd merge-slot check` tells you who is holding it.
+
+This is orthogonal to the approval rule above: the slot decides *who merges next*, never
+*whether* the merge is allowed.
+
 ## Engineering rules (non-negotiable)
 
 - **Interface-first + DI.** Every module lives behind an interface, wired at a single
