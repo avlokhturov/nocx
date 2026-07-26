@@ -2057,9 +2057,23 @@ func TestWSServer_FairnessTwoFloodingOneQuiet(t *testing.T) {
 				if !strings.Contains(string(f.Payload), "FAIRNESS-OK") {
 					continue
 				}
-				if floodAfterEcho == 0 {
-					t.Fatal("no flood frames between the echo request and its reply — cannot tell interleaving from a drained flood")
-				}
+				// Deliberately NOT failing when floodAfterEcho == 0.
+				//
+				// It asked for at least one flood frame to be read between the
+				// echo request and its reply, as evidence the flood was still
+				// live. But the loop reads frames one at a time, and nothing
+				// orders them: the reply can simply be the very next frame. That
+				// is the BEST case for the property under test — the quiet
+				// session answering immediately — so failing on it penalises
+				// exactly the behaviour this test exists to demonstrate. It fired
+				// on macos-latest in CI run 30218205528 while the transport was
+				// working correctly.
+				//
+				// The sound evidence is below: if flood frames keep arriving
+				// AFTER the reply, the flood plainly had not drained, whether or
+				// not one happened to land inside that narrow window. The counter
+				// stays as diagnostics.
+				//
 				// Confirm the flood had not finished: more must follow.
 				// 5 s quiet window is generous enough to survive scheduling
 				// hiccups under load; a streaming flood produces frames
@@ -2069,8 +2083,8 @@ func TestWSServer_FairnessTwoFloodingOneQuiet(t *testing.T) {
 					t.Fatalf("the echo only arrived after the flood drained (%d bytes) — head-of-line blocking", floodSeen)
 				}
 				_ = more
-				t.Logf("echo interleaved after %d flood bytes in %s; flood still streaming",
-					floodSeen, time.Since(echoAt))
+				t.Logf("echo interleaved after %d flood bytes in %s (%d flood frames inside the window); flood still streaming",
+					floodSeen, time.Since(echoAt), floodAfterEcho)
 				return
 			}
 		}
