@@ -18,6 +18,7 @@ import { SettingsContent, SURFACE_SETTINGS, SINGLETON_SETTINGS } from './setting
 import { HorizontalTabStrip, VerticalTabStrip } from './tab-strip'
 import { ConnectionsContent } from './connections-content'
 import { SURFACE_CONNECTIONS, SINGLETON_CONNECTIONS } from './tab-content'
+import { SurfaceRegistry } from './surface-registry'
 import type { ContentDescriptor } from './tab-content'
 import { SettingsObserver } from './settings-observer'
 
@@ -157,6 +158,20 @@ async function main() {
   const tabStrip = placement === 'vertical' ? new VerticalTabStrip() : new HorizontalTabStrip()
   const tm = new TabManager(bar, panes, client, clipboard, gate, banner, profileClient, tabStrip)
 
+  // Surface registry — surfaces declared once, every entry point resolves
+  // through the registry rather than rebuilding the descriptor. (AD-8)
+  const registry = new SurfaceRegistry()
+  registry.register('settings', {
+    surfaceType: SURFACE_SETTINGS,
+    singletonKey: SINGLETON_SETTINGS,
+    factory: () => new SettingsContent(profileClient),
+    descriptor: {
+      restoreDescriptor: null,
+      supportsAttention: false,
+      defaultTitle: 'Settings',
+    },
+  })
+
   // Live application through SettingsObserver: when the placement setting
   // changes, refetch the snapshot and swap the strip in place.
   const observer = new SettingsObserver(dispatcher)
@@ -218,15 +233,8 @@ async function main() {
       action: 'tab',
       onActivate: () => {
         log.info('nocx: opening Settings tab')
-        const content = new SettingsContent(profileClient)
-        const descriptor: ContentDescriptor = {
-          surfaceType: SURFACE_SETTINGS,
-          singletonKey: SINGLETON_SETTINGS,
-          restoreDescriptor: null,
-          supportsAttention: false,
-          defaultTitle: 'Settings',
-        }
-        tm.openTab(content, descriptor)
+        const built = registry.build('settings')
+        if (built) tm.openTab(built.content, built.descriptor)
       },
     },
   ])
@@ -235,17 +243,12 @@ async function main() {
   document.addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key === ',') {
       e.preventDefault()
-      const content = new SettingsContent(profileClient)
-      const descriptor: ContentDescriptor = {
-        surfaceType: SURFACE_SETTINGS,
-        singletonKey: SINGLETON_SETTINGS,
-        restoreDescriptor: null,
-        supportsAttention: false,
-        defaultTitle: 'Settings',
-      }
-      tm.openTab(content, descriptor)
+      const built = registry.build('settings')
+      if (built) tm.openTab(built.content, built.descriptor)
     }
   })
+
+  void tm.openInitialTab()
 
   // --- Auto-update: check on start, then every 24 h ---
 

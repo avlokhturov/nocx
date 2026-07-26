@@ -409,10 +409,8 @@ async function setupIntegration(): Promise<{
     tabStrip,
   )
 
-  // Wait for the initial terminal tab to open a session.
-  await vi.waitFor(() => {
-    expect(client.openSession).toHaveBeenCalled()
-  })
+  // Open the initial tab explicitly — the constructor mounts nothing.
+  await manager.openInitialTab()
 
   // Create a real ProfileClient with the same Dispatcher for settings RPCs.
   const settingsClient = new ProfileClient(new Dispatcher())
