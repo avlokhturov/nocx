@@ -3,9 +3,21 @@ import { test as base, expect as baseExpect, type Page } from '@playwright/test'
 export { expect } from '@playwright/test'
 export type { Page } from '@playwright/test'
 
-/** Wait until the prompt editor owns input and typing can safely begin. */
+/**
+ * Wait until the prompt editor owns input and typing can safely begin.
+ *
+ * Scoped to the ACTIVE pane, not to the document. Every open tab has its own
+ * `.nocx-editor-input`, so a bare locator resolves to one element with a single
+ * tab and N with more — Playwright's strict mode then fails the wait rather than
+ * the assertion, which reads like a product bug and is not one. That is what
+ * broke every multi-tab-input case (nocx-4ff.28) when this helper met a suite
+ * that opens a second tab.
+ *
+ * Waiting on the active pane is also the more correct statement: readiness is a
+ * property of the tab under test, not of whichever editor the DOM lists first.
+ */
 export async function promptReady(page: Page): Promise<void> {
-  const input = page.locator('.nocx-editor-input')
+  const input = page.locator('.pane.active .nocx-editor-input')
   await baseExpect(input).toBeVisible({ timeout: 10_000 })
   await baseExpect(input).toBeFocused({ timeout: 10_000 })
 }
