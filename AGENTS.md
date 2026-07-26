@@ -95,8 +95,20 @@ directory, proved nothing else had been lost.
 Asked to "keep going" with no further instruction, this is the whole answer:
 
 ```bash
-bd ready --exclude-type epic -u -n 10
+# tasks inside epics somebody has actually taken
+for e in $(bd list --type epic --status in_progress --json | jq -r '.[].id'); do
+  bd ready --parent "$e" --exclude-type epic -u -n 5
+done
+# plus standalone bugs, which legitimately have no epic
+bd ready --exclude-type epic -u -n 100 --json | jq -r '.[] | select(.parent == null) | "\(.id)  \(.title)"'
 ```
+
+**You may not take a task out of an epic nobody has taken.** Owning the epic comes first —
+that is what "an epic is handed over whole" means in practice, and a bare
+`bd ready --exclude-type epic` does not enforce it. Measured on 2026-07-26: of seven tasks
+it offered, five belonged to `nocx-5mn`, which no one had claimed. A worker did take
+`nocx-d3q.1` while `nocx-d3q` sat at `○`. If the epic you want is free, take the epic
+(`bd update <epic> --claim`), then come back for its children.
 
 It returns single tasks drawn only from epics that are open for work — 9 of the ~90 open
 issues, against the 68 a bare `bd ready` returned on 2026-07-26 before the backlog was
