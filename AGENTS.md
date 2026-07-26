@@ -212,7 +212,12 @@ happening by accident.
    both had to be closed and split because every new bug in the area landed in them, so they
    could never finish and could only be cherry-picked. Ask: can one person be handed this
    whole and finish it?
-2. Write a DONE WHEN that stops being false exactly once, and name what is deliberately out.
+2. Write a criterion that stops being false exactly once, and name what is deliberately out.
+   This one is **enforced**, not advised: `validation.on-create` is `error`, so `bd create -t
+   epic` without acceptance criteria fails and creates nothing. Pass `--acceptance "..."`, or
+   put a `## Success Criteria` heading in the description — `bd lint` accepts either. An area
+   of code has no such criterion by construction, which is precisely why `nocx-6ek` and
+   `nocx-k0xk` could never close; the gate exists to stop the next one being created.
 3. Set the status deliberately. `bd create` leaves it `open`, which means *free to assign* —
    correct for a real backlog item, wrong if you already own it.
 4. Add `blocks` edges only against epics whose files it collides with (above).
