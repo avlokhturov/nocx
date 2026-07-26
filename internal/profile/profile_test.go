@@ -1,6 +1,7 @@
 package profile
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -241,5 +242,77 @@ func TestJSONStoreAtomicWrite(t *testing.T) {
 		if e.Name() != "profiles.json" {
 			t.Errorf("unexpected file/dir leftover: %s", e.Name())
 		}
+	}
+}
+
+// nocx-wd2m. Host binding is mandatory (nocx-mon), and the rule has to bite at
+// save time. Enforcing it only at connect time — which is where checkBinding
+// lives — means the user stores a secret, walks away, and meets the refusal
+// later as a broken connection instead of a rejected form.
+//
+// The store is the enforcement point on purpose: it is the one path every
+// writer goes through, so a future caller cannot route around the rule the way
+// it could around a check sitting in the transport handler.
+func TestSaveCredentialRejectsMissingHost(t *testing.T) {
+	store := NewJSONStore(filepath.Join(t.TempDir(), "profiles.json"))
+
+	unbound := Credential{
+		ID:       NewCredentialID("unbound"),
+		Name:     "unbound",
+		Username: "bob",
+		Auth:     AuthPassword,
+	}
+	if err := store.SaveCredential(unbound); err == nil {
+		t.Fatal("SaveCredential accepted a credential with no host; an unbound credential must not be storable")
+	} else if !errors.Is(err, ErrCredentialHostRequired) {
+		t.Fatalf("want ErrCredentialHostRequired, got %T: %v", err, err)
+	}
+
+	creds, err := store.LoadCredentials()
+	if err != nil {
+		t.Fatalf("LoadCredentials: %v", err)
+	}
+	if len(creds) != 0 {
+		t.Fatalf("a rejected credential must not be persisted; store holds %d", len(creds))
+	}
+}
+
+func TestSaveCredentialRejectsWhitespaceOnlyHost(t *testing.T) {
+	store := NewJSONStore(filepath.Join(t.TempDir(), "profiles.json"))
+
+	// " " is not a host. Accepting it would satisfy the letter of the rule and
+	// none of its purpose — checkBinding compares against a resolved hostname
+	// and would never match, so the credential would be storable and useless.
+	c := Credential{
+		ID:       NewCredentialID("spacey"),
+		Name:     "spacey",
+		Username: "bob",
+		Auth:     AuthPassword,
+		Host:     "   ",
+	}
+	if err := store.SaveCredential(c); !errors.Is(err, ErrCredentialHostRequired) {
+		t.Fatalf("want ErrCredentialHostRequired for a whitespace host, got %v", err)
+	}
+}
+
+func TestSaveCredentialAcceptsBoundCredential(t *testing.T) {
+	store := NewJSONStore(filepath.Join(t.TempDir(), "profiles.json"))
+
+	c := Credential{
+		ID:       NewCredentialID("bound"),
+		Name:     "bound",
+		Username: "bob",
+		Auth:     AuthPassword,
+		Host:     "prod.example.com",
+	}
+	if err := store.SaveCredential(c); err != nil {
+		t.Fatalf("SaveCredential: %v", err)
+	}
+	creds, err := store.LoadCredentials()
+	if err != nil {
+		t.Fatalf("LoadCredentials: %v", err)
+	}
+	if len(creds) != 1 || creds[0].Host != "prod.example.com" {
+		t.Fatalf("want the bound credential stored, got %+v", creds)
 	}
 }
