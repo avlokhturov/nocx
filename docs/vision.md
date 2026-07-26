@@ -80,7 +80,7 @@ Phases as one-liners. The detailed, executable backlog lives in **beads**, not i
 - **Wails** — Go + WebView shell (MIT).
 - **Custom Go backend** — PTY and SSH now; vault later.
 
-**MIT attribution obligation.** Preserve the copyright notices for xterm.js (© The xterm.js authors, © SourceLair Private Company, © Christopher Jeffrey) and @wterm/dom (Apache 2.0).
+**MIT attribution obligation.** Preserve the copyright notices for xterm.js (© The xterm.js authors, © SourceLair Private Company, © Christopher Jeffrey).
 
 **Architectural spine — OSC 7 / 133 shell integration.** The VT + shell-integration layer is one spine, not several features. Nailing it yields the agent-TUI rendering, the cwd-dependent features (copy-folder-path, duplicate-tab-in-cwd), and the foundation for a future local Warpify at once. Warpify's core mechanic is a shell-integration marker in the shell RC plus a bootstrap script that enables blocks/completions/input-editor inside nested shells (SSH/docker/gcloud/poetry) across bash/zsh/fish — this has no cloud dependency, so "no cloud" costs nothing to honor.
 
@@ -103,7 +103,7 @@ Personal and honest: **"I built it and it works."** Concretely — I can daily-d
 - **Vault (Phase 2):** single-machine, no sync (confirmed). Exact crypto/UX is a Phase-2 implementation decision — how secrets are stored, encrypted, and surfaced (e.g. OS keychain vs. app-managed encrypted store).
 - **SSH ↔ vault integration:** how the SSH client and the vault connect once the vault lands.
 - **"Ask an agent" (Phase 3):** precisely how natural-language queries reach a local / BYO AI from the terminal.
-- **Licensing:** confirm any obligations beyond those documented in the README License section (xterm.js MIT, @wterm/dom Apache 2.0).
+- **Licensing:** confirm any obligations beyond those documented in the README License section (xterm.js MIT).
 - **Agent orchestration as a plugin (undecided, not scheduled).** Coordinating several AI
   agents is, mechanically, spawning processes in panes, reading and writing their streams,
   and tracking their state — which is what a terminal already is. Existing tools bolt

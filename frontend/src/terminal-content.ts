@@ -3,7 +3,7 @@
 // Extracted from Tab so the chrome layer never touches a session or renderer.
 // ═══════════════════════════════════════════════════════════════════════════
 
-import { createRenderer, type RendererName } from './renderers'
+import { XtermRenderer } from './renderers/xterm'
 import type { TerminalRenderer, MarkerAdapter } from './renderers/types'
 import { InputStateController } from './input-state'
 import { CommandEditor } from './editor'
@@ -90,7 +90,6 @@ export class TerminalContent implements TabContent {
 
   constructor(
     private readonly client: WSClient,
-    private readonly rendererName: RendererName,
     private readonly clipboard: ClipboardAccess,
     private readonly gate: ClipboardGate,
     private readonly banner: ClipboardBanner,
@@ -149,7 +148,7 @@ export class TerminalContent implements TabContent {
       }
 
       log.info('nocx: creating renderer')
-      const renderer = createRenderer(this.rendererName)
+      const renderer = new XtermRenderer()
 
       // ── DOM scrollback controller ───────────────────────────────────────
       this.scrollback = new ScrollbackController({
@@ -183,7 +182,7 @@ export class TerminalContent implements TabContent {
           if (this.ledger) {
             let markerLine: () => number | undefined = () => undefined
             const rec = this.ledger.open(doc, this._cwd, this._host, () => markerLine())
-            const m = renderer.registerMarker?.()
+            const m = renderer.registerMarker()
             if (m) {
               markerLine = () => m.line()
               this._markers.set(rec.id, m)
@@ -221,11 +220,9 @@ export class TerminalContent implements TabContent {
         if (marker.kind === 'C') {
           this.scrollback?.onCommandStart(this._pendingCommand, this._cwd, marker.line)
         } else if (marker.kind === 'D') {
-          if (renderer.getBufferLine) {
-            const getLine = (y: number) => renderer.getBufferLine!(y)
-            this.scrollback?.onCommandEnd(getLine, marker.line, marker.exitCode ?? null)
-            renderer.clearViewport?.()
-          }
+          const getLine = (y: number) => renderer.getBufferLine(y)
+          this.scrollback?.onCommandEnd(getLine, marker.line, marker.exitCode ?? null)
+          renderer.clearViewport()
         }
       })
 
@@ -499,7 +496,7 @@ export class TerminalContent implements TabContent {
       this._mounted = true
       this._readyResolve(true)
       log.info('nocx: terminal content ready', {
-        renderer: this.rendererName,
+        renderer: 'xterm',
         sid: session.sessionId,
       })
 

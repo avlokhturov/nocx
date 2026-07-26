@@ -1,10 +1,24 @@
 # ADR-0001 — xterm.js as the VT frontend
 
-- **Status:** Accepted
+- **Status:** Accepted (amended 2026-07-26)
 - **Date:** 2026-07-21
 - **Supersedes:** the ghostty-web assumption baked into AD-5/AD-6 and the Overview
 - **Related:** `nocx-dej` (spike), `nocx-0iz` (bake-off), `nocx-4kt`, `nocx-l8z`, `nocx-id3`
 
+## Amendment (2026-07-26)
+
+The wterm (DOM) renderer was removed. The bake-off settled on xterm.js, and
+keeping a second implementation actively degraded the `TerminalRenderer`
+interface — wterm silently did not fire several callbacks, and its cell-sizing
+approximation was materially wrong (`nocx-au6`). With wterm gone, the interface
+is tighter (no optional members that existed only to accommodate a renderer
+nobody used), and the `createRenderer` factory and `?r=` query-string switch
+have been collapsed. `TerminalRenderer` remains the seam; a future candidate
+still costs one new implementation behind it.
+
+The original decision text below is preserved for context. The parts it
+describes as future possibilities (keeping ghostty-web and wterm switchable)
+are no longer accurate — read the amendment above as the current state.
 ## Context
 
 The architecture named **ghostty-web** as the VT frontend before anything was

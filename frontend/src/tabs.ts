@@ -10,7 +10,6 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 import type { WSClient } from './ipc'
-import { resolveRendererName, type RendererName } from './renderers'
 import { detectAgentStatus, type AgentStatus } from './agent-status'
 import { type ClipboardAccess, type ClipboardGate } from './clipboard'
 import type { ClipboardBanner } from './banner'
@@ -20,8 +19,6 @@ import type { TabStrip } from './tab-strip'
 import type { TabHost, TabContent, ContentDescriptor, ContentViewport } from './tab-content'
 import { SURFACE_TERMINAL } from './tab-content'
 import { TerminalContent } from './terminal-content'
-
-const DEFAULT_RENDERER: RendererName = resolveRendererName()
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Tab — chrome and lifecycle, delegates content to TabContent
@@ -249,7 +246,6 @@ export class TabManager {
   private activeTab: Tab | null = null
   private readonly panes: HTMLElement
   private readonly client: WSClient
-  private readonly rendererName: RendererName
   private readonly clipboard: ClipboardAccess
   private readonly gate: ClipboardGate
   private readonly banner: ClipboardBanner
@@ -272,7 +268,6 @@ export class TabManager {
   ) {
     this.panes = panes
     this.client = client
-    this.rendererName = DEFAULT_RENDERER
     this.clipboard = clipboard
     this.gate = gate
     this.banner = banner
@@ -335,7 +330,6 @@ export class TabManager {
     const tabRef = { current: undefined as Tab | undefined }
     const content = new TerminalContent(
       this.client,
-      this.rendererName,
       this.clipboard,
       this.gate,
       this.banner,
@@ -362,7 +356,6 @@ export class TabManager {
     const tabRef = { current: undefined as Tab | undefined }
     const content = new TerminalContent(
       this.client,
-      this.rendererName,
       this.clipboard,
       this.gate,
       this.banner,

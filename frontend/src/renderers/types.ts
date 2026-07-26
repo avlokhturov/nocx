@@ -31,8 +31,7 @@ export interface CommandMarker {
 }
 
 // CommandMarkerEvent enriches the OSC 133 marker with a cursor snapshot
-// (absolute line, column, active buffer) taken at parse time. xterm.js only;
-// @wterm/dom never fires.
+// (absolute line, column, active buffer) taken at parse time.
 export interface CommandMarkerEvent extends CommandMarker {
   line: number
   col: number
@@ -67,15 +66,11 @@ export interface TerminalRenderer {
   onData(cb: DataCallback): void
   onResize(cb: ResizeCallback): void
   // Register a callback for shell-originated title changes (OSC 0/2).
-  // Some renderers (xterm.js) fire this from the terminal engine;
-  // others may leave it unfired if the engine does not expose an
-  // equivalent event. The fallback title is set by the tab bar.
+  // The fallback title is set by the tab bar.
   onTitle(cb: TitleCallback): void
 
   // onBufferChange fires whenever the active screen buffer changes (normal ↔
-  // alternate). xterm.js fires this from buffer.onBufferChange with the new
-  // buffer type. @wterm/dom has no equivalent event — the callback is never
-  // fired; callers must assume 'normal'.
+  // alternate).
   //
   // This event-driven approach is preferred over a polling getter because
   // xterm.js Terminal.buffer is a lazy-initialized getter that wraps an
@@ -88,29 +83,24 @@ export interface TerminalRenderer {
   // onCwd registers a callback that fires when the shell emits OSC 7
   // (current working directory). The VT frontend parses the OSC sequence
   // and percent-decodes host + path; the caller updates the tab title and
-  // tooltip. xterm.js supports this via parser.registerOscHandler(7, ...);
-  // @wterm/dom does not expose an OSC handler — the callback is never fired.
+  // tooltip.
   onCwd(cb: CwdCallback): void
 
   // onCommandMarker registers a callback that fires when the shell emits
   // OSC 133 command boundary markers (A/B/C/D). The VT frontend parses the
   // OSC sequence and extracts the marker kind and optional exit code.
-  // xterm.js supports this via parser.registerOscHandler(133, ...);
-  // @wterm/dom does not expose an OSC handler — the callback is never fired.
+
   onCommandMarker(cb: CommandMarkerCallback): void
 
   // onBell registers a callback that fires when the terminal receives BEL
   // (\x07). Bell always deserves attention regardless of buffer, so the
-  // tab bar always lights the activity indicator on bell. xterm.js fires
-  // this natively; @wterm/dom does not expose a bell event — callers that
-  // need it must use xterm.js.
+  // tab bar always lights the activity indicator on bell.
   onBell(cb: () => void): void
 
   // onSelectionChange fires when the user completes a selection gesture in
   // the terminal, not per cell or per boundary movement. The callback
   // receives the current selection text (via getSelection()). An empty
-  // string means the selection was cleared. @wterm/dom has no selection —
-  // never fired.
+  // string means the selection was cleared.
   //
   // The renderer reports facts and never touches the clipboard (AD-6).
   // Copy-on-select policy lives above the renderer boundary.
@@ -118,8 +108,7 @@ export interface TerminalRenderer {
 
   // onClipboardWrite fires when a program emits OSC 52 to place text on the
   // clipboard. The renderer decodes the OSC 52 payload and fires the
-  // callback with the decoded text. @wterm/dom has no OSC handler — never
-  // fired.
+  // callback with the decoded text.
   //
   // The renderer reports the decoded text and never touches the clipboard
   // (AD-6). OSC 52 policy (notification, clipboard write) lives above the
@@ -151,47 +140,44 @@ export interface TerminalRenderer {
   dispose(): void
 
   // ── Marker/geometry API (ADR-0008 command-ledger gutter) ────────────────
-  // These are optional — the gutter feature-detects and skips when absent.
 
   /**
    * Register a marker at the current cursor row. Returns an adapter that
    * exposes the live marker line, an onDispose callback (fired when scrollback
-   * trims the line), and a dispose method. Returns undefined when the renderer
-   * does not support markers (e.g. wterm).
+   * trims the line), and a dispose method.
    */
-  registerMarker?(): MarkerAdapter | undefined
+  registerMarker(): MarkerAdapter | undefined
 
   /** Measured cell height in pixels, from the actual rendered char element.
    *  Falls back to fontSize * lineHeight only if measurement is unavailable. */
-  readonly cellHeight?: number
+  readonly cellHeight: number
 
   /** Absolute buffer line index at the top of the visible viewport.
    *  = buffer.active.baseY + buffer.active.viewportY in xterm terms. */
-  readonly viewportTopLine?: number
+  readonly viewportTopLine: number
 
   /** Subscribe to scroll events. Fires with the new viewportY (scroll offset). */
-  onScroll?(cb: (viewportY: number) => void): void
+  onScroll(cb: (viewportY: number) => void): void
 
   /** Subscribe to render events. Fires whenever viewport content is painted. */
-  onRender?(cb: (range: { start: number; end: number }) => void): void
+  onRender(cb: (range: { start: number; end: number }) => void): void
 
   /** The DOM element the renderer mounted into — the gutter overlays it. */
-  readonly paneElement?: HTMLElement
+  readonly paneElement: HTMLElement
 
   /**
    * For DOM scrollback serialization. Returns the active buffer line at
    * the given absolute index. The returned object satisfies xterm's
-   * IBufferLine interface for length, getCell(), isWrapped. Undefined
-   * when the renderer does not support buffer access (e.g. wterm).
+   * IBufferLine interface for length, getCell(), isWrapped.
    */
-  getBufferLine?(line: number): import('@xterm/xterm').IBufferLine | undefined
+  getBufferLine(line: number): import('@xterm/xterm').IBufferLine | undefined
 
   /**
    * Clear the visible xterm viewport. Used after freezing a block to
    * prevent output duplication between DOM blocks and the xterm grid.
    * Does NOT clear scrollback — only the visible viewport rows.
    */
-  clearViewport?(): void
+  clearViewport(): void
 }
 
 /** Adapter over an xterm IMarker, exposing only what the gutter needs. */

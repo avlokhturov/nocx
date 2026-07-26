@@ -17,20 +17,19 @@ import type { TerminalContent } from './terminal-content'
 
 // ── Mocks ──────────────────────────────────────────────────────────────────
 
-// Mock the renderer module before any imports use it.
-vi.mock('./renderers', () => ({
-  createRenderer: vi.fn(createRendererMock),
-  resolveRendererName: vi.fn(() => 'xterm' as const),
+// Mock the XtermRenderer class before any imports use it.
+vi.mock('./renderers/xterm', () => ({
+  XtermRenderer: vi.fn(createRendererMock),
 }))
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
 /**
- * Returns all renderer mocks created so far by the mocked createRenderer.
+ * Returns all renderer mocks created so far by the mocked XtermRenderer constructor.
  */
 async function getRendererMocks(): Promise<RendererMock[]> {
-  const { createRenderer } = await import('./renderers')
-  return vi.mocked(createRenderer).mock.results.map((r) => r.value as unknown as RendererMock)
+  const { XtermRenderer } = await import('./renderers/xterm')
+  return vi.mocked(XtermRenderer).mock.results.map((r) => r.value as unknown as RendererMock)
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -1025,7 +1024,7 @@ describe('TabManager', () => {
     const clipboard = makeClipboard()
     const gate = new ClipboardGate()
     const banner = makeBanner()
-    const content = new TerminalContent(wsClient, 'xterm', clipboard, gate, banner, () => {})
+    const content = new TerminalContent(wsClient, clipboard, gate, banner, () => {})
     const tab = new Tab(
       content,
       {
@@ -1069,7 +1068,7 @@ describe('TabManager', () => {
     const clipboard = makeClipboard()
     const gate = new ClipboardGate()
     const banner = makeBanner()
-    const content = new TerminalContent(wsClient, 'xterm', clipboard, gate, banner, () => {})
+    const content = new TerminalContent(wsClient, clipboard, gate, banner, () => {})
     const tab = new Tab(
       content,
       {
@@ -1118,7 +1117,7 @@ describe('TabManager', () => {
     const clipboard = makeClipboard()
     const gate = new ClipboardGate()
     const banner = makeBanner()
-    const content = new TerminalContent(wsClient, 'xterm', clipboard, gate, banner, () => {})
+    const content = new TerminalContent(wsClient, clipboard, gate, banner, () => {})
     const tab = new Tab(
       content,
       {
@@ -1250,7 +1249,6 @@ describe('TabManager', () => {
       const wsClient = client as unknown as import('./ipc').WSClient
       const content = new TerminalContent(
         wsClient,
-        'xterm' as const,
         makeClipboard(),
         new ClipboardGate(),
         makeBanner(),
