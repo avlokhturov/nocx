@@ -202,6 +202,9 @@ func TestLoopbackPolicyAcceptsTheWailsWebview(t *testing.T) {
 		// A packaged build has no dev server, so no port. Pinning the full
 		// string above would pass CI and reject the shipped app.
 		{"packaged webview, no port", "wails://wails.localhost", true},
+		// Linux WebKitGTK sends a bare "wails" hostname without ".localhost".
+		// Captured from a packaged build: origin=wails://wails host=127.0.0.1:42723.
+		{"linux packaged webview", "wails://wails", true},
 		{"browser dev path", "http://localhost:5173", true},
 		{"port-forwarded verification loop", "http://127.0.0.1:9876", true},
 		{"non-browser caller sends no Origin", "", true},
@@ -226,5 +229,8 @@ func TestWailsOriginStillRequiresLoopbackHost(t *testing.T) {
 	p := LoopbackOriginPolicy{}
 	if p.Allow("wails://wails.localhost", "attacker.example:8080") {
 		t.Fatal("a wails Origin must not excuse a foreign Host")
+	}
+	if p.Allow("wails://wails", "attacker.example:8080") {
+		t.Fatal("a Linux wails Origin must not excuse a foreign Host")
 	}
 }
