@@ -18,7 +18,10 @@ import {
   AcceptedSnapshot,
   applyAcceptedSnapshot,
   canResetSetting,
+  monotonicRevisionPolicy,
   recordSaveOutcome,
+  reconnectRevisionPolicy,
+  type RevisionPolicy,
   type SaveOutcome,
   type SettingsMirror,
   type SettingsSnapshot,
@@ -112,7 +115,7 @@ export class SettingsViewImpl implements SettingsView {
     this.observer = observer ?? null
     this.onStateChanged = onStateChanged
     this.boundKeydown = this.handleKeydown.bind(this)
-    this.boundRefresh = () => this.refresh((_rev, snap) => AcceptedSnapshot.reset(snap))
+    this.boundRefresh = () => this.refresh(reconnectRevisionPolicy)
     this.container.addEventListener('keydown', this.boundKeydown)
     if (this.observer) {
       this.observer.start(() => {
@@ -192,9 +195,7 @@ export class SettingsViewImpl implements SettingsView {
     this.render()
   }
 
-  async refresh(
-    accept?: (currentRevision: number, snapshot: SettingsSnapshot) => AcceptedSnapshot | null,
-  ): Promise<void> {
+  async refresh(accept: RevisionPolicy = monotonicRevisionPolicy): Promise<void> {
     this.loadState = LoadState.Loading
     this.render()
     try {
@@ -204,18 +205,16 @@ export class SettingsViewImpl implements SettingsView {
       ])
       this.declarations = (desc.declarations as Declaration[]) ?? []
 
-      // Apply the snapshot through the revision policy supplied by the caller.
-      // Default (no policy) → monotonic revision check via AcceptedSnapshot.accept.
-      // The observer's reconnect path supplies AcceptedSnapshot.reset to bypass
-      // the monotonic check (in-memory revision counter may reset, ADR-0011 §A.1).
+      // Apply the snapshot through the revision policy the caller supplied.
+      // The observer's reconnect path passes AcceptedSnapshot.reset, because a
+      // reconnect may face a restarted in-memory revision counter (ADR-0011
+      // §A.1). Nothing here branches on which policy is in force.
       const rawSnap: SettingsSnapshot = {
         values: snap.values ?? {},
         overridden: snap.overridden ?? [],
         revision: snap.revision ?? 0,
       }
-      const accepted = accept
-        ? accept(this.revision, rawSnap)
-        : AcceptedSnapshot.accept(this.revision, rawSnap)
+      const accepted = accept(this.revision, rawSnap)
       if (accepted) {
         const nextState = applyAcceptedSnapshot(accepted)
         this.fromMirror(nextState)

@@ -154,12 +154,10 @@ export class Tab implements TabHost {
       this._deliverViewport()
     }
     // Re-apply visibility now that mount has set the content's target (B.6).
-    // TabManager.setActive calls setVisible(true) before start(), so it is
-    // a no-op until mount provides the target element. Without this, a tab
+    // TabManager.setActive calls setVisible() before start(), where it is a
+    // no-op because the content has no target yet. Without this replay, a tab
     // activated before its mount resolves would never get the 'active' class.
-    if (this._active) {
-      this.content.setVisible(true)
-    }
+    this.content.setVisible(this._active)
   }
 
   focus(): void {

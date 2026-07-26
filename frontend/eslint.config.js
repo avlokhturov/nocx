@@ -9,9 +9,11 @@ import prettier from 'eslint-config-prettier'
 import solid from 'eslint-plugin-solid'
 
 export default tseslint.config(
-  // src/spike is the throwaway spike sandbox (kept as a design playground,
-  // see spike/dom-scrollback/) — deliberately not held to the lint bar.
-  { ignores: ['dist/**', 'wailsjs/**', 'src/spike/**', 'lint-fixtures/**'] },
+  // lint-fixtures/ holds the negative fixtures for eslint-plugin-solid: files
+  // whose whole purpose is to fail lint. They are excluded here and linted
+  // explicitly by lint-fixtures/gate.sh with --no-ignore, which asserts that
+  // each required rule fires.
+  { ignores: ['dist/**', 'wailsjs/**', 'lint-fixtures/**'] },
   js.configs.recommended,
   ...tseslint.configs.recommendedTypeChecked,
   {

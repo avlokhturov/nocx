@@ -105,6 +105,34 @@ export type SaveOutcome =
   | { kind: 'accepted'; value: unknown }
   | { kind: 'rejected'; error: string; attemptedValue: unknown }
 
+// ── Revision policy ────────────────────────────────────────────────────────
+
+/**
+ * How an incoming snapshot is admitted. The two implementations are
+ * `AcceptedSnapshot.accept` (monotonic — the default everywhere) and
+ * `AcceptedSnapshot.reset` (reconnect, where the backend's in-memory revision
+ * counter may have restarted, ADR-0011 §A.1).
+ *
+ * The caller supplies the policy; no consumer branches on which one is in
+ * force (AD-8: variation lives in the interface, not in a fork).
+ */
+export type RevisionPolicy = (
+  currentRevision: number,
+  snapshot: SettingsSnapshot,
+) => AcceptedSnapshot | null
+
+/** The normal policy: a snapshot older than the local mirror is refused. */
+export const monotonicRevisionPolicy: RevisionPolicy = (currentRevision, snapshot) =>
+  AcceptedSnapshot.accept(currentRevision, snapshot)
+
+/**
+ * The reconnect policy: the current revision is ignored on purpose, because
+ * the backend's counter is in-memory and may have restarted (ADR-0011 §A.1);
+ * a monotonic check would silently drop the snapshot and leave the UI stale.
+ */
+export const reconnectRevisionPolicy: RevisionPolicy = (_currentRevision, snapshot) =>
+  AcceptedSnapshot.reset(snapshot)
+
 // ── Reset decision ─────────────────────────────────────────────────────────
 
 export type ResetReason = 'notOverridden'
