@@ -321,3 +321,261 @@ export class HorizontalTabStrip implements TabStrip {
     return Array.from(tabsContainer.querySelectorAll('[role="tab"]'))
   }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// VerticalTabStrip
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Same port as HorizontalTabStrip, but renders tabs as a vertical list with
+// Up/Down keyboard navigation. The container uses .tabstrip-vertical (NOT
+// .tabbar), because a vertical strip cannot double as the window's title bar
+// — the macOS traffic lights are horizontal and live at the top.
+
+export class VerticalTabStrip implements TabStrip {
+  private container: HTMLElement | null = null
+  private readonly buttons = new Map<number, HTMLElement>()
+  /** Stored so onDisplayChange can be cleared on remove. */
+  private readonly views = new Map<number, TabView>()
+  private mounted = false
+
+  // Intent callbacks
+  onActivate: ((tabId: number) => void) | null = null
+  onClose: ((tabId: number) => void) | null = null
+  onNewTab: (() => void) | null = null
+  onReorder: ((fromId: number, toId: number) => void) | null = null
+
+  mount(container: HTMLElement): void {
+    if (this.mounted) return
+    this.mounted = true
+
+    this.container = container
+    container.setAttribute('role', 'tablist')
+    container.setAttribute('aria-label', 'Tabs')
+    container.setAttribute('aria-orientation', 'vertical')
+    container.classList.add('tabstrip-vertical')
+
+    // Container for tab buttons — column, scrollable.
+    const tabsContainer = document.createElement('div')
+    tabsContainer.className = 'tabs-container'
+    container.append(tabsContainer)
+
+    // New-tab button — at the bottom of the vertical strip.
+    const addBtn = document.createElement('button')
+    addBtn.className = 'tab-add'
+    addBtn.textContent = '+'
+    addBtn.setAttribute('aria-label', 'New tab')
+    addBtn.addEventListener('click', () => this.onNewTab?.())
+    container.append(addBtn)
+
+    // Keyboard navigation on the tablist (roving tabindex).
+    container.addEventListener('keydown', this.onTablistKeydown)
+  }
+
+  addTab(tab: TabView): void {
+    if (!this.container) return
+
+    const button = document.createElement('div')
+    button.id = `tab-btn-${tab.id}`
+    button.className = 'tab'
+    button.setAttribute('role', 'tab')
+    button.setAttribute('aria-controls', tab.paneId)
+    button.setAttribute('data-tab-id', String(tab.id))
+    button.draggable = true
+    // Roving tabindex: only the active tab gets tabindex=0; all others get -1.
+    button.tabIndex = -1
+
+    // ── Index badge ────────────────────────────────────────────────────
+    const indexLabel = document.createElement('span')
+    indexLabel.className = 'tab-index'
+    button.append(indexLabel)
+
+    // ── Status icon + title (travelling together as one centred unit) ───
+    const label = document.createElement('span')
+    label.className = 'tab-label'
+
+    const statusIcon = document.createElement('span')
+    statusIcon.className = 'tab-status'
+    const titleSpan = document.createElement('span')
+    titleSpan.className = 'tab-title'
+    label.append(statusIcon, titleSpan)
+    button.append(label)
+
+    // ── Close button ───────────────────────────────────────────────────
+    const closeBtn = document.createElement('button')
+    closeBtn.className = 'tab-close'
+    closeBtn.textContent = '\u00d7'
+    closeBtn.setAttribute('aria-label', 'Close tab')
+    button.append(closeBtn)
+
+    // ── Indicator bar ──────────────────────────────────────────────────
+    const indicator = document.createElement('div')
+    indicator.className = 'tab-indicator'
+    button.append(indicator)
+
+    // ── Paint initial state ────────────────────────────────────────────
+    this.paintButton(button, tab)
+
+    // ── Event wiring ───────────────────────────────────────────────────
+    button.addEventListener('click', () => this.onActivate?.(tab.id))
+    closeBtn.addEventListener('click', (e: MouseEvent) => {
+      e.stopPropagation()
+      this.onClose?.(tab.id)
+    })
+    button.addEventListener('mousedown', (e: MouseEvent) => {
+      if (e.button === 1) {
+        e.preventDefault()
+        this.onClose?.(tab.id)
+      }
+    })
+
+    // Drag-and-drop reorder
+    button.addEventListener('dragstart', (e: DragEvent) => {
+      e.dataTransfer?.setData('text/plain', String(tab.id))
+      button.classList.add('dragging')
+    })
+    button.addEventListener('dragend', () => {
+      button.classList.remove('dragging')
+    })
+    button.addEventListener('dragover', (e: DragEvent) => {
+      e.preventDefault()
+    })
+    button.addEventListener('drop', (e: DragEvent) => {
+      e.preventDefault()
+      const draggedId = Number(e.dataTransfer?.getData('text/plain'))
+      if (!Number.isNaN(draggedId) && draggedId !== tab.id) {
+        this.onReorder?.(draggedId, tab.id)
+      }
+    })
+
+    // ── Subscribe to state changes ─────────────────────────────────────
+    tab.onDisplayChange = () => this.paintButton(button, tab)
+
+    // ── Insert into DOM ────────────────────────────────────────────────
+    const tabsContainer = this.container.querySelector('.tabs-container')
+    tabsContainer?.append(button)
+    this.buttons.set(tab.id, button)
+    this.views.set(tab.id, tab)
+    // (TabManager appends it before calling addTab).
+    const pane = document.getElementById(tab.paneId)
+    if (pane) pane.setAttribute('aria-labelledby', button.id)
+
+    this.refreshIndicesFromDOM()
+  }
+
+  removeTab(tabId: number): void {
+    const button = this.buttons.get(tabId)
+    if (button) {
+      button.remove()
+      this.buttons.delete(tabId)
+      const view = this.views.get(tabId)
+      if (view) view.onDisplayChange = null
+      this.views.delete(tabId)
+      this.refreshIndicesFromDOM()
+    }
+  }
+
+  setActive(tabId: number): void {
+    // Update roving tabindex: active gets 0, all others get -1.
+    for (const [id, button] of this.buttons) {
+      const active = id === tabId
+      button.classList.toggle('active', active)
+      button.setAttribute('aria-selected', String(active))
+      button.tabIndex = active ? 0 : -1
+      if (active) {
+        // Clear activity indicator on activation (matching current behaviour).
+        const indicator = button.querySelector('.tab-indicator')
+        indicator?.classList.remove('tab-activity')
+      }
+    }
+  }
+
+  reorder(tabs: readonly TabView[]): void {
+    const tabsContainer = this.container?.querySelector('.tabs-container')
+    if (!tabsContainer) return
+    tabsContainer.innerHTML = ''
+    for (const tab of tabs) {
+      const button = this.buttons.get(tab.id)
+      if (button) tabsContainer.append(button)
+    }
+    this.refreshIndicesFromDOM()
+  }
+
+  // ── Private helpers ─────────────────────────────────────────────────
+
+  /** Paint a button from the current TabView state. */
+  private paintButton(button: HTMLElement, tab: TabView): void {
+    const titleSpan = button.querySelector('.tab-title')
+    if (titleSpan) titleSpan.textContent = tab.title
+
+    button.title = tab.tooltip
+
+    const statusIcon = button.querySelector('.tab-status')
+    if (statusIcon) {
+      button.classList.toggle('working', tab.agentStatus === 'working')
+      button.classList.toggle('waiting', tab.agentStatus === 'idle')
+    }
+
+    const indicator = button.querySelector('.tab-indicator')
+    if (indicator) {
+      indicator.classList.toggle(
+        'tab-activity',
+        tab.hasActivity && !button.classList.contains('active'),
+      )
+    }
+  }
+
+  /** Update index badges from DOM order (self-healing on add/remove/reorder). */
+  private refreshIndicesFromDOM(): void {
+    const buttons = this.orderedButtons()
+    buttons.forEach((button, i) => {
+      const indexLabel = button.querySelector('.tab-index')
+      if (indexLabel) indexLabel.textContent = String(i + 1)
+    })
+  }
+
+  // ── Keyboard (roving tabindex) ───────────────────────────────────────
+
+  private readonly onTablistKeydown = (e: KeyboardEvent): void => {
+    // Only handle keys that navigate within the tablist.
+    const key = e.key
+    if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(key)) return
+
+    const button = (e.target as HTMLElement).closest('[role="tab"]')
+    if (!button) return
+
+    e.preventDefault()
+    e.stopPropagation()
+
+    const ordered = this.orderedButtons()
+    const idx = ordered.indexOf(button as HTMLElement)
+    if (idx === -1) return
+
+    let nextIdx: number
+    switch (key) {
+      case 'ArrowUp':
+        nextIdx = idx > 0 ? idx - 1 : ordered.length - 1
+        break
+      case 'ArrowDown':
+        nextIdx = idx < ordered.length - 1 ? idx + 1 : 0
+        break
+      case 'Home':
+        nextIdx = 0
+        break
+      case 'End':
+        nextIdx = ordered.length - 1
+        break
+      default:
+        return
+    }
+
+    const nextButton = ordered[nextIdx]
+    nextButton.focus()
+  }
+
+  /** Return tab buttons in DOM order. */
+  private orderedButtons(): HTMLElement[] {
+    const tabsContainer = this.container?.querySelector('.tabs-container')
+    if (!tabsContainer) return []
+    return Array.from(tabsContainer.querySelectorAll('[role="tab"]'))
+  }
+}
