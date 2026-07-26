@@ -1381,6 +1381,14 @@ describe('TabManager', () => {
   // B.5 Geometry authority — presentation layer owns the viewport
   // ═════════════════════════════════════════════════════════════════════════
 
+  it('refuses a second openInitialTab — the guard is at the seam, not in a comment', async () => {
+    const { manager } = await mountTabManager()
+    // mountTabManager already opened the initial tab, which is the point:
+    // the composition root calls this exactly once and a second call must
+    // fail loudly rather than mount a second strip and a second first tab.
+    expect(() => manager.openInitialTab()).toThrow(/openInitialTab called twice/)
+  })
+
   describe('B.5 geometry authority', () => {
     // ResizeObserver callback captured by the stub so we can trigger it.
     let roCallback: ((entries: Array<{ contentRect: DOMRectReadOnly }>) => void) | null = null

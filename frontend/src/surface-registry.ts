@@ -11,6 +11,14 @@
 
 import type { TabContent, ContentDescriptor, SurfaceType, SingletonKey } from './tab-content'
 
+// ── Surface ids ───────────────────────────────────────────────────────────
+// Constants rather than bare strings at the call sites: a typo should be a
+// compile error where the type system can reach it, and a loud throw from
+// build() where it cannot.
+
+export const SURFACE_ID_SETTINGS = 'settings'
+export const SURFACE_ID_CONNECTIONS = 'connections'
+
 // ── Registration ──────────────────────────────────────────────────────────
 
 export interface SurfaceRegistration {
@@ -40,16 +48,26 @@ export class SurfaceRegistry {
     this.entries.set(id, registration)
   }
 
-  /** Look up a registration by id. Returns undefined if not registered. */
+  /** Look up a registration by id. Returns undefined if not registered —
+   *  this one is a genuine lookup, unlike build() below. */
   get(id: string): SurfaceRegistration | undefined {
     return this.entries.get(id)
   }
 
-  /** Build a full ContentDescriptor and a fresh TabContent instance
-   *  for opening a surface. Returns undefined if the id is not registered. */
-  build(id: string): { content: TabContent; descriptor: ContentDescriptor } | undefined {
+  /** Build a full ContentDescriptor and a fresh TabContent instance for
+   *  opening a surface.
+   *
+   *  Throws on an unknown id rather than returning undefined. An unregistered
+   *  id is a programmer error, not a runtime condition: returning undefined
+   *  would put a branch in every caller and turn a typo into a keyboard
+   *  shortcut that silently does nothing, which reaches the user as "it
+   *  stopped working" with nothing in the log. */
+  build(id: string): { content: TabContent; descriptor: ContentDescriptor } {
     const reg = this.entries.get(id)
-    if (!reg) return undefined
+    if (!reg) {
+      const known = [...this.entries.keys()].join(', ') || '(none)'
+      throw new Error(`SurfaceRegistry: unknown surface id "${id}". Registered ids: ${known}`)
+    }
     return {
       content: reg.factory(),
       descriptor: {

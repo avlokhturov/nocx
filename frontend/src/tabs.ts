@@ -314,9 +314,19 @@ export class TabManager {
   }
 
   /** Mount the tab strip and open the initial terminal tab.
-   *  Called exactly once by the composition root.
-   *  `initialTabReady` resolves only from terminal content content. */
+   *
+   *  Callable exactly once, and that is enforced here rather than documented:
+   *  a second call would mount the strip again and open a second "initial"
+   *  tab. This epic has already removed one contract that held by coincidence
+   *  (mount-once, which lived in a private flag inside one TabContent
+   *  implementation instead of at the seam), so a comment is not enough.
+   *
+   *  `initialTabReady` resolves only from terminal content — a non-terminal
+   *  first tab must not be able to report the app healthy. */
   openInitialTab(): Promise<void> {
+    if (this._initialTabReady) {
+      throw new Error('openInitialTab called twice; the composition root calls it exactly once')
+    }
     this.tabStrip.mount(this.bar)
     const initialTab = this.newTab()
     const initialContent = initialTab.content as TerminalContent

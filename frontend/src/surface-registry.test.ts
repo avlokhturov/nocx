@@ -41,17 +41,21 @@ describe('SurfaceRegistry', () => {
 
     const built = registry.build('settings')
     expect(built).toBeDefined()
-    expect(built!.descriptor.surfaceType).toBe(TEST_SURFACE)
-    expect(built!.descriptor.singletonKey).toBe(TEST_SINGLETON)
-    expect(built!.descriptor.restoreDescriptor).toBeNull()
-    expect(built!.descriptor.supportsAttention).toBe(false)
-    expect(built!.descriptor.defaultTitle).toBe('Settings')
-    expect(built!.content).toBeInstanceOf(StubContent)
+    expect(built.descriptor.surfaceType).toBe(TEST_SURFACE)
+    expect(built.descriptor.singletonKey).toBe(TEST_SINGLETON)
+    expect(built.descriptor.restoreDescriptor).toBeNull()
+    expect(built.descriptor.supportsAttention).toBe(false)
+    expect(built.descriptor.defaultTitle).toBe('Settings')
+    expect(built.content).toBeInstanceOf(StubContent)
   })
 
-  it('returns undefined for an unregistered surface', () => {
+  it('throws on an unregistered surface, naming the registered ids', () => {
     const registry = new SurfaceRegistry()
-    expect(registry.build('nonexistent')).toBeUndefined()
+    // An unknown id is a programmer error, not a runtime condition: returning
+    // undefined would put a branch in every caller and turn a typo into a
+    // keyboard shortcut that silently does nothing.
+    expect(() => registry.build('nonexistent')).toThrow(/unknown surface id "nonexistent"/)
+    expect(() => registry.build('nonexistent')).toThrow(/Registered ids: \(none\)/)
   })
 
   it('each build() call produces a fresh content instance', () => {
@@ -71,7 +75,7 @@ describe('SurfaceRegistry', () => {
     const b = registry.build('multi')
     expect(a).toBeDefined()
     expect(b).toBeDefined()
-    expect(a!.content).not.toBe(b!.content)
+    expect(a.content).not.toBe(b.content)
   })
 
   it('overriding a registration replaces the factory and descriptor', () => {
@@ -98,8 +102,8 @@ describe('SurfaceRegistry', () => {
     })
 
     const built = registry.build('over')
-    expect(built!.descriptor.defaultTitle).toBe('Replaced')
-    expect(built!.descriptor.supportsAttention).toBe(true)
-    expect(built!.descriptor.singletonKey).toBeNull()
+    expect(built.descriptor.defaultTitle).toBe('Replaced')
+    expect(built.descriptor.supportsAttention).toBe(true)
+    expect(built.descriptor.singletonKey).toBeNull()
   })
 })
