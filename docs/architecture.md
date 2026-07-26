@@ -158,6 +158,7 @@ All decisions below are **[ADOPTED]**. Each carries stable IDs; do not re-litiga
 - Binds: every module boundary.
 - Prevents: concrete-to-concrete coupling that blocks swapping and testing.
 - Rule: every module lives behind an interface and obeys SRP; wiring happens via **manual constructor injection at a single composition root** — the default. `google/wire` was archived read-only (2025-08-25); treat any compile-time DI tool as an optional codegen convenience only [ASSUMPTION]. This same seam is the future plugin seam — a plugin is just another implementation registered at the composition root.
+  - **Variation is expressed by the interface, never by a fork inside an implementation.** No mode strings, flag parameters or type tests selecting between behaviours: if behaviour differs, that difference is a method the implementation overrides or a policy the caller supplies. The test is whether a new implementation can be added without editing a `switch` and without copying lines — the same property that makes this seam a plugin seam. Corollary of AD-6: one behaviour copied into every implementation has as many owners as there are copies, and the next implementation is the one that forgets it.
 
 **AD-9 — Reconnect / replay ownership.**
 
