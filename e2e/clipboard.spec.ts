@@ -73,9 +73,24 @@ test.describe('copy-on-select', () => {
 
     // Select the text inside the block via triple-click, which the
     // scrollback mouseup handler copies to the clipboard.
-    const box = await block.boundingBox()
-    if (!box) throw new Error('cmd-block not found')
-    await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2, { clickCount: 3 })
+    //
+    // Click the locator rather than coordinates frozen by an earlier
+    // boundingBox(). The block is still moving at this point — the prompt block
+    // for the next prompt is appended once the command finishes — so measuring
+    // first and clicking second can land the click outside the text, leaving a
+    // collapsed selection and an empty clipboard. That is the intermittent
+    // failure seen in CI runs 30212570982 and 30217654133 ("(empty)"), passing
+    // in 30214891053 and 30217202549 on the same assertion. Playwright's own
+    // click re-resolves the element and waits for its box to be stable across
+    // two frames, which is exactly the guarantee the manual path lacked.
+    await block.click({ clickCount: 3 })
+
+    // Assert the selection separately from the copy. Both halves failed as one
+    // "(empty)" before, which cannot distinguish "nothing was selected" from
+    // "the copy path is broken" — and they are different bugs.
+    await expect
+      .poll(() => page.evaluate(() => window.getSelection()?.toString() ?? ''), { timeout: 3000 })
+      .toContain(marker)
 
     await expect
       .poll(
