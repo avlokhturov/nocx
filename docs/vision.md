@@ -9,22 +9,28 @@ updated: 2026-07-26
 
 ## 0. Current state (2026-07-26) — read this first
 
-**The core is being rewritten, and new work outside the three active tracks does not start
-until they close.** If you were asked to hold off on coding, this is why: all three tracks
-move seams that everything else attaches to, so anything built against today's seams would
-be rewritten twice.
+**The foundation freeze is over. All four foundation epics closed on 2026-07-26** —
+`nocx-6ek` (persistence), `nocx-v1pr` (tabs), `nocx-k0xk` (quality gates) and `nocx-8v51`
+(settings). The seams they moved have stopped moving, so work built against them is no
+longer at risk of being written twice. Nothing is `in_progress` right now; the front is
+the free epics in `bd ready -t epic -u`.
 
-The active tracks are the epics in status `in_progress`:
+An earlier version of this section named those four as active tracks and told you to hold
+off on coding. **That instruction is retired.** It is left described here rather than
+silently deleted because it was quoted at people, and someone reading a stale copy needs
+to be able to tell that it lapsed rather than that they misread it.
 
-| Epic        | Track         | What it moves                                                                                        |
-| ----------- | ------------- | ---------------------------------------------------------------------------------------------------- |
-| `nocx-6ek`  | Persistence   | Storage capabilities and secrets as opaque references (ADR-0011)                                     |
-| `nocx-v1pr` | Tabs          | TabContent seam with a cancellable lifecycle; tab presentation extracted                             |
-| `nocx-k0xk` | Quality gates | The e2e suite and the per-commit gate — the thing that has to work before the rewrite can be trusted |
+This paragraph is a snapshot and will go stale the same way. The live answer is always
+`bd list --status in_progress --type epic`, and where it disagrees with this document the
+command is right.
 
-Settings (`nocx-8v51`) was the fourth and closed on 2026-07-26. This table is a snapshot, not
-a maintained list: the live answer is `bd list --status in_progress --type epic`, and where
-the two disagree the command is right.
+**Open architectural question, unowned as of 2026-07-26: the frontend has no recorded UI
+framework decision.** The vanilla-TypeScript-plus-Vite setup came from the `M0 scaffold`
+commit (`2bb8ddf`) and was never chosen against alternatives — no ADR discusses it, and
+ADR-0001 settled the VT engine (xterm.js), not the UI layer. That default is now load-
+bearing for three filed epics: `nocx-ycet` (authoritative frontend state), `nocx-vxqj`
+(UI kit) and `nocx-708q` (multi-view sidebar with a file tree). It should be decided
+deliberately before those start, in either direction. See `nocx-6zu5`.
 
 After the foundation, the order is: editor core on CodeMirror 6, Warp-style command blocks and
 shell integration → terminal core, terminal UI and the SSH client → secrets vault → Warpify →
