@@ -101,6 +101,15 @@ export function createRendererMock(): RendererMock {
     setReadOnly: vi.fn(),
     refreshAtlas: vi.fn(),
     focus: vi.fn(),
+    fitViewport: vi.fn(),
+    registerMarker: vi.fn().mockReturnValue(undefined),
+    cellHeight: 16,
+    viewportTopLine: 0,
+    onScroll: vi.fn(),
+    onRender: vi.fn(),
+    paneElement: document.createElement('div'),
+    getBufferLine: vi.fn().mockReturnValue(undefined),
+    clearViewport: vi.fn(),
     cols: 80,
     rows: 24,
     _cbs: cbs,
@@ -301,6 +310,7 @@ export async function mountTabManager(
   clipboard: ClipboardFake
   gate: ClipboardGate
   banner: BannerFake
+  tabStrip: import('../tab-strip').TabStrip
 }> {
   const { bar, panes } = setupTabBarDOM()
   const c = client ?? makeClient()
@@ -312,6 +322,8 @@ export async function mountTabManager(
     listGroups: vi.fn().mockResolvedValue([]),
   }
   const { TabManager } = await import('../tabs')
+  const { HorizontalTabStrip } = await import('../tab-strip')
+  const tabStrip = new HorizontalTabStrip()
   const manager = new TabManager(
     bar,
     panes,
@@ -320,9 +332,10 @@ export async function mountTabManager(
     g,
     bn,
     pc as unknown as import('../profiles').ProfileClient,
+    tabStrip,
   )
   await vi.waitFor(() => {
     expect(c.openSession).toHaveBeenCalled()
   })
-  return { bar, panes, manager, client: c, clipboard: cb, gate: g, banner: bn }
+  return { bar, panes, manager, client: c, clipboard: cb, gate: g, banner: bn, tabStrip }
 }

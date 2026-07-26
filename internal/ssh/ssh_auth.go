@@ -58,7 +58,7 @@ func (rc *RealClient) buildAuthChain(resolved *resolvedConfig, cfg *ConnectConfi
 	chain = append(chain, authChainEntry{kind: kindNone})
 
 	if mode == "" || mode == "publicKey" {
-		rc.addPublicKeyMethods(&chain, resolved)
+		rc.addPublicKeyMethods(&chain, resolved, cfg)
 	}
 
 	if (mode == "" || mode == "agent") && rc.agentAvailable() {
@@ -82,15 +82,15 @@ func (rc *RealClient) buildAuthChain(resolved *resolvedConfig, cfg *ConnectConfi
 	return chain, nil
 }
 
-func (rc *RealClient) addPublicKeyMethods(chain *[]authChainEntry, resolved *resolvedConfig) {
+func (rc *RealClient) addPublicKeyMethods(chain *[]authChainEntry, resolved *resolvedConfig, cfg *ConnectConfig) {
 	if resolved.identityFile != "" {
-		if signer, err := rc.loadKey(resolved.identityFile); err == nil {
+		if signer, err := rc.loadKey(resolved.identityFile, cfg); err == nil {
 			*chain = append(*chain, authChainEntry{kind: kindPublicKey, method: gossh.PublicKeys(signer)})
 		}
 	}
 
 	for _, path := range defaultKeyPaths() {
-		signer, err := rc.loadKey(path)
+		signer, err := rc.loadKey(path, cfg)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				continue
@@ -189,7 +189,7 @@ func defaultKeyPaths() []string {
 	}
 }
 
-func (rc *RealClient) loadKey(path string) (gossh.Signer, error) {
+func (rc *RealClient) loadKey(path string, cfg *ConnectConfig) (gossh.Signer, error) {
 	data, err := os.ReadFile(path) //nolint:gosec
 	if err != nil {
 		return nil, err
@@ -198,10 +198,31 @@ func (rc *RealClient) loadKey(path string) (gossh.Signer, error) {
 	signer, err := gossh.ParsePrivateKey(data)
 	if err != nil {
 		var passErr *gossh.PassphraseMissingError
-		if errors.As(err, &passErr) {
+		if !errors.As(err, &passErr) {
+			return nil, fmt.Errorf("parse key %s: %w", path, err)
+		}
+
+		// Attempt stored passphrase if the caller threaded a config.
+		if cfg == nil || cfg.Secrets == nil || cfg.PassphraseSecretID == "" {
 			return nil, &ErrEncryptedKey{Path: path}
 		}
-		return nil, fmt.Errorf("parse key %s: %w", path, err)
+
+		secret, lookupErr := rc.lookupKeyPassphrase(cfg.Secrets, cfg.PassphraseSecretID)
+		if lookupErr != nil || secret.IsEmpty() {
+			return nil, &ErrEncryptedKey{Path: path}
+		}
+
+		// Parse inside Secret.Use so the passphrase []byte never
+		// escapes the callback (ADR-0011 §2).
+		var withPw gossh.Signer
+		if useErr := secret.Use(func(passphrase []byte) error {
+			var parseErr error
+			withPw, parseErr = gossh.ParsePrivateKeyWithPassphrase(data, passphrase)
+			return parseErr
+		}); useErr != nil {
+			return nil, &ErrEncryptedKey{Path: path}
+		}
+		return withPw, nil
 	}
 	return signer, nil
 }

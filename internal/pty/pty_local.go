@@ -108,12 +108,28 @@ func NewLocal(logger log.Logger, cfg Config, opts ...Option) (*LocalPty, error) 
 		opt(&cfg)
 	}
 
+	// Prefer bash for shell integration (OSC 133 markers).  Fall back through
+	// common paths; on stripped-down containers none may exist, so keep /bin/sh
+	// as the last resort.
 	shell := os.Getenv("SHELL")
+	if shell == "" {
+		for _, candidate := range []string{
+			"/run/current-system/sw/bin/bash", // NixOS
+			"/bin/bash",
+			"/usr/bin/bash",
+			"/usr/local/bin/bash",
+		} {
+			if _, err := os.Stat(candidate); err == nil {
+				shell = candidate
+				break
+			}
+		}
+	}
 	if shell == "" {
 		shell = "/bin/sh"
 	}
 
-	cmd := exec.Command(shell) //nolint:gosec // shell is from SHELL env or fallback
+	cmd := exec.Command(shell, "-i") //nolint:gosec // shell is from detected path
 	cmd.Dir = resolveCwd(cfg.Cwd)
 	env := withUTF8Locale(append(
 		scrubLauncherSession(os.Environ()),

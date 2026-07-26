@@ -74,8 +74,13 @@ func jsonrpcCallWithID(t *testing.T, conn *websocket.Conn, method string, params
 	if werr != nil {
 		t.Fatalf("write request: %v", werr)
 	}
-	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	// Read until the matching response-id appears. Reset the deadline on
+	// each iteration so a slow response under load does not trip gorilla's
+	// permanent error store (see wsReader doc). 30 s is a generous failsafe;
+	// the test succeeds as soon as the condition is met, not when the clock
+	// runs out.
 	for {
+		_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 		_, resp, err := conn.ReadMessage()
 		if err != nil {
 			t.Fatalf("read response: %v", err)
@@ -91,7 +96,8 @@ func jsonrpcCallWithID(t *testing.T, conn *websocket.Conn, method string, params
 		var idCheck struct {
 			ID int `json:"id"`
 		}
-		if err := json.Unmarshal(resp, &idCheck); err != nil || idCheck.ID != id {
+		_ = json.Unmarshal(resp, &idCheck)
+		if idCheck.ID != id {
 			continue
 		}
 		return resp
@@ -230,22 +236,26 @@ func TestWSServer_SizeContract_OpenAtSize(t *testing.T) {
 	f := Frame{Version: FrameVersion, MsgType: MsgTypeData, SessionID: sidBytes, Payload: []byte("stty size\n")}
 	_ = conn.WriteMessage(websocket.BinaryMessage, f.Encode())
 
-	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	// Use a background reader to avoid gorilla's permanent error store
+	// (see wsReader doc). 30 s is a generous failsafe; the test succeeds
+	// as soon as the condition is met, not when the clock runs out.
+	reader := newWSReader(conn)
+	deadline := time.After(30 * time.Second)
 	for {
-		mt, data, err := conn.ReadMessage()
-		if err != nil {
-			t.Fatalf("read: %v", err)
-		}
-		if mt != websocket.BinaryMessage {
-			continue
-		}
-		frame, err := DecodeFrame(data)
-		if err != nil {
-			t.Fatalf("decode frame: %v", err)
-		}
-		output := string(frame.Payload)
-		if strings.Contains(output, "43 132") || strings.Contains(output, "43\t132") {
-			return
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for stty size output")
+		case frame, ok := <-reader.frames:
+			if !ok {
+				t.Fatal("connection closed before stty output arrived")
+			}
+			if string(session.IDFromBytes(frame.SessionID)) != sid {
+				continue
+			}
+			output := string(frame.Payload)
+			if strings.Contains(output, "43 132") || strings.Contains(output, "43\t132") {
+				return
+			}
 		}
 	}
 }
@@ -287,22 +297,23 @@ func TestWSServer_Resize(t *testing.T) {
 	f := Frame{Version: FrameVersion, MsgType: MsgTypeData, SessionID: sidBytes, Payload: []byte("stty size\n")}
 	_ = conn.WriteMessage(websocket.BinaryMessage, f.Encode())
 
-	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	reader := newWSReader(conn)
+	deadline := time.After(30 * time.Second)
 	for {
-		mt, data, err := conn.ReadMessage()
-		if err != nil {
-			t.Fatalf("read: %v", err)
-		}
-		if mt != websocket.BinaryMessage {
-			continue
-		}
-		frame, err := DecodeFrame(data)
-		if err != nil {
-			t.Fatalf("decode frame: %v", err)
-		}
-		output := string(frame.Payload)
-		if strings.Contains(output, "30 100") || strings.Contains(output, "30\t100") {
-			return
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for stty size output")
+		case frame, ok := <-reader.frames:
+			if !ok {
+				t.Fatal("connection closed before stty output arrived")
+			}
+			if string(session.IDFromBytes(frame.SessionID)) != sid {
+				continue
+			}
+			output := string(frame.Payload)
+			if strings.Contains(output, "30 100") || strings.Contains(output, "30\t100") {
+				return
+			}
 		}
 	}
 }
@@ -651,21 +662,19 @@ func TestWSServer_OpenAckBeforeData(t *testing.T) {
 	}
 	_ = conn.WriteMessage(websocket.BinaryMessage, f.Encode())
 
-	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	reader := newWSReader(conn)
+	deadline := time.After(30 * time.Second)
 	for {
-		_, data, err := conn.ReadMessage()
-		if err != nil {
-			t.Fatalf("read: %v", err)
-		}
-		if len(data) == 0 {
-			continue
-		}
-		frame, derr := DecodeFrame(data)
-		if derr != nil {
-			continue
-		}
-		if strings.Contains(string(frame.Payload), "ack-test") {
-			return
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for echo output")
+		case frame, ok := <-reader.frames:
+			if !ok {
+				t.Fatal("connection closed before echo output arrived")
+			}
+			if strings.Contains(string(frame.Payload), "ack-test") {
+				return
+			}
 		}
 	}
 }
@@ -706,8 +715,9 @@ func TestWSServer_ExitClearsRegistry(t *testing.T) {
 	}
 	_ = conn.WriteMessage(websocket.BinaryMessage, f.Encode())
 
-	// Wait for the session to exit.
-	deadline := time.Now().Add(5 * time.Second)
+	// Wait for the session to exit. 30 s is a generous failsafe; the test
+	// succeeds as soon as the registry is empty, not when the clock runs out.
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		if len(sess.List()) == 0 {
 			return
@@ -856,8 +866,11 @@ func TestWSServer_TwoSessionsOneConnection_Isolation(t *testing.T) {
 	fA := Frame{Version: FrameVersion, MsgType: MsgTypeData, SessionID: sidABytes, Payload: []byte("echo session-A\n")}
 	_ = conn.WriteMessage(websocket.BinaryMessage, fA.Encode())
 
-	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	// Per-iteration SetReadDeadline avoids gorilla's permanent error store
+	// (see wsReader doc) without a background goroutine that would race with
+	// jsonrpcCallWithID on the same connection. 30 s is a generous failsafe.
 	for {
+		_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 		_, data, err := conn.ReadMessage()
 		if err != nil {
 			t.Fatalf("read: %v", err)
@@ -879,8 +892,8 @@ func TestWSServer_TwoSessionsOneConnection_Isolation(t *testing.T) {
 	fB := Frame{Version: FrameVersion, MsgType: MsgTypeData, SessionID: sidBBytes, Payload: []byte("echo session-B\n")}
 	_ = conn.WriteMessage(websocket.BinaryMessage, fB.Encode())
 
-	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	for {
+		_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 		_, data, err := conn.ReadMessage()
 		if err != nil {
 			t.Fatalf("read: %v", err)
@@ -913,8 +926,8 @@ func TestWSServer_TwoSessionsOneConnection_Isolation(t *testing.T) {
 	fB2 := Frame{Version: FrameVersion, MsgType: MsgTypeData, SessionID: sidBBytes, Payload: []byte("echo still-alive\n")}
 	_ = conn.WriteMessage(websocket.BinaryMessage, fB2.Encode())
 
-	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	for {
+		_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 		_, data, err := conn.ReadMessage()
 		if err != nil {
 			t.Fatalf("read after close: %v", err)
@@ -1006,19 +1019,21 @@ func TestWSServer_ReattachReplaysUnreadBytes(t *testing.T) {
 
 	// Read some output to advance our offset, then disconnect.
 	var offset uint64
-	_ = connA.SetReadDeadline(time.Now().Add(5 * time.Second))
+	readerA := newWSReader(connA)
+	deadlineA := time.After(30 * time.Second)
+loopA:
 	for {
-		_, data, err := connA.ReadMessage()
-		if err != nil {
-			t.Fatalf("read: %v", err)
-		}
-		frame, derr := DecodeFrame(data)
-		if derr != nil {
-			continue
-		}
-		offset += uint64(len(frame.Payload))
-		if strings.Contains(string(frame.Payload), "reattach-test") {
-			break
+		select {
+		case <-deadlineA:
+			t.Fatal("timed out waiting for reattach-test output")
+		case frame, ok := <-readerA.frames:
+			if !ok {
+				t.Fatal("connection closed before output arrived")
+			}
+			offset += uint64(len(frame.Payload))
+			if strings.Contains(string(frame.Payload), "reattach-test") {
+				break loopA
+			}
 		}
 	}
 
@@ -1061,18 +1076,19 @@ func TestWSServer_ReattachReplaysUnreadBytes(t *testing.T) {
 	}
 
 	// Read replayed bytes — must contain "detached" without duplicating earlier output.
-	_ = connB.SetReadDeadline(time.Now().Add(5 * time.Second))
+	readerB := newWSReader(connB)
+	deadlineB := time.After(30 * time.Second)
 	for {
-		_, data, err := connB.ReadMessage()
-		if err != nil {
-			t.Fatalf("read: %v", err)
-		}
-		frame, derr := DecodeFrame(data)
-		if derr != nil {
-			continue
-		}
-		if strings.Contains(string(frame.Payload), "detached") {
-			return
+		select {
+		case <-deadlineB:
+			t.Fatal("timed out waiting for detached output")
+		case frame, ok := <-readerB.frames:
+			if !ok {
+				t.Fatal("connection closed before detached output arrived")
+			}
+			if strings.Contains(string(frame.Payload), "detached") {
+				return
+			}
 		}
 	}
 }
@@ -1108,8 +1124,8 @@ func TestWSServer_AttachWithStaleOffsetReturnsReset(t *testing.T) {
 	_ = conn.WriteMessage(websocket.BinaryMessage, f.Encode())
 
 	var total uint64
-	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	for {
+		_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 		_, data, err := conn.ReadMessage()
 		if err != nil {
 			t.Fatalf("read: %v", err)
@@ -1634,8 +1650,8 @@ func TestWSServer_RingToConnExitsOnDisconnect(t *testing.T) {
 	}
 
 	// Must receive "after-disconnect" in the replayed output.
-	_ = connB.SetReadDeadline(time.Now().Add(5 * time.Second))
 	for {
+		_ = connB.SetReadDeadline(time.Now().Add(30 * time.Second))
 		_, data, err := connB.ReadMessage()
 		if err != nil {
 			t.Fatalf("read: %v", err)
@@ -1998,7 +2014,7 @@ func TestWSServer_FairnessTwoFloodingOneQuiet(t *testing.T) {
 	var floodAfterEcho int
 	echoSent := false
 	echoAt := time.Time{}
-	deadline := time.After(30 * time.Second)
+	deadline := time.After(60 * time.Second)
 
 	for {
 		select {
@@ -2041,17 +2057,34 @@ func TestWSServer_FairnessTwoFloodingOneQuiet(t *testing.T) {
 				if !strings.Contains(string(f.Payload), "FAIRNESS-OK") {
 					continue
 				}
-				if floodAfterEcho == 0 {
-					t.Fatal("no flood frames between the echo request and its reply — cannot tell interleaving from a drained flood")
-				}
+				// Deliberately NOT failing when floodAfterEcho == 0.
+				//
+				// It asked for at least one flood frame to be read between the
+				// echo request and its reply, as evidence the flood was still
+				// live. But the loop reads frames one at a time, and nothing
+				// orders them: the reply can simply be the very next frame. That
+				// is the BEST case for the property under test — the quiet
+				// session answering immediately — so failing on it penalises
+				// exactly the behaviour this test exists to demonstrate. It fired
+				// on macos-latest in CI run 30218205528 while the transport was
+				// working correctly.
+				//
+				// The sound evidence is below: if flood frames keep arriving
+				// AFTER the reply, the flood plainly had not drained, whether or
+				// not one happened to land inside that narrow window. The counter
+				// stays as diagnostics.
+				//
 				// Confirm the flood had not finished: more must follow.
-				more, n := reader.collect(sidFlood, 2*time.Second, 10*time.Second)
+				// 5 s quiet window is generous enough to survive scheduling
+				// hiccups under load; a streaming flood produces frames
+				// continuously so the window never expires on a live stream.
+				more, n := reader.collect(sidFlood, 5*time.Second, 15*time.Second)
 				if n == 0 {
 					t.Fatalf("the echo only arrived after the flood drained (%d bytes) — head-of-line blocking", floodSeen)
 				}
 				_ = more
-				t.Logf("echo interleaved after %d flood bytes in %s; flood still streaming",
-					floodSeen, time.Since(echoAt))
+				t.Logf("echo interleaved after %d flood bytes in %s (%d flood frames inside the window); flood still streaming",
+					floodSeen, time.Since(echoAt), floodAfterEcho)
 				return
 			}
 		}

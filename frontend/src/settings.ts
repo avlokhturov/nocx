@@ -2,9 +2,32 @@
 // Renders controls by declaration.control kind, grouped by declaration.section.
 // A control:'secret' renders as configured/not-configured with Replace/Clear
 // actions; it never renders a populated input (ADR-0011 §2).
+//
+// State is derived from typed declarations + snapshot.  No literal setting
+// key appears anywhere in this file.
+//
+// Row DOM ids: keyToDomId(key) = 'st-setting-' + encodeURIComponent(key).
+// encodeURIComponent does NOT escape '.', so st-setting-clipboard.osc52Suppressed
+// is a valid HTML5 id but splits into id + class inside a raw CSS selector.
+// Use getElementById or CSS.escape — never querySelector('#' + id).
 
 import { log } from './log'
 import { ProfileClient } from './profiles'
+import { SettingsObserver } from './settings-observer'
+
+/** Stable DOM id for a setting row, derived from the declaration key.
+ *
+ *  Keys are opaque strings — assertValidKey in Go checks only non-empty and
+ *  uniqueness — so the character set is unconstrained. encodeURIComponent is
+ *  injective: every distinct key maps to a distinct id. Dots, underscores and
+ *  hyphens pass through as-is (valid in HTML5 ids); everything else is
+ *  percent-encoded, which is also valid.
+ *
+ *  It does NOT escape '.', so use getElementById or CSS.escape — never a raw
+ *  querySelector('#' + id), where 'st-setting-a.b' parses as id plus class. */
+export function keyToDomId(key: string): string {
+  return 'st-setting-' + encodeURIComponent(key)
+}
 
 export interface Declaration {
   key: string
@@ -23,20 +46,116 @@ export interface Declaration {
 export interface SettingsView {
   show(): void
   refresh(): Promise<void>
+  /** Current declarations, as returned by the last successful refresh. */
+  getDeclarations(): Declaration[]
+  /** Unique sections in declaration order. */
+  getSections(): string[]
+  /** Toggle modified-only filter.  Calls render() so the view reflects the
+   *  new filter state immediately. */
+  setModifiedOnly(val: boolean): void
+  /** Whether the modified-only filter is currently active. */
+  isModifiedOnly(): boolean
+  /** Count of overridden, non-secret declarations. */
+  getModifiedCount(): number
+  /** Per-section counts of overridden, non-secret declarations. */
+  getModifiedBySection(): ReadonlyMap<string, number>
 }
 
+const enum LoadState {
+  Loading = 'loading',
+  Ready = 'ready',
+  Failed = 'failed',
+  Empty = 'empty',
+}
 export class SettingsViewImpl implements SettingsView {
   private container: HTMLElement
   private client: ProfileClient
+  private observer: SettingsObserver | null
   private declarations: Declaration[] = []
   private values: Record<string, unknown> = {}
+  private draftValues: Record<string, unknown> = {}
   private secretStates: Record<string, boolean> = {}
   // Tracks per-key error messages displayed inline on the control.
   private errors: Record<string, string> = {}
+  // Provenance: keys that have a stored override (A.2 from foundation design).
+  private overridden: Set<string> = new Set()
+  private revision = 0
+  // Key → rendered row element.  Replaces CSS-selector interpolation of the
+  // raw key (which is an unconstrained character set — dots break selectors).
+  private rowMap: Map<string, HTMLElement> = new Map()
+  private searchQuery = ''
+  private modifiedOnly = false
+  private onStateChanged?: () => void
+  private loadState: LoadState = LoadState.Loading
+  // Bound handler so we can remove the listener.
+  private boundKeydown: (e: KeyboardEvent) => void
+  // Bound refresh so the observer can call it.
+  private boundRefresh: () => Promise<void>
 
-  constructor(container: HTMLElement, client: ProfileClient) {
+  constructor(
+    container: HTMLElement,
+    client: ProfileClient,
+    observer?: SettingsObserver,
+    onStateChanged?: () => void,
+  ) {
     this.container = container
     this.client = client
+    this.observer = observer ?? null
+    this.onStateChanged = onStateChanged
+    this.boundKeydown = this.handleKeydown.bind(this)
+    this.boundRefresh = this.refresh.bind(this)
+    this.container.addEventListener('keydown', this.boundKeydown)
+    if (this.observer) {
+      this.observer.start(() => {
+        void this.boundRefresh()
+      })
+    }
+  }
+
+  getDeclarations(): Declaration[] {
+    return [...this.declarations]
+  }
+
+  getSections(): string[] {
+    const seen = new Set<string>()
+    const sections: string[] = []
+    for (const d of this.declarations) {
+      if (!seen.has(d.section)) {
+        seen.add(d.section)
+        sections.push(d.section)
+      }
+    }
+    return sections
+  }
+
+  // ── modified-only filter ────────────────────────────────────────────
+
+  setModifiedOnly(val: boolean): void {
+    if (this.modifiedOnly === val) return
+    this.modifiedOnly = val
+    this.render()
+  }
+
+  isModifiedOnly(): boolean {
+    return this.modifiedOnly
+  }
+
+  getModifiedCount(): number {
+    let count = 0
+    for (const d of this.declarations) {
+      if (d.control !== 'secret' && this.overridden.has(d.key)) count++
+    }
+    return count
+  }
+
+  getModifiedBySection(): ReadonlyMap<string, number> {
+    const counts = new Map<string, number>()
+    for (const d of this.declarations) {
+      if (d.control !== 'secret' && this.overridden.has(d.key)) {
+        counts.set(d.section, (counts.get(d.section) ?? 0) + 1)
+      }
+    }
+    return counts
   }
 
   show(): void {
@@ -44,27 +163,40 @@ export class SettingsViewImpl implements SettingsView {
   }
 
   async refresh(): Promise<void> {
+    this.loadState = LoadState.Loading
+    this.render()
     try {
-      const desc = await this.client.describeSettings()
+      const [desc, snap] = await Promise.all([
+        this.client.describeSettings(),
+        this.client.getSnapshot(),
+      ])
       this.declarations = (desc.declarations as Declaration[]) ?? []
-      const all = await this.client.getAllSettings()
-      this.values = all.values ?? {}
-      // Fetch secret existence for every secret-class declaration.
-      this.secretStates = {}
-      for (const d of this.declarations) {
-        if (d.control === 'secret') {
-          try {
-            const result = await this.client.secretExists(d.key)
-            this.secretStates[d.key] = result.exists
-          } catch {
-            this.secretStates[d.key] = false
-          }
-        }
-      }
-      // Clear stale errors on refresh.
+      this.values = snap.values ?? {}
+      this.overridden = new Set(snap.overridden ?? [])
+      this.revision = snap.revision ?? 0
+      this.observer?.setRevision(snap.revision ?? 0)
+      this.draftValues = {}
       this.errors = {}
+
+      // Parallelise secret-existence probes (fixes nocx-jwkw sequential loop).
+      const secretDecls = this.declarations.filter((d) => d.control === 'secret')
+      if (secretDecls.length > 0) {
+        const results = await Promise.allSettled(
+          secretDecls.map((d) => this.client.secretExists(d.key)),
+        )
+        this.secretStates = {}
+        for (let i = 0; i < secretDecls.length; i++) {
+          const r = results[i]
+          this.secretStates[secretDecls[i].key] = r.status === 'fulfilled' ? r.value.exists : false
+        }
+      } else {
+        this.secretStates = {}
+      }
+
+      this.loadState = this.declarations.length === 0 ? LoadState.Empty : LoadState.Ready
     } catch {
-      // Keep existing state on fetch failure.
+      // RPC failure — keep any prior state for a retry but surface the error.
+      this.loadState = LoadState.Failed
     }
     this.render()
   }
@@ -73,28 +205,64 @@ export class SettingsViewImpl implements SettingsView {
 
   private render(): void {
     this.container.replaceChildren()
+    this.rowMap.clear()
 
-    if (this.declarations.length === 0) {
-      const empty = document.createElement('div')
-      empty.className = 'st-empty'
-      empty.textContent = 'No settings declared.'
-      this.container.append(empty)
-      return
+    switch (this.loadState) {
+      case LoadState.Loading:
+        this.renderStatus('st-loading', 'Loading settings\u2026')
+        return
+      case LoadState.Failed:
+        this.renderFailed()
+        this.onStateChanged?.()
+        return
+      case LoadState.Empty:
+        this.renderStatus('st-empty', 'No settings declared.')
+        this.onStateChanged?.()
+        return
     }
 
-    // Group by section, preserving declaration order within each section.
-    const sections = new Map<string, Declaration[]>()
-    for (const d of this.declarations) {
-      const list = sections.get(d.section)
-      if (list) {
-        list.push(d)
-      } else {
-        sections.set(d.section, [d])
+    // filtered = declarations ∩ modifiedOnly ∩ searchQuery
+    let filtered = this.declarations
+    if (this.modifiedOnly) {
+      filtered = filtered.filter((d) => d.control !== 'secret' && this.overridden.has(d.key))
+    }
+    if (this.searchQuery) {
+      const q = this.searchQuery.toLowerCase()
+      // Score every declaration, keep those with a positive score, then
+      // sort by score descending (exact match > substring).  Declaration
+      // order is the stable tie-break: earlier in the declarations array
+      // wins when scores are equal.
+      type Scored = { decl: Declaration; score: number }
+      const scored: Scored[] = []
+      for (const d of filtered) {
+        const score = this.searchScore(d, q)
+        if (score > 0) scored.push({ decl: d, score })
       }
+      scored.sort((a, b) => b.score - a.score)
+      filtered = scored.map((s) => s.decl)
+    }
+
+    if (this.declarations.length > 0 && filtered.length === 0) {
+      this.renderStatus('st-nomatch', 'No settings match your search.')
+      this.onStateChanged?.()
+      return
     }
 
     const wrapper = document.createElement('div')
     wrapper.className = 'st-view'
+
+    // Search bar
+    wrapper.append(this.renderSearchBar())
+    // Modified-only filter bar
+    wrapper.append(this.renderFilterBar())
+
+    // Group by section, preserving declaration order within each section.
+    const sections = new Map<string, Declaration[]>()
+    for (const d of filtered) {
+      const list = sections.get(d.section)
+      if (list) list.push(d)
+      else sections.set(d.section, [d])
+    }
 
     for (const [section, decls] of sections) {
       const sectionEl = document.createElement('div')
@@ -102,26 +270,117 @@ export class SettingsViewImpl implements SettingsView {
 
       const heading = document.createElement('h2')
       heading.className = 'st-section-heading'
+      heading.id = 'st-section-' + encodeURIComponent(section)
       heading.textContent = section
       sectionEl.append(heading)
-
       for (const decl of decls) {
-        sectionEl.append(this.renderControl(decl))
+        const row = this.renderControl(decl)
+        sectionEl.append(row)
+        this.rowMap.set(decl.key, row)
       }
 
       wrapper.append(sectionEl)
     }
 
     this.container.append(wrapper)
+    this.onStateChanged?.()
+  }
+
+  private renderStatus(className: string, text: string): void {
+    const el = document.createElement('div')
+    el.className = 'st-status ' + className
+    el.textContent = text
+    this.container.append(el)
+  }
+
+  private renderFailed(): void {
+    const el = document.createElement('div')
+    el.className = 'st-status st-failed'
+    const msg = document.createElement('span')
+    msg.textContent = 'Failed to load settings.'
+    el.append(msg)
+    const retry = document.createElement('button')
+    retry.className = 'st-retry-btn'
+    retry.textContent = 'Retry'
+    retry.addEventListener('click', () => {
+      void this.refresh()
+    })
+    el.append(retry)
+    this.container.append(el)
+  }
+
+  private renderSearchBar(): HTMLElement {
+    const bar = document.createElement('div')
+    bar.className = 'st-search'
+    const input = document.createElement('input')
+    input.type = 'text'
+    input.className = 'st-search-input'
+    input.placeholder = 'Search settings\u2026'
+    input.value = this.searchQuery
+    input.setAttribute('aria-label', 'Search settings')
+    input.addEventListener('input', () => {
+      this.searchQuery = input.value
+      this.render()
+    })
+    bar.append(input)
+    return bar
+  }
+
+  private renderFilterBar(): HTMLElement {
+    const bar = document.createElement('div')
+    bar.className = 'st-filter-bar'
+    const modifiedCount = this.declarations.filter(
+      (d) => d.control !== 'secret' && this.overridden.has(d.key),
+    ).length
+    const label = document.createElement('label')
+    label.className = 'st-filter-label'
+    const checkbox = document.createElement('input')
+    checkbox.type = 'checkbox'
+    checkbox.checked = this.modifiedOnly
+    checkbox.addEventListener('change', () => {
+      this.setModifiedOnly(checkbox.checked)
+    })
+    label.append(checkbox)
+    label.append(' Modified only (' + String(modifiedCount) + ')')
+    bar.append(label)
+    return bar
+  }
+
+  /** Returns 2 for an exact normalized label or key match, 1 for a
+   *  substring match in any searchable field, and 0 for no match.
+   *  Ranking: exact > substring, tie-broken by declaration order. */
+  private searchScore(decl: Declaration, query: string): number {
+    const q = query.toLowerCase()
+    if (decl.label.toLowerCase() === q || decl.key.toLowerCase() === q) return 2
+    if (decl.label.toLowerCase().includes(q)) return 1
+    if (decl.description.toLowerCase().includes(q)) return 1
+    if (decl.section.toLowerCase().includes(q)) return 1
+    if (decl.key.toLowerCase().includes(q)) return 1
+    if (decl.options) {
+      for (const opt of decl.options) {
+        if (opt.label.toLowerCase().includes(q) || opt.value.toLowerCase().includes(q)) return 1
+      }
+    }
+    return 0
   }
 
   private renderControl(decl: Declaration): HTMLElement {
     const row = document.createElement('div')
     row.className = 'st-row'
+    row.id = keyToDomId(decl.key)
     row.dataset.key = decl.key
 
     const labelCol = document.createElement('div')
     labelCol.className = 'st-label-col'
+
+    // When searching, show the section as a breadcrumb so the user can
+    // orient each result.
+    if (this.searchQuery) {
+      const crumb = document.createElement('span')
+      crumb.className = 'st-breadcrumb'
+      crumb.textContent = decl.section
+      labelCol.append(crumb)
+    }
 
     const label = document.createElement('label')
     label.textContent = decl.label
@@ -135,10 +394,18 @@ export class SettingsViewImpl implements SettingsView {
       labelCol.append(desc)
     }
 
+    // dataClass privacy/storage indicator — generated from the declaration.
+    labelCol.append(this.renderDataClass(decl))
+
     row.append(labelCol)
 
     const controlCol = document.createElement('div')
     controlCol.className = 'st-control-col'
+
+    // Declared bound display for numbers (visible range, not only HTML attrs).
+    if (decl.control === 'number') {
+      controlCol.append(this.renderBounds(decl))
+    }
 
     switch (decl.control) {
       case 'toggle':
@@ -158,6 +425,11 @@ export class SettingsViewImpl implements SettingsView {
         break
     }
 
+    // Provenance badge + Reset (non-secret only; secrets have no default).
+    if (decl.control !== 'secret' && decl.default !== undefined) {
+      controlCol.append(this.renderProvenance(decl))
+    }
+
     // Show any existing error for this key.
     if (this.errors[decl.key]) {
       const errEl = document.createElement('div')
@@ -168,6 +440,16 @@ export class SettingsViewImpl implements SettingsView {
 
     row.append(controlCol)
     return row
+  }
+
+  /**
+   * Returns the effective value for a setting key: draft (rejected input) if
+   * present, else the committed value. Never falls through to the default —
+   * callers combine this with displayValue when needed.
+   */
+  private effectiveValue(key: string): unknown {
+    if (key in this.draftValues) return this.draftValues[key]
+    return this.values[key]
   }
 
   /**
@@ -226,12 +508,22 @@ export class SettingsViewImpl implements SettingsView {
     return ''
   }
 
+  // --- derived state helpers ---
+
+  /** Customized is PROVENANCE: key is in the overridden set.  Not a
+   *  value-vs-default comparison — an override that happens to equal the
+   *  current default is still Customized (it pins the value against future
+   *  default changes, which is what export depends on). */
+  private isCustomized(key: string): boolean {
+    return this.overridden.has(key)
+  }
+
   // --- control renderers ---
 
   private renderToggle(decl: Declaration): HTMLElement {
     const input = document.createElement('input')
     input.type = 'checkbox'
-    input.checked = !!this.values[decl.key]
+    input.checked = !!this.effectiveValue(decl.key)
     input.addEventListener('change', () => {
       void this.saveSetting(decl.key, input.checked)
     })
@@ -241,7 +533,7 @@ export class SettingsViewImpl implements SettingsView {
   private renderText(decl: Declaration): HTMLElement {
     const input = document.createElement('input')
     input.type = 'text'
-    input.value = this.displayValue(this.values[decl.key], decl)
+    input.value = this.displayValue(this.effectiveValue(decl.key), decl)
     input.addEventListener('change', () => {
       void this.saveSetting(decl.key, input.value)
     })
@@ -251,14 +543,15 @@ export class SettingsViewImpl implements SettingsView {
   private renderNumber(decl: Declaration): HTMLElement {
     const input = document.createElement('input')
     input.type = 'number'
-    input.value = this.displayValue(this.values[decl.key], decl)
+    const eff = this.effectiveValue(decl.key)
+    input.value = this.displayValue(eff, decl)
     if (decl.min !== undefined) input.min = String(decl.min)
     if (decl.max !== undefined) input.max = String(decl.max)
     input.addEventListener('change', () => {
       const n = Number(input.value)
       void this.saveSetting(
         decl.key,
-        isNaN(n) ? Number(this.displayValue(this.values[decl.key], decl)) : n,
+        isNaN(n) ? Number(this.displayValue(this.effectiveValue(decl.key), decl)) : n,
       )
     })
     return input
@@ -266,7 +559,7 @@ export class SettingsViewImpl implements SettingsView {
 
   private renderSelect(decl: Declaration): HTMLElement {
     const select = document.createElement('select')
-    const current = this.displayValue(this.values[decl.key], decl)
+    const current = this.displayValue(this.effectiveValue(decl.key), decl)
     for (const opt of decl.options ?? []) {
       const option = document.createElement('option')
       option.value = opt.value
@@ -314,19 +607,128 @@ export class SettingsViewImpl implements SettingsView {
     return wrapper
   }
 
+  // --- provenance & reset ---
+
+  private renderProvenance(decl: Declaration): HTMLElement {
+    const span = document.createElement('span')
+    const customized = this.isCustomized(decl.key)
+    span.className = customized ? 'st-provenance st-customized' : 'st-provenance st-default'
+    span.textContent = customized ? 'Customized' : 'Default'
+
+    if (customized) {
+      const resetBtn = document.createElement('button')
+      resetBtn.className = 'st-reset-btn'
+      resetBtn.textContent = 'Reset'
+      resetBtn.title = 'Reset to default'
+      resetBtn.addEventListener('click', () => {
+        void this.resetSetting(decl.key)
+      })
+      span.append(' ', resetBtn)
+    }
+
+    return span
+  }
+
+  // --- dataClass indicator ---
+
+  private dataClassLabel(dc: Declaration['dataClass']): string {
+    switch (dc) {
+      case 'publicConfig':
+        return 'Public'
+      case 'privateMetadata':
+      case 'privateContent':
+        return 'Private'
+      case 'secretAuthenticator':
+        return 'Secret'
+    }
+  }
+
+  private renderDataClass(decl: Declaration): HTMLElement {
+    const span = document.createElement('span')
+    span.className = 'st-data-class'
+    span.textContent = this.dataClassLabel(decl.dataClass)
+    span.title = 'Storage class: ' + decl.dataClass
+    return span
+  }
+
+  // --- bound display for numbers ---
+
+  private renderBounds(decl: Declaration): HTMLElement {
+    const span = document.createElement('span')
+    span.className = 'st-bounds'
+    if (decl.min !== undefined && decl.max !== undefined) {
+      span.textContent = String(decl.min) + ' \u2013 ' + String(decl.max)
+    } else if (decl.min !== undefined) {
+      span.textContent = '\u2265 ' + String(decl.min)
+    } else if (decl.max !== undefined) {
+      span.textContent = '\u2264 ' + String(decl.max)
+    }
+    return span
+  }
+
+  // --- keyboard ---
+
+  private handleKeydown(e: KeyboardEvent): void {
+    // '/' focuses search when not already in a form control.
+    if (
+      e.key === '/' &&
+      !(
+        e.target instanceof HTMLInputElement ||
+        e.target instanceof HTMLTextAreaElement ||
+        e.target instanceof HTMLSelectElement
+      )
+    ) {
+      e.preventDefault()
+      const input = this.container.querySelector<HTMLInputElement>('.st-search-input')
+      input?.focus()
+    }
+    // Escape clears search.
+    if (e.key === 'Escape' && this.searchQuery) {
+      this.searchQuery = ''
+      this.render()
+    }
+  }
+
   // --- actions ---
 
   private async saveSetting(key: string, value: unknown): Promise<void> {
-    // Clear any previous error for this key before the call.
+    // Clear any previous error and draft for this key before the call.
     delete this.errors[key]
+    delete this.draftValues[key]
     try {
       await this.client.setSetting(key, value)
+      // Write the saved value into the authoritative map so the next
+      // rerender shows what was actually saved, not the pre-save value.
+      this.values[key] = value
+      // Optimistically mark as overridden — a save is user intent.
+      this.overridden.add(key)
     } catch (err) {
       // Validation failures arrive as JSON-RPC errors per the contract.
       this.errors[key] = (err as Error).message
+      // Preserve the rejected input in draft so the user can edit it
+      // rather than retype from scratch, without polluting this.values.
+      this.draftValues[key] = value
     }
     // Re-render just the affected row.
     this.rerenderRow(key)
+  }
+
+  private async resetSetting(key: string): Promise<void> {
+    delete this.errors[key]
+    try {
+      await this.client.resetSetting(key)
+      // Refetch the snapshot to get the reverted default value and updated
+      // overridden set.  Resetting is infrequent enough that a full refetch
+      // is correct and avoids duplicating server-side reset logic.
+      const snap = await this.client.getSnapshot()
+      this.values = snap.values ?? {}
+      this.overridden = new Set(snap.overridden ?? [])
+      this.revision = snap.revision ?? 0
+      delete this.draftValues[key]
+    } catch (err) {
+      this.errors[key] = (err as Error).message
+    }
+    this.render()
   }
 
   private async saveSecret(key: string, value: string): Promise<void> {
@@ -351,13 +753,34 @@ export class SettingsViewImpl implements SettingsView {
     this.rerenderRow(key)
   }
 
-  /** Re-render a single control row in-place without full DOM rebuild. */
+  /** Re-render a single control row in-place without full DOM rebuild.
+   *  Uses a key→element map instead of CSS selector interpolation:
+   *  keys may contain dots, which break querySelector. */
   private rerenderRow(key: string): void {
-    const oldRow = this.container.querySelector<HTMLElement>(`.st-row[data-key="${key}"]`)
+    // Instance-scoped map, not getElementById: Settings now lives in a tab that
+    // can be closed and reopened, so a detached row from a previous mount could
+    // still answer a document-wide id lookup. The keyToDomId ids stay on the
+    // rows for deep links.
+    const oldRow = this.rowMap.get(key)
     if (!oldRow) return
     const decl = this.declarations.find((d) => d.key === key)
     if (!decl) return
     const newRow = this.renderControl(decl)
     oldRow.replaceWith(newRow)
+    this.rowMap.set(key, newRow)
+  }
+
+  // --- test support: the two private helpers below exist only so tests can
+  //     assert the internal invariants without reflection.  They are never
+  //     called by production code. ---
+
+  /** Exposed for tests: is key currently in the overridden set? */
+  _isCustomizedForTest(key: string): boolean {
+    return this.isCustomized(key)
+  }
+
+  /** Exposed for tests: what is the current load state? */
+  _loadStateForTest(): string {
+    return this.loadState
   }
 }
