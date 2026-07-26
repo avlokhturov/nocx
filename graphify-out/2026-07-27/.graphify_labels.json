@@ -695,11 +695,5 @@
   "693": ".NewPTY",
   "694": ".NewPTY",
   "695": "fakeCredRepo",
-  "696": "preflight.ts",
-  "697": "hello.tsx",
-  "698": "gate.sh",
-  "699": "typescript",
-  "700": "typescript-eslint",
-  "701": "vite-plugin-solid",
-  "702": "eslint.config.mjs"
+  "696": "preflight.ts"
 }
