@@ -5,6 +5,7 @@
     "moduleResolution": "bundler",
     "strict": true,
     "jsx": "preserve",
+    "jsxImportSource": "solid-js",
     "resolveJsonModule": true,
     "isolatedModules": true,
     "esModuleInterop": true,
@@ -13,6 +14,6 @@
     "noEmit": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["src/**/*.ts"],
+  "include": ["src/**/*.ts", "src/**/*.tsx"],
   "exclude": ["node_modules"]
 }
