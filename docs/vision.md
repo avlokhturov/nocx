@@ -2,10 +2,41 @@
 title: nocx — Product Vision
 status: ready
 created: 2026-07-20
-updated: 2026-07-20
+updated: 2026-07-26
 ---
 
 # nocx — Product Vision
+
+## 0. Current state (2026-07-26) — read this first
+
+**The core is being rewritten, and new work outside the three active tracks does not start
+until they close.** If you were asked to hold off on coding, this is why: all three tracks
+move seams that everything else attaches to, so anything built against today's seams would
+be rewritten twice.
+
+The active tracks are the epics in status `in_progress`:
+
+| Epic | Track | What it moves |
+| --- | --- | --- |
+| `nocx-6ek` | Persistence | Storage capabilities and secrets as opaque references (ADR-0011) |
+| `nocx-8v51` | Settings | Snapshot contract with provenance, one control-plane dispatcher, change broadcast |
+| `nocx-v1pr` | Tabs | TabContent seam with a cancellable lifecycle; tab presentation extracted |
+| `nocx-k0xk` | Quality gates | The e2e suite and the per-commit gate — the thing that has to work before the rewrite can be trusted |
+
+This list is not maintained by hand: it is whatever `bd list --status in_progress --type epic`
+returns. The other eleven epics are parked, not cancelled — each is blocked on the three
+rewrite epics, so their work disappears from `bd ready` and comes back on its own when the
+rewrite lands. Nothing was deleted and no scope was dropped.
+
+**Where to see the state.** `bd epic status` prints progress for all fifteen epics live from
+the dependency graph, and `bd ready --exclude-type epic` is the queue. A repo-visible page
+that needs no `bd` install is tracked as `nocx-lg6r`; until it exists, those two commands are
+the only honest view.
+
+**If you are an agent**, [AGENTS.md](../AGENTS.md#what-to-work-on-next) is binding on how to
+pick work. Short version: `bd ready --exclude-type epic -u`, take the top, claim it. Do not
+widen the query to find something more interesting — everything it hides is hidden on
+purpose.
 
 ## 1. One-line positioning
 
