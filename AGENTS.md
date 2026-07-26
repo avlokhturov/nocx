@@ -98,47 +98,64 @@ Asked to "keep going" with no further instruction, this is the whole answer:
 bd ready --exclude-type epic -u -n 10
 ```
 
-It returns 7 issues across the 4 active tracks, not the 68 it returned on 2026-07-26 before
-the backlog was sequenced (nocx-k0xk.1). Take the top one and claim it with the three-step
-protocol below. **If it returns nothing, that is an answer, not a bug** — every active
-track's front is occupied. Finish something in flight, or promote the next epic
-deliberately; do not go hunting for work with a wider query.
+It returns single tasks drawn only from epics that are open for work — 9 of the ~90 open
+issues, against the 68 a bare `bd ready` returned on 2026-07-26 before the backlog was
+sequenced (nocx-k0xk.1). Take the top one and claim it with the three-step protocol below.
+**If it returns nothing, that is an answer, not a bug**: every open epic's front is
+occupied. Finish something in flight or take a free epic — never widen the query to find
+more work.
 
-Four invariants keep that command honest. Break one and the noise comes back.
+**Never take work out of a blocked epic.** A blocked epic is blocked because something else
+is being changed in the same files; work started there gets rewritten or collides. The
+guard is automatic if you use the command above — a blocked parent hides all its children
+from `bd ready`, including children with no dependency of their own. Verify rather than
+trusting this paragraph: `nocx-d3q.1` has no dependencies and is still not ready, because
+`nocx-d3q` is blocked. The failure mode is going around the guard — `bd list`, `bd query`,
+or picking an ID out of a document — so if a bead is not in `bd ready`, do not start it,
+and if you believe the block is wrong, say so and get it removed rather than working
+through it.
 
-**Blocking an epic parks its whole track.** This is the load-bearing mechanic and it is not
-obvious: in beads, a blocked parent propagates to its children, so a child with no `blocks`
-edge of its own is still excluded from `bd ready` when its epic is blocked. Verify it rather
-than trusting this paragraph — `nocx-d3q.1` has no dependencies and is not ready, because
-`nocx-d3q` is blocked. So "we are not working on X right now" is recorded as an edge:
+The invariants below keep that command honest. Break one and the noise comes back.
 
-```bash
-bd dep add <parked-epic> <active-epic>    # parked-epic depends on active-epic
-```
-
-`blocks` therefore carries two meanings — a technical dependency and a deliberate
-sequencing decision — and which one applies is recorded in the epic's own description, not
-inferred from the edge. Both mean the same thing operationally: not now.
-
-**The active track is an epic in `in_progress`; every other epic is blocked on them.** That
-is the only place "what matters now" is written down. Not a label (needs hand-syncing, goes
-stale silently), not priority (then priority stops meaning priority, and switching tracks
-means re-prioritising dozens of issues), not `deferred` (already used for knowledge beads —
-`bd list --label kb --status all`). Note that `blocked` is *computed*, never stored:
-`bd query "status=blocked"` returns nothing while `bd stats` counts 23. You cannot set it;
-you can only add the edge that causes it.
-
-**An epic is a DAG, not a bag.** Children are wired with `blocks` so the epic exposes at most
-three entry points. The check is the front itself:
+**An epic blocks another only when they touch the same code.** Not "this is more important",
+not "this comes later in the plan" — the edge means *two people cannot hold these at once*.
+Several epics being available simultaneously is normal and wanted; the only requirement is
+that they are disjoint, so two agents can take two epics without landing in the same files.
 
 ```bash
-bd ready --parent <epic> --exclude-type epic -n 100 --json | jq 'length'   # must be ≤ 3
+bd dep add <blocked-epic> <blocker-epic>   # blocked-epic cannot start until blocker lands
 ```
+
+This criterion replaced an earlier one, and the difference matters. Edges were first used to
+express a schedule, which parked every epic behind the current foundation and left nothing
+to hand out; 13 of 20 epic-level edges turned out to encode "not yet" rather than overlap
+and were removed. What survives is checkable: `nocx-8yg` (fonts, themes, hotkeys) waits on
+`nocx-2gf` because app hotkeys and the editor keymap fight over the same keys, and
+`nocx-25k9` (vault) waits on `nocx-9le` because both rewrite the SSH profile UI — while
+those two run in parallel with each other, which is the point.
+
+Priority, not blocking, is where "this matters more" goes.
+
+**`blocked` is computed, never stored.** `bd query "status=blocked"` returns nothing while
+`bd stats` counts a couple of dozen. You cannot set the status; you can only add the edge
+that causes it. A blocked epic's stored status stays `open`, and `bd show --short` prints it
+as `○` with no hint that anything is holding it — the `●` beside it is priority, not
+blocking. To see what actually holds an epic, read its `DEPENDS ON` list.
+
+**An epic is a DAG, not a bag.** Wire the children with `blocks` so the epic exposes a
+handful of entry points rather than all of them at once. The check is the front itself:
+
+```bash
+bd ready --parent <epic> --exclude-type epic -n 100 --json | jq 'length'
+```
+
+Three or so is healthy. An epic where every child is an entry point has recorded no internal
+order at all, and that is what made `bd ready` unusable as a queue in the first place.
+`nocx-5mn` is at five today and would benefit from sequencing.
 
 Do **not** use `bd swarm validate` for this — it counts closed children in its waves, so it
-reports max parallelism 7 for an epic whose real front is 3. It is useful for reading the
-shape of an epic, useless as a gate. An epic where every child sits in wave 1 has recorded
-no order at all, and that is what made `bd ready` unusable as a queue in the first place.
+reports max parallelism 7 for an epic whose real front is 3. It is good for reading the shape
+of an epic and useless as a gate.
 
 **An epic has three states, and the third one is the useful one.** `in_progress` means
 somebody is working it *right now*. Blocked means parked, or waiting on its predecessor in
@@ -160,13 +177,6 @@ Corollary worth checking for, because it hides: a child sitting `in_progress` in
 an earlier session rather than live work. `bd list --status in_progress` against the epic
 states finds them.
 
-**An epic is a unit of assignment.** It is handed to one person whole — never "this epic
-but not those three children". That is why `nocx-6ek` (Persistence) and `nocx-k0xk` (Quality
-gates) were closed and split: an epic named after an *area* can never finish, because every
-new bug in that area lands in it, so it can only ever be cherry-picked. Scope an epic to a
-deliverable whose DONE WHEN stops being false exactly once. More, smaller epics is the
-correct trade — the backlog went from 15 to 23 and that was the point, not a side effect.
-
 **Where a bug goes.** Inside a live deliverable, it is a child of that epic — `nocx-au6`
 belongs to deleting wterm because the seam lying about capabilities is part of that job. A
 bug that arrives from nowhere gets **no parent at all**: a standalone bug is legitimate and
@@ -176,14 +186,29 @@ triage shows the bug is a symptom of something structural, it *becomes* an epic 
 one) and carries a `discovered-from` edge back to itself, the way `nocx-4ff` points at
 `nocx-gs0` and the way `nocx-bw2` anchored `nocx-rdkh`.
 
-**Epics are never workable, and claims are unassigned-only.** Always `--exclude-type epic`:
-an epic is a container and a synchronisation point, and claiming one is always a mistake.
-Always `-u` when listing and `--claim` when taking — that is what lets two agents work two
-tracks at once without coordinating, neither able to pick up the other's work.
+**An epic is assigned, its children are claimed.** Those are different acts and both are
+needed. Taking an epic means owning the whole deliverable — set it `in_progress`, assign
+yourself, and see it to its DONE WHEN. Then work its children one at a time through
+`bd ready`, `-u` when listing and `--claim` when taking, which is what lets two agents work
+two disjoint epics without coordinating. What you never do is `--claim` the epic bead itself
+as though it were a task; `--exclude-type epic` on every task-level query keeps that from
+happening by accident.
 
-When a track finishes, unparking is one deliberate act: close the epic, then wire the
-children of whichever epic becomes active — sequencing it *before* it goes `in_progress`,
-never after.
+**Creating an epic.** Five things, and the first is the one that gets skipped:
+
+1. Scope it to a deliverable, not a code area. "Persistence" and "Quality gates" were areas;
+   both had to be closed and split because every new bug in the area landed in them, so they
+   could never finish and could only be cherry-picked. Ask: can one person be handed this
+   whole and finish it?
+2. Write a DONE WHEN that stops being false exactly once, and name what is deliberately out.
+3. Set the status deliberately. `bd create` leaves it `open`, which means *free to assign* —
+   correct for a real backlog item, wrong if you already own it.
+4. Add `blocks` edges only against epics whose files it collides with (above).
+5. Label it `mvp`, `phase-2`, `phase-3` or `infra`, and check the ordering invariant still
+   holds: no `mvp` epic sits behind a deferred one.
+
+Prefer more, smaller epics. The backlog went from 15 to 23 doing exactly this, and that was
+the goal rather than a side effect — "handed over whole" and "large area" cannot both hold.
 
 ### Claiming work on a shared backlog
 
