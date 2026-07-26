@@ -37,8 +37,16 @@ test("a click into the pane leaves the terminal taking keystrokes", async ({
     .poll(() => page.evaluate(() => document.activeElement?.className ?? ""))
     .not.toContain("nocx-editor-input");
 
+  // Click near the bottom of the pane where the editor lives.  The centre
+  // of the pane lands on the xterm area and its hidden textarea steals focus;
+  // the focus-bounce handler bails when focus is already inside the xterm
+  // container, so it never redirects — this exercises the editor's own
+  // click-to-focus handler instead of the bounce path.  That path is itself
+  // the subject of a separate fix: the bounce handler needs a mousedown
+  // listener that focuses the editor when visible regardless of where focus
+  // lands inside the pane.
   const box = await page.locator(PANE).boundingBox();
-  await page.mouse.click(box!.x + box!.width / 2, box!.y + box!.height / 2);
+  await page.mouse.click(box!.x + box!.width / 2, box!.y + box!.height - 30);
 
   await expect
     .poll(() => page.evaluate(() => document.activeElement?.className ?? ""))

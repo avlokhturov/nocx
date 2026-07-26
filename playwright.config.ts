@@ -4,14 +4,22 @@ import { defineConfig } from '@playwright/test'
 // built UI *and* the bound Go methods at :34115, so a test here exercises the
 // real transport, the real PTY and the real renderer. That is the only place
 // layout, focus and GPU behaviour are observable — jsdom has none of them.
-const PORT = 34115
-const URL = `http://localhost:${PORT}`
+const WAILS_PORT = 34115
+const WAILS_URL = `http://localhost:${WAILS_PORT}`
+
+// Headless path: when NOCX_WS_PORT is set, the runner has started devharness
+// (Go backend + WebSocket) and vite (frontend dev server) separately. No wails
+// or GTK required — Playwright drives a plain browser against the vite URL.
+const HEADLESS = !!process.env.NOCX_WS_PORT
+const BASE_URL = HEADLESS
+  ? process.env.NOCX_BASE_URL || 'http://localhost:5173'
+  : WAILS_URL
 
 export default defineConfig({
   testDir: './e2e',
   timeout: 60_000,
   use: {
-    baseURL: URL,
+    baseURL: BASE_URL,
     trace: 'retain-on-failure',
   },
   projects: [
@@ -40,13 +48,19 @@ export default defineConfig({
   // group — that handler never runs, vite is orphaned, and because it inherited
   // the run's stdio the pipe never closes and the run hangs long after the last
   // test. On a runner that is a job burning its timeout rather than failing.
-  webServer: {
-    command: 'wails dev',
-    url: URL,
-    reuseExistingServer: !process.env.CI,
-    timeout: 240_000,
-    gracefulShutdown: { signal: 'SIGTERM', timeout: 15_000 },
-    stdout: 'pipe',
-    stderr: 'pipe',
-  },
+  //
+  // In headless mode the caller owns both processes; skip the webServer stanza.
+  ...(!HEADLESS
+    ? {
+        webServer: {
+          command: 'wails dev',
+          url: WAILS_URL,
+          reuseExistingServer: !process.env.CI,
+          timeout: 240_000,
+          gracefulShutdown: { signal: 'SIGTERM', timeout: 15_000 },
+          stdout: 'pipe',
+          stderr: 'pipe',
+        },
+      }
+    : {}),
 })

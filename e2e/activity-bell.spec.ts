@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./harness";
 
 const TAB = ".tab";
 const ACTIVITY = ".tab-indicator.tab-activity";
@@ -28,19 +28,14 @@ test("a bell lights the indicator from inside the alternate buffer", async ({
   // test passes without ever exercising the bell.
   await page.waitForTimeout(2000);
 
-  await page.locator(".tab-add").click();
+  // Use keyboard shortcut — the .tab-add button is hidden in alt-screen mode
+  // (CSS: #app.alt-screen .tab-add { display: none }).
+  await page.keyboard.press("Meta+t");
   await expect(page.locator(TAB)).toHaveCount(2);
   await expect(page.locator(TAB).first()).not.toHaveClass(/active/);
 
-  await page.waitForTimeout(6000);
 
-  const state = await page.evaluate(() =>
-    [...document.querySelectorAll(".tab")].map((t) => ({
-      cls: t.className,
-      indicator: t.querySelector(".tab-indicator")?.className,
-    })),
-  );
-  console.log("--- tab state ---", JSON.stringify(state));
+  await page.waitForTimeout(6000);
 
   await expect(page.locator(TAB).first().locator(ACTIVITY)).toBeAttached();
 });

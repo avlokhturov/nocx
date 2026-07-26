@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test'
+import { test, expect } from './harness'
 
 // nocx-83a: a new tab must never flash 'Terminal' before the directory name
 // arrives. The bug was that the constructor wrote FALLBACK_TITLE into the DOM

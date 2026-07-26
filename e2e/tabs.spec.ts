@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test'
+import { test, expect } from './harness'
 
 // Regression guard for the layout regression fixed in 2314a2a: the gutter no
 // longer overrides pane.style.position, so multiple tabs don't collapse the

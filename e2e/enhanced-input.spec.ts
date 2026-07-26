@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./harness";
 
 // nocx-4ff.4: verify that raw input routing works after an enhanced-input
 // submit — the editor must stay hidden while a program runs, and typed keys

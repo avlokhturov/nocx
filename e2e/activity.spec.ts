@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./harness";
 
 // Drives the real app at :34115 (wails dev serves the UI and the bound Go
 // methods together), so this exercises the real transport, PTY and renderer.
