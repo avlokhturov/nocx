@@ -88,11 +88,11 @@ cwd/prompt markers never cross the WS as their own control messages — they are
 
 **Frontend (xterm.js)**:
 
-| Module     | SRP responsibility                                                                                                                                                                           |
-| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `terminal` | Own terminal render state (grid, scrollback, selection); parse VT and surface OSC events via `parser.registerOscHandler` (verified — [ADR-0001](decisions/0001-xterm-js-as-vt-frontend.md)). |
-| `ui`       | Render tabs, menus, config, and map OSC/cwd events to user actions.                                                                                                                          |
-| `ipc`      | Speak the WebSocket protocol: binary data plane (PTY I/O) + JSON-RPC control plane; ack received byte-offsets (AD-9).                                                                        |
+| Module     | SRP responsibility                                                                                                                                                                                                               |
+| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `terminal` | Own terminal render state (grid, scrollback, selection); parse VT and surface OSC events via `parser.registerOscHandler` (verified — [ADR-0001](decisions/0001-xterm-js-as-vt-frontend.md)).                                     |
+| `ui`       | Render tabs, menus, config, and map OSC/cwd events to user actions. Built on **SolidJS** ([ADR-0012](decisions/0012-solidjs-as-the-application-ui-layer.md)); it creates an empty host for `terminal` and never renders into it. |
+| `ipc`      | Speak the WebSocket protocol: binary data plane (PTY I/O) + JSON-RPC control plane; ack received byte-offsets (AD-9).                                                                                                            |
 
 ## Architectural Decisions
 
@@ -143,6 +143,7 @@ All decisions below are **[ADOPTED]**. Each carries stable IDs; do not re-litiga
 - Prevents: dual-ownership drift and byte-stream sniffing in the backend.
 - Rule: the VT frontend (xterm.js — [ADR-0001](decisions/0001-xterm-js-as-vt-frontend.md)) owns render state (grid, scrollback, selection) and parses OSC 7/133, surfacing them as events via `parser.registerOscHandler` (verified, `nocx-dej`); the Go backend owns PTY/session lifecycle, SSH connections, and config/vault. The backend does **not** sniff the byte stream.
   - ~~Conditional dependency~~ **DISCHARGED** ([ADR-0001](decisions/0001-xterm-js-as-vt-frontend.md)): the VT frontend is xterm.js, whose `parser.registerOscHandler` was verified to deliver OSC 7 and OSC 133 frontend-side. The backend never parses OSC.
+  - **UI-layer corollary** ([ADR-0012](decisions/0012-solidjs-as-the-application-ui-layer.md)): the application UI runs on SolidJS, and the same single-owner rule draws the line inside the frontend. Solid creates an **empty** host element and the terminal adapter takes exclusive ownership of its descendants — Solid never renders children beneath it, never keys or remounts it during ordinary tab activation, and never expresses terminal render state as reactive state. State crosses that boundary only through explicit imperative methods (`setVisible`, `resize`, `focus`). ADR-0005's WebKitGTK refresh pump stays inside the terminal controller; framework effects must not drive terminal refreshes.
 
 **AD-7 — Session model: one PTY/channel per tab.**
 
