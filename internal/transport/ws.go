@@ -82,6 +82,10 @@ type WSServer struct {
 	ringsMu sync.Mutex
 	rx      map[session.ID]*sessionRx
 	stopped bool
+
+	// connsMu protects conns. One entry per active WebSocket connection.
+	connsMu sync.Mutex
+	conns   map[*wsConn]struct{}
 }
 
 // ProfileResolver maps a profile ID to an SSH host and connect config.
@@ -125,9 +129,15 @@ func WithCredentialStore(cs credential.CredentialStore) WSServerOption {
 }
 
 // WithSettingsRegistry attaches a settings registry to the server, enabling
-// the settings.* JSON-RPC methods.
+// the settings.* JSON-RPC methods. Also wires the registry's change notifier
+// so every connected client receives settings.changed broadcasts.
 func WithSettingsRegistry(r *settings.Registry) WSServerOption {
-	return func(s *WSServer) { s.settings = r }
+	return func(s *WSServer) {
+		s.settings = r
+		r.SetNotifier(func(revision int, keys []string) {
+			s.broadcastSettingsChanged(revision, keys)
+		})
+	}
 }
 
 func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption) *WSServer {
@@ -140,6 +150,7 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
 		rx:      make(map[session.ID]*sessionRx),
+		conns:   make(map[*wsConn]struct{}),
 		origins: LoopbackOriginPolicy{},
 	}
 	for _, o := range opts {
@@ -432,6 +443,8 @@ func (s *WSServer) handleSession(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	wconn := newWSConn(conn)
+	s.registerConn(wconn)
+	defer s.unregisterConn(wconn)
 	state := newConnState()
 
 	readErr := make(chan error, 1)
@@ -531,7 +544,7 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		"credentials.hasPassword",
 		"credentials.saveKeyPassphrase", "credentials.deleteKeyPassphrase":
 		s.handleCredentialMethod(wconn, req)
-	case "settings.describe", "settings.getAll", "settings.set", "settings.reset",
+	case "settings.describe", "settings.getSnapshot", "settings.set", "settings.reset",
 		"settings.secretSet", "settings.secretDelete", "settings.secretExists":
 		s.handleSettingsMethod(wconn, req)
 	default:
@@ -1452,8 +1465,8 @@ func (s *WSServer) handleSettingsMethod(wconn *wsConn, req jsonrpcRequest) {
 	switch req.Method {
 	case "settings.describe":
 		s.handleSettingsDescribe(wconn, req)
-	case "settings.getAll":
-		s.handleSettingsGetAll(wconn, req)
+	case "settings.getSnapshot":
+		s.handleSettingsGetSnapshot(wconn, req)
 	case "settings.set":
 		s.handleSettingsSet(wconn, req)
 	case "settings.reset":
@@ -1473,14 +1486,16 @@ func (s *WSServer) handleSettingsDescribe(wconn *wsConn, req jsonrpcRequest) {
 	})))
 }
 
-func (s *WSServer) handleSettingsGetAll(wconn *wsConn, req jsonrpcRequest) {
-	values, err := s.settings.GetAll()
+func (s *WSServer) handleSettingsGetSnapshot(wconn *wsConn, req jsonrpcRequest) {
+	snap, err := s.settings.GetSnapshot()
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "settings.getAll: "+err.Error()))
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "settings.getSnapshot: "+err.Error()))
 		return
 	}
 	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(map[string]any{
-		"values": values,
+		"values":     snap.Values,
+		"overridden": snap.Overridden,
+		"revision":   snap.Revision,
 	})))
 }
 
@@ -1700,4 +1715,45 @@ func mustMarshal(v any) json.RawMessage {
 		return json.RawMessage("null")
 	}
 	return out
+}
+
+// --- connection registry ---------------------------------------------------
+
+// registerConn adds a connection to the broadcast set.
+func (s *WSServer) registerConn(wc *wsConn) {
+	s.connsMu.Lock()
+	s.conns[wc] = struct{}{}
+	s.connsMu.Unlock()
+}
+
+// unregisterConn removes a connection from the broadcast set.
+func (s *WSServer) unregisterConn(wc *wsConn) {
+	s.connsMu.Lock()
+	delete(s.conns, wc)
+	s.connsMu.Unlock()
+}
+
+// broadcastSettingsChanged sends a settings.changed notification to every
+// connected client. Best-effort: a write failure on one connection does not
+// prevent writes to others.
+func (s *WSServer) broadcastSettingsChanged(revision int, keys []string) {
+	s.connsMu.Lock()
+	// Copy under lock so writes happen outside the critical section.
+	conns := make([]*wsConn, 0, len(s.conns))
+	for wc := range s.conns {
+		conns = append(conns, wc)
+	}
+	s.connsMu.Unlock()
+
+	msg := map[string]any{
+		"jsonrpc": "2.0",
+		"method":  "settings.changed",
+		"params": map[string]any{
+			"revision": revision,
+			"keys":     keys,
+		},
+	}
+	for _, wc := range conns {
+		_ = wc.writeJSON(msg)
+	}
 }

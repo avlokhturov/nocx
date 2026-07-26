@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { ConnectionManagerViewImpl } from './connections'
+import { Dispatcher } from './dispatcher'
 import { ProfileClient } from './profiles'
 import type { SSHProfile } from './profiles'
 
-function mockWS(): WebSocket {
-  return { addEventListener: vi.fn(), send: vi.fn() } as unknown as WebSocket
+function mockDispatcher(): Dispatcher {
+  return new Dispatcher()
 }
 
 describe('ConnectionManagerView', () => {
@@ -18,7 +19,7 @@ describe('ConnectionManagerView', () => {
     container = document.createElement('div')
     container.id = 'connections-view'
     document.body.append(container)
-    client = new ProfileClient(mockWS())
+    client = new ProfileClient(mockDispatcher())
     // Default RPC mocks.
     vi.spyOn(client, 'listProfiles').mockResolvedValue([])
     vi.spyOn(client, 'listGroups').mockResolvedValue([])

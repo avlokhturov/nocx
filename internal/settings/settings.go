@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/storage"
@@ -485,13 +486,30 @@ type settingsDoc struct {
 
 // ── Registry ───────────────────────────────────────────────────────────
 
+// ChangeNotifier is called after a successful mutation with the new revision
+// and the keys that changed. The callback receives a copy of the keys slice.
+// It is invoked after the registry lock is released so it can safely call
+// back into the registry without deadlocking.
+type ChangeNotifier func(revision int, keys []string)
+
 // Registry holds the runtime state of all settings: persisted values
 // (non-secret) in a DocumentStore and secret values in a SecretStore.
 type Registry struct {
-	doc     storage.DocumentStore
-	secrets credential.SecretStore
-	values  map[string]any
-	refs    map[string]credential.SecretID // secret key → SecretID
+	mu       sync.Mutex
+	doc      storage.DocumentStore
+	secrets  credential.SecretStore
+	values   map[string]any
+	refs     map[string]credential.SecretID // secret key → SecretID
+	revision int                            // monotonic, in-memory, bumps only on successful mutation
+	notifier ChangeNotifier
+}
+
+// SettingsSnapshot is the wire contract for settings.getSnapshot.
+// Secret-class keys are absent from both Values and Overridden.
+type SettingsSnapshot struct {
+	Values     map[string]any `json:"values"`
+	Overridden []string       `json:"overridden"`
+	Revision   int            `json:"revision"`
 }
 
 // New creates a Registry backed by doc for non-secret values and secrets
@@ -539,6 +557,12 @@ func New(doc storage.DocumentStore, secrets credential.SecretStore) *Registry {
 		}
 	}
 	return r
+}
+
+// SetNotifier registers a callback invoked after every successful mutation.
+// Must be called before the registry is used concurrently (setup only).
+func (r *Registry) SetNotifier(n ChangeNotifier) {
+	r.notifier = n
 }
 
 func descriptorByKey(key string) Descriptor {
@@ -594,6 +618,8 @@ func descriptorToDeclaration(d Descriptor) Declaration {
 
 // GetBool returns the current value of a bool setting, or its default.
 func (r *Registry) GetBool(b *Bool) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if v, ok := r.values[b.key]; ok {
 		bv, isBool := v.(bool)
 		if !isBool {
@@ -606,12 +632,21 @@ func (r *Registry) GetBool(b *Bool) (bool, error) {
 
 // SetBool persists a bool setting value.
 func (r *Registry) SetBool(b *Bool, value bool) error {
-	r.values[b.key] = value
-	return r.save()
+	r.mu.Lock()
+	newValues := copyValues(r.values)
+	newValues[b.key] = value
+	ch, err := r.commitLocked(newValues, r.refs, []string{b.key})
+	r.mu.Unlock()
+	if err == nil {
+		r.finishCommit(ch)
+	}
+	return err
 }
 
 // GetString returns the current value of a string setting, or its default.
 func (r *Registry) GetString(s *String) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if v, ok := r.values[s.key]; ok {
 		str, isStr := v.(string)
 		if !isStr {
@@ -625,15 +660,25 @@ func (r *Registry) GetString(s *String) (string, error) {
 // SetString validates and persists a string setting. Rejects empty strings
 // for settings that have a non-empty default.
 func (r *Registry) SetString(s *String, value string) error {
+	r.mu.Lock()
 	if value == "" && s.default_ != "" {
+		r.mu.Unlock()
 		return &ValidationError{SettingKey: s.key, Value: value, Message: "value must not be empty"}
 	}
-	r.values[s.key] = value
-	return r.save()
+	newValues := copyValues(r.values)
+	newValues[s.key] = value
+	ch, err := r.commitLocked(newValues, r.refs, []string{s.key})
+	r.mu.Unlock()
+	if err == nil {
+		r.finishCommit(ch)
+	}
+	return err
 }
 
 // GetNumber returns the current value of a number setting, or its default.
 func (r *Registry) GetNumber(n *Number) (float64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if v, ok := r.values[n.key]; ok {
 		f, isNum := toFloat64(v)
 		if !isNum {
@@ -646,24 +691,35 @@ func (r *Registry) GetNumber(n *Number) (float64, error) {
 
 // SetNumber validates and persists a number setting.
 func (r *Registry) SetNumber(n *Number, value float64) error {
+	r.mu.Lock()
 	if n.min != nil && value < *n.min {
+		r.mu.Unlock()
 		return &ValidationError{
 			SettingKey: n.key, Value: value,
 			Message: fmt.Sprintf("value %v below minimum %v", value, *n.min),
 		}
 	}
 	if n.max != nil && value > *n.max {
+		r.mu.Unlock()
 		return &ValidationError{
 			SettingKey: n.key, Value: value,
 			Message: fmt.Sprintf("value %v above maximum %v", value, *n.max),
 		}
 	}
-	r.values[n.key] = value
-	return r.save()
+	newValues := copyValues(r.values)
+	newValues[n.key] = value
+	ch, err := r.commitLocked(newValues, r.refs, []string{n.key})
+	r.mu.Unlock()
+	if err == nil {
+		r.finishCommit(ch)
+	}
+	return err
 }
 
 // GetSelect returns the current value of a select setting, or its default.
 func (r *Registry) GetSelect(s *Select) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if v, ok := r.values[s.key]; ok {
 		str, isStr := v.(string)
 		if !isStr {
@@ -676,35 +732,55 @@ func (r *Registry) GetSelect(s *Select) (string, error) {
 
 // SetSelect validates and persists a select setting.
 func (r *Registry) SetSelect(s *Select, value string) error {
+	r.mu.Lock()
 	for _, opt := range s.options {
 		if opt.Value == value {
-			r.values[s.key] = value
-			return r.save()
+			newValues := copyValues(r.values)
+			newValues[s.key] = value
+			ch, err := r.commitLocked(newValues, r.refs, []string{s.key})
+			r.mu.Unlock()
+			if err == nil {
+				r.finishCommit(ch)
+			}
+			return err
 		}
 	}
+	r.mu.Unlock()
 	return &ValidationError{
 		SettingKey: s.key, Value: value,
 		Message: fmt.Sprintf("value %q is not a valid option", value),
 	}
 }
 
-// ── getAll ─────────────────────────────────────────────────────────────
+// ── getSnapshot ─────────────────────────────────────────────────────────
 
-// GetAll returns current values for every non-secret setting. Secret-class
-// keys are never present, even as null (frozen contract).
-func (r *Registry) GetAll() (map[string]any, error) {
-	result := make(map[string]any, len(allDecls))
+// GetSnapshot returns the current snapshot of all non-secret settings:
+// effective values, which keys have stored overrides, and the current
+// revision. Secret-class keys are absent from both Values and Overridden.
+func (r *Registry) GetSnapshot() (SettingsSnapshot, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	values := make(map[string]any, len(allDecls))
+	var overridden []string
 	for _, d := range allDecls {
 		if d.Control() == ControlSecret {
 			continue
 		}
 		if v, ok := r.values[d.Key()]; ok {
-			result[d.Key()] = v
+			values[d.Key()] = v
+			overridden = append(overridden, d.Key())
 		} else {
-			result[d.Key()] = d.Default()
+			values[d.Key()] = d.Default()
 		}
 	}
-	return result, nil
+	if overridden == nil {
+		overridden = []string{}
+	}
+	return SettingsSnapshot{
+		Values:     values,
+		Overridden: overridden,
+		Revision:   r.revision,
+	}, nil
 }
 
 // ── Reset ──────────────────────────────────────────────────────────────
@@ -712,11 +788,19 @@ func (r *Registry) GetAll() (map[string]any, error) {
 // Reset restores a setting to its declared default. Secret-class settings
 // cannot be reset — they have no default.
 func (r *Registry) Reset(d Descriptor) error {
+	r.mu.Lock()
 	if d.Control() == ControlSecret {
+		r.mu.Unlock()
 		return &ValidationError{SettingKey: d.Key(), Message: "cannot reset a secret-class setting"}
 	}
-	delete(r.values, d.Key())
-	return r.save()
+	newValues := copyValues(r.values)
+	delete(newValues, d.Key())
+	ch, err := r.commitLocked(newValues, r.refs, []string{d.Key()})
+	r.mu.Unlock()
+	if err == nil {
+		r.finishCommit(ch)
+	}
+	return err
 }
 
 // ── Secret-class methods ───────────────────────────────────────────────
@@ -725,33 +809,53 @@ func (r *Registry) Reset(d Descriptor) error {
 // an opaque SecretID on first set and persists only the reference in the
 // settings document — the plaintext never leaves the SecretStore.
 func (r *Registry) SecretSet(s *Secret, value string) error {
+	r.mu.Lock()
 	id, ok := r.refs[s.key]
 	if !ok {
 		id = credential.NewSecretID()
-		r.refs[s.key] = id
 	}
 	secret := credential.NewSecret(value)
 	if err := r.secrets.Set(id, secret); err != nil {
+		r.mu.Unlock()
 		return fmt.Errorf("settings: secret set %q: %w", s.key, err)
 	}
-	return r.save()
+	newRefs := copyRefs(r.refs)
+	newRefs[s.key] = id
+	ch, err := r.commitLocked(r.values, newRefs, []string{s.key})
+	r.mu.Unlock()
+	if err == nil {
+		r.finishCommit(ch)
+	}
+	return err
 }
 
 // SecretDelete removes a secret-class setting value from the SecretStore
 // and drops the reference from the settings document. Best-effort on the
 // keychain delete — an orphaned keychain entry is safer than a dangling ref.
 func (r *Registry) SecretDelete(s *Secret) error {
-	if id, ok := r.refs[s.key]; ok {
-		if err := r.secrets.Delete(id); err != nil {
-			slog.Warn("settings: secret delete failed (may be orphaned)", "key", s.key, "error", err)
-		}
-		delete(r.refs, s.key)
+	r.mu.Lock()
+	refID, hasRef := r.refs[s.key]
+	if !hasRef {
+		r.mu.Unlock()
+		return nil
 	}
-	return r.save()
+	if err := r.secrets.Delete(refID); err != nil {
+		slog.Warn("settings: secret delete failed (may be orphaned)", "key", s.key, "error", err)
+	}
+	newRefs := copyRefs(r.refs)
+	delete(newRefs, s.key)
+	ch, err := r.commitLocked(r.values, newRefs, []string{s.key})
+	r.mu.Unlock()
+	if err == nil {
+		r.finishCommit(ch)
+	}
+	return err
 }
 
 // SecretExists reports whether a secret-class setting has a stored value.
 func (r *Registry) SecretExists(s *Secret) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	id, ok := r.refs[s.key]
 	if !ok {
 		return false, nil
@@ -761,19 +865,68 @@ func (r *Registry) SecretExists(s *Secret) (bool, error) {
 
 // ── Persistence ────────────────────────────────────────────────────────
 
-func (r *Registry) save() error {
+// change captures notification state from a successful commit. The caller
+// MUST release r.mu and then call finishCommit.
+type change struct {
+	rev      int
+	notifier ChangeNotifier
+	keys     []string
+}
+
+// commitLocked persists values and refs, commits the new state, and bumps
+// revision. Caller MUST hold r.mu. Returns a change record for notification;
+// caller MUST release r.mu before calling finishCommit.
+func (r *Registry) commitLocked(values map[string]any, refs map[string]credential.SecretID, keys []string) (change, error) {
+	if err := r.writeDoc(values, refs); err != nil {
+		return change{}, err
+	}
+	r.values = values
+	r.refs = refs
+	r.revision++
+	ck := make([]string, len(keys))
+	copy(ck, keys)
+	return change{rev: r.revision, notifier: r.notifier, keys: ck}, nil
+}
+
+// finishCommit invokes the notifier if one is set. Must be called after r.mu
+// is released.
+func (r *Registry) finishCommit(ch change) {
+	if ch.notifier != nil {
+		ch.notifier(ch.rev, ch.keys)
+	}
+}
+
+// writeDoc serialises and writes the settings document without mutating
+// the registry. Caller MUST hold r.mu.
+func (r *Registry) writeDoc(values map[string]any, refs map[string]credential.SecretID) error {
 	doc := settingsDoc{
 		SchemaVersion: int(settingsSchemaVersion),
-		Values:        r.values,
-		SecretRefs:    make(map[string]string, len(r.refs)),
+		Values:        values,
+		SecretRefs:    make(map[string]string, len(refs)),
 	}
-	for k, id := range r.refs {
+	for k, id := range refs {
 		doc.SecretRefs[k] = string(id)
 	}
 	return r.doc.Write(settingsDocName, doc)
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────
+
+func copyValues(src map[string]any) map[string]any {
+	dst := make(map[string]any, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
+func copyRefs(src map[string]credential.SecretID) map[string]credential.SecretID {
+	dst := make(map[string]credential.SecretID, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
 
 func toFloat64(v any) (float64, bool) {
 	switch n := v.(type) {

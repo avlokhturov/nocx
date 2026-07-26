@@ -1614,3 +1614,150 @@ body {
   color: #f7768e;
   margin-top: 4px;
 }
+
+/* ── Load / status states ──────────────────────────────────────────── */
+
+.st-status {
+  padding: 24px;
+  text-align: center;
+  color: #a9b1d6;
+  font-size: 13px;
+}
+
+.st-loading {
+  color: #565f89;
+  font-style: italic;
+}
+
+.st-failed {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  color: #f7768e;
+}
+
+.st-nomatch {
+  color: #565f89;
+  font-style: italic;
+}
+
+.st-retry-btn {
+  font-size: 12px;
+  padding: 4px 16px;
+  border: 1px solid #2a2b3d;
+  border-radius: 4px;
+  background: transparent;
+  color: #c0caf5;
+  cursor: pointer;
+}
+
+.st-retry-btn:hover {
+  background: #2a2b3d;
+}
+
+/* ── Search bar ─────────────────────────────────────────────────────── */
+
+.st-search {
+  margin-bottom: 12px;
+}
+
+.st-search-input {
+  width: 100%;
+  padding: 6px 10px;
+  font-size: 13px;
+  background: #1a1b26;
+  border: 1px solid #2a2b3d;
+  border-radius: 4px;
+  color: #c0caf5;
+  outline: none;
+}
+
+.st-search-input:focus {
+  border-color: #7aa2f7;
+}
+
+.st-search-input::placeholder {
+  color: #565f89;
+}
+
+/* ── Modified-only filter bar ───────────────────────────────────────── */
+
+.st-filter-bar {
+  margin-bottom: 16px;
+}
+
+.st-filter-label {
+  font-size: 12px;
+  color: #a9b1d6;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.st-filter-label input[type='checkbox'] {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+}
+
+/* ── Provenance badge (Customized / Default) ────────────────────────── */
+
+.st-provenance {
+  display: inline-block;
+  font-size: 11px;
+  margin-top: 4px;
+}
+
+.st-customized {
+  color: #e0af68;
+}
+
+.st-default {
+  color: #565f89;
+}
+
+.st-reset-btn {
+  font-size: 11px;
+  padding: 1px 8px;
+  margin-left: 6px;
+  border: 1px solid rgba(224, 175, 104, 0.3);
+  border-radius: 3px;
+  background: transparent;
+  color: #e0af68;
+  cursor: pointer;
+}
+
+.st-reset-btn:hover {
+  background: rgba(224, 175, 104, 0.1);
+}
+
+/* ── Data-class privacy / storage indicator ─────────────────────────── */
+
+.st-data-class {
+  display: block;
+  font-size: 10px;
+  color: #565f89;
+  margin-top: 2px;
+}
+
+/* ── Declared bound display for numbers ─────────────────────────────── */
+
+.st-bounds {
+  display: block;
+  font-size: 11px;
+  color: #565f89;
+  margin-bottom: 2px;
+}
+
+/* ── Search-result breadcrumb ───────────────────────────────────────── */
+
+.st-breadcrumb {
+  display: block;
+  font-size: 10px;
+  color: #7aa2f7;
+  margin-bottom: 1px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
