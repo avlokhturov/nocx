@@ -14,6 +14,15 @@
 import { log } from './log'
 import { ProfileClient } from './profiles'
 import { SettingsObserver } from './settings-observer'
+import {
+  AcceptedSnapshot,
+  applyAcceptedSnapshot,
+  canResetSetting,
+  recordSaveOutcome,
+  type SaveOutcome,
+  type SettingsMirror,
+  type SettingsSnapshot,
+} from './settings-domain'
 
 /** Stable DOM id for a setting row, derived from the declaration key.
  *
@@ -89,7 +98,7 @@ export class SettingsViewImpl implements SettingsView {
   private loadState: LoadState = LoadState.Loading
   // Bound handler so we can remove the listener.
   private boundKeydown: (e: KeyboardEvent) => void
-  // Bound refresh so the observer can call it.
+  // Bound refresh: observer calls this on notification or reconnect (resync).
   private boundRefresh: () => Promise<void>
 
   constructor(
@@ -103,13 +112,34 @@ export class SettingsViewImpl implements SettingsView {
     this.observer = observer ?? null
     this.onStateChanged = onStateChanged
     this.boundKeydown = this.handleKeydown.bind(this)
-    this.boundRefresh = this.refresh.bind(this)
+    this.boundRefresh = () => this.refresh('resync')
     this.container.addEventListener('keydown', this.boundKeydown)
     if (this.observer) {
       this.observer.start(() => {
         void this.boundRefresh()
       })
     }
+  }
+
+  // ── domain state bridge ──────────────────────────────────────────────
+  /** Build a SettingsMirror from the current instance state. */
+  private toMirror(): SettingsMirror {
+    return {
+      values: this.values,
+      draftValues: this.draftValues,
+      overridden: this.overridden,
+      errors: this.errors,
+      revision: this.revision,
+    }
+  }
+
+  /** Replace instance state from a SettingsMirror. */
+  private fromMirror(m: SettingsMirror): void {
+    this.values = m.values
+    this.draftValues = m.draftValues
+    this.overridden = m.overridden
+    this.errors = m.errors
+    this.revision = m.revision
   }
 
   getDeclarations(): Declaration[] {
@@ -162,7 +192,7 @@ export class SettingsViewImpl implements SettingsView {
     this.render()
   }
 
-  async refresh(): Promise<void> {
+  async refresh(mode: 'normal' | 'resync' = 'normal'): Promise<void> {
     this.loadState = LoadState.Loading
     this.render()
     try {
@@ -171,12 +201,23 @@ export class SettingsViewImpl implements SettingsView {
         this.client.getSnapshot(),
       ])
       this.declarations = (desc.declarations as Declaration[]) ?? []
-      this.values = snap.values ?? {}
-      this.overridden = new Set(snap.overridden ?? [])
-      this.revision = snap.revision ?? 0
-      this.observer?.setRevision(snap.revision ?? 0)
-      this.draftValues = {}
-      this.errors = {}
+
+      // Apply the snapshot through the revision policy gate
+      // (AcceptedSnapshot — authority-encoded type from settings-domain).
+      const rawSnap: SettingsSnapshot = {
+        values: snap.values ?? {},
+        overridden: snap.overridden ?? [],
+        revision: snap.revision ?? 0,
+      }
+      const accepted =
+        mode === 'resync'
+          ? AcceptedSnapshot.reset(rawSnap)
+          : AcceptedSnapshot.accept(this.revision, rawSnap)
+      if (accepted) {
+        const nextState = applyAcceptedSnapshot(this.toMirror(), accepted)
+        this.fromMirror(nextState)
+        this.observer?.setRevision(nextState.revision)
+      }
 
       // Parallelise secret-existence probes (fixes nocx-jwkw sequential loop).
       const secretDecls = this.declarations.filter((d) => d.control === 'secret')
@@ -514,9 +555,6 @@ export class SettingsViewImpl implements SettingsView {
    *  value-vs-default comparison — an override that happens to equal the
    *  current default is still Customized (it pins the value against future
    *  default changes, which is what export depends on). */
-  private isCustomized(key: string): boolean {
-    return this.overridden.has(key)
-  }
 
   // --- control renderers ---
 
@@ -611,7 +649,8 @@ export class SettingsViewImpl implements SettingsView {
 
   private renderProvenance(decl: Declaration): HTMLElement {
     const span = document.createElement('span')
-    const customized = this.isCustomized(decl.key)
+    const decision = canResetSetting(this.overridden, decl.key, true)
+    const customized = decision.canReset
     span.className = customized ? 'st-provenance st-customized' : 'st-provenance st-default'
     span.textContent = customized ? 'Customized' : 'Default'
 
@@ -692,24 +731,15 @@ export class SettingsViewImpl implements SettingsView {
   // --- actions ---
 
   private async saveSetting(key: string, value: unknown): Promise<void> {
-    // Clear any previous error and draft for this key before the call.
-    delete this.errors[key]
-    delete this.draftValues[key]
+    let outcome: SaveOutcome
     try {
       await this.client.setSetting(key, value)
-      // Write the saved value into the authoritative map so the next
-      // rerender shows what was actually saved, not the pre-save value.
-      this.values[key] = value
-      // Optimistically mark as overridden — a save is user intent.
-      this.overridden.add(key)
+      outcome = { kind: 'accepted', value }
     } catch (err) {
-      // Validation failures arrive as JSON-RPC errors per the contract.
-      this.errors[key] = (err as Error).message
-      // Preserve the rejected input in draft so the user can edit it
-      // rather than retype from scratch, without polluting this.values.
-      this.draftValues[key] = value
+      outcome = { kind: 'rejected', error: (err as Error).message, attemptedValue: value }
     }
-    // Re-render just the affected row.
+    const nextState = recordSaveOutcome(this.toMirror(), key, outcome)
+    this.fromMirror(nextState)
     this.rerenderRow(key)
   }
 
@@ -717,14 +747,19 @@ export class SettingsViewImpl implements SettingsView {
     delete this.errors[key]
     try {
       await this.client.resetSetting(key)
-      // Refetch the snapshot to get the reverted default value and updated
-      // overridden set.  Resetting is infrequent enough that a full refetch
-      // is correct and avoids duplicating server-side reset logic.
+      // Refetch the snapshot — it goes through the revision policy gate
+      // like any incoming snapshot.
       const snap = await this.client.getSnapshot()
-      this.values = snap.values ?? {}
-      this.overridden = new Set(snap.overridden ?? [])
-      this.revision = snap.revision ?? 0
-      delete this.draftValues[key]
+      const rawSnap: SettingsSnapshot = {
+        values: snap.values ?? {},
+        overridden: snap.overridden ?? [],
+        revision: snap.revision ?? 0,
+      }
+      const accepted = AcceptedSnapshot.accept(this.revision, rawSnap)
+      if (accepted) {
+        const nextState = applyAcceptedSnapshot(this.toMirror(), accepted)
+        this.fromMirror(nextState)
+      }
     } catch (err) {
       this.errors[key] = (err as Error).message
     }
@@ -776,7 +811,7 @@ export class SettingsViewImpl implements SettingsView {
 
   /** Exposed for tests: is key currently in the overridden set? */
   _isCustomizedForTest(key: string): boolean {
-    return this.isCustomized(key)
+    return this.overridden.has(key)
   }
 
   /** Exposed for tests: what is the current load state? */
