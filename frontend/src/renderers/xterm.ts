@@ -359,13 +359,6 @@ export class XtermRenderer implements TerminalRenderer {
     this.term?.paste(text)
   }
 
-  get bracketedPasteMode(): boolean {
-    // Defaults to false before the terminal exists: "not known to be enabled"
-    // must mean "do not send wrappers", because sending them to a shell that
-    // never asked corrupts the command (nocx-hi2).
-    return this.term?.modes.bracketedPasteMode ?? false
-  }
-
   refreshAtlas(): void {
     // nocx-q18: clearing the texture atlas and then repainting races with
     // the atlas repopulation during _updateModel. After clearTextureAtlas(),

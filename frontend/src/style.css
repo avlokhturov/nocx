@@ -295,6 +295,18 @@ body {
   border-top: 1px solid #2a2b3d;
 }
 
+/* Validation and save failures, shown on the form rather than only logged. */
+.cm-form-error {
+  margin-top: 12px;
+  color: #ff6b6b;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.cm-form-error:empty {
+  display: none;
+}
+
 .cm-form-actions button {
   padding: 10px 24px;
   border-radius: 6px;

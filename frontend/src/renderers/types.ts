@@ -121,14 +121,6 @@ export interface TerminalRenderer {
   // it would duplicate engine behaviour and drift from it.
   paste(text: string): void
 
-  /** Whether the shell currently has bracketed-paste mode (DECSET 2004) set.
-   *  The engine tracks `CSI ? 2004 h` / `l` from the output stream, so this is
-   *  the authoritative answer to "may wrappers be sent?" — and per AD-6 it is
-   *  observable here and nowhere else, since the backend never reads the byte
-   *  stream. Dynamic: it goes off while a full-screen program runs, so read it
-   *  at the moment of use rather than caching it (nocx-hi2). */
-  readonly bracketedPasteMode: boolean
-
   // refreshAtlas is called when the renderer becomes visible after being
   // hidden (e.g. tab switch). xterm.js's WebGL texture atlas goes stale
   // while hidden; this gives the renderer a chance to clear and repaint.

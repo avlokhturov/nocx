@@ -1119,7 +1119,14 @@ func (s *WSServer) handleCredentialCRUDMethod(wconn *wsConn, req jsonrpcRequest)
 			c.ID = profile.NewCredentialID(c.Name)
 		}
 		if err := s.credMeta.SaveCredential(c); err != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+			// A missing host binding is the caller's mistake, not ours, and the
+			// renderer has to tell the user which field to fix — so it travels
+			// as Invalid params rather than Internal error (nocx-wd2m).
+			code := -32603
+			if errors.Is(err, profile.ErrCredentialHostRequired) {
+				code = -32602
+			}
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, code, err.Error()))
 			return
 		}
 		c.SecretID = ""

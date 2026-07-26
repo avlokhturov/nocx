@@ -18,7 +18,7 @@ import { test, expect, promptReady } from './harness'
 // hand in a packaged build.
 
 const PANE = '.pane.active'
-const TITLE = '.tab-title'
+const INPUT = '.nocx-editor-input'
 
 async function disableWailsRuntime(page: import('@playwright/test').Page) {
   await page.addInitScript(() => {
@@ -61,31 +61,14 @@ test.describe('copy-on-select', () => {
     // clipboard via the same BrowserClipboard path.
     await page.keyboard.type(`printf '\\033]0;${marker}\\007' && echo ${marker}`)
     await page.keyboard.press('Enter')
-    await expect(page.locator(TITLE).first()).toHaveText(marker, {
-      timeout: 5000,
-    })
 
     // Find the scrollback block containing the marker.
     const block = page.locator('.cmd-block', { hasText: marker }).first()
-    await expect(block).toBeVisible({ timeout: 3000 })
+    await expect(block).toBeVisible({ timeout: 5000 })
 
-    // Select the text inside the block via triple-click, which the
-    // scrollback mouseup handler copies to the clipboard.
-    //
-    // Click the locator rather than coordinates frozen by an earlier
-    // boundingBox(). The block is still moving at this point — the prompt block
-    // for the next prompt is appended once the command finishes — so measuring
-    // first and clicking second can land the click outside the text, leaving a
-    // collapsed selection and an empty clipboard. That is the intermittent
-    // failure seen in CI runs 30212570982 and 30217654133 ("(empty)"), passing
-    // in 30214891053 and 30217202549 on the same assertion. Playwright's own
-    // click re-resolves the element and waits for its box to be stable across
-    // two frames, which is exactly the guarantee the manual path lacked.
+    // Let Playwright wait for the block's position to settle before selecting;
+    // measuring coordinates first can race the next prompt block being added.
     await block.click({ clickCount: 3 })
-
-    // Assert the selection separately from the copy. Both halves failed as one
-    // "(empty)" before, which cannot distinguish "nothing was selected" from
-    // "the copy path is broken" — and they are different bugs.
     await expect
       .poll(() => page.evaluate(() => window.getSelection()?.toString() ?? ''), { timeout: 3000 })
       .toContain(marker)
@@ -118,11 +101,14 @@ test.describe('paste', () => {
 
     await page.context().grantPermissions(['clipboard-read', 'clipboard-write'])
 
-    // Put a command that sets the terminal title on the clipboard.
-    const pasteMarker = `PT-${Date.now().toString(36)}`
-    await page.evaluate(async (marker) => {
-      await navigator.clipboard.writeText(`printf '\\033]0;${marker}\\007'`)
-    }, pasteMarker)
+    // The expected output is not present verbatim in the pasted command, so
+    // finding it in a completed block proves that Enter executed the paste.
+    const suffix = Date.now().toString(36)
+    const pasteMarker = `PT-${suffix}`
+    const pastedCommand = `printf 'PT-%s\\n' '${suffix}'`
+    await page.evaluate(async (command) => {
+      await navigator.clipboard.writeText(command)
+    }, pastedCommand)
 
     // Right-click near the bottom of the pane where the editor lives.
     // The contextmenu handler on the pane pastes to the editor when it is
@@ -134,14 +120,14 @@ test.describe('paste', () => {
     })
 
     // Wait for the paste to land in the editor.
-    await expect(page.locator('.nocx-editor-input')).toHaveValue(new RegExp(pasteMarker), {
+    await expect(page.locator(INPUT)).toHaveValue(pastedCommand, {
       timeout: 3000,
     })
 
-    // Execute the pasted command. If paste worked, the title changes.
+    // Execute the pasted command and wait for its completed output block.
     await page.keyboard.press('Enter')
-    await expect(page.locator(TITLE).first()).toHaveText(pasteMarker, {
-      timeout: 3000,
+    await expect(page.locator('.cmd-block', { hasText: pasteMarker }).first()).toBeVisible({
+      timeout: 5000,
     })
   })
 })

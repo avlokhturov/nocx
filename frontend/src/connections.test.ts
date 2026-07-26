@@ -204,3 +204,93 @@ describe('ConnectionManagerView', () => {
     expect(container.textContent).toContain(payload)
   })
 })
+
+// nocx-wd2m. Host binding is mandatory (nocx-mon). The backend refuses an
+// unbound credential at save time, and the form has to refuse it too — not to
+// be the guarantee, but so the user learns WHICH field is wrong instead of
+// meeting a failed connection later. Before this, the guard existed for name
+// and username only and reported itself through log.warn, so the Save button
+// silently did nothing.
+describe('credential form: host binding is required', () => {
+  let container: HTMLDivElement
+  let client: ProfileClient
+  let view: ConnectionManagerViewImpl
+
+  beforeEach(async () => {
+    document.body.replaceChildren()
+    container = document.createElement('div')
+    document.body.append(container)
+    client = new ProfileClient(mockDispatcher())
+    vi.spyOn(client, 'listProfiles').mockResolvedValue([])
+    vi.spyOn(client, 'listGroups').mockResolvedValue([])
+    vi.spyOn(client, 'listCredentials').mockResolvedValue([])
+    vi.spyOn(client, 'hasPassword').mockResolvedValue(false)
+    vi.spyOn(client, 'savePassword').mockResolvedValue(true)
+    view = new ConnectionManagerViewImpl(container, client)
+    await view.refresh()
+  })
+
+  function openCredentialForm(): void {
+    const btn = [...container.querySelectorAll('button')].find(
+      (b) => b.textContent === 'Saved credentials',
+    )
+    if (!btn) throw new Error('"Saved credentials" button not found')
+    btn.click()
+  }
+
+  function fill(label: string, value: string): void {
+    const field = [...container.querySelectorAll('.cm-field')].find((f) =>
+      f.textContent?.includes(label),
+    )
+    const input = field?.querySelector('input')
+    if (!input) throw new Error(`field ${label} not found`)
+    input.value = value
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+  }
+
+  function save(): void {
+    const btn = container.querySelector<HTMLButtonElement>('button.cm-save')
+    if (!btn) throw new Error('save button not found')
+    btn.click()
+  }
+
+  it('refuses to submit without a host and says so on screen', async () => {
+    const create = vi.spyOn(client, 'createCredential')
+    openCredentialForm()
+    fill('Name', 'unbound')
+    fill('Username', 'bob')
+    save()
+    await Promise.resolve()
+
+    expect(create).not.toHaveBeenCalled()
+    const err = container.querySelector('.cm-form-error')
+    expect(err?.textContent ?? '').toContain('Bind to Host is required')
+  })
+
+  it('refuses a whitespace-only host', async () => {
+    const create = vi.spyOn(client, 'createCredential')
+    openCredentialForm()
+    fill('Name', 'spacey')
+    fill('Username', 'bob')
+    fill('Bind to Host', '   ')
+    save()
+    await Promise.resolve()
+
+    expect(create).not.toHaveBeenCalled()
+  })
+
+  it('submits once a host is given', async () => {
+    const create = vi
+      .spyOn(client, 'createCredential')
+      .mockResolvedValue({ id: 'c1', name: 'bound', username: 'bob', auth: '' } as never)
+    openCredentialForm()
+    fill('Name', 'bound')
+    fill('Username', 'bob')
+    fill('Bind to Host', 'prod.example.com')
+    save()
+    await Promise.resolve()
+
+    expect(create).toHaveBeenCalledTimes(1)
+    expect(create.mock.calls[0][0]).toMatchObject({ host: 'prod.example.com' })
+  })
+})

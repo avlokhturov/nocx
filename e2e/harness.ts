@@ -4,30 +4,22 @@ export { expect } from '@playwright/test'
 export type { Page } from '@playwright/test'
 
 /**
- * Wait until the app is at a prompt that the editor owns — the only state in
- * which typing lands in the editor.
+ * Wait until the prompt editor owns input and typing can safely begin.
  *
- * A non-empty tab title is NOT that state, and using it as the gate is what
- * made this suite flaky. The title fills in when the session opens and reports
- * its cwd; ownership arrives later, when the shell's prompt markers drive the
- * input-state machine to owned=true and editor.show() takes focus. Between the
- * two, keystrokes go somewhere else and the command never runs.
+ * Scoped to the ACTIVE pane, not to the document. Every open tab has its own
+ * `.nocx-editor-input`, so a bare locator resolves to one element with a single
+ * tab and N with more — Playwright's strict mode then fails the wait rather than
+ * the assertion, which reads like a product bug and is not one. That is what
+ * broke every multi-tab-input case (nocx-4ff.28) when this helper met a suite
+ * that opens a second tab.
  *
- * Measured, not inferred: the trace of CI run 30217202549 puts the test's first
- * action at t=73385ms and `input-state PROMPT_READY owned=true` at t=73424ms.
- * On a fast machine the gap closes before the test arrives, which is why this
- * only ever failed on macos-latest — and why it failed on a *different* test
- * each run (30217202549, 30217654133, 30217919912), whichever one happened to
- * lose the race.
- *
- * Focus is the right signal because it is the observable consequence of the
- * transition, and it is what the typing actually depends on.
+ * Waiting on the active pane is also the more correct statement: readiness is a
+ * property of the tab under test, not of whichever editor the DOM lists first.
  */
 export async function promptReady(page: Page): Promise<void> {
-  await baseExpect(page.locator('.tab-title').first()).not.toHaveText('', { timeout: 10_000 })
-  await baseExpect
-    .poll(() => page.evaluate(() => document.activeElement?.className ?? ''), { timeout: 10_000 })
-    .toContain('nocx-editor-input')
+  const input = page.locator('.pane.active .nocx-editor-input')
+  await baseExpect(input).toBeVisible({ timeout: 10_000 })
+  await baseExpect(input).toBeFocused({ timeout: 10_000 })
 }
 
 // Shared e2e harness. When the suite runs against the headless
