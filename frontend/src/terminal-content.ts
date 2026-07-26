@@ -176,8 +176,8 @@ export class TerminalContent implements TabContent {
 
       // ── Wire input ownership BEFORE opening the session ─────────────────
       this.shellTarget = new ShellInputTarget(
+        (text: string) => renderer.paste(text),
         (data: string) => this.session!.send(data),
-        () => renderer.bracketedPasteMode,
       )
       this.editor = new CommandEditor({
         submit: (doc: string) => {
