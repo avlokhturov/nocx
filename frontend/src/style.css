@@ -1485,25 +1485,14 @@ body {
   background: #161720;
 }
 
-/* Search input in the rail. */
+/* Search lives in the rail. `.st-search` is the WRAPPER the markup builds
+   (bar.className = 'st-search'); the field itself is `.st-search-input`, styled
+   further down. Both merge sides used the name `.st-search` — one for the
+   wrapper, one for the input — so input chrome (border, background, padding,
+   :focus, ::placeholder) belongs on `.st-search-input` alone. Putting it here
+   too would double the border and target focus on a div that never takes it. */
 .st-search {
   width: 100%;
-  padding: 7px 10px;
-  margin-bottom: 16px;
-  background: #1f2335;
-  border: 1px solid #2a2b3d;
-  border-radius: 5px;
-  color: #c0caf5;
-  font-size: 13px;
-  outline: none;
-}
-
-.st-search:focus {
-  border-color: #7aa2f7;
-}
-
-.st-search::placeholder {
-  color: #565f89;
 }
 
 /* Section navigation list. */
