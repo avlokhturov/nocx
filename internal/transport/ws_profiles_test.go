@@ -18,7 +18,7 @@ func TestProfilesRPC_ListEmpty(t *testing.T) {
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileStore(ps))
+		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -44,7 +44,7 @@ func TestProfilesRPC_CreateList(t *testing.T) {
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileStore(ps))
+		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -94,7 +94,7 @@ func TestProfilesRPC_Delete(t *testing.T) {
 	_ = ps.SaveProfile(p)
 
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileStore(ps))
+		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -120,7 +120,7 @@ func TestGroupsRPC_Create(t *testing.T) {
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileStore(ps))
+		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -155,7 +155,7 @@ func TestCredentialsRPC_MethodNotFound(t *testing.T) {
 	conn := connectWS(t, ws)
 	defer func() { _ = conn.Close() }()
 
-	// Without WithProfileStore, profiles.list should return method-not-found
+	// Without profile repository wired, profiles.list should return method-not-found
 	// (or empty result — either is acceptable; we check it doesn't crash).
 	resp := jsonrpcCall(t, conn, "profiles.list", map[string]any{})
 	var check struct {
@@ -186,23 +186,27 @@ func TestNoPlaintextSecretsOnWire(t *testing.T) {
 	cs := credential.NewKeychain()
 
 	// Save a credential with password auth (target).
+	tgtPWID := credential.NewSecretID()
+	_ = cs.Set(tgtPWID, credential.NewSecret(targetCanary))
 	_ = ps.SaveCredential(profile.Credential{
 		ID:       "cred:canary:aaa",
 		Name:     "canary-cred",
 		Username: "canary-user",
 		Auth:     "password",
+		SecretID: string(tgtPWID),
 	})
-	_ = cs.SavePassword(credential.Identity{User: "cred:canary:aaa"}, targetCanary)
 
-	// Save a jump credential (public key — password for the private key passphrase path).
+	// Save a jump credential (public key).
+	jumpPWID := credential.NewSecretID()
+	_ = cs.Set(jumpPWID, credential.NewSecret(jumpCanary))
 	_ = ps.SaveCredential(profile.Credential{
 		ID:       "cred:canary:bbb",
 		Name:     "jump-canary",
 		Username: "jump-canary-user",
 		Auth:     "publicKey",
 		KeyPath:  "/home/canary/.ssh/id_rsa",
+		SecretID: string(jumpPWID),
 	})
-	_ = cs.SavePassword(credential.Identity{User: "cred:canary:bbb"}, jumpCanary)
 
 	// Create a jump profile.
 	_ = ps.SaveProfile(profile.SSHProfile{
@@ -221,10 +225,10 @@ func TestNoPlaintextSecretsOnWire(t *testing.T) {
 		},
 	})
 
-	resolver := connection.NewResolver(ps, cs)
+	resolver := connection.NewResolver(ps, ps, cs)
 	ws := NewWSServer(
 		log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileStore(ps),
+		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps),
 		WithCredentialStore(cs),
 		WithProfileResolver(resolver),
 	)

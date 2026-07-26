@@ -1,23 +1,32 @@
 package profile
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/shady2k/nocx/internal/storage"
 )
 
-// ProfileStore is the persistence interface for profiles, groups, and credentials.
-// The single owner of profile/group/credential CRUD (mirrors Tabby's ProfilesService).
-type ProfileStore interface {
+// ProfileRepository is the persistence interface for SSH profile CRUD.
+type ProfileRepository interface {
 	LoadProfiles() ([]SSHProfile, error)
 	SaveProfile(p SSHProfile) error
 	DeleteProfile(id string) error
+}
+
+// GroupRepository is the persistence interface for profile group CRUD.
+type GroupRepository interface {
 	LoadGroups() ([]ProfileGroup, error)
 	SaveGroup(g ProfileGroup) error
 	DeleteGroup(id string) error
+}
+
+// CredentialMetadataRepository is the persistence interface for credential
+// metadata CRUD. Secrets referenced by SecretID fields are managed by the
+// credential.SecretStore, not by this repository (ADR-0011 §2).
+type CredentialMetadataRepository interface {
 	LoadCredentials() ([]Credential, error)
 	SaveCredential(c Credential) error
 	DeleteCredential(id string) error
@@ -27,19 +36,30 @@ type ProfileStore interface {
 // The file format is:
 //
 //	{ "profiles": [...], "groups": [...] }
-//
-// Writes are atomic (temp file + rename) to prevent corruption on crash.
 type JSONStore struct {
-	path string
-	mu   sync.Mutex
+	docStore storage.DocumentStore
+	fileName string
+	mu       sync.Mutex
 }
 
-// NewJSONStore creates a JSONStore rooted at path.
+// NewJSONStore creates a JSONStore rooted at path (convenience constructor
+// used by tests and simple wiring). The path's directory component becomes
+// the DocumentStore root; the file component is the document name.
 func NewJSONStore(path string) *JSONStore {
-	return &JSONStore{path: path}
+	return &JSONStore{
+		docStore: storage.NewDocumentStore(filepath.Dir(path)),
+		fileName: filepath.Base(path),
+	}
 }
 
-// storeData is the on-disk JSON shape.
+// NewJSONStoreWithDocStore creates a JSONStore that reads and writes the
+// named document through the given DocumentStore. Prefer this constructor
+// when the DocumentStore is shared across multiple modules (composition-root
+// wiring per AD-8).
+func NewJSONStoreWithDocStore(docStore storage.DocumentStore, fileName string) *JSONStore {
+	return &JSONStore{docStore: docStore, fileName: fileName}
+}
+
 type storeData struct {
 	Profiles    []SSHProfile   `json:"profiles,omitempty"`
 	Groups      []ProfileGroup `json:"groups,omitempty"`
@@ -47,54 +67,21 @@ type storeData struct {
 }
 
 func (s *JSONStore) load() (*storeData, error) {
-	raw, err := os.ReadFile(s.path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return &storeData{}, nil
-		}
-		return nil, fmt.Errorf("read profile store %s: %w", s.path, err)
-	}
-	if len(raw) == 0 {
-		return &storeData{}, nil
-	}
 	var d storeData
-	if err := json.Unmarshal(raw, &d); err != nil {
-		return nil, fmt.Errorf("parse profile store %s: %w", s.path, err)
+	found, err := s.docStore.Read(s.fileName, &d)
+	if err != nil {
+		return nil, fmt.Errorf("read profile store: %w", err)
+	}
+	if !found {
+		return &storeData{}, nil
 	}
 	return &d, nil
 }
 
-func (s *JSONStore) save(d *storeData) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
-		return fmt.Errorf("mkdir for profile store: %w", err)
-	}
-
-	raw, err := json.MarshalIndent(d, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal profile store: %w", err)
-	}
-
-	tmp, err := os.CreateTemp(filepath.Dir(s.path), ".profiles-*.tmp")
-	if err != nil {
-		return fmt.Errorf("create temp file: %w", err)
-	}
-	tmpName := tmp.Name()
-	defer func() { _ = os.Remove(tmpName) }()
-
-	if _, err := tmp.Write(raw); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("write temp file: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close temp file: %w", err)
-	}
-	if err := os.Rename(tmpName, s.path); err != nil {
-		return fmt.Errorf("rename temp to %s: %w", s.path, err)
-	}
-	return nil
+// writeLocked marshals d to JSON and writes it through the DocumentStore.
+// The caller MUST hold s.mu.
+func (s *JSONStore) writeLocked(d *storeData) error {
+	return s.docStore.Write(s.fileName, d)
 }
 
 func (s *JSONStore) LoadProfiles() ([]SSHProfile, error) {
@@ -106,6 +93,9 @@ func (s *JSONStore) LoadProfiles() ([]SSHProfile, error) {
 }
 
 func (s *JSONStore) SaveProfile(p SSHProfile) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	d, err := s.load()
 	if err != nil {
 		return err
@@ -113,14 +103,17 @@ func (s *JSONStore) SaveProfile(p SSHProfile) error {
 	for i, existing := range d.Profiles {
 		if existing.ID == p.ID {
 			d.Profiles[i] = p
-			return s.save(d)
+			return s.writeLocked(d)
 		}
 	}
 	d.Profiles = append(d.Profiles, p)
-	return s.save(d)
+	return s.writeLocked(d)
 }
 
 func (s *JSONStore) DeleteProfile(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	d, err := s.load()
 	if err != nil {
 		return err
@@ -128,7 +121,7 @@ func (s *JSONStore) DeleteProfile(id string) error {
 	for i, existing := range d.Profiles {
 		if existing.ID == id {
 			d.Profiles = append(d.Profiles[:i], d.Profiles[i+1:]...)
-			return s.save(d)
+			return s.writeLocked(d)
 		}
 	}
 	return nil
@@ -143,6 +136,9 @@ func (s *JSONStore) LoadGroups() ([]ProfileGroup, error) {
 }
 
 func (s *JSONStore) SaveGroup(g ProfileGroup) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	d, err := s.load()
 	if err != nil {
 		return err
@@ -150,14 +146,17 @@ func (s *JSONStore) SaveGroup(g ProfileGroup) error {
 	for i, existing := range d.Groups {
 		if existing.ID == g.ID {
 			d.Groups[i] = g
-			return s.save(d)
+			return s.writeLocked(d)
 		}
 	}
 	d.Groups = append(d.Groups, g)
-	return s.save(d)
+	return s.writeLocked(d)
 }
 
 func (s *JSONStore) DeleteGroup(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	d, err := s.load()
 	if err != nil {
 		return err
@@ -165,7 +164,7 @@ func (s *JSONStore) DeleteGroup(id string) error {
 	for i, existing := range d.Groups {
 		if existing.ID == id {
 			d.Groups = append(d.Groups[:i], d.Groups[i+1:]...)
-			return s.save(d)
+			return s.writeLocked(d)
 		}
 	}
 	return nil
@@ -194,6 +193,9 @@ func (s *JSONStore) SaveCredential(c Credential) error {
 		return errors.New("credential username is required")
 	}
 
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	d, err := s.load()
 	if err != nil {
 		return err
@@ -203,14 +205,17 @@ func (s *JSONStore) SaveCredential(c Credential) error {
 	for i, existing := range d.Credentials {
 		if existing.ID == c.ID {
 			d.Credentials[i] = c
-			return s.save(d)
+			return s.writeLocked(d)
 		}
 	}
 	d.Credentials = append(d.Credentials, c)
-	return s.save(d)
+	return s.writeLocked(d)
 }
 
 func (s *JSONStore) DeleteCredential(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	d, err := s.load()
 	if err != nil {
 		return err
@@ -218,7 +223,7 @@ func (s *JSONStore) DeleteCredential(id string) error {
 	for i, existing := range d.Credentials {
 		if existing.ID == id {
 			d.Credentials = append(d.Credentials[:i], d.Credentials[i+1:]...)
-			return s.save(d)
+			return s.writeLocked(d)
 		}
 	}
 	return nil

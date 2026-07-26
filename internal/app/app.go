@@ -5,17 +5,17 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
 
-	"github.com/shady2k/nocx/internal/config"
 	"github.com/shady2k/nocx/internal/connection"
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/shellintegration"
 	"github.com/shady2k/nocx/internal/ssh"
+	"github.com/shady2k/nocx/internal/storage"
 	"github.com/shady2k/nocx/internal/transport"
 	"github.com/shady2k/nocx/internal/update"
 )
@@ -25,10 +25,9 @@ type App struct {
 	Pty              session.PTYFactory
 	Session          *session.Reg
 	Transport        *transport.WSServer
-	Config           *config.Stub
 	ShellIntegration shellintegration.ShellIntegration
 	Updater          update.Updater
-	Profiles         profile.ProfileStore
+	Profiles         profile.ProfileRepository
 	Credentials      credential.CredentialStore
 }
 
@@ -58,7 +57,6 @@ func New(opts ...Option) (*App, error) {
 	slogger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	logger := log.NewSlogAdapter(slogger)
 
-	cfg := config.NewStub(logger)
 	shint := shellintegration.New(logger)
 	ptf := &localPTYFactory{log: logger, shint: shint}
 	sess := session.New(logger, ptf)
@@ -70,25 +68,25 @@ func New(opts ...Option) (*App, error) {
 	}
 	sess = sess.WithSSHFactory(&sshFactoryAdapter{client: sshClient})
 
-	// Profile + credential stores (AD-4 seam): separate wired deps, not
-	// through config.Stub. Profile store persists to the OS config dir;
-	// credential store uses the OS keychain (vault is a Phase-2 upgrade).
-	configDir, err := os.UserConfigDir()
+	// Profile + credential stores (AD-4/ADR-0011): storage paths resolved
+	// by the shared Paths capability. The DocumentStore is the atomic JSON
+	// capability; the profile store uses it for profiles.json.
+	paths, err := storage.NewOSPaths("nocx")
 	if err != nil {
-		logger.Warn("could not determine config dir, using in-memory profile store", "error", err)
+		return nil, fmt.Errorf("storage paths: %w", err)
 	}
-	var profileStore profile.ProfileStore
-	if configDir != "" {
-		profileStore = profile.NewJSONStore(filepath.Join(configDir, "nocx", "profiles.json"))
-	} else {
-		profileStore = profile.NewJSONStore(filepath.Join(os.TempDir(), "nocx-profiles.json"))
-	}
+	docStore := storage.NewDocumentStore(paths.ConfigDir())
+	profileStore := profile.NewJSONStoreWithDocStore(docStore, "profiles.json")
 	credStore := credential.NewKeychain()
+	settingsRegistry := settings.New(docStore, credStore)
 
 	tpOpts := []transport.WSServerOption{
-		transport.WithProfileStore(profileStore),
+		transport.WithProfileRepository(profileStore),
+		transport.WithGroupRepository(profileStore),
+		transport.WithCredentialMetadataRepository(profileStore),
 		transport.WithCredentialStore(credStore),
-		transport.WithProfileResolver(connection.NewResolver(profileStore, credStore)),
+		transport.WithProfileResolver(connection.NewResolver(profileStore, profileStore, credStore)),
+		transport.WithSettingsRegistry(settingsRegistry),
 	}
 	if o.wsAddr != "" {
 		tpOpts = append(tpOpts, transport.WithListenAddr(o.wsAddr))
@@ -100,7 +98,6 @@ func New(opts ...Option) (*App, error) {
 		Pty:              ptf,
 		Session:          sess,
 		Transport:        tp,
-		Config:           cfg,
 		ShellIntegration: shint,
 		Profiles:         profileStore,
 		Credentials:      credStore,

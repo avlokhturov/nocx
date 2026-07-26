@@ -96,6 +96,10 @@ type ProfileGroup struct {
 // Stored separately from connections so multiple connections can share it.
 // Secrets (passwords, key passphrases) are stored in the OS keychain / vault,
 // keyed by Credential.ID.
+// Credential is a reusable authentication identity (УЗ).
+// Stored separately from connections so multiple connections can share it.
+// Secrets (passwords, key passphrases) are stored in the SecretStore,
+// reachable by opaque SecretID references (ADR-0011 §2).
 type Credential struct {
 	ID       string   `json:"id"`
 	Name     string   `json:"name"`              // Display name (e.g. "work-github")
@@ -111,6 +115,12 @@ type Credential struct {
 	// set; 0 means "this host, any port".
 	Host string `json:"host,omitempty"`
 	Port int    `json:"port,omitempty"`
+	// SecretID is the opaque reference to the stored password in the
+	// SecretStore. Never transmitted to the renderer (ADR-0011 §2).
+	SecretID string `json:"secretId,omitempty"`
+	// PassphraseSecretID is the opaque reference to the stored key
+	// passphrase in the SecretStore. Never transmitted to the renderer.
+	PassphraseSecretID string `json:"passphraseSecretId,omitempty"`
 }
 
 // NewCredentialID generates a credential id: "cred:name:uuid".

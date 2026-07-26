@@ -1,7 +1,6 @@
 package ssh
 
 import (
-	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/pem"
@@ -30,15 +29,15 @@ func TestAuthChainOrderAuto(t *testing.T) {
 	keyPath := writeTestKey(t, dir)
 
 	store := credential.NewKeychain()
-	id := credential.Identity{User: "alice", Host: "h", Port: 22}
-	if err := store.SavePassword(id, "pw123"); err != nil {
-		t.Fatalf("SavePassword: %v", err)
+	id := credential.NewSecretID()
+	if err := store.Set(id, credential.NewSecret("pw123")); err != nil {
+		t.Fatalf("Set: %v", err)
 	}
 
 	resolved := &resolvedConfig{identityFile: keyPath, user: "alice", hostName: "h"}
 	cfg := &ConnectConfig{
-		Credentials:  store,
-		CredIdentity: id,
+		Secrets:  store,
+		SecretID: id,
 	}
 
 	chain, err := rc.buildAuthChain(resolved, cfg)
@@ -82,15 +81,15 @@ func TestAuthChainFilterByAuthMode(t *testing.T) {
 	keyPath := writeTestKey(t, dir)
 
 	store := credential.NewKeychain()
-	id := credential.Identity{User: "alice", Host: "h", Port: 22}
-	if err := store.SavePassword(id, "pw"); err != nil {
-		t.Fatalf("SavePassword: %v", err)
+	id := credential.NewSecretID()
+	if err := store.Set(id, credential.NewSecret("pw")); err != nil {
+		t.Fatalf("Set: %v", err)
 	}
 
 	resolved := &resolvedConfig{identityFile: keyPath, user: "alice", hostName: "h"}
 
 	// auth=password should EXCLUDE publicKey bucket, include password buckets.
-	cfg := &ConnectConfig{Credentials: store, CredIdentity: id, AuthMode: "password"}
+	cfg := &ConnectConfig{Secrets: store, SecretID: id, AuthMode: "password"}
 	chain, err := rc.buildAuthChain(resolved, cfg)
 	if err != nil {
 		t.Fatalf("buildAuthChain: %v", err)
@@ -102,7 +101,7 @@ func TestAuthChainFilterByAuthMode(t *testing.T) {
 	}
 
 	// auth=publicKey should EXCLUDE password buckets, include publicKey.
-	cfg2 := &ConnectConfig{Credentials: store, CredIdentity: id, AuthMode: "publicKey"}
+	cfg2 := &ConnectConfig{Secrets: store, SecretID: id, AuthMode: "publicKey"}
 	chain2, err := rc.buildAuthChain(resolved, cfg2)
 	if err != nil {
 		t.Fatalf("buildAuthChain auth=publicKey: %v", err)
@@ -148,15 +147,15 @@ func TestAuthChainLateBindCredential(t *testing.T) {
 
 	// Set up a credential store with a saved password for the identity.
 	store := credential.NewKeychain()
-	id := credential.Identity{User: "alice", Host: "example.com", Port: 22}
-	if err := store.SavePassword(id, "stored-secret"); err != nil {
-		t.Fatalf("SavePassword: %v", err)
+	id := credential.NewSecretID()
+	if err := store.Set(id, credential.NewSecret("stored-secret")); err != nil {
+		t.Fatalf("Set: %v", err)
 	}
 
 	resolved := &resolvedConfig{identityFile: keyPath, user: "alice", hostName: "example.com", port: 22}
 	cfg := &ConnectConfig{
-		Credentials:  store,
-		CredIdentity: credential.Identity{User: "alice", Host: "example.com", Port: 22},
+		Secrets:  store,
+		SecretID: id,
 	}
 
 	chain, err := rc.buildAuthChain(resolved, cfg)
@@ -218,9 +217,9 @@ func TestResolvePrivateKeyPassphraseByHash(t *testing.T) {
 
 	// Generate an encrypted key (simulated: we test the passphrase path,
 	// not real encryption — just verify the lookup/save contract).
-	hash := credential.KeyHash("sha512:testkeyhash")
-	if err := store.SaveKeyPassphrase(hash, "my-passphrase"); err != nil {
-		t.Fatalf("SaveKeyPassphrase: %v", err)
+	hash := credential.NewSecretID()
+	if err := store.Set(hash, credential.NewSecret("my-passphrase")); err != nil {
+		t.Fatalf("Set: %v", err)
 	}
 
 	got, err := rc.lookupKeyPassphrase(store, hash)
@@ -274,17 +273,17 @@ func writeTestKey(t *testing.T, dir string) string {
 // Ensure the new fields compile on ConnectConfig.
 func TestConnectConfigNewFields(t *testing.T) {
 	cfg := &ConnectConfig{
-		AuthMode:     "password",
-		Credentials:  credential.NewKeychain(),
-		CredIdentity: credential.Identity{User: "u", Host: "h", Port: 22},
+		AuthMode: "password",
+		Secrets:  credential.NewKeychain(),
+		SecretID: credential.NewSecretID(),
 	}
 	if cfg.AuthMode != "password" {
 		t.Error("AuthMode not set")
 	}
-	if cfg.Credentials == nil {
-		t.Error("Credentials not set")
+	if cfg.Secrets == nil {
+		t.Error("Secrets not set")
+	}
+	if cfg.SecretID == "" {
+		t.Error("SecretID not set")
 	}
 }
-
-// Suppress unused import in phases where context isn't referenced.
-var _ = context.Background

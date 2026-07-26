@@ -35,7 +35,7 @@ func (rc *RealClient) poolKeyFor(resolved *resolvedConfig, cfg *ConnectConfig) p
 	// identityFile (it reflects what actually authenticates). Agent-only or
 	// prompt-password auth has no credential principal, so identity is empty
 	// and such connections share — there is no second principal to isolate.
-	identity := cfg.CredIdentity.User
+	identity := string(cfg.SecretID)
 	if identity == "" {
 		if cfg.KeyFile != "" {
 			identity = cfg.KeyFile
@@ -65,12 +65,12 @@ func (rc *RealClient) poolKeyFor(resolved *resolvedConfig, cfg *ConnectConfig) p
 // dialed directly.
 func (rc *RealClient) jumpRouteKey(cfg *ConnectConfig) string {
 	jumpCfg := &ConnectConfig{
-		User:         cfg.JumpUser,
-		Port:         cfg.JumpPort,
-		KeyFile:      cfg.JumpKeyFile,
-		AuthMode:     cfg.JumpAuthMode,
-		Credentials:  cfg.JumpCredentials,
-		CredIdentity: cfg.JumpCredIdentity,
+		User:     cfg.JumpUser,
+		Port:     cfg.JumpPort,
+		KeyFile:  cfg.JumpKeyFile,
+		AuthMode: cfg.JumpAuthMode,
+		Secrets:  cfg.JumpSecrets,
+		SecretID: cfg.JumpSecretID,
 	}
 	jumpResolved, err := rc.resolveConfig(cfg.JumpHost, jumpCfg)
 	if err != nil {
@@ -82,7 +82,7 @@ func (rc *RealClient) jumpRouteKey(cfg *ConnectConfig) string {
 		host:     jumpResolved.hostName,
 		port:     jumpResolved.port,
 		user:     jumpResolved.user,
-		identity: cfg.JumpCredIdentity.User,
+		identity: string(cfg.JumpSecretID),
 	}
 	if jumpKey.identity == "" {
 		if cfg.JumpKeyFile != "" {
@@ -296,13 +296,13 @@ func (d *dialer) dialViaJumpHost(ctx context.Context, cfg *ConnectConfig, resolv
 // (to dial the target through).
 func (d *dialer) acquireJumpHost(ctx context.Context, cfg *ConnectConfig) (*poolHandle, *gossh.Client, error) {
 	jumpCfg := &ConnectConfig{
-		User:         cfg.JumpUser,
-		Port:         cfg.JumpPort,
-		KeyFile:      cfg.JumpKeyFile,
-		AuthMode:     cfg.JumpAuthMode,
-		JumpHost:     "",
-		Credentials:  cfg.JumpCredentials,
-		CredIdentity: cfg.JumpCredIdentity,
+		User:     cfg.JumpUser,
+		Port:     cfg.JumpPort,
+		KeyFile:  cfg.JumpKeyFile,
+		AuthMode: cfg.JumpAuthMode,
+		JumpHost: "",
+		Secrets:  cfg.JumpSecrets,
+		SecretID: cfg.JumpSecretID,
 	}
 
 	jumpResolved, err := d.client.resolveConfig(cfg.JumpHost, jumpCfg)
@@ -310,11 +310,11 @@ func (d *dialer) acquireJumpHost(ctx context.Context, cfg *ConnectConfig) (*pool
 		return nil, nil, fmt.Errorf("resolve jump host config: %w", err)
 	}
 	// Enforce the jump credential's binding against the jump host's resolved
-	// name/effective port, independently of the target. JumpCredentials is
+	// name/effective port, independently of the target. JumpSecrets is
 	// the newer, easier-to-miss path (nocx-mon/PR11-T5): a jump credential
 	// bound to one bastion must not be submittable to another.
-	if jumpCfg.Credentials != nil {
-		if bindErr := checkBinding(cfg.JumpBoundHost, cfg.JumpBoundPort, jumpResolved, jumpCfg.CredIdentity.User, true); bindErr != nil {
+	if jumpCfg.Secrets != nil {
+		if bindErr := checkBinding(cfg.JumpBoundHost, cfg.JumpBoundPort, jumpResolved, string(jumpCfg.SecretID), true); bindErr != nil {
 			return nil, nil, bindErr
 		}
 	}

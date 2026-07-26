@@ -280,4 +280,28 @@ export class ProfileClient {
   hasPassword(credentialId: string): Promise<boolean> {
     return this.call('credentials.hasPassword', { credentialId })
   }
+
+  // Settings RPC (nocx-9m5 / STORE-5b).  No secret value ever appears in a
+  // response — secrets go through secretSet/secretDelete/secretExists only.
+  describeSettings(): Promise<{ declarations: unknown[] }> {
+    return this.call('settings.describe', {})
+  }
+  getAllSettings(): Promise<{ values: Record<string, unknown> }> {
+    return this.call('settings.getAll', {})
+  }
+  setSetting(key: string, value: unknown): Promise<{ ok: true }> {
+    return this.call('settings.set', { key, value })
+  }
+  resetSetting(key: string): Promise<{ ok: true }> {
+    return this.call('settings.reset', { key })
+  }
+  secretSet(key: string, value: string): Promise<{ ok: true }> {
+    return this.call('settings.secretSet', { key, value })
+  }
+  secretDelete(key: string): Promise<{ ok: true }> {
+    return this.call('settings.secretDelete', { key })
+  }
+  secretExists(key: string): Promise<{ exists: boolean }> {
+    return this.call('settings.secretExists', { key })
+  }
 }

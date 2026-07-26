@@ -267,11 +267,11 @@ func sshOptionsFromConfig(cfg *ssh.ConnectConfig) []ssh.ConnectOption {
 	if cfg.JumpHost != "" {
 		opts = append(opts, ssh.WithJumpHost(cfg.JumpHost, cfg.JumpPort, cfg.JumpUser, cfg.JumpAuthMode))
 	}
-	if cfg.JumpCredentials != nil {
-		opts = append(opts, ssh.WithJumpCredentials(cfg.JumpCredentials, cfg.JumpCredIdentity))
+	if cfg.JumpSecrets != nil {
+		opts = append(opts, ssh.WithJumpCredentials(cfg.JumpSecrets, cfg.JumpSecretID))
 	}
-	if cfg.Credentials != nil {
-		opts = append(opts, ssh.WithCredentials(cfg.Credentials, cfg.CredIdentity))
+	if cfg.Secrets != nil {
+		opts = append(opts, ssh.WithCredentials(cfg.Secrets, cfg.SecretID))
 	}
 	if cfg.RemoteInstaller != nil {
 		opts = append(opts, ssh.WithRemoteInstaller(cfg.RemoteInstaller))

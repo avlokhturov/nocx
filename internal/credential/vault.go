@@ -36,28 +36,23 @@ type StoredVault struct {
 	IV       string `json:"iv"`       // unused in v2, kept for backward JSON compat
 }
 
-// vaultData is the in-memory plaintext state of the vault. It holds
-// VaultSecret values (whose Value is a non-serializable Secret) and is
-// converted to vaultDataDTO at the encryption boundary in Marshal.
+// vaultData is the in-memory plaintext state of the vault, keyed by SecretID.
 type vaultData struct {
-	Secrets []VaultSecret
+	Secrets map[SecretID]VaultSecret
 }
 
-// vaultDataDTO is the serializable shape of vaultData: the same key
-// fields plus a plaintext value string. It exists only at the marshal /
-// decrypt boundary so the encrypted blob can be serialized without going
-// through VaultSecret.Value (a Secret that refuses MarshalJSON). The
-// plaintext is written from inside vault.Marshal's Secret.Use callback and
-// read back into a Secret during decrypt — never handed out as a string.
+// vaultDataDTO is the serializable shape of vaultData: an array of
+// ID + plaintext value entries. It exists only at the marshal / decrypt
+// boundary so the encrypted blob can be serialized without going through
+// VaultSecret.Value (a Secret that refuses MarshalJSON).
 type vaultDataDTO struct {
 	Secrets []vaultSecretDTO `json:"secrets,omitempty"`
 }
 
 // vaultSecretDTO is the on-disk shape of a single VaultSecret.
 type vaultSecretDTO struct {
-	Type  SecretType `json:"type"`
-	Key   VaultKey   `json:"key"`
-	Value string     `json:"value"`
+	ID    SecretID `json:"id"`
+	Value string   `json:"value"`
 }
 
 // toDTO converts the in-memory vaultData (with non-serializable Secrets)
@@ -65,19 +60,16 @@ type vaultSecretDTO struct {
 // Secret.Use. This is the one place the vault materializes plaintext for
 // encryption; the bytes live only for the duration of the Marshal call.
 func (d vaultData) toDTO() (vaultDataDTO, error) {
-	out := vaultDataDTO{Secrets: make([]vaultSecretDTO, len(d.Secrets))}
-	for i, s := range d.Secrets {
-		dto := vaultSecretDTO{Type: s.Type, Key: s.Key}
+	out := vaultDataDTO{Secrets: make([]vaultSecretDTO, 0, len(d.Secrets))}
+	for id, s := range d.Secrets {
+		dto := vaultSecretDTO{ID: id}
 		if err := s.Value.Use(func(b []byte) error {
-			// Copy into a string for the DTO. This is the unavoidable
-			// plaintext copy at the encryption boundary — it lives only
-			// until json.Marshal returns and encryptGCM consumes it.
 			dto.Value = string(b)
 			return nil
 		}); err != nil {
-			return vaultDataDTO{}, fmt.Errorf("marshal secret %d: %w", i, err)
+			return vaultDataDTO{}, fmt.Errorf("marshal secret %s: %w", id, err)
 		}
-		out.Secrets[i] = dto
+		out.Secrets = append(out.Secrets, dto)
 	}
 	return out, nil
 }
@@ -85,9 +77,9 @@ func (d vaultData) toDTO() (vaultDataDTO, error) {
 // fromDTO converts a decrypted DTO back into in-memory vaultData, wrapping
 // each plaintext value in a Secret so it is again non-serializable.
 func (vaultDataDTO) fromDTO(dto vaultDataDTO) vaultData {
-	out := vaultData{Secrets: make([]VaultSecret, len(dto.Secrets))}
-	for i, s := range dto.Secrets {
-		out.Secrets[i] = VaultSecret{Type: s.Type, Key: s.Key, Value: NewSecret(s.Value)}
+	out := vaultData{Secrets: make(map[SecretID]VaultSecret, len(dto.Secrets))}
+	for _, s := range dto.Secrets {
+		out.Secrets[s.ID] = VaultSecret{ID: s.ID, Value: NewSecret(s.Value)}
 	}
 	return out
 }
@@ -231,67 +223,39 @@ func (v *Vault) decrypt() error {
 	return nil
 }
 
-// GetSecret retrieves a secret by type and key. If no exact match is found
-// for a password lookup, it retries with Host="" and Port=0 — the
-// "default password shared across servers" fallback (mirrors Tabby).
-func (v *Vault) GetSecret(typ SecretType, key VaultKey) (*VaultSecret, error) {
+// GetSecret retrieves a secret by ID. Returns nil when no secret with that
+// ID exists — absence is not an error.
+func (v *Vault) GetSecret(id SecretID) (*VaultSecret, error) {
 	if !v.IsOpen() {
 		return nil, errors.New("vault is locked")
 	}
-	for i, s := range v.data.Secrets {
-		if s.matches(typ, key) {
-			return &v.data.Secrets[i], nil
-		}
+	s, ok := v.data.Secrets[id]
+	if !ok {
+		return nil, nil
 	}
-	// host-null fallback for passwords only.
-	if typ == SecretTypePassword && (key.Host != "" || key.Port != 0) {
-		fallbackKey := VaultKey{User: key.User, Host: "", Port: 0}
-		for i, s := range v.data.Secrets {
-			if s.matches(typ, fallbackKey) {
-				return &v.data.Secrets[i], nil
-			}
-		}
-	}
-	return nil, nil
+	return &s, nil
 }
 
-// SaveSecret stores or updates a secret. Deduplicates by (type, key) —
-// an existing entry with the same key is updated, not duplicated.
+// SaveSecret stores or updates a secret keyed by its ID.
 func (v *Vault) SaveSecret(secret VaultSecret) error {
 	if !v.IsOpen() {
 		return errors.New("vault is locked")
 	}
-	for i, s := range v.data.Secrets {
-		if s.Type == secret.Type && keysEqual(s.Key, secret.Key) {
-			v.data.Secrets[i] = secret
-			return nil
-		}
+	if v.data.Secrets == nil {
+		v.data.Secrets = make(map[SecretID]VaultSecret)
 	}
-	v.data.Secrets = append(v.data.Secrets, secret)
+	v.data.Secrets[secret.ID] = secret
 	return nil
 }
 
-// DeleteSecret removes a secret by type and key.
-func (v *Vault) DeleteSecret(typ SecretType, key VaultKey) error {
+// DeleteSecret removes a secret by ID. Absence is not an error.
+func (v *Vault) DeleteSecret(id SecretID) error {
 	if !v.IsOpen() {
 		return errors.New("vault is locked")
 	}
-	for i, s := range v.data.Secrets {
-		if s.matches(typ, key) {
-			v.data.Secrets = append(v.data.Secrets[:i], v.data.Secrets[i+1:]...)
-			return nil
-		}
-	}
+	delete(v.data.Secrets, id)
 	return nil
 }
-
-func keysEqual(a, b VaultKey) bool {
-	return a.User == b.User && a.Host == b.Host && a.Port == b.Port && a.Hash == b.Hash
-}
-
-// ---------------------------------------------------------------------------
-// crypto helpers
-// ---------------------------------------------------------------------------
 
 // deriveKey derives a 32-byte AES key from passphrase + salt via PBKDF2-HMAC-SHA512.
 func deriveKey(passphrase string, salt []byte) []byte {

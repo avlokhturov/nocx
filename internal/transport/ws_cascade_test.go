@@ -3,8 +3,6 @@ package transport
 import (
 	"context"
 	"encoding/json"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/gorilla/websocket"
@@ -24,22 +22,21 @@ import (
 // credential store, ready for delete-cascade tests. The keyring mock is
 // per-test fresh.
 type cascadeHarness struct {
-	t      *testing.T
-	ws     *WSServer
-	ps     *profile.JSONStore
-	cs     *credential.Keychain
-	conn   *websocket.Conn
-	keyDir string
+	t    *testing.T
+	ws   *WSServer
+	ps   *profile.JSONStore
+	cs   credential.SecretStore
+	conn *websocket.Conn
 }
 
 func newCascadeHarness(t *testing.T) *cascadeHarness {
 	t.Helper()
 	keyring.MockInit()
 	dir := t.TempDir()
-	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
+	ps := profile.NewJSONStore(dir + "/p.json")
 	cs := credential.NewKeychain()
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileStore(ps), WithCredentialStore(cs))
+		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps), WithCredentialStore(cs))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -47,12 +44,11 @@ func newCascadeHarness(t *testing.T) *cascadeHarness {
 	t.Cleanup(func() { _ = ws.Stop(ctx) })
 	conn := connectWS(t, ws)
 	t.Cleanup(func() { _ = conn.Close() })
-	return &cascadeHarness{t: t, ws: ws, ps: ps, cs: cs, conn: conn, keyDir: dir}
+	return &cascadeHarness{t: t, ws: ws, ps: ps, cs: cs, conn: conn}
 }
 
 // createCredentialViaRPC creates a credential through the credentials.create
-// RPC and returns the server-assigned ID. The ID is never hardcoded — it
-// comes from the real NewCredentialID path the production UI uses.
+// RPC and returns the server-assigned ID.
 func (h *cascadeHarness) createCredentialViaRPC(c profile.Credential) string {
 	h.t.Helper()
 	resp := jsonrpcCall(h.t, h.conn, "credentials.create", c)
@@ -82,9 +78,63 @@ func (h *cascadeHarness) deleteCredentialViaRPC(id string) {
 	}
 }
 
+// savePasswordViaRPC calls credentials.savePassword and returns the SecretID
+// that the backend assigned (read from the updated credential metadata).
+func (h *cascadeHarness) savePasswordViaRPC(credID, password string) credential.SecretID {
+	h.t.Helper()
+	resp := jsonrpcCall(h.t, h.conn, "credentials.savePassword", map[string]any{
+		"credentialId": credID,
+		"password":     password,
+	})
+	var got struct {
+		Result bool `json:"result"`
+	}
+	if err := json.Unmarshal(resp, &got); err != nil || !got.Result {
+		h.t.Fatalf("savePassword failed: %v\nraw: %s", err, string(resp))
+	}
+	// Read the SecretID from the updated credential metadata.
+	creds, err := h.ps.LoadCredentials()
+	if err != nil {
+		h.t.Fatalf("LoadCredentials: %v", err)
+	}
+	for _, c := range creds {
+		if c.ID == credID {
+			return credential.SecretID(c.SecretID)
+		}
+	}
+	h.t.Fatalf("credential %s not found after savePassword", credID)
+	return ""
+}
+
+// savePassphraseViaRPC calls credentials.saveKeyPassphrase and returns the
+// PassphraseSecretID assigned.
+func (h *cascadeHarness) savePassphraseViaRPC(credID, passphrase string) credential.SecretID {
+	h.t.Helper()
+	resp := jsonrpcCall(h.t, h.conn, "credentials.saveKeyPassphrase", map[string]any{
+		"credentialId": credID,
+		"passphrase":   passphrase,
+	})
+	var got struct {
+		Result bool `json:"result"`
+	}
+	if err := json.Unmarshal(resp, &got); err != nil || !got.Result {
+		h.t.Fatalf("saveKeyPassphrase failed: %v\nraw: %s", err, string(resp))
+	}
+	creds, err := h.ps.LoadCredentials()
+	if err != nil {
+		h.t.Fatalf("LoadCredentials: %v", err)
+	}
+	for _, c := range creds {
+		if c.ID == credID {
+			return credential.SecretID(c.PassphraseSecretID)
+		}
+	}
+	h.t.Fatalf("credential %s not found after saveKeyPassphrase", credID)
+	return ""
+}
+
 // TestDeleteCascade_RemovesPassword proves deleting a credential removes
-// the stored password from the secret store. It queries the keychain
-// directly, not through the RPC under test.
+// the stored password from the secret store.
 func TestDeleteCascade_RemovesPassword(t *testing.T) {
 	h := newCascadeHarness(t)
 
@@ -92,57 +142,47 @@ func TestDeleteCascade_RemovesPassword(t *testing.T) {
 		Name: "cascade-pw", Username: "alice", Auth: "password",
 	})
 
-	const pw = "cascade-password-secret"
-	if err := h.cs.SavePassword(credential.Identity{User: id}, pw); err != nil {
-		t.Fatalf("SavePassword: %v", err)
-	}
-	if has, _ := h.cs.HasPassword(credential.Identity{User: id}); !has {
-		t.Fatal("precondition: password should be present")
+	pwID := h.savePasswordViaRPC(id, "cascade-password-secret")
+
+	// Precondition: password exists.
+	got, err := h.cs.Get(pwID)
+	if err != nil || got.IsEmpty() {
+		t.Fatal("precondition: password should be present after save", err)
 	}
 
 	h.deleteCredentialViaRPC(id)
 
-	if has, _ := h.cs.HasPassword(credential.Identity{User: id}); has {
+	// Password must be deleted.
+	after, err := h.cs.Get(pwID)
+	if err != nil {
+		t.Fatalf("Get after delete: %v", err)
+	}
+	if !after.IsEmpty() {
 		t.Fatal("password entry survived credential delete; the keychain is orphaned")
 	}
 }
 
 // TestDeleteCascade_RemovesKeyPassphrase proves deleting a credential with a
-// referenced private key removes the key passphrase entry. This is the
-// ordering trap: the passphrase keys on KeyHash (derived from the key file),
-// not the credential ID, so the metadata must be loaded BEFORE deletion to
-// recover KeyPath. A naive delete-metadata-first implementation cannot
-// remove this entry.
+// passphrase removes it from the secret store via PassphraseSecretID.
 func TestDeleteCascade_RemovesKeyPassphrase(t *testing.T) {
 	h := newCascadeHarness(t)
 
-	// Write a real key file so the backend can read it and derive the hash.
-	keyContents := []byte("-----BEGIN OPENSSH PRIVATE KEY-----\npretend\n-----END OPENSSH PRIVATE KEY-----\n")
-	keyPath := filepath.Join(h.keyDir, "id_ed25519")
-	if err := os.WriteFile(keyPath, keyContents, 0o600); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-
 	id := h.createCredentialViaRPC(profile.Credential{
-		Name: "cascade-key", Username: "bob", Auth: "publicKey", KeyPath: keyPath,
+		Name: "cascade-pp", Username: "bob", Auth: "publicKey",
 	})
 
-	// Save a passphrase under the hash the backend will re-derive from KeyPath.
-	hash := credential.HashKey(keyContents)
-	const pp = "cascade-passphrase-secret"
-	if err := h.cs.SaveKeyPassphrase(hash, pp); err != nil {
-		t.Fatalf("SaveKeyPassphrase: %v", err)
-	}
-	got, err := h.cs.LookupKeyPassphrase(hash)
+	ppID := h.savePassphraseViaRPC(id, "cascade-passphrase-secret")
+
+	got, err := h.cs.Get(ppID)
 	if err != nil || got.IsEmpty() {
 		t.Fatalf("precondition: passphrase should be present, got %v", err)
 	}
 
 	h.deleteCredentialViaRPC(id)
 
-	after, err := h.cs.LookupKeyPassphrase(hash)
+	after, err := h.cs.Get(ppID)
 	if err != nil {
-		t.Fatalf("LookupKeyPassphrase after delete: %v", err)
+		t.Fatalf("Get after delete: %v", err)
 	}
 	if !after.IsEmpty() {
 		t.Fatal("key passphrase survived credential delete; the secret is orphaned forever")
@@ -150,8 +190,7 @@ func TestDeleteCascade_RemovesKeyPassphrase(t *testing.T) {
 }
 
 // TestDeleteCascade_NoSecretsSucceeds proves deleting a credential that
-// never had a secret stored succeeds. "Already absent" and "deleted" must
-// converge.
+// never had a secret stored succeeds.
 func TestDeleteCascade_NoSecretsSucceeds(t *testing.T) {
 	h := newCascadeHarness(t)
 
@@ -159,10 +198,8 @@ func TestDeleteCascade_NoSecretsSucceeds(t *testing.T) {
 		Name: "cascade-empty", Username: "carol", Auth: "password",
 	})
 
-	// No password, no passphrase saved.
 	h.deleteCredentialViaRPC(id)
 
-	// And the metadata is gone too.
 	creds, err := h.ps.LoadCredentials()
 	if err != nil {
 		t.Fatalf("LoadCredentials: %v", err)
@@ -174,23 +211,53 @@ func TestDeleteCascade_NoSecretsSucceeds(t *testing.T) {
 	}
 }
 
-// TestDeleteCascade_Idempotent proves deleting a credential twice both
-// succeeds. A missing credential and a missing secret are not errors.
+// TestDeleteCascade_Idempotent proves deleting a credential twice both succeeds.
 func TestDeleteCascade_Idempotent(t *testing.T) {
 	h := newCascadeHarness(t)
 
 	id := h.createCredentialViaRPC(profile.Credential{
 		Name: "cascade-idem", Username: "dan", Auth: "password",
 	})
-	if err := h.cs.SavePassword(credential.Identity{User: id}, "p"); err != nil {
-		t.Fatalf("SavePassword: %v", err)
+	pwID := h.savePasswordViaRPC(id, "p")
+
+	h.deleteCredentialViaRPC(id)
+	h.deleteCredentialViaRPC(id) // second delete
+
+	after, err := h.cs.Get(pwID)
+	if err != nil {
+		t.Fatalf("Get after second delete: %v", err)
+	}
+	if !after.IsEmpty() {
+		t.Fatal("password survived second delete")
+	}
+}
+
+// TestDeleteCascade_KeyFileDeleted proves a credential delete removes both
+// secrets via SecretID — the private key file does not need to exist.
+func TestDeleteCascade_KeyFileDeleted(t *testing.T) {
+	h := newCascadeHarness(t)
+
+	id := h.createCredentialViaRPC(profile.Credential{
+		Name: "cascade-key-gone", Username: "bob", Auth: "publicKey",
+		KeyPath: "/nonexistent/key/file",
+	})
+
+	ppID := h.savePassphraseViaRPC(id, "passphrase-stored-by-id")
+
+	got, err := h.cs.Get(ppID)
+	if err != nil || got.IsEmpty() {
+		t.Fatalf("precondition: passphrase should be present, got %v", err)
 	}
 
-	h.deleteCredentialViaRPC(id)
-	// Second delete: credential already gone, no secrets. Must still succeed.
+	// Delete the credential — the key path doesn't matter because the
+	// cascade uses PassphraseSecretID from metadata.
 	h.deleteCredentialViaRPC(id)
 
-	if has, _ := h.cs.HasPassword(credential.Identity{User: id}); has {
-		t.Fatal("password survived second delete")
+	after, err := h.cs.Get(ppID)
+	if err != nil {
+		t.Fatalf("Get after delete: %v", err)
+	}
+	if !after.IsEmpty() {
+		t.Fatal("key passphrase survived credential delete despite missing key file — it is orphaned forever (nocx-dm0)")
 	}
 }

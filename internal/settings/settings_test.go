@@ -1,0 +1,466 @@
+package settings_test
+
+import (
+	"encoding/json"
+	"errors"
+	"testing"
+
+	"github.com/shady2k/nocx/internal/credential"
+	"github.com/shady2k/nocx/internal/settings"
+)
+
+// fakeDoc is an in-memory DocumentStore for testing.
+type fakeDoc struct {
+	data map[string][]byte
+}
+
+func (f *fakeDoc) Read(name string, into any) (bool, error) {
+	b, ok := f.data[name]
+	if !ok || b == nil {
+		return false, nil
+	}
+	return true, json.Unmarshal(b, into)
+}
+
+func (f *fakeDoc) Write(name string, doc any) error {
+	b, err := json.Marshal(doc)
+	if err != nil {
+		return err
+	}
+	if f.data == nil {
+		f.data = make(map[string][]byte)
+	}
+	f.data[name] = b
+	return nil
+}
+
+// fakeSecretStore implements credential.SecretStore in memory.
+type fakeSecretStore struct {
+	data map[credential.SecretID]string
+}
+
+func (f *fakeSecretStore) Get(id credential.SecretID) (credential.Secret, error) {
+	v, ok := f.data[id]
+	if !ok {
+		return credential.Secret{}, nil
+	}
+	return credential.NewSecret(v), nil
+}
+
+func (f *fakeSecretStore) Set(id credential.SecretID, value credential.Secret) error {
+	var plaintext string
+	if err := value.Use(func(b []byte) error { plaintext = string(b); return nil }); err != nil {
+		return err
+	}
+	if f.data == nil {
+		f.data = make(map[credential.SecretID]string)
+	}
+	f.data[id] = plaintext
+	return nil
+}
+
+func (f *fakeSecretStore) Delete(id credential.SecretID) error {
+	delete(f.data, id)
+	return nil
+}
+
+func (f *fakeSecretStore) Exists(id credential.SecretID) (bool, error) {
+	_, ok := f.data[id]
+	return ok, nil
+}
+
+// ── inline declarations for types not yet in production ────────────────
+// These exist so the test suite exercises every control kind and data path.
+// They are not production settings; when equivalent real settings are
+// declared, these can be removed and the tests pointed at the real ones.
+
+var _ = settings.MustRegisterSecret(settings.SecretSpec{
+	Key:         "test.secretExample",
+	Section:     "Test",
+	Label:       "Example Secret",
+	Description: "A test-only secret-class setting for exercising the infrastructure.",
+	DataClass:   settings.SecretAuthenticator,
+})
+
+var _ = settings.MustRegisterString(settings.StringSpec{
+	Key:         "test.stringExample",
+	Section:     "Test",
+	Label:       "Example String",
+	Description: "A test-only string setting.",
+	DataClass:   settings.PrivateMetadata,
+	Default:     "hello",
+})
+
+var _ = settings.MustRegisterNumber(settings.NumberSpec{
+	Key:         "test.numberExample",
+	Section:     "Test",
+	Label:       "Example Number",
+	Description: "A test-only number setting.",
+	DataClass:   settings.PrivateMetadata,
+	Default:     42,
+	Min:         func() *float64 { v := 0.0; return &v }(),
+	Max:         func() *float64 { v := 100.0; return &v }(),
+})
+
+var _ = settings.MustRegisterSelect(settings.SelectSpec{
+	Key:         "test.selectExample",
+	Section:     "Test",
+	Label:       "Example Select",
+	Description: "A test-only select setting.",
+	DataClass:   settings.PrivateMetadata,
+	Default:     "a",
+	Options: []settings.SelectOption{
+		{Value: "a", Label: "Option A"},
+		{Value: "b", Label: "Option B"},
+	},
+})
+
+// ── Declaration tests ──────────────────────────────────────────────────
+
+func TestDeclarations(t *testing.T) {
+	reg := settings.New(&fakeDoc{}, &fakeSecretStore{})
+	descs := reg.Descriptors()
+
+	if len(descs) == 0 {
+		t.Fatal("expected at least one declared setting, got 0")
+	}
+
+	// Production declaration must be present.
+	foundOSC52 := false
+	for _, d := range descs {
+		if d.Key() == "" {
+			t.Errorf("declaration has empty key: %+v", d)
+		}
+		if d.Label() == "" {
+			t.Errorf("declaration %q has empty label", d.Key())
+		}
+		if d.Control() == "" {
+			t.Errorf("declaration %q has empty control kind", d.Key())
+		}
+		if d.Key() == "clipboard.osc52Suppressed" {
+			foundOSC52 = true
+		}
+	}
+	if !foundOSC52 {
+		t.Error("clipboard.osc52Suppressed not found in declarations")
+	}
+
+	// Wire Declaration conversion.
+	decls := reg.Declarations()
+	if len(decls) != len(descs) {
+		t.Fatalf("Declarations() returned %d, Descriptors() returned %d", len(decls), len(descs))
+	}
+	for _, d := range decls {
+		if d.Key == "" || d.Control == "" || d.Label == "" {
+			t.Errorf("wire declaration %q has empty fields", d.Key)
+		}
+	}
+}
+
+// ── Bool get/set/reset ─────────────────────────────────────────────────
+
+func TestBoolGetSet(t *testing.T) {
+	reg := settings.New(&fakeDoc{}, &fakeSecretStore{})
+
+	osc52 := findBool(t, reg, "clipboard.osc52Suppressed")
+
+	v, err := reg.GetBool(osc52)
+	if err != nil {
+		t.Fatalf("GetBool: %v", err)
+	}
+	if v != false {
+		t.Errorf("expected default false, got %v", v)
+	}
+
+	if err = reg.SetBool(osc52, true); err != nil {
+		t.Fatalf("SetBool: %v", err)
+	}
+
+	v, err = reg.GetBool(osc52)
+	if err != nil {
+		t.Fatalf("GetBool after set: %v", err)
+	}
+	if v != true {
+		t.Errorf("expected true after set, got %v", v)
+	}
+
+	// Reset to default.
+	if err = reg.Reset(osc52); err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+	v, err = reg.GetBool(osc52)
+	if err != nil {
+		t.Fatalf("GetBool after reset: %v", err)
+	}
+	if v != false {
+		t.Errorf("expected false after reset, got %v", v)
+	}
+}
+
+// ── getAll excludes secrets ────────────────────────────────────────────
+
+func TestGetAllExcludesSecrets(t *testing.T) {
+	reg := settings.New(&fakeDoc{}, &fakeSecretStore{})
+
+	all, err := reg.GetAll()
+	if err != nil {
+		t.Fatalf("GetAll: %v", err)
+	}
+
+	for _, d := range reg.Descriptors() {
+		if d.Control() == settings.ControlSecret {
+			if _, ok := all[d.Key()]; ok {
+				t.Errorf("secret key %q present in getAll response", d.Key())
+			}
+		}
+	}
+
+	// Non-secret declarations must be present.
+	if _, ok := all["clipboard.osc52Suppressed"]; !ok {
+		t.Error("clipboard.osc52Suppressed missing from getAll")
+	}
+}
+
+// ── Secret set/delete/exists (no get) ──────────────────────────────────
+
+func TestSecretSetDeleteExists(t *testing.T) {
+	reg := settings.New(&fakeDoc{}, &fakeSecretStore{})
+
+	s := findSecret(t, reg, "test.secretExample")
+
+	exists, err := reg.SecretExists(s)
+	if err != nil {
+		t.Fatalf("SecretExists: %v", err)
+	}
+	if exists {
+		t.Error("secret should not exist initially")
+	}
+
+	if err = reg.SecretSet(s, "super-secret-value"); err != nil {
+		t.Fatalf("SecretSet: %v", err)
+	}
+
+	exists, err = reg.SecretExists(s)
+	if err != nil {
+		t.Fatalf("SecretExists after set: %v", err)
+	}
+	if !exists {
+		t.Error("secret should exist after set")
+	}
+
+	if err = reg.SecretDelete(s); err != nil {
+		t.Fatalf("SecretDelete: %v", err)
+	}
+
+	exists, err = reg.SecretExists(s)
+	if err != nil {
+		t.Fatalf("SecretExists after delete: %v", err)
+	}
+	if exists {
+		t.Error("secret should not exist after delete")
+	}
+}
+
+// ── Validation ─────────────────────────────────────────────────────────
+
+func TestStringValidation(t *testing.T) {
+	reg := settings.New(&fakeDoc{}, &fakeSecretStore{})
+
+	s := findString(t, reg, "test.stringExample")
+
+	err := reg.SetString(s, "")
+	if err == nil {
+		t.Error("expected validation error for empty string")
+	}
+	if !errors.Is(err, settings.ErrValidation) {
+		t.Errorf("expected ErrValidation, got %v", err)
+	}
+}
+
+// ── Number validation ──────────────────────────────────────────────────
+
+func TestNumberValidation(t *testing.T) {
+	reg := settings.New(&fakeDoc{}, &fakeSecretStore{})
+
+	n := findNumber(t, reg, "test.numberExample")
+
+	err := reg.SetNumber(n, *n.Min()-1)
+	if err == nil {
+		t.Error("expected validation error for value below min")
+	}
+	if !errors.Is(err, settings.ErrValidation) {
+		t.Errorf("expected ErrValidation, got %v", err)
+	}
+}
+
+// ── Select validation ──────────────────────────────────────────────────
+
+func TestSelectValidation(t *testing.T) {
+	reg := settings.New(&fakeDoc{}, &fakeSecretStore{})
+
+	s := findSelect(t, reg, "test.selectExample")
+
+	err := reg.SetSelect(s, "not-an-option-value")
+	if err == nil {
+		t.Error("expected validation error for unknown option")
+	}
+	if !errors.Is(err, settings.ErrValidation) {
+		t.Errorf("expected ErrValidation, got %v", err)
+	}
+}
+
+// ── Persistence round-trip: OSC 52 suppressed survives restart ─────────
+
+func TestPersistenceRoundTrip(t *testing.T) {
+	doc := &fakeDoc{}
+
+	reg1 := settings.New(doc, &fakeSecretStore{})
+	osc52 := findBool(t, reg1, "clipboard.osc52Suppressed")
+
+	if err := reg1.SetBool(osc52, true); err != nil {
+		t.Fatalf("SetBool: %v", err)
+	}
+
+	reg2 := settings.New(doc, &fakeSecretStore{})
+	osc52 = findBool(t, reg2, "clipboard.osc52Suppressed")
+
+	v, err := reg2.GetBool(osc52)
+	if err != nil {
+		t.Fatalf("GetBool after round-trip: %v", err)
+	}
+	if v != true {
+		t.Errorf("expected true after persistence round-trip, got %v", v)
+	}
+}
+
+// ── Schema version ─────────────────────────────────────────────────────
+
+func TestSchemaVersion(t *testing.T) {
+	doc := &fakeDoc{}
+	reg := settings.New(doc, &fakeSecretStore{})
+
+	osc52 := findBool(t, reg, "clipboard.osc52Suppressed")
+	if err := reg.SetBool(osc52, true); err != nil {
+		t.Fatalf("SetBool: %v", err)
+	}
+
+	var docData struct {
+		SchemaVersion int                    `json:"schemaVersion"`
+		Values        map[string]interface{} `json:"values"`
+	}
+	found, err := doc.Read("settings.json", &docData)
+	if err != nil {
+		t.Fatalf("read settings doc: %v", err)
+	}
+	if !found {
+		t.Fatal("settings.json not found after write")
+	}
+	if docData.SchemaVersion <= 0 {
+		t.Errorf("expected positive schema version, got %d", docData.SchemaVersion)
+	}
+}
+
+// ── Declaration wire-shape tests ───────────────────────────────────────
+
+func TestBoolDefaultNotNil(t *testing.T) {
+	reg := settings.New(&fakeDoc{}, &fakeSecretStore{})
+
+	for _, d := range reg.Declarations() {
+		if d.Control == "toggle" {
+			if d.Default == nil {
+				t.Errorf("toggle %q has nil default, want explicit value", d.Key)
+			}
+		}
+	}
+}
+
+func TestSelectHasOptions(t *testing.T) {
+	reg := settings.New(&fakeDoc{}, &fakeSecretStore{})
+
+	for _, d := range reg.Declarations() {
+		if d.Control == "select" {
+			if len(d.Options) == 0 {
+				t.Errorf("select %q has no options", d.Key)
+			}
+		}
+	}
+}
+
+func TestNumberHasBounds(t *testing.T) {
+	reg := settings.New(&fakeDoc{}, &fakeSecretStore{})
+
+	for _, d := range reg.Declarations() {
+		if d.Control == "number" {
+			if d.Min == nil && d.Max == nil {
+				t.Errorf("number %q has neither min nor max", d.Key)
+			}
+		}
+	}
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────
+
+func findBool(t *testing.T, reg *settings.Registry, key string) *settings.Bool {
+	t.Helper()
+	for _, d := range reg.Descriptors() {
+		if d.Key() == key {
+			if b, ok := d.(*settings.Bool); ok {
+				return b
+			}
+		}
+	}
+	t.Fatalf("bool setting %q not found", key)
+	return nil
+}
+
+func findString(t *testing.T, reg *settings.Registry, key string) *settings.String {
+	t.Helper()
+	for _, d := range reg.Descriptors() {
+		if d.Key() == key {
+			if s, ok := d.(*settings.String); ok {
+				return s
+			}
+		}
+	}
+	t.Fatalf("string setting %q not found", key)
+	return nil
+}
+
+func findNumber(t *testing.T, reg *settings.Registry, key string) *settings.Number {
+	t.Helper()
+	for _, d := range reg.Descriptors() {
+		if d.Key() == key {
+			if n, ok := d.(*settings.Number); ok {
+				return n
+			}
+		}
+	}
+	t.Fatalf("number setting %q not found", key)
+	return nil
+}
+
+func findSelect(t *testing.T, reg *settings.Registry, key string) *settings.Select {
+	t.Helper()
+	for _, d := range reg.Descriptors() {
+		if d.Key() == key {
+			if s, ok := d.(*settings.Select); ok {
+				return s
+			}
+		}
+	}
+	t.Fatalf("select setting %q not found", key)
+	return nil
+}
+
+func findSecret(t *testing.T, reg *settings.Registry, key string) *settings.Secret {
+	t.Helper()
+	for _, d := range reg.Descriptors() {
+		if d.Key() == key {
+			if s, ok := d.(*settings.Secret); ok {
+				return s
+			}
+		}
+	}
+	t.Fatalf("secret setting %q not found", key)
+	return nil
+}
