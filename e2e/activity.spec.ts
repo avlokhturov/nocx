@@ -25,9 +25,9 @@ test("a background tab lights the activity indicator on normal-buffer output", a
   await expect(page.locator(TAB)).toHaveCount(2);
   await expect(page.locator(TAB).first()).not.toHaveClass(/active/);
 
-  // Wait past the sleep so the output lands while tab 1 is in the background.
-  await page.waitForTimeout(6000);
-
+  // Assert the indicator is visible — Playwright polls until found. The
+  // shell `sleep 3` is a genuine ordering constraint (output must arrive
+  // after backgrounding, not before), not a test synchronization issue.
   console.log("--- console from the page ---");
   for (const l of logs.filter((l) => l.includes("NOCXDBG"))) console.log(l);
 
@@ -40,5 +40,7 @@ test("a background tab lights the activity indicator on normal-buffer output", a
   });
   console.log("--- tab state ---", JSON.stringify(state, null, 1));
 
-  await expect(page.locator(TAB).first().locator(ACTIVITY)).toBeAttached();
+  await expect(
+    page.locator(TAB).first().locator(ACTIVITY),
+  ).toBeAttached({ timeout: 10000 });
 });

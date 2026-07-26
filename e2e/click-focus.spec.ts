@@ -28,11 +28,16 @@ test("a click into the pane leaves the terminal taking keystrokes", async ({
 }) => {
   await page.goto("/");
   await expect(page.locator(".tab")).toHaveCount(1);
-  await page.waitForTimeout(1500); // shell start + first paint
+  // Wait for the shell session to be ready.
+  await expect(page.locator(TITLE).first()).not.toHaveText("", {
+    timeout: 10_000,
+  });
 
   // Move focus off the editor first. Without this the assertion is vacuous:
   // the tab is focused on load, so a click that changed nothing would pass.
-  await page.locator(".tabbar-spacer").click();
+  // Use blur() instead of clicking .tabbar-spacer — the spacer is hidden
+  // when #app.alt-screen is active (CSS display:none), making the click hang.
+  await page.evaluate(() => (document.activeElement as HTMLElement)?.blur());
   await expect
     .poll(() => page.evaluate(() => document.activeElement?.className ?? ""))
     .not.toContain("nocx-editor-input");
