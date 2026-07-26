@@ -21,7 +21,6 @@ export class ConnectionsContent extends BaseTabContent {
 
   async mount(target: HTMLElement, host: TabHost, signal: AbortSignal): Promise<void> {
     if (this._disposed || this.view) return
-    this._target = target
 
     if (signal.aborted) return
 

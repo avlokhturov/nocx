@@ -58,6 +58,12 @@ export class Tab implements TabHost {
     this.pane.className = 'pane'
     this.pane.id = `pane-${id}`
     this.pane.setAttribute('role', 'tabpanel')
+
+    // ── Pre-mount target ──────────────────────────────────────────────
+    // Hand the pane to the content before mount, so setVisible is
+    // meaningful from the first setActive(true) call. setTarget is on the
+    // TabContent interface — every implementation must accept or no-op it.
+    content.setTarget(this.pane)
   }
 
   // ── TabView conformance ───────────────────────────────────────────────
@@ -139,9 +145,12 @@ export class Tab implements TabHost {
 
   // ── Lifecycle ─────────────────────────────────────────────────────────
 
-  /** Mount the content into this tab's pane. Called by TabManager on
-   *  first activation. Suppressed after first call — mount-once is enforced
-   *  at the seam, not by the content implementation (nocx-njrx.2). */
+  /** Mount the content into this tab's pane. Called by TabManager on first
+   *  activation, and suppressed after that: mount-once is enforced here at
+   *  the seam, not by a private flag inside one implementation (nocx-njrx.2).
+   *  The pane is already visible by now — the content received it through
+   *  setTarget() in the constructor — so mount and the first viewport
+   *  delivery both measure a laid-out element. */
   async start(): Promise<void> {
     if (this._mountStarted) return
     this._mountStarted = true
@@ -153,11 +162,6 @@ export class Tab implements TabHost {
     } else {
       this._deliverViewport()
     }
-    // Re-apply visibility now that mount has set the content's target (B.6).
-    // TabManager.setActive calls setVisible() before start(), where it is a
-    // no-op because the content has no target yet. Without this replay, a tab
-    // activated before its mount resolves would never get the 'active' class.
-    this.content.setVisible(this._active)
   }
 
   focus(): void {

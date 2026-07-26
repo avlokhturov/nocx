@@ -126,7 +126,6 @@ export class TerminalContent extends BaseTabContent {
 
   async mount(target: HTMLElement, host: TabHost, signal: AbortSignal): Promise<void> {
     if (this._disposed) return
-    this._target = target
     this.host = host
 
     // Wire the signal: if the tab is disposed during mount, abort.
