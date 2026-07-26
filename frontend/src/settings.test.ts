@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { SettingsViewImpl, type Declaration } from './settings'
 import { Dispatcher } from './dispatcher'
 import { ProfileClient } from './profiles'
-
+import { AcceptedSnapshot } from './settings-domain'
 function mockDispatcher(): Dispatcher {
   return new Dispatcher()
 }
@@ -70,6 +70,7 @@ function mockReady(
     values?: Record<string, unknown>
     overridden?: string[]
     secrets?: Record<string, boolean>
+    revision?: number
   } = {},
 ) {
   const decls = overrides.declarations ?? TEST_DECLARATIONS
@@ -77,7 +78,7 @@ function mockReady(
   vi.spyOn(client, 'getSnapshot').mockResolvedValue({
     values: overrides.values ?? {},
     overridden: overrides.overridden ?? [],
-    revision: 0,
+    revision: overrides.revision ?? 0,
   })
   const secretExists = vi.spyOn(client, 'secretExists')
   const secretMap = overrides.secrets ?? {}
@@ -937,6 +938,62 @@ describe('SettingsViewImpl', () => {
     await view.refresh()
     const row = container.querySelector<HTMLElement>('.st-row[data-key="test\\.noDefault"]')
     expect(row!.querySelector('.st-provenance')).toBeFalsy()
+    expect(row!.querySelector('.st-reset-btn')).toBeFalsy()
+  })
+
+  it('drops a stale snapshot on the normal refresh path (revision < current)', async () => {
+    // First load: revision 5
+    mockReady(client, {
+      values: { 'terminal.fontSize': 16 },
+      overridden: ['terminal.fontSize'],
+      revision: 5,
+    })
+    await view.refresh()
+
+    // Confirm the snapshot was applied — value is present.
+    const row = container.querySelector<HTMLElement>('.st-row[data-key="terminal\\.fontSize"]')
+    expect(row).toBeTruthy()
+    expect(row!.querySelector('.st-provenance')).toBeTruthy()
+
+    // Stale snapshot: revision 3 (lower than current 5) → dropped.
+    mockReady(client, {
+      values: { 'terminal.fontSize': 99 },
+      overridden: [],
+      revision: 3,
+    })
+    await view.refresh()
+
+    // The stale snapshot was dropped — original value and provenance remain.
+    const input = container.querySelector<HTMLInputElement>(
+      '.st-row[data-key="terminal\\.fontSize"] input',
+    )
+    expect(input!.value).toBe('16')
+    expect(container.querySelector('.st-provenance')).toBeTruthy()
+  })
+
+  it('applies a stale snapshot on the resync path (reset policy)', async () => {
+    // First load: revision 5
+    mockReady(client, {
+      values: { 'terminal.fontSize': 16 },
+      overridden: ['terminal.fontSize'],
+      revision: 5,
+    })
+    await view.refresh()
+
+    // Stale snapshot: revision 3, but supplied via reset policy → applies.
+    mockReady(client, {
+      values: { 'terminal.fontSize': 99 },
+      overridden: [],
+      revision: 3,
+    })
+    await view.refresh((_rev, snap) => AcceptedSnapshot.reset(snap))
+
+    const input = container.querySelector<HTMLInputElement>(
+      '.st-row[data-key="terminal\\.fontSize"] input',
+    )
+    expect(input!.value).toBe('99')
+    // Not overridden anymore → label is 'Default', no reset button.
+    const row = container.querySelector<HTMLElement>('.st-row[data-key="terminal\\.fontSize"]')
     expect(row!.querySelector('.st-reset-btn')).toBeFalsy()
   })
 })
