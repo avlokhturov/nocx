@@ -714,12 +714,11 @@ export class ConnectionManagerViewImpl implements ConnectionManagerView {
       )
     }
 
-    // Host binding — required. An unbound credential is refused at connect
-    // time (ErrCredentialNotBound): "works for any host" is the credential-
-    // redirection hole, since this renderer can create profiles as well as
-    // call open, and could aim a credential at a host it controls (nocx-mon).
+    // Host binding — optional (ADR-0006). An empty host means the credential
+    // works for any host; when set, the backend enforces it against the
+    // resolved hostname before dial.
     section.append(
-      this.textField('Bind to Host (required)', credential.host || '', 'text', (v) => {
+      this.textField('Bind to Host (optional)', credential.host || '', 'text', (v) => {
         credential.host = v
       }),
     )

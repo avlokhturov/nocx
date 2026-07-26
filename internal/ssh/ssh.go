@@ -61,17 +61,16 @@ type ConnectConfig struct {
 	JumpAuthMode string
 
 	// BoundHost/BoundPort carry the host a linked credential is bound to
-	// (from profile.Credential), set by the resolver. internal/ssh enforces
-	// them after resolveConfig against the *resolved* hostname and effective
+	// (from profile.Credential), set by the resolver. Binding is optional
+	// (ADR-0006): an empty BoundHost means the credential works for any host
+	// and no check is performed. When BoundHost is set, internal/ssh enforces
+	// it after resolveConfig against the *resolved* hostname and effective
 	// port — never the alias the renderer chose. Binding on the alias is
 	// unsound: ~/.ssh/config can map "Host myserver" to "HostName
 	// evil.example.com", so a binding satisfiable by a name the attacker
-	// chooses is not a binding (nocx-mon/PR11-T5). An empty BoundHost means
-	// the credential is unbound and is REFUSED at connect time — "any host"
-	// is exactly the credential-redirection hole. An unset BoundPort (0)
-	// means "this host, any port": host is the load-bearing identity; making
-	// port mandatory would break every existing host-only credential harder
-	// than the hole it would close. Stated exception, not a silent gap.
+	// chooses is not a binding. An unset BoundPort (0) means "this host, any
+	// port": host is the load-bearing identity; making port mandatory would
+	// break every existing host-only credential harder than it is worth.
 	BoundHost string
 	BoundPort int
 

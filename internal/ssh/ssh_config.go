@@ -88,23 +88,21 @@ func (rc *RealClient) resolveConfig(host string, cfg *ConnectConfig) (*resolvedC
 	return resolved, nil
 }
 
-// checkBinding enforces that a linked credential is only submitted to the
-// target it is bound to. It is the chokepoint for nocx-mon/PR11-T5: a stored
-// credential may only be spent on its bound host (and port, when the binding
-// pins one). The check runs AFTER resolveConfig, so it compares the
-// *resolved* hostname and effective port — not the alias the renderer chose,
-// which ~/.ssh/config can remap to any HostName. A binding satisfiable by a
-// name the attacker picks is not a binding.
+// checkBinding enforces that a host-bound credential is only submitted to the
+// target it is bound to (ADR-0006). The check runs AFTER resolveConfig, so it
+// compares the *resolved* hostname and effective port — not the alias the
+// renderer chose, which ~/.ssh/config can remap to any HostName. A binding
+// satisfiable by a name the attacker picks is not a binding.
 //
-// boundHost empty => the credential is unbound => refused. "Any host" is the
-// redirection hole; it does not become legal because the check is new.
+// boundHost empty => the credential is not host-bound => accepted for any
+// host. Binding is optional (ADR-0006): empty Host means "works for any host".
 // boundPort == 0 => "this host, any port" (see ConnectConfig.BoundPort).
 //
 // credID is carried only for the error message; binding is decided by the
 // host/port fields the resolver copied from profile.Credential.
 func checkBinding(boundHost string, boundPort int, resolved *resolvedConfig, credID string, jump bool) error {
 	if boundHost == "" {
-		return &ErrCredentialNotBound{CredentialID: credID}
+		return nil
 	}
 	if !strings.EqualFold(boundHost, resolved.hostName) {
 		return &ErrCredentialBindingMismatch{

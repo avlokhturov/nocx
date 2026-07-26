@@ -62,23 +62,6 @@ var (
 	errNoAuthMethods = errors.New("no usable auth methods")
 )
 
-// ErrCredentialNotBound is returned when a linked credential carries no
-// bound host. "Any host" is the credential-redirection hole (nocx-mon/PR11-T5):
-// an authenticated renderer can point a victim credential at a host it
-// controls and have the backend submit the password there. Refused at
-// connect time, before any dial. The UI should prompt the user to bind the
-// credential to its intended target.
-type ErrCredentialNotBound struct {
-	CredentialID string
-}
-
-func (e *ErrCredentialNotBound) Error() string {
-	if e.CredentialID == "" {
-		return "credential is not bound to a host — refusing to submit it"
-	}
-	return fmt.Sprintf("credential %s is not bound to a host — refusing to submit it", e.CredentialID)
-}
-
 // ErrCredentialBindingMismatch is returned when a linked credential's bound
 // host (and port, when set) does not match the resolved target. Matching uses
 // the resolved hostname and effective port after ~/.ssh/config merge — never

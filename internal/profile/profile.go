@@ -106,13 +106,11 @@ type Credential struct {
 	Username string   `json:"username"`          // SSH username
 	Auth     AuthMode `json:"auth"`              // Auth method: password, publicKey, agent, keyboardInteractive
 	KeyPath  string   `json:"keyPath,omitempty"` // Private key path (only for publicKey auth)
-	// Host binds this credential to a single target host. A stored password
-	// is only ever submitted to its bound target; the binding is enforced in
-	// internal/ssh after ~/.ssh/config resolution, against the resolved
-	// hostname (never the profile alias). Empty Host means the credential is
-	// UNBOUND and is refused at connect time — "any host" was the
-	// credential-redirection hole (nocx-mon/PR11-T5). Port pins the port when
-	// set; 0 means "this host, any port".
+	// Host optionally binds this credential to a single target host
+	// (ADR-0006). Empty Host means the credential works for any host. When
+	// set, the binding is enforced in internal/ssh after ~/.ssh/config
+	// resolution, against the resolved hostname (never the profile alias).
+	// Port pins the port when set; 0 means "this host, any port".
 	Host string `json:"host,omitempty"`
 	Port int    `json:"port,omitempty"`
 	// SecretID is the opaque reference to the stored password in the

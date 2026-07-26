@@ -74,13 +74,12 @@ export interface Credential {
   // - publicKey: path to private key or vault:// URL
   // - agent/keyboardInteractive: not needed
   keyPath?: string // Only for publicKey auth
-  // The host this credential may be submitted to. Required: an empty host is
-  // refused at connect time, because "any host" is what lets this renderer
-  // aim a credential at a host it controls (nocx-mon). Matching happens on the
-  // backend against the RESOLVED hostname, never this alias.
+  // The host this credential may be submitted to. Optional (ADR-0006): an
+  // empty host means the credential works for any host. When set, matching
+  // happens on the backend against the RESOLVED hostname, never this alias.
   host?: string
-  // Unset means "this host, any port" — a stated exception, not an oversight:
-  // host is the load-bearing half of the identity.
+  // Unset means "this host, any port": host is the load-bearing half of the
+  // identity.
   port?: number
 }
 
