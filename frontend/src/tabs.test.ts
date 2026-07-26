@@ -14,12 +14,12 @@ import {
 } from './test-support/tabs-fixtures'
 import { ClipboardGate } from './clipboard'
 import type { TerminalContent } from './terminal-content'
-import type {
-  TabContent,
-  ContentDescriptor,
-  TabHost,
-  ContentViewport,
-  SurfaceType,
+import {
+  BaseTabContent,
+  type ContentDescriptor,
+  type TabHost,
+  type ContentViewport,
+  type SurfaceType,
 } from './tab-content'
 
 // ── Mocks ──────────────────────────────────────────────────────────────────
@@ -43,16 +43,15 @@ async function getRendererMocks(): Promise<RendererMock[]> {
 // This class MUST NOT carry a private mount guard — the seam enforces
 // mount-once, not the implementation. If mount() is called more than once,
 // the seam is broken.
-class CountingTestContent implements TabContent {
+class CountingTestContent extends BaseTabContent {
   mountCount = 0
   /** Tracks every setVisible call for test assertions. */
   visibleCalls: boolean[] = []
-  private _mountedTarget: HTMLElement | null = null
 
   // eslint-disable-next-line @typescript-eslint/require-await, @typescript-eslint/no-unused-vars
   async mount(target: HTMLElement, _host: TabHost, _signal: AbortSignal): Promise<void> {
     this.mountCount++
-    this._mountedTarget = target
+    this._target = target
   }
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -61,9 +60,7 @@ class CountingTestContent implements TabContent {
 
   setVisible(visible: boolean): void {
     this.visibleCalls.push(visible)
-    if (this._mountedTarget) {
-      this._mountedTarget.classList.toggle('active', visible)
-    }
+    super.setVisible(visible)
   }
 
   dispose(): void {}
@@ -1249,6 +1246,32 @@ describe('TabManager', () => {
     // The last call on our content should now be false.
     expect(content.visibleCalls[content.visibleCalls.length - 1]).toBe(false)
 
+    expect(content.mountCount).toBe(1)
+  })
+
+  it('activating a tab before mount completes still applies visibility after mount', async () => {
+    const { manager } = await mountTabManager()
+    const content = new CountingTestContent()
+    const descriptor: ContentDescriptor = {
+      surfaceType: 'test.mock' as unknown as SurfaceType,
+      singletonKey: null,
+      restoreDescriptor: null,
+      supportsAttention: false,
+      defaultTitle: 'Test',
+    }
+
+    // addTab fires void this.activate(tab) — mount is async even for
+    // CountingTestContent's sync body. Flush microtasks so the full
+    // activate() chain (setActive → start → mount → post-mount setVisible)
+    // completes before we assert.
+    const tab = manager.openTab(content, descriptor)
+    await Promise.resolve()
+    await Promise.resolve()
+
+    // The pane must have the 'active' class. This is the assertion that
+    // breaks if setVisible(true) was only called before mount (when _target
+    // was null) and not again after mount resolves.
+    expect(tab.pane.classList.contains('active')).toBe(true)
     expect(content.mountCount).toBe(1)
   })
 

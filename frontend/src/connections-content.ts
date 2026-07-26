@@ -5,15 +5,16 @@
 
 import { ConnectionManagerViewImpl } from './connections'
 import type { ProfileClient, SSHProfile } from './profiles'
-import type { TabHost, TabContent, ContentViewport } from './tab-content'
+import { BaseTabContent, type TabHost, type ContentViewport } from './tab-content'
 
-export class ConnectionsContent implements TabContent {
+export class ConnectionsContent extends BaseTabContent {
   private view: ConnectionManagerViewImpl | null = null
-  private _target: HTMLElement | null = null
 
   private _disposed = false
 
-  constructor(private readonly profileClient: ProfileClient) {}
+  constructor(private readonly profileClient: ProfileClient) {
+    super()
+  }
 
   /** Callback for when the user clicks Connect on a profile. */
   onConnect?: (profile: SSHProfile) => void
@@ -40,12 +41,6 @@ export class ConnectionsContent implements TabContent {
   viewportChanged(_viewport: ContentViewport): void {
     // Connections view is a scrolling container — no viewport-specific
     // behaviour.
-  }
-
-  setVisible(visible: boolean): void {
-    if (this._target) {
-      this._target.classList.toggle('active', visible)
-    }
   }
 
   focus(): void {

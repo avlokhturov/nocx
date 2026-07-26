@@ -69,6 +69,29 @@ export interface TabContent {
   setVisible(visible: boolean): void
 }
 
+/**
+ * Common base for DOM-based TabContent implementations. Stores the mount
+ * target and implements setVisible by toggling the 'active' class on it.
+ * Override setVisible only when the implementation genuinely needs
+ * different visibility semantics (e.g. a future Solid surface that manages
+ * visibility through signals). Every new TabContent must extend this or
+ * provide its own setVisible.
+ */
+export abstract class BaseTabContent implements TabContent {
+  protected _target: HTMLElement | null = null
+
+  abstract mount(target: HTMLElement, host: TabHost, signal: AbortSignal): Promise<void>
+  abstract viewportChanged(viewport: ContentViewport): void
+  abstract focus(): void
+  abstract dispose(): void
+
+  setVisible(visible: boolean): void {
+    if (this._target) {
+      this._target.classList.toggle('active', visible)
+    }
+  }
+}
+
 // ── Model state (B.8) ─────────────────────────────────────────────────────
 
 /**

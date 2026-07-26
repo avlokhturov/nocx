@@ -6,7 +6,7 @@
 
 import { SettingsViewImpl, keyToDomId } from './settings'
 import type { ProfileClient } from './profiles'
-import type { TabHost, TabContent, ContentViewport } from './tab-content'
+import { BaseTabContent, type TabHost, type ContentViewport } from './tab-content'
 import { renderExportSection } from './export-section'
 import type { SurfaceType, SingletonKey } from './tab-content'
 
@@ -25,11 +25,10 @@ const NARROW_BREAKPOINT_PX = 640
 
 // ── SettingsContent ─────────────────────────────────────────────────────
 
-export class SettingsContent implements TabContent {
+export class SettingsContent extends BaseTabContent {
   private container: HTMLElement | null = null
   private rail: HTMLElement | null = null
   private contentEl: HTMLElement | null = null
-  private _target: HTMLElement | null = null
 
   private searchInput: HTMLInputElement | null = null
   private modifiedToggle: HTMLInputElement | null = null
@@ -40,7 +39,9 @@ export class SettingsContent implements TabContent {
   /** Current search query, used to re-apply filter after re-render. */
   private _query = ''
 
-  constructor(private readonly profileClient: ProfileClient) {}
+  constructor(private readonly profileClient: ProfileClient) {
+    super()
+  }
 
   // ── TabContent ───────────────────────────────────────────────────────
 
@@ -124,12 +125,6 @@ export class SettingsContent implements TabContent {
     if (!this.container) return
     const narrow = viewport.width < NARROW_BREAKPOINT_PX
     this.container.classList.toggle('st-narrow', narrow)
-  }
-
-  setVisible(visible: boolean): void {
-    if (this._target) {
-      this._target.classList.toggle('active', visible)
-    }
   }
 
   dispose(): void {

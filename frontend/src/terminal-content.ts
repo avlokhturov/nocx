@@ -16,7 +16,7 @@ import { CommandLedger } from './command-ledger'
 import { ScrollbackController } from './scrollback/controller'
 import { log } from './log'
 import type { WSClient, SessionHandle } from './ipc'
-import type { TabHost, TabContent, ContentViewport } from './tab-content'
+import { BaseTabContent, type TabHost, type ContentViewport } from './tab-content'
 
 // How long the grid must hold still before the PTY is told about it.
 const RESIZE_SETTLE_MS = 80
@@ -50,7 +50,7 @@ function cwdTooltip(cwd: string, fromOSC7: boolean): string {
  * ledger, input-state machine, and PTY resize policy. It receives geometry
  * through viewportChanged() — it NEVER interprets container geometry itself.
  */
-export class TerminalContent implements TabContent {
+export class TerminalContent extends BaseTabContent {
   private renderer: TerminalRenderer | null = null
   private session: SessionHandle | null = null
   private editor: CommandEditor | null = null
@@ -70,7 +70,6 @@ export class TerminalContent implements TabContent {
   private mountAbortController: AbortController | null = null
   private resizeTimer: number | undefined
   private host: TabHost | null = null
-  private _target: HTMLElement | null = null
 
   // ── Title composition ────────────────────────────────────────────────
   // Title = programTitle || cwdTitle || 'Terminal'
@@ -101,6 +100,7 @@ export class TerminalContent implements TabContent {
       user?: string
     },
   ) {
+    super()
     this._readyPromise = new Promise<boolean>((resolve) => {
       this._readyResolve = resolve
     })
@@ -544,12 +544,6 @@ export class TerminalContent implements TabContent {
 
   focus(): void {
     this.renderer?.focus()
-  }
-
-  setVisible(visible: boolean): void {
-    if (this._target) {
-      this._target.classList.toggle('active', visible)
-    }
   }
 
   refreshAtlas(): void {

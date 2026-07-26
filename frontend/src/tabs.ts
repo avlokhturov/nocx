@@ -89,8 +89,8 @@ export class Tab implements TabHost {
 
   setActive(active: boolean): void {
     this._active = active
-    this.pane.classList.toggle('active', active)
-    // Notify content of visibility change for internal state management (AD-6 corollary).
+    // Visibility crosses the seam through setVisible — the content
+    // toggles the 'active' class on its mount target (AD-6 corollary).
     this.content.setVisible(active)
     if (active) {
       this._hasActivity = false
@@ -152,6 +152,13 @@ export class Tab implements TabHost {
       this.content.viewportChanged(this._latestViewport)
     } else {
       this._deliverViewport()
+    }
+    // Re-apply visibility now that mount has set the content's target (B.6).
+    // TabManager.setActive calls setVisible(true) before start(), so it is
+    // a no-op until mount provides the target element. Without this, a tab
+    // activated before its mount resolves would never get the 'active' class.
+    if (this._active) {
+      this.content.setVisible(true)
     }
   }
 
