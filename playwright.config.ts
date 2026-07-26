@@ -52,8 +52,14 @@ export default defineConfig({
   testDir: "./e2e",
   timeout: 60_000,
 
-  // Refuse to start when the disk is nearly full. A worker cap limits the rate
-  // of consumption; this bounds the total.
+  // Refuse to start when the disk is nearly full.
+  //
+  // Scope honestly: this is a floor on STARTING, not a bound on consumption. The
+  // largest consumer here is not the suite at all — a crashing browser process
+  // can write a multi-gigabyte core dump in seconds, which no test-side setting
+  // can throttle. That is handled outside the repo by capping dump size. What
+  // this guard buys is refusing to begin a run on a filesystem that is already
+  // too full to survive one.
   globalSetup: "./e2e/preflight.ts",
 
   // One worker by default, because the default must assume this process is NOT
