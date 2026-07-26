@@ -1909,3 +1909,263 @@ body {
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
+
+/* ── Export / backup / import section (ADR-0011 §7) ──────────────────── */
+
+.st-export {
+  margin-top: 32px;
+  padding-top: 24px;
+  border-top: 1px solid #292e42;
+}
+
+.st-export-desc {
+  color: #a9b1d6;
+  font-size: 12px;
+  margin: 0 0 16px;
+  line-height: 1.5;
+}
+
+/* ── Mode card grid ──────────────────────────────────────────────────── */
+
+.st-export-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* ── Mode card ───────────────────────────────────────────────────────── */
+
+.st-export-card {
+  border: 1px solid #292e42;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.st-export-card-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  cursor: default;
+}
+
+.st-export-card-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: #c0caf5;
+  white-space: nowrap;
+}
+
+.st-export-card-summary {
+  font-size: 12px;
+  color: #787c99;
+  flex: 1;
+}
+
+.st-export-card-toggle {
+  flex: none;
+  background: none;
+  border: 1px solid #3b4261;
+  border-radius: 4px;
+  color: #7aa2f7;
+  font-size: 11px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
+.st-export-card-toggle:hover {
+  background: #292e42;
+}
+
+/* ── Card body (expanded) ────────────────────────────────────────────── */
+
+.st-export-card-body {
+  display: none;
+  padding: 0 14px 14px;
+}
+
+.st-export-card-expanded .st-export-card-body {
+  display: block;
+}
+
+/* ── Manifest list ───────────────────────────────────────────────────── */
+
+.st-export-manifest {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 14px;
+}
+
+.st-export-manifest li {
+  font-size: 12px;
+  padding: 2px 0;
+  color: #a9b1d6;
+}
+
+.st-export-check {
+  color: #9ece6a;
+  font-weight: 700;
+  margin-right: 4px;
+}
+
+.st-export-cross {
+  color: #f7768e;
+  font-weight: 700;
+  margin-right: 4px;
+}
+
+.st-export-note {
+  color: #e0af68 !important;
+  font-style: italic;
+  padding-left: 14px !important;
+}
+
+/* ── Actions ─────────────────────────────────────────────────────────── */
+
+.st-export-actions {
+  margin-top: 8px;
+}
+
+.st-export-btn {
+  background: #292e42;
+  border: 1px solid #3b4261;
+  border-radius: 4px;
+  color: #c0caf5;
+  font-size: 12px;
+  padding: 5px 14px;
+  cursor: pointer;
+}
+
+.st-export-btn:hover {
+  background: #3b4261;
+}
+
+.st-export-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.st-export-btn-primary {
+  background: #7aa2f7;
+  color: #1a1b26;
+  border-color: #7aa2f7;
+}
+
+.st-export-btn-primary:hover {
+  background: #89b4fa;
+}
+
+.st-export-btn-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+/* ── Status ──────────────────────────────────────────────────────────── */
+
+.st-export-status {
+  font-size: 12px;
+  color: #a9b1d6;
+  margin-top: 6px;
+  min-height: 18px;
+}
+
+/* ── Loading / error ─────────────────────────────────────────────────── */
+
+.st-export-loading {
+  font-size: 12px;
+  color: #565f89;
+  padding: 8px 0;
+}
+
+.st-export-error {
+  font-size: 12px;
+  color: #f7768e;
+  padding: 8px 0;
+}
+
+/* ── Passphrase form ─────────────────────────────────────────────────── */
+
+.st-export-passphrase-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.st-export-passphrase-label {
+  font-size: 12px;
+  color: #a9b1d6;
+  margin-top: 4px;
+}
+
+.st-export-passphrase-input {
+  background: #1a1b26;
+  border: 1px solid #3b4261;
+  border-radius: 4px;
+  color: #c0caf5;
+  font-size: 13px;
+  padding: 6px 10px;
+  width: 100%;
+  max-width: 320px;
+}
+
+.st-export-passphrase-input:focus {
+  border-color: #7aa2f7;
+  outline: none;
+}
+
+.st-export-passphrase-input::placeholder {
+  color: #565f89;
+}
+
+.st-export-show-toggle,
+.st-export-private-toggle {
+  font-size: 11px;
+  color: #787c99;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+
+.st-export-show-toggle input[type='checkbox'],
+.st-export-private-toggle input[type='checkbox'] {
+  margin: 0;
+}
+
+/* ── Backup details ──────────────────────────────────────────────────── */
+
+.st-export-backup-details {
+  background: #1a1b26;
+  border: 1px solid #292e42;
+  border-radius: 4px;
+  padding: 10px 12px;
+  font-size: 11px;
+  color: #a9b1d6;
+  white-space: pre-wrap;
+  margin-top: 8px;
+  max-height: 200px;
+  overflow: auto;
+}
+
+/* ── Import section ──────────────────────────────────────────────────── */
+
+.st-export-import-section {
+  margin-bottom: 16px;
+}
+
+.st-export-import-label {
+  display: block;
+  font-size: 12px;
+  color: #a9b1d6;
+  margin-bottom: 4px;
+}
+
+.st-export-file-input {
+  display: block;
+  font-size: 12px;
+  color: #787c99;
+  margin-bottom: 8px;
+}

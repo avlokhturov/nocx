@@ -7,6 +7,7 @@
 import { SettingsViewImpl, keyToDomId } from './settings'
 import type { ProfileClient } from './profiles'
 import type { TabHost, TabContent, ContentViewport } from './tab-content'
+import { renderExportSection } from './export-section'
 import type { SurfaceType, SingletonKey } from './tab-content'
 
 // ── Registered surface constants (B.7) ─────────────────────────────────
@@ -100,6 +101,9 @@ export class SettingsContent implements TabContent {
       this.syncRailState(),
     )
     root.append(this.contentEl)
+
+    // Export / backup / import section (ADR-0011 §7)
+    renderExportSection(this.contentEl, this.profileClient)
 
     target.append(root)
     this.container = root

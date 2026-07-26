@@ -276,4 +276,73 @@ export class ProfileClient {
   secretExists(key: string): Promise<{ exists: boolean }> {
     return this.call('settings.secretExists', { key })
   }
+  // ── Export/backup/import RPC methods ──────────────────────────────────
+
+  exportManifest(mode: string): Promise<ExportManifest> {
+    return this.call('export.manifest', { mode })
+  }
+
+  configExport(): Promise<ConfigExport> {
+    return this.call('export.configExport', {})
+  }
+
+  portableEncryptedExport(
+    passphrase: string,
+    includePrivateContent?: boolean,
+  ): Promise<PortableEncryptedExport> {
+    return this.call('export.portableEncrypted', {
+      passphrase,
+      includePrivateContent: includePrivateContent ?? false,
+    })
+  }
+
+  backup(): Promise<BackupManifest> {
+    return this.call('export.backup', {})
+  }
+
+  importConfig(data: ConfigExport): Promise<ImportResult> {
+    return this.call('export.import', { data })
+  }
+
+  importPortable(payloadBase64: string, passphrase: string): Promise<ImportResult> {
+    return this.call('export.importPortable', { payload: payloadBase64, passphrase })
+  }
+}
+
+// ── Export/backup/import types (ADR-0011 §7) ─────────────────────────────
+
+export interface ExportManifest {
+  mode: string
+  carries: string[]
+  omits: string[]
+  notes?: string[]
+}
+
+export interface ConfigExport {
+  profiles: SSHProfile[]
+  groups: ProfileGroup[]
+  credentials: Credential[]
+  settings?: Record<string, unknown>
+}
+
+export interface PortableEncryptedExport {
+  payload: string // base64-encoded NaCl secretbox ciphertext
+  includePrivateContent?: boolean
+}
+
+export interface BackupManifest {
+  mode: string
+  configDir: string
+  contentDbPath?: string
+  contentDbAbsent: boolean
+  secretsStatement: string
+  carries: string[]
+  omits: string[]
+}
+
+export interface ImportResult {
+  profilesImported: number
+  groupsImported: number
+  credentialsImported: number
+  unresolvedCredentials?: Credential[]
 }

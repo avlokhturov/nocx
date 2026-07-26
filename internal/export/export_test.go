@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -668,5 +669,35 @@ func TestNoModeResolvesASecret(t *testing.T) {
 	}
 	if strings.Contains(string(raw), "[REDACTED]") {
 		t.Error("[REDACTED] found in serialized output — a Secret leaked")
+	}
+}
+
+// =========================================================================
+// Structural invariant: internal/export MUST NOT import credential
+// =========================================================================
+
+// TestExportDoesNotImportCredential ensures the build enforces the
+// ADR-0011 §2 invariant: no export mode can resolve a secret because
+// the export package never imports credential.SecretStore. This test
+// inspects the package's production imports (not test imports) via
+// go list -json, so it fails the moment someone adds the import.
+func TestExportDoesNotImportCredential(t *testing.T) {
+	cmd := exec.Command("go", "list", "-json", "github.com/shady2k/nocx/internal/export")
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("go list -json failed: %v", err)
+	}
+
+	var pkg struct {
+		Imports []string `json:"Imports"`
+	}
+	if err := json.Unmarshal(out, &pkg); err != nil {
+		t.Fatalf("unmarshal go list output: %v", err)
+	}
+
+	for _, imp := range pkg.Imports {
+		if imp == "github.com/shady2k/nocx/internal/credential" {
+			t.Fatal("INTERNAL/EXPORT IMPORTS CREDENTIAL — this is the ADR-0011 §2 structural invariant. No export mode may resolve a secret. Remove the credential import and wire the RPCs so they call into the export package, never passing a resolved secret.")
+		}
 	}
 }

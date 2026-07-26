@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/gorilla/websocket"
+	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/importer"
 	"github.com/shady2k/nocx/internal/log"
@@ -18,6 +19,7 @@ import (
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/ssh"
+	"github.com/shady2k/nocx/internal/storage"
 )
 
 // sessionRx wraps a session's output ring together with the current attached
@@ -75,6 +77,14 @@ type WSServer struct {
 	// settings registry backs the settings.* JSON-RPC methods.
 	settings   *settings.Registry
 	resolverOK bool
+
+	// Export/backup/import dependencies (ADR-0011 §7).
+	// When nil, export.* methods return a JSON-RPC error.
+	// The fields are populated by WithPaths, WithContentDB.
+	// The credential.CredentialStore is deliberately absent —
+	// no export mode may resolve a secret (ADR-0011 §2).
+	exportPaths     storage.Paths
+	exportContentDB content.ContentDB
 
 	// ringsMu protects rx and stopped. One sessionRx per session;
 	// keyed by session.ID. When stopped is true, getOrCreateRx returns nil
@@ -138,6 +148,19 @@ func WithSettingsRegistry(r *settings.Registry) WSServerOption {
 			s.broadcastSettingsChanged(revision, keys)
 		})
 	}
+}
+
+// WithExportPaths attaches storage path resolution for the export.backup
+// JSON-RPC method (same-machine backup manifest).
+func WithExportPaths(p storage.Paths) WSServerOption {
+	return func(s *WSServer) { s.exportPaths = p }
+}
+
+// WithExportContentDB attaches a content database for the
+// export.portableEncrypted JSON-RPC method. A stub is correct when
+// content.db has not yet been created (ADR-0011 §5).
+func WithExportContentDB(db content.ContentDB) WSServerOption {
+	return func(s *WSServer) { s.exportContentDB = db }
 }
 
 func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption) *WSServer {
@@ -547,6 +570,9 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 	case "settings.describe", "settings.getSnapshot", "settings.set", "settings.reset",
 		"settings.secretSet", "settings.secretDelete", "settings.secretExists":
 		s.handleSettingsMethod(wconn, req)
+	case "export.manifest", "export.configExport", "export.portableEncrypted",
+		"export.backup", "export.import", "export.importPortable":
+		s.handleExportMethod(wconn, req)
 	default:
 		resp := newJSONRPCError(req.ID, -32601, "Method not found")
 		_ = wconn.writeJSON(resp)
