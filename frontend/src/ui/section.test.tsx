@@ -34,10 +34,19 @@ describe('Section', () => {
     expect(screen.getByText('Row 2')).toBeTruthy()
   })
 
-  it('sets class on the wrapper', () => {
+  // Section is a structural container, so it keeps its `class` passthrough (§3.6) —
+  // but the identity comes first and is not optional. A caller's class riding along
+  // is placement; the component's own class is what section.css keys on, and a
+  // Section that emitted only the caller's class would be an unstyled Section.
+  it('emits its identity first, with the passthrough after it', () => {
     subject({ class: 'st-section' })
-    const container = document.querySelector('.st-section')
-    expect(container).not.toBeNull()
+    const el = document.querySelector('section')
+    expect(el?.getAttribute('class')).toBe('ui-section st-section')
+  })
+
+  it('emits its identity with no passthrough', () => {
+    subject()
+    expect(document.querySelector('section')?.getAttribute('class')).toBe('ui-section')
   })
 
   it('uses section element', () => {

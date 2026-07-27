@@ -1,17 +1,36 @@
-/* Section — a titled group inside a surface.
-   Moved verbatim from kit.css by T1 (nocx-v0ai). T12 (nocx-s9yw) bounds its `class`
-   passthrough to layout and placement. */
+/* Section — a titled group of controls.
+   T12 (nocx-s9yw) folded in what `.cm-form-section` had been doing separately in
+   style.css, because the connections form was building the same thing two ways: two
+   real `<Section>`s and three hand-rolled `<div class="cm-form-section"><h2>` groups,
+   with different headings. Two of those divs are Sections now; the third has no title
+   and is not a section at all, so it keeps a plain layout class.
+
+   `class` stays on this component (§3.6) — it is a structural container meant to be
+   embedded — but it may carry only layout and placement. Everything below is the
+   component's own appearance and is not a consumer's to override. */
 
 .ui-section {
-  margin-bottom: 28px;
+  /* The children are kit Fields and TextFields. They own their internals and not
+     the space between them, so stacked with no gap they read as one block of
+     striped boxes. The group owns the gap. */
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  margin-bottom: var(--space-8);
 }
 
+/* The heading and its rule. The divider was previously only on the hand-rolled
+   groups, so three of the five groups in the connections form had one and two did
+   not — a difference nobody chose. One heading now, and it is this one. */
 .ui-section h2 {
   font-family: var(--font-family-ui);
   font-size: var(--font-size-lg);
   font-weight: 600;
   color: var(--color-text);
-  margin: 0 0 4px;
+  letter-spacing: -0.01em;
+  margin: 0 0 var(--space-2);
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--color-divider);
 }
 
 .ui-section > p {

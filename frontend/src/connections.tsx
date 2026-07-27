@@ -345,8 +345,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         </Section>
 
         <Show when={!profile.options.credentialId}>
-          <div class="cm-form-section">
-            <h2>Authentication (override)</h2>
+          <Section title="Authentication (override)">
             <div class="cm-tip">
               Tip: Create a Credential above to reuse auth settings across connections.
             </div>
@@ -365,7 +364,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                 </For>
               </div>
             </Field>
-          </div>
+          </Section>
         </Show>
 
         <Show when={!!profile.options.credentialId}>
@@ -391,8 +390,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           </div>
         </Show>
 
-        <div class="cm-form-section">
-          <h2>Advanced</h2>
+        <Section title="Advanced">
           <TextField
             label="Keepalive interval (ms)"
             value={profile.options.keepaliveInterval || 0}
@@ -442,7 +440,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
               onChange={(v) => setOption('canBeJumpServer', v)}
             />
           </div>
-        </div>
+        </Section>
 
         <div class="cm-form-actions">
           <Button variant="primary" onClick={() => props.onConnect?.(profile)}>

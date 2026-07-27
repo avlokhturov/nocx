@@ -123,28 +123,15 @@
   max-width: 600px;
 }
 
-/* The form rows are kit Fields and TextFields, which own their internals but
-   not the space between them — stacked with no gap they read as one block of
-   striped boxes. */
+/* A group of form rows with no heading — the credential card. Not a Section: it
+   titles nothing, so making it one would put an empty <h2> on the page. Layout
+   only; the heading treatment it used to carry moved into section.css with the
+   two groups that did have titles (T12, nocx-s9yw). */
 .cm-form-section {
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
   margin-bottom: var(--space-8);
-}
-
-.cm-form-section > h2 {
-  margin-bottom: 0;
-}
-
-.cm-form-section h2 {
-  font-size: var(--font-size-lg);
-  font-weight: 600;
-  color: var(--color-text);
-  letter-spacing: -0.01em;
-  margin: 0 0 16px;
-  padding-bottom: var(--space-2);
-  border-bottom: 1px solid var(--color-divider);
 }
 
 .cm-field {
