@@ -54,19 +54,23 @@ type OriginPolicy interface {
 	Allow(origin, host string) bool
 }
 
-// wailsOriginScheme and wailsOriginHost are what the shipped webview actually
-// sends, captured from a real run rather than guessed:
+// wailsOriginScheme and the wailsOriginHost* constants are what the shipped
+// webview actually sends, captured from real runs rather than guessed:
 //
-//	origin=wails://wails.localhost:34115  host=127.0.0.1:49308
+//	macOS (WKWebView):  origin=wails://wails.localhost:34115  host=127.0.0.1:49308
+//	Linux (WebKitGTK):  origin=wails://wails                  host=127.0.0.1:42723
 //
-// Read off the CI e2e job on macos-latest, where `wails dev` runs the real
-// WKWebView alongside Playwright's browser. The port is the dev asset server's
+// The macOS form was read off the CI e2e job on macos-latest, where `wails dev`
+// runs the real WKWebView alongside Playwright's browser. The Linux form was
+// captured from a packaged build on WebKitGTK, which uses a bare "wails"
+// hostname without the ".localhost" suffix. The port is the dev asset server's
 // and is absent in a packaged build, which is why matching ignores it — pinning
 // the full string would pass in CI and reject the app in release, the exact
 // failure this policy was warned about.
 const (
-	wailsOriginScheme = "wails"
-	wailsOriginHost   = "wails.localhost"
+	wailsOriginScheme    = "wails"
+	wailsOriginHost      = "wails.localhost" // macOS WKWebView
+	wailsOriginHostLinux = "wails"           // Linux WebKitGTK
 )
 
 // LoopbackOriginPolicy is the development policy. Two shapes are legitimate:
@@ -103,9 +107,12 @@ func (LoopbackOriginPolicy) Allow(origin, host string) bool {
 // isWailsWebviewOrigin reports whether an Origin is the app's own webview.
 //
 // Scheme and hostname must both match; the port is ignored because it exists
-// only under `wails dev`. A browser page cannot forge this — no page is served
-// from a wails:// origin — so accepting it costs nothing against the threat the
-// Origin check exists for, which is a foreign page driving the socket.
+// only under `wails dev`. Two hostnames are accepted because the webview
+// differs by platform: macOS WKWebView sends "wails.localhost", Linux
+// WebKitGTK sends "wails". A browser page cannot forge either — no page is
+// served from a wails:// origin — so accepting them costs nothing against the
+// threat the Origin check exists for, which is a foreign page driving the
+// socket.
 func isWailsWebviewOrigin(u *url.URL) bool {
 	if u.Scheme != wailsOriginScheme {
 		return false
@@ -114,7 +121,7 @@ func isWailsWebviewOrigin(u *url.URL) bool {
 	if h == "" { // wails://wails.localhost parses the host into Opaque on some forms
 		h = strings.TrimPrefix(u.Opaque, "//")
 	}
-	return h == wailsOriginHost
+	return h == wailsOriginHost || h == wailsOriginHostLinux
 }
 
 // PinnedOriginPolicy is the production policy: exactly the origins the shipped

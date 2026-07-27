@@ -3,6 +3,7 @@ package profile
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"os"
 	"strings"
 )
@@ -106,10 +107,12 @@ type Credential struct {
 	Username string   `json:"username"`          // SSH username
 	Auth     AuthMode `json:"auth"`              // Auth method: password, publicKey, agent, keyboardInteractive
 	KeyPath  string   `json:"keyPath,omitempty"` // Private key path (only for publicKey auth)
-	// Host optionally binds this credential to a single target host
-	// (ADR-0006). Empty Host means the credential works for any host. When
-	// set, the binding is enforced in internal/ssh after ~/.ssh/config
-	// resolution, against the resolved hostname (never the profile alias).
+	// Host binds this credential to a single target host. A stored password
+	// is only ever submitted to its bound target; the binding is enforced in
+	// internal/ssh after ~/.ssh/config resolution, against the resolved
+	// hostname (never the profile alias). "Any host" was the
+	// credential-redirection hole (nocx-mon/PR11-T5), so Host is REQUIRED:
+	// Validate refuses an empty one and SaveCredential will not store it.
 	// Port pins the port when set; 0 means "this host, any port".
 	Host string `json:"host,omitempty"`
 	Port int    `json:"port,omitempty"`
@@ -124,6 +127,29 @@ type Credential struct {
 // NewCredentialID generates a credential id: "cred:name:uuid".
 func NewCredentialID(name string) string {
 	return "cred:" + slugify(name) + ":" + newUUID()
+}
+
+// ErrCredentialHostRequired is returned when a credential carries no host.
+//
+// The policy is nocx-mon's and it is unchanged: a stored secret may only be
+// spent on the target it is bound to. What changes here is WHEN that is
+// enforced. Refusing only at connect time (checkBinding, internal/ssh) let the
+// user store a secret and meet the refusal later as a broken connection rather
+// than as a rejected form — the rule was real but arrived too late to act on.
+//
+// Note what this does NOT claim. A renderer that can create credentials can
+// also edit the binding, so this stops a mistake, not an attacker; a binding
+// that the constrained actor can rewrite is not an authorization boundary.
+// Making it one needs an approval path outside the renderer, which does not
+// exist yet (nocx-wd2m).
+var ErrCredentialHostRequired = errors.New("credential must be bound to a host")
+
+// Validate reports whether the credential may be stored.
+func (c Credential) Validate() error {
+	if strings.TrimSpace(c.Host) == "" {
+		return ErrCredentialHostRequired
+	}
+	return nil
 }
 
 // applyDefaults fills zero-valued fields on a profile with sensible defaults.

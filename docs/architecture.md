@@ -77,28 +77,29 @@ cwd/prompt markers never cross the WS as their own control messages — they are
 
 **Backend (Go core)** — one interface, one responsibility each:
 
-| Module | SRP responsibility |
-| --- | --- |
-| `pty` | Spawn and manage local pseudo-terminals; stream their I/O. |
-| `ssh` | Establish and manage SSH connections/channels via `x/crypto/ssh`, honoring `~/.ssh/config`; own a **ref-counted `ssh.Client` connection pool** keyed by host+identity (channels multiplex over one connection). |
-| `session` | Own session lifecycle; act as the registry mapping session-id → one PTY/SSH channel + one goroutine. Owns the **channel**; references (never owns) a pooled `ssh` connection. |
-| `transport` | Serve one WebSocket per client; multiplex sessions; carry the binary data plane (PTY I/O) and the JSON-RPC control plane; enforce reconnect replay (AD-9) and backpressure (AD-10). |
-| `config` | Load/persist settings, themes, keybindings, tab-restore; house the Phase-2 vault seam. |
-| `shellintegration` | Provide the OSC 7/133 substrate contract (Tier A shell hooks now; Tier B remote-helper seam later). |
+| Module             | SRP responsibility                                                                                                                                                                                              |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pty`              | Spawn and manage local pseudo-terminals; stream their I/O.                                                                                                                                                      |
+| `ssh`              | Establish and manage SSH connections/channels via `x/crypto/ssh`, honoring `~/.ssh/config`; own a **ref-counted `ssh.Client` connection pool** keyed by host+identity (channels multiplex over one connection). |
+| `session`          | Own session lifecycle; act as the registry mapping session-id → one PTY/SSH channel + one goroutine. Owns the **channel**; references (never owns) a pooled `ssh` connection.                                   |
+| `transport`        | Serve one WebSocket per client; multiplex sessions; carry the binary data plane (PTY I/O) and the JSON-RPC control plane; enforce reconnect replay (AD-9) and backpressure (AD-10).                             |
+| `config`           | Load/persist settings, themes, keybindings, tab-restore; house the Phase-2 vault seam.                                                                                                                          |
+| `shellintegration` | Provide the OSC 7/133 substrate contract (Tier A shell hooks now; Tier B remote-helper seam later).                                                                                                             |
 
 **Frontend (xterm.js)**:
 
-| Module | SRP responsibility |
-| --- | --- |
-| `terminal` | Own terminal render state (grid, scrollback, selection); parse VT and surface OSC events via `parser.registerOscHandler` (verified — [ADR-0001](decisions/0001-xterm-js-as-vt-frontend.md)). |
-| `ui` | Render tabs, menus, config, and map OSC/cwd events to user actions. |
-| `ipc` | Speak the WebSocket protocol: binary data plane (PTY I/O) + JSON-RPC control plane; ack received byte-offsets (AD-9). |
+| Module     | SRP responsibility                                                                                                                                                                                                               |
+| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `terminal` | Own terminal render state (grid, scrollback, selection); parse VT and surface OSC events via `parser.registerOscHandler` (verified — [ADR-0001](decisions/0001-xterm-js-as-vt-frontend.md)).                                     |
+| `ui`       | Render tabs, menus, config, and map OSC/cwd events to user actions. Built on **SolidJS** ([ADR-0012](decisions/0012-solidjs-as-the-application-ui-layer.md)); it creates an empty host for `terminal` and never renders into it. |
+| `ipc`      | Speak the WebSocket protocol: binary data plane (PTY I/O) + JSON-RPC control plane; ack received byte-offsets (AD-9).                                                                                                            |
 
 ## Architectural Decisions
 
 All decisions below are **[ADOPTED]**. Each carries stable IDs; do not re-litigate.
 
 **AD-1 — Decouple frontend/backend over a WebSocket transport.**
+
 - Binds: all frontend↔backend communication.
 - Prevents: shell-locked IPC that blocks a future web version; and a heavyweight transport abstraction (e.g. socket.io) whose unbounded buffering fights AD-10 backpressure and whose Go server ports lag the protocol.
 - Rule: one WebSocket per client, split into two planes; sessions multiplexed by server-assigned session-id. Wire format is explicit:
@@ -110,22 +111,26 @@ All decisions below are **[ADOPTED]**. Each carries stable IDs; do not re-litiga
   - Security invariant for when web ships: auth token + bind-to-localhost by default.
 
 **AD-2 — Go backend service as the one core.**
+
 - Binds: PTY, SSH, session, config, shell-integration logic.
 - Prevents: language fork between desktop and web; logic duplicated per host.
 - Rule: one Go codebase produces multiple build targets (desktop backend, web server, remote helper); hosts embed or serve it, never reimplement it.
 
 **AD-3 — Wails v2 as the MVP desktop shell.**
+
 - Binds: desktop packaging and the embedded WebView (WKWebView on macOS).
 - Prevents: premature adoption of Wails v3 alpha; multi-window complexity MVP does not need.
 - Rule: shell stays a thin, swappable host; tabs and Phase-2 splits are in-window. Migrate to v3 only if multi-window is required.
 
 **AD-4 — SSH built on `golang.org/x/crypto/ssh` (foundation-first).**
+
 - Binds: all SSH connection handling.
 - Prevents: a spawn-`ssh` MVP that would need rewriting for the Phase-2 vault/profiles.
 - Rule: SSH sits behind a clean interface; honor `~/.ssh/config` via a config parser (e.g. `kevinburke/ssh_config`); SFTP via `pkg/sftp` later; the vault injects credentials through this library. The `ssh` module owns a **ref-counted `ssh.Client` connection pool** keyed by host+identity: channels multiplex over one connection, and the connection closes with the last tab that references it — preserving connection reuse and Phase-2 vault credential caching.
-  - Reusable credential target scope follows [ADR-0006](decisions/0006-reusable-credentials.md): empty host means any host; a non-empty host and optional port are checked against the resolved `HostName` and effective port before dialing, independently for target and jump credentials.
+  - Reusable credentials require a non-empty host binding. The SSH module compares that binding case-insensitively with the resolved `HostName` after `~/.ssh/config` processing, and compares a non-zero bound port with the effective port; port `0` means any port on the bound host. Target and jump credentials are checked independently before dial. This prevents accidental credential misrouting, but is not an authorization boundary against a renderer that can edit credential metadata.
 
 **AD-5 — Two-tier shell-integration substrate.**
+
 - Binds: cwd/prompt/block metadata and the features that consume it.
 - Prevents: coupling MVP features to a remote-install requirement.
 - Rule: Tier A = OSC 7/133 markers via shell hooks (zero remote install; local + over SSH) is the MVP substrate; Tier B = a cross-compiled Go helper scp'd to a remote host **augments** (never replaces) the remote shell and feeds richer metadata to the local terminal — a designed seam, not built now.
@@ -134,12 +139,15 @@ All decisions below are **[ADOPTED]**. Each carries stable IDs; do not re-litiga
   - Tier A relies on the VT frontend surfacing OSC 7/133 as events — **verified on xterm.js** (`nocx-dej`, [ADR-0001](decisions/0001-xterm-js-as-vt-frontend.md)).
 
 **AD-6 — Single-owner state ownership.**
+
 - Binds: where terminal vs. session state lives.
 - Prevents: dual-ownership drift and byte-stream sniffing in the backend.
 - Rule: the VT frontend (xterm.js — [ADR-0001](decisions/0001-xterm-js-as-vt-frontend.md)) owns render state (grid, scrollback, selection) and parses OSC 7/133, surfacing them as events via `parser.registerOscHandler` (verified, `nocx-dej`); the Go backend owns PTY/session lifecycle, SSH connections, and config/vault. The backend does **not** sniff the byte stream.
   - ~~Conditional dependency~~ **DISCHARGED** ([ADR-0001](decisions/0001-xterm-js-as-vt-frontend.md)): the VT frontend is xterm.js, whose `parser.registerOscHandler` was verified to deliver OSC 7 and OSC 133 frontend-side. The backend never parses OSC.
+  - **UI-layer corollary** ([ADR-0012](decisions/0012-solidjs-as-the-application-ui-layer.md)): the application UI runs on SolidJS, and the same single-owner rule draws the line inside the frontend. Solid creates an **empty** host element and the terminal adapter takes exclusive ownership of its descendants — Solid never renders children beneath it, never keys or remounts it during ordinary tab activation, and never expresses terminal render state as reactive state. State crosses that boundary only through explicit imperative methods (`setVisible`, `resize`, `focus`). ADR-0005's WebKitGTK refresh pump stays inside the terminal controller; framework effects must not drive terminal refreshes.
 
 **AD-7 — Session model: one PTY/channel per tab.**
+
 - Binds: concurrency and session bookkeeping.
 - Prevents: shared-goroutine coupling across tabs.
 - Rule: one PTY (or SSH channel) per tab; one goroutine per session; the backend `session` module is the authoritative registry keyed by session-id.
@@ -147,17 +155,20 @@ All decisions below are **[ADOPTED]**. Each carries stable IDs; do not re-litiga
   - **Channel/connection ownership**: `session` owns the channel and references (does not own) a pooled `ssh` connection from AD-4. The shared `Channel` interface declares `Resize() error` (may return an unsupported error) and a `Disconnected` signal, so local-PTY and SSH both feed AD-9 reconnect uniformly.
 
 **AD-8 — Interface-first + dependency injection paradigm.**
+
 - Binds: every module boundary.
 - Prevents: concrete-to-concrete coupling that blocks swapping and testing.
 - Rule: every module lives behind an interface and obeys SRP; wiring happens via **manual constructor injection at a single composition root** — the default. `google/wire` was archived read-only (2025-08-25); treat any compile-time DI tool as an optional codegen convenience only [ASSUMPTION]. This same seam is the future plugin seam — a plugin is just another implementation registered at the composition root.
 
 **AD-9 — Reconnect / replay ownership.**
+
 - Binds: session + transport + ipc + terminal.
 - Prevents: data loss or corrupt render on a dropped WS; scrollback dual-ownership.
 - Rule: the backend holds a **bounded per-session output ring** keyed by a monotonic byte-offset; the frontend acks the last-received offset. On reconnect the frontend sends its last offset and the backend replays from there, or emits an explicit `reset` (clear + resync) if the offset is past the buffer.
   - This replay ring is **transport buffering, not scrollback ownership** — scrollback stays frontend-owned, so AD-6 is intact.
 
 **AD-10 — Backpressure / flow-control.**
+
 - Binds: transport + session + ipc + terminal.
 - Prevents: OOM, dropped bytes, and cross-tab head-of-line stalls on the shared WS.
 - Rule: bounded in-flight-byte **credit per session**; when the credit is exhausted, apply backpressure to the PTY/SSH read (throttle the source — **never drop, never grow unbounded**). Bytes are lossless and ordered; per-session fairness ensures one busy tab cannot starve others.
@@ -166,7 +177,7 @@ All decisions below are **[ADOPTED]**. Each carries stable IDs; do not re-litiga
 
 **DI / replaceability.** Modules depend only on abstractions; the composition root is the one place concrete implementations are chosen and wired. Swapping SSH backends, transports, or loggers is a one-line change at the root, and every module is independently testable via injected fakes.
 
-**Quality gates & CI.** Enforced from commit #1: both Go and TypeScript are gated the same way — format, lint, and test. Go uses `golangci-lint` and `gofumpt`; the frontend is held to the same bar. The per-commit gate is the `.githooks/pre-commit` hook, mirrored by `make ci`; GitHub Actions (`ci.yml`) runs on every pull request to `main`, on `release/**` branches and manual dispatch, and is *called* by `release.yml` on a version tag so a release gates on a green suite. The `pull_request` trigger is the mechanical enforcement of **no merge without green** on `main` (nocx-q36): the pre-commit hook and `make ci` give the identical checks as fast local feedback, but a hook is bypassable with `--no-verify` and `make hooks` is a per-clone step a fresh checkout may skip, so CI is the gate that cannot be side-stepped. `ci.yml` no longer has its own tag trigger — with `release.yml` calling it, keeping one would run the whole suite twice per release. Tests are mandatory (TDD) for every language.
+**Quality gates & CI.** Enforced from commit #1: both Go and TypeScript are gated the same way — format, lint, and test. Go uses `golangci-lint` and `gofumpt`; the frontend is held to the same bar. The per-commit gate is the `.githooks/pre-commit` hook, mirrored by `make ci`; GitHub Actions (`ci.yml`) runs on every pull request to `main`, on `release/**` branches and manual dispatch, and is _called_ by `release.yml` on a version tag so a release gates on a green suite. The `pull_request` trigger is the mechanical enforcement of **no merge without green** on `main` (nocx-q36): the pre-commit hook and `make ci` give the identical checks as fast local feedback, but a hook is bypassable with `--no-verify` and `make hooks` is a per-clone step a fresh checkout may skip, so CI is the gate that cannot be side-stepped. `ci.yml` no longer has its own tag trigger — with `release.yml` calling it, keeping one would run the whole suite twice per release. Tests are mandatory (TDD) for every language.
 
 **Logging / observability.** Structured logging via Go `log/slog`, context-propagated, behind a swappable logging interface. Metrics and tracing seams are designed-for but not built (YAGNI). The frontend logs to the browser console and those logs are forwardable to the backend.
 

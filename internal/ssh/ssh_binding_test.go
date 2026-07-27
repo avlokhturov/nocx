@@ -240,34 +240,27 @@ func TestBinding_PortFromAlias(t *testing.T) {
 	}
 }
 
-// TestBinding_UnboundAllowed pins the ADR-0006 decision about empty Host: an
-// unbound credential (BoundHost == "") is accepted for any host. Binding is
-// optional; "works for any host" is the documented semantics of an empty Host.
-func TestBinding_UnboundAllowed(t *testing.T) {
-	srv := startTestSSHServer(t)
-	defer srv.close()
-	khPath := writeKnownHosts(t, srv, srv.addr)
+// TestBinding_UnboundRefused pins the decision about empty Host: an unbound
+// credential (BoundHost == "") is refused at connect time. "Any host" is the
+// redirection hole; it does not become legal because the check is new.
+func TestBinding_UnboundRefused(t *testing.T) {
+	c := newBindingClient(t)
+	store := &credStub{pw: "x"}
+	secretID := credential.NewSecretID()
 
-	client, err := NewReal(log.NewSlogAdapter(nil), WithSSHConfigPath(writeSSHConfig(t, "")), WithKnownHostsFile(khPath))
-	if err != nil {
-		t.Fatalf("NewReal: %v", err)
-	}
-	defer func() { _ = client.Close() }()
-
-	store := &credStub{pw: testSSHPassword}
-
-	// No binding set — BoundHost stays "". ADR-0006: empty Host means the
-	// saved credential works for any host, so its password authenticates.
-	ch, err := client.Connect(
-		context.Background(), srv.addr,
-		WithUser("test"),
-		WithAuthMode("password"),
-		WithCredentials(store, credential.NewSecretID()),
+	_, err := c.Connect(
+		context.Background(), unreachableHost,
+		WithUser("victim"),
+		WithCredentials(store, secretID),
+		// No binding set — BoundHost stays "".
 	)
-	if err != nil {
-		t.Fatalf("unbound credential on %s: Connect: %v", srv.addr, err)
+	var unbound *ErrCredentialNotBound
+	if !errors.As(err, &unbound) {
+		t.Fatalf("want ErrCredentialNotBound, got %T: %v", err, err)
 	}
-	defer func() { _ = ch.Close() }()
+	if unbound.CredentialID != string(secretID) {
+		t.Errorf("CredentialID = %q, want %q", unbound.CredentialID, secretID)
+	}
 }
 
 // TestBinding_HostAnyPortWhenPortUnset pins the stated exception: a
@@ -318,8 +311,9 @@ func TestBinding_InlineAuthNotChecked(t *testing.T) {
 	}
 	defer func() { _ = client.Close() }()
 
-	// No WithCredentials -> Secrets nil -> check skipped entirely. Inline
-	// auth has no stored secret, so there is nothing to bind.
+	// No WithCredentials -> Secrets nil -> check skipped. BoundHost left
+	// empty would otherwise trip ErrCredentialNotBound; that it does not is
+	// exactly the point.
 	ch, err := client.Connect(
 		context.Background(), srv.addr,
 		WithUser("test"),

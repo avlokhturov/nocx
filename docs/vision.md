@@ -9,22 +9,28 @@ updated: 2026-07-26
 
 ## 0. Current state (2026-07-26) — read this first
 
-**The core is being rewritten, and new work outside the three active tracks does not start
-until they close.** If you were asked to hold off on coding, this is why: all three tracks
-move seams that everything else attaches to, so anything built against today's seams would
-be rewritten twice.
+**The foundation freeze is over. All four foundation epics closed on 2026-07-26** —
+`nocx-6ek` (persistence), `nocx-v1pr` (tabs), `nocx-k0xk` (quality gates) and `nocx-8v51`
+(settings). The seams they moved have stopped moving, so work built against them is no
+longer at risk of being written twice. Nothing is `in_progress` right now; the front is
+the free epics in `bd ready -t epic -u`.
 
-The active tracks are the epics in status `in_progress`:
+An earlier version of this section named those four as active tracks and told you to hold
+off on coding. **That instruction is retired.** It is left described here rather than
+silently deleted because it was quoted at people, and someone reading a stale copy needs
+to be able to tell that it lapsed rather than that they misread it.
 
-| Epic | Track | What it moves |
-| --- | --- | --- |
-| `nocx-6ek` | Persistence | Storage capabilities and secrets as opaque references (ADR-0011) |
-| `nocx-v1pr` | Tabs | TabContent seam with a cancellable lifecycle; tab presentation extracted |
-| `nocx-k0xk` | Quality gates | The e2e suite and the per-commit gate — the thing that has to work before the rewrite can be trusted |
+This paragraph is a snapshot and will go stale the same way. The live answer is always
+`bd list --status in_progress --type epic`, and where it disagrees with this document the
+command is right.
 
-Settings (`nocx-8v51`) was the fourth and closed on 2026-07-26. This table is a snapshot, not
-a maintained list: the live answer is `bd list --status in_progress --type epic`, and where
-the two disagree the command is right.
+**Open architectural question, unowned as of 2026-07-26: the frontend has no recorded UI
+framework decision.** The vanilla-TypeScript-plus-Vite setup came from the `M0 scaffold`
+commit (`2bb8ddf`) and was never chosen against alternatives — no ADR discusses it, and
+ADR-0001 settled the VT engine (xterm.js), not the UI layer. That default is now load-
+bearing for three filed epics: `nocx-ycet` (authoritative frontend state), `nocx-vxqj`
+(UI kit) and `nocx-708q` (multi-view sidebar with a file tree). It should be decided
+deliberately before those start, in either direction. See `nocx-6zu5`.
 
 After the foundation, the order is: editor core on CodeMirror 6, Warp-style command blocks and
 shell integration → terminal core, terminal UI and the SSH client → secrets vault → Warpify →
@@ -63,11 +69,12 @@ Developers who run AI-agent TUIs locally (Claude Code, aider) have to choose bet
 There is no local-first terminal that pairs a Warp/Ghostty-grade engine with Tabby-style comfort.
 
 **Competitive-honesty note.** Rendering alone is not the wedge — several tools already render well.
+
 - **Ghostty / WezTerm / Kitty / iTerm2** render excellently, but none ships an integrated SSH manager + vault + Warpify-style UX + GUI configuration in one app; Ghostty in particular has no vault, no SSH manager, and no GUI config.
 - **Tabby** has the vault + SSH manager, but a weak engine.
 - **Warp** has the UX, but requires the cloud.
 
-nocx's bet is the *combination*, delivered locally in one customizable app — not any single feature.
+nocx's bet is the _combination_, delivered locally in one customizable app — not any single feature.
 
 ## 3. Target users
 
@@ -92,11 +99,12 @@ No competitor covers this whole set locally: Ghostty renders but lacks the vault
 ## 5. MVP scope
 
 Revised 2026-07-26: the secrets vault and the Warpify-style UX moved from PHASE 2 into v1.
-The bet in section 4 is the *combination*, and those two are the half of it the strong
+The bet in section 4 is the _combination_, and those two are the half of it the strong
 engines do not have — shipping without them ships neither half of the wedge. The epics
 carrying `mvp` in beads are the authoritative list; this section is the prose version of it.
 
 ### IN v1
+
 - Terminal engine that renders modern agent TUIs flawlessly (true-color, mouse-passthrough, bracketed-paste for TUI fidelity) — `nocx-pxq`
 - Tabs; duplicate tab; restore tabs on restart — `nocx-v1pr`
 - Copy folder path; new-tab-in-same-cwd (OSC 7) — `nocx-5mn`
@@ -110,12 +118,14 @@ carrying `mvp` in beads are the authoritative list; this section is the prose ve
 - Persistence, so any of the above survives a restart — `nocx-6ek`
 
 ### PHASE 2 (deferred)
+
 - Splits / panes
 - Scrollback + find-in-output (search)
 - Semantic command line: in-band validation, completion, ghost-text — `nocx-w7h`
 - Configurable vertical tab placement — `nocx-d3q`
 
 ### OUT (non-goals)
+
 - Cloud sync
 - Mandatory login
 - Telemetry
@@ -162,7 +172,7 @@ Personal and honest: **"I built it and it works."** Concretely — I can daily-d
   agents is, mechanically, spawning processes in panes, reading and writing their streams,
   and tracking their state — which is what a terminal already is. Existing tools bolt
   orchestration onto a terminal; nocx would come from the other side, where orchestration
-  is a *view over sessions* rather than a separate thing. The substrate is largely built:
+  is a _view over sessions_ rather than a separate thing. The substrate is largely built:
   server-authoritative session IDs (AD-7), the session registry, the split data/control
   planes (AD-1), and OSC 133 markers that already answer "did this command finish?" — which
   is the same question as "is this agent done?".

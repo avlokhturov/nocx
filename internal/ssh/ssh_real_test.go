@@ -45,8 +45,6 @@ type testSSHServer struct {
 	windowChanged chan struct{}
 }
 
-const testSSHPassword = "test-password"
-
 func startTestSSHServer(t *testing.T) *testSSHServer {
 	t.Helper()
 
@@ -54,12 +52,6 @@ func startTestSSHServer(t *testing.T) *testSSHServer {
 	userKey := generateSigner(t)
 
 	config := &gossh.ServerConfig{
-		PasswordCallback: func(meta gossh.ConnMetadata, password []byte) (*gossh.Permissions, error) {
-			if meta.User() == "test" && string(password) == testSSHPassword {
-				return nil, nil
-			}
-			return nil, fmt.Errorf("gossh: invalid password for %q", meta.User())
-		},
 		PublicKeyCallback: func(meta gossh.ConnMetadata, key gossh.PublicKey) (*gossh.Permissions, error) {
 			if bytes.Equal(key.Marshal(), userKey.PublicKey().Marshal()) {
 				return nil, nil

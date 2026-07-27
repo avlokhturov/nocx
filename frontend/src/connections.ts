@@ -714,11 +714,12 @@ export class ConnectionManagerViewImpl implements ConnectionManagerView {
       )
     }
 
-    // Host binding — optional (ADR-0006). An empty host means the credential
-    // works for any host; when set, the backend enforces it against the
-    // resolved hostname before dial.
+    // Host binding — required, and refused at SAVE time rather than at connect
+    // time (nocx-wd2m). "Works for any host" is the credential-redirection
+    // hole, since this renderer can create profiles as well as call open, and
+    // could aim a credential at a host it controls (nocx-mon).
     section.append(
-      this.textField('Bind to Host (optional)', credential.host || '', 'text', (v) => {
+      this.textField('Bind to Host (required)', credential.host || '', 'text', (v) => {
         credential.host = v
       }),
     )
@@ -769,11 +770,42 @@ export class ConnectionManagerViewImpl implements ConnectionManagerView {
     }
   }
 
+  /**
+   * Show a validation or save failure on the form itself.
+   *
+   * Previously every one of these went to log.warn, so the Save button simply
+   * did nothing and said nothing — the user had no way to learn which field was
+   * at fault (nocx-wd2m).
+   */
+  private setFormError(form: HTMLElement, message: string): void {
+    let el = form.querySelector<HTMLElement>('.cm-form-error')
+    if (!el) {
+      el = document.createElement('div')
+      el.className = 'cm-form-error'
+      el.setAttribute('role', 'alert')
+      form.append(el)
+    }
+    el.textContent = message
+  }
+
   private async saveCredential(credential: Credential, form: HTMLElement): Promise<void> {
     if (!credential.name || !credential.username) {
-      log.warn('Name and username are required')
+      this.setFormError(form, 'Name and username are required.')
       return
     }
+    // Host binding is mandatory (nocx-mon), and refusing here is the point of
+    // nocx-wd2m: the backend rejects an unbound credential at save time, so
+    // without this the user would store a secret and only discover the refusal
+    // later, as a failed connection. The backend check remains authoritative —
+    // this one exists so the message names the field.
+    if (!credential.host || !credential.host.trim()) {
+      this.setFormError(
+        form,
+        'Bind to Host is required — a credential must name the host it may be used for.',
+      )
+      return
+    }
+    this.setFormError(form, '')
 
     try {
       await this.client.createCredential(credential)
@@ -789,7 +821,12 @@ export class ConnectionManagerViewImpl implements ConnectionManagerView {
       this.editingCredential = null
       await this.refresh()
     } catch (err) {
-      log.error('Failed to save', { message: (err as Error).message })
+      // Surface it, do not just log it. The backend refuses an unbound
+      // credential with Invalid params and a message naming the reason; a
+      // silent failure here is what made the rule invisible.
+      const message = (err as Error).message
+      log.error('Failed to save', { message })
+      this.setFormError(form, message)
     }
   }
 

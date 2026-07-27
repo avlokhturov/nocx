@@ -192,6 +192,12 @@ func (s *JSONStore) SaveCredential(c Credential) error {
 	if c.Username == "" {
 		return errors.New("credential username is required")
 	}
+	// Host binding, enforced here rather than in the transport handler: this is
+	// the one path every writer passes through, so a future caller cannot route
+	// around it (nocx-wd2m).
+	if err := c.Validate(); err != nil {
+		return err
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()

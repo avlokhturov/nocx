@@ -175,7 +175,10 @@ export class TerminalContent implements TabContent {
       this.ledger = new CommandLedger({ now: () => performance.now() })
 
       // ── Wire input ownership BEFORE opening the session ─────────────────
-      this.shellTarget = new ShellInputTarget((data: string) => this.session!.send(data))
+      this.shellTarget = new ShellInputTarget(
+        (text: string) => renderer.paste(text),
+        (data: string) => this.session!.send(data),
+      )
       this.editor = new CommandEditor({
         submit: (doc: string) => {
           this._pendingCommand = doc
@@ -274,7 +277,7 @@ export class TerminalContent implements TabContent {
       })
 
       this._globalKeydown = (e: KeyboardEvent) => {
-        if (!target.isConnected) return
+        if (!target.isConnected || !target.classList.contains('active')) return
         if (this.scrollback && this.scrollback.selectedBlockId !== null) {
           if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
             e.preventDefault()

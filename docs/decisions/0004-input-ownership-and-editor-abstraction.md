@@ -73,8 +73,10 @@ editor chrome.
 On submit we perform a **handoff, not duplicate suppression**:
 
 1. Hide the DOM editor **before** sending anything.
-2. Send the complete text as one bracketed paste (`ESC[200~` … `ESC[201~`)
-   followed by `CR`.
+2. Send the complete text through the terminal renderer's paste API, followed
+   by raw `CR`. The renderer adds `ESC[200~` … `ESC[201~` only when the running
+   shell enabled bracketed-paste mode 2004; application code never hand-rolls
+   those wrappers.
 3. Let zle/readline paint the accepted command once into xterm as the committed
    transcript.
 
@@ -91,8 +93,8 @@ added by registering a target, never by editing the editor:
 
 ```ts
 interface InputTarget {
-  readonly id: string            // 'shell' | 'agent' | …
-  readonly label: string         // UI chip
+  readonly id: string // 'shell' | 'agent' | …
+  readonly label: string // UI chip
   submit(doc: string, ctx: SubmitContext): Promise<void>
   complete?(doc: string, pos: number, ctx: CompleteContext): Promise<Completion[]>
   history?(dir: 'back' | 'forward'): string | undefined

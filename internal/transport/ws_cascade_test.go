@@ -138,8 +138,10 @@ func (h *cascadeHarness) savePassphraseViaRPC(credID, passphrase string) credent
 func TestDeleteCascade_RemovesPassword(t *testing.T) {
 	h := newCascadeHarness(t)
 
+	// Host is required for a credential to be storable at all (nocx-wd2m); it
+	// is incidental to what this test proves, which is secret cleanup.
 	id := h.createCredentialViaRPC(profile.Credential{
-		Name: "cascade-pw", Username: "alice", Auth: "password",
+		Name: "cascade-pw", Username: "alice", Auth: "password", Host: "cascade.example.com",
 	})
 
 	pwID := h.savePasswordViaRPC(id, "cascade-password-secret")
@@ -168,7 +170,7 @@ func TestDeleteCascade_RemovesKeyPassphrase(t *testing.T) {
 	h := newCascadeHarness(t)
 
 	id := h.createCredentialViaRPC(profile.Credential{
-		Name: "cascade-pp", Username: "bob", Auth: "publicKey",
+		Name: "cascade-pp", Username: "bob", Auth: "publicKey", Host: "cascade.example.com",
 	})
 
 	ppID := h.savePassphraseViaRPC(id, "cascade-passphrase-secret")
@@ -195,7 +197,7 @@ func TestDeleteCascade_NoSecretsSucceeds(t *testing.T) {
 	h := newCascadeHarness(t)
 
 	id := h.createCredentialViaRPC(profile.Credential{
-		Name: "cascade-empty", Username: "carol", Auth: "password",
+		Name: "cascade-empty", Username: "carol", Auth: "password", Host: "cascade.example.com",
 	})
 
 	h.deleteCredentialViaRPC(id)
@@ -216,7 +218,7 @@ func TestDeleteCascade_Idempotent(t *testing.T) {
 	h := newCascadeHarness(t)
 
 	id := h.createCredentialViaRPC(profile.Credential{
-		Name: "cascade-idem", Username: "dan", Auth: "password",
+		Name: "cascade-idem", Username: "dan", Auth: "password", Host: "cascade.example.com",
 	})
 	pwID := h.savePasswordViaRPC(id, "p")
 
@@ -238,7 +240,7 @@ func TestDeleteCascade_KeyFileDeleted(t *testing.T) {
 	h := newCascadeHarness(t)
 
 	id := h.createCredentialViaRPC(profile.Credential{
-		Name: "cascade-key-gone", Username: "bob", Auth: "publicKey",
+		Name: "cascade-key-gone", Username: "bob", Auth: "publicKey", Host: "cascade.example.com",
 		KeyPath: "/nonexistent/key/file",
 	})
 

@@ -74,17 +74,11 @@ test.describe('vertical tab placement', () => {
     // The #tabbar element carries both .tabbar and .tabstrip-vertical
     // classes after a swap — checking for absence of the opposite class
     // is a false negative.  Just verify the expected class is present.
-    const wantClass =
-      value === 'vertical' ? 'tabstrip-vertical' : 'tabbar'
-    await expect(page.locator('#tabbar')).toHaveClass(
-      new RegExp(wantClass),
-      { timeout: 5000 },
-    )
+    const wantClass = value === 'vertical' ? 'tabstrip-vertical' : 'tabbar'
+    await expect(page.locator('#tabbar')).toHaveClass(new RegExp(wantClass), { timeout: 5000 })
   }
 
-  test('tabs render and activate in vertical placement', async ({
-    page,
-  }) => {
+  test('tabs render and activate in vertical placement', async ({ page }) => {
     await switchPlacement(page, 'vertical')
 
     await expect(page.locator(TAB)).toHaveCount(1)
@@ -111,10 +105,7 @@ test.describe('vertical tab placement', () => {
     // editor after the settings tab closes.  JS focus() alone may not
     // route subsequent page.keyboard.type() to the PTY.
     const paneBox = await page.locator('.pane.active').boundingBox()
-    await page.mouse.click(
-      paneBox!.x + paneBox!.width / 2,
-      paneBox!.y + paneBox!.height - 30,
-    )
+    await page.mouse.click(paneBox!.x + paneBox!.width / 2, paneBox!.y + paneBox!.height - 30)
 
     await page.keyboard.type('sleep 3; echo PROBE')
     await page.keyboard.press('Enter')
@@ -123,14 +114,10 @@ test.describe('vertical tab placement', () => {
     await expect(page.locator(TAB)).toHaveCount(2)
     await expect(page.locator(TAB).first()).not.toHaveClass(/active/)
 
-    await expect(
-      page.locator(TAB).first().locator(ACTIVITY),
-    ).toBeAttached({ timeout: 15000 })
+    await expect(page.locator(TAB).first().locator(ACTIVITY)).toBeAttached({ timeout: 15000 })
   })
 
-  test('switching placement repositions the strip without a restart', async ({
-    page,
-  }) => {
+  test('switching placement repositions the strip without a restart', async ({ page }) => {
     // beforeEach already reset to horizontal.
     await expect(page.locator('#tabbar')).toHaveClass(/tabbar/)
 
