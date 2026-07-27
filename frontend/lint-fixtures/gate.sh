@@ -48,7 +48,7 @@ integrity_check=$(node "${fixture_dir}/check-css-integrity.mjs" \
   --entry="${fixture_dir}/css-integrity-fixture/entry.css" \
   --styles="${fixture_dir}/css-integrity-fixture/styles" 2>/dev/null || true)
 
-for rule in unreachable escaped-dot undefined-var theme-scope bare-type-selector control-css-outside-kit; do
+for rule in unreachable escaped-dot undefined-var theme-scope bare-type-selector control-css-outside-kit kit-scope-selector; do
   if ! echo "$integrity_check" | grep -q "\"rule\":\"${rule}\""; then
     echo "CSS INTEGRITY GATE FAILED — rule '${rule}' did not fire on the fixture"
     exit 1

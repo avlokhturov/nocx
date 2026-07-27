@@ -27,3 +27,11 @@
 .fixture-fake-input::placeholder {
   color: gray;
 }
+
+/* Rule 6 fixture — the ancestor scope, which no component renders any more.
+   Note this file's own header uses the same words in prose without being a
+   violation: the ban is on the parsed selector, not on the text. */
+
+.kit-scope input {
+  border: 1px solid gray;
+}

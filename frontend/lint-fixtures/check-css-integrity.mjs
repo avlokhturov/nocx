@@ -263,6 +263,27 @@ function findControlFingerprints(source) {
   return hits
 }
 
+/**
+ * Rule 6 — the ancestor scope is gone and must stay gone.
+ *
+ * Keyed on the parsed SELECTOR rather than on the text, because this file's own
+ * header explains the escaped-dot rule using `.kit-scope` as its example: a
+ * literal-string ban would make the checker a violation of itself. Comments and
+ * documentation are deliberately out of scope.
+ */
+function findKitScopeSelectors(ast) {
+  const hits = []
+  css.walk(ast, {
+    visit: 'ClassSelector',
+    enter(node) {
+      if (node.name === 'kit-scope') {
+        hits.push({ selector: `.${node.name}`, line: node.loc?.start.line ?? 0 })
+      }
+    },
+  })
+  return hits
+}
+
 export function checkCSSIntegrity({ entry, stylesDir }) {
   const violations = []
   const entryAbs = resolve(entry)
@@ -300,6 +321,19 @@ export function checkCSSIntegrity({ entry, stylesDir }) {
         file: rel(file),
         line: hit.line,
         detail: `\`${hit.selector}\` is a type selector for an element of that name, not a class — drop the backslash`,
+      })
+    }
+
+    // Rule 6 — `.kit-scope` is gone and must stay gone. The ban is on the SELECTOR,
+    // not on the string: this checker's own header documents the escaped-dot rule
+    // using `.kit-scope` as its example, so a literal-text gate would fail on its own
+    // source. Prose in comments is out of scope by design.
+    for (const hit of findKitScopeSelectors(ast)) {
+      violations.push({
+        rule: 'kit-scope-selector',
+        file: rel(file),
+        line: hit.line,
+        detail: `\`${hit.selector}\` keys appearance off an ancestor the components never render — that contract was removed (nocx-pnbd)`,
       })
     }
 
