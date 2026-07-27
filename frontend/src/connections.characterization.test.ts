@@ -412,4 +412,23 @@ describe('credential form: host binding is required', () => {
     expect(create).toHaveBeenCalledTimes(1)
     expect(create.mock.calls[0][0]).toMatchObject({ host: 'prod.example.com' })
   })
+
+  it('submits a bound port as a number', async () => {
+    const create = vi.spyOn(client, 'createCredential')
+
+    openCredentials()
+    fillField('Name', 'bound-custom-port')
+    fillField('Username', 'bob')
+    fillField('Bind to Host', 'prod.example.com')
+    fillField('Port', '17004')
+    clickSave()
+
+    await Promise.resolve()
+
+    expect(create).toHaveBeenCalledTimes(1)
+    expect(create.mock.calls[0][0]).toMatchObject({
+      host: 'prod.example.com',
+      port: 17004,
+    })
+  })
 })

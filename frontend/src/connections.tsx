@@ -477,7 +477,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   function renderCredentialForm(credential: Credential) {
     const isNew = !credential.id
 
-    function updateField(key: keyof Credential, value: string) {
+    function updateField<K extends keyof Credential>(key: K, value: Credential[K]) {
       const updated = { ...credential, [key]: value }
       if (key === 'name' && !credential.id) updated.id = `cred:${value}:${Date.now()}`
       setEditingCredential(updated)
@@ -572,7 +572,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
               type="number"
               onInput={(v) => {
                 const n = parseInt(v, 10)
-                updateField('port', isNaN(n) ? '' : String(n))
+                updateField('port', isNaN(n) ? undefined : n)
               }}
             />
           </Show>
