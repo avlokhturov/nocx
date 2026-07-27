@@ -1,0 +1,4 @@
+/* UI kit components — Button, TextField, Checkbox, Field, Toolbar, Badge, EmptyState.
+   Owned by nocx-vxqj.4; see docs/decisions/0014-component-kit-foundation.md.
+   Kept out of style.css so parallel workers do not collide; nocx-xrrl.2 folds
+   this directory into the token layout. */

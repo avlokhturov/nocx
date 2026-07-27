@@ -1,6 +1,8 @@
 @import './styles/surface.css';
 @import './styles/shell-layout.css';
 @import './styles/update-notice.css';
+@import './styles/sidebar.css';
+@import './styles/kit.css';
 
 *,
 *::before,
