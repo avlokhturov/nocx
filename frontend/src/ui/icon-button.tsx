@@ -3,6 +3,10 @@ import { splitProps, type JSX } from 'solid-js'
 export type IconButtonSize = 'sm' | 'md'
 
 export interface IconButtonProps {
+  /** See button.tsx: `never` refuses it at compile time and keeps it splittable at
+   *  runtime, which is the half that matters. */
+  class?: never
+  className?: never
   selected?: boolean
   size?: IconButtonSize
   tabIndex?: number
@@ -28,7 +32,10 @@ type IconButtonAttrs = IconButtonProps & JSX.IntrinsicElements['button']
  * and `selected` and manages nothing.
  */
 export function IconButton(props: IconButtonAttrs) {
+  // `class`/`className` are split off and DISCARDED — see the props declaration.
   const knownKeys = [
+    'class',
+    'className',
     'selected',
     'size',
     'tabIndex',

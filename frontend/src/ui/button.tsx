@@ -19,6 +19,16 @@ export type ButtonVariant = 'default' | 'primary' | 'danger' | 'ghost'
 export type ButtonSize = 'sm' | 'md'
 
 export interface ButtonProps {
+  /**
+   * Declared as `never` rather than omitted, which is what makes this work at both
+   * levels: `never` refuses the prop at compile time AND keeps it a valid key for
+   * `splitProps`, so it can be discarded at runtime too. `Omit` on the intersection
+   * gives only the first, and the runtime half is the one that matters — `{...rest}`
+   * is spread AFTER the identity, so a class that slips past the type does not add
+   * itself, it REPLACES `ui-button` and leaves the element unstyled (§3.6).
+   */
+  class?: never
+  className?: never
   children: JSX.Element
   onClick: (e: MouseEvent) => void
   disabled?: boolean
@@ -34,10 +44,25 @@ export interface ButtonProps {
   tabIndex?: number
 }
 
+/**
+ * `class` and `className` are omitted from the intrinsic props deliberately.
+ *
+ * Removing `class` from ButtonProps was not enough: intersecting with
+ * `JSX.IntrinsicElements['button']` hands it straight back, and because it is no
+ * longer in `knownKeys` it lands in `rest` and gets spread onto the element — so the
+ * escape hatch stayed open while looking closed. Omit is the enforcement; a lint rule
+ * would be a second mechanism for something the type system can simply refuse.
+ */
 type ButtonAttrs = ButtonProps & JSX.IntrinsicElements['button']
 
 export function Button(props: ButtonAttrs) {
+  // `class` and `className` are split off and DISCARDED, not forwarded. The type
+  // already refuses them, but `{...rest}` is spread after the identity, so anything
+  // that slipped past the type — plain JS, a ts-expect-error, a cast — would not
+  // merely add a class, it would REPLACE the identity and leave the element unstyled.
   const knownKeys = [
+    'class',
+    'className',
     'children',
     'onClick',
     'disabled',

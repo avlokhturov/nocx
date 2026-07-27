@@ -119,3 +119,25 @@ describe('Button', () => {
     expect(btn.getAttribute('tabindex')).toBeNull() // natively focusable
   })
 })
+
+// Rule 1 is enforced by the type system, not by a lint rule, and this records why
+// that needed checking. Removing `class` from ButtonProps looked sufficient and was
+// not: `ButtonProps & JSX.IntrinsicElements['button']` handed it straight back, and
+// since `class` had also left `knownKeys` it fell into `rest` and was spread onto the
+// element. The escape hatch stayed fully open while every signal said it was closed.
+//
+// A runtime test cannot express "this does not compile", so what it can check is the
+// consequence: nothing a caller passes reaches the element's class attribute.
+describe('Button — the class escape hatch is closed', () => {
+  it('emits only its own identity and variant, whatever the caller does', () => {
+    render(() => (
+      // @ts-expect-error — `class` is omitted from the props on purpose (§3.6)
+      <Button class="sneaky" onClick={() => {}}>
+        Save
+      </Button>
+    ))
+    const el = screen.getByRole('button')
+    expect(el.getAttribute('class')).toBe('ui-button')
+    expect(el.classList.contains('sneaky')).toBe(false)
+  })
+})
