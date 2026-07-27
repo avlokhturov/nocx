@@ -19,6 +19,7 @@
  * into #panes, cleans up with the returned dispose function.
  */
 import { render } from 'solid-js/web'
+import { IconButton } from './ui/icon-button'
 import { Button } from './ui/button'
 
 /** The three banner outcomes the caller acts on. */
@@ -67,14 +68,9 @@ function ClipboardBannerComponent(props: { onChoice: (choice: BannerChoice) => v
         >
           Don't show again
         </Button>
-        <Button
-          class="clipboard-banner-btn clipboard-banner-dismiss"
-          variant="close"
-          ariaLabel="Dismiss"
-          onClick={() => props.onChoice('dismiss')}
-        >
+        <IconButton ariaLabel="Dismiss" size="sm" onClick={() => props.onChoice('dismiss')}>
           ✕
-        </Button>
+        </IconButton>
       </div>
     </div>
   )

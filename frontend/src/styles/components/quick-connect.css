@@ -1,41 +1,6 @@
 /* ── Quick-connect picker ──────────────────────────────────────────────
    Owned by nocx-imkb.7. */
 
-/* ── Caret beside the + button ──────────────────────────────────────────
-   The + and this caret are two halves of one affordance — new tab, and the menu
-   of things a new tab could be. They sat a full button-width apart, reading as
-   two unrelated controls. */
-
-.tab-caret {
-  --wails-draggable: no-drag;
-  flex: none;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 100%;
-  padding: 0;
-  margin: 0 0 0 -6px;
-  border: 0;
-  background: transparent;
-  color: var(--color-text-dim);
-  font-size: 10px;
-  cursor: pointer;
-  line-height: 1;
-}
-
-/* A 20px-wide sliver with only a colour change on hover was hard to hit and
-   gave no feedback that it was a button at all. */
-.tab-caret:hover {
-  color: var(--color-text);
-  background: var(--color-surface-hover);
-}
-
-.tab-caret:focus-visible {
-  outline: none;
-  box-shadow: none;
-}
-
 /* ── Dialog layout ────────────────────────────────────────────────────── */
 
 /* The picker is a command palette: wide enough to read a host and its label on

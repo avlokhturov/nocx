@@ -38,13 +38,13 @@ function mount(): { bar: HTMLElement; panel: HTMLElement } {
 }
 
 function viewBtn(bar: HTMLElement, viewId: string): HTMLElement {
-  const el = bar.querySelector<HTMLElement>(`[role="button"][data-view="${viewId}"]`)
+  const el = bar.querySelector<HTMLElement>(`button[data-view="${viewId}"]`)
   if (!el) throw new Error(`no view button for ${viewId}`)
   return el
 }
 
 function actionBtn(bar: HTMLElement, actionId: string): HTMLElement {
-  const el = bar.querySelector<HTMLElement>(`[role="button"][data-action="${actionId}"]`)
+  const el = bar.querySelector<HTMLElement>(`button[data-action="${actionId}"]`)
   if (!el) throw new Error(`no action button for ${actionId}`)
   return el
 }
@@ -81,7 +81,7 @@ describe('sidebar', () => {
     expect(actionBtn(bar, 'settings')).toBeTruthy()
 
     // Total toolbar buttons
-    expect(bar.querySelectorAll('[role="button"]')).toHaveLength(3)
+    expect(bar.querySelectorAll('button')).toHaveLength(3)
   })
 
   it('starts expanded on the first view with no empty panel (nocx-rp2j fix)', () => {
@@ -89,7 +89,7 @@ describe('sidebar', () => {
     mountSidebar(bar, panel, TWO_VIEWS, [SETTINGS_ACTION])
 
     expect(panel.classList.contains('collapsed')).toBe(false)
-    expect(viewBtn(bar, 'alpha').classList.contains('active')).toBe(true)
+    expect(viewBtn(bar, 'alpha').getAttribute('aria-selected')).toBe('true')
     expect(panelTitle(panel)).toBe('Alpha')
   })
 
@@ -100,11 +100,11 @@ describe('sidebar', () => {
     viewBtn(bar, 'alpha').click()
     expect(panel.classList.contains('collapsed')).toBe(true)
     // VS Code drops the active highlight when the panel is closed
-    expect(viewBtn(bar, 'alpha').classList.contains('active')).toBe(false)
+    expect(viewBtn(bar, 'alpha').getAttribute('aria-selected')).toBeNull()
 
     viewBtn(bar, 'alpha').click()
     expect(panel.classList.contains('collapsed')).toBe(false)
-    expect(viewBtn(bar, 'alpha').classList.contains('active')).toBe(true)
+    expect(viewBtn(bar, 'alpha').getAttribute('aria-selected')).toBe('true')
   })
 
   it('switches views when another button is clicked, keeping the panel open', () => {
@@ -114,8 +114,8 @@ describe('sidebar', () => {
     viewBtn(bar, 'beta').click()
     expect(panel.classList.contains('collapsed')).toBe(false)
     expect(panelTitle(panel)).toBe('Beta')
-    expect(viewBtn(bar, 'beta').classList.contains('active')).toBe(true)
-    expect(viewBtn(bar, 'alpha').classList.contains('active')).toBe(false)
+    expect(viewBtn(bar, 'beta').getAttribute('aria-selected')).toBe('true')
+    expect(viewBtn(bar, 'alpha').getAttribute('aria-selected')).toBeNull()
   })
 
   it('opens the panel on the clicked view when collapsed', () => {
@@ -201,7 +201,7 @@ describe('sidebar', () => {
   it('renders all icons as component elements, not text or innerHTML strings', () => {
     const { bar } = mount()
     mountSidebar(bar, document.createElement('div'), TWO_VIEWS, [SETTINGS_ACTION])
-    const buttons = bar.querySelectorAll<HTMLElement>('[role="button"]')
+    const buttons = bar.querySelectorAll<HTMLElement>('button')
 
     for (const btn of buttons) {
       // The first child must be an Element node (the icon component rendered as

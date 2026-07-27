@@ -27,7 +27,7 @@ import { createEffect, createMemo, For, on, onCleanup, Show } from 'solid-js'
 import type { Component } from 'solid-js'
 import { SidebarView } from './ui/sidebar-view'
 import { createAppStore, type AppActions, type AppState } from './state'
-import { Button } from './ui/button'
+import { IconButton } from './ui/icon-button'
 
 const STORAGE_KEY = 'nocx.sidebar.collapsed'
 
@@ -175,9 +175,7 @@ function SidebarSolid(props: SidebarSolidProps) {
       () => props.state.sidebar.collapsed,
       (collapsed, prev) => {
         if (prev === false && collapsed && focusAnchor) {
-          const btn = props.bar.querySelector<HTMLElement>(
-            `[role="button"][data-view="${focusAnchor}"]`,
-          )
+          const btn = props.bar.querySelector<HTMLElement>(`button[data-view="${focusAnchor}"]`)
           btn?.focus()
           focusAnchor = null
         }
@@ -189,7 +187,7 @@ function SidebarSolid(props: SidebarSolidProps) {
   const handleKeyDown = (e: KeyboardEvent) => {
     const toolbar = props.bar.querySelector('[role="toolbar"]')
     if (!toolbar) return
-    const buttons = [...toolbar.querySelectorAll<HTMLElement>('[role="button"]')]
+    const buttons = [...toolbar.querySelectorAll<HTMLElement>('button')]
     if (buttons.length === 0) return
 
     const currentIdx = buttons.findIndex((b) => b.getAttribute('tabindex') === '0')
@@ -251,17 +249,18 @@ function SidebarSolid(props: SidebarSolidProps) {
       <div class="activity-bar-zone activity-bar-top" role="group" aria-label="Views">
         <For each={props.views}>
           {(view) => (
-            <Button
-              class={`activity-bar-btn${view.id === props.state.sidebar.activeViewId && !props.state.sidebar.collapsed ? ' active' : ''}`}
-              role="button"
+            <IconButton
+              selected={
+                view.id === props.state.sidebar.activeViewId && !props.state.sidebar.collapsed
+              }
               data-view={view.id}
               title={view.title}
-              aria-label={view.title}
+              ariaLabel={view.title}
               tabIndex={view.id === tabbableId() ? 0 : -1}
               onClick={() => handleViewClick(view)}
             >
               <view.icon />
-            </Button>
+            </IconButton>
           )}
         </For>
       </div>
@@ -273,17 +272,15 @@ function SidebarSolid(props: SidebarSolidProps) {
       <div class="activity-bar-zone activity-bar-bottom" role="group" aria-label="Actions">
         <For each={props.actions}>
           {(action) => (
-            <Button
-              class="activity-bar-btn"
-              role="button"
+            <IconButton
               data-action={action.id}
               title={action.title}
-              aria-label={action.title}
+              ariaLabel={action.title}
               tabIndex={action.id === tabbableId() ? 0 : -1}
               onClick={() => handleActionClick(action)}
             >
               <action.icon />
-            </Button>
+            </IconButton>
           )}
         </For>
       </div>

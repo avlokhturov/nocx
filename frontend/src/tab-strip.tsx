@@ -1,5 +1,5 @@
 import { For, Show, createSignal } from 'solid-js'
-import { Button } from './ui/button'
+import { IconButton } from './ui/icon-button'
 import type { Setter } from 'solid-js'
 import { createStore } from 'solid-js/store'
 import { render } from 'solid-js/web'
@@ -159,8 +159,8 @@ abstract class TabStripBase implements TabStrip {
                     <span class="tab-status" />
                     <span class="tab-title">{display.records[tab.id]?.title ?? ''}</span>
                   </span>
-                  <Button
-                    class="tab-close"
+                  <IconButton
+                    size="sm"
                     ariaLabel="Close tab"
                     onClick={(e: MouseEvent) => {
                       e.stopPropagation()
@@ -168,7 +168,7 @@ abstract class TabStripBase implements TabStrip {
                     }}
                   >
                     {'\u00d7'}
-                  </Button>
+                  </IconButton>
                   <div
                     class="tab-indicator"
                     classList={{
@@ -181,17 +181,16 @@ abstract class TabStripBase implements TabStrip {
               )}
             </For>
           </div>
-          <Button class="tab-add" ariaLabel="New tab" onClick={() => this.onNewTab?.()}>
+          <IconButton ariaLabel="New tab" onClick={() => this.onNewTab?.()}>
             +
-          </Button>
-          <Button
-            class="tab-caret"
+          </IconButton>
+          <IconButton
             ariaLabel="Quick connect"
             onClick={() => this.onQuickConnect?.()}
             tabIndex={-1}
           >
             ▾
-          </Button>
+          </IconButton>
           <Show when={this.orientation === 'horizontal'}>
             <div class="tabbar-spacer" />
           </Show>

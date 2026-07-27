@@ -50,14 +50,14 @@ describe('ClipboardBanner', () => {
     const banner = makeBanner()
     const promise = banner.show()
     expect(banner.shown).toBe(true)
-    click('.clipboard-banner-dismiss')
+    click('[aria-label="Dismiss"]')
     await promise
   })
 
   it('shown is false after the user makes a choice', async () => {
     const banner = makeBanner()
     const choice = banner.show()
-    click('.clipboard-banner-dismiss')
+    click('[aria-label="Dismiss"]')
     await choice
     expect(banner.shown).toBe(false)
   })
@@ -81,7 +81,7 @@ describe('ClipboardBanner', () => {
   it('resolves with "dismiss" when dismiss is clicked', async () => {
     const banner = makeBanner()
     const choice = banner.show()
-    click('.clipboard-banner-dismiss')
+    click('[aria-label="Dismiss"]')
     expect(await choice).toBe('dismiss')
   })
 
@@ -91,7 +91,7 @@ describe('ClipboardBanner', () => {
     const banner = makeBanner()
 
     const first = banner.show()
-    click('.clipboard-banner-dismiss')
+    click('[aria-label="Dismiss"]')
     expect(await first).toBe('dismiss')
 
     const second = banner.show()
@@ -123,7 +123,7 @@ describe('ClipboardBanner', () => {
     const promise = banner.show()
     expect(panes.querySelector('.clipboard-banner')).not.toBeNull()
 
-    click('.clipboard-banner-dismiss')
+    click('[aria-label="Dismiss"]')
     await promise
     expect(panes.querySelector('.clipboard-banner')).toBeNull()
   })

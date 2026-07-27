@@ -1,0 +1,68 @@
+/* IconButton — icon-only action affordance.
+   Appearance reconciled from .tab-close, .tab-add, .activity-bar-btn (T3, nocx-wqrq).
+
+   Declarations moved from style.css (before → after):
+   - .tab-close: background, color, border, border-radius, padding, margin, cursor,
+     font-size, line-height → icon-button base + [data-size='sm']
+   - .tab-add: background, color, border, padding, margin, cursor, font-size,
+     font-weight → icon-button base + [data-size='md']
+   - .activity-bar-btn: background, color, padding, border, cursor → icon-button base
+
+   .tab-caret (quick-connect.css:9-37) is NOT migrated in this transaction — blocked
+   on nocx-imkb.7 owning that file. Tab-caret consumer in tab-strip.tsx stays on
+   `Button class="tab-caret"` for now. Its appearances will reconcile when nocx-imkb
+   handles quick-connect.css.
+
+   Dropped (not moved):
+   - position/absolute + z-index/right/top/transform — tab-close's in-tab positioning,
+     belongs to the tab-strip surface CSS
+   - width/height from all sources — sizing belongs to data-size variants or surface
+   - flex layout properties — the icon-button is inline-flex; flex is the parent's domain
+   - opacity/transition — tab-close's reveal-on-hover, belongs to tab surface CSS
+   - .activity-bar-btn svg sizing — belongs to the activity-bar surface CSS
+
+   Hover reconciled to var(--color-surface-hover) across all three sources (two already
+   used it; .tab-close used color-mix which is equivalent intent). */
+
+.ui-icon-button {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--color-text-dim);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: inherit;
+  line-height: 1;
+  border-radius: var(--control-radius-sm);
+  --wails-draggable: no-drag;
+}
+
+.ui-icon-button[data-size='sm'] {
+  width: 22px;
+  height: 22px;
+  font-size: 16px;
+}
+
+.ui-icon-button[data-size='md'] {
+  width: 30px;
+  height: 30px;
+  font-size: 18px;
+  font-weight: 300;
+}
+
+.ui-icon-button:hover {
+  background: var(--color-surface-hover);
+  color: var(--color-text-muted);
+}
+
+.ui-icon-button[aria-selected='true'] {
+  color: var(--color-text);
+}
+
+.ui-icon-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
