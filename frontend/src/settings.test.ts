@@ -199,7 +199,7 @@ describe('SettingsContent', () => {
     expect(toggles.length).toBe(1)
     expect(toggles[0].checked).toBe(false)
 
-    const countSpan = rail.querySelector('.ui-badge-warning')
+    const countSpan = rail.querySelector('.ui-badge[data-tone="warning"]')
     expect(countSpan).toBeTruthy()
     // Bare number: the Badge component draws the container now, so the
     // parentheses that used to stand in for one are redundant chrome.
@@ -212,7 +212,7 @@ describe('SettingsContent', () => {
     })
     await content.mount(target, host, signal)
 
-    const countSpan = target.querySelector('.ui-badge-warning')
+    const countSpan = target.querySelector('.ui-badge[data-tone="warning"]')
     // Only terminal.fontSize — ai.apiKey is a secret and is excluded.
     expect(countSpan!.textContent).toBe('1')
   })
@@ -249,10 +249,10 @@ describe('SettingsContent', () => {
     const appLink = Array.from(links).find((l) => l.textContent.includes('Application'))
     const aiLink = Array.from(links).find((l) => l.textContent.includes('AI'))
 
-    // Badge is rendered by the Badge kit component as .ui-badge-warning
-    expect(terminalLink!.querySelector('.ui-badge-warning')!.textContent).toBe('1')
-    expect(appLink!.querySelector('.ui-badge-warning')!.textContent).toBe('1')
-    expect(aiLink!.querySelector('.ui-badge-warning')).toBeFalsy()
+    // Badge is rendered by the Badge kit component with .ui-badge[data-tone="warning"]
+    expect(terminalLink!.querySelector('.ui-badge[data-tone="warning"]')!.textContent).toBe('1')
+    expect(appLink!.querySelector('.ui-badge[data-tone="warning"]')!.textContent).toBe('1')
+    expect(aiLink!.querySelector('.ui-badge[data-tone="warning"]')).toBeFalsy()
   })
 
   // ── Modified-only filter ───────────────────────────────────────────

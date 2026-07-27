@@ -752,7 +752,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
                 label={' Modified'}
               />
               <Show when={modifiedCount() > 0}>
-                <Badge variant="warning">{String(modifiedCount())}</Badge>
+                <Badge tone="warning">{String(modifiedCount())}</Badge>
               </Show>
             </div>
 
@@ -780,7 +780,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
                         >
                           {page.title}
                           <Show when={count() !== undefined && count()! > 0}>
-                            <Badge variant="warning">{String(count())}</Badge>
+                            <Badge tone="warning">{String(count())}</Badge>
                           </Show>
                         </Button>
                       </li>

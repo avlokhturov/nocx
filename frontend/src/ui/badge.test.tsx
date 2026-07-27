@@ -19,38 +19,37 @@ describe('Badge', () => {
     expect(screen.getByText('Customized')).toBeTruthy()
   })
 
-  it('renders with default variant and no extra class', () => {
+  it('renders with ui-badge class identity', () => {
     subject()
     const el = screen.getByText('Customized')
-    expect(el.classList.contains('ui-badge-warning')).toBe(false)
+    expect(el.classList.contains('ui-badge')).toBe(true)
   })
 
-  it('applies warning variant class', () => {
-    subject({ variant: 'warning' })
+  it('defaults to neutral tone', () => {
+    subject()
     const el = screen.getByText('Customized')
-    expect(el.classList.contains('ui-badge-warning')).toBe(true)
+    expect(el.getAttribute('data-tone')).toBe('neutral')
   })
 
-  it('applies danger variant class', () => {
-    subject({ variant: 'danger' })
+  it('applies info tone', () => {
+    subject({ tone: 'info' })
     const el = screen.getByText('Customized')
-    expect(el.classList.contains('ui-badge-danger')).toBe(true)
+    expect(el.getAttribute('data-tone')).toBe('info')
   })
 
-  it('applies info variant class', () => {
-    subject({ variant: 'info' })
+  it('applies warning tone', () => {
+    subject({ tone: 'warning' })
     const el = screen.getByText('Customized')
-    expect(el.classList.contains('ui-badge-info')).toBe(true)
+    expect(el.getAttribute('data-tone')).toBe('warning')
   })
 
-  it('combines variant and custom class', () => {
-    subject({ variant: 'warning', class: 'st-provenance' })
+  it('applies danger tone', () => {
+    subject({ tone: 'danger' })
     const el = screen.getByText('Customized')
-    expect(el.classList.contains('ui-badge-warning')).toBe(true)
-    expect(el.classList.contains('st-provenance')).toBe(true)
+    expect(el.getAttribute('data-tone')).toBe('danger')
   })
 
-  it('is an inline element', () => {
+  it('is a span element', () => {
     subject()
     const el = screen.getByText('Customized')
     expect(el.tagName).toBe('SPAN')

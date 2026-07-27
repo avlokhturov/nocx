@@ -1,39 +1,28 @@
-/* Badge — the three variant chips.
-   Moved verbatim from kit.css by T1 (nocx-v0ai). T9 (nocx-yj1a) gives Badge a
-   `ui-badge` base class and turns these into a `tone` attribute.
-
+/* Badge — one base shape + tone overrides.
+   Per §3.1: class="ui-badge" on the element, data-tone for variance.
    The 10px font-size is one of the 52 px values outside the token layer that gate 7
-   will reject; it is left exactly as it was here, because T1 changes no values. */
+   will reject; no token in tokens.css carries 10px so it stays as-is. */
 
-.ui-badge-warning {
+.ui-badge {
   display: inline-block;
   padding: 1px 6px;
   border-radius: var(--control-radius-sm);
-  background: color-mix(in srgb, var(--color-warning), transparent 80%);
-  color: var(--color-warning);
   font-size: 10px;
   font-weight: 500;
   line-height: 1.4;
 }
 
-.ui-badge-danger {
-  display: inline-block;
-  padding: 1px 6px;
-  border-radius: var(--control-radius-sm);
-  background: color-mix(in srgb, var(--color-danger), transparent 80%);
-  color: var(--color-danger);
-  font-size: 10px;
-  font-weight: 500;
-  line-height: 1.4;
-}
-
-.ui-badge-info {
-  display: inline-block;
-  padding: 1px 6px;
-  border-radius: var(--control-radius-sm);
+.ui-badge[data-tone='info'] {
   background: color-mix(in srgb, var(--color-accent), transparent 80%);
   color: var(--color-accent);
-  font-size: 10px;
-  font-weight: 500;
-  line-height: 1.4;
+}
+
+.ui-badge[data-tone='warning'] {
+  background: color-mix(in srgb, var(--color-warning), transparent 80%);
+  color: var(--color-warning);
+}
+
+.ui-badge[data-tone='danger'] {
+  background: color-mix(in srgb, var(--color-danger), transparent 80%);
+  color: var(--color-danger);
 }

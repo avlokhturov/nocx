@@ -6,25 +6,21 @@
  * Justified by callers:
  * - settings.ts: .st-provenance / .st-customized / .st-default (Customized/Default badge)
  * - settings.ts: .st-section-nav-badge (modified-only count)
- * - connections.ts: credential auth method chip
+ *
+ * Per §3.1: class="ui-badge" always, variance on data-tone.
  */
 
-export type BadgeVariant = 'default' | 'warning' | 'danger' | 'info'
+export type BadgeTone = 'neutral' | 'info' | 'warning' | 'danger'
 
 export interface BadgeProps {
-  class?: string
   children: string
-  variant?: BadgeVariant
-}
-
-const VARIANT_CLASS: Record<BadgeVariant, string> = {
-  default: '',
-  warning: 'ui-badge-warning',
-  danger: 'ui-badge-danger',
-  info: 'ui-badge-info',
+  tone?: BadgeTone
 }
 
 export function Badge(props: BadgeProps) {
-  const variantClass = () => VARIANT_CLASS[props.variant ?? 'default']
-  return <span class={`${variantClass()} ${props.class ?? ''}`.trim()}>{props.children}</span>
+  return (
+    <span class="ui-badge" data-tone={props.tone ?? 'neutral'}>
+      {props.children}
+    </span>
+  )
 }
