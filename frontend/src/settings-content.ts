@@ -1,14 +1,16 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // SettingsContent — wraps the Solid settings component as a TabContent.
-// Thin mount-once wrapper; the entire UI is the Solid component in
-// settings.tsx. ExportSection is rendered as a child component inside it.
+// Thin adapter over SolidTabContent; keeps existing public behaviour
+// (focus, scrollToKey, narrow-breakpoint handling). The entire UI is the
+// Solid component in settings.tsx. ExportSection is rendered as a child
+// component inside it.
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { createComponent } from 'solid-js'
 import { render } from 'solid-js/web'
 import { type ProfileClient } from './profiles'
 import { type SettingsObserver } from './settings-observer'
-import { BaseTabContent, type TabHost, type ContentViewport } from './tab-content'
+import { SolidTabContent, type TabHost, type ContentViewport } from './solid-tab-content'
 import type { SurfaceType, SingletonKey } from './tab-content'
 import { SettingsComponent, type SettingsComponentHandle } from './settings'
 
@@ -24,11 +26,9 @@ const NARROW_BREAKPOINT_PX = 640
 
 // ── SettingsContent ─────────────────────────────────────────────────────
 
-export class SettingsContent extends BaseTabContent {
-  private container: HTMLElement | null = null
-  private _dispose: (() => void) | null = null
+export class SettingsContent extends SolidTabContent {
+  private handleRef: { current: SettingsComponentHandle | null } = { current: null }
   private handle: SettingsComponentHandle | null = null
-  private _disposed = false
 
   constructor(
     private readonly profileClient: ProfileClient,
@@ -37,31 +37,27 @@ export class SettingsContent extends BaseTabContent {
     super()
   }
 
-  // ── TabContent ───────────────────────────────────────────────────────
-
-  async mount(target: HTMLElement, host: TabHost, signal: AbortSignal): Promise<void> {
-    if (this._disposed || this.container) return
-    if (signal.aborted) return
-
-    host.setTitle('Settings')
-
-    // Create the root container that the Solid component renders into.
-    const root = document.createElement('div')
-    target.append(root)
-    this.container = root
-
-    // Mount the Solid component via a shared ref for cross-seam communication.
-    const handleRef: { current: SettingsComponentHandle | null } = { current: null }
-    this._dispose = render(
+  renderContent(root: HTMLElement): () => void {
+    return render(
       () =>
         createComponent(SettingsComponent, {
           profileClient: this.profileClient,
           observer: this.observer,
-          ref: handleRef,
+          ref: this.handleRef,
         }),
       root,
     )
-    this.handle = handleRef.current!
+  }
+
+  // ── TabContent ───────────────────────────────────────────────────────
+
+  async mount(target: HTMLElement, host: TabHost, signal: AbortSignal): Promise<void> {
+    if (this._disposed || this._hostElement) return
+    if (signal.aborted) return
+
+    host.setTitle('Settings')
+    await super.mount(target, host, signal)
+    this.handle = this.handleRef.current!
     await this.handle.ready()
   }
 
@@ -74,14 +70,9 @@ export class SettingsContent extends BaseTabContent {
     this.handle?.setNarrow(narrow)
   }
 
-  dispose(): void {
-    this._disposed = true
-    this._dispose?.()
-    this._dispose = null
-    this.container?.remove()
-    this.container = null
-    this.handle = null
-  }
+  // dispose() inherited from SolidTabContent — it tears down the root
+  // element and Solid root. The handle reference becomes stale naturally
+  // as the component disposes.
 
   // ── Deep link ───────────────────────────────────────────────────────
 

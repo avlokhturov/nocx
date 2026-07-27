@@ -17,7 +17,6 @@
  * - onConnect callback
  */
 import { For, Show, createSignal, createMemo, onMount } from 'solid-js'
-import { render } from 'solid-js/web'
 import { Button } from './ui/button'
 import { TextField } from './ui/text-field'
 import { Checkbox } from './ui/checkbox'
@@ -667,19 +666,4 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       </div>
     </>
   )
-}
-
-// ── Mounting helper for ConnectionsContent ──────────────────────────────────
-
-/**
- * Render the ConnectionsView Solid component into a target element.
- * Called by ConnectionsContent.mount() to bridge the TabContent seam.
- * Returns a dispose function for cleanup.
- */
-export function mountConnectionsView(
-  target: HTMLElement,
-  client: ProfileClient,
-  onConnect?: (profile: SSHProfile) => void,
-): () => void {
-  return render(() => <ConnectionsView client={client} onConnect={onConnect} />, target)
 }

@@ -2,3 +2,71 @@
    Owned by nocx-82l9.2; see .internal/specs/2026-07-27-ui-shell-kit-and-theming-design.md §6.1.
    Kept out of style.css so two workers can edit CSS in the same wave without
    colliding; nocx-xrrl.2 folds this directory into the token layout. */
+
+/* ── Height contract (§6.1) ─────────────────────────────────────────────
+   Every node in the flex chain gets explicit min-height: 0 and overflow
+   constraints.  WebKit is specifically sensitive to implicit flex minimum
+   sizes — a single missing min-height: 0 in the chain causes the scroll
+   container to never receive a bounded block size.
+
+   The surface-host class is applied by SolidTabContent to the mount root
+   element.  The .ui-page chain is the contract for the Page component
+   (nocx-imkb.1); the selectors below land the CSS before the component
+   exists. */
+
+#panes {
+  position: relative;
+  min-height: 0;
+}
+
+.surface-host {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.ui-page {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.ui-page__header {
+  flex: 0 0 auto;
+}
+
+.ui-page__body {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.ui-page__rail {
+  flex: 0 0 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.ui-page__scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  overflow-y: auto;
+}
+
+/* ── Settings-specific fix: .st-container needs min-height: 0 ────────────
+   style.css declares .st-container { height: 100% } but not min-height,
+   so WebKit's implicit flex min-size (min-height: auto) overrides the
+   explicit height when content is taller than the pane, breaking the
+   scroll chain.  We add it here because another worker owns style.css
+   in this wave and we would collide (nocx-82l9.2). */
+
+.st-container {
+  min-height: 0;
+}
