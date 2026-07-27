@@ -810,6 +810,31 @@ export default tseslint.config(
     plugins: { nocx: nocxPlugin },
     rules: { 'nocx/no-raw-controls': 'error' },
   },
+  // Rule 8 — dependency direction. `ui/` is the vocabulary every surface imports;
+  // it must not import back. A primitive that knows about a surface is no longer a
+  // primitive, and the cycle is invisible until the day someone tries to reuse it.
+  //
+  // Expressed with the stock rule rather than a custom one: the constraint is
+  // "these paths, from this directory", which no-restricted-imports states exactly,
+  // and a hand-written rule here would be code to maintain for nothing.
+  {
+    files: ['src/ui/**/*.{ts,tsx}'],
+    ignores: ['src/ui/**/*.test.{ts,tsx}'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['../*', '../../*'],
+              message:
+                'ui/ may not import from outside itself: surfaces, features and application state all depend on the kit, and the kit must not depend back. Move the shared thing into ui/, or pass it in as a prop.',
+            },
+          ],
+        },
+      ],
+    },
+  },
   // nocx/no-role-impersonation — closes the hole no-raw-controls leaves: a control
   // hand-rolled out of neutral elements with an ARIA role (design spec §4 rule 10).
   {

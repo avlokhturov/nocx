@@ -227,6 +227,42 @@ function findBareTypeSelectors(ast) {
   return hits
 }
 
+/**
+ * Rule 11, strong-signal tier — control CSS outside the kit.
+ *
+ * These have no non-control use. `appearance` only exists to strip platform chrome;
+ * `::placeholder`, `::file-selector-button` and the WebKit spin/search pseudos only
+ * exist on form controls; `:checked::after` draws a state only a control has. A
+ * surface declaring any of them is hand-rolling a control the kit already owns.
+ *
+ * The weaker tier from the design — background + border + padding together — is
+ * deliberately NOT here. Measured, it fires on `.cm-credential-card` and
+ * `.st-export-backup-details`, which are ordinary cards, and a rule that reports
+ * correct code gets disabled. That tier needs the selector traced back to JSX first.
+ */
+const CONTROL_FINGERPRINTS = [
+  /(^|[^-\w])appearance\s*:/,
+  /::placeholder/,
+  /::file-selector-button/,
+  /::-webkit-(inner|outer)-spin-button/,
+  /::-webkit-search-(decoration|results-button)/,
+  /:checked::after/,
+]
+
+function findControlFingerprints(source) {
+  const hits = []
+  source.split('\n').forEach((line, i) => {
+    if (line.trim().startsWith('/*') || line.trim().startsWith('*')) return
+    for (const re of CONTROL_FINGERPRINTS) {
+      if (re.test(line)) {
+        hits.push({ line: i + 1, snippet: line.trim().slice(0, 70) })
+        break
+      }
+    }
+  })
+  return hits
+}
+
 export function checkCSSIntegrity({ entry, stylesDir }) {
   const violations = []
   const entryAbs = resolve(entry)
@@ -265,6 +301,19 @@ export function checkCSSIntegrity({ entry, stylesDir }) {
         line: hit.line,
         detail: `\`${hit.selector}\` is a type selector for an element of that name, not a class — drop the backslash`,
       })
+    }
+
+    // Rule 11 (strong tier) applies everywhere EXCEPT component stylesheets, which
+    // are where controls legitimately live.
+    if (!resolve(file).startsWith(resolve(stylesAbs, 'components'))) {
+      for (const hit of findControlFingerprints(readFileSync(file, 'utf8'))) {
+        violations.push({
+          rule: 'control-css-outside-kit',
+          file: rel(file),
+          line: hit.line,
+          detail: `\`${hit.snippet}\` only exists on form controls — the kit owns those, so this is hand-rolling one`,
+        })
+      }
     }
 
     // Rule 4 applies to component stylesheets only.

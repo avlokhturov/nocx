@@ -14,3 +14,16 @@
 .fixture-uses-fallback {
   font-family: var(--fixture-also-never-declared, monospace);
 }
+
+/* Rule 11 fixture — control CSS in a surface stylesheet.
+   'appearance' exists only to strip platform chrome and '::placeholder' only exists
+   on form controls, so a surface declaring either is hand-rolling a control the kit
+   already owns. Both lines below must be reported. */
+
+.fixture-fake-input {
+  appearance: none;
+}
+
+.fixture-fake-input::placeholder {
+  color: gray;
+}
