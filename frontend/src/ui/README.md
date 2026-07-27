@@ -96,17 +96,28 @@ Every component:
 - `disabled` prevents interaction and reduces opacity.
 - Error states use `aria-invalid` and `role="alert"` on the error message.
 
-## The `ui-` namespace is reserved
+## Identity is what a component renders, not what it is spelled
 
-A class beginning with `ui-` belongs to the component that renders it, and the
-`nocx/no-inline-markup` rule enforces exactly that: the class appearing in any other
-file is a violation, because it means markup is duplicating a component.
+A class is a **kit identity** when a component in this directory renders it, and that
+set is computed from the AST — static `class` / `className` / `classList` values on JSX
+elements in `ui/**`, and nothing else (`lint-fixtures/scan-kit-identities.mjs`). Comments,
+doc strings, `querySelector` arguments and variant lookup tables are invisible to it.
 
-So `ui-` must not be used for anything that is _not_ a component's own class. The
-styling scope wrapper that surfaces put around kit content is `kit-scope`, not
-`ui-kit`, for this reason — it is applied by consumers by design, no component owns
-it, and naming it `ui-*` made the rule flag something no component could replace.
+**The `ui-` prefix is not the test, and treating it as one was a bug.** The derivation
+used to be a regex over raw source, which swept in prose and lookup tables — eight false
+positives from the variant tables alone. It also could not see identities that do not
+start with `ui-`, such as the dialog's `nocx-dialog__panel`. Meanwhile the prefix is
+genuinely in use by surface classes no component renders — `ui-settings-row`,
+`ui-settings-filter`, `ui-export-desc` — and a prefix-based rule would forbid the
+settings surface from styling its own markup.
 
-Renaming out of the `ui-` namespace is legitimate **only** for a scope marker or a
-similar consumer-applied hook. It is not a way to silence the rule: if a component
-renders the class, the fix is to use the component.
+So: `nocx/no-inline-markup` flags a **rendered** class appearing in a file other than the
+component that renders it, because that means markup is duplicating a component. Renaming
+is never the fix. If a component renders the class, the fix is to use the component.
+
+Two identities per component is normal and deliberate. `ui-checkbox` is the row and
+`ui-checkbox__control` is the box; they have different duties and neither may be inferred
+from the other. The one that matters most is the identity on the **element that carries
+the appearance** — an input, a select, a button. Every defect the kit migration
+(`nocx-pp3y`) unwound came from that element having no name, so its rules could only be
+reached through an ancestor and each surface wrote its own instead.
