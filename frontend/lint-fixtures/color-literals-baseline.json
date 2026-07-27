@@ -1,0 +1,73 @@
+{
+  "//": [
+    "DO NOT EDIT MANUALLY. Regenerate with `npm run baseline:color-update`.",
+    "",
+    "This baseline enumerates every current colour-literal violation outside",
+    "frontend/src/styles/themes/. It may only shrink. A new violation in any",
+    "file is an error even if the file already has baselined violations.",
+    "",
+    "This file must be empty before the colour grammar epic (nocx-xrrl) closes."
+  ],
+  "violations": [
+    {
+      "file": "frontend/src/connections.tsx",
+      "id": "86b3a133b355",
+      "type": "#565f89",
+      "line": 273
+    },
+    {
+      "file": "frontend/src/connections.tsx",
+      "id": "86b3a133b355",
+      "type": "#565f89",
+      "line": 350
+    },
+    {
+      "file": "frontend/src/connections.tsx",
+      "id": "e205cadf611d",
+      "type": "rgb",
+      "line": 380
+    },
+    {
+      "file": "frontend/src/connections.tsx",
+      "id": "7ec1142694de",
+      "type": "#c0caf5",
+      "line": 382
+    },
+    {
+      "file": "frontend/src/styles/components/overlay.css",
+      "id": "f13e3308e986",
+      "type": "rgb",
+      "line": 22
+    },
+    {
+      "file": "frontend/src/styles/components/overlay.css",
+      "id": "959018faf42e",
+      "type": "hex",
+      "line": 28
+    },
+    {
+      "file": "frontend/src/styles/components/overlay.css",
+      "id": "b8047ce914db",
+      "type": "hex",
+      "line": 29
+    },
+    {
+      "file": "frontend/src/styles/components/overlay.css",
+      "id": "018ff728a31e",
+      "type": "hex",
+      "line": 34
+    },
+    {
+      "file": "frontend/src/styles/components/overlay.css",
+      "id": "018ff728a31e",
+      "type": "hex",
+      "line": 41
+    },
+    {
+      "file": "frontend/src/styles/components/overlay.css",
+      "id": "08fd2310608d",
+      "type": "hex",
+      "line": 48
+    }
+  ]
+}

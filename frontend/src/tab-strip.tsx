@@ -1,4 +1,5 @@
 import { For, Show, createSignal } from 'solid-js'
+import { Button } from './ui/button'
 import type { Setter } from 'solid-js'
 import { createStore } from 'solid-js/store'
 import { render } from 'solid-js/web'
@@ -41,11 +42,11 @@ export interface TabStrip {
   removeTab(tabId: number): void
   setActive(tabId: number): void
   reorder(tabs: readonly TabView[]): void
-
   onActivate: ((tabId: number) => void) | null
   onClose: ((tabId: number) => void) | null
   onNewTab: (() => void) | null
   onReorder: ((fromId: number, toId: number) => void) | null
+  onQuickConnect: (() => void) | null
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -80,6 +81,7 @@ abstract class TabStripBase implements TabStrip {
   onClose: ((tabId: number) => void) | null = null
   onNewTab: (() => void) | null = null
   onReorder: ((fromId: number, toId: number) => void) | null = null
+  onQuickConnect: (() => void) | null = null
 
   /** Subclasses set up container attributes (class, aria). */
   protected abstract setupContainer(container: HTMLElement): void
@@ -182,6 +184,14 @@ abstract class TabStripBase implements TabStrip {
           <button class="tab-add" aria-label="New tab" onClick={() => this.onNewTab?.()}>
             +
           </button>
+          <Button
+            class="tab-caret"
+            ariaLabel="Quick connect"
+            onClick={() => this.onQuickConnect?.()}
+            tabIndex={-1}
+          >
+            ▾
+          </Button>
           <Show when={this.orientation === 'horizontal'}>
             <div class="tabbar-spacer" />
           </Show>

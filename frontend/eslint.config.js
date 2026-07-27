@@ -19,7 +19,7 @@ import { createHash } from 'node:crypto'
 const CONFIG_DIR = import.meta.dirname
 const PROJECT_ROOT = resolve(CONFIG_DIR, '..')
 const BASELINE_PATH = resolve(CONFIG_DIR, 'lint-fixtures/raw-controls-baseline.json')
-
+const COLOR_BASELINE_PATH = resolve(CONFIG_DIR, 'lint-fixtures/color-literals-baseline.json')
 /** Map of "${relativePath}:${hashId}" → entry for fast lookup. */
 function loadBaseline() {
   try {
@@ -34,10 +34,23 @@ function loadBaseline() {
     return new Map()
   }
 }
+function loadColorBaseline() {
+  const map = new Map()
+  try {
+    const data = JSON.parse(readFileSync(COLOR_BASELINE_PATH, 'utf8'))
+    for (const v of data.violations) {
+      map.set(`${v.file}:${v.id}`, v)
+    }
+  } catch {
+    // No baseline yet — every violation is an error
+  }
+  return map
+}
 
 // Cache the baseline once; reloaded only on restart. Regeneration is a deliberate
 // script, not a side effect of lint.
 const baseline = loadBaseline()
+const colorBaseline = loadColorBaseline()
 
 // ─── Path-based exemption patterns (ADR-0014) ──────────────────────────────────────
 // Application surfaces: files matching an exempt pattern are allowed to use raw
@@ -188,6 +201,318 @@ const nocxPlugin = {
         }
       },
     },
+    'no-color-literals': {
+      meta: {
+        type: 'suggestion',
+        docs: {
+          description:
+            'Reject colour literals outside themes/ — use theme tokens instead. See ADR-0013 §4 and ADR-0012.',
+        },
+        messages: {
+          colorLiteral:
+            'Colour literal "{{literal}}" found. Use a theme token instead (ADR-0013 §4).',
+        },
+      },
+      create(context) {
+        const filename = context.filename ?? ''
+        const rel = relative(PROJECT_ROOT, filename)
+        const sourceCode = context.sourceCode
+
+        function isBaselined(id) {
+          if (globalThis.process.env.NOCX_BASELINE_UPDATE) return false
+          return colorBaseline.has(`${rel}:${id}`)
+        }
+
+        // CSS colour-function names (all prohibited) — used by checkValue below
+
+        // Named CSS colours (excluding safe ones)
+        const NAMED_COLORS = new Set([
+          'aliceblue',
+          'antiquewhite',
+          'aqua',
+          'aquamarine',
+          'azure',
+          'beige',
+          'bisque',
+          'blanchedalmond',
+          'blue',
+          'blueviolet',
+          'brown',
+          'burlywood',
+          'cadetblue',
+          'chartreuse',
+          'chocolate',
+          'coral',
+          'cornflowerblue',
+          'cornsilk',
+          'crimson',
+          'cyan',
+          'darkblue',
+          'darkcyan',
+          'darkgoldenrod',
+          'darkgray',
+          'darkgreen',
+          'darkgrey',
+          'darkkhaki',
+          'darkmagenta',
+          'darkolivegreen',
+          'darkorange',
+          'darkorchid',
+          'darkred',
+          'darksalmon',
+          'darkseagreen',
+          'darkslateblue',
+          'darkslategray',
+          'darkslategrey',
+          'darkturquoise',
+          'darkviolet',
+          'deeppink',
+          'deepskyblue',
+          'dimgray',
+          'dimgrey',
+          'dodgerblue',
+          'firebrick',
+          'floralwhite',
+          'forestgreen',
+          'fuchsia',
+          'gainsboro',
+          'ghostwhite',
+          'gold',
+          'goldenrod',
+          'gray',
+          'green',
+          'greenyellow',
+          'grey',
+          'honeydew',
+          'hotpink',
+          'indianred',
+          'indigo',
+          'ivory',
+          'khaki',
+          'lavender',
+          'lavenderblush',
+          'lawngreen',
+          'lemonchiffon',
+          'lightblue',
+          'lightcoral',
+          'lightcyan',
+          'lightgoldenrodyellow',
+          'lightgray',
+          'lightgreen',
+          'lightgrey',
+          'lightpink',
+          'lightsalmon',
+          'lightseagreen',
+          'lightskyblue',
+          'lightslategray',
+          'lightslategrey',
+          'lightsteelblue',
+          'lightyellow',
+          'lime',
+          'limegreen',
+          'linen',
+          'magenta',
+          'maroon',
+          'mediumaquamarine',
+          'mediumblue',
+          'mediumorchid',
+          'mediumpurple',
+          'mediumseagreen',
+          'mediumslateblue',
+          'mediumspringgreen',
+          'mediumturquoise',
+          'mediumvioletred',
+          'midnightblue',
+          'mintcream',
+          'mistyrose',
+          'moccasin',
+          'navajowhite',
+          'navy',
+          'oldlace',
+          'olive',
+          'olivedrab',
+          'orange',
+          'orangered',
+          'orchid',
+          'palegoldenrod',
+          'palegoldenrod',
+          'papayawhip',
+          'peachpuff',
+          'peru',
+          'pink',
+          'plum',
+          'powderblue',
+          'purple',
+          'rebeccapurple',
+          'red',
+          'rosybrown',
+          'royalblue',
+          'saddlebrown',
+          'salmon',
+          'sandybrown',
+          'seagreen',
+          'seashell',
+          'sienna',
+          'silver',
+          'skyblue',
+          'slateblue',
+          'slategray',
+          'slategrey',
+          'snow',
+          'springgreen',
+          'steelblue',
+          'tan',
+          'teal',
+          'thistle',
+          'tomato',
+          'turquoise',
+          'violet',
+          'wheat',
+          'whitesmoke',
+          'yellow',
+          'yellowgreen',
+        ])
+        // CSS colour properties to check in style objects
+        const COLOR_PROPS = new Set([
+          'color',
+          'background',
+          'background-color',
+          'backgroundcolor',
+          'border-color',
+          'bordercolor',
+          'border-top-color',
+          'bordertopcolor',
+          'border-right-color',
+          'borderrightcolor',
+          'border-bottom-color',
+          'borderbottomcolor',
+          'border-left-color',
+          'borderleftcolor',
+          'outline-color',
+          'outlinecolor',
+          'fill',
+          'stroke',
+          'accent-color',
+          'accentcolor',
+          'caret-color',
+          'caretcolor',
+        ])
+
+        /** Check a string value for colour literals. Returns array of literal strings. */
+        function checkValue(value) {
+          const findings = []
+          const v = String(value)
+
+          // Hex colours
+          const hexRe = /#[0-9a-fA-F]{3,8}(?!\w)/g
+          let m
+          while ((m = hexRe.exec(v)) !== null) findings.push(m[0])
+
+          // Colour functions
+          const fnRe = /\b(rgba?|hsla?|oklch|lab|color)\s*\(/gi
+          while ((m = fnRe.exec(v)) !== null) findings.push(m[0].replace(/\(.*/, '()'))
+
+          // Named colours (excluding safe keywords)
+          const lower = v.toLowerCase()
+          // If the entire value is a safe keyword, skip
+          const SAFE_WORDS = new Set(['currentcolor', 'transparent', 'inherit'])
+          if (SAFE_WORDS.has(lower)) return findings
+
+          // Check individual words
+          const words = lower.split(/[^a-z]/)
+          for (const w of words) {
+            if (w && w !== 'white' && w !== 'black' && NAMED_COLORS.has(w)) {
+              findings.push(w)
+            }
+          }
+
+          // white/black: only allowed inside color-mix()
+          // Simpler check: if value contains 'white' or 'black' NOT inside
+          // 'color-mix(', it's a violation
+          if (/white/.test(lower) && !/color-mix\(/.test(lower)) {
+            findings.push('white')
+          }
+          if (/black/.test(lower) && !/color-mix\(/.test(lower)) {
+            findings.push('black')
+          }
+
+          return findings
+        }
+
+        return {
+          // Check SVG fill/stroke attributes
+          JSXAttribute(node) {
+            if (!node.name || !node.name.name) return
+            const attrName = node.name.name.toLowerCase()
+            if (attrName !== 'fill' && attrName !== 'stroke') return
+
+            if (!node.value) return
+            // String literal value
+            if (node.value.type === 'Literal') {
+              const val = String(node.value.value)
+              const findings = checkValue(val)
+              if (findings.length > 0) {
+                const fullText = sourceCode.getText(node)
+                const id = createHash('sha256').update(fullText).digest('hex').slice(0, 12)
+                if (!isBaselined(id)) {
+                  context.report({
+                    node,
+                    messageId: 'colorLiteral',
+                    data: { literal: findings[0] },
+                  })
+                }
+              }
+            }
+          },
+
+          // Check style={...} object properties
+          Property(node) {
+            // Only check properties inside style objects in JSX
+            const parent = node.parent
+            if (!parent || parent.type !== 'ObjectExpression') return
+            const grandparent = parent.parent
+            if (!grandparent || grandparent.type !== 'JSXExpressionContainer') return
+            const greatGP = grandparent.parent
+            if (
+              !greatGP ||
+              greatGP.type !== 'JSXAttribute' ||
+              !greatGP.name ||
+              greatGP.name.name !== 'style'
+            )
+              return
+
+            // Get the property name
+            let propName = ''
+            if (node.key.type === 'Identifier') propName = node.key.name
+            else if (node.key.type === 'Literal') propName = String(node.key.value)
+            else return
+
+            // Only check colour-related properties
+            const lower = propName.toLowerCase().replace(/[_-]/g, '')
+            if (!COLOR_PROPS.has(lower)) return
+
+            // Check the value
+            if (!node.value) return
+            let val = ''
+            if (node.value.type === 'Literal') val = String(node.value.value)
+            else return // Complex expression — skip
+
+            const findings = checkValue(val)
+            if (findings.length > 0) {
+              const fullText = sourceCode.getText(node)
+              const id = createHash('sha256').update(fullText).digest('hex').slice(0, 12)
+              if (!isBaselined(id)) {
+                context.report({
+                  node,
+                  messageId: 'colorLiteral',
+                  data: { literal: findings[0] },
+                })
+              }
+            }
+          },
+        }
+      },
+    },
   },
 }
 
@@ -243,6 +568,13 @@ export default tseslint.config(
   {
     plugins: { nocx: nocxPlugin },
     rules: { 'nocx/no-raw-controls': 'error' },
+  },
+  // nocx/no-color-literals — rejects colour literals outside themes/
+  // (ADR-0013 §4). Covers JSX style props and SVG attributes in TSX files.
+  // CSS files outside themes/ are checked by check-css-colors.mjs.
+  {
+    plugins: { nocx: nocxPlugin },
+    rules: { 'nocx/no-color-literals': 'error' },
   },
   prettier,
 )

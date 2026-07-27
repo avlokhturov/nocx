@@ -19,6 +19,12 @@ import { mountUpdateNotice } from './update-notice'
 import { SettingsIcon } from './ui/icons'
 import { SettingsObserver } from './settings-observer'
 import { bootstrapTheme } from './renderers/theme-bootstrap'
+import {
+  QuickConnectController,
+  LocalShellQuickConnectProvider,
+  SSHQuickConnectProvider,
+  type QuickConnectProvider,
+} from './quick-connect'
 
 async function main() {
   log.info('nocx: main() called')
@@ -157,7 +163,9 @@ async function main() {
         const next = snap.values[PLACEMENT_KEY] ?? 'horizontal'
         if (next !== placement) {
           placement = next
-          tm.replaceStrip(next === 'vertical' ? new VerticalTabStrip() : new HorizontalTabStrip())
+          const newStrip = next === 'vertical' ? new VerticalTabStrip() : new HorizontalTabStrip()
+          wireQuickConnect(newStrip)
+          tm.replaceStrip(newStrip)
         }
       } catch {
         // Silently ignore — a settings fetch failure is not actionable here.
@@ -199,6 +207,40 @@ async function main() {
       e.preventDefault()
       const { content, descriptor } = registry.build(SURFACE_ID_SETTINGS)
       tm.openTab(content, descriptor)
+    }
+  })
+
+  // ── Quick-connect picker (nocx-imkb.7) ──────────────────────────────
+  // Both the initial tab strip AND replacement strips (via replaceStrip)
+  // need onQuickConnect wired — the helper ensures no strip is missed.
+
+  const qcContainer = document.createElement('div')
+  document.body.append(qcContainer)
+
+  const sshProvider = new SSHQuickConnectProvider(profileClient, (id, host, user) =>
+    tm.newSSHTab(id, host, user),
+  )
+  const qcProviders: QuickConnectProvider[] = [
+    new LocalShellQuickConnectProvider(() => tm.newTab()),
+    sshProvider,
+  ]
+
+  const qc = new QuickConnectController()
+  qc.mount(qcContainer, qcProviders)
+
+  function wireQuickConnect(strip: typeof tabStrip) {
+    strip.onQuickConnect = () => qc.show()
+  }
+  wireQuickConnect(tabStrip)
+
+  // Cmd/Ctrl+Shift+P opens the quick-connect picker.
+  // Chosen to match VS Code's command-palette convention. Does not collide
+  // with TabManager (Ctrl+T/W/1-9), the terminal (single keystrokes), or
+  // CodeMirror (which does not register this binding in its keymap).
+  document.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.key === 'P') {
+      e.preventDefault()
+      qc.show()
     }
   })
 

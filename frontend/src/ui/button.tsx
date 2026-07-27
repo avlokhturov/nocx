@@ -26,6 +26,14 @@ export interface ButtonProps {
   ariaLabel?: string
   type?: 'button' | 'submit' | 'reset'
   variant?: ButtonVariant
+  /**
+   * Roving-tabindex participation. Chrome controls that sit inside a toolbar
+   * managing its own focus order need -1 so they are not a second tab stop.
+   * Added for the tab strip's quick-connect caret (nocx-imkb.7) — the first
+   * time a chrome-sized control tried to use the kit and found it did not fit,
+   * which is what nocx-vxqj.8 is about.
+   */
+  tabIndex?: number
 }
 
 export function Button(props: ButtonProps) {
@@ -37,6 +45,7 @@ export function Button(props: ButtonProps) {
       disabled={props.disabled === true}
       title={props.title ?? ''}
       aria-label={props.ariaLabel ?? undefined}
+      tabIndex={props.tabIndex}
       onClick={() => props.onClick()}
     >
       {props.children}
