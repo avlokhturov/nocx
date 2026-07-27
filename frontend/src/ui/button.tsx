@@ -7,6 +7,15 @@
  * - export-section.ts: st-export-btn, st-export-btn-primary, st-export-card-toggle
  */
 
+export type ButtonVariant = 'default' | 'primary' | 'danger' | 'close'
+
+const VARIANT_CLASS: Record<ButtonVariant, string> = {
+  default: '',
+  primary: 'ui-btn-primary',
+  danger: 'ui-btn-danger',
+  close: 'ui-btn-close',
+}
+
 export interface ButtonProps {
   class?: string
   children: string
@@ -15,12 +24,14 @@ export interface ButtonProps {
   title?: string
   ariaLabel?: string
   type?: 'button' | 'submit' | 'reset'
+  variant?: ButtonVariant
 }
 
 export function Button(props: ButtonProps) {
+  const variantClass = () => VARIANT_CLASS[props.variant ?? 'default']
   return (
     <button
-      class={props.class ?? ''}
+      class={`${variantClass()} ${props.class ?? ''}`.trim()}
       type={props.type ?? 'button'}
       disabled={props.disabled === true}
       title={props.title ?? ''}

@@ -2,3 +2,202 @@
    Owned by nocx-vxqj.4; see docs/decisions/0014-component-kit-foundation.md.
    Kept out of style.css so parallel workers do not collide; nocx-xrrl.2 folds
    this directory into the token layout. */
+
+/* ── Generic focus-visible ring ────────────────────────────────────────────── */
+
+.ui-kit :focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible {
+  outline: 2px solid #7aa2f7;
+  outline-offset: 2px;
+}
+
+/* ── Button variants ───────────────────────────────────────────────────────── */
+
+/* Base button styles moved from style.css .cm-header button, .cm-form-actions button,
+   .st-secret button, .st-retry-btn — consolidated here with variants. */
+
+.ui-btn-primary {
+  background: #7aa2f7;
+  border-color: #7aa2f7;
+  color: #1a1b26;
+}
+.ui-btn-primary:hover {
+  background: #89b4fa;
+  border-color: #89b4fa;
+}
+
+.ui-btn-danger {
+  border-color: #f7768e;
+  color: #f7768e;
+}
+.ui-btn-danger:hover {
+  background: rgba(247, 118, 142, 0.1);
+}
+
+.ui-btn-close {
+  background: none;
+  border: none;
+  color: #565f89;
+}
+.ui-btn-close:hover {
+  color: #f7768e;
+  background: none;
+}
+
+/* ── Select: native element with appearance: none ──────────────────────────── */
+
+/* Select defaults from style.css .st-control-col select — moved here. */
+select.ui-kit,
+.ui-kit select {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 100%;
+  max-width: 320px;
+  padding: 6px 10px;
+  background: #1f2335
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23565f89'/%3E%3C/svg%3E")
+    no-repeat right 8px center;
+  border: 1px solid #2a2b3d;
+  border-radius: 4px;
+  color: #c0caf5;
+  font-size: 13px;
+  cursor: pointer;
+  padding-right: 28px;
+}
+select.ui-kit:focus,
+.ui-kit select:focus {
+  border-color: #7aa2f7;
+  outline: none;
+}
+
+/* ── TextField / SearchField inputs ────────────────────────────────────────── */
+
+/* Input base from style.css .cm-field input, .st-control-col input, .st-search-input. */
+input.ui-kit,
+.ui-kit input[type='text'],
+.ui-kit input[type='number'],
+.ui-kit input[type='password'],
+.ui-kit input[type='search'] {
+  flex: 1;
+  width: 100%;
+  padding: 8px 12px;
+  background: #16171e;
+  border: 1px solid #2a2b3d;
+  border-radius: 4px;
+  color: #c0caf5;
+  font-size: 13px;
+  outline: none;
+}
+input.ui-kit:focus,
+.ui-kit input:focus {
+  border-color: #7aa2f7;
+}
+input.ui-kit::placeholder,
+.ui-kit input::placeholder {
+  color: #565f89;
+}
+
+/* Disabled inputs. */
+input.ui-kit:disabled,
+.ui-kit input:disabled,
+select.ui-kit:disabled,
+.ui-kit select:disabled,
+button.ui-kit:disabled,
+.ui-kit button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ── Field wrapper (form rows) ─────────────────────────────────────────────── */
+
+/* Moved from style.css .cm-field — consolidated here. */
+.ui-field {
+  display: flex;
+  align-items: center;
+  margin-bottom: 12px;
+}
+.ui-field label {
+  width: 160px;
+  font-size: 13px;
+  color: #a9b1d6;
+  flex: none;
+}
+
+.ui-field-desc {
+  font-size: 11px;
+  color: #565f89;
+  margin: 2px 0 4px 0;
+}
+
+.ui-field-error {
+  font-size: 11px;
+  color: #f7768e;
+  margin-top: 4px;
+}
+
+/* ── Section ───────────────────────────────────────────────────────────────── */
+
+/* Moved from style.css .st-section, .st-section-heading, .cm-form-section. */
+.ui-section {
+  margin-bottom: 28px;
+}
+.ui-section h2 {
+  font-size: 13px;
+  font-weight: 600;
+  color: #7aa2f7;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #2a2b3d;
+  margin: 0 0 16px 0;
+  scroll-margin-top: 16px;
+}
+
+/* ── Badge variants ────────────────────────────────────────────────────────── */
+
+.ui-badge-warning {
+  background: rgba(224, 175, 104, 0.12);
+  color: #e0af68;
+}
+
+.ui-badge-danger {
+  background: rgba(247, 118, 142, 0.12);
+  color: #f7768e;
+}
+
+.ui-badge-info {
+  background: rgba(122, 162, 247, 0.12);
+  color: #7aa2f7;
+}
+
+/* ── EmptyState ────────────────────────────────────────────────────────────── */
+
+/* Moved from style.css .st-empty, .cm-list-empty. */
+.ui-empty-state {
+  padding: 32px 16px;
+  text-align: center;
+  color: #565f89;
+  font-size: 13px;
+}
+.ui-empty-state__title {
+  font-weight: 600;
+  margin: 0 0 4px 0;
+}
+.ui-empty-state__desc {
+  color: #565f89;
+  font-style: italic;
+  margin: 0;
+}
+.ui-empty-state__action {
+  margin-top: 16px;
+}
+
+/* ── Toolbar ───────────────────────────────────────────────────────────────── */
+
+.ui-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}

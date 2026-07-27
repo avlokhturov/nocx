@@ -16,6 +16,7 @@ import { ConnectionsContent } from './connections-content'
 import { SURFACE_CONNECTIONS, SINGLETON_CONNECTIONS } from './tab-content'
 import { SurfaceRegistry, SURFACE_ID_SETTINGS, SURFACE_ID_CONNECTIONS } from './surface-registry'
 import { mountUpdateNotice } from './update-notice'
+import { SettingsIcon } from './ui/icons'
 import { SettingsObserver } from './settings-observer'
 
 async function main() {
@@ -144,40 +145,26 @@ async function main() {
       }
     })()
   })
-  // App-shell sidebar (nocx-8yg.9) — VS Code-style activity bar plus a
-  // collapsible panel. Panel views and tab actions are separate arguments,
-  // not two kinds of row in one list: mixing them is what opened an empty
-  // panel at cold start (nocx-rp2j).
+  // App-shell sidebar (nocx-82l9.6) — VS Code-style activity bar plus a
+  // collapsible panel.  Views and actions are two separate zones:
   //
-  // - Connections and Settings are TAB ACTIONS: they open a full-screen tab.
-  // - Sessions is a PANEL VIEW, and deliberately empty: the tab list lives in
-  //   the tab bar. Making the sidebar a second home for tabs is the subject of
-  //   epic nocx-d3q (configurable placement), not of this branch.
+  // - Top zone: views from the registry (currently empty; Explorer, Git,
+  //   and Servers are future beads).
+  // - Bottom zone: global actions (currently only the Settings gear).
+  //
+  // Connections has been removed from the activity bar — it is not a view
+  // and not an action (see .internal/specs §2.4).  The surface is still
+  // reachable through the Cmd/Ctrl+, registry entry point until nocx-imkb.3
+  // lands and Connections becomes a Settings sub-page.
   mountSidebar(
     activityBar,
     sidebarPanel,
-    [
-      {
-        id: 'sessions',
-        title: 'Sessions',
-        icon: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3"/><path d="M13 15h4"/></svg>',
-      },
-    ],
-    [
-      {
-        id: 'connections',
-        title: 'Connections',
-        icon: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 17H7A5 5 0 0 1 7 7h2"/><path d="M15 7h2a5 5 0 1 1 0 10h-2"/><line x1="8" y1="12" x2="16" y2="12"/></svg>',
-        onActivate: () => {
-          log.info('nocx: opening Connections tab')
-          const { content, descriptor } = registry.build(SURFACE_ID_CONNECTIONS)
-          tm.openTab(content, descriptor)
-        },
-      },
+    /* views — empty until nocx-708q */ [],
+    /* actions */ [
       {
         id: 'settings',
         title: 'Settings',
-        icon: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>',
+        icon: SettingsIcon,
         onActivate: () => {
           log.info('nocx: opening Settings tab')
           const { content, descriptor } = registry.build(SURFACE_ID_SETTINGS)

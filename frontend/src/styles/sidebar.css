@@ -2,3 +2,33 @@
    Owned by nocx-82l9.6; see .internal/specs/2026-07-27-ui-shell-kit-and-theming-design.md §2.
    Kept out of style.css so parallel workers do not collide; nocx-xrrl.2 folds
    this directory into the token layout. */
+
+/* ── Activity bar inner layout ────────────────────────────────────────── */
+
+.activity-bar {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.activity-bar-zone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+/* Pushes the bottom zone to the bottom of the column. */
+.activity-bar-spacer {
+  flex: 1 1 auto;
+}
+
+/* Small visual separator between zones.  Only drawn when both zones
+   have visible children — the ::before pseudo is on the spacer itself. */
+.activity-bar-spacer::before {
+  content: '';
+  display: block;
+  width: 24px;
+  height: 1px;
+  background: #2a2b3d;
+  margin: 4px auto;
+}
