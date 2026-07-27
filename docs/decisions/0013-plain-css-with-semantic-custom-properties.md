@@ -234,7 +234,8 @@ The derivation in `tokens.css` works as a single overlay table:
   --color-accent-active: color-mix(in srgb, var(--color-accent), white 20%);
   --color-accent-disabled: color-mix(in srgb, var(--color-accent), transparent 40%);
 
-  --color-surface-hover: color-mix(in srgb, var(--color-surface), white 6%);
+  /* NOT derived — see §3.1. The real hover is DARKER than the surface, so no
+     percentage of white produces it. Assigned per theme instead. */
   --color-surface-active: color-mix(in srgb, var(--color-surface), white 12%);
   --color-surface-disabled: color-mix(in srgb, var(--color-surface), transparent 30%);
 
@@ -252,6 +253,24 @@ The exact mix percentages are a starting point derived by matching the existing
 `#89b4fa` (accent hover ≈ `color-mix(in srgb, #7aa2f7, white 10%)`) and
 `#1f2030` (surface hover ≈ `color-mix(in srgb, #1f2335, white 6%)`). The migration
 bead (`nocx-xrrl.2`) should verify and adjust these before committing.
+
+#### 3.1 One derivation that does not work, found by measuring
+
+The table above was written by matching two existing values by eye. One does not
+survive contact with arithmetic: `--color-surface-hover` is `#1f2030` against a
+surface of `#1f2335` — **darker**, not lighter — so mixing towards white cannot
+produce it at any percentage.
+
+That is not a mistake in the palette. A hover state that darkens is a legitimate
+choice on a dark theme, and it is what the app has always done. What was wrong was
+the assumption, written into this ADR before anyone checked, that every state
+colour lightens.
+
+The policy holds with the exception stated: derive centrally where the derivation
+is real, assign per theme where it is not. Deriving a value that every theme then
+has to override is worse than not deriving it.
+
+Measured during `nocx-xrrl.2`.
 
 #### WebKit floor for color-mix()
 
