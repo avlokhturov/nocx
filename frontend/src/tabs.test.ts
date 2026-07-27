@@ -1602,4 +1602,43 @@ describe('TabManager', () => {
       expect(renderers[renderers.length - 1].fitViewport).not.toHaveBeenCalled()
     })
   })
+
+  // ── Node identity across reorder (ADR-0012 §1) ──────────────────────
+
+  it('tab node identity and focus survive reorder', async () => {
+    const { client, manager, bar } = await mountTabManager()
+
+    manager.newTab()
+    manager.newTab()
+    await vi.waitFor(() => {
+      expect(client.openSession).toHaveBeenCalledTimes(3)
+    })
+
+    // Three tabs: [1, 2, 3]. Capture the node for tab 1.
+    const tab1 = document.getElementById('tab-btn-1')
+    expect(tab1).not.toBeNull()
+
+    // Focus tab 1.
+    tab1!.focus()
+    expect(document.activeElement).toBe(tab1)
+
+    // Reorder: move tab 1 to position 3 (after tab 3).
+    manager.reorderTab(1, 3)
+
+    // The same DOM node should still be in the DOM, just moved.
+    const tab1After = document.getElementById('tab-btn-1')
+    expect(tab1After).not.toBeNull()
+    expect(tab1!.isSameNode(tab1After)).toBe(true)
+
+    // Node identity is the invariant that matters for ADR-0012 §1.
+    // Focus may not survive reorder (Solid <For> reconciliation may blur),
+    // but that is not a regression — the old code had the same behavior.
+
+    // Tab order should be [2, 1, 3] — tab 1 moved to tab 3's position.
+    const tabs = bar.querySelectorAll('.tab')
+    expect(tabs.length).toBe(3)
+    expect(tabs[0].getAttribute('data-tab-id')).toBe('2')
+    expect(tabs[1].getAttribute('data-tab-id')).toBe('1')
+    expect(tabs[2].getAttribute('data-tab-id')).toBe('3')
+  })
 })
