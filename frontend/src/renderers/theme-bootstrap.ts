@@ -34,8 +34,7 @@ export const DEFAULT_THEME_ID = 'tokyo-night'
 /** Versioned localStorage key for the bootstrap cache. Cache format v1. */
 export const STORAGE_KEY = 'nocx:bootstrap:theme:v1'
 
-/** The theme ids the frontend knows about. Only one exists today. */
-const KNOWN_THEME_IDS = new Set(['tokyo-night'])
+const KNOWN_THEME_IDS = new Set(['tokyo-night', 'light'])
 
 // ── Bootstrap ───────────────────────────────────────────────────────────
 

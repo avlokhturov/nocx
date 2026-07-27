@@ -250,7 +250,17 @@ abstract class TabStripBase implements TabStrip {
 
   reorder(tabs: readonly TabView[]): void {
     if (!this.mounted) return
+    // Save and restore focus: Solid's <For> reconciliation moves DOM nodes
+    // via insertBefore, which causes the browser to clear the focused state
+    // even when the same DOM node is reused (keyed by object identity).
+    // Signal setters execute their dependent effects synchronously outside
+    // a batch, so by the time _setTabViews returns the DOM is stable and
+    // the synchronous focus call is sufficient.
+    const active = document.activeElement
     this._setTabViews([...tabs])
+    if (active instanceof HTMLElement && this.container?.contains(active)) {
+      active.focus({ preventScroll: true })
+    }
   }
 
   // ── Keyboard (roving tabindex) ───────────────────────────────────────

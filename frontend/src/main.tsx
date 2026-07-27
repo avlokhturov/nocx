@@ -16,7 +16,7 @@ import { SurfaceRegistry, SURFACE_ID_SETTINGS } from './surface-registry'
 import { mountUpdateNotice } from './update-notice'
 import { SettingsIcon } from './ui/icons'
 import { SettingsObserver } from './settings-observer'
-import { bootstrapTheme } from './renderers/theme-bootstrap'
+import { bootstrapTheme, reconcileThemeFromGo } from './renderers/theme-bootstrap'
 import {
   QuickConnectController,
   LocalShellQuickConnectProvider,
@@ -36,7 +36,6 @@ async function main() {
   // XtermRenderer mount() reads the correct palette from the first frame.
   // ADR-0013 §8, §8.1; design spec §5.4.
   const appliedThemeId = bootstrapTheme()
-  void appliedThemeId // available for future Go theme reconciliation
   render(() => <App />, document.getElementById('app')!)
   const bar = document.getElementById('tabbar')!
   const verticalStripHost = document.getElementById('vertical-tabstrip')!
@@ -84,11 +83,16 @@ async function main() {
   // add exactly such a select to Interface, at which point tab placement would
   // stop working with nothing on screen to say why.
   const PLACEMENT_KEY = 'tab.placement'
+  const THEME_KEY = 'ui.theme'
 
   let placement: unknown = 'horizontal'
   try {
     const snap = await profileClient.getSnapshot()
     placement = snap.values[PLACEMENT_KEY] ?? 'horizontal'
+    // Reconcile the Go theme setting against the bootstrap cache. Go is
+    // authoritative (ADR-0013 §8.1): the bootstrap cache covers the first
+    // frame, but the persisted Go value wins on snapshot arrival.
+    reconcileThemeFromGo(snap.values[THEME_KEY] as string | undefined, appliedThemeId)
   } catch {
     // Backend may not be ready yet — safe fallback.
   }
@@ -132,8 +136,8 @@ async function main() {
     },
   })
 
-  // Live application through SettingsObserver: when the placement setting
-  // changes, refetch the snapshot and swap the strip in place.
+  // Live application through SettingsObserver: when any setting
+  // changes, refetch the snapshot and act on relevant keys.
   const observer = new SettingsObserver(dispatcher)
   observer.setRevision(0)
   observer.start(() => {
@@ -148,6 +152,8 @@ async function main() {
           wireQuickConnect(newStrip)
           tm.replaceStrip(newStrip)
         }
+        // Theme setting changed — reconcile against Go's value (ADR-0013 §8.1).
+        reconcileThemeFromGo(snap.values[THEME_KEY] as string | undefined)
       } catch {
         // Silently ignore — a settings fetch failure is not actionable here.
       }
