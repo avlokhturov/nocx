@@ -25,7 +25,7 @@ none are speculative.
 | Tab pane geometry (viewport) | `Tab` (`tabs.ts:49-50`, `_viewportObserver`, `_latestViewport`) | Frontend — `ResizeObserver` on pane element | Not persisted | Tab |
 | Active sidebar view | `SidebarSolid` → `sidebar` slice of store (`sidebar-model.ts:29`) | Frontend — icon click | **One versioned localStorage record** (§3) | Process |
 | Sidebar collapsed | `SidebarSolid` → `sidebar` slice of store (`sidebar-model.ts:27`) | Frontend — icon click, Ctrl/Cmd+B | **One versioned localStorage record** (§3) | Process |
-| Selected theme | **TBD — recommend Go setting** (§3) | Go backend (recommended); frontend-only theme picker (fallback) | Go settings doc | Process |
+| Selected theme | **Go setting `ui.theme`** (decided — §3) | Go backend | Go settings doc, plus a bootstrap **cache** in the local record (ADR-0013 §8.1) | Process |
 | Accepted settings values | `settings.tsx:84` (`createStore`) + `settings-domain.ts` `SettingsMirror` | Go backend — validated via `AcceptedSnapshot` revision gate | Go settings doc | Process |
 | Settings revision | `settings.tsx:88` (`createSignal`) | Go backend — monotonic counter in `settings.Registry` | Go settings doc | Process |
 | Settings draft values | `settings.tsx:85` (`createStore`) | Frontend — unsaved edits | Not persisted | Draft |
@@ -191,6 +191,18 @@ declaring it as a setting is negligible (< 20 lines in Go).
 ship), a `SelectSpec` with hardcoded `Options` would need updating. At MVP
 (one theme shipping, one in development) this is not a problem. When themes
 become dynamic the setting can switch to a declarative key resolved at runtime.
+
+**Decided, and it needs one exception to the mirror rule.** A Go setting arrives
+asynchronously, but the bootstrap theme resolver must run *before* the first frame, or
+every launch flashes the default theme. So the local versioned record additionally carries
+a **bootstrap cache** of the last accepted theme id: written when the accepted Go value
+changes, read synchronously at startup, reconciled against Go when the snapshot lands.
+
+This is the single permitted exception to "the frontend never writes a second persisted
+copy", and it survives the rule's intent because the cache is never read as authority,
+never written by user action, and always loses to Go. ADR-0013 §8.1 owns the rule; this
+table defers to it. The exception applies to `ui.theme` **only** — `tab.placement` and
+every other Go setting keep the plain mirror with no local copy.
 
 ---
 

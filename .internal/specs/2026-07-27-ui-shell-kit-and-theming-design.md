@@ -325,6 +325,15 @@ or empty strings and stays wrong until the next theme event. `document.fonts.rea
   terminal is constructed: it applies `data-theme`, validates that every required custom
   property resolves to a non-empty value, and falls back atomically to the built-in theme if
   not.
+- The selected theme is a **Go setting** (`ui.theme`), so it survives reinstall, travels
+  with export/import and appears in the generated screen — but Go settings arrive
+  asynchronously, long after the first frame. The resolver therefore reads a **bootstrap
+  cache** of the last accepted theme id from the versioned local UI record, and reconciles
+  against Go when the snapshot arrives. The cache is never read as authority, never written
+  by user action, and always loses to Go; it exists to colour one frame. See ADR-0013 §8.1,
+  which owns this rule. *(This contradiction — synchronous resolver versus an
+  asynchronously-fetched setting — was in the first draft of this spec and was found by
+  reading two workers' deliverables against each other, not by either worker.)*
 - A concrete `ITheme` is passed into terminal construction — never read opportunistically
   afterwards.
 - Subscription to theme changes is registered **before** construction, or reapplied

@@ -29,7 +29,7 @@ import { SettingsObserver } from './settings-observer'
  * and pending-restart state. It renders from state — bound Go calls are
  * idempotent.
  */
-class UpdateNotice {
+export class UpdateNotice {
   private readonly el: HTMLDivElement
 
   constructor(private bar: HTMLElement) {
