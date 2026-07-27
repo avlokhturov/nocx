@@ -7,8 +7,8 @@ import js from '@eslint/js'
 import tseslint from 'typescript-eslint'
 import prettier from 'eslint-config-prettier'
 import solid from 'eslint-plugin-solid'
-import { readFileSync, existsSync } from 'node:fs'
-import { relative, resolve } from 'node:path'
+import { readFileSync, existsSync, readdirSync } from 'node:fs'
+import { relative, resolve, basename } from 'node:path'
 import { createHash } from 'node:crypto'
 
 // ─── Baseline loader (ADR-0014 §"The guard") ───────────────────────────────────────
@@ -51,6 +51,53 @@ function loadColorBaseline() {
 // script, not a side effect of lint.
 const baseline = loadBaseline()
 const colorBaseline = loadColorBaseline()
+
+// ─── Inline-markup guard: class ownership ───────────────────────────────────────────
+// For each ui/*.tsx (non-test), the static `ui-` class names in the source belong
+// to that component. Built at config-load time so a rename or new component is
+// automatically reflected — no hand-maintained list.
+const UI_DIR = resolve(PROJECT_ROOT, 'frontend/src/ui')
+const CLASS_RE = /ui-[\w-]+/g
+
+function buildClassOwnership() {
+  const ownership = new Map()
+  try {
+    const entries = readdirSync(UI_DIR)
+    for (const entry of entries) {
+      if (!entry.endsWith('.tsx') || entry.includes('.test.') || entry.includes('.spec.')) continue
+      const content = readFileSync(resolve(UI_DIR, entry), 'utf-8')
+      CLASS_RE.lastIndex = 0
+      let m
+      while ((m = CLASS_RE.exec(content)) !== null) {
+        const cls = m[0]
+        if (!ownership.has(cls)) ownership.set(cls, new Set())
+        ownership.get(cls).add(entry)
+      }
+    }
+  } catch {
+    // ui/ dir missing — ownership info unavailable (not normal but won't crash)
+  }
+  return ownership
+}
+
+const classOwnership = buildClassOwnership()
+
+const INLINE_MARKUP_BASELINE_PATH = resolve(CONFIG_DIR, 'lint-fixtures/inline-markup-baseline.json')
+
+function loadInlineMarkupBaseline() {
+  const map = new Map()
+  try {
+    const data = JSON.parse(readFileSync(INLINE_MARKUP_BASELINE_PATH, 'utf8'))
+    for (const v of data.violations) {
+      map.set(`${v.file}:${v.id}`, v)
+    }
+  } catch {
+    // No baseline yet — every violation is an error
+  }
+  return map
+}
+
+const inlineMarkupBaseline = loadInlineMarkupBaseline()
 
 // ─── Path-based exemption patterns (ADR-0014) ──────────────────────────────────────
 // Application surfaces: files matching an exempt pattern are allowed to use raw
@@ -513,6 +560,142 @@ const nocxPlugin = {
         }
       },
     },
+    'no-inline-markup': {
+      meta: {
+        type: 'suggestion',
+        docs: {
+          description:
+            "Reject inline markup that duplicates a kit component's class, and inline style props, in application surfaces. Use components from ui/ instead (ADR-0014).",
+        },
+        messages: {
+          bypassComponent:
+            'Use the \'ui/{{component}}\' component instead of duplicating the "{{class}}" class directly in markup. See ADR-0014.',
+          inlineStyle:
+            'Avoid inline style props in application surfaces. Layout and colour belong in CSS. See ADR-0014.',
+        },
+      },
+      create(context) {
+        const filename = context.filename ?? ''
+        const rel = relative(PROJECT_ROOT, filename)
+
+        if (isExempt(rel)) return {}
+
+        const sourceCode = context.sourceCode
+
+        function isBaselined(id) {
+          if (globalThis.process.env.NOCX_BASELINE_UPDATE) return false
+          return inlineMarkupBaseline.has(`${rel}:${id}`)
+        }
+
+        /** Extract `ui-*` class names from a class/className attribute value. */
+        function extractUIClasses(attr) {
+          if (!attr.value) return []
+
+          // String literal: class="ui-page"
+          if (attr.value.type === 'Literal' && typeof attr.value.value === 'string') {
+            return attr.value.value.split(/\s+/).filter((c) => c.startsWith('ui-'))
+          }
+
+          // JSXExpressionContainer
+          if (attr.value.type === 'JSXExpressionContainer') {
+            const expr = attr.value.expression
+
+            // Template literal: class={`ui-empty-state ${x}`}
+            if (expr.type === 'TemplateLiteral') {
+              const names = []
+              for (const quasi of expr.quasis) {
+                const parts = (quasi.value.raw || '').split(/\s+/)
+                for (const p of parts) {
+                  if (p.startsWith('ui-')) names.push(p)
+                }
+              }
+              return names
+            }
+
+            // CallExpression on template literal: class={`ui-empty-state ${x}`.trim()}
+            if (
+              expr.type === 'CallExpression' &&
+              expr.callee.type === 'MemberExpression' &&
+              expr.callee.property.type === 'Identifier' &&
+              expr.callee.property.name === 'trim'
+            ) {
+              const inner = expr.callee.object
+              if (inner.type === 'TemplateLiteral') {
+                const names = []
+                for (const quasi of inner.quasis) {
+                  const parts = (quasi.value.raw || '').split(/\s+/)
+                  for (const p of parts) {
+                    if (p.startsWith('ui-')) names.push(p)
+                  }
+                }
+                return names
+              }
+            }
+          }
+
+          return []
+        }
+
+        function checkJSX(node) {
+          const ownBasename = basename(filename)
+
+          // ── Check 1: class/className duplicating a kit class ──────────────
+          for (const attrName of ['class', 'className']) {
+            const classAttr = node.attributes.find(
+              (a) =>
+                a.type === 'JSXAttribute' &&
+                a.name.type === 'JSXIdentifier' &&
+                a.name.name === attrName,
+            )
+            if (!classAttr) continue
+
+            const classes = extractUIClasses(classAttr)
+            for (const cls of classes) {
+              const owners = classOwnership.get(cls)
+              if (!owners) continue // not a kit-owned class
+
+              // Owner file may render its own class
+              if (owners.has(ownBasename)) continue
+
+              // Files inside ui/ are exempt (composition)
+              if (rel.includes('/src/ui/')) continue
+
+              const id = hashNode(sourceCode, classAttr)
+              if (!isBaselined(id)) {
+                const ownerName = [...owners][0].replace('.tsx', '').replace('.ts', '')
+                context.report({
+                  node: classAttr,
+                  messageId: 'bypassComponent',
+                  data: { class: cls, component: ownerName },
+                })
+                return // one report per element
+              }
+            }
+          }
+
+          // ── Check 2: inline style props ──────────────────────────────────
+          const styleAttr = node.attributes.find(
+            (a) =>
+              a.type === 'JSXAttribute' &&
+              a.name.type === 'JSXIdentifier' &&
+              a.name.name === 'style',
+          )
+          if (styleAttr) {
+            const id = hashNode(sourceCode, styleAttr)
+            if (!isBaselined(id)) {
+              context.report({
+                node: styleAttr,
+                messageId: 'inlineStyle',
+              })
+            }
+          }
+        }
+
+        return {
+          JSXOpeningElement: checkJSX,
+        }
+      },
+    },
   },
 }
 
@@ -575,6 +758,13 @@ export default tseslint.config(
   {
     plugins: { nocx: nocxPlugin },
     rules: { 'nocx/no-color-literals': 'error' },
+  },
+  // nocx/no-inline-markup — rejects inline markup that duplicates a kit
+  // component's class, and inline style props, in application surfaces
+  // (ADR-0014). Class ownership derived from ui/*.tsx at load time.
+  {
+    plugins: { nocx: nocxPlugin },
+    rules: { 'nocx/no-inline-markup': 'error' },
   },
   prettier,
 )

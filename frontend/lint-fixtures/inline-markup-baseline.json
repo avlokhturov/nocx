@@ -1,0 +1,62 @@
+{
+  "//": [
+    "DO NOT EDIT MANUALLY. Regenerate with `npm run baseline:inline-update`.",
+    "",
+    "This baseline enumerates every current inline-markup violation (bypassed",
+    "component classes and inline style props) in application surfaces below",
+    "the project root. It may only shrink. A new violation in any file is an",
+    "error even if the file already has baselined violations. CI asserts this.",
+    "",
+    "This file must be empty before epic nocx-vxqj closes."
+  ],
+  "violations": [
+    {
+      "file": "frontend/src/connections.tsx",
+      "id": "73374e1b6d5b",
+      "type": "inlineStyle",
+      "line": 270
+    },
+    {
+      "file": "frontend/src/connections.tsx",
+      "id": "bfe76aa391f1",
+      "type": "inlineStyle",
+      "line": 347
+    },
+    {
+      "file": "frontend/src/connections.tsx",
+      "id": "61b6fd4497ce",
+      "type": "inlineStyle",
+      "line": 375
+    },
+    {
+      "file": "frontend/src/settings.tsx",
+      "id": "7880ea8b622a",
+      "type": "inlineStyle",
+      "line": 555
+    },
+    {
+      "file": "frontend/src/settings.tsx",
+      "id": "4bca0d6ae081",
+      "type": "bypassComponent",
+      "line": 657
+    },
+    {
+      "file": "frontend/src/settings.tsx",
+      "id": "4bca0d6ae081",
+      "type": "bypassComponent",
+      "line": 719
+    },
+    {
+      "file": "frontend/src/settings.tsx",
+      "id": "3f48b8d93d63",
+      "type": "inlineStyle",
+      "line": 757
+    },
+    {
+      "file": "frontend/src/update-notice.tsx",
+      "id": "4506f24c5611",
+      "type": "inlineStyle",
+      "line": 64
+    }
+  ]
+}

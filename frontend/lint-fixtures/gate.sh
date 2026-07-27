@@ -7,7 +7,7 @@
 set -eu
 
 fixture_dir="lint-fixtures"
-expected_rules="solid/no-destructure solid/reactivity solid/no-react-deps solid/no-react-specific-props solid/prefer-for solid/prefer-show solid/components-return-once nocx/no-raw-controls nocx/no-color-literals"
+expected_rules="solid/no-destructure solid/reactivity solid/no-react-deps solid/no-react-specific-props solid/prefer-for solid/prefer-show solid/components-return-once nocx/no-raw-controls nocx/no-color-literals nocx/no-inline-markup"
 
 # ── CSS fixture check ─────────────────────────────────────────────────────────
 # Run the colour grammar checker on the fixture directory (NOCX_BASELINE_UPDATE
@@ -93,5 +93,5 @@ if [ -z "$ts_reactivity" ]; then
   exit 1
 fi
 
-echo "OK — all 9 lint rules fired (solid/reactivity confirmed from .ts, CSS colour grammar verified, color-mix laundering blocked)"
+echo "OK — all 10 lint rules fired (solid/reactivity confirmed from .ts, CSS colour grammar verified, color-mix laundering blocked)"
 exit 0
