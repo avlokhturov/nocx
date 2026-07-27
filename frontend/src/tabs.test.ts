@@ -12,8 +12,16 @@ import {
   FIXTURE_DIRECTORY_LABEL,
   type RendererMock,
 } from './test-support/tabs-fixtures'
+import { TabManager } from './tabs'
 import { ClipboardGate } from './clipboard'
 import type { TerminalContent } from './terminal-content'
+import {
+  BaseTabContent,
+  type ContentDescriptor,
+  type TabHost,
+  type ContentViewport,
+  type SurfaceType,
+} from './tab-content'
 
 // ── Mocks ──────────────────────────────────────────────────────────────────
 
@@ -32,6 +40,37 @@ async function getRendererMocks(): Promise<RendererMock[]> {
   return vi.mocked(XtermRenderer).mock.results.map((r) => r.value as unknown as RendererMock)
 }
 
+// ── Second TabContent implementation for mount-once proof ─────────────
+// This class MUST NOT carry a private mount guard — the seam enforces
+// mount-once, not the implementation. If mount() is called more than once,
+// the seam is broken.
+class CountingTestContent extends BaseTabContent {
+  mountCount = 0
+  /** Tracks every setVisible call for test assertions. */
+  visibleCalls: boolean[] = []
+  /** Ordered trace of lifecycle calls for ordering assertions. */
+  callLog: string[] = []
+
+  // eslint-disable-next-line @typescript-eslint/require-await, @typescript-eslint/no-unused-vars
+  async mount(_target: HTMLElement, _host: TabHost, _signal: AbortSignal): Promise<void> {
+    this.mountCount++
+    this.callLog.push('mount')
+  }
+
+  viewportChanged(_viewport: ContentViewport): void {
+    this.callLog.push(`viewportChanged(${_viewport.width}x${_viewport.height})`)
+  }
+
+  focus(): void {}
+
+  setVisible(visible: boolean): void {
+    this.visibleCalls.push(visible)
+    this.callLog.push(`setVisible(${visible})`)
+    super.setVisible(visible)
+  }
+
+  dispose(): void {}
+}
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 describe('TabManager', () => {
@@ -42,6 +81,29 @@ describe('TabManager', () => {
 
   // ── opening a tab creates a session and a pane ────────────────────────
 
+  it('constructing a TabManager creates no tab and mounts nothing', async () => {
+    const { bar, panes } = setupTabBarDOM()
+    const c = makeClient()
+    const cb = makeClipboard()
+    const g = new ClipboardGate()
+    const bn = makeBanner()
+    const pc = {
+      listProfiles: vi.fn().mockResolvedValue([]),
+      listGroups: vi.fn().mockResolvedValue([]),
+    }
+    const { HorizontalTabStrip } = await import('./tab-strip')
+    const tabStrip = new HorizontalTabStrip()
+    const manager = new TabManager(bar, panes, c as never, cb, g, bn, pc as never, tabStrip)
+
+    expect(bar.querySelectorAll('.tab').length).toBe(0)
+
+    // Model state is also empty — no tabs registered.
+    expect(manager.tabCount).toBe(0)
+    expect(panes.querySelectorAll('.pane').length).toBe(0)
+    expect(c.openSession).not.toHaveBeenCalled()
+    // Strip is not yet mounted — no DOM children in the bar.
+    expect(bar.children.length).toBe(0)
+  })
   it('opens a session when a tab is created and activated', async () => {
     const { client, bar, panes } = await mountTabManager()
 
@@ -994,6 +1056,10 @@ describe('TabManager', () => {
       profileClient,
       tabStrip,
     )
+    // Open the initial tab explicitly — the constructor mounts nothing.
+    // Don't await: openInitialTab returns the _initialTabReady promise;
+    // we assert the rejection through that same promise below.
+    void manager.openInitialTab()
 
     // initialTabReady must reject — a genuinely broken tab is not "ready".
     // expect().rejects attaches the handler synchronously, so the rejection
@@ -1159,8 +1225,169 @@ describe('TabManager', () => {
   })
 
   // ═════════════════════════════════════════════════════════════════════════
+  // Mount-once enforcement at the seam (nocx-njrx.2)
+  // ═════════════════════════════════════════════════════════════════════════
+
+  it('mounts content exactly once when activated repeatedly — seam guard, not TerminalContent private flag', async () => {
+    const { manager } = await mountTabManager()
+
+    const content = new CountingTestContent()
+    const descriptor: ContentDescriptor = {
+      surfaceType: 'test.mock' as unknown as SurfaceType,
+      singletonKey: null,
+      restoreDescriptor: null,
+      supportsAttention: false,
+      defaultTitle: 'Test',
+    }
+    // openTab creates a tab via addTab → activate → start → mount.
+    manager.openTab(content, descriptor)
+
+    // Activate the terminal tab, then activate our tab again.
+    // Mount must only fire once (seam guard in Tab.start()).
+    manager.activateByIndex(0)
+    manager.activateByIndex(1)
+
+    // Flush microtasks so any pending async activation settles.
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(content.mountCount).toBe(1)
+  })
+
+  it('calling setVisible through the content boundary drives visibility, not a CSS class toggle in tabs.ts', async () => {
+    const { manager } = await mountTabManager()
+    const content = new CountingTestContent()
+    const descriptor: ContentDescriptor = {
+      surfaceType: 'test.mock' as unknown as SurfaceType,
+      singletonKey: null,
+      restoreDescriptor: null,
+      supportsAttention: false,
+      defaultTitle: 'Test',
+    }
+
+    manager.openTab(content, descriptor)
+
+    // setVisible(true) should have been called when the tab was activated.
+    // (The first call is for tab 0 being deactivated, the second is our tab activated.)
+    // content 0 (terminal) also gets setVisible calls, so count >= 1 for our content.
+    expect(content.visibleCalls.length).toBeGreaterThanOrEqual(1)
+    expect(content.visibleCalls[content.visibleCalls.length - 1]).toBe(true)
+
+    // Deactivate the tab — setVisible(false) fires on the previous tab.
+    manager.activateByIndex(0)
+    // The last call on our content should now be false.
+    expect(content.visibleCalls[content.visibleCalls.length - 1]).toBe(false)
+
+    expect(content.mountCount).toBe(1)
+  })
+
+  it('pane is visible before mount when activated — pre-mount target makes setVisible meaningful from first activation', async () => {
+    const { manager } = await mountTabManager()
+    const content = new CountingTestContent()
+    const descriptor: ContentDescriptor = {
+      surfaceType: 'test.mock' as unknown as SurfaceType,
+      singletonKey: null,
+      restoreDescriptor: null,
+      supportsAttention: false,
+      defaultTitle: 'Test',
+    }
+
+    // addTab fires void this.activate(tab) — mount is async even for
+    // CountingTestContent's sync body. With pre-mount target set in the
+    // Tab constructor, setActive(true) already toggles the 'active' class
+    // before mount() resolves.
+    const tab = manager.openTab(content, descriptor)
+    await Promise.resolve()
+    await Promise.resolve()
+
+    // The pane must have the 'active' class from the first activation.
+    // This assertion breaks if setVisible(true) was called when _target
+    // was null (pre-mount target fix makes it non-null from construction).
+    expect(tab.pane.classList.contains('active')).toBe(true)
+    expect(content.mountCount).toBe(1)
+  })
+
+  it('ordering: setVisible(true) fires before mount, and first viewport gets non-zero rectangle when pane is visible', async () => {
+    // Construct a Tab directly (not through TabManager) so we control
+    // the activation order and can inspect the call log precisely.
+    const { Tab } = await import('./tabs')
+    const content = new CountingTestContent()
+    const descriptor: ContentDescriptor = {
+      surfaceType: 'test.mock' as unknown as SurfaceType,
+      singletonKey: null,
+      restoreDescriptor: null,
+      supportsAttention: false,
+      defaultTitle: 'Test',
+    }
+
+    // Tab constructor calls content.setTarget(this.pane) — _target is
+    // set before any activation.
+    const tab = new Tab(content, descriptor, 99)
+    expect(content.callLog).toEqual([]) // no lifecycle calls yet
+
+    // Append pane to DOM and stub getBoundingClientRect to return non-zero,
+    // so _deliverViewport does not suppress the first geometry delivery.
+    // Pattern copied from B.5 test at ~line 1370.
+    const paneParent = document.createElement('div')
+    paneParent.append(tab.pane)
+    Object.defineProperty(tab.pane, 'getBoundingClientRect', {
+      value: () => ({
+        width: 1024,
+        height: 768,
+        top: 0,
+        left: 0,
+        right: 1024,
+        bottom: 768,
+        x: 0,
+        y: 0,
+        toJSON: () => {},
+      }),
+      configurable: true,
+    })
+
+    // Activate before mount: setActive(true) → setVisible(true).
+    // With pre-mount target, this toggles 'active' immediately.
+    tab.setActive(true)
+    expect(tab.pane.classList.contains('active')).toBe(true)
+    expect(content.callLog).toContain('setVisible(true)')
+    expect(content.callLog.indexOf('mount')).toBe(-1) // mount not yet called
+    expect(content.mountCount).toBe(0)
+
+    // Now mount.
+    await tab.start()
+
+    // setVisible(true) was logged before mount.
+    const visibleIdx = content.callLog.indexOf('setVisible(true)')
+    const mountIdx = content.callLog.indexOf('mount')
+    expect(visibleIdx).toBeGreaterThanOrEqual(0)
+    expect(visibleIdx).toBeLessThan(mountIdx)
+
+    // The first viewportChanged must be delivered with non-zero dimensions
+    // (the pre-mount target makes the pane visible, so _deliverViewport
+    // measures the stubbed 1024×768 rect instead of a zero rect).
+    const vpCall = content.callLog.find((c) => c.startsWith('viewportChanged'))
+    expect(vpCall).toBeDefined()
+    expect(vpCall).toMatch(/viewportChanged\(1024x768\)/u)
+
+    // Mount exactly once.
+    expect(content.mountCount).toBe(1)
+
+    // Clean up.
+    tab.close()
+    paneParent.remove()
+  })
+
+  // ═════════════════════════════════════════════════════════════════════════
   // B.5 Geometry authority — presentation layer owns the viewport
   // ═════════════════════════════════════════════════════════════════════════
+
+  it('refuses a second openInitialTab — the guard is at the seam, not in a comment', async () => {
+    const { manager } = await mountTabManager()
+    // mountTabManager already opened the initial tab, which is the point:
+    // the composition root calls this exactly once and a second call must
+    // fail loudly rather than mount a second strip and a second first tab.
+    expect(() => manager.openInitialTab()).toThrow(/openInitialTab called twice/)
+  })
 
   describe('B.5 geometry authority', () => {
     // ResizeObserver callback captured by the stub so we can trigger it.

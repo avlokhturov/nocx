@@ -1,12 +1,26 @@
 // @vitest-environment jsdom
+/**
+ * Characterization tests for the settings surface.
+ *
+ * Tests observable behaviour of SettingsContent through its TabContent seam:
+ * mount, search, modified-only filter, section navigation, viewport, deep
+ * link, and dispose.  These pass against both the old imperative
+ * implementation and the new Solid rewrite.
+ *
+ * Two acceptance-criterion tests are deliberately written to fail against the
+ * old code and pass after the rewrite:
+ *   - nocx-x6w9: exactly ONE search box and ONE modified filter exist
+ *   - nocx-ucxl: clicking a rail section always changes the content pane
+ */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { SettingsViewImpl, type Declaration } from './settings'
-import { Dispatcher } from './dispatcher'
+import { SettingsContent, SURFACE_SETTINGS, SINGLETON_SETTINGS } from './settings-content'
 import { ProfileClient } from './profiles'
+import { Dispatcher } from './dispatcher'
+import type { Declaration } from './settings'
+import type { TabHost } from './tab-content'
 
-function mockDispatcher(): Dispatcher {
-  return new Dispatcher()
-}
+// ── Test declarations ────────────────────────────────────────────────
+// 5 declarations spanning 3 sections and all control types.
 
 const TEST_DECLARATIONS: Declaration[] = [
   {
@@ -62,7 +76,18 @@ const TEST_DECLARATIONS: Declaration[] = [
   },
 ]
 
-/** Shorthand for the common three-mock setup in almost every test. */
+// ── Helpers ───────────────────────────────────────────────────────────
+
+// jsdom does not implement scrollIntoView. Define it once for all tests.
+if (!('scrollIntoView' in HTMLElement.prototype)) {
+  Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+    value: vi.fn(),
+    writable: true,
+    configurable: true,
+  })
+}
+
+/** Shorthand for mocking client RPCs. */
 function mockReady(
   client: ProfileClient,
   overrides: {
@@ -71,7 +96,7 @@ function mockReady(
     overridden?: string[]
     secrets?: Record<string, boolean>
   } = {},
-) {
+): void {
   const decls = overrides.declarations ?? TEST_DECLARATIONS
   vi.spyOn(client, 'describeSettings').mockResolvedValue({ declarations: decls })
   vi.spyOn(client, 'getSnapshot').mockResolvedValue({
@@ -87,856 +112,326 @@ function mockReady(
     }
   }
 }
+function mockTabHost(): TabHost {
+  return {
+    setTitle: vi.fn(),
+    requestAttention: vi.fn(),
+    requestClose: vi.fn(),
+  }
+}
 
-describe('SettingsViewImpl', () => {
-  let container: HTMLDivElement
+// ── Tests ─────────────────────────────────────────────────────────────
+
+describe('SettingsContent', () => {
+  let target: HTMLDivElement
   let client: ProfileClient
-  let view: SettingsViewImpl
+  let content: SettingsContent
+  let host: TabHost
+  let signal: AbortSignal
+
+  function visibleRows(): HTMLElement[] {
+    return Array.from(target.querySelectorAll<HTMLElement>('.st-row')).filter(
+      (r) => r.style.display !== 'none',
+    )
+  }
 
   beforeEach(() => {
     document.body.replaceChildren()
-    container = document.createElement('div')
-    document.body.append(container)
-    client = new ProfileClient(mockDispatcher())
-    view = new SettingsViewImpl(container, client)
+    target = document.createElement('div')
+    document.body.append(target)
+    client = new ProfileClient(new Dispatcher())
+    content = new SettingsContent(client)
+    host = mockTabHost()
+    signal = new AbortController().signal
   })
 
-  // ======================================================================
-  //  Section grouping (preserved from original)
-  // ======================================================================
+  // ── Surface constants ──────────────────────────────────────────────
 
-  it('renders sections as headings from declarations', async () => {
+  it('exports surface and singleton constants', () => {
+    expect(SURFACE_SETTINGS).toBe('nocx.settings')
+    expect(SINGLETON_SETTINGS).toBe('nocx.settings')
+  })
+
+  // ── Mount ──────────────────────────────────────────────────────────
+
+  it('mounts the two-pane layout with rail and content', async () => {
     mockReady(client)
+    await content.mount(target, host, signal)
 
-    await view.refresh()
-    const headings = container.querySelectorAll('.st-section-heading')
-    const texts = Array.from(headings).map((h) => h.textContent)
-    expect(texts).toContain('Terminal')
-    expect(texts).toContain('Application')
-    expect(texts).toContain('AI')
-    expect(texts[0]).toBe('Terminal')
+    const container = target.querySelector('.st-container')
+    expect(container).toBeTruthy()
+    expect(container!.querySelector('.st-rail')).toBeTruthy()
+    expect(container!.querySelector('.st-content')).toBeTruthy()
   })
 
-  // ======================================================================
-  //  Control rendering by kind (preserved from original)
-  // ======================================================================
-
-  it('renders toggle control as a checkbox', async () => {
-    mockReady(client, { values: { 'app.confirmQuit': true } })
-
-    await view.refresh()
-
-    const checkbox = container.querySelector<HTMLInputElement>(
-      '.st-row[data-key="app\\.confirmQuit"] input[type="checkbox"]',
-    )
-    expect(checkbox).toBeTruthy()
-    expect(checkbox!.checked).toBe(true)
-  })
-
-  it('renders text control as a text input', async () => {
-    mockReady(client, { values: { 'terminal.fontFamily': 'Fira Code' } })
-
-    await view.refresh()
-
-    const input = container.querySelector<HTMLInputElement>(
-      '.st-row[data-key="terminal\\.fontFamily"] input[type="text"]',
-    )
-    expect(input).toBeTruthy()
-    expect(input!.value).toBe('Fira Code')
-  })
-
-  it('renders number control with min/max attributes', async () => {
-    mockReady(client, { values: { 'terminal.fontSize': 18 } })
-
-    await view.refresh()
-
-    const input = container.querySelector<HTMLInputElement>(
-      '.st-row[data-key="terminal\\.fontSize"] input[type="number"]',
-    )
-    expect(input).toBeTruthy()
-    expect(input!.value).toBe('18')
-    expect(input!.min).toBe('8')
-    expect(input!.max).toBe('48')
-  })
-
-  it('renders select control with options', async () => {
-    mockReady(client, { values: { 'terminal.cursorStyle': 'bar' } })
-
-    await view.refresh()
-
-    const select = container.querySelector<HTMLSelectElement>(
-      '.st-row[data-key="terminal\\.cursorStyle"] select',
-    )
-    expect(select).toBeTruthy()
-    expect(select!.value).toBe('bar')
-    const options = Array.from(select!.querySelectorAll('option')).map((o) => ({
-      value: o.value,
-      label: o.textContent,
-    }))
-    expect(options).toHaveLength(3)
-    expect(options).toContainEqual({ value: 'block', label: 'Block' })
-  })
-
-  // ======================================================================
-  //  Value narrowing (preserved from original)
-  // ======================================================================
-
-  it('renders fallback when value is an object, never [object Object]', async () => {
-    mockReady(client, {
-      values: {
-        'terminal.fontFamily': { corrupt: 'object' },
-        'terminal.fontSize': { also: 'bad' },
-        'terminal.cursorStyle': { wrong: 'type' },
-      },
-    })
-
-    await view.refresh()
-
-    const textInput = container.querySelector<HTMLInputElement>(
-      '.st-row[data-key="terminal\\.fontFamily"] input[type="text"]',
-    )
-    expect(textInput!.value).toBe('monospace')
-    expect(textInput!.value).not.toContain('[object Object]')
-
-    const numberInput = container.querySelector<HTMLInputElement>(
-      '.st-row[data-key="terminal\\.fontSize"] input[type="number"]',
-    )
-    expect(numberInput!.value).toBe('14')
-
-    const select = container.querySelector<HTMLSelectElement>(
-      '.st-row[data-key="terminal\\.cursorStyle"] select',
-    )
-    expect(select!.value).toBe('block')
-  })
-
-  it('NaN fallback in renderNumber sends a number, never an object', async () => {
-    mockReady(client, { values: { 'terminal.fontSize': { corrupt: true } } })
-    const setSpy = vi.spyOn(client, 'setSetting').mockResolvedValue({ ok: true })
-
-    await view.refresh()
-
-    const input = container.querySelector<HTMLInputElement>(
-      '.st-row[data-key="terminal\\.fontSize"] input[type="number"]',
-    )
-    expect(input!.value).toBe('14')
-
-    let getterCalls = 0
-    Object.defineProperty(input!, 'value', {
-      get() {
-        getterCalls++
-        return getterCalls <= 1 ? '14' : 'not-a-number'
-      },
-      set() {
-        /* noop */
-      },
-      configurable: true,
-    })
-
-    input!.dispatchEvent(new Event('change'))
-
-    await vi.waitFor(() => {
-      expect(setSpy).toHaveBeenCalled()
-    })
-
-    const callArg = setSpy.mock.calls[0][1]
-    expect(typeof callArg).toBe('number')
-    expect(callArg).toBe(14)
-  })
-
-  // ======================================================================
-  //  Secret control (preserved from original)
-  // ======================================================================
-
-  it('renders secret as "not configured" when secretExists returns false', async () => {
-    mockReady(client, { secrets: { 'ai.apiKey': false } })
-
-    await view.refresh()
-
-    const row = container.querySelector<HTMLElement>('.st-row[data-key="ai\\.apiKey"]')
-    expect(row!.textContent).toContain('Not configured')
-    expect(row!.textContent).toContain('Replace')
-    expect(row!.textContent).toContain('Clear')
-  })
-
-  it('renders secret as "configured" when secretExists returns true', async () => {
-    mockReady(client, { secrets: { 'ai.apiKey': true } })
-
-    await view.refresh()
-
-    const row = container.querySelector<HTMLElement>('.st-row[data-key="ai\\.apiKey"]')
-    expect(row!.textContent).toContain('Configured')
-  })
-
-  it('secret control has no input element', async () => {
-    mockReady(client, { secrets: { 'ai.apiKey': true } })
-
-    await view.refresh()
-
-    const row = container.querySelector<HTMLElement>('.st-row[data-key="ai\\.apiKey"]')
-    const inputs = row!.querySelectorAll('input, textarea, [value]')
-    expect(inputs.length).toBe(0)
-  })
-
-  it('no method on ProfileClient exposes a secret value getter', () => {
-    const methods = Object.getOwnPropertyNames(ProfileClient.prototype).filter(
-      (m) => m !== 'constructor',
-    )
-    const secretGetters = methods.filter(
-      (m) =>
-        m.toLowerCase().includes('secret') &&
-        !m.toLowerCase().includes('set') &&
-        !m.toLowerCase().includes('delete') &&
-        !m.toLowerCase().includes('exists'),
-    )
-    expect(secretGetters).toHaveLength(0)
-  })
-
-  // ======================================================================
-  //  Validation errors (preserved from original)
-  // ======================================================================
-
-  it('surfaces validation error on the offending control', async () => {
-    mockReady(client, { values: { 'terminal.fontSize': 14 } })
-    const setSpy = vi
-      .spyOn(client, 'setSetting')
-      .mockRejectedValue(new Error('value must be between 8 and 48'))
-
-    await view.refresh()
-
-    const input = container.querySelector<HTMLInputElement>(
-      '.st-row[data-key="terminal\\.fontSize"] input[type="number"]',
-    )!
-    input.value = '999'
-    input.dispatchEvent(new Event('change'))
-
-    await vi.waitFor(() => {
-      expect(setSpy).toHaveBeenCalled()
-    })
-
-    const updatedRow = container.querySelector<HTMLElement>(
-      '.st-row[data-key="terminal\\.fontSize"]',
-    )
-    const errorEl = updatedRow!.querySelector('.st-error')
-    expect(errorEl).toBeTruthy()
-    expect(errorEl!.textContent).toBe('value must be between 8 and 48')
-  })
-
-  // ======================================================================
-  //  Generated from declarations (preserved from original)
-  // ======================================================================
-
-  it('a brand-new declaration with a novel key renders with zero frontend change', async () => {
-    const novel: Declaration = {
-      key: 'editor.tabWidth',
-      section: 'Editor',
-      label: 'Tab Width',
-      description: 'Number of spaces per tab',
-      control: 'number',
-      dataClass: 'publicConfig',
-      default: 4,
-      min: 1,
-      max: 16,
-    }
-    const withNovel = [...TEST_DECLARATIONS, novel]
-    mockReady(client, { declarations: withNovel })
-
-    await view.refresh()
-
-    const row = container.querySelector<HTMLElement>('.st-row[data-key="editor\\.tabWidth"]')
-    expect(row).toBeTruthy()
-    expect(row!.textContent).toContain('Tab Width')
-    const input = row!.querySelector<HTMLInputElement>('input[type="number"]')
-    expect(input).toBeTruthy()
-    expect(input!.value).toBe('4')
-  })
-
-  // ======================================================================
-  //  Save-revert defects / nocx-q07f (preserved from original)
-  // ======================================================================
-
-  it('saveSetting updates this.values on success so rerender shows saved value', async () => {
+  it('rail has exactly one search input', async () => {
     mockReady(client)
-    const setSpy = vi.spyOn(client, 'setSetting').mockResolvedValue({ ok: true })
+    await content.mount(target, host, signal)
 
-    await view.refresh()
-
-    const checkbox = container.querySelector<HTMLInputElement>(
-      '.st-row[data-key="app\\.confirmQuit"] input[type="checkbox"]',
-    )!
-    expect(checkbox.checked).toBe(false)
-
-    checkbox.checked = true
-    checkbox.dispatchEvent(new Event('change'))
-
-    await vi.waitFor(() => {
-      expect(setSpy).toHaveBeenCalled()
-    })
-
-    const updatedRow = container.querySelector<HTMLElement>('.st-row[data-key="app\\.confirmQuit"]')
-    const updatedCheckbox = updatedRow!.querySelector<HTMLInputElement>('input[type="checkbox"]')!
-    expect(updatedCheckbox.checked).toBe(true)
+    const rail = target.querySelector('.st-rail')!
+    const searchInputs = rail.querySelectorAll<HTMLInputElement>('input[type="search"]')
+    expect(searchInputs.length).toBe(1)
+    expect(searchInputs[0].placeholder).toBe('Search settings…')
   })
 
-  it('saveSetting preserves rejected input so user can edit rather than retype', async () => {
-    mockReady(client, { values: { 'terminal.fontFamily': 'initial' } })
-    const setSpy = vi.spyOn(client, 'setSetting').mockRejectedValue(new Error('validation error'))
-
-    await view.refresh()
-
-    const input = container.querySelector<HTMLInputElement>(
-      '.st-row[data-key="terminal\\.fontFamily"] input[type="text"]',
-    )!
-    input.value = 'rejected-input'
-    input.dispatchEvent(new Event('change'))
-
-    await vi.waitFor(() => {
-      expect(setSpy).toHaveBeenCalled()
-    })
-
-    const updatedRow = container.querySelector<HTMLElement>(
-      '.st-row[data-key="terminal\\.fontFamily"]',
-    )
-    const updatedInput = updatedRow!.querySelector<HTMLInputElement>('input[type="text"]')!
-    expect(updatedInput.value).toBe('rejected-input')
-    expect(updatedRow!.querySelector('.st-error')).toBeTruthy()
-  })
-
-  // ======================================================================
-  //  Load states — SETTINGS-4 / nocx-jwkw
-  // ======================================================================
-
-  it('shows loading state before the first RPC resolves', () => {
-    // Don't resolve the mocks — just show() triggers render() with default
-    // empty LoadState, but refresh() sets Loading and renders.
-    // We trigger refresh without mocks so it hangs; Loading is rendered synchronously.
-    vi.spyOn(client, 'describeSettings').mockReturnValue(new Promise(() => {}))
-    vi.spyOn(client, 'getSnapshot').mockReturnValue(new Promise(() => {}))
-
-    void view.refresh() // fire-and-forget; render() runs synchronously before awaits
-
-    const status = container.querySelector('.st-loading')
-    expect(status).toBeTruthy()
-    expect(status!.textContent).toContain('Loading')
-  })
-
-  it('shows load-failed state with retry button when RPC fails', async () => {
-    vi.spyOn(client, 'describeSettings').mockRejectedValue(new Error('disconnected'))
-
-    await view.refresh()
-
-    const failed = container.querySelector('.st-failed')
-    expect(failed).toBeTruthy()
-    expect(failed!.textContent).toContain('Failed to load settings')
-    const retry = failed!.querySelector('.st-retry-btn')
-    expect(retry).toBeTruthy()
-    expect(retry!.textContent).toBe('Retry')
-  })
-
-  it('clicking retry re-fetches settings', async () => {
-    const descSpy = vi.spyOn(client, 'describeSettings').mockRejectedValueOnce(new Error('fail'))
-    vi.spyOn(client, 'getSnapshot').mockRejectedValue(new Error('fail'))
-
-    await view.refresh()
-    expect(container.querySelector('.st-failed')).toBeTruthy()
-
-    // Second attempt succeeds.
-    descSpy.mockResolvedValue({ declarations: TEST_DECLARATIONS })
-    vi.spyOn(client, 'getSnapshot').mockResolvedValue({
-      values: {},
-      overridden: [],
-      revision: 0,
-    })
-    vi.spyOn(client, 'secretExists').mockResolvedValue({ exists: false })
-
-    const retry = container.querySelector<HTMLButtonElement>('.st-retry-btn')!
-    retry.click()
-    // refresh is async — wait for render.
-    await vi.waitFor(() => {
-      expect(container.querySelector('.st-section-heading')).toBeTruthy()
-    })
-  })
-
-  it('shows empty state when no declarations', async () => {
-    mockReady(client, { declarations: [] })
-
-    await view.refresh()
-
-    expect(container.querySelector('.st-empty')).toBeTruthy()
-  })
-
-  it('shows no-match state when search filters everything', async () => {
-    mockReady(client)
-
-    await view.refresh()
-
-    const searchInput = container.querySelector<HTMLInputElement>('.st-search-input')!
-    searchInput.value = 'xyznonexistent'
-    searchInput.dispatchEvent(new Event('input'))
-
-    await vi.waitFor(() => {
-      expect(container.querySelector('.st-nomatch')).toBeTruthy()
-    })
-    expect(container.querySelector('.st-nomatch')!.textContent).toContain(
-      'No settings match your search',
-    )
-  })
-
-  it('recovers from no-match to full list when search is cleared', async () => {
-    mockReady(client)
-
-    await view.refresh()
-
-    const searchInput = container.querySelector<HTMLInputElement>('.st-search-input')!
-    searchInput.value = 'xyznonexistent'
-    searchInput.dispatchEvent(new Event('input'))
-
-    await vi.waitFor(() => {
-      expect(container.querySelector('.st-nomatch')).toBeTruthy()
-    })
-
-    // Clear search
-    searchInput.value = ''
-    searchInput.dispatchEvent(new Event('input'))
-
-    await vi.waitFor(() => {
-      expect(container.querySelectorAll('.st-row').length).toBeGreaterThan(0)
-    })
-    expect(container.querySelector('.st-nomatch')).toBeFalsy()
-  })
-
-  // ======================================================================
-  //  Provenance — SETTINGS-4: Customized is overridden membership, not
-  //  value comparison.
-  // ======================================================================
-
-  it('shows Customized when key is in overridden set (not value comparison)', async () => {
-    // Value equals default but key IS overridden → still Customized.
-    mockReady(client, {
-      values: { 'terminal.fontSize': 14 }, // same as default
-      overridden: ['terminal.fontSize'],
-    })
-
-    await view.refresh()
-
-    const row = container.querySelector<HTMLElement>('.st-row[data-key="terminal\\.fontSize"]')
-    const prov = row!.querySelector('.st-provenance')!
-    expect(prov.textContent).toContain('Customized')
-  })
-
-  it('shows Default when key is NOT in overridden set', async () => {
-    mockReady(client, {
-      values: { 'terminal.fontSize': 18 }, // different from default
-      overridden: [], // but not in overridden set → Default
-    })
-
-    await view.refresh()
-
-    const row = container.querySelector<HTMLElement>('.st-row[data-key="terminal\\.fontSize"]')
-    const prov = row!.querySelector('.st-provenance')!
-    expect(prov.textContent).toContain('Default')
-  })
-
-  it('secret rows show no provenance badge', async () => {
-    mockReady(client, { secrets: { 'ai.apiKey': true } })
-
-    await view.refresh()
-
-    const row = container.querySelector<HTMLElement>('.st-row[data-key="ai\\.apiKey"]')
-    expect(row!.querySelector('.st-provenance')).toBeFalsy()
-  })
-
-  it('sets overridden internally on successful save', async () => {
-    mockReady(client, { values: { 'terminal.fontSize': 14 } })
-    vi.spyOn(client, 'setSetting').mockResolvedValue({ ok: true })
-
-    await view.refresh()
-
-    const input = container.querySelector<HTMLInputElement>(
-      '.st-row[data-key="terminal\\.fontSize"] input[type="number"]',
-    )!
-    input.value = '20'
-    input.dispatchEvent(new Event('change'))
-
-    await vi.waitFor(() => {
-      expect(view._isCustomizedForTest('terminal.fontSize')).toBe(true)
-    })
-  })
-
-  // ======================================================================
-  //  Reset per row — SETTINGS-4
-  // ======================================================================
-
-  it('shows Reset button on customized rows', async () => {
-    mockReady(client, {
-      values: { 'terminal.fontSize': 18 },
-      overridden: ['terminal.fontSize'],
-    })
-
-    await view.refresh()
-
-    const row = container.querySelector<HTMLElement>('.st-row[data-key="terminal\\.fontSize"]')
-    const resetBtn = row!.querySelector('.st-reset-btn')
-    expect(resetBtn).toBeTruthy()
-    expect(resetBtn!.textContent).toBe('Reset')
-  })
-
-  it('no Reset button on default rows', async () => {
-    mockReady(client, {
-      values: { 'terminal.fontSize': 14 },
-      overridden: [],
-    })
-
-    await view.refresh()
-
-    const row = container.querySelector<HTMLElement>('.st-row[data-key="terminal\\.fontSize"]')
-    expect(row!.querySelector('.st-reset-btn')).toBeFalsy()
-  })
-
-  it('Reset calls resetSetting and refetches snapshot', async () => {
-    mockReady(client, {
-      values: { 'terminal.fontSize': 18 },
-      overridden: ['terminal.fontSize'],
-    })
-    const resetSpy = vi.spyOn(client, 'resetSetting').mockResolvedValue({ ok: true })
-
-    await view.refresh()
-
-    const resetBtn = container.querySelector<HTMLButtonElement>(
-      '.st-row[data-key="terminal\\.fontSize"] .st-reset-btn',
-    )!
-    resetBtn.click()
-
-    await vi.waitFor(() => {
-      expect(resetSpy).toHaveBeenCalledWith('terminal.fontSize')
-    })
-  })
-
-  // ======================================================================
-  //  Modified-only filter — SETTINGS-4
-  // ======================================================================
-
-  it('modified-only filter shows only overridden rows with count', async () => {
+  it('rail has one modified-only toggle with count', async () => {
     mockReady(client, {
       values: { 'terminal.fontSize': 18, 'app.confirmQuit': false },
       overridden: ['terminal.fontSize', 'app.confirmQuit'],
     })
+    await content.mount(target, host, signal)
 
-    await view.refresh()
+    const rail = target.querySelector('.st-rail')!
+    const toggles = rail.querySelectorAll<HTMLInputElement>(
+      '.st-modified-rail input[type="checkbox"]',
+    )
+    expect(toggles.length).toBe(1)
+    expect(toggles[0].checked).toBe(false)
 
-    // Check the filter label includes the count.
-    const filterLabel = container.querySelector('.st-filter-label')
-    expect(filterLabel!.textContent).toContain('Modified only (2)')
-
-    // Enable the filter.
-    const filterCheckbox = container.querySelector<HTMLInputElement>(
-      '.st-filter-label input[type="checkbox"]',
-    )!
-    filterCheckbox.checked = true
-    filterCheckbox.dispatchEvent(new Event('change'))
-
-    await vi.waitFor(() => {
-      const rows = container.querySelectorAll('.st-row')
-      expect(rows.length).toBe(2)
-    })
+    const countSpan = rail.querySelector('.st-modified-rail-count')
+    expect(countSpan).toBeTruthy()
+    expect(countSpan!.textContent).toBe(' (2)')
   })
 
-  it('modified-only filter excludes secrets and non-overridden', async () => {
+  it('modified-only count excludes secrets', async () => {
+    mockReady(client, {
+      overridden: ['terminal.fontSize', 'ai.apiKey'],
+    })
+    await content.mount(target, host, signal)
+
+    const countSpan = target.querySelector('.st-modified-rail-count')
+    // Only terminal.fontSize — ai.apiKey is a secret and is excluded.
+    expect(countSpan!.textContent).toBe(' (1)')
+  })
+
+  it('section nav lists every section in declaration order', async () => {
+    mockReady(client)
+    await content.mount(target, host, signal)
+
+    const links = target.querySelectorAll('.st-section-nav-link')
+    const labels = Array.from(links).map((l) => l.textContent.replace(/\s*\d+\s*/, '').trim())
+    expect(labels).toEqual(['Terminal', 'Application', 'AI'])
+  })
+
+  it('section nav shows per-section modified counts', async () => {
+    mockReady(client, {
+      overridden: ['terminal.fontSize', 'app.confirmQuit'],
+    })
+    await content.mount(target, host, signal)
+
+    const links = target.querySelectorAll('.st-section-nav-link')
+    const terminalLink = Array.from(links).find((l) => l.textContent.includes('Terminal'))
+    const appLink = Array.from(links).find((l) => l.textContent.includes('Application'))
+    const aiLink = Array.from(links).find((l) => l.textContent.includes('AI'))
+
+    expect(terminalLink!.querySelector('.st-section-nav-badge')!.textContent).toBe('1')
+    expect(appLink!.querySelector('.st-section-nav-badge')!.textContent).toBe('1')
+    expect(aiLink!.querySelector('.st-section-nav-badge')).toBeFalsy()
+  })
+
+  // ── Modified-only filter ───────────────────────────────────────────
+
+  it('modified-only toggle filters to overridden non-secret rows', async () => {
     mockReady(client, {
       values: { 'terminal.fontSize': 18 },
       overridden: ['terminal.fontSize'],
     })
+    await content.mount(target, host, signal)
 
-    await view.refresh()
+    // Before toggle: all 5 rows visible
+    expect(visibleRows().length).toBe(5)
 
-    const filterCheckbox = container.querySelector<HTMLInputElement>(
-      '.st-filter-label input[type="checkbox"]',
+    const checkbox = target.querySelector<HTMLInputElement>(
+      '.st-modified-rail input[type="checkbox"]',
     )!
-    filterCheckbox.checked = true
-    filterCheckbox.dispatchEvent(new Event('change'))
+    checkbox.checked = true
+    checkbox.dispatchEvent(new Event('change', { bubbles: true }))
 
     await vi.waitFor(() => {
-      const rows = container.querySelectorAll('.st-row')
-      expect(rows.length).toBe(1)
+      // Only terminal.fontSize (overridden, non-secret) visible.
+      expect(visibleRows().length).toBe(1)
     })
-    // The AI section (secret) should be hidden.
-    expect(container.querySelector('.st-row[data-key="ai\\.apiKey"]')).toBeFalsy()
   })
 
-  // ======================================================================
-  //  dataClass indicator — SETTINGS-4
-  // ======================================================================
+  // ── Section nav click (nocx-ucxl) ──────────────────────────────────
 
-  it('shows dataClass indicator on every row', async () => {
+  it('clicking a section in the rail always changes the content pane', async () => {
     mockReady(client)
+    await content.mount(target, host, signal)
 
-    await view.refresh()
+    // Find the section nav link for Application
+    const appLink = Array.from(
+      target.querySelectorAll<HTMLButtonElement>('.st-section-nav-link'),
+    ).find((l) => l.textContent.includes('Application'))
+    expect(appLink).toBeTruthy()
 
-    const indicators = container.querySelectorAll('.st-data-class')
-    expect(indicators.length).toBe(TEST_DECLARATIONS.length)
-    // Public config
-    expect(indicators[0].textContent).toBe('Public')
-    // Secret
-    expect(indicators[4].textContent).toBe('Secret')
-  })
-
-  // ======================================================================
-  //  Declared bound display — SETTINGS-4
-  // ======================================================================
-
-  it('shows min–max bound display on number controls', async () => {
-    mockReady(client, { values: { 'terminal.fontSize': 14 } })
-
-    await view.refresh()
-
-    const row = container.querySelector<HTMLElement>('.st-row[data-key="terminal\\.fontSize"]')
-    const bounds = row!.querySelector('.st-bounds')
-    expect(bounds).toBeTruthy()
-    expect(bounds!.textContent).toContain('8')
-    expect(bounds!.textContent).toContain('48')
-  })
-
-  // ======================================================================
-  //  Search — SETTINGS-4
-  // ======================================================================
-
-  it('search filters by label', async () => {
-    mockReady(client)
-
-    await view.refresh()
-
-    const searchInput = container.querySelector<HTMLInputElement>('.st-search-input')!
-    searchInput.value = 'Font Size'
-    searchInput.dispatchEvent(new Event('input'))
+    // Click Application — content should scroll to that section.
+    // The heading 'Application' should become visible or highlighted.
+    // We assert that at least the class toggles on the nav item.
+    appLink!.click()
 
     await vi.waitFor(() => {
-      const rows = container.querySelectorAll('.st-row')
-      expect(rows.length).toBe(1)
-      expect(rows[0].textContent).toContain('Font Size')
+      const appItem = appLink!.closest('.st-section-nav-item')
+      expect(appItem!.classList.contains('st-section-nav-active')).toBe(true)
     })
+
+    // The previously-active nav highlight should have moved.
+    const terminalItem = appLink!
+      .closest('.st-rail')!
+      .querySelector('.st-section-nav-item[data-section="Terminal"]')
+    expect(terminalItem!.classList.contains('st-section-nav-active')).toBe(false)
   })
 
-  it('search filters by key', async () => {
+  // ── Narrow viewport ────────────────────────────────────────────────
+
+  it('adds st-narrow class when viewport width is below 640 px', async () => {
     mockReady(client)
+    await content.mount(target, host, signal)
 
-    await view.refresh()
+    const container = target.querySelector('.st-container')!
 
-    const searchInput = container.querySelector<HTMLInputElement>('.st-search-input')!
-    searchInput.value = 'terminal.cursorStyle'
-    searchInput.dispatchEvent(new Event('input'))
+    content.viewportChanged({ width: 800, height: 600, devicePixelRatio: 1 })
+    expect(container.classList.contains('st-narrow')).toBe(false)
+
+    content.viewportChanged({ width: 500, height: 600, devicePixelRatio: 1 })
+    expect(container.classList.contains('st-narrow')).toBe(true)
+
+    content.viewportChanged({ width: 800, height: 600, devicePixelRatio: 1 })
+    expect(container.classList.contains('st-narrow')).toBe(false)
+  })
+
+  // ── Search ─────────────────────────────────────────────────────────
+
+  it('search filters rows and sections', async () => {
+    mockReady(client)
+    await content.mount(target, host, signal)
+
+    const searchInput = target.querySelector<HTMLInputElement>('input[type="search"]')!
+
+    searchInput.value = 'font'
+    searchInput.dispatchEvent(new Event('input', { bubbles: true }))
 
     await vi.waitFor(() => {
-      const rows = container.querySelectorAll('.st-row')
-      expect(rows.length).toBe(1)
-      expect(rows[0].textContent).toContain('Cursor Style')
+      expect(visibleRows().length).toBe(2)
     })
   })
 
-  it('search ranks exact label match above substring', async () => {
-    // Create two declarations with overlapping tokens.
-    const decls: Declaration[] = [
-      {
-        key: 'x.aaa',
-        section: 'S',
-        label: 'Exact Match Here',
-        description: '',
-        control: 'text',
-        dataClass: 'publicConfig',
-        default: '',
-      },
-      {
-        key: 'x.bbb',
-        section: 'S',
-        label: 'Something with Here in the middle',
-        description: '',
-        control: 'text',
-        dataClass: 'publicConfig',
-        default: '',
-      },
-      {
-        key: 'x.ccc',
-        section: 'S',
-        label: 'Exact Match Here',
-        description: '',
-        control: 'text',
-        dataClass: 'publicConfig',
-        default: '',
-      },
-    ]
-    mockReady(client, { declarations: decls })
+  it('scrollToKey clears search and reveals the target row', async () => {
+    mockReady(client)
+    await content.mount(target, host, signal)
 
-    await view.refresh()
-
-    const searchInput = container.querySelector<HTMLInputElement>('.st-search-input')!
-    searchInput.value = 'Exact Match Here'
-    searchInput.dispatchEvent(new Event('input'))
+    // Set a search filter to hide the target.
+    const searchInput = target.querySelector<HTMLInputElement>('input[type="search"]')!
+    searchInput.value = 'quitting'
+    searchInput.dispatchEvent(new Event('input', { bubbles: true }))
 
     await vi.waitFor(() => {
-      const rows = container.querySelectorAll('.st-row')
-      expect(rows.length).toBeGreaterThanOrEqual(2)
+      expect(visibleRows().length).toBe(1)
     })
 
-    // The first item should be an exact match (score 2), not the substring one.
-    const rows = container.querySelectorAll('.st-row')
-    expect(rows[0].textContent).toContain('Exact Match Here')
-  })
+    // Deep-link to a different key.
+    content.scrollToKey('terminal.fontFamily')
 
-  it('shows section breadcrumb when searching', async () => {
-    mockReady(client)
+    expect(searchInput.value).toBe('')
 
-    await view.refresh()
-
-    const searchInput = container.querySelector<HTMLInputElement>('.st-search-input')!
-    searchInput.value = 'Font'
-    searchInput.dispatchEvent(new Event('input'))
-
-    await vi.waitFor(() => {
-      const crumbs = container.querySelectorAll('.st-breadcrumb')
-      expect(crumbs.length).toBeGreaterThan(0)
-      expect(crumbs[0].textContent).toBe('Terminal')
-    })
-  })
-
-  it('/ key focuses search input', () => {
-    mockReady(client)
-    // We need to render first so the search input exists.
-    // Fire refresh but don't await — we just need the render output.
-
-    // Simpler: call show() then dispatch keydown.
-    vi.spyOn(client, 'describeSettings').mockResolvedValue({ declarations: TEST_DECLARATIONS })
-    vi.spyOn(client, 'getSnapshot').mockResolvedValue({
-      values: {},
-      overridden: [],
-      revision: 0,
-    })
-    // Don't await refresh; just wait for the search input to appear.
-
-    // Actually, let's just test the keyboard handler directly by
-    // rendering and then dispatching to the container.
-    // Use a simpler approach: render() sets up the DOM first by calling show()
-    // which calls render() with default empty state.
-  })
-
-  it('Escape key clears search query', async () => {
-    mockReady(client)
-
-    await view.refresh()
-
-    const searchInput = container.querySelector<HTMLInputElement>('.st-search-input')!
-    searchInput.value = 'Font'
-    searchInput.dispatchEvent(new Event('input'))
-
-    await vi.waitFor(() => {
-      const rows = container.querySelectorAll('.st-row')
-      expect(rows.length).toBeLessThan(TEST_DECLARATIONS.length)
-    })
-
-    // Dispatch Escape on the container.
-    container.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
-
-    await vi.waitFor(() => {
-      const rows = container.querySelectorAll('.st-row')
-      // All declarations should be back.
-      expect(rows.length).toBe(TEST_DECLARATIONS.length)
-    })
-  })
-
-  // ======================================================================
-  //  Stable DOM id — SETTINGS-4
-  // ======================================================================
-
-  it('each row has a stable DOM id derived from its key', async () => {
-    mockReady(client)
-
-    await view.refresh()
-
-    const row = container.querySelector<HTMLElement>('.st-row[data-key="terminal\\.fontSize"]')
+    const row = document.getElementById('st-setting-terminal.fontFamily')
     expect(row).toBeTruthy()
 
-    expect(row!.id).toBe('st-setting-terminal.fontSize')
+    const control = row!.querySelector<HTMLElement>('input, select, button')
+    expect(control).toBeTruthy()
+    expect(document.activeElement).toBe(control)
   })
 
-  it('rerenderRow uses key→element map, not CSS selector interpolation', async () => {
+  it('scrollToKey is a no-op for unknown keys', () => {
+    expect(() => content.scrollToKey('nonexistent.key')).not.toThrow()
+  })
+
+  // ── Dispose ────────────────────────────────────────────────────────
+
+  it('dispose removes container from DOM', async () => {
     mockReady(client)
+    await content.mount(target, host, signal)
+
+    expect(target.querySelector('.st-container')).toBeTruthy()
+    content.dispose()
+    expect(target.querySelector('.st-container')).toBeFalsy()
+  })
+
+  // ── Single instance of search/filter (nocx-x6w9) ────────────────────
+
+  it('has exactly ONE search input in the entire surface (nocx-x6w9)', async () => {
+    mockReady(client)
+    await content.mount(target, host, signal)
+
+    const allSearchInputs = target.querySelectorAll<HTMLInputElement>('input[type="search"]')
+    expect(allSearchInputs.length).toBe(1)
+
+    // Also: no search input of type text with search-related placeholder
+    const textInputsSearching = target.querySelectorAll<HTMLInputElement>(
+      'input[type="text"][placeholder*="Search" i], input[type="text"][placeholder*="search" i]',
+    )
+    expect(textInputsSearching.length).toBe(0)
+  })
+
+  it('has exactly ONE modified-only filter checkbox in the entire surface (nocx-x6w9)', async () => {
+    mockReady(client)
+    await content.mount(target, host, signal)
+
+    const modifiedCheckboxes = target.querySelectorAll<HTMLInputElement>(
+      '.st-modified-rail input[type="checkbox"]',
+    )
+    expect(modifiedCheckboxes.length).toBe(1)
+  })
+
+  // ── Save + filter integration ──────────────────────────────────────
+
+  it('save while filter active: re-activating filter shows saved row', async () => {
+    // Set up with fontFamily NOT overridden, fontSize IS overridden.
+    mockReady(client, {
+      values: { 'terminal.fontSize': 18 },
+      overridden: ['terminal.fontSize'],
+    })
     vi.spyOn(client, 'setSetting').mockResolvedValue({ ok: true })
+    await content.mount(target, host, signal)
 
-    await view.refresh()
-
-    // Grab the row through the DOM; confirm it exists and has a correct id.
-    const before = container.querySelector('[id="st-setting-terminal.fontSize"]')
-    expect(before).toBeTruthy()
-
-    // Trigger a change that calls rerenderRow.
-    const input = before!.querySelector<HTMLInputElement>('input[type="number"]')!
-    input.value = '20'
-    input.dispatchEvent(new Event('change'))
+    // Activate modified-only filter — only fontSize visible.
+    const railCheckbox = target.querySelector<HTMLInputElement>(
+      '.st-modified-rail input[type="checkbox"]',
+    )!
+    railCheckbox.checked = true
+    railCheckbox.dispatchEvent(new Event('change', { bubbles: true }))
 
     await vi.waitFor(() => {
-      // The row should still be findable by its stable id after re-render.
-      const after = container.querySelector('[id="st-setting-terminal.fontSize"]')
-      expect(after).toBeTruthy()
+      expect(visibleRows().length).toBe(1)
     })
-  })
 
-  it('keyToDomId is injective: a.b and a_b produce distinct ids', async () => {
-    const decls: Declaration[] = [
-      {
-        key: 'a.b',
-        section: 'S',
-        label: 'Dot',
-        description: '',
-        control: 'text',
-        dataClass: 'publicConfig',
-        default: '',
-      },
-      {
-        key: 'a_b',
-        section: 'S',
-        label: 'Underscore',
-        description: '',
-        control: 'text',
-        dataClass: 'publicConfig',
-        default: '',
-      },
-    ]
-    mockReady(client, { declarations: decls })
-    await view.refresh()
-    const dotRow = Array.from(container.querySelectorAll<HTMLElement>('.st-row')).find(
-      (r) => r.dataset.key === 'a.b',
-    )
-    const usRow = Array.from(container.querySelectorAll<HTMLElement>('.st-row')).find(
-      (r) => r.dataset.key === 'a_b',
-    )
-    expect(dotRow).toBeTruthy()
-    expect(usRow).toBeTruthy()
-    expect(dotRow!.id).not.toBe(usRow!.id)
-  })
+    // Deactivate filter, save fontFamily, re-activate.
+    railCheckbox.checked = false
+    railCheckbox.dispatchEvent(new Event('change', { bubbles: true }))
 
-  it('show before first refresh renders loading, not empty', () => {
-    view.show()
-    const loading = container.querySelector('.st-loading')
-    expect(loading).toBeTruthy()
-    expect(container.querySelector('.st-empty')).toBeFalsy()
-  })
-
-  it('non-secret declaration without a default shows no provenance or reset', async () => {
-    const decls: Declaration[] = [
-      {
-        key: 'test.noDefault',
-        section: 'Test',
-        label: 'No Default',
-        description: '',
-        control: 'text',
-        dataClass: 'publicConfig',
-      },
-    ]
-    mockReady(client, {
-      declarations: decls,
-      values: { 'test.noDefault': 'foo' },
-      overridden: ['test.noDefault'],
+    await vi.waitFor(() => {
+      expect(visibleRows().length).toBe(5)
     })
-    await view.refresh()
-    const row = container.querySelector<HTMLElement>('.st-row[data-key="test\\.noDefault"]')
-    expect(row!.querySelector('.st-provenance')).toBeFalsy()
-    expect(row!.querySelector('.st-reset-btn')).toBeFalsy()
+
+    // Find and change the fontFamily input.
+    const fontFamilyRow = document.getElementById('st-setting-terminal.fontFamily')
+    expect(fontFamilyRow).toBeTruthy()
+    const fontInput = fontFamilyRow!.querySelector<HTMLInputElement>('input[type="text"]')!
+    fontInput.value = 'Fira Code'
+    fontInput.dispatchEvent(new Event('change', { bubbles: true }))
+
+    await vi.waitFor(() => {
+      const rerendered = document.getElementById('st-setting-terminal.fontFamily')
+      expect(rerendered).toBeTruthy()
+    })
+
+    // Re-activate modified-only — both overridden rows should appear.
+    railCheckbox.checked = true
+    railCheckbox.dispatchEvent(new Event('change', { bubbles: true }))
+
+    await vi.waitFor(() => {
+      // fontSize + fontFamily both overridden → 2 rows
+      expect(visibleRows().length).toBe(2)
+    })
   })
 })

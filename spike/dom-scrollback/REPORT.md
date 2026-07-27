@@ -192,7 +192,16 @@ The entire output appears in a single frozen block. For an interactive REPL (`py
 ### Integration notes for tracked files:
 - **No tracked files were modified** for this spike.
 - New files: `frontend/spike.html`, `frontend/src/spike/dom-scrollback.ts`
-- Spike artifacts: `spike/dom-scrollback/` (REPORT.md, screenshots/, validate.mjs, perf-test.mjs, validate.ts)
+- Spike artifacts: `spike/dom-scrollback/` (REPORT.md, DESIGN-NOTES.md, screenshots/)
+
+> **The spike code no longer exists (removed 2026-07-27, nocx-njrx.5).**
+> `frontend/spike.html`, `frontend/src/spike/dom-scrollback.ts` and the Playwright
+> drivers that pointed at that page were deleted: nothing in the product imported
+> them, and they were 1,844 lines of migration surface the SolidJS rewrite would
+> otherwise have had to carry. This report and its screenshots are kept as the
+> record of what the spike found. The findings below are still the reason
+> `docs/decisions/0001-xterm-js-as-vt-frontend.md` reads the way it does; the code
+> that produced them is recoverable from git history, not from the working tree.
 
 ### Architecture impact:
 - AD-6 (single-owner state) is maintained: xterm remains the VT engine owning render state
@@ -203,12 +212,15 @@ The entire output appears in a single frozen block. For an interactive REPL (`py
 
 ## Files
 
+All of the code below was deleted on 2026-07-27 (nocx-njrx.5) and survives only in git
+history; the report and the screenshots are what remain.
+
 | File | Purpose |
 |---|---|
-| `frontend/spike.html` | Standalone vite entry for the spike demo |
-| `frontend/src/spike/dom-scrollback.ts` | Spike implementation (~500 lines) |
-| `spike/dom-scrollback/validate.mjs` | Playwright validation script (all 7 questions) |
-| `spike/dom-scrollback/perf-test.mjs` | 5k/12k line performance test |
+| `frontend/spike.html` | Standalone vite entry for the spike demo (deleted) |
+| `frontend/src/spike/dom-scrollback.ts` | Spike implementation (~500 lines) (deleted) |
+| `spike/dom-scrollback/validate.mjs` | Playwright validation script, all 7 questions (deleted) |
+| `spike/dom-scrollback/perf-test.mjs` | 5k/12k line performance test (deleted) |
 | `spike/dom-scrollback/REPORT.md` | This report |
 | `spike/dom-scrollback/screenshots/` | Visual evidence (8 PNGs) |
 

@@ -210,6 +210,67 @@ recorded as a tiebreak between near-peers, **not** as a technical argument.
 - **A home-grown signals implementation.** Dependency tracking, batching, cleanup,
   equality and re-entrancy are not product differentiators.
 
+## As shipped (2026-07-27, epic `nocx-njrx`)
+
+The migration is complete. What follows is what the code actually does, not what was
+planned; where the two differ, the difference is stated.
+
+**Every application surface renders from Solid.** In order of landing: the clipboard
+banner (the pilot), the sidebar, the export section, the connections manager, the settings
+screen, and the tab strip. Each was rewritten, not wrapped, and each imperative predecessor
+was deleted in the same commit as its replacement — `banner.ts`, `sidebar.ts`,
+`export-section.ts`, `connections.ts`, `settings.ts` and `tab-strip.ts` are gone, together
+with roughly 3,700 lines of structural tests that asserted the shape of the DOM those files
+happened to build.
+
+**One Solid root owns the shell.** `App.tsx` renders the skeleton — `#tabbar`,
+`#activitybar`, `#sidebar`, `#panes` — as **empty hosts** with no reactive state;
+`index.html` carries only `<div id="app">`; `main.tsx` is the composition root and nothing
+else. The six separate roots the migration passed through on its way here are gone.
+
+**What is deliberately still imperative**, and is not "not yet migrated":
+
+- `tabs.ts` — the boundary file. Its tab-list half now delegates to the Solid tab strip;
+  its terminal-lifecycle half stays imperative by §1. `Tab` creates exactly one element,
+  the pane, which is the empty terminal host AD-6 requires.
+- `tab-content.ts`, `terminal-content.ts`, `renderers/`, `scrollback/`, `editor.ts`,
+  `input-state.ts`, `input-target.ts`, `dispatcher.ts`, `gutter.ts`, `command-ledger.ts`,
+  `clipboard.ts`, `frame.ts`, `submit.ts`, `ipc.ts` — terminal-owned or protocol code,
+  permanently framework-neutral.
+- `settings-content.ts` (91 lines) and `connections-content.ts` (50) — `TabContent`
+  adapters that open a Solid root inside a pane. They are the seam, not UI.
+- `settings-domain.ts`, `export-utils.ts`, `profiles.ts`, `agent-status.ts`,
+  `surface-registry.ts` — framework-neutral logic and clients, which is where §2 wants
+  authority to live.
+
+**Three defects were fixed inside the migrations that caused them**, as acceptance criteria
+rather than separate patches, because fixing them first would have been throwaway work and
+"preserve current behaviour" taken literally would have reproduced them: `nocx-x6w9` (the
+settings surface now has exactly one search box and one modified filter, pinned by tests),
+`nocx-ucxl` (selecting a rail section always changes the content pane), `nocx-rp2j`
+(panel-views and tab-actions are separate concepts, so no empty panel opens at cold start).
+
+**Bundle, measured on the shipped build:** 623,145 bytes raw / 162,827 gzip, against the
+pre-adoption baseline of 600 KB raw / 152 KB gzip recorded below — about **+7 KB gzip net**,
+against a budget of 25–35 KB. Net rather than gross: Solid's runtime and the component kit
+are partly paid for by the imperative code they replaced.
+
+**The §3 lint gate is real and was verified by breaking it, three times during the epic.**
+`eslint-plugin-solid` runs at `error` on `.ts` as well as `.tsx` — the extension was
+necessary, because the state module in §2 is plain `.ts` and `flat/recommended` leaves
+`reactivity` and `no-react-deps` at _warn_ there while `prefer-show` is off entirely — and
+`npm run lint` carries `--max-warnings 0`. `lint-fixtures/gate.sh` asserts that each of the
+seven required rules fires **by name**, and separately that `solid/reactivity` fires **from
+a `.ts` file**, which a `.tsx`-only fixture could never catch.
+
+**What the boundary cost, honestly.** The one real regression of the epic was an AD-6
+ordering bug, and it was caught by WebKit and by nothing else: moving the pane's `active`
+class from the shell to the `TabContent` seam left the pane invisible during `mount()` and
+the first geometry delivery, a hidden pane measures ~0 width in WebKit but not in Chromium,
+and the settings surface silently rendered its narrow layout with no content column. 544
+unit tests and all 20 Chromium specs were green. That is the evidence for keeping the
+`webkit` project in `playwright.config.ts`, alongside `nocx-q18`.
+
 ## Consequences
 
 - Bundle grows by Solid's runtime. Measured baseline before adoption: **600 KB raw /

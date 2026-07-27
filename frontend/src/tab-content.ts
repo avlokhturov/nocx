@@ -64,6 +64,57 @@ export interface TabContent {
   /** Tear down all resources. Idempotent. Cancels an in-flight mount
    *  through the AbortSignal passed to mount() (B.6). */
   dispose(): void
+
+  /** Show or hide the content without remounting it.
+   *  Never triggers a remount, WebGL context churn, or session teardown. */
+  setVisible(visible: boolean): void
+
+  /**
+   * Pre-set the mount target element so setVisible is meaningful before
+   * mount. Called by Tab constructor before any activation. Implementations
+   * that don't need a DOM target (e.g. a future Solid surface managing
+   * visibility through signals) MAY implement this as a no-op. Contents
+   * extending BaseTabContent get the default impl that stores _target.
+   */
+  setTarget(target: HTMLElement): void
+}
+
+/**
+ * Common base for DOM-based TabContent implementations. Stores the mount
+ * target and implements setVisible by toggling the 'active' class on it.
+ * Override setVisible only when the implementation genuinely needs
+ * different visibility semantics (e.g. a future Solid surface that manages
+ * visibility through signals). Every new TabContent must extend this or
+ * provide its own setVisible.
+ *
+ * The mount target is set by setTarget() before mount, so setVisible is
+ * meaningful from the first activation call. Implementations MUST NOT
+ * store _target themselves — BaseTabContent owns it.
+ */
+export abstract class BaseTabContent implements TabContent {
+  protected _target: HTMLElement | null = null
+
+  /**
+   * Pre-set the mount target so setVisible is meaningful before mount.
+   * Called by Tab constructor. Idempotent — subsequent calls after the
+   * first are no-ops. Implementations override this only when they need
+   * to intercept target assignment.
+   */
+  setTarget(target: HTMLElement): void {
+    if (this._target) return
+    this._target = target
+  }
+
+  abstract mount(target: HTMLElement, host: TabHost, signal: AbortSignal): Promise<void>
+  abstract viewportChanged(viewport: ContentViewport): void
+  abstract focus(): void
+  abstract dispose(): void
+
+  setVisible(visible: boolean): void {
+    if (this._target) {
+      this._target.classList.toggle('active', visible)
+    }
+  }
 }
 
 // ── Model state (B.8) ─────────────────────────────────────────────────────

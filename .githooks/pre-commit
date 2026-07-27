@@ -76,6 +76,13 @@ if ! (cd frontend && npm run lint 2>&1); then
 fi
 ok "eslint"
 
+# --- 5.5. Solid lint negative fixture ---------------------------------------
+if ! (cd frontend && npm run lint:fixture-check 2>&1); then
+    printf "\nPre-commit hook FAILED. The Solid negative fixture gate needs investigation.\n"
+    exit 1
+fi
+ok "solid negative fixture gate"
+
 # --- 6. frontend typecheck --------------------------------------------------
 if ! (cd frontend && npm run typecheck 2>&1); then
     printf "\nPre-commit hook FAILED. Fix the issues above and try again.\n"

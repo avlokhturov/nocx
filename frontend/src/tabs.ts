@@ -58,6 +58,12 @@ export class Tab implements TabHost {
     this.pane.className = 'pane'
     this.pane.id = `pane-${id}`
     this.pane.setAttribute('role', 'tabpanel')
+
+    // ── Pre-mount target ──────────────────────────────────────────────
+    // Hand the pane to the content before mount, so setVisible is
+    // meaningful from the first setActive(true) call. setTarget is on the
+    // TabContent interface — every implementation must accept or no-op it.
+    content.setTarget(this.pane)
   }
 
   // ── TabView conformance ───────────────────────────────────────────────
@@ -89,7 +95,9 @@ export class Tab implements TabHost {
 
   setActive(active: boolean): void {
     this._active = active
-    this.pane.classList.toggle('active', active)
+    // Visibility crosses the seam through setVisible — the content
+    // toggles the 'active' class on its mount target (AD-6 corollary).
+    this.content.setVisible(active)
     if (active) {
       this._hasActivity = false
     }
@@ -137,11 +145,16 @@ export class Tab implements TabHost {
 
   // ── Lifecycle ─────────────────────────────────────────────────────────
 
-  /** Mount the content into this tab's pane. Called by TabManager on
-   *  first activation. Enables viewport delivery after mount completes (B.5). */
+  /** Mount the content into this tab's pane. Called by TabManager on first
+   *  activation, and suppressed after that: mount-once is enforced here at
+   *  the seam, not by a private flag inside one implementation (nocx-njrx.2).
+   *  The pane is already visible by now — the content received it through
+   *  setTarget() in the constructor — so mount and the first viewport
+   *  delivery both measure a laid-out element. */
   async start(): Promise<void> {
-    log.info('nocx: Tab.start() called', { id: this.id })
+    if (this._mountStarted) return
     this._mountStarted = true
+    log.info('nocx: Tab.start() called', { id: this.id })
     await this.content.mount(this.pane, this, this._mountAbort.signal)
     // B.5: replay the latest buffered viewport, or measure now if none yet.
     if (this._latestViewport) {
@@ -258,7 +271,7 @@ export class TabManager {
   private readonly gate: ClipboardGate
   private readonly banner: ClipboardBanner
   private readonly profileClient: ProfileClient
-  private readonly _initialTabReady: Promise<void>
+  private _initialTabReady: Promise<void> | undefined
   private tabStrip: TabStrip
   private readonly bar: HTMLElement
   /** MRU stack: most-recently-activated tab ids. */
@@ -284,28 +297,7 @@ export class TabManager {
     this.bar = bar
 
     // Wire TabStrip intents.
-    this.tabStrip.onActivate = (id) => {
-      const tab = this.tabs.find((t) => t.id === id)
-      if (tab) void this.activate(tab)
-    }
-    this.tabStrip.onClose = (id) => {
-      const tab = this.tabs.find((t) => t.id === id)
-      if (tab) this.closeTab(tab)
-    }
-    this.tabStrip.onNewTab = () => this.newTab()
-    this.tabStrip.onReorder = (fromId, toId) => this.reorderTab(fromId, toId)
-
-    tabStrip.mount(bar)
-
-    // Open the initial tab — the window is never empty.
-    const initialTab = this.newTab()
-
-    // _initialTabReady stays owned by TerminalContent.ready, not "first tab
-    // mounted". A non-terminal first tab MUST NOT be able to report healthy.
-    const initialContent = initialTab.content as TerminalContent
-    this._initialTabReady = initialContent.ready.then((ok) => {
-      if (!ok) throw new Error('initial tab failed to start')
-    })
+    this.wireStrip(tabStrip)
 
     window.addEventListener('keydown', this.onKeydown, true)
   }
@@ -315,9 +307,34 @@ export class TabManager {
   }
 
   get initialTabReady(): Promise<void> {
+    if (!this._initialTabReady) {
+      throw new Error('initialTabReady accessed before openInitialTab')
+    }
     return this._initialTabReady
   }
 
+  /** Mount the tab strip and open the initial terminal tab.
+   *
+   *  Callable exactly once, and that is enforced here rather than documented:
+   *  a second call would mount the strip again and open a second "initial"
+   *  tab. This epic has already removed one contract that held by coincidence
+   *  (mount-once, which lived in a private flag inside one TabContent
+   *  implementation instead of at the seam), so a comment is not enough.
+   *
+   *  `initialTabReady` resolves only from terminal content — a non-terminal
+   *  first tab must not be able to report the app healthy. */
+  openInitialTab(): Promise<void> {
+    if (this._initialTabReady) {
+      throw new Error('openInitialTab called twice; the composition root calls it exactly once')
+    }
+    this.tabStrip.mount(this.bar)
+    const initialTab = this.newTab()
+    const initialContent = initialTab.content as TerminalContent
+    this._initialTabReady = initialContent.ready.then((ok) => {
+      if (!ok) throw new Error('initial tab failed to start')
+    })
+    return this._initialTabReady
+  }
   // ── Tab creation ──────────────────────────────────────────────────────
 
   /** Create a new local terminal tab and activate it. */

@@ -1,36 +1,35 @@
 // ═══════════════════════════════════════════════════════════════════════════
-// ConnectionsContent — wraps the SSH connection manager as a TabContent.
-// Migrated from the old Tab.managerView escape hatch (B.4).
+// ConnectionsContent — wraps the Solid connections manager as a TabContent.
+// Migrated from the imperative ConnectionManagerViewImpl (nocx-1cru).
 // ═══════════════════════════════════════════════════════════════════════════
 
-import { ConnectionManagerViewImpl } from './connections'
 import type { ProfileClient, SSHProfile } from './profiles'
-import type { TabHost, TabContent, ContentViewport } from './tab-content'
+import { BaseTabContent, type TabHost, type ContentViewport } from './tab-content'
+import { mountConnectionsView } from './connections'
 
-export class ConnectionsContent implements TabContent {
-  private view: ConnectionManagerViewImpl | null = null
+export class ConnectionsContent extends BaseTabContent {
+  private disposeSolid: (() => void) | null = null
+
   private _disposed = false
 
-  constructor(private readonly profileClient: ProfileClient) {}
+  constructor(private readonly profileClient: ProfileClient) {
+    super()
+  }
 
   /** Callback for when the user clicks Connect on a profile. */
   onConnect?: (profile: SSHProfile) => void
 
+  // eslint-disable-next-line @typescript-eslint/require-await
   async mount(target: HTMLElement, host: TabHost, signal: AbortSignal): Promise<void> {
-    if (this._disposed || this.view) return
+    if (this._disposed || this.disposeSolid) return
 
     if (signal.aborted) return
 
-    const view = new ConnectionManagerViewImpl(target, this.profileClient)
-    view.onConnect = (profile: SSHProfile) => {
-      this.onConnect?.(profile)
-    }
-    this.view = view
-
     host.setTitle('Connections')
 
-    view.show()
-    await view.refresh()
+    this.disposeSolid = mountConnectionsView(target, this.profileClient, (profile) => {
+      this.onConnect?.(profile)
+    })
   }
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -38,12 +37,14 @@ export class ConnectionsContent implements TabContent {
     // Connections view is a scrolling container — no viewport-specific
     // behaviour.
   }
+
   focus(): void {
     // Connections view has no primary input to focus.
   }
 
   dispose(): void {
     this._disposed = true
-    this.view = null
+    this.disposeSolid?.()
+    this.disposeSolid = null
   }
 }

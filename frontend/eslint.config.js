@@ -6,11 +6,14 @@
 import js from '@eslint/js'
 import tseslint from 'typescript-eslint'
 import prettier from 'eslint-config-prettier'
+import solid from 'eslint-plugin-solid'
 
 export default tseslint.config(
-  // src/spike is the throwaway spike sandbox (kept as a design playground,
-  // see spike/dom-scrollback/) — deliberately not held to the lint bar.
-  { ignores: ['dist/**', 'wailsjs/**', 'src/spike/**'] },
+  // lint-fixtures/ holds the negative fixtures for eslint-plugin-solid: files
+  // whose whole purpose is to fail lint. They are excluded here and linted
+  // explicitly by lint-fixtures/gate.sh with --no-ignore, which asserts that
+  // each required rule fires.
+  { ignores: ['dist/**', 'wailsjs/**', 'lint-fixtures/**'] },
   js.configs.recommended,
   ...tseslint.configs.recommendedTypeChecked,
   {
@@ -28,6 +31,28 @@ export default tseslint.config(
     // browser; they need no type-aware linting of their own.
     files: ['*.config.js', '*.config.ts'],
     extends: [tseslint.configs.disableTypeChecked],
+  },
+  // Fixture files are outside tsconfig (not in src/) — disable type-checked
+  // rules but keep Solid lint rules.
+  {
+    files: ['lint-fixtures/**'],
+    extends: [tseslint.configs.disableTypeChecked],
+  },
+  // SolidJS lint rules (ADR-0012 §3). Combined with the recommended base
+  // from the plugin into a single files-restricted block so severity and
+  // scope cannot drift.
+  {
+    files: ['**/*.ts', '**/*.tsx', '**/*.jsx'],
+    extends: [solid.configs['flat/recommended']],
+    rules: {
+      'solid/no-destructure': 'error',
+      'solid/reactivity': 'error',
+      'solid/no-react-deps': 'error',
+      'solid/no-react-specific-props': 'error',
+      'solid/prefer-for': 'error',
+      'solid/prefer-show': 'error',
+      'solid/components-return-once': 'error',
+    },
   },
   prettier,
 )
