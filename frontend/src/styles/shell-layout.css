@@ -1,0 +1,4 @@
+/* Shell geometry — #workspace, #vertical-tabstrip and the placement hosts.
+   Owned by nocx-82l9.3; see .internal/specs/2026-07-27-ui-shell-kit-and-theming-design.md §2.5.
+   Kept out of style.css so two workers can edit CSS in the same wave without
+   colliding; nocx-xrrl.2 folds this directory into the token layout. */

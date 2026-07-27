@@ -1,0 +1,4 @@
+/* Surface host and Page composition — the height and scroll chain.
+   Owned by nocx-82l9.2; see .internal/specs/2026-07-27-ui-shell-kit-and-theming-design.md §6.1.
+   Kept out of style.css so two workers can edit CSS in the same wave without
+   colliding; nocx-xrrl.2 folds this directory into the token layout. */
