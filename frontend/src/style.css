@@ -479,7 +479,6 @@
 }
 
 .activity-bar .ui-icon-button {
-  position: relative;
   width: 100%;
   height: 48px;
 }
@@ -487,20 +486,6 @@
 .activity-bar .ui-icon-button svg {
   width: 24px;
   height: 24px;
-}
-
-.activity-bar .ui-icon-button[aria-selected='true'] {
-  color: var(--color-text);
-}
-
-.activity-bar .ui-icon-button[aria-selected='true']::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  width: 2px;
-  background: var(--color-accent);
 }
 
 /* ── Sidebar panel ───────────────────────────────────────────────────── */

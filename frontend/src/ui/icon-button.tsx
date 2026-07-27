@@ -11,6 +11,8 @@ export interface IconButtonProps {
   title?: string
   /** Required — an icon-only control with no accessible name is a defect. */
   ariaLabel: string
+  /** Show a vertical selection indicator bar (used in activity bar rail context). */
+  railIndicator?: boolean
   children: JSX.Element
 }
 
@@ -35,6 +37,7 @@ export function IconButton(props: IconButtonAttrs) {
     'title',
     'ariaLabel',
     'type',
+    'railIndicator',
     'children',
   ] as const
   const [local, rest] = splitProps(props, knownKeys)
@@ -43,6 +46,7 @@ export function IconButton(props: IconButtonAttrs) {
       class="ui-icon-button"
       data-size={local.size ?? 'md'}
       aria-selected={local.selected === true ? 'true' : undefined}
+      data-rail-indicator={local.railIndicator === true ? 'true' : undefined}
       aria-label={local.ariaLabel}
       disabled={local.disabled === true}
       title={local.title ?? ''}

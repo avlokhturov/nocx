@@ -257,6 +257,7 @@ function SidebarSolid(props: SidebarSolidProps) {
               title={view.title}
               ariaLabel={view.title}
               tabIndex={view.id === tabbableId() ? 0 : -1}
+              railIndicator={true}
               onClick={() => handleViewClick(view)}
             >
               <view.icon />

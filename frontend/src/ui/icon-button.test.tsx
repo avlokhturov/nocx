@@ -59,6 +59,18 @@ describe('IconButton', () => {
     expect(btn.hasAttribute('aria-selected')).toBe(false)
   })
 
+  it('sets data-rail-indicator when railIndicator is true', () => {
+    subject({ railIndicator: true, selected: true })
+    const btn = screen.getByRole('button')
+    expect(btn.getAttribute('data-rail-indicator')).toBe('true')
+  })
+
+  it('omits data-rail-indicator when railIndicator is not set', () => {
+    subject()
+    const btn = screen.getByRole('button')
+    expect(btn.hasAttribute('data-rail-indicator')).toBe(false)
+  })
+
   it('calls onClick when clicked', () => {
     const onClick = vi.fn()
     subject({ onClick })

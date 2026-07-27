@@ -38,6 +38,7 @@
   line-height: 1;
   border-radius: var(--control-radius-sm);
   --wails-draggable: no-drag;
+  position: relative;
 }
 
 .ui-icon-button[data-size='sm'] {
@@ -60,6 +61,16 @@
 
 .ui-icon-button[aria-selected='true'] {
   color: var(--color-text);
+}
+
+.ui-icon-button[data-rail-indicator='true'][aria-selected='true']::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--color-accent);
 }
 
 .ui-icon-button:disabled {
