@@ -201,7 +201,9 @@ describe('SettingsContent', () => {
 
     const countSpan = rail.querySelector('.ui-badge-warning')
     expect(countSpan).toBeTruthy()
-    expect(countSpan!.textContent).toBe('(2)')
+    // Bare number: the Badge component draws the container now, so the
+    // parentheses that used to stand in for one are redundant chrome.
+    expect(countSpan!.textContent).toBe('2')
   })
 
   it('modified-only count excludes secrets', async () => {
@@ -212,7 +214,7 @@ describe('SettingsContent', () => {
 
     const countSpan = target.querySelector('.ui-badge-warning')
     // Only terminal.fontSize — ai.apiKey is a secret and is excluded.
-    expect(countSpan!.textContent).toBe('(1)')
+    expect(countSpan!.textContent).toBe('1')
   })
 
   it('section nav lists every generated section in declaration order, then component pages', async () => {
@@ -224,9 +226,16 @@ describe('SettingsContent', () => {
 
     // Generated sections keep Go's declaration order and stay first — that is
     // the invariant the generated screen depends on. Component pages
-    // (nocx-imkb.3 put Connections here) follow them, so asserting the whole
-    // list rather than a prefix keeps a stray insertion visible.
-    expect(labels).toEqual(['Terminal', 'Application', 'AI', 'Connections'])
+    // (nocx-imkb.3 put Connections here, and Export became one too) follow
+    // them, so asserting the whole list rather than a prefix keeps a stray
+    // insertion visible.
+    expect(labels).toEqual([
+      'Terminal',
+      'Application',
+      'AI',
+      'Export / Backup / Import',
+      'Connections',
+    ])
   })
 
   it('section nav shows per-section modified counts', async () => {
@@ -255,8 +264,10 @@ describe('SettingsContent', () => {
     })
     await content.mount(target, host, signal)
 
-    // Before toggle: all 5 rows visible
-    expect(visibleRows().length).toBe(5)
+    // Before toggle: the three rows of the section the screen opens on.
+    // Settings selects the first section rather than listing all five settings
+    // end to end, so "everything visible" means Terminal, not the whole file.
+    expect(visibleRows().length).toBe(3)
 
     const checkbox = target.querySelector<HTMLInputElement>(
       '.ui-settings-filter input[type="checkbox"]',
@@ -420,7 +431,8 @@ describe('SettingsContent', () => {
     railCheckbox.dispatchEvent(new Event('change', { bubbles: true }))
 
     await vi.waitFor(() => {
-      expect(visibleRows().length).toBe(5)
+      // Back to the opened section's three rows, not all five settings.
+      expect(visibleRows().length).toBe(3)
     })
 
     // Find and change the fontFamily input.

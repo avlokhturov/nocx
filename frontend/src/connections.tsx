@@ -326,11 +326,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             }}
           />
 
-          <Field
-            for="credential-select"
-            label={'Credential (\u0423\u0417)'}
-            orientation="horizontal"
-          >
+          <Field for="credential-select" label="Credential">
             <Select
               value={profile.options.credentialId ?? ''}
               onChange={(v) => setOption('credentialId', v || undefined)}
@@ -354,7 +350,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             <div class="cm-tip">
               Tip: Create a Credential above to reuse auth settings across connections.
             </div>
-            <Field for="auth-method" label="Method" orientation="horizontal">
+            <Field for="auth-method" label="Method">
               <div class="cm-radio-group">
                 <For each={AUTH_MODES}>
                   {(mode) => (
@@ -425,7 +421,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             }}
           />
 
-          <Field for="jump-host" label="Jump server" orientation="horizontal">
+          <Field for="jump-host" label="Jump server">
             <Select
               value={profile.options.jumpHost ?? ''}
               onChange={(v) => setOption('jumpHost', v || undefined)}
@@ -434,27 +430,29 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             />
           </Field>
 
-          <Checkbox
-            label="Agent forward"
-            checked={profile.options.agentForward ?? false}
-            onChange={(v) => setOption('agentForward', v)}
-          />
-          <Checkbox
-            label="Can be used as jump server"
-            checked={profile.options.canBeJumpServer ?? false}
-            onChange={(v) => setOption('canBeJumpServer', v)}
-          />
+          <div class="cm-check-group">
+            <Checkbox
+              label="Agent forward"
+              checked={profile.options.agentForward ?? false}
+              onChange={(v) => setOption('agentForward', v)}
+            />
+            <Checkbox
+              label="Can be used as jump server"
+              checked={profile.options.canBeJumpServer ?? false}
+              onChange={(v) => setOption('canBeJumpServer', v)}
+            />
+          </div>
         </div>
 
         <div class="cm-form-actions">
-          <Button class="cm-connect" variant="primary" onClick={() => props.onConnect?.(profile)}>
+          <Button variant="primary" onClick={() => props.onConnect?.(profile)}>
             Connect
           </Button>
-          <Button class="cm-save" variant="primary" onClick={() => void saveProfile(profile)}>
+          <Button variant="secondary" onClick={() => void saveProfile(profile)}>
             {isNew ? 'Create' : 'Save'}
           </Button>
           <Show when={!isNew}>
-            <Button class="cm-danger" variant="danger" onClick={() => void deleteProfile(profile)}>
+            <Button variant="danger" onClick={() => void deleteProfile(profile)}>
               Delete
             </Button>
           </Show>
@@ -504,7 +502,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     }
     return (
       <div class="cm-form">
-        <Section title={isNew ? 'New Credential (\u0423\u0417)' : 'Edit Credential'}>
+        <Section title={isNew ? 'New Credential' : 'Edit Credential'}>
           <TextField label="Name" value={credential.name} onInput={(v) => updateField('name', v)} />
           <TextField
             label="Username"
@@ -576,19 +574,17 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         </Show>
 
         <div class="cm-form-actions">
-          <Button class="cm-save" variant="primary" onClick={() => void saveCred()}>
+          <Button variant="secondary" onClick={() => void saveCred()}>
             {isNew ? 'Create Credential' : 'Save Credential'}
           </Button>
           <Show when={!isNew}>
-            <Button
-              class="cm-danger"
-              variant="danger"
-              onClick={() => void deleteCredential(credential)}
-            >
+            <Button variant="danger" onClick={() => void deleteCredential(credential)}>
               Delete Credential
             </Button>
           </Show>
-          <Button onClick={cancelCredential}>Cancel</Button>
+          <Button variant="secondary" onClick={cancelCredential}>
+            Cancel
+          </Button>
         </div>
       </div>
     )
@@ -621,16 +617,23 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   const hasCredentials = createMemo(() => credentials().length > 0)
 
   return (
-    <>
+    <div class="cm-root">
       <Toolbar>
-        <h1>Connections</h1>
-        <Button onClick={handleImport} title="Import SSH profiles from a Tabby config.yml">
+        <Button
+          variant="secondary"
+          onClick={handleImport}
+          title="Import SSH profiles from a Tabby config.yml"
+        >
           Import from Tabby
         </Button>
-        <Button onClick={showCredentialsPanel} title="Manage saved passwords (keychain)">
+        <Button
+          variant="secondary"
+          onClick={showCredentialsPanel}
+          title="Manage saved passwords (keychain)"
+        >
           Saved credentials
         </Button>
-        <Button class="cm-primary" onClick={startNewProfile}>
+        <Button variant="primary" class="cm-primary" onClick={startNewProfile}>
           + New connection
         </Button>
       </Toolbar>
@@ -659,6 +662,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         </div>
         <div class="cm-form-panel">{formPanelContent()}</div>
       </div>
-    </>
+    </div>
   )
 }

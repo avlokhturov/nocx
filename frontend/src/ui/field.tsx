@@ -32,6 +32,16 @@ export interface FieldProps {
    * - `horizontal`: label on the left, children on the right — settings rows.
    */
   orientation?: 'vertical' | 'horizontal'
+  /**
+   * Small element rendered inline after the label text — a storage-class tag,
+   * a "beta" marker, and the like.
+   *
+   * It exists because such a tag belongs to the *label*, not to the control:
+   * passed through `children` it lands in the control column and reads as part
+   * of the affordance ("Public" sitting immediately left of a select looks like
+   * one of its options).
+   */
+  labelAdornment?: JSX.Element
 }
 
 export function Field(props: FieldProps) {
@@ -70,6 +80,7 @@ export function Field(props: FieldProps) {
             <Show when={props.required === true}>
               <span aria-hidden="true"> *</span>
             </Show>
+            <Show when={props.labelAdornment}>{props.labelAdornment}</Show>
           </label>
           <Show when={props.description !== undefined}>
             <p id={descriptionId()} class="ui-field-desc">

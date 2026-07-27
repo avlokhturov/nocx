@@ -9,7 +9,7 @@
  * these are per-operation busy flags and form drafts (nocx-imkb.5).
  */
 
-import { For, Show } from 'solid-js'
+import { For, Show, onMount } from 'solid-js'
 import { createStore } from 'solid-js/store'
 import { render } from 'solid-js/web'
 import type { ProfileClient, ExportManifest, ConfigExport } from './profiles'
@@ -110,7 +110,7 @@ function ConfigExportActions(props: { profileClient: ProfileClient }) {
 
   return (
     <>
-      <Button class="ui-export-btn" disabled={state.busy} onClick={handleClick}>
+      <Button variant="secondary" disabled={state.busy} onClick={handleClick}>
         Export Configuration
       </Button>
       <StatusLine message={state.status} />
@@ -192,12 +192,7 @@ function PortableEncryptedActions(props: { profileClient: ProfileClient }) {
         />
       </div>
       <div class="st-export-btn-row">
-        <Button
-          class="ui-export-btn ui-export-btn-primary"
-          variant="primary"
-          disabled={state.busy}
-          onClick={handleEncrypt}
-        >
+        <Button variant="primary" disabled={state.busy} onClick={handleEncrypt}>
           Encrypt and Export
         </Button>
         <StatusLine message={state.status} />
@@ -239,7 +234,7 @@ function BackupActions(props: { profileClient: ProfileClient }) {
 
   return (
     <>
-      <Button class="ui-export-btn" disabled={state.busy} onClick={handleShow}>
+      <Button variant="secondary" disabled={state.busy} onClick={handleShow}>
         Show Backup Paths
       </Button>
       <StatusLine message={state.status} />
@@ -376,10 +371,17 @@ function ImportActions(props: { profileClient: ProfileClient }) {
 
 // ── Mode card ────────────────────────────────────────────────────────────
 
+/**
+ * One export mode, rendered open.
+ *
+ * These used to be collapsed behind a "Show details" button, which asked the
+ * user to click four times to compare four modes whose whole purpose is to be
+ * compared — each states what it carries and what it omits, and that statement
+ * was the thing being hidden. Now that Export is a page of its own rather than
+ * a block appended under the settings list, there is room to show them.
+ */
 function ModeCard(props: { def: ModeDef; profileClient: ProfileClient }) {
   const [state, setState] = createStore({
-    expanded: false,
-    loaded: false,
     loading: false,
     manifest: null as ExportManifest | null,
     error: null as string | null,
@@ -392,7 +394,6 @@ function ModeCard(props: { def: ModeDef; profileClient: ProfileClient }) {
       .then(
         (m) => {
           setState('manifest', m)
-          setState('loaded', true)
         },
         (e) => {
           setState('error', `Failed to load: ${String(e)}`)
@@ -403,23 +404,11 @@ function ModeCard(props: { def: ModeDef; profileClient: ProfileClient }) {
       })
   }
 
-  const handleToggle = () => {
-    const now = state.expanded
-    setState('expanded', !now)
-    if (!now && !state.loaded && !state.loading) {
-      loadManifest()
-    }
-  }
+  onMount(loadManifest)
 
   return (
-    <div class="st-export-card" classList={{ 'st-export-card-expanded': state.expanded }}>
-      <div class="st-export-card-header">
-        <span class="st-export-card-label">{props.def.label}</span>
-        <span class="st-export-card-summary">{props.def.summary}</span>
-        <Button class="st-export-card-toggle" onClick={handleToggle}>
-          {state.expanded ? 'Hide details' : 'Show details'}
-        </Button>
-      </div>
+    <PageSection id={'st-export-' + props.def.mode} title={props.def.label} class="st-export-card">
+      <p class="st-export-card-summary">{props.def.summary}</p>
       <div class="st-export-card-body">
         <Show when={state.loading}>
           <div class="st-export-loading">Loading mode details…</div>
@@ -445,25 +434,28 @@ function ModeCard(props: { def: ModeDef; profileClient: ProfileClient }) {
           </div>
         </Show>
       </div>
-    </div>
+    </PageSection>
   )
 }
 
 // ── Root component ───────────────────────────────────────────────────────
 
+/**
+ * The Export / Backup / Import page.
+ *
+ * No wrapping PageSection of its own: this is a page in the settings rail now,
+ * and the rail entry already names it. Wrapping would put the same words twice
+ * on the same screen and nest a section inside a section.
+ */
 export function ExportSection(props: { profileClient: ProfileClient }) {
   return (
-    <PageSection title="Export / Backup / Import" class="ui-export">
+    <div class="ui-export">
       <p class="ui-export-desc">
         Each mode states what it carries and what it omits. Private content and secrets are never
         included without an explicit choice.
       </p>
-      <div class="ui-export-grid">
-        <For each={MODES}>
-          {(def) => <ModeCard def={def} profileClient={props.profileClient} />}
-        </For>
-      </div>
-    </PageSection>
+      <For each={MODES}>{(def) => <ModeCard def={def} profileClient={props.profileClient} />}</For>
+    </div>
   )
 }
 

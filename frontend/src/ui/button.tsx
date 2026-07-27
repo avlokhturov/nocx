@@ -14,10 +14,16 @@ import type { JSX } from 'solid-js'
  * - update-notice.ts: update-apply-btn
  */
 
-export type ButtonVariant = 'default' | 'primary' | 'danger' | 'close'
+export type ButtonVariant = 'default' | 'secondary' | 'primary' | 'danger' | 'close'
 
 const VARIANT_CLASS: Record<ButtonVariant, string> = {
+  // `default` maps to no class on purpose: 27 call sites pass their own fully
+  // formed class (.tab-add, .cm-save, activity-bar buttons) and adding a base
+  // class underneath them would fight rules that assume a bare button. The
+  // consequence is that a Button with neither a variant nor a class renders as
+  // native platform chrome — tracked separately, it needs a per-caller pass.
   default: '',
+  secondary: 'ui-btn-secondary',
   primary: 'ui-btn-primary',
   danger: 'ui-btn-danger',
   close: 'ui-btn-close',

@@ -17,7 +17,7 @@ export interface SectionProps {
 
 export function Section(props: SectionProps) {
   return (
-    <section id={props.id} class={props.class ?? ''}>
+    <section id={props.id} class={`ui-section ${props.class ?? ''}`.trim()}>
       <h2>{props.title}</h2>
       {props.children}
     </section>

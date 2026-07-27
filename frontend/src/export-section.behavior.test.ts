@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { fireEvent, cleanup } from '@solidjs/testing-library'
+import { cleanup } from '@solidjs/testing-library'
 import { mountExportSection } from './export-section'
 import { ProfileClient } from './profiles'
 import { Dispatcher } from './dispatcher'
@@ -64,6 +64,20 @@ function mount() {
   return { container, client, manifestSpy }
 }
 
+/** Mount with the manifest spy reconfigured first — the manifests load on
+ *  mount now, so a test that wants a rejection or a pending load has to set it
+ *  up before the component exists. */
+function mountWith(
+  configure: (manifestSpy: ReturnType<typeof createMockClient>['manifestSpy']) => void,
+) {
+  const container = document.createElement('div')
+  document.body.appendChild(container)
+  const { client, manifestSpy } = createMockClient()
+  configure(manifestSpy)
+  mountExportSection(container, client)
+  return { container, client, manifestSpy }
+}
+
 afterEach(() => {
   vi.clearAllMocks()
   cleanup()
@@ -72,11 +86,19 @@ afterEach(() => {
 // ── Heading and description ───────────────────────────────────────────
 
 describe('export section — heading and description', () => {
-  it('renders a heading with the expected title', () => {
+  // Export is a page in the settings rail now, and the rail entry already
+  // carries the words "Export / Backup / Import". A page-level heading here
+  // would put the same name twice on one screen and nest a section inside a
+  // section, so the only headings are the four mode names.
+  it('has no page-level heading of its own — the headings are the four modes', () => {
     const { container } = mount()
-    const heading = container.querySelector('h2')
-    expect(heading).toBeTruthy()
-    expect(heading!.textContent).toBe('Export / Backup / Import')
+    const headings = Array.from(container.querySelectorAll('h2')).map((h) => h.textContent)
+    expect(headings).toEqual([
+      'Configuration Export',
+      'Portable Encrypted Export',
+      'Same-Machine Backup',
+      'Import',
+    ])
   })
 
   it('renders a description paragraph', () => {
@@ -114,95 +136,63 @@ describe('export section — mode cards', () => {
     expect(text).toContain('Restore a configuration export into this machine')
   })
 
-  it('each card has a toggle button starting with "Show details"', () => {
+  // The four modes exist to be compared, and what each carries and omits is
+  // the comparison. Hiding that behind a per-card disclosure asked for four
+  // clicks to read one table, so the cards render open and there is no toggle.
+  it('renders open — no disclosure control on any card', () => {
     const { container } = mount()
-    const toggles = container.querySelectorAll('.st-export-card-toggle')
-    expect(toggles.length).toBe(4)
-    for (const toggle of toggles) {
-      expect(toggle.textContent).toBe('Show details')
-    }
+    expect(container.querySelectorAll('.st-export-card-toggle').length).toBe(0)
+    expect(container.textContent).not.toContain('Show details')
+    expect(container.textContent).not.toContain('Hide details')
   })
 })
 
-// ── Expand/collapse ───────────────────────────────────────────────────
+// ── Manifest loading ──────────────────────────────────────────────────
 
-describe('export section — expand and collapse', () => {
-  it('clicking toggle adds expanded class and changes button text', () => {
-    const { container } = mount()
-    const card = container.querySelector('.st-export-card')!
-    const toggle = card.querySelector('.st-export-card-toggle')!
-
-    expect(card.classList.contains('st-export-card-expanded')).toBe(false)
-
-    fireEvent.click(toggle)
-    expect(card.classList.contains('st-export-card-expanded')).toBe(true)
-    expect(toggle.textContent).toBe('Hide details')
-  })
-
-  it('clicking toggle again collapses and reverts button text', () => {
-    const { container } = mount()
-    const card = container.querySelector('.st-export-card')!
-    const toggle = card.querySelector('.st-export-card-toggle')!
-
-    fireEvent.click(toggle)
-    fireEvent.click(toggle)
-    expect(card.classList.contains('st-export-card-expanded')).toBe(false)
-    expect(toggle.textContent).toBe('Show details')
-  })
-
-  it('shows a loading indicator on first expand', () => {
-    const { container } = mount()
-    const card = container.querySelector('.st-export-card')!
-    const toggle = card.querySelector('.st-export-card-toggle')!
-
-    fireEvent.click(toggle)
-    const body = card.querySelector('.st-export-card-body')
-    expect(body!.innerHTML).toContain('Loading')
-  })
-
-  it('calls exportManifest once on first expand and renders carries/omits', async () => {
-    const { container, manifestSpy } = mount()
-    const card = container.querySelector('.st-export-card')!
-    const toggle = card.querySelector('.st-export-card-toggle')!
-
-    fireEvent.click(toggle)
+describe('export section — manifest loading', () => {
+  it('loads every mode manifest on mount, exactly once per card', async () => {
+    const { manifestSpy } = mount()
 
     await vi.waitFor(() => {
-      expect(manifestSpy).toHaveBeenCalledTimes(1)
+      expect(manifestSpy).toHaveBeenCalledTimes(4)
+    })
+    expect(manifestSpy.mock.calls.map((c) => c[0])).toEqual([
+      'config-export',
+      'portable-encrypted',
+      'same-machine-backup',
+      'import',
+    ])
+  })
+
+  it('renders carries and omits with no interaction', async () => {
+    const { container } = mount()
+    const card = container.querySelector('.st-export-card')!
+
+    await vi.waitFor(() => {
       const body = card.querySelector('.st-export-card-body')
       expect(body!.textContent).toContain('Profiles and groups')
+      expect(body!.textContent).toContain('Stored passwords')
     })
   })
 
-  it('does not re-fetch manifest on collapse + re-expand', async () => {
-    const { container, manifestSpy } = mount()
-    const card = container.querySelector('.st-export-card')!
-    const toggle = card.querySelector('.st-export-card-toggle')!
-
-    // Expand
-    fireEvent.click(toggle)
-    await vi.waitFor(() => {
-      expect(manifestSpy).toHaveBeenCalledTimes(1)
+  it('shows a loading indicator while the manifest is in flight', () => {
+    // A promise that never settles pins the card in its loading state; with the
+    // canned resolve it would be gone before the assertion could see it.
+    const { container } = mountWith((spy) => {
+      spy.mockReturnValue(new Promise(() => {}))
     })
 
-    // Collapse + re-expand
-    fireEvent.click(toggle)
-    fireEvent.click(toggle)
-
-    // Should not be called again
-    expect(manifestSpy).toHaveBeenCalledTimes(1)
+    const body = container.querySelector('.st-export-card-body')!
+    expect(body.textContent).toContain('Loading')
   })
 
   it('shows an error when exportManifest rejects', async () => {
-    const { container, manifestSpy } = mount()
-    const card = container.querySelector('.st-export-card')!
-    const toggle = card.querySelector('.st-export-card-toggle')!
+    const { container } = mountWith((spy) => {
+      spy.mockRejectedValue(new Error('Network error'))
+    })
 
-    manifestSpy.mockRejectedValueOnce(new Error('Network error'))
-
-    fireEvent.click(toggle)
     await vi.waitFor(() => {
-      const body = card.querySelector('.st-export-card-body')
+      const body = container.querySelector('.st-export-card-body')
       expect(body!.textContent).toContain('Failed to load')
     })
   })

@@ -1,0 +1,16 @@
+/* Two deliberate violations: an escaped-dot selector, which is a type selector
+   for an element that cannot exist, and a var() with neither a declaration nor
+   a fallback. */
+
+\.fixture-scope input {
+  border: 0;
+}
+
+.fixture-uses-missing-token {
+  font-family: var(--fixture-never-declared);
+}
+
+/* A var() WITH a fallback is legitimate and must not be reported. */
+.fixture-uses-fallback {
+  font-family: var(--fixture-also-never-declared, monospace);
+}

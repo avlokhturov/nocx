@@ -8,7 +8,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint . --max-warnings 0 && node lint-fixtures/check-css-colors.mjs",
+    "lint": "eslint . --max-warnings 0 && node lint-fixtures/check-css-colors.mjs && node lint-fixtures/check-css-integrity.mjs",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
     "format:check": "prettier --check .",

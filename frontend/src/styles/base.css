@@ -18,10 +18,26 @@ body {
   height: 100%;
   overflow: hidden;
   background: var(--color-canvas);
+  /* On `body`, not on `#app`. Modals live outside `#app`: a native <dialog>
+     renders in the browser top layer and the kit's portal root is a body-level
+     element, so neither inherits anything set on the app root. With the family
+     declared there, every overlay fell back to the UA serif while the app
+     around it was correct. */
+  font-family: var(--font-family-ui);
+  font-size: var(--font-size-md);
+  color: var(--color-text);
 }
 
+/* The shell is proportional; only terminal content is monospace.
+   `#app` used to set the mono family for everything, which put labels, nav,
+   headings and form controls in SF Mono and made every surface read as a
+   config dump rather than an application. Monospace is now opt-in and states
+   what it means: this text is terminal output, a command, or a value whose
+   column alignment matters. The places that need it declare it —
+   `.cmd-output` (and the `.term-line` spans inside it), `.cmd-header-text`,
+   `.nocx-editor-input`, `.pane-error` — and xterm carries its own
+   FONT_FAMILY, so the terminal itself is unaffected either way. */
 #app {
-  font-family: var(--font-family-mono);
   display: flex;
   flex-direction: column;
   width: 100%;
@@ -77,6 +93,45 @@ body {
 
 .ui-page__header {
   flex: 0 0 auto;
+}
+
+/* Nothing left to show once the title is hidden and there is no description or
+   actions — so the header must not reserve a strip of empty space. */
+.ui-page__header--bare:not(:has(> :not(.ui-visually-hidden))) {
+  display: none;
+}
+
+/* Out of the layout, still in the accessibility tree. The clip-path/1px box is
+   the pattern that survives every engine; `display: none` and
+   `visibility: hidden` both remove the element from assistive technology too,
+   which would leave the page with no accessible name. */
+.ui-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* The page title is a quiet landmark, not a billboard. Without a rule the UA
+   default applies — 2em, i.e. 32px — which is louder than anything else on the
+   surface and redundant next to the tab already carrying the same word. */
+.ui-page__header h1 {
+  margin: 0;
+  font-size: var(--font-size-xl);
+  font-weight: 600;
+  color: var(--color-text);
+  letter-spacing: -0.01em;
+}
+
+.ui-page__header p {
+  margin: var(--space-1) 0 0;
+  font-size: var(--font-size-md);
+  color: var(--color-text-muted);
 }
 
 .ui-page__body {
@@ -175,6 +230,16 @@ body {
 .pane.active {
   visibility: visible;
   pointer-events: auto;
+}
+
+/* A pane hosting a surface goes edge to edge.
+   The 10px on `.pane` is breathing room around terminal text — it must not
+   apply to a surface, where it shows up as a 10px strip of canvas between the
+   activity bar and the surface's own chrome, reading as a gap in the layout.
+   Keyed off the surface host that SolidTabContent creates rather than off a
+   flag the pane would have to be told, so nothing can forget to set it. */
+.pane:has(> .surface-host) {
+  padding: 0;
 }
 
 /* Manager panes host the connection UI, not a terminal — no padding,

@@ -1,32 +1,46 @@
 /* ── Light theme — a clean light palette to prove the token layer works.
    ADR-0013 §2. All colour literals live here and only here. */
 
-:root,
-[data-theme='light'] {
+/* Scoped to the attribute and nothing else — a bare `:root` here would apply
+   under every theme and the two files would fight over import order. Only the
+   default theme (tokyo-night.css) carries an unscoped block. */
+:root[data-theme='light'] {
   /* ── UI colour tokens (§2.1) ─────────────────────────────────────── */
-  --color-canvas: #f5f5f5;
+  --color-canvas: #e6e8ed;
 
-  --color-chrome: #e8e8e8;
-  --color-chrome-rail: #e0e0e0;
-  --color-surface-sunken: #ececec;
+  --color-chrome: #d6dae1;
+  --color-chrome-rail: #dee1e7;
+  --color-surface-sunken: #e4e7ec;
   --color-tab-active: #ffffff;
   --color-surface: #ffffff;
   --color-surface-hover: #f0f0f0;
   --color-surface-raised: #ffffff;
   --color-text: #1a1a1a;
-  --color-text-muted: #555555;
-  --color-text-dim: #999999;
-  --color-border: #d4d4d4;
+  --color-text-muted: #4b5160;
+  --color-text-dim: #5a6170;
+  --color-border: #7c8593;
+  /* Hairline between regions — rail, tab bar, panel edges. Split from
+     --color-border because the two answer different questions: a control
+     outline has to be findable (WCAG 1.4.11, 3:1 against the canvas), a
+     divider only has to be a seam. Raising border to meet 3:1 dragged every
+     divider up with it and the shell looked wireframed. */
+  --color-divider: #ced3db;
   --color-accent: #2563eb;
 
   /* ── Additional semantic colours (§2.2) ──────────────────────────── */
   --color-success: #16a34a;
-  --color-warning: #d97706;
-  --color-danger: #dc2626;
+  --color-warning: #96560a;
+  --color-danger: #c81e1e;
   --color-accent-secondary: #7c3aed;
   --color-error: #ef4444;
 
-  /* ── Font families (§2.4) — ADR §2.4 mandates these per theme file ── */
+  /* ── Font families (§2.4) — ADR §2.4 mandates these per theme file ──
+     Same stacks as Tokyo Night: this theme changes colour, not typography.
+     They are repeated rather than shared because §2.4 makes the theme file
+     the single place a theme's values live. */
+  --font-family-ui: ui-sans-serif, -apple-system, 'SF Pro Text', system-ui, sans-serif;
+  --font-family-mono:
+    ui-monospace, 'SF Mono', Menlo, Monaco, 'Apple Color Emoji', 'Apple Symbols', monospace;
 
   /* ── Interaction states — assigned, not derived ──────────────────────
      ADR-0013 §3 proposed deriving these centrally with color-mix(). The

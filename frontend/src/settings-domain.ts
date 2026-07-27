@@ -211,6 +211,39 @@ export function canResetSetting(overridden: ReadonlySet<string>, key: string): R
 }
 
 /**
+ * Whether a setting differs from its default, for the "modified" marker, the
+ * per-section counts and the Modified-only filter.
+ *
+ * Deliberately not the same question as `canResetSetting`. The backend records
+ * an override the moment a key is written, so setting a value, changing your
+ * mind, and setting it back leaves an override whose value equals the default —
+ * and the UI then claimed the setting was modified when nothing about it was.
+ * That is what the user sees, and value equality is what they mean.
+ *
+ * Compared with JSON rather than `===` because a default can be an array or an
+ * object; `===` would call every one of those modified forever. Key order
+ * within an object is the one thing this does not see through, and settings
+ * defaults are declared literals, so their order is stable.
+ */
+export function isSettingModified(
+  overridden: ReadonlySet<string>,
+  key: string,
+  effective: unknown,
+  defaultValue: unknown,
+): boolean {
+  if (!overridden.has(key)) return false
+  if (defaultValue === undefined) return true
+  if (effective === defaultValue) return false
+  try {
+    return JSON.stringify(effective) !== JSON.stringify(defaultValue)
+  } catch {
+    // Circular or otherwise unserialisable: fall back to the override record,
+    // which is the answer that at least never hides a real change.
+    return true
+  }
+}
+
+/**
  * Apply an accepted snapshot to produce a new settings mirror.
  *
  * Clears drafts and errors because a fresh snapshot represents the

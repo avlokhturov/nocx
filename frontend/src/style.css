@@ -1,15 +1,22 @@
+/* Every stylesheet under styles/ must appear here — `npm run lint` fails on a
+   file nothing imports, because a stylesheet that is merely never loaded looks
+   exactly like one that is loaded and overridden (nocx-u7wq.4). */
 @import './styles/tokens.css';
 @import './styles/themes/tokyo-night.css';
+@import './styles/themes/light.css';
 @import './styles/base.css';
 @import './styles/components/kit.css';
+@import './styles/components/overlay.css';
 @import './styles/components/sidebar.css';
+@import './styles/components/quick-connect.css';
 @import './styles/surfaces/update-notice.css';
 @import './styles/surfaces/settings.css';
-@import './styles/components/quick-connect.css';
+@import './styles/surfaces/export.css';
 @import './styles/surfaces/connections.css';
 
 .cm-body {
-  flex: 1;
+  flex: 1 1 auto;
+  min-height: 0;
   display: flex;
   overflow: hidden;
   --wails-draggable: no-drag;
@@ -17,7 +24,7 @@
 
 .cm-list {
   width: 320px;
-  border-right: 1px solid var(--color-border);
+  border-right: 1px solid var(--color-divider);
   overflow-y: auto;
   padding: 8px 0;
 }
@@ -88,13 +95,13 @@
   margin-top: 2px;
 }
 
+/* A list-group caption. Not uppercase and not accent-coloured: it labels a
+   group of rows, it does not compete with them. */
 .cm-group-header {
-  padding: 10px 16px 4px;
-  font-size: 11px;
+  padding: var(--space-4) 16px var(--space-1);
+  font-size: var(--font-size-sm);
   font-weight: 600;
-  color: var(--color-accent-secondary);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+  color: var(--color-text-dim);
   user-select: none;
 }
 
@@ -108,19 +115,28 @@
   max-width: 600px;
 }
 
+/* The form rows are kit Fields and TextFields, which own their internals but
+   not the space between them — stacked with no gap they read as one block of
+   striped boxes. */
 .cm-form-section {
-  margin-bottom: 32px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  margin-bottom: var(--space-8);
+}
+
+.cm-form-section > h2 {
+  margin-bottom: 0;
 }
 
 .cm-form-section h2 {
-  font-size: 13px;
+  font-size: var(--font-size-lg);
   font-weight: 600;
-  color: var(--color-accent-secondary);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+  color: var(--color-text);
+  letter-spacing: -0.01em;
   margin: 0 0 16px;
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--color-border);
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--color-divider);
 }
 
 .cm-field {
@@ -160,8 +176,17 @@
 
 .cm-radio-group {
   display: flex;
-  gap: 16px;
-  flex: 1;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+}
+
+/* Bare Checkboxes are inline-flex labels, so a run of them collapses onto one
+   line with no separation. Anything stacking two or more owns the gap. */
+.cm-check-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
 }
 
 .cm-radio-group label {
@@ -177,7 +202,7 @@
   gap: 12px;
   margin-top: 24px;
   padding-top: 16px;
-  border-top: 1px solid var(--color-border);
+  border-top: 1px solid var(--color-divider);
 }
 
 /* Validation and save failures, shown on the form rather than only logged. */
@@ -192,51 +217,6 @@
   display: none;
 }
 
-.cm-form-actions button {
-  padding: 10px 24px;
-  border-radius: 6px;
-  font-size: 13px;
-  font-weight: 500;
-  cursor: pointer;
-  border: 1px solid var(--color-border);
-  background: var(--color-surface);
-  color: var(--color-text);
-  transition: all 0.15s ease;
-}
-
-.cm-form-actions button:hover {
-  background: var(--color-border);
-}
-
-.cm-form-actions button.cm-save {
-  background: var(--color-accent);
-  border-color: var(--color-accent);
-  color: var(--color-canvas);
-}
-
-.cm-form-actions button.cm-save:hover {
-  background: var(--color-accent-hover);
-}
-
-.cm-form-actions button.cm-connect {
-  background: var(--color-success);
-  border-color: var(--color-success);
-  color: var(--color-canvas);
-}
-
-.cm-form-actions button.cm-connect:hover {
-  background: var(--color-success-hover);
-}
-
-.cm-form-actions button.cm-danger {
-  border-color: var(--color-danger);
-  color: var(--color-danger);
-}
-
-.cm-form-actions button.cm-danger:hover {
-  background: color-mix(in srgb, var(--color-danger), transparent 90%);
-}
-
 /* ── Tab bar (Tabby-inspired) ─────────────────────────────────────────── */
 
 .tabbar {
@@ -245,10 +225,10 @@
   display: flex;
   align-items: stretch;
   height: 38px;
-  padding: 0 0 0 78px;
+  padding: 0 0 0 var(--titlebar-inset-start, 0);
   background: var(--color-chrome);
-  border-bottom: 1px solid var(--color-border);
-  font-family: var(--font-family-mono);
+  border-bottom: 1px solid var(--color-divider);
+  font-family: var(--font-family-ui);
   font-size: 11px;
   line-height: 1;
   -webkit-user-select: none;
@@ -284,9 +264,12 @@
 
 /* ── Individual tab ──────────────────────────────────────────────────── */
 
+/* Inactive tabs are not transparent: against the chrome they disappeared and
+   only their label remained, so the strip read as text on a bar rather than as
+   a row of tabs. The active one is lighter still, plus its accent bar. */
 .tab {
   --wails-draggable: no-drag;
-  --tab-bg: transparent;
+  --tab-bg: var(--color-surface-sunken);
   position: relative;
   display: flex;
   align-items: center;
@@ -295,10 +278,10 @@
   min-width: 0;
   padding: 0 10px;
   cursor: pointer;
-  background: transparent;
+  background: var(--color-surface-sunken);
   border: 0;
-  border-right: 1px solid transparent;
-  color: var(--color-text-dim);
+  border-right: 1px solid var(--color-divider);
+  color: var(--color-text-muted);
   overflow: hidden;
   border-radius: 6px 6px 0 0;
 }
@@ -430,16 +413,21 @@
   background: var(--color-accent);
 }
 
+/* Unread activity on an inactive tab. A dot, not a bar: spanning the tab's
+   whole width at 2px made it read as a decorative rule — one more line among
+   the ones separating regions — rather than as a marker attached to this tab.
+   It also collided with the active tab's own full-width accent bar, so two
+   different meanings shared one shape. */
 .tab-indicator.tab-activity {
   display: block;
-  bottom: 4px;
+  bottom: 5px;
   top: auto;
-  height: 2px;
-  background: var(--color-accent);
-  border-radius: 1px;
   left: 10px;
-  right: 10px;
-  opacity: 0.6;
+  right: auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-accent);
 }
 
 .tab.active .tab-indicator.tab-activity {
@@ -458,7 +446,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 38px;
+  width: 30px;
   height: 100%;
   padding: 0;
   margin: 0;
@@ -483,8 +471,8 @@
   flex-direction: column;
   width: 240px;
   background: var(--color-chrome);
-  border-right: 1px solid var(--color-border);
-  font-family: var(--font-family-mono);
+  border-right: 1px solid var(--color-divider);
+  font-family: var(--font-family-ui);
   font-size: 11px;
   line-height: 1;
   -webkit-user-select: none;
@@ -530,16 +518,15 @@
   background: var(--color-accent);
 }
 
+/* Same dot as the horizontal strip; only its position differs. `width: auto`
+   here was what stretched it into a bar, and it has to be overridden back
+   because the base rule now sets an explicit size. */
 .tabstrip-vertical .tab-indicator.tab-activity {
-  display: block;
-  top: auto;
-  bottom: 4px;
-  left: 4px;
-  right: auto;
-  width: auto;
-  height: 2px;
-  background: var(--color-accent);
-  border-radius: 1px;
+  top: 50%;
+  bottom: auto;
+  right: 10px;
+  left: auto;
+  transform: translateY(-50%);
 }
 
 .tabstrip-vertical .tab-index {
@@ -550,7 +537,7 @@
 .tabstrip-vertical .tab-add {
   flex: 0 0 auto;
   width: 100%;
-  border-top: 1px solid var(--color-border);
+  border-top: 1px solid var(--color-divider);
   border-right: none;
   border-radius: 0;
 }
@@ -575,7 +562,7 @@
   flex: 0 0 auto;
   width: 48px;
   background: var(--color-canvas);
-  border-right: 1px solid var(--color-border);
+  border-right: 1px solid var(--color-divider);
   -webkit-user-select: none;
   user-select: none;
 }
@@ -624,7 +611,7 @@
   flex: 0 0 auto;
   width: 240px;
   background: var(--color-surface);
-  border-right: 1px solid var(--color-border);
+  border-right: 1px solid var(--color-divider);
   overflow: hidden;
 }
 
@@ -704,9 +691,9 @@
   padding: 10px 16px;
   background: var(--color-surface-sunken);
   border-left: 3px solid var(--color-warning);
-  border-bottom: 1px solid var(--color-border);
+  border-bottom: 1px solid var(--color-divider);
   color: var(--color-text);
-  font-family: var(--font-family-mono);
+  font-family: var(--font-family-ui);
   font-size: 12px;
   line-height: 1.4;
 }
@@ -728,7 +715,7 @@
   padding: 4px 10px;
   border: 0;
   border-radius: 4px;
-  font-family: var(--font-family-mono);
+  font-family: var(--font-family-ui);
   font-size: 11px;
   line-height: 1;
   cursor: pointer;
@@ -783,7 +770,7 @@
   justify-content: space-between;
   align-items: center;
   margin-bottom: 8px;
-  font-family: var(--font-family-mono);
+  font-family: var(--font-family-ui);
   font-size: 11px;
   -webkit-user-select: none;
   user-select: none;
@@ -799,7 +786,7 @@
   background: var(--color-surface-raised);
   border-radius: 5px;
   padding: 3px 9px;
-  font-family: var(--font-family-mono);
+  font-family: var(--font-family-ui);
   font-size: 12px;
   color: var(--color-accent);
   cursor: default;
@@ -1006,7 +993,7 @@
   padding: 3px 0;
   background: transparent;
   border: 0;
-  font-family: var(--font-family-mono);
+  font-family: var(--font-family-ui);
   font-size: 12px;
   pointer-events: auto;
   -webkit-user-select: none;
@@ -1107,7 +1094,7 @@
   border-radius: 3px;
   background: transparent;
   color: var(--color-text-dim);
-  font-family: var(--font-family-mono);
+  font-family: var(--font-family-ui);
   font-size: 14px;
   line-height: 1;
   cursor: pointer;
@@ -1138,7 +1125,7 @@
   border: 0;
   background: transparent;
   color: var(--color-text);
-  font-family: var(--font-family-mono);
+  font-family: var(--font-family-ui);
   font-size: 12px;
   text-align: left;
   cursor: pointer;
@@ -1148,262 +1135,4 @@
 
 .cmd-overflow-menu-item:hover {
   background: var(--color-surface-raised);
-}
-
-/* ── Export / backup / import section (ADR-0011 §7) ──────────────────── */
-
-.st-export {
-  margin-top: 32px;
-  padding-top: 24px;
-  border-top: 1px solid var(--color-surface-raised);
-}
-
-.st-export-desc {
-  color: var(--color-text-muted);
-  font-size: 12px;
-  margin: 0 0 16px;
-  line-height: 1.5;
-}
-
-/* ── Mode card grid ──────────────────────────────────────────────────── */
-
-.st-export-grid {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-/* ── Mode card ───────────────────────────────────────────────────────── */
-
-.st-export-card {
-  border: 1px solid var(--color-surface-raised);
-  border-radius: 6px;
-  overflow: hidden;
-}
-
-.st-export-card-header {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 10px 14px;
-  cursor: default;
-}
-
-.st-export-card-label {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--color-text);
-  white-space: nowrap;
-}
-
-.st-export-card-summary {
-  font-size: 12px;
-  color: var(--color-text-dim);
-  flex: 1;
-}
-
-.st-export-card-toggle {
-  flex: none;
-  background: none;
-  border: 1px solid var(--color-border);
-  border-radius: 4px;
-  color: var(--color-accent);
-  font-size: 11px;
-  padding: 2px 8px;
-  cursor: pointer;
-}
-
-.st-export-card-toggle:hover {
-  background: var(--color-surface-raised);
-}
-
-/* ── Card body (expanded) ────────────────────────────────────────────── */
-
-.st-export-card-body {
-  display: none;
-  padding: 0 14px 14px;
-}
-
-.st-export-card-expanded .st-export-card-body {
-  display: block;
-}
-
-/* ── Manifest list ───────────────────────────────────────────────────── */
-
-.st-export-manifest {
-  list-style: none;
-  padding: 0;
-  margin: 0 0 14px;
-}
-
-.st-export-manifest li {
-  font-size: 12px;
-  padding: 2px 0;
-  color: var(--color-text-muted);
-}
-
-.st-export-check {
-  color: var(--color-success);
-  font-weight: 700;
-  margin-right: 4px;
-}
-
-.st-export-cross {
-  color: var(--color-danger);
-  font-weight: 700;
-  margin-right: 4px;
-}
-
-.st-export-note {
-  color: var(--color-warning) !important;
-  font-style: italic;
-  padding-left: 14px !important;
-}
-
-/* ── Actions ─────────────────────────────────────────────────────────── */
-
-.st-export-actions {
-  margin-top: 8px;
-}
-
-.st-export-btn {
-  background: var(--color-surface-raised);
-  border: 1px solid var(--color-border);
-  border-radius: 4px;
-  color: var(--color-text);
-  font-size: 12px;
-  padding: 5px 14px;
-  cursor: pointer;
-}
-
-.st-export-btn:hover {
-  background: var(--color-surface-raised);
-}
-
-.st-export-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.st-export-btn-primary {
-  background: var(--color-accent);
-  color: var(--color-canvas);
-  border-color: var(--color-accent);
-}
-
-.st-export-btn-primary:hover {
-  background: var(--color-accent-hover);
-}
-
-.st-export-btn-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-top: 10px;
-}
-
-/* ── Status ──────────────────────────────────────────────────────────── */
-
-.st-export-status {
-  font-size: 12px;
-  color: var(--color-text-muted);
-  margin-top: 6px;
-  min-height: 18px;
-}
-
-/* ── Loading / error ─────────────────────────────────────────────────── */
-
-.st-export-loading {
-  font-size: 12px;
-  color: var(--color-text-dim);
-  padding: 8px 0;
-}
-
-.st-export-error {
-  font-size: 12px;
-  color: var(--color-danger);
-  padding: 8px 0;
-}
-
-/* ── Passphrase form ─────────────────────────────────────────────────── */
-
-.st-export-passphrase-form {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin-bottom: 10px;
-}
-
-.st-export-passphrase-label {
-  font-size: 12px;
-  color: var(--color-text-muted);
-  margin-top: 4px;
-}
-
-.st-export-passphrase-input {
-  background: var(--color-canvas);
-  border: 1px solid var(--color-border);
-  border-radius: 4px;
-  color: var(--color-text);
-  font-size: 13px;
-  padding: 6px 10px;
-  width: 100%;
-  max-width: 320px;
-}
-
-.st-export-passphrase-input:focus {
-  border-color: var(--color-accent);
-  outline: none;
-}
-
-.st-export-passphrase-input::placeholder {
-  color: var(--color-text-dim);
-}
-
-.st-export-show-toggle,
-.st-export-private-toggle {
-  font-size: 11px;
-  color: var(--color-text-dim);
-  display: flex;
-  align-items: center;
-}
-
-.st-export-show-toggle input[type='checkbox'],
-.st-export-private-toggle input[type='checkbox'] {
-  margin: 0;
-}
-
-/* ── Backup details ──────────────────────────────────────────────────── */
-
-.st-export-backup-details {
-  background: var(--color-canvas);
-  border: 1px solid var(--color-surface-raised);
-  border-radius: 4px;
-  padding: 10px 12px;
-  font-size: 11px;
-  color: var(--color-text-muted);
-  white-space: pre-wrap;
-  margin-top: 8px;
-  max-height: 200px;
-  overflow: auto;
-}
-
-/* ── Import section ──────────────────────────────────────────────────── */
-
-.st-export-import-section {
-  margin-bottom: 16px;
-}
-
-.st-export-import-label {
-  display: block;
-  font-size: 12px;
-  color: var(--color-text-muted);
-  margin-bottom: 4px;
-}
-
-.st-export-file-input {
-  display: block;
-  font-size: 12px;
-  color: var(--color-text-dim);
-  margin-bottom: 8px;
 }

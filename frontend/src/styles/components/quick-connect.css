@@ -1,7 +1,10 @@
 /* ── Quick-connect picker ──────────────────────────────────────────────
    Owned by nocx-imkb.7. */
 
-/* ── Caret beside the + button ────────────────────────────────────────── */
+/* ── Caret beside the + button ──────────────────────────────────────────
+   The + and this caret are two halves of one affordance — new tab, and the menu
+   of things a new tab could be. They sat a full button-width apart, reading as
+   two unrelated controls. */
 
 .tab-caret {
   --wails-draggable: no-drag;
@@ -9,10 +12,10 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 20px;
+  width: 22px;
   height: 100%;
   padding: 0;
-  margin: 0;
+  margin: 0 0 0 -6px;
   border: 0;
   background: transparent;
   color: var(--color-text-dim);
@@ -21,8 +24,11 @@
   line-height: 1;
 }
 
+/* A 20px-wide sliver with only a colour change on hover was hard to hit and
+   gave no feedback that it was a button at all. */
 .tab-caret:hover {
-  color: var(--color-text-muted);
+  color: var(--color-text);
+  background: var(--color-surface-hover);
 }
 
 .tab-caret:focus-visible {
@@ -32,16 +38,17 @@
 
 /* ── Dialog layout ────────────────────────────────────────────────────── */
 
+/* The picker is a command palette: wide enough to read a host and its label on
+   one line, and tall enough that the list does not look like it ran out. */
 .quick-connect {
   display: flex;
   flex-direction: column;
-  gap: 0;
-  min-width: 280px;
-  max-width: 420px;
+  min-width: 440px;
+  max-width: 560px;
 }
 
 .quick-connect__search {
-  padding-bottom: 8px;
+  padding-bottom: var(--space-3);
 }
 
 .quick-connect__search input {
@@ -54,34 +61,48 @@
 .quick-connect__list {
   display: flex;
   flex-direction: column;
-  gap: 0;
-  max-height: 320px;
+  gap: 2px;
+  max-height: 340px;
   overflow-y: auto;
+  /* Its own scroll region, separated from the filter above it. */
+  border-top: 1px solid var(--color-divider);
+  padding-top: var(--space-2);
 }
 
 .quick-connect__item {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 8px;
-  border-radius: 4px;
+  align-items: baseline;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-2);
+  border-radius: var(--control-radius-sm);
   cursor: pointer;
   user-select: none;
 }
 
-.quick-connect__item:hover,
-.quick-connect__item--selected {
+.quick-connect__item:hover {
   background: var(--color-surface-hover);
 }
 
+/* The keyboard selection has to be distinguishable from a hover, since arrow
+   keys move it while the pointer sits still. */
+.quick-connect__item--selected {
+  background: var(--color-accent);
+}
+
+.quick-connect__item--selected .quick-connect__item-label,
+.quick-connect__item--selected .quick-connect__item-detail {
+  color: var(--color-canvas);
+}
+
 .quick-connect__item-label {
-  font-size: 14px;
+  font-size: var(--font-size-md);
+  font-weight: 500;
   color: var(--color-text);
   flex: 0 0 auto;
 }
 
 .quick-connect__item-detail {
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   color: var(--color-text-dim);
   overflow: hidden;
   text-overflow: ellipsis;

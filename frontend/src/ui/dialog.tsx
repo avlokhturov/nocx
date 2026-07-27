@@ -36,7 +36,9 @@
  */
 
 import { createEffect, createSignal, onCleanup, type Component, type JSX, Show } from 'solid-js'
+import { render } from 'solid-js/web'
 import { pushOverlay, popOverlay, restoreFocus } from './overlay/stack'
+import { Button } from './button'
 
 export interface DialogProps {
   /** Whether the dialog is open. */
@@ -93,9 +95,36 @@ export const Dialog: Component<DialogProps> = (props) => {
     if (ref?.open) ref.close()
   })
 
+  /**
+   * Light dismiss — a click outside the panel closes the dialog.
+   *
+   * The listener is on the `<dialog>` rather than on the backdrop, because
+   * `::backdrop` is a pseudo-element and cannot take one. A native modal
+   * `<dialog>` fills the viewport with the panel centred inside it, so a click
+   * that lands on the dialog element itself landed outside the panel. Comparing
+   * against the panel's box rather than checking `e.target === ref` is what
+   * makes it survive a click on padding or on a child that stops bubbling.
+   */
+  const onPointerDown = (e: MouseEvent) => {
+    const d = ref
+    if (!d) return
+    const panel = d.querySelector('.nocx-dialog__panel')
+    if (!panel) return
+    const r = panel.getBoundingClientRect()
+    const inside =
+      e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom
+    // A click with no coordinates is a keyboard-activated one (Enter on a
+    // button reports 0,0); those are never a dismiss.
+    if (e.clientX === 0 && e.clientY === 0) return
+    if (!inside) props.onClose()
+  }
+
   return (
-    <dialog ref={ref} class="nocx-dialog" onCancel={onCancel}>
-      <div class="nocx-dialog__panel">
+    <dialog ref={ref} class="nocx-dialog" onCancel={onCancel} onMouseDown={onPointerDown}>
+      {/* kit-scope on the panel, so a modal's controls are kit controls without
+          every caller remembering to say so. This is the base every modal is
+          built on; the scope belongs with it. */}
+      <div class="nocx-dialog__panel kit-scope">
         <Show when={props.title}>
           <h2 class="nocx-dialog__title">{props.title}</h2>
         </Show>
@@ -108,18 +137,47 @@ export const Dialog: Component<DialogProps> = (props) => {
   )
 }
 
+/** The confirm body, so the imperative helper below owns no markup of its own. */
+const ConfirmDialog: Component<{
+  message: string
+  okLabel: string
+  cancelLabel: string
+  onResolve: (result: boolean) => void
+}> = (props) => (
+  <Dialog
+    open
+    onClose={() => props.onResolve(false)}
+    footer={
+      <>
+        <Button variant="secondary" onClick={() => props.onResolve(false)}>
+          {props.cancelLabel}
+        </Button>
+        <Button variant="primary" onClick={() => props.onResolve(true)}>
+          {props.okLabel}
+        </Button>
+      </>
+    }
+  >
+    <p class="nocx-dialog__message">{props.message}</p>
+  </Dialog>
+)
+
 /**
- * Imperative confirm dialog — mounts a native `<dialog>` on the body,
- * returns a promise that resolves to true (OK) or false (Cancel).
+ * Imperative confirm dialog — returns a promise that resolves to true (OK) or
+ * false (Cancel).
  *
- * This is the **terminal-owned code path**. Solid must not render into the
- * terminal's subtree (ADR-0012 §1), so this helper uses only vanilla DOM
- * APIs — no Solid components, no JSX. The dialog mounts directly on
- * `document.body`, not inside a portal root, because the native `<dialog>` is
- * in the browser top layer regardless of where its DOM node sits in the tree.
+ * Built on `Dialog`, like every other modal in the app. It used to assemble its
+ * own `<dialog>` out of `document.createElement` calls, and the result was a
+ * third look: the OK button picked up a kit class, the Cancel button was left
+ * with a bare `kit-scope` that matches no rule, and neither the panel nor the
+ * type came from the same place as the rest. One base, the way `Page` is the
+ * one base for surfaces.
  *
- * The dialog carries `--wails-draggable: no-drag` so platform drag regions
- * cannot interfere with it (ADR-0014 "Wails drag-region guard").
+ * The vanilla-DOM version carried a comment justifying itself with ADR-0012 §1,
+ * "Solid must not render into the terminal's subtree". That rule is about the
+ * terminal's DOM. This mounts its own root on `document.body`, which is not the
+ * terminal's subtree — the native `<dialog>` is in the browser top layer no
+ * matter where its node sits — so the constraint never applied here.
  *
  * @param message — The text to show (supports newlines, shown as pre-wrap).
  * @param okLabel — Label for the confirm button (default "OK").
@@ -132,74 +190,36 @@ export function showConfirm(
   cancelLabel = 'Cancel',
 ): Promise<boolean> {
   return new Promise<boolean>((resolve) => {
-    const dialog = document.createElement('dialog')
-    dialog.className = 'nocx-dialog'
-    dialog.style.setProperty('--wails-draggable', 'no-drag')
+    const host = document.createElement('div')
+    document.body.appendChild(host)
 
-    const panel = document.createElement('div')
-    panel.className = 'nocx-dialog__panel'
+    let dispose: (() => void) | null = null
+    let settled = false
 
-    const msg = document.createElement('p')
-    msg.className = 'nocx-dialog__message'
-    msg.textContent = message
-    panel.appendChild(msg)
-
-    const actions = document.createElement('div')
-    actions.className = 'nocx-dialog__actions'
-
-    const cancelBtn = document.createElement('button')
-    cancelBtn.textContent = cancelLabel
-    cancelBtn.className = 'kit-scope'
-
-    const okBtn = document.createElement('button')
-    okBtn.textContent = okLabel
-    okBtn.className = 'ui-btn-primary kit-scope'
-
-    actions.appendChild(cancelBtn)
-    actions.appendChild(okBtn)
-    panel.appendChild(actions)
-    dialog.appendChild(panel)
-    document.body.appendChild(dialog)
-
-    // Focus return
-    const prevFocus = document.activeElement
-
-    function cleanup(result: boolean) {
-      dialog.close()
-      if (document.body.contains(dialog)) {
-        document.body.removeChild(dialog)
-      }
-      // Restore focus. Use requestAnimationFrame so the browser's native
-      // focus-return on dialog close has settled first.
-      if (prevFocus instanceof HTMLElement) {
-        requestAnimationFrame(() => {
-          prevFocus.focus({ preventScroll: true })
-        })
-      }
+    const finish = (result: boolean) => {
+      // Escape fires the cancel path and the disposer can run again on unmount;
+      // the promise must resolve exactly once.
+      if (settled) return
+      settled = true
+      // Deferred so Dialog's own cleanup — popOverlay and focus restore — runs
+      // against a live root before it is torn down.
+      queueMicrotask(() => {
+        dispose?.()
+        host.remove()
+      })
       resolve(result)
     }
 
-    dialog.addEventListener('cancel', () => {
-      cleanup(false)
-    })
-
-    cancelBtn.addEventListener('click', () => {
-      cleanup(false)
-    })
-
-    okBtn.addEventListener('click', () => {
-      cleanup(true)
-    })
-
-    dialog.addEventListener('keydown', (e) => {
-      // Prevent native Escape from closing without our cleanup.
-      if (e.key === 'Escape') {
-        e.preventDefault()
-        cleanup(false)
-      }
-    })
-
-    dialog.showModal()
-    okBtn.focus()
+    dispose = render(
+      () => (
+        <ConfirmDialog
+          message={message}
+          okLabel={okLabel}
+          cancelLabel={cancelLabel}
+          onResolve={finish}
+        />
+      ),
+      host,
+    )
   })
 }

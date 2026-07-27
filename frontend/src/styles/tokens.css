@@ -25,13 +25,29 @@
   --space-6: 24px;
   --space-8: 32px;
   --space-12: 48px;
-  --font-size-sm: 12px;
-  --font-size-md: 14px;
-  --font-size-lg: 16px;
-  --font-size-xl: 20px;
+  /* The scale was set while the whole shell was monospace, where SF Mono's
+     larger x-height makes 12/14 read bigger than it measures. In a
+     proportional UI font the same numbers read small, so every step moves up
+     one notch. Terminal type is not on this scale — renderers/font.ts owns
+     that, deliberately, because it is content rather than chrome. */
+  --font-size-sm: 13px;
+  --font-size-md: 15px;
+  --font-size-lg: 18px;
+  --font-size-xl: 22px;
 
   /* ── Shell layout (§2.5) ──────────────────────────────────────────── */
   --sidebar-width: 240px;
   --activity-bar-width: 48px;
   --tab-height: 38px;
+
+  /* Space the tab bar must leave clear on its leading edge for window controls
+     the host draws over it. Zero everywhere by default — only macOS puts its
+     traffic lights inside the content area, and reserving the notch on Linux
+     or in a browser leaves a gap with nothing in it. `platform.ts` publishes
+     `data-platform`, and the rule below is the only thing that opts in. */
+  --titlebar-inset-start: 0px;
+}
+
+:root[data-platform='darwin'] {
+  --titlebar-inset-start: 78px;
 }

@@ -15,6 +15,16 @@ export interface CheckboxProps {
   label?: string
   ariaLabel?: string
   disabled?: boolean
+  /**
+   * Which affordance to draw. Both are the same `input[type=checkbox]` — this
+   * only changes the shape, never the semantics or the events.
+   *
+   * - `checkbox` (default): selection and filtering, where the user is marking
+   *   something and the effect is scoped to the view.
+   * - `switch`: a setting that takes effect the moment it is flipped. A tick
+   *   box reads as "chosen, pending save"; these have nothing to save.
+   */
+  variant?: 'checkbox' | 'switch'
 }
 
 export function Checkbox(props: CheckboxProps) {
@@ -23,10 +33,14 @@ export function Checkbox(props: CheckboxProps) {
     props.onChange(target.checked)
   }
 
+  const labelClass = () =>
+    [props.variant === 'switch' ? 'ui-switch' : '', props.class ?? ''].filter(Boolean).join(' ')
+
   return (
-    <label class={props.class ?? ''}>
+    <label class={labelClass()}>
       <input
         type="checkbox"
+        role={props.variant === 'switch' ? 'switch' : undefined}
         checked={props.checked}
         aria-label={props.ariaLabel ?? undefined}
         disabled={props.disabled === true}

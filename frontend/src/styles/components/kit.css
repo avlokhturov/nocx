@@ -3,7 +3,7 @@
 
 /* ── Generic focus-visible ring ────────────────────────────────────────────── */
 
-\.kit-scope :focus-visible,
+.kit-scope :focus-visible,
 button:focus-visible,
 input:focus-visible,
 select:focus-visible {
@@ -29,6 +29,27 @@ select:focus-visible {
 
 .ui-btn-primary:hover {
   background: var(--color-accent-hover);
+}
+
+/* The neutral action — the kit had primary, danger and close, and nothing for
+   an ordinary button, so those rendered as native platform chrome. */
+.ui-btn-secondary {
+  height: var(--control-height-sm);
+  padding: 0 10px;
+  background: var(--color-surface-raised);
+  color: var(--color-text-muted);
+  border: 1px solid var(--color-border);
+  border-radius: var(--control-radius-sm);
+  font: inherit;
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.ui-btn-secondary:hover {
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+  border-color: var(--color-accent);
 }
 
 .ui-btn-danger {
@@ -64,8 +85,8 @@ select:focus-visible {
 
 /* ── Select: native element with appearance: none ──────────────────────────── */
 
-select\.kit-scope,
-\.kit-scope select {
+select.kit-scope,
+.kit-scope select {
   appearance: none;
   height: var(--control-height-md);
   padding: 0 28px 0 8px;
@@ -76,61 +97,269 @@ select\.kit-scope,
   color: var(--color-text);
   border: 1px solid var(--color-border);
   border-radius: var(--control-radius-md);
-  font-family: var(--font-family-mono);
+  font-family: var(--font-family-ui);
   font-size: var(--font-size-md);
   cursor: pointer;
   min-width: 0;
 }
 
-select\.kit-scope:focus,
-\.kit-scope select:focus {
+select.kit-scope:focus,
+.kit-scope select:focus {
   border-color: var(--color-accent);
   outline: none;
 }
 
-select\.kit-scope option,
-\.kit-scope select option {
+select.kit-scope option,
+.kit-scope select option {
   background: var(--color-surface-raised);
   color: var(--color-text);
 }
 
+/* ── TextField wrapper ─────────────────────────────────────────────────────
+   TextField renders label, description, input and error into a wrapper that
+   had no class and therefore no layout: an inline <label> ended up on the same
+   line as the input with nothing between them, which is what the export
+   passphrase form looked like. The wrapper stacks them and owns the gap. */
+
+.ui-textfield {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.ui-textfield > label {
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  color: var(--color-text-muted);
+}
+
 /* ── TextField / SearchField inputs ────────────────────────────────────────── */
 
-input\.kit-scope,
-\.kit-scope input[type='text'],
-\.kit-scope input[type='number'],
-\.kit-scope input[type='password'],
-\.kit-scope input[type='search'] {
+input.kit-scope,
+.kit-scope input[type='text'],
+.kit-scope input[type='number'],
+.kit-scope input[type='password'],
+.kit-scope input[type='search'] {
   height: var(--control-height-md);
   padding: 0 8px;
   background: var(--color-surface-raised);
   color: var(--color-text);
   border: 1px solid var(--color-border);
   border-radius: var(--control-radius-md);
-  font-family: var(--font-family-mono);
+  font-family: var(--font-family-ui);
   font-size: var(--font-size-md);
   outline: none;
   min-width: 0;
 }
 
-input\.kit-scope:focus,
-\.kit-scope input:focus {
+input.kit-scope:focus,
+.kit-scope input:focus {
   border-color: var(--color-accent);
 }
 
-input\.kit-scope::placeholder,
-\.kit-scope input::placeholder {
+input.kit-scope::placeholder,
+.kit-scope input::placeholder {
   color: var(--color-text-dim);
 }
 
+/* ── File input ────────────────────────────────────────────────────────────
+   `input[type=file]` draws its own button, labelled by the platform in the
+   platform's language — which is why an English form showed a Russian
+   "Выбор файла". The text is the browser's and cannot be changed from CSS, but
+   the chrome can, so the control at least stops looking pasted in. */
+
+.kit-scope input[type='file'] {
+  font: inherit;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-dim);
+}
+
+.kit-scope input[type='file']::file-selector-button {
+  height: var(--control-height-sm);
+  margin-right: var(--space-2);
+  padding: 0 10px;
+  background: var(--color-surface-raised);
+  color: var(--color-text-muted);
+  border: 1px solid var(--color-border);
+  border-radius: var(--control-radius-sm);
+  font: inherit;
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+}
+
+.kit-scope input[type='file']::file-selector-button:hover {
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+  border-color: var(--color-accent);
+}
+
+/* ── Number input ──────────────────────────────────────────────────────────
+   WebKit's stepper is drawn by the platform and comes out as a white block on a
+   dark field. The value is typed, not stepped, in every place we use it. */
+
+.kit-scope input[type='number'] {
+  appearance: textfield;
+}
+
+.kit-scope input[type='number']::-webkit-inner-spin-button,
+.kit-scope input[type='number']::-webkit-outer-spin-button {
+  appearance: none;
+  margin: 0;
+}
+
 /* Disabled inputs. */
-input\.kit-scope:disabled,
-\.kit-scope input:disabled,
-select\.kit-scope:disabled,
-\.kit-scope select:disabled,
-button\.kit-scope:disabled {
+input.kit-scope:disabled,
+.kit-scope input:disabled,
+select.kit-scope:disabled,
+.kit-scope select:disabled,
+button.kit-scope:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* ── SearchField ───────────────────────────────────────────────────────────
+   The icon is positioned over the input rather than laid out beside it, so the
+   input keeps its own full width and border and nothing has to coordinate two
+   boxes. `pointer-events: none` keeps the glyph from swallowing the click that
+   should focus the field. */
+
+.ui-search-field {
+  position: relative;
+  display: block;
+}
+
+.ui-search-field__icon {
+  position: absolute;
+  left: var(--space-2);
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  width: 15px;
+  height: 15px;
+  color: var(--color-text-dim);
+  pointer-events: none;
+}
+
+.ui-search-field__icon svg {
+  width: 100%;
+  height: 100%;
+}
+
+.kit-scope .ui-search-field input[type='search'] {
+  width: 100%;
+  padding-left: 28px;
+}
+
+/* WebKit draws its own clear button and a magnifier decoration on
+   input[type=search]; both fight the one we place. */
+.ui-search-field input[type='search']::-webkit-search-decoration,
+.ui-search-field input[type='search']::-webkit-search-results-button {
+  appearance: none;
+}
+
+/* ── Checkbox and switch ───────────────────────────────────────────────────
+   The kit shipped a Checkbox component with no CSS at all, so every boolean
+   rendered as native platform chrome — a 12px system box with the label jammed
+   against it. Both shapes are built from the same `input[type=checkbox]`:
+   `appearance: none` takes the platform look away and the box below puts ours
+   back. The switch is the settings affordance (a change that applies
+   immediately); the checkbox stays the filter/selection affordance. */
+
+/* No font-size here on purpose: the label inherits its surroundings, so a
+   checkbox in the settings rail matches the nav beside it and one in a form
+   matches the form. Pinning it to --font-size-md made the rail's "Modified"
+   filter two steps larger than every other line in the same column. */
+.kit-scope label:has(input[type='checkbox']),
+label.ui-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  cursor: pointer;
+  color: var(--color-text);
+}
+
+.kit-scope input[type='checkbox'] {
+  appearance: none;
+  flex: 0 0 auto;
+  margin: 0;
+  width: 16px;
+  height: 16px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--control-radius-sm);
+  background: var(--color-surface-raised);
+  cursor: pointer;
+  position: relative;
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease;
+}
+
+.kit-scope input[type='checkbox']:hover {
+  border-color: var(--color-accent);
+}
+
+.kit-scope input[type='checkbox']:checked {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+/* The tick is drawn rather than typed: a glyph would inherit the surrounding
+   font and shift with it. */
+.kit-scope input[type='checkbox']:checked::after {
+  content: '';
+  position: absolute;
+  left: 4px;
+  top: 1px;
+  width: 5px;
+  height: 9px;
+  border: solid var(--color-canvas);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+.kit-scope input[type='checkbox']:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ── Switch variant ───────────────────────────────────────────────────────── */
+
+.kit-scope .ui-switch input[type='checkbox'],
+.kit-scope input[type='checkbox'].ui-switch__input {
+  width: 34px;
+  height: 20px;
+  border-radius: var(--control-radius-full);
+  background: var(--color-surface-sunken);
+}
+
+.kit-scope .ui-switch input[type='checkbox']::after,
+.kit-scope input[type='checkbox'].ui-switch__input::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border: none;
+  border-radius: 50%;
+  background: var(--color-text-dim);
+  transform: none;
+  transition:
+    transform 0.14s ease,
+    background 0.14s ease;
+}
+
+.kit-scope .ui-switch input[type='checkbox']:checked,
+.kit-scope input[type='checkbox'].ui-switch__input:checked {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+.kit-scope .ui-switch input[type='checkbox']:checked::after,
+.kit-scope input[type='checkbox'].ui-switch__input:checked::after {
+  transform: translateX(14px);
+  background: var(--color-canvas);
 }
 
 /* ── Field wrapper (form rows) ─────────────────────────────────────────────── */
@@ -160,20 +389,33 @@ button\.kit-scope:disabled {
   margin: 2px 0 0;
 }
 
+/* A horizontal field reads label-left, control-right — the control hugs the
+   right edge and the label takes the space that is left.
+   It was the other way round: a 180px label column and a control column with
+   `flex: 1 1 auto`. On a 850px-wide surface that squeezed every description
+   into 180px — the OSC 52 one wrapped to ten lines — while a 120px select sat
+   at the start of a 660px column, leaving ~540px of dead space in every row.
+   The measure cap keeps descriptions readable instead of letting them run the
+   full width of a maximised window. */
 .ui-field-horizontal {
   flex-direction: row;
-  align-items: flex-start;
-  gap: 12px;
+  align-items: center;
+  gap: var(--space-6);
 }
 
 .ui-field-horizontal .ui-field-label-col {
-  flex: 0 0 180px;
-  padding-top: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 64ch;
 }
 
 .ui-field-horizontal .ui-field-control-col {
-  flex: 1 1 auto;
-  min-width: 0;
+  flex: 0 0 auto;
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
 }
 
 /* ── Section ───────────────────────────────────────────────────────────────── */
@@ -262,9 +504,12 @@ button\.kit-scope:disabled {
 
 /* ── Toolbar ───────────────────────────────────────────────────────────────── */
 
+/* A toolbar is a row of peers; 6px read as one segmented control rather than
+   three separate actions. */
 .ui-toolbar {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px 0;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  padding: var(--space-2) 0 var(--space-4);
 }

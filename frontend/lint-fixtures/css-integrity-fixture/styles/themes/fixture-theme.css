@@ -1,0 +1,12 @@
+/* A theme file that is not the designated default, carrying a bare `:root`
+   block. It would apply under every theme, so the `theme-scope` rule must
+   report it. */
+
+:root {
+  --fixture-theme-token: 1px;
+}
+
+/* Correctly scoped — must NOT be reported. */
+:root[data-theme='fixture-theme'] {
+  --fixture-theme-token: 2px;
+}

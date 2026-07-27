@@ -1,12 +1,33 @@
 /* ── Settings surface — replaces .st-* rules from style.css ─────────────
    All colours are tokens from tokyo-night.css via tokens.css. */
 
+/* ── The surface root — a link in the height chain, not just a namespace ──
+   settings.tsx wraps <Page> in this element to scope the selectors below and
+   to catch keydown. That makes it a node between .surface-host and .ui-page,
+   and every node in that chain has to carry the flex/min-height contract from
+   base.css §6.1: a plain block here gives .ui-page a content-sized parent, so
+   .ui-page__scroll never gets a bounded block size and Settings simply does
+   not scroll (nocx-u7wq.5). */
+
+.ui-settings {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
 /* ── Rail overrides ─────────────────────────────────────────────────── */
 
+/* 28vw put the rail at 358px on a 1280px window to hold three short words.
+   It is a navigation list, so it is sized to its content. */
 .ui-settings .ui-page__rail {
-  flex: 0 0 clamp(240px, 28vw, 360px);
+  flex: 0 0 clamp(200px, 18vw, 260px);
   background: var(--color-chrome-rail);
-  padding: 20px 16px;
+  border-right: 1px solid var(--color-divider);
+  padding: var(--space-4) var(--space-3);
+  /* One type size for the whole column — search, filter and nav are peers.
+     These are the surface's primary navigation, not fine print. */
+  font-size: var(--font-size-md);
 }
 
 /* ── Search field in rail ──────────────────────────────────────────── */
@@ -17,11 +38,21 @@
 
 /* ── Modified-only filter in rail ──────────────────────────────────── */
 
+/* The filter row is the same shape as a nav row: label left, count at the far
+   end. It is the same Badge, so it gets the same placement. */
 .ui-settings-filter {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-2);
   margin-bottom: 14px;
+}
+
+.ui-settings-filter .ui-badge-warning {
+  margin-left: auto;
+}
+
+.ui-settings-filter label {
+  flex: 1 1 auto;
 }
 
 .ui-settings-filter-count {
@@ -42,14 +73,16 @@
 }
 
 .ui-settings-section-nav-link {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
   width: 100%;
-  padding: 6px 10px;
+  padding: var(--space-2) 10px;
   border: none;
   border-radius: 4px;
   background: transparent;
   color: var(--color-text-muted);
-  font-size: 13px;
+  font: inherit;
   text-align: left;
   cursor: pointer;
 }
@@ -59,9 +92,29 @@
   color: var(--color-text);
 }
 
+/* Filled, not tinted: the active page has to be findable at a glance across a
+   list, and an 88%-transparent accent wash is not. */
 .ui-settings-section-nav-active .ui-settings-section-nav-link {
-  background: color-mix(in srgb, var(--color-accent), transparent 88%);
-  color: var(--color-accent);
+  background: var(--color-accent);
+  color: var(--color-canvas);
+  font-weight: 500;
+}
+
+.ui-settings-section-nav-active .ui-settings-section-nav-link:hover {
+  background: var(--color-accent-hover);
+  color: var(--color-canvas);
+}
+
+/* The modified-count badge sits at the far end of the row, and on the active
+   row it cannot keep the warning palette — orange on the accent fill was
+   unreadable. On the filled row it borrows the row's own colours instead. */
+.ui-settings-section-nav-link .ui-badge-warning {
+  margin-left: auto;
+}
+
+.ui-settings-section-nav-active .ui-settings-section-nav-link .ui-badge-warning {
+  background: color-mix(in srgb, var(--color-canvas), transparent 75%);
+  color: var(--color-canvas);
 }
 
 /* ── Content area ──────────────────────────────────────────────────── */
@@ -72,83 +125,105 @@
 
 /* ── Section heading within PageSection ────────────────────────────── */
 
+/* A section heading names a group; it is not a log level. Uppercase, letter-
+   spaced and accent-blue read as terminal output, which is exactly the register
+   this surface should not be in. */
 .ui-settings section > h2 {
-  font-size: 13px;
+  font-size: var(--font-size-lg);
   font-weight: 600;
-  color: var(--color-accent);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--color-border);
-  margin: 0 0 16px 0;
-  scroll-margin-top: 16px;
+  color: var(--color-text);
+  letter-spacing: -0.01em;
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--color-divider);
+  margin: 0 0 var(--space-2) 0;
+  scroll-margin-top: var(--space-4);
 }
 
 .ui-settings section {
-  margin-bottom: 28px;
+  margin-bottom: var(--space-8);
 }
 
-/* ── Setting row (two-column layout) ──────────────────────────────── */
+/* ── Setting row ──────────────────────────────────────────────────────
+   The row itself is a container for one kit Field; the two-column geometry
+   belongs to `.ui-field-horizontal` in kit.css and is not repeated here.
+   Three rules used to live at this spot — `.ui-settings-label-col`,
+   `.ui-settings-control-col` and `.ui-settings-description` — describing a
+   layout this surface stopped rendering when it moved onto the kit. They
+   matched nothing in any source file and were deleted rather than updated:
+   the kit owns the shape now. */
 
 .ui-settings-row {
-  display: flex;
-  align-items: flex-start;
-  padding: 8px 0;
-  border-bottom: 1px solid color-mix(in srgb, var(--color-border), transparent 60%);
+  padding: var(--space-3) 0;
+  border-bottom: 1px solid var(--color-divider);
 }
 
 .ui-settings-row:last-child {
   border-bottom: none;
 }
 
-.ui-settings-label-col {
-  flex: 0 1 200px;
-  padding-right: 16px;
-  min-width: 0;
-}
-
-.ui-settings-label-col label {
+.ui-settings-row .ui-field-label-col label {
   display: block;
-  font-size: 13px;
+  font-size: var(--font-size-md);
   font-weight: 500;
   color: var(--color-text);
 }
 
-.ui-settings-description {
-  display: block;
-  font-size: 11px;
-  color: var(--color-text-dim);
-  margin-top: 2px;
+/* Control on top, "Reset to default" beneath it, both flush right.
+   The link is out of flow on purpose: in flow it made the control column two
+   lines tall and the control itself jumped upward the moment a setting was
+   changed — the toggle moved as a side effect of using it. */
+.ui-settings-row .ui-field-control-col {
+  position: relative;
+  flex-direction: column;
+  align-items: flex-end;
 }
 
-.ui-settings-data-class {
-  display: block;
-  font-size: 10px;
+.ui-settings-row .ui-settings-provenance {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: var(--space-1);
+  white-space: nowrap;
+}
+
+.ui-settings-row .ui-field-desc {
+  font-size: var(--font-size-sm);
   color: var(--color-text-dim);
-  margin-top: 4px;
+  line-height: 1.45;
+  margin-top: var(--space-1);
+}
+
+/* Storage class and search breadcrumb — inline tags on the label, quiet enough
+   to skip when scanning and legible when looked for. */
+
+.ui-settings-data-class {
+  display: inline-block;
+  margin-left: var(--space-2);
+  padding: 1px 6px;
+  border-radius: var(--control-radius-sm);
+  background: var(--color-surface-sunken);
+  color: var(--color-text-dim);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  vertical-align: 1px;
 }
 
 .ui-settings-breadcrumb {
-  display: block;
+  display: inline-block;
+  margin-left: var(--space-2);
   font-size: 10px;
   color: var(--color-accent);
-  margin-bottom: 2px;
   text-transform: uppercase;
   letter-spacing: 0.3px;
-}
-
-.ui-settings-control-col {
-  flex: 1;
-  min-width: 0;
 }
 
 /* ── Bounds indicator for number fields ────────────────────────────── */
 
 .ui-settings-bounds {
-  display: block;
-  font-size: 11px;
+  font-size: var(--font-size-sm);
   color: var(--color-text-dim);
-  margin-bottom: 4px;
+  white-space: nowrap;
 }
 
 /* ── Secret field ─────────────────────────────────────────────────── */
@@ -224,10 +299,42 @@
 
 /* ── Provenance badge within control column ─────────────────────────── */
 
+/* Reset sits *under* the control, not beside it. Beside it, a second button
+   competed with the control for the eye at the exact spot where the row's one
+   real affordance lives — and on rows where it was absent the control jumped
+   sideways. Underneath, the control's position is stable across every row and
+   the undo is where you look only once you want it. */
 .ui-settings-provenance {
+  display: inline-flex;
+  align-items: center;
+  font-size: var(--font-size-sm);
+}
+
+.ui-settings-reset-btn {
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--color-accent);
+  font: inherit;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.ui-settings-reset-btn:hover {
+  text-decoration: underline;
+}
+
+/* The changed-row marker the badge used to be. Scoped to the row's own label so
+   it cannot leak into the export cards nested further down. */
+.ui-settings-row--modified > .ui-field > .ui-field-label-col > label::before {
+  content: '';
   display: inline-block;
-  font-size: 11px;
-  margin-top: 4px;
+  width: 6px;
+  height: 6px;
+  margin-right: var(--space-2);
+  border-radius: 50%;
+  background: var(--color-warning);
+  vertical-align: 2px;
 }
 
 .st-vis-hidden {

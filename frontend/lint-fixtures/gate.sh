@@ -1,7 +1,8 @@
 #!/bin/sh
 # Negative fixture gate — assert ALL required eslint-plugin-solid rules fire,
 # that the nocx/no-raw-controls and nocx/no-color-literals rules fire,
-# and that the CSS colour grammar checker catches violation patterns.
+# that the CSS colour grammar checker catches violation patterns,
+# and that the CSS integrity checker catches all four of its violation classes.
 # Run from the frontend/ directory (e.g. via `npm run lint:fixture-check`).
 # Exits 0 if all rules fire, 1 otherwise.
 set -eu
@@ -35,6 +36,34 @@ fi
 # standalone black outside color-mix
 if ! echo "$css_check" | grep -q '"black"'; then
   echo "CSS COLOUR GATE FAILED — standalone black was not detected"
+  exit 1
+fi
+
+# ── CSS integrity fixture check ──────────────────────────────────────────────
+# Every rule in check-css-integrity.mjs must fire against the fixture tree.
+# These four defects are all valid CSS that the browser accepts silently, so a
+# checker that quietly stopped firing would look exactly like a clean codebase.
+integrity_check=$(node "${fixture_dir}/check-css-integrity.mjs" \
+  --entry="${fixture_dir}/css-integrity-fixture/entry.css" \
+  --styles="${fixture_dir}/css-integrity-fixture/styles" 2>/dev/null || true)
+
+for rule in unreachable escaped-dot undefined-var theme-scope; do
+  if ! echo "$integrity_check" | grep -q "\"rule\":\"${rule}\""; then
+    echo "CSS INTEGRITY GATE FAILED — rule '${rule}' did not fire on the fixture"
+    exit 1
+  fi
+done
+
+# A var() with a fallback is legitimate; reporting it would make the rule noise.
+if echo "$integrity_check" | grep -q 'fixture-also-never-declared'; then
+  echo "CSS INTEGRITY GATE FAILED — var() with a fallback was reported as undefined"
+  exit 1
+fi
+
+# A correctly scoped theme rule must not be reported alongside the bare :root.
+integrity_theme_hits=$(echo "$integrity_check" | grep -c '"rule":"theme-scope"' || true)
+if [ "$integrity_theme_hits" -ne 1 ]; then
+  echo "CSS INTEGRITY GATE FAILED — expected exactly 1 theme-scope hit, got ${integrity_theme_hits}"
   exit 1
 fi
 
@@ -93,5 +122,5 @@ if [ -z "$ts_reactivity" ]; then
   exit 1
 fi
 
-echo "OK — all 10 lint rules fired (solid/reactivity confirmed from .ts, CSS colour grammar verified, color-mix laundering blocked)"
+echo "OK — all 10 lint rules fired (solid/reactivity confirmed from .ts, CSS colour grammar verified, color-mix laundering blocked, CSS integrity rules verified)"
 exit 0

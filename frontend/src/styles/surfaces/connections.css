@@ -1,6 +1,48 @@
 /* Connections surface — connection manager, credential forms.
    Owned by nocx-vxqj.8 (kit baselines to zero). */
 
+/* ── The view owns its own height and its own scrolling ─────────────────
+   Connections is two independently scrolling columns under a toolbar that
+   stays put, so it cannot live inside the page scroller: `.cm-body` was a
+   flex child of a *block* parent, its `flex: 1` did nothing, and it took its
+   height from content — measured 401px inside a 762px scroller. Three visible
+   consequences, all one cause: the page scrolled instead of the list, the
+   toolbar scrolled away with it, and the divider between the columns stopped
+   401px down.
+
+   `:has()` keys this off the view's own root, so the page primitives stay
+   generic and no other surface is affected. */
+
+/* Descendant, not child: settings wraps the page body in a `.kit-scope` div, so
+   that wrapper is a link in the chain and has to carry the contract too. */
+.ui-settings .ui-page__scroll:has(.cm-root) {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0;
+}
+
+.ui-settings .ui-page__scroll:has(.cm-root) > .kit-scope {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.cm-root {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* Actions stay reachable however far down either column is scrolled. */
+.cm-root > .ui-toolbar {
+  flex: 0 0 auto;
+  padding: var(--space-3) var(--space-6);
+  border-bottom: 1px solid var(--color-divider);
+}
+
 .cm-tip {
   color: var(--color-text-dim);
   font-size: 12px;

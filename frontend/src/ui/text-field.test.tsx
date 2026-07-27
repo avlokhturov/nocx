@@ -64,10 +64,21 @@ describe('TextField', () => {
     expect(input).toBeTruthy()
   })
 
-  it('sets class on the wrapper', () => {
+  // The wrapper always carries `ui-textfield` — it is what stacks the label
+  // above the input and owns the gap between them. Without it the label sat
+  // inline against the input wherever a caller passed no class of its own.
+  // A caller's class is added alongside, never instead.
+  it('carries the kit base class on the wrapper', () => {
+    subject({ label: 'Port' })
+    const wrapper = screen.getByText('Port').parentElement
+    expect(wrapper?.getAttribute('class')).toBe('ui-textfield')
+  })
+
+  it('appends the caller class to the base class', () => {
     subject({ class: 'cm-field', label: 'Port' })
     const wrapper = screen.getByText('Port').parentElement
-    expect(wrapper?.getAttribute('class')).toBe('cm-field')
+    expect(wrapper?.classList.contains('ui-textfield')).toBe(true)
+    expect(wrapper?.classList.contains('cm-field')).toBe(true)
   })
 
   it('sets disabled attribute', () => {

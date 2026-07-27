@@ -18,58 +18,22 @@
   gap: 8px;
 }
 
-/* ── Mode card (disclosure) ─────────────────────────────────────────── */
-
-.st-export-card {
-  border: 1px solid var(--color-surface-raised);
-  border-radius: 6px;
-  overflow: hidden;
-}
-
-.st-export-card-header {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 10px 14px;
-  cursor: default;
-}
-
-.st-export-card-label {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--color-text);
-  white-space: nowrap;
-}
+/* ── Mode section ───────────────────────────────────────────────────────
+   Each mode is a section of the Export page now, not a collapsible card in a
+   list. The border and radius drew a frame around content that already sits
+   under a PageSection heading rule — a box inside a box. */
 
 .st-export-card-summary {
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   color: var(--color-text-dim);
-  flex: 1;
+  margin: 0 0 var(--space-3);
 }
 
-.st-export-card-toggle {
-  flex: none;
-  background: none;
-  border: 1px solid var(--color-border);
-  border-radius: 4px;
-  color: var(--color-accent);
-  font-size: 11px;
-  padding: 2px 8px;
-  cursor: pointer;
-}
-
-.st-export-card-toggle:hover {
-  background: var(--color-surface-raised);
-}
-
-/* ── Card body (expanded) ────────────────────────────────────────────── */
-
+/* This was `display: none`, revealed by an `.st-export-card-expanded` class
+   that the markup stopped setting when the disclosure went away. The manifest
+   rendered into the DOM on every card and none of it was ever shown — which is
+   exactly what "what does this mode carry?" was supposed to answer. */
 .st-export-card-body {
-  display: none;
-  padding: 0 14px 14px;
-}
-
-.st-export-card-expanded .st-export-card-body {
   display: block;
 }
 

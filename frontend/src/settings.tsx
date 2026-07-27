@@ -13,7 +13,7 @@
  */
 
 import type { JSX } from 'solid-js'
-import { For, Show, createSignal, createMemo, onMount, onCleanup } from 'solid-js'
+import { For, Show, createSignal, createMemo, createEffect, onMount, onCleanup } from 'solid-js'
 import { createStore } from 'solid-js/store'
 import { ConnectionsView } from './connections'
 import type { ProfileClient, SSHProfile } from './profiles'
@@ -22,6 +22,7 @@ import {
   AcceptedSnapshot,
   applyAcceptedSnapshot,
   canResetSetting,
+  isSettingModified,
   monotonicRevisionPolicy,
   reconnectRevisionPolicy,
   recordSaveOutcome,
@@ -228,13 +229,15 @@ export function SettingsComponent(props: SettingsComponentProps) {
     const sf = sectionFilter()
 
     // Section filter (nocx-ucxl): clicking a nav item always changes content.
-    if (sf !== null) {
+    // A search overrides it — searching within one section would silently hide
+    // the setting the user is looking for and give no hint that it did.
+    if (sf !== null && q === '') {
       filtered = filtered.filter((d) => d.section === sf)
     }
 
     // Modified-only filter.
     if (modifiedOnly()) {
-      filtered = filtered.filter((d) => d.control !== 'secret' && overridden().has(d.key))
+      filtered = filtered.filter((d) => d.control !== 'secret' && isModified(d))
     }
 
     // Search filter.
@@ -275,19 +278,52 @@ export function SettingsComponent(props: SettingsComponentProps) {
       id: s,
       title: s,
     }))
+    // Export used to render unconditionally beneath the settings list, which
+    // meant a search for something that matches nothing still showed a page of
+    // export cards under "No settings match your search". It is a page.
+    const exportPage: SettingsPage = {
+      kind: 'component',
+      id: 'export',
+      title: 'Export / Backup / Import',
+      render: () => <ExportSection profileClient={props.profileClient} />,
+    }
     const connectionPage: SettingsPage = {
       kind: 'component',
       id: 'connections',
       title: 'Connections',
       render: () => <ConnectionsView client={props.profileClient} onConnect={props.onConnect} />,
     }
-    return [...generated, connectionPage]
+    return [...generated, exportPage, connectionPage]
+  })
+
+  /** The active component page, or null when a generated section is showing. */
+  const activePage = createMemo(() => {
+    const id = activeComponentPage()
+    if (id === null) return null
+    const page = settingsPages().find((p) => p.id === id)
+    return page !== undefined && page.kind === 'component' ? page : null
+  })
+
+  /**
+   * Open on the first page rather than on everything at once.
+   *
+   * With no selection the body listed every section end to end and the rail
+   * showed nothing as current, so the rail read as decoration. Runs once, when
+   * the sections first arrive, and only while the user has not already chosen —
+   * a later re-render must not yank them back to the top of the list.
+   */
+  createEffect(() => {
+    const first = sections()[0]
+    if (first === undefined) return
+    if (sectionFilter() !== null || activeComponentPage() !== null) return
+    if (searchQuery() !== '') return
+    setSectionFilter(first)
   })
 
   const modifiedCount = createMemo(() => {
     let count = 0
     for (const d of declarations()) {
-      if (d.control !== 'secret' && overridden().has(d.key)) count++
+      if (d.control !== 'secret' && isModified(d)) count++
     }
     return count
   })
@@ -295,7 +331,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
   const modifiedBySection = createMemo(() => {
     const counts = new Map<string, number>()
     for (const d of declarations()) {
-      if (d.control !== 'secret' && overridden().has(d.key)) {
+      if (d.control !== 'secret' && isModified(d)) {
         counts.set(d.section, (counts.get(d.section) ?? 0) + 1)
       }
     }
@@ -364,6 +400,12 @@ export function SettingsComponent(props: SettingsComponentProps) {
 
   function handleSearchInput(value: string): void {
     setSearchQuery(value)
+    // A component page owns the whole body, so typing into the search box while
+    // Connections or Export was open changed the results nobody could see and
+    // the box looked broken. Search is over the settings, so searching leaves
+    // the page — and clearing the box returns to the section that was selected,
+    // which sectionFilter has been holding all along.
+    if (value !== '') setActiveComponentPage(null)
   }
 
   function handleNavClick(page: SettingsPage): void {
@@ -373,7 +415,10 @@ export function SettingsComponent(props: SettingsComponentProps) {
       setSearchQuery('')
     } else {
       setActiveComponentPage(null)
-      setSectionFilter((prev) => (prev === page.title ? null : page.title))
+      // Selects, never toggles. Clicking the current page used to deselect it
+      // and drop the user back into the everything-at-once list, which is not a
+      // state the rail can show and not one anybody asked for.
+      setSectionFilter(page.title)
       setSearchQuery('')
     }
   }
@@ -457,6 +502,19 @@ export function SettingsComponent(props: SettingsComponentProps) {
     return values[key]
   }
 
+  /**
+   * Has the user actually changed this setting away from its default?
+   *
+   * The single answer behind the row marker, the rail counts, the Modified-only
+   * filter and whether Reset is offered — they were four reads of the raw
+   * override set, which is why picking a value, changing your mind and picking
+   * the default again left the row flagged as modified with a Reset that would
+   * change nothing.
+   */
+  function isModified(decl: Declaration): boolean {
+    return isSettingModified(overridden(), decl.key, effectiveValue(decl.key), decl.default)
+  }
+
   function displayValue(value: unknown, decl: Declaration): string {
     const def = decl.default
 
@@ -519,23 +577,30 @@ export function SettingsComponent(props: SettingsComponentProps) {
 
   // ── Sub-components ─────────────────────────────────────────────────
 
+  /**
+   * The reset affordance for one setting.
+   *
+   * There used to be a "Customized"/"Default" badge beside the control as well.
+   * It is gone: "Default" was printed on every untouched row, which is the
+   * overwhelmingly common case, and "Customized" said nothing that the Reset
+   * button beside it did not already say. What a changed row now carries is a
+   * dot on its label (`.ui-settings-row--modified`) — scannable down the
+   * column, and out of the control's way.
+   */
   function ProvenanceBadge(props: { decl: Declaration }) {
     // eslint-disable-next-line solid/reactivity
     const decl = props.decl
-    const customized = () => overridden().has(decl.key)
-    const decision = () => canResetSetting(overridden(), decl.key)
+    const decision = () =>
+      isModified(decl)
+        ? canResetSetting(overridden(), decl.key)
+        : ({ canReset: false, reason: 'notOverridden' } as const)
 
     return (
-      <Show when={decl.default !== undefined}>
+      <Show when={decl.default !== undefined && decision().canReset}>
         <span class="ui-settings-provenance">
-          <Badge variant={customized() ? 'warning' : 'default'}>
-            {customized() ? 'Customized' : 'Default'}
-          </Badge>
-          <Show when={decision().canReset}>
-            <Button class="ui-settings-reset-btn" onClick={() => void resetSetting(decl.key)}>
-              Reset
-            </Button>
-          </Show>
+          <Button class="ui-settings-reset-btn" onClick={() => void resetSetting(decl.key)}>
+            Reset to default
+          </Button>
         </span>
       </Show>
     )
@@ -553,21 +618,27 @@ export function SettingsComponent(props: SettingsComponentProps) {
         class="ui-settings-row"
         id={keyToDomId(decl.key)}
         data-key={decl.key}
-        classList={{ 'st-vis-hidden': !props.visible }}
+        classList={{
+          'st-vis-hidden': !props.visible,
+          'ui-settings-row--modified': isModified(decl),
+        }}
       >
         <Field
           for={keyToDomId(decl.key)}
           label={decl.label}
           description={decl.description || undefined}
           orientation="horizontal"
+          labelAdornment={
+            <>
+              <Show when={showBreadcrumb()}>
+                <span class="ui-settings-breadcrumb">{decl.section}</span>
+              </Show>
+              <span class="ui-settings-data-class" title={'Storage class: ' + decl.dataClass}>
+                {renderDataClassIndicator(decl.dataClass)}
+              </span>
+            </>
+          }
         >
-          <Show when={showBreadcrumb()}>
-            <span class="ui-settings-breadcrumb">{decl.section}</span>
-          </Show>
-          <span class="ui-settings-data-class" title={'Storage class: ' + decl.dataClass}>
-            {renderDataClassIndicator(decl.dataClass)}
-          </span>
-
           <Show when={decl.control === 'number'}>
             <span class="ui-settings-bounds">
               <Show when={decl.min !== undefined && decl.max !== undefined}>
@@ -583,7 +654,12 @@ export function SettingsComponent(props: SettingsComponentProps) {
           </Show>
 
           <Show when={decl.control === 'toggle'}>
-            <Checkbox checked={!!eff()} onChange={(c) => void saveSetting(decl.key, c)} />
+            <Checkbox
+              variant="switch"
+              checked={!!eff()}
+              ariaLabel={decl.label}
+              onChange={(c) => void saveSetting(decl.key, c)}
+            />
           </Show>
 
           <Show when={decl.control === 'text'}>
@@ -620,6 +696,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
                 {secretStates[decl.key] ? 'Configured' : 'Not configured'}
               </span>
               <Button
+                variant="secondary"
                 onClick={() => {
                   const value = prompt('Enter new value for "' + decl.label + '":')
                   if (value === null) return
@@ -654,6 +731,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
     <div class="ui-settings" onKeyDown={handleKeydown}>
       <Page
         title="Settings"
+        titleHidden
         leading={
           <div class="kit-scope">
             {/* ONE search box (nocx-x6w9) — only in the rail. */}
@@ -674,7 +752,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
                 label={' Modified'}
               />
               <Show when={modifiedCount() > 0}>
-                <Badge variant="warning">{'(' + modifiedCount() + ')'}</Badge>
+                <Badge variant="warning">{String(modifiedCount())}</Badge>
               </Show>
             </div>
 
@@ -718,9 +796,15 @@ export function SettingsComponent(props: SettingsComponentProps) {
         }}
       >
         <div class="kit-scope">
-          {/* Component page takes over the body when active. */}
-          <Show when={activeComponentPage() === 'connections'}>
-            <ConnectionsView client={props.profileClient} onConnect={props.onConnect} />
+          {/* A component page takes over the body when active. Resolved through
+              the registry rather than a chain of id comparisons, so adding a
+              page is one registry entry. */}
+          {/* `keyed` is load-bearing: a plain Show only re-runs its callback
+              when `when` crosses falsy→truthy, so switching Export → Connections
+              (truthy → different truthy) left the previous page on screen.
+              Keying re-creates the subtree whenever the page identity changes. */}
+          <Show when={activePage()} keyed>
+            {(page) => page.render()}
           </Show>
 
           {/* Generated settings sections — hidden when a component page is active. */}
@@ -732,7 +816,9 @@ export function SettingsComponent(props: SettingsComponentProps) {
             <Show when={loadState() === 'failed'}>
               <div class="ui-settings-status ui-settings-failed">
                 <span>Failed to load settings.</span>
-                <Button onClick={() => void refresh()}>Retry</Button>
+                <Button variant="secondary" onClick={() => void refresh()}>
+                  Retry
+                </Button>
               </div>
             </Show>
 
@@ -767,11 +853,6 @@ export function SettingsComponent(props: SettingsComponentProps) {
                   )
                 }}
               </For>
-            </Show>
-
-            {/* ExportSection as a child component (no mountExportSection). */}
-            <Show when={loadState() === 'ready'}>
-              <ExportSection profileClient={props.profileClient} />
             </Show>
           </Show>
         </div>

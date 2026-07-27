@@ -1,8 +1,15 @@
 /* ── Tokyo Night theme — the current palette, extracted from 27 hex values
    ADR-0013 §2. All colour literals live here and only here. */
 
+/* Tokyo Night is the default theme, so it is the one file allowed a bare
+   `:root` block — what applies before `data-theme` is set, and if bootstrap
+   ever fails to set it. The attribute selector is written `:root[data-theme=…]`
+   (specificity 0,2,0) rather than `[data-theme=…]` (0,1,0) so that every
+   attribute-scoped theme outranks this default whatever order the files are
+   imported in. Import order deciding which theme wins is how a missing
+   @import passed for a working theme switch (nocx-u7wq.2). */
 :root,
-[data-theme='tokyo-night'] {
+:root[data-theme='tokyo-night'] {
   /* ── UI colour tokens (§2.1) ─────────────────────────────────────── */
   --color-canvas: #1a1b26;
 
@@ -13,17 +20,23 @@
      change, not a refactor. (--color-chrome-rail differs from --color-chrome by
      2/255 in one channel, which is almost certainly accidental and would be a
      safe convergence to make deliberately later.) */
-  --color-chrome: #16161e;
-  --color-chrome-rail: #161720;
+  --color-chrome: #0e0f15;
+  --color-chrome-rail: #111219;
   --color-surface-sunken: #24283b;
   --color-tab-active: #1f2235;
   --color-surface: #1f2335;
   --color-surface-hover: #1f2030;
-  --color-surface-raised: #292e42;
+  --color-surface-raised: #2b3049;
   --color-text: #c0caf5;
   --color-text-muted: #a9b1d6;
-  --color-text-dim: #565f89;
-  --color-border: #2a2b3d;
+  --color-text-dim: #9098bd;
+  --color-border: #5f6590;
+  /* Hairline between regions — rail, tab bar, panel edges. Split from
+     --color-border because the two answer different questions: a control
+     outline has to be findable (WCAG 1.4.11, 3:1 against the canvas), a
+     divider only has to be a seam. Raising border to meet 3:1 dragged every
+     divider up with it and the shell looked wireframed. */
+  --color-divider: #2a2b3d;
   --color-accent: #7aa2f7;
 
   /* ── Additional semantic colours (§2.2) ──────────────────────────── */
@@ -33,7 +46,13 @@
   --color-accent-secondary: #9d7cd8;
   --color-error: #ff6b6b;
 
-  /* ── Font families (§2.4) — ADR §2.4 mandates these per theme file ── */
+  /* ── Font families (§2.4) — ADR §2.4 mandates these per theme file ──
+     These are the values that were declared as --nocx-mono / --nocx-ui until
+     cc92306 renamed every usage and dropped the declarations, which put the
+     whole app in the UA serif fallback (nocx-u7wq.1). */
+  --font-family-ui: ui-sans-serif, -apple-system, 'SF Pro Text', system-ui, sans-serif;
+  --font-family-mono:
+    ui-monospace, 'SF Mono', Menlo, Monaco, 'Apple Color Emoji', 'Apple Symbols', monospace;
 
   /* ── Interaction states — assigned, not derived ──────────────────────
      ADR-0013 §3 proposed deriving these centrally with color-mix(). The

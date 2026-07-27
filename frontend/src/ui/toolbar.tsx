@@ -16,7 +16,11 @@ export interface ToolbarProps {
 
 export function Toolbar(props: ToolbarProps) {
   return (
-    <div role="toolbar" class={props.class ?? ''} aria-label={props.ariaLabel ?? undefined}>
+    <div
+      role="toolbar"
+      class={`ui-toolbar ${props.class ?? ''}`.trim()}
+      aria-label={props.ariaLabel ?? undefined}
+    >
       {props.children}
     </div>
   )

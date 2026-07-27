@@ -25,6 +25,10 @@ export interface PageProps {
   title: string
   description?: string
   actions?: JSX.Element
+  /** Keep the title for assistive technology but out of the layout — see
+   *  PageHeader. Use it when the surface is opened as a tab that already
+   *  carries the same name. */
+  titleHidden?: boolean
   /** Optional rail content — placed in `.ui-page__rail`. Pass this as
    *  plain JSX; Page wraps it in the rail container internally. */
   leading?: JSX.Element
@@ -36,7 +40,12 @@ export interface PageProps {
 export function Page(props: PageProps) {
   return (
     <div class="ui-page">
-      <PageHeader title={props.title} description={props.description} actions={props.actions} />
+      <PageHeader
+        title={props.title}
+        description={props.description}
+        actions={props.actions}
+        titleHidden={props.titleHidden}
+      />
       <PageBody>
         <Show when={props.leading}>
           <PageRail>{props.leading}</PageRail>

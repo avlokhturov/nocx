@@ -17,6 +17,7 @@ import { mountUpdateNotice } from './update-notice'
 import { SettingsIcon } from './ui/icons'
 import { SettingsObserver } from './settings-observer'
 import { bootstrapTheme, reconcileThemeFromGo } from './renderers/theme-bootstrap'
+import { bootstrapPlatform } from './platform'
 import {
   QuickConnectController,
   LocalShellQuickConnectProvider,
@@ -36,6 +37,11 @@ async function main() {
   // XtermRenderer mount() reads the correct palette from the first frame.
   // ADR-0013 §8, §8.1; design spec §5.4.
   const appliedThemeId = bootstrapTheme()
+  // Publishes data-platform for the chrome that differs by host — currently the
+  // macOS traffic-light reservation in the tab bar. Not awaited: the attribute
+  // only adds a notch, so a frame without it is correct on every platform that
+  // does not need one, and blocking first paint on an IPC round trip is not.
+  void bootstrapPlatform()
   render(() => <App />, document.getElementById('app')!)
   const bar = document.getElementById('tabbar')!
   const verticalStripHost = document.getElementById('vertical-tabstrip')!

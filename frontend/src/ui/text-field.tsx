@@ -36,7 +36,7 @@ export function TextField(props: TextFieldProps) {
   }
 
   return (
-    <div class={props.class ?? ''}>
+    <div class={`ui-textfield ${props.class ?? ''}`.trim()}>
       <Show when={props.label !== undefined}>
         <label for={inputId()}>{props.label}</label>
       </Show>

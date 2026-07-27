@@ -1,0 +1,6 @@
+/* Nothing imports this file. That is the point: the `unreachable` rule must
+   report it. */
+
+.fixture-orphan {
+  display: block;
+}

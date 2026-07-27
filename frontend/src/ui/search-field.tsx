@@ -1,14 +1,18 @@
 /**
- * SearchField — settings-search input, matched to the st-search-input CSS class.
+ * SearchField — a text input that looks like a search box: magnifier glyph
+ * inside the field, on the leading edge.
+ *
+ * The icon lives in the component rather than in each caller's CSS, because a
+ * search field without one is not a search field — it is a text box that
+ * happens to filter, and every surface would otherwise have to remember to
+ * draw the affordance itself.
  *
  * Justified by callers:
  * - settings.ts: st-search wrapper + st-search-input, type='text', placeholder, aria-label
  * - settings-content.ts: type='search' variant, st-search class on input
- *
- * Callers wrap this in their own container; the component renders only the
- * input itself with the st-search-input class, letting the parent own the
- * st-search wrapper.
  */
+
+import { SearchIcon } from './icons'
 
 export interface SearchFieldProps {
   class?: string
@@ -26,14 +30,19 @@ export function SearchField(props: SearchFieldProps) {
   }
 
   return (
-    <input
-      type="search"
-      class={props.class ?? ''}
-      value={props.value}
-      placeholder={props.placeholder ?? ''}
-      aria-label={props.ariaLabel ?? undefined}
-      disabled={props.disabled === true}
-      onInput={onInput}
-    />
+    <span class="ui-search-field">
+      <span class="ui-search-field__icon">
+        <SearchIcon />
+      </span>
+      <input
+        type="search"
+        class={props.class ?? ''}
+        value={props.value}
+        placeholder={props.placeholder ?? ''}
+        aria-label={props.ariaLabel ?? undefined}
+        disabled={props.disabled === true}
+        onInput={onInput}
+      />
+    </span>
   )
 }
