@@ -1,0 +1,187 @@
+{
+  "//": [
+    "DO NOT EDIT MANUALLY. Regenerate with `npm run baseline:update`.",
+    "",
+    "This baseline enumerates every current raw-control violation in application",
+    "surfaces. It may only shrink. A new violation in any file is an error even if",
+    "the file already has baselined violations. CI asserts this.",
+    "",
+    "This file must be empty before epic nocx-vxqj closes."
+  ],
+  "violations": [
+    {
+      "file": "frontend/src/banner.tsx",
+      "id": "a400c65d9498",
+      "control": "button",
+      "line": 56
+    },
+    {
+      "file": "frontend/src/banner.tsx",
+      "id": "908b06e08dfa",
+      "control": "button",
+      "line": 62
+    },
+    {
+      "file": "frontend/src/banner.tsx",
+      "id": "297bba7fc85b",
+      "control": "button",
+      "line": 68
+    },
+    {
+      "file": "frontend/src/connections.tsx",
+      "id": "64f9ce25d0a2",
+      "control": "button",
+      "line": 257
+    },
+    {
+      "file": "frontend/src/connections.tsx",
+      "id": "a51dbc0ba6f1",
+      "control": "input/radio",
+      "line": 359
+    },
+    {
+      "file": "frontend/src/connections.tsx",
+      "id": "f2e176190d68",
+      "control": "button",
+      "line": 458
+    },
+    {
+      "file": "frontend/src/connections.tsx",
+      "id": "6404cb35a310",
+      "control": "button",
+      "line": 461
+    },
+    {
+      "file": "frontend/src/connections.tsx",
+      "id": "2f89bc5d04cf",
+      "control": "button",
+      "line": 465
+    },
+    {
+      "file": "frontend/src/connections.tsx",
+      "id": "d1e1f70bf39c",
+      "control": "input/radio",
+      "line": 529
+    },
+    {
+      "file": "frontend/src/connections.tsx",
+      "id": "9362eb61f664",
+      "control": "input/password",
+      "line": 546
+    },
+    {
+      "file": "frontend/src/connections.tsx",
+      "id": "107b1121d0dd",
+      "control": "button",
+      "line": 587
+    },
+    {
+      "file": "frontend/src/connections.tsx",
+      "id": "6cc5974ed7af",
+      "control": "button",
+      "line": 591
+    },
+    {
+      "file": "frontend/src/connections.tsx",
+      "id": "e85d751d95fe",
+      "control": "button",
+      "line": 595
+    },
+    {
+      "file": "frontend/src/export-section.tsx",
+      "id": "f0e4155bb512",
+      "control": "button",
+      "line": 106
+    },
+    {
+      "file": "frontend/src/export-section.tsx",
+      "id": "88a53bc03529",
+      "control": "input/text",
+      "line": 161
+    },
+    {
+      "file": "frontend/src/export-section.tsx",
+      "id": "46abb0c56087",
+      "control": "input/text",
+      "line": 170
+    },
+    {
+      "file": "frontend/src/export-section.tsx",
+      "id": "beb6ad4f2793",
+      "control": "input/checkbox",
+      "line": 179
+    },
+    {
+      "file": "frontend/src/export-section.tsx",
+      "id": "6892b3be66be",
+      "control": "input/checkbox",
+      "line": 187
+    },
+    {
+      "file": "frontend/src/export-section.tsx",
+      "id": "256631cf6104",
+      "control": "button",
+      "line": 196
+    },
+    {
+      "file": "frontend/src/export-section.tsx",
+      "id": "666a2e832968",
+      "control": "button",
+      "line": 240
+    },
+    {
+      "file": "frontend/src/export-section.tsx",
+      "id": "c15466023ef7",
+      "control": "button",
+      "line": 337
+    },
+    {
+      "file": "frontend/src/export-section.tsx",
+      "id": "34f858a261f8",
+      "control": "input/password",
+      "line": 354
+    },
+    {
+      "file": "frontend/src/export-section.tsx",
+      "id": "9cb578aaa382",
+      "control": "button",
+      "line": 362
+    },
+    {
+      "file": "frontend/src/export-section.tsx",
+      "id": "02427220e47a",
+      "control": "button",
+      "line": 415
+    },
+    {
+      "file": "frontend/src/sidebar.tsx",
+      "id": "895179252b15",
+      "control": "button",
+      "line": 253
+    },
+    {
+      "file": "frontend/src/sidebar.tsx",
+      "id": "f530165cfd1c",
+      "control": "button",
+      "line": 279
+    },
+    {
+      "file": "frontend/src/tab-strip.tsx",
+      "id": "53f8e6ee1a21",
+      "control": "button",
+      "line": 160
+    },
+    {
+      "file": "frontend/src/tab-strip.tsx",
+      "id": "2a0026c71f23",
+      "control": "button",
+      "line": 182
+    },
+    {
+      "file": "frontend/src/update-notice.tsx",
+      "id": "7eacb3ef6cfa",
+      "control": "button",
+      "line": 79
+    }
+  ]
+}

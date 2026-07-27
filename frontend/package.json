@@ -14,7 +14,7 @@
     "format:check": "prettier --check .",
     "test": "vitest run",
     "lint:fixture-check": "sh ./lint-fixtures/gate.sh",
-    "test:watch": "vitest"
+    "baseline:update": "node lint-fixtures/update-raw-controls-baseline.mjs"
   },
   "dependencies": {
     "@xterm/addon-canvas": "^0.7.0",
