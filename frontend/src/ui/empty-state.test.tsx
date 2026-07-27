@@ -39,9 +39,14 @@ describe('EmptyState', () => {
     expect(document.querySelector('.ui-empty-state__action')).toBeNull()
   })
 
-  it('sets combined class', () => {
-    subject({ class: 'cm-list-empty' })
+  // Identity, not passthrough. The old case asserted that a caller's class was
+  // merged in; the `class` prop is gone (§3.6), so what matters now is that the
+  // element names itself and nothing else — a stray class here would mean some
+  // caller had found a way back in.
+  it('emits its identity and nothing else', () => {
+    subject()
     const el = document.querySelector('.ui-empty-state')
-    expect(el?.classList.contains('cm-list-empty')).toBe(true)
+    expect(el).not.toBeNull()
+    expect(el!.getAttribute('class')).toBe('ui-empty-state')
   })
 })

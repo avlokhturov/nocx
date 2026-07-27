@@ -44,13 +44,6 @@
   padding: 8px 0;
 }
 
-.cm-list-empty {
-  padding: 32px 16px;
-  color: var(--color-text-dim);
-  font-size: 13px;
-  text-align: center;
-}
-
 .cm-item {
   display: flex;
   align-items: center;
