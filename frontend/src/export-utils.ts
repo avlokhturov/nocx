@@ -8,11 +8,14 @@ export function base64ToBytes(base64: string): Uint8Array {
   return bytes
 }
 
-/** Download a JSON object as a file. */
-export function downloadJSON(filename: string, data: unknown): void {
-  const blob = new Blob([JSON.stringify(data, null, 2)], {
-    type: 'application/json',
-  })
+/**
+ * Hand a blob to the browser as a download.
+ *
+ * The anchor is created, clicked and dropped without ever entering the
+ * document: this is the browser's download idiom, not UI, which is why it
+ * stays imperative in a module the Solid surfaces call.
+ */
+function downloadBlob(filename: string, blob: Blob): void {
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
@@ -21,14 +24,13 @@ export function downloadJSON(filename: string, data: unknown): void {
   URL.revokeObjectURL(url)
 }
 
+/** Download a JSON object as a file. */
+export function downloadJSON(filename: string, data: unknown): void {
+  downloadBlob(filename, new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }))
+}
+
 /** Download a base64-encoded binary payload as a file. */
 export function downloadBinary(filename: string, payload: string): void {
   const bytes = base64ToBytes(payload)
-  const blob = new Blob([bytes as BlobPart], { type: 'application/octet-stream' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  a.click()
-  URL.revokeObjectURL(url)
+  downloadBlob(filename, new Blob([bytes as BlobPart], { type: 'application/octet-stream' }))
 }
