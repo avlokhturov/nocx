@@ -1,21 +1,20 @@
 /* Checkbox — the label row, the box, and the switch variant.
-   Moved verbatim from kit.css by T1 (nocx-v0ai). Still ancestor-keyed; T7 (nocx-b0oi)
-   rewrites these onto `.ui-checkbox` (the row) and `.ui-checkbox__control` (the box) —
-   two identities with different duties, neither inferred from the other. */
+   Rewritten from the `.kit-scope` ancestor onto the component's own identities by T7
+   (nocx-b0oi). Neither the label nor the input had a class of its own, so every boolean
+   in the app rendered as native platform chrome — a 12px system box with the text
+   jammed against it — unless it happened to sit inside the one scoped subtree.
 
-/* The kit shipped a Checkbox component with no CSS at all, so every boolean
-   rendered as native platform chrome — a 12px system box with the label jammed
-   against it. Both shapes are built from the same `input[type=checkbox]`:
-   `appearance: none` takes the platform look away and the box below puts ours
-   back. The switch is the settings affordance (a change that applies
-   immediately); the checkbox stays the filter/selection affordance. */
+   Two identities, different duties (§3.1): `ui-checkbox` is the row and owns the
+   layout, the gap and the cursor; `ui-checkbox__control` is the box and owns its
+   border, its checked mark and its disabled state. The switch is a variant of this
+   primitive rather than a separate one — same contract, different shape — and it is
+   selected by `data-variant`, not by a class the caller has to remember. */
 
-/* No font-size here on purpose: the label inherits its surroundings, so a
-   checkbox in the settings rail matches the nav beside it and one in a form
-   matches the form. Pinning it to --font-size-md made the rail's "Modified"
-   filter two steps larger than every other line in the same column. */
-.kit-scope label:has(input[type='checkbox']),
-label.ui-checkbox {
+/* No font-size on the row on purpose: the label inherits its surroundings, so a
+   checkbox in the settings rail matches the nav beside it and one in a form matches
+   the form. Pinning it to --font-size-md made the rail's "Modified" filter two steps
+   larger than every other line in the same column. */
+.ui-checkbox {
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);
@@ -23,7 +22,8 @@ label.ui-checkbox {
   color: var(--color-text);
 }
 
-.kit-scope input[type='checkbox'] {
+/* `appearance: none` takes the platform look away and everything below puts ours back. */
+.ui-checkbox__control {
   appearance: none;
   flex: 0 0 auto;
   margin: 0;
@@ -39,18 +39,22 @@ label.ui-checkbox {
     border-color 0.12s ease;
 }
 
-.kit-scope input[type='checkbox']:hover {
+.ui-checkbox__control:hover {
   border-color: var(--color-accent);
 }
 
-.kit-scope input[type='checkbox']:checked {
+.ui-checkbox__control:focus {
+  border-color: var(--color-accent);
+}
+
+.ui-checkbox__control:checked {
   background: var(--color-accent);
   border-color: var(--color-accent);
 }
 
-/* The tick is drawn rather than typed: a glyph would inherit the surrounding
-   font and shift with it. */
-.kit-scope input[type='checkbox']:checked::after {
+/* The tick is drawn rather than typed: a glyph would inherit the surrounding font and
+   shift with it. */
+.ui-checkbox__control:checked::after {
   content: '';
   position: absolute;
   left: 4px;
@@ -62,30 +66,23 @@ label.ui-checkbox {
   transform: rotate(45deg);
 }
 
-.kit-scope input[type='checkbox']:disabled {
+.ui-checkbox__control:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
 
-/* Slice of kit.css's `.kit-scope input:focus`, which reached every input type and not
-   only the text-like ones. Easy to lose when that catch-all is cut up, and on a
-   checkbox it is visible: the box has a real border. */
-.kit-scope input[type='checkbox']:focus {
-  border-color: var(--color-accent);
-}
+/* ── Switch variant ─────────────────────────────────────────────────────────
+   The settings affordance, for a change that applies immediately. The checkbox
+   stays the filter and selection affordance. */
 
-/* ── Switch variant ───────────────────────────────────────────────────────── */
-
-.kit-scope .ui-switch input[type='checkbox'],
-.kit-scope input[type='checkbox'].ui-switch__input {
+.ui-checkbox[data-variant='switch'] .ui-checkbox__control {
   width: 34px;
   height: 20px;
   border-radius: var(--control-radius-full);
   background: var(--color-surface-sunken);
 }
 
-.kit-scope .ui-switch input[type='checkbox']::after,
-.kit-scope input[type='checkbox'].ui-switch__input::after {
+.ui-checkbox[data-variant='switch'] .ui-checkbox__control::after {
   content: '';
   position: absolute;
   top: 2px;
@@ -101,14 +98,12 @@ label.ui-checkbox {
     background 0.14s ease;
 }
 
-.kit-scope .ui-switch input[type='checkbox']:checked,
-.kit-scope input[type='checkbox'].ui-switch__input:checked {
+.ui-checkbox[data-variant='switch'] .ui-checkbox__control:checked {
   background: var(--color-accent);
   border-color: var(--color-accent);
 }
 
-.kit-scope .ui-switch input[type='checkbox']:checked::after,
-.kit-scope input[type='checkbox'].ui-switch__input:checked::after {
+.ui-checkbox[data-variant='switch'] .ui-checkbox__control:checked::after {
   transform: translateX(14px);
   background: var(--color-canvas);
 }

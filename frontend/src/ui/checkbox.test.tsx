@@ -39,10 +39,23 @@ describe('Checkbox', () => {
     expect(screen.getByText('Modified only')).toBeTruthy()
   })
 
-  it('sets class on the wrapper', () => {
-    subject({ class: 'my-filter', label: 'test' })
-    const label = screen.getByText('test').parentElement
-    expect(label?.getAttribute('class')).toBe('my-filter')
+  // Two identities with different duties (§3.1): the row and the box. Asserting them
+  // separately is the point — before this transaction neither element had a class at
+  // all, so every boolean rendered as native platform chrome outside the one scoped
+  // subtree, and no test could have told the difference.
+  it('names the row and the box separately', () => {
+    subject({ label: 'test' })
+    const row = screen.getByText('test').parentElement
+    expect(row?.getAttribute('class')).toBe('ui-checkbox')
+    expect(row?.getAttribute('data-variant')).toBe('checkbox')
+    expect(row?.querySelector('input')?.getAttribute('class')).toBe('ui-checkbox__control')
+  })
+
+  it('selects the switch shape by attribute, not by a class the caller remembers', () => {
+    subject({ variant: 'switch', label: 'test' })
+    const row = screen.getByText('test').parentElement
+    expect(row?.getAttribute('data-variant')).toBe('switch')
+    expect(row?.getAttribute('class')).toBe('ui-checkbox')
   })
 
   it('sets aria-label when no visible label', () => {

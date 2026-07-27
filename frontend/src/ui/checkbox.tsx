@@ -9,7 +9,6 @@
 import { Show } from 'solid-js'
 
 export interface CheckboxProps {
-  class?: string
   checked: boolean
   onChange: (checked: boolean) => void
   label?: string
@@ -33,12 +32,10 @@ export function Checkbox(props: CheckboxProps) {
     props.onChange(target.checked)
   }
 
-  const labelClass = () =>
-    [props.variant === 'switch' ? 'ui-switch' : '', props.class ?? ''].filter(Boolean).join(' ')
-
   return (
-    <label class={labelClass()}>
+    <label class="ui-checkbox" data-variant={props.variant ?? 'checkbox'}>
       <input
+        class="ui-checkbox__control"
         type="checkbox"
         role={props.variant === 'switch' ? 'switch' : undefined}
         checked={props.checked}
