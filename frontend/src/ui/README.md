@@ -8,19 +8,42 @@ per-primitive (see ADR-0014).
 
 ### Components we write
 
-| Component       | Module             | Props                                                                                                                  | Today's consumers                                                                                                                                                                           |
-| --------------- | ------------------ | ---------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Button**      | `button.tsx`       | `children`, `onClick`, `disabled`, `title`, `ariaLabel`, `type`, `variant`                                             | `connections.tsx` (header buttons, form actions), `settings.ts` (`st-retry-btn`, `st-secret-replace/clear`, `st-reset-btn`), `export-section.tsx`                                           |
-| **TextField**   | `text-field.tsx`   | `value`, `onInput`, `type`, `label`, `disabled`, `error`, `description`, `id`, `placeholder`, `min`, `max`, `required` | `connections.tsx` (inputField/textField/numberField), `settings.ts` (input[type=text/number])                                                                                               |
-| **SearchField** | `search-field.tsx` | `value`, `onInput`, `placeholder`, `ariaLabel`, `disabled`                                                             | `settings.ts` (`.st-search-input`), `settings-content.ts`                                                                                                                                   |
-| **Checkbox**    | `checkbox.tsx`     | `checked`, `onChange`, `label`, `ariaLabel`, `disabled`                                                                | `connections.tsx` (checkboxField helper), `settings.ts` (toggle controls, filter checkbox), `export-section.tsx`                                                                            |
-| **Select**      | `select.tsx`       | `value`, `onChange`, `options`, `placeholder`, `placeholderValue`, `disabled`                                          | `connections.tsx` (credential selector, jump host), `settings.ts`                                                                                                                           |
-| **Toolbar**     | `toolbar.tsx`      | `children`, `ariaLabel`                                                                                                | `connections.tsx` (header toolbar), `settings-content.ts` (`.st-rail` nav)                                                                                                                  |
-| **Section**     | `section.tsx`      | `title`, `children`, `id`, `class`                                                                                     | `connections.tsx` (`.cm-form-section`), `settings.ts` (`.st-section`), `export-section.tsx`                                                                                                 |
-| **Field**       | `field.tsx`        | `for`, `label`, `children`, `description`, `error`, `required`                                                         | New — intended to replace ad-hoc `.cm-field` and `.st-control-col` markup in `settings.tsx`, `connections.tsx`, `export-section.tsx`                                                        |
-| **Badge**       | `badge.tsx`        | `children`, `variant` (default, warning, danger, info)                                                                 | New — intended to replace `.st-provenance`, `.st-customized`, `.st-default`, `.st-section-nav-badge`                                                                                        |
-| **EmptyState**  | `empty-state.tsx`  | `title`, `description`, `action`                                                                                       | New — replaces `.cm-list-empty` ("No connections yet") and inline "Select a connection to edit" in `connections.tsx`                                                                        |
-| **Toggle**      | —                  | —                                                                                                                      | **Not a separate component.** Checkbox already handles the checked/onChange/label contract. Toggle is a visual variant, not a behavioural one. Future CSS-only styling is documented below. |
+Every one renders a stable **base class** naming itself, on the element that carries the
+appearance — not merely on a wrapper. Variance is a typed `data-*` attribute. None of
+them takes a `class` prop; the structural containers that still do are marked.
+
+| Component       | Module             | Identity                                     | Variance                                                               |
+| --------------- | ------------------ | -------------------------------------------- | ---------------------------------------------------------------------- |
+| **Button**      | `button.tsx`       | `ui-button`                                  | `data-variant`: default \| primary \| danger \| ghost; `data-size`     |
+| **IconButton**  | `icon-button.tsx`  | `ui-icon-button`                             | `data-size`; `selected` → `aria-selected`; `ariaLabel` is **required** |
+| **TextField**   | `text-field.tsx`   | `ui-text-field`, `ui-text-field__input`      | input types text \| number \| password                                 |
+| **SearchField** | `search-field.tsx` | `ui-search-field`, `__input`, `__icon`       | —                                                                      |
+| **Select**      | `select.tsx`       | `ui-select`                                  | native `<select>`, `appearance: none` (ADR-0014)                       |
+| **Checkbox**    | `checkbox.tsx`     | `ui-checkbox`, `ui-checkbox__control`        | `data-variant`: checkbox \| switch                                     |
+| **Radio**       | `radio.tsx`        | `ui-radio`, `ui-radio__control`              | —                                                                      |
+| **FileInput**   | `file-input.tsx`   | `ui-file-input`                              | the platform draws its button's label; untranslatable by design        |
+| **Badge**       | `badge.tsx`        | `ui-badge`                                   | `data-tone`: neutral \| info \| warning \| danger                      |
+| **EmptyState**  | `empty-state.tsx`  | `ui-empty-state` + `__title/__desc/__action` | —                                                                      |
+| **Field**       | `field.tsx`        | `ui-field`, `+ ui-field-horizontal`          | `orientation`                                                          |
+| **Section**     | `section.tsx`      | `ui-section`                                 | keeps `class`, **layout only**                                         |
+| **Toolbar**     | `toolbar.tsx`      | `ui-toolbar`                                 | keeps `class`, **layout only**                                         |
+
+**A wrapper identity and a control identity are different identities with different
+duties, and neither may be inferred from the other.** `ui-checkbox` owns the row and its
+label; `ui-checkbox__control` owns the box, its checked mark and its disabled state. The
+one that matters most is the identity on the element that carries the appearance — an
+input, a select, a button. Every defect the kit migration unwound (`nocx-pp3y`) came from
+that element having no name at all, so its rules could only be reached through an
+ancestor class and each surface wrote its own instead.
+
+**Toggle is not a component.** Checkbox already has the contract — checked, onChange,
+label, disabled — and a switch is a shape, not a different behaviour. It is
+`variant="switch"`.
+
+**`Tab` is not a kit primitive either.** It carries `role=tab`, drag and reorder,
+middle-click close, activity indicators, `aria-controls` and two orientations: a
+behavioural unit, not a styled button. Feature components like it are declared in
+`feature-components.json` rather than inferred from a directory.
 
 ### Platform primitives (no wrapper needed per ADR-0014)
 
@@ -59,31 +82,35 @@ which is the wrong dependency direction.
 
 ## CSS
 
-Component styles live in `frontend/src/styles/kit.css`, imported from `style.css:5`.
-Rules moved from `style.css` into `kit.css` (duplicated; removal is deferred to
-the CSS consolidation sweep — `nocx-xrrl.2`):
+Component styles live in `frontend/src/styles/components/`, **one file per component**
+(ADR-0013 §1), each imported from `style.css`.
 
-| Rule(s) in style.css                                                                                                                                                                                                                                  | Moved to kit.css as                                                    | Component   |
-| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- | ----------- |
-| `.cm-field`, `.cm-field label`, `.cm-field input[type=text/number/password]`, `.cm-field input:focus`, `.cm-field input[type=checkbox]`                                                                                                               | `.ui-field`, `.ui-field label`                                         | Field       |
-| `.st-section`, `.st-section-heading`, `.cm-form-section`, `.cm-form-section h2`                                                                                                                                                                       | `.ui-section`, `.ui-section h2`                                        | Section     |
-| `.st-empty`                                                                                                                                                                                                                                           | `.ui-empty-state`, `.ui-empty-state__title`, `.ui-empty-state__desc`   | EmptyState  |
-| `.cm-list-empty`                                                                                                                                                                                                                                      | `.ui-empty-state` (shared)                                             | EmptyState  |
-| `.st-provenance`, `.st-customized`, `.st-default`                                                                                                                                                                                                     | `.ui-badge-warning`, `.ui-badge-danger`, `.ui-badge-info`              | Badge       |
-| `.st-error`                                                                                                                                                                                                                                           | `.ui-field-error`                                                      | Field       |
-| `.st-search-input`, `.st-search-input:focus`, `.st-search-input::placeholder`                                                                                                                                                                         | `input[type=search]` rule group                                        | SearchField |
-| `.st-control-col select`, `.st-control-col select:focus`                                                                                                                                                                                              | `select.ui-kit` rule group                                             | Select      |
-| `.cm-header button`, `.cm-header button:hover`, `.cm-header button.cm-primary`, `.cm-header button.cm-close`, `.cm-form-actions button`, `.cm-form-actions button.cm-save`, `.cm-form-actions button.cm-danger`, `.st-secret button`, `.st-retry-btn` | Button variants (`.ui-btn-primary`, `.ui-btn-danger`, `.ui-btn-close`) | Button      |
-| `button:focus-visible`, `input:focus-visible`, `select:focus-visible`                                                                                                                                                                                 | Focus-visible ring                                                     | All         |
+There used to be one `kit.css` holding all of it — 515 lines — and it was split during
+the kit migration (`nocx-v0ai`) for a reason worth keeping in mind: while every
+component's rules shared one file, every transaction that touched a component touched
+that file, so nothing could be worked in parallel and no file answered "who owns this
+selector".
 
-## Toggle decision
+A file owns one **identity family**: a root identity plus the `__part` identities only
+that root renders. `Page`, `PageHeader`, `PageBody`, `PageRail`, `PageScroller` and
+`PageSection` all emit `ui-page*` identities that exist only inside a Page, so they are
+one family and one file. `SidebarView` is its own root and gets its own file even though
+it is small.
 
-**Checkbox covers it.** A Toggle (iOS-style switch) is a visual variant of a
-boolean input — same behavioural contract: checked/unchecked, onChange, disabled,
-label. Creating a separate `<Toggle>` component would duplicate every prop and
-test. If a switch visual is needed later, it is a CSS-only change on `<input
-type="checkbox">` via the `appearance: none` + `::before` pattern, gated on a
-class like `ui-toggle`. No component API changes.
+Two rules about what may live where, both gated:
+
+- A component file may contain only selectors rooted at an identity of its own family.
+  No bare-tag selectors — `button`, `input[type=…]`, `label:has(input)` — because a rule
+  that matches by element rather than by identity is a rule any surface can collide with.
+- A surface may name a kit identity **only to place it**, never to change how it looks.
+  The discriminator is the property: `flex`, `margin`, `width`, `order`, `align-self`,
+  `position` are placement; `background`, `border`, `border-radius`, `color`, `font-*`,
+  `padding`, `box-shadow` and any drawing pseudo-element are appearance. That boundary
+  was decided in `nocx-zeti` after the first draft of the rule fired on correct code.
+
+`base.css` is deliberately exempt from the first rule and is where the focus ring lives:
+a visible focus indicator is an application-wide invariant (WCAG 2.4.7), not something a
+surface should have to remember to ask for.
 
 ## Keyboard and accessibility
 
