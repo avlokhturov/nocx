@@ -31,79 +31,13 @@
       "file": "frontend/src/connections.tsx",
       "id": "a51dbc0ba6f1",
       "control": "input/radio",
-      "line": 353
+      "line": 356
     },
     {
       "file": "frontend/src/connections.tsx",
       "id": "d1e1f70bf39c",
       "control": "input/radio",
-      "line": 523
-    },
-    {
-      "file": "frontend/src/export-section.tsx",
-      "id": "f0e4155bb512",
-      "control": "button",
-      "line": 106
-    },
-    {
-      "file": "frontend/src/export-section.tsx",
-      "id": "88a53bc03529",
-      "control": "input/text",
-      "line": 161
-    },
-    {
-      "file": "frontend/src/export-section.tsx",
-      "id": "46abb0c56087",
-      "control": "input/text",
-      "line": 170
-    },
-    {
-      "file": "frontend/src/export-section.tsx",
-      "id": "beb6ad4f2793",
-      "control": "input/checkbox",
-      "line": 179
-    },
-    {
-      "file": "frontend/src/export-section.tsx",
-      "id": "6892b3be66be",
-      "control": "input/checkbox",
-      "line": 187
-    },
-    {
-      "file": "frontend/src/export-section.tsx",
-      "id": "256631cf6104",
-      "control": "button",
-      "line": 196
-    },
-    {
-      "file": "frontend/src/export-section.tsx",
-      "id": "666a2e832968",
-      "control": "button",
-      "line": 240
-    },
-    {
-      "file": "frontend/src/export-section.tsx",
-      "id": "c15466023ef7",
-      "control": "button",
-      "line": 337
-    },
-    {
-      "file": "frontend/src/export-section.tsx",
-      "id": "34f858a261f8",
-      "control": "input/password",
-      "line": 354
-    },
-    {
-      "file": "frontend/src/export-section.tsx",
-      "id": "9cb578aaa382",
-      "control": "button",
-      "line": 362
-    },
-    {
-      "file": "frontend/src/export-section.tsx",
-      "id": "02427220e47a",
-      "control": "button",
-      "line": 415
+      "line": 526
     },
     {
       "file": "frontend/src/sidebar.tsx",
@@ -121,13 +55,13 @@
       "file": "frontend/src/tab-strip.tsx",
       "id": "53f8e6ee1a21",
       "control": "button",
-      "line": 160
+      "line": 162
     },
     {
       "file": "frontend/src/tab-strip.tsx",
       "id": "2a0026c71f23",
       "control": "button",
-      "line": 182
+      "line": 184
     },
     {
       "file": "frontend/src/update-notice.tsx",

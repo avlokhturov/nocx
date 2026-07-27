@@ -15,6 +15,8 @@
 import { Show } from 'solid-js'
 import type { JSX } from 'solid-js'
 import { PageHeader } from './page-header'
+import { PageBody } from './page-body'
+import { PageRail } from './page-rail'
 import { PageScroller, type PageScrollerHandle } from './page-scroller'
 
 export type { PageScrollerHandle }
@@ -35,12 +37,12 @@ export function Page(props: PageProps) {
   return (
     <div class="ui-page">
       <PageHeader title={props.title} description={props.description} actions={props.actions} />
-      <div class="ui-page__body">
+      <PageBody>
         <Show when={props.leading}>
-          <div class="ui-page__rail">{props.leading}</div>
+          <PageRail>{props.leading}</PageRail>
         </Show>
         <PageScroller handle={props.scrollerRef}>{props.children}</PageScroller>
-      </div>
+      </PageBody>
     </div>
   )
 }
