@@ -33,7 +33,7 @@
  */
 
 import { readFileSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
+import { resolve } from 'node:path'
 
 import { test, expect } from './harness'
 
@@ -48,14 +48,30 @@ import { test, expect } from './harness'
  * Only the testbed's own framing is inline, because it is scaffolding for the
  * test rather than part of the contract.
  */
-const SURFACE_CSS = readFileSync(
-  fileURLToPath(new URL('../frontend/src/styles/surface.css', import.meta.url)),
-  'utf8',
-)
+const SURFACE_CSS = readFileSync(resolve(__dirname, '../frontend/src/styles/surface.css'), 'utf8')
 
 const TESTBED_CSS = `
+/* The testbed's own framing, plus the one rule that is not in surface.css.
+
+   .pane still lives in style.css, and reading that whole 2,200-line stylesheet
+   here would drag in the entire application's styling — including selectors that
+   have nothing to do with this contract and could introduce overflow nodes of
+   their own. So .pane is mirrored, and it is the ONLY duplicated rule; the rest
+   comes from the real file. nocx-xrrl.2 moves .pane into styles/ and this
+   duplication goes away with it.
+
+   Getting this wrong is not theoretical: dropping .pane while switching this
+   spec from a copied stylesheet to the real one broke four of six tests, because
+   the height chain has no bottom without it. */
 #testbed { position: relative; overflow: hidden; }
 #panes { height: 100%; }
+.pane {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
 `
 
 const PAGE_CSS = `${SURFACE_CSS}\n${TESTBED_CSS}`
