@@ -11,4 +11,10 @@
   flex-wrap: wrap;
   gap: var(--space-3);
   padding: var(--space-2) 0 var(--space-4);
+
+  /* A toolbar separates itself from what it acts on. This was declared by the
+     connections surface, so the same component looked different depending on
+     where it was used — which is the defect this migration exists to end, in
+     miniature. T13 (nocx-jdhy). */
+  border-bottom: 1px solid var(--color-divider);
 }

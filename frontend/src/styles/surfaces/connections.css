@@ -36,11 +36,13 @@
   min-height: 0;
 }
 
-/* Actions stay reachable however far down either column is scrolled. */
+/* Actions stay reachable however far down either column is scrolled. Placement
+   only — the rule under the toolbar is the toolbar's own look and moved into
+   toolbar.css with T13 (nocx-jdhy). Naming the kit identity from here is the
+   open question in nocx-zeti; this is its second instance. */
 .cm-root > .ui-toolbar {
   flex: 0 0 auto;
   padding: var(--space-3) var(--space-6);
-  border-bottom: 1px solid var(--color-divider);
 }
 
 .cm-tip {
