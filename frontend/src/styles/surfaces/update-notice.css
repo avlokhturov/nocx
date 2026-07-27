@@ -5,28 +5,28 @@
   align-items: center;
   gap: 6px;
   padding: 0 12px;
-  font-family: var(--nocx-mono);
+  font-family: var(--font-family-mono);
   font-size: 10px;
   line-height: 1;
-  color: #a9b1d6;
+  color: var(--color-text-muted);
   white-space: nowrap;
   --wails-draggable: no-drag;
 }
 
 .update-notice.pending {
-  color: #9ece6a;
+  color: var(--color-success);
 }
 
 .update-notice.error {
-  color: #f7768e;
+  color: var(--color-danger);
 }
 
 .update-notice.downloading {
-  color: #e0af68;
+  color: var(--color-warning);
 }
 
 .update-notes-link {
-  color: #7aa2f7;
+  color: var(--color-accent);
   text-decoration: none;
 }
 
@@ -35,8 +35,8 @@
 }
 
 .update-apply-btn {
-  background: #7aa2f7;
-  color: #1a1b26;
+  background: var(--color-accent);
+  color: var(--color-canvas);
   border: none;
   border-radius: 3px;
   padding: 2px 8px;
@@ -47,5 +47,5 @@
 }
 
 .update-apply-btn:hover {
-  background: #89b0ff;
+  background: var(--color-accent-hover);
 }

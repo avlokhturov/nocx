@@ -1,0 +1,70 @@
+/* ── Token vocabulary — semantic names and derivations ─────────────────
+   ADR-0013 §2, §3. Every colour literal lives in themes/ only.
+   This file defines the names; the theme file assigns values via var(). */
+
+:root,
+[data-theme] {
+  /* ── UI colour tokens (§2.1) ─────────────────────────────────────── */
+  --color-canvas: initial;
+  --color-surface: initial;
+  --color-surface-hover: initial;
+  --color-surface-raised: initial;
+  --color-text: initial;
+  --color-text-muted: initial;
+  --color-text-dim: initial;
+  --color-border: initial;
+  --color-accent: initial;
+
+  /* ── Additional semantic colours (§2.2) ──────────────────────────── */
+  --color-success: initial;
+  --color-warning: initial;
+  --color-danger: initial;
+  --color-accent-secondary: initial;
+  --color-error: initial;
+
+  /* ── Derived state colours (§3) — centrally via color-mix() ──────── */
+  --color-accent-hover: color-mix(in srgb, var(--color-accent), white 10%);
+  --color-accent-active: color-mix(in srgb, var(--color-accent), white 20%);
+  --color-accent-disabled: color-mix(in srgb, var(--color-accent), transparent 40%);
+
+  --color-surface-hover: color-mix(in srgb, var(--color-surface), white 6%);
+  --color-surface-active: color-mix(in srgb, var(--color-surface), white 12%);
+  --color-surface-disabled: color-mix(in srgb, var(--color-surface), transparent 30%);
+
+  --color-success-hover: color-mix(in srgb, var(--color-success), white 10%);
+  --color-danger-hover: color-mix(in srgb, var(--color-danger), white 15%);
+  --color-warning-hover: color-mix(in srgb, var(--color-warning), white 10%);
+
+  --color-focus-ring: color-mix(in srgb, var(--color-accent), transparent 40%);
+  --color-scrim: color-mix(in srgb, black, transparent 50%);
+  --color-selection: color-mix(in srgb, var(--color-accent), transparent 70%);
+
+  /* ── Control metrics (§2.4) ──────────────────────────────────────── */
+  --control-height-xs: 22px;
+  --control-height-sm: 24px;
+  --control-height-md: 32px;
+  --control-height-lg: 38px;
+  --control-radius-sm: 4px;
+  --control-radius-md: 6px;
+  --control-radius-lg: 8px;
+  --control-radius-full: 9999px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+  --font-size-sm: 12px;
+  --font-size-md: 14px;
+  --font-size-lg: 16px;
+  --font-size-xl: 20px;
+  --font-family-ui: initial;
+  --font-family-mono: initial;
+
+  /* ── Shell layout (§2.5) ──────────────────────────────────────────── */
+  --sidebar-width: 240px;
+  --activity-bar-width: 48px;
+  --tab-height: 38px;
+  --page-header-height: initial;
+}

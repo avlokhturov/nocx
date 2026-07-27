@@ -10,9 +10,8 @@
  *
  * This spec proves the chain resolves. It renders the full Page DOM
  * structure (#panes → .pane → .surface-host → .ui-page → …) from
- * surface.css §6.1 in a real browser, constrains the container to under
- * 400px, and:
- *
+ * base.css (plus the tokens and theme that define its custom properties) in a
+ * real browser, constrains the container to under 400px, and:
  *   1. Walks every node via getComputedStyle and asserts the only nodes
  *      with `auto`/`scroll` overflow are .ui-page__scroll and .ui-page__rail.
  *   2. Asserts the rail is NOT scrollable at ≤640px (narrow breakpoint),
@@ -28,8 +27,9 @@
  * not the new Page invariant. The synthetic Page is the contract under test.
  *
  * The synthetic page is constructed via page.setContent() — no app server,
- * no fixture route needed. The CSS is READ FROM surface.css rather than copied,
- * so the spec cannot drift away from the contract it is asserting.
+ * no fixture route needed. The CSS is READ FROM base.css (the successor
+ * of surface.css after ADR-0013 folded it into styles/), so the spec
+ * cannot drift away from the contract it is asserting.
  */
 
 import { readFileSync } from 'node:fs'
@@ -41,40 +41,29 @@ import { test, expect } from './harness'
  * The height-chain rules come from the real stylesheet, not a copy.
  *
  * An earlier draft reproduced surface.css verbatim here. That drifts silently:
- * change surface.css and this spec keeps passing against a stale duplicate, so
+ * change the source and this spec keeps passing against a stale duplicate, so
  * the one test meant to prove the contract stops testing it. Reading the file
  * makes divergence impossible.
  *
- * Only the testbed's own framing is inline, because it is scaffolding for the
- * test rather than part of the contract.
+ * ADR-0013 migrated surface.css into base.css, which also absorbed the .pane
+ * rules that were previously in style.css — so this now covers the full
+ * height chain in one read. The tokens and theme files are also loaded so
+ * that var(--color-*) references in base.css resolve (the app normally loads
+ * these as @imports from style.css).
+ *
+ * The testbed's own framing (#testbed, #panes height) remains inline because
+ * it provides the container size the app normally supplies through the shell
+ * layout — it is scaffolding for the test, not part of the contract.
  */
-const SURFACE_CSS = readFileSync(resolve(__dirname, '../frontend/src/styles/surface.css'), 'utf8')
-
+const dir = '../frontend/src/styles/'
+const TOKENS_CSS = readFileSync(resolve(__dirname, dir + 'tokens.css'), 'utf8')
+const THEME_CSS = readFileSync(resolve(__dirname, dir + 'themes/tokyo-night.css'), 'utf8')
+const BASE_CSS = readFileSync(resolve(__dirname, dir + 'base.css'), 'utf8')
 const TESTBED_CSS = `
-/* The testbed's own framing, plus the one rule that is not in surface.css.
-
-   .pane still lives in style.css, and reading that whole 2,200-line stylesheet
-   here would drag in the entire application's styling — including selectors that
-   have nothing to do with this contract and could introduce overflow nodes of
-   their own. So .pane is mirrored, and it is the ONLY duplicated rule; the rest
-   comes from the real file. nocx-xrrl.2 moves .pane into styles/ and this
-   duplication goes away with it.
-
-   Getting this wrong is not theoretical: dropping .pane while switching this
-   spec from a copied stylesheet to the real one broke four of six tests, because
-   the height chain has no bottom without it. */
 #testbed { position: relative; overflow: hidden; }
 #panes { height: 100%; }
-.pane {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
 `
-
-const PAGE_CSS = `${SURFACE_CSS}\n${TESTBED_CSS}`
+const PAGE_CSS = `${TOKENS_CSS}\n${THEME_CSS}\n${BASE_CSS}\n${TESTBED_CSS}`
 
 type ScrollInfo = { tag: string; cls: string; overflowY: string; overflowX: string }
 
