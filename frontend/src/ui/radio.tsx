@@ -4,11 +4,13 @@
  * Designed for radio groups used in connections.tsx (auth mode selection).
  * Consumers wrap this in a container with `role="radiogroup"` and manage
  * selection state externally.
+ *
+ * Renders `ui-radio` on the label (row layout) and `ui-radio__control` on
+ * the input (the drawn dot). No `class` prop — variance through data-* only.
  */
 import { Show } from 'solid-js'
 
 export interface RadioProps {
-  class?: string
   value: string
   checked: boolean
   onChange: (value: string) => void
@@ -20,9 +22,10 @@ export interface RadioProps {
 
 export function Radio(props: RadioProps) {
   return (
-    <label class={props.class ?? ''}>
+    <label class="ui-radio">
       <input
         type="radio"
+        class="ui-radio__control"
         value={props.value}
         checked={props.checked}
         name={props.name}

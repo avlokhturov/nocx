@@ -204,13 +204,12 @@
   margin-top: var(--space-3);
 }
 
-.cm-radio-group label {
-  width: auto;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  cursor: pointer;
-}
+/* `.cm-radio-group label` used to repeat the row layout — display, align-items,
+   gap, cursor — and at 0,1,1 it outranked `.ui-radio` at 0,1,0, so the component's
+   own layout never applied. That is the dual ownership this migration exists to
+   end, and it is the surface's half that goes: the group still owns how the
+   options are arranged (above), and Radio owns what one option looks like.
+   Removed by T8 (nocx-jm7m). */
 
 .cm-form-actions {
   display: flex;

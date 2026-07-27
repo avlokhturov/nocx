@@ -1,25 +1,74 @@
-/* Radio — today this file holds one rule, and that is the whole point of it existing.
-   Created by T1 (nocx-v0ai); T8 (nocx-jm7m) gives Radio a real appearance and rewrites
-   this onto `.ui-radio__control`.
+/* Radio — the row and the drawn dot.
+   Rewritten by T8 (nocx-jm7m) from `.kit-scope` ancestor onto `.ui-radio`
+   and `.ui-radio__control`. Two identities, different duties: the label owns
+   row layout, the input owns the button.
 
-   Radio has no rules of its own anywhere in the stylesheet, so it looks like a
-   primitive that needs no slice when the shared disabled rule is cut up. It is not:
-   kit.css's catch-all `.kit-scope input:disabled` did reach `input[type=radio]`, and
-   Radio has two live consumers at connections.tsx:357,517. Dropping this line while
-   splitting the catch-all would have changed a real control's computed style inside
-   the very transaction whose done condition is "disabled appearance unchanged". The
-   general rule, which is what to remember: the slice list is derived from what the
-   catch-all MATCHES, not from what the stylesheet NAMES. */
+   Built with the same tokens as the checkbox so a radio and a checkbox in
+   the same form are visibly siblings: same size, same border, same accent,
+   same disabled opacity. The only difference is the shape — circular instead
+   of square, and the checked mark is a dot rather than a tick. */
 
-.kit-scope input[type='radio']:disabled {
+/* The label row: layout, cursor, text colour. No font-size — the label
+   inherits its surroundings so one in a settings form matches the form and
+   one in a rail matches the rail. */
+.ui-radio {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  cursor: pointer;
+  color: var(--color-text);
+}
+
+/* The drawn radio button — `appearance: none` strips the platform dot
+   and the border-radius does the rest. */
+.ui-radio__control {
+  appearance: none;
+  flex: 0 0 auto;
+  margin: 0;
+  width: 16px;
+  height: 16px;
+  border: 1px solid var(--color-border);
+  border-radius: 50%;
+  background: var(--color-surface-raised);
+  cursor: pointer;
+  position: relative;
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease;
+}
+
+.ui-radio__control:hover {
+  border-color: var(--color-accent);
+}
+
+/* Filled circle when selected — same accent as the checkbox's checked state. */
+.ui-radio__control:checked {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+/* The inner dot — a 6px circle, centred, drawn in the canvas colour. */
+.ui-radio__control:checked::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-canvas);
+  transform: translate(-50%, -50%);
+}
+
+/* Disabled state — matches the other primitives. */
+.ui-radio__control:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
 
-/* Slice of `.kit-scope input:focus`, which reached every input type. A native radio
-   has no border for this to colour, so it changes nothing today — carried anyway,
-   because the claim T1 makes is that the split loses no declaration, and "it would
-   not have been visible" is not the same claim. */
-.kit-scope input[type='radio']:focus {
+/* Focus ring — the input has a real border now (the radio circle), so
+   this colours the border the same way the checkbox does. The global
+   :focus-visible ring in base.css adds the outline around it. */
+.ui-radio__control:focus {
   border-color: var(--color-accent);
 }
