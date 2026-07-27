@@ -106,13 +106,40 @@ still a poor component API: SVG carries links, external references, styles and a
 The SSH manager is not removed; its entry point changes. `docs/vision.md:91` names the
 integrated SSH manager as one of four product pillars, so deleting it is not on the table.
 
-- **Connections stops being a full-screen tab surface.** Its content — profiles, groups,
-  credentials, Tabby import — becomes a **page inside Settings**, exactly as Tabby does it
+**Launching a connection and managing one are different needs, and conflating them is why the
+current screen reads badly.** Launching is frequent and wants to be fast from anywhere;
+managing profiles, groups and credentials is rare and wants forms and space. The existing
+full-screen Connections tab tries to be both and is mostly a launcher wearing a manager's
+clothes.
+
+- **Managing** becomes a **page inside Settings**, exactly as Tabby does it
   (`tabby-settings/src/components/profilesSettingsTab.component.*`; Tabby has no separate
-  Connections screen at all).
-- **Quick connect** is the `Servers` sidebar view: a host list where a click opens a tab.
+  Connections screen at all). Editing a profile is a sibling of editing a setting: same forms,
+  same search, same modified/default affordance.
+- **Launching** is a **modal quick-connect picker**, opened from a caret beside the `+` in the
+  tab strip and from a keyboard shortcut. Type to filter, Enter to open a tab. Decided
+  2026-07-27 by the owner.
+- **Connections leaves the activity bar entirely.** It was never a view of the workspace; it
+  is an action, and putting an action in the view list is what produced `nocx-rp2j`.
 - `SURFACE_CONNECTIONS` and its singleton leave `surface-registry.ts` — but only after the
-  replacement route is proven reachable (§9, step 8a/8b).
+  replacement routes are proven reachable (§9, step 8a/8b).
+
+**Why a modal rather than a dropdown menu**, since a dropdown is what Tabby and Warp use and
+was the obvious answer:
+
+- It needs **no new primitive**. ADR-0014 declines to build Popover or Menu because nothing
+  consumed them, and a native `<dialog>` is already required to replace three `window.confirm()`
+  calls. A dropdown would reverse that decision to serve one caller.
+- **The platform gives us the hard parts** — focus trap, Escape, background inertness. A
+  dropdown menu means writing roving focus, typeahead, dismissal and interact-outside by hand,
+  in exactly the area ADR-0014 says we get wrong.
+- **It scales.** Forty hosts in a dropdown is painful; forty hosts behind a filter box is
+  ordinary.
+- **It is the seed of the command palette.** The same component later answers `Cmd+K`, with
+  connections as one of its sources — so this is not a single-purpose surface.
+
+The `Servers` sidebar view (`nocx-eab`) is not cancelled by this, only demoted from _the_
+launch route to an option for people who want the host list permanently visible.
 
 ### 2.5 Shell geometry
 
