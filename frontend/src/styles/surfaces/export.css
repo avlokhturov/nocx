@@ -150,13 +150,6 @@
   margin-bottom: 4px;
 }
 
-.st-export-file-input {
-  display: block;
-  font-size: 12px;
-  color: var(--color-text-dim);
-  margin-bottom: 8px;
-}
-
 /* ── Kit-component surface styling ─────────────────────────────────────
    The kit components (Button, TextField, Checkbox) have no default visual
    appearance in kit.css — only variant overrides and focus-visible. Each

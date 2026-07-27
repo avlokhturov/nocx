@@ -18,6 +18,7 @@ import { PageSection } from './ui/page-section'
 import { Button } from './ui/button'
 import { TextField } from './ui/text-field'
 import { Checkbox } from './ui/checkbox'
+import { FileInput } from './ui/file-input'
 
 // ── Mode definitions ────────────────────────────────────────────────────
 
@@ -327,12 +328,7 @@ function ImportActions(props: { profileClient: ProfileClient }) {
     <>
       <div class="st-export-import-section">
         <label class="st-export-import-label">Import from configuration export (.json)</label>
-        <input
-          type="file"
-          accept=".json"
-          class="st-export-file-input"
-          onChange={(e) => setState('configFile', e.currentTarget.files?.[0] ?? null)}
-        />
+        <FileInput accept=".json" onChange={(f) => setState('configFile', f)} />
         <Button
           class="ui-export-btn"
           disabled={state.configBusy || !state.configFile}
@@ -344,12 +340,7 @@ function ImportActions(props: { profileClient: ProfileClient }) {
       </div>
       <div class="st-export-import-section">
         <label class="st-export-import-label">Import from portable encrypted export (.enc)</label>
-        <input
-          type="file"
-          accept=".enc"
-          class="st-export-file-input"
-          onChange={(e) => setState('encFile', e.currentTarget.files?.[0] ?? null)}
-        />
+        <FileInput accept=".enc" onChange={(f) => setState('encFile', f)} />
         <TextField
           type="password"
           placeholder="Passphrase used during export"

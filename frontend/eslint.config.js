@@ -145,8 +145,10 @@ const nocxPlugin = {
         // Raw HTML tags that must use kit components
         const RAW_TAGS = new Set(['button', 'select', 'textarea'])
 
-        // Input types that must use kit components
-        const RAW_INPUT_TYPES = new Set(['checkbox', 'radio', 'text', 'password', 'search'])
+        // Input types that must use kit components. 'file' joined the list with
+        // nocx-dcsx: its absence is how two raw file inputs sat in Export at a zero
+        // baseline — the rule forbade the honest version and not the one that shipped.
+        const RAW_INPUT_TYPES = new Set(['checkbox', 'radio', 'text', 'password', 'search', 'file'])
 
         function isBaselined(id) {
           // NOCX_BASELINE_UPDATE bypasses the baseline so the generator sees

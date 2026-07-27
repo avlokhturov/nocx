@@ -1,22 +1,20 @@
 /* FileInput — the native file control and its platform-drawn button.
-   Moved verbatim from kit.css by T1 (nocx-v0ai). Still ancestor-keyed; T2 (nocx-dcsx)
-   builds the FileInput component these rules have never had and rewrites them onto
-   `.ui-file-input`. Until then the two consumers are raw <input type="file"> elements
-   in export-section.tsx, which is how they sat at a zero raw-control baseline: the
-   ADR-0014 rule never named this type. */
+   Rewritten from `.kit-scope input[type='file']` onto `.ui-file-input`
+   by T2 (nocx-dcsx). The two consumers in export-section.tsx now use
+   the FileInput component. */
 
 /* `input[type=file]` draws its own button, labelled by the platform in the
    platform's language — which is why an English form showed a Russian
    "Выбор файла". The text is the browser's and cannot be changed from CSS, but
    the chrome can, so the control at least stops looking pasted in. */
 
-.kit-scope input[type='file'] {
+.ui-file-input {
   font: inherit;
   font-size: var(--font-size-sm);
   color: var(--color-text-dim);
 }
 
-.kit-scope input[type='file']::file-selector-button {
+.ui-file-input::file-selector-button {
   height: var(--control-height-sm);
   margin-right: var(--space-2);
   padding: 0 10px;
@@ -29,21 +27,17 @@
   cursor: pointer;
 }
 
-.kit-scope input[type='file']::file-selector-button:hover {
+.ui-file-input::file-selector-button:hover {
   background: var(--color-surface-hover);
   color: var(--color-text);
   border-color: var(--color-accent);
 }
 
-/* Disabled slice, cut per primitive by T1. See the design spec §6.1. */
-.kit-scope input[type='file']:disabled {
+.ui-file-input:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
 
-/* Slice of `.kit-scope input:focus`, which reached every input type. The file control
-   declares no border of its own, so this colours nothing today — carried anyway, for
-   the same reason as radio.css: the split must lose no declaration. */
-.kit-scope input[type='file']:focus {
+.ui-file-input:focus {
   border-color: var(--color-accent);
 }
