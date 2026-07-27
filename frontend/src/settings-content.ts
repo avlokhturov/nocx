@@ -8,7 +8,7 @@
 
 import { createComponent } from 'solid-js'
 import { render } from 'solid-js/web'
-import { type ProfileClient } from './profiles'
+import { type ProfileClient, type SSHProfile } from './profiles'
 import { type SettingsObserver } from './settings-observer'
 import { SolidTabContent, type TabHost } from './solid-tab-content'
 import type { SurfaceType, SingletonKey } from './tab-content'
@@ -24,6 +24,8 @@ export const SINGLETON_SETTINGS: SingletonKey = 'nocx.settings' as SingletonKey
 export class SettingsContent extends SolidTabContent {
   private handleRef: { current: SettingsComponentHandle | null } = { current: null }
   private handle: SettingsComponentHandle | null = null
+  /** Callback for when the user clicks Connect on a profile. */
+  onConnect?: (profile: SSHProfile) => void
 
   constructor(
     private readonly profileClient: ProfileClient,
@@ -38,6 +40,9 @@ export class SettingsContent extends SolidTabContent {
         createComponent(SettingsComponent, {
           profileClient: this.profileClient,
           observer: this.observer,
+          onConnect: (profile: SSHProfile) => {
+            this.onConnect?.(profile)
+          },
           ref: this.handleRef,
         }),
       root,

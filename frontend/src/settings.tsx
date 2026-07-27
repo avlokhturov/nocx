@@ -12,10 +12,11 @@
  * Uses the Page layout primitives (nocx-imkb.1) and the UI kit (nocx-vxqj.4).
  */
 
-import { For, Show, createSignal, createMemo, onMount, onCleanup, type Component } from 'solid-js'
+import type { JSX } from 'solid-js'
+import { For, Show, createSignal, createMemo, onMount, onCleanup } from 'solid-js'
 import { createStore } from 'solid-js/store'
-
-import type { ProfileClient } from './profiles'
+import { ConnectionsView } from './connections'
+import type { ProfileClient, SSHProfile } from './profiles'
 import { SettingsObserver } from './settings-observer'
 import {
   AcceptedSnapshot,
@@ -47,7 +48,11 @@ import {
 
 export type SettingsPage =
   | { kind: 'generated'; id: string; title: string }
-  | { kind: 'component'; id: string; title: string; page: Component }
+  // A component page renders itself. It is a thunk rather than a bare
+  // Component because such a page needs context the registry does not have —
+  // Connections needs the ProfileClient and the connect callback — and binding
+  // that at registration is what keeps the registry from having to know it.
+  | { kind: 'component'; id: string; title: string; render: () => JSX.Element }
 
 // ── Stable DOM id ──────────────────────────────────────────────────────
 
@@ -83,6 +88,7 @@ export interface SettingsComponentHandle {
 export interface SettingsComponentProps {
   profileClient: ProfileClient
   observer?: SettingsObserver
+  onConnect?: (profile: SSHProfile) => void
   ref?: { current: SettingsComponentHandle | null }
 }
 
@@ -100,6 +106,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
   const [loadState, setLoadState] = createSignal<LoadState>('loading')
   const [searchQuery, setSearchQuery] = createSignal('')
   const [modifiedOnly, setModifiedOnly] = createSignal(false)
+  const [activeComponentPage, setActiveComponentPage] = createSignal<string | null>(null)
   const [sectionFilter, setSectionFilter] = createSignal<string | null>(null)
 
   // Promise that resolves when the initial data load finishes.
@@ -260,10 +267,21 @@ export function SettingsComponent(props: SettingsComponentProps) {
     return result
   })
 
-  /** The typed page registry — only generated pages for now. */
-  const settingsPages = createMemo<SettingsPage[]>(() =>
-    sections().map((s) => ({ kind: 'generated' as const, id: s, title: s })),
-  )
+  /** The typed page registry — generated sections + component pages. */
+  const settingsPages = createMemo<SettingsPage[]>(() => {
+    const generated: SettingsPage[] = sections().map((s) => ({
+      kind: 'generated' as const,
+      id: s,
+      title: s,
+    }))
+    const connectionPage: SettingsPage = {
+      kind: 'component',
+      id: 'connections',
+      title: 'Connections',
+      render: () => <ConnectionsView client={props.profileClient} onConnect={props.onConnect} />,
+    }
+    return [...generated, connectionPage]
+  })
 
   const modifiedCount = createMemo(() => {
     let count = 0
@@ -347,11 +365,16 @@ export function SettingsComponent(props: SettingsComponentProps) {
     setSearchQuery(value)
   }
 
-  function handleSectionClick(section: string): void {
-    // Toggle section filter (nocx-ucxl): always produces a visible change.
-    setSectionFilter((prev) => (prev === section ? null : section))
-    // Clear search so the user sees all rows in the section.
-    setSearchQuery('')
+  function handleNavClick(page: SettingsPage): void {
+    if (page.kind === 'component') {
+      setActiveComponentPage(page.id)
+      setSectionFilter(null)
+      setSearchQuery('')
+    } else {
+      setActiveComponentPage(null)
+      setSectionFilter((prev) => (prev === page.title ? null : page.title))
+      setSearchQuery('')
+    }
   }
 
   // ── Keyboard handler ───────────────────────────────────────────────
@@ -654,13 +677,16 @@ export function SettingsComponent(props: SettingsComponentProps) {
               </Show>
             </div>
 
-            {/* Section nav — driven by the typed page registry */}
             <nav aria-label="Settings sections">
               <ul class="ui-settings-section-nav">
                 <For each={settingsPages()}>
                   {(page) => {
-                    const count = () => modifiedBySection().get(page.id)
-                    const active = () => sectionFilter() === page.title
+                    const active = () =>
+                      page.kind === 'component'
+                        ? activeComponentPage() === page.id
+                        : activeComponentPage() === null && sectionFilter() === page.title
+                    const count = () =>
+                      page.kind === 'generated' ? modifiedBySection().get(page.id) : undefined
                     return (
                       <li
                         classList={{
@@ -671,7 +697,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
                       >
                         <Button
                           class="ui-settings-section-nav-link"
-                          onClick={() => handleSectionClick(page.title)}
+                          onClick={() => handleNavClick(page)}
                         >
                           {page.title}
                           <Show when={count() !== undefined && count()! > 0}>
@@ -691,49 +717,61 @@ export function SettingsComponent(props: SettingsComponentProps) {
         }}
       >
         <div class="ui-kit">
-          <Show when={loadState() === 'loading'}>
-            <div class="ui-settings-status ui-settings-loading">Loading settings…</div>
+          {/* Component page takes over the body when active. */}
+          <Show when={activeComponentPage() === 'connections'}>
+            <ConnectionsView client={props.profileClient} onConnect={props.onConnect} />
           </Show>
 
-          <Show when={loadState() === 'failed'}>
-            <div class="ui-settings-status ui-settings-failed">
-              <span>Failed to load settings.</span>
-              <Button onClick={() => void refresh()}>Retry</Button>
-            </div>
-          </Show>
+          {/* Generated settings sections — hidden when a component page is active. */}
+          <Show when={activeComponentPage() === null}>
+            <Show when={loadState() === 'loading'}>
+              <div class="ui-settings-status ui-settings-loading">Loading settings…</div>
+            </Show>
 
-          <Show
-            when={
-              loadState() === 'ready' &&
-              filteredDeclarations().length === 0 &&
-              declarations().length > 0
-            }
-          >
-            <div class="ui-settings-status ui-settings-nomatch">No settings match your search.</div>
-          </Show>
+            <Show when={loadState() === 'failed'}>
+              <div class="ui-settings-status ui-settings-failed">
+                <span>Failed to load settings.</span>
+                <Button onClick={() => void refresh()}>Retry</Button>
+              </div>
+            </Show>
 
-          {/* Render all sections; hide non-matching rows via inline style. */}
-          <Show when={loadState() === 'ready'}>
-            <For each={sections()}>
-              {(section) => {
-                const sectionDecls = () => declarations().filter((d) => d.section === section)
-                const sectionVisible = () => sectionDecls().some((d) => visibleKeys().has(d.key))
-                return (
-                  <div style={sectionVisible() ? {} : { display: 'none' }}>
-                    <PageSection id={'st-section-' + encodeURIComponent(section)} title={section}>
-                      <For each={sectionDecls()}>
-                        {(decl) => <SettingRow decl={decl} visible={visibleKeys().has(decl.key)} />}
-                      </For>
-                    </PageSection>
-                  </div>
-                )
-              }}
-            </For>
-          </Show>
+            <Show
+              when={
+                loadState() === 'ready' &&
+                filteredDeclarations().length === 0 &&
+                declarations().length > 0
+              }
+            >
+              <div class="ui-settings-status ui-settings-nomatch">
+                No settings match your search.
+              </div>
+            </Show>
 
-          {/* ExportSection as a child component (no mountExportSection). */}
-          <Show when={loadState() === 'ready'}>
-            <ExportSection profileClient={props.profileClient} />
+            {/* Render all sections; hide non-matching rows via inline style. */}
+            <Show when={loadState() === 'ready'}>
+              <For each={sections()}>
+                {(section) => {
+                  const sectionDecls = () => declarations().filter((d) => d.section === section)
+                  const sectionVisible = () => sectionDecls().some((d) => visibleKeys().has(d.key))
+                  return (
+                    <div style={sectionVisible() ? {} : { display: 'none' }}>
+                      <PageSection id={'st-section-' + encodeURIComponent(section)} title={section}>
+                        <For each={sectionDecls()}>
+                          {(decl) => (
+                            <SettingRow decl={decl} visible={visibleKeys().has(decl.key)} />
+                          )}
+                        </For>
+                      </PageSection>
+                    </div>
+                  )
+                }}
+              </For>
+            </Show>
+
+            {/* ExportSection as a child component (no mountExportSection). */}
+            <Show when={loadState() === 'ready'}>
+              <ExportSection profileClient={props.profileClient} />
+            </Show>
           </Show>
         </div>
       </Page>

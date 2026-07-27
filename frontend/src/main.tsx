@@ -108,7 +108,19 @@ async function main() {
   registry.register(SURFACE_ID_SETTINGS, {
     surfaceType: SURFACE_SETTINGS,
     singletonKey: SINGLETON_SETTINGS,
-    factory: () => new SettingsContent(profileClient),
+    // Settings hosts the Connections page (nocx-imkb.3), so it needs the same
+    // connect callback the standalone surface has. Assigned inside the factory,
+    // before mount: the factory builds a fresh SettingsContent each time it is
+    // opened, and a setter applied afterwards would leave the first connect
+    // click of a freshly opened tab with nothing to call.
+    factory: () => {
+      const content = new SettingsContent(profileClient)
+      content.onConnect = (profile) => {
+        log.info('nocx: connect from Settings', { profileId: profile.id })
+        tm.newSSHTab(profile.id, profile.options.host, profile.options.user)
+      }
+      return content
+    },
     descriptor: {
       restoreDescriptor: null,
       supportsAttention: false,

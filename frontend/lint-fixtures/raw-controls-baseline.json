@@ -29,63 +29,15 @@
     },
     {
       "file": "frontend/src/connections.tsx",
-      "id": "64f9ce25d0a2",
-      "control": "button",
-      "line": 257
-    },
-    {
-      "file": "frontend/src/connections.tsx",
       "id": "a51dbc0ba6f1",
       "control": "input/radio",
-      "line": 359
-    },
-    {
-      "file": "frontend/src/connections.tsx",
-      "id": "f2e176190d68",
-      "control": "button",
-      "line": 458
-    },
-    {
-      "file": "frontend/src/connections.tsx",
-      "id": "6404cb35a310",
-      "control": "button",
-      "line": 461
-    },
-    {
-      "file": "frontend/src/connections.tsx",
-      "id": "2f89bc5d04cf",
-      "control": "button",
-      "line": 465
+      "line": 353
     },
     {
       "file": "frontend/src/connections.tsx",
       "id": "d1e1f70bf39c",
       "control": "input/radio",
-      "line": 529
-    },
-    {
-      "file": "frontend/src/connections.tsx",
-      "id": "9362eb61f664",
-      "control": "input/password",
-      "line": 546
-    },
-    {
-      "file": "frontend/src/connections.tsx",
-      "id": "107b1121d0dd",
-      "control": "button",
-      "line": 587
-    },
-    {
-      "file": "frontend/src/connections.tsx",
-      "id": "6cc5974ed7af",
-      "control": "button",
-      "line": 591
-    },
-    {
-      "file": "frontend/src/connections.tsx",
-      "id": "e85d751d95fe",
-      "control": "button",
-      "line": 595
+      "line": 523
     },
     {
       "file": "frontend/src/export-section.tsx",
