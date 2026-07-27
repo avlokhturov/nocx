@@ -1,8 +1,8 @@
 import { test, expect } from './harness'
 
 test.describe('settings scroll — normal', () => {
-  // Bug: the .st-content scroll chain is broken because SettingsContent.mount
-  // appends an unclassed <div> into .pane, so flex:1 on .st-content never
+  // Bug: the .ui-page__scroll scroll chain is broken because SettingsContent.mount
+  // appends an unclassed <div> into .pane, so flex:1 on .ui-page__scroll never
   // receives a bounded block size and the pane clips the content instead of
   // scrolling it. Reproduces only in WebKit (nocx-82l9.2).
 
@@ -19,10 +19,10 @@ test.describe('settings scroll — normal', () => {
 
     // Open Settings
     await page.keyboard.press('Meta+,')
-    await expect(page.locator('.st-content')).toBeVisible({ timeout: 5000 })
+    await expect(page.locator('.ui-page__scroll')).toBeVisible({ timeout: 5000 })
 
     // Find the last visible row and scroll it into view
-    const lastRow = page.locator('.st-row').last()
+    const lastRow = page.locator('.ui-settings-row').last()
     await lastRow.scrollIntoViewIfNeeded()
 
     // When the scroll chain works, the last row's bottom is within the pane.
@@ -51,10 +51,10 @@ test.describe('settings scroll — narrow', () => {
 
     // Open Settings
     await page.keyboard.press('Meta+,')
-    await expect(page.locator('.st-content')).toBeVisible({ timeout: 5000 })
+    await expect(page.locator('.ui-page__scroll')).toBeVisible({ timeout: 5000 })
 
     // Narrow layout stacks rail above content — verify scroll still works.
-    const lastRow = page.locator('.st-row').last()
+    const lastRow = page.locator('.ui-settings-row').last()
     await lastRow.scrollIntoViewIfNeeded()
 
     const pane = page.locator('.pane.active')

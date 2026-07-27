@@ -1,16 +1,16 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // SettingsContent — wraps the Solid settings component as a TabContent.
 // Thin adapter over SolidTabContent; keeps existing public behaviour
-// (focus, scrollToKey, narrow-breakpoint handling). The entire UI is the
-// Solid component in settings.tsx. ExportSection is rendered as a child
-// component inside it.
+// (focus, scrollToKey). Page owns the narrow breakpoint
+// (base.css @media max-width: 640px). ExportSection is rendered as a
+// child component inside SettingsComponent.
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { createComponent } from 'solid-js'
 import { render } from 'solid-js/web'
 import { type ProfileClient } from './profiles'
 import { type SettingsObserver } from './settings-observer'
-import { SolidTabContent, type TabHost, type ContentViewport } from './solid-tab-content'
+import { SolidTabContent, type TabHost } from './solid-tab-content'
 import type { SurfaceType, SingletonKey } from './tab-content'
 import { SettingsComponent, type SettingsComponentHandle } from './settings'
 
@@ -18,11 +18,6 @@ import { SettingsComponent, type SettingsComponentHandle } from './settings'
 
 export const SURFACE_SETTINGS: SurfaceType = 'nocx.settings' as SurfaceType
 export const SINGLETON_SETTINGS: SingletonKey = 'nocx.settings' as SingletonKey
-
-// ── Breakpoint ─────────────────────────────────────────────────────────
-
-/** Width below which the rail stacks above the content column. */
-const NARROW_BREAKPOINT_PX = 640
 
 // ── SettingsContent ─────────────────────────────────────────────────────
 
@@ -65,10 +60,9 @@ export class SettingsContent extends SolidTabContent {
     this.handle?.focus()
   }
 
-  viewportChanged(viewport: ContentViewport): void {
-    const narrow = viewport.width < NARROW_BREAKPOINT_PX
-    this.handle?.setNarrow(narrow)
-  }
+  // viewportChanged is inherited from SolidTabContent as a no-op. Page owns the
+  // narrow breakpoint in CSS now (base.css @media max-width: 640px), so Settings
+  // has nothing to do with the viewport and does not override it.
 
   // dispose() inherited from SolidTabContent — it tears down the root
   // element and Solid root. The handle reference becomes stale naturally

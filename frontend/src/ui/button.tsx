@@ -1,3 +1,4 @@
+import type { JSX } from 'solid-js'
 /**
  * Button — the terminal's action affordance.
  *
@@ -18,7 +19,7 @@ const VARIANT_CLASS: Record<ButtonVariant, string> = {
 
 export interface ButtonProps {
   class?: string
-  children: string
+  children: JSX.Element
   onClick: () => void
   disabled?: boolean
   title?: string
