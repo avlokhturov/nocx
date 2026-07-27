@@ -63,25 +63,14 @@
   border-left-color: var(--color-accent);
 }
 
-.cm-quick-connect {
-  padding: 4px 8px;
-  background: var(--color-accent);
-  border: none;
-  border-radius: 4px;
-  color: var(--color-canvas);
-  cursor: pointer;
-  font-size: 11px;
-  font-weight: 600;
+.cm-item-actions {
   margin-left: 8px;
   opacity: 0;
   transition: opacity 0.15s;
 }
 
-.cm-item:hover .cm-quick-connect {
+.cm-item:hover .cm-item-actions {
   opacity: 1;
-}
-.cm-quick-connect:hover {
-  background: var(--color-accent-hover);
 }
 
 .cm-item-info {
@@ -618,37 +607,6 @@
   display: flex;
   align-items: center;
   gap: 8px;
-}
-
-.clipboard-banner-btn {
-  --wails-draggable: no-drag;
-  padding: 4px 10px;
-  border: 0;
-  border-radius: 4px;
-  font-family: var(--font-family-ui);
-  font-size: 11px;
-  line-height: 1;
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.clipboard-banner-allow {
-  background: var(--color-accent);
-  color: var(--color-canvas);
-}
-
-.clipboard-banner-allow:hover {
-  background: var(--color-accent-hover);
-}
-
-.clipboard-banner-suppress {
-  background: transparent;
-  color: var(--color-text-dim);
-}
-
-.clipboard-banner-suppress:hover {
-  color: var(--color-text-muted);
-  background: color-mix(in srgb, white, transparent 94%);
 }
 
 .clipboard-banner-dismiss {

@@ -1,81 +1,103 @@
-/* Button — variant chrome.
-   Moved verbatim from kit.css by T1 (nocx-v0ai); still ancestor-independent, since
-   these variants were already keyed on the component's own classes. T14 (nocx-c2t6)
-   rewrites them onto `.ui-button` + `data-variant` and gives `default` a real
-   appearance.
+/* Button — action affordance.
+   Base class: `.ui-button`. Variance: `data-variant` (default | primary | danger)
+   and `data-size` (sm | md).
 
-   No `:disabled` rule here on purpose. kit.css declared one as
-   `button.kit-scope:disabled` — the element-WITH-class form — and `.kit-scope` is only
-   ever on a <div>, so it matched nothing and disabled buttons have never had any
-   treatment. Relocating a dead selector would carry the lie into a fresh file; the real
-   rule is owed by T14. */
+   Declarations moved from the old `.ui-btn-*` classes (T14, nocx-c2t6).
+   All variants share `font: inherit; cursor: pointer; font-size; border-radius;
+   white-space: nowrap` via the base rule.
 
-.ui-btn-primary {
-  height: 24px;
-  padding: 0 12px;
-  background: var(--color-accent);
-  color: var(--color-canvas);
-  border: none;
-  border-radius: var(--control-radius-sm);
+   Before → after (property list for the verification gate):
+     .ui-btn-secondary → .ui-button[data-variant="default"]
+     .ui-btn-primary   → .ui-button[data-variant="primary"]
+     .ui-btn-danger    → .ui-button[data-variant="danger"]
+     ─ (nonexistent)   → .ui-button:disabled  (new — was dead button.kit-scope:disabled)
+     .ui-btn-close     → deleted (IconButton owns this now)
+   No declarations were dropped; all moved to the appropriate variant or the base. */
+
+.ui-button {
   font: inherit;
   font-size: var(--font-size-sm);
-  font-weight: 500;
   cursor: pointer;
   white-space: nowrap;
+  border-radius: var(--control-radius-sm);
 }
 
-.ui-btn-primary:hover {
-  background: var(--color-accent-hover);
-}
+/* ── Default (neutral) — today's secondary, renamed (§3.6 vocabulary) ── */
 
-/* The neutral action — the kit had primary, danger and close, and nothing for
-   an ordinary button, so those rendered as native platform chrome. */
-.ui-btn-secondary {
+.ui-button[data-variant='default'] {
   height: var(--control-height-sm);
   padding: 0 10px;
   background: var(--color-surface-raised);
-  color: var(--color-text-muted);
+  color: var(--color-text);
   border: 1px solid var(--color-border);
-  border-radius: var(--control-radius-sm);
-  font: inherit;
-  font-size: var(--font-size-sm);
-  cursor: pointer;
-  white-space: nowrap;
 }
 
-.ui-btn-secondary:hover {
+.ui-button[data-variant='default']:hover {
   background: var(--color-surface-hover);
   color: var(--color-text);
   border-color: var(--color-accent);
 }
 
-.ui-btn-danger {
-  padding: 0 8px;
+/* ── Primary (accent-filled) ────────────────────────────────────────── */
+
+.ui-button[data-variant='primary'] {
   height: 24px;
+  padding: 0 12px;
+  background: var(--color-accent);
+  color: var(--color-canvas);
+  border: none;
+  font-weight: 500;
+}
+
+.ui-button[data-variant='primary']:hover {
+  background: var(--color-accent-hover);
+}
+
+/* ── Danger (danger outline) ─────────────────────────────────────────── */
+
+.ui-button[data-variant='danger'] {
+  height: 24px;
+  padding: 0 8px;
   background: transparent;
   color: var(--color-danger);
   border: 1px solid var(--color-danger);
-  border-radius: var(--control-radius-sm);
-  font: inherit;
-  font-size: var(--font-size-sm);
-  cursor: pointer;
 }
 
-.ui-btn-danger:hover {
+.ui-button[data-variant='danger']:hover {
   background: color-mix(in srgb, var(--color-danger), transparent 90%);
 }
 
-.ui-btn-close {
-  background: transparent;
-  color: var(--color-text-muted);
-  border: none;
-  cursor: pointer;
-  font-size: var(--font-size-sm);
-  padding: 4px;
-  border-radius: var(--control-radius-sm);
+/* ── Size sm (for inline/chrome uses like quick-connect) ─────────────── */
+
+.ui-button[data-size='sm'] {
+  height: var(--control-height-xs);
+  padding: 0 8px;
+  font-size: 11px;
 }
 
-.ui-btn-close:hover {
+/* ── Disabled — was dead code as button.kit-scope:disabled (§3.6) ───── */
+
+.ui-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ── Ghost — a button that reads as text ─────────────────────────────────
+   The settings section-nav row is one: transparent, borderless, inheriting the
+   surrounding type, and it is a real third look rather than a variation on the
+   other two. It arrived here because T14 first replaced it with a RAW <button> —
+   which satisfies "no class passed to Button" by abandoning the kit altogether,
+   the exact defect this migration exists to end. A genuinely different look is a
+   variant, and this is what naming it looks like. */
+
+.ui-button[data-variant='ghost'] {
+  background: transparent;
+  border: none;
+  color: var(--color-text-muted);
+  font: inherit;
+}
+
+.ui-button[data-variant='ghost']:hover {
   background: var(--color-surface-hover);
   color: var(--color-text);
 }

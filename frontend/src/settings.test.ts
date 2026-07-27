@@ -221,7 +221,7 @@ describe('SettingsContent', () => {
     mockReady(client)
     await content.mount(target, host, signal)
 
-    const links = target.querySelectorAll('.ui-settings-section-nav-link')
+    const links = target.querySelectorAll('.ui-settings-section-nav-item > .ui-button')
     const labels = Array.from(links).map((l) => l.textContent.replace(/\s*\d+\s*/, '').trim())
 
     // Generated sections keep Go's declaration order and stay first — that is
@@ -244,7 +244,7 @@ describe('SettingsContent', () => {
     })
     await content.mount(target, host, signal)
 
-    const links = target.querySelectorAll('.ui-settings-section-nav-link')
+    const links = target.querySelectorAll('.ui-settings-section-nav-item > .ui-button')
     const terminalLink = Array.from(links).find((l) => l.textContent.includes('Terminal'))
     const appLink = Array.from(links).find((l) => l.textContent.includes('Application'))
     const aiLink = Array.from(links).find((l) => l.textContent.includes('AI'))
@@ -289,7 +289,7 @@ describe('SettingsContent', () => {
 
     // Find the section nav link for Application
     const appLink = Array.from(
-      target.querySelectorAll<HTMLButtonElement>('.ui-settings-section-nav-link'),
+      target.querySelectorAll<HTMLButtonElement>('.ui-settings-section-nav-item > .ui-button'),
     ).find((l) => l.textContent.includes('Application'))
     expect(appLink).toBeTruthy()
 
@@ -477,7 +477,7 @@ describe('SettingsContent', () => {
     mockReady(client, { declarations: [...TEST_DECLARATIONS, extraDecl] })
     await content.mount(target, host, signal)
 
-    const links = target.querySelectorAll('.ui-settings-section-nav-link')
+    const links = target.querySelectorAll('.ui-settings-section-nav-item > .ui-button')
     const labels = Array.from(links).map((l) => l.textContent.replace(/\s*\d+\s*/, '').trim())
     expect(labels).toContain('Editor')
     // Original sections still present.

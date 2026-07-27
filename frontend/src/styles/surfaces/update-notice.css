@@ -33,19 +33,3 @@
 .update-notes-link:hover {
   text-decoration: underline;
 }
-
-.update-apply-btn {
-  background: var(--color-accent);
-  color: var(--color-canvas);
-  border: none;
-  border-radius: 3px;
-  padding: 2px 8px;
-  font: inherit;
-  font-weight: 500;
-  cursor: pointer;
-  --wails-draggable: no-drag;
-}
-
-.update-apply-btn:hover {
-  background: var(--color-accent-hover);
-}

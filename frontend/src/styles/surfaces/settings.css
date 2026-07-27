@@ -72,35 +72,28 @@
   margin-bottom: 2px;
 }
 
-.ui-settings-section-nav-link {
+/* Placement for the nav row. The look — transparent, borderless, inheriting the
+   surrounding type, and its hover — belongs to Button's `ghost` variant now
+   (T14, nocx-c2t6). What is left here is how the row sits in the rail: full
+   width, left-aligned, with its own hit area. */
+.ui-settings-section-nav-item > .ui-button {
   display: flex;
   align-items: center;
   gap: var(--space-2);
   width: 100%;
   padding: var(--space-2) 10px;
-  border: none;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--color-text-muted);
-  font: inherit;
   text-align: left;
-  cursor: pointer;
-}
-
-.ui-settings-section-nav-link:hover {
-  background: color-mix(in srgb, white, transparent 96%);
-  color: var(--color-text);
 }
 
 /* Filled, not tinted: the active page has to be findable at a glance across a
    list, and an 88%-transparent accent wash is not. */
-.ui-settings-section-nav-active .ui-settings-section-nav-link {
+.ui-settings-section-nav-active > .ui-button {
   background: var(--color-accent);
   color: var(--color-canvas);
   font-weight: 500;
 }
 
-.ui-settings-section-nav-active .ui-settings-section-nav-link:hover {
+.ui-settings-section-nav-active > .ui-button:hover {
   background: var(--color-accent-hover);
   color: var(--color-canvas);
 }
@@ -108,11 +101,11 @@
 /* The modified-count badge sits at the far end of the row, and on the active
    row it cannot keep the warning palette — orange on the accent fill was
    unreadable. On the filled row it borrows the row's own colours instead. */
-.ui-settings-section-nav-link .ui-badge[data-tone='warning'] {
+.ui-settings-section-nav-item > .ui-button .ui-badge[data-tone='warning'] {
   margin-left: auto;
 }
 
-.ui-settings-section-nav-active .ui-settings-section-nav-link .ui-badge[data-tone='warning'] {
+.ui-settings-section-nav-active > .ui-button .ui-badge[data-tone='warning'] {
   background: color-mix(in srgb, var(--color-canvas), transparent 75%);
   color: var(--color-canvas);
 }
@@ -242,11 +235,6 @@
   color: var(--color-accent);
 }
 
-.ui-settings-secret-clear {
-  border-color: color-mix(in srgb, var(--color-danger), transparent 70%);
-  color: var(--color-danger);
-}
-
 /* ── Error message ────────────────────────────────────────────────── */
 
 .ui-settings-error {
@@ -308,20 +296,6 @@
   display: inline-flex;
   align-items: center;
   font-size: var(--font-size-sm);
-}
-
-.ui-settings-reset-btn {
-  padding: 0;
-  background: none;
-  border: none;
-  color: var(--color-accent);
-  font: inherit;
-  cursor: pointer;
-  text-decoration: none;
-}
-
-.ui-settings-reset-btn:hover {
-  text-decoration: underline;
 }
 
 /* The changed-row marker the badge used to be. Scoped to the row's own label so

@@ -598,9 +598,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
     return (
       <Show when={decl.default !== undefined && decision().canReset}>
         <span class="ui-settings-provenance">
-          <Button class="ui-settings-reset-btn" onClick={() => void resetSetting(decl.key)}>
-            Reset to default
-          </Button>
+          <Button onClick={() => void resetSetting(decl.key)}>Reset to default</Button>
         </span>
       </Show>
     )
@@ -696,7 +694,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
                 {secretStates[decl.key] ? 'Configured' : 'Not configured'}
               </span>
               <Button
-                variant="secondary"
+                variant="default"
                 onClick={() => {
                   const value = prompt('Enter new value for "' + decl.label + '":')
                   if (value === null) return
@@ -705,11 +703,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
               >
                 Replace
               </Button>
-              <Button
-                class="ui-settings-secret-clear"
-                variant="danger"
-                onClick={() => void deleteSecret(decl.key)}
-              >
+              <Button variant="danger" onClick={() => void deleteSecret(decl.key)}>
                 Clear
               </Button>
             </div>
@@ -774,10 +768,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
                         }}
                         data-section={page.title}
                       >
-                        <Button
-                          class="ui-settings-section-nav-link"
-                          onClick={() => handleNavClick(page)}
-                        >
+                        <Button variant="ghost" onClick={() => handleNavClick(page)}>
                           {page.title}
                           <Show when={count() !== undefined && count()! > 0}>
                             <Badge tone="warning">{String(count())}</Badge>
@@ -816,7 +807,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
             <Show when={loadState() === 'failed'}>
               <div class="ui-settings-status ui-settings-failed">
                 <span>Failed to load settings.</span>
-                <Button variant="secondary" onClick={() => void refresh()}>
+                <Button variant="default" onClick={() => void refresh()}>
                   Retry
                 </Button>
               </div>

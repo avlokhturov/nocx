@@ -4,33 +4,21 @@ import type { JSX } from 'solid-js'
 /**
  * Button — the terminal's action affordance.
  *
- * Justified by callers:
- * - settings.ts: st-retry-btn, st-secret-replace/clear, st-reset-btn
- * - connections.ts: cm-primary/new, cm-save, cm-connect, cm-danger, cm-quick-connect, plain toolbar buttons
- * - export-section.ts: st-export-btn, st-export-btn-primary, st-export-card-toggle
- * - banner.ts: clipboard-banner-allow, clipboard-banner-suppress, clipboard-banner-dismiss
- * - sidebar.ts: activity-bar view/action buttons
- * - tab-strip.ts: tab-close, tab-add
- * - update-notice.ts: update-apply-btn
+ * The button carries `class="ui-button"` on the `<button>` element and
+ * `data-variant` / `data-size` for variance (§3.1 of the design spec).
+ *
+ * Variant vocabulary: `default` (neutral, today's secondary appearance),
+ * `primary` (accent-filled), `danger` (danger outline).
+ *
+ * `class` is intentionally absent as a prop — appearance is locked to
+ * the kit (§3.6). Layout and placement belong to a parent wrapper or
+ * a typed prop.
  */
 
-export type ButtonVariant = 'default' | 'secondary' | 'primary' | 'danger' | 'close'
-
-const VARIANT_CLASS: Record<ButtonVariant, string> = {
-  // `default` maps to no class on purpose: 27 call sites pass their own fully
-  // formed class (.tab-add, .cm-save, activity-bar buttons) and adding a base
-  // class underneath them would fight rules that assume a bare button. The
-  // consequence is that a Button with neither a variant nor a class renders as
-  // native platform chrome — tracked separately, it needs a per-caller pass.
-  default: '',
-  secondary: 'ui-btn-secondary',
-  primary: 'ui-btn-primary',
-  danger: 'ui-btn-danger',
-  close: 'ui-btn-close',
-}
+export type ButtonVariant = 'default' | 'primary' | 'danger' | 'ghost'
+export type ButtonSize = 'sm' | 'md'
 
 export interface ButtonProps {
-  class?: string
   children: JSX.Element
   onClick: (e: MouseEvent) => void
   disabled?: boolean
@@ -38,6 +26,7 @@ export interface ButtonProps {
   ariaLabel?: string
   type?: 'button' | 'submit' | 'reset'
   variant?: ButtonVariant
+  size?: ButtonSize
   /**
    * Roving-tabindex participation. Chrome controls that sit inside a toolbar
    * managing their own focus order need -1 so they are not a second tab stop.
@@ -49,7 +38,6 @@ type ButtonAttrs = ButtonProps & JSX.IntrinsicElements['button']
 
 export function Button(props: ButtonAttrs) {
   const knownKeys = [
-    'class',
     'children',
     'onClick',
     'disabled',
@@ -57,13 +45,15 @@ export function Button(props: ButtonAttrs) {
     'ariaLabel',
     'type',
     'variant',
+    'size',
     'tabIndex',
   ] as const
   const [local, rest] = splitProps(props, knownKeys)
-  const variantClass = () => VARIANT_CLASS[local.variant ?? 'default']
   return (
     <button
-      class={`${variantClass()} ${local.class ?? ''}`.trim()}
+      class="ui-button"
+      data-variant={local.variant ?? 'default'}
+      {...(local.size && local.size !== 'md' ? { 'data-size': local.size } : {})}
       type={local.type ?? 'button'}
       disabled={local.disabled === true}
       title={local.title ?? ''}

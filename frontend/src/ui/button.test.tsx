@@ -35,10 +35,10 @@ describe('Button', () => {
     expect(btn.getAttribute('type')).toBe('button')
   })
 
-  it('sets the class attribute', () => {
-    subject({ class: 'my-btn' })
+  it('renders base class ui-button', () => {
+    subject()
     const btn = screen.getByText('Click me')
-    expect(btn.getAttribute('class')).toBe('my-btn')
+    expect(btn.classList.contains('ui-button')).toBe(true)
   })
 
   it('defaults type to button', () => {
@@ -78,36 +78,34 @@ describe('Button', () => {
     expect(screen.getByLabelText('Dismiss')).toBeTruthy()
   })
 
-  it('renders default variant with no extra class', () => {
+  it('defaults data-variant to default', () => {
     subject()
     const btn = screen.getByText('Click me')
-    expect(btn.classList.contains('ui-btn-primary')).toBe(false)
-    expect(btn.classList.contains('ui-btn-danger')).toBe(false)
+    expect(btn.getAttribute('data-variant')).toBe('default')
   })
 
-  it('applies primary variant class', () => {
+  it('renders data-variant="primary" for primary variant', () => {
     subject({ variant: 'primary' })
     const btn = screen.getByText('Click me')
-    expect(btn.classList.contains('ui-btn-primary')).toBe(true)
+    expect(btn.getAttribute('data-variant')).toBe('primary')
   })
 
-  it('applies danger variant class', () => {
+  it('renders data-variant="danger" for danger variant', () => {
     subject({ variant: 'danger' })
     const btn = screen.getByText('Click me')
-    expect(btn.classList.contains('ui-btn-danger')).toBe(true)
+    expect(btn.getAttribute('data-variant')).toBe('danger')
   })
 
-  it('applies close variant class', () => {
-    subject({ variant: 'close' })
+  it('renders data-size="sm" when size is sm', () => {
+    subject({ size: 'sm' })
     const btn = screen.getByText('Click me')
-    expect(btn.classList.contains('ui-btn-close')).toBe(true)
+    expect(btn.getAttribute('data-size')).toBe('sm')
   })
 
-  it('combines variant and custom class', () => {
-    subject({ variant: 'primary', class: 'my-btn' })
+  it('does not render data-size for md (default)', () => {
+    subject({ size: 'md' })
     const btn = screen.getByText('Click me')
-    expect(btn.classList.contains('ui-btn-primary')).toBe(true)
-    expect(btn.classList.contains('my-btn')).toBe(true)
+    expect(btn.hasAttribute('data-size')).toBe(false)
   })
 
   it('has role button for accessibility', () => {

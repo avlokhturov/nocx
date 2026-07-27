@@ -77,7 +77,7 @@ const UpdateNoticeView: Component<UpdateNoticeViewProps> = (props) => {
           >
             release notes
           </a>{' '}
-          <Button class="update-apply-btn" onClick={() => props.onApply()}>
+          <Button variant="primary" onClick={() => props.onApply()}>
             Update
           </Button>
         </Match>

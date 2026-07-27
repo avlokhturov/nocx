@@ -23,6 +23,12 @@ function click(sel: string): void {
   if (!el) throw new Error(`no element for ${sel}`)
   el.click()
 }
+function clickText(text: string): void {
+  const buttons = document.querySelectorAll<HTMLButtonElement>('button')
+  const el = Array.from(buttons).find((b) => b.textContent?.trim() === text)
+  if (!el) throw new Error(`no button with text "${text}"`)
+  el.click()
+}
 
 function makeBanner(): ClipboardBanner {
   return new ClipboardBannerImpl()
@@ -67,14 +73,14 @@ describe('ClipboardBanner', () => {
   it('resolves with "allow" when allow is clicked', async () => {
     const banner = makeBanner()
     const choice = banner.show()
-    click('.clipboard-banner-allow')
+    clickText('Allow clipboard writes')
     expect(await choice).toBe('allow')
   })
 
   it('resolves with "suppress" when suppress is clicked', async () => {
     const banner = makeBanner()
     const choice = banner.show()
-    click('.clipboard-banner-suppress')
+    clickText("Don't show again")
     expect(await choice).toBe('suppress')
   })
 
@@ -98,7 +104,7 @@ describe('ClipboardBanner', () => {
     expect(banner.shown).toBe(true)
     expect(document.querySelector('.clipboard-banner')).not.toBeNull()
 
-    click('.clipboard-banner-allow')
+    clickText('Allow clipboard writes')
     expect(await second).toBe('allow')
   })
 
@@ -112,7 +118,7 @@ describe('ClipboardBanner', () => {
     expect(await banner.show()).toBe('dismiss')
     expect(document.querySelectorAll('.clipboard-banner')).toHaveLength(1)
 
-    click('.clipboard-banner-suppress')
+    clickText("Don't show again")
     expect(await first).toBe('suppress')
   })
 
@@ -131,7 +137,7 @@ describe('ClipboardBanner', () => {
   it('removes the banner element after allow', async () => {
     const banner = makeBanner()
     const choice = banner.show()
-    click('.clipboard-banner-allow')
+    clickText('Allow clipboard writes')
     await choice
     expect(panes.querySelector('.clipboard-banner')).toBeNull()
   })
@@ -139,7 +145,7 @@ describe('ClipboardBanner', () => {
   it('removes the banner element after suppress', async () => {
     const banner = makeBanner()
     const choice = banner.show()
-    click('.clipboard-banner-suppress')
+    clickText("Don't show again")
     await choice
     expect(panes.querySelector('.clipboard-banner')).toBeNull()
   })

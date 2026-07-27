@@ -108,10 +108,9 @@ function ConfigExportActions(props: { profileClient: ProfileClient }) {
         setState('busy', false)
       })
   }
-
   return (
     <>
-      <Button variant="secondary" disabled={state.busy} onClick={handleClick}>
+      <Button variant="default" disabled={state.busy} onClick={handleClick}>
         Export Configuration
       </Button>
       <StatusLine message={state.status} />
@@ -192,12 +191,9 @@ function PortableEncryptedActions(props: { profileClient: ProfileClient }) {
           label="Include private content (conversations, command history)"
         />
       </div>
-      <div class="st-export-btn-row">
-        <Button variant="primary" disabled={state.busy} onClick={handleEncrypt}>
-          Encrypt and Export
-        </Button>
-        <StatusLine message={state.status} />
-      </div>
+      <Button variant="primary" disabled={state.busy} onClick={handleEncrypt}>
+        Encrypt and Export
+      </Button>
     </>
   )
 }
@@ -232,10 +228,9 @@ function BackupActions(props: { profileClient: ProfileClient }) {
         setState('busy', false)
       })
   }
-
   return (
     <>
-      <Button variant="secondary" disabled={state.busy} onClick={handleShow}>
+      <Button variant="default" disabled={state.busy} onClick={handleShow}>
         Show Backup Paths
       </Button>
       <StatusLine message={state.status} />
@@ -323,14 +318,13 @@ function ImportActions(props: { profileClient: ProfileClient }) {
         setState('portableBusy', false)
       })
   }
-
   return (
     <>
       <div class="st-export-import-section">
         <label class="st-export-import-label">Import from configuration export (.json)</label>
         <FileInput accept=".json" onChange={(f) => setState('configFile', f)} />
         <Button
-          class="ui-export-btn"
+          variant="default"
           disabled={state.configBusy || !state.configFile}
           onClick={handleConfigImport}
         >
@@ -348,7 +342,7 @@ function ImportActions(props: { profileClient: ProfileClient }) {
           onInput={(v) => setState('portablePass', v)}
         />
         <Button
-          class="ui-export-btn"
+          variant="default"
           disabled={state.portableBusy || !state.encFile || !state.portablePass}
           onClick={handlePortableImport}
         >

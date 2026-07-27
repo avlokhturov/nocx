@@ -149,7 +149,7 @@ const ConfirmDialog: Component<{
     onClose={() => props.onResolve(false)}
     footer={
       <>
-        <Button variant="secondary" onClick={() => props.onResolve(false)}>
+        <Button variant="default" onClick={() => props.onResolve(false)}>
           {props.cancelLabel}
         </Button>
         <Button variant="primary" onClick={() => props.onResolve(true)}>

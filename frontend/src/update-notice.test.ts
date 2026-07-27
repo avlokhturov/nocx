@@ -80,7 +80,7 @@ describe('UpdateNotice', () => {
     expect(el.hasAttribute('hidden')).toBe(false)
     expect(el.textContent).toContain('1.0.0 available')
     expect(el.querySelector('.update-notes-link')).not.toBeNull()
-    expect(el.querySelector('.update-apply-btn')).not.toBeNull()
+    expect(el.querySelector('.ui-button')).not.toBeNull()
   })
 
   it('showDownloading sets downloading class and content', () => {
@@ -135,7 +135,7 @@ describe('UpdateNotice', () => {
     ctrl.showAvailable('1.0.0', 'https://example.com/release')
 
     // Click the Update button — starts async apply.
-    const btn = bar.querySelector('.update-apply-btn') as HTMLButtonElement
+    const btn = bar.querySelector('.ui-button') as HTMLButtonElement
     expect(btn).not.toBeNull()
     btn.click()
 
@@ -156,7 +156,7 @@ describe('UpdateNotice', () => {
 
     ctrl.showAvailable('1.0.0', 'https://example.com/release')
 
-    const btn = bar.querySelector('.update-apply-btn') as HTMLButtonElement
+    const btn = bar.querySelector('.ui-button') as HTMLButtonElement
     expect(btn).not.toBeNull()
     btn.click()
 
@@ -178,7 +178,7 @@ describe('UpdateNotice', () => {
 
     ctrl.showAvailable('1.0.0', 'https://example.com/release')
 
-    const btn = bar.querySelector('.update-apply-btn') as HTMLButtonElement
+    const btn = bar.querySelector('.ui-button') as HTMLButtonElement
     btn.click()
 
     await vi.waitFor(() => {

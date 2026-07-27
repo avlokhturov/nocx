@@ -255,9 +255,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             {p.options.user || '?'}@{p.options.host}:{p.options.port || 22}
           </div>
         </div>
-        <div onClick={(e) => e.stopPropagation()}>
+        <div class="cm-item-actions" onClick={(e) => e.stopPropagation()}>
           <Button
-            class="cm-quick-connect"
+            variant="primary"
+            size="sm"
             title="Quick connect"
             onClick={() => handleQuickConnect(p)}
           >
@@ -441,12 +442,11 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             />
           </div>
         </Section>
-
         <div class="cm-form-actions">
           <Button variant="primary" onClick={() => props.onConnect?.(profile)}>
             Connect
           </Button>
-          <Button variant="secondary" onClick={() => void saveProfile(profile)}>
+          <Button variant="default" onClick={() => void saveProfile(profile)}>
             {isNew ? 'Create' : 'Save'}
           </Button>
           <Show when={!isNew}>
@@ -570,9 +570,8 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             {formError()}
           </div>
         </Show>
-
         <div class="cm-form-actions">
-          <Button variant="secondary" onClick={() => void saveCred()}>
+          <Button variant="default" onClick={() => void saveCred()}>
             {isNew ? 'Create Credential' : 'Save Credential'}
           </Button>
           <Show when={!isNew}>
@@ -580,7 +579,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
               Delete Credential
             </Button>
           </Show>
-          <Button variant="secondary" onClick={cancelCredential}>
+          <Button variant="default" onClick={cancelCredential}>
             Cancel
           </Button>
         </div>
@@ -618,20 +617,20 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     <div class="cm-root">
       <Toolbar>
         <Button
-          variant="secondary"
+          variant="default"
           onClick={handleImport}
           title="Import SSH profiles from a Tabby config.yml"
         >
           Import from Tabby
         </Button>
         <Button
-          variant="secondary"
+          variant="default"
           onClick={showCredentialsPanel}
           title="Manage saved passwords (keychain)"
         >
           Saved credentials
         </Button>
-        <Button variant="primary" class="cm-primary" onClick={startNewProfile}>
+        <Button variant="primary" onClick={startNewProfile}>
           + New connection
         </Button>
       </Toolbar>

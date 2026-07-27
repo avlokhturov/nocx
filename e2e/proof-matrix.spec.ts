@@ -201,40 +201,18 @@ test.describe('1. Focus matrix', () => {
 // Read computed-style values into local vars BEFORE removing the element,
 // then return them.
 
-test.describe('2. Disabled appearance', () => {
-  // Disabled buttons have never had this treatment, and this test documents that
-  // rather than pretending otherwise.
-  //
-  // kit.css declared it as `button.kit-scope:disabled` — the element-WITH-class form —
-  // and `kit-scope` is only ever applied to a <div>, so the selector matched nothing.
-  // There was no `.kit-scope button:disabled` anywhere. T1 deleted the dead selector
-  // instead of relocating it; T14 (nocx-c2t6) owes the real rule.
-  //
-  // `test.fail()` rather than `skip` on purpose: this expects the failure, so it goes
-  // green today and starts failing the moment someone fixes the defect — which is the
-  // prompt to delete this annotation. A skip would just sit there being ignored.
-  //
-  // The shape under test is the one the app actually produces: a disabled <button>
-  // inside a `.kit-scope` wrapper. The original version of this test built
-  // `<button class="kit-scope">`, which occurs nowhere.
-  test('a disabled button inside .kit-scope has opacity 0.5 and cursor not-allowed', async ({
+  test('a disabled <button class="ui-button"> has opacity 0.5 and cursor not-allowed', async ({
     page,
   }) => {
-    // Inside the body, not beside it: `test.fail()` in a describe body applies to every
-    // test that follows it in the block, which silently marked five passing cases as
-    // expected-failures.
-    test.fail(true, 'disabled buttons are unstyled — nocx-c2t6')
     const result = await page.evaluate(() => {
-      const scope = document.createElement('div')
-      scope.className = 'kit-scope'
       const btn = document.createElement('button')
+      btn.className = 'ui-button'
       btn.disabled = true
-      scope.appendChild(btn)
-      document.body.appendChild(scope)
+      document.body.appendChild(btn)
       const cs = getComputedStyle(btn)
       const opacity = cs.opacity
       const cursor = cs.cursor
-      scope.remove()
+      btn.remove()
       return { opacity, cursor }
     })
     expect(result.opacity).toBe('0.5')

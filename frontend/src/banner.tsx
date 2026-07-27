@@ -55,19 +55,10 @@ function ClipboardBannerComponent(props: { onChoice: (choice: BannerChoice) => v
         security reasons, to protect against malicious software.
       </span>
       <div class="clipboard-banner-actions">
-        <Button
-          class="clipboard-banner-btn clipboard-banner-allow"
-          variant="primary"
-          onClick={() => props.onChoice('allow')}
-        >
+        <Button variant="primary" onClick={() => props.onChoice('allow')}>
           Allow clipboard writes
         </Button>
-        <Button
-          class="clipboard-banner-btn clipboard-banner-suppress"
-          onClick={() => props.onChoice('suppress')}
-        >
-          Don't show again
-        </Button>
+        <Button onClick={() => props.onChoice('suppress')}>Don't show again</Button>
         <IconButton ariaLabel="Dismiss" size="sm" onClick={() => props.onChoice('dismiss')}>
           ✕
         </IconButton>
