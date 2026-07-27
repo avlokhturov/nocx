@@ -254,23 +254,39 @@ The exact mix percentages are a starting point derived by matching the existing
 `#1f2030` (surface hover ≈ `color-mix(in srgb, #1f2335, white 6%)`). The migration
 bead (`nocx-xrrl.2`) should verify and adjust these before committing.
 
-#### 3.1 One derivation that does not work, found by measuring
+#### 3.1 The derivations do not work — none of them, measured
 
-The table above was written by matching two existing values by eye. One does not
-survive contact with arithmetic: `--color-surface-hover` is `#1f2030` against a
-surface of `#1f2335` — **darker**, not lighter — so mixing towards white cannot
-produce it at any percentage.
+Central derivation was the right instinct and the wrong answer for this palette.
+Measured during `nocx-xrrl.2`, not one of the six state colours matches what
+`color-mix()` produces from its base:
 
-That is not a mistake in the palette. A hover state that darkens is a legitimate
-choice on a dark theme, and it is what the app has always done. What was wrong was
-the assumption, written into this ADR before anyone checked, that every state
-colour lightens.
+| Token                    | In the app             | Derived   | Why it differs                                                 |
+| ------------------------ | ---------------------- | --------- | -------------------------------------------------------------- |
+| `--color-surface-hover`  | `#1f2030`              | `#2c3041` | **Darker** than the surface; no percentage of white reaches it |
+| `--color-success-hover`  | `#b9d870`              | `#a8d379` | 17 off in red                                                  |
+| `--color-accent-hover`   | `#89b4fa`              | `#87abf8` | subtle, but not the same colour                                |
+| `--color-surface-active` | `#2a2b3d`              | `#2f3343` | different shade                                                |
+| `--color-danger-hover`   | `rgba(247,118,142,.1)` | `#f88b9f` | a translucent **overlay**, not a solid colour                  |
+| `--color-warning-hover`  | `rgba(224,175,104,.1)` | `#e3b777` | same — a different rendering model                             |
 
-The policy holds with the exception stated: derive centrally where the derivation
-is real, assign per theme where it is not. Deriving a value that every theme then
-has to override is worse than not deriving it.
+The last two are the interesting ones. They are not shades at all: the app tints
+by laying a 10% wash over whatever is beneath, which composites differently
+against every background. A derivation cannot express that, and a solid colour
+that merely looks similar on one surface will be wrong on the next.
 
-Measured during `nocx-xrrl.2`.
+None of this is a defect in the palette. A hover that darkens is a legitimate
+choice on a dark theme, and a translucent tint is a legitimate technique. What was
+wrong was this ADR's assumption, written before anyone checked, that interaction
+colours are the base colour plus some white.
+
+**So state colours are assigned per theme, not derived.** A theme file gains a
+dozen more lines and gains, in exchange, the ability to express a darkening hover
+and a translucent tint. `color-mix()` remains available for a theme author who
+wants it; it is no longer the mechanism the system depends on, so the WebKit floor
+below is a constraint on theme authors rather than on the architecture.
+
+The generic lesson is worth keeping: a derivation rule is a claim about the
+palette, and claims about data get checked against the data.
 
 #### WebKit floor for color-mix()
 

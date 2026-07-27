@@ -34,28 +34,25 @@
   --color-error: #ff6b6b;
 
   /* ── Font families (§2.4) — ADR §2.4 mandates these per theme file ── */
-}
 
-/* ════════════════════════════════════════════════════════════════════════
-   Fallback for environments without color-mix() — WebKitGTK < 2.40,
-   Safari < 16.2.  The derived state colours are explicit here because
-   the central derivation in tokens.css cannot run.
-   ════════════════════════════════════════════════════════════════════════ */
-
-@supports not (background: color-mix(in srgb, red, blue)) {
-  :root,
-  [data-theme='tokyo-night'] {
-    --color-accent-hover: #89b4fa;
-    --color-accent-active: #89b4fa;
-    --color-accent-disabled: rgba(122, 162, 247, 0.6);
-    --color-surface-hover: #1f2030;
-    --color-surface-active: #2a2b3d;
-    --color-surface-disabled: rgba(31, 35, 53, 0.7);
-    --color-success-hover: #b9d870;
-    --color-danger-hover: rgba(247, 118, 142, 0.1);
-    --color-warning-hover: rgba(224, 175, 104, 0.1);
-    --color-focus-ring: rgba(122, 162, 247, 0.6);
-    --color-scrim: rgba(0, 0, 0, 0.5);
-    --color-selection: rgba(122, 162, 247, 0.3);
-  }
+  /* ── Interaction states — assigned, not derived ──────────────────────
+     ADR-0013 §3 proposed deriving these centrally with color-mix(). The
+     palette does not cooperate: measured during nocx-xrrl.2, not one of the
+     six matches its derivation. surface-hover is DARKER than surface, so no
+     percentage of white reaches it; success-hover is off by 17 in red; and
+     danger-hover and warning-hover are translucent overlays, not solid
+     colours, which is a different rendering model rather than a different
+     shade. See ADR-0013 §3.1. */
+  --color-accent-hover: #89b4fa;
+  --color-accent-active: #89b4fa;
+  --color-accent-disabled: rgba(122, 162, 247, 0.6);
+  --color-surface-hover: #1f2030;
+  --color-surface-active: #2a2b3d;
+  --color-surface-disabled: rgba(31, 35, 53, 0.7);
+  --color-success-hover: #b9d870;
+  --color-danger-hover: rgba(247, 118, 142, 0.1);
+  --color-warning-hover: rgba(224, 175, 104, 0.1);
+  --color-focus-ring: rgba(122, 162, 247, 0.6);
+  --color-scrim: rgba(0, 0, 0, 0.5);
+  --color-selection: rgba(122, 162, 247, 0.3);
 }
