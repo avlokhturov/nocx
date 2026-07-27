@@ -1,0 +1,14 @@
+/* Toolbar — a row of peer actions.
+   Moved verbatim from kit.css by T1 (nocx-v0ai). T13 (nocx-jdhy) bounds its `class`
+   passthrough to layout and placement, and considers start/end slots as the
+   replacement for placement classes. */
+
+/* A toolbar is a row of peers; 6px read as one segmented control rather than
+   three separate actions. */
+.ui-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  padding: var(--space-2) 0 var(--space-4);
+}

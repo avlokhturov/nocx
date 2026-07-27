@@ -1,0 +1,57 @@
+/* Field — the form row wrapper, its label, description, error and horizontal variant.
+   Moved verbatim from kit.css by T1 (nocx-v0ai). T11 (nocx-vsf4) keeps `class` on this
+   structural container but bounds it to layout and placement only. */
+
+.ui-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 0;
+}
+
+.ui-field label {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+  font-weight: 500;
+}
+
+.ui-field-desc {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-dim);
+  margin: 0;
+}
+
+.ui-field-error {
+  font-size: var(--font-size-sm);
+  color: var(--color-error);
+  margin: 2px 0 0;
+}
+
+/* A horizontal field reads label-left, control-right — the control hugs the
+   right edge and the label takes the space that is left.
+   It was the other way round: a 180px label column and a control column with
+   `flex: 1 1 auto`. On a 850px-wide surface that squeezed every description
+   into 180px — the OSC 52 one wrapped to ten lines — while a 120px select sat
+   at the start of a 660px column, leaving ~540px of dead space in every row.
+   The measure cap keeps descriptions readable instead of letting them run the
+   full width of a maximised window. */
+.ui-field-horizontal {
+  flex-direction: row;
+  align-items: center;
+  gap: var(--space-6);
+}
+
+.ui-field-horizontal .ui-field-label-col {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 64ch;
+}
+
+.ui-field-horizontal .ui-field-control-col {
+  flex: 0 0 auto;
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}

@@ -1,0 +1,73 @@
+/* SearchField — the positioned icon and the search input.
+   Moved from kit.css by T1 (nocx-v0ai). Still ancestor-keyed; T5 (nocx-2663) rewrites
+   these onto `.ui-search-field__input`.
+
+   The base input declarations are the same ones text-field.css carries, because
+   kit.css styled all four input types from one selector list and T1 splits it per
+   primitive. Repeating token references is not duplication of values. */
+
+/* The icon is positioned over the input rather than laid out beside it, so the
+   input keeps its own full width and border and nothing has to coordinate two
+   boxes. `pointer-events: none` keeps the glyph from swallowing the click that
+   should focus the field. */
+
+.ui-search-field {
+  position: relative;
+  display: block;
+}
+
+.ui-search-field__icon {
+  position: absolute;
+  left: var(--space-2);
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  width: 15px;
+  height: 15px;
+  color: var(--color-text-dim);
+  pointer-events: none;
+}
+
+.ui-search-field__icon svg {
+  width: 100%;
+  height: 100%;
+}
+
+.kit-scope input[type='search'] {
+  height: var(--control-height-md);
+  padding: 0 8px;
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+  border-radius: var(--control-radius-md);
+  font-family: var(--font-family-ui);
+  font-size: var(--font-size-md);
+  outline: none;
+  min-width: 0;
+}
+
+.kit-scope input[type='search']:focus {
+  border-color: var(--color-accent);
+}
+
+.kit-scope input[type='search']::placeholder {
+  color: var(--color-text-dim);
+}
+
+.kit-scope .ui-search-field input[type='search'] {
+  width: 100%;
+  padding-left: 28px;
+}
+
+/* WebKit draws its own clear button and a magnifier decoration on
+   input[type=search]; both fight the one we place. */
+.ui-search-field input[type='search']::-webkit-search-decoration,
+.ui-search-field input[type='search']::-webkit-search-results-button {
+  appearance: none;
+}
+
+/* Disabled slice, cut per primitive by T1. See the design spec §6.1. */
+.kit-scope input[type='search']:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

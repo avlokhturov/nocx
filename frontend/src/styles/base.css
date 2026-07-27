@@ -44,6 +44,32 @@ body {
   height: 100%;
 }
 
+/* ── Focus ring ──────────────────────────────────────────────────────
+   An application-wide accessibility invariant (WCAG 2.4.7), not a per-component
+   detail — a surface that grows a new focusable element must not have to remember to
+   ask for a focus indicator. It lived in kit.css on `.kit-scope :focus-visible` plus
+   bare button/input/select selectors, which meant it reached only the one subtree that
+   applied the scope; moved here by T1 (nocx-v0ai) so that deleting the scope cannot
+   silently narrow it.
+
+   Components override the offset or radius from their own identity where the shape
+   demands it, and nowhere else. `base.css` is deliberately exempt from the rule that
+   forbids bare-tag selectors in component CSS — this is not component CSS.
+
+   The element selectors are kept and the `.kit-scope :focus-visible` half is dropped,
+   which is a faithful move rather than a narrowing: everything that half covered and
+   these do not would be a focusable inside Settings that is neither a button, an input
+   nor a select, and there is none. Widening this to a bare `:focus-visible` — so that
+   a tab or any future focusable is covered too — is a real improvement and a real
+   change, so it waits for the browser matrix (nocx-1ixi) that can prove it. */
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--color-accent);
+}
+
 /* ── Shell geometry (§2.5) — #workspace, #vertical-tabstrip ────────── */
 
 #workspace {

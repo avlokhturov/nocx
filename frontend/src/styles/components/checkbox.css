@@ -1,0 +1,114 @@
+/* Checkbox — the label row, the box, and the switch variant.
+   Moved verbatim from kit.css by T1 (nocx-v0ai). Still ancestor-keyed; T7 (nocx-b0oi)
+   rewrites these onto `.ui-checkbox` (the row) and `.ui-checkbox__control` (the box) —
+   two identities with different duties, neither inferred from the other. */
+
+/* The kit shipped a Checkbox component with no CSS at all, so every boolean
+   rendered as native platform chrome — a 12px system box with the label jammed
+   against it. Both shapes are built from the same `input[type=checkbox]`:
+   `appearance: none` takes the platform look away and the box below puts ours
+   back. The switch is the settings affordance (a change that applies
+   immediately); the checkbox stays the filter/selection affordance. */
+
+/* No font-size here on purpose: the label inherits its surroundings, so a
+   checkbox in the settings rail matches the nav beside it and one in a form
+   matches the form. Pinning it to --font-size-md made the rail's "Modified"
+   filter two steps larger than every other line in the same column. */
+.kit-scope label:has(input[type='checkbox']),
+label.ui-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  cursor: pointer;
+  color: var(--color-text);
+}
+
+.kit-scope input[type='checkbox'] {
+  appearance: none;
+  flex: 0 0 auto;
+  margin: 0;
+  width: 16px;
+  height: 16px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--control-radius-sm);
+  background: var(--color-surface-raised);
+  cursor: pointer;
+  position: relative;
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease;
+}
+
+.kit-scope input[type='checkbox']:hover {
+  border-color: var(--color-accent);
+}
+
+.kit-scope input[type='checkbox']:checked {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+/* The tick is drawn rather than typed: a glyph would inherit the surrounding
+   font and shift with it. */
+.kit-scope input[type='checkbox']:checked::after {
+  content: '';
+  position: absolute;
+  left: 4px;
+  top: 1px;
+  width: 5px;
+  height: 9px;
+  border: solid var(--color-canvas);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+.kit-scope input[type='checkbox']:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Slice of kit.css's `.kit-scope input:focus`, which reached every input type and not
+   only the text-like ones. Easy to lose when that catch-all is cut up, and on a
+   checkbox it is visible: the box has a real border. */
+.kit-scope input[type='checkbox']:focus {
+  border-color: var(--color-accent);
+}
+
+/* ── Switch variant ───────────────────────────────────────────────────────── */
+
+.kit-scope .ui-switch input[type='checkbox'],
+.kit-scope input[type='checkbox'].ui-switch__input {
+  width: 34px;
+  height: 20px;
+  border-radius: var(--control-radius-full);
+  background: var(--color-surface-sunken);
+}
+
+.kit-scope .ui-switch input[type='checkbox']::after,
+.kit-scope input[type='checkbox'].ui-switch__input::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border: none;
+  border-radius: 50%;
+  background: var(--color-text-dim);
+  transform: none;
+  transition:
+    transform 0.14s ease,
+    background 0.14s ease;
+}
+
+.kit-scope .ui-switch input[type='checkbox']:checked,
+.kit-scope input[type='checkbox'].ui-switch__input:checked {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+.kit-scope .ui-switch input[type='checkbox']:checked::after,
+.kit-scope input[type='checkbox'].ui-switch__input:checked::after {
+  transform: translateX(14px);
+  background: var(--color-canvas);
+}

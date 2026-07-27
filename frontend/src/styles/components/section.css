@@ -1,0 +1,21 @@
+/* Section — a titled group inside a surface.
+   Moved verbatim from kit.css by T1 (nocx-v0ai). T12 (nocx-s9yw) bounds its `class`
+   passthrough to layout and placement. */
+
+.ui-section {
+  margin-bottom: 28px;
+}
+
+.ui-section h2 {
+  font-family: var(--font-family-ui);
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+  color: var(--color-text);
+  margin: 0 0 4px;
+}
+
+.ui-section > p {
+  color: var(--color-text-dim);
+  font-size: var(--font-size-sm);
+  margin: 0 0 12px;
+}

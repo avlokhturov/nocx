@@ -1,0 +1,25 @@
+/* Radio — today this file holds one rule, and that is the whole point of it existing.
+   Created by T1 (nocx-v0ai); T8 (nocx-jm7m) gives Radio a real appearance and rewrites
+   this onto `.ui-radio__control`.
+
+   Radio has no rules of its own anywhere in the stylesheet, so it looks like a
+   primitive that needs no slice when the shared disabled rule is cut up. It is not:
+   kit.css's catch-all `.kit-scope input:disabled` did reach `input[type=radio]`, and
+   Radio has two live consumers at connections.tsx:357,517. Dropping this line while
+   splitting the catch-all would have changed a real control's computed style inside
+   the very transaction whose done condition is "disabled appearance unchanged". The
+   general rule, which is what to remember: the slice list is derived from what the
+   catch-all MATCHES, not from what the stylesheet NAMES. */
+
+.kit-scope input[type='radio']:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Slice of `.kit-scope input:focus`, which reached every input type. A native radio
+   has no border for this to colour, so it changes nothing today — carried anyway,
+   because the claim T1 makes is that the split loses no declaration, and "it would
+   not have been visible" is not the same claim. */
+.kit-scope input[type='radio']:focus {
+  border-color: var(--color-accent);
+}

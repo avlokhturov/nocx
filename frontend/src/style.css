@@ -5,8 +5,23 @@
 @import './styles/themes/tokyo-night.css';
 @import './styles/themes/light.css';
 @import './styles/base.css';
-@import './styles/components/kit.css';
-@import './styles/components/overlay.css';
+/* One file per component (ADR-0013 §1). `kit.css` was a 515-line aggregate that
+   re-blurred every selector's owner; T1 (nocx-v0ai) split it. Import order within this
+   block does not carry meaning — no two of these files address the same element, which
+   is the property the split exists to create and gate 3 exists to keep. */
+@import './styles/components/button.css';
+@import './styles/components/text-field.css';
+@import './styles/components/search-field.css';
+@import './styles/components/select.css';
+@import './styles/components/checkbox.css';
+@import './styles/components/radio.css';
+@import './styles/components/file-input.css';
+@import './styles/components/field.css';
+@import './styles/components/section.css';
+@import './styles/components/badge.css';
+@import './styles/components/empty-state.css';
+@import './styles/components/toolbar.css';
+@import './styles/components/dialog.css';
 @import './styles/components/sidebar.css';
 @import './styles/components/quick-connect.css';
 @import './styles/surfaces/update-notice.css';

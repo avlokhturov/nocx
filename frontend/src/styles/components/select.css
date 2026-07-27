@@ -1,0 +1,41 @@
+/* Select — native <select> with `appearance: none` on the closed control (ADR-0014).
+   Moved verbatim from kit.css by T1 (nocx-v0ai). Still ancestor-keyed; T6 (nocx-6913)
+   rewrites these onto `.ui-select`.
+
+   The `select.kit-scope` half of each selector list is dropped rather than moved:
+   `.kit-scope` is only ever applied to a <div>, so the element-with-class form matched
+   nothing. Only the descendant form was ever doing the work. */
+
+.kit-scope select {
+  appearance: none;
+  height: var(--control-height-md);
+  padding: 0 28px 0 8px;
+  background: var(--color-surface-raised)
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23a9b1d6' fill='none' stroke-width='1.5'/%3E%3C/svg%3E")
+    no-repeat right 8px center;
+  background-size: 10px 6px;
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+  border-radius: var(--control-radius-md);
+  font-family: var(--font-family-ui);
+  font-size: var(--font-size-md);
+  cursor: pointer;
+  min-width: 0;
+}
+
+.kit-scope select:focus {
+  border-color: var(--color-accent);
+  outline: none;
+}
+
+.kit-scope select option {
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+}
+
+/* Disabled slice, cut per primitive by T1 so that each later transaction can carry
+   away exactly its own line. See the design spec §6.1. */
+.kit-scope select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
