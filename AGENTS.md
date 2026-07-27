@@ -356,6 +356,47 @@ Run the full local gate before pushing, not only the part you touched: `gofumpt 
 `golangci-lint run`, `go test -race ./...`, plus `npx prettier --check .`, `npx eslint .`,
 `cd frontend && npm run typecheck`, `cd frontend && npm test` for frontend changes.
 
+### Every commit names its bead
+
+**A commit message must carry the bead id of the work it does.** Not optional, not
+"where relevant". A commit with no id is a change nobody can trace back to a decision:
+`git log` stops answering _why_ and only answers _what_, and the why is the part that is
+expensive to reconstruct.
+
+The format:
+
+```
+<type>(<scope>): <subject in the imperative, lower case, no full stop> (<bead-id>)
+
+<body: what was wrong, what changed, and why this way rather than the obvious
+alternative. Wrap at 80. Prose, not bullets — a bullet list records what you did and
+loses the reasoning, which is the only part worth keeping.>
+
+Co-Authored-By: ...
+```
+
+- **`<type>`** — `feat`, `fix`, `refactor`, `test`, `docs`, `build`, `chore`, `perf`.
+- **`<scope>`** — the module: `frontend`, `pty`, `ssh`, `session`, `transport`, `spec`,
+  `beads`. Omit only when the change is genuinely repo-wide.
+- **`(<bead-id>)`** — at the end of the subject. `(nocx-abc1)`. Several ids when one
+  commit genuinely closes several: `(nocx-u7wq.1-.5)` for a contiguous run,
+  `(nocx-abc1, nocx-def2)` otherwise.
+- Additional ids that are _referenced but not closed_ go in the body, named as such, so
+  the subject line stays the list of what this commit finishes.
+
+Two things that are not exceptions and get asked about anyway:
+
+- **No bead for it?** Then there is no task, and per the rule further up this file a
+  `TODO` in source is not a task either. File the bead first — `bd create` takes seconds
+  and the id is what the message needs.
+- **Trivial change?** A one-line fix still had a reason, and a one-line fix with no id
+  is the one nobody can explain six months later. `chore(beads): sync the export`
+  belongs to a bead too, or it is noise that should not be a commit of its own.
+
+The id is checked by eye at review, not by a hook. If that stops working, the fix is a
+`commit-msg` hook that rejects a subject with no `(nocx-…)` — file it rather than
+letting the convention rot.
+
 **Take the merge slot before integrating into `main`.** When several worktrees land in
 sequence, hold `nocx-merge-slot` for the whole merge-and-resolve, and release it whether
 you succeed or not:
