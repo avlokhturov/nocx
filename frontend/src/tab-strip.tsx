@@ -1,4 +1,5 @@
 import { For, Show, createSignal } from 'solid-js'
+import { Tab } from './tab'
 import { IconButton } from './ui/icon-button'
 import type { Setter } from 'solid-js'
 import { createStore } from 'solid-js/store'
@@ -110,74 +111,21 @@ abstract class TabStripBase implements TabStrip {
           <div class="tabs-container">
             <For each={tabViews()}>
               {(tab, index) => (
-                <div
+                <Tab
                   id={`tab-btn-${tab.id}`}
-                  classList={{
-                    tab: true,
-                    active: display.activeId === tab.id,
-                    working: display.records[tab.id]?.agentStatus === 'working',
-                    waiting: display.records[tab.id]?.agentStatus === 'idle',
-                  }}
-                  role="tab"
-                  aria-controls={tab.paneId}
-                  aria-selected={display.activeId === tab.id}
-                  data-tab-id={String(tab.id)}
-                  title={display.records[tab.id]?.tooltip ?? ''}
-                  draggable={true}
+                  tabId={tab.id}
+                  paneId={tab.paneId}
+                  index={index()}
+                  active={display.activeId === tab.id}
+                  agentStatus={display.records[tab.id]?.agentStatus ?? null}
+                  title={display.records[tab.id]?.title ?? ''}
+                  tooltip={display.records[tab.id]?.tooltip ?? ''}
+                  hasActivity={display.records[tab.id]?.hasActivity === true}
                   tabIndex={display.activeId === tab.id ? 0 : -1}
-                  onClick={() => this.onActivate?.(tab.id)}
-                  onMouseDown={(e: MouseEvent) => {
-                    if (e.button === 1) {
-                      e.preventDefault()
-                      this.onClose?.(tab.id)
-                    }
-                  }}
-                  onDragStart={(e: DragEvent) => {
-                    e.dataTransfer?.setData('text/plain', String(tab.id))
-                    if (e.currentTarget instanceof HTMLElement) {
-                      e.currentTarget.classList.add('dragging')
-                    }
-                  }}
-                  onDragEnd={(e: DragEvent) => {
-                    if (e.currentTarget instanceof HTMLElement) {
-                      e.currentTarget.classList.remove('dragging')
-                    }
-                  }}
-                  onDragOver={(e: DragEvent) => {
-                    e.preventDefault()
-                  }}
-                  onDrop={(e: DragEvent) => {
-                    e.preventDefault()
-                    const draggedId = Number(e.dataTransfer?.getData('text/plain'))
-                    if (!Number.isNaN(draggedId) && draggedId !== tab.id) {
-                      this.onReorder?.(draggedId, tab.id)
-                    }
-                  }}
-                >
-                  <span class="tab-index">{index() + 1}</span>
-                  <span class="tab-label">
-                    <span class="tab-status" />
-                    <span class="tab-title">{display.records[tab.id]?.title ?? ''}</span>
-                  </span>
-                  <IconButton
-                    size="sm"
-                    ariaLabel="Close tab"
-                    onClick={(e: MouseEvent) => {
-                      e.stopPropagation()
-                      this.onClose?.(tab.id)
-                    }}
-                  >
-                    {'\u00d7'}
-                  </IconButton>
-                  <div
-                    class="tab-indicator"
-                    classList={{
-                      'tab-activity':
-                        display.records[tab.id]?.hasActivity === true &&
-                        display.activeId !== tab.id,
-                    }}
-                  />
-                </div>
+                  onActivate={() => this.onActivate?.(tab.id)}
+                  onClose={(id) => this.onClose?.(id)}
+                  onReorder={(fromId, toId) => this.onReorder?.(fromId, toId)}
+                />
               )}
             </For>
           </div>

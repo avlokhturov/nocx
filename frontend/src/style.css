@@ -25,6 +25,7 @@
 @import './styles/components/dialog.css';
 @import './styles/components/sidebar.css';
 @import './styles/components/quick-connect.css';
+@import './styles/components/tab.css';
 @import './styles/surfaces/update-notice.css';
 @import './styles/surfaces/settings.css';
 @import './styles/surfaces/export.css';
@@ -217,160 +218,6 @@
   flex: 1 1 0%;
 }
 
-/* ── Individual tab ──────────────────────────────────────────────────── */
-
-/* Inactive tabs are not transparent: against the chrome they disappeared and
-   only their label remained, so the strip read as text on a bar rather than as
-   a row of tabs. The active one is lighter still, plus its accent bar. */
-.tab {
-  --wails-draggable: no-drag;
-  --tab-bg: var(--color-surface-sunken);
-  position: relative;
-  display: flex;
-  align-items: center;
-  flex: 0 1 200px;
-  width: 200px;
-  min-width: 0;
-  padding: 0 10px;
-  cursor: pointer;
-  background: var(--color-surface-sunken);
-  border: 0;
-  border-right: 1px solid var(--color-divider);
-  color: var(--color-text-muted);
-  overflow: hidden;
-  border-radius: 6px 6px 0 0;
-}
-
-.tab:hover {
-  --tab-bg: var(--color-surface-hover);
-  background: var(--color-surface-hover);
-  color: var(--color-text-muted);
-}
-
-.tab.active {
-  --tab-bg: var(--color-surface);
-  background: var(--color-tab-active);
-  color: var(--color-text);
-}
-
-/* Gradient overlay */
-.tab::after {
-  content: '';
-  position: absolute;
-  right: 0;
-  top: 0;
-  width: 34px;
-  height: 100%;
-  pointer-events: none;
-  z-index: 1;
-  opacity: 0;
-  transition: opacity 0.15s;
-  background: linear-gradient(to right, transparent, var(--tab-bg));
-}
-
-.tab:hover::after {
-  opacity: 1;
-}
-
-.tab-index {
-  position: absolute;
-  left: 10px;
-  top: 50%;
-  transform: translateY(-50%);
-  flex: none;
-  font-weight: 700;
-  font-size: 11px;
-  width: 22px;
-  height: 22px;
-  line-height: 22px;
-  border-radius: 10px;
-  text-align: center;
-  color: var(--color-text-dim);
-  align-self: center;
-}
-
-.tab.active .tab-index {
-  color: var(--color-accent);
-  background: color-mix(in srgb, var(--color-accent), transparent 90%);
-}
-
-.tab:hover .tab-index {
-  color: var(--color-text-muted);
-}
-
-.tab-label {
-  flex: auto;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 0;
-  margin: 0 26px;
-}
-
-.tab-title {
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  min-width: 0;
-  align-self: center;
-  font-size: 13px;
-}
-
-/* ── Indicators (active top bar / activity bottom bar) ───────────────── */
-
-.tab-indicator {
-  position: absolute;
-  left: 0;
-  right: 0;
-  pointer-events: none;
-}
-
-.tab.active .tab-indicator {
-  display: block;
-  top: 0;
-  height: 2px;
-  background: var(--color-accent);
-}
-
-/* Unread activity on an inactive tab. A dot, not a bar: spanning the tab's
-   whole width at 2px made it read as a decorative rule — one more line among
-   the ones separating regions — rather than as a marker attached to this tab.
-   It also collided with the active tab's own full-width accent bar, so two
-   different meanings shared one shape. */
-.tab-indicator.tab-activity {
-  display: block;
-  bottom: 5px;
-  top: auto;
-  left: 10px;
-  right: auto;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--color-accent);
-}
-
-.tab.active .tab-indicator.tab-activity {
-  display: none;
-}
-
-.tab.active .tab-indicator:not(.tab-activity) {
-  display: block;
-}
-/* ── Tab close button positioning ──────────────────────────── */
-.tab > .ui-icon-button {
-  z-index: 2;
-  position: absolute;
-  right: 4px;
-  top: 50%;
-  transform: translateY(-50%);
-  opacity: 0;
-  transition: opacity 0.15s;
-}
-
-.tab:hover > .ui-icon-button {
-  opacity: 1;
-}
-
 /* ── Vertical tab strip ──────────────────────────────────────────────── */
 
 .tabstrip-vertical {
@@ -394,51 +241,6 @@
   flex-direction: column;
   overflow-y: auto;
   min-height: 0;
-}
-
-.tabstrip-vertical .tab {
-  flex: 0 0 auto;
-  width: 100%;
-  height: 38px;
-  border-right: none;
-  border-bottom: 1px solid transparent;
-  border-radius: 0;
-}
-
-.tabstrip-vertical .tab.active {
-  --tab-bg: var(--color-surface);
-  background: var(--color-tab-active);
-  color: var(--color-text);
-}
-
-/* Indicator — left-edge bar instead of top bar. */
-.tabstrip-vertical .tab-indicator {
-  top: 0;
-  bottom: 0;
-  left: 0;
-  right: auto;
-  width: 2px;
-  height: auto;
-}
-
-.tabstrip-vertical .tab.active .tab-indicator {
-  display: block;
-  background: var(--color-accent);
-}
-
-/* Same dot as the horizontal strip; only its position differs. `width: auto`
-   here was what stretched it into a bar, and it has to be overridden back
-   because the base rule now sets an explicit size. */
-.tabstrip-vertical .tab-indicator.tab-activity {
-  top: 50%;
-  bottom: auto;
-  right: 10px;
-  left: auto;
-  transform: translateY(-50%);
-}
-
-.tabstrip-vertical .tab-index {
-  left: 10px;
 }
 
 /* ── Tabstrip button sizing ───────────────────────────────── */
@@ -516,48 +318,6 @@
   color: var(--color-text-dim);
   -webkit-user-select: none;
   user-select: none;
-}
-
-/* ── Agent status (derived from the terminal title) ──────────────────── */
-
-.tab-status {
-  flex: none;
-  width: 0;
-  height: 10px;
-  margin: 0;
-  border-radius: 50%;
-  align-self: center;
-  transition: width 0.15s;
-}
-
-.tab.working .tab-status,
-.tab.waiting .tab-status {
-  width: 10px;
-  margin: 0 7px 0 0;
-}
-
-.tab.waiting .tab-status {
-  background: var(--color-success);
-}
-
-.tab.working .tab-status {
-  border: 2px solid color-mix(in srgb, var(--color-accent), transparent 75%);
-  border-top-color: var(--color-accent);
-  animation: tab-spin 0.7s linear infinite;
-}
-
-@keyframes tab-spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .tab.working .tab-status {
-    animation: none;
-    background: var(--color-accent);
-    border-color: transparent;
-  }
 }
 
 /* ── Clipboard banner (OSC 52 blocked-write notification) ──────────── */

@@ -7,6 +7,10 @@ const PLACEMENT_SELECT = `${PLACEMENT_ROW} select`
 
 async function switchPlacement(page: Page, value: 'horizontal' | 'vertical'): Promise<void> {
   await page.keyboard.press('Meta+,')
+  // Settings opens on its FIRST section, so a row in any other section is in the
+  // DOM and hidden. Navigate before waiting, or this times out on a control that
+  // is right there and reads like a broken selector.
+  await page.locator('.ui-settings-section-nav-item[data-section="Interface"] button').click()
   await expect(page.locator(PLACEMENT_SELECT)).toBeVisible({ timeout: 5000 })
   await page.selectOption(PLACEMENT_SELECT, value)
   await page.keyboard.press('Meta+w')
@@ -30,8 +34,8 @@ async function switchPlacement(page: Page, value: 'horizontal' | 'vertical'): Pr
  * Caller must have exactly two tabs present before calling.
  */
 async function assertFocusSurvivesReorder(page: Page): Promise<void> {
-  const secondTab = page.locator('.tab').nth(1)
-  const firstTab = page.locator('.tab').first()
+  const secondTab = page.locator('.nocx-tab').nth(1)
+  const firstTab = page.locator('.nocx-tab').first()
   const tabIdSecond = await secondTab.getAttribute('data-tab-id')
   const tabIdFirst = await firstTab.getAttribute('data-tab-id')
   expect(tabIdFirst).not.toBeNull()
@@ -66,7 +70,7 @@ async function assertFocusSurvivesReorder(page: Page): Promise<void> {
 
   // Snapshot pre-reorder tab order for post-reorder comparison
   const preOrder = await page.evaluate(() => {
-    const tabs = document.querySelectorAll('.tab')
+    const tabs = document.querySelectorAll('.nocx-tab')
     return Array.from(tabs).map((t) => t.getAttribute('data-tab-id'))
   })
   expect(preOrder).toEqual([tabIdFirst, tabIdSecond])
@@ -77,7 +81,7 @@ async function assertFocusSurvivesReorder(page: Page): Promise<void> {
   await page.evaluate(
     ({ draggedId }: { draggedId: string }) => {
       const src = document.querySelector(`[data-tab-id="${draggedId}"]`) as HTMLElement | null
-      const targets = document.querySelectorAll('.tab')
+      const targets = document.querySelectorAll('.nocx-tab')
       const tgt = targets[0] as HTMLElement | null // drop on FIRST tab
       if (!src || !tgt) throw new Error('Source or target tab not found')
 
@@ -108,7 +112,9 @@ async function assertFocusSurvivesReorder(page: Page): Promise<void> {
     .poll(
       () =>
         page.evaluate(() =>
-          Array.from(document.querySelectorAll('.tab')).map((t) => t.getAttribute('data-tab-id')),
+          Array.from(document.querySelectorAll('.nocx-tab')).map((t) =>
+            t.getAttribute('data-tab-id'),
+          ),
         ),
       { timeout: 5000, message: 'tab order did not settle after the drag' },
     )
@@ -131,7 +137,7 @@ async function assertFocusSurvivesReorder(page: Page): Promise<void> {
 test.describe('focus survives tab reorder', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/')
-    await expect(page.locator('.tab-title').first()).not.toHaveText('', {
+    await expect(page.locator('.nocx-tab-title').first()).not.toHaveText('', {
       timeout: 10_000,
     })
     // Reset to horizontal so persisted state does not contaminate.
@@ -140,8 +146,8 @@ test.describe('focus survives tab reorder', () => {
 
   test('horizontal orientation: focus survives drag reorder', async ({ page }) => {
     // Add a second tab so there is something to reorder.
-    await page.locator('.tab-add').click()
-    await expect(page.locator('.tab')).toHaveCount(2)
+    await page.locator('[aria-label="New tab"]').click()
+    await expect(page.locator('.nocx-tab')).toHaveCount(2)
 
     await assertFocusSurvivesReorder(page)
   })
@@ -151,8 +157,8 @@ test.describe('focus survives tab reorder', () => {
     await switchPlacement(page, 'vertical')
 
     // Add a second tab in the vertical strip.
-    await page.locator('.tab-add').click()
-    await expect(page.locator('.tab')).toHaveCount(2)
+    await page.locator('[aria-label="New tab"]').click()
+    await expect(page.locator('.nocx-tab')).toHaveCount(2)
 
     await assertFocusSurvivesReorder(page)
   })

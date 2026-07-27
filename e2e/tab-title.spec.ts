@@ -12,11 +12,11 @@ import { test, expect } from './harness'
 // is inserted, so it captures the initial textContent before any async handler
 // can touch it.
 
-const TITLE = '.tab-title'
+const TITLE = '.nocx-tab-title'
 
 test('a new tab never displays "Terminal" in its title', async ({ page }) => {
   await page.goto('/')
-  await expect(page.locator('.tab')).toHaveCount(1)
+  await expect(page.locator('.nocx-tab')).toHaveCount(1)
 
   // Wait for the first tab's title to be populated — it must be the directory,
   // not 'Terminal'.
@@ -31,8 +31,8 @@ test('a new tab never displays "Terminal" in its title', async ({ page }) => {
     const observer = new MutationObserver((mutations) => {
       for (const m of mutations) {
         for (const node of m.addedNodes) {
-          if (node instanceof HTMLElement && node.classList.contains('tab')) {
-            const title = node.querySelector('.tab-title')
+          if (node instanceof HTMLElement && node.classList.contains('nocx-tab')) {
+            const title = node.querySelector('.nocx-tab-title')
             ;(window as Record<string, unknown>).__nocxTitleSnapshots.push(title?.textContent ?? '')
           }
         }
@@ -45,7 +45,7 @@ test('a new tab never displays "Terminal" in its title', async ({ page }) => {
   // appended to the DOM, recording the title's textContent while the
   // constructor has just finished and openSession is still pending.
   await page.keyboard.press('Meta+t')
-  await expect(page.locator('.tab')).toHaveCount(2)
+  await expect(page.locator('.nocx-tab')).toHaveCount(2)
 
   // Read the snapshots collected by the observer.
   const snapshots: string[] = await page.evaluate(

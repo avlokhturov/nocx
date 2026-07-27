@@ -1,0 +1,8 @@
+[
+  {
+    "file": "tab.tsx",
+    "identity": "nocx-tab",
+    "roles": ["tab"],
+    "contract": "Tab carries role=tab, drag/reorder, middle-click close, activity/agent indicators, aria-controls and two orientations — a behavioural unit outside the kit's primitive vocabulary (§3.7). Declared here so rule 10 permits role=tab outside ui/."
+  }
+]

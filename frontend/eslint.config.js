@@ -52,6 +52,12 @@ function loadColorBaseline() {
 // script, not a side effect of lint.
 const baseline = loadBaseline()
 const colorBaseline = loadColorBaseline()
+/* `src/ui/feature-components.json` is the register of declared feature components —
+   owned code that legitimately carries a role a kit primitive also provides, so far
+   only Tab with `role=tab` (nocx-olav). It is NOT read here yet: rule 10, which is
+   what consumes it, arrives with T20 (nocx-zhjx), and a loader with no consumer is
+   dead code that looks like a working gate. The register ships now because the
+   component that needs it ships now; the wiring ships with the rule. */
 
 // ─── Inline-markup guard: class ownership ───────────────────────────────────────────
 // Derived by AST from static class=/className=/classList= on JSX elements in each

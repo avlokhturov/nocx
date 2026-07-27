@@ -1,0 +1,195 @@
+// @vitest-environment jsdom
+import { describe, expect, it, vi, afterEach } from 'vitest'
+import { render, screen, fireEvent, cleanup } from '@solidjs/testing-library'
+import { Tab, type TabProps } from './tab'
+
+afterEach(() => cleanup())
+
+const defaults: TabProps = {
+  id: 'tab-btn-42',
+  tabId: 42,
+  paneId: 'pane-42',
+  index: 0,
+  active: false,
+  agentStatus: null,
+  title: 'Terminal',
+  tooltip: 'Session #42',
+  hasActivity: false,
+  tabIndex: -1,
+  onActivate: vi.fn(),
+  onClose: vi.fn(),
+  onReorder: vi.fn(),
+}
+
+function subject(overrides?: Partial<TabProps>) {
+  return render(() => <Tab {...defaults} {...overrides} />)
+}
+
+describe('Tab', () => {
+  it('renders with base class nocx-tab', () => {
+    subject()
+    const tab = screen.getByRole('tab')
+    expect(tab.classList.contains('nocx-tab')).toBe(true)
+  })
+
+  it('has no extra classes beyond nocx-tab', () => {
+    subject()
+    const tab = screen.getByRole('tab')
+    expect(tab.classList.length).toBe(1)
+    expect(tab.classList[0]).toBe('nocx-tab')
+  })
+
+  it('has role tab', () => {
+    subject()
+    const tab = screen.getByRole('tab')
+    expect(tab).toBeTruthy()
+  })
+
+  it('sets aria-controls from paneId', () => {
+    subject({ paneId: 'pane-99' })
+    const tab = screen.getByRole('tab')
+    expect(tab.getAttribute('aria-controls')).toBe('pane-99')
+  })
+
+  it('sets aria-selected when active', () => {
+    subject({ active: true })
+    const tab = screen.getByRole('tab')
+    expect(tab.getAttribute('aria-selected')).toBe('true')
+  })
+
+  it('omits aria-selected when not active', () => {
+    subject({ active: false })
+    const tab = screen.getByRole('tab')
+    expect(tab.getAttribute('aria-selected')).toBe('false')
+  })
+
+  it('sets data-tab-id', () => {
+    subject({ tabId: 99 })
+    const tab = screen.getByRole('tab')
+    expect(tab.getAttribute('data-tab-id')).toBe('99')
+  })
+
+  it('sets id from prop', () => {
+    subject({ id: 'tab-btn-7' })
+    const tab = screen.getByRole('tab')
+    expect(tab.id).toBe('tab-btn-7')
+  })
+
+  it('sets data-agent-status when agentStatus is working', () => {
+    subject({ agentStatus: 'working' })
+    const tab = screen.getByRole('tab')
+    expect(tab.getAttribute('data-agent-status')).toBe('working')
+  })
+
+  it('sets data-agent-status when agentStatus is idle', () => {
+    subject({ agentStatus: 'idle' })
+    const tab = screen.getByRole('tab')
+    expect(tab.getAttribute('data-agent-status')).toBe('idle')
+  })
+
+  it('omits data-agent-status when agentStatus is null', () => {
+    subject({ agentStatus: null })
+    const tab = screen.getByRole('tab')
+    expect(tab.hasAttribute('data-agent-status')).toBe(false)
+  })
+
+  it('sets title (tooltip)', () => {
+    subject({ tooltip: 'My terminal' })
+    const tab = screen.getByRole('tab')
+    expect(tab.getAttribute('title')).toBe('My terminal')
+  })
+
+  it('sets tabIndex', () => {
+    subject({ tabIndex: 0 })
+    const tab = screen.getByRole('tab')
+    expect(tab.tabIndex).toBe(0)
+  })
+
+  it('displays index + 1', () => {
+    subject({ index: 2 })
+    const tab = screen.getByRole('tab')
+    expect(tab.textContent).toContain('3')
+  })
+
+  it('displays title', () => {
+    subject({ title: 'ssh session' })
+    const tab = screen.getByRole('tab')
+    expect(tab.textContent).toContain('ssh session')
+  })
+
+  it('renders a close button with aria-label', () => {
+    subject()
+    const closeBtn = screen.getByLabelText('Close tab')
+    expect(closeBtn).toBeTruthy()
+  })
+
+  it('calls onActivate when clicked', () => {
+    const onActivate = vi.fn()
+    subject({ onActivate })
+    const tab = screen.getByRole('tab')
+    fireEvent.click(tab)
+    expect(onActivate).toHaveBeenCalledTimes(1)
+  })
+
+  it('calls onClose when close button clicked', () => {
+    const onClose = vi.fn()
+    subject({ onClose })
+    const closeBtn = screen.getByLabelText('Close tab')
+    fireEvent.click(closeBtn)
+    expect(onClose).toHaveBeenCalledWith(42)
+  })
+
+  it('has nocx-tab-index element', () => {
+    subject()
+    const el = document.querySelector('.nocx-tab-index')
+    expect(el).toBeTruthy()
+  })
+
+  it('has nocx-tab-label element', () => {
+    subject()
+    const el = document.querySelector('.nocx-tab-label')
+    expect(el).toBeTruthy()
+  })
+
+  it('has nocx-tab-status element', () => {
+    subject()
+    const el = document.querySelector('.nocx-tab-status')
+    expect(el).toBeTruthy()
+  })
+
+  it('has nocx-tab-title element', () => {
+    subject()
+    const el = document.querySelector('.nocx-tab-title')
+    expect(el).toBeTruthy()
+  })
+
+  it('has nocx-tab-indicator element', () => {
+    subject()
+    const el = document.querySelector('.nocx-tab-indicator')
+    expect(el).toBeTruthy()
+  })
+
+  it('sets data-activity on indicator when hasActivity is true and not active', () => {
+    subject({ hasActivity: true, active: false })
+    const indicator = document.querySelector('.nocx-tab-indicator')
+    expect(indicator?.getAttribute('data-activity')).toBe('true')
+  })
+
+  it('omits data-activity on indicator when hasActivity is false', () => {
+    subject({ hasActivity: false })
+    const indicator = document.querySelector('.nocx-tab-indicator')
+    expect(indicator?.hasAttribute('data-activity')).toBe(false)
+  })
+
+  it('omits data-activity on indicator when active (even if hasActivity)', () => {
+    subject({ hasActivity: true, active: true })
+    const indicator = document.querySelector('.nocx-tab-indicator')
+    expect(indicator?.hasAttribute('data-activity')).toBe(false)
+  })
+
+  it('is draggable', () => {
+    subject()
+    const tab = screen.getByRole('tab')
+    expect(tab.getAttribute('draggable')).toBe('true')
+  })
+})

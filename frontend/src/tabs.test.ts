@@ -103,7 +103,7 @@ describe('TabManager', () => {
     const tabStrip = new HorizontalTabStrip()
     const manager = new TabManager(bar, bar, panes, c as never, cb, g, bn, pc as never, tabStrip)
 
-    expect(bar.querySelectorAll('.tab').length).toBe(0)
+    expect(bar.querySelectorAll('.nocx-tab').length).toBe(0)
 
     // Model state is also empty — no tabs registered.
     expect(manager.tabCount).toBe(0)
@@ -115,7 +115,7 @@ describe('TabManager', () => {
   it('opens a session when a tab is created and activated', async () => {
     const { client, bar, panes } = await mountTabManager()
 
-    expect(bar.querySelectorAll('.tab').length).toBe(1)
+    expect(bar.querySelectorAll('.nocx-tab').length).toBe(1)
     expect(panes.querySelectorAll('.pane').length).toBe(1)
     expect(client.openSession).toHaveBeenCalled()
   })
@@ -128,7 +128,7 @@ describe('TabManager', () => {
       expect(client.openSession).toHaveBeenCalledTimes(2)
     })
 
-    expect(bar.querySelectorAll('.tab').length).toBe(2)
+    expect(bar.querySelectorAll('.nocx-tab').length).toBe(2)
     expect(panes.querySelectorAll('.pane').length).toBe(2)
   })
 
@@ -154,18 +154,18 @@ describe('TabManager', () => {
     })
 
     // Three tabs: [tab1, tab2, tab3]. Tab3 is active (last created).
-    const tabs = bar.querySelectorAll('.tab')
+    const tabs = bar.querySelectorAll('.nocx-tab')
     expect(tabs.length).toBe(3)
-    expect(tabs[2].classList.contains('active')).toBe(true)
+    expect(tabs[2].getAttribute('aria-selected') === 'true').toBe(true)
 
     // Close the active tab (tab3)
     manager.closeActiveTab()
 
     // Two tabs remain; the neighbour (tab2 at original index 1) is now active
-    const remainingTabs = bar.querySelectorAll('.tab')
+    const remainingTabs = bar.querySelectorAll('.nocx-tab')
     expect(remainingTabs.length).toBe(2)
     // The last remaining tab should be active (neighbour)
-    expect(remainingTabs[1].classList.contains('active')).toBe(true)
+    expect(remainingTabs[1].getAttribute('aria-selected') === 'true').toBe(true)
   })
 
   it('closing the active tab activates the previously-active tab (MRU), not the visual neighbour', async () => {
@@ -184,16 +184,16 @@ describe('TabManager', () => {
     manager.activateByIndex(1) // tab2
 
     // Tab2 is active.
-    const beforeTabs = bar.querySelectorAll('.tab')
-    expect(beforeTabs[1].classList.contains('active')).toBe(true)
+    const beforeTabs = bar.querySelectorAll('.nocx-tab')
+    expect(beforeTabs[1].getAttribute('aria-selected') === 'true').toBe(true)
 
     // Close tab2. MRU says tab3 should activate, not tab1 (visual neighbour).
     manager.closeActiveTab()
 
-    const remainingTabs = bar.querySelectorAll('.tab')
+    const remainingTabs = bar.querySelectorAll('.nocx-tab')
     expect(remainingTabs.length).toBe(2)
     // tab3 should now be active (id 3, original index 2)
-    expect(remainingTabs[1].classList.contains('active')).toBe(true)
+    expect(remainingTabs[1].getAttribute('aria-selected') === 'true').toBe(true)
   })
 
   // ── closing the last tab leaves exactly one fresh tab ─────────────────
@@ -205,7 +205,7 @@ describe('TabManager', () => {
     manager.closeActiveTab()
 
     // A new tab replaces it (window never empty)
-    expect(bar.querySelectorAll('.tab').length).toBe(1)
+    expect(bar.querySelectorAll('.nocx-tab').length).toBe(1)
     expect(panes.querySelectorAll('.pane').length).toBe(1)
     // A new session was opened for the replacement (may be async)
     await vi.waitFor(() => {
@@ -226,8 +226,8 @@ describe('TabManager', () => {
       expect(client.openSession).toHaveBeenCalledTimes(4)
     })
 
-    const labels = bar.querySelectorAll('.tab-index')
-    const titles = bar.querySelectorAll('.tab-title')
+    const labels = bar.querySelectorAll('.nocx-tab-index')
+    const titles = bar.querySelectorAll('.nocx-tab-title')
 
     // Before close: badge = 1..4, fallback title is the directory label.
     expect(labels[0].textContent).toBe('1')
@@ -243,8 +243,8 @@ describe('TabManager', () => {
     manager.closeActiveTab()
 
     // Re-query after DOM mutations; stale references reflect removed elements.
-    const afterLabels = bar.querySelectorAll('.tab-index')
-    const afterTitles = bar.querySelectorAll('.tab-title')
+    const afterLabels = bar.querySelectorAll('.nocx-tab-index')
+    const afterTitles = bar.querySelectorAll('.nocx-tab-title')
     // After close: badge = 1..2, titles stay the directory label.
     expect(afterLabels[0].textContent).toBe('1')
     expect(afterLabels[1].textContent).toBe('2')
@@ -261,21 +261,21 @@ describe('TabManager', () => {
       expect(client.openSession).toHaveBeenCalledTimes(2)
     })
 
-    const tabButtons = bar.querySelectorAll('.tab')
+    const tabButtons = bar.querySelectorAll('.nocx-tab')
     expect(tabButtons.length).toBe(2)
 
     // Tab 2 (index 1) is active by default (last created)
-    expect(tabButtons[1].classList.contains('active')).toBe(true)
+    expect(tabButtons[1].getAttribute('aria-selected') === 'true').toBe(true)
 
     // Switch to tab 1 (index 0)
     manager.activateByIndex(0)
-    expect(tabButtons[0].classList.contains('active')).toBe(true)
-    expect(tabButtons[1].classList.contains('active')).toBe(false)
+    expect(tabButtons[0].getAttribute('aria-selected') === 'true').toBe(true)
+    expect(tabButtons[1].getAttribute('aria-selected') === 'true').toBe(false)
 
     // Switch to tab 2 (index 1)
     manager.activateByIndex(1)
-    expect(tabButtons[0].classList.contains('active')).toBe(false)
-    expect(tabButtons[1].classList.contains('active')).toBe(true)
+    expect(tabButtons[0].getAttribute('aria-selected') === 'true').toBe(false)
+    expect(tabButtons[1].getAttribute('aria-selected') === 'true').toBe(true)
   })
 
   // ── a title event updates that tab's label and no other ───────────────
@@ -291,7 +291,7 @@ describe('TabManager', () => {
     // Flush pending microtasks so both renderers are fully initialised.
     await Promise.resolve()
 
-    const titles = bar.querySelectorAll('.tab-title')
+    const titles = bar.querySelectorAll('.nocx-tab-title')
     expect(titles.length).toBe(2)
     expect(titles[0].textContent).toBe(FIXTURE_DIRECTORY_LABEL)
     expect(titles[1].textContent).toBe(FIXTURE_DIRECTORY_LABEL)
@@ -318,7 +318,7 @@ describe('TabManager', () => {
     await Promise.resolve()
 
     const renderers = await getRendererMocks()
-    const titleEl = bar.querySelector('.tab-title')!
+    const titleEl = bar.querySelector('.nocx-tab-title')!
 
     // Set a real title first.
     renderers[0]._fireTitle('~/projects')
@@ -353,11 +353,11 @@ describe('TabManager', () => {
     bgSession.fireData('hello')
 
     // The background tab's indicator should have the activity class
-    const indicators = bar.querySelectorAll('.tab-indicator')
+    const indicators = bar.querySelectorAll('.nocx-tab-indicator')
     // Tab 1 (background) should have the activity class
-    expect(indicators[1].classList.contains('tab-activity')).toBe(true)
+    expect(indicators[1].getAttribute('data-activity') === 'true').toBe(true)
     // Tab 0 (active) should not
-    expect(indicators[0].classList.contains('tab-activity')).toBe(false)
+    expect(indicators[0].getAttribute('data-activity') === 'true').toBe(false)
   })
 
   it('clears activity indicator when activated', async () => {
@@ -373,8 +373,8 @@ describe('TabManager', () => {
     const activeSession = client._sessions[1]
     activeSession.fireData('output while active')
 
-    const indicators = bar.querySelectorAll('.tab-indicator')
-    expect(indicators[1].classList.contains('tab-activity')).toBe(false)
+    const indicators = bar.querySelectorAll('.nocx-tab-indicator')
+    expect(indicators[1].getAttribute('data-activity') === 'true').toBe(false)
   })
 
   // ── activity indicator: alternate-buffer suppression ─────────────────
@@ -399,8 +399,8 @@ describe('TabManager', () => {
     const bgSession = client._sessions[1]
     bgSession.fireData('spinner repaint')
 
-    const indicators = bar.querySelectorAll('.tab-indicator')
-    expect(indicators[1].classList.contains('tab-activity')).toBe(false)
+    const indicators = bar.querySelectorAll('.nocx-tab-indicator')
+    expect(indicators[1].getAttribute('data-activity') === 'true').toBe(false)
   })
 
   it('marks activity for normal-buffer output on a background tab', async () => {
@@ -417,8 +417,8 @@ describe('TabManager', () => {
     const bgSession = client._sessions[1]
     bgSession.fireData('normal output')
 
-    const indicators = bar.querySelectorAll('.tab-indicator')
-    expect(indicators[1].classList.contains('tab-activity')).toBe(true)
+    const indicators = bar.querySelectorAll('.nocx-tab-indicator')
+    expect(indicators[1].getAttribute('data-activity') === 'true').toBe(true)
   })
 
   it('marks activity on bell in the alternate buffer', async () => {
@@ -439,8 +439,8 @@ describe('TabManager', () => {
     // Fire bell on the background tab's renderer.
     renderers[1]._fireBell()
 
-    const indicators = bar.querySelectorAll('.tab-indicator')
-    expect(indicators[1].classList.contains('tab-activity')).toBe(true)
+    const indicators = bar.querySelectorAll('.nocx-tab-indicator')
+    expect(indicators[1].getAttribute('data-activity') === 'true').toBe(true)
   })
 
   it('does not mark activity on bell for the active tab', async () => {
@@ -450,8 +450,8 @@ describe('TabManager', () => {
     const renderers = await getRendererMocks()
     renderers[0]._fireBell()
 
-    const indicators = bar.querySelectorAll('.tab-indicator')
-    expect(indicators[0].classList.contains('tab-activity')).toBe(false)
+    const indicators = bar.querySelectorAll('.nocx-tab-indicator')
+    expect(indicators[0].getAttribute('data-activity') === 'true').toBe(false)
   })
 
   // ── keyboard shortcuts ────────────────────────────────────────────────
@@ -464,7 +464,7 @@ describe('TabManager', () => {
     await vi.waitFor(() => {
       expect(client.openSession).toHaveBeenCalledTimes(2)
     })
-    expect(bar.querySelectorAll('.tab').length).toBe(2)
+    expect(bar.querySelectorAll('.nocx-tab').length).toBe(2)
   })
 
   it('opens a new tab on Ctrl+T', async () => {
@@ -485,7 +485,7 @@ describe('TabManager', () => {
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'w', metaKey: true, bubbles: true }))
 
     // Closing the last tab opens a fresh one, so there's still 1 tab
-    expect(bar.querySelectorAll('.tab').length).toBe(1)
+    expect(bar.querySelectorAll('.nocx-tab').length).toBe(1)
     expect(session.close).toHaveBeenCalled()
   })
 
@@ -498,23 +498,23 @@ describe('TabManager', () => {
       expect(client.openSession).toHaveBeenCalledTimes(3)
     })
 
-    const tabButtons = bar.querySelectorAll('.tab')
+    const tabButtons = bar.querySelectorAll('.nocx-tab')
     expect(tabButtons.length).toBe(3)
 
     // Tab 3 (index 2) is active (last created)
-    expect(tabButtons[2].classList.contains('active')).toBe(true)
+    expect(tabButtons[2].getAttribute('aria-selected') === 'true').toBe(true)
 
     // Cmd+1 → first tab
     window.dispatchEvent(new KeyboardEvent('keydown', { key: '1', metaKey: true, bubbles: true }))
-    expect(tabButtons[0].classList.contains('active')).toBe(true)
-    expect(tabButtons[1].classList.contains('active')).toBe(false)
-    expect(tabButtons[2].classList.contains('active')).toBe(false)
+    expect(tabButtons[0].getAttribute('aria-selected') === 'true').toBe(true)
+    expect(tabButtons[1].getAttribute('aria-selected') === 'true').toBe(false)
+    expect(tabButtons[2].getAttribute('aria-selected') === 'true').toBe(false)
 
     // Cmd+3 → third tab
     window.dispatchEvent(new KeyboardEvent('keydown', { key: '3', metaKey: true, bubbles: true }))
-    expect(tabButtons[0].classList.contains('active')).toBe(false)
-    expect(tabButtons[1].classList.contains('active')).toBe(false)
-    expect(tabButtons[2].classList.contains('active')).toBe(true)
+    expect(tabButtons[0].getAttribute('aria-selected') === 'true').toBe(false)
+    expect(tabButtons[1].getAttribute('aria-selected') === 'true').toBe(false)
+    expect(tabButtons[2].getAttribute('aria-selected') === 'true').toBe(true)
   })
 
   it('ignores keyboard shortcuts when alt is held', async () => {
@@ -524,7 +524,7 @@ describe('TabManager', () => {
       new KeyboardEvent('keydown', { key: 't', metaKey: true, altKey: true, bubbles: true }),
     )
 
-    expect(bar.querySelectorAll('.tab').length).toBe(1)
+    expect(bar.querySelectorAll('.nocx-tab').length).toBe(1)
   })
 
   it('ignores Cmd+0 (not a valid tab index)', async () => {
@@ -540,8 +540,8 @@ describe('TabManager', () => {
     window.dispatchEvent(new KeyboardEvent('keydown', { key: '0', metaKey: true, bubbles: true }))
 
     // Active should still be the last tab
-    const tabButtons = bar.querySelectorAll('.tab')
-    expect(tabButtons[2].classList.contains('active')).toBe(true)
+    const tabButtons = bar.querySelectorAll('.nocx-tab')
+    expect(tabButtons[2].getAttribute('aria-selected') === 'true').toBe(true)
   })
 
   // ── close by middle-click ─────────────────────────────────────────────
@@ -554,7 +554,7 @@ describe('TabManager', () => {
       expect(client.openSession).toHaveBeenCalledTimes(2)
     })
 
-    const tabButtons = bar.querySelectorAll('.tab')
+    const tabButtons = bar.querySelectorAll('.nocx-tab')
     expect(tabButtons.length).toBe(2)
 
     const session0 = client._sessions[0]
@@ -564,7 +564,7 @@ describe('TabManager', () => {
 
     // Check it was closed
     expect(session0.close).toHaveBeenCalled()
-    expect(bar.querySelectorAll('.tab').length).toBe(1)
+    expect(bar.querySelectorAll('.nocx-tab').length).toBe(1)
   })
 
   // ── flex-grow regression guards ──────────────────────────────────────
@@ -576,7 +576,7 @@ describe('TabManager', () => {
       .tabbar { display: flex; }
       .tabs-container { flex: 0 1 auto; min-width: 0; display: flex; align-items: stretch; }
       .tabbar-spacer { flex: 1 1 0%; }
-      .tab { flex: 0 1 200px; }
+      .nocx-tab { flex: 0 1 200px; }
     `
     document.head.appendChild(style)
 
@@ -585,7 +585,7 @@ describe('TabManager', () => {
     const tabsContainer = bar.querySelector('.tabs-container') as HTMLElement
     expect(tabsContainer).not.toBeNull()
 
-    const tab = bar.querySelector('.tab') as HTMLElement
+    const tab = bar.querySelector('.nocx-tab') as HTMLElement
     expect(tab).not.toBeNull()
 
     // The tabs container itself must not grow.
@@ -610,13 +610,13 @@ describe('TabManager', () => {
       .tabbar { display: flex; }
       .tabs-container { flex: 0 1 auto; min-width: 0; display: flex; align-items: stretch; }
       .tabbar-spacer { flex: 1 1 0%; }
-      .tab { flex: 1000 1 200px; }
+      .nocx-tab { flex: 1000 1 200px; }
     `
     document.head.appendChild(style)
 
     const { bar } = await mountTabManager()
 
-    const tab = bar.querySelector('.tab') as HTMLElement
+    const tab = bar.querySelector('.nocx-tab') as HTMLElement
     expect(tab).not.toBeNull()
 
     // With flex:1000 the computed flex-grow IS '1000'.
@@ -636,7 +636,7 @@ describe('TabManager', () => {
     await Promise.resolve()
 
     const renderers = await getRendererMocks()
-    const titleEl = bar.querySelector('.tab-title')!
+    const titleEl = bar.querySelector('.nocx-tab-title')!
 
     // Initial title is the fixture directory label.
     expect(titleEl.textContent).toBe(FIXTURE_DIRECTORY_LABEL)
@@ -660,7 +660,7 @@ describe('TabManager', () => {
     await Promise.resolve()
 
     const renderers = await getRendererMocks()
-    const tabBtn = bar.querySelector('.tab')!
+    const tabBtn = bar.querySelector('.nocx-tab')!
 
     // Initial tooltip includes the '(initial cwd)' marker (AD-5 surfacing).
     expect(tabBtn.getAttribute('title')).toContain('(initial cwd)')
@@ -677,7 +677,7 @@ describe('TabManager', () => {
     await Promise.resolve()
 
     const renderers = await getRendererMocks()
-    const titleEl = bar.querySelector('.tab-title')!
+    const titleEl = bar.querySelector('.nocx-tab-title')!
 
     // Program sets a title (e.g. vim, htop).
     renderers[0]._fireTitle('vim')
@@ -705,7 +705,7 @@ describe('TabManager', () => {
     const renderers = await getRendererMocks()
     expect(renderers.length).toBe(2)
 
-    const titles = bar.querySelectorAll('.tab-title')
+    const titles = bar.querySelectorAll('.nocx-tab-title')
 
     // Fire cwd for first tab only.
     renderers[0]._fireCwd('', '/tmp')
@@ -729,7 +729,7 @@ describe('TabManager', () => {
 
     await Promise.resolve()
 
-    const tabBtns = bar.querySelectorAll('.tab')
+    const tabBtns = bar.querySelectorAll('.nocx-tab')
     // Both tabs should have the initial marker since no OSC 7 fired.
     expect(tabBtns[0].getAttribute('title')).toContain('(initial cwd)')
     expect(tabBtns[1].getAttribute('title')).toContain('(initial cwd)')
@@ -1639,7 +1639,7 @@ describe('TabManager', () => {
     // but that is not a regression — the old code had the same behavior.
 
     // Tab order should be [2, 1, 3] — tab 1 moved to tab 3's position.
-    const tabs = bar.querySelectorAll('.tab')
+    const tabs = bar.querySelectorAll('.nocx-tab')
     expect(tabs.length).toBe(3)
     expect(tabs[0].getAttribute('data-tab-id')).toBe('2')
     expect(tabs[1].getAttribute('data-tab-id')).toBe('1')

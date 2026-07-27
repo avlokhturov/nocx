@@ -9,15 +9,15 @@ test('adding a second tab preserves layout with both tabs visible', async ({ pag
   await page.goto('/')
 
   // Wait for the initial tab to populate its title (session is ready).
-  await expect(page.locator('.tab-title').first()).not.toHaveText('', { timeout: 10_000 })
-  await expect(page.locator('.tab')).toHaveCount(1)
+  await expect(page.locator('.nocx-tab-title').first()).not.toHaveText('', { timeout: 10_000 })
+  await expect(page.locator('.nocx-tab')).toHaveCount(1)
 
   // Click the + button to add a second tab.
-  await page.locator('.tab-add').click()
+  await page.locator('[aria-label="New tab"]').click()
 
   // Both tabs must be present and visible.
-  await expect(page.locator('.tab')).toHaveCount(2)
-  const tabs = page.locator('.tab')
+  await expect(page.locator('.nocx-tab')).toHaveCount(2)
+  const tabs = page.locator('.nocx-tab')
   await expect(tabs.nth(0)).toBeVisible()
   await expect(tabs.nth(1)).toBeVisible()
 
@@ -36,19 +36,25 @@ test('adding a second tab preserves layout with both tabs visible', async ({ pag
 
 const PLACEMENT_ROW = '.ui-settings-row[data-key="tab.placement"]'
 const PLACEMENT_SELECT = `${PLACEMENT_ROW} select`
-const TAB = '.tab'
-const ACTIVITY = '.tab-indicator.tab-activity'
+const TAB = '.nocx-tab'
+const ACTIVITY = '.nocx-tab-indicator[data-activity="true"]'
 
 test.describe('vertical tab placement', () => {
   // Reset placement to horizontal before every test so persisted state
   // does not contaminate the next test or the horizontal-only spec above.
   test.beforeEach(async ({ page }) => {
     await page.goto('/')
-    await expect(page.locator('.tab-title').first()).not.toHaveText('', {
+    await expect(page.locator('.nocx-tab-title').first()).not.toHaveText('', {
       timeout: 10_000,
     })
-    // Open Settings and switch to horizontal.
+    // Open Settings, go to the section that owns the setting, and switch to
+    // horizontal. The rail navigation is not optional: Settings opens on its
+    // FIRST section rather than listing every setting end to end, so a row in
+    // any other section is present in the DOM and hidden. Waiting for it to
+    // become visible without navigating times out on a control that is right
+    // there — which reads like a broken selector and is not one.
     await page.keyboard.press('Meta+,')
+    await page.locator('.ui-settings-section-nav-item[data-section="Interface"] button').click()
     await expect(page.locator(PLACEMENT_SELECT)).toBeVisible({
       timeout: 5000,
     })
@@ -66,6 +72,7 @@ test.describe('vertical tab placement', () => {
     value: 'horizontal' | 'vertical',
   ) => {
     await page.keyboard.press('Meta+,')
+    await page.locator('.ui-settings-section-nav-item[data-section="Interface"] button').click()
     await expect(page.locator(PLACEMENT_SELECT)).toBeVisible({
       timeout: 5000,
     })
@@ -89,16 +96,16 @@ test.describe('vertical tab placement', () => {
     await expect(page.locator(TAB)).toHaveCount(1)
     const tab = page.locator(TAB).first()
     await expect(tab).toBeVisible()
-    await expect(tab).toHaveClass(/active/)
+    await expect(tab).toHaveAttribute('aria-selected', 'true')
 
     await page.keyboard.press('Meta+t')
     await expect(page.locator(TAB)).toHaveCount(2)
 
     await page.keyboard.press('Meta+1')
-    await expect(page.locator(TAB).first()).toHaveClass(/active/)
+    await expect(page.locator(TAB).first()).toHaveAttribute('aria-selected', 'true')
 
     await page.keyboard.press('Meta+2')
-    await expect(page.locator(TAB).nth(1)).toHaveClass(/active/)
+    await expect(page.locator(TAB).nth(1)).toHaveAttribute('aria-selected', 'true')
   })
 
   test('activity indicator lights for a backgrounded tab in vertical placement', async ({
@@ -140,7 +147,7 @@ test.describe('vertical tab placement', () => {
 
     await switchPlacement(page, 'horizontal')
     await expect(page.locator(TAB)).toHaveCount(1)
-    await expect(page.locator(TAB).first()).toHaveClass(/active/)
+    await expect(page.locator(TAB).first()).toHaveAttribute('aria-selected', 'true')
   })
 
   // Reset placement to horizontal after each vertical test so the
@@ -149,6 +156,7 @@ test.describe('vertical tab placement', () => {
   // the last line of defense — it runs even if the test body fails.
   test.afterEach(async ({ page }) => {
     await page.keyboard.press('Meta+,')
+    await page.locator('.ui-settings-section-nav-item[data-section="Interface"] button').click()
     await expect(page.locator(PLACEMENT_SELECT)).toBeVisible({
       timeout: 5000,
     })
