@@ -1,36 +1,32 @@
 /* TextField — the wrapper, its label, and the text/number/password input.
-   Moved from kit.css by T1 (nocx-v0ai). Still ancestor-keyed; T4 (nocx-xygp) rewrites
-   these onto `.ui-text-field` and `.ui-text-field__input`.
+   Rewritten from the `.kit-scope` ancestor onto the component's own identities by T4
+   (nocx-xygp).
 
-   kit.css styled text, number, password and search from one selector list. T1 splits
-   that list by type so each primitive owns its own: search lives in search-field.css.
-   The declarations are identical and that is fine — they are token references, so
-   "change it in one place" still holds and the place is the token.
+   Two identities with different duties (§3.1): `ui-text-field` stacks the label,
+   description, input and error and owns the gap between them; `ui-text-field__input` is
+   the control. Neither is inferred from the other, and the input is the one that
+   carries the appearance — which is exactly what it lacked before, being the only part
+   of this component with no class at all. */
 
-   The `input.kit-scope` half is dropped rather than moved: `.kit-scope` is only ever on
-   a <div>, so the element-with-class form matched nothing. */
+/* TextField renders label, description, input and error into a wrapper that had no
+   class and therefore no layout: an inline <label> ended up on the same line as the
+   input with nothing between them, which is what the export passphrase form looked
+   like. The wrapper stacks them and owns the gap. */
 
-/* TextField renders label, description, input and error into a wrapper that
-   had no class and therefore no layout: an inline <label> ended up on the same
-   line as the input with nothing between them, which is what the export
-   passphrase form looked like. The wrapper stacks them and owns the gap. */
-
-.ui-textfield {
+.ui-text-field {
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
   min-width: 0;
 }
 
-.ui-textfield > label {
+.ui-text-field > label {
   font-size: var(--font-size-sm);
   font-weight: 500;
   color: var(--color-text-muted);
 }
 
-.kit-scope input[type='text'],
-.kit-scope input[type='number'],
-.kit-scope input[type='password'] {
+.ui-text-field__input {
   height: var(--control-height-md);
   padding: 0 8px;
   background: var(--color-surface-raised);
@@ -43,35 +39,28 @@
   min-width: 0;
 }
 
-.kit-scope input[type='text']:focus,
-.kit-scope input[type='number']:focus,
-.kit-scope input[type='password']:focus {
+.ui-text-field__input:focus {
   border-color: var(--color-accent);
 }
 
-.kit-scope input[type='text']::placeholder,
-.kit-scope input[type='number']::placeholder,
-.kit-scope input[type='password']::placeholder {
+.ui-text-field__input::placeholder {
   color: var(--color-text-dim);
 }
 
 /* WebKit's stepper is drawn by the platform and comes out as a white block on a
    dark field. The value is typed, not stepped, in every place we use it. */
 
-.kit-scope input[type='number'] {
+.ui-text-field__input[type='number'] {
   appearance: textfield;
 }
 
-.kit-scope input[type='number']::-webkit-inner-spin-button,
-.kit-scope input[type='number']::-webkit-outer-spin-button {
+.ui-text-field__input[type='number']::-webkit-inner-spin-button,
+.ui-text-field__input[type='number']::-webkit-outer-spin-button {
   appearance: none;
   margin: 0;
 }
 
-/* Disabled slice, cut per primitive by T1. See the design spec §6.1. */
-.kit-scope input[type='text']:disabled,
-.kit-scope input[type='number']:disabled,
-.kit-scope input[type='password']:disabled {
+.ui-text-field__input:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }

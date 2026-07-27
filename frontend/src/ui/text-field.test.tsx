@@ -64,21 +64,25 @@ describe('TextField', () => {
     expect(input).toBeTruthy()
   })
 
-  // The wrapper always carries `ui-textfield` — it is what stacks the label
+  // The wrapper always carries `ui-text-field` — it is what stacks the label
   // above the input and owns the gap between them. Without it the label sat
   // inline against the input wherever a caller passed no class of its own.
   // A caller's class is added alongside, never instead.
   it('carries the kit base class on the wrapper', () => {
     subject({ label: 'Port' })
     const wrapper = screen.getByText('Port').parentElement
-    expect(wrapper?.getAttribute('class')).toBe('ui-textfield')
+    expect(wrapper?.getAttribute('class')).toBe('ui-text-field')
   })
 
-  it('appends the caller class to the base class', () => {
-    subject({ class: 'cm-field', label: 'Port' })
-    const wrapper = screen.getByText('Port').parentElement
-    expect(wrapper?.classList.contains('ui-textfield')).toBe(true)
-    expect(wrapper?.classList.contains('cm-field')).toBe(true)
+  // The input is the element that carries the appearance, and until T4 it was the
+  // one part of this component with no class at all — so its rules could only be
+  // reached through an ancestor, and three surfaces re-implemented them instead.
+  // The wrapper's identity says nothing about the input's; they are separate
+  // duties and the gate has to see both (§3.1).
+  it('names the input, not only the wrapper', () => {
+    subject({ label: 'Port' })
+    const input = screen.getByRole('textbox')
+    expect(input.getAttribute('class')).toBe('ui-text-field__input')
   })
 
   it('sets disabled attribute', () => {

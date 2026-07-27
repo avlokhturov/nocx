@@ -135,40 +135,11 @@
   margin-bottom: var(--space-8);
 }
 
-.cm-field {
-  display: flex;
-  align-items: center;
-  margin-bottom: 12px;
-}
-
-.cm-field label {
-  width: 160px;
-  font-size: 13px;
-  color: var(--color-text-muted);
-  flex-shrink: 0;
-}
-
-.cm-field input[type='text'],
-.cm-field input[type='number'],
-.cm-field input[type='password'] {
-  flex: 1;
-  padding: 8px 12px;
-  background: var(--color-canvas);
-  border: 1px solid var(--color-border);
-  border-radius: 4px;
-  color: var(--color-text);
-  font-size: 13px;
-}
-
-.cm-field input:focus {
-  outline: none;
-  border-color: var(--color-accent);
-}
-.cm-field input[type='checkbox'] {
-  width: 16px;
-  height: 16px;
-  accent-color: var(--color-accent);
-}
+/* `.cm-field` and its five rules are gone: nothing renders that class any more —
+   the form rows are kit Fields and TextFields — and among them was one of the three
+   independent re-implementations of the text input this migration set out to remove
+   (T4, nocx-xygp). A CSS rule with no element to match looks exactly like one that is
+   merely overridden, which is how it survived this long. */
 
 .cm-radio-group {
   display: flex;

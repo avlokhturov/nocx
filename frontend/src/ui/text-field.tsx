@@ -8,7 +8,6 @@
 import { Show } from 'solid-js'
 
 export interface TextFieldProps {
-  class?: string
   id?: string
   label?: string
   description?: string
@@ -36,7 +35,7 @@ export function TextField(props: TextFieldProps) {
   }
 
   return (
-    <div class={`ui-textfield ${props.class ?? ''}`.trim()}>
+    <div class="ui-text-field">
       <Show when={props.label !== undefined}>
         <label for={inputId()}>{props.label}</label>
       </Show>
@@ -46,6 +45,7 @@ export function TextField(props: TextFieldProps) {
         </p>
       </Show>
       <input
+        class="ui-text-field__input"
         id={inputId() || undefined}
         type={props.type ?? 'text'}
         value={props.value}

@@ -190,29 +190,6 @@
 
 /* ── Text inputs inside passphrase form ────────────────────────────── */
 
-.st-export-passphrase-form input[type='text'],
-.st-export-passphrase-form input[type='password'] {
-  background: var(--color-canvas);
-  border: 1px solid var(--color-border);
-  border-radius: 4px;
-  color: var(--color-text);
-  font-size: 13px;
-  padding: 6px 10px;
-  width: 100%;
-  max-width: 320px;
-}
-
-.st-export-passphrase-form input[type='text']:focus,
-.st-export-passphrase-form input[type='password']:focus {
-  border-color: var(--color-accent);
-  outline: none;
-}
-
-.st-export-passphrase-form input[type='text']::placeholder,
-.st-export-passphrase-form input[type='password']::placeholder {
-  color: var(--color-text-dim);
-}
-
 .st-export-passphrase-form label {
   font-size: 12px;
   color: var(--color-text-muted);
@@ -221,29 +198,4 @@
 
 /* ── Checkboxes inside passphrase form ─────────────────────────────── */
 
-.st-export-passphrase-form input[type='checkbox'] {
-  margin: 0;
-}
-
 /* ── Import section password input ────────────────────────────────── */
-
-.st-export-import-section input[type='password'] {
-  background: var(--color-canvas);
-  border: 1px solid var(--color-border);
-  border-radius: 4px;
-  color: var(--color-text);
-  font-size: 13px;
-  padding: 6px 10px;
-  width: 100%;
-  max-width: 320px;
-  margin-bottom: 8px;
-}
-
-.st-export-import-section input[type='password']:focus {
-  border-color: var(--color-accent);
-  outline: none;
-}
-
-.st-export-import-section input[type='password']::placeholder {
-  color: var(--color-text-dim);
-}
