@@ -52,12 +52,24 @@ function loadColorBaseline() {
 // script, not a side effect of lint.
 const baseline = loadBaseline()
 const colorBaseline = loadColorBaseline()
-/* `src/ui/feature-components.json` is the register of declared feature components —
-   owned code that legitimately carries a role a kit primitive also provides, so far
-   only Tab with `role=tab` (nocx-olav). It is NOT read here yet: rule 10, which is
-   what consumes it, arrives with T20 (nocx-zhjx), and a loader with no consumer is
-   dead code that looks like a working gate. The register ships now because the
-   component that needs it ships now; the wiring ships with the rule. */
+/**
+ * Declared feature components — owned code that legitimately carries a role a kit
+ * primitive also provides. Today that is only Tab with `role=tab` (nocx-olav).
+ *
+ * A register of deliberate exceptions, not a baseline: it does not have to shrink, but
+ * every entry states the composite contract it owns, so adding one is a reviewable act
+ * rather than a number going up.
+ *
+ * @type {Array<{ file: string, identity: string, roles: string[], contract: string }>}
+ */
+const FEATURE_COMPONENTS_PATH = resolve(CONFIG_DIR, 'src/ui/feature-components.json')
+let featureComponents = []
+try {
+  featureComponents = JSON.parse(readFileSync(FEATURE_COMPONENTS_PATH, 'utf-8'))
+} catch {
+  // Absent file means no exceptions, which is the safe default.
+  featureComponents = []
+}
 
 // ─── Inline-markup guard: class ownership ───────────────────────────────────────────
 // Derived by AST from static class=/className=/classList= on JSX elements in each
@@ -233,6 +245,67 @@ const nocxPlugin = {
         }
       },
     },
+    // ─── nocx/no-role-impersonation ─────────────────────────────────────────
+    // ADR-0014's raw-control rule forbids <button>, <select>, <textarea> and
+    // <input type=...>. It does not stop a surface hand-rolling the same control out
+    // of neutral elements — <div role="button">, <span role="checkbox"> — which
+    // satisfies the letter of the guard and defeats it entirely.
+    //
+    // Only the ARCHITECTURAL half lives here: a role a kit primitive already
+    // provides. The behavioural half — "is this element actually interactive" —
+    // needs a real focus/activation analysis, which is jsx-a11y's job; a
+    // half-written version of it fires on legitimate event delegation and gets
+    // disabled, which is worse than not having it.
+    //
+    // `listbox` and `option` are deliberately absent. A quick-connect row is
+    // composite domain semantics and a native <select> does not replace an arbitrary
+    // list row; forbidding the role would push the surface toward worse markup.
+    'no-role-impersonation': {
+      meta: {
+        type: 'suggestion',
+        docs: {
+          description:
+            'Reject ARIA roles that duplicate a kit primitive, outside ui/ and the declared feature components.',
+        },
+        messages: {
+          impersonation:
+            'role="{{role}}" duplicates a kit primitive. Use the component from \'ui/\', or declare this file in ui/feature-components.json with the composite contract it owns.',
+        },
+        schema: [],
+      },
+      create(context) {
+        const KIT_ROLES = new Set([
+          'button',
+          'checkbox',
+          'radio',
+          'switch',
+          'textbox',
+          'searchbox',
+          'combobox',
+        ])
+        const filename = context.filename ?? context.getFilename()
+        const rel = relative(PROJECT_ROOT, filename).replace(/\\/g, '/')
+        // ui/ owns the primitives; terminal-owned files are inside the xterm
+        // boundary (AD-6) and are not application UI.
+        if (rel.includes('frontend/src/ui/')) return {}
+        if (/frontend\/src\/(terminal-content|tabs|renderers\/|scrollback\/)/.test(rel)) return {}
+        const base = basename(filename)
+        const declared = featureComponents.find((f) => f.file === base)
+        const allowed = new Set(declared ? declared.roles : [])
+
+        return {
+          JSXAttribute(node) {
+            if (node.name?.name !== 'role') return
+            const v = node.value
+            if (!v || v.type !== 'Literal' || typeof v.value !== 'string') return
+            const role = v.value
+            if (!KIT_ROLES.has(role) || allowed.has(role)) return
+            context.report({ node, messageId: 'impersonation', data: { role } })
+          },
+        }
+      },
+    },
+
     'no-color-literals': {
       meta: {
         type: 'suggestion',
@@ -736,6 +809,12 @@ export default tseslint.config(
   {
     plugins: { nocx: nocxPlugin },
     rules: { 'nocx/no-raw-controls': 'error' },
+  },
+  // nocx/no-role-impersonation — closes the hole no-raw-controls leaves: a control
+  // hand-rolled out of neutral elements with an ARIA role (design spec §4 rule 10).
+  {
+    plugins: { nocx: nocxPlugin },
+    rules: { 'nocx/no-role-impersonation': 'error' },
   },
   // nocx/no-color-literals — rejects colour literals outside themes/
   // (ADR-0013 §4). Covers JSX style props and SVG attributes in TSX files.

@@ -76,6 +76,27 @@ if ! node "${fixture_dir}/check-kit-identities.mjs" 2>&1; then
   exit 1
 fi
 
+# ── Role-impersonation fixture check ─────────────────────────────────────────
+# nocx/no-role-impersonation must fire on every control hand-rolled from a neutral
+# element, and must NOT fire on role=option / role=listbox, which are composite
+# domain semantics no kit primitive replaces. Both directions are asserted: a rule
+# that over-reaches gets disabled, which is the same outcome as not having it.
+# No --format compact: it was dropped from core ESLint, and with `|| true`
+# swallowing the error the gate silently measured zero and reported a pass.
+role_check=$(npx eslint --no-ignore \
+  "${fixture_dir}/nocx-no-role-impersonation.tsx" 2>&1 || true)
+
+role_hits=$(echo "$role_check" | grep -c 'no-role-impersonation' || true)
+if [ "$role_hits" -lt 7 ]; then
+  echo "ROLE GATE FAILED — expected 7 impersonation reports, got ${role_hits}"
+  exit 1
+fi
+
+if echo "$role_check" | grep -qE 'role="(option|listbox)"'; then
+  echo "ROLE GATE FAILED — the rule reported role=option or role=listbox; it has over-reached"
+  exit 1
+fi
+
 # ── ESLint fixture check ─────────────────────────────────────────────────────
 # Run eslint on .tsx and .ts files (not .css — espree cannot parse CSS).
 # The .ts glob is needed for the solid/reactivity .ts fixture.
