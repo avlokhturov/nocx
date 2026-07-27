@@ -1,11 +1,5 @@
 import './style.css'
-import {
-  GetWSPort,
-  GetWSToken,
-  CheckForUpdate,
-  ApplyUpdate,
-  ReportHealthy,
-} from '../wailsjs/go/main/WailsApp'
+import { GetWSPort, GetWSToken, CheckForUpdate, ReportHealthy } from '../wailsjs/go/main/WailsApp'
 import { render } from 'solid-js/web'
 import App from './App'
 import { log } from './log'
@@ -21,81 +15,8 @@ import { HorizontalTabStrip, VerticalTabStrip } from './tab-strip'
 import { ConnectionsContent } from './connections-content'
 import { SURFACE_CONNECTIONS, SINGLETON_CONNECTIONS } from './tab-content'
 import { SurfaceRegistry, SURFACE_ID_SETTINGS, SURFACE_ID_CONNECTIONS } from './surface-registry'
+import { mountUpdateNotice } from './update-notice'
 import { SettingsObserver } from './settings-observer'
-
-/**
- * Renders the auto-update notice in the tab bar. The notice is a small,
- * non-modal element that shows update availability, download progress,
- * and pending-restart state. It renders from state — bound Go calls are
- * idempotent.
- */
-export class UpdateNotice {
-  private readonly el: HTMLDivElement
-
-  constructor(private bar: HTMLElement) {
-    this.el = document.createElement('div')
-    this.el.className = 'update-notice'
-    this.el.style.display = 'none'
-    this.bar.append(this.el)
-  }
-
-  /** Show an update is available with a link to release notes. */
-  showAvailable(version: string, notesUrl: string): void {
-    this.el.style.display = 'flex'
-    this.el.innerHTML = ''
-    const span = document.createElement('span')
-    span.textContent = `nocx ${version} available`
-    const link = document.createElement('a')
-    link.href = notesUrl
-    link.target = '_blank'
-    link.rel = 'noopener'
-    link.textContent = 'release notes'
-    link.className = 'update-notes-link'
-    const btn = document.createElement('button')
-    btn.textContent = 'Update'
-    btn.className = 'update-apply-btn'
-    btn.addEventListener('click', () => {
-      void this.apply()
-    })
-    this.el.append(span, ' · ', link, ' ', btn)
-  }
-
-  /** Show the busy/downloading state. */
-  showDownloading(): void {
-    this.el.style.display = 'flex'
-    this.el.innerHTML = ''
-    this.el.textContent = 'Downloading update…'
-    this.el.className = 'update-notice downloading'
-  }
-
-  /** Show pending restart state after a successful apply. */
-  showPendingRestart(version: string): void {
-    this.el.style.display = 'flex'
-    this.el.innerHTML = ''
-    this.el.textContent = `nocx ${version} installed — restart to apply`
-    this.el.className = 'update-notice pending'
-  }
-
-  /** Show an error message. */
-  showError(msg: string): void {
-    this.el.style.display = 'flex'
-    this.el.innerHTML = ''
-    this.el.textContent = `Update failed: ${msg}`
-    this.el.className = 'update-notice error'
-  }
-
-  private async apply(): Promise<void> {
-    this.showDownloading()
-    try {
-      await ApplyUpdate()
-      // After a successful apply, show pending restart.
-      this.showPendingRestart('') // version unknown here; Go can enrich later
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      this.showError(msg)
-    }
-  }
-}
 
 async function main() {
   log.info('nocx: main() called')
@@ -112,7 +33,7 @@ async function main() {
   const sidebarPanel = document.getElementById('sidebar')!
 
   // Update notice — renders inline in the tab bar, right-aligned.
-  const notice = new UpdateNotice(bar)
+  const notice = mountUpdateNotice(bar)
 
   const clipboard = createClipboardAccess()
   const gate = new ClipboardGate()

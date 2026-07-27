@@ -72,10 +72,10 @@ unrepresentable rather than merely fixed.
 ```ts
 interface SidebarViewDescriptor {
   readonly id: string
-  readonly title: string              // panel header, e.g. "EXPLORER"
-  readonly icon: Component            // activity-bar icon — a component, never markup
-  readonly view: Component            // panel body
-  readonly actions?: Component        // per-view header actions (⋯, refresh, collapse-all)
+  readonly title: string // panel header, e.g. "EXPLORER"
+  readonly icon: Component // activity-bar icon — a component, never markup
+  readonly view: Component // panel body
+  readonly actions?: Component // per-view header actions (⋯, refresh, collapse-all)
   readonly order: number
 }
 ```
@@ -189,8 +189,8 @@ The first draft of this section named Kobalte behind wrappers as the answer. A s
 it and the number the answer rested on did not survive review (§4.1), so the honest state is:
 per-primitive, platform-first hypothesis, pending measurement.
 
-| Written by us | Platform, inside a kit wrapper | Custom overlay, cost to be measured |
-|---|---|---|
+| Written by us                                                                                | Platform, inside a kit wrapper                                                         | Custom overlay, cost to be measured   |
+| -------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- | ------------------------------------- |
 | Button, TextField, SearchField, Checkbox, Field, Section, Toolbar, Badge, EmptyState, Toggle | `<dialog>` + `showModal()` for modals; native `<select>` for ordinary settings choices | Popover, Menu / context menu, Tooltip |
 
 Two things this table says deliberately:
@@ -283,7 +283,7 @@ primitive — with two refinements:
 - A native modal `<dialog>` renders in the browser **top layer**, not in our portal root, and
   is therefore not governed by the portal-root and z-index clauses. The drag-region, focus-
   return and xterm-textarea clauses still apply to it.
-- Every *custom* overlay shares one overlay root and one **overlay stack**, so Escape and
+- Every _custom_ overlay shares one overlay root and one **overlay stack**, so Escape and
   outside-interaction close the topmost eligible overlay only. Without a stack, nested
   overlays each think they own Escape, and closing one closes all.
 
@@ -364,19 +364,19 @@ attributes. Violations fail the build.
 
 Four paths escape a CSS-file scanner, and each gets a stated policy:
 
-| Source | Policy |
-|---|---|
-| Settings values from Go | May carry a *token name*, never a literal, unless the setting is explicitly a user-chosen colour |
-| xterm's injected stylesheet (`index.html:10-12` keeps `style-src 'unsafe-inline'` for it) | Owned by xterm; out of scope for the guard, in scope for the theme adapter (§5.4) |
-| Serializer output (`scrollback/serializer.ts:37-65` emits generated `rgb(...)`) | Terminal **content** semantics — exempt (§5.5) |
-| SVG assets | Reviewed at build time; `currentColor` where the icon should follow its container (§2.3) |
+| Source                                                                                    | Policy                                                                                           |
+| ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| Settings values from Go                                                                   | May carry a _token name_, never a literal, unless the setting is explicitly a user-chosen colour |
+| xterm's injected stylesheet (`index.html:10-12` keeps `style-src 'unsafe-inline'` for it) | Owned by xterm; out of scope for the guard, in scope for the theme adapter (§5.4)                |
+| Serializer output (`scrollback/serializer.ts:37-65` emits generated `rgb(...)`)           | Terminal **content** semantics — exempt (§5.5)                                                   |
+| SVG assets                                                                                | Reviewed at build time; `currentColor` where the icon should follow its container (§2.3)         |
 
 ### 5.4 xterm reads the same tokens, and startup ordering is explicit
 
 The terminal palette is currently a literal object at `renderers/xterm.ts:152`. It is replaced
 by one adapter that resolves the `--terminal-*` properties and builds xterm's `ITheme`.
 
-Reading resolved properties *at terminal creation* has a real race: if `data-theme` or its
+Reading resolved properties _at terminal creation_ has a real race: if `data-theme` or its
 stylesheet is applied after the first `getComputedStyle()`, the first terminal gets defaults
 or empty strings and stays wrong until the next theme event. `document.fonts.ready`
 (`xterm.ts:185`) does not order stylesheets. So:
@@ -391,16 +391,16 @@ or empty strings and stays wrong until the next theme event. `document.fonts.rea
   cache** of the last accepted theme id from the versioned local UI record, and reconciles
   against Go when the snapshot arrives. The cache is never read as authority, never written
   by user action, and always loses to Go; it exists to colour one frame. See ADR-0013 §8.1,
-  which owns this rule. *(This contradiction — synchronous resolver versus an
+  which owns this rule. _(This contradiction — synchronous resolver versus an
   asynchronously-fetched setting — was in the first draft of this spec and was found by
-  reading two workers' deliverables against each other, not by either worker.)*
+  reading two workers' deliverables against each other, not by either worker.)_
 - A concrete `ITheme` is passed into terminal construction — never read opportunistically
   afterwards.
 - Subscription to theme changes is registered **before** construction, or reapplied
   immediately after registering, to close the fetch/subscribe race.
 
 `applyTheme(theme)` is a **terminal-controller** operation, not a Solid effect. It sets
-`term.options.theme` *and* performs whatever refresh or atlas invalidation xterm needs for the
+`term.options.theme` _and_ performs whatever refresh or atlas invalidation xterm needs for the
 new palette to appear without user interaction. ADR-0005's 42 ms WebKitGTK refresh pump stays
 wholly inside the controller and is not driven from reactive state; a Linux/WebKitGTK test
 asserts the new palette appears on a live terminal with no input.
@@ -427,18 +427,52 @@ minimum sizes, which is why the current bug is invisible in jsdom and in some Ch
 Every node in the chain is specified:
 
 ```css
-#panes            { position: relative; min-height: 0; }
-.pane             { position: absolute; inset: 0; display: flex; flex-direction: column;
-                    overflow: hidden; }                       /* unchanged */
-.surface-host     { display: flex; flex: 1 1 auto; min-width: 0; min-height: 0;
-                    overflow: hidden; }
-.ui-page          { display: flex; flex-direction: column; flex: 1 1 auto;
-                    min-height: 0; overflow: hidden; }
-.ui-page__header  { flex: 0 0 auto; }
-.ui-page__body    { display: flex; flex: 1 1 auto; min-height: 0; min-width: 0;
-                    overflow: hidden; }
-.ui-page__rail    { flex: 0 0 auto; min-height: 0; overflow-y: auto; }
-.ui-page__scroll  { flex: 1 1 auto; min-height: 0; min-width: 0; overflow-y: auto; }
+#panes {
+  position: relative;
+  min-height: 0;
+}
+.pane {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+} /* unchanged */
+.surface-host {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.ui-page {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+.ui-page__header {
+  flex: 0 0 auto;
+}
+.ui-page__body {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+.ui-page__rail {
+  flex: 0 0 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+.ui-page__scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  overflow-y: auto;
+}
 ```
 
 Both the normal and the narrow (stacked) layout are tested in packaged WebKitGTK, not only in
@@ -478,14 +512,14 @@ So the rail is a typed registry of two kinds of entry:
 
 ```ts
 type SettingsPage =
-  | { kind: 'generated'; id: string; title: string }   // one page per Go-declared section
+  | { kind: 'generated'; id: string; title: string } // one page per Go-declared section
   | { kind: 'component'; id: string; title: string; page: Component }
 ```
 
 The generated-screen invariant is preserved **inside** the generated pages and stated with that
 boundary: adding a Go setting still costs zero frontend changes and appears in its section's
 page. Adding an application page such as Connections is one registry entry — and is explicitly
-*not* claimed to be free.
+_not_ claimed to be free.
 
 ### 6.5 Keyboard and focus model
 
@@ -535,7 +569,7 @@ change lands in the same commit.
 The ownership table is written **first**, and lands before any surface is merged or moved
 (§9). It is the deliverable `nocx-ycet` actually needs.
 
-- **One store, created in the composition root**, holding *accepted shared* state: tab list and
+- **One store, created in the composition root**, holding _accepted shared_ state: tab list and
   active tab, tab placement, active sidebar view and collapsed flag, selected theme, accepted
   settings revision and values.
 - **Local to the surface**: edit drafts, validation messages, expanded cards, file-picker
@@ -559,24 +593,24 @@ absent or unreadable.
 Each step lands and is verifiable on its own. Steps 1–4 are user-visible bug fixes and do not
 wait for the kit.
 
-| # | Step | Deletes |
-|---|---|---|
-| 1 | Correct ADR-0012 "As shipped"; add failing tests for §3.1–3.3 | nothing |
-| 2 | `.surface-host` + generic `SolidTabContent` + the §6.1 selectors; migrate both seams | duplicated mount/dispose in the two `*-content.ts` |
-| 3 | `#workspace` / `#vertical-tabstrip`; orientation picks its host; **update `e2e/tabs.spec.ts:57-78,122-143`, which currently assert `.tabstrip-vertical` on `#tabbar`, in the same commit** | the "every strip mounts into `bar`" assumption; CSS comments describing absent structure |
-| 4 | `UpdateNotice` → Solid | the vanilla class at `main.tsx:32-98` |
-| 5 | Measurement per §4.1 (independent builds, production entry, platform-first options) → ADR: the kit foundation as a **per-primitive** choice with the native/custom boundary stated → the shared overlay contract (§4.2) → guard with a shrinking baseline (§4.3) | nothing |
-| 6 | ADR: styling architecture (§5); `styles/` + tokens incl. state tokens; convert shell and existing kit; the §5.2 grammar check with its own baseline | hardcoded palette in converted selectors |
-| 7 | State **ownership table** (§8) — decided before surfaces move | nothing |
-| 8 | `Page` / `SidebarView` (§6.1–6.2); Settings page registry (§6.4); migrate Settings onto kit + Page | Settings-specific control CSS, raw markup |
-| 9a | Connections **added** as a Settings sub-page; every current entry path and the `tm.newSSHTab()` connect callback exercised end-to-end | nothing |
-| 9b | Only once 9a is green: remove the standalone surface | `SURFACE_CONNECTIONS`, `connections-content.ts`, `cm-*` rules |
-| 10 | Export into the same page/section vocabulary | `st-export-*` duplication |
-| 11 | Sidebar view registry; activity-bar zones; icons as components; delete Sessions | `mountSidebar`'s two-array API, imperative panel, Sessions placeholder, SVG-string icons |
-| 12 | Finish `tab-strip.tsx` on `<For>` with the §7 compatibility matrix | imperative button construction and the tests that pinned its DOM shape |
-| 13 | Store in the root per the step-7 table; delete dead slices; versioned persistence | unreachable models, their tests, sidebar's private store |
-| 14 | Theme switching end-to-end, including the §5.4 bootstrap resolver and xterm | literal palettes at `renderers/xterm.ts:152` and the serializer's ANSI table |
-| 15 | CSS consolidation sweep; set a CSS/bundle budget; both baselines from steps 5 and 6 must be empty | orphaned selectors, remaining literals, inline styles |
+| #   | Step                                                                                                                                                                                                                                                             | Deletes                                                                                  |
+| --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| 1   | Correct ADR-0012 "As shipped"; add failing tests for §3.1–3.3                                                                                                                                                                                                    | nothing                                                                                  |
+| 2   | `.surface-host` + generic `SolidTabContent` + the §6.1 selectors; migrate both seams                                                                                                                                                                             | duplicated mount/dispose in the two `*-content.ts`                                       |
+| 3   | `#workspace` / `#vertical-tabstrip`; orientation picks its host; **update `e2e/tabs.spec.ts:57-78,122-143`, which currently assert `.tabstrip-vertical` on `#tabbar`, in the same commit**                                                                       | the "every strip mounts into `bar`" assumption; CSS comments describing absent structure |
+| 4   | `UpdateNotice` → Solid                                                                                                                                                                                                                                           | the vanilla class at `main.tsx:32-98`                                                    |
+| 5   | Measurement per §4.1 (independent builds, production entry, platform-first options) → ADR: the kit foundation as a **per-primitive** choice with the native/custom boundary stated → the shared overlay contract (§4.2) → guard with a shrinking baseline (§4.3) | nothing                                                                                  |
+| 6   | ADR: styling architecture (§5); `styles/` + tokens incl. state tokens; convert shell and existing kit; the §5.2 grammar check with its own baseline                                                                                                              | hardcoded palette in converted selectors                                                 |
+| 7   | State **ownership table** (§8) — decided before surfaces move                                                                                                                                                                                                    | nothing                                                                                  |
+| 8   | `Page` / `SidebarView` (§6.1–6.2); Settings page registry (§6.4); migrate Settings onto kit + Page                                                                                                                                                               | Settings-specific control CSS, raw markup                                                |
+| 9a  | Connections **added** as a Settings sub-page; every current entry path and the `tm.newSSHTab()` connect callback exercised end-to-end                                                                                                                            | nothing                                                                                  |
+| 9b  | Only once 9a is green: remove the standalone surface                                                                                                                                                                                                             | `SURFACE_CONNECTIONS`, `connections-content.ts`, `cm-*` rules                            |
+| 10  | Export into the same page/section vocabulary                                                                                                                                                                                                                     | `st-export-*` duplication                                                                |
+| 11  | Sidebar view registry; activity-bar zones; icons as components; delete Sessions                                                                                                                                                                                  | `mountSidebar`'s two-array API, imperative panel, Sessions placeholder, SVG-string icons |
+| 12  | Finish `tab-strip.tsx` on `<For>` with the §7 compatibility matrix                                                                                                                                                                                               | imperative button construction and the tests that pinned its DOM shape                   |
+| 13  | Store in the root per the step-7 table; delete dead slices; versioned persistence                                                                                                                                                                                | unreachable models, their tests, sidebar's private store                                 |
+| 14  | Theme switching end-to-end, including the §5.4 bootstrap resolver and xterm                                                                                                                                                                                      | literal palettes at `renderers/xterm.ts:152` and the serializer's ANSI table             |
+| 15  | CSS consolidation sweep; set a CSS/bundle budget; both baselines from steps 5 and 6 must be empty                                                                                                                                                                | orphaned selectors, remaining literals, inline styles                                    |
 
 Two ordering rules the review corrected: the state ownership table moves **before** any surface
 migration (step 7, not last), because moving Connections into Settings otherwise decides
@@ -589,34 +623,34 @@ after step 11.
 
 ## 10. Risks and the checks that catch them
 
-| Risk | Check that actually catches it |
-|---|---|
-| Broken height/scroll chain | WebKit e2e: open Settings in a short window, scroll to the last setting, assert visible. jsdom cannot see layout. |
-| A second scroll container appears | test asserting no computed `overflow:auto/scroll` in a page subtree except the rail |
-| Vertical strip mounted in the title bar | e2e bounding-box assertions: drag bar above workspace, strip left of `#body`, panes non-zero width |
-| Wails drag region swallows clicks, incl. portaled overlays | packaged WebKitGTK/WKWebView smoke test opening every overlay from the title-bar region — Playwright does not implement Wails drag semantics |
-| Stale update-notice class/content | unit test over every state→state transition, especially error→available |
-| Tab identity or focus lost on reorder | component test asserting DOM node identity and focus survive reorder; keying by tab id |
-| Roving tabindex / ARIA regression | component tests plus arrow/Home/End e2e in both orientations and in the activity bar |
-| Solid remounts the xterm host | mount/dispose counters across activation, reorder, placement change, theme change |
-| First terminal gets an unthemed palette | assertion that the bootstrap resolver ran and every `--terminal-*` resolved before construction |
-| Theme change does not repaint on WebKitGTK | Linux packaged test: change theme, assert new palette on a live terminal with no input |
-| Frozen scrollback recolours | test a theme change before and after a block freezes |
-| Kit / overlay bundle creep | per-step **production entry** build recording raw/gzip delta by package against the 25–35 KB net budget, of which the migration already spent +7 KB |
-| A measured number is trusted for a claim it does not support | read the method before the conclusion — cumulative builds attribute the first item's dependencies to everything after it (§4.1) |
-| Nested overlays fight over Escape | one overlay stack, asserted by a test that opens two and closes only the topmost |
-| An agent hand-rolls a control again | the ESLint guard (§4.3) with a baseline that only shrinks |
-| A colour literal launders through `color-mix` or SVG | the grammar check (§5.2), including JSX and SVG attributes |
-| "Central" state goes dead again | reachability test plus store contract tests with two real consumers |
-| Persisted UI state lost on upgrade | migration test from the existing `nocx.sidebar.collapsed` key |
-| Chromium green, WebKit broken | keep both projects; WebKit is the release-relevant result. ADR-0012:266 records a regression that 544 unit tests and all 20 Chromium specs missed. |
+| Risk                                                         | Check that actually catches it                                                                                                                      |
+| ------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Broken height/scroll chain                                   | WebKit e2e: open Settings in a short window, scroll to the last setting, assert visible. jsdom cannot see layout.                                   |
+| A second scroll container appears                            | test asserting no computed `overflow:auto/scroll` in a page subtree except the rail                                                                 |
+| Vertical strip mounted in the title bar                      | e2e bounding-box assertions: drag bar above workspace, strip left of `#body`, panes non-zero width                                                  |
+| Wails drag region swallows clicks, incl. portaled overlays   | packaged WebKitGTK/WKWebView smoke test opening every overlay from the title-bar region — Playwright does not implement Wails drag semantics        |
+| Stale update-notice class/content                            | unit test over every state→state transition, especially error→available                                                                             |
+| Tab identity or focus lost on reorder                        | component test asserting DOM node identity and focus survive reorder; keying by tab id                                                              |
+| Roving tabindex / ARIA regression                            | component tests plus arrow/Home/End e2e in both orientations and in the activity bar                                                                |
+| Solid remounts the xterm host                                | mount/dispose counters across activation, reorder, placement change, theme change                                                                   |
+| First terminal gets an unthemed palette                      | assertion that the bootstrap resolver ran and every `--terminal-*` resolved before construction                                                     |
+| Theme change does not repaint on WebKitGTK                   | Linux packaged test: change theme, assert new palette on a live terminal with no input                                                              |
+| Frozen scrollback recolours                                  | test a theme change before and after a block freezes                                                                                                |
+| Kit / overlay bundle creep                                   | per-step **production entry** build recording raw/gzip delta by package against the 25–35 KB net budget, of which the migration already spent +7 KB |
+| A measured number is trusted for a claim it does not support | read the method before the conclusion — cumulative builds attribute the first item's dependencies to everything after it (§4.1)                     |
+| Nested overlays fight over Escape                            | one overlay stack, asserted by a test that opens two and closes only the topmost                                                                    |
+| An agent hand-rolls a control again                          | the ESLint guard (§4.3) with a baseline that only shrinks                                                                                           |
+| A colour literal launders through `color-mix` or SVG         | the grammar check (§5.2), including JSX and SVG attributes                                                                                          |
+| "Central" state goes dead again                              | reachability test plus store contract tests with two real consumers                                                                                 |
+| Persisted UI state lost on upgrade                           | migration test from the existing `nocx.sidebar.collapsed` key                                                                                       |
+| Chromium green, WebKit broken                                | keep both projects; WebKit is the release-relevant result. ADR-0012:266 records a regression that 544 unit tests and all 20 Chromium specs missed.  |
 
 ## 11. Explicitly out of scope
 
 - File mutation in Explorer (rename, delete, drag-and-drop) — stays out per `nocx-708q`.
 - Remote/SFTP browsing — `nocx-9le.5`.
 - A published design-system package outside this repo.
-- Light theme content: the token layer must *support* it; shipping a second palette is
+- Light theme content: the token layer must _support_ it; shipping a second palette is
   `nocx-8yg.6`'s call, not this design's.
 - Localisation of the new chrome — `nocx-dej6`.
 

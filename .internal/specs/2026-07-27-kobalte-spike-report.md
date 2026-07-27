@@ -2,7 +2,7 @@
 
 > **Coordinator correction, 2026-07-27, added after an adversarial review.**
 > **Do not act on this report's headline number.** The measurement below builds the
-> primitives *cumulatively, with Select first*, so the "~34 KB shared core" is "Select and
+> primitives _cumulatively, with Select first_, so the "~34 KB shared core" is "Select and
 > everything reachable from Select" — not fixed overhead that every Kobalte primitive pays.
 > `@internationalized/number`, the collection machinery and the live announcer are
 > Select/Combobox-oriented, and a Dialog-only build may contain almost none of them. The
@@ -23,7 +23,7 @@
 > what could not be tested, and the observation that `--wails-draggable` is unobservable
 > outside a packaged Wails build. The redo of `nocx-vxqj.3` measures each primitive
 > independently against the production entry, attributes bytes by package, compares against a
-> local implementation that *retains* `@floating-ui/dom`, and evaluates the platform-first
+> local implementation that _retains_ `@floating-ui/dom`, and evaluates the platform-first
 > option (native `<dialog>`, native `<select>`) that this spike did not consider.
 
 **Worker:** dispatched task_fec2dba2838d
@@ -34,22 +34,24 @@
 
 ## Deliverable 1 — Provenance
 
-| Field | Value |
-|---|---|
-| Version | `@kobalte/core@0.13.12` |
-| Publication date | 2026-06-30 |
-| Published by | GitHub Actions (via npm OIDC) |
-| Maintainers | fabienml, jer3m01 |
-| Repository | github.com/kobaltedev/kobalte |
-| Open issues | 118 (via GitHub API) |
-| Open PRs | 22 (via GitHub API) |
-| Last release before this | 0.13.11 on 2025-07-26 (gap of ~11 months) |
+| Field                      | Value                                                                                                                                                                 |
+| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Version                    | `@kobalte/core@0.13.12`                                                                                                                                               |
+| Publication date           | 2026-06-30                                                                                                                                                            |
+| Published by               | GitHub Actions (via npm OIDC)                                                                                                                                         |
+| Maintainers                | fabienml, jer3m01                                                                                                                                                     |
+| Repository                 | github.com/kobaltedev/kobalte                                                                                                                                         |
+| Open issues                | 118 (via GitHub API)                                                                                                                                                  |
+| Open PRs                   | 22 (via GitHub API)                                                                                                                                                   |
+| Last release before this   | 0.13.11 on 2025-07-26 (gap of ~11 months)                                                                                                                             |
 | Release cadence (last 12m) | 4 releases: 0.13.8 (Feb 2025), 0.13.9 (Feb 2025), 0.13.10 (May 2025), 0.13.11 (Jul 2025), 0.13.12 (Jun 2026). An 11-month gap between 0.13.11 and 0.13.12 is notable. |
 
 **Peer dependencies:**
+
 ```
 solid-js: ^1.8.15
 ```
+
 The project pins `solid-js@^1.9.14` — this satisfies Kobalte's peer range.
 
 **Solid 2.x story:** none. Kobalte has no Solid 2.x branch, no experimental Solid 2 support, and no public roadmap toward it. ADR-0012 deliberately pins Solid 1.x, so this is acceptable as long as the ADR holds. If Solid 2 reaches stable and becomes the ecosystem default, Kobalte would need a new major version to support it.
@@ -69,23 +71,23 @@ The project pins `solid-js@^1.9.14` — this satisfies Kobalte's peer range.
 
 ### Baseline (production build)
 
-| Metric | Raw | Gzip |
-|---|---|---|
-| Baseline (this spike) | 623,060 B | 162,808 B |
-| Brief-quoted baseline | 623,145 B | 162,827 B |
-| Variance | -85 B / -19 B (normal build noise) | |
+| Metric                | Raw                                | Gzip      |
+| --------------------- | ---------------------------------- | --------- |
+| Baseline (this spike) | 623,060 B                          | 162,808 B |
+| Brief-quoted baseline | 623,145 B                          | 162,827 B |
+| Variance              | -85 B / -19 B (normal build noise) |           |
 
 ### Build results (harness delta)
 
-| # | Primitive added | Raw (B) | Gzip (B) | Raw delta | Gzip delta | Cumul gzip |
-|---|---|---|---|---|---|---|
-| 0 | baseline (Solid only) | 6,642 | 2,820 | — | — | — |
-| 1 | + Select (includes all shared core) | 109,906 | 36,865 | +103,264 | +34,045 | 34,045 |
-| 2 | + Dialog | 114,802 | 37,873 | +4,896 | +1,008 | 35,053 |
-| 3 | + Popover | 119,692 | 38,583 | +4,890 | +710 | 35,763 |
-| 4 | + ContextMenu | 143,247 | 44,201 | +23,555 | +5,618 | 41,381 |
-| 5 | + Tooltip | 149,037 | 45,739 | +5,790 | +1,538 | 42,919 |
-| 6 | + Combobox | 166,856 | 50,538 | +17,819 | +4,799 | 47,718 |
+| #   | Primitive added                     | Raw (B) | Gzip (B) | Raw delta | Gzip delta | Cumul gzip |
+| --- | ----------------------------------- | ------- | -------- | --------- | ---------- | ---------- |
+| 0   | baseline (Solid only)               | 6,642   | 2,820    | —         | —          | —          |
+| 1   | + Select (includes all shared core) | 109,906 | 36,865   | +103,264  | +34,045    | 34,045     |
+| 2   | + Dialog                            | 114,802 | 37,873   | +4,896    | +1,008     | 35,053     |
+| 3   | + Popover                           | 119,692 | 38,583   | +4,890    | +710       | 35,763     |
+| 4   | + ContextMenu                       | 143,247 | 44,201   | +23,555   | +5,618     | 41,381     |
+| 5   | + Tooltip                           | 149,037 | 45,739   | +5,790    | +1,538     | 42,919     |
+| 6   | + Combobox                          | 166,856 | 50,538   | +17,819   | +4,799     | 47,718     |
 
 ### Interpretation
 
@@ -93,14 +95,14 @@ The project pins `solid-js@^1.9.14` — this satisfies Kobalte's peer range.
 
 **Incremental per-primitive costs:**
 
-| Primitive | Gzip delta | Assessment |
-|---|---|---|
-| Dialog | +1.0 KB | Cheap — good candidate |
-| Popover | +0.7 KB | Very cheap — excellent candidate |
-| Tooltip | +1.5 KB | Cheap — good candidate |
-| Select | included in shared core | Not free — the shared core is the cost of Select |
-| Combobox | +4.8 KB | Moderate — shares core with Select |
-| ContextMenu | +5.6 KB | Moderate — separate from the Popover/Select family |
+| Primitive   | Gzip delta              | Assessment                                         |
+| ----------- | ----------------------- | -------------------------------------------------- |
+| Dialog      | +1.0 KB                 | Cheap — good candidate                             |
+| Popover     | +0.7 KB                 | Very cheap — excellent candidate                   |
+| Tooltip     | +1.5 KB                 | Cheap — good candidate                             |
+| Select      | included in shared core | Not free — the shared core is the cost of Select   |
+| Combobox    | +4.8 KB                 | Moderate — shares core with Select                 |
+| ContextMenu | +5.6 KB                 | Moderate — separate from the Popover/Select family |
 
 **Budget check:** ADR-0012 sets a budget of **25–35 KB gzip** for "framework, store and initial component primitives combined." Solid is already inside that budget. Kobalte's shared-core cost alone (**34 KB gzip**) consumes 97–100% of the remaining budget before any primitive is used. Adding any combination of primitives pushes past the ceiling.
 
@@ -108,11 +110,11 @@ If the budget is treated strictly, Kobalte fails. If the budget is treated as a 
 
 ### Projected production build sizes
 
-| Scenario | Raw (B) | Gzip (B) | Delta from current |
-|---|---|---|---|
-| Current production (no Kobalte) | 623,060 | 162,808 | — |
-| Production + Select only (shared core) | 726,324 | 196,853 | +34 KB gzip |
-| Production + all 6 primitives | 783,274 | 210,526 | +48 KB gzip |
+| Scenario                               | Raw (B) | Gzip (B) | Delta from current |
+| -------------------------------------- | ------- | -------- | ------------------ |
+| Current production (no Kobalte)        | 623,060 | 162,808  | —                  |
+| Production + Select only (shared core) | 726,324 | 196,853  | +34 KB gzip        |
+| Production + all 6 primitives          | 783,274 | 210,526  | +48 KB gzip        |
 
 ---
 
@@ -124,20 +126,20 @@ If the budget is treated strictly, Kobalte fails. If the budget is treated as a 
 
 ### Results
 
-| Primitive | Renders | Portaled to body | Focus | Escape dismisses | Notes |
-|---|---|---|---|---|---|
-| Dialog (title bar) | ✓ | ✓ | Close button | ✓ | Full focus trap on open, escape works |
-| Dialog (terminal) | ✓ | ✓ | Close button | ✓ | Same behaviour |
-| Popover (title bar) | ✓ | ✓ | — | ✓ | Renders at body level |
-| Popover (terminal) | ✓ | ✓ | — | ✓ | Same behaviour |
-| Tooltip (title bar) | ✓ | ✓ | — | _(hover away)_ ✓ | Appears on hover, dismisses correctly |
-| Tooltip (terminal) | ✓ | ✓ | — | _(hover away)_ ✓ | Same behaviour |
-| Select (title bar) | Trigger visible | Listbox failed to open | — | — | 0.13.x API change: requires `options` array + render-prop for items |
-| Select (terminal) | Trigger visible | Listbox failed to open | — | — | Same API issue |
-| Combobox (title bar) | Input visible | Listbox not visible | — | — | Same API issue (options array) |
-| Combobox (terminal) | Input visible | Listbox not visible | — | — | Same API issue |
-| ContextMenu (terminal) | Trigger visible | Menu did not open | — | — | Right-click interaction incomplete |
-| Terminal host DOM | ✓ Preserved | — | — | — | xterm host element unchanged |
+| Primitive              | Renders         | Portaled to body       | Focus        | Escape dismisses | Notes                                                               |
+| ---------------------- | --------------- | ---------------------- | ------------ | ---------------- | ------------------------------------------------------------------- |
+| Dialog (title bar)     | ✓               | ✓                      | Close button | ✓                | Full focus trap on open, escape works                               |
+| Dialog (terminal)      | ✓               | ✓                      | Close button | ✓                | Same behaviour                                                      |
+| Popover (title bar)    | ✓               | ✓                      | —            | ✓                | Renders at body level                                               |
+| Popover (terminal)     | ✓               | ✓                      | —            | ✓                | Same behaviour                                                      |
+| Tooltip (title bar)    | ✓               | ✓                      | —            | _(hover away)_ ✓ | Appears on hover, dismisses correctly                               |
+| Tooltip (terminal)     | ✓               | ✓                      | —            | _(hover away)_ ✓ | Same behaviour                                                      |
+| Select (title bar)     | Trigger visible | Listbox failed to open | —            | —                | 0.13.x API change: requires `options` array + render-prop for items |
+| Select (terminal)      | Trigger visible | Listbox failed to open | —            | —                | Same API issue                                                      |
+| Combobox (title bar)   | Input visible   | Listbox not visible    | —            | —                | Same API issue (options array)                                      |
+| Combobox (terminal)    | Input visible   | Listbox not visible    | —            | —                | Same API issue                                                      |
+| ContextMenu (terminal) | Trigger visible | Menu did not open      | —            | —                | Right-click interaction incomplete                                  |
+| Terminal host DOM      | ✓ Preserved     | —                      | —            | —                | xterm host element unchanged                                        |
 
 ### Verdict on portal-specific concerns
 
@@ -171,7 +173,7 @@ If the budget is treated strictly, Kobalte fails. If the budget is treated as a 
 
 **Reject Kobalte as specified** — but **adopt narrowed** for exactly Dialog, Popover, and Tooltip.
 
-The shared-core cost (~34 KB gzip) violates the ADR-0012 budget by definition. The budget is 25–35 KB for the *entire* framework, store, and initial component kit — not just for the headless library. Kobalte's shared core alone consumes 100% of that budget, leaving nothing for state management or the components themselves.
+The shared-core cost (~34 KB gzip) violates the ADR-0012 budget by definition. The budget is 25–35 KB for the _entire_ framework, store, and initial component kit — not just for the headless library. Kobalte's shared core alone consumes 100% of that budget, leaving nothing for state management or the components themselves.
 
 However, **Dialog, Popover, and Tooltip** are the primitives where accessibility is genuinely hard (focus trapping, Escape key handling, interact-outside detection, ARIA live regions). These three cost only ~3.2 KB gzip incrementally **if** we already have the shared infrastructure.
 
@@ -185,16 +187,16 @@ The recommendation splits:
 
 ### Summary
 
-| Criterion | Verdict |
-|---|---|
-| Kobalte version/peer compatibility | ✓ 0.13.12 satisfies solid-js ^1.9.14 |
-| Maintenance activity | ⚠ Last release was after 11-month gap; 118 open issues, 22 open PRs |
-| Bundle cost (shared core) | ✗ ~34 KB gzip — violates 25–35 KB budget |
-| Bundle cost (incremental) | ⚠ Reasonable for 3 primitives (~3.2 KB total); expensive for all 6 (~14 KB) |
-| Portal behaviour in WebKitGTK | ✓ Dialog/Popover/Tooltip work correctly; Select/Combobox/ContextMenu have API issues |
-| `--wails-draggable` hazard | ⚠ Confirmed that portals render at body level; actual drag interaction unverified |
-| Focus management | ✓ Dialog focus trap works in WebKitGTK |
-| Escape handling | ✓ Works for Dialog, Popover in WebKitGTK |
+| Criterion                          | Verdict                                                                              |
+| ---------------------------------- | ------------------------------------------------------------------------------------ |
+| Kobalte version/peer compatibility | ✓ 0.13.12 satisfies solid-js ^1.9.14                                                 |
+| Maintenance activity               | ⚠ Last release was after 11-month gap; 118 open issues, 22 open PRs                  |
+| Bundle cost (shared core)          | ✗ ~34 KB gzip — violates 25–35 KB budget                                             |
+| Bundle cost (incremental)          | ⚠ Reasonable for 3 primitives (~3.2 KB total); expensive for all 6 (~14 KB)          |
+| Portal behaviour in WebKitGTK      | ✓ Dialog/Popover/Tooltip work correctly; Select/Combobox/ContextMenu have API issues |
+| `--wails-draggable` hazard         | ⚠ Confirmed that portals render at body level; actual drag interaction unverified    |
+| Focus management                   | ✓ Dialog focus trap works in WebKitGTK                                               |
+| Escape handling                    | ✓ Works for Dialog, Popover in WebKitGTK                                             |
 
 ---
 
@@ -213,6 +215,7 @@ The recommendation splits:
 - `kobalte-spike-report.md` — this report
 
 Modified (in worktree only):
+
 - `frontend/package.json` — added `@kobalte/core`
 - `frontend/package-lock.json` — regenerated
 - `frontend/src/kobalte-harness.tsx` — rewritten 7 times for measurement

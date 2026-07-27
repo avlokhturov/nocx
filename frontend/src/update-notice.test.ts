@@ -1,95 +1,190 @@
 // @vitest-environment jsdom
-import { describe, it, expect } from 'vitest'
-import { UpdateNotice } from './main'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { mountUpdateNotice, type UpdateNoticeController } from './update-notice'
+
+vi.mock('../wailsjs/go/main/WailsApp', () => ({
+  ApplyUpdate: vi.fn<() => Promise<void>>(),
+  CheckForUpdate: vi.fn(),
+  ReportHealthy: vi.fn(),
+  GetWSPort: vi.fn(),
+  GetWSToken: vi.fn(),
+}))
+
+import { ApplyUpdate } from '../wailsjs/go/main/WailsApp'
+
+function stateClass(kind: string): string {
+  if (kind === 'hidden' || kind === 'available') return 'update-notice'
+  return `update-notice ${kind}`
+}
+
+const ALL_STATES = ['hidden', 'available', 'downloading', 'pending', 'error'] as const
+
+// Every directed pair (from → to, from ≠ to) = 16 transitions (hidden excluded as target).
+const ALL_PAIRS: [string, string][] = ALL_STATES.flatMap((from) =>
+  ALL_STATES.filter((to) => to !== from && to !== 'hidden').map((to): [string, string] => [
+    from,
+    to,
+  ]),
+)
+
+function setState(kind: string, ctrl: UpdateNoticeController): void {
+  switch (kind) {
+    case 'hidden':
+      break // already hidden from mount
+    case 'available':
+      ctrl.showAvailable('1.0.0', 'https://example.com/release')
+      break
+    case 'downloading':
+      ctrl.showDownloading()
+      break
+    case 'pending':
+      ctrl.showPendingRestart('1.0.0')
+      break
+    case 'error':
+      ctrl.showError('test error')
+      break
+  }
+}
 
 describe('UpdateNotice', () => {
-  // ── Pinned defect: showAvailable does not reset className ──────────────
-  // All three transitions fail because showAvailable() (main.tsx:43-61)
-  // sets display and innerHTML but never restores className to 'update-notice'.
-  // After any error/downloading/pending state, the previous class persists.
-  // Fix: add `this.el.className = 'update-notice'` inside showAvailable.
+  let bar: HTMLElement
+  let ctrl: UpdateNoticeController
 
-  it.fails('error→available resets className (nocx-82l9.1)', () => {
-    const bar = document.createElement('div')
-    const notice = new UpdateNotice(bar)
-
-    notice.showError('connection lost')
-    notice.showAvailable('1.0.0', 'https://example.com/release')
-
-    const el = bar.querySelector('.update-notice')
-    expect(el).not.toBeNull()
-    expect(el!.className).toBe('update-notice')
+  beforeEach(() => {
+    bar = document.createElement('div')
+    document.body.append(bar)
+    ctrl = mountUpdateNotice(bar)
+    vi.mocked(ApplyUpdate).mockReset()
+    vi.mocked(ApplyUpdate).mockResolvedValue(undefined)
   })
 
-  it.fails('downloading→available resets className (nocx-82l9.1)', () => {
-    const bar = document.createElement('div')
-    const notice = new UpdateNotice(bar)
-
-    notice.showDownloading()
-    notice.showAvailable('1.0.0', 'https://example.com/release')
-
-    const el = bar.querySelector('.update-notice')
-    expect(el).not.toBeNull()
-    expect(el!.className).toBe('update-notice')
+  afterEach(() => {
+    bar.remove()
   })
 
-  it.fails('pending→available resets className (nocx-82l9.1)', () => {
-    const bar = document.createElement('div')
-    const notice = new UpdateNotice(bar)
+  // ── Individual state renders ──────────────────────────────────────────
 
-    notice.showPendingRestart('1.0.0')
-    notice.showAvailable('1.0.0', 'https://example.com/release')
-
-    const el = bar.querySelector('.update-notice')
+  it('hidden renders with display:none', () => {
+    const el = bar.querySelector('.update-notice') as HTMLElement
     expect(el).not.toBeNull()
-    expect(el!.className).toBe('update-notice')
+    expect(el.style.display).toBe('none')
+    expect(el.className).toBe('update-notice')
   })
 
-  // ── Individual state setters are correct ──────────────────────────────
+  it('showAvailable renders version, link, and button', () => {
+    ctrl.showAvailable('1.0.0', 'https://example.com/release')
 
-  it('showDownloading sets downloading class (passing)', () => {
-    const bar = document.createElement('div')
-    const notice = new UpdateNotice(bar)
-
-    notice.showDownloading()
-
-    const el = bar.querySelector('.update-notice')
+    const el = bar.querySelector('.update-notice') as HTMLElement
     expect(el).not.toBeNull()
-    expect(el!.className).toBe('update-notice downloading')
+    expect(el.className).toBe('update-notice')
+    expect(el.style.display).toBe('flex')
+    expect(el.textContent).toContain('1.0.0 available')
+    expect(el.querySelector('.update-notes-link')).not.toBeNull()
+    expect(el.querySelector('.update-apply-btn')).not.toBeNull()
   })
 
-  it('showPendingRestart sets pending class (passing)', () => {
-    const bar = document.createElement('div')
-    const notice = new UpdateNotice(bar)
+  it('showDownloading sets downloading class and content', () => {
+    ctrl.showDownloading()
 
-    notice.showPendingRestart('1.0.0')
-
-    const el = bar.querySelector('.update-notice')
+    const el = bar.querySelector('.update-notice') as HTMLElement
     expect(el).not.toBeNull()
-    expect(el!.className).toBe('update-notice pending')
+    expect(el.className).toBe('update-notice downloading')
+    expect(el.textContent).toBe('Downloading update…')
   })
 
-  it('showError sets error class (passing)', () => {
-    const bar = document.createElement('div')
-    const notice = new UpdateNotice(bar)
+  it('showPendingRestart sets pending class and content', () => {
+    ctrl.showPendingRestart('1.0.0')
 
-    notice.showError('connection lost')
-
-    const el = bar.querySelector('.update-notice')
+    const el = bar.querySelector('.update-notice') as HTMLElement
     expect(el).not.toBeNull()
-    expect(el!.className).toBe('update-notice error')
+    expect(el.className).toBe('update-notice pending')
+    expect(el.textContent).toContain('1.0.0 installed')
+    expect(el.textContent).toContain('restart to apply')
   })
 
-  it('showAvailable sets correct content (passing)', () => {
-    const bar = document.createElement('div')
-    const notice = new UpdateNotice(bar)
+  it('showError sets error class and content', () => {
+    ctrl.showError('connection lost')
 
-    notice.showAvailable('1.0.0', 'https://example.com/release')
-
-    const el = bar.querySelector('.update-notice')
+    const el = bar.querySelector('.update-notice') as HTMLElement
     expect(el).not.toBeNull()
-    expect(el!.textContent).toContain('1.0.0 available')
-    expect(el!.querySelector('a')).not.toBeNull()
-    expect(el!.querySelector('button')).not.toBeNull()
+    expect(el.className).toBe('update-notice error')
+    expect(el.textContent).toContain('Update failed')
+    expect(el.textContent).toContain('connection lost')
+  })
+
+  // ── Every state-to-state transition ───────────────────────────────────
+
+  it.each(ALL_PAIRS)('%s→%s resets className to target state', (from, to) => {
+    setState(from, ctrl)
+    setState(to, ctrl)
+
+    const el = bar.querySelector('.update-notice') as HTMLElement
+    expect(el.className).toBe(stateClass(to))
+    if (to === 'hidden') {
+      expect(el.style.display).toBe('none')
+    } else {
+      expect(el.style.display).toBe('flex')
+    }
+  })
+
+  // ── Apply path: successful update ─────────────────────────────────────
+
+  it('click Update → downloading → pending on success', async () => {
+    vi.mocked(ApplyUpdate).mockResolvedValue(undefined)
+
+    ctrl.showAvailable('1.0.0', 'https://example.com/release')
+
+    // Click the Update button — starts async apply.
+    const btn = bar.querySelector('.update-apply-btn') as HTMLButtonElement
+    expect(btn).not.toBeNull()
+    btn.click()
+
+    // Immediately after click: downloading state.
+    const el = bar.querySelector('.update-notice') as HTMLElement
+    expect(el.className).toBe('update-notice downloading')
+
+    // Wait for the async ApplyUpdate to resolve.
+    await vi.waitFor(() => {
+      expect(el.className).toBe('update-notice pending')
+    })
+  })
+
+  // ── Apply path: failed update ─────────────────────────────────────────
+
+  it('click Update → downloading → error on failure', async () => {
+    vi.mocked(ApplyUpdate).mockRejectedValue(new Error('network error'))
+
+    ctrl.showAvailable('1.0.0', 'https://example.com/release')
+
+    const btn = bar.querySelector('.update-apply-btn') as HTMLButtonElement
+    expect(btn).not.toBeNull()
+    btn.click()
+
+    // Immediately after click: downloading state.
+    const el = bar.querySelector('.update-notice') as HTMLElement
+    expect(el.className).toBe('update-notice downloading')
+
+    // Wait for the async ApplyUpdate to reject.
+    await vi.waitFor(() => {
+      expect(el.className).toBe('update-notice error')
+    })
+    expect(el.textContent).toContain('network error')
+  })
+
+  // ── Apply path: non-Error rejection ───────────────────────────────────
+
+  it('click Update → downloading → error with string rejection', async () => {
+    vi.mocked(ApplyUpdate).mockRejectedValue('plain string')
+
+    ctrl.showAvailable('1.0.0', 'https://example.com/release')
+
+    const btn = bar.querySelector('.update-apply-btn') as HTMLButtonElement
+    btn.click()
+
+    await vi.waitFor(() => {
+      const el = bar.querySelector('.update-notice') as HTMLElement
+      expect(el.className).toBe('update-notice error')
+      expect(el.textContent).toContain('plain string')
+    })
   })
 })

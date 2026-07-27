@@ -12,33 +12,33 @@ ADR-0012 §2 (authority chain: Go → framework‑neutral .ts → Solid signals 
 23 rows, one per piece of frontend state. Every row is verified against the code;
 none are speculative.
 
-| State | Owner | Authority | Persistence | Lifetime |
-|---|---|---|---|---|
-| Tab list | `TabManager` (`tabs.ts:265`, `tabs: Tab[]`) | Frontend (TabManager) | Not persisted | Process |
-| Active tab | `TabManager` (`tabs.ts:267`, `activeTab`) | Frontend (TabManager) — derives from tab-list order + activation | Not persisted | Process |
-| Tab MRU order | `TabManager` (`tabs.ts:278`, `recentTabIds`) | Frontend (TabManager) | Not persisted | Process |
-| Tab placement (`tab.placement`) | **Go** `settings.Registry` (`internal/settings/settings.go:470`) | Go backend — `ProfileClient.getSnapshot()` + live `SettingsObserver` | Go settings doc | Process |
-| Per-tab title | `Tab` (`tabs.ts:41-42`, `_title` / `_programTitle`) | Frontend — set via `TabHost.setTitle()` from terminal OSC | Not persisted | Tab |
-| Per-tab activity flag | `Tab` (`tabs.ts:43`, `_hasActivity`) | Frontend — `Tab.requestAttention()` / `markActivity()` | Not persisted | Tab |
-| Per-tab agent status | `Tab` (`tabs.ts:44`, `_agentStatus`) | Frontend — `detectAgentStatus()` from title text | Not persisted | Tab |
-| Per-tab tooltip | `Tab` (`tabs.ts:45`, `_tooltip`) | Frontend — `TerminalContent` via cwd/SSH info callback | Not persisted | Tab |
-| Tab pane geometry (viewport) | `Tab` (`tabs.ts:49-50`, `_viewportObserver`, `_latestViewport`) | Frontend — `ResizeObserver` on pane element | Not persisted | Tab |
-| Active sidebar view | `SidebarSolid` → `sidebar` slice of store (`sidebar-model.ts:29`) | Frontend — icon click | **One versioned localStorage record** (§3) | Process |
-| Sidebar collapsed | `SidebarSolid` → `sidebar` slice of store (`sidebar-model.ts:27`) | Frontend — icon click, Ctrl/Cmd+B | **One versioned localStorage record** (§3) | Process |
-| Selected theme | **Go setting `ui.theme`** (decided — §3) | Go backend | Go settings doc, plus a bootstrap **cache** in the local record (ADR-0013 §8.1) | Process |
-| Accepted settings values | `settings.tsx:84` (`createStore`) + `settings-domain.ts` `SettingsMirror` | Go backend — validated via `AcceptedSnapshot` revision gate | Go settings doc | Process |
-| Settings revision | `settings.tsx:88` (`createSignal`) | Go backend — monotonic counter in `settings.Registry` | Go settings doc | Process |
-| Settings draft values | `settings.tsx:85` (`createStore`) | Frontend — unsaved edits | Not persisted | Draft |
-| Settings validation errors | `settings.tsx:87` (`createStore`) | Frontend — local validation | Not persisted | Draft |
-| Settings search query | `settings.tsx:91` (`createSignal`) | Frontend | Not persisted | Surface mount |
-| Settings modified-only filter | `settings.tsx:92` (`createSignal`) | Frontend | Not persisted | Surface mount |
-| Settings section filter | `settings.tsx:93` (`createSignal`) | Frontend | Not persisted | Surface mount |
-| Profile/group/credential lists | `connections.tsx:62-64` (3 `createSignal`) | Go backend — `ProfileClient` RPC calls | Go settings doc | Surface mount |
-| Connection selection / editing | `connections.tsx:67-69` (3 `createSignal`) | Frontend — UI state | Not persisted | Draft |
-| Connection form error | `connections.tsx:486` (`createSignal`) | Frontend | Not persisted | Draft |
-| Export-section state (25 `createSignal`) | `export-section.tsx` (25 `createSignal`) | Frontend — per-section UI state | Not persisted | Surface mount |
-| Clipboard banner shown | `ClipboardBannerImpl._shown` (`banner.tsx`) | Frontend — promise-based `show()` flow | Not persisted | Process |
-| **Terminal render state** | **xterm.js** (AD-6) | **Out — must never appear in the store** | N/A | N/A |
+| State                                    | Owner                                                                     | Authority                                                            | Persistence                                                                     | Lifetime      |
+| ---------------------------------------- | ------------------------------------------------------------------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------- | ------------- |
+| Tab list                                 | `TabManager` (`tabs.ts:265`, `tabs: Tab[]`)                               | Frontend (TabManager)                                                | Not persisted                                                                   | Process       |
+| Active tab                               | `TabManager` (`tabs.ts:267`, `activeTab`)                                 | Frontend (TabManager) — derives from tab-list order + activation     | Not persisted                                                                   | Process       |
+| Tab MRU order                            | `TabManager` (`tabs.ts:278`, `recentTabIds`)                              | Frontend (TabManager)                                                | Not persisted                                                                   | Process       |
+| Tab placement (`tab.placement`)          | **Go** `settings.Registry` (`internal/settings/settings.go:470`)          | Go backend — `ProfileClient.getSnapshot()` + live `SettingsObserver` | Go settings doc                                                                 | Process       |
+| Per-tab title                            | `Tab` (`tabs.ts:41-42`, `_title` / `_programTitle`)                       | Frontend — set via `TabHost.setTitle()` from terminal OSC            | Not persisted                                                                   | Tab           |
+| Per-tab activity flag                    | `Tab` (`tabs.ts:43`, `_hasActivity`)                                      | Frontend — `Tab.requestAttention()` / `markActivity()`               | Not persisted                                                                   | Tab           |
+| Per-tab agent status                     | `Tab` (`tabs.ts:44`, `_agentStatus`)                                      | Frontend — `detectAgentStatus()` from title text                     | Not persisted                                                                   | Tab           |
+| Per-tab tooltip                          | `Tab` (`tabs.ts:45`, `_tooltip`)                                          | Frontend — `TerminalContent` via cwd/SSH info callback               | Not persisted                                                                   | Tab           |
+| Tab pane geometry (viewport)             | `Tab` (`tabs.ts:49-50`, `_viewportObserver`, `_latestViewport`)           | Frontend — `ResizeObserver` on pane element                          | Not persisted                                                                   | Tab           |
+| Active sidebar view                      | `SidebarSolid` → `sidebar` slice of store (`sidebar-model.ts:29`)         | Frontend — icon click                                                | **One versioned localStorage record** (§3)                                      | Process       |
+| Sidebar collapsed                        | `SidebarSolid` → `sidebar` slice of store (`sidebar-model.ts:27`)         | Frontend — icon click, Ctrl/Cmd+B                                    | **One versioned localStorage record** (§3)                                      | Process       |
+| Selected theme                           | **Go setting `ui.theme`** (decided — §3)                                  | Go backend                                                           | Go settings doc, plus a bootstrap **cache** in the local record (ADR-0013 §8.1) | Process       |
+| Accepted settings values                 | `settings.tsx:84` (`createStore`) + `settings-domain.ts` `SettingsMirror` | Go backend — validated via `AcceptedSnapshot` revision gate          | Go settings doc                                                                 | Process       |
+| Settings revision                        | `settings.tsx:88` (`createSignal`)                                        | Go backend — monotonic counter in `settings.Registry`                | Go settings doc                                                                 | Process       |
+| Settings draft values                    | `settings.tsx:85` (`createStore`)                                         | Frontend — unsaved edits                                             | Not persisted                                                                   | Draft         |
+| Settings validation errors               | `settings.tsx:87` (`createStore`)                                         | Frontend — local validation                                          | Not persisted                                                                   | Draft         |
+| Settings search query                    | `settings.tsx:91` (`createSignal`)                                        | Frontend                                                             | Not persisted                                                                   | Surface mount |
+| Settings modified-only filter            | `settings.tsx:92` (`createSignal`)                                        | Frontend                                                             | Not persisted                                                                   | Surface mount |
+| Settings section filter                  | `settings.tsx:93` (`createSignal`)                                        | Frontend                                                             | Not persisted                                                                   | Surface mount |
+| Profile/group/credential lists           | `connections.tsx:62-64` (3 `createSignal`)                                | Go backend — `ProfileClient` RPC calls                               | Go settings doc                                                                 | Surface mount |
+| Connection selection / editing           | `connections.tsx:67-69` (3 `createSignal`)                                | Frontend — UI state                                                  | Not persisted                                                                   | Draft         |
+| Connection form error                    | `connections.tsx:486` (`createSignal`)                                    | Frontend                                                             | Not persisted                                                                   | Draft         |
+| Export-section state (25 `createSignal`) | `export-section.tsx` (25 `createSignal`)                                  | Frontend — per-section UI state                                      | Not persisted                                                                   | Surface mount |
+| Clipboard banner shown                   | `ClipboardBannerImpl._shown` (`banner.tsx`)                               | Frontend — promise-based `show()` flow                               | Not persisted                                                                   | Process       |
+| **Terminal render state**                | **xterm.js** (AD-6)                                                       | **Out — must never appear in the store**                             | N/A                                                                             | N/A           |
 
 **Notes on what the brief did not list:**
 
@@ -145,6 +145,7 @@ is optimistic — unrecognised versions are treated as absent (defaults applied,
 see below).
 
 **Migration from `nocx.sidebar.collapsed`:**
+
 1. Read the existing `nocx.sidebar.collapsed` key. If `'1'`, set
    `sidebar.collapsed = true` in the new record.
 2. Delete the old key.
@@ -156,6 +157,7 @@ in component code.
 
 **Defined defaults when the record is absent, unparseable, or from a future
 version:**
+
 - `sidebar.collapsed`: `true` when there are no panel views (`panelViews.length === 0`),
   else `false` (mirrors the fix for `nocx-rp2j` at `sidebar.tsx:230-234`).
 - `sidebar.activeViewId`: the first panel view's id, or empty string.
@@ -193,7 +195,7 @@ ship), a `SelectSpec` with hardcoded `Options` would need updating. At MVP
 become dynamic the setting can switch to a declarative key resolved at runtime.
 
 **Decided, and it needs one exception to the mirror rule.** A Go setting arrives
-asynchronously, but the bootstrap theme resolver must run *before* the first frame, or
+asynchronously, but the bootstrap theme resolver must run _before_ the first frame, or
 every launch flashes the default theme. So the local versioned record additionally carries
 a **bootstrap cache** of the last accepted theme id: written when the accepted Go value
 changes, read synchronously at startup, reconciled against Go when the snapshot lands.
@@ -244,7 +246,7 @@ Four slices in `state/` have no production consumer. All live in
 ### `settings` (`settings-model.ts`) — DELETE (the slice only)
 
 - **Lines removed from slice:** 46 (`settings-model.ts` — a re-export barrel)
-  + 102 (test) = 148
+  - 102 (test) = 148
 - **The real code stays:** `settings-domain.ts` (236 lines) + `settings-domain.test.ts`
   (337 lines) = 573 lines. This is framework-neutral logic imported directly by
   `settings.tsx`. The `settings-model.ts` barrel duplicates the re-export job
@@ -259,20 +261,20 @@ Four slices in `state/` have no production consumer. All live in
 
 ### Total lines that deletion would remove
 
-| File | Lines |
-|---|---|
-| `tab-model.ts` | 281 |
-| `tab-model.test.ts` | 260 |
-| `profiles-model.ts` | 66 |
-| `profiles-model.test.ts` | 84 |
-| `banner-model.ts` | 62 |
-| `banner-model.test.ts` | 50 |
-| `settings-model.ts` | 46 |
-| `settings-model.test.ts` | 102 |
-| **Subtotal (model files)** | **951** |
-| Store slice fields in `store.ts` (~30 lines of `AppState`, `createInitialState`, and action wrappers) | ~30 |
-| Store slice assertions in `store.test.ts` | ~80 |
-| **Total deletable** | **~1,061** |
+| File                                                                                                  | Lines      |
+| ----------------------------------------------------------------------------------------------------- | ---------- |
+| `tab-model.ts`                                                                                        | 281        |
+| `tab-model.test.ts`                                                                                   | 260        |
+| `profiles-model.ts`                                                                                   | 66         |
+| `profiles-model.test.ts`                                                                              | 84         |
+| `banner-model.ts`                                                                                     | 62         |
+| `banner-model.test.ts`                                                                                | 50         |
+| `settings-model.ts`                                                                                   | 46         |
+| `settings-model.test.ts`                                                                              | 102        |
+| **Subtotal (model files)**                                                                            | **951**    |
+| Store slice fields in `store.ts` (~30 lines of `AppState`, `createInitialState`, and action wrappers) | ~30        |
+| Store slice assertions in `store.test.ts`                                                             | ~80        |
+| **Total deletable**                                                                                   | **~1,061** |
 
 After deletion the store holds only the `sidebar` slice, plus whatever new
 slices `nocx-ycet` adds (tab list, active tab, selected theme — if the
@@ -281,6 +283,7 @@ consumer today, and the design spec (§8) expects active sidebar view and
 collapsed flag in the store.
 
 **Files that stay:**
+
 - `sidebar-model.ts` (83 lines) + `sidebar-model.test.ts` (86 lines) — one
   production consumer (mountSidebar via sidebar slice).
 - `settings-domain.ts` (236 lines) + `settings-domain.test.ts` (337 lines) —
@@ -346,6 +349,7 @@ This is the architectural linchpin: once the store is in the root, other consume
 can share it.
 
 **Before:**
+
 ```ts
 // sidebar.tsx
 export function mountSidebar(...) {
@@ -355,6 +359,7 @@ export function mountSidebar(...) {
 ```
 
 **After:**
+
 ```ts
 // main.tsx
 const [state, actions] = createAppStore()
@@ -389,12 +394,14 @@ This is the main payload of `nocx-ycet`. It replaces `TabManager`'s private
 fields (`tabs`, `activeTab`, `recentTabIds`) with store-backed state.
 
 **What moves:**
+
 - Tab list → `state.tabModel.tabs` (new store slice)
 - Active tab id → `state.tabModel.activeTabId`
 - MRU order → `state.tabModel.recentTabIds`
 - Per-tab display state → `state.tabModel.tabs[i].{title, hasActivity, agentStatus}`
 
 **What stays in Tab/TabManager:**
+
 - Tab chrome lifecycle (pane creation, ResizeObserver, setActive/setVisible on
   content — these are imperative operations on DOM elements, not state)
 - `_tooltip` (presentation-only, displayed on hover, no shared consumer)

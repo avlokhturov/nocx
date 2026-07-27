@@ -70,3 +70,47 @@
 .st-container {
   min-height: 0;
 }
+
+/* ── Narrow breakpoint (640px) ────────────────────────────────────────
+   At widths ≤ 640px the rail stacks above the content and does not
+   scroll independently. */
+
+@media (max-width: 640px) {
+  .ui-page__body {
+    flex-direction: column;
+  }
+
+  .ui-page__rail {
+    overflow-y: visible;
+  }
+}
+
+/* ── SidebarView (§6.3 / SidebarView component) ───────────────────────
+   Panel view layout: header with title and actions, optional filter row,
+   scrolling body.  No rail — SidebarView is not a Page. */
+
+.ui-sidebar-view {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.ui-sidebar-view__header {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 0.5em;
+}
+
+.ui-sidebar-view__filter {
+  flex: 0 0 auto;
+}
+
+.ui-sidebar-view__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  overflow-y: auto;
+}

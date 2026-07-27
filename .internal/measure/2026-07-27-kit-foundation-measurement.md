@@ -47,16 +47,16 @@ The previous spike's key finding — "shared core ~34 KB gzip" — was **Select*
 
 The true minimal shared Kobalte infrastructure (what Dialog alone requires) is:
 
-| Package | Gzip |
-|---|---|
-| `@kobalte/core` (15 files) | 9.7 KB |
-| `@kobalte/utils` | 2.7 KB |
-| `solid-prevent-scroll` (5 files) | 2.8 KB |
-| `solid-presence` (2 files) | 0.7 KB |
-| `@solid-primitives/refs` | 0.4 KB |
-| **Total** | **~16.3 KB raw gzip** |
+| Package                          | Gzip                  |
+| -------------------------------- | --------------------- |
+| `@kobalte/core` (15 files)       | 9.7 KB                |
+| `@kobalte/utils`                 | 2.7 KB                |
+| `solid-prevent-scroll` (5 files) | 2.8 KB                |
+| `solid-presence` (2 files)       | 0.7 KB                |
+| `@solid-primitives/refs`         | 0.4 KB                |
+| **Total**                        | **~16.3 KB raw gzip** |
 
-But *delivered* gzip is smaller because the baseline already includes some `@solid-primitives/*` packages. The measured net gzip delta for Dialog is **11.9 KB** — that is what actually appears in the production bundle.
+But _delivered_ gzip is smaller because the baseline already includes some `@solid-primitives/*` packages. The measured net gzip delta for Dialog is **11.9 KB** — that is what actually appears in the production bundle.
 
 ### The key number the ADR needs: DPT cost
 
@@ -65,6 +65,7 @@ But *delivered* gzip is smaller because the baseline already includes some `@sol
 This is the cost of adding all three lightweight Kobalte primitives to the app. The shared infrastructure is paid once (not 11.9+20.9+17.4 = 50.2 KB).
 
 Budget check (corrected, per brief):
+
 - ADR-0012 budget: 25-35 KB gzip net
 - Solid migration already spent: ~+7 KB gzip
 - Remaining budget: **18-28 KB gzip**
@@ -73,14 +74,14 @@ Budget check (corrected, per brief):
 
 ### Categorisation by dependency weight
 
-| Primitive | ΔGzip | Notable dependencies |
-|---|---|---|
-| Dialog | 11.6 KB | Core infrastructure only (portal, focus scope, escape key, interact-outside, polymorphic) |
-| Tooltip | 17.4 KB | Core + floating-ui collision detection |
-| Popover | 20.9 KB | Core + floating-ui + more positioning |
-| ContextMenu | 30.5 KB | Core + floating-ui + menu machinery |
-| Select | 31.7 KB | Core + floating-ui + collection + `@internationalized/number` |
-| Combobox | 33.6 KB | Core + floating-ui + collection + `@internationalized/number` + more |
+| Primitive   | ΔGzip   | Notable dependencies                                                                      |
+| ----------- | ------- | ----------------------------------------------------------------------------------------- |
+| Dialog      | 11.6 KB | Core infrastructure only (portal, focus scope, escape key, interact-outside, polymorphic) |
+| Tooltip     | 17.4 KB | Core + floating-ui collision detection                                                    |
+| Popover     | 20.9 KB | Core + floating-ui + more positioning                                                     |
+| ContextMenu | 30.5 KB | Core + floating-ui + menu machinery                                                       |
+| Select      | 31.7 KB | Core + floating-ui + collection + `@internationalized/number`                             |
+| Combobox    | 33.6 KB | Core + floating-ui + collection + `@internationalized/number` + more                      |
 
 ---
 
@@ -90,22 +91,24 @@ The argument that "Kobalte includes @floating-ui/dom which we'd write anyway" is
 
 **Which primitives genuinely need collision-aware positioning:**
 
-| Primitive | Needs floating-ui? | Rationale |
-|---|---|---|
-| Dialog (centred modal) | **No** | Centred overlay; no anchor-relative positioning needed. `margin: auto` on a flex/grid container suffices. |
-| Popover | **Yes** | Anchor-relative; must flip when near window edge, shift to stay visible, track scroll, clean up on disconnect. |
-| Tooltip | **Yes** | Same as Popover — anchor-relative, must flip/shift. |
-| ContextMenu | **Yes** | Appears at cursor/pointer position near window edge; flip/shift required. |
-| Select | **Yes** | Listbox opens below/above trigger; flip required. |
-| Combobox | **Yes** | Same as Select. |
+| Primitive              | Needs floating-ui? | Rationale                                                                                                      |
+| ---------------------- | ------------------ | -------------------------------------------------------------------------------------------------------------- |
+| Dialog (centred modal) | **No**             | Centred overlay; no anchor-relative positioning needed. `margin: auto` on a flex/grid container suffices.      |
+| Popover                | **Yes**            | Anchor-relative; must flip when near window edge, shift to stay visible, track scroll, clean up on disconnect. |
+| Tooltip                | **Yes**            | Same as Popover — anchor-relative, must flip/shift.                                                            |
+| ContextMenu            | **Yes**            | Appears at cursor/pointer position near window edge; flip/shift required.                                      |
+| Select                 | **Yes**            | Listbox opens below/above trigger; flip required.                                                              |
+| Combobox               | **Yes**            | Same as Select.                                                                                                |
 
 If we adopt a platform-first hybrid:
+
 - Dialog uses `<dialog>` at zero cost — no floating-ui needed.
 - Popover/Tooltip/ContextMenu/Select/Combobox all need floating-ui anyway, so Kobalte's inclusion of it is **replacement cost, not overhead**.
 
 **Cost of "our code + floating-ui" vs "Kobalte + floating-ui":**
 
 A custom Popover built on `@floating-ui/dom` directly would cost roughly:
+
 - `@floating-ui/dom` itself: ~7-10 KB gzip
 - Our positioning abstraction: ~1-2 KB
 - Our overlay management (portal, escape, interact-outside): ~3-5 KB
@@ -121,51 +124,52 @@ Estimated total: **~13-20 KB gzip** for a Popover, versus Kobalte's **20.9 KB** 
 ### Our declared floors
 
 From ADR-0013 §3:
+
 - **Linux**: WebKitGTK 2.40
 - **macOS**: Ventura 13.1 / Safari 16.2
 
 ### `<dialog>` + `showModal()`
 
-| Question | Answer | Source |
-|---|---|---|
-| Supported at our floor? | **Yes** | Safari 15.4 (WebKit r~15.4). Well below our macOS floor of 16.2. WebKitGTK 2.40 includes it. |
-| Top-layer rendering? | Yes, natively | `showModal()` renders in the top layer, above all `z-index` stacking contexts. |
-| Background blocking? | Yes | Rest of document becomes inert. |
-| Escape/cancel? | Yes | Fires `cancel` event; `preventDefault()` to prevent close. |
-| Native focus treatment? | Yes | Auto-focuses first focusable element; focus trap within dialog. |
+| Question                | Answer        | Source                                                                                       |
+| ----------------------- | ------------- | -------------------------------------------------------------------------------------------- |
+| Supported at our floor? | **Yes**       | Safari 15.4 (WebKit r~15.4). Well below our macOS floor of 16.2. WebKitGTK 2.40 includes it. |
+| Top-layer rendering?    | Yes, natively | `showModal()` renders in the top layer, above all `z-index` stacking contexts.               |
+| Background blocking?    | Yes           | Rest of document becomes inert.                                                              |
+| Escape/cancel?          | Yes           | Fires `cancel` event; `preventDefault()` to prevent close.                                   |
+| Native focus treatment? | Yes           | Auto-focuses first focusable element; focus trap within dialog.                              |
 
 **What we'd still need to write:**
 
-| Behaviour | Effort | Notes |
-|---|---|---|
-| Initial focus policy | ~10 lines | `autofocus` attribute or manual `focus()` on mount |
-| Focus return to xterm's hidden textarea | ~30 lines | On close, return focus to the terminal's textarea. This is tricky because xterm's focus element is a hidden textarea. |
-| Nested dialog policy | ~20 lines | Stack of open dialogs; only top one interactive. Native `<dialog>` handles this partly but stacking multiple modals needs management. |
-| Styling (theming) | Already handled by ADR-0013 | Use `::backdrop` and CSS variables. |
-| Wails drag-region behaviour | ~20 lines | On mousedown over dialog: check if target is under `--wails-draggable: drag` ancestor; if so, let Wails handle it. |
-| Animation | ~30 lines | `@starting-style` or `animation` on `::backdrop` and dialog open/close. |
+| Behaviour                               | Effort                      | Notes                                                                                                                                 |
+| --------------------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| Initial focus policy                    | ~10 lines                   | `autofocus` attribute or manual `focus()` on mount                                                                                    |
+| Focus return to xterm's hidden textarea | ~30 lines                   | On close, return focus to the terminal's textarea. This is tricky because xterm's focus element is a hidden textarea.                 |
+| Nested dialog policy                    | ~20 lines                   | Stack of open dialogs; only top one interactive. Native `<dialog>` handles this partly but stacking multiple modals needs management. |
+| Styling (theming)                       | Already handled by ADR-0013 | Use `::backdrop` and CSS variables.                                                                                                   |
+| Wails drag-region behaviour             | ~20 lines                   | On mousedown over dialog: check if target is under `--wails-draggable: drag` ancestor; if so, let Wails handle it.                    |
+| Animation                               | ~30 lines                   | `@starting-style` or `animation` on `::backdrop` and dialog open/close.                                                               |
 
 **Verdict: `<dialog>` is usable at our floor and removes the need for Kobalte's Dialog entirely.**
 
 ### HTML Popover API (`popover` attribute)
 
-| Question | Answer | Source |
-|---|---|---|
-| Supported at our floor? | **No** | Safari 17+ (macOS 14.x / iOS 17). WebKitGTK ~2.42+. Above both floors. |
-| What it gives | Top-layer popover, light-dismiss, Escape handling, `:popover-open` pseudo-class | |
-| What we'd still need | polyfill or JS implementation | Fallback for Safari 16.x requires a JS-based positioning + overlay solution anyway — at which point you're maintaining both implementations. |
+| Question                | Answer                                                                          | Source                                                                                                                                       |
+| ----------------------- | ------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| Supported at our floor? | **No**                                                                          | Safari 17+ (macOS 14.x / iOS 17). WebKitGTK ~2.42+. Above both floors.                                                                       |
+| What it gives           | Top-layer popover, light-dismiss, Escape handling, `:popover-open` pseudo-class |                                                                                                                                              |
+| What we'd still need    | polyfill or JS implementation                                                   | Fallback for Safari 16.x requires a JS-based positioning + overlay solution anyway — at which point you're maintaining both implementations. |
 
 **Verdict: Cannot be foundational. Would require either raising the floor to Safari 17+ (breaking ADR-0013's declared floor) or maintaining two overlapping implementations. Not worth it for our use case.**
 
 ### Native `<select>` element
 
-| Question | Answer |
-|---|---|
-| Works everywhere? | Yes |
-| Keyboard operation? | Yes, platform-native |
-| Accessibility? | Yes, platform-native |
-| Form semantics? | Yes |
-| Typeahead? | Yes |
+| Question                      | Answer                                                                                                          |
+| ----------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| Works everywhere?             | Yes                                                                                                             |
+| Keyboard operation?           | Yes, platform-native                                                                                            |
+| Accessibility?                | Yes, platform-native                                                                                            |
+| Form semantics?               | Yes                                                                                                             |
+| Typeahead?                    | Yes                                                                                                             |
 | Can we fully style the popup? | **No** — the popup is platform-owned on each OS. This is the original complaint that motivated a custom Select. |
 
 **Verdict: Acceptable for simple choice settings (theme selector, font size). For anything needing a styled popup listbox, a custom solution is required.**
@@ -174,8 +178,8 @@ From ADR-0013 §3:
 
 Corvu 0.4.8 is a Solid-native headless component library. Measured against the same production baseline:
 
-| Primitive | ΔGzip | Notes |
-|---|---|---|
+| Primitive             | ΔGzip      | Notes                                                                                                                                                           |
+| --------------------- | ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `corvu/dialog` (Root) | **4.1 KB** | ⅓ of Kobalte Dialog's 11.9 KB. Smaller because it doesn't bundle a separate focus-scope or portal system — it integrates with Solid's reactivity more directly. |
 
 Corvu also depends on `@floating-ui/dom` for positioned primitives (popover, tooltip) but the core dialog avoids it entirely.
@@ -189,6 +193,7 @@ Corvu also depends on `@floating-ui/dom` for positioned primitives (popover, too
 **Status: NOT TESTED — blocked by environment.**
 
 What was tried:
+
 1. `wails dev` from the repo root — fails because the system has `webkit2gtk-4.1` but Wails v2 requires `webkit2gtk-4.0`.
 2. `pkg-config --list-all | grep webkit` confirms only `webkit2gtk-4.1` is available.
 3. No `webkit2gtk-4.0.pc` file exists anywhere in the Nix store.
@@ -205,6 +210,7 @@ If this gate is required before the ADR, it must be run on a developer machine o
 ### Working hypothesis from coordinator
 
 The brief states the coordinator's current position: **platform-first hybrid** —
+
 - Native `<dialog>` and native `<select>` where sufficient
 - Small local overlay core (portal root, overlay stack, escape ownership, interact-outside, focus return)
 - `@floating-ui/dom` only where collision handling is genuinely needed
@@ -225,24 +231,24 @@ The brief states the coordinator's current position: **platform-first hybrid** �
 
 ### Per-primitive table
 
-| Primitive | Recommended implementation | Measured cost | What we write ourselves | What a test can catch |
-|---|---|---|---|---|
-| **Dialog** | Native `<dialog>` + local wrapper | **0 KB** (cost of the wrapper, ~3 KB if we want it) | Focus return to xterm textarea, Wails drag-region guard, animation, nesting policy (~80 lines) | Focus trap, Escape close, focus return, drag overlay blocked, animation timing |
-| **Popover** | Small core + `@floating-ui/dom` | **~3-5 KB** (core) + **~7-10 KB** (floating-ui) = **~10-15 KB** | Portal mount, positioning, flip/shift, scroll tracking, anchor disconnect, ARIA (`aria-haspopup`, `aria-expanded`), keyboard nav | Positioning edge cases (near edges, small viewport), scroll, nested popovers, Escape/outside click |
-| **Tooltip** | Same core + floating-ui | Same as Popover (shares core + floating-ui) | Less than Popover — no interact-outside, lighter ARIA | Show/hide timing, hover intent, overflow |
-| **Select** | Native `<select>` for simple; Kobalte Select (31.7 KB) only if styled popup listbox is required | **0 KB** (native) or **31.7 KB** (Kobalte) | Native: styling-limited. Kobalte: wrapper around options array API | Keyboard nav, typeahead, scroll within listbox, form integration |
-| **Combobox** | **None** until a consumer defines the contract | 0 KB | N/A | N/A |
-| **ContextMenu** | Small core + floating-ui (shares code with Popover) | **~12-17 KB** (core + floating-ui + menu logic) | Right-click detection, submenu positioning, keyboard nav (arrow keys), ARIA (`menubar`, `menu`, `menuitem`) | Right-click on terminal surface, submenu positioning, Escape closes submenu |
+| Primitive       | Recommended implementation                                                                      | Measured cost                                                   | What we write ourselves                                                                                                          | What a test can catch                                                                              |
+| --------------- | ----------------------------------------------------------------------------------------------- | --------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| **Dialog**      | Native `<dialog>` + local wrapper                                                               | **0 KB** (cost of the wrapper, ~3 KB if we want it)             | Focus return to xterm textarea, Wails drag-region guard, animation, nesting policy (~80 lines)                                   | Focus trap, Escape close, focus return, drag overlay blocked, animation timing                     |
+| **Popover**     | Small core + `@floating-ui/dom`                                                                 | **~3-5 KB** (core) + **~7-10 KB** (floating-ui) = **~10-15 KB** | Portal mount, positioning, flip/shift, scroll tracking, anchor disconnect, ARIA (`aria-haspopup`, `aria-expanded`), keyboard nav | Positioning edge cases (near edges, small viewport), scroll, nested popovers, Escape/outside click |
+| **Tooltip**     | Same core + floating-ui                                                                         | Same as Popover (shares core + floating-ui)                     | Less than Popover — no interact-outside, lighter ARIA                                                                            | Show/hide timing, hover intent, overflow                                                           |
+| **Select**      | Native `<select>` for simple; Kobalte Select (31.7 KB) only if styled popup listbox is required | **0 KB** (native) or **31.7 KB** (Kobalte)                      | Native: styling-limited. Kobalte: wrapper around options array API                                                               | Keyboard nav, typeahead, scroll within listbox, form integration                                   |
+| **Combobox**    | **None** until a consumer defines the contract                                                  | 0 KB                                                            | N/A                                                                                                                              | N/A                                                                                                |
+| **ContextMenu** | Small core + floating-ui (shares code with Popover)                                             | **~12-17 KB** (core + floating-ui + menu logic)                 | Right-click detection, submenu positioning, keyboard nav (arrow keys), ARIA (`menubar`, `menu`, `menuitem`)                      | Right-click on terminal surface, submenu positioning, Escape closes submenu                        |
 
 ### Net effect on budget
 
-| Scenario | Gzip added | In budget? |
-|---|---|---|
-| Solid migration (already spent) | +7 KB | Within 25-35 KB |
-| + Kobalte DPT (Dialog+Popover+Tooltip) | +23.7 KB | Within 25-35 KB (30.7 total) |
-| + All 6 Kobalte primitives | +43.8 KB | **Over** (50.8 KB total) |
+| Scenario                                                     | Gzip added                                       | In budget?                       |
+| ------------------------------------------------------------ | ------------------------------------------------ | -------------------------------- |
+| Solid migration (already spent)                              | +7 KB                                            | Within 25-35 KB                  |
+| + Kobalte DPT (Dialog+Popover+Tooltip)                       | +23.7 KB                                         | Within 25-35 KB (30.7 total)     |
+| + All 6 Kobalte primitives                                   | +43.8 KB                                         | **Over** (50.8 KB total)         |
 | + Native `<dialog>` + custom Popover/Tooltip (this proposal) | ~+3-5 KB core + ~7-10 KB floating-ui = ~10-15 KB | **Well within** (17-22 KB total) |
-| + Corvu Dialog only | +4.1 KB | **Well within** (11.1 KB total) |
+| + Corvu Dialog only                                          | +4.1 KB                                          | **Well within** (11.1 KB total)  |
 
 ### Counter-argument (test the recommendation)
 
@@ -296,5 +302,6 @@ frontend/kobalte-measure.html   — base measurement HTML entry
 ```
 
 Modified (in this worktree only):
+
 - `frontend/package.json` — added `@kobalte/core`, `corvu`, `rollup-plugin-visualizer`
 - `frontend/package-lock.json` — regenerated

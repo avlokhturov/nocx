@@ -271,7 +271,7 @@ so no empty panel opens at cold start).
 vanilla. These are structural — the next epic (`nocx-82l9`) owns fixing them:
 
 - **Settings does not scroll** (`nocx-82l9.2`). `.pane` is `position:absolute; inset:0;
-  overflow:hidden` and `SettingsContent.mount` appends an unclassed `<div>`, so the
+overflow:hidden` and `SettingsContent.mount` appends an unclassed `<div>`, so the
   `flex:1; overflow-y:auto` scroll chain is broken. Reproducible in WebKit only.
 - **Vertical tab placement is broken** (`nocx-82l9.3`). There is no `#vertical-tabstrip`
   container alongside `#body`. `App.tsx` renders `#tabbar` then `#body`, and both

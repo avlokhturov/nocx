@@ -11,10 +11,7 @@ test.describe('vertical tab placement', () => {
   const PLACEMENT_ROW = '.st-row[data-key="tab.placement"]'
   const PLACEMENT_SELECT = `${PLACEMENT_ROW} select`
 
-  async function switchPlacement(
-    page: Page,
-    value: 'horizontal' | 'vertical',
-  ): Promise<void> {
+  async function switchPlacement(page: Page, value: 'horizontal' | 'vertical'): Promise<void> {
     await page.keyboard.press('Meta+,')
     await expect(page.locator(PLACEMENT_SELECT)).toBeVisible({ timeout: 5000 })
     await page.selectOption(PLACEMENT_SELECT, value)
@@ -23,7 +20,9 @@ test.describe('vertical tab placement', () => {
     //   horizontal → #tabbar gets .tabbar
     //   vertical   → #vertical-tabstrip gets .tabstrip-vertical
     if (value === 'vertical') {
-      await expect(page.locator('#vertical-tabstrip')).toHaveClass(/tabstrip-vertical/, { timeout: 5000 })
+      await expect(page.locator('#vertical-tabstrip')).toHaveClass(/tabstrip-vertical/, {
+        timeout: 5000,
+      })
     } else {
       await expect(page.locator('#tabbar')).toHaveClass(/tabbar/, { timeout: 5000 })
     }

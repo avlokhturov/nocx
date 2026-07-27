@@ -14,7 +14,7 @@
 Themes are the next feature (`nocx-8yg.6`) and the current CSS cannot support them.
 Measured on `main`:
 
-- **232 hex colour literals**, ``27 unique`` values — verified with
+- **232 hex colour literals**, `27 unique` values — verified with
   `grep -coP '#[0-9a-fA-F]{3,8}' frontend/src/style.css` and
   `grep -oP '#[0-9a-fA-F]{3,8}' frontend/src/style.css | sort -u | wc -l`.
 - **22 `rgba()` calls** adding 18 more unique colour variants to the surface palette
@@ -36,16 +36,16 @@ Measured on `main`:
 Adding a theme file and switching it with `data-theme` would produce a broken UI because
 **every colour value is hardcoded.** Examples from the file:
 
-| Selector | Property | Hardcoded | Would-be token |
-|---|---|---|---|
-| `html, body` | `background` | `#1a1b26` | `--color-canvas` |
-| `.tab.active` | `background` | `#1f2235` | `--color-surface` |
-| `.tab:hover` | `background` | `#1f2030` | `--color-surface-hover` |
-| `#activitybar` | `background` | `#16161e` | `--color-canvas` |
-| `.cm-item-group-header` | `color` | `#9d7cd8` | `--color-accent-secondary` |
-| `.update-notice.downloading` | `border-left-color` | `#e0af68` | `--color-warning` |
-| `.cm-form-actions button.cm-danger` | `background` | `#f7768e` | `--color-danger` |
-| `.cm-form-error` | `color` | `#ff6b6b` | `--color-error` |
+| Selector                            | Property            | Hardcoded | Would-be token             |
+| ----------------------------------- | ------------------- | --------- | -------------------------- |
+| `html, body`                        | `background`        | `#1a1b26` | `--color-canvas`           |
+| `.tab.active`                       | `background`        | `#1f2235` | `--color-surface`          |
+| `.tab:hover`                        | `background`        | `#1f2030` | `--color-surface-hover`    |
+| `#activitybar`                      | `background`        | `#16161e` | `--color-canvas`           |
+| `.cm-item-group-header`             | `color`             | `#9d7cd8` | `--color-accent-secondary` |
+| `.update-notice.downloading`        | `border-left-color` | `#e0af68` | `--color-warning`          |
+| `.cm-form-actions button.cm-danger` | `background`        | `#f7768e` | `--color-danger`           |
+| `.cm-form-error`                    | `color`             | `#ff6b6b` | `--color-error`            |
 
 A theme switch would need to override ~195 selector blocks (every one that contains a
 hardcoded `#hex` or `rgba()` value). The selector specificity jungle and hardcoded
@@ -93,36 +93,36 @@ Nine base semantic colours, derived from the 27 unique hex values in the current
 stylesheet. The design spec (§5.1) lists eight; this expands to nine because the
 existing code uses four distinct semantic roles the spec's eight miss (§2.2):
 
-| Token | Role | Current value (Tokyo Night) | Usage |
-|---|---|---|---|
-| `--color-canvas` | Deepest page / terminal background | `#1a1b26` | `html,body`, `#app` terminal area, `.tabbar`, `.tabstrip-vertical`, `.clipboard-banner`, `.update-notice`, `.pane-manager` (9 selectors) |
-| `--color-surface` | Default component surface | `#1f2335` | `.tab.active`, `.cm-body`, `#sidebar`, `.st-rail`, `.cm-item.active`, `.st-content`, `.mode-card`, `.st-backup`, `.st-loading`, block containers, tab hover gradient base (16 selectors) |
-| `--color-surface-hover` | Surface hover state | `#1f2030` | `.tab:hover`, `.tabstrip-vertical .tab:hover`, `.tab-add:hover`, `.cm-item:hover`, `.cm-list-empty`, `.mode-card:hover` (7 selectors) |
-| `--color-surface-raised` | Elevated surface (inputs, chips, dropdowns) | `#292e42` | `.chip`, `.pane-manager`, `select`, `input`, `.st-search`, `.block-toolbar`, `.block-overflow-menu`, `.mode-card`, `.mode-card header`, `.st-backup-header`, `.st-import-section` (14 selectors) |
-| `--color-text` | Primary body text | `#c0caf5` | Primary text everywhere (27 selectors — tabs, buttons, sidebar, chips, settings, export, blocks) |
-| `--color-text-muted` | Secondary / label text | `#a9b1d6` | `.cm-header h1`, `.tab`, `.cm-item-info`, `.tabstrip-vertical .tab`, `.tab-close`, `.cm-item-meta`, `.chip`, `.block-meta`, `.st-section-title`, `.st-loading`, `.st-search-counter`, `.st-mode-card-subtitle`, `.st-card-actions`, `.st-status-text` (24 selectors) |
-| `--color-text-dim` | Disabled / placeholder / tertiary text | `#565f89` | `.cm-list-empty`, `.tab-close`, `.tabstrip-vertical .tab-close`, `.block-overflow-btn`, `.block-permalink`, `.st-search-placeholder`, `.st-badge-default`, input placeholders (12 selectors) |
-| `--color-border` | Default dividers and borders | `#2a2b3d` | `.cm-header`, `.cm-header button`, `.cm-list`, `.tab-close`, `.tab-add`, `.tabstrip-vertical`, `.activity-bar`, `#sidebar`, `.clipboard-banner`, `.chip`, `.block`, `.cm-form input`, etc. (40+ selectors) |
-| `--color-accent` | Primary action / accent | `#7aa2f7` | `.cm-header button.cm-primary`, active indicators, scrollbar thumb, `.cm-selected`, `.cm-quick-connect`, `.st-settings-save`, `.st-checkbox input:checked`, `.accent-indicator`, `.switch.checked`, `.tab.active .tab-indicator`, chip border/background, search bar border, link/highlight text (34 selectors) |
+| Token                    | Role                                        | Current value (Tokyo Night) | Usage                                                                                                                                                                                                                                                                                                           |
+| ------------------------ | ------------------------------------------- | --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--color-canvas`         | Deepest page / terminal background          | `#1a1b26`                   | `html,body`, `#app` terminal area, `.tabbar`, `.tabstrip-vertical`, `.clipboard-banner`, `.update-notice`, `.pane-manager` (9 selectors)                                                                                                                                                                        |
+| `--color-surface`        | Default component surface                   | `#1f2335`                   | `.tab.active`, `.cm-body`, `#sidebar`, `.st-rail`, `.cm-item.active`, `.st-content`, `.mode-card`, `.st-backup`, `.st-loading`, block containers, tab hover gradient base (16 selectors)                                                                                                                        |
+| `--color-surface-hover`  | Surface hover state                         | `#1f2030`                   | `.tab:hover`, `.tabstrip-vertical .tab:hover`, `.tab-add:hover`, `.cm-item:hover`, `.cm-list-empty`, `.mode-card:hover` (7 selectors)                                                                                                                                                                           |
+| `--color-surface-raised` | Elevated surface (inputs, chips, dropdowns) | `#292e42`                   | `.chip`, `.pane-manager`, `select`, `input`, `.st-search`, `.block-toolbar`, `.block-overflow-menu`, `.mode-card`, `.mode-card header`, `.st-backup-header`, `.st-import-section` (14 selectors)                                                                                                                |
+| `--color-text`           | Primary body text                           | `#c0caf5`                   | Primary text everywhere (27 selectors — tabs, buttons, sidebar, chips, settings, export, blocks)                                                                                                                                                                                                                |
+| `--color-text-muted`     | Secondary / label text                      | `#a9b1d6`                   | `.cm-header h1`, `.tab`, `.cm-item-info`, `.tabstrip-vertical .tab`, `.tab-close`, `.cm-item-meta`, `.chip`, `.block-meta`, `.st-section-title`, `.st-loading`, `.st-search-counter`, `.st-mode-card-subtitle`, `.st-card-actions`, `.st-status-text` (24 selectors)                                            |
+| `--color-text-dim`       | Disabled / placeholder / tertiary text      | `#565f89`                   | `.cm-list-empty`, `.tab-close`, `.tabstrip-vertical .tab-close`, `.block-overflow-btn`, `.block-permalink`, `.st-search-placeholder`, `.st-badge-default`, input placeholders (12 selectors)                                                                                                                    |
+| `--color-border`         | Default dividers and borders                | `#2a2b3d`                   | `.cm-header`, `.cm-header button`, `.cm-list`, `.tab-close`, `.tab-add`, `.tabstrip-vertical`, `.activity-bar`, `#sidebar`, `.clipboard-banner`, `.chip`, `.block`, `.cm-form input`, etc. (40+ selectors)                                                                                                      |
+| `--color-accent`         | Primary action / accent                     | `#7aa2f7`                   | `.cm-header button.cm-primary`, active indicators, scrollbar thumb, `.cm-selected`, `.cm-quick-connect`, `.st-settings-save`, `.st-checkbox input:checked`, `.accent-indicator`, `.switch.checked`, `.tab.active .tab-indicator`, chip border/background, search bar border, link/highlight text (34 selectors) |
 
 #### 2.2 Additional semantic colours
 
 The design spec's eight-token set omits four distinct semantic colours the existing
 stylesheet uses:
 
-| Colour | Role | Usage | Token |
-|---|---|---|---|
-| `#9ece6a` (green) | Success / positive / connected state | `.cm-connect`, agent status "waiting", `.update-notice.available`, block status "ok", export action | `--color-success` |
-| `#e0af68` (amber) | Warning / downloading / modified / customized | `.update-notice.downloading`, `.st-badge-customized`, `.st-modified-input`, `.st-modified-only-toggle`, `.st-card-customized`, `color: currentColor` for customized label | `--color-warning` |
-| `#f7768e` (pink-red) | Destructive / delete / danger | `.cm-danger`, `.cm-remove`, `.st-settings-delete`, `.cm-form-actions button.cm-danger`, `.st-remove-btn`, removed-block state | `--color-danger` |
-| `#9d7cd8` (purple) | Secondary accent / section / group header | `.cm-item-group-header`, `.cm-section .cm-section-title`, section title accent in settings | `--color-accent-secondary` |
+| Colour               | Role                                          | Usage                                                                                                                                                                     | Token                      |
+| -------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------- |
+| `#9ece6a` (green)    | Success / positive / connected state          | `.cm-connect`, agent status "waiting", `.update-notice.available`, block status "ok", export action                                                                       | `--color-success`          |
+| `#e0af68` (amber)    | Warning / downloading / modified / customized | `.update-notice.downloading`, `.st-badge-customized`, `.st-modified-input`, `.st-modified-only-toggle`, `.st-card-customized`, `color: currentColor` for customized label | `--color-warning`          |
+| `#f7768e` (pink-red) | Destructive / delete / danger                 | `.cm-danger`, `.cm-remove`, `.st-settings-delete`, `.cm-form-actions button.cm-danger`, `.st-remove-btn`, removed-block state                                             | `--color-danger`           |
+| `#9d7cd8` (purple)   | Secondary accent / section / group header     | `.cm-item-group-header`, `.cm-section .cm-section-title`, section title accent in settings                                                                                | `--color-accent-secondary` |
 
 Two more colours appear once each and are edge cases to document:
 
-| Colour | Role | Location | Recommendation |
-|---|---|---|---|
-| `#ff6b6b` (bright red) | Form validation error | `style.css:301 .cm-form-error` | `--color-error` — distinct from `--color-danger` (which is for destructive actions, not validation) |
-| `#ff9e64` (orange) | Interrupted command state | `style.css:1226 .command-row.interrupted` | Merge into `--color-warning` during migration, since the amber is already used for caution states; if visual distinction matters after migration, split into `--color-interrupted` |
+| Colour                 | Role                      | Location                                  | Recommendation                                                                                                                                                                     |
+| ---------------------- | ------------------------- | ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `#ff6b6b` (bright red) | Form validation error     | `style.css:301 .cm-form-error`            | `--color-error` — distinct from `--color-danger` (which is for destructive actions, not validation)                                                                                |
+| `#ff9e64` (orange)     | Interrupted command state | `style.css:1226 .command-row.interrupted` | Merge into `--color-warning` during migration, since the amber is already used for caution states; if visual distinction matters after migration, split into `--color-interrupted` |
 
 The `#89b4fa / #89b0ff / #89b4ff` cluster (7 usages) and `#b9d870` (1 usage, connect
 button hover) are hover-tinted variants of `--color-accent` and `--color-success`
@@ -146,66 +146,66 @@ centrally in `tokens.css`):
 
 Derived from the existing stylesheet's actual values:
 
-| Token | Values (Tokyo Night) | Role |
-|---|---|---|
-| `--control-height-xs` | `22px` | Small inline controls, chip height |
-| `--control-height-sm` | `24px` | Compact buttons, search inputs |
-| `--control-height-md` | `32px` | Standard button/input height |
-| `--control-height-lg` | `38px` | Tab bar height, primary actions |
-| `--control-radius-sm` | `4px` | Small borders (tabs, badges, chips) |
-| `--control-radius-md` | `6px` | Default border radius (buttons, inputs) |
-| `--control-radius-lg` | `8px` | Large borders (cards, dialogs) |
-| `--control-radius-full` | `9999px` | Pill shapes (tags, indicators) |
-| `--space-1` | `4px` | Micro spacing |
-| `--space-2` | `8px` | Tight spacing |
-| `--space-3` | `12px` | Default padding (buttons, tabs) |
-| `--space-4` | `16px` | Standard gutter (panels, sections) |
-| `--space-6` | `24px` | Wide gutter |
-| `--space-8` | `32px` | Section spacing |
-| `--space-12` | `48px` | Page margin |
-| `--font-size-sm` | `12px` | Small labels, metadata |
-| `--font-size-md` | `14px` | Body text |
-| `--font-size-lg` | `16px` | Section titles |
-| `--font-size-xl` | `20px` | Page headers |
-| `--font-family-ui` | `ui-sans-serif, -apple-system, 'SF Pro Text', system-ui, sans-serif` | UI text (was `--nocx-ui`) |
-| `--font-family-mono` | `ui-monospace, 'SF Mono', Menlo, Monaco, 'Apple Color Emoji', 'Apple Symbols', monospace` | Monospace text (was `--nocx-mono`) |
+| Token                   | Values (Tokyo Night)                                                                      | Role                                    |
+| ----------------------- | ----------------------------------------------------------------------------------------- | --------------------------------------- |
+| `--control-height-xs`   | `22px`                                                                                    | Small inline controls, chip height      |
+| `--control-height-sm`   | `24px`                                                                                    | Compact buttons, search inputs          |
+| `--control-height-md`   | `32px`                                                                                    | Standard button/input height            |
+| `--control-height-lg`   | `38px`                                                                                    | Tab bar height, primary actions         |
+| `--control-radius-sm`   | `4px`                                                                                     | Small borders (tabs, badges, chips)     |
+| `--control-radius-md`   | `6px`                                                                                     | Default border radius (buttons, inputs) |
+| `--control-radius-lg`   | `8px`                                                                                     | Large borders (cards, dialogs)          |
+| `--control-radius-full` | `9999px`                                                                                  | Pill shapes (tags, indicators)          |
+| `--space-1`             | `4px`                                                                                     | Micro spacing                           |
+| `--space-2`             | `8px`                                                                                     | Tight spacing                           |
+| `--space-3`             | `12px`                                                                                    | Default padding (buttons, tabs)         |
+| `--space-4`             | `16px`                                                                                    | Standard gutter (panels, sections)      |
+| `--space-6`             | `24px`                                                                                    | Wide gutter                             |
+| `--space-8`             | `32px`                                                                                    | Section spacing                         |
+| `--space-12`            | `48px`                                                                                    | Page margin                             |
+| `--font-size-sm`        | `12px`                                                                                    | Small labels, metadata                  |
+| `--font-size-md`        | `14px`                                                                                    | Body text                               |
+| `--font-size-lg`        | `16px`                                                                                    | Section titles                          |
+| `--font-size-xl`        | `20px`                                                                                    | Page headers                            |
+| `--font-family-ui`      | `ui-sans-serif, -apple-system, 'SF Pro Text', system-ui, sans-serif`                      | UI text (was `--nocx-ui`)               |
+| `--font-family-mono`    | `ui-monospace, 'SF Mono', Menlo, Monaco, 'Apple Color Emoji', 'Apple Symbols', monospace` | Monospace text (was `--nocx-mono`)      |
 
 #### 2.5 Shell layout tokens
 
-| Token | Value (Tokyo Night) | Role |
-|---|---|---|
-| `--sidebar-width` | `240px` | Sidebar panel width |
-| `--activity-bar-width` | `48px` | Activity bar width |
-| `--tab-height` | `38px` | Tab strip item height |
+| Token                  | Value (Tokyo Night)             | Role                           |
+| ---------------------- | ------------------------------- | ------------------------------ |
+| `--sidebar-width`      | `240px`                         | Sidebar panel width            |
+| `--activity-bar-width` | `48px`                          | Activity bar width             |
+| `--tab-height`         | `38px`                          | Tab strip item height          |
 | `--page-header-height` | TBD during shell implementation | Page header height (spec §6.1) |
 
 #### 2.6 Terminal tokens
 
 Mapped from the current `ITheme` object at `renderers/xterm.ts:152-176`:
 
-| Token | Current value | Role |
-|---|---|---|
-| `--terminal-background` | `#1a1b26` | Terminal canvas |
-| `--terminal-foreground` | `#c0caf5` | Default text |
-| `--terminal-cursor` | `#c0caf5` | Cursor colour |
-| `--terminal-cursor-accent` | `#1a1b26` | Cursor text colour (inverse) |
-| `--terminal-selection` | `#364A82` | Text selection background |
-| `--terminal-ansi-0` | `#1a1b26` | Black |
-| `--terminal-ansi-1` | `#f7768e` | Red |
-| `--terminal-ansi-2` | `#9ece6a` | Green |
-| `--terminal-ansi-3` | `#e0af68` | Yellow |
-| `--terminal-ansi-4` | `#7aa2f7` | Blue |
-| `--terminal-ansi-5` | `#bb9af7` | Magenta |
-| `--terminal-ansi-6` | `#7dcfff` | Cyan |
-| `--terminal-ansi-7` | `#a9b1d6` | White |
-| `--terminal-ansi-8` | `#414868` | Bright Black |
-| `--terminal-ansi-9` | `#f7768e` | Bright Red |
-| `--terminal-ansi-10` | `#9ece6a` | Bright Green |
-| `--terminal-ansi-11` | `#e0af68` | Bright Yellow |
-| `--terminal-ansi-12` | `#7aa2f7` | Bright Blue |
-| `--terminal-ansi-13` | `#bb9af7` | Bright Magenta |
-| `--terminal-ansi-14` | `#7dcfff` | Bright Cyan |
-| `--terminal-ansi-15` | `#c0caf5` | Bright White |
+| Token                      | Current value | Role                         |
+| -------------------------- | ------------- | ---------------------------- |
+| `--terminal-background`    | `#1a1b26`     | Terminal canvas              |
+| `--terminal-foreground`    | `#c0caf5`     | Default text                 |
+| `--terminal-cursor`        | `#c0caf5`     | Cursor colour                |
+| `--terminal-cursor-accent` | `#1a1b26`     | Cursor text colour (inverse) |
+| `--terminal-selection`     | `#364A82`     | Text selection background    |
+| `--terminal-ansi-0`        | `#1a1b26`     | Black                        |
+| `--terminal-ansi-1`        | `#f7768e`     | Red                          |
+| `--terminal-ansi-2`        | `#9ece6a`     | Green                        |
+| `--terminal-ansi-3`        | `#e0af68`     | Yellow                       |
+| `--terminal-ansi-4`        | `#7aa2f7`     | Blue                         |
+| `--terminal-ansi-5`        | `#bb9af7`     | Magenta                      |
+| `--terminal-ansi-6`        | `#7dcfff`     | Cyan                         |
+| `--terminal-ansi-7`        | `#a9b1d6`     | White                        |
+| `--terminal-ansi-8`        | `#414868`     | Bright Black                 |
+| `--terminal-ansi-9`        | `#f7768e`     | Bright Red                   |
+| `--terminal-ansi-10`       | `#9ece6a`     | Bright Green                 |
+| `--terminal-ansi-11`       | `#e0af68`     | Bright Yellow                |
+| `--terminal-ansi-12`       | `#7aa2f7`     | Bright Blue                  |
+| `--terminal-ansi-13`       | `#bb9af7`     | Bright Magenta               |
+| `--terminal-ansi-14`       | `#7dcfff`     | Bright Cyan                  |
+| `--terminal-ansi-15`       | `#c0caf5`     | Bright White                 |
 
 These 20 tokens (5 base + 16 ANSI) mirror the `ITheme` shape that xterm.js consumes. The
 theme adapter (§5.4 of the design spec) resolves them via `getComputedStyle` and passes
@@ -228,22 +228,23 @@ The derivation in `tokens.css` works as a single overlay table:
 
 ```css
 /* tokens.css — state colour derivation */
-:root, [data-theme] {
-  --color-accent-hover:   color-mix(in srgb, var(--color-accent), white 10%);
-  --color-accent-active:  color-mix(in srgb, var(--color-accent), white 20%);
+:root,
+[data-theme] {
+  --color-accent-hover: color-mix(in srgb, var(--color-accent), white 10%);
+  --color-accent-active: color-mix(in srgb, var(--color-accent), white 20%);
   --color-accent-disabled: color-mix(in srgb, var(--color-accent), transparent 40%);
-  
-  --color-surface-hover:  color-mix(in srgb, var(--color-surface), white 6%);
+
+  --color-surface-hover: color-mix(in srgb, var(--color-surface), white 6%);
   --color-surface-active: color-mix(in srgb, var(--color-surface), white 12%);
   --color-surface-disabled: color-mix(in srgb, var(--color-surface), transparent 30%);
-  
-  --color-success-hover:  color-mix(in srgb, var(--color-success), white 10%);
-  --color-danger-hover:   color-mix(in srgb, var(--color-danger), white 15%);
-  --color-warning-hover:  color-mix(in srgb, var(--color-warning), white 10%);
-  
-  --color-focus-ring:     color-mix(in srgb, var(--color-accent), transparent 40%);
-  --color-scrim:          color-mix(in srgb, black, transparent 50%);
-  --color-selection:      color-mix(in srgb, var(--color-accent), transparent 70%);
+
+  --color-success-hover: color-mix(in srgb, var(--color-success), white 10%);
+  --color-danger-hover: color-mix(in srgb, var(--color-danger), white 15%);
+  --color-warning-hover: color-mix(in srgb, var(--color-warning), white 10%);
+
+  --color-focus-ring: color-mix(in srgb, var(--color-accent), transparent 40%);
+  --color-scrim: color-mix(in srgb, black, transparent 50%);
+  --color-selection: color-mix(in srgb, var(--color-accent), transparent 70%);
 }
 ```
 
@@ -257,19 +258,19 @@ bead (`nocx-xrrl.2`) should verify and adjust these before committing.
 `color-mix()` is required by the central derivation. The minimum versions that support
 it:
 
-| Platform | Minimum version | Source |
-|---|---|---|
-| macOS WKWebView | Safari 16.2 / macOS Ventura 13.1 | WebKit Feature Status, MDN browser-compat data |
-| iOS WKWebView | iOS 16.2 | WebKit Feature Status |
-| Linux WebKitGTK | 2.40 | WebKitGTK release notes; `color-mix()` landed in 2.39.x dev builds and shipped in 2.40 |
-| Windows | WebView2 (Chromium 111+) | Can I Use; Chromium supports `color-mix()` since M111 |
+| Platform        | Minimum version                  | Source                                                                                 |
+| --------------- | -------------------------------- | -------------------------------------------------------------------------------------- |
+| macOS WKWebView | Safari 16.2 / macOS Ventura 13.1 | WebKit Feature Status, MDN browser-compat data                                         |
+| iOS WKWebView   | iOS 16.2                         | WebKit Feature Status                                                                  |
+| Linux WebKitGTK | 2.40                             | WebKitGTK release notes; `color-mix()` landed in 2.39.x dev builds and shipped in 2.40 |
+| Windows         | WebView2 (Chromium 111+)         | Can I Use; Chromium supports `color-mix()` since M111                                  |
 
 The runtime floor this ADR declares:
 
 - **Linux WebKitGTK: 2.40.** Our CI/build system carries 2.52.5, but the app runs
   against the user's system WebKitGTK, which can be older. The floor is 2.40, not
   2.52.5.
-- **macOS: Ventura 13.1.** This is a *declared* minimum, declared by this ADR. The
+- **macOS: Ventura 13.1.** This is a _declared_ minimum, declared by this ADR. The
   app does not currently declare a macOS minimum; we now state one for the purposes
   of this decision. If the deployment target is lowered below 13.1, the derivation
   policy below applies.
@@ -281,7 +282,8 @@ fallback is **explicit per-theme state values**, emitted as `@supports` fallback
 ```css
 /* themes/tokyo-night.css — fallback for environments without color-mix() */
 @supports not (background: color-mix(in srgb, red, blue)) {
-  :root, [data-theme="tokyo-night"] {
+  :root,
+  [data-theme='tokyo-night'] {
     --color-accent-hover: #89b4fa;
     --color-surface-hover: #1f2030;
     /* … every state token repeated per theme … */
@@ -318,6 +320,7 @@ colour-value ::= var(--token)
                | white | black          /* achromatic mix anchors — §4.1 */
                | color-mix( <mix-params> )
 ```
+
 where `<mix-params>` contains a colour space and operands, and every colour operand
 must itself be one of the permitted values (no palette literals inside `color-mix()`).
 
@@ -330,7 +333,7 @@ canonical example is not enforceable.
 
 `white`, `black` and `transparent` are **achromatic anchors**, not palette choices: they
 carry no theme identity and cannot encode a brand colour. Every other named colour
-(`red`, `rebeccapurple`, …) stays prohibited, because those *are* palette.
+(`red`, `rebeccapurple`, …) stays prohibited, because those _are_ palette.
 
 The carve-out is narrow on purpose: `white`/`black` are permitted **only as operands of
 `color-mix()`**. `color: white` on a declaration is a violation — it should be
@@ -411,7 +414,7 @@ Tailwind CSS is a reasonable choice on its own terms. We decline it for reasons 
   ergonomic argument (no custom CSS) is gone and we are maintaining two systems.
 - **Orca's relevant pattern is the token layer, not the framework.** Orca uses
   Tailwind v4 but its theme system works through CSS variables (`@theme inline { …
-  }` mapping to `var(--background)`, `var(--foreground)`, etc.). That variable layer
+}` mapping to `var(--background)`, `var(--foreground)`, etc.). That variable layer
   is the architecture we are copying; the utility framework around it is decorative
   to this decision.
 
@@ -464,6 +467,7 @@ The visible consequence is bounded and acceptable: if a user changes the theme o
 machine and syncs, the first frame after launch shows the previous theme and then
 corrects. The alternative — an unstyled or default-themed first frame on **every** launch —
 is worse.
+
 - The terminal adapter resolves `--terminal-*` tokens into `ITheme` at construction
   time, passes the concrete object into `Terminal`, and subscribes to theme changes
   before construction completes. ADR-0005's pump stays wholly inside the terminal

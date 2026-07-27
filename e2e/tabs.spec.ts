@@ -75,7 +75,9 @@ test.describe('vertical tab placement', () => {
     //   horizontal → #tabbar gets .tabbar
     //   vertical   → #vertical-tabstrip gets .tabstrip-vertical
     if (value === 'vertical') {
-      await expect(page.locator('#vertical-tabstrip')).toHaveClass(/tabstrip-vertical/, { timeout: 5000 })
+      await expect(page.locator('#vertical-tabstrip')).toHaveClass(/tabstrip-vertical/, {
+        timeout: 5000,
+      })
     } else {
       await expect(page.locator('#tabbar')).toHaveClass(/tabbar/, { timeout: 5000 })
     }
@@ -118,7 +120,6 @@ test.describe('vertical tab placement', () => {
     await expect(page.locator(TAB).first()).not.toHaveClass(/active/)
     await expect(page.locator(TAB).first().locator(ACTIVITY)).toBeAttached({ timeout: 15000 })
   })
-
 
   test('switching placement repositions the strip without a restart', async ({ page }) => {
     // beforeEach already reset to horizontal.
