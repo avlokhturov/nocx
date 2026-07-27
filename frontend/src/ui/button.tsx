@@ -38,6 +38,17 @@ export interface ButtonProps {
   variant?: ButtonVariant
   size?: ButtonSize
   /**
+   * Selected, for a button that represents a current choice — a navigation row, a
+   * segmented control. Rendered as `aria-selected`, so the state is in the
+   * accessibility tree rather than only in the paint, and `button.css` draws it.
+   *
+   * This exists because the settings rail was painting it from outside: background,
+   * colour and weight declared on `.ui-settings-section-nav-active > .ui-button`.
+   * A surface may place a component and may not repaint it (§3.6), and a state the
+   * component can name is a state the component should draw.
+   */
+  selected?: boolean
+  /**
    * Roving-tabindex participation. Chrome controls that sit inside a toolbar
    * managing their own focus order need -1 so they are not a second tab stop.
    */
@@ -71,6 +82,7 @@ export function Button(props: ButtonAttrs) {
     'type',
     'variant',
     'size',
+    'selected',
     'tabIndex',
   ] as const
   const [local, rest] = splitProps(props, knownKeys)
@@ -81,6 +93,7 @@ export function Button(props: ButtonAttrs) {
       {...(local.size && local.size !== 'md' ? { 'data-size': local.size } : {})}
       type={local.type ?? 'button'}
       disabled={local.disabled === true}
+      aria-selected={local.selected === true ? 'true' : undefined}
       title={local.title ?? ''}
       aria-label={local.ariaLabel ?? undefined}
       tabIndex={local.tabIndex}

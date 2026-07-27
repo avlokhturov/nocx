@@ -787,7 +787,11 @@ export function SettingsComponent(props: SettingsComponentProps) {
                         }}
                         data-section={page.title}
                       >
-                        <Button variant="ghost" onClick={() => handleNavClick(page)}>
+                        <Button
+                          variant="ghost"
+                          selected={active()}
+                          onClick={() => handleNavClick(page)}
+                        >
                           {page.title}
                           <Show when={count() !== undefined && count()! > 0}>
                             <Badge tone="warning">{String(count())}</Badge>

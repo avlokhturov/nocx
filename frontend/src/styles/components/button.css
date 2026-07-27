@@ -101,3 +101,30 @@
   background: var(--color-surface-hover);
   color: var(--color-text);
 }
+
+/* ── Selected ────────────────────────────────────────────────────────────
+   A button representing a current choice. Filled rather than tinted: the active
+   row has to be findable at a glance down a list, and an 88%-transparent accent
+   wash is not.
+
+   Lived in settings.css until T20 (nocx-etu2), where the rail painted it onto
+   `.ui-button` from outside — the thing rule 3 forbids. The state was already in
+   the component; only the paint was elsewhere. */
+
+.ui-button[aria-selected='true'] {
+  background: var(--color-accent);
+  color: var(--color-canvas);
+  font-weight: 500;
+}
+
+.ui-button[aria-selected='true']:hover {
+  background: var(--color-accent-hover);
+  color: var(--color-canvas);
+}
+
+/* A badge riding inside a selected button cannot keep its own palette — warning
+   orange on the accent fill was unreadable. It borrows the button's colours. */
+.ui-button[aria-selected='true'] .ui-badge {
+  background: color-mix(in srgb, var(--color-canvas), transparent 75%);
+  color: var(--color-canvas);
+}

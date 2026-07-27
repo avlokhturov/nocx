@@ -85,29 +85,11 @@
   text-align: left;
 }
 
-/* Filled, not tinted: the active page has to be findable at a glance across a
-   list, and an 88%-transparent accent wash is not. */
-.ui-settings-section-nav-active > .ui-button {
-  background: var(--color-accent);
-  color: var(--color-canvas);
-  font-weight: 500;
-}
-
-.ui-settings-section-nav-active > .ui-button:hover {
-  background: var(--color-accent-hover);
-  color: var(--color-canvas);
-}
-
-/* The modified-count badge sits at the far end of the row, and on the active
-   row it cannot keep the warning palette — orange on the accent fill was
-   unreadable. On the filled row it borrows the row's own colours instead. */
-.ui-settings-section-nav-item > .ui-button .ui-badge[data-tone='warning'] {
+/* The active row's fill, its hover and the badge's colours on it all moved into
+   button.css with T20 (nocx-etu2): they are the look of a selected Button, and the
+   rail was painting them from outside. What stays here is placement. */
+.ui-settings-section-nav-item > .ui-button .ui-badge {
   margin-left: auto;
-}
-
-.ui-settings-section-nav-active > .ui-button .ui-badge[data-tone='warning'] {
-  background: color-mix(in srgb, var(--color-canvas), transparent 75%);
-  color: var(--color-canvas);
 }
 
 /* ── Content area ──────────────────────────────────────────────────── */
