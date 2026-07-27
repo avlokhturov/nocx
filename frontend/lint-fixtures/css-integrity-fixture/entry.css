@@ -3,3 +3,4 @@
    `styles/orphan.css` is deliberately absent from this import list. */
 @import './styles/loaded.css';
 @import './styles/themes/fixture-theme.css';
+@import './styles/components/fixture-component.css';

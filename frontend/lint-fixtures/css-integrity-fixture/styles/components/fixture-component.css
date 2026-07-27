@@ -1,0 +1,17 @@
+/* Rule 4 fixture — a component stylesheet may only address its own identities.
+
+   The bare `button` below matches by element rather than by identity, so any surface
+   that renders a <button> collides with it. That is how the kit's controls came to
+   need an ancestor scope in the first place: rules named `input` and `select`, so a
+   wrapper was invented to stop them applying everywhere.
+
+   The narrowed selector under it must NOT be reported — `button.ui-fixture` addresses
+   the component, and a rule that forbade it would forbid the correct spelling too. */
+
+button {
+  background: red;
+}
+
+button.ui-fixture {
+  background: blue;
+}

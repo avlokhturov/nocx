@@ -185,6 +185,48 @@ function findUnscopedThemeRules(ast, themeId, isDefaultTheme) {
 
 // ── Checker ────────────────────────────────────────────────────────────────
 
+/**
+ * Rule 4 — a component stylesheet may only address its own identities.
+ *
+ * A bare type selector in `styles/components/` is a rule that matches by element
+ * rather than by identity, which means any surface that happens to render that
+ * element collides with it. That is exactly how the kit's controls came to be styled
+ * through an ancestor: the rules named `input` and `select`, so they needed a scope
+ * to stop them applying everywhere.
+ *
+ * `base.css` is deliberately NOT covered — it is not component CSS, and it is where
+ * the application-wide focus ring lives (design spec §3.2).
+ */
+function findBareTypeSelectors(ast) {
+  const hits = []
+  css.walk(ast, {
+    visit: 'Rule',
+    enter(node) {
+      // `from`, `to` and `50%` inside @keyframes are keyframe selectors, not type
+      // selectors. css-tree parses them as Rules all the same.
+      if (this.atrule && /keyframes$/i.test(this.atrule.name)) return
+      css.walk(node.prelude, {
+        visit: 'Selector',
+        enter(sel) {
+          const first = sel.children.first
+          if (!first || first.type !== 'TypeSelector') return
+          // A type selector is fine when something narrows it to an identity in the
+          // same compound — `input.ui-text-field__input` addresses the component.
+          let narrowed = false
+          let n = sel.children.head?.next
+          while (n && n.data.type !== 'Combinator') {
+            if (n.data.type === 'ClassSelector') narrowed = true
+            n = n.next
+          }
+          if (narrowed) return
+          hits.push({ selector: css.generate(sel), line: sel.loc?.start.line ?? 0 })
+        },
+      })
+    },
+  })
+  return hits
+}
+
 export function checkCSSIntegrity({ entry, stylesDir }) {
   const violations = []
   const entryAbs = resolve(entry)
@@ -223,6 +265,18 @@ export function checkCSSIntegrity({ entry, stylesDir }) {
         line: hit.line,
         detail: `\`${hit.selector}\` is a type selector for an element of that name, not a class — drop the backslash`,
       })
+    }
+
+    // Rule 4 applies to component stylesheets only.
+    if (resolve(file).startsWith(resolve(stylesAbs, 'components'))) {
+      for (const hit of findBareTypeSelectors(ast)) {
+        violations.push({
+          rule: 'bare-type-selector',
+          file: rel(file),
+          line: hit.line,
+          detail: `\`${hit.selector}\` matches by element, not by identity — any surface rendering that element collides with it`,
+        })
+      }
     }
 
     const { declared, referenced } = collectCustomProperties(ast)

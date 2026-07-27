@@ -48,12 +48,19 @@ integrity_check=$(node "${fixture_dir}/check-css-integrity.mjs" \
   --entry="${fixture_dir}/css-integrity-fixture/entry.css" \
   --styles="${fixture_dir}/css-integrity-fixture/styles" 2>/dev/null || true)
 
-for rule in unreachable escaped-dot undefined-var theme-scope; do
+for rule in unreachable escaped-dot undefined-var theme-scope bare-type-selector; do
   if ! echo "$integrity_check" | grep -q "\"rule\":\"${rule}\""; then
     echo "CSS INTEGRITY GATE FAILED — rule '${rule}' did not fire on the fixture"
     exit 1
   fi
 done
+
+# The narrowed form must NOT be reported: `button.ui-fixture` addresses the component,
+# and a rule that forbade it would forbid the correct spelling along with the wrong one.
+if [ "$(echo "$integrity_check" | grep -c '"rule":"bare-type-selector"')" -ne 1 ]; then
+  echo "CSS INTEGRITY GATE FAILED — expected exactly 1 bare-type-selector hit (the narrowed selector must not be reported)"
+  exit 1
+fi
 
 # A var() with a fallback is legitimate; reporting it would make the rule noise.
 if echo "$integrity_check" | grep -q 'fixture-also-never-declared'; then
