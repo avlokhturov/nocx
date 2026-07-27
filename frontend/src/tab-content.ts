@@ -17,9 +17,6 @@ export type SingletonKey = string & { readonly __brand: 'SingletonKey' }
 // ── Registered surface constants ──────────────────────────────────────────
 
 export const SURFACE_TERMINAL: SurfaceType = 'nocx.terminal' as SurfaceType
-export const SURFACE_CONNECTIONS: SurfaceType = 'nocx.connections' as SurfaceType
-
-export const SINGLETON_CONNECTIONS: SingletonKey = 'nocx.connections' as SingletonKey
 
 // ── Geometry (B.5) ────────────────────────────────────────────────────────
 

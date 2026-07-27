@@ -5,77 +5,7 @@
 @import './styles/components/sidebar.css';
 @import './styles/surfaces/update-notice.css';
 @import './styles/surfaces/settings.css';
-@import './styles/surfaces/export.css';
 @import './styles/components/quick-connect.css';
-
-/* ── Connections view ─────────────────────────────────────────────────── */
-
-.cm-header {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 16px 24px;
-  border-bottom: 1px solid var(--color-border);
-  flex-shrink: 0;
-  position: relative;
-  z-index: 10;
-  pointer-events: auto;
-  --wails-draggable: no-drag;
-}
-
-.cm-header h1 {
-  margin: 0;
-  font-size: 16px;
-  font-weight: 600;
-  color: var(--color-text);
-  flex: 1;
-}
-
-.cm-header button {
-  padding: 8px 16px;
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: 6px;
-  color: var(--color-text);
-  cursor: pointer;
-  font-size: 13px;
-  font-weight: 500;
-  transition: all 0.15s ease;
-  position: relative;
-  z-index: 11;
-  pointer-events: auto;
-  --wails-draggable: no-drag;
-}
-
-.cm-header button:hover {
-  background: var(--color-border);
-  border-color: var(--color-accent);
-  color: var(--color-accent);
-}
-
-.cm-header button.cm-primary {
-  background: var(--color-accent);
-  border-color: var(--color-accent);
-  color: var(--color-canvas);
-}
-
-.cm-header button.cm-primary:hover {
-  background: var(--color-accent-hover);
-  border-color: var(--color-accent-hover);
-}
-
-.cm-header button.cm-close {
-  background: none;
-  border: none;
-  color: var(--color-text-dim);
-  font-size: 20px;
-  padding: 4px 8px;
-}
-
-.cm-header button.cm-close:hover {
-  color: var(--color-danger);
-  background: none;
-}
 
 .cm-body {
   flex: 1;
@@ -241,29 +171,6 @@
   cursor: pointer;
 }
 
-.cm-keys-list {
-  flex: 1;
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-
-.cm-keys-list li {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 4px 0;
-}
-
-.cm-keys-list li button {
-  background: none;
-  border: none;
-  color: var(--color-danger);
-  cursor: pointer;
-  font-size: 14px;
-  padding: 2px 4px;
-}
-
 .cm-form-actions {
   display: flex;
   gap: 12px;
@@ -330,15 +237,6 @@
 }
 
 /* ── Tab bar (Tabby-inspired) ─────────────────────────────────────────── */
-
-.tab-connections {
-  color: var(--color-text-muted);
-  font-size: 16px;
-}
-
-.tab-connections:hover {
-  color: var(--color-accent);
-}
 
 .tabbar {
   --wails-draggable: drag;
@@ -1252,3 +1150,259 @@
 }
 
 /* ── Export / backup / import section (ADR-0011 §7) ──────────────────── */
+
+.st-export {
+  margin-top: 32px;
+  padding-top: 24px;
+  border-top: 1px solid var(--color-surface-raised);
+}
+
+.st-export-desc {
+  color: var(--color-text-muted);
+  font-size: 12px;
+  margin: 0 0 16px;
+  line-height: 1.5;
+}
+
+/* ── Mode card grid ──────────────────────────────────────────────────── */
+
+.st-export-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* ── Mode card ───────────────────────────────────────────────────────── */
+
+.st-export-card {
+  border: 1px solid var(--color-surface-raised);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.st-export-card-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  cursor: default;
+}
+
+.st-export-card-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text);
+  white-space: nowrap;
+}
+
+.st-export-card-summary {
+  font-size: 12px;
+  color: var(--color-text-dim);
+  flex: 1;
+}
+
+.st-export-card-toggle {
+  flex: none;
+  background: none;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  color: var(--color-accent);
+  font-size: 11px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
+.st-export-card-toggle:hover {
+  background: var(--color-surface-raised);
+}
+
+/* ── Card body (expanded) ────────────────────────────────────────────── */
+
+.st-export-card-body {
+  display: none;
+  padding: 0 14px 14px;
+}
+
+.st-export-card-expanded .st-export-card-body {
+  display: block;
+}
+
+/* ── Manifest list ───────────────────────────────────────────────────── */
+
+.st-export-manifest {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 14px;
+}
+
+.st-export-manifest li {
+  font-size: 12px;
+  padding: 2px 0;
+  color: var(--color-text-muted);
+}
+
+.st-export-check {
+  color: var(--color-success);
+  font-weight: 700;
+  margin-right: 4px;
+}
+
+.st-export-cross {
+  color: var(--color-danger);
+  font-weight: 700;
+  margin-right: 4px;
+}
+
+.st-export-note {
+  color: var(--color-warning) !important;
+  font-style: italic;
+  padding-left: 14px !important;
+}
+
+/* ── Actions ─────────────────────────────────────────────────────────── */
+
+.st-export-actions {
+  margin-top: 8px;
+}
+
+.st-export-btn {
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  color: var(--color-text);
+  font-size: 12px;
+  padding: 5px 14px;
+  cursor: pointer;
+}
+
+.st-export-btn:hover {
+  background: var(--color-surface-raised);
+}
+
+.st-export-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.st-export-btn-primary {
+  background: var(--color-accent);
+  color: var(--color-canvas);
+  border-color: var(--color-accent);
+}
+
+.st-export-btn-primary:hover {
+  background: var(--color-accent-hover);
+}
+
+.st-export-btn-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+/* ── Status ──────────────────────────────────────────────────────────── */
+
+.st-export-status {
+  font-size: 12px;
+  color: var(--color-text-muted);
+  margin-top: 6px;
+  min-height: 18px;
+}
+
+/* ── Loading / error ─────────────────────────────────────────────────── */
+
+.st-export-loading {
+  font-size: 12px;
+  color: var(--color-text-dim);
+  padding: 8px 0;
+}
+
+.st-export-error {
+  font-size: 12px;
+  color: var(--color-danger);
+  padding: 8px 0;
+}
+
+/* ── Passphrase form ─────────────────────────────────────────────────── */
+
+.st-export-passphrase-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.st-export-passphrase-label {
+  font-size: 12px;
+  color: var(--color-text-muted);
+  margin-top: 4px;
+}
+
+.st-export-passphrase-input {
+  background: var(--color-canvas);
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  color: var(--color-text);
+  font-size: 13px;
+  padding: 6px 10px;
+  width: 100%;
+  max-width: 320px;
+}
+
+.st-export-passphrase-input:focus {
+  border-color: var(--color-accent);
+  outline: none;
+}
+
+.st-export-passphrase-input::placeholder {
+  color: var(--color-text-dim);
+}
+
+.st-export-show-toggle,
+.st-export-private-toggle {
+  font-size: 11px;
+  color: var(--color-text-dim);
+  display: flex;
+  align-items: center;
+}
+
+.st-export-show-toggle input[type='checkbox'],
+.st-export-private-toggle input[type='checkbox'] {
+  margin: 0;
+}
+
+/* ── Backup details ──────────────────────────────────────────────────── */
+
+.st-export-backup-details {
+  background: var(--color-canvas);
+  border: 1px solid var(--color-surface-raised);
+  border-radius: 4px;
+  padding: 10px 12px;
+  font-size: 11px;
+  color: var(--color-text-muted);
+  white-space: pre-wrap;
+  margin-top: 8px;
+  max-height: 200px;
+  overflow: auto;
+}
+
+/* ── Import section ──────────────────────────────────────────────────── */
+
+.st-export-import-section {
+  margin-bottom: 16px;
+}
+
+.st-export-import-label {
+  display: block;
+  font-size: 12px;
+  color: var(--color-text-muted);
+  margin-bottom: 4px;
+}
+
+.st-export-file-input {
+  display: block;
+  font-size: 12px;
+  color: var(--color-text-dim);
+  margin-bottom: 8px;
+}

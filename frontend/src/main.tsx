@@ -12,9 +12,7 @@ import { ProfileClient } from './profiles'
 import { Dispatcher } from './dispatcher'
 import { SettingsContent, SURFACE_SETTINGS, SINGLETON_SETTINGS } from './settings-content'
 import { HorizontalTabStrip, VerticalTabStrip } from './tab-strip'
-import { ConnectionsContent } from './connections-content'
-import { SURFACE_CONNECTIONS, SINGLETON_CONNECTIONS } from './tab-content'
-import { SurfaceRegistry, SURFACE_ID_SETTINGS, SURFACE_ID_CONNECTIONS } from './surface-registry'
+import { SurfaceRegistry, SURFACE_ID_SETTINGS } from './surface-registry'
 import { mountUpdateNotice } from './update-notice'
 import { SettingsIcon } from './ui/icons'
 import { SettingsObserver } from './settings-observer'
@@ -133,23 +131,6 @@ async function main() {
       defaultTitle: 'Settings',
     },
   })
-  registry.register(SURFACE_ID_CONNECTIONS, {
-    surfaceType: SURFACE_CONNECTIONS,
-    singletonKey: SINGLETON_CONNECTIONS,
-    factory: () => {
-      const content = new ConnectionsContent(profileClient)
-      content.onConnect = (profile) => {
-        log.info('nocx: onConnect called', { profileId: profile.id, profile: profile.name })
-        tm.newSSHTab(profile.id, profile.options.host, profile.options.user)
-      }
-      return content
-    },
-    descriptor: {
-      restoreDescriptor: null,
-      supportsAttention: false,
-      defaultTitle: 'Connections',
-    },
-  })
 
   // Live application through SettingsObserver: when the placement setting
   // changes, refetch the snapshot and swap the strip in place.
@@ -180,9 +161,8 @@ async function main() {
   // - Bottom zone: global actions (currently only the Settings gear).
   //
   // Connections has been removed from the activity bar — it is not a view
-  // and not an action (see .internal/specs §2.4).  The surface is still
-  // reachable through the Cmd/Ctrl+, registry entry point until nocx-imkb.3
-  // lands and Connections becomes a Settings sub-page.
+  // and not an action (see .internal/specs §2.4).  It is now a Settings
+  // sub-page reachable from the Settings rail.
   mountSidebar(
     activityBar,
     sidebarPanel,
