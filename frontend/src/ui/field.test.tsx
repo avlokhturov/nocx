@@ -53,9 +53,20 @@ describe('Field', () => {
     expect(screen.getByText('*')).toBeTruthy()
   })
 
-  it('sets class on wrapper', () => {
-    subject({ class: 'cm-field' })
+  // §3.6 kept `class` on the structural containers, bounded to layout. Measured, Field
+  // had no consumer passing one — six call sites across connections and settings, none
+  // of them — so the prop is gone rather than bounded. A prop needs two legitimate
+  // consumers to exist; this had none, and the only class it ever carried in anger was
+  // in this test.
+  it('emits its identity and nothing else', () => {
+    subject()
     const wrapper = screen.getByText('Hostname').closest('.ui-field')
-    expect(wrapper?.getAttribute('class')).toBe('ui-field cm-field')
+    expect(wrapper?.getAttribute('class')).toBe('ui-field')
+  })
+
+  it('adds only the horizontal modifier in that orientation', () => {
+    subject({ orientation: 'horizontal' })
+    const wrapper = screen.getByText('Hostname').closest('.ui-field')
+    expect(wrapper?.getAttribute('class')).toBe('ui-field ui-field-horizontal')
   })
 })

@@ -17,7 +17,6 @@ import { Show } from 'solid-js'
 import type { JSX } from 'solid-js'
 
 export interface FieldProps {
-  class?: string
   /** The id of the control inside this field — used for label's `for` and
    *  description/error aria-describedby wiring. */
   for: string
@@ -52,7 +51,7 @@ export function Field(props: FieldProps) {
     <Show
       when={props.orientation === 'horizontal'}
       fallback={
-        <div class={`ui-field ${props.class ?? ''}`.trim()}>
+        <div class="ui-field">
           <label for={props.for}>
             {props.label}
             <Show when={props.required === true}>
@@ -73,7 +72,7 @@ export function Field(props: FieldProps) {
         </div>
       }
     >
-      <div class={`ui-field ui-field-horizontal ${props.class ?? ''}`.trim()}>
+      <div class="ui-field ui-field-horizontal">
         <div class="ui-field-label-col">
           <label for={props.for}>
             {props.label}
