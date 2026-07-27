@@ -54,10 +54,18 @@ export type SettingsPage =
   // Component because such a page needs context the registry does not have —
   // Connections needs the ProfileClient and the connect callback — and binding
   // that at registration is what keeps the registry from having to know it.
-  | { kind: 'component'; id: string; title: string; render: () => JSX.Element }
-
-// ── Stable DOM id ──────────────────────────────────────────────────────
-
+  // scrollMode (design spec §3.8): 'page' — PageScroller owns vertical scroll;
+  // 'contained' — Page provides a bounded content area and the surface assigns
+  // its own scroll owners (e.g. Connections' two-column panels).
+  | {
+      kind: 'component'
+      id: string
+      title: string
+      description?: string
+      actions?: JSX.Element
+      scrollMode: 'page' | 'contained'
+      renderContent: () => JSX.Element
+    }
 /** Stable DOM id for a setting row, derived from the declaration key. */
 export function keyToDomId(key: string): string {
   return 'st-setting-' + encodeURIComponent(key)
@@ -285,23 +293,34 @@ export function SettingsComponent(props: SettingsComponentProps) {
       kind: 'component',
       id: 'export',
       title: 'Export / Backup / Import',
-      render: () => <ExportSection profileClient={props.profileClient} />,
+      scrollMode: 'page',
+      renderContent: () => <ExportSection profileClient={props.profileClient} />,
     }
     const connectionPage: SettingsPage = {
       kind: 'component',
       id: 'connections',
       title: 'Connections',
-      render: () => <ConnectionsView client={props.profileClient} onConnect={props.onConnect} />,
+      scrollMode: 'contained',
+      renderContent: () => (
+        <ConnectionsView client={props.profileClient} onConnect={props.onConnect} />
+      ),
     }
     return [...generated, exportPage, connectionPage]
   })
 
   /** The active component page, or null when a generated section is showing. */
-  const activePage = createMemo(() => {
+  const activePage = createMemo<Extract<SettingsPage, { kind: 'component' }> | null>(() => {
     const id = activeComponentPage()
     if (id === null) return null
     const page = settingsPages().find((p) => p.id === id)
     return page !== undefined && page.kind === 'component' ? page : null
+  })
+
+  /** The active scroll mode — derived from the active component page,
+   *  falling back to 'page' for generated sections. */
+  const scrollMode = createMemo(() => {
+    const page = activePage()
+    return page !== null && page.kind === 'component' ? page.scrollMode : 'page'
   })
 
   /**
@@ -785,68 +804,63 @@ export function SettingsComponent(props: SettingsComponentProps) {
         scrollerRef={(h) => {
           scrollerHandle = h
         }}
+        scrollMode={scrollMode()}
       >
-        <div>
-          {/* A component page takes over the body when active. Resolved through
+        {/* A component page takes over the body when active. Resolved through
               the registry rather than a chain of id comparisons, so adding a
               page is one registry entry. */}
-          {/* `keyed` is load-bearing: a plain Show only re-runs its callback
+        {/* `keyed` is load-bearing: a plain Show only re-runs its callback
               when `when` crosses falsy→truthy, so switching Export → Connections
               (truthy → different truthy) left the previous page on screen.
               Keying re-creates the subtree whenever the page identity changes. */}
-          <Show when={activePage()} keyed>
-            {(page) => page.render()}
+        <Show when={activePage()} keyed>
+          {(page) => page.renderContent()}
+        </Show>
+
+        {/* Generated settings sections — hidden when a component page is active. */}
+        <Show when={activeComponentPage() === null}>
+          <Show when={loadState() === 'loading'}>
+            <div class="ui-settings-status ui-settings-loading">Loading settings…</div>
           </Show>
 
-          {/* Generated settings sections — hidden when a component page is active. */}
-          <Show when={activeComponentPage() === null}>
-            <Show when={loadState() === 'loading'}>
-              <div class="ui-settings-status ui-settings-loading">Loading settings…</div>
-            </Show>
-
-            <Show when={loadState() === 'failed'}>
-              <div class="ui-settings-status ui-settings-failed">
-                <span>Failed to load settings.</span>
-                <Button variant="default" onClick={() => void refresh()}>
-                  Retry
-                </Button>
-              </div>
-            </Show>
-
-            <Show
-              when={
-                loadState() === 'ready' &&
-                filteredDeclarations().length === 0 &&
-                declarations().length > 0
-              }
-            >
-              <div class="ui-settings-status ui-settings-nomatch">
-                No settings match your search.
-              </div>
-            </Show>
-
-            {/* Render all sections; hide non-matching rows via inline style. */}
-            <Show when={loadState() === 'ready'}>
-              <For each={sections()}>
-                {(section) => {
-                  const sectionDecls = () => declarations().filter((d) => d.section === section)
-                  const sectionVisible = () => sectionDecls().some((d) => visibleKeys().has(d.key))
-                  return (
-                    <div classList={{ 'st-vis-hidden': !sectionVisible() }}>
-                      <PageSection id={'st-section-' + encodeURIComponent(section)} title={section}>
-                        <For each={sectionDecls()}>
-                          {(decl) => (
-                            <SettingRow decl={decl} visible={visibleKeys().has(decl.key)} />
-                          )}
-                        </For>
-                      </PageSection>
-                    </div>
-                  )
-                }}
-              </For>
-            </Show>
+          <Show when={loadState() === 'failed'}>
+            <div class="ui-settings-status ui-settings-failed">
+              <span>Failed to load settings.</span>
+              <Button variant="default" onClick={() => void refresh()}>
+                Retry
+              </Button>
+            </div>
           </Show>
-        </div>
+
+          <Show
+            when={
+              loadState() === 'ready' &&
+              filteredDeclarations().length === 0 &&
+              declarations().length > 0
+            }
+          >
+            <div class="ui-settings-status ui-settings-nomatch">No settings match your search.</div>
+          </Show>
+
+          {/* Render all sections; hide non-matching rows via inline style. */}
+          <Show when={loadState() === 'ready'}>
+            <For each={sections()}>
+              {(section) => {
+                const sectionDecls = () => declarations().filter((d) => d.section === section)
+                const sectionVisible = () => sectionDecls().some((d) => visibleKeys().has(d.key))
+                return (
+                  <div classList={{ 'st-vis-hidden': !sectionVisible() }}>
+                    <PageSection id={'st-section-' + encodeURIComponent(section)} title={section}>
+                      <For each={sectionDecls()}>
+                        {(decl) => <SettingRow decl={decl} visible={visibleKeys().has(decl.key)} />}
+                      </For>
+                    </PageSection>
+                  </div>
+                )
+              }}
+            </For>
+          </Show>
+        </Show>
       </Page>
     </div>
   )

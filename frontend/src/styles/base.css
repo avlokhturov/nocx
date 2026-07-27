@@ -179,6 +179,22 @@ select:focus-visible {
   overflow-y: auto;
 }
 
+/* ── Contained content area (scrollMode: 'contained') ─────────────────
+   A bounded flex container that does not scroll — the surface inside owns
+   its own scroll containers (e.g. Connections' two-column panels). The
+   overflow: hidden boundary is load-bearing: without it, the flex chain
+   reaches into the child, which re-expands to content height and the
+   two-column layout never bounds; with it, the child has a bounded block
+   size it can distribute between its own scroll owners. */
+
+.ui-page__contained {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
 /* ── Narrow breakpoint (640px) — rail stacks above content ──────────── */
 
 @media (max-width: 640px) {

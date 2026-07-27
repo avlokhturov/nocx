@@ -1,39 +1,6 @@
 /* Connections surface — connection manager, credential forms.
    Owned by nocx-vxqj.8 (kit baselines to zero). */
 
-/* ── The view owns its own height and its own scrolling ─────────────────
-   Connections is two independently scrolling columns under a toolbar that
-   stays put, so it cannot live inside the page scroller: `.cm-body` was a
-   flex child of a *block* parent, its `flex: 1` did nothing, and it took its
-   height from content — measured 401px inside a 762px scroller. Three visible
-   consequences, all one cause: the page scrolled instead of the list, the
-   toolbar scrolled away with it, and the divider between the columns stopped
-   401px down.
-
-   `:has()` keys this off the view's own root, so the page primitives stay
-   generic and no other surface is affected. */
-
-/* Descendant, not child: settings wraps the page body in a plain div, so
-   that wrapper is a link in the chain and has to carry the contract too. */
-.ui-settings .ui-page__scroll:has(.cm-root) {
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  padding: 0;
-}
-
-/* The height chain, reaching through whatever the settings page wraps its body in.
-   It used to name `.kit-scope` explicitly, because that wrapper was there; the
-   wrapper is gone (T15, nocx-pnbd) and the chain now applies to the scroller's own
-   child. The `:has()` remains and is a smell — Connections is an arbitrary subtree
-   inside Settings' scroller rather than a page of its own, which is T19's to fix. */
-.ui-settings .ui-page__scroll:has(.cm-root) > * {
-  display: flex;
-  flex-direction: column;
-  flex: 1 1 auto;
-  min-height: 0;
-}
-
 .cm-root {
   display: flex;
   flex-direction: column;

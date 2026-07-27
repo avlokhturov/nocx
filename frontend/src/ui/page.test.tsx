@@ -92,6 +92,29 @@ describe('Page', () => {
     expect(container.querySelector('.ui-page__scroll')).not.toBeNull()
   })
 
+  it('renders .ui-page__contained when scrollMode is contained', () => {
+    const { container } = subject({ scrollMode: 'contained' })
+    expect(container.querySelector('.ui-page__contained')).not.toBeNull()
+    expect(container.querySelector('.ui-page__scroll')).toBeNull()
+  })
+
+  it('renders children inside .ui-page__contained when scrollMode is contained', () => {
+    subject({ scrollMode: 'contained' })
+    const contained = document.querySelector('.ui-page__contained')
+    expect(contained?.textContent).toBe('Page body')
+  })
+
+  it('applies data-scroll="contained" when scrollMode is contained', () => {
+    const { container } = subject({ scrollMode: 'contained' })
+    expect(container.querySelector('[data-scroll="contained"]')).not.toBeNull()
+    expect(container.querySelector('[data-scroll="page"]')).toBeNull()
+  })
+
+  it('applies data-scroll="page" by default', () => {
+    const { container } = subject()
+    expect(container.querySelector('[data-scroll="page"]')).not.toBeNull()
+  })
+
   it('works with PageSection children', () => {
     const { container } = render(() => (
       <Page title="Settings">

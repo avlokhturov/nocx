@@ -34,12 +34,17 @@ export interface PageProps {
   leading?: JSX.Element
   /** Exposes the PageScroller handle for `scrollToElement()` calls. */
   scrollerRef?: PageScrollerHandle | ((h: PageScrollerHandle) => void)
+  /** Scroll ownership mode (design spec §3.8).
+   *  'page' (default) — PageScroller owns vertical scroll.
+   *  'contained' — Page provides a bounded content area; the surface
+   *  assigns its own scroll owners (e.g. Connections' two-column panels). */
+  scrollMode?: 'page' | 'contained'
   children: JSX.Element
 }
 
 export function Page(props: PageProps) {
   return (
-    <div class="ui-page">
+    <div class="ui-page" data-scroll={props.scrollMode ?? 'page'}>
       <PageHeader
         title={props.title}
         description={props.description}
@@ -50,7 +55,15 @@ export function Page(props: PageProps) {
         <Show when={props.leading}>
           <PageRail>{props.leading}</PageRail>
         </Show>
-        <PageScroller handle={props.scrollerRef}>{props.children}</PageScroller>
+        {/* `contained` hands the surface a bounded box and lets it own its scrollers;
+            `page` keeps the single PageScroller. A closed mode, not a `:has()` guess
+            about what happens to be inside (§3.8). */}
+        <Show
+          when={(props.scrollMode ?? 'page') === 'contained'}
+          fallback={<PageScroller handle={props.scrollerRef}>{props.children}</PageScroller>}
+        >
+          <div class="ui-page__contained">{props.children}</div>
+        </Show>
       </PageBody>
     </div>
   )
