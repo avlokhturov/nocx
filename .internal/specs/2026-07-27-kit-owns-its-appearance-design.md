@@ -440,8 +440,8 @@ migrates late.
 So a transaction is **one primitive, end to end**:
 
 1. the component emits its identity on its appearance-bearing element, plus `data-*`;
-2. its rules leave `kit.css` for `styles/components/<x>.css`, rewritten to that
-   identity — including the `.kit-scope` selectors that addressed it;
+2. its rules — already sitting in `styles/components/<x>.css` after transaction 1 —
+   are rewritten from the ancestor to that identity;
 3. **every consumer of that primitive migrates in the same commit**: `class=` removed
    at the call site, replaced by a variant prop or a parent wrapper; the surface CSS
    that styled the old class deleted;
@@ -486,6 +486,17 @@ button.kit-scope:disabled { … }                    /* Button     */
 Each later transaction carries away exactly its own line and rewrites it to its
 identity.
 
+**Transaction 1 also moves every primitive's existing rules into its own file,
+unchanged and still ancestor-keyed, so that `kit.css` ends the transaction empty and is
+deleted.** This looks like a detail and is the difference between a serial migration and
+a parallel one. If each primitive transaction had to _remove its rules from `kit.css`_,
+`kit.css` would be a file all thirteen of them write to, and they could only ever run
+one at a time regardless of which surfaces they touch. Relocating the rules first — a
+pure move, no rewriting, no behaviour change, trivially reviewable as a diff that only
+changes line numbers — leaves each later transaction touching exactly its own `.tsx`,
+its own `.css`, and its consumers. What remains serialised is then only the genuine
+overlap between consumers, measured in §6.4.
+
 **The `radio` line is easy to miss and must not be**, which is why it is written out
 here. `Radio` has no rules of its own in `kit.css` and looks like it needs no slice —
 but the catch-all `.kit-scope input:disabled` (`kit.css:213`) does reach it, and
@@ -510,29 +521,29 @@ browser harness, and the documentation.
 
 ### 6.2 Order
 
-| #   | Transaction                                                                                                                                                                                                                                              | Done when                                                                                                                |
-| --- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| 0   | The identity-derivation mechanism and its fixtures (§4)                                                                                                                                                                                                  | the derived identity set is asserted against a fixture; the regex at `eslint.config.js:62` is gone                       |
-| 1   | **Decompose the shared rules.** Focus ring to `base.css`; the disabled rule (`kit.css:212-219`) split into one slice **per primitive**, still ancestor-keyed for now; `styles/components/` gains the empty per-component files of §3.4 and their imports | focus matrix and disabled appearance (§5) unchanged in a browser; no rule in `kit.css` addresses more than one primitive |
-| 2   | `FileInput` — new; Export's two raw file inputs (`export-section.tsx:330,347`) adopt it; `kit.css:172-195` → `file-input.css`                                                                                                                            | rule 5's widened element list passes at zero                                                                             |
-| 3   | `IconButton` — new; adopted by the activity bar, tab add/close/caret, dialog close                                                                                                                                                                       | no `<Button class=…>` remains in shell files                                                                             |
-| 4   | `TextField` — identity on the input; `style.css:155` and `export.css:200,237` deleted; all consumers migrated                                                                                                                                            | one text-input implementation exists                                                                                     |
-| 5   | `SearchField`                                                                                                                                                                                                                                            | —                                                                                                                        |
-| 6   | `Select`                                                                                                                                                                                                                                                 | —                                                                                                                        |
-| 7   | `Checkbox`, including the switch variant                                                                                                                                                                                                                 | —                                                                                                                        |
-| 8   | `Radio` — today it has no rules at all, so this is a new appearance rather than a move                                                                                                                                                                   | —                                                                                                                        |
-| 9   | `Badge`                                                                                                                                                                                                                                                  | —                                                                                                                        |
-| 10  | `EmptyState`                                                                                                                                                                                                                                             | —                                                                                                                        |
-| 11  | `Field` — structural; `class` stays but becomes layout-only (§3.6)                                                                                                                                                                                       | rule 11's traced-class tier passes for it                                                                                |
-| 12  | `Section` — structural                                                                                                                                                                                                                                   | —                                                                                                                        |
-| 13  | `Toolbar` — structural                                                                                                                                                                                                                                   | —                                                                                                                        |
-| 14  | `Button` — last, because what `default` should look like is only knowable once the shell's 70 variant-less call sites have become `IconButton`                                                                                                           | rule 1 enabled with no exemptions                                                                                        |
-| 15  | `.kit-scope` deleted: the two wrappers in `settings.tsx`, the panel in `dialog.tsx`, the `:has(.cm-root) > .kit-scope` chain in `connections.css`                                                                                                        | rule 6 enabled                                                                                                           |
-| 16  | Docs and comments describing the old contract: `ui/README.md:106`, `dialog.tsx:124,172`                                                                                                                                                                  | no document describes a scope that no longer exists                                                                      |
-| 17  | `Tab` extracted as a feature component with `tab.css` and a `feature-components.json` entry                                                                                                                                                              | keyboard, drag, middle-click, indicator and ARIA tests pass in a browser                                                 |
-| 18  | quick-connect, banners, update-notice                                                                                                                                                                                                                    | no surface selector addresses a kit identity; rules 3 and 10 enabled                                                     |
-| 19  | Real pages: descriptors, `scrollMode`, `SettingsPage` wrapper, `:has(.cm-root)` gone                                                                                                                                                                     | no nested `.ui-page`; one scroll owner per page; rule 9 enabled                                                          |
-| 20  | Legacy `style.css` collapsed; the remaining gates enabled                                                                                                                                                                                                | every counter in §4 reads zero                                                                                           |
+| #   | Transaction                                                                                                                                                                                                                      | Done when                                                                                                                               |
+| --- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| 0   | The identity-derivation mechanism and its fixtures (§4)                                                                                                                                                                          | the derived identity set is asserted against a fixture; the regex at `eslint.config.js:62` is gone                                      |
+| 1   | **Decompose and relocate.** Focus ring to `base.css`; the disabled rule (`kit.css:212-219`) split into one slice **per primitive**, still ancestor-keyed; every primitive's rules then moved verbatim into its own file per §3.4 | `kit.css` no longer exists; no rule addresses more than one primitive; focus matrix and disabled appearance (§5) unchanged in a browser |
+| 2   | `FileInput` — new; Export's two raw file inputs (`export-section.tsx:330,347`) adopt it; `kit.css:172-195` → `file-input.css`                                                                                                    | rule 5's widened element list passes at zero                                                                                            |
+| 3   | `IconButton` — new; adopted by the activity bar, tab add/close/caret, dialog close                                                                                                                                               | no `<Button class=…>` remains in shell files                                                                                            |
+| 4   | `TextField` — identity on the input; `style.css:155` and `export.css:200,237` deleted; all consumers migrated                                                                                                                    | one text-input implementation exists                                                                                                    |
+| 5   | `SearchField`                                                                                                                                                                                                                    | —                                                                                                                                       |
+| 6   | `Select`                                                                                                                                                                                                                         | —                                                                                                                                       |
+| 7   | `Checkbox`, including the switch variant                                                                                                                                                                                         | —                                                                                                                                       |
+| 8   | `Radio` — today it has no rules at all, so this is a new appearance rather than a move                                                                                                                                           | —                                                                                                                                       |
+| 9   | `Badge`                                                                                                                                                                                                                          | —                                                                                                                                       |
+| 10  | `EmptyState`                                                                                                                                                                                                                     | —                                                                                                                                       |
+| 11  | `Field` — structural; `class` stays but becomes layout-only (§3.6)                                                                                                                                                               | rule 11's traced-class tier passes for it                                                                                               |
+| 12  | `Section` — structural                                                                                                                                                                                                           | —                                                                                                                                       |
+| 13  | `Toolbar` — structural                                                                                                                                                                                                           | —                                                                                                                                       |
+| 14  | `Button` — last, because what `default` should look like is only knowable once the shell's 70 variant-less call sites have become `IconButton`                                                                                   | rule 1 enabled with no exemptions                                                                                                       |
+| 15  | `.kit-scope` deleted: the two wrappers in `settings.tsx`, the panel in `dialog.tsx`, the `:has(.cm-root) > .kit-scope` chain in `connections.css`                                                                                | rule 6 enabled                                                                                                                          |
+| 16  | Docs and comments describing the old contract: `ui/README.md:106`, `dialog.tsx:124,172`                                                                                                                                          | no document describes a scope that no longer exists                                                                                     |
+| 17  | `Tab` extracted as a feature component with `tab.css` and a `feature-components.json` entry                                                                                                                                      | keyboard, drag, middle-click, indicator and ARIA tests pass in a browser                                                                |
+| 18  | quick-connect, banners, update-notice                                                                                                                                                                                            | no surface selector addresses a kit identity; rules 3 and 10 enabled                                                                    |
+| 19  | Real pages: descriptors, `scrollMode`, `SettingsPage` wrapper, `:has(.cm-root)` gone                                                                                                                                             | no nested `.ui-page`; one scroll owner per page; rule 9 enabled                                                                         |
+| 20  | Legacy `style.css` collapsed; the remaining gates enabled                                                                                                                                                                        | every counter in §4 reads zero                                                                                                          |
 
 Dependencies, as distinct from preference: 0 precedes everything that asserts an
 identity; 1 precedes every primitive, because it is what makes a primitive's rules
@@ -542,7 +553,40 @@ Everything else is ordered by risk, not by need. The tab strip is late by choice
 drag, active state, roving tabindex and status indicators make it the surface where a
 still-settling contract is most expensive to get wrong.
 
-### 6.3 "Renders identically" is not a done condition
+### 6.3 What actually runs in parallel, measured
+
+After transaction 1 the only shared files left are the consumer surfaces. Measured on
+`d7ac36e` — every consumer of every primitive, outside `ui/`:
+
+| Primitive     | Consumer surfaces                                                                        |
+| ------------- | ---------------------------------------------------------------------------------------- |
+| `Button`      | banner, connections, tab-strip, settings, update-notice, export-section, sidebar, dialog |
+| `TextField`   | export-section, connections, settings                                                    |
+| `Checkbox`    | connections, export-section, settings                                                    |
+| `Select`      | connections, settings                                                                    |
+| `SearchField` | quick-connect, settings                                                                  |
+| `Field`       | connections, settings                                                                    |
+| `FileInput`   | export-section                                                                           |
+| `IconButton`  | sidebar, tab-strip, dialog                                                               |
+| `Badge`       | settings                                                                                 |
+| `Radio`       | connections                                                                              |
+| `EmptyState`  | connections                                                                              |
+| `Section`     | connections                                                                              |
+| `Toolbar`     | connections                                                                              |
+
+Two transactions may run concurrently exactly when their consumer sets are disjoint.
+That yields one genuinely parallel wave — `FileInput` (export-section), `IconButton`
+(shell files), `Badge` (settings) and one of the connections-only four — after which
+the multi-surface primitives run one at a time, and the remaining connections-only
+transactions queue behind each other.
+
+**This is the honest ceiling, and it is low.** Four workers at the widest point, two or
+three for most of the run. The primitives are not a fan-out; the fan-out is elsewhere:
+transaction 0, the browser harness, and each gate rule with its fixture touch none of
+these files and none of each other. Anyone planning worker waves should take the
+parallelism from this table rather than from the number of transactions.
+
+### 6.4 "Renders identically" is not a done condition
 
 Each transaction proves its result by **computed style**, not by eye: for the primitive
 it touches, assert the resolved `background`, `color`, `border`, `border-radius`,
