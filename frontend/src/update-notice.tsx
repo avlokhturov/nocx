@@ -1,6 +1,7 @@
 import { type Component, type Accessor, Switch, Match, createSignal } from 'solid-js'
 import { render } from 'solid-js/web'
 import { ApplyUpdate } from '../wailsjs/go/main/WailsApp'
+import { Button } from './ui/button'
 
 export type UpdateState =
   | { kind: 'hidden' }
@@ -61,7 +62,7 @@ const UpdateNoticeView: Component<UpdateNoticeViewProps> = (props) => {
   const hidden = () => props.state().kind === 'hidden'
 
   return (
-    <div class={className()} style={hidden() ? { display: 'none' } : { display: 'flex' }}>
+    <div class={className()} hidden={hidden()}>
       <Switch fallback={null}>
         <Match when={props.state().kind === 'available'}>
           <span>
@@ -76,9 +77,9 @@ const UpdateNoticeView: Component<UpdateNoticeViewProps> = (props) => {
           >
             release notes
           </a>{' '}
-          <button class="update-apply-btn" onClick={() => props.onApply()}>
+          <Button class="update-apply-btn" onClick={() => props.onApply()}>
             Update
-          </button>
+          </Button>
         </Match>
         <Match when={props.state().kind === 'downloading'}>
           <span>Downloading update…</span>

@@ -229,3 +229,7 @@
   font-size: 11px;
   margin-top: 4px;
 }
+
+.st-vis-hidden {
+  display: none;
+}

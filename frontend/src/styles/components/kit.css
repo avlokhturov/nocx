@@ -3,7 +3,7 @@
 
 /* ── Generic focus-visible ring ────────────────────────────────────────────── */
 
-.ui-kit :focus-visible,
+\.kit-scope :focus-visible,
 button:focus-visible,
 input:focus-visible,
 select:focus-visible {
@@ -64,8 +64,8 @@ select:focus-visible {
 
 /* ── Select: native element with appearance: none ──────────────────────────── */
 
-select.ui-kit,
-.ui-kit select {
+select\.kit-scope,
+\.kit-scope select {
   appearance: none;
   height: var(--control-height-md);
   padding: 0 28px 0 8px;
@@ -82,25 +82,25 @@ select.ui-kit,
   min-width: 0;
 }
 
-select.ui-kit:focus,
-.ui-kit select:focus {
+select\.kit-scope:focus,
+\.kit-scope select:focus {
   border-color: var(--color-accent);
   outline: none;
 }
 
-select.ui-kit option,
-.ui-kit select option {
+select\.kit-scope option,
+\.kit-scope select option {
   background: var(--color-surface-raised);
   color: var(--color-text);
 }
 
 /* ── TextField / SearchField inputs ────────────────────────────────────────── */
 
-input.ui-kit,
-.ui-kit input[type='text'],
-.ui-kit input[type='number'],
-.ui-kit input[type='password'],
-.ui-kit input[type='search'] {
+input\.kit-scope,
+\.kit-scope input[type='text'],
+\.kit-scope input[type='number'],
+\.kit-scope input[type='password'],
+\.kit-scope input[type='search'] {
   height: var(--control-height-md);
   padding: 0 8px;
   background: var(--color-surface-raised);
@@ -113,22 +113,22 @@ input.ui-kit,
   min-width: 0;
 }
 
-input.ui-kit:focus,
-.ui-kit input:focus {
+input\.kit-scope:focus,
+\.kit-scope input:focus {
   border-color: var(--color-accent);
 }
 
-input.ui-kit::placeholder,
-.ui-kit input::placeholder {
+input\.kit-scope::placeholder,
+\.kit-scope input::placeholder {
   color: var(--color-text-dim);
 }
 
 /* Disabled inputs. */
-input.ui-kit:disabled,
-.ui-kit input:disabled,
-select.ui-kit:disabled,
-.ui-kit select:disabled,
-button.ui-kit:disabled {
+input\.kit-scope:disabled,
+\.kit-scope input:disabled,
+select\.kit-scope:disabled,
+\.kit-scope select:disabled,
+button\.kit-scope:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
@@ -158,6 +158,22 @@ button.ui-kit:disabled {
   font-size: var(--font-size-sm);
   color: var(--color-error);
   margin: 2px 0 0;
+}
+
+.ui-field-horizontal {
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.ui-field-horizontal .ui-field-label-col {
+  flex: 0 0 180px;
+  padding-top: 6px;
+}
+
+.ui-field-horizontal .ui-field-control-col {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 /* ── Section ───────────────────────────────────────────────────────────────── */

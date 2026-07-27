@@ -19,33 +19,33 @@ dialog.nocx-dialog {
      ADR-0014: "::backdrop theming — styled via ADR-0013's token variables."
      Uses --color-scrim from tokens.css, defined in themes/tokyo-night.css. */
 dialog.nocx-dialog::backdrop {
-  background: var(--color-scrim, rgba(0, 0, 0, 0.5));
+  background: var(--color-scrim);
 }
 
 /* ── Dialog inner surface ────────────────────────────────────────────── */
 
 .nocx-dialog__panel {
-  background: var(--color-surface, #1f2335);
-  border: 1px solid var(--color-border, #2a2b3d);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
   border-radius: var(--control-radius-lg, 8px);
   padding: var(--space-6, 24px);
   min-width: 320px;
   max-width: 480px;
-  color: var(--color-text, #c0caf5);
+  color: var(--color-text);
 }
 
 .nocx-dialog__title {
   font-size: var(--font-size-lg, 16px);
   font-weight: 600;
   margin: 0 0 var(--space-3, 12px);
-  color: var(--color-text, #c0caf5);
+  color: var(--color-text);
 }
 
 .nocx-dialog__message {
   font-size: var(--font-size-md, 14px);
   line-height: 1.5;
   margin: 0 0 var(--space-6, 24px);
-  color: var(--color-text-muted, #a9b1d6);
+  color: var(--color-text-muted);
   white-space: pre-wrap;
   word-break: break-word;
 }

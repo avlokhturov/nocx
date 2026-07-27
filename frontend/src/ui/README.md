@@ -95,3 +95,18 @@ Every component:
 - Uses `aria-label` when visible text is absent.
 - `disabled` prevents interaction and reduces opacity.
 - Error states use `aria-invalid` and `role="alert"` on the error message.
+
+## The `ui-` namespace is reserved
+
+A class beginning with `ui-` belongs to the component that renders it, and the
+`nocx/no-inline-markup` rule enforces exactly that: the class appearing in any other
+file is a violation, because it means markup is duplicating a component.
+
+So `ui-` must not be used for anything that is _not_ a component's own class. The
+styling scope wrapper that surfaces put around kit content is `kit-scope`, not
+`ui-kit`, for this reason — it is applied by consumers by design, no component owns
+it, and naming it `ui-*` made the rule flag something no component could replace.
+
+Renaming out of the `ui-` namespace is legitimate **only** for a scope marker or a
+similar consumer-applied hook. It is not a way to silence the rule: if a component
+renders the class, the fix is to use the component.

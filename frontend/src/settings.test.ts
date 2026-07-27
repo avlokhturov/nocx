@@ -140,7 +140,7 @@ describe('SettingsContent', () => {
 
   function visibleRows(): HTMLElement[] {
     return Array.from(target.querySelectorAll<HTMLElement>('.ui-settings-row')).filter(
-      (r) => r.style.display !== 'none',
+      (r) => r.style.display !== 'none' && !r.classList.contains('st-vis-hidden'),
     )
   }
 

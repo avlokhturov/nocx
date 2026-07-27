@@ -42,6 +42,7 @@ import {
   TextField,
   Button,
   Badge,
+  Field,
 } from './ui'
 
 // ── Settings page registry type (Deliverable 2) ────────────────────────
@@ -552,21 +553,21 @@ export function SettingsComponent(props: SettingsComponentProps) {
         class="ui-settings-row"
         id={keyToDomId(decl.key)}
         data-key={decl.key}
-        style={props.visible ? {} : { display: 'none' }}
+        classList={{ 'st-vis-hidden': !props.visible }}
       >
-        <div class="ui-settings-label-col">
+        <Field
+          for={keyToDomId(decl.key)}
+          label={decl.label}
+          description={decl.description || undefined}
+          orientation="horizontal"
+        >
           <Show when={showBreadcrumb()}>
             <span class="ui-settings-breadcrumb">{decl.section}</span>
-          </Show>
-          <label title={decl.description}>{decl.label}</label>
-          <Show when={decl.description}>
-            <span class="ui-settings-description">{decl.description}</span>
           </Show>
           <span class="ui-settings-data-class" title={'Storage class: ' + decl.dataClass}>
             {renderDataClassIndicator(decl.dataClass)}
           </span>
-        </div>
-        <div class="ui-settings-control-col">
+
           <Show when={decl.control === 'number'}>
             <span class="ui-settings-bounds">
               <Show when={decl.min !== undefined && decl.max !== undefined}>
@@ -642,7 +643,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
           <Show when={err()}>
             <div class="ui-settings-error">{err()}</div>
           </Show>
-        </div>
+        </Field>
       </div>
     )
   }
@@ -654,7 +655,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
       <Page
         title="Settings"
         leading={
-          <div class="ui-kit">
+          <div class="kit-scope">
             {/* ONE search box (nocx-x6w9) — only in the rail. */}
             <div class="ui-settings-search">
               <SearchField
@@ -716,7 +717,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
           scrollerHandle = h
         }}
       >
-        <div class="ui-kit">
+        <div class="kit-scope">
           {/* Component page takes over the body when active. */}
           <Show when={activeComponentPage() === 'connections'}>
             <ConnectionsView client={props.profileClient} onConnect={props.onConnect} />
@@ -754,7 +755,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
                   const sectionDecls = () => declarations().filter((d) => d.section === section)
                   const sectionVisible = () => sectionDecls().some((d) => visibleKeys().has(d.key))
                   return (
-                    <div style={sectionVisible() ? {} : { display: 'none' }}>
+                    <div classList={{ 'st-vis-hidden': !sectionVisible() }}>
                       <PageSection id={'st-section-' + encodeURIComponent(section)} title={section}>
                         <For each={sectionDecls()}>
                           {(decl) => (

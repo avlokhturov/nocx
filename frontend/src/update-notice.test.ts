@@ -64,10 +64,10 @@ describe('UpdateNotice', () => {
 
   // ── Individual state renders ──────────────────────────────────────────
 
-  it('hidden renders with display:none', () => {
+  it('hidden state sets the hidden attribute', () => {
     const el = bar.querySelector('.update-notice') as HTMLElement
     expect(el).not.toBeNull()
-    expect(el.style.display).toBe('none')
+    expect(el.hasAttribute('hidden')).toBe(true)
     expect(el.className).toBe('update-notice')
   })
 
@@ -77,7 +77,7 @@ describe('UpdateNotice', () => {
     const el = bar.querySelector('.update-notice') as HTMLElement
     expect(el).not.toBeNull()
     expect(el.className).toBe('update-notice')
-    expect(el.style.display).toBe('flex')
+    expect(el.hasAttribute('hidden')).toBe(false)
     expect(el.textContent).toContain('1.0.0 available')
     expect(el.querySelector('.update-notes-link')).not.toBeNull()
     expect(el.querySelector('.update-apply-btn')).not.toBeNull()
@@ -121,9 +121,9 @@ describe('UpdateNotice', () => {
     const el = bar.querySelector('.update-notice') as HTMLElement
     expect(el.className).toBe(stateClass(to))
     if (to === 'hidden') {
-      expect(el.style.display).toBe('none')
+      expect(el.hasAttribute('hidden')).toBe(true)
     } else {
-      expect(el.style.display).toBe('flex')
+      expect(el.hasAttribute('hidden')).toBe(false)
     }
   })
 

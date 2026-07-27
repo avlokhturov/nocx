@@ -1,12 +1,12 @@
 @import './styles/tokens.css';
 @import './styles/themes/tokyo-night.css';
-@import './styles/themes/light.css';
 @import './styles/base.css';
 @import './styles/components/kit.css';
 @import './styles/components/sidebar.css';
 @import './styles/surfaces/update-notice.css';
 @import './styles/surfaces/settings.css';
 @import './styles/components/quick-connect.css';
+@import './styles/surfaces/connections.css';
 
 .cm-body {
   flex: 1;

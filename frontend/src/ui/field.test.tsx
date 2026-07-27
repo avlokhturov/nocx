@@ -29,7 +29,7 @@ describe('Field', () => {
 
   it('renders children', () => {
     subject()
-    expect(document.querySelector('#host')).toBeTruthy()
+    expect(screen.getByRole('textbox')).toBeTruthy()
   })
 
   it('renders description', () => {
@@ -55,7 +55,7 @@ describe('Field', () => {
 
   it('sets class on wrapper', () => {
     subject({ class: 'cm-field' })
-    const wrapper = screen.getByText('Hostname').parentElement
-    expect(wrapper?.getAttribute('class')).toBe('cm-field')
+    const wrapper = screen.getByText('Hostname').closest('.ui-field')
+    expect(wrapper?.getAttribute('class')).toBe('ui-field cm-field')
   })
 })

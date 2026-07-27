@@ -159,16 +159,16 @@ abstract class TabStripBase implements TabStrip {
                     <span class="tab-status" />
                     <span class="tab-title">{display.records[tab.id]?.title ?? ''}</span>
                   </span>
-                  <button
+                  <Button
                     class="tab-close"
-                    aria-label="Close tab"
+                    ariaLabel="Close tab"
                     onClick={(e: MouseEvent) => {
                       e.stopPropagation()
                       this.onClose?.(tab.id)
                     }}
                   >
                     {'\u00d7'}
-                  </button>
+                  </Button>
                   <div
                     class="tab-indicator"
                     classList={{
@@ -181,9 +181,9 @@ abstract class TabStripBase implements TabStrip {
               )}
             </For>
           </div>
-          <button class="tab-add" aria-label="New tab" onClick={() => this.onNewTab?.()}>
+          <Button class="tab-add" ariaLabel="New tab" onClick={() => this.onNewTab?.()}>
             +
-          </button>
+          </Button>
           <Button
             class="tab-caret"
             ariaLabel="Quick connect"
@@ -250,12 +250,11 @@ abstract class TabStripBase implements TabStrip {
 
   reorder(tabs: readonly TabView[]): void {
     if (!this.mounted) return
-    // Save and restore focus: Solid's <For> reconciliation moves DOM nodes
-    // via insertBefore, which causes the browser to clear the focused state
-    // even when the same DOM node is reused (keyed by object identity).
-    // Signal setters execute their dependent effects synchronously outside
-    // a batch, so by the time _setTabViews returns the DOM is stable and
-    // the synchronous focus call is sufficient.
+    // Solid's <For> reconciliation clears focus when it moves a node with
+    // insertBefore, even though the node itself survives — keyed identity is
+    // necessary here and not sufficient (nocx-82l9.8). Signal setters run their
+    // dependent effects synchronously outside a batch, so the DOM is settled by
+    // the time _setTabViews returns and restoring focus here is enough.
     const active = document.activeElement
     this._setTabViews([...tabs])
     if (active instanceof HTMLElement && this.container?.contains(active)) {

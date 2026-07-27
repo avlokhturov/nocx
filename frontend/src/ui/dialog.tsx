@@ -149,11 +149,11 @@ export function showConfirm(
 
     const cancelBtn = document.createElement('button')
     cancelBtn.textContent = cancelLabel
-    cancelBtn.className = 'ui-kit'
+    cancelBtn.className = 'kit-scope'
 
     const okBtn = document.createElement('button')
     okBtn.textContent = okLabel
-    okBtn.className = 'ui-btn-primary ui-kit'
+    okBtn.className = 'ui-btn-primary kit-scope'
 
     actions.appendChild(cancelBtn)
     actions.appendChild(okBtn)

@@ -13,8 +13,8 @@
  * Every form row should use this instead of ad-hoc markup.
  */
 
-import type { JSX } from 'solid-js'
 import { Show } from 'solid-js'
+import type { JSX } from 'solid-js'
 
 export interface FieldProps {
   class?: string
@@ -26,6 +26,12 @@ export interface FieldProps {
   error?: string
   required?: boolean
   children: JSX.Element
+  /**
+   * Layout orientation:
+   * - `vertical` (default): label above, children below — standard form rows.
+   * - `horizontal`: label on the left, children on the right — settings rows.
+   */
+  orientation?: 'vertical' | 'horizontal'
 }
 
 export function Field(props: FieldProps) {
@@ -33,24 +39,51 @@ export function Field(props: FieldProps) {
   const errorId = () => (props.error ? `${props.for}__error` : undefined)
 
   return (
-    <div class={props.class ?? ''}>
-      <label for={props.for}>
-        {props.label}
-        <Show when={props.required === true}>
-          <span aria-hidden="true"> *</span>
-        </Show>
-      </label>
-      <Show when={props.description !== undefined}>
-        <p id={descriptionId()} class="ui-field-desc">
-          {props.description}
-        </p>
-      </Show>
-      {props.children}
-      <Show when={props.error !== undefined}>
-        <p id={errorId()} class="ui-field-error" role="alert">
-          {props.error}
-        </p>
-      </Show>
-    </div>
+    <Show
+      when={props.orientation === 'horizontal'}
+      fallback={
+        <div class={`ui-field ${props.class ?? ''}`.trim()}>
+          <label for={props.for}>
+            {props.label}
+            <Show when={props.required === true}>
+              <span aria-hidden="true"> *</span>
+            </Show>
+          </label>
+          <Show when={props.description !== undefined}>
+            <p id={descriptionId()} class="ui-field-desc">
+              {props.description}
+            </p>
+          </Show>
+          {props.children}
+          <Show when={props.error !== undefined}>
+            <p id={errorId()} class="ui-field-error" role="alert">
+              {props.error}
+            </p>
+          </Show>
+        </div>
+      }
+    >
+      <div class={`ui-field ui-field-horizontal ${props.class ?? ''}`.trim()}>
+        <div class="ui-field-label-col">
+          <label for={props.for}>
+            {props.label}
+            <Show when={props.required === true}>
+              <span aria-hidden="true"> *</span>
+            </Show>
+          </label>
+          <Show when={props.description !== undefined}>
+            <p id={descriptionId()} class="ui-field-desc">
+              {props.description}
+            </p>
+          </Show>
+          <Show when={props.error !== undefined}>
+            <p id={errorId()} class="ui-field-error" role="alert">
+              {props.error}
+            </p>
+          </Show>
+        </div>
+        <div class="ui-field-control-col">{props.children}</div>
+      </div>
+    </Show>
   )
 }
