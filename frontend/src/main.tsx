@@ -18,6 +18,7 @@ import { SurfaceRegistry, SURFACE_ID_SETTINGS, SURFACE_ID_CONNECTIONS } from './
 import { mountUpdateNotice } from './update-notice'
 import { SettingsIcon } from './ui/icons'
 import { SettingsObserver } from './settings-observer'
+import { bootstrapTheme } from './renderers/theme-bootstrap'
 
 async function main() {
   log.info('nocx: main() called')
@@ -26,6 +27,12 @@ async function main() {
   // hosts (#tabbar, #activitybar, #sidebar, #panes) that imperative code
   // mounts into. Everything below is the composition root — no more DOM
   // construction, no hand-wired layout.
+  // Bootstrap the theme before any render. Applies data-theme, validates
+  // terminal tokens, and sets the module-level current theme so every
+  // XtermRenderer mount() reads the correct palette from the first frame.
+  // ADR-0013 §8, §8.1; design spec §5.4.
+  const appliedThemeId = bootstrapTheme()
+  void appliedThemeId // available for future Go theme reconciliation
   render(() => <App />, document.getElementById('app')!)
   const bar = document.getElementById('tabbar')!
   const verticalStripHost = document.getElementById('vertical-tabstrip')!

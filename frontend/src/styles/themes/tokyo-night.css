@@ -55,4 +55,36 @@
   --color-focus-ring: rgba(122, 162, 247, 0.6);
   --color-scrim: rgba(0, 0, 0, 0.5);
   --color-selection: rgba(122, 162, 247, 0.3);
+
+  /* ── Terminal palette (§2.3) ─────────────────────────────────────────
+     Lifted verbatim from the literal object that lived in
+     renderers/xterm.ts, which was the only definition of these colours
+     until now. The adapter in nocx-xrrl.5 reads them from here, so this
+     file is the single source of terminal colour as well as UI colour —
+     which is the point of the token layer.
+
+     ANSI 0-15 are theme colours. Indices 16-255 and truecolor stay
+     algorithmic in the terminal itself: those are content, not theme. */
+  --terminal-background: #1a1b26;
+  --terminal-foreground: #c0caf5;
+  --terminal-cursor: #c0caf5;
+  --terminal-cursor-accent: #1a1b26;
+  --terminal-selection: #364a82;
+
+  --terminal-ansi-0: #1a1b26;
+  --terminal-ansi-1: #f7768e;
+  --terminal-ansi-2: #9ece6a;
+  --terminal-ansi-3: #e0af68;
+  --terminal-ansi-4: #7aa2f7;
+  --terminal-ansi-5: #bb9af7;
+  --terminal-ansi-6: #7dcfff;
+  --terminal-ansi-7: #a9b1d6;
+  --terminal-ansi-8: #414868;
+  --terminal-ansi-9: #f7768e;
+  --terminal-ansi-10: #9ece6a;
+  --terminal-ansi-11: #e0af68;
+  --terminal-ansi-12: #7aa2f7;
+  --terminal-ansi-13: #bb9af7;
+  --terminal-ansi-14: #7dcfff;
+  --terminal-ansi-15: #c0caf5;
 }
