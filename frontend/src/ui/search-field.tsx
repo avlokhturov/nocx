@@ -15,7 +15,6 @@
 import { SearchIcon } from './icons'
 
 export interface SearchFieldProps {
-  class?: string
   value: string
   onInput: (value: string) => void
   placeholder?: string
@@ -36,7 +35,7 @@ export function SearchField(props: SearchFieldProps) {
       </span>
       <input
         type="search"
-        class={props.class ?? ''}
+        class="ui-search-field__input"
         value={props.value}
         placeholder={props.placeholder ?? ''}
         aria-label={props.ariaLabel ?? undefined}

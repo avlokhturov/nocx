@@ -1,6 +1,7 @@
 /* SearchField — the positioned icon and the search input.
-   Moved from kit.css by T1 (nocx-v0ai). Still ancestor-keyed; T5 (nocx-2663) rewrites
-   these onto `.ui-search-field__input`.
+   Rewritten from the `.kit-scope` ancestor onto the component's own identities by T5
+   (nocx-2663). The input had `props.class ?? ''` — an arbitrary consumer class and no
+   identity of its own — so its rules could only be reached through an ancestor.
 
    The base input declarations are the same ones text-field.css carries, because
    kit.css styled all four input types from one selector list and T1 splits it per
@@ -33,7 +34,7 @@
   height: 100%;
 }
 
-.kit-scope input[type='search'] {
+.ui-search-field__input {
   height: var(--control-height-md);
   padding: 0 8px;
   background: var(--color-surface-raised);
@@ -46,28 +47,29 @@
   min-width: 0;
 }
 
-.kit-scope input[type='search']:focus {
+.ui-search-field__input:focus {
   border-color: var(--color-accent);
 }
 
-.kit-scope input[type='search']::placeholder {
+.ui-search-field__input::placeholder {
   color: var(--color-text-dim);
 }
 
-.kit-scope .ui-search-field input[type='search'] {
+/* The room the icon needs. Belongs to the input rather than the wrapper, because it
+   is the input's own padding that keeps the glyph from sitting on the text. */
+.ui-search-field__input {
   width: 100%;
   padding-left: 28px;
 }
 
 /* WebKit draws its own clear button and a magnifier decoration on
    input[type=search]; both fight the one we place. */
-.ui-search-field input[type='search']::-webkit-search-decoration,
-.ui-search-field input[type='search']::-webkit-search-results-button {
+.ui-search-field__input::-webkit-search-decoration,
+.ui-search-field__input::-webkit-search-results-button {
   appearance: none;
 }
 
-/* Disabled slice, cut per primitive by T1. See the design spec §6.1. */
-.kit-scope input[type='search']:disabled {
+.ui-search-field__input:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }

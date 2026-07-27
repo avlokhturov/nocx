@@ -46,10 +46,14 @@ describe('SearchField', () => {
     expect(screen.getByLabelText('Search settings')).toBeTruthy()
   })
 
-  it('sets class', () => {
-    subject({ class: 'st-search-input' })
+  // The input used to render whatever class the caller handed it and nothing of its
+  // own, so `st-search-input` WAS its identity — owned by the settings surface, for a
+  // component the settings surface does not own. That is the inversion this migration
+  // removes: the element that carries the appearance names itself (§3.1).
+  it('names its own input', () => {
+    subject()
     const input = screen.getByRole('searchbox')
-    expect(input.getAttribute('class')).toBe('st-search-input')
+    expect(input.getAttribute('class')).toBe('ui-search-field__input')
   })
 
   it('sets disabled attribute', () => {
