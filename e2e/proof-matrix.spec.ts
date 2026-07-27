@@ -46,6 +46,11 @@ test.beforeEach(async ({ page }) => {
 // the element selectors rather than widening to a bare `:focus-visible`; this
 // matrix is what a later widening would have to be proven against.
 //
+// Selectors here ask for the accessible name, not the class, wherever a control
+// became an IconButton — `.tab-add` and friends were deleted with the classes they
+// named (nocx-wqrq), and a test pinned to a retired class fails for a reason that
+// has nothing to do with what it measures.
+//
 // Each test: (1) focus the element with Tab, assert a ring property is set,
 // (2) click it with the mouse / move focus away, assert the ring property is
 // NOT set (pointer activation must not show the keyboard ring).
@@ -75,7 +80,7 @@ test.describe('1. Focus matrix', () => {
       expect(kbdShadow).toContain('rgb')
 
       // Move focus off and activate with pointer
-      await page.locator('.tab-add').focus()
+      await page.locator('[aria-label="New tab"]').focus()
       await expect(gear).not.toBeFocused()
 
       await gear.click()
@@ -193,14 +198,16 @@ test.describe('1. Focus matrix', () => {
 //   input.kit-scope:disabled, .kit-scope input:disabled,
 //   select.kit-scope:disabled, .kit-scope select:disabled,
 //   button.kit-scope:disabled
-// To test it, inject elements that match these selectors — either with a
-// `kit-scope` class directly or inside a `.kit-scope` parent.
-// The actual app has `kit-scope` wrappers at settings.tsx:736 and :798,
-// so we reuse the existing page context.
+// Every control carries its own identity now, so a disabled element is injected
+// with its own class and NO ancestor — which is the whole claim this migration
+// makes, tested rather than asserted. These cases used to build a `.kit-scope`
+// wrapper around a bare element; that is the contract T15 (nocx-pnbd) deleted, so
+// asserting it would only prove the wrapper was still needed.
 //
 // Read computed-style values into local vars BEFORE removing the element,
 // then return them.
 
+test.describe('2. Disabled appearance', () => {
   test('a disabled <button class="ui-button"> has opacity 0.5 and cursor not-allowed', async ({
     page,
   }) => {
@@ -219,109 +226,84 @@ test.describe('1. Focus matrix', () => {
     expect(result.cursor).toBe('not-allowed')
   })
 
-  test('input disabled inside .kit-scope has opacity 0.5 and cursor not-allowed', async ({
-    page,
-  }) => {
+  test('a disabled TextField input has opacity 0.5 and cursor not-allowed', async ({ page }) => {
     const result = await page.evaluate(() => {
-      const scope = document.createElement('div')
-      scope.className = 'kit-scope'
-      scope.style.display = 'contents'
-      const input = document.createElement('input')
-      input.type = 'text'
-      input.disabled = true
-      scope.appendChild(input)
-      document.body.appendChild(scope)
-      const cs = getComputedStyle(input)
+      const el = document.createElement('input')
+      el.type = 'text'
+      el.className = 'ui-text-field__input'
+      el.disabled = true
+      document.body.appendChild(el)
+      const cs = getComputedStyle(el)
       const opacity = cs.opacity
       const cursor = cs.cursor
-      scope.remove()
+      el.remove()
       return { opacity, cursor }
     })
     expect(result.opacity).toBe('0.5')
     expect(result.cursor).toBe('not-allowed')
   })
 
-  test('input[type=search] disabled inside .kit-scope has opacity 0.5 and cursor not-allowed', async ({
-    page,
-  }) => {
+  test('a disabled SearchField input has opacity 0.5 and cursor not-allowed', async ({ page }) => {
     const result = await page.evaluate(() => {
-      const scope = document.createElement('div')
-      scope.className = 'kit-scope'
-      scope.style.display = 'contents'
-      const input = document.createElement('input')
-      input.type = 'search'
-      input.disabled = true
-      scope.appendChild(input)
-      document.body.appendChild(scope)
-      const cs = getComputedStyle(input)
+      const el = document.createElement('input')
+      el.type = 'search'
+      el.className = 'ui-search-field__input'
+      el.disabled = true
+      document.body.appendChild(el)
+      const cs = getComputedStyle(el)
       const opacity = cs.opacity
       const cursor = cs.cursor
-      scope.remove()
+      el.remove()
       return { opacity, cursor }
     })
     expect(result.opacity).toBe('0.5')
     expect(result.cursor).toBe('not-allowed')
   })
 
-  test('input[type=checkbox] disabled inside .kit-scope has opacity 0.5 and cursor not-allowed', async ({
-    page,
-  }) => {
+  test('a disabled Checkbox control has opacity 0.5 and cursor not-allowed', async ({ page }) => {
     const result = await page.evaluate(() => {
-      const scope = document.createElement('div')
-      scope.className = 'kit-scope'
-      scope.style.display = 'contents'
-      const input = document.createElement('input')
-      input.type = 'checkbox'
-      input.disabled = true
-      scope.appendChild(input)
-      document.body.appendChild(scope)
-      const cs = getComputedStyle(input)
+      const el = document.createElement('input')
+      el.type = 'checkbox'
+      el.className = 'ui-checkbox__control'
+      el.disabled = true
+      document.body.appendChild(el)
+      const cs = getComputedStyle(el)
       const opacity = cs.opacity
       const cursor = cs.cursor
-      scope.remove()
+      el.remove()
       return { opacity, cursor }
     })
     expect(result.opacity).toBe('0.5')
     expect(result.cursor).toBe('not-allowed')
   })
 
-  test('input[type=radio] disabled inside .kit-scope has opacity 0.5 and cursor not-allowed', async ({
-    page,
-  }) => {
+  test('a disabled Radio control has opacity 0.5 and cursor not-allowed', async ({ page }) => {
     const result = await page.evaluate(() => {
-      const scope = document.createElement('div')
-      scope.className = 'kit-scope'
-      scope.style.display = 'contents'
-      const input = document.createElement('input')
-      input.type = 'radio'
-      input.disabled = true
-      scope.appendChild(input)
-      document.body.appendChild(scope)
-      const cs = getComputedStyle(input)
+      const el = document.createElement('input')
+      el.type = 'radio'
+      el.className = 'ui-radio__control'
+      el.disabled = true
+      document.body.appendChild(el)
+      const cs = getComputedStyle(el)
       const opacity = cs.opacity
       const cursor = cs.cursor
-      scope.remove()
+      el.remove()
       return { opacity, cursor }
     })
     expect(result.opacity).toBe('0.5')
     expect(result.cursor).toBe('not-allowed')
   })
 
-  test('select disabled inside .kit-scope has opacity 0.5 and cursor not-allowed', async ({
-    page,
-  }) => {
+  test('a disabled Select has opacity 0.5 and cursor not-allowed', async ({ page }) => {
     const result = await page.evaluate(() => {
-      const scope = document.createElement('div')
-      scope.className = 'kit-scope'
-      scope.style.display = 'contents'
-      const sel = document.createElement('select')
-      sel.disabled = true
-      scope.appendChild(sel)
-      document.body.appendChild(scope)
-      const cs = getComputedStyle(sel)
+      const el = document.createElement('select')
+      el.className = 'ui-select'
+      el.disabled = true
+      document.body.appendChild(el)
+      const cs = getComputedStyle(el)
       const opacity = cs.opacity
       const cursor = cs.cursor
-      scope.remove()
+      el.remove()
       return { opacity, cursor }
     })
     expect(result.opacity).toBe('0.5')
@@ -546,7 +528,7 @@ test.describe('5. Roving tabindex', () => {
       await expect(tabs.first()).toBeAttached()
 
       // Open a second tab so there is a tab to navigate to
-      await page.locator('.tab-add').click()
+      await page.locator('[aria-label="New tab"]').click()
       await expect(tabs).toHaveCount(2)
       await page.waitForTimeout(100)
 
@@ -579,7 +561,7 @@ test.describe('5. Roving tabindex', () => {
       await expect(tabs.first()).toBeAttached()
 
       // Open a second tab first so arrow navigation has room
-      await page.locator('.tab-add').click()
+      await page.locator('[aria-label="New tab"]').click()
       await expect(tabs).toHaveCount(2)
       await page.waitForTimeout(100)
 
@@ -605,7 +587,7 @@ test.describe('5. Roving tabindex', () => {
       await expect(tabs.first()).toBeAttached()
 
       // Open a second tab so we can go right then Home
-      await page.locator('.tab-add').click()
+      await page.locator('[aria-label="New tab"]').click()
       await expect(tabs).toHaveCount(2)
       await page.waitForTimeout(100)
 
@@ -675,7 +657,9 @@ test.describe('5. Roving tabindex', () => {
 
   test.describe('activity bar', () => {
     test('exactly one button has tabIndex=0', async ({ page }) => {
-      const buttons = page.locator('[role="toolbar"] [role="button"]')
+      // `[role="button"]` matches only an EXPLICIT attribute, and IconButton renders a
+      // real <button>, whose button role is implicit. Query the element.
+      const buttons = page.locator('[role="toolbar"] button')
       await expect(buttons.first()).toBeAttached()
 
       const tabIndexes = await buttons.evaluateAll((els) =>

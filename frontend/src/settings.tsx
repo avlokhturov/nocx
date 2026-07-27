@@ -727,7 +727,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
         title="Settings"
         titleHidden
         leading={
-          <div class="kit-scope">
+          <div>
             {/* ONE search box (nocx-x6w9) — only in the rail. */}
             <div class="ui-settings-search">
               <SearchField
@@ -786,7 +786,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
           scrollerHandle = h
         }}
       >
-        <div class="kit-scope">
+        <div>
           {/* A component page takes over the body when active. Resolved through
               the registry rather than a chain of id comparisons, so adding a
               page is one registry entry. */}

@@ -12,3 +12,10 @@ _bmad/
 .agents/
 .claude/
 .opencode/
+
+# Playwright run artefacts. Already in .gitignore, but prettier walks the
+# filesystem rather than the index, so an ignored directory still failed
+# `prettier --check .` and with it the pre-commit hook — on a file no human
+# wrote and nothing in the repo reads.
+test-results/
+playwright-report/

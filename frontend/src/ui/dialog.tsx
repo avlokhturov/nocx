@@ -121,10 +121,7 @@ export const Dialog: Component<DialogProps> = (props) => {
 
   return (
     <dialog ref={ref} class="nocx-dialog" onCancel={onCancel} onMouseDown={onPointerDown}>
-      {/* kit-scope on the panel, so a modal's controls are kit controls without
-          every caller remembering to say so. This is the base every modal is
-          built on; the scope belongs with it. */}
-      <div class="nocx-dialog__panel kit-scope">
+      <div class="nocx-dialog__panel">
         <Show when={props.title}>
           <h2 class="nocx-dialog__title">{props.title}</h2>
         </Show>
@@ -169,9 +166,9 @@ const ConfirmDialog: Component<{
  * Built on `Dialog`, like every other modal in the app. It used to assemble its
  * own `<dialog>` out of `document.createElement` calls, and the result was a
  * third look: the OK button picked up a kit class, the Cancel button was left
- * with a bare `kit-scope` that matches no rule, and neither the panel nor the
- * type came from the same place as the rest. One base, the way `Page` is the
- * one base for surfaces.
+ * with nothing that matched a rule, and neither the panel nor the type came from
+ * the same place as the rest. One base, the way `Page` is the one base for
+ * surfaces.
  *
  * The vanilla-DOM version carried a comment justifying itself with ADR-0012 §1,
  * "Solid must not render into the terminal's subtree". That rule is about the

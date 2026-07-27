@@ -13,7 +13,7 @@
    `:has()` keys this off the view's own root, so the page primitives stay
    generic and no other surface is affected. */
 
-/* Descendant, not child: settings wraps the page body in a `.kit-scope` div, so
+/* Descendant, not child: settings wraps the page body in a plain div, so
    that wrapper is a link in the chain and has to carry the contract too. */
 .ui-settings .ui-page__scroll:has(.cm-root) {
   display: flex;
@@ -22,7 +22,12 @@
   padding: 0;
 }
 
-.ui-settings .ui-page__scroll:has(.cm-root) > .kit-scope {
+/* The height chain, reaching through whatever the settings page wraps its body in.
+   It used to name `.kit-scope` explicitly, because that wrapper was there; the
+   wrapper is gone (T15, nocx-pnbd) and the chain now applies to the scroller's own
+   child. The `:has()` remains and is a smell — Connections is an arbitrary subtree
+   inside Settings' scroller rather than a page of its own, which is T19's to fix. */
+.ui-settings .ui-page__scroll:has(.cm-root) > * {
   display: flex;
   flex-direction: column;
   flex: 1 1 auto;

@@ -2,3 +2,10 @@ dist/
 node_modules/
 wailsjs/
 package-lock.json
+
+# Playwright run artefacts. The pre-commit hook runs prettier from THIS directory,
+# so the root .prettierignore never applies to it — and prettier walks the
+# filesystem rather than the git index, so being gitignored is not enough. The
+# hook was failing on a file no human wrote and nothing in the repo reads.
+test-results/
+playwright-report/
