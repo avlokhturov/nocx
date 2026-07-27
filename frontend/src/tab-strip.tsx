@@ -19,6 +19,7 @@ export interface TabView {
 
 /** Presentation port for tab chrome. */
 export interface TabStrip {
+  readonly orientation: Orientation
   mount(container: HTMLElement): void
   addTab(tab: TabView): void
   removeTab(tabId: number): void
@@ -35,7 +36,7 @@ export interface TabStrip {
 // Internal types
 // ═══════════════════════════════════════════════════════════════════════════
 
-type Orientation = 'horizontal' | 'vertical'
+export type Orientation = 'horizontal' | 'vertical'
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Adapter base — Solid renders the static wrapping structure; tab buttons
@@ -52,7 +53,7 @@ abstract class TabStripBase implements TabStrip {
   /** Stored so onDisplayChange can be cleared on remove. */
   private readonly views = new Map<number, TabView>()
 
-  protected abstract orientation: Orientation
+  public abstract readonly orientation: Orientation
 
   // Intent callbacks
   onActivate: ((tabId: number) => void) | null = null
@@ -306,7 +307,7 @@ abstract class TabStripBase implements TabStrip {
 // ═══════════════════════════════════════════════════════════════════════════
 
 export class HorizontalTabStrip extends TabStripBase {
-  protected readonly orientation: Orientation = 'horizontal'
+  public readonly orientation: Orientation = 'horizontal'
 
   protected setupContainer(container: HTMLElement): void {
     container.setAttribute('role', 'tablist')
@@ -320,7 +321,7 @@ export class HorizontalTabStrip extends TabStripBase {
 // ═══════════════════════════════════════════════════════════════════════════
 
 export class VerticalTabStrip extends TabStripBase {
-  protected readonly orientation: Orientation = 'vertical'
+  public readonly orientation: Orientation = 'vertical'
 
   protected setupContainer(container: HTMLElement): void {
     container.setAttribute('role', 'tablist')

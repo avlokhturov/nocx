@@ -106,6 +106,7 @@ async function main() {
   // construction, no hand-wired layout.
   render(() => <App />, document.getElementById('app')!)
   const bar = document.getElementById('tabbar')!
+  const verticalStripHost = document.getElementById('vertical-tabstrip')!
   const panes = document.getElementById('panes')!
   const activityBar = document.getElementById('activitybar')!
   const sidebarPanel = document.getElementById('sidebar')!
@@ -158,9 +159,19 @@ async function main() {
   } catch {
     // Backend may not be ready yet — safe fallback.
   }
-
   const tabStrip = placement === 'vertical' ? new VerticalTabStrip() : new HorizontalTabStrip()
-  const tm = new TabManager(bar, panes, client, clipboard, gate, banner, profileClient, tabStrip)
+
+  const tm = new TabManager(
+    bar,
+    verticalStripHost,
+    panes,
+    client,
+    clipboard,
+    gate,
+    banner,
+    profileClient,
+    tabStrip,
+  )
 
   // Surface registry — surfaces declared once, every entry point resolves
   // through the registry rather than rebuilding the descriptor. (AD-8)

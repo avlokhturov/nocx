@@ -93,7 +93,7 @@ describe('TabManager', () => {
     }
     const { HorizontalTabStrip } = await import('./tab-strip')
     const tabStrip = new HorizontalTabStrip()
-    const manager = new TabManager(bar, panes, c as never, cb, g, bn, pc as never, tabStrip)
+    const manager = new TabManager(bar, bar, panes, c as never, cb, g, bn, pc as never, tabStrip)
 
     expect(bar.querySelectorAll('.tab').length).toBe(0)
 
@@ -1047,6 +1047,7 @@ describe('TabManager', () => {
       connect: () => Promise.resolve(''),
     } as unknown as import('./profiles').ProfileClient
     const manager = new TabManager(
+      bar,
       bar,
       panes,
       client as unknown as import('./ipc').WSClient,

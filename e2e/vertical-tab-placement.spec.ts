@@ -1,10 +1,10 @@
 import { test, expect, type Page } from './harness'
 
 test.describe('vertical tab placement', () => {
-  // Bug: there is no #vertical-tabstrip container alongside #body.
-  // App.tsx renders #tabbar then #body, and both orientations mount into
-  // the same #tabbar element. A 240px-wide column is therefore mounted
-  // inside the top bar instead of left of #body (nocx-82l9.3).
+  // Fixed: #vertical-tabstrip container now exists alongside #body.
+  // The strip mounts into #vertical-tabstrip in vertical placement and
+  // into #tabbar in horizontal placement. #tabbar stays present as the
+  // Wails drag region in both placements (nocx-82l9.3).
 
   // Shared helpers — copied from tabs.spec.ts conventions (that file is
   // owned by nocx-82l9.3 and must not be edited here).
@@ -19,8 +19,14 @@ test.describe('vertical tab placement', () => {
     await expect(page.locator(PLACEMENT_SELECT)).toBeVisible({ timeout: 5000 })
     await page.selectOption(PLACEMENT_SELECT, value)
     await page.keyboard.press('Meta+w')
-    const wantClass = value === 'vertical' ? 'tabstrip-vertical' : 'tabbar'
-    await expect(page.locator('#tabbar')).toHaveClass(new RegExp(wantClass), { timeout: 5000 })
+    // Each orientation mounts into its own host:
+    //   horizontal → #tabbar gets .tabbar
+    //   vertical   → #vertical-tabstrip gets .tabstrip-vertical
+    if (value === 'vertical') {
+      await expect(page.locator('#vertical-tabstrip')).toHaveClass(/tabstrip-vertical/, { timeout: 5000 })
+    } else {
+      await expect(page.locator('#tabbar')).toHaveClass(/tabbar/, { timeout: 5000 })
+    }
   }
 
   test.beforeEach(async ({ page }) => {
@@ -30,14 +36,13 @@ test.describe('vertical tab placement', () => {
     await switchPlacement(page, 'horizontal')
   })
 
-  test.fail('vertical tab strip sits left of #body below the drag bar (nocx-82l9.3)', async ({
+  test('vertical tab strip sits left of #body below the drag bar (nocx-82l9.3)', async ({
     page,
   }) => {
     await switchPlacement(page, 'vertical')
 
-    // The vertical tab strip is inside #tabbar. In the correct design
-    // (#vertical-tabstrip container), the tab buttons should sit left of #body
-    // and below the drag bar.
+    // The vertical tab strip is in #vertical-tabstrip. Tab buttons should
+    // sit left of #body and below the drag bar.
     const firstTab = page.locator('.tab').first()
     const body = page.locator('#body')
     const panes = page.locator('#panes')

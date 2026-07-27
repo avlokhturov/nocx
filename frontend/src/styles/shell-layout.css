@@ -2,3 +2,25 @@
    Owned by nocx-82l9.3; see .internal/specs/2026-07-27-ui-shell-kit-and-theming-design.md §2.5.
    Kept out of style.css so two workers can edit CSS in the same wave without
    colliding; nocx-xrrl.2 folds this directory into the token layout. */
+
+/*
+ * #workspace is a flex row that fills the remaining vertical space below
+ * #tabbar. Contains #vertical-tabstrip and #body side by side.
+ */
+#workspace {
+  display: flex;
+  flex-direction: row;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/*
+ * #vertical-tabstrip is the mount host for vertical tab placement.
+ * When a vertical strip is mounted inside it, the strip's .tabstrip-vertical
+ * class provides width: 240px. When empty (horizontal placement), it
+ * collapses to 0 width because there's no content.
+ */
+#vertical-tabstrip {
+  display: flex;
+  flex: 0 0 auto;
+}
