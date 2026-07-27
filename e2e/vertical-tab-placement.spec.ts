@@ -8,7 +8,7 @@ test.describe('vertical tab placement', () => {
 
   // Shared helpers — copied from tabs.spec.ts conventions (that file is
   // owned by nocx-82l9.3 and must not be edited here).
-  const PLACEMENT_ROW = '.st-row[data-key="tab.placement"]'
+  const PLACEMENT_ROW = '.ui-settings-row[data-key="tab.placement"]'
   const PLACEMENT_SELECT = `${PLACEMENT_ROW} select`
 
   async function switchPlacement(page: Page, value: 'horizontal' | 'vertical'): Promise<void> {

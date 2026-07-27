@@ -22,9 +22,10 @@
  *      (nocx-82l9.2) was the second one failing.
  *
  * Design choice: synthetic Page, not the real Settings surface.
- * Settings currently uses .st-rail/.st-content (the old layout), not the
- * Page component. Testing it would exercise the old layout's scroll chain,
- * not the new Page invariant. The synthetic Page is the contract under test.
+ * Settings now renders through Page (nocx-imkb.2), so it would be a valid
+ * subject — but it is one page among several and carries its own content. The
+ * synthetic Page keeps the subject the contract itself, and e2e/settings-scroll
+ * covers the real surface separately.
  *
  * The synthetic page is constructed via page.setContent() — no app server,
  * no fixture route needed. The CSS is READ FROM base.css (the successor

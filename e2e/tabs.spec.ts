@@ -34,7 +34,7 @@ test('adding a second tab preserves layout with both tabs visible', async ({ pag
 
 // ── Vertical tab placement (nocx-d3q.4) ────────────────────────────────
 
-const PLACEMENT_ROW = '.st-row[data-key="tab.placement"]'
+const PLACEMENT_ROW = '.ui-settings-row[data-key="tab.placement"]'
 const PLACEMENT_SELECT = `${PLACEMENT_ROW} select`
 const TAB = '.tab'
 const ACTIVITY = '.tab-indicator.tab-activity'
