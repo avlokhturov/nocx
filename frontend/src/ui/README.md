@@ -24,11 +24,11 @@ per-primitive (see ADR-0014).
 
 ### Platform primitives (no wrapper needed per ADR-0014)
 
-| Primitive             | Implementation                    | Why                                                                                                                      |
-| --------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| Dialog                | Native `<dialog>` + `showModal()` | ADR-0014 — zero KB, top-layer rendering, Escape/cancel, native focus. Wrapper delegated to `nocx-vxqj.5` (overlay core). |
-| Tooltip               | Native `title` attribute          | ~8 call sites, none need rich content.                                                                                   |
-| Popover/Menu/Combobox | **Not built**                     | Zero consumers. Revisit when a real consumer exists.                                                                     |
+| Primitive             | Implementation                 | Why                                                                                                                   |
+| --------------------- | ------------------------------ | --------------------------------------------------------------------------------------------------------------------- |
+| Dialog                | `dialog.tsx` + `overlay/` core | Native `<dialog>` + `showModal()` — top-layer rendering, Escape/cancel, native focus. ADR-0014. Built in nocx-vxqj.5. |
+| Tooltip               | Native `title` attribute       | ~8 call sites, none need rich content.                                                                                |
+| Popover/Menu/Combobox | **Not built**                  | Zero consumers. Revisit when a real consumer exists.                                                                  |
 
 ### Page primitives (separate ownership — not merged with kit Section)
 

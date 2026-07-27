@@ -4,6 +4,7 @@
 @import './styles/components/kit.css';
 @import './styles/components/sidebar.css';
 @import './styles/surfaces/update-notice.css';
+@import './styles/components/overlay.css';
 
 /* ── Connections view ─────────────────────────────────────────────────── */
 

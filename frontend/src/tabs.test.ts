@@ -73,6 +73,14 @@ class CountingTestContent extends BaseTabContent {
 }
 // ── Tests ──────────────────────────────────────────────────────────────────
 
+// terminal-content now asks the kit for confirmation instead of window.confirm
+// (nocx-vxqj.5). The dialog is a real <dialog> element, so these tests mock the
+// helper rather than driving a modal that jsdom cannot open.
+const showConfirmMock = vi.fn()
+vi.mock('./ui/dialog', () => ({
+  showConfirm: (...args: unknown[]) => showConfirmMock(...args) as Promise<boolean>,
+}))
+
 describe('TabManager', () => {
   beforeEach(() => {
     resetSessionCounter()
@@ -829,8 +837,8 @@ describe('TabManager', () => {
     const cb = makeClipboard({
       readText: vi.fn().mockResolvedValue('line1\nline2'),
     })
-    const confirm = vi.fn()
-    vi.stubGlobal('confirm', confirm)
+    const confirm = showConfirmMock
+    confirm.mockReset()
 
     const { bar } = await mountTabManager(undefined, cb)
 
@@ -838,7 +846,7 @@ describe('TabManager', () => {
     const renderers = await getRendererMocks()
 
     // Default _bufferType is 'normal'.
-    confirm.mockReturnValueOnce(false)
+    confirm.mockResolvedValueOnce(false)
     const pane = bar.parentElement!.querySelector('.pane.active')!
     pane.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }))
 
@@ -849,21 +857,19 @@ describe('TabManager', () => {
     expect(renderers[0].paste).not.toHaveBeenCalled()
 
     // Now confirm.
-    confirm.mockReturnValueOnce(true)
+    confirm.mockResolvedValueOnce(true)
     pane.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }))
     await vi.waitFor(() => {
       expect(renderers[0].paste).toHaveBeenCalledWith('line1\nline2')
     })
-
-    vi.unstubAllGlobals()
   })
 
   it('does not confirm multi-line paste in the alternate screen', async () => {
     const cb = makeClipboard({
       readText: vi.fn().mockResolvedValue('line1\nline2'),
     })
-    const confirm = vi.fn()
-    vi.stubGlobal('confirm', confirm)
+    const confirm = showConfirmMock
+    confirm.mockReset()
 
     const { bar } = await mountTabManager(undefined, cb)
 
@@ -882,8 +888,6 @@ describe('TabManager', () => {
     // No confirmation in alternate screen — full-screen program is not a shell.
     expect(confirm).not.toHaveBeenCalled()
     expect(renderers[0].paste).toHaveBeenCalledWith('line1\nline2')
-
-    vi.unstubAllGlobals()
   })
 
   // ── OSC 52 gate ────────────────────────────────────────────────────
