@@ -1,6 +1,7 @@
 #!/bin/sh
 # Negative fixture gate — assert ALL required eslint-plugin-solid rules fire,
 # that the nocx/no-raw-controls and nocx/no-color-literals rules fire,
+# that the AST kit-identity scanner matches fixture expectations,
 # that the CSS colour grammar checker catches violation patterns,
 # and that the CSS integrity checker catches all four of its violation classes.
 # Run from the frontend/ directory (e.g. via `npm run lint:fixture-check`).
@@ -67,6 +68,14 @@ if [ "$integrity_theme_hits" -ne 1 ]; then
   exit 1
 fi
 
+# ── Kit identity fixture check ──────────────────────────────────────────────
+# The AST scanner must find the expected classes and not pick up comment-only
+# or querySelector patterns. See check-kit-identities.mjs.
+if ! node "${fixture_dir}/check-kit-identities.mjs" 2>&1; then
+  echo "FAIL — kit identity scanner did not match fixture expectations"
+  exit 1
+fi
+
 # ── ESLint fixture check ─────────────────────────────────────────────────────
 # Run eslint on .tsx and .ts files (not .css — espree cannot parse CSS).
 # The .ts glob is needed for the solid/reactivity .ts fixture.
@@ -122,5 +131,5 @@ if [ -z "$ts_reactivity" ]; then
   exit 1
 fi
 
-echo "OK — all 10 lint rules fired (solid/reactivity confirmed from .ts, CSS colour grammar verified, color-mix laundering blocked, CSS integrity rules verified)"
+echo "OK — all 10 lint rules fired; kit identities verified; CSS colour + integrity verified"
 exit 0

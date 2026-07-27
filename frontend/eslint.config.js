@@ -7,9 +7,10 @@ import js from '@eslint/js'
 import tseslint from 'typescript-eslint'
 import prettier from 'eslint-config-prettier'
 import solid from 'eslint-plugin-solid'
-import { readFileSync, existsSync, readdirSync } from 'node:fs'
+import { readFileSync, existsSync } from 'node:fs'
 import { relative, resolve, basename } from 'node:path'
 import { createHash } from 'node:crypto'
+import { scanKitIdentities } from './lint-fixtures/scan-kit-identities.mjs'
 
 // ─── Baseline loader (ADR-0014 §"The guard") ───────────────────────────────────────
 // Per-violation baseline: each raw-control violation still present in application
@@ -53,34 +54,10 @@ const baseline = loadBaseline()
 const colorBaseline = loadColorBaseline()
 
 // ─── Inline-markup guard: class ownership ───────────────────────────────────────────
-// For each ui/*.tsx (non-test), the static `ui-` class names in the source belong
-// to that component. Built at config-load time so a rename or new component is
-// automatically reflected — no hand-maintained list.
+// Derived by AST from static class=/className=/classList= on JSX elements in each
+// ui/*.tsx file. See scan-kit-identities.mjs for the full derivation logic.
 const UI_DIR = resolve(PROJECT_ROOT, 'frontend/src/ui')
-const CLASS_RE = /ui-[\w-]+/g
-
-function buildClassOwnership() {
-  const ownership = new Map()
-  try {
-    const entries = readdirSync(UI_DIR)
-    for (const entry of entries) {
-      if (!entry.endsWith('.tsx') || entry.includes('.test.') || entry.includes('.spec.')) continue
-      const content = readFileSync(resolve(UI_DIR, entry), 'utf-8')
-      CLASS_RE.lastIndex = 0
-      let m
-      while ((m = CLASS_RE.exec(content)) !== null) {
-        const cls = m[0]
-        if (!ownership.has(cls)) ownership.set(cls, new Set())
-        ownership.get(cls).add(entry)
-      }
-    }
-  } catch {
-    // ui/ dir missing — ownership info unavailable (not normal but won't crash)
-  }
-  return ownership
-}
-
-const classOwnership = buildClassOwnership()
+const { byClass: classOwnership } = scanKitIdentities(UI_DIR)
 
 const INLINE_MARKUP_BASELINE_PATH = resolve(CONFIG_DIR, 'lint-fixtures/inline-markup-baseline.json')
 
