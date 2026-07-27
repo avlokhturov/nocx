@@ -1,5 +1,31 @@
 # Kobalte Spike Report — nocx-vxqj.3
 
+> **Coordinator correction, 2026-07-27, added after an adversarial review.**
+> **Do not act on this report's headline number.** The measurement below builds the
+> primitives *cumulatively, with Select first*, so the "~34 KB shared core" is "Select and
+> everything reachable from Select" — not fixed overhead that every Kobalte primitive pays.
+> `@internationalized/number`, the collection machinery and the live announcer are
+> Select/Combobox-oriented, and a Dialog-only build may contain almost none of them. The
+> conclusion that Dialog+Popover+Tooltip costs "34 KB + 3.2 KB" therefore does not follow
+> from this data.
+>
+> Two further gaps: the production baseline and the harness were separate builds and the
+> delta was added arithmetically (lines 83-89), where §4.1 of the design spec required a
+> measurement against the real production entry; and the packaged-webview run §4.1 also
+> required did not happen, which this report states honestly at lines 124-130.
+>
+> The coordinator additionally misquoted the budget when first accepting this: ADR-0012's
+> 25–35 KB is a **net** allowance against which the migration already spent +7 KB, so a real
+> +34 KB would exceed the ceiling by roughly 6 KB rather than consuming all of it.
+>
+> What survives and is worth keeping: the WebKit portal results in Deliverable 3 (Dialog,
+> Popover and Tooltip behave correctly; the xterm host stays intact), the honest statement of
+> what could not be tested, and the observation that `--wails-draggable` is unobservable
+> outside a packaged Wails build. The redo of `nocx-vxqj.3` measures each primitive
+> independently against the production entry, attributes bytes by package, compares against a
+> local implementation that *retains* `@floating-ui/dom`, and evaluates the platform-first
+> option (native `<dialog>`, native `<select>`) that this spike did not consider.
+
 **Worker:** dispatched task_fec2dba2838d
 **Date:** 2026-07-27
 **Status:** Complete (with caveats, see gaps below)

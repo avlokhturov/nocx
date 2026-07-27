@@ -180,13 +180,47 @@ type UpdateState =
 
 ## 4. The component kit
 
-**Decision, conditional on the spike in §4.1: one nocx-owned kit in `frontend/src/ui/`, with
-Kobalte used internally for the primitives where accessibility is genuinely hard. Surfaces
-never import Kobalte directly.**
+**Decision: one nocx-owned kit in `frontend/src/ui/`. Surfaces never import a component
+library directly. The implementation behind each primitive is chosen per primitive, and the
+current working position is platform-first — but the choice is not settled until the
+measurement in §4.1 lands.**
 
-| Written by us | Kobalte behind a wrapper |
-|---|---|
-| Button, TextField, SearchField, Checkbox, Field, Section, Toolbar, Badge, EmptyState, Toggle | Select, Dialog, Popover, Menu / context menu, Tooltip, Combobox |
+The first draft of this section named Kobalte behind wrappers as the answer. A spike measured
+it and the number the answer rested on did not survive review (§4.1), so the honest state is:
+per-primitive, platform-first hypothesis, pending measurement.
+
+| Written by us | Platform, inside a kit wrapper | Custom overlay, cost to be measured |
+|---|---|---|
+| Button, TextField, SearchField, Checkbox, Field, Section, Toolbar, Badge, EmptyState, Toggle | `<dialog>` + `showModal()` for modals; native `<select>` for ordinary settings choices | Popover, Menu / context menu, Tooltip |
+
+Two things this table says deliberately:
+
+- **`<dialog>` and `<select>` cost zero bytes and are believed to predate our declared floors**
+  (ADR-0013 §3: WebKitGTK 2.40, macOS 13.1). `<dialog>` brings top-layer rendering, background
+  blocking, Escape/cancel and native focus treatment; `<select>` brings keyboard operation,
+  platform accessibility, form semantics and typeahead. The cost of `<select>` is the original
+  complaint — its open popup is platform-owned and cannot be fully restyled. That is a
+  deliberate trade of pixel-identical popups for accessibility and zero bytes, and it is the
+  owner's call to reverse.
+- **The HTML Popover API is not available at our floor** (Safari 17 era). It cannot be
+  foundational without raising the floor or maintaining two implementations.
+- **No Combobox is built until a real consumer defines its contract** — editable or
+  select-only, local or async, free-form values allowed or not, grouping, virtualisation, form
+  semantics. A speculative generic combobox is the single most likely thing in this kit to be
+  subtly wrong.
+
+Rationale for keeping the kit local regardless of what sits behind it:
+
+- **solid-ui / shadcn-for-Solid is rejected.** It ships generated components into the repo
+  under another project's conventions and maintenance cadence; agents will fork the generated
+  files per surface, which defeats "write once, reuse" — the exact goal of `nocx-vxqj`.
+- **A wrapper is the replacement point.** Whatever is chosen per primitive, one nocx
+  vocabulary faces the surfaces, so a later change of implementation is a change in `ui/`
+  rather than a change everywhere.
+- **`@floating-ui/dom` is replacement cost, not overhead**, for anything needing collision-aware
+  positioning: anchor measurement, flip/shift, scroll-parent tracking and cleanup have to exist
+  whoever writes them, and CSS Anchor Positioning is unavailable at our floors. A comparison
+  that charges it to a library and not to our own code is not a comparison.
 
 Rationale, weighing the three options `nocx-vxqj.2` names:
 
@@ -202,21 +236,33 @@ Rationale, weighing the three options `nocx-vxqj.2` names:
   nocx vocabulary and one replacement point. `nocx-vxqj.2`'s constraint ("must not smuggle in
   a framework") is satisfied: Solid is already the framework.
 
-### 4.1 The ADR is gated on a measured spike, not on this argument
+### 4.1 The ADR is gated on a measurement — and the first one did not clear the gate
 
-Nothing above is evidence. The repo has no Kobalte dependency and no measurement, so the ADR
-must not be written until a spike reports:
+Nothing in §4 is evidence. The ADR must not be written until a spike reports:
 
-- the exact `@kobalte/core` version, its publication date and maintenance status, and its
-  declared peer range against `solid-js` 1.9.14;
-- the **measured** gzip delta against the real production build for the six primitives named,
-  reported as shared-core cost plus incremental per-primitive cost — "tree-shakable" is not a
-  number;
-- the portal behaviour in §4.2, exercised in a packaged webview.
+- the **measured** gzip delta **against the real production entry**, with each primitive built
+  **independently** before any combination is measured, and bytes attributed **by package**
+  from a bundler metafile — "tree-shakable" is not a number, and a cumulative build charges
+  the first primitive's dependencies to everything after it;
+- the same measurement for the local alternative, **retaining `@floating-ui/dom`** wherever
+  collision-aware positioning is genuinely needed;
+- platform support at our declared floors for `<dialog>`, the Popover API and `<select>`, with
+  sources;
+- the portal behaviour in §4.2, exercised in a **packaged** webview.
 
-If the spike fails on cost or on §4.2, the fallback is locally implemented controls plus
-narrow accessibility utilities — not adopting the set blindly. ADR-0012's 25–35 KB budget for
-framework + kit is the ceiling.
+The budget, quoted correctly: ADR-0012 allows **25–35 KB gzip net** for framework, store and
+initial kit combined, and the shipped migration already spent **+7 KB** of it.
+
+**A first spike ran on 2026-07-27 and did not clear this gate**, which is why the gate exists.
+It built primitives cumulatively with Select first — so its headline "34 KB shared core" is
+Select's dependency closure, not fixed overhead — it projected from a standalone harness
+rather than measuring the production entry, and it did not run a packaged webview. Its report
+and a correction header are at `.internal/specs/2026-07-27-kobalte-spike-report.md`; its
+WebKit portal results are sound and worth keeping. The redo is the live `nocx-vxqj.3`.
+
+The lesson worth carrying: the gate caught this, but only because someone read the method
+rather than the conclusion. A measured number is not automatically evidence for the claim it
+is attached to.
 
 ### 4.2 Portals must have a Wails contract before any overlay ships
 
@@ -230,6 +276,20 @@ The wrappers own: the portal root element, the z-index layer scale, `--wails-dra
 no-drag` on that root, the dismissal policy, and focus return to the invoker. Packaged
 WKWebView and WebKitGTK tests open every overlay type from the title-bar region **and** from a
 terminal-adjacent surface.
+
+This contract is **implementation-independent** — it applies to whatever ends up behind each
+primitive — with two refinements:
+
+- A native modal `<dialog>` renders in the browser **top layer**, not in our portal root, and
+  is therefore not governed by the portal-root and z-index clauses. The drag-region, focus-
+  return and xterm-textarea clauses still apply to it.
+- Every *custom* overlay shares one overlay root and one **overlay stack**, so Escape and
+  outside-interaction close the topmost eligible overlay only. Without a stack, nested
+  overlays each think they own Escape, and closing one closes all.
+
+`--wails-draggable` is read by Wails' native mousedown hook, which does not exist in
+Playwright's engine, so this can only be verified in a packaged build. A Playwright result
+here is not evidence.
 
 ### 4.3 The guard lands with the migration it enforces
 
@@ -505,7 +565,7 @@ wait for the kit.
 | 2 | `.surface-host` + generic `SolidTabContent` + the §6.1 selectors; migrate both seams | duplicated mount/dispose in the two `*-content.ts` |
 | 3 | `#workspace` / `#vertical-tabstrip`; orientation picks its host; **update `e2e/tabs.spec.ts:57-78,122-143`, which currently assert `.tabstrip-vertical` on `#tabbar`, in the same commit** | the "every strip mounts into `bar`" assumption; CSS comments describing absent structure |
 | 4 | `UpdateNotice` → Solid | the vanilla class at `main.tsx:32-98` |
-| 5 | Kobalte spike (§4.1) → ADR: kit foundation; guard with a shrinking baseline (§4.3) | nothing |
+| 5 | Measurement per §4.1 (independent builds, production entry, platform-first options) → ADR: the kit foundation as a **per-primitive** choice with the native/custom boundary stated → the shared overlay contract (§4.2) → guard with a shrinking baseline (§4.3) | nothing |
 | 6 | ADR: styling architecture (§5); `styles/` + tokens incl. state tokens; convert shell and existing kit; the §5.2 grammar check with its own baseline | hardcoded palette in converted selectors |
 | 7 | State **ownership table** (§8) — decided before surfaces move | nothing |
 | 8 | `Page` / `SidebarView` (§6.1–6.2); Settings page registry (§6.4); migrate Settings onto kit + Page | Settings-specific control CSS, raw markup |
@@ -542,7 +602,9 @@ after step 11.
 | First terminal gets an unthemed palette | assertion that the bootstrap resolver ran and every `--terminal-*` resolved before construction |
 | Theme change does not repaint on WebKitGTK | Linux packaged test: change theme, assert new palette on a live terminal with no input |
 | Frozen scrollback recolours | test a theme change before and after a block freezes |
-| Kobalte bundle creep | per-step production build recording raw/gzip delta against the 25–35 KB budget |
+| Kit / overlay bundle creep | per-step **production entry** build recording raw/gzip delta by package against the 25–35 KB net budget, of which the migration already spent +7 KB |
+| A measured number is trusted for a claim it does not support | read the method before the conclusion — cumulative builds attribute the first item's dependencies to everything after it (§4.1) |
+| Nested overlays fight over Escape | one overlay stack, asserted by a test that opens two and closes only the topmost |
 | An agent hand-rolls a control again | the ESLint guard (§4.3) with a baseline that only shrinks |
 | A colour literal launders through `color-mix` or SVG | the grammar check (§5.2), including JSX and SVG attributes |
 | "Central" state goes dead again | reachability test plus store contract tests with two real consumers |
