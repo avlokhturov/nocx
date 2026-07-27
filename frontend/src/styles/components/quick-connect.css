@@ -78,7 +78,7 @@
 
 .quick-connect__empty {
   padding: 12px 8px;
-  font-size: 13px;
+  font-size: var(--font-size-sm);
   color: var(--color-text-dim);
   text-align: center;
 }

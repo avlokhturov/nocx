@@ -50,7 +50,7 @@
 .ui-icon-button[data-size='md'] {
   width: 30px;
   height: 30px;
-  font-size: 18px;
+  font-size: var(--font-size-lg);
   font-weight: 300;
 }
 

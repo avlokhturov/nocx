@@ -304,7 +304,7 @@ select:focus-visible {
   padding: 16px;
   color: var(--color-danger);
   font-family: var(--font-family-mono);
-  font-size: 13px;
+  font-size: var(--font-size-sm);
   line-height: 1.5;
   white-space: pre-wrap;
 }

@@ -80,7 +80,7 @@
 }
 
 .cm-item-name {
-  font-size: 13px;
+  font-size: var(--font-size-sm);
   font-weight: 500;
   color: var(--color-text);
   white-space: nowrap;
@@ -165,7 +165,7 @@
 .cm-form-error {
   margin-top: 12px;
   color: var(--color-error);
-  font-size: 13px;
+  font-size: var(--font-size-sm);
   line-height: 1.4;
 }
 

@@ -228,7 +228,7 @@
 }
 
 .ui-settings-secret-status {
-  font-size: 13px;
+  font-size: var(--font-size-sm);
   padding: 4px 10px;
   border-radius: 4px;
   background: color-mix(in srgb, var(--color-accent), transparent 90%);
@@ -249,7 +249,7 @@
   padding: 24px;
   text-align: center;
   color: var(--color-text-muted);
-  font-size: 13px;
+  font-size: var(--font-size-sm);
 }
 
 .ui-settings-loading {

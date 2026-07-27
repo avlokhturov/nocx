@@ -128,7 +128,7 @@
   text-overflow: ellipsis;
   min-width: 0;
   align-self: center;
-  font-size: 13px;
+  font-size: var(--font-size-sm);
 }
 
 /* ── Indicators (active top bar / activity bottom bar) ───────────────── */
