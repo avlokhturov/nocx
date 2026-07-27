@@ -594,18 +594,11 @@
   gap: 8px;
 }
 
-.clipboard-banner-dismiss {
-  background: transparent;
-  color: var(--color-text-dim);
-  font-size: 16px;
-  line-height: 1;
-  padding: 4px 8px;
-}
-
-.clipboard-banner-dismiss:hover {
-  color: var(--color-text-muted);
-  background: color-mix(in srgb, white, transparent 94%);
-}
+/* `.clipboard-banner-dismiss` and `.clipboard-banner-btn` are gone: the dismiss
+   control became an IconButton (nocx-wqrq) and the other two became Buttons with
+   variants (nocx-c2t6), so nothing has rendered these classes since. A CSS rule with
+   no element to match looks exactly like one that is merely overridden, which is how
+   they survived two transactions that touched this very block. */
 
 /* ── Command editor (DOM textarea) ──────────────────────────────────── */
 
