@@ -1,12 +1,9 @@
 /* Select — native <select> with `appearance: none` on the closed control (ADR-0014).
-   Moved verbatim from kit.css by T1 (nocx-v0ai). Still ancestor-keyed; T6 (nocx-6913)
-   rewrites these onto `.ui-select`.
+   Rewritten from the `.kit-scope` ancestor onto `.ui-select` by T6 (nocx-6913). The
+   element rendered `props.class ?? ''` and nothing of its own, so a Select outside the
+   one scoped subtree was native platform chrome. */
 
-   The `select.kit-scope` half of each selector list is dropped rather than moved:
-   `.kit-scope` is only ever applied to a <div>, so the element-with-class form matched
-   nothing. Only the descendant form was ever doing the work. */
-
-.kit-scope select {
+.ui-select {
   appearance: none;
   height: var(--control-height-md);
   padding: 0 28px 0 8px;
@@ -23,19 +20,17 @@
   min-width: 0;
 }
 
-.kit-scope select:focus {
+.ui-select:focus {
   border-color: var(--color-accent);
   outline: none;
 }
 
-.kit-scope select option {
+.ui-select option {
   background: var(--color-surface-raised);
   color: var(--color-text);
 }
 
-/* Disabled slice, cut per primitive by T1 so that each later transaction can carry
-   away exactly its own line. See the design spec §6.1. */
-.kit-scope select:disabled {
+.ui-select:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }

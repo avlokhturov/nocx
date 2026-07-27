@@ -46,10 +46,13 @@ describe('Select', () => {
     expect(screen.getByText('— None —')).toBeTruthy()
   })
 
-  it('sets class on the select', () => {
-    subject({ class: 'cm-field' })
+  // `cm-field` was a connections-surface class, and asserting it here meant the kit's
+  // Select was named by one of its consumers. Outside that surface's subtree it had no
+  // rules at all and rendered as native platform chrome (§3.1).
+  it('names itself', () => {
+    subject()
     const sel = screen.getByRole('combobox')
-    expect(sel.getAttribute('class')).toBe('cm-field')
+    expect(sel.getAttribute('class')).toBe('ui-select')
   })
 
   it('sets disabled attribute', () => {

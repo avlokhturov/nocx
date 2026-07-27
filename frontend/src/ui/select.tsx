@@ -17,7 +17,6 @@ export interface SelectOption {
 }
 
 export interface SelectProps {
-  class?: string
   value: string
   onChange: (value: string) => void
   options: SelectOption[]
@@ -35,7 +34,7 @@ export function Select(props: SelectProps) {
 
   return (
     <select
-      class={props.class ?? ''}
+      class="ui-select"
       value={props.value}
       disabled={props.disabled === true}
       onChange={onChange}
