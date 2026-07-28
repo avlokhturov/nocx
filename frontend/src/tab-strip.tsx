@@ -129,7 +129,11 @@ abstract class TabStripBase implements TabStrip {
               )}
             </For>
           </div>
-          <IconButton ariaLabel="New tab" onClick={() => this.onNewTab?.()}>
+          <IconButton
+            ariaLabel="New tab"
+            square={this.orientation === 'vertical'}
+            onClick={() => this.onNewTab?.()}
+          >
             +
           </IconButton>
           <IconButton

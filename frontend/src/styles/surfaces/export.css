@@ -5,7 +5,7 @@
 
 .ui-export-desc {
   color: var(--color-text-muted);
-  font-size: 12px;
+  font-size: var(--font-size-xs);
   margin: 0 0 16px;
   line-height: 1.5;
 }
@@ -46,7 +46,7 @@
 }
 
 .st-export-manifest li {
-  font-size: 12px;
+  font-size: var(--font-size-xs);
   padding: 2px 0;
   color: var(--color-text-muted);
 }
@@ -87,7 +87,7 @@
 /* ── Status ──────────────────────────────────────────────────────────── */
 
 .st-export-status {
-  font-size: 12px;
+  font-size: var(--font-size-xs);
   color: var(--color-text-muted);
   margin-top: 6px;
   min-height: 18px;
@@ -96,13 +96,13 @@
 /* ── Loading / error ─────────────────────────────────────────────────── */
 
 .st-export-loading {
-  font-size: 12px;
+  font-size: var(--font-size-xs);
   color: var(--color-text-dim);
   padding: 8px 0;
 }
 
 .st-export-error {
-  font-size: 12px;
+  font-size: var(--font-size-xs);
   color: var(--color-danger);
   padding: 8px 0;
 }
@@ -117,7 +117,7 @@
 }
 
 .st-export-passphrase-label {
-  font-size: 12px;
+  font-size: var(--font-size-xs);
   color: var(--color-text-muted);
   margin-top: 4px;
 }
@@ -145,7 +145,7 @@
 
 .st-export-import-label {
   display: block;
-  font-size: 12px;
+  font-size: var(--font-size-xs);
   color: var(--color-text-muted);
   margin-bottom: 4px;
 }
@@ -153,7 +153,7 @@
 /* ── Text inputs inside passphrase form ────────────────────────────── */
 
 .st-export-passphrase-form label {
-  font-size: 12px;
+  font-size: var(--font-size-xs);
   color: var(--color-text-muted);
   margin-top: 4px;
 }

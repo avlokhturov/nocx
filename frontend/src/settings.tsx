@@ -643,6 +643,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
         <Field
           for={keyToDomId(decl.key)}
           label={decl.label}
+          labelProminence="primary"
           description={decl.description || undefined}
           orientation="horizontal"
           labelAdornment={

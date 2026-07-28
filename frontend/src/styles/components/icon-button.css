@@ -77,3 +77,10 @@
   opacity: 0.5;
   cursor: default;
 }
+
+/* Flush in a strip rather than floating in a toolbar. Declared by style.css on
+   `.tabstrip-vertical > .ui-icon-button` until T20 (nocx-etu2) — a surface changing
+   the component's shape, which is the one thing rule 3 does not allow it to do. */
+.ui-icon-button[data-square='true'] {
+  border-radius: 0;
+}

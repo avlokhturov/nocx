@@ -17,6 +17,17 @@ import { Show } from 'solid-js'
 import type { JSX } from 'solid-js'
 
 export interface FieldProps {
+  /**
+   * How prominent the label is. `secondary` is the form default — a quiet label above
+   * a control. `primary` makes the label the row's main text, which is what a settings
+   * row is: the label IS the setting and the control is the answer to it.
+   *
+   * This exists because settings.css was overriding `.ui-field label`'s size, weight
+   * and colour from outside. Both stylesheets declared the same properties and the
+   * surface won by specificity — dual ownership, the defect this migration exists to
+   * remove, surviving inside the component that was supposed to end it (nocx-etu2).
+   */
+  labelProminence?: 'secondary' | 'primary'
   /** The id of the control inside this field — used for label's `for` and
    *  description/error aria-describedby wiring. */
   for: string
@@ -51,7 +62,7 @@ export function Field(props: FieldProps) {
     <Show
       when={props.orientation === 'horizontal'}
       fallback={
-        <div class="ui-field">
+        <div class="ui-field" data-label={props.labelProminence ?? 'secondary'}>
           <label for={props.for}>
             {props.label}
             <Show when={props.required === true}>
@@ -72,7 +83,7 @@ export function Field(props: FieldProps) {
         </div>
       }
     >
-      <div class="ui-field ui-field-horizontal">
+      <div class="ui-field ui-field-horizontal" data-label={props.labelProminence ?? 'secondary'}>
         <div class="ui-field-label-col">
           <label for={props.for}>
             {props.label}

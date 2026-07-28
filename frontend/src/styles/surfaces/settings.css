@@ -137,12 +137,8 @@
   border-bottom: none;
 }
 
-.ui-settings-row .ui-field-label-col label {
-  display: block;
-  font-size: var(--font-size-md);
-  font-weight: 500;
-  color: var(--color-text);
-}
+/* The label's prominence is a Field variant now (labelProminence="primary"), not
+   something this surface paints onto `.ui-field label` from outside. T20, nocx-etu2. */
 
 /* Control on top, "Reset to default" beneath it, both flush right.
    The link is out of flow on purpose: in flow it made the control column two
@@ -162,9 +158,11 @@
   white-space: nowrap;
 }
 
+/* Spacing only. The description's size and colour are Field's own and are declared
+   in field.css; repeating them here meant two stylesheets owned one property and the
+   surface won by specificity (T20, nocx-etu2). Line height and the gap above are
+   about how this row breathes, which is the surface's. */
 .ui-settings-row .ui-field-desc {
-  font-size: var(--font-size-sm);
-  color: var(--color-text-dim);
   line-height: 1.45;
   margin-top: var(--space-1);
 }

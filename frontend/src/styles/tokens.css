@@ -30,6 +30,12 @@
      proportional UI font the same numbers read small, so every step moves up
      one notch. Terminal type is not on this scale — renderers/font.ts owns
      that, deliberately, because it is content rather than chrome. */
+  /* Below the body scale: badges, meta rows, captions, the tab index pill. The
+     scale went 13/15/18/22 and had no step for "smaller than body", so 26 places
+     spelled one out in px — 12px fourteen times, which is what this is. The 10px
+     and 11px uses are a separate question and deliberately not folded in here:
+     collapsing them would be a visual change decided by arithmetic. */
+  --font-size-xs: 12px;
   --font-size-sm: 13px;
   --font-size-md: 15px;
   --font-size-lg: 18px;

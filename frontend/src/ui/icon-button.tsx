@@ -3,6 +3,13 @@ import { splitProps, type JSX } from 'solid-js'
 export type IconButtonSize = 'sm' | 'md'
 
 export interface IconButtonProps {
+  /**
+   * Square corners, for a button that sits flush in a strip rather than floating in
+   * a toolbar. The vertical tab strip wants them; it was setting `border-radius: 0`
+   * on `.ui-icon-button` from style.css, which is a surface changing a component's
+   * shape (nocx-etu2).
+   */
+  square?: boolean
   /** See button.tsx: `never` refuses it at compile time and keeps it splittable at
    *  runtime, which is the half that matters. */
   class?: never
@@ -37,6 +44,7 @@ export function IconButton(props: IconButtonAttrs) {
     'class',
     'className',
     'selected',
+    'square',
     'size',
     'tabIndex',
     'onClick',
@@ -53,6 +61,7 @@ export function IconButton(props: IconButtonAttrs) {
       class="ui-icon-button"
       data-size={local.size ?? 'md'}
       aria-selected={local.selected === true ? 'true' : undefined}
+      data-square={local.square === true ? 'true' : undefined}
       data-rail-indicator={local.railIndicator === true ? 'true' : undefined}
       aria-label={local.ariaLabel}
       disabled={local.disabled === true}
