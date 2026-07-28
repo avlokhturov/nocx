@@ -173,9 +173,8 @@ describe('export section — manifest loading', () => {
     const card = container.querySelector('section[id^="st-export-"]')!
 
     await vi.waitFor(() => {
-      const body = card.querySelector('.st-export-card-body')
-      expect(body!.textContent).toContain('Profiles and groups')
-      expect(body!.textContent).toContain('Stored passwords')
+      expect(card.textContent).toContain('Profiles and groups')
+      expect(card.textContent).toContain('Stored passwords')
     })
   })
 
@@ -186,8 +185,8 @@ describe('export section — manifest loading', () => {
       spy.mockReturnValue(new Promise(() => {}))
     })
 
-    const body = container.querySelector('.st-export-card-body')!
-    expect(body.textContent).toContain('Loading')
+    const card = container.querySelector('section[id^="st-export-"]')!
+    expect(card.textContent).toContain('Loading')
   })
 
   it('shows an error when exportManifest rejects', async () => {
@@ -196,8 +195,8 @@ describe('export section — manifest loading', () => {
     })
 
     await vi.waitFor(() => {
-      const body = container.querySelector('.st-export-card-body')
-      expect(body!.textContent).toContain('Failed to load')
+      const card = container.querySelector('section[id^="st-export-"]')
+      expect(card!.textContent).toContain('Failed to load')
     })
   })
 })

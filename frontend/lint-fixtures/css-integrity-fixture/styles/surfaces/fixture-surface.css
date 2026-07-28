@@ -19,11 +19,15 @@
   height: 24px;
 }
 
-/* NOT reported. Placement, which nocx-zeti decided a parent may name a kit identity
+/* NOT reported by rule 3. Placement, which nocx-zeti decided a parent may name a kit identity
    for: where the widget sits, how much room it gets, how its own children line up.
    And the second selector's subject carries a class of its own — that is the
    surface's element, handed to the component as children, and nobody else's
-   business. */
+   business.
+
+   REPORTED by surface-spacing-kit (the new rule): `margin-bottom` on
+   `.fixture-widget` (a kit identity) is a spacing/rhythm property, which belongs
+   to the Stack primitive and not to the surface. */
 .fixture-host > .fixture-widget {
   display: flex;
   align-items: center;
@@ -34,6 +38,16 @@
 
 .fixture-host .fixture-widget .fixture-own-child {
   background: gray;
+}
+
+/* NOT reported by surface-spacing-kit: subject is a surface class (not a kit identity),
+   so the rule stays silent — surfaces can space their own elements. */
+.fixture-own-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
+  margin-bottom: 4px;
 }
 
 /* ── Rule 7 fixture — untokenised type ──────────────────────────────────── */

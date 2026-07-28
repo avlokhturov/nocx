@@ -2,13 +2,16 @@
  * PageSection — a titled section within a Page, with an optional anchor id
  * for deep linking. Uses `<section>` for semantics.
  *
+ * Children are spaced by the Stack primitive (one source of truth for vertical
+ * rhythm).
+ *
  * Overlaps with the existing `Section` component (same h2+children pattern)
  * but differs in:
- * - Uses `<section>` not `<div>`
- * - Has `id` for anchor-based scroll targeting
- * - Gets page-specific spacing from surface.css
+ * - Gets page-specific spacing from page-section.css
+ * - Participates in the Page's scroll-anchor and spacing system
  *
- * They are deliberately not merged; the coordinator decides.
+ * They are deliberately not merged; Page is a layout primitive, Section is a
+ * kit component, and merging them would make the kit import page-layout CSS.
  *
  * `ui-page-section` is not optional. This component was the last one in the kit still
  * emitting only its caller's class — named in §1 of the migration design as the
@@ -24,8 +27,8 @@
  * that cannot see it. Placement belongs to the parent's own selector, which rule 3
  * permits (nocx-zeti).
  */
-
 import type { JSX } from 'solid-js'
+import { Stack } from './stack'
 
 export interface PageSectionProps {
   id?: string
@@ -37,7 +40,7 @@ export function PageSection(props: PageSectionProps) {
   return (
     <section id={props.id} class="ui-page-section">
       <h2>{props.title}</h2>
-      {props.children}
+      <Stack gap="default">{props.children}</Stack>
     </section>
   )
 }

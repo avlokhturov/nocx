@@ -14,6 +14,7 @@ them takes a `class` prop; the structural containers that still do are marked.
 
 | Component       | Module             | Identity                                     | Variance                                                               |
 | --------------- | ------------------ | -------------------------------------------- | ---------------------------------------------------------------------- |
+| **Stack**       | `stack.tsx`        | `ui-stack`                                   | `data-gap`: default \| loose                                           |
 | **Button**      | `button.tsx`       | `ui-button`                                  | `data-variant`: default \| primary \| danger \| ghost; `data-size`     |
 | **IconButton**  | `icon-button.tsx`  | `ui-icon-button`                             | `data-size`; `selected` → `aria-selected`; `ariaLabel` is **required** |
 | **TextField**   | `text-field.tsx`   | `ui-text-field`, `ui-text-field__input`      | input types text \| number \| password                                 |
@@ -21,24 +22,95 @@ them takes a `class` prop; the structural containers that still do are marked.
 | **Select**      | `select.tsx`       | `ui-select`                                  | native `<select>`, `appearance: none` (ADR-0014)                       |
 | **Checkbox**    | `checkbox.tsx`     | `ui-checkbox`, `ui-checkbox__control`        | `data-variant`: checkbox \| switch                                     |
 | **Radio**       | `radio.tsx`        | `ui-radio`, `ui-radio__control`              | —                                                                      |
-| **FileInput**   | `file-input.tsx`   | `ui-file-input`                              | the platform draws its button's label; untranslatable by design        |
+| **FileInput**   | `file-input.tsx`   | `ui-file-input`, `__native`, `__name`        | kit Button as trigger; native input hidden but focusable               |
+| **Toast**       | `toast.tsx`        | `ui-toast-host`, `ui-toast`, `__message`     | `data-level`: info \| success \| warning \| danger                     |
+| **MarkerList**  | `marker-list.tsx`  | `ui-marker-list` + `__item/__marker/__text`  | `data-tone`: included \| excluded \| note                              |
+| **CodeBlock**   | `code-block.tsx`   | `ui-code-block`                              | preformatted machine output; scroll-capped                             |
 | **Badge**       | `badge.tsx`        | `ui-badge`                                   | `data-tone`: neutral \| info \| warning \| danger                      |
 | **EmptyState**  | `empty-state.tsx`  | `ui-empty-state` + `__title/__desc/__action` | —                                                                      |
 | **Field**       | `field.tsx`        | `ui-field`, `+ ui-field-horizontal`          | `orientation`                                                          |
-| **Section**     | `section.tsx`      | `ui-section`                                 | keeps `class`, **layout only**                                         |
+| **Section**     | `section.tsx`      | `ui-section`                                 | children spaced by Stack; no `class` passthrough                       |
 | **Toolbar**     | `toolbar.tsx`      | `ui-toolbar`                                 | keeps `class`, **layout only**                                         |
+
+## Vertical rhythm: Stack
+
+**Stack** (`stack.tsx`) is the only source of vertical spacing between kit components.
+Surfaces must not add their own margins between stacked controls — that constraint
+is enforced by the `surface-spacing-kit` lint rule. Prefer Stack over a plain `<div>`
+with a hand-rolled gap.
+
+## Button variant rules
+
+**Button** (`button.tsx`) has four variants. The rules for using them are in the
+component's doc comment and summarised here — they are the contract that keeps
+two sections of the same kind from showing different button looks for the same
+kind of action:
+
+- **primary** — the one action a section exists for. At most one per section.
+  A control that reveals, expands or navigates is not primary (disclosure does
+  not change data). A button rendered once per row of a list is never primary
+  (emphasis is spent by repetition).
+- **default** — everything else that is a real action. This is the default.
+- **danger** — destructive and irreversible.
+- **ghost** — a control that reads as a row rather than a button
+  (e.g. the settings rail's nav items).
 
 **A wrapper identity and a control identity are different identities with different
 duties, and neither may be inferred from the other.** `ui-checkbox` owns the row and its
-label; `ui-checkbox__control` owns the box, its checked mark and its disabled state. The
-one that matters most is the identity on the element that carries the appearance — an
-input, a select, a button. Every defect the kit migration unwound (`nocx-pp3y`) came from
-that element having no name at all, so its rules could only be reached through an
-ancestor class and each surface wrote its own instead.
+label; `ui-checkbox__control` owns the box, its checked mark and its disabled state. The one that matters most is the identity on the element that carries the appearance — an input, a select, or a button. Every defect the kit migration unwound (`nocx-pp3y`) came from that element having no name at all, so its rules could only be reached through an ancestor class and each surface wrote its own instead.
 
 **Toggle is not a component.** Checkbox already has the contract — checked, onChange,
 label, disabled — and a switch is a shape, not a different behaviour. It is
 `variant="switch"`.
+
+## Form validation
+
+`Field` and `TextField` have always rendered an `error` and set `aria-invalid`. What the
+kit lacked was a way to decide there _was_ an error, so surfaces either skipped
+validation (the connections form saved a profile with no host and reported the resulting
+backend failure as a connection error) or grew a private one.
+
+`validation.ts` is that vocabulary, in two separable halves:
+
+- **Validators** — `(value: string) => message | undefined`. Plain functions:
+  `required(label)`, `hostname()`, `port()`, `nonNegativeInteger(label)`, `combine(...)`.
+- **`createFormValidation(rules)`** — decides _when_ a message is shown, which is a
+  different question from whether the value is wrong. Rules are accessors, so it makes
+  no assumption about how the surface stores its draft.
+
+```tsx
+const v = createFormValidation({
+  host: () => combine(required('Host'), hostname())(draft()?.host ?? ''),
+})
+
+<TextField error={v.error('host')} onBlur={() => v.touch('host')} required … />
+```
+
+An error appears when the field is left (`touch`, from `TextField`'s `onBlur`) or when
+submit is attempted (`revealAll`) — never while the user is still typing the first
+character of an empty field. `valid()` and `firstError()` ignore both and answer about
+the values, which is what a submit handler needs. `reset()` when the form switches to a
+different record, or the previous record's touches greet the user with errors they have
+not caused.
+
+**Messages carry no trailing full stop.** They are fragments, and the same string is
+shown inline under a field and inside a Toast.
+
+## Telling the user something happened: Toast
+
+**Toast** (`toast.tsx`) is the only notification affordance. An operation's outcome is
+raised with `showToast({ level, message, duration })` and rendered by the single
+`ToastHost` in `App.tsx` — surfaces do not render a status line of their own.
+
+`info` and `success` dismiss themselves after 4 s; `warning` after 8 s; `danger` is
+sticky, because an error the user was not looking at is an error they never saw. An
+explicit `duration` overrides the level's default and `0` means sticky, which is what a
+half-succeeded import uses.
+
+The rule this replaces a pattern for: **a message about an action does not live in the
+document flow.** The export page kept a `.st-export-status` div under every action,
+holding an empty line on four sections forever so that a message could appear without
+shifting the layout — and shifting it anyway when the message ran to two lines.
 
 **`Tab` is not a kit primitive either.** It carries `role=tab`, drag and reorder,
 middle-click close, activity indicators, `aria-controls` and two orientations: a

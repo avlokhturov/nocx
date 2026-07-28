@@ -1,0 +1,147 @@
+/* Toast — the screen-level notification area and the notifications in it.
+   One identity family: `ui-toast-host` and the `ui-toast` items it renders.
+
+   The host is `position: fixed` and `pointer-events: none` so an empty
+   notification area costs nothing: no space in the layout, and no invisible
+   rectangle over the bottom-right corner of whatever surface is open. The
+   toasts themselves take pointer events back — they have a close button. */
+
+.ui-toast-host {
+  position: fixed;
+  right: var(--space-4);
+  bottom: var(--space-4);
+  z-index: 300;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--space-2);
+  pointer-events: none;
+  max-width: min(560px, calc(100vw - var(--space-8)));
+}
+
+/* The level tints the whole card rather than painting a stripe down one edge.
+   The first version had a 3px left border, and inside a rounded card it read as
+   a separate bar sitting behind the toast rather than as part of it. The tint is
+   `color-mix` against the raised surface at a low percentage, so the card still
+   sits in the theme instead of becoming a coloured slab; the border and the icon
+   carry the rest of the statement. */
+.ui-toast {
+  pointer-events: auto;
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  /* On the toast, not on the host: the host aligns its children to the right
+     edge, so a min-width there widens the invisible column and leaves the card
+     hugging its text. A one-clause message at 420px read as a tooltip rather
+     than as the app telling you something. */
+  min-width: 340px;
+  box-sizing: border-box;
+  padding: var(--space-4);
+  padding-right: var(--space-3);
+  color: var(--color-text);
+  border: 1px solid var(--toast-edge);
+  border-radius: var(--control-radius-lg);
+  background:
+    linear-gradient(
+      to bottom,
+      color-mix(in srgb, white, transparent 96%),
+      color-mix(in srgb, black, transparent 97%)
+    ),
+    color-mix(in srgb, var(--toast-accent) 10%, var(--color-surface-raised));
+  /* Two shadows, not one: a tight contact shadow that seats the card on the
+     surface and a wide soft one that lifts it off the page. A single blur does
+     one or the other. */
+  box-shadow:
+    0 1px 2px color-mix(in srgb, black, transparent 80%),
+    0 8px 24px color-mix(in srgb, black, transparent 65%);
+  animation: ui-toast-in 160ms cubic-bezier(0.2, 0.9, 0.3, 1.2);
+}
+
+/* One variable pair per level; every rule above reads them, so a new level is
+   two declarations rather than a copy of the card. */
+.ui-toast[data-level='info'] {
+  --toast-accent: var(--color-accent);
+  --toast-edge: color-mix(in srgb, var(--color-accent) 35%, transparent);
+}
+
+.ui-toast[data-level='success'] {
+  --toast-accent: var(--color-success);
+  --toast-edge: color-mix(in srgb, var(--color-success) 35%, transparent);
+}
+
+.ui-toast[data-level='warning'] {
+  --toast-accent: var(--color-warning);
+  --toast-edge: color-mix(in srgb, var(--color-warning) 40%, transparent);
+}
+
+.ui-toast[data-level='danger'] {
+  --toast-accent: var(--color-danger);
+  --toast-edge: color-mix(in srgb, var(--color-danger) 45%, transparent);
+}
+
+/* The glyph sits in a tinted disc so it reads as a badge rather than as a letter
+   that happens to be coloured, and so it holds its weight against the message
+   text next to it. */
+.ui-toast__icon {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--control-radius-full);
+  background: color-mix(in srgb, var(--toast-accent) 20%, transparent);
+  color: var(--toast-accent);
+}
+
+.ui-toast__icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.ui-toast__message {
+  flex: 1;
+  font-size: var(--font-size-md);
+  line-height: 1.5;
+  /* Optical centring against the icon disc: the first line of text and the
+     glyph share a baseline instead of the text starting a pixel high. */
+  padding-top: 3px;
+  /* A backend error can arrive as one unbroken token (a path, a base64 blob).
+     Without this it widens the toast past its max and clips. */
+  overflow-wrap: anywhere;
+}
+
+/* The close button recedes until the toast is under the pointer. It is always
+   reachable — opacity, not display — but it is not competing with the message
+   for attention on a toast that will dismiss itself anyway. */
+.ui-toast .ui-icon-button {
+  flex: 0 0 auto;
+  opacity: 0.5;
+  transition: opacity 120ms ease;
+}
+
+.ui-toast:hover .ui-icon-button,
+.ui-toast .ui-icon-button:focus-visible {
+  opacity: 1;
+}
+
+@keyframes ui-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ui-toast {
+    animation: none;
+  }
+
+  .ui-toast .ui-icon-button {
+    transition: none;
+  }
+}

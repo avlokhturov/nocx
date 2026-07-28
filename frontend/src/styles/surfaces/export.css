@@ -1,21 +1,21 @@
-/* ── Export surface — replaces style.css .st-export-* rules ──────────────
-   All colours are tokens from tokyo-night.css via tokens.css. */
+/* ── Export surface ──────────────────────────────────────────────────────
+   All colours are tokens from tokyo-night.css via tokens.css.
+
+   What is NOT here any more, and why it matters: the manifest list. It was six
+   classes — `.st-export-manifest`, `.st-export-carries`, `.st-export-omits`,
+   `.st-export-check`, `.st-export-cross`, `.st-export-note` — declaring a type
+   size, a colour per stance and a glyph, for the reading matter this page exists
+   to show. That is a private vocabulary for something the kit should own, and it
+   had drifted two type steps below the text around it. It is `MarkerList` now
+   (`ui/marker-list.tsx`). `.st-export-status` is gone the same way, into Toast. */
 
 /* ── Section description ────────────────────────────────────────────── */
 
 .ui-export-desc {
   color: var(--color-text-muted);
-  font-size: var(--font-size-xs);
-  margin: 0 0 16px;
+  font-size: var(--font-size-sm);
+  margin: 0 0 var(--space-4);
   line-height: 1.5;
-}
-
-/* ── Mode card grid ──────────────────────────────────────────────────── */
-
-.ui-export-grid {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
 }
 
 /* ── Mode section ───────────────────────────────────────────────────────
@@ -23,141 +23,28 @@
    list. The border and radius drew a frame around content that already sits
    under a PageSection heading rule — a box inside a box. */
 
+/* `margin: 0` is load-bearing. PageSection already spaces its children through
+   Stack, so a margin here does not replace that gap — it adds to it, which is
+   what put 28px between a section's one-line summary and the list under it. */
 .st-export-card-summary {
   font-size: var(--font-size-sm);
   color: var(--color-text-dim);
-  margin: 0 0 var(--space-3);
-}
-
-/* This was `display: none`, revealed by an `.st-export-card-expanded` class
-   that the markup stopped setting when the disclosure went away. The manifest
-   rendered into the DOM on every card and none of it was ever shown — which is
-   exactly what "what does this mode carry?" was supposed to answer. */
-.st-export-card-body {
-  display: block;
-}
-
-/* ── Manifest list ───────────────────────────────────────────────────── */
-
-.st-export-manifest {
-  list-style: none;
-  padding: 0;
-  margin: 0 0 14px;
-}
-
-.st-export-manifest li {
-  font-size: var(--font-size-xs);
-  padding: 2px 0;
-  color: var(--color-text-muted);
-}
-
-.st-export-check {
-  color: var(--color-success);
-  font-weight: 700;
-  margin-right: 4px;
-}
-
-.st-export-cross {
-  color: var(--color-danger);
-  font-weight: 700;
-  margin-right: 4px;
-}
-
-.st-export-note {
-  color: var(--color-warning) !important;
-  font-style: italic;
-  padding-left: 14px !important;
-}
-
-/* ── Actions ─────────────────────────────────────────────────────────── */
-
-.st-export-actions {
-  margin-top: 8px;
-}
-
-/* ── Button row (button + status inline) ─────────────────────────────── */
-
-.st-export-btn-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-top: 10px;
-}
-
-/* ── Status ──────────────────────────────────────────────────────────── */
-
-.st-export-status {
-  font-size: var(--font-size-xs);
-  color: var(--color-text-muted);
-  margin-top: 6px;
-  min-height: 18px;
+  margin: 0;
 }
 
 /* ── Loading / error ─────────────────────────────────────────────────── */
 
 .st-export-loading {
-  font-size: var(--font-size-xs);
+  font-size: var(--font-size-sm);
   color: var(--color-text-dim);
-  padding: 8px 0;
 }
 
 .st-export-error {
-  font-size: var(--font-size-xs);
+  font-size: var(--font-size-sm);
   color: var(--color-danger);
-  padding: 8px 0;
 }
 
-/* ── Passphrase form ─────────────────────────────────────────────────── */
-
-.st-export-passphrase-form {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin-bottom: 10px;
-}
-
-.st-export-passphrase-label {
-  font-size: var(--font-size-xs);
-  color: var(--color-text-muted);
-  margin-top: 4px;
-}
-
-/* ── Backup details ──────────────────────────────────────────────────── */
-
-.st-export-backup-details {
-  background: var(--color-canvas);
-  border: 1px solid var(--color-surface-raised);
-  border-radius: 4px;
-  padding: 10px 12px;
-  font-size: var(--font-size-2xs);
-  color: var(--color-text-muted);
-  white-space: pre-wrap;
-  margin-top: 8px;
-  max-height: 200px;
-  overflow: auto;
-}
-
-/* ── Import section ──────────────────────────────────────────────────── */
-
-.st-export-import-section {
-  margin-bottom: 16px;
-}
-
-.st-export-import-label {
-  display: block;
-  font-size: var(--font-size-xs);
-  color: var(--color-text-muted);
-  margin-bottom: 4px;
-}
-
-/* ── Text inputs inside passphrase form ────────────────────────────── */
-
-.st-export-passphrase-form label {
-  font-size: var(--font-size-xs);
-  color: var(--color-text-muted);
-  margin-top: 4px;
-}
-
-/* ── Checkboxes inside passphrase form ─────────────────────────────── */
-
-/* ── Import section password input ────────────────────────────────── */
+/* `.st-export-backup-details` is gone into `CodeBlock` (`ui/code-block.tsx`) with
+   the same reasoning as the manifest: a `<pre>` with a background, a border, a
+   radius, a type size and a scroll cap is a component, and a surface declaring
+   all five is a second answer to a question the kit should answer once. */

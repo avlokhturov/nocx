@@ -1,0 +1,25 @@
+/* Stack — vertical rhythm for kit controls.
+   One source of truth for the gap between stacked components.
+   Section and PageSection delegate their content gap to this. */
+
+.ui-stack {
+  display: flex;
+  flex-direction: column;
+}
+
+.ui-stack[data-gap='default'] {
+  gap: var(--space-4);
+}
+
+.ui-stack[data-gap='loose'] {
+  gap: var(--space-6);
+}
+
+/* A Stack is a flex column, so every child stretches to its width by default —
+   which is right for a field and wrong for a button. It made "Import" and
+   "Decrypt and Import" page-wide slabs on the export page while "Export
+   Configuration", which happened not to sit in a Stack, was button-sized. A
+   button sizes to its label wherever it is. */
+.ui-stack > .ui-button {
+  align-self: flex-start;
+}

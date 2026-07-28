@@ -1,6 +1,3 @@
-import { splitProps } from 'solid-js'
-import type { JSX } from 'solid-js'
-
 /**
  * Button — the terminal's action affordance.
  *
@@ -8,12 +5,28 @@ import type { JSX } from 'solid-js'
  * `data-variant` / `data-size` for variance (§3.1 of the design spec).
  *
  * Variant vocabulary: `default` (neutral, today's secondary appearance),
- * `primary` (accent-filled), `danger` (danger outline).
+ * `primary` (accent-filled), `danger` (danger outline),
+ * `ghost` (a control that reads as a row rather than a button).
+ *
+ * ## When to use each variant
+ *
+ * - **primary** — the one action a section exists for. At most one per
+ *   section. A control that reveals, expands or navigates is NOT a section's
+ *   primary, even when it is the only button in the section: disclosure does
+ *   not change data. A button rendered once per row of a list is NEVER
+ *   primary — the emphasis is spent by repetition.
+ * - **default** — everything else that is a real action. This is the default
+ *   when no variant is specified.
+ * - **danger** — destructive and irreversible.
+ * - **ghost** — a control that reads as a row rather than a button
+ *   (e.g. the settings rail's nav items).
  *
  * `class` is intentionally absent as a prop — appearance is locked to
  * the kit (§3.6). Layout and placement belong to a parent wrapper or
  * a typed prop.
  */
+import { splitProps } from 'solid-js'
+import type { JSX } from 'solid-js'
 
 export type ButtonVariant = 'default' | 'primary' | 'danger' | 'ghost'
 export type ButtonSize = 'sm' | 'md'

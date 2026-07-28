@@ -5,20 +5,20 @@
    with different headings. Two of those divs are Sections now; the third has no title
    and is not a section at all, so it keeps a plain layout class.
 
-   `class` stays on this component (§3.6) — it is a structural container meant to be
-   embedded — but it may carry only layout and placement. Everything below is the
-   component's own appearance and is not a consumer's to override. */
-
+   Children are now spaced by the Stack primitive (T1 of nocx-g470):
+   `.ui-stack[data-gap='default'] { gap: var(--space-4) }`. Section's own flex gap
+   spaces the h2 from the Stack, and the Stack handles children-to-children spacing.
+   No `class` passthrough — see page-section.tsx for why the structural containers
+   stopped accepting one. */
 .ui-section {
-  /* The children are kit Fields and TextFields. They own their internals and not
-     the space between them, so stacked with no gap they read as one block of
-     striped boxes. The group owns the gap. */
+  /* The gap from h2 to the first child comes from Section's own flex gap;
+     children-to-children spacing is Stack's job. Section's bottom margin separates
+     it from the next section in the page. */
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
   margin-bottom: var(--space-8);
 }
-
 /* The heading and its rule. The divider was previously only on the hand-rolled
    groups, so three of the five groups in the connections form had one and two did
    not — a difference nobody chose. One heading now, and it is this one. */

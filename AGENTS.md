@@ -433,6 +433,42 @@ _whether_ the merge is allowed.
   bytes in JSON-RPC (AD-1 data plane); the backend never sniffs the byte stream (AD-6);
   session-id is server-authoritative (AD-7).
 
+### Before you build a UI component: read the kit
+
+**Read [`frontend/src/ui/README.md`](frontend/src/ui/README.md) and list
+`frontend/src/ui/` before writing any UI element.** Not after, not "if the kit looks
+like it has one" — the inventory table names every component, its identity classes and
+its variance, and it takes a minute to read.
+
+Three things, in this order:
+
+1. **Does the kit already have it?** Then import it from `ui/`. A "toggle" is
+   `Checkbox variant="switch"`; a status message is `showToast`; a titled group of
+   controls is `Section` or `PageSection`. If it does the job at 90%, add the missing
+   variance as a typed `data-*` on the existing component rather than forking it.
+2. **Does something close enough exist that this is a variant of it?** Extend that
+   component in `ui/`, with the variance in its props and its rules in its own CSS file.
+   The kit grows by variants, not by near-duplicates.
+3. **Genuinely new?** Then it goes in `ui/` as a component — one module, one CSS file in
+   `styles/components/`, a stable identity class, a test, and a row in the README table.
+
+What you may never do is build the control **inside the surface**: a hand-rolled
+`<div class="st-something">` with its own colours and spacing, a bespoke button, a
+"temporary" status div, a one-off `.tsx` helper that draws a control the kit is supposed
+to own. Every one of those is a second vocabulary for the same thing, and the app then
+shows two looks for one concept — which is the entire defect the kit migration
+(`nocx-pp3y`, `nocx-v0ai`) spent two epics unwinding. Measured examples that got in:
+`.st-export-status`, which each surface would have re-invented until Toast existed, and
+the settings rail painting a Button's selected state from outside.
+
+A surface may **place** a kit component (`flex`, `margin`, `width`, `order`,
+`align-self`, `position`) and may never **repaint** it (`background`, `border`, `color`,
+`font-*`, `padding`, `box-shadow`). If you find yourself wanting to repaint one, the
+component is missing a variant — add it there.
+
+If the kit is genuinely wrong for the case, say so and change the kit deliberately, the
+same way an `AD` gets changed. Do not route around it in one surface.
+
 ## Stack
 
 - **Backend:** Go — `pty`, `ssh` (via `golang.org/x/crypto/ssh`), `session`, `transport`,

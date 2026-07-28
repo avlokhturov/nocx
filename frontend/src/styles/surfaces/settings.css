@@ -129,8 +129,16 @@
   letter-spacing: -0.01em;
   padding-bottom: var(--space-2);
   border-bottom: 1px solid var(--color-divider);
-  margin: 0 0 var(--space-2) 0;
+  margin: 0;
   scroll-margin-top: var(--space-4);
+}
+
+/* One gap between the heading rule and the first row, not three. The h2 carried a
+   margin-bottom on top of PageSection's flex gap, and `.ui-settings-row` adds its
+   own top padding — 8 + 16 + 12 left the heading floating well clear of the control
+   it names. The flex gap alone owns it now. */
+.ui-settings .ui-page-section {
+  gap: var(--space-2);
 }
 
 .ui-settings section {
@@ -194,7 +202,6 @@
    about how this row breathes, which is the surface's. */
 .ui-settings-row .ui-field-desc {
   line-height: 1.45;
-  margin-top: var(--space-1);
 }
 
 /* The search breadcrumb — an inline tag on the label, quiet enough to skip when

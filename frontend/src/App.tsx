@@ -1,4 +1,5 @@
 import type { Component } from 'solid-js'
+import { ToastHost } from './ui/toast'
 
 /**
  * App — single Solid root that owns the shell layout and provides empty hosts
@@ -40,6 +41,12 @@ const App: Component = () => {
           <div id="panes" />
         </div>
       </div>
+      {/* The notification area. Mounted here, once, because a toast raised by a
+          per-tab surface has to render above the whole window rather than inside
+          the pane that raised it — and because two hosts would show every toast
+          twice. It is fixed and empty until something is raised, so it costs no
+          layout. */}
+      <ToastHost />
     </>
   )
 }

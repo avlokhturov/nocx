@@ -1,0 +1,9 @@
+/* PageSection — a titled section within a Page.
+   The section gap from h2 to its children (the Stack) is the same as Stack's
+   default gap, so the heading floats evenly above the first control. */
+
+.ui-page-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}

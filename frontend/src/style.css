@@ -26,6 +26,11 @@
 @import './styles/components/sidebar.css';
 @import './styles/components/quick-connect.css';
 @import './styles/components/tab.css';
+@import './styles/components/stack.css';
+@import './styles/components/page-section.css';
+@import './styles/components/toast.css';
+@import './styles/components/marker-list.css';
+@import './styles/components/code-block.css';
 @import './styles/components/tab-strip.css';
 @import './styles/surfaces/banner.css';
 @import './styles/surfaces/update-notice.css';
@@ -79,6 +84,10 @@
   padding: 10px 14px 12px;
 }
 
+/* The rule that collapsed this for a pane-filling program is gone with the
+   reservation it was working around: `hide()` now takes the box away every
+   time, so there is nothing left to collapse (nocx-6w4z). */
+
 .nocx-editor-chrome {
   display: flex;
   justify-content: space-between;
@@ -102,6 +111,18 @@
   padding: 3px 9px;
   font-family: var(--font-family-ui);
   font-size: var(--font-size-xs);
+  /* Digits get equal advance widths. The UI font is proportional, so `1` is
+     narrower than `0` and the clock chip changed width every time a digit
+     rolled — visible as a twitch once a second, and worse on the minute where
+     several digits change at once. Tabular figures are the fix rather than a
+     monospace family: this is UI chrome and should read as the rest of the app,
+     it just must not resize itself.
+
+     On `.nocx-chip` rather than on the clock alone. Every chip that carries a
+     number has the same problem — exit codes and durations in the scrollback
+     block headers sit in a column where unequal digits show up as ragged
+     alignment rather than as movement (nocx-6w4z). */
+  font-variant-numeric: tabular-nums;
   color: var(--color-accent);
   cursor: default;
   -webkit-user-select: none;
@@ -201,6 +222,12 @@
   overflow-y: auto;
   overflow-x: hidden;
   scrollbar-gutter: stable;
+  /* This class positions the scroller itself. Browser scroll anchoring is a
+     second controller doing the same job from the other side: as blocks and the
+     live region resize it adjusts `scrollTop` to keep whatever descendant it
+     picked in place, and the two then correct each other frame by frame. Only
+     one of them can own the position (nocx-6w4z). */
+  overflow-anchor: none;
   display: flex;
   flex-direction: column;
 }
@@ -224,7 +251,10 @@
 .xterm-live-container {
   flex: none;
   overflow: hidden;
-  transition: height 120ms ease;
+  /* No height transition. The height changes on every frame of output, so the
+     animation never finished — and anything measuring this element to position
+     the scroller was reading a value mid-flight, aiming at a target that had
+     moved by the time the scroll landed. */
 }
 
 .xterm-live-container.live-idle {
@@ -235,13 +265,14 @@
   height: 140px;
 }
 
+/* Fills the pane, not the viewport. It was `position: fixed` with all four
+   insets, which painted over the tab strip and the activity bar — so an
+   alt-screen program erased the window's chrome while a normal-buffer program
+   doing exactly the same job did not. The height is set inline from the
+   scroller by the controller, the same way the running region is sized, so
+   both paths land on one treatment (nocx-6w4z). */
 .xterm-live-container.live-fullscreen {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 100;
+  flex: none;
 }
 
 /* Inner wrapper: always has a stable min-height so xterm.fit() produces
@@ -277,10 +308,18 @@
   border-top: 1px solid var(--color-surface-hover);
   border-radius: 0;
   background: transparent;
-  content-visibility: auto;
-  contain-intrinsic-size: auto 48px;
+  /* `content-visibility: auto` with an intrinsic-size guess is gone. Off-screen
+     blocks reported the GUESS — 48px — from `getBoundingClientRect()`, so the
+     scroll target computed for "put this block at the top" was built on a
+     number that was wrong by an order of magnitude: measured, a 635px block
+     answering 48. Skipping layout for off-screen content is a real
+     optimisation, but not while exact offsets decide where the view lands. */
   overflow: visible;
-  cursor: pointer;
+  /* The arrow, not the hand. A block is selectable, but what fills it is command
+     output you read and select text in — and a pointer cursor over a wall of
+     text says "this is a link" while making it harder to see where the caret
+     will land. The controls that really are clickable (the ⋮ button, the menu
+     items) keep their own `cursor: pointer` (nocx-6w4z). */
   position: relative;
 }
 
@@ -304,7 +343,12 @@
   display: flex;
   flex-direction: column;
   gap: 2px;
-  padding: 3px 0;
+  /* The bottom half of this padding is the gap between the command and what it
+     printed. It belongs to the header rather than to `.cmd-output`, because a
+     RUNNING block has no `.cmd-output` at all — the live xterm follows the
+     header directly — and a rule on the output would have left exactly the case
+     you are looking at while a command runs without any gap. */
+  padding: 3px 0 var(--space-3);
   background: transparent;
   border: 0;
   font-family: var(--font-family-ui);

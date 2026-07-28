@@ -1,0 +1,56 @@
+/* MarkerList — an enumeration where each item states a stance.
+   Replaces the export surface's six `.st-export-*` classes, which re-declared a
+   type size and a colour per stance for what is that page's main content. */
+
+.ui-marker-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.ui-marker-list__item {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  /* The body step, the same one the kit uses for a field's value and an empty
+     state's title. The surface version sat at --font-size-xs, two steps below
+     the text around it, which is what a surface declaring its own scale looks
+     like from the outside. */
+  font-size: var(--font-size-md);
+  line-height: 1.5;
+  color: var(--color-text-muted);
+}
+
+/* Fixed-width so the text of every item starts on the same column whatever its
+   marker — and so a note, which has no marker, still lines up with the items it
+   is a note about. */
+.ui-marker-list__marker {
+  flex: 0 0 auto;
+  width: 1ch;
+  font-weight: 700;
+  text-align: center;
+}
+
+.ui-marker-list__item[data-tone='included'] .ui-marker-list__marker {
+  color: var(--color-success);
+}
+
+.ui-marker-list__item[data-tone='excluded'] .ui-marker-list__marker {
+  color: var(--color-danger);
+}
+
+/* A note is subordinate to the item above it: one step down, italic, and in the
+   warning colour because every note in the one consumer is a caveat.
+
+   No indent of its own. A note renders the same empty marker cell as every other
+   item, so its text already starts on the shared text column — the surface
+   version needed `padding-left` because it had no marker element at all, and
+   carrying that over would have indented the note twice. */
+.ui-marker-list__item[data-tone='note'] {
+  color: var(--color-warning);
+  font-style: italic;
+  font-size: var(--font-size-sm);
+}

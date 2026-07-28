@@ -15,6 +15,14 @@ export interface TextFieldProps {
   value: string | number
   /** Fires on every keystroke (input event). */
   onInput?: (value: string) => void
+  /**
+   * Fires when focus leaves the input.
+   *
+   * Exists for validation: a message must not appear while the user is still
+   * typing the first character of an empty field, so `createFormValidation` marks
+   * a field answered on blur rather than on input. See `ui/validation.ts`.
+   */
+  onBlur?: (value: string) => void
   type?: 'text' | 'number' | 'password'
   placeholder?: string
   min?: number
@@ -32,6 +40,11 @@ export function TextField(props: TextFieldProps) {
   const onInput = (e: Event) => {
     const target = e.currentTarget as HTMLInputElement
     props.onInput?.(target.value)
+  }
+
+  const onBlur = (e: FocusEvent) => {
+    const target = e.currentTarget as HTMLInputElement
+    props.onBlur?.(target.value)
   }
 
   return (
@@ -57,6 +70,7 @@ export function TextField(props: TextFieldProps) {
         aria-invalid={props.error !== undefined ? true : undefined}
         aria-describedby={ariaDescribedBy()}
         onInput={onInput}
+        onBlur={onBlur}
       />
       <Show when={props.error !== undefined}>
         <p id={errorId()} class="ui-field-error" role="alert">

@@ -50,7 +50,7 @@ integrity_check=$(node "${fixture_dir}/check-css-integrity.mjs" \
   --styles="${fixture_dir}/css-integrity-fixture/styles" \
   --ui="${fixture_dir}/css-integrity-fixture/ui" 2>/dev/null || true)
 
-for rule in unreachable escaped-dot undefined-var theme-scope bare-type-selector control-css-outside-kit kit-scope-selector surface-paints-kit untokenised-type px-font-size-token; do
+for rule in unreachable escaped-dot undefined-var theme-scope bare-type-selector control-css-outside-kit kit-scope-selector surface-paints-kit surface-spacing-kit untokenised-type px-font-size-token; do
   if ! echo "$integrity_check" | grep -q "\"rule\":\"${rule}\""; then
     echo "CSS INTEGRITY GATE FAILED — rule '${rule}' did not fire on the fixture"
     exit 1
@@ -91,6 +91,21 @@ fi
 # components were not read and the two hits above came from somewhere else.
 if echo "$integrity_check" | grep -q '"rule":"kit-identities-empty"'; then
   echo "CSS INTEGRITY GATE FAILED — the kit identity scan came back empty; rule 3 did not really run"
+  exit 1
+fi
+
+# Rule: surface-spacing-kit — exactly 1 hit. The existing .fixture-host > .fixture-widget
+# declares gap and margin-bottom on a kit identity, which the new rule must report as
+# spacing on the component. The .fixture-own-group with gap+margin on a surface class
+# (not a kit identity) must stay silent.
+integrity_spacing_hits=$(echo "$integrity_check" | grep -c '"rule":"surface-spacing-kit"' || true)
+if [ "$integrity_spacing_hits" -ne 1 ]; then
+  echo "CSS INTEGRITY GATE FAILED — expected exactly 1 surface-spacing-kit hit (gap + margin-bottom on .fixture-widget), got ${integrity_spacing_hits}"
+  exit 1
+fi
+
+if echo "$integrity_check" | grep -q 'fixture-own-group'; then
+  echo "CSS INTEGRITY GATE FAILED — surface-spacing-kit reported a surface class spacing its own elements"
   exit 1
 fi
 
@@ -244,5 +259,5 @@ if [ -z "$ts_reactivity" ]; then
   exit 1
 fi
 
-echo "OK — all 10 lint rules fired; kit identities verified; CSS colour + integrity verified (10 integrity rules)"
+echo "OK — all 10 lint rules fired; kit identities verified; CSS colour + integrity verified (11 integrity rules)"
 exit 0

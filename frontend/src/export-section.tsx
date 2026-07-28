@@ -19,7 +19,11 @@ import { Button } from './ui/button'
 import { TextField } from './ui/text-field'
 import { Checkbox } from './ui/checkbox'
 import { FileInput } from './ui/file-input'
-
+import { Field } from './ui/field'
+import { Stack } from './ui/stack'
+import { MarkerList, type MarkerListItem } from './ui/marker-list'
+import { CodeBlock } from './ui/code-block'
+import { showToast } from './ui/toast'
 // ── Mode definitions ────────────────────────────────────────────────────
 
 type Mode = 'config-export' | 'portable-encrypted' | 'same-machine-backup' | 'import'
@@ -55,53 +59,47 @@ const MODES: ModeDef[] = [
 
 // ── Manifest display ────────────────────────────────────────────────────
 
+/**
+ * What a mode carries, omits and warns about, as one MarkerList.
+ *
+ * This was six `.st-export-*` classes declaring their own type size, colour and
+ * glyph per stance — a private vocabulary for the page's main content, which is
+ * how it drifted two steps below the text around it. The stances are the kit
+ * component's tones now, and this function only shapes the data.
+ */
 function ManifestDisplay(props: { manifest: ExportManifest }) {
-  return (
-    <ul class="st-export-manifest">
-      <For each={props.manifest.carries}>
-        {(item) => (
-          <li class="st-export-carries">
-            <span class="st-export-check">+</span> {item}
-          </li>
-        )}
-      </For>
-      <For each={props.manifest.omits}>
-        {(item) => (
-          <li class="st-export-omits">
-            <span class="st-export-cross">−</span> {item}
-          </li>
-        )}
-      </For>
-      <Show when={props.manifest.notes}>
-        <For each={props.manifest.notes}>{(note) => <li class="st-export-note">{note}</li>}</For>
-      </Show>
-    </ul>
-  )
-}
-
-// ── Status line helper ─────────────────────────────────────────────────
-
-function StatusLine(props: { message: string }) {
-  return <div class="st-export-status">{props.message}</div>
+  const items = (): MarkerListItem[] => [
+    ...props.manifest.carries.map((text) => ({ text, tone: 'included' as const })),
+    ...props.manifest.omits.map((text) => ({ text, tone: 'excluded' as const })),
+    ...(props.manifest.notes ?? []).map((text) => ({ text, tone: 'note' as const })),
+  ]
+  return <MarkerList items={items()} />
 }
 
 // ── Config export actions ───────────────────────────────────────────────
+//
+// Outcomes are toasts, not an inline status line. Each action used to render a
+// `.st-export-status` div under itself, which held a line of empty space on every
+// section forever and shoved the controls below it down the moment anything was
+// said. The in-flight state is on the button (disabled) where the user is already
+// looking, and the result — which is the part worth interrupting for — arrives as
+// a notification. Failures are raised at `danger`, which is sticky: an error the
+// user was not looking at is an error they never saw.
 
 function ConfigExportActions(props: { profileClient: ProfileClient }) {
-  const [state, setState] = createStore({ status: '', busy: false })
+  const [state, setState] = createStore({ busy: false })
 
   const handleClick = () => {
     setState('busy', true)
-    setState('status', 'Exporting…')
     props.profileClient
       .configExport()
       .then(
         (result) => {
           downloadJSON('nocx-config-export.json', result)
-          setState('status', 'Exported — file downloaded.')
+          showToast({ level: 'success', message: 'Exported — file downloaded' })
         },
         (e) => {
-          setState('status', `Export failed: ${String(e)}`)
+          showToast({ level: 'danger', message: `Export failed: ${String(e)}` })
         },
       )
       .finally(() => {
@@ -109,12 +107,9 @@ function ConfigExportActions(props: { profileClient: ProfileClient }) {
       })
   }
   return (
-    <>
-      <Button variant="default" disabled={state.busy} onClick={handleClick}>
-        Export Configuration
-      </Button>
-      <StatusLine message={state.status} />
-    </>
+    <Button variant="default" disabled={state.busy} onClick={handleClick}>
+      Export Configuration
+    </Button>
   )
 }
 
@@ -126,7 +121,6 @@ function PortableEncryptedActions(props: { profileClient: ProfileClient }) {
     confirm: '',
     showPasswords: false,
     includePrivate: false,
-    status: '',
     busy: false,
   })
 
@@ -134,26 +128,28 @@ function PortableEncryptedActions(props: { profileClient: ProfileClient }) {
     const pass = state.passphrase
     const conf = state.confirm
     if (!pass) {
-      setState('status', 'Passphrase is required.')
+      showToast({ level: 'warning', message: 'Passphrase is required' })
       return
     }
     if (pass !== conf) {
-      setState('status', 'Passphrases do not match.')
+      showToast({ level: 'warning', message: 'Passphrases do not match' })
       return
     }
     setState('busy', true)
-    setState('status', 'Encrypting…')
     props.profileClient
       .portableEncryptedExport(pass, state.includePrivate)
       .then(
         (result) => {
           downloadBinary('nocx-portable-export.enc', result.payload)
-          setState('status', 'Exported — file downloaded. Keep the passphrase safe.')
+          showToast({
+            level: 'success',
+            message: 'Exported — file downloaded. Keep the passphrase safe',
+          })
           setState('passphrase', '')
           setState('confirm', '')
         },
         (e) => {
-          setState('status', `Export failed: ${String(e)}`)
+          showToast({ level: 'danger', message: `Export failed: ${String(e)}` })
         },
       )
       .finally(() => {
@@ -164,37 +160,35 @@ function PortableEncryptedActions(props: { profileClient: ProfileClient }) {
   const inputType = () => (state.showPasswords ? 'text' : 'password')
 
   return (
-    <>
-      <div class="st-export-passphrase-form">
-        <TextField
-          label="New passphrase"
-          type={inputType()}
-          placeholder="Choose a strong passphrase"
-          value={state.passphrase}
-          onInput={(v) => setState('passphrase', v)}
-        />
-        <TextField
-          label="Confirm passphrase"
-          type={inputType()}
-          placeholder="Re-enter the passphrase"
-          value={state.confirm}
-          onInput={(v) => setState('confirm', v)}
-        />
-        <Checkbox
-          checked={state.showPasswords}
-          onChange={(v) => setState('showPasswords', v)}
-          label="Show passphrase"
-        />
-        <Checkbox
-          checked={state.includePrivate}
-          onChange={(v) => setState('includePrivate', v)}
-          label="Include private content (conversations, command history)"
-        />
-      </div>
-      <Button variant="primary" disabled={state.busy} onClick={handleEncrypt}>
+    <Stack gap="default">
+      <TextField
+        label="New passphrase"
+        type={inputType()}
+        placeholder="Choose a strong passphrase"
+        value={state.passphrase}
+        onInput={(v) => setState('passphrase', v)}
+      />
+      <TextField
+        label="Confirm passphrase"
+        type={inputType()}
+        placeholder="Re-enter the passphrase"
+        value={state.confirm}
+        onInput={(v) => setState('confirm', v)}
+      />
+      <Checkbox
+        checked={state.showPasswords}
+        onChange={(v) => setState('showPasswords', v)}
+        label="Show passphrase"
+      />
+      <Checkbox
+        checked={state.includePrivate}
+        onChange={(v) => setState('includePrivate', v)}
+        label="Include private content (conversations, command history)"
+      />
+      <Button variant="default" disabled={state.busy} onClick={handleEncrypt}>
         Encrypt and Export
       </Button>
-    </>
+    </Stack>
   )
 }
 
@@ -202,7 +196,6 @@ function PortableEncryptedActions(props: { profileClient: ProfileClient }) {
 
 function BackupActions(props: { profileClient: ProfileClient }) {
   const [state, setState] = createStore({
-    status: '',
     busy: false,
     paths: '',
     pathsVisible: false,
@@ -210,17 +203,15 @@ function BackupActions(props: { profileClient: ProfileClient }) {
 
   const handleShow = () => {
     setState('busy', true)
-    setState('status', 'Checking…')
     props.profileClient
       .backup()
       .then(
         (result) => {
           setState('paths', JSON.stringify(result, null, 2))
           setState('pathsVisible', true)
-          setState('status', '')
         },
         (e) => {
-          setState('status', `Backup check failed: ${String(e)}`)
+          showToast({ level: 'danger', message: `Backup check failed: ${String(e)}` })
           setState('pathsVisible', false)
         },
       )
@@ -233,9 +224,8 @@ function BackupActions(props: { profileClient: ProfileClient }) {
       <Button variant="default" disabled={state.busy} onClick={handleShow}>
         Show Backup Paths
       </Button>
-      <StatusLine message={state.status} />
       <Show when={state.pathsVisible}>
-        <pre class="st-export-backup-details">{state.paths}</pre>
+        <CodeBlock ariaLabel="Backup paths">{state.paths}</CodeBlock>
       </Show>
     </>
   )
@@ -246,39 +236,52 @@ function BackupActions(props: { profileClient: ProfileClient }) {
 function ImportActions(props: { profileClient: ProfileClient }) {
   const [state, setState] = createStore({
     configFile: null as File | null,
-    configStatus: '',
     configBusy: false,
     encFile: null as File | null,
     portablePass: '',
-    portableStatus: '',
     portableBusy: false,
   })
+
+  /**
+   * An import that leaves credentials unmapped has half-succeeded, and the half
+   * that failed needs the user to do something about it — so it is raised as a
+   * sticky warning rather than a success that scrolls away in four seconds.
+   */
+  const reportImport = (result: {
+    profilesImported: number
+    groupsImported: number
+    credentialsImported: number
+    unresolvedCredentials?: unknown[]
+  }) => {
+    const summary =
+      `Imported ${result.profilesImported} profiles, ` +
+      `${result.groupsImported} groups, ${result.credentialsImported} credentials`
+    const unresolved = result.unresolvedCredentials?.length ?? 0
+    if (unresolved > 0) {
+      showToast({
+        level: 'warning',
+        duration: 0,
+        message: `${summary} — ${unresolved} credentials need secret mapping`,
+      })
+      return
+    }
+    showToast({ level: 'success', message: summary })
+  }
 
   const handleConfigImport = () => {
     const file = state.configFile
     if (!file) return
     const pc = props.profileClient
     setState('configBusy', true)
-    setState('configStatus', 'Importing…')
     file
       .text()
       .then((text) => {
         const data = JSON.parse(text) as ConfigExport
         return pc.importConfig(data)
       })
-      .then((result) => {
-        const parts: string[] = [
-          `Imported ${result.profilesImported} profiles,`,
-          `${result.groupsImported} groups,`,
-          `${result.credentialsImported} credentials.`,
-        ]
-        if (result.unresolvedCredentials?.length) {
-          parts.push(` ${result.unresolvedCredentials.length} credentials need secret mapping.`)
-        }
-        setState('configStatus', parts.join(' '))
-      })
+      .then(reportImport)
       .catch((e) => {
-        setState('configStatus', `Import failed: ${String(e)}`)
+        showToast({ level: 'danger', message: `Import failed: ${String(e)}` })
       })
       .finally(() => {
         setState('configBusy', false)
@@ -291,7 +294,6 @@ function ImportActions(props: { profileClient: ProfileClient }) {
     const pass = state.portablePass
     const pc = props.profileClient
     setState('portableBusy', true)
-    setState('portableStatus', 'Decrypting and importing…')
     file
       .arrayBuffer()
       .then((buf) => {
@@ -299,30 +301,26 @@ function ImportActions(props: { profileClient: ProfileClient }) {
         return pc.importPortable(base64, pass)
       })
       .then((result) => {
-        const parts: string[] = [
-          `Imported ${result.profilesImported} profiles,`,
-          `${result.groupsImported} groups,`,
-          `${result.credentialsImported} credentials.`,
-        ]
-        if (result.unresolvedCredentials?.length) {
-          parts.push(` ${result.unresolvedCredentials.length} credentials need secret mapping.`)
-        }
-        setState('portableStatus', parts.join(' '))
+        reportImport(result)
         setState('encFile', null)
         setState('portablePass', '')
       })
       .catch((e) => {
-        setState('portableStatus', `Import failed: ${String(e)}`)
+        showToast({ level: 'danger', message: `Import failed: ${String(e)}` })
       })
       .finally(() => {
         setState('portableBusy', false)
       })
   }
   return (
-    <>
-      <div class="st-export-import-section">
-        <label class="st-export-import-label">Import from configuration export (.json)</label>
-        <FileInput accept=".json" onChange={(f) => setState('configFile', f)} />
+    // `loose` outside, `default` inside — the two import blocks are independent
+    // of each other, the controls within one are not. That distinction is the
+    // whole reason Stack has two steps rather than one.
+    <Stack gap="loose">
+      <Stack gap="default">
+        <Field for="config-file" label="Import from configuration export (.json)">
+          <FileInput id="config-file" accept=".json" onChange={(f) => setState('configFile', f)} />
+        </Field>
         <Button
           variant="default"
           disabled={state.configBusy || !state.configFile}
@@ -330,17 +328,20 @@ function ImportActions(props: { profileClient: ProfileClient }) {
         >
           Import
         </Button>
-        <StatusLine message={state.configStatus} />
-      </div>
-      <div class="st-export-import-section">
-        <label class="st-export-import-label">Import from portable encrypted export (.enc)</label>
-        <FileInput accept=".enc" onChange={(f) => setState('encFile', f)} />
-        <TextField
-          type="password"
-          placeholder="Passphrase used during export"
-          value={state.portablePass}
-          onInput={(v) => setState('portablePass', v)}
-        />
+      </Stack>
+      <Stack gap="default">
+        <Field for="enc-file" label="Import from portable encrypted export (.enc)">
+          <FileInput id="enc-file" accept=".enc" onChange={(f) => setState('encFile', f)} />
+        </Field>
+        <Field for="portable-pass" label="Passphrase">
+          <TextField
+            id="portable-pass"
+            type="password"
+            placeholder="Passphrase used during export"
+            value={state.portablePass}
+            onInput={(v) => setState('portablePass', v)}
+          />
+        </Field>
         <Button
           variant="default"
           disabled={state.portableBusy || !state.encFile || !state.portablePass}
@@ -348,9 +349,8 @@ function ImportActions(props: { profileClient: ProfileClient }) {
         >
           Decrypt and Import
         </Button>
-        <StatusLine message={state.portableStatus} />
-      </div>
-    </>
+      </Stack>
+    </Stack>
   )
 }
 
@@ -394,7 +394,12 @@ function ModeCard(props: { def: ModeDef; profileClient: ProfileClient }) {
   return (
     <PageSection id={'st-export-' + props.def.mode} title={props.def.label}>
       <p class="st-export-card-summary">{props.def.summary}</p>
-      <div class="st-export-card-body">
+      {/* Stack, not a div with margins: the manifest and the actions are stacked
+          kit content, and the gaps between them belong to Stack. They used to be
+          a `margin-bottom` on the list plus a `margin-top` on the actions, which
+          is two surfaces' worth of spacing decisions stacked on top of
+          PageSection's own gap. */}
+      <Stack gap="default">
         <Show when={state.loading}>
           <div class="st-export-loading">Loading mode details…</div>
         </Show>
@@ -403,22 +408,20 @@ function ModeCard(props: { def: ModeDef; profileClient: ProfileClient }) {
         </Show>
         <Show when={state.manifest !== null && !state.loading}>
           <ManifestDisplay manifest={state.manifest!} />
-          <div class="st-export-actions">
-            <Show when={props.def.mode === 'config-export'}>
-              <ConfigExportActions profileClient={props.profileClient} />
-            </Show>
-            <Show when={props.def.mode === 'portable-encrypted'}>
-              <PortableEncryptedActions profileClient={props.profileClient} />
-            </Show>
-            <Show when={props.def.mode === 'same-machine-backup'}>
-              <BackupActions profileClient={props.profileClient} />
-            </Show>
-            <Show when={props.def.mode === 'import'}>
-              <ImportActions profileClient={props.profileClient} />
-            </Show>
-          </div>
+          <Show when={props.def.mode === 'config-export'}>
+            <ConfigExportActions profileClient={props.profileClient} />
+          </Show>
+          <Show when={props.def.mode === 'portable-encrypted'}>
+            <PortableEncryptedActions profileClient={props.profileClient} />
+          </Show>
+          <Show when={props.def.mode === 'same-machine-backup'}>
+            <BackupActions profileClient={props.profileClient} />
+          </Show>
+          <Show when={props.def.mode === 'import'}>
+            <ImportActions profileClient={props.profileClient} />
+          </Show>
         </Show>
-      </div>
+      </Stack>
     </PageSection>
   )
 }
@@ -427,6 +430,15 @@ function ModeCard(props: { def: ModeDef; profileClient: ProfileClient }) {
 
 /**
  * The Export / Backup / Import page.
+ *
+ * **No `primary` button anywhere on this page, deliberately.** The kit's rule is
+ * at most one primary per section, and applying it literally here gave two of the
+ * four sections an accent-filled button and two a plain one — which made peer
+ * sections look unlike each other while distinguishing nothing the user can act
+ * on. Primary emphasis exists to point at one action among several on a screen;
+ * this page is a list of four independent operations with no ranking between
+ * them, plus a file picker and a disclosure inside them. The consistent look IS
+ * the correct look, so every action here is `default`.
  *
  * No wrapping PageSection of its own: this is a page in the settings rail now,
  * and the rail entry already names it. Wrapping would put the same words twice

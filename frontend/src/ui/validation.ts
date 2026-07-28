@@ -1,0 +1,158 @@
+/**
+ * Form validation for the kit.
+ *
+ * `Field` and `TextField` already render an `error` and set `aria-invalid` — the
+ * kit could *show* a validation failure from the day it was written. What it had
+ * no vocabulary for was deciding there was one, so surfaces either skipped
+ * validation entirely (the connections form let you save a profile with no host
+ * and then produced a backend error on connect) or grew a private one (that same
+ * file's `cm-form-error`, a single string for the whole form, in a colour token
+ * that pointed at nothing).
+ *
+ * Two pieces, deliberately separable:
+ *
+ * - **Validators** — `(value: string) => message | undefined`. Plain functions,
+ *   no reactivity, trivially testable, composable with `combine`.
+ * - **`createFormValidation`** — decides *when* a message is shown, which is a
+ *   different question from whether the value is wrong.
+ *
+ * ## When an error is shown
+ *
+ * Not while the user is still typing the first character of an empty field: a
+ * form that turns red before you have finished answering it is reporting your
+ * progress as failure. A message appears when the user has left the field
+ * (`touch`) or when they have tried to submit (`revealAll`). `valid()` and
+ * `firstError()` ignore both and answer about the values themselves, which is
+ * what a submit handler needs.
+ */
+import { createSignal } from 'solid-js'
+
+export type Validator = (value: string) => string | undefined
+
+/**
+ * Non-empty after trimming. `label` names the field in the message, so the text
+ * reads as a sentence about this field rather than a generic "Required".
+ */
+export function required(label: string): Validator {
+  return (value) => (value.trim() === '' ? `${label} is required` : undefined)
+}
+
+/**
+ * A hostname, IPv4 address, or bracketed IPv6 literal.
+ *
+ * Deliberately permissive about what a *name* may contain — underscores and
+ * trailing dots appear in real internal DNS, and rejecting a host the user can
+ * actually reach is a worse failure than accepting one they cannot. It rejects
+ * what cannot be a host at all: whitespace, a scheme, a path, an embedded port
+ * or userinfo. Those are the mistakes people actually make here — pasting
+ * `ssh://box:22` or `user@box` into a field that already has User and Port
+ * beside it.
+ */
+export function hostname(): Validator {
+  return (value) => {
+    const host = value.trim()
+    if (host === '') return undefined
+    if (/\s/.test(host)) return 'Host cannot contain spaces'
+    if (host.includes('://')) return 'Enter a host name only, without a scheme'
+    if (host.includes('/')) return 'Enter a host name only, without a path'
+    if (host.includes('@')) return 'Enter a host name only — the user goes in the User field'
+    // A bracketed IPv6 literal is the one form where colons are legal.
+    if (host.startsWith('[')) {
+      return /^\[[0-9a-fA-F:]+\]$/.test(host) ? undefined : 'Not a valid IPv6 address'
+    }
+    if (host.includes(':')) return 'Enter a host name only — the port goes in the Port field'
+    if (!/^[A-Za-z0-9._-]+$/.test(host)) return 'Host contains characters that are not valid'
+    return undefined
+  }
+}
+
+/** A TCP port: an integer in 1..65535. Empty passes — compose with `required`. */
+export function port(): Validator {
+  return (value) => {
+    const text = value.trim()
+    if (text === '') return undefined
+    if (!/^\d+$/.test(text)) return 'Port must be a whole number'
+    const n = Number(text)
+    if (n < 1 || n > 65535) return 'Port must be between 1 and 65535'
+    return undefined
+  }
+}
+
+/**
+ * A whole number ≥ 0. For the timeout and count fields where `0` is a legal
+ * value meaning "off", so `required` is wrong and a range check is all there is.
+ */
+export function nonNegativeInteger(label: string): Validator {
+  return (value) => {
+    const text = value.trim()
+    if (text === '') return undefined
+    if (!/^\d+$/.test(text)) return `${label} must be a whole number`
+    return undefined
+  }
+}
+
+/** First failing validator wins, so rules read in the order they should fire. */
+export function combine(...validators: Validator[]): Validator {
+  return (value) => {
+    for (const validate of validators) {
+      const message = validate(value)
+      if (message !== undefined) return message
+    }
+    return undefined
+  }
+}
+
+export interface FormValidation<K extends string> {
+  /** The message to render for a field — `undefined` until it is touched or revealed. */
+  error(field: K): string | undefined
+  /** Mark a field as answered. Call from the control's `onBlur`. */
+  touch(field: K): void
+  /** Show every failing field at once. Call when submit is attempted. */
+  revealAll(): void
+  /** Whether the values pass, regardless of what is currently shown. */
+  valid(): boolean
+  /** First failing message in declaration order — the one to put in a toast. */
+  firstError(): string | undefined
+  /** Forget every touch. Call when the form switches to a different record. */
+  reset(): void
+}
+
+/**
+ * Wire a set of rules to the show-it-yet decision.
+ *
+ * Rules are accessors, not values, so they read whatever reactive state the
+ * surface keeps its draft in — this makes no assumption about how the form is
+ * stored, which is why it can serve both a store and a plain signal.
+ *
+ *     const v = createFormValidation({
+ *       host: () => combine(required('Host'), hostname())(draft().host),
+ *     })
+ *     <TextField error={v.error('host')} onBlur={() => v.touch('host')} … />
+ */
+export function createFormValidation<K extends string>(
+  rules: Record<K, () => string | undefined>,
+): FormValidation<K> {
+  const [touched, setTouched] = createSignal<ReadonlySet<K>>(new Set<K>())
+  const [revealed, setRevealed] = createSignal(false)
+  const keys = Object.keys(rules) as K[]
+  const messageOf = (field: K) => rules[field]()
+
+  return {
+    error: (field) => (revealed() || touched().has(field) ? messageOf(field) : undefined),
+    touch: (field) =>
+      setTouched((current) => (current.has(field) ? current : new Set([...current, field]))),
+    revealAll: () => setRevealed(true),
+    valid: () => keys.every((key) => messageOf(key) === undefined),
+    firstError: () => {
+      for (const key of keys) {
+        const message = messageOf(key)
+        if (message !== undefined) return message
+      }
+      return undefined
+    },
+    reset: () => {
+      setTouched(new Set<K>())
+      setRevealed(false)
+    },
+  }
+}

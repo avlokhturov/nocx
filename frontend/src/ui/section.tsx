@@ -6,11 +6,13 @@
  * - connections.ts: div.cm-form-section > h2 + fields
  * - export-section.ts: div.st-export wrapper with heading + description
  *
- * No `class` passthrough — see page-section.tsx for why the structural containers
- * stopped accepting one.
+ * Children are spaced by the Stack primitive (one source of truth for vertical
+ * rhythm). No `class` passthrough — see page-section.tsx for why the structural
+ * containers stopped accepting one.
  */
-
 import type { JSX } from 'solid-js'
+import { Stack } from './stack'
+
 export interface SectionProps {
   id?: string
   title: string
@@ -21,7 +23,7 @@ export function Section(props: SectionProps) {
   return (
     <section id={props.id} class="ui-section">
       <h2>{props.title}</h2>
-      {props.children}
+      <Stack gap="default">{props.children}</Stack>
     </section>
   )
 }

@@ -380,6 +380,83 @@ function findSurfacePaintingKit(ast, kitIdentities) {
 }
 
 /**
+ * Rule: surface-spacing-kit — a surface may not space kit components by hand.
+ *
+ * This catches margin-top and margin-bottom declared directly on a kit identity
+ * (e.g. `.x > .ui-button { margin-top: 8px }`).
+ *
+ * `gap` is deliberately NOT in the list. This rule is about vertical rhythm
+ * between components; `gap` on a flex row is horizontal spacing between a
+ * component's own children, which is a different question and belongs to rule 3
+ * if it belongs anywhere. Including it fired on
+ * `.ui-settings-section-nav-item > .ui-button`, where the gap separates a label
+ * from a badge inside one button — nothing to do with the rhythm of a stack.
+ *
+ * LIMITATION: the common case — a surface class wrapping kit children
+ * (e.g. `.st-export-import-section { margin-bottom: 16px }`) — is invisible
+ * to CSS-only analysis because the subject is a surface class, not a kit
+ * identity. That case is solved architecturally: the Stack primitive owns
+ * vertical rhythm, and surfaces that wrap kit children migrate to Stack.
+ *
+ * A surface spacing its own elements (subjects with no kit identity) stays
+ * silent, since those are the surface's own layout and not the kit's concern.
+ *
+ * Shares the same compound-selector logic as findSurfacePaintingKit.
+ */
+const SPACING_PROPERTIES = [/^margin-top$/, /^margin-bottom$/]
+
+const isSpacingProperty = (prop) => SPACING_PROPERTIES.some((re) => re.test(prop))
+
+function findSurfaceSpacingKit(ast, kitIdentities) {
+  const hits = []
+  css.walk(ast, {
+    visit: 'Rule',
+    enter(node) {
+      const props = []
+      css.walk(node.block, {
+        visit: 'Declaration',
+        enter(d) {
+          props.push(d.property)
+        },
+      })
+      if (props.length === 0) return
+
+      css.walk(node.prelude, {
+        visit: 'Selector',
+        enter(sel) {
+          // Split the selector into compounds; the last one is the subject.
+          const compounds = [[]]
+          sel.children.forEach((n) => {
+            if (n.type === 'Combinator') compounds.push([])
+            else compounds[compounds.length - 1].push(n)
+          })
+          const classesIn = (compound) =>
+            compound.filter((n) => n.type === 'ClassSelector').map((n) => n.name)
+
+          const subject = compounds[compounds.length - 1]
+          const subjectClasses = classesIn(subject)
+          const subjectIdentities = subjectClasses.filter((c) => kitIdentities.has(c))
+
+          if (subjectIdentities.length === 0) return
+
+          const spaced = props.filter(isSpacingProperty)
+          if (spaced.length === 0) return
+
+          const selector = css.generate(sel)
+          const line = sel.loc?.start.line ?? 0
+          hits.push({
+            selector,
+            line,
+            detail: `declares ${spaced.join(', ')} on \`.${subjectIdentities.join('.')}\` — vertical rhythm belongs to the Stack primitive, not to where the component is used`,
+          })
+        },
+      })
+    },
+  })
+  return hits
+}
+
+/**
  * Rule 7 — untokenised type.
  *
  * A `font-size` in px and a `font-family` that is not a token are the two ways the type
@@ -593,6 +670,20 @@ export function checkCSSIntegrity({ entry, stylesDir, uiDir }) {
       for (const hit of findSurfacePaintingKit(ast, kitIdentities)) {
         violations.push({
           rule: 'surface-paints-kit',
+          file: rel(file),
+          line: hit.line,
+          detail: `\`${hit.selector}\` ${hit.detail}`,
+        })
+      }
+    }
+
+    // Rule: surface-spacing-kit — a surface may not space kit components by hand.
+    // Shares the same scope as rule 3: the kit's own layer is where spacing is
+    // declared (inside the Stack CSS), and everywhere else must not add it.
+    if (!inKitLayer) {
+      for (const hit of findSurfaceSpacingKit(ast, kitIdentities)) {
+        violations.push({
+          rule: 'surface-spacing-kit',
           file: rel(file),
           line: hit.line,
           detail: `\`${hit.selector}\` ${hit.detail}`,
