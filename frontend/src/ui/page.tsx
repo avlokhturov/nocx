@@ -12,7 +12,7 @@
  * break if children were wrapped in a fragment.
  */
 
-import { Show } from 'solid-js'
+import { Show, createEffect, on } from 'solid-js'
 import type { JSX } from 'solid-js'
 import { PageHeader } from './page-header'
 import { PageBody } from './page-body'
@@ -43,6 +43,38 @@ export interface PageProps {
 }
 
 export function Page(props: PageProps) {
+  let bodyRef: HTMLDivElement | undefined
+
+  /**
+   * Focus placement after a page change (§3.8).
+   *
+   * Switching pages replaces the whole body, and whatever the user had focused goes
+   * with it — leaving focus on `document.body`, so the next Tab starts from the top of
+   * the window rather than from the page they just opened. Keyboard users lose their
+   * place silently; nothing about it is visible.
+   *
+   * Page owns this because every page needs it and none of them should have to
+   * remember: it is the same reason the focus ring lives in base.css rather than in
+   * each component. Keyed on `title`, which is the page's identity in the registry.
+   *
+   * `preventScroll` matters — focusing an element scrolls it into view by default,
+   * which would fight the scroll position a page has just been given.
+   */
+  createEffect(
+    on(
+      () => props.title,
+      (_title, prev) => {
+        if (prev === undefined) return // first render is not a page CHANGE
+        const active = document.activeElement
+        if (active && active !== document.body && bodyRef?.contains(active)) return
+        const target = bodyRef?.querySelector<HTMLElement>(
+          'input, select, button, [tabindex]:not([tabindex="-1"])',
+        )
+        target?.focus({ preventScroll: true })
+      },
+    ),
+  )
+
   return (
     <div class="ui-page" data-scroll={props.scrollMode ?? 'page'}>
       <PageHeader
@@ -51,7 +83,7 @@ export function Page(props: PageProps) {
         actions={props.actions}
         titleHidden={props.titleHidden}
       />
-      <PageBody>
+      <PageBody ref={(el: HTMLDivElement) => (bodyRef = el)}>
         <Show when={props.leading}>
           <PageRail>{props.leading}</PageRail>
         </Show>
