@@ -4,15 +4,12 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // Credential is a reusable authentication identity. It holds identity only —
 // never a host. Which endpoints a credential may be spent on is computed from
-// the saved profiles that reference it — but NOT yet. Host and Port stay here
-// through wave 1 because checkBinding (ssh_config.go:105) refuses a connection
-// whose BoundHost is empty and the resolver fills it from this field. They are
-// deleted in wave 2, in the same commit range that makes computed authorization
-// live. This move is a file move, not a semantic change.
+// the saved profiles that reference it.
 //
 // Secrets live in the credential.SecretStore behind opaque references
 // (ADR-0011 §2). SecretID and PassphraseSecretID are BACKEND-OWNED: they are
@@ -26,10 +23,6 @@ type Credential struct {
 	Username string   `json:"username"`
 	Auth     AuthMode `json:"auth"`
 	KeyPath  string   `json:"keyPath,omitempty"`
-
-	// Host/Port: see the note above. Renderer-owned while they exist.
-	Host string `json:"host,omitempty"`
-	Port int    `json:"port,omitempty"`
 
 	// SecretID is the opaque reference to the stored password.
 	SecretID string `json:"secretId,omitempty"`
@@ -55,11 +48,23 @@ type Credential struct {
 // typed per auth method: a generic "version with a SecretID" would be
 // password-shaped and would break on the first key rotation.
 type CredentialVersion struct {
-	ID                 string   `json:"id"`                           // "v1", "v2", … unique within the credential
-	Auth               AuthMode `json:"auth"`                         // the method this version is for
-	PasswordSecretID   string   `json:"passwordSecretId,omitempty"`   // password / keyboardInteractive
-	KeyFingerprint     string   `json:"keyFingerprint,omitempty"`     // publicKey: SHA256 of the PUBLIC key
-	PassphraseSecretID string   `json:"passphraseSecretId,omitempty"` // publicKey, optional
+	ID string `json:"id"`
+
+	// Auth is the credential's auth mode at the time this version was created.
+	// Used to validate version consistency against the credential's auth type.
+	Auth AuthMode `json:"auth,omitempty"`
+
+	// PasswordSecretID is the keychain reference for the password.
+	PasswordSecretID string `json:"passwordSecretId,omitempty"`
+	// PassphraseSecretID is the keychain reference for the key passphrase.
+	PassphraseSecretID string `json:"passphraseSecretId,omitempty"`
+
+	// KeyFingerprint is the SHA256 of the credential's public key, recorded
+	// by the backend when a key is saved. It is the identity of a key version.
+	KeyFingerprint string `json:"keyFingerprint,omitempty"`
+
+	// Created records when this version was created.
+	Created time.Time `json:"created,omitempty"`
 }
 
 const legacyVersionID = "v1"
@@ -70,14 +75,10 @@ const legacyVersionID = "v1"
 // window in which a password is unreachable.
 func (c Credential) Current() (CredentialVersion, bool) {
 	if len(c.Versions) == 0 {
-		if c.SecretID == "" && c.PassphraseSecretID == "" {
-			return CredentialVersion{}, false
-		}
-		return CredentialVersion{
-			ID:                 legacyVersionID,
-			PasswordSecretID:   c.SecretID,
-			PassphraseSecretID: c.PassphraseSecretID,
-		}, true
+		return CredentialVersion{ID: legacyVersionID, PasswordSecretID: c.SecretID, PassphraseSecretID: c.PassphraseSecretID}, true
+	}
+	if c.CurrentVersionID == "" {
+		return CredentialVersion{}, false
 	}
 	return c.Version(c.CurrentVersionID)
 }
@@ -99,14 +100,13 @@ func (v CredentialVersion) ValidateVersion() error {
 	switch v.Auth {
 	case AuthPassword, AuthKeyboardInteractive:
 		if v.KeyFingerprint != "" {
-			return fmt.Errorf("version %s: keyFingerprint is not valid for auth mode %s", v.ID, v.Auth)
+			return errors.New("password/keyboard-interactive credential version carries a key fingerprint")
 		}
 	case AuthPublicKey:
-		// KeyFingerprint is required; passphrase is optional.
-		// No auth-specific restriction beyond that.
+		// Public key versions may have a key fingerprint and/or passphrase.
 	case AuthAgent:
-		if v.PasswordSecretID != "" || v.PassphraseSecretID != "" || v.KeyFingerprint != "" {
-			return fmt.Errorf("version %s: agent auth version must not carry secret references", v.ID)
+		if v.PasswordSecretID != "" || v.KeyFingerprint != "" {
+			return errors.New("agent credential version carries keys or passwords")
 		}
 	}
 	return nil
@@ -124,8 +124,6 @@ type CredentialPatch struct {
 	Username *string
 	Auth     *AuthMode
 	KeyPath  *string
-	Host     *string // removed in wave 2 with the field
-	Port     *int    // removed in wave 2 with the field
 }
 
 // WithPatch returns c with the patch applied. Fields the patch does not mention
@@ -144,12 +142,6 @@ func (c Credential) WithPatch(p CredentialPatch) Credential {
 	if p.KeyPath != nil {
 		c.KeyPath = *p.KeyPath
 	}
-	if p.Host != nil {
-		c.Host = *p.Host
-	}
-	if p.Port != nil {
-		c.Port = *p.Port
-	}
 	return c
 }
 
@@ -158,36 +150,27 @@ func NewCredentialID(name string) string {
 	return "cred:" + slugify(name) + ":" + newUUID()
 }
 
-// Validate reports whether the credential may be stored. The host check is
-// unchanged from profile.go and stays until wave 2 removes the field with the
-// binding it feeds; the two identity checks are new, and they are what remains
-// once the host check goes.
+// Validate reports whether the credential may be stored.
 func (c Credential) Validate() error {
+	if strings.TrimSpace(c.ID) == "" {
+		return errors.New("credential id is required")
+	}
 	if strings.TrimSpace(c.Name) == "" {
 		return ErrCredentialNameRequired
 	}
 	if strings.TrimSpace(c.Username) == "" {
 		return ErrCredentialUsernameRequired
 	}
-	if strings.TrimSpace(c.Host) == "" {
-		return ErrCredentialHostRequired
-	}
 	for _, v := range c.Versions {
 		if err := v.ValidateVersion(); err != nil {
-			return fmt.Errorf("credential %s: %w", c.ID, err)
+			return fmt.Errorf("credential %q version %q: %w", c.Name, v.ID, err)
 		}
 	}
 	return nil
 }
 
-// ErrCredentialHostRequired is nocx-mon's policy, moved here verbatim. It goes
-// away in wave 2 together with Credential.Host, when computed authorization
-// replaces the binding it enforces — not before, because checkBinding refuses
-// an empty BoundHost and the resolver has nothing else to fill it from.
-var ErrCredentialHostRequired = errors.New("credential must be bound to a host")
-
 // ErrCredentialNameRequired and ErrCredentialUsernameRequired are the identity
-// completeness checks. They are additive: the host check above still runs.
+// completeness checks.
 var (
 	ErrCredentialNameRequired     = errors.New("credential name is required")
 	ErrCredentialUsernameRequired = errors.New("credential username is required")

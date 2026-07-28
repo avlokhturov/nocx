@@ -1162,8 +1162,6 @@ func (s *WSServer) handleCredentialCRUDMethod(wconn *wsConn, req jsonrpcRequest)
 			Username: in.Username,
 			Auth:     in.Auth,
 			KeyPath:  in.KeyPath,
-			Host:     in.Host,
-			Port:     in.Port,
 		}
 		if err := s.credMeta.CreateCredential(c); err != nil {
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, credentialErrorCode(err), err.Error()))
@@ -1215,8 +1213,6 @@ type credentialCreateDTO struct {
 	Username           string           `json:"username"`
 	Auth               profile.AuthMode `json:"auth"`
 	KeyPath            string           `json:"keyPath"`
-	Host               string           `json:"host"`
-	Port               int              `json:"port"`
 	SecretID           string           `json:"secretId"`
 	PassphraseSecretID string           `json:"passphraseSecretId"`
 }
@@ -1231,8 +1227,6 @@ type credentialUpdateDTO struct {
 	Username           *string           `json:"username"`
 	Auth               *profile.AuthMode `json:"auth"`
 	KeyPath            *string           `json:"keyPath"`
-	Host               *string           `json:"host"`
-	Port               *int              `json:"port"`
 	SecretID           string            `json:"secretId"`
 	PassphraseSecretID string            `json:"passphraseSecretId"`
 }
@@ -1240,7 +1234,6 @@ type credentialUpdateDTO struct {
 func (d credentialUpdateDTO) Patch() profile.CredentialPatch {
 	return profile.CredentialPatch{
 		Name: d.Name, Username: d.Username, Auth: d.Auth, KeyPath: d.KeyPath,
-		Host: d.Host, Port: d.Port,
 	}
 }
 

@@ -13,12 +13,12 @@ func newTestStore(t *testing.T) *JSONStore {
 
 func TestCreateCredential_RejectsDuplicateID(t *testing.T) {
 	s := newTestStore(t)
-	c := Credential{ID: "cred:a:1", Name: "a", Username: "u", Auth: AuthPassword, SecretID: "sec:1", Host: "10.0.0.1"}
+	c := Credential{ID: "cred:a:1", Name: "a", Username: "u", Auth: AuthPassword, SecretID: "sec:1"}
 	if err := s.CreateCredential(c); err != nil {
 		t.Fatalf("first create: %v", err)
 	}
 
-	dup := Credential{ID: "cred:a:1", Name: "impostor", Username: "u2", Auth: AuthAgent, Host: "10.0.0.1"}
+	dup := Credential{ID: "cred:a:1", Name: "impostor", Username: "u2", Auth: AuthAgent}
 	if err := s.CreateCredential(dup); !errors.Is(err, ErrCredentialExists) {
 		t.Fatalf("second create err = %v, want ErrCredentialExists", err)
 	}
@@ -55,7 +55,7 @@ func TestUpdateCredential_RejectsMissingID(t *testing.T) {
 func TestUpdateCredential_MergesAndKeepsSecretID(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.CreateCredential(Credential{
-		ID: "cred:a:1", Name: "a", Username: "u", Auth: AuthPassword, SecretID: "sec:1", Host: "10.0.0.1",
+		ID: "cred:a:1", Name: "a", Username: "u", Auth: AuthPassword, SecretID: "sec:1",
 	}); err != nil {
 		t.Fatalf("create: %v", err)
 	}

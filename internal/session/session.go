@@ -273,6 +273,13 @@ func sshOptionsFromConfig(cfg *ssh.ConnectConfig) []ssh.ConnectOption {
 	if cfg.Secrets != nil {
 		opts = append(opts, ssh.WithCredentials(cfg.Secrets, cfg.SecretID))
 	}
+
+	if cfg.AuthorizedEndpoint != "" {
+		opts = append(opts, ssh.WithAuthorizedEndpoint(cfg.AuthorizedEndpoint))
+	}
+	if cfg.JumpAuthorizedEndpoint != "" {
+		opts = append(opts, ssh.WithJumpAuthorizedEndpoint(cfg.JumpAuthorizedEndpoint))
+	}
 	if cfg.RemoteInstaller != nil {
 		opts = append(opts, ssh.WithRemoteInstaller(cfg.RemoteInstaller))
 	}

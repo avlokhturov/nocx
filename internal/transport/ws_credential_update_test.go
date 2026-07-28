@@ -34,7 +34,6 @@ func TestCredentialsRPC_UpdatePreservesSecretRefs(t *testing.T) {
 		Name:     "prod-ops",
 		Username: "ops",
 		Auth:     profile.AuthPassword,
-		Host:     "10.0.0.1",
 	})
 
 	pwID := h.savePasswordViaRPC(id, "s3cret")

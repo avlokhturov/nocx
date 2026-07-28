@@ -10,6 +10,9 @@ package connection
 import (
 	"errors"
 	"fmt"
+	"net"
+	"strconv"
+	"time"
 
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/profile"
@@ -19,13 +22,34 @@ import (
 // Resolver maps profile IDs to ssh.ConnectConfig with credential wiring.
 type Resolver struct {
 	profiles profile.ProfileRepository
+	groups   profile.GroupRepository
 	credMeta profile.CredentialMetadataRepository
 	secrets  credential.SecretStore
+
+	// sshConfigPath is the path to ~/.ssh/config, used to resolve profile
+	// hosts through alias HostName directives before setting the authorized
+	// endpoint. An empty path means no resolution (bare hostname used as-is).
+	sshConfigPath string
+}
+
+// ResolverOption configures the Resolver.
+type ResolverOption func(*Resolver)
+
+// WithSSHConfigPath sets the path to ~/.ssh/config for resolving profile
+// host aliases. When set, the resolver applies SSH config HostName resolution
+// to the profile's Host before storing it as the authorized endpoint, so
+// the authorization identity is the canonical hostname — not the alias.
+func WithSSHConfigPath(path string) ResolverOption {
+	return func(r *Resolver) { r.sshConfigPath = path }
 }
 
 // NewResolver creates a Resolver backed by the given stores.
-func NewResolver(pr profile.ProfileRepository, cmr profile.CredentialMetadataRepository, ss credential.SecretStore) *Resolver {
-	return &Resolver{profiles: pr, credMeta: cmr, secrets: ss}
+func NewResolver(pr profile.ProfileRepository, gr profile.GroupRepository, cmr profile.CredentialMetadataRepository, ss credential.SecretStore, opts ...ResolverOption) *Resolver {
+	r := &Resolver{profiles: pr, groups: gr, credMeta: cmr, secrets: ss}
+	for _, o := range opts {
+		o(r)
+	}
+	return r
 }
 
 // Resolve maps a profile ID to a Resolved ready for SSH connection.
@@ -36,6 +60,12 @@ func NewResolver(pr profile.ProfileRepository, cmr profile.CredentialMetadataRep
 //   - SecretStore + SecretID wired for late-bound password resolution
 //     (only when a credential is linked)
 //   - Jump host fields resolved recursively (with cycle detection)
+//   - KeepaliveInterval/KeepaliveCountMax/ReadyTimeout/AgentForward from the
+//     effective profile (profile + group inheritance + global defaults)
+//   - AuthorizedEndpoint from the profile's Host, resolved through
+//     ~/.ssh/config to the canonical hostname (not the alias). The credential
+//     is authorized for this resolved endpoint, verified at connect time
+//     against the freshly-resolved dial target.
 //
 // Passwords are never set as plaintext on the returned config.
 func (r *Resolver) Resolve(profileID string) (host string, cfg *ssh.ConnectConfig, err error) {
@@ -43,7 +73,6 @@ func (r *Resolver) Resolve(profileID string) (host string, cfg *ssh.ConnectConfi
 	if err != nil {
 		return "", nil, err
 	}
-
 	visited := map[string]bool{profileID: true}
 	cfg, err = r.buildConfig(&prof, visited)
 	if err != nil {
@@ -68,23 +97,61 @@ func (r *Resolver) findProfile(id string) (profile.SSHProfile, error) {
 }
 
 // buildConfig constructs a ConnectConfig from a profile, handling credential
-// resolution and jump host recursion.
+// resolution, effective profile inheritance, and jump host recursion.
 func (r *Resolver) buildConfig(prof *profile.SSHProfile, visited map[string]bool) (*ssh.ConnectConfig, error) {
 	cfg := &ssh.ConnectConfig{}
 	cfg.Port = prof.Options.Port
 
-	if prof.Options.CredentialID != "" {
-		cred, err := r.findCredential(prof.Options.CredentialID)
+	// Resolve effective profile (profile + group inheritance + defaults).
+	groups, err := r.groups.LoadGroups()
+	if err != nil {
+		return nil, fmt.Errorf("load groups: %w", err)
+	}
+	// No global defaults store yet — pass empty.
+	eff, err := profile.ResolveEffectiveProfile(*prof, groups, profile.SparseSSHOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("resolve effective profile for %s: %w", prof.ID, err)
+	}
+
+	// Use the effective profile's port (profile > group chain > global > 22).
+	// ~/.ssh/config Port is applied at connect time by resolveConfig, which
+	// is outranked by the explicit cfg.Port set here.
+	cfg.Port = eff.Profile.Options.Port
+
+	// Copy keepalive/timeout/agentforward from effective profile.
+	// The profile stores MILLISECONDS; ConnectConfig fields are time.Duration.
+	if eff.Profile.Options.KeepaliveInterval > 0 {
+		cfg.KeepaliveInterval = time.Duration(eff.Profile.Options.KeepaliveInterval) * time.Millisecond
+	}
+	if eff.Profile.Options.KeepaliveCountMax > 0 {
+		cfg.KeepaliveCountMax = eff.Profile.Options.KeepaliveCountMax
+	} else {
+		cfg.KeepaliveCountMax = -1 // default: single failure closes
+	}
+	if eff.Profile.Options.ReadyTimeout > 0 {
+		cfg.ReadyTimeout = time.Duration(eff.Profile.Options.ReadyTimeout) * time.Millisecond
+	}
+	cfg.AgentForward = eff.Profile.Options.AgentForward
+
+	credID := eff.Profile.Options.CredentialID
+	if credID != "" {
+		cred, err := r.findCredential(credID)
 		if err != nil {
 			return nil, fmt.Errorf("profile %s: %w", prof.ID, err)
 		}
 		cfg.User = cred.Username
 		cfg.AuthMode = string(cred.Auth)
 		cfg.KeyFile = cred.KeyPath
-
-		cfg.BoundHost = cred.Host
-		cfg.BoundPort = cred.Port
-
+		// Authorized endpoint: the profile's Host is resolved through
+		// ~/.ssh/config to get the canonical hostname (not the alias), then
+		// stored as the authorization identity. At connect time, the same
+		// resolution is applied to the dial target, so an alias connects and
+		// a HostName change (drift) is detected as a mismatch.
+		authHost := r.resolveProfileHost(prof.Options.Host)
+		cfg.AuthorizedEndpoint = authHost
+		if cfg.Port > 0 {
+			cfg.AuthorizedEndpoint = net.JoinHostPort(authHost, strconv.Itoa(cfg.Port))
+		}
 		// Wire SecretStore for late-bound password/passphrase resolution
 		// via opaque SecretID references (ADR-0011 §2).
 		cfg.Secrets = r.secrets
@@ -102,29 +169,30 @@ func (r *Resolver) buildConfig(prof *profile.SSHProfile, visited map[string]bool
 			}
 		}
 	} else {
-		cfg.User = prof.Options.User
-		cfg.AuthMode = string(prof.Options.Auth)
+		cfg.User = eff.Profile.Options.User
+		cfg.AuthMode = string(eff.Profile.Options.Auth)
 	}
 
-	// Resolve jump host if set.
-	if prof.Options.JumpHost != "" {
-		if visited[prof.Options.JumpHost] {
-			return nil, fmt.Errorf("cyclic jump host reference: %s -> %s", prof.ID, prof.Options.JumpHost)
+	// Resolve jump host if set (from effective profile, which may inherit it).
+	jumpHostID := eff.Profile.Options.JumpHost
+	if jumpHostID != "" {
+		if visited[jumpHostID] {
+			return nil, fmt.Errorf("cyclic jump host reference: %s -> %s", prof.ID, jumpHostID)
 		}
-		visited[prof.Options.JumpHost] = true
+		visited[jumpHostID] = true
 
-		jumpProf, err := r.findProfile(prof.Options.JumpHost)
+		jumpProf, err := r.findProfile(jumpHostID)
 		if err != nil {
-			return nil, fmt.Errorf("jump host %s: %w", prof.Options.JumpHost, err)
+			return nil, fmt.Errorf("jump host %s: %w", jumpHostID, err)
 		}
 
 		jumpCfg, err := r.buildConfig(&jumpProf, visited)
 		if err != nil {
-			return nil, fmt.Errorf("jump host %s: %w", prof.Options.JumpHost, err)
+			return nil, fmt.Errorf("jump host %s: %w", jumpHostID, err)
 		}
 
 		cfg.JumpHost = jumpProf.Options.Host
-		cfg.JumpPort = jumpProf.Options.Port
+		cfg.JumpPort = jumpCfg.Port
 		cfg.JumpUser = jumpCfg.User
 		cfg.JumpKeyFile = jumpCfg.KeyFile
 		cfg.JumpAuthMode = jumpCfg.AuthMode
@@ -133,8 +201,13 @@ func (r *Resolver) buildConfig(prof *profile.SSHProfile, visited map[string]bool
 			cfg.JumpSecrets = jumpCfg.Secrets
 			cfg.JumpSecretID = jumpCfg.SecretID
 			cfg.JumpPassphraseSecretID = jumpCfg.PassphraseSecretID
-			cfg.JumpBoundHost = jumpCfg.BoundHost
-			cfg.JumpBoundPort = jumpCfg.BoundPort
+			// Authorized endpoint for the jump credential: resolved through
+			// ~/.ssh/config, same as the target credential.
+			jumpAuthHost := r.resolveProfileHost(jumpProf.Options.Host)
+			cfg.JumpAuthorizedEndpoint = jumpAuthHost
+			if jumpCfg.Port > 0 {
+				cfg.JumpAuthorizedEndpoint = net.JoinHostPort(jumpAuthHost, strconv.Itoa(jumpCfg.Port))
+			}
 		}
 	}
 
@@ -153,6 +226,16 @@ func (r *Resolver) findCredential(id string) (profile.Credential, error) {
 		}
 	}
 	return profile.Credential{}, fmt.Errorf("credential %s: %w", id, ErrProfileNotFound)
+}
+
+// resolveProfileHost applies ~/.ssh/config HostName resolution to a profile's
+// host, returning the canonical hostname. An empty sshConfigPath means no
+// resolution (the original host is returned unchanged).
+func (r *Resolver) resolveProfileHost(host string) string {
+	if r.sshConfigPath == "" {
+		return host
+	}
+	return ssh.ResolveHostName(r.sshConfigPath, host)
 }
 
 // ErrProfileNotFound is returned when a profile or credential ID is not found.

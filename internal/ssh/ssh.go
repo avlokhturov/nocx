@@ -61,36 +61,20 @@ type ConnectConfig struct {
 	JumpKeyFile  string
 	JumpAuthMode string
 
-	// BoundHost/BoundPort carry the host a linked credential is bound to
-	// (from profile.Credential), set by the resolver. internal/ssh enforces
-	// them after resolveConfig against the *resolved* hostname and effective
-	// port — never the alias the renderer chose. Binding on the alias is
-	// unsound: ~/.ssh/config can map "Host myserver" to "HostName
-	// evil.example.com", so a binding satisfiable by a name the attacker
-	// chooses is not a binding (nocx-mon/PR11-T5). An empty BoundHost means
-	// the credential is unbound and is REFUSED at connect time — "any host"
-	// is exactly the credential-redirection hole. An unset BoundPort (0)
-	// means "this host, any port": host is the load-bearing identity; making
-	// port mandatory would break every existing host-only credential harder
-	// than the hole it would close. Stated exception, not a silent gap.
-	BoundHost string
-	BoundPort int
+	// AuthorizedEndpoint carries the endpoint identity that a linked credential
+	// is authorized for, set by the resolver. The value is the profile's Host
+	// resolved through ~/.ssh/config to the canonical hostname (not the alias).
+	// At connect time, after resolveConfig applies ~/.ssh/config to the dial
+	// target, this value is compared against the resolved endpoint: the
+	// credential may only be spent on the endpoint its profile identifies.
+	// An empty AuthorizedEndpoint means no credential is linked (inline auth)
+	// and no check is performed.
+	// Port is included when the effective profile specifies one.
+	AuthorizedEndpoint string
 
-	// JumpBoundHost/JumpBoundPort are the jump credential's binding, enforced
-	// against the jump host's resolved name and effective port independently
-	// of the target — a target-bound credential must not satisfy the jump
-	// binding and vice versa.
-	JumpBoundHost string
-	JumpBoundPort int
-
-	// JumpSecrets, when set, enables late-bind of the jump host's
-	// password from the SecretStore. Separate from the target's Secrets
-	// so each hop resolves independently.
-	JumpSecrets  credential.SecretStore
-	JumpSecretID credential.SecretID
-	// JumpPassphraseSecretID is the opaque reference to the jump host's key
-	// passphrase in the SecretStore.
-	JumpPassphraseSecretID credential.SecretID
+	// JumpAuthorizedEndpoint is the jump credential's authorized endpoint,
+	// resolved through ~/.ssh/config independently of the target.
+	JumpAuthorizedEndpoint string
 
 	// Secrets, when set, enables late-bind of stored passwords from the
 	// SecretStore by SecretID. The store is the seam between the profile
@@ -101,6 +85,15 @@ type ConnectConfig struct {
 	// PassphraseSecretID is the opaque reference to the stored key
 	// passphrase in the SecretStore.
 	PassphraseSecretID credential.SecretID
+
+	// JumpSecrets, when set, enables late-bind of the jump host's
+	// password from the SecretStore. Separate from the target's Secrets
+	// so each hop resolves independently.
+	JumpSecrets  credential.SecretStore
+	JumpSecretID credential.SecretID
+	// JumpPassphraseSecretID is the opaque reference to the jump host's key
+	// passphrase in the SecretStore.
+	JumpPassphraseSecretID credential.SecretID
 
 	// KeepaliveInterval controls how often the SSH keepalive probe
 	// ("keepalive@openssh.com") is sent on the connection. Zero disables
@@ -226,6 +219,20 @@ func WithCredentials(store credential.SecretStore, id credential.SecretID) Conne
 		c.Secrets = store
 		c.SecretID = id
 	}
+}
+
+// WithAuthorizedEndpoint sets the endpoint identity a linked credential is
+// authorized for, set by the resolver. The value is the profile's Host,
+// resolved through ~/.ssh/config to the canonical hostname. At connect time,
+// this is compared against the resolved dial target.
+func WithAuthorizedEndpoint(endpoint string) ConnectOption {
+	return func(c *ConnectConfig) { c.AuthorizedEndpoint = endpoint }
+}
+
+// WithJumpAuthorizedEndpoint sets the jump credential's authorized endpoint,
+// matching WithAuthorizedEndpoint but for the jump host.
+func WithJumpAuthorizedEndpoint(endpoint string) ConnectOption {
+	return func(c *ConnectConfig) { c.JumpAuthorizedEndpoint = endpoint }
 }
 
 type Stub struct {

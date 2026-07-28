@@ -75,15 +75,23 @@ func (rc *RealClient) Connect(ctx context.Context, host string, opts ...ConnectO
 	if err != nil {
 		return nil, fmt.Errorf("resolve config for %s: %w", host, err)
 	}
-
-	// Enforce the credential binding BEFORE any dial. Only a linked
-	// credential (Secrets != nil) carries a binding to check; inline
-	// auth has no stored secret to redirect. The check sees the resolved
-	// hostname/effective port, so an alias remapped via HostName cannot
-	// slip a bound credential past its target (nocx-mon/PR11-T5).
+	// Enforce computed authorization BEFORE any dial. Only a linked credential
+	// (Secrets != nil) carries an authorized endpoint to check; inline auth has
+	// no stored secret to redirect.
+	//
+	// Resolve the authorized endpoint through ~/.ssh/config separately from the
+	// dial target. The resolver stores the canonical (resolved) hostname, and
+	// this pass re-resolves it through the current SSH config. If ~/.ssh/config
+	// changed since the resolver ran (drift), the two resolutions yield different
+	// results and the check fails. For binding tests that bypass the resolver,
+	// this pass also resolves aliases set directly as AuthorizedEndpoint.
+	//
+	// The host parameter and cfg.AuthorizedEndpoint are separate inputs, so
+	// comparing their resolved forms is not self-authorizing.
 	if cfg.Secrets != nil {
-		if bindErr := checkBinding(cfg.BoundHost, cfg.BoundPort, resolved, string(cfg.SecretID), false); bindErr != nil {
-			return nil, bindErr
+		resolvedAuthz := rc.resolveAuthzEndpoint(cfg.AuthorizedEndpoint)
+		if authErr := checkAuthorization(resolvedAuthz, resolved, string(cfg.SecretID), false); authErr != nil {
+			return nil, authErr
 		}
 	}
 	key := rc.poolKeyFor(resolved, cfg)

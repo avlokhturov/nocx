@@ -583,27 +583,31 @@ func TestJSONStoreAtomicWrite(t *testing.T) {
 	}
 }
 
-// nocx-wd2m. Host binding is mandatory (nocx-mon), and the rule has to bite at
-// save time. Enforcing it only at connect time — which is where checkBinding
-// lives — means the user stores a secret, walks away, and meets the refusal
-// later as a broken connection instead of a rejected form.
-//
-// The store is the enforcement point on purpose: it is the one path every
-// writer goes through, so a future caller cannot route around the rule the way
-// it could around a check sitting in the transport handler.
-func TestSaveCredentialRejectsMissingHost(t *testing.T) {
+// TestSaveCredentialValidatesIdentity checks that a credential without a name
+// or username is rejected at save time.
+func TestSaveCredentialValidatesIdentity(t *testing.T) {
 	store := NewJSONStore(filepath.Join(t.TempDir(), "profiles.json"))
 
-	unbound := Credential{
-		ID:       NewCredentialID("unbound"),
-		Name:     "unbound",
+	noName := Credential{
+		ID:       NewCredentialID(""), // will get an ID anyway
 		Username: "bob",
 		Auth:     AuthPassword,
 	}
-	if err := store.CreateCredential(unbound); err == nil {
-		t.Fatal("CreateCredential accepted a credential with no host; an unbound credential must not be storable")
-	} else if !errors.Is(err, ErrCredentialHostRequired) {
-		t.Fatalf("want ErrCredentialHostRequired, got %T: %v", err, err)
+	if err := store.CreateCredential(noName); err == nil {
+		t.Fatal("CreateCredential accepted a credential with no name")
+	} else if !errors.Is(err, ErrCredentialNameRequired) {
+		t.Fatalf("want ErrCredentialNameRequired, got %T: %v", err, err)
+	}
+
+	noUser := Credential{
+		ID:   NewCredentialID("nameless"),
+		Name: "has-id",
+		Auth: AuthPassword,
+	}
+	if err := store.CreateCredential(noUser); err == nil {
+		t.Fatal("CreateCredential accepted a credential with no username")
+	} else if !errors.Is(err, ErrCredentialUsernameRequired) {
+		t.Fatalf("want ErrCredentialUsernameRequired, got %T: %v", err, err)
 	}
 
 	creds, err := store.LoadCredentials()
@@ -611,38 +615,23 @@ func TestSaveCredentialRejectsMissingHost(t *testing.T) {
 		t.Fatalf("LoadCredentials: %v", err)
 	}
 	if len(creds) != 0 {
-		t.Fatalf("a rejected credential must not be persisted; store holds %d", len(creds))
+		t.Fatalf("rejected credentials must not be persisted; store holds %d", len(creds))
 	}
 }
 
-func TestSaveCredentialRejectsWhitespaceOnlyHost(t *testing.T) {
+func TestSaveCredentialAcceptsValidCredential(t *testing.T) {
 	store := NewJSONStore(filepath.Join(t.TempDir(), "profiles.json"))
 
 	c := Credential{
-		ID:       NewCredentialID("spacey"),
-		Name:     "spacey",
+		ID:       NewCredentialID("valid"),
+		Name:     "valid",
 		Username: "bob",
 		Auth:     AuthPassword,
-		Host:     "   ",
-	}
-	if err := store.CreateCredential(c); !errors.Is(err, ErrCredentialHostRequired) {
-		t.Fatalf("want ErrCredentialHostRequired for a whitespace host, got %v", err)
-	}
-}
-
-func TestSaveCredentialAcceptsBoundCredential(t *testing.T) {
-	store := NewJSONStore(filepath.Join(t.TempDir(), "profiles.json"))
-
-	c := Credential{
-		ID:       NewCredentialID("bound"),
-		Name:     "bound",
-		Username: "bob",
-		Auth:     AuthPassword,
-		Host:     "host.example.com",
 	}
 	if err := store.CreateCredential(c); err != nil {
-		t.Fatalf("CreateCredential(c): %v", err)
+		t.Fatalf("CreateCredential rejected a valid credential: %v", err)
 	}
+
 	creds, err := store.LoadCredentials()
 	if err != nil {
 		t.Fatalf("LoadCredentials: %v", err)
@@ -652,8 +641,6 @@ func TestSaveCredentialAcceptsBoundCredential(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Unknown-key tolerance — store loads through, resolution errors, save rejects
 // ---------------------------------------------------------------------------
 
 func TestLoadGroupsThroughUnknownDefaultKeys(t *testing.T) {

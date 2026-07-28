@@ -191,9 +191,8 @@ func TestNoPlaintextSecretsOnWire(t *testing.T) {
 	_ = ps.CreateCredential(profile.Credential{
 		ID:       "cred:canary:aaa",
 		Name:     "canary-cred",
-		Username: "canary-user",
+		Username: "canary",
 		Auth:     "password",
-		Host:     "10.0.0.1",
 		SecretID: string(tgtPWID),
 	})
 
@@ -203,9 +202,8 @@ func TestNoPlaintextSecretsOnWire(t *testing.T) {
 	_ = ps.CreateCredential(profile.Credential{
 		ID:       "cred:canary:bbb",
 		Name:     "jump-canary",
-		Username: "jump-canary-user",
+		Username: "jump-canary",
 		Auth:     "publicKey",
-		Host:     "10.0.0.1",
 		KeyPath:  "/home/canary/.ssh/id_rsa",
 		SecretID: string(jumpPWID),
 	})
@@ -227,7 +225,7 @@ func TestNoPlaintextSecretsOnWire(t *testing.T) {
 		},
 	})
 
-	resolver := connection.NewResolver(ps, ps, cs)
+	resolver := connection.NewResolver(ps, ps, ps, cs)
 	ws := NewWSServer(
 		log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
 		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps),

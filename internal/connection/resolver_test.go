@@ -251,7 +251,7 @@ func TestResolver_CredentialMode(t *testing.T) {
 		},
 	})
 
-	r := NewResolver(ps, ps, ss)
+	r := NewResolver(ps, ps, ps, ss)
 	host, cfg, err := r.Resolve("profile:1")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
@@ -296,7 +296,7 @@ func TestResolver_InlineMode(t *testing.T) {
 		},
 	})
 
-	r := NewResolver(ps, ps, ss)
+	r := NewResolver(ps, ps, ps, ss)
 	host, cfg, err := r.Resolve("profile:inline")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
@@ -324,7 +324,7 @@ func TestResolver_UnknownProfile(t *testing.T) {
 	ps := newStubProfileStore()
 	ss := newStubSecretStore()
 
-	r := NewResolver(ps, ps, ss)
+	r := NewResolver(ps, ps, ps, ss)
 	_, _, err := r.Resolve("nonexistent")
 	if err == nil {
 		t.Fatal("expected error for unknown profile")
@@ -369,7 +369,7 @@ func TestResolver_JumpHost(t *testing.T) {
 		},
 	})
 
-	r := NewResolver(ps, ps, ss)
+	r := NewResolver(ps, ps, ps, ss)
 	host, cfg, err := r.Resolve("profile:tgt")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
@@ -429,7 +429,7 @@ func TestResolver_JumpHostInlineMode(t *testing.T) {
 		},
 	})
 
-	r := NewResolver(ps, ps, ss)
+	r := NewResolver(ps, ps, ps, ss)
 	host, cfg, err := r.Resolve("profile:tgt2")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
@@ -458,31 +458,27 @@ func TestResolver_CarriesTargetBinding(t *testing.T) {
 		Name:     "bound-cred",
 		Username: "u",
 		Auth:     "password",
-		Host:     "bound.example.com",
-		Port:     2222,
 		SecretID: string(pwID),
 	})
 	_ = ps.SaveProfile(profile.SSHProfile{
 		Base:    profile.Base{ID: "profile:bound", Name: "bound"},
-		Options: profile.SSHProfileOptions{Host: "bound.example.com", CredentialID: "cred:bound:aaa"},
+		Options: profile.SSHProfileOptions{Host: "bound.example.com", Port: 2222, CredentialID: "cred:bound:aaa"},
 	})
 
-	r := NewResolver(ps, ps, ss)
+	r := NewResolver(ps, ps, ps, ss)
 	_, cfg, err := r.Resolve("profile:bound")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
 
-	if cfg.BoundHost != "bound.example.com" {
-		t.Errorf("BoundHost = %q, want bound.example.com", cfg.BoundHost)
-	}
-	if cfg.BoundPort != 2222 {
-		t.Errorf("BoundPort = %d, want 2222", cfg.BoundPort)
+	if cfg.AuthorizedEndpoint != "bound.example.com:2222" {
+		t.Errorf("AuthorizedEndpoint = %q, want bound.example.com:2222", cfg.AuthorizedEndpoint)
 	}
 }
 
-//nolint:errcheck
-func TestResolver_UnboundCredentialSurfacesEmpty(t *testing.T) {
+// TestResolver_UnboundCredentialSurfacesEmpty pin that a credential with no
+// Host/Port fields still produces an AuthorizedEndpoint from its profile.
+func TestResolver_LinkedCredentialSurfacesAuthorizedEndpoint(t *testing.T) {
 	ps := newStubProfileStore()
 	ss := newStubSecretStore()
 
@@ -493,30 +489,27 @@ func TestResolver_UnboundCredentialSurfacesEmpty(t *testing.T) {
 		Name:     "unbound",
 		Username: "u",
 		Auth:     "password",
-		Host:     "", // unbound
-		Port:     0,
 		SecretID: string(pwID),
 	})
 	_ = ps.SaveProfile(profile.SSHProfile{
 		Base:    profile.Base{ID: "profile:unbound", Name: "unbound"},
-		Options: profile.SSHProfileOptions{Host: "any.example.com", CredentialID: "cred:unbound:bbb"},
+		Options: profile.SSHProfileOptions{Host: "any.example.com", Port: 22, CredentialID: "cred:unbound:bbb"},
 	})
 
-	r := NewResolver(ps, ps, ss)
+	r := NewResolver(ps, ps, ps, ss)
 	_, cfg, err := r.Resolve("profile:unbound")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
 
-	if cfg.BoundHost != "" {
-		t.Errorf("BoundHost = %q, want empty (unbound)", cfg.BoundHost)
+	if cfg.AuthorizedEndpoint == "" {
+		t.Error("AuthorizedEndpoint = empty, want endpoint from profile (credential is linked)")
 	}
-	if cfg.BoundPort != 0 {
-		t.Errorf("BoundPort = %d, want 0", cfg.BoundPort)
+	if cfg.AuthorizedEndpoint != "any.example.com:22" {
+		t.Errorf("AuthorizedEndpoint = %q, want any.example.com:22 (from profile host:port)", cfg.AuthorizedEndpoint)
 	}
 }
 
-//nolint:errcheck
 func TestResolver_CarriesJumpBinding(t *testing.T) {
 	ps := newStubProfileStore()
 	ss := newStubSecretStore()
@@ -529,13 +522,11 @@ func TestResolver_CarriesJumpBinding(t *testing.T) {
 		Name:     "jump-bound",
 		Username: "ju",
 		Auth:     "password",
-		Host:     "jump-bound.example.com",
-		Port:     2222,
 		SecretID: string(jumpPWID),
 	})
 	_ = ps.SaveProfile(profile.SSHProfile{
 		Base:    profile.Base{ID: "profile:jumpb", Name: "jumpb"},
-		Options: profile.SSHProfileOptions{Host: "jump-bound.example.com", CredentialID: "cred:jumpbound:ccc"},
+		Options: profile.SSHProfileOptions{Host: "jump-bound.example.com", Port: 2222, CredentialID: "cred:jumpbound:ccc"},
 	})
 
 	// Target
@@ -546,32 +537,24 @@ func TestResolver_CarriesJumpBinding(t *testing.T) {
 		Name:     "tgt-bound",
 		Username: "tu",
 		Auth:     "password",
-		Host:     "tgt-bound.example.com",
-		Port:     3333,
 		SecretID: string(tgtPWID),
 	})
 	_ = ps.SaveProfile(profile.SSHProfile{
 		Base:    profile.Base{ID: "profile:tgtb", Name: "tgtb"},
-		Options: profile.SSHProfileOptions{Host: "tgt-bound.example.com", CredentialID: "cred:tgtbound:ddd", JumpHost: "profile:jumpb"},
+		Options: profile.SSHProfileOptions{Host: "tgt-bound.example.com", Port: 3333, CredentialID: "cred:tgtbound:ddd", JumpHost: "profile:jumpb"},
 	})
 
-	r := NewResolver(ps, ps, ss)
+	r := NewResolver(ps, ps, ps, ss)
 	_, cfg, err := r.Resolve("profile:tgtb")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
 
-	if cfg.BoundHost != "tgt-bound.example.com" {
-		t.Errorf("BoundHost = %q, want tgt-bound.example.com", cfg.BoundHost)
+	if cfg.AuthorizedEndpoint != "tgt-bound.example.com:3333" {
+		t.Errorf("AuthorizedEndpoint = %q, want tgt-bound.example.com:3333", cfg.AuthorizedEndpoint)
 	}
-	if cfg.BoundPort != 3333 {
-		t.Errorf("BoundPort = %d, want 3333", cfg.BoundPort)
-	}
-	if cfg.JumpBoundHost != "jump-bound.example.com" {
-		t.Errorf("JumpBoundHost = %q, want jump-bound.example.com", cfg.JumpBoundHost)
-	}
-	if cfg.JumpBoundPort != 2222 {
-		t.Errorf("JumpBoundPort = %d, want 2222", cfg.JumpBoundPort)
+	if cfg.JumpAuthorizedEndpoint != "jump-bound.example.com:2222" {
+		t.Errorf("JumpAuthorizedEndpoint = %q, want jump-bound.example.com:2222", cfg.JumpAuthorizedEndpoint)
 	}
 }
 
@@ -590,7 +573,6 @@ func TestResolve_UsesCurrentVersionSecret(t *testing.T) {
 
 	cred := profile.Credential{
 		ID: "cred:ops:1", Name: "ops", Username: "ops", Auth: profile.AuthPassword,
-		Host: "10.0.0.1", // still required in wave 1 — see the note above
 		Versions: []profile.CredentialVersion{
 			{ID: "v7", PasswordSecretID: "sec:7"},
 			{ID: "v8", PasswordSecretID: "sec:8"},
@@ -605,7 +587,7 @@ func TestResolve_UsesCurrentVersionSecret(t *testing.T) {
 	}
 	_ = ps.SaveProfile(prof)
 
-	r := NewResolver(ps, ps, ss)
+	r := NewResolver(ps, ps, ps, ss)
 
 	_, cfg, err := r.Resolve(prof.ID)
 	if err != nil {

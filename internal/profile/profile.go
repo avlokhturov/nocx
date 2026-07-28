@@ -109,6 +109,7 @@ type SparseSSHOptions struct {
 	Port                 *int                  `json:"port,omitempty"`
 	User                 *string               `json:"user,omitempty"`
 	KeyPath              *string               `json:"keyPath,omitempty"`
+	Auth                 *AuthMode             `json:"auth,omitempty"`
 	JumpHost             *string               `json:"jumpHost,omitempty"`
 	KeepaliveInterval    *int                  `json:"keepaliveInterval,omitempty"`
 	KeepaliveCountMax    *int                  `json:"keepaliveCountMax,omitempty"`
@@ -446,6 +447,10 @@ func applySparseLayer(acc *SparseSSHOptions, source *map[string]FieldSource, src
 		acc.User = src.User
 		setSource(source, "user", layer)
 	}
+	if src.Auth != nil {
+		acc.Auth = src.Auth
+		setSource(source, "auth", layer)
+	}
 	if src.KeyPath != nil {
 		acc.KeyPath = src.KeyPath
 		setSource(source, "keyPath", layer)
@@ -504,6 +509,10 @@ func sshOptionsToSparse(o SSHProfileOptions) SparseSSHOptions {
 		v := o.User
 		s.User = &v
 	}
+	if o.Auth != "" {
+		v := o.Auth
+		s.Auth = &v
+	}
 	if o.KeepaliveInterval != 0 {
 		v := o.KeepaliveInterval
 		s.KeepaliveInterval = &v
@@ -540,6 +549,9 @@ func sparseToOptions(s SparseSSHOptions) SSHProfileOptions {
 	}
 	if s.User != nil {
 		o.User = *s.User
+	}
+	if s.Auth != nil {
+		o.Auth = *s.Auth
 	}
 	if s.JumpHost != nil {
 		o.JumpHost = *s.JumpHost

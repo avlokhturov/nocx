@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strconv"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/credential"
@@ -62,36 +63,36 @@ func TestBinding_RefusesMismatchedHost(t *testing.T) {
 		withBinding("good.example.com", 0),
 	)
 
-	var mismatch *ErrCredentialBindingMismatch
-	if !errors.As(err, &mismatch) {
-		t.Fatalf("want ErrCredentialBindingMismatch, got %T: %v", err, err)
+	var authErr *ErrCredentialAuthorizationFailed
+	if !errors.As(err, &authErr) {
+		t.Fatalf("want ErrCredentialAuthorizationFailed, got %T: %v", err, err)
 	}
-	if mismatch.ResolvedHost != "127.0.0.1" {
-		t.Errorf("ResolvedHost = %q, want 127.0.0.1 (the dialed host, not the alias)", mismatch.ResolvedHost)
+	if authErr.ResolvedHost != "127.0.0.1" {
+		t.Errorf("ResolvedHost = %q, want 127.0.0.1 (the dialed host, not the alias)", authErr.ResolvedHost)
 	}
-	if mismatch.BoundHost != "good.example.com" {
-		t.Errorf("BoundHost = %q, want good.example.com", mismatch.BoundHost)
+	if authErr.Expected != "good.example.com" {
+		t.Errorf("Expected = %q, want good.example.com", authErr.Expected)
 	}
-	if mismatch.Jump {
+	if authErr.Jump {
 		t.Error("Jump flag should be false for the target binding")
 	}
 }
 
-// TestBinding_AliasResolutionNotAlias pins the load-bearing criterion from
-// the bead: matching uses the RESOLVED hostname, never the alias. An alias
-// "victim" whose HostName is evil.example.com must be refused for a
-// credential bound to "victim" (the alias) AND for one bound to the real
-// target's peer — only a credential bound to the resolved HostName passes.
-func TestBinding_AliasResolutionNotAlias(t *testing.T) {
+// TestBinding_AliasConnects proves that a credential bound to an SSH alias
+// CONNECTS when the alias resolves through ~/.ssh/config to the same target
+// as the dial endpoint. Under the computed-authorization redesign the identity
+// is the profile's Host, which is an alias the user chose — the credential
+// is authorized for the canonical hostname, so an alias resolves correctly.
+func TestBinding_AliasConnects(t *testing.T) {
 	srv := startTestSSHServer(t)
 	defer srv.close()
 	_, portStr, _ := net.SplitHostPort(srv.addr)
+	srvHost := hostPortOnly(srv.addr)
 
-	// Alias "victim" -> HostName 127.0.0.1 (the test server), Port = srv port.
 	configContent := fmt.Sprintf(`Host victim
     HostName %s
     Port %s
-`, hostPortOnly(srv.addr), portStr)
+`, srvHost, portStr)
 	configPath := writeSSHConfig(t, configContent)
 	khPath := writeKnownHosts(t, srv, srv.addr)
 
@@ -103,37 +104,100 @@ func TestBinding_AliasResolutionNotAlias(t *testing.T) {
 
 	store := &credStub{pw: "x"}
 
-	// Bound to the ALIAS "victim" — must be REFUSED. The alias is a name the
-	// renderer/attacker chooses; binding on it is unsound because HostName
-	// can be remapped. The resolved host is 127.0.0.1, so "victim" != 127.0.0.1.
-	_, err = client.Connect(
+	// Bound to the ALIAS — must CONNECT. resolveAuthzEndpoint("victim")
+	// resolves through ~/.ssh/config to srvHost, and resolveConfig("victim")
+	// also resolves to srvHost. Both sides match.
+	ch, err := client.Connect(
 		context.Background(), "victim",
 		WithUser("test"),
 		WithAuthMethods([]gossh.AuthMethod{gossh.PublicKeys(srv.userSigner)}),
 		WithCredentials(store, credential.NewSecretID()),
 		withBinding("victim", 0),
 	)
-	var mismatch *ErrCredentialBindingMismatch
-	if !errors.As(err, &mismatch) {
-		t.Fatalf("bound-to-alias: want ErrCredentialBindingMismatch, got %T: %v", err, err)
+	if err != nil {
+		t.Fatalf("alias-bound: Connect: %v", err)
 	}
-	if mismatch.ResolvedHost != hostPortOnly(srv.addr) {
-		t.Errorf("ResolvedHost = %q, want %s (resolved, not the alias)", mismatch.ResolvedHost, hostPortOnly(srv.addr))
-	}
+	_ = ch.Close()
+}
 
-	// Bound to the RESOLVED host — must CONNECT. This proves the check is
-	// "match the resolved value", not "deny everything".
-	ch, err := client.Connect(
+// TestBinding_AliasDriftRefused proves that when ~/.ssh/config changes the
+// HostName of an alias after the authorized endpoint was resolved, the
+// connection is refused (drift detection). The authorized endpoint is the
+// canonical hostname from the OLD resolution; the dial target resolves
+// through the NEW config, which yields a different host — the mismatch is
+// detected and the credential is not submitted.
+func TestBinding_AliasDriftRefused(t *testing.T) {
+	srv := startTestSSHServer(t)
+	defer srv.close()
+	_, portStr, _ := net.SplitHostPort(srv.addr)
+	srvHost := hostPortOnly(srv.addr)
+
+	// Old config: alias "victim" → HostName 127.0.0.1 (the test server).
+	oldConfig := fmt.Sprintf(`Host victim
+    HostName %s
+    Port %s
+`, srvHost, portStr)
+	configPath := writeSSHConfig(t, oldConfig)
+	khPath := writeKnownHosts(t, srv, srv.addr)
+
+	store := &credStub{pw: "x"}
+
+	// Connect with AuthorizedEndpoint set to the OLD resolved value (srvHost).
+	// At connect time, resolveAuthzEndpoint("127.0.0.1") is a no-op (IP, not an
+	// alias), so the authorized identity stays "127.0.0.1".
+	// resolveConfig("victim") → hostName = "127.0.0.1" (from old config).
+	// Match → connect.
+	client, err := NewReal(log.NewSlogAdapter(nil), WithSSHConfigPath(configPath), WithKnownHostsFile(khPath))
+	if err != nil {
+		t.Fatalf("NewReal: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	_, err = client.Connect(
 		context.Background(), "victim",
 		WithUser("test"),
 		WithAuthMethods([]gossh.AuthMethod{gossh.PublicKeys(srv.userSigner)}),
 		WithCredentials(store, credential.NewSecretID()),
-		withBinding(hostPortOnly(srv.addr), 0),
+		func(c *ConnectConfig) { c.AuthorizedEndpoint = srvHost },
 	)
 	if err != nil {
-		t.Fatalf("bound-to-resolved: Connect: %v", err)
+		t.Fatalf("connect with old resolved endpoint: %v", err)
 	}
-	defer func() { _ = ch.Close() }()
+
+	// Now the config changes: alias "victim" → HostName "evil.example.com".
+	driftConfig := fmt.Sprintf(`Host victim
+    HostName evil.example.com
+    Port %s
+`, portStr)
+	configPath2 := writeSSHConfig(t, driftConfig)
+
+	client2, err := NewReal(log.NewSlogAdapter(nil), WithSSHConfigPath(configPath2), WithKnownHostsFile(khPath))
+	if err != nil {
+		t.Fatalf("NewReal 2: %v", err)
+	}
+	defer func() { _ = client2.Close() }()
+
+	// The authorized endpoint is still "127.0.0.1" (the old resolved value).
+	// resolveAuthzEndpoint("127.0.0.1") → "127.0.0.1" (no-op).
+	// resolveConfig("victim").hostName → "evil.example.com" (from new config).
+	// "127.0.0.1" != "evil.example.com" → drifts → REFUSED.
+	_, err = client2.Connect(
+		context.Background(), "victim",
+		WithUser("test"),
+		WithAuthMethods([]gossh.AuthMethod{gossh.PublicKeys(srv.userSigner)}),
+		WithCredentials(store, credential.NewSecretID()),
+		func(c *ConnectConfig) { c.AuthorizedEndpoint = srvHost },
+	)
+	var authErr *ErrCredentialAuthorizationFailed
+	if !errors.As(err, &authErr) {
+		t.Fatalf("drift: want ErrCredentialAuthorizationFailed, got %T: %v", err, err)
+	}
+	if authErr.Expected != srvHost {
+		t.Errorf("Expected = %q, want %q (the old resolved endpoint)", authErr.Expected, srvHost)
+	}
+	if authErr.ResolvedHost != "evil.example.com" {
+		t.Errorf("ResolvedHost = %q, want evil.example.com (the new HostName after drift)", authErr.ResolvedHost)
+	}
 }
 
 // TestBinding_JumpHostRefused pins the easier-to-miss path: JumpCredentials
@@ -175,22 +239,21 @@ func TestBinding_JumpHostRefused(t *testing.T) {
 		WithJumpCredentials(store, credential.NewSecretID()),
 		// Jump credential bound to a host the jump alias does NOT resolve to.
 		func(c *ConnectConfig) {
-			c.JumpBoundHost = "other-bastion.example.com"
-			c.JumpBoundPort = 0
+			c.JumpAuthorizedEndpoint = "other-bastion.example.com"
 		},
 	)
-	var mismatch *ErrCredentialBindingMismatch
-	if !errors.As(err, &mismatch) {
-		t.Fatalf("want ErrCredentialBindingMismatch for jump, got %T: %v", err, err)
+	var authErr *ErrCredentialAuthorizationFailed
+	if !errors.As(err, &authErr) {
+		t.Fatalf("want ErrCredentialAuthorizationFailed for jump, got %T: %v", err, err)
 	}
-	if !mismatch.Jump {
+	if !authErr.Jump {
 		t.Error("Jump flag should be true for a jump-credential binding failure")
 	}
-	if mismatch.ResolvedHost != hostPortOnly(srv.addr) {
-		t.Errorf("ResolvedHost = %q, want %s (the jump alias's resolved HostName)", mismatch.ResolvedHost, hostPortOnly(srv.addr))
+	if authErr.ResolvedHost != hostPortOnly(srv.addr) {
+		t.Errorf("ResolvedHost = %q, want %s (the jump alias's resolved HostName)", authErr.ResolvedHost, hostPortOnly(srv.addr))
 	}
-	if mismatch.BoundHost != "other-bastion.example.com" {
-		t.Errorf("BoundHost = %q, want other-bastion.example.com", mismatch.BoundHost)
+	if authErr.Expected != "other-bastion.example.com" {
+		t.Errorf("Expected = %q, want other-bastion.example.com", authErr.Expected)
 	}
 }
 
@@ -228,14 +291,14 @@ func TestBinding_PortFromAlias(t *testing.T) {
 		WithCredentials(store, credential.NewSecretID()),
 		withBinding(hostPortOnly(srv.addr), 22),
 	)
-	var mismatch *ErrCredentialBindingMismatch
-	if !errors.As(err, &mismatch) {
-		t.Fatalf("port mismatch: want ErrCredentialBindingMismatch, got %T: %v", err, err)
+	var authErr *ErrCredentialAuthorizationFailed
+	if !errors.As(err, &authErr) {
+		t.Fatalf("port mismatch: want ErrCredentialAuthorizationFailed, got %T: %v", err, err)
 	}
-	if mismatch.BoundPort != 22 {
-		t.Errorf("BoundPort = %d, want 22", mismatch.BoundPort)
+	if authErr.Expected != "127.0.0.1:22" {
+		t.Errorf("Expected = %q, want 127.0.0.1:22", authErr.Expected)
 	}
-	if mismatch.ResolvedPort == 22 {
+	if authErr.ResolvedPort == 22 {
 		t.Error("ResolvedPort = 22, but the alias overrides Port to the test server's ephemeral port")
 	}
 }
@@ -254,12 +317,18 @@ func TestBinding_UnboundRefused(t *testing.T) {
 		WithCredentials(store, secretID),
 		// No binding set — BoundHost stays "".
 	)
-	var unbound *ErrCredentialNotBound
-	if !errors.As(err, &unbound) {
-		t.Fatalf("want ErrCredentialNotBound, got %T: %v", err, err)
+	var authErr *ErrCredentialAuthorizationFailed
+	if !errors.As(err, &authErr) {
+		t.Fatalf("want ErrCredentialAuthorizationFailed, got %T: %v", err, err)
 	}
-	if unbound.CredentialID != string(secretID) {
-		t.Errorf("CredentialID = %q, want %q", unbound.CredentialID, secretID)
+	if authErr.Expected != "<none>" {
+		t.Errorf("Expected = %q, want \"<none>\" for unbound credential", authErr.Expected)
+	}
+	if authErr.ResolvedHost != "127.0.0.1" {
+		t.Errorf("ResolvedHost = %q, want 127.0.0.1", authErr.ResolvedHost)
+	}
+	if authErr.CredentialID != string(secretID) {
+		t.Errorf("CredentialID = %q, want %q", authErr.CredentialID, secretID)
 	}
 }
 
@@ -330,7 +399,10 @@ func TestBinding_InlineAuthNotChecked(t *testing.T) {
 // data, not something callers set directly in production.
 func withBinding(host string, port int) ConnectOption {
 	return func(c *ConnectConfig) {
-		c.BoundHost = host
-		c.BoundPort = port
+		if port == 0 {
+			c.AuthorizedEndpoint = host
+		} else {
+			c.AuthorizedEndpoint = net.JoinHostPort(host, strconv.Itoa(port))
+		}
 	}
 }

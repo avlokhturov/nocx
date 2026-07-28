@@ -325,13 +325,13 @@ func (d *dialer) acquireJumpHost(ctx context.Context, cfg *ConnectConfig) (*pool
 	if err != nil {
 		return nil, nil, fmt.Errorf("resolve jump host config: %w", err)
 	}
-	// Enforce the jump credential's binding against the jump host's resolved
-	// name/effective port, independently of the target. JumpSecrets is
-	// the newer, easier-to-miss path (nocx-mon/PR11-T5): a jump credential
-	// bound to one bastion must not be submittable to another.
+	// Enforce the jump credential's authorization against the jump host's
+	// resolved name/effective port, independently of the target. JumpSecrets
+	// is the newer, easier-to-miss path: a jump credential authorized for one
 	if jumpCfg.Secrets != nil {
-		if bindErr := checkBinding(cfg.JumpBoundHost, cfg.JumpBoundPort, jumpResolved, string(jumpCfg.SecretID), true); bindErr != nil {
-			return nil, nil, bindErr
+		resolvedJumpAuthz := d.client.resolveAuthzEndpoint(cfg.JumpAuthorizedEndpoint)
+		if authErr := checkAuthorization(resolvedJumpAuthz, jumpResolved, string(jumpCfg.SecretID), true); authErr != nil {
+			return nil, nil, authErr
 		}
 	}
 

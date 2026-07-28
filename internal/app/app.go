@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 
 	"github.com/shady2k/nocx/internal/connection"
 	"github.com/shady2k/nocx/internal/content"
@@ -81,18 +82,21 @@ func New(opts ...Option) (*App, error) {
 	credStore := credential.NewKeychain()
 	settingsRegistry := settings.New(docStore, credStore)
 
+	home, _ := os.UserHomeDir()
+	sshConfigPath := filepath.Join(home, ".ssh", "config")
+
 	tpOpts := []transport.WSServerOption{
 		transport.WithProfileRepository(profileStore),
 		transport.WithGroupRepository(profileStore),
 		transport.WithCredentialMetadataRepository(profileStore),
 		transport.WithCredentialStore(credStore),
-		transport.WithProfileResolver(connection.NewResolver(profileStore, profileStore, credStore)),
+		transport.WithProfileResolver(connection.NewResolver(
+			profileStore, profileStore, profileStore, credStore,
+			connection.WithSSHConfigPath(sshConfigPath),
+		)),
 		transport.WithSettingsRegistry(settingsRegistry),
 		transport.WithExportPaths(paths),
 		transport.WithExportContentDB(content.NewStub(logger)),
-	}
-	if o.wsAddr != "" {
-		tpOpts = append(tpOpts, transport.WithListenAddr(o.wsAddr))
 	}
 	tp := transport.NewWSServer(logger, sess, tpOpts...)
 
