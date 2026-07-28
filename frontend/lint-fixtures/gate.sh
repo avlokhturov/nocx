@@ -3,7 +3,8 @@
 # that the nocx/no-raw-controls and nocx/no-color-literals rules fire,
 # that the AST kit-identity scanner matches fixture expectations,
 # that the CSS colour grammar checker catches violation patterns,
-# and that the CSS integrity checker catches all four of its violation classes.
+# and that the CSS integrity checker catches every one of its violation classes —
+# nine as of nocx-zhjx, each asserted by name below, several in both directions.
 # Run from the frontend/ directory (e.g. via `npm run lint:fixture-check`).
 # Exits 0 if all rules fire, 1 otherwise.
 set -eu
@@ -42,14 +43,14 @@ fi
 
 # ── CSS integrity fixture check ──────────────────────────────────────────────
 # Every rule in check-css-integrity.mjs must fire against the fixture tree.
-# These four defects are all valid CSS that the browser accepts silently, so a
+# All of these defects are valid CSS that the browser accepts silently, so a
 # checker that quietly stopped firing would look exactly like a clean codebase.
 integrity_check=$(node "${fixture_dir}/check-css-integrity.mjs" \
   --entry="${fixture_dir}/css-integrity-fixture/entry.css" \
   --styles="${fixture_dir}/css-integrity-fixture/styles" \
   --ui="${fixture_dir}/css-integrity-fixture/ui" 2>/dev/null || true)
 
-for rule in unreachable escaped-dot undefined-var theme-scope bare-type-selector control-css-outside-kit kit-scope-selector surface-paints-kit; do
+for rule in unreachable escaped-dot undefined-var theme-scope bare-type-selector control-css-outside-kit kit-scope-selector surface-paints-kit untokenised-type; do
   if ! echo "$integrity_check" | grep -q "\"rule\":\"${rule}\""; then
     echo "CSS INTEGRITY GATE FAILED — rule '${rule}' did not fire on the fixture"
     exit 1
@@ -90,6 +91,23 @@ fi
 # components were not read and the two hits above came from somewhere else.
 if echo "$integrity_check" | grep -q '"rule":"kit-identities-empty"'; then
   echo "CSS INTEGRITY GATE FAILED — the kit identity scan came back empty; rule 3 did not really run"
+  exit 1
+fi
+
+# Rule 7, all three shapes. The px font-size and the literal font-family are the rule
+# itself; the third is the half that keeps the exemption list honest — the fixture's
+# entry allows two 9px declarations and the file has one, so a list that had rotted into
+# a permission slip would say so. And a declaration that READS the token layer must stay
+# silent, or the rule forbids the correct spelling along with the wrong one.
+for want in 'bypasses the token layer' 'may only shrink\|still allows'; do
+  if ! echo "$integrity_check" | grep -q "$want"; then
+    echo "CSS INTEGRITY GATE FAILED — rule 7 did not report: ${want}"
+    exit 1
+  fi
+done
+
+if echo "$integrity_check" | grep -q 'fixture-tokenised'; then
+  echo "CSS INTEGRITY GATE FAILED — rule 7 reported a declaration that reads a token"
   exit 1
 fi
 
@@ -184,5 +202,5 @@ if [ -z "$ts_reactivity" ]; then
   exit 1
 fi
 
-echo "OK — all 10 lint rules fired; kit identities verified; CSS colour + integrity verified (8 integrity rules)"
+echo "OK — all 10 lint rules fired; kit identities verified; CSS colour + integrity verified (9 integrity rules)"
 exit 0

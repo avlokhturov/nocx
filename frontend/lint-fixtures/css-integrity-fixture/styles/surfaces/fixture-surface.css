@@ -35,3 +35,23 @@
 .fixture-host .fixture-widget .fixture-own-child {
   background: gray;
 }
+
+/* ── Rule 7 fixture — untokenised type ──────────────────────────────────── */
+
+/* Reported: a px font-size with no exemption, and a font-family that is not a token. */
+.fixture-untokenised {
+  font-size: 13px;
+  font-family: 'Helvetica Neue', sans-serif;
+}
+
+/* NOT reported: the whole point of the token layer is that reading it is correct. */
+.fixture-tokenised {
+  font-size: var(--fixture-font-size);
+  font-family: var(--fixture-font-family);
+}
+
+/* Reported as a STALE exemption: the list allows two 9px declarations here and there is
+   one, which is how an exemption list rots into a permission slip. */
+.fixture-stale-exemption {
+  font-size: 9px;
+}

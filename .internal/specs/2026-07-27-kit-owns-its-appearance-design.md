@@ -341,9 +341,17 @@ component renders — `ui-settings-row`, `ui-settings-search`, `ui-settings-filt
 fixes nothing. (`ui-export-btn`, passed into `Button` at `export-section.tsx:337`, is a
 different case and goes away with rule 1.)
 
-1. **`class` on a closed kit component**, in any consumer — an ESLint rule resolving
-   JSX elements through their `src/ui` import, not by tag name. The message names both
-   exits: a wrapper for layout, a typed prop for repeated variation.
+1. **`class` on a closed kit component**, in any consumer — specified here as an ESLint
+   rule resolving JSX elements through their `src/ui` import, not by tag name.
+
+   **Not written, and deliberately.** `class?: never` refuses the prop at compile time
+   on every kit component, structural containers included as of nocx-zhjx (§3.6), so
+   `tsc --noEmit` reports it with the call site and the type — earlier and more precisely
+   than a lint rule that would have to re-derive the import graph to know what a kit
+   component is. `never` rather than omission is the load-bearing detail: it keeps the
+   key valid for `splitProps`, so a class arriving from an untyped path is still split
+   off and discarded instead of replacing the identity.
+
 2. **Component identity tests**: every primitive asserts its base class, its
    appearance-bearing element's identity, and its prop → attribute matrix.
 3. **CSS ownership**: `styles/components/<x>.css` may contain only selectors rooted at
@@ -394,10 +402,36 @@ different case and goes away with rule 1.)
 7. **Untokenised values**: `font-size` in px and `font-family` outside the token layer
    are errors. Not all `px` — a `1px` border and exact icon geometry are legitimate; the
    rule names its properties and its exemptions.
+
+   Shipped as `untokenised-type` in `check-css-integrity.mjs` (T20, nocx-zhjx). The
+   count went 52 → 18 during the epic, and the last 18 are **two decisions rather than
+   18 mistakes**, so they ship as exemptions carrying a file, a value, a count, a reason
+   and `nocx-pp3y.2`: the scale has no step below 12px (eight 11px and four 10px
+   declarations are a real register — pills, meta rows, the tab bar), and the DOM's
+   terminal text is 14px while xterm draws the live screen at `FONT_SIZE = 13`, which is
+   a defect in its own right and not a rounding question.
+
+   The count is checked in **both** directions. Too many is a new violation; too few is
+   a stale exemption, reported as one — the design says an exemption's count may only
+   shrink, and a list that is never made to shrink is a permission slip. The fixture
+   carries one deliberately-stale entry so that half of the rule is watched too.
+
 8. **Dependency direction**: `ui/**` may not import surfaces, features or application
    state. The reverse is allowed.
 9. **Page ownership**: every registered route builds its `Page` through the shared
    frame, no nested `.ui-page`, exactly one scroll owner in `page` mode.
+
+   **Not a lint rule, and proven where it is observable instead.** Scroll ownership is a
+   fact about resolved layout, so a static rule could only check the spelling of the
+   markup and would have passed on the WebKit failure that started this
+   (nocx-82l9.2 — a missing `min-height: 0` several elements up the flex chain).
+   `e2e/scroll-ownership.spec.ts` measures the computed `overflow` of every node in the
+   chain in both engines, `e2e/settings-scroll.spec.ts` measures the real surface, and
+   the jsdom suite asserts the descriptor contract and the absence of a nested
+   `.ui-page`. There is exactly one `<Page>` consumer today, so "every registered route
+   builds its Page through the shared frame" is currently true by construction; if a
+   second appears, this is the line that says it must go through the same frame.
+
 10. **Role impersonation.** Outside `ui/`, an element carrying a role a kit primitive
     already provides — `button`, `checkbox`, `radio`, `switch`, `textbox`, `searchbox`,
     `combobox` — is an error. Exempt: `ui/**`, the entries in `feature-components.json`,

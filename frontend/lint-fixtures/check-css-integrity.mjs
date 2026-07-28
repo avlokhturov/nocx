@@ -380,6 +380,126 @@ function findSurfacePaintingKit(ast, kitIdentities) {
 }
 
 /**
+ * Rule 7 — untokenised type.
+ *
+ * A `font-size` in px and a `font-family` that is not a token are the two ways the type
+ * scale gets bypassed: both are valid CSS, both look deliberate, and both mean the
+ * next person changing the scale misses this rule. Not all px — `1px` borders and icon
+ * geometry are legitimate, which is why the rule names its two properties and nothing
+ * else.
+ *
+ * Exemptions carry a file, a value, a count, a reason and a bead id, and the count is
+ * checked in BOTH directions. Too many is a new violation; too few is a stale
+ * exemption, which is how a list like this rots into a permission slip — the design
+ * says the count may only shrink, so shrinking it is part of the fix that shrank it.
+ */
+const TYPE_EXEMPTIONS = [
+  {
+    file: 'src/style.css',
+    value: '11px',
+    count: 4,
+    bead: 'nocx-pp3y.2',
+    reason:
+      'the chrome register the scale does not have: item meta, the tab bar, the vertical strip, the editor chrome',
+  },
+  {
+    file: 'src/style.css',
+    value: '14px',
+    count: 5,
+    bead: 'nocx-pp3y.2',
+    reason:
+      'terminal text in the DOM. xterm draws the live screen at FONT_SIZE = 13, so these five are also 1px out from the canvas showing the same content — a defect to decide on a running page, not to round',
+  },
+  {
+    file: 'src/styles/components/badge.css',
+    value: '10px',
+    count: 1,
+    bead: 'nocx-pp3y.2',
+    reason: 'the smallest register; no token is this size and inventing one is a scale decision',
+  },
+  {
+    file: 'src/styles/components/button.css',
+    value: '11px',
+    count: 1,
+    bead: 'nocx-pp3y.2',
+    reason: "data-size='sm' — the chrome register, same decision as style.css's 11px",
+  },
+  {
+    file: 'src/styles/components/tab.css',
+    value: '11px',
+    count: 1,
+    bead: 'nocx-pp3y.2',
+    reason: 'the tab index pill — the chrome register',
+  },
+  {
+    file: 'src/styles/components/icon-button.css',
+    value: '16px',
+    count: 1,
+    bead: 'nocx-pp3y.2',
+    reason:
+      "data-size='sm' sizes the '×' glyph rather than type; if it moves it becomes an icon-size declaration, not a font-size token",
+  },
+  {
+    file: 'src/styles/surfaces/settings.css',
+    value: '10px',
+    count: 2,
+    bead: 'nocx-pp3y.2',
+    reason: 'the settings badge and breadcrumb — the smallest register',
+  },
+  {
+    file: 'src/styles/surfaces/settings.css',
+    value: '11px',
+    count: 1,
+    bead: 'nocx-pp3y.2',
+    reason: 'the settings error line — the chrome register',
+  },
+  {
+    file: 'src/styles/surfaces/export.css',
+    value: '11px',
+    count: 1,
+    bead: 'nocx-pp3y.2',
+    reason: 'the backup details block — the chrome register',
+  },
+  {
+    file: 'src/styles/surfaces/update-notice.css',
+    value: '10px',
+    count: 1,
+    bead: 'nocx-pp3y.2',
+    reason: 'the update notice — the smallest register',
+  },
+  {
+    // Fixture entry, and the only one that is deliberately WRONG. The fixture file has
+    // one occurrence and this allows two, so the "count may only shrink" half of the
+    // rule has something to fire on — otherwise that half would ship unwatched, which
+    // is the failure mode this whole gate family exists to prevent.
+    file: 'lint-fixtures/css-integrity-fixture/styles/surfaces/fixture-surface.css',
+    value: '9px',
+    count: 2,
+    bead: 'nocx-zhjx',
+    reason: 'fixture: proves a stale exemption is reported rather than silently allowed',
+  },
+]
+
+/** px font-sizes and non-token font-families in one file. */
+function findUntokenisedType(ast) {
+  const hits = []
+  css.walk(ast, {
+    visit: 'Declaration',
+    enter(node) {
+      const value = css.generate(node.value).trim()
+      if (node.property === 'font-size' && /(^|[^-\w])\d+(\.\d+)?px$/.test(value)) {
+        hits.push({ property: 'font-size', value, line: node.loc?.start.line ?? 0 })
+        return
+      }
+      if (node.property === 'font-family' && !value.includes('var(') && value !== 'inherit') {
+        hits.push({ property: 'font-family', value, line: node.loc?.start.line ?? 0 })
+      }
+    },
+  })
+  return hits
+}
+
+/**
  * Rule 6 — the ancestor scope is gone and must stay gone.
  *
  * Keyed on the parsed SELECTOR rather than on the text, because this file's own
@@ -438,6 +558,9 @@ export function checkCSSIntegrity({ entry, stylesDir, uiDir }) {
   // ── per-file AST scans over the reachable set ───────────────────────────
   const declaredEverywhere = new Set(EXTERNALLY_DECLARED)
   const referencedEverywhere = []
+  // Rule 7 counts per (file, value) so the exemption list can be checked in both
+  // directions once every file has been read.
+  const typeHits = new Map()
 
   for (const file of [...reachable].sort()) {
     let ast
@@ -511,6 +634,21 @@ export function checkCSSIntegrity({ entry, stylesDir, uiDir }) {
       }
     }
 
+    // Rule 7 — the token layer declares the scale; everything else reads it. `themes/`
+    // and `tokens.css` ARE that layer.
+    const inTokenLayer =
+      resolve(file) === resolve(stylesAbs, 'tokens.css') ||
+      resolve(file).startsWith(resolve(stylesAbs, 'themes'))
+    if (!inTokenLayer) {
+      for (const hit of findUntokenisedType(ast)) {
+        const key = `${rel(file)} ${hit.value}`
+        const prev = typeHits.get(key) ?? { file: rel(file), ...hit, count: 0, lines: [] }
+        prev.count += 1
+        prev.lines.push(hit.line)
+        typeHits.set(key, prev)
+      }
+    }
+
     const { declared, referenced } = collectCustomProperties(ast)
     for (const name of declared) declaredEverywhere.add(name)
     for (const ref of referenced) referencedEverywhere.push({ ...ref, file })
@@ -528,6 +666,53 @@ export function checkCSSIntegrity({ entry, stylesDir, uiDir }) {
         })
       }
     }
+  }
+
+  // ── untokenised-type (needs every file's count before the list can be judged) ──
+  const exemptionsUsed = new Set()
+  for (const hit of typeHits.values()) {
+    const exemption = TYPE_EXEMPTIONS.find(
+      (e) => `frontend/${e.file}` === hit.file && e.value === hit.value,
+    )
+    if (!exemption) {
+      violations.push({
+        rule: 'untokenised-type',
+        file: hit.file,
+        line: hit.lines[0],
+        detail: `${hit.property}: ${hit.value} (${hit.count}×) bypasses the token layer — use a token, or add an exemption naming a file, a reason and a bead id`,
+      })
+      continue
+    }
+    exemptionsUsed.add(`${exemption.file} ${exemption.value}`)
+    if (hit.count > exemption.count) {
+      violations.push({
+        rule: 'untokenised-type',
+        file: hit.file,
+        line: hit.lines[exemption.count] ?? hit.lines[0],
+        detail: `${hit.count} occurrences of ${hit.value}, but the exemption (${exemption.bead}) allows ${exemption.count} — an exemption's count may only shrink`,
+      })
+    } else if (hit.count < exemption.count) {
+      violations.push({
+        rule: 'untokenised-type',
+        file: hit.file,
+        line: hit.lines[0],
+        detail: `${hit.count} occurrence(s) of ${hit.value} left but the exemption (${exemption.bead}) still allows ${exemption.count} — lower it, or the list becomes a permission slip`,
+      })
+    }
+  }
+  // An exemption for a file this run did not scan is not stale — it belongs to a
+  // different tree. The app run and the fixture run share one list, and each is only
+  // answerable for the entries inside the tree it was pointed at.
+  for (const e of TYPE_EXEMPTIONS) {
+    if (exemptionsUsed.has(`${e.file} ${e.value}`)) continue
+    const abs = resolve(FRONTEND_DIR, e.file)
+    if (!abs.startsWith(stylesAbs) && abs !== entryAbs) continue
+    violations.push({
+      rule: 'untokenised-type',
+      file: `frontend/${e.file}`,
+      line: 0,
+      detail: `the exemption for ${e.value} (${e.bead}) has nothing left to exempt — delete it`,
+    })
   }
 
   // ── undefined-var (needs every file's declarations first) ───────────────
