@@ -378,6 +378,7 @@ different case and goes away with rule 1.)
    that happened to have a page; and the activity bar sizing the icon inside an
    IconButton — load-bearing, because the kit's icons carry a viewBox and no intrinsic
    size, so deleting the rule renders the gear at 300x150.
+
 4. **Bare-tag selectors** (`button`, `input[type=…]`, `label:has(input)`) are forbidden
    in component CSS; only identity-rooted selectors are allowed. `base.css` is exempt
    and is where the focus ring lives (§3.2).
