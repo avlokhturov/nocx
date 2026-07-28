@@ -241,6 +241,13 @@
   flex-direction: column;
   overflow-y: auto;
   min-height: 0;
+
+  /* The rule that separates the tab list from the strip's actions. It was declared
+     as `border-top` on the New-tab IconButton — a surface drawing a line on a kit
+     component, which rule 3 forbids. The strip's own chrome belongs to the strip:
+     the container and the button are adjacent with no gap, so the line lands in the
+     same place, and it now survives the button changing (T20, nocx-zhjx). */
+  border-bottom: 1px solid var(--color-divider);
 }
 
 /* ── Tabstrip button sizing ───────────────────────────────── */
@@ -253,7 +260,6 @@
 .tabstrip-vertical .tabs-container + .ui-icon-button {
   flex: 0 0 auto;
   width: 100%;
-  border-top: 1px solid var(--color-divider);
 }
 
 /* Square corners are `square` on IconButton now, not a shape this surface imposes
@@ -279,14 +285,15 @@
   user-select: none;
 }
 
+/* Placement only: how big a rail button's hit area is, is a property of the rail.
+   How big the icon inside it is, is not — that moved to IconButton's `lg` size
+   (T20, nocx-zhjx). The rule here used to be `.activity-bar .ui-icon-button svg`,
+   reaching past the component into markup the component renders, and it was
+   load-bearing: these icons carry a viewBox and no intrinsic size, so with the rule
+   gone and nothing in its place the gear renders at the SVG default of 300x150. */
 .activity-bar .ui-icon-button {
   width: 100%;
   height: 48px;
-}
-
-.activity-bar .ui-icon-button svg {
-  width: 24px;
-  height: 24px;
 }
 
 /* ── Sidebar panel ───────────────────────────────────────────────────── */

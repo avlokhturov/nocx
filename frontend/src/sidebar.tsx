@@ -250,6 +250,7 @@ function SidebarSolid(props: SidebarSolidProps) {
         <For each={props.views}>
           {(view) => (
             <IconButton
+              size="lg"
               selected={
                 view.id === props.state.sidebar.activeViewId && !props.state.sidebar.collapsed
               }
@@ -274,6 +275,7 @@ function SidebarSolid(props: SidebarSolidProps) {
         <For each={props.actions}>
           {(action) => (
             <IconButton
+              size="lg"
               data-action={action.id}
               title={action.title}
               ariaLabel={action.title}

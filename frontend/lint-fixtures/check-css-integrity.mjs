@@ -21,9 +21,17 @@
  * All four are invisible to the browser, to eslint, and to jsdom tests. A
  * linter is the only thing that can see them, which is why this file exists.
  *
+ * It has since grown the rules of the kit-ownership design (2026-07-27) that are
+ * statements about CSS rather than about JSX — rule 3 (surface-paints-kit), rule 4
+ * (bare-type-selector), rule 6 (kit-scope-selector) and rule 11's strong tier
+ * (control-css-outside-kit). Each is documented at its own function.
+ *
  * Invocation:
  *   node lint-fixtures/check-css-integrity.mjs
- *   node lint-fixtures/check-css-integrity.mjs --entry=<css> --styles=<dir>
+ *   node lint-fixtures/check-css-integrity.mjs --entry=<css> --styles=<dir> --ui=<dir>
+ *
+ * `--ui` is where rule 3 derives its kit identities from; it defaults to the sibling
+ * `ui/` of the styles directory.
  *
  * Violations print as JSON Lines on stdout and a human summary on stderr;
  * exit code 1 if any fired.
@@ -33,6 +41,7 @@ import { createRequire } from 'node:module'
 import { readFileSync, readdirSync, existsSync } from 'node:fs'
 import { resolve, relative, dirname, join, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { scanKitIdentities } from './scan-kit-identities.mjs'
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url))
 const FRONTEND_DIR = resolve(__dirname, '..')
@@ -264,6 +273,113 @@ function findControlFingerprints(source) {
 }
 
 /**
+ * Rule 3 — a surface may not paint a kit component.
+ *
+ * The identity set is derived from the components' own JSX by AST (nocx-hav2), never
+ * from the `ui-` prefix: `.ui-settings-row` and `.ui-settings-filter` carry the prefix
+ * and no component renders them, so a prefix test would police the surface's own
+ * classes and miss a component that named itself anything else.
+ *
+ * A parent may name a kit identity — it has no other way to say where the component
+ * goes — but only for placement. That is nocx-zeti's decision, and its discriminator is
+ * rule 11's property list, reused verbatim here so the two rules cannot drift into
+ * disagreeing about what appearance is. `text-align`, `display`, `flex`, `width`,
+ * `margin` and friends are placement and stay silent.
+ *
+ * Two shapes, because the second is not a special case of the first:
+ *
+ *   A. The subject IS a kit identity and the rule declares appearance —
+ *      `.cm-root > .ui-toolbar { padding: … }`. The same component then looks
+ *      different depending on where it is used, which is the defect in one line.
+ *
+ *   B. The subject is INSIDE a kit identity and has no class of its own —
+ *      `.ui-field > .ui-field-label-col > label::before`, or
+ *      `.activity-bar .ui-icon-button svg`. A surface cannot author a bare `label` or
+ *      `svg` inside a component it does not render, so any such subject is the
+ *      component's own markup being reached into, whatever the property. Tier B is
+ *      therefore not filtered by the property list; the tunnel is the violation.
+ *      A subject that carries a class is the surface's own element, passed in as
+ *      children, and is nobody else's business.
+ *
+ * Not applied to `styles/components/` or `base.css` — those ARE the kit's layer, which
+ * is where the paint is supposed to live.
+ */
+const APPEARANCE_PROPERTIES = [
+  /^background/,
+  /^border/,
+  /^color$/,
+  /^font/,
+  /^box-shadow$/,
+  /^padding/,
+]
+
+const isAppearanceProperty = (prop) =>
+  APPEARANCE_PROPERTIES.some((re) => re.test(prop.replace(/^-{2}/, 'custom-')))
+
+function findSurfacePaintingKit(ast, kitIdentities) {
+  const hits = []
+  css.walk(ast, {
+    visit: 'Rule',
+    enter(node) {
+      const props = []
+      css.walk(node.block, {
+        visit: 'Declaration',
+        enter(d) {
+          props.push(d.property)
+        },
+      })
+      if (props.length === 0) return
+
+      css.walk(node.prelude, {
+        visit: 'Selector',
+        enter(sel) {
+          // Split the selector into compounds; the last one is the subject.
+          const compounds = [[]]
+          sel.children.forEach((n) => {
+            if (n.type === 'Combinator') compounds.push([])
+            else compounds[compounds.length - 1].push(n)
+          })
+          const classesIn = (compound) =>
+            compound.filter((n) => n.type === 'ClassSelector').map((n) => n.name)
+
+          const subject = compounds[compounds.length - 1]
+          const subjectClasses = classesIn(subject)
+          const subjectIdentities = subjectClasses.filter((c) => kitIdentities.has(c))
+          const ancestorIdentities = compounds
+            .slice(0, -1)
+            .flatMap(classesIn)
+            .filter((c) => kitIdentities.has(c))
+
+          const selector = css.generate(sel)
+          const line = sel.loc?.start.line ?? 0
+
+          if (subjectIdentities.length > 0) {
+            const painted = props.filter(isAppearanceProperty)
+            if (painted.length > 0) {
+              hits.push({
+                selector,
+                line,
+                detail: `declares ${painted.join(', ')} on \`.${subjectIdentities.join('.')}\` — appearance belongs to the component, not to where it is used`,
+              })
+            }
+            return
+          }
+
+          if (ancestorIdentities.length > 0 && subjectClasses.length === 0) {
+            hits.push({
+              selector,
+              line,
+              detail: `reaches inside \`.${ancestorIdentities.join('.')}\` to style markup the component renders — that markup is not this file's to address`,
+            })
+          }
+        },
+      })
+    },
+  })
+  return hits
+}
+
+/**
  * Rule 6 — the ancestor scope is gone and must stay gone.
  *
  * Keyed on the parsed SELECTOR rather than on the text, because this file's own
@@ -284,11 +400,27 @@ function findKitScopeSelectors(ast) {
   return hits
 }
 
-export function checkCSSIntegrity({ entry, stylesDir }) {
+export function checkCSSIntegrity({ entry, stylesDir, uiDir }) {
   const violations = []
   const entryAbs = resolve(entry)
   const stylesAbs = resolve(stylesDir)
   const rel = (p) => relative(PROJECT_ROOT, resolve(p))
+
+  // Rule 3 needs to know what a kit identity is, and the only honest source is the
+  // components' own JSX. An empty set is not "nothing to check" — it means the scan
+  // found no directory, which would silently disable the rule, so say so instead.
+  const uiAbs = uiDir ? resolve(uiDir) : resolve(stylesAbs, '..', 'ui')
+  const { byClass } = scanKitIdentities(uiAbs)
+  const kitIdentities = new Set(byClass.keys())
+  if (kitIdentities.size === 0) {
+    violations.push({
+      rule: 'kit-identities-empty',
+      file: rel(uiAbs),
+      line: 0,
+      detail:
+        'the AST scan found no kit identities — rule 3 cannot run, and silence here would read as a pass',
+    })
+  }
 
   const reachable = reachableFrom(entryAbs)
 
@@ -350,6 +482,23 @@ export function checkCSSIntegrity({ entry, stylesDir }) {
       }
     }
 
+    // Rule 3 applies everywhere the kit's own layer is not: `styles/components/` is
+    // where a component's paint belongs, and `base.css` is the application layer that
+    // owns the focus ring and the Page height/gutter chain (§3.2, §3.8).
+    const inKitLayer =
+      resolve(file).startsWith(resolve(stylesAbs, 'components')) ||
+      resolve(file) === resolve(stylesAbs, 'base.css')
+    if (!inKitLayer) {
+      for (const hit of findSurfacePaintingKit(ast, kitIdentities)) {
+        violations.push({
+          rule: 'surface-paints-kit',
+          file: rel(file),
+          line: hit.line,
+          detail: `\`${hit.selector}\` ${hit.detail}`,
+        })
+      }
+    }
+
     // Rule 4 applies to component stylesheets only.
     if (resolve(file).startsWith(resolve(stylesAbs, 'components'))) {
       for (const hit of findBareTypeSelectors(ast)) {
@@ -405,8 +554,12 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 
   const entry = arg('entry', resolve(FRONTEND_DIR, 'src/style.css'))
   const stylesDir = arg('styles', resolve(FRONTEND_DIR, 'src/styles'))
+  // Rule 3's identity set comes from the components' JSX. Defaults to the sibling of
+  // the styles directory, which is `src/ui` for the app and the fixture's own `ui/`
+  // for the fixture.
+  const uiDir = arg('ui', resolve(stylesDir, '..', 'ui'))
 
-  const violations = checkCSSIntegrity({ entry, stylesDir })
+  const violations = checkCSSIntegrity({ entry, stylesDir, uiDir })
 
   for (const v of violations) console.log(JSON.stringify(v))
 

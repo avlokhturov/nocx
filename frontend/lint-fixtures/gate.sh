@@ -46,9 +46,10 @@ fi
 # checker that quietly stopped firing would look exactly like a clean codebase.
 integrity_check=$(node "${fixture_dir}/check-css-integrity.mjs" \
   --entry="${fixture_dir}/css-integrity-fixture/entry.css" \
-  --styles="${fixture_dir}/css-integrity-fixture/styles" 2>/dev/null || true)
+  --styles="${fixture_dir}/css-integrity-fixture/styles" \
+  --ui="${fixture_dir}/css-integrity-fixture/ui" 2>/dev/null || true)
 
-for rule in unreachable escaped-dot undefined-var theme-scope bare-type-selector control-css-outside-kit kit-scope-selector; do
+for rule in unreachable escaped-dot undefined-var theme-scope bare-type-selector control-css-outside-kit kit-scope-selector surface-paints-kit; do
   if ! echo "$integrity_check" | grep -q "\"rule\":\"${rule}\""; then
     echo "CSS INTEGRITY GATE FAILED — rule '${rule}' did not fire on the fixture"
     exit 1
@@ -65,6 +66,30 @@ fi
 # A var() with a fallback is legitimate; reporting it would make the rule noise.
 if echo "$integrity_check" | grep -q 'fixture-also-never-declared'; then
   echo "CSS INTEGRITY GATE FAILED — var() with a fallback was reported as undefined"
+  exit 1
+fi
+
+# Rule 3, both directions. Exactly two hits: the surface painting the component
+# (tier A) and the surface reaching into markup the component renders (tier B). The
+# fixture's placement rules — display, gap, width, margin, and a subject carrying the
+# surface's own class — must stay silent, because placement is the one thing a parent
+# has no other way to express and a rule that reported it would be turned off.
+integrity_kit_hits=$(echo "$integrity_check" | grep -c '"rule":"surface-paints-kit"' || true)
+if [ "$integrity_kit_hits" -ne 2 ]; then
+  echo "CSS INTEGRITY GATE FAILED — expected exactly 2 surface-paints-kit hits (tier A + tier B), got ${integrity_kit_hits}"
+  exit 1
+fi
+
+if echo "$integrity_check" | grep -q 'fixture-own-child'; then
+  echo "CSS INTEGRITY GATE FAILED — rule 3 reported a subject carrying the surface's own class"
+  exit 1
+fi
+
+# The identity set must have been DERIVED. An empty scan would silently disable rule 3,
+# so the checker reports it as its own violation; seeing it here means the fixture's
+# components were not read and the two hits above came from somewhere else.
+if echo "$integrity_check" | grep -q '"rule":"kit-identities-empty"'; then
+  echo "CSS INTEGRITY GATE FAILED — the kit identity scan came back empty; rule 3 did not really run"
   exit 1
 fi
 
@@ -159,5 +184,5 @@ if [ -z "$ts_reactivity" ]; then
   exit 1
 fi
 
-echo "OK — all 10 lint rules fired; kit identities verified; CSS colour + integrity verified"
+echo "OK — all 10 lint rules fired; kit identities verified; CSS colour + integrity verified (8 integrity rules)"
 exit 0

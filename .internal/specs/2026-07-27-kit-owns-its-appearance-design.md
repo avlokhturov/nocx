@@ -347,8 +347,37 @@ different case and goes away with rule 1.)
 2. **Component identity tests**: every primitive asserts its base class, its
    appearance-bearing element's identity, and its prop → attribute matrix.
 3. **CSS ownership**: `styles/components/<x>.css` may contain only selectors rooted at
-   an identity of that component's family (§3.4). Surface CSS may not reference a kit
+   an identity of that component's family (§3.4). Surface CSS may not **paint** a kit
    identity.
+
+   Shipped as `surface-paints-kit` in `check-css-integrity.mjs` (T20, nocx-zhjx). "May
+   not reference" was the first wording and it was wrong: a parent has no other way to
+   say where a component goes, so a rule that forbade the reference would have fired on
+   correct code and been switched off — which is what nocx-zeti was opened to settle. It
+   decided that a parent may name a kit identity for **placement** and never for
+   appearance, with rule 11's property list as the discriminator; the gate reuses that
+   list verbatim so the two cannot drift apart.
+
+   Two shapes are reported, and the second is not a special case of the first:
+
+   - the subject **is** a kit identity and the rule declares appearance —
+     `.cm-root > .ui-toolbar { padding: … }`, the same component looking different
+     depending on where it is used;
+   - the subject is **inside** a kit identity and carries no class of its own —
+     `.activity-bar .ui-icon-button svg`, or the modified dot's
+     `.ui-field … label::before`. A surface cannot author a bare `svg` or `label`
+     inside a component it does not render, so the tunnel is the violation whatever
+     the property. A subject that does carry a class is the surface's own element,
+     handed in as children.
+
+   Enabling it found five, each a different shape and none of them cosmetic: a divider
+   the vertical strip drew on the New-tab button; a Toolbar padded by the connections
+   surface, where the kit's own value was dead on specificity; a `ghost` Button whose
+   padding existed only in settings.css, so a ghost button anywhere else would have had
+   a hit area the size of its text; the page's reading gutter owned by the one surface
+   that happened to have a page; and the activity bar sizing the icon inside an
+   IconButton — load-bearing, because the kit's icons carry a viewBox and no intrinsic
+   size, so deleting the rule renders the gear at 300x150.
 4. **Bare-tag selectors** (`button`, `input[type=…]`, `label:has(input)`) are forbidden
    in component CSS; only identity-rooted selectors are allowed. `base.css` is exempt
    and is where the focus ring lives (§3.2).

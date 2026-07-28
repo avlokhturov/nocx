@@ -95,6 +95,13 @@
   border: none;
   color: var(--color-text-muted);
   font: inherit;
+
+  /* Ghost had no padding of its own, and the only consumer supplied one from
+     settings.css — so a ghost Button anywhere else would have had a hit area the size
+     of its text. The variant was incomplete rather than customised, which is what
+     rule 3 firing on it revealed (T20, nocx-zhjx). Moved verbatim from
+     `.ui-settings-section-nav-item > .ui-button`. */
+  padding: var(--space-2) 10px;
 }
 
 .ui-button[data-variant='ghost']:hover {

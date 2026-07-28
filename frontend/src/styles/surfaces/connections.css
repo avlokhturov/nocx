@@ -8,13 +8,12 @@
   min-height: 0;
 }
 
-/* Actions stay reachable however far down either column is scrolled. Placement
-   only — the rule under the toolbar is the toolbar's own look and moved into
-   toolbar.css with T13 (nocx-jdhy). Naming the kit identity from here is the
-   open question in nocx-zeti; this is its second instance. */
+/* Actions stay reachable however far down either column is scrolled. Placement only,
+   and now placement in full: the padding that sat here overrode the toolbar's own and
+   moved into toolbar.css with T20 (nocx-zhjx). Naming the kit identity for placement
+   is what nocx-zeti decided a parent may do. */
 .cm-root > .ui-toolbar {
   flex: 0 0 auto;
-  padding: var(--space-3) var(--space-6);
 }
 
 .cm-tip {

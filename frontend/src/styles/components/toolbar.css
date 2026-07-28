@@ -10,7 +10,15 @@
   align-items: center;
   flex-wrap: wrap;
   gap: var(--space-3);
-  padding: var(--space-2) 0 var(--space-4);
+
+  /* This padding was `var(--space-2) 0 var(--space-4)` here AND
+     `var(--space-3) var(--space-6)` on `.cm-root > .ui-toolbar` in the connections
+     surface. Two owners, and the surface won on specificity — so the value written
+     here was dead and the one on screen was the surface's. The surface's value is
+     therefore what moves in, unchanged (T20, nocx-zhjx). If a second consumer ever
+     needs a different gutter, that is the moment for a prop, not for a second
+     owner. */
+  padding: var(--space-3) var(--space-6);
 
   /* A toolbar separates itself from what it acts on. This was declared by the
      connections surface, so the same component looked different depending on

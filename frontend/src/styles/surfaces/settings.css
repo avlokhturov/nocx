@@ -82,17 +82,20 @@
   margin-bottom: 2px;
 }
 
-/* Placement for the nav row. The look — transparent, borderless, inheriting the
-   surrounding type, and its hover — belongs to Button's `ghost` variant now
-   (T14, nocx-c2t6). What is left here is how the row sits in the rail: full
-   width, left-aligned, with its own hit area. */
+/* Placement for the nav row, and only placement. The look — transparent, borderless,
+   inheriting the surrounding type, and its hover — belongs to Button's `ghost` variant
+   (T14, nocx-c2t6); the hit area went with it in T20 (nocx-zhjx), because a variant
+   with no padding of its own is incomplete rather than customised. `text-align: left`
+   went too: the row is a flex container, so it was inert, and the leftward run of the
+   label is the default in this writing mode rather than something to declare.
+
+   What is left is how the row sits in the rail: it fills the width, its children line
+   up on the cross axis, and the badge pushes to the end (below). */
 .ui-settings-section-nav-item > .ui-button {
   display: flex;
   align-items: center;
   gap: var(--space-2);
   width: 100%;
-  padding: var(--space-2) 10px;
-  text-align: left;
 }
 
 /* The active row's fill, its hover and the badge's colours on it all moved into
@@ -102,11 +105,11 @@
   margin-left: auto;
 }
 
-/* ── Content area ──────────────────────────────────────────────────── */
-
-.ui-settings .ui-page__scroll {
-  padding: 20px 28px;
-}
+/* ── Content area ────────────────────────────────────────────────────────
+   The reading gutter moved to `.ui-page__scroll` in base.css with T20 (nocx-zhjx).
+   It was declared here, which made the gutter a property of the one surface that
+   happened to have a page — and the whole point of a Page is that the next surface
+   behaves the same without having to remember to. */
 
 /* ── Section heading within PageSection ────────────────────────────── */
 

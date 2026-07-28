@@ -1,0 +1,37 @@
+/* Rule 3 fixture — a surface may not paint a kit component.
+   `fixture-widget` and `fixture-widget__label` are what ui/fixture-widget.tsx renders,
+   so they are kit identities by derivation rather than by prefix.
+
+   Three rules, and the third one is the reason this fixture exists in both
+   directions: a rule that also reported placement would be disabled within a week,
+   because placement is the one thing a parent has no other way to express. */
+
+/* TIER A — reported. The subject IS the component, and padding is appearance: the
+   same widget would look different depending on which surface hosts it. */
+.fixture-host > .fixture-widget {
+  padding: 8px 16px;
+}
+
+/* TIER B — reported. The subject is markup the component renders and this file
+   cannot author, so reaching it is the violation whatever the property. */
+.fixture-host .fixture-widget svg {
+  width: 24px;
+  height: 24px;
+}
+
+/* NOT reported. Placement, which nocx-zeti decided a parent may name a kit identity
+   for: where the widget sits, how much room it gets, how its own children line up.
+   And the second selector's subject carries a class of its own — that is the
+   surface's element, handed to the component as children, and nobody else's
+   business. */
+.fixture-host > .fixture-widget {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin-bottom: 2px;
+}
+
+.fixture-host .fixture-widget .fixture-own-child {
+  background: gray;
+}

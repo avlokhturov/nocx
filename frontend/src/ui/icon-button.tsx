@@ -1,6 +1,11 @@
 import { splitProps, type JSX } from 'solid-js'
 
-export type IconButtonSize = 'sm' | 'md'
+/**
+ * `sm` and `md` size the button and its glyph together. `lg` sizes the glyph only —
+ * see icon-button.css: a rail button's hit area belongs to the rail, its icon does
+ * not.
+ */
+export type IconButtonSize = 'sm' | 'md' | 'lg'
 
 export interface IconButtonProps {
   /**

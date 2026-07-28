@@ -184,6 +184,13 @@ select:focus-visible {
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
+
+  /* The page's reading gutter. Declared by settings.css until T20 (nocx-zhjx), which
+     made it the property of the one surface that happened to have a page: a second
+     page would have had none unless someone remembered to ask. Moved verbatim —
+     20/28 is what is on screen today, and re-deciding the number here would be a
+     visual change smuggled into a refactor. */
+  padding: 20px 28px;
 }
 
 /* ── Contained content area (scrollMode: 'contained') ─────────────────

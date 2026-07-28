@@ -54,6 +54,32 @@
   font-weight: 300;
 }
 
+/* ── The icon ────────────────────────────────────────────────────────────
+   An icon-only button owns how big its icon is. This was
+   `.activity-bar .ui-icon-button svg` in style.css — a surface reaching past the
+   component into markup the component renders (T20, nocx-zhjx) — and it could not
+   simply be deleted: the kit's icons carry a viewBox and no intrinsic size, so with
+   no rule at all an SVG child renders at the default 300x150.
+
+   `1em` ties the icon to the button's own font-size, so an icon and a text glyph at
+   the same `data-size` come out the same size. A size that needs a different box
+   says so, which is what `lg` is: the activity bar's 48px rail buttons carry a 24px
+   glyph, and 24px is not a step on the type scale. */
+
+.ui-icon-button > svg {
+  width: 1em;
+  height: 1em;
+}
+
+/* `lg` sizes the GLYPH and deliberately not the button. Where a rail button's hit
+   area comes from is the rail's business — it is placement, and `.activity-bar`
+   still declares it. A component that assumed a 48px column would be wrong the
+   first time one of these appeared anywhere else. */
+.ui-icon-button[data-size='lg'] > svg {
+  width: 24px;
+  height: 24px;
+}
+
 .ui-icon-button:hover {
   background: var(--color-surface-hover);
   color: var(--color-text-muted);
