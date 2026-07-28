@@ -418,6 +418,14 @@ different case and goes away with rule 1.)
 
 8. **Dependency direction**: `ui/**` may not import surfaces, features or application
    state. The reverse is allowed.
+
+   `no-restricted-imports`, scoped to `files: ['src/ui/**']`. Its fixture is the one that
+   cannot be a checked-in file: the config only applies inside that directory, so a
+   fixture in `lint-fixtures/` would never trigger the rule and a permanent one in
+   `src/ui/` would be a real violation. `gate.sh` therefore writes the file, reads the
+   report and removes it under a trap. Verified to fail as well as pass, by pointing the
+   same fixture at a legal sibling import.
+
 9. **Page ownership**: every registered route builds its `Page` through the shared
    frame, no nested `.ui-page`, exactly one scroll owner in `page` mode.
 

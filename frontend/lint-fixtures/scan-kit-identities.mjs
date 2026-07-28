@@ -189,19 +189,21 @@ function expressionSnippet(expr) {
 /**
  * Classes a component happens to render that are nevertheless not identities.
  *
- * `kit-scope` is the styling-scope wrapper consumers put around kit content. No
- * component owns it — `ui/README.md` says exactly that, and it is deliberately outside
- * the `ui-` namespace for the reason. `dialog.tsx` renders it on its own panel only
- * because a modal has no consumer to apply it, and a purely mechanical AST rule reads
- * that one occurrence as "dialog.tsx owns kit-scope" — which would then make
- * settings.tsx's own `<div class="kit-scope">` an inline-markup violation.
+ * **Empty, and that is the finished state.** Its one entry was `kit-scope`, the styling
+ * scope no component owned and every component's appearance depended on: `dialog.tsx`
+ * rendered it on its own panel because a modal has no consumer to apply it, and a purely
+ * mechanical AST rule read that single occurrence as "dialog.tsx owns kit-scope" — which
+ * would then have made settings.tsx's own `<div class="kit-scope">` an inline-markup
+ * violation. T15 (nocx-pnbd) deleted the class, so the exception has nothing left to
+ * describe; rule 6 in `check-css-integrity.mjs` is what keeps the selector from coming
+ * back, and this set staying empty is what says no component needs an exception.
  *
- * The old regex could not hit this, because it matched `ui-` only. Widening the
- * derivation to every static class is correct and is what the design asks for; this set
- * is where the handful of non-identity exceptions are named rather than silently
- * filtered by prefix. It should be empty after T15 (nocx-pnbd) deletes `kit-scope`.
+ * The set exists rather than being deleted because the derivation is over EVERY static
+ * class, not over a `ui-` prefix (the design: "the prefix is not the test"). If a
+ * component ever legitimately renders a class it does not own, this is where that gets
+ * argued in writing instead of disappearing into a regex.
  */
-const NOT_AN_IDENTITY = new Set(['kit-scope'])
+const NOT_AN_IDENTITY = new Set()
 
 export function scanKitIdentities(uiDir) {
   const byClass = new Map()

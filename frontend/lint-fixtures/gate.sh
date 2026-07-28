@@ -148,6 +148,31 @@ if echo "$role_check" | grep -qE 'role="(option|listbox)"'; then
   exit 1
 fi
 
+# ── Dependency-direction fixture check (§4 rule 8) ───────────────────────────
+# The rule is `no-restricted-imports` scoped to `files: ['src/ui/**']`, so a fixture
+# living in lint-fixtures/ cannot trigger it — the config would never apply. The only
+# way to watch it fire is from inside that directory, so the gate writes a file there,
+# reads the report, and removes it. The trap matters: a leftover would break `tsc` for
+# everyone, and this is the one gate whose fixture cannot be a checked-in file.
+import_fixture="src/ui/__gate_import_direction.tsx"
+cleanup_import_fixture() { rm -f "$import_fixture"; }
+trap cleanup_import_fixture EXIT INT TERM
+cat > "$import_fixture" <<'FIXTURE'
+// Temporary fixture written by lint-fixtures/gate.sh — see the note there. If you are
+// reading this in a working tree, the gate crashed between writing and removing it, and
+// deleting it is the whole fix.
+import { SURFACE_ID_SETTINGS } from '../surface-registry'
+export const dependencyDirection = SURFACE_ID_SETTINGS
+FIXTURE
+import_check=$(npx eslint --no-ignore "$import_fixture" 2>&1 || true)
+cleanup_import_fixture
+trap - EXIT INT TERM
+
+if ! echo "$import_check" | grep -q 'no-restricted-imports'; then
+  echo "IMPORT DIRECTION GATE FAILED — ui/ importing from outside itself was not reported"
+  exit 1
+fi
+
 # ── ESLint fixture check ─────────────────────────────────────────────────────
 # Run eslint on .tsx and .ts files (not .css — espree cannot parse CSS).
 # The .ts glob is needed for the solid/reactivity .ts fixture.
