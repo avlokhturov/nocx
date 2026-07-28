@@ -114,11 +114,15 @@ test.describe('vertical tab placement', () => {
    * The test above cannot catch it: it switches with ONE tab and adds the second while
    * already vertical, so the populate path it exercises is addTab and not replaceStrip.
    *
-   * Asserted by measured geometry rather than by presence. The bug's own report named
-   * the tell — the New-tab + sitting at the vertical MIDDLE, because an empty
-   * `.tabs-container` (flex: 1 1 auto) and `.tabbar-spacer` split the column between
-   * them — and a strip with rows that exist at zero height would satisfy any assertion
-   * about the DOM while showing nothing (the lesson recorded on nocx-d3q).
+   * Asserted by measured geometry rather than by presence: a strip with rows that exist
+   * at zero height would satisfy any assertion about the DOM while showing nothing (the
+   * lesson recorded on nocx-d3q).
+   *
+   * The original tell was the New-tab + sitting at the vertical MIDDLE, because an empty
+   * `.tabs-container` (flex: 1 1 auto) split the column. That reading is gone: the strip's
+   * actions now sit in a fixed row at the TOP, so the + no longer moves with the list and
+   * says nothing about it. What replaced it measures the list directly — the rows must
+   * fill the column downward from the actions, which an empty container cannot fake.
    */
   test('switching to vertical with two tabs open lists both of them (nocx-zudj)', async ({
     page,
@@ -140,9 +144,11 @@ test.describe('vertical tab placement', () => {
     expect(first!.height).toBeGreaterThan(10)
     expect(second!.height).toBeGreaterThan(10)
     expect(second!.y).toBeGreaterThan(first!.y)
-    // And the + is below them, not floating in the middle of an empty column.
-    expect(add!.y).toBeGreaterThan(second!.y + second!.height)
-    expect(add!.y).toBeGreaterThan(stripBox!.y + stripBox!.height / 2)
+    // The list starts under the actions row and runs down the strip, which is what
+    // an empty container cannot do however many records claim to exist.
+    expect(first!.y).toBeGreaterThanOrEqual(add!.y + add!.height)
+    expect(first!.x).toBeGreaterThanOrEqual(stripBox!.x)
+    expect(second!.y + second!.height).toBeLessThanOrEqual(stripBox!.y + stripBox!.height)
   })
 
   test('activity indicator lights for a backgrounded tab in vertical placement', async ({
@@ -185,6 +191,64 @@ test.describe('vertical tab placement', () => {
     await switchPlacement(page, 'horizontal')
     await expect(page.locator(TAB)).toHaveCount(1)
     await expect(page.locator(TAB).first()).toHaveAttribute('aria-selected', 'true')
+  })
+
+  /**
+   * The second line is not "the tooltip, if any" — it is the tab's location, shown only
+   * when the first line is a NAME rather than that same location. A plain local tab is
+   * titled after its directory and its tooltip is that directory, so printing both would
+   * be the first line twice. Both directions are asserted here because the rule is the
+   * whole point: presence alone passed on the version that showed the duplicate.
+   */
+  test('the second line appears only when the title is a name, not the directory', async ({
+    page,
+  }) => {
+    await switchPlacement(page, 'vertical')
+
+    // A freshly opened local tab: the title is the directory, so no second line.
+    await expect(page.locator(TAB)).toHaveCount(1)
+    await expect(page.locator('.nocx-tab-subtitle')).toHaveCount(0)
+
+    // Give the tab a name of its own via OSC 0. Now the location is extra information
+    // and earns its line.
+    const paneBox = await page.locator('.pane.active').boundingBox()
+    await page.mouse.click(paneBox!.x + paneBox!.width / 2, paneBox!.y + paneBox!.height - 30)
+    const marker = `NAME-${Date.now().toString(36)}`
+    await page.keyboard.type(`printf '\\033]0;${marker}\\007'`)
+    await page.keyboard.press('Enter')
+
+    await expect(page.locator('.nocx-tab-title').first()).toHaveText(marker, { timeout: 5000 })
+    const subtitle = page.locator('.nocx-tab-subtitle').first()
+    await expect(subtitle).toBeAttached({ timeout: 5000 })
+    await expect(subtitle).not.toHaveText('')
+  })
+
+  test('vertical label text starts near the left edge (not centred)', async ({ page }) => {
+    await switchPlacement(page, 'vertical')
+
+    const tab = page.locator(TAB).first()
+    const title = tab.locator('.nocx-tab-title')
+    const tabBox = await tab.boundingBox()
+    const titleBox = await title.boundingBox()
+
+    // Title's left edge should be near the tab's left content edge:
+    // 10px tab padding + 10px pill left + 22px pill width + 10px gap = 52px.
+    // This is well left of centre (which would be ~80+ px for a 240px strip).
+    expect(titleBox!.x - tabBox!.x).toBeLessThan(60)
+  })
+
+  test('horizontal label text is centred (not near the left edge)', async ({ page }) => {
+    // beforeEach already reset to horizontal, but make sure.
+    await expect(page.locator('#tabbar')).toHaveClass(/tabbar/)
+
+    const tab = page.locator(TAB).first()
+    const title = tab.locator('.nocx-tab-title')
+    const tabBox = await tab.boundingBox()
+    const titleBox = await title.boundingBox()
+
+    // In horizontal with centering, the title's left edge should be well
+    // past 40px from the tab's left edge (centered text in a 200px tab).
+    expect(titleBox!.x - tabBox!.x).toBeGreaterThan(40)
   })
 
   // Reset placement to horizontal after each vertical test so the

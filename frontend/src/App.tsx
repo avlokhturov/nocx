@@ -26,10 +26,17 @@ const App: Component = () => {
     <>
       <div id="tabbar" class="tabbar" />
       <div id="workspace">
-        <div id="vertical-tabstrip" />
         <div id="body">
           <div id="activitybar" />
           <div id="sidebar" />
+          {/* The vertical tab strip lists the panes, so it sits next to them —
+              inside #body, after the activity bar and the sidebar. It used to be
+              a sibling of #body and therefore the leftmost thing in the window,
+              pushing the activity bar (which is app-level chrome and belongs to
+              the window edge) inward. Ordering it after #sidebar rather than
+              immediately after the activity bar keeps it beside the panes when
+              the sidebar opens, instead of wedged between the two. */}
+          <div id="vertical-tabstrip" />
           <div id="panes" />
         </div>
       </div>

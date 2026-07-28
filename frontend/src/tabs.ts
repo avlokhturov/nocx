@@ -43,6 +43,7 @@ export class Tab implements TabHost {
   private _hasActivity = false
   private _agentStatus: AgentStatus | null = null
   private _tooltip = ''
+  private _subtitle = ''
   private _disposed = false
   private _mountAbort = new AbortController()
   // ── B.5 geometry authority ──────────────────────────────────────────
@@ -89,6 +90,19 @@ export class Tab implements TabHost {
     return this._tooltip
   }
 
+  /**
+   * The tab's location, for the strip's optional second line — empty when the first
+   * line already says it.
+   *
+   * The decision cannot be made here. TerminalContent composes the title as
+   * `programTitle || cwdTitle` and hands the RESULT to setTitle, so from the tab's
+   * side every title looks equally like a name. Only the content knows whether a
+   * program supplied one, so the content decides and pushes the answer.
+   */
+  get subtitle(): string {
+    return this._subtitle
+  }
+
   get paneId(): string {
     return this.pane.id
   }
@@ -127,6 +141,15 @@ export class Tab implements TabHost {
   updateTooltip(tooltip: string): void {
     if (this._disposed) return
     this._tooltip = tooltip
+    this.onDisplayChange?.()
+  }
+
+  /** Terminal-content-only, like updateTooltip: the location line, or '' when the
+   *  title already carries it. See the `subtitle` getter. */
+  updateSubtitle(subtitle: string): void {
+    if (this._disposed) return
+    if (subtitle === this._subtitle) return
+    this._subtitle = subtitle
     this.onDisplayChange?.()
   }
 
@@ -179,6 +202,12 @@ export class Tab implements TabHost {
 
   private markActivity(): void {
     if (this._disposed) return
+    // Only a tab the user is not looking at can hold unread output. Without this
+    // guard the flag was set by output arriving in the ACTIVE tab, where nothing
+    // renders it — and it survived the switch away, because setActive() clears
+    // the flag on activation and not on deactivation. The result: the tab you
+    // just left lit up its indicator with nothing having happened in it since.
+    if (this._active) return
     if (!this._hasActivity) {
       this._hasActivity = true
       this.onDisplayChange?.()
@@ -357,13 +386,21 @@ export class TabManager {
       (inAlt) => {
         if (tabRef.current === this.activeTab) this.syncAltScreenClass(inAlt)
       },
+      undefined,
+      (subtitle) => tabRef.current?.updateSubtitle(subtitle),
     )
     const descriptor: ContentDescriptor = {
       surfaceType: SURFACE_TERMINAL,
       singletonKey: null,
       restoreDescriptor: { type: 'local' },
       supportsAttention: true,
-      defaultTitle: 'Terminal',
+      // No placeholder. A terminal tab is named after where it is, and that
+      // arrives one WebSocket round-trip after the tab appears; printing
+      // 'Terminal' in the meantime showed a word that is never the answer and
+      // then replaced it, which reads as a flicker rather than as loading
+      // (nocx-83a). An empty title is honest and the strip's width is fixed, so
+      // nothing moves when the real one lands.
+      defaultTitle: '',
     }
     const tab = this.addTab(content, descriptor)
     tabRef.current = tab

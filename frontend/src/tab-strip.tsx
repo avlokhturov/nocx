@@ -1,6 +1,8 @@
 import { For, Show, createSignal } from 'solid-js'
 import { Tab } from './tab'
 import { IconButton } from './ui/icon-button'
+import { SearchField } from './ui/search-field'
+import { ChevronDownIcon, PlusIcon } from './ui/icons'
 import type { Setter } from 'solid-js'
 import { createStore } from 'solid-js/store'
 import { render } from 'solid-js/web'
@@ -17,6 +19,9 @@ export interface TabView {
   readonly hasActivity: boolean
   readonly agentStatus: AgentStatus | null
   readonly tooltip: string
+  /** The tab's location for the strip's second line, or '' when the title already
+   *  says it — see Tab.subtitle. */
+  readonly subtitle: string
   readonly paneId: string
   onDisplayChange: (() => void) | null
 }
@@ -25,12 +30,13 @@ export interface TabView {
  * Reactive display-state record for a single tab, keyed by tab id.
  * Stored in a local Solid store so JSX expressions (each compiled into
  * their own reactive computation) are fine-grained reactive.
- * Mirrors TabView getters — not Tab.displayTitle (which falls back to
- * 'Terminal' and would break e2e/tab-title.spec.ts).
+ * Mirrors TabView getters — not Tab.displayTitle, which falls back to the
+ * descriptor's default title.
  */
 interface TabDisplayRecord {
   title: string
   tooltip: string
+  subtitle: string
   hasActivity: boolean
   agentStatus: AgentStatus | null
 }
@@ -94,13 +100,13 @@ abstract class TabStripBase implements TabStrip {
 
     this.setupContainer(container)
     container.addEventListener('keydown', this.onTablistKeydown)
-
     this.dispose = render(() => {
       const [tabViews, setTabViews] = createSignal<TabView[]>([])
       const [display, setDisplay] = createStore<{
         records: Record<number, TabDisplayRecord>
         activeId: number
       }>({ records: {}, activeId: -1 })
+      const [searchQuery, setSearchQuery] = createSignal('')
 
       this._getTabViews = tabViews
       this._setTabViews = setTabViews
@@ -108,6 +114,35 @@ abstract class TabStripBase implements TabStrip {
 
       return (
         <>
+          <Show when={this.orientation === 'vertical'}>
+            <div class="tabstrip-header">
+              <div class="tabstrip-search">
+                <SearchField
+                  value={searchQuery()}
+                  onInput={(v) => setSearchQuery(v)}
+                  placeholder="Filter tabs…"
+                  ariaLabel="Filter tabs"
+                  onKeyDown={(e) => {
+                    if (e.key === 'Escape' && searchQuery() !== '') {
+                      e.stopPropagation()
+                    }
+                  }}
+                />
+              </div>
+              <div class="tabstrip-actions">
+                <IconButton ariaLabel="New tab" square onClick={() => this.onNewTab?.()}>
+                  <PlusIcon />
+                </IconButton>
+                <IconButton
+                  ariaLabel="Quick connect"
+                  onClick={() => this.onQuickConnect?.()}
+                  tabIndex={-1}
+                >
+                  <ChevronDownIcon />
+                </IconButton>
+              </div>
+            </div>
+          </Show>
           <div class="tabs-container">
             <For each={tabViews()}>
               {(tab, index) => (
@@ -120,8 +155,19 @@ abstract class TabStripBase implements TabStrip {
                   agentStatus={display.records[tab.id]?.agentStatus ?? null}
                   title={display.records[tab.id]?.title ?? ''}
                   tooltip={display.records[tab.id]?.tooltip ?? ''}
+                  subtitle={display.records[tab.id]?.subtitle ?? ''}
                   hasActivity={display.records[tab.id]?.hasActivity === true}
                   tabIndex={display.activeId === tab.id ? 0 : -1}
+                  orientation={this.orientation}
+                  hidden={(() => {
+                    const q = searchQuery().toLowerCase().trim()
+                    if (!q) return false
+                    const r = display.records[tab.id]
+                    return (
+                      !(r?.title ?? '').toLowerCase().includes(q) &&
+                      !(r?.tooltip ?? '').toLowerCase().includes(q)
+                    )
+                  })()}
                   onActivate={() => this.onActivate?.(tab.id)}
                   onClose={(id) => this.onClose?.(id)}
                   onReorder={(fromId, toId) => this.onReorder?.(fromId, toId)}
@@ -129,21 +175,24 @@ abstract class TabStripBase implements TabStrip {
               )}
             </For>
           </div>
-          <IconButton
-            ariaLabel="New tab"
-            square={this.orientation === 'vertical'}
-            onClick={() => this.onNewTab?.()}
-          >
-            +
-          </IconButton>
-          <IconButton
-            ariaLabel="Quick connect"
-            onClick={() => this.onQuickConnect?.()}
-            tabIndex={-1}
-          >
-            ▾
-          </IconButton>
           <Show when={this.orientation === 'horizontal'}>
+            {/* The strip's actions, as one group. They were two loose siblings of
+                the tab list, which the vertical strip then spread down the whole
+                column — the list is `flex: 1 1 auto`, so it pushed them apart and
+                left the caret alone in the bottom corner. As a group they can be
+                placed once, per orientation, by the strip's own CSS. */}
+            <div class="tabstrip-actions">
+              <IconButton ariaLabel="New tab" onClick={() => this.onNewTab?.()}>
+                <PlusIcon />
+              </IconButton>
+              <IconButton
+                ariaLabel="Quick connect"
+                onClick={() => this.onQuickConnect?.()}
+                tabIndex={-1}
+              >
+                <ChevronDownIcon />
+              </IconButton>
+            </div>
             <div class="tabbar-spacer" />
           </Show>
         </>
@@ -159,6 +208,7 @@ abstract class TabStripBase implements TabStrip {
       this._setDisplay('records', tab.id, {
         title: tab.title,
         tooltip: tab.tooltip,
+        subtitle: tab.subtitle,
         hasActivity: tab.hasActivity,
         agentStatus: tab.agentStatus,
       })
@@ -170,6 +220,7 @@ abstract class TabStripBase implements TabStrip {
     this._setDisplay('records', tab.id, {
       title: tab.title,
       tooltip: tab.tooltip,
+      subtitle: tab.subtitle,
       hasActivity: tab.hasActivity,
       agentStatus: tab.agentStatus,
     })

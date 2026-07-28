@@ -192,4 +192,65 @@ describe('Tab', () => {
     const tab = screen.getByRole('tab')
     expect(tab.getAttribute('draggable')).toBe('true')
   })
+
+  it('marks the row hidden with data-hidden when the hidden prop is true', () => {
+    subject({ hidden: true })
+    const tab = screen.getByRole('tab')
+    expect(tab.getAttribute('data-hidden')).toBe('true')
+    expect(tab.classList.contains('nocx-tab')).toBe(true)
+  })
+
+  it('omits data-hidden when the hidden prop is false', () => {
+    subject({ hidden: false })
+    const tab = screen.getByRole('tab')
+    expect(tab.hasAttribute('data-hidden')).toBe(false)
+    expect(tab.classList.length).toBe(1)
+  })
+
+  it('renders subtitle element in vertical mode when the title is a name', () => {
+    subject({ orientation: 'vertical', tooltip: '~/repos/nocx', subtitle: '~/repos/nocx' })
+    const subtitle = document.querySelector('.nocx-tab-subtitle')
+    expect(subtitle).toBeTruthy()
+    expect(subtitle?.textContent).toBe('~/repos/nocx')
+  })
+
+  it('omits subtitle element in horizontal mode', () => {
+    subject({ orientation: 'horizontal', tooltip: '~/repos/nocx', subtitle: '~/repos/nocx' })
+    const subtitle = document.querySelector('.nocx-tab-subtitle')
+    expect(subtitle).toBeNull()
+  })
+
+  // A plain local tab is titled after its own directory, so the content pushes an
+  // empty subtitle rather than printing the first line twice.
+  it('omits the subtitle when the content pushed an empty one', () => {
+    subject({ orientation: 'vertical', tooltip: '~/repos/nocx', subtitle: '' })
+    expect(document.querySelector('.nocx-tab-subtitle')).toBeNull()
+  })
+
+  it('omits subtitle element in vertical mode when there is no location to show', () => {
+    subject({ orientation: 'vertical', tooltip: '', subtitle: '' })
+    const subtitle = document.querySelector('.nocx-tab-subtitle')
+    expect(subtitle).toBeNull()
+  })
+
+  it('renders subtitle element in vertical mode when tooltip is non-empty', () => {
+    subject({ orientation: 'vertical', tooltip: '~/repos/nocx', subtitle: '~/repos/nocx' })
+    const subtitle = document.querySelector('.nocx-tab-subtitle')
+    expect(subtitle).toBeTruthy()
+    expect(subtitle?.textContent).toBe('~/repos/nocx')
+  })
+
+  // The subtitle shows the same text, but it ellipses — so the native tooltip is
+  // the only way to read a long path in full and stays in both orientations.
+  it('keeps the title attribute in vertical mode, where the subtitle ellipses', () => {
+    subject({ orientation: 'vertical', tooltip: '~/repos/nocx', subtitle: '~/repos/nocx' })
+    const tab = screen.getByRole('tab')
+    expect(tab.getAttribute('title')).toBe('~/repos/nocx')
+  })
+
+  it('sets title attribute in horizontal mode (tooltip as native tooltip)', () => {
+    subject({ orientation: 'horizontal', tooltip: '~/repos/nocx' })
+    const tab = screen.getByRole('tab')
+    expect(tab.getAttribute('title')).toBe('~/repos/nocx')
+  })
 })

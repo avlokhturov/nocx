@@ -20,6 +20,7 @@ export interface SearchFieldProps {
   placeholder?: string
   ariaLabel?: string
   disabled?: boolean
+  onKeyDown?: (e: KeyboardEvent) => void
 }
 
 export function SearchField(props: SearchFieldProps) {
@@ -40,6 +41,7 @@ export function SearchField(props: SearchFieldProps) {
         placeholder={props.placeholder ?? ''}
         aria-label={props.ariaLabel ?? undefined}
         disabled={props.disabled === true}
+        onKeyDown={(e) => props.onKeyDown?.(e)}
         onInput={onInput}
       />
     </span>

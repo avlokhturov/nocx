@@ -1,3 +1,4 @@
+import { Show } from 'solid-js'
 import { IconButton } from './ui/icon-button'
 import type { AgentStatus } from './agent-status'
 
@@ -29,12 +30,19 @@ export interface TabProps {
   agentStatus: AgentStatus | null
   /** Display title from the reactive store. */
   title: string
-  /** Tooltip text from the reactive store. */
+  /** Tooltip text from the reactive store — rendered as subtitle in vertical mode. */
   tooltip: string
   /** Whether there is unread activity visible on an inactive tab. */
   hasActivity: boolean
   /** Tabindex for roving tabindex participation. */
   tabIndex: number
+  /** Orientation of the tab strip — controls subtitle rendering. Defaults to 'horizontal'. */
+  orientation?: 'horizontal' | 'vertical'
+  /** When true, the tab row is hidden via CSS (filtering). Defaults to false. */
+  hidden?: boolean
+  /** The row's second line in vertical placement: the tab's location. Empty when the
+   *  title already carries it, in which case no second line is drawn. */
+  subtitle?: string
   /** Called when the tab is clicked. */
   onActivate: () => void
   /** Called with the tab id when the tab is closed (middle-click or close button). */
@@ -53,6 +61,10 @@ export function Tab(props: TabProps) {
       aria-selected={props.active}
       data-tab-id={String(props.tabId)}
       data-agent-status={props.agentStatus ?? undefined}
+      data-hidden={props.hidden === true ? 'true' : undefined}
+      // Kept in BOTH orientations. The vertical row shows the same text as a
+      // subtitle, but that line ellipses — so dropping the native tooltip there
+      // took away the only way to read a long path in full.
       title={props.tooltip}
       draggable={true}
       tabIndex={props.tabIndex}
@@ -87,8 +99,18 @@ export function Tab(props: TabProps) {
     >
       <span class="nocx-tab-index">{props.index + 1}</span>
       <span class="nocx-tab-label">
-        <span class="nocx-tab-status" />
-        <span class="nocx-tab-title">{props.title}</span>
+        {/* The status dot belongs ON the title's line, not above it. In the
+            vertical row the label is a column, so a status span sitting beside
+            the title became a third row of its own — 10px tall even when the dot
+            is not showing — and pushed the two visible lines below the row's
+            centre. Wrapping the pair keeps the column at exactly two children. */}
+        <span class="nocx-tab-line">
+          <span class="nocx-tab-status" />
+          <span class="nocx-tab-title">{props.title}</span>
+        </span>
+        <Show when={props.orientation === 'vertical' && (props.subtitle ?? '') !== ''}>
+          <span class="nocx-tab-subtitle">{props.subtitle}</span>
+        </Show>
       </span>
       <IconButton
         size="sm"
