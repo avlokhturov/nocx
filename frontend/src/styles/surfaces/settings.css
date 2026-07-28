@@ -20,13 +20,14 @@
 
 /* 28vw put the rail at 358px on a 1280px window to hold three short words.
    It is a navigation list, so it is sized to its content. */
+/* Sizing only. The rail's chrome — background, divider, padding — moved to
+   base.css with T20 (nocx-etu2): it is what a rail looks like, not what THIS rail
+   looks like, and leaving it here let one surface define it for all of them.
+   The font-size stays: one type size for the whole column, because search, filter
+   and nav are peers here and are this surface's primary navigation rather than fine
+   print. That is an editorial choice about content, not about the component. */
 .ui-settings .ui-page__rail {
   flex: 0 0 clamp(200px, 18vw, 260px);
-  background: var(--color-chrome-rail);
-  border-right: 1px solid var(--color-divider);
-  padding: var(--space-4) var(--space-3);
-  /* One type size for the whole column — search, filter and nav are peers.
-     These are the surface's primary navigation, not fine print. */
   font-size: var(--font-size-md);
 }
 

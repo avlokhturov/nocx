@@ -167,10 +167,17 @@ select:focus-visible {
   min-height: 0;
 }
 
+/* The rail's own chrome. It sat in settings.css, which meant the one surface that
+   had a rail decided what every rail looks like — and rule 3 forbids a surface
+   painting a component (T20, nocx-etu2). Width and flex stay overridable from the
+   surface: how wide a navigation column needs to be is a property of what is in it. */
 .ui-page__rail {
   width: 200px;
   flex: 0 0 auto;
   overflow-y: auto;
+  background: var(--color-chrome-rail);
+  border-right: 1px solid var(--color-divider);
+  padding: var(--space-4) var(--space-3);
 }
 
 .ui-page__scroll {
