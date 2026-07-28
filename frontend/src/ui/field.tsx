@@ -28,6 +28,16 @@ export interface FieldProps {
    * remove, surviving inside the component that was supposed to end it (nocx-etu2).
    */
   labelProminence?: 'secondary' | 'primary'
+  /**
+   * A small mark rendered before the label text — a dot, a badge, a lock.
+   *
+   * A slot rather than something the surface reaches in for. Settings drew its
+   * "modified" dot with `.ui-settings-row--modified > .ui-field > .ui-field-label-col
+   * > label::before`, a selector that tunnels through two kit identities to decorate
+   * a component's internals. Composition says the same thing without the tunnel
+   * (nocx-etu2).
+   */
+  labelMarker?: JSX.Element
   /** The id of the control inside this field — used for label's `for` and
    *  description/error aria-describedby wiring. */
   for: string
@@ -64,6 +74,7 @@ export function Field(props: FieldProps) {
       fallback={
         <div class="ui-field" data-label={props.labelProminence ?? 'secondary'}>
           <label for={props.for}>
+            {props.labelMarker}
             {props.label}
             <Show when={props.required === true}>
               <span aria-hidden="true"> *</span>
@@ -86,6 +97,7 @@ export function Field(props: FieldProps) {
       <div class="ui-field ui-field-horizontal" data-label={props.labelProminence ?? 'secondary'}>
         <div class="ui-field-label-col">
           <label for={props.for}>
+            {props.labelMarker}
             {props.label}
             <Show when={props.required === true}>
               <span aria-hidden="true"> *</span>

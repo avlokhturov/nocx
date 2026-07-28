@@ -644,6 +644,11 @@ export function SettingsComponent(props: SettingsComponentProps) {
           for={keyToDomId(decl.key)}
           label={decl.label}
           labelProminence="primary"
+          labelMarker={
+            <Show when={isModified(decl)}>
+              <span class="ui-settings-modified-dot" aria-hidden="true" />
+            </Show>
+          }
           description={decl.description || undefined}
           orientation="horizontal"
           labelAdornment={
@@ -747,7 +752,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
         title="Settings"
         titleHidden
         leading={
-          <div>
+          <div class="ui-settings-rail">
             {/* ONE search box (nocx-x6w9) — only in the rail. */}
             <div class="ui-settings-search">
               <SearchField

@@ -26,8 +26,17 @@
    The font-size stays: one type size for the whole column, because search, filter
    and nav are peers here and are this surface's primary navigation rather than fine
    print. That is an editorial choice about content, not about the component. */
+/* Sizing the rail is the surface's call — how wide a navigation column needs to be
+   is a property of what is in it. */
 .ui-settings .ui-page__rail {
   flex: 0 0 clamp(200px, 18vw, 260px);
+}
+
+/* One type size for the whole column: search, filter and nav are peers here and are
+   this surface's primary navigation rather than fine print. Declared on the surface's
+   OWN wrapper rather than on `.ui-page__rail`, which is Page's — an editorial choice
+   about this content should not reach into the component that holds it (nocx-etu2). */
+.ui-settings-rail {
   font-size: var(--font-size-md);
 }
 
@@ -281,8 +290,10 @@
 
 /* The changed-row marker the badge used to be. Scoped to the row's own label so
    it cannot leak into the export cards nested further down. */
-.ui-settings-row--modified > .ui-field > .ui-field-label-col > label::before {
-  content: '';
+/* The dot is an element the surface hands to Field's `labelMarker` slot now, not a
+   pseudo-element drawn through two kit identities (nocx-etu2). Composition says the
+   same thing without tunnelling into the component's internals. */
+.ui-settings-modified-dot {
   display: inline-block;
   width: 6px;
   height: 6px;
