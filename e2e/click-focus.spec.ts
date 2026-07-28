@@ -25,7 +25,7 @@ const INPUT = '.nocx-editor-input'
 
 test('a click into the pane leaves the terminal taking keystrokes', async ({ page }) => {
   await page.goto('/')
-  await expect(page.locator('.tab')).toHaveCount(1)
+  await expect(page.locator('.nocx-tab')).toHaveCount(1)
   // Wait for the prompt to be OWNED, not merely for a title. Ownership is what
   // gives the editor focus, so typing before that transition is a race.
   await promptReady(page)
@@ -34,8 +34,8 @@ test('a click into the pane leaves the terminal taking keystrokes', async ({ pag
   // the tab is focused on load, so a click that changed nothing would pass.
   // Focus an outside control rather than calling blur(): a late prompt-state
   // transition legitimately focuses the editor and would race a bare blur.
-  await page.locator('.tab-add').focus()
-  await expect(page.locator('.tab-add')).toBeFocused()
+  await page.locator('[aria-label="New tab"]').focus()
+  await expect(page.locator('[aria-label="New tab"]')).toBeFocused()
 
   // Click near the bottom of the pane where the editor lives.  The centre
   // of the pane lands on the xterm area and its hidden textarea steals focus;

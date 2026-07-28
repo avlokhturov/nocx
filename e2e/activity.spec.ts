@@ -4,8 +4,8 @@ import { test, expect } from './harness'
 // methods together), so this exercises the real transport, PTY and renderer.
 // The activity indicator is invisible to jsdom — no layout, no GPU, no focus.
 
-const TAB = '.tab'
-const ACTIVITY = '.tab-indicator.tab-activity'
+const TAB = '.nocx-tab'
+const ACTIVITY = '.nocx-tab-indicator[data-activity="true"]'
 
 test('a background tab lights the activity indicator on normal-buffer output', async ({ page }) => {
   const logs: string[] = []
@@ -19,9 +19,9 @@ test('a background tab lights the activity indicator on normal-buffer output', a
   await page.keyboard.press('Enter')
 
   // Open a second tab; the first drops to the background.
-  await page.locator('.tab-add').click()
+  await page.locator('[aria-label="New tab"]').click()
   await expect(page.locator(TAB)).toHaveCount(2)
-  await expect(page.locator(TAB).first()).not.toHaveClass(/active/)
+  await expect(page.locator(TAB).first()).toHaveAttribute('aria-selected', 'false')
 
   // Assert the indicator is visible — Playwright polls until found. The
   // shell `sleep 3` is a genuine ordering constraint (output must arrive
@@ -30,10 +30,10 @@ test('a background tab lights the activity indicator on normal-buffer output', a
   for (const l of logs.filter((l) => l.includes('NOCXDBG'))) console.log(l)
 
   const state = await page.evaluate(() => {
-    const tabs = [...document.querySelectorAll('.tab')]
+    const tabs = [...document.querySelectorAll('.nocx-tab')]
     return tabs.map((t) => ({
-      cls: t.className,
-      indicator: t.querySelector('.tab-indicator')?.className,
+      selected: t.getAttribute('aria-selected'),
+      activity: t.querySelector('.nocx-tab-indicator')?.getAttribute('data-activity'),
     }))
   })
   console.log('--- tab state ---', JSON.stringify(state, null, 1))

@@ -124,7 +124,7 @@ test.describe('vertical tab placement', () => {
 
     await page.keyboard.press('Meta+t')
     await expect(page.locator(TAB)).toHaveCount(2)
-    await expect(page.locator(TAB).first()).not.toHaveClass(/active/)
+    await expect(page.locator(TAB).first()).toHaveAttribute('aria-selected', 'false')
     await expect(page.locator(TAB).first().locator(ACTIVITY)).toBeAttached({ timeout: 15000 })
   })
 

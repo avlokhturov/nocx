@@ -1,68 +1,95 @@
-import { test, expect } from './harness'
+import { test, expect, type Page } from './harness'
+
+// nocx-82l9.2: SettingsContent.mount appended an unclassed <div> into .pane, so
+// flex:1 on .ui-page__scroll never received a bounded block size and the pane
+// clipped its content instead of scrolling it. WebKit only — it is specifically
+// sensitive to a missing min-height:0 in a flex chain.
+//
+// The probe used to be "scroll the last of a long list of setting rows into
+// view". Settings no longer has a long list: it opens on one section at a time,
+// and no section that contains rows overflows a short window (measured in WebKit
+// at 1024x520 — Clipboard and Interface both fit, 482px of content in 482px of
+// scroller). The section that does overflow is Export / Backup / Import, at
+// 1468px, so that is where the chain is now observable. The overflow assertion
+// comes first on purpose: if that section ever shrinks, this test must fail
+// loudly rather than pass because there was nothing to scroll (nocx-pp3y.1).
+
+const EXPORT_SECTION = '.ui-settings-section-nav-item[data-section="Export / Backup / Import"]'
+
+async function openOverflowingSection(page: Page): Promise<void> {
+  await page.goto('/')
+  await expect(page.locator('.nocx-tab-title').first()).not.toHaveText('', { timeout: 10_000 })
+  await page.keyboard.press('Meta+,')
+  await expect(page.locator('.ui-page__scroll')).toBeVisible({ timeout: 5000 })
+  await page.locator(`${EXPORT_SECTION} button`).click()
+}
+
+/** The scroller must actually have something to scroll, or the rest proves nothing. */
+async function expectOverflow(page: Page): Promise<void> {
+  await expect
+    .poll(
+      () =>
+        page.evaluate(() => {
+          const sc = document.querySelector<HTMLElement>('.ui-page__scroll')
+          if (!sc) return 0
+          return sc.scrollHeight - sc.clientHeight
+        }),
+      { timeout: 5000 },
+    )
+    .toBeGreaterThan(0)
+}
+
+/**
+ * Scroll to the bottom and report whether the last section ends inside the PANE.
+ *
+ * The pane is the boundary that matters and the scroller is not: with the chain
+ * unbound the scroller grows to content height, so "the last section fits inside
+ * the scroller" is vacuously true precisely when the bug is present. Measured by
+ * injecting `min-height: auto` over the chain in WebKit — the scroller-relative
+ * comparison returned true, the pane-relative one returned false.
+ */
+async function lastSectionReachable(page: Page): Promise<boolean> {
+  return page.evaluate(() => {
+    const sc = document.querySelector<HTMLElement>('.ui-page__scroll')
+    const pane = document.querySelector<HTMLElement>('.pane.active')
+    if (!sc || !pane) return false
+    sc.scrollTop = sc.scrollHeight
+    const sections = sc.querySelectorAll<HTMLElement>('.ui-page-section')
+    const last = sections[sections.length - 1]
+    if (!last) return false
+    // 1px of rounding slack — WebKit reports fractional heights here.
+    return last.getBoundingClientRect().bottom <= pane.getBoundingClientRect().bottom + 1
+  })
+}
 
 test.describe('settings scroll — normal', () => {
-  // Bug: the .ui-page__scroll scroll chain is broken because SettingsContent.mount
-  // appends an unclassed <div> into .pane, so flex:1 on .ui-page__scroll never
-  // receives a bounded block size and the pane clips the content instead of
-  // scrolling it. Reproduces only in WebKit (nocx-82l9.2).
-
   test.use({ viewport: { width: 1024, height: 520 } })
 
-  test('scrolls the last setting row into view in a short window (nocx-82l9.2)', async ({
+  test('scrolls the last section into view in a short window (nocx-82l9.2)', async ({
     page,
     browserName,
   }) => {
     test.skip(browserName !== 'webkit', 'Settings scroll bug is WebKit-only (nocx-82l9.2)')
 
-    await page.goto('/')
-    await expect(page.locator('.tab-title').first()).not.toHaveText('', { timeout: 10_000 })
+    await openOverflowingSection(page)
+    await expectOverflow(page)
 
-    // Open Settings
-    await page.keyboard.press('Meta+,')
-    await expect(page.locator('.ui-page__scroll')).toBeVisible({ timeout: 5000 })
-
-    // Find the last visible row and scroll it into view
-    const lastRow = page.locator('.ui-settings-row').last()
-    await lastRow.scrollIntoViewIfNeeded()
-
-    // When the scroll chain works, the last row's bottom is within the pane.
-    // With the bug, the pane clips the content and scrolling has no effect.
-    const pane = page.locator('.pane.active')
-    const paneBox = await pane.boundingBox()
-    const rowBox = await lastRow.boundingBox()
-
-    expect(rowBox).not.toBeNull()
-    expect(paneBox).not.toBeNull()
-    expect(rowBox!.y + rowBox!.height).toBeLessThanOrEqual(paneBox!.y + paneBox!.height)
+    expect(await lastSectionReachable(page)).toBe(true)
   })
 })
 
 test.describe('settings scroll — narrow', () => {
   test.use({ viewport: { width: 600, height: 520 } })
 
-  test('scrolls the last setting row in narrow (stacked, <640px) layout', async ({
+  test('scrolls the last section in narrow (stacked, <640px) layout', async ({
     page,
     browserName,
   }) => {
     test.skip(browserName !== 'webkit', 'Settings scroll bug is WebKit-only (nocx-82l9.2)')
 
-    await page.goto('/')
-    await expect(page.locator('.tab-title').first()).not.toHaveText('', { timeout: 10_000 })
+    await openOverflowingSection(page)
+    await expectOverflow(page)
 
-    // Open Settings
-    await page.keyboard.press('Meta+,')
-    await expect(page.locator('.ui-page__scroll')).toBeVisible({ timeout: 5000 })
-
-    // Narrow layout stacks rail above content — verify scroll still works.
-    const lastRow = page.locator('.ui-settings-row').last()
-    await lastRow.scrollIntoViewIfNeeded()
-
-    const pane = page.locator('.pane.active')
-    const paneBox = await pane.boundingBox()
-    const rowBox = await lastRow.boundingBox()
-
-    expect(rowBox).not.toBeNull()
-    expect(paneBox).not.toBeNull()
-    expect(rowBox!.y + rowBox!.height).toBeLessThanOrEqual(paneBox!.y + paneBox!.height)
+    expect(await lastSectionReachable(page)).toBe(true)
   })
 })

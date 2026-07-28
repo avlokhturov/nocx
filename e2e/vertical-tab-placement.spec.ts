@@ -13,6 +13,10 @@ test.describe('vertical tab placement', () => {
 
   async function switchPlacement(page: Page, value: 'horizontal' | 'vertical'): Promise<void> {
     await page.keyboard.press('Meta+,')
+    // Settings opens on its FIRST section, so a row in any other section is in
+    // the DOM and hidden. Navigate before waiting, or this times out on a
+    // control that is right there and reads like a broken selector.
+    await page.locator('.ui-settings-section-nav-item[data-section="Interface"] button').click()
     await expect(page.locator(PLACEMENT_SELECT)).toBeVisible({ timeout: 5000 })
     await page.selectOption(PLACEMENT_SELECT, value)
     await page.keyboard.press('Meta+w')
@@ -30,7 +34,7 @@ test.describe('vertical tab placement', () => {
 
   test.beforeEach(async ({ page }) => {
     await page.goto('/')
-    await expect(page.locator('.tab-title').first()).not.toHaveText('', { timeout: 10_000 })
+    await expect(page.locator('.nocx-tab-title').first()).not.toHaveText('', { timeout: 10_000 })
     // Ensure horizontal before every test
     await switchPlacement(page, 'horizontal')
   })
@@ -42,7 +46,7 @@ test.describe('vertical tab placement', () => {
 
     // The vertical tab strip is in #vertical-tabstrip. Tab buttons should
     // sit left of #body and below the drag bar.
-    const firstTab = page.locator('.tab').first()
+    const firstTab = page.locator('.nocx-tab').first()
     const body = page.locator('#body')
     const panes = page.locator('#panes')
 

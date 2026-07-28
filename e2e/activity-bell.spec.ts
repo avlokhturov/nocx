@@ -1,7 +1,7 @@
 import { test, expect } from './harness'
 
-const TAB = '.tab'
-const ACTIVITY = '.tab-indicator.tab-activity'
+const TAB = '.nocx-tab'
+const ACTIVITY = '.nocx-tab-indicator[data-activity="true"]'
 
 // A full-screen TUI repaints constantly in the alternate buffer, and those
 // repaints deliberately do not light the indicator (nocx-5mf). A bell is the
@@ -29,11 +29,11 @@ test('a bell lights the indicator from inside the alternate buffer', async ({ pa
     timeout: 5000,
   })
 
-  // Use keyboard shortcut — the .tab-add button is hidden in alt-screen
-  // mode (CSS: #app.alt-screen .tab-add { display: none }).
+  // Use keyboard shortcut — the New tab button is hidden in alt-screen mode
+  // (style.css: #app.alt-screen .tabs-container + .ui-icon-button).
   await page.keyboard.press('Meta+t')
   await expect(page.locator(TAB)).toHaveCount(2)
-  await expect(page.locator(TAB).first()).not.toHaveClass(/active/)
+  await expect(page.locator(TAB).first()).toHaveAttribute('aria-selected', 'false')
 
   // Wait for the activity indicator — replaces waitForTimeout(6000).
   // Playwright's expect polls every ~100ms until found.

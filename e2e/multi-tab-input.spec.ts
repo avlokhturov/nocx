@@ -4,9 +4,9 @@ import { test, expect, promptReady } from './harness'
 // keyboard input. The user-observable contract is that every tab accepts
 // keystrokes when it is active, regardless of how many other tabs exist.
 
-const TITLE = '.tab-title'
-const TAB = '.tab'
-const TAB_ADD = '.tab-add'
+const TITLE = '.nocx-tab-title'
+const TAB = '.nocx-tab'
+const TAB_ADD = '[aria-label="New tab"]'
 const PANE = '.pane.active'
 
 test.describe('multi-tab input (nocx-4ff.28)', () => {

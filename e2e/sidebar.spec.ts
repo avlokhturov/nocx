@@ -4,8 +4,12 @@ import { test, expect } from './harness'
 // These tests run against the full app so layout, focus and ARIA are real.
 
 const TOOLBAR = '[role="toolbar"]'
-const VIEW_BTN = '[role="button"][data-view]'
-const ACTION_BTN = '[role="button"][data-action]'
+// A native <button> carries the button role implicitly, so there is no
+// role="button" to select on: the activity bar's zones render IconButtons, and
+// the kit's no-role-impersonation rule is what forbids the attribute these
+// selectors used to name (nocx-pp3y.1).
+const VIEW_BTN = 'button[data-view]'
+const ACTION_BTN = 'button[data-action]'
 const VIEWS_GROUP = '[role="group"][aria-label="Views"]'
 const ACTIONS_GROUP = '[role="group"][aria-label="Actions"]'
 

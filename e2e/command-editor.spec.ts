@@ -1,6 +1,6 @@
 import { test, expect } from './harness' // shared Wails WS-port shim for headless CI
 
-const TITLE = '.tab-title'
+const TITLE = '.nocx-tab-title'
 const EDITOR = '.nocx-editor'
 const INPUT = '.nocx-editor-input'
 
