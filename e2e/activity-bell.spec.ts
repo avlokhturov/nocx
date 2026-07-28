@@ -25,12 +25,18 @@ test('a bell lights the indicator from inside the alternate buffer', async ({ pa
 
   // Wait for alt-screen to be active before backgrounding (replaces
   // waitForTimeout(2000)).
-  await expect(page.locator('#app')).toHaveClass(/alt-screen/, {
+  //
+  // Asked of the PANE, not of `#app`. `#app.alt-screen` is gone: it existed to
+  // empty the window chrome so a viewport-sized fullscreen xterm would not
+  // paint through it, and nocx-6w4z moved the fullscreen region inside the pane
+  // precisely so the chrome could stay. The class went with it, and this wait
+  // silently became a 5s timeout on a class nothing sets any more (nocx-42lb).
+  // `live-fullscreen` is what `enterFullscreen()` writes, on the alt-screen
+  // path, so it states the same condition against the code that survived.
+  await expect(page.locator('.pane.active .xterm-live-container')).toHaveClass(/live-fullscreen/, {
     timeout: 5000,
   })
 
-  // Use keyboard shortcut — the New tab button is hidden in alt-screen mode
-  // (style.css: #app.alt-screen .tabs-container + .ui-icon-button).
   await page.keyboard.press('Meta+t')
   await expect(page.locator(TAB)).toHaveCount(2)
   await expect(page.locator(TAB).first()).toHaveAttribute('aria-selected', 'false')
