@@ -117,11 +117,15 @@ func (rc *RealClient) dialForConnect(ctx context.Context, host string, resolved 
 		auths := authMethodsFromChain(chain)
 
 		addr := net.JoinHostPort(resolved.hostName, strconv.Itoa(resolved.port))
+		timeout := cfg.ReadyTimeout
+		if timeout <= 0 {
+			timeout = 30 * time.Second
+		}
 		gcfg := &gossh.ClientConfig{
 			User:            resolved.user,
 			Auth:            auths,
 			HostKeyCallback: hostKeyCB,
-			Timeout:         30 * time.Second,
+			Timeout:         timeout,
 		}
 
 		d := &dialer{client: rc}
@@ -132,7 +136,11 @@ func (rc *RealClient) dialForConnect(ctx context.Context, host string, resolved 
 		if err != nil {
 			return nil, err
 		}
-		return &pooledSSHConn{client: gclient}, nil
+		stopKA, _ := startKeepalive(gclient, cfg.KeepaliveInterval, cfg.KeepaliveCountMax)
+		return &pooledSSHConn{
+			client:        gclient,
+			stopKeepalive: stopKA,
+		}, nil
 	}
 }
 
@@ -152,11 +160,15 @@ func (rc *RealClient) dialJumpForConnect(ctx context.Context, host string, resol
 			return nil, fmt.Errorf("build jump host auth: %w", err)
 		}
 		jumpAuths := authMethodsFromChain(chain)
+		timeout := cfg.ReadyTimeout
+		if timeout <= 0 {
+			timeout = 30 * time.Second
+		}
 		jumpClientCfg := &gossh.ClientConfig{
 			User:            resolved.user,
 			Auth:            jumpAuths,
 			HostKeyCallback: hostKeyCB,
-			Timeout:         30 * time.Second,
+			Timeout:         timeout,
 		}
 		d := &dialer{client: rc}
 		jumpAddr := net.JoinHostPort(resolved.hostName, strconv.Itoa(resolved.port))
@@ -283,9 +295,11 @@ func (d *dialer) dialViaJumpHost(ctx context.Context, cfg *ConnectConfig, resolv
 		// refcount drops to zero and the bastion connection closes. The bastion
 		// handle is released exactly once because pooledSSHConn.Close is guarded
 		// by its own sync.Once.
+		stop, _ := startKeepalive(target, cfg.KeepaliveInterval, cfg.KeepaliveCountMax)
 		return &pooledSSHConn{
-			client:  target,
-			release: func() { d.client.pool.Release(jumpHandle) },
+			client:        target,
+			release:       func() { d.client.pool.Release(jumpHandle) },
+			stopKeepalive: stop,
 		}, nil
 	}
 }

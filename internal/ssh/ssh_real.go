@@ -11,6 +11,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/log"
 	gossh "golang.org/x/crypto/ssh"
+	agent "golang.org/x/crypto/ssh/agent"
 	"golang.org/x/crypto/ssh/knownhosts"
 )
 
@@ -104,11 +105,27 @@ func (rc *RealClient) Connect(ctx context.Context, host string, opts ...ConnectO
 		return nil, fmt.Errorf("internal: pooled client is not *gossh.Client (%T)", pconn.client)
 	}
 
+	// Agent forwarding: register the per-connection channel handler once
+	// (initAgentForward is guarded by agentForwardOnce), then request it
+	// per-session inside openShell. Fail early if the user asked for
+	// forwarding but no agent is reachable.
+	if cfg.AgentForward {
+		if !rc.agentAvailable() {
+			rc.pool.Release(handle)
+			return nil, fmt.Errorf("agent forwarding requested but no SSH agent available (SSH_AUTH_SOCK not set)")
+		}
+		if fwdErr := pconn.initAgentForward(gclient, os.Getenv("SSH_AUTH_SOCK")); fwdErr != nil {
+			rc.pool.Release(handle)
+			return nil, fmt.Errorf("agent-forward setup: %w", fwdErr)
+		}
+	}
+
 	ch, err := rc.openShell(ctx, gclient, resolved, cfg)
 	if err != nil {
-		// Failed to open the shell — release our reference so the connection
-		// can close if we were the only tab. Without this the failed Connect
-		// path leaks a pooled ref (and a jump transport) for the process life.
+		// Failed to open the shell — release our reference so the
+		// connection can close if we were the only tab. Without this the
+		// failed Connect path leaks a pooled ref (and a jump transport)
+		// for the process life.
 		rc.pool.Release(handle)
 		return nil, err
 	}
@@ -174,7 +191,8 @@ func (rc *RealClient) hostKeyCallback() (gossh.HostKeyCallback, error) {
 	}, nil
 }
 
-// openShell opens a session, requests a PTY, and starts a shell.
+// openShell opens a session, requests a PTY, optionally requests agent
+// forwarding, and starts a shell.
 func (rc *RealClient) openShell(ctx context.Context, gclient *gossh.Client, resolved *resolvedConfig, cfg *ConnectConfig) (*RealChannel, error) {
 	if cfg.RemoteInstaller != nil {
 		remoteHome, err := cfg.RemoteInstaller.GetRemoteHome(gclient)
@@ -206,6 +224,16 @@ func (rc *RealClient) openShell(ctx context.Context, gclient *gossh.Client, reso
 		return nil, fmt.Errorf("pty-req: %w", err)
 	}
 
+	if cfg.AgentForward {
+		// Per-connection handler already registered in Connect (initAgentForward).
+		// Per-session: request agent forwarding on this session so the remote
+		// side can open auth-agent@openssh.com channels. agent.RequestAgentForwarding
+		// uses wantReply=true, so a server refusal surfaces as an error.
+		if reqErr := agent.RequestAgentForwarding(session); reqErr != nil {
+			_ = session.Close()
+			return nil, fmt.Errorf("agent-forward request: %w", reqErr)
+		}
+	}
 	stdin, err := session.StdinPipe()
 	if err != nil {
 		_ = session.Close()

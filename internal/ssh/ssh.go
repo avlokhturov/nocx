@@ -3,6 +3,7 @@ package ssh
 import (
 	"context"
 	"io"
+	"time"
 
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
@@ -100,6 +101,28 @@ type ConnectConfig struct {
 	// PassphraseSecretID is the opaque reference to the stored key
 	// passphrase in the SecretStore.
 	PassphraseSecretID credential.SecretID
+
+	// KeepaliveInterval controls how often the SSH keepalive probe
+	// ("keepalive@openssh.com") is sent on the connection. Zero disables
+	// keepalive. The profile stores this value in milliseconds; callers
+	// convert to a time.Duration before setting this field.
+	KeepaliveInterval time.Duration
+
+	// KeepaliveCountMax is the number of consecutive keepalive failures
+	// before the connection is considered dead and closed. Only meaningful
+	// when KeepaliveInterval > 0. Zero or negative means a single failure
+	// closes the connection.
+	KeepaliveCountMax int
+
+	// ReadyTimeout is the maximum time to wait for the SSH TCP dial and
+	// handshake to complete. Zero means use the default of 30 seconds.
+	ReadyTimeout time.Duration
+
+	// AgentForward enables SSH agent forwarding (auth-agent-req@openssh.com)
+	// on the session. The request is sent only when agent auth is actually
+	// in play (SSH_AUTH_SOCK is reachable); if set but no agent is available,
+	// the connect fails with an error.
+	AgentForward bool
 }
 
 func WithUser(user string) ConnectOption {
@@ -130,6 +153,28 @@ func WithPTYSize(cols, rows, xpixel, ypixel uint16) ConnectOption {
 		c.XPixel = xpixel
 		c.YPixel = ypixel
 	}
+}
+
+// WithKeepalive sets the keepalive interval and consecutive-failure limit.
+// A zero interval disables keepalive. Negative countMax means a single
+// failure closes the connection.
+func WithKeepalive(interval time.Duration, countMax int) ConnectOption {
+	return func(c *ConnectConfig) {
+		c.KeepaliveInterval = interval
+		c.KeepaliveCountMax = countMax
+	}
+}
+
+// WithTimeout sets the connect timeout for the TCP dial and SSH handshake.
+// Zero means the default of 30 seconds.
+func WithTimeout(timeout time.Duration) ConnectOption {
+	return func(c *ConnectConfig) { c.ReadyTimeout = timeout }
+}
+
+// WithAgentForward enables SSH agent forwarding on the session. It is only
+// honoured when the SSH agent is actually available (SSH_AUTH_SOCK set).
+func WithAgentForward() ConnectOption {
+	return func(c *ConnectConfig) { c.AgentForward = true }
 }
 
 // WithAuthMethods injects explicit ssh.AuthMethod values, bypassing the

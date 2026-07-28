@@ -6,6 +6,8 @@ import (
 	"sync"
 
 	"github.com/shady2k/nocx/internal/log"
+	gossh "golang.org/x/crypto/ssh"
+	agent "golang.org/x/crypto/ssh/agent"
 )
 
 // sshClientConn is the subset of *gossh.Client we need: Close. The real
@@ -25,11 +27,41 @@ type pooledSSHConn struct {
 	client    sshClientConn
 	release   func() // releases the jump handle, nil for direct conns
 	closeOnce sync.Once
+
+	// stopKeepalive cancels the keepalive goroutine when non-nil. Set by
+	// the dial factory when KeepaliveInterval > 0; called from Close before
+	// closing the transport so the ticker stops before the connection goes
+	// away (proved in TestKeepaliveTickerStopsOnClose). Nil when keepalive is
+	// disabled or this is a test fake.
+	stopKeepalive func()
+
+	// agentForwardOnce guards agent.ForwardToRemote so it is called exactly
+	// once per pooled connection, even when multiple tabs share the client.
+	agentForwardOnce sync.Once
+}
+
+// initAgentForward registers the auth-agent@openssh.com channel handler on
+// the underlying *gossh.Client exactly once per pooled connection. It is a
+// no-op (nil error) when addr is empty or the handler was already registered
+// by a previous tab sharing this connection. addr should be the local SSH
+// agent socket path (os.Getenv("SSH_AUTH_SOCK")).
+func (c *pooledSSHConn) initAgentForward(gclient *gossh.Client, addr string) error {
+	if addr == "" {
+		return nil
+	}
+	var setupErr error
+	c.agentForwardOnce.Do(func() {
+		setupErr = agent.ForwardToRemote(gclient, addr)
+	})
+	return setupErr
 }
 
 func (c *pooledSSHConn) Close() error {
 	var err error
 	c.closeOnce.Do(func() {
+		if c.stopKeepalive != nil {
+			c.stopKeepalive()
+		}
 		err = c.client.Close()
 		if c.release != nil {
 			c.release()
@@ -47,15 +79,15 @@ func (c *pooledSSHConn) Close() error {
 //   - host/port/user: the network endpoint and the account on it. Two
 //     different users on one host are different principals; sharing a
 //     connection means one user's session carries the other's traffic.
-//   - identity: the credential principal. A stored credential is bound to
-//     one principal (nocx-mon/PR11-T5); two different stored credentials
-//     for the same host+user are different principals and MUST NOT share,
-//     or one credential's session carries the other's traffic. For inline
-//     auth (no stored credential) we key on the private key path: a
-//     different key file is a different principal. When neither applies
-//     (agent-only / prompt-password), identity is empty and the entries
-//     share — those auth methods are not credential-bound, so there is no
-//     second principal to isolate.
+//   - identity: the credential principal. A stored credential is isolated
+//     by its SecretID — which is reminted on every password change, so a
+//     rotated credential cannot reuse a transport authenticated with the
+//     old secret (that is the distinction the "stored-credential ID" name
+//     misses). For inline auth (no stored credential) we key on the private
+//     key path: a different key file is a different principal. When neither
+//     applies (agent-only / prompt-password), identity is empty and the
+//     entries share — those auth methods are not credential-bound, so there
+//     is no second principal to isolate.
 //   - jumpRoute: the resolved identity of the bastion the connection is
 //     dialed through. The same target reached via two different bastions
 //     is a different route; pooling them together would let one bastion's
@@ -68,7 +100,7 @@ type poolKey struct {
 	host      string
 	port      int
 	user      string
-	identity  string // stored-credential ID, else inline key path, else ""
+	identity  string // SecretID (reminted on password change) or inline key path; isolates credential rotation
 	jumpRoute string // resolved jump identity (see jumpRouteKey), "" for direct
 }
 
