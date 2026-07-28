@@ -77,11 +77,26 @@ Bold entries had no bead.
    `export/import.go:37` call `SaveProfile` directly, bypassing any domain service, and
    credentials are imported in a second pass after profiles. A failure halfway leaves a
    partially imported store on disk, not merely a transient in-memory inconsistency.
-9. **The pool is not invalidated on password rotation.** `pool.go:67` keys on the
-   credential **ID**, not on secret identity, so rotation leaves the key unchanged and a
-   new channel can reuse a transport authenticated with the old password. Access **can**
-   survive server-side revocation for as long as that transport stays valid — the server
-   may or may not terminate it.
+9. **A public key is pooled by path, not by key identity** — and a larger claim here was
+   **withdrawn**, see below. `poolKeyFor` (`ssh_dial.go:38`) sets the pool identity to
+   `string(cfg.SecretID)`, falling back to `cfg.KeyFile` and then to `~/.ssh/config`'s
+   `IdentityFile`. For a key, that is a **path**: replacing the file contents at the same
+   path changes what authenticates without changing the pool key. Agent auth leaves the
+   identity empty by design, which the comment defends as "no second principal to
+   isolate" — but the agent's key set can change underneath that assumption, so the
+   behaviour should be chosen explicitly rather than inherited.
+
+   **Withdrawn:** rev. 1 and rev. 2 of this document claimed the pool is not invalidated on
+   password rotation. That is false. `savePasswordForCredential` (`ws.go:1244-1252`) mints a
+   **fresh** `SecretID` for every password change and the resolver copies it onto the config
+   (`resolver.go:91-93`), so the pool key changes and the old transport is not reused. The
+   bastion is handled the same way through `JumpSecretID` (`ssh_dial.go:86`). The error came
+   from reading `pool.go:67-73`'s doc comment — which says the identity is the
+   "stored-credential ID" — instead of the construction site that actually populates it. Two
+   independent reviewers made the same mistake from the same comment, which is itself the
+   defect worth fixing: **the comment describes a weaker key than the code implements** and
+   must be corrected to say `SecretID`.
+
 10. **The replay ring holds raw output on the backend.** `ring.go:10` retains 256 KiB per
     session and `ring.go:33` keeps it across subscriber disconnects by design. Any
     frontend-only masking is therefore a display feature, not a confidentiality guarantee.
@@ -323,26 +338,31 @@ honest position for a single-user local-first desktop app.
 
 ### 3.7 Pool identity must include the authenticator
 
-`pool.go:67-73` keys on host, port, user, credential **ID** and a formatted jump-route
-string. Its own comment states the rule: widen the key only by a component that
-distinguishes two principals. Rotation is the case that rule missed — the _same_ principal
-with a _different_ authenticator.
+**Start from what already works**, because the earlier revisions of this document got it
+wrong (§2.9). `poolKeyFor` (`ssh_dial.go:30-58`) keys on resolved host, port, user, an
+identity string and the jump route, and that identity string is `cfg.SecretID` — the
+opaque reference to the actual secret, reminted on every password change. Password
+rotation therefore already invalidates the pool, for the target and for the bastion alike.
+No persisted revision counter is needed, and no wholesale fingerprint rewrite either. What
+is needed is narrower:
 
-The fingerprint covers, for the target **and every hop**: dial endpoint; effective SSH
-username; credential ID; **credential version ID**; the selected version's password
-`SecretID` and passphrase `SecretID`; effective auth mode and method order; public-key
-identity; agent policy; and the complete ordered jump route. No persisted revision counter
-is needed.
+**A requirement, not a bug.** Once a credential has versions (§3.9), the resolver must copy
+the **selected version's** `SecretID` onto the config. Do that and the existing mechanism
+keeps working unchanged — pooling by the selected version rather than by the mutable
+credential aggregate falls out for free, so flipping which version is `candidate` does not
+disturb a connection whose selected version has not moved.
 
-Four things the plan must decide rather than inherit:
+Three things the plan must then decide rather than inherit:
 
 - **Public keys**: key identity means the public-key fingerprint or loaded signer identity,
-  **not the path** — replacing the file contents at the same path changes the authenticator
-  today without changing the key.
-- **Agent auth**: the agent's key set can change while credential ID and socket path stay
-  put, and there is no cheap deterministic pre-auth fingerprint. Choose explicitly between
-  "agent transports stay reusable until closed", "agent connections are not pooled", "pool
-  under an agent-session epoch", or "the broker reports the signing key actually used".
+  **not the path**. Today `poolKeyFor` falls back to `cfg.KeyFile` and then to the resolved
+  `IdentityFile`, so replacing the file contents at the same path changes what
+  authenticates without changing the key. This is the one real gap in §2.9.
+- **Agent auth**: the identity is empty by design — `pool.go` defends this as "no second
+  principal to isolate" — but the agent's key set can change underneath that assumption.
+  Choose explicitly between "agent transports stay reusable until closed", "agent
+  connections are not pooled", "pool under an agent-session epoch", or "the broker reports
+  the signing key actually used".
 - **`AuthAuto` fallback**: the key describes the effective _policy_; the method the server
   selects may differ. The pool entry should record the method and key identity **actually**
   authenticated, and expose it — the rotation UI needs exactly that to say which secret
@@ -351,12 +371,14 @@ Four things the plan must decide rather than inherit:
   serialization. Today's one-hop formatted `jumpRouteKey()` cannot represent an arbitrary
   route, and §2.7 must be fixed first.
 
-Pool by the **selected credential version**, not by the mutable credential aggregate:
-flipping which version is `candidate` must not change the key when the version actually
-used is unchanged.
+And one documentation fix that is not cosmetic: `pool.go:67-73` describes the identity as
+the "stored-credential ID" when the code sets it from `SecretID`. That comment is what led
+two independent reviewers to report a rotation bug that does not exist. A comment claiming
+a **weaker** key than the code implements is worse than none, and it gets corrected in the
+same wave.
 
-A changed fingerprint prevents new _reuse_; it does not drain existing idle entries. If
-retirement must stop existing transports, the pool needs an explicit drain API (§3.8).
+A changed key prevents new _reuse_; it does not drain existing idle entries. If retirement
+must stop existing transports, the pool needs an explicit drain API (§3.8).
 
 ### 3.8 Live sessions, revocation, and what "reconnect" means
 
@@ -590,8 +612,9 @@ stating rather than discovering:
    §3.3, Tabby import, configuration import, adoption — all routed through the engine, with
    transactional semantics and a declared collision policy.
 4. **"SSH does what the profile says."** Multi-hop routes (§2.7), the four ignored options
-   (`nocx-49x`), the pool fingerprint (§3.7), the forced-fresh probe primitive, transport
-   drain and revocation.
+   (`nocx-49x`), the narrowed pool work of §3.7 — public-key identity by fingerprint rather
+   than path, an explicit agent-auth decision, the structured jump route, and the corrected
+   `pool.go` comment — plus the forced-fresh probe primitive, transport drain and revocation.
 5. **"A credential stops being a side door."** The existing epic `nocx-0w2f` — its own
    settings section and one shared credential form component, replacing the "Saved
    credentials" toolbar button. Reused, not re-created. The "+" affordance is wave 6's.
