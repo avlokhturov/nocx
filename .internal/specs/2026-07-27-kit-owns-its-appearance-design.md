@@ -176,28 +176,44 @@ so the split in §3.4 has nowhere to put it and step 1 would orphan it.
 `class="ui-file-input"`. The button's _text_ stays the platform's and untranslatable —
 that is native behaviour and is not a reason to hand-roll the control.
 
-### 3.6 `class` is removed from the visual primitives
+### 3.6 `class` is removed from every kit component
 
 Removed from: `Button`, `TextField`, `SearchField`, `Select`, `Checkbox`, `Radio`,
-`Badge`, `EmptyState`, `FileInput`, `IconButton`.
+`Badge`, `EmptyState`, `FileInput`, `IconButton` — and, as of nocx-zhjx, from the
+structural containers too: `Section`, `PageSection`, `Toolbar`. `Field` never had one.
 
-Kept on the structural containers whose purpose is to be embedded — `Section`,
-`PageSection`, `Toolbar`, `Field` — which must additionally start emitting their own
-base class.
-
-**Keeping `class` there is itself a hole unless it is bounded**, because a consumer can
-pass `class="foo"` and then style `.foo` with exactly the control CSS the closed
-primitives now forbid. The contract:
+**Amended.** This section originally kept `class` on the structural containers whose
+purpose is to be embedded, bounded to layout and placement:
 
 > A class passed to a structural container may only carry **layout and placement** —
 > `margin`, `grid`/`flex` participation, `width`, `order`, `align-self`, `position`. It
 > may not carry appearance: `background`, `border`, `border-radius`, `color`,
 > `font-*`, `padding`, `box-shadow`, `appearance`, or any pseudo-element that draws.
 
-Rule 11 enforces this on the class's _own_ rules, which is possible precisely because
-the class is passed statically and can be traced from the JSX to the stylesheet.
+That bound was to be enforced by rule 11's weak tier, tracing the statically-passed
+class from the JSX to its own rules. **The weak tier was then refused** (§4, rule 11):
+it fires on `.cm-credential-card` and `.st-export-backup-details`, which are ordinary
+cards, and a rule that cannot tell a card from a re-skinned kit container is a rule
+people route around. That left the bound written down and unchecked — the exact shape
+of §1.1's finding, where a guard existed and the kit was bypassed anyway.
 
-Instance positioning otherwise belongs to the parent:
+So the hole was closed instead of policed. Measured before removing the prop: across
+the whole app, **one** call site passed a class to any structural container —
+`export-section.tsx` handing `st-export-card` to a `PageSection` — and
+`st-export-card` had no CSS rule at all. It was a test hook, and three assertions in
+`export-section.behavior.test.ts` were its only readers; they now address the card by
+the anchor id the component already sets for deep linking. A prop with no consumer and
+no enforceable bound is not an extension point, and a type that refuses a class beats
+a lint rule that cannot see it — the same argument that made rule 1 unnecessary as a
+lint rule.
+
+The `padding` question this raised is answered by removal rather than by definition.
+The property list above calls `padding` appearance, which would have made several
+placement-only references true violations by fiat; with no passthrough to classify,
+the only remaining channel is a parent's own selector, which rule 3 permits (nocx-zeti)
+and which names the parent rather than the component.
+
+Instance positioning belongs to the parent:
 
 ```css
 .cm-toolbar {

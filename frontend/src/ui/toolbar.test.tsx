@@ -19,17 +19,9 @@ describe('Toolbar', () => {
     expect(screen.getByText('Toolbar content')).toBeTruthy()
   })
 
-  it('always emits its own base class, before any passthrough', () => {
-    subject({ class: 'cm-header' })
-    // The wrapper is a div with role="toolbar"
-    const el = screen.getByRole('toolbar')
-    // `ui-toolbar` is the component's identity and is not optional: the shared
-    // rules in kit.css key off it, so a Toolbar that renders only the caller's
-    // class is an unstyled Toolbar.
-    expect(el.getAttribute('class')).toBe('ui-toolbar cm-header')
-  })
-
-  it('emits the base class with no passthrough', () => {
+  // `ui-toolbar` is the component's identity and is the whole of it: toolbar.css keys
+  // off it, and a caller can neither add to it nor replace it.
+  it('emits its identity and nothing else', () => {
     subject()
     expect(screen.getByRole('toolbar').getAttribute('class')).toBe('ui-toolbar')
   })

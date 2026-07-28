@@ -46,9 +46,8 @@ describe('PageSection', () => {
     expect(section).not.toBeNull()
   })
 
-  it('sets class on the wrapper', () => {
-    subject({ class: 'my-section' })
-    const section = document.querySelector('section.my-section')
-    expect(section).not.toBeNull()
+  it('emits its identity and nothing else', () => {
+    subject()
+    expect(document.querySelector('section')?.getAttribute('class')).toBe('ui-page-section')
   })
 })

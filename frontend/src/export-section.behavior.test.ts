@@ -112,9 +112,13 @@ describe('export section — heading and description', () => {
 // ── Mode cards ────────────────────────────────────────────────────────
 
 describe('export section — mode cards', () => {
+  // Addressed by the anchor id the component sets for deep linking, not by a class:
+  // a mode card is a kit PageSection, and the kit's containers no longer accept a
+  // class from their caller. `st-export-card` was only ever a test hook — it had no
+  // CSS — and a hook is not a reason to keep the hatch open.
   it('renders four cards', () => {
     const { container } = mount()
-    const cards = container.querySelectorAll('.st-export-card')
+    const cards = container.querySelectorAll('section[id^="st-export-"]')
     expect(cards.length).toBe(4)
   })
 
@@ -166,7 +170,7 @@ describe('export section — manifest loading', () => {
 
   it('renders carries and omits with no interaction', async () => {
     const { container } = mount()
-    const card = container.querySelector('.st-export-card')!
+    const card = container.querySelector('section[id^="st-export-"]')!
 
     await vi.waitFor(() => {
       const body = card.querySelector('.st-export-card-body')

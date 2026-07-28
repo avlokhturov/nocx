@@ -12,10 +12,17 @@
  *
  * `ui-page-section` is not optional. This component was the last one in the kit still
  * emitting only its caller's class — named in §1 of the migration design as the
- * defect it is, and fixed last because nothing styled it and so nothing broke. A
- * structural container keeps its `class` passthrough (§3.6), bounded to layout, but
- * the identity comes first: a component named only by its consumer is a component the
- * consumer owns.
+ * defect it is, and fixed last because nothing styled it and so nothing broke.
+ *
+ * There is no `class` passthrough. §3.6 originally kept one on the structural
+ * containers, bounded to layout and enforced by rule 11's weak tier — and that tier
+ * was then refused because it fires on ordinary cards, which left the bound written
+ * down and unchecked. Measured before removing it: the only caller passing a class to
+ * any structural container was export-section, whose `st-export-card` had no CSS at
+ * all and existed as a test hook. A prop with no consumer and no enforceable bound is
+ * the hatch this epic exists to close, and a type that refuses it beats a lint rule
+ * that cannot see it. Placement belongs to the parent's own selector, which rule 3
+ * permits (nocx-zeti).
  */
 
 import type { JSX } from 'solid-js'
@@ -23,13 +30,12 @@ import type { JSX } from 'solid-js'
 export interface PageSectionProps {
   id?: string
   title: string
-  class?: string
   children: JSX.Element
 }
 
 export function PageSection(props: PageSectionProps) {
   return (
-    <section id={props.id} class={`ui-page-section ${props.class ?? ''}`.trim()}>
+    <section id={props.id} class="ui-page-section">
       <h2>{props.title}</h2>
       {props.children}
     </section>

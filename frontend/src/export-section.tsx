@@ -392,7 +392,7 @@ function ModeCard(props: { def: ModeDef; profileClient: ProfileClient }) {
   onMount(loadManifest)
 
   return (
-    <PageSection id={'st-export-' + props.def.mode} title={props.def.label} class="st-export-card">
+    <PageSection id={'st-export-' + props.def.mode} title={props.def.label}>
       <p class="st-export-card-summary">{props.def.summary}</p>
       <div class="st-export-card-body">
         <Show when={state.loading}>
