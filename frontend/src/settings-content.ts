@@ -59,6 +59,10 @@ export class SettingsContent extends SolidTabContent {
     await super.mount(target, host, signal)
     this.handle = this.handleRef.current!
     await this.handle.ready()
+    if (this.pendingNewConnection) {
+      this.pendingNewConnection = false
+      this.handle.newConnection()
+    }
   }
 
   focus(): void {
@@ -78,4 +82,22 @@ export class SettingsContent extends SolidTabContent {
   scrollToKey(key: string): void {
     this.handle?.scrollToKey(key)
   }
+
+  /**
+   * Open the Connections page on a blank profile.
+   *
+   * Queued when the tab is not mounted yet: opening Settings and asking for a
+   * new connection is one user action, but the mount is a promise the caller
+   * does not hold, so a straight call would be dropped exactly when the tab was
+   * freshly opened — the common case.
+   */
+  startNewConnection(): void {
+    if (this.handle) {
+      this.handle.newConnection()
+      return
+    }
+    this.pendingNewConnection = true
+  }
+
+  private pendingNewConnection = false
 }

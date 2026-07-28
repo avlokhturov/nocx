@@ -61,14 +61,21 @@ export interface QuickConnectProvider {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Local shell provider — always listed first
+// Actions provider — the things that are not a connection, always listed first
+//
+// One provider rather than two, because the group is what draws the separator:
+// splitting "Local shell" and "New connection" into separate providers would
+// put a line between them.
 // ═══════════════════════════════════════════════════════════════════════════
 
-export class LocalShellQuickConnectProvider implements QuickConnectProvider {
-  readonly id = 'local'
-  readonly label = 'Local Shell'
+export class ActionsQuickConnectProvider implements QuickConnectProvider {
+  readonly id = 'actions'
+  readonly label = 'Actions'
 
-  constructor(private newTab: () => Tab) {}
+  constructor(
+    private newTab: () => Tab,
+    private newConnection: () => void,
+  ) {}
 
   getItems(): QuickConnectItem[] {
     return [
@@ -77,6 +84,12 @@ export class LocalShellQuickConnectProvider implements QuickConnectProvider {
         label: 'Local shell',
         detail: 'Open a new local terminal tab',
         run: () => void this.newTab(),
+      },
+      {
+        id: '__new_connection__',
+        label: 'New connection',
+        detail: 'Define an SSH connection in Settings',
+        run: () => this.newConnection(),
       },
     ]
   }
@@ -97,17 +110,25 @@ export class SSHQuickConnectProvider implements QuickConnectProvider {
 
   async getItems(): Promise<QuickConnectItem[]> {
     const profiles = await this.profileClient.listProfiles()
-    return profiles.map((p) => {
-      const user = p.options.user
-      const host = p.options.host
-      const label = user ? `${user}@${host}` : host
-      return {
-        id: p.id,
-        label,
-        detail: p.name,
-        run: () => void this.newSSHTab(p.id, host, user),
-      }
-    })
+    // A profile saved before its host was filled in is not a connection: opening
+    // it hands the backend an empty address and the tab comes up on "Terminal
+    // failed to start". It also rendered as a row with an empty primary label —
+    // a stray indent rather than a line. The palette lists what can be
+    // connected to; finishing such a profile is what the New-connection action
+    // above is for.
+    return profiles
+      .filter((p) => p.options.host !== '')
+      .map((p) => {
+        const user = p.options.user
+        const host = p.options.host
+        const label = user ? `${user}@${host}` : host
+        return {
+          id: p.id,
+          label,
+          detail: p.name,
+          run: () => void this.newSSHTab(p.id, host, user),
+        }
+      })
   }
 }
 
@@ -121,11 +142,22 @@ interface QuickConnectDialogProps {
   providers: QuickConnectProvider[]
 }
 
+/**
+ * An item plus the provider it came from. The provider is what the separator
+ * below is drawn from: a rule that put a line after the actions would draw one
+ * with nothing under it when no connection is defined, and this way the line
+ * only exists where two populated groups meet — including while a filter is
+ * emptying one of them.
+ */
+interface GroupedItem extends QuickConnectItem {
+  readonly providerId: string
+}
+
 const QuickConnectDialog: Component<QuickConnectDialogProps> = (props) => {
   let panelRef: HTMLDivElement | undefined
   let gen = 0
   const [query, setQuery] = createSignal('')
-  const [items, setItems] = createSignal<QuickConnectItem[]>([])
+  const [items, setItems] = createSignal<GroupedItem[]>([])
   const [selectedIndex, setSelectedIndex] = createSignal(0)
 
   /**
@@ -144,12 +176,12 @@ const QuickConnectDialog: Component<QuickConnectDialogProps> = (props) => {
     providers: readonly QuickConnectProvider[],
     currentGen: number,
   ): Promise<void> => {
-    const all: QuickConnectItem[] = []
+    const all: GroupedItem[] = []
     for (const provider of providers) {
       try {
         const providerItems = await provider.getItems()
         if (currentGen !== gen) return
-        all.push(...providerItems)
+        all.push(...providerItems.map((item) => ({ ...item, providerId: provider.id })))
       } catch {
         // Provider failure is not user-visible — skip silently.
       }
@@ -232,7 +264,7 @@ const QuickConnectDialog: Component<QuickConnectDialogProps> = (props) => {
   }
 
   return (
-    <Dialog open={props.open} onClose={props.onClose}>
+    <Dialog open={props.open} onClose={props.onClose} size="lg">
       <div class="quick-connect" ref={panelRef} onKeyDown={onKeyDown}>
         <div class="quick-connect__search">
           <SearchField
@@ -242,29 +274,44 @@ const QuickConnectDialog: Component<QuickConnectDialogProps> = (props) => {
             ariaLabel="Quick connect filter"
           />
         </div>
-        <div class="quick-connect__list" role="listbox" aria-label="Connection list">
-          <For each={filteredItems()}>
-            {(item, index) => (
-              <div
-                class="quick-connect__item"
-                classList={{
-                  'quick-connect__item--selected': selectedIndex() === index(),
-                }}
-                role="option"
-                aria-selected={selectedIndex() === index()}
-                onClick={() => activate(index())}
-                onMouseEnter={() => setSelectedIndex(index())}
-              >
-                <span class="quick-connect__item-label">{item.label}</span>
-                <Show when={item.detail !== undefined}>
-                  <span class="quick-connect__item-detail">{item.detail}</span>
-                </Show>
-              </div>
-            )}
-          </For>
-        </div>
-        <Show when={filteredItems().length === 0}>
-          <div class="quick-connect__empty">No matches</div>
+        {/* No listbox at all when nothing matches: the empty notice takes the
+            list's place in the layout rather than sitting under a list box that
+            stretches to the bottom of the panel, and an empty `role="listbox"`
+            is not something to announce either. */}
+        <Show
+          when={filteredItems().length > 0}
+          fallback={<div class="quick-connect__empty">No matches</div>}
+        >
+          <div class="quick-connect__list" role="listbox" aria-label="Connection list">
+            <For each={filteredItems()}>
+              {(item, index) => (
+                <>
+                  <Show
+                    when={
+                      index() > 0 && filteredItems()[index() - 1]?.providerId !== item.providerId
+                    }
+                  >
+                    <div class="quick-connect__separator" role="presentation" />
+                  </Show>
+                  <div
+                    class="quick-connect__item"
+                    classList={{
+                      'quick-connect__item--selected': selectedIndex() === index(),
+                    }}
+                    role="option"
+                    aria-selected={selectedIndex() === index()}
+                    onClick={() => activate(index())}
+                    onMouseEnter={() => setSelectedIndex(index())}
+                  >
+                    <span class="quick-connect__item-label">{item.label}</span>
+                    <Show when={item.detail !== undefined}>
+                      <span class="quick-connect__item-detail">{item.detail}</span>
+                    </Show>
+                  </div>
+                </>
+              )}
+            </For>
+          </div>
         </Show>
       </div>
     </Dialog>

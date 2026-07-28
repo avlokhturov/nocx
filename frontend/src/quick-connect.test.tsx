@@ -2,7 +2,7 @@
 import { describe, expect, it, vi, afterEach, beforeEach } from 'vitest'
 import { cleanup } from '@solidjs/testing-library'
 import {
-  LocalShellQuickConnectProvider,
+  ActionsQuickConnectProvider,
   SSHQuickConnectProvider,
   QuickConnectController,
   type QuickConnectItem,
@@ -13,28 +13,43 @@ afterEach(() => {
   cleanup()
 })
 
-/* ── Local shell provider ───────────────────────────────────────────── */
+/* ── Actions provider ───────────────────────────────────────────────── */
 
-describe('LocalShellQuickConnectProvider', () => {
-  it('returns a single "Local shell" item', async () => {
-    const newTab = vi.fn()
-    const provider = new LocalShellQuickConnectProvider(newTab)
+describe('ActionsQuickConnectProvider', () => {
+  it('offers the local shell and the new-connection action, in that order', async () => {
+    const provider = new ActionsQuickConnectProvider(vi.fn(), vi.fn())
     const items = await Promise.resolve(provider.getItems())
 
-    expect(items).toHaveLength(1)
-    expect(items[0].id).toBe('__local__')
+    // The order is the contract, not an accident: these two are the palette's
+    // first group and the separator below them is drawn from the group boundary.
+    expect(items.map((i) => i.id)).toEqual(['__local__', '__new_connection__'])
     expect(items[0].label).toBe('Local shell')
     expect(items[0].detail).toContain('local terminal')
+    expect(items[1].label).toBe('New connection')
   })
 
-  it('calls newTab when run() is invoked', () => {
+  it('calls newTab when the local-shell item runs', () => {
     const newTab = vi.fn()
-    const provider = new LocalShellQuickConnectProvider(newTab)
+    const newConnection = vi.fn()
+    const provider = new ActionsQuickConnectProvider(newTab, newConnection)
 
-    const items = provider.getItems()
-    items[0].run()
+    provider.getItems()[0].run()
 
     expect(newTab).toHaveBeenCalledOnce()
+    expect(newConnection).not.toHaveBeenCalled()
+  })
+
+  it('opens the connection editor when the new-connection item runs', () => {
+    const newTab = vi.fn()
+    const newConnection = vi.fn()
+    const provider = new ActionsQuickConnectProvider(newTab, newConnection)
+
+    provider.getItems()[1].run()
+
+    // Not a tab: this entry used to be an unconfigured profile, and running it
+    // opened a terminal on an empty host that failed to start.
+    expect(newConnection).toHaveBeenCalledOnce()
+    expect(newTab).not.toHaveBeenCalled()
   })
 })
 
@@ -129,7 +144,7 @@ describe('QuickConnectController', () => {
 
   it('mounts without error', () => {
     const ctrl = makeController()
-    const providers: QuickConnectProvider[] = [new LocalShellQuickConnectProvider(vi.fn())]
+    const providers: QuickConnectProvider[] = [new ActionsQuickConnectProvider(vi.fn(), vi.fn())]
     ctrl.mount(container, providers)
     const dialog = container.querySelector<HTMLDialogElement>('dialog.nocx-dialog')
     expect(dialog).toBeTruthy()
@@ -138,7 +153,7 @@ describe('QuickConnectController', () => {
 
   it('show() opens the dialog', () => {
     const ctrl = makeController()
-    const providers: QuickConnectProvider[] = [new LocalShellQuickConnectProvider(vi.fn())]
+    const providers: QuickConnectProvider[] = [new ActionsQuickConnectProvider(vi.fn(), vi.fn())]
     ctrl.mount(container, providers)
     ctrl.show()
 
@@ -153,7 +168,7 @@ describe('QuickConnectController', () => {
 
   it('destroy() cleans up the DOM', () => {
     const ctrl = makeController()
-    ctrl.mount(container, [new LocalShellQuickConnectProvider(vi.fn())])
+    ctrl.mount(container, [new ActionsQuickConnectProvider(vi.fn(), vi.fn())])
     ctrl.show()
     ctrl.destroy()
 
@@ -162,7 +177,7 @@ describe('QuickConnectController', () => {
 
   it('Escape closes the dialog via native cancel event', () => {
     const ctrl = makeController()
-    ctrl.mount(container, [new LocalShellQuickConnectProvider(vi.fn())])
+    ctrl.mount(container, [new ActionsQuickConnectProvider(vi.fn(), vi.fn())])
     ctrl.show()
 
     const dialog = container.querySelector<HTMLDialogElement>('dialog.nocx-dialog')
@@ -209,7 +224,7 @@ describe('QuickConnectController', () => {
   it('Enter on a selected item closes the dialog', async () => {
     const ctrl = makeController()
     const newTab = vi.fn()
-    ctrl.mount(container, [new LocalShellQuickConnectProvider(newTab)])
+    ctrl.mount(container, [new ActionsQuickConnectProvider(newTab, vi.fn())])
     ctrl.show()
     await waitForItems()
 
@@ -256,7 +271,7 @@ describe('QuickConnectController', () => {
 
   it('search input is focused after opening via rAF', async () => {
     const ctrl = makeController()
-    ctrl.mount(container, [new LocalShellQuickConnectProvider(vi.fn())])
+    ctrl.mount(container, [new ActionsQuickConnectProvider(vi.fn(), vi.fn())])
     ctrl.show()
     await waitForItems()
 
@@ -279,7 +294,7 @@ describe('QuickConnectController', () => {
     button.focus()
     expect(document.activeElement).toBe(button)
 
-    ctrl.mount(container, [new LocalShellQuickConnectProvider(vi.fn())])
+    ctrl.mount(container, [new ActionsQuickConnectProvider(vi.fn(), vi.fn())])
     ctrl.show()
 
     const dialog = container.querySelector<HTMLDialogElement>('dialog.nocx-dialog')

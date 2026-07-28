@@ -16,7 +16,7 @@
  * - Import from Tabby
  * - onConnect callback
  */
-import { For, Show, createSignal, createMemo, onMount } from 'solid-js'
+import { For, Show, createSignal, createMemo, createEffect, on, onMount } from 'solid-js'
 import { Button } from './ui/button'
 import { TextField } from './ui/text-field'
 import { Checkbox } from './ui/checkbox'
@@ -56,6 +56,14 @@ const CRED_AUTH_MODES: AuthMode[] = ['password', 'publicKey', 'agent']
 export interface ConnectionsViewProps {
   client: ProfileClient
   onConnect?: (profile: SSHProfile) => void
+  /**
+   * Monotonic counter — every increment opens a blank profile for editing, the
+   * same state the "+ New connection" button produces. A counter rather than a
+   * callback ref because the page may not be rendered when the request is made:
+   * mounting with a non-zero value is itself the request, which is what makes
+   * the palette work on a Settings tab that was not open yet.
+   */
+  newProfileRequest?: number
 }
 
 // ── Component ────────────────────────────────────────────────────────────────
@@ -91,6 +99,18 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   onMount(() => {
     void loadAll()
   })
+
+  // The palette's "New connection" request. Not deferred: a page that mounts
+  // with a request already counted is the case where Settings was closed when
+  // the user picked it, and deferring would swallow exactly that one.
+  createEffect(
+    on(
+      () => props.newProfileRequest ?? 0,
+      (n) => {
+        if (n > 0) startNewProfile()
+      },
+    ),
+  )
 
   // ── Derived ─────────────────────────────────────────────────────────────
   const jumpServerProfiles = createMemo(() => profiles().filter((p) => p.options.canBeJumpServer))

@@ -32,6 +32,29 @@ dialog.nocx-dialog::backdrop {
   min-width: 320px;
   max-width: 480px;
   color: var(--color-text);
+  /* The panel is the boundary, and it enforces it rather than trusting the
+     content to stay inside. A child that names a width or a height larger than
+     the panel allows is clamped here; before this, such a child simply hung out
+     past the border and the panel looked broken. Flex column is what makes the
+     vertical half real: a shrinkable child with its own `min-height: 0` scroll
+     region gives up space instead of overflowing. */
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - var(--space-6, 24px) * 2);
+  overflow: hidden;
+}
+
+.nocx-dialog__panel > * {
+  max-width: 100%;
+  min-width: 0;
+}
+
+/* The palette width. Its content box is 512px + the 24px padding on each side,
+   so a panel that stopped at the default 480 is what made the list hang out
+   past the panel's own border. */
+.nocx-dialog__panel[data-size='lg'] {
+  max-width: 560px;
 }
 
 .nocx-dialog__title {

@@ -20,7 +20,7 @@ import { bootstrapTheme, reconcileThemeFromGo } from './renderers/theme-bootstra
 import { bootstrapPlatform } from './platform'
 import {
   QuickConnectController,
-  LocalShellQuickConnectProvider,
+  ActionsQuickConnectProvider,
   SSHQuickConnectProvider,
   type QuickConnectProvider,
 } from './quick-connect'
@@ -142,6 +142,24 @@ async function main() {
     },
   })
 
+  /**
+   * Open (or focus) the Settings tab and hand back the instance that is
+   * actually on screen.
+   *
+   * `openTab` deduplicates on the singleton key, so when Settings is already
+   * open the content just built is discarded and the live instance is the
+   * existing tab's. Talking to the one we built would have addressed a surface
+   * nobody can see — silently, and only on the second invocation.
+   */
+  function openSettingsTab(): SettingsContent {
+    const { content, descriptor } = registry.build(SURFACE_ID_SETTINGS)
+    const live = tm.openTab(content, descriptor).content
+    if (!(live instanceof SettingsContent)) {
+      throw new Error('nocx: the Settings singleton is not a SettingsContent')
+    }
+    return live
+  }
+
   // Live application through SettingsObserver: when any setting
   // changes, refetch the snapshot and act on relevant keys.
   const observer = new SettingsObserver(dispatcher)
@@ -186,8 +204,7 @@ async function main() {
         icon: SettingsIcon,
         onActivate: () => {
           log.info('nocx: opening Settings tab')
-          const { content, descriptor } = registry.build(SURFACE_ID_SETTINGS)
-          tm.openTab(content, descriptor)
+          openSettingsTab()
         },
       },
     ],
@@ -197,8 +214,7 @@ async function main() {
   document.addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key === ',') {
       e.preventDefault()
-      const { content, descriptor } = registry.build(SURFACE_ID_SETTINGS)
-      tm.openTab(content, descriptor)
+      openSettingsTab()
     }
   })
 
@@ -213,7 +229,10 @@ async function main() {
     tm.newSSHTab(id, host, user),
   )
   const qcProviders: QuickConnectProvider[] = [
-    new LocalShellQuickConnectProvider(() => tm.newTab()),
+    new ActionsQuickConnectProvider(
+      () => tm.newTab(),
+      () => openSettingsTab().startNewConnection(),
+    ),
     sshProvider,
   ]
 

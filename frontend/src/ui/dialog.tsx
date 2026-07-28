@@ -51,6 +51,16 @@ export interface DialogProps {
   children: JSX.Element
   /** Optional footer / action area. Rendered after children. */
   footer?: JSX.Element
+  /**
+   * Panel width class. `md` (the default) is the confirm/edit width; `lg` is
+   * the palette width, wide enough for a host and its label on one line.
+   *
+   * A prop rather than a class: the panel's width is the kit's to decide, and a
+   * caller that reached past `max-width` with its own fixed width simply
+   * overflowed the panel — which is exactly what a class would have let it keep
+   * doing, silently.
+   */
+  size?: 'md' | 'lg'
 }
 
 export const Dialog: Component<DialogProps> = (props) => {
@@ -121,7 +131,7 @@ export const Dialog: Component<DialogProps> = (props) => {
 
   return (
     <dialog ref={ref} class="nocx-dialog" onCancel={onCancel} onMouseDown={onPointerDown}>
-      <div class="nocx-dialog__panel">
+      <div class="nocx-dialog__panel" data-size={props.size ?? 'md'}>
         <Show when={props.title}>
           <h2 class="nocx-dialog__title">{props.title}</h2>
         </Show>

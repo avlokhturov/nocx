@@ -4,16 +4,29 @@
 /* ── Dialog layout ────────────────────────────────────────────────────── */
 
 /* The picker is a command palette: wide enough to read a host and its label on
-   one line, and tall enough that the list does not look like it ran out. */
+   one line, and tall enough that the list does not look like it ran out.
+
+   The size is FIXED, not derived from the content. A palette whose box grows and
+   shrinks as you type moves the rows out from under the pointer between two
+   keystrokes, and the filter is exactly when a stable target matters most. The
+   list below takes the leftover space and scrolls inside it. */
 .quick-connect {
   display: flex;
   flex-direction: column;
-  min-width: 440px;
-  max-width: 560px;
+  width: 512px;
+  height: 420px;
+  /* Lets the panel's clamp reach the list's scroll region on a short viewport
+     instead of stopping at this box. */
+  min-height: 0;
 }
 
+/* The rule under the filter belongs here rather than on the list: the list is
+   replaced by the empty notice when nothing matches, and a divider that lived on
+   it went away exactly when the panel needed it most. */
 .quick-connect__search {
   padding-bottom: var(--space-3);
+  border-bottom: 1px solid var(--color-divider);
+  flex: 0 0 auto;
 }
 
 .quick-connect__search input {
@@ -27,10 +40,11 @@
   display: flex;
   flex-direction: column;
   gap: 2px;
-  max-height: 340px;
+  /* Takes whatever the fixed panel has left. `min-height: 0` is what lets a
+     flex child actually scroll instead of growing its parent. */
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
-  /* Its own scroll region, separated from the filter above it. */
-  border-top: 1px solid var(--color-divider);
   padding-top: var(--space-2);
 }
 
@@ -44,7 +58,24 @@
   user-select: none;
 }
 
-.quick-connect__item:hover {
+/* `:not()` rather than plain `:hover`, and it is load-bearing: `.item:hover` is a
+   class plus a pseudo-class (0,2,0) and beats `.item--selected` (0,1,0), so the
+   hover background used to win on the selected row while the label kept the dark
+   text meant for the accent fill — dark on near-black. Hovering also SETS the
+   selection (onMouseEnter), so that unreadable state was every row under the
+   pointer, not a corner case. */
+/* Between two populated groups only — the actions above, the connections below.
+   It is rendered from the boundary between adjacent items rather than after the
+   action group, so with no connections defined (or with a filter that empties
+   one side) there is no line left hanging over nothing. */
+.quick-connect__separator {
+  height: 1px;
+  margin: var(--space-2) 0;
+  background: var(--color-divider);
+  flex: 0 0 auto;
+}
+
+.quick-connect__item:not(.quick-connect__item--selected):hover {
   background: var(--color-surface-hover);
 }
 
@@ -76,9 +107,13 @@
 
 /* ── Empty state ──────────────────────────────────────────────────────── */
 
+/* Stands in for the list, so it takes the same space and centres in it. */
 .quick-connect__empty {
-  padding: 12px 8px;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   font-size: var(--font-size-sm);
   color: var(--color-text-dim);
-  text-align: center;
 }
