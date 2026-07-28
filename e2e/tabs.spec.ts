@@ -108,6 +108,43 @@ test.describe('vertical tab placement', () => {
     await expect(page.locator(TAB).nth(1)).toHaveAttribute('aria-selected', 'true')
   })
 
+  /**
+   * nocx-zudj: with two tabs open, switching to vertical left the strip listing no tabs
+   * at all — the swap mounted the new strip without repopulating its display records.
+   * The test above cannot catch it: it switches with ONE tab and adds the second while
+   * already vertical, so the populate path it exercises is addTab and not replaceStrip.
+   *
+   * Asserted by measured geometry rather than by presence. The bug's own report named
+   * the tell — the New-tab + sitting at the vertical MIDDLE, because an empty
+   * `.tabs-container` (flex: 1 1 auto) and `.tabbar-spacer` split the column between
+   * them — and a strip with rows that exist at zero height would satisfy any assertion
+   * about the DOM while showing nothing (the lesson recorded on nocx-d3q).
+   */
+  test('switching to vertical with two tabs open lists both of them (nocx-zudj)', async ({
+    page,
+  }) => {
+    await page.keyboard.press('Meta+t')
+    await expect(page.locator(TAB)).toHaveCount(2)
+
+    await switchPlacement(page, 'vertical')
+
+    const strip = page.locator('#vertical-tabstrip')
+    await expect(strip.locator(TAB)).toHaveCount(2)
+
+    const first = await strip.locator(TAB).first().boundingBox()
+    const second = await strip.locator(TAB).nth(1).boundingBox()
+    const add = await strip.locator('[aria-label="New tab"]').boundingBox()
+    const stripBox = await strip.boundingBox()
+
+    // Both rows have real height and stack down the column.
+    expect(first!.height).toBeGreaterThan(10)
+    expect(second!.height).toBeGreaterThan(10)
+    expect(second!.y).toBeGreaterThan(first!.y)
+    // And the + is below them, not floating in the middle of an empty column.
+    expect(add!.y).toBeGreaterThan(second!.y + second!.height)
+    expect(add!.y).toBeGreaterThan(stripBox!.y + stripBox!.height / 2)
+  })
+
   test('activity indicator lights for a backgrounded tab in vertical placement', async ({
     page,
   }) => {
