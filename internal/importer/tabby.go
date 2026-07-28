@@ -184,3 +184,43 @@ func dedupKeySet(profs []profile.SSHProfile) map[string]bool {
 	}
 	return m
 }
+
+// ImportTabbyWithService imports profiles and groups from a Tabby config
+// through the domain service, ensuring atomicity. Returns the ImportResult
+// from the service call, which includes any import errors.
+func ImportTabbyWithService(cfg *TabbyConfig, svc *profile.ProfileService, typeFilter string) *profile.ImportResult {
+	// Collect profiles from config.
+	var profiles []profile.SSHProfile
+	for _, tp := range cfg.Profiles {
+		if tp.Type != typeFilter {
+			continue
+		}
+		profiles = append(profiles, convertProfile(tp))
+	}
+
+	// Collect groups from config.
+	var groups []profile.ProfileGroup
+	for _, tg := range cfg.Groups {
+		var defaults *profile.ProfileDefaults
+		if tg.Defaults != nil {
+			d, err := profile.DecodeDefaults(tg.Defaults)
+			if err != nil {
+				result := &profile.ImportResult{}
+				result.ImportErrors = append(result.ImportErrors, fmt.Sprintf("group %q defaults: %v", tg.Name, err))
+				return result
+			}
+			defaults = &d
+		}
+		groups = append(groups, profile.ProfileGroup{
+			ID:            tg.ID,
+			ParentGroupID: tg.ParentGroupID,
+			Name:          tg.Name,
+			Icon:          tg.Icon,
+			Color:         tg.Color,
+			Defaults:      defaults,
+			Editable:      true,
+		})
+	}
+
+	return svc.AtomicImport(profiles, groups, nil)
+}

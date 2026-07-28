@@ -47,6 +47,12 @@ type Base struct {
 	Weight               int                  `json:"weight,omitempty"`
 	IsBuiltin            bool                 `json:"isBuiltin,omitempty"`
 	IsTemplate           bool                 `json:"isTemplate,omitempty"`
+	// NeedsReview marks a profile that references a credential whose
+	// identity was resolved from a local credential during import.
+	// Such profiles must be reviewed by a human before they can be
+	// resolved for connection. The resolver refuses profiles with this
+	// flag set; the UI for clearing it belongs to a later wave.
+	NeedsReview bool `json:"needsReview,omitempty"`
 }
 
 // SSHProfileOptions is the SSH-specific options block on an SSHProfile.

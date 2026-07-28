@@ -92,6 +92,24 @@ func (s *JSONStore) writeLocked(d *storeData) error {
 	return s.docStore.Write(s.fileName, d)
 }
 
+// LoadAll returns the full document state — all profiles, groups, and
+// credentials. Used by the domain service for atomic import operations,
+// where the caller needs a consistent snapshot of the entire store.
+func (s *JSONStore) LoadAll() (*storeData, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.load()
+}
+
+// WriteAll atomically replaces the entire store document. Used by the
+// domain service for transactional import: build the new document in
+// memory, validate it whole, write once.
+func (s *JSONStore) WriteAll(d *storeData) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.writeLocked(d)
+}
+
 func (s *JSONStore) LoadProfiles() ([]SSHProfile, error) {
 	d, err := s.load()
 	if err != nil {

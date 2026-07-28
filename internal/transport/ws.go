@@ -74,6 +74,11 @@ type WSServer struct {
 	// Profile resolver maps profile IDs to SSH connect configs.
 	resolver ProfileResolver
 
+	// Profile service provides a single write path for profiles, groups,
+	// and credentials through the domain layer. When nil, the import
+	// handlers fall back to the legacy per-repository path.
+	profileSvc *profile.ProfileService
+
 	// settings registry backs the settings.* JSON-RPC methods.
 	settings   *settings.Registry
 	resolverOK bool
@@ -161,6 +166,14 @@ func WithExportPaths(p storage.Paths) WSServerOption {
 // content.db has not yet been created (ADR-0011 §5).
 func WithExportContentDB(db content.ContentDB) WSServerOption {
 	return func(s *WSServer) { s.exportContentDB = db }
+}
+
+// WithProfileService attaches a profile domain service for import
+// operations, providing a single validated write path and atomic
+// imports. When not wired, import handlers use the legacy per-repository
+// path for backward compatibility.
+func WithProfileService(svc *profile.ProfileService) WSServerOption {
+	return func(s *WSServer) { s.profileSvc = svc }
 }
 
 func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption) *WSServer {
@@ -1613,6 +1626,18 @@ func (s *WSServer) handleImportTabby(wconn *wsConn, req jsonrpcRequest) {
 		return
 	}
 
+	if s.profileSvc != nil {
+		// Domain service path: atomic import.
+		result := importer.ImportTabbyWithService(cfg, s.profileSvc, "ssh")
+		if len(result.ImportErrors) > 0 {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Import failed: "+result.ImportErrors[0]))
+			return
+		}
+		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(result.ProfilesImported)))
+		return
+	}
+
+	// Legacy path: one record at a time.
 	countBefore, _ := s.profiles.LoadProfiles()
 	before := len(countBefore)
 	if err := importer.ImportGroups(cfg, s.groups); err != nil {

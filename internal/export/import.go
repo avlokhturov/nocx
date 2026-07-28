@@ -78,3 +78,29 @@ func ImportConfiguration(deps ImportDeps, data *ConfigExport) (*ImportResult, er
 
 	return result, nil
 }
+
+// ImportConfigurationWithService imports a ConfigExport through the
+// domain service, ensuring atomicity and validation. Returns the
+// combined import result with unresolved credentials.
+func ImportConfigurationWithService(svc *profile.ProfileService, data *ConfigExport) (*ImportResult, error) {
+	svcResult := svc.AtomicImport(data.Profiles, data.Groups, data.Credentials)
+
+	if len(svcResult.ImportErrors) > 0 {
+		return nil, fmt.Errorf("import failed: %s", svcResult.ImportErrors[0])
+	}
+
+	result := &ImportResult{
+		ProfilesImported:    svcResult.ProfilesImported,
+		GroupsImported:      svcResult.GroupsImported,
+		CredentialsImported: svcResult.CredentialsImported,
+	}
+
+	// Every credential is unresolved — the user must map secrets.
+	for _, c := range data.Credentials {
+		if c.ID != "" {
+			result.UnresolvedCredentials = append(result.UnresolvedCredentials, c)
+		}
+	}
+
+	return result, nil
+}
