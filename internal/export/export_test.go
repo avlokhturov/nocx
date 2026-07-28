@@ -81,15 +81,35 @@ func (r *fakeGroupRepo) DeleteGroup(id string) error {
 type fakeCredRepo struct{ creds []profile.Credential }
 
 func (r *fakeCredRepo) LoadCredentials() ([]profile.Credential, error) { return r.creds, nil }
-func (r *fakeCredRepo) SaveCredential(c profile.Credential) error {
-	for i, e := range r.creds {
+func (r *fakeCredRepo) CreateCredential(c profile.Credential) error {
+	for _, e := range r.creds {
 		if e.ID == c.ID {
-			r.creds[i] = c
-			return nil
+			return profile.ErrCredentialExists
 		}
 	}
 	r.creds = append(r.creds, c)
 	return nil
+}
+
+func (r *fakeCredRepo) UpdateCredential(id string, p profile.CredentialPatch) (profile.Credential, error) {
+	for i, e := range r.creds {
+		if e.ID == id {
+			r.creds[i] = e.WithPatch(p)
+			return r.creds[i], nil
+		}
+	}
+	return profile.Credential{}, profile.ErrCredentialNotFound
+}
+
+func (r *fakeCredRepo) SetSecretRefs(id string, secretID, passphraseSecretID string) error {
+	for i, e := range r.creds {
+		if e.ID == id {
+			r.creds[i].SecretID = secretID
+			r.creds[i].PassphraseSecretID = passphraseSecretID
+			return nil
+		}
+	}
+	return profile.ErrCredentialNotFound
 }
 
 func (r *fakeCredRepo) DeleteCredential(id string) error {

@@ -28,8 +28,10 @@ type GroupRepository interface {
 // credential.SecretStore, not by this repository (ADR-0011 §2).
 type CredentialMetadataRepository interface {
 	LoadCredentials() ([]Credential, error)
-	SaveCredential(c Credential) error
+	CreateCredential(c Credential) error
+	UpdateCredential(id string, p CredentialPatch) (Credential, error)
 	DeleteCredential(id string) error
+	SetSecretRefs(id string, secretID, passphraseSecretID string) error
 }
 
 // JSONStore persists profiles and groups to a single JSON file on disk.
@@ -182,19 +184,22 @@ func (s *JSONStore) LoadCredentials() ([]Credential, error) {
 	return d.Credentials, nil
 }
 
-func (s *JSONStore) SaveCredential(c Credential) error {
+// ErrCredentialIDRequired, ErrCredentialExists and ErrCredentialNotFound make
+// create and update distinguishable. The single SaveCredential upsert they
+// replace accepted an empty ID and silently overwrote an existing record, so a
+// create could destroy data it never read (nocx-u5ai).
+var (
+	ErrCredentialIDRequired = errors.New("credential ID is required")
+	ErrCredentialExists     = errors.New("credential already exists")
+	ErrCredentialNotFound   = errors.New("credential not found")
+)
+
+// CreateCredential stores a new credential. It refuses an empty ID and refuses
+// to overwrite an existing one.
+func (s *JSONStore) CreateCredential(c Credential) error {
 	if c.ID == "" {
-		return errors.New("credential ID is required")
+		return ErrCredentialIDRequired
 	}
-	if c.Name == "" {
-		return errors.New("credential name is required")
-	}
-	if c.Username == "" {
-		return errors.New("credential username is required")
-	}
-	// Host binding, enforced here rather than in the transport handler: this is
-	// the one path every writer passes through, so a future caller cannot route
-	// around it (nocx-wd2m).
 	if err := c.Validate(); err != nil {
 		return err
 	}
@@ -206,16 +211,66 @@ func (s *JSONStore) SaveCredential(c Credential) error {
 	if err != nil {
 		return err
 	}
-
-	// Update existing or append new.
-	for i, existing := range d.Credentials {
+	for _, existing := range d.Credentials {
 		if existing.ID == c.ID {
-			d.Credentials[i] = c
-			return s.writeLocked(d)
+			return fmt.Errorf("%s: %w", c.ID, ErrCredentialExists)
 		}
 	}
 	d.Credentials = append(d.Credentials, c)
 	return s.writeLocked(d)
+}
+
+// UpdateCredential merges a sparse patch onto the stored record and returns the
+// result. The read-merge-write runs under the mutex: doing it in the caller
+// would let a concurrent savePassword land between the read and the write and
+// be silently discarded.
+func (s *JSONStore) UpdateCredential(id string, p CredentialPatch) (Credential, error) {
+	if id == "" {
+		return Credential{}, ErrCredentialIDRequired
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	d, err := s.load()
+	if err != nil {
+		return Credential{}, err
+	}
+	for i, existing := range d.Credentials {
+		if existing.ID == id {
+			merged := existing.WithPatch(p)
+			if err := merged.Validate(); err != nil {
+				return Credential{}, err
+			}
+			d.Credentials[i] = merged
+			if err := s.writeLocked(d); err != nil {
+				return Credential{}, err
+			}
+			return merged, nil
+		}
+	}
+	return Credential{}, fmt.Errorf("%s: %w", id, ErrCredentialNotFound)
+}
+
+// SetSecretRefs repoints a credential's backend-owned secret references. It is
+// the only way those fields ever change, and it is deliberately not reachable
+// through CredentialPatch — the renderer must never name a SecretID.
+func (s *JSONStore) SetSecretRefs(id string, secretID, passphraseSecretID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	d, err := s.load()
+	if err != nil {
+		return err
+	}
+	for i, existing := range d.Credentials {
+		if existing.ID == id {
+			d.Credentials[i].SecretID = secretID
+			d.Credentials[i].PassphraseSecretID = passphraseSecretID
+			return s.writeLocked(d)
+		}
+	}
+	return fmt.Errorf("%s: %w", id, ErrCredentialNotFound)
 }
 
 func (s *JSONStore) DeleteCredential(id string) error {

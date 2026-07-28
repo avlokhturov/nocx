@@ -52,7 +52,7 @@ func ImportConfiguration(deps ImportDeps, data *ConfigExport) (*ImportResult, er
 	}
 
 	for _, c := range data.Credentials {
-		if err := deps.Credentials.SaveCredential(c); err != nil {
+		if err := deps.Credentials.CreateCredential(c); err != nil {
 			return nil, fmt.Errorf("import credential %s: %w", c.ID, err)
 		}
 		result.CredentialsImported++

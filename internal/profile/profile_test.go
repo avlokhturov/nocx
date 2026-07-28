@@ -262,8 +262,8 @@ func TestSaveCredentialRejectsMissingHost(t *testing.T) {
 		Username: "bob",
 		Auth:     AuthPassword,
 	}
-	if err := store.SaveCredential(unbound); err == nil {
-		t.Fatal("SaveCredential accepted a credential with no host; an unbound credential must not be storable")
+	if err := store.CreateCredential(unbound); err == nil {
+		t.Fatal("CreateCredential accepted a credential with no host; an unbound credential must not be storable")
 	} else if !errors.Is(err, ErrCredentialHostRequired) {
 		t.Fatalf("want ErrCredentialHostRequired, got %T: %v", err, err)
 	}
@@ -280,9 +280,6 @@ func TestSaveCredentialRejectsMissingHost(t *testing.T) {
 func TestSaveCredentialRejectsWhitespaceOnlyHost(t *testing.T) {
 	store := NewJSONStore(filepath.Join(t.TempDir(), "profiles.json"))
 
-	// " " is not a host. Accepting it would satisfy the letter of the rule and
-	// none of its purpose — checkBinding compares against a resolved hostname
-	// and would never match, so the credential would be storable and useless.
 	c := Credential{
 		ID:       NewCredentialID("spacey"),
 		Name:     "spacey",
@@ -290,7 +287,7 @@ func TestSaveCredentialRejectsWhitespaceOnlyHost(t *testing.T) {
 		Auth:     AuthPassword,
 		Host:     "   ",
 	}
-	if err := store.SaveCredential(c); !errors.Is(err, ErrCredentialHostRequired) {
+	if err := store.CreateCredential(c); !errors.Is(err, ErrCredentialHostRequired) {
 		t.Fatalf("want ErrCredentialHostRequired for a whitespace host, got %v", err)
 	}
 }
@@ -305,8 +302,8 @@ func TestSaveCredentialAcceptsBoundCredential(t *testing.T) {
 		Auth:     AuthPassword,
 		Host:     "prod.example.com",
 	}
-	if err := store.SaveCredential(c); err != nil {
-		t.Fatalf("SaveCredential: %v", err)
+	if err := store.CreateCredential(c); err != nil {
+		t.Fatalf("CreateCredential: %v", err)
 	}
 	creds, err := store.LoadCredentials()
 	if err != nil {

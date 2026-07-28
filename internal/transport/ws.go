@@ -1104,34 +1104,54 @@ func (s *WSServer) handleCredentialCRUDMethod(wconn *wsConn, req jsonrpcRequest)
 			creds[i].PassphraseSecretID = ""
 		}
 		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(creds)))
-	case "credentials.create", "credentials.update":
-		var c profile.Credential
-		if err := json.Unmarshal(req.Params, &c); err != nil {
+	case "credentials.create":
+		var in credentialCreateDTO
+		if err := json.Unmarshal(req.Params, &in); err != nil {
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
 			return
 		}
-		// Reject renderer-supplied SecretIDs — the backend owns them exclusively.
-		if c.SecretID != "" || c.PassphraseSecretID != "" {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "secretId/passphraseSecretId are backend-owned"))
+		if in.SecretID != "" || in.PassphraseSecretID != "" {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602,
+				"secretId/passphraseSecretId are backend-owned"))
 			return
 		}
-		if c.ID == "" {
-			c.ID = profile.NewCredentialID(c.Name)
+		// The renderer's id is ignored, not honoured: it was minted from the first
+		// keystroke of the name and never revised (spec §2.4).
+		c := profile.Credential{
+			ID:       profile.NewCredentialID(in.Name),
+			Name:     in.Name,
+			Username: in.Username,
+			Auth:     in.Auth,
+			KeyPath:  in.KeyPath,
+			Host:     in.Host,
+			Port:     in.Port,
 		}
-		if err := s.credMeta.SaveCredential(c); err != nil {
-			// A missing host binding is the caller's mistake, not ours, and the
-			// renderer has to tell the user which field to fix — so it travels
-			// as Invalid params rather than Internal error (nocx-wd2m).
-			code := -32603
-			if errors.Is(err, profile.ErrCredentialHostRequired) {
-				code = -32602
-			}
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, code, err.Error()))
+		if err := s.credMeta.CreateCredential(c); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, credentialErrorCode(err), err.Error()))
 			return
 		}
 		c.SecretID = ""
 		c.PassphraseSecretID = ""
 		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(c)))
+	case "credentials.update":
+		var in credentialUpdateDTO
+		if err := json.Unmarshal(req.Params, &in); err != nil || in.ID == "" {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: id required"))
+			return
+		}
+		if in.SecretID != "" || in.PassphraseSecretID != "" {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602,
+				"secretId/passphraseSecretId are backend-owned"))
+			return
+		}
+		merged, err := s.credMeta.UpdateCredential(in.ID, in.Patch())
+		if err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, credentialErrorCode(err), err.Error()))
+			return
+		}
+		merged.SecretID = ""
+		merged.PassphraseSecretID = ""
+		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(merged)))
 	case "credentials.delete":
 		var params struct {
 			ID string `json:"id"`
@@ -1145,6 +1165,59 @@ func (s *WSServer) handleCredentialCRUDMethod(wconn *wsConn, req jsonrpcRequest)
 			return
 		}
 		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(true)))
+	}
+}
+
+// credentialCreateDTO is the renderer's create payload. SecretID and
+// PassphraseSecretID appear here only so a renderer that sends them can be
+// REJECTED rather than silently ignored — they are never read into the record.
+type credentialCreateDTO struct {
+	Name               string           `json:"name"`
+	Username           string           `json:"username"`
+	Auth               profile.AuthMode `json:"auth"`
+	KeyPath            string           `json:"keyPath"`
+	Host               string           `json:"host"`
+	Port               int              `json:"port"`
+	SecretID           string           `json:"secretId"`
+	PassphraseSecretID string           `json:"passphraseSecretId"`
+}
+
+// credentialUpdateDTO is sparse: a field the renderer did not send stays nil
+// and the stored value survives. That is the whole fix for the orphaned-secret
+// defect — the previous handler decoded into the record type, so an absent
+// field arrived as a zero value indistinguishable from a deliberate clear.
+type credentialUpdateDTO struct {
+	ID                 string            `json:"id"`
+	Name               *string           `json:"name"`
+	Username           *string           `json:"username"`
+	Auth               *profile.AuthMode `json:"auth"`
+	KeyPath            *string           `json:"keyPath"`
+	Host               *string           `json:"host"`
+	Port               *int              `json:"port"`
+	SecretID           string            `json:"secretId"`
+	PassphraseSecretID string            `json:"passphraseSecretId"`
+}
+
+func (d credentialUpdateDTO) Patch() profile.CredentialPatch {
+	return profile.CredentialPatch{
+		Name: d.Name, Username: d.Username, Auth: d.Auth, KeyPath: d.KeyPath,
+		Host: d.Host, Port: d.Port,
+	}
+}
+
+// credentialErrorCode maps a store error to a JSON-RPC code. A caller mistake
+// is -32602 so the renderer can name the field to fix; anything else is -32603
+// (nocx-wd2m established this distinction for the host binding).
+func credentialErrorCode(err error) int {
+	switch {
+	case errors.Is(err, profile.ErrCredentialExists),
+		errors.Is(err, profile.ErrCredentialNotFound),
+		errors.Is(err, profile.ErrCredentialIDRequired),
+		errors.Is(err, profile.ErrCredentialNameRequired),
+		errors.Is(err, profile.ErrCredentialUsernameRequired):
+		return -32602
+	default:
+		return -32603
 	}
 }
 
@@ -1248,8 +1321,7 @@ func (s *WSServer) savePasswordForCredential(credID, password string) error {
 	}
 
 	oldID := credential.SecretID(cred.SecretID)
-	cred.SecretID = string(newID)
-	if err := s.credMeta.SaveCredential(cred); err != nil {
+	if err := s.credMeta.SetSecretRefs(credID, string(newID), cred.PassphraseSecretID); err != nil {
 		return fmt.Errorf("save credential metadata: %w", err)
 	}
 
@@ -1261,9 +1333,6 @@ func (s *WSServer) savePasswordForCredential(credID, password string) error {
 	return nil
 }
 
-// deletePasswordForCredential removes the stored password secret and clears
-// the credential's SecretID. The metadata update is the authoritative step;
-// secret deletion is best-effort afterward.
 func (s *WSServer) deletePasswordForCredential(credID string) error {
 	if s.credMeta == nil {
 		return errors.New("profiles not available")
@@ -1277,8 +1346,7 @@ func (s *WSServer) deletePasswordForCredential(credID string) error {
 	}
 
 	oldID := credential.SecretID(cred.SecretID)
-	cred.SecretID = ""
-	if err := s.credMeta.SaveCredential(cred); err != nil {
+	if err := s.credMeta.SetSecretRefs(credID, "", cred.PassphraseSecretID); err != nil {
 		return fmt.Errorf("save credential metadata: %w", err)
 	}
 
@@ -1325,8 +1393,7 @@ func (s *WSServer) savePassphraseForCredential(credID, passphrase string) error 
 	}
 
 	oldID := credential.SecretID(cred.PassphraseSecretID)
-	cred.PassphraseSecretID = string(newID)
-	if err := s.credMeta.SaveCredential(cred); err != nil {
+	if err := s.credMeta.SetSecretRefs(credID, cred.SecretID, string(newID)); err != nil {
 		return fmt.Errorf("save credential metadata: %w", err)
 	}
 
@@ -1351,8 +1418,7 @@ func (s *WSServer) deletePassphraseForCredential(credID string) error {
 	}
 
 	oldID := credential.SecretID(cred.PassphraseSecretID)
-	cred.PassphraseSecretID = ""
-	if err := s.credMeta.SaveCredential(cred); err != nil {
+	if err := s.credMeta.SetSecretRefs(credID, cred.SecretID, ""); err != nil {
 		return fmt.Errorf("save credential metadata: %w", err)
 	}
 

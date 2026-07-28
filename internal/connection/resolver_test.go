@@ -52,8 +52,42 @@ func (s *stubProfileStore) LoadCredentials() ([]profile.Credential, error) {
 	return out, nil
 }
 
+// SaveCredential is no longer part of CredentialMetadataRepository — it was the
+// upsert that made create and update indistinguishable. It survives here as a
+// test-local helper because the resolver fixtures below only ever need "put this
+// credential in the store", not the create/update distinction the interface now
+// draws.
 func (s *stubProfileStore) SaveCredential(c profile.Credential) error {
 	s.credentials[c.ID] = c
+	return nil
+}
+
+func (s *stubProfileStore) CreateCredential(c profile.Credential) error {
+	if _, ok := s.credentials[c.ID]; ok {
+		return profile.ErrCredentialExists
+	}
+	s.credentials[c.ID] = c
+	return nil
+}
+
+func (s *stubProfileStore) UpdateCredential(id string, p profile.CredentialPatch) (profile.Credential, error) {
+	existing, ok := s.credentials[id]
+	if !ok {
+		return profile.Credential{}, profile.ErrCredentialNotFound
+	}
+	merged := existing.WithPatch(p)
+	s.credentials[id] = merged
+	return merged, nil
+}
+
+func (s *stubProfileStore) SetSecretRefs(id, secretID, passphraseSecretID string) error {
+	existing, ok := s.credentials[id]
+	if !ok {
+		return profile.ErrCredentialNotFound
+	}
+	existing.SecretID = secretID
+	existing.PassphraseSecretID = passphraseSecretID
+	s.credentials[id] = existing
 	return nil
 }
 
