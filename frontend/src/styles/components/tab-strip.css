@@ -31,20 +31,13 @@
   overflow: hidden;
 }
 
-/* When the active tab is in alt-screen mode (e.g. vim, htop, less),
-   keep the tabbar visible as a backdrop for the macOS traffic lights
-   but hide all tab content. The tabbar sits above the fullscreen xterm
-   via z-index so the traffic lights don't overlap terminal content. */
-#app.alt-screen .tabbar {
-  z-index: 101;
-}
-#app.alt-screen .tabs-container,
-#app.alt-screen .tabbar-spacer,
-#app.alt-screen .tabstrip-header,
-#app.alt-screen .tabstrip-actions,
-#app.alt-screen .tabstrip-search {
-  display: none;
-}
+/* The alt-screen rules that emptied this strip are gone. They existed because
+   a fullscreen xterm was `position: fixed` over the whole viewport, so the tabs
+   had to be hidden or the program would have painted through them; the strip
+   stayed only as a backdrop for the macOS traffic lights. The fullscreen region
+   is confined to the pane now, so there is nothing to get out of the way of —
+   and `htop` was erasing the tab strip and the activity bar while `top`, the
+   same kind of program in the other buffer, left them alone (nocx-6w4z). */
 
 .tabs-container {
   flex: 0 1 auto;

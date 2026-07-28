@@ -79,13 +79,24 @@
   border-left-color: var(--color-accent);
 }
 
+/* The connect button fades in on row hover. This was briefly made permanent, on
+   the reasoning that hiding a row's only affordance leaves nothing to click —
+   and that reasoning was answered by the badge rather than by the button: the
+   row now states what it is on its second line, so the control no longer has to
+   stay visible to explain the row. Fifteen permanent buttons down a list is
+   noise; fifteen quiet rows that offer one under the pointer is not.
+
+   `:focus-within` is not decoration. An `opacity: 0` element is still in the tab
+   order, so without it a keyboard user tabs into a button they cannot see
+   (nocx-b61d, nocx-fmoz). */
 .cm-item-actions {
   margin-left: 8px;
   opacity: 0;
   transition: opacity 0.15s;
 }
 
-.cm-item:hover .cm-item-actions {
+.cm-item:hover .cm-item-actions,
+.cm-item:focus-within .cm-item-actions {
   opacity: 1;
 }
 
@@ -94,8 +105,19 @@
   min-width: 0;
 }
 
+/* ── The list's type register ─────────────────────────────────────────────
+   This column is the Connections page's primary navigation — the same job the
+   settings rail does one column to the left, where `.ui-settings-rail` sets
+   `--font-size-md` and says why: "this surface's primary navigation rather than
+   fine print". The connection list made the opposite choice and stated no
+   reason, so two lists of navigable rows sat side by side at 14px and 12.25px
+   and the right-hand one read as a footnote to the left-hand one.
+
+   The row name is body text: md. The second line is genuinely secondary and
+   takes one step down: sm. Nothing here goes below sm — the address is the only
+   copy of where this connection points (nocx-j8af). */
 .cm-item-name {
-  font-size: var(--font-size-sm);
+  font-size: var(--font-size-md);
   font-weight: 500;
   color: var(--color-text);
   white-space: nowrap;
@@ -103,17 +125,36 @@
   text-overflow: ellipsis;
 }
 
+/* The second line carries the protocol badge and the address side by side. It is
+   a row rather than a line of text because the badge has its own box, and a
+   badge sitting in flowing text sits on the text baseline instead of on the
+   line's centre. */
 .cm-item-meta {
-  font-size: var(--font-size-2xs);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--font-size-sm);
   color: var(--color-text-dim);
   margin-top: 2px;
 }
 
+/* The address is what gets sacrificed when the row is too narrow — the badge is
+   two glyphs wide and fixed, the hostname is not. */
+.cm-item-address {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* A list-group caption. Not uppercase and not accent-coloured: it labels a
-   group of rows, it does not compete with them. */
+   group of rows, it does not compete with them — and it does that with weight
+   and colour, not by shrinking. Left at sm it would now be smaller than the rows
+   underneath it, which reads as a caption for something above rather than a
+   heading for what follows. */
 .cm-group-header {
   padding: var(--space-4) 16px var(--space-1);
-  font-size: var(--font-size-sm);
+  font-size: var(--font-size-md);
   font-weight: 600;
   color: var(--color-text-dim);
   user-select: none;
@@ -176,14 +217,8 @@
   border-top: 1px solid var(--color-divider);
 }
 
-/* Validation and save failures, shown on the form rather than only logged. */
-.cm-form-error {
-  margin-top: 12px;
-  color: var(--color-error);
-  font-size: var(--font-size-sm);
-  line-height: 1.4;
-}
-
-.cm-form-error:empty {
-  display: none;
-}
+/* `.cm-form-error` is gone. It was one string for a whole form: it could name
+   only the first failure, could not point at the field that failed, and this
+   surface had to decide when to show it. Validation is per-field through the
+   kit's `Field`/`TextField` `error` prop driven by `ui/validation.ts`, and a
+   backend refusal is a Toast. */

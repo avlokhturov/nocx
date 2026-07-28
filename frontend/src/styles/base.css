@@ -27,6 +27,54 @@ body {
   color: var(--color-text);
 }
 
+/* ── Scrollbars ───────────────────────────────────────────────────
+   Nothing styled these, so every scroll container fell back to the engine's
+   default: a wide, pale, opaque bar that reads as a piece of the browser
+   sitting on top of the app rather than as part of it. On the Connections
+   page it also arrives without warning — the form panel only overflows once a
+   profile is selected — which is why it looked like a stray artefact rather
+   than a scrollbar.
+
+   `::-webkit-scrollbar` rather than `scrollbar-width`/`scrollbar-color`: both
+   targets are WebKit-family (WKWebView in the packaged app, Chromium in dev)
+   and support the pseudo-elements, whereas Chromium ignores the pseudo-element
+   rules entirely once the standard properties are set — declaring both means
+   the two engines render different scrollbars from the same stylesheet.
+
+   Colours are tokens, so this follows the theme without a second declaration.
+   Terminal viewports are deliberately included: xterm's scrollbar is the same
+   chrome and had the same problem (nocx-vnbv). */
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-surface-raised);
+  border-radius: 6px;
+  /* A transparent border with background-clip is what keeps the thumb narrower
+     than its track without narrowing the hit target — the grab area stays the
+     full 10px while the visible bar is 6px. */
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-dim);
+  background-clip: content-box;
+}
+
+/* Where two scroll containers meet. Left at the engine default it paints an
+   opaque light square in the corner of every doubly-scrolling panel. */
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
 /* The shell is proportional; only terminal content is monospace.
    `#app` used to set the mono family for everything, which put labels, nav,
    headings and form controls in SF Mono and made every surface read as a

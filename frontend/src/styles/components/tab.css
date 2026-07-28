@@ -197,15 +197,27 @@
 .nocx-tab-indicator[data-activity='true'] {
   display: block;
   top: auto;
-  /* On the tab's bottom edge, mirroring the active tab's bar at the top. */
+  /* The tab's whole bottom edge, mirroring the active tab's bar at the top —
+     which is full width. The 10px inset it used to carry was there to keep it
+     from being mistaken for that bar back when both were the accent colour;
+     the colours differ now, and a bar that stops short of both edges reads as
+     unfinished rather than as distinct. */
   bottom: 0;
-  left: 10px;
-  right: 10px;
+  left: 0;
+  right: 0;
   width: auto;
   height: 2px;
   border-radius: 1px;
-  opacity: 0.6;
-  background: var(--color-accent);
+  /* Warning, not accent. Sharing the accent with the selection bar meant the
+     only difference between "this tab is current" and "this tab has output you
+     have not seen" was which edge it sat on — a distinction that disappears
+     entirely in the vertical strip, where both are left-edge bars. Colour is
+     what separates them; the geometry is now nearly the same on purpose.
+
+     No opacity: 0.6 any more. It was dimming the one mark whose whole job is to
+     be noticed, and it was dimming it against a token already chosen to be
+     quieter than the accent (nocx-lyns). */
+  background: var(--color-warning);
 }
 
 .nocx-tab[aria-selected='true'] .nocx-tab-indicator[data-activity='true'] {
@@ -275,19 +287,68 @@
 
 /* ── Vertical tab strip overrides ────────────────────────────────────── */
 
+/* A seam between rows, and it has to be its own colour rather than the divider
+   token. Every row was the same flat fill butted against the next with nothing
+   between them, so three tabs read as one slab of colour with text on it —
+   `border-bottom` was already here and already `transparent`.
+
+   `--color-divider` does not work at this job: #2a2b3d against a row fill of
+   #24283b is six, three and two steps out of 255. The token is tuned to be a
+   seam on `--color-chrome`, which is nearly black, and on the row's own fill it
+   is a line that exists and cannot be seen.
+
+   A white overlay instead, which is how a seam is drawn ON a filled dark
+   surface rather than between a surface and the chrome behind it. It is
+   relative to whatever the row is filled with, so it stays visible in both
+   themes and does not have to be re-picked if the fill changes. */
 .tabstrip-vertical .nocx-tab {
   flex: 0 0 auto;
   width: 100%;
   height: 52px;
   border-right: none;
-  border-bottom: 1px solid transparent;
+  border-bottom: 1px solid color-mix(in srgb, white, transparent 90%);
   border-radius: 0;
 }
 
+/* Measured, which is the only reason this changed: an inactive row is
+   `--color-surface-sunken` (#24283b) and the selected row was
+   `--color-tab-active` (#1f2235) — five, six and six steps out of 255 apart, and
+   in the DARKER direction. Two rows differing by two percent of luminance are
+   not two states, and the strip read as one undifferentiated column.
+
+   Darker-when-active is the horizontal strip's metaphor: the selected tab drops
+   out of the strip and merges into the terminal below it, and the shared edge is
+   what sells it. A vertical row has no such edge to share — the pane is off to
+   the side, not underneath — so the metaphor buys nothing and the cost is the
+   only cue being spent on it.
+
+   An accent tint instead — but mixed with the ROW's own fill, not with
+   transparency. `color-mix(accent, transparent 88%)` is what
+   `.cm-item.cm-selected` uses and copying it here inverted the very problem it
+   was meant to fix: a translucent fill composites over whatever is behind the
+   element, and behind a tab row is the strip at `--color-chrome` (#0e0f15),
+   far darker than the row's own #24283b. The connections list gets away with it
+   because it sits on a light surface. Mixing against `--color-surface-sunken`
+   asks the question that was actually meant — take this row and push it toward
+   the accent — and cannot be changed by what happens to sit underneath.
+
+   Lighter, because that is what a raised thing is. The inset top highlight and
+   the drop shadow are the rest of the same statement: the selected row sits
+   above the column, the others are in it (nocx-u81j). */
 .tabstrip-vertical .nocx-tab[aria-selected='true'] {
   --tab-bg: var(--color-surface);
-  background: var(--color-tab-active);
+  background: color-mix(in srgb, var(--color-accent) 16%, var(--color-surface-sunken));
   color: var(--color-text);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, white, transparent 88%),
+    0 2px 6px color-mix(in srgb, black, transparent 60%);
+}
+
+/* Inactive rows recede. `--color-text-muted` sat close enough to `--color-text`
+   that the background was carrying the whole distinction on its own; with the
+   selected row now tinted, the text can help rather than hedge. */
+.tabstrip-vertical .nocx-tab:not([aria-selected='true']) {
+  color: var(--color-text-dim);
 }
 
 .tabstrip-vertical .nocx-tab-label {
@@ -349,18 +410,30 @@
   background: var(--color-accent);
 }
 
-/* Same underline as the horizontal strip, along the row's bottom edge.
-   `right` is spelled out: the vertical base rule above sets it to `auto` for the
-   left-edge selection bar, and an absolutely positioned empty element with only
-   `left` set collapses to zero width — the bar would be in the DOM, correct by
-   every assertion, and invisible. */
+/* A left-edge bar, like the selection indicator beside it and unlike the
+   horizontal strip's underline. A row in a vertical strip has no meaningful
+   bottom edge — the next row starts there — so an underline read as a divider
+   between two tabs rather than as a mark on one of them.
+
+   The same slot AND the same height as the selection bar, deliberately. The two
+   never appear together — activation hides this one — so nothing has to tell
+   them apart by shape, and colour does the whole job. A first attempt inset this
+   one 10px top and bottom to differentiate it, which only made two bars of
+   different lengths in the same column read as a rendering fault rather than as
+   two states.
+
+   `bottom` and `height` are spelled out even though the vertical base rule
+   already sets them: the horizontal `[data-activity='true']` rule above is one
+   class plus an attribute and this is one class, one class and an attribute, so
+   it wins — but only for what it declares. Leaving `height` out let the
+   horizontal rule's `2px` through and the bar became a 2x2 dot (nocx-lyns). */
 .tabstrip-vertical .nocx-tab-indicator[data-activity='true'] {
-  top: auto;
+  top: 0;
   bottom: 0;
-  left: 10px;
-  right: 10px;
-  width: auto;
-  height: 2px;
+  left: 0;
+  right: auto;
+  width: 2px;
+  height: auto;
 }
 
 .tabstrip-vertical .nocx-tab-index {

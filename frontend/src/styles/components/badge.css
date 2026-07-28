@@ -12,6 +12,17 @@
   line-height: 1.4;
 }
 
+/* `neutral` is the DEFAULT tone and it had no rule at all — three tones painted a
+   background and the fourth, the one you get by writing `<Badge>`, painted
+   nothing. It rendered as bare text with 6px of padding either side, which reads
+   as a stray gap rather than as a chip, and left the component's default state
+   as the only one that did not look like a badge. A default that has to be
+   overridden to work is the kit failing to constrain (nocx-fmoz). */
+.ui-badge[data-tone='neutral'] {
+  background: var(--color-surface-raised);
+  color: var(--color-text-dim);
+}
+
 .ui-badge[data-tone='info'] {
   background: color-mix(in srgb, var(--color-accent), transparent 80%);
   color: var(--color-accent);
