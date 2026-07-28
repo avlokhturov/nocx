@@ -88,11 +88,18 @@ func (r *Resolver) buildConfig(prof *profile.SSHProfile, visited map[string]bool
 		// Wire SecretStore for late-bound password/passphrase resolution
 		// via opaque SecretID references (ADR-0011 §2).
 		cfg.Secrets = r.secrets
-		if cred.SecretID != "" {
-			cfg.SecretID = credential.SecretID(cred.SecretID)
-		}
-		if cred.PassphraseSecretID != "" {
-			cfg.PassphraseSecretID = credential.SecretID(cred.PassphraseSecretID)
+
+		// The SELECTED version's references, not the record's. poolKeyFor
+		// (ssh_dial.go:38) keys on cfg.SecretID, so this is also what makes
+		// a promotion produce a new pool entry without any change in
+		// internal/ssh.
+		if v, ok := cred.Current(); ok {
+			if v.PasswordSecretID != "" {
+				cfg.SecretID = credential.SecretID(v.PasswordSecretID)
+			}
+			if v.PassphraseSecretID != "" {
+				cfg.PassphraseSecretID = credential.SecretID(v.PassphraseSecretID)
+			}
 		}
 	} else {
 		cfg.User = prof.Options.User

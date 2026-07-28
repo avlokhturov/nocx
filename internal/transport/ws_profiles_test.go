@@ -91,7 +91,7 @@ func TestProfilesRPC_Delete(t *testing.T) {
 		Base:    profile.Base{ID: "ssh:custom:del:0001", Type: "ssh", Name: "del"},
 		Options: profile.SSHProfileOptions{Host: "h"},
 	}
-	_ = ps.SaveProfile(p)
+	_ = ps.CreateProfile(p)
 
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
 		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
@@ -211,13 +211,13 @@ func TestNoPlaintextSecretsOnWire(t *testing.T) {
 	})
 
 	// Create a jump profile.
-	_ = ps.SaveProfile(profile.SSHProfile{
+	_ = ps.CreateProfile(profile.SSHProfile{
 		Base:    profile.Base{ID: "profile:canary-jump", Name: "canary-jump"},
 		Options: profile.SSHProfileOptions{Host: "jump.canary.example.com", CredentialID: "cred:canary:bbb"},
 	})
 
 	// Create a target profile with a jump host.
-	_ = ps.SaveProfile(profile.SSHProfile{
+	_ = ps.CreateProfile(profile.SSHProfile{
 		Base: profile.Base{ID: "profile:canary-tgt", Name: "canary-target"},
 		Options: profile.SSHProfileOptions{
 			Host:         "target.canary.example.com",
@@ -276,4 +276,135 @@ func TestNoPlaintextSecretsOnWire(t *testing.T) {
 		"kind":      "ssh",
 		"profileId": "profile:canary-jump",
 	})
+}
+
+func TestProfilesRPC_CreateRejectsDuplicateID(t *testing.T) {
+	dir := t.TempDir()
+	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
+	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	id := profile.NewProfileID("ssh", "web-1")
+	first := map[string]any{
+		"id": id, "type": "ssh", "name": "web-1",
+		"options": map[string]any{"host": "10.0.0.1", "port": 22, "user": "ops"},
+	}
+	jsonrpcCall(t, conn, "profiles.create", first)
+
+	second := map[string]any{
+		"id": id, "type": "ssh", "name": "impostor",
+		"options": map[string]any{"host": "evil.example", "port": 22, "user": "root"},
+	}
+	resp := jsonrpcCall(t, conn, "profiles.create", second)
+	var out struct {
+		Error *struct {
+			Code int `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.Error == nil || out.Error.Code != -32602 {
+		t.Fatalf("want -32602 for a duplicate create, got %+v", out.Error)
+	}
+
+	stored, err := ps.LoadProfiles()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(stored) != 1 || stored[0].Options.Host != "10.0.0.1" {
+		t.Fatalf("a refused create overwrote the record: %+v", stored)
+	}
+}
+
+func TestProfilesRPC_UpdateRejectsMissingID(t *testing.T) {
+	dir := t.TempDir()
+	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
+	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	resp := jsonrpcCall(t, conn, "profiles.update", map[string]any{
+		"id": "ssh:nonexistent:0001", "type": "ssh", "name": "ghost",
+		"options": map[string]any{"host": "10.0.0.1"},
+	})
+	var out struct {
+		Error *struct {
+			Code int `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.Error == nil || out.Error.Code != -32602 {
+		t.Fatalf("want -32602 for update on missing profile, got %+v", out.Error)
+	}
+}
+
+func TestGroupsRPC_CreateRejectsDuplicateID(t *testing.T) {
+	dir := t.TempDir()
+	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
+	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	jsonrpcCall(t, conn, "groups.create", map[string]any{"id": "g1", "name": "Prod"})
+	resp := jsonrpcCall(t, conn, "groups.create", map[string]any{"id": "g1", "name": "Duplicate"})
+	var out struct {
+		Error *struct {
+			Code int `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.Error == nil || out.Error.Code != -32602 {
+		t.Fatalf("want -32602 for a duplicate group create, got %+v", out.Error)
+	}
+}
+
+func TestGroupsRPC_UpdateRejectsMissingID(t *testing.T) {
+	dir := t.TempDir()
+	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
+	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	resp := jsonrpcCall(t, conn, "groups.update", map[string]any{"id": "g-nonexistent", "name": "Ghost"})
+	var out struct {
+		Error *struct {
+			Code int `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.Error == nil || out.Error.Code != -32602 {
+		t.Fatalf("want -32602 for update on missing group, got %+v", out.Error)
+	}
 }

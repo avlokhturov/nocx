@@ -1019,14 +1019,33 @@ func (s *WSServer) handleProfileMethod(wconn *wsConn, req jsonrpcRequest) {
 			return
 		}
 		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(profs)))
-	case "profiles.create", "profiles.update":
+	case "profiles.create":
 		var p profile.SSHProfile
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
 			return
 		}
-		if err := s.profiles.SaveProfile(p); err != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		// Mint an ID when the renderer sends none.
+		if p.ID == "" {
+			p.ID = profile.NewProfileID("ssh", p.Name)
+		}
+		if err := s.profiles.CreateProfile(p); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, profileMethodErrorCode(err), err.Error()))
+			return
+		}
+		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(p)))
+	case "profiles.update":
+		var p profile.SSHProfile
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+			return
+		}
+		if p.ID == "" {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "id required"))
+			return
+		}
+		if err := s.profiles.UpdateProfile(p); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, profileMethodErrorCode(err), err.Error()))
 			return
 		}
 		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(p)))
@@ -1059,14 +1078,29 @@ func (s *WSServer) handleGroupMethod(wconn *wsConn, req jsonrpcRequest) {
 			return
 		}
 		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(groups)))
-	case "groups.create", "groups.update":
+	case "groups.create":
 		var g profile.ProfileGroup
 		if err := json.Unmarshal(req.Params, &g); err != nil {
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
 			return
 		}
-		if err := s.groups.SaveGroup(g); err != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		if err := s.groups.CreateGroup(g); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, profileMethodErrorCode(err), err.Error()))
+			return
+		}
+		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(g)))
+	case "groups.update":
+		var g profile.ProfileGroup
+		if err := json.Unmarshal(req.Params, &g); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+			return
+		}
+		if g.ID == "" {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "id required"))
+			return
+		}
+		if err := s.groups.UpdateGroup(g); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, profileMethodErrorCode(err), err.Error()))
 			return
 		}
 		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(g)))
@@ -1099,9 +1133,14 @@ func (s *WSServer) handleCredentialCRUDMethod(wconn *wsConn, req jsonrpcRequest)
 			return
 		}
 		// Strip SecretID fields — the renderer must never see them (ADR-0011 SS2).
+		// Also strip per-version secret references.
 		for i := range creds {
 			creds[i].SecretID = ""
 			creds[i].PassphraseSecretID = ""
+			for j := range creds[i].Versions {
+				creds[i].Versions[j].PasswordSecretID = ""
+				creds[i].Versions[j].PassphraseSecretID = ""
+			}
 		}
 		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(creds)))
 	case "credentials.create":
@@ -1139,11 +1178,6 @@ func (s *WSServer) handleCredentialCRUDMethod(wconn *wsConn, req jsonrpcRequest)
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: id required"))
 			return
 		}
-		if in.SecretID != "" || in.PassphraseSecretID != "" {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602,
-				"secretId/passphraseSecretId are backend-owned"))
-			return
-		}
 		merged, err := s.credMeta.UpdateCredential(in.ID, in.Patch())
 		if err != nil {
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, credentialErrorCode(err), err.Error()))
@@ -1151,6 +1185,11 @@ func (s *WSServer) handleCredentialCRUDMethod(wconn *wsConn, req jsonrpcRequest)
 		}
 		merged.SecretID = ""
 		merged.PassphraseSecretID = ""
+		// Also blank per-version secret references.
+		for j := range merged.Versions {
+			merged.Versions[j].PasswordSecretID = ""
+			merged.Versions[j].PassphraseSecretID = ""
+		}
 		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(merged)))
 	case "credentials.delete":
 		var params struct {
@@ -1202,6 +1241,22 @@ func (d credentialUpdateDTO) Patch() profile.CredentialPatch {
 	return profile.CredentialPatch{
 		Name: d.Name, Username: d.Username, Auth: d.Auth, KeyPath: d.KeyPath,
 		Host: d.Host, Port: d.Port,
+	}
+}
+
+// profileMethodErrorCode maps a store error to a JSON-RPC code, same pattern
+// as credentialErrorCode.
+func profileMethodErrorCode(err error) int {
+	switch {
+	case errors.Is(err, profile.ErrProfileExists),
+		errors.Is(err, profile.ErrProfileNotFound),
+		errors.Is(err, profile.ErrProfileIDRequired),
+		errors.Is(err, profile.ErrGroupExists),
+		errors.Is(err, profile.ErrGroupNotFound),
+		errors.Is(err, profile.ErrGroupIDRequired):
+		return -32602
+	default:
+		return -32603
 	}
 }
 
@@ -1298,11 +1353,11 @@ func (s *WSServer) handleCredentialMethod(wconn *wsConn, req jsonrpcRequest) {
 	}
 }
 
-// savePasswordForCredential stores a password secret and repoints the
-// credential's SecretID. The new secret is written under a fresh ID first,
-// then metadata is updated, then the old secret (if any) is best-effort
-// deleted — write-before-repoint prevents a crash from orphaning the new
-// secret.
+// savePasswordForCredential stores a password secret, appends a credential
+// version, and moves CurrentVersionID to it. The new secret is written under a
+// fresh ID first, then metadata is updated, then the old secret (if any) is
+// best-effort deleted — write-before-repoint prevents a crash from orphaning
+// the new secret.
 func (s *WSServer) savePasswordForCredential(credID, password string) error {
 	if s.credMeta == nil {
 		return errors.New("profiles not available")
@@ -1320,13 +1375,19 @@ func (s *WSServer) savePasswordForCredential(credID, password string) error {
 		return fmt.Errorf("store secret: %w", err)
 	}
 
-	oldID := credential.SecretID(cred.SecretID)
-	if err := s.credMeta.SetSecretRefs(credID, string(newID), cred.PassphraseSecretID); err != nil {
-		return fmt.Errorf("save credential metadata: %w", err)
+	// Load the current version to find the old secret ID and carry
+	// over the existing passphrase to the new version.
+	oldID := credential.SecretID("")
+	passphraseRef := ""
+	if v, ok := cred.Current(); ok {
+		oldID = credential.SecretID(v.PasswordSecretID)
+		passphraseRef = v.PassphraseSecretID
+	}
+	if err := s.credMeta.AppendCredentialVersion(credID, string(newID), passphraseRef); err != nil {
+		return fmt.Errorf("save credential version: %w", err)
 	}
 
-	// Best-effort delete of the old secret. The new one is already stored
-	// and metadata points at it, so this is purely garbage collection.
+	// Best-effort delete of the old secret.
 	if oldID != "" {
 		_ = s.credentials.Delete(oldID)
 	}
@@ -1345,8 +1406,15 @@ func (s *WSServer) deletePasswordForCredential(credID string) error {
 		return fmt.Errorf("credential %s not found", credID)
 	}
 
-	oldID := credential.SecretID(cred.SecretID)
-	if err := s.credMeta.SetSecretRefs(credID, "", cred.PassphraseSecretID); err != nil {
+	// Determine old secret and current passphrase ref from the current version.
+	oldID := credential.SecretID("")
+	passphraseRef := ""
+	if v, ok := cred.Current(); ok {
+		oldID = credential.SecretID(v.PasswordSecretID)
+		passphraseRef = v.PassphraseSecretID
+	}
+
+	if err := s.credMeta.UpdateCurrentVersionRefs(credID, "", passphraseRef); err != nil {
 		return fmt.Errorf("save credential metadata: %w", err)
 	}
 
@@ -1366,15 +1434,19 @@ func (s *WSServer) hasPasswordForCredential(credID string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if !ok || cred.SecretID == "" {
+	if !ok {
 		return false, nil
 	}
-	return s.credentials.Exists(credential.SecretID(cred.SecretID))
+	// Check the current version's password reference.
+	v, ok := cred.Current()
+	if !ok || v.PasswordSecretID == "" {
+		return false, nil
+	}
+	return s.credentials.Exists(credential.SecretID(v.PasswordSecretID))
 }
 
-// savePassphraseForCredential stores a key passphrase secret and repoints
-// the credential's PassphraseSecretID. Same write-before-repoint pattern as
-// savePasswordForCredential.
+// savePassphraseForCredential stores a key passphrase secret and updates the
+// current version's passphrase reference. Same write-before-repoint pattern.
 func (s *WSServer) savePassphraseForCredential(credID, passphrase string) error {
 	if s.credMeta == nil {
 		return errors.New("profiles not available")
@@ -1392,8 +1464,15 @@ func (s *WSServer) savePassphraseForCredential(credID, passphrase string) error 
 		return fmt.Errorf("store passphrase: %w", err)
 	}
 
-	oldID := credential.SecretID(cred.PassphraseSecretID)
-	if err := s.credMeta.SetSecretRefs(credID, cred.SecretID, string(newID)); err != nil {
+	// Determine old passphrase ref and current password ref.
+	oldID := credential.SecretID("")
+	passwordRef := ""
+	if v, ok := cred.Current(); ok {
+		oldID = credential.SecretID(v.PassphraseSecretID)
+		passwordRef = v.PasswordSecretID
+	}
+
+	if err := s.credMeta.UpdateCurrentVersionRefs(credID, passwordRef, string(newID)); err != nil {
 		return fmt.Errorf("save credential metadata: %w", err)
 	}
 
@@ -1404,7 +1483,7 @@ func (s *WSServer) savePassphraseForCredential(credID, passphrase string) error 
 }
 
 // deletePassphraseForCredential removes the stored key passphrase secret and
-// clears the credential's PassphraseSecretID.
+// clears the current version's passphrase reference.
 func (s *WSServer) deletePassphraseForCredential(credID string) error {
 	if s.credMeta == nil {
 		return errors.New("profiles not available")
@@ -1417,8 +1496,15 @@ func (s *WSServer) deletePassphraseForCredential(credID string) error {
 		return fmt.Errorf("credential %s not found", credID)
 	}
 
-	oldID := credential.SecretID(cred.PassphraseSecretID)
-	if err := s.credMeta.SetSecretRefs(credID, cred.SecretID, ""); err != nil {
+	// Determine old passphrase ref and current password ref.
+	oldID := credential.SecretID("")
+	passwordRef := ""
+	if v, ok := cred.Current(); ok {
+		oldID = credential.SecretID(v.PassphraseSecretID)
+		passwordRef = v.PasswordSecretID
+	}
+
+	if err := s.credMeta.UpdateCurrentVersionRefs(credID, passwordRef, ""); err != nil {
 		return fmt.Errorf("save credential metadata: %w", err)
 	}
 
@@ -1445,7 +1531,7 @@ func (s *WSServer) deletePassphraseForCredential(credID string) error {
 // never saved) must succeed. SecretStore.Delete treats "already absent" as
 // success, so no special-casing is needed.
 func (s *WSServer) deleteCredentialCascade(id string) error {
-	// Load the metadata BEFORE deleting it: SecretID and PassphraseSecretID
+	// Load the metadata BEFORE deleting it: all SecretIDs across versions
 	// are needed to reach the keychain entries, and once the row is gone
 	// they are unrecoverable.
 	cred, ok, err := s.findCredentialByID(id)
@@ -1453,11 +1539,23 @@ func (s *WSServer) deleteCredentialCascade(id string) error {
 		return fmt.Errorf("load credential %s: %w", id, err)
 	}
 
-	// Read every SecretID BEFORE deleting metadata.
-	var pwID, ppID credential.SecretID
+	// Collect every secret ID from record-level fields AND all versions.
+	var ids []credential.SecretID
 	if ok {
-		pwID = credential.SecretID(cred.SecretID)
-		ppID = credential.SecretID(cred.PassphraseSecretID)
+		if cred.SecretID != "" {
+			ids = append(ids, credential.SecretID(cred.SecretID))
+		}
+		if cred.PassphraseSecretID != "" {
+			ids = append(ids, credential.SecretID(cred.PassphraseSecretID))
+		}
+		for _, v := range cred.Versions {
+			if v.PasswordSecretID != "" {
+				ids = append(ids, credential.SecretID(v.PasswordSecretID))
+			}
+			if v.PassphraseSecretID != "" {
+				ids = append(ids, credential.SecretID(v.PassphraseSecretID))
+			}
+		}
 	}
 
 	// Delete metadata first. Its deletion stands regardless of secret
@@ -1471,20 +1569,14 @@ func (s *WSServer) deleteCredentialCascade(id string) error {
 		return nil
 	}
 
-	// Best-effort secret deletion. Attempt BOTH deletions even if one
-	// fails. Errors are aggregated; metadata is already gone.
+	// Best-effort secret deletion.
 	if s.credentials == nil {
 		return nil
 	}
 	var errs []error
-	if pwID != "" {
-		if err := s.credentials.Delete(pwID); err != nil {
-			errs = append(errs, fmt.Errorf("delete password for %s: %w", id, err))
-		}
-	}
-	if ppID != "" {
-		if err := s.credentials.Delete(ppID); err != nil {
-			errs = append(errs, fmt.Errorf("delete key passphrase for %s: %w", id, err))
+	for _, secretID := range ids {
+		if err := s.credentials.Delete(secretID); err != nil {
+			errs = append(errs, fmt.Errorf("delete secret %s for %s: %w", secretID, id, err))
 		}
 	}
 	return errors.Join(errs...)

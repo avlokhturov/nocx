@@ -3,6 +3,7 @@ package export_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -31,15 +32,24 @@ func (l *testLogger) WithContext(_ context.Context) log.Logger { return l }
 type fakeProfileRepo struct{ profiles []profile.SSHProfile }
 
 func (r *fakeProfileRepo) LoadProfiles() ([]profile.SSHProfile, error) { return r.profiles, nil }
-func (r *fakeProfileRepo) SaveProfile(p profile.SSHProfile) error {
+func (r *fakeProfileRepo) CreateProfile(p profile.SSHProfile) error {
+	for _, e := range r.profiles {
+		if e.ID == p.ID {
+			return profile.ErrProfileExists
+		}
+	}
+	r.profiles = append(r.profiles, p)
+	return nil
+}
+
+func (r *fakeProfileRepo) UpdateProfile(p profile.SSHProfile) error {
 	for i, e := range r.profiles {
 		if e.ID == p.ID {
 			r.profiles[i] = p
 			return nil
 		}
 	}
-	r.profiles = append(r.profiles, p)
-	return nil
+	return profile.ErrProfileNotFound
 }
 
 func (r *fakeProfileRepo) DeleteProfile(id string) error {
@@ -56,15 +66,24 @@ func (r *fakeProfileRepo) DeleteProfile(id string) error {
 type fakeGroupRepo struct{ groups []profile.ProfileGroup }
 
 func (r *fakeGroupRepo) LoadGroups() ([]profile.ProfileGroup, error) { return r.groups, nil }
-func (r *fakeGroupRepo) SaveGroup(g profile.ProfileGroup) error {
+func (r *fakeGroupRepo) CreateGroup(g profile.ProfileGroup) error {
+	for _, e := range r.groups {
+		if e.ID == g.ID {
+			return profile.ErrGroupExists
+		}
+	}
+	r.groups = append(r.groups, g)
+	return nil
+}
+
+func (r *fakeGroupRepo) UpdateGroup(g profile.ProfileGroup) error {
 	for i, e := range r.groups {
 		if e.ID == g.ID {
 			r.groups[i] = g
 			return nil
 		}
 	}
-	r.groups = append(r.groups, g)
-	return nil
+	return profile.ErrGroupNotFound
 }
 
 func (r *fakeGroupRepo) DeleteGroup(id string) error {
@@ -101,11 +120,49 @@ func (r *fakeCredRepo) UpdateCredential(id string, p profile.CredentialPatch) (p
 	return profile.Credential{}, profile.ErrCredentialNotFound
 }
 
-func (r *fakeCredRepo) SetSecretRefs(id string, secretID, passphraseSecretID string) error {
+func (r *fakeCredRepo) UpdateCurrentVersionRefs(id, passwordSecretID, passphraseSecretID string) error {
 	for i, e := range r.creds {
 		if e.ID == id {
-			r.creds[i].SecretID = secretID
-			r.creds[i].PassphraseSecretID = passphraseSecretID
+			if len(e.Versions) == 0 {
+				r.creds[i].SecretID = passwordSecretID
+				r.creds[i].PassphraseSecretID = passphraseSecretID
+			} else {
+				for j := range r.creds[i].Versions {
+					if r.creds[i].Versions[j].ID == r.creds[i].CurrentVersionID {
+						r.creds[i].Versions[j].PasswordSecretID = passwordSecretID
+						r.creds[i].Versions[j].PassphraseSecretID = passphraseSecretID
+						break
+					}
+				}
+			}
+			return nil
+		}
+	}
+	return profile.ErrCredentialNotFound
+}
+
+func (r *fakeCredRepo) AppendCredentialVersion(id, passwordSecretID, passphraseSecretID string) error {
+	for i, e := range r.creds {
+		if e.ID == id {
+			if len(e.Versions) == 0 {
+				r.creds[i].Versions = []profile.CredentialVersion{
+					{
+						ID:                 "v1",
+						PasswordSecretID:   e.SecretID,
+						PassphraseSecretID: e.PassphraseSecretID,
+					},
+				}
+				r.creds[i].CurrentVersionID = "v1"
+				r.creds[i].SecretID = ""
+				r.creds[i].PassphraseSecretID = ""
+			}
+			nextID := fmt.Sprintf("v%d", len(r.creds[i].Versions)+1)
+			r.creds[i].Versions = append(r.creds[i].Versions, profile.CredentialVersion{
+				ID:                 nextID,
+				PasswordSecretID:   passwordSecretID,
+				PassphraseSecretID: passphraseSecretID,
+			})
+			r.creds[i].CurrentVersionID = nextID
 			return nil
 		}
 	}

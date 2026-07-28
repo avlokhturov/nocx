@@ -167,10 +167,10 @@ func TestJSONStoreRoundTrip(t *testing.T) {
 	}
 	grp := ProfileGroup{ID: "g1", Name: "Prod"}
 
-	if err := store.SaveProfile(prof.ToPartial()); err != nil {
+	if err := store.CreateProfile(prof.ToPartial()); err != nil {
 		t.Fatalf("SaveProfile: %v", err)
 	}
-	if err := store.SaveGroup(grp); err != nil {
+	if err := store.CreateGroup(grp); err != nil {
 		t.Fatalf("SaveGroup: %v", err)
 	}
 
@@ -203,7 +203,7 @@ func TestJSONStoreDeleteProfile(t *testing.T) {
 		Base:    Base{ID: "ssh:custom:del:0001", Type: "ssh", Name: "del"},
 		Options: SSHProfileOptions{Host: "h"},
 	}
-	_ = store.SaveProfile(prof.ToPartial())
+	_ = store.CreateProfile(prof.ToPartial())
 
 	if err := store.DeleteProfile(prof.ID); err != nil {
 		t.Fatalf("DeleteProfile: %v", err)
@@ -232,7 +232,7 @@ func TestJSONStoreAtomicWrite(t *testing.T) {
 	store := NewJSONStore(path)
 
 	prof := SSHProfile{Base: Base{ID: "ssh:custom:atom:0001", Type: "ssh", Name: "atom"}}
-	_ = store.SaveProfile(prof.ToPartial())
+	_ = store.CreateProfile(prof.ToPartial())
 
 	entries, err := os.ReadDir(dir)
 	if err != nil {

@@ -12,26 +12,32 @@ import (
 // ProfileRepository is the persistence interface for SSH profile CRUD.
 type ProfileRepository interface {
 	LoadProfiles() ([]SSHProfile, error)
-	SaveProfile(p SSHProfile) error
+	CreateProfile(p SSHProfile) error
+	UpdateProfile(p SSHProfile) error
 	DeleteProfile(id string) error
 }
 
 // GroupRepository is the persistence interface for profile group CRUD.
 type GroupRepository interface {
 	LoadGroups() ([]ProfileGroup, error)
-	SaveGroup(g ProfileGroup) error
+	CreateGroup(g ProfileGroup) error
+	UpdateGroup(g ProfileGroup) error
 	DeleteGroup(id string) error
 }
 
-// CredentialMetadataRepository is the persistence interface for credential
-// metadata CRUD. Secrets referenced by SecretID fields are managed by the
-// credential.SecretStore, not by this repository (ADR-0011 §2).
 type CredentialMetadataRepository interface {
 	LoadCredentials() ([]Credential, error)
 	CreateCredential(c Credential) error
 	UpdateCredential(id string, p CredentialPatch) (Credential, error)
 	DeleteCredential(id string) error
-	SetSecretRefs(id string, secretID, passphraseSecretID string) error
+	// UpdateCurrentVersionRefs sets password/passphrase secret IDs on the
+	// credential's current version (or on the record-level fields for a
+	// legacy credential with no versions).
+	UpdateCurrentVersionRefs(id string, passwordSecretID, passphraseSecretID string) error
+	// AppendCredentialVersion appends a new version and makes it current.
+	// If the credential has no versions (legacy), existing record-level
+	// SecretID/PassphraseSecretID are migrated into version "v1" first.
+	AppendCredentialVersion(id string, passwordSecretID, passphraseSecretID string) error
 }
 
 // JSONStore persists profiles and groups to a single JSON file on disk.
@@ -94,7 +100,44 @@ func (s *JSONStore) LoadProfiles() ([]SSHProfile, error) {
 	return d.Profiles, nil
 }
 
-func (s *JSONStore) SaveProfile(p SSHProfile) error {
+// ErrProfileIDRequired, ErrProfileExists and ErrProfileNotFound make
+// create and update distinguishable — the same pattern as credentials.
+var (
+	ErrProfileIDRequired = errors.New("profile ID is required")
+	ErrProfileExists     = errors.New("profile already exists")
+	ErrProfileNotFound   = errors.New("profile not found")
+)
+
+// CreateProfile stores a new profile. It refuses an empty ID and refuses
+// to overwrite an existing one.
+func (s *JSONStore) CreateProfile(p SSHProfile) error {
+	if p.ID == "" {
+		return ErrProfileIDRequired
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	d, err := s.load()
+	if err != nil {
+		return err
+	}
+	for _, existing := range d.Profiles {
+		if existing.ID == p.ID {
+			return fmt.Errorf("%s: %w", p.ID, ErrProfileExists)
+		}
+	}
+	d.Profiles = append(d.Profiles, p)
+	return s.writeLocked(d)
+}
+
+// UpdateProfile replaces a stored profile. It fails if the profile does not
+// exist — unlike the old SaveProfile, which silently created one.
+func (s *JSONStore) UpdateProfile(p SSHProfile) error {
+	if p.ID == "" {
+		return ErrProfileIDRequired
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -108,8 +151,7 @@ func (s *JSONStore) SaveProfile(p SSHProfile) error {
 			return s.writeLocked(d)
 		}
 	}
-	d.Profiles = append(d.Profiles, p)
-	return s.writeLocked(d)
+	return fmt.Errorf("%s: %w", p.ID, ErrProfileNotFound)
 }
 
 func (s *JSONStore) DeleteProfile(id string) error {
@@ -137,7 +179,43 @@ func (s *JSONStore) LoadGroups() ([]ProfileGroup, error) {
 	return d.Groups, nil
 }
 
-func (s *JSONStore) SaveGroup(g ProfileGroup) error {
+// ErrGroupIDRequired, ErrGroupExists and ErrGroupNotFound make
+// create and update distinguishable.
+var (
+	ErrGroupIDRequired = errors.New("group ID is required")
+	ErrGroupExists     = errors.New("group already exists")
+	ErrGroupNotFound   = errors.New("group not found")
+)
+
+// CreateGroup stores a new group. It refuses an empty ID and refuses
+// to overwrite an existing one.
+func (s *JSONStore) CreateGroup(g ProfileGroup) error {
+	if g.ID == "" {
+		return ErrGroupIDRequired
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	d, err := s.load()
+	if err != nil {
+		return err
+	}
+	for _, existing := range d.Groups {
+		if existing.ID == g.ID {
+			return fmt.Errorf("%s: %w", g.ID, ErrGroupExists)
+		}
+	}
+	d.Groups = append(d.Groups, g)
+	return s.writeLocked(d)
+}
+
+// UpdateGroup replaces a stored group. It fails if the group does not exist.
+func (s *JSONStore) UpdateGroup(g ProfileGroup) error {
+	if g.ID == "" {
+		return ErrGroupIDRequired
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -151,8 +229,7 @@ func (s *JSONStore) SaveGroup(g ProfileGroup) error {
 			return s.writeLocked(d)
 		}
 	}
-	d.Groups = append(d.Groups, g)
-	return s.writeLocked(d)
+	return fmt.Errorf("%s: %w", g.ID, ErrGroupNotFound)
 }
 
 func (s *JSONStore) DeleteGroup(id string) error {
@@ -203,6 +280,12 @@ func (s *JSONStore) CreateCredential(c Credential) error {
 	if err := c.Validate(); err != nil {
 		return err
 	}
+	// Validate each version against its auth method.
+	for _, v := range c.Versions {
+		if err := v.ValidateVersion(); err != nil {
+			return err
+		}
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -252,10 +335,10 @@ func (s *JSONStore) UpdateCredential(id string, p CredentialPatch) (Credential, 
 	return Credential{}, fmt.Errorf("%s: %w", id, ErrCredentialNotFound)
 }
 
-// SetSecretRefs repoints a credential's backend-owned secret references. It is
-// the only way those fields ever change, and it is deliberately not reachable
-// through CredentialPatch — the renderer must never name a SecretID.
-func (s *JSONStore) SetSecretRefs(id string, secretID, passphraseSecretID string) error {
+// UpdateCurrentVersionRefs sets password/passphrase secret IDs on the
+// credential's current version. For a legacy credential with no versions,
+// the record-level SecretID/PassphraseSecretID fields are updated instead.
+func (s *JSONStore) UpdateCurrentVersionRefs(id string, passwordSecretID, passphraseSecretID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -265,8 +348,71 @@ func (s *JSONStore) SetSecretRefs(id string, secretID, passphraseSecretID string
 	}
 	for i, existing := range d.Credentials {
 		if existing.ID == id {
-			d.Credentials[i].SecretID = secretID
-			d.Credentials[i].PassphraseSecretID = passphraseSecretID
+			if len(existing.Versions) == 0 {
+				// Legacy path: update record-level fields.
+				d.Credentials[i].SecretID = passwordSecretID
+				d.Credentials[i].PassphraseSecretID = passphraseSecretID
+			} else {
+				// Update current version's fields.
+				for j := range d.Credentials[i].Versions {
+					if d.Credentials[i].Versions[j].ID == d.Credentials[i].CurrentVersionID {
+						d.Credentials[i].Versions[j].PasswordSecretID = passwordSecretID
+						d.Credentials[i].Versions[j].PassphraseSecretID = passphraseSecretID
+						break
+					}
+				}
+			}
+			return s.writeLocked(d)
+		}
+	}
+	return fmt.Errorf("%s: %w", id, ErrCredentialNotFound)
+}
+
+// AppendCredentialVersion appends a new version and sets it as the current
+// version. If the credential has no versions yet (legacy), the existing
+// record-level SecretID and PassphraseSecretID are first migrated into
+// version "v1".
+func (s *JSONStore) AppendCredentialVersion(id string, passwordSecretID, passphraseSecretID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	d, err := s.load()
+	if err != nil {
+		return err
+	}
+	for i, existing := range d.Credentials {
+		if existing.ID == id {
+			// Migrate legacy fields into a version if needed.
+			if len(existing.Versions) == 0 {
+				d.Credentials[i].Versions = []CredentialVersion{
+					{
+						ID:                 legacyVersionID,
+						PasswordSecretID:   existing.SecretID,
+						PassphraseSecretID: existing.PassphraseSecretID,
+					},
+				}
+				d.Credentials[i].CurrentVersionID = legacyVersionID
+				d.Credentials[i].SecretID = ""
+				d.Credentials[i].PassphraseSecretID = ""
+			}
+
+			// Determine the next version ID.
+			nextID := fmt.Sprintf("v%d", len(d.Credentials[i].Versions)+1)
+
+			// Validate the new version against the credential's auth.
+			newVersion := CredentialVersion{
+				ID:                 nextID,
+				Auth:               d.Credentials[i].Auth,
+				PasswordSecretID:   passwordSecretID,
+				PassphraseSecretID: passphraseSecretID,
+			}
+			if err := newVersion.ValidateVersion(); err != nil {
+				return err
+			}
+
+			// Append the new version.
+			d.Credentials[i].Versions = append(d.Credentials[i].Versions, newVersion)
+			d.Credentials[i].CurrentVersionID = nextID
 			return s.writeLocked(d)
 		}
 	}

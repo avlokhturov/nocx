@@ -1,6 +1,7 @@
 package connection
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/credential"
@@ -12,12 +13,14 @@ import (
 // need both.
 type stubProfileStore struct {
 	profiles    map[string]profile.SSHProfile
+	groups      map[string]profile.ProfileGroup
 	credentials map[string]profile.Credential
 }
 
 func newStubProfileStore() *stubProfileStore {
 	return &stubProfileStore{
 		profiles:    make(map[string]profile.SSHProfile),
+		groups:      make(map[string]profile.ProfileGroup),
 		credentials: make(map[string]profile.Credential),
 	}
 }
@@ -32,7 +35,18 @@ func (s *stubProfileStore) LoadProfiles() ([]profile.SSHProfile, error) {
 	return out, nil
 }
 
-func (s *stubProfileStore) SaveProfile(p profile.SSHProfile) error {
+func (s *stubProfileStore) CreateProfile(p profile.SSHProfile) error {
+	if _, ok := s.profiles[p.ID]; ok {
+		return profile.ErrProfileExists
+	}
+	s.profiles[p.ID] = p
+	return nil
+}
+
+func (s *stubProfileStore) UpdateProfile(p profile.SSHProfile) error {
+	if _, ok := s.profiles[p.ID]; !ok {
+		return profile.ErrProfileNotFound
+	}
 	s.profiles[p.ID] = p
 	return nil
 }
@@ -62,6 +76,51 @@ func (s *stubProfileStore) SaveCredential(c profile.Credential) error {
 	return nil
 }
 
+// SaveProfile is a test-local helper like SaveCredential — the interface
+// now uses CreateProfile/UpdateProfile, but test fixtures want "put this
+// in the store" without worrying about existence.
+func (s *stubProfileStore) SaveProfile(p profile.SSHProfile) error {
+	s.profiles[p.ID] = p
+	return nil
+}
+
+// SaveGroup is a test-local helper for the same reason.
+func (s *stubProfileStore) SaveGroup(g profile.ProfileGroup) error {
+	s.groups[g.ID] = g
+	return nil
+}
+
+// LoadGroups / CreateGroup / UpdateGroup / DeleteGroup are needed for
+// the stub to satisfy profile.GroupRepository where required.
+func (s *stubProfileStore) LoadGroups() ([]profile.ProfileGroup, error) {
+	out := make([]profile.ProfileGroup, 0, len(s.groups))
+	for _, g := range s.groups {
+		out = append(out, g)
+	}
+	return out, nil
+}
+
+func (s *stubProfileStore) CreateGroup(g profile.ProfileGroup) error {
+	if _, ok := s.groups[g.ID]; ok {
+		return profile.ErrGroupExists
+	}
+	s.groups[g.ID] = g
+	return nil
+}
+
+func (s *stubProfileStore) UpdateGroup(g profile.ProfileGroup) error {
+	if _, ok := s.groups[g.ID]; !ok {
+		return profile.ErrGroupNotFound
+	}
+	s.groups[g.ID] = g
+	return nil
+}
+
+func (s *stubProfileStore) DeleteGroup(id string) error {
+	delete(s.groups, id)
+	return nil
+}
+
 func (s *stubProfileStore) CreateCredential(c profile.Credential) error {
 	if _, ok := s.credentials[c.ID]; ok {
 		return profile.ErrCredentialExists
@@ -80,13 +139,51 @@ func (s *stubProfileStore) UpdateCredential(id string, p profile.CredentialPatch
 	return merged, nil
 }
 
-func (s *stubProfileStore) SetSecretRefs(id, secretID, passphraseSecretID string) error {
+func (s *stubProfileStore) UpdateCurrentVersionRefs(id, passwordSecretID, passphraseSecretID string) error {
 	existing, ok := s.credentials[id]
 	if !ok {
 		return profile.ErrCredentialNotFound
 	}
-	existing.SecretID = secretID
-	existing.PassphraseSecretID = passphraseSecretID
+	if len(existing.Versions) == 0 {
+		existing.SecretID = passwordSecretID
+		existing.PassphraseSecretID = passphraseSecretID
+	} else {
+		for j := range existing.Versions {
+			if existing.Versions[j].ID == existing.CurrentVersionID {
+				existing.Versions[j].PasswordSecretID = passwordSecretID
+				existing.Versions[j].PassphraseSecretID = passphraseSecretID
+				break
+			}
+		}
+	}
+	s.credentials[id] = existing
+	return nil
+}
+
+func (s *stubProfileStore) AppendCredentialVersion(id, passwordSecretID, passphraseSecretID string) error {
+	existing, ok := s.credentials[id]
+	if !ok {
+		return profile.ErrCredentialNotFound
+	}
+	if len(existing.Versions) == 0 {
+		existing.Versions = []profile.CredentialVersion{
+			{
+				ID:                 "v1",
+				PasswordSecretID:   existing.SecretID,
+				PassphraseSecretID: existing.PassphraseSecretID,
+			},
+		}
+		existing.CurrentVersionID = "v1"
+		existing.SecretID = ""
+		existing.PassphraseSecretID = ""
+	}
+	nextID := fmt.Sprintf("v%d", len(existing.Versions)+1)
+	existing.Versions = append(existing.Versions, profile.CredentialVersion{
+		ID:                 nextID,
+		PasswordSecretID:   passwordSecretID,
+		PassphraseSecretID: passphraseSecretID,
+	})
+	existing.CurrentVersionID = nextID
 	s.credentials[id] = existing
 	return nil
 }
@@ -475,5 +572,62 @@ func TestResolver_CarriesJumpBinding(t *testing.T) {
 	}
 	if cfg.JumpBoundPort != 2222 {
 		t.Errorf("JumpBoundPort = %d, want 2222", cfg.JumpBoundPort)
+	}
+}
+
+// TestResolve_UsesCurrentVersionSecret pins the contract between the credential
+// version model and the connection pool. poolKeyFor (ssh_dial.go:38) keys on
+// cfg.SecretID, so publishing the SELECTED version's reference is what makes
+// moving `current` produce a different pool key — with no change anywhere in
+// internal/ssh. Asserting it here is what stops a later refactor from quietly
+// publishing the record-level SecretID again and re-pooling two versions
+// together.
+//
+//nolint:errcheck
+func TestResolve_UsesCurrentVersionSecret(t *testing.T) {
+	ps := newStubProfileStore()
+	ss := newStubSecretStore()
+
+	cred := profile.Credential{
+		ID: "cred:ops:1", Name: "ops", Username: "ops", Auth: profile.AuthPassword,
+		Host: "10.0.0.1", // still required in wave 1 — see the note above
+		Versions: []profile.CredentialVersion{
+			{ID: "v7", PasswordSecretID: "sec:7"},
+			{ID: "v8", PasswordSecretID: "sec:8"},
+		},
+		CurrentVersionID: "v7",
+	}
+	_ = ps.SaveCredential(cred)
+
+	prof := profile.SSHProfile{
+		Base:    profile.Base{ID: "ssh:custom:web-1:1", Type: "ssh", Name: "web-1"},
+		Options: profile.SSHProfileOptions{Host: "10.0.0.1", Port: 22, CredentialID: cred.ID},
+	}
+	_ = ps.SaveProfile(prof)
+
+	r := NewResolver(ps, ps, ss)
+
+	_, cfg, err := r.Resolve(prof.ID)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if string(cfg.SecretID) != "sec:7" {
+		t.Fatalf("SecretID = %q, want sec:7 (the current version)", cfg.SecretID)
+	}
+	first := cfg.SecretID
+
+	// Move current to v8 and resolve again.
+	cred.CurrentVersionID = "v8"
+	_ = ps.SaveCredential(cred)
+
+	_, cfg2, err := r.Resolve(prof.ID)
+	if err != nil {
+		t.Fatalf("Resolve after promotion: %v", err)
+	}
+	if string(cfg2.SecretID) != "sec:8" {
+		t.Fatalf("SecretID = %q, want sec:8", cfg2.SecretID)
+	}
+	if cfg2.SecretID == first {
+		t.Fatal("promoting a version left the SecretID unchanged; the pool would reuse the old transport")
 	}
 }

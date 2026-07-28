@@ -99,6 +99,9 @@ func (h *cascadeHarness) savePasswordViaRPC(credID, password string) credential.
 	}
 	for _, c := range creds {
 		if c.ID == credID {
+			if v, ok := c.Current(); ok {
+				return credential.SecretID(v.PasswordSecretID)
+			}
 			return credential.SecretID(c.SecretID)
 		}
 	}
@@ -126,7 +129,9 @@ func (h *cascadeHarness) savePassphraseViaRPC(credID, passphrase string) credent
 	}
 	for _, c := range creds {
 		if c.ID == credID {
-			return credential.SecretID(c.PassphraseSecretID)
+			if v, ok := c.Current(); ok {
+				return credential.SecretID(v.PassphraseSecretID)
+			}
 		}
 	}
 	h.t.Fatalf("credential %s not found after saveKeyPassphrase", credID)

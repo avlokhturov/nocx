@@ -1,6 +1,7 @@
 package export
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/shady2k/nocx/internal/profile"
@@ -38,15 +39,30 @@ func ImportConfiguration(deps ImportDeps, data *ConfigExport) (*ImportResult, er
 	result := &ImportResult{}
 
 	for _, p := range data.Profiles {
-		if err := deps.Profiles.SaveProfile(p); err != nil {
-			return nil, fmt.Errorf("import profile %s: %w", p.ID, err)
+		// Create, falling back to Update on duplicate — preserving the
+		// overwrite-on-reimport behaviour today's SaveProfile provided.
+		// Wave 3 routes this through the domain service properly.
+		if err := deps.Profiles.CreateProfile(p); err != nil {
+			if errors.Is(err, profile.ErrProfileExists) {
+				if upErr := deps.Profiles.UpdateProfile(p); upErr != nil {
+					return nil, fmt.Errorf("import profile %s: %w", p.ID, upErr)
+				}
+			} else {
+				return nil, fmt.Errorf("import profile %s: %w", p.ID, err)
+			}
 		}
 		result.ProfilesImported++
 	}
 
 	for _, g := range data.Groups {
-		if err := deps.Groups.SaveGroup(g); err != nil {
-			return nil, fmt.Errorf("import group %s: %w", g.ID, err)
+		if err := deps.Groups.CreateGroup(g); err != nil {
+			if errors.Is(err, profile.ErrGroupExists) {
+				if upErr := deps.Groups.UpdateGroup(g); upErr != nil {
+					return nil, fmt.Errorf("import group %s: %w", g.ID, upErr)
+				}
+			} else {
+				return nil, fmt.Errorf("import group %s: %w", g.ID, err)
+			}
 		}
 		result.GroupsImported++
 	}

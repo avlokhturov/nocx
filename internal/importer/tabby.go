@@ -1,6 +1,7 @@
 package importer
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/shady2k/nocx/internal/profile"
@@ -94,7 +95,16 @@ func ImportProfiles(cfg *TabbyConfig, repo profile.ProfileRepository, typeFilter
 		}
 		seen[key] = true
 
-		if err := repo.SaveProfile(p); err != nil {
+		// Create, falling back to Update on duplicate — preserving the
+		// overwrite-on-reimport behaviour today's SaveProfile provided.
+		// Wave 3 routes this through the domain service properly.
+		if err := repo.CreateProfile(p); err != nil {
+			if errors.Is(err, profile.ErrProfileExists) {
+				if upErr := repo.UpdateProfile(p); upErr != nil {
+					return fmt.Errorf("update profile %q: %w", p.Name, upErr)
+				}
+				continue
+			}
 			return fmt.Errorf("save profile %q: %w", p.Name, err)
 		}
 	}
@@ -114,7 +124,14 @@ func ImportGroups(cfg *TabbyConfig, repo profile.GroupRepository) error {
 			Defaults:      tg.Defaults,
 			Editable:      true,
 		}
-		if err := repo.SaveGroup(g); err != nil {
+		// Create, falling back to Update on duplicate.
+		if err := repo.CreateGroup(g); err != nil {
+			if errors.Is(err, profile.ErrGroupExists) {
+				if upErr := repo.UpdateGroup(g); upErr != nil {
+					return fmt.Errorf("update group %q: %w", g.Name, upErr)
+				}
+				continue
+			}
 			return fmt.Errorf("save group %q: %w", g.Name, err)
 		}
 	}
