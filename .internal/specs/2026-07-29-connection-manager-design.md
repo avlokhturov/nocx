@@ -208,7 +208,7 @@ a stated purpose:
 ```
 DialEndpoint       resolved network host + effective port
 HostKeyIdentity    the name used for known_hosts lookup
-AuthorizationPair  credential version + approved effective profile endpoint
+AuthorizationPair  credential version + the effective profile endpoint it may be spent on
 DisplayTarget      the original alias or input, for the UI
 ```
 
@@ -221,7 +221,15 @@ Every writer — ordinary save, Tabby import, configuration import, `~/.ssh/conf
 — goes through this service. Today none of them do (§2.8).
 
 Host is **required and never inherited**: inheriting it would let moving a profile between
-groups change which machine it is. Also specified: an adopted `~/.ssh/config` entry stores
+groups change which machine it is.
+
+That collides with one existing record category, and the collision is resolved by deletion:
+`Base.IsTemplate` (`profile.go:47`, mirrored at `profiles.ts:27`) is declared in exactly
+those two places and read by nothing — no writer, no reader, no UI. A template that may
+omit a host would need "host is required" to grow an exception; a speculative field with no
+consumer does not earn one. It is deleted in wave 2 under the repository's no-dead-code
+rule. If templates are wanted later they arrive as a designed feature with their own
+validity rules, not as a dormant boolean. Also specified: an adopted `~/.ssh/config` entry stores
 the _alias_, not the resolved `HostName`; direct `host:port` input is normalized into host
 plus explicit port; empty host is invalid at the service boundary including imports.
 
@@ -285,7 +293,9 @@ Stated in full, so nothing is implied that is not true:
   authorization under a local single-user trust model does not automatically carry into
   web or relay operation; that requires its own authority and threat-model decision.
 
-The root problem is a confused deputy, and no competing design solves it: `profiles.json`
+The root problem is a confused deputy, and neither computed authorization nor a grant
+stored in the same writable document solves it — a broker with an approval channel outside
+the renderer would, which is why it is named below rather than dismissed: `profiles.json`
 is plaintext and same-user writable, so whoever can write it can name a credential and a
 target and make nocx spend a keychain capability the attacker lacks. Every design that
 stores its proof in that same file — PR #59's grant table, or an endpoint fingerprint of
@@ -374,13 +384,37 @@ current state, never the old session's snapshot.
 ### 3.9 Credential versions are foundational
 
 Because rotation is a rollout (§6) and not an edit, a credential holds secret **versions**
-from the start — `current`, optional `candidate`, and per-endpoint pins — even though the
-rollout UI and orchestration arrive last. Every version has its own opaque `SecretID`.
+from the start — `current` and an optional `candidate` — even though the rollout UI and
+orchestration arrive last.
 
 This is a scope decision taken deliberately: building the credential service and the pool
 fingerprint around a single `SecretID` and adding versions later would rewrite the
 credential service, pool identity, orphan collection, `credentials.hasPassword`, and the
 export shape a second time.
+
+**A version is not "a credential with a different `SecretID`."** The shape must be typed
+per auth method, or the schema comes out password-shaped and breaks on the first key
+rotation. A version may carry a password `SecretID`; a keyboard-interactive secret
+reference; a private-key public fingerprint **plus** a passphrase `SecretID`; an external
+signer identity; or, for agent auth, no secret reference at all.
+
+**A straggler pin is keyed by profile provenance, not by endpoint:**
+
+```
+CredentialVersionSelection { CredentialID, ProfileID, HopProfileID?, VersionID }
+```
+
+Keying pins by canonical endpoint was the obvious shape and it is wrong for the same
+reason endpoint-keyed authorization was: two profiles reaching one endpoint would share a
+pin, an `~/.ssh/config` edit would orphan or silently transfer it, and a jump hop would be
+ambiguous. The profile still authorizes the endpoint through computed resolution (§3.1);
+the pin only selects **which version that profile uses**. Probe evidence is keyed by the
+full effective-resolution fingerprint, which is a different key and must not be conflated
+with the pin.
+
+Promotion changes the credential's default `current`; individual stragglers keep
+profile-scoped pins. Where a group-wide selection lives, if it exists at all, is a plan
+input (§9).
 
 ## 4. `~/.ssh/config` as a live source
 
@@ -399,9 +433,19 @@ everywhere else: a user with fifty aliases opens Connections and sees "No connec
 - A **one-off importer** sits alongside the Tabby one, labelled honestly: it produces a
   detached copy, not a synchronised view.
 
-The terminal hint is a **frontend** feature. AD-6 forbids the backend interpreting the byte
-stream; the frontend already owns input (AD-4) and parses OSC 133, so it knows a command is
-being typed, and fetches the alias list over the control plane.
+The terminal hint is a **frontend** feature, and its reach is narrower than it first looks.
+AD-6 forbids the backend interpreting the byte stream, so the hint cannot be built there.
+On the frontend, nocx knows the command text **only while its own command editor owns the
+input** — submission runs through `ShellInputTarget` (`terminal-content.ts:219-245`), so
+the text is in hand. In raw terminal mode it does not: OSC 133 marks prompt and command
+boundaries but does not expose the shell's current editable line, and reconstructing
+`ssh <host>` from keystrokes is unreliable because history, completion, cursor movement and
+pasted control sequences are all handled remotely.
+
+So: the hint ships for the nocx command editor. Supporting arbitrary native shell input
+needs cooperating shell integration (AD-5 Tier B), not merely OSC 133, and is not promised
+here. (Input ownership is **ADR-0004**, not AD-4 — AD-4 is the `x/crypto/ssh` foundation
+decision at `architecture.md:125`. An earlier draft of this document confused the two.)
 
 Rejected — a one-off import as the _only_ path: an imported record freezes one evaluation of
 a positional config, and later edits to an earlier wildcard block, an `Include`, a `Match`
@@ -493,8 +537,17 @@ current version during an ordinary connection — it hides rollout state and spe
 authentication attempts.
 
 Rollout status is operational evidence (private metadata), not profile configuration; its
-retention, manual clearing, and import/export behaviour must be specified. Promotion drains
-transports still running the retired version (§3.7).
+retention, manual clearing, and import/export behaviour must be specified.
+
+**Promotion, retirement and revocation are three transitions, not one.** Conflating them
+would drain transports that are legitimately still running a pinned previous version:
+
+- **promote candidate** — the candidate becomes `current`; the previous version stays
+  usable for profiles explicitly pinned to it, and nothing is drained;
+- **retire previous** — the version may no longer be selected for new connections, and the
+  user chooses whether existing transports on it drain (§3.7, §3.8);
+- **emergency revoke** — a separate destructive action that closes everything using the
+  version now.
 
 Later, and not now: for fleets already managed by an external secret system, a credential
 becomes "username + policy + external secret locator" and nocx reports adoption without
@@ -502,10 +555,27 @@ being the rotation authority.
 
 ## 7. Work breakdown
 
-Seven deliverables, each named by an outcome that stops being false exactly once. Order
+Eight deliverables, each named by an outcome that stops being false exactly once. Order
 revised after review — the earlier draft had `Test` in the UI wave while its primitive was in
 the last wave, and transactional imports after the surface although §3.4 requires every
 writer to route through the engine.
+
+**Each wave is self-sufficient**: it lands on `main` leaving the product coherent, with
+nothing user-visible half-built and no feature flag hiding an unfinished surface. That is
+the constraint that replaces "one long-lived branch", and it is stronger — a flag hides
+incomplete work, self-sufficiency means there is nothing to hide. Two consequences worth
+stating rather than discovering:
+
+- **Wave 2 is self-sufficient only because there is nothing to inherit yet.** No group UI
+  exists and `Defaults` has never been written by anything but the Tabby importer, so
+  turning on real inheritance changes no observable behaviour on its own. This is a fact
+  about today's data, not a licence: once wave 6 lets users author group defaults, changing
+  resolution semantics without shipping their display in the same wave would be a
+  regression.
+- **The "+ create a credential" affordance belongs to wave 6, not wave 5.** It lives inside
+  the connection form, which wave 6 rewrites; putting it in wave 5 would build it twice.
+  Wave 5 therefore delivers the Credentials settings section and the single shared form
+  component, and wave 6 wires the affordance into the new form.
 
 1. **"Editing a credential no longer loses the password."** Patch-style DTOs preserving
    `SecretID`/`PassphraseSecretID`, create distinguishable from update (`nocx-u5ai`),
@@ -523,23 +593,32 @@ writer to route through the engine.
    (`nocx-49x`), the pool fingerprint (§3.7), the forced-fresh probe primitive, transport
    drain and revocation.
 5. **"A credential stops being a side door."** The existing epic `nocx-0w2f` — its own
-   settings section, creation from inside the connection form, one shared form component.
-   Reused, not re-created.
-6. **"The connection list answers questions."** The surface of §5, including groups, `Test`
-   as a row action, provenance display and the error taxonomy.
+   settings section and one shared credential form component, replacing the "Saved
+   credentials" toolbar button. Reused, not re-created. The "+" affordance is wave 6's.
+6. **"The connection list answers questions."** The surface of §5, including groups and
+   their impact preview, `Test` as a row action, provenance display, the "+ create a
+   credential" affordance in the new connection form, and the error taxonomy.
 7. **"Hosts from `~/.ssh/config` appear where they are looked for."** §4, plus the adoption
    flow.
 8. **"Changing a fleet password is a rollout, not a hope."** §6 — orchestration and UI over
    the primitives already built in waves 1 and 4.
 
-**Integration discipline.** One feature branch, no user-visible release until all of it is
-done — but _ship together_ does not mean _integrate together_. A single 5,000-line review
-event is not acceptable. Therefore: each wave ends in green, independently reviewable
-commits; `main` is merged or rebased in at every wave boundary; an explicit checkpoint review
-per wave; no squash merge, so the internal history survives for `git bisect`; an integration
-test suite exists before wave 3; and branch diff-size and conflict checks run at each
-checkpoint. Merging incomplete work to `main` behind a flag was considered and rejected — it
-contradicts the owner's requirement to ship only when the whole feature is done.
+**Integration discipline.** A wave merges to `main` as soon as it is done and green. That
+is possible only because of the self-sufficiency rule above, and it is what pays for it: a
+long-lived branch rewriting `profile`, `connection`, `ssh`, `transport`, imports and a
+916-line UI component would meet a `main` that had moved underneath it, and a single
+5,000-line review event cannot distinguish merge damage from feature defects.
+
+Feature flags were considered and are **not** used. A flag hides unfinished work behind a
+switch someone must later remember to remove; the self-sufficiency rule removes the need
+by making each wave complete on its own terms. Where a wave genuinely cannot avoid landing
+an incomplete surface, that is a signal the wave is cut wrong and should be re-cut, not
+flagged.
+
+Each wave therefore: ends green under the full gate; is reviewed on its own; keeps its
+internal history (no squash) so `git bisect` still works; and takes the merge slot
+(`bd merge-slot`) for the whole merge-and-resolve. An integration test suite exists before
+wave 3, when the first wave lands that changes behaviour a user can see.
 
 Each wave carries a `discovered-from` edge to `nocx-52cd` and references this document; the
 document, not a label, is what says these are one feature.
@@ -577,6 +656,8 @@ Raised by adversarial review and not answered here, in rough order of how early 
 3. The declared `~/.ssh/config` supported subset, and the `ssh -G` conformance fixture set.
 4. Credential deletion under inheritance: direct references are greppable, inherited ones
    need effective resolution.
+   4b. Whether a group-wide credential-version selection exists at all, or whether stragglers
+   are only ever pinned per profile (§3.9).
 5. Optimistic concurrency: what happens when two dialogs edit the same profile, group or
    credential.
 6. The provenance wire contract — stable source kinds and identifiers that never leak a
