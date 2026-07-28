@@ -1,6 +1,7 @@
 # Connection manager: groups, shared credentials, and computed authorization
 
-- **Date:** 2026-07-29 (rev. 2, after adversarial review)
+- **Date:** 2026-07-29 (rev. 3 — rev. 2 after adversarial review; rev. 3 withdraws the
+  pool-rotation finding of §2.9, which was wrong)
 - **Brainstorming bead:** `nocx-52cd`
 - **Status:** design approved, pending implementation plan
 - **Supersedes in part:** [ADR-0006 — Reusable Credentials](../../docs/decisions/0006-reusable-credentials.md)
