@@ -112,6 +112,16 @@ Bold entries had no bead.
 only: name, username, auth mode, key metadata, opaque secret references, secret versions
 (§3.9).
 
+**That deletion belongs to wave 2, not wave 1**, and the boundary matters. `checkBinding`
+(`ssh_config.go:105`) refuses a connection whose `BoundHost` is empty — that is `nocx-mon`'s
+defence, and the resolver fills `BoundHost` from `Credential.Host` (`resolver.go:85-86`).
+Delete the field while computed authorization is still a wave away and every stored password
+starts failing at connect time. So the field, `ErrCredentialHostRequired` and the
+`BoundHost`/`BoundPort` wiring all survive wave 1 untouched, and go **in the same commit
+range** that makes computed authorization live. Writing the wave-1 plan is what surfaced
+this; the earlier revisions of this document had the deletion in wave 1 and would have
+shipped a wave that breaks password auth.
+
 At connect time the backend proves authorization **locally**, from the selected profile:
 
 ```
@@ -603,12 +613,16 @@ stating rather than discovering:
 1. **"Editing a credential no longer loses the password."** Patch-style DTOs preserving
    `SecretID`/`PassphraseSecretID`, create distinguishable from update (`nocx-u5ai`),
    backend-minted IDs, crash-safe secret replacement and orphan recovery, and the
-   version-capable credential model of §3.9. _Active data loss; must not wait for the
-   redesign._
+   version-capable credential model of §3.9. `Credential.Host` is **untouched** here (§3.1).
+   _Active data loss; must not wait for the redesign._ Plan:
+   `.internal/plans/2026-07-29-wave-1-credential-correctness.md`.
 2. **"A connection knows what it inherited, and says so."** The effective-profile engine:
    typed sparse presence-aware values, provenance, the resolution identities of §3.4, the
    closed precedence table of §3.5, group cycle/depth validation, the structured jump-route
-   model. The TypeScript inheritance copy deleted, `deadcode` clean (`nocx-hhj3`).
+   model. The TypeScript inheritance copy deleted, `deadcode` clean (`nocx-hhj3`). **This is
+   also where `Credential.Host` dies**, in the same commit range that makes computed
+   authorization live, because the binding check it feeds cannot be removed before its
+   replacement exists (§3.1).
 3. **"Every writer goes through one door."** Ordinary CRUD, the group impact workflow of
    §3.3, Tabby import, configuration import, adoption — all routed through the engine, with
    transactional semantics and a declared collision policy.

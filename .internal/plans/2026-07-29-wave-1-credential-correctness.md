@@ -198,9 +198,14 @@ git commit -m "test(transport): prove a credential rename orphans its password (
 - A patch field that is present but empty (`*p.KeyPath == ""`) **clears** that field —
   presence is the signal, not emptiness. This is the same presence-versus-zero rule §3.3 of
   the spec makes mandatory for group defaults; it starts here.
-- `Credential.Host` and `Credential.Port` are **gone**, and so is
-  `ErrCredentialHostRequired`. Authorization is computed from profiles (spec §3.1), so a
-  credential no longer names a host.
+- `Credential.Host`, `Credential.Port` and `ErrCredentialHostRequired` are **carried over
+  unchanged**. Spec §3.1 deletes them in **wave 2**, in the same commit range that makes
+  computed authorization live: `checkBinding` (`ssh_config.go:105`) refuses a connection
+  whose `BoundHost` is empty, and the resolver fills it from `Credential.Host`
+  (`resolver.go:85-86`), so removing the field here would break every stored password until
+  wave 2 landed. The move is a file move, not a semantic change.
+- `CredentialPatch` deliberately **does** carry `Host` and `Port` while they exist — they
+  are renderer-owned today (the credential form edits them), unlike `SecretID`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -270,8 +275,11 @@ import "strings"
 
 // Credential is a reusable authentication identity. It holds identity only —
 // never a host. Which endpoints a credential may be spent on is computed from
-// the saved profiles that reference it (see the wave-1 design spec §3.1); the
-// Host/Port binding this type used to carry was deleted with that decision.
+// the saved profiles that reference it — but NOT yet. Host and Port stay here
+// through wave 1 because checkBinding (ssh_config.go:105) refuses a connection
+// whose BoundHost is empty and the resolver fills it from this field. They are
+// deleted in wave 2, in the same commit range that makes computed authorization
+// live. This move is a file move, not a semantic change.
 //
 // Secrets live in the credential.SecretStore behind opaque references
 // (ADR-0011 §2). SecretID and PassphraseSecretID are BACKEND-OWNED: they are
@@ -285,6 +293,10 @@ type Credential struct {
 	Username string   `json:"username"`
 	Auth     AuthMode `json:"auth"`
 	KeyPath  string   `json:"keyPath,omitempty"`
+
+	// Host/Port: see the note above. Renderer-owned while they exist.
+	Host string `json:"host,omitempty"`
+	Port int    `json:"port,omitempty"`
 
 	// SecretID is the opaque reference to the stored password.
 	SecretID string `json:"secretId,omitempty"`
@@ -304,6 +316,8 @@ type CredentialPatch struct {
 	Username *string
 	Auth     *AuthMode
 	KeyPath  *string
+	Host     *string // removed in wave 2 with the field
+	Port     *int    // removed in wave 2 with the field
 }
 
 // WithPatch returns c with the patch applied. Fields the patch does not mention
@@ -322,6 +336,12 @@ func (c Credential) WithPatch(p CredentialPatch) Credential {
 	if p.KeyPath != nil {
 		c.KeyPath = *p.KeyPath
 	}
+	if p.Host != nil {
+		c.Host = *p.Host
+	}
+	if p.Port != nil {
+		c.Port = *p.Port
+	}
 	return c
 }
 
@@ -330,9 +350,10 @@ func NewCredentialID(name string) string {
 	return "cred:" + slugify(name) + ":" + newUUID()
 }
 
-// Validate reports whether the credential may be stored. Host is no longer
-// part of a credential, so the host check that used to live here is gone; what
-// remains is identity completeness.
+// Validate reports whether the credential may be stored. The host check is
+// unchanged from profile.go and stays until wave 2 removes the field with the
+// binding it feeds; the two identity checks are new, and they are what remains
+// once the host check goes.
 func (c Credential) Validate() error {
 	if strings.TrimSpace(c.Name) == "" {
 		return ErrCredentialNameRequired
@@ -340,21 +361,29 @@ func (c Credential) Validate() error {
 	if strings.TrimSpace(c.Username) == "" {
 		return ErrCredentialUsernameRequired
 	}
+	if strings.TrimSpace(c.Host) == "" {
+		return ErrCredentialHostRequired
+	}
 	return nil
 }
 ```
 
-- [ ] **Step 4: Delete the old block from `profile.go`**
+- [ ] **Step 4: Move the old block out of `profile.go`**
 
 Remove lines 96-153 of `internal/profile/profile.go` — the duplicated `Credential` doc
 comment, the struct, `NewCredentialID`, `ErrCredentialHostRequired` and the old `Validate`.
-Add the two new sentinels next to the other package errors:
+`ErrCredentialHostRequired` moves to `credential.go` **unchanged**; only its address
+changes. Add the two new sentinels beside it:
 
 ```go
+// ErrCredentialHostRequired is nocx-mon's policy, moved here verbatim. It goes
+// away in wave 2 together with Credential.Host, when computed authorization
+// replaces the binding it enforces — not before, because checkBinding refuses
+// an empty BoundHost and the resolver has nothing else to fill it from.
+var ErrCredentialHostRequired = errors.New("credential must be bound to a host")
+
 // ErrCredentialNameRequired and ErrCredentialUsernameRequired are the identity
-// completeness checks that replaced ErrCredentialHostRequired. A credential no
-// longer names a host: which endpoints it may be spent on is computed from the
-// profiles that reference it.
+// completeness checks. They are additive: the host check above still runs.
 var (
 	ErrCredentialNameRequired     = errors.New("credential name is required")
 	ErrCredentialUsernameRequired = errors.New("credential username is required")
@@ -365,10 +394,10 @@ var (
 
 Run: `go test ./internal/profile/ -v`
 
-Expected: the two new tests PASS. Existing tests referencing `Host`, `Port` or
-`ErrCredentialHostRequired` will fail to compile — that is the point of the deletion. Fix
-them by removing the host assertions; do **not** reintroduce the field. Check what breaks
-first: `grep -rn "ErrCredentialHostRequired\|Credential{.*Host" --include=*_test.go .`
+Expected: the two new tests PASS **and every existing test still compiles and passes** —
+this step is a move plus two additive checks, so a red suite here means something was
+changed that should not have been. Confirm with
+`git diff --stat internal/profile/` that `profile.go` only lost lines.
 
 - [ ] **Step 6: Commit**
 
@@ -1107,51 +1136,115 @@ git commit -m "feat(profile): a credential carries secret versions (nocx-52cd)"
   version changes the pool key with no change to `internal/ssh`. A test asserts the
   resolved `SecretID` differs across two versions — that is the property the pool relies on,
   and it is asserted here rather than assumed.
-- `cfg.BoundHost` / `cfg.BoundPort` are **no longer set** by the resolver: `Credential.Host`
-  is gone (Task 2). The binding check in `internal/ssh` becomes unreachable for stored
-  credentials and its removal belongs to wave 2, when computed authorization replaces it —
-  **not here**. Until then a credential is refused at connect time by `checkBinding` seeing
-  an empty `BoundHost`, which is a **known temporary regression for password auth** and is
-  the one thing in this wave that is not self-sufficient.
+- `cfg.BoundHost` / `cfg.BoundPort` keep being set from `cred.Host` / `cred.Port`, exactly
+  as today (`resolver.go:85-86`). Wave 1 does not touch the binding: `Credential.Host`
+  survives until wave 2 replaces `checkBinding` with computed authorization (spec §3.1).
+  **Do not "tidy" these two lines away** — removing them here breaks every stored password
+  at connect time, and that is precisely the flaw writing this plan found in the spec's
+  first wave boundary.
 
-> **STOP.** That last bullet breaks the self-sufficiency rule this wave is built on. Two
-> honest options, and the plan must not paper over the choice:
->
-> **(a)** Keep `Credential.Host` in Task 2, deleting it in wave 2 alongside computed
-> authorization. Wave 1 stays purely corrective and ships safely; the field lives two waves
-> longer.
->
-> **(b)** Move computed authorization forward into wave 1, which merges waves 1 and 2 and
-> makes this a much larger deliverable.
->
-> **Recommendation: (a).** Wave 1's purpose is to stop active data loss; enlarging it to
-> carry the authorization rewrite defeats the ordering the spec argued for. Task 2's step 3
-> keeps `Host`/`Port` and `ErrCredentialHostRequired` unchanged, and Task 7 keeps setting
-> `BoundHost`/`BoundPort`. The spec's §3.1 deletion of `Credential.Host` then belongs to
-> wave 2, and §7 wave 1's description must be corrected to say so.
->
-> **This needs the owner's decision before Task 2 is implemented.** It is the one place
-> where writing the plan found a flaw in the spec's wave boundary.
+- [ ] **Step 1: Read the existing fixtures, then write the failing test**
 
-- [ ] **Step 1: Resolve the question above, then write the failing test**
+Read `internal/connection/resolver_test.go` first and reuse its store fakes and constructor
+calls verbatim. Do **not** invent helper names — a memory from a previous session
+(`bd memories`, "never write test code that calls a helper you have not read in that exact
+test file") records what that costs.
+
+The test asserts the property the pool depends on, rather than assuming it:
 
 ```go
+// TestResolve_UsesCurrentVersionSecret pins the contract between the credential
+// version model and the connection pool. poolKeyFor (ssh_dial.go:38) keys on
+// cfg.SecretID, so publishing the SELECTED version's reference is what makes
+// moving `current` produce a different pool key — with no change anywhere in
+// internal/ssh. Asserting it here is what stops a later refactor from quietly
+// publishing the record-level SecretID again and re-pooling two versions
+// together.
 func TestResolve_UsesCurrentVersionSecret(t *testing.T) {
-	// Two versions; current is v7. The resolver must publish v7's reference,
-	// because that is what the pool keys on (ssh_dial.go:38) — moving current
-	// to v8 must therefore produce a different pool key with no change in
-	// internal/ssh.
-	// ... construct stores, resolve, assert cfg.SecretID == "sec:7",
-	//     then move current to v8, resolve again, assert "sec:8" and that the
-	//     two differ.
+	cred := profile.Credential{
+		ID: "cred:ops:1", Name: "ops", Username: "ops", Auth: profile.AuthPassword,
+		Host: "10.0.0.1", // still required in wave 1 — see the note above
+		Versions: []profile.CredentialVersion{
+			{ID: "v7", PasswordSecretID: "sec:7"},
+			{ID: "v8", PasswordSecretID: "sec:8"},
+		},
+		CurrentVersionID: "v7",
+	}
+	prof := profile.SSHProfile{
+		Base:    profile.Base{ID: "ssh:custom:web-1:1", Type: "ssh", Name: "web-1"},
+		Options: profile.SSHProfileOptions{Host: "10.0.0.1", Port: 22, CredentialID: cred.ID},
+	}
+
+	// <construct the resolver over fakes holding prof and cred — copy the
+	//  construction from the neighbouring test in this file>
+
+	_, cfg, err := r.Resolve(prof.ID)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if string(cfg.SecretID) != "sec:7" {
+		t.Fatalf("SecretID = %q, want sec:7 (the current version)", cfg.SecretID)
+	}
+	first := cfg.SecretID
+
+	// Move current to v8 and resolve again.
+	cred.CurrentVersionID = "v8"
+	// <write cred back through the same fake>
+
+	_, cfg2, err := r.Resolve(prof.ID)
+	if err != nil {
+		t.Fatalf("Resolve after promotion: %v", err)
+	}
+	if string(cfg2.SecretID) != "sec:8" {
+		t.Fatalf("SecretID = %q, want sec:8", cfg2.SecretID)
+	}
+	if cfg2.SecretID == first {
+		t.Fatal("promoting a version left the SecretID unchanged; the pool would reuse the old transport")
+	}
 }
 ```
 
-Fill this in against the existing fixtures in `resolver_test.go` — read them first; do not
-invent helper names (`bd memories` records that lesson from a previous session).
+The two `<…>` lines are the only places to fill in, and they are fixture construction copied
+from the neighbouring test — not design decisions.
 
-- [ ] **Step 2-5:** run red, implement `cred.Current()` selection in `buildConfig`, run
-      green, commit.
+- [ ] **Step 2: Run it and verify it fails**
+
+Run: `go test ./internal/connection/ -run TestResolve_UsesCurrentVersionSecret -v`
+Expected: FAIL — `cfg.SecretID` is the record-level `SecretID` (empty here, since this
+credential has versions and no legacy reference), not `sec:7`.
+
+- [ ] **Step 3: Select the current version in `buildConfig`**
+
+In `internal/connection/resolver.go`, replace the two secret-reference assignments
+(`resolver.go:91-96`) with:
+
+```go
+	// The SELECTED version's references, not the record's. poolKeyFor keys on
+	// cfg.SecretID, so this is also what makes a promotion produce a new pool
+	// entry without any change in internal/ssh.
+	if v, ok := cred.Current(); ok {
+		if v.PasswordSecretID != "" {
+			cfg.SecretID = credential.SecretID(v.PasswordSecretID)
+		}
+		if v.PassphraseSecretID != "" {
+			cfg.PassphraseSecretID = credential.SecretID(v.PassphraseSecretID)
+		}
+	}
+```
+
+Leave `cfg.BoundHost = cred.Host` and `cfg.BoundPort = cred.Port` exactly where they are.
+
+- [ ] **Step 4: Run the test and the suite**
+
+Run: `go test ./internal/connection/ ./internal/ssh/ ./internal/transport/ -race`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add internal/connection/resolver.go internal/connection/resolver_test.go
+git commit -m "feat(connection): resolve the credential's current version, not its record (nocx-52cd)"
+```
 
 ---
 
@@ -1160,12 +1253,13 @@ invent helper names (`bd memories` records that lesson from a previous session).
 **1. Spec coverage.** §2.1 → Tasks 1-4. §2.4 → Task 4. `nocx-u5ai` (§2.11) → Tasks 3 and 5.
 §3.9 → Tasks 6 and 7. §9 item 2 (auth-specific version schema) → Task 6, decided there.
 **Not covered, and deliberately deferred to their stated waves:** §2.2, §2.3, §2.5, §2.6,
-§2.7, §2.8, §2.9, §2.10, and §3.1's deletion of `Credential.Host` — see the Task 7 note.
+§2.7, §2.8, §2.9, §2.10. §3.1's deletion of `Credential.Host` is deferred to **wave 2** by
+the owner's decision of 2026-07-29 — the spec now says so in §3.1 and §7, so this is a
+recorded boundary rather than an omission.
 
-**2. Placeholders.** Task 7 step 1 contains a comment sketch rather than complete test code,
-because the test's shape depends on the owner's answer to the wave-boundary question above.
-That is a **known, surfaced gap**, not a silent one: Task 7 cannot be handed to a worker
-until the question is answered, and the plan says so.
+**2. Placeholders.** None. Task 7's two `<…>` markers name fixture construction to copy from
+an adjacent test, which the plan deliberately does not transcribe because a stale copy of a
+fixture is worse than a pointer to the live one.
 
 **3. Type consistency.** `CredentialPatch` (Task 2) is consumed by `UpdateCredential`
 (Task 3) and produced by `credentialUpdateDTO.Patch()` (Task 4) — same field names and
