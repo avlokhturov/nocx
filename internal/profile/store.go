@@ -188,10 +188,16 @@ var (
 )
 
 // CreateGroup stores a new group. It refuses an empty ID and refuses
-// to overwrite an existing one.
+// to overwrite an existing one. It also validates that the group's defaults
+// contain no unknown keys.
 func (s *JSONStore) CreateGroup(g ProfileGroup) error {
 	if g.ID == "" {
 		return ErrGroupIDRequired
+	}
+	if g.Defaults != nil {
+		if err := g.Defaults.Validate(); err != nil {
+			return fmt.Errorf("%s: %w", g.ID, err)
+		}
 	}
 
 	s.mu.Lock()
@@ -211,9 +217,15 @@ func (s *JSONStore) CreateGroup(g ProfileGroup) error {
 }
 
 // UpdateGroup replaces a stored group. It fails if the group does not exist.
+// It also validates that the updated defaults contain no unknown keys.
 func (s *JSONStore) UpdateGroup(g ProfileGroup) error {
 	if g.ID == "" {
 		return ErrGroupIDRequired
+	}
+	if g.Defaults != nil {
+		if err := g.Defaults.Validate(); err != nil {
+			return fmt.Errorf("%s: %w", g.ID, err)
+		}
 	}
 
 	s.mu.Lock()

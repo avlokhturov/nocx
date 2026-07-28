@@ -3,6 +3,9 @@ package profile
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"strings"
 )
@@ -83,81 +86,497 @@ func (p SSHProfile) ToPartial() SSHProfile {
 // ParentGroupID. Defaults carries per-provider defaults inherited by
 // profiles in this group.
 type ProfileGroup struct {
-	ID            string         `json:"id"`
-	ParentGroupID string         `json:"parentGroupId,omitempty"`
-	Name          string         `json:"name"`
-	Icon          string         `json:"icon,omitempty"`
-	Color         string         `json:"color,omitempty"`
-	Defaults      map[string]any `json:"defaults,omitempty"`
-	Editable      bool           `json:"editable,omitempty"`
+	ID            string           `json:"id"`
+	ParentGroupID string           `json:"parentGroupId,omitempty"`
+	Name          string           `json:"name"`
+	Icon          string           `json:"icon,omitempty"`
+	Color         string           `json:"color,omitempty"`
+	Defaults      *ProfileDefaults `json:"defaults,omitempty"`
+	Editable      bool             `json:"editable,omitempty"`
 }
 
-// applyDefaults fills zero-valued fields on a profile with sensible defaults.
-// This is layer 1 (hardcoded) of the 4-layer defaults merge; the full merge
-// (provider → global → group → profile) is performed by mergeSSHOptions.
-func applyDefaults(p *SSHProfile) {
-	if p.Options.Port == 0 {
-		p.Options.Port = 22
+// ---------------------------------------------------------------------------
+// Sparse options — presence-aware typed defaults for groups and globals
+// ---------------------------------------------------------------------------
+
+// SparseSSHOptions is a presence-aware counterpart to SSHProfileOptions where
+// every inheritable field can be absent (nil pointer = not set, inherit).
+// This is what GROUPS and GLOBAL defaults carry, and what the merge accumulates.
+// The stored SSHProfile.Options stays non-pointer — only groups/globals use the
+// sparse type.
+type SparseSSHOptions struct {
+	CredentialID         *string               `json:"credentialId,omitempty"`
+	Port                 *int                  `json:"port,omitempty"`
+	User                 *string               `json:"user,omitempty"`
+	KeyPath              *string               `json:"keyPath,omitempty"`
+	JumpHost             *string               `json:"jumpHost,omitempty"`
+	KeepaliveInterval    *int                  `json:"keepaliveInterval,omitempty"`
+	KeepaliveCountMax    *int                  `json:"keepaliveCountMax,omitempty"`
+	ReadyTimeout         *int                  `json:"readyTimeout,omitempty"`
+	AgentForward         *bool                 `json:"agentForward,omitempty"`
+	BehaviorOnSessionEnd *BehaviorOnSessionEnd `json:"behaviorOnSessionEnd,omitempty"`
+}
+
+// ProfileDefaults is the typed defaults block on a ProfileGroup (or global
+// defaults). It wraps SparseSSHOptions with custom JSON handling that records
+// unknown keys instead of rejecting the document. Unknown keys are preserved
+// on write so they round-trip without data loss, but they are reported by
+// Validate() at write and resolution time.
+type ProfileDefaults struct {
+	SparseSSHOptions
+
+	unknown map[string]json.RawMessage // unknown keys encountered during unmarshal
+}
+
+// allowedDefaultKeys returns the set of JSON field names ProfileDefaults
+// accepts. Used in custom unmarshaling and DecodeDefaults.
+var allowedFields = map[string]bool{
+	"credentialId":         true,
+	"port":                 true,
+	"user":                 true,
+	"keyPath":              true,
+	"jumpHost":             true,
+	"keepaliveInterval":    true,
+	"keepaliveCountMax":    true,
+	"readyTimeout":         true,
+	"agentForward":         true,
+	"behaviorOnSessionEnd": true,
+}
+
+// UnmarshalJSON decodes known fields into SparseSSHOptions and records unknown
+// keys with their raw values. It never returns an error for syntactically valid
+// JSON — unknown keys are preserved for round-trip safety.
+func (d *ProfileDefaults) UnmarshalJSON(data []byte) error {
+	raw := make(map[string]json.RawMessage)
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
 	}
-	if p.Options.Auth == "" {
-		p.Options.Auth = AuthAuto
+	if err := json.Unmarshal(data, &d.SparseSSHOptions); err != nil {
+		return err
 	}
-	if p.Options.User == "" {
-		p.Options.User = currentUser()
+	d.unknown = make(map[string]json.RawMessage, len(raw))
+	for key, val := range raw {
+		if !allowedFields[key] {
+			d.unknown[key] = val
+		}
 	}
-	if p.BehaviorOnSessionEnd == "" {
-		p.BehaviorOnSessionEnd = BehaviorAuto
+	if len(d.unknown) == 0 {
+		d.unknown = nil
+	}
+	return nil
+}
+
+// MarshalJSON serializes known fields and appends any unknown keys that were
+// recorded during unmarshal, preserving round-trip fidelity.
+func (d ProfileDefaults) MarshalJSON() ([]byte, error) {
+	b, err := json.Marshal(d.SparseSSHOptions)
+	if err != nil {
+		return nil, err
+	}
+	if len(d.unknown) == 0 {
+		return b, nil
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(b, &m); err != nil {
+		return nil, err
+	}
+	for k, v := range d.unknown {
+		m[k] = v
+	}
+	return json.Marshal(m)
+}
+
+// UnknownKeys returns the list of JSON field names that were present during
+// unmarshal but are not in the allowed set. The returned slice is sorted for
+// deterministic output.
+func (d *ProfileDefaults) UnknownKeys() []string {
+	if d == nil || len(d.unknown) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(d.unknown))
+	for k := range d.unknown {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+// Validate returns an error when unknown keys exist, listing them. It returns
+// nil for a nil receiver or clean defaults.
+func (d *ProfileDefaults) Validate() error {
+	if d == nil {
+		return nil
+	}
+	if keys := d.UnknownKeys(); len(keys) > 0 {
+		return fmt.Errorf("unknown keys in defaults: %s", strings.Join(keys, ", "))
+	}
+	return nil
+}
+
+// hardcodedDefaults returns the base-layer defaults that always apply when
+// no group, global, or profile overrides them.
+func hardcodedDefaults() SparseSSHOptions {
+	port := 22
+	user := currentUser()
+	beh := BehaviorAuto
+	return SparseSSHOptions{
+		Port:                 &port,
+		User:                 &user,
+		BehaviorOnSessionEnd: &beh,
 	}
 }
 
-// mergeSSHOptions applies the 4-layer defaults merge for SSH profile options.
-// Precedence (last wins): hardcoded → providerDefaults → globalDefaults →
-// groupDefaults → profile. Each layer fills fields that are zero in the
-// accumulator; a non-zero value at a higher layer is preserved.
-func mergeSSHOptions(
-	hardcoded, providerDefaults, globalDefaults, groupDefaults, profile SSHProfileOptions,
-) SSHProfileOptions {
-	acc := hardcoded
-	mergeInto(&acc, providerDefaults)
-	mergeInto(&acc, globalDefaults)
-	mergeInto(&acc, groupDefaults)
-	mergeInto(&acc, profile)
-	return acc
+// ---------------------------------------------------------------------------
+// Effective profile — resolved inheritance with provenance
+// ---------------------------------------------------------------------------
+
+// FieldSource identifies where an effective field value came from.
+type FieldSource string
+
+const (
+	FieldSourceProfile FieldSource = "profile" // explicitly set on the stored profile
+	FieldSourceGroup   FieldSource = "group:"  // prefix — actual source is "group:<id>"
+	FieldSourceGlobal  FieldSource = "global"  // global defaults (Wave 2a: not yet wired to a store)
+	FieldSourceDefault FieldSource = "default" // hardcoded application default
+)
+
+// EffectiveProfile holds the resolved values for a single profile plus
+// per-field provenance. An inherited value is NEVER written back into the
+// stored profile — the caller can distinguish "inherited 2222" from
+// "overridden here to 2222" forever by comparing Profile against the stored
+// version through Source.
+type EffectiveProfile struct {
+	Profile SSHProfile             // resolved values (merged)
+	Source  map[string]FieldSource // field name -> winning provenance
 }
 
-// mergeInto copies non-zero fields from src into dst. For slices, a non-empty
-// src replaces dst (matching Tabby's arrayMerge = replace semantics).
-func mergeInto(dst *SSHProfileOptions, src SSHProfileOptions) {
-	if src.Host != "" {
-		dst.Host = src.Host
+// ---------------------------------------------------------------------------
+// Group graph validation
+// ---------------------------------------------------------------------------
+
+var (
+	ErrCycleDetected = errors.New("group cycle detected")
+	ErrMissingParent = errors.New("group parent not found")
+	ErrDepthExceeded = errors.New("group depth exceeds maximum")
+)
+
+const maxGroupDepth = 32
+
+// ValidateGroupTree checks every group for valid parent references, cycles,
+// and depth > 32. It returns the first error found, naming the offending
+// group ID in the error message.
+func ValidateGroupTree(groups []ProfileGroup) error {
+	byID := make(map[string]ProfileGroup, len(groups))
+	for _, g := range groups {
+		byID[g.ID] = g
 	}
-	if src.Port != 0 {
-		dst.Port = src.Port
+
+	for _, g := range groups {
+		if err := validateGroup(byID, g.ID); err != nil {
+			return fmt.Errorf("group %s: %w", g.ID, err)
+		}
 	}
-	if src.CredentialID != "" {
-		dst.CredentialID = src.CredentialID
+	return nil
+}
+
+// validateGroup checks a single group's parent chain for existence, cycles,
+// and depth.
+func validateGroup(byID map[string]ProfileGroup, startID string) error {
+	current := startID
+	seen := map[string]bool{startID: true}
+	for range maxGroupDepth {
+		g, ok := byID[current]
+		if !ok {
+			// root with no parent
+			return nil
+		}
+		if g.ParentGroupID == "" {
+			// reached a root — valid
+			return nil
+		}
+		if _, ok := byID[g.ParentGroupID]; !ok {
+			return fmt.Errorf("parent %q: %w", g.ParentGroupID, ErrMissingParent)
+		}
+		if seen[g.ParentGroupID] {
+			return fmt.Errorf("parent %q: %w", g.ParentGroupID, ErrCycleDetected)
+		}
+		seen[g.ParentGroupID] = true
+		current = g.ParentGroupID
 	}
-	if src.User != "" {
-		dst.User = src.User
+	return fmt.Errorf("%w (max %d)", ErrDepthExceeded, maxGroupDepth)
+}
+
+// ResolveGroupChain walks the parent chain from the given leaf group ID up
+// to a root, returning groups ordered from nearest ancestor to root.
+// Returns an error if a parent is missing or a cycle is detected.
+func ResolveGroupChain(groups []ProfileGroup, leafGroupID string) ([]ProfileGroup, error) {
+	byID := make(map[string]ProfileGroup, len(groups))
+	for _, g := range groups {
+		byID[g.ID] = g
 	}
-	if src.Auth != "" {
-		dst.Auth = src.Auth
+
+	if err := validateGroup(byID, leafGroupID); err != nil {
+		return nil, err
 	}
-	if src.KeepaliveInterval != 0 {
-		dst.KeepaliveInterval = src.KeepaliveInterval
+
+	var chain []ProfileGroup
+	current := leafGroupID
+	for range maxGroupDepth {
+		g, ok := byID[current]
+		if !ok || g.ParentGroupID == "" {
+			break
+		}
+		parent, ok := byID[g.ParentGroupID]
+		if !ok {
+			break
+		}
+		chain = append(chain, parent)
+		current = g.ParentGroupID
 	}
-	if src.KeepaliveCountMax != 0 {
-		dst.KeepaliveCountMax = src.KeepaliveCountMax
+	return chain, nil
+}
+
+// ---------------------------------------------------------------------------
+// Effective profile resolution
+// ---------------------------------------------------------------------------
+
+// fieldSourceForGroup builds the provenance string for a group-source field.
+func fieldSourceForGroup(id string) FieldSource {
+	return FieldSource("group:" + id)
+}
+
+// ResolveEffectiveProfile produces the resolved profile with per-field
+// provenance. Precedence (highest to lowest):
+//
+//	profile → nearest ancestor group → … → root group → global → hardcoded default
+//
+// Host is never inherited and is always required.
+func ResolveEffectiveProfile(
+	profile SSHProfile,
+	groups []ProfileGroup,
+	globalDefaults SparseSSHOptions,
+) (EffectiveProfile, error) {
+	if profile.Options.Host == "" {
+		return EffectiveProfile{}, errors.New("profile host is required and cannot be inherited")
 	}
-	if src.ReadyTimeout != 0 {
-		dst.ReadyTimeout = src.ReadyTimeout
+
+	// Build group chain (nearest ancestor first, then parent, up to root).
+	groupChain := make([]ProfileGroup, 0)
+	if profile.Group != "" {
+		var err error
+		groupChain, err = ResolveGroupChain(groups, profile.Group)
+		if err != nil {
+			return EffectiveProfile{}, fmt.Errorf("resolve group chain from %s: %w", profile.Group, err)
+		}
 	}
-	if src.JumpHost != "" {
-		dst.JumpHost = src.JumpHost
+
+	// Convert profile's stored options to sparse — non-zero values become set,
+	// zero values become inherit. For bools, only true is treated as "set"
+	// (false is indistinguishable from "not set at all" in a JSON-omitempty
+	// store, so we treat it as inherited).
+	profileSparse := sshOptionsToSparse(profile.Options)
+
+	// Also extract the profile's own BehaviorOnSessionEnd from Base.
+	if profile.BehaviorOnSessionEnd != "" {
+		beh := profile.BehaviorOnSessionEnd
+		profileSparse.BehaviorOnSessionEnd = &beh
 	}
-	if src.AgentForward {
-		dst.AgentForward = src.AgentForward
+
+	// Start with hardcoded defaults (lowest priority).
+	acc := hardcodedDefaults()
+	source := map[string]FieldSource{}
+	source["port"] = FieldSourceDefault
+	source["user"] = FieldSourceDefault
+	source["behaviorOnSessionEnd"] = FieldSourceDefault
+
+	// Apply global defaults.
+	applySparseLayer(&acc, &source, globalDefaults, FieldSourceGlobal)
+
+	// Apply group defaults: root first, nearest last (so nearest wins).
+	for i := len(groupChain) - 1; i >= 0; i-- {
+		g := groupChain[i]
+		if g.Defaults != nil {
+			if err := g.Defaults.Validate(); err != nil {
+				return EffectiveProfile{}, fmt.Errorf("group %q defaults: %w", g.ID, err)
+			}
+			applySparseLayer(&acc, &source, g.Defaults.SparseSSHOptions, fieldSourceForGroup(g.ID))
+		}
 	}
+
+	// Apply the profile's own group defaults (leaf group), which are not
+	// included in the chain returned by ResolveGroupChain.
+	if profile.Group != "" {
+		for _, g := range groups {
+			if g.ID == profile.Group && g.Defaults != nil {
+				if err := g.Defaults.Validate(); err != nil {
+					return EffectiveProfile{}, fmt.Errorf("group %q defaults: %w", g.ID, err)
+				}
+				applySparseLayer(&acc, &source, g.Defaults.SparseSSHOptions, fieldSourceForGroup(g.ID))
+			}
+		}
+	}
+
+	// Apply profile's own options (highest priority).
+	applySparseLayer(&acc, &source, profileSparse, FieldSourceProfile)
+
+	// Convert accumulator back to SSHProfile.
+	result := profile
+	result.Options = sparseToOptions(acc)
+
+	// Apply BehaviorOnSessionEnd from accumulator to the result's Base.
+	if acc.BehaviorOnSessionEnd != nil {
+		result.BehaviorOnSessionEnd = *acc.BehaviorOnSessionEnd
+	}
+
+	return EffectiveProfile{Profile: result, Source: source}, nil
+}
+
+// applySparseLayer overlays src into acc for non-nil fields, recording
+// provenance. acc is updated in place ONLY for fields that are nil in acc
+// or that src explicitly sets (including explicit false for bools).
+func applySparseLayer(acc *SparseSSHOptions, source *map[string]FieldSource, src SparseSSHOptions, layer FieldSource) {
+	if src.CredentialID != nil {
+		acc.CredentialID = src.CredentialID
+		setSource(source, "credentialId", layer)
+	}
+	if src.Port != nil {
+		acc.Port = src.Port
+		setSource(source, "port", layer)
+	}
+	if src.User != nil {
+		acc.User = src.User
+		setSource(source, "user", layer)
+	}
+	if src.KeyPath != nil {
+		acc.KeyPath = src.KeyPath
+		setSource(source, "keyPath", layer)
+	}
+	if src.JumpHost != nil {
+		acc.JumpHost = src.JumpHost
+		setSource(source, "jumpHost", layer)
+	}
+	if src.KeepaliveInterval != nil {
+		acc.KeepaliveInterval = src.KeepaliveInterval
+		setSource(source, "keepaliveInterval", layer)
+	}
+	if src.KeepaliveCountMax != nil {
+		acc.KeepaliveCountMax = src.KeepaliveCountMax
+		setSource(source, "keepaliveCountMax", layer)
+	}
+	if src.ReadyTimeout != nil {
+		acc.ReadyTimeout = src.ReadyTimeout
+		setSource(source, "readyTimeout", layer)
+	}
+	if src.AgentForward != nil {
+		acc.AgentForward = src.AgentForward
+		setSource(source, "agentForward", layer)
+	}
+	if src.BehaviorOnSessionEnd != nil {
+		acc.BehaviorOnSessionEnd = src.BehaviorOnSessionEnd
+		setSource(source, "behaviorOnSessionEnd", layer)
+	}
+}
+
+// setSource records field <- layer in source, overwriting any previous entry.
+func setSource(source *map[string]FieldSource, field string, layer FieldSource) {
+	if *source == nil {
+		*source = map[string]FieldSource{}
+	}
+	(*source)[field] = layer
+}
+
+// sshOptionsToSparse converts a dense SSHProfileOptions to a sparse
+// representation. Zero values become nil (inherit); non-zero values become
+// pointer-set. For bools, only true is captured — false is treated as
+// "not set" because it cannot be distinguished from an unset field in a
+// JSON-omitempty store. (The caller constructs the effective profile and
+// the stored profile directly for tests that need explicit false.)
+func sshOptionsToSparse(o SSHProfileOptions) SparseSSHOptions {
+	s := SparseSSHOptions{}
+	if o.CredentialID != "" {
+		v := o.CredentialID
+		s.CredentialID = &v
+	}
+	if o.Port != 0 {
+		v := o.Port
+		s.Port = &v
+	}
+	if o.User != "" {
+		v := o.User
+		s.User = &v
+	}
+	if o.KeepaliveInterval != 0 {
+		v := o.KeepaliveInterval
+		s.KeepaliveInterval = &v
+	}
+	if o.KeepaliveCountMax != 0 {
+		v := o.KeepaliveCountMax
+		s.KeepaliveCountMax = &v
+	}
+	if o.ReadyTimeout != 0 {
+		v := o.ReadyTimeout
+		s.ReadyTimeout = &v
+	}
+	if o.JumpHost != "" {
+		v := o.JumpHost
+		s.JumpHost = &v
+	}
+	if o.AgentForward {
+		v := true
+		s.AgentForward = &v
+	}
+	return s
+}
+
+// sparseToOptions converts a sparse representation back to dense SSHProfileOptions.
+// BehaviorOnSessionEnd is NOT handled here — it lives on Base, not Options.
+// The caller applies it to the result's Base separately.
+func sparseToOptions(s SparseSSHOptions) SSHProfileOptions {
+	o := SSHProfileOptions{}
+	if s.CredentialID != nil {
+		o.CredentialID = *s.CredentialID
+	}
+	if s.Port != nil {
+		o.Port = *s.Port
+	}
+	if s.User != nil {
+		o.User = *s.User
+	}
+	if s.JumpHost != nil {
+		o.JumpHost = *s.JumpHost
+	}
+	if s.KeepaliveInterval != nil {
+		o.KeepaliveInterval = *s.KeepaliveInterval
+	}
+	if s.KeepaliveCountMax != nil {
+		o.KeepaliveCountMax = *s.KeepaliveCountMax
+	}
+	if s.ReadyTimeout != nil {
+		o.ReadyTimeout = *s.ReadyTimeout
+	}
+	if s.AgentForward != nil {
+		o.AgentForward = *s.AgentForward
+	}
+	return o
+}
+
+// ---------------------------------------------------------------------------
+// Legacy map decode
+// ---------------------------------------------------------------------------
+
+// DecodeDefaults decodes a map[string]any (the old ProfileGroup.Defaults
+// format) into a ProfileDefaults. Unknown keys are recorded (not rejected),
+// so they round-trip safely and are reported by Validate() at write or
+// resolution time.
+func DecodeDefaults(m map[string]any) (ProfileDefaults, error) {
+	data, err := json.Marshal(m)
+	if err != nil {
+		return ProfileDefaults{}, fmt.Errorf("re-encode defaults: %w", err)
+	}
+	var d ProfileDefaults
+	if err := d.UnmarshalJSON(data); err != nil {
+		return ProfileDefaults{}, err
+	}
+	return d, nil
 }
 
 // ---------------------------------------------------------------------------

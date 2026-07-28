@@ -115,13 +115,21 @@ func ImportProfiles(cfg *TabbyConfig, repo profile.ProfileRepository, typeFilter
 // group repository.
 func ImportGroups(cfg *TabbyConfig, repo profile.GroupRepository) error {
 	for _, tg := range cfg.Groups {
+		var defaults *profile.ProfileDefaults
+		if tg.Defaults != nil {
+			d, err := profile.DecodeDefaults(tg.Defaults)
+			if err != nil {
+				return fmt.Errorf("import group %q defaults: %w", tg.Name, err)
+			}
+			defaults = &d
+		}
 		g := profile.ProfileGroup{
 			ID:            tg.ID,
 			ParentGroupID: tg.ParentGroupID,
 			Name:          tg.Name,
 			Icon:          tg.Icon,
 			Color:         tg.Color,
-			Defaults:      tg.Defaults,
+			Defaults:      defaults,
 			Editable:      true,
 		}
 		// Create, falling back to Update on duplicate.
