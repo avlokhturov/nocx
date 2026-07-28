@@ -23,6 +23,17 @@ import { BaseTabContent, type TabHost, type ContentViewport } from './tab-conten
 const RESIZE_SETTLE_MS = 80
 
 /**
+ * How long output is treated as the shell's answer to a resize rather than as
+ * unread activity.
+ *
+ * Generous on purpose. Getting it wrong in one direction lights an indicator
+ * that lies about a tab; getting it wrong in the other costs one missed
+ * indicator on a tab the user resized a moment ago and is therefore watching.
+ * Those are not symmetric.
+ */
+const RESIZE_ECHO_MS = 400
+
+/**
  * Whether `el` is somewhere the user types on purpose.
  *
  * Used to keep the terminal's document-level key rescue off other people's
@@ -85,6 +96,8 @@ export class TerminalContent extends BaseTabContent {
   private _disposed = false
   private mountAbortController: AbortController | null = null
   private resizeTimer: number | undefined
+  /** Timestamp until which incoming data is the echo of a resize we sent. */
+  private echoUntil = 0
   private host: TabHost | null = null
 
   // ── Title composition ────────────────────────────────────────────────
@@ -109,7 +122,6 @@ export class TerminalContent extends BaseTabContent {
     private readonly gate: ClipboardGate,
     private readonly banner: ClipboardBanner,
     private readonly onTooltipChange: (tooltip: string) => void,
-    private readonly onAltScreenChange?: (inAltScreen: boolean) => void,
     private readonly sshOpts?: {
       profileId: string
       host: string
@@ -233,6 +245,10 @@ export class TerminalContent extends BaseTabContent {
           })
         },
         cancel: () => this.session?.send('\x03'),
+        // A taller editor is a shorter scrollback. Keep the bottom of the
+        // transcript where it belongs — just above the editor — instead of
+        // letting it slide underneath.
+        resized: () => this.scrollback?.scrollToBottom(),
       })
       this.editor.mount(target)
 
@@ -267,7 +283,6 @@ export class TerminalContent extends BaseTabContent {
         } else {
           this.scrollback?.exitFullscreen()
         }
-        this.onAltScreenChange?.(type === 'alternate')
       })
 
       this.inputState.onChange((m) => {
@@ -399,6 +414,9 @@ export class TerminalContent extends BaseTabContent {
 
       this._cwd = session.cwd || ''
       this._host = this.sshOpts?.host || ''
+      // The block header's `user@host`. Empty for a local shell, where the
+      // machine is implied and printing it on every block would be noise.
+      this.scrollback?.blockManager.setLocation(this.sshOpts ? this.locationLine() : '')
       this.editor?.setCwd(session.cwd || '')
 
       // Push initial title + tooltip. Title composition lives here.
@@ -416,7 +434,8 @@ export class TerminalContent extends BaseTabContent {
       session.onData((data: string) => {
         log.debug('nocx: session data received', { length: data.length })
         renderer.write(data)
-        if (this._bufferType === 'normal') {
+        this.scheduleLiveResize()
+        if (this._bufferType === 'normal' && Date.now() >= this.echoUntil) {
           host.requestAttention()
         }
       })
@@ -524,6 +543,13 @@ export class TerminalContent extends BaseTabContent {
         this.rows = rows
         clearTimeout(this.resizeTimer)
         this.resizeTimer = window.setTimeout(() => {
+          // A resize makes the shell redraw its prompt, and that redraw arrives
+          // on `session.onData` looking exactly like output the user has not
+          // seen. It is not: we asked for it. Switching the strip from vertical
+          // to horizontal resizes every pane at once, so every inactive tab lit
+          // its activity indicator for something the user did to the WINDOW
+          // rather than to any tab (nocx-6w4z).
+          this.echoUntil = Date.now() + RESIZE_ECHO_MS
           session.sendResize(cols, rows)
         }, RESIZE_SETTLE_MS)
       })
@@ -566,6 +592,34 @@ export class TerminalContent extends BaseTabContent {
     }
   }
 
+  // ── Live-region sizing ────────────────────────────────────────────────
+
+  private liveResizeFrame = 0
+
+  /**
+   * Re-measure the live region on the next frame.
+   *
+   * Coalesced to one animation frame because a busy command delivers dozens of
+   * chunks per frame and every one of them would otherwise read the grid and
+   * write a style — a layout thrash on the hot path, for a height that can only
+   * be painted once per frame anyway.
+   */
+  private scheduleLiveResize(): void {
+    if (this.liveResizeFrame !== 0) return
+    this.liveResizeFrame = requestAnimationFrame(() => {
+      this.liveResizeFrame = 0
+      if (this._disposed || !this.renderer || !this.scrollback) return
+      // Height first, refit second, and the order is the whole point. Reaching
+      // the ceiling collapses the editor, which grows the scroller — so the
+      // usable height is only correct AFTER this call. Refitting first meant
+      // the grid stayed at the old size until the next chunk of output arrived,
+      // and `top` refreshes every three seconds: the pane visibly re-laid
+      // itself several seconds after the program started.
+      this.scrollback.setLiveHeight(this.renderer.liveContentHeight())
+      this.refitIfResized()
+    })
+  }
+
   // ── B.5 viewport delivery ─────────────────────────────────────────────
 
   private _latestViewport: ContentViewport | null = null
@@ -577,8 +631,58 @@ export class TerminalContent extends BaseTabContent {
     // Pass the authoritative viewport to the renderer (B.5).
     // The renderer computes cols/rows from its own cell metrics.
     if (this._mounted && this.renderer) {
-      this.renderer.fitViewport(viewport)
+      this.renderer.fitViewport(this.usableViewport(viewport))
     }
+  }
+
+  /**
+   * The delivered viewport, less the chrome the grid can never be shown in.
+   *
+   * B.5 says this class does not interpret container geometry, and it still
+   * does not: the pane's box is handed to it. What it subtracts is its OWN
+   * furniture — the editor is a flex sibling inside the pane, so the scroller
+   * that displays the grid is shorter than the pane by exactly the editor's
+   * height.
+   *
+   * Measured while `top` ran: the pane was 682px, the editor 76, the scroller
+   * 606 — and the grid had been fitted to the full 682, producing a 665px
+   * screen. `top` filled all of its rows and the bottom four had nowhere to be
+   * drawn. Clamping the live region cannot fix that; it only decides where the
+   * clipping happens. The grid has to be the size of the space it is shown in
+   * (nocx-6w4z).
+   */
+  private lastFitHeight = 0
+
+  /**
+   * Re-fit the grid when the space it is shown in has changed size.
+   *
+   * `viewportChanged` only fires when the PANE's geometry changes, and the
+   * things that resize the grid's home are inside the pane: the editor
+   * appearing, and the editor being taken away again when a program fills the
+   * pane. Neither is a change the pane itself ever sees. The very first fit therefore ran while the
+   * editor was still `display: none`, took the whole pane, and was never
+   * revisited: 682px of grid living in a 606px scroller, four rows permanently
+   * below the fold.
+   *
+   * No loop: fitting changes the row count, which changes the PTY size, which
+   * produces output, which lands back here — and the usable height is the same,
+   * so nothing refits.
+   */
+  private refitIfResized(): void {
+    const v = this._latestViewport
+    if (!v || !this.renderer) return
+    const usable = this.usableViewport(v)
+    if (usable.height === this.lastFitHeight) return
+    this.lastFitHeight = usable.height
+    this.renderer.fitViewport(usable)
+  }
+
+  private usableViewport(viewport: ContentViewport): ContentViewport {
+    const shown = this.scrollback?.scrollbackArea.clientHeight ?? 0
+    // Zero before first layout — the delivered box is the better guess then,
+    // and the next viewport delivery corrects it.
+    if (shown <= 0) return viewport
+    return { ...viewport, height: shown }
   }
 
   /**

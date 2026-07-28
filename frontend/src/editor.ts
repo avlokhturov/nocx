@@ -12,6 +12,12 @@ export interface EditorActions {
   // Without it, Ctrl-C in the textarea is a no-op and the stale text corrupts
   // the next command.
   cancel: () => void
+  /**
+   * Fired when the editor's own height changes, because that changes how much
+   * room the scrollback has. Optional: an editor with nothing above it — a test,
+   * or a future host — has nobody to tell.
+   */
+  resized?: () => void
 }
 
 export class CommandEditor {
@@ -49,6 +55,33 @@ export class CommandEditor {
     // Auto-grow: resize rows to fit content (1..MAX_ROWS).
     this.ta.addEventListener('input', this.onInput)
     this.root.appendChild(this.ta)
+  }
+
+  /**
+   * The clock ticks only while the editor is on screen.
+   *
+   * It used to be stamped once, by the input-state transition that revealed the
+   * editor, and then left alone — so the chip showed the second the prompt
+   * appeared and stayed there. Sit at a prompt for ten minutes and it is ten
+   * minutes wrong, which is worse than showing nothing: a wrong clock is still
+   * read as a clock.
+   *
+   * A block in the scrollback is the opposite case and keeps its frozen stamp:
+   * it records when that command ran. This chip is not a record, it is the
+   * present, and the editor is where the present is (nocx-6w4z).
+   */
+  private clock: ReturnType<typeof setInterval> | null = null
+
+  private startClock(): void {
+    this.setTime(new Date())
+    if (this.clock !== null) return
+    this.clock = setInterval(() => this.setTime(new Date()), 1000)
+  }
+
+  private stopClock(): void {
+    if (this.clock === null) return
+    clearInterval(this.clock)
+    this.clock = null
   }
 
   /** Update the time chip with date, weekday and time. */
@@ -121,14 +154,19 @@ export class CommandEditor {
 
   // ── visibility ────────────────────────────────────────────────────────
 
-  /** True once the editor has been shown at least once. After that, hide()
-   *  uses visibility:hidden so the editor's BOX stays in the flex layout —
-   *  display:none would hand its height back to the scrollback area and the
-   *  whole pane would jump on every command start/end (owner report). */
-  private _shownOnce = false
-
+  /**
+   * Hiding gives the space back.
+   *
+   * `hide()` used `visibility: hidden` once the editor had been shown, so its
+   * box stayed in the flex layout — deliberately, to stop the pane jumping on
+   * every command start and end. What that bought in stability it paid for in a
+   * strip of dead canvas below every running command, which the owner reported
+   * twice as "space reserved for an editor that is not there". The reservation
+   * goes; the jump comes back and is the smaller of the two problems now that
+   * the live region grows with its content rather than snapping to a constant
+   * (nocx-6w4z).
+   */
   show(): void {
-    this._shownOnce = true
     this.root.style.display = ''
     // CLEARED, not set to 'visible'. An inactive pane is hidden with
     // `visibility: hidden` on purpose (base.css) so its renderer keeps measuring
@@ -139,6 +177,7 @@ export class CommandEditor {
     // empty one above. Clearing the property lets the pane decide, which is
     // where that decision belongs.
     this.root.style.visibility = ''
+    this.startClock()
     this.ta.focus()
   }
 
@@ -165,12 +204,12 @@ export class CommandEditor {
   }
 
   hide(): void {
+    // Stopped, not left running. Every tab owns an editor, so a timer that
+    // outlives visibility is one wakeup per second per tab for a chip nobody can
+    // see — and they accumulate for the life of the window.
+    this.stopClock()
     this.ta.blur()
-    if (this._shownOnce) {
-      this.root.style.visibility = 'hidden'
-    } else {
-      this.root.style.display = 'none'
-    }
+    this.root.style.display = 'none'
   }
 
   get isVisible(): boolean {
@@ -190,6 +229,10 @@ export class CommandEditor {
   }
 
   dispose(): void {
+    // A tab can be closed while its editor is on screen, which is the common
+    // case rather than the edge one — hide() would never run and the interval
+    // would outlive everything it refers to.
+    this.stopClock()
     this.ta.removeEventListener('keydown', this.onKeydown)
     this.ta.removeEventListener('input', this.onInput)
     this.root.remove()
@@ -199,6 +242,13 @@ export class CommandEditor {
 
   private _grow(): void {
     const lines = this.ta.value.split('\n').length
-    this.ta.rows = Math.min(MAX_ROWS, Math.max(1, lines))
+    const rows = Math.min(MAX_ROWS, Math.max(1, lines))
+    if (rows === this.ta.rows) return
+    this.ta.rows = rows
+    // Typing a second line makes this box taller, which makes the scrollback
+    // area shorter — and nothing was recomputing the view for that, so the
+    // bottom of the transcript slid underneath the editor instead of moving up
+    // out of its way (nocx-6w4z).
+    this.actions.resized?.()
   }
 }

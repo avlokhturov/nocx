@@ -231,8 +231,15 @@ export function attrsToStyle(snapshot: TerminalSnapshot, a: CellAttrs): string {
     ;[effectiveFg, effectiveBg] = [effectiveBg, effectiveFg]
   }
 
-  if (effectiveFg) parts.push(`color:${effectiveFg}`)
-  if (effectiveBg) parts.push(`background:${effectiveBg}`)
+  // Only what the cell actually asked for. The defaults are resolved above
+  // because `inverse` needs both sides to swap, but writing them out again is
+  // painting the theme onto every run — and that is why every finished block
+  // came out on a black slab while the live region beside it, which paints
+  // nothing, sat on the app's own background. A block should inherit
+  // `.cmd-output`'s colours and override only where the program said so
+  // (nocx-6w4z).
+  if (effectiveFg && effectiveFg !== snapshot.defaultFg) parts.push(`color:${effectiveFg}`)
+  if (effectiveBg && effectiveBg !== snapshot.defaultBg) parts.push(`background:${effectiveBg}`)
   if (a.bold) parts.push('font-weight:bold')
   if (a.italic) parts.push('font-style:italic')
   if (a.underline && !a.strikethrough) parts.push('text-decoration:underline')

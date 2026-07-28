@@ -63,7 +63,22 @@ function div(className: string, ...children: (string | HTMLElement)[]): HTMLElem
   return el
 }
 
-// ── Duration formatter ─────────────────────────────────────────────────────
+// ── Duration formatters ────────────────────────────────────────────────────
+
+/**
+ * The elapsed time of a command that is still running.
+ *
+ * Whole seconds, unlike the finished-command format. The ticker fires once a
+ * second, so a tenths digit could only ever read `.0` — a decimal place that
+ * never varies is not precision, it is noise that makes the number wider and
+ * harder to read at a glance.
+ */
+function formatRunningDuration(ms: number): string {
+  if (ms < 60000) return `${Math.floor(ms / 1000)}s`
+  const min = Math.floor(ms / 60000)
+  const sec = Math.floor((ms % 60000) / 1000)
+  return `${min}m ${sec}s`
+}
 
 function formatDuration(ms: number): string {
   if (ms < 1000) return `${ms.toFixed(0)}ms`
@@ -91,6 +106,7 @@ function cwdLabel(cwd: string): string {
 function createHeader(
   command: string,
   cwd: string,
+  location: string,
   durationMs: number | null,
   exitCode: number | null,
   status: 'running' | 'success' | 'failure',
@@ -99,6 +115,17 @@ function createHeader(
 
   // ── Chips row (above command text): cwd left, duration+exit right ──
   const chipsRow = div('cmd-header-chips')
+
+  // Where the command ran, when it is somewhere other than this machine. Warp
+  // puts `user@host` at the head of every block header and it is the attribute
+  // ours was missing: a scrollback full of blocks with no host in them reads
+  // the same whether you were on your laptop or three hops away (nocx-6w4z).
+  if (location) {
+    const loc = document.createElement('span')
+    loc.className = 'nocx-chip nocx-chip-muted cmd-header-location'
+    loc.textContent = location
+    chipsRow.appendChild(loc)
+  }
 
   // CWD — standard chip component
   if (cwd) {
@@ -112,9 +139,18 @@ function createHeader(
   const right = div('cmd-header-right')
 
   if (status === 'running') {
+    // The elapsed time, ticking. It used to appear only once the command had
+    // finished, which is the one moment you no longer need it — the question
+    // "how long has this been going" is asked WHILE it is going. Warp shows it
+    // live and so does this (nocx-6w4z).
     const spinner = document.createElement('span')
     spinner.className = 'cmd-header-spinner'
     right.appendChild(spinner)
+
+    const dur = document.createElement('span')
+    dur.className = 'nocx-chip nocx-chip-muted cmd-header-duration'
+    dur.textContent = formatRunningDuration(0)
+    right.appendChild(dur)
   } else {
     if (durationMs !== null) {
       const dur = document.createElement('span')
@@ -152,6 +188,27 @@ function createHeader(
 function isOutputEmpty(html: string): boolean {
   const stripped = html.replace(/<[^>]*>/g, '').replace(/\s/g, '')
   return stripped.length === 0
+}
+
+/**
+ * A block's output as text, with the line breaks put back.
+ *
+ * The serializer emits one `<span class="term-line">` per logical line and
+ * nothing between them — the line breaks you see are `display: block` in CSS,
+ * not characters in the DOM. So `outputEl.textContent` returned the whole block
+ * as a single run, and "Copy output" pasted a hundred rows of `top` onto one
+ * line (nocx-6w4z).
+ *
+ * Falls back to `textContent` when there are no line spans, which is what a
+ * block with plain text content would give.
+ */
+export function blockOutputText(outputEl: HTMLElement | null): string {
+  if (!outputEl) return ''
+  const lines = outputEl.querySelectorAll('.term-line')
+  if (lines.length === 0) return outputEl.textContent ?? ''
+  return Array.from(lines)
+    .map((line) => line.textContent ?? '')
+    .join('\n')
 }
 
 /**
@@ -214,7 +271,7 @@ function buildOverflowMenu(command: string, outputEl: HTMLElement | null): HTMLE
     copyOut.textContent = 'Copy output'
     copyOut.addEventListener('click', (ev) => {
       ev.stopPropagation()
-      const text = outputEl?.textContent ?? ''
+      const text = blockOutputText(outputEl)
       clipboardFallback(text)
       closeMenu()
     })
@@ -224,7 +281,7 @@ function buildOverflowMenu(command: string, outputEl: HTMLElement | null): HTMLE
     copyAll.textContent = 'Copy all'
     copyAll.addEventListener('click', (ev) => {
       ev.stopPropagation()
-      const outText = outputEl?.textContent ?? ''
+      const outText = blockOutputText(outputEl)
       clipboardFallback(`${command}\n${outText}`)
       closeMenu()
     })
@@ -336,6 +393,7 @@ export function createCommandBlock(
   id: number,
   command: string,
   cwd: string,
+  location: string,
   outputHtml: string,
   durationMs: number | null,
   exitCode: number | null,
@@ -347,7 +405,7 @@ export function createCommandBlock(
   wrapper.className = 'cmd-block'
   wrapper.setAttribute('data-block-id', String(id))
 
-  const header = createHeader(command, cwd, durationMs, exitCode, status)
+  const header = createHeader(command, cwd, location, durationMs, exitCode, status)
 
   let outputEl: HTMLElement | null = null
   if (outputHtml && !isOutputEmpty(outputHtml)) {
@@ -378,6 +436,7 @@ export function createRunningBlock(
   id: number,
   command: string,
   cwd: string,
+  location: string,
   getContainer: () => HTMLElement,
   onSelect: (id: number, selected: boolean) => void,
 ): HTMLElement {
@@ -385,7 +444,7 @@ export function createRunningBlock(
   wrapper.className = 'cmd-block cmd-block-running'
   wrapper.setAttribute('data-block-id', String(id))
 
-  const header = createHeader(command, cwd, null, null, 'running')
+  const header = createHeader(command, cwd, location, null, null, 'running')
 
   // Overflow menu — minimal: copy command only while running.
   // Always the LAST element of header-right (owner directive).
@@ -407,6 +466,7 @@ export function freezeBlock(
   id: number,
   command: string,
   cwd: string,
+  location: string,
   outputHtml: string,
   durationMs: number,
   exitCode: number | null,
@@ -417,6 +477,7 @@ export function freezeBlock(
     id,
     command,
     cwd,
+    location,
     outputHtml,
     durationMs,
     exitCode,
@@ -524,6 +585,13 @@ export class BlockManager {
   /**
    * Start a new running block. Called on OSC 133 C.
    */
+  /** Where this session is — `user@host`, or empty for a local shell. */
+  private _location = ''
+
+  setLocation(location: string): void {
+    this._location = location
+  }
+
   startBlock(command: string, cwd: string, startLine: number): BlockRecord {
     if (this._runningBlock) {
       this._finalizeRunningUnsafe()
@@ -532,10 +600,17 @@ export class BlockManager {
     const id = this._nextId++
     this._cmdStartTime = this._now()
 
-    const el = createRunningBlock(id, command, cwd, this._getContainer, (bid, sel) => {
-      if (sel) this._onBlockSelected(bid)
-      else this._onBlockDeselected(bid)
-    })
+    const el = createRunningBlock(
+      id,
+      command,
+      cwd,
+      this._location,
+      this._getContainer,
+      (bid, sel) => {
+        if (sel) this._onBlockSelected(bid)
+        else this._onBlockDeselected(bid)
+      },
+    )
     this._scrollbackInner.insertBefore(el, this._xtermContainer)
 
     const rec: BlockRecord = {
@@ -551,8 +626,34 @@ export class BlockManager {
     }
     this._blocks.push(rec)
     this._runningBlock = rec
+    this._startTicker(el)
 
     return rec
+  }
+
+  /**
+   * Tick the running block's duration chip once a second.
+   *
+   * One timer for the one running block, cleared the moment it stops running —
+   * there is never more than one, so this cannot accumulate the way a per-block
+   * timer would.
+   */
+  private _ticker: ReturnType<typeof setInterval> | null = null
+
+  private _startTicker(el: HTMLElement): void {
+    this._stopTicker()
+    const chip = el.querySelector('.cmd-header-duration')
+    const started = this._cmdStartTime
+    if (!chip || started === null) return
+    this._ticker = setInterval(() => {
+      chip.textContent = formatRunningDuration(this._now() - started)
+    }, 1000)
+  }
+
+  private _stopTicker(): void {
+    if (this._ticker === null) return
+    clearInterval(this._ticker)
+    this._ticker = null
   }
 
   /**
@@ -574,6 +675,7 @@ export class BlockManager {
       rec.id,
       rec.command,
       rec.cwd,
+      this._location,
       outputHtml,
       durationMs ?? 0,
       exitCode,
@@ -584,6 +686,7 @@ export class BlockManager {
       },
     )
 
+    this._stopTicker()
     rec.el = newEl
     rec.durationMs = durationMs
     rec.exitCode = exitCode
@@ -594,6 +697,7 @@ export class BlockManager {
   }
 
   clearAll(): void {
+    this._stopTicker()
     for (const b of this._blocks) {
       b.el.remove()
     }
@@ -604,6 +708,7 @@ export class BlockManager {
   }
 
   private _finalizeRunningUnsafe(): void {
+    this._stopTicker()
     if (!this._runningBlock) return
     this._runningBlock.status = 'failure'
     this._runningBlock.exitCode = null

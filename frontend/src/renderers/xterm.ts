@@ -408,6 +408,38 @@ export class XtermRenderer implements TerminalRenderer {
     return this.term?.rows ?? 24
   }
 
+  /**
+   * Height in CSS pixels of the rows that have actually been written to.
+   *
+   * Scans the viewport upward for the last non-blank line rather than
+   * multiplying `rows` by the cell height. The two differ by the whole point of
+   * this method: the grid is as tall as the pane, so `rows * cell` would give a
+   * full-pane live region to a command that printed one line.
+   *
+   * The cursor is included on purpose. A program that clears the screen and
+   * parks the cursor at row 30 is using thirty rows even though twenty-nine of
+   * them are blank; sizing to the text alone would clip it.
+   *
+   * Bounded by `rows`, so the cost is one pass over the visible grid — this runs
+   * per animation frame while a command produces output.
+   */
+  liveContentHeight(): number {
+    const t = this.term
+    if (!t) return 0
+    const cell = this._getCellDims()
+    if (!cell) return 0
+    const buf = t.buffer.active
+    let last = buf.cursorY
+    for (let y = t.rows - 1; y > last; y--) {
+      const line = buf.getLine(buf.baseY + y)
+      if (line && line.translateToString(true).length > 0) {
+        last = y
+        break
+      }
+    }
+    return (last + 1) * cell.height
+  }
+
   // ── Marker/geometry API (ADR-0008 command-ledger gutter) ──────────────
 
   registerMarker(): MarkerAdapter | undefined {

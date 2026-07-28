@@ -128,22 +128,34 @@ describe('attrsEqual', () => {
 })
 
 describe('attrsToStyle', () => {
-  it('resolves defaults for empty attrs (mode-0 cells get snapshot fg/bg)', () => {
-    const style = attrsToStyle(DEFAULT_SNAPSHOT, emptyAttrs())
-    expect(style).toContain('color:#c0caf5')
-    expect(style).toContain('background:#1a1b26')
+  it('writes nothing for a cell that asked for nothing', () => {
+    // Reversed deliberately. This used to paint the snapshot's default fg and bg
+    // onto every run, for snapshot fidelity — and the result was a finished block
+    // rendered on a slab of the terminal's background sitting inside an app with
+    // its own, while the live region next to it, which paints nothing, matched.
+    // A block inherits `.cmd-output` and overrides only where the program spoke
+    // (nocx-6w4z).
+    expect(attrsToStyle(DEFAULT_SNAPSHOT, emptyAttrs())).toBe('')
+  })
+
+  it('still resolves defaults when inverse swaps them', () => {
+    // The defaults are what `inverse` swaps IN, so they must still be resolved —
+    // they just stop being written back out when they land where they started.
+    const style = attrsToStyle(DEFAULT_SNAPSHOT, { ...emptyAttrs(), inverse: true })
+    expect(style).toContain('color:#1a1b26')
+    expect(style).toContain('background:#c0caf5')
   })
 
   it('includes foreground color', () => {
     const style = attrsToStyle(DEFAULT_SNAPSHOT, { ...emptyAttrs(), fg: '#ff0000' })
     expect(style).toContain('color:#ff0000')
-    expect(style).toContain('background:#1a1b26') // default bg still applied
+    expect(style).not.toContain('background:') // default bg still applied
   })
 
   it('includes background color', () => {
     const style = attrsToStyle(DEFAULT_SNAPSHOT, { ...emptyAttrs(), bg: '#0000ff' })
-    expect(style).toContain('color:#c0caf5') // default fg still applied
     expect(style).toContain('background:#0000ff')
+    expect(style).not.toContain('color:') // the default fg is no longer written
   })
 
   it('includes bold', () => {
@@ -228,9 +240,7 @@ describe('serializeLine', () => {
     const line = makeLine('hello')
     const html = serializeLine(DEFAULT_SNAPSHOT, line)
     // Mode-0 cells now resolve to snapshot defaults
-    expect(html).toBe(
-      '<span class="term-line"><span style="color:#c0caf5;background:#1a1b26">hello</span></span>',
-    )
+    expect(html).toBe('<span class="term-line">hello</span>')
   })
 
   it('escapes HTML entities', () => {
@@ -252,18 +262,16 @@ describe('serializeRange', () => {
   it('trims trailing empty lines (no dangling empty term-line at block bottom)', () => {
     const lines = [makeLine('output'), makeLine(''), makeLine('')]
     const html = serializeRange(DEFAULT_SNAPSHOT, (y) => lines[y], 0, 2)
-    expect(html).toBe(
-      '<span class="term-line"><span style="color:#c0caf5;background:#1a1b26">output</span></span>',
-    )
+    expect(html).toBe('<span class="term-line">output</span>')
   })
 
   it('preserves interior blank lines', () => {
     const lines = [makeLine('a'), makeLine(''), makeLine('b'), makeLine('')]
     const html = serializeRange(DEFAULT_SNAPSHOT, (y) => lines[y], 0, 3)
     expect(html).toBe(
-      '<span class="term-line"><span style="color:#c0caf5;background:#1a1b26">a</span></span>' +
+      '<span class="term-line">a</span>' +
         '<span class="term-line"></span>' +
-        '<span class="term-line"><span style="color:#c0caf5;background:#1a1b26">b</span></span>',
+        '<span class="term-line">b</span>',
     )
   })
 
@@ -282,7 +290,7 @@ describe('serializeRange reflow (isWrapped)', () => {
     ]
     const html = serializeRange(DEFAULT_SNAPSHOT, (y) => lines[y], 0, 2)
     expect(html).toBe(
-      '<span class="term-line"><span style="color:#c0caf5;background:#1a1b26">Quick safety check: is this a</span><span style="color:#c0caf5;background:#1a1b26">project you created?</span></span>',
+      '<span class="term-line">Quick safety check: is this aproject you created?</span>',
     )
   })
 
@@ -290,8 +298,7 @@ describe('serializeRange reflow (isWrapped)', () => {
     const lines = [new BufferLine('PID TTY', false), new BufferLine('123 pts/1', false)]
     const html = serializeRange(DEFAULT_SNAPSHOT, (y) => lines[y], 0, 1)
     expect(html).toBe(
-      '<span class="term-line"><span style="color:#c0caf5;background:#1a1b26">PID TTY</span></span>' +
-        '<span class="term-line"><span style="color:#c0caf5;background:#1a1b26">123 pts/1</span></span>',
+      '<span class="term-line">PID TTY</span>' + '<span class="term-line">123 pts/1</span>',
     )
   })
 
@@ -301,15 +308,13 @@ describe('serializeRange reflow (isWrapped)', () => {
       new BufferLine('next', true),
     ]
     const html = serializeRange(DEFAULT_SNAPSHOT, (y) => lines[y], 0, 1)
-    expect(html).toBe(
-      '<span class="term-line"><span style="color:#c0caf5;background:#1a1b26">word </span><span style="color:#c0caf5;background:#1a1b26">next</span></span>',
-    )
+    expect(html).toBe('<span class="term-line">word next</span>')
   })
 
   it('trims trailing empty logical lines after reflow', () => {
     const lines = [new BufferLine('a', false), new BufferLine('', false), new BufferLine('', false)]
     expect(serializeRange(DEFAULT_SNAPSHOT, (y) => lines[y], 0, 2)).toBe(
-      '<span class="term-line"><span style="color:#c0caf5;background:#1a1b26">a</span></span>',
+      '<span class="term-line">a</span>',
     )
   })
 })
@@ -368,14 +373,38 @@ describe('theme snapshot freezing', () => {
     const snapA = fromITheme(themeA)
     const snapB = fromITheme(themeB)
 
-    const line = makeLine('coloured')
+    // An ANSI colour, which is what the snapshot is for: index 1 means whatever
+    // "red" is in the theme that was live when the block froze. fgMode 1 is the
+    // palette mode in the mock cell.
+    const line = new BufferLine(
+      [...'coloured'].map((ch) => ({
+        chars: ch,
+        width: 1,
+        fg: 1,
+        fgMode: 1,
+        bg: 0,
+        bgMode: 0,
+        bold: false,
+        italic: false,
+        underline: false,
+        inverse: false,
+        blink: false,
+        strikethrough: false,
+        overline: false,
+      })),
+    )
     const outputA = serializeLine(snapA, line)
     const outputB = serializeLine(snapB, line)
 
-    // Same input, different snapshot → different default fg/bg baked in
-    expect(outputA).toContain('#111111')
-    expect(outputB).toContain('#cccccc')
     expect(outputA).not.toBe(outputB)
+
+    // What is NOT frozen any more: the defaults. A cell that asked for nothing
+    // writes nothing, so ordinary text in an old block follows the app's current
+    // colours instead of carrying a slab of the palette it was captured under
+    // (nocx-6w4z).
+    const plain = makeLine('plain')
+    expect(serializeLine(snapA, plain)).toBe(serializeLine(snapB, plain))
+    expect(serializeLine(snapA, plain)).not.toContain('#111111')
   })
 
   it('after-freeze snapshot does not re-colour when theme changes (256/truecolor)', () => {

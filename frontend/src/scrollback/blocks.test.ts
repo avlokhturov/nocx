@@ -25,7 +25,7 @@ const noopSelect = (): void => {}
 describe('createRunningBlock', () => {
   it('creates a div with classes cmd-block and cmd-block-running', () => {
     const container = document.createElement('div')
-    const el = createRunningBlock(1, 'ls -la', '~', () => container, noopSelect)
+    const el = createRunningBlock(1, 'ls -la', '~', '', () => container, noopSelect)
     expect(el.tagName).toBe('DIV')
     expect(el.classList.contains('cmd-block')).toBe(true)
     expect(el.classList.contains('cmd-block-running')).toBe(true)
@@ -34,14 +34,21 @@ describe('createRunningBlock', () => {
 
   it('includes command text in header', () => {
     const container = document.createElement('div')
-    const el = createRunningBlock(1, 'ls -la', '~', () => container, noopSelect)
+    const el = createRunningBlock(1, 'ls -la', '~', '', () => container, noopSelect)
     const text = el.querySelector('.cmd-header-text')
     expect(text?.textContent).toBe('ls -la')
   })
 
   it('includes cwd chip in the header (standard .nocx-chip component)', () => {
     const container = document.createElement('div')
-    const el = createRunningBlock(1, 'echo hi', '/home/dev/projects', () => container, noopSelect)
+    const el = createRunningBlock(
+      1,
+      'echo hi',
+      '/home/dev/projects',
+      '',
+      () => container,
+      noopSelect,
+    )
     const cwd = el.querySelector('.cmd-header-cwd')
     expect(cwd?.textContent).toBe('\u{1F4C1} dev/projects')
     expect(cwd?.classList.contains('nocx-chip')).toBe(true)
@@ -49,21 +56,21 @@ describe('createRunningBlock', () => {
 
   it('shows a spinner for running state', () => {
     const container = document.createElement('div')
-    const el = createRunningBlock(1, 'sleep 10', '~', () => container, noopSelect)
+    const el = createRunningBlock(1, 'sleep 10', '~', '', () => container, noopSelect)
     const spinner = el.querySelector('.cmd-header-spinner')
     expect(spinner).not.toBeNull()
   })
 
   it('has no output area until freeze (P0-3)', () => {
     const container = document.createElement('div')
-    const el = createRunningBlock(1, 'cmd', '~', () => container, noopSelect)
+    const el = createRunningBlock(1, 'cmd', '~', '', () => container, noopSelect)
     const output = el.querySelector('.cmd-output')
     expect(output).toBeNull()
   })
 
   it('includes overflow menu button (P2-9)', () => {
     const container = document.createElement('div')
-    const el = createRunningBlock(1, 'cmd', '~', () => container, noopSelect)
+    const el = createRunningBlock(1, 'cmd', '~', '', () => container, noopSelect)
     const btn = el.querySelector('.cmd-overflow-btn')
     expect(btn).not.toBeNull()
   })
@@ -73,14 +80,25 @@ describe('createCommandBlock', () => {
   const c = (): HTMLElement => document.createElement('div')
 
   it('creates a frozen block with success status', () => {
-    const el = createCommandBlock(1, 'echo hello', '~', 'output', 42, 0, 'success', c, noopSelect)
+    const el = createCommandBlock(
+      1,
+      'echo hello',
+      '~',
+      '',
+      'output',
+      42,
+      0,
+      'success',
+      c,
+      noopSelect,
+    )
     expect(el.classList.contains('cmd-block')).toBe(true)
     const exit = el.querySelector('.cmd-header-exit-ok')
     expect(exit?.textContent).toBe('ok')
   })
 
   it('creates a frozen block with failure status', () => {
-    const el = createCommandBlock(2, 'false', '~', '', 5, 1, 'failure', c, noopSelect)
+    const el = createCommandBlock(2, 'false', '~', '', '', 5, 1, 'failure', c, noopSelect)
     const exit = el.querySelector('.cmd-header-exit-fail')
     expect(exit?.textContent).toBe('exit 1')
   })
@@ -90,6 +108,7 @@ describe('createCommandBlock', () => {
       1,
       'ls',
       '~',
+      '',
       '<span class="term-line">file.txt</span>',
       10,
       0,
@@ -106,6 +125,7 @@ describe('createCommandBlock', () => {
       1,
       'sleep 1',
       '~',
+      '',
       'some output',
       1234,
       0,
@@ -118,12 +138,12 @@ describe('createCommandBlock', () => {
   })
 
   it('omits exit badge when exitCode is null', () => {
-    const el = createCommandBlock(1, 'cmd', '~', 'out', null, null, 'success', c, noopSelect)
+    const el = createCommandBlock(1, 'cmd', '~', '', 'out', null, null, 'success', c, noopSelect)
     expect(el.querySelector('.cmd-header-exit')).toBeNull()
   })
 
   it('omits .cmd-output when outputHtml is empty (P0-3)', () => {
-    const el = createCommandBlock(1, 'cd repos', '~', '', 3, 0, 'success', c, noopSelect)
+    const el = createCommandBlock(1, 'cd repos', '~', '', '', 3, 0, 'success', c, noopSelect)
     expect(el.querySelector('.cmd-output')).toBeNull()
   })
 
@@ -132,6 +152,7 @@ describe('createCommandBlock', () => {
       1,
       'cmd',
       '~',
+      '',
       '<span class="term-line"></span>',
       1,
       0,
@@ -143,7 +164,7 @@ describe('createCommandBlock', () => {
   })
 
   it('includes overflow menu button (P2-9)', () => {
-    const el = createCommandBlock(1, 'ls', '~', 'output', 10, 0, 'success', c, noopSelect)
+    const el = createCommandBlock(1, 'ls', '~', '', 'output', 10, 0, 'success', c, noopSelect)
     const btn = el.querySelector('.cmd-overflow-btn')
     expect(btn).not.toBeNull()
   })
@@ -153,6 +174,7 @@ describe('createCommandBlock', () => {
       1,
       'cmd',
       '/home/user/repos',
+      '',
       'out',
       10,
       0,
@@ -169,7 +191,7 @@ describe('freezeBlock', () => {
   it('replaces a running block with a frozen one in the DOM', () => {
     const parent = document.createElement('div')
     const container = document.createElement('div')
-    const running = createRunningBlock(1, 'sleep 5', '~', () => container, noopSelect)
+    const running = createRunningBlock(1, 'sleep 5', '~', '', () => container, noopSelect)
     parent.appendChild(running)
 
     const frozen = freezeBlock(
@@ -177,6 +199,7 @@ describe('freezeBlock', () => {
       1,
       'sleep 5',
       '~',
+      '',
       '<span>done</span>',
       5100,
       0,
@@ -193,13 +216,14 @@ describe('freezeBlock', () => {
   it('adds overflow menu to frozen block (P2-9)', () => {
     const parent = document.createElement('div')
     const container = document.createElement('div')
-    const running = createRunningBlock(1, 'ls', '~', () => container, noopSelect)
+    const running = createRunningBlock(1, 'ls', '~', '', () => container, noopSelect)
     parent.appendChild(running)
     const frozen = freezeBlock(
       running,
       1,
       'ls',
       '~',
+      '',
       '<span>ok</span>',
       100,
       0,
@@ -218,6 +242,7 @@ describe('block selection model (P1-7, P1-8)', () => {
       1,
       'cmd',
       '~',
+      '',
       'out',
       10,
       0,
@@ -244,6 +269,7 @@ describe('block selection model (P1-7, P1-8)', () => {
       1,
       'cmd1',
       '~',
+      '',
       'out1',
       10,
       0,
@@ -255,6 +281,7 @@ describe('block selection model (P1-7, P1-8)', () => {
       2,
       'cmd2',
       '~',
+      '',
       'out2',
       10,
       0,
@@ -286,6 +313,7 @@ describe('block selection model (P1-7, P1-8)', () => {
       1,
       'cmd',
       '~',
+      '',
       'out',
       10,
       0,
@@ -316,6 +344,7 @@ describe('block selection model (P1-7, P1-8)', () => {
       1,
       'cmd',
       '~',
+      '',
       'out',
       10,
       0,
@@ -342,6 +371,7 @@ describe('block selection model (P1-7, P1-8)', () => {
       1,
       'cmd',
       '~',
+      '',
       'out',
       10,
       0,
@@ -370,6 +400,7 @@ describe('block selection model (P1-7, P1-8)', () => {
       1,
       'cmd',
       '~',
+      '',
       'out',
       10,
       0,
@@ -533,8 +564,13 @@ describe('BlockManager', () => {
     const linesA = [new BufferLine('hello', false)]
     const recA = manager.freezeBlock((y) => linesA[y] ?? undefined, 0, 0)
     expect(recA).not.toBeNull()
+    // Defaults are no longer baked in — plain text follows the app's colours —
+    // so what this asserts is that the block exists and carries its text, with
+    // the palette question moved to serializer.test.ts where a cell actually
+    // sets an ANSI colour (nocx-6w4z).
     const outputA = recA!.el.querySelector('.cmd-output')
-    expect(outputA?.innerHTML).toContain('#111111')
+    expect(outputA?.innerHTML).toContain('hello')
+    expect(outputA?.innerHTML).not.toContain('#111111')
 
     // Second block with theme B
     setCurrentTheme(themeB)
@@ -543,11 +579,17 @@ describe('BlockManager', () => {
     const recB = manager.freezeBlock((y) => linesB[y] ?? undefined, 0, 0)
     expect(recB).not.toBeNull()
     const outputB = recB!.el.querySelector('.cmd-output')
-    expect(outputB?.innerHTML).toContain('#cccccc')
+    expect(outputB?.innerHTML).toContain('world')
+    expect(outputB?.innerHTML).not.toContain('#cccccc')
     expect(outputB?.innerHTML).not.toContain('#111111')
 
-    // First block still has snapshot A's colours
-    expect(outputA?.innerHTML).toContain('#111111')
+    // And the first block is still untouched by theme B — which is the property
+    // this test is really about. It is asserted by absence now: neither block
+    // carries a default colour at all, so a theme change cannot reach into an
+    // old block's plain text. Frozen ANSI colours are covered in
+    // serializer.test.ts, where a cell actually sets one (nocx-6w4z).
+    expect(outputA?.innerHTML).toContain('hello')
+    expect(outputA?.innerHTML).not.toContain('#cccccc')
   })
 })
 
@@ -559,6 +601,7 @@ describe('overflow menu (P1-6)', () => {
       1,
       'echo hello',
       '~',
+      '',
       'output',
       42,
       0,
@@ -590,6 +633,7 @@ describe('overflow menu (P1-6)', () => {
       1,
       'echo hello',
       '~',
+      '',
       'output',
       42,
       0,
@@ -624,6 +668,7 @@ describe('overflow menu (P1-6)', () => {
       1,
       'echo hello',
       '~',
+      '',
       'output',
       42,
       0,
@@ -653,6 +698,7 @@ describe('overflow menu (P1-6)', () => {
       1,
       'echo hello',
       '~',
+      '',
       'output',
       42,
       0,

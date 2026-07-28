@@ -383,9 +383,10 @@ export class TabManager {
       this.gate,
       this.banner,
       (tooltip) => tabRef.current?.updateTooltip(tooltip),
-      (inAlt) => {
-        if (tabRef.current === this.activeTab) this.syncAltScreenClass(inAlt)
-      },
+      // The alt-screen callback that used to sit here is gone with the
+      // parameter. It toggled `#app.alt-screen`, which emptied the tab strip so
+      // a viewport-sized fullscreen xterm would not paint through it; the
+      // fullscreen region lives inside its pane now (nocx-6w4z).
       undefined,
       (subtitle) => tabRef.current?.updateSubtitle(subtitle),
     )
@@ -417,9 +418,6 @@ export class TabManager {
       this.gate,
       this.banner,
       (tooltip) => tabRef.current?.updateTooltip(tooltip),
-      (inAlt) => {
-        if (tabRef.current === this.activeTab) this.syncAltScreenClass(inAlt)
-      },
       sshOpts,
     )
     const descriptor: ContentDescriptor = {
@@ -521,13 +519,6 @@ export class TabManager {
     }
     strip.onNewTab = () => this.newTab()
     strip.onReorder = (fromId, toId) => this.reorderTab(fromId, toId)
-  }
-
-  /** Toggle #app alt-screen class based on active terminal buffer type. */
-  private syncAltScreenClass(inAlt: boolean): void {
-    const app = document.getElementById('app')
-    if (!app) return
-    app.classList.toggle('alt-screen', inAlt)
   }
 
   /**

@@ -146,6 +146,17 @@ export interface TerminalRenderer {
   readonly cols: number
   readonly rows: number
 
+  /**
+   * CSS pixels the written rows of the current viewport actually occupy.
+   *
+   * The presentation layer sizes the live region from this instead of from a
+   * constant, so three lines of `ls` get three lines and a program repainting a
+   * whole screen gets the whole screen. `0` when the grid is empty or the
+   * renderer cannot measure a cell yet — the caller keeps its previous height
+   * rather than collapsing.
+   */
+  liveContentHeight(): number
+
   // dispose releases renderer-held resources (timers, listeners). Called when
   // the tab owning this renderer is closed so a periodic forced-refresh pump
   // does not outlive the terminal it paints.
