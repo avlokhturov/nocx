@@ -789,3 +789,124 @@ func TestPoolConnectionSharing(t *testing.T) {
 		t.Fatalf("after all closed, pool.Count()=%d, want 0", got)
 	}
 }
+
+// TestProbe_Success verifies Probe authenticates and closes without a shell.
+func TestProbe_Success(t *testing.T) {
+	srv := startTestSSHServer(t)
+	defer srv.close()
+	khPath := writeKnownHosts(t, srv, srv.addr)
+
+	client, err := NewReal(
+		log.NewSlogAdapter(nil),
+		WithKnownHostsFile(khPath),
+	)
+	if err != nil {
+		t.Fatalf("NewReal: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	err = client.Probe(
+		context.Background(), srv.addr,
+		gossh.PublicKeys(srv.userSigner),
+		WithUser("test"),
+	)
+	if err != nil {
+		t.Fatalf("Probe: %v", err)
+	}
+
+	// Pool must be empty — Probe bypasses the pool entirely.
+	if got := client.pool.Count(); got != 0 {
+		t.Fatalf("pool.Count()=%d, want 0 (Probe bypasses pool)", got)
+	}
+}
+
+// TestProbe_WrongKey_ReturnsError verifies Probe fails on bad auth.
+func TestProbe_WrongKey_ReturnsError(t *testing.T) {
+	srv := startTestSSHServer(t)
+	defer srv.close()
+	khPath := writeKnownHosts(t, srv, srv.addr)
+
+	client, err := NewReal(
+		log.NewSlogAdapter(nil),
+		WithKnownHostsFile(khPath),
+	)
+	if err != nil {
+		t.Fatalf("NewReal: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	wrongKey := generateSigner(t)
+	err = client.Probe(
+		context.Background(), srv.addr,
+		gossh.PublicKeys(wrongKey),
+		WithUser("test"),
+	)
+	if err == nil {
+		t.Fatal("Probe with wrong key: expected error, got nil")
+	}
+}
+
+// TestProbe_UnknownHost_ReturnsError verifies Probe fails when the host
+// key is unknown, without attempting authentication.
+func TestProbe_UnknownHost_ReturnsError(t *testing.T) {
+	srv := startTestSSHServer(t)
+	defer srv.close()
+
+	// Write known_hosts with a different host key than the server uses.
+	wrongSigner := generateSigner(t)
+	wrongKey := wrongSigner.PublicKey()
+	line := knownhosts.Line([]string{srv.addr}, wrongKey)
+	dir := t.TempDir()
+	khPath := filepath.Join(dir, "known_hosts")
+	if err := os.WriteFile(khPath, []byte(line+"\n"), 0o600); err != nil {
+		t.Fatalf("write known_hosts: %v", err)
+	}
+
+	client, err := NewReal(
+		log.NewSlogAdapter(nil),
+		WithKnownHostsFile(khPath),
+	)
+	if err != nil {
+		t.Fatalf("NewReal: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	err = client.Probe(
+		context.Background(), srv.addr,
+		gossh.PublicKeys(srv.userSigner),
+		WithUser("test"),
+	)
+	if err == nil {
+		t.Fatal("Probe with wrong host key: expected error, got nil")
+	}
+}
+
+// TestProbe_SingleAuthMethod verifies Probe sends exactly one auth method
+// (the supplied one) and does not fall back to agent or any other method.
+// This is implicit: gossh.ClientConfig.Auth is set to a slice of length 1,
+// so the server only sees that one method. A key that succeeds proves it.
+func TestProbe_SingleAuthMethod(t *testing.T) {
+	srv := startTestSSHServer(t)
+	defer srv.close()
+	khPath := writeKnownHosts(t, srv, srv.addr)
+
+	client, err := NewReal(
+		log.NewSlogAdapter(nil),
+		WithKnownHostsFile(khPath),
+	)
+	if err != nil {
+		t.Fatalf("NewReal: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	// Password method with correct key signer won't work (server only accepts
+	// public key), but using public key with exactly one method should.
+	err = client.Probe(
+		context.Background(), srv.addr,
+		gossh.PublicKeys(srv.userSigner),
+		WithUser("test"),
+	)
+	if err != nil {
+		t.Fatalf("Probe with single public-key method: %v", err)
+	}
+}

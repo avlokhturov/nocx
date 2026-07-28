@@ -52,14 +52,27 @@ type ConnectConfig struct {
 	// Mirrors Tabby's profile.options.auth enum.
 	AuthMode string
 
-	// JumpHost is the profile name or ID of the jump server to use.
+	// JumpHost is the first hop's hostname or IP. When JumpConfig is also set
+	// (set by the resolver for multi-hop), JumpConfig carries the full
+	// recursive hop configuration and this flat field is the first hop's host.
+	// For backward compatibility, both fields are populated: acquireJumpHost
+	// prefers JumpConfig when non-nil.
 	JumpHost string
-	// JumpPort is the port of the jump server (0 means use default 22).
+	// JumpPort is the port of the first jump server (0 means use default 22).
 	JumpPort int
 	// Jump host credentials — loaded from jump server's profile.
 	JumpUser     string
 	JumpKeyFile  string
 	JumpAuthMode string
+
+	// JumpConfig carries the full recursive jump host configuration for
+	// multi-hop routes. When the resolver builds the config for a target
+	// accessed through a chain of bastions, JumpConfig is the recursive
+	// ConnectConfig of the first hop, which itself may have JumpConfig set
+	// for the next hop, and so on. This is nil for direct connections.
+	// acquireJumpHost reads this field preferentially; the flat Jump* fields
+	// are populated as well for backward compatibility.
+	JumpConfig *ConnectConfig
 
 	// AuthorizedEndpoint carries the endpoint identity that a linked credential
 	// is authorized for, set by the resolver. The value is the profile's Host

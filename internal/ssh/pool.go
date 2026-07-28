@@ -83,11 +83,17 @@ func (c *pooledSSHConn) Close() error {
 //     by its SecretID — which is reminted on every password change, so a
 //     rotated credential cannot reuse a transport authenticated with the
 //     old secret (that is the distinction the "stored-credential ID" name
-//     misses). For inline auth (no stored credential) we key on the private
-//     key path: a different key file is a different principal. When neither
-//     applies (agent-only / prompt-password), identity is empty and the
-//     entries share — those auth methods are not credential-bound, so there
-//     is no second principal to isolate.
+//     misses). For inline auth (no stored credential) we key on the SHA256
+//     fingerprint of the public key, not the file path, so replacing the
+//     file contents at the same path changes the pool identity. When neither
+//     applies (agent-only / prompt-password), identity is empty by EXPLICIT
+//     DESIGN: the agent authenticates each channel independently (every
+//     shell/session request goes through the agent socket), so sharing the
+//     transport does not share the authentication — each tab still proves
+//     its identity through the agent for its own channel. If the agent's
+//     loaded keys change (e.g. ssh-add -D), new transports use the updated
+//     key set but existing transports remain valid. There is no credential
+//     principal to isolate; pooling by host+user+port is correct.
 //   - jumpRoute: the resolved identity of the bastion the connection is
 //     dialed through. The same target reached via two different bastions
 //     is a different route; pooling them together would let one bastion's
@@ -100,7 +106,7 @@ type poolKey struct {
 	host      string
 	port      int
 	user      string
-	identity  string // SecretID (reminted on password change) or inline key path; isolates credential rotation
+	identity  string // SecretID, public-key SHA256 fingerprint, or empty for agent/prompt auth
 	jumpRoute string // resolved jump identity (see jumpRouteKey), "" for direct
 }
 
@@ -331,6 +337,34 @@ func (p *ConnPool) CloseAll() {
 	for _, c := range toClose {
 		_ = c.Close()
 	}
+}
+
+// Drain closes all pooled connections matching the predicate, regardless
+// of refcount. Existing sessions on those connections will fail. Entries
+// not matching the predicate are unaffected. Returns the number of
+// connections drained.
+//
+// This is used when a credential version is retired: the pool key has
+// changed (so new Acquire calls get a new transport), but the old entries
+// are still in the pool. Drain removes them, forcing new dials.
+func (p *ConnPool) Drain(match func(key poolKey) bool) int {
+	p.mu.Lock()
+	toClose := make([]sshClientConn, 0)
+	closed := 0
+	for key, entry := range p.pool {
+		if match(key) {
+			toClose = append(toClose, entry.conn)
+			delete(p.pool, key)
+			closed++
+			p.log.Debug("pool connection drained",
+				"host", key.host, "user", key.user, "port", key.port, "identity", key.identity)
+		}
+	}
+	p.mu.Unlock()
+	for _, c := range toClose {
+		_ = c.Close()
+	}
+	return closed
 }
 
 // Count returns the number of pooled connections (for testing/diagnostics).

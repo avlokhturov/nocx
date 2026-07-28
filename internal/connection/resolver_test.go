@@ -613,3 +613,134 @@ func TestResolve_UsesCurrentVersionSecret(t *testing.T) {
 		t.Fatal("promoting a version left the SecretID unchanged; the pool would reuse the old transport")
 	}
 }
+
+// TestResolver_MultiHopJump verifies that a target behind two bastions
+// carries the full recursive JumpConfig chain through to the ConnectConfig.
+func TestResolver_MultiHopJump(t *testing.T) {
+	ps := newStubProfileStore()
+	ss := newStubSecretStore()
+
+	// Inner bastion (closest to client) - jumps through no one
+	innerPWID := credential.NewSecretID()
+	_ = ss.Set(innerPWID, credential.NewSecret("inner-secret"))
+	_ = ps.SaveCredential(profile.Credential{
+		ID: "cred:inner:1", Name: "inner-cred", Username: "inneruser", Auth: "password",
+		SecretID: string(innerPWID),
+	})
+	_ = ps.SaveProfile(profile.SSHProfile{
+		Base: profile.Base{ID: "profile:inner", Name: "inner-bastion"},
+		Options: profile.SSHProfileOptions{
+			Host:         "inner.corp.net",
+			Port:         2201,
+			CredentialID: "cred:inner:1",
+		},
+	})
+
+	// Outer bastion (closest to target) - jumps through inner
+	outerPWID := credential.NewSecretID()
+	_ = ss.Set(outerPWID, credential.NewSecret("outer-secret"))
+	_ = ps.SaveCredential(profile.Credential{
+		ID: "cred:outer:1", Name: "outer-cred", Username: "outeruser", Auth: "publicKey",
+		KeyPath:  "/home/user/.ssh/outer_rsa",
+		SecretID: string(outerPWID),
+	})
+	_ = ps.SaveProfile(profile.SSHProfile{
+		Base: profile.Base{ID: "profile:outer", Name: "outer-bastion"},
+		Options: profile.SSHProfileOptions{
+			Host:         "outer.corp.net",
+			Port:         2200,
+			CredentialID: "cred:outer:1",
+			JumpHost:     "profile:inner",
+		},
+	})
+
+	// Target profile - jumps through outer
+	tgtPWID := credential.NewSecretID()
+	_ = ss.Set(tgtPWID, credential.NewSecret("tgt-secret"))
+	_ = ps.SaveCredential(profile.Credential{
+		ID: "cred:tgt:1", Name: "tgt-cred", Username: "tgtuser", Auth: "password",
+		SecretID: string(tgtPWID),
+	})
+	_ = ps.SaveProfile(profile.SSHProfile{
+		Base: profile.Base{ID: "profile:tgt", Name: "target"},
+		Options: profile.SSHProfileOptions{
+			Host:         "target.internal",
+			Port:         2222,
+			CredentialID: "cred:tgt:1",
+			JumpHost:     "profile:outer",
+		},
+	})
+
+	r := NewResolver(ps, ps, ps, ss)
+	host, cfg, err := r.Resolve("profile:tgt")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	if host != "target.internal" {
+		t.Errorf("host = %q, want target.internal", host)
+	}
+	if cfg.SecretID != tgtPWID {
+		t.Errorf("Target SecretID = %q, want %q", cfg.SecretID, tgtPWID)
+	}
+
+	// First hop: outer bastion
+	if cfg.JumpHost != "outer.corp.net" {
+		t.Errorf("JumpHost = %q, want outer.corp.net", cfg.JumpHost)
+	}
+	if cfg.JumpConfig == nil {
+		t.Fatal("JumpConfig is nil, want outer bastion config")
+	}
+	if cfg.JumpConfig.Port != 2200 {
+		t.Errorf("JumpConfig.Port = %d, want 2200", cfg.JumpConfig.Port)
+	}
+	if cfg.JumpConfig.User != "outeruser" {
+		t.Errorf("JumpConfig.User = %q, want outeruser", cfg.JumpConfig.User)
+	}
+	if cfg.JumpConfig.SecretID != outerPWID {
+		t.Errorf("JumpConfig.SecretID = %q, want %q", cfg.JumpConfig.SecretID, outerPWID)
+	}
+
+	// Second hop: inner bastion (outer's jump)
+	if cfg.JumpConfig.JumpHost != "inner.corp.net" {
+		t.Errorf("JumpConfig.JumpHost = %q, want inner.corp.net", cfg.JumpConfig.JumpHost)
+	}
+	if cfg.JumpConfig.JumpConfig == nil {
+		t.Fatal("JumpConfig.JumpConfig is nil, want inner bastion config")
+	}
+	if cfg.JumpConfig.JumpConfig.SecretID != innerPWID {
+		t.Errorf("JumpConfig.JumpConfig.SecretID = %q, want %q", cfg.JumpConfig.JumpConfig.SecretID, innerPWID)
+	}
+	if cfg.JumpConfig.JumpConfig.JumpConfig != nil {
+		t.Errorf("JumpConfig.JumpConfig.JumpConfig should be nil (no more hops), got %v", cfg.JumpConfig.JumpConfig.JumpConfig)
+	}
+}
+
+// TestResolver_MultiHopCycleDetected verifies that a multi-hop chain with a
+// cycle is rejected at resolve time.
+func TestResolver_MultiHopCycleDetected(t *testing.T) {
+	ps := newStubProfileStore()
+	ss := newStubSecretStore()
+
+	// Two profiles that reference each other in a cycle
+	_ = ps.SaveProfile(profile.SSHProfile{
+		Base: profile.Base{ID: "profile:a", Name: "a"},
+		Options: profile.SSHProfileOptions{
+			Host:     "host-a.net",
+			JumpHost: "profile:b",
+		},
+	})
+	_ = ps.SaveProfile(profile.SSHProfile{
+		Base: profile.Base{ID: "profile:b", Name: "b"},
+		Options: profile.SSHProfileOptions{
+			Host:     "host-b.net",
+			JumpHost: "profile:a",
+		},
+	})
+
+	r := NewResolver(ps, ps, ps, ss)
+	_, _, err := r.Resolve("profile:a")
+	if err == nil {
+		t.Fatal("expected cycle detection error, got nil")
+	}
+}
