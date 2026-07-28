@@ -41,10 +41,18 @@ test.describe('Connections inside Settings', () => {
     await page.locator('[role="toolbar"]').getByRole('button', { name: '+ New connection' }).click()
     await expect(page.locator('.cm-form')).toBeAttached()
 
-    // Fill in the profile form (Name, Host).
+    // Fill in the profile form (Name, Host, User).
+    //
+    // User is required whenever no credential is selected (nocx-74cn added the
+    // rule; nocx-vjhz is this spec catching up). Leaving it empty does not fail
+    // here — it fails 20 lines down, where Create is refused, no profile is
+    // written and the tab count that Connect was supposed to change reads one
+    // short. The only visible evidence was a "User is required" toast that
+    // nothing asserted on.
     const inputs = page.locator('.cm-form input')
     await inputs.nth(0).fill('Test SSH')
     await inputs.nth(1).fill('localhost')
+    await page.locator('#profile-user').fill('tester')
 
     // Save the profile first (calls createProfile), then Connect opens a tab.
     await page
@@ -62,9 +70,12 @@ test.describe('Connections inside Settings', () => {
       .getByRole('button', { name: 'Connect', exact: true })
       .click()
 
-    // A new SSH tab should have been created.
-    const tabsAfterConnect = await page.locator('.nocx-tab-title').count()
-    expect(tabsAfterConnect).toBe(tabsBeforeConnect + 1)
+    // A new SSH tab should have been created. Asserted with a retrying
+    // expectation, not a bare count(): opening the tab is a round trip, so a
+    // count read on the next line races it and answers for the DOM as it was.
+    await expect(page.locator('.nocx-tab-title')).toHaveCount(tabsBeforeConnect + 1, {
+      timeout: 10_000,
+    })
 
     // Verify the new tab is not called "Settings".
     const newTab = page.locator('.nocx-tab-title').last()

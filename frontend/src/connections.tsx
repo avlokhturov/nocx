@@ -137,6 +137,35 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     ),
   )
 
+  /**
+   * The profile the form is currently showing.
+   *
+   * There are two ways a profile reaches the form and only one of them is
+   * `editing()`: a draft being typed, and a saved profile picked out of the
+   * list, which sets `selectedID` and deliberately clears `editing` so the
+   * record on screen is the stored one rather than a copy. `formPanelContent`
+   * has always known that. The validation rules did not — they read `editing()`,
+   * so in the second case every rule saw `''`.
+   *
+   * The visible result was a form full of correct values reporting that its
+   * fields were required, and a Connect button that did nothing: `gate()` asks
+   * the rules, the rules were reading a null draft, and the click was refused
+   * with "Name is required" on a field containing a name. It appeared right
+   * after saving — `saveProfile` ends in `setEditing(null)` — which made it look
+   * like the save had failed when the save was the one thing that worked
+   * (nocx-vjhz).
+   *
+   * One memo, read by the rules and by the panel, so the two cannot drift apart
+   * again.
+   */
+  const formProfile = createMemo<SSHProfile | null>(() => {
+    const ed = editing()
+    if (ed) return ed
+    const selId = selectedID()
+    if (!selId) return null
+    return profiles().find((x) => x.id === selId) ?? null
+  })
+
   // ── Validation ──────────────────────────────────────────────────────────
   //
   // At component scope, NOT inside renderProfileForm. That function runs inside a
@@ -144,27 +173,31 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   // there would be thrown away and rebuilt each time, and "this field has been
   // answered" would reset itself as the user typed.
   //
-  // The rules read `editing()` directly rather than taking the draft as an
+  // The rules read `formProfile()` directly rather than taking the draft as an
   // argument, which is what lets the same object be read by the form (to render
   // the message) and by the submit handlers (to refuse).
 
   const profileValidation = createFormValidation({
-    name: () => required('Name')(editing()?.name ?? ''),
-    host: () => combine(required('Host'), hostname())(editing()?.options.host ?? ''),
-    port: () => combine(required('Port'), portRule())(String(editing()?.options.port ?? '')),
+    name: () => required('Name')(formProfile()?.name ?? ''),
+    host: () => combine(required('Host'), hostname())(formProfile()?.options.host ?? ''),
+    port: () => combine(required('Port'), portRule())(String(formProfile()?.options.port ?? '')),
     // Only when no credential is selected: a credential carries its own username,
     // and the User field is not even rendered in that case.
     user: () => {
-      const p = editing()
+      const p = formProfile()
       if (!p || p.options.credentialId) return undefined
       return required('User')(p.options.user ?? '')
     },
     keepaliveInterval: () =>
-      nonNegativeInteger('Keepalive interval')(String(editing()?.options.keepaliveInterval ?? '')),
+      nonNegativeInteger('Keepalive interval')(
+        String(formProfile()?.options.keepaliveInterval ?? ''),
+      ),
     keepaliveCountMax: () =>
-      nonNegativeInteger('Keepalive count max')(String(editing()?.options.keepaliveCountMax ?? '')),
+      nonNegativeInteger('Keepalive count max')(
+        String(formProfile()?.options.keepaliveCountMax ?? ''),
+      ),
     readyTimeout: () =>
-      nonNegativeInteger('Ready timeout')(String(editing()?.options.readyTimeout ?? '')),
+      nonNegativeInteger('Ready timeout')(String(formProfile()?.options.readyTimeout ?? '')),
   })
 
   const credentialValidation = createFormValidation({
@@ -818,14 +851,8 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     const cred = editingCredential()
     if (cred) return renderCredentialForm(cred)
 
-    const ed = editing()
-    if (ed) return renderProfileForm(ed)
-
-    const selId = selectedID()
-    if (selId) {
-      const p = profiles().find((x) => x.id === selId)
-      if (p) return renderProfileForm(p)
-    }
+    const p = formProfile()
+    if (p) return renderProfileForm(p)
 
     return renderEmpty()
   })
