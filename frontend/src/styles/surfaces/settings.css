@@ -55,6 +55,12 @@
   align-items: center;
   gap: var(--space-2);
   margin-bottom: 14px;
+  /* The rail's gutter. The section rows below are ghost Buttons carrying their
+     own horizontal padding, so their count badges sit 10px in from the rail's
+     edge; this row had none and its badge sat flush against it, leaving the two
+     counts 10px out of column. The gutter is the rail's, so every row in it
+     keeps the same one. */
+  padding: 0 10px;
 }
 
 .ui-settings-filter .ui-badge[data-tone='warning'] {
@@ -152,22 +158,34 @@
 /* The label's prominence is a Field variant now (labelProminence="primary"), not
    something this surface paints onto `.ui-field label` from outside. T20, nocx-etu2. */
 
-/* Control on top, "Reset to default" beneath it, both flush right.
-   The link is out of flow on purpose: in flow it made the control column two
-   lines tall and the control itself jumped upward the moment a setting was
-   changed — the toggle moved as a side effect of using it. */
+/* The control column stacks: the control line first, then hints and errors under
+   it, all flush right. The reset affordance is no longer part of that stack — it
+   sits on the control's own line, see below. */
 .ui-settings-row .ui-field-control-col {
-  position: relative;
   flex-direction: column;
   align-items: flex-end;
 }
 
+/* The control and its reset affordance on one line, so the icon is level with
+   the control by construction rather than by a hand-picked offset. */
+.ui-settings-control-line {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+/* A slot of fixed width, always present. The icon inside it comes and goes with
+   the row's modified state; if the slot came and went too, the control would
+   shift sideways the moment a value changed — the same defect the modified dot
+   had on the label side. Right of the control, not under it: under it is where
+   the pointer already is after operating the control, which is what made the old
+   full-width button one slip away from undoing the change just made. */
 .ui-settings-row .ui-settings-provenance {
-  position: absolute;
-  top: 100%;
-  right: 0;
-  margin-top: var(--space-1);
-  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 18px;
 }
 
 /* Spacing only. The description's size and colour are Field's own and are declared
@@ -179,26 +197,14 @@
   margin-top: var(--space-1);
 }
 
-/* Storage class and search breadcrumb — inline tags on the label, quiet enough
-   to skip when scanning and legible when looked for. */
-
-.ui-settings-data-class {
-  display: inline-block;
-  margin-left: var(--space-2);
-  padding: 1px 6px;
-  border-radius: var(--control-radius-sm);
-  background: var(--color-surface-sunken);
-  color: var(--color-text-dim);
-  font-size: 10px;
-  font-weight: 500;
-  letter-spacing: 0.02em;
-  vertical-align: 1px;
-}
+/* The search breadcrumb — an inline tag on the label, quiet enough to skip when
+   scanning and legible when looked for. The storage-class tag that shared this
+   rule is gone with its markup: nothing consulted `dataClass`. */
 
 .ui-settings-breadcrumb {
   display: inline-block;
   margin-left: var(--space-2);
-  font-size: 10px;
+  font-size: var(--font-size-2xs);
   color: var(--color-accent);
   text-transform: uppercase;
   letter-spacing: 0.3px;
@@ -231,7 +237,7 @@
 /* ── Error message ────────────────────────────────────────────────── */
 
 .ui-settings-error {
-  font-size: 11px;
+  font-size: var(--font-size-2xs);
   color: var(--color-danger);
   margin-top: 4px;
 }
@@ -285,25 +291,30 @@
    real affordance lives — and on rows where it was absent the control jumped
    sideways. Underneath, the control's position is stable across every row and
    the undo is where you look only once you want it. */
-.ui-settings-provenance {
-  display: inline-flex;
-  align-items: center;
-  font-size: var(--font-size-sm);
-}
-
 /* The changed-row marker the badge used to be. Scoped to the row's own label so
    it cannot leak into the export cards nested further down. */
 /* The dot is an element the surface hands to Field's `labelMarker` slot now, not a
    pseudo-element drawn through two kit identities (nocx-etu2). Composition says the
    same thing without tunnelling into the component's internals. */
+/* The dot hangs in the page gutter instead of standing in the label's way.
+   Reserving its box in the flow kept the labels in one column but moved that
+   column 14px right of the section heading above it — the row no longer jumped,
+   it was just permanently indented. The negative margin cancels the box it
+   occupies, so the label starts exactly where it would with no dot at all and
+   the marker sits to its left, in space the page's 28px gutter already has. */
 .ui-settings-modified-dot {
   display: inline-block;
   width: 6px;
   height: 6px;
   margin-right: var(--space-2);
+  margin-left: calc(-6px - var(--space-2));
   border-radius: 50%;
-  background: var(--color-warning);
+  background: transparent;
   vertical-align: 2px;
+}
+
+.ui-settings-modified-dot[data-modified='true'] {
+  background: var(--color-warning);
 }
 
 .st-vis-hidden {

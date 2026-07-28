@@ -1,2 +1,5 @@
 export { default as SettingsIcon } from './SettingsIcon'
 export { default as SearchIcon } from './SearchIcon'
+export { default as ResetIcon } from './ResetIcon'
+export { default as ChevronDownIcon } from './ChevronDownIcon'
+export { default as PlusIcon } from './PlusIcon'

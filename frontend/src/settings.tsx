@@ -44,7 +44,9 @@ import {
   Button,
   Badge,
   Field,
+  IconButton,
 } from './ui'
+import { ResetIcon } from './ui/icons'
 
 // ── Settings page registry type (Deliverable 2) ────────────────────────
 
@@ -91,6 +93,11 @@ type LoadState = 'loading' | 'ready' | 'failed' | 'empty'
 export interface SettingsComponentHandle {
   focus(): void
   scrollToKey(key: string): void
+  /**
+   * Show the Connections page with a blank profile open for editing — the
+   * quick-connect palette's "New connection" entry point.
+   */
+  newConnection(): void
   /** Resolves when the initial data load completes. */
   ready(): Promise<void>
 }
@@ -117,6 +124,11 @@ export function SettingsComponent(props: SettingsComponentProps) {
   const [searchQuery, setSearchQuery] = createSignal('')
   const [modifiedOnly, setModifiedOnly] = createSignal(false)
   const [activeComponentPage, setActiveComponentPage] = createSignal<string | null>(null)
+  // A counter rather than a flag: the Connections page has to start a blank
+  // profile every time the palette asks, including the second time, and a
+  // boolean would need a reset that both sides have to remember to do. Zero
+  // means "nobody asked", which is what a normally-opened Settings tab reads.
+  const [newConnectionRequest, setNewConnectionRequest] = createSignal(0)
   const [sectionFilter, setSectionFilter] = createSignal<string | null>(null)
 
   // Promise that resolves when the initial data load finishes.
@@ -302,7 +314,11 @@ export function SettingsComponent(props: SettingsComponentProps) {
       title: 'Connections',
       scrollMode: 'contained',
       renderContent: () => (
-        <ConnectionsView client={props.profileClient} onConnect={props.onConnect} />
+        <ConnectionsView
+          client={props.profileClient}
+          onConnect={props.onConnect}
+          newProfileRequest={newConnectionRequest()}
+        />
       ),
     }
     return [...generated, exportPage, connectionPage]
@@ -486,6 +502,15 @@ export function SettingsComponent(props: SettingsComponentProps) {
         { once: true },
       )
     },
+    newConnection(): void {
+      // Clear the filters first: with a search still active the Connections page
+      // is not among the pages the rail offers, and the request would land on a
+      // page nobody can see.
+      setSearchQuery('')
+      setSectionFilter(null)
+      setActiveComponentPage('connections')
+      setNewConnectionRequest((n) => n + 1)
+    },
     ready(): Promise<void> {
       return readyPromise
     },
@@ -582,18 +607,6 @@ export function SettingsComponent(props: SettingsComponentProps) {
 
   // ── Render helpers ─────────────────────────────────────────────────
 
-  function renderDataClassIndicator(dataClass: Declaration['dataClass']): string {
-    switch (dataClass) {
-      case 'publicConfig':
-        return 'Public'
-      case 'privateMetadata':
-      case 'privateContent':
-        return 'Private'
-      case 'secretAuthenticator':
-        return 'Secret'
-    }
-  }
-
   // ── Sub-components ─────────────────────────────────────────────────
 
   /**
@@ -605,6 +618,14 @@ export function SettingsComponent(props: SettingsComponentProps) {
    * button beside it did not already say. What a changed row now carries is a
    * dot on its label (`.ui-settings-row--modified`) — scannable down the
    * column, and out of the control's way.
+   *
+   * The affordance itself is an icon at the right end of the row, in a gutter the
+   * row reserves whether or not it is showing one. It used to be a full "Reset to
+   * default" button sitting directly BELOW the control — which is where the
+   * pointer already is after operating that control, so the two were one slip
+   * apart. Sideways with a gap costs the same pixels and is not on that path.
+   * Icon-only, so `ariaLabel` is not optional; `title` carries the same words the
+   * button used to spell out.
    */
   function ProvenanceBadge(props: { decl: Declaration }) {
     // eslint-disable-next-line solid/reactivity
@@ -614,12 +635,24 @@ export function SettingsComponent(props: SettingsComponentProps) {
         ? canResetSetting(overridden(), decl.key)
         : ({ canReset: false, reason: 'notOverridden' } as const)
 
+    // The SLOT is unconditional and the icon inside it is not. With the `Show`
+    // around the span, the slot itself came and went and the control shifted
+    // sideways the moment a value changed — the control moving as a side effect
+    // of being used, which is the same defect the modified dot had on the label
+    // side. Its width is reserved in settings.css.
     return (
-      <Show when={decl.default !== undefined && decision().canReset}>
-        <span class="ui-settings-provenance">
-          <Button onClick={() => void resetSetting(decl.key)}>Reset to default</Button>
-        </span>
-      </Show>
+      <span class="ui-settings-provenance">
+        <Show when={decl.default !== undefined && decision().canReset}>
+          <IconButton
+            size="xs"
+            ariaLabel={'Reset "' + decl.label + '" to default'}
+            title="Reset to default"
+            onClick={() => void resetSetting(decl.key)}
+          >
+            <ResetIcon />
+          </IconButton>
+        </Show>
+      </span>
     )
   }
 
@@ -645,21 +678,28 @@ export function SettingsComponent(props: SettingsComponentProps) {
           label={decl.label}
           labelProminence="primary"
           labelMarker={
-            <Show when={isModified(decl)}>
-              <span class="ui-settings-modified-dot" aria-hidden="true" />
-            </Show>
+            // Always rendered, coloured only when modified. Under a `Show` the
+            // dot's 6px box and its margin entered the flow the moment a value
+            // was changed, so the label jumped 14px sideways — the row moved to
+            // report that it had not moved. Reserving the space costs nothing on
+            // an unmodified row and keeps the labels in one column.
+            <span
+              class="ui-settings-modified-dot"
+              data-modified={isModified(decl) ? 'true' : undefined}
+              aria-hidden="true"
+            />
           }
           description={decl.description || undefined}
           orientation="horizontal"
           labelAdornment={
-            <>
-              <Show when={showBreadcrumb()}>
-                <span class="ui-settings-breadcrumb">{decl.section}</span>
-              </Show>
-              <span class="ui-settings-data-class" title={'Storage class: ' + decl.dataClass}>
-                {renderDataClassIndicator(decl.dataClass)}
-              </span>
-            </>
+            // The storage-class tag (Public / Private / Secret) used to sit here.
+            // It is gone: nothing in the product consulted `dataClass` — export
+            // eligibility is decided by the control kind in Registry.GetSnapshot,
+            // not by the class — so the tag printed one of three words on every
+            // row with no consequence attached to any of them.
+            <Show when={showBreadcrumb()}>
+              <span class="ui-settings-breadcrumb">{decl.section}</span>
+            </Show>
           }
         >
           <Show when={decl.control === 'number'}>
@@ -676,65 +716,70 @@ export function SettingsComponent(props: SettingsComponentProps) {
             </span>
           </Show>
 
-          <Show when={decl.control === 'toggle'}>
-            <Checkbox
-              variant="switch"
-              checked={!!eff()}
-              ariaLabel={decl.label}
-              onChange={(c) => void saveSetting(decl.key, c)}
-            />
-          </Show>
+          {/* One line: the control and its reset affordance, side by side. The
+              wrapper is the surface's own, so the reset sits level with the
+              control without the surface reaching into Field's column. */}
+          <div class="ui-settings-control-line">
+            <Show when={decl.control === 'toggle'}>
+              <Checkbox
+                variant="switch"
+                checked={!!eff()}
+                ariaLabel={decl.label}
+                onChange={(c) => void saveSetting(decl.key, c)}
+              />
+            </Show>
 
-          <Show when={decl.control === 'text'}>
-            <TextField
-              value={displayValue(eff(), decl)}
-              onInput={(v) => void saveSetting(decl.key, v)}
-            />
-          </Show>
+            <Show when={decl.control === 'text'}>
+              <TextField
+                value={displayValue(eff(), decl)}
+                onInput={(v) => void saveSetting(decl.key, v)}
+              />
+            </Show>
 
-          <Show when={decl.control === 'number'}>
-            <TextField
-              type="number"
-              value={displayValue(eff(), decl)}
-              min={decl.min}
-              max={decl.max}
-              onInput={(v) => {
-                const n = Number(v)
-                void saveSetting(decl.key, isNaN(n) ? Number(displayValue(eff(), decl)) : n)
-              }}
-            />
-          </Show>
-
-          <Show when={decl.control === 'select'}>
-            <Select
-              value={displayValue(eff(), decl)}
-              onChange={(v) => void saveSetting(decl.key, v)}
-              options={decl.options ?? []}
-            />
-          </Show>
-
-          <Show when={decl.control === 'secret'}>
-            <div class="ui-settings-secret">
-              <span class="ui-settings-secret-status">
-                {secretStates[decl.key] ? 'Configured' : 'Not configured'}
-              </span>
-              <Button
-                variant="default"
-                onClick={() => {
-                  const value = prompt('Enter new value for "' + decl.label + '":')
-                  if (value === null) return
-                  void saveSecret(decl.key, value)
+            <Show when={decl.control === 'number'}>
+              <TextField
+                type="number"
+                value={displayValue(eff(), decl)}
+                min={decl.min}
+                max={decl.max}
+                onInput={(v) => {
+                  const n = Number(v)
+                  void saveSetting(decl.key, isNaN(n) ? Number(displayValue(eff(), decl)) : n)
                 }}
-              >
-                Replace
-              </Button>
-              <Button variant="danger" onClick={() => void deleteSecret(decl.key)}>
-                Clear
-              </Button>
-            </div>
-          </Show>
+              />
+            </Show>
 
-          <ProvenanceBadge decl={decl} />
+            <Show when={decl.control === 'select'}>
+              <Select
+                value={displayValue(eff(), decl)}
+                onChange={(v) => void saveSetting(decl.key, v)}
+                options={decl.options ?? []}
+              />
+            </Show>
+
+            <Show when={decl.control === 'secret'}>
+              <div class="ui-settings-secret">
+                <span class="ui-settings-secret-status">
+                  {secretStates[decl.key] ? 'Configured' : 'Not configured'}
+                </span>
+                <Button
+                  variant="default"
+                  onClick={() => {
+                    const value = prompt('Enter new value for "' + decl.label + '":')
+                    if (value === null) return
+                    void saveSecret(decl.key, value)
+                  }}
+                >
+                  Replace
+                </Button>
+                <Button variant="danger" onClick={() => void deleteSecret(decl.key)}>
+                  Clear
+                </Button>
+              </div>
+            </Show>
+
+            <ProvenanceBadge decl={decl} />
+          </div>
 
           <Show when={err()}>
             <div class="ui-settings-error">{err()}</div>
