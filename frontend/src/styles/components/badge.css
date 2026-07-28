@@ -1,13 +1,13 @@
 /* Badge — one base shape + tone overrides.
    Per §3.1: class="ui-badge" on the element, data-tone for variance.
-   The 10px font-size is one of the 52 px values outside the token layer that gate 7
-   will reject; no token in tokens.css carries 10px so it stays as-is. */
+   Font-size uses --font-size-2xs, the scale token for the "smaller than body"
+   register that nocx-pp3y.2 established. */
 
 .ui-badge {
   display: inline-block;
   padding: 1px 6px;
   border-radius: var(--control-radius-sm);
-  font-size: 10px;
+  font-size: var(--font-size-2xs);
   font-weight: 500;
   line-height: 1.4;
 }

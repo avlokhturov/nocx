@@ -1,0 +1,14 @@
+/* Fixture tokens.css for px-font-size-token rule.
+   A px font-size token that is NOT one of the two exceptions must be reported.
+   A rem font-size token must NOT be reported.
+   --font-size-terminal in px must NOT be reported (the explicit exception). */
+:root {
+  /* Reported: px font-size token that is not the base or terminal exception. */
+  --font-size-bad: 14px;
+
+  /* NOT reported: rem font-size token — correct relative scale. */
+  --font-size-good: 0.875rem;
+
+  /* NOT reported: the terminal exception is explicitly allowed. */
+  --font-size-terminal: 13px;
+}

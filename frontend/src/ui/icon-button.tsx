@@ -5,7 +5,7 @@ import { splitProps, type JSX } from 'solid-js'
  * see icon-button.css: a rail button's hit area belongs to the rail, its icon does
  * not.
  */
-export type IconButtonSize = 'sm' | 'md' | 'lg'
+export type IconButtonSize = 'xs' | 'sm' | 'md' | 'lg'
 
 export interface IconButtonProps {
   /**

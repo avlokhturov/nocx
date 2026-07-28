@@ -4,7 +4,7 @@
 # that the AST kit-identity scanner matches fixture expectations,
 # that the CSS colour grammar checker catches violation patterns,
 # and that the CSS integrity checker catches every one of its violation classes —
-# nine as of nocx-zhjx, each asserted by name below, several in both directions.
+# ten as of nocx-pp3y.2, each asserted by name below, several in both directions.
 # Run from the frontend/ directory (e.g. via `npm run lint:fixture-check`).
 # Exits 0 if all rules fire, 1 otherwise.
 set -eu
@@ -50,7 +50,7 @@ integrity_check=$(node "${fixture_dir}/check-css-integrity.mjs" \
   --styles="${fixture_dir}/css-integrity-fixture/styles" \
   --ui="${fixture_dir}/css-integrity-fixture/ui" 2>/dev/null || true)
 
-for rule in unreachable escaped-dot undefined-var theme-scope bare-type-selector control-css-outside-kit kit-scope-selector surface-paints-kit untokenised-type; do
+for rule in unreachable escaped-dot undefined-var theme-scope bare-type-selector control-css-outside-kit kit-scope-selector surface-paints-kit untokenised-type px-font-size-token; do
   if ! echo "$integrity_check" | grep -q "\"rule\":\"${rule}\""; then
     echo "CSS INTEGRITY GATE FAILED — rule '${rule}' did not fire on the fixture"
     exit 1
@@ -109,6 +109,22 @@ done
 # `var(--token)` in either property, and `font: inherit`, are the correct spellings.
 if echo "$integrity_check" | grep -q 'fixture-tokenised\|inherit'; then
   echo "CSS INTEGRITY GATE FAILED — rule 7 reported a declaration that reads a token or inherits"
+  exit 1
+fi
+
+# Rule: px font-size tokens in tokens.css must be relative (rem).
+if ! echo "$integrity_check" | grep -q 'font-size-bad'; then
+  echo "CSS INTEGRITY GATE FAILED — px-font-size-token did not report --font-size-bad: 14px"
+  exit 1
+fi
+# The rem token (--font-size-good: 0.875rem) must NOT be reported.
+if echo "$integrity_check" | grep -q '"font-size-good"'; then
+  echo "CSS INTEGRITY GATE FAILED — px-font-size-token reported a rem token (--font-size-good)"
+  exit 1
+fi
+# The terminal exception (--font-size-terminal: 13px) must NOT be reported.
+if echo "$integrity_check" | grep -q 'font-size-terminal'; then
+  echo "CSS INTEGRITY GATE FAILED — px-font-size-token reported the terminal exception (--font-size-terminal)"
   exit 1
 fi
 
@@ -228,5 +244,5 @@ if [ -z "$ts_reactivity" ]; then
   exit 1
 fi
 
-echo "OK — all 10 lint rules fired; kit identities verified; CSS colour + integrity verified (9 integrity rules)"
+echo "OK — all 10 lint rules fired; kit identities verified; CSS colour + integrity verified (10 integrity rules)"
 exit 0

@@ -395,100 +395,6 @@ function findSurfacePaintingKit(ast, kitIdentities) {
  */
 const TYPE_EXEMPTIONS = [
   {
-    file: 'src/style.css',
-    value: '11px',
-    count: 1,
-    bead: 'nocx-pp3y.2',
-    reason: 'the command editor chrome — the register the scale does not have',
-  },
-  {
-    file: 'src/styles/components/tab-strip.css',
-    value: '11px',
-    count: 2,
-    bead: 'nocx-pp3y.2',
-    reason: 'the tab bar and the vertical strip — the chrome register',
-  },
-  {
-    file: 'src/styles/components/sidebar.css',
-    value: '11px',
-    count: 1,
-    bead: 'nocx-pp3y.2',
-    reason:
-      'the panel title, which arrived here as a `font:` shorthand hiding both this size and a literal family',
-  },
-  {
-    file: 'src/styles/surfaces/connections.css',
-    value: '11px',
-    count: 1,
-    bead: 'nocx-pp3y.2',
-    reason: 'the connection row meta line — the chrome register',
-  },
-  {
-    file: 'src/style.css',
-    value: '14px',
-    count: 5,
-    bead: 'nocx-pp3y.2',
-    reason:
-      'terminal text in the DOM. xterm draws the live screen at FONT_SIZE = 13, so these five are also 1px out from the canvas showing the same content — a defect to decide on a running page, not to round',
-  },
-  {
-    file: 'src/styles/components/badge.css',
-    value: '10px',
-    count: 1,
-    bead: 'nocx-pp3y.2',
-    reason: 'the smallest register; no token is this size and inventing one is a scale decision',
-  },
-  {
-    file: 'src/styles/components/button.css',
-    value: '11px',
-    count: 1,
-    bead: 'nocx-pp3y.2',
-    reason: "data-size='sm' — the chrome register, same decision as style.css's 11px",
-  },
-  {
-    file: 'src/styles/components/tab.css',
-    value: '11px',
-    count: 1,
-    bead: 'nocx-pp3y.2',
-    reason: 'the tab index pill — the chrome register',
-  },
-  {
-    file: 'src/styles/components/icon-button.css',
-    value: '16px',
-    count: 1,
-    bead: 'nocx-pp3y.2',
-    reason:
-      "data-size='sm' sizes the '×' glyph rather than type; if it moves it becomes an icon-size declaration, not a font-size token",
-  },
-  {
-    file: 'src/styles/surfaces/settings.css',
-    value: '10px',
-    count: 2,
-    bead: 'nocx-pp3y.2',
-    reason: 'the settings badge and breadcrumb — the smallest register',
-  },
-  {
-    file: 'src/styles/surfaces/settings.css',
-    value: '11px',
-    count: 1,
-    bead: 'nocx-pp3y.2',
-    reason: 'the settings error line — the chrome register',
-  },
-  {
-    file: 'src/styles/surfaces/export.css',
-    value: '11px',
-    count: 1,
-    bead: 'nocx-pp3y.2',
-    reason: 'the backup details block — the chrome register',
-  },
-  {
-    file: 'src/styles/surfaces/update-notice.css',
-    value: '10px',
-    count: 1,
-    bead: 'nocx-pp3y.2',
-    reason: 'the update notice — the smallest register',
-  },
-  {
     // Fixture entry, and the only one that is deliberately WRONG. The fixture file has
     // one occurrence and this allows two, so the "count may only shrink" half of the
     // rule has something to fire on — otherwise that half would ship unwatched, which
@@ -554,6 +460,38 @@ function findKitScopeSelectors(ast) {
     enter(node) {
       if (node.name === 'kit-scope') {
         hits.push({ selector: `.${node.name}`, line: node.loc?.start.line ?? 0 })
+      }
+    },
+  })
+  return hits
+}
+
+/**
+ * Rule: font-size tokens in tokens.css must be relative (rem), not absolute (px).
+ *
+ * The zoom guarantee depends on every type size being a ratio of --font-size-base,
+ * so a token written in px bypasses the single-number zoom contract. --font-size-base
+ * itself MUST be in px (a rem base would be circular — rem resolves to html's
+ * font-size, which is derived from the base). The terminal is the other exception:
+ * its size MUST be in px because xterm rasterises from TypeScript and does not scale
+ * with the CSS root (AD-6). Every other --font-size-* token must be in rem.
+ */
+const PX_TOKEN_EXCEPTIONS = new Set(['--font-size-base', '--font-size-terminal'])
+
+function findPxFontSizeTokens(ast) {
+  const hits = []
+  css.walk(ast, {
+    visit: 'Declaration',
+    enter(node) {
+      if (!node.property.startsWith('--font-size-')) return
+      if (PX_TOKEN_EXCEPTIONS.has(node.property)) return
+      const value = css.generate(node.value).trim()
+      if (/(^|[^-\w])\d+(\.\d+)?px$/.test(value)) {
+        hits.push({
+          property: node.property,
+          value,
+          line: node.loc?.start.line ?? 0,
+        })
       }
     },
   })
@@ -686,6 +624,19 @@ export function checkCSSIntegrity({ entry, stylesDir, uiDir }) {
         prev.count += 1
         prev.lines.push(hit.line)
         typeHits.set(key, prev)
+      }
+    }
+
+    // Rule: px font-size tokens in tokens.css bypass the relative-scale contract.
+    // --font-size-base and --font-size-terminal are the only allowed px tokens.
+    if (resolve(file) === resolve(stylesAbs, 'tokens.css')) {
+      for (const hit of findPxFontSizeTokens(ast)) {
+        violations.push({
+          rule: 'px-font-size-token',
+          file: rel(file),
+          line: hit.line,
+          detail: `${hit.property}: ${hit.value} must be in rem, not px — every type-size declaration must be relative to the base so zoom scales the whole UI. Only the base anchor and the terminal-size token are allowed in px.`,
+        })
       }
     }
 

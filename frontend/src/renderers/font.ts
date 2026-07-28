@@ -10,5 +10,5 @@ export const FONT_FAMILY =
 // but the GPU atlas path avoids the 2d-canvas antialiasing seams that motivated
 // the earlier analysis. If a 2d renderer returns, see nocx-4kt for whole-pixel
 // sizes (14.12, 16.61).
-export const FONT_SIZE = 13
+export const FONT_SIZE = 14
 export const LINE_HEIGHT = 1.2

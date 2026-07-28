@@ -7,6 +7,23 @@
    and only there. What remains here is what genuinely does not vary by theme:
    control metrics, spacing, type scale and shell dimensions. */
 
+/* ── Root font-size and zoom — one number, everything else relative ─────
+   --font-size-base is THE single declared type size. --ui-scale lets a zoom
+   control change one number and scale the whole UI predictably. Every other
+   type size is a ratio of this base, expressed in rem — NOT em, which
+   compounds with nesting and makes zoom unpredictable.
+
+   The terminal is the one exception: xterm.js rasterises into a GPU atlas
+   from TypeScript and does not scale with the CSS root, so --font-size-terminal
+   stays in px and MUST equal FONT_SIZE in renderers/font.ts. AD-6. */
+:root {
+  --font-size-base: 14px;
+  --ui-scale: 1;
+}
+html {
+  font-size: calc(var(--font-size-base) * var(--ui-scale));
+}
+
 :root,
 [data-theme] {
   /* ── Control metrics (§2.4) ──────────────────────────────────────── */
@@ -30,16 +47,19 @@
      proportional UI font the same numbers read small, so every step moves up
      one notch. Terminal type is not on this scale — renderers/font.ts owns
      that, deliberately, because it is content rather than chrome. */
-  /* Below the body scale: badges, meta rows, captions, the tab index pill. The
-     scale went 13/15/18/22 and had no step for "smaller than body", so 26 places
-     spelled one out in px — 12px fourteen times, which is what this is. The 10px
-     and 11px uses are a separate question and deliberately not folded in here:
-     collapsing them would be a visual change decided by arithmetic. */
-  --font-size-xs: 12px;
-  --font-size-sm: 13px;
-  --font-size-md: 15px;
-  --font-size-lg: 18px;
-  --font-size-xl: 22px;
+  /* ── Type scale (all rem, relative to --font-size-base) ────────────────
+     --font-size-2xs fills the "smaller than body" register that 10px and 11px
+     both meant before the scale had a name for it. */
+  --font-size-2xs: 0.75rem;
+  --font-size-xs: 0.8rem;
+  --font-size-sm: 0.875rem;
+  --font-size-md: 1rem;
+  --font-size-lg: 1.2rem;
+  --font-size-xl: 1.45rem;
+  /* Terminal text — deliberately px, see header comment. MUST equal
+     frontend/src/renderers/font.ts::FONT_SIZE. Protected by unit test and
+     CSS integrity rule. */
+  --font-size-terminal: 14px;
 
   /* ── Shell layout (§2.5) ──────────────────────────────────────────── */
   --sidebar-width: 240px;

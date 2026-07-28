@@ -47,7 +47,7 @@
 .sidebar-title {
   padding: 10px 16px;
   font-family: var(--font-family-ui);
-  font-size: 11px;
+  font-size: var(--font-size-2xs);
   font-weight: 600;
   line-height: 1;
   letter-spacing: 0.08em;

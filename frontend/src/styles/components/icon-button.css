@@ -41,10 +41,27 @@
   position: relative;
 }
 
+/* The quietest step: an affordance that sits beside a control rather than being
+   one, like the reset arrow on a settings row. Small enough not to compete with
+   the control it belongs to, still a 18px target. */
+.ui-icon-button[data-size='xs'] {
+  width: 18px;
+  height: 18px;
+}
+
+.ui-icon-button[data-size='xs'] > svg {
+  width: 13px;
+  height: 13px;
+}
+
 .ui-icon-button[data-size='sm'] {
   width: 22px;
   height: 22px;
-  font-size: 16px;
+}
+
+.ui-icon-button[data-size='sm'] > svg {
+  width: 16px;
+  height: 16px;
 }
 
 .ui-icon-button[data-size='md'] {

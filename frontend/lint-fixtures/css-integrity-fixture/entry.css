@@ -2,6 +2,7 @@
    checker must fire against this tree. Not part of the app stylesheet.
    `styles/orphan.css` is deliberately absent from this import list. */
 @import './styles/loaded.css';
+@import './styles/tokens.css';
 @import './styles/themes/fixture-theme.css';
 @import './styles/components/fixture-component.css';
 @import './styles/surfaces/fixture-surface.css';

@@ -24,7 +24,6 @@ body {
      declared there, every overlay fell back to the UA serif while the app
      around it was correct. */
   font-family: var(--font-family-ui);
-  font-size: var(--font-size-md);
   color: var(--color-text);
 }
 
