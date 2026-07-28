@@ -16,7 +16,9 @@ dev:
 # The same app in an ordinary browser instead of the Wails webview: backend
 # (cmd/devharness, real PTY) plus vite with the Wails bindings shimmed. Needs no
 # display, no GTK — forward both ports over SSH and open http://localhost:5180.
-# Ports: NOCX_WS_PORT=9876, NOCX_WEB_PORT=5180 (5173 belongs to the e2e suite).
+# Ports: NOCX_WS_PORT=9880, NOCX_WEB_PORT=5180. Neither is shared with anything
+# else: 5173 belongs to `npm run dev` and the e2e suite, 9876 to the e2e suite's
+# devharness, 34115 to `wails dev`.
 dev-web:
 	./scripts/dev-web.sh
 

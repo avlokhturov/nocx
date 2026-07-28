@@ -10,9 +10,13 @@
 import { defineConfig, mergeConfig, type Plugin } from 'vite'
 import base from './vite.config'
 
-const port = Number(process.env.NOCX_WS_PORT ?? '9876')
+// The fallbacks match scripts/dev-web.sh, which is what normally sets all three.
+// They matter anyway: run this config by hand and the old 5173 fallback put the
+// dev stand straight onto the port `npm run dev` and the headless e2e suite both
+// serve from, which is the collision the script goes out of its way to avoid.
+const port = Number(process.env.NOCX_WS_PORT ?? '9880')
 const token = process.env.NOCX_WS_TOKEN ?? ''
-const webPort = Number(process.env.NOCX_WEB_PORT ?? '5173')
+const webPort = Number(process.env.NOCX_WEB_PORT ?? '5180')
 
 const wailsShim: Plugin = {
   name: 'nocx-dev-wails-shim',

@@ -14,10 +14,26 @@
 # gate. This script reads both values off the backend's stdout and hands them
 # to vite, so the pair is never copied by hand.
 #
-# Ports (override by env): NOCX_WS_PORT=9876, NOCX_WEB_PORT=5180.
+# Ports (override by env): NOCX_WS_PORT=9880, NOCX_WEB_PORT=5180.
+#
+# Both halves are deliberately off every other consumer's port, because a dev
+# stand that quietly shares a socket with the test suite is worse than one that
+# refuses to start:
+#
+#   5173       `npm run dev` AND the headless e2e vite (playwright BASE_URL)
+#   9876       the WS port the headless e2e runbook pins for devharness
+#   34115      the wails dev asset server
+#   32768+     the ephemeral range wails dev's own backend (127.0.0.1:0) lands in
+#
+# 5180 and 9880 are in none of those, the last one by arithmetic rather than by
+# luck: both sit below the ephemeral floor, so a `wails dev` running alongside
+# cannot draw one of them at random.
 set -euo pipefail
 
-WS_PORT="${NOCX_WS_PORT:-9876}"
+# Deliberately NOT 9876: that is the port the headless e2e path pins for its own
+# devharness, so sharing it means a test run and a look-and-see session evict
+# each other on the backend socket.
+WS_PORT="${NOCX_WS_PORT:-9880}"
 # Deliberately NOT 5173: the headless e2e path serves the frontend there
 # (playwright.config.ts BASE_URL), so sharing the port means a test run and a
 # look-and-see session evict each other, or worse, one silently attaches to the
