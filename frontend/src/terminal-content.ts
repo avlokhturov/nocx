@@ -650,6 +650,26 @@ export class TerminalContent extends BaseTabContent {
    * drawn. Clamping the live region cannot fix that; it only decides where the
    * clipping happens. The grid has to be the size of the space it is shown in
    * (nocx-6w4z).
+   *
+   * The width is the same statement one axis over, and it was left unmade until
+   * nocx-vydj. The delivered width is `pane.getBoundingClientRect().width`, a
+   * BORDER box — it counts the `padding: 0 10px` on `.pane`, which is breathing
+   * room around the text and not space the grid may use. `cols` was therefore
+   * computed from 20px that do not exist, and the last columns were laid out
+   * past the right edge of `.xterm-inner`, whose `overflow: hidden` cut them
+   * mid-glyph.
+   *
+   * That it read as a Wails-only defect is the scrollbar gutter: measured at a
+   * 1232px pane, `.scrollback-area` is 1212 wide in both engines, but its
+   * clientWidth is 1202 in Chromium and 1212 in WebKit, because
+   * `scrollbar-gutter: stable` reserves in one and is ignored by the other. Same
+   * build, same grid, two different overhangs — 20px in a browser, 10 in
+   * WKWebView. Neither is correct, and subtracting a constant for the padding
+   * would have fixed only the browser.
+   *
+   * `clientWidth` of the scroller answers both at once: it is the content box,
+   * so the pane's padding is already gone, and it excludes the scrollbar
+   * whether or not the engine reserved one.
    */
   private lastFitHeight = 0
 
@@ -678,11 +698,13 @@ export class TerminalContent extends BaseTabContent {
   }
 
   private usableViewport(viewport: ContentViewport): ContentViewport {
-    const shown = this.scrollback?.scrollbackArea.clientHeight ?? 0
+    const area = this.scrollback?.scrollbackArea
     // Zero before first layout — the delivered box is the better guess then,
-    // and the next viewport delivery corrects it.
-    if (shown <= 0) return viewport
-    return { ...viewport, height: shown }
+    // and the next viewport delivery corrects it. Each axis falls back on its
+    // own: jsdom reports 0 for both, a real pane mid-layout can report one.
+    const height = area && area.clientHeight > 0 ? area.clientHeight : viewport.height
+    const width = area && area.clientWidth > 0 ? area.clientWidth : viewport.width
+    return { ...viewport, width, height }
   }
 
   /**
