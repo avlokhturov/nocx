@@ -27,3 +27,32 @@
   background: var(--color-border);
   margin: 4px auto;
 }
+
+/* ── Activity bar contents ─────────────────────────────────────────────────
+   Moved from style.css by T20 (nocx-zhjx). `.activity-bar` is this file's
+   already; the rules for what sits inside it belong with it rather than in the
+   shell stylesheet. Placement only — how big a rail button's hit area is, is the
+   rail's business; how big its icon is, is IconButton's `lg` size. */
+.activity-bar .ui-icon-button {
+  width: 100%;
+  height: 48px;
+}
+
+/* ── Panel title ──────────────────────────────────────────────────────────
+   Moved from style.css by T20 (nocx-zhjx), and detokenised on the way: it used a
+   `font:` shorthand that spelled out the UI font stack by hand — character for
+   character the value of `--font-family-ui` — which is how a family escapes the
+   token layer without either half of rule 7 seeing it. The shorthand is now three
+   longhands reading the token; the 11px is the chrome register (nocx-pp3y.2). */
+.sidebar-title {
+  padding: 10px 16px;
+  font-family: var(--font-family-ui);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-dim);
+  -webkit-user-select: none;
+  user-select: none;
+}

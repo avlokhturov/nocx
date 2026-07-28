@@ -397,10 +397,31 @@ const TYPE_EXEMPTIONS = [
   {
     file: 'src/style.css',
     value: '11px',
-    count: 4,
+    count: 1,
+    bead: 'nocx-pp3y.2',
+    reason: 'the command editor chrome — the register the scale does not have',
+  },
+  {
+    file: 'src/styles/components/tab-strip.css',
+    value: '11px',
+    count: 2,
+    bead: 'nocx-pp3y.2',
+    reason: 'the tab bar and the vertical strip — the chrome register',
+  },
+  {
+    file: 'src/styles/components/sidebar.css',
+    value: '11px',
+    count: 1,
     bead: 'nocx-pp3y.2',
     reason:
-      'the chrome register the scale does not have: item meta, the tab bar, the vertical strip, the editor chrome',
+      'the panel title, which arrived here as a `font:` shorthand hiding both this size and a literal family',
+  },
+  {
+    file: 'src/styles/surfaces/connections.css',
+    value: '11px',
+    count: 1,
+    bead: 'nocx-pp3y.2',
+    reason: 'the connection row meta line — the chrome register',
   },
   {
     file: 'src/style.css',
@@ -480,19 +501,38 @@ const TYPE_EXEMPTIONS = [
   },
 ]
 
-/** px font-sizes and non-token font-families in one file. */
+/**
+ * px font-sizes and non-token font-families in one file.
+ *
+ * The `font` shorthand is checked too, and it is not a completeness flourish: the
+ * sidebar panel title used `font: 600 11px/1 ui-sans-serif, -apple-system, …`, spelling
+ * out the value of `--font-family-ui` character for character. It set both a px size and
+ * a literal family, and the longhand-only version of this rule saw neither (nocx-zhjx).
+ * `font: inherit` is how the kit says "take the surrounding type", which is the opposite
+ * of bypassing the scale.
+ */
 function findUntokenisedType(ast) {
   const hits = []
   css.walk(ast, {
     visit: 'Declaration',
     enter(node) {
       const value = css.generate(node.value).trim()
+      const at = node.loc?.start.line ?? 0
+
       if (node.property === 'font-size' && /(^|[^-\w])\d+(\.\d+)?px$/.test(value)) {
-        hits.push({ property: 'font-size', value, line: node.loc?.start.line ?? 0 })
+        hits.push({ property: 'font-size', value, line: at })
         return
       }
       if (node.property === 'font-family' && !value.includes('var(') && value !== 'inherit') {
-        hits.push({ property: 'font-family', value, line: node.loc?.start.line ?? 0 })
+        hits.push({ property: 'font-family', value, line: at })
+        return
+      }
+      if (node.property === 'font' && value !== 'inherit') {
+        const px = value.match(/(^|[^-\w])(\d+(\.\d+)?px)/)
+        if (px) hits.push({ property: 'font (shorthand)', value: px[2], line: at })
+        if (!value.includes('var(')) {
+          hits.push({ property: 'font (shorthand)', value: 'literal family', line: at })
+        }
       }
     },
   })

@@ -55,3 +55,19 @@
 .fixture-stale-exemption {
   font-size: 9px;
 }
+
+/* Reported TWICE — a px size and a literal family, both inside a `font:` shorthand.
+   This is the shape that got past the longhand-only version of the rule in the real
+   tree: the sidebar panel title spelled out the value of --font-family-ui by hand
+   (nocx-zhjx). */
+.fixture-shorthand {
+  font:
+    600 7px/1 ui-sans-serif,
+    sans-serif;
+}
+
+/* NOT reported: `font: inherit` is how the kit says "take the surrounding type", which
+   is the opposite of bypassing the scale. */
+.fixture-font-inherit {
+  font: inherit;
+}

@@ -99,15 +99,16 @@ fi
 # entry allows two 9px declarations and the file has one, so a list that had rotted into
 # a permission slip would say so. And a declaration that READS the token layer must stay
 # silent, or the rule forbids the correct spelling along with the wrong one.
-for want in 'bypasses the token layer' 'may only shrink\|still allows'; do
-  if ! echo "$integrity_check" | grep -q "$want"; then
+for want in 'font-size: 13px' 'font-family: ' 'still allows' 'font (shorthand): 7px' 'font (shorthand): literal family'; do
+  if ! echo "$integrity_check" | grep -qF "$want"; then
     echo "CSS INTEGRITY GATE FAILED — rule 7 did not report: ${want}"
     exit 1
   fi
 done
 
-if echo "$integrity_check" | grep -q 'fixture-tokenised'; then
-  echo "CSS INTEGRITY GATE FAILED — rule 7 reported a declaration that reads a token"
+# `var(--token)` in either property, and `font: inherit`, are the correct spellings.
+if echo "$integrity_check" | grep -q 'fixture-tokenised\|inherit'; then
+  echo "CSS INTEGRITY GATE FAILED — rule 7 reported a declaration that reads a token or inherits"
   exit 1
 fi
 

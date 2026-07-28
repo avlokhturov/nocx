@@ -1,0 +1,44 @@
+/* Clipboard banner — the OSC 52 blocked-write notification.
+
+   Moved verbatim from style.css by T20 (nocx-zhjx): it is a surface, rendered by
+   banner.ts, and the shell stylesheet is not where a surface's rules belong. */
+
+/* ── Clipboard banner (OSC 52 blocked-write notification) ──────────── */
+
+.clipboard-banner {
+  --wails-draggable: no-drag;
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 16px;
+  background: var(--color-surface-sunken);
+  border-left: 3px solid var(--color-warning);
+  border-bottom: 1px solid var(--color-divider);
+  color: var(--color-text);
+  font-family: var(--font-family-ui);
+  font-size: var(--font-size-xs);
+  line-height: 1.4;
+}
+
+.clipboard-banner-message {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.clipboard-banner-actions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* `.clipboard-banner-dismiss` and `.clipboard-banner-btn` are gone: the dismiss
+   control became an IconButton (nocx-wqrq) and the other two became Buttons with
+   variants (nocx-c2t6), so nothing has rendered these classes since. A CSS rule with
+   no element to match looks exactly like one that is merely overridden, which is how
+   they survived two transactions that touched this very block. */

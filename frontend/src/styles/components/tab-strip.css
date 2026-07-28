@@ -1,0 +1,105 @@
+/* TabStrip — the strip that hosts the tabs, in both orientations.
+
+   Moved verbatim from style.css by T20 (nocx-zhjx). TabStripBase renders
+   `.tabs-container` and `.tabbar-spacer` and puts `.tabbar` or `.tabstrip-vertical` on
+   its host, so these are a component's own classes; style.css held them because the
+   strip predates the kit. Tab itself lives in tab.css — the strip and the tab are two
+   components, and the two files say so.
+
+   The `#app.alt-screen` rules come with them. They read as app-level because of the
+   `#app` in front, but what they express is how the STRIP responds to a terminal in the
+   alternate buffer: the bar stays as a backdrop for the window controls and its contents
+   go. Leaving them behind would have left style.css owning part of this component's
+   appearance, which is the arrangement this epic exists to end. */
+
+/* ── Tab bar (Tabby-inspired) ─────────────────────────────────────────── */
+
+.tabbar {
+  --wails-draggable: drag;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: stretch;
+  height: 38px;
+  padding: 0 0 0 var(--titlebar-inset-start, 0);
+  background: var(--color-chrome);
+  border-bottom: 1px solid var(--color-divider);
+  font-family: var(--font-family-ui);
+  font-size: 11px;
+  line-height: 1;
+  -webkit-user-select: none;
+  user-select: none;
+  overflow: hidden;
+}
+
+/* When the active tab is in alt-screen mode (e.g. vim, htop, less),
+   keep the tabbar visible as a backdrop for the macOS traffic lights
+   but hide all tab content. The tabbar sits above the fullscreen xterm
+   via z-index so the traffic lights don't overlap terminal content. */
+#app.alt-screen .tabbar {
+  z-index: 101;
+}
+#app.alt-screen .tabs-container,
+#app.alt-screen .tabbar-spacer,
+#app.alt-screen .tabs-container + .ui-icon-button {
+  display: none;
+}
+
+.tabs-container {
+  flex: 0 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: stretch;
+}
+
+/* ── Flexible spacer ── absorbs leftover width so tabs never stretch ── */
+
+.tabbar-spacer {
+  flex: 1 1 0%;
+}
+
+/* ── Vertical tab strip ──────────────────────────────────────────────── */
+
+.tabstrip-vertical {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  width: 240px;
+  background: var(--color-chrome);
+  border-right: 1px solid var(--color-divider);
+  font-family: var(--font-family-ui);
+  font-size: 11px;
+  line-height: 1;
+  -webkit-user-select: none;
+  user-select: none;
+  overflow: hidden;
+}
+
+.tabstrip-vertical .tabs-container {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  min-height: 0;
+
+  /* The rule that separates the tab list from the strip's actions. It was declared
+     as `border-top` on the New-tab IconButton — a surface drawing a line on a kit
+     component, which rule 3 forbids. The strip's own chrome belongs to the strip:
+     the container and the button are adjacent with no gap, so the line lands in the
+     same place, and it now survives the button changing (T20, nocx-zhjx). */
+  border-bottom: 1px solid var(--color-divider);
+}
+
+/* ── Tabstrip button sizing ───────────────────────────────── */
+.tabbar > .ui-icon-button {
+  flex: none;
+  width: 30px;
+  height: 100%;
+}
+
+.tabstrip-vertical .tabs-container + .ui-icon-button {
+  flex: 0 0 auto;
+  width: 100%;
+}
+
+/* Square corners are `square` on IconButton now, not a shape this surface imposes
+   from outside (T20, nocx-etu2). */
