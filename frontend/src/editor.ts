@@ -130,7 +130,15 @@ export class CommandEditor {
   show(): void {
     this._shownOnce = true
     this.root.style.display = ''
-    this.root.style.visibility = 'visible'
+    // CLEARED, not set to 'visible'. An inactive pane is hidden with
+    // `visibility: hidden` on purpose (base.css) so its renderer keeps measuring
+    // a real size — and `visibility`, unlike `display`, is overridable by a
+    // descendant. An inline `visible` here therefore re-painted the editor of a
+    // tab the user had switched away from, on top of the active tab's editor at
+    // the very same coordinates: you typed into the one below and watched the
+    // empty one above. Clearing the property lets the pane decide, which is
+    // where that decision belongs.
+    this.root.style.visibility = ''
     this.ta.focus()
   }
 

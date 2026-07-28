@@ -22,8 +22,23 @@ import { BaseTabContent, type TabHost, type ContentViewport } from './tab-conten
 // How long the grid must hold still before the PTY is told about it.
 const RESIZE_SETTLE_MS = 80
 
-// Shown only until the session reports where it started.
-const FALLBACK_TITLE = 'Terminal'
+/**
+ * Whether `el` is somewhere the user types on purpose.
+ *
+ * Used to keep the terminal's document-level key rescue off other people's
+ * fields. `isContentEditable` is checked too: a rich-text surface is a text
+ * entry even though it is neither an input nor a textarea.
+ */
+function isTextEntry(el: Element | null): boolean {
+  if (!(el instanceof HTMLElement)) return false
+  if (el.isContentEditable) return true
+  const tag = el.tagName
+  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT'
+}
+
+// No placeholder title — see the descriptor in tabs.ts for why. A tab with no
+// name yet shows nothing rather than a word that is never the answer.
+const FALLBACK_TITLE = ''
 
 /**
  * Names a tab after its directory, the way every other terminal does.
@@ -73,7 +88,7 @@ export class TerminalContent extends BaseTabContent {
   private host: TabHost | null = null
 
   // ── Title composition ────────────────────────────────────────────────
-  // Title = programTitle || cwdTitle || 'Terminal'
+  // Title = programTitle || cwdTitle (no placeholder — nocx-83a)
   // Computed here so the host receives the final string.
   private programTitle = ''
   private cwdTitle = ''
@@ -100,6 +115,9 @@ export class TerminalContent extends BaseTabContent {
       host: string
       user?: string
     },
+    /** Pushes the strip's optional second line — the tab's location, or '' when the
+     *  title already says it. Only this class holds both halves of that question. */
+    private readonly onSubtitleChange?: (subtitle: string) => void,
   ) {
     super()
     this._readyPromise = new Promise<boolean>((resolve) => {
@@ -116,11 +134,23 @@ export class TerminalContent extends BaseTabContent {
     return this._readyPromise
   }
 
-  /** Push the composed title to the host: program title > cwd title > 'Terminal'. */
+  /** Push the composed title to the host: program title, else the cwd label. */
   private pushTitle(): void {
     if (!this.host) return
-    const title = this.programTitle || this.cwdTitle || 'Terminal'
+    const title = this.programTitle || this.cwdTitle
     this.host.setTitle(title)
+    // The location line earns a row only when the title is a name of its own.
+    // With no program title the title IS the location, and a second line would
+    // print the first one again.
+    this.onSubtitleChange?.(this.programTitle ? this.locationLine() : '')
+  }
+
+  /** Where this tab is: `user@host` for SSH, the working directory otherwise. */
+  private locationLine(): string {
+    if (this.sshOpts) {
+      return this.sshOpts.user ? `${this.sshOpts.user}@${this.sshOpts.host}` : this.sshOpts.host
+    }
+    return this._cwd
   }
 
   // ── TabContent ──────────────────────────────────────────────────────────
@@ -303,6 +333,15 @@ export class TerminalContent extends BaseTabContent {
           (this.scrollback?.xtermLiveContainer.contains(active) || this.editor.rootContains(active))
         )
           return
+        // Somebody else's text control has the focus — the tab strip's filter, a
+        // settings field, a dialog. This handler is on `document`, so it sees
+        // every keystroke in the window, and the rescue it performs (pull focus
+        // into the prompt so typing "just works" after a click on the pane) is
+        // exactly wrong when the user is deliberately typing somewhere else: the
+        // first character lands in the field, focus jumps, and the rest goes to
+        // the shell. Whitelisting the editor and the grid was not enough, because
+        // any control OUTSIDE the terminal is equally not ours.
+        if (isTextEntry(active)) return
         this.editor.focus()
       }
       document.addEventListener('keydown', this._globalKeydown)
@@ -542,7 +581,26 @@ export class TerminalContent extends BaseTabContent {
     }
   }
 
+  /**
+   * Focus whichever surface owns input right now.
+   *
+   * At the prompt that is the editor, and the grid is deliberately read-only
+   * while the editor is up (`setReadOnly(true)` on the input-state change). So
+   * focusing the renderer unconditionally parked the caret in a widget that
+   * drops every keystroke — and neither focus-bounce path rescues it, because
+   * both stand down when the focus is already inside the live xterm container,
+   * which is exactly where `renderer.focus()` puts it.
+   *
+   * This is why a freshly created tab typed fine and a tab you switched back to
+   * did not: the new tab's `editor.show()` focuses its own textarea, while
+   * `TabManager.activate()` ends with `tab.focus()` and took that focus away
+   * again on every return.
+   */
   focus(): void {
+    if (this.editor?.isVisible) {
+      this.editor.focus()
+      return
+    }
     this.renderer?.focus()
   }
 
