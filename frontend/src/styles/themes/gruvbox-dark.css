@@ -1,0 +1,98 @@
+/* ── Gruvbox Dark theme — ported from the canonical palette.
+   ADR-0013 §2. All colour literals live here and only here.
+
+   Gruvbox Dark — Pavel Pertsev's retro groove palette. bg0_h (#1d2021) is the
+   hard background used for chrome, bg0 (#282828) the canvas, bg1/bg2 the raised
+   surfaces, fg1-fg4 the text ramp.
+
+   The terminal block is the theme's published ANSI palette, unmodified: those
+   sixteen values ARE the theme, and correcting their contrast would produce
+   something that is no longer Gruvbox Dark. The UI tokens above it are held to
+   the contrast floors asserted in theme-catalogue.test.ts. */
+
+/* Scoped to the attribute and nothing else — a bare `:root` here would apply
+   under every theme and the files would fight over import order. Only the
+   default theme (tokyo-night.css) carries an unscoped block. */
+:root[data-theme='gruvbox-dark'] {
+  /* ── UI colour tokens (§2.1) ─────────────────────────────────────── */
+  --color-canvas: #282828;
+
+  /* Chrome sits *behind* content and is deliberately darker than the
+     canvas — the tab bar, the vertical strip and the settings rail. */
+  --color-chrome: #1d2021;
+  --color-chrome-rail: #202223;
+  --color-surface-sunken: #222222;
+  --color-tab-active: #32302f;
+  --color-surface: #32302f;
+  --color-surface-hover: #2d2b2a;
+  --color-surface-raised: #3c3836;
+  --color-text: #ebdbb2;
+  --color-text-muted: #d5c4a1;
+  --color-text-dim: #bdae93;
+  --color-border: #928374;
+  /* Hairline between regions — rail, tab bar, panel edges. Split from
+     --color-border because the two answer different questions: a control
+     outline has to be findable (WCAG 1.4.11, 3:1 against the canvas), a
+     divider only has to be a seam. */
+  --color-divider: #3c3836;
+  --color-accent: #fabd2f;
+
+  /* ── Additional semantic colours (§2.2) ──────────────────────────── */
+  --color-success: #b8bb26;
+  --color-warning: #fe8019;
+  --color-danger: #fb4934;
+  --color-accent-secondary: #d3869b;
+  --color-error: #cc241d;
+
+  /* ── Font families (§2.4) — ADR §2.4 mandates these per theme file ──
+     Same stacks as the default theme: this theme changes colour, not
+     typography. They are repeated rather than shared because §2.4 makes the
+     theme file the single place a theme's values live. */
+  --font-family-ui: ui-sans-serif, -apple-system, 'SF Pro Text', system-ui, sans-serif;
+  --font-family-mono:
+    ui-monospace, 'SF Mono', Menlo, Monaco, 'Apple Color Emoji', 'Apple Symbols', monospace;
+
+  /* ── Interaction states — assigned, not derived ──────────────────────
+     ADR-0013 §3.1: state colours are assigned per theme rather than derived
+     centrally, because translucent tints and darker-than-surface hovers are
+     different rendering models, not different shades of one formula. */
+  --color-accent-hover: #fbc548;
+  --color-accent-active: #fbc548;
+  --color-accent-disabled: rgba(250, 189, 47, 0.6);
+  --color-surface-hover: #2d2b2a;
+  --color-surface-active: #3c3836;
+  --color-surface-disabled: rgba(50, 48, 47, 0.7);
+  --color-success-hover: #c1c340;
+  --color-danger-hover: rgba(251, 73, 52, 0.1);
+  --color-warning-hover: rgba(254, 128, 25, 0.1);
+  --color-focus-ring: rgba(250, 189, 47, 0.6);
+  --color-scrim: rgba(0, 0, 0, 0.5);
+  --color-selection: rgba(250, 189, 47, 0.3);
+
+  /* ── Terminal palette (§2.3) ─────────────────────────────────────────
+     The published Gruvbox Dark ANSI palette, verbatim. ANSI 0-15 are theme
+     colours; indices 16-255 and truecolor stay algorithmic in the terminal
+     itself, because those are content rather than theme. */
+  --terminal-background: #282828;
+  --terminal-foreground: #ebdbb2;
+  --terminal-cursor: #ebdbb2;
+  --terminal-cursor-accent: #282828;
+  --terminal-selection: #504945;
+
+  --terminal-ansi-0: #282828;
+  --terminal-ansi-1: #cc241d;
+  --terminal-ansi-2: #98971a;
+  --terminal-ansi-3: #d79921;
+  --terminal-ansi-4: #458588;
+  --terminal-ansi-5: #b16286;
+  --terminal-ansi-6: #689d6a;
+  --terminal-ansi-7: #a89984;
+  --terminal-ansi-8: #928374;
+  --terminal-ansi-9: #fb4934;
+  --terminal-ansi-10: #b8bb26;
+  --terminal-ansi-11: #fabd2f;
+  --terminal-ansi-12: #83a598;
+  --terminal-ansi-13: #d3869b;
+  --terminal-ansi-14: #8ec07c;
+  --terminal-ansi-15: #ebdbb2;
+}

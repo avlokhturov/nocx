@@ -17,7 +17,12 @@
   --color-surface-raised: #ffffff;
   --color-text: #1a1a1a;
   --color-text-muted: #4b5160;
-  --color-text-dim: #5a6170;
+  /* Two channels darker than the #5a6170 it was. Dim text on --color-chrome
+     measured 4.43:1 — under WCAG 1.4.3 AA, and the only cell in either original
+     theme that the catalogue contrast gate found failing. #585f6e clears it at
+     4.57:1, which is the same margin tokyo-night already had at its own tightest
+     pair (nocx-7o42). */
+  --color-text-dim: #585f6e;
   --color-border: #7c8593;
   /* Hairline between regions — rail, tab bar, panel edges. Split from
      --color-border because the two answer different questions: a control

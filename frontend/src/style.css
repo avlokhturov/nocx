@@ -4,6 +4,21 @@
 @import './styles/tokens.css';
 @import './styles/themes/tokyo-night.css';
 @import './styles/themes/light.css';
+/* The ported catalogue. Order within the block carries no meaning — every one of
+   these scopes its rules to its own `[data-theme]` value, which is what makes
+   them commutative and is checked by lint-fixtures/check-css-integrity.mjs.
+   Only tokyo-night.css above declares a bare `:root`, so it alone depends on
+   position. theme-catalogue.test.ts asserts this list matches the directory. */
+@import './styles/themes/ayu-dark.css';
+@import './styles/themes/catppuccin-latte.css';
+@import './styles/themes/catppuccin-mocha.css';
+@import './styles/themes/dracula.css';
+@import './styles/themes/gruvbox-dark.css';
+@import './styles/themes/nord.css';
+@import './styles/themes/one-dark.css';
+@import './styles/themes/rose-pine.css';
+@import './styles/themes/solarized-dark.css';
+@import './styles/themes/solarized-light.css';
 @import './styles/base.css';
 /* One file per component (ADR-0013 §1). `kit.css` was a 515-line aggregate that
    re-blurred every selector's owner; T1 (nocx-v0ai) split it. Import order within this

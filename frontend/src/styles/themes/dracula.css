@@ -1,0 +1,98 @@
+/* ── Dracula theme — ported from the canonical palette.
+   ADR-0013 §2. All colour literals live here and only here.
+
+   Dracula — the official palette (dracula-theme.com). The chrome value #191a21 is
+   Dracula's own darker background; the ramp above it is interpolated between it
+   and the #282a36 canvas.
+
+   The terminal block is the theme's published ANSI palette, unmodified: those
+   sixteen values ARE the theme, and correcting their contrast would produce
+   something that is no longer Dracula. The UI tokens above it are held to
+   the contrast floors asserted in theme-catalogue.test.ts. */
+
+/* Scoped to the attribute and nothing else — a bare `:root` here would apply
+   under every theme and the files would fight over import order. Only the
+   default theme (tokyo-night.css) carries an unscoped block. */
+:root[data-theme='dracula'] {
+  /* ── UI colour tokens (§2.1) ─────────────────────────────────────── */
+  --color-canvas: #282a36;
+
+  /* Chrome sits *behind* content and is deliberately darker than the
+     canvas — the tab bar, the vertical strip and the settings rail. */
+  --color-chrome: #191a21;
+  --color-chrome-rail: #1d1e26;
+  --color-surface-sunken: #21222c;
+  --color-tab-active: #2f3140;
+  --color-surface: #343746;
+  --color-surface-hover: #2e3040;
+  --color-surface-raised: #3d3f50;
+  --color-text: #f8f8f2;
+  --color-text-muted: #d3d4e0;
+  --color-text-dim: #a8abc0;
+  --color-border: #7d8bb8;
+  /* Hairline between regions — rail, tab bar, panel edges. Split from
+     --color-border because the two answer different questions: a control
+     outline has to be findable (WCAG 1.4.11, 3:1 against the canvas), a
+     divider only has to be a seam. */
+  --color-divider: #383a4a;
+  --color-accent: #bd93f9;
+
+  /* ── Additional semantic colours (§2.2) ──────────────────────────── */
+  --color-success: #50fa7b;
+  --color-warning: #ffb86c;
+  --color-danger: #ff5555;
+  --color-accent-secondary: #ff79c6;
+  --color-error: #ff6e6e;
+
+  /* ── Font families (§2.4) — ADR §2.4 mandates these per theme file ──
+     Same stacks as the default theme: this theme changes colour, not
+     typography. They are repeated rather than shared because §2.4 makes the
+     theme file the single place a theme's values live. */
+  --font-family-ui: ui-sans-serif, -apple-system, 'SF Pro Text', system-ui, sans-serif;
+  --font-family-mono:
+    ui-monospace, 'SF Mono', Menlo, Monaco, 'Apple Color Emoji', 'Apple Symbols', monospace;
+
+  /* ── Interaction states — assigned, not derived ──────────────────────
+     ADR-0013 §3.1: state colours are assigned per theme rather than derived
+     centrally, because translucent tints and darker-than-surface hovers are
+     different rendering models, not different shades of one formula. */
+  --color-accent-hover: #c5a0fa;
+  --color-accent-active: #c5a0fa;
+  --color-accent-disabled: rgba(189, 147, 249, 0.6);
+  --color-surface-hover: #2e3040;
+  --color-surface-active: #44475a;
+  --color-surface-disabled: rgba(52, 55, 70, 0.7);
+  --color-success-hover: #65fb8b;
+  --color-danger-hover: rgba(255, 85, 85, 0.1);
+  --color-warning-hover: rgba(255, 184, 108, 0.1);
+  --color-focus-ring: rgba(189, 147, 249, 0.6);
+  --color-scrim: rgba(0, 0, 0, 0.5);
+  --color-selection: rgba(189, 147, 249, 0.3);
+
+  /* ── Terminal palette (§2.3) ─────────────────────────────────────────
+     The published Dracula ANSI palette, verbatim. ANSI 0-15 are theme
+     colours; indices 16-255 and truecolor stay algorithmic in the terminal
+     itself, because those are content rather than theme. */
+  --terminal-background: #282a36;
+  --terminal-foreground: #f8f8f2;
+  --terminal-cursor: #f8f8f2;
+  --terminal-cursor-accent: #282a36;
+  --terminal-selection: #44475a;
+
+  --terminal-ansi-0: #21222c;
+  --terminal-ansi-1: #ff5555;
+  --terminal-ansi-2: #50fa7b;
+  --terminal-ansi-3: #f1fa8c;
+  --terminal-ansi-4: #bd93f9;
+  --terminal-ansi-5: #ff79c6;
+  --terminal-ansi-6: #8be9fd;
+  --terminal-ansi-7: #f8f8f2;
+  --terminal-ansi-8: #6272a4;
+  --terminal-ansi-9: #ff6e6e;
+  --terminal-ansi-10: #69ff94;
+  --terminal-ansi-11: #ffffa5;
+  --terminal-ansi-12: #d6acff;
+  --terminal-ansi-13: #ff92df;
+  --terminal-ansi-14: #a4ffff;
+  --terminal-ansi-15: #ffffff;
+}

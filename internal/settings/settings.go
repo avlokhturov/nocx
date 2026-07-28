@@ -493,6 +493,16 @@ var UITheme = MustRegisterSelect(SelectSpec{
 	Options: []SelectOption{
 		{Value: "tokyo-night", Label: "Tokyo Night"},
 		{Value: "light", Label: "Light"},
+		{Value: "ayu-dark", Label: "Ayu Dark"},
+		{Value: "catppuccin-latte", Label: "Catppuccin Latte"},
+		{Value: "catppuccin-mocha", Label: "Catppuccin Mocha"},
+		{Value: "dracula", Label: "Dracula"},
+		{Value: "gruvbox-dark", Label: "Gruvbox Dark"},
+		{Value: "nord", Label: "Nord"},
+		{Value: "one-dark", Label: "One Dark"},
+		{Value: "rose-pine", Label: "Rosé Pine"},
+		{Value: "solarized-dark", Label: "Solarized Dark"},
+		{Value: "solarized-light", Label: "Solarized Light"},
 	},
 })
 
