@@ -21,7 +21,7 @@ import { Field } from './ui/field'
 import { Badge } from './ui/badge'
 import { IconButton } from './ui/icon-button'
 import { SearchField } from './ui/search-field'
-import { PlugIcon, ResetIcon } from './ui/icons'
+import { PlugIcon, PlusIcon, ResetIcon } from './ui/icons'
 import {
   createFormValidation,
   required,
@@ -43,6 +43,8 @@ import type {
   ProbeOutcome,
 } from './profiles'
 import { ProfileClient, buildGroupTree } from './profiles'
+import { parseQuickConnect } from './profiles'
+import { CredentialForm, type CredentialFormHandle } from './credential-form'
 import { log } from './log'
 import { showToast } from './ui/toast'
 
@@ -199,6 +201,16 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   // ── Filter ─────────────────────────────────────────────────────────────
   const [searchQuery, setSearchQuery] = createSignal('')
 
+  // ── Quick-connect dialog (creation starts from one field) ─────────────
+  const [quickConnectOpen, setQuickConnectOpen] = createSignal(false)
+  const [quickConnectValue, setQuickConnectValue] = createSignal('')
+
+  // ── Inline credential creation dialog ─────────────────────────────────
+  const [credDialogOpen, setCredDialogOpen] = createSignal(false)
+  const [credDraft, setCredDraft] = createSignal<Credential | null>(null)
+  const [credPasswordValue, setCredPasswordValue] = createSignal('')
+  const credFormRef = { current: null as CredentialFormHandle | null }
+
   // ── Data loading ────────────────────────────────────────────────────────
   async function loadAll() {
     try {
@@ -305,12 +317,47 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   // ── Form / dialog helpers ─────────────────────────────────────────────
 
   function startNewProfile() {
+    setQuickConnectValue('')
+    setQuickConnectOpen(true)
+  }
+
+  function closeQuickConnect() {
+    setQuickConnectOpen(false)
+    setQuickConnectValue('')
+  }
+
+  function handleQuickConnect() {
+    const q = quickConnectValue().trim()
+    if (!q) {
+      showToast({ level: 'warning', message: 'Enter a host, alias, or connection string' })
+      return
+    }
+
+    const parsed = parseQuickConnect(q)
     const profile: SSHProfile = {
       id: '',
       type: 'ssh',
-      name: 'New connection',
-      options: { host: '', port: 22, user: '', auth: '' },
+      name: parsed.options.host || 'New connection',
+      options: {
+        host: parsed.options.host,
+        port: parsed.options.port ?? 22,
+        user: parsed.options.user ?? '',
+        auth: '',
+      },
     }
+
+    // If the input had an ssh:// prefix, that's expected — nothing lost.
+    // Report any other part that didn't survive: if the original contained
+    // an '@' or ':' but parsing left the host empty, the format was wrong.
+    const hadAtOrColon = q.includes('@') || q.includes(':')
+    if (!parsed.options.host && hadAtOrColon) {
+      showToast({
+        level: 'warning',
+        message: `Could not parse "${q}": try "user@host:port" or "ssh://user@host:port"`,
+      })
+    }
+
+    closeQuickConnect()
     setEditing(profile)
     setDirtyFields(new Set<string>())
     profileValidation.reset()
@@ -483,6 +530,63 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       const message = (err as Error).message
       log.error('Failed to revert field', { field, message })
       showToast({ level: 'danger', message: `Could not revert "${field}": ${message}` })
+    }
+  }
+
+  // ── Inline credential creation (from within connection form) ────────────
+
+  function openCredDialog() {
+    setCredDraft({ id: '', name: '', username: '', auth: '' })
+    setCredPasswordValue('')
+    credFormRef.current?.reset()
+    setCredDialogOpen(true)
+  }
+
+  function closeCredDialog() {
+    setCredDialogOpen(false)
+    setCredDraft(null)
+    setCredPasswordValue('')
+  }
+
+  async function handleCredSave() {
+    const cred = credDraft()
+    if (!cred) return
+    if (!credFormRef.current?.valid()) {
+      credFormRef.current?.revealAll()
+      const msg = credFormRef.current?.error('name') ?? 'Please fill in all required fields'
+      showToast({ level: 'warning', message: msg })
+      return
+    }
+
+    try {
+      const saved = await props.client.createCredential(cred)
+
+      if (cred.auth === 'password' && credPasswordValue()) {
+        await props.client.savePassword(saved.id, credPasswordValue())
+      }
+
+      // Refresh the credential list and select the new one
+      const updated = await props.client.listCredentials()
+      setCredentials(updated ?? [])
+
+      // Select the new credential on the connection being edited
+      const p = editing()
+      if (p) {
+        const updatedProfile = { ...p, options: { ...p.options, credentialId: saved.id } }
+        setEditing(updatedProfile)
+        setDirtyFields((prev: Set<string>) => {
+          const next = new Set(prev)
+          next.add('credentialId')
+          return next
+        })
+      }
+
+      closeCredDialog()
+      showToast({ level: 'success', message: `Created credential "${saved.name}"` })
+    } catch (err) {
+      const message = (err as Error).message
+      log.error('Failed to create credential from form', { message })
+      showToast({ level: 'danger', message: `Could not create credential: ${message}` })
     }
   }
 
@@ -818,6 +922,14 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                 options={credOptions()}
                 placeholder="&mdash; None (specify below) &mdash;"
               />
+              <IconButton
+                size="sm"
+                ariaLabel="New credential"
+                title="Create a new credential"
+                onClick={() => openCredDialog()}
+              >
+                <PlusIcon />
+              </IconButton>
               {isSaved() && provenanceBadge('credentialId')}
             </div>
           </Field>
@@ -840,9 +952,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
 
         <Show when={!hasCredential}>
           <Section title="Authentication (override)">
-            <div class="cm-tip">
-              Tip: Create a Credential above to reuse auth settings across connections.
-            </div>
             <Field for="auth-method" label="Method">
               <div class="cm-radio-group">
                 <For each={AUTH_MODES}>
@@ -1021,6 +1130,67 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             }
           >
             {renderProfileForm(profile())}
+          </Dialog>
+        )}
+      </Show>
+
+      {/* Quick-connect Dialog — creation starts from one field */}
+      <Dialog
+        open={quickConnectOpen()}
+        onClose={closeQuickConnect}
+        title="New Connection"
+        size="md"
+        footer={
+          <>
+            <Button variant="primary" onClick={handleQuickConnect}>
+              Next
+            </Button>
+            <Button variant="default" onClick={closeQuickConnect}>
+              Cancel
+            </Button>
+          </>
+        }
+      >
+        <TextField
+          id="quick-connect-input"
+          label="Host or connection string"
+          value={quickConnectValue()}
+          onInput={(v) => setQuickConnectValue(v)}
+          placeholder="deploy@host:2222 or ssh://user@host:2222"
+        />
+        <p class="cm-hint">
+          Paste a host, alias, or connection string above. Parsed fields will be filled into the
+          form.
+        </p>
+      </Dialog>
+
+      {/* Credential creation Dialog (from within connection form) */}
+      <Show when={credDraft()}>
+        {(cred) => (
+          <Dialog
+            open={credDialogOpen()}
+            onClose={closeCredDialog}
+            title="New Credential"
+            footer={
+              <>
+                <Button variant="primary" onClick={() => void handleCredSave()}>
+                  Save Credential
+                </Button>
+                <Button variant="default" onClick={closeCredDialog}>
+                  Cancel
+                </Button>
+              </>
+            }
+          >
+            <CredentialForm
+              credential={cred()}
+              onFieldChange={(key, value) => {
+                setCredDraft({ ...cred(), [key]: value })
+              }}
+              passwordValue={credPasswordValue()}
+              onPasswordChange={setCredPasswordValue}
+              ref={credFormRef}
+            />
           </Dialog>
         )}
       </Show>

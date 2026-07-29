@@ -8,7 +8,7 @@
  * validation) are tested in connections.test.tsx.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { cleanup, render } from '@solidjs/testing-library'
+import { cleanup, render, fireEvent } from '@solidjs/testing-library'
 import { ConnectionsView } from './connections'
 import { ProfileClient } from './profiles'
 import { Dispatcher } from './dispatcher'
@@ -440,5 +440,230 @@ describe('group tree', () => {
     const headers = container.querySelectorAll('.cm-group-header')
     expect(headers.length).toBe(1)
     expect(headers[0].textContent).toBe('Connections')
+  })
+})
+
+// ── Quick-connect dialog (creation from one field) ────────────────────────
+
+describe('quick connect', () => {
+  it('"+ New connection" opens the quick-connect dialog, not the full form', async () => {
+    const { container } = mount({ profiles: [] })
+
+    await waitForProfiles(container, 0)
+
+    // Find and click the "+ New connection" button
+    const newBtn = container.querySelector('.ui-button')
+    expect(newBtn, 'New connection button not found').toBeTruthy()
+    expect(newBtn!.textContent).toContain('New connection')
+    ;(newBtn! as HTMLElement).click()
+
+    // Quick-connect dialog should appear
+    await vi.waitFor(() => {
+      const input = container.querySelector('#quick-connect-input')
+      expect(input).toBeTruthy()
+    })
+
+    // The full form dialog should NOT be open yet (no profile-name field)
+    expect(container.querySelector('#profile-name')).toBeFalsy()
+  })
+
+  it('typing a connection string and clicking Next opens the form with parsed values', async () => {
+    const { container } = mount({ profiles: [] })
+
+    await waitForProfiles(container, 0)
+
+    // Click "+ New connection"
+    const newBtn = container.querySelector('.ui-button')
+    expect(newBtn).toBeTruthy()
+    ;(newBtn! as HTMLElement).click()
+
+    // Type into the quick-connect input
+    await vi.waitFor(() => {
+      const input = container.querySelector('#quick-connect-input') as HTMLInputElement
+      expect(input).toBeTruthy()
+    })
+
+    const input = container.querySelector('#quick-connect-input') as HTMLInputElement
+    input.value = 'deploy@web.example.com:2222'
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+
+    // Click "Next"
+    const nextBtn = Array.from(container.querySelectorAll('.ui-button')).find(
+      (b) => b.textContent?.trim() === 'Next',
+    )
+    expect(nextBtn, 'Next button not found').toBeTruthy()
+    ;(nextBtn! as HTMLElement).click()
+
+    // Form dialog should open with parsed values
+    await vi.waitFor(() => {
+      const hostInput = container.querySelector('#profile-host') as HTMLInputElement
+      expect(hostInput, 'Form dialog did not open').toBeTruthy()
+      expect(hostInput.value).toBe('web.example.com')
+    })
+
+    const portInput = container.querySelector('#profile-port') as HTMLInputElement
+    expect(portInput.value).toBe('2222')
+
+    const userInput = container.querySelector('#profile-user') as HTMLInputElement
+    expect(userInput.value).toBe('deploy')
+  })
+
+  it('empty input and Next shows a warning but does not close the dialog', async () => {
+    const { container } = mount({ profiles: [] })
+
+    await waitForProfiles(container, 0)
+
+    const newBtn = container.querySelector('.ui-button')
+    expect(newBtn).toBeTruthy()
+    ;(newBtn! as HTMLElement).click()
+
+    // Quick-connect dialog opens
+    await vi.waitFor(() => {
+      expect(container.querySelector('#quick-connect-input')).toBeTruthy()
+    })
+
+    // Click Next without typing anything
+    const nextBtn = Array.from(container.querySelectorAll('.ui-button')).find(
+      (b) => b.textContent?.trim() === 'Next',
+    )
+    expect(nextBtn).toBeTruthy()
+    ;(nextBtn! as HTMLElement).click()
+
+    // Dialog should still be open (no profile-name in DOM)
+    expect(container.querySelector('#profile-name')).toBeFalsy()
+    expect(container.querySelector('#quick-connect-input')).toBeTruthy()
+  })
+})
+
+// ── Inline credential creation from connection form ──────────────────────
+
+describe('inline credential creation', () => {
+  it('a "+" button sits beside the credential select in the form', async () => {
+    const { container } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+
+    await waitForProfiles(container, 1)
+
+    // Open edit dialog
+    const editBtn = Array.from(container.querySelectorAll('.cm-item-actions .ui-button')).find(
+      (b) => b.textContent?.trim() === 'Edit',
+    )
+    expect(editBtn).toBeTruthy()
+    ;(editBtn! as HTMLElement).click()
+
+    await vi.waitFor(() => {
+      expect(container.querySelector('.nocx-dialog__panel')).toBeTruthy()
+    })
+
+    // Find the "+" button beside the credential select
+    const plusBtn = container.querySelector('[aria-label="New credential"]')
+    expect(plusBtn, 'New credential button not found beside credential select').toBeTruthy()
+  })
+
+  it('clicking the "+" button opens a credential creation dialog', async () => {
+    const { container } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+
+    await waitForProfiles(container, 1)
+
+    // Open edit dialog
+    const editBtn = Array.from(container.querySelectorAll('.cm-item-actions .ui-button')).find(
+      (b) => b.textContent?.trim() === 'Edit',
+    )
+    expect(editBtn).toBeTruthy()
+    ;(editBtn! as HTMLElement).click()
+
+    await vi.waitFor(() => {
+      expect(container.querySelector('.nocx-dialog__panel')).toBeTruthy()
+    })
+
+    // Click "+"
+    const plusBtn = container.querySelector('[aria-label="New credential"]') as HTMLElement
+    expect(plusBtn).toBeTruthy()
+    plusBtn.click()
+
+    // Credential dialog should appear
+    await vi.waitFor(() => {
+      const credNameInput = container.querySelector('#cred-name') as HTMLInputElement
+      expect(credNameInput, 'Credential form did not open').toBeTruthy()
+      expect(credNameInput.value).toBe('')
+    })
+  })
+
+  it('creating a credential from the form selects it and keeps the connection intact', async () => {
+    const { container, client } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+
+    // Spy on createCredential to return a canned credential
+    const newCred: Credential = {
+      id: 'cred:new-key',
+      name: 'prod-key-2',
+      username: 'deploy',
+      auth: 'publicKey',
+      keyPath: '/home/user/.ssh/id_rsa',
+    }
+    const createSpy = vi.spyOn(client, 'createCredential').mockResolvedValue(newCred)
+    vi.spyOn(client, 'listCredentials').mockResolvedValue([...MOCK_CREDENTIALS, newCred])
+
+    await waitForProfiles(container, 1)
+
+    // Open edit dialog
+    const editBtn = Array.from(container.querySelectorAll('.cm-item-actions .ui-button')).find(
+      (b) => b.textContent?.trim() === 'Edit',
+    )
+    expect(editBtn).toBeTruthy()
+    fireEvent.click(editBtn!)
+
+    await vi.waitFor(() => {
+      expect(container.querySelector('.nocx-dialog__panel')).toBeTruthy()
+    })
+
+    // Save the connection form's host value before opening credential dialog
+    const origHostValue = (container.querySelector('#profile-host') as HTMLInputElement)?.value
+
+    // Click "+" beside credential select
+    const plusBtn = container.querySelector('[aria-label="New credential"]') as HTMLElement
+    expect(plusBtn).toBeTruthy()
+    fireEvent.click(plusBtn)
+
+    // Fill in credential name
+    await vi.waitFor(() => {
+      const credNameInput = container.querySelector('#cred-name') as HTMLInputElement
+      expect(credNameInput, 'Credential form should open').toBeTruthy()
+    })
+
+    const nameInput = container.querySelector('#cred-name') as HTMLInputElement
+    fireEvent.input(nameInput, { target: { value: 'prod-key-2' } })
+
+    const usernameInput = container.querySelector('#cred-username') as HTMLInputElement
+    fireEvent.input(usernameInput, { target: { value: 'deploy' } })
+
+    // Find "Save Credential" first, then click once
+    const saveBtn = await vi.waitFor(() => {
+      const btn = Array.from(container.querySelectorAll('.ui-button')).find(
+        (b) => b.textContent?.trim() === 'Save Credential',
+      )
+      expect(btn).toBeTruthy()
+      return btn!
+    })
+    fireEvent.click(saveBtn)
+
+    // Wait for the create call
+    await vi.waitFor(() => {
+      expect(createSpy).toHaveBeenCalled()
+    })
+
+    // Credential dialog should close
+    await vi.waitFor(() => {
+      expect(container.querySelector('#cred-name')).toBeFalsy()
+    })
+
+    // Connection form should still be open (profile-host still visible)
+    expect(container.querySelector('#profile-host')).toBeTruthy()
+
+    // The connection form's host value is preserved
+    expect((container.querySelector('#profile-host') as HTMLInputElement).value).toBe(origHostValue)
+
+    // The credential select has the new credential selected
+    const credSelect = container.querySelector('.ui-select') as HTMLSelectElement
+    expect(credSelect, 'Credential select element not found').toBeTruthy()
+    expect(credSelect.value).toBe('cred:new-key')
   })
 })

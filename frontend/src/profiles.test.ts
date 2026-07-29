@@ -90,6 +90,20 @@ describe('parseQuickConnect', () => {
     expect(p.options.host).toBe('::1')
     expect(p.options.port).toBe(2222)
   })
+
+  it('parses ssh://user@host:port', () => {
+    const p = parseQuickConnect('ssh://deploy@10.0.0.1:2222')
+    expect(p.options.user).toBe('deploy')
+    expect(p.options.host).toBe('10.0.0.1')
+    expect(p.options.port).toBe(2222)
+  })
+
+  it('parses ssh://host with default port', () => {
+    const p = parseQuickConnect('ssh://example.com')
+    expect(p.options.host).toBe('example.com')
+    expect(p.options.port).toBe(22)
+    expect(p.options.user).toBeUndefined()
+  })
 })
 
 describe('SSHProfile shape', () => {

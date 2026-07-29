@@ -121,13 +121,19 @@ export function resolveGroupPath(groups: ProfileGroup[], id: string): string[] {
   return path
 }
 
-// parseQuickConnect parses "user@host:port" / "user@host" / "host" /
-// "[host]:port" into a sparse SSHProfile (quick-connect entry).
+// parseQuickConnect parses "ssh://user@host:port", "user@host:port", "user@host",
+// "host", "[host]:port" into a sparse SSHProfile (quick-connect entry).
 export function parseQuickConnect(query: string): SSHProfile {
   let user = ''
   let host = ''
   let port = 22
   let rest = query.trim()
+
+  // Strip ssh:// prefix — accept "ssh://user@host:port" as well as "user@host:port"
+  const SSH_SCHEME = 'ssh://'
+  if (rest.slice(0, SSH_SCHEME.length).toLowerCase() === SSH_SCHEME) {
+    rest = rest.slice(SSH_SCHEME.length)
+  }
 
   if (rest.startsWith('[')) {
     // IPv6: [::1]:port or [::1]
