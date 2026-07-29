@@ -16,6 +16,21 @@
   margin-bottom: 8px;
 }
 
+/* Explanatory line under a dialog's controls. Was only ever styled inside the
+   group form, so the same element read as body text in the quick-connect and
+   import dialogs. No font-size: text inside a dialog is body text. */
+.cm-hint {
+  color: var(--color-text-muted);
+  margin: var(--space-2) 0 0;
+}
+
+/* Three lines held open whatever the chosen source says. Without it the dialog
+   grew and shrank as the user moved down the radio list, walking the buttons
+   out from under the pointer that was reaching for them. */
+.cm-import-hint {
+  min-height: calc(3 * 1.5em);
+}
+
 .cm-credential-card {
   padding: 8px;
   background: var(--color-surface-raised);
@@ -32,12 +47,28 @@
 
 /* ── Search bar in toolbar ──────────────────────────────────────────────── */
 
+/* The filter takes the bar's free width up to a readable cap; the actions
+   cluster is pushed to the trailing edge by the auto margin. Placement only —
+   neither rule touches how the kit draws either component. */
 .cm-search {
   display: flex;
   align-items: center;
   gap: 4px;
+  flex: 1 1 260px;
+  min-width: 180px;
+  max-width: 420px;
+}
+
+.cm-search > .ui-search-field {
   flex: 1 1 auto;
-  max-width: 320px;
+}
+
+.cm-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-left: auto;
+  flex: 0 0 auto;
 }
 
 /* ── Connection list (full width) ───────────────────────────────────────── */
@@ -156,10 +187,13 @@
 
 /* ── Group headers ───────────────────────────────────────────────────────── */
 
+/* Uppercase and letter-spaced, which reads well as a band across the list —
+   but at the body size and in the body colour. It was also shrunk to sm and
+   muted, and those two are what made it look like chrome rather than like the
+   name of a record the user created and can rename. */
 .cm-group-header {
   font-weight: 600;
-  font-size: var(--font-size-sm);
-  color: var(--color-text-muted);
+  color: var(--color-text);
   padding: 8px 12px 4px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
@@ -250,6 +284,13 @@
   font-weight: 500;
 }
 
+.cm-group-empty {
+  margin: 0;
+  padding: 2px 12px 8px;
+  color: var(--color-text-muted);
+  font-style: italic;
+}
+
 .cm-group-actions {
   display: flex;
   gap: var(--space-1);
@@ -258,12 +299,26 @@
 
 /* ── Group form inside dialog ────────────────────────────────────────────── */
 
+/* The name above, the rail and its pane in the middle, the blast radius pinned
+   below. The middle is the only part allowed to shrink and scroll. */
 .cm-group-form {
-  max-width: 600px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-height: 0;
+}
+
+.cm-group-form > .ui-tabs {
+  flex: 1 1 auto;
+}
+
+.cm-group-impact {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--color-divider);
+  padding-top: var(--space-3);
 }
 
 .cm-group-form .cm-hint {
-  font-size: var(--font-size-sm);
   color: var(--color-text-muted);
   margin: 0 0 var(--space-4);
 }
@@ -348,10 +403,19 @@
 
 /* ── Delete impact ──────────────────────────────────────────────────────── */
 
+/* No font-size. This is what the user is being asked to agree to, and it was
+   set a step below body text — the smallest type on screen carrying the most
+   consequential question. */
 .cm-delete-impact {
-  font-size: var(--font-size-sm);
+  color: var(--color-text);
 }
 
 .cm-delete-impact p {
   margin: var(--space-2) 0;
+}
+
+/* The backend's rationale for the action it chose — supporting detail under the
+   sentence the user is actually agreeing to. */
+.cm-delete-reason {
+  color: var(--color-text-muted);
 }

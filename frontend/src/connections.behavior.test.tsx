@@ -354,8 +354,7 @@ describe('edit action', () => {
 
     await waitForProfiles(container, 1)
 
-    const allBtns = container.querySelectorAll('.cm-item-actions .ui-button')
-    const editBtn = Array.from(allBtns).find((b) => b.textContent?.trim() === 'Edit')
+    const editBtn = container.querySelector('.cm-item-actions [aria-label^="Edit "]')
     expect(editBtn, 'Edit button not found').toBeTruthy()
     ;(editBtn! as HTMLElement).click()
 
@@ -374,8 +373,7 @@ describe('edit action', () => {
 
     await waitForProfiles(container, 1)
 
-    const allBtns = container.querySelectorAll('.cm-item-actions .ui-button')
-    const editBtn = Array.from(allBtns).find((b) => b.textContent?.trim() === 'Edit')
+    const editBtn = container.querySelector('.cm-item-actions [aria-label^="Edit "]')
     expect(editBtn, 'Edit button not found').toBeTruthy()
     ;(editBtn! as HTMLElement).click()
 
@@ -411,7 +409,7 @@ describe('group tree', () => {
     const connectionsIdx = children.findIndex(
       (c) =>
         c.matches('.cm-group-header') &&
-        c.querySelector('.cm-group-name')?.textContent === 'Connections',
+        c.querySelector('.cm-group-name')?.textContent === 'Ungrouped',
     )
     const prodDbIdx = children.findIndex(
       (c) => c.matches('.cm-item') && c.querySelector('.cm-item-name')?.textContent === 'prod-db',
@@ -434,7 +432,11 @@ describe('group tree', () => {
     expect(stagingIdx).toBeGreaterThan(connectionsIdx)
   })
 
-  it('empty tree sections are omitted (no group header for zero-profile groups)', async () => {
+  // The inverse of this used to be asserted: a zero-profile group rendered
+  // nothing at all. That made "New group" look like it had failed, and left no
+  // header to reach the group's own editor from, so it could be neither renamed
+  // nor deleted. An empty group is now shown, with a line saying it is empty.
+  it('a zero-profile group still shows its header and says it is empty', async () => {
     const { container } = mount({
       profiles: MOCK_PROFILES.slice(0, 1),
       groups: MOCK_GROUPS,
@@ -442,9 +444,9 @@ describe('group tree', () => {
 
     await waitForProfiles(container, 1)
 
-    const headers = container.querySelectorAll('.cm-group-header')
-    expect(headers.length).toBe(1)
-    expect(headers[0].textContent).toBe('Connections')
+    const names = Array.from(container.querySelectorAll('.cm-group-name')).map((n) => n.textContent)
+    expect(names).toEqual(['Production', 'Ungrouped'])
+    expect(container.querySelector('.cm-group-empty')).toBeTruthy()
   })
 })
 
@@ -456,10 +458,12 @@ describe('quick connect', () => {
 
     await waitForProfiles(container, 0)
 
-    // Find and click the "+ New connection" button
-    const newBtn = container.querySelector('.ui-button')
+    // Find and click the "+ New connection" button. By text, not by position:
+    // the toolbar now carries sibling actions ("New group", "Import…").
+    const newBtn = Array.from(container.querySelectorAll('.ui-button')).find((b) =>
+      b.textContent?.includes('New connection'),
+    )
     expect(newBtn, 'New connection button not found').toBeTruthy()
-    expect(newBtn!.textContent).toContain('New connection')
     ;(newBtn! as HTMLElement).click()
 
     // Quick-connect dialog should appear
@@ -549,9 +553,7 @@ describe('inline credential creation', () => {
     await waitForProfiles(container, 1)
 
     // Open edit dialog
-    const editBtn = Array.from(container.querySelectorAll('.cm-item-actions .ui-button')).find(
-      (b) => b.textContent?.trim() === 'Edit',
-    )
+    const editBtn = container.querySelector('.cm-item-actions [aria-label^="Edit "]')
     expect(editBtn).toBeTruthy()
     ;(editBtn! as HTMLElement).click()
 
@@ -570,9 +572,7 @@ describe('inline credential creation', () => {
     await waitForProfiles(container, 1)
 
     // Open edit dialog
-    const editBtn = Array.from(container.querySelectorAll('.cm-item-actions .ui-button')).find(
-      (b) => b.textContent?.trim() === 'Edit',
-    )
+    const editBtn = container.querySelector('.cm-item-actions [aria-label^="Edit "]')
     expect(editBtn).toBeTruthy()
     ;(editBtn! as HTMLElement).click()
 
@@ -610,9 +610,7 @@ describe('inline credential creation', () => {
     await waitForProfiles(container, 1)
 
     // Open edit dialog
-    const editBtn = Array.from(container.querySelectorAll('.cm-item-actions .ui-button')).find(
-      (b) => b.textContent?.trim() === 'Edit',
-    )
+    const editBtn = container.querySelector('.cm-item-actions [aria-label^="Edit "]')
     expect(editBtn).toBeTruthy()
     fireEvent.click(editBtn!)
 
@@ -666,8 +664,11 @@ describe('inline credential creation', () => {
     // The connection form's host value is preserved
     expect((container.querySelector('#profile-host') as HTMLInputElement).value).toBe(origHostValue)
 
-    // The credential select has the new credential selected
-    const credSelect = container.querySelector('.ui-select') as HTMLSelectElement
+    // The credential select has the new credential selected. Scoped to the
+    // Authentication section: the form has sections now, and the General one
+    // also holds a Select (the group), so the first .ui-select on the page is
+    // no longer this one.
+    const credSelect = container.querySelector('#ui-tabpanel-auth .ui-select') as HTMLSelectElement
     expect(credSelect, 'Credential select element not found').toBeTruthy()
     expect(credSelect.value).toBe('cred:new-key')
   })
@@ -732,9 +733,10 @@ async function openGroupEditorByName(container: HTMLElement, groupName: string) 
     (h) => h.querySelector('.cm-group-name')?.textContent === groupName,
   )
   expect(targetHeader, `Group header "${groupName}" not found`).toBeTruthy()
-  const editBtn = Array.from(targetHeader!.querySelectorAll('.cm-group-actions .ui-button')).find(
-    (b) => b.textContent?.trim() === 'Edit',
-  )
+  // By aria-label: the row's actions are icon buttons, so there is no text to
+  // match. The label is what a screen reader announces and what the test reads
+  // — one string, checked by both.
+  const editBtn = targetHeader!.querySelector(`[aria-label="Edit group ${groupName}"]`)
   expect(editBtn, `Edit button for "${groupName}" not found`).toBeTruthy()
   ;(editBtn! as HTMLElement).click()
 
@@ -744,11 +746,26 @@ async function openGroupEditorByName(container: HTMLElement, groupName: string) 
   })
 }
 
+/**
+ * Click a section in the group editor's rail.
+ *
+ * The editor's fields used to be one long column, so a test could reach any of
+ * them the moment the dialog opened. They are sections now and only the
+ * selected one is rendered.
+ */
+function selectGroupSection(container: HTMLElement, label: string) {
+  const tab = Array.from(container.querySelectorAll('.ui-tabs__list .ui-button')).find(
+    (b) => b.textContent?.trim() === label,
+  )
+  expect(tab, `Group editor section "${label}" not found`).toBeTruthy()
+  ;(tab! as HTMLElement).click()
+}
+
 // ── Helper: open the profile edit dialog for a named profile ─────────────
 
 async function openProfileEditor(container: HTMLElement, profileName: string) {
-  const allBtns = container.querySelectorAll('.cm-item-actions .ui-button')
-  const editBtn = Array.from(allBtns).find((b) => b.textContent?.trim() === 'Edit')
+  // By aria-label: Edit is an icon button now, so there is no text to match.
+  const editBtn = container.querySelector('.cm-item-actions [aria-label^="Edit "]')
   expect(editBtn, `Edit button for "${profileName}" not found`).toBeTruthy()
   ;(editBtn! as HTMLElement).click()
 
@@ -775,6 +792,8 @@ describe('group editor', () => {
 
     const impactSpy = vi.spyOn(client, 'groupImpact').mockResolvedValue(IMPACT_COSMETIC)
 
+    selectGroupSection(container, 'Connection')
+
     // Change the port default to trigger impact computation
     const portInput = container.querySelector('#group-default-port') as HTMLInputElement
     expect(portInput).toBeTruthy()
@@ -800,6 +819,8 @@ describe('group editor', () => {
     await openGroupEditorByName(container, 'Production')
 
     const impactSpy = vi.spyOn(client, 'groupImpact').mockResolvedValue(IMPACT_DANGEROUS)
+
+    selectGroupSection(container, 'Connection')
 
     // Change a default to trigger impact computation
     const portInput = container.querySelector('#group-default-port') as HTMLInputElement
@@ -846,6 +867,8 @@ describe('group editor', () => {
     await openGroupEditorByName(container, 'Production')
 
     const impactSpy = vi.spyOn(client, 'groupImpact').mockResolvedValue(IMPACT_COSMETIC)
+
+    selectGroupSection(container, 'Connection')
 
     // Change a non-dangerous default
     const portInput = container.querySelector('#group-default-port') as HTMLInputElement
@@ -917,18 +940,18 @@ describe('group editor', () => {
       (h) => h.querySelector('.cm-group-name')?.textContent === 'Production',
     )
     expect(prodHeader).toBeTruthy()
-    const deleteBtn = Array.from(prodHeader!.querySelectorAll('.cm-group-actions .ui-button')).find(
-      (b) => b.textContent?.trim() === 'Delete',
-    )
+    const deleteBtn = prodHeader!.querySelector('[aria-label="Delete group Production"]')
     expect(deleteBtn).toBeTruthy()
     ;(deleteBtn! as HTMLElement).click()
 
-    // Wait for delete dialog
+    // Wait for delete dialog. Matched loosely: the title now names the group
+    // it is about to destroy, which is the point of the confirmation.
     await vi.waitFor(() => {
-      expect(findDialogByTitle(container, 'Delete Group')).toBeTruthy()
+      expect(findDialogByTitleContaining(container, 'Delete Group')).toBeTruthy()
     })
 
-    const deleteDialog = findDialogByTitle(container, 'Delete Group')!
+    const deleteDialog = findDialogByTitleContaining(container, 'Delete Group')!
+    expect(deleteDialog.textContent).toContain('Production')
 
     // The impact should explain what happens to children
     await vi.waitFor(() => {

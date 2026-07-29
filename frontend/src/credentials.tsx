@@ -287,6 +287,7 @@ export function CredentialsSection(props: CredentialsSectionProps) {
             open={dialogOpen()}
             onClose={closeDialog}
             title={cred().id ? 'Edit Credential' : 'New Credential'}
+            size="lg"
             footer={
               <>
                 <Button variant="primary" onClick={() => void handleSave()} disabled={saving()}>

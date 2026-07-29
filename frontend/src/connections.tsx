@@ -7,21 +7,46 @@
  * Pattern follows credentials.tsx: full-width list, editing in a Dialog.
  * Tabby import moved to Export / Backup / Import section.
  */
-import { For, Show, createSignal, createMemo, createEffect, on, onMount, type JSX } from 'solid-js'
+import {
+  For,
+  Show,
+  createSignal,
+  createMemo,
+  createEffect,
+  on,
+  onMount,
+  type Component,
+  type JSX,
+} from 'solid-js'
 import { Button } from './ui/button'
 import { TextField } from './ui/text-field'
 import { Checkbox } from './ui/checkbox'
 import { Select, type SelectOption } from './ui/select'
 import { Toolbar } from './ui/toolbar'
 import { Dialog, showConfirm } from './ui/dialog'
-import { Section } from './ui/section'
 import { Radio } from './ui/radio'
+import { Section } from './ui/section'
+import { SegmentedControl } from './ui/segmented-control'
+import { Stack } from './ui/stack'
+import { Tabs } from './ui/tabs'
 import { EmptyState } from './ui/empty-state'
 import { Field } from './ui/field'
+import { FileInput } from './ui/file-input'
 import { Badge } from './ui/badge'
 import { IconButton } from './ui/icon-button'
 import { SearchField } from './ui/search-field'
-import { PlugIcon, PlusIcon, ResetIcon } from './ui/icons'
+import {
+  AsteriskIcon,
+  KeyIcon,
+  KeyboardIcon,
+  LightbulbIcon,
+  PencilIcon,
+  PlugIcon,
+  PlusIcon,
+  ResetIcon,
+  TrashIcon,
+  UserIcon,
+} from './ui/icons'
 import {
   createFormValidation,
   required,
@@ -42,6 +67,8 @@ import type {
   SessionStatus,
   ProbeOutcome,
   GroupImpactResponse,
+  ConfigExport,
+  SSHConfigPathResult,
 } from './profiles'
 import { ProfileClient, buildGroupTree } from './profiles'
 import { parseQuickConnect } from './profiles'
@@ -67,6 +94,42 @@ function authModeLabel(mode: AuthMode): string {
 }
 
 const AUTH_MODES: AuthMode[] = ['', 'password', 'publicKey', 'agent', 'keyboardInteractive']
+
+/**
+ * The same five modes as one row of segments, each with a glyph over its label.
+ *
+ * A record rather than a chain of ternaries, because the chain had a hole:
+ * `agent` matched none of its three tests and fell through to the default, so
+ * the Agent segment was labelled "Password". A record cannot have a hole — the
+ * key is either present or the compiler says so.
+ *
+ * Only "Keyboard Interactive" is shortened, and only because it is three times
+ * the length of the rest; its full name is in the tooltip. Everything else
+ * keeps the spelling `authModeLabel` uses, so the mode reads the same wherever
+ * it appears.
+ */
+const AUTH_SEGMENT_LABEL: Record<AuthMode, string> = {
+  '': 'Auto',
+  password: 'Password',
+  publicKey: 'Public Key',
+  agent: 'Agent',
+  keyboardInteractive: 'Interactive',
+}
+
+const AUTH_SEGMENT_ICON: Record<AuthMode, Component> = {
+  '': LightbulbIcon,
+  password: AsteriskIcon,
+  publicKey: KeyIcon,
+  agent: UserIcon,
+  keyboardInteractive: KeyboardIcon,
+}
+
+const AUTH_SEGMENTS = AUTH_MODES.map((mode) => ({
+  value: mode,
+  label: AUTH_SEGMENT_LABEL[mode],
+  title: authModeLabel(mode),
+  icon: AUTH_SEGMENT_ICON[mode],
+}))
 
 // ── Provenance helpers ───────────────────────────────────────────────────────
 
@@ -154,6 +217,17 @@ export function decideSaveRoute(profile: SSHProfile, dirty: ReadonlySet<string>)
   return { kind: 'patch', patchSet }
 }
 
+// ── Import sources ───────────────────────────────────────────────────────────
+
+/**
+ * Where a batch of connections can come from.
+ *
+ * `sshConfig` reads the machine's own ~/.ssh/config and takes no file; the
+ * other two are files the user picks. That difference is why the dialog's file
+ * picker is conditional rather than always shown and sometimes ignored.
+ */
+type ImportSource = 'sshConfig' | 'tabby' | 'backup'
+
 // ── Props ────────────────────────────────────────────────────────────────────
 
 export interface ConnectionsViewProps {
@@ -207,6 +281,14 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   const [quickConnectOpen, setQuickConnectOpen] = createSignal(false)
   const [quickConnectValue, setQuickConnectValue] = createSignal('')
 
+  // ── Import dialog (bringing connections in from elsewhere) ────────────
+  const [importOpen, setImportOpen] = createSignal(false)
+  const [importSource, setImportSource] = createSignal<ImportSource>('sshConfig')
+  const [importFile, setImportFile] = createSignal<File | null>(null)
+  const [importBusy, setImportBusy] = createSignal(false)
+  // Where the SSH config actually is, per the backend. Null until asked.
+  const [sshConfigPath, setSSHConfigPath] = createSignal<SSHConfigPathResult | null>(null)
+
   // ── Inline credential creation dialog ─────────────────────────────────
   const [credDialogOpen, setCredDialogOpen] = createSignal(false)
   const [credDraft, setCredDraft] = createSignal<Credential | null>(null)
@@ -221,10 +303,46 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   const [groupImpactBusy, setGroupImpactBusy] = createSignal(false)
   const [groupApplyBusy, setGroupApplyBusy] = createSignal(false)
   const [deleteGroupId, setDeleteGroupId] = createSignal<string | null>(null)
+
+  /** The name behind deleteGroupId, for the confirmation to say out loud. */
+  const deleteGroupName = createMemo(() => {
+    const id = deleteGroupId()
+    if (!id) return ''
+    return groups().find((g) => g.id === id)?.name ?? ''
+  })
   const [deleteImpact, setDeleteImpact] = createSignal<GroupImpactResponse | null>(null)
   const [deleteConfirmOpen, setDeleteConfirmOpen] = createSignal(false)
   const [deleteBusy, setDeleteBusy] = createSignal(false)
   const [dangerConfirmed, setDangerConfirmed] = createSignal(false)
+  const [groupSection, setGroupSection] = createSignal('general')
+  const [profileSection, setProfileSection] = createSignal('general')
+
+  /** The impact, but only when it names a consequence. Null otherwise. */
+  const groupImpactWorthShowing = createMemo(() => {
+    const i = groupImpact()
+    if (!i) return null
+    if ((i.affectedProfiles?.length ?? 0) === 0 && !i.dangerous) return null
+    return i
+  })
+
+  /**
+   * The rail's sections. Fixed, and deliberately without a blast-radius entry:
+   * the preview exists so that the consequence is seen BEFORE applying, and a
+   * section is something the user can decline to open. It is pinned under the
+   * pane instead, visible from whichever section made the change.
+   */
+  /**
+   * The name is required, and the message belongs under the field.
+   *
+   * It was a Toast, and a Toast raised from inside a modal dialog cannot be
+   * seen at all: `showModal()` puts the dialog in the browser's top layer,
+   * which paints above every z-index in the normal layer — including the toast
+   * host's. So the button reported the problem to a place hidden behind the
+   * thing the user was looking at, and pressing it appeared to do nothing.
+   */
+  const groupValidation = createFormValidation({
+    name: () => required('Name')(groupDraft()?.name ?? ''),
+  })
 
   // ── Data loading ────────────────────────────────────────────────────────
   async function loadAll() {
@@ -247,6 +365,141 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     }
   }
 
+  // ── Import ────────────────────────────────────────────────────────────
+
+  const IMPORT_SOURCES = createMemo((): { value: ImportSource; label: string }[] => {
+    const cfg = sshConfigPath()
+    return [
+      // The path is the backend's answer, not a guess. Until it arrives the
+      // option is named without one rather than with a plausible fiction.
+      { value: 'sshConfig', label: cfg?.path ? `SSH config (${cfg.path})` : 'SSH config' },
+      { value: 'tabby', label: 'Tabby config (.yml/.yaml)' },
+      { value: 'backup', label: 'nocx configuration export (.json)' },
+    ]
+  })
+
+  const importHint = createMemo(() => {
+    switch (importSource()) {
+      case 'sshConfig': {
+        const cfg = sshConfigPath()
+        if (cfg && !cfg.available) {
+          return 'This build has no SSH config reader wired, so there is nothing to import from.'
+        }
+        const where = cfg?.path ? `this machine’s ${cfg.path}` : 'this machine’s SSH config'
+        return `Reads ${where} and saves its aliases as connections. An alias whose name or host is already saved is skipped, so running it twice is safe.`
+      }
+      case 'tabby':
+        return 'Connections and groups from a Tabby configuration. Passwords are not carried over — attach a credential afterwards.'
+      case 'backup':
+        return 'Connections, groups and credentials from a nocx configuration export. Secrets stay in the keychain they were exported from.'
+    }
+  })
+
+  function openImportDialog() {
+    setImportSource('sshConfig')
+    setImportFile(null)
+    setImportOpen(true)
+    // Asked on open rather than on mount: it is only ever needed to draw this
+    // dialog, and most sessions never open it.
+    if (sshConfigPath() === null) {
+      props.client
+        .sshConfigPath()
+        .then(setSSHConfigPath)
+        .catch((err: unknown) => {
+          // Not worth a toast — the label falls back to naming no path, and
+          // the import itself reports its own failure if it comes to that.
+          log.warn('Could not resolve the SSH config path', { message: (err as Error).message })
+        })
+    }
+  }
+
+  function closeImportDialog() {
+    setImportOpen(false)
+    setImportFile(null)
+  }
+
+  /**
+   * An import that leaves credentials unmapped has half-succeeded, and the half
+   * that failed needs the user to do something about it — so it is raised as a
+   * sticky warning rather than a success that scrolls away in four seconds.
+   */
+  function reportImport(result: {
+    profilesImported: number
+    groupsImported: number
+    credentialsImported: number
+    unresolvedCredentials?: unknown[]
+  }) {
+    const summary =
+      `Imported ${result.profilesImported} connections, ` +
+      `${result.groupsImported} groups, ${result.credentialsImported} credentials`
+    const unresolved = result.unresolvedCredentials?.length ?? 0
+    if (unresolved > 0) {
+      showToast({
+        level: 'warning',
+        duration: 0,
+        message: `${summary} — ${unresolved} credentials need secret mapping`,
+      })
+      return
+    }
+    showToast({ level: 'success', message: summary })
+  }
+
+  async function runImport() {
+    const source = importSource()
+    const file = importFile()
+    if (source !== 'sshConfig' && !file) {
+      showToast({ level: 'warning', message: 'Choose a file to import' })
+      return
+    }
+
+    setImportBusy(true)
+    try {
+      switch (source) {
+        case 'sshConfig': {
+          const { profilesImported, skipped } = await props.client.importSSHConfig()
+          if (profilesImported === 0 && skipped === 0) {
+            showToast({ level: 'info', message: 'No SSH config aliases to import' })
+          } else if (skipped > 0) {
+            // Sticky: "12 imported" alone reads as everything, and the
+            // skipped ones are the part the user may want to go look at.
+            showToast({
+              level: 'warning',
+              duration: 0,
+              message:
+                `Imported ${profilesImported} connections from ~/.ssh/config, ` +
+                `${skipped} skipped (name or host already saved)`,
+            })
+          } else {
+            showToast({
+              level: 'success',
+              message: `Imported ${profilesImported} connections from ~/.ssh/config`,
+            })
+          }
+          break
+        }
+        case 'tabby': {
+          const count = await props.client.importTabby(await file!.text())
+          log.info('Imported SSH profiles from Tabby config', { count })
+          showToast({ level: 'success', message: `Imported ${count} connections from Tabby` })
+          break
+        }
+        case 'backup': {
+          const data = JSON.parse(await file!.text()) as ConfigExport
+          reportImport(await props.client.importConfig(data))
+          break
+        }
+      }
+      closeImportDialog()
+      await loadAll()
+    } catch (err) {
+      const message = (err as Error).message
+      log.error('Import failed', { source, message })
+      showToast({ level: 'danger', message: `Import failed: ${message}` })
+    } finally {
+      setImportBusy(false)
+    }
+  }
+
   // ── Group editor ──────────────────────────────────────────────────────
 
   function openGroupEditor(group: ProfileGroup) {
@@ -254,7 +507,20 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     setGroupDraft(JSON.parse(JSON.stringify(group)) as ProfileGroup)
     setGroupImpact(null)
     setDangerConfirmed(false)
+    setGroupSection('general')
+    groupValidation.reset()
     setGroupDialogOpen(true)
+  }
+
+  /**
+   * Open the group editor on a blank group.
+   *
+   * The id stays empty: the backend mints it on groups.create, the same way it
+   * mints a profile id. A renderer that invented one would have to know the
+   * store's uniqueness rule, and it is not the renderer's rule.
+   */
+  function startNewGroup() {
+    openGroupEditor({ id: '', name: '' })
   }
 
   function closeGroupEditor() {
@@ -285,10 +551,24 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   async function saveGroup() {
     const draft = groupDraft()
     if (!draft) return
+    if (!groupValidation.valid()) {
+      groupValidation.revealAll()
+      // The offending field may be in a section the user is not looking at.
+      // Reveal it there and the dialog reports nothing at all.
+      setGroupSection('general')
+      return
+    }
     setGroupApplyBusy(true)
     try {
-      // Must submit via groups.apply — groups.update refuses Defaults changes.
-      await props.client.groupApply([draft])
+      if (!draft.id) {
+        // A group that does not exist yet has no blast radius, and
+        // groups.apply is a diff against a stored group. Creation is
+        // groups.create, which mints the id.
+        await props.client.createGroup(draft)
+      } else {
+        // Must submit via groups.apply — groups.update refuses Defaults changes.
+        await props.client.groupApply([draft])
+      }
       closeGroupEditor()
       await loadAll()
       showToast({ level: 'success', message: `Saved group "${draft.name}"` })
@@ -386,12 +666,21 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     void computeGroupImpact(updated)
   }
 
-  const DEFAULT_FIELDS: { key: string; label: string }[] = [
+  /**
+   * The group's defaults, split the way the connection editor splits the same
+   * settings. Nine fields in one list is what made this dialog a tube; they
+   * were never one subject anyway — a credential and a keepalive interval are
+   * not read at the same moment.
+   */
+  const CONNECTION_DEFAULTS: { key: string; label: string }[] = [
     { key: 'credentialId', label: 'Credential' },
     { key: 'port', label: 'Port' },
     { key: 'user', label: 'User' },
     { key: 'auth', label: 'Auth mode' },
     { key: 'jumpHost', label: 'Jump server' },
+  ]
+
+  const ADVANCED_DEFAULTS: { key: string; label: string }[] = [
     { key: 'keepaliveInterval', label: 'Keepalive interval (ms)' },
     { key: 'keepaliveCountMax', label: 'Keepalive count max' },
     { key: 'readyTimeout', label: 'Ready timeout (ms)' },
@@ -470,11 +759,12 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     )
   }
   function renderGroupEditor(): JSX.Element {
-    const draft = groupDraft()
-    const impact = groupImpact()
-    const impactBusy = groupImpactBusy()
-
+    // Read inside the accessors, never once at the top. A read up here makes
+    // the whole editor one computation, so every keystroke rebuilt the form's
+    // DOM and took the caret with it — the field lost focus after the first
+    // character typed. Read per value and Solid updates the one attribute.
     function gv(key: string): unknown {
+      const draft = groupDraft()
       if (!draft) return undefined
       if (key === 'name') return draft.name
       if (key === 'description') return draft.description ?? ''
@@ -502,112 +792,132 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       })),
     )
 
+    // Not a component — a render helper for one row, so the fields are read
+    // once at call time on purpose. Named parameters would trip the
+    // no-destructure rule, which cannot tell the two apart.
+    function renderDefault(field: { key: string; label: string }): JSX.Element {
+      const key = field.key
+      const label = field.label
+      if (key === 'credentialId' || key === 'jumpHost') {
+        return (
+          <Field for={`group-default-${key}`} label={label}>
+            <div class="cm-field-row">
+              <Select
+                value={gv(key) as string}
+                onChange={(v) => setG(key, v || '')}
+                options={key === 'credentialId' ? credOptions() : jumpOptions()}
+                placeholder="&mdash; Not set (inherit) &mdash;"
+              />
+            </div>
+          </Field>
+        )
+      }
+      if (key === 'auth') {
+        return (
+          <Field for="group-default-auth" label={label}>
+            <SegmentedControl
+              options={AUTH_SEGMENTS}
+              value={(gv(key) as string) ?? ''}
+              onChange={(v) => setG(key, v)}
+              ariaLabel="Default auth mode"
+            />
+          </Field>
+        )
+      }
+      if (key === 'agentForward') {
+        return (
+          <Checkbox
+            label={label}
+            checked={gv(key) === true}
+            onChange={(v) => setG(key, v ? 'true' : '')}
+          />
+        )
+      }
+      return (
+        <TextField
+          id={`group-default-${key}`}
+          label={label}
+          value={gv(key) != null ? String(gv(key)) : ''}
+          type={
+            key === 'port' ||
+            key.includes('Timeout') ||
+            key.includes('Count') ||
+            key.includes('interval')
+              ? 'number'
+              : 'text'
+          }
+          onInput={(v) => setG(key, v)}
+          placeholder="&mdash; Not set (inherit) &mdash;"
+        />
+      )
+    }
+
+    function renderDefaults(fields: { key: string; label: string }[]): JSX.Element {
+      return (
+        <Stack>
+          <p class="cm-hint">
+            Inherited by every connection in this group and its subgroups, unless the connection
+            overrides it.
+          </p>
+          <For each={fields}>{(f) => renderDefault(f)}</For>
+        </Stack>
+      )
+    }
+
     return (
       <div class="cm-group-form">
-        <Section title="Details">
-          <TextField
-            id="group-name"
-            label="Name"
-            required
-            value={gv('name') as string}
-            onInput={(v) => setG('name', v)}
-          />
-          <TextField
-            id="group-description"
-            label="Description"
-            value={gv('description') as string}
-            onInput={(v) => setG('description', v)}
-          />
-        </Section>
-
-        <Section title="Group Defaults">
-          <p class="cm-hint">
-            Defaults are inherited by all connections in this group and its subgroups. Changing a
-            default here affects every connection that does not explicitly override it.
-          </p>
-          <For each={DEFAULT_FIELDS}>
-            {({ key, label }) => {
-              if (key === 'credentialId') {
-                return (
-                  <Field for={`group-default-${key}`} label={label}>
-                    <div class="cm-field-row">
-                      <Select
-                        value={gv(key) as string}
-                        onChange={(v) => setG(key, v || '')}
-                        options={credOptions()}
-                        placeholder="&mdash; Not set (inherit) &mdash;"
-                      />
-                    </div>
-                  </Field>
-                )
-              }
-              if (key === 'jumpHost') {
-                return (
-                  <Field for={`group-default-${key}`} label={label}>
-                    <div class="cm-field-row">
-                      <Select
-                        value={gv(key) as string}
-                        onChange={(v) => setG(key, v || '')}
-                        options={jumpOptions()}
-                        placeholder="&mdash; Not set (inherit) &mdash;"
-                      />
-                    </div>
-                  </Field>
-                )
-              }
-              if (key === 'auth') {
-                return (
-                  <Field for="group-default-auth" label={label}>
-                    <div class="cm-radio-group">
-                      <For each={AUTH_MODES}>
-                        {(mode) => (
-                          <Radio
-                            value={mode}
-                            checked={gv(key) === mode}
-                            onChange={(v) => setG(key, v)}
-                            name="group-default-auth"
-                            label={authModeLabel(mode)}
-                          />
-                        )}
-                      </For>
-                    </div>
-                  </Field>
-                )
-              }
-              if (key === 'agentForward') {
-                return (
-                  <Checkbox
-                    label={label}
-                    checked={gv(key) === true}
-                    onChange={(v) => setG(key, v ? 'true' : '')}
+        <Tabs
+          items={[
+            {
+              id: 'general',
+              label: 'General',
+              content: () => (
+                <Stack>
+                  <TextField
+                    id="group-name"
+                    label="Name"
+                    required
+                    value={gv('name') as string}
+                    error={groupValidation.error('name')}
+                    onInput={(v) => setG('name', v)}
+                    onBlur={() => groupValidation.touch('name')}
                   />
-                )
-              }
-              return (
-                <TextField
-                  id={`group-default-${key}`}
-                  label={label}
-                  value={gv(key) != null ? String(gv(key)) : ''}
-                  type={
-                    key === 'port' ||
-                    key.includes('Timeout') ||
-                    key.includes('Count') ||
-                    key.includes('interval')
-                      ? 'number'
-                      : 'text'
-                  }
-                  onInput={(v) => setG(key, v)}
-                  placeholder="&mdash; Not set (inherit) &mdash;"
-                />
-              )
-            }}
-          </For>
-        </Section>
+                  <TextField
+                    id="group-description"
+                    label="Description"
+                    value={gv('description') as string}
+                    onInput={(v) => setG('description', v)}
+                  />
+                </Stack>
+              ),
+            },
+            {
+              id: 'connection',
+              label: 'Connection',
+              content: () => renderDefaults(CONNECTION_DEFAULTS),
+            },
+            {
+              id: 'advanced',
+              label: 'Advanced',
+              content: () => renderDefaults(ADVANCED_DEFAULTS),
+            },
+          ]}
+          active={groupSection()}
+          onChange={setGroupSection}
+          ariaLabel="Group sections"
+        />
 
-        <Show when={impact}>
+        {/* Pinned under the pane, not filed as a section. What a change is
+            about to do to other connections has to be in front of the person
+            making it, and a section is something you can decline to open. */}
+        {/* Only when it has something to say. The block is a warning, and a
+            warning that fires on every edit to report that nothing happened
+            teaches the reader to stop looking at it — which is exactly the
+            moment it needs to be read. */}
+        <Show when={groupImpactWorthShowing()}>
           {(i) => (
-            <Section title="Blast Radius Preview">
-              <Show when={!impactBusy} fallback={<p>Computing impact…</p>}>
+            <div class="cm-group-impact">
+              <Show when={!groupImpactBusy()} fallback={<p>Computing impact…</p>}>
                 {renderImpactSummary(i())}
                 <Show when={i().dangerous}>
                   <div class="cm-danger-confirm">
@@ -619,7 +929,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                   </div>
                 </Show>
               </Show>
-            </Section>
+            </div>
           )}
         </Show>
       </div>
@@ -752,6 +1062,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     }
 
     closeQuickConnect()
+    setProfileSection('general')
     setEditing(profile)
     setDirtyFields(new Set<string>())
     profileValidation.reset()
@@ -759,6 +1070,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   }
 
   function openEditDialog(profile: SSHProfile) {
+    setProfileSection('general')
     setEditing(profile)
     setDirtyFields(new Set<string>())
     profileValidation.reset()
@@ -784,11 +1096,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     name: () => required('Name')(formProfile()?.name ?? ''),
     host: () => combine(required('Host'), hostname())(formProfile()?.options.host ?? ''),
     port: () => combine(required('Port'), portRule())(String(formProfile()?.options.port ?? '')),
-    user: () => {
-      const p = formProfile()
-      if (!p || p.options.credentialId) return undefined
-      return required('User')(p.options.user ?? '')
-    },
     keepaliveInterval: () =>
       nonNegativeInteger('Keepalive interval')(
         String(formProfile()?.options.keepaliveInterval ?? ''),
@@ -889,12 +1196,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       log.error('Failed to compute move impact', { message })
       setProfileMoveImpact(null)
     }
-  }
-
-  function connectFromForm(profile: SSHProfile) {
-    if (!gate(profileValidation)) return
-    closeDialog()
-    props.onConnect?.(profile)
   }
 
   async function deleteProfile(profile: SSHProfile) {
@@ -1122,6 +1423,19 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           >
             {isTesting() ? 'Testing...' : 'Test'}
           </Button>
+          {/* Icon where a glyph is conventional, word where it is not. "Test"
+              has no universal symbol — Orca draws one and labels it anyway —
+              while a pencil and a plug are read without being read. A label
+              repeated once per row is spent by the second row, which is the
+              same argument the kit already makes about primary buttons. */}
+          <IconButton
+            size="sm"
+            title="Edit"
+            ariaLabel={`Edit ${p.name}`}
+            onClick={() => openEditDialog(p)}
+          >
+            <PencilIcon />
+          </IconButton>
           <IconButton
             size="sm"
             title="Connect"
@@ -1130,45 +1444,52 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           >
             <PlugIcon />
           </IconButton>
-          <Button
-            variant="default"
-            size="sm"
-            onClick={() => openEditDialog(p)}
-            ariaLabel={`Edit ${p.name}`}
-          >
-            Edit
-          </Button>
         </div>
       </div>
     )
   }
 
+  /** Does this group, or anything under it, hold a connection the filter kept? */
+  function groupHasMatches(node: TreeNode): boolean {
+    if (groupProfiles(node.id).length > 0) return true
+    return node.children.some((c) => groupHasMatches(c))
+  }
+
   function renderGroupSection(node: TreeNode) {
+    // An empty group used to render nothing at all, so creating one looked
+    // like the button had failed — and with no header there was no way to
+    // reach its editor to rename or delete it either. While a filter is
+    // active it is noise, so that is the only case that still hides it.
+    if (searchQuery().trim() !== '' && !groupHasMatches(node)) return null
     const gp = groupProfiles(node.id)
-    if (gp.length === 0 && node.children.length === 0) return null
     return (
       <>
         <div class="cm-group-header" role="heading" aria-level={2}>
           <span class="cm-group-name">{node.name}</span>
           <span class="cm-group-actions">
-            <Button
-              variant="ghost"
+            <IconButton
               size="sm"
-              onClick={() => openGroupEditor(node)}
+              title="Edit group"
               ariaLabel={`Edit group ${node.name}`}
+              onClick={() => openGroupEditor(node)}
             >
-              Edit
-            </Button>
-            <Button
-              variant="ghost"
+              <PencilIcon />
+            </IconButton>
+            <IconButton
               size="sm"
-              onClick={() => confirmDeleteGroup(node)}
+              title="Delete group"
               ariaLabel={`Delete group ${node.name}`}
+              onClick={() => confirmDeleteGroup(node)}
             >
-              Delete
-            </Button>
+              <TrashIcon />
+            </IconButton>
           </span>
         </div>
+        <Show when={gp.length === 0 && node.children.length === 0}>
+          <p class="cm-group-empty">
+            No connections here yet — pick this group in a connection&rsquo;s editor to move it in.
+          </p>
+        </Show>
         <For each={gp}>{(p) => renderRow(p)}</For>
         <For each={node.children}>{(child) => renderGroupSection(child)}</For>
       </>
@@ -1312,214 +1633,228 @@ export function ConnectionsView(props: ConnectionsViewProps) {
 
     return (
       <div class="cm-form">
-        <Section title="Basic">
-          <TextField
-            id="profile-name"
-            label="Name"
-            required
-            value={profile.name}
-            error={profileValidation.error('name')}
-            onInput={onNameChange}
-            onBlur={() => profileValidation.touch('name')}
-          />
-          {fieldRow(
-            'host',
-            <TextField
-              id="profile-host"
-              label="Host"
-              required
-              value={fvStr('host')}
-              error={profileValidation.error('host')}
-              onInput={(v) => setOption('host', v)}
-              onBlur={() => profileValidation.touch('host')}
-            />,
-          )}
-          {fieldRow(
-            'port',
-            <TextField
-              id="profile-port"
-              label="Port"
-              required
-              value={fvNum('port') || 22}
-              type="number"
-              error={profileValidation.error('port')}
-              onInput={(v) => {
-                const n = parseInt(v, 10)
-                setOption('port', isNaN(n) ? 0 : n)
-              }}
-              onBlur={() => profileValidation.touch('port')}
-            />,
-          )}
-
-          <Field for="credential-select" label="Credential">
-            <div class="cm-field-row">
-              <Select
-                value={fvStr('credentialId')}
-                onChange={(v) => setOption('credentialId', v || undefined)}
-                options={credOptions()}
-                placeholder="&mdash; None (specify below) &mdash;"
-              />
-              <IconButton
-                size="sm"
-                ariaLabel="New credential"
-                title="Create a new credential"
-                onClick={() => openCredDialog()}
-              >
-                <PlusIcon />
-              </IconButton>
-              {isSaved() && provenanceBadge('credentialId')}
-            </div>
-          </Field>
-
-          <Show when={!hasCredential}>
-            {fieldRow(
-              'user',
-              <TextField
-                id="profile-user"
-                label="User"
-                required
-                value={fvStr('user')}
-                error={profileValidation.error('user')}
-                onInput={(v) => setOption('user', v)}
-                onBlur={() => profileValidation.touch('user')}
-              />,
-            )}
-          </Show>
-        </Section>
-
-        <Show when={isSaved()}>
-          <Section title="Group">
-            <Field for="profile-group" label="Group">
-              <Select
-                value={profile.group ?? ''}
-                onChange={(v) => {
-                  const targetGroupId = v || ''
-                  setEditing({ ...profile, group: targetGroupId || undefined })
-                  setDirtyFields((prev) => new Set(prev).add('group'))
-                  if (profile.id) void computeMoveImpact(profile.id, targetGroupId)
-                }}
-                options={groupOptions()}
-                placeholder="&mdash; No group &mdash;"
-              />
-            </Field>
-            <Show when={profileMoveImpact()} keyed>
-              {(impact) => renderImpactSummary(impact)}
-            </Show>
-          </Section>
-        </Show>
-
-        <Show when={!hasCredential}>
-          <Section title="Authentication (override)">
-            <Field for="auth-method" label="Method">
-              <div class="cm-radio-group">
-                <For each={AUTH_MODES}>
-                  {(mode) => (
-                    <Radio
-                      value={mode}
-                      checked={fvStr('auth') === mode}
-                      onChange={(v) => setOption('auth', v)}
-                      name="auth-mode"
-                      label={authModeLabel(mode)}
-                    />
+        <Tabs
+          items={[
+            {
+              id: 'general',
+              label: 'General',
+              content: () => (
+                <Stack>
+                  <TextField
+                    id="profile-name"
+                    label="Name"
+                    required
+                    value={profile.name}
+                    error={profileValidation.error('name')}
+                    onInput={onNameChange}
+                    onBlur={() => profileValidation.touch('name')}
+                  />
+                  {fieldRow(
+                    'host',
+                    <TextField
+                      id="profile-host"
+                      label="Host"
+                      required
+                      value={fvStr('host')}
+                      error={profileValidation.error('host')}
+                      onInput={(v) => setOption('host', v)}
+                      onBlur={() => profileValidation.touch('host')}
+                    />,
                   )}
-                </For>
-              </div>
-            </Field>
-            {isSaved() && provenanceBadge('auth')}
-          </Section>
+                  {fieldRow(
+                    'port',
+                    <TextField
+                      id="profile-port"
+                      label="Port"
+                      required
+                      value={fvNum('port') || 22}
+                      type="number"
+                      error={profileValidation.error('port')}
+                      onInput={(v) => {
+                        const n = parseInt(v, 10)
+                        setOption('port', isNaN(n) ? 0 : n)
+                      }}
+                      onBlur={() => profileValidation.touch('port')}
+                    />,
+                  )}
+                  <Show when={isSaved()}>
+                    <Field for="profile-group" label="Group">
+                      <Select
+                        value={profile.group ?? ''}
+                        onChange={(v) => {
+                          const targetGroupId = v || ''
+                          setEditing({ ...profile, group: targetGroupId || undefined })
+                          setDirtyFields((prev) => new Set(prev).add('group'))
+                          if (profile.id) void computeMoveImpact(profile.id, targetGroupId)
+                        }}
+                        options={groupOptions()}
+                        placeholder="&mdash; No group &mdash;"
+                      />
+                    </Field>
+                  </Show>
+                </Stack>
+              ),
+            },
+            {
+              id: 'auth',
+              label: 'Authentication',
+              content: () => (
+                <Stack>
+                  <Field for="credential-select" label="Credential">
+                    <div class="cm-field-row">
+                      <Select
+                        value={fvStr('credentialId')}
+                        onChange={(v) => setOption('credentialId', v || undefined)}
+                        options={credOptions()}
+                        placeholder="&mdash; None (specify below) &mdash;"
+                      />
+                      <IconButton
+                        size="sm"
+                        ariaLabel="New credential"
+                        title="Create a new credential"
+                        onClick={() => openCredDialog()}
+                      >
+                        <PlusIcon />
+                      </IconButton>
+                      {isSaved() && provenanceBadge('credentialId')}
+                    </div>
+                  </Field>
+
+                  {/* A credential answers user and method together, so the
+                      fields it answers are not shown competing with it. */}
+                  <Show
+                    when={hasCredential}
+                    fallback={
+                      <>
+                        {fieldRow(
+                          'user',
+                          <TextField
+                            id="profile-user"
+                            label="User"
+                            value={fvStr('user')}
+                            placeholder="&mdash; Your local username &mdash;"
+                            onInput={(v) => setOption('user', v)}
+                          />,
+                        )}
+                        <Field for="auth-method" label="Method">
+                          <SegmentedControl
+                            options={AUTH_SEGMENTS}
+                            value={fvStr('auth')}
+                            onChange={(v) => setOption('auth', v)}
+                            ariaLabel="Auth method"
+                          />
+                        </Field>
+                        {isSaved() && provenanceBadge('auth')}
+                      </>
+                    }
+                  >
+                    <div class="cm-credential-card">
+                      <strong>Using Credential: </strong>
+                      <span>{credObj ? credObj.name : 'Unknown'}</span>
+                      <br />
+                      <small>
+                        {credObj
+                          ? `Username: ${credObj.username} | Auth: ${authModeLabel(credObj.auth)}`
+                          : ''}
+                      </small>
+                    </div>
+                  </Show>
+                </Stack>
+              ),
+            },
+            {
+              id: 'advanced',
+              label: 'Advanced',
+              content: () => (
+                <Stack>
+                  {fieldRow(
+                    'keepaliveInterval',
+                    <TextField
+                      id="profile-keepalive-interval"
+                      label="Keepalive interval (ms)"
+                      value={fvNum('keepaliveInterval')}
+                      type="number"
+                      min={0}
+                      error={profileValidation.error('keepaliveInterval')}
+                      onInput={(v) => {
+                        const n = parseInt(v, 10)
+                        setOption('keepaliveInterval', isNaN(n) ? 0 : n)
+                      }}
+                      onBlur={() => profileValidation.touch('keepaliveInterval')}
+                    />,
+                  )}
+                  {fieldRow(
+                    'keepaliveCountMax',
+                    <TextField
+                      id="profile-keepalive-count"
+                      label="Keepalive count max"
+                      value={fvNum('keepaliveCountMax')}
+                      type="number"
+                      min={0}
+                      error={profileValidation.error('keepaliveCountMax')}
+                      onInput={(v) => {
+                        const n = parseInt(v, 10)
+                        setOption('keepaliveCountMax', isNaN(n) ? 0 : n)
+                      }}
+                      onBlur={() => profileValidation.touch('keepaliveCountMax')}
+                    />,
+                  )}
+                  {fieldRow(
+                    'readyTimeout',
+                    <TextField
+                      id="profile-ready-timeout"
+                      label="Ready timeout (ms)"
+                      value={fvNum('readyTimeout')}
+                      type="number"
+                      min={0}
+                      error={profileValidation.error('readyTimeout')}
+                      onInput={(v) => {
+                        const n = parseInt(v, 10)
+                        setOption('readyTimeout', isNaN(n) ? 0 : n)
+                      }}
+                      onBlur={() => profileValidation.touch('readyTimeout')}
+                    />,
+                  )}
+                  <Field for="jump-host" label="Jump server">
+                    <div class="cm-field-row">
+                      <Select
+                        value={fvStr('jumpHost')}
+                        onChange={(v) => setOption('jumpHost', v || undefined)}
+                        options={jumpOptions()}
+                        placeholder="&mdash; None &mdash;"
+                      />
+                      {isSaved() && provenanceBadge('jumpHost')}
+                    </div>
+                  </Field>
+                  <div class="cm-check-group">
+                    <Checkbox
+                      label="Agent forward"
+                      checked={fvBool('agentForward')}
+                      onChange={(v) => setOption('agentForward', v)}
+                    />
+                    <Checkbox
+                      label="Can be used as jump server"
+                      checked={fvBool('canBeJumpServer')}
+                      onChange={(v) => setOption('canBeJumpServer', v)}
+                    />
+                  </div>
+                  {isSaved() &&
+                    (provenanceBadge('agentForward') || provenanceBadge('canBeJumpServer'))}
+                </Stack>
+              ),
+            },
+          ]}
+          active={profileSection()}
+          onChange={setProfileSection}
+          ariaLabel="Connection sections"
+        />
+
+        {/* Pinned under the pane, like the group editor's blast radius: what a
+            move does to inherited settings has to be in front of the person
+            making it, not filed behind a section they can decline to open. */}
+        <Show when={profileMoveImpact()} keyed>
+          {(impact) => <div class="cm-group-impact">{renderImpactSummary(impact)}</div>}
         </Show>
-
-        <Show when={hasCredential}>
-          <div class="cm-form-section">
-            <div class="cm-credential-card">
-              <strong>Using Credential: </strong>
-              <span>{credObj ? credObj.name : 'Unknown'}</span>
-              <br />
-              <small>
-                {credObj
-                  ? `Username: ${credObj.username} | Auth: ${authModeLabel(credObj.auth)}`
-                  : ''}
-              </small>
-            </div>
-          </div>
-        </Show>
-
-        <Section title="Advanced">
-          {fieldRow(
-            'keepaliveInterval',
-            <TextField
-              id="profile-keepalive-interval"
-              label="Keepalive interval (ms)"
-              value={fvNum('keepaliveInterval')}
-              type="number"
-              min={0}
-              error={profileValidation.error('keepaliveInterval')}
-              onInput={(v) => {
-                const n = parseInt(v, 10)
-                setOption('keepaliveInterval', isNaN(n) ? 0 : n)
-              }}
-              onBlur={() => profileValidation.touch('keepaliveInterval')}
-            />,
-          )}
-          {fieldRow(
-            'keepaliveCountMax',
-            <TextField
-              id="profile-keepalive-count"
-              label="Keepalive count max"
-              value={fvNum('keepaliveCountMax')}
-              type="number"
-              min={0}
-              error={profileValidation.error('keepaliveCountMax')}
-              onInput={(v) => {
-                const n = parseInt(v, 10)
-                setOption('keepaliveCountMax', isNaN(n) ? 0 : n)
-              }}
-              onBlur={() => profileValidation.touch('keepaliveCountMax')}
-            />,
-          )}
-          {fieldRow(
-            'readyTimeout',
-            <TextField
-              id="profile-ready-timeout"
-              label="Ready timeout (ms)"
-              value={fvNum('readyTimeout')}
-              type="number"
-              min={0}
-              error={profileValidation.error('readyTimeout')}
-              onInput={(v) => {
-                const n = parseInt(v, 10)
-                setOption('readyTimeout', isNaN(n) ? 0 : n)
-              }}
-              onBlur={() => profileValidation.touch('readyTimeout')}
-            />,
-          )}
-
-          <Field for="jump-host" label="Jump server">
-            <div class="cm-field-row">
-              <Select
-                value={fvStr('jumpHost')}
-                onChange={(v) => setOption('jumpHost', v || undefined)}
-                options={jumpOptions()}
-                placeholder="&mdash; None &mdash;"
-              />
-              {isSaved() && provenanceBadge('jumpHost')}
-            </div>
-          </Field>
-
-          <div class="cm-check-group">
-            <Checkbox
-              label="Agent forward"
-              checked={fvBool('agentForward')}
-              onChange={(v) => setOption('agentForward', v)}
-            />
-            <Checkbox
-              label="Can be used as jump server"
-              checked={fvBool('canBeJumpServer')}
-              onChange={(v) => setOption('canBeJumpServer', v)}
-            />
-          </div>
-          {isSaved() && (provenanceBadge('agentForward') || provenanceBadge('canBeJumpServer'))}
-        </Section>
       </div>
     )
   }
@@ -1528,7 +1863,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
 
   return (
     <div class="cm-root">
-      <Toolbar>
+      <Toolbar ariaLabel="Connection actions">
         <div class="cm-search">
           <SearchField
             value={searchQuery()}
@@ -1537,28 +1872,62 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             ariaLabel="Filter connections"
           />
         </div>
-        <Button variant="primary" onClick={startNewProfile}>
-          + New connection
-        </Button>
+        {/* Actions sit together on the trailing edge. The filter and the
+            create button used to be adjacent with the rest of the bar empty,
+            which read as one broken cluster rather than as two jobs. */}
+        <div class="cm-toolbar-actions">
+          <Button variant="default" onClick={openImportDialog}>
+            Import…
+          </Button>
+          <Button variant="default" onClick={startNewGroup}>
+            New group
+          </Button>
+          <Button variant="primary" onClick={startNewProfile}>
+            + New connection
+          </Button>
+        </div>
       </Toolbar>
       <Show
-        when={profiles().length > 0}
+        when={profiles().length > 0 || groups().length > 0}
         fallback={
           <EmptyState
             title="No connections yet"
-            description={'Click "+ New connection" to add one.'}
+            description="Add one by hand, or import from ~/.ssh/config, Tabby, or an export."
+            action={
+              <>
+                <Button variant="primary" onClick={startNewProfile}>
+                  + New connection
+                </Button>
+                <Button variant="default" onClick={openImportDialog}>
+                  Import…
+                </Button>
+              </>
+            }
           />
         }
       >
-        <div class="cm-body" role="list" aria-label="Connection list">
-          <For each={tree()}>{(node) => renderGroupSection(node)}</For>
-          <Show when={ungrouped().length > 0}>
-            <div class="cm-group-header" role="heading" aria-level={2}>
-              <span class="cm-group-name">Connections</span>
-            </div>
-            <For each={ungrouped()}>{(p) => renderRow(p)}</For>
+        <>
+          <div class="cm-body" role="list" aria-label="Connection list">
+            <For each={tree()}>{(node) => renderGroupSection(node)}</For>
+            <Show when={ungrouped().length > 0}>
+              <div class="cm-group-header" role="heading" aria-level={2}>
+                <span class="cm-group-name">
+                  {groups().length > 0 ? 'Ungrouped' : 'Connections'}
+                </span>
+              </div>
+              <For each={ungrouped()}>{(p) => renderRow(p)}</For>
+            </Show>
+          </div>
+          {/* A filter that matches nothing hid every row and every group and
+              said nothing, which is indistinguishable from the list failing
+              to load. */}
+          <Show when={searchQuery().trim() !== '' && filteredProfiles().length === 0}>
+            <EmptyState
+              title="Nothing matches this filter"
+              description={`No connection's name, host or user contains "${searchQuery().trim()}".`}
+            />
           </Show>
-        </div>
+        </>
       </Show>
 
       {/* Editor Dialog */}
@@ -1568,13 +1937,11 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             open={dialogOpen()}
             onClose={closeDialog}
             title={profile().id ? `Edit Connection: ${profile().name}` : 'New Connection'}
+            size="lg"
             footer={
               <>
                 <Button variant="primary" onClick={() => void saveProfile(profile())}>
                   {profile().id ? 'Save Connection' : 'Create Connection'}
-                </Button>
-                <Button variant="default" onClick={() => connectFromForm(profile())}>
-                  Connect
                 </Button>
                 <Show when={profile().id}>
                   <Button variant="danger" onClick={() => void deleteProfile(profile())}>
@@ -1598,6 +1965,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         onClose={closeQuickConnect}
         title="New Connection"
         size="md"
+        onSubmit={handleQuickConnect}
         footer={
           <>
             <Button variant="primary" onClick={handleQuickConnect}>
@@ -1622,6 +1990,67 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         </p>
       </Dialog>
 
+      {/* Import Dialog — bringing connections in from elsewhere */}
+      <Dialog
+        open={importOpen()}
+        onClose={closeImportDialog}
+        title="Import Connections"
+        size="md"
+        onSubmit={() => void runImport()}
+        footer={
+          <>
+            <Button variant="primary" disabled={importBusy()} onClick={() => void runImport()}>
+              {importBusy() ? 'Importing…' : 'Import'}
+            </Button>
+            <Button variant="default" disabled={importBusy()} onClick={closeImportDialog}>
+              Cancel
+            </Button>
+          </>
+        }
+      >
+        <Field for="cm-import-source" label="Source">
+          <div class="cm-radio-group">
+            <For each={IMPORT_SOURCES()}>
+              {(src) => (
+                <Radio
+                  value={src.value}
+                  checked={importSource() === src.value}
+                  onChange={(v) => {
+                    setImportSource(v as ImportSource)
+                    // A file chosen for one source is not a file for another.
+                    setImportFile(null)
+                  }}
+                  name="cm-import-source"
+                  label={src.label}
+                />
+              )}
+            </For>
+          </div>
+        </Field>
+
+        {/* The file row is always present, and disabled for the source that
+            takes no file. Showing it conditionally made the dialog change
+            height under the pointer as the user moved down the radio list —
+            the buttons they were reaching for moved away from them. Keyed on
+            the source so switching between the two file sources remounts the
+            picker: FileInput holds the chosen name internally and would
+            otherwise still display a file we have just discarded. */}
+        <Show when={importSource()} keyed>
+          {(src) => (
+            <Field for="cm-import-file" label="File">
+              <FileInput
+                id="cm-import-file"
+                accept={src === 'tabby' ? '.yml,.yaml' : '.json'}
+                disabled={importBusy() || src === 'sshConfig'}
+                onChange={setImportFile}
+              />
+            </Field>
+          )}
+        </Show>
+
+        <p class="cm-hint cm-import-hint">{importHint()}</p>
+      </Dialog>
+
       {/* Credential creation Dialog (from within connection form) */}
       <Show when={credDraft()}>
         {(cred) => (
@@ -1629,6 +2058,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             open={credDialogOpen()}
             onClose={closeCredDialog}
             title="New Credential"
+            size="lg"
             footer={
               <>
                 <Button variant="primary" onClick={() => void handleCredSave()}>
@@ -1659,8 +2089,19 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           <Dialog
             open={groupDialogOpen()}
             onClose={closeGroupEditor}
-            title={`Edit Group: ${group().name}`}
+            // The live draft name, not the stored one: the title is where the
+            // group's identity stays readable once the user is two sections
+            // deep in defaults, and a title showing the old name while the
+            // General field shows a new one is worse than no title at all.
+            title={
+              group().id
+                ? `Edit Group: ${groupDraft()?.name || group().name}`
+                : groupDraft()?.name
+                  ? `New Group: ${groupDraft()!.name}`
+                  : 'New Group'
+            }
             size="lg"
+            onSubmit={() => void saveGroup()}
             footer={
               <>
                 <Button
@@ -1668,7 +2109,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                   disabled={groupApplyBusy() || (groupImpact()?.dangerous && !dangerConfirmed())}
                   onClick={() => void saveGroup()}
                 >
-                  {groupApplyBusy() ? 'Applying…' : 'Save Group'}
+                  {groupApplyBusy() ? 'Applying…' : group().id ? 'Save Group' : 'Create Group'}
                 </Button>
                 <Button variant="default" onClick={closeGroupEditor} disabled={groupApplyBusy()}>
                   Cancel
@@ -1686,7 +2127,9 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         <Dialog
           open={deleteConfirmOpen()}
           onClose={cancelDeleteGroup}
-          title="Delete Group"
+          // Which group. A confirmation that does not name what it is about to
+          // destroy is asking the user to remember which row they clicked.
+          title={deleteGroupName() ? `Delete Group: ${deleteGroupName()}` : 'Delete Group'}
           footer={
             <>
               <Button
@@ -1700,7 +2143,18 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                     ? 'Cannot Delete'
                     : 'Delete Group'}
               </Button>
-              <Button variant="default" onClick={cancelDeleteGroup} disabled={deleteBusy()}>
+              {/* autofocus on Cancel, deliberately. A native showModal()
+                  focuses the first focusable descendant, and this dialog's
+                  body is text — so focus landed on "Delete Group" and one
+                  Enter, pressed by someone who was still typing a moment ago,
+                  destroyed the group. The safe action takes the focus; the
+                  destructive one has to be aimed at. */}
+              <Button
+                variant="default"
+                onClick={cancelDeleteGroup}
+                disabled={deleteBusy()}
+                autofocus
+              >
                 Cancel
               </Button>
             </>
@@ -1719,7 +2173,14 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                   <p>This group cannot be deleted through this dialog.</p>
                 </Show>
                 <Show when={di.action === 'promote_to_root'}>
-                  <p>{di.reason}</p>
+                  {/* The written sentence first, the backend's rationale after
+                      it. "group has no children" is why the backend chose this
+                      action, not what the user is agreeing to. */}
+                  <p>
+                    Delete the group <strong>{deleteGroupName()}</strong>? Its connections and
+                    subgroups move to the top level; nothing is deleted with it.
+                  </p>
+                  <p class="cm-delete-reason">{di.reason}</p>
                   <Show
                     when={
                       deleteImpact()?.affectedProfiles &&
