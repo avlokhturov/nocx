@@ -576,6 +576,8 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.handleGroupMethod(wconn, req)
 	case "credentials.list", "credentials.create", "credentials.update", "credentials.delete":
 		s.handleCredentialCRUDMethod(wconn, req)
+	case "credentials.usage":
+		s.handleCredentialUsageMethod(wconn, req)
 	case "credentials.savePassword", "credentials.deletePassword",
 		"credentials.hasPassword",
 		"credentials.saveKeyPassphrase", "credentials.deleteKeyPassphrase":
@@ -1216,6 +1218,39 @@ func (s *WSServer) handleCredentialCRUDMethod(wconn *wsConn, req jsonrpcRequest)
 		}
 		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(true)))
 	}
+}
+
+func (s *WSServer) handleCredentialUsageMethod(wconn *wsConn, req jsonrpcRequest) {
+	if s.credMeta == nil || s.profiles == nil || s.groups == nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "credentials not available"))
+		return
+	}
+
+	creds, err := s.credMeta.LoadCredentials()
+	if err != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		return
+	}
+
+	profiles, err := s.profiles.LoadProfiles()
+	if err != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		return
+	}
+
+	groups, err := s.groups.LoadGroups()
+	if err != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		return
+	}
+
+	usage := profile.ComputeCredentialUsage(creds, profiles, groups, profile.SparseSSHOptions{})
+
+	result := struct {
+		Usage []profile.CredentialUsage `json:"usage"`
+	}{Usage: usage}
+
+	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(result)))
 }
 
 // credentialCreateDTO is the renderer's create payload. SecretID and
