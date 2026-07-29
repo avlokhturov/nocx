@@ -41,7 +41,14 @@ export interface FieldProps {
   /** The id of the control inside this field — used for label's `for` and
    *  description/error aria-describedby wiring. */
   for: string
-  label: string
+  /**
+   * Optional, and deliberately so: a control can legitimately carry a
+   * description or an error and no label of its own. When it is absent the
+   * `<label>` element is not rendered at all — an empty `<label for>` bound to
+   * a control announces that control as unlabelled, which is worse than having
+   * no label element (nocx-uxs5.5).
+   */
+  label?: string
   description?: string
   error?: string
   required?: boolean
@@ -73,13 +80,15 @@ export function Field(props: FieldProps) {
       when={props.orientation === 'horizontal'}
       fallback={
         <div class="ui-field" data-label={props.labelProminence ?? 'secondary'}>
-          <label for={props.for}>
-            {props.labelMarker}
-            {props.label}
-            <Show when={props.required === true}>
-              <span aria-hidden="true"> *</span>
-            </Show>
-          </label>
+          <Show when={props.label !== undefined || props.labelMarker !== undefined}>
+            <label for={props.for}>
+              {props.labelMarker}
+              {props.label}
+              <Show when={props.required === true}>
+                <span aria-hidden="true"> *</span>
+              </Show>
+            </label>
+          </Show>
           <Show when={props.description !== undefined}>
             <p id={descriptionId()} class="ui-field-desc">
               {props.description}
@@ -96,14 +105,16 @@ export function Field(props: FieldProps) {
     >
       <div class="ui-field ui-field-horizontal" data-label={props.labelProminence ?? 'secondary'}>
         <div class="ui-field-label-col">
-          <label for={props.for}>
-            {props.labelMarker}
-            {props.label}
-            <Show when={props.required === true}>
-              <span aria-hidden="true"> *</span>
-            </Show>
-            <Show when={props.labelAdornment}>{props.labelAdornment}</Show>
-          </label>
+          <Show when={props.label !== undefined || props.labelMarker !== undefined}>
+            <label for={props.for}>
+              {props.labelMarker}
+              {props.label}
+              <Show when={props.required === true}>
+                <span aria-hidden="true"> *</span>
+              </Show>
+              <Show when={props.labelAdornment}>{props.labelAdornment}</Show>
+            </label>
+          </Show>
           <Show when={props.description !== undefined}>
             <p id={descriptionId()} class="ui-field-desc">
               {props.description}

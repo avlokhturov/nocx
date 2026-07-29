@@ -70,7 +70,9 @@ describe('TextField', () => {
   // A caller's class is added alongside, never instead.
   it('carries the kit base class on the wrapper', () => {
     subject({ label: 'Port' })
-    const wrapper = screen.getByText('Port').parentElement
+    const label = screen.getByText('Port')
+    const wrapper = label.closest('.ui-text-field')
+    expect(wrapper).toBeTruthy()
     expect(wrapper?.getAttribute('class')).toBe('ui-text-field')
   })
 
@@ -133,5 +135,28 @@ describe('TextField', () => {
     subject({ required: true })
     const input = screen.getByRole('textbox')
     expect(input).toHaveProperty('required', true)
+  })
+})
+
+describe('composition with Field', () => {
+  // TextField's label is optional and Field's was not, so the composition
+  // originally carried `label={props.label!}` — an assertion silencing a case
+  // that genuinely occurs. The result was <label for="x"></label>: an empty
+  // label bound to the control, which announces it as unlabelled. That is a
+  // worse outcome than the duplication the composition removed, so it is
+  // pinned here rather than left to review (nocx-uxs5.5).
+  it('emits no label element when there is no label to show', () => {
+    const { container } = render(() => (
+      <TextField id="cred-x" value="x" error="Required" onInput={() => {}} />
+    ))
+    expect(container.querySelector('label')).toBeNull()
+    expect(container.querySelector('.ui-field-error')?.textContent).toBe('Required')
+  })
+
+  it('still labels the control when a label is given', () => {
+    const { container } = render(() => <TextField id="cred-y" label="Name" value="y" />)
+    const label = container.querySelector('label')
+    expect(label?.getAttribute('for')).toBe('cred-y')
+    expect(label?.textContent?.trim()).toBe('Name')
   })
 })
