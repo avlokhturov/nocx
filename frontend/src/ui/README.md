@@ -12,25 +12,67 @@ Every one renders a stable **base class** naming itself, on the element that car
 appearance — not merely on a wrapper. Variance is a typed `data-*` attribute. None of
 them takes a `class` prop; the structural containers that still do are marked.
 
-| Component       | Module             | Identity                                     | Variance                                                                    |
-| --------------- | ------------------ | -------------------------------------------- | --------------------------------------------------------------------------- |
-| **Stack**       | `stack.tsx`        | `ui-stack`                                   | `data-gap`: default \| loose                                                |
-| **Button**      | `button.tsx`       | `ui-button`                                  | `data-variant`: default \| primary \| danger \| ghost; `data-size`          |
-| **IconButton**  | `icon-button.tsx`  | `ui-icon-button`                             | `data-size`; `selected` → `aria-selected`; `ariaLabel` is **required**      |
-| **TextField**   | `text-field.tsx`   | `ui-text-field`, `ui-text-field__input`      | input types text \| number \| password; composes Field for label/desc/error |
-| **SearchField** | `search-field.tsx` | `ui-search-field`, `__input`, `__icon`       | —                                                                           |
-| **Select**      | `select.tsx`       | `ui-select`                                  | native `<select>`, `appearance: none` (ADR-0014)                            |
-| **Checkbox**    | `checkbox.tsx`     | `ui-checkbox`, `ui-checkbox__control`        | `data-variant`: checkbox \| switch                                          |
-| **Radio**       | `radio.tsx`        | `ui-radio`, `ui-radio__control`              | —                                                                           |
-| **FileInput**   | `file-input.tsx`   | `ui-file-input`, `__native`, `__name`        | kit Button as trigger; native input hidden but focusable                    |
-| **Toast**       | `toast.tsx`        | `ui-toast-host`, `ui-toast`, `__message`     | `data-level`: info \| success \| warning \| danger                          |
-| **MarkerList**  | `marker-list.tsx`  | `ui-marker-list` + `__item/__marker/__text`  | `data-tone`: included \| excluded \| note                                   |
-| **CodeBlock**   | `code-block.tsx`   | `ui-code-block`                              | preformatted machine output; scroll-capped                                  |
-| **Badge**       | `badge.tsx`        | `ui-badge`                                   | `data-tone`: neutral \| info \| warning \| danger                           |
-| **EmptyState**  | `empty-state.tsx`  | `ui-empty-state` + `__title/__desc/__action` | —                                                                           |
-| **Field**       | `field.tsx`        | `ui-field`, `+ ui-field-horizontal`          | `orientation`                                                               |
-| **Section**     | `section.tsx`      | `ui-section`                                 | children spaced by Stack; no `class` passthrough                            |
-| **Toolbar**     | `toolbar.tsx`      | `ui-toolbar`                                 | keeps `class`, **layout only**                                              |
+| Component            | Module                  | Identity                                     | Variance                                                                    |
+| -------------------- | ----------------------- | -------------------------------------------- | --------------------------------------------------------------------------- |
+| **Stack**            | `stack.tsx`             | `ui-stack`                                   | `data-gap`: default \| loose                                                |
+| **Button**           | `button.tsx`            | `ui-button`                                  | `data-variant`: default \| primary \| danger \| ghost; `data-size`          |
+| **IconButton**       | `icon-button.tsx`       | `ui-icon-button`                             | `data-size`; `selected` → `aria-selected`; `ariaLabel` is **required**      |
+| **TextField**        | `text-field.tsx`        | `ui-text-field`, `ui-text-field__input`      | input types text \| number \| password; composes Field for label/desc/error |
+| **SearchField**      | `search-field.tsx`      | `ui-search-field`, `__input`, `__icon`       | —                                                                           |
+| **Select**           | `select.tsx`            | `ui-select`                                  | native `<select>`, `appearance: none` (ADR-0014)                            |
+| **Checkbox**         | `checkbox.tsx`          | `ui-checkbox`, `ui-checkbox__control`        | `data-variant`: checkbox \| switch                                          |
+| **Radio**            | `radio.tsx`             | `ui-radio`, `ui-radio__control`              | —                                                                           |
+| **SegmentedControl** | `segmented-control.tsx` | `ui-segmented-control`, `__option`           | one row; same `radiogroup` ARIA as Radio, for few and short options         |
+| **FileInput**        | `file-input.tsx`        | `ui-file-input`, `__native`, `__name`        | kit Button as trigger; native input hidden but focusable                    |
+| **Toast**            | `toast.tsx`             | `ui-toast-host`, `ui-toast`, `__message`     | `data-level`: info \| success \| warning \| danger                          |
+| **MarkerList**       | `marker-list.tsx`       | `ui-marker-list` + `__item/__marker/__text`  | `data-tone`: included \| excluded \| note                                   |
+| **CodeBlock**        | `code-block.tsx`        | `ui-code-block`                              | preformatted machine output; scroll-capped                                  |
+| **Badge**            | `badge.tsx`             | `ui-badge`                                   | `data-tone`: neutral \| info \| warning \| danger                           |
+| **EmptyState**       | `empty-state.tsx`       | `ui-empty-state` + `__title/__desc/__action` | —                                                                           |
+| **Field**            | `field.tsx`             | `ui-field`, `+ ui-field-horizontal`          | `orientation`                                                               |
+| **Section**          | `section.tsx`           | `ui-section`                                 | children spaced by Stack; no `class` passthrough                            |
+| **Toolbar**          | `toolbar.tsx`           | `ui-toolbar`                                 | keeps `class`, **layout only**                                              |
+| **Tabs**             | `tabs.tsx`              | `ui-tabs`, `ui-tabs__list`, `ui-tabs__panel` | `data-orientation`: vertical \| horizontal; rows are ghost Buttons          |
+
+## A container's size is the container's decision, never its content's
+
+**A component that holds swappable content declares a definite size for it.** Not a
+`max-width`, not a `min-height` — a size the content cannot argue with.
+
+Two components make this promise, and both learned it the same way. `Dialog`'s panel
+was `max-width: 480px` on a `<dialog>`, which is `width: fit-content`: the panel
+therefore shrank to whatever the body needed, so a body with sections redrew the dialog
+at a different width on every section — 356px on one, the full 560 on the next. `Tabs`
+had the same defect vertically. In both cases the visible symptom is the same and it is
+not cosmetic: **the footer buttons move out from under the pointer that is reaching for
+them**, and a control that moves while being aimed at is a control that gets misclicked.
+
+`Dialog` names its width through `size` — a definite width, not a cap.
+
+`Tabs` **measures** rather than names: every section is rendered into one grid cell, so
+the box is the size of the largest section and switching cannot change it. A fixed
+height was tried first and was wrong for a reason worth keeping — a guessed height is
+either too small, and then a short section scrolls inside a window with room to spare,
+or too large, and then every section but one sits in a half-empty box. The inactive
+sections are `visibility: hidden`, which keeps them out of the tab order and the
+accessibility tree while they still contribute their size; `display: none` would take
+away the very thing they are there for.
+
+The general form: if switching what is inside a component can change that component's
+outer size, the component is missing a size, not the caller.
+
+## Dialog body text is body text
+
+Prose inside a dialog is set at the body size. Not `--font-size-sm`, not smaller
+"because it is only supporting detail" — a dialog is the one surface where the reader
+has been interrupted and is being asked to decide something, and the delete
+confirmation had the smallest type on screen carrying the most consequential question.
+`--font-size-sm` is for a caption beside a control that already says what it is: a
+provenance label, a row's second line. Not for a sentence.
+
+`Dialog` takes an `onSubmit` for the dialog's obvious yes, so Enter in a single-line
+field confirms rather than doing nothing. It is opt-in: Enter must not fire a
+destructive confirmation, and a dialog whose body is a message has nothing to submit.
 
 ## Vertical rhythm: Stack
 

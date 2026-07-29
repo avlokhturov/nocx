@@ -26,6 +26,8 @@
 @import './styles/components/sidebar.css';
 @import './styles/components/quick-connect.css';
 @import './styles/components/tab.css';
+@import './styles/components/tabs.css';
+@import './styles/components/segmented-control.css';
 @import './styles/components/stack.css';
 @import './styles/components/page-section.css';
 @import './styles/components/toast.css';

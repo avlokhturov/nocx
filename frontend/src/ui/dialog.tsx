@@ -61,6 +61,47 @@ export interface DialogProps {
    * doing, silently.
    */
   size?: 'md' | 'lg'
+  /**
+   * The dialog's affirmative action, triggered by Enter in a single-line field.
+   *
+   * Opt-in rather than automatic: Enter must not fire a destructive
+   * confirmation, and a dialog whose body is a message has nothing to submit.
+   * A caller that passes this is saying "this dialog has one obvious yes".
+   *
+   * Textareas and buttons are exempt — Enter belongs to them.
+   */
+  onSubmit?: () => void
+}
+
+/**
+ * Put the caret where the user is about to type.
+ *
+ * `showModal()` focuses the first focusable descendant, and "focusable" is
+ * wider than "a control": a scrolling region is focusable too, so browsers can
+ * let a keyboard user scroll it. The dialog body scrolls, so opening a form
+ * landed the focus on the body itself — a focus ring drawn around the entire
+ * dialog contents, and a first keystroke that went nowhere. Reported from a Mac
+ * with full keyboard access on, where it happens every time.
+ *
+ * Order of preference, and each step exists for a reason:
+ *   1. an explicit `autofocus` — the caller has said which control, and on a
+ *      destructive confirmation that is deliberately the SAFE one;
+ *   2. the first real field — what a form is for;
+ *   3. the first button — a dialog with nothing to fill in.
+ * A scroll container matches none of them, so it is reachable by Tab and never
+ * chosen for you.
+ */
+function focusInitial(d: HTMLDialogElement): void {
+  const panel = d.querySelector('.nocx-dialog__panel')
+  if (!panel) return
+  const enabled = ':not([disabled]):not([tabindex="-1"])'
+  const target =
+    panel.querySelector<HTMLElement>('[autofocus]' + enabled) ??
+    panel.querySelector<HTMLElement>(
+      `input:not([type="hidden"])${enabled}, select${enabled}, textarea${enabled}`,
+    ) ??
+    panel.querySelector<HTMLElement>('button' + enabled)
+  target?.focus()
 }
 
 export const Dialog: Component<DialogProps> = (props) => {
@@ -73,16 +114,22 @@ export const Dialog: Component<DialogProps> = (props) => {
 
     if (props.open && !d.open) {
       d.showModal()
-      // The callback is stored and invoked later, when Escape or an
-      // outside interaction reaches the top of the overlay stack — i.e. as an
-      // event response, which is where solid/reactivity permits a prop read.
-      // The rule cannot see through the indirection.
-      // eslint-disable-next-line solid/reactivity
-      const e = pushOverlay(() => {
+      // The callback is stored and invoked later, when Escape or an outside
+      // interaction reaches the top of the overlay stack — i.e. as an event
+      // response, which is where solid/reactivity permits a prop read.
+      //
+      // The element travels with the entry so the toast host can render itself
+      // inside the topmost dialog. A modal dialog is in the browser's top
+      // layer, which nothing in the normal layer can paint over at any
+      // z-index, so a notification raised while this is open is only visible
+      // if it is a child of it.
+      const close = () => {
         props.onClose()
         return true
-      })
+      }
+      const e = pushOverlay(close, undefined, d)
       setEntry(e)
+      focusInitial(d)
     } else if (!props.open && d.open) {
       const e = entry()
       if (e) popOverlay(e)
@@ -118,6 +165,10 @@ export const Dialog: Component<DialogProps> = (props) => {
   const onPointerDown = (e: MouseEvent) => {
     const d = ref
     if (!d) return
+    // The toast host renders inside this dialog when it is topmost, so a click
+    // on a toast is a click on a descendant that is deliberately outside the
+    // panel. Dismissing a notification must not dismiss the form behind it.
+    if ((e.target as Element | null)?.closest('.ui-toast-host')) return
     const panel = d.querySelector('.nocx-dialog__panel')
     if (!panel) return
     const r = panel.getBoundingClientRect()
@@ -129,13 +180,48 @@ export const Dialog: Component<DialogProps> = (props) => {
     if (!inside) props.onClose()
   }
 
+  /**
+   * Enter in a single-line field means "the obvious yes", which is what it
+   * means in every other form on every other platform. Without it a dialog
+   * whose whole body is one text box makes the user reach for the mouse to
+   * confirm what they have just finished typing.
+   *
+   * Guarded three ways: only when the caller declared an action, only from a
+   * real input (a textarea owns Enter, a button already has its own), and not
+   * mid-composition — an IME uses Enter to accept a candidate, and submitting
+   * there would eat the word being typed.
+   */
+  const onKeyDown = (e: KeyboardEvent) => {
+    if (!props.onSubmit) return
+    if (e.key !== 'Enter' || e.shiftKey || e.isComposing) return
+    const target = e.target as HTMLElement | null
+    if (!target || target.tagName !== 'INPUT') return
+    if ((target as HTMLInputElement).type === 'button') return
+    e.preventDefault()
+    props.onSubmit()
+  }
+
   return (
-    <dialog ref={ref} class="nocx-dialog" onCancel={onCancel} onMouseDown={onPointerDown}>
+    <dialog
+      ref={ref}
+      class="nocx-dialog"
+      onCancel={onCancel}
+      onMouseDown={onPointerDown}
+      onKeyDown={onKeyDown}
+    >
       <div class="nocx-dialog__panel" data-size={props.size ?? 'md'}>
         <Show when={props.title}>
           <h2 class="nocx-dialog__title">{props.title}</h2>
         </Show>
-        {props.children}
+        {/* The body is a slot with rhythm of its own, not a place children are
+            dropped. They used to be panel children directly, and the panel is a
+            gapless flex column — so a dialog whose body was several Fields had
+            its label sitting on the control above it, and every caller that
+            looked right did so by remembering to wrap its content in a Section
+            or a Stack. "Remember to" is not a contract. It also owns the
+            scroll: content taller than the panel used to be clipped by the
+            panel's `overflow: hidden` and simply unreachable. */}
+        <div class="nocx-dialog__body">{props.children}</div>
         <Show when={props.footer}>
           <div class="nocx-dialog__actions">{props.footer}</div>
         </Show>
