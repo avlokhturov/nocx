@@ -100,7 +100,6 @@ func (r *Resolver) findProfile(id string) (profile.SSHProfile, error) {
 // resolution, effective profile inheritance, and jump host recursion.
 func (r *Resolver) buildConfig(prof *profile.SSHProfile, visited map[string]bool) (*ssh.ConnectConfig, error) {
 	cfg := &ssh.ConnectConfig{}
-	cfg.Port = prof.Options.Port
 
 	// Resolve effective profile (profile + group inheritance + defaults).
 	groups, err := r.groups.LoadGroups()
@@ -116,24 +115,24 @@ func (r *Resolver) buildConfig(prof *profile.SSHProfile, visited map[string]bool
 	// Use the effective profile's port (profile > group chain > global > 22).
 	// ~/.ssh/config Port is applied at connect time by resolveConfig, which
 	// is outranked by the explicit cfg.Port set here.
-	cfg.Port = eff.Profile.Options.Port
+	cfg.Port = eff.ResolvedOptions.Port
 
 	// Copy keepalive/timeout/agentforward from effective profile.
 	// The profile stores MILLISECONDS; ConnectConfig fields are time.Duration.
-	if eff.Profile.Options.KeepaliveInterval > 0 {
-		cfg.KeepaliveInterval = time.Duration(eff.Profile.Options.KeepaliveInterval) * time.Millisecond
+	if eff.ResolvedOptions.KeepaliveInterval > 0 {
+		cfg.KeepaliveInterval = time.Duration(eff.ResolvedOptions.KeepaliveInterval) * time.Millisecond
 	}
-	if eff.Profile.Options.KeepaliveCountMax > 0 {
-		cfg.KeepaliveCountMax = eff.Profile.Options.KeepaliveCountMax
+	if eff.ResolvedOptions.KeepaliveCountMax > 0 {
+		cfg.KeepaliveCountMax = eff.ResolvedOptions.KeepaliveCountMax
 	} else {
 		cfg.KeepaliveCountMax = -1 // default: single failure closes
 	}
-	if eff.Profile.Options.ReadyTimeout > 0 {
-		cfg.ReadyTimeout = time.Duration(eff.Profile.Options.ReadyTimeout) * time.Millisecond
+	if eff.ResolvedOptions.ReadyTimeout > 0 {
+		cfg.ReadyTimeout = time.Duration(eff.ResolvedOptions.ReadyTimeout) * time.Millisecond
 	}
-	cfg.AgentForward = eff.Profile.Options.AgentForward
+	cfg.AgentForward = eff.ResolvedOptions.AgentForward
 
-	credID := eff.Profile.Options.CredentialID
+	credID := eff.ResolvedOptions.CredentialID
 	if credID != "" {
 		cred, err := r.findCredential(credID)
 		if err != nil {
@@ -169,12 +168,12 @@ func (r *Resolver) buildConfig(prof *profile.SSHProfile, visited map[string]bool
 			}
 		}
 	} else {
-		cfg.User = eff.Profile.Options.User
-		cfg.AuthMode = string(eff.Profile.Options.Auth)
+		cfg.User = eff.ResolvedOptions.User
+		cfg.AuthMode = string(eff.ResolvedOptions.Auth)
 	}
 
 	// Resolve jump host if set (from effective profile, which may inherit it).
-	jumpHostID := eff.Profile.Options.JumpHost
+	jumpHostID := eff.ResolvedOptions.JumpHost
 	if jumpHostID != "" {
 		if visited[jumpHostID] {
 			return nil, fmt.Errorf("cyclic jump host reference: %s -> %s", prof.ID, jumpHostID)

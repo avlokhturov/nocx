@@ -60,10 +60,10 @@ func TestProfilesRPC_CreateList(t *testing.T) {
 			Type: "ssh",
 			Name: "test-host",
 		},
-		Options: profile.SSHProfileOptions{
+		Options: profile.StoredSSHProfileOptions{
 			Host: "example.com",
-			Port: 22,
-			User: "alice",
+			Port: profile.Ptr(22),
+			User: profile.Ptr("alice"),
 		},
 	}
 
@@ -89,7 +89,7 @@ func TestProfilesRPC_Delete(t *testing.T) {
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
 	p := profile.SSHProfile{
 		Base:    profile.Base{ID: "ssh:custom:del:0001", Type: "ssh", Name: "del"},
-		Options: profile.SSHProfileOptions{Host: "h"},
+		Options: profile.StoredSSHProfileOptions{Host: "h"},
 	}
 	_ = ps.CreateProfile(p)
 
@@ -211,17 +211,17 @@ func TestNoPlaintextSecretsOnWire(t *testing.T) {
 	// Create a jump profile.
 	_ = ps.CreateProfile(profile.SSHProfile{
 		Base:    profile.Base{ID: "profile:canary-jump", Name: "canary-jump"},
-		Options: profile.SSHProfileOptions{Host: "jump.canary.example.com", CredentialID: "cred:canary:bbb"},
+		Options: profile.StoredSSHProfileOptions{Host: "jump.canary.example.com", CredentialID: "cred:canary:bbb"},
 	})
 
 	// Create a target profile with a jump host.
 	_ = ps.CreateProfile(profile.SSHProfile{
 		Base: profile.Base{ID: "profile:canary-tgt", Name: "canary-target"},
-		Options: profile.SSHProfileOptions{
+		Options: profile.StoredSSHProfileOptions{
 			Host:         "target.canary.example.com",
-			Port:         2222,
+			Port:         profile.Ptr(2222),
 			CredentialID: "cred:canary:aaa",
-			JumpHost:     "profile:canary-jump",
+			JumpHost:     profile.Ptr("profile:canary-jump"),
 		},
 	})
 

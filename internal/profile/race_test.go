@@ -92,11 +92,11 @@ func TestJSONStore_NoLostUpdateOnConcurrentSave(t *testing.T) {
 	// Pre-populate with two profiles (barrier not yet armed, passes through).
 	p1 := SSHProfile{
 		Base:    Base{ID: "id1", Name: "profile-1"},
-		Options: SSHProfileOptions{Host: "host1.example.com", Port: 22},
+		Options: StoredSSHProfileOptions{Host: "host1.example.com", Port: Ptr(22)},
 	}
 	p2 := SSHProfile{
 		Base:    Base{ID: "id2", Name: "profile-2"},
-		Options: SSHProfileOptions{Host: "host2.example.com", Port: 22},
+		Options: StoredSSHProfileOptions{Host: "host2.example.com", Port: Ptr(22)},
 	}
 	if err := store.CreateProfile(p1); err != nil {
 		t.Fatalf("pre-pop p1: %v", err)

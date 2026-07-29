@@ -83,11 +83,6 @@ type WSServer struct {
 	settings   *settings.Registry
 	resolverOK bool
 
-	// profileUsage tracks last-used timestamps for the sessions.status RPC.
-	// When nil, the handler reports live-state from the registry but
-	// last-used timestamps are unavailable (nocx-uxs5.4).
-	profileUsage session.ProfileUsageTracker
-
 	// Export/backup/import dependencies (ADR-0011 §7).
 	// When nil, export.* methods return a JSON-RPC error.
 	// The fields are populated by WithPaths, WithContentDB.
@@ -594,8 +589,6 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 	case "export.manifest", "export.configExport", "export.portableEncrypted",
 		"export.backup", "export.import", "export.importPortable":
 		s.handleExportMethod(wconn, req)
-	case "sessions.status":
-		s.handleSessionsStatus(wconn, req)
 	default:
 		resp := newJSONRPCError(req.ID, -32601, "Method not found")
 		_ = wconn.writeJSON(resp)
@@ -626,12 +619,6 @@ func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connSta
 		YPixel:   params.YPixel,
 		Enhanced: params.Enhanced,
 	}
-	// ProfileID is deliberately NOT set here. It is recorded below, only once
-	// the resolver has accepted it, because a local PTY has no profile and
-	// setting it up front lets a renderer attach any profile id to a local
-	// session it opens. sessions.status would then report that profile live and
-	// the connection list would draw a row as connected with nothing behind it
-	// (nocx-uxs5.4).
 
 	// SSH session — when kind="ssh", open a remote channel instead of local PTY.
 	if params.Kind == "ssh" {
@@ -664,10 +651,6 @@ func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connSta
 		cfg.Kind = session.KindRemote
 		cfg.Host = host
 		cfg.Remote = remote
-		// Recorded here and nowhere else: the resolver has just accepted this
-		// id, so the association is the backend's own conclusion rather than
-		// the renderer's claim.
-		cfg.ProfileID = params.ProfileID
 	}
 
 	sess, err := s.registry.Open(ctx, cfg)

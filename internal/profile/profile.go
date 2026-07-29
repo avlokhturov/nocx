@@ -77,20 +77,140 @@ type SSHProfileOptions struct {
 // SSHProfile is a connection profile for an SSH host. It holds only
 // *identity* (host/port/user) and configuration — never secrets.
 // Credentials live in the CredentialStore, addressed by identity.
+// Options uses the presence-aware StoredSSHProfileOptions so nil
+// pointer fields distinguish "not set" from "explicitly zero/false".
 type SSHProfile struct {
 	Base
-	Options SSHProfileOptions `json:"options"`
+	Options StoredSSHProfileOptions `json:"options"`
 }
 
-// ToPartial returns a sparse representation suitable for persistence:
-// only non-zero fields are written. The JSON encoder handles omitempty.
-func (p SSHProfile) ToPartial() SSHProfile {
-	return p
+// StoredSSHProfileOptions is the presence-aware options type used for JSON
+// storage. Pointer fields distinguish "not set" (nil) from "explicitly set
+// to zero/false" (non-nil), which the dense SSHProfileOptions cannot do
+// with omitempty JSON tags.
+type StoredSSHProfileOptions struct {
+	Host                 string                `json:"host"`
+	Port                 *int                  `json:"port,omitempty"`
+	CredentialID         string                `json:"credentialId,omitempty"`
+	User                 *string               `json:"user,omitempty"`
+	Auth                 *AuthMode             `json:"auth,omitempty"`
+	KeepaliveInterval    *int                  `json:"keepaliveInterval,omitempty"`
+	KeepaliveCountMax    *int                  `json:"keepaliveCountMax,omitempty"`
+	ReadyTimeout         *int                  `json:"readyTimeout,omitempty"`
+	JumpHost             *string               `json:"jumpHost,omitempty"`
+	AgentForward         *bool                 `json:"agentForward,omitempty"`
+	CanBeJumpServer      *bool                 `json:"canBeJumpServer,omitempty"`
+	BehaviorOnSessionEnd *BehaviorOnSessionEnd `json:"behaviorOnSessionEnd,omitempty"`
 }
 
-// ProfileGroup is a folder that groups profiles. Groups form a tree via
-// ParentGroupID. Defaults carries per-provider defaults inherited by
-// profiles in this group.
+// ToDense converts stored options to dense SSHProfileOptions. Pointer fields
+// that are nil become the zero value (unset), which the caller interprets as
+// "inherit" in the resolution engine.
+func (s StoredSSHProfileOptions) ToDense() SSHProfileOptions {
+	o := SSHProfileOptions{Host: s.Host}
+	if s.CredentialID != "" {
+		o.CredentialID = s.CredentialID
+	}
+	if s.Port != nil {
+		o.Port = *s.Port
+	}
+	if s.User != nil {
+		o.User = *s.User
+	}
+	if s.Auth != nil {
+		o.Auth = *s.Auth
+	}
+	if s.KeepaliveInterval != nil {
+		o.KeepaliveInterval = *s.KeepaliveInterval
+	}
+	if s.KeepaliveCountMax != nil {
+		o.KeepaliveCountMax = *s.KeepaliveCountMax
+	}
+	if s.ReadyTimeout != nil {
+		o.ReadyTimeout = *s.ReadyTimeout
+	}
+	if s.JumpHost != nil {
+		o.JumpHost = *s.JumpHost
+	}
+	if s.AgentForward != nil {
+		o.AgentForward = *s.AgentForward
+	}
+	if s.CanBeJumpServer != nil {
+		o.CanBeJumpServer = *s.CanBeJumpServer
+	}
+	return o
+}
+
+// StoredOptionsFromDense converts dense SSHProfileOptions to the presence-aware
+// stored representation. Zero/false values become nil (inherit), matching the
+// sshOptionsToSparse semantics. For explicit zero/false from patch operations,
+// construct StoredSSHProfileOptions directly with the desired pointer values.
+func StoredOptionsFromDense(o SSHProfileOptions) StoredSSHProfileOptions {
+	s := StoredSSHProfileOptions{Host: o.Host}
+	if o.CredentialID != "" {
+		s.CredentialID = o.CredentialID
+	}
+	if o.Port != 0 {
+		v := o.Port
+		s.Port = &v
+	}
+	if o.User != "" {
+		v := o.User
+		s.User = &v
+	}
+	if o.Auth != "" {
+		v := o.Auth
+		s.Auth = &v
+	}
+	if o.KeepaliveInterval != 0 {
+		v := o.KeepaliveInterval
+		s.KeepaliveInterval = &v
+	}
+	if o.KeepaliveCountMax != 0 {
+		v := o.KeepaliveCountMax
+		s.KeepaliveCountMax = &v
+	}
+	if o.ReadyTimeout != 0 {
+		v := o.ReadyTimeout
+		s.ReadyTimeout = &v
+	}
+	if o.JumpHost != "" {
+		v := o.JumpHost
+		s.JumpHost = &v
+	}
+	if o.AgentForward {
+		v := true
+		s.AgentForward = &v
+	}
+	if o.CanBeJumpServer {
+		v := true
+		s.CanBeJumpServer = &v
+	}
+	return s
+}
+
+// storedOptsToSparse converts StoredSSHProfileOptions (pointer-based,
+// presence-aware) directly to SparseSSHOptions, preserving nil vs non-nil
+// for every field including bools. Unlike sshOptionsToSparse, this is
+// lossless: *false stays *false, *0 stays *0.
+func storedOptsToSparse(o StoredSSHProfileOptions) SparseSSHOptions {
+	s := SparseSSHOptions{}
+	if o.CredentialID != "" {
+		v := o.CredentialID
+		s.CredentialID = &v
+	}
+	s.Port = o.Port
+	s.User = o.User
+	s.Auth = o.Auth
+	s.JumpHost = o.JumpHost
+	s.KeepaliveInterval = o.KeepaliveInterval
+	s.KeepaliveCountMax = o.KeepaliveCountMax
+	s.ReadyTimeout = o.ReadyTimeout
+	s.AgentForward = o.AgentForward
+	s.BehaviorOnSessionEnd = o.BehaviorOnSessionEnd
+	return s
+}
+
 type ProfileGroup struct {
 	ID            string           `json:"id"`
 	ParentGroupID string           `json:"parentGroupId,omitempty"`
@@ -108,8 +228,8 @@ type ProfileGroup struct {
 // SparseSSHOptions is a presence-aware counterpart to SSHProfileOptions where
 // every inheritable field can be absent (nil pointer = not set, inherit).
 // This is what GROUPS and GLOBAL defaults carry, and what the merge accumulates.
-// The stored SSHProfile.Options stays non-pointer — only groups/globals use the
-// sparse type.
+// The stored SSHProfile.Options uses the pointer-based StoredSSHProfileOptions.
+// Only groups/globals use this sparse type for inheritance.
 type SparseSSHOptions struct {
 	CredentialID         *string               `json:"credentialId,omitempty"`
 	Port                 *int                  `json:"port,omitempty"`
@@ -251,9 +371,16 @@ const (
 // stored profile — the caller can distinguish "inherited 2222" from
 // "overridden here to 2222" forever by comparing Profile against the stored
 // version through Source.
+// EffectiveProfile holds the resolved values for a single profile plus
+// per-field provenance. Profile carries the original (stored) profile;
+// ResolvedOptions holds the fully-resolved dense values. An inherited value
+// is NEVER written back into the stored profile — the caller can distinguish
+// "inherited 2222" from "overridden here to 2222" forever by comparing
+// Profile against the stored version through Source.
 type EffectiveProfile struct {
-	Profile SSHProfile             // resolved values (merged)
-	Source  map[string]FieldSource // field name -> winning provenance
+	Profile         SSHProfile             // original stored profile
+	ResolvedOptions SSHProfileOptions      // resolved values (dense, all-specified)
+	Source          map[string]FieldSource // field name -> winning provenance
 }
 
 // ---------------------------------------------------------------------------
@@ -376,11 +503,10 @@ func ResolveEffectiveProfile(
 		}
 	}
 
-	// Convert profile's stored options to sparse — non-zero values become set,
-	// zero values become inherit. For bools, only true is treated as "set"
-	// (false is indistinguishable from "not set at all" in a JSON-omitempty
-	// store, so we treat it as inherited).
-	profileSparse := sshOptionsToSparse(profile.Options)
+	// Convert profile's stored options to sparse — pointer-based means
+	// nil = inherit, non-nil = explicitly set (even for false/zero). This
+	// is lossless unlike the old dense conversion.
+	profileSparse := storedOptsToSparse(profile.Options)
 
 	// Also extract the profile's own BehaviorOnSessionEnd from Base.
 	if profile.BehaviorOnSessionEnd != "" {
@@ -425,16 +551,16 @@ func ResolveEffectiveProfile(
 	// Apply profile's own options (highest priority).
 	applySparseLayer(&acc, &source, profileSparse, FieldSourceProfile)
 
-	// Convert accumulator back to SSHProfile.
+	// Build resolved dense options from the merged accumulator.
 	result := profile
-	result.Options = sparseToOptions(acc)
+	resolvedOpts := sparseToOptions(acc)
 
 	// Apply BehaviorOnSessionEnd from accumulator to the result's Base.
 	if acc.BehaviorOnSessionEnd != nil {
 		result.BehaviorOnSessionEnd = *acc.BehaviorOnSessionEnd
 	}
 
-	return EffectiveProfile{Profile: result, Source: source}, nil
+	return EffectiveProfile{Profile: result, ResolvedOptions: resolvedOpts, Source: source}, nil
 }
 
 // applySparseLayer overlays src into acc for non-nil fields, recording
@@ -742,3 +868,318 @@ func newUUID() string {
 
 // Suppress unused import safety — uuid helper.
 var _ = hex.EncodeToString
+
+// FieldSourceCredential is the prefix for credential-source provenance.
+// Actual source is "credential:<id>".
+// Not a credential: the name of a provenance layer. gosec matches the
+// identifier, not what it holds.
+const FieldSourceCredential FieldSource = "credential:" //nolint:gosec // provenance kind, not a secret
+
+// ApplyCredentialLayer overlays credential user/auth onto the resolved
+// effective profile. Per §3.5 precedence, credential user/auth outrank the
+// profile field when credentialId is in effect. The returned EffectiveProfile
+// has updated Options.User, Options.Auth and Options.KeyPath (from the
+// credential) and provenance entries reflecting the credential source.
+//
+// credential is required: pass the resolved credential identified by
+// eff.Profile.Options.CredentialID. Pass nil when no credential applies.
+func ApplyCredentialLayer(eff EffectiveProfile, credential *Credential) EffectiveProfile {
+	if credential == nil {
+		return eff
+	}
+
+	// Build sparse overlay from credential fields.
+	overlay := SparseSSHOptions{}
+	if credential.Username != "" {
+		v := credential.Username
+		overlay.User = &v
+	}
+	if credential.Auth != "" {
+		v := credential.Auth
+		overlay.Auth = &v
+	}
+	if credential.KeyPath != "" {
+		v := credential.KeyPath
+		overlay.KeyPath = &v
+	}
+
+	// Apply overlay to the existing accumulator, recording credential provenance.
+	acc := sshOptionsToSparse(eff.ResolvedOptions)
+	source := make(map[string]FieldSource, len(eff.Source))
+	for k, v := range eff.Source {
+		source[k] = v
+	}
+	applySparseLayer(&acc, &source, overlay, FieldSource(string(FieldSourceCredential)+credential.ID))
+
+	// Convert back to dense resolved options.
+	result := eff.Profile
+	resolvedOpts := sparseToOptions(acc)
+	return EffectiveProfile{Profile: result, ResolvedOptions: resolvedOpts, Source: source}
+}
+
+// ---------------------------------------------------------------------------
+// Effective profile DTO — wire format with closed-enum source kinds
+// ---------------------------------------------------------------------------
+
+// EffectiveSourceKind is a closed enum for the renderer to switch on.
+type EffectiveSourceKind string
+
+const (
+	EffectiveSourceProfile    EffectiveSourceKind = "profile"
+	EffectiveSourceGroup      EffectiveSourceKind = "group"
+	EffectiveSourceCredential EffectiveSourceKind = "credential"
+	EffectiveSourceSSHConfig  EffectiveSourceKind = "sshConfig"
+	EffectiveSourceGlobal     EffectiveSourceKind = "global"
+	EffectiveSourceDefault    EffectiveSourceKind = "default"
+)
+
+// EffectiveFieldDTO is the per-field wire representation.
+type EffectiveFieldDTO struct {
+	Value  any            `json:"value"`
+	Source FieldSourceDTO `json:"source"`
+}
+
+// FieldSourceDTO is the provenance source in the wire format.
+type FieldSourceDTO struct {
+	Kind  EffectiveSourceKind `json:"kind"`
+	ID    string              `json:"id"`
+	Label string              `json:"label"`
+}
+
+// EffectiveProfileDTO is the per-profile wire representation.
+type EffectiveProfileDTO struct {
+	ID     string                       `json:"id"`
+	Fields map[string]EffectiveFieldDTO `json:"fields"`
+}
+
+// EffectiveBatchResponse is the response to profiles.effective.
+type EffectiveBatchResponse struct {
+	Profiles []EffectiveProfileDTO `json:"profiles"`
+}
+
+// ToEffectiveDTO converts the resolved EffectiveProfile with supporting data
+// into the wire format. Returned fields include every inheritable option
+// even when zero/false/empty — omission would make "false" indistinguishable
+// from "unresolved".
+func ToEffectiveDTO(eff EffectiveProfile, groupByID map[string]ProfileGroup, credentialByID map[string]Credential) EffectiveProfileDTO {
+	fields := make(map[string]EffectiveFieldDTO)
+	p := eff.ResolvedOptions
+
+	// Helper to add a field with provenance.
+	addField := func(name string, value any, source FieldSource) {
+		kind, id, label := parseFieldSource(source, groupByID, credentialByID)
+		fields[name] = EffectiveFieldDTO{
+			Value:  value,
+			Source: FieldSourceDTO{Kind: kind, ID: id, Label: label},
+		}
+	}
+
+	// Options fields.
+	addField("host", p.Host, eff.Source["host"])
+	addField("port", p.Port, eff.Source["port"])
+	addField("credentialId", p.CredentialID, eff.Source["credentialId"])
+	addField("user", p.User, eff.Source["user"])
+	addField("auth", string(p.Auth), eff.Source["auth"])
+	addField("keepaliveInterval", p.KeepaliveInterval, eff.Source["keepaliveInterval"])
+	addField("keepaliveCountMax", p.KeepaliveCountMax, eff.Source["keepaliveCountMax"])
+	addField("readyTimeout", p.ReadyTimeout, eff.Source["readyTimeout"])
+	addField("jumpHost", p.JumpHost, eff.Source["jumpHost"])
+	addField("agentForward", p.AgentForward, eff.Source["agentForward"])
+	addField("canBeJumpServer", p.CanBeJumpServer, eff.Source["canBeJumpServer"])
+	addField("behaviorOnSessionEnd", string(eff.Profile.BehaviorOnSessionEnd), eff.Source["behaviorOnSessionEnd"])
+
+	return EffectiveProfileDTO{ID: eff.Profile.ID, Fields: fields}
+}
+
+// parseFieldSource converts an internal FieldSource string into the closed-enum
+// wire format with resolved group/credential labels.
+func parseFieldSource(src FieldSource, groupByID map[string]ProfileGroup, credentialByID map[string]Credential) (kind EffectiveSourceKind, id, label string) {
+	if src == "" {
+		return EffectiveSourceDefault, "", ""
+	}
+	s := string(src)
+
+	if src == FieldSourceProfile {
+		return EffectiveSourceProfile, "", ""
+	}
+	if src == FieldSourceGlobal {
+		return EffectiveSourceGlobal, "", ""
+	}
+	if src == FieldSourceDefault {
+		return EffectiveSourceDefault, "", ""
+	}
+	if strings.HasPrefix(s, "group:") {
+		gid := s[6:]
+		kind = EffectiveSourceGroup
+		id = gid
+		if g, ok := groupByID[gid]; ok {
+			label = g.Name
+		}
+		return
+	}
+	if strings.HasPrefix(s, "credential:") {
+		cid := s[11:]
+		kind = EffectiveSourceCredential
+		id = cid
+		if c, ok := credentialByID[cid]; ok {
+			label = c.Name
+		}
+		return
+	}
+
+	// Unknown — treat as default.
+	return EffectiveSourceDefault, "", ""
+}
+
+// fieldNames is the closed allowlist of patchable field paths.
+// Each entry maps a JSON path to a mutator that applies the value
+// to StoredSSHProfileOptions.
+type patchPath string
+
+const (
+	patchPort                 patchPath = "options.port"
+	patchUser                 patchPath = "options.user"
+	patchAuth                 patchPath = "options.auth"
+	patchCredentialID         patchPath = "options.credentialId"
+	patchKeepaliveInterval    patchPath = "options.keepaliveInterval"
+	patchKeepaliveCountMax    patchPath = "options.keepaliveCountMax"
+	patchReadyTimeout         patchPath = "options.readyTimeout"
+	patchJumpHost             patchPath = "options.jumpHost"
+	patchAgentForward         patchPath = "options.agentForward"
+	patchCanBeJumpServer      patchPath = "options.canBeJumpServer"
+	patchBehaviorOnSessionEnd patchPath = "options.behaviorOnSessionEnd"
+)
+
+// PatchPathAllowed reports whether a path may be named by profiles.patch.
+//
+// The allowlist lives here, beside the mutators it guards, and is exported so
+// the transport asks rather than keeps its own copy. Two lists that must agree
+// are two lists that will eventually not.
+func PatchPathAllowed(path string) bool {
+	return allowedPatchPaths()[patchPath(path)]
+}
+
+// allowedPatchPaths returns the set of valid patch paths.
+func allowedPatchPaths() map[patchPath]bool {
+	return map[patchPath]bool{
+		patchPort:                 true,
+		patchUser:                 true,
+		patchAuth:                 true,
+		patchCredentialID:         true,
+		patchKeepaliveInterval:    true,
+		patchKeepaliveCountMax:    true,
+		patchReadyTimeout:         true,
+		patchJumpHost:             true,
+		patchAgentForward:         true,
+		patchCanBeJumpServer:      true,
+		patchBehaviorOnSessionEnd: true,
+	}
+}
+
+// ApplyPatchSet applies a set operation to stored options, returning true if
+// the field was recognized. Accepted path values: string, float64 (from JSON
+// number), bool.
+func ApplyPatchSet(opts *StoredSSHProfileOptions, path string, value any) bool {
+	pp := patchPath(path)
+	switch pp {
+	case patchPort:
+		v := toInt(value)
+		opts.Port = &v
+	case patchUser:
+		v := toString(value)
+		opts.User = &v
+	case patchAuth:
+		v := toString(value)
+		am := AuthMode(v)
+		opts.Auth = &am
+	case patchCredentialID:
+		v := toString(value)
+		opts.CredentialID = v
+	case patchKeepaliveInterval:
+		v := toInt(value)
+		opts.KeepaliveInterval = &v
+	case patchKeepaliveCountMax:
+		v := toInt(value)
+		opts.KeepaliveCountMax = &v
+	case patchReadyTimeout:
+		v := toInt(value)
+		opts.ReadyTimeout = &v
+	case patchJumpHost:
+		v := toString(value)
+		opts.JumpHost = &v
+	case patchAgentForward:
+		v := toBool(value)
+		opts.AgentForward = &v
+	case patchCanBeJumpServer:
+		v := toBool(value)
+		opts.CanBeJumpServer = &v
+	case patchBehaviorOnSessionEnd:
+		v := toString(value)
+		bh := BehaviorOnSessionEnd(v)
+		opts.BehaviorOnSessionEnd = &bh
+	default:
+		return false
+	}
+	return true
+}
+
+// ApplyPatchUnset applies an unset operation to stored options, setting the
+// field to nil (inherit). Returns true if the field was recognized.
+func ApplyPatchUnset(opts *StoredSSHProfileOptions, path string) bool {
+	pp := patchPath(path)
+	switch pp {
+	case patchPort:
+		opts.Port = nil
+	case patchUser:
+		opts.User = nil
+	case patchAuth:
+		opts.Auth = nil
+	case patchCredentialID:
+		opts.CredentialID = ""
+	case patchKeepaliveInterval:
+		opts.KeepaliveInterval = nil
+	case patchKeepaliveCountMax:
+		opts.KeepaliveCountMax = nil
+	case patchReadyTimeout:
+		opts.ReadyTimeout = nil
+	case patchJumpHost:
+		opts.JumpHost = nil
+	case patchAgentForward:
+		opts.AgentForward = nil
+	case patchCanBeJumpServer:
+		opts.CanBeJumpServer = nil
+	case patchBehaviorOnSessionEnd:
+		opts.BehaviorOnSessionEnd = nil
+	default:
+		return false
+	}
+	return true
+}
+
+// toInt converts a JSON number (float64) or int to int.
+func toInt(v any) int {
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case int:
+		return n
+	default:
+		return 0
+	}
+}
+
+// toString converts a JSON string to string.
+func toString(v any) string {
+	s, _ := v.(string)
+	return s
+}
+
+// toBool converts a JSON bool to bool.
+func toBool(v any) bool {
+	b, _ := v.(bool)
+	return b
+}
+
+// Ptr returns a pointer to v for constructing StoredSSHProfileOptions fields.
+// Example: Ptr(2222) returns *int(2222); Ptr("bob") returns *string("bob").
+func Ptr[T any](v T) *T { return &v }

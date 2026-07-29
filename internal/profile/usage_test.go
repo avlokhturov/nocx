@@ -17,7 +17,7 @@ func TestComputeCredentialUsage_ProfileNamesDirectly(t *testing.T) {
 	c1 := Credential{ID: "cred:prod:1", Name: "Prod", Username: "deploy"}
 	p1 := SSHProfile{
 		Base: Base{ID: "ssh:p1:1", Type: "ssh", Name: "web"},
-		Options: SSHProfileOptions{
+		Options: StoredSSHProfileOptions{
 			Host:         "web.example.com",
 			CredentialID: "cred:prod:1",
 		},
@@ -50,7 +50,7 @@ func TestComputeCredentialUsage_ProfileInheritsFromGroup(t *testing.T) {
 	c1 := Credential{ID: "cred:prod:1", Name: "Prod", Username: "deploy"}
 	p1 := SSHProfile{
 		Base: Base{ID: "ssh:p1:1", Type: "ssh", Name: "web", Group: "g1"},
-		Options: SSHProfileOptions{
+		Options: StoredSSHProfileOptions{
 			Host: "web.example.com",
 			// No CredentialID — inherits from group
 		},
@@ -89,7 +89,7 @@ func TestComputeCredentialUsage_ProfileOverridesGroupCredential(t *testing.T) {
 
 	p1 := SSHProfile{
 		Base: Base{ID: "ssh:p1:1", Type: "ssh", Name: "web", Group: "g1"},
-		Options: SSHProfileOptions{
+		Options: StoredSSHProfileOptions{
 			Host:         "web.example.com",
 			CredentialID: "cred:direct:1", // profile names its own credential
 		},
@@ -137,7 +137,7 @@ func TestComputeCredentialUsage_CredentialUnused(t *testing.T) {
 	c2 := Credential{ID: "cred:used:1", Name: "Used", Username: "real"}
 	p1 := SSHProfile{
 		Base: Base{ID: "ssh:p1:1", Type: "ssh", Name: "web"},
-		Options: SSHProfileOptions{
+		Options: StoredSSHProfileOptions{
 			Host:         "web.example.com",
 			CredentialID: "cred:used:1",
 		},
@@ -192,7 +192,7 @@ func TestComputeCredentialUsage_GroupNestedChain(t *testing.T) {
 	// with a credentialId.
 	p1 := SSHProfile{
 		Base: Base{ID: "ssh:p1:1", Type: "ssh", Name: "leaf", Group: "g3"},
-		Options: SSHProfileOptions{
+		Options: StoredSSHProfileOptions{
 			Host: "leaf.example.com",
 			// No credentialId — inherits from g2 via g3
 		},
@@ -201,7 +201,7 @@ func TestComputeCredentialUsage_GroupNestedChain(t *testing.T) {
 	// Profile p2 is in g2 (parent) — directly inherits g2's credential.
 	p2 := SSHProfile{
 		Base: Base{ID: "ssh:p2:1", Type: "ssh", Name: "mid", Group: "g2"},
-		Options: SSHProfileOptions{
+		Options: StoredSSHProfileOptions{
 			Host: "mid.example.com",
 			// No credentialId — inherits from g2 directly
 		},
@@ -210,7 +210,7 @@ func TestComputeCredentialUsage_GroupNestedChain(t *testing.T) {
 	// Profile p3 is in g1 (grandparent) — inherits g1's credential.
 	p3 := SSHProfile{
 		Base: Base{ID: "ssh:p3:1", Type: "ssh", Name: "root", Group: "g1"},
-		Options: SSHProfileOptions{
+		Options: StoredSSHProfileOptions{
 			Host: "root.example.com",
 			// No credentialId — inherits from g1
 		},
@@ -280,7 +280,7 @@ func TestComputeCredentialUsage_GlobalDefaultsInherited(t *testing.T) {
 	c1 := Credential{ID: "cred:global:1", Name: "Global", Username: "root"}
 	p1 := SSHProfile{
 		Base: Base{ID: "ssh:p1:1", Type: "ssh", Name: "web"},
-		Options: SSHProfileOptions{
+		Options: StoredSSHProfileOptions{
 			Host: "web.example.com",
 			// No credentialId — inherits from global defaults
 		},
@@ -311,21 +311,21 @@ func TestComputeCredentialUsage_MultipleProfilesPerCredential(t *testing.T) {
 	profiles := []SSHProfile{
 		{
 			Base: Base{ID: "ssh:p1:1", Type: "ssh", Name: "web1"},
-			Options: SSHProfileOptions{
+			Options: StoredSSHProfileOptions{
 				Host:         "web1.example.com",
 				CredentialID: "cred:fleet:1",
 			},
 		},
 		{
 			Base: Base{ID: "ssh:p2:1", Type: "ssh", Name: "web2"},
-			Options: SSHProfileOptions{
+			Options: StoredSSHProfileOptions{
 				Host:         "web2.example.com",
 				CredentialID: "cred:fleet:1",
 			},
 		},
 		{
 			Base: Base{ID: "ssh:p3:1", Type: "ssh", Name: "web3"},
-			Options: SSHProfileOptions{
+			Options: StoredSSHProfileOptions{
 				Host:         "web3.example.com",
 				CredentialID: "cred:fleet:1",
 			},

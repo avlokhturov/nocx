@@ -70,6 +70,14 @@ func (s *ProfileService) SaveProfile(p SSHProfile) error {
 		return fmt.Errorf("%s: host is required", p.ID)
 	}
 
+	// Sync BehaviorOnSessionEnd from Base to Options for storage.
+	if p.BehaviorOnSessionEnd != "" {
+		v := p.BehaviorOnSessionEnd
+		p.Options.BehaviorOnSessionEnd = &v
+	} else {
+		p.Options.BehaviorOnSessionEnd = nil
+	}
+
 	// Load current state.
 	storeData, err := s.store.LoadAll()
 	if err != nil {
@@ -195,6 +203,14 @@ func (s *ProfileService) AtomicImport(profiles []SSHProfile, groups []ProfileGro
 			continue
 		}
 
+		// Sync BehaviorOnSessionEnd from Base to Options for storage.
+		if p.BehaviorOnSessionEnd != "" {
+			v := p.BehaviorOnSessionEnd
+			p.Options.BehaviorOnSessionEnd = &v
+		} else {
+			p.Options.BehaviorOnSessionEnd = nil
+		}
+
 		found := false
 		for i, existing := range storeData.Profiles {
 			if existing.ID == p.ID {
@@ -314,6 +330,10 @@ func (s *ProfileService) ClearReviewFlag(profileID string) (SSHProfile, error) {
 			storeData.Profiles[i].NeedsReview = false
 			if err := s.store.WriteAll(storeData); err != nil {
 				return SSHProfile{}, fmt.Errorf("write store: %w", err)
+			}
+			// Sync BehaviorOnSessionEnd from Options to Base for the caller.
+			if storeData.Profiles[i].Options.BehaviorOnSessionEnd != nil {
+				storeData.Profiles[i].BehaviorOnSessionEnd = *storeData.Profiles[i].Options.BehaviorOnSessionEnd
 			}
 			return storeData.Profiles[i], nil
 		}

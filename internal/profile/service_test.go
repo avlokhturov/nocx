@@ -25,10 +25,10 @@ func svc(t *testing.T) *ProfileService {
 func makeTestProfile(id, name, host string) SSHProfile {
 	return SSHProfile{
 		Base: Base{ID: id, Type: "ssh", Name: name},
-		Options: SSHProfileOptions{
+		Options: StoredSSHProfileOptions{
 			Host: host,
-			Port: 22,
-			User: "testuser",
+			Port: Ptr(22),
+			User: Ptr("testuser"),
 		},
 	}
 }
@@ -82,7 +82,7 @@ func TestServiceSaveProfile_RejectsEmptyHost(t *testing.T) {
 	s := svc(t)
 	p := SSHProfile{
 		Base:    Base{ID: "ssh:custom:test:1", Type: "ssh", Name: "test"},
-		Options: SSHProfileOptions{},
+		Options: StoredSSHProfileOptions{},
 	}
 	err := s.SaveProfile(p)
 	if err == nil || !contains(err.Error(), "host is required") {

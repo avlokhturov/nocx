@@ -82,6 +82,10 @@ func New(opts ...Option) (*App, error) {
 	credStore := credential.NewKeychain()
 	settingsRegistry := settings.New(docStore, credStore)
 
+	// Profile usage tracker for the sessions.status RPC (nocx-uxs5.4).
+	usageStore := session.NewDocumentUsageStore(docStore)
+	sess = sess.WithProfileUsageTracker(usageStore)
+
 	home, _ := os.UserHomeDir()
 	sshConfigPath := filepath.Join(home, ".ssh", "config")
 
@@ -95,6 +99,7 @@ func New(opts ...Option) (*App, error) {
 			connection.WithSSHConfigPath(sshConfigPath),
 		)),
 		transport.WithSettingsRegistry(settingsRegistry),
+		transport.WithProfileUsageStore(usageStore),
 		transport.WithExportPaths(paths),
 		transport.WithExportContentDB(content.NewStub(logger)),
 	}

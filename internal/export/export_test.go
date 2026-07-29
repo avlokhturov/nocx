@@ -203,7 +203,7 @@ func makeProfile(id, name, host string) profile.SSHProfile {
 			Type: "ssh",
 			Name: name,
 		},
-		Options: profile.SSHProfileOptions{Host: host, Port: 22, User: "root"},
+		Options: profile.StoredSSHProfileOptions{Host: host, Port: profile.Ptr(22), User: profile.Ptr("root")},
 	}
 }
 

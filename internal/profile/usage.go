@@ -72,7 +72,7 @@ func ComputeCredentialUsage(
 			continue
 		}
 
-		credID := eff.Profile.Options.CredentialID
+		credID := eff.ResolvedOptions.CredentialID
 		if credID == "" {
 			continue
 		}

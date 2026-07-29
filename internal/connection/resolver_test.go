@@ -244,9 +244,9 @@ func TestResolver_CredentialMode(t *testing.T) {
 
 	_ = ps.SaveProfile(profile.SSHProfile{
 		Base: profile.Base{ID: "profile:1", Name: "staging"},
-		Options: profile.SSHProfileOptions{
+		Options: profile.StoredSSHProfileOptions{
 			Host:         "staging.example.com",
-			Port:         2222,
+			Port:         profile.Ptr(2222),
 			CredentialID: "cred:work:abc123",
 		},
 	})
@@ -288,11 +288,11 @@ func TestResolver_InlineMode(t *testing.T) {
 
 	_ = ps.SaveProfile(profile.SSHProfile{
 		Base: profile.Base{ID: "profile:inline", Name: "legacy"},
-		Options: profile.SSHProfileOptions{
+		Options: profile.StoredSSHProfileOptions{
 			Host: "legacy.example.com",
-			Port: 22,
-			User: "admin",
-			Auth: "password",
+			Port: profile.Ptr(22),
+			User: profile.Ptr("admin"),
+			Auth: profile.Ptr(profile.AuthMode("password")),
 		},
 	})
 
@@ -346,7 +346,7 @@ func TestResolver_JumpHost(t *testing.T) {
 	})
 	_ = ps.SaveProfile(profile.SSHProfile{
 		Base:    profile.Base{ID: "profile:jump", Name: "jump"},
-		Options: profile.SSHProfileOptions{Host: "jump.example.com", Port: 22, CredentialID: "cred:jump:xyz"},
+		Options: profile.StoredSSHProfileOptions{Host: "jump.example.com", Port: profile.Ptr(22), CredentialID: "cred:jump:xyz"},
 	})
 
 	// Target profile
@@ -361,11 +361,11 @@ func TestResolver_JumpHost(t *testing.T) {
 	})
 	_ = ps.SaveProfile(profile.SSHProfile{
 		Base: profile.Base{ID: "profile:tgt", Name: "target"},
-		Options: profile.SSHProfileOptions{
+		Options: profile.StoredSSHProfileOptions{
 			Host:         "target.internal",
-			Port:         2222,
+			Port:         profile.Ptr(2222),
 			CredentialID: "cred:tgt:def",
-			JumpHost:     "profile:jump",
+			JumpHost:     profile.Ptr("profile:jump"),
 		},
 	})
 
@@ -411,21 +411,21 @@ func TestResolver_JumpHostInlineMode(t *testing.T) {
 	// Jump profile (inline, no credential)
 	_ = ps.SaveProfile(profile.SSHProfile{
 		Base: profile.Base{ID: "profile:jump-inline", Name: "jump"},
-		Options: profile.SSHProfileOptions{
+		Options: profile.StoredSSHProfileOptions{
 			Host: "jump.inline.com",
-			Port: 22,
-			User: "jumper",
-			Auth: "publicKey",
+			Port: profile.Ptr(22),
+			User: profile.Ptr("jumper"),
+			Auth: profile.Ptr(profile.AuthMode("publicKey")),
 		},
 	})
 
 	// Target profile
 	_ = ps.SaveProfile(profile.SSHProfile{
 		Base: profile.Base{ID: "profile:tgt2", Name: "target"},
-		Options: profile.SSHProfileOptions{
+		Options: profile.StoredSSHProfileOptions{
 			Host:     "target.inline",
-			Port:     3333,
-			JumpHost: "profile:jump-inline",
+			Port:     profile.Ptr(3333),
+			JumpHost: profile.Ptr("profile:jump-inline"),
 		},
 	})
 
@@ -462,7 +462,7 @@ func TestResolver_CarriesTargetBinding(t *testing.T) {
 	})
 	_ = ps.SaveProfile(profile.SSHProfile{
 		Base:    profile.Base{ID: "profile:bound", Name: "bound"},
-		Options: profile.SSHProfileOptions{Host: "bound.example.com", Port: 2222, CredentialID: "cred:bound:aaa"},
+		Options: profile.StoredSSHProfileOptions{Host: "bound.example.com", Port: profile.Ptr(2222), CredentialID: "cred:bound:aaa"},
 	})
 
 	r := NewResolver(ps, ps, ps, ss)
@@ -493,7 +493,7 @@ func TestResolver_LinkedCredentialSurfacesAuthorizedEndpoint(t *testing.T) {
 	})
 	_ = ps.SaveProfile(profile.SSHProfile{
 		Base:    profile.Base{ID: "profile:unbound", Name: "unbound"},
-		Options: profile.SSHProfileOptions{Host: "any.example.com", Port: 22, CredentialID: "cred:unbound:bbb"},
+		Options: profile.StoredSSHProfileOptions{Host: "any.example.com", Port: profile.Ptr(22), CredentialID: "cred:unbound:bbb"},
 	})
 
 	r := NewResolver(ps, ps, ps, ss)
@@ -526,7 +526,7 @@ func TestResolver_CarriesJumpBinding(t *testing.T) {
 	})
 	_ = ps.SaveProfile(profile.SSHProfile{
 		Base:    profile.Base{ID: "profile:jumpb", Name: "jumpb"},
-		Options: profile.SSHProfileOptions{Host: "jump-bound.example.com", Port: 2222, CredentialID: "cred:jumpbound:ccc"},
+		Options: profile.StoredSSHProfileOptions{Host: "jump-bound.example.com", Port: profile.Ptr(2222), CredentialID: "cred:jumpbound:ccc"},
 	})
 
 	// Target
@@ -541,7 +541,7 @@ func TestResolver_CarriesJumpBinding(t *testing.T) {
 	})
 	_ = ps.SaveProfile(profile.SSHProfile{
 		Base:    profile.Base{ID: "profile:tgtb", Name: "tgtb"},
-		Options: profile.SSHProfileOptions{Host: "tgt-bound.example.com", Port: 3333, CredentialID: "cred:tgtbound:ddd", JumpHost: "profile:jumpb"},
+		Options: profile.StoredSSHProfileOptions{Host: "tgt-bound.example.com", Port: profile.Ptr(3333), CredentialID: "cred:tgtbound:ddd", JumpHost: profile.Ptr("profile:jumpb")},
 	})
 
 	r := NewResolver(ps, ps, ps, ss)
@@ -583,7 +583,7 @@ func TestResolve_UsesCurrentVersionSecret(t *testing.T) {
 
 	prof := profile.SSHProfile{
 		Base:    profile.Base{ID: "ssh:custom:web-1:1", Type: "ssh", Name: "web-1"},
-		Options: profile.SSHProfileOptions{Host: "10.0.0.1", Port: 22, CredentialID: cred.ID},
+		Options: profile.StoredSSHProfileOptions{Host: "10.0.0.1", Port: profile.Ptr(22), CredentialID: cred.ID},
 	}
 	_ = ps.SaveProfile(prof)
 
@@ -629,9 +629,9 @@ func TestResolver_MultiHopJump(t *testing.T) {
 	})
 	_ = ps.SaveProfile(profile.SSHProfile{
 		Base: profile.Base{ID: "profile:inner", Name: "inner-bastion"},
-		Options: profile.SSHProfileOptions{
+		Options: profile.StoredSSHProfileOptions{
 			Host:         "inner.corp.net",
-			Port:         2201,
+			Port:         profile.Ptr(2201),
 			CredentialID: "cred:inner:1",
 		},
 	})
@@ -646,11 +646,11 @@ func TestResolver_MultiHopJump(t *testing.T) {
 	})
 	_ = ps.SaveProfile(profile.SSHProfile{
 		Base: profile.Base{ID: "profile:outer", Name: "outer-bastion"},
-		Options: profile.SSHProfileOptions{
+		Options: profile.StoredSSHProfileOptions{
 			Host:         "outer.corp.net",
-			Port:         2200,
+			Port:         profile.Ptr(2200),
 			CredentialID: "cred:outer:1",
-			JumpHost:     "profile:inner",
+			JumpHost:     profile.Ptr("profile:inner"),
 		},
 	})
 
@@ -663,11 +663,11 @@ func TestResolver_MultiHopJump(t *testing.T) {
 	})
 	_ = ps.SaveProfile(profile.SSHProfile{
 		Base: profile.Base{ID: "profile:tgt", Name: "target"},
-		Options: profile.SSHProfileOptions{
+		Options: profile.StoredSSHProfileOptions{
 			Host:         "target.internal",
-			Port:         2222,
+			Port:         profile.Ptr(2222),
 			CredentialID: "cred:tgt:1",
-			JumpHost:     "profile:outer",
+			JumpHost:     profile.Ptr("profile:outer"),
 		},
 	})
 
@@ -725,16 +725,16 @@ func TestResolver_MultiHopCycleDetected(t *testing.T) {
 	// Two profiles that reference each other in a cycle
 	_ = ps.SaveProfile(profile.SSHProfile{
 		Base: profile.Base{ID: "profile:a", Name: "a"},
-		Options: profile.SSHProfileOptions{
+		Options: profile.StoredSSHProfileOptions{
 			Host:     "host-a.net",
-			JumpHost: "profile:b",
+			JumpHost: profile.Ptr("profile:b"),
 		},
 	})
 	_ = ps.SaveProfile(profile.SSHProfile{
 		Base: profile.Base{ID: "profile:b", Name: "b"},
-		Options: profile.SSHProfileOptions{
+		Options: profile.StoredSSHProfileOptions{
 			Host:     "host-b.net",
-			JumpHost: "profile:a",
+			JumpHost: profile.Ptr("profile:a"),
 		},
 	})
 

@@ -85,7 +85,7 @@ func TestCredentialUsageRPC_DirectAndGroupInheritance(t *testing.T) {
 	// p2 — inherits cred:group:1 from g1
 	p1 := profile.SSHProfile{
 		Base: profile.Base{ID: "ssh:p1:1", Type: "ssh", Name: "web-direct"},
-		Options: profile.SSHProfileOptions{
+		Options: profile.StoredSSHProfileOptions{
 			Host:         "web.example.com",
 			CredentialID: "cred:direct:1",
 		},
@@ -95,7 +95,7 @@ func TestCredentialUsageRPC_DirectAndGroupInheritance(t *testing.T) {
 	}
 	p2 := profile.SSHProfile{
 		Base: profile.Base{ID: "ssh:p2:1", Type: "ssh", Name: "web-inherit", Group: "g1"},
-		Options: profile.SSHProfileOptions{
+		Options: profile.StoredSSHProfileOptions{
 			Host: "web2.example.com",
 			// No credentialId — inherits from group
 		},

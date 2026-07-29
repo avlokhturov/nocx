@@ -146,8 +146,43 @@ func ImportGroups(cfg *TabbyConfig, repo profile.GroupRepository) error {
 	return nil
 }
 
-// convertProfile maps a TabbyProfile to a nocx SSHProfile.
+// convertProfile maps a TabbyProfile to a nocx SSHProfile using the
+// presence-aware StoredSSHProfileOptions so nil pointers distinguish
+// "not set" from "explicitly zero/false".
 func convertProfile(tp TabbyProfile) profile.SSHProfile {
+	opts := profile.StoredSSHProfileOptions{Host: tp.Options.Host}
+	if tp.Options.Port != 0 {
+		v := tp.Options.Port
+		opts.Port = &v
+	}
+	if tp.Options.User != "" {
+		v := tp.Options.User
+		opts.User = &v
+	}
+	if tp.Options.Auth != "" {
+		v := profile.AuthMode(tp.Options.Auth)
+		opts.Auth = &v
+	}
+	if tp.Options.KeepaliveInterval != 0 {
+		v := tp.Options.KeepaliveInterval
+		opts.KeepaliveInterval = &v
+	}
+	if tp.Options.KeepaliveCountMax != 0 {
+		v := tp.Options.KeepaliveCountMax
+		opts.KeepaliveCountMax = &v
+	}
+	if tp.Options.ReadyTimeout != 0 {
+		v := tp.Options.ReadyTimeout
+		opts.ReadyTimeout = &v
+	}
+	if tp.Options.JumpHost != "" {
+		v := tp.Options.JumpHost
+		opts.JumpHost = &v
+	}
+	if tp.Options.AgentForward {
+		v := true
+		opts.AgentForward = &v
+	}
 	return profile.SSHProfile{
 		Base: profile.Base{
 			ID:    tp.ID,
@@ -157,23 +192,21 @@ func convertProfile(tp TabbyProfile) profile.SSHProfile {
 			Icon:  tp.Icon,
 			Color: tp.Color,
 		},
-		Options: profile.SSHProfileOptions{
-			Host:              tp.Options.Host,
-			Port:              tp.Options.Port,
-			User:              tp.Options.User,
-			Auth:              profile.AuthMode(tp.Options.Auth),
-			KeepaliveInterval: tp.Options.KeepaliveInterval,
-			KeepaliveCountMax: tp.Options.KeepaliveCountMax,
-			ReadyTimeout:      tp.Options.ReadyTimeout,
-			JumpHost:          tp.Options.JumpHost,
-			AgentForward:      tp.Options.AgentForward,
-		},
+		Options: opts,
 	}
 }
 
 // dedupKey builds a dedup key from host+port+user.
 func dedupKey(p profile.SSHProfile) string {
-	return fmt.Sprintf("%s|%d|%s", p.Options.Host, p.Options.Port, p.Options.User)
+	port := 0
+	if p.Options.Port != nil {
+		port = *p.Options.Port
+	}
+	user := ""
+	if p.Options.User != nil {
+		user = *p.Options.User
+	}
+	return fmt.Sprintf("%s|%d|%s", p.Options.Host, port, user)
 }
 
 // dedupKeySet builds a set of existing dedup keys.

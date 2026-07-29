@@ -115,7 +115,7 @@ func TestGroupPathCycleGuard(t *testing.T) {
 func TestResolveEffectiveProfile_BasicInheritance(t *testing.T) {
 	profile := SSHProfile{
 		Base: Base{ID: "p1", Type: "ssh", Name: "web", Group: "g1"},
-		Options: SSHProfileOptions{
+		Options: StoredSSHProfileOptions{
 			Host: "web.example.com",
 		},
 	}
@@ -131,11 +131,11 @@ func TestResolveEffectiveProfile_BasicInheritance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveEffectiveProfile: %v", err)
 	}
-	if eff.Profile.Options.Port != 2222 {
-		t.Errorf("port = %d, want 2222 (inherited from group)", eff.Profile.Options.Port)
+	if eff.ResolvedOptions.Port != 2222 {
+		t.Errorf("port = %d, want 2222 (inherited from group)", eff.ResolvedOptions.Port)
 	}
-	if eff.Profile.Options.CredentialID != "cred:prod:1" {
-		t.Errorf("credentialId = %q, want cred:prod:1", eff.Profile.Options.CredentialID)
+	if eff.ResolvedOptions.CredentialID != "cred:prod:1" {
+		t.Errorf("credentialId = %q, want cred:prod:1", eff.ResolvedOptions.CredentialID)
 	}
 	if src, ok := eff.Source["port"]; !ok || string(src) != "group:g1" {
 		t.Errorf("provenance for port = %q, want group:g1", src)
@@ -148,10 +148,10 @@ func TestResolveEffectiveProfile_BasicInheritance(t *testing.T) {
 func TestResolveEffectiveProfile_ProfileOverridesGroup(t *testing.T) {
 	profile := SSHProfile{
 		Base: Base{ID: "p1", Type: "ssh", Name: "web", Group: "g1"},
-		Options: SSHProfileOptions{
+		Options: StoredSSHProfileOptions{
 			Host: "web.example.com",
-			Port: 2222,
-			User: "bob",
+			Port: new(2222),
+			User: new("bob"),
 		},
 	}
 	groups := []ProfileGroup{
@@ -166,11 +166,11 @@ func TestResolveEffectiveProfile_ProfileOverridesGroup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveEffectiveProfile: %v", err)
 	}
-	if eff.Profile.Options.Port != 2222 {
-		t.Errorf("port = %d, want 2222 (profile overrides group)", eff.Profile.Options.Port)
+	if eff.ResolvedOptions.Port != 2222 {
+		t.Errorf("port = %d, want 2222 (profile overrides group)", eff.ResolvedOptions.Port)
 	}
-	if eff.Profile.Options.User != "bob" {
-		t.Errorf("user = %q, want bob (profile overrides group)", eff.Profile.Options.User)
+	if eff.ResolvedOptions.User != "bob" {
+		t.Errorf("user = %q, want bob (profile overrides group)", eff.ResolvedOptions.User)
 	}
 	if src := eff.Source["port"]; string(src) != "profile" {
 		t.Errorf("provenance for port = %q, want profile", src)
@@ -214,7 +214,7 @@ func TestResolveEffectiveProfile_InheritVsExplicitZero(t *testing.T) {
 	// Effective port should be 2222 from group.
 	profile := SSHProfile{
 		Base: Base{ID: "p1", Type: "ssh", Name: "web", Group: "g1"},
-		Options: SSHProfileOptions{
+		Options: StoredSSHProfileOptions{
 			Host: "web.example.com",
 		},
 	}
@@ -229,8 +229,8 @@ func TestResolveEffectiveProfile_InheritVsExplicitZero(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveEffectiveProfile: %v", err)
 	}
-	if eff.Profile.Options.Port != 2222 {
-		t.Errorf("port = %d, want 2222 (inherited)", eff.Profile.Options.Port)
+	if eff.ResolvedOptions.Port != 2222 {
+		t.Errorf("port = %d, want 2222 (inherited)", eff.ResolvedOptions.Port)
 	}
 	if src := eff.Source["port"]; string(src) != "group:g1" {
 		t.Errorf("provenance = %q, want group:g1", src)
@@ -242,7 +242,7 @@ func TestResolveEffectiveProfile_GroupChainPrecedence(t *testing.T) {
 	// Profile inherits from child (nearest ancestor wins).
 	profile := SSHProfile{
 		Base: Base{ID: "p1", Type: "ssh", Name: "web", Group: "g2"},
-		Options: SSHProfileOptions{
+		Options: StoredSSHProfileOptions{
 			Host: "web.example.com",
 		},
 	}
@@ -262,8 +262,8 @@ func TestResolveEffectiveProfile_GroupChainPrecedence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveEffectiveProfile: %v", err)
 	}
-	if eff.Profile.Options.Port != 3333 {
-		t.Errorf("port = %d, want 3333 (nearest group wins)", eff.Profile.Options.Port)
+	if eff.ResolvedOptions.Port != 3333 {
+		t.Errorf("port = %d, want 3333 (nearest group wins)", eff.ResolvedOptions.Port)
 	}
 	if src := eff.Source["port"]; string(src) != "group:g2" {
 		t.Errorf("provenance = %q, want group:g2", src)
@@ -273,7 +273,7 @@ func TestResolveEffectiveProfile_GroupChainPrecedence(t *testing.T) {
 func TestResolveEffectiveProfile_GlobalDefaults(t *testing.T) {
 	profile := SSHProfile{
 		Base: Base{ID: "p1", Type: "ssh", Name: "web"},
-		Options: SSHProfileOptions{
+		Options: StoredSSHProfileOptions{
 			Host: "web.example.com",
 		},
 	}
@@ -285,8 +285,8 @@ func TestResolveEffectiveProfile_GlobalDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveEffectiveProfile: %v", err)
 	}
-	if eff.Profile.Options.Port != 2222 {
-		t.Errorf("port = %d, want 2222 (global)", eff.Profile.Options.Port)
+	if eff.ResolvedOptions.Port != 2222 {
+		t.Errorf("port = %d, want 2222 (global)", eff.ResolvedOptions.Port)
 	}
 	if src := eff.Source["port"]; string(src) != "global" {
 		t.Errorf("provenance = %q, want global", src)
@@ -296,7 +296,7 @@ func TestResolveEffectiveProfile_GlobalDefaults(t *testing.T) {
 func TestResolveEffectiveProfile_HostRequired(t *testing.T) {
 	profile := SSHProfile{
 		Base:    Base{ID: "p1", Type: "ssh", Name: "web"},
-		Options: SSHProfileOptions{},
+		Options: StoredSSHProfileOptions{},
 	}
 	_, err := ResolveEffectiveProfile(profile, nil, SparseSSHOptions{})
 	if err == nil {
@@ -496,16 +496,16 @@ func TestJSONStoreRoundTrip(t *testing.T) {
 			Name:  "roundtrip",
 			Group: "g1",
 		},
-		Options: SSHProfileOptions{
+		Options: StoredSSHProfileOptions{
 			Host: "host.example.com",
-			Port: 2222,
-			User: "bob",
-			Auth: AuthPublicKey,
+			Port: new(2222),
+			User: new("bob"),
+			Auth: new(AuthPublicKey),
 		},
 	}
 	grp := ProfileGroup{ID: "g1", Name: "Prod"}
 
-	if err := store.CreateProfile(prof.ToPartial()); err != nil {
+	if err := store.CreateProfile(prof); err != nil {
 		t.Fatalf("SaveProfile: %v", err)
 	}
 	if err := store.CreateGroup(grp); err != nil {
@@ -539,9 +539,9 @@ func TestJSONStoreDeleteProfile(t *testing.T) {
 
 	prof := SSHProfile{
 		Base:    Base{ID: "ssh:custom:del:0001", Type: "ssh", Name: "del"},
-		Options: SSHProfileOptions{Host: "h"},
+		Options: StoredSSHProfileOptions{Host: "h"},
 	}
-	_ = store.CreateProfile(prof.ToPartial())
+	_ = store.CreateProfile(prof)
 
 	if err := store.DeleteProfile(prof.ID); err != nil {
 		t.Fatalf("DeleteProfile: %v", err)
@@ -570,7 +570,7 @@ func TestJSONStoreAtomicWrite(t *testing.T) {
 	store := NewJSONStore(path)
 
 	prof := SSHProfile{Base: Base{ID: "ssh:custom:atom:0001", Type: "ssh", Name: "atom"}}
-	_ = store.CreateProfile(prof.ToPartial())
+	_ = store.CreateProfile(prof)
 
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -723,7 +723,7 @@ func TestResolveThroughUnknownDefaultKeysFails(t *testing.T) {
 	}
 	profile := SSHProfile{
 		Base: Base{ID: "ssh:custom:web:0001", Type: "ssh", Name: "web", Group: "g1"},
-		Options: SSHProfileOptions{
+		Options: StoredSSHProfileOptions{
 			Host: "web.example.com",
 		},
 	}

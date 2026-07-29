@@ -115,6 +115,17 @@ func (s *JSONStore) LoadProfiles() ([]SSHProfile, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Profiles already on disk in the old dense shape (written before the
+	// presence-aware format) load with every field implicitly "not set" —
+	// zero/false values become nil pointers. This is correct behaviour: the
+	// old format could not distinguish "explicitly false" from "absent", so
+	// inheriting the group default is the right fallback. No migration shim
+	// is needed per AGENTS.md — this is a greenfield project.
+	for i := range d.Profiles {
+		if d.Profiles[i].Options.BehaviorOnSessionEnd != nil {
+			d.Profiles[i].BehaviorOnSessionEnd = *d.Profiles[i].Options.BehaviorOnSessionEnd
+		}
+	}
 	return d.Profiles, nil
 }
 
@@ -145,6 +156,13 @@ func (s *JSONStore) CreateProfile(p SSHProfile) error {
 			return fmt.Errorf("%s: %w", p.ID, ErrProfileExists)
 		}
 	}
+	// Sync BehaviorOnSessionEnd from Base to Options for storage.
+	if p.BehaviorOnSessionEnd != "" {
+		v := p.BehaviorOnSessionEnd
+		p.Options.BehaviorOnSessionEnd = &v
+	} else {
+		p.Options.BehaviorOnSessionEnd = nil
+	}
 	d.Profiles = append(d.Profiles, p)
 	return s.writeLocked(d)
 }
@@ -162,6 +180,13 @@ func (s *JSONStore) UpdateProfile(p SSHProfile) error {
 	d, err := s.load()
 	if err != nil {
 		return err
+	}
+	// Sync BehaviorOnSessionEnd from Base to Options for storage.
+	if p.BehaviorOnSessionEnd != "" {
+		v := p.BehaviorOnSessionEnd
+		p.Options.BehaviorOnSessionEnd = &v
+	} else {
+		p.Options.BehaviorOnSessionEnd = nil
 	}
 	for i, existing := range d.Profiles {
 		if existing.ID == p.ID {
