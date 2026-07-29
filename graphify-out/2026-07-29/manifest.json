@@ -215,8 +215,8 @@
     "semantic_hash": ""
   },
   "internal/app/app.go": {
-    "mtime": 1785281942.1648788,
-    "ast_hash": "94230dc8ac161266de0313248bc316da",
+    "mtime": 1785082609.3439958,
+    "ast_hash": "21506f77747a151b697cd74d3d6f83f5",
     "semantic_hash": ""
   },
   "internal/app/app_test.go": {
@@ -255,8 +255,8 @@
     "semantic_hash": "d6fd52280516f9e1ba425f74c10b5b22"
   },
   "internal/session/session.go": {
-    "mtime": 1785281942.1658788,
-    "ast_hash": "8ea9b1439b621b2c68a6653eefb088c8",
+    "mtime": 1785053463.3263478,
+    "ast_hash": "d7deb3fa8b048f02a9c285d4e1b1df51",
     "semantic_hash": ""
   },
   "internal/session/session_test.go": {
@@ -275,23 +275,23 @@
     "semantic_hash": ""
   },
   "internal/ssh/errors.go": {
-    "mtime": 1785281942.1658788,
-    "ast_hash": "a6fb67829fbd92a4d68dbe37d0d65eb6",
+    "mtime": 1785016590.520552,
+    "ast_hash": "eb1b78e598db12fe3de42770b39160e8",
     "semantic_hash": ""
   },
   "internal/ssh/ssh.go": {
-    "mtime": 1785282916.7797682,
-    "ast_hash": "31ca7ac8d167dbcaae73de7f1514fa3c",
+    "mtime": 1785053463.3269928,
+    "ast_hash": "672deee2514d06a9c25eab57dde08a18",
     "semantic_hash": ""
   },
   "internal/ssh/ssh_real.go": {
-    "mtime": 1785282916.7797682,
-    "ast_hash": "44061a90364295b16feed4a49a79180c",
+    "mtime": 1785053463.3269928,
+    "ast_hash": "ce4a67f4486dc6dbf647d4c0ce7251a3",
     "semantic_hash": ""
   },
   "internal/ssh/ssh_real_test.go": {
-    "mtime": 1785282916.830769,
-    "ast_hash": "98813fae73aae9db57015bce31a742b6",
+    "mtime": 1785016590.520552,
+    "ast_hash": "4d21246d6cb9f51ff5a1458e640a67d0",
     "semantic_hash": ""
   },
   "internal/transport/frame.go": {
@@ -325,8 +325,8 @@
     "semantic_hash": "a8823adff389741013d8a6d1dbaaaed9"
   },
   "internal/transport/ws.go": {
-    "mtime": 1785307966.265691,
-    "ast_hash": "3890d4097fe55d905016eeb4e808814b",
+    "mtime": 1785103103.5271513,
+    "ast_hash": "7efebc1237908a2287302d683fe9b70c",
     "semantic_hash": ""
   },
   "internal/transport/ws_test.go": {
@@ -3145,18 +3145,18 @@
     "semantic_hash": ""
   },
   "frontend/src/profiles.ts": {
-    "mtime": 1785307977.5814178,
-    "ast_hash": "bafe52a5b4d43072d61cd426555d82e8",
+    "mtime": 1785082609.3379958,
+    "ast_hash": "1a8d7a5a5363f90d98b6aec0a80d5bb9",
     "semantic_hash": ""
   },
   "internal/connection/resolver.go": {
-    "mtime": 1785282916.7787683,
-    "ast_hash": "43620ce1d270e8c24624409a238c8250",
+    "mtime": 1785053463.3239572,
+    "ast_hash": "4e0031b0bbe08f6d67bbade41aed97dc",
     "semantic_hash": ""
   },
   "internal/connection/resolver_test.go": {
-    "mtime": 1785282916.7797682,
-    "ast_hash": "d755665fddb1c4f59406e9037dae48d3",
+    "mtime": 1785053463.3239572,
+    "ast_hash": "a8784a380018bafb16d650dc9aa003cd",
     "semantic_hash": ""
   },
   "internal/credential/credential.go": {
@@ -3200,13 +3200,13 @@
     "semantic_hash": ""
   },
   "internal/importer/memstore_test.go": {
-    "mtime": 1785278608.5689952,
-    "ast_hash": "5ac33f8f324c488ac89bccb42ea156b8",
+    "mtime": 1785053463.3263478,
+    "ast_hash": "2793d9430d954e4b75f0a0de30ffa852",
     "semantic_hash": ""
   },
   "internal/importer/tabby.go": {
-    "mtime": 1785282706.8637753,
-    "ast_hash": "9c4f7dbdef0c801a29839047ee91d932",
+    "mtime": 1785053463.3263478,
+    "ast_hash": "5ae2f293e3efe765ab2bee928641c5ae",
     "semantic_hash": ""
   },
   "internal/importer/tabby_test.go": {
@@ -3215,18 +3215,18 @@
     "semantic_hash": ""
   },
   "internal/profile/profile.go": {
-    "mtime": 1785282706.8647754,
-    "ast_hash": "b1700f5188ce4dd79e7f0ecc6e2290c5",
+    "mtime": 1785103103.5271513,
+    "ast_hash": "a9a7013b9afa12d3de1e524e90e99bdf",
     "semantic_hash": ""
   },
   "internal/profile/profile_test.go": {
-    "mtime": 1785281995.7199614,
-    "ast_hash": "920e45077fc2b6df2ab68a9c94690a78",
+    "mtime": 1785103103.5271513,
+    "ast_hash": "7b6d0618c82103f2db7e1d41e2e3ad22",
     "semantic_hash": ""
   },
   "internal/profile/store.go": {
-    "mtime": 1785282706.8647754,
-    "ast_hash": "0835e4a6a560f1fb8f199c50d313022c",
+    "mtime": 1785103103.5271513,
+    "ast_hash": "1ecf409aeb19cd47e3dbc105c1425496",
     "semantic_hash": ""
   },
   "internal/session/channel.go": {
@@ -3245,13 +3245,13 @@
     "semantic_hash": ""
   },
   "internal/ssh/pool.go": {
-    "mtime": 1785282916.8107688,
-    "ast_hash": "fa0ab3f102c337d4e33a2ae954a01e2d",
+    "mtime": 1785016590.520552,
+    "ast_hash": "2d0c61b046bf4e1195fc6d8c4276ebde",
     "semantic_hash": ""
   },
   "internal/ssh/pool_test.go": {
-    "mtime": 1785282916.7797682,
-    "ast_hash": "39d792b95e3db47a54b8474f07b4db0d",
+    "mtime": 1785016590.520552,
+    "ast_hash": "41a8ac6c36b4b552e699add1218d1f39",
     "semantic_hash": ""
   },
   "internal/ssh/ssh_auth.go": {
@@ -3260,8 +3260,8 @@
     "semantic_hash": ""
   },
   "internal/ssh/ssh_binding_test.go": {
-    "mtime": 1785281942.1658788,
-    "ast_hash": "fdd67cc25d53fedba70ef622cad89c70",
+    "mtime": 1785053463.3269928,
+    "ast_hash": "9fc4c43cb871e59970176316739f6a9b",
     "semantic_hash": ""
   },
   "internal/ssh/ssh_cancel_test.go": {
@@ -3275,13 +3275,13 @@
     "semantic_hash": ""
   },
   "internal/ssh/ssh_config.go": {
-    "mtime": 1785281995.7159612,
-    "ast_hash": "2f12fd99416644543da9b4aeabe603f0",
+    "mtime": 1785016590.520552,
+    "ast_hash": "0689419485a99a3eccb9902b31ba4a63",
     "semantic_hash": ""
   },
   "internal/ssh/ssh_dial.go": {
-    "mtime": 1785282970.4064896,
-    "ast_hash": "46a7234fa8bf1aa7365b0032d907a0e3",
+    "mtime": 1785082609.3449957,
+    "ast_hash": "68ccd4f370dbbbd8d7c794acb9c89d0e",
     "semantic_hash": ""
   },
   "internal/transport/ws_auth.go": {
@@ -3295,8 +3295,8 @@
     "semantic_hash": ""
   },
   "internal/transport/ws_cascade_test.go": {
-    "mtime": 1785281942.1658788,
-    "ast_hash": "05b5644aff4b8ad0319c44d2ea73a61e",
+    "mtime": 1785103103.5281513,
+    "ast_hash": "8f1938df6f1f6a7cc724743faec69479",
     "semantic_hash": ""
   },
   "internal/transport/ws_logging_test.go": {
@@ -3305,8 +3305,8 @@
     "semantic_hash": ""
   },
   "internal/transport/ws_profiles_test.go": {
-    "mtime": 1785281942.1658788,
-    "ast_hash": "a563ad963bec64944be113dc7448857e",
+    "mtime": 1785053463.327486,
+    "ast_hash": "f497bd7ad1b52621432fea4bfb69e42a",
     "semantic_hash": ""
   },
   ".internal/briefs/w1-e2e-inventory.md": {
@@ -3465,8 +3465,8 @@
     "semantic_hash": ""
   },
   "docs/decisions/0006-reusable-credentials.md": {
-    "mtime": 1785307966.2683492,
-    "ast_hash": "f3914358856a3081872a872ccc5c2c31",
+    "mtime": 1785094700.7510962,
+    "ast_hash": "d05b007b395aff4b0a91bcc098a72884",
     "semantic_hash": ""
   },
   "docs/decisions/0011-persistence-storage-capabilities-and-secret-references.md": {
@@ -3555,8 +3555,8 @@
     "semantic_hash": ""
   },
   "frontend/src/settings.test.ts": {
-    "mtime": 1785308130.8626926,
-    "ast_hash": "04e22019fc8cea5ca848f34b69700367",
+    "mtime": 1785188574.0061967,
+    "ast_hash": "6b9ac1999025592748fd1f48afce7e61",
     "semantic_hash": ""
   },
   "internal/export/backup.go": {
@@ -3575,13 +3575,13 @@
     "semantic_hash": ""
   },
   "internal/export/export_test.go": {
-    "mtime": 1785278608.5719953,
-    "ast_hash": "05cce780346e429efa1116cc0011c07e",
+    "mtime": 1785082609.3449957,
+    "ast_hash": "3db400a5589514ce5568cfe61879de3f",
     "semantic_hash": ""
   },
   "internal/export/import.go": {
-    "mtime": 1785282706.8637753,
-    "ast_hash": "0671e39167148b32a489155af57ae8d7",
+    "mtime": 1785053463.3263478,
+    "ast_hash": "d408eaf4328bb0836e1d8abf30867fb5",
     "semantic_hash": ""
   },
   "internal/export/portable.go": {
@@ -3590,8 +3590,8 @@
     "semantic_hash": ""
   },
   "internal/profile/race_test.go": {
-    "mtime": 1785278598.6049004,
-    "ast_hash": "e0c3a94cfd0c36695df0a563dd2072b9",
+    "mtime": 1785053463.3263478,
+    "ast_hash": "8cb7ac312d3cb68338ac054dc836c2b7",
     "semantic_hash": ""
   },
   "internal/settings/settings.go": {
@@ -3690,8 +3690,8 @@
     "semantic_hash": ""
   },
   "internal/transport/ws_export.go": {
-    "mtime": 1785282763.2625918,
-    "ast_hash": "1b11eabe848d5235d5d7db9c5723d794",
+    "mtime": 1785082609.3449957,
+    "ast_hash": "910626006dec7834fd8b270dbd0d855c",
     "semantic_hash": ""
   },
   ".internal/briefs/2026-07-26-credential-hygiene.md": {
@@ -3800,8 +3800,8 @@
     "semantic_hash": ""
   },
   "frontend/src/connections.tsx": {
-    "mtime": 1785307977.5504866,
-    "ast_hash": "175df3e57308cd2f84f003ea2ac007ea",
+    "mtime": 1785268802.4514976,
+    "ast_hash": "67cc03ac83279d576f5a3e5b6abef34d",
     "semantic_hash": ""
   },
   "frontend/src/export-section.behavior.test.ts": {
@@ -4205,8 +4205,8 @@
     "semantic_hash": ""
   },
   "frontend/src/settings.tsx": {
-    "mtime": 1785307966.2711353,
-    "ast_hash": "fbb764f39d1eced3a623109f77e71d58",
+    "mtime": 1785260150.3459358,
+    "ast_hash": "1183d52e22d724a833d3a7d2a67e611c",
     "semantic_hash": ""
   },
   "frontend/src/sidebar.test.tsx": {
@@ -4612,86 +4612,6 @@
   ".internal/briefs/vertical-tabs-warp-ideas.md": {
     "mtime": 1785260150.3382847,
     "ast_hash": "29c3570f5c536938ea69c86d4044d8c7",
-    "semantic_hash": ""
-  },
-  "frontend/src/credential-form.tsx": {
-    "mtime": 1785307977.4188128,
-    "ast_hash": "0115d3802ec5605185374cf8859b1bbc",
-    "semantic_hash": ""
-  },
-  "frontend/src/credentials.test.tsx": {
-    "mtime": 1785307977.4725776,
-    "ast_hash": "bcf6e9abbd3f8fcf6c16a8efa0d92ef8",
-    "semantic_hash": ""
-  },
-  "frontend/src/credentials.tsx": {
-    "mtime": 1785307977.449486,
-    "ast_hash": "b465f86f57bf9cb17892d354bf2add6b",
-    "semantic_hash": ""
-  },
-  "internal/profile/credential.go": {
-    "mtime": 1785281942.1658788,
-    "ast_hash": "35f63691a4057ad72b4259f14f48636e",
-    "semantic_hash": ""
-  },
-  "internal/profile/credential_test.go": {
-    "mtime": 1785278608.557995,
-    "ast_hash": "388a24483ca830407468997e667e1862",
-    "semantic_hash": ""
-  },
-  "internal/profile/service.go": {
-    "mtime": 1785282763.2655919,
-    "ast_hash": "8c1c8bd1ba426178211b68eee15d7828",
-    "semantic_hash": ""
-  },
-  "internal/profile/service_test.go": {
-    "mtime": 1785282763.266592,
-    "ast_hash": "3434e9711a8a5d897497be0b664830d9",
-    "semantic_hash": ""
-  },
-  "internal/profile/store_test.go": {
-    "mtime": 1785281942.1658788,
-    "ast_hash": "ba2682601de6cd7c66f56335fb658fcc",
-    "semantic_hash": ""
-  },
-  "internal/profile/usage.go": {
-    "mtime": 1785307966.2633386,
-    "ast_hash": "b4b392b144ff4af1e98b84285897728f",
-    "semantic_hash": ""
-  },
-  "internal/profile/usage_test.go": {
-    "mtime": 1785307966.2633908,
-    "ast_hash": "a35a2935ab29b5fbcca95398cb5f60cb",
-    "semantic_hash": ""
-  },
-  "internal/ssh/ssh_keepalive.go": {
-    "mtime": 1785278093.68478,
-    "ast_hash": "0d5ead73f067b238d413195548720d11",
-    "semantic_hash": ""
-  },
-  "internal/ssh/ssh_keepalive_test.go": {
-    "mtime": 1785278352.879175,
-    "ast_hash": "9ac0baaed753a8f3104300c8a3fa2374",
-    "semantic_hash": ""
-  },
-  "internal/transport/ws_credential_update_test.go": {
-    "mtime": 1785281942.1658788,
-    "ast_hash": "b784eb92890f556a8e5981b6a8a2f019",
-    "semantic_hash": ""
-  },
-  "internal/transport/ws_usage_test.go": {
-    "mtime": 1785307966.265845,
-    "ast_hash": "87ed1d966b95ad2eca60c1c2730397f2",
-    "semantic_hash": ""
-  },
-  ".internal/plans/2026-07-29-wave-1-credential-correctness.md": {
-    "mtime": 1785275280.8214753,
-    "ast_hash": "b0b4ff71c8622a13eb6c668fd317b14b",
-    "semantic_hash": ""
-  },
-  ".internal/specs/2026-07-29-connection-manager-design.md": {
-    "mtime": 1785275152.2223651,
-    "ast_hash": "9342ac6dd70996c5afc740954663ab64",
     "semantic_hash": ""
   }
 }
