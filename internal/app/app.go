@@ -127,6 +127,14 @@ func New(opts ...Option) (*App, error) {
 		transport.WithVersionSessionRegistry(&versionSessionRegistryAdapter{reg: sess}),
 		transport.WithRolloutRunner(resolver, profileStore),
 	}
+	// WithWSAddr set the field and nothing read it, so NOCX_WS_ADDR was accepted
+	// and ignored and the listener always took an ephemeral port. The dev stand
+	// pins 9880 precisely so the SSH forward survives a restart; instead every
+	// restart moved the backend and left the open tab talking to a port that no
+	// longer existed — which reads as "the backend stopped responding".
+	if o.wsAddr != "" {
+		tpOpts = append(tpOpts, transport.WithListenAddr(o.wsAddr))
+	}
 	tp := transport.NewWSServer(logger, sess, tpOpts...)
 
 	app := &App{
