@@ -581,6 +581,8 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.handleProfileMethod(wconn, req)
 	case "profiles.importTabby":
 		s.handleImportTabby(wconn, req)
+	case "profiles.moveImpact":
+		s.handleProfileMoveImpact(wconn, req)
 	case "groups.impact":
 		s.handleGroupImpact(wconn, req)
 	case "groups.apply":

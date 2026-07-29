@@ -415,6 +415,151 @@ func diffResolvedOptions(oldEff, newEff profile.EffectiveProfile, oldErr, newErr
 }
 
 // ---------------------------------------------------------------------------
+// profiles.moveImpact — compute the effect of moving a profile to a new group
+// ---------------------------------------------------------------------------
+
+// profileMoveImpactParams is the request for profiles.moveImpact.
+// TargetGroupID may be empty to indicate promotion to root.
+type profileMoveImpactParams struct {
+	ProfileIDs    []string `json:"profileIds"`
+	TargetGroupID string   `json:"targetGroupId"`
+}
+
+func (p profileMoveImpactParams) validate() error {
+	if len(p.ProfileIDs) == 0 {
+		return errors.New("profileIds is required")
+	}
+	return nil
+}
+
+func (s *WSServer) handleProfileMoveImpact(wconn *wsConn, req jsonrpcRequest) {
+	if s.groups == nil || s.profiles == nil || s.credMeta == nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "profiles not available"))
+		return
+	}
+
+	var params profileMoveImpactParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		return
+	}
+	if err := params.validate(); err != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, err.Error()))
+		return
+	}
+
+	allProfiles, err := s.profiles.LoadProfiles()
+	if err != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		return
+	}
+	allGroups, err := s.groups.LoadGroups()
+	if err != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		return
+	}
+	allCreds, err := s.credMeta.LoadCredentials()
+	if err != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		return
+	}
+
+	resp := computeProfileMoveImpact(params.ProfileIDs, params.TargetGroupID, allProfiles, allGroups, allCreds)
+	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(resp)))
+}
+
+// computeProfileMoveImpact computes the impact of moving one or more profiles
+// to a target group (or root, when targetGroupID is empty). Each profile is
+// resolved twice — once with its current group, once with the proposed group —
+// and the effective-field diff is returned. The response shape matches
+// groups.impact so the renderer needs only one diff display.
+func computeProfileMoveImpact(
+	profileIDs []string,
+	targetGroupID string,
+	allProfiles []profile.SSHProfile,
+	allGroups []profile.ProfileGroup,
+	allCreds []profile.Credential,
+) groupImpactResponse {
+	// Build profile lookup.
+	profileByID := make(map[string]profile.SSHProfile, len(allProfiles))
+	for _, p := range allProfiles {
+		profileByID[p.ID] = p
+	}
+
+	// Build credential lookup.
+	credByID := make(map[string]profile.Credential, len(allCreds))
+	for _, c := range allCreds {
+		credByID[c.ID] = c
+	}
+
+	var impacts []profileImpact
+	anyDangerous := false
+
+	for _, id := range profileIDs {
+		prof, ok := profileByID[id]
+		if !ok {
+			continue
+		}
+
+		// Resolve with current group.
+		oldEff, oldErr := profile.ResolveEffectiveProfile(prof, allGroups, profile.SparseSSHOptions{})
+
+		// Build modified profile with the proposed group.
+		modifiedProf := prof
+		modifiedProf.Group = targetGroupID
+		newEff, newErr := profile.ResolveEffectiveProfile(modifiedProf, allGroups, profile.SparseSSHOptions{})
+
+		// If both fail resolution the same way, nothing changed.
+		if oldErr != nil && newErr != nil && oldErr.Error() == newErr.Error() {
+			continue
+		}
+
+		// Apply credential layer to both.
+		if oldErr == nil && oldEff.ResolvedOptions.CredentialID != "" {
+			if cred, ok := credByID[oldEff.ResolvedOptions.CredentialID]; ok {
+				oldEff = profile.ApplyCredentialLayer(oldEff, &cred)
+			}
+		}
+		if newErr == nil && newEff.ResolvedOptions.CredentialID != "" {
+			if cred, ok := credByID[newEff.ResolvedOptions.CredentialID]; ok {
+				newEff = profile.ApplyCredentialLayer(newEff, &cred)
+			}
+		}
+
+		// Compute diffs.
+		diffs := diffResolvedOptions(oldEff, newEff, oldErr, newErr)
+		if len(diffs) == 0 {
+			continue
+		}
+
+		for _, d := range diffs {
+			if d.Dangerous {
+				anyDangerous = true
+			}
+		}
+
+		impacts = append(impacts, profileImpact{
+			ProfileID:   prof.ID,
+			ProfileName: prof.Name,
+			Diffs:       diffs,
+		})
+	}
+
+	if len(impacts) == 0 {
+		return groupImpactResponse{Dangerous: false}
+	}
+
+	sort.Slice(impacts, func(i, j int) bool {
+		return impacts[i].ProfileID < impacts[j].ProfileID
+	})
+
+	return groupImpactResponse{
+		Dangerous:        anyDangerous,
+		AffectedProfiles: impacts,
+	}
+}
+
+// ---------------------------------------------------------------------------
 // groups.apply —  apply one or more group changes atomically
 // ---------------------------------------------------------------------------
 

@@ -805,3 +805,385 @@ func TestGroupImpact_DeleteUnknownGroup(t *testing.T) {
 		t.Errorf("expected refuse action for unknown group, got %v", result.Result.DeleteImpact)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// profiles.moveImpact tests
+// ---------------------------------------------------------------------------
+
+// TestProfileMoveImpact_DefaultsChange asserts that moving a profile into a
+// group whose defaults differ reports those fields as changed, with dangerous
+// ones marked.
+func TestProfileMoveImpact_DefaultsChange(t *testing.T) {
+	dir := t.TempDir()
+	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
+	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer conn.Close() //nolint:errcheck
+
+	// Create default group with port 2222.
+	jsonrpcCall(t, conn, "groups.create", profile.ProfileGroup{
+		ID: "g-source", Name: "Source",
+		Defaults: &profile.ProfileDefaults{
+			SparseSSHOptions: profile.SparseSSHOptions{
+				Port: profile.Ptr(2222),
+			},
+		},
+	})
+	// Create target group with a different port.
+	jsonrpcCall(t, conn, "groups.create", profile.ProfileGroup{
+		ID: "g-target", Name: "Target",
+		Defaults: &profile.ProfileDefaults{
+			SparseSSHOptions: profile.SparseSSHOptions{
+				Port: profile.Ptr(3333),
+			},
+		},
+	})
+	// Create profile in source group.
+	jsonrpcCall(t, conn, "profiles.create", profile.SSHProfile{
+		Base:    profile.Base{ID: "ssh:p:0001", Name: "server-a", Type: "ssh", Group: "g-source"},
+		Options: profile.StoredSSHProfileOptions{Host: "host-a"},
+	})
+
+	// Propose moving to g-target.
+	resp := jsonrpcCall(t, conn, "profiles.moveImpact", map[string]any{
+		"profileIds":    []string{"ssh:p:0001"},
+		"targetGroupId": "g-target",
+	})
+
+	var result struct {
+		Result groupImpactResponse `json:"result"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if len(result.Result.AffectedProfiles) != 1 {
+		t.Fatalf("expected 1 affected profile, got %d", len(result.Result.AffectedProfiles))
+	}
+	pi := result.Result.AffectedProfiles[0]
+	if pi.ProfileID != "ssh:p:0001" {
+		t.Errorf("expected profile ssh:p:0001, got %s", pi.ProfileID)
+	}
+
+	foundPort := false
+	for _, d := range pi.Diffs {
+		if d.Field == "port" {
+			foundPort = true
+			if !d.Dangerous {
+				t.Error("port change should be dangerous")
+			}
+			break
+		}
+	}
+	if !foundPort {
+		t.Error("expected port diff, none found")
+	}
+
+	if !result.Result.Dangerous {
+		t.Error("expected dangerous=true for port change")
+	}
+}
+
+// TestProfileMoveImpact_IdenticalDefaults asserts that moving a profile into a
+// group whose defaults are identical reports no change.
+func TestProfileMoveImpact_IdenticalDefaults(t *testing.T) {
+	dir := t.TempDir()
+	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
+	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer conn.Close() //nolint:errcheck
+
+	// Two groups with identical port defaults.
+	jsonrpcCall(t, conn, "groups.create", profile.ProfileGroup{
+		ID: "g-source", Name: "Source",
+		Defaults: &profile.ProfileDefaults{
+			SparseSSHOptions: profile.SparseSSHOptions{
+				Port: profile.Ptr(2222),
+			},
+		},
+	})
+	jsonrpcCall(t, conn, "groups.create", profile.ProfileGroup{
+		ID: "g-target", Name: "Target",
+		Defaults: &profile.ProfileDefaults{
+			SparseSSHOptions: profile.SparseSSHOptions{
+				Port: profile.Ptr(2222),
+			},
+		},
+	})
+	jsonrpcCall(t, conn, "profiles.create", profile.SSHProfile{
+		Base:    profile.Base{ID: "ssh:p:0001", Name: "server-a", Type: "ssh", Group: "g-source"},
+		Options: profile.StoredSSHProfileOptions{Host: "host-a"},
+	})
+
+	resp := jsonrpcCall(t, conn, "profiles.moveImpact", map[string]any{
+		"profileIds":    []string{"ssh:p:0001"},
+		"targetGroupId": "g-target",
+	})
+
+	var result struct {
+		Result groupImpactResponse `json:"result"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if len(result.Result.AffectedProfiles) != 0 {
+		t.Errorf("expected 0 affected profiles for identical defaults, got %d", len(result.Result.AffectedProfiles))
+	}
+
+	if result.Result.Dangerous {
+		t.Error("expected dangerous=false for identical defaults")
+	}
+}
+
+// TestProfileMoveImpact_OwnValueOverrides asserts that a profile with its own
+// port set does not report a change when moved to a group with a different
+// default, because the profile's own value wins at higher precedence.
+func TestProfileMoveImpact_OwnValueOverrides(t *testing.T) {
+	dir := t.TempDir()
+	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
+	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer conn.Close() //nolint:errcheck
+
+	// Source group: port 2222.
+	jsonrpcCall(t, conn, "groups.create", profile.ProfileGroup{
+		ID: "g-source", Name: "Source",
+		Defaults: &profile.ProfileDefaults{
+			SparseSSHOptions: profile.SparseSSHOptions{
+				Port: profile.Ptr(2222),
+			},
+		},
+	})
+	// Target group: port 3333.
+	jsonrpcCall(t, conn, "groups.create", profile.ProfileGroup{
+		ID: "g-target", Name: "Target",
+		Defaults: &profile.ProfileDefaults{
+			SparseSSHOptions: profile.SparseSSHOptions{
+				Port: profile.Ptr(3333),
+			},
+		},
+	})
+	// Profile has its own port of 4444 — this overrides any group default.
+	jsonrpcCall(t, conn, "profiles.create", profile.SSHProfile{
+		Base: profile.Base{ID: "ssh:p:0001", Name: "server-a", Type: "ssh", Group: "g-source"},
+		Options: profile.StoredSSHProfileOptions{
+			Host: "host-a",
+			Port: profile.Ptr(4444),
+		},
+	})
+
+	resp := jsonrpcCall(t, conn, "profiles.moveImpact", map[string]any{
+		"profileIds":    []string{"ssh:p:0001"},
+		"targetGroupId": "g-target",
+	})
+
+	var result struct {
+		Result groupImpactResponse `json:"result"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if len(result.Result.AffectedProfiles) != 0 {
+		t.Errorf("expected 0 affected profiles when own value overrides, got %d", len(result.Result.AffectedProfiles))
+	}
+
+	if result.Result.Dangerous {
+		t.Error("expected dangerous=false when own value overrides")
+	}
+}
+
+// TestProfileMoveImpact_PromotionToRoot asserts that moving a profile from a
+// group to root shows the effective-field diff between group defaults and
+// hardcoded defaults.
+func TestProfileMoveImpact_PromotionToRoot(t *testing.T) {
+	dir := t.TempDir()
+	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
+	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer conn.Close() //nolint:errcheck
+
+	// Create group with port 2222 and a profile that inherits it.
+	jsonrpcCall(t, conn, "groups.create", profile.ProfileGroup{
+		ID: "g1", Name: "Prod",
+		Defaults: &profile.ProfileDefaults{
+			SparseSSHOptions: profile.SparseSSHOptions{
+				Port: profile.Ptr(2222),
+			},
+		},
+	})
+	jsonrpcCall(t, conn, "profiles.create", profile.SSHProfile{
+		Base:    profile.Base{ID: "ssh:p:0001", Name: "server-a", Type: "ssh", Group: "g1"},
+		Options: profile.StoredSSHProfileOptions{Host: "host-a"},
+	})
+
+	// Propose promoting to root (empty targetGroupId).
+	resp := jsonrpcCall(t, conn, "profiles.moveImpact", map[string]any{
+		"profileIds":    []string{"ssh:p:0001"},
+		"targetGroupId": "",
+	})
+
+	var result struct {
+		Result groupImpactResponse `json:"result"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if len(result.Result.AffectedProfiles) != 1 {
+		t.Fatalf("expected 1 affected profile for promotion, got %d", len(result.Result.AffectedProfiles))
+	}
+
+	foundPort := false
+	for _, d := range result.Result.AffectedProfiles[0].Diffs {
+		if d.Field == "port" {
+			foundPort = true
+			break
+		}
+	}
+	if !foundPort {
+		t.Error("expected port diff after promotion to root (group → hardcoded)")
+	}
+
+	if !result.Result.Dangerous {
+		t.Error("expected dangerous=true for port change on promotion")
+	}
+}
+
+// TestProfileMoveImpact_MultipleProfiles asserts that several profiles can be
+// evaluated in a single call.
+func TestProfileMoveImpact_MultipleProfiles(t *testing.T) {
+	dir := t.TempDir()
+	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
+	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer conn.Close() //nolint:errcheck
+
+	// Source group: port 2222.
+	jsonrpcCall(t, conn, "groups.create", profile.ProfileGroup{
+		ID: "g-source", Name: "Source",
+		Defaults: &profile.ProfileDefaults{
+			SparseSSHOptions: profile.SparseSSHOptions{
+				Port: profile.Ptr(2222),
+			},
+		},
+	})
+	// Target group: port 3333.
+	jsonrpcCall(t, conn, "groups.create", profile.ProfileGroup{
+		ID: "g-target", Name: "Target",
+		Defaults: &profile.ProfileDefaults{
+			SparseSSHOptions: profile.SparseSSHOptions{
+				Port: profile.Ptr(3333),
+			},
+		},
+	})
+	// Two profiles in source group.
+	jsonrpcCall(t, conn, "profiles.create", profile.SSHProfile{
+		Base:    profile.Base{ID: "ssh:p:0001", Name: "server-a", Type: "ssh", Group: "g-source"},
+		Options: profile.StoredSSHProfileOptions{Host: "host-a"},
+	})
+	jsonrpcCall(t, conn, "profiles.create", profile.SSHProfile{
+		Base:    profile.Base{ID: "ssh:p:0002", Name: "server-b", Type: "ssh", Group: "g-source"},
+		Options: profile.StoredSSHProfileOptions{Host: "host-b"},
+	})
+
+	resp := jsonrpcCall(t, conn, "profiles.moveImpact", map[string]any{
+		"profileIds":    []string{"ssh:p:0001", "ssh:p:0002"},
+		"targetGroupId": "g-target",
+	})
+
+	var result struct {
+		Result groupImpactResponse `json:"result"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if len(result.Result.AffectedProfiles) != 2 {
+		t.Fatalf("expected 2 affected profiles, got %d", len(result.Result.AffectedProfiles))
+	}
+
+	// Both profiles should have port diffs.
+	for _, pi := range result.Result.AffectedProfiles {
+		foundPort := false
+		for _, d := range pi.Diffs {
+			if d.Field == "port" {
+				foundPort = true
+				break
+			}
+		}
+		if !foundPort {
+			t.Errorf("profile %s: expected port diff", pi.ProfileID)
+		}
+	}
+
+	if !result.Result.Dangerous {
+		t.Error("expected dangerous=true for port changes")
+	}
+}
+
+// TestProfileMoveImpact_InvalidParams asserts that invalid request params
+// return errors.
+func TestProfileMoveImpact_InvalidParams(t *testing.T) {
+	dir := t.TempDir()
+	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
+	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer conn.Close() //nolint:errcheck
+
+	// Empty profileIds.
+	resp := jsonrpcCall(t, conn, "profiles.moveImpact", map[string]any{
+		"profileIds":    []string{},
+		"targetGroupId": "g-target",
+	})
+
+	var result struct {
+		Error *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error,omitempty"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if result.Error == nil {
+		t.Fatal("expected error for empty profileIds, got success")
+	}
+}
