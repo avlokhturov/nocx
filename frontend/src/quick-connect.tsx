@@ -117,7 +117,7 @@ export class SSHQuickConnectProvider implements QuickConnectProvider {
     // connected to; finishing such a profile is what the New-connection action
     // above is for.
     return profiles
-      .filter((p) => p.options.host !== '')
+      .filter((p) => p.options.host != null && p.options.host.trim() !== '')
       .map((p) => {
         const user = p.options.user
         const host = p.options.host

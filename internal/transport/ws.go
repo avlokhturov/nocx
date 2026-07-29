@@ -683,7 +683,16 @@ func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connSta
 	sess, err := s.registry.Open(ctx, cfg)
 	if err != nil {
 		s.log.Error("failed to open session", "error", err)
-		resp := newJSONRPCError(req.ID, -32603, "Internal error")
+		// Classify the SSH error through the same taxonomy the probe uses
+		// so the user sees what actually failed, not "Internal error".
+		pr := classifyProbeError(err)
+		var msg string
+		if pr.err == nil {
+			msg = string(pr.outcome) + ": " + pr.detail
+		} else {
+			msg = err.Error() // unclassifiable — use the raw wrapped error
+		}
+		resp := newJSONRPCError(req.ID, -32603, msg)
 		_ = wconn.writeJSON(resp)
 		return
 	}

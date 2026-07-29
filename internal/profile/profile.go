@@ -489,7 +489,7 @@ func ResolveEffectiveProfile(
 	groups []ProfileGroup,
 	globalDefaults SparseSSHOptions,
 ) (EffectiveProfile, error) {
-	if profile.Options.Host == "" {
+	if strings.TrimSpace(profile.Options.Host) == "" {
 		return EffectiveProfile{}, errors.New("profile host is required and cannot be inherited")
 	}
 

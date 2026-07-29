@@ -304,6 +304,17 @@ func TestResolveEffectiveProfile_HostRequired(t *testing.T) {
 	}
 }
 
+func TestResolveEffectiveProfile_WhitespaceOnlyHostRejected(t *testing.T) {
+	profile := SSHProfile{
+		Base:    Base{ID: "p1", Type: "ssh", Name: "web"},
+		Options: StoredSSHProfileOptions{Host: "  "},
+	}
+	_, err := ResolveEffectiveProfile(profile, nil, SparseSSHOptions{})
+	if err == nil {
+		t.Fatal("expected error for whitespace-only host")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Group graph validation
 // ---------------------------------------------------------------------------

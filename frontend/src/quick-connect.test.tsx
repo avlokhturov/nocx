@@ -115,6 +115,39 @@ describe('SSHQuickConnectProvider', () => {
     const items = await Promise.resolve(provider.getItems())
     expect(items).toHaveLength(0)
   })
+
+  it('filters profiles with empty or whitespace-only host', async () => {
+    const profileClient = {
+      listProfiles: vi.fn().mockResolvedValue([
+        {
+          id: 'ssh:c:good:uuid',
+          type: 'ssh' as const,
+          name: 'Good',
+          options: { host: 'server.example.com', port: 22 },
+        },
+        {
+          id: 'ssh:c:empty:uuid',
+          type: 'ssh' as const,
+          name: 'Empty host',
+          options: { host: '', port: 22 },
+        },
+        {
+          id: 'ssh:c:spaces:uuid',
+          type: 'ssh' as const,
+          name: 'Whitespace host',
+          options: { host: '  ', port: 22 },
+        },
+      ]),
+    }
+    const newSSHTab = vi.fn()
+    const provider = new SSHQuickConnectProvider(profileClient as never, newSSHTab)
+
+    const items = await Promise.resolve(provider.getItems())
+
+    expect(items).toHaveLength(1)
+    expect(items[0].id).toBe('ssh:c:good:uuid')
+    expect(newSSHTab).not.toHaveBeenCalled()
+  })
 })
 
 /* ── Controller rendering and interaction ───────────────────────────── */
