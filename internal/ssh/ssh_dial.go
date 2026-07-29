@@ -40,7 +40,7 @@ type dialer struct {
 // (different socket path), so the pool key already separates them.
 // The identity string is what the binding check already keys on, so widening or
 // narrowing it here is exactly widening/narrowing the authorization boundary.
-func (rc *RealClient) poolKeyFor(resolved *resolvedConfig, cfg *ConnectConfig) poolKey {
+func (rc *RealClient) poolKeyFor(ctx context.Context, resolved *resolvedConfig, cfg *ConnectConfig) poolKey {
 	// identity: a stored credential is the principal (its SecretID isolates
 	// it). An inline private key is the principal — keyed by its public-key
 	// fingerprint (SHA256 of the public key), NOT its file path, so replacing
@@ -60,7 +60,7 @@ func (rc *RealClient) poolKeyFor(resolved *resolvedConfig, cfg *ConnectConfig) p
 
 	jumpRoute := ""
 	if cfg.JumpHost != "" {
-		jumpRoute = rc.jumpRouteKey(cfg)
+		jumpRoute = rc.jumpRouteKey(ctx, cfg)
 	}
 
 	return poolKey{
@@ -107,7 +107,7 @@ func publicKeyFingerprint(keyPath string) string {
 // walks the JumpConfig chain, so a target reached through bastion A then
 // bastion B produces a different route key than the same target through
 // bastion A alone, and from the same target through bastion B then C.
-func (rc *RealClient) jumpRouteKey(cfg *ConnectConfig) string {
+func (rc *RealClient) jumpRouteKey(ctx context.Context, cfg *ConnectConfig) string {
 	// Prefer JumpConfig (multi-hop) over flat fields.
 	jumpCfg := cfg.JumpConfig
 	if jumpCfg == nil {
@@ -122,7 +122,7 @@ func (rc *RealClient) jumpRouteKey(cfg *ConnectConfig) string {
 		}
 	}
 
-	jumpResolved, err := rc.resolveConfig(cfg.JumpHost, jumpCfg)
+	jumpResolved, err := rc.resolveConfig(ctx, cfg.JumpHost, jumpCfg)
 	if err != nil {
 		return "unresolved:" + cfg.JumpHost
 	}
@@ -152,7 +152,7 @@ func (rc *RealClient) jumpRouteKey(cfg *ConnectConfig) string {
 
 	// Recursively append the next hop in a multi-hop chain.
 	if jumpCfg.JumpConfig != nil || jumpCfg.JumpHost != "" {
-		next := rc.jumpRouteKey(jumpCfg)
+		next := rc.jumpRouteKey(ctx, jumpCfg)
 		if next != "" {
 			base += ">" + next
 		}
@@ -426,7 +426,7 @@ func (d *dialer) acquireJumpHost(ctx context.Context, cfg *ConnectConfig) (*pool
 		}
 	}
 
-	jumpResolved, err := d.client.resolveConfig(cfg.JumpHost, jumpCfg)
+	jumpResolved, err := d.client.resolveConfig(ctx, cfg.JumpHost, jumpCfg)
 	if err != nil {
 		return nil, nil, fmt.Errorf("resolve jump host config: %w", err)
 	}
@@ -441,13 +441,13 @@ func (d *dialer) acquireJumpHost(ctx context.Context, cfg *ConnectConfig) (*pool
 		secretID = cfg.JumpSecretID
 	}
 	if secrets != nil {
-		resolvedJumpAuthz := d.client.resolveAuthzEndpoint(cfg.JumpAuthorizedEndpoint)
+		resolvedJumpAuthz := d.client.resolveAuthzEndpoint(ctx, cfg.JumpAuthorizedEndpoint)
 		if authErr := checkAuthorization(resolvedJumpAuthz, jumpResolved, string(secretID), true); authErr != nil {
 			return nil, nil, authErr
 		}
 	}
 
-	jumpKey := d.client.poolKeyFor(jumpResolved, jumpCfg)
+	jumpKey := d.client.poolKeyFor(ctx, jumpResolved, jumpCfg)
 	handle, err := d.client.pool.AcquireDial(ctx, jumpKey, d.client.dialJumpForConnect(ctx, cfg.JumpHost, jumpResolved, jumpCfg))
 	if err != nil {
 		return nil, nil, err

@@ -24,9 +24,12 @@ func WithKnownHostsFile(path string) RealClientOption {
 	return func(rc *RealClient) { rc.knownHostsFile = path }
 }
 
-// WithSSHConfigPath sets an explicit SSH config path.
-func WithSSHConfigPath(path string) RealClientOption {
-	return func(rc *RealClient) { rc.sshConfigPath = path }
+// WithConfigResolver sets the SSH config resolver for the RealClient.
+// When set, ~/.ssh/config HostName resolution and config merging use the
+// injected resolver instead of running ssh -G internally. Tests use a
+// stub resolver; production uses NewSSHConfigResolver.
+func WithConfigResolver(resolver ConfigResolver) RealClientOption {
+	return func(rc *RealClient) { rc.configResolver = resolver }
 }
 
 // RealClient is a production SSH client that connects to remote hosts
@@ -37,7 +40,7 @@ func WithSSHConfigPath(path string) RealClientOption {
 type RealClient struct {
 	log            log.Logger
 	knownHostsFile string
-	sshConfigPath  string
+	configResolver ConfigResolver
 
 	pool *ConnPool
 }
@@ -49,19 +52,19 @@ func NewReal(logger log.Logger, opts ...RealClientOption) (*RealClient, error) {
 	}
 	home, _ := os.UserHomeDir()
 	rc.knownHostsFile = filepath.Join(home, ".ssh", "known_hosts")
-	rc.sshConfigPath = filepath.Join(home, ".ssh", "config")
 
 	for _, o := range opts {
 		o(rc)
 	}
 
+	// If no resolver was injected, create a default ssh -G resolver pointing
+	// at ~/.ssh/config with an empty sshPath (look up "ssh" on PATH).
+	if rc.configResolver == nil {
+		sshConfigPath := filepath.Join(home, ".ssh", "config")
+		rc.configResolver = NewSSHConfigResolver(rc.log, sshConfigPath, "")
+	}
+
 	rc.pool = NewConnPool(logger)
-	// The pool's default dial factory is the placeholder (it returns an
-	// error). Production Connects pass a per-call factory to AcquireDial so
-	// the dial sees the caller's credential store and key material — the key
-	// identifies the principal, the factory provides the credentials. Keeping
-	// p.dial as the placeholder means a bare Acquire (no factory) fails loud
-	// rather than silently dialing with the wrong identity.
 	return rc, nil
 }
 
@@ -72,7 +75,7 @@ func (rc *RealClient) Connect(ctx context.Context, host string, opts ...ConnectO
 		o(cfg)
 	}
 
-	resolved, err := rc.resolveConfig(host, cfg)
+	resolved, err := rc.resolveConfig(ctx, host, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("resolve config for %s: %w", host, err)
 	}
@@ -90,12 +93,12 @@ func (rc *RealClient) Connect(ctx context.Context, host string, opts ...ConnectO
 	// The host parameter and cfg.AuthorizedEndpoint are separate inputs, so
 	// comparing their resolved forms is not self-authorizing.
 	if cfg.Secrets != nil {
-		resolvedAuthz := rc.resolveAuthzEndpoint(cfg.AuthorizedEndpoint)
+		resolvedAuthz := rc.resolveAuthzEndpoint(ctx, cfg.AuthorizedEndpoint)
 		if authErr := checkAuthorization(resolvedAuthz, resolved, string(cfg.SecretID), false); authErr != nil {
 			return nil, authErr
 		}
 	}
-	key := rc.poolKeyFor(resolved, cfg)
+	key := rc.poolKeyFor(ctx, resolved, cfg)
 	handle, err := rc.pool.AcquireDial(ctx, key, rc.dialForConnect(ctx, host, resolved, cfg))
 	if err != nil {
 		return nil, err
@@ -170,7 +173,7 @@ func (rc *RealClient) Probe(ctx context.Context, host string, authMethod gossh.A
 		o(cfg)
 	}
 
-	resolved, err := rc.resolveConfig(host, cfg)
+	resolved, err := rc.resolveConfig(ctx, host, cfg)
 	if err != nil {
 		return fmt.Errorf("probe: resolve config: %w", err)
 	}

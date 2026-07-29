@@ -25,7 +25,7 @@ import (
 //   - *ErrEncryptedKey when a passphrase or keyboard-interactive user input is needed
 //   - *net.OpError (or context deadline/exceeded) for unreachable targets
 func (rc *RealClient) ProbeConfig(ctx context.Context, host string, cfg *ConnectConfig) error {
-	resolved, err := rc.resolveConfig(host, cfg)
+	resolved, err := rc.resolveConfig(ctx, host, cfg)
 	if err != nil {
 		return fmt.Errorf("probe config: %w", err)
 	}

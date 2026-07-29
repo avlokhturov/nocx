@@ -1,13 +1,12 @@
 package ssh
 
 import (
+	"context"
 	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
-
-	"github.com/kevinburke/ssh_config"
 )
 
 // resolvedConfig holds the merged configuration from ~/.ssh/config and explicit options.
@@ -23,14 +22,16 @@ type resolvedConfig struct {
 	ypixel       uint16
 }
 
-// resolveConfig merges ~/.ssh/config values with explicit ConnectOptions.
-// Precedence: explicit option > config file > default.
-func (rc *RealClient) resolveConfig(host string, cfg *ConnectConfig) (*resolvedConfig, error) {
+// resolveConfig merges ~/.ssh/config values (via the injected ConfigResolver)
+// with explicit ConnectOptions. Precedence: explicit option > config file > default.
+func (rc *RealClient) resolveConfig(ctx context.Context, host string, cfg *ConnectConfig) (*resolvedConfig, error) {
 	resolvedHost, resolvedPort := host, 22
+	hostHasExplicitPort := false
 	if h, p, err := net.SplitHostPort(host); err == nil {
 		resolvedHost = h
 		if port, err := strconv.Atoi(p); err == nil {
 			resolvedPort = port
+			hostHasExplicitPort = true
 		}
 	}
 
@@ -42,24 +43,30 @@ func (rc *RealClient) resolveConfig(host string, cfg *ConnectConfig) (*resolvedC
 		rows:     24,
 	}
 
-	sshCfg, err := rc.openSSHConfig()
-	if err == nil && sshCfg != nil {
-		if hn, _ := sshCfg.Get(host, "HostName"); hn != "" {
-			resolved.hostName = hn
+	// Resolve ~/.ssh/config directives via the injected resolver. On error, the
+	// resolver has already logged a one-time warning and returned degraded
+	// values — do NOT use those degraded values (they would overwrite the
+	// explicit host:port).
+	hostCfg, rcErr := rc.configResolver.ResolveConfig(ctx, resolvedHost)
+	if rcErr == nil && hostCfg != nil {
+		if hostCfg.HostName != "" {
+			resolved.hostName = hostCfg.HostName
 		}
-		if u, _ := sshCfg.Get(host, "User"); u != "" {
-			resolved.user = u
+		if hostCfg.User != "" {
+			resolved.user = hostCfg.User
 		}
-		if p, _ := sshCfg.Get(host, "Port"); p != "" {
-			if port, err := strconv.Atoi(p); err == nil {
-				resolved.port = port
-			}
+		// Only apply config file port when the host string did NOT already
+		// carry an explicit port. An explicit host:port always wins over the
+		// config file's Port directive (which defaults to 22 for every host).
+		if hostCfg.Port > 0 && !hostHasExplicitPort {
+			resolved.port = hostCfg.Port
 		}
-		if idf, _ := sshCfg.Get(host, "IdentityFile"); idf != "" {
-			resolved.identityFile = expandPath(idf)
+		if hostCfg.IdentityFile != "" {
+			resolved.identityFile = hostCfg.IdentityFile
 		}
 	}
 
+	// Apply explicit ConnectOptions (highest precedence).
 	if cfg.User != "" {
 		resolved.user = cfg.User
 	}
@@ -88,15 +95,6 @@ func (rc *RealClient) resolveConfig(host string, cfg *ConnectConfig) (*resolvedC
 	return resolved, nil
 }
 
-func (rc *RealClient) openSSHConfig() (*ssh_config.Config, error) {
-	f, err := os.Open(rc.sshConfigPath)
-	if err != nil {
-		return nil, nil
-	}
-	defer func() { _ = f.Close() }()
-	return ssh_config.Decode(f)
-}
-
 func currentUser() string {
 	u := os.Getenv("USER")
 	if u == "" {
@@ -116,40 +114,15 @@ func expandPath(path string) string {
 	return path
 }
 
-// ResolveHostName applies ~/.ssh/config to resolve a host alias to its
-// HostName directive value. Returns the original host if the config file
-// cannot be read or has no matching HostName directive.
-// This is a package-level function so the resolver (internal/connection)
-// can call it without importing the ssh_config package directly.
-func ResolveHostName(configPath, host string) string {
-	// #nosec G304 -- configPath is the app-owned ~/.ssh/config location, not
-	// renderer input; the renderer never names a file here.
-	f, err := os.Open(configPath)
-	if err != nil {
-		return host
-	}
-	defer func() { _ = f.Close() }()
-
-	sshCfg, err := ssh_config.Decode(f)
-	if err != nil {
-		return host
-	}
-
-	if hn, _ := sshCfg.Get(host, "HostName"); hn != "" {
-		return hn
-	}
-	return host
-}
-
-// resolveAuthzEndpoint applies ~/.ssh/config HostName resolution to the host
-// portion of an endpoint string. If the endpoint is already a resolved value
-// (an IP address or real hostname, not an alias), this is a no-op. For an
-// alias, it resolves through the same SSH config that resolveConfig uses for
-// the dial target, so both sides of the authorization comparison go through
-// the same resolution.
+// resolveAuthzEndpoint applies the ConfigResolver's HostName resolution to
+// the host portion of an endpoint string. If the endpoint is already a
+// resolved value (an IP address or real hostname, not an alias), this is a
+// no-op. For an alias, it resolves through the same ConfigResolver that
+// resolveConfig uses for the dial target, so both sides of the authorization
+// comparison go through the same resolution.
 //
 // An empty endpoint returns empty — inline auth has no authorization check.
-func (rc *RealClient) resolveAuthzEndpoint(endpoint string) string {
+func (rc *RealClient) resolveAuthzEndpoint(ctx context.Context, endpoint string) string {
 	if endpoint == "" {
 		return ""
 	}
@@ -159,11 +132,9 @@ func (rc *RealClient) resolveAuthzEndpoint(endpoint string) string {
 		authPortStr = ""
 	}
 
-	sshCfg, err := rc.openSSHConfig()
-	if err == nil && sshCfg != nil {
-		if hn, _ := sshCfg.Get(authHost, "HostName"); hn != "" {
-			authHost = hn
-		}
+	resolvedHost, _ := rc.configResolver.ResolveHost(ctx, authHost)
+	if resolvedHost != "" {
+		authHost = resolvedHost
 	}
 
 	if authPortStr != "" {

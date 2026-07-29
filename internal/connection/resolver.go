@@ -8,6 +8,7 @@
 package connection
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -25,22 +26,18 @@ type Resolver struct {
 	groups   profile.GroupRepository
 	credMeta profile.CredentialMetadataRepository
 	secrets  credential.SecretStore
-
-	// sshConfigPath is the path to ~/.ssh/config, used to resolve profile
-	// hosts through alias HostName directives before setting the authorized
-	// endpoint. An empty path means no resolution (bare hostname used as-is).
-	sshConfigPath string
+	// configResolver resolves ~/.ssh/config directives using ssh -G.
+	// Injected at the composition root, shared with the RealClient so both
+	// sides of the authorization comparison go through the same resolution.
+	// When nil, host resolution is a no-op (original host returned as-is).
+	configResolver ssh.ConfigResolver
 }
 
 // ResolverOption configures the Resolver.
 type ResolverOption func(*Resolver)
 
-// WithSSHConfigPath sets the path to ~/.ssh/config for resolving profile
-// host aliases. When set, the resolver applies SSH config HostName resolution
-// to the profile's Host before storing it as the authorized endpoint, so
-// the authorization identity is the canonical hostname — not the alias.
-func WithSSHConfigPath(path string) ResolverOption {
-	return func(r *Resolver) { r.sshConfigPath = path }
+func WithConfigResolver(resolver ssh.ConfigResolver) ResolverOption {
+	return func(r *Resolver) { r.configResolver = resolver }
 }
 
 // NewResolver creates a Resolver backed by the given stores.
@@ -231,14 +228,21 @@ func (r *Resolver) findCredential(id string) (profile.Credential, error) {
 	return profile.Credential{}, fmt.Errorf("credential %s: %w", id, ErrProfileNotFound)
 }
 
-// resolveProfileHost applies ~/.ssh/config HostName resolution to a profile's
-// host, returning the canonical hostname. An empty sshConfigPath means no
-// resolution (the original host is returned unchanged).
+// resolveProfileHost applies the ConfigResolver's HostName resolution to a
+// profile's host, returning the canonical hostname. When no resolver is
+// configured, the original host is returned unchanged (no resolution).
+// Uses context.Background() since profile resolution runs during
+// configuration, not on the connect path; the resolver's own 10s internal
+// timeout still bounds the subprocess.
 func (r *Resolver) resolveProfileHost(host string) string {
-	if r.sshConfigPath == "" {
+	if r.configResolver == nil {
 		return host
 	}
-	return ssh.ResolveHostName(r.sshConfigPath, host)
+	resolved, err := r.configResolver.ResolveHost(context.Background(), host)
+	if err != nil || resolved == "" {
+		return host
+	}
+	return resolved
 }
 
 // ErrProfileNotFound is returned when a profile or credential ID is not found.

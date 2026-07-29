@@ -3,7 +3,6 @@ package ssh
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net"
 	"strconv"
 	"testing"
@@ -25,14 +24,13 @@ func (s *credStub) Set(_ credential.SecretID, _ credential.Secret) error { retur
 func (s *credStub) Delete(_ credential.SecretID) error                   { return nil }
 func (s *credStub) Exists(_ credential.SecretID) (bool, error)           { return true, nil }
 
-// newBindingClient builds a RealClient pointed at an empty ssh_config so
-// resolution is deterministic (alias lookups come only from the config we
-// write per test, if any).
+// newBindingClient builds a RealClient with an empty stub resolver so
+// resolution is deterministic (alias lookups use the StubConfigResolver).
 func newBindingClient(t *testing.T) *RealClient {
 	t.Helper()
 	c, err := NewReal(
 		log.NewSlogAdapter(nil),
-		WithSSHConfigPath(writeSSHConfig(t, "")),
+		WithConfigResolver(NewStubConfigResolver()),
 		WithKnownHostsFile(writeSSHConfig(t, "")),
 	)
 	if err != nil {
@@ -88,15 +86,13 @@ func TestBinding_AliasConnects(t *testing.T) {
 	defer srv.close()
 	_, portStr, _ := net.SplitHostPort(srv.addr)
 	srvHost := hostPortOnly(srv.addr)
+	srvPort, _ := strconv.Atoi(portStr)
 
-	configContent := fmt.Sprintf(`Host victim
-    HostName %s
-    Port %s
-`, srvHost, portStr)
-	configPath := writeSSHConfig(t, configContent)
+	stub := NewStubConfigResolver()
+	stub.AddEntry("victim", HostConfig{HostName: srvHost, Port: srvPort})
 	khPath := writeKnownHosts(t, srv, srv.addr)
 
-	client, err := NewReal(log.NewSlogAdapter(nil), WithSSHConfigPath(configPath), WithKnownHostsFile(khPath))
+	client, err := NewReal(log.NewSlogAdapter(nil), WithConfigResolver(stub), WithKnownHostsFile(khPath))
 	if err != nil {
 		t.Fatalf("NewReal: %v", err)
 	}
@@ -105,7 +101,7 @@ func TestBinding_AliasConnects(t *testing.T) {
 	store := &credStub{pw: "x"}
 
 	// Bound to the ALIAS — must CONNECT. resolveAuthzEndpoint("victim")
-	// resolves through ~/.ssh/config to srvHost, and resolveConfig("victim")
+	// resolves through the stub to srvHost, and resolveConfig("victim")
 	// also resolves to srvHost. Both sides match.
 	ch, err := client.Connect(
 		context.Background(), "victim",
@@ -131,28 +127,24 @@ func TestBinding_AliasDriftRefused(t *testing.T) {
 	defer srv.close()
 	_, portStr, _ := net.SplitHostPort(srv.addr)
 	srvHost := hostPortOnly(srv.addr)
+	srvPort, _ := strconv.Atoi(portStr)
 
-	// Old config: alias "victim" → HostName 127.0.0.1 (the test server).
-	oldConfig := fmt.Sprintf(`Host victim
-    HostName %s
-    Port %s
-`, srvHost, portStr)
-	configPath := writeSSHConfig(t, oldConfig)
 	khPath := writeKnownHosts(t, srv, srv.addr)
-
 	store := &credStub{pw: "x"}
 
-	// Connect with AuthorizedEndpoint set to the OLD resolved value (srvHost).
-	// At connect time, resolveAuthzEndpoint("127.0.0.1") is a no-op (IP, not an
-	// alias), so the authorized identity stays "127.0.0.1".
-	// resolveConfig("victim") → hostName = "127.0.0.1" (from old config).
-	// Match → connect.
-	client, err := NewReal(log.NewSlogAdapter(nil), WithSSHConfigPath(configPath), WithKnownHostsFile(khPath))
+	// Old config: alias "victim" → HostName srvHost (the test server).
+	oldStub := NewStubConfigResolver()
+	oldStub.AddEntry("victim", HostConfig{HostName: srvHost, Port: srvPort})
+	client, err := NewReal(log.NewSlogAdapter(nil), WithConfigResolver(oldStub), WithKnownHostsFile(khPath))
 	if err != nil {
 		t.Fatalf("NewReal: %v", err)
 	}
 	defer func() { _ = client.Close() }()
 
+	// Connect with AuthorizedEndpoint set to the OLD resolved value (srvHost).
+	// resolveAuthzEndpoint("127.0.0.1") is a no-op (IP, not an alias).
+	// resolveConfig("victim") → hostName = "127.0.0.1" (from old stub).
+	// Match → connect.
 	_, err = client.Connect(
 		context.Background(), "victim",
 		WithUser("test"),
@@ -164,14 +156,10 @@ func TestBinding_AliasDriftRefused(t *testing.T) {
 		t.Fatalf("connect with old resolved endpoint: %v", err)
 	}
 
-	// Now the config changes: alias "victim" → HostName "evil.example.com".
-	driftConfig := fmt.Sprintf(`Host victim
-    HostName evil.example.com
-    Port %s
-`, portStr)
-	configPath2 := writeSSHConfig(t, driftConfig)
-
-	client2, err := NewReal(log.NewSlogAdapter(nil), WithSSHConfigPath(configPath2), WithKnownHostsFile(khPath))
+	// Now the config drifts: alias "victim" → HostName "evil.example.com".
+	driftStub := NewStubConfigResolver()
+	driftStub.AddEntry("victim", HostConfig{HostName: "evil.example.com", Port: srvPort})
+	client2, err := NewReal(log.NewSlogAdapter(nil), WithConfigResolver(driftStub), WithKnownHostsFile(khPath))
 	if err != nil {
 		t.Fatalf("NewReal 2: %v", err)
 	}
@@ -179,7 +167,7 @@ func TestBinding_AliasDriftRefused(t *testing.T) {
 
 	// The authorized endpoint is still "127.0.0.1" (the old resolved value).
 	// resolveAuthzEndpoint("127.0.0.1") → "127.0.0.1" (no-op).
-	// resolveConfig("victim").hostName → "evil.example.com" (from new config).
+	// resolveConfig("victim").hostName → "evil.example.com" (from drift stub).
 	// "127.0.0.1" != "evil.example.com" → drifts → REFUSED.
 	_, err = client2.Connect(
 		context.Background(), "victim",
@@ -208,18 +196,14 @@ func TestBinding_JumpHostRefused(t *testing.T) {
 	srv := startTestSSHServer(t)
 	defer srv.close()
 	_, portStr, _ := net.SplitHostPort(srv.addr)
+	srvPort, _ := strconv.Atoi(portStr)
 
-	// Jump alias "jumphost" -> HostName 127.0.0.1 (the test server). The
-	// target is the same server reached directly. The jump credential is
-	// bound to "other-bastion.example.com", so the jump binding must refuse.
-	configContent := fmt.Sprintf(`Host jumphost
-    HostName %s
-    Port %s
-`, hostPortOnly(srv.addr), portStr)
-	configPath := writeSSHConfig(t, configContent)
 	khPath := writeKnownHosts(t, srv, srv.addr)
 
-	client, err := NewReal(log.NewSlogAdapter(nil), WithSSHConfigPath(configPath), WithKnownHostsFile(khPath))
+	// Jump alias "jumphost" -> HostName 127.0.0.1 (the test server).
+	stub := NewStubConfigResolver()
+	stub.AddEntry("jumphost", HostConfig{HostName: hostPortOnly(srv.addr), Port: srvPort})
+	client, err := NewReal(log.NewSlogAdapter(nil), WithConfigResolver(stub), WithKnownHostsFile(khPath))
 	if err != nil {
 		t.Fatalf("NewReal: %v", err)
 	}
@@ -227,8 +211,6 @@ func TestBinding_JumpHostRefused(t *testing.T) {
 
 	store := &credStub{pw: "x"}
 
-	// Target binding matches the resolved target; only the jump binding is
-	// wrong. This isolates the jump-host enforcement from the target's.
 	_, err = client.Connect(
 		context.Background(), srv.addr,
 		WithUser("test"),
@@ -237,7 +219,6 @@ func TestBinding_JumpHostRefused(t *testing.T) {
 		withBinding(hostPortOnly(srv.addr), 0),
 		WithJumpHost("jumphost", 0, "test", "publicKey"),
 		WithJumpCredentials(store, credential.NewSecretID()),
-		// Jump credential bound to a host the jump alias does NOT resolve to.
 		func(c *ConnectConfig) {
 			c.JumpAuthorizedEndpoint = "other-bastion.example.com"
 		},
@@ -257,24 +238,17 @@ func TestBinding_JumpHostRefused(t *testing.T) {
 	}
 }
 
-// TestBinding_PortFromAlias pins the second bead criterion: matching uses
-// the EFFECTIVE port after resolution, not the profile's. An alias whose
-// Port overrides the default means the effective port is the alias's port;
-// a credential bound to port 22 must be refused when the alias resolves to
-// the test server's port.
 func TestBinding_PortFromAlias(t *testing.T) {
 	srv := startTestSSHServer(t)
 	defer srv.close()
 	_, portStr, _ := net.SplitHostPort(srv.addr)
+	srvPort, _ := strconv.Atoi(portStr)
 
-	configContent := fmt.Sprintf(`Host portalias
-    HostName %s
-    Port %s
-`, hostPortOnly(srv.addr), portStr)
-	configPath := writeSSHConfig(t, configContent)
 	khPath := writeKnownHosts(t, srv, srv.addr)
 
-	client, err := NewReal(log.NewSlogAdapter(nil), WithSSHConfigPath(configPath), WithKnownHostsFile(khPath))
+	stub := NewStubConfigResolver()
+	stub.AddEntry("portalias", HostConfig{HostName: hostPortOnly(srv.addr), Port: srvPort})
+	client, err := NewReal(log.NewSlogAdapter(nil), WithConfigResolver(stub), WithKnownHostsFile(khPath))
 	if err != nil {
 		t.Fatalf("NewReal: %v", err)
 	}
@@ -303,9 +277,6 @@ func TestBinding_PortFromAlias(t *testing.T) {
 	}
 }
 
-// TestBinding_UnboundRefused pins the decision about empty Host: an unbound
-// credential (BoundHost == "") is refused at connect time. "Any host" is the
-// redirection hole; it does not become legal because the check is new.
 func TestBinding_UnboundRefused(t *testing.T) {
 	c := newBindingClient(t)
 	store := &credStub{pw: "x"}
@@ -315,7 +286,6 @@ func TestBinding_UnboundRefused(t *testing.T) {
 		context.Background(), unreachableHost,
 		WithUser("victim"),
 		WithCredentials(store, secretID),
-		// No binding set — BoundHost stays "".
 	)
 	var authErr *ErrCredentialAuthorizationFailed
 	if !errors.As(err, &authErr) {
@@ -332,17 +302,12 @@ func TestBinding_UnboundRefused(t *testing.T) {
 	}
 }
 
-// TestBinding_HostAnyPortWhenPortUnset pins the stated exception: a
-// credential bound to a host with no port (BoundPort == 0) is accepted for
-// that host on ANY port. Host is the load-bearing identity; making port
-// mandatory would break every existing host-only credential harder than the
-// hole it would close.
 func TestBinding_HostAnyPortWhenPortUnset(t *testing.T) {
 	srv := startTestSSHServer(t)
 	defer srv.close()
 	khPath := writeKnownHosts(t, srv, srv.addr)
 
-	client, err := NewReal(log.NewSlogAdapter(nil), WithSSHConfigPath(writeSSHConfig(t, "")), WithKnownHostsFile(khPath))
+	client, err := NewReal(log.NewSlogAdapter(nil), WithConfigResolver(NewStubConfigResolver()), WithKnownHostsFile(khPath))
 	if err != nil {
 		t.Fatalf("NewReal: %v", err)
 	}
@@ -351,7 +316,6 @@ func TestBinding_HostAnyPortWhenPortUnset(t *testing.T) {
 	store := &credStub{pw: "x"}
 	_, srvPort, _ := net.SplitHostPort(srv.addr)
 
-	// Bound to the host with port 0 -> accepted on the server's ephemeral port.
 	ch, err := client.Connect(
 		context.Background(), srv.addr,
 		WithUser("test"),
@@ -365,24 +329,17 @@ func TestBinding_HostAnyPortWhenPortUnset(t *testing.T) {
 	defer func() { _ = ch.Close() }()
 }
 
-// TestBinding_InlineAuthNotChecked pins the negative space: inline (no
-// credential) auth has no stored secret to redirect, so there is no binding
-// to enforce and Connect proceeds normally. This guards against an
-// over-broad check that would break every inline profile.
 func TestBinding_InlineAuthNotChecked(t *testing.T) {
 	srv := startTestSSHServer(t)
 	defer srv.close()
 	khPath := writeKnownHosts(t, srv, srv.addr)
 
-	client, err := NewReal(log.NewSlogAdapter(nil), WithSSHConfigPath(writeSSHConfig(t, "")), WithKnownHostsFile(khPath))
+	client, err := NewReal(log.NewSlogAdapter(nil), WithConfigResolver(NewStubConfigResolver()), WithKnownHostsFile(khPath))
 	if err != nil {
 		t.Fatalf("NewReal: %v", err)
 	}
 	defer func() { _ = client.Close() }()
 
-	// No WithCredentials -> Secrets nil -> check skipped. BoundHost left
-	// empty would otherwise trip ErrCredentialNotBound; that it does not is
-	// exactly the point.
 	ch, err := client.Connect(
 		context.Background(), srv.addr,
 		WithUser("test"),

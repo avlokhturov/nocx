@@ -5,7 +5,6 @@ go 1.26
 require (
 	github.com/creack/pty v1.1.24
 	github.com/gorilla/websocket v1.5.3
-	github.com/kevinburke/ssh_config v1.2.0
 	github.com/pkg/sftp v1.13.11
 	github.com/wailsapp/wails/v2 v2.13.0
 	github.com/zalando/go-keyring v0.2.8

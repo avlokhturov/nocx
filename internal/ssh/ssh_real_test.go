@@ -609,23 +609,18 @@ func TestConnect_WrongKey_AuthFailed(t *testing.T) {
 func TestSSHConfig_AliasResolution(t *testing.T) {
 	srv := startTestSSHServer(t)
 	defer srv.close()
-
+	_, portStr, _ := net.SplitHostPort(srv.addr)
+	srvHost := hostPortOnly(srv.addr)
+	srvPort, _ := strconv.Atoi(portStr)
 	khPath := writeKnownHosts(t, srv, srv.addr)
 
-	// Extract the port from the server address so the config matches.
-	_, portStr, _ := net.SplitHostPort(srv.addr)
-	configContent := fmt.Sprintf(`Host myalias
-    HostName %s
-    User testuser
-    Port %s
-`, hostPortOnly(srv.addr), portStr)
-
-	configPath := writeSSHConfig(t, configContent)
+	stub := NewStubConfigResolver()
+	stub.AddEntry("myalias", HostConfig{HostName: srvHost, User: "testuser", Port: srvPort})
 
 	client, err := NewReal(
 		log.NewSlogAdapter(nil),
 		WithKnownHostsFile(khPath),
-		WithSSHConfigPath(configPath),
+		WithConfigResolver(stub),
 	)
 	if err != nil {
 		t.Fatalf("NewReal: %v", err)
@@ -665,17 +660,15 @@ func TestSSHConfig_ExplicitOptionBeatsConfig(t *testing.T) {
 	defer srv.close()
 
 	khPath := writeKnownHosts(t, srv, srv.addr)
+	srvHost := hostPortOnly(srv.addr)
 
-	configContent := fmt.Sprintf(`Host %s
-    User configuser
-`, hostPortOnly(srv.addr))
-
-	configPath := writeSSHConfig(t, configContent)
+	stub := NewStubConfigResolver()
+	stub.AddEntry(srvHost, HostConfig{User: "configuser"})
 
 	client, err := NewReal(
 		log.NewSlogAdapter(nil),
 		WithKnownHostsFile(khPath),
-		WithSSHConfigPath(configPath),
+		WithConfigResolver(stub),
 	)
 	if err != nil {
 		t.Fatalf("NewReal: %v", err)
@@ -691,12 +684,12 @@ func TestSSHConfig_ExplicitOptionBeatsConfig(t *testing.T) {
 		WithPTYSize(80, 24, 0, 0),
 	)
 	if err != nil {
-		t.Fatalf("Connect with explicit user: %v", err)
+		t.Fatalf("Connect with explicit user beats config: %v", err)
 	}
 	defer func() { _ = ch.Close() }()
 
 	<-srv.shellReady
-	_, err = ch.Write([]byte("ping"))
+	_, err = ch.Write([]byte("hello"))
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
@@ -705,15 +698,11 @@ func TestSSHConfig_ExplicitOptionBeatsConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
-	if string(buf[:n]) != "echo:ping" {
-		t.Fatalf("expected echo:ping, got %q", string(buf[:n]))
+	if string(buf[:n]) != "echo:hello" {
+		t.Fatalf("expected echo:hello, got %q", string(buf[:n]))
 	}
 }
 
-// TestPoolConnectionSharing proves the AD-4 contract end-to-end: two
-// Connects to the same host+user share one ssh.Client (pool.Count==1), and
-// both channels work independently. Closing both releases the connection
-// (pool.Count==0).
 func TestPoolConnectionSharing(t *testing.T) {
 	srv := startTestSSHServer(t)
 	defer srv.close()

@@ -306,7 +306,7 @@ func newTestRealClient(t *testing.T) *RealClient {
 	rc, err := NewReal(
 		log.NewSlogAdapter(nil), // nil handler → slog falls back
 		WithKnownHostsFile(filepath.Join(dir, "known_hosts")),
-		WithSSHConfigPath(filepath.Join(dir, "config")),
+		WithConfigResolver(NewStubConfigResolver()),
 	)
 	if err != nil {
 		t.Fatalf("NewReal: %v", err)

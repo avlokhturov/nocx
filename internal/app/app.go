@@ -63,8 +63,16 @@ func New(opts ...Option) (*App, error) {
 	ptf := &localPTYFactory{log: logger, shint: shint}
 	sess := session.New(logger, ptf)
 
+	// SSH config resolver: shared by both the SSH client and the profile
+	// resolver so the authorization comparison matches canonical hostnames.
+	// AD-4: nocx asks OpenSSH via ssh -G; the injected resolver is the sole
+	// path through which ~/.ssh/config is read.
+	home, _ := os.UserHomeDir()
+	sshConfigPath := filepath.Join(home, ".ssh", "config")
+	sshCfgResolver := ssh.NewSSHConfigResolver(logger, sshConfigPath, "")
+
 	// SSH client (AD-4): real client on x/crypto/ssh, honors ~/.ssh/config.
-	sshClient, err := ssh.NewReal(logger)
+	sshClient, err := ssh.NewReal(logger, ssh.WithConfigResolver(sshCfgResolver))
 	if err != nil {
 		return nil, fmt.Errorf("ssh client: %w", err)
 	}
@@ -86,9 +94,6 @@ func New(opts ...Option) (*App, error) {
 	usageStore := session.NewDocumentUsageStore(docStore)
 	sess = sess.WithProfileUsageTracker(usageStore)
 
-	home, _ := os.UserHomeDir()
-	sshConfigPath := filepath.Join(home, ".ssh", "config")
-
 	tpOpts := []transport.WSServerOption{
 		transport.WithProfileRepository(profileStore),
 		transport.WithGroupRepository(profileStore),
@@ -96,7 +101,7 @@ func New(opts ...Option) (*App, error) {
 		transport.WithCredentialStore(credStore),
 		transport.WithProfileResolver(connection.NewResolver(
 			profileStore, profileStore, profileStore, credStore,
-			connection.WithSSHConfigPath(sshConfigPath),
+			connection.WithConfigResolver(sshCfgResolver),
 		)),
 		transport.WithSettingsRegistry(settingsRegistry),
 		transport.WithProfileUsageStore(usageStore),
