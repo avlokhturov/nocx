@@ -123,7 +123,7 @@ export class TerminalContent extends BaseTabContent {
     private readonly banner: ClipboardBanner,
     private readonly onTooltipChange: (tooltip: string) => void,
     private readonly sshOpts?: {
-      profileId: string
+      profileId?: string
       host: string
       user?: string
     },
@@ -397,7 +397,14 @@ export class TerminalContent extends BaseTabContent {
 
       // Open the session at the renderer's actual grid size.
       const session = this.sshOpts
-        ? await this.client.openSSHSession(this.cols, this.rows, this.sshOpts.profileId)
+        ? this.sshOpts.profileId
+          ? await this.client.openSSHSession(this.cols, this.rows, this.sshOpts.profileId)
+          : await this.client.openSSHSessionByHost(
+              this.cols,
+              this.rows,
+              this.sshOpts.host,
+              this.sshOpts.user,
+            )
         : await this.client.openSession(this.cols, this.rows, true)
 
       if (signal.aborted) {

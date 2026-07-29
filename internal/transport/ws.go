@@ -82,6 +82,14 @@ type WSServer struct {
 	// settings registry backs the settings.* JSON-RPC methods.
 	settings   *settings.Registry
 	resolverOK bool
+
+	// SSH config resolver and config path for the ssh.listAliases RPC.
+	// When nil, the handler returns a JSON-RPC error. The resolver
+	// answers values via ssh -G; enumeration reads Host patterns from
+	// the config file directly (see internal/ssh/aliases.go for the
+	// split documentation).
+	sshConfigResolver ssh.ConfigResolver
+	sshConfigPath     string
 	// prober validates credentials without opening a session (connections.test).
 	// When nil, the handler returns a JSON-RPC error.
 	prober Prober
@@ -121,6 +129,15 @@ type ProfileResolver interface {
 // WithProfileResolver attaches a profile resolver for SSH connection setup.
 func WithProfileResolver(r ProfileResolver) WSServerOption {
 	return func(s *WSServer) { s.resolver = r; s.resolverOK = true }
+}
+
+// WithSSHConfigResolver attaches the SSH config resolver and config path
+// for the ssh.listAliases RPC. The resolver answers values via ssh -G;
+// the config path is used to enumerate Host patterns (see aliases.go for
+// the split rationale). When not wired, ssh.listAliases returns a JSON-RPC
+// error.
+func WithSSHConfigResolver(resolver ssh.ConfigResolver, configPath string) WSServerOption {
+	return func(s *WSServer) { s.sshConfigResolver = resolver; s.sshConfigPath = configPath }
 }
 
 // WSServerOption configures a WSServer.
@@ -438,6 +455,12 @@ type openParams struct {
 	// inside the SSH auth chain from the credential store.
 	Kind      string `json:"kind,omitempty"`
 	ProfileID string `json:"profileId,omitempty"`
+	// Host opens a direct SSH connection without a saved profile. When set
+	// (and ProfileID is empty), the backend resolves the host through
+	// ~/.ssh/config (ssh -G) and opens a direct session. User optionally
+	// overrides the resolved user.
+	Host string `json:"host,omitempty"`
+	User string `json:"user,omitempty"`
 }
 
 // resizeParams is the payload of the "resize" RPC method.
@@ -607,6 +630,8 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.handleSessionsStatus(wconn, req)
 	case "connections.test":
 		s.handleConnectionsTest(wconn, req)
+	case "sshConfig.aliases":
+		s.handleSSHConfigAliases(wconn, req)
 
 	default:
 		resp := newJSONRPCError(req.ID, -32601, "Method not found")
@@ -647,39 +672,93 @@ func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connSta
 
 	// SSH session — when kind="ssh", open a remote channel instead of local PTY.
 	if params.Kind == "ssh" {
-		if !s.resolverOK {
-			resp := newJSONRPCError(req.ID, -32603, "SSH sessions not available (no profile resolver wired)")
+		var host string
+		var remote *ssh.ConnectConfig
+
+		if params.ProfileID != "" {
+			// Profile-based resolution: look up the stored profile, resolve
+			// credentials and jump hosts through the profile resolver.
+			if !s.resolverOK {
+				resp := newJSONRPCError(req.ID, -32603, "SSH sessions not available (no profile resolver wired)")
+				_ = wconn.writeJSON(resp)
+				return
+			}
+
+			var err error
+			host, remote, err = s.resolver.Resolve(params.ProfileID)
+			if err != nil {
+				s.log.Error("profile resolve failed", "profileId", params.ProfileID, "error", err)
+				resp := newJSONRPCError(req.ID, -32603, err.Error())
+				_ = wconn.writeJSON(resp)
+				return
+			}
+
+			remote.Cols = params.Cols
+			remote.Rows = params.Rows
+			remote.XPixel = params.XPixel
+			remote.YPixel = params.YPixel
+
+			s.log.Info("SSH open via profile", "profileId", params.ProfileID, "host", host, "user", remote.User)
+
+			cfg.Kind = session.KindRemote
+			cfg.Host = host
+			cfg.Remote = remote
+			// Recorded here and nowhere else: the resolver has just accepted this
+			// id, so the association is the backend's own conclusion rather than
+			// the renderer's claim.
+			cfg.ProfileID = params.ProfileID
+		} else if params.Host != "" {
+			// Direct host resolution: resolve through ~/.ssh/config (ssh -G)
+			// and build a minimal ConnectConfig. Used for SSH aliases from
+			// the config file — no stored profile involved.
+			if s.sshConfigResolver == nil {
+				resp := newJSONRPCError(req.ID, -32603, "SSH config resolver not available")
+				_ = wconn.writeJSON(resp)
+				return
+			}
+
+			resolved, err := s.sshConfigResolver.ResolveConfig(ctx, params.Host)
+			if err != nil {
+				s.log.Warn("SSH config resolution degraded for direct host", "host", params.Host, "error", err)
+			}
+
+			user := params.User
+			if user == "" && resolved != nil && resolved.User != "" {
+				user = resolved.User
+			}
+			port := 0
+			if resolved != nil && resolved.Port > 0 {
+				port = resolved.Port
+			}
+			remoteHost := params.Host
+			if resolved != nil && resolved.HostName != "" {
+				remoteHost = resolved.HostName
+			}
+
+			var keyFile string
+			if resolved != nil {
+				keyFile = resolved.IdentityFile
+			}
+			remote = &ssh.ConnectConfig{
+				User:    user,
+				Port:    port,
+				KeyFile: keyFile,
+				Cols:    params.Cols,
+				Rows:    params.Rows,
+			}
+
+			s.log.Info("SSH open via direct host", "host", params.Host, "resolvedHost", remoteHost, "user", user)
+
+			cfg.Kind = session.KindRemote
+			cfg.Host = remoteHost
+			cfg.Remote = remote
+			// No ProfileID — this is not a saved profile. The usage tracker
+			// does not record it.
+		} else {
+			resp := newJSONRPCError(req.ID, -32602, "Invalid params: profileId or host required for ssh session")
 			_ = wconn.writeJSON(resp)
 			return
 		}
-		if params.ProfileID == "" {
-			resp := newJSONRPCError(req.ID, -32602, "Invalid params: profileId required for ssh session")
-			_ = wconn.writeJSON(resp)
-			return
-		}
-
-		host, remote, err := s.resolver.Resolve(params.ProfileID)
-		if err != nil {
-			s.log.Error("profile resolve failed", "profileId", params.ProfileID, "error", err)
-			resp := newJSONRPCError(req.ID, -32603, err.Error())
-			_ = wconn.writeJSON(resp)
-			return
-		}
-
-		remote.Cols = params.Cols
-		remote.Rows = params.Rows
-		remote.XPixel = params.XPixel
-		remote.YPixel = params.YPixel
-
-		s.log.Info("SSH open via profile", "profileId", params.ProfileID, "host", host, "user", remote.User)
-
-		cfg.Kind = session.KindRemote
-		cfg.Host = host
-		cfg.Remote = remote
-		// Recorded here and nowhere else: the resolver has just accepted this
-		// id, so the association is the backend's own conclusion rather than
-		// the renderer's claim.
-		cfg.ProfileID = params.ProfileID
 	}
 
 	sess, err := s.registry.Open(ctx, cfg)

@@ -22,6 +22,7 @@ import {
   QuickConnectController,
   ActionsQuickConnectProvider,
   SSHQuickConnectProvider,
+  SSHAliasQuickConnectProvider,
   type QuickConnectProvider,
 } from './quick-connect'
 
@@ -234,6 +235,7 @@ async function main() {
       () => openSettingsTab().startNewConnection(),
     ),
     sshProvider,
+    new SSHAliasQuickConnectProvider(profileClient, (host, user) => tm.newSSHTab('', host, user)),
   ]
 
   const qc = new QuickConnectController()

@@ -213,6 +213,35 @@ export interface EffectiveBatchResponse {
   errors?: { id: string; error: string }[]
 }
 
+// ── SSH config alias types (wave 7 — nocx-c2ym.3) ─────────────────────
+//
+// Returned by sshConfig.aliases — live aliases from ~/.ssh/config.
+
+/** One SSH host alias from ~/.ssh/config. */
+export interface SSHAliasEntry {
+  /** The Host pattern as written by the user. This is the identity. */
+  readonly alias: string
+  /** Resolved HostName (may equal alias when config sets none). */
+  readonly hostName: string
+  /** Resolved User (omitted when config sets none). */
+  readonly user?: string
+  /** Resolved Port (omitted when config sets none). */
+  readonly port?: number
+}
+
+/** Why the SSH config could not be read. */
+export interface SSHAliasUnavailable {
+  readonly reason: 'no-ssh-binary' | 'timeout' | 'parse-failure'
+  readonly detail: string
+}
+
+/** Response from sshConfig.aliases. */
+export interface SSHAliasResponse {
+  readonly aliases: SSHAliasEntry[]
+  /** null when the read succeeded. */
+  readonly unavailable: SSHAliasUnavailable | null
+}
+
 // ── Group impact types (wave 6 — nocx-uxs5) ──────────────────────────
 //
 // Returned by groups.impact — computed on the backend so inheritance
@@ -369,6 +398,13 @@ export class ProfileClient {
   // its new effective entry. Use set for overrides, unset to revert to inherited.
   patchProfile(params: PatchParams): Promise<EffectiveProfileDTO> {
     return this.call('profiles.patch', params)
+  }
+
+  // ── SSH config aliases (wave 7 — nocx-c2ym.3) ─────────────────────
+
+  /** List SSH host aliases from ~/.ssh/config with resolved values. */
+  listSSHAliases(): Promise<SSHAliasResponse> {
+    return this.call('sshConfig.aliases', {})
   }
 
   // Settings RPC (nocx-9m5 / STORE-5b).  No secret value ever appears in a

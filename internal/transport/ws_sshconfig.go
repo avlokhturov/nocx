@@ -1,0 +1,82 @@
+package transport
+
+import (
+	"context"
+
+	"github.com/shady2k/nocx/internal/ssh"
+)
+
+// ---------------------------------------------------------------------------
+// sshConfig.aliases — JSON-RPC types
+// ---------------------------------------------------------------------------
+
+// sshConfigAliasesResponse is the wire format for sshConfig.aliases.
+type sshConfigAliasesResponse struct {
+	Aliases     []ssh.AliasEntry     `json:"aliases"`
+	Unavailable *ssh.UnavailableInfo `json:"unavailable"`
+}
+
+// ---------------------------------------------------------------------------
+// Handler
+// ---------------------------------------------------------------------------
+
+// handleSSHConfigAliases returns SSH aliases from ~/.ssh/config with their
+// resolved values. The handler enumerates Host patterns directly from the
+// config file (ssh -G does not enumerate — it answers only for a named host)
+// and resolves values through the wired ConfigResolver.
+//
+//	--> {"jsonrpc":"2.0","id":1,"method":"sshConfig.aliases","params":{}}
+//	<-- {"jsonrpc":"2.0","id":1,"result":{"aliases":[{"alias":"prod-db","hostName":"10.0.0.1","user":"deploy","port":2222}],"unavailable":null}}
+//
+// When the resolver is not wired, returns success with unavailable set
+// so the frontend can handle the condition uniformly.
+// When resolution fails, entries are returned with hostName=alias and
+// unavailable conveys the reason.
+func (s *WSServer) handleSSHConfigAliases(wconn *wsConn, req jsonrpcRequest) {
+	if s.sshConfigResolver == nil || s.sshConfigPath == "" {
+		resp := sshConfigAliasesResponse{
+			Aliases: nil,
+			Unavailable: &ssh.UnavailableInfo{
+				Reason: "parse-failure",
+				Detail: "SSH config resolver not wired",
+			},
+		}
+		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(resp)))
+		return
+	}
+
+	// Enumerate host patterns from the config file.
+	patterns, err := ssh.EnumerateHostPatterns(s.sshConfigPath)
+	if err != nil {
+		resp := sshConfigAliasesResponse{
+			Aliases: nil,
+			Unavailable: &ssh.UnavailableInfo{
+				Reason: "parse-failure",
+				Detail: err.Error(),
+			},
+		}
+		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(resp)))
+		return
+	}
+
+	// No aliases at all — valid state, not degradation.
+	if len(patterns) == 0 {
+		resp := sshConfigAliasesResponse{
+			Aliases:     []ssh.AliasEntry{},
+			Unavailable: nil,
+		}
+		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(resp)))
+		return
+	}
+
+	// Resolve each pattern through the ConfigResolver (ssh -G).
+	// Use a background context with no deadline — the resolver has its own
+	// internal timeout per call (10s) and caches results.
+	resolved := ssh.ResolveAliases(context.Background(), s.sshConfigResolver, patterns)
+
+	resp := sshConfigAliasesResponse{
+		Aliases:     resolved.Aliases,
+		Unavailable: resolved.Unavailable,
+	}
+	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(resp)))
+}

@@ -105,6 +105,33 @@
   white-space: nowrap;
 }
 
+/* ── System entries (SSH aliases) ────────────────────────────────────── */
+
+/* System entries are visually distinguishable from saved connections:
+   smaller row area and a subtle badge rather than a full-height row. */
+.quick-connect__item--system {
+  padding-top: 3px;
+  padding-bottom: 3px;
+}
+
+.quick-connect__item--system .quick-connect__item-label {
+  font-size: var(--font-size-sm);
+}
+
+.quick-connect__item-badge {
+  display: inline-block;
+  font-size: var(--font-size-2xs);
+  line-height: 1;
+  padding: 1px 4px;
+  margin-left: 6px;
+  border-radius: 3px;
+  background: var(--color-surface-hover);
+  color: var(--color-text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  vertical-align: middle;
+}
+
 /* ── Empty state ──────────────────────────────────────────────────────── */
 
 /* Stands in for the list, so it takes the same space and centres in it. */

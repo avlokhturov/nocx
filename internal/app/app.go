@@ -108,6 +108,7 @@ func New(opts ...Option) (*App, error) {
 		transport.WithExportPaths(paths),
 		transport.WithExportContentDB(content.NewStub(logger)),
 		transport.WithProber(&proberAdapter{client: sshClient}),
+		transport.WithSSHConfigResolver(sshCfgResolver, sshConfigPath),
 	}
 	tp := transport.NewWSServer(logger, sess, tpOpts...)
 
