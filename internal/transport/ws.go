@@ -661,6 +661,8 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.handleRolloutRun(wconn, req)
 	case "sshConfig.aliases":
 		s.handleSSHConfigAliases(wconn, req)
+	case "sshConfig.path":
+		s.handleSSHConfigPath(wconn, req)
 
 	default:
 		resp := newJSONRPCError(req.ID, -32601, "Method not found")
@@ -1257,6 +1259,10 @@ func (s *WSServer) handleGroupMethod(wconn *wsConn, req jsonrpcRequest) {
 		if err := json.Unmarshal(req.Params, &g); err != nil {
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
 			return
+		}
+		// Mint an ID when the renderer sends none, as profiles.create does.
+		if g.ID == "" {
+			g.ID = profile.NewGroupID(g.Name)
 		}
 		if err := s.groups.CreateGroup(g); err != nil {
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, profileMethodErrorCode(err), err.Error()))

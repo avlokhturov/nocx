@@ -16,9 +16,36 @@ type sshConfigAliasesResponse struct {
 	Unavailable *ssh.UnavailableInfo `json:"unavailable"`
 }
 
+// sshConfigPathResponse is the wire format for sshConfig.path.
+type sshConfigPathResponse struct {
+	Path      string `json:"path"`
+	Available bool   `json:"available"`
+}
+
 // ---------------------------------------------------------------------------
 // Handler
 // ---------------------------------------------------------------------------
+
+// handleSSHConfigPath reports which file sshConfig.aliases reads, and whether
+// reading it is possible at all.
+//
+//	--> {"jsonrpc":"2.0","id":1,"method":"sshConfig.path","params":{}}
+//	<-- {"jsonrpc":"2.0","id":1,"result":{"path":"/home/u/.ssh/config","available":true}}
+//
+// It exists because the renderer was naming the file in its own UI text. The
+// path is composed in the composition root from the user's home directory, so
+// a label that spells "~/.ssh/config" is a guess that happens to agree with it
+// — and would keep reading as the truth on the day the two diverge. This is
+// cheap on purpose: it stats nothing and resolves nothing, so a dialog may ask
+// merely to draw itself, which sshConfig.aliases (an `ssh -G` per host) is far
+// too expensive for.
+func (s *WSServer) handleSSHConfigPath(wconn *wsConn, req jsonrpcRequest) {
+	resp := sshConfigPathResponse{
+		Path:      s.sshConfigPath,
+		Available: s.sshConfigResolver != nil && s.sshConfigPath != "",
+	}
+	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(resp)))
+}
 
 // handleSSHConfigAliases returns SSH aliases from ~/.ssh/config with their
 // resolved values. The handler enumerates Host patterns directly from the

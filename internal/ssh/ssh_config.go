@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -95,15 +96,32 @@ func (rc *RealClient) resolveConfig(ctx context.Context, host string, cfg *Conne
 	return resolved, nil
 }
 
+// currentUser is the login name to use when nothing names one, resolved the way
+// OpenSSH resolves it.
+//
+// ssh takes it from the passwd database — getpwuid(getuid()) — and ssh_config(5)
+// documents the default for User as "the name of the user running ssh". This
+// read the environment instead, and $USER is set by a shell: an app launched
+// from Finder or a desktop session can have no shell in its ancestry and
+// therefore no $USER at all.
+//
+// The old fallback when both variables were empty was the literal string
+// "root", which is the worst available guess — the most privileged account on
+// the far side, the one an intrusion-detection rule watches first, and the one
+// whose failed attempts get an address banned. An empty result is returned
+// instead: a connection that cannot name its user should fail saying so, not
+// quietly try to be root.
 func currentUser() string {
-	u := os.Getenv("USER")
-	if u == "" {
-		u = os.Getenv("LOGNAME")
+	if u, err := user.Current(); err == nil && u.Username != "" {
+		return u.Username
 	}
-	if u == "" {
-		u = "root"
+	// The passwd lookup failing at all is rare (a static build with no entry for
+	// the uid). The environment is a better guess than nothing, and still not a
+	// guess at root.
+	if u := os.Getenv("USER"); u != "" {
+		return u
 	}
-	return u
+	return os.Getenv("LOGNAME")
 }
 
 func expandPath(path string) string {

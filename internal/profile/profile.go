@@ -746,6 +746,16 @@ func NewProfileID(typ, name string) string {
 	return typ + ":custom:" + slugify(name) + ":" + newUUID()
 }
 
+// NewGroupID generates a namespaced group id: "group:custom:slug:uuid".
+//
+// Group ids are minted here rather than in the renderer for the same reason
+// profile ids are: an id is identity, and a display layer that invents one has
+// to know the uniqueness rule the store enforces. CreateGroup refuses an empty
+// id, so something must fill it — this is that something.
+func NewGroupID(name string) string {
+	return "group:custom:" + slugify(name) + ":" + newUUID()
+}
+
 // isNamespacedID checks whether id has the "type:custom:..." shape.
 func isNamespacedID(id string) bool {
 	_, ok := parseNamespacedID(id)

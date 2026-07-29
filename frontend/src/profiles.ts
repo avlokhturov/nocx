@@ -272,6 +272,13 @@ export interface SSHConfigImportResult {
   readonly skipped: number
 }
 
+/** Where the machine's SSH config lives, as the backend computed it. */
+export interface SSHConfigPathResult {
+  readonly path: string
+  /** False when no SSH config resolver is wired — importing would fail. */
+  readonly available: boolean
+}
+
 // ── Group impact types (wave 6 — nocx-uxs5) ──────────────────────────
 //
 // Returned by groups.impact — computed on the backend so inheritance
@@ -472,9 +479,19 @@ export class ProfileClient {
 
   // ── SSH config aliases (wave 7 — nocx-c2ym.3) ─────────────────────
 
-  /** List SSH host aliases from ~/.ssh/config with resolved values. */
+  /** List SSH host aliases from the machine's SSH config with resolved values. */
   listSSHAliases(): Promise<SSHAliasResponse> {
     return this.call('sshConfig.aliases', {})
+  }
+
+  /**
+   * Which file listSSHAliases reads, and whether it can be read at all.
+   *
+   * Cheap by construction — no stat, no `ssh -G` — so a surface may ask merely
+   * to name the file in its own text instead of assuming "~/.ssh/config".
+   */
+  sshConfigPath(): Promise<SSHConfigPathResult> {
+    return this.call('sshConfig.path', {})
   }
 
   /**
