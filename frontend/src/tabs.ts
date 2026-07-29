@@ -14,6 +14,8 @@ import { detectAgentStatus, type AgentStatus } from './agent-status'
 import { type ClipboardAccess, type ClipboardGate } from './clipboard'
 import type { ClipboardBanner } from './banner'
 import type { ProfileClient } from './profiles'
+import { adoptAliasProfile } from './profiles'
+import { showToast } from './ui/toast'
 import { log } from './log'
 import type { TabStrip } from './tab-strip'
 import type { TabHost, TabContent, ContentDescriptor, ContentViewport } from './tab-content'
@@ -44,6 +46,8 @@ export class Tab implements TabHost {
   private _agentStatus: AgentStatus | null = null
   private _tooltip = ''
   private _subtitle = ''
+  private _adoptable = false
+  private _onAdopt: (() => void) | null = null
   private _disposed = false
   private _mountAbort = new AbortController()
   // ── B.5 geometry authority ──────────────────────────────────────────
@@ -105,6 +109,22 @@ export class Tab implements TabHost {
 
   get paneId(): string {
     return this.pane.id
+  }
+
+  get adoptable(): boolean {
+    return this._adoptable
+  }
+
+  get onAdopt(): (() => void) | null {
+    return this._onAdopt
+  }
+
+  /** Mark the tab as saveable or not, with the save action. */
+  setAdoptState(adoptable: boolean, onAdopt: () => void): void {
+    if (this._disposed) return
+    this._adoptable = adoptable
+    this._onAdopt = adoptable ? onAdopt : null
+    this.onDisplayChange?.()
   }
 
   setActive(active: boolean): void {
@@ -409,9 +429,9 @@ export class TabManager {
     return tab
   }
 
-  newSSHTab(profileId: string, host: string, user?: string): Tab {
-    log.info('nocx: newSSHTab called', { profileId, host })
-    const sshOpts = { profileId, host, user }
+  newSSHTab(profileId: string, host: string, user?: string, port?: number): Tab {
+    log.info('nocx: newSSHTab called', { profileId, host, user, port })
+    const sshOpts = { profileId, host, user, port } as const
     const tabRef = { current: undefined as Tab | undefined }
     const content = new TerminalContent(
       this.client,
@@ -421,6 +441,16 @@ export class TabManager {
       this.profileClient,
       (tooltip) => tabRef.current?.updateTooltip(tooltip),
       sshOpts,
+      (subtitle) => tabRef.current?.updateSubtitle(subtitle),
+      (adoptable: boolean) => {
+        const tab = tabRef.current
+        if (!tab) return
+        if (adoptable) {
+          tab.setAdoptState(true, () => this._adoptAlias(host, user, port, tab))
+        } else {
+          tab.setAdoptState(false, () => {})
+        }
+      },
     )
     const descriptor: ContentDescriptor = {
       surfaceType: SURFACE_TERMINAL,
@@ -432,6 +462,32 @@ export class TabManager {
     const tab = this.addTab(content, descriptor)
     tabRef.current = tab
     return tab
+  }
+
+  /** Adopt an SSH alias as a saved nocx profile. Creates the profile and switches
+   *  the tab to track the saved profile. */
+  private _adoptAlias(
+    host: string,
+    user: string | undefined,
+    port: number | undefined,
+    tab: Tab,
+  ): void {
+    const profile = adoptAliasProfile(host, user, port)
+
+    void this.profileClient
+      .createProfile(profile)
+      .then((saved) => {
+        // Use what the backend returned: the id is minted there, so `profile.id`
+        // is still empty here.
+        tab.setAdoptState(false, () => {})
+        log.info('nocx: alias adopted', { host, profileId: saved.id })
+        showToast({ level: 'success', message: `Saved "${host}" as a connection` })
+      })
+      .catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err)
+        log.error('nocx: alias adoption failed', { host, error: message })
+        showToast({ level: 'danger', message: `Could not save: ${message}` })
+      })
   }
   /**
    * Open a tab with the given content, deduplicating by singletonKey.

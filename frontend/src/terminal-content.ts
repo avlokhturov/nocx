@@ -134,10 +134,14 @@ export class TerminalContent extends BaseTabContent {
       profileId: string
       host: string
       user?: string
+      port?: number
     },
     /** Pushes the strip's optional second line — the tab's location, or '' when the
      *  title already says it. Only this class holds both halves of that question. */
     private readonly onSubtitleChange?: (subtitle: string) => void,
+    /** Called when the session is an alias (not a saved profile) and can be
+     *  adopted as a nocx connection. True = adoptable, False = not. */
+    private readonly onAdoptabilityChange?: (adoptable: boolean) => void,
   ) {
     super()
     this._readyPromise = new Promise<boolean>((resolve) => {
@@ -408,9 +412,18 @@ export class TerminalContent extends BaseTabContent {
         }
       })
 
-      // Open the session at the renderer's actual grid size.
+      // Alias tab: profileId is empty, open by host so the backend
+      // resolves through ~/.ssh/config (ssh -G). Saved-profile tabs
+      // use openSSHSession with the real profileId.
       const session = this.sshOpts
-        ? await this.client.openSSHSession(this.cols, this.rows, this.sshOpts.profileId)
+        ? this.sshOpts.profileId
+          ? await this.client.openSSHSession(this.cols, this.rows, this.sshOpts.profileId)
+          : await this.client.openSSHSessionByHost(
+              this.cols,
+              this.rows,
+              this.sshOpts.host,
+              this.sshOpts.user,
+            )
         : await this.client.openSession(this.cols, this.rows, true)
 
       if (signal.aborted) {
@@ -441,6 +454,14 @@ export class TerminalContent extends BaseTabContent {
       } else {
         this.cwdTitle = directoryLabel(session.cwd)
         this.onTooltipChange(cwdTooltip(session.cwd, false))
+      }
+
+      // Signal adoptability for alias tabs (no saved profile yet).
+      // Must come after the session opens so adoption is only offered
+      // to sessions that actually connected — a failed connect never
+      // reaches this point (it throws to the outer catch).
+      if (this.sshOpts && !this.sshOpts.profileId) {
+        this.onAdoptabilityChange?.(true)
       }
       this.pushTitle()
 

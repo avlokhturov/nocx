@@ -146,7 +146,7 @@ export class SSHAliasQuickConnectProvider implements QuickConnectProvider {
 
   constructor(
     private profileClient: ProfileClient,
-    private newTabByHost: (host: string, user?: string) => Tab,
+    private newTabByHost: (host: string, user?: string, port?: number) => Tab,
   ) {}
 
   async getItems(): Promise<QuickConnectItem[]> {
@@ -187,7 +187,7 @@ export class SSHAliasQuickConnectProvider implements QuickConnectProvider {
           label,
           detail: a.hostName !== a.alias ? a.hostName : undefined,
           system: true,
-          run: () => void this.newTabByHost(a.alias, a.user),
+          run: () => void this.newTabByHost(a.alias, a.user, a.port),
         }
       })
   }

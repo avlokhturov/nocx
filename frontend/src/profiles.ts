@@ -170,16 +170,27 @@ export function parseQuickConnect(query: string): SSHProfile {
   }
 }
 
-// newProfileID creates a namespaced profile id client-side for display while
-// the user fills the form. On save the profile is sent to the backend, which
-// either uses it or generates its own.
-export function newProfileID(type: string, name: string): string {
-  const safe =
-    name
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-|-$/g, '') || 'unnamed'
-  return `prof:${type}:${safe}`
+/** Build a saved SSHProfile from an SSH config alias. The host is set to the
+ *  alias itself (not the resolved hostName) so palette suppression compares
+ *  alias-to-alias, and user/port are only included when the config provided
+ *  them — absent means "not set" rather than "explicit default". */
+export function adoptAliasProfile(
+  alias: string,
+  user: string | undefined,
+  port: number | undefined,
+): SSHProfile {
+  // No id. The backend mints it (ws.go, profiles.create) and returns the
+  // record; the renderer minting one is what nocx-uxs5.10 removed, and the
+  // caller must use the id createProfile hands back.
+  const profile: SSHProfile = {
+    id: '',
+    name: alias,
+    type: 'ssh',
+    options: { host: alias },
+  }
+  if (user) profile.options.user = user
+  if (port) profile.options.port = port
+  return profile
 }
 
 // ── Effective profile types (wire format from profiles.effective) ──────────
@@ -240,6 +251,12 @@ export interface SSHAliasResponse {
   readonly aliases: SSHAliasEntry[]
   /** null when the read succeeded. */
   readonly unavailable: SSHAliasUnavailable | null
+}
+
+/** Result from importing ~/.ssh/config aliases. */
+export interface SSHConfigImportResult {
+  readonly profilesImported: number
+  readonly skipped: number
 }
 
 // ── Group impact types (wave 6 — nocx-uxs5) ──────────────────────────
@@ -407,6 +424,74 @@ export class ProfileClient {
     return this.call('sshConfig.aliases', {})
   }
 
+  /**
+   * Import ~/.ssh/config aliases as detached (non-live) nocx profiles.
+   * Skips aliases whose name or host already exists among saved profiles.
+   * Collision check is frontend-side, so concurrent edits may race — the
+   * returned count is best-effort rather than exact.
+   */
+  async importSSHConfig(): Promise<SSHConfigImportResult> {
+    const [aliasResp, existing] = await Promise.all([this.listSSHAliases(), this.listProfiles()])
+
+    if (aliasResp.unavailable) {
+      throw new Error(aliasResp.unavailable.detail)
+    }
+
+    // Build collision sets from existing profiles.
+    const existingNames = new Set(existing.map((p) => p.name))
+    const existingHosts = new Set(existing.map((p) => p.options.host))
+
+    // Track seen-in-batch names and hosts for same-source dedup.
+    const seenNames = new Set<string>()
+    const seenHosts = new Set<string>()
+
+    let imported = 0
+    let skipped = 0
+
+    for (const entry of aliasResp.aliases) {
+      // Skip by name collision.
+      if (existingNames.has(entry.alias) || seenNames.has(entry.alias)) {
+        skipped++
+        continue
+      }
+      // Skip by host collision.
+      if (existingHosts.has(entry.hostName) || seenHosts.has(entry.hostName)) {
+        skipped++
+        continue
+      }
+
+      seenNames.add(entry.alias)
+      seenHosts.add(entry.hostName)
+
+      // No id: the backend mints it on profiles.create and returns the record.
+      // Minting one here is what nocx-uxs5.10 removed.
+      const p: SSHProfile = {
+        id: '',
+        type: 'ssh',
+        name: entry.alias,
+        options: {
+          host: entry.hostName,
+          ...(entry.user !== undefined ? { user: entry.user } : {}),
+          ...(entry.port !== undefined ? { port: entry.port } : {}),
+        },
+      }
+
+      try {
+        await this.createProfile(p)
+        imported++
+      } catch (e) {
+        // Race: profile created between our list and the create call.
+        // Only count profile-exists errors as collisions; propagate all others.
+        if (String(e).includes('profile already exists')) {
+          skipped++
+        } else {
+          throw e
+        }
+      }
+    }
+
+    return { profilesImported: imported, skipped }
+  }
   // Settings RPC (nocx-9m5 / STORE-5b).  No secret value ever appears in a
   // response — secrets go through secretSet/secretDelete/secretExists only.
   describeSettings(): Promise<{ declarations: unknown[] }> {

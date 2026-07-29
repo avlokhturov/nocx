@@ -235,7 +235,9 @@ async function main() {
       () => openSettingsTab().startNewConnection(),
     ),
     sshProvider,
-    new SSHAliasQuickConnectProvider(profileClient, (host, user) => tm.newSSHTab('', host, user)),
+    new SSHAliasQuickConnectProvider(profileClient, (host, user, port) =>
+      tm.newSSHTab('', host, user, port),
+    ),
   ]
 
   const qc = new QuickConnectController()

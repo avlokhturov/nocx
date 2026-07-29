@@ -552,7 +552,7 @@ describe('SSHAliasQuickConnectProvider', () => {
     const items = await provider.getItems()
     items[0].run()
 
-    expect(newTabByHost).toHaveBeenCalledWith('myserver', 'admin')
+    expect(newTabByHost).toHaveBeenCalledWith('myserver', 'admin', undefined)
   })
 
   it('handles degraded resolver with unavailable', async () => {
@@ -606,5 +606,105 @@ describe('SSHAliasQuickConnectProvider', () => {
     expect(items).toHaveLength(1)
     expect(items[0].system).toBe(true)
     expect(items[0].id).toBe('__ssh_alias:myserver')
+  })
+
+  it('calls newTabByHost with port when alias has one', async () => {
+    const profileClient = {
+      listProfiles: vi.fn().mockResolvedValue([]),
+      listSSHAliases: vi.fn().mockResolvedValue({
+        aliases: [{ alias: 'db-prod', hostName: '10.0.0.5', user: 'deploy', port: 2222 }],
+        unavailable: null,
+      }),
+    }
+    const newTabByHost = vi.fn()
+    const provider = new SSHAliasQuickConnectProvider(profileClient as never, newTabByHost)
+
+    const items = await provider.getItems()
+    items[0].run()
+
+    expect(newTabByHost).toHaveBeenCalledWith('db-prod', 'deploy', 2222)
+  })
+
+  it('surfaces alias without user or port when config sets none', async () => {
+    const profileClient = {
+      listProfiles: vi.fn().mockResolvedValue([]),
+      listSSHAliases: vi.fn().mockResolvedValue({
+        aliases: [{ alias: 'bare-host', hostName: '10.0.0.1' }],
+        unavailable: null,
+      }),
+    }
+    const newTabByHost = vi.fn()
+    const provider = new SSHAliasQuickConnectProvider(profileClient as never, newTabByHost)
+
+    const items = await provider.getItems()
+    expect(items[0].label).toBe('bare-host')
+    expect(items[0].detail).toBe('10.0.0.1')
+    items[0].run()
+    expect(newTabByHost).toHaveBeenCalledWith('bare-host', undefined, undefined)
+  })
+
+  it('suppresses alias when a saved profile matches by alias (not hostName)', async () => {
+    const profileClient = {
+      // Profile saved with host='myserver' (the alias, NOT the resolved hostName)
+      listProfiles: vi
+        .fn()
+        .mockResolvedValue([
+          { id: 'ssh:myserver:1', type: 'ssh', name: 'My Server', options: { host: 'myserver' } },
+        ]),
+      listSSHAliases: vi.fn().mockResolvedValue({
+        aliases: [
+          { alias: 'myserver', hostName: '10.0.0.1', user: 'admin' },
+          { alias: 'other', hostName: '10.0.0.2' },
+        ],
+        unavailable: null,
+      }),
+    }
+    const newTabByHost = vi.fn()
+    const provider = new SSHAliasQuickConnectProvider(profileClient as never, newTabByHost)
+
+    const items = await provider.getItems()
+    // 'myserver' should be suppressed because its alias matches a saved profile's host
+    expect(items).toHaveLength(1)
+    expect(items[0].id).toBe('__ssh_alias:other')
+  })
+
+  it('preserves alias when saved profile host differs from alias', async () => {
+    const profileClient = {
+      // Profile saved with host='10.0.0.1' (resolved hostName, NOT the alias)
+      listProfiles: vi
+        .fn()
+        .mockResolvedValue([
+          { id: 'ssh:server:1', type: 'ssh', name: 'Server', options: { host: '10.0.0.1' } },
+        ]),
+      listSSHAliases: vi.fn().mockResolvedValue({
+        aliases: [{ alias: 'myserver', hostName: '10.0.0.1', user: 'admin' }],
+        unavailable: null,
+      }),
+    }
+    const newTabByHost = vi.fn()
+    const provider = new SSHAliasQuickConnectProvider(profileClient as never, newTabByHost)
+
+    const items = await provider.getItems()
+    // 'myserver' should NOT be suppressed — saved profile stores hostName, not alias
+    expect(items).toHaveLength(1)
+    expect(items[0].id).toBe('__ssh_alias:myserver')
+  })
+
+  it('shows alias without user/port when config provided none', async () => {
+    const profileClient = {
+      listProfiles: vi.fn().mockResolvedValue([]),
+      listSSHAliases: vi.fn().mockResolvedValue({
+        aliases: [{ alias: 'minimal', hostName: '10.0.0.1' }],
+        unavailable: null,
+      }),
+    }
+    const newTabByHost = vi.fn()
+    const provider = new SSHAliasQuickConnectProvider(profileClient as never, newTabByHost)
+
+    const items = await provider.getItems()
+    expect(items).toHaveLength(1)
+    // Label uses alias directly, no user or port decoration
+    expect(items[0].label).toBe('minimal')
+    expect(items[0].detail).toBe('10.0.0.1')
   })
 })

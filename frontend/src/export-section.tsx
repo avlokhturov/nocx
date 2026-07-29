@@ -12,7 +12,7 @@
 import { For, Show, onMount } from 'solid-js'
 import { createStore } from 'solid-js/store'
 import { render } from 'solid-js/web'
-import type { ProfileClient, ExportManifest, ConfigExport } from './profiles'
+import type { ProfileClient, ExportManifest, ConfigExport, SSHConfigImportResult } from './profiles'
 import { log } from './log'
 import { downloadJSON, downloadBinary } from './export-utils'
 import { PageSection } from './ui/page-section'
@@ -243,6 +243,7 @@ function ImportActions(props: { profileClient: ProfileClient }) {
     portableBusy: false,
     tabbyFile: null as File | null,
     tabbyBusy: false,
+    sshBusy: false,
   })
 
   /**
@@ -339,6 +340,37 @@ function ImportActions(props: { profileClient: ProfileClient }) {
         setState('tabbyBusy', false)
       })
   }
+
+  const handleSSHConfigImport = () => {
+    const pc = props.profileClient
+    setState('sshBusy', true)
+    pc.importSSHConfig()
+      .then((result: SSHConfigImportResult) => {
+        const { profilesImported, skipped } = result
+        if (profilesImported === 0 && skipped === 0) {
+          showToast({ level: 'info', message: 'No SSH config aliases to import' })
+        } else if (skipped > 0) {
+          showToast({
+            level: 'warning',
+            duration: 0,
+            message:
+              `Imported ${profilesImported} SSH config profiles, ` +
+              `${skipped} skipped (name or host already saved)`,
+          })
+        } else {
+          showToast({
+            level: 'success',
+            message: `Imported ${profilesImported} SSH config profiles`,
+          })
+        }
+      })
+      .catch((e: unknown) => {
+        showToast({ level: 'danger', message: `SSH config import failed: ${String(e)}` })
+      })
+      .finally(() => {
+        setState('sshBusy', false)
+      })
+  }
   return (
     // `loose` outside, `default` inside — the three import blocks are independent
     // of each other, the controls within one are not. That distinction is the
@@ -391,6 +423,21 @@ function ImportActions(props: { profileClient: ProfileClient }) {
           onClick={handleTabbyImport}
         >
           Import
+        </Button>
+      </Stack>
+      <Stack gap="default">
+        <p class="ui-export-desc">
+          Creates saved copies of your ~/.ssh/config aliases as nocx profiles. This is a one-off,
+          detached copy — changes to ~/.ssh/config after import are not synced. Profiles whose name
+          or host already exist are skipped.
+        </p>
+        <Button
+          variant="default"
+          disabled={state.sshBusy}
+          onClick={handleSSHConfigImport}
+          data-testid="import-ssh-config"
+        >
+          Import from ~/.ssh/config
         </Button>
       </Stack>
     </Stack>

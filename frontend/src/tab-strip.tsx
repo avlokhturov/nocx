@@ -22,6 +22,9 @@ export interface TabView {
   /** The tab's location for the strip's second line, or '' when the title already
    *  says it — see Tab.subtitle. */
   readonly subtitle: string
+  /** When true, the tab offers a save action (alias adoption). */
+  readonly adoptable?: boolean
+  readonly onAdopt?: (() => void) | null
   readonly paneId: string
   onDisplayChange: (() => void) | null
 }
@@ -37,6 +40,7 @@ interface TabDisplayRecord {
   title: string
   tooltip: string
   subtitle: string
+  adoptable: boolean
   hasActivity: boolean
   agentStatus: AgentStatus | null
 }
@@ -153,6 +157,8 @@ abstract class TabStripBase implements TabStrip {
                   index={index()}
                   active={display.activeId === tab.id}
                   agentStatus={display.records[tab.id]?.agentStatus ?? null}
+                  adoptable={display.records[tab.id]?.adoptable === true}
+                  onAdopt={tab.onAdopt ?? undefined}
                   title={display.records[tab.id]?.title ?? ''}
                   tooltip={display.records[tab.id]?.tooltip ?? ''}
                   subtitle={display.records[tab.id]?.subtitle ?? ''}
@@ -209,6 +215,7 @@ abstract class TabStripBase implements TabStrip {
         title: tab.title,
         tooltip: tab.tooltip,
         subtitle: tab.subtitle,
+        adoptable: tab.adoptable,
         hasActivity: tab.hasActivity,
         agentStatus: tab.agentStatus,
       })
@@ -221,6 +228,7 @@ abstract class TabStripBase implements TabStrip {
       title: tab.title,
       tooltip: tab.tooltip,
       subtitle: tab.subtitle,
+      adoptable: tab.adoptable,
       hasActivity: tab.hasActivity,
       agentStatus: tab.agentStatus,
     })

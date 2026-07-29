@@ -200,3 +200,67 @@ describe('export section — manifest loading', () => {
     })
   })
 })
+
+// ── SSH config import ────────────────────────────────────────────────────
+
+function createSSHImportMockClient() {
+  const pc = new ProfileClient(new Dispatcher())
+  vi.spyOn(pc, 'exportManifest').mockResolvedValue(MOCK_MANIFEST)
+  const importSSHSpy = vi.spyOn(pc, 'importSSHConfig').mockResolvedValue({
+    profilesImported: 3,
+    skipped: 0,
+  })
+  return { client: pc, importSSHSpy }
+}
+
+function mountForSSH() {
+  const container = document.createElement('div')
+  document.body.appendChild(container)
+  const { client, importSSHSpy } = createSSHImportMockClient()
+  mountExportSection(container, client)
+  return { container, client, importSSHSpy }
+}
+
+describe('export section — SSH config import', () => {
+  it('renders the SSH config import section with detached-copy label', async () => {
+    const { container } = mountForSSH()
+    const importCard = container.querySelector('section[id="st-export-import"]')
+
+    await vi.waitFor(() => {
+      expect(importCard?.textContent).toContain('from ~/.ssh/config')
+    })
+    expect(importCard?.textContent).toContain('detached copy')
+    expect(importCard?.textContent).toContain('one-off')
+  })
+
+  it('calls importSSHConfig on button click', async () => {
+    const { container, importSSHSpy } = mountForSSH()
+
+    await vi.waitFor(() => {
+      const el = container.querySelector('button[data-testid="import-ssh-config"]')
+      expect(el).toBeTruthy()
+    })
+    const btn = container.querySelector('button[data-testid="import-ssh-config"]') as HTMLElement
+    btn.click()
+
+    await vi.waitFor(() => {
+      expect(importSSHSpy).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  it('shows a danger toast when importSSHConfig rejects', async () => {
+    const { container, importSSHSpy } = mountForSSH()
+    importSSHSpy.mockRejectedValue(new Error('ssh binary not found'))
+
+    await vi.waitFor(() => {
+      const el = container.querySelector('button[data-testid="import-ssh-config"]')
+      expect(el).toBeTruthy()
+    })
+    const btn = container.querySelector('button[data-testid="import-ssh-config"]') as HTMLElement
+    btn.click()
+
+    await vi.waitFor(() => {
+      expect(importSSHSpy).toHaveBeenCalledTimes(1)
+    })
+  })
+})
