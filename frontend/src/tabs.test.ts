@@ -1095,7 +1095,7 @@ describe('TabManager', () => {
     const clipboard = makeClipboard()
     const gate = new ClipboardGate()
     const banner = makeBanner()
-    const content = new TerminalContent(wsClient, clipboard, gate, banner, () => {})
+    const content = new TerminalContent(wsClient, clipboard, gate, banner, null, () => {})
     const tab = new Tab(
       content,
       {
@@ -1139,7 +1139,7 @@ describe('TabManager', () => {
     const clipboard = makeClipboard()
     const gate = new ClipboardGate()
     const banner = makeBanner()
-    const content = new TerminalContent(wsClient, clipboard, gate, banner, () => {})
+    const content = new TerminalContent(wsClient, clipboard, gate, banner, null, () => {})
     const tab = new Tab(
       content,
       {
@@ -1188,7 +1188,7 @@ describe('TabManager', () => {
     const clipboard = makeClipboard()
     const gate = new ClipboardGate()
     const banner = makeBanner()
-    const content = new TerminalContent(wsClient, clipboard, gate, banner, () => {})
+    const content = new TerminalContent(wsClient, clipboard, gate, banner, null, () => {})
     const tab = new Tab(
       content,
       {
@@ -1483,7 +1483,9 @@ describe('TabManager', () => {
         makeClipboard(),
         new ClipboardGate(),
         makeBanner(),
+        null,
         () => {},
+        undefined,
       )
       const tab = new Tab(
         content,

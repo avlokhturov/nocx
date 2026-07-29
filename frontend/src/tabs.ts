@@ -382,6 +382,7 @@ export class TabManager {
       this.clipboard,
       this.gate,
       this.banner,
+      this.profileClient,
       (tooltip) => tabRef.current?.updateTooltip(tooltip),
       // The alt-screen callback that used to sit here is gone with the
       // parameter. It toggled `#app.alt-screen`, which emptied the tab strip so
@@ -417,6 +418,7 @@ export class TabManager {
       this.clipboard,
       this.gate,
       this.banner,
+      this.profileClient,
       (tooltip) => tabRef.current?.updateTooltip(tooltip),
       sshOpts,
     )

@@ -18,6 +18,7 @@ import { log } from './log'
 import type { WSClient, SessionHandle } from './ipc'
 import { showConfirm } from './ui/dialog'
 import { BaseTabContent, type TabHost, type ContentViewport } from './tab-content'
+import { type ProfileClient, type SSHAliasEntry } from './profiles'
 
 // How long the grid must hold still before the PTY is told about it.
 const RESIZE_SETTLE_MS = 80
@@ -99,6 +100,10 @@ export class TerminalContent extends BaseTabContent {
   /** Timestamp until which incoming data is the echo of a resize we sent. */
   private echoUntil = 0
   private host: TabHost | null = null
+  /** Whether the editor currently owns DOM keyboard input (owned from input-state). */
+  private _editorOwned = false
+  /** In-flight alias-fetch counter — generation for stale-request gating. */
+  private _aliasFetchId = 0
 
   // ── Title composition ────────────────────────────────────────────────
   // Title = programTitle || cwdTitle (no placeholder — nocx-83a)
@@ -121,9 +126,12 @@ export class TerminalContent extends BaseTabContent {
     private readonly clipboard: ClipboardAccess,
     private readonly gate: ClipboardGate,
     private readonly banner: ClipboardBanner,
+    /** Live SSH config alias source for the editor hint (w7-hint). Null when
+     *  unavailable (tests, raw-mode-only contexts). */
+    private readonly profileClient: ProfileClient | null,
     private readonly onTooltipChange: (tooltip: string) => void,
     private readonly sshOpts?: {
-      profileId?: string
+      profileId: string
       host: string
       user?: string
     },
@@ -249,7 +257,12 @@ export class TerminalContent extends BaseTabContent {
         // transcript where it belongs — just above the editor — instead of
         // letting it slide underneath.
         resized: () => this.scrollback?.scrollToBottom(),
+        /** Detect `ssh <partial>` pattern and show matching aliases. */
+        onInputChange: (text) => this._onEditorInput(text),
+        /** Hint acceptance — no cache to invalidate. */
+        onAcceptHint: () => {},
       })
+
       this.editor.mount(target)
 
       if (signal.aborted) {
@@ -284,9 +297,9 @@ export class TerminalContent extends BaseTabContent {
           this.scrollback?.exitFullscreen()
         }
       })
-
       this.inputState.onChange((m) => {
         console.debug('nocx: input-state', m.state, 'trusted=', m.trusted, 'owned=', m.owned)
+        this._editorOwned = m.owned
         if (shouldShowEditor(m.owned, this.nativeMode)) {
           this.editor!.setTime(new Date())
           this.editor!.show()
@@ -397,14 +410,7 @@ export class TerminalContent extends BaseTabContent {
 
       // Open the session at the renderer's actual grid size.
       const session = this.sshOpts
-        ? this.sshOpts.profileId
-          ? await this.client.openSSHSession(this.cols, this.rows, this.sshOpts.profileId)
-          : await this.client.openSSHSessionByHost(
-              this.cols,
-              this.rows,
-              this.sshOpts.host,
-              this.sshOpts.user,
-            )
+        ? await this.client.openSSHSession(this.cols, this.rows, this.sshOpts.profileId)
         : await this.client.openSession(this.cols, this.rows, true)
 
       if (signal.aborted) {
@@ -760,5 +766,62 @@ export class TerminalContent extends BaseTabContent {
   private _disposeAllMarkers(): void {
     for (const m of this._markers.values()) m.dispose()
     this._markers.clear()
+  }
+
+  // ── SSH alias hint support (w7-hint) ─────────────────────────────────
+
+  /** Called on every textarea input change. Detects `ssh <partial>` commands
+   *  and fetches matching aliases from the live ~/.ssh/config source.
+   *  No client-side caching — every activation fetches fresh (coordinator contract). */
+  private _onEditorInput(text: string): void {
+    // Only when the editor owns keyboard input (PROMPT_READY with owned=true).
+    if (!this._editorOwned || !this.profileClient) {
+      this.editor?.hideAliasHints()
+      return
+    }
+
+    // Detect `ssh <partial>` at the start of the line (possibly after whitespace).
+    const trimmed = text.trimStart()
+    const match = trimmed.match(/^ssh\s+(\S*)/)
+    if (!match) {
+      this.editor?.hideAliasHints()
+      return
+    }
+
+    const partial = match[1]
+    const fetchId = ++this._aliasFetchId
+
+    // Fetch fresh aliases on every activation. Guard against stale responses
+    // with a generation counter: a newer fetch invalidates an older one.
+    this.profileClient
+      .listSSHAliases()
+      .then((resp) => {
+        if (fetchId !== this._aliasFetchId) return // stale — newer text superseded this
+        if (resp.unavailable) {
+          this.editor?.hideAliasHints()
+          return
+        }
+        const filtered = this._filterAliases(resp.aliases, partial)
+        this.editor?.showAliasHints(filtered)
+      })
+      .catch(() => {
+        // Fetch failed (network, backend down). Silently hide hints — the
+        // feature degrades transparently rather than showing stale/flaky data.
+        this.editor?.hideAliasHints()
+      })
+  }
+
+  /** Filter SSH config aliases by case-insensitive prefix match.
+   *  Excludes wildcard patterns (Host * etc. are rules, not targets). */
+  private _filterAliases(aliases: SSHAliasEntry[], partial: string): SSHAliasEntry[] {
+    const lower = partial.toLowerCase()
+    return aliases.filter(
+      // No wildcard filter here on purpose. sshConfig.aliases already excludes
+      // patterns on the backend (internal/ssh/aliases.go, containsWildcard),
+      // and a second copy of that rule in the renderer is a rule that drifts —
+      // the two versions of it disagreed on '!' and on brackets before this
+      // line was removed.
+      (a) => a.alias.toLowerCase().startsWith(lower),
+    )
   }
 }
