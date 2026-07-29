@@ -1,0 +1,230 @@
+/* Rollout surface — credential version rollout panel.
+ *
+ * Placed inside a Dialog in the Credentials section. Shows version info,
+ * stage/discard candidate, run rollout, promote/retire/revoke.
+ *
+ * Identity family: .ro-* — one file per identity family.
+ */
+.ro-root {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 520px;
+  max-width: 680px;
+}
+
+.ro-versions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.ro-version-badge {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--font-size-sm);
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-surface-raised);
+  border-radius: var(--control-radius-md);
+}
+
+.ro-version-badge code {
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-xs);
+  background: var(--color-surface);
+  padding: 1px 4px;
+  border-radius: var(--control-radius-sm);
+}
+
+.ro-version-date {
+  color: var(--color-text-dim);
+  margin-left: auto;
+}
+
+.ro-desc {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-dim);
+  margin: 0 0 var(--space-3);
+}
+
+.ro-action-row {
+  margin-top: var(--space-3);
+}
+
+.ro-target-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  max-height: 200px;
+  overflow-y: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--control-radius-md);
+  padding: var(--space-2);
+}
+
+.ro-target-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+}
+
+.ro-target-actions {
+  margin-top: var(--space-1);
+}
+
+.ro-params-row {
+  display: flex;
+  gap: var(--space-3);
+}
+
+.ro-params-row > * {
+  flex: 1;
+}
+
+.ro-error {
+  padding: var(--space-3);
+  background: var(--color-surface-raised);
+  color: var(--color-danger);
+  border-radius: var(--control-radius-md);
+  font-size: var(--font-size-sm);
+}
+
+.ro-result-summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  font-size: var(--font-size-sm);
+  margin-bottom: var(--space-3);
+}
+
+.ro-timestamp {
+  color: var(--color-text-dim);
+}
+
+.ro-result-counts {
+  display: flex;
+  gap: var(--space-4);
+  font-size: var(--font-size-sm);
+  margin-bottom: var(--space-3);
+}
+
+.ro-count {
+  color: var(--color-text-dim);
+}
+
+.ro-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--font-size-sm);
+  margin-bottom: var(--space-3);
+}
+
+.ro-table th {
+  text-align: left;
+  padding: var(--space-1) var(--space-2);
+  color: var(--color-text-dim);
+  font-weight: 500;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.ro-table td {
+  padding: var(--space-1) var(--space-2);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.ro-item-profile {
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-xs);
+}
+
+.ro-item-endpoint {
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-xs);
+}
+
+.ro-item-outcome {
+  min-width: 110px;
+}
+
+.ro-item-detail {
+  color: var(--color-text-dim);
+  font-size: var(--font-size-xs);
+}
+
+.ro-action-card {
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--control-radius-md);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.ro-action-danger {
+  border-color: var(--color-danger);
+  background: var(--color-surface-raised);
+}
+
+.ro-action-desc {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-dim);
+  margin: 0;
+}
+
+.ro-action-controls {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-3);
+}
+
+.ro-action-controls > button {
+  flex-shrink: 0;
+}
+
+.ro-evidence {
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+  padding: var(--space-1) var(--space-2);
+  background: var(--color-surface-raised);
+  border-radius: var(--control-radius-sm);
+}
+
+.ro-revoke-confirm {
+  padding: var(--space-3);
+  border: 1px solid var(--color-danger);
+  border-radius: var(--control-radius-md);
+  background: var(--color-surface);
+}
+
+.ro-revoke-confirm p {
+  margin: 0 0 var(--space-2);
+  font-size: var(--font-size-sm);
+}
+
+.ro-revoke-confirm ul {
+  margin: 0 0 var(--space-3);
+  padding-left: var(--space-4);
+  font-size: var(--font-size-sm);
+}
+
+.ro-revoke-buttons {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.ro-field-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
+.ro-field-label {
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  color: var(--color-text);
+  display: block;
+  margin-bottom: var(--space-1);
+}

@@ -14,6 +14,7 @@ import { showToast } from './ui/toast'
 import type { Credential, CredentialUsage, ProfileClient } from './profiles'
 import { log } from './log'
 import { CredentialForm, type CredentialFormHandle } from './credential-form'
+import { RolloutPanel } from './rollout-panel'
 
 export interface CredentialsSectionProps {
   client: ProfileClient
@@ -45,6 +46,8 @@ export function CredentialsSection(props: CredentialsSectionProps) {
   const [dialogOpen, setDialogOpen] = createSignal(false)
   const [editingCred, setEditingCred] = createSignal<Credential | null>(null)
   const [passwordValue, setPasswordValue] = createSignal('')
+  const [rolloutCred, setRolloutCred] = createSignal<Credential | null>(null)
+  const [rolloutOpen, setRolloutOpen] = createSignal(false)
   const [saving, setSaving] = createSignal(false)
 
   const formRef = { current: null as CredentialFormHandle | null }
@@ -102,6 +105,25 @@ export function CredentialsSection(props: CredentialsSectionProps) {
     setDialogOpen(false)
     setEditingCred(null)
     setPasswordValue('')
+  }
+
+  function openRolloutDialog(cred: Credential) {
+    setRolloutCred(cred)
+    setRolloutOpen(true)
+  }
+
+  function closeRolloutDialog() {
+    setRolloutOpen(false)
+    setRolloutCred(null)
+  }
+
+  async function handleRolloutStateChange() {
+    await loadAll()
+    const id = rolloutCred()?.id
+    if (id) {
+      const fresh = credentials().find((c) => c.id === id)
+      if (fresh) setRolloutCred({ ...fresh })
+    }
   }
 
   async function handleSave() {
@@ -240,6 +262,11 @@ export function CredentialsSection(props: CredentialsSectionProps) {
                     <div class="cr-item-meta">{subtitle()}</div>
                   </div>
                   <div class="cr-item-actions">
+                    <Show when={cred.auth === 'password'}>
+                      <Button variant="default" size="sm" onClick={() => openRolloutDialog(cred)}>
+                        Rollout
+                      </Button>
+                    </Show>
                     <Button variant="default" size="sm" onClick={() => openEditDialog(cred)}>
                       Edit
                     </Button>
@@ -286,6 +313,23 @@ export function CredentialsSection(props: CredentialsSectionProps) {
               passwordValue={passwordValue()}
               onPasswordChange={setPasswordValue}
               ref={formRef}
+            />
+          </Dialog>
+        )}
+      </Show>
+
+      <Show when={rolloutCred()}>
+        {(cred) => (
+          <Dialog
+            open={rolloutOpen()}
+            onClose={closeRolloutDialog}
+            title={'Rollout: ' + cred().name}
+          >
+            <RolloutPanel
+              client={props.client}
+              credential={cred()}
+              usage={usageMap().get(cred().id) ?? null}
+              onStateChange={() => void handleRolloutStateChange()}
             />
           </Dialog>
         )}

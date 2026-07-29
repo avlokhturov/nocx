@@ -38,6 +38,7 @@
 @import './styles/surfaces/export.css';
 @import './styles/surfaces/connections.css';
 @import './styles/surfaces/credentials.css';
+@import './styles/surfaces/rollout.css';
 
 /* ── App body row: activity bar | sidebar | panes ────────────────────── */
 
