@@ -287,6 +287,18 @@ export class ProfileClient {
 
   // ── Effective profile resolution (profiles.effective / profiles.patch) ──
 
+  // ── Session and probe methods (wave 6 — nocx-uxs5) ─────────────────────
+
+  /** sessions.status — live + last-used state for a batch of profile IDs. */
+  sessionStatus(profileIds: string[]): Promise<{ statuses: Record<string, SessionStatus> }> {
+    return this.call('sessions.status', { profileIds })
+  }
+
+  /** connections.test — probe one profile, return typed outcome. */
+  connectionTest(profileId: string): Promise<ConnectionTestResult> {
+    return this.call('connections.test', { profileId })
+  }
+
   // loadEffective resolves one or more profiles to their effective values
   // with per-field provenance. Batch: pass several IDs in one call.
   loadEffective(ids: string[]): Promise<EffectiveBatchResponse> {
@@ -375,6 +387,24 @@ export interface ProfileRef {
   source: 'profile' | 'group' | 'global' // 'group' and 'global' = inherited
   groupId?: string
   groupName?: string
+}
+
+// ── Sessions and probe types (wave 6 — nocx-uxs5) ────────────────────────
+
+/** Closed-enum outcome from connections.test. */
+export type ProbeOutcome =
+  'accepted' | 'rejected' | 'unreachable' | 'host-key-problem' | 'needs-interactive'
+
+/** Result of a single-profile credential probe. */
+export interface ConnectionTestResult {
+  outcome: ProbeOutcome
+  detail?: string
+}
+
+/** Session state for one profile ID from sessions.status. */
+export interface SessionStatus {
+  live: boolean
+  lastUsed?: string
 }
 
 // ── Export/backup/import types (ADR-0011 §7) ─────────────────────────────

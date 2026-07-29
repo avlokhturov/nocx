@@ -13,6 +13,7 @@ import { For, Show, onMount } from 'solid-js'
 import { createStore } from 'solid-js/store'
 import { render } from 'solid-js/web'
 import type { ProfileClient, ExportManifest, ConfigExport } from './profiles'
+import { log } from './log'
 import { downloadJSON, downloadBinary } from './export-utils'
 import { PageSection } from './ui/page-section'
 import { Button } from './ui/button'
@@ -240,6 +241,8 @@ function ImportActions(props: { profileClient: ProfileClient }) {
     encFile: null as File | null,
     portablePass: '',
     portableBusy: false,
+    tabbyFile: null as File | null,
+    tabbyBusy: false,
   })
 
   /**
@@ -312,8 +315,32 @@ function ImportActions(props: { profileClient: ProfileClient }) {
         setState('portableBusy', false)
       })
   }
+
+  const handleTabbyImport = () => {
+    const file = state.tabbyFile
+    if (!file) return
+    const pc = props.profileClient
+    setState('tabbyBusy', true)
+    file
+      .text()
+      .then((text) => pc.importTabby(text))
+      .then((count) => {
+        log.info('Imported SSH profiles from Tabby config', { count })
+        setState('tabbyFile', null)
+        showToast({
+          level: 'success',
+          message: `Imported ${count} connections from the Tabby config`,
+        })
+      })
+      .catch((e) => {
+        showToast({ level: 'danger', message: `Tabby import failed: ${String(e)}` })
+      })
+      .finally(() => {
+        setState('tabbyBusy', false)
+      })
+  }
   return (
-    // `loose` outside, `default` inside — the two import blocks are independent
+    // `loose` outside, `default` inside — the three import blocks are independent
     // of each other, the controls within one are not. That distinction is the
     // whole reason Stack has two steps rather than one.
     <Stack gap="loose">
@@ -348,6 +375,22 @@ function ImportActions(props: { profileClient: ProfileClient }) {
           onClick={handlePortableImport}
         >
           Decrypt and Import
+        </Button>
+      </Stack>
+      <Stack gap="default">
+        <Field for="tabby-config-file" label="Import from Tabby config (.yml/.yaml)">
+          <FileInput
+            id="tabby-config-file"
+            accept=".yml,.yaml"
+            onChange={(f) => setState('tabbyFile', f)}
+          />
+        </Field>
+        <Button
+          variant="default"
+          disabled={state.tabbyBusy || !state.tabbyFile}
+          onClick={handleTabbyImport}
+        >
+          Import
         </Button>
       </Stack>
     </Stack>

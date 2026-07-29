@@ -1,20 +1,11 @@
 /**
  * ConnectionsView — Solid component for the connections manager.
  *
- * Replaces the imperative ConnectionManagerViewImpl (deleted in the same
- * commit). Uses the UI kit (Button, TextField, Checkbox, Select, Toolbar)
- * and Solid reactive state instead of hand-rolled DOM and private fields.
+ * Full-width connection list with dialog-based editing (wave 6).
+ * Spec §5 of the connection manager design: nothing hidden, nothing asked twice.
  *
- * Behaviour that must match the predecessor:
- * - Header with title and action buttons
- * - Profile list on the left, form panel on the right
- * - Grouped profile display using buildGroupTree
- * - Full SSH profile editing including credential selector, auth radio,
- *   advanced settings, jump host selector
- * - Credential CRUD with host-binding validation
- * - Quick connect via dblclick or the row's connect button
- * - Import from Tabby
- * - onConnect callback
+ * Pattern follows credentials.tsx: full-width list, editing in a Dialog.
+ * Tabby import moved to Export / Backup / Import section.
  */
 import { For, Show, createSignal, createMemo, createEffect, on, onMount, type JSX } from 'solid-js'
 import { Button } from './ui/button'
@@ -22,13 +13,14 @@ import { TextField } from './ui/text-field'
 import { Checkbox } from './ui/checkbox'
 import { Select, type SelectOption } from './ui/select'
 import { Toolbar } from './ui/toolbar'
-import { showConfirm } from './ui/dialog'
+import { Dialog, showConfirm } from './ui/dialog'
 import { Section } from './ui/section'
 import { Radio } from './ui/radio'
 import { EmptyState } from './ui/empty-state'
 import { Field } from './ui/field'
 import { Badge } from './ui/badge'
 import { IconButton } from './ui/icon-button'
+import { SearchField } from './ui/search-field'
 import { PlugIcon, ResetIcon } from './ui/icons'
 import {
   createFormValidation,
@@ -47,10 +39,13 @@ import type {
   EffectiveProfileDTO,
   EffectiveFieldDTO,
   FieldSourceDTO,
+  SessionStatus,
+  ProbeOutcome,
 } from './profiles'
 import { ProfileClient, buildGroupTree } from './profiles'
 import { log } from './log'
 import { showToast } from './ui/toast'
+
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 function authModeLabel(mode: AuthMode): string {
@@ -89,6 +84,38 @@ export function sourceLabel(source: FieldSourceDTO): string {
   }
 }
 
+// ── Probe outcome helpers ────────────────────────────────────────────────────
+
+function probeOutcomeLabel(outcome: ProbeOutcome): string {
+  switch (outcome) {
+    case 'accepted':
+      return 'Accepted'
+    case 'rejected':
+      return 'Rejected'
+    case 'unreachable':
+      return 'Unreachable'
+    case 'host-key-problem':
+      return 'Host key changed'
+    case 'needs-interactive':
+      return 'Needs interactive auth'
+  }
+}
+
+function probeOutcomeTone(outcome: ProbeOutcome): 'neutral' | 'info' | 'warning' | 'danger' {
+  switch (outcome) {
+    case 'accepted':
+      return 'info'
+    case 'rejected':
+      return 'danger'
+    case 'unreachable':
+      return 'warning'
+    case 'host-key-problem':
+      return 'danger'
+    case 'needs-interactive':
+      return 'warning'
+  }
+}
+
 // ── Save route decision (pure, tested directly) ─────────────────────────────
 
 /** Describes how to save an existing profile for a given set of dirty fields. */
@@ -123,6 +150,7 @@ export function decideSaveRoute(profile: SSHProfile, dirty: ReadonlySet<string>)
   }
   return { kind: 'patch', patchSet }
 }
+
 // ── Props ────────────────────────────────────────────────────────────────────
 
 export interface ConnectionsViewProps {
@@ -151,13 +179,25 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   const [groups, setGroups] = createSignal<ProfileGroup[]>([])
   const [credentials, setCredentials] = createSignal<Credential[]>([])
 
-  // ── Selection state ─────────────────────────────────────────────────────
-  const [selectedID, setSelectedID] = createSignal('')
+  // ── Selection / dialog state ─────────────────────────────────────────────
   const [editing, setEditing] = createSignal<SSHProfile | null>(null)
+  const [dialogOpen, setDialogOpen] = createSignal(false)
 
   // ── Effective/provenance state ─────────────────────────────────────────
   const [effectiveData, setEffectiveData] = createSignal<Record<string, EffectiveProfileDTO>>({})
   const [dirtyFields, setDirtyFields] = createSignal<Set<string>>(new Set())
+
+  // ── Session state per profile ──────────────────────────────────────────
+  const [sessionStatuses, setSessionStatuses] = createSignal<Record<string, SessionStatus>>({})
+
+  // ── Probe result per profile ──────────────────────────────────────────
+  const [probeResults, setProbeResults] = createSignal<
+    Record<string, { outcome: ProbeOutcome; detail?: string } | null>
+  >({})
+  const [probeBusy, setProbeBusy] = createSignal<Set<string>>(new Set())
+
+  // ── Filter ─────────────────────────────────────────────────────────────
+  const [searchQuery, setSearchQuery] = createSignal('')
 
   // ── Data loading ────────────────────────────────────────────────────────
   async function loadAll() {
@@ -171,9 +211,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       setGroups(g ?? [])
       setCredentials(c ?? [])
     } catch (err) {
-      // Current state is kept — a failed refresh must not blank a list the user
-      // is reading — but it is no longer kept quietly. Sticky, because the list
-      // on screen is now stale and nothing else on it says so.
       const message = (err as Error).message
       log.error('Failed to load connections', { message })
       showToast({
@@ -199,14 +236,63 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     }
   }
 
-  // Initial load on mount.
+  async function loadSessionStatuses() {
+    const pids = profiles().map((x) => x.id)
+    if (pids.length === 0) return
+    try {
+      const res = await props.client.sessionStatus(pids)
+      setSessionStatuses(res.statuses ?? {})
+    } catch (err) {
+      log.error('Failed to load session status', { message: (err as Error).message })
+    }
+  }
+
+  async function handleTest(profile: SSHProfile) {
+    setProbeBusy((prev) => new Set(prev).add(profile.id))
+    try {
+      const res = await props.client.connectionTest(profile.id)
+      setProbeResults((prev) => ({ ...prev, [profile.id]: res }))
+      showToast({
+        level: res.outcome === 'accepted' ? 'success' : 'warning',
+        message: res.detail
+          ? `${probeOutcomeLabel(res.outcome)}: ${res.detail}`
+          : probeOutcomeLabel(res.outcome),
+      })
+    } catch (err) {
+      const message = (err as Error).message
+      log.error('Connection test failed', { profileId: profile.id, message })
+      showToast({ level: 'danger', message: `Test failed: ${message}` })
+    } finally {
+      setProbeBusy((prev) => {
+        const next = new Set(prev)
+        next.delete(profile.id)
+        return next
+      })
+    }
+  }
+
+  // Initial load on mount — profiles, session status, and effective data.
+  // loadAll triggers loadSessionStatuses and loadEffective internally after
+  // profiles are set, so the async continuation does not need to be tracked.
   onMount(() => {
     void loadAll()
   })
 
-  // The palette's "New connection" request. Not deferred: a page that mounts
-  // with a request already counted is the case where Settings was closed when
-  // the user picked it, and deferring would swallow exactly that one.
+  // After profiles load, fetch session status and effective data for them.
+  createEffect(
+    on(
+      () =>
+        profiles()
+          .map((x) => x.id)
+          .join(','),
+      (ids) => {
+        if (!ids) return
+        void loadSessionStatuses()
+        void loadEffective(ids.split(','))
+      },
+    ),
+  )
+  // The palette's "New connection" request.
   createEffect(
     on(
       () => props.newProfileRequest ?? 0,
@@ -216,52 +302,45 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     ),
   )
 
-  /**
-   * The profile the form is currently showing.
-   *
-   * There are two ways a profile reaches the form and only one of them is
-   * `editing()`: a draft being typed, and a saved profile picked out of the
-   * list, which sets `selectedID` and deliberately clears `editing` so the
-   * record on screen is the stored one rather than a copy. `formPanelContent`
-   * has always known that. The validation rules did not — they read `editing()`,
-   * so in the second case every rule saw `''`.
-   *
-   * The visible result was a form full of correct values reporting that its
-   * fields were required, and a Connect button that did nothing: `gate()` asks
-   * the rules, the rules were reading a null draft, and the click was refused
-   * with "Name is required" on a field containing a name. It appeared right
-   * after saving — `saveProfile` ends in `setEditing(null)` — which made it look
-   * like the save had failed when the save was the one thing that worked
-   * (nocx-vjhz).
-   *
-   * One memo, read by the rules and by the panel, so the two cannot drift apart
-   * again.
-   */
-  const formProfile = createMemo<SSHProfile | null>(() => {
-    const ed = editing()
-    if (ed) return ed
-    const selId = selectedID()
-    if (!selId) return null
-    return profiles().find((x) => x.id === selId) ?? null
-  })
+  // ── Form / dialog helpers ─────────────────────────────────────────────
+
+  function startNewProfile() {
+    const profile: SSHProfile = {
+      id: '',
+      type: 'ssh',
+      name: 'New connection',
+      options: { host: '', port: 22, user: '', auth: '' },
+    }
+    setEditing(profile)
+    setDirtyFields(new Set<string>())
+    profileValidation.reset()
+    setDialogOpen(true)
+  }
+
+  function openEditDialog(profile: SSHProfile) {
+    setEditing(profile)
+    setDirtyFields(new Set<string>())
+    profileValidation.reset()
+    void loadEffective([profile.id])
+    setDialogOpen(true)
+  }
+
+  function closeDialog() {
+    setDialogOpen(false)
+    setEditing(null)
+    setDirtyFields(new Set<string>())
+  }
 
   // ── Validation ──────────────────────────────────────────────────────────
-  //
-  // At component scope, NOT inside renderProfileForm. That function runs inside a
-  // createMemo on `editing()`, so it re-runs on every keystroke — signals created
-  // there would be thrown away and rebuilt each time, and "this field has been
-  // answered" would reset itself as the user typed.
-  //
-  // The rules read `formProfile()` directly rather than taking the draft as an
-  // argument, which is what lets the same object be read by the form (to render
-  // the message) and by the submit handlers (to refuse).
+
+  const formProfile = createMemo<SSHProfile | null>(() => {
+    return editing()
+  })
 
   const profileValidation = createFormValidation({
     name: () => required('Name')(formProfile()?.name ?? ''),
     host: () => combine(required('Host'), hostname())(formProfile()?.options.host ?? ''),
     port: () => combine(required('Port'), portRule())(String(formProfile()?.options.port ?? '')),
-    // Only when no credential is selected: a credential carries its own username,
-    // and the User field is not even rendered in that case.
     user: () => {
       const p = formProfile()
       if (!p || p.options.credentialId) return undefined
@@ -279,14 +358,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       nonNegativeInteger('Ready timeout')(String(formProfile()?.options.readyTimeout ?? '')),
   })
 
-  /**
-   * Refuse a submit whose form does not pass, and say why.
-   *
-   * Reveals every failing field (so the form marks them, not just the first) and
-   * raises the first message as a warning toast — because the offending field may
-   * be scrolled out of sight in a form this long, and a button that silently does
-   * nothing is indistinguishable from one that is broken.
-   */
   function gate(validation: {
     valid(): boolean
     revealAll(): void
@@ -299,60 +370,20 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     return false
   }
 
-  // ── Derived ─────────────────────────────────────────────────────────────
-  const jumpServerProfiles = createMemo(() => profiles().filter((p) => p.options.canBeJumpServer))
+  // ── Save / delete / connect ────────────────────────────────────────────
 
-  const isNewProfile = createMemo(() => {
-    const p = editing()
-    return p !== null && (!p.id || !profiles().some((x) => x.id === p.id))
-  })
-
-  // Every entry point that swaps the record under a form resets that form's
-  // validation. Without it the "already answered" marks carry over to the next
-  // record and a freshly opened blank form opens with errors already showing.
-  function handleProfileClick(p: SSHProfile) {
-    setSelectedID(p.id)
-    setEditing(null)
-    setDirtyFields(new Set<string>())
-    profileValidation.reset()
-    void loadEffective([p.id])
-  }
-
-  function handleProfileDblClick(p: SSHProfile) {
-    props.onConnect?.(p)
-  }
-
-  function handleQuickConnect(p: SSHProfile) {
-    props.onConnect?.(p)
-  }
-
-  function startNewProfile() {
-    const profile: SSHProfile = {
-      id: '',
-      type: 'ssh',
-      name: 'New connection',
-      options: { host: '', port: 22, user: '', auth: '' },
-    }
-    setSelectedID('')
-    setEditing(profile)
-    setDirtyFields(new Set<string>())
-    profileValidation.reset()
-  }
   async function saveProfile(profile: SSHProfile) {
     if (!gate(profileValidation)) return
 
     const isNew = !profile.id || !profiles().some((x) => x.id === profile.id)
 
     if (isNew) {
-      // New profile: create via full-profile RPC.
-      // The backend mints the ID; don't assign one client-side.
       try {
         const saved = await props.client.createProfile(profile)
-        setSelectedID(saved.id)
-        setEditing(null)
-        setDirtyFields(new Set<string>())
-        profileValidation.reset()
+        closeDialog()
         await loadAll()
+        void loadSessionStatuses()
+        void loadEffective([saved.id])
         showToast({ level: 'success', message: `Saved "${saved.name}"` })
       } catch (err) {
         const message = (err as Error).message
@@ -362,29 +393,21 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       return
     }
 
-    // Existing profile: decide route based on dirty fields.
     const dirty = dirtyFields()
     const route = decideSaveRoute(profile, dirty)
 
     switch (route.kind) {
       case 'noop':
-        setEditing(null)
-        setDirtyFields(new Set<string>())
+        closeDialog()
         return
 
       case 'update':
         try {
           const saved = await props.client.updateProfile(profile)
-          setSelectedID(saved.id)
-          setEditing(null)
-          setDirtyFields(new Set<string>())
-          profileValidation.reset()
-          // Refresh both the profiles list (so saved name/host appear) and
-          // effective data. loadAll fetches fresh profile/group/credential
-          // lists from the backend; loadEffective refreshes the inline
-          // provenance state for the updated profile.
+          closeDialog()
           await loadAll()
           await loadEffective([saved.id])
+          void loadSessionStatuses()
           showToast({ level: 'success', message: `Saved "${saved.name}"` })
         } catch (err) {
           const message = (err as Error).message
@@ -397,10 +420,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         try {
           const eff = await props.client.patchProfile({ id: profile.id, set: route.patchSet })
           setEffectiveData((prev) => ({ ...prev, [profile.id]: eff }))
-          setSelectedID(profile.id)
-          setEditing(null)
-          setDirtyFields(new Set<string>())
-          profileValidation.reset()
+          closeDialog()
           showToast({ level: 'success', message: `Saved "${profile.name}"` })
         } catch (err) {
           const message = (err as Error).message
@@ -411,43 +431,49 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     }
   }
 
-  /**
-   * Connect from the form. Gated on the same rules as save, because the failure
-   * it prevents is the one the user actually hit: a profile with an empty host
-   * connects, fails in the backend, and reports it as a connection error rather
-   * than as a form that was never filled in.
-   */
   function connectFromForm(profile: SSHProfile) {
     if (!gate(profileValidation)) return
+    closeDialog()
     props.onConnect?.(profile)
+  }
+
+  async function deleteProfile(profile: SSHProfile) {
+    if (!(await showConfirm(`Delete "${profile.name}"?`))) return
+    try {
+      await props.client.deleteProfile(profile.id)
+      closeDialog()
+      await loadAll()
+      void loadSessionStatuses()
+      showToast({ level: 'success', message: `Deleted "${profile.name}"` })
+    } catch (err) {
+      const message = (err as Error).message
+      log.error('Failed to delete profile', { message })
+      showToast({ level: 'danger', message: `Could not delete "${profile.name}": ${message}` })
+    }
   }
 
   async function revertField(field: string) {
     const p = formProfile()
     if (!p || !p.id) return
     try {
-      // If the field is still dirty (hasn't been committed yet), unset it
-      // on the backend via patch.
       const eff = await props.client.patchProfile({ id: p.id, unset: [`options.${field}`] })
-      // Update effective data from the patch response.
       setEffectiveData((prev) => ({ ...prev, [p.id]: eff }))
-      // Remove from dirty set.
       setDirtyFields((prev: Set<string>) => {
         const next = new Set(prev)
         next.delete(field)
         return next
       })
       // Drop the field from the draft rather than writing the inherited value
-      // into it. Two reasons, and the second one is the whole point of revert.
+      // into it. Two reasons, and the second is the whole point of revert.
       //
-      // Display does not need it: fieldValue() already falls through to the
-      // effective entry once the field is no longer dirty.
+      // Display does not need it: fieldValue() falls through to the effective
+      // entry once the field is no longer dirty.
       //
       // Saving must not have it. A later edit to the name or host routes through
       // profiles.update, which writes the WHOLE profile — so an inherited value
       // sitting in options would be persisted as an explicit override, and the
-      // field the user just reverted would be pinned to the value it used to
-      // inherit. Spec §3.3's first binding rule: an inherited value is never
+      // field just reverted would be pinned to the value it used to inherit.
+      // Spec §3.3's first binding rule: an inherited value is never
       // materialised, because once it is, "inherited 2222" and "overridden here
       // to 2222" are the same state forever.
       const updated = { ...p, options: { ...p.options } }
@@ -460,130 +486,163 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     }
   }
 
-  async function deleteProfile(profile: SSHProfile) {
-    if (!(await showConfirm(`Delete "${profile.name}"?`))) return
-    try {
-      await props.client.deleteProfile(profile.id)
-      setSelectedID('')
-      setEditing(null)
-      await loadAll()
-      showToast({ level: 'success', message: `Deleted "${profile.name}"` })
-    } catch (err) {
-      const message = (err as Error).message
-      log.error('Failed to delete profile', { message })
-      // A delete that fails silently is the worst kind: the user confirmed a
-      // destructive action, saw nothing happen, and has no way to tell whether
-      // it went through.
-      showToast({ level: 'danger', message: `Could not delete "${profile.name}": ${message}` })
-    }
-  }
+  // ── Derived data ──────────────────────────────────────────────────────
 
-  function handleImport() {
-    const client = props.client
-    const doImport = (text: string) => {
-      /* eslint-disable solid/reactivity */
-      client
-        .importTabby(text)
-        .then((count) => {
-          log.info('Imported SSH profiles from Tabby config', { count })
-          void loadAll()
-          showToast({
-            level: 'success',
-            message: `Imported ${count} connections from the Tabby config`,
-          })
-        })
-        .catch((err: unknown) => {
-          const message = (err as Error).message
-          log.error('Import failed', { message })
-          showToast({ level: 'danger', message: `Tabby import failed: ${message}` })
-        })
-      /* eslint-enable solid/reactivity */
-    }
-    const input = document.createElement('input')
-    input.type = 'file'
-    input.accept = '.yml,.yaml'
-    input.addEventListener('change', () => {
-      const file = input.files?.[0]
-      if (!file) return
-      void file.text().then(doImport)
-    })
-    input.click()
-  }
-  // ── Render helpers ──────────────────────────────────────────────────────
+  const jumpServerProfiles = createMemo(() => profiles().filter((p) => p.options.canBeJumpServer))
 
-  function renderGroupSection(node: TreeNode) {
-    const groupProfiles = profiles().filter((p) => p.group === node.id)
-    return (
-      <>
-        <div class="cm-group-header">{node.name}</div>
-        <For each={groupProfiles}>{(p) => renderListItem(p)}</For>
-        <For each={node.children}>{(child) => renderGroupSection(child)}</For>
-      </>
+  // ── Filtered + grouped list ──────────────────────────────────────────
+
+  const filteredProfiles = createMemo(() => {
+    const q = searchQuery().toLowerCase()
+    if (!q) return profiles()
+    return profiles().filter(
+      (p) =>
+        p.name.toLowerCase().includes(q) ||
+        p.options.host.toLowerCase().includes(q) ||
+        (p.options.user || '').toLowerCase().includes(q),
     )
+  })
+
+  const tree = createMemo(() => buildGroupTree(groups()))
+
+  const ungrouped = createMemo(() =>
+    filteredProfiles().filter((p) => !p.group || !groups().some((g) => g.id === p.group)),
+  )
+
+  // Profiles in each group, filtered
+  function groupProfiles(groupId: string): SSHProfile[] {
+    return filteredProfiles().filter((p) => p.group === groupId)
   }
 
-  function renderListItem(p: SSHProfile) {
-    const isSelected = p.id === selectedID()
+  // ── Row render helpers ───────────────────────────────────────────────
+
+  function renderRow(p: SSHProfile) {
+    const status = () => sessionStatuses()[p.id]
+    const probe = () => probeResults()[p.id]
+    const isTesting = () => probeBusy().has(p.id)
+
+    // Credential lookup
+    const eff = () => effectiveData()[p.id]
+    const effCredId = () => {
+      const e = eff()
+      return e?.fields?.credentialId?.value as string | undefined
+    }
+    const credObj = () => credentials().find((c) => c.id === effCredId())
+    const credSource = () => {
+      const e = eff()
+      return e?.fields?.credentialId?.source
+    }
+
     return (
-      <div
-        classList={{ 'cm-item': true, 'cm-selected': isSelected }}
-        onClick={() => handleProfileClick(p)}
-        onDblClick={() => handleProfileDblClick(p)}
-      >
+      <div class="cm-item" role="listitem" tabIndex={-1}>
         <div class="cm-item-info">
           <div class="cm-item-name">{p.name}</div>
           <div class="cm-item-meta">
-            {/* The protocol, stated rather than assumed. Every saved profile is
-                SSH today, so this reads as redundant — until the second kind
-                lands, at which point a list that never said which was which is
-                a list nobody can read. A quiet neutral badge for exactly that
-                reason: it carries no information yet and must not look as
-                though it does.
-
-                Read off `Base.type`, which the backend already sets and
-                `startNewProfile` already writes — not a literal. A hard-coded
-                "SSH" would keep rendering SSH beside the first profile that is
-                not one, and would do it silently (nocx-fmoz). */}
             <Badge tone="neutral">{p.type.toUpperCase()}</Badge>
             <span class="cm-item-address">
               {p.options.user || '?'}@{p.options.host}:{p.options.port || 22}
             </span>
+            {/* Session state — Show with keyed narrows the type */}
+            <Show when={status()} keyed>
+              {(st) => (
+                <span
+                  class="cm-session-state"
+                  classList={{ 'cm-session-live': st.live }}
+                  role="status"
+                  aria-label={st.live ? 'Connected' : 'Disconnected'}
+                >
+                  <span class="cm-session-dot" aria-hidden="true" />
+                  {st.live ? 'Connected' : 'Disconnected'}
+                  <Show when={st.lastUsed} keyed>
+                    {(lastUsed) => (
+                      <span class="cm-session-last-used">
+                        &middot; last used {new Date(lastUsed).toLocaleDateString()}
+                      </span>
+                    )}
+                  </Show>
+                </span>
+              )}
+            </Show>
           </div>
+          {/* Credential info */}
+          <Show when={credObj()} keyed>
+            {(cred) => (
+              <div class="cm-item-credential">
+                <span class="cm-credential-key">Credential:</span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => props.onNavigateToCredentials?.()}
+                  ariaLabel={`Open credentials for ${cred.name}`}
+                >
+                  {cred.name}
+                </Button>
+                <Show when={credSource()} keyed>
+                  {(src) => <span class="cm-provenance-label">{sourceLabel(src)}</span>}
+                </Show>
+              </div>
+            )}
+          </Show>
+          {/* Probe result — only shown when present */}
+          <Show when={probe()} keyed>
+            {(pr) => (
+              <>
+                <Badge tone={probeOutcomeTone(pr.outcome)}>{probeOutcomeLabel(pr.outcome)}</Badge>
+                <Show when={pr.detail} keyed>
+                  {(detail) => <span class="cm-probe-detail">{detail}</span>}
+                </Show>
+              </>
+            )}
+          </Show>
         </div>
-        <div class="cm-item-actions" onClick={(e) => e.stopPropagation()}>
-          {/* An icon, not the word "SSH". The label named a protocol and the
-              button performed an action, so one control was doing both jobs and
-              reading as neither — it looked like a type tag you could somehow
-              press. The two are separate things now: the badge above says what
-              this is, this says what it does (nocx-fmoz). */}
+        <div class="cm-item-actions">
+          <Button
+            variant="default"
+            size="sm"
+            disabled={isTesting()}
+            onClick={() => void handleTest(p)}
+            ariaLabel={`Test connection to ${p.name}`}
+          >
+            {isTesting() ? 'Testing...' : 'Test'}
+          </Button>
           <IconButton
             size="sm"
             title="Connect"
             ariaLabel={`Connect to ${p.name}`}
-            onClick={() => handleQuickConnect(p)}
+            onClick={() => props.onConnect?.(p)}
           >
             <PlugIcon />
           </IconButton>
+          <Button
+            variant="default"
+            size="sm"
+            onClick={() => openEditDialog(p)}
+            ariaLabel={`Edit ${p.name}`}
+          >
+            Edit
+          </Button>
         </div>
       </div>
     )
   }
 
-  function renderEmpty() {
+  function renderGroupSection(node: TreeNode) {
+    const gp = groupProfiles(node.id)
+    if (gp.length === 0 && node.children.length === 0) return null
     return (
-      <EmptyState
-        title="Select a connection to edit"
-        description={'Click "+ New connection" to create one.'}
-      />
+      <>
+        <div class="cm-group-header" role="heading" aria-level={2}>
+          {node.name}
+        </div>
+        <For each={gp}>{(p) => renderRow(p)}</For>
+        <For each={node.children}>{(child) => renderGroupSection(child)}</For>
+      </>
     )
   }
 
-  // ── Profile form ────────────────────────────────────────────────────────
+  // ── Dialog form (profile editor) ──────────────────────────────────────
 
   function renderProfileForm(profile: SSHProfile) {
-    const isNew = isNewProfile()
-    const isSaved = !!profile.id && profiles().some((x) => x.id === profile.id)
-
     function setOption(key: keyof SSHProfile['options'], value: unknown) {
       const updated = { ...profile, options: { ...profile.options, [key]: value } }
       setEditing(updated)
@@ -604,7 +663,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       })
     }
 
-    // ── Provenance helpers ──────────────────────────────────────────────
     function effField(field: string): EffectiveFieldDTO | undefined {
       const eff = effectiveData()[profile.id]
       return eff?.fields[field]
@@ -664,6 +722,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       return (profile.options as unknown as Record<string, unknown>)[key]
     }
 
+    const isSaved = () => !!profile.id && profiles().some((x) => x.id === profile.id)
     function fvStr(key: string): string {
       const v = fieldValue(key)
       if (typeof v === 'string') return v
@@ -697,6 +756,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     )
 
     function fieldRow(field: string, textField: JSX.Element) {
+      const isSaved = !!profile.id && profiles().some((x) => x.id === profile.id)
       return (
         <div class="cm-field-row">
           {textField}
@@ -756,9 +816,9 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                 value={fvStr('credentialId')}
                 onChange={(v) => setOption('credentialId', v || undefined)}
                 options={credOptions()}
-                placeholder="— None (specify below) —"
+                placeholder="&mdash; None (specify below) &mdash;"
               />
-              {isSaved && provenanceBadge('credentialId')}
+              {isSaved() && provenanceBadge('credentialId')}
             </div>
           </Field>
 
@@ -798,7 +858,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                 </For>
               </div>
             </Field>
-            {isSaved && provenanceBadge('auth')}
+            {isSaved() && provenanceBadge('auth')}
           </Section>
         </Show>
 
@@ -873,9 +933,9 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                 value={fvStr('jumpHost')}
                 onChange={(v) => setOption('jumpHost', v || undefined)}
                 options={jumpOptions()}
-                placeholder="— None —"
+                placeholder="&mdash; None &mdash;"
               />
-              {isSaved && provenanceBadge('jumpHost')}
+              {isSaved() && provenanceBadge('jumpHost')}
             </div>
           </Field>
 
@@ -891,77 +951,79 @@ export function ConnectionsView(props: ConnectionsViewProps) {
               onChange={(v) => setOption('canBeJumpServer', v)}
             />
           </div>
-          {isSaved && (provenanceBadge('agentForward') || provenanceBadge('canBeJumpServer'))}
+          {isSaved() && (provenanceBadge('agentForward') || provenanceBadge('canBeJumpServer'))}
         </Section>
-
-        <div class="cm-form-actions">
-          <Button variant="primary" onClick={() => void saveProfile(profile)}>
-            {isNew ? 'Create' : 'Save'}
-          </Button>
-          <Button variant="default" onClick={() => connectFromForm(profile)}>
-            Connect
-          </Button>
-          <Show when={!isNew}>
-            <Button variant="danger" onClick={() => void deleteProfile(profile)}>
-              Delete
-            </Button>
-          </Show>
-        </div>
       </div>
     )
   }
 
-  // ── Form panel ─────────────────────────────────────────────────────────
-
-  const formPanelContent = createMemo(() => {
-    const p = formProfile()
-    if (p) return renderProfileForm(p)
-
-    return renderEmpty()
-  })
-
   // ── Main render ────────────────────────────────────────────────────────
-
-  const tree = createMemo(() => buildGroupTree(groups()))
-  const ungrouped = createMemo(() =>
-    profiles().filter((p) => !p.group || !groups().some((g) => g.id === p.group)),
-  )
 
   return (
     <div class="cm-root">
       <Toolbar>
-        <Button
-          variant="default"
-          onClick={handleImport}
-          title="Import SSH profiles from a Tabby config.yml"
-        >
-          Import from Tabby
-        </Button>
-
+        <div class="cm-search">
+          <SearchField
+            value={searchQuery()}
+            onInput={setSearchQuery}
+            placeholder="Filter connections"
+            ariaLabel="Filter connections"
+          />
+        </div>
         <Button variant="primary" onClick={startNewProfile}>
           + New connection
         </Button>
       </Toolbar>
-      <div class="cm-body">
-        <div class="cm-list">
-          <Show
-            when={profiles().length > 0}
-            fallback={
-              <EmptyState
-                title="No connections yet"
-                description={'Click "+ New connection" to add one.'}
-              />
-            }
-          >
-            <For each={tree()}>{(node) => renderGroupSection(node)}</For>
-            <Show when={ungrouped().length > 0}>
-              <div class="cm-group-header">Connections</div>
-              <For each={ungrouped()}>{(p) => renderListItem(p)}</For>
-            </Show>
+      <Show
+        when={profiles().length > 0}
+        fallback={
+          <EmptyState
+            title="No connections yet"
+            description={'Click "+ New connection" to add one.'}
+          />
+        }
+      >
+        <div class="cm-body" role="list" aria-label="Connection list">
+          <For each={tree()}>{(node) => renderGroupSection(node)}</For>
+          <Show when={ungrouped().length > 0}>
+            <div class="cm-group-header" role="heading" aria-level={2}>
+              Connections
+            </div>
+            <For each={ungrouped()}>{(p) => renderRow(p)}</For>
           </Show>
         </div>
-        <div class="cm-form-panel">{formPanelContent()}</div>
-      </div>
+      </Show>
+
+      {/* Editor Dialog */}
+      <Show when={editing()}>
+        {(profile) => (
+          <Dialog
+            open={dialogOpen()}
+            onClose={closeDialog}
+            title={profile().id ? `Edit Connection: ${profile().name}` : 'New Connection'}
+            footer={
+              <>
+                <Button variant="primary" onClick={() => void saveProfile(profile())}>
+                  {profile().id ? 'Save Connection' : 'Create Connection'}
+                </Button>
+                <Button variant="default" onClick={() => connectFromForm(profile())}>
+                  Connect
+                </Button>
+                <Show when={profile().id}>
+                  <Button variant="danger" onClick={() => void deleteProfile(profile())}>
+                    Delete Connection
+                  </Button>
+                </Show>
+                <Button variant="default" onClick={closeDialog}>
+                  Cancel
+                </Button>
+              </>
+            }
+          >
+            {renderProfileForm(profile())}
+          </Dialog>
+        )}
+      </Show>
     </div>
   )
 }
