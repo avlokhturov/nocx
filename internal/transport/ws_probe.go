@@ -3,7 +3,6 @@ package transport
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net"
 	"strconv"
 	"time"
@@ -12,21 +11,21 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// ProbeOutcome — closed-enum wire contract (nocx-uxs5.3)
+// ProbeOutcome — re-exported from ssh package for convenience
 // ---------------------------------------------------------------------------
 
 // ProbeOutcome is a closed-enum outcome for a single-profile credential
-// probe. The Go type holds only the five defined values; a sixth kind
-// cannot be expressed at compile time. Wave 8 builds rotation on these
-// string constants.
-type ProbeOutcome string
+// probe. It is defined in the ssh package alongside the error types it
+// classifies; re-exported here so existing transport consumers do not
+// need to change.
+type ProbeOutcome = ssh.ProbeOutcome
 
 const (
-	OutcomeAccepted         ProbeOutcome = "accepted"
-	OutcomeRejected         ProbeOutcome = "rejected"
-	OutcomeUnreachable      ProbeOutcome = "unreachable"
-	OutcomeHostKeyProblem   ProbeOutcome = "host-key-problem"
-	OutcomeNeedsInteractive ProbeOutcome = "needs-interactive"
+	OutcomeAccepted         = ssh.OutcomeAccepted
+	OutcomeRejected         = ssh.OutcomeRejected
+	OutcomeUnreachable      = ssh.OutcomeUnreachable
+	OutcomeHostKeyProblem   = ssh.OutcomeHostKeyProblem
+	OutcomeNeedsInteractive = ssh.OutcomeNeedsInteractive
 )
 
 // ---------------------------------------------------------------------------
@@ -177,59 +176,6 @@ type probeResult struct {
 // Unclassifiable errors are returned as a wrapped error for the RPC
 // error path — they are never collapsed into "rejected".
 func classifyProbeError(err error) probeResult {
-	if err == nil {
-		return probeResult{outcome: OutcomeAccepted, detail: "ok"}
-	}
-
-	// Host key issues — checked before auth.
-	var unknownKey *ssh.ErrUnknownHostKey
-	if errors.As(err, &unknownKey) {
-		return probeResult{
-			outcome: OutcomeHostKeyProblem,
-			detail:  unknownKey.Error(),
-		}
-	}
-	var keyMismatch *ssh.ErrHostKeyMismatch
-	if errors.As(err, &keyMismatch) {
-		return probeResult{
-			outcome: OutcomeHostKeyProblem,
-			detail:  keyMismatch.Error(),
-		}
-	}
-
-	// Auth rejected (wrong password, bad key).
-	var authErr *ssh.ErrAuthFailed
-	if errors.As(err, &authErr) {
-		return probeResult{
-			outcome: OutcomeRejected,
-			detail:  authErr.Error(),
-		}
-	}
-
-	// Encrypted key — needs passphrase (interactive).
-	var encKey *ssh.ErrEncryptedKey
-	if errors.As(err, &encKey) {
-		return probeResult{
-			outcome: OutcomeNeedsInteractive,
-			detail:  encKey.Error(),
-		}
-	}
-
-	// Network reachability.
-	var netErr *net.OpError
-	if errors.As(err, &netErr) {
-		return probeResult{
-			outcome: OutcomeUnreachable,
-			detail:  netErr.Error(),
-		}
-	}
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-		return probeResult{
-			outcome: OutcomeUnreachable,
-			detail:  err.Error(),
-		}
-	}
-
-	// Unclassifiable — return as RPC error, never map to rejected.
-	return probeResult{err: err}
+	outcome, detail, e := ssh.ClassifyProbeError(err)
+	return probeResult{outcome: outcome, detail: detail, err: e}
 }

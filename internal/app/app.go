@@ -100,15 +100,21 @@ func New(opts ...Option) (*App, error) {
 	// and credentials. Used by the import handlers and version transitions.
 	profileSvc := profile.NewProfileService(profileStore)
 
+	// One resolver, two consumers: the connections.test handler and the
+	// rollout runner. They must resolve identically — a rollout that probed
+	// through a differently-configured resolver would prove nothing about
+	// the connection the user will later make.
+	resolver := connection.NewResolver(
+		profileStore, profileStore, profileStore, credStore,
+		connection.WithConfigResolver(sshCfgResolver),
+	)
+
 	tpOpts := []transport.WSServerOption{
 		transport.WithProfileRepository(profileStore),
 		transport.WithGroupRepository(profileStore),
 		transport.WithCredentialMetadataRepository(profileStore),
 		transport.WithCredentialStore(credStore),
-		transport.WithProfileResolver(connection.NewResolver(
-			profileStore, profileStore, profileStore, credStore,
-			connection.WithConfigResolver(sshCfgResolver),
-		)),
+		transport.WithProfileResolver(resolver),
 		transport.WithSettingsRegistry(settingsRegistry),
 		transport.WithProfileUsageStore(usageStore),
 		transport.WithExportPaths(paths),
@@ -119,6 +125,7 @@ func New(opts ...Option) (*App, error) {
 		transport.WithProbeResultStore(probeResultStore),
 		transport.WithSSHConfigResolver(sshCfgResolver, sshConfigPath),
 		transport.WithVersionSessionRegistry(&versionSessionRegistryAdapter{reg: sess}),
+		transport.WithRolloutRunner(resolver, profileStore),
 	}
 	tp := transport.NewWSServer(logger, sess, tpOpts...)
 

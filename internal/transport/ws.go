@@ -16,6 +16,7 @@ import (
 	"github.com/shady2k/nocx/internal/importer"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
+	"github.com/shady2k/nocx/internal/rollout"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/ssh"
@@ -97,6 +98,9 @@ type WSServer struct {
 	// When nil, probe results are not stored (the probe still runs and
 	// returns its outcome to the caller).
 	probeResultStore *ProbeResultStore
+	// rolloutRunner performs credential rollout probes (rollout.run).
+	// When nil, the handler returns a JSON-RPC error.
+	rolloutRunner rollout.Runner
 
 	// profileUsage tracks last-used timestamps for the sessions.status RPC.
 	// When nil, the handler reports live-state from the registry but
@@ -651,7 +655,8 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.handleVersionsRetire(wconn, req)
 	case "versions.revoke":
 		s.handleVersionsRevoke(wconn, req)
-
+	case "rollout.run":
+		s.handleRolloutRun(wconn, req)
 	case "sshConfig.aliases":
 		s.handleSSHConfigAliases(wconn, req)
 
