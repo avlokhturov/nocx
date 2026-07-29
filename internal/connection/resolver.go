@@ -163,6 +163,7 @@ func (r *Resolver) buildConfig(prof *profile.SSHProfile, visited map[string]bool
 			if v.PassphraseSecretID != "" {
 				cfg.PassphraseSecretID = credential.SecretID(v.PassphraseSecretID)
 			}
+			cfg.CredentialVersionID = v.ID
 		}
 	} else {
 		cfg.User = eff.ResolvedOptions.User

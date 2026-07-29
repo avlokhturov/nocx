@@ -93,6 +93,10 @@ type WSServer struct {
 	// prober validates credentials without opening a session (connections.test).
 	// When nil, the handler returns a JSON-RPC error.
 	prober Prober
+	// probeResultStore records probe outcomes as operational evidence.
+	// When nil, probe results are not stored (the probe still runs and
+	// returns its outcome to the caller).
+	probeResultStore *ProbeResultStore
 
 	// profileUsage tracks last-used timestamps for the sessions.status RPC.
 	// When nil, the handler reports live-state from the registry but
@@ -138,6 +142,13 @@ func WithProfileResolver(r ProfileResolver) WSServerOption {
 // error.
 func WithSSHConfigResolver(resolver ssh.ConfigResolver, configPath string) WSServerOption {
 	return func(s *WSServer) { s.sshConfigResolver = resolver; s.sshConfigPath = configPath }
+}
+
+// WithProbeResultStore attaches a probe result store for recording outcomes
+// of connections.test probes. When nil, probe outcomes are still returned to
+// the caller but not persisted in memory.
+func WithProbeResultStore(s *ProbeResultStore) WSServerOption {
+	return func(ws *WSServer) { ws.probeResultStore = s }
 }
 
 // WSServerOption configures a WSServer.

@@ -93,6 +93,9 @@ func New(opts ...Option) (*App, error) {
 	// Profile usage tracker for the sessions.status RPC (nocx-uxs5.4).
 	usageStore := session.NewDocumentUsageStore(docStore)
 	sess = sess.WithProfileUsageTracker(usageStore)
+	// Probe result store: operational evidence for connections.test.
+	// Process-lifetime only (not persisted across restarts).
+	probeResultStore := transport.NewProbeResultStore()
 
 	tpOpts := []transport.WSServerOption{
 		transport.WithProfileRepository(profileStore),
@@ -108,6 +111,7 @@ func New(opts ...Option) (*App, error) {
 		transport.WithExportPaths(paths),
 		transport.WithExportContentDB(content.NewStub(logger)),
 		transport.WithProber(&proberAdapter{client: sshClient}),
+		transport.WithProbeResultStore(probeResultStore),
 		transport.WithSSHConfigResolver(sshCfgResolver, sshConfigPath),
 	}
 	tp := transport.NewWSServer(logger, sess, tpOpts...)
@@ -181,4 +185,8 @@ type proberAdapter struct {
 
 func (a *proberAdapter) Probe(ctx context.Context, host string, cfg *ssh.ConnectConfig) error {
 	return a.client.ProbeConfig(ctx, host, cfg)
+}
+
+func (a *proberAdapter) ProbeWithResult(ctx context.Context, host string, cfg *ssh.ConnectConfig) (string, error) {
+	return a.client.ProbeConfigWithResult(ctx, host, cfg)
 }

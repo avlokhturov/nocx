@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"strconv"
+	"time"
 
 	"github.com/shady2k/nocx/internal/ssh"
 )
@@ -40,7 +42,16 @@ const (
 // The single implementation wraps ssh.RealClient.ProbeConfig.
 // Defined here (consumer package) per the repo's DI convention.
 type Prober interface {
+	// Probe validates credentials without recording the observed
+	// host-key fingerprint. Prefer ProbeWithResult when the caller
+	// needs the fingerprint for storage or identity matching.
 	Probe(ctx context.Context, host string, cfg *ssh.ConnectConfig) error
+
+	// ProbeWithResult is identical to Probe but also returns the
+	// host-key fingerprint observed during the SSH handshake.
+	// The fingerprint is empty when the handshake fails before host
+	// key verification (e.g. unreachable host).
+	ProbeWithResult(ctx context.Context, host string, cfg *ssh.ConnectConfig) (fingerprint string, err error)
 }
 
 // WithProber attaches a Prober for the connections.test JSON-RPC method.
@@ -104,8 +115,17 @@ func (s *WSServer) handleConnectionsTest(wconn *wsConn, req jsonrpcRequest) {
 	}
 
 	// Probe uses the same resolved parameters Connect would.
-	err = s.prober.Probe(context.Background(), host, connectCfg)
+	fingerprint, err := s.prober.ProbeWithResult(context.Background(), host, connectCfg)
 	result := classifyProbeError(err)
+
+	// Record the probe result in the store for operational evidence.
+	// All classified outcomes (accepted, rejected, unreachable, host-key
+	// problem, needs-interactive) are stored; unclassifiable errors skip
+	// the store because they represent a probe bug, not a valid outcome.
+	if result.err == nil && s.probeResultStore != nil {
+		s.storeProbeResult(host, connectCfg, fingerprint, result.outcome, result.detail)
+	}
+
 	if result.err != nil {
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, result.err.Error()))
 		return
@@ -115,6 +135,34 @@ func (s *WSServer) handleConnectionsTest(wconn *wsConn, req jsonrpcRequest) {
 		Outcome: result.outcome,
 		Detail:  result.detail,
 	})))
+}
+
+// storeProbeResult builds a ProbeResultRecord from the probe output and
+// stores it. All classified outcomes are recorded.
+func (s *WSServer) storeProbeResult(host string, cfg *ssh.ConnectConfig, fingerprint string, outcome ProbeOutcome, detail string) {
+	port := 22
+	if cfg.Port > 0 {
+		port = cfg.Port
+	}
+	endpoint := net.JoinHostPort(host, strconv.Itoa(port))
+
+	authPolicy := cfg.AuthMode
+	if authPolicy == "" {
+		authPolicy = "auto"
+	}
+
+	s.probeResultStore.Store(ProbeResultRecord{
+		Identity: ProbeResultIdentity{
+			Endpoint:           endpoint,
+			HostKeyFingerprint: fingerprint,
+			CredentialVersion:  cfg.CredentialVersionID,
+			Username:           cfg.User,
+			AuthPolicy:         authPolicy,
+			Timestamp:          time.Now(),
+		},
+		Outcome: outcome,
+		Detail:  detail,
+	})
 }
 
 // probeResult is the internal classified outcome.

@@ -258,6 +258,62 @@ func (rc *RealClient) hostKeyCallback() (gossh.HostKeyCallback, error) {
 	}, nil
 }
 
+// probeHostKeyCallback returns a HostKeyCallback that captures the observed
+// host key fingerprint on every call (success or failure). The capture is set
+// before the callback returns, so reading *capture after dialDirect returns
+// gives the fingerprint that was presented by the server — even when the key
+// was rejected (unknown host key, key mismatch). For unreachable hosts the
+// callback is never invoked and *capture is empty.
+//
+// The closure captures a stack-allocated string by reference; escape analysis
+// promotes it to the heap. The returned func owns the only reference, so
+// *capture is safe to read after the dial completes and before the closure is
+// collected.
+func (rc *RealClient) probeHostKeyCallback() (gossh.HostKeyCallback, *string, error) {
+	var captured string
+	cb, err := knownhosts.New(rc.knownHostsFile)
+	if err != nil {
+		// known_hosts file missing or unreadable — treat every host as unknown.
+		return func(addr string, remote net.Addr, key gossh.PublicKey) error {
+			captured = gossh.FingerprintSHA256(key)
+			return &ErrUnknownHostKey{
+				Addr:        addr,
+				KeyAlgo:     key.Type(),
+				Fingerprint: captured,
+			}
+		}, &captured, nil
+	}
+
+	return func(addr string, remote net.Addr, key gossh.PublicKey) error {
+		captured = gossh.FingerprintSHA256(key)
+		err := cb(addr, remote, key)
+		if err == nil {
+			return nil
+		}
+
+		var keyErr *knownhosts.KeyError
+		if errors.As(err, &keyErr) {
+			if len(keyErr.Want) == 0 {
+				return &ErrUnknownHostKey{
+					Addr:        addr,
+					KeyAlgo:     key.Type(),
+					Fingerprint: captured,
+				}
+			}
+			var expected []string
+			for _, k := range keyErr.Want {
+				expected = append(expected, gossh.FingerprintSHA256(k.Key))
+			}
+			return &ErrHostKeyMismatch{
+				Addr:        addr,
+				Fingerprint: captured,
+				Expected:    strings.Join(expected, ","),
+			}
+		}
+		return err
+	}, &captured, nil
+}
+
 // openShell opens a session, requests a PTY, optionally requests agent
 // forwarding, and starts a shell.
 func (rc *RealClient) openShell(ctx context.Context, gclient *gossh.Client, resolved *resolvedConfig, cfg *ConnectConfig) (*RealChannel, error) {

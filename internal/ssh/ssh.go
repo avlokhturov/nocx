@@ -129,6 +129,11 @@ type ConnectConfig struct {
 	// in play (SSH_AUTH_SOCK is reachable); if set but no agent is available,
 	// the connect fails with an error.
 	AgentForward bool
+
+	// CredentialVersionID identifies the credential version selected by the
+	// resolver for this connection. Set by the resolver during profile
+	// resolution; empty when no credential is linked (inline auth).
+	CredentialVersionID string
 }
 
 func WithUser(user string) ConnectOption {

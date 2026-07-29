@@ -25,24 +25,39 @@ import (
 //   - *ErrEncryptedKey when a passphrase or keyboard-interactive user input is needed
 //   - *net.OpError (or context deadline/exceeded) for unreachable targets
 func (rc *RealClient) ProbeConfig(ctx context.Context, host string, cfg *ConnectConfig) error {
+	_, err := rc.probeConfig(ctx, host, cfg)
+	return err
+}
+
+// ProbeConfigWithResult is identical to ProbeConfig but also returns the
+// host-key fingerprint observed during the handshake. The fingerprint is
+// empty when the handshake fails before host key verification (e.g.
+// unreachable host).
+func (rc *RealClient) ProbeConfigWithResult(ctx context.Context, host string, cfg *ConnectConfig) (fingerprint string, err error) {
+	return rc.probeConfig(ctx, host, cfg)
+}
+
+// probeConfig is the shared implementation for ProbeConfig and
+// ProbeConfigWithResult.
+func (rc *RealClient) probeConfig(ctx context.Context, host string, cfg *ConnectConfig) (fingerprint string, err error) {
 	resolved, err := rc.resolveConfig(ctx, host, cfg)
 	if err != nil {
-		return fmt.Errorf("probe config: %w", err)
+		return "", fmt.Errorf("probe config: %w", err)
 	}
 
 	chain, err := rc.buildAuthChain(resolved, cfg)
 	if err != nil {
-		return fmt.Errorf("probe config: %w", err)
+		return "", fmt.Errorf("probe config: %w", err)
 	}
 
 	auth, err := firstAuthMethod(chain)
 	if err != nil {
-		return fmt.Errorf("probe config: %w", err)
+		return "", fmt.Errorf("probe config: %w", err)
 	}
 
-	hostKeyCB, err := rc.hostKeyCallback()
+	hostKeyCB, fp, err := rc.probeHostKeyCallback()
 	if err != nil {
-		return fmt.Errorf("probe config: %w", err)
+		return "", fmt.Errorf("probe config: %w", err)
 	}
 
 	addr := net.JoinHostPort(resolved.hostName, fmt.Sprintf("%d", resolved.port))
@@ -61,10 +76,10 @@ func (rc *RealClient) ProbeConfig(ctx context.Context, host string, cfg *Connect
 	d := &dialer{client: rc}
 	gclient, err := d.dialDirect(ctx, addr, gcfg, host, resolved.user)
 	if err != nil {
-		return fmt.Errorf("probe config: %w", err)
+		return *fp, fmt.Errorf("probe config: %w", err)
 	}
 	_ = gclient.Close()
-	return nil
+	return *fp, nil
 }
 
 // firstAuthMethod extracts the first usable gossh.AuthMethod from the auth

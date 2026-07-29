@@ -129,13 +129,23 @@ func TestClassifyProbeError_UnclassifiableWrappedAuth(t *testing.T) {
 // Fake prober and resolver for handler tests
 // ---------------------------------------------------------------------------
 
-// fakeProber implements Prober for tests.
 type fakeProber struct {
-	probeFn func(ctx context.Context, host string, cfg *ssh.ConnectConfig) error
+	probeFn           func(ctx context.Context, host string, cfg *ssh.ConnectConfig) error
+	probeWithResultFn func(ctx context.Context, host string, cfg *ssh.ConnectConfig) (string, error)
 }
 
 func (f *fakeProber) Probe(ctx context.Context, host string, cfg *ssh.ConnectConfig) error {
 	return f.probeFn(ctx, host, cfg)
+}
+
+func (f *fakeProber) ProbeWithResult(ctx context.Context, host string, cfg *ssh.ConnectConfig) (string, error) {
+	if f.probeWithResultFn != nil {
+		return f.probeWithResultFn(ctx, host, cfg)
+	}
+	// Fall back to Probe behavior for existing tests that don't
+	// care about the fingerprint.
+	err := f.probeFn(ctx, host, cfg)
+	return "", err
 }
 
 // fakeResolver implements ProfileResolver for tests.
@@ -437,6 +447,91 @@ func TestConnectionsTest_ProbeResultJSON(t *testing.T) {
 			}
 		}
 		_ = conn.Close()
+	}
+}
+
+func TestConnectionsTest_StoresResult(t *testing.T) {
+	store := NewProbeResultStore()
+	logger := log.NewSlogAdapter(nil)
+	reg := newRegWithStub(logger)
+
+	testFingerprint := "SHA256:testprobe"
+	prober := &fakeProber{
+		probeWithResultFn: func(_ context.Context, _ string, _ *ssh.ConnectConfig) (string, error) {
+			return testFingerprint, nil
+		},
+	}
+
+	srv := NewWSServer(
+		logger, reg,
+		WithProfileResolver(&fakeResolver{
+			resolveFn: func(profileID string) (string, *ssh.ConnectConfig, error) {
+				return "host.example.com", &ssh.ConnectConfig{
+					User:                "test",
+					Port:                2222,
+					AuthMode:            "publicKey",
+					CredentialVersionID: "v7",
+				}, nil
+			},
+		}),
+		WithProber(prober),
+		WithProbeResultStore(store),
+	)
+	ctx := context.Background()
+	if err := srv.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Stop(ctx) })
+
+	conn := connectWS(t, srv)
+	defer conn.Close() //nolint:errcheck
+
+	resp := jsonrpcCall(t, conn, "connections.test", map[string]any{
+		"profileId": "ssh:test:1",
+	})
+
+	var result struct {
+		Result connectionsTestResult `json:"result"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if result.Result.Outcome != OutcomeAccepted {
+		t.Errorf("expected accepted, got %s", result.Result.Outcome)
+	}
+
+	// Verify the store recorded the probe result.
+	if got := store.Len(); got != 1 {
+		t.Fatalf("expected 1 stored result, got %d", got)
+	}
+	records := store.List()
+	if len(records) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(records))
+	}
+	rec := records[0]
+	if rec.Outcome != OutcomeAccepted {
+		t.Errorf("expected stored outcome accepted, got %s", rec.Outcome)
+	}
+	if rec.Identity.HostKeyFingerprint != testFingerprint {
+		t.Errorf("expected fingerprint %s, got %s", testFingerprint, rec.Identity.HostKeyFingerprint)
+	}
+	if rec.Identity.Endpoint != "host.example.com:2222" {
+		t.Errorf("expected endpoint host.example.com:2222, got %s", rec.Identity.Endpoint)
+	}
+	if rec.Identity.Username != "test" {
+		t.Errorf("expected username test, got %s", rec.Identity.Username)
+	}
+	if rec.Identity.AuthPolicy != "publicKey" {
+		t.Errorf("expected auth policy publicKey, got %s", rec.Identity.AuthPolicy)
+	}
+	if rec.Identity.CredentialVersion != "v7" {
+		t.Errorf("expected credential version v7, got %s", rec.Identity.CredentialVersion)
+	}
+	if rec.Identity.Timestamp.IsZero() {
+		t.Errorf("expected non-zero timestamp")
+	}
+	if rec.Detail != "ok" {
+		t.Errorf("expected detail 'ok' on accepted probe, got %s", rec.Detail)
 	}
 }
 
