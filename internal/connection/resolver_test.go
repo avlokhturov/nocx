@@ -1,6 +1,7 @@
 package connection
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 
@@ -797,5 +798,122 @@ func TestResolver_MultiHopCycleDetected(t *testing.T) {
 	_, _, err := r.Resolve("profile:a")
 	if err == nil {
 		t.Fatal("expected cycle detection error, got nil")
+	}
+}
+
+// --- ResolveWithVersion: what it must refuse -------------------------------
+//
+// These assert the absence of a fallback. The rollout probe authenticates with
+// a staged candidate; if the resolver quietly substituted the current version
+// when the candidate was missing, a probe would spend a second password against
+// the same host and the operator would see a success that proves nothing.
+
+// rotationFixture builds a profile whose credential has a current and a
+// candidate version, each with its own password secret.
+func rotationFixture(t *testing.T) (*stubProfileStore, *stubSecretStore, credential.SecretID, credential.SecretID) {
+	t.Helper()
+	ps := newStubProfileStore()
+	ss := newStubSecretStore()
+
+	curID := credential.NewSecretID()
+	candID := credential.NewSecretID()
+	if err := ss.Set(curID, credential.NewSecret("current-pw")); err != nil {
+		t.Fatalf("set current: %v", err)
+	}
+	if err := ss.Set(candID, credential.NewSecret("candidate-pw")); err != nil {
+		t.Fatalf("set candidate: %v", err)
+	}
+
+	_ = ps.SaveCredential(profile.Credential{
+		ID:       "cred:rot:aaa",
+		Name:     "rot",
+		Username: "ru",
+		Auth:     "password",
+		Versions: []profile.CredentialVersion{
+			{ID: "v1", Auth: "password", PasswordSecretID: string(curID)},
+			{ID: "v2", Auth: "password", PasswordSecretID: string(candID)},
+		},
+		CurrentVersionID:   "v1",
+		CandidateVersionID: "v2",
+	})
+	_ = ps.SaveProfile(profile.SSHProfile{
+		Base:    profile.Base{ID: "profile:rot", Name: "rot"},
+		Options: profile.StoredSSHProfileOptions{Host: "rot.example.com", CredentialID: "cred:rot:aaa"},
+	})
+	return ps, ss, curID, candID
+}
+
+func TestResolveWithVersion_UsesTheNamedVersion(t *testing.T) {
+	ps, ss, _, candID := rotationFixture(t)
+
+	_, cfg, err := NewResolver(ps, ps, ps, ss).ResolveWithVersion("profile:rot", "cred:rot:aaa", "v2")
+	if err != nil {
+		t.Fatalf("ResolveWithVersion: %v", err)
+	}
+	if cfg.SecretID != candID {
+		t.Errorf("SecretID = %q, want the candidate %q", cfg.SecretID, candID)
+	}
+	if cfg.CredentialVersionID != "v2" {
+		t.Errorf("CredentialVersionID = %q, want v2", cfg.CredentialVersionID)
+	}
+}
+
+func TestResolveWithVersion_MissingVersionDoesNotFallBack(t *testing.T) {
+	ps, ss, curID, _ := rotationFixture(t)
+
+	_, cfg, err := NewResolver(ps, ps, ps, ss).ResolveWithVersion("profile:rot", "cred:rot:aaa", "v99")
+	if !errors.Is(err, ErrVersionNotFound) {
+		t.Fatalf("err = %v, want ErrVersionNotFound", err)
+	}
+	if cfg != nil {
+		t.Fatalf("cfg = %+v, want nil — a config carrying %q would be the silent retry this forbids", cfg, curID)
+	}
+}
+
+func TestResolveWithVersion_WrongCredentialIsRefused(t *testing.T) {
+	ps, ss, _, _ := rotationFixture(t)
+
+	_, cfg, err := NewResolver(ps, ps, ps, ss).ResolveWithVersion("profile:rot", "cred:someone-else:zzz", "v2")
+	if !errors.Is(err, ErrCredentialMismatch) {
+		t.Fatalf("err = %v, want ErrCredentialMismatch", err)
+	}
+	if cfg != nil {
+		t.Fatalf("cfg = %+v, want nil", cfg)
+	}
+}
+
+func TestResolveWithVersion_LeavesTheBastionOnItsCurrentVersion(t *testing.T) {
+	ps, ss, _, candID := rotationFixture(t)
+
+	// A bastion with its own credential, one version, in front of the target.
+	jumpID := credential.NewSecretID()
+	if err := ss.Set(jumpID, credential.NewSecret("jump-pw")); err != nil {
+		t.Fatalf("set jump: %v", err)
+	}
+	_ = ps.SaveCredential(profile.Credential{
+		ID:               "cred:bastion:bbb",
+		Name:             "bastion",
+		Username:         "bu",
+		Auth:             "password",
+		Versions:         []profile.CredentialVersion{{ID: "b1", Auth: "password", PasswordSecretID: string(jumpID)}},
+		CurrentVersionID: "b1",
+	})
+	_ = ps.SaveProfile(profile.SSHProfile{
+		Base:    profile.Base{ID: "profile:bastion", Name: "bastion"},
+		Options: profile.StoredSSHProfileOptions{Host: "bastion.example.com", CredentialID: "cred:bastion:bbb"},
+	})
+	tgt := ps.profiles["profile:rot"]
+	tgt.Options.JumpHost = profile.Ptr("profile:bastion")
+	_ = ps.SaveProfile(tgt)
+
+	_, cfg, err := NewResolver(ps, ps, ps, ss).ResolveWithVersion("profile:rot", "cred:rot:aaa", "v2")
+	if err != nil {
+		t.Fatalf("ResolveWithVersion: %v", err)
+	}
+	if cfg.SecretID != candID {
+		t.Errorf("target SecretID = %q, want the candidate %q", cfg.SecretID, candID)
+	}
+	if cfg.JumpSecretID != jumpID {
+		t.Errorf("JumpSecretID = %q, want the bastion's own %q — rotating one credential must not touch the bastion", cfg.JumpSecretID, jumpID)
 	}
 }
