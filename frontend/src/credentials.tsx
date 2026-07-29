@@ -49,6 +49,11 @@ export function CredentialsSection(props: CredentialsSectionProps) {
   const [rolloutCred, setRolloutCred] = createSignal<Credential | null>(null)
   const [rolloutOpen, setRolloutOpen] = createSignal(false)
   const [saving, setSaving] = createSignal(false)
+  // Staged rollout is behind a flag while its shape is decided. The apparatus
+  // answers a question a domain-controlled fleet does not ask, and it carries a
+  // known gap (nocx-jb20.4) — so it is off unless someone turns it on, rather
+  // than a button somebody finds.
+  const [rotationEnabled, setRotationEnabled] = createSignal(false)
 
   const formRef = { current: null as CredentialFormHandle | null }
 
@@ -80,6 +85,17 @@ export function CredentialsSection(props: CredentialsSectionProps) {
 
   onMount(() => {
     void loadAll()
+    props.client
+      .getSnapshot()
+      .then((snap) => {
+        setRotationEnabled(snap.values['credentials.rotationEnabled'] === true)
+      })
+      .catch((err: unknown) => {
+        // A snapshot that does not arrive leaves the flag off, which is the
+        // safe direction: the tools stay hidden rather than appearing by
+        // accident.
+        log.warn('Could not read the rotation flag', { message: (err as Error).message })
+      })
   })
 
   function openNewDialog() {
@@ -262,7 +278,7 @@ export function CredentialsSection(props: CredentialsSectionProps) {
                     <div class="cr-item-meta">{subtitle()}</div>
                   </div>
                   <div class="cr-item-actions">
-                    <Show when={cred.auth === 'password'}>
+                    <Show when={rotationEnabled() && cred.auth === 'password'}>
                       <Button variant="default" size="sm" onClick={() => openRolloutDialog(cred)}>
                         Rollout
                       </Button>
