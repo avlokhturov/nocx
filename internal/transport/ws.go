@@ -655,6 +655,8 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.handleVersionsRetire(wconn, req)
 	case "versions.revoke":
 		s.handleVersionsRevoke(wconn, req)
+	case "versions.impact":
+		s.handleVersionsImpact(wconn, req)
 	case "rollout.run":
 		s.handleRolloutRun(wconn, req)
 	case "sshConfig.aliases":

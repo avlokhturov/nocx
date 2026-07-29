@@ -84,6 +84,32 @@ type versionsActionResult struct {
 	SessionsClosed int    `json:"sessionsClosed"`
 }
 
+type versionsImpactParams struct {
+	CredentialID string `json:"credentialId"`
+	VersionID    string `json:"versionId"`
+}
+
+type versionLiveSession struct {
+	SessionID   string `json:"sessionId"`
+	ProfileID   string `json:"profileId"`
+	ProfileName string `json:"profileName"`
+}
+
+type versionProfileRef struct {
+	ProfileID   string `json:"profileId"`
+	ProfileName string `json:"profileName"`
+}
+
+type versionsImpactResult struct {
+	VersionID      string               `json:"versionId"`
+	IsCurrent      bool                 `json:"isCurrent"`
+	IsCandidate    bool                 `json:"isCandidate"`
+	Retired        bool                 `json:"retired"`
+	LiveSessions   []versionLiveSession `json:"liveSessions"`
+	PinnedProfiles []versionProfileRef  `json:"pinnedProfiles"`
+	ProfilesUsing  []versionProfileRef  `json:"profilesUsing"`
+}
+
 // ---------------------------------------------------------------------------
 // Handler: versions.promote
 // ---------------------------------------------------------------------------
@@ -230,6 +256,155 @@ func (s *WSServer) handleVersionsRevoke(wconn *wsConn, req jsonrpcRequest) {
 		VersionID:      params.VersionID,
 		Retired:        true,
 		SessionsClosed: closed,
+	})))
+}
+
+// ---------------------------------------------------------------------------
+// Handler: versions.impact
+// ---------------------------------------------------------------------------
+
+// handleVersionsImpact computes the blast radius of a version transition
+// without performing any action. Returns live sessions, pinned profiles,
+// and profiles that would resolve to this version.
+//
+// Read-only: a double call with identical params must produce identical
+// side-effect-free results.
+//
+//	--> {"jsonrpc":"2.0","id":1,"method":"versions.impact","params":{"credentialId":"cred:prod-ops:abc","versionId":"v1"}}
+//	<-- {"jsonrpc":"2.0","id":1,"result":{
+//	      "versionId":"v1",
+//	      "isCurrent":true,
+//	      "isCandidate":false,
+//	      "retired":false,
+//	      "liveSessions":[{"sessionId":"sess-7","profileId":"ssh:web01:1","profileName":"web-01"}],
+//	      "pinnedProfiles":[{"profileId":"ssh:legacy:1","profileName":"legacy-db"}],
+//	      "profilesUsing":[{"profileId":"ssh:web01:1","profileName":"web-01"}]
+//	    }}
+func (s *WSServer) handleVersionsImpact(wconn *wsConn, req jsonrpcRequest) {
+	if s.profiles == nil || s.groups == nil || s.credMeta == nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "profiles not available"))
+		return
+	}
+
+	var params versionsImpactParams
+	if err := json.Unmarshal(req.Params, &params); err != nil || params.CredentialID == "" || params.VersionID == "" {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: credentialId and versionId required"))
+		return
+	}
+
+	// Validate the credential exists.
+	cred, err := s.findFullCredential(params.CredentialID)
+	if err != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "credential not found"))
+		return
+	}
+
+	// Validate the version exists. Accept both explicit versions and the
+	// synthesized legacy "v1" from cred.Current().
+	version, versionFound := cred.Version(params.VersionID)
+	if !versionFound {
+		if cur, ok := cred.Current(); !ok || cur.ID != params.VersionID {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "version not found"))
+			return
+		}
+	}
+
+	// Load profiles and groups for impact computation.
+	allProfiles, err := s.profiles.LoadProfiles()
+	if err != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		return
+	}
+	allGroups, err := s.groups.LoadGroups()
+	if err != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		return
+	}
+
+	// Build profile name lookup.
+	profileNames := make(map[string]string, len(allProfiles))
+	for _, p := range allProfiles {
+		profileNames[p.ID] = p.Name
+	}
+
+	// Compute liveSessions: sessions on this credential AND this version.
+	var liveSessions []versionLiveSession
+	if s.registry != nil {
+		for _, sess := range s.registry.List() {
+			if sess.CredentialID() == params.CredentialID && sess.CredentialVersionID() == params.VersionID {
+				liveSessions = append(liveSessions, versionLiveSession{
+					SessionID:   string(sess.ID()),
+					ProfileID:   sess.ProfileID(),
+					ProfileName: profileNames[sess.ProfileID()],
+				})
+			}
+		}
+	}
+
+	// Version status flags.
+	isCurrent := false
+	if cur, ok := cred.Current(); ok && cur.ID == params.VersionID {
+		isCurrent = true
+	}
+	isCandidate := false
+	if cand := cred.CandidateVersionID; cand != "" && cand == params.VersionID {
+		isCandidate = true
+	}
+	retired := version.RetiredAt != nil
+
+	// Compute pinnedProfiles and profilesUsing by resolving each profile's
+	// effective credential through group inheritance.
+	pinnedProfiles := make([]versionProfileRef, 0)
+	profilesUsing := make([]versionProfileRef, 0)
+
+	for _, p := range allProfiles {
+		eff, err := profile.ResolveEffectiveProfile(p, allGroups, profile.SparseSSHOptions{})
+		if err != nil {
+			continue // profile not resolvable — can't be using anything
+		}
+		if eff.ResolvedOptions.CredentialID != params.CredentialID {
+			continue // not this credential
+		}
+
+		// Determine which version this profile would use for a new connection.
+		versionForProfile := ""
+		if p.PinnedVersionID != "" {
+			// Pinned to a specific version — that's what retirement preserves.
+			versionForProfile = p.PinnedVersionID
+		} else if cur, ok := cred.Current(); ok {
+			// Unpinned — follows the credential's current version.
+			versionForProfile = cur.ID
+		}
+
+		if versionForProfile != params.VersionID {
+			continue
+		}
+
+		profilesUsing = append(profilesUsing, versionProfileRef{
+			ProfileID:   p.ID,
+			ProfileName: p.Name,
+		})
+
+		if p.PinnedVersionID == params.VersionID {
+			pinnedProfiles = append(pinnedProfiles, versionProfileRef{
+				ProfileID:   p.ID,
+				ProfileName: p.Name,
+			})
+		}
+	}
+
+	if liveSessions == nil {
+		liveSessions = []versionLiveSession{}
+	}
+
+	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(versionsImpactResult{
+		VersionID:      params.VersionID,
+		IsCurrent:      isCurrent,
+		IsCandidate:    isCandidate,
+		Retired:        retired,
+		LiveSessions:   liveSessions,
+		PinnedProfiles: pinnedProfiles,
+		ProfilesUsing:  profilesUsing,
 	})))
 }
 

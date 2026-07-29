@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -458,5 +459,596 @@ func TestVersionsRevoke_ClosesOnlyVersionSessions(t *testing.T) {
 				t.Error("v1 RetiredAt is nil, want non-nil after revoke")
 			}
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// versions.impact
+// ---------------------------------------------------------------------------
+
+// TestVersionsImpact_LiveSessionsAndScoping verifies that liveSessions
+// reports sessions on the matching credential+version and excludes sessions
+// on a different version of the same credential.
+func TestVersionsImpact_LiveSessionsAndScoping(t *testing.T) {
+	dir := t.TempDir()
+	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
+	reg := newRegWithStub(log.NewSlogAdapter(nil))
+
+	ws := NewWSServer(
+		log.NewSlogAdapter(nil), reg,
+		WithProfileRepository(ps),
+		WithGroupRepository(ps),
+		WithCredentialMetadataRepository(ps),
+	)
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer conn.Close() //nolint:errcheck
+
+	// Create credential with v1 (current) and v2.
+	cred := profile.Credential{
+		ID: "cred:test:1", Name: "test", Username: "tu", Auth: "password",
+		Versions: []profile.CredentialVersion{
+			{ID: "v1", PasswordSecretID: "sec:1"},
+			{ID: "v2", PasswordSecretID: "sec:2"},
+		},
+		CurrentVersionID: "v1",
+	}
+	if err := ps.CreateCredential(cred); err != nil {
+		t.Fatalf("CreateCredential: %v", err)
+	}
+
+	// Create profile A with direct credential ref.
+	jsonrpcCall(t, conn, "profiles.create", profile.SSHProfile{
+		Base: profile.Base{ID: "ssh:web:1", Name: "web-01", Type: "ssh"},
+		Options: profile.StoredSSHProfileOptions{
+			Host:         "web01.example.com",
+			CredentialID: "cred:test:1",
+		},
+	})
+
+	// Open a session on v1.
+	sessV1, err := reg.Open(ctx, session.Config{
+		ProfileID:           "ssh:web:1",
+		CredentialID:        "cred:test:1",
+		CredentialVersionID: "v1",
+	})
+	if err != nil {
+		t.Fatalf("registry.Open v1: %v", err)
+	}
+	defer reg.Close(sessV1.ID()) //nolint:errcheck
+
+	// Open a session on v2 (same credential, different version).
+	jsonrpcCall(t, conn, "profiles.create", profile.SSHProfile{
+		Base: profile.Base{ID: "ssh:web:2", Name: "web-02", Type: "ssh"},
+		Options: profile.StoredSSHProfileOptions{
+			Host:         "web02.example.com",
+			CredentialID: "cred:test:1",
+		},
+	})
+
+	sessV2, err := reg.Open(ctx, session.Config{
+		ProfileID:           "ssh:web:2",
+		CredentialID:        "cred:test:1",
+		CredentialVersionID: "v2",
+	})
+	if err != nil {
+		t.Fatalf("registry.Open v2: %v", err)
+	}
+	defer reg.Close(sessV2.ID()) //nolint:errcheck
+
+	// Call impact for v1.
+	resp := jsonrpcCall(t, conn, "versions.impact", map[string]any{
+		"credentialId": "cred:test:1",
+		"versionId":    "v1",
+	})
+
+	var result struct {
+		Result versionsImpactResult `json:"result"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	// Only the v1 session should appear.
+	if len(result.Result.LiveSessions) != 1 {
+		t.Fatalf("expected 1 live session, got %d", len(result.Result.LiveSessions))
+	}
+	if result.Result.LiveSessions[0].ProfileID != "ssh:web:1" {
+		t.Errorf("expected profile ssh:web:1, got %s", result.Result.LiveSessions[0].ProfileID)
+	}
+	if result.Result.LiveSessions[0].ProfileName != "web-01" {
+		t.Errorf("expected profile name web-01, got %s", result.Result.LiveSessions[0].ProfileName)
+	}
+
+	// v1 should be current, not v2.
+	if !result.Result.IsCurrent {
+		t.Error("expected isCurrent=true for v1")
+	}
+	if result.Result.IsCandidate {
+		t.Error("expected isCandidate=false for v1")
+	}
+	if result.Result.Retired {
+		t.Error("expected retired=false for v1 (not retired)")
+	}
+
+	// Verify session ID is populated (not empty string).
+	if result.Result.LiveSessions[0].SessionID == "" {
+		t.Error("expected non-empty sessionId")
+	}
+
+	// Verify v2 session is NOT present.
+	for _, ls := range result.Result.LiveSessions {
+		if ls.ProfileID == "ssh:web:2" {
+			t.Error("v2 session should not be in liveSessions for v1 impact")
+		}
+	}
+}
+
+// TestVersionsImpact_PinnedAndUsingProfiles verifies pinnedProfiles and
+// profilesUsing reflect which profiles would resolve to this version,
+// including group-inherited credentials.
+func TestVersionsImpact_PinnedAndUsingProfiles(t *testing.T) {
+	dir := t.TempDir()
+	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
+	reg := newRegWithStub(log.NewSlogAdapter(nil))
+
+	ws := NewWSServer(
+		log.NewSlogAdapter(nil), reg,
+		WithProfileRepository(ps),
+		WithGroupRepository(ps),
+		WithCredentialMetadataRepository(ps),
+	)
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer conn.Close() //nolint:errcheck
+
+	// Create credential with v1 (current) and v2.
+	cred := profile.Credential{
+		ID: "cred:test:1", Name: "test", Username: "tu", Auth: "password",
+		Versions: []profile.CredentialVersion{
+			{ID: "v1", PasswordSecretID: "sec:1"},
+			{ID: "v2", PasswordSecretID: "sec:2"},
+		},
+		CurrentVersionID: "v1",
+	}
+	if err := ps.CreateCredential(cred); err != nil {
+		t.Fatalf("CreateCredential: %v", err)
+	}
+
+	// Profile A: directly references credential, unpinned → uses v1 (current).
+	jsonrpcCall(t, conn, "profiles.create", profile.SSHProfile{
+		Base: profile.Base{ID: "ssh:web:1", Name: "web-01", Type: "ssh"},
+		Options: profile.StoredSSHProfileOptions{
+			Host:         "web01.example.com",
+			CredentialID: "cred:test:1",
+		},
+	})
+
+	// Profile B: pinned to v2 (different version).
+	jsonrpcCall(t, conn, "profiles.create", profile.SSHProfile{
+		Base: profile.Base{
+			ID:              "ssh:legacy:1",
+			Name:            "legacy-db",
+			Type:            "ssh",
+			PinnedVersionID: "v2",
+		},
+		Options: profile.StoredSSHProfileOptions{
+			Host:         "legacy.example.com",
+			CredentialID: "cred:test:1",
+		},
+	})
+
+	// Profile C: inherits credential from group defaults.
+	jsonrpcCall(t, conn, "groups.create", profile.ProfileGroup{
+		ID: "g1", Name: "Prod",
+		Defaults: &profile.ProfileDefaults{
+			SparseSSHOptions: profile.SparseSSHOptions{
+				CredentialID: profile.Ptr("cred:test:1"),
+			},
+		},
+	})
+	jsonrpcCall(t, conn, "profiles.create", profile.SSHProfile{
+		Base:    profile.Base{ID: "ssh:grouped:1", Name: "grouped-server", Type: "ssh", Group: "g1"},
+		Options: profile.StoredSSHProfileOptions{Host: "grouped.example.com"},
+	})
+
+	// Profile D: uses a different credential entirely.
+	cred2 := profile.Credential{
+		ID: "cred:other:1", Name: "other", Username: "ou", Auth: "password",
+		Versions: []profile.CredentialVersion{
+			{ID: "v1", PasswordSecretID: "sec:other"},
+		},
+		CurrentVersionID: "v1",
+	}
+	if err := ps.CreateCredential(cred2); err != nil {
+		t.Fatalf("CreateCredential cred2: %v", err)
+	}
+	jsonrpcCall(t, conn, "profiles.create", profile.SSHProfile{
+		Base: profile.Base{ID: "ssh:other:1", Name: "other-server", Type: "ssh"},
+		Options: profile.StoredSSHProfileOptions{
+			Host:         "other.example.com",
+			CredentialID: "cred:other:1",
+		},
+	})
+
+	// Call impact for v1.
+	resp := jsonrpcCall(t, conn, "versions.impact", map[string]any{
+		"credentialId": "cred:test:1",
+		"versionId":    "v1",
+	})
+
+	var result struct {
+		Result versionsImpactResult `json:"result"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	// profilesUsing: profile A (direct, unpinned → v1) and profile C (group inheritance, unpinned → v1).
+	// Profile B is pinned to v2 → not using v1.
+	// Profile D uses different credential → not included.
+	if len(result.Result.ProfilesUsing) != 2 {
+		t.Fatalf("expected 2 profilesUsing (A direct + C group), got %d", len(result.Result.ProfilesUsing))
+	}
+
+	foundDirect := false
+	foundGrouped := false
+	for _, pu := range result.Result.ProfilesUsing {
+		if pu.ProfileID == "ssh:web:1" {
+			foundDirect = true
+			if pu.ProfileName != "web-01" {
+				t.Errorf("expected profile name web-01, got %s", pu.ProfileName)
+			}
+		}
+		if pu.ProfileID == "ssh:grouped:1" {
+			foundGrouped = true
+			if pu.ProfileName != "grouped-server" {
+				t.Errorf("expected profile name grouped-server, got %s", pu.ProfileName)
+			}
+		}
+	}
+	if !foundDirect {
+		t.Error("expected ssh:web:1 in profilesUsing (direct credential ref)")
+	}
+	if !foundGrouped {
+		t.Error("expected ssh:grouped:1 in profilesUsing (group inheritance)")
+	}
+
+	// pinnedProfiles: none pinned to v1.
+	if len(result.Result.PinnedProfiles) != 0 {
+		t.Errorf("expected 0 pinnedProfiles for v1, got %d", len(result.Result.PinnedProfiles))
+	}
+
+	// Verify profile B (pinned to v2) is NOT in profilesUsing for v1.
+	for _, pu := range result.Result.ProfilesUsing {
+		if pu.ProfileID == "ssh:legacy:1" {
+			t.Error("profile pinned to v2 should not be in profilesUsing for v1")
+		}
+	}
+}
+
+// TestVersionsImpact_PinnedVersion verifies pinnedProfiles correctly identifies
+// profiles pinned to the requested version.
+func TestVersionsImpact_PinnedVersion(t *testing.T) {
+	dir := t.TempDir()
+	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
+	reg := newRegWithStub(log.NewSlogAdapter(nil))
+
+	ws := NewWSServer(
+		log.NewSlogAdapter(nil), reg,
+		WithProfileRepository(ps),
+		WithGroupRepository(ps),
+		WithCredentialMetadataRepository(ps),
+	)
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer conn.Close() //nolint:errcheck
+
+	cred := profile.Credential{
+		ID: "cred:test:1", Name: "test", Username: "tu", Auth: "password",
+		Versions: []profile.CredentialVersion{
+			{ID: "v1", PasswordSecretID: "sec:1"},
+			{ID: "v2", PasswordSecretID: "sec:2"},
+		},
+		CurrentVersionID: "v1",
+	}
+	if err := ps.CreateCredential(cred); err != nil {
+		t.Fatalf("CreateCredential: %v", err)
+	}
+
+	// Profile pinned to v2.
+	jsonrpcCall(t, conn, "profiles.create", profile.SSHProfile{
+		Base: profile.Base{
+			ID:              "ssh:pinned:v2:1",
+			Name:            "pinned-to-v2",
+			Type:            "ssh",
+			PinnedVersionID: "v2",
+		},
+		Options: profile.StoredSSHProfileOptions{
+			Host:         "pinned.example.com",
+			CredentialID: "cred:test:1",
+		},
+	})
+
+	// Profile pinned to v1.
+	jsonrpcCall(t, conn, "profiles.create", profile.SSHProfile{
+		Base: profile.Base{
+			ID:              "ssh:pinned:v1:1",
+			Name:            "pinned-to-v1",
+			Type:            "ssh",
+			PinnedVersionID: "v1",
+		},
+		Options: profile.StoredSSHProfileOptions{
+			Host:         "pinned-v1.example.com",
+			CredentialID: "cred:test:1",
+		},
+	})
+
+	// Impact for v2.
+	resp := jsonrpcCall(t, conn, "versions.impact", map[string]any{
+		"credentialId": "cred:test:1",
+		"versionId":    "v2",
+	})
+
+	var result struct {
+		Result versionsImpactResult `json:"result"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	// Only the v2-pinned profile should be in pinnedProfiles.
+	if len(result.Result.PinnedProfiles) != 1 {
+		t.Fatalf("expected 1 pinned profile for v2, got %d", len(result.Result.PinnedProfiles))
+	}
+	if result.Result.PinnedProfiles[0].ProfileID != "ssh:pinned:v2:1" {
+		t.Errorf("expected ssh:pinned:v2:1, got %s", result.Result.PinnedProfiles[0].ProfileID)
+	}
+
+	// profilesUsing should include only the v2-pinned profile (it's the only
+	// profile that resolves to v2 — the other is pinned to v1).
+	if len(result.Result.ProfilesUsing) != 1 {
+		t.Fatalf("expected 1 profileUsing for v2, got %d", len(result.Result.ProfilesUsing))
+	}
+
+	// v2 should not be current.
+	if result.Result.IsCurrent {
+		t.Error("expected isCurrent=false for v2")
+	}
+}
+
+// TestVersionsImpact_EmptyResults verifies that empty result lists marshal
+// as JSON arrays, never null.
+func TestVersionsImpact_EmptyResults(t *testing.T) {
+	dir := t.TempDir()
+	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
+	reg := newRegWithStub(log.NewSlogAdapter(nil))
+
+	ws := NewWSServer(
+		log.NewSlogAdapter(nil), reg,
+		WithProfileRepository(ps),
+		WithGroupRepository(ps),
+		WithCredentialMetadataRepository(ps),
+	)
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer conn.Close() //nolint:errcheck
+
+	// Create a credential with v1 but no profiles and no sessions.
+	cred := profile.Credential{
+		ID: "cred:empty:1", Name: "empty", Username: "tu", Auth: "password",
+		Versions: []profile.CredentialVersion{
+			{ID: "v1", PasswordSecretID: "sec:1"},
+		},
+		CurrentVersionID: "v1",
+	}
+	if err := ps.CreateCredential(cred); err != nil {
+		t.Fatalf("CreateCredential: %v", err)
+	}
+
+	resp := jsonrpcCall(t, conn, "versions.impact", map[string]any{
+		"credentialId": "cred:empty:1",
+		"versionId":    "v1",
+	})
+
+	// Assert that liveSessions, pinnedProfiles, profilesUsing are "[]" not null.
+	var raw struct {
+		Result json.RawMessage `json:"result"`
+	}
+	if err := json.Unmarshal(resp, &raw); err != nil {
+		t.Fatalf("unmarshal raw: %v", err)
+	}
+
+	var fields struct {
+		LiveSessions   json.RawMessage `json:"liveSessions"`
+		PinnedProfiles json.RawMessage `json:"pinnedProfiles"`
+		ProfilesUsing  json.RawMessage `json:"profilesUsing"`
+	}
+	if err := json.Unmarshal(raw.Result, &fields); err != nil {
+		t.Fatalf("unmarshal fields: %v", err)
+	}
+
+	if string(fields.LiveSessions) != "[]" {
+		t.Errorf("liveSessions should be [], got %s", string(fields.LiveSessions))
+	}
+	if string(fields.PinnedProfiles) != "[]" {
+		t.Errorf("pinnedProfiles should be [], got %s", string(fields.PinnedProfiles))
+	}
+	if string(fields.ProfilesUsing) != "[]" {
+		t.Errorf("profilesUsing should be [], got %s", string(fields.ProfilesUsing))
+	}
+}
+
+// TestVersionsImpact_Idempotent verifies that calling versions.impact twice
+// produces identical results and causes no side effects.
+func TestVersionsImpact_Idempotent(t *testing.T) {
+	dir := t.TempDir()
+	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
+	reg := newRegWithStub(log.NewSlogAdapter(nil))
+
+	ws := NewWSServer(
+		log.NewSlogAdapter(nil), reg,
+		WithProfileRepository(ps),
+		WithGroupRepository(ps),
+		WithCredentialMetadataRepository(ps),
+	)
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer conn.Close() //nolint:errcheck
+
+	cred := profile.Credential{
+		ID: "cred:idem:1", Name: "idem", Username: "tu", Auth: "password",
+		Versions: []profile.CredentialVersion{
+			{ID: "v1", PasswordSecretID: "sec:1"},
+		},
+		CurrentVersionID: "v1",
+	}
+	if err := ps.CreateCredential(cred); err != nil {
+		t.Fatalf("CreateCredential: %v", err)
+	}
+
+	params := map[string]any{
+		"credentialId": "cred:idem:1",
+		"versionId":    "v1",
+	}
+
+	resp1 := jsonrpcCall(t, conn, "versions.impact", params)
+	resp2 := jsonrpcCall(t, conn, "versions.impact", params)
+
+	// Both responses should be identical.
+	if string(resp1) != string(resp2) {
+		t.Error("two identical impact calls produced different results")
+	}
+
+	// Verify the credential was not mutated — still current, not retired.
+	all, err := ps.LoadCredentials()
+	if err != nil {
+		t.Fatalf("LoadCredentials: %v", err)
+	}
+	var found *profile.Credential
+	for i, c := range all {
+		if c.ID == "cred:idem:1" {
+			found = &all[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("credential not found after impact call")
+	}
+	if found.CurrentVersionID != "v1" {
+		t.Error("impact should not change current version")
+	}
+	if len(found.Versions) != 1 {
+		t.Error("impact should not add or remove versions")
+	}
+	if found.Versions[0].RetiredAt != nil {
+		t.Error("impact should not retire a version")
+	}
+}
+
+// TestVersionsImpact_UnknownCredential verifies that an unknown credential ID
+// produces an error rather than an empty success.
+func TestVersionsImpact_UnknownCredential(t *testing.T) {
+	dir := t.TempDir()
+	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
+	reg := newRegWithStub(log.NewSlogAdapter(nil))
+
+	ws := NewWSServer(
+		log.NewSlogAdapter(nil), reg,
+		WithProfileRepository(ps),
+		WithGroupRepository(ps),
+		WithCredentialMetadataRepository(ps),
+	)
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer conn.Close() //nolint:errcheck
+
+	resp := jsonrpcCall(t, conn, "versions.impact", map[string]any{
+		"credentialId": "cred:nonexistent:1",
+		"versionId":    "v1",
+	})
+
+	var errResp rpcErrorResponse
+	if err := json.Unmarshal(resp, &errResp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if errResp.Error == nil {
+		t.Fatal("expected error for unknown credential, got success")
+	}
+	if errResp.Error.Code != -32602 {
+		t.Errorf("expected error code -32602, got %d", errResp.Error.Code)
+	}
+}
+
+// TestVersionsImpact_UnknownVersion verifies that an unknown version ID
+// produces an error rather than an empty success.
+func TestVersionsImpact_UnknownVersion(t *testing.T) {
+	dir := t.TempDir()
+	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
+	reg := newRegWithStub(log.NewSlogAdapter(nil))
+
+	ws := NewWSServer(
+		log.NewSlogAdapter(nil), reg,
+		WithProfileRepository(ps),
+		WithGroupRepository(ps),
+		WithCredentialMetadataRepository(ps),
+	)
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer conn.Close() //nolint:errcheck
+
+	cred := profile.Credential{
+		ID: "cred:noversion:1", Name: "nover", Username: "tu", Auth: "password",
+		Versions: []profile.CredentialVersion{
+			{ID: "v1", PasswordSecretID: "sec:1"},
+		},
+		CurrentVersionID: "v1",
+	}
+	if err := ps.CreateCredential(cred); err != nil {
+		t.Fatalf("CreateCredential: %v", err)
+	}
+
+	resp := jsonrpcCall(t, conn, "versions.impact", map[string]any{
+		"credentialId": "cred:noversion:1",
+		"versionId":    "v99",
+	})
+
+	var errResp rpcErrorResponse
+	if err := json.Unmarshal(resp, &errResp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if errResp.Error == nil {
+		t.Fatal("expected error for unknown version, got success")
+	}
+	if errResp.Error.Code != -32602 {
+		t.Errorf("expected error code -32602, got %d", errResp.Error.Code)
 	}
 }
