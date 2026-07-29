@@ -102,6 +102,7 @@ func New(opts ...Option) (*App, error) {
 		transport.WithProfileUsageStore(usageStore),
 		transport.WithExportPaths(paths),
 		transport.WithExportContentDB(content.NewStub(logger)),
+		transport.WithProber(&proberAdapter{client: sshClient}),
 	}
 	tp := transport.NewWSServer(logger, sess, tpOpts...)
 
@@ -165,4 +166,13 @@ type sshFactoryAdapter struct {
 
 func (a *sshFactoryAdapter) Connect(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.Channel, error) {
 	return a.client.Connect(ctx, host, opts...)
+}
+
+// proberAdapter adapts ssh.RealClient to transport.Prober.
+type proberAdapter struct {
+	client *ssh.RealClient
+}
+
+func (a *proberAdapter) Probe(ctx context.Context, host string, cfg *ssh.ConnectConfig) error {
+	return a.client.ProbeConfig(ctx, host, cfg)
 }

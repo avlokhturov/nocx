@@ -5,8 +5,11 @@ import (
 	"crypto/rand"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/credential"
@@ -347,4 +350,112 @@ func TestConnectConfigNewFields(t *testing.T) {
 	if cfg.SecretID == "" {
 		t.Error("SecretID not set")
 	}
+}
+
+// TestProbeFirstMethodFromExplicitAuthMethods verifies that the probe picks
+// the same first method buildAuthChain would — no hardcoded expectation,
+// so the test stays correct when the chain's order changes deliberately.
+func TestProbeFirstMethodFromExplicitAuthMethods(t *testing.T) {
+	rc := newTestRealClient(t)
+	resolved := &resolvedConfig{user: "alice", hostName: "h"}
+
+	// Use two distinguishable types: public key (gossh.PublicKeys) and
+	// password (gossh.Password). firstAuthMethod must pick the first entry,
+	// which is the public-key method — if it picks the password method
+	// instead, the concrete type won't match chain[0].method.
+	dir := t.TempDir()
+	keyPath := writeTestKey(t, dir)
+	signer, err := rc.loadKey(keyPath, nil)
+	if err != nil {
+		t.Fatalf("loadKey: %v", err)
+	}
+	explicit := []gossh.AuthMethod{
+		gossh.PublicKeys(signer),
+		gossh.Password("fallback"),
+	}
+	cfg := &ConnectConfig{AuthMethods: explicit}
+
+	chain, err := rc.buildAuthChain(resolved, cfg)
+	if err != nil {
+		t.Fatalf("buildAuthChain: %v", err)
+	}
+
+	method, err := firstAuthMethod(chain)
+	if err != nil {
+		t.Fatalf("firstAuthMethod: %v", err)
+	}
+	if method == nil {
+		t.Fatal("firstAuthMethod returned nil method for explicit AuthMethods")
+	}
+	if len(chain) == 0 {
+		t.Fatal("buildAuthChain returned empty chain for explicit AuthMethods")
+	}
+	if chain[0].method == nil {
+		t.Fatal("buildAuthChain's first entry has nil method for explicit AuthMethods")
+	}
+	// gossh.AuthMethod is incomparable (unexported function-typed method),
+	// so we use reflect.TypeOf for a safe concrete-type comparison.
+	// Using two different method types (publicKey vs password) means a
+	// type mismatch proves firstAuthMethod picked the wrong entry.
+	methodType := reflect.TypeOf(method)
+	chainType := reflect.TypeOf(chain[0].method)
+	if methodType != chainType {
+		t.Errorf("firstAuthMethod returned %v, but buildAuthChain's first entry is %v; did it pick entry 1 (password) instead of entry 0?", methodType, chainType)
+	}
+}
+
+// TestProbeFirstMethodKeyboardInteractive verifies that:
+//   - with a stored secret and AuthMode=keyboardInteractive, firstAuthMethod
+//     returns a keyboard-interactive method (not a plain password method);
+//   - without a stored secret, firstAuthMethod returns ErrEncryptedKey
+//     (needs-interactive).
+func TestProbeFirstMethodKeyboardInteractive(t *testing.T) {
+	keyring.MockInit()
+	rc := newTestRealClient(t)
+	resolved := &resolvedConfig{user: "alice", hostName: "h"}
+
+	t.Run("with stored secret", func(t *testing.T) {
+		store := credential.NewKeychain()
+		id := credential.NewSecretID()
+		if err := store.Set(id, credential.NewSecret("secret-pw")); err != nil {
+			t.Fatalf("Set: %v", err)
+		}
+		cfg := &ConnectConfig{Secrets: store, SecretID: id, AuthMode: "keyboardInteractive"}
+
+		chain, err := rc.buildAuthChain(resolved, cfg)
+		if err != nil {
+			t.Fatalf("buildAuthChain: %v", err)
+		}
+
+		method, err := firstAuthMethod(chain)
+		if err != nil {
+			t.Fatalf("firstAuthMethod with stored secret: %v", err)
+		}
+		if method == nil {
+			t.Fatal("firstAuthMethod returned nil method for keyboardInteractive with stored secret")
+		}
+
+		// Concrete-type assertion: the method must be keyboard-interactive,
+		typeName := fmt.Sprintf("%T", method)
+		if strings.Contains(strings.ToLower(typeName), "password") {
+			t.Errorf("firstAuthMethod returned a password-type method (%s), want keyboard-interactive", typeName)
+		}
+	})
+
+	t.Run("without stored secret", func(t *testing.T) {
+		cfg := &ConnectConfig{Secrets: nil, SecretID: "", AuthMode: "keyboardInteractive"}
+		chain, err := rc.buildAuthChain(resolved, cfg)
+		if err != nil {
+			t.Fatalf("buildAuthChain: %v", err)
+		}
+
+		_, err = firstAuthMethod(chain)
+		if err == nil {
+			t.Fatal("firstAuthMethod: expected ErrEncryptedKey for keyboardInteractive without stored secret, got nil")
+		}
+		var encErr *ErrEncryptedKey
+		if !errors.As(err, &encErr) {
+			t.Fatalf("firstAuthMethod: expected *ErrEncryptedKey, got %T: %v", err, err)
+		}
+	})
 }

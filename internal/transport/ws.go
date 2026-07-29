@@ -82,6 +82,9 @@ type WSServer struct {
 	// settings registry backs the settings.* JSON-RPC methods.
 	settings   *settings.Registry
 	resolverOK bool
+	// prober validates credentials without opening a session (connections.test).
+	// When nil, the handler returns a JSON-RPC error.
+	prober Prober
 
 	// profileUsage tracks last-used timestamps for the sessions.status RPC.
 	// When nil, the handler reports live-state from the registry but
@@ -596,6 +599,9 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.handleExportMethod(wconn, req)
 	case "sessions.status":
 		s.handleSessionsStatus(wconn, req)
+	case "connections.test":
+		s.handleConnectionsTest(wconn, req)
+
 	default:
 		resp := newJSONRPCError(req.ID, -32601, "Method not found")
 		_ = wconn.writeJSON(resp)
