@@ -96,6 +96,9 @@ func New(opts ...Option) (*App, error) {
 	// Probe result store: operational evidence for connections.test.
 	// Process-lifetime only (not persisted across restarts).
 	probeResultStore := transport.NewProbeResultStore()
+	// Profile service: single validated write path for profiles, groups,
+	// and credentials. Used by the import handlers and version transitions.
+	profileSvc := profile.NewProfileService(profileStore)
 
 	tpOpts := []transport.WSServerOption{
 		transport.WithProfileRepository(profileStore),
@@ -111,8 +114,11 @@ func New(opts ...Option) (*App, error) {
 		transport.WithExportPaths(paths),
 		transport.WithExportContentDB(content.NewStub(logger)),
 		transport.WithProber(&proberAdapter{client: sshClient}),
+		transport.WithProfileService(profileSvc),
+
 		transport.WithProbeResultStore(probeResultStore),
 		transport.WithSSHConfigResolver(sshCfgResolver, sshConfigPath),
+		transport.WithVersionSessionRegistry(&versionSessionRegistryAdapter{reg: sess}),
 	}
 	tp := transport.NewWSServer(logger, sess, tpOpts...)
 
@@ -189,4 +195,24 @@ func (a *proberAdapter) Probe(ctx context.Context, host string, cfg *ssh.Connect
 
 func (a *proberAdapter) ProbeWithResult(ctx context.Context, host string, cfg *ssh.ConnectConfig) (string, error) {
 	return a.client.ProbeConfigWithResult(ctx, host, cfg)
+}
+
+// versionSessionRegistryAdapter adapts session.Registry to the narrow
+// transport.VersionSessionRegistry interface.
+type versionSessionRegistryAdapter struct {
+	reg *session.Reg
+}
+
+func (a *versionSessionRegistryAdapter) FindByCredentialVersion(credentialID, versionID string) []session.ID {
+	var ids []session.ID
+	for _, s := range a.reg.List() {
+		if s.CredentialID() == credentialID && s.CredentialVersionID() == versionID {
+			ids = append(ids, s.ID())
+		}
+	}
+	return ids
+}
+
+func (a *versionSessionRegistryAdapter) Close(id session.ID) error {
+	return a.reg.Close(id)
 }

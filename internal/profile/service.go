@@ -341,3 +341,38 @@ func (s *ProfileService) ClearReviewFlag(profileID string) (SSHProfile, error) {
 
 	return SSHProfile{}, fmt.Errorf("%s: %w", profileID, ErrProfileNotFound)
 }
+
+// ---------------------------------------------------------------------------
+// Version transitions: promote, retire
+// ---------------------------------------------------------------------------
+
+// PromoteVersion promotes the credential's candidate version to current.
+// The promotion is gated by the declared threshold: the evidence must show
+// at least minAccepted probe results from the candidate version, or the
+// promotion is refused. accepted and total report what was measured.
+// The threshold must be positive — a promotion without measurable evidence
+// is an error, not an unconditional pass.
+func (s *ProfileService) PromoteVersion(credID string, accepted, total, minAccepted int) (Credential, error) {
+	if minAccepted <= 0 {
+		return Credential{}, &ErrThresholdNotMet{Threshold: minAccepted, Accepted: accepted, Total: total}
+	}
+	if accepted < minAccepted {
+		return Credential{}, &ErrThresholdNotMet{Threshold: minAccepted, Accepted: accepted, Total: total}
+	}
+	cred, err := s.store.PromoteVersion(credID)
+	if err != nil {
+		return Credential{}, fmt.Errorf("promote %s: %w", credID, err)
+	}
+	return cred, nil
+}
+
+// RetireVersion marks a version as retired. After this call, the version
+// is not selected by Current() and the resolver refuses it for new connections.
+// Does NOT close existing sessions on this version — that is the caller's
+// responsibility when draining is needed.
+func (s *ProfileService) RetireVersion(credID, versionID string) error {
+	if err := s.store.RetireVersion(credID, versionID); err != nil {
+		return fmt.Errorf("retire %s version %s: %w", credID, versionID, err)
+	}
+	return nil
+}

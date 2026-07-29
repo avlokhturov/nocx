@@ -160,8 +160,9 @@ func (s *WSServer) storeProbeResult(host string, cfg *ssh.ConnectConfig, fingerp
 			AuthPolicy:         authPolicy,
 			Timestamp:          time.Now(),
 		},
-		Outcome: outcome,
-		Detail:  detail,
+		Outcome:      outcome,
+		Detail:       detail,
+		CredentialID: cfg.CredentialID,
 	})
 }
 

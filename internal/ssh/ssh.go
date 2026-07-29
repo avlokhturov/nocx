@@ -134,6 +134,10 @@ type ConnectConfig struct {
 	// resolver for this connection. Set by the resolver during profile
 	// resolution; empty when no credential is linked (inline auth).
 	CredentialVersionID string
+	// CredentialID identifies which credential this config was resolved from.
+	// Used together with CredentialVersionID by revocation to scope session
+	// matching by credential, not just by version ID.
+	CredentialID string
 }
 
 func WithUser(user string) ConnectOption {

@@ -102,6 +102,9 @@ type WSServer struct {
 	// When nil, the handler reports live-state from the registry but
 	// last-used timestamps are unavailable (nocx-uxs5.4).
 	profileUsage session.ProfileUsageTracker
+	// versionRegistry provides session lookup by credential version for
+	// revocation. When nil, session draining/revocation is a no-op.
+	versionRegistry VersionSessionRegistry
 
 	// Export/backup/import dependencies (ADR-0011 §7).
 	// When nil, export.* methods return a JSON-RPC error.
@@ -642,6 +645,13 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.handleSessionsStatus(wconn, req)
 	case "connections.test":
 		s.handleConnectionsTest(wconn, req)
+	case "versions.promote":
+		s.handleVersionsPromote(wconn, req)
+	case "versions.retire":
+		s.handleVersionsRetire(wconn, req)
+	case "versions.revoke":
+		s.handleVersionsRevoke(wconn, req)
+
 	case "sshConfig.aliases":
 		s.handleSSHConfigAliases(wconn, req)
 
@@ -719,6 +729,14 @@ func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connSta
 			// id, so the association is the backend's own conclusion rather than
 			// the renderer's claim.
 			cfg.ProfileID = params.ProfileID
+			// CredentialVersionID from the resolver: the session needs this
+			// for revocation to find sessions by version. Empty for sessions
+			// with no linked credential (inline auth).
+			cfg.CredentialVersionID = remote.CredentialVersionID
+			// CredentialID from the resolver: paired with CredentialVersionID
+			// for scoped revocation matching.
+			cfg.CredentialID = remote.CredentialID
+
 		} else if params.Host != "" {
 			// Direct host resolution: resolve through ~/.ssh/config (ssh -G)
 			// and build a minimal ConnectConfig. Used for SSH aliases from

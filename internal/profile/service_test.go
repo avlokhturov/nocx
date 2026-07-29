@@ -476,3 +476,117 @@ func contains(s, substr string) bool {
 	}
 	return false
 }
+
+// ---------------------------------------------------------------------------
+// PromoteVersion — threshold validation
+// ---------------------------------------------------------------------------
+
+func TestPromoteVersion_ZeroThreshold(t *testing.T) {
+	s, _ := newTestService(t)
+	// Create a credential with a candidate via the store.
+	if err := s.store.CreateCredential(Credential{
+		ID:       "cred:test:1",
+		Name:     "test",
+		Username: "u",
+		Auth:     AuthPassword,
+		Versions: []CredentialVersion{
+			{ID: "v1", PasswordSecretID: "sec:1"},
+			{ID: "v2", PasswordSecretID: "sec:2"},
+		},
+		CurrentVersionID:   "v1",
+		CandidateVersionID: "v2",
+	}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	_, err := s.PromoteVersion("cred:test:1", 5, 5, 0)
+	if err == nil {
+		t.Fatal("PromoteVersion: expected error for zero threshold, got nil")
+	}
+	var tnm *ErrThresholdNotMet
+	if !errors.As(err, &tnm) {
+		t.Fatalf("error type = %T, want *ErrThresholdNotMet", err)
+	}
+}
+
+func TestPromoteVersion_ThresholdNotMet(t *testing.T) {
+	s, _ := newTestService(t)
+	if err := s.store.CreateCredential(Credential{
+		ID:       "cred:test:2",
+		Name:     "test",
+		Username: "u",
+		Auth:     AuthPassword,
+		Versions: []CredentialVersion{
+			{ID: "v1", PasswordSecretID: "sec:1"},
+			{ID: "v2", PasswordSecretID: "sec:2"},
+		},
+		CurrentVersionID:   "v1",
+		CandidateVersionID: "v2",
+	}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// Evidence (2 accepted out of 5) below threshold (3).
+	_, err := s.PromoteVersion("cred:test:2", 2, 5, 3)
+	if err == nil {
+		t.Fatal("PromoteVersion: expected error, got nil")
+	}
+	var tnm *ErrThresholdNotMet
+	if !errors.As(err, &tnm) {
+		t.Fatalf("error type = %T, want *ErrThresholdNotMet", err)
+	}
+	if tnm.Threshold != 3 {
+		t.Errorf("Threshold = %d, want 3", tnm.Threshold)
+	}
+	if tnm.Accepted != 2 {
+		t.Errorf("Accepted = %d, want 2", tnm.Accepted)
+	}
+	if tnm.Total != 5 {
+		t.Errorf("Total = %d, want 5", tnm.Total)
+	}
+
+	// Verify nothing changed — reload from store.
+	creds, err := s.store.LoadCredentials()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	for _, c := range creds {
+		if c.ID == "cred:test:2" {
+			if c.CurrentVersionID != "v1" {
+				t.Errorf("after failed promote CurrentVersionID = %q, want v1", c.CurrentVersionID)
+			}
+			if c.CandidateVersionID != "v2" {
+				t.Errorf("after failed promote CandidateVersionID = %q, want v2", c.CandidateVersionID)
+			}
+		}
+	}
+}
+
+func TestPromoteVersion_SuccessWithThreshold(t *testing.T) {
+	s, _ := newTestService(t)
+	if err := s.store.CreateCredential(Credential{
+		ID:       "cred:test:3",
+		Name:     "test",
+		Username: "u",
+		Auth:     AuthPassword,
+		Versions: []CredentialVersion{
+			{ID: "v1", PasswordSecretID: "sec:1"},
+			{ID: "v2", PasswordSecretID: "sec:2"},
+		},
+		CurrentVersionID:   "v1",
+		CandidateVersionID: "v2",
+	}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	cred, err := s.PromoteVersion("cred:test:3", 5, 5, 3)
+	if err != nil {
+		t.Fatalf("PromoteVersion: %v", err)
+	}
+	if cred.CurrentVersionID != "v2" {
+		t.Errorf("CurrentVersionID = %q, want v2", cred.CurrentVersionID)
+	}
+	if cred.CandidateVersionID != "" {
+		t.Errorf("CandidateVersionID = %q, want empty", cred.CandidateVersionID)
+	}
+}

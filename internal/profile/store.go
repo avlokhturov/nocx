@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/shady2k/nocx/internal/storage"
 )
@@ -46,6 +47,19 @@ type CredentialMetadataRepository interface {
 	// After this call, CandidateVersionID is empty and the candidate version
 	// is removed from the version list. Idempotent: already-absent returns nil.
 	ClearCandidateVersion(id string) error
+	// PromoteVersion promotes the candidate version to current. It sets
+	// CurrentVersionID to CandidateVersionID, then clears CandidateVersionID.
+	// Returns ErrCandidateNotFound when no candidate is set.
+	PromoteVersion(id string) (Credential, error)
+	// RetireVersion marks a version as retired. RetiredAt is set to the
+	// current time. A retired version is not selected by Current() and the
+	// resolver refuses to select it. Returns ErrVersionNotFound when the
+	// version does not exist.
+	RetireVersion(id string, versionID string) error
+	// UnretireVersion clears the retirement mark on a version, making it
+	// selectable again. Returns ErrVersionNotFound when the version does
+	// not exist. Idempotent on an already-active version.
+	UnretireVersion(id string, versionID string) error
 }
 
 // JSONStore persists profiles and groups to a single JSON file on disk.
@@ -660,6 +674,91 @@ func (s *JSONStore) ClearCandidateVersion(id string) error {
 			d.Credentials[i].Versions = remaining
 			d.Credentials[i].CandidateVersionID = ""
 			return s.writeLocked(d)
+		}
+	}
+	return fmt.Errorf("%s: %w", id, ErrCredentialNotFound)
+}
+
+// PromoteVersion promotes the candidate version to current. It does NOT
+// retire the previous current version — that is a separate call (RetireVersion).
+// Returns an error when no candidate is set.
+func (s *JSONStore) PromoteVersion(id string) (Credential, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	d, err := s.load()
+	if err != nil {
+		return Credential{}, err
+	}
+	for i, existing := range d.Credentials {
+		if existing.ID == id {
+			if existing.CandidateVersionID == "" {
+				return Credential{}, fmt.Errorf("%s: no candidate to promote", id)
+			}
+
+			// No versions list means the credential is a legacy record.
+			// A candidate cannot exist on a credential with no versions —
+			// staging always appends to Versions first. Refuse: this state
+			// is unreachable from correct callers and silent data loss from
+			// any path that reaches it.
+			if len(existing.Versions) == 0 {
+				return Credential{}, fmt.Errorf("%s: cannot promote: credential has no version list", id)
+			}
+
+			// Standard path: swap candidate to current.
+			d.Credentials[i].CurrentVersionID = existing.CandidateVersionID
+			d.Credentials[i].CandidateVersionID = ""
+			return d.Credentials[i], s.writeLocked(d)
+		}
+	}
+	return Credential{}, fmt.Errorf("%s: %w", id, ErrCredentialNotFound)
+}
+
+// RetireVersion marks a version as retired by setting RetiredAt to the current
+// time. The version is still in the version list and can be looked up by ID.
+func (s *JSONStore) RetireVersion(id string, versionID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	d, err := s.load()
+	if err != nil {
+		return err
+	}
+	for i, existing := range d.Credentials {
+		if existing.ID == id {
+			for j, v := range d.Credentials[i].Versions {
+				if v.ID == versionID {
+					now := time.Now()
+					d.Credentials[i].Versions[j].RetiredAt = &now
+					return s.writeLocked(d)
+				}
+			}
+			// Legacy credential with no versions — refuse retirement.
+			return fmt.Errorf("%s version %s: %w", id, versionID, ErrVersionNotFound)
+		}
+	}
+	return fmt.Errorf("%s: %w", id, ErrCredentialNotFound)
+}
+
+// UnretireVersion clears the retirement mark on a version. Idempotent on a
+// version that is already active (RetiredAt is already nil).
+func (s *JSONStore) UnretireVersion(id string, versionID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	d, err := s.load()
+	if err != nil {
+		return err
+	}
+	for i, existing := range d.Credentials {
+		if existing.ID == id {
+			for j, v := range d.Credentials[i].Versions {
+				if v.ID == versionID {
+					d.Credentials[i].Versions[j].RetiredAt = nil
+					return s.writeLocked(d)
+				}
+			}
+			return fmt.Errorf("%s version %s: %w", id, versionID, ErrVersionNotFound)
 		}
 	}
 	return fmt.Errorf("%s: %w", id, ErrCredentialNotFound)

@@ -207,3 +207,112 @@ func TestApplyGroups_EmptySlice(t *testing.T) {
 		t.Fatalf("empty slice: %v", err)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// PromoteVersion
+// ---------------------------------------------------------------------------
+
+func TestPromoteVersion_NoVersionsError(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateCredential(Credential{
+		ID:                 "cred:test:1",
+		Name:               "test",
+		Username:           "u",
+		Auth:               AuthPassword,
+		SecretID:           "sec:old",
+		CandidateVersionID: "v2", // no Versions list
+	}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	_, err := s.PromoteVersion("cred:test:1")
+	if err == nil {
+		t.Fatal("PromoteVersion: expected error for credential with no versions, got nil")
+	}
+}
+
+func TestPromoteVersion_NoCandidateError(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateCredential(Credential{
+		ID:       "cred:test:2",
+		Name:     "test",
+		Username: "u",
+		Auth:     AuthPassword,
+		Versions: []CredentialVersion{
+			{ID: "v1", PasswordSecretID: "sec:1"},
+		},
+		CurrentVersionID: "v1",
+	}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	_, err := s.PromoteVersion("cred:test:2")
+	if err == nil {
+		t.Fatal("PromoteVersion: expected error for no candidate, got nil")
+	}
+}
+
+func TestPromoteVersion_Success(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateCredential(Credential{
+		ID:       "cred:test:3",
+		Name:     "test",
+		Username: "u",
+		Auth:     AuthPassword,
+		Versions: []CredentialVersion{
+			{ID: "v1", PasswordSecretID: "sec:1"},
+			{ID: "v2", PasswordSecretID: "sec:2"},
+		},
+		CurrentVersionID:   "v1",
+		CandidateVersionID: "v2",
+	}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	cred, err := s.PromoteVersion("cred:test:3")
+	if err != nil {
+		t.Fatalf("PromoteVersion: %v", err)
+	}
+	if cred.CurrentVersionID != "v2" {
+		t.Errorf("CurrentVersionID = %q, want v2", cred.CurrentVersionID)
+	}
+	if cred.CandidateVersionID != "" {
+		t.Errorf("CandidateVersionID = %q, want empty", cred.CandidateVersionID)
+	}
+}
+
+func TestPromoteVersion_PreviousVersionSelectableByPin(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateCredential(Credential{
+		ID:       "cred:test:4",
+		Name:     "test",
+		Username: "u",
+		Auth:     AuthPassword,
+		Versions: []CredentialVersion{
+			{ID: "v1", PasswordSecretID: "sec:1"},
+			{ID: "v2", PasswordSecretID: "sec:2"},
+		},
+		CurrentVersionID:   "v1",
+		CandidateVersionID: "v2",
+	}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// Promote v2 to current.
+	cred, err := s.PromoteVersion("cred:test:4")
+	if err != nil {
+		t.Fatalf("PromoteVersion: %v", err)
+	}
+	if cred.CurrentVersionID != "v2" {
+		t.Fatalf("CurrentVersionID = %q, want v2", cred.CurrentVersionID)
+	}
+
+	// v1 should still be in the version list and selectable.
+	v, ok := cred.Version("v1")
+	if !ok {
+		t.Fatal("v1 not found after promotion")
+	}
+	if v.PasswordSecretID != "sec:1" {
+		t.Errorf("v1 PasswordSecretID = %q, want sec:1", v.PasswordSecretID)
+	}
+}

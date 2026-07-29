@@ -65,14 +65,41 @@ type CredentialVersion struct {
 
 	// Created records when this version was created.
 	Created time.Time `json:"created,omitempty"`
+
+	// RetiredAt records when this version was retired. Nil means the version
+	// is active. A retired version is not selected for new connections
+	// (the resolver returns ErrVersionRetired), but existing sessions on it
+	// keep running unless the caller explicitly drains them.
+	RetiredAt *time.Time `json:"retiredAt,omitempty"`
 }
 
 const legacyVersionID = "v1"
+
+// ErrVersionRetired is returned when trying to select a retired credential version.
+// The resolver returns this when a profile's credential's current version has been
+// retired, or when a pinned version is retired.
+var ErrVersionRetired = errors.New("credential version is retired")
+
+// ErrThresholdNotMet is returned when promoting a candidate and the probe
+// evidence does not meet the declared threshold.
+type ErrThresholdNotMet struct {
+	Threshold int `json:"threshold"`
+	Accepted  int `json:"accepted"`
+	Total     int `json:"total"`
+}
+
+func (e *ErrThresholdNotMet) Error() string {
+	return fmt.Sprintf("promote threshold not met: need %d accepted, have %d out of %d", e.Threshold, e.Accepted, e.Total)
+}
 
 // Current returns the version a normal connection uses. A record written before
 // versions existed has no list and a bare SecretID; it reads as a single
 // current version, so an existing store loads with no migration step and no
 // window in which a password is unreachable.
+//
+// When the named current version has been retired, Current returns false
+// rather than returning a retired version. The legacy path (no Versions list)
+// is never retired and always succeeds.
 func (c Credential) Current() (CredentialVersion, bool) {
 	if len(c.Versions) == 0 {
 		return CredentialVersion{ID: legacyVersionID, PasswordSecretID: c.SecretID, PassphraseSecretID: c.PassphraseSecretID}, true
@@ -80,7 +107,14 @@ func (c Credential) Current() (CredentialVersion, bool) {
 	if c.CurrentVersionID == "" {
 		return CredentialVersion{}, false
 	}
-	return c.Version(c.CurrentVersionID)
+	v, ok := c.Version(c.CurrentVersionID)
+	if !ok {
+		return CredentialVersion{}, false
+	}
+	if v.RetiredAt != nil {
+		return CredentialVersion{}, false
+	}
+	return v, true
 }
 
 // Candidate returns the staged version being evaluated for rollout, or false
@@ -184,4 +218,5 @@ var (
 	ErrCredentialNameRequired     = errors.New("credential name is required")
 	ErrCredentialUsernameRequired = errors.New("credential username is required")
 	ErrCandidateExists            = errors.New("a candidate version already exists; discard it first")
+	ErrVersionNotFound            = errors.New("credential version not found")
 )

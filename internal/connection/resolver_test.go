@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/profile"
@@ -247,6 +248,51 @@ func (s *stubProfileStore) ClearCandidateVersion(id string) error {
 func (s *stubProfileStore) DeleteCredential(id string) error {
 	delete(s.credentials, id)
 	return nil
+}
+
+func (s *stubProfileStore) PromoteVersion(id string) (profile.Credential, error) {
+	existing, ok := s.credentials[id]
+	if !ok {
+		return profile.Credential{}, profile.ErrCredentialNotFound
+	}
+	if existing.CandidateVersionID == "" {
+		return profile.Credential{}, fmt.Errorf("%s: no candidate to promote", id)
+	}
+	existing.CurrentVersionID = existing.CandidateVersionID
+	existing.CandidateVersionID = ""
+	s.credentials[id] = existing
+	return existing, nil
+}
+
+func (s *stubProfileStore) RetireVersion(id string, versionID string) error {
+	existing, ok := s.credentials[id]
+	if !ok {
+		return profile.ErrCredentialNotFound
+	}
+	for i, v := range existing.Versions {
+		if v.ID == versionID {
+			now := time.Now()
+			existing.Versions[i].RetiredAt = &now
+			s.credentials[id] = existing
+			return nil
+		}
+	}
+	return profile.ErrVersionNotFound
+}
+
+func (s *stubProfileStore) UnretireVersion(id string, versionID string) error {
+	existing, ok := s.credentials[id]
+	if !ok {
+		return profile.ErrCredentialNotFound
+	}
+	for i, v := range existing.Versions {
+		if v.ID == versionID {
+			existing.Versions[i].RetiredAt = nil
+			s.credentials[id] = existing
+			return nil
+		}
+	}
+	return profile.ErrVersionNotFound
 }
 
 // stubSecretStore implements credential.SecretStore in memory.
@@ -915,5 +961,287 @@ func TestResolveWithVersion_LeavesTheBastionOnItsCurrentVersion(t *testing.T) {
 	}
 	if cfg.JumpSecretID != jumpID {
 		t.Errorf("JumpSecretID = %q, want the bastion's own %q — rotating one credential must not touch the bastion", cfg.JumpSecretID, jumpID)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Pinned version tests
+// ---------------------------------------------------------------------------
+
+// TestResolve_PinnedVersion uses the pinned version instead of current.
+func TestResolve_PinnedVersion(t *testing.T) {
+	ps := newStubProfileStore()
+	ss := newStubSecretStore()
+
+	v1ID := credential.NewSecretID()
+	v2ID := credential.NewSecretID()
+	v3ID := credential.NewSecretID()
+	for _, s := range []credential.SecretID{v1ID, v2ID, v3ID} {
+		if err := ss.Set(s, credential.NewSecret("pw-"+string(s))); err != nil {
+			t.Fatalf("set secret: %v", err)
+		}
+	}
+
+	_ = ps.SaveCredential(profile.Credential{
+		ID:       "cred:test:aaa",
+		Name:     "test",
+		Username: "tu",
+		Auth:     "password",
+		Versions: []profile.CredentialVersion{
+			{ID: "v1", Auth: "password", PasswordSecretID: string(v1ID)},
+			{ID: "v2", Auth: "password", PasswordSecretID: string(v2ID)},
+			{ID: "v3", Auth: "password", PasswordSecretID: string(v3ID)},
+		},
+		CurrentVersionID: "v1",
+	})
+
+	_ = ps.SaveProfile(profile.SSHProfile{
+		Base:    profile.Base{ID: "profile:pin", Name: "pinned", PinnedVersionID: "v3"},
+		Options: profile.StoredSSHProfileOptions{Host: "host.example.com", CredentialID: "cred:test:aaa"},
+	})
+
+	_, cfg, err := NewResolver(ps, ps, ps, ss).Resolve("profile:pin")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if cfg.CredentialVersionID != "v3" {
+		t.Errorf("CredentialVersionID = %q, want pinned version v3", cfg.CredentialVersionID)
+	}
+	if cfg.SecretID != v3ID {
+		t.Errorf("SecretID = %q, want the pinned version's secret %q", cfg.SecretID, v3ID)
+	}
+}
+
+// TestResolve_PinnedVersionOverridesCurrent verifies that a pinned profile
+// ignores CurrentVersionID changes — the pin wins.
+func TestResolve_PinnedVersionOverridesCurrent(t *testing.T) {
+	ps := newStubProfileStore()
+	ss := newStubSecretStore()
+
+	v1ID := credential.NewSecretID()
+	v2ID := credential.NewSecretID()
+	for _, s := range []credential.SecretID{v1ID, v2ID} {
+		if err := ss.Set(s, credential.NewSecret("pw-"+string(s))); err != nil {
+			t.Fatalf("set secret: %v", err)
+		}
+	}
+
+	_ = ps.SaveCredential(profile.Credential{
+		ID:       "cred:test:bbb",
+		Name:     "test",
+		Username: "tu",
+		Auth:     "password",
+		Versions: []profile.CredentialVersion{
+			{ID: "v1", Auth: "password", PasswordSecretID: string(v1ID)},
+			{ID: "v2", Auth: "password", PasswordSecretID: string(v2ID)},
+		},
+		CurrentVersionID: "v2", // v2 is current
+	})
+
+	// Profile pins to v1 — should resolve to v1 even though v2 is current.
+	_ = ps.SaveProfile(profile.SSHProfile{
+		Base:    profile.Base{ID: "profile:pin-old", Name: "pinned-old", PinnedVersionID: "v1"},
+		Options: profile.StoredSSHProfileOptions{Host: "host.example.com", CredentialID: "cred:test:bbb"},
+	})
+
+	_, cfg, err := NewResolver(ps, ps, ps, ss).Resolve("profile:pin-old")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if cfg.CredentialVersionID != "v1" {
+		t.Errorf("CredentialVersionID = %q, want pinned version v1", cfg.CredentialVersionID)
+	}
+	if cfg.SecretID != v1ID {
+		t.Errorf("SecretID = %q, want v1 secret %q", cfg.SecretID, v1ID)
+	}
+}
+
+// TestResolve_PinnedVersionSurvivesRetirement verifies that pinning a profile
+// to a retired version still resolves. A pin is the thing retirement does not
+// break.
+func TestResolve_PinnedVersionSurvivesRetirement(t *testing.T) {
+	ps := newStubProfileStore()
+	ss := newStubSecretStore()
+
+	v1ID := credential.NewSecretID()
+	v2ID := credential.NewSecretID()
+	for _, s := range []credential.SecretID{v1ID, v2ID} {
+		if err := ss.Set(s, credential.NewSecret("pw-"+string(s))); err != nil {
+			t.Fatalf("set secret: %v", err)
+		}
+	}
+
+	now := time.Now()
+	cred := profile.Credential{
+		ID:       "cred:test:ccc",
+		Name:     "test",
+		Username: "tu",
+		Auth:     "password",
+		Versions: []profile.CredentialVersion{
+			{ID: "v1", Auth: "password", PasswordSecretID: string(v1ID), RetiredAt: &now},
+			{ID: "v2", Auth: "password", PasswordSecretID: string(v2ID)},
+		},
+		CurrentVersionID: "v2",
+	}
+	if err := ps.SaveCredential(cred); err != nil {
+		t.Fatalf("save credential: %v", err)
+	}
+
+	// Profile pins to v1 — v1 is retired but the pin should make it work.
+	_ = ps.SaveProfile(profile.SSHProfile{
+		Base:    profile.Base{ID: "profile:pin-retired", Name: "pinned-retired", PinnedVersionID: "v1"},
+		Options: profile.StoredSSHProfileOptions{Host: "host.example.com", CredentialID: "cred:test:ccc"},
+	})
+
+	_, cfg, err := NewResolver(ps, ps, ps, ss).Resolve("profile:pin-retired")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if cfg.CredentialVersionID != "v1" {
+		t.Errorf("CredentialVersionID = %q, want pinned version v1", cfg.CredentialVersionID)
+	}
+	if cfg.SecretID != v1ID {
+		t.Errorf("SecretID = %q, want v1 secret %q", cfg.SecretID, v1ID)
+	}
+}
+
+// TestResolve_PinnedVersionNotFound fails when the pinned version does not
+// exist on the credential.
+func TestResolve_PinnedVersionNotFound(t *testing.T) {
+	ps := newStubProfileStore()
+	ss := newStubSecretStore()
+
+	v1ID := credential.NewSecretID()
+	_ = ss.Set(v1ID, credential.NewSecret("pw-v1"))
+
+	_ = ps.SaveCredential(profile.Credential{
+		ID:       "cred:test:ddd",
+		Name:     "test",
+		Username: "tu",
+		Auth:     "password",
+		Versions: []profile.CredentialVersion{
+			{ID: "v1", Auth: "password", PasswordSecretID: string(v1ID)},
+		},
+		CurrentVersionID: "v1",
+	})
+
+	// Pin to v2 — does not exist.
+	_ = ps.SaveProfile(profile.SSHProfile{
+		Base:    profile.Base{ID: "profile:pin-missing", Name: "pinned-missing", PinnedVersionID: "v2"},
+		Options: profile.StoredSSHProfileOptions{Host: "host.example.com", CredentialID: "cred:test:ddd"},
+	})
+
+	_, _, err := NewResolver(ps, ps, ps, ss).Resolve("profile:pin-missing")
+	if err == nil {
+		t.Fatal("expected error for missing pinned version, got nil")
+	}
+}
+
+// TestResolve_RetiredCurrentVersion verifies that Current() returns false
+// for a retired current version and the resolver returns ErrVersionRetired.
+func TestResolve_RetiredCurrentVersion(t *testing.T) {
+	ps := newStubProfileStore()
+	ss := newStubSecretStore()
+
+	v1ID := credential.NewSecretID()
+	for _, s := range []credential.SecretID{v1ID} {
+		if err := ss.Set(s, credential.NewSecret("pw-v1")); err != nil {
+			t.Fatalf("set secret: %v", err)
+		}
+	}
+
+	now := time.Now()
+	_ = ps.SaveCredential(profile.Credential{
+		ID:       "cred:test:eee",
+		Name:     "test",
+		Username: "tu",
+		Auth:     "password",
+		Versions: []profile.CredentialVersion{
+			{ID: "v1", Auth: "password", PasswordSecretID: string(v1ID), RetiredAt: &now},
+		},
+		CurrentVersionID: "v1",
+	})
+
+	_ = ps.SaveProfile(profile.SSHProfile{
+		Base:    profile.Base{ID: "profile:retired-current", Name: "retired-current"},
+		Options: profile.StoredSSHProfileOptions{Host: "host.example.com", CredentialID: "cred:test:eee"},
+	})
+
+	_, _, err := NewResolver(ps, ps, ps, ss).Resolve("profile:retired-current")
+	if !errors.Is(err, profile.ErrVersionRetired) {
+		t.Fatalf("expected ErrVersionRetired, got %v", err)
+	}
+}
+
+// TestResolveWithVersion_RetiredVersionIsRefused verifies that
+// ResolveWithVersion refuses an explicitly retired version.
+func TestResolveWithVersion_RetiredVersionIsRefused(t *testing.T) {
+	ps, ss, _, _ := rotationFixture(t)
+
+	// Retire v1 on the credential.
+	err := ps.RetireVersion("cred:rot:aaa", "v1")
+	if err != nil {
+		t.Fatalf("RetireVersion: %v", err)
+	}
+
+	// ResolveWithVersion v1 — should refuse.
+	_, _, err = NewResolver(ps, ps, ps, ss).ResolveWithVersion("profile:rot", "cred:rot:aaa", "v1")
+	if !errors.Is(err, profile.ErrVersionRetired) {
+		t.Fatalf("expected ErrVersionRetired for retired version, got %v", err)
+	}
+}
+
+// TestResolve_NoCredentialProfilePinsDifferentEndpointTwoProfiles verifies
+// that pinning profile A does not affect profile B even when both point at
+// the same endpoint.
+func TestResolve_PinProfileADoesNotPinProfileB(t *testing.T) {
+	ps := newStubProfileStore()
+	ss := newStubSecretStore()
+
+	v1ID := credential.NewSecretID()
+	v2ID := credential.NewSecretID()
+	for _, s := range []credential.SecretID{v1ID, v2ID} {
+		if err := ss.Set(s, credential.NewSecret("pw-"+string(s))); err != nil {
+			t.Fatalf("set secret: %v", err)
+		}
+	}
+
+	_ = ps.SaveCredential(profile.Credential{
+		ID:       "cred:shared:fff",
+		Name:     "shared",
+		Username: "tu",
+		Auth:     "password",
+		Versions: []profile.CredentialVersion{
+			{ID: "v1", Auth: "password", PasswordSecretID: string(v1ID)},
+			{ID: "v2", Auth: "password", PasswordSecretID: string(v2ID)},
+		},
+		CurrentVersionID: "v2", // v2 is current
+	})
+
+	// Profile A pins to v1.
+	_ = ps.SaveProfile(profile.SSHProfile{
+		Base:    profile.Base{ID: "profile:a", Name: "a", PinnedVersionID: "v1"},
+		Options: profile.StoredSSHProfileOptions{Host: "shared.example.com", CredentialID: "cred:shared:fff"},
+	})
+	// Profile B has no pin — uses current (v2).
+	_ = ps.SaveProfile(profile.SSHProfile{
+		Base:    profile.Base{ID: "profile:b", Name: "b"},
+		Options: profile.StoredSSHProfileOptions{Host: "shared.example.com", CredentialID: "cred:shared:fff"},
+	})
+
+	_, cfgA, err := NewResolver(ps, ps, ps, ss).Resolve("profile:a")
+	if err != nil {
+		t.Fatalf("Resolve A: %v", err)
+	}
+	_, cfgB, err := NewResolver(ps, ps, ps, ss).Resolve("profile:b")
+	if err != nil {
+		t.Fatalf("Resolve B: %v", err)
+	}
+
+	if cfgA.CredentialVersionID != "v1" {
+		t.Errorf("A CredentialVersionID = %q, want v1", cfgA.CredentialVersionID)
+	}
+	if cfgB.CredentialVersionID != "v2" {
+		t.Errorf("B CredentialVersionID = %q, want v2 (current)", cfgB.CredentialVersionID)
 	}
 }

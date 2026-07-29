@@ -53,6 +53,12 @@ type Base struct {
 	// resolved for connection. The resolver refuses profiles with this
 	// flag set; the UI for clearing it belongs to a later wave.
 	NeedsReview bool `json:"needsReview,omitempty"`
+	// PinnedVersionID, when non-empty, pins this profile to a specific
+	// credential version. The resolver selects this version instead of the
+	// credential's current version. A pinned profile resolves after a
+	// promotion and after a retirement — a pin is the thing retirement
+	// does not break.
+	PinnedVersionID string `json:"pinnedVersionId,omitempty"`
 }
 
 // SSHProfileOptions is the SSH-specific options block on an SSHProfile.

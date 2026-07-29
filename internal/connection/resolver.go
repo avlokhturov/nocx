@@ -179,6 +179,8 @@ func (r *Resolver) buildConfig(prof *profile.SSHProfile, visited map[string]bool
 			return nil, fmt.Errorf("profile %s: %w", prof.ID, err)
 		}
 		cfg.User = cred.Username
+		cfg.CredentialID = credID
+
 		cfg.AuthMode = string(cred.Auth)
 		cfg.KeyFile = cred.KeyPath
 		// Authorized endpoint: the profile's Host is resolved through
@@ -195,22 +197,54 @@ func (r *Resolver) buildConfig(prof *profile.SSHProfile, visited map[string]bool
 		// via opaque SecretID references (ADR-0011 §2).
 		cfg.Secrets = r.secrets
 
-		// The SELECTED version's references, not the record's. poolKeyFor
-		// (ssh_dial.go:38) keys on cfg.SecretID, so this is also what makes
-		// a promotion produce a new pool entry without any change in
-		// internal/ssh.
-		v, ok := cred.Current()
+		// Determine which version to use. Priority: override > pinned > current.
+		// Override is for the rollout probe (ResolveWithVersion).
+		var v profile.CredentialVersion
+		var ok bool
+		var versionErr error
+
 		if override != nil {
+			// ResolveWithVersion path — caller-named version.
 			if credID != override.credentialID {
 				return nil, fmt.Errorf("profile %s uses credential %s, not %s: %w", prof.ID, credID, override.credentialID, ErrCredentialMismatch)
 			}
-			// Deliberately overwrites ok as well: a missing version must not
-			// leave the current version's references on the config.
 			v, ok = cred.Version(override.versionID)
 			if !ok {
 				return nil, fmt.Errorf("credential %s version %s: %w", credID, override.versionID, ErrVersionNotFound)
 			}
+			if v.RetiredAt != nil {
+				return nil, fmt.Errorf("credential %s version %s: %w", credID, override.versionID, profile.ErrVersionRetired)
+			}
+			versionErr = nil
+		} else if prof.PinnedVersionID != "" {
+			// Pinned profile: use the pinned version regardless of retirement.
+			// A pin IS the thing retirement does not break (nocx-383c.4).
+			v, ok = cred.Version(prof.PinnedVersionID)
+			if !ok {
+				return nil, fmt.Errorf("credential %s pinned version %s: %w", credID, prof.PinnedVersionID, ErrVersionNotFound)
+			}
+			// Pinned profiles still resolve even after retirement — that is
+			// the entire purpose of a pin. Do NOT check RetiredAt here.
+			versionErr = nil
+		} else {
+			// Normal path: use the current version.
+			v, ok = cred.Current()
+			if !ok {
+				// Current() returns false when CurrentVersionID is empty,
+				// the version is missing, or the version is retired.
+				// Check which case to give the right error.
+				if cred.CurrentVersionID != "" {
+					if cv, found := cred.Version(cred.CurrentVersionID); found && cv.RetiredAt != nil {
+						return nil, fmt.Errorf("credential %s current version %s: %w", credID, cred.CurrentVersionID, profile.ErrVersionRetired)
+					}
+				}
+				// Fallthrough: version not found or no current set.
+			}
+			versionErr = nil
 		}
+
+		// When Current() returned false and we couldn't find a better error,
+		// proceed without the version (ok will be false).
 		if ok {
 			if v.PasswordSecretID != "" {
 				cfg.SecretID = credential.SecretID(v.PasswordSecretID)
@@ -220,7 +254,9 @@ func (r *Resolver) buildConfig(prof *profile.SSHProfile, visited map[string]bool
 			}
 			cfg.CredentialVersionID = v.ID
 		}
+		_ = versionErr // used for future error enrichment
 	} else {
+		// No credential linked — use inline fields from the profile.
 		if override != nil {
 			return nil, fmt.Errorf("profile %s uses no credential, cannot resolve version %s: %w", prof.ID, override.versionID, ErrCredentialMismatch)
 		}

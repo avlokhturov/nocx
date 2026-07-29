@@ -230,6 +230,23 @@ func (r *fakeCredRepo) DeleteCredential(id string) error {
 	return nil
 }
 
+// The version transitions are part of the repository interface but never
+// exercised by export: a backup carries credential records, not rotation
+// state. They are here to satisfy the interface, and each fails loudly rather
+// than returning a zero value, so an export path that starts calling one is a
+// test failure instead of a silent no-op.
+func (r *fakeCredRepo) PromoteVersion(id string) (profile.Credential, error) {
+	return profile.Credential{}, fmt.Errorf("PromoteVersion(%q): export does not promote versions", id)
+}
+
+func (r *fakeCredRepo) RetireVersion(id, versionID string) error {
+	return fmt.Errorf("RetireVersion(%q, %q): export does not retire versions", id, versionID)
+}
+
+func (r *fakeCredRepo) UnretireVersion(id, versionID string) error {
+	return fmt.Errorf("UnretireVersion(%q, %q): export does not unretire versions", id, versionID)
+}
+
 var (
 	_ profile.ProfileRepository            = (*fakeProfileRepo)(nil)
 	_ profile.GroupRepository              = (*fakeGroupRepo)(nil)
