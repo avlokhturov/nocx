@@ -16,7 +16,7 @@
  * - Import from Tabby
  * - onConnect callback
  */
-import { For, Show, createSignal, createMemo, createEffect, on, onMount } from 'solid-js'
+import { For, Show, createSignal, createMemo, createEffect, on, onMount, type JSX } from 'solid-js'
 import { Button } from './ui/button'
 import { TextField } from './ui/text-field'
 import { Checkbox } from './ui/checkbox'
@@ -29,8 +29,7 @@ import { EmptyState } from './ui/empty-state'
 import { Field } from './ui/field'
 import { Badge } from './ui/badge'
 import { IconButton } from './ui/icon-button'
-import { PlugIcon } from './ui/icons'
-import { showToast } from './ui/toast'
+import { PlugIcon, ResetIcon } from './ui/icons'
 import {
   createFormValidation,
   required,
@@ -39,10 +38,19 @@ import {
   nonNegativeInteger,
   combine,
 } from './ui/validation'
-import type { SSHProfile, ProfileGroup, Credential, AuthMode, TreeNode } from './profiles'
-import { ProfileClient, buildGroupTree, newProfileID } from './profiles'
+import type {
+  SSHProfile,
+  ProfileGroup,
+  Credential,
+  AuthMode,
+  TreeNode,
+  EffectiveProfileDTO,
+  EffectiveFieldDTO,
+  FieldSourceDTO,
+} from './profiles'
+import { ProfileClient, buildGroupTree } from './profiles'
 import { log } from './log'
-
+import { showToast } from './ui/toast'
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 function authModeLabel(mode: AuthMode): string {
@@ -62,6 +70,59 @@ function authModeLabel(mode: AuthMode): string {
 
 const AUTH_MODES: AuthMode[] = ['', 'password', 'publicKey', 'agent', 'keyboardInteractive']
 
+// ── Provenance helpers ───────────────────────────────────────────────────────
+
+export function sourceLabel(source: FieldSourceDTO): string {
+  switch (source.kind) {
+    case 'profile':
+      return 'set here'
+    case 'group':
+      return `from group ${source.label || source.id}`
+    case 'credential':
+      return `from credential ${source.label || source.id}`
+    case 'sshConfig':
+      return 'from ~/.ssh/config'
+    case 'global':
+      return 'from global defaults'
+    case 'default':
+      return 'default'
+  }
+}
+
+// ── Save route decision (pure, tested directly) ─────────────────────────────
+
+/** Describes how to save an existing profile for a given set of dirty fields. */
+export type SaveRoute =
+  { kind: 'noop' } | { kind: 'update' } | { kind: 'patch'; patchSet: Record<string, unknown> }
+
+/**
+ * Decide the save route for an existing profile given its dirty fields.
+ *
+ * When host or name are dirty, the full profile must go through
+ * profiles.update because neither field is in the backend's
+ * PatchPathAllowed set. When only options fields are dirty, send
+ * just those fields through profiles.patch without pre-filtering:
+ * the backend is the authority on what can be patched (nocx-fxs.1).
+ *
+ * Non-patchable fields: host (on SSHProfileOptions but not in
+ * PatchPathAllowed), name (on Base).
+ */
+export function decideSaveRoute(profile: SSHProfile, dirty: ReadonlySet<string>): SaveRoute {
+  if (dirty.size === 0) return { kind: 'noop' }
+
+  const nonPatchable: Record<string, true> = { name: true, host: true }
+  const hasNonPatchable = [...dirty].some((f) => nonPatchable[f])
+
+  if (hasNonPatchable) {
+    return { kind: 'update' }
+  }
+
+  const patchSet: Record<string, unknown> = {}
+  for (const field of dirty) {
+    patchSet[`options.${field}`] = profile.options[field as keyof typeof profile.options]
+  }
+  return { kind: 'patch', patchSet }
+}
 // ── Props ────────────────────────────────────────────────────────────────────
 
 export interface ConnectionsViewProps {
@@ -75,6 +136,11 @@ export interface ConnectionsViewProps {
    * the palette work on a Settings tab that was not open yet.
    */
   newProfileRequest?: number
+  /**
+   * Navigate to the Credentials settings section, typically by
+   * setting the active settings page to 'credentials'.
+   */
+  onNavigateToCredentials?: () => void
 }
 
 // ── Component ────────────────────────────────────────────────────────────────
@@ -88,6 +154,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   // ── Selection state ─────────────────────────────────────────────────────
   const [selectedID, setSelectedID] = createSignal('')
   const [editing, setEditing] = createSignal<SSHProfile | null>(null)
+
+  // ── Effective/provenance state ─────────────────────────────────────────
+  const [effectiveData, setEffectiveData] = createSignal<Record<string, EffectiveProfileDTO>>({})
+  const [dirtyFields, setDirtyFields] = createSignal<Set<string>>(new Set())
 
   // ── Data loading ────────────────────────────────────────────────────────
   async function loadAll() {
@@ -110,6 +180,22 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         level: 'danger',
         message: `Could not load connections: ${message}. The list may be out of date`,
       })
+    }
+  }
+
+  async function loadEffective(ids: string[]) {
+    if (ids.length === 0) return
+    try {
+      const res = await props.client.loadEffective(ids)
+      setEffectiveData((prev) => {
+        const next = { ...prev }
+        for (const eff of res.profiles) {
+          next[eff.id] = eff
+        }
+        return next
+      })
+    } catch (err) {
+      log.error('Failed to load effective data', { message: (err as Error).message })
     }
   }
 
@@ -221,15 +307,15 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     return p !== null && (!p.id || !profiles().some((x) => x.id === p.id))
   })
 
-  // ── Actions ─────────────────────────────────────────────────────────────
-
   // Every entry point that swaps the record under a form resets that form's
   // validation. Without it the "already answered" marks carry over to the next
   // record and a freshly opened blank form opens with errors already showing.
   function handleProfileClick(p: SSHProfile) {
     setSelectedID(p.id)
     setEditing(null)
+    setDirtyFields(new Set<string>())
     profileValidation.reset()
+    void loadEffective([p.id])
   }
 
   function handleProfileDblClick(p: SSHProfile) {
@@ -249,28 +335,79 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     }
     setSelectedID('')
     setEditing(profile)
-
+    setDirtyFields(new Set<string>())
     profileValidation.reset()
   }
-
   async function saveProfile(profile: SSHProfile) {
     if (!gate(profileValidation)) return
-    if (!profile.id) {
-      profile.id = newProfileID('ssh', profile.name)
+
+    const isNew = !profile.id || !profiles().some((x) => x.id === profile.id)
+
+    if (isNew) {
+      // New profile: create via full-profile RPC.
+      // The backend mints the ID; don't assign one client-side.
+      try {
+        const saved = await props.client.createProfile(profile)
+        setSelectedID(saved.id)
+        setEditing(null)
+        setDirtyFields(new Set<string>())
+        profileValidation.reset()
+        await loadAll()
+        showToast({ level: 'success', message: `Saved "${saved.name}"` })
+      } catch (err) {
+        const message = (err as Error).message
+        log.error('Failed to save', { message })
+        showToast({ level: 'danger', message: `Could not save the connection: ${message}` })
+      }
+      return
     }
-    try {
-      await props.client.createProfile(profile)
-      setSelectedID(profile.id)
-      setEditing(null)
-      profileValidation.reset()
-      await loadAll()
-      showToast({ level: 'success', message: `Saved "${profile.name}"` })
-    } catch (err) {
-      const message = (err as Error).message
-      log.error('Failed to save', { message })
-      // Was a log line and nothing else: the button appeared to do nothing and
-      // the profile silently stayed unsaved.
-      showToast({ level: 'danger', message: `Could not save the connection: ${message}` })
+
+    // Existing profile: decide route based on dirty fields.
+    const dirty = dirtyFields()
+    const route = decideSaveRoute(profile, dirty)
+
+    switch (route.kind) {
+      case 'noop':
+        setEditing(null)
+        setDirtyFields(new Set<string>())
+        return
+
+      case 'update':
+        try {
+          const saved = await props.client.updateProfile(profile)
+          setSelectedID(saved.id)
+          setEditing(null)
+          setDirtyFields(new Set<string>())
+          profileValidation.reset()
+          // Refresh both the profiles list (so saved name/host appear) and
+          // effective data. loadAll fetches fresh profile/group/credential
+          // lists from the backend; loadEffective refreshes the inline
+          // provenance state for the updated profile.
+          await loadAll()
+          await loadEffective([saved.id])
+          showToast({ level: 'success', message: `Saved "${saved.name}"` })
+        } catch (err) {
+          const message = (err as Error).message
+          log.error('Failed to save', { message })
+          showToast({ level: 'danger', message: `Could not save the connection: ${message}` })
+        }
+        return
+
+      case 'patch':
+        try {
+          const eff = await props.client.patchProfile({ id: profile.id, set: route.patchSet })
+          setEffectiveData((prev) => ({ ...prev, [profile.id]: eff }))
+          setSelectedID(profile.id)
+          setEditing(null)
+          setDirtyFields(new Set<string>())
+          profileValidation.reset()
+          showToast({ level: 'success', message: `Saved "${profile.name}"` })
+        } catch (err) {
+          const message = (err as Error).message
+          log.error('Failed to save', { message })
+          showToast({ level: 'danger', message: `Could not save the connection: ${message}` })
+        }
+        return
     }
   }
 
@@ -283,6 +420,44 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   function connectFromForm(profile: SSHProfile) {
     if (!gate(profileValidation)) return
     props.onConnect?.(profile)
+  }
+
+  async function revertField(field: string) {
+    const p = formProfile()
+    if (!p || !p.id) return
+    try {
+      // If the field is still dirty (hasn't been committed yet), unset it
+      // on the backend via patch.
+      const eff = await props.client.patchProfile({ id: p.id, unset: [`options.${field}`] })
+      // Update effective data from the patch response.
+      setEffectiveData((prev) => ({ ...prev, [p.id]: eff }))
+      // Remove from dirty set.
+      setDirtyFields((prev: Set<string>) => {
+        const next = new Set(prev)
+        next.delete(field)
+        return next
+      })
+      // Drop the field from the draft rather than writing the inherited value
+      // into it. Two reasons, and the second one is the whole point of revert.
+      //
+      // Display does not need it: fieldValue() already falls through to the
+      // effective entry once the field is no longer dirty.
+      //
+      // Saving must not have it. A later edit to the name or host routes through
+      // profiles.update, which writes the WHOLE profile — so an inherited value
+      // sitting in options would be persisted as an explicit override, and the
+      // field the user just reverted would be pinned to the value it used to
+      // inherit. Spec §3.3's first binding rule: an inherited value is never
+      // materialised, because once it is, "inherited 2222" and "overridden here
+      // to 2222" are the same state forever.
+      const updated = { ...p, options: { ...p.options } }
+      delete (updated.options as unknown as Record<string, unknown>)[field]
+      setEditing(updated)
+    } catch (err) {
+      const message = (err as Error).message
+      log.error('Failed to revert field', { field, message })
+      showToast({ level: 'danger', message: `Could not revert "${field}": ${message}` })
+    }
   }
 
   async function deleteProfile(profile: SSHProfile) {
@@ -407,16 +582,104 @@ export function ConnectionsView(props: ConnectionsViewProps) {
 
   function renderProfileForm(profile: SSHProfile) {
     const isNew = isNewProfile()
+    const isSaved = !!profile.id && profiles().some((x) => x.id === profile.id)
 
     function setOption(key: keyof SSHProfile['options'], value: unknown) {
       const updated = { ...profile, options: { ...profile.options, [key]: value } }
       setEditing(updated)
+      setDirtyFields((prev: Set<string>) => {
+        const next = new Set(prev)
+        next.add(key)
+        return next
+      })
     }
 
     function onNameChange(v: string) {
       const updated = { ...profile, name: v }
-      if (!profile.id) updated.id = newProfileID('ssh', v)
       setEditing(updated)
+      setDirtyFields((prev: Set<string>) => {
+        const next = new Set(prev)
+        next.add('name')
+        return next
+      })
+    }
+
+    // ── Provenance helpers ──────────────────────────────────────────────
+    function effField(field: string): EffectiveFieldDTO | undefined {
+      const eff = effectiveData()[profile.id]
+      return eff?.fields[field]
+    }
+
+    function provenanceBadge(field: string) {
+      if (dirtyFields().has(field)) {
+        return (
+          <span class="cm-provenance">
+            <span class="cm-provenance-label cm-provenance-overridden">overridden here</span>
+            <IconButton
+              size="sm"
+              ariaLabel={`Revert ${field}`}
+              title="Revert to inherited"
+              onClick={(e: MouseEvent) => {
+                e.preventDefault()
+                void revertField(field)
+              }}
+            >
+              <ResetIcon />
+            </IconButton>
+          </span>
+        )
+      }
+      const eff = effField(field)
+      if (!eff) return null
+
+      const label = sourceLabel(eff.source)
+      if (eff.source.kind === 'credential') {
+        return (
+          <span class="cm-provenance">
+            <Button
+              variant="ghost"
+              onClick={() => props.onNavigateToCredentials?.()}
+              title="Open Credentials settings"
+            >
+              {label}
+            </Button>
+          </span>
+        )
+      }
+      return (
+        <span class="cm-provenance">
+          <span class="cm-provenance-label">{label}</span>
+        </span>
+      )
+    }
+
+    function fieldValue(key: string): unknown {
+      const dirty = dirtyFields()
+      if (dirty.has(key)) {
+        const draft = editing()
+        if (draft) return (draft.options as unknown as Record<string, unknown>)[key]
+      }
+      const eff = effField(key)
+      if (eff !== undefined) return eff.value
+      return (profile.options as unknown as Record<string, unknown>)[key]
+    }
+
+    function fvStr(key: string): string {
+      const v = fieldValue(key)
+      if (typeof v === 'string') return v
+      if (typeof v === 'number') return String(v)
+      if (typeof v === 'boolean') return v ? 'true' : ''
+      return ''
+    }
+
+    function fvNum(key: string): number {
+      const v = fieldValue(key)
+      return v != null && typeof v === 'number' ? v : 0
+    }
+
+    function fvBool(key: string): boolean {
+      const v = fieldValue(key)
+      return v === true
     }
 
     const credOptions = createMemo((): SelectOption[] =>
@@ -433,6 +696,19 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       })),
     )
 
+    function fieldRow(field: string, textField: JSX.Element) {
+      return (
+        <div class="cm-field-row">
+          {textField}
+          {isSaved && provenanceBadge(field)}
+        </div>
+      )
+    }
+
+    const effCredId = fvStr('credentialId')
+    const hasCredential = !!effCredId
+    const credObj = credentials().find((c) => c.id === effCredId)
+
     return (
       <div class="cm-form">
         <Section title="Basic">
@@ -445,55 +721,64 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             onInput={onNameChange}
             onBlur={() => profileValidation.touch('name')}
           />
-          <TextField
-            id="profile-host"
-            label="Host"
-            required
-            value={profile.options.host}
-            error={profileValidation.error('host')}
-            onInput={(v) => setOption('host', v)}
-            onBlur={() => profileValidation.touch('host')}
-          />
-          <TextField
-            id="profile-port"
-            label="Port"
-            required
-            // `?? 22`, not `|| 22`: with `||` a stored 0 displayed as 22, so
-            // clearing the field snapped the box back to a number the profile did
-            // not have while the rule complained about the one it did.
-            value={profile.options.port ?? 22}
-            type="number"
-            error={profileValidation.error('port')}
-            onInput={(v) => {
-              const n = parseInt(v, 10)
-              setOption('port', isNaN(n) ? 0 : n)
-            }}
-            onBlur={() => profileValidation.touch('port')}
-          />
+          {fieldRow(
+            'host',
+            <TextField
+              id="profile-host"
+              label="Host"
+              required
+              value={fvStr('host')}
+              error={profileValidation.error('host')}
+              onInput={(v) => setOption('host', v)}
+              onBlur={() => profileValidation.touch('host')}
+            />,
+          )}
+          {fieldRow(
+            'port',
+            <TextField
+              id="profile-port"
+              label="Port"
+              required
+              value={fvNum('port') || 22}
+              type="number"
+              error={profileValidation.error('port')}
+              onInput={(v) => {
+                const n = parseInt(v, 10)
+                setOption('port', isNaN(n) ? 0 : n)
+              }}
+              onBlur={() => profileValidation.touch('port')}
+            />,
+          )}
 
           <Field for="credential-select" label="Credential">
-            <Select
-              value={profile.options.credentialId ?? ''}
-              onChange={(v) => setOption('credentialId', v || undefined)}
-              options={credOptions()}
-              placeholder="— None (specify below) —"
-            />
+            <div class="cm-field-row">
+              <Select
+                value={fvStr('credentialId')}
+                onChange={(v) => setOption('credentialId', v || undefined)}
+                options={credOptions()}
+                placeholder="— None (specify below) —"
+              />
+              {isSaved && provenanceBadge('credentialId')}
+            </div>
           </Field>
 
-          <Show when={!profile.options.credentialId}>
-            <TextField
-              id="profile-user"
-              label="User"
-              required
-              value={profile.options.user || ''}
-              error={profileValidation.error('user')}
-              onInput={(v) => setOption('user', v)}
-              onBlur={() => profileValidation.touch('user')}
-            />
+          <Show when={!hasCredential}>
+            {fieldRow(
+              'user',
+              <TextField
+                id="profile-user"
+                label="User"
+                required
+                value={fvStr('user')}
+                error={profileValidation.error('user')}
+                onInput={(v) => setOption('user', v)}
+                onBlur={() => profileValidation.touch('user')}
+              />,
+            )}
           </Show>
         </Section>
 
-        <Show when={!profile.options.credentialId}>
+        <Show when={!hasCredential}>
           <Section title="Authentication (override)">
             <div class="cm-tip">
               Tip: Create a Credential above to reuse auth settings across connections.
@@ -504,7 +789,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                   {(mode) => (
                     <Radio
                       value={mode}
-                      checked={(profile.options.auth ?? '') === mode}
+                      checked={fvStr('auth') === mode}
                       onChange={(v) => setOption('auth', v)}
                       name="auth-mode"
                       label={authModeLabel(mode)}
@@ -513,99 +798,102 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                 </For>
               </div>
             </Field>
+            {isSaved && provenanceBadge('auth')}
           </Section>
         </Show>
 
-        <Show when={!!profile.options.credentialId}>
+        <Show when={hasCredential}>
           <div class="cm-form-section">
             <div class="cm-credential-card">
               <strong>Using Credential: </strong>
-              <span>
-                {(() => {
-                  const cred = credentials().find((c) => c.id === profile.options.credentialId)
-                  if (!cred) return 'Unknown'
-                  return cred.name
-                })()}
-              </span>
+              <span>{credObj ? credObj.name : 'Unknown'}</span>
               <br />
               <small>
-                {(() => {
-                  const cred = credentials().find((c) => c.id === profile.options.credentialId)
-                  if (!cred) return ''
-                  return `Username: ${cred.username} | Auth: ${authModeLabel(cred.auth)}`
-                })()}
+                {credObj
+                  ? `Username: ${credObj.username} | Auth: ${authModeLabel(credObj.auth)}`
+                  : ''}
               </small>
             </div>
           </div>
         </Show>
 
         <Section title="Advanced">
-          <TextField
-            id="profile-keepalive-interval"
-            label="Keepalive interval (ms)"
-            value={profile.options.keepaliveInterval || 0}
-            type="number"
-            min={0}
-            error={profileValidation.error('keepaliveInterval')}
-            onInput={(v) => {
-              const n = parseInt(v, 10)
-              setOption('keepaliveInterval', isNaN(n) ? 0 : n)
-            }}
-            onBlur={() => profileValidation.touch('keepaliveInterval')}
-          />
-          <TextField
-            id="profile-keepalive-count"
-            label="Keepalive count max"
-            value={profile.options.keepaliveCountMax || 0}
-            type="number"
-            min={0}
-            error={profileValidation.error('keepaliveCountMax')}
-            onInput={(v) => {
-              const n = parseInt(v, 10)
-              setOption('keepaliveCountMax', isNaN(n) ? 0 : n)
-            }}
-            onBlur={() => profileValidation.touch('keepaliveCountMax')}
-          />
-          <TextField
-            id="profile-ready-timeout"
-            label="Ready timeout (ms)"
-            value={profile.options.readyTimeout || 0}
-            type="number"
-            min={0}
-            error={profileValidation.error('readyTimeout')}
-            onInput={(v) => {
-              const n = parseInt(v, 10)
-              setOption('readyTimeout', isNaN(n) ? 0 : n)
-            }}
-            onBlur={() => profileValidation.touch('readyTimeout')}
-          />
+          {fieldRow(
+            'keepaliveInterval',
+            <TextField
+              id="profile-keepalive-interval"
+              label="Keepalive interval (ms)"
+              value={fvNum('keepaliveInterval')}
+              type="number"
+              min={0}
+              error={profileValidation.error('keepaliveInterval')}
+              onInput={(v) => {
+                const n = parseInt(v, 10)
+                setOption('keepaliveInterval', isNaN(n) ? 0 : n)
+              }}
+              onBlur={() => profileValidation.touch('keepaliveInterval')}
+            />,
+          )}
+          {fieldRow(
+            'keepaliveCountMax',
+            <TextField
+              id="profile-keepalive-count"
+              label="Keepalive count max"
+              value={fvNum('keepaliveCountMax')}
+              type="number"
+              min={0}
+              error={profileValidation.error('keepaliveCountMax')}
+              onInput={(v) => {
+                const n = parseInt(v, 10)
+                setOption('keepaliveCountMax', isNaN(n) ? 0 : n)
+              }}
+              onBlur={() => profileValidation.touch('keepaliveCountMax')}
+            />,
+          )}
+          {fieldRow(
+            'readyTimeout',
+            <TextField
+              id="profile-ready-timeout"
+              label="Ready timeout (ms)"
+              value={fvNum('readyTimeout')}
+              type="number"
+              min={0}
+              error={profileValidation.error('readyTimeout')}
+              onInput={(v) => {
+                const n = parseInt(v, 10)
+                setOption('readyTimeout', isNaN(n) ? 0 : n)
+              }}
+              onBlur={() => profileValidation.touch('readyTimeout')}
+            />,
+          )}
 
           <Field for="jump-host" label="Jump server">
-            <Select
-              value={profile.options.jumpHost ?? ''}
-              onChange={(v) => setOption('jumpHost', v || undefined)}
-              options={jumpOptions()}
-              placeholder="— None —"
-            />
+            <div class="cm-field-row">
+              <Select
+                value={fvStr('jumpHost')}
+                onChange={(v) => setOption('jumpHost', v || undefined)}
+                options={jumpOptions()}
+                placeholder="— None —"
+              />
+              {isSaved && provenanceBadge('jumpHost')}
+            </div>
           </Field>
 
           <div class="cm-check-group">
             <Checkbox
               label="Agent forward"
-              checked={profile.options.agentForward ?? false}
+              checked={fvBool('agentForward')}
               onChange={(v) => setOption('agentForward', v)}
             />
             <Checkbox
               label="Can be used as jump server"
-              checked={profile.options.canBeJumpServer ?? false}
+              checked={fvBool('canBeJumpServer')}
               onChange={(v) => setOption('canBeJumpServer', v)}
             />
           </div>
+          {isSaved && (provenanceBadge('agentForward') || provenanceBadge('canBeJumpServer'))}
         </Section>
-        {/* Create/Save is the primary, not Connect. This is the connection *editor*
-            — the action it exists for is committing the record in front of you.
-            Connect is a shortcut out of it, and it was carrying the accent while
-            the action the screen is named after looked secondary. */}
+
         <div class="cm-form-actions">
           <Button variant="primary" onClick={() => void saveProfile(profile)}>
             {isNew ? 'Create' : 'Save'}

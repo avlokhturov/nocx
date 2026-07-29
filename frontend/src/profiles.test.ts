@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest'
-import { buildGroupTree, resolveGroupPath, parseQuickConnect } from './profiles'
+import {
+  buildGroupTree,
+  resolveGroupPath,
+  parseQuickConnect,
+  type EffectiveFieldDTO,
+  type PatchParams,
+} from './profiles'
 import type { ProfileGroup, SSHProfile } from './profiles'
 
 describe('buildGroupTree', () => {
@@ -101,5 +107,72 @@ describe('SSHProfile shape', () => {
     }
     expect(p.type).toBe('ssh')
     expect(p.options.credentialId).toBe('cred:alice:123456')
+  })
+})
+
+describe('EffectiveProfile types', () => {
+  it('stores per-field effective values with closed-enum source kinds', () => {
+    const field: EffectiveFieldDTO = {
+      value: 2222,
+      source: { kind: 'group', id: 'g1', label: 'Prod' },
+    }
+    expect(field.source.kind).toMatch(/^(profile|group|credential|sshConfig|global|default)$/)
+    expect(field.value).toBe(2222)
+    expect(field.source.label).toBe('Prod')
+  })
+
+  it('profile source kind has no id/label', () => {
+    const field: EffectiveFieldDTO = {
+      value: 'my-host',
+      source: { kind: 'profile', id: '', label: '' },
+    }
+    expect(field.source.kind).toBe('profile')
+  })
+
+  it('credential source kind links to credential', () => {
+    const field: EffectiveFieldDTO = {
+      value: 'deploy',
+      source: { kind: 'credential', id: 'cred:prod-ops', label: 'prod-ops' },
+    }
+    expect(field.source.id).toBe('cred:prod-ops')
+    expect(field.source.label).toBe('prod-ops')
+  })
+
+  it('sshConfig source kind has no id', () => {
+    const field: EffectiveFieldDTO = {
+      value: 22,
+      source: { kind: 'sshConfig', id: '', label: '' },
+    }
+    expect(field.source.kind).toBe('sshConfig')
+  })
+})
+
+describe('PatchParams', () => {
+  it('accepts set and unset as disjoint operations', () => {
+    const params: PatchParams = {
+      id: 'prof:ssh:my-server',
+      set: { 'options.port': 2222 },
+      unset: ['options.user'],
+    }
+    expect(params.set!['options.port']).toBe(2222)
+    expect(params.unset).toContain('options.user')
+  })
+
+  it('accepts unset-only revert operation', () => {
+    const params: PatchParams = {
+      id: 'prof:ssh:my-server',
+      unset: ['options.port'],
+    }
+    expect(params.set).toBeUndefined()
+    expect(params.unset).toHaveLength(1)
+  })
+
+  it('accepts set-only override', () => {
+    const params: PatchParams = {
+      id: 'prof:ssh:my-server',
+      set: { 'options.port': 2222 },
+    }
+    expect(params.unset).toBeUndefined()
+    expect(params.set!['options.port']).toBe(2222)
   })
 })

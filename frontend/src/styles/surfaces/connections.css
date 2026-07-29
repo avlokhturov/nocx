@@ -222,3 +222,49 @@
    surface had to decide when to show it. Validation is per-field through the
    kit's `Field`/`TextField` `error` prop driven by `ui/validation.ts`, and a
    backend refusal is a Toast. */
+
+/* ── Provenance display ──────────────────────────────────────────────────
+   Each editable field shows where its effective value came from.
+   "overridden here" appears when the field has been modified. */
+
+.cm-field-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.cm-field-row > :first-child {
+  flex: 1;
+  min-width: 0;
+}
+
+.cm-provenance {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  margin-top: 22px; /* aligns with the input below its label */
+  white-space: nowrap;
+}
+
+.cm-provenance-label {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-dim);
+}
+
+.cm-provenance-overridden {
+  font-style: italic;
+  color: var(--color-accent);
+}
+
+.cm-provenance-link {
+  font-size: var(--font-size-sm);
+  color: var(--color-accent);
+  text-decoration: underline;
+  cursor: pointer;
+  padding: 0;
+}
+
+.cm-provenance-link:hover {
+  color: var(--color-accent-hover);
+}

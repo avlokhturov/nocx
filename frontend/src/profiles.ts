@@ -57,11 +57,11 @@ export interface ProfileGroup {
   id: string
   parentGroupId?: string
   name: string
-  icon?: string
-  color?: string
+  description?: string
   defaults?: Record<string, unknown>
-  editable?: boolean
-  children?: ProfileGroup[]
+  order?: number
+  color?: string
+  icon?: string
 }
 
 // Credential is a reusable authentication identity (nocx-УЗ).
@@ -88,11 +88,12 @@ export interface TreeNode extends ProfileGroup {
 // Orphaned groups (parent not found) become roots.
 export function buildGroupTree(groups: ProfileGroup[]): TreeNode[] {
   const map = new Map<string, TreeNode>()
+  const roots: TreeNode[] = []
+
   for (const g of groups) {
     map.set(g.id, { ...g, children: [] })
   }
 
-  const roots: TreeNode[] = []
   for (const g of groups) {
     const node = map.get(g.id)!
     if (g.parentGroupId && map.has(g.parentGroupId)) {
@@ -101,25 +102,21 @@ export function buildGroupTree(groups: ProfileGroup[]): TreeNode[] {
       roots.push(node)
     }
   }
+
   return roots
 }
 
 // resolveGroupPath walks the parent chain returning breadcrumb names
 // (root first, leaf last). Cycle-guarded at 32 levels.
 export function resolveGroupPath(groups: ProfileGroup[], id: string): string[] {
-  const map = new Map<string, ProfileGroup>()
-  for (const g of groups) map.set(g.id, g)
-
+  const map = new Map(groups.map((g) => [g.id, g]))
   const path: string[] = []
-  let current = id
-  for (let depth = 0; current && depth < 32; depth++) {
-    const g = map.get(current)
-    if (!g) {
-      path.unshift(current)
-      break
-    }
-    if (g.name) path.unshift(g.name)
-    current = g.parentGroupId ?? ''
+  let current: ProfileGroup | undefined = map.get(id)
+  let guard = 0
+  while (current && guard < 32) {
+    path.unshift(current.name)
+    current = current.parentGroupId ? map.get(current.parentGroupId) : undefined
+    guard++
   }
   return path
 }
@@ -128,40 +125,42 @@ export function resolveGroupPath(groups: ProfileGroup[], id: string): string[] {
 // "[host]:port" into a sparse SSHProfile (quick-connect entry).
 export function parseQuickConnect(query: string): SSHProfile {
   let user = ''
-  let host = query
+  let host = ''
   let port = 22
+  let rest = query.trim()
 
-  if (host.includes('@')) {
-    const at = host.indexOf('@')
-    user = host.slice(0, at)
-    host = host.slice(at + 1)
-  }
-
-  if (host.includes('[')) {
-    const close = host.indexOf(']')
-    if (close > 0) {
-      const inner = host.slice(1, close)
-      const rest = host.slice(close + 1)
-      host = inner
-      if (rest.startsWith(':')) {
-        const p = parseInt(rest.slice(1), 10)
-        if (p > 0) port = p
+  if (rest.startsWith('[')) {
+    // IPv6: [::1]:port or [::1]
+    const closeBracket = rest.indexOf(']')
+    if (closeBracket === -1) {
+      host = rest
+    } else {
+      host = rest.slice(1, closeBracket)
+      if (rest[closeBracket + 1] === ':') {
+        port = parseInt(rest.slice(closeBracket + 2), 10) || 22
       }
     }
-  } else if (host.includes(':')) {
-    const colon = host.lastIndexOf(':')
-    const p = parseInt(host.slice(colon + 1), 10)
-    if (p > 0) {
-      port = p
-      host = host.slice(0, colon)
+  } else {
+    // IPv4 or hostname
+    const atIdx = rest.lastIndexOf('@')
+    if (atIdx !== -1) {
+      user = rest.slice(0, atIdx)
+      rest = rest.slice(atIdx + 1)
+    }
+    const colonIdx = rest.lastIndexOf(':')
+    if (colonIdx !== -1) {
+      host = rest.slice(0, colonIdx)
+      port = parseInt(rest.slice(colonIdx + 1), 10) || 22
+    } else {
+      host = rest
     }
   }
 
   return {
     id: '',
     type: 'ssh',
-    name: query,
-    options: { host, port, user },
+    name: host,
+    options: { host, port, user: user || undefined },
   }
 }
 
@@ -169,12 +168,52 @@ export function parseQuickConnect(query: string): SSHProfile {
 // the user fills the form. On save the profile is sent to the backend, which
 // either uses it or generates its own.
 export function newProfileID(type: string, name: string): string {
-  const uuid =
-    typeof crypto !== 'undefined' && crypto.randomUUID
-      ? crypto.randomUUID()
-      : `nocx-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
-  return `${type}:custom:${name}:${uuid}`
+  const safe =
+    name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '') || 'unnamed'
+  return `prof:${type}:${safe}`
 }
+
+// ── Effective profile types (wire format from profiles.effective) ──────────
+
+// EffectiveSourceKind is a closed enum — switch on this, never parse id/label.
+export type EffectiveSourceKind =
+  'profile' | 'group' | 'credential' | 'sshConfig' | 'global' | 'default'
+
+// FieldSourceDTO is the provenance source in the wire format.
+export interface FieldSourceDTO {
+  kind: EffectiveSourceKind
+  id: string
+  label: string
+}
+
+// EffectiveFieldDTO is the per-field wire representation.
+export interface EffectiveFieldDTO {
+  value: unknown
+  source: FieldSourceDTO
+}
+
+// EffectiveProfileDTO is the per-profile wire representation.
+export interface EffectiveProfileDTO {
+  id: string
+  fields: Record<string, EffectiveFieldDTO>
+}
+
+// EffectiveBatchResponse is the response from profiles.effective.
+export interface EffectiveBatchResponse {
+  profiles: EffectiveProfileDTO[]
+  errors?: { id: string; error: string }[]
+}
+
+// PatchParams is the request for profiles.patch.
+export interface PatchParams {
+  id: string
+  set?: Record<string, unknown>
+  unset?: string[]
+}
+
 // ProfileClient is the JSON-RPC client for profile/group/credential CRUD.
 // It speaks the control-plane methods wired in nocx-fxs.5 (AD-1).
 // RPC dispatch is delegated to a shared Dispatcher so request-ID allocation
@@ -246,6 +285,20 @@ export class ProfileClient {
     return this.call('credentials.usage', {})
   }
 
+  // ── Effective profile resolution (profiles.effective / profiles.patch) ──
+
+  // loadEffective resolves one or more profiles to their effective values
+  // with per-field provenance. Batch: pass several IDs in one call.
+  loadEffective(ids: string[]): Promise<EffectiveBatchResponse> {
+    return this.call('profiles.effective', { ids })
+  }
+
+  // patchProfile applies atomic set/unset operations to a profile and returns
+  // its new effective entry. Use set for overrides, unset to revert to inherited.
+  patchProfile(params: PatchParams): Promise<EffectiveProfileDTO> {
+    return this.call('profiles.patch', params)
+  }
+
   // Settings RPC (nocx-9m5 / STORE-5b).  No secret value ever appears in a
   // response — secrets go through secretSet/secretDelete/secretExists only.
   describeSettings(): Promise<{ declarations: unknown[] }> {
@@ -302,7 +355,7 @@ export class ProfileClient {
   }
 
   importPortable(payloadBase64: string, passphrase: string): Promise<ImportResult> {
-    return this.call('export.importPortable', { payload: payloadBase64, passphrase })
+    return this.call('export.portableImport', { payload: payloadBase64, passphrase })
   }
 }
 

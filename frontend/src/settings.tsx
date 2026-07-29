@@ -319,6 +319,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
           client={props.profileClient}
           onConnect={props.onConnect}
           newProfileRequest={newConnectionRequest()}
+          onNavigateToCredentials={() => setActiveComponentPage('credentials')}
         />
       ),
     }
