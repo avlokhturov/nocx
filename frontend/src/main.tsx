@@ -132,7 +132,13 @@ async function main() {
       const content = new SettingsContent(profileClient)
       content.onConnect = (profile) => {
         log.info('nocx: connect from Settings', { profileId: profile.id })
-        tm.newSSHTab(profile.id, profile.options.host, profile.options.user)
+        tm.newSSHTab(
+          profile.id,
+          profile.options.host,
+          profile.options.user,
+          profile.options.port,
+          profile.name,
+        )
       }
       return content
     },

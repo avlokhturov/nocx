@@ -429,8 +429,8 @@ export class TabManager {
     return tab
   }
 
-  newSSHTab(profileId: string, host: string, user?: string, port?: number): Tab {
-    log.info('nocx: newSSHTab called', { profileId, host, user, port })
+  newSSHTab(profileId: string, host: string, user?: string, port?: number, title?: string): Tab {
+    log.info('nocx: newSSHTab called', { profileId, host, user, port, title })
     const sshOpts = { profileId, host, user, port } as const
     const tabRef = { current: undefined as Tab | undefined }
     const content = new TerminalContent(
@@ -457,7 +457,7 @@ export class TabManager {
       singletonKey: null,
       restoreDescriptor: { type: 'ssh', profileId, host, user },
       supportsAttention: true,
-      defaultTitle: host,
+      defaultTitle: title || host,
     }
     const tab = this.addTab(content, descriptor)
     tabRef.current = tab

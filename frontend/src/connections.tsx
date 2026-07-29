@@ -7,26 +7,14 @@
  * Pattern follows credentials.tsx: full-width list, editing in a Dialog.
  * Tabby import moved to Export / Backup / Import section.
  */
-import {
-  For,
-  Show,
-  createSignal,
-  createMemo,
-  createEffect,
-  on,
-  onMount,
-  type Component,
-  type JSX,
-} from 'solid-js'
+import { For, Show, createSignal, createMemo, createEffect, on, onMount, type JSX } from 'solid-js'
 import { Button } from './ui/button'
 import { TextField } from './ui/text-field'
 import { Checkbox } from './ui/checkbox'
 import { Select, type SelectOption } from './ui/select'
-import { Toolbar } from './ui/toolbar'
 import { Dialog, showConfirm } from './ui/dialog'
 import { Radio } from './ui/radio'
 import { Section } from './ui/section'
-import { SegmentedControl } from './ui/segmented-control'
 import { Stack } from './ui/stack'
 import { Tabs } from './ui/tabs'
 import { EmptyState } from './ui/empty-state'
@@ -34,19 +22,8 @@ import { Field } from './ui/field'
 import { FileInput } from './ui/file-input'
 import { Badge } from './ui/badge'
 import { IconButton } from './ui/icon-button'
-import { SearchField } from './ui/search-field'
-import {
-  AsteriskIcon,
-  KeyIcon,
-  KeyboardIcon,
-  LightbulbIcon,
-  PencilIcon,
-  PlugIcon,
-  PlusIcon,
-  ResetIcon,
-  TrashIcon,
-  UserIcon,
-} from './ui/icons'
+import { CollectionRow, CollectionView } from './ui/collection-view'
+import { CheckCircleIcon, PencilIcon, PlugIcon, TrashIcon } from './ui/icons'
 import {
   createFormValidation,
   required,
@@ -73,63 +50,10 @@ import type {
 import { ProfileClient, buildGroupTree } from './profiles'
 import { parseQuickConnect } from './profiles'
 import { CredentialForm, type CredentialFormHandle } from './credential-form'
+import { PasswordEditor } from './password-editor'
+import { AuthenticationEditor } from './authentication-editor'
 import { log } from './log'
 import { showToast } from './ui/toast'
-
-// ── Helpers ─────────────────────────────────────────────────────────────────
-
-function authModeLabel(mode: AuthMode): string {
-  switch (mode) {
-    case '':
-      return 'Auto'
-    case 'password':
-      return 'Password'
-    case 'publicKey':
-      return 'Public Key'
-    case 'agent':
-      return 'Agent'
-    case 'keyboardInteractive':
-      return 'Keyboard Interactive'
-  }
-}
-
-const AUTH_MODES: AuthMode[] = ['', 'password', 'publicKey', 'agent', 'keyboardInteractive']
-
-/**
- * The same five modes as one row of segments, each with a glyph over its label.
- *
- * A record rather than a chain of ternaries, because the chain had a hole:
- * `agent` matched none of its three tests and fell through to the default, so
- * the Agent segment was labelled "Password". A record cannot have a hole — the
- * key is either present or the compiler says so.
- *
- * Only "Keyboard Interactive" is shortened, and only because it is three times
- * the length of the rest; its full name is in the tooltip. Everything else
- * keeps the spelling `authModeLabel` uses, so the mode reads the same wherever
- * it appears.
- */
-const AUTH_SEGMENT_LABEL: Record<AuthMode, string> = {
-  '': 'Auto',
-  password: 'Password',
-  publicKey: 'Public Key',
-  agent: 'Agent',
-  keyboardInteractive: 'Interactive',
-}
-
-const AUTH_SEGMENT_ICON: Record<AuthMode, Component> = {
-  '': LightbulbIcon,
-  password: AsteriskIcon,
-  publicKey: KeyIcon,
-  agent: UserIcon,
-  keyboardInteractive: KeyboardIcon,
-}
-
-const AUTH_SEGMENTS = AUTH_MODES.map((mode) => ({
-  value: mode,
-  label: AUTH_SEGMENT_LABEL[mode],
-  title: authModeLabel(mode),
-  icon: AUTH_SEGMENT_ICON[mode],
-}))
 
 // ── Provenance helpers ───────────────────────────────────────────────────────
 
@@ -164,21 +88,6 @@ function probeOutcomeLabel(outcome: ProbeOutcome): string {
       return 'Host key changed'
     case 'needs-interactive':
       return 'Needs interactive auth'
-  }
-}
-
-function probeOutcomeTone(outcome: ProbeOutcome): 'neutral' | 'info' | 'warning' | 'danger' {
-  switch (outcome) {
-    case 'accepted':
-      return 'info'
-    case 'rejected':
-      return 'danger'
-    case 'unreachable':
-      return 'warning'
-    case 'host-key-problem':
-      return 'danger'
-    case 'needs-interactive':
-      return 'warning'
   }
 }
 
@@ -259,6 +168,8 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   // ── Selection / dialog state ─────────────────────────────────────────────
   const [editing, setEditing] = createSignal<SSHProfile | null>(null)
   const [dialogOpen, setDialogOpen] = createSignal(false)
+  const [profilePasswordOpen, setProfilePasswordOpen] = createSignal(false)
+  const [profilePasswordValue, setProfilePasswordValue] = createSignal('')
 
   // ── Effective/provenance state ─────────────────────────────────────────
   const [effectiveData, setEffectiveData] = createSignal<Record<string, EffectiveProfileDTO>>({})
@@ -268,10 +179,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   // ── Session state per profile ──────────────────────────────────────────
   const [sessionStatuses, setSessionStatuses] = createSignal<Record<string, SessionStatus>>({})
 
-  // ── Probe result per profile ──────────────────────────────────────────
-  const [probeResults, setProbeResults] = createSignal<
-    Record<string, { outcome: ProbeOutcome; detail?: string } | null>
-  >({})
+  // ── Connection test state per profile ────────────────────────────────
   const [probeBusy, setProbeBusy] = createSignal<Set<string>>(new Set())
 
   // ── Filter ─────────────────────────────────────────────────────────────
@@ -673,10 +581,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
    * not read at the same moment.
    */
   const CONNECTION_DEFAULTS: { key: string; label: string }[] = [
-    { key: 'credentialId', label: 'Credential' },
     { key: 'port', label: 'Port' },
-    { key: 'user', label: 'User' },
-    { key: 'auth', label: 'Auth mode' },
     { key: 'jumpHost', label: 'Jump server' },
   ]
 
@@ -778,13 +683,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         setGroupDefaultsField(key, v)
       }
     }
-    const credOptions = createMemo((): SelectOption[] =>
-      credentials().map((c) => ({
-        value: c.id,
-        label: `${c.name} (${c.username})`,
-      })),
-    )
-
     const jumpOptions = createMemo((): SelectOption[] =>
       jumpServerProfiles().map((p) => ({
         value: p.id,
@@ -798,29 +696,17 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     function renderDefault(field: { key: string; label: string }): JSX.Element {
       const key = field.key
       const label = field.label
-      if (key === 'credentialId' || key === 'jumpHost') {
+      if (key === 'jumpHost') {
         return (
           <Field for={`group-default-${key}`} label={label}>
             <div class="cm-field-row">
               <Select
                 value={gv(key) as string}
                 onChange={(v) => setG(key, v || '')}
-                options={key === 'credentialId' ? credOptions() : jumpOptions()}
+                options={jumpOptions()}
                 placeholder="&mdash; Not set (inherit) &mdash;"
               />
             </div>
-          </Field>
-        )
-      }
-      if (key === 'auth') {
-        return (
-          <Field for="group-default-auth" label={label}>
-            <SegmentedControl
-              options={AUTH_SEGMENTS}
-              value={(gv(key) as string) ?? ''}
-              onChange={(v) => setG(key, v)}
-              ariaLabel="Default auth mode"
-            />
           </Field>
         )
       }
@@ -864,6 +750,39 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       )
     }
 
+    function renderConnectionDefaults(): JSX.Element {
+      const auth = gv('auth')
+      return (
+        <Stack>
+          <p class="cm-hint">
+            Inherited by every connection in this group and its subgroups, unless the connection
+            overrides it.
+          </p>
+          <AuthenticationEditor
+            id="group-default-auth"
+            credentials={credentials()}
+            credentialId={(gv('credentialId') as string | undefined) || undefined}
+            onCredentialChange={(value) => setGroupDefaultsField('credentialId', value)}
+            username={(gv('user') as string | undefined) || undefined}
+            onUsernameChange={(value) => setGroupDefaultsField('user', value)}
+            auth={auth === undefined ? undefined : (auth as AuthMode)}
+            onAuthChange={(value) => setGroupDefaultsField('auth', value)}
+            inherit
+            publicKeyAction={
+              <TextField
+                id="group-default-key-path"
+                label="Private Key Path"
+                value={(gv('keyPath') as string | undefined) ?? ''}
+                onInput={(value) => setGroupDefaultsField('keyPath', value)}
+                placeholder="— Not set (inherit) —"
+              />
+            }
+          />
+          <For each={CONNECTION_DEFAULTS}>{(field) => renderDefault(field)}</For>
+        </Stack>
+      )
+    }
+
     return (
       <div class="cm-group-form">
         <Tabs
@@ -894,7 +813,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             {
               id: 'connection',
               label: 'Connection',
-              content: () => renderDefaults(CONNECTION_DEFAULTS),
+              content: renderConnectionDefaults,
             },
             {
               id: 'advanced',
@@ -967,7 +886,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     setProbeBusy((prev) => new Set(prev).add(profile.id))
     try {
       const res = await props.client.connectionTest(profile.id)
-      setProbeResults((prev) => ({ ...prev, [profile.id]: res }))
       showToast({
         level: res.outcome === 'accepted' ? 'success' : 'warning',
         message: res.detail
@@ -1082,6 +1000,8 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   function closeDialog() {
     setDialogOpen(false)
     setEditing(null)
+    setProfilePasswordOpen(false)
+    setProfilePasswordValue('')
     setDirtyFields(new Set<string>())
     setProfileMoveImpact(null)
   }
@@ -1124,6 +1044,35 @@ export function ConnectionsView(props: ConnectionsViewProps) {
 
   async function saveProfile(profile: SSHProfile) {
     if (!gate(profileValidation)) return
+
+    if (
+      !profile.options.credentialId &&
+      profile.options.auth === 'password' &&
+      profilePasswordValue()
+    ) {
+      try {
+        const credential = await props.client.createCredential({
+          id: '',
+          name: profile.name,
+          username: profile.options.user ?? '',
+          auth: 'password',
+        })
+        await props.client.savePassword(credential.id, profilePasswordValue())
+        const linked = {
+          ...profile,
+          options: { ...profile.options, credentialId: credential.id },
+        }
+        setEditing(linked)
+        setProfilePasswordValue('')
+        setDirtyFields((prev) => new Set(prev).add('credentialId'))
+        await saveProfile(linked)
+      } catch (err) {
+        const message = (err as Error).message
+        log.error('Failed to save inline password credential', { message })
+        showToast({ level: 'danger', message: `Could not save the password: ${message}` })
+      }
+      return
+    }
 
     const isNew = !profile.id || !profiles().some((x) => x.id === profile.id)
 
@@ -1213,46 +1162,27 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     }
   }
 
-  async function revertField(field: string) {
-    const p = formProfile()
-    if (!p || !p.id) return
-    try {
-      const eff = await props.client.patchProfile({ id: p.id, unset: [`options.${field}`] })
-      setEffectiveData((prev) => ({ ...prev, [p.id]: eff }))
-      setDirtyFields((prev: Set<string>) => {
-        const next = new Set(prev)
-        next.delete(field)
-        return next
-      })
-      // Drop the field from the draft rather than writing the inherited value
-      // into it. Two reasons, and the second is the whole point of revert.
-      //
-      // Display does not need it: fieldValue() falls through to the effective
-      // entry once the field is no longer dirty.
-      //
-      // Saving must not have it. A later edit to the name or host routes through
-      // profiles.update, which writes the WHOLE profile — so an inherited value
-      // sitting in options would be persisted as an explicit override, and the
-      // field just reverted would be pinned to the value it used to inherit.
-      // Spec §3.3's first binding rule: an inherited value is never
-      // materialised, because once it is, "inherited 2222" and "overridden here
-      // to 2222" are the same state forever.
-      const updated = { ...p, options: { ...p.options } }
-      delete (updated.options as unknown as Record<string, unknown>)[field]
-      setEditing(updated)
-    } catch (err) {
-      const message = (err as Error).message
-      log.error('Failed to revert field', { field, message })
-      showToast({ level: 'danger', message: `Could not revert "${field}": ${message}` })
-    }
-  }
-
   // ── Inline credential creation (from within connection form) ────────────
 
   function openCredDialog() {
-    setCredDraft({ id: '', name: '', username: '', auth: '' })
+    const profile = editing()
+    const username = profile?.options.user?.trim() ?? ''
+    const host = profile?.options.host?.trim() ?? ''
+    const connectionName = profile?.name.trim() ?? ''
+    const endpointName = username && host ? `${username}@${host}` : host
+
+    setCredDraft({
+      id: '',
+      name: connectionName || endpointName || 'SSH credential',
+      username,
+      auth: profile?.options.auth ?? '',
+    })
     setCredPasswordValue('')
     credFormRef.current?.reset()
+    // This is a drill-in from the connection editor, not a second decision
+    // layered over it. Keep the connection draft in memory and hand the single
+    // modal slot to the credential editor.
+    setDialogOpen(false)
     setCredDialogOpen(true)
   }
 
@@ -1260,6 +1190,8 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     setCredDialogOpen(false)
     setCredDraft(null)
     setCredPasswordValue('')
+    // Return to the connection draft on both Save and Cancel.
+    if (editing()) setDialogOpen(true)
   }
 
   async function handleCredSave() {
@@ -1336,7 +1268,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
 
   function renderRow(p: SSHProfile) {
     const status = () => sessionStatuses()[p.id]
-    const probe = () => probeResults()[p.id]
     const isTesting = () => probeBusy().has(p.id)
 
     // Credential lookup
@@ -1352,100 +1283,92 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     }
 
     return (
-      <div class="cm-item" role="listitem" tabIndex={-1}>
-        <div class="cm-item-info">
-          <div class="cm-item-name">{p.name}</div>
-          <div class="cm-item-meta">
-            <Badge tone="neutral">{p.type.toUpperCase()}</Badge>
-            <span class="cm-item-address">
-              {p.options.user || '?'}@{p.options.host}:{p.options.port || 22}
-            </span>
-            {/* Session state — Show with keyed narrows the type */}
-            <Show when={status()} keyed>
-              {(st) => (
-                <span
-                  class="cm-session-state"
-                  classList={{ 'cm-session-live': st.live }}
-                  role="status"
-                  aria-label={st.live ? 'Connected' : 'Disconnected'}
-                >
-                  <span class="cm-session-dot" aria-hidden="true" />
-                  {st.live ? 'Connected' : 'Disconnected'}
-                  <Show when={st.lastUsed} keyed>
-                    {(lastUsed) => (
-                      <span class="cm-session-last-used">
-                        &middot; last used {new Date(lastUsed).toLocaleDateString()}
-                      </span>
-                    )}
+      <CollectionRow
+        info={
+          <>
+            <div class="cm-item-name">{p.name}</div>
+            <div class="cm-item-meta">
+              <Badge tone="neutral">{p.type.toUpperCase()}</Badge>
+              <span class="cm-item-address">
+                {p.options.user ? `${p.options.user}@` : ''}
+                {p.options.host}:{p.options.port || 22}
+              </span>
+              {/* Session state — Show with keyed narrows the type */}
+              <Show when={status()} keyed>
+                {(st) => (
+                  <span
+                    class="cm-session-state"
+                    classList={{ 'cm-session-live': st.live }}
+                    role="status"
+                    aria-label={st.live ? 'Connected' : 'Disconnected'}
+                  >
+                    <span class="cm-session-dot" aria-hidden="true" />
+                    {st.live ? 'Connected' : 'Disconnected'}
+                    <Show when={st.lastUsed} keyed>
+                      {(lastUsed) => (
+                        <span class="cm-session-last-used">
+                          &middot; last used {new Date(lastUsed).toLocaleDateString()}
+                        </span>
+                      )}
+                    </Show>
+                  </span>
+                )}
+              </Show>
+            </div>
+            {/* Credential info */}
+            <Show when={credObj()} keyed>
+              {(cred) => (
+                <div class="cm-item-credential">
+                  <span class="cm-credential-key">Credential:</span>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => props.onNavigateToCredentials?.()}
+                    ariaLabel={`Open credentials for ${cred.name}`}
+                  >
+                    {cred.name}
+                  </Button>
+                  <Show when={credSource()} keyed>
+                    {(src) => <span class="cm-provenance-label">{sourceLabel(src)}</span>}
                   </Show>
-                </span>
+                </div>
               )}
             </Show>
-          </div>
-          {/* Credential info */}
-          <Show when={credObj()} keyed>
-            {(cred) => (
-              <div class="cm-item-credential">
-                <span class="cm-credential-key">Credential:</span>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => props.onNavigateToCredentials?.()}
-                  ariaLabel={`Open credentials for ${cred.name}`}
-                >
-                  {cred.name}
-                </Button>
-                <Show when={credSource()} keyed>
-                  {(src) => <span class="cm-provenance-label">{sourceLabel(src)}</span>}
-                </Show>
-              </div>
-            )}
-          </Show>
-          {/* Probe result — only shown when present */}
-          <Show when={probe()} keyed>
-            {(pr) => (
-              <>
-                <Badge tone={probeOutcomeTone(pr.outcome)}>{probeOutcomeLabel(pr.outcome)}</Badge>
-                <Show when={pr.detail} keyed>
-                  {(detail) => <span class="cm-probe-detail">{detail}</span>}
-                </Show>
-              </>
-            )}
-          </Show>
-        </div>
-        <div class="cm-item-actions">
-          <Button
-            variant="default"
-            size="sm"
-            disabled={isTesting()}
-            onClick={() => void handleTest(p)}
-            ariaLabel={`Test connection to ${p.name}`}
-          >
-            {isTesting() ? 'Testing...' : 'Test'}
-          </Button>
-          {/* Icon where a glyph is conventional, word where it is not. "Test"
-              has no universal symbol — Orca draws one and labels it anyway —
-              while a pencil and a plug are read without being read. A label
-              repeated once per row is spent by the second row, which is the
-              same argument the kit already makes about primary buttons. */}
-          <IconButton
-            size="sm"
-            title="Edit"
-            ariaLabel={`Edit ${p.name}`}
-            onClick={() => openEditDialog(p)}
-          >
-            <PencilIcon />
-          </IconButton>
-          <IconButton
-            size="sm"
-            title="Connect"
-            ariaLabel={`Connect to ${p.name}`}
-            onClick={() => props.onConnect?.(p)}
-          >
-            <PlugIcon />
-          </IconButton>
-        </div>
-      </div>
+          </>
+        }
+        actions={
+          <>
+            <IconButton
+              size="sm"
+              title="Edit"
+              ariaLabel={`Edit ${p.name}`}
+              onClick={() => openEditDialog(p)}
+            >
+              <PencilIcon />
+            </IconButton>
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={isTesting()}
+              onClick={() => void handleTest(p)}
+              ariaLabel={`Test connection to ${p.name}`}
+            >
+              <CheckCircleIcon />
+              {isTesting() ? 'Testing...' : 'Test'}
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              title="Connect"
+              ariaLabel={`Connect to ${p.name}`}
+              onClick={() => props.onConnect?.(p)}
+            >
+              <PlugIcon />
+              Connect
+            </Button>
+          </>
+        }
+      />
     )
   }
 
@@ -1524,58 +1447,21 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       return eff?.fields[field]
     }
 
-    function provenanceBadge(field: string) {
-      if (dirtyFields().has(field)) {
-        return (
-          <span class="cm-provenance">
-            <span class="cm-provenance-label cm-provenance-overridden">overridden here</span>
-            <IconButton
-              size="sm"
-              ariaLabel={`Revert ${field}`}
-              title="Revert to inherited"
-              onClick={(e: MouseEvent) => {
-                e.preventDefault()
-                void revertField(field)
-              }}
-            >
-              <ResetIcon />
-            </IconButton>
-          </span>
-        )
-      }
-      const eff = effField(field)
-      if (!eff) return null
-
-      const label = sourceLabel(eff.source)
-      if (eff.source.kind === 'credential') {
-        return (
-          <span class="cm-provenance">
-            <Button
-              variant="ghost"
-              onClick={() => props.onNavigateToCredentials?.()}
-              title="Open Credentials settings"
-            >
-              {label}
-            </Button>
-          </span>
-        )
-      }
-      return (
-        <span class="cm-provenance">
-          <span class="cm-provenance-label">{label}</span>
-        </span>
-      )
-    }
-
     function fieldValue(key: string): unknown {
       const dirty = dirtyFields()
       if (dirty.has(key)) {
         const draft = editing()
         if (draft) return (draft.options as unknown as Record<string, unknown>)[key]
       }
+      // The editor edits the stored profile, so an explicit profile value wins.
+      // Effective values are only the fallback for a field this profile omits.
+      // Reading effective first replaced a saved host with the resolver's empty
+      // default and rendered the Host input blank.
+      const own = (profile.options as unknown as Record<string, unknown>)[key]
+      if (own !== undefined && own !== null) return own
       const eff = effField(key)
       if (eff !== undefined) return eff.value
-      return (profile.options as unknown as Record<string, unknown>)[key]
+      return undefined
     }
 
     const isSaved = () => !!profile.id && profiles().some((x) => x.id === profile.id)
@@ -1597,13 +1483,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       return v === true
     }
 
-    const credOptions = createMemo((): SelectOption[] =>
-      credentials().map((c) => ({
-        value: c.id,
-        label: `${c.name} (${c.username})`,
-      })),
-    )
-
     const jumpOptions = createMemo((): SelectOption[] =>
       jumpServerProfiles().map((p) => ({
         value: p.id,
@@ -1618,18 +1497,9 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     )
 
     function fieldRow(field: string, textField: JSX.Element) {
-      const isSaved = !!profile.id && profiles().some((x) => x.id === profile.id)
-      return (
-        <div class="cm-field-row">
-          {textField}
-          {isSaved && provenanceBadge(field)}
-        </div>
-      )
+      void field
+      return <div class="cm-field-row">{textField}</div>
     }
-
-    const effCredId = fvStr('credentialId')
-    const hasCredential = !!effCredId
-    const credObj = credentials().find((c) => c.id === effCredId)
 
     return (
       <div class="cm-form">
@@ -1700,65 +1570,40 @@ export function ConnectionsView(props: ConnectionsViewProps) {
               label: 'Authentication',
               content: () => (
                 <Stack>
-                  <Field for="credential-select" label="Credential">
-                    <div class="cm-field-row">
-                      <Select
-                        value={fvStr('credentialId')}
-                        onChange={(v) => setOption('credentialId', v || undefined)}
-                        options={credOptions()}
-                        placeholder="&mdash; None (specify below) &mdash;"
-                      />
-                      <IconButton
-                        size="sm"
-                        ariaLabel="New credential"
-                        title="Create a new credential"
-                        onClick={() => openCredDialog()}
-                      >
-                        <PlusIcon />
-                      </IconButton>
-                      {isSaved() && provenanceBadge('credentialId')}
-                    </div>
-                  </Field>
-
-                  {/* A credential answers user and method together, so the
-                      fields it answers are not shown competing with it. */}
-                  <Show
-                    when={hasCredential}
-                    fallback={
-                      <>
-                        {fieldRow(
-                          'user',
-                          <TextField
-                            id="profile-user"
-                            label="User"
-                            value={fvStr('user')}
-                            placeholder="&mdash; Your local username &mdash;"
-                            onInput={(v) => setOption('user', v)}
-                          />,
-                        )}
-                        <Field for="auth-method" label="Method">
-                          <SegmentedControl
-                            options={AUTH_SEGMENTS}
-                            value={fvStr('auth')}
-                            onChange={(v) => setOption('auth', v)}
-                            ariaLabel="Auth method"
-                          />
-                        </Field>
-                        {isSaved() && provenanceBadge('auth')}
-                      </>
+                  <AuthenticationEditor
+                    id="profile-auth"
+                    credentials={credentials()}
+                    credentialId={fvStr('credentialId') || undefined}
+                    onCredentialChange={(value) => setOption('credentialId', value)}
+                    onCreateCredential={openCredDialog}
+                    username={fvStr('user')}
+                    onUsernameChange={(value) => setOption('user', value)}
+                    auth={fvStr('auth') as AuthMode}
+                    onAuthChange={(value) => setOption('auth', value)}
+                    passwordAction={
+                      <Field for="profile-password-action" label="Password">
+                        <div class="credential-secret-action">
+                          <span class="credential-secret-description">
+                            {profilePasswordValue() ? 'Password ready to save' : 'No password set'}
+                          </span>
+                          <div class="credential-secret-actions">
+                            <Button variant="default" onClick={() => setProfilePasswordOpen(true)}>
+                              {profilePasswordValue() ? 'Change Password' : 'Set Password'}
+                            </Button>
+                          </div>
+                        </div>
+                      </Field>
                     }
-                  >
-                    <div class="cm-credential-card">
-                      <strong>Using Credential: </strong>
-                      <span>{credObj ? credObj.name : 'Unknown'}</span>
-                      <br />
-                      <small>
-                        {credObj
-                          ? `Username: ${credObj.username} | Auth: ${authModeLabel(credObj.auth)}`
-                          : ''}
-                      </small>
-                    </div>
-                  </Show>
+                    publicKeyAction={
+                      <TextField
+                        id="profile-key-path"
+                        label="Private Key Path"
+                        value={fvStr('keyPath')}
+                        onInput={(value) => setOption('keyPath', value || undefined)}
+                        placeholder="~/.ssh/id_ed25519"
+                      />
+                    }
+                  />
                 </Stack>
               ),
             },
@@ -1823,7 +1668,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                         options={jumpOptions()}
                         placeholder="&mdash; None &mdash;"
                       />
-                      {isSaved() && provenanceBadge('jumpHost')}
                     </div>
                   </Field>
                   <div class="cm-check-group">
@@ -1838,8 +1682,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                       onChange={(v) => setOption('canBeJumpServer', v)}
                     />
                   </div>
-                  {isSaved() &&
-                    (provenanceBadge('agentForward') || provenanceBadge('canBeJumpServer'))}
                 </Stack>
               ),
             },
@@ -1852,8 +1694,14 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         {/* Pinned under the pane, like the group editor's blast radius: what a
             move does to inherited settings has to be in front of the person
             making it, not filed behind a section they can decline to open. */}
-        <Show when={profileMoveImpact()} keyed>
-          {(impact) => <div class="cm-group-impact">{renderImpactSummary(impact)}</div>}
+        <Show
+          when={
+            profileMoveImpact() &&
+            ((profileMoveImpact()!.affectedProfiles?.length ?? 0) > 0 ||
+              profileMoveImpact()!.dangerous)
+          }
+        >
+          <div class="cm-group-impact">{renderImpactSummary(profileMoveImpact()!)}</div>
         </Show>
       </div>
     )
@@ -1863,33 +1711,26 @@ export function ConnectionsView(props: ConnectionsViewProps) {
 
   return (
     <div class="cm-root">
-      <Toolbar ariaLabel="Connection actions">
-        <div class="cm-search">
-          <SearchField
-            value={searchQuery()}
-            onInput={setSearchQuery}
-            placeholder="Filter connections"
-            ariaLabel="Filter connections"
-          />
-        </div>
-        {/* Actions sit together on the trailing edge. The filter and the
-            create button used to be adjacent with the rest of the bar empty,
-            which read as one broken cluster rather than as two jobs. */}
-        <div class="cm-toolbar-actions">
-          <Button variant="default" onClick={openImportDialog}>
-            Import…
-          </Button>
-          <Button variant="default" onClick={startNewGroup}>
-            New group
-          </Button>
-          <Button variant="primary" onClick={startNewProfile}>
-            + New connection
-          </Button>
-        </div>
-      </Toolbar>
-      <Show
-        when={profiles().length > 0 || groups().length > 0}
-        fallback={
+      <CollectionView
+        searchValue={searchQuery()}
+        onSearch={setSearchQuery}
+        searchPlaceholder="Filter connections"
+        searchLabel="Filter connections"
+        actions={
+          <>
+            <Button variant="default" onClick={openImportDialog}>
+              Import…
+            </Button>
+            <Button variant="default" onClick={startNewGroup}>
+              New group
+            </Button>
+            <Button variant="primary" onClick={startNewProfile}>
+              + New connection
+            </Button>
+          </>
+        }
+        hasItems={profiles().length > 0 || groups().length > 0}
+        empty={
           <EmptyState
             title="No connections yet"
             description="Add one by hand, or import from ~/.ssh/config, Tabby, or an export."
@@ -1906,29 +1747,25 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           />
         }
       >
-        <>
-          <div class="cm-body" role="list" aria-label="Connection list">
-            <For each={tree()}>{(node) => renderGroupSection(node)}</For>
-            <Show when={ungrouped().length > 0}>
-              <div class="cm-group-header" role="heading" aria-level={2}>
-                <span class="cm-group-name">
-                  {groups().length > 0 ? 'Ungrouped' : 'Connections'}
-                </span>
-              </div>
-              <For each={ungrouped()}>{(p) => renderRow(p)}</For>
-            </Show>
-          </div>
-          {/* A filter that matches nothing hid every row and every group and
+        <div role="list" aria-label="Connection list">
+          <For each={tree()}>{(node) => renderGroupSection(node)}</For>
+          <Show when={ungrouped().length > 0}>
+            <div class="cm-group-header" role="heading" aria-level={2}>
+              <span class="cm-group-name">{groups().length > 0 ? 'Ungrouped' : 'Connections'}</span>
+            </div>
+            <For each={ungrouped()}>{(p) => renderRow(p)}</For>
+          </Show>
+        </div>
+        {/* A filter that matches nothing hid every row and every group and
               said nothing, which is indistinguishable from the list failing
               to load. */}
-          <Show when={searchQuery().trim() !== '' && filteredProfiles().length === 0}>
-            <EmptyState
-              title="Nothing matches this filter"
-              description={`No connection's name, host or user contains "${searchQuery().trim()}".`}
-            />
-          </Show>
-        </>
-      </Show>
+        <Show when={searchQuery().trim() !== '' && filteredProfiles().length === 0}>
+          <EmptyState
+            title="Nothing matches this filter"
+            description={`No connection's name, host or user contains "${searchQuery().trim()}".`}
+          />
+        </Show>
+      </CollectionView>
 
       {/* Editor Dialog */}
       <Show when={editing()}>
@@ -1938,6 +1775,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             onClose={closeDialog}
             title={profile().id ? `Edit Connection: ${profile().name}` : 'New Connection'}
             size="lg"
+            onSubmit={() => void saveProfile(profile())}
             footer={
               <>
                 <Button variant="primary" onClick={() => void saveProfile(profile())}>
@@ -1955,6 +1793,15 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             }
           >
             {renderProfileForm(profile())}
+            <PasswordEditor
+              open={profilePasswordOpen()}
+              value={profilePasswordValue()}
+              prompt={`Password for ${
+                editing()?.options.user || editing()?.options.host || 'connection'
+              }`}
+              onClose={() => setProfilePasswordOpen(false)}
+              onSave={setProfilePasswordValue}
+            />
           </Dialog>
         )}
       </Show>
@@ -1964,7 +1811,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         open={quickConnectOpen()}
         onClose={closeQuickConnect}
         title="New Connection"
-        size="md"
+        size="lg"
         onSubmit={handleQuickConnect}
         footer={
           <>
@@ -1995,7 +1842,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         open={importOpen()}
         onClose={closeImportDialog}
         title="Import Connections"
-        size="md"
+        size="lg"
         onSubmit={() => void runImport()}
         footer={
           <>
@@ -2059,6 +1906,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             onClose={closeCredDialog}
             title="New Credential"
             size="lg"
+            onSubmit={() => void handleCredSave()}
             footer={
               <>
                 <Button variant="primary" onClick={() => void handleCredSave()}>

@@ -52,7 +52,7 @@ test.describe('Connections inside Settings', () => {
     const inputs = page.locator('.cm-form input')
     await inputs.nth(0).fill('Test SSH')
     await inputs.nth(1).fill('localhost')
-    await page.locator('#profile-user').fill('tester')
+    await page.locator('#profile-auth-user').fill('tester')
 
     // Save the profile first (calls createProfile), then Connect opens a tab.
     await page

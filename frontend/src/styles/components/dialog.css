@@ -84,7 +84,7 @@ dialog.nocx-dialog::backdrop {
    so a panel that stopped at the default 480 is what made the list hang out
    past the panel's own border. */
 .nocx-dialog__panel[data-size='lg'] {
-  width: 560px;
+  width: 640px;
 }
 
 .nocx-dialog__title {

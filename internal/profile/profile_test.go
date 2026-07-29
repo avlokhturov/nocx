@@ -615,18 +615,16 @@ func TestSaveCredentialValidatesIdentity(t *testing.T) {
 		Name: "has-id",
 		Auth: AuthPassword,
 	}
-	if err := store.CreateCredential(noUser); err == nil {
-		t.Fatal("CreateCredential accepted a credential with no username")
-	} else if !errors.Is(err, ErrCredentialUsernameRequired) {
-		t.Fatalf("want ErrCredentialUsernameRequired, got %T: %v", err, err)
+	if err := store.CreateCredential(noUser); err != nil {
+		t.Fatalf("CreateCredential rejected an empty username: %v", err)
 	}
 
 	creds, err := store.LoadCredentials()
 	if err != nil {
 		t.Fatalf("LoadCredentials: %v", err)
 	}
-	if len(creds) != 0 {
-		t.Fatalf("rejected credentials must not be persisted; store holds %d", len(creds))
+	if len(creds) != 1 {
+		t.Fatalf("only the credential with an optional username should persist; store holds %d", len(creds))
 	}
 }
 

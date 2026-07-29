@@ -11,12 +11,14 @@
  * Dialog, wave 6 will host the same component in a dialog opened from the
  * connection form.
  */
-import { Show, For, type Component } from 'solid-js'
+import { createSignal, type Component } from 'solid-js'
+import { AuthMethodEditor } from './authentication-editor'
+import { PasswordEditor } from './password-editor'
+import { Button } from './ui/button'
 import { TextField } from './ui/text-field'
 import { Field } from './ui/field'
-import { Radio } from './ui/radio'
 import { createFormValidation, required } from './ui/validation'
-import type { Credential, AuthMode } from './profiles'
+import type { Credential } from './profiles'
 
 // ── Types ────────────────────────────────────────────────────────────────
 
@@ -39,29 +41,12 @@ export interface CredentialFormProps {
   ref?: { current: CredentialFormHandle | null }
 }
 
-const AUTH_MODES: AuthMode[] = ['password', 'publicKey', 'agent']
-
-function authModeLabel(mode: AuthMode): string {
-  switch (mode) {
-    case '':
-      return 'Auto'
-    case 'password':
-      return 'Password'
-    case 'publicKey':
-      return 'Public Key'
-    case 'agent':
-      return 'SSH Agent'
-    case 'keyboardInteractive':
-      return 'Keyboard Interactive'
-  }
-}
-
 // ── Component ────────────────────────────────────────────────────────────
 
 export const CredentialForm: Component<CredentialFormProps> = (props) => {
+  const [passwordOpen, setPasswordOpen] = createSignal(false)
   const validation = createFormValidation({
     name: () => required('Name')(props.credential?.name ?? ''),
-    username: () => required('Username')(props.credential?.username ?? ''),
     keyPath: () => {
       const c = props.credential
       if (!c || c.auth !== 'publicKey') return undefined
@@ -99,56 +84,54 @@ export const CredentialForm: Component<CredentialFormProps> = (props) => {
       <TextField
         id="cred-username"
         label="Username"
-        required
         value={c().username}
-        error={validation.error('username')}
         onInput={(v) => props.onFieldChange('username', v)}
-        onBlur={() => validation.touch('username')}
+        placeholder="Your local username"
       />
 
-      <Field for="cred-auth-method" label="Authentication Method" orientation="horizontal">
-        <div class="cm-radio-group">
-          <For each={AUTH_MODES}>
-            {(mode) => (
-              <Radio
-                value={mode}
-                checked={c().auth === mode}
-                onChange={(v) => props.onFieldChange('auth', v)}
-                name="cred-auth-mode"
-                label={authModeLabel(mode)}
-              />
-            )}
-          </For>
-        </div>
-      </Field>
-
-      <Show when={c().auth === 'password'}>
-        <Field
-          for="cred-password"
-          label="Password (stored in OS keychain)"
-          orientation="horizontal"
-        >
+      <AuthMethodEditor
+        id="credential-auth"
+        auth={c().auth}
+        onAuthChange={(value) => props.onFieldChange('auth', value ?? '')}
+        passwordAction={
+          <>
+            <Field for="credential-password-action" label="Password">
+              <div class="credential-secret-action">
+                <span class="credential-secret-description">
+                  {props.passwordValue
+                    ? 'Password ready to save'
+                    : c().id
+                      ? 'Stored in the system keychain'
+                      : 'No password set'}
+                </span>
+                <div class="credential-secret-actions">
+                  <Button variant="default" onClick={() => setPasswordOpen(true)}>
+                    {props.passwordValue || c().id ? 'Change Password' : 'Set Password'}
+                  </Button>
+                </div>
+              </div>
+            </Field>
+            <PasswordEditor
+              open={passwordOpen()}
+              value={props.passwordValue}
+              prompt={`Password for ${c().username || c().name || 'credential'}`}
+              onClose={() => setPasswordOpen(false)}
+              onSave={props.onPasswordChange}
+            />
+          </>
+        }
+        publicKeyAction={
           <TextField
-            id="cred-password"
-            type="password"
-            value={props.passwordValue}
-            onInput={(v) => props.onPasswordChange(v)}
-            placeholder={c().id ? 'Leave empty to keep current' : 'Enter password'}
+            id="cred-key-path"
+            label="Private Key Path"
+            required
+            value={c().keyPath || ''}
+            error={validation.error('keyPath')}
+            onInput={(v) => props.onFieldChange('keyPath', v)}
+            onBlur={() => validation.touch('keyPath')}
           />
-        </Field>
-      </Show>
-
-      <Show when={c().auth === 'publicKey'}>
-        <TextField
-          id="cred-key-path"
-          label="Private Key Path"
-          required
-          value={c().keyPath || ''}
-          error={validation.error('keyPath')}
-          onInput={(v) => props.onFieldChange('keyPath', v)}
-          onBlur={() => validation.touch('keyPath')}
-        />
-      </Show>
+        }
+      />
     </>
   )
 }

@@ -15,6 +15,9 @@ import type { Credential, CredentialUsage, ProfileClient } from './profiles'
 import { log } from './log'
 import { CredentialForm, type CredentialFormHandle } from './credential-form'
 import { RolloutPanel } from './rollout-panel'
+import { CollectionRow, CollectionView } from './ui/collection-view'
+import { IconButton } from './ui/icon-button'
+import { PencilIcon, TrashIcon } from './ui/icons'
 
 export interface CredentialsSectionProps {
   client: ProfileClient
@@ -35,7 +38,7 @@ function authModeLabel(mode: string): string {
 
 function usageSubtitle(cred: Credential, usageMap: Map<string, CredentialUsage>): string {
   const n = usageMap.get(cred.id)?.profiles.length ?? 0
-  const base = cred.username + ' \u00b7 ' + authModeLabel(cred.auth)
+  const base = [cred.username, authModeLabel(cred.auth)].filter(Boolean).join(' \u00b7 ')
   if (n === 0) return base + ' \u00b7 not used by anything'
   return base + ' \u00b7 ' + n + ' connection' + (n === 1 ? '' : 's')
 }
@@ -49,6 +52,7 @@ export function CredentialsSection(props: CredentialsSectionProps) {
   const [rolloutCred, setRolloutCred] = createSignal<Credential | null>(null)
   const [rolloutOpen, setRolloutOpen] = createSignal(false)
   const [saving, setSaving] = createSignal(false)
+  const [searchQuery, setSearchQuery] = createSignal('')
   // Staged rollout is behind a flag while its shape is decided. The apparatus
   // answers a question a domain-controlled fleet does not ask, and it carries a
   // known gap (nocx-jb20.4) — so it is off unless someone turns it on, rather
@@ -63,6 +67,15 @@ export function CredentialsSection(props: CredentialsSectionProps) {
       m.set(u.credentialId, u)
     }
     return m
+  })
+  const filteredCredentials = createMemo(() => {
+    const query = searchQuery().trim().toLowerCase()
+    if (!query) return credentials()
+    return credentials().filter((credential) =>
+      [credential.name, credential.username, authModeLabel(credential.auth)].some((value) =>
+        value.toLowerCase().includes(query),
+      ),
+    )
   })
 
   async function loadAll() {
@@ -246,56 +259,78 @@ export function CredentialsSection(props: CredentialsSectionProps) {
 
   return (
     <div class="cr-root">
-      <div class="cr-toolbar">
-        <Button variant="primary" onClick={openNewDialog}>
-          + New credential
-        </Button>
-      </div>
-
-      <Show
-        when={credentials().length > 0}
-        fallback={
+      <CollectionView
+        searchValue={searchQuery()}
+        onSearch={setSearchQuery}
+        searchPlaceholder="Filter credentials"
+        searchLabel="Filter credentials"
+        actions={
+          <Button variant="primary" onClick={openNewDialog}>
+            + New credential
+          </Button>
+        }
+        hasItems={credentials().length > 0}
+        empty={
           <EmptyState
             title="No saved credentials"
-            description={'Click "+ New credential" to add one.'}
+            description="Create a reusable authentication identity for your connections."
+            action={
+              <Button variant="primary" onClick={openNewDialog}>
+                + New credential
+              </Button>
+            }
           />
         }
       >
-        <div class="cr-list">
-          <For each={credentials()}>
+        <div role="list" aria-label="Credential list">
+          <For each={filteredCredentials()}>
             {(cred) => {
               const subtitle = () => usageSubtitle(cred, usageMap())
-              // The row is not itself a click target. A div with an onClick and
-              // no role, tabindex or key handler is unreachable by keyboard and
-              // invisible to a screen reader, and both custom lint rules miss
-              // it: no-raw-controls only sees real control tags, and
-              // no-role-impersonation only fires on a role that is present.
-              // Edit is the affordance, and it is a real button.
               return (
-                <div class="cr-item">
-                  <div class="cr-item-info">
-                    <div class="cr-item-name">{cred.name}</div>
-                    <div class="cr-item-meta">{subtitle()}</div>
-                  </div>
-                  <div class="cr-item-actions">
-                    <Show when={rotationEnabled() && cred.auth === 'password'}>
-                      <Button variant="default" size="sm" onClick={() => openRolloutDialog(cred)}>
-                        Rollout
-                      </Button>
-                    </Show>
-                    <Button variant="default" size="sm" onClick={() => openEditDialog(cred)}>
-                      Edit
-                    </Button>
-                    <Button variant="danger" size="sm" onClick={() => void handleDelete(cred)}>
-                      Delete
-                    </Button>
-                  </div>
-                </div>
+                <CollectionRow
+                  info={
+                    <>
+                      <div class="cr-item-name">{cred.name}</div>
+                      <div class="cr-item-meta">{subtitle()}</div>
+                    </>
+                  }
+                  actions={
+                    <>
+                      <Show when={rotationEnabled() && cred.auth === 'password'}>
+                        <Button variant="default" size="sm" onClick={() => openRolloutDialog(cred)}>
+                          Rollout
+                        </Button>
+                      </Show>
+                      <IconButton
+                        size="sm"
+                        title="Edit"
+                        ariaLabel={`Edit ${cred.name}`}
+                        onClick={() => openEditDialog(cred)}
+                      >
+                        <PencilIcon />
+                      </IconButton>
+                      <IconButton
+                        size="sm"
+                        title="Delete"
+                        ariaLabel={`Delete ${cred.name}`}
+                        onClick={() => void handleDelete(cred)}
+                      >
+                        <TrashIcon />
+                      </IconButton>
+                    </>
+                  }
+                />
               )
             }}
           </For>
+          <Show when={searchQuery().trim() !== '' && filteredCredentials().length === 0}>
+            <EmptyState
+              title="Nothing matches this filter"
+              description={`No credential's name, user or method contains "${searchQuery().trim()}".`}
+            />
+          </Show>
         </div>
-      </Show>
+      </CollectionView>
 
       <Show when={editingCred()}>
         {(cred) => (
@@ -304,6 +339,7 @@ export function CredentialsSection(props: CredentialsSectionProps) {
             onClose={closeDialog}
             title={cred().id ? 'Edit Credential' : 'New Credential'}
             size="lg"
+            onSubmit={() => void handleSave()}
             footer={
               <>
                 <Button variant="primary" onClick={() => void handleSave()} disabled={saving()}>

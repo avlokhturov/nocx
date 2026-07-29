@@ -16,6 +16,8 @@ import type { AgentStatus } from './agent-status'
 export interface TabView {
   readonly id: number
   readonly title: string
+  /** Title shown before content publishes its first dynamic title. */
+  readonly displayTitle?: string
   readonly hasActivity: boolean
   readonly agentStatus: AgentStatus | null
   readonly tooltip: string
@@ -33,8 +35,7 @@ export interface TabView {
  * Reactive display-state record for a single tab, keyed by tab id.
  * Stored in a local Solid store so JSX expressions (each compiled into
  * their own reactive computation) are fine-grained reactive.
- * Mirrors TabView getters — not Tab.displayTitle, which falls back to the
- * descriptor's default title.
+ * Uses displayTitle when the content has not published a dynamic title yet.
  */
 interface TabDisplayRecord {
   title: string
@@ -212,7 +213,7 @@ abstract class TabStripBase implements TabStrip {
     // Wire display-change notification to write changed fields into the store.
     tab.onDisplayChange = () => {
       this._setDisplay('records', tab.id, {
-        title: tab.title,
+        title: tab.displayTitle ?? tab.title,
         tooltip: tab.tooltip,
         subtitle: tab.subtitle,
         adoptable: tab.adoptable,
@@ -225,7 +226,7 @@ abstract class TabStripBase implements TabStrip {
 
     // Initialize store entry with current display state.
     this._setDisplay('records', tab.id, {
-      title: tab.title,
+      title: tab.displayTitle ?? tab.title,
       tooltip: tab.tooltip,
       subtitle: tab.subtitle,
       adoptable: tab.adoptable,

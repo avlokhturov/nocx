@@ -17,6 +17,13 @@ export { Field, type FieldProps } from './field'
 export { Badge, type BadgeProps, type BadgeTone } from './badge'
 export { FileInput, type FileInputProps } from './file-input'
 export { EmptyState, type EmptyStateProps } from './empty-state'
+export {
+  CollectionView,
+  CollectionRow,
+  type CollectionViewProps,
+  type CollectionRowProps,
+} from './collection-view'
+export { Prompt, type PromptProps } from './prompt'
 export { Radio, type RadioProps } from './radio'
 export { Stack, type StackProps, type StackGap } from './stack'
 export { CodeBlock, type CodeBlockProps } from './code-block'

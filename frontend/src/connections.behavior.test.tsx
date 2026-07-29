@@ -12,6 +12,7 @@ import { cleanup, render, fireEvent } from '@solidjs/testing-library'
 import { ConnectionsView } from './connections'
 import { ProfileClient } from './profiles'
 import { Dispatcher } from './dispatcher'
+import { clearToasts, toasts } from './ui'
 import type {
   SSHProfile,
   ProfileGroup,
@@ -146,6 +147,7 @@ function mount(
 }
 
 afterEach(() => {
+  clearToasts()
   vi.clearAllMocks()
   cleanup()
 })
@@ -233,7 +235,7 @@ describe('session state', () => {
 
     await waitForProfiles(container, 2)
 
-    const items = container.querySelectorAll('.cm-item')
+    const items = container.querySelectorAll('.ui-collection-row')
     const liveState = items[0].querySelector('.cm-session-state')
     expect(liveState).toBeTruthy()
     expect(liveState!.textContent).toContain('Connected')
@@ -263,7 +265,7 @@ describe('session state', () => {
 // ── Test action (distinct from Connect) ─────────────────────────────
 
 describe('Test action', () => {
-  it('calls connectionTest and displays the typed outcome', async () => {
+  it('calls connectionTest and reports the typed outcome in a toast', async () => {
     const onConnect = vi.fn()
     const { container, connectionTest } = mount({
       profiles: MOCK_PROFILES.slice(0, 1),
@@ -273,20 +275,15 @@ describe('Test action', () => {
 
     await waitForProfiles(container, 1)
 
-    const allBtns = container.querySelectorAll('.cm-item-actions .ui-button')
-    const testBtn = Array.from(allBtns).find((b) => b.textContent?.trim() === 'Test')
+    const testBtn = container.querySelector('[aria-label^="Test connection"]')
     expect(testBtn, 'Test button not found').toBeTruthy()
     ;(testBtn! as HTMLElement).click()
 
     await vi.waitFor(() => {
-      const badges = container.querySelectorAll('.ui-badge')
-      expect(badges.length).toBeGreaterThanOrEqual(2)
-      expect(badges[1].textContent).toBe('Rejected')
+      expect(toasts()).toHaveLength(1)
+      expect(toasts()[0].message).toContain('Password authentication failed')
+      expect(toasts()[0].level).toBe('warning')
     })
-
-    const detail = container.querySelector('.cm-probe-detail')
-    expect(detail).toBeTruthy()
-    expect(detail!.textContent).toContain('Password authentication failed')
 
     expect(onConnect).not.toHaveBeenCalled()
 
@@ -301,20 +298,15 @@ describe('Test action', () => {
 
     await waitForProfiles(container, 1)
 
-    const allBtns = container.querySelectorAll('.cm-item-actions .ui-button')
-    const testBtn = Array.from(allBtns).find((b) => b.textContent?.trim() === 'Test')
+    const testBtn = container.querySelector('[aria-label^="Test connection"]')
     expect(testBtn, 'Test button not found').toBeTruthy()
     ;(testBtn! as HTMLElement).click()
 
     await vi.waitFor(() => {
-      const badges = container.querySelectorAll('.ui-badge')
-      expect(badges.length).toBeGreaterThanOrEqual(2)
-      expect(badges[1].textContent).toBe('Accepted')
+      expect(toasts()).toHaveLength(1)
+      expect(toasts()[0].message).toContain('Connection successful')
+      expect(toasts()[0].level).toBe('success')
     })
-
-    const detail = container.querySelector('.cm-probe-detail')
-    expect(detail).toBeTruthy()
-    expect(detail!.textContent).toContain('Connection successful')
   })
 })
 
@@ -354,7 +346,7 @@ describe('edit action', () => {
 
     await waitForProfiles(container, 1)
 
-    const editBtn = container.querySelector('.cm-item-actions [aria-label^="Edit "]')
+    const editBtn = container.querySelector('.ui-collection-row__actions [aria-label^="Edit "]')
     expect(editBtn, 'Edit button not found').toBeTruthy()
     ;(editBtn! as HTMLElement).click()
 
@@ -373,7 +365,7 @@ describe('edit action', () => {
 
     await waitForProfiles(container, 1)
 
-    const editBtn = container.querySelector('.cm-item-actions [aria-label^="Edit "]')
+    const editBtn = container.querySelector('.ui-collection-row__actions [aria-label^="Edit "]')
     expect(editBtn, 'Edit button not found').toBeTruthy()
     ;(editBtn! as HTMLElement).click()
 
@@ -381,8 +373,8 @@ describe('edit action', () => {
       expect(container.querySelector('.nocx-dialog__panel')).toBeTruthy()
     })
 
-    expect(container.querySelectorAll('.cm-item').length).toBe(1)
-    expect(container.querySelector('.cm-body')).toBeTruthy()
+    expect(container.querySelectorAll('.ui-collection-row').length).toBe(1)
+    expect(container.querySelector('.ui-collection-view__body')).toBeTruthy()
   })
 })
 
@@ -397,7 +389,7 @@ describe('group tree', () => {
 
     await waitForProfiles(container, 3)
 
-    const body = container.querySelector('.cm-body')
+    const body = container.querySelector('[role="list"][aria-label="Connection list"]')
     expect(body).toBeTruthy()
     const children = Array.from(body!.children)
 
@@ -412,14 +404,19 @@ describe('group tree', () => {
         c.querySelector('.cm-group-name')?.textContent === 'Ungrouped',
     )
     const prodDbIdx = children.findIndex(
-      (c) => c.matches('.cm-item') && c.querySelector('.cm-item-name')?.textContent === 'prod-db',
+      (c) =>
+        c.matches('.ui-collection-row') &&
+        c.querySelector('.cm-item-name')?.textContent === 'prod-db',
     )
     const prodWebIdx = children.findIndex(
-      (c) => c.matches('.cm-item') && c.querySelector('.cm-item-name')?.textContent === 'prod-web',
+      (c) =>
+        c.matches('.ui-collection-row') &&
+        c.querySelector('.cm-item-name')?.textContent === 'prod-web',
     )
     const stagingIdx = children.findIndex(
       (c) =>
-        c.matches('.cm-item') && c.querySelector('.cm-item-name')?.textContent === 'staging-web',
+        c.matches('.ui-collection-row') &&
+        c.querySelector('.cm-item-name')?.textContent === 'staging-web',
     )
 
     expect(productionIdx).toBeGreaterThanOrEqual(0)
@@ -513,7 +510,7 @@ describe('quick connect', () => {
     const portInput = container.querySelector('#profile-port') as HTMLInputElement
     expect(portInput.value).toBe('2222')
 
-    const userInput = container.querySelector('#profile-user') as HTMLInputElement
+    const userInput = container.querySelector('#profile-auth-user') as HTMLInputElement
     expect(userInput.value).toBe('deploy')
   })
 
@@ -553,7 +550,7 @@ describe('inline credential creation', () => {
     await waitForProfiles(container, 1)
 
     // Open edit dialog
-    const editBtn = container.querySelector('.cm-item-actions [aria-label^="Edit "]')
+    const editBtn = container.querySelector('.ui-collection-row__actions [aria-label^="Edit "]')
     expect(editBtn).toBeTruthy()
     ;(editBtn! as HTMLElement).click()
 
@@ -572,7 +569,7 @@ describe('inline credential creation', () => {
     await waitForProfiles(container, 1)
 
     // Open edit dialog
-    const editBtn = container.querySelector('.cm-item-actions [aria-label^="Edit "]')
+    const editBtn = container.querySelector('.ui-collection-row__actions [aria-label^="Edit "]')
     expect(editBtn).toBeTruthy()
     ;(editBtn! as HTMLElement).click()
 
@@ -589,7 +586,7 @@ describe('inline credential creation', () => {
     await vi.waitFor(() => {
       const credNameInput = container.querySelector('#cred-name') as HTMLInputElement
       expect(credNameInput, 'Credential form did not open').toBeTruthy()
-      expect(credNameInput.value).toBe('')
+      expect(credNameInput.value).toBe('prod-web')
     })
   })
 
@@ -610,7 +607,7 @@ describe('inline credential creation', () => {
     await waitForProfiles(container, 1)
 
     // Open edit dialog
-    const editBtn = container.querySelector('.cm-item-actions [aria-label^="Edit "]')
+    const editBtn = container.querySelector('.ui-collection-row__actions [aria-label^="Edit "]')
     expect(editBtn).toBeTruthy()
     fireEvent.click(editBtn!)
 
@@ -765,7 +762,7 @@ function selectGroupSection(container: HTMLElement, label: string) {
 
 async function openProfileEditor(container: HTMLElement, profileName: string) {
   // By aria-label: Edit is an icon button now, so there is no text to match.
-  const editBtn = container.querySelector('.cm-item-actions [aria-label^="Edit "]')
+  const editBtn = container.querySelector('.ui-collection-row__actions [aria-label^="Edit "]')
   expect(editBtn, `Edit button for "${profileName}" not found`).toBeTruthy()
   ;(editBtn! as HTMLElement).click()
 

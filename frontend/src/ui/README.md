@@ -29,6 +29,8 @@ them takes a `class` prop; the structural containers that still do are marked.
 | **CodeBlock**        | `code-block.tsx`        | `ui-code-block`                              | preformatted machine output; scroll-capped                                  |
 | **Badge**            | `badge.tsx`             | `ui-badge`                                   | `data-tone`: neutral \| info \| warning \| danger                           |
 | **EmptyState**       | `empty-state.tsx`       | `ui-empty-state` + `__title/__desc/__action` | —                                                                           |
+| **CollectionView**   | `collection-view.tsx`   | `ui-collection-view`, `ui-collection-row`    | Searchable manager shell and shared list row                                |
+| **Prompt**           | `prompt.tsx`            | `ui-prompt-overlay`, `ui-prompt`             | `data-placement`: floating \| top-sheet                                     |
 | **Field**            | `field.tsx`             | `ui-field`, `+ ui-field-horizontal`          | `orientation`                                                               |
 | **Section**          | `section.tsx`           | `ui-section`                                 | children spaced by Stack; no `class` passthrough                            |
 | **Toolbar**          | `toolbar.tsx`           | `ui-toolbar`                                 | keeps `class`, **layout only**                                              |

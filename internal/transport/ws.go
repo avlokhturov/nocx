@@ -1513,8 +1513,7 @@ func credentialErrorCode(err error) int {
 	case errors.Is(err, profile.ErrCredentialExists),
 		errors.Is(err, profile.ErrCredentialNotFound),
 		errors.Is(err, profile.ErrCredentialIDRequired),
-		errors.Is(err, profile.ErrCredentialNameRequired),
-		errors.Is(err, profile.ErrCredentialUsernameRequired):
+		errors.Is(err, profile.ErrCredentialNameRequired):
 		return -32602
 	default:
 		return -32603

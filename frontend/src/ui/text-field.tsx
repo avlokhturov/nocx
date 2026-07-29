@@ -8,7 +8,7 @@
  * - settings.ts: input[type=text] and input[type=number] with change event, min/max
  * - connections.ts: inputField() / textField() / numberField() — label + input with input event
  */
-import { Show } from 'solid-js'
+import { Show, type JSX } from 'solid-js'
 import { Field } from './field'
 
 export interface TextFieldProps {
@@ -33,6 +33,9 @@ export interface TextFieldProps {
   max?: number
   disabled?: boolean
   required?: boolean
+  autoFocus?: boolean
+  /** Controls rendered inside the trailing edge of the input. */
+  trailing?: JSX.Element
 }
 
 export function TextField(props: TextFieldProps) {
@@ -52,21 +55,30 @@ export function TextField(props: TextFieldProps) {
   }
 
   const input = () => (
-    <input
-      class="ui-text-field__input"
-      id={inputId() || undefined}
-      type={props.type ?? 'text'}
-      value={props.value}
-      placeholder={props.placeholder ?? ''}
-      min={props.min !== undefined ? String(props.min) : undefined}
-      max={props.max !== undefined ? String(props.max) : undefined}
-      disabled={props.disabled === true}
-      required={props.required === true}
-      aria-invalid={props.error !== undefined ? true : undefined}
-      aria-describedby={ariaDescribedBy()}
-      onInput={onInput}
-      onBlur={onBlur}
-    />
+    <div class="ui-text-field__control" data-trailing={props.trailing ? 'true' : 'false'}>
+      <input
+        class="ui-text-field__input"
+        id={inputId() || undefined}
+        type={props.type ?? 'text'}
+        value={props.value}
+        placeholder={props.placeholder ?? ''}
+        min={props.min !== undefined ? String(props.min) : undefined}
+        max={props.max !== undefined ? String(props.max) : undefined}
+        disabled={props.disabled === true}
+        required={props.required === true}
+        aria-invalid={props.error !== undefined ? true : undefined}
+        aria-describedby={ariaDescribedBy()}
+        autofocus={props.autoFocus === true}
+        ref={(element) => {
+          if (props.autoFocus === true) queueMicrotask(() => element.focus())
+        }}
+        onInput={onInput}
+        onBlur={onBlur}
+      />
+      <Show when={props.trailing}>
+        <span class="ui-text-field__trailing">{props.trailing}</span>
+      </Show>
+    </div>
   )
 
   const hasFieldContent = () =>

@@ -119,12 +119,10 @@ describe('CredentialsSection — edit mutates in place', () => {
     // Click the first row's Edit button. The row itself is deliberately not a
     // click target — see the comment in credentials.tsx — so this test is also
     // what stops a keyboard-unreachable row click coming back.
-    const firstRowActions = container.querySelectorAll('.cr-item-actions')[0]
-    const editBtn = Array.from(firstRowActions.querySelectorAll('button')).find(
-      (b) => b.textContent?.trim() === 'Edit',
-    )
+    const firstRowActions = container.querySelectorAll('.ui-collection-row__actions')[0]
+    const editBtn = firstRowActions.querySelector('[aria-label^="Edit "]')
     expect(editBtn).toBeTruthy()
-    editBtn?.click()
+    ;(editBtn as HTMLElement | null)?.click()
 
     await vi.waitFor(() => {
       expect(container.querySelector('.nocx-dialog__panel')).toBeTruthy()
@@ -159,7 +157,7 @@ describe('CredentialsSection — create flow', () => {
     })
 
     // Click "+ New credential"
-    const newBtn = container.querySelector('.cr-toolbar .ui-button') as HTMLElement
+    const newBtn = container.querySelector('.ui-collection-view__actions .ui-button') as HTMLElement
     expect(newBtn).toBeTruthy()
     newBtn.click()
 
@@ -181,17 +179,30 @@ describe('CredentialsSection — create flow', () => {
     userInput.value = 'ops'
     userInput.dispatchEvent(new Event('input', { bubbles: true }))
 
-    // Select password auth by clicking the first radio
-    const radios = container.querySelectorAll('input[type="radio"]')
-    expect(radios.length).toBeGreaterThanOrEqual(1)
-    ;(radios[0] as HTMLElement).click()
+    // Select password auth through the shared authentication segmented control.
+    const passwordMethod = Array.from(
+      container.querySelectorAll('.ui-segmented-control__option'),
+    ).find((b) => b.textContent?.trim() === 'Password') as HTMLElement
+    expect(passwordMethod).toBeTruthy()
+    passwordMethod.click()
 
-    // Fill password
-    const pwdInput = document.getElementById('cred-password') as HTMLInputElement | null
-    if (pwdInput) {
-      pwdInput.value = 's3cret'
-      pwdInput.dispatchEvent(new Event('input', { bubbles: true }))
-    }
+    // Open the shared password sheet, fill it, and accept it.
+    const setPassword = Array.from(container.querySelectorAll('.ui-button')).find(
+      (b) => b.textContent?.trim() === 'Set Password',
+    ) as HTMLElement
+    expect(setPassword).toBeTruthy()
+    setPassword.click()
+
+    const pwdInput = document.getElementById('credential-password') as HTMLInputElement
+    expect(pwdInput).toBeTruthy()
+    pwdInput.value = 's3cret'
+    pwdInput.dispatchEvent(new Event('input', { bubbles: true }))
+
+    const promptOK = Array.from(container.querySelectorAll('.ui-prompt .ui-button')).find(
+      (b) => b.textContent?.trim() === 'OK',
+    ) as HTMLElement
+    expect(promptOK).toBeTruthy()
+    promptOK.click()
 
     // Find and click the "Create Credential" button
     const actions = container.querySelector('.nocx-dialog__actions')

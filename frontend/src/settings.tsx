@@ -327,7 +327,11 @@ export function SettingsComponent(props: SettingsComponentProps) {
       kind: 'component',
       id: 'credentials',
       title: 'Credentials',
-      scrollMode: 'page',
+      // Same manager shell as Connections: its CollectionView owns the
+      // toolbar gutter and the scrolling list. Page mode adds a second page
+      // gutter around it, making two instances of the same component visibly
+      // different.
+      scrollMode: 'contained',
       renderContent: () => <CredentialsSection client={props.profileClient} />,
     }
     return [...generated, exportPage, connectionPage, credentialsPage]

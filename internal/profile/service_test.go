@@ -188,8 +188,8 @@ func TestServiceSaveCredential_ValidatesFields(t *testing.T) {
 	}
 	c = Credential{ID: "cred:a:1", Name: "a", Auth: AuthPassword}
 	err = s.SaveCredential(c)
-	if !errors.Is(err, ErrCredentialUsernameRequired) {
-		t.Fatalf("expected ErrCredentialUsernameRequired, got %v", err)
+	if err != nil {
+		t.Fatalf("empty username should inherit the SSH default, got %v", err)
 	}
 }
 
@@ -361,9 +361,9 @@ func TestAtomicImport_Transactional_LastRecordFailure(t *testing.T) {
 		makeTestProfile("ssh:custom:p2:1", "db", "db.example.com"),
 	}
 	groups := []ProfileGroup{makeTestGroup("g1", "Prod", nil)}
-	// Invalid credential — missing Username.
+	// Invalid credential — missing Name.
 	creds := []Credential{
-		{ID: "cred:bad:1", Name: "bad", Auth: AuthPassword},
+		{ID: "cred:bad:1", Auth: AuthPassword},
 	}
 
 	result := s.AtomicImport(profiles, groups, creds)

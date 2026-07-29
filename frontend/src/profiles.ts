@@ -36,6 +36,7 @@ export interface SSHProfileOptions {
   // Override fields (used only if credentialId is empty)
   user?: string
   auth?: AuthMode
+  keyPath?: string
   // Note: passwords/keys are NEVER stored here — they live in the Credential's keychain entry.
   keepaliveInterval?: number
   keepaliveCountMax?: number

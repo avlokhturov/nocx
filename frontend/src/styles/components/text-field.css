@@ -9,6 +9,11 @@
   min-width: 0;
 }
 
+.ui-text-field__control {
+  position: relative;
+  min-width: 0;
+}
+
 .ui-text-field__input {
   height: var(--control-height-md);
   padding: 0 8px;
@@ -20,6 +25,22 @@
   font-size: var(--font-size-md);
   outline: none;
   min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.ui-text-field__control[data-trailing='true'] .ui-text-field__input {
+  padding-right: 84px;
+}
+
+.ui-text-field__trailing {
+  position: absolute;
+  top: 50%;
+  right: 4px;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  gap: 2px;
 }
 
 .ui-text-field__input:focus {

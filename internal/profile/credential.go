@@ -203,9 +203,6 @@ func (c Credential) Validate() error {
 	if strings.TrimSpace(c.Name) == "" {
 		return ErrCredentialNameRequired
 	}
-	if strings.TrimSpace(c.Username) == "" {
-		return ErrCredentialUsernameRequired
-	}
 	for _, v := range c.Versions {
 		if err := v.ValidateVersion(); err != nil {
 			return fmt.Errorf("credential %q version %q: %w", c.Name, v.ID, err)
@@ -215,8 +212,7 @@ func (c Credential) Validate() error {
 }
 
 var (
-	ErrCredentialNameRequired     = errors.New("credential name is required")
-	ErrCredentialUsernameRequired = errors.New("credential username is required")
-	ErrCandidateExists            = errors.New("a candidate version already exists; discard it first")
-	ErrVersionNotFound            = errors.New("credential version not found")
+	ErrCredentialNameRequired = errors.New("credential name is required")
+	ErrCandidateExists        = errors.New("a candidate version already exists; discard it first")
+	ErrVersionNotFound        = errors.New("credential version not found")
 )
