@@ -83,6 +83,17 @@ func (c Credential) Current() (CredentialVersion, bool) {
 	return c.Version(c.CurrentVersionID)
 }
 
+// Candidate returns the staged version being evaluated for rollout, or false
+// when no candidate exists. The candidate never participates in an ordinary
+// connection — only the current version does — and sits here so a rollout
+// probe can authenticate with it explicitly.
+func (c Credential) Candidate() (CredentialVersion, bool) {
+	if c.CandidateVersionID == "" {
+		return CredentialVersion{}, false
+	}
+	return c.Version(c.CandidateVersionID)
+}
+
 // Version returns the version with the given ID, or false if not found.
 func (c Credential) Version(id string) (CredentialVersion, bool) {
 	for _, v := range c.Versions {
@@ -169,9 +180,8 @@ func (c Credential) Validate() error {
 	return nil
 }
 
-// ErrCredentialNameRequired and ErrCredentialUsernameRequired are the identity
-// completeness checks.
 var (
 	ErrCredentialNameRequired     = errors.New("credential name is required")
 	ErrCredentialUsernameRequired = errors.New("credential username is required")
+	ErrCandidateExists            = errors.New("a candidate version already exists; discard it first")
 )

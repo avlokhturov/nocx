@@ -38,6 +38,14 @@ type CredentialMetadataRepository interface {
 	// If the credential has no versions (legacy), existing record-level
 	// SecretID/PassphraseSecretID are migrated into version "v1" first.
 	AppendCredentialVersion(id string, passwordSecretID, passphraseSecretID string) error
+	// SetCandidateVersion creates a new version and sets it as the candidate
+	// (without affecting CurrentVersionID). Returns ErrCandidateExists when
+	// a candidate is already set — one candidate at a time, and only one.
+	SetCandidateVersion(id string, passwordSecretID, passphraseSecretID string) error
+	// ClearCandidateVersion removes the candidate version and its reference.
+	// After this call, CandidateVersionID is empty and the candidate version
+	// is removed from the version list. Idempotent: already-absent returns nil.
+	ClearCandidateVersion(id string) error
 }
 
 // JSONStore persists profiles and groups to a single JSON file on disk.
@@ -563,6 +571,94 @@ func (s *JSONStore) AppendCredentialVersion(id string, passwordSecretID, passphr
 			// Append the new version.
 			d.Credentials[i].Versions = append(d.Credentials[i].Versions, newVersion)
 			d.Credentials[i].CurrentVersionID = nextID
+			return s.writeLocked(d)
+		}
+	}
+	return fmt.Errorf("%s: %w", id, ErrCredentialNotFound)
+}
+
+// SetCandidateVersion creates a new version and sets it as the candidate
+// without affecting CurrentVersionID or changing how connections authenticate.
+// Returns ErrCandidateExists when a candidate is already set — one candidate
+// at a time, and only one, because a second candidate would need to specify
+// which one is being probed or promoted.
+func (s *JSONStore) SetCandidateVersion(id string, passwordSecretID, passphraseSecretID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	d, err := s.load()
+	if err != nil {
+		return err
+	}
+	for i, existing := range d.Credentials {
+		if existing.ID == id {
+			if existing.CandidateVersionID != "" {
+				return fmt.Errorf("%s: %w", id, ErrCandidateExists)
+			}
+
+			// Migrate legacy fields into a version if needed.
+			if len(existing.Versions) == 0 {
+				d.Credentials[i].Versions = []CredentialVersion{
+					{
+						ID:                 legacyVersionID,
+						PasswordSecretID:   existing.SecretID,
+						PassphraseSecretID: existing.PassphraseSecretID,
+					},
+				}
+				d.Credentials[i].CurrentVersionID = legacyVersionID
+				d.Credentials[i].SecretID = ""
+				d.Credentials[i].PassphraseSecretID = ""
+			}
+
+			// Determine the next version ID.
+			nextID := fmt.Sprintf("v%d", len(d.Credentials[i].Versions)+1)
+
+			// Validate the new version against the credential's auth.
+			newVersion := CredentialVersion{
+				ID:                 nextID,
+				Auth:               d.Credentials[i].Auth,
+				PasswordSecretID:   passwordSecretID,
+				PassphraseSecretID: passphraseSecretID,
+			}
+			if err := newVersion.ValidateVersion(); err != nil {
+				return err
+			}
+
+			// Append the new version — no CurrentVersionID change.
+			d.Credentials[i].Versions = append(d.Credentials[i].Versions, newVersion)
+			d.Credentials[i].CandidateVersionID = nextID
+			return s.writeLocked(d)
+		}
+	}
+	return fmt.Errorf("%s: %w", id, ErrCredentialNotFound)
+}
+
+// ClearCandidateVersion removes the candidate version and its reference.
+// The candidate version is removed from the version list so it cannot be
+// referenced as a straggler. Idempotent: already-absent returns nil.
+func (s *JSONStore) ClearCandidateVersion(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	d, err := s.load()
+	if err != nil {
+		return err
+	}
+	for i, existing := range d.Credentials {
+		if existing.ID == id {
+			if existing.CandidateVersionID == "" {
+				return nil // idempotent
+			}
+
+			// Remove the candidate version from the version list.
+			remaining := make([]CredentialVersion, 0, len(existing.Versions)-1)
+			for _, v := range d.Credentials[i].Versions {
+				if v.ID != existing.CandidateVersionID {
+					remaining = append(remaining, v)
+				}
+			}
+			d.Credentials[i].Versions = remaining
+			d.Credentials[i].CandidateVersionID = ""
 			return s.writeLocked(d)
 		}
 	}

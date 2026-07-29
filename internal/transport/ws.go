@@ -618,7 +618,8 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.handleCredentialUsageMethod(wconn, req)
 	case "credentials.savePassword", "credentials.deletePassword",
 		"credentials.hasPassword",
-		"credentials.saveKeyPassphrase", "credentials.deleteKeyPassphrase":
+		"credentials.saveKeyPassphrase", "credentials.deleteKeyPassphrase",
+		"credentials.stagePassword", "credentials.discardCandidate":
 		s.handleCredentialMethod(wconn, req)
 	case "settings.describe", "settings.getSnapshot", "settings.set", "settings.reset",
 		"settings.secretSet", "settings.secretDelete", "settings.secretExists":
@@ -1569,6 +1570,10 @@ func (s *WSServer) handleCredentialMethod(wconn *wsConn, req jsonrpcRequest) {
 			return
 		}
 		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(true)))
+	case "credentials.stagePassword":
+		s.handleStagePassword(wconn, req)
+	case "credentials.discardCandidate":
+		s.handleDiscardCandidate(wconn, req)
 	}
 }
 

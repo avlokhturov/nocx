@@ -188,6 +188,61 @@ func (s *stubProfileStore) AppendCredentialVersion(id, passwordSecretID, passphr
 	return nil
 }
 
+func (s *stubProfileStore) SetCandidateVersion(id, passwordSecretID, passphraseSecretID string) error {
+	existing, ok := s.credentials[id]
+	if !ok {
+		return profile.ErrCredentialNotFound
+	}
+	if existing.CandidateVersionID != "" {
+		return profile.ErrCandidateExists
+	}
+	if len(existing.Versions) == 0 {
+		existing.Versions = []profile.CredentialVersion{
+			{
+				ID:                 "v1",
+				PasswordSecretID:   existing.SecretID,
+				PassphraseSecretID: existing.PassphraseSecretID,
+			},
+		}
+		existing.CurrentVersionID = "v1"
+		existing.SecretID = ""
+		existing.PassphraseSecretID = ""
+	}
+	nextID := fmt.Sprintf("v%d", len(existing.Versions)+1)
+	newVersion := profile.CredentialVersion{
+		ID:                 nextID,
+		PasswordSecretID:   passwordSecretID,
+		PassphraseSecretID: passphraseSecretID,
+	}
+	if err := newVersion.ValidateVersion(); err != nil {
+		return err
+	}
+	existing.Versions = append(existing.Versions, newVersion)
+	existing.CandidateVersionID = nextID
+	s.credentials[id] = existing
+	return nil
+}
+
+func (s *stubProfileStore) ClearCandidateVersion(id string) error {
+	existing, ok := s.credentials[id]
+	if !ok {
+		return profile.ErrCredentialNotFound
+	}
+	if existing.CandidateVersionID == "" {
+		return nil // idempotent
+	}
+	remaining := make([]profile.CredentialVersion, 0, len(existing.Versions)-1)
+	for _, v := range existing.Versions {
+		if v.ID != existing.CandidateVersionID {
+			remaining = append(remaining, v)
+		}
+	}
+	existing.Versions = remaining
+	existing.CandidateVersionID = ""
+	s.credentials[id] = existing
+	return nil
+}
+
 func (s *stubProfileStore) DeleteCredential(id string) error {
 	delete(s.credentials, id)
 	return nil

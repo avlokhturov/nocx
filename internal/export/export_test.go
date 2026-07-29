@@ -169,6 +169,57 @@ func (r *fakeCredRepo) AppendCredentialVersion(id, passwordSecretID, passphraseS
 	return profile.ErrCredentialNotFound
 }
 
+func (r *fakeCredRepo) SetCandidateVersion(id, passwordSecretID, passphraseSecretID string) error {
+	for i, e := range r.creds {
+		if e.ID == id {
+			if e.CandidateVersionID != "" {
+				return profile.ErrCandidateExists
+			}
+			if len(e.Versions) == 0 {
+				r.creds[i].Versions = []profile.CredentialVersion{
+					{
+						ID:                 "v1",
+						PasswordSecretID:   e.SecretID,
+						PassphraseSecretID: e.PassphraseSecretID,
+					},
+				}
+				r.creds[i].CurrentVersionID = "v1"
+				r.creds[i].SecretID = ""
+				r.creds[i].PassphraseSecretID = ""
+			}
+			nextID := fmt.Sprintf("v%d", len(r.creds[i].Versions)+1)
+			r.creds[i].Versions = append(r.creds[i].Versions, profile.CredentialVersion{
+				ID:                 nextID,
+				PasswordSecretID:   passwordSecretID,
+				PassphraseSecretID: passphraseSecretID,
+			})
+			r.creds[i].CandidateVersionID = nextID
+			return nil
+		}
+	}
+	return profile.ErrCredentialNotFound
+}
+
+func (r *fakeCredRepo) ClearCandidateVersion(id string) error {
+	for i, e := range r.creds {
+		if e.ID == id {
+			if e.CandidateVersionID == "" {
+				return nil
+			}
+			remaining := make([]profile.CredentialVersion, 0, len(e.Versions)-1)
+			for _, v := range r.creds[i].Versions {
+				if v.ID != e.CandidateVersionID {
+					remaining = append(remaining, v)
+				}
+			}
+			r.creds[i].Versions = remaining
+			r.creds[i].CandidateVersionID = ""
+			return nil
+		}
+	}
+	return profile.ErrCredentialNotFound
+}
+
 func (r *fakeCredRepo) DeleteCredential(id string) error {
 	for i, c := range r.creds {
 		if c.ID == id {
