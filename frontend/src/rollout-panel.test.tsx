@@ -99,10 +99,10 @@ const MOCK_IMPACT: VersionImpactResult = {
   isCandidate: false,
   retired: false,
   liveSessions: [{ sessionId: 'sess-1', profileId: 'ssh:p1:1', profileName: 'web-01' }],
-  pinnedProfiles: [{ profileId: 'ssh:legacy:1', profileName: 'legacy-db', source: 'profile' }],
+  pinnedProfiles: [{ profileId: 'ssh:legacy:1', profileName: 'legacy-db' }],
   profilesUsing: [
-    { profileId: 'ssh:p1:1', profileName: 'web-01', source: 'profile' },
-    { profileId: 'ssh:p2:1', profileName: 'web-02', source: 'profile' },
+    { profileId: 'ssh:p1:1', profileName: 'web-01' },
+    { profileId: 'ssh:p2:1', profileName: 'web-02' },
   ],
 }
 

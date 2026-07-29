@@ -657,6 +657,16 @@ export interface SessionRef {
   profileName: string
 }
 
+/**
+ * A profile named by versions.impact. Deliberately NOT ProfileRef: that type
+ * carries `source` provenance which versions.impact does not send, so reusing
+ * it would let the compiler promise a field that arrives undefined.
+ */
+export interface ImpactProfileRef {
+  profileId: string
+  profileName: string
+}
+
 /** Result from versions.impact — preview the blast radius of a transition. */
 export interface VersionImpactResult {
   versionId: string
@@ -664,8 +674,8 @@ export interface VersionImpactResult {
   isCandidate: boolean
   retired: boolean
   liveSessions: SessionRef[]
-  pinnedProfiles: ProfileRef[]
-  profilesUsing: ProfileRef[]
+  pinnedProfiles: ImpactProfileRef[]
+  profilesUsing: ImpactProfileRef[]
 }
 
 /** Params for rollout.run. */
