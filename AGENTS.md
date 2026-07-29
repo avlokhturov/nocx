@@ -63,6 +63,51 @@ and is not, which is precisely the failure this setup exists to prevent.
    The pre-commit hook is the gate on every commit; CI validates release branches and tags.
 5. Update the task in beads; record any non-obvious decision as an ADR in `docs/decisions/`.
 
+### A test asserts what a user can do, not what the code currently does
+
+**Before you call anything done, exercise it the way a user reaches it — end to end, through
+the seam a person actually touches.** Not the unit. Not the handler in isolation. The whole
+path: the button exists, it is clickable, and the thing it promises actually happens on the
+other side.
+
+This is not a style preference. A test written by reading the implementation cannot report a
+missing feature, because it has no notion of what is absent — it can only confirm that what
+was written does what it was written to do. That is the failure mode, and it is silent:
+every gate stays green while the product does not work.
+
+Measured on 2026-07-29, one session, all found by a user clicking:
+
+- **The connection manager shipped with no way to create a group.** Eight epics closed, 1041
+  frontend tests green, `deadcode` clean, every acceptance criterion read clause by clause.
+  `ConnectionsView` had a full group **editor** — impact preview, danger confirmation,
+  delete — reachable only from a group header that only appeared once a group already
+  existed. No test noticed, because every test mounted the component and asserted what it
+  rendered.
+- **`groups.create` refused every call the UI could make.** `JSONStore.CreateGroup` requires
+  a non-empty id and the handler minted none, so it answered `group ID is required`. There
+  are nine backend tests for `groups.create` and **all nine pass an explicit id**
+  (`ProfileGroup{ID: "g1", …}`). They encoded the caller's convenience, which was true for a
+  test and false for the renderer. One test with an empty id would have caught it.
+- **An empty group rendered as nothing at all**, so the button — once it existed — looked
+  broken, and the group could not be reached to be renamed or deleted.
+
+Three defects, one shape: each unit was correct and the user's task was impossible.
+
+So, concretely:
+
+- **Added an RPC method?** Call it the way the renderer calls it, including the fields the
+  renderer leaves empty. A handler tested only with fully-populated params is tested against
+  its author's assumptions.
+- **Added a UI action?** Assert the control is present and enabled from the state a user
+  starts in, that activating it reaches the client method, and that the result appears in the
+  list afterwards. "The dialog opens" is not the feature.
+- **Wired something new into the composition root?** The reachability checks in the next
+  section tell you whether it is connected. They do not tell you whether it works.
+
+The existing rule below — _"Coverage proves a unit works. It says nothing about whether the
+product uses it"_ — is the same lesson one level down, learned when the vault's 26 tested
+functions turned out to be unreachable. This one is its sibling: **reachable is not usable.**
+
 ### Before you fix anything: find out whether it is already decided or already filed
 
 A bug report is a symptom, not a mandate to start editing. Four checks, in this order,
