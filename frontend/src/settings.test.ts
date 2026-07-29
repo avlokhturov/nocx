@@ -235,6 +235,7 @@ describe('SettingsContent', () => {
       'AI',
       'Export / Backup / Import',
       'Connections',
+      'Credentials',
     ])
   })
 

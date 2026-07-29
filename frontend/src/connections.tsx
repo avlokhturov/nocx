@@ -61,7 +61,6 @@ function authModeLabel(mode: AuthMode): string {
 }
 
 const AUTH_MODES: AuthMode[] = ['', 'password', 'publicKey', 'agent', 'keyboardInteractive']
-const CRED_AUTH_MODES: AuthMode[] = ['password', 'publicKey', 'agent']
 
 // ── Props ────────────────────────────────────────────────────────────────────
 
@@ -89,12 +88,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   // ── Selection state ─────────────────────────────────────────────────────
   const [selectedID, setSelectedID] = createSignal('')
   const [editing, setEditing] = createSignal<SSHProfile | null>(null)
-  const [editingCredential, setEditingCredential] = createSignal<Credential | null>(null)
-  // Hoisted out of renderCredentialForm for the same reason the validation is:
-  // that function runs inside a createMemo on `editingCredential()`, so a signal
-  // declared there was rebuilt on every keystroke — typing a password and then
-  // touching any other field discarded the password without saying so.
-  const [passwordValue, setPasswordValue] = createSignal('')
 
   // ── Data loading ────────────────────────────────────────────────────────
   async function loadAll() {
@@ -200,18 +193,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       nonNegativeInteger('Ready timeout')(String(formProfile()?.options.readyTimeout ?? '')),
   })
 
-  const credentialValidation = createFormValidation({
-    name: () => required('Name')(editingCredential()?.name ?? ''),
-    username: () => required('Username')(editingCredential()?.username ?? ''),
-    host: () => combine(required('Bind to Host'), hostname())(editingCredential()?.host ?? ''),
-    port: () => portRule()(String(editingCredential()?.port ?? '')),
-    keyPath: () => {
-      const c = editingCredential()
-      if (!c || c.auth !== 'publicKey') return undefined
-      return required('Private key path')(c.keyPath ?? '')
-    },
-  })
-
   /**
    * Refuse a submit whose form does not pass, and say why.
    *
@@ -248,9 +229,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   function handleProfileClick(p: SSHProfile) {
     setSelectedID(p.id)
     setEditing(null)
-    setEditingCredential(null)
     profileValidation.reset()
-    credentialValidation.reset()
   }
 
   function handleProfileDblClick(p: SSHProfile) {
@@ -270,32 +249,8 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     }
     setSelectedID('')
     setEditing(profile)
-    setEditingCredential(null)
+
     profileValidation.reset()
-  }
-
-  function showCredentialsPanel() {
-    setSelectedID('')
-    setEditing(null)
-    setEditingCredential({
-      id: '',
-      name: '',
-      username: '',
-      auth: '',
-    })
-    credentialValidation.reset()
-  }
-
-  function editCredential(cred: Credential) {
-    setSelectedID('')
-    setEditing(null)
-    setEditingCredential({ ...cred })
-    credentialValidation.reset()
-  }
-
-  function cancelCredential() {
-    setEditingCredential(null)
-    credentialValidation.reset()
   }
 
   async function saveProfile(profile: SSHProfile) {
@@ -348,23 +303,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     }
   }
 
-  async function deleteCredential(credential: Credential) {
-    if (!(await showConfirm(`Delete credential "${credential.name}"?`))) return
-    try {
-      await props.client.deleteCredential(credential.id)
-      setEditingCredential(null)
-      await loadAll()
-      showToast({ level: 'success', message: `Deleted credential "${credential.name}"` })
-    } catch (err) {
-      const message = (err as Error).message
-      log.error('Failed to delete credential', { message })
-      showToast({
-        level: 'danger',
-        message: `Could not delete "${credential.name}": ${message}`,
-      })
-    }
-  }
-
   function handleImport() {
     const client = props.client
     const doImport = (text: string) => {
@@ -397,23 +335,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     input.click()
   }
   // ── Render helpers ──────────────────────────────────────────────────────
-
-  function renderCredentialListItem(cred: Credential) {
-    const isSelected = editingCredential()?.id === cred.id
-    return (
-      <div
-        classList={{ 'cm-item': true, 'cm-selected': isSelected }}
-        onClick={() => editCredential(cred)}
-      >
-        <div class="cm-item-info">
-          <div class="cm-item-name">{cred.name}</div>
-          <div class="cm-item-meta">
-            {cred.username} &bull; {authModeLabel(cred.auth)}
-          </div>
-        </div>
-      </div>
-    )
-  }
 
   function renderGroupSection(node: TreeNode) {
     const groupProfiles = profiles().filter((p) => p.group === node.id)
@@ -702,155 +623,9 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     )
   }
 
-  // ── Credential form ────────────────────────────────────────────────────
-
-  function renderCredentialForm(credential: Credential) {
-    const isNew = !credential.id
-
-    function updateField(key: keyof Credential, value: string) {
-      const updated = { ...credential, [key]: value }
-      if (key === 'name' && !credential.id) updated.id = `cred:${value}:${Date.now()}`
-      setEditingCredential(updated)
-    }
-
-    async function saveCred() {
-      if (!gate(credentialValidation)) return
-      try {
-        await props.client.createCredential(credential)
-        if (credential.auth === 'password' && passwordValue()) {
-          await props.client.savePassword(credential.id, passwordValue())
-        }
-        setEditingCredential(null)
-        credentialValidation.reset()
-        setPasswordValue('')
-        await loadAll()
-        showToast({ level: 'success', message: `Saved credential "${credential.name}"` })
-      } catch (err) {
-        const message = (err as Error).message
-        log.error('Failed to save', { message })
-        showToast({ level: 'danger', message: `Could not save the credential: ${message}` })
-      }
-    }
-    return (
-      <div class="cm-form">
-        <Section title={isNew ? 'New Credential' : 'Edit Credential'}>
-          <TextField
-            id="cred-name"
-            label="Name"
-            required
-            value={credential.name}
-            error={credentialValidation.error('name')}
-            onInput={(v) => updateField('name', v)}
-            onBlur={() => credentialValidation.touch('name')}
-          />
-          <TextField
-            id="cred-username"
-            label="Username"
-            required
-            value={credential.username}
-            error={credentialValidation.error('username')}
-            onInput={(v) => updateField('username', v)}
-            onBlur={() => credentialValidation.touch('username')}
-          />
-
-          <Field for="cred-auth-method" label="Authentication Method" orientation="horizontal">
-            <div class="cm-radio-group">
-              <For each={CRED_AUTH_MODES}>
-                {(mode) => (
-                  <Radio
-                    value={mode}
-                    checked={credential.auth === mode}
-                    onChange={(v) => updateField('auth', v)}
-                    name="cred-auth-mode"
-                    label={authModeLabel(mode)}
-                  />
-                )}
-              </For>
-            </div>
-          </Field>
-
-          <Show when={credential.auth === 'password'}>
-            <Field
-              for="cred-password"
-              label="Password (stored in OS keychain)"
-              orientation="horizontal"
-            >
-              <TextField
-                type="password"
-                value={passwordValue()}
-                onInput={(v) => setPasswordValue(v)}
-                placeholder={credential.id ? 'Leave empty to keep current' : 'Enter password'}
-              />
-            </Field>
-          </Show>
-
-          <Show when={credential.auth === 'publicKey'}>
-            <TextField
-              id="cred-key-path"
-              label="Private Key Path"
-              required
-              value={credential.keyPath || ''}
-              error={credentialValidation.error('keyPath')}
-              onInput={(v) => updateField('keyPath', v)}
-              onBlur={() => credentialValidation.touch('keyPath')}
-            />
-          </Show>
-
-          {/* The label no longer says "(required)" — the kit marks a required field
-              and states the rule when it fails, so spelling it into the label was a
-              second, unenforced copy of the same fact. */}
-          <TextField
-            id="cred-host"
-            label="Bind to Host"
-            required
-            description="A credential names the one host it may be used for."
-            value={credential.host || ''}
-            error={credentialValidation.error('host')}
-            onInput={(v) => updateField('host', v)}
-            onBlur={() => credentialValidation.touch('host')}
-          />
-          <Show when={!!credential.host}>
-            <TextField
-              id="cred-port"
-              label="Port"
-              value={credential.port || 22}
-              type="number"
-              error={credentialValidation.error('port')}
-              onInput={(v) => {
-                const n = parseInt(v, 10)
-                updateField('port', isNaN(n) ? '' : String(n))
-              }}
-              onBlur={() => credentialValidation.touch('port')}
-            />
-          </Show>
-        </Section>
-
-        {/* `.cm-form-error` is gone: one string for a whole form, which could only
-            report the first failure and could not point at the field. Failures are
-            per-field now, and anything the backend refuses is a toast. */}
-        <div class="cm-form-actions">
-          <Button variant="primary" onClick={() => void saveCred()}>
-            {isNew ? 'Create Credential' : 'Save Credential'}
-          </Button>
-          <Show when={!isNew}>
-            <Button variant="danger" onClick={() => void deleteCredential(credential)}>
-              Delete Credential
-            </Button>
-          </Show>
-          <Button variant="default" onClick={cancelCredential}>
-            Cancel
-          </Button>
-        </div>
-      </div>
-    )
-  }
-
   // ── Form panel ─────────────────────────────────────────────────────────
 
   const formPanelContent = createMemo(() => {
-    const cred = editingCredential()
-    if (cred) return renderCredentialForm(cred)
-
     const p = formProfile()
     if (p) return renderProfileForm(p)
 
@@ -863,7 +638,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   const ungrouped = createMemo(() =>
     profiles().filter((p) => !p.group || !groups().some((g) => g.id === p.group)),
   )
-  const hasCredentials = createMemo(() => credentials().length > 0)
 
   return (
     <div class="cm-root">
@@ -875,26 +649,15 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         >
           Import from Tabby
         </Button>
-        <Button
-          variant="default"
-          onClick={showCredentialsPanel}
-          title="Manage saved passwords (keychain)"
-        >
-          Saved credentials
-        </Button>
+
         <Button variant="primary" onClick={startNewProfile}>
           + New connection
         </Button>
       </Toolbar>
       <div class="cm-body">
         <div class="cm-list">
-          <Show when={hasCredentials()}>
-            <div class="cm-group-header">Saved Credentials</div>
-            <For each={credentials()}>{(cred) => renderCredentialListItem(cred)}</For>
-          </Show>
-
           <Show
-            when={profiles().length > 0 || credentials().length > 0}
+            when={profiles().length > 0}
             fallback={
               <EmptyState
                 title="No connections yet"

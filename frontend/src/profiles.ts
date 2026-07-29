@@ -76,14 +76,6 @@ export interface Credential {
   // - publicKey: path to private key or vault:// URL
   // - agent/keyboardInteractive: not needed
   keyPath?: string // Only for publicKey auth
-  // The host this credential may be submitted to. Required: an empty host is
-  // refused at connect time, because "any host" is what lets this renderer
-  // aim a credential at a host it controls (nocx-mon). Matching happens on the
-  // backend against the RESOLVED hostname, never this alias.
-  host?: string
-  // Unset means "this host, any port" — a stated exception, not an oversight:
-  // host is the load-bearing half of the identity.
-  port?: number
 }
 
 // TreeNode is a ProfileGroup with its children resolved — the output of
@@ -249,6 +241,11 @@ export class ProfileClient {
     return this.call('credentials.hasPassword', { credentialId })
   }
 
+  // Credential usage query — which profiles (by resolved inheritance) use each credential.
+  credentialUsage(): Promise<{ usage: CredentialUsage[] }> {
+    return this.call('credentials.usage', {})
+  }
+
   // Settings RPC (nocx-9m5 / STORE-5b).  No secret value ever appears in a
   // response — secrets go through secretSet/secretDelete/secretExists only.
   describeSettings(): Promise<{ declarations: unknown[] }> {
@@ -307,6 +304,24 @@ export class ProfileClient {
   importPortable(payloadBase64: string, passphrase: string): Promise<ImportResult> {
     return this.call('export.importPortable', { payload: payloadBase64, passphrase })
   }
+}
+
+// ── Credential usage types ────────────────────────────────────────────────
+//
+// Returned by credentials.usage — resolved on the backend so inheritance is
+// correctly reflected (a credential used through a group default is still "in
+// use", and the frontend should not attempt to compute it).
+export interface CredentialUsage {
+  credentialId: string
+  profiles: ProfileRef[]
+}
+
+export interface ProfileRef {
+  profileId: string
+  profileName: string
+  source: 'profile' | 'group' | 'global' // 'group' and 'global' = inherited
+  groupId?: string
+  groupName?: string
 }
 
 // ── Export/backup/import types (ADR-0011 §7) ─────────────────────────────

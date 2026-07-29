@@ -16,6 +16,7 @@ import type { JSX } from 'solid-js'
 import { For, Show, createSignal, createMemo, createEffect, onMount, onCleanup } from 'solid-js'
 import { createStore } from 'solid-js/store'
 import { ConnectionsView } from './connections'
+import { CredentialsSection } from './credentials'
 import type { ProfileClient, SSHProfile } from './profiles'
 import { SettingsObserver } from './settings-observer'
 import {
@@ -321,7 +322,14 @@ export function SettingsComponent(props: SettingsComponentProps) {
         />
       ),
     }
-    return [...generated, exportPage, connectionPage]
+    const credentialsPage: SettingsPage = {
+      kind: 'component',
+      id: 'credentials',
+      title: 'Credentials',
+      scrollMode: 'page',
+      renderContent: () => <CredentialsSection client={props.profileClient} />,
+    }
+    return [...generated, exportPage, connectionPage, credentialsPage]
   })
 
   /** The active component page, or null when a generated section is showing. */

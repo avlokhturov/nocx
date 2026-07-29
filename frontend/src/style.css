@@ -37,6 +37,7 @@
 @import './styles/surfaces/settings.css';
 @import './styles/surfaces/export.css';
 @import './styles/surfaces/connections.css';
+@import './styles/surfaces/credentials.css';
 
 /* ── App body row: activity bar | sidebar | panes ────────────────────── */
 
