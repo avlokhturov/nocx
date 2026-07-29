@@ -41,6 +41,7 @@ import type {
   FieldSourceDTO,
   SessionStatus,
   ProbeOutcome,
+  GroupImpactResponse,
 } from './profiles'
 import { ProfileClient, buildGroupTree } from './profiles'
 import { parseQuickConnect } from './profiles'
@@ -139,7 +140,7 @@ export type SaveRoute =
 export function decideSaveRoute(profile: SSHProfile, dirty: ReadonlySet<string>): SaveRoute {
   if (dirty.size === 0) return { kind: 'noop' }
 
-  const nonPatchable: Record<string, true> = { name: true, host: true }
+  const nonPatchable: Record<string, true> = { name: true, host: true, group: true }
   const hasNonPatchable = [...dirty].some((f) => nonPatchable[f])
 
   if (hasNonPatchable) {
@@ -188,6 +189,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   // ── Effective/provenance state ─────────────────────────────────────────
   const [effectiveData, setEffectiveData] = createSignal<Record<string, EffectiveProfileDTO>>({})
   const [dirtyFields, setDirtyFields] = createSignal<Set<string>>(new Set())
+  const [profileMoveImpact, setProfileMoveImpact] = createSignal<GroupImpactResponse | null>(null)
 
   // ── Session state per profile ──────────────────────────────────────────
   const [sessionStatuses, setSessionStatuses] = createSignal<Record<string, SessionStatus>>({})
@@ -211,6 +213,19 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   const [credPasswordValue, setCredPasswordValue] = createSignal('')
   const credFormRef = { current: null as CredentialFormHandle | null }
 
+  // ── Group editor dialog ──────────────────────────────────────────────
+  const [editingGroup, setEditingGroup] = createSignal<ProfileGroup | null>(null)
+  const [groupDialogOpen, setGroupDialogOpen] = createSignal(false)
+  const [groupDraft, setGroupDraft] = createSignal<ProfileGroup | null>(null)
+  const [groupImpact, setGroupImpact] = createSignal<GroupImpactResponse | null>(null)
+  const [groupImpactBusy, setGroupImpactBusy] = createSignal(false)
+  const [groupApplyBusy, setGroupApplyBusy] = createSignal(false)
+  const [deleteGroupId, setDeleteGroupId] = createSignal<string | null>(null)
+  const [deleteImpact, setDeleteImpact] = createSignal<GroupImpactResponse | null>(null)
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = createSignal(false)
+  const [deleteBusy, setDeleteBusy] = createSignal(false)
+  const [dangerConfirmed, setDangerConfirmed] = createSignal(false)
+
   // ── Data loading ────────────────────────────────────────────────────────
   async function loadAll() {
     try {
@@ -230,6 +245,385 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         message: `Could not load connections: ${message}. The list may be out of date`,
       })
     }
+  }
+
+  // ── Group editor ──────────────────────────────────────────────────────
+
+  function openGroupEditor(group: ProfileGroup) {
+    setEditingGroup(group)
+    setGroupDraft(JSON.parse(JSON.stringify(group)) as ProfileGroup)
+    setGroupImpact(null)
+    setDangerConfirmed(false)
+    setGroupDialogOpen(true)
+  }
+
+  function closeGroupEditor() {
+    setGroupDialogOpen(false)
+    setEditingGroup(null)
+    setGroupDraft(null)
+    setGroupImpact(null)
+    setGroupImpactBusy(false)
+    setDangerConfirmed(false)
+  }
+
+  async function computeGroupImpact(draft: ProfileGroup) {
+    if (!draft.id) return
+    setDangerConfirmed(false)
+    setGroupImpactBusy(true)
+    try {
+      const result = await props.client.groupImpact({ group: draft })
+      setGroupImpact(result)
+    } catch (err) {
+      const message = (err as Error).message
+      log.error('Failed to compute group impact', { message })
+      setGroupImpact(null)
+    } finally {
+      setGroupImpactBusy(false)
+    }
+  }
+
+  async function saveGroup() {
+    const draft = groupDraft()
+    if (!draft) return
+    setGroupApplyBusy(true)
+    try {
+      // Must submit via groups.apply — groups.update refuses Defaults changes.
+      await props.client.groupApply([draft])
+      closeGroupEditor()
+      await loadAll()
+      showToast({ level: 'success', message: `Saved group "${draft.name}"` })
+    } catch (err) {
+      const message = (err as Error).message
+      log.error('Failed to save group', { message })
+      showToast({ level: 'danger', message: `Could not save group: ${message}` })
+    } finally {
+      setGroupApplyBusy(false)
+    }
+  }
+
+  function confirmDeleteGroup(group: ProfileGroup) {
+    setDeleteGroupId(group.id)
+    void computeDeleteImpact(group.id)
+    setDeleteConfirmOpen(true)
+  }
+
+  async function computeDeleteImpact(groupId: string) {
+    setDeleteBusy(true)
+    try {
+      const result = await props.client.groupImpact({ deleteGroupId: groupId })
+      setDeleteImpact(result)
+    } catch (err) {
+      const message = (err as Error).message
+      log.error('Failed to compute delete impact', { message })
+      setDeleteImpact(null)
+      showToast({ level: 'danger', message: `Could not preview deletion: ${message}` })
+    } finally {
+      setDeleteBusy(false)
+    }
+  }
+
+  async function executeDeleteGroup() {
+    const gid = deleteGroupId()
+    if (!gid) return
+    setDeleteBusy(true)
+    try {
+      await props.client.deleteGroup(gid)
+      setDeleteConfirmOpen(false)
+      setDeleteGroupId(null)
+      setDeleteImpact(null)
+      await loadAll()
+      showToast({ level: 'success', message: 'Group deleted' })
+    } catch (err) {
+      const message = (err as Error).message
+      log.error('Failed to delete group', { message })
+      showToast({ level: 'danger', message: `Could not delete group: ${message}` })
+    } finally {
+      setDeleteBusy(false)
+    }
+  }
+
+  function cancelDeleteGroup() {
+    setDeleteConfirmOpen(false)
+    setDeleteGroupId(null)
+    setDeleteImpact(null)
+  }
+
+  function setGroupField(key: keyof ProfileGroup, value: unknown) {
+    const current = groupDraft()
+    if (!current) return
+    const updated = { ...current, [key]: value }
+    setGroupDraft(updated)
+    void computeGroupImpact(updated)
+  }
+
+  function setGroupDefaultsField(key: string, value: unknown) {
+    const current = groupDraft()
+    if (!current) return
+    // Convert types based on field — the backend expects typed sparse values.
+    let typed: unknown = value
+    if (value === '' || value === undefined || value === null) {
+      typed = undefined // unset — let the empty delete below handle it
+    } else {
+      const numericFields = new Set([
+        'port',
+        'keepaliveInterval',
+        'keepaliveCountMax',
+        'readyTimeout',
+      ])
+      if (numericFields.has(key)) {
+        const n = Number(value)
+        typed = isNaN(n) ? undefined : n
+      } else if (key === 'agentForward') {
+        typed = value === true || value === 'true'
+      }
+    }
+    const defaults = { ...(current.defaults || {}), [key]: typed }
+    if (typed === undefined || typed === null) {
+      delete defaults[key]
+    }
+    const updated = { ...current, defaults } as ProfileGroup
+    setGroupDraft(updated)
+    void computeGroupImpact(updated)
+  }
+
+  const DEFAULT_FIELDS: { key: string; label: string }[] = [
+    { key: 'credentialId', label: 'Credential' },
+    { key: 'port', label: 'Port' },
+    { key: 'user', label: 'User' },
+    { key: 'auth', label: 'Auth mode' },
+    { key: 'jumpHost', label: 'Jump server' },
+    { key: 'keepaliveInterval', label: 'Keepalive interval (ms)' },
+    { key: 'keepaliveCountMax', label: 'Keepalive count max' },
+    { key: 'readyTimeout', label: 'Ready timeout (ms)' },
+    { key: 'agentForward', label: 'Agent forward' },
+  ]
+
+  /** Human-readable field labels for the impact summary. */
+  function fieldLabel(key: string): string {
+    const m: Record<string, string> = {
+      credentialId: 'credential',
+      port: 'port',
+      user: 'username',
+      auth: 'auth mode',
+      jumpHost: 'jump server',
+      keepaliveInterval: 'keepalive interval',
+      keepaliveCountMax: 'keepalive count max',
+      readyTimeout: 'ready timeout',
+      agentForward: 'agent forwarding',
+    }
+    return m[key] ?? key
+  }
+
+  function renderImpactSummary(impact: GroupImpactResponse): JSX.Element {
+    const profiles = impact.affectedProfiles ?? []
+    const dangerous = impact.dangerous
+    if (profiles.length === 0) return <p class="cm-impact-none">No connections affected</p>
+
+    const dangerousCount = profiles.filter((p) => p.diffs.some((d) => d.dangerous)).length
+
+    return (
+      <div class="cm-impact">
+        <p class="cm-impact-count" role="status">
+          Affects <strong>{profiles.length}</strong> connection{profiles.length === 1 ? '' : 's'}
+          <Show when={dangerous}>
+            <span class="cm-impact-dangerous"> &middot; includes auth-affecting changes</span>
+          </Show>
+        </p>
+        <Show when={dangerous}>
+          <div class="cm-impact-danger-badge" role="alert">
+            This change affects authentication for {dangerousCount} connection
+            {dangerousCount === 1 ? '' : 's'} and requires explicit confirmation.
+          </div>
+        </Show>
+        <table class="cm-impact-table" role="list">
+          <For each={profiles}>
+            {(pi) => (
+              <tr class="cm-impact-row" role="listitem">
+                <td class="cm-impact-profile">{pi.profileName}</td>
+                <td class="cm-impact-diffs">
+                  <For each={pi.diffs}>
+                    {(d) => (
+                      <span
+                        class="cm-impact-diff"
+                        classList={{ 'cm-impact-diff-dangerous': d.dangerous }}
+                      >
+                        <Show when={d.dangerous} fallback={<Badge tone="warning">changed</Badge>}>
+                          <Badge tone="danger">dangerous</Badge>
+                        </Show>
+                        {fieldLabel(d.field)}:{' '}
+                        {typeof d.oldValue === 'string'
+                          ? d.oldValue
+                          : (JSON.stringify(d.oldValue) ?? '(none)')}{' '}
+                        →{' '}
+                        {typeof d.newValue === 'string'
+                          ? d.newValue
+                          : (JSON.stringify(d.newValue) ?? '(none)')}
+                      </span>
+                    )}
+                  </For>
+                </td>
+              </tr>
+            )}
+          </For>
+        </table>
+      </div>
+    )
+  }
+  function renderGroupEditor(): JSX.Element {
+    const draft = groupDraft()
+    const impact = groupImpact()
+    const impactBusy = groupImpactBusy()
+
+    function gv(key: string): unknown {
+      if (!draft) return undefined
+      if (key === 'name') return draft.name
+      if (key === 'description') return draft.description ?? ''
+      return (draft.defaults ?? {})[key]
+    }
+
+    function setG(key: string, v: string) {
+      if (key === 'name' || key === 'description') {
+        setGroupField(key, v)
+      } else {
+        setGroupDefaultsField(key, v)
+      }
+    }
+    const credOptions = createMemo((): SelectOption[] =>
+      credentials().map((c) => ({
+        value: c.id,
+        label: `${c.name} (${c.username})`,
+      })),
+    )
+
+    const jumpOptions = createMemo((): SelectOption[] =>
+      jumpServerProfiles().map((p) => ({
+        value: p.id,
+        label: p.name,
+      })),
+    )
+
+    return (
+      <div class="cm-group-form">
+        <Section title="Details">
+          <TextField
+            id="group-name"
+            label="Name"
+            required
+            value={gv('name') as string}
+            onInput={(v) => setG('name', v)}
+          />
+          <TextField
+            id="group-description"
+            label="Description"
+            value={gv('description') as string}
+            onInput={(v) => setG('description', v)}
+          />
+        </Section>
+
+        <Section title="Group Defaults">
+          <p class="cm-hint">
+            Defaults are inherited by all connections in this group and its subgroups. Changing a
+            default here affects every connection that does not explicitly override it.
+          </p>
+          <For each={DEFAULT_FIELDS}>
+            {({ key, label }) => {
+              if (key === 'credentialId') {
+                return (
+                  <Field for={`group-default-${key}`} label={label}>
+                    <div class="cm-field-row">
+                      <Select
+                        value={gv(key) as string}
+                        onChange={(v) => setG(key, v || '')}
+                        options={credOptions()}
+                        placeholder="&mdash; Not set (inherit) &mdash;"
+                      />
+                    </div>
+                  </Field>
+                )
+              }
+              if (key === 'jumpHost') {
+                return (
+                  <Field for={`group-default-${key}`} label={label}>
+                    <div class="cm-field-row">
+                      <Select
+                        value={gv(key) as string}
+                        onChange={(v) => setG(key, v || '')}
+                        options={jumpOptions()}
+                        placeholder="&mdash; Not set (inherit) &mdash;"
+                      />
+                    </div>
+                  </Field>
+                )
+              }
+              if (key === 'auth') {
+                return (
+                  <Field for="group-default-auth" label={label}>
+                    <div class="cm-radio-group">
+                      <For each={AUTH_MODES}>
+                        {(mode) => (
+                          <Radio
+                            value={mode}
+                            checked={gv(key) === mode}
+                            onChange={(v) => setG(key, v)}
+                            name="group-default-auth"
+                            label={authModeLabel(mode)}
+                          />
+                        )}
+                      </For>
+                    </div>
+                  </Field>
+                )
+              }
+              if (key === 'agentForward') {
+                return (
+                  <Checkbox
+                    label={label}
+                    checked={gv(key) === true}
+                    onChange={(v) => setG(key, v ? 'true' : '')}
+                  />
+                )
+              }
+              return (
+                <TextField
+                  id={`group-default-${key}`}
+                  label={label}
+                  value={gv(key) != null ? String(gv(key)) : ''}
+                  type={
+                    key === 'port' ||
+                    key.includes('Timeout') ||
+                    key.includes('Count') ||
+                    key.includes('interval')
+                      ? 'number'
+                      : 'text'
+                  }
+                  onInput={(v) => setG(key, v)}
+                  placeholder="&mdash; Not set (inherit) &mdash;"
+                />
+              )
+            }}
+          </For>
+        </Section>
+
+        <Show when={impact}>
+          {(i) => (
+            <Section title="Blast Radius Preview">
+              <Show when={!impactBusy} fallback={<p>Computing impact…</p>}>
+                {renderImpactSummary(i())}
+                <Show when={i().dangerous}>
+                  <div class="cm-danger-confirm">
+                    <Checkbox
+                      label="I understand this will change authentication for affected connections"
+                      checked={dangerConfirmed()}
+                      onChange={(v) => setDangerConfirmed(v)}
+                    />
+                  </div>
+                </Show>
+              </Show>
+            </Section>
+          )}
+        </Show>
+      </div>
+    )
   }
 
   async function loadEffective(ids: string[]) {
@@ -369,6 +763,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     setDirtyFields(new Set<string>())
     profileValidation.reset()
     void loadEffective([profile.id])
+    setProfileMoveImpact(null)
     setDialogOpen(true)
   }
 
@@ -376,6 +771,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     setDialogOpen(false)
     setEditing(null)
     setDirtyFields(new Set<string>())
+    setProfileMoveImpact(null)
   }
 
   // ── Validation ──────────────────────────────────────────────────────────
@@ -440,7 +836,12 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       return
     }
 
-    const dirty = dirtyFields()
+    const dirty = new Set(dirtyFields())
+    // If the group changed from the original, force a full update.
+    const origProfile = profiles().find((p) => p.id === profile.id)
+    if (origProfile && origProfile.group !== profile.group) {
+      dirty.add('group')
+    }
     const route = decideSaveRoute(profile, dirty)
 
     switch (route.kind) {
@@ -475,6 +876,18 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           showToast({ level: 'danger', message: `Could not save the connection: ${message}` })
         }
         return
+    }
+  }
+
+  async function computeMoveImpact(profileId: string, targetGroupId: string) {
+    setProfileMoveImpact(null)
+    try {
+      const result = await props.client.moveImpact({ profileIds: [profileId], targetGroupId })
+      setProfileMoveImpact(result)
+    } catch (err) {
+      const message = (err as Error).message
+      log.error('Failed to compute move impact', { message })
+      setProfileMoveImpact(null)
     }
   }
 
@@ -736,7 +1149,25 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     return (
       <>
         <div class="cm-group-header" role="heading" aria-level={2}>
-          {node.name}
+          <span class="cm-group-name">{node.name}</span>
+          <span class="cm-group-actions">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => openGroupEditor(node)}
+              ariaLabel={`Edit group ${node.name}`}
+            >
+              Edit
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => confirmDeleteGroup(node)}
+              ariaLabel={`Delete group ${node.name}`}
+            >
+              Delete
+            </Button>
+          </span>
         </div>
         <For each={gp}>{(p) => renderRow(p)}</For>
         <For each={node.children}>{(child) => renderGroupSection(child)}</For>
@@ -858,6 +1289,12 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         label: p.name,
       })),
     )
+    const groupOptions = createMemo((): SelectOption[] =>
+      groups().map((g) => ({
+        value: g.id,
+        label: g.name,
+      })),
+    )
 
     function fieldRow(field: string, textField: JSX.Element) {
       const isSaved = !!profile.id && profiles().some((x) => x.id === profile.id)
@@ -949,6 +1386,27 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             )}
           </Show>
         </Section>
+
+        <Show when={isSaved()}>
+          <Section title="Group">
+            <Field for="profile-group" label="Group">
+              <Select
+                value={profile.group ?? ''}
+                onChange={(v) => {
+                  const targetGroupId = v || ''
+                  setEditing({ ...profile, group: targetGroupId || undefined })
+                  setDirtyFields((prev) => new Set(prev).add('group'))
+                  if (profile.id) void computeMoveImpact(profile.id, targetGroupId)
+                }}
+                options={groupOptions()}
+                placeholder="&mdash; No group &mdash;"
+              />
+            </Field>
+            <Show when={profileMoveImpact()} keyed>
+              {(impact) => renderImpactSummary(impact)}
+            </Show>
+          </Section>
+        </Show>
 
         <Show when={!hasCredential}>
           <Section title="Authentication (override)">
@@ -1096,7 +1554,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           <For each={tree()}>{(node) => renderGroupSection(node)}</For>
           <Show when={ungrouped().length > 0}>
             <div class="cm-group-header" role="heading" aria-level={2}>
-              Connections
+              <span class="cm-group-name">Connections</span>
             </div>
             <For each={ungrouped()}>{(p) => renderRow(p)}</For>
           </Show>
@@ -1193,6 +1651,90 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             />
           </Dialog>
         )}
+      </Show>
+
+      {/* Group Editor Dialog */}
+      <Show when={editingGroup()}>
+        {(group) => (
+          <Dialog
+            open={groupDialogOpen()}
+            onClose={closeGroupEditor}
+            title={`Edit Group: ${group().name}`}
+            size="lg"
+            footer={
+              <>
+                <Button
+                  variant={groupImpact()?.dangerous ? 'danger' : 'primary'}
+                  disabled={groupApplyBusy() || (groupImpact()?.dangerous && !dangerConfirmed())}
+                  onClick={() => void saveGroup()}
+                >
+                  {groupApplyBusy() ? 'Applying…' : 'Save Group'}
+                </Button>
+                <Button variant="default" onClick={closeGroupEditor} disabled={groupApplyBusy()}>
+                  Cancel
+                </Button>
+              </>
+            }
+          >
+            {renderGroupEditor()}
+          </Dialog>
+        )}
+      </Show>
+
+      {/* Group Delete Confirmation Dialog */}
+      <Show when={deleteConfirmOpen()}>
+        <Dialog
+          open={deleteConfirmOpen()}
+          onClose={cancelDeleteGroup}
+          title="Delete Group"
+          footer={
+            <>
+              <Button
+                variant="danger"
+                disabled={deleteBusy() || deleteImpact()?.deleteImpact?.action === 'refuse'}
+                onClick={() => void executeDeleteGroup()}
+              >
+                {deleteBusy()
+                  ? 'Deleting…'
+                  : deleteImpact()?.deleteImpact?.action === 'refuse'
+                    ? 'Cannot Delete'
+                    : 'Delete Group'}
+              </Button>
+              <Button variant="default" onClick={cancelDeleteGroup} disabled={deleteBusy()}>
+                Cancel
+              </Button>
+            </>
+          }
+        >
+          <Show when={deleteBusy() && !deleteImpact()}>
+            <p>Computing impact…</p>
+          </Show>
+          <Show when={deleteImpact()?.deleteImpact} keyed>
+            {(di) => (
+              <div class="cm-delete-impact">
+                <Show when={di.action === 'refuse'}>
+                  <div class="cm-impact-danger-badge" role="alert">
+                    {di.reason}
+                  </div>
+                  <p>This group cannot be deleted through this dialog.</p>
+                </Show>
+                <Show when={di.action === 'promote_to_root'}>
+                  <p>{di.reason}</p>
+                  <Show
+                    when={
+                      deleteImpact()?.affectedProfiles &&
+                      deleteImpact()!.affectedProfiles!.length > 0
+                    }
+                  >
+                    <Section title="Affected Connections">
+                      {renderImpactSummary(deleteImpact()!)}
+                    </Section>
+                  </Show>
+                </Show>
+              </div>
+            )}
+          </Show>
+        </Dialog>
       </Show>
     </div>
   )

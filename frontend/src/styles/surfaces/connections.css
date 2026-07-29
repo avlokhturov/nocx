@@ -237,3 +237,121 @@
 .cm-provenance-link:hover {
   color: var(--color-accent-hover);
 }
+
+/* ── Group header actions ───────────────────────────────────────────────── */
+
+.cm-group-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.cm-group-name {
+  font-weight: 500;
+}
+
+.cm-group-actions {
+  display: flex;
+  gap: var(--space-1);
+  flex: 0 0 auto;
+}
+
+/* ── Group form inside dialog ────────────────────────────────────────────── */
+
+.cm-group-form {
+  max-width: 600px;
+}
+
+.cm-group-form .cm-hint {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+  margin: 0 0 var(--space-4);
+}
+
+/* ── Impact / blast radius preview ──────────────────────────────────────── */
+
+.cm-impact {
+  margin: var(--space-4) 0;
+}
+
+.cm-impact-none {
+  color: var(--color-text-muted);
+  font-style: italic;
+}
+
+.cm-impact-count {
+  margin: 0 0 var(--space-3);
+  font-weight: 500;
+}
+
+.cm-impact-dangerous {
+  color: var(--color-danger);
+  font-weight: 600;
+}
+
+.cm-impact-danger-badge {
+  background: color-mix(in srgb, var(--color-danger), transparent 85%);
+  border: 1px solid var(--color-danger);
+  border-radius: var(--control-radius-sm);
+  padding: var(--space-3);
+  margin: var(--space-3) 0;
+  font-size: var(--font-size-sm);
+  color: var(--color-danger);
+}
+
+.cm-impact-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--font-size-sm);
+}
+
+.cm-impact-row {
+  border-bottom: 1px solid var(--color-divider);
+}
+
+.cm-impact-row:last-child {
+  border-bottom: none;
+}
+
+.cm-impact-profile {
+  padding: var(--space-2) var(--space-3) var(--space-2) 0;
+  font-weight: 500;
+  vertical-align: top;
+  white-space: nowrap;
+}
+
+.cm-impact-diffs {
+  padding: var(--space-2) 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.cm-impact-diff {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--color-text);
+}
+
+.cm-impact-diff-dangerous {
+  font-weight: 500;
+}
+
+/* ── Danger confirmation checkbox ───────────────────────────────────────── */
+
+.cm-danger-confirm {
+  margin-top: var(--space-4);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--color-danger);
+}
+
+/* ── Delete impact ──────────────────────────────────────────────────────── */
+
+.cm-delete-impact {
+  font-size: var(--font-size-sm);
+}
+
+.cm-delete-impact p {
+  margin: var(--space-2) 0;
+}

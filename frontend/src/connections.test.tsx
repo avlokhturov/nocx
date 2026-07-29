@@ -80,6 +80,11 @@ describe('decideSaveRoute', () => {
     // backend's PatchPathAllowed.
     expect(r.kind).toBe('patch')
   })
+
+  it('returns update when only group is dirty', () => {
+    const r = decideSaveRoute(MOCK_PROFILE, new Set(['group']))
+    expect(r.kind).toBe('update')
+  })
 })
 
 describe('revert does not materialise the inherited value', () => {

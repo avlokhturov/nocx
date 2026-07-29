@@ -19,6 +19,7 @@ import type {
   EffectiveProfileDTO,
   SessionStatus,
   ConnectionTestResult,
+  GroupImpactResponse,
 } from './profiles'
 // ── Stub profiles ──────────────────────────────────────────────────────
 
@@ -403,10 +404,14 @@ describe('group tree', () => {
     const children = Array.from(body!.children)
 
     const productionIdx = children.findIndex(
-      (c) => c.matches('.cm-group-header') && c.textContent === 'Production',
+      (c) =>
+        c.matches('.cm-group-header') &&
+        c.querySelector('.cm-group-name')?.textContent === 'Production',
     )
     const connectionsIdx = children.findIndex(
-      (c) => c.matches('.cm-group-header') && c.textContent === 'Connections',
+      (c) =>
+        c.matches('.cm-group-header') &&
+        c.querySelector('.cm-group-name')?.textContent === 'Connections',
     )
     const prodDbIdx = children.findIndex(
       (c) => c.matches('.cm-item') && c.querySelector('.cm-item-name')?.textContent === 'prod-db',
@@ -665,5 +670,321 @@ describe('inline credential creation', () => {
     const credSelect = container.querySelector('.ui-select') as HTMLSelectElement
     expect(credSelect, 'Credential select element not found').toBeTruthy()
     expect(credSelect.value).toBe('cred:new-key')
+  })
+})
+
+// ── Shared impact stubs ──────────────────────────────────────────────────
+
+const IMPACT_DANGEROUS: GroupImpactResponse = {
+  dangerous: true,
+  affectedProfiles: [
+    {
+      profileId: 'ssh:p2',
+      profileName: 'prod-db',
+      diffs: [{ field: 'credentialId', oldValue: null, newValue: 'cred:new', dangerous: true }],
+    },
+  ],
+}
+
+const IMPACT_COSMETIC: GroupImpactResponse = {
+  dangerous: false,
+  affectedProfiles: [
+    {
+      profileId: 'ssh:p2',
+      profileName: 'prod-db',
+      diffs: [{ field: 'port', oldValue: 5432, newValue: 22, dangerous: false }],
+    },
+  ],
+}
+
+const IMPACT_DELETE_PROMOTE: GroupImpactResponse = {
+  dangerous: false,
+  deleteImpact: {
+    action: 'promote_to_root',
+    reason: 'The group contains child profiles that will be reparented.',
+    affectedGroupIds: [],
+  },
+}
+
+// ── Helpers: find a dialog by title ────────────────────────────────────
+
+function findDialogByTitle(container: HTMLElement, titleText: string): HTMLElement | null {
+  const titles = container.querySelectorAll('.nocx-dialog__title')
+  for (const t of titles) {
+    if (t.textContent === titleText) return t.closest('.nocx-dialog')
+  }
+  return null
+}
+
+function findDialogByTitleContaining(container: HTMLElement, partial: string): HTMLElement | null {
+  const titles = container.querySelectorAll('.nocx-dialog__title')
+  for (const t of titles) {
+    if (t.textContent && t.textContent.includes(partial)) return t.closest('.nocx-dialog')
+  }
+  return null
+}
+
+// ── Helper: open the group editor dialog ────────────────────────────────
+
+async function openGroupEditorByName(container: HTMLElement, groupName: string) {
+  const headers = container.querySelectorAll('.cm-group-header')
+  const targetHeader = Array.from(headers).find(
+    (h) => h.querySelector('.cm-group-name')?.textContent === groupName,
+  )
+  expect(targetHeader, `Group header "${groupName}" not found`).toBeTruthy()
+  const editBtn = Array.from(targetHeader!.querySelectorAll('.cm-group-actions .ui-button')).find(
+    (b) => b.textContent?.trim() === 'Edit',
+  )
+  expect(editBtn, `Edit button for "${groupName}" not found`).toBeTruthy()
+  ;(editBtn! as HTMLElement).click()
+
+  await vi.waitFor(() => {
+    const dialog = findDialogByTitle(container, `Edit Group: ${groupName}`)
+    expect(dialog, `Group edit dialog "${groupName}" not found`).toBeTruthy()
+  })
+}
+
+// ── Helper: open the profile edit dialog for a named profile ─────────────
+
+async function openProfileEditor(container: HTMLElement, profileName: string) {
+  const allBtns = container.querySelectorAll('.cm-item-actions .ui-button')
+  const editBtn = Array.from(allBtns).find((b) => b.textContent?.trim() === 'Edit')
+  expect(editBtn, `Edit button for "${profileName}" not found`).toBeTruthy()
+  ;(editBtn! as HTMLElement).click()
+
+  await vi.waitFor(() => {
+    const dialog = findDialogByTitleContaining(container, profileName)
+    expect(dialog, `Profile edit dialog "${profileName}" not found`).toBeTruthy()
+  })
+}
+
+// ── Group editor tests ──────────────────────────────────────────────────
+
+describe('group editor', () => {
+  it('blast radius appears before applying', async () => {
+    const { container, client } = mount({
+      profiles: MOCK_PROFILES,
+      groups: MOCK_GROUPS,
+    })
+    await waitForProfiles(container, 3)
+
+    await openGroupEditorByName(container, 'Production')
+
+    // Impact section should not be visible before any change
+    expect(container.querySelector('.cm-impact-count')).toBeFalsy()
+
+    const impactSpy = vi.spyOn(client, 'groupImpact').mockResolvedValue(IMPACT_COSMETIC)
+
+    // Change the port default to trigger impact computation
+    const portInput = container.querySelector('#group-default-port') as HTMLInputElement
+    expect(portInput).toBeTruthy()
+    fireEvent.input(portInput, { target: { value: '22' } })
+
+    // Wait for the impact summary to appear
+    await vi.waitFor(() => {
+      const count = container.querySelector('.cm-impact-count')
+      expect(count).toBeTruthy()
+      expect(count!.textContent).toContain('Affects')
+    })
+
+    expect(impactSpy).toHaveBeenCalled()
+  })
+
+  it('dangerous change gates the save button', async () => {
+    const { container, client } = mount({
+      profiles: MOCK_PROFILES,
+      groups: MOCK_GROUPS,
+    })
+    await waitForProfiles(container, 3)
+
+    await openGroupEditorByName(container, 'Production')
+
+    const impactSpy = vi.spyOn(client, 'groupImpact').mockResolvedValue(IMPACT_DANGEROUS)
+
+    // Change a default to trigger impact computation
+    const portInput = container.querySelector('#group-default-port') as HTMLInputElement
+    expect(portInput).toBeTruthy()
+    fireEvent.input(portInput, { target: { value: '22' } })
+
+    // Wait for dangerous badge to appear
+    await vi.waitFor(() => {
+      expect(container.querySelector('.cm-impact-danger-badge')).toBeTruthy()
+    })
+
+    // Scope to the group editor dialog
+    const groupDialog = findDialogByTitle(container, 'Edit Group: Production')!
+
+    // Save button should be disabled before confirmation
+    const saveBtn = Array.from(groupDialog.querySelectorAll('.ui-button')).find(
+      (b) => b.textContent?.trim() === 'Save Group',
+    )
+    expect(saveBtn).toBeTruthy()
+    expect((saveBtn! as HTMLButtonElement).disabled).toBe(true)
+
+    // Click the danger confirmation checkbox
+    const confirmCheckbox = groupDialog.querySelector(
+      '.cm-danger-confirm input[type="checkbox"]',
+    ) as HTMLInputElement
+    expect(confirmCheckbox).toBeTruthy()
+    fireEvent.click(confirmCheckbox)
+
+    // Save button should now be enabled
+    await vi.waitFor(() => {
+      expect((saveBtn! as HTMLButtonElement).disabled).toBe(false)
+    })
+
+    expect(impactSpy).toHaveBeenCalled()
+  })
+
+  it('cosmetic change does not gate the save', async () => {
+    const { container, client } = mount({
+      profiles: MOCK_PROFILES,
+      groups: MOCK_GROUPS,
+    })
+    await waitForProfiles(container, 3)
+
+    await openGroupEditorByName(container, 'Production')
+
+    const impactSpy = vi.spyOn(client, 'groupImpact').mockResolvedValue(IMPACT_COSMETIC)
+
+    // Change a non-dangerous default
+    const portInput = container.querySelector('#group-default-port') as HTMLInputElement
+    expect(portInput).toBeTruthy()
+    fireEvent.input(portInput, { target: { value: '22' } })
+
+    // Wait for impact to appear
+    await vi.waitFor(() => {
+      expect(container.querySelector('.cm-impact-count')).toBeTruthy()
+    })
+
+    const groupDialog = findDialogByTitle(container, 'Edit Group: Production')!
+
+    // No danger confirmation checkbox should exist
+    expect(groupDialog.querySelector('.cm-danger-confirm')).toBeFalsy()
+
+    // Save button should be enabled
+    const saveBtn = Array.from(groupDialog.querySelectorAll('.ui-button')).find(
+      (b) => b.textContent?.trim() === 'Save Group',
+    )
+    expect(saveBtn).toBeTruthy()
+    expect((saveBtn! as HTMLButtonElement).disabled).toBe(false)
+
+    expect(impactSpy).toHaveBeenCalled()
+  })
+
+  it('cancelling the editor applies nothing', async () => {
+    const { container, client } = mount({
+      profiles: MOCK_PROFILES,
+      groups: MOCK_GROUPS,
+    })
+    await waitForProfiles(container, 3)
+
+    await openGroupEditorByName(container, 'Production')
+
+    const applySpy = vi.spyOn(client, 'groupApply')
+
+    // Find Cancel inside the group editor dialog
+    const groupDialog = findDialogByTitle(container, 'Edit Group: Production')
+    expect(groupDialog, 'Group dialog not found').toBeTruthy()
+    const cancelBtn = Array.from(groupDialog!.querySelectorAll('.ui-button')).find(
+      (b) => b.textContent?.trim() === 'Cancel',
+    )
+    expect(cancelBtn).toBeTruthy()
+    ;(cancelBtn! as HTMLElement).click()
+
+    // The group dialog should close
+    await vi.waitFor(() => {
+      expect(findDialogByTitle(container, 'Edit Group: Production')).toBeFalsy()
+    })
+
+    // groupApply should never be called
+    expect(applySpy).not.toHaveBeenCalled()
+  })
+
+  it('delete states what happens to children before confirming', async () => {
+    const { container, client } = mount({
+      profiles: MOCK_PROFILES,
+      groups: MOCK_GROUPS,
+    })
+    await waitForProfiles(container, 3)
+
+    // Spy BEFORE clicking delete — computeDeleteImpact calls groupImpact immediately
+    const impactSpy = vi.spyOn(client, 'groupImpact').mockResolvedValue(IMPACT_DELETE_PROMOTE)
+
+    // Find and click the Delete button in the Production group header
+    const headers = container.querySelectorAll('.cm-group-header')
+    const prodHeader = Array.from(headers).find(
+      (h) => h.querySelector('.cm-group-name')?.textContent === 'Production',
+    )
+    expect(prodHeader).toBeTruthy()
+    const deleteBtn = Array.from(prodHeader!.querySelectorAll('.cm-group-actions .ui-button')).find(
+      (b) => b.textContent?.trim() === 'Delete',
+    )
+    expect(deleteBtn).toBeTruthy()
+    ;(deleteBtn! as HTMLElement).click()
+
+    // Wait for delete dialog
+    await vi.waitFor(() => {
+      expect(findDialogByTitle(container, 'Delete Group')).toBeTruthy()
+    })
+
+    const deleteDialog = findDialogByTitle(container, 'Delete Group')!
+
+    // The impact should explain what happens to children
+    await vi.waitFor(() => {
+      const deleteText = deleteDialog.querySelector('.cm-delete-impact')
+      expect(deleteText).toBeTruthy()
+      expect(deleteText!.textContent).toContain('reparented')
+      expect(deleteText!.textContent).toContain('child profiles')
+    })
+
+    expect(impactSpy).toHaveBeenCalled()
+  })
+})
+
+// ── Move preview test ────────────────────────────────────────────────────
+
+describe('profile move preview', () => {
+  it('moving a profile into a group with different defaults previews the diff', async () => {
+    const { container, client } = mount({
+      profiles: MOCK_PROFILES,
+      groups: MOCK_GROUPS,
+    })
+    await waitForProfiles(container, 3)
+
+    // Open the profile editor for prod-db (which is in the Production group)
+    await openProfileEditor(container, 'prod-db')
+
+    // The profile form should be visible
+    expect(container.querySelector('.cm-form')).toBeTruthy()
+
+    const profileDialog = findDialogByTitleContaining(container, 'prod-db')
+    expect(profileDialog, 'Profile dialog not found').toBeTruthy()
+
+    // Find the Group select: label[for="profile-group"] inside the dialog
+    const groupLabel = profileDialog!.querySelector('label[for="profile-group"]')
+    expect(groupLabel, 'Group label not found').toBeTruthy()
+    const groupSelect = groupLabel!
+      .closest('.ui-field')
+      ?.querySelector('.ui-select') as HTMLSelectElement
+    expect(groupSelect, 'Group select not found in profile dialog').toBeTruthy()
+
+    // Mock moveImpact to return a result
+    const moveImpactSpy = vi.spyOn(client, 'moveImpact').mockResolvedValue(IMPACT_COSMETIC)
+
+    // Change the group to empty (ungrouped) to trigger moveImpact
+    fireEvent.change(groupSelect, { target: { value: '' } })
+
+    // Wait for the move impact preview to appear (reuses renderImpactSummary)
+    await vi.waitFor(() => {
+      const count = container.querySelector('.cm-impact-count')
+      expect(count).toBeTruthy()
+      expect(count!.textContent).toContain('Affects')
+    })
+
+    expect(moveImpactSpy).toHaveBeenCalledWith({
+      profileIds: ['ssh:p2'],
+      targetGroupId: '',
+    })
   })
 })

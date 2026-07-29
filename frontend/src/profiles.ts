@@ -213,6 +213,39 @@ export interface EffectiveBatchResponse {
   errors?: { id: string; error: string }[]
 }
 
+// ── Group impact types (wave 6 — nocx-uxs5) ──────────────────────────
+//
+// Returned by groups.impact — computed on the backend so inheritance
+// is correctly reflected. The frontend renders what the backend answers.
+
+/** One field that would change for a profile under a proposed group change. */
+export interface FieldDiff {
+  field: string
+  oldValue: unknown
+  newValue: unknown
+  dangerous: boolean
+}
+
+/** Effective-field diff for one profile. */
+export interface ProfileImpact {
+  profileId: string
+  profileName: string
+  diffs: FieldDiff[]
+}
+
+/** What happens to children when a group is deleted. */
+export interface DeleteImpact {
+  action: string // "promote_to_root" | "refuse"
+  reason: string // human-readable explanation
+  affectedGroupIds?: string[] // child groups that would be reparented
+}
+
+/** Response from groups.impact. */
+export interface GroupImpactResponse {
+  dangerous: boolean
+  affectedProfiles?: ProfileImpact[]
+  deleteImpact?: DeleteImpact
+}
 // PatchParams is the request for profiles.patch.
 export interface PatchParams {
   id: string
@@ -255,6 +288,27 @@ export class ProfileClient {
   }
   deleteGroup(id: string): Promise<boolean> {
     return this.call('groups.delete', { id })
+  }
+
+  /** groups.impact — preview the effect of a proposed group change or delete. */
+  groupImpact(params: {
+    group?: ProfileGroup
+    deleteGroupId?: string
+  }): Promise<GroupImpactResponse> {
+    return this.call('groups.impact', params)
+  }
+
+  /** groups.apply — atomically apply one or more group changes. */
+  groupApply(groups: ProfileGroup[]): Promise<ProfileGroup[]> {
+    return this.call('groups.apply', groups)
+  }
+
+  /** profiles.moveImpact — preview the effect of moving profile(s) to a new group. */
+  moveImpact(params: {
+    profileIds: string[]
+    targetGroupId: string
+  }): Promise<GroupImpactResponse> {
+    return this.call('profiles.moveImpact', params)
   }
 
   importTabby(configYAML: string): Promise<number> {
