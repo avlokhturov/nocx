@@ -72,3 +72,138 @@ func TestUpdateCredential_MergesAndKeepsSecretID(t *testing.T) {
 		t.Errorf("SecretID = %q, want sec:1", got.SecretID)
 	}
 }
+
+func TestApplyGroups_MultiGroupUpdate(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateGroup(ProfileGroup{ID: "g1", Name: "Root"}); err != nil {
+		t.Fatalf("create g1: %v", err)
+	}
+	if err := s.CreateGroup(ProfileGroup{ID: "g2", Name: "Child", ParentGroupID: "g1"}); err != nil {
+		t.Fatalf("create g2: %v", err)
+	}
+	if err := s.CreateGroup(ProfileGroup{ID: "g3", Name: "Grandchild", ParentGroupID: "g2"}); err != nil {
+		t.Fatalf("create g3: %v", err)
+	}
+
+	// Apply two changes atomically: reparent g2 to root, reparent g3 to g1.
+	// The old handleGroupApply would need two sequential calls; the second
+	// call's validation would not see the first call's change to g2's
+	// ParentGroupID, so the tree state viewed by the second validation would
+	// differ from what is written.
+	err := s.ApplyGroups([]ProfileGroup{
+		{ID: "g2", Name: "Child", ParentGroupID: ""},
+		{ID: "g3", Name: "Grandchild", ParentGroupID: "g1"},
+	})
+	if err != nil {
+		t.Fatalf("ApplyGroups: %v", err)
+	}
+
+	groups, err := s.LoadGroups()
+	if err != nil {
+		t.Fatalf("LoadGroups: %v", err)
+	}
+
+	if len(groups) != 3 {
+		t.Fatalf("got %d groups, want 3", len(groups))
+	}
+
+	// Assert by ID, not position.
+	for _, g := range groups {
+		switch g.ID {
+		case "g1":
+			if g.ParentGroupID != "" || g.Name != "Root" {
+				t.Errorf("g1 = %+v, want Root with no parent", g)
+			}
+		case "g2":
+			if g.ParentGroupID != "" {
+				t.Errorf("g2 ParentGroupID = %q, want empty (reparented to root)", g.ParentGroupID)
+			}
+		case "g3":
+			if g.ParentGroupID != "g1" {
+				t.Errorf("g3 ParentGroupID = %q, want g1 (reparented under g1)", g.ParentGroupID)
+			}
+		}
+	}
+}
+
+func TestApplyGroups_RejectsCycle(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateGroup(ProfileGroup{ID: "g1", Name: "Root"}); err != nil {
+		t.Fatalf("create g1: %v", err)
+	}
+	if err := s.CreateGroup(ProfileGroup{ID: "g2", Name: "Child", ParentGroupID: "g1"}); err != nil {
+		t.Fatalf("create g2: %v", err)
+	}
+
+	// Apply two changes that together form a cycle: g1 -> g2, g2 -> g1.
+	// With the old sequential pattern (LoadGroups → validate → UpdateGroup),
+	// g1 would be updated first, then g2 would fail validation — leaving the
+	// store in an inconsistent state (g1 reparented, g2 unchanged).
+	// ApplyGroups must reject both under one lock.
+	err := s.ApplyGroups([]ProfileGroup{
+		{ID: "g1", Name: "Root", ParentGroupID: "g2"},
+		{ID: "g2", Name: "Child", ParentGroupID: "g1"},
+	})
+	if err == nil {
+		t.Fatal("expected cycle error, got nil")
+	}
+
+	// Store must be unchanged: g1 root, g2 child of g1. Assert by ID, not
+	// position — LoadGroups makes no ordering guarantee.
+	groups, err := s.LoadGroups()
+	if err != nil {
+		t.Fatalf("LoadGroups: %v", err)
+	}
+	if len(groups) != 2 {
+		t.Fatalf("got %d groups, want 2", len(groups))
+	}
+	for _, g := range groups {
+		switch g.ID {
+		case "g1":
+			if g.ParentGroupID != "" {
+				t.Errorf("g1 ParentGroupID = %q after rejected cycle, want empty", g.ParentGroupID)
+			}
+		case "g2":
+			if g.ParentGroupID != "g1" {
+				t.Errorf("g2 ParentGroupID = %q after rejected cycle, want g1", g.ParentGroupID)
+			}
+		}
+	}
+}
+
+func TestApplyGroups_RejectsUnknownGroup(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateGroup(ProfileGroup{ID: "g1", Name: "Root"}); err != nil {
+		t.Fatalf("create g1: %v", err)
+	}
+
+	err := s.ApplyGroups([]ProfileGroup{
+		{ID: "g1", Name: "Still Root"},
+		{ID: "g2", Name: "Phantom"},
+	})
+	if !errors.Is(err, ErrGroupNotFound) {
+		t.Fatalf("err = %v, want ErrGroupNotFound", err)
+	}
+
+	// g1 must be unchanged.
+	groups, err := s.LoadGroups()
+	if err != nil {
+		t.Fatalf("LoadGroups: %v", err)
+	}
+	if len(groups) != 1 || groups[0].Name != "Root" {
+		t.Fatalf("g1 mutated after rejected unknown group: %+v", groups[0])
+	}
+}
+
+func TestApplyGroups_EmptySlice(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.ApplyGroups(nil); err != nil {
+		t.Fatalf("nil slice: %v", err)
+	}
+	if err := s.ApplyGroups([]ProfileGroup{}); err != nil {
+		t.Fatalf("empty slice: %v", err)
+	}
+}

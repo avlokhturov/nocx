@@ -256,6 +256,10 @@ func (s *JSONStore) CreateGroup(g ProfileGroup) error {
 		}
 	}
 	d.Groups = append(d.Groups, g)
+	// Validate the group tree with the new group included.
+	if err := ValidateGroupTree(d.Groups); err != nil {
+		return err
+	}
 	return s.writeLocked(d)
 }
 
@@ -281,6 +285,10 @@ func (s *JSONStore) UpdateGroup(g ProfileGroup) error {
 	for i, existing := range d.Groups {
 		if existing.ID == g.ID {
 			d.Groups[i] = g
+			// Validate the updated group tree.
+			if err := ValidateGroupTree(d.Groups); err != nil {
+				return err
+			}
 			return s.writeLocked(d)
 		}
 	}
@@ -302,6 +310,93 @@ func (s *JSONStore) DeleteGroup(id string) error {
 		}
 	}
 	return nil
+}
+
+// DeleteGroupAtomic removes a group and promotes its children to root
+// in a single atomic write. Returns ErrGroupNotFound when the group
+// does not exist.
+func (s *JSONStore) DeleteGroupAtomic(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	d, err := s.load()
+	if err != nil {
+		return err
+	}
+
+	found := false
+	for i, existing := range d.Groups {
+		if existing.ID == id {
+			d.Groups = append(d.Groups[:i], d.Groups[i+1:]...)
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("%s: %w", id, ErrGroupNotFound)
+	}
+
+	// Promote children to root.
+	for i := range d.Groups {
+		if d.Groups[i].ParentGroupID == id {
+			d.Groups[i].ParentGroupID = ""
+		}
+	}
+
+	// Validate the mutated tree before writing.
+	if err := ValidateGroupTree(d.Groups); err != nil {
+		return err
+	}
+
+	return s.writeLocked(d)
+}
+
+// ApplyGroups applies one or more group updates atomically: loads the full
+// document, applies every change in memory under a single lock, validates the
+// group tree, and writes once. Returns ErrGroupNotFound when any group ID in
+// the slice does not exist in the current store.
+func (s *JSONStore) ApplyGroups(groups []ProfileGroup) error {
+	if len(groups) == 0 {
+		return nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	d, err := s.load()
+	if err != nil {
+		return err
+	}
+
+	// Validate and apply each change. All validation runs under the same lock
+	// so the state seen during validation is exactly the state that gets written.
+	byID := make(map[string]int, len(d.Groups))
+	for i, g := range d.Groups {
+		byID[g.ID] = i
+	}
+
+	for _, g := range groups {
+		if g.ID == "" {
+			return ErrGroupIDRequired
+		}
+		if g.Defaults != nil {
+			if err := g.Defaults.Validate(); err != nil {
+				return fmt.Errorf("%s: %w", g.ID, err)
+			}
+		}
+		idx, ok := byID[g.ID]
+		if !ok {
+			return fmt.Errorf("%s: %w", g.ID, ErrGroupNotFound)
+		}
+		d.Groups[idx] = g
+	}
+
+	// Validate the mutated tree before writing.
+	if err := ValidateGroupTree(d.Groups); err != nil {
+		return err
+	}
+
+	return s.writeLocked(d)
 }
 
 // ---------------------------------------------------------------------------

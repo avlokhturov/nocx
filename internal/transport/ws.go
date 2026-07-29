@@ -581,6 +581,10 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.handleProfileMethod(wconn, req)
 	case "profiles.importTabby":
 		s.handleImportTabby(wconn, req)
+	case "groups.impact":
+		s.handleGroupImpact(wconn, req)
+	case "groups.apply":
+		s.handleGroupApply(wconn, req)
 	case "groups.list", "groups.create", "groups.update", "groups.delete":
 		s.handleGroupMethod(wconn, req)
 	case "credentials.list", "credentials.create", "credentials.update", "credentials.delete":
@@ -1142,6 +1146,34 @@ func (s *WSServer) handleGroupMethod(wconn *wsConn, req jsonrpcRequest) {
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "id required"))
 			return
 		}
+		// Guard: ParentGroupID and Defaults cannot be changed through generic
+		// CRUD — the renderer MUST use groups.impact + groups.apply.
+		allGroups, loadErr := s.groups.LoadGroups()
+		if loadErr != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, loadErr.Error()))
+			return
+		}
+		var stored *profile.ProfileGroup
+		for i := range allGroups {
+			if allGroups[i].ID == g.ID {
+				stored = &allGroups[i]
+				break
+			}
+		}
+		if stored == nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "group not found"))
+			return
+		}
+		if g.ParentGroupID != stored.ParentGroupID {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602,
+				"ParentGroupId can only be changed through groups.apply, not groups.update"))
+			return
+		}
+		if defaultsChanged(stored.Defaults, g.Defaults) {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602,
+				"Defaults can only be changed through groups.apply, not groups.update"))
+			return
+		}
 		if err := s.groups.UpdateGroup(g); err != nil {
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, profileMethodErrorCode(err), err.Error()))
 			return
@@ -1155,8 +1187,19 @@ func (s *WSServer) handleGroupMethod(wconn *wsConn, req jsonrpcRequest) {
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
 			return
 		}
-		if err := s.groups.DeleteGroup(params.ID); err != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		if params.ID == "" {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "id required"))
+			return
+		}
+
+		// Use atomic delete (promotes children to root).
+		ad, ok := s.groups.(interface{ DeleteGroupAtomic(string) error })
+		if !ok {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "group store does not support atomic delete"))
+			return
+		}
+		if err := ad.DeleteGroupAtomic(params.ID); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, profileMethodErrorCode(err), err.Error()))
 			return
 		}
 		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(true)))
@@ -1343,6 +1386,23 @@ func credentialErrorCode(err error) int {
 	default:
 		return -32603
 	}
+}
+
+// defaultsChanged reports whether two ProfileDefaults blocks differ.
+// Both nil and empty defaults are treated as equivalent.
+func defaultsChanged(a, b *profile.ProfileDefaults) bool {
+	if a == nil && b == nil {
+		return false
+	}
+	if a == nil || b == nil {
+		return true
+	}
+	aJSON, errA := a.MarshalJSON()
+	bJSON, errB := b.MarshalJSON()
+	if errA != nil || errB != nil {
+		return true
+	}
+	return string(aJSON) != string(bJSON)
 }
 
 func (s *WSServer) handleCredentialMethod(wconn *wsConn, req jsonrpcRequest) {
