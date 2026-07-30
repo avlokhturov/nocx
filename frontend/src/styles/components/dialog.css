@@ -80,9 +80,11 @@ dialog.nocx-dialog::backdrop {
   margin-bottom: 0;
 }
 
-/* The palette width. Its content box is 512px + the 24px padding on each side,
-   so a panel that stopped at the default 480 is what made the list hang out
-   past the panel's own border. */
+/* The palette width — wide enough to read a host and its label on one line.
+   The number here is the ONLY declaration of it: quick-connect.css used to carry
+   a 512px content width derived from an earlier 560px panel, and when this line
+   moved to 640 the palette kept sitting at 512 with 80px of dead space beside it
+   (nocx-kudf). Content fills this box; it does not restate it. */
 .nocx-dialog__panel[data-size='lg'] {
   width: 640px;
 }
