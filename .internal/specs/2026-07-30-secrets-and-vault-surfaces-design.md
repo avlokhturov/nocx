@@ -109,6 +109,42 @@ mechanical.
 The alternative — duplicating a card per host so it can carry that host's OTP — destroys
 exactly the reuse ADR-0006 was written for, and is rejected.
 
+### 3.1 Why the owning record has to exist at all
+
+The obvious simplification is to delete it: put the secret reference straight on the
+connection, and let twelve connections carry the same reference string. It was asked, and it
+is worth writing down why it does not work, because the record is otherwise easy to mistake
+for an extra file somebody chose.
+
+Note first that the simplification is not hypothetical — it is what nocx did originally.
+ADR-0006's Context: "The initial connection manager UI stored authentication settings
+(passwords, private keys) inline within each SSH profile. This led to duplication: if a user
+had the same credentials for 10 servers, they had to enter the password 10 times."
+
+Three things stop it here, and the first is decisive:
+
+1. **The renderer may not name a secret.** ADR-0011 §2 makes references backend-owned; they
+   are stripped from every list response (`ws.go:1354-1363`) and rejected on every request
+   (`ws.go:1371-1375`), and nocx-jb20.1 is a P0 for the one path that leaks them. So the
+   shared thing needs an identifier the renderer is _allowed_ to hold. `sec:v1:…` is not one.
+   The record's id is.
+2. **Rotation mints a new `SecretID`** rather than overwriting material (ADR-0011). Sharing by
+   pointer therefore turns a rotation into an N-place write across a store with **no
+   multi-document transaction** — a failure partway leaves some connections on the new secret
+   and some on the old, silently. With a record it is one field on one document.
+3. **A key and its passphrase have to be known to belong together**, and the vault cannot say
+   so: it stores values one at a time and, on the OS keychain, cannot even enumerate them.
+
+What follows from this is not that the record is a user-facing concept. It is the opposite:
+the record is the **stable, nameable address of a shared secret**, and the user should meet it
+only as the row in Secrets that its material produces (§7). Today it is met as a settings
+section called "Credentials" that the user never knowingly populated, which is the defect
+§1.3 measures.
+
+The inline path is not deleted either. `profile.go:65-72` already lets a connection carry its
+own `user` / `auth` / `keyPath` when it names no record — right for a one-off host, wrong for
+a fleet. Both stay.
+
 ---
 
 ## 4. The vault keeps a registry, because the providers cannot
