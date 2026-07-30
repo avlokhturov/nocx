@@ -81,6 +81,20 @@ func newVaultError(id json.RawMessage, code int, msg string, err error) jsonrpcR
 	}
 }
 
+// rpcErrorFor renders err as a JSON-RPC error, preserving the vault reason
+// code when err wraps one.
+//
+// Every handler that can reach the SecretStore must use this rather than
+// newJSONRPCError. The renderer tells "the vault needs setting up" apart from
+// a genuine failure by reading data.reason; a bare -32603 with a prose message
+// is indistinguishable from a disk error, so the setup dialog never opens and
+// the user is shown a toast instead. That was the whole of nocx-25k9.7: the
+// vault handlers attached the reason and the older credentials.* handlers,
+// which are the ones the connection form actually calls, did not.
+func rpcErrorFor(id json.RawMessage, fallback int, msgPrefix string, err error) jsonrpcResponse {
+	return newVaultError(id, vaultErrorCode(err, fallback), msgPrefix+err.Error(), err)
+}
+
 // handleVaultMethod dispatches vault.* RPCs. Returns -32601 when the vault
 // lifecycle is not wired.
 func (s *WSServer) handleVaultMethod(wconn *wsConn, req jsonrpcRequest) {

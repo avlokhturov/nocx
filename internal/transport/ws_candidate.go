@@ -101,7 +101,7 @@ func (s *WSServer) handleStagePassword(wconn *wsConn, req jsonrpcRequest) {
 		return
 	}
 	if err := s.stageCandidateForCredential(params.CredentialID, params.Password); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "", err))
 		return
 	}
 	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(true)))
@@ -121,7 +121,7 @@ func (s *WSServer) handleDiscardCandidate(wconn *wsConn, req jsonrpcRequest) {
 		return
 	}
 	if err := s.discardCandidateForCredential(params.CredentialID); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "", err))
 		return
 	}
 	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(true)))

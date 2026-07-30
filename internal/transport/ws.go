@@ -731,7 +731,9 @@ func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connSta
 			host, remote, err = s.resolver.Resolve(params.ProfileID)
 			if err != nil {
 				s.log.Error("profile resolve failed", "profileId", params.ProfileID, "error", err)
-				resp := newJSONRPCError(req.ID, -32603, err.Error())
+				// Resolving reads the stored password, so a sealed vault surfaces
+				// here — the renderer needs the reason to offer an unlock.
+				resp := rpcErrorFor(req.ID, -32603, "", err)
 				_ = wconn.writeJSON(resp)
 				return
 			}
@@ -1429,7 +1431,7 @@ func (s *WSServer) handleCredentialCRUDMethod(wconn *wsConn, req jsonrpcRequest)
 			return
 		}
 		if err := s.deleteCredentialCascade(params.ID); err != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+			_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "", err))
 			return
 		}
 		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(true)))
@@ -1565,7 +1567,7 @@ func (s *WSServer) handleCredentialMethod(wconn *wsConn, req jsonrpcRequest) {
 			return
 		}
 		if err := s.savePasswordForCredential(params.CredentialID, params.Password); err != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+			_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "", err))
 			return
 		}
 		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(true)))
@@ -1578,7 +1580,7 @@ func (s *WSServer) handleCredentialMethod(wconn *wsConn, req jsonrpcRequest) {
 			return
 		}
 		if err := s.deletePasswordForCredential(params.CredentialID); err != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+			_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "", err))
 			return
 		}
 		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(true)))
@@ -1592,7 +1594,7 @@ func (s *WSServer) handleCredentialMethod(wconn *wsConn, req jsonrpcRequest) {
 		}
 		has, err := s.hasPasswordForCredential(params.CredentialID)
 		if err != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+			_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "", err))
 			return
 		}
 		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(has)))
@@ -1606,7 +1608,7 @@ func (s *WSServer) handleCredentialMethod(wconn *wsConn, req jsonrpcRequest) {
 			return
 		}
 		if err := s.savePassphraseForCredential(params.CredentialID, params.Passphrase); err != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+			_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "", err))
 			return
 		}
 		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(true)))
@@ -1619,7 +1621,7 @@ func (s *WSServer) handleCredentialMethod(wconn *wsConn, req jsonrpcRequest) {
 			return
 		}
 		if err := s.deletePassphraseForCredential(params.CredentialID); err != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+			_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "", err))
 			return
 		}
 		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(true)))
@@ -2126,7 +2128,7 @@ func (s *WSServer) handleSettingsSecretSet(wconn *wsConn, req jsonrpcRequest) {
 		return
 	}
 	if err := s.settings.SecretSet(sk, p.Value); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "settings.secretSet: "+err.Error()))
+		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "settings.secretSet: ", err))
 		return
 	}
 	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(map[string]bool{"ok": true})))
@@ -2156,7 +2158,7 @@ func (s *WSServer) handleSettingsSecretDelete(wconn *wsConn, req jsonrpcRequest)
 		return
 	}
 	if err := s.settings.SecretDelete(sk); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "settings.secretDelete: "+err.Error()))
+		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "settings.secretDelete: ", err))
 		return
 	}
 	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(map[string]bool{"ok": true})))
