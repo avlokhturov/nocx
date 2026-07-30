@@ -75,19 +75,40 @@ func WithKeyring(kr Keyring) Option {
 	return func(p *Provider) { p.keyring = kr }
 }
 
+// ReasonProbe observes the platform's secret store directly and reports why it
+// is unusable. It is consulted only when a keyring error names no cause — see
+// classifyReason — and returns the empty Reason when it has no opinion.
+//
+// The observation matters because go-keyring's own failure text does not always
+// name the cause. A locked collection surfaces as "failed to unlock correct
+// collection '…'", which says nothing a string match can use, and guessing from
+// it told users to install a keyring they were already running (nocx-25k9.6).
+type ReasonProbe func() vault.Reason
+
+// WithReasonProbe replaces the platform observation used to explain a keyring
+// error that names no cause. Pass a fixed answer in tests: arranging a real
+// locked Secret Service is unreliable — a daemon started with --login holds the
+// password and re-unlocks itself on the next access — so this seam is how the
+// locked case is asserted at all.
+func WithReasonProbe(rp ReasonProbe) Option {
+	return func(p *Provider) { p.reasonProbe = rp }
+}
+
 // Provider implements vault.WritableProvider backed by the OS keychain via
 // the Keyring interface.
 type Provider struct {
-	keyring Keyring
-	timeout time.Duration
+	keyring     Keyring
+	timeout     time.Duration
+	reasonProbe ReasonProbe
 }
 
 // New creates a system provider with the given options. The default keyring
 // wraps zalando/go-keyring.
 func New(opts ...Option) *Provider {
 	p := &Provider{
-		keyring: keyringAdapter{},
-		timeout: defaultTimeout,
+		keyring:     keyringAdapter{},
+		timeout:     defaultTimeout,
+		reasonProbe: platformReason,
 	}
 	for _, o := range opts {
 		o(p)
@@ -218,7 +239,7 @@ func (p *Provider) runKeyringOp(ctx context.Context, fn func() error) error {
 		}
 	case err := <-ch:
 		if err != nil {
-			return classifyAndWrap(err)
+			return p.classifyAndWrap(err)
 		}
 		return nil
 	}
@@ -244,7 +265,7 @@ func (p *Provider) runKeyringGetOp(ctx context.Context, fn func() (string, error
 		}
 	case r := <-ch:
 		if r.err != nil {
-			return "", classifyAndWrap(r.err)
+			return "", p.classifyAndWrap(r.err)
 		}
 		return r.val, nil
 	}
@@ -265,21 +286,30 @@ func (p *Provider) withTimeout(ctx context.Context) (context.Context, context.Ca
 // classifyAndWrap wraps a keyring error in ProviderError with the appropriate
 // reason. keyring.ErrNotFound passes through unwrapped so the caller can
 // detect it with errors.Is.
-func classifyAndWrap(err error) error {
+func (p *Provider) classifyAndWrap(err error) error {
 	if errors.Is(err, keyring.ErrNotFound) {
 		return err
 	}
 	return &vault.ProviderError{
 		Provider: vault.ProviderSystem,
-		Reason:   classifyReason(err),
+		Reason:   p.classifyReason(err),
 		Err:      err,
 	}
 }
 
-// classifyReason maps a keyring error to a Reason. The matching is heuristic
-// because go-keyring wraps platform-specific errors from three different
-// backends.
-func classifyReason(err error) vault.Reason {
+// classifyReason maps a keyring error to a Reason, in two steps. First the
+// error text, which is believed when it names a cause; the matching is
+// heuristic because go-keyring wraps platform-specific errors from three
+// different backends.
+//
+// When the text names nothing, the reason is observed rather than guessed. The
+// old default — "no-service" — is a claim about the machine, and it was wrong
+// for the case that matters most: a running daemon whose collection is locked
+// fails with "failed to unlock correct collection '…'", which contains no word
+// this function matches. Users of a perfectly good keyring were told to install
+// one and invent a master passphrase (nocx-25k9.6). "no-service" survives only
+// as the answer when nothing can observe the store at all.
+func (p *Provider) classifyReason(err error) vault.Reason {
 	if err == nil {
 		return ""
 	}
@@ -289,7 +319,11 @@ func classifyReason(err error) vault.Reason {
 		return vault.ReasonLocked
 	case strings.Contains(s, "denied") || strings.Contains(s, "access"):
 		return vault.ReasonDenied
-	default:
-		return vault.ReasonNoService
 	}
+	if p.reasonProbe != nil {
+		if r := p.reasonProbe(); r != "" {
+			return r
+		}
+	}
+	return vault.ReasonNoService
 }

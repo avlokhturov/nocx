@@ -69,6 +69,93 @@ func (lockedKeyring) Delete(service, user string) error {
 	return errors.New("secret service: collection is locked")
 }
 
+// goKeyringLockedMessage is the error zalando/go-keyring actually returns when
+// the Secret Service collection it writes to is locked and the daemon cannot
+// self-unlock (secret_service.Unlock, v0.2.8). Note what the text does not
+// contain: the word "locked". That is why classifyReason's string matching fell
+// through to its default and reported a running-but-locked keyring as
+// "no-service" (nocx-25k9.6).
+const goKeyringLockedMessage = `failed to unlock correct collection '/org/freedesktop/secrets/aliases/default'`
+
+// TestProbe_UnhelpfulErrorAsksThePlatform pins the defect and its fix: when the
+// keyring error names no cause, the reason must come from observing the secret
+// store, not from guessing "no service". Each case is a real machine state.
+func TestProbe_UnhelpfulErrorAsksThePlatform(t *testing.T) {
+	tests := []struct {
+		name    string
+		observe vault.Reason
+		want    vault.Reason
+	}{
+		{
+			// The bug: a daemon owns org.freedesktop.secrets and its
+			// collection is locked. Telling the user to install a keyring
+			// they are already running is the misdiagnosis the reason codes
+			// exist to prevent.
+			name:    "locked collection is reported as locked",
+			observe: vault.ReasonLocked,
+			want:    vault.ReasonLocked,
+		},
+		{
+			name:    "present but uninterrogable is reported as denied",
+			observe: vault.ReasonDenied,
+			want:    vault.ReasonDenied,
+		},
+		{
+			// A genuinely absent service must still read as absent.
+			name:    "no service is still reported as no-service",
+			observe: vault.ReasonNoService,
+			want:    vault.ReasonNoService,
+		},
+		{
+			// Off Linux there is nothing to interrogate; the probe abstains
+			// and the historical default stands.
+			name:    "an abstaining probe leaves the default in place",
+			observe: "",
+			want:    vault.ReasonNoService,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := system.New(
+				system.WithKeyring(failingKeyring{err: errors.New(goKeyringLockedMessage)}),
+				system.WithReasonProbe(func() vault.Reason { return tt.observe }),
+			)
+			status := p.Probe(context.Background())
+			if status.Ready {
+				t.Fatal("Probe with a failing keyring: Ready=true, want false")
+			}
+			if status.Reason != tt.want {
+				t.Fatalf("Probe Reason = %q, want %q", status.Reason, tt.want)
+			}
+		})
+	}
+}
+
+// TestProbe_ErrorTextBeatsTheProbeWhenItNamesTheCause verifies the platform
+// probe is a fallback, not an override: an error that says what went wrong is
+// believed, so a macOS/Windows backend keeps working unchanged.
+func TestProbe_ErrorTextBeatsTheProbeWhenItNamesTheCause(t *testing.T) {
+	p := system.New(
+		system.WithKeyring(lockedKeyring{}),
+		// An observation that disagrees. The error text is specific; take it.
+		system.WithReasonProbe(func() vault.Reason { return vault.ReasonNoService }),
+	)
+	status := p.Probe(context.Background())
+	if status.Reason != vault.ReasonLocked {
+		t.Fatalf("Probe Reason = %q, want %q", status.Reason, vault.ReasonLocked)
+	}
+}
+
+// failingKeyring is a Keyring whose every operation fails with err.
+type failingKeyring struct{ err error }
+
+func (k failingKeyring) Set(service, user, password string) error { return k.err }
+
+func (k failingKeyring) Get(service, user string) (string, error) { return "", k.err }
+
+func (k failingKeyring) Delete(service, user string) error { return k.err }
+
 // TestTimeoutWriteStillLands verifies that a Put that times out still
 // completes in the background, and that the value is readable afterwards.
 //

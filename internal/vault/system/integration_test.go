@@ -54,7 +54,7 @@ func (cp *cleanupProvider) Put(ctx context.Context, id credential.SecretID, s cr
 // Secret Service daemon. It skips when no such daemon is on the session bus.
 func TestRealKeyringRoundTrip(t *testing.T) {
 	if !system.SecretServiceAvailable() {
-		t.Skip("no Secret Service on the session bus — run under dbus-run-session with gnome-keyring")
+		t.Skip("no usable Secret Service on the session bus (absent, or its collection is locked) — run under dbus-run-session with an unlocked gnome-keyring")
 	}
 	vaulttest.RunProviderContract(t, "real-keyring", func(t *testing.T) vault.WritableProvider {
 		return newCleanupProvider(t)
@@ -67,7 +67,7 @@ func TestRealKeyringRoundTrip(t *testing.T) {
 // without leaking entries into the real keychain.
 func TestRealKeyringProbeAndCleanup(t *testing.T) {
 	if !system.SecretServiceAvailable() {
-		t.Skip("no Secret Service on the session bus — run under dbus-run-session with gnome-keyring")
+		t.Skip("no usable Secret Service on the session bus (absent, or its collection is locked) — run under dbus-run-session with an unlocked gnome-keyring")
 	}
 
 	ctx := context.Background()
