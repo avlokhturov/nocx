@@ -997,7 +997,7 @@ export interface VaultSectionProps {
 }
 
 export function VaultSection(props: VaultSectionProps) {
-  const [dialog, setDialog] = createSignal<'passphrase' | 'recovery' | null>(null)
+  const [dialog, setDialog] = createSignal<'setup' | 'passphrase' | 'recovery' | null>(null)
   const [sealing, setSealing] = createSignal(false)
 
   const handleSeal = async () => {
@@ -1117,16 +1117,41 @@ export function VaultSection(props: VaultSectionProps) {
         </Show>
       </PageSection>
       <PageSection title="Actions" divided>
+        <Show when={status() && status()!.state !== 'unsealed'}>
+          <Field
+            for={status()?.state === 'sealed' ? 'vault-action-unlock' : 'vault-action-setup'}
+            label={status()?.state === 'sealed' ? 'Unlock' : 'Set up protection'}
+            orientation="horizontal"
+          >
+            <Button
+              variant="primary"
+              onClick={() => {
+                const s = status()
+                if (s?.state === 'sealed') {
+                  props.vaultController.openUnlock()
+                } else {
+                  setDialog('setup')
+                }
+              }}
+            >
+              {status()?.state === 'sealed' ? 'Unlock' : 'Set up protection'}
+            </Button>
+          </Field>
+        </Show>
         <Field
           for="vault-action-seal"
           label="Seal now"
           orientation="horizontal"
           description={
-            status() && status()!.state !== 'unsealed' ? 'Already sealed or not set up.' : undefined
+            status() && status()!.state !== 'unsealed'
+              ? status()!.state === 'sealed'
+                ? 'Vault is sealed.'
+                : 'Vault has not been set up.'
+              : undefined
           }
         >
           <Button
-            variant="default"
+            variant={status()?.state === 'unsealed' ? 'primary' : 'default'}
             disabled={sealing() || status()?.state !== 'unsealed'}
             onClick={() => {
               void handleSeal()
@@ -1198,6 +1223,15 @@ export function VaultSection(props: VaultSectionProps) {
       <RecoveryCodeDialog
         open={dialog() === 'recovery'}
         onClose={() => setDialog(null)}
+        vaultClient={props.vaultClient}
+      />
+      <SetupDialog
+        open={dialog() === 'setup'}
+        onClose={() => setDialog(null)}
+        onSetupComplete={() => {
+          void props.vaultController.refresh()
+          props.vaultController.onSetupDone()
+        }}
         vaultClient={props.vaultClient}
       />
     </div>

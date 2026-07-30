@@ -69,6 +69,31 @@
   width: 100%;
 }
 
+/* ── Status indicator ────────────────────────────────────────────────── */
+
+/* A small dot before the label that uses the same sizing pattern as
+   .cm-session-dot in connections.css. The dot is purely visual; the
+   accessible name lives in a .ui-visually-hidden span inside the button. */
+.ui-tabs__status {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+
+.ui-tabs__status[data-tone='ok'] {
+  background: var(--color-success);
+}
+
+.ui-tabs__status[data-tone='warning'] {
+  background: var(--color-warning);
+}
+
+.ui-tabs__status[data-tone='error'] {
+  background: var(--color-danger);
+}
+
 /* ── The panel ────────────────────────────────────────────────────────── */
 
 /* One cell, every section in it. The cell takes the size of the largest, so the

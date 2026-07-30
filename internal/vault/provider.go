@@ -27,11 +27,16 @@ type WritableProvider interface {
 	Delete(ctx context.Context, id credential.SecretID) error
 }
 
-// Reason is a machine-readable discriminator. Two Status values plus a reason
-// beat a longer enum of states nothing in CI can exercise (spec §4.4): the UI
-// needs to distinguish "start a Secret Service" from "unlock the login
-// keychain" from "this build has no such provider", and those are reasons, not
+// Reason is a machine-readable discriminator that a Provider.Status()
+// returns when Ready is false. Two states plus a reason beat a longer
+// enum of states nothing in CI can exercise (spec §4.4): the UI needs to
+// distinguish "start a Secret Service" from "unlock the login keychain"
+// from "this build has no such provider", and those are reasons, not
 // states.
+//
+// ReasonUnknownProvider is intentionally absent from this type — it is a
+// reference routing error, not a health status any registered provider
+// can report.
 type Reason string
 
 const (
@@ -40,7 +45,6 @@ const (
 	ReasonDenied              Reason = "denied"
 	ReasonTimeout             Reason = "timeout"
 	ReasonUnsupportedPlatform Reason = "unsupported-platform"
-	ReasonUnknownProvider     Reason = "unknown-provider"
 )
 
 // Status is what a provider reports about itself.

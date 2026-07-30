@@ -232,17 +232,58 @@ configuration and lives here.
 
 ### Secrets (today's "Credentials")
 
-The contents of the vault. Renamed because the material is no longer only logins: a private
-key and an OTP seed are not credentials.
+The contents of the vault, **one row per stored value**. Not a list of logins, and not a list
+of bundles. Renamed because the material is no longer only logins: a private key and an OTP
+seed are not credentials.
 
 - **Sealed:** a locked state and one action. Nothing else.
-- **Unsealed:** cards, each showing what it holds — kind of material, which store, when
-  written, whether that store is answering, and how many connections use it.
-- A **permanent** one-line explanation, not an empty state: _"A card is a login you save once
-  and reuse across connections. Change the password once and every connection that uses it
-  follows."_
-- When a password typed into a connection creates a card, **say so at that moment**. The
-  silent creation at `connections.tsx:1103-1105` is where the unexplained noun comes from.
+- **Unsealed:** a row per secret — what it is, which store holds it, whether that store is
+  answering, and what uses it.
+
+```
+🔑  SSH password for deploy · 12 connections     system keychain
+🔑  SSH password for shady@vm-dsm01:22           system keychain
+🗝   Private key id_ed25519                       encrypted nocx storage
+🔑   Passphrase for key SHA256:bdc73f37…          system keychain
+```
+
+**The label is derived, never invented.** Tabby does this and it is why its vault page reads
+(`tabby-core/src/services/vault.service.ts:27-31`,
+`tabby-settings/src/components/vaultSettingsTab.component.ts:87-99`): a secret there is
+`{type, key, value}` where `key` carries the meaning — `{user, host, port}` for
+`ssh:password`, `{hash}` for `ssh:key-passphrase` — and the label is a format string over it.
+
+**We cannot copy that, and the reason is the identity model.** Tabby's secret is
+content-addressed: its identity _is_ its meaning. That buys a free label and costs sharing —
+a password for host A and host B are two entries by construction, and `keyMatches` overwrites
+on save. Ours is a minted opaque `sec:v1:<provider>:<32 hex>` with no meaning in it
+deliberately (vault design §4.1), which buys sharing and fresh-id rotation and costs the free
+label.
+
+So the label comes from **the owner of the reference**, which knows the meaning, while the
+vault stays mute about it. Where a secret is shared the label says so — "12 connections" —
+instead of naming one host, which is the case Tabby's model cannot express at all. And where
+Tabby falls back to `Unknown secret of type {type} for {key}` printing raw JSON, we have
+`kind` as an explicit registry field, so a new kind does not degrade into "unknown".
+
+**The credential record does not appear on this page, or anywhere else the user looks.** It
+survives as plumbing for the three reasons §3 gives — the renderer may not name a secret, so
+the shared thing needs an id the renderer may hold; rotation mints a new `SecretID`, so
+sharing by pointer would be an N-place write in a store with no multi-document transaction;
+and something must say that a key and its passphrase belong together. What it stops being is
+a **noun the user has to understand**. Today it is a surrogate: created silently at
+`connections.tsx:1103-1105` because there is nowhere else to put a secret reference, then
+displayed as a section called "Credentials" that the user never knowingly populated.
+
+**Say it when it happens.** When typing a password into a connection creates a stored secret,
+the surface says what was stored and where — at that moment, not in a settings page the user
+may never open.
+
+**Adding material is an action, not a mode.** `SegmentedControl` means _one of these_ — right
+for how a key is supplied (path / choose a file / paste) and for a connection's auth method,
+wrong for what a secret set contains, which is additive. Add opens a Dialog; the kind is
+chosen inside it, where the choice really is exclusive. No new kit component is needed:
+`Dialog`, `SegmentedControl` and `FileInput` all exist.
 
 ### Vault
 

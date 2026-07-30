@@ -1127,4 +1127,110 @@ describe('VaultSection', () => {
     ) as HTMLSelectElement
     expect(updatedSelect.value).toBe('30')
   })
+
+  it('renders Set up protection button, enabled, for uninitialized vault', async () => {
+    await renderVaultSection(UNINIT_STATUS)
+    const setupBtn = screen.getByRole('button', { name: 'Set up protection' })
+    expect(setupBtn).toBeTruthy()
+    expect(setupBtn.getAttribute('disabled')).toBeNull()
+    expect(setupBtn.getAttribute('data-variant')).toBe('primary')
+    // Seal now is NOT primary when uninitialized
+    const sealBtn = screen.getAllByText('Seal now').find((el) => el.tagName === 'BUTTON')
+    expect(sealBtn!.getAttribute('data-variant')).toBe('default')
+  })
+  it('renders Unlock button, enabled, for sealed vault', async () => {
+    await renderVaultSection(SEALED_STATUS)
+    const unlockBtn = screen.getByRole('button', { name: 'Unlock' })
+    expect(unlockBtn).toBeTruthy()
+    expect(unlockBtn.getAttribute('disabled')).toBeNull()
+    expect(unlockBtn.getAttribute('data-variant')).toBe('primary')
+    // Seal now is NOT primary when sealed
+    const sealBtn = screen.getAllByText('Seal now').find((el) => el.tagName === 'BUTTON')
+    expect(sealBtn!.getAttribute('data-variant')).toBe('default')
+  })
+
+  it('clicking Set up protection opens SetupDialog for uninitialized vault', async () => {
+    const { client } = mockClient()
+    ;(client.status as ReturnType<typeof vi.fn>).mockResolvedValue(UNINIT_STATUS)
+    const ctrl = createVaultState(client)
+    await ctrl.refresh()
+    render(() => <VaultSection vaultClient={client} vaultController={ctrl} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Set up protection' }))
+    expect(screen.getByText('Set Up Vault')).toBeTruthy()
+  })
+
+  it('clicking Unlock calls vaultController.openUnlock for sealed vault', async () => {
+    const { client } = mockClient()
+    ;(client.status as ReturnType<typeof vi.fn>).mockResolvedValue(SEALED_STATUS)
+    const ctrl = createVaultState(client)
+    const openUnlockSpy = vi.spyOn(ctrl, 'openUnlock')
+    await ctrl.refresh()
+    render(() => <VaultSection vaultClient={client} vaultController={ctrl} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Unlock' }))
+    await vi.waitFor(() => {
+      expect(openUnlockSpy).toHaveBeenCalled()
+    })
+  })
+
+  it('Seal now button shows state-specific disabled reason for uninitialized', async () => {
+    await renderVaultSection(UNINIT_STATUS)
+    const sealBtn = screen.getAllByText('Seal now').find((el) => el.tagName === 'BUTTON')
+    expect(sealBtn!.getAttribute('disabled')).not.toBeNull()
+    expect(screen.getAllByText('Vault has not been set up.').length).toBeGreaterThan(0)
+  })
+
+  it('Seal now button shows state-specific disabled reason for sealed', async () => {
+    await renderVaultSection(SEALED_STATUS)
+    const sealBtn = screen.getAllByText('Seal now').find((el) => el.tagName === 'BUTTON')
+    expect(sealBtn!.getAttribute('disabled')).not.toBeNull()
+    expect(screen.getAllByText('Vault is sealed.').length).toBeGreaterThan(0)
+  })
+
+  it('page reflects new state after setup completes', async () => {
+    const { client, setup } = mockClient()
+    setup.mockResolvedValue({ recoveryCode: 'test-recovery' })
+    ;(client.status as ReturnType<typeof vi.fn>).mockResolvedValue(UNINIT_STATUS)
+    const ctrl = createVaultState(client)
+    await ctrl.refresh()
+    render(() => <VaultSection vaultClient={client} vaultController={ctrl} />)
+
+    // Click Set up protection to open dialog
+    fireEvent.click(screen.getByRole('button', { name: 'Set up protection' }))
+    expect(screen.getByText('Set Up Vault')).toBeTruthy()
+
+    // Fill in passphrase
+    const passInput = screen.getByLabelText('Master passphrase')
+    fireEvent.input(passInput, { target: { value: 'my-passphrase' } })
+    const confirmInput = screen.getByLabelText('Confirm passphrase')
+    fireEvent.input(confirmInput, { target: { value: 'my-passphrase' } })
+
+    // Click Set Up button inside dialog
+    const setupBtn = screen.getAllByText('Set Up').find((el) => el.tagName === 'BUTTON')
+    fireEvent.click(setupBtn!)
+
+    await vi.waitFor(() => {
+      expect(setup).toHaveBeenCalledWith({ passphrase: 'my-passphrase' })
+    })
+
+    // Recovery code shown — now mock refresh to return sealed status
+    ;(client.status as ReturnType<typeof vi.fn>).mockResolvedValue(SEALED_STATUS)
+    // Click Done
+    const doneBtn = screen.getAllByText('Done').find((el) => el.tagName === 'BUTTON')
+    fireEvent.click(doneBtn!)
+
+    // After Done: onSetupComplete fires refresh + onSetupDone, then onClose resets dialog
+    await vi.waitFor(() => {
+      // The page should now show Unlock (from refreshed sealed status)
+      expect(screen.getByRole('button', { name: 'Unlock' })).toBeTruthy()
+    })
+  })
+
+  it('Seal now button variant is primary when unsealed', async () => {
+    await renderVaultSection(UNSEALED_STATUS)
+    const sealBtn = screen.getAllByText('Seal now').find((el) => el.tagName === 'BUTTON')
+    expect(sealBtn).toBeTruthy()
+    expect(sealBtn!.getAttribute('data-variant')).toBe('primary')
+  })
 })

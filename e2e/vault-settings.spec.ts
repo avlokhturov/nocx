@@ -77,7 +77,9 @@ async function openVaultSettings(page: Page): Promise<void> {
   const mod = process.platform === 'darwin' ? 'Meta' : 'Control'
   await page.keyboard.press(`${mod}+,`)
   // Wait for the Settings search field to appear.
-  await expect(page.getByRole('searchbox', { name: 'Search settings' })).toBeVisible({ timeout: 5000 })
+  await expect(page.getByRole('searchbox', { name: 'Search settings' })).toBeVisible({
+    timeout: 5000,
+  })
   // Click "Vault" in the left rail using data-section attribute.
   await page.locator('.ui-settings-section-nav-item[data-section="Vault"]').click()
   // Wait for the vault status section heading.
@@ -99,10 +101,7 @@ async function setupVaultAndSavePassword(
   await expect(page.locator('.cm-root')).toBeVisible({ timeout: 5000 })
 
   // Click "+ New connection".
-  await page
-    .locator('[role="toolbar"]')
-    .getByRole('button', { name: '+ New connection' })
-    .click()
+  await page.locator('[role="toolbar"]').getByRole('button', { name: '+ New connection' }).click()
   await expect(page.getByRole('dialog').filter({ hasText: 'New Connection' })).toBeVisible({
     timeout: 5000,
   })
@@ -168,9 +167,9 @@ async function setupVaultAndSavePassword(
   await page.getByRole('dialog').getByRole('button', { name: 'Done', exact: true }).click()
 
   // Verify profile was saved.
-  await expect(
-    page.locator('.ui-collection-row').filter({ hasText: profileName }),
-  ).toBeVisible({ timeout: 10_000 })
+  await expect(page.locator('.ui-collection-row').filter({ hasText: profileName })).toBeVisible({
+    timeout: 10_000,
+  })
 
   return code ?? ''
 }
@@ -203,7 +202,11 @@ test.describe('Vault settings — change passphrase', () => {
 
     // Phase 1: Set up vault + save password.
     await openVaultSettings(page)
-    const recoveryCode = await setupVaultAndSavePassword(page, 'original-passphrase', 'change-pass-test')
+    const recoveryCode = await setupVaultAndSavePassword(
+      page,
+      'original-passphrase',
+      'change-pass-test',
+    )
     expect(recoveryCode.length).toBeGreaterThan(0)
 
     // Phase 2: Navigate to Vault section and change passphrase.
@@ -221,7 +224,9 @@ test.describe('Vault settings — change passphrase', () => {
       .click()
 
     // Wait for dialog to close (success).
-    await expect(page.getByRole('dialog').filter({ hasText: 'Change vault passphrase' })).not.toBeVisible({
+    await expect(
+      page.getByRole('dialog').filter({ hasText: 'Change vault passphrase' }),
+    ).not.toBeVisible({
       timeout: 10_000,
     })
     // Capture tab count before restart.
@@ -257,15 +262,9 @@ test.describe('Vault settings — change passphrase', () => {
     })
 
     // Unseal with the NEW passphrase.
-    await page
-      .getByRole('dialog')
-      .getByRole('button', { name: 'Passphrase', exact: true })
-      .click()
+    await page.getByRole('dialog').getByRole('button', { name: 'Passphrase', exact: true }).click()
     await page.locator('#vault-unlock-passphrase').fill('new-passphrase-789')
-    await page
-      .getByRole('dialog')
-      .getByRole('button', { name: 'Unlock', exact: true })
-      .click()
+    await page.getByRole('dialog').getByRole('button', { name: 'Unlock', exact: true }).click()
 
     // Dialog closes — vault unsealed.
     await expect(page.getByRole('dialog').filter({ hasText: 'Unlock Vault' })).not.toBeVisible({
@@ -322,9 +321,11 @@ test.describe('Vault settings — reissue recovery code', () => {
       .click()
 
     // Read the new recovery code.
-    await expect(page.getByRole('dialog').filter({ hasText: 'Reissue recovery code' })).toBeVisible({
-      timeout: 10_000,
-    })
+    await expect(page.getByRole('dialog').filter({ hasText: 'Reissue recovery code' })).toBeVisible(
+      {
+        timeout: 10_000,
+      },
+    )
     const newCodeBlock = page.locator('.ui-code-block')
     const newCode = await newCodeBlock.textContent()
     expect(newCode).not.toBeNull()
@@ -343,7 +344,9 @@ test.describe('Vault settings — reissue recovery code', () => {
 
     // Phase 4: Connect → vault sealed → unseal with NEW recovery code.
     await page.keyboard.press('Meta+,')
-    await expect(page.getByRole('searchbox', { name: 'Search settings' })).toBeVisible({ timeout: 5000 })
+    await expect(page.getByRole('searchbox', { name: 'Search settings' })).toBeVisible({
+      timeout: 5000,
+    })
 
     await page.locator('.ui-settings-section-nav-item[data-section="Connections"]').click()
     await expect(page.locator('.cm-root')).toBeVisible({ timeout: 5000 })
@@ -364,10 +367,7 @@ test.describe('Vault settings — reissue recovery code', () => {
       .getByRole('button', { name: 'Recovery code', exact: true })
       .click()
     await page.locator('#vault-unlock-recovery').fill(newCode ?? '')
-    await page
-      .getByRole('dialog')
-      .getByRole('button', { name: 'Unlock', exact: true })
-      .click()
+    await page.getByRole('dialog').getByRole('button', { name: 'Unlock', exact: true }).click()
 
     await expect(page.getByRole('dialog').filter({ hasText: 'Unlock Vault' })).not.toBeVisible({
       timeout: 10_000,

@@ -32,14 +32,23 @@
  * component.
  */
 
-import { For, type JSX } from 'solid-js'
+import { For, Show, type JSX } from 'solid-js'
 import { Button } from './button'
+
+export interface TabItemStatus {
+  /** The visual tone of the row's status indicator. */
+  tone: 'ok' | 'warning' | 'error'
+  /** An accessible name for the status, read by assistive technology. */
+  accessibleName: string
+}
 
 export interface TabItem {
   id: string
   label: string
   /** The section's content. Called for every section, not only the current one. */
   content: () => JSX.Element
+  /** Optional status indicator shown on the row. No status = unchanged rendering. */
+  status?: TabItemStatus
 }
 
 export interface TabsProps {
@@ -110,7 +119,15 @@ export function Tabs(props: TabsProps) {
               tabIndex={props.active === item.id ? 0 : -1}
               onClick={() => props.onChange(item.id)}
             >
-              {item.label}
+              <Show when={item.status} fallback={item.label}>
+                {(status) => (
+                  <>
+                    <span class="ui-tabs__status" data-tone={status().tone} aria-hidden="true" />
+                    {item.label}
+                    <span class="ui-visually-hidden">{status().accessibleName}</span>
+                  </>
+                )}
+              </Show>
             </Button>
           )}
         </For>

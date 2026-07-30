@@ -1005,6 +1005,11 @@ func (v *Vault) Create(ctx context.Context, value credential.Secret) (credential
 	return id, nil
 }
 
+// ReasonUnknownProvider is returned when a provider ID does not match any
+// registered provider. It is a routing/configuration error, not a provider
+// health status — no Provider.Status() implementation returns it.
+const ReasonUnknownProvider = "unknown-provider"
+
 // Get resolves id to a provider and reads the secret. It never falls back to
 // the default provider — an unregistered tag returns ErrProviderUnavailable
 // with ReasonUnknownProvider (spec §6 invariant 5).

@@ -58,12 +58,19 @@ func New(docs storage.DocumentStore, name string) *Provider {
 // ID returns the provider tag for routing.
 func (p *Provider) ID() vault.ProviderID { return vault.ProviderFile }
 
-// Status reports whether the provider is unlocked and ready.
+// Status reports whether the document store is reachable. It probes the
+// store directly — a store that answers is Ready regardless of whether the
+// vault is sealed. Sealing is the Vault's concern (provider.go doc comment).
 func (p *Provider) Status(_ context.Context) vault.Status {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.dataKey == nil {
-		return vault.Status{Ready: false, Reason: vault.ReasonLocked}
+
+	// Probe the document store for reachability. A store that answers
+	// (even with "not found") is reachable.
+	var b blob
+	_, err := p.docs.Read(p.name, &b)
+	if err != nil {
+		return vault.Status{Ready: false, Reason: vault.ReasonDenied}
 	}
 	return vault.Status{Ready: true}
 }

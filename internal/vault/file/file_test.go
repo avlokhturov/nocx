@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/shady2k/nocx/internal/credential"
+	"github.com/shady2k/nocx/internal/storage"
 	"github.com/shady2k/nocx/internal/vault"
 	"github.com/shady2k/nocx/internal/vault/vaulttest"
 )
@@ -531,14 +532,23 @@ func TestWrongKeyDoesNotLeakOracle(t *testing.T) {
 // Status
 // ---------------------------------------------------------------------------
 
-func TestStatusLocked(t *testing.T) {
+// brokenDocStore wraps a DocumentStore and fails reads when err is set.
+type brokenDocStore struct {
+	storage.DocumentStore
+	err error
+}
+
+func (s *brokenDocStore) Read(name string, into any) (bool, error) {
+	return false, s.err
+}
+
+// TestStatusStoreReachable asserts that a freshly-created (never unlocked,
+// dataKey == nil) provider reports Ready when the store answers.
+func TestStatusStoreReachable(t *testing.T) {
 	p := New(newMemDocStore(), "vault.json")
 	st := p.Status(context.Background())
-	if st.Ready {
-		t.Fatal("Status reports ready on a locked provider")
-	}
-	if st.Reason != vault.ReasonLocked {
-		t.Fatalf("Status.Reason = %q, want %q", st.Reason, vault.ReasonLocked)
+	if !st.Ready {
+		t.Fatalf("Status on new provider = not ready (reason=%q), want Ready", st.Reason)
 	}
 }
 
@@ -547,5 +557,31 @@ func TestStatusUnlocked(t *testing.T) {
 	st := p.Status(context.Background())
 	if !st.Ready {
 		t.Fatalf("Status reports not ready on an unlocked provider: reason=%q", st.Reason)
+	}
+}
+
+// TestStatusSealedStoreReachable asserts that a provider whose data has been
+// wiped (Lock) but whose document store is still reachable reports Ready.
+// Sealing is the Vault's concern — the store itself answers.
+func TestStatusSealedStoreReachable(t *testing.T) {
+	p, _, _ := unlockedProvider(t)
+	p.Lock()
+	st := p.Status(context.Background())
+	if !st.Ready {
+		t.Fatalf("Status after Lock = not ready (reason=%q), want Ready", st.Reason)
+	}
+}
+
+// TestStatusStoreUnreachable asserts that a provider whose document store
+// returns errors reports not Ready with a store-relevant reason.
+func TestStatusStoreUnreachable(t *testing.T) {
+	docs := &brokenDocStore{DocumentStore: newMemDocStore(), err: errors.New("disk failure")}
+	p := New(docs, "vault.json")
+	st := p.Status(context.Background())
+	if st.Ready {
+		t.Fatal("Status with broken store reports Ready, want not ready")
+	}
+	if st.Reason == "" {
+		t.Fatal("Status with broken store has empty reason, want a store-relevant reason")
 	}
 }
