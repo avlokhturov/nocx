@@ -1,5 +1,5 @@
 import { Show, createMemo, type Component, type JSX } from 'solid-js'
-import { AUTH_SEGMENTS, authModeLabel } from './auth-methods'
+import { AUTH_SEGMENTS } from './auth-methods'
 import type { AuthMode, Credential } from './profiles'
 import { Field } from './ui/field'
 import { IconButton } from './ui/icon-button'
@@ -26,6 +26,12 @@ export interface AuthenticationEditorProps {
   publicKeyAction?: JSX.Element
   credentialSuffix?: JSX.Element
   authSuffix?: JSX.Element
+  /** Draft of the selected credential for inline editing. */
+  credentialDraft?: Credential
+  /** Called when an inline credential field changes. */
+  onCredentialDraftChange?: (draft: Credential) => void
+  /** How many connections use the selected credential. */
+  credentialUsage?: number
 }
 
 export interface AuthMethodEditorProps {
@@ -112,7 +118,6 @@ export const AuthenticationEditor: Component<AuthenticationEditorProps> = (props
           {props.credentialSuffix}
         </div>
       </Field>
-
       <Show
         when={selectedCredential()}
         fallback={
@@ -140,21 +145,45 @@ export const AuthenticationEditor: Component<AuthenticationEditorProps> = (props
           </>
         }
       >
-        {(credential) => (
-          <div class="cm-credential-card">
-            <strong>Using Credential: </strong>
-            <span>{credential().name}</span>
-            <Show when={credential().hasKeyMaterial && credential().keyFingerprint}>
-              <br />
-              <small>Key fingerprint: {credential().keyFingerprint}</small>
-            </Show>
-            <br />
-            <small>
-              Username: {credential().username || 'local username'} | Auth:{' '}
-              {authModeLabel(credential().auth)}
-            </small>
-          </div>
-        )}
+        {(credential) => {
+          const draft = () => props.credentialDraft ?? credential()
+          return (
+            <>
+              <TextField
+                id={`${props.id}-cred-name`}
+                label="Name"
+                required
+                value={draft().name}
+                onInput={(v) => props.onCredentialDraftChange?.({ ...draft(), name: v })}
+              />
+              <TextField
+                id={`${props.id}-cred-user`}
+                label="Username"
+                value={draft().username}
+                onInput={(v) => props.onCredentialDraftChange?.({ ...draft(), username: v })}
+              />
+              <AuthMethodEditor
+                id={`${props.id}-cred-auth`}
+                auth={draft().auth}
+                onAuthChange={(value) =>
+                  props.onCredentialDraftChange?.({ ...draft(), auth: value ?? '' })
+                }
+                passwordAction={props.passwordAction}
+                publicKeyAction={props.publicKeyAction}
+                suffix={props.authSuffix}
+              />
+              <Show when={credential().keyFingerprint}>
+                <p class="cm-key-fingerprint">Key fingerprint: {credential().keyFingerprint}</p>
+              </Show>
+              <Show when={props.credentialUsage !== undefined}>
+                <p class="cm-credential-usage">
+                  Used by {props.credentialUsage} connection
+                  {(props.credentialUsage ?? 0) === 1 ? '' : 's'}
+                </p>
+              </Show>
+            </>
+          )
+        }}
       </Show>
     </Stack>
   )

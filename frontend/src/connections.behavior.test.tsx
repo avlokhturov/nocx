@@ -22,7 +22,6 @@ import type {
   ConnectionTestResult,
   GroupImpactResponse,
 } from './profiles'
-// ── Stub profiles ──────────────────────────────────────────────────────
 
 const MOCK_PROFILES: SSHProfile[] = [
   {
@@ -118,6 +117,7 @@ function createMockClient(overrides?: {
   vi.spyOn(pc, 'listCredentials').mockResolvedValue(overrides?.credentials ?? [])
   vi.spyOn(pc, 'sessionStatus').mockResolvedValue({ statuses: overrides?.sessionStatuses ?? {} })
   vi.spyOn(pc, 'loadEffective').mockResolvedValue({ profiles: overrides?.effectiveProfiles ?? [] })
+  vi.spyOn(pc, 'credentialUsage').mockResolvedValue({ usage: [] })
   const connectionTest = vi
     .spyOn(pc, 'connectionTest')
     .mockResolvedValue(overrides?.connectionTestResult ?? { outcome: 'accepted' })
@@ -821,9 +821,78 @@ describe('three-way key input — connection editor', () => {
     selectProfileSection(container, 'Authentication')
 
     await vi.waitFor(() => {
-      const card = container.querySelector('.cm-credential-card')
-      expect(card, 'Credential card not shown').toBeTruthy()
-      expect(card!.textContent).toContain('testfingerprint123')
+      const fp = container.querySelector('.cm-key-fingerprint')
+      expect(fp, 'Key fingerprint not shown').toBeTruthy()
+      expect(fp!.textContent).toContain('testfingerprint123')
+    })
+  })
+  it('shows editable credential fields when credential selected', async () => {
+    const cred: Credential = {
+      id: 'cred:edit-test',
+      name: 'my-cred',
+      username: 'admin',
+      auth: 'password',
+    }
+    const PROFILE_WITH_CRED: SSHProfile = {
+      ...MOCK_PROFILES[0],
+      options: { ...MOCK_PROFILES[0].options, credentialId: 'cred:edit-test' },
+    }
+    const { container } = mount({ profiles: [PROFILE_WITH_CRED], credentials: [cred] })
+    await waitForProfiles(container, 1)
+    await openProfileEditor(container, 'prod-web')
+    selectProfileSection(container, 'Authentication')
+
+    await vi.waitFor(() => {
+      expect(container.querySelector('#profile-auth-cred-name')).toBeTruthy()
+      expect(container.querySelector('#profile-auth-cred-user')).toBeTruthy()
+    })
+    const nameField = container.querySelector('#profile-auth-cred-name') as HTMLInputElement
+    expect(nameField.value).toBe('my-cred')
+    const userField = container.querySelector('#profile-auth-cred-user') as HTMLInputElement
+    expect(userField.value).toBe('admin')
+  })
+
+  it('saves credential draft changes via updateCredential', async () => {
+    const cred: Credential = {
+      id: 'cred:update-test',
+      name: 'old-name',
+      username: 'admin',
+      auth: 'password',
+    }
+    const PROFILE_WITH_CRED: SSHProfile = {
+      ...MOCK_PROFILES[0],
+      options: { ...MOCK_PROFILES[0].options, credentialId: 'cred:update-test' },
+    }
+    const { container, client } = mount({ profiles: [PROFILE_WITH_CRED], credentials: [cred] })
+    const updateSpy = vi.spyOn(client, 'updateCredential').mockResolvedValue(cred)
+    vi.spyOn(client, 'patchProfile').mockResolvedValue(MOCK_EFFECTIVE_CRED)
+
+    await waitForProfiles(container, 1)
+    await openProfileEditor(container, 'prod-web')
+    selectProfileSection(container, 'Authentication')
+
+    await vi.waitFor(() => {
+      expect(container.querySelector('#profile-auth-cred-name')).toBeTruthy()
+    })
+    const nameField = container.querySelector('#profile-auth-cred-name') as HTMLInputElement
+    expect(nameField).toBeTruthy()
+    fireEvent.input(nameField, { target: { value: 'new-name' } })
+
+    // Find "Save Connection" and click it
+    const saveBtn = await vi.waitFor(() => {
+      const btn = Array.from(container.querySelectorAll('.ui-button')).find(
+        (b) => b.textContent?.trim() === 'Save Connection',
+      )
+      expect(btn, 'Save Connection button not found').toBeTruthy()
+      return btn!
+    })
+    fireEvent.click(saveBtn)
+
+    await vi.waitFor(() => {
+      expect(updateSpy).toHaveBeenCalledTimes(1)
+      expect(updateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'cred:update-test', name: 'new-name' }),
+      )
     })
   })
 

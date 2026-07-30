@@ -208,6 +208,11 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   const [credDraft, setCredDraft] = createSignal<Credential | null>(null)
   const [credPasswordValue, setCredPasswordValue] = createSignal('')
   const credFormRef = { current: null as CredentialFormHandle | null }
+  // ── Inline credential editing (profile editor) ──────────────────────
+  const [profileCredDraft, setProfileCredDraft] = createSignal<Credential | null>(null)
+  const [credentialUsage, setCredentialUsage] = createSignal<Record<string, number>>({})
+  // ── Inline credential editing (group editor) ─────────────────────────
+  const [groupCredDraft, setGroupCredDraft] = createSignal<Credential | null>(null)
 
   // ── Group editor dialog ──────────────────────────────────────────────
   const [editingGroup, setEditingGroup] = createSignal<ProfileGroup | null>(null)
@@ -295,6 +300,57 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       })
     }
   }
+
+  async function loadCredentialUsage() {
+    try {
+      const result = await props.client.credentialUsage()
+      const map: Record<string, number> = {}
+      for (const entry of result.usage) {
+        map[entry.credentialId] = entry.profiles.length
+      }
+      setCredentialUsage(map)
+    } catch (err) {
+      log.error('Failed to load credential usage', { message: (err as Error).message })
+    }
+  }
+
+  // ── Credential draft management (inline editing) ──────────────────────
+
+  createEffect(
+    on(
+      () => [editing()?.options?.credentialId, credentials()] as const,
+      ([credId]) => {
+        if (credId) {
+          const cred = credentials().find((c) => c.id === credId)
+          if (cred && (!profileCredDraft() || profileCredDraft()?.id !== credId)) {
+            setProfileCredDraft({ ...cred })
+          }
+        } else {
+          setProfileCredDraft(null)
+        }
+      },
+    ),
+  )
+
+  createEffect(
+    on(
+      () => {
+        const defaults = groupDraft()?.defaults
+        return [
+          defaults ? (defaults.credentialId as string | undefined) : undefined,
+          credentials(),
+        ] as const
+      },
+      ([credId]) => {
+        if (credId) {
+          const cred = credentials().find((c) => c.id === credId)
+          if (cred) setGroupCredDraft({ ...cred })
+        } else {
+          setGroupCredDraft(null)
+        }
+      },
+    ),
+  )
 
   // ── Import ────────────────────────────────────────────────────────────
 
@@ -508,6 +564,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     setGroupKeyText('')
     setGroupKeyFingerprint(undefined)
     setGroupKeyTextError(undefined)
+    setGroupCredDraft(null)
   }
 
   async function computeGroupImpact(draft: ProfileGroup) {
@@ -574,6 +631,39 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         setGroupKeyText('')
         // Recurse to save the updated draft
         return saveGroup()
+      }
+
+      // Save credential draft if the credential's fields were edited inline
+      const credDraft = groupCredDraft()
+      if (credDraft && credDraft.id) {
+        const original = credentials().find((c) => c.id === credDraft.id)
+        if (
+          original &&
+          (original.name !== credDraft.name ||
+            original.username !== credDraft.username ||
+            original.auth !== credDraft.auth)
+        ) {
+          await props.client.updateCredential(credDraft)
+          // Update the local credentials list so stale data doesn't reappear
+          setCredentials((prev) => prev.map((c) => (c.id === credDraft.id ? credDraft : c)))
+          setGroupCredDraft(null)
+        }
+
+        // Key material save for an existing credential
+        if (credDraft.auth === 'publicKey' && groupKeyMode() === 'material' && groupKeyText()) {
+          const saveKeymat = async () => {
+            const result = await props.client.saveKeyMaterial(credDraft.id, groupKeyText())
+            setGroupKeyFingerprint(result.fingerprint)
+          }
+          if (props.vaultController) {
+            await props.vaultController.saveSecretWithVault(saveKeymat)
+          } else {
+            await saveKeymat()
+          }
+          setGroupKeyText('')
+          setGroupKeyFingerprint(undefined)
+          setGroupKeyTextError(undefined)
+        }
       }
 
       if (!draft.id) {
@@ -866,6 +956,20 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       )
     }
 
+    /** When a credential is selected, keyPath lives on the credential draft. */
+    const groupKeyPathValue = () => {
+      const cred = groupCredDraft()
+      if (cred) return cred.keyPath ?? ''
+      return (gv('keyPath') as string | undefined) ?? ''
+    }
+    function handleGroupKeyPathChange(v: string | undefined) {
+      const cred = groupCredDraft()
+      if (cred) {
+        setGroupCredDraft({ ...cred, keyPath: v })
+      } else {
+        setGroupDefaultsField('keyPath', v || undefined)
+      }
+    }
     function renderConnectionDefaults(): JSX.Element {
       const auth = gv('auth')
       return (
@@ -883,6 +987,9 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             onUsernameChange={(value) => setGroupDefaultsField('user', value)}
             auth={auth === undefined ? undefined : (auth as AuthMode)}
             onAuthChange={(value) => setGroupDefaultsField('auth', value)}
+            credentialDraft={groupCredDraft() ?? undefined}
+            onCredentialDraftChange={(draft) => setGroupCredDraft(draft)}
+            credentialUsage={groupCredDraft() ? credentialUsage()[groupCredDraft()!.id] : undefined}
             publicKeyAction={
               <Field for="group-default-key" label="Private Key">
                 <SegmentedControl
@@ -895,13 +1002,15 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                   onChange={(value) => {
                     const prev = groupKeyMode()
                     if (value === 'material') {
-                      setGroupDefaultsField('keyPath', undefined)
+                      handleGroupKeyPathChange(undefined)
                     } else if (prev === 'material') {
                       const credId = gv('credentialId') as string | undefined
                       setGroupKeyText('')
                       setGroupKeyFingerprint(undefined)
                       setGroupKeyTextError(undefined)
-                      setGroupDefaultsField('credentialId', undefined)
+                      if (!groupCredDraft()) {
+                        setGroupDefaultsField('credentialId', undefined)
+                      }
                       if (credId) {
                         props.client.deleteKeyMaterial(credId).catch((err: unknown) => {
                           log.error('Failed to delete key material', {
@@ -923,8 +1032,8 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                   <TextField
                     id="group-default-key-path"
                     label="Private Key Path"
-                    value={(gv('keyPath') as string | undefined) ?? ''}
-                    onInput={(value) => setGroupDefaultsField('keyPath', value || undefined)}
+                    value={groupKeyPathValue()}
+                    onInput={(value) => handleGroupKeyPathChange(value || undefined)}
                     placeholder="— Not set (inherit) —"
                   />
                 </Show>
@@ -934,7 +1043,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                     onChange={(file) => {
                       if (file) {
                         const filePath = (file as File & { path?: string })?.path ?? file.name
-                        setGroupDefaultsField('keyPath', filePath)
+                        handleGroupKeyPathChange(filePath)
                       }
                     }}
                     ariaLabel="Choose private key file"
@@ -1093,6 +1202,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   // profiles are set, so the async continuation does not need to be tracked.
   onMount(() => {
     void loadAll()
+    void loadCredentialUsage()
   })
 
   // After profiles load, fetch session status and effective data for them.
@@ -1179,14 +1289,13 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     setEditing(profile)
     setDirtyFields(new Set<string>())
     profileValidation.reset()
-    void loadEffective([profile.id])
-    setProfileMoveImpact(null)
     setProfileKeyMode('path')
     setProfileKeyText('')
     setProfileKeyFingerprint(undefined)
     setProfileKeyTextError(undefined)
     setDialogOpen(true)
   }
+
   function closeDialog() {
     setDialogOpen(false)
     setEditing(null)
@@ -1198,6 +1307,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     setProfileKeyText('')
     setProfileKeyFingerprint(undefined)
     setProfileKeyTextError(undefined)
+    setProfileCredDraft(null)
   }
 
   // ── Validation ──────────────────────────────────────────────────────────
@@ -1324,7 +1434,59 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       }
       return
     }
+    // Save credential draft if the credential's fields were edited inline
+    const credDraft = profileCredDraft()
+    if (credDraft && credDraft.id) {
+      const original = credentials().find((c) => c.id === credDraft.id)
+      if (
+        original &&
+        (original.name !== credDraft.name ||
+          original.username !== credDraft.username ||
+          original.auth !== credDraft.auth)
+      ) {
+        try {
+          await props.client.updateCredential(credDraft)
+          // Update the local credentials list so stale data doesn't reappear
+          // on the next editor open.
+          setCredentials((prev) => prev.map((c) => (c.id === credDraft.id ? credDraft : c)))
+          setProfileCredDraft(null)
+        } catch (err) {
+          const message = (err as Error).message
+          log.error('Failed to update credential', { message })
+          showToast({ level: 'danger', message: `Could not update credential: ${message}` })
+          return
+        }
+      }
 
+      // Password save for an existing credential
+      if (profilePasswordValue()) {
+        const savePw = async () => {
+          await props.client.savePassword(credDraft.id, profilePasswordValue())
+        }
+        if (props.vaultController) {
+          await props.vaultController.saveSecretWithVault(savePw)
+        } else {
+          await savePw()
+        }
+        setProfilePasswordValue('')
+      }
+
+      // Key material save for an existing credential
+      if (credDraft.auth === 'publicKey' && profileKeyMode() === 'material' && profileKeyText()) {
+        const saveKeymat = async () => {
+          const result = await props.client.saveKeyMaterial(credDraft.id, profileKeyText())
+          setProfileKeyFingerprint(result.fingerprint)
+        }
+        if (props.vaultController) {
+          await props.vaultController.saveSecretWithVault(saveKeymat)
+        } else {
+          await saveKeymat()
+        }
+        setProfileKeyText('')
+        setProfileKeyFingerprint(undefined)
+        setProfileKeyTextError(undefined)
+      }
+    }
     const isNew = !profile.id || !profiles().some((x) => x.id === profile.id)
 
     if (isNew) {
@@ -1699,6 +1861,21 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       })
     }
 
+    /** When a credential is selected, keyPath lives on the credential draft. */
+    const keyPathValue = () => {
+      const cred = profileCredDraft()
+      if (cred) return cred.keyPath ?? ''
+      return fvStr('keyPath')
+    }
+    function handleKeyPathChange(v: string | undefined) {
+      const cred = profileCredDraft()
+      if (cred) {
+        setProfileCredDraft({ ...cred, keyPath: v })
+      } else {
+        setOption('keyPath', v || undefined)
+      }
+    }
+
     function effField(field: string): EffectiveFieldDTO | undefined {
       const eff = effectiveData()[profile.id]
       return eff?.fields[field]
@@ -1837,6 +2014,8 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                     onUsernameChange={(value) => setOption('user', value)}
                     auth={fvStr('auth') as AuthMode}
                     onAuthChange={(value) => setOption('auth', value)}
+                    credentialDraft={profileCredDraft() ?? undefined}
+                    onCredentialDraftChange={(draft) => setProfileCredDraft(draft)}
                     passwordAction={
                       <Field for="profile-password-action" label="Password">
                         <div class="credential-secret-action">
@@ -1863,13 +2042,15 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                           onChange={(value) => {
                             const prev = profileKeyMode()
                             if (value === 'material') {
-                              setOption('keyPath', undefined)
+                              handleKeyPathChange(undefined)
                             } else if (prev === 'material') {
                               const credId = fvStr('credentialId')
                               setProfileKeyText('')
                               setProfileKeyFingerprint(undefined)
                               setProfileKeyTextError(undefined)
-                              setOption('credentialId', undefined)
+                              if (!profileCredDraft()) {
+                                setOption('credentialId', undefined)
+                              }
                               if (credId) {
                                 props.client.deleteKeyMaterial(credId).catch((err: unknown) => {
                                   log.error('Failed to delete key material', {
@@ -1891,8 +2072,8 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                           <TextField
                             id="profile-key-path"
                             label="Private Key Path"
-                            value={fvStr('keyPath')}
-                            onInput={(value) => setOption('keyPath', value || undefined)}
+                            value={keyPathValue()}
+                            onInput={(value) => handleKeyPathChange(value || undefined)}
                             placeholder="~/.ssh/id_ed25519"
                           />
                         </Show>
@@ -1903,7 +2084,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                               if (file) {
                                 const filePath =
                                   (file as File & { path?: string })?.path ?? file.name
-                                setOption('keyPath', filePath)
+                                handleKeyPathChange(filePath)
                               }
                             }}
                             ariaLabel="Choose private key file"

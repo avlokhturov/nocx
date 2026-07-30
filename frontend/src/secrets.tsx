@@ -19,8 +19,6 @@ import { log } from './log'
 export interface SecretsSectionProps {
   vaultClient: VaultClient
   vaultController: VaultController
-  /** Navigate to the credential that owns a secret. Fired on row activation. */
-  onNavigateToOwner?: (ownerId: string) => void
 }
 
 type LoadState =
@@ -70,10 +68,6 @@ export function SecretsSection(props: SecretsSectionProps) {
     }
   })
 
-  const handleRowClick = (entry: VaultInventoryEntry) => {
-    props.onNavigateToOwner?.(entry.ownerId)
-  }
-
   return (
     <div class="sr-root">
       <p class="sr-description">
@@ -109,19 +103,7 @@ export function SecretsSection(props: SecretsSectionProps) {
           <PageSection title="Secrets" divided>
             <For each={(loadState() as Extract<LoadState, { kind: 'loaded' }>).entries}>
               {(entry) => (
-                // A ghost Button, not a div wearing role="button". The kit's own
-                // rule: "ghost — a control that reads as a row rather than a
-                // button". It also gets keyboard activation for free, which the
-                // hand-rolled version had to reimplement.
-                <Button
-                  variant="ghost"
-                  onClick={() => handleRowClick(entry)}
-                  ariaLabel={
-                    entry.label +
-                    ` · ${entry.usedBy} connection${entry.usedBy === 1 ? '' : 's'}` +
-                    (!entry.reachable ? ' · store unreachable' : '')
-                  }
-                >
+                <div class="sr-row">
                   <span class="sr-row-icon">{entry.provider === 'file' ? '🗝️' : '🔑'}</span>
                   <div class="sr-row-body">
                     <span class="sr-row-label">{entry.label}</span>
@@ -133,7 +115,7 @@ export function SecretsSection(props: SecretsSectionProps) {
                   <Show when={!entry.reachable}>
                     <span class="sr-row-unreachable">Store unreachable</span>
                   </Show>
-                </Button>
+                </div>
               )}
             </For>
           </PageSection>

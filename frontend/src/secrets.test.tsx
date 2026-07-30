@@ -87,26 +87,12 @@ const MOCK_ENTRY_2: VaultInventoryEntry = {
 }
 
 /** Mount the SecretsSection with mocked client and controller. */
-async function mount(
-  client: VaultClient,
-  overrides?: Partial<{
-    onNavigateToOwner: (ownerId: string) => void
-  }>,
-) {
+async function mount(client: VaultClient) {
   const ctrl = createVaultState(client)
   // Wait for the initial status fetch
   await ctrl.refresh()
   const container = document.body.appendChild(document.createElement('div'))
-  render(
-    () => (
-      <SecretsSection
-        vaultClient={client}
-        vaultController={ctrl}
-        onNavigateToOwner={overrides?.onNavigateToOwner}
-      />
-    ),
-    { container },
-  )
+  render(() => <SecretsSection vaultClient={client} vaultController={ctrl} />, { container })
   return { container, ctrl }
 }
 
@@ -164,11 +150,8 @@ describe('SecretsSection', () => {
       expect(container.querySelector('.sr-row-label')).toBeTruthy()
     })
 
-    // A row is a ghost Button carrying the label; scope by that rather than by a
-    // wrapper class, because the row IS the kit component now.
-    const rows = Array.from(container.querySelectorAll('.ui-button')).filter((b) =>
-      b.querySelector('.sr-row-label'),
-    )
+    // A row is a div.sr-row — no longer a ghost Button.
+    const rows = Array.from(container.querySelectorAll('.sr-row'))
     expect(rows.length).toBe(2)
 
     // Row 1: label, store, usage
@@ -206,25 +189,6 @@ describe('SecretsSection', () => {
 
     const unreachableEl = container.querySelector('.sr-row-unreachable')
     expect(unreachableEl?.textContent).toBe('Store unreachable')
-  })
-
-  it('calls onNavigateToOwner with the correct ownerId on row click', async () => {
-    const { client, inventory } = mockClient()
-    client.status = vi.fn().mockResolvedValue(UNSEALED_STATUS)
-    inventory.mockResolvedValue({ entries: [MOCK_ENTRY_1] })
-
-    const onNavigateToOwner = vi.fn()
-    const { container } = await mount(client, { onNavigateToOwner })
-
-    await vi.waitFor(() => {
-      expect(container.querySelector('.sr-row-label')).toBeTruthy()
-    })
-
-    const row = container.querySelector('.sr-row-label')!.closest('button') as HTMLElement
-    row.click()
-
-    expect(onNavigateToOwner).toHaveBeenCalledTimes(1)
-    expect(onNavigateToOwner).toHaveBeenCalledWith('cred:prod-deploy')
   })
 
   it('no secret value appears in rendered output and no copy/reveal controls exist', async () => {

@@ -349,7 +349,6 @@ export function SettingsComponent(props: SettingsComponentProps) {
           <SecretsSection
             vaultClient={props.vaultClient!}
             vaultController={props.vaultController!}
-            onNavigateToOwner={() => setActiveComponentPage('connections')}
           />
         </Show>
       ),
