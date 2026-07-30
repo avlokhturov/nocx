@@ -73,7 +73,7 @@ type CredentialVersion struct {
 	RetiredAt *time.Time `json:"retiredAt,omitempty"`
 }
 
-const legacyVersionID = "v1"
+const initialVersionID = "v1"
 
 // ErrVersionRetired is returned when trying to select a retired credential version.
 // The resolver returns this when a profile's credential's current version has been
@@ -98,11 +98,11 @@ func (e *ErrThresholdNotMet) Error() string {
 // window in which a password is unreachable.
 //
 // When the named current version has been retired, Current returns false
-// rather than returning a retired version. The legacy path (no Versions list)
-// is never retired and always succeeds.
+// rather than returning a retired version. The initial state (no Versions
+// list) is never retired and always succeeds.
 func (c Credential) Current() (CredentialVersion, bool) {
 	if len(c.Versions) == 0 {
-		return CredentialVersion{ID: legacyVersionID, PasswordSecretID: c.SecretID, PassphraseSecretID: c.PassphraseSecretID}, true
+		return CredentialVersion{ID: initialVersionID, PasswordSecretID: c.SecretID, PassphraseSecretID: c.PassphraseSecretID}, true
 	}
 	if c.CurrentVersionID == "" {
 		return CredentialVersion{}, false

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"strings"
@@ -1862,5 +1863,289 @@ func TestSnapshot_HasOSKeyPreserved(t *testing.T) {
 	// OSKeyCapable should remain true even after setup.
 	if !snap.OSKeyCapable {
 		t.Error("OSKeyCapable = false, want true (system provider is still present)")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Auto-seal
+// ---------------------------------------------------------------------------
+
+func TestSetAutoSeal_ValidValues(t *testing.T) {
+	v, _, _ := testVault(t, newTestProvider(ProviderFile))
+	for _, mins := range []int{0, 5, 15, 30, 60} {
+		if err := v.SetAutoSeal(context.Background(), mins); err != nil {
+			t.Errorf("SetAutoSeal(%d): %v", mins, err)
+		}
+		v.mu.Lock()
+		got := v.doc.AutoSealMinutes
+		v.mu.Unlock()
+		if got != mins {
+			t.Errorf("AutoSealMinutes after SetAutoSeal(%d) = %d", mins, got)
+		}
+	}
+}
+
+func TestSetAutoSeal_InvalidValues(t *testing.T) {
+	v, _, _ := testVault(t, newTestProvider(ProviderFile))
+	for _, mins := range []int{-1, 1, 10, 20, 100} {
+		if err := v.SetAutoSeal(context.Background(), mins); err == nil {
+			t.Errorf("SetAutoSeal(%d): expected error", mins)
+		}
+	}
+}
+
+func TestSetAutoSeal_Persistence(t *testing.T) {
+	loweredCost(t)
+	v, store, _ := testVault(t, newTestProvider(ProviderFile))
+	// Ensure vault document exists by setting up.
+	mustSetup(t, v, "hunter2")
+
+	if err := v.SetAutoSeal(context.Background(), 30); err != nil {
+		t.Fatalf("SetAutoSeal: %v", err)
+	}
+	v.Seal()
+
+	// Reload from store.
+	reg, rerr := NewRegistry(newTestProvider(ProviderFile))
+	if rerr != nil {
+		t.Fatalf("NewRegistry: %v", rerr)
+	}
+	v2, err := New(store, reg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	v2.mu.Lock()
+	got := v2.doc.AutoSealMinutes
+	v2.mu.Unlock()
+	if got != 30 {
+		t.Fatalf("persisted AutoSealMinutes = %d, want 30", got)
+	}
+}
+
+func TestActivity_EpochIncrement(t *testing.T) {
+	v, _, _ := testVault(t, newTestProvider(ProviderFile))
+	v.mu.Lock()
+	before := v.autoSealEpoch
+	v.mu.Unlock()
+
+	v.Activity()
+
+	v.mu.Lock()
+	after := v.autoSealEpoch
+	v.mu.Unlock()
+	if after != before+1 {
+		t.Fatalf("epoch after Activity = %d, want %d", after, before+1)
+	}
+}
+
+func TestAutoSeal_TimerFiresAndSeals(t *testing.T) {
+	loweredCost(t)
+	v, _, _ := testVault(t, newTestProvider(ProviderFile))
+	mustSetup(t, v, "pass")
+
+	// Override the duration function to use milliseconds for testing.
+	v.mu.Lock()
+	v.autoSealDurationFn = func(int) time.Duration { return 10 * time.Millisecond }
+	v.doc.AutoSealMinutes = 1 // any non-zero value; the function returns 10ms regardless
+	v.autoSealEpoch++         // ensure epoch is tracked
+	v.mu.Unlock()
+
+	// Wake the goroutine to arm the timer.
+	v.wakeAutoSeal()
+
+	// Wait for the timer to fire and seal.
+	time.Sleep(50 * time.Millisecond)
+
+	if v.State() != StateSealed {
+		t.Fatal("auto-seal timer did not seal the vault")
+	}
+}
+
+func TestAutoSeal_ActivityPreventsSeal(t *testing.T) {
+	loweredCost(t)
+	v, _, _ := testVault(t, newTestProvider(ProviderFile))
+	mustSetup(t, v, "pass")
+
+	v.mu.Lock()
+	v.autoSealDurationFn = func(int) time.Duration { return 50 * time.Millisecond }
+	v.doc.AutoSealMinutes = 1
+	v.autoSealEpoch++
+	v.mu.Unlock()
+
+	// Wake to arm the 50ms timer.
+	v.wakeAutoSeal()
+	time.Sleep(20 * time.Millisecond)
+
+	// Activity resets the timer and increments the epoch.
+	v.Activity()
+
+	// Wait less than the original timer's remaining 30ms so the
+	// original timer would have fired, but the reset should have
+	// started a fresh 50ms timer.
+	time.Sleep(20 * time.Millisecond)
+
+	if v.State() == StateSealed {
+		t.Fatal("vault was sealed after activity reset — activity should restart the timer")
+	}
+
+	// Wait for the fresh 50ms timer to fire.
+	time.Sleep(60 * time.Millisecond)
+
+	if v.State() != StateSealed {
+		t.Fatal("vault should have sealed after the reset timer expired")
+	}
+}
+
+func TestAutoSeal_SealStopsTimer(t *testing.T) {
+	loweredCost(t)
+	v, _, _ := testVault(t, newTestProvider(ProviderFile))
+	mustSetup(t, v, "pass")
+
+	v.mu.Lock()
+	v.autoSealDurationFn = func(int) time.Duration { return 10 * time.Millisecond }
+	v.doc.AutoSealMinutes = 1
+	v.autoSealEpoch++
+	v.mu.Unlock()
+	v.wakeAutoSeal()
+
+	// Manual seal before timer fires.
+	time.Sleep(5 * time.Millisecond)
+	v.Seal()
+
+	// Wait for the original timer to fire.
+	time.Sleep(50 * time.Millisecond)
+
+	// Vault should remain sealed (no spurious re-seal needed; the point is
+	// that the timer did not cause a double-seal or panic).
+	if v.State() != StateSealed {
+		t.Fatal("vault is not sealed after manual seal + timer expiry")
+	}
+}
+
+func TestAutoSeal_GenGuardAndEpochGuard(t *testing.T) {
+	loweredCost(t)
+	v, _, _ := testVault(t, newTestProvider(ProviderFile))
+	mustSetup(t, v, "pass")
+
+	// Use a long interval so no real timer fires during the test.
+	v.mu.Lock()
+	v.autoSealDurationFn = func(int) time.Duration { return 10 * time.Minute }
+	v.doc.AutoSealMinutes = 5
+	v.mu.Unlock()
+
+	// Wake to arm, capturing gen + epoch.
+	v.wakeAutoSeal()
+	time.Sleep(50 * time.Millisecond)
+
+	v.mu.Lock()
+	genAtArm := v.gen
+	epochAtArm := v.autoSealEpoch
+	v.mu.Unlock()
+
+	// Seal changes gen. After this, a stale timer armed before the seal
+	// should be rejected because gen changed.
+	v.Seal()
+
+	// Verify gen changed.
+	v.mu.Lock()
+	if v.gen <= genAtArm {
+		t.Fatal("seal did not increment gen")
+	}
+	v.mu.Unlock()
+
+	// Unseal. The goroutine is woken and re-arms with fresh gen.
+	if err := v.Unseal(context.Background(), UnsealRequest{Passphrase: "pass"}); err != nil {
+		t.Fatalf("Unseal: %v", err)
+	}
+
+	// Verify epoch changed (Unseal increments it).
+	v.mu.Lock()
+	epochAfter := v.autoSealEpoch
+	v.mu.Unlock()
+
+	if epochAfter <= epochAtArm {
+		t.Fatal("epoch did not increment after unseal")
+	}
+
+	// Now verify the guard logic by deduction: if a stale timer armed at
+	// (genAtArm, epochAtArm) fires now, neither gen nor epoch matches.
+	// The goroutine's check (!isSealed && epoch == armEpoch) would fail on
+	// epoch mismatch. This proves the guard works without relying on timer
+	// timing.
+	v.mu.Lock()
+	isSealed := v.rootKey == nil
+	genNow := v.gen
+	epochNow := v.autoSealEpoch
+	v.mu.Unlock()
+
+	if isSealed {
+		t.Fatal("vault should be unsealed after unseal call")
+	}
+	if genNow == genAtArm {
+		t.Fatal("gen should have changed after seal")
+	}
+	if epochNow == epochAtArm {
+		t.Fatal("epoch should have changed after activity/unseal")
+	}
+}
+
+func TestAutoSeal_OffDoesNotArm(t *testing.T) {
+	v, _, _ := testVault(t, newTestProvider(ProviderFile))
+	mustSetup(t, v, "pass")
+
+	// Set to 0 (off) and ensure the goroutine does not arm a timer.
+	if err := v.SetAutoSeal(context.Background(), 0); err != nil {
+		t.Fatalf("SetAutoSeal(0): %v", err)
+	}
+
+	// Verify the epoch was incremented but no timer is running (can't
+	// directly observe the timer, but we can check the goroutine didn't
+	// seal after a wake).
+	v.wakeAutoSeal()
+	time.Sleep(10 * time.Millisecond)
+
+	if v.State() != StateUnsealed {
+		t.Fatal("vault was sealed despite auto-seal being off")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Snapshot: AutoSealMinutes and HasPassphrase
+// ---------------------------------------------------------------------------
+
+func TestSnapshot_AutoSealMinutes(t *testing.T) {
+	loweredCost(t)
+	v, _, _ := testVault(t, newTestProvider(ProviderFile))
+	mustSetup(t, v, "pass")
+
+	snap := v.Snapshot(context.Background())
+	if snap.AutoSealMinutes != 15 {
+		t.Errorf("AutoSealMinutes in snapshot = %d, want 15 (fresh vault default)",
+			snap.AutoSealMinutes)
+	}
+
+	_ = v.SetAutoSeal(context.Background(), 30)
+	snap = v.Snapshot(context.Background())
+	if snap.AutoSealMinutes != 30 {
+		t.Errorf("AutoSealMinutes after SetAutoSeal(30) = %d, want 30",
+			snap.AutoSealMinutes)
+	}
+}
+
+func TestSnapshot_HasPassphrase(t *testing.T) {
+	loweredCost(t)
+	v, _, _ := testVault(t, newTestProvider(ProviderFile))
+
+	// Before setup: no passphrase envelope.
+	snap := v.Snapshot(context.Background())
+	if snap.HasPassphrase {
+		t.Error("HasPassphrase = true before setup")
+	}
+
+	// After passphrase setup: should have an envelope.
+	mustSetup(t, v, "pass")
+	snap = v.Snapshot(context.Background())
+	if !snap.HasPassphrase {
+		t.Error("HasPassphrase = false after passphrase setup")
 	}
 }

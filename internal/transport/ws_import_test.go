@@ -135,9 +135,10 @@ func TestImportTabby_NoVault(t *testing.T) {
 	// Plain config with no vault — existing behavior.
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
+	svc := profile.NewProfileService(ps)
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
 		WithProfileRepository(ps), WithGroupRepository(ps),
-		WithCredentialMetadataRepository(ps), WithCredentialStore(newTestStore()))
+		WithCredentialMetadataRepository(ps), WithCredentialStore(newTestStore()), WithProfileService(svc))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -177,9 +178,10 @@ profiles:
 func TestImportTabby_EncryptedVaultNoPassphrase(t *testing.T) {
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
+	svc := profile.NewProfileService(ps)
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
 		WithProfileRepository(ps), WithGroupRepository(ps),
-		WithCredentialMetadataRepository(ps), WithCredentialStore(newTestStore()))
+		WithCredentialMetadataRepository(ps), WithCredentialStore(newTestStore()), WithProfileService(svc))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -215,9 +217,10 @@ func TestImportTabby_EncryptedVaultNoPassphrase(t *testing.T) {
 func TestImportTabby_WrongPassphrase(t *testing.T) {
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
+	svc := profile.NewProfileService(ps)
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
 		WithProfileRepository(ps), WithGroupRepository(ps),
-		WithCredentialMetadataRepository(ps), WithCredentialStore(newTestStore()))
+		WithCredentialMetadataRepository(ps), WithCredentialStore(newTestStore()), WithProfileService(svc))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -355,9 +358,10 @@ func TestImportTabby_HappyPath(t *testing.T) {
 func TestImportTabby_UnhandledSecretTypeIsSkipped(t *testing.T) {
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
+	svc := profile.NewProfileService(ps)
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
 		WithProfileRepository(ps), WithGroupRepository(ps),
-		WithCredentialMetadataRepository(ps), WithCredentialStore(newTestStore()))
+		WithCredentialMetadataRepository(ps), WithCredentialStore(newTestStore()), WithProfileService(svc))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -403,9 +407,10 @@ func TestImportTabby_UnhandledSecretTypeIsSkipped(t *testing.T) {
 func TestImportTabby_InvalidSecretValue(t *testing.T) {
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
+	svc := profile.NewProfileService(ps)
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
 		WithProfileRepository(ps), WithGroupRepository(ps),
-		WithCredentialMetadataRepository(ps), WithCredentialStore(newTestStore()))
+		WithCredentialMetadataRepository(ps), WithCredentialStore(newTestStore()), WithProfileService(svc))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -449,10 +454,11 @@ func TestImportTabby_CreateFailsMidway(t *testing.T) {
 	//   3. The metadata store has NO credentials (import never completed).
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
+	svc := profile.NewProfileService(ps)
 	failStore := newFailAfterStore(2) // succeeds 2 times, fails on 3rd
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
 		WithProfileRepository(ps), WithGroupRepository(ps),
-		WithCredentialMetadataRepository(ps), WithCredentialStore(failStore))
+		WithCredentialMetadataRepository(ps), WithCredentialStore(failStore), WithProfileService(svc))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -515,11 +521,12 @@ func TestImportTabby_SealedVault(t *testing.T) {
 	// a generic toast.
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
+	svc := profile.NewProfileService(ps)
 	sealedStore := newFailAfterStore(0)
 	sealedStore.err = vault.ErrVaultSealed
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
 		WithProfileRepository(ps), WithGroupRepository(ps),
-		WithCredentialMetadataRepository(ps), WithCredentialStore(sealedStore))
+		WithCredentialMetadataRepository(ps), WithCredentialStore(sealedStore), WithProfileService(svc))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -561,15 +568,15 @@ func TestImportTabby_SealedVault(t *testing.T) {
 	}
 }
 
-func TestImportTabby_LegacyPathSecrets(t *testing.T) {
-	// Legacy path (no profileSvc) with credentials + credMeta.
+func TestImportTabby_VaultSecrets(t *testing.T) {
+	// Import with credentials + credMeta via the atomic import path.
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
+	svc := profile.NewProfileService(ps)
 	cs := newTestStore()
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
 		WithProfileRepository(ps), WithGroupRepository(ps),
-		WithCredentialMetadataRepository(ps), WithCredentialStore(cs))
-	// No WithProfileService — uses legacy path.
+		WithCredentialMetadataRepository(ps), WithCredentialStore(cs), WithProfileService(svc))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -601,13 +608,13 @@ func TestImportTabby_LegacyPathSecrets(t *testing.T) {
 	// Credential should be in the metadata store.
 	creds, _ := ps.LoadCredentials()
 	if len(creds) != 1 {
-		t.Errorf("expected 1 credential in legacy path, got %d", len(creds))
+		t.Errorf("expected 1 credential in metadata store, got %d", len(creds))
 	}
 	if creds[0].SecretID == "" {
 		t.Error("credential should reference a secret")
 	}
 
-	// Profile should reference the credential in legacy path too.
+	// Profile should reference the credential.
 	profs, _ := ps.LoadProfiles()
 	if len(profs) != 1 {
 		t.Fatalf("expected 1 profile, got %d", len(profs))
@@ -620,9 +627,10 @@ func TestImportTabby_LegacyPathSecrets(t *testing.T) {
 func TestImportTabby_NoCredentialStore(t *testing.T) {
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
+	svc := profile.NewProfileService(ps)
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
 		WithProfileRepository(ps), WithGroupRepository(ps),
-		WithCredentialMetadataRepository(ps))
+		WithCredentialMetadataRepository(ps), WithProfileService(svc))
 	// No WithCredentialStore.
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
@@ -662,6 +670,7 @@ func TestImportTabby_ProfileMatchesExistingCredNotImported(t *testing.T) {
 	// The imported profile should be marked NeedsReview.
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
+	svc := profile.NewProfileService(ps)
 	cs := newTestStore()
 
 	// Pre-populate a credential that the imported profile will reference.
@@ -676,7 +685,7 @@ func TestImportTabby_ProfileMatchesExistingCredNotImported(t *testing.T) {
 
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
 		WithProfileRepository(ps), WithGroupRepository(ps),
-		WithCredentialMetadataRepository(ps), WithCredentialStore(cs))
+		WithCredentialMetadataRepository(ps), WithCredentialStore(cs), WithProfileService(svc))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)

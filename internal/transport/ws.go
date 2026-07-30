@@ -78,9 +78,8 @@ type WSServer struct {
 	// Profile resolver maps profile IDs to SSH connect configs.
 	resolver ProfileResolver
 
-	// Profile service provides a single write path for profiles, groups,
-	// and credentials through the domain layer. When nil, the import
-	// handlers fall back to the legacy per-repository path.
+	// Profile service provides a single validated write path for profiles,
+	// groups, and credentials through the domain layer.
 	profileSvc *profile.ProfileService
 
 	// settings registry backs the settings.* JSON-RPC methods.
@@ -215,9 +214,7 @@ func WithExportContentDB(db content.ContentDB) WSServerOption {
 }
 
 // WithProfileService attaches a profile domain service for import
-// operations, providing a single validated write path and atomic
-// imports. When not wired, import handlers use the legacy per-repository
-// path for backward compatibility.
+// operations, providing a single validated write path and atomic imports.
 func WithProfileService(svc *profile.ProfileService) WSServerOption {
 	return func(s *WSServer) { s.profileSvc = svc }
 }
@@ -675,7 +672,8 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.handleSSHConfigPath(wconn, req)
 
 	case "vault.status", "vault.setup", "vault.unseal", "vault.seal",
-		"vault.changePassphrase", "vault.regenerateRecovery", "vault.setDefaultProvider":
+		"vault.changePassphrase", "vault.regenerateRecovery", "vault.setDefaultProvider",
+		"vault.setAutoSeal", "vault.activity":
 		s.handleVaultMethod(wconn, req)
 	default:
 		resp := newJSONRPCError(req.ID, -32601, "Method not found")
@@ -2059,82 +2057,8 @@ func (s *WSServer) handleImportTabby(wconn *wsConn, req jsonrpcRequest) {
 		}
 	}
 
-	if s.profileSvc != nil {
-		// Domain service path: atomic import.
-		var profiles []profile.SSHProfile
-		for _, tp := range cfg.Profiles {
-			if tp.Type != "ssh" {
-				continue
-			}
-			p := importer.ConvertProfile(tp)
-			if p.Options.User != nil && p.Options.Host != "" {
-				port := 0
-				if p.Options.Port != nil {
-					port = *p.Options.Port
-				}
-				user := ""
-				if p.Options.User != nil {
-					user = *p.Options.User
-				}
-				if credID, ok := pwLookup[pwKey{user: user, host: p.Options.Host, port: port}]; ok {
-					p.Options.CredentialID = credID
-				}
-			}
-			profiles = append(profiles, p)
-		}
-
-		var groups []profile.ProfileGroup
-		for _, tg := range cfg.Groups {
-			var defaults *profile.ProfileDefaults
-			if tg.Defaults != nil {
-				d, err := profile.DecodeDefaults(tg.Defaults)
-				if err != nil {
-					_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, fmt.Sprintf("Import failed: group %q defaults: %v", tg.Name, err)))
-					return
-				}
-				defaults = &d
-			}
-			groups = append(groups, profile.ProfileGroup{
-				ID:            tg.ID,
-				ParentGroupID: tg.ParentGroupID,
-				Name:          tg.Name,
-				Icon:          tg.Icon,
-				Color:         tg.Color,
-				Defaults:      defaults,
-				Editable:      true,
-			})
-		}
-
-		result := s.profileSvc.AtomicImport(profiles, groups, credentials)
-		if len(result.ImportErrors) > 0 {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Import failed: "+result.ImportErrors[0]))
-			return
-		}
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(result.ProfilesImported)))
-		return
-	}
-	// Legacy path: one record at a time.
-	if len(credentials) > 0 && s.credMeta == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Import credential: credential metadata store not available"))
-		return
-	}
-
-	for _, c := range credentials {
-		if err := s.credMeta.CreateCredential(c); err != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Import credential: "+err.Error()))
-			return
-		}
-	}
-	// Convert profiles with vault credential matching.
-	existing, _ := s.profiles.LoadProfiles()
-	seen := make(map[string]bool, len(existing))
-	for _, p := range existing {
-		key := importer.DedupKey(p)
-		if key != "" {
-			seen[key] = true
-		}
-	}
-	imported := 0
+	// Domain service path: atomic import.
+	var profiles []profile.SSHProfile
 	for _, tp := range cfg.Profiles {
 		if tp.Type != "ssh" {
 			continue
@@ -2153,18 +2077,37 @@ func (s *WSServer) handleImportTabby(wconn *wsConn, req jsonrpcRequest) {
 				p.Options.CredentialID = credID
 			}
 		}
-		key := importer.DedupKey(p)
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		if err := s.profiles.CreateProfile(p); err != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Import profiles: "+err.Error()))
-			return
-		}
-		imported++
+		profiles = append(profiles, p)
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(imported)))
+
+	var groups []profile.ProfileGroup
+	for _, tg := range cfg.Groups {
+		var defaults *profile.ProfileDefaults
+		if tg.Defaults != nil {
+			d, err := profile.DecodeDefaults(tg.Defaults)
+			if err != nil {
+				_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, fmt.Sprintf("Import failed: group %q defaults: %v", tg.Name, err)))
+				return
+			}
+			defaults = &d
+		}
+		groups = append(groups, profile.ProfileGroup{
+			ID:            tg.ID,
+			ParentGroupID: tg.ParentGroupID,
+			Name:          tg.Name,
+			Icon:          tg.Icon,
+			Color:         tg.Color,
+			Defaults:      defaults,
+			Editable:      true,
+		})
+	}
+
+	result := s.profileSvc.AtomicImport(profiles, groups, credentials)
+	if len(result.ImportErrors) > 0 {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Import failed: "+result.ImportErrors[0]))
+		return
+	}
+	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(result.ProfilesImported)))
 }
 
 // --- settings control-plane handlers -------------------------------------

@@ -1012,6 +1012,42 @@ export function VaultSection(props: VaultSectionProps) {
     }
   }
 
+  const actionCanRun = () => {
+    // Both "Change passphrase" and "Reissue recovery code" require an
+    // unsealed vault with a passphrase envelope. An OS-held key alone
+    // is not sufficient — a factor that only unseals must not be able
+    // to replace the factor that recovers (vault.ChangePassphrase doc).
+    const s = status()
+    if (!s) return false
+    return s.state === 'unsealed' && s.hasPassphrase
+  }
+
+  const actionDisabledReason = () => {
+    const s = status()
+    if (!s) return ''
+    if (s.state === 'uninitialized') return 'Vault has not been set up.'
+    if (s.state === 'sealed') return 'Vault is sealed.'
+    // unsealed but no passphrase envelope
+    return 'Only available when a passphrase is configured.'
+  }
+
+  const AUTO_SEAL_OPTIONS = [
+    { value: 0, label: 'Off' },
+    { value: 5, label: '5 min' },
+    { value: 15, label: '15 min' },
+    { value: 30, label: '30 min' },
+    { value: 60, label: '60 min' },
+  ]
+
+  const handleSetAutoSeal = async (minutes: number) => {
+    try {
+      await props.vaultClient.setAutoSeal(minutes)
+      await props.vaultController.refresh()
+      showToast({ level: 'success', message: 'Auto-seal timeout updated.' })
+    } catch (e: unknown) {
+      showToast({ level: 'danger', message: vaultErrorMessage(e) })
+    }
+  }
   return (
     <div>
       <Section title="Status">
@@ -1042,6 +1078,20 @@ export function VaultSection(props: VaultSectionProps) {
               />
             </Field>
           </Show>
+          <Show when={status() && status()!.state === 'unsealed'}>
+            <Field for="vault-auto-seal" label="Auto-seal timeout" orientation="horizontal">
+              <Select
+                value={String(status()!.autoSealMinutes)}
+                onChange={(v) => {
+                  void handleSetAutoSeal(Number(v))
+                }}
+                options={AUTO_SEAL_OPTIONS.map((o) => ({
+                  value: String(o.value),
+                  label: o.label,
+                }))}
+              />
+            </Field>
+          </Show>
         </Stack>
       </Section>
 
@@ -1057,16 +1107,33 @@ export function VaultSection(props: VaultSectionProps) {
             >
               {sealing() ? 'Sealing…' : 'Seal now'}
             </Button>
+            <Show when={status() && status()!.state !== 'unsealed'}>
+              <p class="ui-vault-desc-text">Already sealed or not set up.</p>
+            </Show>
           </Field>
           <Field for="vault-action-passphrase" label="Change passphrase" orientation="horizontal">
-            <Button variant="default" onClick={() => setDialog('passphrase')}>
+            <Button
+              variant="default"
+              disabled={!actionCanRun()}
+              onClick={() => setDialog('passphrase')}
+            >
               Change passphrase
             </Button>
+            <Show when={!actionCanRun()}>
+              <p class="ui-vault-desc-text">{actionDisabledReason()}</p>
+            </Show>
           </Field>
           <Field for="vault-action-recovery" label="Recovery code" orientation="horizontal">
-            <Button variant="default" onClick={() => setDialog('recovery')}>
+            <Button
+              variant="default"
+              disabled={!actionCanRun()}
+              onClick={() => setDialog('recovery')}
+            >
               Reissue recovery code
             </Button>
+            <Show when={!actionCanRun()}>
+              <p class="ui-vault-desc-text">{actionDisabledReason()}</p>
+            </Show>
           </Field>
         </Stack>
       </Section>

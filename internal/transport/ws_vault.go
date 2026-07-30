@@ -20,6 +20,8 @@ type VaultLifecycle interface {
 	ChangePassphrase(ctx context.Context, req vault.ChangePassphraseRequest) error
 	RegenerateRecovery(ctx context.Context, req vault.RegenerateRequest) (string, error)
 	SetDefaultProvider(ctx context.Context, p vault.ProviderID) error
+	SetAutoSeal(ctx context.Context, minutes int) error
+	Activity()
 }
 
 // vaultSetupParams is the wire format for vault.setup.
@@ -121,14 +123,20 @@ func (s *WSServer) handleVaultMethod(wconn *wsConn, req jsonrpcRequest) {
 		s.handleVaultRegenerateRecovery(wconn, req)
 	case "vault.setDefaultProvider":
 		s.handleVaultSetDefaultProvider(wconn, req)
+	case "vault.setAutoSeal":
+		s.handleVaultSetAutoSeal(wconn, req)
+	case "vault.activity":
+		s.handleVaultActivity(wconn, req)
 	}
 }
 
 type vaultStatusResponse struct {
-	State          string                     `json:"state"`
-	OSKeyAvailable bool                       `json:"osKeyAvailable"`
-	OSKeyCapable   bool                       `json:"osKeyCapable"`
-	Providers      []vaultStatusProviderEntry `json:"providers"`
+	State           string                     `json:"state"`
+	OSKeyAvailable  bool                       `json:"osKeyAvailable"`
+	OSKeyCapable    bool                       `json:"osKeyCapable"`
+	HasPassphrase   bool                       `json:"hasPassphrase"`
+	AutoSealMinutes int                        `json:"autoSealMinutes"`
+	Providers       []vaultStatusProviderEntry `json:"providers"`
 }
 
 type vaultStatusProviderEntry struct {
@@ -140,9 +148,11 @@ type vaultStatusProviderEntry struct {
 
 func vaultSnapToStatus(snap vault.Snapshot) vaultStatusResponse {
 	resp := vaultStatusResponse{
-		State:          snap.State.String(),
-		OSKeyAvailable: snap.HasOSKey,
-		OSKeyCapable:   snap.OSKeyCapable,
+		State:           snap.State.String(),
+		OSKeyAvailable:  snap.HasOSKey,
+		OSKeyCapable:    snap.OSKeyCapable,
+		HasPassphrase:   snap.HasPassphrase,
+		AutoSealMinutes: snap.AutoSealMinutes,
 	}
 	for _, p := range snap.Providers {
 		entry := vaultStatusProviderEntry{
@@ -327,6 +337,40 @@ func (s *WSServer) handleVaultSetDefaultProvider(wconn *wsConn, req jsonrpcReque
 	}
 
 	s.broadcastVaultChanged()
+	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(struct{}{})))
+}
+
+type vaultSetAutoSealParams struct {
+	Minutes *int `json:"minutes"`
+}
+
+func (s *WSServer) handleVaultSetAutoSeal(wconn *wsConn, req jsonrpcRequest) {
+	var params vaultSetAutoSealParams
+	if !isJSONObject(req.Params) {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		return
+	}
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		return
+	}
+	if params.Minutes == nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: minutes is required"))
+		return
+	}
+
+	if err := s.vaultLifecycle.SetAutoSeal(context.Background(), *params.Minutes); err != nil {
+		code := vaultErrorCode(err, -32603)
+		_ = wconn.writeJSON(newVaultError(req.ID, code, err.Error(), err))
+		return
+	}
+
+	s.broadcastVaultChanged()
+	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(struct{}{})))
+}
+
+func (s *WSServer) handleVaultActivity(wconn *wsConn, req jsonrpcRequest) {
+	s.vaultLifecycle.Activity()
 	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(struct{}{})))
 }
 

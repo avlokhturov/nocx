@@ -87,6 +87,25 @@ async function main() {
   })
   void vaultController.refresh()
 
+  // ── Vault activity signal (nocx-eg80) ──────────────────────────────
+  // Throttled: at most one call every 3 seconds. Reports user activity
+  // (keyboard, mouse, UI actions) so the vault can reset its idle timer.
+  // Terminal output, background jobs, and WebSocket messages do NOT fire
+  // this — see the e2e test that verifies this distinction.
+  let lastActivity = 0
+  const ACTIVITY_THROTTLE_MS = 3000
+  const reportActivity = () => {
+    const now = Date.now()
+    if (now - lastActivity < ACTIVITY_THROTTLE_MS) return
+    lastActivity = now
+    vaultClient.activity().catch(() => {
+      // Fire-and-forget: a failed activity call is never actionable.
+    })
+  }
+
+  document.addEventListener('keydown', reportActivity, true)
+  document.addEventListener('mousedown', reportActivity, true)
+
   // The generated-screen invariant says no setting key appears in the frontend,
   // and it is about the SCREEN: settings.ts and settings-content.ts render from
   // declarations so a new setting costs one MustRegister* call in Go and zero
@@ -128,6 +147,7 @@ async function main() {
     tabStrip,
   )
   tm.onVaultSealed = () => vaultController.openUnlock()
+  tm.onActivity = reportActivity
 
   // Surface registry — surfaces declared once, every entry point resolves
   // through the registry rather than rebuilding the descriptor. (AD-8)

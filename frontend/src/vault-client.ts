@@ -32,6 +32,17 @@ export interface VaultStatus {
    * decide first whether you are asking about the machine or about the vault.
    */
   osKeyCapable: boolean
+  /**
+   * STATE: this vault holds a passphrase envelope.
+   * False on OS-key-only vaults, where changing the passphrase or
+   * regenerating the recovery code is denied — a factor that only
+   * unseals must not replace the factor that recovers.
+   */
+  hasPassphrase: boolean
+  /**
+   * Auto-seal idle timeout in minutes. 0 means off.
+   */
+  autoSealMinutes: number
   providers: ProviderStatus[]
   defaultProvider: string | null
 }
@@ -98,5 +109,13 @@ export class VaultClient {
 
   setDefaultProvider(params: VaultSetDefaultProviderParams): Promise<Record<string, never>> {
     return this.dispatcher.call('vault.setDefaultProvider', params)
+  }
+
+  setAutoSeal(minutes: number): Promise<Record<string, never>> {
+    return this.dispatcher.call('vault.setAutoSeal', { minutes })
+  }
+
+  activity(): Promise<Record<string, never>> {
+    return this.dispatcher.call('vault.activity', {})
   }
 }

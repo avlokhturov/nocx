@@ -70,6 +70,10 @@ type Vault struct {
 	rootKey      []byte // nil when sealed
 	logger       *slog.Logger
 	initializing bool // guards concurrent Setup (defect 7)
+
+	autoSealWake       chan struct{}           // buffered(1), wakes the auto-seal goroutine
+	autoSealEpoch      uint64                  // incremented on each Activity/SetAutoSeal
+	autoSealDurationFn func(int) time.Duration // minutes→duration; overridden by tests
 }
 
 // New loads the vault document, decides the initial state, and runs
@@ -81,14 +85,14 @@ func New(docs storage.DocumentStore, reg *Registry, logger *slog.Logger) (*Vault
 	if err != nil {
 		return nil, err
 	}
-
 	v := &Vault{
-		store:  docs,
-		reg:    reg,
-		doc:    doc,
-		logger: logger,
+		store:              docs,
+		reg:                reg,
+		doc:                doc,
+		logger:             logger,
+		autoSealWake:       make(chan struct{}, 1),
+		autoSealDurationFn: defaultAutoSealDuration,
 	}
-
 	if found {
 		// Reconcile before returning — provider calls happen here, outside any
 		// vault lock (this is construction, no lock to hold).
@@ -100,6 +104,15 @@ func New(docs storage.DocumentStore, reg *Registry, logger *slog.Logger) (*Vault
 			return nil, fmt.Errorf("save after reconcile: %w", err)
 		}
 	}
+
+	if !found {
+		// Fresh vaults default to 15-minute auto-seal timeout.
+		v.doc.AutoSealMinutes = defaultAutoSealMinutes
+	}
+
+	// Start auto-seal goroutine after all initialization succeeds so a
+	// construction error does not leak it.
+	go v.autoSealLoop()
 
 	return v, nil
 }
@@ -348,7 +361,12 @@ func (v *Vault) Setup(ctx context.Context, req SetupRequest) (SetupResult, error
 	}
 	v.initializing = false
 	setupOK = true
+	// Increment epoch so a stale auto-seal timer (armed before setup) will not
+	// fire and immediately re-seal the freshly initialized vault.
+	v.autoSealEpoch++
 	v.mu.Unlock()
+
+	v.wakeAutoSeal()
 	v.logger.Info(
 		"vault initialized",
 		"state", "unsealed",
@@ -459,8 +477,12 @@ func (v *Vault) Unseal(ctx context.Context, req UnsealRequest) error {
 		v.logger.Warn("unseal rejected by concurrent seal", "duration", time.Since(t0))
 		return ErrVaultSealed
 	}
+	// Increment epoch so a stale auto-seal timer (armed before this unseal)
+	// will not fire and immediately re-seal.
+	v.autoSealEpoch++
 	v.mu.Unlock()
 
+	v.wakeAutoSeal()
 	v.logger.Info("vault unsealed", "duration", time.Since(t0))
 	return nil
 }
@@ -540,6 +562,11 @@ func (v *Vault) Seal() {
 	gen := v.gen
 	v.mu.Unlock()
 
+	// Wake auto-seal goroutine so it stops the timer — the vault is no longer
+	// unsealed. The goroutine reads fresh state under the lock, so this is safe
+	// to call after releasing v.mu.
+	v.wakeAutoSeal()
+
 	for _, p := range providers {
 		if lk, ok := p.(locker); ok {
 			lk.Lock()
@@ -547,6 +574,119 @@ func (v *Vault) Seal() {
 	}
 
 	v.logger.Info("vault sealed", "generation", gen)
+}
+
+// defaultAutoSealMinutes is the factory default for newly initialized vaults.
+const defaultAutoSealMinutes = 15
+
+// defaultAutoSealDuration converts minutes to a timer duration. Tests override
+// this via Vault.autoSealDurationFn to use sub-minute intervals.
+func defaultAutoSealDuration(minutes int) time.Duration {
+	return time.Duration(minutes) * time.Minute
+}
+
+// validateAutoSealMinutes returns an error when minutes is not one of the
+// accepted values (0 = off, 5, 15, 30, 60).
+func validateAutoSealMinutes(minutes int) error {
+	switch minutes {
+	case 0, 5, 15, 30, 60:
+		return nil
+	default:
+		return fmt.Errorf("auto-seal minutes must be 0 (off), 5, 15, 30, or 60; got %d", minutes)
+	}
+}
+
+// Activity reports user activity (keyboard, mouse, UI actions) to reset the
+// idle auto-seal timer. This is an explicit signal from the frontend — it is
+// never inferred from terminal output, background jobs, network events, or
+// incoming WebSocket messages.
+func (v *Vault) Activity() {
+	v.mu.Lock()
+	v.autoSealEpoch++
+	v.mu.Unlock()
+	v.wakeAutoSeal()
+}
+
+// SetAutoSeal configures the idle auto-seal timeout and persists it. Accepted
+// values: 0 (off), 5, 15, 30, 60. When the vault is unsealed the timer is
+// armed immediately with the new interval.
+func (v *Vault) SetAutoSeal(ctx context.Context, minutes int) error {
+	if err := validateAutoSealMinutes(minutes); err != nil {
+		return err
+	}
+
+	v.mu.Lock()
+	oldMins := v.doc.AutoSealMinutes
+	oldEpoch := v.autoSealEpoch
+	v.doc.AutoSealMinutes = minutes
+	v.autoSealEpoch++
+	if err := saveDocument(v.store, v.doc); err != nil {
+		v.doc.AutoSealMinutes = oldMins
+		v.autoSealEpoch = oldEpoch
+		v.mu.Unlock()
+		return fmt.Errorf("save auto-seal setting: %w", err)
+	}
+	v.mu.Unlock()
+
+	v.wakeAutoSeal()
+	return nil
+}
+
+// wakeAutoSeal wakes the auto-seal goroutine so it re-reads vault state and
+// arms or stops the timer accordingly. Non-blocking: a goroutine already
+// processing a previous wake will pick up the latest state when it loops.
+func (v *Vault) wakeAutoSeal() {
+	select {
+	case v.autoSealWake <- struct{}{}:
+	default:
+	}
+}
+
+// autoSealLoop is the background goroutine that manages the auto-seal timer.
+// It runs for the lifetime of the Vault.
+//
+// On each wake event it re-reads vault state under the lock and arms or stops
+// the timer. When the timer fires it checks whether the epoch and generation
+// are unchanged before calling Seal — ensuring an activity or configuration
+// change that arrives near-simultaneously with an expiry wins.
+func (v *Vault) autoSealLoop() {
+	var t *time.Timer
+	var c <-chan time.Time
+	var armEpoch uint64
+
+	for {
+		select {
+		case <-v.autoSealWake:
+			if t != nil {
+				t.Stop()
+				t, c = nil, nil
+			}
+
+			v.mu.Lock()
+			mins := v.doc.AutoSealMinutes
+			durFn := v.autoSealDurationFn
+			isSealed := v.rootKey == nil
+			armEpoch = v.autoSealEpoch
+			v.mu.Unlock()
+
+			if !isSealed && mins > 0 {
+				t = time.NewTimer(durFn(mins))
+				c = t.C
+			}
+
+		case <-c:
+			c = nil
+
+			v.mu.Lock()
+			isSealed := v.rootKey == nil
+			epoch := v.autoSealEpoch
+			v.mu.Unlock()
+
+			if !isSealed && epoch == armEpoch {
+				v.Seal()
+			}
+		}
+	}
 }
 
 // ChangePassphraseRequest carries the current authentication factor and the
@@ -1177,6 +1317,17 @@ type Snapshot struct {
 	// these, decide whether the question is about the machine or the vault.
 	OSKeyCapable bool `json:"osKeyCapable"`
 
+	// HasPassphrase is STATE: the vault document contains a passphrase
+	// envelope. When false, ChangePassphrase and RegenerateRecovery are
+	// impossible — the vault was set up with only an OS-held key.
+	HasPassphrase bool `json:"hasPassphrase"`
+
+	// AutoSealMinutes is the configured idle auto-seal timeout. 0 = off.
+	// The Snapshot is the transport projection, so Live (mutable) values are
+	// always read under the lock and are never stale for long — see the method
+	// that constructs it for the exact locking window.
+	AutoSealMinutes int `json:"autoSealMinutes"`
+
 	Providers []ProviderSnapshot `json:"providers"`
 }
 
@@ -1187,11 +1338,15 @@ func (v *Vault) Snapshot(ctx context.Context) Snapshot {
 	v.mu.Lock()
 	state := v.stateLocked()
 	hasOSKey := v.doc.HasOSKey
+	hasPass := v.doc.Passphrase != nil
+	autoSealMins := v.doc.AutoSealMinutes
 	providers := v.reg.List()
 	v.mu.Unlock()
 	snap := Snapshot{
-		State:    state,
-		HasOSKey: hasOSKey,
+		State:           state,
+		HasOSKey:        hasOSKey,
+		HasPassphrase:   hasPass,
+		AutoSealMinutes: autoSealMins,
 	}
 
 	for _, p := range providers {
@@ -1215,15 +1370,19 @@ func (v *Vault) Snapshot(ctx context.Context) Snapshot {
 // MarshalJSON serialises Snapshot with a string state value.
 func (s Snapshot) MarshalJSON() ([]byte, error) {
 	type alias struct {
-		State        string             `json:"state"`
-		HasOSKey     bool               `json:"osKeyAvailable"`
-		OSKeyCapable bool               `json:"osKeyCapable"`
-		Providers    []ProviderSnapshot `json:"providers"`
+		State           string             `json:"state"`
+		HasOSKey        bool               `json:"osKeyAvailable"`
+		OSKeyCapable    bool               `json:"osKeyCapable"`
+		HasPassphrase   bool               `json:"hasPassphrase"`
+		AutoSealMinutes int                `json:"autoSealMinutes"`
+		Providers       []ProviderSnapshot `json:"providers"`
 	}
 	return json.Marshal(alias{
-		State:        s.State.String(),
-		HasOSKey:     s.HasOSKey,
-		OSKeyCapable: s.OSKeyCapable,
-		Providers:    s.Providers,
+		State:           s.State.String(),
+		HasOSKey:        s.HasOSKey,
+		OSKeyCapable:    s.OSKeyCapable,
+		HasPassphrase:   s.HasPassphrase,
+		AutoSealMinutes: s.AutoSealMinutes,
+		Providers:       s.Providers,
 	})
 }

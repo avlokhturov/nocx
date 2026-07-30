@@ -328,6 +328,9 @@ export class TabManager {
   private readonly recentTabIds: number[] = []
   /** Called when an SSH connection fails because the vault is sealed. */
   onVaultSealed?: () => void
+  /** Called when the user performs a UI action that should reset the
+   *  vault idle timer. Wired by main.tsx to vaultClient.activity(). */
+  onActivity?: () => void
 
   constructor(
     bar: HTMLElement,
@@ -693,6 +696,7 @@ export class TabManager {
     if (e.key === 't') {
       e.preventDefault()
       e.stopPropagation()
+      this.onActivity?.()
       this.newTab()
       return
     }
@@ -700,6 +704,7 @@ export class TabManager {
     if (e.key === 'w') {
       e.preventDefault()
       e.stopPropagation()
+      this.onActivity?.()
       this.closeActiveTab()
       return
     }
@@ -709,6 +714,7 @@ export class TabManager {
     if (Number.isInteger(keyNum) && keyNum >= 1 && keyNum <= 9 && keyNum <= this.tabs.length) {
       e.preventDefault()
       e.stopPropagation()
+      this.onActivity?.()
       this.activateByIndex(keyNum - 1)
     }
   }

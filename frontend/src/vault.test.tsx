@@ -39,6 +39,8 @@ function mockClient() {
   const changePassphrase = vi.fn()
   const regenerateRecovery = vi.fn()
   const setDefaultProvider = vi.fn()
+  const setAutoSeal = vi.fn()
+  const activity = vi.fn()
   const client = {
     status,
     setup,
@@ -47,6 +49,8 @@ function mockClient() {
     changePassphrase,
     regenerateRecovery,
     setDefaultProvider,
+    setAutoSeal,
+    activity,
   } as unknown as VaultClient
   return {
     client,
@@ -57,6 +61,8 @@ function mockClient() {
     changePassphrase,
     regenerateRecovery,
     setDefaultProvider,
+    setAutoSeal,
+    activity,
   }
 }
 
@@ -64,6 +70,8 @@ const BASE_STATUS = {
   state: 'sealed' as const,
   osKeyAvailable: false,
   osKeyCapable: false,
+  hasPassphrase: false,
+  autoSealMinutes: 0,
   providers: [],
   defaultProvider: null,
 }
@@ -77,6 +85,8 @@ describe('createVaultState', () => {
       state: 'uninitialized',
       osKeyAvailable: false,
       osKeyCapable: true,
+      hasPassphrase: false,
+      autoSealMinutes: 0,
       providers: [],
       defaultProvider: null,
     })
@@ -104,6 +114,8 @@ describe('createVaultState', () => {
       state: 'uninitialized',
       osKeyAvailable: false,
       osKeyCapable: true,
+      hasPassphrase: false,
+      autoSealMinutes: 0,
       providers: [],
       defaultProvider: null,
     })
@@ -127,6 +139,8 @@ describe('createVaultState', () => {
     ;(client.status as ReturnType<typeof vi.fn>).mockResolvedValue({
       state: 'uninitialized',
       osKeyAvailable: false,
+      hasPassphrase: false,
+      autoSealMinutes: 0,
       providers: [],
       defaultProvider: null,
     })
@@ -147,6 +161,8 @@ describe('createVaultState', () => {
     ;(client.status as ReturnType<typeof vi.fn>).mockResolvedValue({
       state: 'sealed',
       osKeyAvailable: true,
+      hasPassphrase: false,
+      autoSealMinutes: 0,
       providers: [],
       defaultProvider: null,
     })
@@ -167,6 +183,8 @@ describe('createVaultState', () => {
     ;(client.status as ReturnType<typeof vi.fn>).mockResolvedValue({
       state: 'unsealed',
       osKeyAvailable: true,
+      hasPassphrase: false,
+      autoSealMinutes: 0,
       providers: [],
       defaultProvider: null,
     })
@@ -190,6 +208,8 @@ describe('createVaultState', () => {
     ;(client.status as ReturnType<typeof vi.fn>).mockResolvedValue({
       state: 'unsealed',
       osKeyAvailable: false,
+      hasPassphrase: false,
+      autoSealMinutes: 0,
       providers: [],
       defaultProvider: null,
     })
@@ -228,6 +248,8 @@ describe('createVaultState', () => {
     ;(client.status as ReturnType<typeof vi.fn>).mockResolvedValue({
       state: 'uninitialized',
       osKeyAvailable: false,
+      hasPassphrase: false,
+      autoSealMinutes: 0,
       providers: [],
       defaultProvider: null,
     })
@@ -252,6 +274,8 @@ describe('createVaultState', () => {
     ;(client.status as ReturnType<typeof vi.fn>).mockResolvedValue({
       state: 'sealed',
       osKeyAvailable: false,
+      hasPassphrase: false,
+      autoSealMinutes: 0,
       providers: [],
       defaultProvider: null,
     })
@@ -284,6 +308,8 @@ describe('saveSecretWithVault', () => {
     status.mockResolvedValue({
       state: 'uninitialized',
       osKeyAvailable: false,
+      hasPassphrase: false,
+      autoSealMinutes: 0,
       providers: [],
       defaultProvider: null,
     })
@@ -317,6 +343,8 @@ describe('saveSecretWithVault', () => {
       state: 'uninitialized',
       osKeyAvailable: false,
       osKeyCapable: true,
+      hasPassphrase: false,
+      autoSealMinutes: 0,
       providers: [],
       defaultProvider: null,
     })
@@ -347,6 +375,8 @@ describe('saveSecretWithVault', () => {
     status.mockResolvedValue({
       state: 'sealed',
       osKeyAvailable: true,
+      hasPassphrase: false,
+      autoSealMinutes: 0,
       providers: [],
       defaultProvider: null,
     })
@@ -376,6 +406,8 @@ describe('saveSecretWithVault', () => {
     status.mockResolvedValue({
       state: 'unsealed',
       osKeyAvailable: false,
+      hasPassphrase: false,
+      autoSealMinutes: 0,
       providers: [],
       defaultProvider: null,
     })
@@ -394,6 +426,8 @@ describe('saveSecretWithVault', () => {
       state: 'uninitialized',
       osKeyAvailable: false,
       osKeyCapable: true,
+      hasPassphrase: false,
+      autoSealMinutes: 0,
       providers: [],
       defaultProvider: null,
     })
@@ -414,6 +448,8 @@ describe('saveSecretWithVault', () => {
     status.mockResolvedValue({
       state: 'sealed',
       osKeyAvailable: false,
+      hasPassphrase: false,
+      autoSealMinutes: 0,
       providers: [],
       defaultProvider: null,
     })
@@ -441,6 +477,8 @@ describe('saveSecretWithVault', () => {
     status.mockResolvedValue({
       state: 'uninitialized',
       osKeyAvailable: false,
+      hasPassphrase: false,
+      autoSealMinutes: 0,
       providers: [],
       defaultProvider: null,
     })
@@ -466,6 +504,8 @@ describe('saveSecretWithVault', () => {
     status.mockResolvedValue({
       state: 'sealed',
       osKeyAvailable: false,
+      hasPassphrase: false,
+      autoSealMinutes: 0,
       providers: [],
       defaultProvider: null,
     })
@@ -827,18 +867,24 @@ describe('VaultSection', () => {
   const UNSEALED_STATUS = {
     state: 'unsealed' as const,
     osKeyAvailable: true,
+    hasPassphrase: true,
+    autoSealMinutes: 0,
     providers: [{ id: 'keychain', writable: true, ready: true }],
     defaultProvider: 'keychain',
   }
   const SEALED_STATUS = {
     state: 'sealed' as const,
     osKeyAvailable: false,
+    hasPassphrase: false,
+    autoSealMinutes: 0,
     providers: [{ id: 'secret-service', writable: true, ready: true }],
     defaultProvider: null,
   }
   const UNINIT_STATUS = {
     state: 'uninitialized' as const,
     osKeyAvailable: false,
+    hasPassphrase: false,
+    autoSealMinutes: 0,
     providers: [],
     defaultProvider: null,
   }
@@ -896,6 +942,64 @@ describe('VaultSection', () => {
     expect(sealBtn!.getAttribute('disabled')).not.toBeNull()
   })
 
+  it('change passphrase button is disabled on uninitialized with explanation', async () => {
+    await renderVaultSection(UNINIT_STATUS)
+    const allChange = screen.getAllByText('Change passphrase')
+    const changeBtn = allChange.find((el) => el.tagName === 'BUTTON')
+    expect(changeBtn!.getAttribute('disabled')).not.toBeNull()
+    expect(screen.getAllByText('Vault has not been set up.').length).toBeGreaterThan(0)
+  })
+
+  it('reissue recovery button is disabled on uninitialized with explanation', async () => {
+    await renderVaultSection(UNINIT_STATUS)
+    const allRecovery = screen.getAllByText('Reissue recovery code')
+    const recoveryBtn = allRecovery.find((el) => el.tagName === 'BUTTON')
+    expect(recoveryBtn!.getAttribute('disabled')).not.toBeNull()
+    expect(screen.getAllByText('Vault has not been set up.').length).toBeGreaterThan(0)
+  })
+
+  it('action buttons disabled on sealed with explanation', async () => {
+    await renderVaultSection(SEALED_STATUS)
+    const allChange = screen.getAllByText('Change passphrase')
+    const changeBtn = allChange.find((el) => el.tagName === 'BUTTON')
+    expect(changeBtn!.getAttribute('disabled')).not.toBeNull()
+    const allRecovery = screen.getAllByText('Reissue recovery code')
+    const recoveryBtn = allRecovery.find((el) => el.tagName === 'BUTTON')
+    expect(recoveryBtn!.getAttribute('disabled')).not.toBeNull()
+    expect(screen.getAllByText('Vault is sealed.').length).toBeGreaterThan(0)
+  })
+
+  it('action buttons enabled on unsealed with passphrase', async () => {
+    await renderVaultSection(UNSEALED_STATUS)
+    const allChange = screen.getAllByText('Change passphrase')
+    const changeBtn = allChange.find((el) => el.tagName === 'BUTTON')
+    expect(changeBtn!.getAttribute('disabled')).toBeNull()
+    const allRecovery = screen.getAllByText('Reissue recovery code')
+    const recoveryBtn = allRecovery.find((el) => el.tagName === 'BUTTON')
+    expect(recoveryBtn!.getAttribute('disabled')).toBeNull()
+  })
+
+  it('action buttons disabled on unsealed OS-only with explanation', async () => {
+    const status = {
+      state: 'unsealed' as const,
+      hasPassphrase: false,
+      osKeyAvailable: true,
+      autoSealMinutes: 0,
+      providers: [{ id: 'keychain', writable: true, ready: true }],
+      defaultProvider: 'keychain',
+    }
+    await renderVaultSection(status)
+    const allChange = screen.getAllByText('Change passphrase')
+    const changeBtn = allChange.find((el) => el.tagName === 'BUTTON')
+    expect(changeBtn!.getAttribute('disabled')).not.toBeNull()
+    const allRecovery = screen.getAllByText('Reissue recovery code')
+    const recoveryBtn = allRecovery.find((el) => el.tagName === 'BUTTON')
+    expect(recoveryBtn!.getAttribute('disabled')).not.toBeNull()
+    expect(
+      screen.getAllByText('Only available when a passphrase is configured.').length,
+    ).toBeGreaterThan(0)
+  })
+
   it('renders provider list with badges', async () => {
     await renderVaultSection(UNSEALED_STATUS)
     const allKeychain = screen.getAllByText('keychain')
@@ -909,6 +1013,8 @@ describe('VaultSection', () => {
     const status = {
       state: 'unsealed' as const,
       osKeyAvailable: true,
+      hasPassphrase: true,
+      autoSealMinutes: 0,
       providers: [{ id: 'keychain', writable: false, ready: false, reason: 'Keychain locked' }],
       defaultProvider: null,
     }
@@ -925,6 +1031,8 @@ describe('VaultSection', () => {
     const status = {
       state: 'unsealed' as const,
       osKeyAvailable: true,
+      hasPassphrase: true,
+      autoSealMinutes: 0,
       providers: [
         { id: 'keychain', writable: true, ready: true },
         { id: 'secret-service', writable: true, ready: true },
@@ -964,6 +1072,8 @@ describe('VaultSection', () => {
     const status = {
       state: 'unsealed' as const,
       osKeyAvailable: true,
+      hasPassphrase: true,
+      autoSealMinutes: 0,
       providers: [
         { id: 'keychain', writable: false, ready: false, reason: 'Unlock your login keychain' },
       ],
@@ -976,5 +1086,45 @@ describe('VaultSection', () => {
     render(() => <VaultSection vaultClient={client} vaultController={ctrl} />)
 
     expect(screen.getByText('Unlock your login keychain')).toBeTruthy()
+  })
+
+  it('auto-seal select round-trips: set then refresh shows updated value', async () => {
+    const { client, setAutoSeal } = mockClient()
+    ;(client.status as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ...UNSEALED_STATUS,
+      autoSealMinutes: 0,
+    })
+    const ctrl = createVaultState(client)
+    await ctrl.refresh()
+
+    render(() => <VaultSection vaultClient={client} vaultController={ctrl} />)
+    // Find the auto-seal select by looking for "Off" option text.
+    const allSelects = document.querySelectorAll('select.ui-select')
+    const selectEl = Array.from(allSelects).find(
+      (s) => s.querySelector('option[value="0"]')?.textContent === 'Off',
+    ) as HTMLSelectElement
+    expect(selectEl.value).toBe('0')
+
+    // Change to 30 minutes.
+    fireEvent.change(selectEl, { target: { value: '30' } })
+
+    await vi.waitFor(() => {
+      expect(setAutoSeal).toHaveBeenCalledWith(30)
+    })
+
+    // Simulate round-trip: status refresh returns updated value.
+    ;(client.status as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ...UNSEALED_STATUS,
+      autoSealMinutes: 30,
+    })
+    await ctrl.refresh()
+
+    // Re-render and verify select shows the new value.
+    render(() => <VaultSection vaultClient={client} vaultController={ctrl} />)
+    const updatedSelects = document.querySelectorAll('select.ui-select')
+    const updatedSelect = Array.from(updatedSelects).find(
+      (s) => s.querySelector('option[value="0"]')?.textContent === 'Off',
+    ) as HTMLSelectElement
+    expect(updatedSelect.value).toBe('30')
   })
 })

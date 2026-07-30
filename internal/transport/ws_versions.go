@@ -122,11 +122,6 @@ type versionsImpactResult struct {
 //	<-- {"jsonrpc":"2.0","id":1,"result":{"versionId":"v2","evidence":{"accepted":5,"total":5}}}
 //	<-- {"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"promote threshold not met: need 3 accepted, have 1 out of 5"}}
 func (s *WSServer) handleVersionsPromote(wconn *wsConn, req jsonrpcRequest) {
-	if s.profileSvc == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "Method not found"))
-		return
-	}
-
 	var params versionsPromoteParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.CredentialID == "" {
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: credentialId required"))
@@ -183,11 +178,6 @@ func (s *WSServer) handleVersionsPromote(wconn *wsConn, req jsonrpcRequest) {
 //	--> {"jsonrpc":"2.0","id":1,"method":"versions.retire","params":{"credentialId":"cred:prod:abc","versionId":"v1","drainExisting":false}}
 //	<-- {"jsonrpc":"2.0","id":1,"result":{"versionId":"v1","retired":true,"sessionsClosed":0}}
 func (s *WSServer) handleVersionsRetire(wconn *wsConn, req jsonrpcRequest) {
-	if s.profileSvc == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "Method not found"))
-		return
-	}
-
 	var params versionsRetireParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.CredentialID == "" || params.VersionID == "" {
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: credentialId and versionId required"))
@@ -226,11 +216,6 @@ func (s *WSServer) handleVersionsRetire(wconn *wsConn, req jsonrpcRequest) {
 //	--> {"jsonrpc":"2.0","id":1,"method":"versions.revoke","params":{"credentialId":"cred:prod:abc","versionId":"v1"}}
 //	<-- {"jsonrpc":"2.0","id":1,"result":{"versionId":"v1","retired":true,"sessionsClosed":3}}
 func (s *WSServer) handleVersionsRevoke(wconn *wsConn, req jsonrpcRequest) {
-	if s.profileSvc == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "Method not found"))
-		return
-	}
-
 	var params versionsRevokeParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.CredentialID == "" || params.VersionID == "" {
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: credentialId and versionId required"))
@@ -300,7 +285,7 @@ func (s *WSServer) handleVersionsImpact(wconn *wsConn, req jsonrpcRequest) {
 	}
 
 	// Validate the version exists. Accept both explicit versions and the
-	// synthesized legacy "v1" from cred.Current().
+	// synthesized initial "v1" from cred.Current().
 	version, versionFound := cred.Version(params.VersionID)
 	if !versionFound {
 		if cur, ok := cred.Current(); !ok || cur.ID != params.VersionID {

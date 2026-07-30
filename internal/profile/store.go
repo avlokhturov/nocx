@@ -33,10 +33,10 @@ type CredentialMetadataRepository interface {
 	DeleteCredential(id string) error
 	// UpdateCurrentVersionRefs sets password/passphrase secret IDs on the
 	// credential's current version (or on the record-level fields for a
-	// legacy credential with no versions).
+	// credential with no versions).
 	UpdateCurrentVersionRefs(id string, passwordSecretID, passphraseSecretID string) error
 	// AppendCredentialVersion appends a new version and makes it current.
-	// If the credential has no versions (legacy), existing record-level
+	// If the credential has no versions, existing record-level
 	// SecretID/PassphraseSecretID are migrated into version "v1" first.
 	AppendCredentialVersion(id string, passwordSecretID, passphraseSecretID string) error
 	// SetCandidateVersion creates a new version and sets it as the candidate
@@ -508,7 +508,7 @@ func (s *JSONStore) UpdateCredential(id string, p CredentialPatch) (Credential, 
 }
 
 // UpdateCurrentVersionRefs sets password/passphrase secret IDs on the
-// credential's current version. For a legacy credential with no versions,
+// credential's current version. For a credential with no versions,
 // the record-level SecretID/PassphraseSecretID fields are updated instead.
 func (s *JSONStore) UpdateCurrentVersionRefs(id string, passwordSecretID, passphraseSecretID string) error {
 	s.mu.Lock()
@@ -521,7 +521,7 @@ func (s *JSONStore) UpdateCurrentVersionRefs(id string, passwordSecretID, passph
 	for i, existing := range d.Credentials {
 		if existing.ID == id {
 			if len(existing.Versions) == 0 {
-				// Legacy path: update record-level fields.
+				// No versions: update record-level fields.
 				d.Credentials[i].SecretID = passwordSecretID
 				d.Credentials[i].PassphraseSecretID = passphraseSecretID
 			} else {
@@ -541,7 +541,7 @@ func (s *JSONStore) UpdateCurrentVersionRefs(id string, passwordSecretID, passph
 }
 
 // AppendCredentialVersion appends a new version and sets it as the current
-// version. If the credential has no versions yet (legacy), the existing
+// version. If the credential has no versions yet, the existing
 // record-level SecretID and PassphraseSecretID are first migrated into
 // version "v1".
 func (s *JSONStore) AppendCredentialVersion(id string, passwordSecretID, passphraseSecretID string) error {
@@ -554,16 +554,16 @@ func (s *JSONStore) AppendCredentialVersion(id string, passwordSecretID, passphr
 	}
 	for i, existing := range d.Credentials {
 		if existing.ID == id {
-			// Migrate legacy fields into a version if needed.
+			// Migrate record-level fields into a version if needed.
 			if len(existing.Versions) == 0 {
 				d.Credentials[i].Versions = []CredentialVersion{
 					{
-						ID:                 legacyVersionID,
+						ID:                 initialVersionID,
 						PasswordSecretID:   existing.SecretID,
 						PassphraseSecretID: existing.PassphraseSecretID,
 					},
 				}
-				d.Credentials[i].CurrentVersionID = legacyVersionID
+				d.Credentials[i].CurrentVersionID = initialVersionID
 				d.Credentials[i].SecretID = ""
 				d.Credentials[i].PassphraseSecretID = ""
 			}
@@ -610,16 +610,16 @@ func (s *JSONStore) SetCandidateVersion(id string, passwordSecretID, passphraseS
 				return fmt.Errorf("%s: %w", id, ErrCandidateExists)
 			}
 
-			// Migrate legacy fields into a version if needed.
+			// Migrate record-level fields into a version if needed.
 			if len(existing.Versions) == 0 {
 				d.Credentials[i].Versions = []CredentialVersion{
 					{
-						ID:                 legacyVersionID,
+						ID:                 initialVersionID,
 						PasswordSecretID:   existing.SecretID,
 						PassphraseSecretID: existing.PassphraseSecretID,
 					},
 				}
-				d.Credentials[i].CurrentVersionID = legacyVersionID
+				d.Credentials[i].CurrentVersionID = initialVersionID
 				d.Credentials[i].SecretID = ""
 				d.Credentials[i].PassphraseSecretID = ""
 			}
@@ -696,7 +696,7 @@ func (s *JSONStore) PromoteVersion(id string) (Credential, error) {
 				return Credential{}, fmt.Errorf("%s: no candidate to promote", id)
 			}
 
-			// No versions list means the credential is a legacy record.
+			// No versions list means the credential is in initial state.
 			// A candidate cannot exist on a credential with no versions —
 			// staging always appends to Versions first. Refuse: this state
 			// is unreachable from correct callers and silent data loss from
@@ -733,7 +733,7 @@ func (s *JSONStore) RetireVersion(id string, versionID string) error {
 					return s.writeLocked(d)
 				}
 			}
-			// Legacy credential with no versions — refuse retirement.
+			// Credential with no versions — refuse retirement.
 			return fmt.Errorf("%s version %s: %w", id, versionID, ErrVersionNotFound)
 		}
 	}

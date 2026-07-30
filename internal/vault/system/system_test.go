@@ -37,6 +37,38 @@ func TestProbeWithFakeKeyring(t *testing.T) {
 	}
 }
 
+// TestProbe_LockedKeyring verifies that Probe returns ReasonLocked when the
+// keyring is locked (Set fails with a "locked" error). A locked keychain must
+// not be reported as "no-service" — the renderer shows different copy for each.
+func TestProbe_LockedKeyring(t *testing.T) {
+	kr := lockedKeyring{}
+	p := system.New(system.WithKeyring(kr))
+	ctx := context.Background()
+	status := p.Probe(ctx)
+	if status.Ready {
+		t.Fatal("Probe with locked keyring: Ready=true, want false")
+	}
+	if status.Reason != vault.ReasonLocked {
+		t.Fatalf("Probe Reason = %q, want %q", status.Reason, vault.ReasonLocked)
+	}
+}
+
+// lockedKeyring is a Keyring that always returns errors containing "locked" on
+// Set, simulating an OS keychain whose collection is locked.
+type lockedKeyring struct{}
+
+func (lockedKeyring) Set(service, user, password string) error {
+	return errors.New("secret service: collection is locked")
+}
+
+func (lockedKeyring) Get(service, user string) (string, error) {
+	return "", errors.New("secret service: collection is locked")
+}
+
+func (lockedKeyring) Delete(service, user string) error {
+	return errors.New("secret service: collection is locked")
+}
+
 // TestTimeoutWriteStillLands verifies that a Put that times out still
 // completes in the background, and that the value is readable afterwards.
 //

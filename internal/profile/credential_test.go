@@ -46,13 +46,13 @@ func TestCredentialWithPatch_PresentAndEmptyClears(t *testing.T) {
 	}
 }
 
-func TestCredentialCurrent_LegacyRecordReadsAsOneVersion(t *testing.T) {
-	// A store written before versions existed: SecretID on the record, no list.
+func TestCredentialCurrent_NoVersionsReadsAsOneVersion(t *testing.T) {
+	// A credential with no Versions list: SecretID on the record, no versions.
 	c := Credential{ID: "cred:a:1", Name: "a", Username: "u", Auth: AuthPassword, SecretID: "sec:1"}
 
 	v, ok := c.Current()
 	if !ok {
-		t.Fatal("a legacy credential must read as one current version")
+		t.Fatal("a credential with no versions must read as one current version")
 	}
 	if v.PasswordSecretID != "sec:1" {
 		t.Errorf("PasswordSecretID = %q, want sec:1", v.PasswordSecretID)

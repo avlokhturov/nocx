@@ -25,6 +25,9 @@ type fakeVaultLifecycle struct {
 	regenerateErr         error
 	regenerateCode        string
 	setDefaultProviderErr error
+	setAutoSealErr        error
+	setAutoSealCalled     bool
+	activityCalled        bool
 }
 
 func (f *fakeVaultLifecycle) State() vault.State { return f.state }
@@ -57,6 +60,15 @@ func (f *fakeVaultLifecycle) RegenerateRecovery(_ context.Context, _ vault.Regen
 
 func (f *fakeVaultLifecycle) SetDefaultProvider(_ context.Context, _ vault.ProviderID) error {
 	return f.setDefaultProviderErr
+}
+
+func (f *fakeVaultLifecycle) SetAutoSeal(_ context.Context, _ int) error {
+	f.setAutoSealCalled = true
+	return f.setAutoSealErr
+}
+
+func (f *fakeVaultLifecycle) Activity() {
+	f.activityCalled = true
 }
 
 func newFakeVaultLifecycle() *fakeVaultLifecycle {
@@ -534,6 +546,126 @@ func TestVaultRPC_SetDefaultProvider_ErrorPropagation(t *testing.T) {
 	}
 	if resp.Error.Code != -32002 {
 		t.Errorf("error code = %d, want -32002", resp.Error.Code)
+	}
+}
+
+// ── vault.setAutoSeal ────────────────────────────────────────────────────
+
+func TestVaultRPC_SetAutoSeal_Success(t *testing.T) {
+	fake := newFakeVaultLifecycle()
+	ws, cleanup := newVaultWSServer(t, fake)
+	defer cleanup()
+
+	conn := connectWS(t, ws)
+	resp := vaultCall(t, conn, "vault.setAutoSeal", map[string]any{"minutes": 30}, 1)
+
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: code=%d msg=%s", resp.Error.Code, resp.Error.Message)
+	}
+	if !fake.setAutoSealCalled {
+		t.Fatal("SetAutoSeal was not called on lifecycle")
+	}
+}
+
+func TestVaultRPC_SetAutoSeal_InvalidParams(t *testing.T) {
+	fake := newFakeVaultLifecycle()
+	ws, cleanup := newVaultWSServer(t, fake)
+	defer cleanup()
+
+	conn := connectWS(t, ws)
+	// Missing "minutes" field.
+	resp := vaultCall(t, conn, "vault.setAutoSeal", map[string]any{}, 1)
+
+	if resp.Error == nil {
+		t.Fatal("expected error for missing minutes")
+	}
+	if resp.Error.Code != -32602 {
+		t.Errorf("error code = %d, want -32602", resp.Error.Code)
+	}
+	if fake.setAutoSealCalled {
+		t.Fatal("SetAutoSeal should not be called with invalid params")
+	}
+}
+
+func TestVaultRPC_SetAutoSeal_ErrorPropagation(t *testing.T) {
+	fake := newFakeVaultLifecycle()
+	fake.setAutoSealErr = vault.ErrVaultUninitialized
+	ws, cleanup := newVaultWSServer(t, fake)
+	defer cleanup()
+
+	conn := connectWS(t, ws)
+	resp := vaultCall(t, conn, "vault.setAutoSeal", map[string]any{"minutes": 5}, 1)
+
+	if resp.Error == nil {
+		t.Fatal("expected error")
+	}
+	if resp.Error.Code != -32000 {
+		t.Errorf("error code = %d, want -32000 (ErrVaultUninitialized)", resp.Error.Code)
+	}
+}
+
+// ── vault.activity ──────────────────────────────────────────────────────
+
+func TestVaultRPC_Activity(t *testing.T) {
+	fake := newFakeVaultLifecycle()
+	ws, cleanup := newVaultWSServer(t, fake)
+	defer cleanup()
+
+	conn := connectWS(t, ws)
+	resp := vaultCall(t, conn, "vault.activity", map[string]any{}, 1)
+
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: code=%d msg=%s", resp.Error.Code, resp.Error.Message)
+	}
+	if !fake.activityCalled {
+		t.Fatal("Activity was not called on lifecycle")
+	}
+}
+
+// ── vault.status: new fields ────────────────────────────────────────────
+
+func TestVaultRPC_Status_AutoSealFields(t *testing.T) {
+	snap := vault.Snapshot{
+		State:           vault.StateUnsealed,
+		HasOSKey:        false,
+		OSKeyCapable:    true,
+		HasPassphrase:   true,
+		AutoSealMinutes: 15,
+		Providers: []vault.ProviderSnapshot{
+			{ID: vault.ProviderSystem, Writable: true, Ready: true},
+		},
+	}
+	fake := newFakeVaultLifecycle()
+	fake.snap = snap
+	ws, cleanup := newVaultWSServer(t, fake)
+	defer cleanup()
+
+	conn := connectWS(t, ws)
+	resp := vaultCall(t, conn, "vault.status", map[string]any{}, 1)
+
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: code=%d msg=%s", resp.Error.Code, resp.Error.Message)
+	}
+
+	// Decode the result to check new fields.
+	var status struct {
+		State           string `json:"state"`
+		OSKeyAvailable  bool   `json:"osKeyAvailable"`
+		OSKeyCapable    bool   `json:"osKeyCapable"`
+		HasPassphrase   bool   `json:"hasPassphrase"`
+		AutoSealMinutes int    `json:"autoSealMinutes"`
+	}
+	if err := json.Unmarshal(resp.Result, &status); err != nil {
+		t.Fatalf("unmarshal status: %v", err)
+	}
+	if status.AutoSealMinutes != 15 {
+		t.Errorf("autoSealMinutes = %d, want 15", status.AutoSealMinutes)
+	}
+	if !status.HasPassphrase {
+		t.Error("hasPassphrase = false, want true")
+	}
+	if !status.OSKeyCapable {
+		t.Error("osKeyCapable = false, want true")
 	}
 }
 
