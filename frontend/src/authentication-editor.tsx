@@ -144,6 +144,10 @@ export const AuthenticationEditor: Component<AuthenticationEditorProps> = (props
           <div class="cm-credential-card">
             <strong>Using Credential: </strong>
             <span>{credential().name}</span>
+            <Show when={credential().hasKeyMaterial && credential().keyFingerprint}>
+              <br />
+              <small>Key fingerprint: {credential().keyFingerprint}</small>
+            </Show>
             <br />
             <small>
               Username: {credential().username || 'local username'} | Auth:{' '}

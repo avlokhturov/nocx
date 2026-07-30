@@ -890,96 +890,158 @@ describe('VaultSection', () => {
   }
 
   async function renderVaultSection(mockStatus: object) {
-    const { client, seal } = mockClient()
+    const { client } = mockClient()
     ;(client.status as ReturnType<typeof vi.fn>).mockResolvedValue(mockStatus)
     const ctrl = createVaultState(client)
     await ctrl.refresh()
     render(() => <VaultSection vaultClient={client} vaultController={ctrl} />)
-    return { client, ctrl, seal }
+    return { client, ctrl }
   }
 
-  it('shows state badge for unsealed', async () => {
-    await renderVaultSection(UNSEALED_STATUS)
-    expect(screen.getByText('Unsealed')).toBeTruthy()
-  })
+  /** Return the primary button within the top status row. */
+  function statusRowPrimary(): HTMLElement | null {
+    const row = document.querySelector('.ui-vault-status-row')
+    if (!row) return null
+    return row.querySelector('button[data-variant="primary"]')
+  }
 
-  it('shows state badge for sealed', async () => {
-    await renderVaultSection(SEALED_STATUS)
-    expect(screen.getByText('Sealed')).toBeTruthy()
-  })
+  // ── Acceptance 1: primary action by state ─────────────────────────
 
-  it('shows state badge for uninitialized', async () => {
+  it('shows Set up protection as primary for uninitialized', async () => {
     await renderVaultSection(UNINIT_STATUS)
-    expect(screen.getByText('Uninitialized')).toBeTruthy()
+    const btn = statusRowPrimary()
+    expect(btn).toBeTruthy()
+    expect(btn!.textContent).toBe('Set up protection')
+    expect(btn!.getAttribute('disabled')).toBeNull()
+    expect(btn!.getAttribute('data-variant')).toBe('primary')
   })
 
-  it('shows OS-held key availability', async () => {
-    await renderVaultSection(UNSEALED_STATUS)
-    expect(screen.getByText('Available')).toBeTruthy()
-  })
-
-  it('shows OS-held key not available', async () => {
+  it('shows Unlock as primary for sealed', async () => {
     await renderVaultSection(SEALED_STATUS)
-    expect(screen.getByText('Not available')).toBeTruthy()
+    const btn = statusRowPrimary()
+    expect(btn).toBeTruthy()
+    expect(btn!.textContent).toBe('Unlock')
+    expect(btn!.getAttribute('disabled')).toBeNull()
+    expect(btn!.getAttribute('data-variant')).toBe('primary')
   })
 
-  it('seal button calls vaultController.seal', async () => {
-    const { ctrl } = await renderVaultSection(UNSEALED_STATUS)
-    const sealSpy = vi.spyOn(ctrl, 'seal').mockResolvedValue(undefined)
+  it('shows Lock now as primary for unsealed', async () => {
+    await renderVaultSection(UNSEALED_STATUS)
+    const btn = statusRowPrimary()
+    expect(btn).toBeTruthy()
+    expect(btn!.textContent).toBe('Lock now')
+    expect(btn!.getAttribute('disabled')).toBeNull()
+    expect(btn!.getAttribute('data-variant')).toBe('primary')
+  })
 
-    const allSealNow = screen.getAllByText('Seal now')
-    const sealBtn = allSealNow.find((el) => el.tagName === 'BUTTON')
-    fireEvent.click(sealBtn!)
+  it('exactly one primary button in status row per state', async () => {
+    await renderVaultSection(UNINIT_STATUS)
+    let row = document.querySelector('.ui-vault-status-row')
+    expect(row!.querySelectorAll('button[data-variant="primary"]').length).toBe(1)
+    cleanup()
+
+    const { client } = mockClient()
+    ;(client.status as ReturnType<typeof vi.fn>).mockResolvedValue(SEALED_STATUS)
+    const ctrl = createVaultState(client)
+    await ctrl.refresh()
+    render(() => <VaultSection vaultClient={client} vaultController={ctrl} />)
+    row = document.querySelector('.ui-vault-status-row')
+    expect(row!.querySelectorAll('button[data-variant="primary"]').length).toBe(1)
+  })
+
+  // ── Primary action behavior ───────────────────────────────────────
+
+  it('Set up protection opens SetupDialog for uninitialized', async () => {
+    const { client } = mockClient()
+    ;(client.status as ReturnType<typeof vi.fn>).mockResolvedValue(UNINIT_STATUS)
+    const ctrl = createVaultState(client)
+    await ctrl.refresh()
+    render(() => <VaultSection vaultClient={client} vaultController={ctrl} />)
+
+    fireEvent.click(statusRowPrimary()!)
+    expect(screen.getByText('Set Up Vault')).toBeTruthy()
+  })
+
+  it('Unlock calls vaultController.openUnlock for sealed', async () => {
+    const { client } = mockClient()
+    ;(client.status as ReturnType<typeof vi.fn>).mockResolvedValue(SEALED_STATUS)
+    const ctrl = createVaultState(client)
+    const openUnlockSpy = vi.spyOn(ctrl, 'openUnlock')
+    await ctrl.refresh()
+    render(() => <VaultSection vaultClient={client} vaultController={ctrl} />)
+
+    fireEvent.click(statusRowPrimary()!)
     await vi.waitFor(() => {
-      expect(sealSpy).toHaveBeenCalled()
+      expect(openUnlockSpy).toHaveBeenCalled()
     })
   })
 
-  it('seal button is disabled when sealed', async () => {
-    await renderVaultSection(SEALED_STATUS)
-    const allSealNow = screen.getAllByText('Seal now')
-    const sealBtn = allSealNow.find((el) => el.tagName === 'BUTTON')
-    expect(sealBtn!.getAttribute('disabled')).not.toBeNull()
+  // ── Acceptance 2: store rows with status markers ───────────────────
+
+  it('each store row label appears in the tablist', async () => {
+    const status = {
+      state: 'unsealed' as const,
+      osKeyAvailable: true,
+      hasPassphrase: true,
+      autoSealMinutes: 0,
+      providers: [
+        { id: 'system', writable: true, ready: true },
+        { id: 'file', writable: true, ready: false, reason: 'locked' },
+      ],
+      defaultProvider: 'system',
+    }
+    await renderVaultSection(status)
+    const tablist = document.querySelector('[role="tablist"]')
+    expect(tablist).toBeTruthy()
+    expect(tablist!.textContent).toContain('System keychain')
+    expect(tablist!.textContent).toContain('Encrypted nocx storage')
   })
 
-  it('change passphrase button is disabled on uninitialized with explanation', async () => {
-    await renderVaultSection(UNINIT_STATUS)
-    const allChange = screen.getAllByText('Change passphrase')
-    const changeBtn = allChange.find((el) => el.tagName === 'BUTTON')
-    expect(changeBtn!.getAttribute('disabled')).not.toBeNull()
-    expect(screen.getAllByText('Vault has not been set up.').length).toBeGreaterThan(0)
+  it('unready store identifiable without selecting it', async () => {
+    const status = {
+      state: 'unsealed' as const,
+      osKeyAvailable: true,
+      hasPassphrase: true,
+      autoSealMinutes: 0,
+      providers: [
+        { id: 'system', writable: true, ready: true },
+        { id: 'file', writable: true, ready: false, reason: 'locked' },
+      ],
+      defaultProvider: 'system',
+    }
+    await renderVaultSection(status)
+    // The visually-hidden span contains the REASON_MESSAGES sentence
+    const hiddenSpans = document.querySelectorAll('.ui-visually-hidden')
+    const lockedMsg = Array.from(hiddenSpans).find((s) =>
+      s.textContent?.includes('Your login keychain is locked'),
+    )
+    expect(lockedMsg).toBeTruthy()
   })
 
-  it('reissue recovery button is disabled on uninitialized with explanation', async () => {
-    await renderVaultSection(UNINIT_STATUS)
-    const allRecovery = screen.getAllByText('Reissue recovery code')
-    const recoveryBtn = allRecovery.find((el) => el.tagName === 'BUTTON')
-    expect(recoveryBtn!.getAttribute('disabled')).not.toBeNull()
-    expect(screen.getAllByText('Vault has not been set up.').length).toBeGreaterThan(0)
+  // ── Acceptance 3: store panel shows state sentence ────────────────
+
+  it('store panel shows state as sentence with remedy, not a reason code', async () => {
+    const status = {
+      state: 'unsealed' as const,
+      osKeyAvailable: true,
+      hasPassphrase: true,
+      autoSealMinutes: 0,
+      providers: [{ id: 'file', writable: false, ready: false, reason: 'locked' }],
+      defaultProvider: null,
+    }
+    await renderVaultSection(status)
+    // The panel shows a sentence starting with "Not answering:"
+    expect(screen.getByText(/Not answering: Your login keychain is locked/)).toBeTruthy()
   })
 
-  it('action buttons disabled on sealed with explanation', async () => {
-    await renderVaultSection(SEALED_STATUS)
-    const allChange = screen.getAllByText('Change passphrase')
-    const changeBtn = allChange.find((el) => el.tagName === 'BUTTON')
-    expect(changeBtn!.getAttribute('disabled')).not.toBeNull()
-    const allRecovery = screen.getAllByText('Reissue recovery code')
-    const recoveryBtn = allRecovery.find((el) => el.tagName === 'BUTTON')
-    expect(recoveryBtn!.getAttribute('disabled')).not.toBeNull()
-    expect(screen.getAllByText('Vault is sealed.').length).toBeGreaterThan(0)
-  })
-
-  it('action buttons enabled on unsealed with passphrase', async () => {
+  it('ready store panel shows availability sentence', async () => {
     await renderVaultSection(UNSEALED_STATUS)
-    const allChange = screen.getAllByText('Change passphrase')
-    const changeBtn = allChange.find((el) => el.tagName === 'BUTTON')
-    expect(changeBtn!.getAttribute('disabled')).toBeNull()
-    const allRecovery = screen.getAllByText('Reissue recovery code')
-    const recoveryBtn = allRecovery.find((el) => el.tagName === 'BUTTON')
-    expect(recoveryBtn!.getAttribute('disabled')).toBeNull()
+    expect(screen.getByText(/is available and answering/)).toBeTruthy()
   })
 
-  it('action buttons disabled on unsealed OS-only with explanation', async () => {
+  // ── Acceptance 4: protection actions on no-passphrase vault ───────
+
+  it('change passphrase and recovery disabled with explanation when no passphrase', async () => {
     const status = {
       state: 'unsealed' as const,
       hasPassphrase: false,
@@ -989,106 +1051,72 @@ describe('VaultSection', () => {
       defaultProvider: 'keychain',
     }
     await renderVaultSection(status)
-    const allChange = screen.getAllByText('Change passphrase')
-    const changeBtn = allChange.find((el) => el.tagName === 'BUTTON')
-    expect(changeBtn!.getAttribute('disabled')).not.toBeNull()
-    const allRecovery = screen.getAllByText('Reissue recovery code')
-    const recoveryBtn = allRecovery.find((el) => el.tagName === 'BUTTON')
-    expect(recoveryBtn!.getAttribute('disabled')).not.toBeNull()
+    expect(
+      screen.getByRole('button', { name: 'Change passphrase' }).getAttribute('disabled'),
+    ).not.toBeNull()
+    expect(
+      screen.getByRole('button', { name: 'Reissue recovery code' }).getAttribute('disabled'),
+    ).not.toBeNull()
+    // Description appears twice (once per field)
     expect(
       screen.getAllByText('Only available when a passphrase is configured.').length,
-    ).toBeGreaterThan(0)
+    ).toBeGreaterThanOrEqual(1)
   })
 
-  it('renders provider list with badges', async () => {
+  it('action buttons enabled on unsealed with passphrase', async () => {
     await renderVaultSection(UNSEALED_STATUS)
-    const allKeychain = screen.getAllByText('keychain')
-    const providerLabel = allKeychain.find((el) => el.tagName === 'LABEL')
-    expect(providerLabel).toBeTruthy()
-    expect(screen.getByText('Writable')).toBeTruthy()
-    expect(screen.getByText('Ready')).toBeTruthy()
+    expect(
+      screen.getByRole('button', { name: 'Change passphrase' }).getAttribute('disabled'),
+    ).toBeNull()
+    expect(
+      screen.getByRole('button', { name: 'Reissue recovery code' }).getAttribute('disabled'),
+    ).toBeNull()
   })
 
-  it('shows provider reason when not ready', async () => {
-    const status = {
-      state: 'unsealed' as const,
-      osKeyAvailable: true,
-      hasPassphrase: true,
-      autoSealMinutes: 0,
-      providers: [{ id: 'keychain', writable: false, ready: false, reason: 'Keychain locked' }],
-      defaultProvider: null,
+  it('protection actions disabled on uninitialized with explanation', async () => {
+    await renderVaultSection(UNINIT_STATUS)
+    expect(
+      screen.getByRole('button', { name: 'Change passphrase' }).getAttribute('disabled'),
+    ).not.toBeNull()
+    expect(
+      screen.getByRole('button', { name: 'Reissue recovery code' }).getAttribute('disabled'),
+    ).not.toBeNull()
+    expect(screen.getAllByText('Protection is not set up yet.').length).toBeGreaterThanOrEqual(1)
+  })
+
+  it('protection actions disabled on sealed with explanation', async () => {
+    await renderVaultSection(SEALED_STATUS)
+    expect(
+      screen.getByRole('button', { name: 'Change passphrase' }).getAttribute('disabled'),
+    ).not.toBeNull()
+    expect(
+      screen.getByRole('button', { name: 'Reissue recovery code' }).getAttribute('disabled'),
+    ).not.toBeNull()
+    expect(screen.getAllByText('Vault is locked.').length).toBeGreaterThanOrEqual(1)
+  })
+
+  // ── Lock now button in Protection section ─────────────────────────
+
+  it('Lock now disabled when sealed with explanation', async () => {
+    await renderVaultSection(SEALED_STATUS)
+    const lockNowBtns = screen.getAllByText('Lock now').filter((el) => el.tagName === 'BUTTON')
+    for (const btn of lockNowBtns) {
+      expect(btn.getAttribute('disabled')).not.toBeNull()
     }
-    const { client } = mockClient()
-    ;(client.status as ReturnType<typeof vi.fn>).mockResolvedValue(status)
-    const ctrl = createVaultState(client)
-    await ctrl.refresh()
-    render(() => <VaultSection vaultClient={client} vaultController={ctrl} />)
-
-    expect(screen.getByText('Keychain locked')).toBeTruthy()
+    expect(screen.getAllByText('Vault is locked.').length).toBeGreaterThanOrEqual(1)
   })
 
-  it('selecting default provider calls setDefaultProvider', async () => {
-    const status = {
-      state: 'unsealed' as const,
-      osKeyAvailable: true,
-      hasPassphrase: true,
-      autoSealMinutes: 0,
-      providers: [
-        { id: 'keychain', writable: true, ready: true },
-        { id: 'secret-service', writable: true, ready: true },
-      ],
-      defaultProvider: 'keychain',
+  it('Lock now disabled when uninitialized with explanation', async () => {
+    await renderVaultSection(UNINIT_STATUS)
+    const lockNowBtns = screen.getAllByText('Lock now').filter((el) => el.tagName === 'BUTTON')
+    for (const btn of lockNowBtns) {
+      expect(btn.getAttribute('disabled')).not.toBeNull()
     }
-    const { client, setDefaultProvider } = mockClient()
-    setDefaultProvider.mockResolvedValue({})
-    ;(client.status as ReturnType<typeof vi.fn>).mockResolvedValue(status)
-    const ctrl = createVaultState(client)
-    await ctrl.refresh()
-    render(() => <VaultSection vaultClient={client} vaultController={ctrl} />)
-
-    const select = screen.getByDisplayValue('keychain')
-    fireEvent.change(select, { target: { value: 'secret-service' } })
-
-    await vi.waitFor(() => {
-      expect(setDefaultProvider).toHaveBeenCalledWith({ provider: 'secret-service' })
-    })
+    expect(screen.getAllByText('Protection is not set up yet.').length).toBeGreaterThanOrEqual(1)
   })
+  // ── Auto-lock select ──────────────────────────────────────────────
 
-  it('refreshes status after vault.changed push', async () => {
-    const { client } = mockClient()
-    ;(client.status as ReturnType<typeof vi.fn>).mockResolvedValue(UNSEALED_STATUS)
-    const ctrl = createVaultState(client)
-    await ctrl.refresh()
-
-    // Simulate vault.changed by changing status and refreshing
-    ;(client.status as ReturnType<typeof vi.fn>).mockResolvedValue(SEALED_STATUS)
-    await ctrl.refresh()
-
-    render(() => <VaultSection vaultClient={client} vaultController={ctrl} />)
-    expect(screen.getByText('Sealed')).toBeTruthy()
-  })
-
-  it('shows provider not-ready reason for each unready provider', async () => {
-    const status = {
-      state: 'unsealed' as const,
-      osKeyAvailable: true,
-      hasPassphrase: true,
-      autoSealMinutes: 0,
-      providers: [
-        { id: 'keychain', writable: false, ready: false, reason: 'Unlock your login keychain' },
-      ],
-      defaultProvider: null,
-    }
-    const { client } = mockClient()
-    ;(client.status as ReturnType<typeof vi.fn>).mockResolvedValue(status)
-    const ctrl = createVaultState(client)
-    await ctrl.refresh()
-    render(() => <VaultSection vaultClient={client} vaultController={ctrl} />)
-
-    expect(screen.getByText('Unlock your login keychain')).toBeTruthy()
-  })
-
-  it('auto-seal select round-trips: set then refresh shows updated value', async () => {
+  it('auto-lock select round-trips: set then refresh shows updated value', async () => {
     const { client, setAutoSeal } = mockClient()
     ;(client.status as ReturnType<typeof vi.fn>).mockResolvedValue({
       ...UNSEALED_STATUS,
@@ -1098,10 +1126,10 @@ describe('VaultSection', () => {
     await ctrl.refresh()
 
     render(() => <VaultSection vaultClient={client} vaultController={ctrl} />)
-    // Find the auto-seal select by looking for "Off" option text.
+    // Find the auto-lock select by looking for "Never" option text.
     const allSelects = document.querySelectorAll('select.ui-select')
     const selectEl = Array.from(allSelects).find(
-      (s) => s.querySelector('option[value="0"]')?.textContent === 'Off',
+      (s) => s.querySelector('option[value="0"]')?.textContent === 'Never',
     ) as HTMLSelectElement
     expect(selectEl.value).toBe('0')
 
@@ -1123,70 +1151,62 @@ describe('VaultSection', () => {
     render(() => <VaultSection vaultClient={client} vaultController={ctrl} />)
     const updatedSelects = document.querySelectorAll('select.ui-select')
     const updatedSelect = Array.from(updatedSelects).find(
-      (s) => s.querySelector('option[value="0"]')?.textContent === 'Off',
+      (s) => s.querySelector('option[value="0"]')?.textContent === 'Never',
     ) as HTMLSelectElement
     expect(updatedSelect.value).toBe('30')
   })
 
-  it('renders Set up protection button, enabled, for uninitialized vault', async () => {
-    await renderVaultSection(UNINIT_STATUS)
-    const setupBtn = screen.getByRole('button', { name: 'Set up protection' })
-    expect(setupBtn).toBeTruthy()
-    expect(setupBtn.getAttribute('disabled')).toBeNull()
-    expect(setupBtn.getAttribute('data-variant')).toBe('primary')
-    // Seal now is NOT primary when uninitialized
-    const sealBtn = screen.getAllByText('Seal now').find((el) => el.tagName === 'BUTTON')
-    expect(sealBtn!.getAttribute('data-variant')).toBe('default')
-  })
-  it('renders Unlock button, enabled, for sealed vault', async () => {
-    await renderVaultSection(SEALED_STATUS)
-    const unlockBtn = screen.getByRole('button', { name: 'Unlock' })
-    expect(unlockBtn).toBeTruthy()
-    expect(unlockBtn.getAttribute('disabled')).toBeNull()
-    expect(unlockBtn.getAttribute('data-variant')).toBe('primary')
-    // Seal now is NOT primary when sealed
-    const sealBtn = screen.getAllByText('Seal now').find((el) => el.tagName === 'BUTTON')
-    expect(sealBtn!.getAttribute('data-variant')).toBe('default')
+  // ── Default provider ("Store new secrets here") ───────────────────
+
+  it('default store shows "Storing new secrets here" text', async () => {
+    await renderVaultSection(UNSEALED_STATUS)
+    expect(screen.getByText('Storing new secrets here')).toBeTruthy()
   })
 
-  it('clicking Set up protection opens SetupDialog for uninitialized vault', async () => {
-    const { client } = mockClient()
-    ;(client.status as ReturnType<typeof vi.fn>).mockResolvedValue(UNINIT_STATUS)
+  it('non-default store shows Store new secrets here button', async () => {
+    const status = {
+      state: 'unsealed' as const,
+      osKeyAvailable: true,
+      hasPassphrase: true,
+      autoSealMinutes: 0,
+      providers: [
+        { id: 'system', writable: true, ready: true },
+        { id: 'file', writable: true, ready: true },
+      ],
+      defaultProvider: 'system',
+    }
+    const { client, setDefaultProvider } = mockClient()
+    setDefaultProvider.mockResolvedValue({})
+    ;(client.status as ReturnType<typeof vi.fn>).mockResolvedValue(status)
     const ctrl = createVaultState(client)
     await ctrl.refresh()
     render(() => <VaultSection vaultClient={client} vaultController={ctrl} />)
 
-    fireEvent.click(screen.getByRole('button', { name: 'Set up protection' }))
-    expect(screen.getByText('Set Up Vault')).toBeTruthy()
-  })
+    // Find "Store new secrets here" button for the non-default store
+    const storeBtns = screen
+      .getAllByText('Store new secrets here')
+      .filter((el) => el.tagName === 'BUTTON')
+    expect(storeBtns.length).toBeGreaterThan(0)
+    fireEvent.click(storeBtns[0])
 
-  it('clicking Unlock calls vaultController.openUnlock for sealed vault', async () => {
-    const { client } = mockClient()
-    ;(client.status as ReturnType<typeof vi.fn>).mockResolvedValue(SEALED_STATUS)
-    const ctrl = createVaultState(client)
-    const openUnlockSpy = vi.spyOn(ctrl, 'openUnlock')
-    await ctrl.refresh()
-    render(() => <VaultSection vaultClient={client} vaultController={ctrl} />)
-
-    fireEvent.click(screen.getByRole('button', { name: 'Unlock' }))
     await vi.waitFor(() => {
-      expect(openUnlockSpy).toHaveBeenCalled()
+      expect(setDefaultProvider).toHaveBeenCalledWith({ provider: 'file' })
     })
   })
 
-  it('Seal now button shows state-specific disabled reason for uninitialized', async () => {
-    await renderVaultSection(UNINIT_STATUS)
-    const sealBtn = screen.getAllByText('Seal now').find((el) => el.tagName === 'BUTTON')
-    expect(sealBtn!.getAttribute('disabled')).not.toBeNull()
-    expect(screen.getAllByText('Vault has not been set up.').length).toBeGreaterThan(0)
+  // ── Diagnostics section ───────────────────────────────────────────
+
+  it('diagnostics section contains raw provider info', async () => {
+    await renderVaultSection(UNSEALED_STATUS)
+    const details = document.querySelector('details.ui-vault-diagnostics')
+    expect(details).toBeTruthy()
+    // The details contains the summary text
+    expect(details!.textContent).toContain('Diagnostics')
+    // Raw state text appears inside details
+    expect(details!.textContent).toContain('unsealed')
   })
 
-  it('Seal now button shows state-specific disabled reason for sealed', async () => {
-    await renderVaultSection(SEALED_STATUS)
-    const sealBtn = screen.getAllByText('Seal now').find((el) => el.tagName === 'BUTTON')
-    expect(sealBtn!.getAttribute('disabled')).not.toBeNull()
-    expect(screen.getAllByText('Vault is sealed.').length).toBeGreaterThan(0)
-  })
+  // ── State transitions ─────────────────────────────────────────────
 
   it('page reflects new state after setup completes', async () => {
     const { client, setup } = mockClient()
@@ -1197,7 +1217,7 @@ describe('VaultSection', () => {
     render(() => <VaultSection vaultClient={client} vaultController={ctrl} />)
 
     // Click Set up protection to open dialog
-    fireEvent.click(screen.getByRole('button', { name: 'Set up protection' }))
+    fireEvent.click(statusRowPrimary()!)
     expect(screen.getByText('Set Up Vault')).toBeTruthy()
 
     // Fill in passphrase
@@ -1227,10 +1247,29 @@ describe('VaultSection', () => {
     })
   })
 
-  it('Seal now button variant is primary when unsealed', async () => {
+  // ── Acceptance 5: no secret values ────────────────────────────────
+
+  it('no secret value appears anywhere in rendered output', async () => {
     await renderVaultSection(UNSEALED_STATUS)
-    const sealBtn = screen.getAllByText('Seal now').find((el) => el.tagName === 'BUTTON')
-    expect(sealBtn).toBeTruthy()
-    expect(sealBtn!.getAttribute('data-variant')).toBe('primary')
+    const bodyText = document.body.textContent ?? ''
+    // Should not contain secret-like patterns
+    expect(bodyText).not.toMatch(/sec:v1:/)
+  })
+
+  // ── Top description sentence ──────────────────────────────────────
+
+  it('shows description sentence at top', async () => {
+    await renderVaultSection(UNSEALED_STATUS)
+    expect(
+      screen.getByText('nocx protects passwords and key passphrases saved for your connections.'),
+    ).toBeTruthy()
+  })
+
+  // ── Test button ───────────────────────────────────────────────────
+
+  it('Test button is present on store panels', async () => {
+    await renderVaultSection(UNSEALED_STATUS)
+    const testButtons = screen.getAllByText('Test').filter((el) => el.tagName === 'BUTTON')
+    expect(testButtons.length).toBeGreaterThan(0)
   })
 })

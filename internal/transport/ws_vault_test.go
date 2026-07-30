@@ -28,6 +28,8 @@ type fakeVaultLifecycle struct {
 	setAutoSealErr        error
 	setAutoSealCalled     bool
 	activityCalled        bool
+	inventoryErr          error
+	inventoryResult       []vault.InventoryEntry
 }
 
 func (f *fakeVaultLifecycle) State() vault.State { return f.state }
@@ -69,6 +71,13 @@ func (f *fakeVaultLifecycle) SetAutoSeal(_ context.Context, _ int) error {
 
 func (f *fakeVaultLifecycle) Activity() {
 	f.activityCalled = true
+}
+
+func (f *fakeVaultLifecycle) BuildInventory(_ context.Context, _ []vault.CredentialInventory) ([]vault.InventoryEntry, error) {
+	if f.inventoryErr != nil {
+		return nil, f.inventoryErr
+	}
+	return f.inventoryResult, nil
 }
 
 func newFakeVaultLifecycle() *fakeVaultLifecycle {

@@ -16,7 +16,7 @@ import type { JSX } from 'solid-js'
 import { For, Show, createSignal, createMemo, createEffect, onMount, onCleanup } from 'solid-js'
 import { createStore } from 'solid-js/store'
 import { ConnectionsView } from './connections'
-import { CredentialsSection } from './credentials'
+import { SecretsSection } from './secrets'
 import type { ProfileClient, SSHProfile } from './profiles'
 import { SettingsObserver } from './settings-observer'
 import {
@@ -328,17 +328,30 @@ export function SettingsComponent(props: SettingsComponentProps) {
           vaultController={props.vaultController}
           onConnect={props.onConnect}
           newProfileRequest={newConnectionRequest()}
-          onNavigateToCredentials={() => setActiveComponentPage('credentials')}
+          onNavigateToCredentials={() => setActiveComponentPage('secrets')}
         />
       ),
     }
-    const credentialsPage: SettingsPage = {
+    const secretsPage: SettingsPage = {
       kind: 'component',
-      id: 'credentials',
-      title: 'Credentials',
+      id: 'secrets',
+      title: 'Secrets',
       scrollMode: 'contained',
       renderContent: () => (
-        <CredentialsSection client={props.profileClient} vaultController={props.vaultController} />
+        <Show
+          when={props.vaultClient && props.vaultController}
+          fallback={
+            <PageSection title="Secrets">
+              Vault secrets are not available in this window.
+            </PageSection>
+          }
+        >
+          <SecretsSection
+            vaultClient={props.vaultClient!}
+            vaultController={props.vaultController!}
+            onNavigateToOwner={() => setActiveComponentPage('connections')}
+          />
+        </Show>
       ),
     }
     const vaultPage: SettingsPage = {
@@ -360,7 +373,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
         </Show>
       ),
     }
-    return [...generated, exportPage, connectionPage, credentialsPage, vaultPage]
+    return [...generated, exportPage, connectionPage, secretsPage, vaultPage]
   })
 
   /** The active component page, or null when a generated section is showing. */

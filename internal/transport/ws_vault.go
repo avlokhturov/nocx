@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/vault"
 )
 
@@ -19,6 +20,9 @@ type VaultLifecycle interface {
 	Seal()
 	ChangePassphrase(ctx context.Context, req vault.ChangePassphraseRequest) error
 	RegenerateRecovery(ctx context.Context, req vault.RegenerateRequest) (string, error)
+	// BuildInventory assembles the vault inventory from credential metadata.
+	// Returns vault.ErrVaultSealed when the vault is sealed.
+	BuildInventory(ctx context.Context, inputs []vault.CredentialInventory) ([]vault.InventoryEntry, error)
 	SetDefaultProvider(ctx context.Context, p vault.ProviderID) error
 	SetAutoSeal(ctx context.Context, minutes int) error
 	Activity()
@@ -127,6 +131,8 @@ func (s *WSServer) handleVaultMethod(wconn *wsConn, req jsonrpcRequest) {
 		s.handleVaultSetAutoSeal(wconn, req)
 	case "vault.activity":
 		s.handleVaultActivity(wconn, req)
+	case "vault.inventory":
+		s.handleVaultInventory(wconn, req)
 	}
 }
 
@@ -372,6 +378,96 @@ func (s *WSServer) handleVaultSetAutoSeal(wconn *wsConn, req jsonrpcRequest) {
 func (s *WSServer) handleVaultActivity(wconn *wsConn, req jsonrpcRequest) {
 	s.vaultLifecycle.Activity()
 	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(struct{}{})))
+}
+
+func (s *WSServer) handleVaultInventory(wconn *wsConn, req jsonrpcRequest) {
+	if s.credMeta == nil || s.profiles == nil || s.groups == nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "vault.inventory not available"))
+		return
+	}
+
+	creds, err := s.credMeta.LoadCredentials()
+	if err != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		return
+	}
+
+	profiles, err := s.profiles.LoadProfiles()
+	if err != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		return
+	}
+
+	groups, err := s.groups.LoadGroups()
+	if err != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		return
+	}
+
+	usage := profile.ComputeCredentialUsage(creds, profiles, groups, profile.SparseSSHOptions{})
+
+	// Build profile lookup for single-use label resolution.
+	profByID := make(map[string]profile.SSHProfile, len(profiles))
+	for _, p := range profiles {
+		profByID[p.ID] = p
+	}
+
+	// Build usage maps.
+	usageCount := make(map[string]int, len(usage))
+	usageRefs := make(map[string][]profile.ProfileRef, len(usage))
+	for _, u := range usage {
+		usageCount[u.CredentialID] = len(u.Profiles)
+		usageRefs[u.CredentialID] = u.Profiles
+	}
+
+	// Build vault inventory inputs.
+	inputs := make([]vault.CredentialInventory, 0, len(creds))
+	for _, c := range creds {
+		ci := vault.CredentialInventory{
+			ID:                 c.ID,
+			Username:           c.Username,
+			AuthMode:           string(c.Auth),
+			SecretID:           c.SecretID,
+			PassphraseSecretID: c.PassphraseSecretID,
+			UsageCount:         usageCount[c.ID],
+		}
+
+		// Populate versions.
+		for _, v := range c.Versions {
+			ci.Versions = append(ci.Versions, vault.CredentialVersionInventory{
+				PasswordSecretID:   v.PasswordSecretID,
+				PassphraseSecretID: v.PassphraseSecretID,
+				KeyFingerprint:     v.KeyFingerprint,
+			})
+		}
+
+		// For single-use passwords, resolve the sole profile to get host:port.
+		if ci.UsageCount == 1 {
+			if refs, ok := usageRefs[c.ID]; ok && len(refs) > 0 {
+				if p, ok := profByID[refs[0].ProfileID]; ok {
+					eff, resolveErr := profile.ResolveEffectiveProfile(p, groups, profile.SparseSSHOptions{})
+					if resolveErr == nil {
+						ci.SingleHost = eff.ResolvedOptions.Host
+						ci.SinglePort = eff.ResolvedOptions.Port
+					}
+				}
+			}
+		}
+
+		inputs = append(inputs, ci)
+	}
+
+	entries, err := s.vaultLifecycle.BuildInventory(context.Background(), inputs)
+	if err != nil {
+		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "vault.inventory: ", err))
+		return
+	}
+
+	result := struct {
+		Entries []vault.InventoryEntry `json:"entries"`
+	}{Entries: entries}
+
+	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(result)))
 }
 
 // broadcastVaultChanged sends a vault.changed notification to every connected

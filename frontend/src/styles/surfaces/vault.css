@@ -25,3 +25,27 @@
 .ui-vault-desc-text {
   margin: 0;
 }
+
+/* Status row at the top of the page — sentence + primary action */
+.ui-vault-status-row {
+  margin-bottom: 24px;
+}
+
+.ui-vault-status-row p {
+  margin: 0 0 12px 0;
+}
+
+/* Diagnostics disclosure — collapsed by default, wraps raw diagnostic info */
+.ui-vault-diagnostics {
+  margin-top: 24px;
+  font-size: var(--font-size-sm);
+}
+
+.ui-vault-diagnostics summary {
+  cursor: pointer;
+  user-select: none;
+}
+
+.ui-vault-diagnostics > div {
+  margin-top: 8px;
+}

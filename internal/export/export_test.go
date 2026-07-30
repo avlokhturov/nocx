@@ -141,6 +141,26 @@ func (r *fakeCredRepo) UpdateCurrentVersionRefs(id, passwordSecretID, passphrase
 	return profile.ErrCredentialNotFound
 }
 
+func (r *fakeCredRepo) UpdateCurrentVersionKeyMaterial(id, keyMaterialSecretID, keyFingerprint string) error {
+	for i, e := range r.creds {
+		if e.ID == id {
+			if len(e.Versions) == 0 {
+				r.creds[i].KeyMaterialSecretID = keyMaterialSecretID
+			} else {
+				for j := range r.creds[i].Versions {
+					if r.creds[i].Versions[j].ID == r.creds[i].CurrentVersionID {
+						r.creds[i].Versions[j].KeyMaterialSecretID = keyMaterialSecretID
+						r.creds[i].Versions[j].KeyFingerprint = keyFingerprint
+						break
+					}
+				}
+			}
+			return nil
+		}
+	}
+	return profile.ErrCredentialNotFound
+}
+
 func (r *fakeCredRepo) AppendCredentialVersion(id, passwordSecretID, passphraseSecretID string) error {
 	for i, e := range r.creds {
 		if e.ID == id {

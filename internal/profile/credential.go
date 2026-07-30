@@ -28,6 +28,19 @@ type Credential struct {
 	SecretID string `json:"secretId,omitempty"`
 	// PassphraseSecretID is the opaque reference to the stored key passphrase.
 	PassphraseSecretID string `json:"passphraseSecretId,omitempty"`
+	// KeyMaterialSecretID is the opaque reference to the stored private key
+	// material. Mutually exclusive with KeyPath: storing key material clears
+	// KeyPath, and setting KeyPath deletes stored key material.
+	KeyMaterialSecretID string `json:"keyMaterialSecretId,omitempty"`
+
+	// HasKeyMaterial is a computed response field: true when the credential's
+	// current version carries stored key material. Set only in list/create/update
+	// responses; never persisted.
+	HasKeyMaterial bool `json:"hasKeyMaterial"`
+	// KeyFingerprint is a computed response field: the SHA256 fingerprint of
+	// the credential's current version key. Set only in list/create/update
+	// responses; never persisted.
+	KeyFingerprint string `json:"keyFingerprint"`
 
 	// Versions holds the history of secret material for this credential.
 	// A record written before versions existed has no Versions list and a
@@ -58,6 +71,9 @@ type CredentialVersion struct {
 	PasswordSecretID string `json:"passwordSecretId,omitempty"`
 	// PassphraseSecretID is the keychain reference for the key passphrase.
 	PassphraseSecretID string `json:"passphraseSecretId,omitempty"`
+	// KeyMaterialSecretID is the keychain reference for the stored private key
+	// material.
+	KeyMaterialSecretID string `json:"keyMaterialSecretId,omitempty"`
 
 	// KeyFingerprint is the SHA256 of the credential's public key, recorded
 	// by the backend when a key is saved. It is the identity of a key version.
@@ -102,7 +118,12 @@ func (e *ErrThresholdNotMet) Error() string {
 // list) is never retired and always succeeds.
 func (c Credential) Current() (CredentialVersion, bool) {
 	if len(c.Versions) == 0 {
-		return CredentialVersion{ID: initialVersionID, PasswordSecretID: c.SecretID, PassphraseSecretID: c.PassphraseSecretID}, true
+		return CredentialVersion{
+			ID:                  initialVersionID,
+			PasswordSecretID:    c.SecretID,
+			PassphraseSecretID:  c.PassphraseSecretID,
+			KeyMaterialSecretID: c.KeyMaterialSecretID,
+		}, true
 	}
 	if c.CurrentVersionID == "" {
 		return CredentialVersion{}, false
@@ -138,20 +159,24 @@ func (c Credential) Version(id string) (CredentialVersion, bool) {
 	return CredentialVersion{}, false
 }
 
-// ValidateVersion reports whether the version's fields are consistent with its
-// auth method. A password version must not carry KeyFingerprint; an agent
-// version must carry neither password nor key fields.
 func (v CredentialVersion) ValidateVersion() error {
 	switch v.Auth {
 	case AuthPassword, AuthKeyboardInteractive:
 		if v.KeyFingerprint != "" {
 			return errors.New("password/keyboard-interactive credential version carries a key fingerprint")
 		}
+		if v.KeyMaterialSecretID != "" {
+			return errors.New("password/keyboard-interactive credential version carries key material")
+		}
 	case AuthPublicKey:
-		// Public key versions may have a key fingerprint and/or passphrase.
+		// Public key versions may have a key fingerprint, key material,
+		// and/or passphrase.
 	case AuthAgent:
 		if v.PasswordSecretID != "" || v.KeyFingerprint != "" {
 			return errors.New("agent credential version carries keys or passwords")
+		}
+		if v.KeyMaterialSecretID != "" {
+			return errors.New("agent credential version carries key material")
 		}
 	}
 	return nil

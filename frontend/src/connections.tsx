@@ -20,6 +20,7 @@ import { Tabs } from './ui/tabs'
 import { EmptyState } from './ui/empty-state'
 import { Field } from './ui/field'
 import { FileInput } from './ui/file-input'
+import { SegmentedControl } from './ui/segmented-control'
 import { Badge } from './ui/badge'
 import { IconButton } from './ui/icon-button'
 import { CollectionRow, CollectionView } from './ui/collection-view'
@@ -49,6 +50,7 @@ import type {
   TabbyPreviewResponse,
 } from './profiles'
 import { ProfileClient, buildGroupTree, parseQuickConnect } from './profiles'
+import { RpcError } from './dispatcher'
 import { CredentialForm, type CredentialFormHandle } from './credential-form'
 import { PasswordEditor } from './password-editor'
 import { AuthenticationEditor } from './authentication-editor'
@@ -228,6 +230,23 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   const [dangerConfirmed, setDangerConfirmed] = createSignal(false)
   const [groupSection, setGroupSection] = createSignal('general')
   const [profileSection, setProfileSection] = createSignal('general')
+
+  // ── Three-way key input state (publicKey auth) ───────────────────────
+  type KeyInputMode = 'path' | 'file' | 'material'
+
+  // Profile editor key state
+  const [profileKeyMode, setProfileKeyMode] = createSignal<KeyInputMode>('path')
+  const [profileKeyText, setProfileKeyText] = createSignal('')
+  const [profileKeyFingerprint, setProfileKeyFingerprint] = createSignal<string | undefined>(
+    undefined,
+  )
+  const [profileKeyTextError, setProfileKeyTextError] = createSignal<string | undefined>(undefined)
+
+  // Group editor key state
+  const [groupKeyMode, setGroupKeyMode] = createSignal<KeyInputMode>('path')
+  const [groupKeyText, setGroupKeyText] = createSignal('')
+  const [groupKeyFingerprint, setGroupKeyFingerprint] = createSignal<string | undefined>(undefined)
+  const [groupKeyTextError, setGroupKeyTextError] = createSignal<string | undefined>(undefined)
 
   /** The impact, but only when it names a consequence. Null otherwise. */
   const groupImpactWorthShowing = createMemo(() => {
@@ -460,6 +479,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     setDangerConfirmed(false)
     setGroupSection('general')
     groupValidation.reset()
+    setGroupKeyMode('path')
+    setGroupKeyText('')
+    setGroupKeyFingerprint(undefined)
+    setGroupKeyTextError(undefined)
     setGroupDialogOpen(true)
   }
 
@@ -481,6 +504,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     setGroupImpact(null)
     setGroupImpactBusy(false)
     setDangerConfirmed(false)
+    setGroupKeyMode('path')
+    setGroupKeyText('')
+    setGroupKeyFingerprint(undefined)
+    setGroupKeyTextError(undefined)
   }
 
   async function computeGroupImpact(draft: ProfileGroup) {
@@ -511,19 +538,65 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     }
     setGroupApplyBusy(true)
     try {
+      // Key material save (publicKey paste mode in group defaults)
+      const defaults = draft.defaults ?? {}
+      if (
+        !defaults.credentialId &&
+        defaults.auth === 'publicKey' &&
+        groupKeyMode() === 'material' &&
+        groupKeyText()
+      ) {
+        const credential = await props.client.createCredential({
+          id: '',
+          name: draft.name,
+          username: (defaults.user as string | undefined) ?? '',
+          auth: 'publicKey',
+        })
+        const saveKeymat = async () => {
+          const result = await props.client.saveKeyMaterial(credential.id, groupKeyText())
+          setGroupKeyFingerprint(result.fingerprint)
+        }
+        if (props.vaultController) {
+          await props.vaultController.saveSecretWithVault(saveKeymat)
+        } else {
+          await saveKeymat()
+        }
+        // Update the draft to link credential and remove keyPath
+        const updatedDefaults: Record<string, unknown> = Object.fromEntries(
+          Object.entries(defaults).filter(([k]) => k !== 'keyPath'),
+        )
+        updatedDefaults.credentialId = credential.id
+        // The recursion below re-reads groupDraft(), so the updated draft has to
+        // go back into the signal. Building it and dropping it meant the second
+        // pass saved the ORIGINAL group — keyPath intact, credential unlinked —
+        // while the key material sat in the vault owned by nobody.
+        setGroupDraft({ ...draft, defaults: updatedDefaults } as ProfileGroup)
+        setGroupKeyText('')
+        // Recurse to save the updated draft
+        return saveGroup()
+      }
+
       if (!draft.id) {
-        // A group that does not exist yet has no blast radius, and
-        // groups.apply is a diff against a stored group. Creation is
-        // groups.create, which mints the id.
         await props.client.createGroup(draft)
       } else {
-        // Must submit via groups.apply — groups.update refuses Defaults changes.
         await props.client.groupApply([draft])
       }
       closeGroupEditor()
       await loadAll()
       showToast({ level: 'success', message: `Saved group "${draft.name}"` })
     } catch (err) {
+      if (
+        err instanceof RpcError &&
+        typeof err.data === 'object' &&
+        err.data &&
+        'reason' in err.data &&
+        err.data.reason === 'invalid-key'
+      ) {
+        setGroupKeyTextError('Invalid private key format')
+        log.error('Invalid key material in group defaults', { message: (err as Error).message })
+        setGroupApplyBusy(false)
+        return
+      }
       const message = (err as Error).message
       log.error('Failed to save group', { message })
       showToast({ level: 'danger', message: `Could not save group: ${message}` })
@@ -810,15 +883,81 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             onUsernameChange={(value) => setGroupDefaultsField('user', value)}
             auth={auth === undefined ? undefined : (auth as AuthMode)}
             onAuthChange={(value) => setGroupDefaultsField('auth', value)}
-            inherit
             publicKeyAction={
-              <TextField
-                id="group-default-key-path"
-                label="Private Key Path"
-                value={(gv('keyPath') as string | undefined) ?? ''}
-                onInput={(value) => setGroupDefaultsField('keyPath', value)}
-                placeholder="— Not set (inherit) —"
-              />
+              <Field for="group-default-key" label="Private Key">
+                <SegmentedControl
+                  options={[
+                    { value: 'path', label: 'Path' },
+                    { value: 'file', label: 'Choose file' },
+                    { value: 'material', label: 'Paste key' },
+                  ]}
+                  value={groupKeyMode()}
+                  onChange={(value) => {
+                    const prev = groupKeyMode()
+                    if (value === 'material') {
+                      setGroupDefaultsField('keyPath', undefined)
+                    } else if (prev === 'material') {
+                      const credId = gv('credentialId') as string | undefined
+                      setGroupKeyText('')
+                      setGroupKeyFingerprint(undefined)
+                      setGroupKeyTextError(undefined)
+                      setGroupDefaultsField('credentialId', undefined)
+                      if (credId) {
+                        props.client.deleteKeyMaterial(credId).catch((err: unknown) => {
+                          log.error('Failed to delete key material', {
+                            message: (err as Error).message,
+                          })
+                        })
+                      }
+                    }
+                    if (value === 'path' || value === 'file') {
+                      setGroupKeyText('')
+                      setGroupKeyFingerprint(undefined)
+                      setGroupKeyTextError(undefined)
+                    }
+                    setGroupKeyMode(value as KeyInputMode)
+                  }}
+                  ariaLabel="Key input mode"
+                />
+                <Show when={groupKeyMode() === 'path'}>
+                  <TextField
+                    id="group-default-key-path"
+                    label="Private Key Path"
+                    value={(gv('keyPath') as string | undefined) ?? ''}
+                    onInput={(value) => setGroupDefaultsField('keyPath', value || undefined)}
+                    placeholder="— Not set (inherit) —"
+                  />
+                </Show>
+                <Show when={groupKeyMode() === 'file'}>
+                  <FileInput
+                    accept="*"
+                    onChange={(file) => {
+                      if (file) {
+                        const filePath = (file as File & { path?: string })?.path ?? file.name
+                        setGroupDefaultsField('keyPath', filePath)
+                      }
+                    }}
+                    ariaLabel="Choose private key file"
+                    buttonLabel="Choose file…"
+                  />
+                </Show>
+                <Show when={groupKeyMode() === 'material'}>
+                  <TextField
+                    id="group-default-key-text"
+                    label="Private Key"
+                    value={groupKeyText()}
+                    onInput={(value) => {
+                      setGroupKeyText(value)
+                      setGroupKeyTextError(undefined)
+                    }}
+                    placeholder="Paste the private key content here"
+                    error={groupKeyTextError()}
+                  />
+                  <Show when={groupKeyFingerprint()}>
+                    <span class="cm-key-fingerprint">Fingerprint: {groupKeyFingerprint()}</span>
+                  </Show>
+                </Show>
+              </Field>
             }
           />
           <For each={CONNECTION_DEFAULTS}>{(field) => renderDefault(field)}</For>
@@ -1027,6 +1166,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     setEditing(profile)
     setDirtyFields(new Set<string>())
     profileValidation.reset()
+    setProfileKeyMode('path')
+    setProfileKeyText('')
+    setProfileKeyFingerprint(undefined)
+    setProfileKeyTextError(undefined)
     setDialogOpen(true)
   }
 
@@ -1037,9 +1180,12 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     profileValidation.reset()
     void loadEffective([profile.id])
     setProfileMoveImpact(null)
+    setProfileKeyMode('path')
+    setProfileKeyText('')
+    setProfileKeyFingerprint(undefined)
+    setProfileKeyTextError(undefined)
     setDialogOpen(true)
   }
-
   function closeDialog() {
     setDialogOpen(false)
     setEditing(null)
@@ -1047,6 +1193,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     setProfilePasswordValue('')
     setDirtyFields(new Set<string>())
     setProfileMoveImpact(null)
+    setProfileKeyMode('path')
+    setProfileKeyText('')
+    setProfileKeyFingerprint(undefined)
+    setProfileKeyTextError(undefined)
   }
 
   // ── Validation ──────────────────────────────────────────────────────────
@@ -1120,6 +1270,56 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         const message = (err as Error).message
         log.error('Failed to save inline password credential', { message })
         showToast({ level: 'danger', message: `Could not save the password: ${message}` })
+      }
+      return
+    }
+
+    // Key material save (publicKey paste mode)
+    if (
+      !profile.options.credentialId &&
+      profile.options.auth === 'publicKey' &&
+      profileKeyMode() === 'material' &&
+      profileKeyText()
+    ) {
+      try {
+        const credential = await props.client.createCredential({
+          id: '',
+          name: profile.name,
+          username: profile.options.user ?? '',
+          auth: 'publicKey',
+        })
+        const saveKeymat = async () => {
+          const result = await props.client.saveKeyMaterial(credential.id, profileKeyText())
+          setProfileKeyFingerprint(result.fingerprint)
+        }
+        if (props.vaultController) {
+          await props.vaultController.saveSecretWithVault(saveKeymat)
+        } else {
+          await saveKeymat()
+        }
+        const linked = {
+          ...profile,
+          options: { ...profile.options, credentialId: credential.id, keyPath: undefined },
+        }
+        setEditing(linked)
+        setProfileKeyText('')
+        setDirtyFields((prev) => new Set(prev).add('credentialId'))
+        await saveProfile(linked)
+      } catch (err) {
+        if (
+          err instanceof RpcError &&
+          typeof err.data === 'object' &&
+          err.data &&
+          'reason' in err.data &&
+          err.data.reason === 'invalid-key'
+        ) {
+          setProfileKeyTextError('Invalid private key format')
+          log.error('Invalid key material', { message: (err as Error).message })
+          return
+        }
+        const message = (err as Error).message
+        log.error('Failed to save key material', { message })
+        showToast({ level: 'danger', message: `Could not save the key: ${message}` })
       }
       return
     }
@@ -1651,13 +1851,83 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                       </Field>
                     }
                     publicKeyAction={
-                      <TextField
-                        id="profile-key-path"
-                        label="Private Key Path"
-                        value={fvStr('keyPath')}
-                        onInput={(value) => setOption('keyPath', value || undefined)}
-                        placeholder="~/.ssh/id_ed25519"
-                      />
+                      <Field for="profile-key" label="Private Key">
+                        <SegmentedControl
+                          options={[
+                            { value: 'path', label: 'Path' },
+                            { value: 'file', label: 'Choose file' },
+                            { value: 'material', label: 'Paste key' },
+                          ]}
+                          value={profileKeyMode()}
+                          onChange={(value) => {
+                            const prev = profileKeyMode()
+                            if (value === 'material') {
+                              setOption('keyPath', undefined)
+                            } else if (prev === 'material') {
+                              const credId = fvStr('credentialId')
+                              setProfileKeyText('')
+                              setProfileKeyFingerprint(undefined)
+                              setProfileKeyTextError(undefined)
+                              setOption('credentialId', undefined)
+                              if (credId) {
+                                props.client.deleteKeyMaterial(credId).catch((err: unknown) => {
+                                  log.error('Failed to delete key material', {
+                                    message: (err as Error).message,
+                                  })
+                                })
+                              }
+                            }
+                            if (value === 'path' || value === 'file') {
+                              setProfileKeyText('')
+                              setProfileKeyFingerprint(undefined)
+                              setProfileKeyTextError(undefined)
+                            }
+                            setProfileKeyMode(value as KeyInputMode)
+                          }}
+                          ariaLabel="Key input mode"
+                        />
+                        <Show when={profileKeyMode() === 'path'}>
+                          <TextField
+                            id="profile-key-path"
+                            label="Private Key Path"
+                            value={fvStr('keyPath')}
+                            onInput={(value) => setOption('keyPath', value || undefined)}
+                            placeholder="~/.ssh/id_ed25519"
+                          />
+                        </Show>
+                        <Show when={profileKeyMode() === 'file'}>
+                          <FileInput
+                            accept="*"
+                            onChange={(file) => {
+                              if (file) {
+                                const filePath =
+                                  (file as File & { path?: string })?.path ?? file.name
+                                setOption('keyPath', filePath)
+                              }
+                            }}
+                            ariaLabel="Choose private key file"
+                            buttonLabel="Choose file…"
+                          />
+                        </Show>
+                        <Show when={profileKeyMode() === 'material'}>
+                          <TextField
+                            id="profile-key-text"
+                            label="Private Key"
+                            value={profileKeyText()}
+                            onInput={(value) => {
+                              setProfileKeyText(value)
+                              setProfileKeyTextError(undefined)
+                            }}
+                            placeholder="Paste the private key content here"
+                            error={profileKeyTextError()}
+                          />
+                          <Show when={profileKeyFingerprint()}>
+                            <span class="cm-key-fingerprint">
+                              Fingerprint: {profileKeyFingerprint()}
+                            </span>
+                          </Show>
+                        </Show>
+                      </Field>
                     }
                   />
                 </Stack>

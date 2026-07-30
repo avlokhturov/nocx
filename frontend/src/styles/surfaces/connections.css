@@ -461,3 +461,11 @@
 .cm-delete-reason {
   color: var(--color-text-muted);
 }
+
+/* The fingerprint caption under a pasted key. It was written twice as an inline
+   style prop — which ADR-0014 forbids — and both copies named `--text-secondary`,
+   a token this repo does not define, so the colour silently did nothing. */
+.cm-key-fingerprint {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-dim);
+}

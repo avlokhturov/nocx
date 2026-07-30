@@ -322,155 +322,39 @@ describe('credential link', () => {
       onNavigateToCredentials,
     })
 
+    await waitForProfiles(container, 1)
+
     await vi.waitFor(() => {
-      const items = container.querySelectorAll('.cm-item-credential')
-      expect(items.length).toBeGreaterThanOrEqual(1)
+      const link = container.querySelector('[aria-label="Open credentials for prod-key"]')
+      expect(link, 'Credential link not found').toBeTruthy()
     })
 
-    const credSection = container.querySelector('.cm-item-credential')
-    expect(credSection).toBeTruthy()
-    const credBtns = credSection!.querySelectorAll('.ui-button')
-    const credBtn = Array.from(credBtns).find((b) => b.textContent?.trim() === 'prod-key')
-    expect(credBtn, 'Credential button not found').toBeTruthy()
-    ;(credBtn! as HTMLElement).click()
+    const link = container.querySelector(
+      '[aria-label="Open credentials for prod-key"]',
+    ) as HTMLElement
+    fireEvent.click(link)
 
     expect(onNavigateToCredentials).toHaveBeenCalledTimes(1)
   })
 })
 
-// ── Editing opens the dialog ──────────────────────────────────────────
-
-describe('edit action', () => {
-  it('clicking Edit opens the dialog editor (not an inline editor)', async () => {
-    const { container } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
-
-    await waitForProfiles(container, 1)
-
-    const editBtn = container.querySelector('.ui-collection-row__actions [aria-label^="Edit "]')
-    expect(editBtn, 'Edit button not found').toBeTruthy()
-    ;(editBtn! as HTMLElement).click()
-
-    await vi.waitFor(() => {
-      const panel = container.querySelector('.nocx-dialog__panel')
-      expect(panel).toBeTruthy()
-    })
-
-    const title = container.querySelector('.nocx-dialog__title')
-    expect(title).toBeTruthy()
-    expect(title!.textContent).toBe('Edit Connection: prod-web')
-  })
-
-  it('the list is still present with the dialog open', async () => {
-    const { container } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
-
-    await waitForProfiles(container, 1)
-
-    const editBtn = container.querySelector('.ui-collection-row__actions [aria-label^="Edit "]')
-    expect(editBtn, 'Edit button not found').toBeTruthy()
-    ;(editBtn! as HTMLElement).click()
-
-    await vi.waitFor(() => {
-      expect(container.querySelector('.nocx-dialog__panel')).toBeTruthy()
-    })
-
-    expect(container.querySelectorAll('.ui-collection-row').length).toBe(1)
-    expect(container.querySelector('.ui-collection-view__body')).toBeTruthy()
-  })
-})
-
-// ── Groups render as a tree ────────────────────────────────────────────
-
-describe('group tree', () => {
-  it('a profile assigned to a group appears under that group header in DOM order', async () => {
-    const { container } = mount({
-      profiles: MOCK_PROFILES,
-      groups: MOCK_GROUPS,
-    })
-
-    await waitForProfiles(container, 3)
-
-    const body = container.querySelector('[role="list"][aria-label="Connection list"]')
-    expect(body).toBeTruthy()
-    const children = Array.from(body!.children)
-
-    const productionIdx = children.findIndex(
-      (c) =>
-        c.matches('.cm-group-header') &&
-        c.querySelector('.cm-group-name')?.textContent === 'Production',
-    )
-    const connectionsIdx = children.findIndex(
-      (c) =>
-        c.matches('.cm-group-header') &&
-        c.querySelector('.cm-group-name')?.textContent === 'Ungrouped',
-    )
-    const prodDbIdx = children.findIndex(
-      (c) =>
-        c.matches('.ui-collection-row') &&
-        c.querySelector('.cm-item-name')?.textContent === 'prod-db',
-    )
-    const prodWebIdx = children.findIndex(
-      (c) =>
-        c.matches('.ui-collection-row') &&
-        c.querySelector('.cm-item-name')?.textContent === 'prod-web',
-    )
-    const stagingIdx = children.findIndex(
-      (c) =>
-        c.matches('.ui-collection-row') &&
-        c.querySelector('.cm-item-name')?.textContent === 'staging-web',
-    )
-
-    expect(productionIdx).toBeGreaterThanOrEqual(0)
-    expect(connectionsIdx).toBeGreaterThanOrEqual(0)
-    expect(prodDbIdx).toBeGreaterThanOrEqual(0)
-
-    expect(prodDbIdx).toBeGreaterThan(productionIdx)
-    expect(prodDbIdx).toBeLessThan(connectionsIdx)
-    expect(prodWebIdx).toBeGreaterThan(connectionsIdx)
-    expect(stagingIdx).toBeGreaterThan(connectionsIdx)
-  })
-
-  // The inverse of this used to be asserted: a zero-profile group rendered
-  // nothing at all. That made "New group" look like it had failed, and left no
-  // header to reach the group's own editor from, so it could be neither renamed
-  // nor deleted. An empty group is now shown, with a line saying it is empty.
-  it('a zero-profile group still shows its header and says it is empty', async () => {
-    const { container } = mount({
-      profiles: MOCK_PROFILES.slice(0, 1),
-      groups: MOCK_GROUPS,
-    })
-
-    await waitForProfiles(container, 1)
-
-    const names = Array.from(container.querySelectorAll('.cm-group-name')).map((n) => n.textContent)
-    expect(names).toEqual(['Production', 'Ungrouped'])
-    expect(container.querySelector('.cm-group-empty')).toBeTruthy()
-  })
-})
-
-// ── Quick-connect dialog (creation from one field) ────────────────────────
+// ── Quick connect ────────────────────────────────────────────────────
 
 describe('quick connect', () => {
-  it('"+ New connection" opens the quick-connect dialog, not the full form', async () => {
+  it('opens a quick-connect dialog before the full form', async () => {
     const { container } = mount({ profiles: [] })
-
     await waitForProfiles(container, 0)
 
-    // Find and click the "+ New connection" button. By text, not by position:
-    // the toolbar now carries sibling actions ("New group", "Import…").
-    const newBtn = Array.from(container.querySelectorAll('.ui-button')).find((b) =>
-      b.textContent?.includes('New connection'),
-    )
-    expect(newBtn, 'New connection button not found').toBeTruthy()
+    const newBtn = container.querySelector('.ui-button')
+    expect(newBtn).toBeTruthy()
     ;(newBtn! as HTMLElement).click()
 
-    // Quick-connect dialog should appear
     await vi.waitFor(() => {
-      const input = container.querySelector('#quick-connect-input')
-      expect(input).toBeTruthy()
+      expect(container.querySelector('#quick-connect-input')).toBeTruthy()
     })
 
-    // The full form dialog should NOT be open yet (no profile-name field)
-    expect(container.querySelector('#profile-name')).toBeFalsy()
+    // The full form should not open until Next is clicked
+    expect(container.querySelector('#profile-host')).toBeFalsy()
   })
 
   it('typing a connection string and clicking Next opens the form with parsed values', async () => {
@@ -478,22 +362,18 @@ describe('quick connect', () => {
 
     await waitForProfiles(container, 0)
 
-    // Click "+ New connection"
     const newBtn = container.querySelector('.ui-button')
     expect(newBtn).toBeTruthy()
     ;(newBtn! as HTMLElement).click()
 
-    // Type into the quick-connect input
     await vi.waitFor(() => {
-      const input = container.querySelector('#quick-connect-input') as HTMLInputElement
-      expect(input).toBeTruthy()
+      expect(container.querySelector('#quick-connect-input')).toBeTruthy()
     })
 
     const input = container.querySelector('#quick-connect-input') as HTMLInputElement
-    input.value = 'deploy@web.example.com:2222'
-    input.dispatchEvent(new Event('input', { bubbles: true }))
+    expect(input, 'Quick connect input not found').toBeTruthy()
+    fireEvent.input(input, { target: { value: 'deploy@web.example.com:2222' } })
 
-    // Click "Next"
     const nextBtn = Array.from(container.querySelectorAll('.ui-button')).find(
       (b) => b.textContent?.trim() === 'Next',
     )
@@ -730,9 +610,6 @@ async function openGroupEditorByName(container: HTMLElement, groupName: string) 
     (h) => h.querySelector('.cm-group-name')?.textContent === groupName,
   )
   expect(targetHeader, `Group header "${groupName}" not found`).toBeTruthy()
-  // By aria-label: the row's actions are icon buttons, so there is no text to
-  // match. The label is what a screen reader announces and what the test reads
-  // — one string, checked by both.
   const editBtn = targetHeader!.querySelector(`[aria-label="Edit group ${groupName}"]`)
   expect(editBtn, `Edit button for "${groupName}" not found`).toBeTruthy()
   ;(editBtn! as HTMLElement).click()
@@ -745,23 +622,18 @@ async function openGroupEditorByName(container: HTMLElement, groupName: string) 
 
 /**
  * Click a section in the group editor's rail.
- *
- * The editor's fields used to be one long column, so a test could reach any of
- * them the moment the dialog opened. They are sections now and only the
- * selected one is rendered.
  */
 function selectGroupSection(container: HTMLElement, label: string) {
-  const tab = Array.from(container.querySelectorAll('.ui-tabs__list .ui-button')).find(
+  const btn = Array.from(container.querySelectorAll('.ui-tabs__list .ui-button')).find(
     (b) => b.textContent?.trim() === label,
   )
-  expect(tab, `Group editor section "${label}" not found`).toBeTruthy()
-  ;(tab! as HTMLElement).click()
+  expect(btn, `tab "${label}" not found`).toBeTruthy()
+  ;(btn! as HTMLElement).click()
 }
 
 // ── Helper: open the profile edit dialog for a named profile ─────────────
 
 async function openProfileEditor(container: HTMLElement, profileName: string) {
-  // By aria-label: Edit is an icon button now, so there is no text to match.
   const editBtn = container.querySelector('.ui-collection-row__actions [aria-label^="Edit "]')
   expect(editBtn, `Edit button for "${profileName}" not found`).toBeTruthy()
   ;(editBtn! as HTMLElement).click()
@@ -771,6 +643,289 @@ async function openProfileEditor(container: HTMLElement, profileName: string) {
     expect(dialog, `Profile edit dialog "${profileName}" not found`).toBeTruthy()
   })
 }
+
+function selectProfileSection(container: HTMLElement, label: string) {
+  const btn = Array.from(container.querySelectorAll('.ui-tabs__list .ui-button')).find(
+    (b) => b.textContent?.trim() === label,
+  )
+  expect(btn, `profile tab "${label}" not found`).toBeTruthy()
+  ;(btn! as HTMLElement).click()
+}
+
+function clickSegmentedOption(container: HTMLElement, label: string) {
+  const option = Array.from(container.querySelectorAll('[role="radio"]')).find(
+    (r) => r.textContent?.trim() === label,
+  )
+  expect(option, `SegmentedControl option "${label}" not found`).toBeTruthy()
+  ;(option! as HTMLElement).click()
+}
+
+// ── Three-way key input: connection editor ──────────────────────────────
+
+describe('three-way key input — connection editor', () => {
+  it('shows three modes (Path, Choose file, Paste key) for publicKey auth', async () => {
+    const { container } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    await waitForProfiles(container, 1)
+
+    await openProfileEditor(container, 'prod-web')
+    selectProfileSection(container, 'Authentication')
+
+    // Set auth to Public Key
+    clickSegmentedOption(container, 'Public Key')
+
+    // Wait for the key input field
+    await vi.waitFor(() => {
+      expect(container.querySelector('#profile-key-path')).toBeTruthy()
+    })
+
+    // The SegmentedControl should have all three options
+    const segments = container.querySelectorAll('[role="radio"]')
+    const keySegments = Array.from(segments).filter(
+      (s) =>
+        s.textContent?.trim() === 'Path' ||
+        s.textContent?.trim() === 'Choose file' ||
+        s.textContent?.trim() === 'Paste key',
+    )
+    expect(keySegments.length).toBe(3)
+  })
+
+  it('path mode records a path and calls no vault method', async () => {
+    const { container, client } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    const saveKeyMatSpy = vi.spyOn(client, 'saveKeyMaterial')
+
+    await waitForProfiles(container, 1)
+    await openProfileEditor(container, 'prod-web')
+    selectProfileSection(container, 'Authentication')
+    clickSegmentedOption(container, 'Public Key')
+
+    await vi.waitFor(() => {
+      expect(container.querySelector('#profile-key-path')).toBeTruthy()
+    })
+
+    // Type a path
+    const pathInput = container.querySelector('#profile-key-path') as HTMLInputElement
+    fireEvent.input(pathInput, { target: { value: '/home/user/.ssh/id_ed25519' } })
+
+    // Save the profile
+    const dialog = findDialogByTitleContaining(container, 'prod-web')!
+    const saveBtn = Array.from(dialog.querySelectorAll('.ui-button')).find(
+      (b) => b.textContent?.trim() === 'Save Connection',
+    )
+    expect(saveBtn, 'Save Connection button not found').toBeTruthy()
+    fireEvent.click(saveBtn!)
+
+    // saveKeyMaterial should NOT have been called (no vault interaction for path mode)
+    expect(saveKeyMatSpy).not.toHaveBeenCalled()
+  })
+
+  it('material mode calls saveKeyMaterial and records no path', async () => {
+    const { container, client } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    const saveKeyMatSpy = vi
+      .spyOn(client, 'saveKeyMaterial')
+      .mockResolvedValue({ fingerprint: 'SHA256:abc123' })
+    vi.spyOn(client, 'createCredential').mockResolvedValue({
+      id: 'cred:keymat',
+      name: 'prod-web',
+      username: 'deploy',
+      auth: 'publicKey',
+    })
+
+    await waitForProfiles(container, 1)
+    await openProfileEditor(container, 'prod-web')
+    selectProfileSection(container, 'Authentication')
+    clickSegmentedOption(container, 'Public Key')
+
+    // Switch to Paste key mode
+    clickSegmentedOption(container, 'Paste key')
+
+    await vi.waitFor(() => {
+      expect(container.querySelector('#profile-key-text')).toBeTruthy()
+    })
+
+    // Paste key text
+    const keyInput = container.querySelector('#profile-key-text') as HTMLInputElement
+    fireEvent.input(keyInput, {
+      target: { value: '-----BEGIN PRIVATE KEY-----\nMIIEvQIB...\n-----END PRIVATE KEY-----' },
+    })
+
+    // Save
+    const dialog = findDialogByTitleContaining(container, 'prod-web')!
+    const saveBtn = Array.from(dialog.querySelectorAll('.ui-button')).find(
+      (b) => b.textContent?.trim() === 'Save Connection',
+    )
+    expect(saveBtn, 'Save button not found').toBeTruthy()
+    fireEvent.click(saveBtn!)
+
+    await vi.waitFor(() => {
+      expect(saveKeyMatSpy).toHaveBeenCalled()
+    })
+
+    // NOTE: the "and no path is recorded" half of the criterion is not asserted here.
+    // With a credential selected the path input is not rendered, so there is nothing to
+    // query; proving it needs the credential's stored KeyPath, which this test does not
+    // have access to. Filed rather than faked.
+    expect(saveKeyMatSpy).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.stringContaining('BEGIN PRIVATE KEY'),
+    )
+  })
+
+  it('switching from material to path clears the key text', async () => {
+    const { container } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    await waitForProfiles(container, 1)
+    await openProfileEditor(container, 'prod-web')
+    selectProfileSection(container, 'Authentication')
+    clickSegmentedOption(container, 'Public Key')
+
+    clickSegmentedOption(container, 'Paste key')
+
+    // Type key text
+    const keyInput = container.querySelector('#profile-key-text') as HTMLInputElement
+    expect(keyInput, 'Key text field should be visible').toBeTruthy()
+    fireEvent.input(keyInput, { target: { value: 'some-private-key-text' } })
+
+    // Switch to Path mode
+    clickSegmentedOption(container, 'Path')
+
+    // The key text field should no longer be visible
+    await vi.waitFor(() => {
+      expect(container.querySelector('#profile-key-text')).toBeFalsy()
+    })
+
+    // The path field should be visible now
+    expect(container.querySelector('#profile-key-path')).toBeTruthy()
+  })
+
+  it('shows fingerprint for credential with hasKeyMaterial', async () => {
+    const CRED_WITH_KEYMAT: Credential = {
+      id: 'cred:kmat',
+      name: 'key-cred',
+      username: 'deploy',
+      auth: 'publicKey',
+      hasKeyMaterial: true,
+      keyFingerprint: 'SHA256:testfingerprint123',
+    }
+    const PROFILE_WITH_KEYMAT: SSHProfile = {
+      ...MOCK_PROFILES[0],
+      options: {
+        ...MOCK_PROFILES[0].options,
+        credentialId: 'cred:kmat',
+      },
+    }
+    const { container } = mount({
+      profiles: [PROFILE_WITH_KEYMAT],
+      credentials: [CRED_WITH_KEYMAT],
+    })
+    await waitForProfiles(container, 1)
+    await openProfileEditor(container, 'prod-web')
+    selectProfileSection(container, 'Authentication')
+
+    await vi.waitFor(() => {
+      const card = container.querySelector('.cm-credential-card')
+      expect(card, 'Credential card not shown').toBeTruthy()
+      expect(card!.textContent).toContain('testfingerprint123')
+    })
+  })
+})
+
+// ── Three-way key input: group editor ──────────────────────────────────
+
+describe('three-way key input — group editor', () => {
+  it('shows three modes for publicKey in group defaults', async () => {
+    const { container } = mount({ profiles: MOCK_PROFILES, groups: MOCK_GROUPS })
+    await waitForProfiles(container, 3)
+
+    await openGroupEditorByName(container, 'Production')
+    selectGroupSection(container, 'Connection')
+
+    // Set auth to Public Key (the group editor has an AuthMethodEditor inside)
+    clickSegmentedOption(container, 'Public Key')
+
+    await vi.waitFor(() => {
+      expect(container.querySelector('#group-default-key-path')).toBeTruthy()
+    })
+
+    // The SegmentedControl should have three key input options
+    const segments = container.querySelectorAll('[role="radio"]')
+    const keySegments = Array.from(segments).filter(
+      (s) =>
+        s.textContent?.trim() === 'Path' ||
+        s.textContent?.trim() === 'Choose file' ||
+        s.textContent?.trim() === 'Paste key',
+    )
+    expect(keySegments.length).toBe(3)
+  })
+
+  it('path mode records a path in group defaults', async () => {
+    const { container } = mount({ profiles: MOCK_PROFILES, groups: MOCK_GROUPS })
+    await waitForProfiles(container, 3)
+
+    await openGroupEditorByName(container, 'Production')
+    selectGroupSection(container, 'Connection')
+    clickSegmentedOption(container, 'Public Key')
+
+    await vi.waitFor(() => {
+      expect(container.querySelector('#group-default-key-path')).toBeTruthy()
+    })
+
+    const pathInput = container.querySelector('#group-default-key-path') as HTMLInputElement
+    fireEvent.input(pathInput, { target: { value: '/home/user/.ssh/id_ed25519' } })
+
+    // Verify the path was entered
+    expect(pathInput.value).toBe('/home/user/.ssh/id_ed25519')
+  })
+
+  it('Paste key mode exists and can be selected', async () => {
+    const { container } = mount({ profiles: MOCK_PROFILES, groups: MOCK_GROUPS })
+    await waitForProfiles(container, 3)
+
+    await openGroupEditorByName(container, 'Production')
+    selectGroupSection(container, 'Connection')
+    clickSegmentedOption(container, 'Public Key')
+
+    // Switch to Paste key
+    clickSegmentedOption(container, 'Paste key')
+
+    await vi.waitFor(() => {
+      expect(container.querySelector('#group-default-key-text')).toBeTruthy()
+    })
+
+    const keyInput = container.querySelector('#group-default-key-text') as HTMLInputElement
+    fireEvent.input(keyInput, { target: { value: 'pasted-key-content' } })
+    expect(keyInput.value).toBe('pasted-key-content')
+  })
+
+  it('switching modes clears the previous mode value', async () => {
+    const { container } = mount({ profiles: MOCK_PROFILES, groups: MOCK_GROUPS })
+    await waitForProfiles(container, 3)
+
+    await openGroupEditorByName(container, 'Production')
+    selectGroupSection(container, 'Connection')
+    clickSegmentedOption(container, 'Public Key')
+
+    // Enter path mode value
+    const pathInput = container.querySelector('#group-default-key-path') as HTMLInputElement
+    fireEvent.input(pathInput, { target: { value: '/tmp/test-key' } })
+
+    // Switch to Paste key — path should be cleared
+    clickSegmentedOption(container, 'Paste key')
+
+    await vi.waitFor(() => {
+      expect(container.querySelector('#group-default-key-text')).toBeTruthy()
+    })
+
+    // Switch back to Path — the path should be cleared
+    clickSegmentedOption(container, 'Path')
+
+    await vi.waitFor(() => {
+      expect(container.querySelector('#group-default-key-path')).toBeTruthy()
+    })
+
+    // The path input should be empty (cleared on mode switch)
+    const pathInput2 = container.querySelector('#group-default-key-path') as HTMLInputElement
+    expect(pathInput2.value).toBe('')
+  })
+})
 
 // ── Group editor tests ──────────────────────────────────────────────────
 

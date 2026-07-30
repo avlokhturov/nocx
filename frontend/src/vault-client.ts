@@ -78,6 +78,24 @@ export interface VaultUnsealParams {
   secret?: string
 }
 
+export interface VaultInventoryEntry {
+  kind: 'password' | 'key-passphrase'
+  /** Already human-readable, derived by the backend. Render verbatim. */
+  label: string
+  /** Provider id: 'system' for OS keychain, 'file' for encrypted nocx storage. */
+  provider: 'system' | 'file'
+  /** Credential id that owns this secret, for navigation. */
+  ownerId: string
+  /** Number of connections that reference the owning credential. */
+  usedBy: number
+  /** Whether the provider that holds this secret is reachable right now. */
+  reachable: boolean
+}
+
+export interface VaultInventory {
+  entries: VaultInventoryEntry[]
+}
+
 export class VaultClient {
   constructor(private dispatcher: Dispatcher) {}
 
@@ -113,6 +131,10 @@ export class VaultClient {
 
   setAutoSeal(minutes: number): Promise<Record<string, never>> {
     return this.dispatcher.call('vault.setAutoSeal', { minutes })
+  }
+
+  inventory(): Promise<VaultInventory> {
+    return this.dispatcher.call('vault.inventory', {})
   }
 
   activity(): Promise<Record<string, never>> {

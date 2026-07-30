@@ -164,6 +164,37 @@ func (s *stubProfileStore) UpdateCurrentVersionRefs(id, passwordSecretID, passph
 	return nil
 }
 
+func (s *stubProfileStore) UpdateCurrentVersionKeyMaterial(id, keyMaterialSecretID, keyFingerprint string) error {
+	existing, ok := s.credentials[id]
+	if !ok {
+		return profile.ErrCredentialNotFound
+	}
+	if len(existing.Versions) == 0 {
+		existing.Versions = []profile.CredentialVersion{{
+			ID:                  "v1",
+			PasswordSecretID:    existing.SecretID,
+			PassphraseSecretID:  existing.PassphraseSecretID,
+			KeyMaterialSecretID: keyMaterialSecretID,
+			KeyFingerprint:      keyFingerprint,
+		}}
+		existing.CurrentVersionID = "v1"
+		existing.SecretID = ""
+		existing.PassphraseSecretID = ""
+		existing.KeyMaterialSecretID = ""
+	} else {
+		for j := range existing.Versions {
+			if existing.Versions[j].ID == existing.CurrentVersionID {
+				existing.Versions[j].KeyMaterialSecretID = keyMaterialSecretID
+				existing.Versions[j].KeyFingerprint = keyFingerprint
+				break
+			}
+		}
+	}
+	existing.KeyPath = ""
+	s.credentials[id] = existing
+	return nil
+}
+
 func (s *stubProfileStore) AppendCredentialVersion(id, passwordSecretID, passphraseSecretID string) error {
 	existing, ok := s.credentials[id]
 	if !ok {

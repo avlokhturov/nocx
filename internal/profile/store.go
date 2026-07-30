@@ -51,6 +51,11 @@ type CredentialMetadataRepository interface {
 	// CurrentVersionID to CandidateVersionID, then clears CandidateVersionID.
 	// Returns ErrCandidateNotFound when no candidate is set.
 	PromoteVersion(id string) (Credential, error)
+	// UpdateCurrentVersionKeyMaterial sets the key material secret ID and
+	// key fingerprint on the credential's current version (or record-level
+	// fields for a credential with no versions), and clears KeyPath so
+	// path and stored material are never both set.
+	UpdateCurrentVersionKeyMaterial(id string, keyMaterialSecretID, keyFingerprint string) error
 	// RetireVersion marks a version as retired. RetiredAt is set to the
 	// current time. A retired version is not selected by Current() and the
 	// resolver refuses to select it. Returns ErrVersionNotFound when the
@@ -540,6 +545,60 @@ func (s *JSONStore) UpdateCurrentVersionRefs(id string, passwordSecretID, passph
 	return fmt.Errorf("%s: %w", id, ErrCredentialNotFound)
 }
 
+// UpdateCurrentVersionKeyMaterial sets the key material secret ID and
+// fingerprint on the credential's current version, and clears KeyPath.
+// For a credential with no versions, existing record-level fields are
+// migrated into a v1 version first so the fingerprint is stored on the
+// version where callers expect it.
+func (s *JSONStore) UpdateCurrentVersionKeyMaterial(id string, keyMaterialSecretID, keyFingerprint string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	d, err := s.load()
+	if err != nil {
+		return err
+	}
+	for i, existing := range d.Credentials {
+		if existing.ID == id {
+			if len(existing.Versions) == 0 {
+				// Migrate record-level fields into a version first
+				// so we can store the fingerprint on the version.
+				d.Credentials[i].Versions = []CredentialVersion{
+					{
+						ID:                  initialVersionID,
+						PasswordSecretID:    existing.SecretID,
+						PassphraseSecretID:  existing.PassphraseSecretID,
+						KeyMaterialSecretID: keyMaterialSecretID,
+						KeyFingerprint:      keyFingerprint,
+					},
+				}
+				d.Credentials[i].CurrentVersionID = initialVersionID
+				d.Credentials[i].SecretID = ""
+				d.Credentials[i].PassphraseSecretID = ""
+			} else {
+				// Update current version's key material fields.
+				var updated bool
+				for j := range d.Credentials[i].Versions {
+					if d.Credentials[i].Versions[j].ID == d.Credentials[i].CurrentVersionID {
+						d.Credentials[i].Versions[j].KeyMaterialSecretID = keyMaterialSecretID
+						d.Credentials[i].Versions[j].KeyFingerprint = keyFingerprint
+						updated = true
+						break
+					}
+				}
+				if !updated {
+					return fmt.Errorf("credential %s current version %s not found", id, d.Credentials[i].CurrentVersionID)
+				}
+			}
+			// Clear KeyPath — stored key material and a path are
+			// mutually exclusive (brief §3).
+			d.Credentials[i].KeyPath = ""
+			return s.writeLocked(d)
+		}
+	}
+	return fmt.Errorf("%s: %w", id, ErrCredentialNotFound)
+}
+
 // AppendCredentialVersion appends a new version and sets it as the current
 // version. If the credential has no versions yet, the existing
 // record-level SecretID and PassphraseSecretID are first migrated into
@@ -558,14 +617,16 @@ func (s *JSONStore) AppendCredentialVersion(id string, passwordSecretID, passphr
 			if len(existing.Versions) == 0 {
 				d.Credentials[i].Versions = []CredentialVersion{
 					{
-						ID:                 initialVersionID,
-						PasswordSecretID:   existing.SecretID,
-						PassphraseSecretID: existing.PassphraseSecretID,
+						ID:                  initialVersionID,
+						PasswordSecretID:    existing.SecretID,
+						PassphraseSecretID:  existing.PassphraseSecretID,
+						KeyMaterialSecretID: existing.KeyMaterialSecretID,
 					},
 				}
 				d.Credentials[i].CurrentVersionID = initialVersionID
 				d.Credentials[i].SecretID = ""
 				d.Credentials[i].PassphraseSecretID = ""
+				d.Credentials[i].KeyMaterialSecretID = ""
 			}
 
 			// Determine the next version ID.
@@ -609,19 +670,20 @@ func (s *JSONStore) SetCandidateVersion(id string, passwordSecretID, passphraseS
 			if existing.CandidateVersionID != "" {
 				return fmt.Errorf("%s: %w", id, ErrCandidateExists)
 			}
-
 			// Migrate record-level fields into a version if needed.
 			if len(existing.Versions) == 0 {
 				d.Credentials[i].Versions = []CredentialVersion{
 					{
-						ID:                 initialVersionID,
-						PasswordSecretID:   existing.SecretID,
-						PassphraseSecretID: existing.PassphraseSecretID,
+						ID:                  initialVersionID,
+						PasswordSecretID:    existing.SecretID,
+						PassphraseSecretID:  existing.PassphraseSecretID,
+						KeyMaterialSecretID: existing.KeyMaterialSecretID,
 					},
 				}
 				d.Credentials[i].CurrentVersionID = initialVersionID
 				d.Credentials[i].SecretID = ""
 				d.Credentials[i].PassphraseSecretID = ""
+				d.Credentials[i].KeyMaterialSecretID = ""
 			}
 
 			// Determine the next version ID.

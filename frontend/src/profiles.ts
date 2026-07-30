@@ -85,7 +85,15 @@ export interface Credential {
   // - publicKey: path to private key or vault:// URL
   // - agent/keyboardInteractive: not needed
   keyPath?: string // Only for publicKey auth
-
+  /**
+   * Whether this credential has key material stored in the vault.
+   * Only meaningful for publicKey auth. Only present in list responses.
+   */
+  hasKeyMaterial?: boolean
+  /**
+   * The fingerprint of the stored key. Present when hasKeyMaterial is true.
+   */
+  keyFingerprint?: string
   // Version tracking (wave 8 — rollouts)
   versions?: CredentialVersion[]
   currentVersionId?: string
@@ -415,6 +423,16 @@ export class ProfileClient {
   }
   hasPassword(credentialId: string): Promise<boolean> {
     return this.call('credentials.hasPassword', { credentialId })
+  }
+
+  // Key material storage (vault) — keyed by credential ID
+  /** credentials.saveKeyMaterial — store a private key in the vault. */
+  saveKeyMaterial(credentialId: string, keyText: string): Promise<{ fingerprint: string }> {
+    return this.call('credentials.saveKeyMaterial', { credentialId, keyText })
+  }
+  /** credentials.deleteKeyMaterial — remove stored key material from the vault. */
+  deleteKeyMaterial(credentialId: string): Promise<Record<string, never>> {
+    return this.call('credentials.deleteKeyMaterial', { credentialId })
   }
 
   // Credential usage query — which profiles (by resolved inheritance) use each credential.

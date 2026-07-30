@@ -12,18 +12,20 @@
 // Surfaces import createVaultState for reactive state + the two dialogs,
 // calling ensureBeforeSave to intercept the password-save flow.
 
-import { createSignal, Show, For, type Component, type Accessor } from 'solid-js'
+import { createSignal, createEffect, Show, For, type Component, type Accessor } from 'solid-js'
 import { Dialog } from './ui/dialog'
 import { Button } from './ui/button'
 import { Stack } from './ui/stack'
 import { TextField } from './ui/text-field'
 import { CodeBlock } from './ui/code-block'
 import { IconButton } from './ui/icon-button'
-import { Badge, PageSection, Select, Field } from './ui'
+import { PageSection, Select, Field } from './ui'
 import { CopyIcon } from './ui/icons'
 import { showToast } from './ui/toast'
 import { RpcError } from './dispatcher'
-import type { VaultClient, VaultStatus } from './vault-client'
+import type { VaultClient, VaultStatus, ProviderStatus } from './vault-client'
+import { Tabs } from './ui/tabs'
+import type { TabItem, TabItemStatus } from './ui/tabs'
 
 // ── Error mapping ───────────────────────────────────────────────────────
 // The Dispatcher currently drops structured RPC error fields and surfaces
@@ -48,6 +50,43 @@ function vaultErrorMessage(err: unknown): string {
   }
   if (err instanceof Error) return err.message
   return 'Operation failed'
+}
+
+// ── Store display helpers ───────────────────────────────────────────────
+// Maps provider IDs to user-facing store names, and constructs state
+// sentences from provider status using REASON_MESSAGES as the single owner
+// of user-facing wording.
+
+const STORE_NAMES: Record<string, string> = {
+  system: 'System keychain',
+  file: 'Encrypted nocx storage',
+}
+
+function storeLabelName(id: string): string {
+  return STORE_NAMES[id] ?? id
+}
+
+/** The fallback sentence shown when a store is not answering and its reason
+ *  code is not in REASON_MESSAGES. */
+const UNKNOWN_REASON_SENTENCE = 'Not answering: check the store and try again.'
+
+function storeStateSentence(p: ProviderStatus): string {
+  if (p.ready) return `${storeLabelName(p.id)} is available and answering.`
+  const msg = p.reason
+    ? (REASON_MESSAGES[p.reason] ?? UNKNOWN_REASON_SENTENCE)
+    : UNKNOWN_REASON_SENTENCE
+  return `Not answering: ${msg}`
+}
+
+function storeRowStatus(p: ProviderStatus): TabItemStatus {
+  if (!p.ready) {
+    const label = p.reason ? (REASON_MESSAGES[p.reason] ?? 'Not available') : 'Not available'
+    return { tone: 'error', accessibleName: label }
+  }
+  return {
+    tone: p.writable ? 'ok' : 'warning',
+    accessibleName: p.writable ? 'Available' : 'Read-only',
+  }
 }
 
 // ── Vault controller (reactive state + methods for surfaces) ────────────
@@ -999,12 +1038,14 @@ export interface VaultSectionProps {
 export function VaultSection(props: VaultSectionProps) {
   const [dialog, setDialog] = createSignal<'setup' | 'passphrase' | 'recovery' | null>(null)
   const [sealing, setSealing] = createSignal(false)
+  const [activeStore, setActiveStore] = createSignal<string | null>(null)
+  const [lastTestRun, setLastTestRun] = createSignal<Record<string, number>>({})
 
   const handleSeal = async () => {
     setSealing(true)
     try {
       await props.vaultController.seal()
-      showToast({ level: 'success', message: 'Vault sealed.' })
+      showToast({ level: 'success', message: 'Vault locked.' })
     } catch (e: unknown) {
       showToast({ level: 'danger', message: vaultErrorMessage(e) })
     } finally {
@@ -1013,19 +1054,6 @@ export function VaultSection(props: VaultSectionProps) {
   }
 
   const status = () => props.vaultController.status()
-
-  const stateBadge = () => {
-    const s = status()
-    if (!s) return { label: 'Unknown', tone: 'neutral' as const }
-    switch (s.state) {
-      case 'unsealed':
-        return { label: 'Unsealed', tone: 'info' as const }
-      case 'sealed':
-        return { label: 'Sealed', tone: 'warning' as const }
-      case 'uninitialized':
-        return { label: 'Uninitialized', tone: 'neutral' as const }
-    }
-  }
 
   const handleDefaultProvider = async (provider: string) => {
     try {
@@ -1049,119 +1077,174 @@ export function VaultSection(props: VaultSectionProps) {
   const actionDisabledReason = () => {
     const s = status()
     if (!s) return ''
-    if (s.state === 'uninitialized') return 'Vault has not been set up.'
-    if (s.state === 'sealed') return 'Vault is sealed.'
+    if (s.state === 'uninitialized') return 'Protection is not set up yet.'
+    if (s.state === 'sealed') return 'Vault is locked.'
     // unsealed but no passphrase envelope
     return 'Only available when a passphrase is configured.'
   }
 
-  const AUTO_SEAL_OPTIONS = [
-    { value: 0, label: 'Off' },
+  const AUTO_LOCK_OPTIONS = [
+    { value: 0, label: 'Never' },
     { value: 5, label: '5 min' },
     { value: 15, label: '15 min' },
     { value: 30, label: '30 min' },
     { value: 60, label: '60 min' },
   ]
 
-  const handleSetAutoSeal = async (minutes: number) => {
+  const handleSetAutoLock = async (minutes: number) => {
     try {
       await props.vaultClient.setAutoSeal(minutes)
       await props.vaultController.refresh()
-      showToast({ level: 'success', message: 'Auto-seal timeout updated.' })
+      showToast({ level: 'success', message: 'Auto-lock timeout updated.' })
     } catch (e: unknown) {
       showToast({ level: 'danger', message: vaultErrorMessage(e) })
     }
   }
+
+  const handleRefresh = async () => {
+    const before = Date.now()
+    await props.vaultController.refresh()
+    return before
+  }
+
+  // Build store tab items for the vertical rail
+  const storeItems = () => {
+    const s = status()
+    if (!s) return [] as TabItem[]
+    return s.providers.map((p) => ({
+      id: p.id,
+      label: storeLabelName(p.id),
+      status: storeRowStatus(p),
+      content: () => {
+        const isDefault = s.defaultProvider === p.id
+        const storeLabel = storeLabelName(p.id)
+        const lastCheck = lastTestRun()[p.id]
+        return (
+          <Stack>
+            <p>
+              <strong>{storeLabel}</strong>
+            </p>
+
+            <p>{storeStateSentence(p)}</p>
+            <div>
+              <Button
+                variant="default"
+                onClick={() => {
+                  void handleRefresh().then((ts) => setLastTestRun((r) => ({ ...r, [p.id]: ts })))
+                }}
+              >
+                Test
+              </Button>
+              <Show when={lastCheck}>
+                {(ts) => <span> · Last checked: {new Date(ts()).toLocaleTimeString()}</span>}
+              </Show>
+            </div>
+            <div>
+              <Show
+                when={isDefault}
+                fallback={
+                  <Button
+                    variant="ghost"
+                    onClick={() => {
+                      void handleDefaultProvider(p.id)
+                    }}
+                  >
+                    Store new secrets here
+                  </Button>
+                }
+              >
+                <span>Storing new secrets here</span>
+              </Show>
+            </div>
+          </Stack>
+        )
+      },
+    })) as TabItem[]
+  }
+
+  // Sync active store when providers change
+  createEffect(() => {
+    const items = storeItems()
+    if (items.length > 0 && !items.find((t) => t.id === activeStore())) {
+      setActiveStore(items[0].id)
+    }
+  })
+
   return (
     <div>
-      <PageSection title="Status" divided>
-        <Field for="vault-state" label="State" orientation="horizontal">
-          <Badge tone={stateBadge().tone}>{stateBadge().label}</Badge>
-        </Field>
-        <Field for="vault-oskey" label="OS-held key" orientation="horizontal">
-          <Show
-            when={status()?.osKeyAvailable}
-            fallback={<Badge tone="neutral">Not available</Badge>}
-          >
-            <Badge tone="info">Available</Badge>
-          </Show>
-        </Field>
-        <Show when={status() && status()!.providers.some((p) => p.writable)}>
-          <Field for="vault-default-provider" label="Default provider" orientation="horizontal">
-            <Select
-              value={status()!.defaultProvider ?? ''}
-              onChange={(v) => {
-                void handleDefaultProvider(v)
+      {/* Top: state + single primary action */}
+      <div class="ui-vault-status-row">
+        <p>nocx protects passwords and key passphrases saved for your connections.</p>
+        <Show when={status()}>
+          {(s) => (
+            <Button
+              variant="primary"
+              disabled={s().state === 'unsealed' && sealing()}
+              onClick={() => {
+                if (s().state === 'uninitialized') setDialog('setup')
+                else if (s().state === 'sealed') props.vaultController.openUnlock()
+                else void handleSeal()
               }}
-              options={status()!
-                .providers.filter((p) => p.writable)
-                .map((p) => ({ value: p.id, label: p.id }))}
-              placeholder="— None —"
-              placeholderValue=""
-            />
-          </Field>
+            >
+              {s().state === 'unsealed'
+                ? sealing()
+                  ? 'Locking…'
+                  : 'Lock now'
+                : s().state === 'sealed'
+                  ? 'Unlock'
+                  : 'Set up protection'}
+            </Button>
+          )}
         </Show>
-        <Show when={status() && status()!.state === 'unsealed'}>
-          <Field for="vault-auto-seal" label="Auto-seal timeout" orientation="horizontal">
+      </div>
+
+      {/* Where it is stored */}
+      <Show when={storeItems().length > 0}>
+        <PageSection title="Where it is stored">
+          <Tabs
+            items={storeItems()}
+            active={activeStore() ?? ''}
+            onChange={setActiveStore}
+            orientation="vertical"
+            ariaLabel="Storage providers"
+          />
+        </PageSection>
+      </Show>
+
+      {/* Protection */}
+      <PageSection title="Protection" divided>
+        <Field
+          for="vault-lock-now"
+          label="Lock now"
+          orientation="horizontal"
+          description={(() => {
+            const s = status()
+            if (!s || s.state === 'unsealed') return undefined
+            return s.state === 'sealed' ? 'Vault is locked.' : 'Protection is not set up yet.'
+          })()}
+        >
+          <Button
+            variant="default"
+            disabled={sealing() || status()?.state !== 'unsealed'}
+            onClick={() => void handleSeal()}
+          >
+            {sealing() ? 'Locking…' : 'Lock now'}
+          </Button>
+        </Field>
+        <Show when={status()?.state === 'unsealed'}>
+          <Field for="vault-auto-lock" label="Lock automatically after" orientation="horizontal">
             <Select
               value={String(status()!.autoSealMinutes)}
-              onChange={(v) => {
-                void handleSetAutoSeal(Number(v))
-              }}
-              options={AUTO_SEAL_OPTIONS.map((o) => ({
+              onChange={(v) => void handleSetAutoLock(Number(v))}
+              options={AUTO_LOCK_OPTIONS.map((o) => ({
                 value: String(o.value),
                 label: o.label,
               }))}
             />
           </Field>
         </Show>
-      </PageSection>
-      <PageSection title="Actions" divided>
-        <Show when={status() && status()!.state !== 'unsealed'}>
-          <Field
-            for={status()?.state === 'sealed' ? 'vault-action-unlock' : 'vault-action-setup'}
-            label={status()?.state === 'sealed' ? 'Unlock' : 'Set up protection'}
-            orientation="horizontal"
-          >
-            <Button
-              variant="primary"
-              onClick={() => {
-                const s = status()
-                if (s?.state === 'sealed') {
-                  props.vaultController.openUnlock()
-                } else {
-                  setDialog('setup')
-                }
-              }}
-            >
-              {status()?.state === 'sealed' ? 'Unlock' : 'Set up protection'}
-            </Button>
-          </Field>
-        </Show>
         <Field
-          for="vault-action-seal"
-          label="Seal now"
-          orientation="horizontal"
-          description={
-            status() && status()!.state !== 'unsealed'
-              ? status()!.state === 'sealed'
-                ? 'Vault is sealed.'
-                : 'Vault has not been set up.'
-              : undefined
-          }
-        >
-          <Button
-            variant={status()?.state === 'unsealed' ? 'primary' : 'default'}
-            disabled={sealing() || status()?.state !== 'unsealed'}
-            onClick={() => {
-              void handleSeal()
-            }}
-          >
-            {sealing() ? 'Sealing…' : 'Seal now'}
-          </Button>
-        </Field>
-        <Field
-          for="vault-action-passphrase"
+          for="vault-change-passphrase"
           label="Change passphrase"
           orientation="horizontal"
           description={!actionCanRun() ? actionDisabledReason() : undefined}
@@ -1175,7 +1258,7 @@ export function VaultSection(props: VaultSectionProps) {
           </Button>
         </Field>
         <Field
-          for="vault-action-recovery"
+          for="vault-reissue-recovery"
           label="Recovery code"
           orientation="horizontal"
           description={!actionCanRun() ? actionDisabledReason() : undefined}
@@ -1189,32 +1272,41 @@ export function VaultSection(props: VaultSectionProps) {
           </Button>
         </Field>
       </PageSection>
-      <Show when={status() && status()!.providers.length > 0}>
-        <PageSection title="Providers" divided>
-          <For each={status()!.providers}>
-            {(p) => (
-              <Field
-                for={'vault-provider-' + p.id}
-                label={p.id}
-                orientation="horizontal"
-                description={
-                  !p.ready && p.reason ? (REASON_MESSAGES[p.reason ?? ''] ?? p.reason) : undefined
-                }
-              >
-                <div>
-                  <Show when={p.writable} fallback={<Badge tone="neutral">Read-only</Badge>}>
-                    <Badge tone="info">Writable</Badge>
-                  </Show>{' '}
-                  <Show when={p.ready} fallback={<Badge tone="warning">Not ready</Badge>}>
-                    <Badge tone="info">Ready</Badge>
-                  </Show>
-                </div>
-              </Field>
-            )}
-          </For>
-        </PageSection>
+
+      {/* Diagnostics disclosure */}
+      <Show when={status()}>
+        <details class="ui-vault-diagnostics">
+          <summary>Diagnostics</summary>
+          <div>
+            <Field for="vault-state-raw" label="State" orientation="horizontal">
+              <span>{status()!.state}</span>
+            </Field>
+            <Field for="vault-oskey-raw" label="OS-held key" orientation="horizontal">
+              <span>{status()!.osKeyAvailable ? 'Available' : 'Not available'}</span>
+            </Field>
+            <Show when={status()!.providers.length > 0}>
+              <For each={status()!.providers}>
+                {(p) => (
+                  <Field
+                    for={'vault-diag-' + p.id}
+                    label={storeLabelName(p.id)}
+                    orientation="horizontal"
+                  >
+                    <span>
+                      {p.writable ? 'Writable' : 'Read-only'}
+                      {' · '}
+                      {p.ready ? 'Ready' : 'Not ready'}
+                      {p.reason ? ` · ${p.reason}` : ''}
+                    </span>
+                  </Field>
+                )}
+              </For>
+            </Show>
+          </div>
+        </details>
       </Show>
 
+      {/* Dialogs */}
       <ChangePassphraseDialog
         open={dialog() === 'passphrase'}
         onClose={() => setDialog(null)}

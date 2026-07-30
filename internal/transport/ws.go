@@ -24,6 +24,7 @@ import (
 	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/storage"
+	gossh "golang.org/x/crypto/ssh"
 )
 
 // sessionRx wraps a session's output ring together with the current attached
@@ -752,6 +753,7 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 	case "credentials.savePassword", "credentials.deletePassword",
 		"credentials.hasPassword",
 		"credentials.saveKeyPassphrase", "credentials.deleteKeyPassphrase",
+		"credentials.saveKeyMaterial", "credentials.deleteKeyMaterial",
 		"credentials.stagePassword", "credentials.discardCandidate":
 		s.handleCredentialMethod(wconn, req)
 	case "settings.describe", "settings.getSnapshot", "settings.set", "settings.reset",
@@ -781,7 +783,7 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 
 	case "vault.status", "vault.setup", "vault.unseal", "vault.seal",
 		"vault.changePassphrase", "vault.regenerateRecovery", "vault.setDefaultProvider",
-		"vault.setAutoSeal", "vault.activity":
+		"vault.setAutoSeal", "vault.activity", "vault.inventory":
 		s.handleVaultMethod(wconn, req)
 	default:
 		resp := newJSONRPCError(req.ID, -32601, "Method not found")
@@ -1477,9 +1479,18 @@ func (s *WSServer) handleCredentialCRUDMethod(wconn *wsConn, req jsonrpcRequest)
 		for i := range creds {
 			creds[i].SecretID = ""
 			creds[i].PassphraseSecretID = ""
+			creds[i].KeyMaterialSecretID = ""
+			// Populate computed response fields from the current version.
+			if v, ok := creds[i].Current(); ok {
+				if v.KeyMaterialSecretID != "" {
+					creds[i].HasKeyMaterial = true
+				}
+				creds[i].KeyFingerprint = v.KeyFingerprint
+			}
 			for j := range creds[i].Versions {
 				creds[i].Versions[j].PasswordSecretID = ""
 				creds[i].Versions[j].PassphraseSecretID = ""
+				creds[i].Versions[j].KeyMaterialSecretID = ""
 			}
 		}
 		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(creds)))
@@ -1516,6 +1527,19 @@ func (s *WSServer) handleCredentialCRUDMethod(wconn *wsConn, req jsonrpcRequest)
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: id required"))
 			return
 		}
+		// Exclusivity: if the patch sets KeyPath on a credential that holds
+		// key material, delete the stored material and clear the reference.
+		if in.KeyPath != nil && *in.KeyPath != "" && s.credentials != nil {
+			if cred, ok, findErr := s.findCredentialByID(in.ID); findErr == nil && ok {
+				if v, currentOk := cred.Current(); currentOk && v.KeyMaterialSecretID != "" {
+					// Delete the vault secret.
+					_ = s.credentials.Delete(context.Background(), credential.SecretID(v.KeyMaterialSecretID))
+					// Clear the metadata reference and fingerprint.
+					_ = s.credMeta.UpdateCurrentVersionKeyMaterial(in.ID, "", "")
+				}
+			}
+		}
+
 		merged, err := s.credMeta.UpdateCredential(in.ID, in.Patch())
 		if err != nil {
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, credentialErrorCode(err), err.Error()))
@@ -1523,10 +1547,18 @@ func (s *WSServer) handleCredentialCRUDMethod(wconn *wsConn, req jsonrpcRequest)
 		}
 		merged.SecretID = ""
 		merged.PassphraseSecretID = ""
-		// Also blank per-version secret references.
+		merged.KeyMaterialSecretID = ""
+		// Also blank per-version secret references and populate computed fields.
+		if v, ok := merged.Current(); ok {
+			if v.KeyMaterialSecretID != "" {
+				merged.HasKeyMaterial = true
+			}
+			merged.KeyFingerprint = v.KeyFingerprint
+		}
 		for j := range merged.Versions {
 			merged.Versions[j].PasswordSecretID = ""
 			merged.Versions[j].PassphraseSecretID = ""
+			merged.Versions[j].KeyMaterialSecretID = ""
 		}
 		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(merged)))
 	case "credentials.delete":
@@ -1736,6 +1768,47 @@ func (s *WSServer) handleCredentialMethod(wconn *wsConn, req jsonrpcRequest) {
 		s.handleStagePassword(wconn, req)
 	case "credentials.discardCandidate":
 		s.handleDiscardCandidate(wconn, req)
+	case "credentials.saveKeyMaterial":
+		var params struct {
+			CredentialID string `json:"credentialId"`
+			KeyText      string `json:"keyText"`
+		}
+		if err := json.Unmarshal(req.Params, &params); err != nil || params.CredentialID == "" {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: credentialId required"))
+			return
+		}
+		fingerprint, err := s.saveKeyMaterialForCredential(params.CredentialID, params.KeyText)
+		if err != nil {
+			var invalidKey *errInvalidKeyMaterial
+			if errors.As(err, &invalidKey) {
+				_ = wconn.writeJSON(jsonrpcResponse{
+					JSONRPC: "2.0",
+					ID:      req.ID,
+					Error: &jsonrpcErrorObj{
+						Code:    -32603,
+						Message: err.Error(),
+						Data:    &vaultErrorData{Reason: "invalid-key"},
+					},
+				})
+				return
+			}
+			_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "", err))
+			return
+		}
+		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(map[string]string{"fingerprint": fingerprint})))
+	case "credentials.deleteKeyMaterial":
+		var params struct {
+			CredentialID string `json:"credentialId"`
+		}
+		if err := json.Unmarshal(req.Params, &params); err != nil || params.CredentialID == "" {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: credentialId required"))
+			return
+		}
+		if err := s.deleteKeyMaterialForCredential(params.CredentialID); err != nil {
+			_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "", err))
+			return
+		}
+		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(struct{}{})))
 	}
 }
 
@@ -1833,6 +1906,137 @@ func (s *WSServer) hasPasswordForCredential(credID string) (bool, error) {
 		return false, nil
 	}
 	return s.credentials.Exists(context.Background(), credential.SecretID(v.PasswordSecretID))
+}
+
+// errInvalidKeyMaterial is returned when key text does not parse as a private
+// key. It maps to error.data.reason: "invalid-key" in the JSON-RPC response.
+type errInvalidKeyMaterial struct{ msg string }
+
+func (e *errInvalidKeyMaterial) Error() string { return e.msg }
+
+// parsePrivateKeyMaterial validates and extracts the SHA256 fingerprint from
+// private key PEM text. Returns the fingerprint (empty for encrypted keys
+// whose public half is unavailable) or an *errInvalidKeyMaterial if the text
+// is not a valid private key.
+// parsePrivateKeyMaterial validates and extracts the SHA256 fingerprint from
+// private key PEM text. Returns the fingerprint (empty for encrypted keys
+// whose public half is unavailable) or an *errInvalidKeyMaterial if the text
+// is not a valid private key.
+func parsePrivateKeyMaterial(keyText string) (fingerprint string, err error) {
+	keyBytes := []byte(keyText)
+	parsed, parseErr := gossh.ParseRawPrivateKey(keyBytes)
+	if parseErr == nil {
+		// Unencrypted key — wrap as signer and extract fingerprint.
+		signer, signerErr := gossh.NewSignerFromKey(parsed)
+		if signerErr != nil {
+			return "", &errInvalidKeyMaterial{msg: fmt.Sprintf("cannot create signer from key: %v", signerErr)}
+		}
+		return gossh.FingerprintSHA256(signer.PublicKey()), nil
+	}
+
+	// Encrypted or otherwise unparseable.
+	var passErr *gossh.PassphraseMissingError
+	if errors.As(parseErr, &passErr) {
+		if passErr.PublicKey != nil {
+			// OpenSSH format encrypted key — public half is readable.
+			return gossh.FingerprintSHA256(passErr.PublicKey), nil
+		}
+		// Traditional PEM-encrypted key — no public half available.
+		// Reject with a clear message (the user should convert to OpenSSH format).
+		return "", &errInvalidKeyMaterial{
+			msg: "encrypted private key format does not expose a public key; use OpenSSH format (ssh-keygen -p -m RFC4716 -f key)",
+		}
+	}
+
+	return "", &errInvalidKeyMaterial{msg: fmt.Sprintf("not a valid private key: %v", parseErr)}
+}
+
+func (s *WSServer) saveKeyMaterialForCredential(credID, keyText string) (string, error) {
+	if s.credMeta == nil {
+		return "", errors.New("profiles not available")
+	}
+	if s.credentials == nil {
+		return "", errors.New("secret store not available")
+	}
+
+	cred, ok, err := s.findCredentialByID(credID)
+	if err != nil {
+		return "", fmt.Errorf("load credential %s: %w", credID, err)
+	}
+	if !ok {
+		return "", fmt.Errorf("credential %s not found", credID)
+	}
+
+	// Parse and validate the key text before storing anything.
+	fingerprint, err := parsePrivateKeyMaterial(keyText)
+	if err != nil {
+		return "", err
+	}
+
+	// Store the key material in the vault (write-before-repoint).
+	ctx := context.Background()
+	newID, err := s.credentials.Create(ctx, credential.NewSecret(keyText))
+	if err != nil {
+		return "", fmt.Errorf("store key material: %w", err)
+	}
+
+	// Determine old key material ref for cleanup.
+	oldID := credential.SecretID("")
+	if v, ok := cred.Current(); ok {
+		oldID = credential.SecretID(v.KeyMaterialSecretID)
+	}
+
+	// Update credential metadata: set key material ref, fingerprint, and
+	// clear KeyPath (the store method handles the mutual exclusion).
+	if err := s.credMeta.UpdateCurrentVersionKeyMaterial(credID, string(newID), fingerprint); err != nil {
+		return "", fmt.Errorf("save credential metadata: %w", err)
+	}
+
+	// Best-effort delete of the old key material.
+	if oldID != "" {
+		_ = s.credentials.Delete(ctx, oldID)
+	}
+
+	return fingerprint, nil
+}
+
+// deleteKeyMaterialForCredential removes the stored key material from the
+// vault and clears the reference on the credential version.
+func (s *WSServer) deleteKeyMaterialForCredential(credID string) error {
+	if s.credMeta == nil {
+		return errors.New("profiles not available")
+	}
+	if s.credentials == nil {
+		return errors.New("secret store not available")
+	}
+
+	cred, ok, err := s.findCredentialByID(credID)
+	if err != nil {
+		return fmt.Errorf("load credential %s: %w", credID, err)
+	}
+	if !ok {
+		return fmt.Errorf("credential %s not found", credID)
+	}
+
+	// Find the current key material ref to delete from vault.
+	ctx := context.Background()
+	oldID := credential.SecretID("")
+	if v, ok := cred.Current(); ok {
+		oldID = credential.SecretID(v.KeyMaterialSecretID)
+	}
+
+	// Clear the reference on the credential version and clear KeyPath.
+	// Use empty values to clear the fields.
+	if err := s.credMeta.UpdateCurrentVersionKeyMaterial(credID, "", ""); err != nil {
+		return fmt.Errorf("update credential metadata: %w", err)
+	}
+
+	// Delete the vault secret.
+	if oldID != "" {
+		_ = s.credentials.Delete(ctx, oldID)
+	}
+
+	return nil
 }
 
 // savePassphraseForCredential stores a key passphrase secret and updates the
