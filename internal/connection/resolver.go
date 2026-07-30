@@ -252,6 +252,9 @@ func (r *Resolver) buildConfig(prof *profile.SSHProfile, visited map[string]bool
 			if v.PassphraseSecretID != "" {
 				cfg.PassphraseSecretID = credential.SecretID(v.PassphraseSecretID)
 			}
+			if v.KeyMaterialSecretID != "" {
+				cfg.KeySecretID = credential.SecretID(v.KeyMaterialSecretID)
+			}
 			cfg.CredentialVersionID = v.ID
 		}
 		_ = versionErr // used for future error enrichment

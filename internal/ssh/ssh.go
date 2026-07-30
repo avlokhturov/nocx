@@ -98,6 +98,12 @@ type ConnectConfig struct {
 	// PassphraseSecretID is the opaque reference to the stored key
 	// passphrase in the SecretStore.
 	PassphraseSecretID credential.SecretID
+	// KeySecretID is the opaque reference to the stored private key
+	// material in the SecretStore, resolved from the credential version's
+	// KeyMaterialSecretID. Mutually exclusive with KeyFile: when set, the
+	// auth chain loads key bytes from the SecretStore instead of reading
+	// a file. The bytes never touch disk.
+	KeySecretID credential.SecretID
 
 	// JumpSecrets, when set, enables late-bind of the jump host's
 	// password from the SecretStore. Separate from the target's Secrets

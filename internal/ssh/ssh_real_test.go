@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/binary"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -17,7 +18,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/vault"
 	gossh "golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
 )
@@ -50,6 +53,43 @@ func startTestSSHServer(t *testing.T) *testSSHServer {
 
 	hostKey := generateSigner(t)
 	userKey := generateSigner(t)
+
+	config := &gossh.ServerConfig{
+		PublicKeyCallback: func(meta gossh.ConnMetadata, key gossh.PublicKey) (*gossh.Permissions, error) {
+			if bytes.Equal(key.Marshal(), userKey.PublicKey().Marshal()) {
+				return nil, nil
+			}
+			return nil, fmt.Errorf("gossh: unknown public key for %q", meta.User())
+		},
+	}
+	config.AddHostKey(hostKey)
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("test server listen: %v", err)
+	}
+
+	srv := &testSSHServer{
+		t:             t,
+		hostSigner:    hostKey,
+		userSigner:    userKey,
+		listener:      listener,
+		addr:          listener.Addr().String(),
+		shellReady:    make(chan struct{}),
+		windowChanged: make(chan struct{}, 8),
+	}
+
+	go srv.acceptLoop(config)
+	return srv
+}
+
+// startTestSSHServerWithUserKey starts a test SSH server that authenticates
+// with the provided user key instead of generating one. The caller retains
+// access to the raw private key material to store in a test SecretStore.
+func startTestSSHServerWithUserKey(t *testing.T, userKey gossh.Signer) *testSSHServer {
+	t.Helper()
+
+	hostKey := generateSigner(t)
 
 	config := &gossh.ServerConfig{
 		PublicKeyCallback: func(meta gossh.ConnMetadata, key gossh.PublicKey) (*gossh.Permissions, error) {
@@ -897,5 +937,300 @@ func TestProbe_SingleAuthMethod(t *testing.T) {
 	)
 	if err != nil {
 		t.Fatalf("Probe with single public-key method: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ConnectOption helpers for vault key path testing
+// ---------------------------------------------------------------------------
+
+func withKeySecretID(id credential.SecretID) ConnectOption {
+	return func(c *ConnectConfig) { c.KeySecretID = id }
+}
+
+func withPassphraseSecretID(id credential.SecretID) ConnectOption {
+	return func(c *ConnectConfig) { c.PassphraseSecretID = id }
+}
+
+func withStore(store credential.SecretStore) ConnectOption {
+	return func(c *ConnectConfig) { c.Secrets = store }
+}
+
+// ---------------------------------------------------------------------------
+// Vault key authentication — end-to-end via the SecretStore
+// ---------------------------------------------------------------------------
+
+// TestConnect_VaultKeyAuth_Success verifies that a private key stored in the
+// SecretStore authenticates through the full Connect path: buildAuthChain
+// loads the key from the store and opens a session.
+func TestConnect_VaultKeyAuth_Success(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore()
+
+	// Generate a key, marshal it, and store in the vault.
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	userSigner, err := gossh.NewSignerFromKey(priv)
+	if err != nil {
+		t.Fatalf("create signer: %v", err)
+	}
+	block, err := gossh.MarshalPrivateKey(priv, "")
+	if err != nil {
+		t.Fatalf("marshal key: %v", err)
+	}
+	keyPEM := pem.EncodeToMemory(block)
+
+	keyID, err := store.Create(ctx, credential.NewSecretBytes(keyPEM))
+	if err != nil {
+		t.Fatalf("store vault key: %v", err)
+	}
+
+	// Start an SSH server that accepts this public key.
+	srv := startTestSSHServerWithUserKey(t, userSigner)
+	defer srv.close()
+
+	khPath := writeKnownHosts(t, srv, srv.addr)
+
+	client, err := NewReal(
+		log.NewSlogAdapter(nil),
+		WithKnownHostsFile(khPath),
+	)
+	if err != nil {
+		t.Fatalf("NewReal: %v", err)
+	}
+
+	// Bind the credential to the server address so the binding check passes.
+	authzHost, authzPortStr, _ := net.SplitHostPort(srv.addr)
+	authzPort, _ := strconv.Atoi(authzPortStr)
+
+	ch, err := client.Connect(
+		ctx, srv.addr,
+		WithUser("test"),
+		withStore(store),
+		withKeySecretID(keyID),
+		withBinding(authzHost, authzPort),
+		WithPTYSize(80, 24, 640, 480),
+	)
+	if err != nil {
+		t.Fatalf("Connect with vault key: %v", err)
+	}
+	defer func() { _ = ch.Close() }()
+
+	// Verify the shell is ready and data flows.
+	<-srv.shellReady
+
+	_, err = ch.Write([]byte("hello"))
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	buf := make([]byte, 32)
+	n, err := ch.Read(buf)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if string(buf[:n]) != "echo:hello" {
+		t.Fatalf("got %q, want echo:hello", string(buf[:n]))
+	}
+}
+
+// TestConnect_VaultEncryptedKeyAuth_Success verifies that an encrypted private
+// key stored in the SecretStore with its passphrase authenticates through the
+// full Connect path.
+func TestConnect_VaultEncryptedKeyAuth_Success(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore()
+
+	passphrase := "test-encrypted-passphrase"
+
+	// Generate an encrypted key and store both the key and passphrase.
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	userSigner, err := gossh.NewSignerFromKey(priv)
+	if err != nil {
+		t.Fatalf("create signer: %v", err)
+	}
+	block, err := gossh.MarshalPrivateKeyWithPassphrase(priv, "", []byte(passphrase))
+	if err != nil {
+		t.Fatalf("marshal encrypted key: %v", err)
+	}
+	keyPEM := pem.EncodeToMemory(block)
+
+	keyID, err := store.Create(ctx, credential.NewSecretBytes(keyPEM))
+	if err != nil {
+		t.Fatalf("store vault encrypted key: %v", err)
+	}
+	pwID, err := store.Create(ctx, credential.NewSecret(passphrase))
+	if err != nil {
+		t.Fatalf("store vault passphrase: %v", err)
+	}
+
+	// Start an SSH server that accepts this public key.
+	srv := startTestSSHServerWithUserKey(t, userSigner)
+	defer srv.close()
+
+	khPath := writeKnownHosts(t, srv, srv.addr)
+
+	client, err := NewReal(
+		log.NewSlogAdapter(nil),
+		WithKnownHostsFile(khPath),
+	)
+	if err != nil {
+		t.Fatalf("NewReal: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	authzHost, authzPortStr, _ := net.SplitHostPort(srv.addr)
+	authzPort, _ := strconv.Atoi(authzPortStr)
+
+	ch, err := client.Connect(
+		ctx, srv.addr,
+		WithUser("test"),
+		withStore(store),
+		withKeySecretID(keyID),
+		withPassphraseSecretID(pwID),
+		withBinding(authzHost, authzPort),
+		WithPTYSize(80, 24, 640, 480),
+	)
+	if err != nil {
+		t.Fatalf("Connect with encrypted vault key: %v", err)
+	}
+	defer func() { _ = ch.Close() }()
+
+	<-srv.shellReady
+
+	_, err = ch.Write([]byte("hello"))
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	buf := make([]byte, 32)
+	n, err := ch.Read(buf)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if string(buf[:n]) != "echo:hello" {
+		t.Fatalf("got %q, want echo:hello", string(buf[:n]))
+	}
+}
+
+// TestConnect_KeyFileAuth_Regression verifies that a connection using a
+// KeyFile (instead of KeySecretID) still authenticates through the auth
+// chain — a regression test against vault-key changes breaking the file
+// path that every existing credential uses.
+func TestConnect_KeyFileAuth_Regression(t *testing.T) {
+	// Generate a key and a server that accepts it.
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	userSigner, err := gossh.NewSignerFromKey(priv)
+	if err != nil {
+		t.Fatalf("create signer: %v", err)
+	}
+
+	srv := startTestSSHServerWithUserKey(t, userSigner)
+	defer srv.close()
+
+	khPath := writeKnownHosts(t, srv, srv.addr)
+
+	// Write the private key to a temp file as the KeyFile path would.
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "id_test")
+	block, err := gossh.MarshalPrivateKey(priv, "")
+	if err != nil {
+		t.Fatalf("marshal key: %v", err)
+	}
+	if writeErr := os.WriteFile(keyPath, pem.EncodeToMemory(block), 0o600); writeErr != nil {
+		t.Fatalf("write key file: %v", writeErr)
+	}
+
+	client, err := NewReal(
+		log.NewSlogAdapter(nil),
+		WithKnownHostsFile(khPath),
+	)
+	if err != nil {
+		t.Fatalf("NewReal: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	ch, err := client.Connect(
+		context.Background(), srv.addr,
+		WithUser("test"),
+		WithKeyFile(keyPath),
+		WithPTYSize(80, 24, 640, 480),
+	)
+	if err != nil {
+		t.Fatalf("Connect with KeyFile: %v", err)
+	}
+	defer func() { _ = ch.Close() }()
+
+	<-srv.shellReady
+
+	_, err = ch.Write([]byte("hello"))
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	buf := make([]byte, 32)
+	n, err := ch.Read(buf)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if string(buf[:n]) != "echo:hello" {
+		t.Fatalf("got %q, want echo:hello", string(buf[:n]))
+	}
+}
+
+// TestConnect_VaultSealed_ReturnsTypedError verifies that when the vault is
+// sealed, connecting with a KeySecretID produces vault.ErrVaultSealed, not
+// a generic auth failure. The UI keys on this error to show the Unlock dialog.
+func TestConnect_VaultSealed_ReturnsTypedError(t *testing.T) {
+	ctx := context.Background()
+
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	userSigner, err := gossh.NewSignerFromKey(priv)
+	if err != nil {
+		t.Fatalf("create signer: %v", err)
+	}
+
+	srv := startTestSSHServerWithUserKey(t, userSigner)
+	defer srv.close()
+
+	khPath := writeKnownHosts(t, srv, srv.addr)
+
+	client, err := NewReal(
+		log.NewSlogAdapter(nil),
+		WithKnownHostsFile(khPath),
+	)
+	if err != nil {
+		t.Fatalf("NewReal: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	authzHost, authzPortStr, _ := net.SplitHostPort(srv.addr)
+	authzPort, _ := strconv.Atoi(authzPortStr)
+
+	// Pass a sealed store — Get returns vault.ErrVaultSealed.
+	_, err = client.Connect(
+		ctx, srv.addr,
+		WithUser("test"),
+		withStore(&sealedStore{}),
+		withKeySecretID("any-key-ref"),
+		withBinding(authzHost, authzPort),
+		WithPTYSize(80, 24, 640, 480),
+	)
+	if err == nil {
+		t.Fatal("expected error from sealed vault, got nil")
+	}
+	if !errors.Is(err, vault.ErrVaultSealed) {
+		t.Fatalf("expected ErrVaultSealed, got %T: %v", err, err)
 	}
 }

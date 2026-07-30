@@ -1276,3 +1276,54 @@ func TestResolve_PinProfileADoesNotPinProfileB(t *testing.T) {
 		t.Errorf("B CredentialVersionID = %q, want v2 (current)", cfgB.CredentialVersionID)
 	}
 }
+
+// TestResolver_KeyMaterialSecretID verifies that KeyMaterialSecretID on a
+// credential version is resolved into cfg.KeySecretID on the ConnectConfig.
+//
+//nolint:errcheck
+func TestResolver_KeyMaterialSecretID(t *testing.T) {
+	ps := newStubProfileStore()
+	ss := newStubSecretStore()
+
+	pwID, _ := ss.Create(context.Background(), credential.NewSecret("s3cret"))
+
+	_ = ps.SaveCredential(profile.Credential{
+		ID:       "cred:km:abc",
+		Name:     "key-material",
+		Username: "deploy",
+		Auth:     "publicKey",
+		Versions: []profile.CredentialVersion{
+			{
+				ID:                  "v1",
+				PasswordSecretID:    string(pwID),
+				KeyMaterialSecretID: "vault-sec:abc123",
+				PassphraseSecretID:  "vault-sec:pass456",
+			},
+		},
+		CurrentVersionID: "v1",
+	})
+
+	_ = ps.SaveProfile(profile.SSHProfile{
+		Base: profile.Base{ID: "profile:km:1", Name: "km-test"},
+		Options: profile.StoredSSHProfileOptions{
+			Host:         "km.example.com",
+			CredentialID: "cred:km:abc",
+		},
+	})
+
+	r := NewResolver(ps, ps, ps, ss)
+	_, cfg, err := r.Resolve("profile:km:1")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	if cfg.KeySecretID != "vault-sec:abc123" {
+		t.Errorf("KeySecretID = %q, want vault-sec:abc123", cfg.KeySecretID)
+	}
+	if cfg.PassphraseSecretID != "vault-sec:pass456" {
+		t.Errorf("PassphraseSecretID = %q, want vault-sec:pass456", cfg.PassphraseSecretID)
+	}
+	if cfg.KeyFile != "" {
+		t.Errorf("KeyFile = %q, want empty (key material replaces path)", cfg.KeyFile)
+	}
+}

@@ -8,7 +8,7 @@
  * - settings.ts: input[type=text] and input[type=number] with change event, min/max
  * - connections.ts: inputField() / textField() / numberField() — label + input with input event
  */
-import { Show, type JSX } from 'solid-js'
+import { Show, Switch, Match, type JSX } from 'solid-js'
 import { Field } from './field'
 
 export interface TextFieldProps {
@@ -16,6 +16,8 @@ export interface TextFieldProps {
   label?: string
   description?: string
   error?: string
+  /** When true, renders a <textarea> instead of an <input>. */
+  multiline?: boolean
   value: string | number
   /** Fires on every keystroke (input event). */
   onInput?: (value: string) => void
@@ -34,7 +36,6 @@ export interface TextFieldProps {
   disabled?: boolean
   required?: boolean
   autoFocus?: boolean
-  /** Controls rendered inside the trailing edge of the input. */
   trailing?: JSX.Element
 }
 
@@ -54,28 +55,58 @@ export function TextField(props: TextFieldProps) {
     props.onBlur?.(target.value)
   }
 
+  const inputElement = () => (
+    <input
+      class="ui-text-field__input"
+      id={inputId() || undefined}
+      type={props.type ?? 'text'}
+      value={props.value}
+      placeholder={props.placeholder ?? ''}
+      min={props.min !== undefined ? String(props.min) : undefined}
+      max={props.max !== undefined ? String(props.max) : undefined}
+      disabled={props.disabled === true}
+      required={props.required === true}
+      aria-invalid={props.error !== undefined ? true : undefined}
+      aria-describedby={ariaDescribedBy()}
+      autofocus={props.autoFocus === true}
+      ref={(element) => {
+        if (props.autoFocus === true) queueMicrotask(() => element.focus())
+      }}
+      onInput={onInput}
+      onBlur={onBlur}
+    />
+  )
+
+  const textareaElement = () => (
+    <textarea
+      class="ui-text-field__input"
+      id={inputId() || undefined}
+      value={props.value}
+      placeholder={props.placeholder ?? ''}
+      disabled={props.disabled === true}
+      required={props.required === true}
+      aria-invalid={props.error !== undefined ? true : undefined}
+      aria-describedby={ariaDescribedBy()}
+      autofocus={props.autoFocus === true}
+      rows={4}
+      ref={(element) => {
+        if (props.autoFocus === true) queueMicrotask(() => element.focus())
+      }}
+      onInput={onInput}
+      onBlur={onBlur}
+    />
+  )
+
   const input = () => (
-    <div class="ui-text-field__control" data-trailing={props.trailing ? 'true' : 'false'}>
-      <input
-        class="ui-text-field__input"
-        id={inputId() || undefined}
-        type={props.type ?? 'text'}
-        value={props.value}
-        placeholder={props.placeholder ?? ''}
-        min={props.min !== undefined ? String(props.min) : undefined}
-        max={props.max !== undefined ? String(props.max) : undefined}
-        disabled={props.disabled === true}
-        required={props.required === true}
-        aria-invalid={props.error !== undefined ? true : undefined}
-        aria-describedby={ariaDescribedBy()}
-        autofocus={props.autoFocus === true}
-        ref={(element) => {
-          if (props.autoFocus === true) queueMicrotask(() => element.focus())
-        }}
-        onInput={onInput}
-        onBlur={onBlur}
-      />
-      <Show when={props.trailing}>
+    <div
+      class="ui-text-field__control"
+      data-trailing={props.trailing && !props.multiline ? 'true' : 'false'}
+    >
+      <Switch>
+        <Match when={props.multiline === true}>{textareaElement()}</Match>
+        <Match when={true}>{inputElement()}</Match>
+      </Switch>
+      <Show when={!props.multiline && props.trailing}>
         <span class="ui-text-field__trailing">{props.trailing}</span>
       </Show>
     </div>
@@ -88,7 +119,7 @@ export function TextField(props: TextFieldProps) {
     props.required === true
 
   return (
-    <div class="ui-text-field">
+    <div class="ui-text-field" data-multiline={props.multiline ? 'true' : undefined}>
       <Show when={hasFieldContent()} fallback={input()}>
         <Field
           for={inputId()}

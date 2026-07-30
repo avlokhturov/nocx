@@ -943,6 +943,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                 </Show>
                 <Show when={groupKeyMode() === 'material'}>
                   <TextField
+                    multiline
                     id="group-default-key-text"
                     label="Private Key"
                     value={groupKeyText()}
@@ -1911,6 +1912,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                         </Show>
                         <Show when={profileKeyMode() === 'material'}>
                           <TextField
+                            multiline
                             id="profile-key-text"
                             label="Private Key"
                             value={profileKeyText()}

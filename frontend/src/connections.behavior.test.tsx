@@ -826,6 +826,58 @@ describe('three-way key input — connection editor', () => {
       expect(card!.textContent).toContain('testfingerprint123')
     })
   })
+
+  it('preserves newlines in pasted key text on save', async () => {
+    const { container, client } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    const saveKeyMatSpy = vi
+      .spyOn(client, 'saveKeyMaterial')
+      .mockResolvedValue({ fingerprint: 'SHA256:newline-test' })
+    vi.spyOn(client, 'createCredential').mockResolvedValue({
+      id: 'cred:nl',
+      name: 'prod-web',
+      username: 'deploy',
+      auth: 'publicKey',
+    })
+
+    await waitForProfiles(container, 1)
+    await openProfileEditor(container, 'prod-web')
+    selectProfileSection(container, 'Authentication')
+    clickSegmentedOption(container, 'Public Key')
+
+    // Switch to Paste key mode
+    clickSegmentedOption(container, 'Paste key')
+
+    await vi.waitFor(() => {
+      expect(container.querySelector('#profile-key-text')).toBeTruthy()
+    })
+
+    // Set a multi-line key value directly on the textarea, then dispatch input
+    const keyField = container.querySelector('#profile-key-text') as HTMLTextAreaElement
+    const keyContent =
+      '-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH PRIVATE KEY-----\n'
+    const originalNewlineCount = (keyContent.match(/\n/g) || []).length
+    keyField.value = keyContent
+    fireEvent.input(keyField)
+
+    // Save
+    const dialog = findDialogByTitleContaining(container, 'prod-web')!
+    const saveBtn = Array.from(dialog.querySelectorAll('.ui-button')).find(
+      (b) => b.textContent?.trim() === 'Save Connection',
+    )
+    expect(saveBtn, 'Save button not found').toBeTruthy()
+    fireEvent.click(saveBtn!)
+
+    await vi.waitFor(() => {
+      expect(saveKeyMatSpy).toHaveBeenCalled()
+    })
+
+    const capturedArg = saveKeyMatSpy.mock.calls[0][1]
+    const capturedNewlineCount = (capturedArg.match(/\n/g) || []).length
+    expect(capturedNewlineCount).toBe(originalNewlineCount)
+    expect(capturedNewlineCount).toBeGreaterThan(0)
+    // Confirm it's the same content, not truncated
+    expect(capturedArg).toBe(keyContent)
+  })
 })
 
 // ── Three-way key input: group editor ──────────────────────────────────
@@ -924,6 +976,58 @@ describe('three-way key input — group editor', () => {
     // The path input should be empty (cleared on mode switch)
     const pathInput2 = container.querySelector('#group-default-key-path') as HTMLInputElement
     expect(pathInput2.value).toBe('')
+  })
+
+  it('preserves newlines in pasted key text on group save', async () => {
+    const { container, client } = mount({ profiles: MOCK_PROFILES, groups: MOCK_GROUPS })
+    const saveKeyMatSpy = vi
+      .spyOn(client, 'saveKeyMaterial')
+      .mockResolvedValue({ fingerprint: 'SHA256:group-newline' })
+    vi.spyOn(client, 'createCredential').mockResolvedValue({
+      id: 'cred:grp-nl',
+      name: 'Production',
+      username: 'deploy',
+      auth: 'publicKey',
+    })
+    vi.spyOn(client, 'groupApply').mockResolvedValue([])
+    vi.spyOn(client, 'groupImpact').mockResolvedValue(IMPACT_COSMETIC)
+
+    await waitForProfiles(container, 3)
+    await openGroupEditorByName(container, 'Production')
+    selectGroupSection(container, 'Connection')
+    clickSegmentedOption(container, 'Public Key')
+
+    // Switch to Paste key mode
+    clickSegmentedOption(container, 'Paste key')
+
+    await vi.waitFor(() => {
+      expect(container.querySelector('#group-default-key-text')).toBeTruthy()
+    })
+
+    // Set multi-line key value directly on the textarea, then dispatch input
+    const keyField = container.querySelector('#group-default-key-text') as HTMLTextAreaElement
+    const keyContent = '-----BEGIN EC PRIVATE KEY-----\nMHQCAQEEIIm\n-----END EC PRIVATE KEY-----\n'
+    const originalNewlineCount = (keyContent.match(/\n/g) || []).length
+    keyField.value = keyContent
+    fireEvent.input(keyField)
+
+    // Save the group
+    const dialog = findDialogByTitle(container, 'Edit Group: Production')!
+    const saveBtn = Array.from(dialog.querySelectorAll('.ui-button')).find(
+      (b) => b.textContent?.trim() === 'Save Group',
+    )
+    expect(saveBtn, 'Save Group button not found').toBeTruthy()
+    fireEvent.click(saveBtn!)
+
+    await vi.waitFor(() => {
+      expect(saveKeyMatSpy).toHaveBeenCalled()
+    })
+
+    const capturedArg = saveKeyMatSpy.mock.calls[0][1]
+    const capturedNewlineCount = (capturedArg.match(/\n/g) || []).length
+    expect(capturedNewlineCount).toBe(originalNewlineCount)
+    expect(capturedNewlineCount).toBeGreaterThan(0)
+    expect(capturedArg).toBe(keyContent)
   })
 })
 

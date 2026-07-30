@@ -13,6 +13,11 @@ import (
 	"golang.org/x/crypto/ssh/agent"
 )
 
+// readFileFn abstracts os.ReadFile for test injection. Tests replace this
+// with a spy to assert that no file I/O occurs when the vault key path is
+// taken (KeySecretID set).
+var readFileFn = os.ReadFile
+
 // ---------------------------------------------------------------------------
 // Auth fallback chain (Tabby-parity)
 // ---------------------------------------------------------------------------
@@ -58,7 +63,9 @@ func (rc *RealClient) buildAuthChain(ctx context.Context, resolved *resolvedConf
 
 	chain = append(chain, authChainEntry{kind: kindNone})
 	if mode == "" || mode == "publicKey" {
-		rc.addPublicKeyMethods(ctx, &chain, resolved, cfg)
+		if err := rc.addPublicKeyMethods(ctx, &chain, resolved, cfg); err != nil {
+			return nil, err
+		}
 	}
 	if (mode == "" || mode == "agent") && rc.agentAvailable() {
 		rc.addAgentMethods(&chain)
@@ -81,13 +88,31 @@ func (rc *RealClient) buildAuthChain(ctx context.Context, resolved *resolvedConf
 	return chain, nil
 }
 
-func (rc *RealClient) addPublicKeyMethods(ctx context.Context, chain *[]authChainEntry, resolved *resolvedConfig, cfg *ConnectConfig) {
+func (rc *RealClient) addPublicKeyMethods(ctx context.Context, chain *[]authChainEntry, resolved *resolvedConfig, cfg *ConnectConfig) error {
+	// Vault-stored key material path. When KeySecretID is set, load key
+	// bytes from the SecretStore exclusively — no file-based fallback.
+	if cfg.KeySecretID != "" {
+		// Guard: KeySecretID and KeyFile are mutually exclusive. If both
+		// are set upstream it is a bug that must be loud, not silently
+		// resolved by precedence.
+		if cfg.KeyFile != "" {
+			return fmt.Errorf("both KeySecretID and KeyFile are set; vault-key path refused — this is a bug")
+		}
+		if cfg.Secrets == nil {
+			return fmt.Errorf("KeySecretID set but no SecretStore configured")
+		}
+		return rc.addVaultKeyMethod(ctx, chain, cfg)
+	}
+
+	// File-based key path: explicit identity file from cfg.KeyFile resolved
+	// through ~/.ssh/config.
 	if resolved.identityFile != "" {
 		if signer, err := rc.loadKey(ctx, resolved.identityFile, cfg); err == nil {
 			*chain = append(*chain, authChainEntry{kind: kindPublicKey, method: gossh.PublicKeys(signer)})
 		}
 	}
 
+	// Default key discovery: try conventional paths as fallback.
 	for _, path := range defaultKeyPaths() {
 		signer, err := rc.loadKey(ctx, path, cfg)
 		if err != nil {
@@ -102,6 +127,60 @@ func (rc *RealClient) addPublicKeyMethods(ctx context.Context, chain *[]authChai
 		}
 		*chain = append(*chain, authChainEntry{kind: kindPublicKey, method: gossh.PublicKeys(signer)})
 	}
+
+	return nil
+}
+
+// addVaultKeyMethod loads private key bytes from the SecretStore by
+// KeySecretID and builds the signer. When PassphraseSecretID is also set,
+// the passphrase is loaded and used to decrypt the key. Key bytes never
+// touch disk.
+//
+// Any error — vault sealed, secret missing, malformed key material — is
+// propagated to the caller. There is no silent fallback to file-based keys.
+func (rc *RealClient) addVaultKeyMethod(ctx context.Context, chain *[]authChainEntry, cfg *ConnectConfig) error {
+	secret, err := cfg.Secrets.Get(ctx, cfg.KeySecretID)
+	if err != nil {
+		return err
+	}
+	if secret.IsEmpty() {
+		return fmt.Errorf("key material not found for vault secret %q", cfg.KeySecretID)
+	}
+
+	var signer gossh.Signer
+	if useErr := secret.Use(func(keyBytes []byte) error {
+		if cfg.PassphraseSecretID == "" {
+			s, parseErr := gossh.ParsePrivateKey(keyBytes)
+			if parseErr != nil {
+				return fmt.Errorf("parse vault key: %w", parseErr)
+			}
+			signer = s
+			return nil
+		}
+
+		// Encrypted key: load the passphrase from the same store.
+		pwSecret, pwErr := rc.lookupKeyPassphrase(ctx, cfg.Secrets, cfg.PassphraseSecretID)
+		if pwErr != nil {
+			return pwErr
+		}
+		if pwSecret.IsEmpty() {
+			return fmt.Errorf("passphrase not found for encrypted vault key %q", cfg.KeySecretID)
+		}
+
+		return pwSecret.Use(func(passphrase []byte) error {
+			s, parseErr := gossh.ParsePrivateKeyWithPassphrase(keyBytes, passphrase)
+			if parseErr != nil {
+				return fmt.Errorf("parse vault key with passphrase: %w", parseErr)
+			}
+			signer = s
+			return nil
+		})
+	}); useErr != nil {
+		return useErr
+	}
+
+	*chain = append(*chain, authChainEntry{kind: kindPublicKey, method: gossh.PublicKeys(signer)})
+	return nil
 }
 
 func (rc *RealClient) addAgentMethods(chain *[]authChainEntry) {
@@ -189,7 +268,7 @@ func defaultKeyPaths() []string {
 }
 
 func (rc *RealClient) loadKey(ctx context.Context, path string, cfg *ConnectConfig) (gossh.Signer, error) {
-	data, err := os.ReadFile(path) //nolint:gosec
+	data, err := readFileFn(path)
 	if err != nil {
 		return nil, err
 	}

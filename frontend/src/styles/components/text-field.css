@@ -68,3 +68,18 @@
   opacity: 0.5;
   cursor: not-allowed;
 }
+
+/* Multiline (textarea) variant — overrides input-only sizing while keeping
+   the shared appearance identity (`ui-text-field__input`). The textarea grows
+   with content in supporting browsers and scrolls otherwise. */
+
+.ui-text-field[data-multiline='true'] .ui-text-field__input {
+  height: auto;
+  padding: 8px;
+  resize: vertical;
+  overflow: auto;
+  line-height: 1.5;
+  white-space: pre;
+  min-height: calc(var(--control-height-md) * 2);
+  field-sizing: content;
+}

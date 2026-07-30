@@ -136,6 +136,51 @@ describe('TextField', () => {
     const input = screen.getByRole('textbox')
     expect(input).toHaveProperty('required', true)
   })
+
+  // ── Multiline (textarea) variance ──────────────────────────────────
+  it('renders a textarea when multiline is set', () => {
+    subject({ multiline: true, value: 'key content' })
+    const input = screen.getByRole('textbox')
+    expect(input.tagName).toBe('TEXTAREA')
+  })
+
+  it('existing typed input still renders an input element', () => {
+    const { container } = subject({ type: 'text', value: 'hello' })
+    const input = container.querySelector('input')
+    expect(input, 'Should be an INPUT element').toBeTruthy()
+    expect(input!.tagName).toBe('INPUT')
+  })
+
+  it('preserves newlines in multiline value', () => {
+    const keyContent =
+      '-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\n-----END PRIVATE KEY-----'
+    const newlineCount = (keyContent.match(/\n/g) || []).length
+    const { container } = subject({ multiline: true, value: keyContent })
+    const textarea = container.querySelector('textarea')
+    expect(textarea).not.toBeNull()
+    expect(textarea!.value).toBe(keyContent)
+    expect((textarea!.value.match(/\n/g) || []).length).toBe(newlineCount)
+    expect(newlineCount).toBeGreaterThan(0)
+  })
+
+  it('renders label on multiline variant', () => {
+    subject({ multiline: true, value: '', label: 'Private Key' })
+    const label = document.querySelector('label')
+    expect(label?.textContent?.trim()).toBe('Private Key')
+  })
+
+  it('renders description on multiline variant', () => {
+    const desc = 'Paste your private key'
+    subject({ multiline: true, value: '', description: desc })
+    expect(screen.getByText(desc)).toBeTruthy()
+  })
+
+  it('renders error text on multiline variant', () => {
+    subject({ multiline: true, value: '', error: 'Invalid key' })
+    expect(screen.getByText('Invalid key')).toBeTruthy()
+    const textarea = screen.getByRole('textbox')
+    expect(textarea.getAttribute('aria-invalid')).toBe('true')
+  })
 })
 
 describe('composition with Field', () => {

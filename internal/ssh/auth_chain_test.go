@@ -16,6 +16,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/vault"
 	"github.com/zalando/go-keyring"
 	gossh "golang.org/x/crypto/ssh"
 )
@@ -523,4 +524,247 @@ func newTestStore() *memSecretStore {
 func newTestSecretID() credential.SecretID {
 	testSecretCounter++
 	return credential.SecretID(fmt.Sprintf("test-secret-id-%d", testSecretCounter))
+}
+
+// sealedStore returns vault.ErrVaultSealed on every Get, simulating a
+// locked vault at connect time.
+type sealedStore struct{}
+
+func (s *sealedStore) Create(_ context.Context, _ credential.Secret) (credential.SecretID, error) {
+	return "", vault.ErrVaultSealed
+}
+
+func (s *sealedStore) Get(_ context.Context, _ credential.SecretID) (credential.Secret, error) {
+	return credential.Secret{}, vault.ErrVaultSealed
+}
+
+func (s *sealedStore) Delete(_ context.Context, _ credential.SecretID) error {
+	return vault.ErrVaultSealed
+}
+
+func (s *sealedStore) Exists(_ context.Context, _ credential.SecretID) (bool, error) {
+	return false, vault.ErrVaultSealed
+}
+
+// generateTestKey generates an ed25519 key and returns both the PEM-encoded
+// private key bytes and the gossh.Signer, for tests that need a real key.
+func generateTestKey(t *testing.T) ([]byte, gossh.Signer) {
+	t.Helper()
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	signer, err := gossh.NewSignerFromKey(priv)
+	if err != nil {
+		t.Fatalf("create signer: %v", err)
+	}
+	block, err := gossh.MarshalPrivateKey(priv, "")
+	if err != nil {
+		t.Fatalf("marshal key: %v", err)
+	}
+	return pem.EncodeToMemory(block), signer
+}
+
+// TestAddVaultKeyMethod_PlainKey stores an unencrypted key in the
+// SecretStore and verifies addPublicKeyMethods loads it as a signer.
+func TestAddVaultKeyMethod_PlainKey(t *testing.T) {
+	rc := newTestRealClient(t)
+	ctx := context.Background()
+	store := newTestStore()
+
+	keyPEM, _ := generateTestKey(t)
+	id, err := store.Create(ctx, credential.NewSecretBytes(keyPEM))
+	if err != nil {
+		t.Fatalf("store key: %v", err)
+	}
+
+	cfg := &ConnectConfig{
+		Secrets:     store,
+		KeySecretID: id,
+	}
+	var chain []authChainEntry
+
+	// resolved.identityFile is empty so file path is not triggered.
+	resolved := &resolvedConfig{}
+	if err := rc.addPublicKeyMethods(ctx, &chain, resolved, cfg); err != nil {
+		t.Fatalf("addPublicKeyMethods: %v", err)
+	}
+
+	if len(chain) != 1 {
+		t.Fatalf("expected 1 publicKey entry, got %d", len(chain))
+	}
+	if chain[0].kind != kindPublicKey {
+		t.Fatalf("expected kindPublicKey, got %v", chain[0].kind)
+	}
+	if chain[0].method == nil {
+		t.Fatal("expected non-nil AuthMethod for vault key")
+	}
+}
+
+// TestAddVaultKeyMethod_EncryptedKey stores an encrypted key together with
+// its passphrase and verifies the signer is produced from both.
+func TestAddVaultKeyMethod_EncryptedKey(t *testing.T) {
+	rc := newTestRealClient(t)
+	ctx := context.Background()
+	store := newTestStore()
+
+	passphrase := "strong-passphrase-123"
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	block, err := gossh.MarshalPrivateKeyWithPassphrase(priv, "", []byte(passphrase))
+	if err != nil {
+		t.Fatalf("marshal encrypted key: %v", err)
+	}
+	keyPEM := pem.EncodeToMemory(block)
+
+	keyID, err := store.Create(ctx, credential.NewSecretBytes(keyPEM))
+	if err != nil {
+		t.Fatalf("store encrypted key: %v", err)
+	}
+	pwID, err := store.Create(ctx, credential.NewSecret(passphrase))
+	if err != nil {
+		t.Fatalf("store passphrase: %v", err)
+	}
+
+	cfg := &ConnectConfig{
+		Secrets:            store,
+		KeySecretID:        keyID,
+		PassphraseSecretID: pwID,
+	}
+	var chain []authChainEntry
+	resolved := &resolvedConfig{}
+
+	if err := rc.addPublicKeyMethods(ctx, &chain, resolved, cfg); err != nil {
+		t.Fatalf("addPublicKeyMethods: %v", err)
+	}
+
+	if len(chain) != 1 {
+		t.Fatalf("expected 1 publicKey entry, got %d", len(chain))
+	}
+	if chain[0].kind != kindPublicKey {
+		t.Fatalf("expected kindPublicKey, got %v", chain[0].kind)
+	}
+	if chain[0].method == nil {
+		t.Fatal("expected non-nil AuthMethod for encrypted vault key")
+	}
+}
+
+// TestAddVaultKeyMethod_SealedVault verifies that when the SecretStore
+// returns ErrVaultSealed, the error propagates through buildAuthChain
+// rather than being silently swallowed.
+func TestAddVaultKeyMethod_SealedVault(t *testing.T) {
+	rc := newTestRealClient(t)
+	ctx := context.Background()
+
+	cfg := &ConnectConfig{
+		Secrets:     &sealedStore{},
+		KeySecretID: "some-key-ref",
+	}
+	var chain []authChainEntry
+	resolved := &resolvedConfig{}
+
+	err := rc.addPublicKeyMethods(ctx, &chain, resolved, cfg)
+	if err == nil {
+		t.Fatal("expected error from sealed vault, got nil")
+	}
+	if !errors.Is(err, vault.ErrVaultSealed) {
+		t.Fatalf("expected ErrVaultSealed, got %T: %v", err, err)
+	}
+}
+
+// TestAddVaultKeyMethod_MutualExclusivity verifies that setting both
+// KeySecretID and KeyFile produces a loud error.
+func TestAddVaultKeyMethod_MutualExclusivity(t *testing.T) {
+	rc := newTestRealClient(t)
+	ctx := context.Background()
+
+	cfg := &ConnectConfig{
+		Secrets:     newTestStore(),
+		KeySecretID: "some-key-ref",
+		KeyFile:     "/path/to/some_key",
+	}
+	var chain []authChainEntry
+	resolved := &resolvedConfig{}
+
+	err := rc.addPublicKeyMethods(ctx, &chain, resolved, cfg)
+	if err == nil {
+		t.Fatal("expected error for mutual exclusivity violation, got nil")
+	}
+	if !strings.Contains(err.Error(), "both KeySecretID and KeyFile are set") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestAddVaultKeyMethod_NoDiskAccess verifies that when KeySecretID is set,
+// the vault key path is taken and readFileFn is never called — proving
+// file-based key loading is short-circuited before any I/O.
+func TestAddVaultKeyMethod_NoDiskAccess(t *testing.T) {
+	rc := newTestRealClient(t)
+	ctx := context.Background()
+	store := newTestStore()
+
+	keyPEM, _ := generateTestKey(t)
+	id, err := store.Create(ctx, credential.NewSecretBytes(keyPEM))
+	if err != nil {
+		t.Fatalf("store key: %v", err)
+	}
+
+	// Replace readFileFn with a spy that records calls.
+	var readFileCalls int
+	orig := readFileFn
+	readFileFn = func(path string) ([]byte, error) {
+		readFileCalls++
+		return orig(path)
+	}
+	defer func() { readFileFn = orig }()
+
+	// Set resolved.identityFile to an existing file with garbage content.
+	// The spy on readFileFn will catch any attempted read — the vault key
+	// path must never call it.
+	dir := t.TempDir()
+	garbageFile := filepath.Join(dir, "some_key")
+	if err := os.WriteFile(garbageFile, []byte("NOT A KEY"), 0o600); err != nil {
+		t.Fatalf("write garbage file: %v", err)
+	}
+
+	cfg := &ConnectConfig{
+		Secrets:     store,
+		KeySecretID: id,
+	}
+	var chain []authChainEntry
+	resolved := &resolvedConfig{identityFile: garbageFile}
+
+	if err := rc.addPublicKeyMethods(ctx, &chain, resolved, cfg); err != nil {
+		t.Fatalf("addPublicKeyMethods: %v", err)
+	}
+
+	if len(chain) != 1 {
+		t.Fatalf("expected 1 publicKey entry from vault, got %d", len(chain))
+	}
+	if readFileCalls != 0 {
+		t.Fatalf("expected 0 readFileFn calls (vault path), got %d", readFileCalls)
+	}
+}
+
+// TestAddVaultKeyMethod_NoStoreErrors propagates when KeySecretID is set
+func TestAddVaultKeyMethod_NoStoreErrors(t *testing.T) {
+	rc := newTestRealClient(t)
+	ctx := context.Background()
+
+	cfg := &ConnectConfig{
+		KeySecretID: "some-key-ref",
+		// Secrets is nil
+	}
+	var chain []authChainEntry
+	resolved := &resolvedConfig{}
+
+	err := rc.addPublicKeyMethods(ctx, &chain, resolved, cfg)
+	if err == nil {
+		t.Fatal("expected error for nil SecretStore, got nil")
+	}
+	if !strings.Contains(err.Error(), "no SecretStore configured") {
+		t.Fatalf("unexpected error: %v", err)
+	}
 }
