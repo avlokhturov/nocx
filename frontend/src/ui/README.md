@@ -14,7 +14,7 @@ them takes a `class` prop; the structural containers that still do are marked.
 
 | Component            | Module                  | Identity                                     | Variance                                                                    |
 | -------------------- | ----------------------- | -------------------------------------------- | --------------------------------------------------------------------------- |
-| **Stack**            | `stack.tsx`             | `ui-stack`                                   | `data-gap`: default \| loose                                                |
+| **Stack**            | `stack.tsx`             | `ui-stack`                                   | `data-gap`: default \| loose; `data-divided`                                |
 | **Button**           | `button.tsx`            | `ui-button`                                  | `data-variant`: default \| primary \| danger \| ghost; `data-size`          |
 | **IconButton**       | `icon-button.tsx`       | `ui-icon-button`                             | `data-size`; `selected` → `aria-selected`; `ariaLabel` is **required**      |
 | **TextField**        | `text-field.tsx`        | `ui-text-field`, `ui-text-field__input`      | input types text \| number \| password; composes Field for label/desc/error |
@@ -31,8 +31,8 @@ them takes a `class` prop; the structural containers that still do are marked.
 | **EmptyState**       | `empty-state.tsx`       | `ui-empty-state` + `__title/__desc/__action` | —                                                                           |
 | **CollectionView**   | `collection-view.tsx`   | `ui-collection-view`, `ui-collection-row`    | Searchable manager shell and shared list row                                |
 | **Prompt**           | `prompt.tsx`            | `ui-prompt-overlay`, `ui-prompt`             | `data-placement`: floating \| top-sheet                                     |
-| **Field**            | `field.tsx`             | `ui-field`, `+ ui-field-horizontal`          | `orientation`                                                               |
-| **Section**          | `section.tsx`           | `ui-section`                                 | children spaced by Stack; no `class` passthrough                            |
+| **Field**            | `field.tsx`             | `ui-field`, `+ ui-field-horizontal`          | `orientation`; `data-label` follows orientation (horizontal→primary)        |
+| **Section**          | `section.tsx`           | `ui-section`                                 | children spaced by Stack; `divided`; no `class` passthrough                 |
 | **Toolbar**          | `toolbar.tsx`           | `ui-toolbar`                                 | keeps `class`, **layout only**                                              |
 | **Tabs**             | `tabs.tsx`              | `ui-tabs`, `ui-tabs__list`, `ui-tabs__panel` | `data-orientation`: vertical \| horizontal; rows are ghost Buttons          |
 
@@ -82,6 +82,11 @@ destructive confirmation, and a dialog whose body is a message has nothing to su
 Surfaces must not add their own margins between stacked controls — that constraint
 is enforced by the `surface-spacing-kit` lint rule. Prefer Stack over a plain `<div>`
 with a hand-rolled gap.
+
+`divided` (`data-divided="true"`) turns the Stack into a divided list: each child
+gets row padding and a hairline separator between visible children. The selector uses
+`:not(.st-vis-hidden)` so search-filtered rows do not leave a gap or orphaned divider.
+Settings pages and the Vault panel use divided Stacks for their row rhythm.
 
 ## Button variant rules
 
@@ -171,23 +176,23 @@ behavioural unit, not a styled button. Feature components like it are declared i
 
 ### Page primitives (separate ownership — not merged with kit Section)
 
-| Component    | Module              | Notes                                                          |
-| ------------ | ------------------- | -------------------------------------------------------------- |
-| Page         | `page.tsx`          | Page layout container                                          |
-| PageHeader   | `page-header.tsx`   | Page header                                                    |
-| PageBody     | `page-body.tsx`     | Page body                                                      |
-| PageRail     | `page-rail.tsx`     | Side navigation rail                                           |
-| PageScroller | `page-scroller.tsx` | Scroll owner                                                   |
-| PageSection  | `page-section.tsx`  | Semantic `<section>` within a Page, with `id` for deep linking |
-| SidebarView  | `sidebar-view.tsx`  | Sidebar view wrapper                                           |
+| Component       | Module              | Notes                                                                             |
+| --------------- | ------------------- | --------------------------------------------------------------------------------- |
+| Page            | `page.tsx`          | Page layout container                                                             |
+| PageHeader      | `page-header.tsx`   | Page header                                                                       |
+| PageBody        | `page-body.tsx`     | Page body                                                                         |
+| PageRail        | `page-rail.tsx`     | Side navigation rail                                                              |
+| PageScroller    | `page-scroller.tsx` | Scroll owner                                                                      |
+| **PageSection** | `page-section.tsx`  | Semantic `<section>` within a Page, with `id` for deep linking; accepts `divided` |
+| SidebarView     | `sidebar-view.tsx`  | Sidebar view wrapper                                                              |
 
 ### `Section` vs `PageSection` overlap
 
 `Section` (kit) and `PageSection` (page layout) both render an `h2` + children.
 They differ in:
 
-- **`Section`** — `<section>` element, `id` for anchor targeting, `class` passthrough. Part of the kit.
-- **`PageSection`** — `<section>` element, `id` for deep-linking, gets page-specific spacing from `surface.css`.
+- **`Section`** — `<section>` element, `id` for anchor targeting, `class` passthrough. Part of the kit. Accepts `divided` to forward to its inner Stack.
+- **`PageSection`** — `<section>` element, `id` for deep-linking, gets page-specific spacing from `surface.css`. Accepts `divided` to forward to its inner Stack.
 
 **Recommendation: do not merge them.** `Section` is a generic kit component for form
 groups and control sections within any surface. `PageSection` is a layout primitive

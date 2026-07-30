@@ -715,7 +715,6 @@ export function SettingsComponent(props: SettingsComponentProps) {
         <Field
           for={keyToDomId(decl.key)}
           label={decl.label}
-          labelProminence="primary"
           labelMarker={
             // Always rendered, coloured only when modified. Under a `Show` the
             // dot's 6px box and its margin entered the flow the moment a value
@@ -944,7 +943,11 @@ export function SettingsComponent(props: SettingsComponentProps) {
                 const sectionVisible = () => sectionDecls().some((d) => visibleKeys().has(d.key))
                 return (
                   <div classList={{ 'st-vis-hidden': !sectionVisible() }}>
-                    <PageSection id={'st-section-' + encodeURIComponent(section)} title={section}>
+                    <PageSection
+                      id={'st-section-' + encodeURIComponent(section)}
+                      title={section}
+                      divided
+                    >
                       <For each={sectionDecls()}>
                         {(decl) => <SettingRow decl={decl} visible={visibleKeys().has(decl.key)} />}
                       </For>

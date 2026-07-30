@@ -15,12 +15,16 @@
 
 import { Show } from 'solid-js'
 import type { JSX } from 'solid-js'
-
 export interface FieldProps {
   /**
    * How prominent the label is. `secondary` is the form default — a quiet label above
    * a control. `primary` makes the label the row's main text, which is what a settings
-   * row is: the label IS the setting and the control is the answer to it.
+   * row needs because the label IS the setting and the control is the answer to it.
+   *
+   * A horizontal Field defaults to `primary` because a horizontal field *is* a settings
+   * row: the label is the setting and the control is the answer to it — whereas a vertical
+   * field is a form field whose label captions its control. The prop still exists so a
+   * caller can override, but the default follows orientation.
    *
    * This exists because settings.css was overriding `.ui-field label`'s size, weight
    * and colour from outside. Both stylesheets declared the same properties and the
@@ -103,7 +107,7 @@ export function Field(props: FieldProps) {
         </div>
       }
     >
-      <div class="ui-field ui-field-horizontal" data-label={props.labelProminence ?? 'secondary'}>
+      <div class="ui-field ui-field-horizontal" data-label={props.labelProminence ?? 'primary'}>
         <div class="ui-field-label-col">
           <Show when={props.label !== undefined || props.labelMarker !== undefined}>
             <label for={props.for}>

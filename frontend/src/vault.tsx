@@ -19,7 +19,7 @@ import { Stack } from './ui/stack'
 import { TextField } from './ui/text-field'
 import { CodeBlock } from './ui/code-block'
 import { IconButton } from './ui/icon-button'
-import { Badge, Section, Select, Field } from './ui'
+import { Badge, PageSection, Select, Field } from './ui'
 import { CopyIcon } from './ui/icons'
 import { showToast } from './ui/toast'
 import { RpcError } from './dispatcher'
@@ -1074,120 +1074,120 @@ export function VaultSection(props: VaultSectionProps) {
   }
   return (
     <div>
-      <Section title="Status">
-        <Stack>
-          <Field for="vault-state" label="State" orientation="horizontal">
-            <Badge tone={stateBadge().tone}>{stateBadge().label}</Badge>
-          </Field>
-          <Field for="vault-oskey" label="OS-held key" orientation="horizontal">
-            <Show
-              when={status()?.osKeyAvailable}
-              fallback={<Badge tone="neutral">Not available</Badge>}
-            >
-              <Badge tone="info">Available</Badge>
-            </Show>
-          </Field>
-          <Show when={status() && status()!.providers.some((p) => p.writable)}>
-            <Field for="vault-default-provider" label="Default provider" orientation="horizontal">
-              <Select
-                value={status()!.defaultProvider ?? ''}
-                onChange={(v) => {
-                  void handleDefaultProvider(v)
-                }}
-                options={status()!
-                  .providers.filter((p) => p.writable)
-                  .map((p) => ({ value: p.id, label: p.id }))}
-                placeholder="— None —"
-                placeholderValue=""
-              />
-            </Field>
+      <PageSection title="Status" divided>
+        <Field for="vault-state" label="State" orientation="horizontal">
+          <Badge tone={stateBadge().tone}>{stateBadge().label}</Badge>
+        </Field>
+        <Field for="vault-oskey" label="OS-held key" orientation="horizontal">
+          <Show
+            when={status()?.osKeyAvailable}
+            fallback={<Badge tone="neutral">Not available</Badge>}
+          >
+            <Badge tone="info">Available</Badge>
           </Show>
-          <Show when={status() && status()!.state === 'unsealed'}>
-            <Field for="vault-auto-seal" label="Auto-seal timeout" orientation="horizontal">
-              <Select
-                value={String(status()!.autoSealMinutes)}
-                onChange={(v) => {
-                  void handleSetAutoSeal(Number(v))
-                }}
-                options={AUTO_SEAL_OPTIONS.map((o) => ({
-                  value: String(o.value),
-                  label: o.label,
-                }))}
-              />
-            </Field>
-          </Show>
-        </Stack>
-      </Section>
-
-      <Section title="Actions">
-        <Stack>
-          <Field for="vault-action-seal" label="Seal now" orientation="horizontal">
-            <Button
-              variant="default"
-              disabled={sealing() || status()?.state !== 'unsealed'}
-              onClick={() => {
-                void handleSeal()
+        </Field>
+        <Show when={status() && status()!.providers.some((p) => p.writable)}>
+          <Field for="vault-default-provider" label="Default provider" orientation="horizontal">
+            <Select
+              value={status()!.defaultProvider ?? ''}
+              onChange={(v) => {
+                void handleDefaultProvider(v)
               }}
-            >
-              {sealing() ? 'Sealing…' : 'Seal now'}
-            </Button>
-            <Show when={status() && status()!.state !== 'unsealed'}>
-              <p class="ui-vault-desc-text">Already sealed or not set up.</p>
-            </Show>
+              options={status()!
+                .providers.filter((p) => p.writable)
+                .map((p) => ({ value: p.id, label: p.id }))}
+              placeholder="— None —"
+              placeholderValue=""
+            />
           </Field>
-          <Field for="vault-action-passphrase" label="Change passphrase" orientation="horizontal">
-            <Button
-              variant="default"
-              disabled={!actionCanRun()}
-              onClick={() => setDialog('passphrase')}
-            >
-              Change passphrase
-            </Button>
-            <Show when={!actionCanRun()}>
-              <p class="ui-vault-desc-text">{actionDisabledReason()}</p>
-            </Show>
+        </Show>
+        <Show when={status() && status()!.state === 'unsealed'}>
+          <Field for="vault-auto-seal" label="Auto-seal timeout" orientation="horizontal">
+            <Select
+              value={String(status()!.autoSealMinutes)}
+              onChange={(v) => {
+                void handleSetAutoSeal(Number(v))
+              }}
+              options={AUTO_SEAL_OPTIONS.map((o) => ({
+                value: String(o.value),
+                label: o.label,
+              }))}
+            />
           </Field>
-          <Field for="vault-action-recovery" label="Recovery code" orientation="horizontal">
-            <Button
-              variant="default"
-              disabled={!actionCanRun()}
-              onClick={() => setDialog('recovery')}
-            >
-              Reissue recovery code
-            </Button>
-            <Show when={!actionCanRun()}>
-              <p class="ui-vault-desc-text">{actionDisabledReason()}</p>
-            </Show>
-          </Field>
-        </Stack>
-      </Section>
-
+        </Show>
+      </PageSection>
+      <PageSection title="Actions" divided>
+        <Field
+          for="vault-action-seal"
+          label="Seal now"
+          orientation="horizontal"
+          description={
+            status() && status()!.state !== 'unsealed' ? 'Already sealed or not set up.' : undefined
+          }
+        >
+          <Button
+            variant="default"
+            disabled={sealing() || status()?.state !== 'unsealed'}
+            onClick={() => {
+              void handleSeal()
+            }}
+          >
+            {sealing() ? 'Sealing…' : 'Seal now'}
+          </Button>
+        </Field>
+        <Field
+          for="vault-action-passphrase"
+          label="Change passphrase"
+          orientation="horizontal"
+          description={!actionCanRun() ? actionDisabledReason() : undefined}
+        >
+          <Button
+            variant="default"
+            disabled={!actionCanRun()}
+            onClick={() => setDialog('passphrase')}
+          >
+            Change passphrase
+          </Button>
+        </Field>
+        <Field
+          for="vault-action-recovery"
+          label="Recovery code"
+          orientation="horizontal"
+          description={!actionCanRun() ? actionDisabledReason() : undefined}
+        >
+          <Button
+            variant="default"
+            disabled={!actionCanRun()}
+            onClick={() => setDialog('recovery')}
+          >
+            Reissue recovery code
+          </Button>
+        </Field>
+      </PageSection>
       <Show when={status() && status()!.providers.length > 0}>
-        <Section title="Providers">
-          <Stack>
-            <For each={status()!.providers}>
-              {(p) => (
-                <Field for={'vault-provider-' + p.id} label={p.id} orientation="horizontal">
-                  <Stack>
-                    <div>
-                      <Show when={p.writable} fallback={<Badge tone="neutral">Read-only</Badge>}>
-                        <Badge tone="info">Writable</Badge>
-                      </Show>{' '}
-                      <Show when={p.ready} fallback={<Badge tone="warning">Not ready</Badge>}>
-                        <Badge tone="info">Ready</Badge>
-                      </Show>
-                    </div>
-                    <Show when={!p.ready && p.reason}>
-                      <p class="ui-vault-desc-text">
-                        {REASON_MESSAGES[p.reason ?? ''] ?? p.reason}
-                      </p>
-                    </Show>
-                  </Stack>
-                </Field>
-              )}
-            </For>
-          </Stack>
-        </Section>
+        <PageSection title="Providers" divided>
+          <For each={status()!.providers}>
+            {(p) => (
+              <Field
+                for={'vault-provider-' + p.id}
+                label={p.id}
+                orientation="horizontal"
+                description={
+                  !p.ready && p.reason ? (REASON_MESSAGES[p.reason ?? ''] ?? p.reason) : undefined
+                }
+              >
+                <div>
+                  <Show when={p.writable} fallback={<Badge tone="neutral">Read-only</Badge>}>
+                    <Badge tone="info">Writable</Badge>
+                  </Show>{' '}
+                  <Show when={p.ready} fallback={<Badge tone="warning">Not ready</Badge>}>
+                    <Badge tone="info">Ready</Badge>
+                  </Show>
+                </div>
+              </Field>
+            )}
+          </For>
+        </PageSection>
       </Show>
 
       <ChangePassphraseDialog
