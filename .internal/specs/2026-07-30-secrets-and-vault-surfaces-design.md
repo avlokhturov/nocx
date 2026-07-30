@@ -252,13 +252,28 @@ sealed: it configures, it does not query the registry.
 **State, and one action for it.** Uninitialized → **Set up protection** (nocx-25k9.12; a page
 that announces a problem offers its remedy). Sealed → **Unlock**. Unsealed → **Lock now**.
 
-**Where it is stored.** One **group per store, not tabs**, and the state line of every store
-is visible without expanding anything. Tabs would hide exactly what the section exists to
-answer: standing on the external store's tab while the login keychain is the thing that is
-not answering tells the user nothing. There are two stores today and a few later; a vertical
-list shows every state at once.
+**Where it is stored.** A **vertical section rail** — the kit's `Tabs` at
+`orientation="vertical"`, already used by the connection and group editors
+(`connections.tsx:831,1562`) — one row per store, that store's panel beside it. `Tabs`
+measures rather than names its size: every section renders into one grid cell, so the box is
+the largest panel and switching stores cannot move a control out from under the pointer.
 
-Each group carries:
+**The rail is only correct if every row carries its store's state.** Without that it has the
+defect that ruled out plain tabs: standing on the external store while the login keychain is
+the thing not answering tells the user nothing. A stacked list of expanded groups was the
+alternative — it shows every state, and grows unusable past three or four stores. The rail
+shows the same states in less space.
+
+That needs **one addition to the kit**: `TabItem` is `{id, label, content}` today and has
+nowhere to put a marker. Per `ui/README.md` this is a typed variance added to `Tabs`, never a
+fork. The marker is semantic rather than decorative — it carries a tone (ok / warning /
+error) and an accessible name, or a screen-reader user is told "System keychain" with no hint
+that it is broken.
+
+**Add a store** is a button below the rail, not a row inside it: a rail row is a section, and
+an action rendered as one makes the rail lie about what it enumerates.
+
+Each store's panel carries:
 
 - name and kind — _System keychain_, _Encrypted nocx storage_, _HashiCorp Vault ·
   `vault.homelab:8200`_;
@@ -272,9 +287,9 @@ Each group carries:
 - **Store new secrets here** — one marker across all stores;
 - **how much it holds** — "6 secrets", from the registry. Disconnecting a store must say what
   it strands, and without the registry that warning cannot be written at all (§4);
-- collapsed: the detail of the last check — what the store actually answered, and when.
+- when the last check ran, and what the store actually answered.
 
-What goes behind a disclosure is the _detail_ of a state, never the state. The current page
+What may be collapsed is the _detail_ of a state, never the state itself. The current page
 puts `Writable`/`Not ready` badges in the body with no action attached to either, which is
 the opposite arrangement.
 
