@@ -103,7 +103,12 @@ func (v *Vault) BuildInventory(ctx context.Context, inputs []CredentialInventory
 		return nil, ErrVaultSealed
 	}
 
-	var entries []InventoryEntry
+	// Never a nil slice: it marshals to `"entries": null` and the renderer's
+	// field is typed as an array, so the Secrets page died on `.length` with
+	// an empty vault. usage.go:54-57 documents this exact trap — "a Go test
+	// asserting len == 0 passes either way, which is exactly how the wrong
+	// wire format stays green" — and this is it happening again.
+	entries := make([]InventoryEntry, 0, len(inputs))
 
 	for _, cred := range inputs {
 		refs := collectRefs(cred)

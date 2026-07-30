@@ -2,6 +2,7 @@ package vault
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"os"
 	"testing"
@@ -466,5 +467,32 @@ func TestBuildInventory_LegacyAndVersionRefsCombined(t *testing.T) {
 	}
 	if !seen["key-passphrase:system"] {
 		t.Error("missing key-passphrase entry")
+	}
+}
+
+// An empty inventory must marshal to `[]`, never to `null`.
+//
+// Asserting len(entries) == 0 would pass either way — a nil slice and an empty
+// slice are indistinguishable in Go and completely different on the wire. The
+// renderer types this field as an array and calls .length on it, so `null`
+// crashed the Secrets page on a vault with nothing in it. usage.go:54-57 warned
+// about this exact shape; this is the test that catches it.
+func TestBuildInventory_EmptyMarshalsToArrayNotNull(t *testing.T) {
+	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
+	mustSetup(t, v, "test-pass")
+
+	entries, err := v.BuildInventory(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("BuildInventory: %v", err)
+	}
+
+	b, err := json.Marshal(struct {
+		Entries []InventoryEntry `json:"entries"`
+	}{Entries: entries})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if got := string(b); got != `{"entries":[]}` {
+		t.Fatalf("empty inventory marshalled as %s, want {\"entries\":[]}", got)
 	}
 }
