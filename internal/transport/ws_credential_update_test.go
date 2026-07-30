@@ -8,7 +8,6 @@ import (
 
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
-	"github.com/zalando/go-keyring"
 )
 
 // TestCredentialsRPC_UpdatePreservesSecretRefs is the regression that names
@@ -86,17 +85,15 @@ func TestCredentialsRPC_UpdatePreservesSecretRefs(t *testing.T) {
 	// nothing points at them any more. Assert they are still there, so a
 	// future "fix" that deletes them instead of preserving the reference is
 	// caught as the different bug it would be.
-	if ok, err := h.cs.Exists(pwID); err != nil || !ok {
+	if ok, err := h.cs.Exists(context.Background(), pwID); err != nil || !ok {
 		t.Errorf("password secret %q missing after update (err=%v)", pwID, err)
 	}
-	if ok, err := h.cs.Exists(ppID); err != nil || !ok {
+	if ok, err := h.cs.Exists(context.Background(), ppID); err != nil || !ok {
 		t.Errorf("passphrase secret %q missing after update (err=%v)", ppID, err)
 	}
 }
 
 func TestCredentialsRPC_CreateMintsItsOwnID(t *testing.T) {
-	keyring.MockInit()
-
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(dir + "/p.json")
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),

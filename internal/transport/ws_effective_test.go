@@ -9,7 +9,6 @@ import (
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
-	"github.com/zalando/go-keyring"
 )
 
 // TestEffectiveProfile_ProvenanceAndPatch is the required validation test
@@ -27,10 +26,9 @@ import (
 //  7. Reload from storage: assert the stored port is absent, not 2222,
 //     while the returned effective port is 2222 sourced from the group.
 func TestEffectiveProfile_ProvenanceAndPatch(t *testing.T) {
-	keyring.MockInit()
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(dir + "/p.json")
-	cs := credential.NewKeychain()
+	cs := newTestStore()
 
 	// Step 2-3: Create a group with port 2222 and credentialId.
 	const groupID = "group-prod"
@@ -53,23 +51,23 @@ func TestEffectiveProfile_ProvenanceAndPatch(t *testing.T) {
 	}
 
 	// Step 3: Credential with user deploy, auth publicKey, and canary secrets.
+	// Create canary secrets FIRST so we can use their generated IDs in the
+	// credential record.
+	pwID, _ := cs.Create(context.Background(), credential.NewSecret("hunter2"))
+	ppID, _ := cs.Create(context.Background(), credential.NewSecret("passphrase"))
+
+	// Step 3: Credential with user deploy, auth publicKey, and canary secrets.
 	cred := profile.Credential{
 		ID:                 credID,
 		Name:               "prod-ops",
 		Username:           "deploy",
 		Auth:               profile.AuthPublicKey,
-		SecretID:           "sec:canary-password",
-		PassphraseSecretID: "sec:canary-passphrase",
+		SecretID:           string(pwID),
+		PassphraseSecretID: string(ppID),
 	}
 	if err := ps.CreateCredential(cred); err != nil {
 		t.Fatalf("CreateCredential: %v", err)
 	}
-
-	// Store the canary secrets in the keychain so they exist as real
-	_ = cs.Set("sec:canary-password", credential.NewSecret("hunter2"))
-	_ = cs.Set("sec:canary-passphrase", credential.NewSecret("passphrase"))
-
-	// Step 1: Profile with no local port, user or auth — host only.
 	prof := profile.SSHProfile{
 		Base: profile.Base{
 			ID:    "ssh:prod-api:1",
@@ -269,7 +267,6 @@ func TestEffectiveProfile_ProvenanceAndPatch(t *testing.T) {
 // treated false as "not set", so agentForward=false in a profile with
 // group default agentForward=true resolved to true, sourced "group".
 func TestEffectiveProfile_ExplicitFalseSurvivesRoundTrip(t *testing.T) {
-	keyring.MockInit()
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(dir + "/p.json")
 

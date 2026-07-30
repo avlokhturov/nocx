@@ -17,12 +17,16 @@ import (
 // without depending on the keyring.
 type credStub struct{ pw string }
 
-func (s *credStub) Get(_ credential.SecretID) (credential.Secret, error) {
+func (s *credStub) Create(_ context.Context, value credential.Secret) (credential.SecretID, error) {
+	_ = value // binding tests don't persist; the store always returns s.pw
+	return credential.SecretID("test-id"), nil
+}
+
+func (s *credStub) Get(_ context.Context, _ credential.SecretID) (credential.Secret, error) {
 	return credential.NewSecret(s.pw), nil
 }
-func (s *credStub) Set(_ credential.SecretID, _ credential.Secret) error { return nil }
-func (s *credStub) Delete(_ credential.SecretID) error                   { return nil }
-func (s *credStub) Exists(_ credential.SecretID) (bool, error)           { return true, nil }
+func (s *credStub) Delete(_ context.Context, _ credential.SecretID) error         { return nil }
+func (s *credStub) Exists(_ context.Context, _ credential.SecretID) (bool, error) { return true, nil }
 
 // newBindingClient builds a RealClient with an empty stub resolver so
 // resolution is deterministic (alias lookups use the StubConfigResolver).
@@ -56,7 +60,7 @@ func TestBinding_RefusesMismatchedHost(t *testing.T) {
 	_, err := c.Connect(
 		context.Background(), unreachableHost,
 		WithUser("victim"),
-		WithCredentials(store, credential.NewSecretID()),
+		WithCredentials(store, credential.SecretID("test-id")),
 		// Credential is bound to a different host than the one we dial.
 		withBinding("good.example.com", 0),
 	)
@@ -107,7 +111,7 @@ func TestBinding_AliasConnects(t *testing.T) {
 		context.Background(), "victim",
 		WithUser("test"),
 		WithAuthMethods([]gossh.AuthMethod{gossh.PublicKeys(srv.userSigner)}),
-		WithCredentials(store, credential.NewSecretID()),
+		WithCredentials(store, credential.SecretID("test-id")),
 		withBinding("victim", 0),
 	)
 	if err != nil {
@@ -149,7 +153,7 @@ func TestBinding_AliasDriftRefused(t *testing.T) {
 		context.Background(), "victim",
 		WithUser("test"),
 		WithAuthMethods([]gossh.AuthMethod{gossh.PublicKeys(srv.userSigner)}),
-		WithCredentials(store, credential.NewSecretID()),
+		WithCredentials(store, credential.SecretID("test-id")),
 		func(c *ConnectConfig) { c.AuthorizedEndpoint = srvHost },
 	)
 	if err != nil {
@@ -173,7 +177,7 @@ func TestBinding_AliasDriftRefused(t *testing.T) {
 		context.Background(), "victim",
 		WithUser("test"),
 		WithAuthMethods([]gossh.AuthMethod{gossh.PublicKeys(srv.userSigner)}),
-		WithCredentials(store, credential.NewSecretID()),
+		WithCredentials(store, credential.SecretID("test-id")),
 		func(c *ConnectConfig) { c.AuthorizedEndpoint = srvHost },
 	)
 	var authErr *ErrCredentialAuthorizationFailed
@@ -215,10 +219,10 @@ func TestBinding_JumpHostRefused(t *testing.T) {
 		context.Background(), srv.addr,
 		WithUser("test"),
 		WithAuthMethods([]gossh.AuthMethod{gossh.PublicKeys(srv.userSigner)}),
-		WithCredentials(store, credential.NewSecretID()),
+		WithCredentials(store, credential.SecretID("test-id")),
 		withBinding(hostPortOnly(srv.addr), 0),
 		WithJumpHost("jumphost", 0, "test", "publicKey"),
-		WithJumpCredentials(store, credential.NewSecretID()),
+		WithJumpCredentials(store, credential.SecretID("test-id")),
 		func(c *ConnectConfig) {
 			c.JumpAuthorizedEndpoint = "other-bastion.example.com"
 		},
@@ -262,7 +266,7 @@ func TestBinding_PortFromAlias(t *testing.T) {
 		context.Background(), "portalias",
 		WithUser("test"),
 		WithAuthMethods([]gossh.AuthMethod{gossh.PublicKeys(srv.userSigner)}),
-		WithCredentials(store, credential.NewSecretID()),
+		WithCredentials(store, credential.SecretID("test-id")),
 		withBinding(hostPortOnly(srv.addr), 22),
 	)
 	var authErr *ErrCredentialAuthorizationFailed
@@ -280,7 +284,7 @@ func TestBinding_PortFromAlias(t *testing.T) {
 func TestBinding_UnboundRefused(t *testing.T) {
 	c := newBindingClient(t)
 	store := &credStub{pw: "x"}
-	secretID := credential.NewSecretID()
+	secretID := credential.SecretID("test-id")
 
 	_, err := c.Connect(
 		context.Background(), unreachableHost,
@@ -320,7 +324,7 @@ func TestBinding_HostAnyPortWhenPortUnset(t *testing.T) {
 		context.Background(), srv.addr,
 		WithUser("test"),
 		WithAuthMethods([]gossh.AuthMethod{gossh.PublicKeys(srv.userSigner)}),
-		WithCredentials(store, credential.NewSecretID()),
+		WithCredentials(store, credential.SecretID("test-id")),
 		withBinding(hostPortOnly(srv.addr), 0),
 	)
 	if err != nil {

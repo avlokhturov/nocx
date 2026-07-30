@@ -13,7 +13,6 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
-	"github.com/zalando/go-keyring"
 )
 
 // ---------------------------------------------------------------------------
@@ -68,6 +67,7 @@ type versionsHarness struct {
 	t           *testing.T
 	ws          *WSServer
 	ps          *profile.JSONStore
+	cs          credential.SecretStore
 	probeStore  *ProbeResultStore
 	spyRegistry *spySessionRegistry
 	conn        *websocket.Conn
@@ -75,10 +75,9 @@ type versionsHarness struct {
 
 func newVersionsHarness(t *testing.T, withSpy bool) *versionsHarness {
 	t.Helper()
-	keyring.MockInit()
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(dir + "/p.json")
-	cs := credential.NewKeychain()
+	cs := newTestStore()
 	probeStore := NewProbeResultStore()
 	svc := profile.NewProfileService(ps)
 
@@ -105,7 +104,7 @@ func newVersionsHarness(t *testing.T, withSpy bool) *versionsHarness {
 	t.Cleanup(func() { _ = ws.Stop(ctx) })
 	conn := connectWS(t, ws)
 	t.Cleanup(func() { _ = conn.Close() })
-	return &versionsHarness{t: t, ws: ws, ps: ps, probeStore: probeStore, spyRegistry: spy, conn: conn}
+	return &versionsHarness{t: t, ws: ws, ps: ps, cs: cs, probeStore: probeStore, spyRegistry: spy, conn: conn}
 }
 
 type rpcErrorResponse struct {
@@ -118,6 +117,18 @@ type rpcErrorResponse struct {
 
 func (h *versionsHarness) createTestCredential(versions []profile.CredentialVersion, currentID, candidateID string) string {
 	h.t.Helper()
+
+	// Create secrets FIRST so we can use their generated IDs in the versions.
+	for i, v := range versions {
+		if v.PasswordSecretID != "" {
+			id, err := h.cs.Create(context.Background(), credential.NewSecret("pw-"+v.ID))
+			if err != nil {
+				h.t.Fatalf("create secret for %s: %v", v.ID, err)
+			}
+			versions[i].PasswordSecretID = string(id)
+		}
+	}
+
 	cred := profile.Credential{
 		ID:                 "cred:test:1",
 		Name:               "test",
@@ -129,15 +140,6 @@ func (h *versionsHarness) createTestCredential(versions []profile.CredentialVers
 	}
 	if err := h.ps.CreateCredential(cred); err != nil {
 		h.t.Fatalf("CreateCredential: %v", err)
-	}
-	// Create secrets in the keychain.
-	for _, v := range versions {
-		if v.PasswordSecretID != "" {
-			cs := credential.NewKeychain()
-			if err := cs.Set(credential.SecretID(v.PasswordSecretID), credential.NewSecret("pw-"+v.ID)); err != nil {
-				h.t.Fatalf("set secret for %s: %v", v.ID, err)
-			}
-		}
 	}
 	return cred.ID
 }

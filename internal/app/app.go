@@ -20,6 +20,9 @@ import (
 	"github.com/shady2k/nocx/internal/storage"
 	"github.com/shady2k/nocx/internal/transport"
 	"github.com/shady2k/nocx/internal/update"
+	"github.com/shady2k/nocx/internal/vault"
+	"github.com/shady2k/nocx/internal/vault/file"
+	"github.com/shady2k/nocx/internal/vault/system"
 )
 
 type App struct {
@@ -30,7 +33,7 @@ type App struct {
 	ShellIntegration shellintegration.ShellIntegration
 	Updater          update.Updater
 	Profiles         profile.ProfileRepository
-	Credentials      credential.CredentialStore
+	Credentials      credential.SecretStore
 }
 
 // Log logs a message from the frontend.
@@ -78,18 +81,36 @@ func New(opts ...Option) (*App, error) {
 	}
 	sess = sess.WithSSHFactory(&sshFactoryAdapter{client: sshClient})
 
-	// Profile + credential stores (AD-4/ADR-0011): storage paths resolved
-	// by the shared Paths capability. The DocumentStore is the atomic JSON
-	// capability; the profile store uses it for profiles.json.
+	// Vault (ADR-0011 as amended): owns provider routing, key material and
+	// the seal lifecycle. Two providers are compiled on every platform:
+	// system (OS keychain) and file (encrypted document).
 	paths, err := storage.NewOSPaths("nocx")
 	if err != nil {
 		return nil, fmt.Errorf("storage paths: %w", err)
 	}
 	docStore := storage.NewDocumentStore(paths.ConfigDir())
 	profileStore := profile.NewJSONStoreWithDocStore(docStore, "profiles.json")
-	credStore := credential.NewKeychain()
-	settingsRegistry := settings.New(docStore, credStore)
 
+	sysProv := system.New()
+	fileProv := file.New(docStore, "vault-file.json")
+	reg, err := vault.NewRegistry(sysProv, fileProv)
+	if err != nil {
+		return nil, fmt.Errorf("vault registry: %w", err)
+	}
+
+	// Probe the system provider once at startup and log the outcome.
+	// A machine with no Secret Service says so in the log rather than
+	// failing mysteriously later.
+	ctx := context.Background()
+	probeStatus := sysProv.Probe(ctx)
+	slogger.Info("vault system-provider availability probe",
+		"ready", probeStatus.Ready, "reason", probeStatus.Reason)
+
+	v, err := vault.New(docStore, reg, slogger)
+	if err != nil {
+		return nil, fmt.Errorf("vault init: %w", err)
+	}
+	settingsRegistry := settings.New(docStore, v)
 	// Profile usage tracker for the sessions.status RPC (nocx-uxs5.4).
 	usageStore := session.NewDocumentUsageStore(docStore)
 	sess = sess.WithProfileUsageTracker(usageStore)
@@ -105,7 +126,7 @@ func New(opts ...Option) (*App, error) {
 	// through a differently-configured resolver would prove nothing about
 	// the connection the user will later make.
 	resolver := connection.NewResolver(
-		profileStore, profileStore, profileStore, credStore,
+		profileStore, profileStore, profileStore, v,
 		connection.WithConfigResolver(sshCfgResolver),
 	)
 
@@ -113,7 +134,7 @@ func New(opts ...Option) (*App, error) {
 		transport.WithProfileRepository(profileStore),
 		transport.WithGroupRepository(profileStore),
 		transport.WithCredentialMetadataRepository(profileStore),
-		transport.WithCredentialStore(credStore),
+		transport.WithCredentialStore(v),
 		transport.WithProfileResolver(resolver),
 		transport.WithSettingsRegistry(settingsRegistry),
 		transport.WithProfileUsageStore(usageStore),
@@ -144,7 +165,7 @@ func New(opts ...Option) (*App, error) {
 		Transport:        tp,
 		ShellIntegration: shint,
 		Profiles:         profileStore,
-		Credentials:      credStore,
+		Credentials:      v,
 	}
 
 	logger.Info("application initialized")

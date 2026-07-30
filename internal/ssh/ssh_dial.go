@@ -176,7 +176,7 @@ func (rc *RealClient) dialForConnect(ctx context.Context, host string, resolved 
 			return nil, fmt.Errorf("host key callback: %w", err)
 		}
 
-		chain, err := rc.buildAuthChain(resolved, cfg)
+		chain, err := rc.buildAuthChain(ctx, resolved, cfg)
 		if err != nil {
 			return nil, err
 		}
@@ -221,7 +221,7 @@ func (rc *RealClient) dialJumpForConnect(ctx context.Context, host string, resol
 		if err != nil {
 			return nil, fmt.Errorf("jump host key callback: %w", err)
 		}
-		chain, err := rc.buildAuthChain(resolved, cfg)
+		chain, err := rc.buildAuthChain(ctx, resolved, cfg)
 		if err != nil {
 			return nil, fmt.Errorf("build jump host auth: %w", err)
 		}

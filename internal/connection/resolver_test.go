@@ -1,6 +1,7 @@
 package connection
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/profile"
+	"github.com/shady2k/nocx/internal/vault"
 )
 
 // stubProfileStore implements both profile.ProfileRepository and
@@ -304,7 +306,16 @@ func newStubSecretStore() *stubSecretStore {
 	return &stubSecretStore{secrets: make(map[credential.SecretID]credential.Secret)}
 }
 
-func (s *stubSecretStore) Get(id credential.SecretID) (credential.Secret, error) {
+func (s *stubSecretStore) Create(ctx context.Context, value credential.Secret) (credential.SecretID, error) {
+	id, err := vault.MintReferenceForTest(vault.ProviderFile)
+	if err != nil {
+		return "", err
+	}
+	s.secrets[id] = value
+	return id, nil
+}
+
+func (s *stubSecretStore) Get(ctx context.Context, id credential.SecretID) (credential.Secret, error) {
 	val, ok := s.secrets[id]
 	if !ok {
 		return credential.Secret{}, nil
@@ -312,17 +323,12 @@ func (s *stubSecretStore) Get(id credential.SecretID) (credential.Secret, error)
 	return val, nil
 }
 
-func (s *stubSecretStore) Set(id credential.SecretID, value credential.Secret) error {
-	s.secrets[id] = value
-	return nil
-}
-
-func (s *stubSecretStore) Delete(id credential.SecretID) error {
+func (s *stubSecretStore) Delete(ctx context.Context, id credential.SecretID) error {
 	delete(s.secrets, id)
 	return nil
 }
 
-func (s *stubSecretStore) Exists(id credential.SecretID) (bool, error) {
+func (s *stubSecretStore) Exists(ctx context.Context, id credential.SecretID) (bool, error) {
 	_, ok := s.secrets[id]
 	return ok, nil
 }
@@ -332,8 +338,7 @@ func TestResolver_CredentialMode(t *testing.T) {
 	ps := newStubProfileStore()
 	ss := newStubSecretStore()
 
-	pwID := credential.NewSecretID()
-	_ = ss.Set(pwID, credential.NewSecret("s3cret"))
+	pwID, _ := ss.Create(context.Background(), credential.NewSecret("s3cret"))
 
 	_ = ps.SaveCredential(profile.Credential{
 		ID:       "cred:work:abc123",
@@ -439,8 +444,7 @@ func TestResolver_JumpHost(t *testing.T) {
 	ss := newStubSecretStore()
 
 	// Jump profile
-	jumpPWID := credential.NewSecretID()
-	_ = ss.Set(jumpPWID, credential.NewSecret("jump-secret"))
+	jumpPWID, _ := ss.Create(context.Background(), credential.NewSecret("jump-secret"))
 	_ = ps.SaveCredential(profile.Credential{
 		ID: "cred:jump:xyz", Name: "jump-cred", Username: "jumpuser", Auth: "publicKey",
 		KeyPath:  "/home/user/.ssh/jump_rsa",
@@ -452,8 +456,7 @@ func TestResolver_JumpHost(t *testing.T) {
 	})
 
 	// Target profile
-	tgtPWID := credential.NewSecretID()
-	_ = ss.Set(tgtPWID, credential.NewSecret("tgt-secret"))
+	tgtPWID, _ := ss.Create(context.Background(), credential.NewSecret("tgt-secret"))
 	_ = ps.SaveCredential(profile.Credential{
 		ID:       "cred:tgt:def",
 		Name:     "tgt-cred",
@@ -553,8 +556,7 @@ func TestResolver_CarriesTargetBinding(t *testing.T) {
 	ps := newStubProfileStore()
 	ss := newStubSecretStore()
 
-	pwID := credential.NewSecretID()
-	_ = ss.Set(pwID, credential.NewSecret("pw"))
+	pwID, _ := ss.Create(context.Background(), credential.NewSecret("pw"))
 	_ = ps.SaveCredential(profile.Credential{
 		ID:       "cred:bound:aaa",
 		Name:     "bound-cred",
@@ -584,8 +586,7 @@ func TestResolver_LinkedCredentialSurfacesAuthorizedEndpoint(t *testing.T) {
 	ps := newStubProfileStore()
 	ss := newStubSecretStore()
 
-	pwID := credential.NewSecretID()
-	_ = ss.Set(pwID, credential.NewSecret("pw"))
+	pwID, _ := ss.Create(context.Background(), credential.NewSecret("pw"))
 	_ = ps.SaveCredential(profile.Credential{
 		ID:       "cred:unbound:bbb",
 		Name:     "unbound",
@@ -617,8 +618,7 @@ func TestResolver_CarriesJumpBinding(t *testing.T) {
 	ss := newStubSecretStore()
 
 	// Jump credential with binding
-	jumpPWID := credential.NewSecretID()
-	_ = ss.Set(jumpPWID, credential.NewSecret("jpw"))
+	jumpPWID, _ := ss.Create(context.Background(), credential.NewSecret("jpw"))
 	_ = ps.SaveCredential(profile.Credential{
 		ID:       "cred:jumpbound:ccc",
 		Name:     "jump-bound",
@@ -632,8 +632,7 @@ func TestResolver_CarriesJumpBinding(t *testing.T) {
 	})
 
 	// Target
-	tgtPWID := credential.NewSecretID()
-	_ = ss.Set(tgtPWID, credential.NewSecret("tpw"))
+	tgtPWID, _ := ss.Create(context.Background(), credential.NewSecret("tpw"))
 	_ = ps.SaveCredential(profile.Credential{
 		ID:       "cred:tgtbound:ddd",
 		Name:     "tgt-bound",
@@ -723,8 +722,7 @@ func TestResolver_MultiHopJump(t *testing.T) {
 	ss := newStubSecretStore()
 
 	// Inner bastion (closest to client) - jumps through no one
-	innerPWID := credential.NewSecretID()
-	_ = ss.Set(innerPWID, credential.NewSecret("inner-secret"))
+	innerPWID, _ := ss.Create(context.Background(), credential.NewSecret("inner-secret"))
 	_ = ps.SaveCredential(profile.Credential{
 		ID: "cred:inner:1", Name: "inner-cred", Username: "inneruser", Auth: "password",
 		SecretID: string(innerPWID),
@@ -739,8 +737,7 @@ func TestResolver_MultiHopJump(t *testing.T) {
 	})
 
 	// Outer bastion (closest to target) - jumps through inner
-	outerPWID := credential.NewSecretID()
-	_ = ss.Set(outerPWID, credential.NewSecret("outer-secret"))
+	outerPWID, _ := ss.Create(context.Background(), credential.NewSecret("outer-secret"))
 	_ = ps.SaveCredential(profile.Credential{
 		ID: "cred:outer:1", Name: "outer-cred", Username: "outeruser", Auth: "publicKey",
 		KeyPath:  "/home/user/.ssh/outer_rsa",
@@ -757,8 +754,7 @@ func TestResolver_MultiHopJump(t *testing.T) {
 	})
 
 	// Target profile - jumps through outer
-	tgtPWID := credential.NewSecretID()
-	_ = ss.Set(tgtPWID, credential.NewSecret("tgt-secret"))
+	tgtPWID, _ := ss.Create(context.Background(), credential.NewSecret("tgt-secret"))
 	_ = ps.SaveCredential(profile.Credential{
 		ID: "cred:tgt:1", Name: "tgt-cred", Username: "tgtuser", Auth: "password",
 		SecretID: string(tgtPWID),
@@ -861,13 +857,13 @@ func rotationFixture(t *testing.T) (*stubProfileStore, *stubSecretStore, credent
 	ps := newStubProfileStore()
 	ss := newStubSecretStore()
 
-	curID := credential.NewSecretID()
-	candID := credential.NewSecretID()
-	if err := ss.Set(curID, credential.NewSecret("current-pw")); err != nil {
-		t.Fatalf("set current: %v", err)
+	curID, err := ss.Create(context.Background(), credential.NewSecret("current-pw"))
+	if err != nil {
+		t.Fatalf("create current: %v", err)
 	}
-	if err := ss.Set(candID, credential.NewSecret("candidate-pw")); err != nil {
-		t.Fatalf("set candidate: %v", err)
+	candID, err := ss.Create(context.Background(), credential.NewSecret("candidate-pw"))
+	if err != nil {
+		t.Fatalf("create candidate: %v", err)
 	}
 
 	_ = ps.SaveCredential(profile.Credential{
@@ -932,9 +928,9 @@ func TestResolveWithVersion_LeavesTheBastionOnItsCurrentVersion(t *testing.T) {
 	ps, ss, _, candID := rotationFixture(t)
 
 	// A bastion with its own credential, one version, in front of the target.
-	jumpID := credential.NewSecretID()
-	if err := ss.Set(jumpID, credential.NewSecret("jump-pw")); err != nil {
-		t.Fatalf("set jump: %v", err)
+	jumpID, err := ss.Create(context.Background(), credential.NewSecret("jump-pw"))
+	if err != nil {
+		t.Fatalf("create jump: %v", err)
 	}
 	_ = ps.SaveCredential(profile.Credential{
 		ID:               "cred:bastion:bbb",
@@ -973,13 +969,17 @@ func TestResolve_PinnedVersion(t *testing.T) {
 	ps := newStubProfileStore()
 	ss := newStubSecretStore()
 
-	v1ID := credential.NewSecretID()
-	v2ID := credential.NewSecretID()
-	v3ID := credential.NewSecretID()
-	for _, s := range []credential.SecretID{v1ID, v2ID, v3ID} {
-		if err := ss.Set(s, credential.NewSecret("pw-"+string(s))); err != nil {
-			t.Fatalf("set secret: %v", err)
-		}
+	v1ID, err := ss.Create(context.Background(), credential.NewSecret("pw-v1"))
+	if err != nil {
+		t.Fatalf("create v1: %v", err)
+	}
+	v2ID, err := ss.Create(context.Background(), credential.NewSecret("pw-v2"))
+	if err != nil {
+		t.Fatalf("create v2: %v", err)
+	}
+	v3ID, err := ss.Create(context.Background(), credential.NewSecret("pw-v3"))
+	if err != nil {
+		t.Fatalf("create v3: %v", err)
 	}
 
 	_ = ps.SaveCredential(profile.Credential{
@@ -1018,12 +1018,13 @@ func TestResolve_PinnedVersionOverridesCurrent(t *testing.T) {
 	ps := newStubProfileStore()
 	ss := newStubSecretStore()
 
-	v1ID := credential.NewSecretID()
-	v2ID := credential.NewSecretID()
-	for _, s := range []credential.SecretID{v1ID, v2ID} {
-		if err := ss.Set(s, credential.NewSecret("pw-"+string(s))); err != nil {
-			t.Fatalf("set secret: %v", err)
-		}
+	v1ID, err := ss.Create(context.Background(), credential.NewSecret("pw-v1"))
+	if err != nil {
+		t.Fatalf("create v1: %v", err)
+	}
+	v2ID, err := ss.Create(context.Background(), credential.NewSecret("pw-v2"))
+	if err != nil {
+		t.Fatalf("create v2: %v", err)
 	}
 
 	_ = ps.SaveCredential(profile.Credential{
@@ -1063,12 +1064,13 @@ func TestResolve_PinnedVersionSurvivesRetirement(t *testing.T) {
 	ps := newStubProfileStore()
 	ss := newStubSecretStore()
 
-	v1ID := credential.NewSecretID()
-	v2ID := credential.NewSecretID()
-	for _, s := range []credential.SecretID{v1ID, v2ID} {
-		if err := ss.Set(s, credential.NewSecret("pw-"+string(s))); err != nil {
-			t.Fatalf("set secret: %v", err)
-		}
+	v1ID, err := ss.Create(context.Background(), credential.NewSecret("pw-v1"))
+	if err != nil {
+		t.Fatalf("create v1: %v", err)
+	}
+	v2ID, err := ss.Create(context.Background(), credential.NewSecret("pw-v2"))
+	if err != nil {
+		t.Fatalf("create v2: %v", err)
 	}
 
 	now := time.Now()
@@ -1083,7 +1085,7 @@ func TestResolve_PinnedVersionSurvivesRetirement(t *testing.T) {
 		},
 		CurrentVersionID: "v2",
 	}
-	if err := ps.SaveCredential(cred); err != nil {
+	if err = ps.SaveCredential(cred); err != nil {
 		t.Fatalf("save credential: %v", err)
 	}
 
@@ -1111,8 +1113,7 @@ func TestResolve_PinnedVersionNotFound(t *testing.T) {
 	ps := newStubProfileStore()
 	ss := newStubSecretStore()
 
-	v1ID := credential.NewSecretID()
-	_ = ss.Set(v1ID, credential.NewSecret("pw-v1"))
+	v1ID, _ := ss.Create(context.Background(), credential.NewSecret("pw-v1"))
 
 	_ = ps.SaveCredential(profile.Credential{
 		ID:       "cred:test:ddd",
@@ -1143,11 +1144,9 @@ func TestResolve_RetiredCurrentVersion(t *testing.T) {
 	ps := newStubProfileStore()
 	ss := newStubSecretStore()
 
-	v1ID := credential.NewSecretID()
-	for _, s := range []credential.SecretID{v1ID} {
-		if err := ss.Set(s, credential.NewSecret("pw-v1")); err != nil {
-			t.Fatalf("set secret: %v", err)
-		}
+	v1ID, err := ss.Create(context.Background(), credential.NewSecret("pw-v1"))
+	if err != nil {
+		t.Fatalf("create v1: %v", err)
 	}
 
 	now := time.Now()
@@ -1167,7 +1166,7 @@ func TestResolve_RetiredCurrentVersion(t *testing.T) {
 		Options: profile.StoredSSHProfileOptions{Host: "host.example.com", CredentialID: "cred:test:eee"},
 	})
 
-	_, _, err := NewResolver(ps, ps, ps, ss).Resolve("profile:retired-current")
+	_, _, err = NewResolver(ps, ps, ps, ss).Resolve("profile:retired-current")
 	if !errors.Is(err, profile.ErrVersionRetired) {
 		t.Fatalf("expected ErrVersionRetired, got %v", err)
 	}
@@ -1198,12 +1197,13 @@ func TestResolve_PinProfileADoesNotPinProfileB(t *testing.T) {
 	ps := newStubProfileStore()
 	ss := newStubSecretStore()
 
-	v1ID := credential.NewSecretID()
-	v2ID := credential.NewSecretID()
-	for _, s := range []credential.SecretID{v1ID, v2ID} {
-		if err := ss.Set(s, credential.NewSecret("pw-"+string(s))); err != nil {
-			t.Fatalf("set secret: %v", err)
-		}
+	v1ID, err := ss.Create(context.Background(), credential.NewSecret("pw-v1"))
+	if err != nil {
+		t.Fatalf("create v1: %v", err)
+	}
+	v2ID, err := ss.Create(context.Background(), credential.NewSecret("pw-v2"))
+	if err != nil {
+		t.Fatalf("create v2: %v", err)
 	}
 
 	_ = ps.SaveCredential(profile.Credential{

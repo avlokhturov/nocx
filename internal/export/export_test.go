@@ -11,10 +11,10 @@ import (
 	"testing"
 
 	"github.com/shady2k/nocx/internal/content"
-	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/export"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
+	"github.com/shady2k/nocx/internal/vault"
 )
 
 // --- test helpers ---
@@ -253,14 +253,23 @@ var (
 	_ profile.CredentialMetadataRepository = (*fakeCredRepo)(nil)
 )
 
-func makeCredential(name, username, auth string) profile.Credential {
+func makeCredential(t *testing.T, name, username, auth string) profile.Credential {
+	t.Helper()
+	secretID, err := vault.MintReferenceForTest(vault.ProviderFile)
+	if err != nil {
+		t.Fatalf("MintReferenceForTest: %v", err)
+	}
+	passphraseSecretID, err := vault.MintReferenceForTest(vault.ProviderFile)
+	if err != nil {
+		t.Fatalf("MintReferenceForTest: %v", err)
+	}
 	return profile.Credential{
 		ID:                 profile.NewCredentialID(name),
 		Name:               name,
 		Username:           username,
 		Auth:               profile.AuthMode(auth),
-		SecretID:           string(credential.NewSecretID()),
-		PassphraseSecretID: string(credential.NewSecretID()),
+		SecretID:           string(secretID),
+		PassphraseSecretID: string(passphraseSecretID),
 	}
 }
 
@@ -369,7 +378,7 @@ func TestManifestFor_Import(t *testing.T) {
 // =========================================================================
 
 func TestExportConfiguration_ContainsSecretID_NotMaterial(t *testing.T) {
-	cred := makeCredential("work-github", "alice", string(profile.AuthPassword))
+	cred := makeCredential(t, "work-github", "alice", string(profile.AuthPassword))
 	profiles := []profile.SSHProfile{makeProfile("ssh:custom:test:0001", "test-host", "example.com")}
 	groups := []profile.ProfileGroup{makeGroup("group-1", "Work")}
 	creds := []profile.Credential{cred}
@@ -447,7 +456,7 @@ func TestExportConfiguration_NilSettingsProvider(t *testing.T) {
 // =========================================================================
 
 func TestPortableEncrypted_RoundTrip(t *testing.T) {
-	cred := makeCredential("work-github", "alice", string(profile.AuthPassword))
+	cred := makeCredential(t, "work-github", "alice", string(profile.AuthPassword))
 	profiles := []profile.SSHProfile{makeProfile("ssh:custom:test:0001", "test-host", "example.com")}
 	groups := []profile.ProfileGroup{makeGroup("group-1", "Work")}
 	creds := []profile.Credential{cred}
@@ -519,7 +528,7 @@ func TestPortableEncrypted_NilContentDB(t *testing.T) {
 }
 
 func TestPortableEncrypted_WrongPassphrase(t *testing.T) {
-	cred := makeCredential("work-github", "alice", string(profile.AuthPassword))
+	cred := makeCredential(t, "work-github", "alice", string(profile.AuthPassword))
 	configDeps := export.ConfigExportDeps{
 		Profiles:    &fakeProfileRepo{},
 		Groups:      &fakeGroupRepo{},
@@ -664,7 +673,7 @@ func TestBackup_ContentDBPresent(t *testing.T) {
 // =========================================================================
 
 func TestImportConfiguration_RoundTrip(t *testing.T) {
-	cred := makeCredential("work-github", "alice", string(profile.AuthPassword))
+	cred := makeCredential(t, "work-github", "alice", string(profile.AuthPassword))
 	original := &export.ConfigExport{
 		Profiles:    []profile.SSHProfile{makeProfile("ssh:custom:test:0001", "test-host", "example.com")},
 		Groups:      []profile.ProfileGroup{makeGroup("group-1", "Work")},
@@ -705,13 +714,21 @@ func TestImportConfiguration_RoundTrip(t *testing.T) {
 }
 
 func TestImportConfiguration_DoesNotResolveSecrets(t *testing.T) {
+	passSecretID, err := vault.MintReferenceForTest(vault.ProviderFile)
+	if err != nil {
+		t.Fatalf("MintReferenceForTest: %v", err)
+	}
+	passphraseSecretID, err := vault.MintReferenceForTest(vault.ProviderFile)
+	if err != nil {
+		t.Fatalf("MintReferenceForTest: %v", err)
+	}
 	cred := profile.Credential{
 		ID:                 profile.NewCredentialID("test"),
 		Name:               "test",
 		Username:           "alice",
 		Auth:               profile.AuthPassword,
-		SecretID:           string(credential.NewSecretID()),
-		PassphraseSecretID: string(credential.NewSecretID()),
+		SecretID:           string(passSecretID),
+		PassphraseSecretID: string(passphraseSecretID),
 	}
 
 	original := &export.ConfigExport{Credentials: []profile.Credential{cred}}
@@ -741,7 +758,7 @@ func TestImportConfiguration_DoesNotResolveSecrets(t *testing.T) {
 }
 
 func TestImportConfiguration_FullRoundTrip(t *testing.T) {
-	cred := makeCredential("work-github", "alice", string(profile.AuthPassword))
+	cred := makeCredential(t, "work-github", "alice", string(profile.AuthPassword))
 	originalProfile := makeProfile("ssh:custom:test:0001", "test-host", "example.com")
 	originalGroup := makeGroup("group-1", "Work")
 
@@ -797,7 +814,7 @@ func TestNoModeResolvesASecret(t *testing.T) {
 	// inadvertently included a Secret, json.Marshal would fail — this
 	// test proves that doesn't happen.
 
-	cred := makeCredential("test", "alice", string(profile.AuthPassword))
+	cred := makeCredential(t, "test", "alice", string(profile.AuthPassword))
 	deps := export.ConfigExportDeps{
 		Profiles:    &fakeProfileRepo{},
 		Groups:      &fakeGroupRepo{},

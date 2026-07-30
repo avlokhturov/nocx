@@ -1,6 +1,7 @@
 package ssh
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -43,7 +44,7 @@ type authChainEntry struct {
 // buildAuthChain builds the ordered auth fallback chain, porting Tabby's
 // SSHSession.init(). Order: none → publicKey(s) → agent → savedPassword →
 // keyboard-interactive → promptPassword → hostbased.
-func (rc *RealClient) buildAuthChain(resolved *resolvedConfig, cfg *ConnectConfig) ([]authChainEntry, error) {
+func (rc *RealClient) buildAuthChain(ctx context.Context, resolved *resolvedConfig, cfg *ConnectConfig) ([]authChainEntry, error) {
 	if len(cfg.AuthMethods) > 0 {
 		chain := make([]authChainEntry, 0, len(cfg.AuthMethods))
 		for _, m := range cfg.AuthMethods {
@@ -56,21 +57,19 @@ func (rc *RealClient) buildAuthChain(resolved *resolvedConfig, cfg *ConnectConfi
 	var chain []authChainEntry
 
 	chain = append(chain, authChainEntry{kind: kindNone})
-
 	if mode == "" || mode == "publicKey" {
-		rc.addPublicKeyMethods(&chain, resolved, cfg)
+		rc.addPublicKeyMethods(ctx, &chain, resolved, cfg)
 	}
-
 	if (mode == "" || mode == "agent") && rc.agentAvailable() {
 		rc.addAgentMethods(&chain)
 	}
 
 	if mode == "" || mode == "password" {
-		rc.addPasswordMethods(&chain, cfg)
+		rc.addPasswordMethods(ctx, &chain, cfg)
 	}
 
 	if mode == "" || mode == "keyboardInteractive" {
-		rc.addKeyboardInteractiveMethods(&chain, cfg)
+		rc.addKeyboardInteractiveMethods(ctx, &chain, cfg)
 	}
 
 	if mode == "" || mode == "password" {
@@ -82,15 +81,15 @@ func (rc *RealClient) buildAuthChain(resolved *resolvedConfig, cfg *ConnectConfi
 	return chain, nil
 }
 
-func (rc *RealClient) addPublicKeyMethods(chain *[]authChainEntry, resolved *resolvedConfig, cfg *ConnectConfig) {
+func (rc *RealClient) addPublicKeyMethods(ctx context.Context, chain *[]authChainEntry, resolved *resolvedConfig, cfg *ConnectConfig) {
 	if resolved.identityFile != "" {
-		if signer, err := rc.loadKey(resolved.identityFile, cfg); err == nil {
+		if signer, err := rc.loadKey(ctx, resolved.identityFile, cfg); err == nil {
 			*chain = append(*chain, authChainEntry{kind: kindPublicKey, method: gossh.PublicKeys(signer)})
 		}
 	}
 
 	for _, path := range defaultKeyPaths() {
-		signer, err := rc.loadKey(path, cfg)
+		signer, err := rc.loadKey(ctx, path, cfg)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				continue
@@ -128,9 +127,9 @@ func passwordCallbackFromSecret(s credential.Secret) gossh.AuthMethod {
 	})
 }
 
-func (rc *RealClient) addPasswordMethods(chain *[]authChainEntry, cfg *ConnectConfig) {
+func (rc *RealClient) addPasswordMethods(ctx context.Context, chain *[]authChainEntry, cfg *ConnectConfig) {
 	if cfg.Secrets != nil && cfg.SecretID != "" {
-		if stored, err := cfg.Secrets.Get(cfg.SecretID); err == nil && !stored.IsEmpty() {
+		if stored, err := cfg.Secrets.Get(ctx, cfg.SecretID); err == nil && !stored.IsEmpty() {
 			*chain = append(*chain, authChainEntry{
 				kind:   kindSavedPassword,
 				method: passwordCallbackFromSecret(stored),
@@ -142,9 +141,9 @@ func (rc *RealClient) addPasswordMethods(chain *[]authChainEntry, cfg *ConnectCo
 	}
 }
 
-func (rc *RealClient) addKeyboardInteractiveMethods(chain *[]authChainEntry, cfg *ConnectConfig) {
+func (rc *RealClient) addKeyboardInteractiveMethods(ctx context.Context, chain *[]authChainEntry, cfg *ConnectConfig) {
 	if cfg.Secrets != nil && cfg.SecretID != "" {
-		if stored, err := cfg.Secrets.Get(cfg.SecretID); err == nil && !stored.IsEmpty() {
+		if stored, err := cfg.Secrets.Get(ctx, cfg.SecretID); err == nil && !stored.IsEmpty() {
 			*chain = append(*chain, authChainEntry{kind: kindKeyboardInteractive, secret: stored})
 		}
 	}
@@ -154,11 +153,11 @@ func (rc *RealClient) addKeyboardInteractiveMethods(chain *[]authChainEntry, cfg
 // lookupKeyPassphrase resolves a private-key passphrase by SecretID from the
 // SecretStore. It returns a credential.Secret so the passphrase is
 // non-serializable; callers read it through Secret.Use.
-func (rc *RealClient) lookupKeyPassphrase(store credential.SecretStore, id credential.SecretID) (credential.Secret, error) {
+func (rc *RealClient) lookupKeyPassphrase(ctx context.Context, store credential.SecretStore, id credential.SecretID) (credential.Secret, error) {
 	if store == nil || id == "" {
 		return credential.Secret{}, nil
 	}
-	return store.Get(id)
+	return store.Get(ctx, id)
 }
 
 func authMethodsFromChain(chain []authChainEntry) []gossh.AuthMethod {
@@ -189,7 +188,7 @@ func defaultKeyPaths() []string {
 	}
 }
 
-func (rc *RealClient) loadKey(path string, cfg *ConnectConfig) (gossh.Signer, error) {
+func (rc *RealClient) loadKey(ctx context.Context, path string, cfg *ConnectConfig) (gossh.Signer, error) {
 	data, err := os.ReadFile(path) //nolint:gosec
 	if err != nil {
 		return nil, err
@@ -207,7 +206,7 @@ func (rc *RealClient) loadKey(path string, cfg *ConnectConfig) (gossh.Signer, er
 			return nil, &ErrEncryptedKey{Path: path}
 		}
 
-		secret, lookupErr := rc.lookupKeyPassphrase(cfg.Secrets, cfg.PassphraseSecretID)
+		secret, lookupErr := rc.lookupKeyPassphrase(ctx, cfg.Secrets, cfg.PassphraseSecretID)
 		if lookupErr != nil || secret.IsEmpty() {
 			return nil, &ErrEncryptedKey{Path: path}
 		}

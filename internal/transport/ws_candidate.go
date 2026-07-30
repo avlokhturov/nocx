@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,8 +35,9 @@ func (s *WSServer) stageCandidateForCredential(credID, password string) error {
 		return fmt.Errorf("credential %s: %w", credID, profile.ErrCandidateExists)
 	}
 
-	newID := credential.NewSecretID()
-	if err := s.credentials.Set(newID, credential.NewSecret(password)); err != nil {
+	ctx := context.Background()
+	newID, err := s.credentials.Create(ctx, credential.NewSecret(password))
+	if err != nil {
 		return fmt.Errorf("store secret: %w", err)
 	}
 
@@ -79,7 +81,7 @@ func (s *WSServer) discardCandidateForCredential(credID string) error {
 
 	// Best-effort delete of the candidate secret.
 	if candidateSecretID != "" {
-		_ = s.credentials.Delete(candidateSecretID)
+		_ = s.credentials.Delete(context.Background(), candidateSecretID)
 	}
 	return nil
 }

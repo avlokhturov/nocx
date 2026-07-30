@@ -9,11 +9,9 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/shady2k/nocx/internal/connection"
-	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/rollout"
-	"github.com/zalando/go-keyring"
 )
 
 // rolloutHarness wires a WSServer with a registered runner for testing.
@@ -25,10 +23,9 @@ type rolloutHarness struct {
 
 func newRolloutHarness(t *testing.T, runner rollout.Runner) *rolloutHarness {
 	t.Helper()
-	keyring.MockInit()
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(dir + "/p.json")
-	cs := credential.NewKeychain()
+	cs := newTestStore()
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
 		WithProfileRepository(ps), WithCredentialMetadataRepository(ps),
 		WithCredentialStore(cs))
@@ -156,7 +153,7 @@ func TestRolloutRun_ParamsPassThrough(t *testing.T) {
 func TestRolloutResolverAdapter_NonVersionError(t *testing.T) {
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(dir + "/p.json")
-	cs := credential.NewKeychain()
+	cs := newTestStore()
 	resolver := connection.NewResolver(ps, ps, ps, cs)
 	adapter := &rolloutResolverAdapter{inner: resolver}
 

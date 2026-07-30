@@ -11,7 +11,6 @@ import (
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
-	"github.com/zalando/go-keyring"
 )
 
 func TestProfilesRPC_ListEmpty(t *testing.T) {
@@ -144,7 +143,6 @@ func TestGroupsRPC_Create(t *testing.T) {
 }
 
 func TestCredentialsRPC_MethodNotFound(t *testing.T) {
-	keyring.MockInit()
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
@@ -176,18 +174,15 @@ func TestCredentialsRPC_MethodNotFound(t *testing.T) {
 // struct fields, so a field added later that carries a secret will fail
 // this test even if no struct-field assertion was written for it.
 func TestNoPlaintextSecretsOnWire(t *testing.T) {
-	keyring.MockInit()
-
 	const targetCanary = "CANARY-TARGET-s3cr3t-do-not-leak"
 	const jumpCanary = "CANARY-JUMP-s3cr3t-do-not-leak"
 
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
-	cs := credential.NewKeychain()
+	cs := newTestStore()
 
 	// Save a credential with password auth (target).
-	tgtPWID := credential.NewSecretID()
-	_ = cs.Set(tgtPWID, credential.NewSecret(targetCanary))
+	tgtPWID, _ := cs.Create(context.Background(), credential.NewSecret(targetCanary))
 	_ = ps.CreateCredential(profile.Credential{
 		ID:       "cred:canary:aaa",
 		Name:     "canary-cred",
@@ -197,8 +192,7 @@ func TestNoPlaintextSecretsOnWire(t *testing.T) {
 	})
 
 	// Save a jump credential (public key).
-	jumpPWID := credential.NewSecretID()
-	_ = cs.Set(jumpPWID, credential.NewSecret(jumpCanary))
+	jumpPWID, _ := cs.Create(context.Background(), credential.NewSecret(jumpCanary))
 	_ = ps.CreateCredential(profile.Credential{
 		ID:       "cred:canary:bbb",
 		Name:     "jump-canary",

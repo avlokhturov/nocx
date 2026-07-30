@@ -9,7 +9,6 @@ import (
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
-	"github.com/zalando/go-keyring"
 )
 
 // candidateHarness wires a WSServer with a profile store and a keychain
@@ -24,10 +23,9 @@ type candidateHarness struct {
 
 func newCandidateHarness(t *testing.T) *candidateHarness {
 	t.Helper()
-	keyring.MockInit()
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(dir + "/p.json")
-	cs := credential.NewKeychain()
+	cs := newTestStore()
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
 		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps), WithCredentialStore(cs))
 	ctx := context.Background()
@@ -176,7 +174,7 @@ func TestCandidateStageDoesNotAffectCurrent(t *testing.T) {
 
 	// INVARIANT 5: The candidate secret exists in the secret store.
 	secretID := credential.SecretID(candidate.PasswordSecretID)
-	if ok, err := h.cs.Exists(secretID); err != nil || !ok {
+	if ok, err := h.cs.Exists(context.Background(), secretID); err != nil || !ok {
 		t.Errorf("candidate secret %q missing in secret store (err=%v)", secretID, err)
 	}
 }
@@ -212,7 +210,7 @@ func TestCandidateDiscardRemovesVersion(t *testing.T) {
 	candidateSecretID := credential.SecretID(cand.PasswordSecretID)
 
 	// Verify the candidate secret exists.
-	if ok, err := h.cs.Exists(candidateSecretID); err != nil || !ok {
+	if ok, err := h.cs.Exists(context.Background(), candidateSecretID); err != nil || !ok {
 		t.Fatalf("candidate secret not found before discard (err=%v)", err)
 	}
 
@@ -253,7 +251,7 @@ func TestCandidateDiscardRemovesVersion(t *testing.T) {
 	}
 
 	// INVARIANT 5: The candidate's secret is deleted from the store.
-	if ok, err := h.cs.Exists(candidateSecretID); err == nil && ok {
+	if ok, err := h.cs.Exists(context.Background(), candidateSecretID); err == nil && ok {
 		t.Error("candidate secret still exists in secret store after discard")
 	}
 }

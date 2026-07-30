@@ -70,7 +70,7 @@ type WSServer struct {
 	profiles    profile.ProfileRepository
 	groups      profile.GroupRepository
 	credMeta    profile.CredentialMetadataRepository
-	credentials credential.CredentialStore
+	credentials credential.SecretStore
 
 	// Profile resolver maps profile IDs to SSH connect configs.
 	resolver ProfileResolver
@@ -182,7 +182,7 @@ func WithCredentialMetadataRepository(cmr profile.CredentialMetadataRepository) 
 
 // WithCredentialStore attaches a credential store, enabling the
 // credentials.* JSON-RPC methods.
-func WithCredentialStore(cs credential.CredentialStore) WSServerOption {
+func WithCredentialStore(cs credential.SecretStore) WSServerOption {
 	return func(s *WSServer) { s.credentials = cs }
 }
 
@@ -1623,6 +1623,9 @@ func (s *WSServer) handleCredentialMethod(wconn *wsConn, req jsonrpcRequest) {
 // fresh ID first, then metadata is updated, then the old secret (if any) is
 // best-effort deleted — write-before-repoint prevents a crash from orphaning
 // the new secret.
+//
+// No production context available — this is called from a JSON-RPC handler
+// that has no request scoping. The vault caps waiting via its own deadline.
 func (s *WSServer) savePasswordForCredential(credID, password string) error {
 	if s.credMeta == nil {
 		return errors.New("profiles not available")
@@ -1635,8 +1638,9 @@ func (s *WSServer) savePasswordForCredential(credID, password string) error {
 		return fmt.Errorf("credential %s not found", credID)
 	}
 
-	newID := credential.NewSecretID()
-	if err := s.credentials.Set(newID, credential.NewSecret(password)); err != nil {
+	ctx := context.Background()
+	newID, err := s.credentials.Create(ctx, credential.NewSecret(password))
+	if err != nil {
 		return fmt.Errorf("store secret: %w", err)
 	}
 
@@ -1654,7 +1658,7 @@ func (s *WSServer) savePasswordForCredential(credID, password string) error {
 
 	// Best-effort delete of the old secret.
 	if oldID != "" {
-		_ = s.credentials.Delete(oldID)
+		_ = s.credentials.Delete(ctx, oldID)
 	}
 	return nil
 }
@@ -1684,7 +1688,7 @@ func (s *WSServer) deletePasswordForCredential(credID string) error {
 	}
 
 	if oldID != "" {
-		_ = s.credentials.Delete(oldID)
+		_ = s.credentials.Delete(context.Background(), oldID)
 	}
 	return nil
 }
@@ -1707,7 +1711,7 @@ func (s *WSServer) hasPasswordForCredential(credID string) (bool, error) {
 	if !ok || v.PasswordSecretID == "" {
 		return false, nil
 	}
-	return s.credentials.Exists(credential.SecretID(v.PasswordSecretID))
+	return s.credentials.Exists(context.Background(), credential.SecretID(v.PasswordSecretID))
 }
 
 // savePassphraseForCredential stores a key passphrase secret and updates the
@@ -1724,8 +1728,9 @@ func (s *WSServer) savePassphraseForCredential(credID, passphrase string) error 
 		return fmt.Errorf("credential %s not found", credID)
 	}
 
-	newID := credential.NewSecretID()
-	if err := s.credentials.Set(newID, credential.NewSecret(passphrase)); err != nil {
+	ctx := context.Background()
+	newID, err := s.credentials.Create(ctx, credential.NewSecret(passphrase))
+	if err != nil {
 		return fmt.Errorf("store passphrase: %w", err)
 	}
 
@@ -1742,7 +1747,7 @@ func (s *WSServer) savePassphraseForCredential(credID, passphrase string) error 
 	}
 
 	if oldID != "" {
-		_ = s.credentials.Delete(oldID)
+		_ = s.credentials.Delete(ctx, oldID)
 	}
 	return nil
 }
@@ -1774,7 +1779,7 @@ func (s *WSServer) deletePassphraseForCredential(credID string) error {
 	}
 
 	if oldID != "" {
-		_ = s.credentials.Delete(oldID)
+		_ = s.credentials.Delete(context.Background(), oldID)
 	}
 	return nil
 }
@@ -1839,8 +1844,9 @@ func (s *WSServer) deleteCredentialCascade(id string) error {
 		return nil
 	}
 	var errs []error
+	ctx := context.Background()
 	for _, secretID := range ids {
-		if err := s.credentials.Delete(secretID); err != nil {
+		if err := s.credentials.Delete(ctx, secretID); err != nil {
 			errs = append(errs, fmt.Errorf("delete secret %s for %s: %w", secretID, id, err))
 		}
 	}

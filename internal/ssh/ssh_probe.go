@@ -45,7 +45,7 @@ func (rc *RealClient) probeConfig(ctx context.Context, host string, cfg *Connect
 		return "", fmt.Errorf("probe config: %w", err)
 	}
 
-	chain, err := rc.buildAuthChain(resolved, cfg)
+	chain, err := rc.buildAuthChain(ctx, resolved, cfg)
 	if err != nil {
 		return "", fmt.Errorf("probe config: %w", err)
 	}
