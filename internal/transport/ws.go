@@ -71,6 +71,9 @@ type WSServer struct {
 	groups      profile.GroupRepository
 	credMeta    profile.CredentialMetadataRepository
 	credentials credential.SecretStore
+	// Vault lifecycle for vault.* RPC methods. When nil, those methods return a
+	// JSON-RPC error.
+	vaultLifecycle VaultLifecycle
 
 	// Profile resolver maps profile IDs to SSH connect configs.
 	resolver ProfileResolver
@@ -217,6 +220,12 @@ func WithExportContentDB(db content.ContentDB) WSServerOption {
 // path for backward compatibility.
 func WithProfileService(svc *profile.ProfileService) WSServerOption {
 	return func(s *WSServer) { s.profileSvc = svc }
+}
+
+// WithVaultLifecycle attaches the vault seal-lifecycle surface, enabling the
+// vault.* JSON-RPC methods.
+func WithVaultLifecycle(vl VaultLifecycle) WSServerOption {
+	return func(s *WSServer) { s.vaultLifecycle = vl }
 }
 
 func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption) *WSServer {
@@ -424,6 +433,7 @@ type jsonrpcResponse struct {
 type jsonrpcErrorObj struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
+	Data    any    `json:"data,omitempty"`
 }
 
 func newJSONRPCError(id json.RawMessage, code int, msg string) jsonrpcResponse {
@@ -664,6 +674,8 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 	case "sshConfig.path":
 		s.handleSSHConfigPath(wconn, req)
 
+	case "vault.status", "vault.setup", "vault.unseal", "vault.seal":
+		s.handleVaultMethod(wconn, req)
 	default:
 		resp := newJSONRPCError(req.ID, -32601, "Method not found")
 		_ = wconn.writeJSON(resp)

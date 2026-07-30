@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -937,4 +938,65 @@ func (v *Vault) reportOrphanedOSKey(ctx context.Context, sysProv WritableProvide
 		v.logger.Warn("setup rollback could not remove the OS-held root key; it is now an orphan in the system store and cannot be found by any later sweep",
 			"secretID", oskID, "provider", sysProv.ID(), "error", err)
 	}
+}
+
+// ProviderSnapshot is a read-only projection of a provider for the vault.status
+// RPC. It carries no entry names, no locators and nothing from which a storage
+// location can be reconstructed.
+type ProviderSnapshot struct {
+	ID       ProviderID `json:"id"`
+	Writable bool       `json:"writable"`
+	Ready    bool       `json:"ready"`
+	Reason   Reason     `json:"reason,omitempty"`
+}
+
+// Snapshot is a consistent view of the vault at one moment. It is the response
+// shape for vault.status and the payload for vault.changed broadcasts.
+type Snapshot struct {
+	State     State              `json:"-"`
+	HasOSKey  bool               `json:"osKeyAvailable"`
+	Providers []ProviderSnapshot `json:"providers"`
+}
+
+// Snapshot returns a read-only projection of the vault for the transport layer.
+// It holds no lock across provider calls: state and registry contents are read
+// under the mutex, then released before each provider is queried.
+func (v *Vault) Snapshot(ctx context.Context) Snapshot {
+	v.mu.Lock()
+	state := v.stateLocked()
+	hasOSKey := v.doc.HasOSKey
+	providers := v.reg.List()
+	v.mu.Unlock()
+
+	snap := Snapshot{
+		State:    state,
+		HasOSKey: hasOSKey,
+	}
+
+	for _, p := range providers {
+		status := p.Status(ctx)
+		_, writable := p.(WritableProvider)
+		snap.Providers = append(snap.Providers, ProviderSnapshot{
+			ID:       p.ID(),
+			Writable: writable,
+			Ready:    status.Ready,
+			Reason:   status.Reason,
+		})
+	}
+
+	return snap
+}
+
+// MarshalJSON serialises Snapshot with a string state value.
+func (s Snapshot) MarshalJSON() ([]byte, error) {
+	type alias struct {
+		State     string             `json:"state"`
+		HasOSKey  bool               `json:"osKeyAvailable"`
+		Providers []ProviderSnapshot `json:"providers"`
+	}
+	return json.Marshal(alias{
+		State:     s.State.String(),
+		HasOSKey:  s.HasOSKey,
+		Providers: s.Providers,
+	})
 }

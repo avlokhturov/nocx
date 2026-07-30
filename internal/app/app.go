@@ -135,6 +135,7 @@ func New(opts ...Option) (*App, error) {
 		transport.WithGroupRepository(profileStore),
 		transport.WithCredentialMetadataRepository(profileStore),
 		transport.WithCredentialStore(v),
+		transport.WithVaultLifecycle(v),
 		transport.WithProfileResolver(resolver),
 		transport.WithSettingsRegistry(settingsRegistry),
 		transport.WithProfileUsageStore(usageStore),
