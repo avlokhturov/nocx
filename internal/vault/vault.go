@@ -214,7 +214,20 @@ func (v *Vault) Setup(ctx context.Context, req SetupRequest) (SetupResult, error
 		}
 		v.doc.Passphrase = &e
 
-		code, recEnv, err := newRecoveryCode()
+		// Generate a recovery code wrapping THE EXISTING root key.
+		// NOT newRecoveryCode, which mints a new root along with the code.
+		var raw [16]byte
+		if _, rerr := rand.Read(raw[:]); rerr != nil {
+			for i := range len(root) {
+				root[i] = 0
+			}
+			v.doc = origDoc
+			v.initializing = false
+			v.mu.Unlock()
+			return SetupResult{}, fmt.Errorf("generate recovery code: %w", rerr)
+		}
+		code := crockfordEncode(raw[:])
+		recEnv, err := wrapWithPassphrase(root, code)
 		if err != nil {
 			for i := range len(root) {
 				root[i] = 0
@@ -222,7 +235,7 @@ func (v *Vault) Setup(ctx context.Context, req SetupRequest) (SetupResult, error
 			v.doc = origDoc
 			v.initializing = false
 			v.mu.Unlock()
-			return SetupResult{}, fmt.Errorf("generate recovery code: %w", err)
+			return SetupResult{}, fmt.Errorf("wrap recovery: %w", err)
 		}
 		v.doc.Recovery = &recEnv
 		result.RecoveryCode = code
@@ -534,6 +547,201 @@ func (v *Vault) Seal() {
 	}
 
 	v.logger.Info("vault sealed", "generation", gen)
+}
+
+// ChangePassphraseRequest carries the current authentication factor and the
+// new passphrase for vault.ChangePassphrase.
+type ChangePassphraseRequest struct {
+	OldPassphrase string `json:"oldPassphrase,omitempty"`
+	RecoveryCode  string `json:"recoveryCode,omitempty"`
+	NewPassphrase string `json:"newPassphrase"`
+}
+
+// RegenerateRequest carries the passphrase for vault.RegenerateRecovery.
+type RegenerateRequest struct {
+	Passphrase string `json:"passphrase"`
+}
+
+// ChangePassphrase replaces the passphrase envelope. It requires the old
+// passphrase or a recovery code (the OS-held key alone is not sufficient):
+// a factor that only unlocks must not be able to replace the factor that
+// recovers. Unsealing is temporary; rotating is not.
+//
+// The root key is unwrapped from the existing envelope with the old factor
+// and rewrapped with the new passphrase. No secrets are re-encrypted
+// (spec §5.1). The operation works sealed because it touches only envelopes
+// in the document — no provider call is needed.
+func (v *Vault) ChangePassphrase(ctx context.Context, req ChangePassphraseRequest) error {
+	v.mu.Lock()
+	if v.stateLocked() == StateUninitialized {
+		v.mu.Unlock()
+		return ErrVaultUninitialized
+	}
+	if v.doc.Passphrase == nil {
+		v.mu.Unlock()
+		return fmt.Errorf("no passphrase envelope: %w", ErrUnsealFailed)
+	}
+	if req.NewPassphrase == "" {
+		v.mu.Unlock()
+		return fmt.Errorf("new passphrase must not be empty")
+	}
+	if req.OldPassphrase == "" && req.RecoveryCode == "" {
+		v.mu.Unlock()
+		return fmt.Errorf("old passphrase or recovery code required")
+	}
+	// Snapshot envelopes under lock. The root key is extracted from the
+	// envelope itself — we never read v.rootKey outside the lock.
+	oldPassEnv := *v.doc.Passphrase
+	var recovEnv *Envelope
+	if v.doc.Recovery != nil {
+		r := *v.doc.Recovery
+		recovEnv = &r
+	}
+	gen := v.gen
+	v.mu.Unlock()
+
+	// Authenticate using one factor and extract the root key from the envelope.
+	var root []byte
+	var authErr error
+	if req.OldPassphrase != "" {
+		root, authErr = unwrapWithPassphrase(oldPassEnv, req.OldPassphrase)
+	} else {
+		if recovEnv == nil {
+			return fmt.Errorf("%w: no recovery envelope", ErrUnsealFailed)
+		}
+		root, authErr = unwrapWithPassphrase(*recovEnv, req.RecoveryCode)
+	}
+	if authErr != nil {
+		return authErr // already ErrUnsealFailed
+	}
+	// Wipe root bytes on every return path from here.
+	defer func() {
+		for i := range len(root) {
+			root[i] = 0
+		}
+	}()
+
+	// Auth passed — wrap the root key with the new passphrase.
+	newEnv, err := wrapWithPassphrase(root, req.NewPassphrase)
+	if err != nil {
+		return fmt.Errorf("wrap new passphrase: %w", err)
+	}
+
+	v.mu.Lock()
+	// Guard: if the vault was sealed and re-initialized, gen changed.
+	if v.gen != gen {
+		v.mu.Unlock()
+		return ErrVaultSealed
+	}
+	oldDocEnv := v.doc.Passphrase // save for rollback
+	v.doc.Passphrase = &newEnv
+	if saveErr := saveDocument(v.store, v.doc); saveErr != nil {
+		v.doc.Passphrase = oldDocEnv // restore
+		v.mu.Unlock()
+		return fmt.Errorf("save document: %w", saveErr)
+	}
+	v.mu.Unlock()
+
+	return nil
+}
+
+// RegenerateRecovery replaces the recovery code envelope. It requires the
+// current passphrase (the OS-held key alone is not sufficient): reissuing
+// the recovery code must not be possible without the passphrase.
+//
+// The root key is unwrapped from the passphrase envelope, then wrapped with
+// a freshly generated recovery code. A new root key is NOT minted —
+// newRecoveryCode would do that, which is wrong here.
+func (v *Vault) RegenerateRecovery(ctx context.Context, req RegenerateRequest) (string, error) {
+	v.mu.Lock()
+	if v.stateLocked() == StateUninitialized {
+		v.mu.Unlock()
+		return "", ErrVaultUninitialized
+	}
+	if v.doc.Passphrase == nil {
+		v.mu.Unlock()
+		return "", fmt.Errorf("no passphrase envelope: %w", ErrUnsealFailed)
+	}
+	if req.Passphrase == "" {
+		v.mu.Unlock()
+		return "", fmt.Errorf("passphrase required")
+	}
+	passEnv := *v.doc.Passphrase
+	gen := v.gen
+	v.mu.Unlock()
+
+	// Verify passphrase and extract root key.
+	root, err := unwrapWithPassphrase(passEnv, req.Passphrase)
+	if err != nil {
+		return "", err // already ErrUnsealFailed
+	}
+	// Wipe root bytes on every return path from here.
+	defer func() {
+		for i := range len(root) {
+			root[i] = 0
+		}
+	}()
+
+	// Generate a fresh recovery code wrapping THE EXISTING root key.
+	// Match newRecoveryCode's format: 16 random bytes → Crockford base32.
+	var raw [16]byte
+	if _, rerr := rand.Read(raw[:]); rerr != nil {
+		return "", fmt.Errorf("recovery code: %w", rerr)
+	}
+	code := crockfordEncode(raw[:])
+
+	env, err := wrapWithPassphrase(root, code)
+	if err != nil {
+		return "", fmt.Errorf("wrap recovery: %w", err)
+	}
+
+	v.mu.Lock()
+	if v.gen != gen {
+		v.mu.Unlock()
+		return "", ErrVaultSealed
+	}
+	oldRecovery := v.doc.Recovery
+	v.doc.Recovery = &env
+	if saveErr := saveDocument(v.store, v.doc); saveErr != nil {
+		v.doc.Recovery = oldRecovery // restore
+		v.mu.Unlock()
+		return "", fmt.Errorf("save document: %w", saveErr)
+	}
+	v.mu.Unlock()
+
+	return code, nil
+}
+
+// SetDefaultProvider changes the default provider for new secrets. Existing
+// references are immutable — the provider is encoded in the reference itself
+// (sec:v1:<provider>:<32hex>), so nothing can migrate without minting a new
+// reference (spec §4.1). Only registered, writable providers are accepted.
+func (v *Vault) SetDefaultProvider(ctx context.Context, p ProviderID) error {
+	v.mu.Lock()
+	if v.stateLocked() == StateUninitialized {
+		v.mu.Unlock()
+		return ErrVaultUninitialized
+	}
+
+	// Check the provider is registered AND writable.
+	if _, ok := v.reg.Writable(p); !ok {
+		if _, exists := v.reg.Get(p); exists {
+			v.mu.Unlock()
+			return unavailable(p, ReasonDenied, errors.New("provider is not writable"))
+		}
+		v.mu.Unlock()
+		return unavailable(p, ReasonUnknownProvider, fmt.Errorf("provider %q is not registered", p))
+	}
+
+	oldDefault := v.doc.DefaultProvider
+	v.doc.DefaultProvider = p
+	if saveErr := saveDocument(v.store, v.doc); saveErr != nil {
+		v.doc.DefaultProvider = oldDefault // restore
+		v.mu.Unlock()
+		return fmt.Errorf("save document: %w", saveErr)
+	}
+	v.mu.Unlock()
+	return nil
 }
 
 // --- credential.SecretStore ---

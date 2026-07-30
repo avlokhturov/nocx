@@ -674,7 +674,8 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 	case "sshConfig.path":
 		s.handleSSHConfigPath(wconn, req)
 
-	case "vault.status", "vault.setup", "vault.unseal", "vault.seal":
+	case "vault.status", "vault.setup", "vault.unseal", "vault.seal",
+		"vault.changePassphrase", "vault.regenerateRecovery", "vault.setDefaultProvider":
 		s.handleVaultMethod(wconn, req)
 	default:
 		resp := newJSONRPCError(req.ID, -32601, "Method not found")

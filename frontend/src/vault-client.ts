@@ -16,6 +16,7 @@ export interface VaultStatus {
   state: VaultState
   osKeyAvailable: boolean
   providers: ProviderStatus[]
+  defaultProvider: string | null
 }
 
 export interface VaultSetupParams {
@@ -24,6 +25,24 @@ export interface VaultSetupParams {
 
 export interface VaultSetupResult {
   recoveryCode?: string
+}
+
+export interface VaultChangePassphraseParams {
+  oldPassphrase?: string
+  recoveryCode?: string
+  newPassphrase: string
+}
+
+export interface VaultRegenerateRecoveryParams {
+  passphrase: string
+}
+
+export interface VaultRegenerateRecoveryResult {
+  recoveryCode: string
+}
+
+export interface VaultSetDefaultProviderParams {
+  provider: string
 }
 
 export interface VaultUnsealParams {
@@ -48,5 +67,19 @@ export class VaultClient {
 
   seal(): Promise<Record<string, never>> {
     return this.dispatcher.call('vault.seal', {})
+  }
+
+  changePassphrase(params: VaultChangePassphraseParams): Promise<Record<string, never>> {
+    return this.dispatcher.call('vault.changePassphrase', params)
+  }
+
+  regenerateRecovery(
+    params: VaultRegenerateRecoveryParams,
+  ): Promise<VaultRegenerateRecoveryResult> {
+    return this.dispatcher.call('vault.regenerateRecovery', params)
+  }
+
+  setDefaultProvider(params: VaultSetDefaultProviderParams): Promise<Record<string, never>> {
+    return this.dispatcher.call('vault.setDefaultProvider', params)
   }
 }

@@ -33,6 +33,7 @@ import {
   type SettingsSnapshot,
 } from './settings-domain'
 import { ExportSection } from './export-section'
+import { VaultSection } from './vault'
 import { log } from './log'
 import {
   Page,
@@ -108,6 +109,7 @@ export interface SettingsComponentProps {
   observer?: SettingsObserver
   onConnect?: (profile: SSHProfile) => void
   vaultController?: import('./vault').VaultController
+  vaultClient?: import('./vault-client').VaultClient
   ref?: { current: SettingsComponentHandle | null }
 }
 
@@ -334,7 +336,26 @@ export function SettingsComponent(props: SettingsComponentProps) {
         <CredentialsSection client={props.profileClient} vaultController={props.vaultController} />
       ),
     }
-    return [...generated, exportPage, connectionPage, credentialsPage]
+    const vaultPage: SettingsPage = {
+      kind: 'component',
+      id: 'vault',
+      title: 'Vault',
+      scrollMode: 'page',
+      // The section is listed unconditionally — a surface that appears only
+      // once some other state exists is how a feature ships unreachable. The
+      // guard is for the client being absent, which the composition root never
+      // does and a bare-bones embedding might; it renders a sentence rather
+      // than throwing on a non-null assertion.
+      renderContent: () => (
+        <Show
+          when={props.vaultClient && props.vaultController}
+          fallback={<PageSection title="Vault">Vault is not available in this window.</PageSection>}
+        >
+          <VaultSection vaultClient={props.vaultClient!} vaultController={props.vaultController!} />
+        </Show>
+      ),
+    }
+    return [...generated, exportPage, connectionPage, credentialsPage, vaultPage]
   })
 
   /** The active component page, or null when a generated section is showing. */

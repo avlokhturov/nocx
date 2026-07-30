@@ -12,13 +12,14 @@
 // Surfaces import createVaultState for reactive state + the two dialogs,
 // calling ensureBeforeSave to intercept the password-save flow.
 
-import { createSignal, Show, type Component, type Accessor } from 'solid-js'
+import { createSignal, Show, For, type Component, type Accessor } from 'solid-js'
 import { Dialog } from './ui/dialog'
 import { Button } from './ui/button'
 import { Stack } from './ui/stack'
 import { TextField } from './ui/text-field'
 import { CodeBlock } from './ui/code-block'
 import { IconButton } from './ui/icon-button'
+import { Badge, Section, Select, Field } from './ui'
 import { CopyIcon } from './ui/icons'
 import { showToast } from './ui/toast'
 import { RpcError } from './dispatcher'
@@ -39,10 +40,10 @@ const REASON_MESSAGES: Record<string, string> = {
 }
 
 function vaultErrorMessage(err: unknown): string {
-  if (err && typeof err === 'object' && 'reason' in err) {
-    const r = (err as { reason: string }).reason
-    if (r && typeof r === 'string' && REASON_MESSAGES[r]) {
-      return REASON_MESSAGES[r]
+  if (err instanceof RpcError && err.data && typeof err.data === 'object') {
+    const d = err.data as { reason?: string }
+    if (d.reason && REASON_MESSAGES[d.reason]) {
+      return REASON_MESSAGES[d.reason]
     }
   }
   if (err instanceof Error) return err.message
@@ -71,16 +72,20 @@ export interface VaultController {
   closeUnlock(): void
   /**
    * Runs `saveFn` and catches vault errors with dialog + retry.
-   *
-   * 1. Tries saveFn first (operation-first, not preflight).
-   * 2. On vault-uninitialized: silent setup (osKeyAvailable) or SetupDialog,
-   *    then retries saveFn exactly once.
-   * 3. On vault-sealed: UnlockDialog, then retries once.
-   * 4. On any other error: rejects (propagates to caller's catch).
-   * 5. If silent setup fails: shows a toast and resolves without saving.
-   * 6. If user cancels a dialog: resolves without saving.
    */
   saveSecretWithVault(saveFn: () => Promise<void>): Promise<void>
+  /** Seal the vault immediately. */
+  seal(): Promise<void>
+  /** Change the master passphrase using old passphrase or recovery code. */
+  changePassphrase(params: {
+    oldPassphrase?: string
+    recoveryCode?: string
+    newPassphrase: string
+  }): Promise<void>
+  /** Regenerate the recovery code. Shows once. */
+  regenerateRecovery(params: { passphrase: string }): Promise<{ recoveryCode: string }>
+  /** Set the default writable provider. */
+  setDefaultProvider(params: { provider: string }): Promise<void>
 }
 
 /** Create the vault reactive state for a surface. */
@@ -298,7 +303,32 @@ export function createVaultState(vaultClient: VaultClient): VaultController {
         },
       )
     }
+
     setShowUnlock(true)
+  }
+
+  async function seal(): Promise<void> {
+    await vaultClient.seal()
+    await refresh()
+  }
+
+  async function changePassphrase(params: {
+    oldPassphrase?: string
+    recoveryCode?: string
+    newPassphrase: string
+  }): Promise<void> {
+    await vaultClient.changePassphrase(params)
+  }
+
+  async function regenerateRecovery(params: {
+    passphrase: string
+  }): Promise<{ recoveryCode: string }> {
+    return vaultClient.regenerateRecovery(params)
+  }
+
+  async function setDefaultProvider(params: { provider: string }): Promise<void> {
+    await vaultClient.setDefaultProvider(params)
+    await refresh()
   }
 
   return {
@@ -313,6 +343,10 @@ export function createVaultState(vaultClient: VaultClient): VaultController {
     closeSetup,
     closeUnlock,
     saveSecretWithVault,
+    seal,
+    changePassphrase,
+    regenerateRecovery,
+    setDefaultProvider,
   }
 }
 
@@ -625,5 +659,456 @@ export const UnlockDialog: Component<UnlockDialogProps> = (props) => {
       {meansRow}
       {meansForm()}
     </Dialog>
+  )
+}
+
+// ── Change passphrase dialog ────────────────────────────────────────────
+
+export interface ChangePassphraseDialogProps {
+  open: boolean
+  onClose: () => void
+  vaultClient: VaultClient
+}
+
+export const ChangePassphraseDialog: Component<ChangePassphraseDialogProps> = (props) => {
+  const [mode, setMode] = createSignal<'passphrase' | 'recovery'>('passphrase')
+  const [oldPassphrase, setOldPassphrase] = createSignal('')
+  const [recoveryCode, setRecoveryCode] = createSignal('')
+  const [newPassphrase, setNewPassphrase] = createSignal('')
+  const [confirmPassphrase, setConfirmPassphrase] = createSignal('')
+  const [error, setError] = createSignal('')
+  const [changing, setChanging] = createSignal(false)
+
+  const reset = () => {
+    setMode('passphrase')
+    setOldPassphrase('')
+    setRecoveryCode('')
+    setNewPassphrase('')
+    setConfirmPassphrase('')
+    setError('')
+    setChanging(false)
+  }
+
+  const handleChange = async () => {
+    setError('')
+    const np = newPassphrase()
+    if (!np) {
+      setError('Enter a new passphrase')
+      return
+    }
+    if (np !== confirmPassphrase()) {
+      setError('Passphrases do not match')
+      return
+    }
+
+    const m = mode()
+    if (m === 'passphrase' && !oldPassphrase()) {
+      setError('Enter your current passphrase')
+      return
+    }
+    if (m === 'recovery' && !recoveryCode()) {
+      setError('Enter your recovery code')
+      return
+    }
+
+    setChanging(true)
+    try {
+      await props.vaultClient.changePassphrase(
+        m === 'passphrase'
+          ? { oldPassphrase: oldPassphrase(), newPassphrase: np }
+          : { recoveryCode: recoveryCode(), newPassphrase: np },
+      )
+      reset()
+      props.onClose()
+      showToast({ level: 'success', message: 'Passphrase changed.' })
+    } catch (e: unknown) {
+      setChanging(false)
+      setError(vaultErrorMessage(e))
+    }
+  }
+
+  return (
+    <Dialog
+      open={props.open}
+      onClose={() => {
+        reset()
+        props.onClose()
+      }}
+      title="Change vault passphrase"
+      onSubmit={() => {
+        void handleChange()
+      }}
+      footer={
+        <>
+          <Button
+            variant="primary"
+            disabled={changing()}
+            onClick={() => {
+              void handleChange()
+            }}
+          >
+            {changing() ? 'Changing…' : 'Change passphrase'}
+          </Button>
+          <Button
+            variant="default"
+            disabled={changing()}
+            onClick={() => {
+              reset()
+              props.onClose()
+            }}
+          >
+            Cancel
+          </Button>
+        </>
+      }
+    >
+      <Stack>
+        <div class="ui-vault-means-row">
+          <Button
+            variant={mode() === 'passphrase' ? 'primary' : 'default'}
+            onClick={() => {
+              setMode('passphrase')
+              setError('')
+            }}
+          >
+            I know my passphrase
+          </Button>
+          <Button
+            variant={mode() === 'recovery' ? 'primary' : 'default'}
+            onClick={() => {
+              setMode('recovery')
+              setError('')
+            }}
+          >
+            I have a recovery code
+          </Button>
+        </div>
+
+        <Show when={mode() === 'passphrase'}>
+          <TextField
+            id="vault-change-old-passphrase"
+            label="Current passphrase"
+            type="password"
+            value={oldPassphrase()}
+            onInput={(v) => {
+              setOldPassphrase(v)
+              setError('')
+            }}
+            autoFocus
+          />
+        </Show>
+        <Show when={mode() === 'recovery'}>
+          <TextField
+            id="vault-change-recovery"
+            label="Recovery code"
+            type="password"
+            value={recoveryCode()}
+            onInput={(v) => {
+              setRecoveryCode(v)
+              setError('')
+            }}
+            autoFocus
+          />
+        </Show>
+
+        <TextField
+          id="vault-change-new-passphrase"
+          label="New passphrase"
+          type="password"
+          value={newPassphrase()}
+          onInput={(v) => {
+            setNewPassphrase(v)
+            setError('')
+          }}
+        />
+        <TextField
+          id="vault-change-confirm-passphrase"
+          label="Confirm new passphrase"
+          type="password"
+          value={confirmPassphrase()}
+          onInput={(v) => {
+            setConfirmPassphrase(v)
+            setError('')
+          }}
+          error={error()}
+        />
+
+        <p class="ui-vault-desc-text">
+          Changing the passphrase requires your current passphrase or a recovery code. An OS-held
+          key alone is not sufficient — a factor that only unlocks must not be able to replace the
+          factor that recovers.
+        </p>
+      </Stack>
+    </Dialog>
+  )
+}
+
+// ── Recovery code dialog ────────────────────────────────────────────────
+
+export interface RecoveryCodeDialogProps {
+  open: boolean
+  onClose: () => void
+  vaultClient: VaultClient
+}
+
+export const RecoveryCodeDialog: Component<RecoveryCodeDialogProps> = (props) => {
+  const [passphrase, setPassphrase] = createSignal('')
+  const [recoveryCode, setRecoveryCode] = createSignal<string | null>(null)
+  const [error, setError] = createSignal('')
+  const [generating, setGenerating] = createSignal(false)
+  const [copied, setCopied] = createSignal(false)
+
+  const reset = () => {
+    setPassphrase('')
+    setRecoveryCode(null)
+    setError('')
+    setGenerating(false)
+    setCopied(false)
+  }
+
+  const handleGenerate = async () => {
+    if (!passphrase()) {
+      setError('Enter your passphrase')
+      return
+    }
+    setError('')
+    setGenerating(true)
+    try {
+      const result = await props.vaultClient.regenerateRecovery({ passphrase: passphrase() })
+      setRecoveryCode(result.recoveryCode)
+    } catch (e: unknown) {
+      setGenerating(false)
+      setError(vaultErrorMessage(e))
+    }
+  }
+
+  const handleCopy = () => {
+    const code = recoveryCode()
+    if (!code) return
+    void navigator.clipboard.writeText(code).then(
+      () => {
+        setCopied(true)
+      },
+      () => {
+        /* clipboard not available */
+      },
+    )
+  }
+
+  const handleDone = () => {
+    reset()
+    props.onClose()
+  }
+
+  return (
+    <Dialog
+      open={props.open}
+      onClose={() => {
+        reset()
+        props.onClose()
+      }}
+      title="Reissue recovery code"
+    >
+      <Show when={recoveryCode() === null}>
+        <Stack>
+          <TextField
+            id="vault-reissue-passphrase"
+            label="Current passphrase"
+            type="password"
+            value={passphrase()}
+            onInput={(v) => {
+              setPassphrase(v)
+              setError('')
+            }}
+            error={error()}
+            autoFocus
+          />
+          <Button
+            variant="primary"
+            disabled={generating()}
+            onClick={() => {
+              void handleGenerate()
+            }}
+          >
+            {generating() ? 'Generating…' : 'Generate new recovery code'}
+          </Button>
+          <Button
+            variant="default"
+            disabled={generating()}
+            onClick={() => {
+              reset()
+              props.onClose()
+            }}
+          >
+            Cancel
+          </Button>
+        </Stack>
+      </Show>
+      <Show when={recoveryCode() !== null}>
+        <Stack>
+          <p class="ui-vault-desc-text">
+            Your new recovery code is shown below. Copy it now — it will not be displayed again.
+            Keep it in a safe place.
+          </p>
+          <div class="ui-vault-recovery-row">
+            <CodeBlock>{recoveryCode() ?? ''}</CodeBlock>
+            <IconButton ariaLabel={copied() ? 'Copied' : 'Copy recovery code'} onClick={handleCopy}>
+              <CopyIcon />
+            </IconButton>
+          </div>
+          <Button variant="primary" onClick={handleDone}>
+            Done
+          </Button>
+        </Stack>
+      </Show>
+    </Dialog>
+  )
+}
+
+// ── Vault settings section ─────────────────────────────────────────────
+
+export interface VaultSectionProps {
+  vaultClient: VaultClient
+  vaultController: VaultController
+}
+
+export function VaultSection(props: VaultSectionProps) {
+  const [dialog, setDialog] = createSignal<'passphrase' | 'recovery' | null>(null)
+  const [sealing, setSealing] = createSignal(false)
+
+  const handleSeal = async () => {
+    setSealing(true)
+    try {
+      await props.vaultController.seal()
+      showToast({ level: 'success', message: 'Vault sealed.' })
+    } catch (e: unknown) {
+      showToast({ level: 'danger', message: vaultErrorMessage(e) })
+    } finally {
+      setSealing(false)
+    }
+  }
+
+  const status = () => props.vaultController.status()
+
+  const stateBadge = () => {
+    const s = status()
+    if (!s) return { label: 'Unknown', tone: 'neutral' as const }
+    switch (s.state) {
+      case 'unsealed':
+        return { label: 'Unsealed', tone: 'info' as const }
+      case 'sealed':
+        return { label: 'Sealed', tone: 'warning' as const }
+      case 'uninitialized':
+        return { label: 'Uninitialized', tone: 'neutral' as const }
+    }
+  }
+
+  const handleDefaultProvider = async (provider: string) => {
+    try {
+      await props.vaultController.setDefaultProvider({ provider })
+      showToast({ level: 'success', message: 'Default provider updated.' })
+    } catch (e: unknown) {
+      showToast({ level: 'danger', message: vaultErrorMessage(e) })
+    }
+  }
+
+  return (
+    <div>
+      <Section title="Status">
+        <Stack>
+          <Field for="vault-state" label="State" orientation="horizontal">
+            <Badge tone={stateBadge().tone}>{stateBadge().label}</Badge>
+          </Field>
+          <Field for="vault-oskey" label="OS-held key" orientation="horizontal">
+            <Show
+              when={status()?.osKeyAvailable}
+              fallback={<Badge tone="neutral">Not available</Badge>}
+            >
+              <Badge tone="info">Available</Badge>
+            </Show>
+          </Field>
+          <Show when={status() && status()!.providers.some((p) => p.writable)}>
+            <Field for="vault-default-provider" label="Default provider" orientation="horizontal">
+              <Select
+                value={status()!.defaultProvider ?? ''}
+                onChange={(v) => {
+                  void handleDefaultProvider(v)
+                }}
+                options={status()!
+                  .providers.filter((p) => p.writable)
+                  .map((p) => ({ value: p.id, label: p.id }))}
+                placeholder="— None —"
+                placeholderValue=""
+              />
+            </Field>
+          </Show>
+        </Stack>
+      </Section>
+
+      <Section title="Actions">
+        <Stack>
+          <Field for="vault-action-seal" label="Seal now" orientation="horizontal">
+            <Button
+              variant="default"
+              disabled={sealing() || status()?.state !== 'unsealed'}
+              onClick={() => {
+                void handleSeal()
+              }}
+            >
+              {sealing() ? 'Sealing…' : 'Seal now'}
+            </Button>
+          </Field>
+          <Field for="vault-action-passphrase" label="Change passphrase" orientation="horizontal">
+            <Button variant="default" onClick={() => setDialog('passphrase')}>
+              Change passphrase
+            </Button>
+          </Field>
+          <Field for="vault-action-recovery" label="Recovery code" orientation="horizontal">
+            <Button variant="default" onClick={() => setDialog('recovery')}>
+              Reissue recovery code
+            </Button>
+          </Field>
+        </Stack>
+      </Section>
+
+      <Show when={status() && status()!.providers.length > 0}>
+        <Section title="Providers">
+          <Stack>
+            <For each={status()!.providers}>
+              {(p) => (
+                <Field for={'vault-provider-' + p.id} label={p.id} orientation="horizontal">
+                  <Stack>
+                    <div>
+                      <Show when={p.writable} fallback={<Badge tone="neutral">Read-only</Badge>}>
+                        <Badge tone="info">Writable</Badge>
+                      </Show>{' '}
+                      <Show when={p.ready} fallback={<Badge tone="warning">Not ready</Badge>}>
+                        <Badge tone="info">Ready</Badge>
+                      </Show>
+                    </div>
+                    <Show when={!p.ready && p.reason}>
+                      <p class="ui-vault-desc-text">
+                        {REASON_MESSAGES[p.reason ?? ''] ?? p.reason}
+                      </p>
+                    </Show>
+                  </Stack>
+                </Field>
+              )}
+            </For>
+          </Stack>
+        </Section>
+      </Show>
+
+      <ChangePassphraseDialog
+        open={dialog() === 'passphrase'}
+        onClose={() => setDialog(null)}
+        vaultClient={props.vaultClient}
+      />
+      <RecoveryCodeDialog
+        open={dialog() === 'recovery'}
+        onClose={() => setDialog(null)}
+        vaultClient={props.vaultClient}
+      />
+    </div>
   )
 }

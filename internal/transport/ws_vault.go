@@ -17,6 +17,9 @@ type VaultLifecycle interface {
 	Setup(ctx context.Context, req vault.SetupRequest) (vault.SetupResult, error)
 	Unseal(ctx context.Context, req vault.UnsealRequest) error
 	Seal()
+	ChangePassphrase(ctx context.Context, req vault.ChangePassphraseRequest) error
+	RegenerateRecovery(ctx context.Context, req vault.RegenerateRequest) (string, error)
+	SetDefaultProvider(ctx context.Context, p vault.ProviderID) error
 }
 
 // vaultSetupParams is the wire format for vault.setup.
@@ -112,6 +115,12 @@ func (s *WSServer) handleVaultMethod(wconn *wsConn, req jsonrpcRequest) {
 		s.handleVaultUnseal(wconn, req)
 	case "vault.seal":
 		s.handleVaultSeal(wconn, req)
+	case "vault.changePassphrase":
+		s.handleVaultChangePassphrase(wconn, req)
+	case "vault.regenerateRecovery":
+		s.handleVaultRegenerateRecovery(wconn, req)
+	case "vault.setDefaultProvider":
+		s.handleVaultSetDefaultProvider(wconn, req)
 	}
 }
 
@@ -228,6 +237,94 @@ func (s *WSServer) handleVaultUnseal(wconn *wsConn, req jsonrpcRequest) {
 
 func (s *WSServer) handleVaultSeal(wconn *wsConn, req jsonrpcRequest) {
 	s.vaultLifecycle.Seal()
+	s.broadcastVaultChanged()
+	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(struct{}{})))
+}
+
+type vaultChangePassphraseParams struct {
+	OldPassphrase string `json:"oldPassphrase,omitempty"`
+	RecoveryCode  string `json:"recoveryCode,omitempty"`
+	NewPassphrase string `json:"newPassphrase"`
+}
+
+type vaultRegenerateRecoveryParams struct {
+	Passphrase string `json:"passphrase"`
+}
+
+type vaultSetDefaultProviderParams struct {
+	Provider string `json:"provider"`
+}
+
+func (s *WSServer) handleVaultChangePassphrase(wconn *wsConn, req jsonrpcRequest) {
+	var params vaultChangePassphraseParams
+	if !isJSONObject(req.Params) {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		return
+	}
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		return
+	}
+
+	vreq := vault.ChangePassphraseRequest{
+		OldPassphrase: params.OldPassphrase,
+		RecoveryCode:  params.RecoveryCode,
+		NewPassphrase: params.NewPassphrase,
+	}
+	if err := s.vaultLifecycle.ChangePassphrase(context.Background(), vreq); err != nil {
+		code := vaultErrorCode(err, -32603)
+		_ = wconn.writeJSON(newVaultError(req.ID, code, err.Error(), err))
+		return
+	}
+
+	s.broadcastVaultChanged()
+	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(struct{}{})))
+}
+
+func (s *WSServer) handleVaultRegenerateRecovery(wconn *wsConn, req jsonrpcRequest) {
+	var params vaultRegenerateRecoveryParams
+	if !isJSONObject(req.Params) {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		return
+	}
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		return
+	}
+
+	vreq := vault.RegenerateRequest{Passphrase: params.Passphrase}
+	recoveryCode, err := s.vaultLifecycle.RegenerateRecovery(context.Background(), vreq)
+	if err != nil {
+		errCode := vaultErrorCode(err, -32603)
+		_ = wconn.writeJSON(newVaultError(req.ID, errCode, err.Error(), err))
+		return
+	}
+
+	s.broadcastVaultChanged()
+	resp := struct {
+		RecoveryCode string `json:"recoveryCode"`
+	}{RecoveryCode: recoveryCode}
+	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(resp)))
+}
+
+func (s *WSServer) handleVaultSetDefaultProvider(wconn *wsConn, req jsonrpcRequest) {
+	var params vaultSetDefaultProviderParams
+	if !isJSONObject(req.Params) {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		return
+	}
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		return
+	}
+
+	provID := vault.ProviderID(params.Provider)
+	if err := s.vaultLifecycle.SetDefaultProvider(context.Background(), provID); err != nil {
+		code := vaultErrorCode(err, -32603)
+		_ = wconn.writeJSON(newVaultError(req.ID, code, err.Error(), err))
+		return
+	}
+
 	s.broadcastVaultChanged()
 	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(struct{}{})))
 }

@@ -15,12 +15,16 @@ import (
 // ── fake vault lifecycle ──────────────────────────────────────────────
 
 type fakeVaultLifecycle struct {
-	state       vault.State
-	snap        vault.Snapshot
-	setupErr    error
-	setupResult vault.SetupResult
-	unsealErr   error
-	sealCalled  bool
+	state                 vault.State
+	snap                  vault.Snapshot
+	setupErr              error
+	setupResult           vault.SetupResult
+	unsealErr             error
+	sealCalled            bool
+	changePassphraseErr   error
+	regenerateErr         error
+	regenerateCode        string
+	setDefaultProviderErr error
 }
 
 func (f *fakeVaultLifecycle) State() vault.State { return f.state }
@@ -39,6 +43,21 @@ func (f *fakeVaultLifecycle) Unseal(_ context.Context, _ vault.UnsealRequest) er
 }
 
 func (f *fakeVaultLifecycle) Seal() { f.sealCalled = true }
+
+func (f *fakeVaultLifecycle) ChangePassphrase(_ context.Context, _ vault.ChangePassphraseRequest) error {
+	return f.changePassphraseErr
+}
+
+func (f *fakeVaultLifecycle) RegenerateRecovery(_ context.Context, _ vault.RegenerateRequest) (string, error) {
+	if f.regenerateErr != nil {
+		return "", f.regenerateErr
+	}
+	return f.regenerateCode, nil
+}
+
+func (f *fakeVaultLifecycle) SetDefaultProvider(_ context.Context, _ vault.ProviderID) error {
+	return f.setDefaultProviderErr
+}
 
 func newFakeVaultLifecycle() *fakeVaultLifecycle {
 	return &fakeVaultLifecycle{
@@ -394,6 +413,125 @@ func TestVaultRPC_Seal_EmptyParams(t *testing.T) {
 	}
 }
 
+// ── vault.changePassphrase ─────────────────────────────────────────────
+
+func TestVaultRPC_ChangePassphrase_Success(t *testing.T) {
+	fake := newFakeVaultLifecycle()
+	ws, stop := newVaultWSServer(t, fake)
+	defer stop()
+
+	conn := connectWS(t, ws)
+	params := map[string]any{
+		"oldPassphrase": "sekret",
+		"newPassphrase": "newsekret",
+	}
+	resp := vaultCall(t, conn, "vault.changePassphrase", params, 1)
+
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %+v", resp.Error)
+	}
+}
+
+func TestVaultRPC_ChangePassphrase_ErrorPropagation(t *testing.T) {
+	fake := newFakeVaultLifecycle()
+	fake.changePassphraseErr = vault.ErrUnsealFailed
+	ws, stop := newVaultWSServer(t, fake)
+	defer stop()
+
+	conn := connectWS(t, ws)
+	params := map[string]any{
+		"oldPassphrase": "wrong",
+		"newPassphrase": "newsekret",
+	}
+	resp := vaultCall(t, conn, "vault.changePassphrase", params, 1)
+
+	if resp.Error == nil {
+		t.Fatal("expected error")
+	}
+	if resp.Error.Code != -32003 {
+		t.Errorf("error code = %d, want -32003", resp.Error.Code)
+	}
+}
+
+// ── vault.regenerateRecovery ──────────────────────────────────────────
+
+func TestVaultRPC_RegenerateRecovery_Success(t *testing.T) {
+	fake := newFakeVaultLifecycle()
+	fake.regenerateCode = "new-recovery-42"
+	ws, stop := newVaultWSServer(t, fake)
+	defer stop()
+
+	conn := connectWS(t, ws)
+	params := map[string]any{"passphrase": "sekret"}
+	resp := vaultCall(t, conn, "vault.regenerateRecovery", params, 1)
+
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %+v", resp.Error)
+	}
+	var result struct {
+		RecoveryCode string `json:"recoveryCode"`
+	}
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if result.RecoveryCode != "new-recovery-42" {
+		t.Errorf("recoveryCode = %q, want %q", result.RecoveryCode, "new-recovery-42")
+	}
+}
+
+func TestVaultRPC_RegenerateRecovery_ErrorPropagation(t *testing.T) {
+	fake := newFakeVaultLifecycle()
+	fake.regenerateErr = vault.ErrUnsealFailed
+	ws, stop := newVaultWSServer(t, fake)
+	defer stop()
+
+	conn := connectWS(t, ws)
+	params := map[string]any{"passphrase": "wrong"}
+	resp := vaultCall(t, conn, "vault.regenerateRecovery", params, 1)
+
+	if resp.Error == nil {
+		t.Fatal("expected error")
+	}
+	if resp.Error.Code != -32003 {
+		t.Errorf("error code = %d, want -32003", resp.Error.Code)
+	}
+}
+
+// ── vault.setDefaultProvider ───────────────────────────────────────────
+
+func TestVaultRPC_SetDefaultProvider_Success(t *testing.T) {
+	fake := newFakeVaultLifecycle()
+	ws, stop := newVaultWSServer(t, fake)
+	defer stop()
+
+	conn := connectWS(t, ws)
+	params := map[string]any{"provider": "file"}
+	resp := vaultCall(t, conn, "vault.setDefaultProvider", params, 1)
+
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %+v", resp.Error)
+	}
+}
+
+func TestVaultRPC_SetDefaultProvider_ErrorPropagation(t *testing.T) {
+	fake := newFakeVaultLifecycle()
+	pe := &vault.ProviderError{Provider: "system", Reason: vault.ReasonDenied, Err: vault.ErrProviderUnavailable}
+	fake.setDefaultProviderErr = pe
+	ws, stop := newVaultWSServer(t, fake)
+	defer stop()
+
+	conn := connectWS(t, ws)
+	params := map[string]any{"provider": "system"}
+	resp := vaultCall(t, conn, "vault.setDefaultProvider", params, 1)
+
+	if resp.Error == nil {
+		t.Fatal("expected error")
+	}
+	if resp.Error.Code != -32002 {
+		t.Errorf("error code = %d, want -32002", resp.Error.Code)
+	}
+}
+
 // ── not wired ─────────────────────────────────────────────────────────
 
 func TestVaultRPC_MethodNotFound_WhenNotWired(t *testing.T) {
@@ -405,7 +543,10 @@ func TestVaultRPC_MethodNotFound_WhenNotWired(t *testing.T) {
 	defer func() { _ = ws.Stop(ctx) }()
 
 	conn := connectWS(t, ws)
-	for _, method := range []string{"vault.status", "vault.setup", "vault.unseal", "vault.seal"} {
+	for _, method := range []string{
+		"vault.status", "vault.setup", "vault.unseal", "vault.seal",
+		"vault.changePassphrase", "vault.regenerateRecovery", "vault.setDefaultProvider",
+	} {
 		resp := vaultCall(t, conn, method, map[string]any{}, 1)
 		if resp.Error == nil {
 			t.Errorf("%s: expected error, got nil", method)

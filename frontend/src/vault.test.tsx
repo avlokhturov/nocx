@@ -1,7 +1,14 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { cleanup, render, screen, fireEvent } from '@solidjs/testing-library'
-import { SetupDialog, UnlockDialog, createVaultState } from './vault'
+import {
+  SetupDialog,
+  UnlockDialog,
+  createVaultState,
+  ChangePassphraseDialog,
+  RecoveryCodeDialog,
+  VaultSection,
+} from './vault'
 import type { VaultClient } from './vault-client'
 import { RpcError } from './dispatcher'
 
@@ -29,14 +36,35 @@ function mockClient() {
   const setup = vi.fn()
   const unseal = vi.fn()
   const seal = vi.fn()
-  const client = { status, setup, unseal, seal } as unknown as VaultClient
-  return { client, status, setup, unseal, seal }
+  const changePassphrase = vi.fn()
+  const regenerateRecovery = vi.fn()
+  const setDefaultProvider = vi.fn()
+  const client = {
+    status,
+    setup,
+    unseal,
+    seal,
+    changePassphrase,
+    regenerateRecovery,
+    setDefaultProvider,
+  } as unknown as VaultClient
+  return {
+    client,
+    status,
+    setup,
+    unseal,
+    seal,
+    changePassphrase,
+    regenerateRecovery,
+    setDefaultProvider,
+  }
 }
 
 const BASE_STATUS = {
   state: 'sealed' as const,
   osKeyAvailable: false,
   providers: [],
+  defaultProvider: null,
 }
 
 // ── createVaultState — controller behavior (no Dialog rendering) ───────
@@ -48,6 +76,7 @@ describe('createVaultState', () => {
       state: 'uninitialized',
       osKeyAvailable: true,
       providers: [],
+      defaultProvider: null,
     })
     setup.mockResolvedValue({})
 
@@ -73,6 +102,7 @@ describe('createVaultState', () => {
       state: 'uninitialized',
       osKeyAvailable: true,
       providers: [],
+      defaultProvider: null,
     })
     setup.mockRejectedValue(new Error('no-service'))
 
@@ -95,6 +125,7 @@ describe('createVaultState', () => {
       state: 'uninitialized',
       osKeyAvailable: false,
       providers: [],
+      defaultProvider: null,
     })
 
     const ctrl = createVaultState(client)
@@ -114,6 +145,7 @@ describe('createVaultState', () => {
       state: 'sealed',
       osKeyAvailable: true,
       providers: [],
+      defaultProvider: null,
     })
 
     const ctrl = createVaultState(client)
@@ -133,6 +165,7 @@ describe('createVaultState', () => {
       state: 'unsealed',
       osKeyAvailable: true,
       providers: [],
+      defaultProvider: null,
     })
 
     const ctrl = createVaultState(client)
@@ -155,6 +188,7 @@ describe('createVaultState', () => {
       state: 'unsealed',
       osKeyAvailable: false,
       providers: [],
+      defaultProvider: null,
     })
 
     const ctrl = createVaultState(client)
@@ -192,6 +226,7 @@ describe('createVaultState', () => {
       state: 'uninitialized',
       osKeyAvailable: false,
       providers: [],
+      defaultProvider: null,
     })
 
     const ctrl = createVaultState(client)
@@ -215,6 +250,7 @@ describe('createVaultState', () => {
       state: 'sealed',
       osKeyAvailable: false,
       providers: [],
+      defaultProvider: null,
     })
 
     const ctrl = createVaultState(client)
@@ -242,7 +278,12 @@ function makeRpcError(reason: string): Error {
 describe('saveSecretWithVault', () => {
   it('vault-uninitialized + no OS key: shows SetupDialog, retries save after setup', async () => {
     const { client, status, setup } = mockClient()
-    status.mockResolvedValue({ state: 'uninitialized', osKeyAvailable: false, providers: [] })
+    status.mockResolvedValue({
+      state: 'uninitialized',
+      osKeyAvailable: false,
+      providers: [],
+      defaultProvider: null,
+    })
     setup.mockResolvedValue({})
 
     const ctrl = createVaultState(client)
@@ -269,7 +310,12 @@ describe('saveSecretWithVault', () => {
 
   it('vault-uninitialized + osKeyAvailable: silent setup, no dialog, retries save', async () => {
     const { client, status, setup } = mockClient()
-    status.mockResolvedValue({ state: 'uninitialized', osKeyAvailable: true, providers: [] })
+    status.mockResolvedValue({
+      state: 'uninitialized',
+      osKeyAvailable: true,
+      providers: [],
+      defaultProvider: null,
+    })
     setup.mockResolvedValue({})
 
     const ctrl = createVaultState(client)
@@ -294,7 +340,12 @@ describe('saveSecretWithVault', () => {
 
   it('vault-sealed: shows UnlockDialog, retries after unseal', async () => {
     const { client, status } = mockClient()
-    status.mockResolvedValue({ state: 'sealed', osKeyAvailable: true, providers: [] })
+    status.mockResolvedValue({
+      state: 'sealed',
+      osKeyAvailable: true,
+      providers: [],
+      defaultProvider: null,
+    })
 
     const ctrl = createVaultState(client)
     await ctrl.refresh()
@@ -318,7 +369,12 @@ describe('saveSecretWithVault', () => {
 
   it('non-vault error: propagates to caller', async () => {
     const { client, status } = mockClient()
-    status.mockResolvedValue({ state: 'unsealed', osKeyAvailable: false, providers: [] })
+    status.mockResolvedValue({
+      state: 'unsealed',
+      osKeyAvailable: false,
+      providers: [],
+      defaultProvider: null,
+    })
 
     const ctrl = createVaultState(client)
     await ctrl.refresh()
@@ -331,7 +387,12 @@ describe('saveSecretWithVault', () => {
 
   it('silent setup failure: rejects so caller shows error', async () => {
     const { client, status, setup } = mockClient()
-    status.mockResolvedValue({ state: 'uninitialized', osKeyAvailable: true, providers: [] })
+    status.mockResolvedValue({
+      state: 'uninitialized',
+      osKeyAvailable: true,
+      providers: [],
+      defaultProvider: null,
+    })
     setup.mockRejectedValue(new Error('secret-service-unavailable'))
 
     const ctrl = createVaultState(client)
@@ -346,7 +407,12 @@ describe('saveSecretWithVault', () => {
 
   it('retry failure after unlock: rejects', async () => {
     const { client, status } = mockClient()
-    status.mockResolvedValue({ state: 'sealed', osKeyAvailable: false, providers: [] })
+    status.mockResolvedValue({
+      state: 'sealed',
+      osKeyAvailable: false,
+      providers: [],
+      defaultProvider: null,
+    })
 
     const ctrl = createVaultState(client)
     await ctrl.refresh()
@@ -368,7 +434,12 @@ describe('saveSecretWithVault', () => {
 
   it('user cancels setup dialog: resolves without saving', async () => {
     const { client, status } = mockClient()
-    status.mockResolvedValue({ state: 'uninitialized', osKeyAvailable: false, providers: [] })
+    status.mockResolvedValue({
+      state: 'uninitialized',
+      osKeyAvailable: false,
+      providers: [],
+      defaultProvider: null,
+    })
 
     const ctrl = createVaultState(client)
     await ctrl.refresh()
@@ -388,7 +459,12 @@ describe('saveSecretWithVault', () => {
 
   it('user cancels unlock dialog: resolves without saving', async () => {
     const { client, status } = mockClient()
-    status.mockResolvedValue({ state: 'sealed', osKeyAvailable: false, providers: [] })
+    status.mockResolvedValue({
+      state: 'sealed',
+      osKeyAvailable: false,
+      providers: [],
+      defaultProvider: null,
+    })
 
     const ctrl = createVaultState(client)
     await ctrl.refresh()
@@ -591,5 +667,310 @@ describe('UnlockDialog', () => {
     })
     // Dialog stays open, onUnsealed not called
     expect(onUnsealed).not.toHaveBeenCalled()
+  })
+})
+
+// ── ChangePassphraseDialog ─────────────────────────────────────────────
+
+describe('ChangePassphraseDialog', () => {
+  it('renders passphrase mode by default', () => {
+    const { client } = mockClient()
+    render(() => <ChangePassphraseDialog open={true} onClose={vi.fn()} vaultClient={client} />)
+    expect(screen.getByText('I know my passphrase')).toBeTruthy()
+    expect(screen.getByText('I have a recovery code')).toBeTruthy()
+    expect(screen.getByLabelText('Current passphrase')).toBeTruthy()
+    expect(screen.getByLabelText('New passphrase')).toBeTruthy()
+    expect(screen.getByLabelText('Confirm new passphrase')).toBeTruthy()
+  })
+
+  it('calls changePassphrase with old passphrase on submit', async () => {
+    const { client, changePassphrase } = mockClient()
+    changePassphrase.mockResolvedValue({})
+    render(() => <ChangePassphraseDialog open={true} onClose={vi.fn()} vaultClient={client} />)
+
+    fireEvent.input(screen.getByLabelText('Current passphrase'), { target: { value: 'oldpw' } })
+    fireEvent.input(screen.getByLabelText('New passphrase'), { target: { value: 'newpw' } })
+    fireEvent.input(screen.getByLabelText('Confirm new passphrase'), { target: { value: 'newpw' } })
+    fireEvent.click(screen.getByText('Change passphrase'))
+
+    await vi.waitFor(() => {
+      expect(changePassphrase).toHaveBeenCalledWith({
+        oldPassphrase: 'oldpw',
+        newPassphrase: 'newpw',
+      })
+    })
+  })
+
+  it('switches to recovery code mode', () => {
+    const { client } = mockClient()
+    render(() => <ChangePassphraseDialog open={true} onClose={vi.fn()} vaultClient={client} />)
+
+    fireEvent.click(screen.getByText('I have a recovery code'))
+    expect(() => screen.getByLabelText('Current passphrase')).toThrow()
+    expect(screen.getByLabelText('Recovery code')).toBeTruthy()
+    expect(screen.getByLabelText('New passphrase')).toBeTruthy()
+  })
+
+  it('calls changePassphrase with recovery code in recovery mode', async () => {
+    const { client, changePassphrase } = mockClient()
+    changePassphrase.mockResolvedValue({})
+    render(() => <ChangePassphraseDialog open={true} onClose={vi.fn()} vaultClient={client} />)
+
+    fireEvent.click(screen.getByText('I have a recovery code'))
+    fireEvent.input(screen.getByLabelText('Recovery code'), { target: { value: 'ABCD-1234' } })
+    fireEvent.input(screen.getByLabelText('New passphrase'), { target: { value: 'newpw' } })
+    fireEvent.input(screen.getByLabelText('Confirm new passphrase'), { target: { value: 'newpw' } })
+    fireEvent.click(screen.getByText('Change passphrase'))
+
+    await vi.waitFor(() => {
+      expect(changePassphrase).toHaveBeenCalledWith({
+        recoveryCode: 'ABCD-1234',
+        newPassphrase: 'newpw',
+      })
+    })
+  })
+
+  it('shows error when passphrases do not match', () => {
+    const { client, changePassphrase } = mockClient()
+    render(() => <ChangePassphraseDialog open={true} onClose={vi.fn()} vaultClient={client} />)
+
+    fireEvent.input(screen.getByLabelText('Current passphrase'), { target: { value: 'oldpw' } })
+    fireEvent.input(screen.getByLabelText('New passphrase'), { target: { value: 'newpw' } })
+    fireEvent.input(screen.getByLabelText('Confirm new passphrase'), {
+      target: { value: 'different' },
+    })
+    fireEvent.click(screen.getByText('Change passphrase'))
+
+    expect(screen.getByText('Passphrases do not match')).toBeTruthy()
+    expect(changePassphrase).not.toHaveBeenCalled()
+  })
+
+  it('shows error when changePassphrase rejects', async () => {
+    const { client, changePassphrase } = mockClient()
+    changePassphrase.mockRejectedValue(new RpcError('wrong', -32000, { reason: 'denied' }))
+    render(() => <ChangePassphraseDialog open={true} onClose={vi.fn()} vaultClient={client} />)
+
+    fireEvent.input(screen.getByLabelText('Current passphrase'), { target: { value: 'wrong' } })
+    fireEvent.input(screen.getByLabelText('New passphrase'), { target: { value: 'newpw' } })
+    fireEvent.input(screen.getByLabelText('Confirm new passphrase'), { target: { value: 'newpw' } })
+    fireEvent.click(screen.getByText('Change passphrase'))
+
+    await vi.waitFor(() => {
+      expect(screen.getByText('Access to the system keyring was denied.')).toBeTruthy()
+    })
+  })
+})
+
+// ── RecoveryCodeDialog ─────────────────────────────────────────────────
+
+describe('RecoveryCodeDialog', () => {
+  it('shows passphrase input first', () => {
+    const { client } = mockClient()
+    render(() => <RecoveryCodeDialog open={true} onClose={vi.fn()} vaultClient={client} />)
+    expect(screen.getByLabelText('Current passphrase')).toBeTruthy()
+    expect(screen.getByText('Generate new recovery code')).toBeTruthy()
+  })
+
+  it('calls regenerateRecovery with passphrase', async () => {
+    const { client, regenerateRecovery } = mockClient()
+    regenerateRecovery.mockResolvedValue({ recoveryCode: 'NEW-CODE-1234' })
+    const onClose = vi.fn()
+    render(() => <RecoveryCodeDialog open={true} onClose={onClose} vaultClient={client} />)
+
+    fireEvent.input(screen.getByLabelText('Current passphrase'), { target: { value: 'mypw' } })
+    fireEvent.click(screen.getByText('Generate new recovery code'))
+
+    await vi.waitFor(() => {
+      expect(regenerateRecovery).toHaveBeenCalledWith({ passphrase: 'mypw' })
+    })
+    await vi.waitFor(() => {
+      expect(screen.getByText('NEW-CODE-1234')).toBeTruthy()
+    })
+  })
+
+  it('shows error when regenerateRecovery rejects', async () => {
+    const { client, regenerateRecovery } = mockClient()
+    regenerateRecovery.mockRejectedValue(new RpcError('bad', -32000, { reason: 'denied' }))
+    render(() => <RecoveryCodeDialog open={true} onClose={vi.fn()} vaultClient={client} />)
+
+    fireEvent.input(screen.getByLabelText('Current passphrase'), { target: { value: 'wrong' } })
+    fireEvent.click(screen.getByText('Generate new recovery code'))
+
+    await vi.waitFor(() => {
+      expect(screen.getByText('Access to the system keyring was denied.')).toBeTruthy()
+    })
+  })
+
+  it('shows recovery code once, then Done returns to the passphrase screen on reopen', async () => {
+    const { client, regenerateRecovery } = mockClient()
+    regenerateRecovery.mockResolvedValue({ recoveryCode: 'SECRET-CODE' })
+    render(() => <RecoveryCodeDialog open={true} onClose={vi.fn()} vaultClient={client} />)
+
+    fireEvent.input(screen.getByLabelText('Current passphrase'), { target: { value: 'mypw' } })
+    fireEvent.click(screen.getByText('Generate new recovery code'))
+
+    await vi.waitFor(() => {
+      expect(screen.getByText('SECRET-CODE')).toBeTruthy()
+    })
+    expect(screen.getByText('Done')).toBeTruthy()
+    expect(() => screen.getByText('Generate new recovery code')).toThrow()
+  })
+})
+
+// ── VaultSection ───────────────────────────────────────────────────────
+
+describe('VaultSection', () => {
+  const UNSEALED_STATUS = {
+    state: 'unsealed' as const,
+    osKeyAvailable: true,
+    providers: [{ id: 'keychain', writable: true, ready: true }],
+    defaultProvider: 'keychain',
+  }
+  const SEALED_STATUS = {
+    state: 'sealed' as const,
+    osKeyAvailable: false,
+    providers: [{ id: 'secret-service', writable: true, ready: true }],
+    defaultProvider: null,
+  }
+  const UNINIT_STATUS = {
+    state: 'uninitialized' as const,
+    osKeyAvailable: false,
+    providers: [],
+    defaultProvider: null,
+  }
+
+  async function renderVaultSection(mockStatus: object) {
+    const { client, seal } = mockClient()
+    ;(client.status as ReturnType<typeof vi.fn>).mockResolvedValue(mockStatus)
+    const ctrl = createVaultState(client)
+    await ctrl.refresh()
+    render(() => <VaultSection vaultClient={client} vaultController={ctrl} />)
+    return { client, ctrl, seal }
+  }
+
+  it('shows state badge for unsealed', async () => {
+    await renderVaultSection(UNSEALED_STATUS)
+    expect(screen.getByText('Unsealed')).toBeTruthy()
+  })
+
+  it('shows state badge for sealed', async () => {
+    await renderVaultSection(SEALED_STATUS)
+    expect(screen.getByText('Sealed')).toBeTruthy()
+  })
+
+  it('shows state badge for uninitialized', async () => {
+    await renderVaultSection(UNINIT_STATUS)
+    expect(screen.getByText('Uninitialized')).toBeTruthy()
+  })
+
+  it('shows OS-held key availability', async () => {
+    await renderVaultSection(UNSEALED_STATUS)
+    expect(screen.getByText('Available')).toBeTruthy()
+  })
+
+  it('shows OS-held key not available', async () => {
+    await renderVaultSection(SEALED_STATUS)
+    expect(screen.getByText('Not available')).toBeTruthy()
+  })
+
+  it('seal button calls vaultController.seal', async () => {
+    const { ctrl } = await renderVaultSection(UNSEALED_STATUS)
+    const sealSpy = vi.spyOn(ctrl, 'seal').mockResolvedValue(undefined)
+
+    const allSealNow = screen.getAllByText('Seal now')
+    const sealBtn = allSealNow.find((el) => el.tagName === 'BUTTON')
+    fireEvent.click(sealBtn!)
+    await vi.waitFor(() => {
+      expect(sealSpy).toHaveBeenCalled()
+    })
+  })
+
+  it('seal button is disabled when sealed', async () => {
+    await renderVaultSection(SEALED_STATUS)
+    const allSealNow = screen.getAllByText('Seal now')
+    const sealBtn = allSealNow.find((el) => el.tagName === 'BUTTON')
+    expect(sealBtn!.getAttribute('disabled')).not.toBeNull()
+  })
+
+  it('renders provider list with badges', async () => {
+    await renderVaultSection(UNSEALED_STATUS)
+    const allKeychain = screen.getAllByText('keychain')
+    const providerLabel = allKeychain.find((el) => el.tagName === 'LABEL')
+    expect(providerLabel).toBeTruthy()
+    expect(screen.getByText('Writable')).toBeTruthy()
+    expect(screen.getByText('Ready')).toBeTruthy()
+  })
+
+  it('shows provider reason when not ready', async () => {
+    const status = {
+      state: 'unsealed' as const,
+      osKeyAvailable: true,
+      providers: [{ id: 'keychain', writable: false, ready: false, reason: 'Keychain locked' }],
+      defaultProvider: null,
+    }
+    const { client } = mockClient()
+    ;(client.status as ReturnType<typeof vi.fn>).mockResolvedValue(status)
+    const ctrl = createVaultState(client)
+    await ctrl.refresh()
+    render(() => <VaultSection vaultClient={client} vaultController={ctrl} />)
+
+    expect(screen.getByText('Keychain locked')).toBeTruthy()
+  })
+
+  it('selecting default provider calls setDefaultProvider', async () => {
+    const status = {
+      state: 'unsealed' as const,
+      osKeyAvailable: true,
+      providers: [
+        { id: 'keychain', writable: true, ready: true },
+        { id: 'secret-service', writable: true, ready: true },
+      ],
+      defaultProvider: 'keychain',
+    }
+    const { client, setDefaultProvider } = mockClient()
+    setDefaultProvider.mockResolvedValue({})
+    ;(client.status as ReturnType<typeof vi.fn>).mockResolvedValue(status)
+    const ctrl = createVaultState(client)
+    await ctrl.refresh()
+    render(() => <VaultSection vaultClient={client} vaultController={ctrl} />)
+
+    const select = screen.getByDisplayValue('keychain')
+    fireEvent.change(select, { target: { value: 'secret-service' } })
+
+    await vi.waitFor(() => {
+      expect(setDefaultProvider).toHaveBeenCalledWith({ provider: 'secret-service' })
+    })
+  })
+
+  it('refreshes status after vault.changed push', async () => {
+    const { client } = mockClient()
+    ;(client.status as ReturnType<typeof vi.fn>).mockResolvedValue(UNSEALED_STATUS)
+    const ctrl = createVaultState(client)
+    await ctrl.refresh()
+
+    // Simulate vault.changed by changing status and refreshing
+    ;(client.status as ReturnType<typeof vi.fn>).mockResolvedValue(SEALED_STATUS)
+    await ctrl.refresh()
+
+    render(() => <VaultSection vaultClient={client} vaultController={ctrl} />)
+    expect(screen.getByText('Sealed')).toBeTruthy()
+  })
+
+  it('shows provider not-ready reason for each unready provider', async () => {
+    const status = {
+      state: 'unsealed' as const,
+      osKeyAvailable: true,
+      providers: [
+        { id: 'keychain', writable: false, ready: false, reason: 'Unlock your login keychain' },
+      ],
+      defaultProvider: null,
+    }
+    const { client } = mockClient()
+    ;(client.status as ReturnType<typeof vi.fn>).mockResolvedValue(status)
+    const ctrl = createVaultState(client)
+    await ctrl.refresh()
+    render(() => <VaultSection vaultClient={client} vaultController={ctrl} />)
+
+    expect(screen.getByText('Unlock your login keychain')).toBeTruthy()
   })
 })

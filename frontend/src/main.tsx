@@ -136,7 +136,7 @@ async function main() {
     surfaceType: SURFACE_SETTINGS,
     singletonKey: SINGLETON_SETTINGS,
     factory: () => {
-      const content = new SettingsContent(profileClient, undefined, vaultController)
+      const content = new SettingsContent(profileClient, undefined, vaultController, vaultClient)
       content.onConnect = (profile) => {
         log.info('nocx: connect from Settings', { profileId: profile.id })
         // Vault preflight: if sealed, ensureBeforeSave shows UnlockDialog

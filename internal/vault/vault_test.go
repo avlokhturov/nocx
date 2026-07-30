@@ -89,6 +89,21 @@ var _ WritableProvider = (*testProvider)(nil)
 
 type panickingProvider struct{ *testProvider }
 
+// readOnlyProvider wraps a Provider to be read-only for testing. It satisfies
+// Provider but NOT WritableProvider — the Registry's type assertion fails.
+type readOnlyProvider struct {
+	id    ProviderID
+	inner Provider
+}
+
+func (r *readOnlyProvider) ID() ProviderID                    { return r.id }
+func (r *readOnlyProvider) Status(ctx context.Context) Status { return r.inner.Status(ctx) }
+func (r *readOnlyProvider) Get(ctx context.Context, id credential.SecretID) (credential.Secret, error) {
+	return r.inner.Get(ctx, id)
+}
+
+var _ Provider = (*readOnlyProvider)(nil)
+
 func (p *panickingProvider) Put(_ context.Context, _ credential.SecretID, _ credential.Secret) error {
 	panic("put panicked as designed")
 }
@@ -1027,6 +1042,44 @@ func TestSetup_SerialisesConcurrentCalls(t *testing.T) {
 	}
 }
 
+func TestSetup_RecoveryCodeRoundTrip(t *testing.T) {
+	loweredCost(t)
+	fp := newTestFileProvider(ProviderFile)
+	v, store, _ := testVault(t, fp)
+
+	ctx := context.Background()
+	result, err := v.Setup(ctx, SetupRequest{Passphrase: "sekret"})
+	if err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	if result.RecoveryCode == "" {
+		t.Fatal("expected non-empty recovery code from passphrase setup")
+	}
+
+	// Seal the vault.
+	v.Seal()
+
+	// Load it fresh and unseal with the recovery code.
+	reg, _ := NewRegistry(fp)
+	v2, err := New(store, reg, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if v2.State() != StateSealed {
+		t.Fatalf("reloaded state = %v, want sealed", v2.State())
+	}
+
+	if err = v2.Unseal(ctx, UnsealRequest{RecoveryCode: result.RecoveryCode}); err != nil {
+		t.Fatalf("Unseal with Setup recovery code: %v", err)
+	}
+}
+
+// The round trip that proves a recovery code is a recovery factor — reading a
+// stored secret back after unsealing with nothing else — lives in
+// vault_recovery_external_test.go, because it needs the real file provider.
+// The in-memory fake used here does not survive a reopen, so a test written
+// against it fails identically whether the code is correct or not.
+
 // Defect 8: Delete re-checks state and generation immediately before
 // persisting the journal and delegating. This test verifies the invariant
 // that Delete returns an error when a Seal happens (the initial state check
@@ -1217,5 +1270,514 @@ func TestExists_RejectsResultAfterSeal(t *testing.T) {
 	// After fix: Exists re-checks gen after provider returns and rejects.
 	if err == nil {
 		t.Fatal("Exists should reject result after seal")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ChangePassphrase
+// ---------------------------------------------------------------------------
+
+func TestChangePassphrase_WithOldPassphrase(t *testing.T) {
+	loweredCost(t)
+	sys := newTestProvider(ProviderSystem)
+	fp := newTestFileProvider(ProviderFile)
+	v, store, _ := testVault(t, sys, fp)
+	mustSetup(t, v, "sekret")
+
+	// Create a secret before the change, read it back after.
+	ctx := context.Background()
+	id, err := v.Create(ctx, credential.NewSecret("persist-test"))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err = v.AttachTarget(ctx, id, "test"); err != nil {
+		t.Fatalf("AttachTarget: %v", err)
+	}
+	if err = v.CommitMetadata(ctx, id); err != nil {
+		t.Fatalf("CommitMetadata: %v", err)
+	}
+
+	// Count provider Puts before the change.
+	var putCount int32
+	sys.putHook = func() { atomic.AddInt32(&putCount, 1) }
+	putCountBefore := atomic.LoadInt32(&putCount)
+
+	err = v.ChangePassphrase(ctx, ChangePassphraseRequest{
+		OldPassphrase: "sekret",
+		NewPassphrase: "newsekret",
+	})
+	if err != nil {
+		t.Fatalf("ChangePassphrase: %v", err)
+	}
+
+	// Assert: no provider writes happened during the change.
+	if atomic.LoadInt32(&putCount) != putCountBefore {
+		t.Error("ChangePassphrase wrote to a provider; should touch only the document")
+	}
+
+	// Assert: secret still resolves after passphrase change.
+	sec, err := v.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("Get after ChangePassphrase: %v", err)
+	}
+	var s string
+	_ = sec.Use(func(b []byte) error { s = string(b); return nil })
+	if s != "persist-test" {
+		t.Errorf("secret value = %q, want %q", s, "persist-test")
+	}
+
+	// Assert: reloaded vault unseals with new passphrase.
+	v.Seal()
+	reg, _ := NewRegistry(sys, fp)
+	v2, err := New(store, reg, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err = v2.Unseal(ctx, UnsealRequest{Passphrase: "newsekret"}); err != nil {
+		t.Fatalf("Unseal with new passphrase: %v", err)
+	}
+}
+
+func TestChangePassphrase_WithRecoveryCode(t *testing.T) {
+	loweredCost(t)
+	fp := newTestFileProvider(ProviderFile)
+	v, _, _ := testVault(t, fp)
+	result := mustSetup(t, v, "sekret")
+
+	ctx := context.Background()
+	code := result.RecoveryCode
+	if code == "" {
+		t.Fatal("expected non-empty recovery code from passphrase setup")
+	}
+
+	err := v.ChangePassphrase(ctx, ChangePassphraseRequest{
+		RecoveryCode:  code,
+		NewPassphrase: "recovery-changed",
+	})
+	if err != nil {
+		t.Fatalf("ChangePassphrase with recovery code: %v", err)
+	}
+
+	// Assert: old passphrase no longer works.
+	if err := v.ChangePassphrase(ctx, ChangePassphraseRequest{
+		OldPassphrase: "sekret",
+		NewPassphrase: "another",
+	}); err == nil {
+		t.Error("old passphrase should not work after recovery-code rotation")
+	}
+}
+
+func TestChangePassphrase_WrongOldPassphrase(t *testing.T) {
+	loweredCost(t)
+	sys := newTestProvider(ProviderSystem)
+	fp := newTestFileProvider(ProviderFile)
+	v, _, _ := testVault(t, sys, fp)
+	mustSetup(t, v, "sekret")
+
+	ctx := context.Background()
+	err := v.ChangePassphrase(ctx, ChangePassphraseRequest{
+		OldPassphrase: "wrong",
+		NewPassphrase: "newsekret",
+	})
+	if !errors.Is(err, ErrUnsealFailed) {
+		t.Fatalf("expected ErrUnsealFailed, got %v", err)
+	}
+}
+
+func TestChangePassphrase_WrongRecoveryCode(t *testing.T) {
+	loweredCost(t)
+	fp := newTestFileProvider(ProviderFile)
+	v, _, _ := testVault(t, fp)
+	mustSetup(t, v, "sekret")
+
+	ctx := context.Background()
+	err := v.ChangePassphrase(ctx, ChangePassphraseRequest{
+		RecoveryCode:  "invalid-code",
+		NewPassphrase: "newsekret",
+	})
+	if !errors.Is(err, ErrUnsealFailed) {
+		t.Fatalf("expected ErrUnsealFailed, got %v", err)
+	}
+}
+
+func TestChangePassphrase_NoAuthFactor(t *testing.T) {
+	loweredCost(t)
+	sys := newTestProvider(ProviderSystem)
+	fp := newTestFileProvider(ProviderFile)
+	v, _, _ := testVault(t, sys, fp)
+	mustSetup(t, v, "")
+
+	ctx := context.Background()
+	err := v.ChangePassphrase(ctx, ChangePassphraseRequest{
+		NewPassphrase: "newsekret",
+	})
+	if err == nil {
+		t.Fatal("expected error for no auth factor with OS key only")
+	}
+}
+
+func TestChangePassphrase_EmptyNewPassphrase(t *testing.T) {
+	loweredCost(t)
+	fp := newTestFileProvider(ProviderFile)
+	v, _, _ := testVault(t, fp)
+	mustSetup(t, v, "sekret")
+
+	ctx := context.Background()
+	err := v.ChangePassphrase(ctx, ChangePassphraseRequest{
+		OldPassphrase: "sekret",
+		NewPassphrase: "",
+	})
+	if err == nil {
+		t.Fatal("expected error for empty new passphrase")
+	}
+}
+
+func TestChangePassphrase_Uninitialized(t *testing.T) {
+	loweredCost(t)
+	sys := newTestProvider(ProviderSystem)
+	fp := newTestFileProvider(ProviderFile)
+	v, _, _ := testVault(t, sys, fp)
+
+	ctx := context.Background()
+	err := v.ChangePassphrase(ctx, ChangePassphraseRequest{
+		OldPassphrase: "sekret",
+		NewPassphrase: "newsekret",
+	})
+	if !errors.Is(err, ErrVaultUninitialized) {
+		t.Fatalf("expected ErrVaultUninitialized, got %v", err)
+	}
+}
+
+func TestChangePassphrase_Sealed(t *testing.T) {
+	loweredCost(t)
+	fp := newTestFileProvider(ProviderFile)
+	v, _, _ := testVault(t, fp)
+	mustSetup(t, v, "sekret")
+	v.Seal()
+
+	ctx := context.Background()
+	err := v.ChangePassphrase(ctx, ChangePassphraseRequest{
+		OldPassphrase: "sekret",
+		NewPassphrase: "newsekret",
+	})
+	if err != nil {
+		t.Fatalf("ChangePassphrase while sealed: %v", err)
+	}
+
+	// Verify new passphrase works.
+	if err := v.Unseal(ctx, UnsealRequest{Passphrase: "newsekret"}); err != nil {
+		t.Fatalf("Unseal with new passphrase after sealed change: %v", err)
+	}
+}
+
+func TestChangePassphrase_NoPassphraseEnvelope(t *testing.T) {
+	loweredCost(t)
+	sys := newTestProvider(ProviderSystem)
+	fp := newTestFileProvider(ProviderFile)
+	v, _, _ := testVault(t, sys, fp)
+	mustSetup(t, v, "") // silent setup — no passphrase envelope
+
+	ctx := context.Background()
+	err := v.ChangePassphrase(ctx, ChangePassphraseRequest{
+		OldPassphrase: "sekret",
+		NewPassphrase: "newsekret",
+	})
+	if err == nil {
+		t.Fatal("expected error when no passphrase envelope exists")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// RegenerateRecovery
+// ---------------------------------------------------------------------------
+
+func TestRegenerateRecovery_WithPassphrase(t *testing.T) {
+	loweredCost(t)
+	fp := newTestFileProvider(ProviderFile)
+	v, store, _ := testVault(t, fp)
+	mustSetup(t, v, "sekret")
+
+	ctx := context.Background()
+	code, err := v.RegenerateRecovery(ctx, RegenerateRequest{Passphrase: "sekret"})
+	if err != nil {
+		t.Fatalf("RegenerateRecovery: %v", err)
+	}
+	if code == "" {
+		t.Fatal("expected non-empty recovery code")
+	}
+	if len(code) < 10 {
+		t.Fatalf("recovery code too short: %q", code)
+	}
+
+	// Assert: the new recovery code can unseal after seal.
+	v.Seal()
+	reg, _ := NewRegistry(fp)
+	v2, err := New(store, reg, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err = v2.Unseal(ctx, UnsealRequest{RecoveryCode: code}); err != nil {
+		t.Fatalf("Unseal with new recovery code: %v", err)
+	}
+}
+
+func TestRegenerateRecovery_WrongPassphrase(t *testing.T) {
+	loweredCost(t)
+	fp := newTestFileProvider(ProviderFile)
+	v, _, _ := testVault(t, fp)
+	mustSetup(t, v, "sekret")
+
+	ctx := context.Background()
+	_, err := v.RegenerateRecovery(ctx, RegenerateRequest{Passphrase: "wrong"})
+	if !errors.Is(err, ErrUnsealFailed) {
+		t.Fatalf("expected ErrUnsealFailed, got %v", err)
+	}
+}
+
+func TestRegenerateRecovery_EmptyPassphrase(t *testing.T) {
+	loweredCost(t)
+	fp := newTestFileProvider(ProviderFile)
+	v, _, _ := testVault(t, fp)
+	mustSetup(t, v, "sekret")
+
+	ctx := context.Background()
+	_, err := v.RegenerateRecovery(ctx, RegenerateRequest{Passphrase: ""})
+	if err == nil {
+		t.Fatal("expected error for empty passphrase")
+	}
+}
+
+func TestRegenerateRecovery_NoPassphraseEnvelope(t *testing.T) {
+	loweredCost(t)
+	sys := newTestProvider(ProviderSystem)
+	fp := newTestFileProvider(ProviderFile)
+	v, _, _ := testVault(t, sys, fp)
+	mustSetup(t, v, "") // silent setup — no passphrase envelope
+
+	ctx := context.Background()
+	_, err := v.RegenerateRecovery(ctx, RegenerateRequest{Passphrase: "sekret"})
+	if err == nil {
+		t.Fatal("expected error when no passphrase envelope exists")
+	}
+}
+
+func TestRegenerateRecovery_Uninitialized(t *testing.T) {
+	loweredCost(t)
+	sys := newTestProvider(ProviderSystem)
+	fp := newTestFileProvider(ProviderFile)
+	v, _, _ := testVault(t, sys, fp)
+
+	ctx := context.Background()
+	_, err := v.RegenerateRecovery(ctx, RegenerateRequest{Passphrase: "sekret"})
+	if !errors.Is(err, ErrVaultUninitialized) {
+		t.Fatalf("expected ErrVaultUninitialized, got %v", err)
+	}
+}
+
+func TestRegenerateRecovery_Sealed(t *testing.T) {
+	loweredCost(t)
+	fp := newTestFileProvider(ProviderFile)
+	v, _, _ := testVault(t, fp)
+	mustSetup(t, v, "sekret")
+	v.Seal()
+
+	ctx := context.Background()
+	code, err := v.RegenerateRecovery(ctx, RegenerateRequest{Passphrase: "sekret"})
+	if err != nil {
+		t.Fatalf("RegenerateRecovery while sealed: %v", err)
+	}
+	if code == "" {
+		t.Fatal("expected non-empty recovery code")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// SetDefaultProvider
+// ---------------------------------------------------------------------------
+
+func TestSetDefaultProvider_Valid(t *testing.T) {
+	loweredCost(t)
+	sys := newTestProvider(ProviderSystem)
+	fp := newTestFileProvider(ProviderFile)
+	v, _, _ := testVault(t, sys, fp)
+	mustSetup(t, v, "")
+
+	ctx := context.Background()
+	if err := v.SetDefaultProvider(ctx, ProviderFile); err != nil {
+		t.Fatalf("SetDefaultProvider: %v", err)
+	}
+	if v.doc.DefaultProvider != ProviderFile {
+		t.Errorf("DefaultProvider = %q, want %q", v.doc.DefaultProvider, ProviderFile)
+	}
+}
+
+func TestSetDefaultProvider_Unregistered(t *testing.T) {
+	loweredCost(t)
+	sys := newTestProvider(ProviderSystem)
+	fp := newTestFileProvider(ProviderFile)
+	v, _, _ := testVault(t, sys, fp)
+	mustSetup(t, v, "")
+
+	ctx := context.Background()
+	err := v.SetDefaultProvider(ctx, ProviderID("nonexistent"))
+	if err == nil {
+		t.Fatal("expected error for unregistered provider")
+	}
+
+	var pe *ProviderError
+	if !errors.As(err, &pe) {
+		t.Fatalf("expected *ProviderError, got %T: %v", err, err)
+	}
+	if pe.Reason != ReasonUnknownProvider {
+		t.Errorf("reason = %q, want %q", pe.Reason, ReasonUnknownProvider)
+	}
+}
+
+func TestSetDefaultProvider_NonWritable(t *testing.T) {
+	loweredCost(t)
+	ro := &readOnlyProvider{id: ProviderSystem, inner: newTestProvider(ProviderSystem)}
+	v, _, _ := testVault(t, ro)
+	mustSetup(t, v, "")
+
+	ctx := context.Background()
+	err := v.SetDefaultProvider(ctx, ProviderSystem)
+	if err == nil {
+		t.Fatal("expected error for non-writable provider")
+	}
+
+	var pe *ProviderError
+	if !errors.As(err, &pe) {
+		t.Fatalf("expected *ProviderError, got %T: %v", err, err)
+	}
+	if pe.Reason != ReasonDenied {
+		t.Errorf("reason = %q, want %q", pe.Reason, ReasonDenied)
+	}
+}
+
+func TestSetDefaultProvider_Uninitialized(t *testing.T) {
+	loweredCost(t)
+	sys := newTestProvider(ProviderSystem)
+	fp := newTestFileProvider(ProviderFile)
+	v, _, _ := testVault(t, sys, fp)
+
+	ctx := context.Background()
+	err := v.SetDefaultProvider(ctx, ProviderFile)
+	if !errors.Is(err, ErrVaultUninitialized) {
+		t.Fatalf("expected ErrVaultUninitialized, got %v", err)
+	}
+}
+
+func TestSetDefaultProvider_Sealed(t *testing.T) {
+	loweredCost(t)
+	sys := newTestProvider(ProviderSystem)
+	fp := newTestFileProvider(ProviderFile)
+	v, _, _ := testVault(t, sys, fp)
+	mustSetup(t, v, "")
+	v.Seal()
+
+	ctx := context.Background()
+	if err := v.SetDefaultProvider(ctx, ProviderFile); err != nil {
+		t.Fatalf("SetDefaultProvider while sealed: %v", err)
+	}
+	if v.doc.DefaultProvider != ProviderFile {
+		t.Errorf("DefaultProvider = %q, want %q", v.doc.DefaultProvider, ProviderFile)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Failure-path tests
+// ---------------------------------------------------------------------------
+
+func TestChangePassphrase_SaveFails(t *testing.T) {
+	loweredCost(t)
+	fp := newTestFileProvider(ProviderFile)
+	v, docStore, _ := testVault(t, fp)
+	mustSetup(t, v, "sekret")
+
+	// Replace the store with a failing one.
+	v.mu.Lock()
+	v.store = &failingDocStore{failOnWrite: true}
+	v.mu.Unlock()
+
+	ctx := context.Background()
+	err := v.ChangePassphrase(ctx, ChangePassphraseRequest{
+		OldPassphrase: "sekret",
+		NewPassphrase: "newsekret",
+	})
+	if err == nil {
+		t.Fatal("expected error when document save fails")
+	}
+	if !strings.Contains(err.Error(), "save document") {
+		t.Errorf("error = %q, want substring 'save document'", err.Error())
+	}
+
+	// Restore real store so deferred cleanup works and rollback check can save.
+	v.mu.Lock()
+	v.store = docStore
+	v.mu.Unlock()
+
+	// Assert: old passphrase envelope was rolled back.
+	if err := v.ChangePassphrase(ctx, ChangePassphraseRequest{
+		OldPassphrase: "sekret",
+		NewPassphrase: "newsekret",
+	}); err != nil {
+		t.Fatalf("old passphrase should still work after rollback: %v", err)
+	}
+}
+
+func TestRegenerateRecovery_SaveFails(t *testing.T) {
+	loweredCost(t)
+	fp := newTestFileProvider(ProviderFile)
+	v, docStore, _ := testVault(t, fp)
+	mustSetup(t, v, "sekret")
+
+	// Replace the store with a failing one.
+	v.mu.Lock()
+	v.store = &failingDocStore{failOnWrite: true}
+	v.mu.Unlock()
+
+	ctx := context.Background()
+	_, err := v.RegenerateRecovery(ctx, RegenerateRequest{Passphrase: "sekret"})
+	if err == nil {
+		t.Fatal("expected error when document save fails")
+	}
+	if !strings.Contains(err.Error(), "save document") {
+		t.Errorf("error = %q, want substring 'save document'", err.Error())
+	}
+
+	// Restore real store so deferred cleanup works.
+	v.mu.Lock()
+	v.store = docStore
+	v.mu.Unlock()
+}
+
+func TestSetDefaultProvider_SaveFails(t *testing.T) {
+	loweredCost(t)
+	sys := newTestProvider(ProviderSystem)
+	fp := newTestFileProvider(ProviderFile)
+	v, docStore, _ := testVault(t, sys, fp)
+	mustSetup(t, v, "")
+
+	// Replace the store with a failing one.
+	v.mu.Lock()
+	v.store = &failingDocStore{failOnWrite: true}
+	v.mu.Unlock()
+
+	ctx := context.Background()
+	err := v.SetDefaultProvider(ctx, ProviderFile)
+	if err == nil {
+		t.Fatal("expected error when document save fails")
+	}
+	if !strings.Contains(err.Error(), "save document") {
+		t.Errorf("error = %q, want substring 'save document'", err.Error())
+	}
+	// Restore real store so deferred cleanup works.
+	v.mu.Lock()
+	v.store = docStore
+	v.mu.Unlock()
+
+	// Assert: DefaultProvider was rolled back to original value.
+	if v.doc.DefaultProvider != ProviderSystem {
+		t.Errorf("DefaultProvider = %q, want %q (original)", v.doc.DefaultProvider, ProviderSystem)
 	}
 }

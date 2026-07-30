@@ -465,10 +465,10 @@ test.describe('Vault — with keyring, silent setup', () => {
         .getByRole('radio', { name: 'Password' })
         .click()
 
-      await page
-        .locator('#profile-password-action')
-        .getByRole('button', { name: /Set Password/i })
-        .click()
+      // Same locator as cases 1 and 2. `profile-password-action` is a Field's
+      // `for=` — a label target, not an element id — so scoping to it matched
+      // nothing and this case timed out looking for a button that was on screen.
+      await page.getByRole('button', { name: /Set Password/i }).click()
       const pwInput = page.locator('[role="dialog"] input[type="password"]')
       await expect(pwInput).toBeVisible({ timeout: 3000 })
       await pwInput.fill('keyring-password-789')

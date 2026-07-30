@@ -236,6 +236,7 @@ describe('SettingsContent', () => {
       'Export / Backup / Import',
       'Connections',
       'Credentials',
+      'Vault',
     ])
   })
 
