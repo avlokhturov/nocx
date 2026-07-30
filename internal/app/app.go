@@ -34,6 +34,11 @@ type App struct {
 	Updater          update.Updater
 	Profiles         profile.ProfileRepository
 	Credentials      credential.SecretStore
+
+	// vaultCloser releases the vault's background worker and seals it at
+	// shutdown. Held as a minimal interface rather than *vault.Vault so the
+	// composition root keeps depending on behaviour instead of a type.
+	vaultCloser interface{ Close() }
 }
 
 // Log logs a message from the frontend.
@@ -167,6 +172,7 @@ func New(opts ...Option) (*App, error) {
 		ShellIntegration: shint,
 		Profiles:         profileStore,
 		Credentials:      v,
+		vaultCloser:      v,
 	}
 
 	logger.Info("application initialized")
@@ -200,6 +206,12 @@ func (a *App) Shutdown(ctx context.Context) {
 	a.Logger.Info("shutting down application")
 	if err := a.Transport.Stop(ctx); err != nil {
 		a.Logger.Error("transport shutdown error", "error", err)
+	}
+	// After the transport, so nothing is still asking the vault for secrets.
+	// This seals it as well as stopping its timer: leaving the root key in a
+	// live heap on the way out would undo the reason the seal exists.
+	if a.vaultCloser != nil {
+		a.vaultCloser.Close()
 	}
 	a.Logger.Info("application stopped")
 }

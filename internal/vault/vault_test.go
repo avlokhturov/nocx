@@ -263,6 +263,7 @@ func testVault(t *testing.T, providers ...Provider) (*Vault, storage.DocumentSto
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	t.Cleanup(v.Close)
 	return v, store, capH
 }
 

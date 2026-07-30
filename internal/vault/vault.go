@@ -71,7 +71,9 @@ type Vault struct {
 	logger       *slog.Logger
 	initializing bool // guards concurrent Setup (defect 7)
 
-	autoSealWake       chan struct{}           // buffered(1), wakes the auto-seal goroutine
+	autoSealWake       chan struct{} // buffered(1), wakes the auto-seal goroutine
+	autoSealQuit       chan struct{} // closed by Close to stop the goroutine
+	closeOnce          sync.Once
 	autoSealEpoch      uint64                  // incremented on each Activity/SetAutoSeal
 	autoSealDurationFn func(int) time.Duration // minutes→duration; overridden by tests
 }
@@ -91,6 +93,7 @@ func New(docs storage.DocumentStore, reg *Registry, logger *slog.Logger) (*Vault
 		doc:                doc,
 		logger:             logger,
 		autoSealWake:       make(chan struct{}, 1),
+		autoSealQuit:       make(chan struct{}),
 		autoSealDurationFn: defaultAutoSealDuration,
 	}
 	if found {
@@ -655,8 +658,24 @@ func (v *Vault) wakeAutoSeal() {
 	}
 }
 
+// Close stops the auto-seal goroutine and seals the vault.
+//
+// It is safe to call more than once and safe to call on a vault that was never
+// unsealed. Owning the goroutine's lifetime is the point: without it every
+// Vault leaks one for the life of the process, which is invisible with the one
+// vault an app builds and is dozens in a test binary, each holding its Vault
+// alive. Sealing on the way out is not decoration either — Close is what runs
+// at shutdown, and leaving the root key in a live heap afterwards would undo
+// the reason the seal lifecycle exists.
+func (v *Vault) Close() {
+	v.closeOnce.Do(func() {
+		close(v.autoSealQuit)
+	})
+	v.Seal()
+}
+
 // autoSealLoop is the background goroutine that manages the auto-seal timer.
-// It runs for the lifetime of the Vault.
+// It runs until Close.
 //
 // On each wake event it re-reads vault state under the lock and arms or stops
 // the timer. When the timer fires it checks whether the epoch and generation
@@ -669,6 +688,12 @@ func (v *Vault) autoSealLoop() {
 
 	for {
 		select {
+		case <-v.autoSealQuit:
+			if t != nil {
+				t.Stop()
+			}
+			return
+
 		case <-v.autoSealWake:
 			if t != nil {
 				t.Stop()
