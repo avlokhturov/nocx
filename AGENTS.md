@@ -108,6 +108,79 @@ The existing rule below — _"Coverage proves a unit works. It says nothing abou
 product uses it"_ — is the same lesson one level down, learned when the vault's 26 tested
 functions turned out to be unreachable. This one is its sibling: **reachable is not usable.**
 
+### More tests will not save you. These three habits will
+
+The rule above is about tests that miss a feature. This one is about tests that miss a **defect**
+in the feature they cover, which is a different failure and is not fixed by writing more of them.
+
+Measured on 2026-07-30, on `internal/vault/vault.go`: eighteen tests, `go vet` clean,
+`golangci-lint` clean, `go test -race` green. An adversarial read against the spec then found ten
+correctness defects, two of them release-blocking — a `Setup` that returns four times while
+holding its mutex, deadlocking every later operation, and a `Create` that deletes the journal
+record it had just written, reopening precisely the crash gap the journal exists to close. Every
+one of those survived every gate. Adding a nineteenth test of the same kind would have changed
+nothing.
+
+**1. Ask what the failure paths do, not only what the happy path does.**
+
+Of those eighteen tests, none made a dependency return an error. All four deadlocking returns in
+`Setup` had zero coverage. The metric that matters is not how many tests exist but how many
+**dependency-failure paths** are exercised: for every external call your code makes, there is a
+test where that call fails. It is mechanical, it is cheap, and it would have caught five of the
+ten defects on its own.
+
+For a procedure with several steps that touches more than one store, go further and enumerate the
+partial failures: step 3 of 5 fails — what is now true on disk, in the OS keychain, and in memory,
+and how does the next start recover? "It returns an error" is not an answer.
+
+**2. State invariants as intervals, not as moments.**
+
+The journal defect was specified into existence. The acceptance criterion read: _"`Create` writes
+`PhasePrepared` **before** calling the provider — prove it with a `Put` that panics."_ The worker
+implemented exactly that, and the test passes. But the property that matters is not a moment, it
+is a span: the record must exist **from before the write until metadata references the secret**. A
+criterion that names only the start of the interval buys a test that guards only the start.
+
+So write invariants with both ends: what event makes this true, and what event is allowed to end
+it. If you cannot name the closing event, you do not yet understand the invariant.
+
+**3. Do not let the author of the code be the only author of its tests.**
+
+A test written by the implementer, in the same pass, encodes the implementer's model of the
+problem — including the parts that are wrong. The worker believed clearing the journal on success
+was correct, so the test asserts that it is cleared. Nothing inside that loop can discover the
+belief is mistaken; the code and the test agree, and they are wrong together.
+
+Two ways out, in increasing cost. Cheapest and almost always worth it: **write the acceptance
+criteria as assertions rather than prose**, in the task itself, so there is nothing left to
+interpret — `after Create the journal holds a PhaseSecretWritten entry for the id; after Commit it
+does not`. Expensive, and reserved for code where a defect is costly — the vault, the updater, the
+transport: **have someone who did not write the implementation write the tests from the spec**, or
+have an independent reader check the code against the spec afterwards. That second reading is what
+found eight of the ten defects above, and it cost one round trip.
+
+**4. Before accepting any new symbol, ask who calls it.** One `grep`, every time.
+
+This is not a new rule — the reachability checks two sections down have always said it. It is here
+because knowing the check and running it are different things, and on the same day as the defects
+above, the same reviewer skipped it twice. Once caught, once not:
+
+- `frontend/src/vault.tsx` — 18 passing tests, imported by nothing. Found, because someone thought
+  to grep for the import.
+- `internal/vault/system/SecretServiceAvailable` — written to guard a keyring integration test,
+  compiled on every platform, given a non-Linux stub, accepted. Called by nothing. The CI job that
+  exists to run that test stands up a real Secret Service, goes green, and exercises the keyring in
+  zero tests. Nobody grepped.
+
+Both were reviewed carefully. Careful is not the same as systematic, which is why this is a listed
+habit and not advice.
+
+Note what this section is not. Mutation testing (`nocx-u4b`) answers a narrower question — does a
+test assert on the line it executes — and it would have flagged the weak assertions here. It cannot
+find the deadlock or the lifecycle races, because those are _missing_ code and thread
+interleavings, and mutation operators only delete and replace what is already written. It is a
+complement to this section, not a substitute for it.
+
 ### Before you fix anything: find out whether it is already decided or already filed
 
 A bug report is a symptom, not a mandate to start editing. Four checks, in this order,

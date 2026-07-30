@@ -72,6 +72,13 @@ func Reconcile(ctx context.Context, doc *Document, reg *Registry) []JournalEntry
 		if entry.Op == "" {
 			continue // already cleared
 		}
+		// Validate Op is a known operation (defect 10).
+		switch entry.Op {
+		case "create", "delete", "rotate":
+		default:
+			blocked = append(blocked, *entry)
+			continue
+		}
 
 		providerID, err := parseID(entry.NewID)
 		if err != nil {
@@ -100,10 +107,13 @@ func Reconcile(ctx context.Context, doc *Document, reg *Registry) []JournalEntry
 					continue
 				}
 				*entry = JournalEntry{}
+			} else {
+				// Non-empty target but phase not yet repointed: metadata was
+				// changed atomically but the journal was not updated before the
+				// crash. Retain for investigation — do not assume forward or back
+				// (defect 10).
+				blocked = append(blocked, *entry)
 			}
-			// Non-empty target but phase not yet repointed: metadata was
-			// changed atomically but the journal was not updated before the
-			// crash. Retain for investigation — do not assume forward or back.
 
 		case PhaseMetadataRepointed:
 			// Verify the new secret is accessible.
@@ -130,6 +140,10 @@ func Reconcile(ctx context.Context, doc *Document, reg *Registry) []JournalEntry
 				}
 			}
 			*entry = JournalEntry{}
+
+		default:
+			// Unknown phase — report (defect 10).
+			blocked = append(blocked, *entry)
 		}
 	}
 

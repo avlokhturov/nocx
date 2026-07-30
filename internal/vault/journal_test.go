@@ -431,7 +431,8 @@ func TestReconcile_Idempotent(t *testing.T) {
 }
 
 // TestReconcile_NonEmptyTargetPrepared asserts that an entry in PhasePrepared
-// with a non-empty Target is NOT cleared — it is retained for investigation.
+// with a non-empty Target is retained for investigation and reported as
+// blocked (defect 10: previously it was silently retained).
 func TestReconcile_NonEmptyTargetPrepared(t *testing.T) {
 	ctx := context.Background()
 	fake := vaulttest.NewFake()
@@ -456,8 +457,8 @@ func TestReconcile_NonEmptyTargetPrepared(t *testing.T) {
 	if _, err := fake.Get(ctx, surpriseID); err != nil {
 		t.Error("secret should not have been deleted when target is set but phase is Prepared")
 	}
-	if len(blocked) != 0 {
-		t.Fatalf("expected 0 blocked, got %d", len(blocked))
+	if len(blocked) != 1 {
+		t.Fatalf("expected 1 blocked (retained for investigation), got %d", len(blocked))
 	}
 }
 

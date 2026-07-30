@@ -1,0 +1,1221 @@
+package vault
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"os"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/shady2k/nocx/internal/credential"
+	"github.com/shady2k/nocx/internal/storage"
+)
+
+// ---------------------------------------------------------------------------
+// In-memory test providers
+// ---------------------------------------------------------------------------
+
+type testProvider struct {
+	id      ProviderID
+	mu      sync.Mutex
+	data    map[credential.SecretID]credential.Secret
+	fail    error
+	delay   time.Duration
+	putHook func() // fires on each Put
+	getHook func() // fires on each Get
+}
+
+func newTestProvider(id ProviderID) *testProvider {
+	return &testProvider{id: id, data: make(map[credential.SecretID]credential.Secret)}
+}
+
+func (p *testProvider) ID() ProviderID                  { return p.id }
+func (p *testProvider) Status(_ context.Context) Status { return Status{Ready: true} }
+
+func (p *testProvider) Get(_ context.Context, id credential.SecretID) (credential.Secret, error) {
+	if p.getHook != nil {
+		p.getHook()
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.fail != nil {
+		return credential.Secret{}, p.fail
+	}
+	s, ok := p.data[id]
+	if !ok {
+		return credential.Secret{}, ErrSecretNotFound
+	}
+	return s, nil
+}
+
+func (p *testProvider) Put(_ context.Context, id credential.SecretID, s credential.Secret) error {
+	if p.delay > 0 {
+		time.Sleep(p.delay)
+	}
+	if p.putHook != nil {
+		p.putHook()
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.fail != nil {
+		return p.fail
+	}
+	var val []byte
+	_ = s.Use(func(b []byte) error { val = make([]byte, len(b)); copy(val, b); return nil })
+	p.data[id] = credential.NewSecretBytes(val)
+	return nil
+}
+
+func (p *testProvider) Delete(_ context.Context, id credential.SecretID) error {
+	if p.delay > 0 {
+		time.Sleep(p.delay)
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.fail != nil {
+		return p.fail
+	}
+	delete(p.data, id)
+	return nil
+}
+
+var _ WritableProvider = (*testProvider)(nil)
+
+type panickingProvider struct{ *testProvider }
+
+func (p *panickingProvider) Put(_ context.Context, _ credential.SecretID, _ credential.Secret) error {
+	panic("put panicked as designed")
+}
+
+type testFileProvider struct {
+	*testProvider
+	unlocked    atomic.Bool
+	instanceID  string
+	dataKeyGen  bool
+	dataKeyFail error  // injected NewDataKey failure
+	unlockHook  func() // fires on each Unlock (blocks for race tests)
+}
+
+func newTestFileProvider(id ProviderID) *testFileProvider {
+	return &testFileProvider{testProvider: newTestProvider(id)}
+}
+
+func (p *testFileProvider) SetInstanceID(id string) { p.instanceID = id }
+func (p *testFileProvider) NewDataKey() ([]byte, error) {
+	if p.dataKeyFail != nil {
+		return nil, p.dataKeyFail
+	}
+	p.dataKeyGen = true
+	return make([]byte, 32), nil
+}
+
+func (p *testFileProvider) Unlock(_ []byte) error {
+	if p.unlockHook != nil {
+		p.unlockHook()
+	}
+	p.unlocked.Store(true)
+	return nil
+}
+func (p *testFileProvider) Lock() { p.unlocked.Store(false) }
+
+var (
+	_ unlocker       = (*testFileProvider)(nil)
+	_ locker         = (*testFileProvider)(nil)
+	_ dataKeyCreator = (*testFileProvider)(nil)
+)
+
+// ---------------------------------------------------------------------------
+// Log capture
+// ---------------------------------------------------------------------------
+
+type captureHandler struct {
+	mu     sync.Mutex
+	attrs  []slog.Attr
+	msgs   []string // rendered log text
+	parent slog.Handler
+}
+
+func newCaptureHandler(parent slog.Handler) *captureHandler {
+	return &captureHandler{parent: parent}
+}
+
+func (h *captureHandler) Enabled(_ context.Context, l slog.Level) bool {
+	return h.parent.Enabled(context.TODO(), l)
+}
+
+func (h *captureHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	// Build rendered text from message + attrs.
+	var buf bytes.Buffer
+	buf.WriteString(r.Message)
+	buf.WriteByte(' ')
+	r.Attrs(func(a slog.Attr) bool {
+		h.attrs = append(h.attrs, a)
+		buf.WriteString(a.Key)
+		buf.WriteByte('=')
+		buf.WriteString(a.Value.String())
+		buf.WriteByte(' ')
+		return true
+	})
+	h.msgs = append(h.msgs, buf.String())
+	h.mu.Unlock()
+	_ = h.parent.Handle(context.TODO(), r)
+	return nil
+}
+
+func (h *captureHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return &captureHandler{parent: h.parent.WithAttrs(attrs)}
+}
+
+func (h *captureHandler) WithGroup(name string) slog.Handler {
+	return &captureHandler{parent: h.parent.WithGroup(name)}
+}
+
+func (h *captureHandler) containsPlaintext(s string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, a := range h.attrs {
+		if a.Value.Kind() == slog.KindString && a.Value.String() == s {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *captureHandler) containsPlaintextRendered(s string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, m := range h.msgs {
+		if strings.Contains(m, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// ---------------------------------------------------------------------------
+// Failing document store for test injection
+// ---------------------------------------------------------------------------
+
+type failingDocStore struct {
+	storage.DocumentStore
+	mu          sync.Mutex
+	failOnWrite bool
+}
+
+func (s *failingDocStore) Write(name string, doc any) error {
+	s.mu.Lock()
+	fail := s.failOnWrite
+	s.mu.Unlock()
+	if fail {
+		return fmt.Errorf("injected write failure")
+	}
+	return s.DocumentStore.Write(name, doc)
+}
+
+// ---------------------------------------------------------------------------
+// Test helpers
+// ---------------------------------------------------------------------------
+
+func testVault(t *testing.T, providers ...Provider) (*Vault, storage.DocumentStore, *captureHandler) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	store := storage.NewDocumentStore(tmpDir)
+	reg, err := NewRegistry(providers...)
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	capH := newCaptureHandler(logger.Handler())
+	logger = slog.New(capH)
+	v, err := New(store, reg, logger)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return v, store, capH
+}
+
+func mustSetup(t *testing.T, v *Vault, passphrase string) SetupResult {
+	t.Helper()
+	result, err := v.Setup(context.Background(), SetupRequest{Passphrase: passphrase})
+	if err != nil {
+		t.Fatalf("Setup(%q): %v", passphrase, err)
+	}
+	return result
+}
+
+// ---------------------------------------------------------------------------
+// Behaviour 1: Silent setup where the probe succeeds
+// ---------------------------------------------------------------------------
+
+func TestSetup_Silent(t *testing.T) {
+	loweredCost(t)
+	sys := newTestProvider(ProviderSystem)
+	fp := newTestFileProvider(ProviderFile)
+	v, _, _ := testVault(t, sys, fp)
+	result := mustSetup(t, v, "")
+	if result.RecoveryCode != "" {
+		t.Fatalf("silent setup returned recovery code %q, want empty", result.RecoveryCode)
+	}
+	if v.State() != StateUnsealed {
+		t.Fatalf("state = %v, want %s", v.State(), StateUnsealed)
+	}
+	oskID := osKeyID(v.doc.Instance)
+	sec, err := sys.Get(context.Background(), oskID)
+	if err != nil {
+		t.Fatalf("OS key not found: %v", err)
+	}
+	if sec.IsEmpty() {
+		t.Fatal("OS key is empty")
+	}
+}
+
+func TestSetup_WithPassphrase(t *testing.T) {
+	loweredCost(t)
+	fp := newTestFileProvider(ProviderFile)
+	v, _, _ := testVault(t, fp)
+	result := mustSetup(t, v, "hunter2")
+	if result.RecoveryCode == "" {
+		t.Fatal("passphrase setup should return a recovery code")
+	}
+	if v.State() != StateUnsealed {
+		t.Fatalf("state = %v, want %s", v.State(), StateUnsealed)
+	}
+}
+
+func TestSetup_EmptyPassphraseNoSystemProvider(t *testing.T) {
+	loweredCost(t)
+	fp := newTestFileProvider(ProviderFile)
+	v, _, _ := testVault(t, fp)
+	_, err := v.Setup(context.Background(), SetupRequest{})
+	if err == nil {
+		t.Fatal("silent setup without system provider should fail")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Behaviour 2: Document fields after setup
+// ---------------------------------------------------------------------------
+
+func TestSetup_SilentDocumentFields(t *testing.T) {
+	loweredCost(t)
+	sys := newTestProvider(ProviderSystem)
+	fp := newTestFileProvider(ProviderFile)
+	v, store, _ := testVault(t, sys, fp)
+	mustSetup(t, v, "")
+	var doc Document
+	found, err := store.Read("vault.json", &doc)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if !found {
+		t.Fatal("document not found")
+	}
+	if doc.Passphrase != nil {
+		t.Fatal("Passphrase should be nil after silent setup")
+	}
+	if doc.Recovery != nil {
+		t.Fatal("Recovery should be nil after silent setup")
+	}
+	if !doc.HasOSKey {
+		t.Fatal("HasOSKey should be true after silent setup")
+	}
+}
+
+func TestSetup_PassphraseDocumentFields(t *testing.T) {
+	loweredCost(t)
+	fp := newTestFileProvider(ProviderFile)
+	v, store, _ := testVault(t, fp)
+	mustSetup(t, v, "hunter2")
+	var doc Document
+	found, err := store.Read("vault.json", &doc)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if !found {
+		t.Fatal("document not found")
+	}
+	if doc.Passphrase == nil {
+		t.Fatal("Passphrase should not be nil after passphrase setup")
+	}
+	if doc.Recovery == nil {
+		t.Fatal("Recovery should not be nil after passphrase setup")
+	}
+	if doc.HasOSKey {
+		t.Fatal("HasOSKey should be false after passphrase setup")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Behaviour 3: One owner — fifty concurrent Creates
+// ---------------------------------------------------------------------------
+
+func TestCreate_Concurrent(t *testing.T) {
+	loweredCost(t)
+	sys := newTestProvider(ProviderSystem)
+	fp := newTestFileProvider(ProviderFile)
+	v, _, _ := testVault(t, sys, fp)
+	mustSetup(t, v, "")
+
+	ctx := context.Background()
+	const n = 50
+	type res struct {
+		id  credential.SecretID
+		err error
+	}
+	ch := make(chan res, n)
+
+	var wg sync.WaitGroup
+	for range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			id, err := v.Create(ctx, credential.NewSecret("concurrent-value"))
+			ch <- res{id, err}
+		}()
+	}
+	wg.Wait()
+	close(ch)
+
+	ids := make([]credential.SecretID, 0, n)
+	for r := range ch {
+		if r.err != nil {
+			t.Fatalf("concurrent Create: %v", r.err)
+		}
+		ids = append(ids, r.id)
+	}
+
+	for _, id := range ids {
+		sec, err := v.Get(ctx, id)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		var s string
+		_ = sec.Use(func(b []byte) error { s = string(b); return nil })
+		if s != "concurrent-value" {
+			t.Fatalf("value = %q, want %q", s, "concurrent-value")
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Behaviour 4: Generations
+// ---------------------------------------------------------------------------
+
+func TestSeal_RejectsSlowPut(t *testing.T) {
+	loweredCost(t)
+	sys := newTestProvider(ProviderSystem)
+	slowProv := newTestProvider(ProviderFile)
+	slowProv.delay = 100 * time.Millisecond
+	v, _, _ := testVault(t, sys, slowProv)
+	mustSetup(t, v, "")
+
+	ctx := context.Background()
+	v.mu.Lock()
+	v.doc.DefaultProvider = ProviderFile
+	v.mu.Unlock()
+
+	before := len(v.doc.Journal)
+	crCh := make(chan error, 1)
+	go func() {
+		_, err := v.Create(ctx, credential.NewSecret("slow-value"))
+		crCh <- err
+	}()
+
+	time.Sleep(10 * time.Millisecond)
+	v.Seal()
+
+	err := <-crCh
+	if err != ErrVaultSealed {
+		t.Fatalf("Create after seal: got %v, want ErrVaultSealed", err)
+	}
+
+	after := len(v.doc.Journal)
+	if after <= before {
+		t.Fatal("journal entry should survive sealing during slow Put")
+	}
+
+	for i := before; i < after; i++ {
+		e := v.doc.Journal[i]
+		if e.Phase == PhaseSecretWritten || e.Phase == PhaseMetadataRepointed {
+			t.Fatalf("entry %d unexpected phase %s", i, e.Phase)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Behaviour 5: Honest limit
+// ---------------------------------------------------------------------------
+
+func TestGet_HonestLimit(t *testing.T) {
+	loweredCost(t)
+	sys := newTestProvider(ProviderSystem)
+	fp := newTestFileProvider(ProviderFile)
+	v, _, _ := testVault(t, sys, fp)
+	mustSetup(t, v, "")
+
+	ctx := context.Background()
+	id, err := v.Create(ctx, credential.NewSecret("honest-limit-value"))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	sec, err := v.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("Get before seal: %v", err)
+	}
+
+	v.Seal()
+
+	// The Secret obtained before seal remains readable (spec §4.5): once
+	// bytes are out, the Vault does not own their lifetime.
+	var s string
+	_ = sec.Use(func(b []byte) error { s = string(b); return nil })
+	if s != "honest-limit-value" {
+		t.Fatalf("value = %q, want %q", s, "honest-limit-value")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Behaviour 6: State gating
+// ---------------------------------------------------------------------------
+
+func TestState_Transitions(t *testing.T) {
+	loweredCost(t)
+	sys := newTestProvider(ProviderSystem)
+	fp := newTestFileProvider(ProviderFile)
+	v, _, _ := testVault(t, sys, fp)
+
+	check := func(want State) {
+		t.Helper()
+		if got := v.State(); got != want {
+			t.Fatalf("state = %v, want %v", got, want)
+		}
+	}
+
+	check(StateUninitialized)
+	mustSetup(t, v, "")
+	check(StateUnsealed)
+	v.Seal()
+	check(StateSealed)
+
+	ctx := context.Background()
+	if err := v.Unseal(ctx, UnsealRequest{UseOSKey: true}); err != nil {
+		t.Fatalf("Unseal: %v", err)
+	}
+	check(StateUnsealed)
+}
+
+func TestStateGating_SecretStore(t *testing.T) {
+	loweredCost(t)
+	sys := newTestProvider(ProviderSystem)
+	fp := newTestFileProvider(ProviderFile)
+	v, _, _ := testVault(t, sys, fp)
+	ctx := context.Background()
+	validID := credential.SecretID("sec:v1:system:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+
+	t.Run("uninitialized", func(t *testing.T) {
+		if v.State() != StateUninitialized {
+			t.Fatal("expected uninitialized")
+		}
+		if _, err := v.Create(ctx, credential.NewSecret("x")); err != ErrVaultUninitialized {
+			t.Fatalf("Create: got %v, want ErrVaultUninitialized", err)
+		}
+		if _, err := v.Get(ctx, validID); err != ErrVaultUninitialized {
+			t.Fatalf("Get: got %v, want ErrVaultUninitialized", err)
+		}
+		if err := v.Delete(ctx, validID); err != ErrVaultUninitialized {
+			t.Fatalf("Delete: got %v, want ErrVaultUninitialized", err)
+		}
+		if _, err := v.Exists(ctx, validID); err != ErrVaultUninitialized {
+			t.Fatalf("Exists: got %v, want ErrVaultUninitialized", err)
+		}
+	})
+
+	mustSetup(t, v, "")
+
+	t.Run("sealed", func(t *testing.T) {
+		v.Seal()
+		if v.State() != StateSealed {
+			t.Fatal("expected sealed")
+		}
+		if _, err := v.Create(ctx, credential.NewSecret("x")); err != ErrVaultSealed {
+			t.Fatalf("Create: got %v, want ErrVaultSealed", err)
+		}
+		if _, err := v.Get(ctx, validID); err != ErrVaultSealed {
+			t.Fatalf("Get: got %v, want ErrVaultSealed", err)
+		}
+		if err := v.Delete(ctx, validID); err != ErrVaultSealed {
+			t.Fatalf("Delete: got %v, want ErrVaultSealed", err)
+		}
+		if _, err := v.Exists(ctx, validID); err != ErrVaultSealed {
+			t.Fatalf("Exists: got %v, want ErrVaultSealed", err)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Behaviour 7: Journal before delegation
+// ---------------------------------------------------------------------------
+
+func TestCreate_JournalBeforePut(t *testing.T) {
+	loweredCost(t)
+	sys := newTestProvider(ProviderSystem)
+	panicking := &panickingProvider{testProvider: newTestProvider(ProviderFile)}
+	v, _, _ := testVault(t, sys, panicking)
+	mustSetup(t, v, "")
+
+	v.mu.Lock()
+	v.doc.DefaultProvider = ProviderFile
+	v.mu.Unlock()
+
+	before := len(v.doc.Journal)
+	func() {
+		defer func() { _ = recover() }()
+		_, _ = v.Create(context.Background(), credential.NewSecret("journal-test"))
+	}()
+	after := len(v.doc.Journal)
+	if after <= before {
+		t.Fatal("journal entry should survive provider panic")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Behaviour 8: No silent fallback
+// ---------------------------------------------------------------------------
+
+func TestGet_NoSilentFallback(t *testing.T) {
+	loweredCost(t)
+	var sysGotCalled atomic.Bool
+
+	sys := newTestProvider(ProviderSystem)
+	fp := newTestFileProvider(ProviderFile)
+	v, _, _ := testVault(t, sys, fp)
+	mustSetup(t, v, "")
+
+	// Install a Get tracker AFTER setup (setup calls Put on sys, not Get).
+	sys.getHook = func() { sysGotCalled.Store(true) }
+
+	ctx := context.Background()
+	id := credential.SecretID("sec:v1:unknown:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	_, err := v.Get(ctx, id)
+
+	var pe *ProviderError
+	if !errors.As(err, &pe) {
+		t.Fatalf("want ProviderError, got %T: %v", err, err)
+	}
+	if pe.Reason != ReasonUnknownProvider {
+		t.Fatalf("reason = %q, want %q", pe.Reason, ReasonUnknownProvider)
+	}
+	if !errors.Is(err, ErrProviderUnavailable) {
+		t.Fatal("should wrap ErrProviderUnavailable")
+	}
+	if sysGotCalled.Load() {
+		t.Fatal("default provider was called — silent fallback would be a security hole")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Behaviour 9: Malformed reference
+// ---------------------------------------------------------------------------
+
+func TestGet_MalformedReference(t *testing.T) {
+	loweredCost(t)
+	var providerCalled atomic.Bool
+
+	sys := newTestProvider(ProviderSystem)
+	fp := newTestFileProvider(ProviderFile)
+	v, _, _ := testVault(t, sys, fp)
+	mustSetup(t, v, "")
+
+	sys.getHook = func() { providerCalled.Store(true) }
+	fp.getHook = func() { providerCalled.Store(true) }
+
+	ctx := context.Background()
+	bad := []credential.SecretID{
+		"",
+		"sec:0123456789abcdef0123456789abcdef",
+		"key:v1:file:0123456789abcdef0123456789abcdef",
+		"sec:v2:file:0123456789abcdef0123456789abcdef",
+		"sec:v1::0123456789abcdef0123456789abcdef",
+		"sec:v1:file:",
+		"sec:v1:file:0123456789ABCDEF0123456789abcdef",
+		"sec:v1:file:0123456789abcdef",
+		"sec:v1:file:0123456789abcdef0123456789abcdef00",
+		"sec:v1:file:zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+		"sec:v1:File:0123456789abcdef0123456789abcdef",
+	}
+	for _, id := range bad {
+		_, err := v.Get(ctx, id)
+		if err == nil {
+			t.Fatalf("Get(%q) succeeded, want error", id)
+		}
+		if providerCalled.Load() {
+			t.Fatal("provider was called despite malformed reference")
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Logging: no plaintext in logs
+// ---------------------------------------------------------------------------
+
+func TestCreate_NoPlaintextInLogs(t *testing.T) {
+	loweredCost(t)
+	sys := newTestProvider(ProviderSystem)
+	fp := newTestFileProvider(ProviderFile)
+	v, _, capH := testVault(t, sys, fp)
+	mustSetup(t, v, "")
+
+	plaintext := "my-supersecret-password-42"
+	_, err := v.Create(context.Background(), credential.NewSecret(plaintext))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if capH.containsPlaintext(plaintext) {
+		t.Fatal("plaintext secret leaked into log output")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Delete
+// ---------------------------------------------------------------------------
+
+func TestDelete_Basic(t *testing.T) {
+	loweredCost(t)
+	sys := newTestProvider(ProviderSystem)
+	fp := newTestFileProvider(ProviderFile)
+	v, _, _ := testVault(t, sys, fp)
+	mustSetup(t, v, "")
+
+	ctx := context.Background()
+	id, err := v.Create(ctx, credential.NewSecret("delete-me"))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if err = v.Delete(ctx, id); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	_, err = v.Get(ctx, id)
+	if err != ErrSecretNotFound {
+		t.Fatalf("Get after Delete = %v, want ErrSecretNotFound", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Unseal round-trip with passphrase
+// ---------------------------------------------------------------------------
+
+func TestUnseal_PassphraseRoundTrip(t *testing.T) {
+	loweredCost(t)
+	fp := newTestFileProvider(ProviderFile)
+	v, store, _ := testVault(t, fp)
+	mustSetup(t, v, "hunter2")
+
+	ctx := context.Background()
+	id, err := v.Create(ctx, credential.NewSecret("unseal-test"))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// Commit journal entry so Reconcile on reload does not delete the orphan
+	// (Create now leaves PhaseSecretWritten entries, defect 1).
+	if err = v.AttachTarget(ctx, id, "roundtrip"); err != nil {
+		t.Fatalf("AttachTarget: %v", err)
+	}
+	if err = v.CommitMetadata(ctx, id); err != nil {
+		t.Fatalf("CommitMetadata: %v", err)
+	}
+	v.Seal()
+
+	reg, _ := NewRegistry(fp)
+	v2, err := New(store, reg, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if v2.State() != StateSealed {
+		t.Fatalf("reloaded state = %v, want sealed", v2.State())
+	}
+
+	if err = v2.Unseal(ctx, UnsealRequest{Passphrase: "hunter2"}); err != nil {
+		t.Fatalf("Unseal: %v", err)
+	}
+
+	sec, err := v2.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("Get after unseal: %v", err)
+	}
+	var s string
+	_ = sec.Use(func(b []byte) error { s = string(b); return nil })
+	if s != "unseal-test" {
+		t.Fatalf("value = %q, want %q", s, "unseal-test")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Regression tests for core-fix defects
+// ---------------------------------------------------------------------------
+
+// Defect 1: Create clears journal entry after successful Put instead of
+// advancing to PhaseSecretWritten.
+func TestCreate_AdvanceToPhaseSecretWritten(t *testing.T) {
+	loweredCost(t)
+	sys := newTestProvider(ProviderSystem)
+	fp := newTestFileProvider(ProviderFile)
+	v, _, _ := testVault(t, sys, fp)
+	mustSetup(t, v, "")
+
+	ctx := context.Background()
+	id, err := v.Create(ctx, credential.NewSecret("test-value"))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Journal should hold a PhaseSecretWritten entry for the secret.
+	var found bool
+	for _, e := range v.doc.Journal {
+		if e.NewID == id {
+			found = true
+			if e.Phase != PhaseSecretWritten {
+				t.Fatalf("journal entry phase = %q, want %q", e.Phase, PhaseSecretWritten)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Fatal("no journal entry for created secret — Create cleared it")
+	}
+
+	// AttachTarget and CommitMetadata should clear the entry.
+	if err := v.AttachTarget(ctx, id, "test-target"); err != nil {
+		t.Fatalf("AttachTarget: %v", err)
+	}
+	if err := v.CommitMetadata(ctx, id); err != nil {
+		t.Fatalf("CommitMetadata: %v", err)
+	}
+	for _, e := range v.doc.Journal {
+		if e.NewID == id {
+			t.Fatal("journal entry not cleared after CommitMetadata")
+		}
+	}
+}
+
+// Defect 2: Setup returns while holding the mutex on several error paths.
+// Regression test verifies that after a failing provider Put during silent
+// setup, State() does not hang.
+func TestSetup_MutexNotHeldOnError(t *testing.T) {
+	loweredCost(t)
+	sys := newTestProvider(ProviderSystem)
+	sys.fail = errors.New("injected put failure")
+	fp := newTestFileProvider(ProviderFile)
+	v, _, _ := testVault(t, sys, fp)
+
+	done := make(chan struct{}, 1)
+	go func() {
+		_, _ = v.Setup(context.Background(), SetupRequest{})
+		done <- struct{}{}
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Setup hung — mutex held on error return path")
+	}
+
+	stCh := make(chan State, 1)
+	go func() {
+		stCh <- v.State()
+	}()
+	select {
+	case <-stCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("State() hung after failed Setup — mutex still held")
+	}
+}
+
+func TestUnseal_DetectsConcurrentSeal(t *testing.T) {
+	loweredCost(t)
+	sys := newTestProvider(ProviderSystem)
+	fp := newTestFileProvider(ProviderFile)
+	v, _, _ := testVault(t, sys, fp)
+	mustSetup(t, v, "")
+
+	ctx := context.Background()
+	v.Seal()
+
+	// Block Unseal's provider Unlock so we can inject a concurrent Seal.
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	fp.unlockHook = func() {
+		close(entered) // Unseal has started unlocking providers
+		<-release      // wait for test to inject Seal
+	}
+
+	go func() {
+		<-entered
+		v.Seal()
+		close(release) // let Unseal's Unlock complete
+	}()
+
+	err := v.Unseal(ctx, UnsealRequest{UseOSKey: true})
+	// After fix: Unseal captures gen, re-checks after provider calls,
+	// detects the gen change from concurrent Seal, returns error.
+	// Before fix: Unseal ignores gen change and returns nil.
+	if err == nil {
+		t.Fatal("Unseal should have detected concurrent Seal")
+	}
+	if v.State() != StateSealed {
+		t.Fatal("vault should remain sealed after Seal+Unseal race")
+	}
+	// Provider must be locked (not unlocked by Unseal, defect 3).
+	if fp.unlocked.Load() {
+		t.Fatal("provider should be locked after Seal+Unseal race")
+	}
+}
+
+func TestGet_RejectsResultAfterSeal(t *testing.T) {
+	loweredCost(t)
+	sys := newTestProvider(ProviderSystem)
+	fp := newTestFileProvider(ProviderFile)
+	v, _, _ := testVault(t, sys, fp)
+	mustSetup(t, v, "")
+
+	ctx := context.Background()
+	// Create routes to ProviderSystem (default when sys is registered).
+	id, err := v.Create(ctx, credential.NewSecret("get-race"))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Slow down Get so we can inject a Seal mid-flight.
+	// Hook goes on sys since Create routes to ProviderSystem.
+	var getStarted atomic.Bool
+	getGate := make(chan struct{})
+	sys.getHook = func() {
+		getStarted.Store(true)
+		<-getGate
+	}
+
+	got := make(chan error, 1)
+	go func() {
+		var goErr error
+		_, goErr = v.Get(ctx, id)
+		got <- goErr
+	}()
+	for !getStarted.Load() {
+		time.Sleep(time.Millisecond)
+	}
+
+	v.Seal()
+	close(getGate)
+	err = <-got
+	// After fix: Get re-checks gen after provider returns and rejects result.
+	// Before fix: Get accepts the stale result.
+	if err == nil {
+		t.Fatal("Get should reject result after seal")
+	}
+}
+
+// Defect 5: Setup commits the document before the file provider is
+// initialised, so a failed NewDataKey leaves the document saying
+// "initialised" with a bricked vault.
+func TestSetup_DocumentNotSavedBeforeProviderInit(t *testing.T) {
+	loweredCost(t)
+	sys := newTestProvider(ProviderSystem)
+	fp := &testFileProvider{testProvider: newTestProvider(ProviderFile)}
+	fp.dataKeyFail = errors.New("injected data key failure")
+	// We'll verify the document is not committed.
+	v, store, _ := testVault(t, sys, fp)
+
+	_, err := v.Setup(context.Background(), SetupRequest{Passphrase: "test"})
+	if err == nil {
+		t.Fatal("expected Setup to fail due to data key error")
+	}
+
+	// Document should NOT exist (or should have Instance empty).
+	var doc Document
+	found, _ := store.Read("vault.json", &doc)
+	if found && doc.Instance != "" {
+		t.Fatal("Setup committed document before provider init completed")
+	}
+}
+
+// Defect 6: Silent setup can strand an OS-held root key if document save
+// fails after the key was stored. The fix best-effort deletes the OS key,
+// restores the in-memory document, and wipes the root.
+func TestSetup_OrphanCleanupOnSaveFail(t *testing.T) {
+	loweredCost(t)
+	tmpDir := t.TempDir()
+	realStore := storage.NewDocumentStore(tmpDir)
+	store := &failingDocStore{DocumentStore: realStore}
+
+	sys := newTestProvider(ProviderSystem)
+	fp := newTestFileProvider(ProviderFile)
+	reg, err := NewRegistry(sys, fp)
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	v, err := New(store, reg, logger)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Silent setup: OS key is stored, then document save fails.
+	store.failOnWrite = true
+	_, err = v.Setup(context.Background(), SetupRequest{})
+	if err == nil {
+		t.Fatal("expected Setup to fail due to document save failure")
+	}
+
+	// The OS key should have been best-effort deleted.
+	oskID := osKeyID(v.doc.Instance)
+	sec, err := sys.Get(context.Background(), oskID)
+	if err == nil && !sec.IsEmpty() {
+		t.Fatal("OS key should have been cleaned up after save failure")
+	}
+
+	// The vault should still be uninitialized.
+	if v.State() != StateUninitialized {
+		t.Fatalf("vault state = %v, want uninitialized after failed setup", v.State())
+	}
+}
+
+// Defect 7: Concurrent Setup is not serialised — two callers both pass the
+// uninitialised check because the mutex is released.
+func TestSetup_SerialisesConcurrentCalls(t *testing.T) {
+	loweredCost(t)
+	sys := newTestProvider(ProviderSystem)
+	fp := newTestFileProvider(ProviderFile)
+	v, _, _ := testVault(t, sys, fp)
+
+	startCh := make(chan struct{})
+	readyCh := make(chan struct{}, 2)
+
+	results := make(chan error, 2)
+	for range 2 {
+		go func() {
+			readyCh <- struct{}{}
+			<-startCh
+			_, err := v.Setup(context.Background(), SetupRequest{})
+			results <- err
+		}()
+	}
+
+	for range 2 {
+		<-readyCh
+	}
+	close(startCh) // release both goroutines at once
+
+	// Collect both results.
+	var errCount int
+	for range 2 {
+		if err := <-results; err != nil {
+			errCount++
+		}
+	}
+
+	// Exactly one should succeed; the other should fail.
+	if errCount != 1 {
+		t.Fatalf("expected exactly 1 error from 2 concurrent Setups, got %d", errCount)
+	}
+}
+
+// Defect 8: Delete re-checks state and generation immediately before
+// persisting the journal and delegating. This test verifies the invariant
+// that Delete returns an error when a Seal happens (the initial state check
+// catches it; the re-check at journal time is defense-in-depth).
+func TestDelete_SealBeforeDelete(t *testing.T) {
+	loweredCost(t)
+	sys := newTestProvider(ProviderSystem)
+	fp := newTestFileProvider(ProviderFile)
+	v, _, _ := testVault(t, sys, fp)
+	mustSetup(t, v, "")
+
+	ctx := context.Background()
+	id, err := v.Create(ctx, credential.NewSecret("delete-seal"))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	v.Seal()
+	err = v.Delete(ctx, id)
+	if err == nil {
+		t.Fatal("Delete after Seal should fail")
+	}
+}
+
+func TestExists_PropagatesProviderErrors(t *testing.T) {
+	loweredCost(t)
+	sys := newTestProvider(ProviderSystem)
+	fp := newTestProvider(ProviderFile)
+	v, _, _ := testVault(t, sys, fp)
+	mustSetup(t, v, "")
+
+	ctx := context.Background()
+	id, err := v.Create(ctx, credential.NewSecret("exists-test"))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Inject a non-SecretNotFound error.
+	sys.fail = errors.New("provider denied")
+
+	ok, err := v.Exists(ctx, id)
+	// Before fix: (false, nil) — error swallowed.
+	// After fix: error propagates.
+	if err == nil {
+		t.Fatal("Exists should have propagated provider error, got nil")
+	}
+	if !ok {
+		t.Log("Exists returned false with error — that's fine (may or may not exist)")
+	}
+
+	// ErrSecretNotFound should still map to (false, nil).
+	sys.fail = nil
+	missing := credential.SecretID("sec:v1:system:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	ok, err = v.Exists(ctx, missing)
+	if err != nil {
+		t.Fatalf("Exists for absent secret should return (false, nil), got error: %v", err)
+	}
+	if ok {
+		t.Fatal("Exists for absent secret should return false")
+	}
+}
+
+// Defect 10: journal.go retains PhasePrepared/PhaseSecretWritten entries
+// with non-empty Target without reporting them, and unknown phases fall
+// through silently.
+func TestReconcile_ReportsRetainedAndUnknown(t *testing.T) {
+	doc := &Document{}
+	wp := newTestProvider(ProviderFile)
+	reg, err := NewRegistry(wp)
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+
+	ctx := context.Background()
+
+	// Entry with non-empty Target at PhasePrepared — should be blocked.
+	doc.Journal = append(doc.Journal, JournalEntry{
+		Op:     "create",
+		NewID:  "sec:v1:file:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Phase:  PhasePrepared,
+		Target: "some-target",
+	})
+
+	// Entry with unknown phase — should be blocked.
+	doc.Journal = append(doc.Journal, JournalEntry{
+		Op:    "create",
+		NewID: "sec:v1:file:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		Phase: "unknown-phase",
+	})
+
+	blocked := Reconcile(ctx, doc, reg)
+	if len(blocked) != 2 {
+		t.Fatalf("expected 2 blocked entries, got %d", len(blocked))
+	}
+}
+
+// Defect 10b: validate that a malformed Op is reported.
+func TestReconcile_ReportsMalformedOp(t *testing.T) {
+	doc := &Document{}
+	wp := newTestProvider(ProviderFile)
+	reg, err := NewRegistry(wp)
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	ctx := context.Background()
+
+	// Empty Op is skipped as cleared.
+	doc.Journal = append(doc.Journal, JournalEntry{
+		Op:    "",
+		NewID: "sec:v1:file:cccccccccccccccccccccccccccccccc",
+		Phase: PhasePrepared,
+	})
+
+	// Unknown Op is blocked.
+	doc.Journal = append(doc.Journal, JournalEntry{
+		Op:    "unknown-op",
+		NewID: "sec:v1:file:dddddddddddddddddddddddddddddddd",
+		Phase: PhasePrepared,
+	})
+
+	blocked := Reconcile(ctx, doc, reg)
+	// Empty-Op entry skipped; unknown-Op entry blocked.
+	if len(blocked) != 1 {
+		t.Fatalf("expected 1 blocked for unknown-Op entry, got %d", len(blocked))
+	}
+	if blocked[0].Op != "unknown-op" {
+		t.Fatalf("blocked entry Op = %q, want %q", blocked[0].Op, "unknown-op")
+	}
+}
+
+// Defect 12: The plaintext-in-logs check only checks attribute equality,
+// missing plaintext inside error messages or rendered output.
+func TestCreate_NoPlaintextInRenderedLogs(t *testing.T) {
+	loweredCost(t)
+	sys := newTestProvider(ProviderSystem)
+	fp := newTestProvider(ProviderFile)
+	v, _, capH := testVault(t, sys, fp)
+	mustSetup(t, v, "")
+
+	plaintext := "my-supersecret-password-42"
+	_, err := v.Create(context.Background(), credential.NewSecret(plaintext))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// The rendered log output must not contain the plaintext as a substring.
+	if capH.containsPlaintextRendered(plaintext) {
+		t.Fatal("plaintext secret leaked into rendered log output")
+	}
+}
+
+// Defect 4b: Exists must also re-check the generation after provider call.
+func TestExists_RejectsResultAfterSeal(t *testing.T) {
+	loweredCost(t)
+	sys := newTestProvider(ProviderSystem)
+	fp := newTestFileProvider(ProviderFile)
+	v, _, _ := testVault(t, sys, fp)
+	mustSetup(t, v, "")
+
+	ctx := context.Background()
+	id, err := v.Create(ctx, credential.NewSecret("exists-race"))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	var getStarted atomic.Bool
+	getGate := make(chan struct{})
+	sys.getHook = func() {
+		getStarted.Store(true)
+		<-getGate
+	}
+
+	got := make(chan error, 1)
+	go func() {
+		var goErr error
+		_, goErr = v.Exists(ctx, id)
+		got <- goErr
+	}()
+
+	for !getStarted.Load() {
+		time.Sleep(time.Millisecond)
+	}
+
+	v.Seal()
+	close(getGate)
+
+	err = <-got
+	// After fix: Exists re-checks gen after provider returns and rejects.
+	if err == nil {
+		t.Fatal("Exists should reject result after seal")
+	}
+}
