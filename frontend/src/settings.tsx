@@ -310,7 +310,12 @@ export function SettingsComponent(props: SettingsComponentProps) {
       id: 'export',
       title: 'Export / Backup / Import',
       scrollMode: 'page',
-      renderContent: () => <ExportSection profileClient={props.profileClient} />,
+      renderContent: () => (
+        <ExportSection
+          profileClient={props.profileClient}
+          vaultController={props.vaultController}
+        />
+      ),
     }
     const connectionPage: SettingsPage = {
       kind: 'component',

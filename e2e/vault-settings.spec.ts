@@ -13,7 +13,6 @@
  * or the default dev-server port.
  */
 import { test as base, expect, type Page } from '@playwright/test'
-import { execSync } from 'node:child_process'
 import { mkdtempSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'

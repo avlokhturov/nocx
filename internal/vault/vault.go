@@ -162,16 +162,22 @@ func (v *Vault) Setup(ctx context.Context, req SetupRequest) (SetupResult, error
 	}()
 
 	// --- determine mode ---
+	//
+	// System readiness is probed HERE, before the document lock, because a
+	// provider is never called while that lock is held (ADR-0011 §4). It also
+	// has to be probed at all: the registry answers whether a provider is
+	// REGISTERED, and app.go registers the system provider on every platform,
+	// so "registered" is true on machines with no Secret Service at all.
 	silent := req.Passphrase == ""
-	if silent {
-		sys, sysOK := v.reg.Get(ProviderSystem)
-		if !sysOK {
-			return SetupResult{}, fmt.Errorf("silent setup requires system provider: %w", ErrProviderUnavailable)
+	sysReady := false
+	if sys, sysOK := v.reg.Get(ProviderSystem); sysOK {
+		sysReady = sys.Status(ctx).Ready
+		if silent && !sysReady {
+			return SetupResult{}, fmt.Errorf("system provider not ready (%s): provide a passphrase",
+				sys.Status(ctx).Reason)
 		}
-		st := sys.Status(ctx)
-		if !st.Ready {
-			return SetupResult{}, fmt.Errorf("system provider not ready (%s): provide a passphrase", st.Reason)
-		}
+	} else if silent {
+		return SetupResult{}, fmt.Errorf("silent setup requires system provider: %w", ErrProviderUnavailable)
 	}
 
 	// --- mint root key ---
@@ -255,7 +261,14 @@ func (v *Vault) Setup(ctx context.Context, req SetupRequest) (SetupResult, error
 	}
 
 	// Set default provider.
-	if sysProv != nil {
+	//
+	// Readiness, not mere registration. Choosing the system provider because it
+	// exists sends every secret to a keychain that is not there: on any machine
+	// without a Secret Service, passphrase setup succeeded and then the first
+	// password save failed with "provider system unavailable (no-service)".
+	// Nothing caught it, because the only double for a provider reported itself
+	// ready unconditionally.
+	if sysProv != nil && sysReady {
 		v.doc.DefaultProvider = ProviderSystem
 	} else {
 		v.doc.DefaultProvider = ProviderFile

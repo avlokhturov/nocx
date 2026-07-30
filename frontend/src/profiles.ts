@@ -378,8 +378,18 @@ export class ProfileClient {
     return this.call('profiles.moveImpact', params)
   }
 
-  importTabby(configYAML: string): Promise<number> {
-    return this.call('profiles.importTabby', { config: configYAML })
+  importTabby(configYAML: string, passphrase?: string): Promise<number> {
+    return this.call('profiles.importTabby', { config: configYAML, passphrase })
+  }
+
+  tabbyPreview(configYAML: string, passphrase?: string): Promise<TabbyPreviewResponse> {
+    const params: Record<string, string> = { config: configYAML }
+    if (passphrase) params.passphrase = passphrase
+    return this.call('profiles.tabbyPreview', params)
+  }
+
+  tabbyExecute(planToken: string): Promise<ImportResult> {
+    return this.call('profiles.tabbyExecute', { planToken })
   }
 
   // Credential CRUD (УЗ — reusable authentication identities)
@@ -797,4 +807,45 @@ export interface ImportResult {
   groupsImported: number
   credentialsImported: number
   unresolvedCredentials?: Credential[]
+}
+
+// ── Tabby import preview types (bead nocx-kqw6) ──────────────────────────
+
+/** One profile to import and what would happen. */
+export interface ProfileEntry {
+  name: string
+  action: 'new' | 'overwrite' | 'needs-review'
+}
+
+/** One credential the import would create. */
+export interface CredentialEntry {
+  name: string
+  type: 'password' | 'passphrase'
+}
+
+/** One skipped secret and why. */
+export interface SkippedInfo {
+  secretType: string
+  reason: string
+}
+
+/** One collision and the policy that applies. */
+export interface CollisionInfo {
+  kind: string
+  name: string
+  policy: string
+}
+
+/** Response from profiles.tabbyPreview. */
+export interface TabbyPreviewResponse {
+  profilesToImport: number
+  groupsToImport: number
+  credentialsToImport: number
+  profileEntries?: ProfileEntry[]
+  groupNames?: string[]
+  credentialEntries?: CredentialEntry[]
+  skippedSecrets?: SkippedInfo[]
+  collisions?: CollisionInfo[]
+  secretProvider: string
+  planToken: string
 }

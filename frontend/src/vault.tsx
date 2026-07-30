@@ -155,17 +155,37 @@ export function createVaultState(vaultClient: VaultClient): VaultController {
     setShowUnlock(true)
   }
 
+  // True while a deferred operation started by onSetupDone/onUnsealDone is
+  // still running.
+  //
+  // The dialogs call "done" and then "close" in that order, and close used to
+  // resolve the caller's promise and drop the reject handle — while the retry
+  // it had just launched was still in flight. So a retry that failed reported
+  // success and its error went nowhere: no toast, no log, and a dialog that sat
+  // there looking inert. That is how a Tabby import stopped after vault setup
+  // with nothing on screen to say why. The retry settles its own promise; close
+  // must not settle it from underneath.
+  let retryInFlight = false
+
+  function settleAfterRetry(): void {
+    retryInFlight = false
+  }
+
   function onSetupDone(): void {
     const save = pendingSave
     pendingSave = null
-    void save?.()
+    if (!save) return
+    retryInFlight = true
+    void save().finally(settleAfterRetry)
   }
 
   function onUnsealDone(): void {
     const save = pendingSave
     pendingSave = null
     void refresh()
-    void save?.()
+    if (!save) return
+    retryInFlight = true
+    void save().finally(settleAfterRetry)
   }
 
   function openUnlock(): void {
@@ -173,20 +193,24 @@ export function createVaultState(vaultClient: VaultClient): VaultController {
     setShowUnlock(true)
   }
 
-  function closeSetup(): void {
+  /** Closing a dialog cancels a pending operation — unless one is already
+   *  running, in which case that operation owns the promise. */
+  function closeDialog(hide: () => void): void {
     pendingSave = null
-    pendingResolve?.(undefined)
-    pendingResolve = null
-    pendingReject = null
-    setShowSetup(false)
+    if (!retryInFlight) {
+      pendingResolve?.(undefined)
+      pendingResolve = null
+      pendingReject = null
+    }
+    hide()
+  }
+
+  function closeSetup(): void {
+    closeDialog(() => setShowSetup(false))
   }
 
   function closeUnlock(): void {
-    pendingSave = null
-    pendingResolve?.(undefined)
-    pendingResolve = null
-    pendingReject = null
-    setShowUnlock(false)
+    closeDialog(() => setShowUnlock(false))
   }
 
   /**

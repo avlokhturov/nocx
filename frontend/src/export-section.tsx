@@ -13,13 +13,14 @@ import { For, Show, onMount } from 'solid-js'
 import { createStore } from 'solid-js/store'
 import { render } from 'solid-js/web'
 import type { ProfileClient, ExportManifest, ConfigExport, SSHConfigImportResult } from './profiles'
-import { log } from './log'
+import type { VaultController } from './vault'
 import { downloadJSON, downloadBinary } from './export-utils'
 import { PageSection } from './ui/page-section'
 import { Button } from './ui/button'
 import { TextField } from './ui/text-field'
 import { Checkbox } from './ui/checkbox'
 import { FileInput } from './ui/file-input'
+import { showConfirm } from './ui/dialog'
 import { Field } from './ui/field'
 import { Stack } from './ui/stack'
 import { MarkerList, type MarkerListItem } from './ui/marker-list'
@@ -234,7 +235,7 @@ function BackupActions(props: { profileClient: ProfileClient }) {
 
 // ── Import actions ──────────────────────────────────────────────────────
 
-function ImportActions(props: { profileClient: ProfileClient }) {
+function ImportActions(props: { profileClient: ProfileClient; vaultController?: VaultController }) {
   const [state, setState] = createStore({
     configFile: null as File | null,
     configBusy: false,
@@ -242,6 +243,7 @@ function ImportActions(props: { profileClient: ProfileClient }) {
     portablePass: '',
     portableBusy: false,
     tabbyFile: null as File | null,
+    tabbyPass: '',
     tabbyBusy: false,
     sshBusy: false,
   })
@@ -317,28 +319,100 @@ function ImportActions(props: { profileClient: ProfileClient }) {
       })
   }
 
-  const handleTabbyImport = () => {
+  const handleTabbyImport = async () => {
     const file = state.tabbyFile
     if (!file) return
     const pc = props.profileClient
     setState('tabbyBusy', true)
-    file
-      .text()
-      .then((text) => pc.importTabby(text))
-      .then((count) => {
-        log.info('Imported SSH profiles from Tabby config', { count })
+    try {
+      const text = await file.text()
+      // Preview first.
+      const preview = await pc.tabbyPreview(text)
+
+      // Build confirmation details with per-entry info.
+      const parts: string[] = [
+        `${preview.profilesToImport} profile(s), ${preview.groupsToImport} group(s),` +
+          ` ${preview.credentialsToImport} credential(s)`,
+      ]
+      if (preview.profileEntries && preview.profileEntries.length > 0) {
+        parts.push('')
+        parts.push('Profiles:')
+        for (const e of preview.profileEntries) {
+          const action =
+            e.action === 'overwrite'
+              ? ' (overwrites existing)'
+              : e.action === 'needs-review'
+                ? ' (needs review)'
+                : ''
+          parts.push(`  ${e.name}${action}`)
+        }
+      }
+      if (preview.groupNames && preview.groupNames.length > 0) {
+        parts.push('')
+        parts.push('Groups: ' + preview.groupNames.join(', '))
+      }
+      if (preview.credentialEntries && preview.credentialEntries.length > 0) {
+        parts.push('')
+        parts.push('Credentials:')
+        for (const e of preview.credentialEntries) {
+          parts.push(`  ${e.name} (${e.type})`)
+        }
+      }
+      if (preview.collisions && preview.collisions.length > 0) {
+        parts.push('')
+        parts.push('Collisions:')
+        for (const c of preview.collisions) {
+          const policy =
+            c.policy === 'overwrite'
+              ? 'will be overwritten'
+              : c.policy === 'refuse'
+                ? 'import refused'
+                : 'needs review'
+          parts.push(`  ${c.kind} "${c.name}" — ${policy}`)
+        }
+      }
+      if (preview.skippedSecrets && preview.skippedSecrets.length > 0) {
+        parts.push('')
+        parts.push('Skipped secrets:')
+        for (const s of preview.skippedSecrets) {
+          parts.push(`  ${s.secretType}: ${s.reason}`)
+        }
+      }
+      parts.push('')
+      parts.push(`Destination: ${preview.secretProvider}`)
+
+      // Confirm with per-entry details via the kit's showConfirm.
+      const confirmed = await showConfirm(
+        parts.join('\n') + '\n\nProceed with import?',
+        'Import',
+        'Cancel',
+      )
+      if (!confirmed) {
         setState('tabbyFile', null)
-        showToast({
-          level: 'success',
-          message: `Imported ${count} connections from the Tabby config`,
-        })
-      })
-      .catch((e) => {
-        showToast({ level: 'danger', message: `Tabby import failed: ${String(e)}` })
-      })
-      .finally(() => {
         setState('tabbyBusy', false)
-      })
+        return
+      }
+
+      // Execute with vault retry if vault controller is available.
+      const doExecute = async (): Promise<void> => {
+        const result = await pc.tabbyExecute(preview.planToken)
+        setState('tabbyFile', null)
+        const execSummary =
+          `Imported ${result.profilesImported} connections, ` +
+          `${result.groupsImported} groups, ${result.credentialsImported} credentials`
+        showToast({ level: 'success', message: execSummary })
+      }
+
+      if (props.vaultController) {
+        await props.vaultController.saveSecretWithVault(doExecute)
+      } else {
+        await doExecute()
+      }
+    } catch (e) {
+      showToast({ level: 'danger', message: `Tabby import failed: ${String(e)}` })
+    } finally {
+      setState('tabbyBusy', false)
+    }
   }
 
   const handleSSHConfigImport = () => {
@@ -420,7 +494,7 @@ function ImportActions(props: { profileClient: ProfileClient }) {
         <Button
           variant="default"
           disabled={state.tabbyBusy || !state.tabbyFile}
-          onClick={handleTabbyImport}
+          onClick={() => void handleTabbyImport()}
         >
           Import
         </Button>
@@ -455,7 +529,11 @@ function ImportActions(props: { profileClient: ProfileClient }) {
  * was the thing being hidden. Now that Export is a page of its own rather than
  * a block appended under the settings list, there is room to show them.
  */
-function ModeCard(props: { def: ModeDef; profileClient: ProfileClient }) {
+function ModeCard(props: {
+  def: ModeDef
+  profileClient: ProfileClient
+  vaultController?: VaultController
+}) {
   const [state, setState] = createStore({
     loading: false,
     manifest: null as ExportManifest | null,
@@ -508,7 +586,10 @@ function ModeCard(props: { def: ModeDef; profileClient: ProfileClient }) {
             <BackupActions profileClient={props.profileClient} />
           </Show>
           <Show when={props.def.mode === 'import'}>
-            <ImportActions profileClient={props.profileClient} />
+            <ImportActions
+              profileClient={props.profileClient}
+              vaultController={props.vaultController}
+            />
           </Show>
         </Show>
       </Stack>
@@ -534,14 +615,25 @@ function ModeCard(props: { def: ModeDef; profileClient: ProfileClient }) {
  * and the rail entry already names it. Wrapping would put the same words twice
  * on the same screen and nest a section inside a section.
  */
-export function ExportSection(props: { profileClient: ProfileClient }) {
+export function ExportSection(props: {
+  profileClient: ProfileClient
+  vaultController?: VaultController
+}) {
   return (
     <div class="ui-export">
       <p class="ui-export-desc">
         Each mode states what it carries and what it omits. Private content and secrets are never
         included without an explicit choice.
       </p>
-      <For each={MODES}>{(def) => <ModeCard def={def} profileClient={props.profileClient} />}</For>
+      <For each={MODES}>
+        {(def) => (
+          <ModeCard
+            def={def}
+            profileClient={props.profileClient}
+            vaultController={props.vaultController}
+          />
+        )}
+      </For>
     </div>
   )
 }

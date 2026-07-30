@@ -46,9 +46,9 @@ import type {
   GroupImpactResponse,
   ConfigExport,
   SSHConfigPathResult,
+  TabbyPreviewResponse,
 } from './profiles'
-import { ProfileClient, buildGroupTree } from './profiles'
-import { parseQuickConnect } from './profiles'
+import { ProfileClient, buildGroupTree, parseQuickConnect } from './profiles'
 import { CredentialForm, type CredentialFormHandle } from './credential-form'
 import { PasswordEditor } from './password-editor'
 import { AuthenticationEditor } from './authentication-editor'
@@ -191,12 +191,13 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   // ── Quick-connect dialog (creation starts from one field) ─────────────
   const [quickConnectOpen, setQuickConnectOpen] = createSignal(false)
   const [quickConnectValue, setQuickConnectValue] = createSignal('')
-
-  // ── Import dialog (bringing connections in from elsewhere) ────────────
-  const [importOpen, setImportOpen] = createSignal(false)
   const [importSource, setImportSource] = createSignal<ImportSource>('sshConfig')
+  const [importOpen, setImportOpen] = createSignal(false)
   const [importFile, setImportFile] = createSignal<File | null>(null)
   const [importBusy, setImportBusy] = createSignal(false)
+  const [importPassphrase, setImportPassphrase] = createSignal('')
+  const [previewResult, setPreviewResult] = createSignal<TabbyPreviewResponse | null>(null)
+  const [previewOpen, setPreviewOpen] = createSignal(false)
   // Where the SSH config actually is, per the backend. Null until asked.
   const [sshConfigPath, setSSHConfigPath] = createSignal<SSHConfigPathResult | null>(null)
 
@@ -300,15 +301,15 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         return `Reads ${where} and saves its aliases as connections. An alias whose name or host is already saved is skipped, so running it twice is safe.`
       }
       case 'tabby':
-        return 'Connections and groups from a Tabby configuration. Passwords are not carried over — attach a credential afterwards.'
+        return 'Connections, groups and credentials from a Tabby configuration. A preview is shown before anything is written so you can review collisions and skipped secrets.'
       case 'backup':
-        return 'Connections, groups and credentials from a nocx configuration export. Secrets stay in the keychain they were exported from.'
     }
   })
 
   function openImportDialog() {
     setImportSource('sshConfig')
     setImportFile(null)
+    setImportPassphrase('')
     setImportOpen(true)
     // Asked on open rather than on mount: it is only ever needed to draw this
     // dialog, and most sessions never open it.
@@ -327,6 +328,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   function closeImportDialog() {
     setImportOpen(false)
     setImportFile(null)
+    setImportPassphrase('')
   }
 
   /**
@@ -389,9 +391,14 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           break
         }
         case 'tabby': {
-          const count = await props.client.importTabby(await file!.text())
-          log.info('Imported SSH profiles from Tabby config', { count })
-          showToast({ level: 'success', message: `Imported ${count} connections from Tabby` })
+          // Preview first, then open preview dialog for confirmation.
+          const preview = await props.client.tabbyPreview(
+            await file!.text(),
+            importPassphrase() || undefined,
+          )
+          setPreviewResult(preview)
+          closeImportDialog()
+          setPreviewOpen(true)
           break
         }
         case 'backup': {
@@ -411,8 +418,41 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     }
   }
 
-  // ── Group editor ──────────────────────────────────────────────────────
+  function closePreview() {
+    setPreviewOpen(false)
+    setPreviewResult(null)
+  }
 
+  async function executeImport() {
+    const preview = previewResult()
+    if (!preview) return
+
+    const doExecute = async (): Promise<void> => {
+      const result = await props.client.tabbyExecute(preview.planToken)
+      setPreviewOpen(false)
+      setPreviewResult(null)
+      reportImport(result)
+      await loadAll()
+    }
+
+    if (props.vaultController) {
+      try {
+        await props.vaultController.saveSecretWithVault(doExecute)
+      } catch (err) {
+        const message = (err as Error).message
+        log.error('Tabby import failed', { message })
+        showToast({ level: 'danger', message: `Tabby import failed: ${message}` })
+      }
+    } else {
+      try {
+        await doExecute()
+      } catch (err) {
+        const message = (err as Error).message
+        log.error('Tabby import failed', { message })
+        showToast({ level: 'danger', message: `Tabby import failed: ${message}` })
+      }
+    }
+  }
   function openGroupEditor(group: ProfileGroup) {
     setEditingGroup(group)
     setGroupDraft(JSON.parse(JSON.stringify(group)) as ProfileGroup)
@@ -1859,11 +1899,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         onClose={closeImportDialog}
         title="Import Connections"
         size="lg"
-        onSubmit={() => void runImport()}
         footer={
           <>
             <Button variant="primary" disabled={importBusy()} onClick={() => void runImport()}>
-              {importBusy() ? 'Importing…' : 'Import'}
+              {importBusy() ? 'Importing…' : importSource() === 'tabby' ? 'Preview' : 'Import'}
             </Button>
             <Button variant="default" disabled={importBusy()} onClick={closeImportDialog}>
               Cancel
@@ -1911,8 +1950,131 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           )}
         </Show>
 
+        {/* Passphrase field for encrypted Tabby vaults. */}
+        <Show when={importSource() === 'tabby'}>
+          <Field for="cm-import-passphrase" label="Vault passphrase (if encrypted)">
+            <TextField
+              id="cm-import-passphrase"
+              type="password"
+              value={importPassphrase()}
+              onInput={(v) => setImportPassphrase(v)}
+              placeholder="Leave blank unless the Tabby vault is encrypted"
+            />
+          </Field>
+        </Show>
+
         <p class="cm-hint cm-import-hint">{importHint()}</p>
       </Dialog>
+
+      {/* Tabby Import Preview Dialog */}
+      <Show when={previewOpen() && previewResult()}>
+        {(preview) => (
+          <Dialog
+            open={previewOpen()}
+            onClose={closePreview}
+            title="Tabby Import Preview"
+            size="lg"
+            footer={
+              <>
+                <Button
+                  variant="primary"
+                  disabled={importBusy()}
+                  onClick={() => void executeImport()}
+                >
+                  {importBusy() ? 'Importing…' : 'Import'}
+                </Button>
+                <Button variant="default" onClick={closePreview}>
+                  Cancel
+                </Button>
+              </>
+            }
+          >
+            <Stack gap="default">
+              <p>
+                The Tabby configuration contains <strong>{preview().profilesToImport}</strong>{' '}
+                {preview().profilesToImport === 1 ? 'profile' : 'profiles'},{' '}
+                <strong>{preview().groupsToImport}</strong>{' '}
+                {preview().groupsToImport === 1 ? 'group' : 'groups'}, and{' '}
+                <strong>{preview().credentialsToImport}</strong>{' '}
+                {preview().credentialsToImport === 1 ? 'credential' : 'credentials'}.
+              </p>
+
+              <Show when={preview().profileEntries && preview().profileEntries!.length > 0}>
+                <p>
+                  <strong>Profiles</strong>
+                </p>
+                <For each={preview().profileEntries || []}>
+                  {(entry) => (
+                    <p>
+                      {entry.name} —{' '}
+                      {entry.action === 'new'
+                        ? 'new'
+                        : entry.action === 'overwrite'
+                          ? 'will overwrite existing'
+                          : 'needs review'}
+                    </p>
+                  )}
+                </For>
+              </Show>
+
+              <Show when={preview().groupNames && preview().groupNames!.length > 0}>
+                <p>
+                  <strong>Groups</strong>
+                </p>
+                <For each={preview().groupNames || []}>{(name) => <p>{name}</p>}</For>
+              </Show>
+
+              <Show when={preview().credentialEntries && preview().credentialEntries!.length > 0}>
+                <p>
+                  <strong>Credentials</strong>
+                </p>
+                <For each={preview().credentialEntries || []}>
+                  {(entry) => (
+                    <p>
+                      {entry.name} ({entry.type})
+                    </p>
+                  )}
+                </For>
+              </Show>
+
+              <Show when={preview().collisions && preview().collisions!.length > 0}>
+                <p>
+                  <strong>Collisions</strong>
+                </p>
+                <For each={preview().collisions || []}>
+                  {(c) => (
+                    <p>
+                      {c.kind} "{c.name}" —{' '}
+                      {c.policy === 'overwrite'
+                        ? 'will be overwritten'
+                        : c.policy === 'refuse'
+                          ? 'import refused (already exists)'
+                          : 'needs review'}
+                    </p>
+                  )}
+                </For>
+              </Show>
+
+              <Show when={preview().skippedSecrets && preview().skippedSecrets!.length > 0}>
+                <p>
+                  <strong>Skipped secrets</strong>
+                </p>
+                <For each={preview().skippedSecrets || []}>
+                  {(s) => (
+                    <p>
+                      {s.secretType}: {s.reason}
+                    </p>
+                  )}
+                </For>
+              </Show>
+
+              <p>
+                <strong>Destination:</strong> {preview().secretProvider}
+              </p>
+            </Stack>
+          </Dialog>
+        )}
+      </Show>
 
       {/* Credential creation Dialog (from within connection form) */}
       <Show when={credDraft()}>

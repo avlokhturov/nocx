@@ -2,6 +2,8 @@ package transport
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/shady2k/nocx/internal/content"
@@ -130,6 +133,107 @@ type WSServer struct {
 	// connsMu protects conns. One entry per active WebSocket connection.
 	connsMu sync.Mutex
 	conns   map[*wsConn]struct{}
+
+	// planMu guards planStore. Plans are decrypted import plans keyed by
+	// opaque token, stored server-side so secrets never reach the renderer.
+	planMu    sync.Mutex
+	planStore map[string]*planEntry
+}
+
+// ── Tabby import plan store (server-side, never reaches renderer) ─────────
+
+// planEntry holds a decrypted import plan for one-time execution.
+// inProgress prevents concurrent execute calls for the same token.
+type planEntry struct {
+	plan       *importPlan
+	createdAt  time.Time
+	inProgress bool
+}
+
+// importPlan is the complete decrypted plan for a Tabby import.
+// Stored server-side by opaque token; secrets never leave the backend.
+type importPlan struct {
+	profiles []profile.SSHProfile
+	groups   []profile.ProfileGroup
+	creds    []credentialPlan
+}
+
+// credentialPlan pairs a credential's metadata with its decrypted secret value.
+type credentialPlan struct {
+	cred         profile.Credential
+	secret       string
+	isPassphrase bool
+}
+
+// planTTL is how long a plan remains valid after creation.
+const planTTL = 10 * time.Minute
+
+// maxPlans bounds the in-memory plan map to prevent unbounded accumulation.
+const maxPlans = 100
+
+// storePlan stores a plan and returns an opaque token.
+func (s *WSServer) storePlan(plan *importPlan) (string, error) {
+	s.planMu.Lock()
+	defer s.planMu.Unlock()
+
+	// Lazy init.
+	if s.planStore == nil {
+		s.planStore = make(map[string]*planEntry)
+	}
+
+	// Evict expired entries before adding.
+	now := time.Now()
+	for k, e := range s.planStore {
+		if now.Sub(e.createdAt) > planTTL {
+			delete(s.planStore, k)
+		}
+	}
+
+	if len(s.planStore) >= maxPlans {
+		return "", errors.New("plan store full")
+	}
+
+	var buf [32]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "", err
+	}
+	token := hex.EncodeToString(buf[:])
+	s.planStore[token] = &planEntry{plan: plan, createdAt: now}
+	return token, nil
+}
+
+// claimPlan marks a plan as in-progress and returns it. Returns nil if not
+// found, expired, or already claimed by a concurrent caller.
+func (s *WSServer) claimPlan(token string) *importPlan {
+	s.planMu.Lock()
+	defer s.planMu.Unlock()
+	e, ok := s.planStore[token]
+	if !ok || e.inProgress {
+		return nil
+	}
+	if time.Since(e.createdAt) > planTTL {
+		delete(s.planStore, token)
+		return nil
+	}
+	e.inProgress = true
+	return e.plan
+}
+
+// releasePlan clears the in-progress flag so the plan can be retried (e.g.
+// after vault setup/unlock). No-op if the token does not exist.
+func (s *WSServer) releasePlan(token string) {
+	s.planMu.Lock()
+	defer s.planMu.Unlock()
+	if e, ok := s.planStore[token]; ok {
+		e.inProgress = false
+	}
+}
+
+// finishPlan removes a completed plan from the store. No-op if not found.
+func (s *WSServer) finishPlan(token string) {
+	s.planMu.Lock()
+	defer s.planMu.Unlock()
+	delete(s.planStore, token)
 }
 
 // ProfileResolver maps a profile ID to an SSH host and connect config.
@@ -629,6 +733,10 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.handleProfileMethod(wconn, req)
 	case "profiles.importTabby":
 		s.handleImportTabby(wconn, req)
+	case "profiles.tabbyPreview":
+		s.handleTabbyPreview(wconn, req)
+	case "profiles.tabbyExecute":
+		s.handleTabbyExecute(wconn, req)
 	case "profiles.moveImpact":
 		s.handleProfileMoveImpact(wconn, req)
 	case "groups.impact":
@@ -1906,6 +2014,433 @@ func (s *WSServer) findCredentialByID(id string) (profile.Credential, bool, erro
 // passphrase. Tabby identifies the key only by a hash, which is unreadable on
 // its own, so the label says what it is and keeps enough of the hash to tell
 // two of them apart.
+// ── Tabby import preview types ──────────────────────────────────────────
+
+// TabbyPreviewResponse is returned by profiles.tabbyPreview.
+type TabbyPreviewResponse struct {
+	ProfilesToImport    int               `json:"profilesToImport"`
+	GroupsToImport      int               `json:"groupsToImport"`
+	CredentialsToImport int               `json:"credentialsToImport"`
+	ProfileEntries      []ProfileEntry    `json:"profileEntries,omitempty"`
+	GroupNames          []string          `json:"groupNames,omitempty"`
+	CredentialEntries   []CredentialEntry `json:"credentialEntries,omitempty"`
+	SkippedSecrets      []SkippedInfo     `json:"skippedSecrets,omitempty"`
+	Collisions          []CollisionInfo   `json:"collisions,omitempty"`
+	SecretProvider      string            `json:"secretProvider"`
+	PlanToken           string            `json:"planToken"`
+}
+
+// ProfileEntry describes one profile the import would create or modify.
+type ProfileEntry struct {
+	Name   string `json:"name"`
+	Action string `json:"action"` // "new", "overwrite", "needs-review"
+}
+
+// CredentialEntry describes one credential the import would create.
+type CredentialEntry struct {
+	Name string `json:"name"`
+	Type string `json:"type"` // "password" or "passphrase"
+}
+
+// SkippedInfo describes one skipped secret and why.
+type SkippedInfo struct {
+	SecretType string `json:"secretType"`
+	Reason     string `json:"reason"`
+}
+
+// CollisionInfo describes one collision in an import plan.
+type CollisionInfo struct {
+	Kind   string `json:"kind"`   // "profile", "group", "credential"
+	Name   string `json:"name"`   // the identifier that collides
+	Policy string `json:"policy"` // "overwrite", "refuse", "needs-review"
+}
+
+// tabbyExecuteParams is the payload for profiles.tabbyExecute.
+type tabbyExecuteParams struct {
+	PlanToken string `json:"planToken"`
+}
+
+// planTabbyImport parses a Tabby config, decrypts its vault (if passphrase
+// supplied), and plans every profile, group, and credential WITHOUT writing
+// anything. Returns the full importPlan for execution and a preview response
+// for the renderer. The plan is stored server-side by the returned token.
+func (s *WSServer) planTabbyImport(configYAML, passphrase string) (*importPlan, *TabbyPreviewResponse, error) {
+	cfg, err := importer.ParseTabbyConfig([]byte(configYAML))
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Decrypt vault and build credentials + profile matching.
+	var credentials []credentialPlan
+	type pwKey struct {
+		user, host string
+		port       int
+	}
+	pwLookup := make(map[pwKey]string)
+	skipped := make([]SkippedInfo, 0)
+
+	if cfg.Vault != nil && cfg.Vault.Encrypted {
+		if passphrase == "" {
+			return nil, nil, errors.New("vault is encrypted: passphrase required")
+		}
+		vaultContents, decryptErr := importer.DecryptTabbyVault(cfg.Vault, passphrase)
+		if decryptErr != nil {
+			return nil, nil, decryptErr
+		}
+
+		for _, sec := range vaultContents.DecodedSecrets() {
+			var val string
+			umErr := json.Unmarshal(sec.Value, &val)
+			if umErr != nil || val == "" {
+				skipped = append(skipped, SkippedInfo{
+					SecretType: sec.Type,
+					Reason:     "unreadable value",
+				})
+				continue
+			}
+			switch sec.Type {
+			case "ssh:password":
+				var t struct {
+					User string `json:"user"`
+					Host string `json:"host"`
+					Port int    `json:"port"`
+				}
+				umErr = json.Unmarshal(sec.Key, &t)
+				if umErr != nil || t.Host == "" {
+					skipped = append(skipped, SkippedInfo{
+						SecretType: sec.Type,
+						Reason:     "unreadable key (missing host)",
+					})
+					continue
+				}
+				name := t.User + "@" + t.Host
+				credID := profile.NewCredentialID(name)
+				cred := profile.Credential{
+					ID:       credID,
+					Name:     name,
+					Username: t.User,
+					Auth:     profile.AuthPassword,
+				}
+				pk := pwKey{user: t.User, host: t.Host, port: t.Port}
+				pwLookup[pk] = credID
+				credentials = append(credentials, credentialPlan{
+					cred:   cred,
+					secret: val,
+				})
+
+			case "ssh:key-passphrase":
+				var k struct {
+					Hash string `json:"hash"`
+				}
+				umErr = json.Unmarshal(sec.Key, &k)
+				if umErr != nil || k.Hash == "" {
+					skipped = append(skipped, SkippedInfo{
+						SecretType: sec.Type,
+						Reason:     "unreadable key (missing hash)",
+					})
+					continue
+				}
+				keyName := privateKeyLabel(k.Hash)
+				cred := profile.Credential{
+					ID:   profile.NewCredentialID(keyName),
+					Name: keyName,
+					Auth: profile.AuthPublicKey,
+				}
+				credentials = append(credentials, credentialPlan{
+					cred:         cred,
+					secret:       val,
+					isPassphrase: true,
+				})
+
+			default:
+				skipped = append(skipped, SkippedInfo{
+					SecretType: sec.Type,
+					Reason:     "unhandled secret type",
+				})
+			}
+		}
+	}
+
+	// Convert profiles and match credentials.
+	var profiles []profile.SSHProfile
+	for _, tp := range cfg.Profiles {
+		if tp.Type != "ssh" {
+			continue
+		}
+		p := importer.ConvertProfile(tp)
+		if p.Options.User != nil && p.Options.Host != "" {
+			port := 0
+			if p.Options.Port != nil {
+				port = *p.Options.Port
+			}
+			user := ""
+			if p.Options.User != nil {
+				user = *p.Options.User
+			}
+			if credID, ok := pwLookup[pwKey{user: user, host: p.Options.Host, port: port}]; ok {
+				p.Options.CredentialID = credID
+			}
+		}
+		profiles = append(profiles, p)
+	}
+
+	// Convert groups.
+	var groups []profile.ProfileGroup
+	for _, tg := range cfg.Groups {
+		var defaults *profile.ProfileDefaults
+		if tg.Defaults != nil {
+			d, decodeErr := profile.DecodeDefaults(tg.Defaults)
+			if decodeErr != nil {
+				return nil, nil, fmt.Errorf("group %q defaults: %w", tg.Name, decodeErr)
+			}
+			defaults = &d
+		}
+		groups = append(groups, profile.ProfileGroup{
+			ID:            tg.ID,
+			ParentGroupID: tg.ParentGroupID,
+			Name:          tg.Name,
+			Icon:          tg.Icon,
+			Color:         tg.Color,
+			Defaults:      defaults,
+			Editable:      true,
+		})
+	}
+
+	// Build per-entry preview lists.
+	profileEntries := make([]ProfileEntry, 0, len(profiles))
+	groupNames := make([]string, 0, len(groups))
+	credentialEntries := make([]CredentialEntry, 0, len(credentials))
+
+	// Determine which profiles collide (for setting their action).
+	existingProfileIDs := make(map[string]bool)
+	if s.profiles != nil {
+		existingProfs, _ := s.profiles.LoadProfiles()
+		for _, p := range existingProfs {
+			existingProfileIDs[p.ID] = true
+		}
+	}
+	for _, p := range profiles {
+		action := "new"
+		if p.ID != "" && existingProfileIDs[p.ID] {
+			action = "overwrite"
+		}
+		// Check if this profile references an existing local credential.
+		if p.Options.CredentialID != "" && s.credMeta != nil {
+			existingCreds, _ := s.credMeta.LoadCredentials()
+			for _, c := range existingCreds {
+				if c.ID == p.Options.CredentialID {
+					action = "needs-review"
+					break
+				}
+			}
+		}
+		profileEntries = append(profileEntries, ProfileEntry{Name: p.Name, Action: action})
+	}
+	for _, g := range groups {
+		groupNames = append(groupNames, g.Name)
+	}
+	for _, cp := range credentials {
+		typ := "password"
+		if cp.isPassphrase {
+			typ = "passphrase"
+		}
+		credentialEntries = append(credentialEntries, CredentialEntry{Name: cp.cred.Name, Type: typ})
+	}
+
+	// Build preview response with collision info.
+	preview := &TabbyPreviewResponse{
+		ProfilesToImport:    len(profiles),
+		GroupsToImport:      len(groups),
+		CredentialsToImport: len(credentials),
+		ProfileEntries:      profileEntries,
+		GroupNames:          groupNames,
+		CredentialEntries:   credentialEntries,
+		SkippedSecrets:      skipped,
+	}
+
+	// Detect collisions by checking against current store state.
+	if s.profiles != nil {
+		existingProfs, _ := s.profiles.LoadProfiles()
+		existingIDs := make(map[string]bool, len(existingProfs))
+		for _, p := range existingProfs {
+			existingIDs[p.ID] = true
+		}
+		for _, p := range profiles {
+			if p.ID != "" && existingIDs[p.ID] {
+				preview.Collisions = append(preview.Collisions, CollisionInfo{
+					Kind:   "profile",
+					Name:   p.Name,
+					Policy: "overwrite",
+				})
+			}
+		}
+	}
+
+	if s.groups != nil {
+		existingGroups, _ := s.groups.LoadGroups()
+		existingIDs := make(map[string]bool, len(existingGroups))
+		for _, g := range existingGroups {
+			existingIDs[g.ID] = true
+		}
+		for _, g := range groups {
+			if g.ID != "" && existingIDs[g.ID] {
+				preview.Collisions = append(preview.Collisions, CollisionInfo{
+					Kind:   "group",
+					Name:   g.Name,
+					Policy: "overwrite",
+				})
+			}
+		}
+	}
+
+	if s.credMeta != nil {
+		existingCreds, _ := s.credMeta.LoadCredentials()
+		existingIDs := make(map[string]bool, len(existingCreds))
+		for _, c := range existingCreds {
+			existingIDs[c.ID] = true
+		}
+		for _, cp := range credentials {
+			if cp.cred.ID != "" && existingIDs[cp.cred.ID] {
+				preview.Collisions = append(preview.Collisions, CollisionInfo{
+					Kind:   "credential",
+					Name:   cp.cred.Name,
+					Policy: "refuse",
+				})
+			}
+		}
+		// Check for profiles that would reference existing local credentials
+		// (needs-review case). This applies even for credentials not in the plan.
+		for _, p := range profiles {
+			if p.Options.CredentialID != "" && existingIDs[p.Options.CredentialID] {
+				preview.Collisions = append(preview.Collisions, CollisionInfo{
+					Kind:   "profile",
+					Name:   p.Name,
+					Policy: "needs-review",
+				})
+			}
+		}
+	}
+
+	// Determine secret provider.
+	preview.SecretProvider = s.secretProviderName()
+
+	// Build the plan and store it.
+	plan := &importPlan{
+		profiles: profiles,
+		groups:   groups,
+		creds:    credentials,
+	}
+	token, err := s.storePlan(plan)
+	if err != nil {
+		return nil, nil, fmt.Errorf("store plan: %w", err)
+	}
+	preview.PlanToken = token
+
+	return plan, preview, nil
+}
+
+// secretProviderName returns a human-readable name for where secrets would be
+// stored. Uses the vault lifecycle if wired, otherwise returns "secret store".
+func (s *WSServer) secretProviderName() string {
+	if s.vaultLifecycle == nil {
+		return "secret store"
+	}
+	snap := s.vaultLifecycle.Snapshot(context.Background())
+	for _, p := range snap.Providers {
+		if string(p.ID) == "system" && p.Writable && p.Ready {
+			return "OS keychain"
+		}
+	}
+	return "encrypted file"
+}
+
+// handleTabbyPreview parses a Tabby config and returns a preview of what
+// would be imported, without writing anything. Uses planTabbyImport for the
+// shared planning logic.
+func (s *WSServer) handleTabbyPreview(wconn *wsConn, req jsonrpcRequest) {
+	if s.profiles == nil || s.groups == nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "profiles not available"))
+		return
+	}
+	var params struct {
+		Config     string `json:"config"`
+		Passphrase string `json:"passphrase,omitempty"`
+	}
+	if err := json.Unmarshal(req.Params, &params); err != nil || params.Config == "" {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: config (YAML string) required"))
+		return
+	}
+
+	plan, preview, err := s.planTabbyImport(params.Config, params.Passphrase)
+	if err != nil {
+		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "Tabby preview: ", err))
+		return
+	}
+	_ = plan // stored server-side by preview.PlanToken
+	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(preview)))
+}
+
+// handleTabbyExecute executes a previously previewed Tabby import plan.
+// Takes the plan token from the preview response.
+func (s *WSServer) handleTabbyExecute(wconn *wsConn, req jsonrpcRequest) {
+	if s.profiles == nil || s.groups == nil || s.credentials == nil || s.profileSvc == nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "import not available"))
+		return
+	}
+	var params tabbyExecuteParams
+	if err := json.Unmarshal(req.Params, &params); err != nil || params.PlanToken == "" {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: planToken required"))
+		return
+	}
+
+	// Claim the plan so concurrent calls for the same token are rejected.
+	plan := s.claimPlan(params.PlanToken)
+	if plan == nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Plan not found, expired, or already in progress. Please preview again."))
+		return
+	}
+
+	// On any failure, release the plan for retry (vault setup/unlock flow).
+	var succeeded bool
+	defer func() {
+		if !succeeded {
+			s.releasePlan(params.PlanToken)
+		}
+	}()
+
+	// Recompute credentials with actual secret IDs.
+	ctx := context.Background()
+	for i, cp := range plan.creds {
+		secretID, err := s.credentials.Create(ctx, credential.NewSecret(cp.secret))
+		if err != nil {
+			_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "Store secret: ", err))
+			return
+		}
+		if cp.isPassphrase {
+			plan.creds[i].cred.PassphraseSecretID = string(secretID)
+		} else {
+			plan.creds[i].cred.SecretID = string(secretID)
+		}
+	}
+
+	// Build the credential list for import.
+	var creds []profile.Credential
+	for _, cp := range plan.creds {
+		creds = append(creds, cp.cred)
+	}
+
+	result := s.profileSvc.AtomicImport(plan.profiles, plan.groups, creds)
+	if len(result.ImportErrors) > 0 {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Import failed: "+result.ImportErrors[0]))
+		return
+	}
+
+	// All writes succeeded — remove the plan permanently.
+	s.finishPlan(params.PlanToken)
+	succeeded = true
+	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(result)))
+}
+
 func privateKeyLabel(hash string) string {
 	short := hash
 	if len(short) > 8 {
