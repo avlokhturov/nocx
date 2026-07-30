@@ -2,7 +2,7 @@
 
 - **Date:** 2026-07-30
 - **Beads:** nocx-nfvd (this brainstorm), nocx-25k9 (epic), nocx-25k9.1 (the wiring bug this answers)
-- **Touches:** ADR-0011 (amended twice — see §3 and §11), ADR-0006, AD-8
+- **Touches:** ADR-0011 (§1 amended — see §3; §2 upheld — see §3.1), ADR-0006, AD-8
 - **Status:** approved section by section by the owner, then adversarially reviewed against a peer
   agent (codex) on 2026-07-30. The review overturned four of my positions; §4.1, §4.2, §5.4 and §7.2
   are the result, not the original draft.
@@ -79,8 +79,8 @@ Everything below is justified against this list. A control that protects nothing
 **In scope:**
 
 - **T1 — brief access to an unlocked machine.** A colleague, a conference, a borrowed desk. The
-  dominant real-world case for a terminal. Countered by: idle seal, plaintext never rendered without
-  an explicit action, clipboard auto-clear.
+  dominant real-world case for a terminal. Countered by: idle seal, and the fact that a stored secret
+  cannot be displayed or copied at all (§3.1) — there is nothing on screen to read.
 - **T2 — data at rest.** Stolen or lost disk, a backup, a config directory that ends up in a
   dotfiles repo or a cloud folder. Countered by: AEAD-encrypted blob whose key is not stored beside
   it; the keychain encrypts on its own.
@@ -106,9 +106,11 @@ Everything below is justified against this list. A control that protects nothing
    the keychain, so the master passphrase adds nothing against T2. The passphrase only matters in the
    mode where the OS-held key is absent. That toggle is therefore the single place a user picks a
    security level, and it must be labelled as such.
-4. **Clipboard clearing is best-effort and must be described as such.** A clipboard manager, a shell
-   integration or another application may have taken a copy within the interval. It reduces the T1
-   window; it does not close it.
+4. **The only plaintext that ever reaches the renderer is material the user is entering or being
+   given once** — a passphrase being typed, a recovery code being generated. Never a stored secret
+   read back (§3.1). Where such material offers Copy, the clipboard is cleared on a timer and that
+   clearing is **best-effort**: a clipboard manager, a shell integration or another application may
+   already have taken a copy. It narrows the window; it does not close it.
 
 **Deliberately not defended:** the user copying a secret into another app; an already-established SSH
 session (the secret was spent at authentication and seal cannot recall it); any form of sync
@@ -136,7 +138,28 @@ shipped platform has no keychain and the alternative is a build on which no secr
 all. The rest of ADR-0011 — three storage capabilities, secrets as opaque references, backend-only
 resolution, cross-store writes as explicit journalled workflows — stands unchanged and is reinforced.
 
-A second ADR-0011 clause is at stake and is **not** settled here; see §11.
+### 3.1 A second ADR-0011 clause is at stake, and it survives: there is no Reveal
+
+The peer review surfaced this and the owner settled it on 2026-07-30. ADR-0011 §2 does not merely
+discourage returning plaintext to the renderer:
+
+> The boundary is that the renderer has no API that returns a secret.
+>
+> Consequently `credentials.lookupPassword` and every sibling RPC that returns plaintext is
+> **removed, not fixed**. A secret-class setting generates an editor whose operations are `set`,
+> `delete` and `exists` — **never `get`**.
+
+That was written after an observed leak in PR #11. A "Reveal this secret" affordance would reinstate
+the exact RPC shape that clause deleted, and once plaintext reaches JavaScript it lives in immutable
+strings that cannot be wiped.
+
+**Decision: no Reveal, and no Copy of a stored secret.** A user who has forgotten a stored password
+_replaces_ it; they do not read it back. ADR-0011 §2 stands unamended, and ADR-0016 amends ADR-0011
+in exactly one place — §1's "never a file we write".
+
+This is a real capability the product does not have, and it is a deliberate trade, not an oversight:
+nocx is not a password manager, and the one class of leak that has actually occurred in this repo is
+the one this clause prevents.
 
 One further nuance: DocumentStore is justified in ADR-0011 as "human-recoverable configuration… a
 user can open these in an editor and repair them". The `file` provider's blob is the one document
@@ -568,7 +591,9 @@ passphrase rotation are V2; V1 creates only the key material its own acceptance 
 Shipping them dark would repeat exactly the failure that produced `nocx-25k9.1`.
 
 **V2 — the Vault surface.** Lifecycle, providers, default provider, auto-seal setting, passphrase and
-recovery management. It is **not** an entry list. Secret references are minted by at least two
+recovery management. It is **not** an entry list, and it has no Reveal and no Copy of a stored secret
+(§3.1) — a forgotten password is replaced through the credential UI, never read back. Secret
+references are minted by at least two
 independent domains — credentials (`ws.go:1638`) and settings (`settings.go:867`) — so a generic
 "vault entries" page would have to aggregate every metadata repository that owns references, which
 recreates the central switch over domain types that §4.1 just removed. Credential secrets stay in the
@@ -595,7 +620,9 @@ only.
 3. Routing lives in the `SecretID` and is parsed only inside the Vault. No consumer branches on it.
 4. The Vault mints every reference. The renderer never supplies one.
 5. An unresolvable reference is preserved and reported, never re-routed to another provider.
-6. No plaintext in any ordinary response, and none in any log.
+6. **No response returns a stored secret — there is no `get` and no Reveal** (§3.1). The only
+   plaintext crossing to the renderer is material being entered or generated once; none of it is read
+   back from a provider. Nothing plaintext reaches any log.
 7. Global seal is a **policy** boundary for the `system` provider and a **cryptographic** one for the
    `file` provider. Seal cannot revoke bytes already handed out.
 8. Only the default provider is used implicitly; the Vault never silently tries another.
@@ -608,17 +635,10 @@ only.
 
 ---
 
-## 11. Open — needs the owner, or real hardware
+## 11. Open — needs real hardware or a measurement
 
-- **Reveal versus ADR-0011 §2 — needs the owner, and the architectural default is "drop it".**
-  ADR-0011 does not merely discourage returning plaintext to the renderer; it states "The boundary is
-  that the renderer has no API that returns a secret", and then "`credentials.lookupPassword` and
-  every sibling RPC that returns plaintext is **removed, not fixed**. A secret-class setting generates
-  an editor whose operations are `set`, `delete` and `exists` — **never `get`**." That clause was
-  written after an observed leak in PR #11. A V2 Reveal reinstates the exact RPC shape that was
-  deliberately deleted, and once plaintext reaches JavaScript it lives in immutable strings that
-  cannot be wiped. Unless the owner explicitly reopens that boundary for a concrete user need, the
-  accepted ADR wins and there is no Reveal — the safe alternative is secret _replacement_ only.
+Both remaining items are measurements, not decisions. Every design question is settled.
+
 - **macOS keychain ACL.** The claim that items created through `/usr/bin/security` are readable by any
   same-user process invoking the same utility is consistent with how `security` sets an item's trusted
   application list, but neither CI nor the dev machine can verify it. Confirm on a real Mac before
