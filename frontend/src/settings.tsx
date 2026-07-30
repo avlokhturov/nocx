@@ -107,6 +107,7 @@ export interface SettingsComponentProps {
   profileClient: ProfileClient
   observer?: SettingsObserver
   onConnect?: (profile: SSHProfile) => void
+  vaultController?: import('./vault').VaultController
   ref?: { current: SettingsComponentHandle | null }
 }
 
@@ -317,6 +318,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
       renderContent: () => (
         <ConnectionsView
           client={props.profileClient}
+          vaultController={props.vaultController}
           onConnect={props.onConnect}
           newProfileRequest={newConnectionRequest()}
           onNavigateToCredentials={() => setActiveComponentPage('credentials')}
@@ -327,12 +329,10 @@ export function SettingsComponent(props: SettingsComponentProps) {
       kind: 'component',
       id: 'credentials',
       title: 'Credentials',
-      // Same manager shell as Connections: its CollectionView owns the
-      // toolbar gutter and the scrolling list. Page mode adds a second page
-      // gutter around it, making two instances of the same component visibly
-      // different.
       scrollMode: 'contained',
-      renderContent: () => <CredentialsSection client={props.profileClient} />,
+      renderContent: () => (
+        <CredentialsSection client={props.profileClient} vaultController={props.vaultController} />
+      ),
     }
     return [...generated, exportPage, connectionPage, credentialsPage]
   })

@@ -19,6 +19,7 @@ import type { WSClient, SessionHandle } from './ipc'
 import { showConfirm } from './ui/dialog'
 import { BaseTabContent, type TabHost, type ContentViewport } from './tab-content'
 import { type ProfileClient, type SSHAliasEntry } from './profiles'
+import { RpcError } from './dispatcher'
 
 // How long the grid must hold still before the PTY is told about it.
 const RESIZE_SETTLE_MS = 80
@@ -142,6 +143,8 @@ export class TerminalContent extends BaseTabContent {
     /** Called when the session is an alias (not a saved profile) and can be
      *  adopted as a nocx connection. True = adoptable, False = not. */
     private readonly onAdoptabilityChange?: (adoptable: boolean) => void,
+    /** Called when an SSH connection fails because the vault is sealed. */
+    private readonly onVaultSealed?: () => void,
   ) {
     super()
     this._readyPromise = new Promise<boolean>((resolve) => {
@@ -617,6 +620,15 @@ export class TerminalContent extends BaseTabContent {
         this.viewportChanged(this._latestViewport)
       }
     } catch (err) {
+      // Vault-sealed errors should surface as Unlock dialog, not generic error.
+      if (err instanceof RpcError) {
+        const data = err.data as { reason?: string } | undefined
+        if (data?.reason === 'vault-sealed') {
+          this.onVaultSealed?.()
+          this._readyResolve(false)
+          return
+        }
+      }
       const notice = document.createElement('pre')
       notice.className = 'pane-error'
       notice.textContent = `Terminal failed to start:\n\n${err instanceof Error ? err.message : String(err)}`

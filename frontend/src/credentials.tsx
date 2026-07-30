@@ -21,6 +21,7 @@ import { PencilIcon, TrashIcon } from './ui/icons'
 
 export interface CredentialsSectionProps {
   client: ProfileClient
+  vaultController?: import('./vault').VaultController
 }
 
 function authModeLabel(mode: string): string {
@@ -173,9 +174,15 @@ export function CredentialsSection(props: CredentialsSectionProps) {
       } else {
         saved = await props.client.createCredential(cred)
       }
-
       if (cred.auth === 'password' && passwordValue()) {
-        await props.client.savePassword(saved.id, passwordValue())
+        const saveFn = async () => {
+          await props.client.savePassword(saved.id, passwordValue())
+        }
+        if (props.vaultController) {
+          await props.vaultController.saveSecretWithVault(saveFn)
+        } else {
+          await saveFn()
+        }
       }
 
       closeDialog()

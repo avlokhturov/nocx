@@ -1,6 +1,7 @@
 import './style.css'
 import { GetWSPort, GetWSToken, CheckForUpdate, ReportHealthy } from '../wailsjs/go/main/WailsApp'
 import { render } from 'solid-js/web'
+import { Show } from 'solid-js'
 import App from './App'
 import { log } from './log'
 import { WSClient } from './ipc'
@@ -9,6 +10,9 @@ import { mountSidebar } from './sidebar'
 import { createClipboardAccess, ClipboardGate } from './clipboard'
 import { ClipboardBannerImpl } from './banner'
 import { ProfileClient } from './profiles'
+import { VaultClient } from './vault-client'
+import { createVaultState, SetupDialog, UnlockDialog } from './vault'
+import { VaultObserver } from './vault-observer'
 import { Dispatcher } from './dispatcher'
 import { SettingsContent, SURFACE_SETTINGS, SINGLETON_SETTINGS } from './settings-content'
 import { HorizontalTabStrip, VerticalTabStrip } from './tab-strip'
@@ -75,6 +79,13 @@ async function main() {
   const client = new WSClient(dispatcher)
   await client.connect(port, host, token)
   const profileClient = new ProfileClient(dispatcher)
+  const vaultClient = new VaultClient(dispatcher)
+  const vaultObserver = new VaultObserver(dispatcher)
+  const vaultController = createVaultState(vaultClient)
+  vaultObserver.start(() => {
+    void vaultController.refresh()
+  })
+  void vaultController.refresh()
 
   // The generated-screen invariant says no setting key appears in the frontend,
   // and it is about the SCREEN: settings.ts and settings-content.ts render from
@@ -116,6 +127,7 @@ async function main() {
     profileClient,
     tabStrip,
   )
+  tm.onVaultSealed = () => vaultController.openUnlock()
 
   // Surface registry — surfaces declared once, every entry point resolves
   // through the registry rather than rebuilding the descriptor. (AD-8)
@@ -123,22 +135,22 @@ async function main() {
   registry.register(SURFACE_ID_SETTINGS, {
     surfaceType: SURFACE_SETTINGS,
     singletonKey: SINGLETON_SETTINGS,
-    // Settings hosts the Connections page (nocx-imkb.3), so it needs the same
-    // connect callback the standalone surface has. Assigned inside the factory,
-    // before mount: the factory builds a fresh SettingsContent each time it is
-    // opened, and a setter applied afterwards would leave the first connect
-    // click of a freshly opened tab with nothing to call.
     factory: () => {
-      const content = new SettingsContent(profileClient)
+      const content = new SettingsContent(profileClient, undefined, vaultController)
       content.onConnect = (profile) => {
         log.info('nocx: connect from Settings', { profileId: profile.id })
-        tm.newSSHTab(
-          profile.id,
-          profile.options.host,
-          profile.options.user,
-          profile.options.port,
-          profile.name,
-        )
+        // Vault preflight: if sealed, ensureBeforeSave shows UnlockDialog
+        // and defers newSSHTab until after unseal.
+        vaultController.ensureBeforeSave(() => {
+          void tm.newSSHTab(
+            profile.id,
+            profile.options.host,
+            profile.options.user,
+            profile.options.port,
+            profile.name,
+          )
+          return Promise.resolve()
+        })
       }
       return content
     },
@@ -303,6 +315,35 @@ async function main() {
       }
     })()
   }, DAY_MS)
+
+  // ── Vault dialogs ────────────────────────────────────────────────────
+  // Mounted at the app level so they float over every page, not just Settings.
+  const vaultRoot = document.createElement('div')
+  document.body.append(vaultRoot)
+  render(
+    () => (
+      <>
+        <Show when={vaultController.showSetup()}>
+          <SetupDialog
+            open={vaultController.showSetup()}
+            onClose={() => vaultController.closeSetup()}
+            onSetupComplete={() => vaultController.onSetupDone()}
+            vaultClient={vaultClient}
+          />
+        </Show>
+        <Show when={vaultController.showUnlock()}>
+          <UnlockDialog
+            open={vaultController.showUnlock()}
+            onClose={() => vaultController.closeUnlock()}
+            onUnsealed={() => vaultController.onUnsealDone()}
+            vaultClient={vaultClient}
+            vaultStatus={vaultController.status()}
+          />
+        </Show>
+      </>
+    ),
+    vaultRoot,
+  )
 }
 
 main().catch((err) => log.error('nocx: main error', { message: (err as Error).message }))

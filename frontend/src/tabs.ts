@@ -326,6 +326,8 @@ export class TabManager {
   private readonly verticalHost: HTMLElement
   /** MRU stack: most-recently-activated tab ids. */
   private readonly recentTabIds: number[] = []
+  /** Called when an SSH connection fails because the vault is sealed. */
+  onVaultSealed?: () => void
 
   constructor(
     bar: HTMLElement,
@@ -451,6 +453,7 @@ export class TabManager {
           tab.setAdoptState(false, () => {})
         }
       },
+      this.onVaultSealed,
     )
     const descriptor: ContentDescriptor = {
       surfaceType: SURFACE_TERMINAL,

@@ -2,7 +2,8 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { cleanup, render, screen, fireEvent } from '@solidjs/testing-library'
 import { SetupDialog, UnlockDialog, createVaultState } from './vault'
-import { VaultClient } from './vault-client'
+import type { VaultClient } from './vault-client'
+import { RpcError } from './dispatcher'
 
 // ── jsdom patch: native <dialog> showModal/close are unsupported ──────
 // jsdom 29 does not implement HTMLDialogElement.prototype.showModal.
@@ -232,6 +233,180 @@ describe('createVaultState', () => {
   })
 })
 
+// ── saveSecretWithVault — operation-first vault error handling ──────────
+
+function makeRpcError(reason: string): Error {
+  return new RpcError('vault error', -32000, { reason })
+}
+
+describe('saveSecretWithVault', () => {
+  it('vault-uninitialized + no OS key: shows SetupDialog, retries save after setup', async () => {
+    const { client, status, setup } = mockClient()
+    status.mockResolvedValue({ state: 'uninitialized', osKeyAvailable: false, providers: [] })
+    setup.mockResolvedValue({})
+
+    const ctrl = createVaultState(client)
+    await ctrl.refresh()
+
+    const savePassword = vi
+      .fn<(...args: string[]) => Promise<void>>()
+      .mockRejectedValueOnce(makeRpcError('vault-uninitialized'))
+      .mockResolvedValueOnce(undefined)
+    const saveFn = () => savePassword('my-pw')
+
+    const promise = ctrl.saveSecretWithVault(saveFn)
+
+    await vi.waitFor(() => expect(ctrl.showSetup()).toBe(true))
+    expect(ctrl.showUnlock()).toBe(false)
+    expect(savePassword).toHaveBeenCalledTimes(1)
+
+    ctrl.onSetupDone()
+    await expect(promise).resolves.toBeUndefined()
+    expect(savePassword).toHaveBeenCalledTimes(2)
+    expect(savePassword.mock.calls[0]).toEqual(['my-pw'])
+    expect(savePassword.mock.calls[1]).toEqual(['my-pw'])
+  })
+
+  it('vault-uninitialized + osKeyAvailable: silent setup, no dialog, retries save', async () => {
+    const { client, status, setup } = mockClient()
+    status.mockResolvedValue({ state: 'uninitialized', osKeyAvailable: true, providers: [] })
+    setup.mockResolvedValue({})
+
+    const ctrl = createVaultState(client)
+    await ctrl.refresh()
+
+    const savePassword = vi
+      .fn<(...args: string[]) => Promise<void>>()
+      .mockRejectedValueOnce(makeRpcError('vault-uninitialized'))
+      .mockResolvedValueOnce(undefined)
+    const saveFn = () => savePassword('my-pw')
+
+    const promise = ctrl.saveSecretWithVault(saveFn)
+
+    await expect(promise).resolves.toBeUndefined()
+    expect(ctrl.showSetup()).toBe(false)
+    expect(ctrl.showUnlock()).toBe(false)
+    expect(setup).toHaveBeenCalledWith({})
+    expect(savePassword).toHaveBeenCalledTimes(2)
+    expect(savePassword.mock.calls[0]).toEqual(['my-pw'])
+    expect(savePassword.mock.calls[1]).toEqual(['my-pw'])
+  })
+
+  it('vault-sealed: shows UnlockDialog, retries after unseal', async () => {
+    const { client, status } = mockClient()
+    status.mockResolvedValue({ state: 'sealed', osKeyAvailable: true, providers: [] })
+
+    const ctrl = createVaultState(client)
+    await ctrl.refresh()
+
+    const savePassword = vi
+      .fn<(...args: string[]) => Promise<void>>()
+      .mockRejectedValueOnce(makeRpcError('vault-sealed'))
+      .mockResolvedValueOnce(undefined)
+    const saveFn = () => savePassword('my-pw')
+
+    const promise = ctrl.saveSecretWithVault(saveFn)
+
+    await vi.waitFor(() => expect(ctrl.showUnlock()).toBe(true))
+    expect(ctrl.showSetup()).toBe(false)
+    expect(savePassword).toHaveBeenCalledTimes(1)
+
+    ctrl.onUnsealDone()
+    await expect(promise).resolves.toBeUndefined()
+    expect(savePassword).toHaveBeenCalledTimes(2)
+  })
+
+  it('non-vault error: propagates to caller', async () => {
+    const { client, status } = mockClient()
+    status.mockResolvedValue({ state: 'unsealed', osKeyAvailable: false, providers: [] })
+
+    const ctrl = createVaultState(client)
+    await ctrl.refresh()
+
+    const saveFn = vi.fn().mockRejectedValue(new Error('network error'))
+    const promise = ctrl.saveSecretWithVault(saveFn)
+
+    await expect(promise).rejects.toThrow('network error')
+  })
+
+  it('silent setup failure: rejects so caller shows error', async () => {
+    const { client, status, setup } = mockClient()
+    status.mockResolvedValue({ state: 'uninitialized', osKeyAvailable: true, providers: [] })
+    setup.mockRejectedValue(new Error('secret-service-unavailable'))
+
+    const ctrl = createVaultState(client)
+    await ctrl.refresh()
+
+    const saveFn = vi.fn().mockRejectedValueOnce(makeRpcError('vault-uninitialized'))
+    const promise = ctrl.saveSecretWithVault(saveFn)
+
+    await expect(promise).rejects.toThrow('secret-service-unavailable')
+    expect(saveFn).toHaveBeenCalledTimes(1)
+  })
+
+  it('retry failure after unlock: rejects', async () => {
+    const { client, status } = mockClient()
+    status.mockResolvedValue({ state: 'sealed', osKeyAvailable: false, providers: [] })
+
+    const ctrl = createVaultState(client)
+    await ctrl.refresh()
+
+    const savePassword = vi
+      .fn<(...args: string[]) => Promise<void>>()
+      .mockRejectedValueOnce(makeRpcError('vault-sealed'))
+      .mockRejectedValueOnce(new Error('still-sealed'))
+    const saveFn = () => savePassword('pw')
+
+    const promise = ctrl.saveSecretWithVault(saveFn)
+
+    await vi.waitFor(() => expect(ctrl.showUnlock()).toBe(true))
+    ctrl.onUnsealDone()
+
+    await expect(promise).rejects.toThrow('still-sealed')
+    expect(savePassword).toHaveBeenCalledTimes(2)
+  })
+
+  it('user cancels setup dialog: resolves without saving', async () => {
+    const { client, status } = mockClient()
+    status.mockResolvedValue({ state: 'uninitialized', osKeyAvailable: false, providers: [] })
+
+    const ctrl = createVaultState(client)
+    await ctrl.refresh()
+
+    const savePassword = vi
+      .fn<(...args: string[]) => Promise<void>>()
+      .mockRejectedValueOnce(makeRpcError('vault-uninitialized'))
+    const saveFn = () => savePassword('pw')
+    const promise = ctrl.saveSecretWithVault(saveFn)
+
+    await vi.waitFor(() => expect(ctrl.showSetup()).toBe(true))
+    ctrl.closeSetup()
+
+    await expect(promise).resolves.toBeUndefined()
+    expect(savePassword).toHaveBeenCalledTimes(1)
+  })
+
+  it('user cancels unlock dialog: resolves without saving', async () => {
+    const { client, status } = mockClient()
+    status.mockResolvedValue({ state: 'sealed', osKeyAvailable: false, providers: [] })
+
+    const ctrl = createVaultState(client)
+    await ctrl.refresh()
+
+    const savePassword = vi
+      .fn<(...args: string[]) => Promise<void>>()
+      .mockRejectedValueOnce(makeRpcError('vault-sealed'))
+    const saveFn = () => savePassword('pw')
+    const promise = ctrl.saveSecretWithVault(saveFn)
+
+    await vi.waitFor(() => expect(ctrl.showUnlock()).toBe(true))
+    ctrl.closeUnlock()
+
+    await expect(promise).resolves.toBeUndefined()
+    expect(savePassword).toHaveBeenCalledTimes(1)
+  })
+})
+
 // ── SetupDialog ────────────────────────────────────────────────────────
 
 describe('SetupDialog', () => {
@@ -300,6 +475,23 @@ describe('SetupDialog', () => {
       expect(screen.getByText('ABCD-1234-EFGH-5678')).toBeTruthy()
     })
     expect(screen.getByText('Done')).toBeTruthy()
+  })
+  it('shows error message when vaultClient.setup rejects', async () => {
+    const { client, setup } = mockClient()
+    setup.mockRejectedValue(new Error('Backend refused'))
+    render(() => <SetupDialog open={true} onClose={vi.fn()} vaultClient={client} />)
+
+    const passphrase = screen.getByLabelText('Master passphrase')
+    const confirm = screen.getByLabelText('Confirm passphrase')
+    fireEvent.input(passphrase, { target: { value: 'hunter2' } })
+    fireEvent.input(confirm, { target: { value: 'hunter2' } })
+    fireEvent.click(screen.getByText('Set Up'))
+
+    await vi.waitFor(() => {
+      expect(screen.getByText('Backend refused')).toBeTruthy()
+    })
+    // Dialog stays open, user can retry
+    expect(screen.getByText('Set Up')).toBeTruthy()
   })
 })
 
@@ -372,5 +564,32 @@ describe('UnlockDialog', () => {
 
     expect(screen.getByText('Enter your passphrase')).toBeTruthy()
     expect(unseal).not.toHaveBeenCalled()
+  })
+
+  it('shows error when vaultClient.unseal rejects', async () => {
+    const { client, unseal } = mockClient()
+    unseal.mockRejectedValue(new Error('wrong passphrase'))
+    const onUnsealed = vi.fn()
+    render(() => (
+      <UnlockDialog
+        open={true}
+        onClose={vi.fn()}
+        vaultClient={client}
+        vaultStatus={BASE_STATUS}
+        onUnsealed={onUnsealed}
+      />
+    ))
+
+    const buttons = screen.getAllByText('Passphrase')
+    fireEvent.click(buttons[0])
+    const input = screen.getByLabelText('Passphrase')
+    fireEvent.input(input, { target: { value: 'wrongpw' } })
+    fireEvent.click(screen.getByText('Unlock'))
+
+    await vi.waitFor(() => {
+      expect(screen.getByText('wrong passphrase')).toBeTruthy()
+    })
+    // Dialog stays open, onUnsealed not called
+    expect(onUnsealed).not.toHaveBeenCalled()
   })
 })

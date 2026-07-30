@@ -54,6 +54,7 @@ import { PasswordEditor } from './password-editor'
 import { AuthenticationEditor } from './authentication-editor'
 import { log } from './log'
 import { showToast } from './ui/toast'
+import type { VaultController } from './vault'
 
 // ── Provenance helpers ───────────────────────────────────────────────────────
 
@@ -141,6 +142,7 @@ type ImportSource = 'sshConfig' | 'tabby' | 'backup'
 
 export interface ConnectionsViewProps {
   client: ProfileClient
+  vaultController?: VaultController
   onConnect?: (profile: SSHProfile) => void
   /**
    * Monotonic counter — every increment opens a blank profile for editing, the
@@ -151,8 +153,9 @@ export interface ConnectionsViewProps {
    */
   newProfileRequest?: number
   /**
-   * Navigate to the Credentials settings section, typically by
-   * setting the active settings page to 'credentials'.
+   * Navigate from the Connections page to the Credentials page (in the same
+   * Settings tab). The Connections page does not import CredentialsSection —
+   * it asks its parent to show it, and the parent decides how.
    */
   onNavigateToCredentials?: () => void
 }
@@ -1057,7 +1060,14 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           username: profile.options.user ?? '',
           auth: 'password',
         })
-        await props.client.savePassword(credential.id, profilePasswordValue())
+        const savePw = async () => {
+          await props.client.savePassword(credential.id, profilePasswordValue())
+        }
+        if (props.vaultController) {
+          await props.vaultController.saveSecretWithVault(savePw)
+        } else {
+          await savePw()
+        }
         const linked = {
           ...profile,
           options: { ...profile.options, credentialId: credential.id },
@@ -1208,7 +1218,14 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       const saved = await props.client.createCredential(cred)
 
       if (cred.auth === 'password' && credPasswordValue()) {
-        await props.client.savePassword(saved.id, credPasswordValue())
+        const savePw = async () => {
+          await props.client.savePassword(saved.id, credPasswordValue())
+        }
+        if (props.vaultController) {
+          await props.vaultController.saveSecretWithVault(savePw)
+        } else {
+          await savePw()
+        }
       }
 
       // Refresh the credential list and select the new one
@@ -1235,7 +1252,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       showToast({ level: 'danger', message: `Could not create credential: ${message}` })
     }
   }
-
   // ── Derived data ──────────────────────────────────────────────────────
 
   const jumpServerProfiles = createMemo(() => profiles().filter((p) => p.options.canBeJumpServer))

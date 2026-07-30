@@ -21,6 +21,7 @@ import { CodeBlock } from './ui/code-block'
 import { IconButton } from './ui/icon-button'
 import { CopyIcon } from './ui/icons'
 import { showToast } from './ui/toast'
+import { RpcError } from './dispatcher'
 import type { VaultClient, VaultStatus } from './vault-client'
 
 // ── Error mapping ───────────────────────────────────────────────────────
@@ -58,13 +59,7 @@ export interface VaultController {
   /** True when the unlock dialog should be shown. */
   showUnlock: Accessor<boolean>
   refresh(): Promise<boolean>
-  /**
-   * Called before saving a password. When the vault is uninitialized:
-   * - osKeyAvailable → silent setup (no dialog), then continue
-   * - !osKeyAvailable → show SetupDialog, continue after completion
-   * When sealed → show UnlockDialog, continue after unseal
-   * When unsealed → continue immediately
-   */
+  /** Preflight-based vault check — see saveSecretWithVault for the operation-first replacement. */
   ensureBeforeSave(doSave: () => Promise<void>): void
   /** Call when the setup dialog completes so the deferred save can run. */
   onSetupDone(): void
@@ -74,16 +69,32 @@ export interface VaultController {
   openUnlock(): void
   closeSetup(): void
   closeUnlock(): void
+  /**
+   * Runs `saveFn` and catches vault errors with dialog + retry.
+   *
+   * 1. Tries saveFn first (operation-first, not preflight).
+   * 2. On vault-uninitialized: silent setup (osKeyAvailable) or SetupDialog,
+   *    then retries saveFn exactly once.
+   * 3. On vault-sealed: UnlockDialog, then retries once.
+   * 4. On any other error: rejects (propagates to caller's catch).
+   * 5. If silent setup fails: shows a toast and resolves without saving.
+   * 6. If user cancels a dialog: resolves without saving.
+   */
+  saveSecretWithVault(saveFn: () => Promise<void>): Promise<void>
 }
 
 /** Create the vault reactive state for a surface. */
 export function createVaultState(vaultClient: VaultClient): VaultController {
-  const [status, setStatus] = createSignal<VaultStatus | null>(null)
+  const [status_, setStatus] = createSignal<VaultStatus | null>(null)
   const [showSetup, setShowSetup] = createSignal(false)
   const [showUnlock, setShowUnlock] = createSignal(false)
 
   // Pending save callback — set when we defer a save to show a dialog
   let pendingSave: (() => Promise<void>) | null = null
+  // Promise controls for saveSecretWithVault — resolve/reject the caller's promise
+  // when the deferred save runs or the dialog is cancelled.
+  let pendingResolve: ((value: undefined) => void) | null = null
+  let pendingReject: ((reason: unknown) => void) | null = null
 
   async function refresh(): Promise<boolean> {
     try {
@@ -96,10 +107,8 @@ export function createVaultState(vaultClient: VaultClient): VaultController {
   }
 
   function ensureBeforeSave(doSave: () => Promise<void>): void {
-    const s = status()
+    const s = status_()
     if (!s) {
-      // Status not yet loaded — fetch first, then re-evaluate.
-      // refresh returns false on failure so we avoid re-entry.
       void refresh().then((ok) => {
         if (ok) {
           ensureBeforeSave(doSave)
@@ -120,9 +129,6 @@ export function createVaultState(vaultClient: VaultClient): VaultController {
 
     if (s.state === 'uninitialized') {
       if (s.osKeyAvailable) {
-        // Silent setup — no dialog, then save.
-        // If setup fails, show a toast so the user knows the password
-        // was not stored, and do NOT call doSave.
         void vaultClient
           .setup({})
           .then(() => doSave())
@@ -134,7 +140,6 @@ export function createVaultState(vaultClient: VaultClient): VaultController {
           })
         return
       }
-      // Show setup dialog, save after completion
       pendingSave = () => doSave()
       setShowSetup(true)
       return
@@ -165,16 +170,139 @@ export function createVaultState(vaultClient: VaultClient): VaultController {
 
   function closeSetup(): void {
     pendingSave = null
+    pendingResolve?.(undefined)
+    pendingResolve = null
+    pendingReject = null
     setShowSetup(false)
   }
 
   function closeUnlock(): void {
     pendingSave = null
+    pendingResolve?.(undefined)
+    pendingResolve = null
+    pendingReject = null
     setShowUnlock(false)
   }
 
+  /**
+   * saveSecretWithVault — operation-first vault error handling with retry.
+   *
+   * 1. Tries saveFn first. On success, resolves.
+   * 2. On vault-uninitialized: checks osKeyAvailable (fetches fresh status).
+   *    osKeyAvailable → silent setup, then retry. Silent setup failure → rejects.
+   *    !osKeyAvailable → SetupDialog, retry on completion.
+   * 3. On vault-sealed: UnlockDialog, retry on completion.
+   * 4. On any other error: rejects (propagates to caller's catch).
+   * 5. User cancels a dialog: resolves (no-op, caller continues without saving).
+   */
+  function saveSecretWithVault(saveFn: () => Promise<void>): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      pendingResolve = resolve
+      pendingReject = reject
+
+      const attempt = (): void => {
+        void saveFn()
+          .then(() => {
+            pendingResolve?.(undefined)
+            pendingResolve = null
+            pendingReject = null
+          })
+          .catch((err: unknown) => {
+            if (!(err instanceof RpcError)) {
+              pendingReject?.(err)
+              pendingResolve = null
+              pendingReject = null
+              return
+            }
+            const reason = (err.data as { reason?: string } | undefined)?.reason
+            if (reason === 'vault-uninitialized') {
+              void handleUninitialized(saveFn)
+              return
+            }
+            if (reason === 'vault-sealed') {
+              void handleSealed(saveFn)
+              return
+            }
+            // Non-vault RPC error — propagate
+            pendingReject?.(err)
+            pendingResolve = null
+            pendingReject = null
+          })
+      }
+
+      attempt()
+    })
+  }
+
+  /** Handle a vault-uninitialized error: silent setup or dialog, then retry once. */
+  async function handleUninitialized(saveFn: () => Promise<void>): Promise<void> {
+    // Fetch fresh status — the error came from the backend, cached status may be stale.
+    try {
+      const s = await vaultClient.status()
+      setStatus(s)
+      if (s.osKeyAvailable) {
+        try {
+          await vaultClient.setup({})
+          // Retry the save once
+          await saveFn()
+          pendingResolve?.(undefined)
+          pendingResolve = null
+          pendingReject = null
+          return
+        } catch (e2) {
+          // Silent setup failed — reject so caller never shows "Saved"
+          pendingReject?.(e2)
+          pendingResolve = null
+          pendingReject = null
+          return
+        }
+      }
+      // No OS key — show SetupDialog, retry on completion
+      pendingSave = (): Promise<void> => {
+        return saveFn().then(
+          () => {
+            pendingResolve?.(undefined)
+            pendingResolve = null
+            pendingReject = null
+          },
+          (e3: unknown) => {
+            pendingReject?.(e3)
+            pendingResolve = null
+            pendingReject = null
+          },
+        )
+      }
+      setShowSetup(true)
+    } catch {
+      // Status fetch itself failed — cannot determine remedy
+      pendingReject?.(new Error('Vault status unavailable'))
+      pendingResolve = null
+      pendingReject = null
+    }
+  }
+
+  /** Handle a vault-sealed error: show UnlockDialog, retry on completion. */
+  function handleSealed(saveFn: () => Promise<void>): void {
+    void refresh()
+    pendingSave = (): Promise<void> => {
+      return saveFn().then(
+        () => {
+          pendingResolve?.(undefined)
+          pendingResolve = null
+          pendingReject = null
+        },
+        (e: unknown) => {
+          pendingReject?.(e)
+          pendingResolve = null
+          pendingReject = null
+        },
+      )
+    }
+    setShowUnlock(true)
+  }
+
   return {
-    status,
+    status: status_,
     showSetup,
     showUnlock,
     refresh,
@@ -184,6 +312,7 @@ export function createVaultState(vaultClient: VaultClient): VaultController {
     openUnlock,
     closeSetup,
     closeUnlock,
+    saveSecretWithVault,
   }
 }
 
