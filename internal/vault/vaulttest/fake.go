@@ -32,6 +32,15 @@ func NewFake() *Fake {
 	}
 }
 
+// NewFakeWithID creates a Fake with a specific ProviderID. Use this when a
+// test needs two fakes with distinct identities (e.g. cross-provider routing).
+func NewFakeWithID(id vault.ProviderID) *Fake {
+	return &Fake{
+		store: make(map[credential.SecretID][]byte),
+		id:    id,
+	}
+}
+
 func (f *Fake) ID() vault.ProviderID { return f.id }
 
 func (f *Fake) Status(_ context.Context) vault.Status {

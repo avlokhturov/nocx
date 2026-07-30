@@ -1,0 +1,27 @@
+/* ── Vault surface — dialogs for vault setup and unlock ─────────────────
+   Layout-only rules: placement (flex, position, margin) per ADR-0014.
+   Appearance lives in the kit component stylesheets. */
+
+/* Wrapper around CodeBlock — holds the copy/download row in place */
+.ui-vault-code-block-wrap {
+  position: relative;
+}
+
+/* Row of actions below the recovery code (copy, download) */
+.ui-vault-action-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+/* Row of unlock-means buttons (OS key, passphrase, recovery) */
+.ui-vault-means-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+/* Descriptive text inside the unlock dialog body */
+.ui-vault-desc-text {
+  margin: 0;
+}
