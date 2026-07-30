@@ -104,6 +104,15 @@ func (r *readOnlyProvider) Get(ctx context.Context, id credential.SecretID) (cre
 
 var _ Provider = (*readOnlyProvider)(nil)
 
+// unreadyProvider is writable and otherwise functional, but reports itself as
+// not ready — used to test capability detection when the system provider exists
+// but cannot be written to (e.g. locked keychain).
+type unreadyProvider struct{ *testProvider }
+
+func (u *unreadyProvider) Status(_ context.Context) Status { return Status{Ready: false} }
+
+var _ WritableProvider = (*unreadyProvider)(nil)
+
 func (p *panickingProvider) Put(_ context.Context, _ credential.SecretID, _ credential.Secret) error {
 	panic("put panicked as designed")
 }
@@ -1779,5 +1788,79 @@ func TestSetDefaultProvider_SaveFails(t *testing.T) {
 	// Assert: DefaultProvider was rolled back to original value.
 	if v.doc.DefaultProvider != ProviderSystem {
 		t.Errorf("DefaultProvider = %q, want %q (original)", v.doc.DefaultProvider, ProviderSystem)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Snapshot: OSKeyCapable — derived from provider list, not from vault state
+// ---------------------------------------------------------------------------
+
+func TestSnapshot_OSKeyCapable_ReadyWritableSystem(t *testing.T) {
+	loweredCost(t)
+	sys := newTestProvider(ProviderSystem)
+	fp := newTestFileProvider(ProviderFile)
+	v, _, _ := testVault(t, sys, fp)
+	snap := v.Snapshot(context.Background())
+	if !snap.OSKeyCapable {
+		t.Error("OSKeyCapable = false, want true (system provider is ready and writable)")
+	}
+}
+
+func TestSnapshot_OSKeyCapable_SystemNotWritable(t *testing.T) {
+	loweredCost(t)
+	ro := &readOnlyProvider{id: ProviderSystem, inner: newTestProvider(ProviderSystem)}
+	fp := newTestFileProvider(ProviderFile)
+	v, _, _ := testVault(t, ro, fp)
+	snap := v.Snapshot(context.Background())
+	if snap.OSKeyCapable {
+		t.Error("OSKeyCapable = true, want false (system provider is not writable)")
+	}
+}
+
+func TestSnapshot_OSKeyCapable_SystemNotReady(t *testing.T) {
+	loweredCost(t)
+	sys := &unreadyProvider{testProvider: newTestProvider(ProviderSystem)}
+	fp := newTestFileProvider(ProviderFile)
+	v, _, _ := testVault(t, sys, fp)
+	snap := v.Snapshot(context.Background())
+	if snap.OSKeyCapable {
+		t.Error("OSKeyCapable = true, want false (system provider is not ready)")
+	}
+}
+
+func TestSnapshot_OSKeyCapable_NoSystemProvider(t *testing.T) {
+	loweredCost(t)
+	fp := newTestFileProvider(ProviderFile)
+	v, _, _ := testVault(t, fp)
+	snap := v.Snapshot(context.Background())
+	if snap.OSKeyCapable {
+		t.Error("OSKeyCapable = true, want false (no system provider)")
+	}
+}
+
+func TestSnapshot_OSKeyCapable_NonSystemWritableReady(t *testing.T) {
+	loweredCost(t)
+	// Only a file provider — ready+writable but not a system provider.
+	fp := newTestFileProvider(ProviderFile)
+	v, _, _ := testVault(t, fp)
+	snap := v.Snapshot(context.Background())
+	if snap.OSKeyCapable {
+		t.Error("OSKeyCapable = true, want false (only file provider, not system)")
+	}
+}
+
+func TestSnapshot_HasOSKeyPreserved(t *testing.T) {
+	loweredCost(t)
+	sys := newTestProvider(ProviderSystem)
+	fp := newTestFileProvider(ProviderFile)
+	v, _, _ := testVault(t, sys, fp)
+	mustSetup(t, v, "")
+	snap := v.Snapshot(context.Background())
+	if !snap.HasOSKey {
+		t.Error("HasOSKey = false, want true after silent setup")
+	}
+	// OSKeyCapable should remain true even after setup.
+	if !snap.OSKeyCapable {
+		t.Error("OSKeyCapable = false, want true (system provider is still present)")
 	}
 }

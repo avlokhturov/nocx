@@ -94,7 +94,9 @@ test.describe('Vault — no keyring, full round trip', () => {
 
   test.beforeAll(() => {
     xdg = createXdgDirs()
-    backend = new VaultBackend(DEVHARNESS_BIN, asXdgDirs(xdg))
+    // `true` = no Secret Service for this backend, regardless of the session
+    // the suite runs in. These two cases are ABOUT the passphrase path.
+    backend = new VaultBackend(DEVHARNESS_BIN, asXdgDirs(xdg), true)
   })
 
   test.afterAll(() => {
@@ -268,7 +270,9 @@ test.describe('Vault — recovery code unseal', () => {
 
   test.beforeAll(() => {
     xdg = createXdgDirs()
-    backend = new VaultBackend(DEVHARNESS_BIN, asXdgDirs(xdg))
+    // `true` = no Secret Service for this backend, regardless of the session
+    // the suite runs in. These two cases are ABOUT the passphrase path.
+    backend = new VaultBackend(DEVHARNESS_BIN, asXdgDirs(xdg), true)
   })
 
   test.afterAll(() => {

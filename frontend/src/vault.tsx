@@ -133,7 +133,7 @@ export function createVaultState(vaultClient: VaultClient): VaultController {
     }
 
     if (s.state === 'uninitialized') {
-      if (s.osKeyAvailable) {
+      if (s.osKeyCapable) {
         void vaultClient
           .setup({})
           .then(() => doSave())
@@ -193,9 +193,9 @@ export function createVaultState(vaultClient: VaultClient): VaultController {
    * saveSecretWithVault — operation-first vault error handling with retry.
    *
    * 1. Tries saveFn first. On success, resolves.
-   * 2. On vault-uninitialized: checks osKeyAvailable (fetches fresh status).
-   *    osKeyAvailable → silent setup, then retry. Silent setup failure → rejects.
-   *    !osKeyAvailable → SetupDialog, retry on completion.
+   * 2. On vault-uninitialized: checks osKeyCapable (fetches fresh status).
+   *    osKeyCapable → silent setup, then retry. Silent setup failure → rejects.
+   *    !osKeyCapable → SetupDialog, retry on completion.
    * 3. On vault-sealed: UnlockDialog, retry on completion.
    * 4. On any other error: rejects (propagates to caller's catch).
    * 5. User cancels a dialog: resolves (no-op, caller continues without saving).
@@ -245,7 +245,7 @@ export function createVaultState(vaultClient: VaultClient): VaultController {
     try {
       const s = await vaultClient.status()
       setStatus(s)
-      if (s.osKeyAvailable) {
+      if (s.osKeyCapable) {
         try {
           await vaultClient.setup({})
           // Retry the save once

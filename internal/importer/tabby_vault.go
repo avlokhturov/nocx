@@ -16,6 +16,17 @@ import (
 )
 
 // Tabby vault format constants (v1).
+//
+// Verified against upstream Tabby source:
+// https://github.com/Eugeny/tabby/blob/master/tabby-core/src/services/vault.service.ts
+//   - DERIVE: PBKDF2-SHA512, 100k iterations, 32-byte key, 8-byte salt (raw lines 14-18, 57-64)
+//   - ENCRYPT: AES-256-CBC, 16-byte IV (raw lines 17-19, 66-82)
+//   - ENCODE: keySalt=hex (toString('hex'), l77), iv=hex (toString('hex'), l78)
+//   - ENCODE: contents=base64 (toString('base64'), l76)
+//   - MAC: none — unauthenticated envelope. No HMAC/GCM (confirmed l1-340)
+//   - PLAINTEXT: JSON {config: any, secrets: [{type,key,value}]}
+//
+// nocx-25k9.9: verification by source audit, not fixture.
 const (
 	tabbyPBKDF2Iterations = 100_000
 	tabbyKeyLength        = 32 // AES-256

@@ -63,6 +63,7 @@ function mockClient() {
 const BASE_STATUS = {
   state: 'sealed' as const,
   osKeyAvailable: false,
+  osKeyCapable: false,
   providers: [],
   defaultProvider: null,
 }
@@ -70,11 +71,12 @@ const BASE_STATUS = {
 // ── createVaultState — controller behavior (no Dialog rendering) ───────
 
 describe('createVaultState', () => {
-  it('calls silent setup + doSave when osKeyAvailable and uninitialized', async () => {
+  it('calls silent setup + doSave when osKeyCapable and uninitialized', async () => {
     const { client, setup } = mockClient()
     ;(client.status as ReturnType<typeof vi.fn>).mockResolvedValue({
       state: 'uninitialized',
-      osKeyAvailable: true,
+      osKeyAvailable: false,
+      osKeyCapable: true,
       providers: [],
       defaultProvider: null,
     })
@@ -100,7 +102,8 @@ describe('createVaultState', () => {
     const { client, setup } = mockClient()
     ;(client.status as ReturnType<typeof vi.fn>).mockResolvedValue({
       state: 'uninitialized',
-      osKeyAvailable: true,
+      osKeyAvailable: false,
+      osKeyCapable: true,
       providers: [],
       defaultProvider: null,
     })
@@ -308,11 +311,12 @@ describe('saveSecretWithVault', () => {
     expect(savePassword.mock.calls[1]).toEqual(['my-pw'])
   })
 
-  it('vault-uninitialized + osKeyAvailable: silent setup, no dialog, retries save', async () => {
+  it('vault-uninitialized + osKeyCapable: silent setup, no dialog, retries save', async () => {
     const { client, status, setup } = mockClient()
     status.mockResolvedValue({
       state: 'uninitialized',
-      osKeyAvailable: true,
+      osKeyAvailable: false,
+      osKeyCapable: true,
       providers: [],
       defaultProvider: null,
     })
@@ -384,12 +388,12 @@ describe('saveSecretWithVault', () => {
 
     await expect(promise).rejects.toThrow('network error')
   })
-
   it('silent setup failure: rejects so caller shows error', async () => {
     const { client, status, setup } = mockClient()
     status.mockResolvedValue({
       state: 'uninitialized',
-      osKeyAvailable: true,
+      osKeyAvailable: false,
+      osKeyCapable: true,
       providers: [],
       defaultProvider: null,
     })

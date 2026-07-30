@@ -124,10 +124,10 @@ func (s *WSServer) handleVaultMethod(wconn *wsConn, req jsonrpcRequest) {
 	}
 }
 
-// vaultStatusResponse is the wire format for vault.status and vault.changed.
 type vaultStatusResponse struct {
 	State          string                     `json:"state"`
 	OSKeyAvailable bool                       `json:"osKeyAvailable"`
+	OSKeyCapable   bool                       `json:"osKeyCapable"`
 	Providers      []vaultStatusProviderEntry `json:"providers"`
 }
 
@@ -142,6 +142,7 @@ func vaultSnapToStatus(snap vault.Snapshot) vaultStatusResponse {
 	resp := vaultStatusResponse{
 		State:          snap.State.String(),
 		OSKeyAvailable: snap.HasOSKey,
+		OSKeyCapable:   snap.OSKeyCapable,
 	}
 	for _, p := range snap.Providers {
 		entry := vaultStatusProviderEntry{

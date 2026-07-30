@@ -98,6 +98,18 @@ export class VaultBackend {
   constructor(
     private readonly binary: string,
     private readonly xdg: XdgDirs,
+    /**
+     * Cut the backend off from the session bus, so its system provider probes
+     * as unavailable no matter what is running around the test.
+     *
+     * A case that needs "no OS keychain" cannot get it by assuming: run the
+     * suite inside the dbus-run-session the keyring case requires and the
+     * passphrase cases fail, because setup silently succeeds and the dialog
+     * they wait for never appears. That is a true result reported as the wrong
+     * defect. Pointing DBUS_SESSION_BUS_ADDRESS at nothing makes the condition
+     * explicit and identical in both environments.
+     */
+    private readonly withoutSecretService = false,
   ) {
     if (!existsSync(binary)) {
       throw new Error(`devharness binary not found: ${binary}`)
@@ -118,6 +130,9 @@ export class VaultBackend {
       XDG_DATA_HOME: this.xdg.data,
       XDG_CONFIG_HOME: this.xdg.config,
       XDG_CACHE_HOME: this.xdg.cache,
+    }
+    if (this.withoutSecretService) {
+      env.DBUS_SESSION_BUS_ADDRESS = 'unix:path=/nonexistent/nocx-e2e-no-secret-service'
     }
 
     this.proc = spawn(this.binary, [], { env, stdio: ['ignore', logFd, logFd], detached: false })

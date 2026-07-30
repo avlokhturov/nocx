@@ -88,8 +88,8 @@ func ImportProfiles(cfg *TabbyConfig, repo profile.ProfileRepository, typeFilter
 			continue
 		}
 
-		p := convertProfile(tp)
-		key := dedupKey(p)
+		p := ConvertProfile(tp)
+		key := DedupKey(p)
 		if seen[key] {
 			continue
 		}
@@ -146,10 +146,10 @@ func ImportGroups(cfg *TabbyConfig, repo profile.GroupRepository) error {
 	return nil
 }
 
-// convertProfile maps a TabbyProfile to a nocx SSHProfile using the
+// ConvertProfile maps a TabbyProfile to a nocx SSHProfile using the
 // presence-aware StoredSSHProfileOptions so nil pointers distinguish
 // "not set" from "explicitly zero/false".
-func convertProfile(tp TabbyProfile) profile.SSHProfile {
+func ConvertProfile(tp TabbyProfile) profile.SSHProfile {
 	opts := profile.StoredSSHProfileOptions{Host: tp.Options.Host}
 	if tp.Options.Port != 0 {
 		v := tp.Options.Port
@@ -196,8 +196,8 @@ func convertProfile(tp TabbyProfile) profile.SSHProfile {
 	}
 }
 
-// dedupKey builds a dedup key from host+port+user.
-func dedupKey(p profile.SSHProfile) string {
+// DedupKey builds a dedup key from host+port+user.
+func DedupKey(p profile.SSHProfile) string {
 	port := 0
 	if p.Options.Port != nil {
 		port = *p.Options.Port
@@ -213,7 +213,7 @@ func dedupKey(p profile.SSHProfile) string {
 func dedupKeySet(profs []profile.SSHProfile) map[string]bool {
 	m := make(map[string]bool, len(profs))
 	for _, p := range profs {
-		m[dedupKey(p)] = true
+		m[DedupKey(p)] = true
 	}
 	return m
 }
@@ -228,7 +228,7 @@ func ImportTabbyWithService(cfg *TabbyConfig, svc *profile.ProfileService, typeF
 		if tp.Type != typeFilter {
 			continue
 		}
-		profiles = append(profiles, convertProfile(tp))
+		profiles = append(profiles, ConvertProfile(tp))
 	}
 
 	// Collect groups from config.

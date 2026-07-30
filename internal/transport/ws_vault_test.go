@@ -63,8 +63,9 @@ func newFakeVaultLifecycle() *fakeVaultLifecycle {
 	return &fakeVaultLifecycle{
 		state: vault.StateUnsealed,
 		snap: vault.Snapshot{
-			State:    vault.StateUnsealed,
-			HasOSKey: true,
+			State:        vault.StateUnsealed,
+			HasOSKey:     true,
+			OSKeyCapable: true,
 			Providers: []vault.ProviderSnapshot{
 				{ID: "system", Writable: true, Ready: true},
 				{ID: "file", Writable: true, Ready: true},
@@ -147,10 +148,10 @@ func TestVaultRPC_Status_EmptyParams(t *testing.T) {
 	if resp.Result == nil {
 		t.Fatal("expected result, got nil")
 	}
-
 	var status struct {
 		State          string `json:"state"`
 		OSKeyAvailable bool   `json:"osKeyAvailable"`
+		OSKeyCapable   bool   `json:"osKeyCapable"`
 	}
 	if err := json.Unmarshal(resp.Result, &status); err != nil {
 		t.Fatalf("unmarshal result: %v", err)
@@ -160,6 +161,9 @@ func TestVaultRPC_Status_EmptyParams(t *testing.T) {
 	}
 	if !status.OSKeyAvailable {
 		t.Error("osKeyAvailable = false, want true")
+	}
+	if !status.OSKeyCapable {
+		t.Error("osKeyCapable = false, want true")
 	}
 }
 
@@ -186,8 +190,9 @@ func TestVaultRPC_Status_NoLocators(t *testing.T) {
 func TestVaultRPC_Status_ProviderReason(t *testing.T) {
 	fake := newFakeVaultLifecycle()
 	fake.snap = vault.Snapshot{
-		State:    vault.StateUnsealed,
-		HasOSKey: true,
+		State:        vault.StateUnsealed,
+		HasOSKey:     true,
+		OSKeyCapable: true,
 		Providers: []vault.ProviderSnapshot{
 			{ID: "system", Writable: true, Ready: true},
 			{ID: "file", Writable: true, Ready: false, Reason: vault.ReasonLocked},

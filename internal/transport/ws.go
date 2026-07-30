@@ -1884,16 +1884,46 @@ func (s *WSServer) findCredentialByID(id string) (profile.Credential, bool, erro
 	return profile.Credential{}, false, nil
 }
 
-// handleImportTabby parses a Tabby config YAML and imports SSH profiles +
-// groups into the wired profile and group repositories. Returns the number
-// of profiles imported.
+// handleImportTabby parses a Tabby config YAML and imports SSH profiles,
+// groups, and optionally vault secrets into the wired profile/group
+// repositories and SecretStore.
+//
+// When the config carries an encrypted vault section and passphrase is provided,
+// every decrypted secret is stored via Vault.Create and imported as a
+// profile.Credential, with password secrets matched to their profiles by
+// host+port+user. An encrypted vault without a passphrase is an error.
+//
+// Order (ADR-0011 §4): secrets are written first, then the metadata that
+// references them. A crash mid-import orphans secrets — reconciliation
+// recovers on next start. The reverse would leave metadata pointing at
+// nothing, which is a broken profile the user must repair by hand.
+//
+// Collision policy (nocx-y910.1): profiles and groups overwrite on duplicate
+// ID; duplicate credential IDs are refused. A profile naming an existing local
+// credential is marked NeedsReview.
+//
+// The passphrase is a parameter of the operation, asked once, stored nowhere
+// — no field, no cache, no package variable.
+// privateKeyLabel names the credential that carries an imported private-key
+// passphrase. Tabby identifies the key only by a hash, which is unreadable on
+// its own, so the label says what it is and keeps enough of the hash to tell
+// two of them apart.
+func privateKeyLabel(hash string) string {
+	short := hash
+	if len(short) > 8 {
+		short = short[:8]
+	}
+	return "Tabby key " + short
+}
+
 func (s *WSServer) handleImportTabby(wconn *wsConn, req jsonrpcRequest) {
 	if s.profiles == nil || s.groups == nil {
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "profiles not available"))
 		return
 	}
 	var params struct {
-		Config string `json:"config"`
+		Config     string `json:"config"`
+		Passphrase string `json:"passphrase,omitempty"`
 	}
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.Config == "" {
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: config (YAML string) required"))
@@ -1906,9 +1936,176 @@ func (s *WSServer) handleImportTabby(wconn *wsConn, req jsonrpcRequest) {
 		return
 	}
 
+	// Decrypt vault and build credentials + profile matching.
+	var credentials []profile.Credential
+	type pwKey struct {
+		user, host string
+		port       int
+	}
+	pwLookup := make(map[pwKey]string)
+
+	if cfg.Vault != nil && cfg.Vault.Encrypted {
+		if s.credentials == nil {
+			_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "Store secret: ", errors.New("credential store not available")))
+			return
+		}
+		if params.Passphrase == "" {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Vault is encrypted: passphrase required"))
+			return
+		}
+		vaultContents, err := importer.DecryptTabbyVault(cfg.Vault, params.Passphrase)
+		if err != nil {
+			_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "Decrypt vault: ", err))
+			return
+		}
+
+		// Plan every secret before creating any, so a shape we cannot read
+		// never leaves an orphaned secret behind.
+		//
+		// A secret we cannot interpret is SKIPPED, never fatal. Tabby's vault
+		// is shared by every plugin the user has installed, so an unknown type
+		// is normal rather than exceptional — and aborting on one would throw
+		// away the profiles and groups that imported fine. The shapes below are
+		// verified against tabby-ssh/src/services/passwordStorage.service.ts.
+		type secretPlan struct {
+			ts        importer.TabbySecret
+			val       string
+			keyName   string // private-key identifier (key-passphrase)
+			keyTarget *pwKey // connection target (password)
+		}
+		plans := make([]secretPlan, 0, len(vaultContents.DecodedSecrets()))
+		skipped := 0
+		for _, sec := range vaultContents.DecodedSecrets() {
+			var val string
+			if err := json.Unmarshal(sec.Value, &val); err != nil || val == "" {
+				s.log.Warn("tabby import: skipping secret with unreadable value", "type", sec.Type)
+				skipped++
+				continue
+			}
+			switch sec.Type {
+			case "ssh:password":
+				// getVaultKeyForConnection → {user, host, port}
+				var t struct {
+					User string `json:"user"`
+					Host string `json:"host"`
+					Port int    `json:"port"`
+				}
+				if err := json.Unmarshal(sec.Key, &t); err != nil || t.Host == "" {
+					s.log.Warn("tabby import: skipping password secret with unreadable key")
+					skipped++
+					continue
+				}
+				plans = append(plans, secretPlan{
+					ts:        sec,
+					val:       val,
+					keyTarget: &pwKey{user: t.User, host: t.Host, port: t.Port},
+				})
+			case "ssh:key-passphrase":
+				// getVaultKeyForPrivateKey → {hash: id}. It is an object, not a
+				// string: reading it as a string failed for every real Tabby
+				// vault and, before this, aborted the whole import.
+				var k struct {
+					Hash string `json:"hash"`
+				}
+				if err := json.Unmarshal(sec.Key, &k); err != nil || k.Hash == "" {
+					s.log.Warn("tabby import: skipping key-passphrase secret with unreadable key")
+					skipped++
+					continue
+				}
+				plans = append(plans, secretPlan{ts: sec, val: val, keyName: privateKeyLabel(k.Hash)})
+			default:
+				// Everything else, including Tabby's "file" secrets. Those hold
+				// base64 file CONTENT — usually a private key — which is not a
+				// credential secret and does not belong in a password slot.
+				// Importing key material is its own feature, not a side effect
+				// of this one.
+				s.log.Info("tabby import: skipping secret of unhandled type", "type", sec.Type)
+				skipped++
+			}
+		}
+		if skipped > 0 {
+			s.log.Info("tabby import: some vault secrets were not imported", "skipped", skipped, "imported", len(plans))
+		}
+
+		// All secrets validated. Create each one in the SecretStore.
+		ctx := context.Background()
+		for _, p := range plans {
+			secretID, err := s.credentials.Create(ctx, credential.NewSecret(p.val))
+			if err != nil {
+				_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "Store secret: ", err))
+				return
+			}
+			switch p.ts.Type {
+			case "ssh:password":
+				name := p.keyTarget.user + "@" + p.keyTarget.host
+				cred := profile.Credential{
+					ID:       profile.NewCredentialID(name),
+					Name:     name,
+					Username: p.keyTarget.user,
+					Auth:     profile.AuthPassword,
+					SecretID: string(secretID),
+				}
+				credentials = append(credentials, cred)
+				pwLookup[*p.keyTarget] = cred.ID
+			case "ssh:key-passphrase":
+				cred := profile.Credential{
+					ID:                 profile.NewCredentialID(p.keyName),
+					Name:               p.keyName,
+					Auth:               profile.AuthPublicKey,
+					PassphraseSecretID: string(secretID),
+				}
+				credentials = append(credentials, cred)
+			}
+		}
+	}
+
 	if s.profileSvc != nil {
 		// Domain service path: atomic import.
-		result := importer.ImportTabbyWithService(cfg, s.profileSvc, "ssh")
+		var profiles []profile.SSHProfile
+		for _, tp := range cfg.Profiles {
+			if tp.Type != "ssh" {
+				continue
+			}
+			p := importer.ConvertProfile(tp)
+			if p.Options.User != nil && p.Options.Host != "" {
+				port := 0
+				if p.Options.Port != nil {
+					port = *p.Options.Port
+				}
+				user := ""
+				if p.Options.User != nil {
+					user = *p.Options.User
+				}
+				if credID, ok := pwLookup[pwKey{user: user, host: p.Options.Host, port: port}]; ok {
+					p.Options.CredentialID = credID
+				}
+			}
+			profiles = append(profiles, p)
+		}
+
+		var groups []profile.ProfileGroup
+		for _, tg := range cfg.Groups {
+			var defaults *profile.ProfileDefaults
+			if tg.Defaults != nil {
+				d, err := profile.DecodeDefaults(tg.Defaults)
+				if err != nil {
+					_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, fmt.Sprintf("Import failed: group %q defaults: %v", tg.Name, err)))
+					return
+				}
+				defaults = &d
+			}
+			groups = append(groups, profile.ProfileGroup{
+				ID:            tg.ID,
+				ParentGroupID: tg.ParentGroupID,
+				Name:          tg.Name,
+				Icon:          tg.Icon,
+				Color:         tg.Color,
+				Defaults:      defaults,
+				Editable:      true,
+			})
+		}
+
+		result := s.profileSvc.AtomicImport(profiles, groups, credentials)
 		if len(result.ImportErrors) > 0 {
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Import failed: "+result.ImportErrors[0]))
 			return
@@ -1916,20 +2113,57 @@ func (s *WSServer) handleImportTabby(wconn *wsConn, req jsonrpcRequest) {
 		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(result.ProfilesImported)))
 		return
 	}
-
 	// Legacy path: one record at a time.
-	countBefore, _ := s.profiles.LoadProfiles()
-	before := len(countBefore)
-	if err := importer.ImportGroups(cfg, s.groups); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Import groups: "+err.Error()))
+	if len(credentials) > 0 && s.credMeta == nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Import credential: credential metadata store not available"))
 		return
 	}
-	if err := importer.ImportProfiles(cfg, s.profiles, "ssh"); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Import profiles: "+err.Error()))
-		return
+
+	for _, c := range credentials {
+		if err := s.credMeta.CreateCredential(c); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Import credential: "+err.Error()))
+			return
+		}
 	}
-	after, _ := s.profiles.LoadProfiles()
-	imported := len(after) - before
+	// Convert profiles with vault credential matching.
+	existing, _ := s.profiles.LoadProfiles()
+	seen := make(map[string]bool, len(existing))
+	for _, p := range existing {
+		key := importer.DedupKey(p)
+		if key != "" {
+			seen[key] = true
+		}
+	}
+	imported := 0
+	for _, tp := range cfg.Profiles {
+		if tp.Type != "ssh" {
+			continue
+		}
+		p := importer.ConvertProfile(tp)
+		if p.Options.User != nil && p.Options.Host != "" {
+			port := 0
+			if p.Options.Port != nil {
+				port = *p.Options.Port
+			}
+			user := ""
+			if p.Options.User != nil {
+				user = *p.Options.User
+			}
+			if credID, ok := pwLookup[pwKey{user: user, host: p.Options.Host, port: port}]; ok {
+				p.Options.CredentialID = credID
+			}
+		}
+		key := importer.DedupKey(p)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		if err := s.profiles.CreateProfile(p); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Import profiles: "+err.Error()))
+			return
+		}
+		imported++
+	}
 	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(imported)))
 }
 

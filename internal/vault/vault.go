@@ -1161,8 +1161,22 @@ type ProviderSnapshot struct {
 // Snapshot is a consistent view of the vault at one moment. It is the response
 // shape for vault.status and the payload for vault.changed broadcasts.
 type Snapshot struct {
-	State     State              `json:"-"`
-	HasOSKey  bool               `json:"osKeyAvailable"`
+	State State `json:"-"`
+
+	// HasOSKey is STATE: this vault holds an OS-held key and can be unsealed
+	// by one. False on every uninitialized vault, by construction.
+	HasOSKey bool `json:"osKeyAvailable"`
+
+	// OSKeyCapable is CAPABILITY: this machine has a system keyring that is
+	// ready and writable, so Setup can mint an OS-held key with no passphrase.
+	//
+	// The distinction is the whole of nocx-25k9.8. One field carried both
+	// meanings, the renderer read it to decide whether setup could be silent,
+	// and since it is false before setup the silent path never ran — which made
+	// the system provider unreachable from the UI. Before using either of
+	// these, decide whether the question is about the machine or the vault.
+	OSKeyCapable bool `json:"osKeyCapable"`
+
 	Providers []ProviderSnapshot `json:"providers"`
 }
 
@@ -1175,7 +1189,6 @@ func (v *Vault) Snapshot(ctx context.Context) Snapshot {
 	hasOSKey := v.doc.HasOSKey
 	providers := v.reg.List()
 	v.mu.Unlock()
-
 	snap := Snapshot{
 		State:    state,
 		HasOSKey: hasOSKey,
@@ -1184,12 +1197,16 @@ func (v *Vault) Snapshot(ctx context.Context) Snapshot {
 	for _, p := range providers {
 		status := p.Status(ctx)
 		_, writable := p.(WritableProvider)
-		snap.Providers = append(snap.Providers, ProviderSnapshot{
+		ps := ProviderSnapshot{
 			ID:       p.ID(),
 			Writable: writable,
 			Ready:    status.Ready,
 			Reason:   status.Reason,
-		})
+		}
+		snap.Providers = append(snap.Providers, ps)
+		if ps.ID == ProviderSystem && ps.Writable && ps.Ready {
+			snap.OSKeyCapable = true
+		}
 	}
 
 	return snap
@@ -1198,13 +1215,15 @@ func (v *Vault) Snapshot(ctx context.Context) Snapshot {
 // MarshalJSON serialises Snapshot with a string state value.
 func (s Snapshot) MarshalJSON() ([]byte, error) {
 	type alias struct {
-		State     string             `json:"state"`
-		HasOSKey  bool               `json:"osKeyAvailable"`
-		Providers []ProviderSnapshot `json:"providers"`
+		State        string             `json:"state"`
+		HasOSKey     bool               `json:"osKeyAvailable"`
+		OSKeyCapable bool               `json:"osKeyCapable"`
+		Providers    []ProviderSnapshot `json:"providers"`
 	}
 	return json.Marshal(alias{
-		State:     s.State.String(),
-		HasOSKey:  s.HasOSKey,
-		Providers: s.Providers,
+		State:        s.State.String(),
+		HasOSKey:     s.HasOSKey,
+		OSKeyCapable: s.OSKeyCapable,
+		Providers:    s.Providers,
 	})
 }
