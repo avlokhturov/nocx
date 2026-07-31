@@ -59,6 +59,7 @@ func TestCountSecretReferences_CountsASharedSecretOnce(t *testing.T) {
 		t.Errorf("SecretCount = %d, want 1", impact.SecretCount)
 	}
 }
+
 // A credential with no stored material must not be counted as affected — the
 // confirmation would name connections that lose nothing.
 func TestCountSecretReferences_IgnoresCredentialsHoldingNothing(t *testing.T) {

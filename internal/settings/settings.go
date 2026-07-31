@@ -481,8 +481,6 @@ var TabPlacement = MustRegisterSelect(SelectSpec{
 	},
 })
 
-
-
 // UITheme controls which colour theme the UI and terminals use.
 // The frontend resolves it to a theme file matching the id; adding a new theme
 // requires a new theme CSS file and an option here.

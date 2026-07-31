@@ -306,5 +306,3 @@ func TestClearSecretReferences_NoReferenceIsIdempotent(t *testing.T) {
 		t.Fatalf("credentials = %d, want 1", len(creds))
 	}
 }
-
-

@@ -687,6 +687,7 @@ func TestVaultDeleteSecret_OverTheWireConformsToContract(t *testing.T) {
 		}
 	}
 }
+
 // The renderer may not name a secret (nocx-jb20.1): delete accepts the row
 // handle, and a SecretID sent in its place must be refused.
 func TestVaultDeleteSecret_RejectsSecretID(t *testing.T) {

@@ -68,8 +68,6 @@ export interface ProfileGroup {
   icon?: string
 }
 
-
-
 // Credential is a reusable authentication identity (nocx-УЗ).
 // Stored separately from connections so multiple connections can share it.
 export interface Credential {
@@ -638,8 +636,6 @@ export interface ProfileRef {
   groupId?: string
   groupName?: string
 }
-
-
 
 /**
  * Closed-enum outcome from connections.test. Derived from the generated

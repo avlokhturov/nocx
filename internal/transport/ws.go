@@ -118,12 +118,10 @@ type WSServer struct {
 	// returns its outcome to the caller).
 	probeResultStore *ProbeResultStore
 
-
 	// profileUsage tracks last-used timestamps for the sessions.status RPC.
 	// When nil, the handler reports live-state from the registry but
 	// last-used timestamps are unavailable (nocx-uxs5.4).
 	profileUsage session.ProfileUsageTracker
-
 
 	// When nil, export.* methods return a JSON-RPC error.
 	// The fields are populated by WithPaths, WithContentDB.
@@ -1897,8 +1895,6 @@ func (s *WSServer) deletePasswordForCredential(credID string) error {
 	return nil
 }
 
-
-
 // hasPasswordForCredential checks whether a password secret exists for the
 // credential. Returns false when the credential is not found.
 func (s *WSServer) hasPasswordForCredential(credID string) (bool, error) {
@@ -2040,7 +2036,6 @@ func (s *WSServer) saveKeyMaterialForCredential(credID, keyText, name string) (f
 // deleteKeyMaterialForCredential removes the stored key material from the
 // vault and clears the reference on the credential record.
 func (s *WSServer) deleteKeyMaterialForCredential(credID string) error {
-
 	if s.credMeta == nil {
 		return errors.New("profiles not available")
 	}
@@ -2073,6 +2068,7 @@ func (s *WSServer) deleteKeyMaterialForCredential(credID string) error {
 
 	return nil
 }
+
 // savePassphraseForCredential verifies a key passphrase against the stored
 // key material when there is any, then stores it and points the credential's
 // record-level passphrase reference at it. Same write-before-repoint pattern.

@@ -341,5 +341,3 @@ func (s *ProfileService) ClearReviewFlag(profileID string) (SSHProfile, error) {
 
 	return SSHProfile{}, fmt.Errorf("%s: %w", profileID, ErrProfileNotFound)
 }
-
-

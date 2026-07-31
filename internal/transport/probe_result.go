@@ -20,9 +20,9 @@ import (
 //	Endpoint — the resolved dial target (host:port)
 //	HostKeyFingerprint — the host public-key fingerprint observed at probe time
 
-//	Username — the effective username after all inheritance and ~/.ssh/config
-//	AuthPolicy — the auth mode string (AuthMode value or "auto")
-//	Timestamp — when the probe was performed
+// Username — the effective username after all inheritance and ~/.ssh/config
+// AuthPolicy — the auth mode string (AuthMode value or "auto")
+// Timestamp — when the probe was performed
 type ProbeResultIdentity struct {
 	Endpoint           string    `json:"endpoint"`
 	HostKeyFingerprint string    `json:"hostKeyFingerprint"`

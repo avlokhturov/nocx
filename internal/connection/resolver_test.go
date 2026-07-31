@@ -180,12 +180,11 @@ func (s *stubProfileStore) ClearSecretReferences(secretID string) error {
 	}
 	return nil
 }
+
 func (s *stubProfileStore) DeleteCredential(id string) error {
 	delete(s.credentials, id)
 	return nil
 }
-
-
 
 // stubSecretStore implements credential.SecretStore in memory.
 type stubSecretStore struct {
@@ -729,7 +728,6 @@ func TestResolver_MultiHopCycleDetected(t *testing.T) {
 		t.Fatal("expected cycle detection error, got nil")
 	}
 }
-
 
 // TestResolver_KeyMaterialSecretID verifies that the credential's record-level
 // KeyMaterialSecretID and PassphraseSecretID are resolved into cfg.KeySecretID

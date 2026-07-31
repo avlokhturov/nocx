@@ -340,17 +340,17 @@ func sshOptionsFromConfig(cfg *ssh.ConnectConfig) []ssh.ConnectOption {
 // Deleted profile with open session: the session holds its own Channel
 // (SSH connection or PTY) and does not reference the profile store at
 type realSession struct {
-	id                  ID
-	kind                Kind
-	cwd                 string
-	profileID           string
-	credentialID        string
+	id           ID
+	kind         Kind
+	cwd          string
+	profileID    string
+	credentialID string
 
-	ch                  Channel
-	log                 log.Logger
-	handler             OutputHandler
-	handlerMu           sync.Mutex
-	closeOnce           sync.Once
+	ch        Channel
+	log       log.Logger
+	handler   OutputHandler
+	handlerMu sync.Mutex
+	closeOnce sync.Once
 }
 
 func (s *realSession) ID() ID               { return s.id }
@@ -358,7 +358,6 @@ func (s *realSession) Kind() Kind           { return s.kind }
 func (s *realSession) Cwd() string          { return s.cwd }
 func (s *realSession) ProfileID() string    { return s.profileID }
 func (s *realSession) CredentialID() string { return s.credentialID }
-
 
 func (s *realSession) Write(p []byte) (int, error) {
 	return s.ch.Write(p)

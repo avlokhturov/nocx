@@ -160,7 +160,6 @@ func New(opts ...Option) (*App, error) {
 
 		transport.WithProbeResultStore(probeResultStore),
 		transport.WithSSHConfigResolver(sshCfgResolver, sshConfigPath),
-
 	}
 	// WithWSAddr set the field and nothing read it, so NOCX_WS_ADDR was accepted
 	// and ignored and the listener always took an ephemeral port. The dev stand
@@ -258,5 +257,3 @@ func (a *proberAdapter) ProbeWithResult(ctx context.Context, host string, cfg *s
 func (a *proberAdapter) TrustHostKey(ctx context.Context, addr string, key []byte) (string, error) {
 	return a.client.TrustHostKey(addr, key)
 }
-
-

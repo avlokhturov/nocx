@@ -45,5 +45,3 @@ func TestCredentialWithPatch_PresentAndEmptyClears(t *testing.T) {
 		t.Errorf("Username = %q, want u", got.Username)
 	}
 }
-
-

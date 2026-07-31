@@ -53,7 +53,6 @@ type Base struct {
 	// resolved for connection. The resolver refuses profiles with this
 	// flag set; the UI for clearing it belongs to a later wave.
 	NeedsReview bool `json:"needsReview,omitempty"`
-
 }
 
 // SSHProfileOptions is the SSH-specific options block on an SSHProfile.
