@@ -8,9 +8,10 @@ import {
   ChangePassphraseDialog,
   RecoveryCodeDialog,
   VaultSection,
+  ResetVaultDialog,
 } from './vault'
 import { ToastHost, clearToasts } from './ui/toast'
-import type { VaultClient } from './vault-client'
+import type { VaultClient, VaultResetPreview, VaultResetResult } from './vault-client'
 import { RpcError } from './dispatcher'
 
 // ── jsdom patch: native <dialog> showModal/close are unsupported ──────
@@ -1605,9 +1606,183 @@ describe('VaultSection', () => {
     }
   })
 
+  // The reason this action exists. A user who has forgotten the passphrase
+  // finds every other control on this page disabled — precisely because they
+  // cannot get in — so the way out must not be disabled with them.
+  it('offers the reset while the vault is locked, when nothing else is available', async () => {
+    await renderVaultSection(SEALED_STATUS)
+    const btn = screen
+      .getAllByText('Reset the vault')
+      .find((el) => el.tagName === 'BUTTON') as HTMLButtonElement
+    expect(btn).toBeTruthy()
+    expect(btn.hasAttribute('disabled')).toBe(false)
+    expect(btn.getAttribute('data-variant')).toBe('danger')
+
+    // Every other action in Protection is disabled in this state.
+    expect(screen.getByRole('button', { name: 'Change passphrase' }).hasAttribute('disabled')).toBe(
+      true,
+    )
+  })
+
+  it('offers the reset when protection was never set up', async () => {
+    await renderVaultSection(UNINIT_STATUS)
+    const btn = screen
+      .getAllByText('Reset the vault')
+      .find((el) => el.tagName === 'BUTTON') as HTMLButtonElement
+    expect(btn.hasAttribute('disabled')).toBe(false)
+  })
+
+  it('the reset row states that it cannot be undone, before the dialog is opened', async () => {
+    await renderVaultSection(SEALED_STATUS)
+    expect(screen.getByText(/Delete every saved password.*Cannot be undone/)).toBeTruthy()
+  })
+
   it('does not set the diagnostics block below the page type size', async () => {
     await renderVaultSection(UNSEALED_STATUS)
     const details = document.querySelector('details.ui-vault-diagnostics')!
     expect((details as HTMLElement).style.fontSize).toBe('')
+  })
+})
+
+// ── ResetVaultDialog ───────────────────────────────────────────────────
+// The way back for a user who has forgotten the passphrase and has no recovery
+// code. Everything here is about the moment BEFORE the destruction: what the
+// user is told, and what they have to do to proceed.
+
+describe('ResetVaultDialog', () => {
+  function mockResetClient(overrides?: {
+    preview?: Partial<VaultResetPreview>
+    result?: Partial<VaultResetResult>
+    resetRejects?: unknown
+  }) {
+    const resetPreview = vi.fn().mockResolvedValue({
+      secretCount: 3,
+      credentialCount: 2,
+      connectionCount: 5,
+      systemKeychainReachable: true,
+      vaultInitialized: true,
+      ...overrides?.preview,
+    })
+    const reset =
+      overrides?.resetRejects !== undefined
+        ? vi.fn().mockRejectedValue(overrides.resetRejects)
+        : vi.fn().mockResolvedValue({
+            secretCount: 3,
+            credentialCount: 2,
+            connectionCount: 5,
+            residue: [],
+            ...overrides?.result,
+          })
+    const client = { resetPreview, reset } as unknown as VaultClient
+    return { client, resetPreview, reset }
+  }
+
+  async function openReset(overrides?: Parameters<typeof mockResetClient>[0]) {
+    clearToasts()
+    const m = mockResetClient(overrides)
+    const onReset = vi.fn()
+    render(() => (
+      <>
+        <ResetVaultDialog open={true} onClose={vi.fn()} onReset={onReset} vaultClient={m.client} />
+        <ToastHost />
+      </>
+    ))
+    await vi.waitFor(() => expect(m.resetPreview).toHaveBeenCalled())
+    return { ...m, onReset }
+  }
+
+  function resetButton(): HTMLButtonElement {
+    return screen
+      .getAllByText('Reset the vault')
+      .find((el) => el.tagName === 'BUTTON') as HTMLButtonElement
+  }
+
+  it('says the action cannot be undone, before anything is destroyed', async () => {
+    await openReset()
+    expect(document.body.textContent).toMatch(/cannot be undone/i)
+    expect(document.body.textContent).toMatch(/no way to recover them/i)
+  })
+
+  it('names what will be lost, in the numbers the store actually holds', async () => {
+    await openReset()
+    await vi.waitFor(() => {
+      const impact = document.querySelector('.ui-vault-reset-impact')!
+      expect(impact.textContent).toContain('3 saved secrets')
+      expect(impact.textContent).toContain('5 connections')
+    })
+  })
+
+  // The confirmation is the whole point of the dialog. A destructive action
+  // one click away from a page the user was reading is an action they take by
+  // accident.
+  it('refuses to reset until the user confirms they understand', async () => {
+    const { reset } = await openReset()
+    expect(resetButton().disabled).toBe(true)
+    fireEvent.click(resetButton())
+    expect(reset).not.toHaveBeenCalled()
+  })
+
+  it('resets once confirmed', async () => {
+    const { reset, onReset } = await openReset()
+    fireEvent.click(screen.getByLabelText('I understand this cannot be undone'))
+    expect(resetButton().disabled).toBe(false)
+    fireEvent.click(resetButton())
+    await vi.waitFor(() => expect(reset).toHaveBeenCalled())
+    await vi.waitFor(() => expect(onReset).toHaveBeenCalled())
+  })
+
+  // Stated before the choice, not discovered after it. Whether the keychain
+  // answers decides whether anything stored there can be removed at all.
+  it('warns that an unreachable keychain keeps its secrets, before confirming', async () => {
+    await openReset({ preview: { systemKeychainReachable: false } })
+    await vi.waitFor(() => {
+      const warning = document.querySelector('.ui-vault-reset-warning')!
+      expect(warning.textContent).toContain('system keychain is not answering')
+      expect(warning.textContent).toContain('remain readable')
+    })
+  })
+
+  it('says nothing about the keychain when it is answering', async () => {
+    await openReset({ preview: { systemKeychainReachable: true } })
+    expect(document.querySelector('.ui-vault-reset-warning')).toBeNull()
+  })
+
+  // The honest half. Claiming everything was deleted while a store still holds
+  // readable secrets is the one thing this flow must never do.
+  it('reports what was left behind instead of claiming everything was deleted', async () => {
+    await openReset({
+      preview: { systemKeychainReachable: false },
+      result: { residue: [{ store: 'system', reason: 'no-service' }] },
+    })
+    fireEvent.click(screen.getByLabelText('I understand this cannot be undone'))
+    fireEvent.click(resetButton())
+
+    await vi.waitFor(() => {
+      const toast = document.querySelector('.ui-toast')!
+      expect(toast.getAttribute('data-level')).toBe('warning')
+      expect(toast.textContent).toContain('System keychain')
+      expect(toast.textContent).toContain('still holds secrets')
+    })
+  })
+
+  it('confirms plainly when there was nothing left behind', async () => {
+    await openReset({ result: { residue: [] } })
+    fireEvent.click(screen.getByLabelText('I understand this cannot be undone'))
+    fireEvent.click(resetButton())
+
+    await vi.waitFor(() => {
+      const toast = document.querySelector('.ui-toast')!
+      expect(toast.getAttribute('data-level')).toBe('success')
+      expect(toast.textContent).toContain('Set up protection to start again')
+    })
+  })
+
+  it('says so when there is nothing to delete', async () => {
+    await openReset({ preview: { secretCount: 0, credentialCount: 0, connectionCount: 0 } })
+    await vi.waitFor(() => {
+      expect(document.querySelector('.ui-vault-reset-impact')!.textContent).toBe(
+        'There are no saved secrets to delete.',
+      )
+    })
   })
 })

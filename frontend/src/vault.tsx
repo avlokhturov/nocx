@@ -12,19 +12,33 @@
 // Surfaces import createVaultState for reactive state + the two dialogs,
 // calling ensureBeforeSave to intercept the password-save flow.
 
-import { createSignal, onMount, Show, For, type Component, type Accessor } from 'solid-js'
+import {
+  createSignal,
+  createEffect,
+  onMount,
+  Show,
+  For,
+  type Component,
+  type Accessor,
+} from 'solid-js'
 import { Dialog } from './ui/dialog'
 import { Button } from './ui/button'
 import { Stack } from './ui/stack'
 import { TextField } from './ui/text-field'
 import { CodeBlock } from './ui/code-block'
 import { IconButton } from './ui/icon-button'
-import { PageSection, Select, Field, StatusCard, StatusDot, Badge } from './ui'
+import { PageSection, Select, Field, StatusCard, StatusDot, Badge, Checkbox } from './ui'
 import type { StatusCardTone, BadgeTone } from './ui'
 import { CopyIcon, LockIcon, LockOpenIcon } from './ui/icons'
 import { showToast } from './ui/toast'
 import { RpcError } from './dispatcher'
-import type { VaultClient, VaultStatus, ProviderStatus } from './vault-client'
+import type {
+  VaultClient,
+  VaultStatus,
+  ProviderStatus,
+  VaultResetPreview,
+  ResidueEntry,
+} from './vault-client'
 
 // ── Error mapping ───────────────────────────────────────────────────────
 // The Dispatcher currently drops structured RPC error fields and surfaces
@@ -623,6 +637,162 @@ export const SetupDialog: Component<SetupDialogProps> = (props) => {
   )
 }
 
+// ── Reset dialog ─────────────────────────────────────────────────────────
+
+export interface ResetVaultDialogProps {
+  open: boolean
+  onClose: () => void
+  /** Called after the vault has been reset, so the page can refresh. */
+  onReset?: () => void
+  vaultClient: VaultClient
+}
+
+/**
+ * The way back for a user who has forgotten the passphrase and has no recovery
+ * code. Without it they are locked out permanently, because everything the
+ * vault protects is protected by the thing they have lost.
+ *
+ * It states what will be destroyed BEFORE it is destroyed, and it says the
+ * word irreversible, because it is: the file store's secrets are already
+ * unrecoverable — their key is wrapped in the forgotten passphrase — and the
+ * keychain's are removed outright.
+ *
+ * The confirmation is a checkbox rather than a typed word, matching the group
+ * deletion in connections.tsx. A second vocabulary for "yes I am sure" is the
+ * duplication the kit exists to prevent.
+ */
+export const ResetVaultDialog: Component<ResetVaultDialogProps> = (props) => {
+  const [preview, setPreview] = createSignal<VaultResetPreview | null>(null)
+  const [confirmed, setConfirmed] = createSignal(false)
+  const [resetting, setResetting] = createSignal(false)
+  const [error, setError] = createSignal('')
+
+  const reset = () => {
+    setPreview(null)
+    setConfirmed(false)
+    setResetting(false)
+    setError('')
+  }
+
+  // The preview is fetched when the dialog opens, not when the page loads: the
+  // counts must describe the store as it is at the moment the user is asked,
+  // and a page that has been open for an hour has had time to be wrong.
+  createEffect(() => {
+    if (!props.open) return
+    void props.vaultClient
+      .resetPreview()
+      .then(setPreview)
+      .catch((e: unknown) => setError(vaultErrorMessage(e)))
+  })
+
+  const handleReset = async () => {
+    setResetting(true)
+    setError('')
+    try {
+      const result = await props.vaultClient.reset()
+      reset()
+      // Residue is the honest half. Saying "everything was deleted" while a
+      // store still holds readable secrets is the one thing this dialog must
+      // never do.
+      if (result.residue.length > 0) {
+        showToast({
+          level: 'warning',
+          message: `Vault reset. ${residueSentence(result.residue)}`,
+          duration: 0,
+        })
+      } else {
+        showToast({ level: 'success', message: 'Vault reset. Set up protection to start again.' })
+      }
+      props.onReset?.()
+      props.onClose()
+    } catch (e: unknown) {
+      setResetting(false)
+      setError(vaultErrorMessage(e))
+    }
+  }
+
+  return (
+    <Dialog
+      open={props.open}
+      onClose={() => {
+        reset()
+        props.onClose()
+      }}
+      title="Reset the vault"
+      footer={
+        <>
+          <Button
+            variant="danger"
+            disabled={!confirmed() || resetting()}
+            onClick={() => {
+              void handleReset()
+            }}
+          >
+            {resetting() ? 'Resetting…' : 'Reset the vault'}
+          </Button>
+          <Button variant="default" disabled={resetting()} onClick={props.onClose}>
+            Cancel
+          </Button>
+        </>
+      }
+    >
+      <Stack>
+        <p class="ui-vault-desc-text">
+          This deletes every password and key passphrase nocx has saved, and cannot be undone. There
+          is no way to recover them afterwards.
+        </p>
+
+        <Show when={preview()}>
+          {(p) => (
+            <>
+              <Show when={p().secretCount > 0}>
+                <p class="ui-vault-reset-impact">
+                  {countPhrase(p().secretCount, 'saved secret', 'saved secrets')} will be deleted.{' '}
+                  {countPhrase(p().connectionCount, 'connection', 'connections')} will ask for a
+                  password again.
+                </p>
+              </Show>
+              <Show when={p().secretCount === 0}>
+                <p class="ui-vault-reset-impact">There are no saved secrets to delete.</p>
+              </Show>
+              {/* Stated before the choice, not after it. Whether the keychain
+                  answers decides whether anything stored there can be removed
+                  at all, and finding that out afterwards is a surprise rather
+                  than a decision. */}
+              <Show when={!p().systemKeychainReachable}>
+                <p class="ui-vault-reset-warning">
+                  The system keychain is not answering, so secrets stored there cannot be removed.
+                  They will remain readable until it is available and you reset again.
+                </p>
+              </Show>
+            </>
+          )}
+        </Show>
+
+        <Checkbox
+          checked={confirmed()}
+          onChange={setConfirmed}
+          label="I understand this cannot be undone"
+        />
+
+        <Show when={error()}>
+          <p class="ui-vault-reset-warning">{error()}</p>
+        </Show>
+      </Stack>
+    </Dialog>
+  )
+}
+
+/** "1 connection" / "3 connections" — a count that reads as a sentence. */
+function countPhrase(n: number, one: string, many: string): string {
+  return `${n} ${n === 1 ? one : many}`
+}
+
+function residueSentence(residue: ResidueEntry[]): string {
+  const names = residue.map((r) => storeLabelName(r.store)).join(', ')
+  return `${names} could not be cleared, and still holds secrets.`
+}
+
 // ── Unlock dialog ────────────────────────────────────────────────────────
 
 export type UnlockMeans = 'os' | 'passphrase' | 'recovery'
@@ -1108,7 +1278,9 @@ export function VaultSection(props: VaultSectionProps) {
     void props.vaultController.refresh()
   })
 
-  const [dialog, setDialog] = createSignal<'setup' | 'passphrase' | 'recovery' | null>(null)
+  const [dialog, setDialog] = createSignal<'setup' | 'passphrase' | 'recovery' | 'reset' | null>(
+    null,
+  )
   const [sealing, setSealing] = createSignal(false)
   const [lastTestRun, setLastTestRun] = createSignal<Record<string, number>>({})
 
@@ -1399,6 +1571,20 @@ export function VaultSection(props: VaultSectionProps) {
             Reissue recovery code
           </Button>
         </Field>
+        {/* Last, and the only enabled control here while the vault is locked.
+            It is the way back for someone who has forgotten the passphrase and
+            has no recovery code — for whom every other row on this page is
+            disabled precisely because they cannot get in. */}
+        <Field
+          for="vault-reset"
+          label="Reset the vault"
+          orientation="horizontal"
+          description="Delete every saved password and key passphrase and start again. Cannot be undone."
+        >
+          <Button variant="danger" onClick={() => setDialog('reset')}>
+            Reset the vault
+          </Button>
+        </Field>
       </PageSection>
 
       {/* Diagnostics disclosure */}
@@ -1455,6 +1641,12 @@ export function VaultSection(props: VaultSectionProps) {
       <RecoveryCodeDialog
         open={dialog() === 'recovery'}
         onClose={() => setDialog(null)}
+        vaultClient={props.vaultClient}
+      />
+      <ResetVaultDialog
+        open={dialog() === 'reset'}
+        onClose={() => setDialog(null)}
+        onReset={() => void props.vaultController.refresh()}
         vaultClient={props.vaultClient}
       />
       <SetupDialog
