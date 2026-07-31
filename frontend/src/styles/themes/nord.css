@@ -1,0 +1,99 @@
+/* ── Nord theme — ported from the canonical palette.
+   ADR-0013 §2. All colour literals live here and only here.
+
+   Nord — nordtheme.com. Polar Night (nord0-3) is the chrome ramp, Snow Storm
+   (nord4-6) the text ramp, Frost (nord8) the accent, Aurora the semantics.
+   nord3 (#4c566a) reaches only 1.6:1 on nord0, so the control border is a
+   lightened Polar Night rather than nord3 itself.
+
+   The terminal block is the theme's published ANSI palette, unmodified: those
+   sixteen values ARE the theme, and correcting their contrast would produce
+   something that is no longer Nord. The UI tokens above it are held to
+   the contrast floors asserted in theme-catalogue.test.ts. */
+
+/* Scoped to the attribute and nothing else — a bare `:root` here would apply
+   under every theme and the files would fight over import order. Only the
+   default theme (tokyo-night.css) carries an unscoped block. */
+:root[data-theme='nord'] {
+  /* ── UI colour tokens (§2.1) ─────────────────────────────────────── */
+  --color-canvas: #2e3440;
+
+  /* Chrome sits *behind* content and is deliberately darker than the
+     canvas — the tab bar, the vertical strip and the settings rail. */
+  --color-chrome: #272b34;
+  --color-chrome-rail: #2a2e39;
+  --color-surface-sunken: #292e38;
+  --color-tab-active: #3b4252;
+  --color-surface: #3b4252;
+  --color-surface-hover: #353b47;
+  --color-surface-raised: #3d4556;
+  --color-text: #eceff4;
+  --color-text-muted: #d8dee9;
+  --color-text-dim: #aab4c6;
+  --color-border: #7b8798;
+  /* Hairline between regions — rail, tab bar, panel edges. Split from
+     --color-border because the two answer different questions: a control
+     outline has to be findable (WCAG 1.4.11, 3:1 against the canvas), a
+     divider only has to be a seam. */
+  --color-divider: #3b4252;
+  --color-accent: #88c0d0;
+
+  /* ── Additional semantic colours (§2.2) ──────────────────────────── */
+  --color-success: #a3be8c;
+  --color-warning: #ebcb8b;
+  --color-danger: #bf616a;
+  --color-accent-secondary: #b48ead;
+  --color-error: #d08770;
+
+  /* ── Font families (§2.4) — ADR §2.4 mandates these per theme file ──
+     Same stacks as the default theme: this theme changes colour, not
+     typography. They are repeated rather than shared because §2.4 makes the
+     theme file the single place a theme's values live. */
+  --font-family-ui: ui-sans-serif, -apple-system, 'SF Pro Text', system-ui, sans-serif;
+  --font-family-mono:
+    ui-monospace, 'SF Mono', Menlo, Monaco, 'Apple Color Emoji', 'Apple Symbols', monospace;
+
+  /* ── Interaction states — assigned, not derived ──────────────────────
+     ADR-0013 §3.1: state colours are assigned per theme rather than derived
+     centrally, because translucent tints and darker-than-surface hovers are
+     different rendering models, not different shades of one formula. */
+  --color-accent-hover: #96c8d6;
+  --color-accent-active: #96c8d6;
+  --color-accent-disabled: rgba(136, 192, 208, 0.6);
+  --color-surface-hover: #353b47;
+  --color-surface-active: #434c5e;
+  --color-surface-disabled: rgba(59, 66, 82, 0.7);
+  --color-success-hover: #aec69a;
+  --color-danger-hover: rgba(191, 97, 106, 0.1);
+  --color-warning-hover: rgba(235, 203, 139, 0.1);
+  --color-focus-ring: rgba(136, 192, 208, 0.6);
+  --color-scrim: rgba(0, 0, 0, 0.5);
+  --color-selection: rgba(136, 192, 208, 0.3);
+
+  /* ── Terminal palette (§2.3) ─────────────────────────────────────────
+     The published Nord ANSI palette, verbatim. ANSI 0-15 are theme
+     colours; indices 16-255 and truecolor stay algorithmic in the terminal
+     itself, because those are content rather than theme. */
+  --terminal-background: #2e3440;
+  --terminal-foreground: #d8dee9;
+  --terminal-cursor: #d8dee9;
+  --terminal-cursor-accent: #2e3440;
+  --terminal-selection: #434c5e;
+
+  --terminal-ansi-0: #3b4252;
+  --terminal-ansi-1: #bf616a;
+  --terminal-ansi-2: #a3be8c;
+  --terminal-ansi-3: #ebcb8b;
+  --terminal-ansi-4: #81a1c1;
+  --terminal-ansi-5: #b48ead;
+  --terminal-ansi-6: #88c0d0;
+  --terminal-ansi-7: #e5e9f0;
+  --terminal-ansi-8: #4c566a;
+  --terminal-ansi-9: #bf616a;
+  --terminal-ansi-10: #a3be8c;
+  --terminal-ansi-11: #ebcb8b;
+  --terminal-ansi-12: #81a1c1;
+  --terminal-ansi-13: #b48ead;
+  --terminal-ansi-14: #8fbcbb;
+  --terminal-ansi-15: #eceff4;
+}

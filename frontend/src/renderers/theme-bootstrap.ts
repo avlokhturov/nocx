@@ -34,7 +34,31 @@ export const DEFAULT_THEME_ID = 'tokyo-night'
 /** Versioned localStorage key for the bootstrap cache. Cache format v1. */
 export const STORAGE_KEY = 'nocx:bootstrap:theme:v1'
 
-const KNOWN_THEME_IDS = new Set(['tokyo-night', 'light'])
+/**
+ * Every theme id the frontend will apply. An id outside this set is rewritten to
+ * the default rather than trusted, because `data-theme` naming a theme with no
+ * stylesheet is not a visible failure — the tokens simply keep the default
+ * theme's values and the app looks correct while the setting says otherwise.
+ *
+ * Exported so theme-catalogue.test.ts can assert it against the files actually
+ * on disk. It is the second of the three places a new theme has to be
+ * registered; the other two are the `@import` in style.css and the `ui.theme`
+ * options in internal/settings/settings.go.
+ */
+export const KNOWN_THEME_IDS: ReadonlySet<string> = new Set([
+  'tokyo-night',
+  'light',
+  'ayu-dark',
+  'catppuccin-latte',
+  'catppuccin-mocha',
+  'dracula',
+  'gruvbox-dark',
+  'nord',
+  'one-dark',
+  'rose-pine',
+  'solarized-dark',
+  'solarized-light',
+])
 
 // ── Bootstrap ───────────────────────────────────────────────────────────
 

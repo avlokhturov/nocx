@@ -1,0 +1,99 @@
+/* ── Ayu Dark theme — ported from the canonical palette.
+   ADR-0013 §2. All colour literals live here and only here.
+
+   Ayu Dark — Ike Ku's palette. The near-black #0a0e14 canvas is what makes this
+   theme; the chrome ramp goes darker still, the way the reference terminals do.
+   Ayu's UI foreground (#565b66) is a 2.6:1 hairline, so the control border is
+   lightened to clear 3:1.
+
+   The terminal block is the theme's published ANSI palette, unmodified: those
+   sixteen values ARE the theme, and correcting their contrast would produce
+   something that is no longer Ayu Dark. The UI tokens above it are held to
+   the contrast floors asserted in theme-catalogue.test.ts. */
+
+/* Scoped to the attribute and nothing else — a bare `:root` here would apply
+   under every theme and the files would fight over import order. Only the
+   default theme (tokyo-night.css) carries an unscoped block. */
+:root[data-theme='ayu-dark'] {
+  /* ── UI colour tokens (§2.1) ─────────────────────────────────────── */
+  --color-canvas: #0a0e14;
+
+  /* Chrome sits *behind* content and is deliberately darker than the
+     canvas — the tab bar, the vertical strip and the settings rail. */
+  --color-chrome: #05080d;
+  --color-chrome-rail: #080b11;
+  --color-surface-sunken: #0d1017;
+  --color-tab-active: #12161f;
+  --color-surface: #11151c;
+  --color-surface-hover: #0f131a;
+  --color-surface-raised: #1c212b;
+  --color-text: #bfbdb6;
+  --color-text-muted: #a6a49d;
+  --color-text-dim: #8a8881;
+  --color-border: #6d727d;
+  /* Hairline between regions — rail, tab bar, panel edges. Split from
+     --color-border because the two answer different questions: a control
+     outline has to be findable (WCAG 1.4.11, 3:1 against the canvas), a
+     divider only has to be a seam. */
+  --color-divider: #1a1f28;
+  --color-accent: #e6b450;
+
+  /* ── Additional semantic colours (§2.2) ──────────────────────────── */
+  --color-success: #aad94c;
+  --color-warning: #ffb454;
+  --color-danger: #f07178;
+  --color-accent-secondary: #59c2ff;
+  --color-error: #d95757;
+
+  /* ── Font families (§2.4) — ADR §2.4 mandates these per theme file ──
+     Same stacks as the default theme: this theme changes colour, not
+     typography. They are repeated rather than shared because §2.4 makes the
+     theme file the single place a theme's values live. */
+  --font-family-ui: ui-sans-serif, -apple-system, 'SF Pro Text', system-ui, sans-serif;
+  --font-family-mono:
+    ui-monospace, 'SF Mono', Menlo, Monaco, 'Apple Color Emoji', 'Apple Symbols', monospace;
+
+  /* ── Interaction states — assigned, not derived ──────────────────────
+     ADR-0013 §3.1: state colours are assigned per theme rather than derived
+     centrally, because translucent tints and darker-than-surface hovers are
+     different rendering models, not different shades of one formula. */
+  --color-accent-hover: #e9bd65;
+  --color-accent-active: #e9bd65;
+  --color-accent-disabled: rgba(230, 180, 80, 0.6);
+  --color-surface-hover: #0f131a;
+  --color-surface-active: #1c212b;
+  --color-surface-disabled: rgba(17, 21, 28, 0.7);
+  --color-success-hover: #b4de61;
+  --color-danger-hover: rgba(240, 113, 120, 0.1);
+  --color-warning-hover: rgba(255, 180, 84, 0.1);
+  --color-focus-ring: rgba(230, 180, 80, 0.6);
+  --color-scrim: rgba(0, 0, 0, 0.5);
+  --color-selection: rgba(230, 180, 80, 0.3);
+
+  /* ── Terminal palette (§2.3) ─────────────────────────────────────────
+     The published Ayu Dark ANSI palette, verbatim. ANSI 0-15 are theme
+     colours; indices 16-255 and truecolor stay algorithmic in the terminal
+     itself, because those are content rather than theme. */
+  --terminal-background: #0a0e14;
+  --terminal-foreground: #b3b1ad;
+  --terminal-cursor: #e6b450;
+  --terminal-cursor-accent: #0a0e14;
+  --terminal-selection: #273747;
+
+  --terminal-ansi-0: #01060e;
+  --terminal-ansi-1: #ea6c73;
+  --terminal-ansi-2: #91b362;
+  --terminal-ansi-3: #f9af4f;
+  --terminal-ansi-4: #53bdfa;
+  --terminal-ansi-5: #fae994;
+  --terminal-ansi-6: #90e1c6;
+  --terminal-ansi-7: #c7c7c7;
+  --terminal-ansi-8: #686868;
+  --terminal-ansi-9: #f07178;
+  --terminal-ansi-10: #c2d94c;
+  --terminal-ansi-11: #ffb454;
+  --terminal-ansi-12: #59c2ff;
+  --terminal-ansi-13: #ffee99;
+  --terminal-ansi-14: #95e6cb;
+  --terminal-ansi-15: #ffffff;
+}

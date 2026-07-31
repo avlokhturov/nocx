@@ -1,0 +1,99 @@
+/* ── Solarized Dark theme — ported from the canonical palette.
+   ADR-0013 §2. All colour literals live here and only here.
+
+   Solarized Dark — Ethan Schoonover's palette. base03/base02 are the chrome and
+   panel colours and the accents are canonical. Solarized deliberately runs a
+   narrow contrast range: base00 (#657b83) reaches only 4.0:1 on base03, so the
+   dim text token is lightened to clear 4.5:1. The ANSI block is untouched.
+
+   The terminal block is the theme's published ANSI palette, unmodified: those
+   sixteen values ARE the theme, and correcting their contrast would produce
+   something that is no longer Solarized Dark. The UI tokens above it are held to
+   the contrast floors asserted in theme-catalogue.test.ts. */
+
+/* Scoped to the attribute and nothing else — a bare `:root` here would apply
+   under every theme and the files would fight over import order. Only the
+   default theme (tokyo-night.css) carries an unscoped block. */
+:root[data-theme='solarized-dark'] {
+  /* ── UI colour tokens (§2.1) ─────────────────────────────────────── */
+  --color-canvas: #002b36;
+
+  /* Chrome sits *behind* content and is deliberately darker than the
+     canvas — the tab bar, the vertical strip and the settings rail. */
+  --color-chrome: #00212b;
+  --color-chrome-rail: #002731;
+  --color-surface-sunken: #012730;
+  --color-tab-active: #073642;
+  --color-surface: #073642;
+  --color-surface-hover: #053039;
+  --color-surface-raised: #0b3843;
+  --color-text: #eee8d5;
+  --color-text-muted: #93a1a1;
+  --color-text-dim: #8c9fa1;
+  --color-border: #6b8d95;
+  /* Hairline between regions — rail, tab bar, panel edges. Split from
+     --color-border because the two answer different questions: a control
+     outline has to be findable (WCAG 1.4.11, 3:1 against the canvas), a
+     divider only has to be a seam. */
+  --color-divider: #073642;
+  --color-accent: #2aa198;
+
+  /* ── Additional semantic colours (§2.2) ──────────────────────────── */
+  --color-success: #859900;
+  --color-warning: #b58900;
+  --color-danger: #dc322f;
+  --color-accent-secondary: #6c71c4;
+  --color-error: #cb4b16;
+
+  /* ── Font families (§2.4) — ADR §2.4 mandates these per theme file ──
+     Same stacks as the default theme: this theme changes colour, not
+     typography. They are repeated rather than shared because §2.4 makes the
+     theme file the single place a theme's values live. */
+  --font-family-ui: ui-sans-serif, -apple-system, 'SF Pro Text', system-ui, sans-serif;
+  --font-family-mono:
+    ui-monospace, 'SF Mono', Menlo, Monaco, 'Apple Color Emoji', 'Apple Symbols', monospace;
+
+  /* ── Interaction states — assigned, not derived ──────────────────────
+     ADR-0013 §3.1: state colours are assigned per theme rather than derived
+     centrally, because translucent tints and darker-than-surface hovers are
+     different rendering models, not different shades of one formula. */
+  --color-accent-hover: #44aca4;
+  --color-accent-active: #44aca4;
+  --color-accent-disabled: rgba(42, 161, 152, 0.6);
+  --color-surface-hover: #053039;
+  --color-surface-active: #0d4553;
+  --color-surface-disabled: rgba(7, 54, 66, 0.7);
+  --color-success-hover: #94a51f;
+  --color-danger-hover: rgba(220, 50, 47, 0.1);
+  --color-warning-hover: rgba(181, 137, 0, 0.1);
+  --color-focus-ring: rgba(42, 161, 152, 0.6);
+  --color-scrim: rgba(0, 0, 0, 0.5);
+  --color-selection: rgba(42, 161, 152, 0.3);
+
+  /* ── Terminal palette (§2.3) ─────────────────────────────────────────
+     The published Solarized Dark ANSI palette, verbatim. ANSI 0-15 are theme
+     colours; indices 16-255 and truecolor stay algorithmic in the terminal
+     itself, because those are content rather than theme. */
+  --terminal-background: #002b36;
+  --terminal-foreground: #839496;
+  --terminal-cursor: #839496;
+  --terminal-cursor-accent: #002b36;
+  --terminal-selection: #073642;
+
+  --terminal-ansi-0: #073642;
+  --terminal-ansi-1: #dc322f;
+  --terminal-ansi-2: #859900;
+  --terminal-ansi-3: #b58900;
+  --terminal-ansi-4: #268bd2;
+  --terminal-ansi-5: #d33682;
+  --terminal-ansi-6: #2aa198;
+  --terminal-ansi-7: #eee8d5;
+  --terminal-ansi-8: #002b36;
+  --terminal-ansi-9: #cb4b16;
+  --terminal-ansi-10: #586e75;
+  --terminal-ansi-11: #657b83;
+  --terminal-ansi-12: #839496;
+  --terminal-ansi-13: #6c71c4;
+  --terminal-ansi-14: #93a1a1;
+  --terminal-ansi-15: #fdf6e3;
+}

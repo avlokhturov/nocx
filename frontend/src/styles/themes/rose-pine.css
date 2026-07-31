@@ -1,0 +1,99 @@
+/* ── Rosé Pine theme — ported from the canonical palette.
+   ADR-0013 §2. All colour literals live here and only here.
+
+   Rosé Pine — rosepinetheme.com. base/surface/overlay are the chrome ramp,
+   highlight-low/med/high the interaction states, text/subtle/muted the text
+   ramp. Rosé Pine has no green: pine (#31748f) is 2.0:1 on base and unreadable
+   as a status colour, so success uses foam and muted is lightened to clear 4.5:1.
+
+   The terminal block is the theme's published ANSI palette, unmodified: those
+   sixteen values ARE the theme, and correcting their contrast would produce
+   something that is no longer Rosé Pine. The UI tokens above it are held to
+   the contrast floors asserted in theme-catalogue.test.ts. */
+
+/* Scoped to the attribute and nothing else — a bare `:root` here would apply
+   under every theme and the files would fight over import order. Only the
+   default theme (tokyo-night.css) carries an unscoped block. */
+:root[data-theme='rose-pine'] {
+  /* ── UI colour tokens (§2.1) ─────────────────────────────────────── */
+  --color-canvas: #191724;
+
+  /* Chrome sits *behind* content and is deliberately darker than the
+     canvas — the tab bar, the vertical strip and the settings rail. */
+  --color-chrome: #14121f;
+  --color-chrome-rail: #171522;
+  --color-surface-sunken: #1f1d2e;
+  --color-tab-active: #26233a;
+  --color-surface: #1f1d2e;
+  --color-surface-hover: #21202e;
+  --color-surface-raised: #26233a;
+  --color-text: #e0def4;
+  --color-text-muted: #c8c4e0;
+  --color-text-dim: #a6a1c2;
+  --color-border: #8b86a6;
+  /* Hairline between regions — rail, tab bar, panel edges. Split from
+     --color-border because the two answer different questions: a control
+     outline has to be findable (WCAG 1.4.11, 3:1 against the canvas), a
+     divider only has to be a seam. */
+  --color-divider: #26233a;
+  --color-accent: #c4a7e7;
+
+  /* ── Additional semantic colours (§2.2) ──────────────────────────── */
+  --color-success: #9ccfd8;
+  --color-warning: #f6c177;
+  --color-danger: #eb6f92;
+  --color-accent-secondary: #ebbcba;
+  --color-error: #eb6f92;
+
+  /* ── Font families (§2.4) — ADR §2.4 mandates these per theme file ──
+     Same stacks as the default theme: this theme changes colour, not
+     typography. They are repeated rather than shared because §2.4 makes the
+     theme file the single place a theme's values live. */
+  --font-family-ui: ui-sans-serif, -apple-system, 'SF Pro Text', system-ui, sans-serif;
+  --font-family-mono:
+    ui-monospace, 'SF Mono', Menlo, Monaco, 'Apple Color Emoji', 'Apple Symbols', monospace;
+
+  /* ── Interaction states — assigned, not derived ──────────────────────
+     ADR-0013 §3.1: state colours are assigned per theme rather than derived
+     centrally, because translucent tints and darker-than-surface hovers are
+     different rendering models, not different shades of one formula. */
+  --color-accent-hover: #cbb2ea;
+  --color-accent-active: #cbb2ea;
+  --color-accent-disabled: rgba(196, 167, 231, 0.6);
+  --color-surface-hover: #21202e;
+  --color-surface-active: #403d52;
+  --color-surface-disabled: rgba(31, 29, 46, 0.7);
+  --color-success-hover: #a8d5dd;
+  --color-danger-hover: rgba(235, 111, 146, 0.1);
+  --color-warning-hover: rgba(246, 193, 119, 0.1);
+  --color-focus-ring: rgba(196, 167, 231, 0.6);
+  --color-scrim: rgba(0, 0, 0, 0.5);
+  --color-selection: rgba(196, 167, 231, 0.3);
+
+  /* ── Terminal palette (§2.3) ─────────────────────────────────────────
+     The published Rosé Pine ANSI palette, verbatim. ANSI 0-15 are theme
+     colours; indices 16-255 and truecolor stay algorithmic in the terminal
+     itself, because those are content rather than theme. */
+  --terminal-background: #191724;
+  --terminal-foreground: #e0def4;
+  --terminal-cursor: #524f67;
+  --terminal-cursor-accent: #e0def4;
+  --terminal-selection: #403d52;
+
+  --terminal-ansi-0: #26233a;
+  --terminal-ansi-1: #eb6f92;
+  --terminal-ansi-2: #31748f;
+  --terminal-ansi-3: #f6c177;
+  --terminal-ansi-4: #9ccfd8;
+  --terminal-ansi-5: #c4a7e7;
+  --terminal-ansi-6: #ebbcba;
+  --terminal-ansi-7: #e0def4;
+  --terminal-ansi-8: #6e6a86;
+  --terminal-ansi-9: #eb6f92;
+  --terminal-ansi-10: #31748f;
+  --terminal-ansi-11: #f6c177;
+  --terminal-ansi-12: #9ccfd8;
+  --terminal-ansi-13: #c4a7e7;
+  --terminal-ansi-14: #ebbcba;
+  --terminal-ansi-15: #e0def4;
+}

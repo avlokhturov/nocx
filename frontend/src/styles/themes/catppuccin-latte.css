@@ -1,0 +1,98 @@
+/* ── Catppuccin Latte theme — ported from the canonical palette.
+   ADR-0013 §2. All colour literals live here and only here.
+
+   Catppuccin Latte — the light flavour. crust/mantle/base are the chrome ramp,
+   surface0-2 the raised surfaces, text/subtext1/subtext0 the text ramp and
+   overlay1 the border.
+
+   The terminal block is the theme's published ANSI palette, unmodified: those
+   sixteen values ARE the theme, and correcting their contrast would produce
+   something that is no longer Catppuccin Latte. The UI tokens above it are held to
+   the contrast floors asserted in theme-catalogue.test.ts. */
+
+/* Scoped to the attribute and nothing else — a bare `:root` here would apply
+   under every theme and the files would fight over import order. Only the
+   default theme (tokyo-night.css) carries an unscoped block. */
+:root[data-theme='catppuccin-latte'] {
+  /* ── UI colour tokens (§2.1) ─────────────────────────────────────── */
+  --color-canvas: #eff1f5;
+
+  /* Chrome sits *behind* content and is deliberately greyer than the
+     canvas — the tab bar, the vertical strip and the settings rail. */
+  --color-chrome: #dce0e8;
+  --color-chrome-rail: #e6e9ef;
+  --color-surface-sunken: #e6e9ef;
+  --color-tab-active: #ffffff;
+  --color-surface: #ffffff;
+  --color-surface-hover: #e6e9ef;
+  --color-surface-raised: #ffffff;
+  --color-text: #4c4f69;
+  --color-text-muted: #575a70;
+  --color-text-dim: #5e6174;
+  --color-border: #86899b;
+  /* Hairline between regions — rail, tab bar, panel edges. Split from
+     --color-border because the two answer different questions: a control
+     outline has to be findable (WCAG 1.4.11, 3:1 against the canvas), a
+     divider only has to be a seam. */
+  --color-divider: #ccd0da;
+  --color-accent: #1e66f5;
+
+  /* ── Additional semantic colours (§2.2) ──────────────────────────── */
+  --color-success: #40a02b;
+  --color-warning: #df8e1d;
+  --color-danger: #d20f39;
+  --color-accent-secondary: #8839ef;
+  --color-error: #e64553;
+
+  /* ── Font families (§2.4) — ADR §2.4 mandates these per theme file ──
+     Same stacks as the default theme: this theme changes colour, not
+     typography. They are repeated rather than shared because §2.4 makes the
+     theme file the single place a theme's values live. */
+  --font-family-ui: ui-sans-serif, -apple-system, 'SF Pro Text', system-ui, sans-serif;
+  --font-family-mono:
+    ui-monospace, 'SF Mono', Menlo, Monaco, 'Apple Color Emoji', 'Apple Symbols', monospace;
+
+  /* ── Interaction states — assigned, not derived ──────────────────────
+     ADR-0013 §3.1: state colours are assigned per theme rather than derived
+     centrally, because translucent tints and darker-than-surface hovers are
+     different rendering models, not different shades of one formula. */
+  --color-accent-hover: #1a5ad8;
+  --color-accent-active: #1a5ad8;
+  --color-accent-disabled: rgba(30, 102, 245, 0.6);
+  --color-surface-hover: #e6e9ef;
+  --color-surface-active: #dce0e8;
+  --color-surface-disabled: rgba(255, 255, 255, 0.7);
+  --color-success-hover: #388d26;
+  --color-danger-hover: rgba(210, 15, 57, 0.1);
+  --color-warning-hover: rgba(223, 142, 29, 0.1);
+  --color-focus-ring: rgba(30, 102, 245, 0.6);
+  --color-scrim: rgba(0, 0, 0, 0.5);
+  --color-selection: rgba(30, 102, 245, 0.2);
+
+  /* ── Terminal palette (§2.3) ─────────────────────────────────────────
+     The published Catppuccin Latte ANSI palette, verbatim. ANSI 0-15 are theme
+     colours; indices 16-255 and truecolor stay algorithmic in the terminal
+     itself, because those are content rather than theme. */
+  --terminal-background: #eff1f5;
+  --terminal-foreground: #4c4f69;
+  --terminal-cursor: #dc8a78;
+  --terminal-cursor-accent: #eff1f5;
+  --terminal-selection: #acb0be;
+
+  --terminal-ansi-0: #5c5f77;
+  --terminal-ansi-1: #d20f39;
+  --terminal-ansi-2: #40a02b;
+  --terminal-ansi-3: #df8e1d;
+  --terminal-ansi-4: #1e66f5;
+  --terminal-ansi-5: #ea76cb;
+  --terminal-ansi-6: #179299;
+  --terminal-ansi-7: #acb0be;
+  --terminal-ansi-8: #6c6f85;
+  --terminal-ansi-9: #d20f39;
+  --terminal-ansi-10: #40a02b;
+  --terminal-ansi-11: #df8e1d;
+  --terminal-ansi-12: #1e66f5;
+  --terminal-ansi-13: #ea76cb;
+  --terminal-ansi-14: #179299;
+  --terminal-ansi-15: #bcc0cc;
+}
