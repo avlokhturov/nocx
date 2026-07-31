@@ -155,12 +155,11 @@ repository's own: no compatibility shims, no dead code, delete it.
   whose effective secret is this one. `nocx-8pct` and `nocx-cx03` are both symptoms of
   counting through an owner that may not exist, and both dissolve here rather than being
   fixed twice.
-- **There is no migration, and that is the decision, not an omission.** A stored profile
-  that names a `credentialId` simply stops naming anything the new code reads: the field is
-  gone, the connection has no secret, and the user picks one. Nothing converts it, because a
-  conversion is a compatibility shim with a schedule, and this repository does not ship
-  those — greenfield, break and refactor. Writing one here would also mean keeping the
-  credential aggregate alive long enough to read it, which is the thing being deleted.
+- **Stored data is not a consideration.** There are no users, no shipped release and no
+  connections worth keeping. The document shape changes, documents in the old shape are not
+  read, and nothing converts them — no fallback, no field kept "just in case". A conversion
+  would also mean keeping the credential aggregate alive long enough to read the old shape,
+  which is the thing being deleted.
 - **The renderer gets simpler in a way worth naming.** `AuthenticationEditor` currently
   juggles a credential id, a credential draft, a usage count and an inline-creation path
   that mints a credential the user never asked for. Most of that exists to keep an invisible
