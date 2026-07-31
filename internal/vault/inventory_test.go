@@ -216,6 +216,53 @@ func TestBuildInventory_PassphraseEntry(t *testing.T) {
 	}
 }
 
+// A stored private key is a secret like any other (nocx-8pct): the key
+// material reference must surface as a private-key row OWNED by its
+// credential, carrying the credential's usage count — not as an ownerless
+// row reporting 0 connections.
+func TestBuildInventory_PrivateKeyEntryOwnedByCredential(t *testing.T) {
+	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
+	mustSetup(t, v, "test-pass")
+	defer v.Close()
+
+	inputs := []CredentialInventory{
+		{
+			ID:         "cred:test:key",
+			Username:   "root",
+			AuthMode:   "publicKey",
+			UsageCount: 1,
+			Versions: []CredentialVersionInventory{
+				{
+					KeyMaterialSecretID: refSys,
+					KeyFingerprint:      "bdc73f37a1b2c3d4e5f6a7b8c9d0e1f2",
+				},
+			},
+		},
+	}
+
+	entries, err := v.BuildInventory(context.Background(), inputs)
+	if err != nil {
+		t.Fatalf("BuildInventory: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries, want 1", len(entries))
+	}
+	e := entries[0]
+	if e.Kind != "private-key" {
+		t.Errorf("kind = %q, want %q", e.Kind, "private-key")
+	}
+	if e.OwnerID != "cred:test:key" {
+		t.Errorf("ownerId = %q, want %q", e.OwnerID, "cred:test:key")
+	}
+	if e.UsedBy != 1 {
+		t.Errorf("usedBy = %d, want 1 — the connection that resolves to the credential", e.UsedBy)
+	}
+	// No record name: the derived label, not "Unknown secret".
+	if e.Name != "Private key for root" {
+		t.Errorf("name = %q, want %q", e.Name, "Private key for root")
+	}
+}
+
 func TestBuildInventory_SingleUseLabelIncludesHostPort(t *testing.T) {
 	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
 	mustSetup(t, v, "test-pass")

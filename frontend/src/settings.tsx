@@ -353,6 +353,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
             vaultClient={props.vaultClient!}
             vaultController={props.vaultController!}
             dialogClient={props.dialogClient}
+            profileClient={props.profileClient}
           />
         </Show>
       ),

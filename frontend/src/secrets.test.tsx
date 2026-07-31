@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render } from '@solidjs/testing-library'
 import { SecretsSection } from './secrets'
 import { createVaultState } from './vault'
 import type { VaultClient, VaultInventory, InventoryEntry } from './vault-client'
+import type { ProfileClient } from './profiles'
 
 // ── jsdom patch: native <dialog> showModal/close are unsupported ──────
 const origShowModal = HTMLDialogElement.prototype.showModal.bind(HTMLDialogElement.prototype)
@@ -46,6 +47,7 @@ function mockClient() {
   const createSecret = vi.fn()
   const renameSecret = vi.fn()
   const replaceSecret = vi.fn()
+  const deleteSecret = vi.fn()
   const client = {
     status,
     setup,
@@ -60,8 +62,9 @@ function mockClient() {
     createSecret,
     renameSecret,
     replaceSecret,
+    deleteSecret,
   } as unknown as VaultClient
-  return { client, inventory, createSecret, renameSecret, replaceSecret, status }
+  return { client, inventory, createSecret, renameSecret, replaceSecret, deleteSecret, status }
 }
 
 const UNSEALED_STATUS = {
@@ -95,12 +98,17 @@ const MOCK_ENTRY_2: InventoryEntry = {
 }
 
 /** Mount the SecretsSection with mocked client and controller. */
-async function mount(client: VaultClient) {
+async function mount(client: VaultClient, profileClient?: ProfileClient) {
   const ctrl = createVaultState(client)
   // Wait for the initial status fetch
   await ctrl.refresh()
   const container = document.body.appendChild(document.createElement('div'))
-  render(() => <SecretsSection vaultClient={client} vaultController={ctrl} />, { container })
+  render(
+    () => (
+      <SecretsSection vaultClient={client} vaultController={ctrl} profileClient={profileClient} />
+    ),
+    { container },
+  )
   return { container, ctrl }
 }
 
@@ -166,11 +174,10 @@ describe('SecretsSection', () => {
     const rows = Array.from(container.querySelectorAll('.ui-collection-row'))
     expect(rows.length).toBe(2)
 
-    // Row 1: label, store, usage
-    const row1Labels = rows[0].querySelectorAll('.sr-row-label')
-    expect(row1Labels[0].textContent).toBe('SSH password for deploy')
+    const row1Kind = rows[0].querySelector('.ui-badge')
+    expect(row1Kind?.textContent).toBe('Password')
 
-    const row1Store = rows[0].querySelector('.ui-badge')
+    const row1Store = rows[0].querySelectorAll('.ui-badge')[1]
     expect(row1Store?.textContent).toBe('System keychain')
 
     const row1Usage = rows[0].querySelector('.sr-row-usage')
@@ -754,4 +761,219 @@ it('replaces a private key secret via the three-way input', async () => {
       path: '/home/dev/.ssh/id_ed25519',
     })
   })
+})
+
+// The rows the bug report showed were indistinguishable: a private key and
+// its passphrase share the generated name, the key icon and the store badge
+// (nocx-mg9r). The kind is on the wire already — this asserts the SURFACE
+// renders it, in text a user can read, next to the storage badge.
+it('states each row kind in readable text beside the storage badge', async () => {
+  const { client, inventory } = mockClient()
+  client.status = vi.fn().mockResolvedValue(UNSEALED_STATUS)
+  inventory.mockResolvedValue({
+    entries: [
+      { ...MOCK_ENTRY_1, name: 'root@192.168.0.57', kind: 'private-key' },
+      { ...MOCK_ENTRY_2, name: 'root@192.168.0.57', kind: 'key-passphrase' },
+    ],
+  })
+
+  const { container } = await mount(client)
+
+  await vi.waitFor(() => {
+    expect(container.querySelector('.sr-row-label')).toBeTruthy()
+  })
+
+  const rows = Array.from(container.querySelectorAll('.ui-collection-row'))
+  expect(rows.length).toBe(2)
+
+  // Same name, same store — the kind badge is what tells them apart.
+  const badges = rows.map((r) =>
+    Array.from(r.querySelectorAll('.ui-badge')).map((b) => b.textContent),
+  )
+  expect(badges[0][0]).toBe('Private key')
+  expect(badges[1][0]).toBe('Key passphrase')
+  expect(badges[0][1]).toBe('System keychain')
+  expect(badges[1][1]).toBe('System keychain')
+  expect(badges[0][0]).not.toBe(badges[1][0])
+})
+
+// A secret nothing uses may go with a plain confirmation: no usage fetch, one
+// dialog, delete reached with the row handle, row gone after.
+it('deletes a secret nothing uses with a plain confirmation', async () => {
+  const { client, inventory, deleteSecret } = mockClient()
+  client.status = vi.fn().mockResolvedValue(UNSEALED_STATUS)
+  // First load shows the row; after the delete the component reloads and the
+  // row is gone — the empty inventory is what the reload sees.
+  inventory.mockResolvedValueOnce({ entries: [MOCK_ENTRY_2] }).mockResolvedValue({ entries: [] })
+  deleteSecret.mockResolvedValue({})
+
+  const { container } = await mount(client)
+
+  await vi.waitFor(() => {
+    expect(container.querySelector('.sr-row-label')).toBeTruthy()
+  })
+
+  const del = container.querySelector('button[aria-label^="Delete "]') as HTMLButtonElement
+  expect(del).toBeTruthy()
+  del.click()
+
+  await vi.waitFor(() => {
+    expect(container.querySelector('.nocx-dialog')).toBeTruthy()
+  })
+  expect(container.textContent).toContain('No connection uses this secret')
+
+  // The destructive action is not the default: Cancel carries autofocus.
+  const cancel = Array.from(container.querySelectorAll('.nocx-dialog button')).find(
+    (b) => b.textContent === 'Cancel',
+  ) as HTMLButtonElement
+  expect(cancel.hasAttribute('autofocus')).toBe(true)
+
+  const confirm = Array.from(container.querySelectorAll('.nocx-dialog button')).find(
+    (b) => b.textContent === 'Delete secret',
+  ) as HTMLButtonElement
+  confirm.click()
+
+  await vi.waitFor(() => {
+    expect(deleteSecret).toHaveBeenCalledWith({ id: MOCK_ENTRY_2.id })
+  })
+
+  // The row is gone from the list after the delete, without a manual refresh:
+  // the component reloads the inventory itself.
+  await vi.waitFor(() => {
+    expect(container.querySelector('.sr-row-label')).toBeNull()
+  })
+})
+
+// A secret connections still use NAMES them before it goes. The confirmation
+// says which connections break, and the delete button stays disabled until
+// the names are actually known.
+it('names the connections a delete would break before offering the danger button', async () => {
+  const { client, inventory, deleteSecret } = mockClient()
+  client.status = vi.fn().mockResolvedValue(UNSEALED_STATUS)
+  inventory.mockResolvedValueOnce({ entries: [MOCK_ENTRY_1] }).mockResolvedValue({ entries: [] })
+  deleteSecret.mockResolvedValue({})
+
+  const credentialUsage = vi.fn()
+  const pc = { credentialUsage } as unknown as ProfileClient
+  credentialUsage.mockResolvedValue({
+    usage: [
+      {
+        credentialId: 'cred:prod-deploy',
+        profiles: [
+          { profileId: 'ssh:p1:1', profileName: 'web-prod', source: 'profile' },
+          { profileId: 'ssh:p2:1', profileName: 'db-prod', source: 'profile' },
+        ],
+      },
+    ],
+  })
+
+  const { container } = await mount(client, pc)
+
+  await vi.waitFor(() => {
+    expect(container.querySelector('.sr-row-label')).toBeTruthy()
+  })
+
+  const del = container.querySelector('button[aria-label^="Delete "]') as HTMLButtonElement
+  del.click()
+
+  // The names arrive from credentials.usage, and the dialog says who breaks.
+  await vi.waitFor(() => {
+    expect(container.textContent).toContain('web-prod')
+  })
+  expect(container.textContent).toContain('db-prod')
+  expect(container.textContent).toContain('will stop using it')
+
+  const confirm = Array.from(container.querySelectorAll('.nocx-dialog button')).find(
+    (b) => b.textContent === 'Delete secret',
+  ) as HTMLButtonElement
+  expect(confirm.disabled).toBe(false)
+  confirm.click()
+
+  await vi.waitFor(() => {
+    expect(deleteSecret).toHaveBeenCalledWith({ id: MOCK_ENTRY_1.id })
+  })
+  await vi.waitFor(() => {
+    expect(container.querySelector('.sr-row-label')).toBeNull()
+  })
+})
+
+// The danger button is never the dialog's default: while the connection names
+// are still loading it is disabled, so Enter or a premature click cannot
+// destroy a secret whose blast radius nobody has named yet.
+it('keeps the delete button disabled until the breaking connections are named', async () => {
+  const { client, inventory } = mockClient()
+  client.status = vi.fn().mockResolvedValue(UNSEALED_STATUS)
+  inventory.mockResolvedValue({ entries: [MOCK_ENTRY_1] })
+
+  let resolveUsage: (v: { usage: never[] }) => void
+  const pc = {
+    credentialUsage: vi.fn(
+      () =>
+        new Promise((resolve) => {
+          resolveUsage = resolve
+        }),
+    ),
+  } as unknown as ProfileClient
+
+  const { container } = await mount(client, pc)
+
+  await vi.waitFor(() => {
+    expect(container.querySelector('.sr-row-label')).toBeTruthy()
+  })
+
+  const del = container.querySelector('button[aria-label^="Delete "]') as HTMLButtonElement
+  del.click()
+
+  await vi.waitFor(() => {
+    expect(container.querySelector('.nocx-dialog')).toBeTruthy()
+  })
+  const confirm = Array.from(container.querySelectorAll('.nocx-dialog button')).find(
+    (b) => b.textContent === 'Delete secret',
+  ) as HTMLButtonElement
+  expect(confirm.disabled).toBe(true)
+  expect(container.textContent).toContain('Checking which connections use this secret')
+
+  resolveUsage!({ usage: [] })
+  await vi.waitFor(() => {
+    expect(confirm.disabled).toBe(false)
+  })
+})
+
+// When the usage fetch fails the dialog says so and offers a retry — a
+// count-only confirmation would break the "names them before it goes"
+// contract silently.
+it('refuses to delete when the breaking connections cannot be named', async () => {
+  const { client, inventory, deleteSecret } = mockClient()
+  client.status = vi.fn().mockResolvedValue(UNSEALED_STATUS)
+  inventory.mockResolvedValue({ entries: [MOCK_ENTRY_1] })
+
+  const pc = {
+    credentialUsage: vi.fn().mockRejectedValue(new Error('backend unreachable')),
+  } as unknown as ProfileClient
+
+  const { container } = await mount(client, pc)
+
+  await vi.waitFor(() => {
+    expect(container.querySelector('.sr-row-label')).toBeTruthy()
+  })
+
+  const del = container.querySelector('button[aria-label^="Delete "]') as HTMLButtonElement
+  del.click()
+
+  await vi.waitFor(() => {
+    expect(container.textContent).toContain('Could not check which connections use this secret')
+  })
+
+  const confirm = Array.from(container.querySelectorAll('.nocx-dialog button')).find(
+    (b) => b.textContent === 'Delete secret',
+  ) as HTMLButtonElement
+  expect(confirm.disabled).toBe(true)
+  confirm.click()
+  expect(deleteSecret).not.toHaveBeenCalled()
+
+  // Retry is offered, and a recovered fetch enables the danger button.
+  const retry = Array.from(container.querySelectorAll('.nocx-dialog button')).find(
+    (b) => b.textContent === 'Try again',
+  ) as HTMLButtonElement
+  expect(retry).toBeTruthy()
 })

@@ -35,6 +35,9 @@ type fakeVaultLifecycle struct {
 	createNamedID         credential.SecretID
 	renameSecretErr       error
 	renameSecretName      string
+	resolveRowID          credential.SecretID
+	resolveRowFound       bool
+	resolveRowErr         error
 }
 
 func (f *fakeVaultLifecycle) State() vault.State { return f.state }
@@ -100,6 +103,13 @@ func (f *fakeVaultLifecycle) RenameSecret(_ context.Context, row string, name st
 func (f *fakeVaultLifecycle) ReplaceSecret(_ context.Context, row string, _ credential.Secret, _ []vault.CredentialInventory) error {
 	f.renameSecretName = row
 	return f.renameSecretErr
+}
+
+func (f *fakeVaultLifecycle) ResolveRow(row string, _ []vault.CredentialInventory) (credential.SecretID, bool) {
+	if f.resolveRowErr != nil {
+		return "", false
+	}
+	return f.resolveRowID, f.resolveRowFound
 }
 
 func newFakeVaultLifecycle() *fakeVaultLifecycle {

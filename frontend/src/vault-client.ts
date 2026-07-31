@@ -83,6 +83,10 @@ export interface VaultReplaceSecretParams {
   path?: string
 }
 
+export interface VaultDeleteSecretParams {
+  /** The row handle the inventory entry carried — never a SecretID. */
+  id: string
+}
 export class VaultClient {
   constructor(private dispatcher: Dispatcher) {}
 
@@ -156,6 +160,15 @@ export class VaultClient {
    *  working. The old value is never shown back (ADR-0011 §2). */
   replaceSecret(params: VaultReplaceSecretParams): Promise<Record<string, never>> {
     return this.dispatcher.call('vault.replaceSecret', params)
+  }
+
+  /** Delete a secret and its stored material, addressed by its inventory row
+   *  handle — never by a secret reference (the renderer may not name one,
+   *  nocx-jb20.1). Metadata first, stored secret second (ADR-0011 §4): any
+   *  connection that used the secret is told before this is called, and the
+   *  credential reference is cleared with the delete. */
+  deleteSecret(params: VaultDeleteSecretParams): Promise<Record<string, never>> {
+    return this.dispatcher.call('vault.deleteSecret', params)
   }
   activity(): Promise<Record<string, never>> {
     return this.dispatcher.call('vault.activity', {})

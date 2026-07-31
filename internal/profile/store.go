@@ -65,6 +65,13 @@ type CredentialMetadataRepository interface {
 	// selectable again. Returns ErrVersionNotFound when the version does
 	// not exist. Idempotent on an already-active version.
 	UnretireVersion(id string, versionID string) error
+	// ClearSecretReferences removes every reference to secretID from all
+	// credentials — record-level fields and every version's password,
+	// passphrase and key-material references — in one write. It is the
+	// metadata-first half of deleting a secret (ADR-0011 §4): nothing may
+	// keep pointing at a store entry that is about to be gone. A secret
+	// nothing references is a no-op.
+	ClearSecretReferences(secretID string) error
 }
 
 // JSONStore persists profiles and groups to a single JSON file on disk.
@@ -597,6 +604,64 @@ func (s *JSONStore) UpdateCurrentVersionKeyMaterial(id string, keyMaterialSecret
 		}
 	}
 	return fmt.Errorf("%s: %w", id, ErrCredentialNotFound)
+}
+
+// ClearSecretReferences removes every reference to secretID from all
+// credentials: record-level fields AND every version's password, passphrase
+// and key-material references, in ONE write. It is the metadata-first half
+// of deleting a secret (ADR-0011 §4): nothing may keep pointing at a store
+// entry that is about to be gone, and a loop of per-field setters could fail
+// halfway, leaving a partial clear. A version whose key material reference
+// is cleared loses its fingerprint too — the two describe the same material,
+// and deleteKeyMaterialForCredential already clears them together.
+//
+// Idempotent: a secret nothing references clears nothing and succeeds.
+func (s *JSONStore) ClearSecretReferences(secretID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	d, err := s.load()
+	if err != nil {
+		return err
+	}
+
+	changed := false
+	for i := range d.Credentials {
+		c := &d.Credentials[i]
+		if c.SecretID == secretID {
+			c.SecretID = ""
+			changed = true
+		}
+		if c.PassphraseSecretID == secretID {
+			c.PassphraseSecretID = ""
+			changed = true
+		}
+		if c.KeyMaterialSecretID == secretID {
+			c.KeyMaterialSecretID = ""
+			changed = true
+		}
+		for j := range c.Versions {
+			v := &c.Versions[j]
+			if v.PasswordSecretID == secretID {
+				v.PasswordSecretID = ""
+				changed = true
+			}
+			if v.PassphraseSecretID == secretID {
+				v.PassphraseSecretID = ""
+				changed = true
+			}
+			if v.KeyMaterialSecretID == secretID {
+				v.KeyMaterialSecretID = ""
+				v.KeyFingerprint = ""
+				changed = true
+			}
+		}
+	}
+
+	if !changed {
+		return nil
+	}
+	return s.writeLocked(d)
 }
 
 // AppendCredentialVersion appends a new version and sets it as the current

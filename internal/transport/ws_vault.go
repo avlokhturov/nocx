@@ -34,6 +34,12 @@ type VaultLifecycle interface {
 	// RenameSecret sets a secret's display name, addressed by its
 	// renderer-addressable row handle — never by a SecretID (nocx-jb20.1).
 	RenameSecret(ctx context.Context, row string, name string, inputs []vault.CredentialInventory) error
+	// ResolveRow maps a renderer-addressable row handle to the SecretID
+	// behind it. Backend-only: the renderer never receives a SecretID
+	// (nocx-jb20.1). The transport resolves the row first so it can clear
+	// credential references — metadata first (ADR-0011 §4) — before the
+	// stored secret is deleted.
+	ResolveRow(row string, inputs []vault.CredentialInventory) (credential.SecretID, bool)
 	// ReplaceSecret overwrites the material behind an existing secret,
 	// addressed by its renderer-addressable row handle — never by a SecretID
 	// (nocx-jb20.1). The reference does not change: the new value lands under
@@ -157,6 +163,8 @@ func (s *WSServer) handleVaultMethod(wconn *wsConn, req jsonrpcRequest) {
 		s.handleVaultRenameSecret(wconn, req)
 	case "vault.replaceSecret":
 		s.handleVaultReplaceSecret(wconn, req)
+	case "vault.deleteSecret":
+		s.handleVaultDeleteSecret(wconn, req)
 	}
 }
 
@@ -482,20 +490,22 @@ func (s *WSServer) vaultInventoryInputs(creds []profile.Credential, profiles []p
 	inputs := make([]vault.CredentialInventory, 0, len(creds))
 	for _, c := range creds {
 		ci := vault.CredentialInventory{
-			ID:                 c.ID,
-			Username:           c.Username,
-			AuthMode:           string(c.Auth),
-			SecretID:           c.SecretID,
-			PassphraseSecretID: c.PassphraseSecretID,
-			UsageCount:         usageCount[c.ID],
+			ID:                  c.ID,
+			Username:            c.Username,
+			AuthMode:            string(c.Auth),
+			SecretID:            c.SecretID,
+			PassphraseSecretID:  c.PassphraseSecretID,
+			KeyMaterialSecretID: c.KeyMaterialSecretID,
+			UsageCount:          usageCount[c.ID],
 		}
 
 		// Populate versions.
 		for _, v := range c.Versions {
 			ci.Versions = append(ci.Versions, vault.CredentialVersionInventory{
-				PasswordSecretID:   v.PasswordSecretID,
-				PassphraseSecretID: v.PassphraseSecretID,
-				KeyFingerprint:     v.KeyFingerprint,
+				PasswordSecretID:    v.PasswordSecretID,
+				PassphraseSecretID:  v.PassphraseSecretID,
+				KeyMaterialSecretID: v.KeyMaterialSecretID,
+				KeyFingerprint:      v.KeyFingerprint,
 			})
 		}
 
@@ -735,6 +745,90 @@ func (s *WSServer) handleVaultReplaceSecret(wconn *wsConn, req jsonrpcRequest) {
 		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "vault.replaceSecret: ", err))
 		return
 	}
+
+	s.broadcastVaultChanged()
+	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(struct{}{})))
+}
+
+type vaultDeleteSecretParams struct {
+	ID string `json:"id"`
+}
+
+// handleVaultDeleteSecret deletes a secret the user chose on the Secrets
+// page. The row is addressed by its renderer-addressable handle, which the
+// backend resolves — a SecretID is never accepted from the renderer as an
+// identifier (nocx-jb20.1).
+//
+// # Order: metadata first, stored secret second (ADR-0011 §4)
+//
+// "Deletion goes metadata-first with a retriable secret deletion after: a
+// brief unreachable orphan is safer than metadata pointing at a secret that
+// is gone." The credential records are the metadata that point at this
+// secret, so every reference is cleared BEFORE the vault deletes the stored
+// value — the vault's own catalogue record and journal go with the provider
+// delete, in Vault.Delete's existing metadata-first sequence. A failed
+// provider delete therefore leaves a brief unreachable orphan (the journal
+// retries it), never a connection claiming a password that cannot exist.
+func (s *WSServer) handleVaultDeleteSecret(wconn *wsConn, req jsonrpcRequest) {
+	if s.credMeta == nil || s.profiles == nil || s.groups == nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "vault.deleteSecret not available"))
+		return
+	}
+	if s.vaultLifecycle == nil || s.credentials == nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "vault.deleteSecret not available"))
+		return
+	}
+	var params vaultDeleteSecretParams
+	if !isJSONObject(req.Params) {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		return
+	}
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		return
+	}
+	if strings.TrimSpace(params.ID) == "" {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: id is required"))
+		return
+	}
+
+	creds, err := s.credMeta.LoadCredentials()
+	if err != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		return
+	}
+	profiles, err := s.profiles.LoadProfiles()
+	if err != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		return
+	}
+	groups, err := s.groups.LoadGroups()
+	if err != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		return
+	}
+	inputs := s.vaultInventoryInputs(creds, profiles, groups)
+
+	// Resolve the row to the secret it names before touching anything: the
+	// reference must be found while the metadata still holds it.
+	id, ok := s.vaultLifecycle.ResolveRow(params.ID, inputs)
+	if !ok {
+		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "vault.deleteSecret: ", fmt.Errorf("unknown secret row %q", params.ID)))
+		return
+	}
+
+	// Metadata first (ADR-0011 §4): clear every reference in the credential
+	// records — one atomic write. If this fails, nothing was deleted.
+	if err := s.credMeta.ClearSecretReferences(string(id)); err != nil {
+		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "vault.deleteSecret: ", err))
+		return
+	}
+
+	// Stored secret second, best-effort like every other metadata-first
+	// deletion in this file: the metadata removal stands regardless, and a
+	// failed provider delete is a brief unreachable orphan the journal
+	// reconciles — never a dangling row.
+	_ = s.credentials.Delete(context.Background(), id)
 
 	s.broadcastVaultChanged()
 	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(struct{}{})))

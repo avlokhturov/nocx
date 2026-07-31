@@ -23,13 +23,14 @@ import { Stack } from './ui/stack'
 import { TextField } from './ui/text-field'
 import { SegmentedControl } from './ui/segmented-control'
 import { createFormValidation, required } from './ui/validation'
-import { KeyIcon, LockIcon, PencilIcon, ResetIcon } from './ui/icons'
+import { KeyIcon, LockIcon, PencilIcon, ResetIcon, TrashIcon } from './ui/icons'
 import { DEFAULT_KEY_MODE, KeyMaterialInput, suppliesMaterial } from './key-material-input'
 import type { KeyInputMode } from './key-material-input'
 import { showToast } from './ui/toast'
 import type { VaultClient, InventoryEntry } from './vault-client'
 import type { VaultController } from './vault'
 import type { DialogClient } from './dialog-client'
+import type { ProfileClient } from './profiles'
 import { log } from './log'
 export interface SecretsSectionProps {
   vaultClient: VaultClient
@@ -37,6 +38,10 @@ export interface SecretsSectionProps {
   /** Native dialog capability (dialog.*). Absent in the dev-web harness and
    *  in tests; the surfaces then degrade to typing paths by hand. */
   dialogClient?: DialogClient
+  /** Connection usage (credentials.usage). Needed to NAME the connections a
+   *  delete would break — the delete confirmation says which connections
+   *  stop working before anything is deleted. */
+  profileClient?: ProfileClient
 }
 
 type LoadState =
@@ -44,6 +49,18 @@ type LoadState =
   | { kind: 'loaded'; entries: InventoryEntry[] }
   | { kind: 'empty' }
   | { kind: 'error'; message: string }
+
+// What the material is, in words a user reads. The wire vocabulary is closed
+// (registry spec §4.1) — a new kind is an addition here, never a degradation
+// into the raw token. The badge is how two rows with the same name and store
+// (a private key and its passphrase) stay distinguishable (nocx-mg9r).
+const KIND_LABELS: Record<string, string> = {
+  password: 'Password',
+  'key-passphrase': 'Key passphrase',
+  'private-key': 'Private key',
+  'public-key': 'Public key',
+  'otp-seed': 'OTP seed',
+}
 
 const STORE_LABELS: Record<string, string> = {
   system: 'System keychain',
@@ -113,6 +130,20 @@ export function SecretsSection(props: SecretsSectionProps) {
   // handle, never by a secret reference (nocx-jb20.1).
   const [renameTarget, setRenameTarget] = createSignal<InventoryEntry | null>(null)
   const [renameName, setRenameName] = createSignal('')
+
+  // Delete-secret dialog state — the row being deleted, addressed by its
+  // opaque handle (nocx-jb20.1). A secret that connections still use names
+  // them before anything can be deleted; a secret nothing uses goes with a
+  // plain confirmation. The delete button is never the dialog's default
+  // action — Cancel is (ui/README: "Enter must not fire a destructive
+  // confirmation").
+  const [deleteTarget, setDeleteTarget] = createSignal<InventoryEntry | null>(null)
+  const [deleteBusy, setDeleteBusy] = createSignal(false)
+  // Connection names for the target's owning credential. null while loading,
+  // [] once loaded with nothing to name. Only fetched for rows in use — a
+  // plain confirmation for a secret nothing uses.
+  const [deleteNames, setDeleteNames] = createSignal<string[] | null>(null)
+  const [deleteNamesError, setDeleteNamesError] = createSignal<string | null>(null)
   const [renameBusy, setRenameBusy] = createSignal(false)
   const renameValidation = createFormValidation({
     name: () => required('Name')(renameName()),
@@ -296,6 +327,63 @@ export function SecretsSection(props: SecretsSectionProps) {
     }
   }
 
+  function openDelete(entry: InventoryEntry): void {
+    setDeleteTarget(entry)
+    setDeleteBusy(false)
+    setDeleteNamesError(null)
+    if (entry.usedBy > 0) {
+      // The confirmation must NAME the connections this breaks before
+      // anything can be deleted — the count alone is not the feature.
+      setDeleteNames(null)
+      void loadDeleteNames(entry)
+    } else {
+      setDeleteNames([])
+    }
+  }
+
+  async function loadDeleteNames(entry: InventoryEntry): Promise<void> {
+    setDeleteNames(null)
+    setDeleteNamesError(null)
+    const pc = props.profileClient
+    if (!pc) {
+      setDeleteNamesError('this window cannot check which connections use the secret')
+      return
+    }
+    try {
+      const { usage } = await pc.credentialUsage()
+      const refs = usage.find((u) => u.credentialId === entry.ownerId)?.profiles ?? []
+      setDeleteNames(refs.map((r) => r.profileName).filter(Boolean))
+    } catch (err) {
+      const message = (err as Error).message
+      log.error('Failed to load connection usage for the delete confirmation', { message })
+      setDeleteNamesError(message)
+    }
+  }
+
+  function closeDelete(): void {
+    if (deleteBusy()) return
+    setDeleteTarget(null)
+  }
+
+  async function submitDelete(): Promise<void> {
+    const entry = deleteTarget()
+    if (!entry) return
+    setDeleteBusy(true)
+    try {
+      await props.vaultClient.deleteSecret({ id: entry.id })
+      setDeleteTarget(null)
+      showToast({ level: 'success', message: `Deleted "${entry.name}"` })
+      // The row is gone from the list without a manual refresh.
+      void load()
+    } catch (err) {
+      const message = (err as Error).message
+      log.error('Failed to delete secret', { message })
+      showToast({ level: 'danger', message: `Could not delete secret: ${message}` })
+    } finally {
+      setDeleteBusy(false)
+    }
+  }
+
   return (
     <div class="sr-root">
       {/* A Switch, not nested Shows. The nested form made a missing case
@@ -405,6 +493,11 @@ export function SecretsSection(props: SecretsSectionProps) {
                   }
                   actions={
                     <>
+                      {/* What the material IS, before which store holds it:
+                          two rows with the same generated name (a key and its
+                          passphrase) are told apart by this badge (nocx-mg9r).
+                          The icon alone cannot carry that — both are keys. */}
+                      <Badge tone="info">{KIND_LABELS[entry.kind] ?? entry.kind}</Badge>
                       {/* Which store holds it is a status, and a status is a
                           Badge — the same vocabulary the diagnostics and the
                           unreachable marker beside it already use. As bare
@@ -429,6 +522,14 @@ export function SecretsSection(props: SecretsSectionProps) {
                         onClick={() => openRename(entry)}
                       >
                         <PencilIcon />
+                      </IconButton>
+                      <IconButton
+                        size="md"
+                        ariaLabel={`Delete ${entry.name}`}
+                        title="Delete secret"
+                        onClick={() => openDelete(entry)}
+                      >
+                        <TrashIcon />
                       </IconButton>
                     </>
                   }
@@ -612,6 +713,79 @@ export function SecretsSection(props: SecretsSectionProps) {
                 error={renameValidation.error('name')}
                 required
               />
+            </Stack>
+          </Dialog>
+        )}
+      </Show>
+
+      {/* Delete confirmation — addressed by the row's opaque handle. A secret
+          that connections still use NAMES them before it can be deleted, and
+          the delete button is never the default action: Cancel is autofocused
+          so a stray Enter cannot destroy anything (ui/README: "Enter must not
+          fire a destructive confirmation"). A secret nothing uses goes with a
+          plain confirmation. */}
+      <Show when={deleteTarget()}>
+        {(target) => (
+          <Dialog
+            open={true}
+            onClose={closeDelete}
+            title={`Delete "${target().name}"?`}
+            footer={
+              <>
+                <Button
+                  variant="danger"
+                  disabled={deleteBusy() || deleteNames() === null || deleteNamesError() !== null}
+                  onClick={() => void submitDelete()}
+                >
+                  {deleteBusy() ? 'Deleting…' : 'Delete secret'}
+                </Button>
+                <Button variant="default" onClick={closeDelete} disabled={deleteBusy()} autofocus>
+                  Cancel
+                </Button>
+              </>
+            }
+          >
+            <Stack gap="default">
+              <Show when={target().usedBy > 0}>
+                <Show when={deleteNames() === null && deleteNamesError() === null}>
+                  <p class="sr-delete-hint">Checking which connections use this secret…</p>
+                </Show>
+                <Show when={deleteNamesError() !== null}>
+                  <p class="sr-delete-hint" role="alert">
+                    Could not check which connections use this secret: {deleteNamesError()}
+                  </p>
+                  <Button
+                    variant="default"
+                    disabled={deleteBusy()}
+                    onClick={() => void loadDeleteNames(target())}
+                  >
+                    Try again
+                  </Button>
+                </Show>
+                <Show when={deleteNames() !== null && deleteNamesError() === null}>
+                  <p class="sr-delete-hint">
+                    These connections use this secret and will stop using it:
+                  </p>
+                  <Show when={deleteNames()!.length > 0}>
+                    <ul class="sr-delete-connections">
+                      <For each={deleteNames()}>{(name) => <li>{name}</li>}</For>
+                    </ul>
+                  </Show>
+                  <Show when={deleteNames()!.length === 0}>
+                    <p class="sr-delete-hint">
+                      {target().usedBy} connection{target().usedBy === 1 ? '' : 's'} use it, but the
+                      connection name could not be resolved.
+                    </p>
+                  </Show>
+                </Show>
+              </Show>
+              <Show when={target().usedBy === 0}>
+                <p class="sr-delete-hint">
+                  No connection uses this secret. The stored value is destroyed and cannot be
+                  recovered.
+                </p>
+              </Show>
+              <p class="sr-delete-hint">This cannot be undone.</p>
             </Stack>
           </Dialog>
         )}

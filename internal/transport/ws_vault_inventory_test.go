@@ -134,6 +134,27 @@ func (h *inventoryHarness) savePassphrase(credID, passphrase string) {
 	}
 }
 
+// saveKeyMaterialNamed stores a private key the way the renderer does for an
+// encrypted-key connection (ADR-0016 name attached).
+func (h *inventoryHarness) saveKeyMaterialNamed(credID, keyText, name string) json.RawMessage {
+	h.t.Helper()
+	return jsonrpcCall(h.t, h.conn, "credentials.saveKeyMaterial", map[string]any{
+		"credentialId": credID,
+		"keyText":      keyText,
+		"name":         name,
+	})
+}
+
+// saveKeyPassphraseNamed stores a passphrase with the ADR-0016 name attached.
+func (h *inventoryHarness) saveKeyPassphraseNamed(credID, passphrase, name string) json.RawMessage {
+	h.t.Helper()
+	return jsonrpcCall(h.t, h.conn, "credentials.saveKeyPassphrase", map[string]any{
+		"credentialId": credID,
+		"passphrase":   passphrase,
+		"name":         name,
+	})
+}
+
 func (h *inventoryHarness) createProfile(p profile.SSHProfile) {
 	h.t.Helper()
 	resp := jsonrpcCall(h.t, h.conn, "profiles.create", p)
@@ -295,6 +316,110 @@ func TestVaultInventory_MixedCredentials(t *testing.T) {
 	// "SHA256:…" with an empty fingerprint — a known data gap in writer.
 	if keyEntry.Name != "Passphrase for key SHA256:…" {
 		t.Errorf("key name = %q, want %q", keyEntry.Name, "Passphrase for key SHA256:…")
+	}
+}
+
+// The exact shape the bug reports were filed against (nocx-mg9r, nocx-8pct):
+// a connection with an encrypted private key stores BOTH the key and its
+// passphrase, and both rows must say what they are (kind) and who uses them
+// (owner + count). This drives the real backend over the real socket — no
+// fixture — so a projection gap on the wire fails here.
+func TestVaultInventory_KeyAndPassphraseCarryKindAndUsage(t *testing.T) {
+	h := newInventoryHarness(t)
+	h.setupAndUnseal()
+
+	credID := h.createCredential(profile.Credential{
+		Name: "vm-dsm01", Username: "root", Auth: profile.AuthPublicKey,
+	})
+
+	// An encrypted key, saved the way the connection editor does: the key
+	// first, then its passphrase, both under the same generated name.
+	pem, _ := testEncryptedKeyPEM(t, "correct horse")
+	resp := h.saveKeyMaterialNamed(credID, pem, "root@192.168.0.57")
+	var keyResp struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &keyResp); err != nil {
+		t.Fatalf("saveKeyMaterial unmarshal: %v\nraw: %s", err, string(resp))
+	}
+	if keyResp.Error != nil {
+		t.Fatalf("saveKeyMaterial: %+v", keyResp.Error)
+	}
+
+	resp = h.saveKeyPassphraseNamed(credID, "correct horse", "root@192.168.0.57")
+	var passResp struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &passResp); err != nil {
+		t.Fatalf("saveKeyPassphrase unmarshal: %v\nraw: %s", err, string(resp))
+	}
+	if passResp.Error != nil {
+		t.Fatalf("saveKeyPassphrase: %+v", passResp.Error)
+	}
+
+	// One connection resolves to this credential.
+	user := "root"
+	port := 22
+	h.createProfile(profile.SSHProfile{
+		Base: profile.Base{
+			ID:   "prof:encrypted-key:1",
+			Name: "vm-dsm01",
+			Type: "ssh",
+		},
+		Options: profile.StoredSSHProfileOptions{
+			Host:         "192.168.0.57",
+			Port:         &port,
+			CredentialID: credID,
+			User:         &user,
+		},
+	})
+
+	inv := h.callInventory()
+	if len(inv.Entries) != 2 {
+		t.Fatalf("expected 2 entries (key + passphrase), got %d", len(inv.Entries))
+	}
+
+	var keyRow, passRow *inventoryEntryDTO
+	for i := range inv.Entries {
+		e := &inv.Entries[i]
+		switch e.Kind {
+		case "private-key":
+			keyRow = e
+		case "key-passphrase":
+			passRow = e
+		}
+	}
+
+	if keyRow == nil {
+		t.Fatal("no private-key entry found — the key material reference is not on the wire")
+	}
+	if keyRow.Name != "root@192.168.0.57" {
+		t.Errorf("key name = %q, want %q", keyRow.Name, "root@192.168.0.57")
+	}
+	if keyRow.OwnerID != credID {
+		t.Errorf("key ownerId = %q, want %q", keyRow.OwnerID, credID)
+	}
+	if keyRow.UsedBy != 1 {
+		t.Errorf("key usedBy = %d, want 1 — a stored key the connection resolves to must report that connection", keyRow.UsedBy)
+	}
+
+	if passRow == nil {
+		t.Fatal("no key-passphrase entry found")
+	}
+	if passRow.Name != "root@192.168.0.57" {
+		t.Errorf("passphrase name = %q, want %q", passRow.Name, "root@192.168.0.57")
+	}
+	if passRow.OwnerID != credID {
+		t.Errorf("passphrase ownerId = %q, want %q", passRow.OwnerID, credID)
+	}
+	if passRow.UsedBy != 1 {
+		t.Errorf("passphrase usedBy = %d, want 1", passRow.UsedBy)
+	}
+
+	// The two rows are distinguishable ONLY by kind — the names and store
+	// are identical. The kind is what the surface must render (nocx-mg9r).
+	if keyRow.Kind == passRow.Kind {
+		t.Errorf("key and passphrase rows carry the same kind %q — nothing tells them apart", keyRow.Kind)
 	}
 }
 

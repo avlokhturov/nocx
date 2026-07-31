@@ -250,6 +250,34 @@ func (r *fakeCredRepo) DeleteCredential(id string) error {
 	return nil
 }
 
+func (r *fakeCredRepo) ClearSecretReferences(secretID string) error {
+	for i := range r.creds {
+		c := &r.creds[i]
+		if c.SecretID == secretID {
+			c.SecretID = ""
+		}
+		if c.PassphraseSecretID == secretID {
+			c.PassphraseSecretID = ""
+		}
+		if c.KeyMaterialSecretID == secretID {
+			c.KeyMaterialSecretID = ""
+		}
+		for j := range c.Versions {
+			if c.Versions[j].PasswordSecretID == secretID {
+				c.Versions[j].PasswordSecretID = ""
+			}
+			if c.Versions[j].PassphraseSecretID == secretID {
+				c.Versions[j].PassphraseSecretID = ""
+			}
+			if c.Versions[j].KeyMaterialSecretID == secretID {
+				c.Versions[j].KeyMaterialSecretID = ""
+				c.Versions[j].KeyFingerprint = ""
+			}
+		}
+	}
+	return nil
+}
+
 // The version transitions are part of the repository interface but never
 // exercised by export: a backup carries credential records, not rotation
 // state. They are here to satisfy the interface, and each fails loudly rather

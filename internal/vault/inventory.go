@@ -29,13 +29,14 @@ type InventoryEntry struct {
 // CredentialInventory contains the metadata needed to derive inventory entries
 // for one credential. This is a plain-data projection — no profile package types.
 type CredentialInventory struct {
-	ID                 string
-	Username           string
-	AuthMode           string // "password", "publicKey", "agent", etc.
-	SecretID           string // legacy bare reference
-	PassphraseSecretID string // legacy bare reference
-	Versions           []CredentialVersionInventory
-	UsageCount         int
+	ID                  string
+	Username            string
+	AuthMode            string // "password", "publicKey", "agent", etc.
+	SecretID            string // legacy bare reference
+	PassphraseSecretID  string // legacy bare reference
+	KeyMaterialSecretID string // legacy bare reference to stored private key
+	Versions            []CredentialVersionInventory
+	UsageCount          int
 	// For single-use passwords, the effective host and port of the sole profile.
 	SingleHost string
 	SinglePort int
@@ -43,9 +44,10 @@ type CredentialInventory struct {
 
 // CredentialVersionInventory projects the version metadata the label needs.
 type CredentialVersionInventory struct {
-	PasswordSecretID   string
-	PassphraseSecretID string
-	KeyFingerprint     string
+	PasswordSecretID    string
+	PassphraseSecretID  string
+	KeyMaterialSecretID string
+	KeyFingerprint      string
 }
 
 // secretRef is an internal representation of a unique secret reference found
@@ -54,6 +56,69 @@ type secretRef struct {
 	ref            credential.SecretID
 	kind           string // "password" | "key-passphrase"
 	keyFingerprint string // non-empty only for "key-passphrase"
+}
+
+// collectRefs gathers unique secret references from a credential's versions
+// AND its legacy bare fields (which may coexist during migration). Unconditional
+// collection of both sources followed by deduplication ensures no secret is
+// missed when a credential transitions from the legacy format.
+func collectRefs(cred CredentialInventory) []secretRef {
+	seen := make(map[credential.SecretID]bool)
+	var refs []secretRef
+
+	// Legacy bare top-level fields.
+	if cred.SecretID != "" {
+		id := credential.SecretID(cred.SecretID)
+		if !seen[id] {
+			seen[id] = true
+			refs = append(refs, secretRef{ref: id, kind: "password"})
+		}
+	}
+	if cred.PassphraseSecretID != "" {
+		id := credential.SecretID(cred.PassphraseSecretID)
+		if !seen[id] {
+			seen[id] = true
+			refs = append(refs, secretRef{ref: id, kind: "key-passphrase"})
+		}
+	}
+	if cred.KeyMaterialSecretID != "" {
+		id := credential.SecretID(cred.KeyMaterialSecretID)
+		if !seen[id] {
+			seen[id] = true
+			refs = append(refs, secretRef{ref: id, kind: "private-key"})
+		}
+	}
+
+	// Version-level fields.
+	for _, v := range cred.Versions {
+		if v.PasswordSecretID != "" {
+			id := credential.SecretID(v.PasswordSecretID)
+			if !seen[id] {
+				seen[id] = true
+				refs = append(refs, secretRef{ref: id, kind: "password"})
+			}
+		}
+		if v.PassphraseSecretID != "" {
+			id := credential.SecretID(v.PassphraseSecretID)
+			if !seen[id] {
+				seen[id] = true
+				refs = append(refs, secretRef{
+					ref:            id,
+					kind:           "key-passphrase",
+					keyFingerprint: v.KeyFingerprint,
+				})
+			}
+		}
+		if v.KeyMaterialSecretID != "" {
+			id := credential.SecretID(v.KeyMaterialSecretID)
+			if !seen[id] {
+				seen[id] = true
+				refs = append(refs, secretRef{ref: id, kind: "private-key"})
+			}
+		}
+	}
+
+	return refs
 }
 
 // ---------------------------------------------------------------------------
@@ -221,55 +286,6 @@ func recordFor(records []SecretRecord, id credential.SecretID) (SecretRecord, bo
 	return SecretRecord{}, false
 }
 
-// collectRefs gathers unique secret references from a credential's versions
-// AND its legacy bare fields (which may coexist during migration). Unconditional
-// collection of both sources followed by deduplication ensures no secret is
-// missed when a credential transitions from the legacy format.
-func collectRefs(cred CredentialInventory) []secretRef {
-	seen := make(map[credential.SecretID]bool)
-	var refs []secretRef
-
-	// Legacy bare top-level fields.
-	if cred.SecretID != "" {
-		id := credential.SecretID(cred.SecretID)
-		if !seen[id] {
-			seen[id] = true
-			refs = append(refs, secretRef{ref: id, kind: "password"})
-		}
-	}
-	if cred.PassphraseSecretID != "" {
-		id := credential.SecretID(cred.PassphraseSecretID)
-		if !seen[id] {
-			seen[id] = true
-			refs = append(refs, secretRef{ref: id, kind: "key-passphrase"})
-		}
-	}
-
-	// Version-level fields.
-	for _, v := range cred.Versions {
-		if v.PasswordSecretID != "" {
-			id := credential.SecretID(v.PasswordSecretID)
-			if !seen[id] {
-				seen[id] = true
-				refs = append(refs, secretRef{ref: id, kind: "password"})
-			}
-		}
-		if v.PassphraseSecretID != "" {
-			id := credential.SecretID(v.PassphraseSecretID)
-			if !seen[id] {
-				seen[id] = true
-				refs = append(refs, secretRef{
-					ref:            id,
-					kind:           "key-passphrase",
-					keyFingerprint: v.KeyFingerprint,
-				})
-			}
-		}
-	}
-
-	return refs
-}
-
 // deriveLabel produces the fallback label for a secret entry whose name did
 // not land, from the owner that references it.
 //
@@ -277,6 +293,8 @@ func collectRefs(cred CredentialInventory) []secretRef {
 //   - password used by one profile → "SSH password for {user}@{host}:{port}"
 //   - password used by several    → "SSH password for {user}"
 //   - key passphrase              → "Passphrase for key SHA256:{first 8 of fingerprint}…"
+//   - private key                 → "Private key for {user}@{host}:{port}" (one
+//     profile) or "Private key for {user}" (several)
 func deriveLabel(sr secretRef, cred CredentialInventory) string {
 	switch sr.kind {
 	case "password":
@@ -291,6 +309,12 @@ func deriveLabel(sr secretRef, cred CredentialInventory) string {
 			fp = fp[:8]
 		}
 		return fmt.Sprintf("Passphrase for key SHA256:%s…", fp)
+
+	case "private-key":
+		if cred.UsageCount == 1 && cred.SingleHost != "" {
+			return fmt.Sprintf("Private key for %s@%s:%d", cred.Username, cred.SingleHost, cred.SinglePort)
+		}
+		return fmt.Sprintf("Private key for %s", cred.Username)
 
 	default:
 		return "Unknown secret"

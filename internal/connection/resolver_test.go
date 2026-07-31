@@ -195,6 +195,35 @@ func (s *stubProfileStore) UpdateCurrentVersionKeyMaterial(id, keyMaterialSecret
 	return nil
 }
 
+func (s *stubProfileStore) ClearSecretReferences(secretID string) error {
+	for id := range s.credentials {
+		c := s.credentials[id]
+		if c.SecretID == secretID {
+			c.SecretID = ""
+		}
+		if c.PassphraseSecretID == secretID {
+			c.PassphraseSecretID = ""
+		}
+		if c.KeyMaterialSecretID == secretID {
+			c.KeyMaterialSecretID = ""
+		}
+		for j := range c.Versions {
+			if c.Versions[j].PasswordSecretID == secretID {
+				c.Versions[j].PasswordSecretID = ""
+			}
+			if c.Versions[j].PassphraseSecretID == secretID {
+				c.Versions[j].PassphraseSecretID = ""
+			}
+			if c.Versions[j].KeyMaterialSecretID == secretID {
+				c.Versions[j].KeyMaterialSecretID = ""
+				c.Versions[j].KeyFingerprint = ""
+			}
+		}
+		s.credentials[id] = c
+	}
+	return nil
+}
+
 func (s *stubProfileStore) AppendCredentialVersion(id, passwordSecretID, passphraseSecretID string) error {
 	existing, ok := s.credentials[id]
 	if !ok {

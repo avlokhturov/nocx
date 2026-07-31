@@ -1536,6 +1536,22 @@ func (v *Vault) ReplaceSecret(ctx context.Context, row string, value credential.
 	return nil
 }
 
+// ResolveRow maps a renderer-addressable row handle to the SecretID behind
+// it — the inverse half of the inventory's row minting. Backend-only: the
+// renderer is never handed a SecretID, and the row handle is the only
+// identifier it is allowed to hold (nocx-jb20.1). The row set is the same one
+// BuildInventory shows: vault records first, then references in the
+// credential metadata (so a pre-ADR-0016 secret can be resolved too).
+//
+// The transport uses this to clear credential references (metadata first,
+// ADR-0011 §4) before the stored secret is deleted.
+func (v *Vault) ResolveRow(row string, inputs []CredentialInventory) (credential.SecretID, bool) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	id, _, ok := v.resolveRowLocked(row, inputs)
+	return id, ok
+}
+
 // resolveRowLocked maps a row handle to its (SecretID, kind). Records are the
 // primary source; unrecorded references come from the credential metadata.
 // Must hold v.mu.

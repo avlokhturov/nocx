@@ -10,6 +10,7 @@ import (
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
+	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/vault"
@@ -587,4 +588,136 @@ func TestSaveKeyMaterial_OverTheWireConformsToContract(t *testing.T) {
 		t.Fatalf("saveKeyMaterial: %+v", envelope.Error)
 	}
 	validateJSON(t, schema, envelope.Result, "saveKeyMaterial result")
+}
+
+// ── vault.deleteSecret ────────────────────────────────────────────────
+
+// The DTO's own conformance: the delete result is an empty object — there is
+// nothing to return, the row is what changes — and the schema pins that shape.
+func TestVaultDeleteSecret_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "vault.deleteSecret.schema.json")
+	raw, err := json.Marshal(struct{}{})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "vault.deleteSecret DTO")
+}
+
+// The real method through the real socket, with the fields the renderer sends
+// (the row handle the inventory carried). After deletion the row is gone from
+// the inventory, the stored secret is gone from the vault, and the credential
+// no longer claims a password is saved — metadata first, stored secret second
+// (ADR-0011 §4).
+func TestVaultDeleteSecret_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "vault.deleteSecret.schema.json")
+	h := newInventoryHarness(t)
+	h.setupAndUnseal()
+
+	credID := h.createCredential(profile.Credential{
+		Name: "prod", Username: "deploy", Auth: profile.AuthPassword,
+	})
+	h.savePasswordNamed(credID, "hunter2", "deploy@vm-dsm01")
+
+	inv := h.callInventory()
+	if len(inv.Entries) != 1 {
+		t.Fatalf("precondition: expected 1 entry, got %d", len(inv.Entries))
+	}
+
+	// The renderer never sees the SecretID; read it from the metadata to
+	// assert the stored secret is really gone afterwards.
+	var secretID credential.SecretID
+	{
+		creds, err := h.ps.LoadCredentials()
+		if err != nil {
+			t.Fatalf("LoadCredentials: %v", err)
+		}
+		for _, c := range creds {
+			if c.ID != credID {
+				continue
+			}
+			if v, ok := c.Current(); ok {
+				secretID = credential.SecretID(v.PasswordSecretID)
+			}
+		}
+	}
+	if secretID == "" {
+		t.Fatalf("precondition: no password reference on credential %s", credID)
+	}
+
+	deleteResp := jsonrpcCall(t, h.conn, "vault.deleteSecret", map[string]any{
+		"id": inv.Entries[0].ID,
+	})
+	var deleteEnvelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(deleteResp, &deleteEnvelope); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, string(deleteResp))
+	}
+	if deleteEnvelope.Error != nil {
+		t.Fatalf("vault.deleteSecret: %+v", deleteEnvelope.Error)
+	}
+	validateJSON(t, schema, deleteEnvelope.Result, "vault.deleteSecret result")
+
+	// The row is gone, not renamed and not hidden.
+	inv2 := h.callInventory()
+	if len(inv2.Entries) != 0 {
+		t.Fatalf("expected 0 entries after delete, got %d", len(inv2.Entries))
+	}
+
+	// The stored secret is gone from the vault.
+	exists, err := h.v.Exists(h.t.Context(), secretID)
+	if err != nil {
+		t.Fatalf("Exists: %v", err)
+	}
+	if exists {
+		t.Error("stored secret still exists after delete")
+	}
+
+	// The credential reference is gone: nothing points at the deleted secret.
+	credsAfter, err := h.ps.LoadCredentials()
+	if err != nil {
+		t.Fatalf("LoadCredentials after delete: %v", err)
+	}
+	for _, c := range credsAfter {
+		if c.ID != credID {
+			continue
+		}
+		if v, ok := c.Current(); ok && v.PasswordSecretID != "" {
+			t.Errorf("credential still references the deleted secret: %q", v.PasswordSecretID)
+		}
+	}
+}
+
+// The renderer may not name a secret (nocx-jb20.1): delete accepts the row
+// handle, and a SecretID sent in its place must be refused.
+func TestVaultDeleteSecret_RejectsSecretID(t *testing.T) {
+	h := newInventoryHarness(t)
+	h.setupAndUnseal()
+
+	jsonrpcCall(t, h.conn, "vault.createSecret", map[string]any{
+		"name": "prod password", "kind": "password", "value": "hunter2",
+	})
+
+	resp := jsonrpcCall(t, h.conn, "vault.deleteSecret", map[string]any{
+		"id": "sec:v1:file:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	})
+	var errResult struct {
+		Error *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &errResult); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, string(resp))
+	}
+	if errResult.Error == nil {
+		t.Fatal("expected an error for a SecretID addressed delete")
+	}
+
+	// Nothing was deleted: the secret is still there.
+	inv := h.callInventory()
+	if len(inv.Entries) != 1 {
+		t.Fatalf("expected the secret to survive a refused delete, got %d entries", len(inv.Entries))
+	}
 }
