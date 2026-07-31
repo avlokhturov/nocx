@@ -346,12 +346,15 @@ func (r *runner) probeOne(ctx context.Context, cc *concurrencyControl, t *target
 		detail = classifyErr.Error()
 	}
 
-	// Host-key problem: exclude, never count as credential probe.
-	if outcome == ssh.OutcomeHostKeyProblem {
+	// Host-key problem: exclude, never count as credential probe. The two
+	// cases keep their own reason so the rollout table says which one it
+	// was — an unknown host (routine first contact) reads differently from
+	// a changed key (the MITM signature).
+	if outcome == ssh.OutcomeHostKeyUnknown || outcome == ssh.OutcomeHostKeyChanged {
 		r.stateMu.Lock()
 		state.Excluded = append(state.Excluded, Exclusion{
 			ProfileID: t.profileID, Endpoint: t.endpoint,
-			Reason: "host-key-problem", Detail: detail,
+			Reason: string(outcome), Detail: detail,
 		})
 		t.probed = false
 		r.stateMu.Unlock()

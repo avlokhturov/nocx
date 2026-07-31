@@ -109,6 +109,10 @@ type WSServer struct {
 	// prober validates credentials without opening a session (connections.test).
 	// When nil, the handler returns a JSON-RPC error.
 	prober Prober
+	// hostKeyTruster appends offered host keys to known_hosts
+	// (connections.trustHostKey — accept-on-first-use). When nil, the
+	// handler returns a JSON-RPC error.
+	hostKeyTruster HostKeyTruster
 	// probeResultStore records probe outcomes as operational evidence.
 	// When nil, probe results are not stored (the probe still runs and
 	// returns its outcome to the caller).
@@ -775,6 +779,8 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.handleSessionsStatus(wconn, req)
 	case "connections.test":
 		s.handleConnectionsTest(wconn, req)
+	case "connections.trustHostKey":
+		s.handleConnectionsTrustHostKey(wconn, req)
 	case "versions.promote":
 		s.handleVersionsPromote(wconn, req)
 	case "versions.retire":

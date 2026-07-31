@@ -7,7 +7,7 @@ import (
 )
 
 // ProbeOutcome is a closed-enum outcome for an SSH credential probe.
-// The Go type holds only the five defined values; a sixth kind cannot be
+// The Go type holds only the six defined values; a seventh kind cannot be
 // expressed at compile time.
 type ProbeOutcome string
 
@@ -15,7 +15,8 @@ const (
 	OutcomeAccepted         ProbeOutcome = "accepted"
 	OutcomeRejected         ProbeOutcome = "rejected"
 	OutcomeUnreachable      ProbeOutcome = "unreachable"
-	OutcomeHostKeyProblem   ProbeOutcome = "host-key-problem"
+	OutcomeHostKeyUnknown   ProbeOutcome = "host-key-unknown"
+	OutcomeHostKeyChanged   ProbeOutcome = "host-key-changed"
 	OutcomeNeedsInteractive ProbeOutcome = "needs-interactive"
 )
 
@@ -26,15 +27,17 @@ func ClassifyProbeError(err error) (outcome ProbeOutcome, detail string, classif
 	if err == nil {
 		return OutcomeAccepted, "ok", nil
 	}
-
-	// Host key issues — checked before auth.
+	// Host key issues — checked before auth. First contact and a changed
+	// key are different questions and different outcomes: an unknown host
+	// is routine and accepts the offered key; a changed key is the one
+	// signature of a man-in-the-middle and must never be conflated with it.
 	var unknownKey *ErrUnknownHostKey
 	if errors.As(err, &unknownKey) {
-		return OutcomeHostKeyProblem, unknownKey.Error(), nil
+		return OutcomeHostKeyUnknown, unknownKey.Error(), nil
 	}
 	var keyMismatch *ErrHostKeyMismatch
 	if errors.As(err, &keyMismatch) {
-		return OutcomeHostKeyProblem, keyMismatch.Error(), nil
+		return OutcomeHostKeyChanged, keyMismatch.Error(), nil
 	}
 
 	// Auth rejected (wrong password, bad key).

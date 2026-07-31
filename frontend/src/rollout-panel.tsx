@@ -60,8 +60,10 @@ export function outcomeLabel(outcome: ProbeOutcome): string {
       return 'Rejected'
     case 'unreachable':
       return 'Unreachable'
-    case 'host-key-problem':
-      return 'Host key problem'
+    case 'host-key-unknown':
+      return 'Unknown host key'
+    case 'host-key-changed':
+      return 'Host key changed'
     case 'needs-interactive':
       return 'Needs interactive'
   }
@@ -75,7 +77,9 @@ export function outcomeTone(outcome: ProbeOutcome): 'neutral' | 'info' | 'warnin
       return 'danger'
     case 'unreachable':
       return 'warning'
-    case 'host-key-problem':
+    case 'host-key-unknown':
+      return 'warning'
+    case 'host-key-changed':
       return 'danger'
     case 'needs-interactive':
       return 'warning'

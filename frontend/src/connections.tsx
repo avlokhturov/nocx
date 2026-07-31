@@ -51,6 +51,7 @@ import type {
   FieldSourceDTO,
   SessionStatus,
   ProbeOutcome,
+  ConnectionTestResult,
   GroupImpactResponse,
   ConfigExport,
   SSHConfigPathResult,
@@ -93,8 +94,12 @@ function generatedSecretName(user: string | undefined, host: string | undefined)
   const h = (host ?? '').trim()
   return u && h ? `${u}@${h}` : u || h
 }
-
 // ── Probe outcome helpers ────────────────────────────────────────────────────
+
+// The offered host-key evidence from connections.test, as the renderer shows
+// it and echoes it back to connections.trustHostKey. A host key is public
+// material (ADR-0011 §3), so it may cross the wire and be displayed.
+type HostKeyEvidence = NonNullable<ConnectionTestResult['hostKey']>
 
 function probeOutcomeLabel(outcome: ProbeOutcome): string {
   switch (outcome) {
@@ -104,7 +109,11 @@ function probeOutcomeLabel(outcome: ProbeOutcome): string {
       return 'Rejected'
     case 'unreachable':
       return 'Unreachable'
-    case 'host-key-problem':
+    case 'host-key-unknown':
+      // First contact is routine; the words must not borrow the alarm that
+      // belongs to a changed key (nocx-6v1p).
+      return 'Unknown host key'
+    case 'host-key-changed':
       return 'Host key changed'
     case 'needs-interactive':
       return 'Needs interactive auth'
@@ -217,12 +226,21 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   const [effectiveData, setEffectiveData] = createSignal<Record<string, EffectiveProfileDTO>>({})
   const [dirtyFields, setDirtyFields] = createSignal<Set<string>>(new Set())
   const [profileMoveImpact, setProfileMoveImpact] = createSignal<GroupImpactResponse | null>(null)
-
-  // ── Session state per profile ──────────────────────────────────────────
-  const [sessionStatuses, setSessionStatuses] = createSignal<Record<string, SessionStatus>>({})
-
   // ── Connection test state per profile ────────────────────────────────
   const [probeBusy, setProbeBusy] = createSignal<Set<string>>(new Set())
+
+  // ── Host key accept state (nocx-ved0) ────────────────────────────────
+  // A probe that fails on the host key IS the question — first contact or a
+  // changed key — so it is raised as a decision dialog rather than a toast.
+  // changed=false is the routine accept (unknown host); changed=true is the
+  // MITM-signature case and must never be the default action.
+  const [pendingHostKey, setPendingHostKey] = createSignal<{
+    profile: SSHProfile
+    evidence: HostKeyEvidence
+    changed: boolean
+  } | null>(null)
+  const [hostKeyBusy, setHostKeyBusy] = createSignal(false)
+  const [sessionStatuses, setSessionStatuses] = createSignal<Record<string, SessionStatus>>({})
 
   // ── Filter ─────────────────────────────────────────────────────────────
   const [searchQuery, setSearchQuery] = createSignal('')
@@ -1214,11 +1232,24 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       log.error('Failed to load session status', { message: (err as Error).message })
     }
   }
-
   async function handleTest(profile: SSHProfile) {
     setProbeBusy((prev) => new Set(prev).add(profile.id))
     try {
       const res = await props.client.connectionTest(profile.id)
+      if (
+        (res.outcome === 'host-key-unknown' || res.outcome === 'host-key-changed') &&
+        res.hostKey
+      ) {
+        // The outcome IS the question, and a toast cannot carry a decision:
+        // raise the accept dialog. The two cases are separate controls — a
+        // changed key never gets the routine accept button (nocx-6v1p).
+        setPendingHostKey({
+          profile,
+          evidence: res.hostKey,
+          changed: res.outcome === 'host-key-changed',
+        })
+        return
+      }
       showToast({
         level: res.outcome === 'accepted' ? 'success' : 'warning',
         message: res.detail
@@ -1235,6 +1266,28 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         next.delete(profile.id)
         return next
       })
+    }
+  }
+
+  /**
+   * Accept the pending host key: append it to known_hosts via the client,
+   * then re-probe — the accept only means something if the next test
+   * succeeds. Declining (closing the dialog) writes nothing at all.
+   */
+  async function acceptPendingHostKey() {
+    const pending = pendingHostKey()
+    if (!pending) return
+    setHostKeyBusy(true)
+    try {
+      await props.client.trustHostKey(pending.evidence.host, pending.evidence.key)
+      setPendingHostKey(null)
+      await handleTest(pending.profile)
+    } catch (err) {
+      const message = (err as Error).message
+      log.error('Failed to trust host key', { host: pending.evidence.host, message })
+      showToast({ level: 'danger', message: `Could not trust the host key: ${message}` })
+    } finally {
+      setHostKeyBusy(false)
     }
   }
 
@@ -2694,6 +2747,74 @@ export function ConnectionsView(props: ConnectionsViewProps) {
               resolve(outcome)
             }}
           />
+        )}
+      </Show>
+      {/* Host-key decision — raised when a probe fails on the host key.
+          The unknown-host accept is routine and primary; a changed key is
+          a different question with a danger action that is never default,
+          naming both fingerprints so the user can judge (nocx-6v1p). */}
+      <Show when={pendingHostKey()} keyed>
+        {(pending) => (
+          <Dialog
+            open
+            onClose={() => setPendingHostKey(null)}
+            title={pending.changed ? 'Host key changed' : 'Unknown host key'}
+            footer={
+              <>
+                <Button
+                  variant={pending.changed ? 'danger' : 'primary'}
+                  disabled={hostKeyBusy()}
+                  onClick={() => void acceptPendingHostKey()}
+                >
+                  {hostKeyBusy()
+                    ? 'Trusting…'
+                    : pending.changed
+                      ? 'Trust the new key'
+                      : 'Trust host key'}
+                </Button>
+                <Button
+                  variant="default"
+                  disabled={hostKeyBusy()}
+                  onClick={() => setPendingHostKey(null)}
+                  autofocus
+                >
+                  Cancel
+                </Button>
+              </>
+            }
+          >
+            <Stack>
+              <Show
+                when={pending.changed}
+                fallback={
+                  <p>
+                    This is the first time nocx has met this host. If you trust this machine, accept
+                    its key — it will be saved to ~/.ssh/known_hosts.
+                  </p>
+                }
+              >
+                <p>
+                  The host key offered by this server differs from the one nocx has seen before.
+                  That can mean the host&rsquo;s key was regenerated — or that someone is
+                  intercepting this connection. Do not continue unless you are sure this is the same
+                  machine. Accepting replaces the old key: it stops being trusted.
+                </p>
+              </Show>
+              <p>
+                {pending.changed ? 'Stored fingerprint' : 'Offered fingerprint'}:{' '}
+                <code>
+                  {pending.changed
+                    ? pending.evidence.storedFingerprint
+                    : pending.evidence.fingerprint}
+                </code>
+              </p>
+              <Show when={pending.changed}>
+                <p>
+                  Offered fingerprint: <code>{pending.evidence.fingerprint}</code>
+                </p>
+              </Show>
+            </Stack>
+          </Dialog>
         )}
       </Show>
     </div>

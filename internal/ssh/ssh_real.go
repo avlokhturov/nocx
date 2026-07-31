@@ -2,6 +2,9 @@ package ssh
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha1" //nolint:gosec // known_hosts hashes host names with HMAC-SHA1; the file format fixes the algorithm.
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net"
@@ -225,6 +228,7 @@ func (rc *RealClient) hostKeyCallback() (gossh.HostKeyCallback, error) {
 				Addr:        addr,
 				KeyAlgo:     key.Type(),
 				Fingerprint: gossh.FingerprintSHA256(key),
+				Key:         key.Marshal(),
 			}
 		}, nil
 	}
@@ -242,6 +246,7 @@ func (rc *RealClient) hostKeyCallback() (gossh.HostKeyCallback, error) {
 					Addr:        addr,
 					KeyAlgo:     key.Type(),
 					Fingerprint: gossh.FingerprintSHA256(key),
+					Key:         key.Marshal(),
 				}
 			}
 			var expected []string
@@ -250,8 +255,10 @@ func (rc *RealClient) hostKeyCallback() (gossh.HostKeyCallback, error) {
 			}
 			return &ErrHostKeyMismatch{
 				Addr:        addr,
+				KeyAlgo:     key.Type(),
 				Fingerprint: gossh.FingerprintSHA256(key),
 				Expected:    strings.Join(expected, ","),
+				Key:         key.Marshal(),
 			}
 		}
 		return err
@@ -280,6 +287,7 @@ func (rc *RealClient) probeHostKeyCallback() (gossh.HostKeyCallback, *string, er
 				Addr:        addr,
 				KeyAlgo:     key.Type(),
 				Fingerprint: captured,
+				Key:         key.Marshal(),
 			}
 		}, &captured, nil
 	}
@@ -298,6 +306,7 @@ func (rc *RealClient) probeHostKeyCallback() (gossh.HostKeyCallback, *string, er
 					Addr:        addr,
 					KeyAlgo:     key.Type(),
 					Fingerprint: captured,
+					Key:         key.Marshal(),
 				}
 			}
 			var expected []string
@@ -306,12 +315,190 @@ func (rc *RealClient) probeHostKeyCallback() (gossh.HostKeyCallback, *string, er
 			}
 			return &ErrHostKeyMismatch{
 				Addr:        addr,
+				KeyAlgo:     key.Type(),
 				Fingerprint: captured,
 				Expected:    strings.Join(expected, ","),
+				Key:         key.Marshal(),
 			}
 		}
 		return err
 	}, &captured, nil
+}
+
+// TrustHostKey records the offered public key for addr in known_hosts. It is
+// the one write path this package owns for the host key store, and the only
+// operation that ever touches it.
+//
+// It REPLACES rather than merely appends, and that distinction is the whole
+// security value of the operation. A key that has changed is answered by
+// pressing "trust the new key"; appending the new line and leaving the old one
+// in place would keep the old key valid too, because knownhosts accepts a
+// presented key that matches any line for the host — so the party holding the
+// key the user has just rejected would still pass. Every line naming this host
+// with the SAME key algorithm is dropped first; lines for the host's other
+// algorithms are left alone, since a changed ed25519 key says nothing about
+// its RSA one. Hashed entries (|1|salt|hash, what OpenSSH writes with
+// HashKnownHosts on) are matched by recomputing the HMAC, the same way
+// ssh-keygen -R finds them.
+//
+// A file with nothing to replace is appended to and never rewritten. A rewrite
+// goes through a temp file in the same directory and a rename, so an interrupt
+// cannot leave a half-written known_hosts. A missing file is created 0600; an
+// existing file keeps its own mode, which is the user's to choose.
+//
+// keyBlob is the wire-format marshalled public key (gossh.PublicKey.Marshal),
+// as carried by ErrUnknownHostKey.Key / ErrHostKeyMismatch.Key. addr is the
+// address exactly as the host key callback saw it, so the written line matches
+// the next probe's known_hosts lookup (knownhosts.Line normalizes host:22 →
+// host and host:2222 → [host]:2222 for us).
+func (rc *RealClient) TrustHostKey(addr string, keyBlob []byte) (fingerprint string, err error) {
+	key, parseErr := gossh.ParsePublicKey(keyBlob)
+	if parseErr != nil {
+		return "", fmt.Errorf("trust host key: invalid public key: %w", parseErr)
+	}
+	line := knownhosts.Line([]string{addr}, key) + "\n"
+
+	existing, readErr := os.ReadFile(rc.knownHostsFile)
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		return "", fmt.Errorf("trust host key: read %s: %w", rc.knownHostsFile, readErr)
+	}
+
+	kept, replaced := dropHostKeyLines(string(existing), addr, key.Type())
+	if !replaced {
+		f, openErr := os.OpenFile(rc.knownHostsFile, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
+		if openErr != nil {
+			return "", fmt.Errorf("trust host key: open %s: %w", rc.knownHostsFile, openErr)
+		}
+		defer func() { _ = f.Close() }()
+		if _, writeErr := f.WriteString(line); writeErr != nil {
+			return "", fmt.Errorf("trust host key: append to %s: %w", rc.knownHostsFile, writeErr)
+		}
+		return gossh.FingerprintSHA256(key), nil
+	}
+
+	if err := rc.rewriteKnownHosts(kept + line); err != nil {
+		return "", err
+	}
+	return gossh.FingerprintSHA256(key), nil
+}
+
+// rewriteKnownHosts replaces the file's contents atomically, keeping the mode
+// the file already had — a temp file beside it and a rename, so an interrupt
+// leaves either the old file or the new one and never a truncated one.
+func (rc *RealClient) rewriteKnownHosts(content string) error {
+	mode := os.FileMode(0o600)
+	if info, statErr := os.Stat(rc.knownHostsFile); statErr == nil {
+		mode = info.Mode().Perm()
+	}
+	dir := filepath.Dir(rc.knownHostsFile)
+	tmp, createErr := os.CreateTemp(dir, ".known_hosts-*")
+	if createErr != nil {
+		return fmt.Errorf("trust host key: create temp in %s: %w", dir, createErr)
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+
+	if _, writeErr := tmp.WriteString(content); writeErr != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("trust host key: write %s: %w", tmpName, writeErr)
+	}
+	if closeErr := tmp.Close(); closeErr != nil {
+		return fmt.Errorf("trust host key: close %s: %w", tmpName, closeErr)
+	}
+	if chmodErr := os.Chmod(tmpName, mode); chmodErr != nil {
+		return fmt.Errorf("trust host key: chmod %s: %w", tmpName, chmodErr)
+	}
+	if renameErr := os.Rename(tmpName, rc.knownHostsFile); renameErr != nil {
+		return fmt.Errorf("trust host key: rename onto %s: %w", rc.knownHostsFile, renameErr)
+	}
+	return nil
+}
+
+// dropHostKeyLines returns the file with every line that names addr under the
+// given key algorithm removed, and whether anything was removed. Comments and
+// blank lines survive untouched: this is the user's file.
+func dropHostKeyLines(content, addr, keyAlgo string) (kept string, dropped bool) {
+	var b strings.Builder
+	for _, line := range strings.SplitAfter(content, "\n") {
+		trimmed := strings.TrimSpace(strings.TrimSuffix(line, "\n"))
+		if trimmed != "" && !strings.HasPrefix(trimmed, "#") &&
+			lineKeyAlgo(trimmed) == keyAlgo && lineNamesHost(trimmed, addr) {
+			dropped = true
+			continue
+		}
+		b.WriteString(line)
+	}
+	kept = b.String()
+	if kept != "" && !strings.HasSuffix(kept, "\n") {
+		kept += "\n"
+	}
+	return kept, dropped
+}
+
+// knownHostsFields strips a leading @cert-authority / @revoked marker and
+// returns the line's fields: host patterns, key algorithm, key.
+func knownHostsFields(line string) []string {
+	fields := strings.Fields(line)
+	if len(fields) > 0 && strings.HasPrefix(fields[0], "@") {
+		fields = fields[1:]
+	}
+	return fields
+}
+
+// lineKeyAlgo is the key algorithm a known_hosts line carries, or "".
+func lineKeyAlgo(line string) string {
+	fields := knownHostsFields(line)
+	if len(fields) < 3 {
+		return ""
+	}
+	return fields[1]
+}
+
+// lineNamesHost reports whether a known_hosts line's host field names addr,
+// plain or hashed. Negations (!host) are treated as naming it — a line that
+// mentions the host at all is one this operation must not silently leave
+// contradicting the key it just wrote.
+func lineNamesHost(line, addr string) bool {
+	fields := knownHostsFields(line)
+	if len(fields) < 3 {
+		return false
+	}
+	normalized := knownhosts.Normalize(addr)
+	for _, pattern := range strings.Split(fields[0], ",") {
+		pattern = strings.TrimPrefix(pattern, "!")
+		if strings.HasPrefix(pattern, "|1|") {
+			if hashedPatternMatches(pattern, normalized) {
+				return true
+			}
+			continue
+		}
+		if pattern == normalized {
+			return true
+		}
+	}
+	return false
+}
+
+// hashedPatternMatches answers the |1|salt|hash form OpenSSH writes when
+// HashKnownHosts is on. The construction is fixed by the file format —
+// HMAC-SHA1 over the normalized host with the line's own salt — so SHA-1 here
+// is reading somebody else's format, not choosing a hash.
+func hashedPatternMatches(pattern, normalizedHost string) bool {
+	parts := strings.Split(pattern, "|")
+	if len(parts) != 4 {
+		return false
+	}
+	salt, saltErr := base64.StdEncoding.DecodeString(parts[2])
+	if saltErr != nil {
+		return false
+	}
+	want, hashErr := base64.StdEncoding.DecodeString(parts[3])
+	if hashErr != nil {
+		return false
+	}
+	mac := hmac.New(sha1.New, salt)
+	mac.Write([]byte(normalizedHost))
+	return hmac.Equal(mac.Sum(nil), want)
 }
 
 // openShell opens a session, requests a PTY, optionally requests agent

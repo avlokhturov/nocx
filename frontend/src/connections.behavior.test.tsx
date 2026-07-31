@@ -125,7 +125,8 @@ function createMockClient(overrides?: {
   const connectionTest = vi
     .spyOn(pc, 'connectionTest')
     .mockResolvedValue(overrides?.connectionTestResult ?? { outcome: 'accepted' })
-  return { client: pc, connectionTest }
+  const trustHostKey = vi.spyOn(pc, 'trustHostKey').mockResolvedValue({ fingerprint: 'SHA256:abc' })
+  return { client: pc, connectionTest, trustHostKey }
 }
 
 function mount(
@@ -139,7 +140,7 @@ function mount(
     vaultClient?: VaultClient
   },
 ) {
-  const { client, connectionTest } = createMockClient(overrides)
+  const { client, connectionTest, trustHostKey } = createMockClient(overrides)
   const vaultController = overrides?.vaultController
   const vaultClient = overrides?.vaultClient
   const dialogClient = overrides?.openFileDialog
@@ -170,7 +171,7 @@ function mount(
     ),
     { container },
   )
-  return { container, client, connectionTest }
+  return { container, client, connectionTest, trustHostKey }
 }
 
 afterEach(() => {
@@ -333,6 +334,139 @@ describe('Test action', () => {
       expect(toasts()).toHaveLength(1)
       expect(toasts()[0].message).toContain('Connection successful')
       expect(toasts()[0].level).toBe('success')
+    })
+  })
+})
+
+// ── Host key accept (nocx-ved0) ────────────────────────────────────────
+// From the state a user is actually in — a host that is not in known_hosts —
+// the accept control exists, activating it reaches the client method, and the
+// next probe succeeds. The changed-key case is a different question: it must
+// name both fingerprints, never be the default action, and declining writes
+// nothing at all.
+
+const UNKNOWN_KEY_RESULT: ConnectionTestResult = {
+  outcome: 'host-key-unknown',
+  detail: 'unknown host key for host.example.com:22: ssh-ed25519 SHA256:abc',
+  hostKey: {
+    host: 'host.example.com:22',
+    algorithm: 'ssh-ed25519',
+    fingerprint: 'SHA256:abc',
+    key: 'a2V5',
+  },
+}
+
+const CHANGED_KEY_RESULT: ConnectionTestResult = {
+  outcome: 'host-key-changed',
+  detail: 'host key mismatch for host.example.com:22: got SHA256:new, expected SHA256:stored',
+  hostKey: {
+    host: 'host.example.com:22',
+    algorithm: 'ssh-ed25519',
+    fingerprint: 'SHA256:new',
+    storedFingerprint: 'SHA256:stored',
+    key: 'bmV3',
+  },
+}
+
+function clickTest(container: HTMLElement) {
+  const testBtn = container.querySelector('[aria-label^="Test connection"]')
+  expect(testBtn, 'Test button not found').toBeTruthy()
+  ;(testBtn! as HTMLElement).click()
+}
+
+describe('host key accept', () => {
+  it('unknown host key: accept control reaches trustHostKey and the next probe succeeds', async () => {
+    const { container, connectionTest, trustHostKey } = mount({
+      profiles: MOCK_PROFILES.slice(0, 1),
+      connectionTestResult: UNKNOWN_KEY_RESULT,
+    })
+    connectionTest
+      .mockResolvedValueOnce(UNKNOWN_KEY_RESULT)
+      .mockResolvedValueOnce({ outcome: 'accepted', detail: 'Connection successful' })
+
+    await waitForProfiles(container, 1)
+    clickTest(container)
+
+    // The accept dialog shows the offered fingerprint — the user must be able
+    // to read it before deciding.
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain('SHA256:abc')
+    })
+    // The routine accept is the primary action, and its words never say
+    // "changed" — this is first contact, not a warning.
+    expect(container.textContent).toContain('Unknown host key')
+    expect(container.textContent).not.toContain('changed')
+
+    clickButtonByText(container, 'Trust host key')
+
+    await vi.waitFor(() => {
+      expect(trustHostKey).toHaveBeenCalledWith('host.example.com:22', 'a2V5')
+    })
+    // The next probe runs and succeeds.
+    await vi.waitFor(() => {
+      expect(connectionTest).toHaveBeenCalledTimes(2)
+    })
+    await vi.waitFor(() => {
+      expect(
+        toasts().some((t) => t.level === 'success' && t.message.includes('Connection successful')),
+      ).toBe(true)
+    })
+  })
+
+  it('unknown host key: declining writes nothing at all', async () => {
+    const { container, connectionTest, trustHostKey } = mount({
+      profiles: MOCK_PROFILES.slice(0, 1),
+      connectionTestResult: UNKNOWN_KEY_RESULT,
+    })
+    await waitForProfiles(container, 1)
+    clickTest(container)
+
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain('SHA256:abc')
+    })
+    clickButtonByText(container, 'Cancel')
+
+    expect(trustHostKey).not.toHaveBeenCalled()
+    expect(connectionTest).toHaveBeenCalledTimes(1)
+  })
+  it('changed key: names both fingerprints, is never the default action, and declining writes nothing', async () => {
+    const { container, connectionTest, trustHostKey } = mount({
+      profiles: MOCK_PROFILES.slice(0, 1),
+      connectionTestResult: CHANGED_KEY_RESULT,
+    })
+    await waitForProfiles(container, 1)
+    clickTest(container)
+
+    // Both fingerprints are on screen — the user cannot judge a changed key
+    // without the stored one to compare it against.
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain('SHA256:new')
+      expect(container.textContent).toContain('SHA256:stored')
+    })
+    expect(container.textContent).toContain('Host key changed')
+
+    // The trust action is danger, not primary — it has to be aimed at.
+    const buttons = Array.from(container.querySelectorAll<HTMLElement>('.ui-button'))
+    const dangerAction = buttons.find((b) => b.textContent?.trim() === 'Trust the new key')
+    const cancelButton = buttons.find((b) => b.textContent?.trim() === 'Cancel')
+    expect(dangerAction, 'danger action not found').toBeTruthy()
+    expect(cancelButton, 'cancel not found').toBeTruthy()
+    expect(dangerAction!.dataset.variant).toBe('danger')
+    expect(cancelButton!.dataset.variant).toBe('default')
+
+    // Decline first: nothing is written, no second probe.
+    cancelButton!.click()
+    expect(trustHostKey).not.toHaveBeenCalled()
+    expect(connectionTest).toHaveBeenCalledTimes(1)
+
+    // Run the test again and take the deliberate danger action.
+    clickTest(container)
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain('SHA256:stored')
+    })
+    clickButtonByText(container, 'Trust the new key')
+    await vi.waitFor(() => {
+      expect(trustHostKey).toHaveBeenCalledWith('host.example.com:22', 'bmV3')
     })
   })
 })

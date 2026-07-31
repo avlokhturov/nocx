@@ -121,15 +121,26 @@ func startTestSSHServerWithUserKey(t *testing.T, userKey gossh.Signer) *testSSHS
 }
 
 func (s *testSSHServer) acceptLoop(config *gossh.ServerConfig) {
-	conn, err := s.listener.Accept()
-	if err != nil {
-		s.t.Logf("test server accept: %v", err)
-		return
+	for {
+		conn, err := s.listener.Accept()
+		if err != nil {
+			// Listener closed (srv.close) or a transient error — stop.
+			return
+		}
+		s.serveConn(conn, config)
 	}
+}
 
+// serveConn performs the server side of one SSH connection and returns when
+// the connection ends, so acceptLoop can accept the next one. Serving
+// sequentially is deliberate: a probe whose host key was rejected closes the
+// connection without a session, and accept-on-first-use needs the follow-up
+// connection (trust, then probe again) to be served too.
+func (s *testSSHServer) serveConn(conn net.Conn, config *gossh.ServerConfig) {
 	sshConn, chans, reqs, err := gossh.NewServerConn(conn, config)
 	if err != nil {
 		s.t.Logf("test server handshake: %v", err)
+		_ = conn.Close()
 		return
 	}
 	go gossh.DiscardRequests(reqs)

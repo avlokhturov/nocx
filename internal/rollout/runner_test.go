@@ -176,7 +176,7 @@ func TestKeyboardInteractiveExcluded(t *testing.T) {
 	}
 }
 
-func TestHostKeyProblemExcludes(t *testing.T) {
+func TestHostKeyUnknownExcludes(t *testing.T) {
 	r := &fakeResolver{configs: map[string]resolveResult{"p1": {"h1", testConfig("h1", "alice"), nil}}}
 	p := &fakeProber{
 		outcomeFn: func(ep string) (string, error) {
@@ -192,8 +192,29 @@ func TestHostKeyProblemExcludes(t *testing.T) {
 	if len(state.Probed) != 0 {
 		t.Errorf("expected 0 probed, got %d", len(state.Probed))
 	}
-	if len(state.Excluded) != 1 || state.Excluded[0].Reason != "host-key-problem" {
-		t.Errorf("expected host-key-problem exclusion, got %+v", state.Excluded)
+	if len(state.Excluded) != 1 || state.Excluded[0].Reason != "host-key-unknown" {
+		t.Errorf("expected host-key-unknown exclusion, got %+v", state.Excluded)
+	}
+}
+
+func TestHostKeyChangedExcludes(t *testing.T) {
+	r := &fakeResolver{configs: map[string]resolveResult{"p1": {"h1", testConfig("h1", "alice"), nil}}}
+	p := &fakeProber{
+		outcomeFn: func(ep string) (string, error) {
+			return "", &ssh.ErrHostKeyMismatch{Addr: ep, Fingerprint: "SHA256:new", Expected: "SHA256:old"}
+		},
+	}
+	ci := &fakeCredentialInfo{authModes: map[string]string{"cred:1": "password"}}
+	state, err := defaultRunner(r, p, ci).Run(context.Background(),
+		RunParams{CredentialID: "cred:1", VersionID: "v2", TargetIDs: []string{"p1"}})
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	if len(state.Probed) != 0 {
+		t.Errorf("expected 0 probed, got %d", len(state.Probed))
+	}
+	if len(state.Excluded) != 1 || state.Excluded[0].Reason != "host-key-changed" {
+		t.Errorf("expected host-key-changed exclusion, got %+v", state.Excluded)
 	}
 }
 

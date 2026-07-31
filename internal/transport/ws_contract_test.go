@@ -13,6 +13,7 @@ import (
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
+	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/vault"
 	"github.com/shady2k/nocx/internal/vaultreset"
 )
@@ -719,5 +720,180 @@ func TestVaultDeleteSecret_RejectsSecretID(t *testing.T) {
 	inv := h.callInventory()
 	if len(inv.Entries) != 1 {
 		t.Fatalf("expected the secret to survive a refused delete, got %d entries", len(inv.Entries))
+	}
+}
+
+// ── connections.test / connections.trustHostKey ────────────────────────
+
+// The DTO's own conformance: both host-key shapes, and the one field that
+// must not leak between them — storedFingerprint is present for a changed
+// key and absent for an unknown one. If omitempty ever drops it, the changed
+// case fails right here, before the renderer ever sees a key change without
+// the stored fingerprint to judge it by.
+func TestConnectionsTest_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "connections.probe.schema.json")
+
+	cases := []struct {
+		name       string
+		dto        connectionsTestResult
+		wantStored bool
+		wantAbsent bool
+	}{
+		{"accepted", connectionsTestResult{Outcome: OutcomeAccepted, Detail: "ok"}, false, false},
+		{
+			"host-key-unknown",
+			connectionsTestResult{
+				Outcome: OutcomeHostKeyUnknown,
+				Detail:  "unknown host key for h:22: ssh-ed25519 SHA256:abc",
+				HostKey: &connectionsTestHostKey{
+					Host:        "h:22",
+					Algorithm:   "ssh-ed25519",
+					Fingerprint: "SHA256:abc",
+					Key:         "a2V5",
+				},
+			},
+			false,
+			true,
+		},
+		{
+			"host-key-changed",
+			connectionsTestResult{
+				Outcome: OutcomeHostKeyChanged,
+				Detail:  "host key mismatch for h:22: got SHA256:new, expected SHA256:old",
+				HostKey: &connectionsTestHostKey{
+					Host:              "h:22",
+					Algorithm:         "ecdsa-sha2-nistp256",
+					Fingerprint:       "SHA256:new",
+					StoredFingerprint: "SHA256:old",
+					Key:               "a2V5",
+				},
+			},
+			true,
+			false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, err := json.Marshal(tc.dto)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "connections.test result ("+tc.name+")")
+			hasStored := strings.Contains(string(raw), "storedFingerprint")
+			if tc.wantStored && !hasStored {
+				t.Errorf("storedFingerprint must be present for %s, wire: %s", tc.name, raw)
+			}
+			if tc.wantAbsent && hasStored {
+				t.Errorf("storedFingerprint must be absent for %s, wire: %s", tc.name, raw)
+			}
+		})
+	}
+}
+
+// The real method through the real socket: the renderer receives the offered
+// fingerprint and key, and the stored fingerprint only when the key changed.
+func TestConnectionsTest_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "connections.probe.schema.json")
+
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{"accepted", nil},
+		{
+			"host-key-unknown",
+			&ssh.ErrUnknownHostKey{
+				Addr:        "host.example.com:22",
+				KeyAlgo:     "ssh-ed25519",
+				Fingerprint: "SHA256:abc",
+				Key:         []byte("offered-key-blob"),
+			},
+		},
+		{
+			"host-key-changed",
+			&ssh.ErrHostKeyMismatch{
+				Addr:        "host.example.com:22",
+				Fingerprint: "SHA256:new",
+				Expected:    "SHA256:old",
+				KeyAlgo:     "ecdsa-sha2-nistp256",
+				Key:         []byte("new-key-blob"),
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newProbeTestServer(t, tc.err, &fakeResolver{
+				resolveFn: func(profileID string) (string, *ssh.ConnectConfig, error) {
+					return "host.example.com", &ssh.ConnectConfig{User: "test"}, nil
+				},
+			})
+			conn := connectWS(t, srv)
+			defer conn.Close() //nolint:errcheck
+
+			resp := jsonrpcCall(t, conn, "connections.test", map[string]any{
+				"profileId": "ssh:test:1",
+			})
+			var envelope struct {
+				Result json.RawMessage `json:"result"`
+				Error  *struct{}       `json:"error,omitempty"`
+			}
+			if err := json.Unmarshal(resp, &envelope); err != nil {
+				t.Fatalf("unmarshal envelope: %v", err)
+			}
+			if envelope.Error != nil {
+				t.Fatalf("unexpected RPC error: %s", resp)
+			}
+			validateJSON(t, schema, envelope.Result, "connections.test result ("+tc.name+") over the wire")
+		})
+	}
+}
+
+func TestConnectionsTrustHostKey_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "connections.trustHostKey.schema.json")
+	raw, err := json.Marshal(connectionsTrustHostKeyResult{Fingerprint: "SHA256:trusted"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "connections.trustHostKey result")
+}
+
+// The real method through the real socket: the renderer echoes host+key from
+// the probe result, and the response carries the fingerprint of the key that
+// was appended to known_hosts.
+func TestConnectionsTrustHostKey_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "connections.trustHostKey.schema.json")
+	truster := &fakeHostKeyTruster{fingerprint: "SHA256:trusted"}
+
+	logger := log.NewSlogAdapter(nil)
+	reg := newRegWithStub(logger)
+	srv := NewWSServer(logger, reg, WithHostKeyTruster(truster))
+	ctx := context.Background()
+	if err := srv.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Stop(ctx) })
+
+	conn := connectWS(t, srv)
+	defer conn.Close() //nolint:errcheck
+
+	resp := jsonrpcCall(t, conn, "connections.trustHostKey", map[string]any{
+		"host": "host.example.com:22",
+		"key":  "b2ZmZXJlZC1rZXktYmxvYg==",
+	})
+	var envelope struct {
+		Result json.RawMessage `json:"result"`
+		Error  *struct{}       `json:"error,omitempty"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if envelope.Error != nil {
+		t.Fatalf("unexpected RPC error: %s", resp)
+	}
+	validateJSON(t, schema, envelope.Result, "connections.trustHostKey result over the wire")
+	if !truster.called {
+		t.Fatal("expected the truster to be called")
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sync"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/log"
@@ -44,8 +45,8 @@ func TestClassifyProbeError_ErrAuthFailed(t *testing.T) {
 func TestClassifyProbeError_ErrUnknownHostKey(t *testing.T) {
 	hkErr := &ssh.ErrUnknownHostKey{Addr: "1.2.3.4:22", KeyAlgo: "ssh-ed25519", Fingerprint: "SHA256:abc"}
 	r := classifyProbeError(hkErr)
-	if r.outcome != OutcomeHostKeyProblem {
-		t.Errorf("expected host-key-problem, got %s", r.outcome)
+	if r.outcome != OutcomeHostKeyUnknown {
+		t.Errorf("expected host-key-unknown, got %s", r.outcome)
 	}
 	if r.err != nil {
 		t.Errorf("expected nil err, got %v", r.err)
@@ -55,8 +56,8 @@ func TestClassifyProbeError_ErrUnknownHostKey(t *testing.T) {
 func TestClassifyProbeError_ErrHostKeyMismatch(t *testing.T) {
 	hkErr := &ssh.ErrHostKeyMismatch{Addr: "1.2.3.4:22", Fingerprint: "abc", Expected: "def"}
 	r := classifyProbeError(hkErr)
-	if r.outcome != OutcomeHostKeyProblem {
-		t.Errorf("expected host-key-problem, got %s", r.outcome)
+	if r.outcome != OutcomeHostKeyChanged {
+		t.Errorf("expected host-key-changed, got %s", r.outcome)
 	}
 	if r.err != nil {
 		t.Errorf("expected nil err, got %v", r.err)
@@ -235,8 +236,13 @@ func TestConnectionsTest_Unreachable(t *testing.T) {
 	}
 }
 
-func TestConnectionsTest_HostKeyProblem(t *testing.T) {
-	probeErr := &ssh.ErrUnknownHostKey{Addr: "host.example.com:22", KeyAlgo: "ssh-ed25519", Fingerprint: "SHA256:abc"}
+func TestConnectionsTest_HostKeyUnknown(t *testing.T) {
+	probeErr := &ssh.ErrUnknownHostKey{
+		Addr:        "host.example.com:22",
+		KeyAlgo:     "ssh-ed25519",
+		Fingerprint: "SHA256:abc",
+		Key:         []byte("offered-key-blob"),
+	}
 	srv := newProbeTestServer(t, probeErr, &fakeResolver{
 		resolveFn: func(profileID string) (string, *ssh.ConnectConfig, error) {
 			return "host.example.com", &ssh.ConnectConfig{User: "test"}, nil
@@ -255,8 +261,74 @@ func TestConnectionsTest_HostKeyProblem(t *testing.T) {
 	if err := json.Unmarshal(resp, &result); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if result.Result.Outcome != OutcomeHostKeyProblem {
-		t.Errorf("expected host-key-problem, got %s", result.Result.Outcome)
+	if result.Result.Outcome != OutcomeHostKeyUnknown {
+		t.Errorf("expected host-key-unknown, got %s", result.Result.Outcome)
+	}
+	hk := result.Result.HostKey
+	if hk == nil {
+		t.Fatal("expected hostKey evidence on the result")
+	}
+	if hk.Host != "host.example.com:22" {
+		t.Errorf("expected host host.example.com:22, got %q", hk.Host)
+	}
+	if hk.Algorithm != "ssh-ed25519" {
+		t.Errorf("expected algorithm ssh-ed25519, got %q", hk.Algorithm)
+	}
+	if hk.Fingerprint != "SHA256:abc" {
+		t.Errorf("expected fingerprint SHA256:abc, got %q", hk.Fingerprint)
+	}
+	if hk.Key != "b2ZmZXJlZC1rZXktYmxvYg==" {
+		t.Errorf("expected base64 key b2ZmZXJlZC1rZXktYmxvYg==, got %q", hk.Key)
+	}
+	if hk.StoredFingerprint != "" {
+		t.Errorf("expected no stored fingerprint for an unknown key, got %q", hk.StoredFingerprint)
+	}
+}
+
+func TestConnectionsTest_HostKeyChanged(t *testing.T) {
+	probeErr := &ssh.ErrHostKeyMismatch{
+		Addr:        "host.example.com:22",
+		Fingerprint: "SHA256:new",
+		Expected:    "SHA256:stored",
+		KeyAlgo:     "ecdsa-sha2-nistp256",
+		Key:         []byte("new-key-blob"),
+	}
+	srv := newProbeTestServer(t, probeErr, &fakeResolver{
+		resolveFn: func(profileID string) (string, *ssh.ConnectConfig, error) {
+			return "host.example.com", &ssh.ConnectConfig{User: "test"}, nil
+		},
+	})
+	conn := connectWS(t, srv)
+	defer conn.Close() //nolint:errcheck
+
+	resp := jsonrpcCall(t, conn, "connections.test", map[string]any{
+		"profileId": "ssh:test:1",
+	})
+
+	var result struct {
+		Result connectionsTestResult `json:"result"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if result.Result.Outcome != OutcomeHostKeyChanged {
+		t.Errorf("expected host-key-changed, got %s", result.Result.Outcome)
+	}
+	hk := result.Result.HostKey
+	if hk == nil {
+		t.Fatal("expected hostKey evidence on the result")
+	}
+	if hk.Fingerprint != "SHA256:new" {
+		t.Errorf("expected offered fingerprint SHA256:new, got %q", hk.Fingerprint)
+	}
+	if hk.StoredFingerprint != "SHA256:stored" {
+		t.Errorf("expected stored fingerprint SHA256:stored, got %q", hk.StoredFingerprint)
+	}
+	if hk.Algorithm != "ecdsa-sha2-nistp256" {
+		t.Errorf("expected algorithm ecdsa-sha2-nistp256, got %q", hk.Algorithm)
+	}
+	if hk.Key != "bmV3LWtleS1ibG9i" {
+		t.Errorf("expected base64 key bmV3LWtleS1ibG9i, got %q", hk.Key)
 	}
 }
 
@@ -400,11 +472,11 @@ func TestConnectionsTest_ProbeResultJSON(t *testing.T) {
 	}{
 		{nil, OutcomeAccepted},
 		{&ssh.ErrAuthFailed{User: "u", Host: "h", Err: errors.New("bad auth")}, OutcomeRejected},
-		{&ssh.ErrUnknownHostKey{Addr: "h:22", KeyAlgo: "k", Fingerprint: "f"}, OutcomeHostKeyProblem},
+		{&ssh.ErrUnknownHostKey{Addr: "h:22", KeyAlgo: "k", Fingerprint: "f"}, OutcomeHostKeyUnknown},
+		{&ssh.ErrHostKeyMismatch{Addr: "h:22", Fingerprint: "f", Expected: "e"}, OutcomeHostKeyChanged},
 		{&net.OpError{Op: "dial", Net: "tcp", Err: errors.New("refused")}, OutcomeUnreachable},
 		{&ssh.ErrEncryptedKey{Path: "/key"}, OutcomeNeedsInteractive},
 	}
-
 	for _, tt := range tests {
 		srv := newProbeTestServer(t, tt.err, &fakeResolver{
 			resolveFn: func(profileID string) (string, *ssh.ConnectConfig, error) {
@@ -532,6 +604,165 @@ func TestConnectionsTest_StoresResult(t *testing.T) {
 	}
 	if rec.Detail != "ok" {
 		t.Errorf("expected detail 'ok' on accepted probe, got %s", rec.Detail)
+	}
+}
+
+// ── connections.trustHostKey ────────────────────────────────────────────
+
+type fakeHostKeyTruster struct {
+	mu          sync.Mutex
+	addr        string
+	key         []byte
+	fingerprint string
+	err         error
+	called      bool
+}
+
+func (f *fakeHostKeyTruster) TrustHostKey(_ context.Context, addr string, key []byte) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.called = true
+	f.addr = addr
+	f.key = key
+	return f.fingerprint, f.err
+}
+
+func TestConnectionsTrustHostKey_Success(t *testing.T) {
+	truster := &fakeHostKeyTruster{fingerprint: "SHA256:trusted"}
+	logger := log.NewSlogAdapter(nil)
+	reg := newRegWithStub(logger)
+	srv := NewWSServer(logger, reg, WithHostKeyTruster(truster))
+	ctx := context.Background()
+	if err := srv.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Stop(ctx) })
+
+	conn := connectWS(t, srv)
+	defer conn.Close() //nolint:errcheck
+
+	resp := jsonrpcCall(t, conn, "connections.trustHostKey", map[string]any{
+		"host": "host.example.com:22",
+		"key":  "b2ZmZXJlZC1rZXktYmxvYg==",
+	})
+
+	var result struct {
+		Result connectionsTrustHostKeyResult `json:"result"`
+		Error  *jsonrpcErrorObj              `json:"error,omitempty"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if result.Error != nil {
+		t.Fatalf("expected success, got RPC error %d: %s", result.Error.Code, result.Error.Message)
+	}
+	if result.Result.Fingerprint != "SHA256:trusted" {
+		t.Errorf("expected fingerprint SHA256:trusted, got %q", result.Result.Fingerprint)
+	}
+	if !truster.called {
+		t.Fatal("expected the truster to be called")
+	}
+	if truster.addr != "host.example.com:22" {
+		t.Errorf("expected addr host.example.com:22, got %q", truster.addr)
+	}
+	if string(truster.key) != "offered-key-blob" {
+		t.Errorf("expected decoded key blob, got %q", string(truster.key))
+	}
+}
+
+func TestConnectionsTrustHostKey_NoTruster(t *testing.T) {
+	logger := log.NewSlogAdapter(nil)
+	reg := newRegWithStub(logger)
+	srv := NewWSServer(logger, reg)
+	ctx := context.Background()
+	if err := srv.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Stop(ctx) })
+
+	conn := connectWS(t, srv)
+	defer conn.Close() //nolint:errcheck
+
+	resp := jsonrpcCall(t, conn, "connections.trustHostKey", map[string]any{
+		"host": "host.example.com:22",
+		"key":  "b2ZmZXJlZC1rZXktYmxvYg==",
+	})
+
+	var result struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if result.Error == nil {
+		t.Fatal("expected error when no truster is wired")
+	}
+	if result.Error.Code != -32603 {
+		t.Errorf("expected code -32603, got %d", result.Error.Code)
+	}
+}
+
+func TestConnectionsTrustHostKey_InvalidParams(t *testing.T) {
+	truster := &fakeHostKeyTruster{}
+	logger := log.NewSlogAdapter(nil)
+	reg := newRegWithStub(logger)
+	srv := NewWSServer(logger, reg, WithHostKeyTruster(truster))
+	ctx := context.Background()
+	if err := srv.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Stop(ctx) })
+
+	conn := connectWS(t, srv)
+	defer conn.Close() //nolint:errcheck
+
+	// Missing key → invalid params, truster untouched.
+	resp := jsonrpcCall(t, conn, "connections.trustHostKey", map[string]any{
+		"host": "host.example.com:22",
+	})
+	var result struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if result.Error == nil || result.Error.Code != -32602 {
+		t.Fatalf("expected -32602 for missing key, got %+v", result.Error)
+	}
+	if truster.called {
+		t.Fatal("truster must not be called with invalid params")
+	}
+}
+
+func TestConnectionsTrustHostKey_InvalidKeyEncoding(t *testing.T) {
+	truster := &fakeHostKeyTruster{}
+	logger := log.NewSlogAdapter(nil)
+	reg := newRegWithStub(logger)
+	srv := NewWSServer(logger, reg, WithHostKeyTruster(truster))
+	ctx := context.Background()
+	if err := srv.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Stop(ctx) })
+
+	conn := connectWS(t, srv)
+	defer conn.Close() //nolint:errcheck
+
+	resp := jsonrpcCall(t, conn, "connections.trustHostKey", map[string]any{
+		"host": "host.example.com:22",
+		"key":  "!!!not-base64!!!",
+	})
+	var result struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if result.Error == nil || result.Error.Code != -32603 {
+		t.Fatalf("expected -32603 for undecodable key, got %+v", result.Error)
+	}
+	if truster.called {
+		t.Fatal("truster must not be called with an undecodable key")
 	}
 }
 

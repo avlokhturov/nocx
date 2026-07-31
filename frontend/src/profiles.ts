@@ -1,4 +1,6 @@
 import { Dispatcher } from './dispatcher'
+import type { ConnectionTestResult } from './generated/connections.probe'
+import type { TrustHostKeyResult } from './generated/connections.trustHostKey'
 import type { SaveKeyMaterialResult } from './generated/credentials.saveKeyMaterial'
 
 // Profile/group models + IPC client for the connection manager.
@@ -507,6 +509,15 @@ export class ProfileClient {
     return this.call('connections.test', { profileId })
   }
 
+  /**
+   * connections.trustHostKey — append the offered host key to known_hosts
+   * (accept-on-first-use). host and key are echoed verbatim from the
+   * connections.test result's hostKey evidence; the write is backend-side.
+   */
+  trustHostKey(host: string, key: string): Promise<TrustHostKeyResult> {
+    return this.call('connections.trustHostKey', { host, key })
+  }
+
   // loadEffective resolves one or more profiles to their effective values
   // with per-field provenance. Batch: pass several IDs in one call.
   loadEffective(ids: string[]): Promise<EffectiveBatchResponse> {
@@ -784,17 +795,14 @@ export interface RolloutRunResult {
   completedAt?: string
 }
 
-// ── Sessions and probe types (wave 6 — nocx-uxs5) ────────────────────────
+/**
+ * Closed-enum outcome from connections.test. Derived from the generated
+ * ConnectionTestResult so the renderer's union and the wire enum cannot
+ * drift apart.
+ */
+export type ProbeOutcome = ConnectionTestResult['outcome']
 
-/** Closed-enum outcome from connections.test. */
-export type ProbeOutcome =
-  'accepted' | 'rejected' | 'unreachable' | 'host-key-problem' | 'needs-interactive'
-
-/** Result of a single-profile credential probe. */
-export interface ConnectionTestResult {
-  outcome: ProbeOutcome
-  detail?: string
-}
+export type { ConnectionTestResult }
 
 /** Session state for one profile ID from sessions.status. */
 export interface SessionStatus {

@@ -158,6 +158,7 @@ func New(opts ...Option) (*App, error) {
 		transport.WithExportContentDB(content.NewStub(logger)),
 		transport.WithProber(&proberAdapter{client: sshClient}),
 		transport.WithProfileService(profileSvc),
+		transport.WithHostKeyTruster(&proberAdapter{client: sshClient}),
 
 		transport.WithProbeResultStore(probeResultStore),
 		transport.WithSSHConfigResolver(sshCfgResolver, sshConfigPath),
@@ -243,7 +244,8 @@ func (a *sshFactoryAdapter) Connect(ctx context.Context, host string, opts ...ss
 	return a.client.Connect(ctx, host, opts...)
 }
 
-// proberAdapter adapts ssh.RealClient to transport.Prober.
+// proberAdapter adapts ssh.RealClient to transport.Prober and
+// transport.HostKeyTruster (the same client owns known_hosts for both).
 type proberAdapter struct {
 	client *ssh.RealClient
 }
@@ -254,6 +256,10 @@ func (a *proberAdapter) Probe(ctx context.Context, host string, cfg *ssh.Connect
 
 func (a *proberAdapter) ProbeWithResult(ctx context.Context, host string, cfg *ssh.ConnectConfig) (string, error) {
 	return a.client.ProbeConfigWithResult(ctx, host, cfg)
+}
+
+func (a *proberAdapter) TrustHostKey(ctx context.Context, addr string, key []byte) (string, error) {
+	return a.client.TrustHostKey(addr, key)
 }
 
 // versionSessionRegistryAdapter adapts session.Registry to the narrow

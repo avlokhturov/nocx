@@ -164,8 +164,11 @@ describe('RolloutPanel — version info', () => {
     it('returns Unreachable for unreachable', () => {
       expect(outcomeLabel('unreachable')).toBe('Unreachable')
     })
-    it('returns Host key problem for host-key-problem', () => {
-      expect(outcomeLabel('host-key-problem')).toBe('Host key problem')
+    it('returns Unknown host key for host-key-unknown', () => {
+      expect(outcomeLabel('host-key-unknown')).toBe('Unknown host key')
+    })
+    it('returns Host key changed for host-key-changed', () => {
+      expect(outcomeLabel('host-key-changed')).toBe('Host key changed')
     })
     it('returns Needs interactive for needs-interactive', () => {
       expect(outcomeLabel('needs-interactive')).toBe('Needs interactive')
@@ -182,8 +185,11 @@ describe('RolloutPanel — version info', () => {
     it('unreachable → warning', () => {
       expect(outcomeTone('unreachable')).toBe('warning')
     })
-    it('host-key-problem → danger', () => {
-      expect(outcomeTone('host-key-problem')).toBe('danger')
+    it('host-key-unknown → warning', () => {
+      expect(outcomeTone('host-key-unknown')).toBe('warning')
+    })
+    it('host-key-changed → danger', () => {
+      expect(outcomeTone('host-key-changed')).toBe('danger')
     })
     it('needs-interactive → warning', () => {
       expect(outcomeTone('needs-interactive')).toBe('warning')

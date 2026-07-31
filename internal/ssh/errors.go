@@ -26,8 +26,15 @@ func (e *ErrAuthFailed) Unwrap() error { return e.Err }
 // does not match the one recorded in known_hosts.
 type ErrHostKeyMismatch struct {
 	Addr        string
+	KeyAlgo     string
 	Fingerprint string
-	Expected    string
+	// Expected holds the fingerprint(s) recorded in known_hosts. A host
+	// with several entries (key rotation) yields a comma-joined list.
+	Expected string
+	// Key is the wire-format marshalled offered public key — public
+	// material, carried so the accept path can append it to known_hosts
+	// without re-probing.
+	Key []byte
 }
 
 func (e *ErrHostKeyMismatch) Error() string {
@@ -41,6 +48,10 @@ type ErrUnknownHostKey struct {
 	Addr        string
 	KeyAlgo     string
 	Fingerprint string
+	// Key is the wire-format marshalled offered public key — public
+	// material, carried so the accept path can append it to known_hosts
+	// without re-probing.
+	Key []byte
 }
 
 func (e *ErrUnknownHostKey) Error() string {
