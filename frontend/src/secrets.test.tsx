@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
-import { cleanup, render } from '@solidjs/testing-library'
+import { cleanup, fireEvent, render } from '@solidjs/testing-library'
 import { SecretsSection } from './secrets'
 import { createVaultState } from './vault'
 import type { VaultClient, VaultInventory, InventoryEntry } from './vault-client'
@@ -168,7 +168,7 @@ describe('SecretsSection', () => {
     const row1Labels = rows[0].querySelectorAll('.sr-row-label')
     expect(row1Labels[0].textContent).toBe('SSH password for deploy')
 
-    const row1Store = rows[0].querySelector('.sr-row-store')
+    const row1Store = rows[0].querySelector('.ui-badge')
     expect(row1Store?.textContent).toBe('System keychain')
 
     const row1Usage = rows[0].querySelector('.sr-row-usage')
@@ -198,9 +198,10 @@ describe('SecretsSection', () => {
       expect(container.querySelector('.ui-badge')).toBeTruthy()
     })
 
-    const badge = container.querySelector('.ui-badge')
+    const badge = Array.from(container.querySelectorAll('.ui-badge')).find(
+      (b) => b.getAttribute('data-tone') === 'danger',
+    )
     expect(badge?.textContent).toBe('Store unreachable')
-    expect(badge?.getAttribute('data-tone')).toBe('danger')
   })
 
   it('no secret value appears in rendered output and no copy/reveal controls exist', async () => {
@@ -233,19 +234,92 @@ describe('SecretsSection', () => {
   // The promise "never shown back to you" answers a question you only have
   // once you are looking at a list of secrets and wondering whether you can
   // read one — so it belongs to that section, not to the top of the page.
-  it('explains the list where the list is, not above every state', async () => {
+  // The page is a CollectionView now, like Connections: a pinned toolbar with
+  // a filter and the add action, and the rows scrolling below. The promise
+  // that a stored secret is never shown back lives in the empty state, where a
+  // new user reads it — Connections carries no standing description line
+  // either, and this page is meant to match it.
+  it('gives the list a toolbar with a filter and the add action', async () => {
     const { client, inventory } = mockClient()
     client.status = vi.fn().mockResolvedValue(UNSEALED_STATUS)
     inventory.mockResolvedValue({ entries: [MOCK_ENTRY_1] })
 
     const { container } = await mount(client)
-
     await vi.waitFor(() => {
-      expect(container.querySelector('.sr-row-label')).toBeTruthy()
+      expect(container.querySelector('.ui-collection-view')).toBeTruthy()
+    })
+    expect(container.querySelector('.ui-search-field')).toBeTruthy()
+    const add = Array.from(container.querySelectorAll('.ui-toolbar button')).find((b) =>
+      b.textContent?.includes('Add a secret'),
+    )
+    expect(add).toBeTruthy()
+  })
+
+  // Offered before there is anything to add to. A create action that appears
+  // only once one item exists is unreachable for the first one.
+  it('offers the add action on an empty vault too', async () => {
+    const { client, inventory } = mockClient()
+    client.status = vi.fn().mockResolvedValue(UNSEALED_STATUS)
+    inventory.mockResolvedValue({ entries: [] })
+
+    const { container } = await mount(client)
+    await vi.waitFor(() => {
+      expect(container.querySelector('.ui-collection-view')).toBeTruthy()
+    })
+    const add = Array.from(container.querySelectorAll('.ui-toolbar button')).find((b) =>
+      b.textContent?.includes('Add a secret'),
+    )
+    expect(add).toBeTruthy()
+  })
+
+  it('filters the rows by name, and says so rather than claiming the vault is empty', async () => {
+    const { client, inventory } = mockClient()
+    client.status = vi.fn().mockResolvedValue(UNSEALED_STATUS)
+    inventory.mockResolvedValue({ entries: [MOCK_ENTRY_1, MOCK_ENTRY_2] })
+
+    const { container } = await mount(client)
+    await vi.waitFor(() => {
+      expect(container.querySelectorAll('.ui-collection-row').length).toBe(2)
     })
 
-    const description = container.querySelector('.ui-page-section__desc')
-    expect(description?.textContent).toMatch(/passwords and key passphrases/)
+    const search = container.querySelector('.ui-search-field input') as HTMLInputElement
+    fireEvent.input(search, { target: { value: 'nothing-matches-this' } })
+
+    await vi.waitFor(() => {
+      expect(container.querySelectorAll('.ui-collection-row').length).toBe(0)
+    })
+    // Not "Vault is empty" — the user can disprove that by clearing the box.
+    expect(container.querySelector('.ui-empty-state__title')?.textContent).toBe(
+      'No secret matches that',
+    )
+  })
+
+  it('states which store holds a secret as a badge, not as bare text', async () => {
+    const { client, inventory } = mockClient()
+    client.status = vi.fn().mockResolvedValue(UNSEALED_STATUS)
+    inventory.mockResolvedValue({ entries: [MOCK_ENTRY_1] })
+
+    const { container } = await mount(client)
+    await vi.waitFor(() => {
+      expect(container.querySelector('.ui-collection-row')).toBeTruthy()
+    })
+    const badges = Array.from(container.querySelectorAll('.ui-badge')).map((b) => b.textContent)
+    expect(badges).toContain('System keychain')
+    expect(container.querySelector('.sr-row-store')).toBeNull()
+  })
+
+  it('keeps the never-shown-back promise where a new user reads it', async () => {
+    const { client, inventory } = mockClient()
+    client.status = vi.fn().mockResolvedValue(UNSEALED_STATUS)
+    inventory.mockResolvedValue({ entries: [] })
+
+    const { container } = await mount(client)
+
+    await vi.waitFor(() => {
+      expect(container.querySelector('.ui-empty-state__desc')).toBeTruthy()
+    })
+
+    const description = container.querySelector('.ui-empty-state__desc')
     expect(description?.textContent).toMatch(/never shown back to you/)
   })
 

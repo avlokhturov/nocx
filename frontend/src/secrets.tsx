@@ -16,8 +16,7 @@ import { For, Show, Switch, Match, createSignal, createEffect, onMount } from 's
 import { Button } from './ui/button'
 import { IconButton } from './ui/icon-button'
 import { EmptyState } from './ui/empty-state'
-import { PageSection } from './ui/page-section'
-import { CollectionRow } from './ui/collection-view'
+import { CollectionRow, CollectionView } from './ui/collection-view'
 import { Badge } from './ui/badge'
 import { Dialog } from './ui/dialog'
 import { Stack } from './ui/stack'
@@ -75,6 +74,18 @@ export function SecretsSection(props: SecretsSectionProps) {
   const renameValidation = createFormValidation({
     name: () => required('Name')(renameName()),
   })
+
+  const [filter, setFilter] = createSignal('')
+
+  /** The rows the filter leaves. Matching on the name alone: it is the thing
+   *  the user typed and the only field they chose. */
+  const visibleEntries = () => {
+    const st = loadState()
+    if (st.kind !== 'loaded') return [] as InventoryEntry[]
+    const q = filter().trim().toLowerCase()
+    if (!q) return st.entries
+    return st.entries.filter((e) => e.name.toLowerCase().includes(q))
+  }
 
   const status = () => props.vaultController.status()
 
@@ -228,26 +239,46 @@ export function SecretsSection(props: SecretsSectionProps) {
           />
         </Match>
 
-        <Match when={loadState().kind === 'empty'}>
-          <EmptyState
-            icon={<KeyIcon />}
-            title="Vault is empty"
-            description="There are no secrets in the vault yet. Add one here, or save a password on a connection and it appears."
-            action={
+        {/* Unsealed, with or without contents: the same surface either way.
+            The toolbar has to exist before there is anything to filter, or
+            "Add a secret" would appear only once a secret already existed —
+            which is the shape of defect this repo has shipped before, where
+            the only way to create the first thing was to already have one. */}
+        <Match when={loadState().kind === 'empty' || loadState().kind === 'loaded'}>
+          <CollectionView
+            searchValue={filter()}
+            onSearch={setFilter}
+            searchPlaceholder="Filter secrets"
+            searchLabel="Filter secrets"
+            actions={
               <Button variant="primary" onClick={openAdd}>
-                Add a secret
+                + Add a secret
               </Button>
             }
-          />
-        </Match>
-
-        <Match when={loadState().kind === 'loaded'}>
-          <PageSection
-            title="Secrets"
-            description="These are the passwords and key passphrases nocx keeps for your connections. They are stored encrypted and never shown back to you."
-            divided
+            hasItems={visibleEntries().length > 0}
+            empty={
+              <Show
+                when={loadState().kind === 'loaded'}
+                fallback={
+                  <EmptyState
+                    icon={<KeyIcon />}
+                    title="Vault is empty"
+                    description="There are no secrets in the vault yet. Add one here, or save a password on a connection and it appears. Whatever is stored is encrypted and never shown back to you."
+                  />
+                }
+              >
+                {/* Contents exist; the filter is what hid them. Saying "vault
+                    is empty" here would be a lie the user can disprove by
+                    clearing the box. */}
+                <EmptyState
+                  icon={<KeyIcon />}
+                  title="No secret matches that"
+                  description="Nothing in the vault matches the filter."
+                />
+              </Show>
+            }
           >
-            <For each={(loadState() as Extract<LoadState, { kind: 'loaded' }>).entries}>
+            <For each={visibleEntries()}>
               {(entry) => (
                 <CollectionRow
                   info={
@@ -265,6 +296,15 @@ export function SecretsSection(props: SecretsSectionProps) {
                   }
                   actions={
                     <>
+                      {/* Which store holds it is a status, and a status is a
+                          Badge — the same vocabulary the diagnostics and the
+                          unreachable marker beside it already use. As bare
+                          text it read as part of the name and ran into the
+                          row's right edge. */}
+                      <Badge tone="neutral">{STORE_LABELS[entry.provider] ?? entry.provider}</Badge>
+                      <Show when={!entry.reachable}>
+                        <Badge tone="danger">Store unreachable</Badge>
+                      </Show>
                       <IconButton
                         size="md"
                         ariaLabel={`Rename ${entry.name}`}
@@ -273,23 +313,12 @@ export function SecretsSection(props: SecretsSectionProps) {
                       >
                         <PencilIcon />
                       </IconButton>
-                      <span class="sr-row-store">
-                        {STORE_LABELS[entry.provider] ?? entry.provider}
-                      </span>
-                      <Show when={!entry.reachable}>
-                        <Badge tone="danger">Store unreachable</Badge>
-                      </Show>
                     </>
                   }
                 />
               )}
             </For>
-            <div class="sr-add-row">
-              <Button variant="default" onClick={openAdd}>
-                Add a secret
-              </Button>
-            </div>
-          </PageSection>
+          </CollectionView>
         </Match>
       </Switch>
 
