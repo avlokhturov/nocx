@@ -263,7 +263,13 @@ export const Dialog: Component<DialogProps> = (props) => {
   })
 
   // Handle native cancel event (Escape key).
-  const onCancel = () => {
+  const onCancel = (e: Event) => {
+    // Only the dialog's OWN cancel. `cancel` bubbles, and `input[type=file]`
+    // fires one when the user dismisses the OS file picker — so cancelling a
+    // file chooser inside a dialog was closing the dialog and discarding the
+    // form behind it. The native `<dialog>` cancel (Escape) targets the dialog
+    // itself; anything else reaching here belongs to a descendant.
+    if (e.target !== ref) return
     props.onClose()
   }
 

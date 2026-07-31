@@ -277,6 +277,37 @@ describe('Dialog', () => {
 
 /* ── Panel height animation ──────────────────────────────────────────── */
 
+// A `cancel` from a descendant is not the dialog's cancel. `input[type=file]`
+// fires one when the OS file picker is dismissed, and it bubbles — so choosing
+// "Choose file" in the connection editor and then pressing Cancel in the
+// picker closed the whole editor and discarded the form. Reported from the
+// running app.
+describe('Dialog cancel', () => {
+  it('closes on its own cancel', () => {
+    const onClose = vi.fn()
+    const { container } = render(() => (
+      <Dialog open={true} onClose={onClose} title="T">
+        body
+      </Dialog>
+    ))
+    const dialog = container.querySelector('dialog') as HTMLDialogElement
+    fireEvent(dialog, new Event('cancel', { bubbles: true }))
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('ignores a cancel bubbling up from a descendant, such as a file picker', () => {
+    const onClose = vi.fn()
+    const { container } = render(() => (
+      <Dialog open={true} onClose={onClose} title="T">
+        <input type="file" data-testid="picker" />
+      </Dialog>
+    ))
+    const picker = container.querySelector('input[type=file]') as HTMLInputElement
+    fireEvent(picker, new Event('cancel', { bubbles: true }))
+    expect(onClose).not.toHaveBeenCalled()
+  })
+})
+
 describe('Dialog panel height animation', () => {
   // jsdom has no layout and ResizeObserver is stubbed to never fire, so we
   // capture the callback the component registers and drive it by hand, with
