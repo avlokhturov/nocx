@@ -160,20 +160,16 @@ export function KeyMaterialInput(props: KeyMaterialInputProps) {
           ariaLabel="Choose private key file"
           buttonLabel="Choose file…"
         />
-        {/* The read can fail — an unreadable file, a revoked permission.
-            Silence there would leave the user believing a key was loaded. */}
-        <Show when={fileError()}>
-          <p class="cm-key-file-error">{fileError()}</p>
-        </Show>
       </Show>
-      {/* The parent's verdict on the material — "not a private key", and the
-          like. It used to be passed only to the paste-mode TextField, so a
-          file chosen in file mode that turned out to be a public key set an
-          error nothing rendered: the user pressed Create and saw literally
-          nothing happen. The error belongs to the material, and the material
-          can arrive by any of the three routes. */}
-      <Show when={props.error && props.mode !== 'material'}>
-        <p class="cm-key-file-error">{props.error}</p>
+      {/* ONE message about the material, in whichever mode supplied it.
+          Local first: the eager check knows the user chose a .pub and says
+          which file is wanted, while the backend can only report that it
+          failed to parse — so stacking both put "That is a public key…" above
+          "ssh: no key found", which is the same news twice and the second
+          telling is the less useful one. The toast carries the outcome; this
+          carries which control to fix. */}
+      <Show when={props.mode !== 'material' && (fileError() ?? props.error)}>
+        <p class="cm-key-file-error">{fileError() ?? props.error}</p>
       </Show>
       <Show when={props.mode === 'material'}>
         <TextField
@@ -186,7 +182,7 @@ export function KeyMaterialInput(props: KeyMaterialInputProps) {
             props.onMaterialChange(value)
           }}
           placeholder="Paste the private key content here"
-          error={props.error ?? fileError()}
+          error={fileError() ?? props.error}
         />
         <Show when={props.fingerprint}>
           <span class="cm-key-fingerprint">Fingerprint: {props.fingerprint}</span>

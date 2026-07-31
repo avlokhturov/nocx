@@ -1982,10 +1982,21 @@ func parsePrivateKeyMaterial(keyText string) (fingerprint string, err error) {
 			return gossh.FingerprintSHA256(passErr.PublicKey), nil
 		}
 		// Traditional PEM-encrypted key — no public half available.
-		// Reject with a clear message (the user should convert to OpenSSH format).
-		return "", &errInvalidKeyMaterial{
-			msg: "encrypted private key format does not expose a public key; use OpenSSH format (ssh-keygen -p -m RFC4716 -f key)",
-		}
+		// Traditional PEM-encrypted key: readable, usable, and its public half
+		// is behind the passphrase we were not given.
+		//
+		// This used to be rejected, telling the user to convert the key. That
+		// was wrong twice. The key works — ssh_auth.go already opens exactly
+		// this shape with ParsePrivateKeyWithPassphrase, and it works in every
+		// other client — so refusing it turned "I cannot compute a fingerprint
+		// yet" into "your key is invalid". And the remedy quoted was not one:
+		// RFC4716 is a PUBLIC key format, so the command would not have
+		// converted the private key at all.
+		//
+		// The fingerprint is left empty, which this function's own contract
+		// has always permitted. Empty means unknown-until-unlocked, not
+		// absent: nothing downstream may treat it as an identity.
+		return "", nil
 	}
 
 	return "", &errInvalidKeyMaterial{msg: fmt.Sprintf("not a valid private key: %v", parseErr)}
