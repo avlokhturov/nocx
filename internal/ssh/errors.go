@@ -1,7 +1,6 @@
 package ssh
 
 import (
-	"errors"
 	"fmt"
 )
 
@@ -21,6 +20,50 @@ func (e *ErrAuthFailed) Error() string {
 }
 
 func (e *ErrAuthFailed) Unwrap() error { return e.Err }
+
+// ErrNoAuthMethod is returned when the connection had nothing to authenticate
+// with: the auth method it names has no material behind it. It is a
+// configuration answer, not a server one, and it is deliberately separate from
+// ErrAuthFailed — the server rejecting a password and nocx never sending one
+// are different problems with different fixes, and reporting the second as the
+// first sends the user to look at the host.
+//
+// Reported from the running app: a connection set to publicKey whose
+// credential held no key produced "attempted methods [none], no supported
+// methods remain" — the Go library naming its own internals to a user whose
+// actual problem was an empty credential.
+type ErrNoAuthMethod struct {
+	User string
+	Host string
+	// Mode is the auth method the connection names: publicKey, password,
+	// agent, keyboardInteractive, or "" for auto.
+	Mode string
+}
+
+func (e *ErrNoAuthMethod) Error() string {
+	switch e.Mode {
+	case "publicKey":
+		return fmt.Sprintf(
+			"no private key to offer %s@%s: this connection is set to key authentication and no key is stored for it",
+			e.User, e.Host,
+		)
+	case "password":
+		return fmt.Sprintf(
+			"no password to offer %s@%s: this connection is set to password authentication and no password is stored for it",
+			e.User, e.Host,
+		)
+	case "agent":
+		return fmt.Sprintf(
+			"no agent to ask for %s@%s: this connection is set to agent authentication and no SSH agent is reachable (SSH_AUTH_SOCK is unset or empty)",
+			e.User, e.Host,
+		)
+	default:
+		return fmt.Sprintf(
+			"nothing to authenticate %s@%s with: no key, no password and no reachable agent",
+			e.User, e.Host,
+		)
+	}
+}
 
 // ErrHostKeyMismatch is returned when the host key presented by the remote
 // does not match the one recorded in known_hosts.
@@ -67,11 +110,6 @@ type ErrEncryptedKey struct {
 func (e *ErrEncryptedKey) Error() string {
 	return fmt.Sprintf("private key %s is encrypted and requires a passphrase (not supported)", e.Path)
 }
-
-// Sentinel errors used internally.
-var (
-	errNoAuthMethods = errors.New("no usable auth methods")
-)
 
 // ErrCredentialAuthorizationFailed is returned when a linked credential is not
 // authorized for the resolved endpoint. The credential may only be spent on the

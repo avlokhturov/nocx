@@ -52,6 +52,13 @@ func (rc *RealClient) probeConfig(ctx context.Context, host string, cfg *Connect
 
 	auth, err := firstAuthMethod(chain)
 	if err != nil {
+		// The connection names an auth method it has no material for. That is
+		// a configuration answer, and the probe must give the same one the
+		// connect path gives — a test that reports something different from
+		// what connecting does is worse than no test.
+		if errors.Is(err, errNoUsableAuth) {
+			return "", &ErrNoAuthMethod{User: resolved.user, Host: resolved.hostName, Mode: cfg.AuthMode}
+		}
 		return "", fmt.Errorf("probe config: %w", err)
 	}
 
@@ -81,6 +88,14 @@ func (rc *RealClient) probeConfig(ctx context.Context, host string, cfg *Connect
 	_ = gclient.Close()
 	return *fp, nil
 }
+
+// errNoUsableAuth marks a chain with nothing to send. Callers turn it into an
+// ErrNoAuthMethod carrying the user and host, which they know and this does not.
+//
+// One sentinel, not two: errors.go carried an errNoAuthMethods that nothing in
+// the package ever returned — a test asserted on it in a branch production
+// could not reach, which is how a dead sentinel survives a review.
+var errNoUsableAuth = errors.New("no usable auth methods found")
 
 // firstAuthMethod extracts the first usable gossh.AuthMethod from the auth
 // chain built by buildAuthChain. It skips entries that do not carry a method
@@ -124,5 +139,5 @@ func firstAuthMethod(chain []authChainEntry) (gossh.AuthMethod, error) {
 		}
 		// kindNone, kindHostbased → skip to next entry.
 	}
-	return nil, errors.New("no usable auth methods found")
+	return nil, errNoUsableAuth
 }

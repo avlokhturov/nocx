@@ -2,6 +2,7 @@ package ssh
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -267,6 +268,13 @@ func (p *ConnPool) acquire(ctx context.Context, key poolKey, dial func(key poolK
 	if err != nil {
 		p.mu.Unlock()
 		close(d.done) // wake waiters so they can see the failure / retry
+		// A typed domain error already names the user and the host — wrapping
+		// it here printed them twice in one sentence, which is how a message
+		// stops being read. Only an untyped failure needs the context added.
+		var noAuth *ErrNoAuthMethod
+		if errors.As(err, &noAuth) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("dial %s@%s:%d: %w", key.user, key.host, key.port, err)
 	}
 	// A concurrent Acquire that waited on our done channel cannot have

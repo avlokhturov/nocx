@@ -204,8 +204,8 @@ func TestAuthChainDefaultKeyDiscovery(t *testing.T) {
 	chain, err := rc.buildAuthChain(ctx, resolved, cfg)
 	// We expect at least promptPassword in the chain (or an error if no methods).
 	if err != nil {
-		// errNoAuthMethods is acceptable when no keys/agent/password.
-		if !errors.Is(err, errNoAuthMethods) {
+		// A chain with nothing to send is acceptable here.
+		if !errors.Is(err, errNoUsableAuth) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		return
@@ -766,5 +766,73 @@ func TestAddVaultKeyMethod_NoStoreErrors(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "no SecretStore configured") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// ── The empty credential, reported from the running app ─────────────────
+//
+// A connection set to publicKey whose credential holds no key material has
+// nothing to send. The chain still carries `none` and `hostbased`, neither of
+// which carries a method, so the dial went out with an empty Auth list and the
+// server answered "attempted methods [none], no supported methods remain" —
+// the Go library naming its own internals to a user whose actual problem was
+// an empty credential, and pointing them at the host rather than at the
+// connection. Both entry points must give the same, true answer.
+
+func TestNoAuthMaterial_ConnectSaysWhichMethodHasNothing(t *testing.T) {
+	// HOME with no ~/.ssh keys, so default key discovery finds nothing —
+	// exactly the reported machine.
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SSH_AUTH_SOCK", "")
+	rc := newTestRealClient(t)
+	resolved := &resolvedConfig{user: "root", hostName: "192.168.0.57", port: 22}
+	cfg := &ConnectConfig{AuthMode: "publicKey"}
+
+	dial := rc.dialForConnect(context.Background(), "192.168.0.57", resolved, cfg)
+	_, err := dial(poolKey{})
+	if err == nil {
+		t.Fatal("expected a dial refusal when there is nothing to authenticate with")
+	}
+	var noAuth *ErrNoAuthMethod
+	if !errors.As(err, &noAuth) {
+		t.Fatalf("expected ErrNoAuthMethod, got %T: %v", err, err)
+	}
+	if noAuth.Mode != "publicKey" || noAuth.User != "root" || noAuth.Host != "192.168.0.57" {
+		t.Fatalf("error lost the context it exists to carry: %+v", noAuth)
+	}
+	// The sentence names the cause, not the library's internals.
+	if strings.Contains(err.Error(), "no supported methods remain") {
+		t.Fatalf("the handshake message leaked into the user's answer: %v", err)
+	}
+	if !strings.Contains(err.Error(), "no key is stored") {
+		t.Fatalf("the message does not say what is missing: %v", err)
+	}
+}
+
+func TestNoAuthMaterial_ProbeSaysTheSameThingAsConnect(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SSH_AUTH_SOCK", "")
+	rc := newTestRealClient(t)
+	ctx := context.Background()
+	resolved := &resolvedConfig{user: "root", hostName: "192.168.0.57", port: 22}
+	cfg := &ConnectConfig{AuthMode: "publicKey"}
+
+	chain, err := rc.buildAuthChain(ctx, resolved, cfg)
+	if err != nil {
+		t.Fatalf("buildAuthChain: %v", err)
+	}
+	if _, err := firstAuthMethod(chain); !errors.Is(err, errNoUsableAuth) {
+		t.Fatalf("expected errNoUsableAuth from a chain with nothing to send, got %v", err)
+	}
+
+	// …and the probe turns it into the same answer the connect path gives,
+	// so Test and Connect cannot disagree about the same connection.
+	_, probeErr := rc.probeConfig(ctx, "192.168.0.57", cfg)
+	var noAuth *ErrNoAuthMethod
+	if !errors.As(probeErr, &noAuth) {
+		t.Fatalf("expected ErrNoAuthMethod from the probe, got %T: %v", probeErr, probeErr)
+	}
+	if noAuth.Mode != "publicKey" {
+		t.Fatalf("probe lost the mode: %+v", noAuth)
 	}
 }

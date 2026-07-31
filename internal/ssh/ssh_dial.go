@@ -181,6 +181,18 @@ func (rc *RealClient) dialForConnect(ctx context.Context, host string, resolved 
 			return nil, err
 		}
 		auths := authMethodsFromChain(chain)
+		// Nothing to offer. The chain always carries `none`, which carries no
+		// method, so an empty list means every real method fell out: the mode
+		// names something the connection has no material for. Say that instead
+		// of dialing and letting the handshake report it as
+		// "attempted methods [none], no supported methods remain" — the
+		// server is not the problem and the user should not be sent to look
+		// at it. `none` is not attempted on its own: a server that accepts it
+		// accepts it as the opening of a real chain, and offering it alone
+		// is how this failure disguised itself as an auth rejection.
+		if len(auths) == 0 {
+			return nil, &ErrNoAuthMethod{User: resolved.user, Host: resolved.hostName, Mode: cfg.AuthMode}
+		}
 
 		addr := net.JoinHostPort(resolved.hostName, strconv.Itoa(resolved.port))
 		timeout := cfg.ReadyTimeout
