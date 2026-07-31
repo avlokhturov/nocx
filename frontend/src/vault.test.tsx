@@ -687,12 +687,7 @@ describe('UnlockDialog', () => {
     expect(unseal).not.toHaveBeenCalled()
   })
 
-  // The message goes on the FIELD, not into a toast. `Dialog` uses
-  // `showModal()`, so it paints in the browser's top layer and a toast raised
-  // while it is open is drawn behind it — invisible. This was shipped as a
-  // toast for one commit and the test passed, because jsdom stubs showModal
-  // and has no top layer to hide anything.
-  it('reports a refused passphrase on the field, naming what was refused', async () => {
+  it('reports a refused passphrase as a toast, naming what was refused', async () => {
     clearToasts()
     const { client, unseal } = mockClient()
     // What the backend actually sends when the passphrase does not fit: the
@@ -720,12 +715,17 @@ describe('UnlockDialog', () => {
     fireEvent.click(screen.getByText('Unlock'))
 
     await vi.waitFor(() => {
-      const err = document.querySelector('.ui-field-error')
-      expect(err).toBeTruthy()
-      expect(err!.textContent).toBe('That passphrase does not unlock this vault.')
+      const toast = document.querySelector('.ui-toast')
+      expect(toast).toBeTruthy()
+      expect(toast!.getAttribute('data-level')).toBe('danger')
+      expect(toast!.textContent).toBe('That passphrase does not unlock this vault.')
     })
-    // Not a toast: it would be painted behind the dialog that raised it.
-    expect(document.querySelector('.ui-toast')).toBeNull()
+    // The property that makes it reachable rather than merely present: a modal
+    // <dialog> paints in the top layer, so a toast is visible only if it is
+    // rendered INSIDE that element. ToastHost portals itself there. Asserting
+    // presence alone would pass either way, because jsdom stubs showModal and
+    // has no top layer to hide anything.
+    expect(document.querySelector('.ui-toast')!.closest('dialog')).not.toBeNull()
     // Never the backend's own words.
     expect(document.body.textContent).not.toContain('unseal failed')
     // Dialog stays open, onUnsealed not called

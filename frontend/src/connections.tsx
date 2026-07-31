@@ -268,13 +268,8 @@ export function ConnectionsView(props: ConnectionsViewProps) {
    * pane instead, visible from whichever section made the change.
    */
   /**
-   * The name is required, and the message belongs under the field.
-   *
-   * It was a Toast, and a Toast raised from inside a modal dialog cannot be
-   * seen at all: `showModal()` puts the dialog in the browser's top layer,
-   * which paints above every z-index in the normal layer — including the toast
-   * host's. So the button reported the problem to a place hidden behind the
-   * thing the user was looking at, and pressing it appeared to do nothing.
+   * The name is required, and the message belongs under the field: it is field
+   * validation, answered by editing the field, and it clears as you type.
    */
   const groupValidation = createFormValidation({
     name: () => required('Name')(groupDraft()?.name ?? ''),

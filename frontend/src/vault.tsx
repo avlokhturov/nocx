@@ -681,18 +681,10 @@ export const UnlockDialog: Component<UnlockDialogProps> = (props) => {
       props.onClose()
     } catch (e: unknown) {
       setUnlocking(false)
-      // In the field, NOT a toast — and this is not a style preference.
-      // `Dialog` uses `showModal()`, which paints in the browser's top layer,
-      // above every z-index in the normal layer including ToastHost's 300. A
-      // toast raised from inside an open dialog is drawn behind it and cannot
-      // be seen at all, so the button would look like it did nothing.
-      // connections.tsx:271 records the same lesson, learned the same way.
-      //
-      // jsdom will not catch a regression here: the test setup stubs
-      // showModal, so there is no top layer and the toast is "visible" to a
-      // query. The guard is the assertion below that the message lands on the
-      // field.
-      setError(refusalMessage(m, e))
+      // The outcome of the call is a toast, like every other outcome on these
+      // surfaces. ToastHost portals into the topmost open overlay, so it is
+      // visible from inside a modal.
+      showToast({ level: 'danger', message: refusalMessage(m, e) })
     }
   }
 
