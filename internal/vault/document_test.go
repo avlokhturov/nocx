@@ -33,6 +33,11 @@ func (f *fakeDocStore) Write(name string, doc any) error {
 	return nil
 }
 
+func (f *fakeDocStore) Delete(name string) error {
+	delete(f.data, name)
+	return nil
+}
+
 func TestDocument_RoundTrip(t *testing.T) {
 	store := &fakeDocStore{}
 	pass := &Envelope{

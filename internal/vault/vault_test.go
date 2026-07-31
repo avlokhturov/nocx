@@ -244,6 +244,10 @@ func (s *failingDocStore) Write(name string, doc any) error {
 	return s.DocumentStore.Write(name, doc)
 }
 
+func (s *failingDocStore) Delete(name string) error {
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
@@ -2149,4 +2153,113 @@ func TestSnapshot_HasPassphrase(t *testing.T) {
 	if !snap.HasPassphrase {
 		t.Error("HasPassphrase = false after passphrase setup")
 	}
+}
+
+// --- Purge ---
+
+// Purge is the vault's half of a reset: destroy every provider's material,
+// then the document, and return to uninitialized.
+//
+// It must work while SEALED. That is not an edge case, it is the only case —
+// a user resets because they cannot unlock, so an implementation that needed
+// the root key would refuse exactly when it is wanted.
+func TestVault_Purge_FromSealedReturnsToUninitialized(t *testing.T) {
+	loweredCost(t)
+	v, _, _ := testVault(t, newTestProvider(ProviderSystem), newTestFileProvider(ProviderFile))
+	mustSetup(t, v, "correct horse battery staple")
+	v.Seal()
+
+	if got := v.State(); got != StateSealed {
+		t.Fatalf("precondition: state = %v, want sealed", got)
+	}
+	if _, err := v.Purge(context.Background()); err != nil {
+		t.Fatalf("Purge: %v", err)
+	}
+	if got := v.State(); got != StateUninitialized {
+		t.Errorf("state after Purge = %v, want uninitialized", got)
+	}
+}
+
+// The document is what makes a vault exist, so a purged vault must not come
+// back on the next start. Reconstructing from the same store is the only
+// assertion that can tell "forgot in memory" from "gone".
+func TestVault_Purge_DoesNotSurviveAReconstruct(t *testing.T) {
+	loweredCost(t)
+	v, store, _ := testVault(t, newTestProvider(ProviderSystem), newTestFileProvider(ProviderFile))
+	mustSetup(t, v, "correct horse battery staple")
+
+	if _, err := v.Purge(context.Background()); err != nil {
+		t.Fatalf("Purge: %v", err)
+	}
+
+	reg, err := NewRegistry()
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	again, err := New(store, reg, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	if err != nil {
+		t.Fatalf("New after Purge: %v", err)
+	}
+	t.Cleanup(again.Close)
+	if got := again.State(); got != StateUninitialized {
+		t.Errorf("reconstructed state = %v, want uninitialized", got)
+	}
+}
+
+// Re-running an interrupted reset must succeed rather than report that there
+// is nothing to purge. There is no journal here; re-running IS the recovery.
+func TestVault_Purge_IsIdempotent(t *testing.T) {
+	loweredCost(t)
+	v, _, _ := testVault(t, newTestProvider(ProviderSystem), newTestFileProvider(ProviderFile))
+	mustSetup(t, v, "correct horse battery staple")
+
+	if _, err := v.Purge(context.Background()); err != nil {
+		t.Fatalf("first Purge: %v", err)
+	}
+	if _, err := v.Purge(context.Background()); err != nil {
+		t.Errorf("second Purge: %v, want nil", err)
+	}
+}
+
+// A provider that cannot be reached must not stop the rest. The keychain being
+// unavailable is an ordinary Linux state, and refusing to clear the vault
+// because of it would leave the user locked out with no way back — so the
+// error is reported AND the vault is still cleared.
+func TestVault_Purge_ReportsAFailedProviderAndStillClearsTheVault(t *testing.T) {
+	loweredCost(t)
+	v, _, _ := testVault(
+		t,
+		newTestProvider(ProviderSystem),
+		newTestFileProvider(ProviderFile),
+		&refusingPurgeProvider{id: "stubborn"},
+	)
+	mustSetup(t, v, "correct horse battery staple")
+
+	failures, err := v.Purge(context.Background())
+	if err == nil {
+		t.Fatal("Purge returned nil despite a provider that could not be purged")
+	}
+	if len(failures) != 1 || failures[0].Provider != "stubborn" {
+		t.Errorf("failures = %+v, want one naming the stubborn provider", failures)
+	}
+	if got := v.State(); got != StateUninitialized {
+		t.Errorf("state = %v, want uninitialized — the vault is cleared regardless", got)
+	}
+}
+
+// refusingPurgeProvider is registered, purgeable, and always fails.
+type refusingPurgeProvider struct{ id ProviderID }
+
+func (p *refusingPurgeProvider) ID() ProviderID { return p.id }
+
+func (p *refusingPurgeProvider) Status(_ context.Context) Status {
+	return Status{Ready: true}
+}
+
+func (p *refusingPurgeProvider) Get(_ context.Context, _ credential.SecretID) (credential.Secret, error) {
+	return credential.Secret{}, errors.New("not implemented")
+}
+
+func (p *refusingPurgeProvider) PurgeAll(_ context.Context) error {
+	return errors.New("keychain is not answering")
 }

@@ -281,6 +281,35 @@ func (p *Provider) Delete(_ context.Context, id credential.SecretID) error {
 
 // makeAAD builds the AAD from the current blob version and vault instance.
 // Caller must hold p.mu.
+// PurgeAll destroys every secret this provider holds.
+//
+// Its material is one document, so purging is deleting it. The in-memory copy
+// goes with it and the keys are wiped: a provider left unlocked would
+// otherwise keep serving secrets that no longer exist on disk, and the first
+// write after that would recreate the blob from a stale map.
+//
+// Deleting a blob that is not there succeeds — a reset interrupted after this
+// step must be safe to re-run.
+func (p *Provider) PurgeAll(_ context.Context) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if err := p.docs.Delete(p.name); err != nil {
+		return err
+	}
+	p.secrets = make(map[credential.SecretID][]byte)
+	p.wrappedKey = nil
+	for i := range p.dataKey {
+		p.dataKey[i] = 0
+	}
+	p.dataKey = nil
+	for i := range p.rootKey {
+		p.rootKey[i] = 0
+	}
+	p.rootKey = nil
+	return nil
+}
+
 func (p *Provider) makeAAD() []byte {
 	return buildAAD(blobVersion, p.vaultInstance)
 }

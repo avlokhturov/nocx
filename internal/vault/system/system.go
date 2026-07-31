@@ -35,6 +35,14 @@ type Keyring interface {
 	Set(service, user, password string) error
 	Get(service, user string) (string, error)
 	Delete(service, user string) error
+	// DeleteAll removes every entry under service.
+	//
+	// It is here because there is no enumeration operation on any platform,
+	// so "remove everything nocx stored" cannot be expressed as a loop over
+	// known ids: an entry whose reference was lost is undiscoverable, and
+	// this provider stores plaintext, so leaving it behind leaves a readable
+	// password nothing can ever find again.
+	DeleteAll(service string) error
 }
 
 // keyringAdapter adapts zalando/go-keyring's package-level functions to the
@@ -52,6 +60,10 @@ func (keyringAdapter) Get(service, user string) (string, error) {
 
 func (keyringAdapter) Delete(service, user string) error {
 	return keyring.Delete(service, user)
+}
+
+func (keyringAdapter) DeleteAll(service string) error {
+	return keyring.DeleteAll(service)
 }
 
 const defaultTimeout = 5 * time.Second
@@ -214,6 +226,23 @@ func (p *Provider) Delete(ctx context.Context, id credential.SecretID) error {
 		return nil
 	}
 	return err
+}
+
+// PurgeAll removes every secret this provider has stored, including entries
+// whose references were lost — see the Keyring doc for why a bulk delete is
+// the only complete operation available.
+//
+// Scoped to keychainSecretService, which is a constant in this package. The
+// service name must never come from a caller, and least of all from the
+// renderer: it is the one argument that decides whose secrets are destroyed.
+//
+// ctx bounds how long the caller waits. It does NOT cancel the underlying
+// keyring call — see WithTimeout. A timeout therefore means "unknown", not
+// "did not happen", which is why the operation is safe to retry.
+func (p *Provider) PurgeAll(ctx context.Context) error {
+	return p.runKeyringOp(ctx, func() error {
+		return p.keyring.DeleteAll(keychainSecretService)
+	})
 }
 
 // --- internal helpers ---

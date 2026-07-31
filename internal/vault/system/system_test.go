@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -66,6 +67,10 @@ func (lockedKeyring) Get(service, user string) (string, error) {
 }
 
 func (lockedKeyring) Delete(service, user string) error {
+	return errors.New("secret service: collection is locked")
+}
+
+func (lockedKeyring) DeleteAll(service string) error {
 	return errors.New("secret service: collection is locked")
 }
 
@@ -155,6 +160,7 @@ func (k failingKeyring) Set(service, user, password string) error { return k.err
 func (k failingKeyring) Get(service, user string) (string, error) { return "", k.err }
 
 func (k failingKeyring) Delete(service, user string) error { return k.err }
+func (k failingKeyring) DeleteAll(service string) error    { return k.err }
 
 // TestTimeoutWriteStillLands verifies that a Put that times out still
 // completes in the background, and that the value is readable afterwards.
@@ -272,6 +278,17 @@ func (k *memKeyring) Delete(service, user string) error {
 	return nil
 }
 
+func (k *memKeyring) DeleteAll(service string) error {
+	k.mu.Lock()
+	for stored := range k.store {
+		if strings.HasPrefix(stored, service+".") {
+			delete(k.store, stored)
+		}
+	}
+	k.mu.Unlock()
+	return nil
+}
+
 func key(service, user string) string { return service + "." + user }
 
 // blockingKeyring blocks Set until unblockSet is called. Used to test timeout
@@ -318,5 +335,90 @@ func (k *blockingKeyring) Delete(service, user string) error {
 	return nil
 }
 
+func (k *blockingKeyring) DeleteAll(service string) error {
+	k.mu.Lock()
+	for stored := range k.store {
+		if strings.HasPrefix(stored, service+".") {
+			delete(k.store, stored)
+		}
+	}
+	k.mu.Unlock()
+	return nil
+}
+
 func (k *blockingKeyring) unblockSet()     { close(k.setBlock) }
 func (k *blockingKeyring) waitForSetDone() { <-k.setDone }
+
+// --- PurgeAll ---
+
+// PurgeAll is how a vault reset removes what nocx put in the OS keychain.
+//
+// It has to be a bulk delete by service rather than a walk over known ids,
+// because the keyring exposes no enumeration on any platform: an entry whose
+// reference was lost earlier cannot be discovered, so a walk silently leaves
+// it behind — as plaintext, since this provider stores plaintext. Bulk delete
+// is the only operation that can be complete.
+func TestProvider_PurgeAll_RemovesEveryEntryUnderOurService(t *testing.T) {
+	kr := newMemKeyring()
+	p := system.New(system.WithKeyring(kr))
+	ctx := context.Background()
+
+	if err := p.Put(ctx, "id-one", credential.NewSecretBytes([]byte("a"))); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := p.Put(ctx, "id-two", credential.NewSecretBytes([]byte("b"))); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	// An entry nothing references any more — exactly the case a walk misses.
+	if err := kr.Set("nocx", "orphaned-id", "c"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+
+	if err := p.PurgeAll(ctx); err != nil {
+		t.Fatalf("PurgeAll: %v", err)
+	}
+
+	for _, id := range []credential.SecretID{"id-one", "id-two"} {
+		if _, err := p.Get(ctx, id); err == nil {
+			t.Errorf("%s still readable after PurgeAll", id)
+		}
+	}
+	if _, err := kr.Get("nocx", "orphaned-id"); err == nil {
+		t.Error("orphaned entry survived PurgeAll")
+	}
+}
+
+// Another application's entries are not ours to remove. The scope is the
+// service name, and it is a constant in this package — never anything a caller
+// or the renderer supplies.
+func TestProvider_PurgeAll_LeavesOtherServicesAlone(t *testing.T) {
+	kr := newMemKeyring()
+	p := system.New(system.WithKeyring(kr))
+	ctx := context.Background()
+
+	if err := p.Put(ctx, "ours", credential.NewSecretBytes([]byte("a"))); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := kr.Set("some-other-app", "theirs", "b"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+
+	if err := p.PurgeAll(ctx); err != nil {
+		t.Fatalf("PurgeAll: %v", err)
+	}
+
+	if _, err := kr.Get("some-other-app", "theirs"); err != nil {
+		t.Errorf("another application's entry was removed: %v", err)
+	}
+}
+
+// The reset runs while the vault is sealed and the keychain may simply not be
+// there — no Secret Service running is an ordinary Linux state. The failure
+// has to arrive as an error the caller can report, not a panic or a silent
+// success that would let the UI claim everything was removed.
+func TestProvider_PurgeAll_ReportsAnUnavailableKeychain(t *testing.T) {
+	p := system.New(system.WithKeyring(failingKeyring{err: errors.New("no-service")}))
+	if err := p.PurgeAll(context.Background()); err == nil {
+		t.Error("PurgeAll returned nil when the keyring failed")
+	}
+}

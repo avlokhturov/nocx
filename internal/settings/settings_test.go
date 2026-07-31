@@ -37,6 +37,11 @@ func (f *fakeDoc) Write(name string, doc any) error {
 	return nil
 }
 
+func (f *fakeDoc) Delete(name string) error {
+	delete(f.data, name)
+	return nil
+}
+
 // fakeSecretStore implements credential.SecretStore in memory.
 type fakeSecretStore struct {
 	data    map[credential.SecretID]string

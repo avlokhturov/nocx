@@ -56,6 +56,13 @@ func (s *memDocStore) Write(name string, doc any) error {
 	return nil
 }
 
+func (s *memDocStore) Delete(name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.docs, name)
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -632,5 +639,46 @@ func TestPut_WithoutRootKeyStillReportsSealed(t *testing.T) {
 		credential.NewSecret("x"))
 	if !errors.Is(err, vault.ErrVaultSealed) {
 		t.Fatalf("Put with no root key: got %v, want ErrVaultSealed", err)
+	}
+}
+
+// PurgeAll is what a vault reset calls on this provider. Its material is one
+// document, so purging is deleting it — and the in-memory copy has to go with
+// it, or a provider that is still unlocked would keep serving secrets that no
+// longer exist on disk.
+func TestProvider_PurgeAll(t *testing.T) {
+	docs := newMemDocStore()
+	p := New(docs, "vault-file.json")
+	ctx := context.Background()
+	root := bytes.Repeat([]byte{7}, 32)
+
+	p.SetInstanceID("inst-1")
+	if err := p.Unlock(root); err != nil {
+		t.Fatalf("Unlock: %v", err)
+	}
+	if _, err := p.NewDataKey(); err != nil {
+		t.Fatalf("NewDataKey: %v", err)
+	}
+	if err := p.Put(ctx, "id-one", credential.NewSecretBytes([]byte("secret"))); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	if err := p.PurgeAll(ctx); err != nil {
+		t.Fatalf("PurgeAll: %v", err)
+	}
+
+	if _, ok := docs.docs["vault-file.json"]; ok {
+		t.Error("the blob document survived PurgeAll")
+	}
+	if _, err := p.Get(ctx, "id-one"); err == nil {
+		t.Error("a secret is still readable from memory after PurgeAll")
+	}
+}
+
+// Re-running an interrupted reset must not fail on the half already done.
+func TestProvider_PurgeAll_WithNoBlobIsNotAnError(t *testing.T) {
+	p := New(newMemDocStore(), "vault-file.json")
+	if err := p.PurgeAll(context.Background()); err != nil {
+		t.Errorf("PurgeAll on an absent blob: %v, want nil", err)
 	}
 }
