@@ -23,6 +23,7 @@ import (
 	"github.com/shady2k/nocx/internal/vault"
 	"github.com/shady2k/nocx/internal/vault/file"
 	"github.com/shady2k/nocx/internal/vault/system"
+	"github.com/shady2k/nocx/internal/vaultreset"
 )
 
 type App struct {
@@ -141,6 +142,7 @@ func New(opts ...Option) (*App, error) {
 		transport.WithCredentialMetadataRepository(profileStore),
 		transport.WithCredentialStore(v),
 		transport.WithVaultLifecycle(v),
+		transport.WithVaultReset(vaultreset.New(v, profileStore, slogger)),
 		transport.WithProfileResolver(resolver),
 		transport.WithSettingsRegistry(settingsRegistry),
 		transport.WithProfileUsageStore(usageStore),

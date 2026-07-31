@@ -501,6 +501,15 @@ func (s *WSServer) broadcastVaultChanged() {
 	}
 	s.connsMu.Unlock()
 
+	// Every other caller reaches here from handleVaultMethod, which refuses
+	// when the lifecycle is absent — so this dereference was safe by
+	// construction until vault.reset arrived. Reset deliberately bypasses that
+	// gate, because a reset must work on a vault that is broken or half-built,
+	// and there is nothing to announce when there is no vault to describe.
+	if s.vaultLifecycle == nil {
+		return
+	}
+
 	ctx := context.Background()
 	snap := s.vaultLifecycle.Snapshot(ctx)
 	msg := map[string]any{

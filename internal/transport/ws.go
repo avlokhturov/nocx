@@ -78,6 +78,7 @@ type WSServer struct {
 	// Vault lifecycle for vault.* RPC methods. When nil, those methods return a
 	// JSON-RPC error.
 	vaultLifecycle VaultLifecycle
+	vaultReset     VaultResetService
 
 	// Profile resolver maps profile IDs to SSH connect configs.
 	resolver ProfileResolver
@@ -785,6 +786,13 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		"vault.changePassphrase", "vault.regenerateRecovery", "vault.setDefaultProvider",
 		"vault.setAutoSeal", "vault.activity", "vault.inventory":
 		s.handleVaultMethod(wconn, req)
+	// Not routed through handleVaultMethod: that gate refuses when the vault
+	// lifecycle is absent, and a reset must work on a vault that is broken or
+	// half-built — which is the only state it is ever wanted in.
+	case "vault.resetPreview":
+		s.handleVaultResetPreview(wconn, req)
+	case "vault.reset":
+		s.handleVaultReset(wconn, req)
 	default:
 		resp := newJSONRPCError(req.ID, -32601, "Method not found")
 		_ = wconn.writeJSON(resp)
