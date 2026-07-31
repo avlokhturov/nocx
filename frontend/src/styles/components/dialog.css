@@ -87,16 +87,6 @@ dialog.nocx-dialog::backdrop {
    (nocx-kudf). Content fills this box; it does not restate it. */
 .nocx-dialog__panel[data-size='lg'] {
   width: 640px;
-  /* And its height, for the same reason and by the same right.
-     The panel already names its width, so the General section sits in a box
-     wider than it needs and nobody minds. Height was left to the content, so
-     choosing Public Key — which reveals a Path/Choose file/Paste key control
-     and a field under it — grew the dialog and moved the footer buttons down
-     from under the pointer reaching for them. That is the exact harm the width
-     rule exists to prevent, applied to the other axis.
-     Bounded by the panel's own max-height above, so a short viewport still
-     scrolls rather than overflowing. */
-  min-height: 420px;
 }
 
 .nocx-dialog__title {
