@@ -136,6 +136,8 @@ export interface VaultController {
   onUnsealDone(): void
   /** Show the unlock dialog (e.g. after a sealed-on-connect error). */
   openUnlock(): void
+  /** Show the setup dialog, for a surface offering to set protection up. */
+  openSetup(): void
   closeSetup(): void
   closeUnlock(): void
   /**
@@ -259,6 +261,14 @@ export function createVaultState(vaultClient: VaultClient): VaultController {
   function openUnlock(): void {
     pendingSave = null
     setShowUnlock(true)
+  }
+
+  /** Show the setup dialog with no save waiting behind it. The counterpart of
+   *  openUnlock, for a surface that has nothing to show until protection
+   *  exists and should offer the remedy rather than name it. */
+  function openSetup(): void {
+    pendingSave = null
+    setShowSetup(true)
   }
 
   /** Closing a dialog cancels a pending operation — unless one is already
@@ -444,6 +454,7 @@ export function createVaultState(vaultClient: VaultClient): VaultController {
     onSetupDone,
     onUnsealDone,
     openUnlock,
+    openSetup,
     closeSetup,
     closeUnlock,
     saveSecretWithVault,

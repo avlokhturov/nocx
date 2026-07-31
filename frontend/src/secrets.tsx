@@ -7,7 +7,7 @@
  * No Reveal, no Copy of a stored value. Settlement: ADR-0011 §2 and
  * vault design §3.1.
  */
-import { For, Show, createSignal, createEffect, onMount } from 'solid-js'
+import { For, Show, Switch, Match, createSignal, createEffect, onMount } from 'solid-js'
 import { Button } from './ui/button'
 import { EmptyState } from './ui/empty-state'
 import { PageSection } from './ui/page-section'
@@ -82,9 +82,28 @@ export function SecretsSection(props: SecretsSectionProps) {
           Where it belongs is on the section it describes: "never shown back to
           you" answers a question you only have once you are looking at a list
           of secrets and wondering whether you can read one. */}
-      <Show
-        when={status()?.state !== 'sealed'}
-        fallback={
+      {/* A Switch, not nested Shows. The nested form made a missing case
+          invisible: `uninitialized` fell through every branch and the page
+          rendered nothing at all — a blank panel, no heading, no plate — and
+          so did `loading` and `error`. Only `sealed`, `empty` and `loaded`
+          were ever named, because before the vault could be reset there was
+          no easy way to reach the others with this page open. A Switch makes
+          the set of states something you have to look at. */}
+      <Switch fallback={<EmptyState icon={<KeyIcon />} title="Loading secrets…" />}>
+        <Match when={status()?.state === 'uninitialized'}>
+          <EmptyState
+            icon={<LockIcon />}
+            title="Protection is not set up yet"
+            description="nocx has nowhere to keep passwords until protection is set up. Nothing is stored, and nothing is lost."
+            action={
+              <Button variant="primary" onClick={() => props.vaultController.openSetup()}>
+                Set up protection
+              </Button>
+            }
+          />
+        </Match>
+
+        <Match when={status()?.state === 'sealed'}>
           <EmptyState
             icon={<LockIcon />}
             title="Vault is locked"
@@ -95,20 +114,30 @@ export function SecretsSection(props: SecretsSectionProps) {
               </Button>
             }
           />
-        }
-      >
-        <Show
-          when={loadState().kind === 'loaded'}
-          fallback={
-            <Show when={loadState().kind === 'empty'}>
-              <EmptyState
-                icon={<KeyIcon />}
-                title="Vault is empty"
-                description="There are no passwords or key passphrases in the vault yet. They appear here when you add a password to a connection."
-              />
-            </Show>
-          }
-        >
+        </Match>
+
+        <Match when={loadState().kind === 'error'}>
+          <EmptyState
+            icon={<KeyIcon />}
+            title="Could not load secrets"
+            description={(loadState() as Extract<LoadState, { kind: 'error' }>).message}
+            action={
+              <Button variant="default" onClick={() => void load()}>
+                Try again
+              </Button>
+            }
+          />
+        </Match>
+
+        <Match when={loadState().kind === 'empty'}>
+          <EmptyState
+            icon={<KeyIcon />}
+            title="Vault is empty"
+            description="There are no passwords or key passphrases in the vault yet. They appear here when you add a password to a connection."
+          />
+        </Match>
+
+        <Match when={loadState().kind === 'loaded'}>
           <PageSection
             title="Secrets"
             description="These are the passwords and key passphrases nocx keeps for your connections. They are stored encrypted and never shown back to you."
@@ -148,8 +177,8 @@ export function SecretsSection(props: SecretsSectionProps) {
               )}
             </For>
           </PageSection>
-        </Show>
-      </Show>
+        </Match>
+      </Switch>
     </div>
   )
 }

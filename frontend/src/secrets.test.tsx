@@ -242,4 +242,66 @@ describe('SecretsSection', () => {
     expect(description?.textContent).toMatch(/passwords and key passphrases/)
     expect(description?.textContent).toMatch(/never shown back to you/)
   })
+
+  // The blank page. `uninitialized` was reachable only by resetting the vault,
+  // which until now could not be done from the interface — so no test named
+  // the state, the nested Shows let it fall through every branch, and the
+  // whole panel rendered empty. Found by resetting and clicking Secrets.
+  it('offers to set protection up when there is no vault yet', async () => {
+    const { client } = mockClient()
+    client.status = vi.fn().mockResolvedValue({
+      ...UNSEALED_STATUS,
+      state: 'uninitialized' as const,
+    })
+
+    const { container, ctrl } = await mount(client)
+
+    await vi.waitFor(() => {
+      expect(container.querySelector('.ui-empty-state__title')?.textContent).toBe(
+        'Protection is not set up yet',
+      )
+    })
+    // And the remedy is offered here, not merely named: a page that announces
+    // a problem offers its way out.
+    const action = container.querySelector('.ui-empty-state__action button') as HTMLButtonElement
+    expect(action.textContent).toBe('Set up protection')
+    const openSetup = vi.spyOn(ctrl, 'openSetup')
+    action.click()
+    expect(openSetup).toHaveBeenCalled()
+  })
+
+  it('says so when the inventory could not be loaded, instead of showing nothing', async () => {
+    const { client, inventory } = mockClient()
+    client.status = vi.fn().mockResolvedValue(UNSEALED_STATUS)
+    inventory.mockRejectedValue(new Error('backend went away'))
+
+    const { container } = await mount(client)
+
+    await vi.waitFor(() => {
+      expect(container.querySelector('.ui-empty-state__title')?.textContent).toBe(
+        'Could not load secrets',
+      )
+    })
+    expect(container.querySelector('.ui-empty-state__desc')?.textContent).toContain(
+      'backend went away',
+    )
+  })
+
+  // The guard against the whole class. Whatever the vault says, this page
+  // shows the user something — a blank panel is never an answer, and it is the
+  // failure that no per-state test can rule out on its own.
+  it('never renders an empty panel, in any vault state', async () => {
+    for (const state of ['uninitialized', 'sealed', 'unsealed'] as const) {
+      cleanup()
+      const { client, inventory } = mockClient()
+      client.status = vi.fn().mockResolvedValue({ ...UNSEALED_STATUS, state })
+      inventory.mockResolvedValue({ entries: [] })
+
+      const { container } = await mount(client)
+
+      await vi.waitFor(() => {
+        expect(container.textContent?.trim(), `state ${state} rendered nothing`).not.toBe('')
+      })
+    }
+  })
 })
