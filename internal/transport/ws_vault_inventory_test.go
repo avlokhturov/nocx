@@ -23,6 +23,7 @@ type inventoryHarness struct {
 	t    *testing.T
 	v    *vault.Vault
 	ps   *profile.JSONStore
+	ws   *WSServer
 	conn *websocket.Conn
 }
 
@@ -43,6 +44,7 @@ func newInventoryHarness(t *testing.T) *inventoryHarness {
 	t.Cleanup(v.Close)
 
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
+
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
 		WithProfileRepository(ps), WithGroupRepository(ps),
 		WithCredentialMetadataRepository(ps), WithCredentialStore(v),
@@ -55,7 +57,7 @@ func newInventoryHarness(t *testing.T) *inventoryHarness {
 	conn := connectWS(t, ws)
 	t.Cleanup(func() { _ = conn.Close() })
 
-	return &inventoryHarness{t: t, v: v, ps: ps, conn: conn}
+	return &inventoryHarness{t: t, v: v, ps: ps, ws: ws, conn: conn}
 }
 
 func (h *inventoryHarness) setupAndUnseal() {

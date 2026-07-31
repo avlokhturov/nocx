@@ -18,6 +18,7 @@ import { createStore } from 'solid-js/store'
 import { ConnectionsView } from './connections'
 import { SecretsSection } from './secrets'
 import type { ProfileClient, SSHProfile } from './profiles'
+import type { DialogClient } from './dialog-client'
 import { SettingsObserver } from './settings-observer'
 import {
   AcceptedSnapshot,
@@ -110,6 +111,7 @@ export interface SettingsComponentProps {
   onConnect?: (profile: SSHProfile) => void
   vaultController?: import('./vault').VaultController
   vaultClient?: import('./vault-client').VaultClient
+  dialogClient?: DialogClient
   ref?: { current: SettingsComponentHandle | null }
 }
 
@@ -320,12 +322,13 @@ export function SettingsComponent(props: SettingsComponentProps) {
     const connectionPage: SettingsPage = {
       kind: 'component',
       id: 'connections',
-      title: 'Connections',
       scrollMode: 'contained',
+      title: 'Connections',
       renderContent: () => (
         <ConnectionsView
           client={props.profileClient}
           vaultController={props.vaultController}
+          dialogClient={props.dialogClient}
           onConnect={props.onConnect}
           newProfileRequest={newConnectionRequest()}
           onNavigateToCredentials={() => setActiveComponentPage('secrets')}
@@ -349,6 +352,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
           <SecretsSection
             vaultClient={props.vaultClient!}
             vaultController={props.vaultController!}
+            dialogClient={props.dialogClient}
           />
         </Show>
       ),

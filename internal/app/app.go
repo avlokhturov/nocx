@@ -42,6 +42,14 @@ type App struct {
 	vaultCloser interface{ Close() }
 }
 
+// SetDialogService attaches the native dialog capability (dialog.* RPCs). It
+// is wired from main.go's WailsApp.startup — the Wails context it needs only
+// exists there, after the transport was built — and must be called before
+// Start, so no renderer request can observe the unset state.
+func (a *App) SetDialogService(ds transport.DialogService) {
+	a.Transport.SetDialogService(ds)
+}
+
 // Log logs a message from the frontend.
 func (a *App) Log(message string) {
 	a.Logger.Info("frontend: " + message)

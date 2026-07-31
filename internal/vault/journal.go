@@ -85,7 +85,7 @@ func Reconcile(ctx context.Context, doc *Document, reg *Registry) []JournalEntry
 		}
 		// Validate Op is a known operation (defect 10).
 		switch entry.Op {
-		case "create", "delete", "rotate":
+		case "create", "delete", "rotate", "replace":
 		default:
 			blocked = append(blocked, *entry)
 			continue
@@ -104,9 +104,18 @@ func Reconcile(ctx context.Context, doc *Document, reg *Registry) []JournalEntry
 			blocked = append(blocked, *entry)
 			continue
 		}
-
 		switch entry.Phase {
 		case PhasePrepared, PhaseSecretWritten:
+			if entry.Op == "replace" {
+				// A replace writes a new value under an EXISTING id: whichever
+				// half of the write landed (the put, the clear, or neither),
+				// the id still names a valid secret — there is no orphan to
+				// delete and no dangling reference to repair. The record's
+				// presence is irrelevant (an unrecorded legacy reference is
+				// just as live as a recorded one), so the entry is cleared.
+				*entry = JournalEntry{}
+				continue
+			}
 			if entry.Target == "" {
 				if hasRecord(doc, entry.NewID) {
 					// The create's durable half landed: value and record were

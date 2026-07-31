@@ -45,6 +45,7 @@ function mockClient() {
   const inventory = vi.fn<() => Promise<VaultInventory>>()
   const createSecret = vi.fn()
   const renameSecret = vi.fn()
+  const replaceSecret = vi.fn()
   const client = {
     status,
     setup,
@@ -58,8 +59,9 @@ function mockClient() {
     inventory,
     createSecret,
     renameSecret,
+    replaceSecret,
   } as unknown as VaultClient
-  return { client, inventory, createSecret, renameSecret, status }
+  return { client, inventory, createSecret, renameSecret, replaceSecret, status }
 }
 
 const UNSEALED_STATUS = {
@@ -506,5 +508,231 @@ describe('SecretsSection', () => {
     })
     const usage = container.querySelector('.sr-row-usage')
     expect(usage?.textContent).toBe('0 connections')
+  })
+})
+
+// A private key on the Secrets page is supplied the same three ways the
+// connection editor offers — path, file, paste. Pasting is material: the
+// stored value IS the key.
+it('adds a private key from pasted material', async () => {
+  const { client, inventory, createSecret } = mockClient()
+  client.status = vi.fn().mockResolvedValue(UNSEALED_STATUS)
+  inventory.mockResolvedValue({ entries: [MOCK_ENTRY_1] })
+  createSecret.mockResolvedValue({})
+
+  const { container } = await mount(client)
+  await vi.waitFor(() => {
+    expect(container.querySelector('.sr-row-label')).toBeTruthy()
+  })
+
+  const addButton = Array.from(container.querySelectorAll('button')).find((b) =>
+    b.textContent?.includes('Add a secret'),
+  )
+  addButton!.click()
+  await vi.waitFor(() => {
+    expect(container.querySelector('.nocx-dialog__title')?.textContent).toContain('Add secret')
+  })
+
+  const nameInput = container.querySelector('#sr-add-name') as HTMLInputElement
+  nameInput.value = 'deploy key'
+  nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+
+  // Switch the kind to Private key — the dialog then offers the three-way
+  // input instead of the single value field.
+  const kindOptions = Array.from(container.querySelectorAll('[role="radio"]'))
+  const privateKeyKind = kindOptions.find(
+    (o) => o.textContent?.trim() === 'Private key',
+  ) as HTMLElement
+  expect(privateKeyKind).toBeTruthy()
+  privateKeyKind.click()
+  await vi.waitFor(() => {
+    // The three-way input replaced the single value field.
+    expect(container.querySelector('#sr-add-key-path')).toBeTruthy()
+  })
+  expect(container.querySelector('#sr-add-value')).toBeNull()
+
+  const modeOptions = Array.from(container.querySelectorAll('[role="radio"]'))
+  const paste = modeOptions.find((o) => o.textContent?.trim() === 'Paste key') as HTMLElement
+  paste.click()
+
+  await vi.waitFor(() => {
+    expect(container.querySelector('#sr-add-key-text')).toBeTruthy()
+  })
+  const keyInput = container.querySelector('#sr-add-key-text') as HTMLTextAreaElement
+  keyInput.value = '-----BEGIN PRIVATE KEY-----\nMIIE\n-----END PRIVATE KEY-----'
+  keyInput.dispatchEvent(new Event('input', { bubbles: true }))
+
+  const submit = Array.from(container.querySelectorAll('.nocx-dialog button')).find(
+    (b) => b.textContent === 'Add secret',
+  ) as HTMLButtonElement | undefined
+  submit!.click()
+
+  await vi.waitFor(() => {
+    expect(createSecret).toHaveBeenCalledWith({
+      name: 'deploy key',
+      kind: 'private-key',
+      value: '-----BEGIN PRIVATE KEY-----\nMIIE\n-----END PRIVATE KEY-----',
+    })
+  })
+})
+
+// Path mode sends the path for the BACKEND to dereference — the renderer
+// cannot read arbitrary paths, and the stored material is the key, never a
+// filename (dcf566b).
+it('adds a private key from a path the backend dereferences', async () => {
+  const { client, inventory, createSecret } = mockClient()
+  client.status = vi.fn().mockResolvedValue(UNSEALED_STATUS)
+  inventory.mockResolvedValue({ entries: [MOCK_ENTRY_1] })
+  createSecret.mockResolvedValue({})
+
+  const { container } = await mount(client)
+  await vi.waitFor(() => {
+    expect(container.querySelector('.sr-row-label')).toBeTruthy()
+  })
+
+  const addButton = Array.from(container.querySelectorAll('button')).find((b) =>
+    b.textContent?.includes('Add a secret'),
+  )
+  addButton!.click()
+  await vi.waitFor(() => {
+    expect(container.querySelector('.nocx-dialog__title')?.textContent).toContain('Add secret')
+  })
+
+  const nameInput = container.querySelector('#sr-add-name') as HTMLInputElement
+  nameInput.value = 'deploy key'
+  nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+
+  const kindOptions = Array.from(container.querySelectorAll('[role="radio"]'))
+  const privateKeyKind = kindOptions.find(
+    (o) => o.textContent?.trim() === 'Private key',
+  ) as HTMLElement
+  privateKeyKind.click()
+
+  await vi.waitFor(() => {
+    expect(container.querySelector('#sr-add-key-path')).toBeTruthy()
+  })
+
+  const pathInput = container.querySelector('#sr-add-key-path') as HTMLInputElement
+  pathInput.value = '/home/dev/.ssh/id_ed25519'
+  pathInput.dispatchEvent(new Event('input', { bubbles: true }))
+
+  const submit = Array.from(container.querySelectorAll('.nocx-dialog button')).find(
+    (b) => b.textContent === 'Add secret',
+  ) as HTMLButtonElement | undefined
+  submit!.click()
+
+  await vi.waitFor(() => {
+    expect(createSecret).toHaveBeenCalledWith({
+      name: 'deploy key',
+      kind: 'private-key',
+      path: '/home/dev/.ssh/id_ed25519',
+    })
+  })
+})
+
+// Replacing the value: the field is EMPTY, never prefilled, and labelled as
+// a replacement — the vault never hands the old value back (ADR-0011 §2).
+it('replaces a secret value by its row handle, never showing the old value', async () => {
+  const { client, inventory, replaceSecret } = mockClient()
+  client.status = vi.fn().mockResolvedValue(UNSEALED_STATUS)
+  inventory.mockResolvedValue({ entries: [MOCK_ENTRY_1] })
+  replaceSecret.mockResolvedValue({})
+
+  const { container } = await mount(client)
+  await vi.waitFor(() => {
+    expect(container.querySelector('.sr-row-label')).toBeTruthy()
+  })
+
+  const replaceButton = container.querySelector(
+    '[aria-label^="Replace value of"]',
+  ) as HTMLButtonElement
+  expect(replaceButton).toBeTruthy()
+  replaceButton.click()
+
+  await vi.waitFor(() => {
+    expect(container.querySelector('.nocx-dialog__title')?.textContent).toContain(
+      'Replace value of',
+    )
+  })
+
+  // The field is labelled a replacement and is EMPTY — the old value is
+  // never shown back, so it cannot be prefilled.
+  const valueInput = container.querySelector('#sr-replace-value') as HTMLInputElement
+  expect(valueInput).toBeTruthy()
+  expect(valueInput.value).toBe('')
+  const fieldLabel = container.querySelector('label[for="sr-replace-value"]')
+  expect(fieldLabel?.textContent).toContain('New value')
+  expect(container.textContent).not.toContain('hunter2')
+
+  valueInput.value = 'new secret value'
+  valueInput.dispatchEvent(new Event('input', { bubbles: true }))
+
+  const submit = Array.from(container.querySelectorAll('.nocx-dialog button')).find(
+    (b) => b.textContent === 'Replace value',
+  ) as HTMLButtonElement | undefined
+  submit!.click()
+
+  await vi.waitFor(() => {
+    expect(replaceSecret).toHaveBeenCalledWith({
+      id: MOCK_ENTRY_1.id,
+      value: 'new secret value',
+    })
+  })
+})
+
+// Renaming and replacing are independent: both controls exist on a row and
+// one never requires the other.
+it('offers rename and replace independently on every row', async () => {
+  const { client, inventory } = mockClient()
+  client.status = vi.fn().mockResolvedValue(UNSEALED_STATUS)
+  inventory.mockResolvedValue({ entries: [MOCK_ENTRY_1] })
+
+  const { container } = await mount(client)
+  await vi.waitFor(() => {
+    expect(container.querySelector('.sr-row-label')).toBeTruthy()
+  })
+
+  expect(container.querySelector('[aria-label^="Rename"]')).toBeTruthy()
+  expect(container.querySelector('[aria-label^="Replace value of"]')).toBeTruthy()
+})
+
+// Replacing a private-key secret uses the same three-way input the add
+// dialog does, including the backend-dereferenced path.
+it('replaces a private key secret via the three-way input', async () => {
+  const { client, inventory, replaceSecret } = mockClient()
+  client.status = vi.fn().mockResolvedValue(UNSEALED_STATUS)
+  inventory.mockResolvedValue({
+    entries: [{ ...MOCK_ENTRY_1, kind: 'private-key', name: 'deploy key' }],
+  })
+  replaceSecret.mockResolvedValue({})
+
+  const { container } = await mount(client)
+  await vi.waitFor(() => {
+    expect(container.querySelector('.sr-row-label')).toBeTruthy()
+  })
+
+  const replaceButton = container.querySelector(
+    '[aria-label^="Replace value of"]',
+  ) as HTMLButtonElement
+  replaceButton.click()
+
+  await vi.waitFor(() => {
+    expect(container.querySelector('#sr-replace-key-path')).toBeTruthy()
+  })
+
+  const pathInput = container.querySelector('#sr-replace-key-path') as HTMLInputElement
+  pathInput.value = '/home/dev/.ssh/id_ed25519'
+  pathInput.dispatchEvent(new Event('input', { bubbles: true }))
+
+  const submit = Array.from(container.querySelectorAll('.nocx-dialog button')).find(
+    (b) => b.textContent === 'Replace value',
+  ) as HTMLButtonElement | undefined
+  submit!.click()
+
+  await vi.waitFor(() => {
+    expect(replaceSecret).toHaveBeenCalledWith({
+      id: MOCK_ENTRY_1.id,
+      path: '/home/dev/.ssh/id_ed25519',
+    })
   })
 })

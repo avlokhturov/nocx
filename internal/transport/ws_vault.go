@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/shady2k/nocx/internal/credential"
@@ -32,6 +34,12 @@ type VaultLifecycle interface {
 	// RenameSecret sets a secret's display name, addressed by its
 	// renderer-addressable row handle — never by a SecretID (nocx-jb20.1).
 	RenameSecret(ctx context.Context, row string, name string, inputs []vault.CredentialInventory) error
+	// ReplaceSecret overwrites the material behind an existing secret,
+	// addressed by its renderer-addressable row handle — never by a SecretID
+	// (nocx-jb20.1). The reference does not change: the new value lands under
+	// the SAME SecretID, so every connection referencing the secret keeps
+	// working.
+	ReplaceSecret(ctx context.Context, row string, value credential.Secret, inputs []vault.CredentialInventory) error
 	SetDefaultProvider(ctx context.Context, p vault.ProviderID) error
 	SetAutoSeal(ctx context.Context, minutes int) error
 	Activity()
@@ -147,6 +155,8 @@ func (s *WSServer) handleVaultMethod(wconn *wsConn, req jsonrpcRequest) {
 		s.handleVaultCreateSecret(wconn, req)
 	case "vault.renameSecret":
 		s.handleVaultRenameSecret(wconn, req)
+	case "vault.replaceSecret":
+		s.handleVaultReplaceSecret(wconn, req)
 	}
 }
 
@@ -510,7 +520,8 @@ func (s *WSServer) vaultInventoryInputs(creds []profile.Credential, profiles []p
 type vaultCreateSecretParams struct {
 	Name  string `json:"name"`
 	Kind  string `json:"kind"`
-	Value string `json:"value"`
+	Value string `json:"value,omitempty"`
+	Path  string `json:"path,omitempty"`
 }
 
 // handleVaultCreateSecret stores a secret the user created on the Secrets
@@ -518,6 +529,12 @@ type vaultCreateSecretParams struct {
 // value goes to the default provider; the name and kind go into the vault's
 // catalogue record — in the same create sequence, never a second path
 // (ADR-0016).
+//
+// A private key may be supplied by PATH instead of by value: the renderer
+// cannot read arbitrary paths, so the backend dereferences the path at save
+// time and stores the file's CONTENTS — never the path string, which is the
+// defect dcf566b fixed on the connection editor and must not be
+// reintroduced here.
 func (s *WSServer) handleVaultCreateSecret(wconn *wsConn, req jsonrpcRequest) {
 	var params vaultCreateSecretParams
 	if !isJSONObject(req.Params) {
@@ -533,7 +550,17 @@ func (s *WSServer) handleVaultCreateSecret(wconn *wsConn, req jsonrpcRequest) {
 		return
 	}
 
-	_, err := s.vaultLifecycle.CreateNamed(context.Background(), credential.NewSecret(params.Value),
+	value := params.Value
+	if params.Path != "" {
+		contents, err := readKeyFile(params.Path)
+		if err != nil {
+			_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "vault.createSecret: read key file: ", err))
+			return
+		}
+		value = contents
+	}
+
+	_, err := s.vaultLifecycle.CreateNamed(context.Background(), credential.NewSecret(value),
 		vault.SecretMeta{Name: params.Name, Kind: params.Kind})
 	if err != nil {
 		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "vault.createSecret: ", err))
@@ -542,6 +569,45 @@ func (s *WSServer) handleVaultCreateSecret(wconn *wsConn, req jsonrpcRequest) {
 
 	s.broadcastVaultChanged()
 	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(struct{}{})))
+}
+
+// readKeyFile reads the file the user chose in Path mode. A leading ~ is
+// expanded to the home directory: the native dialog yields absolute paths,
+// but the hand-typed fallback (dev-web, where no dialog exists) commonly
+// starts with ~, and the backend is the only side that can resolve it.
+func readKeyFile(path string) (string, error) {
+	expanded := path
+	if path == "~" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		expanded = home
+	} else if strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		expanded = filepath.Join(home, path[2:])
+	}
+	// gosec flags the variable path, and the flag is worth answering rather
+	// than silencing. The path comes from the renderer, so this is an
+	// arbitrary-read primitive on the control plane — but the caller and the
+	// file's owner are the same person: nocx runs as the user, reading a key
+	// they named, on a machine they own. A hostile owner of the machine is
+	// explicitly out of the threat model (T6), and a process that could forge
+	// this call already runs as them and can read the file directly (T4).
+	//
+	// What must NOT be allowed is a path arriving from anywhere but the user's
+	// own typing or the native dialog. That is the boundary to keep, and it is
+	// why the contents go straight into the vault and are never echoed back:
+	// an attacker who could steer this call must not also be able to read what
+	// it found.
+	data, err := os.ReadFile(expanded) //nolint:gosec // see above: user-named path, user-owned file, contents never returned
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
 }
 
 type vaultRenameSecretParams struct {
@@ -596,6 +662,77 @@ func (s *WSServer) handleVaultRenameSecret(wconn *wsConn, req jsonrpcRequest) {
 
 	if err := s.vaultLifecycle.RenameSecret(context.Background(), params.ID, params.Name, inputs); err != nil {
 		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "vault.renameSecret: ", err))
+		return
+	}
+
+	s.broadcastVaultChanged()
+	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(struct{}{})))
+}
+
+type vaultReplaceSecretParams struct {
+	ID    string `json:"id"`
+	Value string `json:"value,omitempty"`
+	Path  string `json:"path,omitempty"`
+}
+
+// handleVaultReplaceSecret overwrites a secret's material. The row is
+// addressed by its renderer-addressable handle, which the backend resolves —
+// a SecretID is never accepted from the renderer as an identifier
+// (nocx-jb20.1). The reference does NOT change: the new value lands under
+// the same SecretID, so every connection using the secret keeps working and
+// the name and kind are untouched (renaming and replacing are independent
+// operations). The old value is never shown back — the vault does not hand
+// it out (ADR-0011 §2) — so the renderer only ever supplies the replacement.
+// Like create, a private key may be supplied by PATH, which the backend
+// dereferences to the file's contents.
+func (s *WSServer) handleVaultReplaceSecret(wconn *wsConn, req jsonrpcRequest) {
+	if s.credMeta == nil || s.profiles == nil || s.groups == nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "vault.replaceSecret not available"))
+		return
+	}
+	var params vaultReplaceSecretParams
+	if !isJSONObject(req.Params) {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		return
+	}
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		return
+	}
+	if strings.TrimSpace(params.ID) == "" {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: id is required"))
+		return
+	}
+
+	value := params.Value
+	if params.Path != "" {
+		contents, err := readKeyFile(params.Path)
+		if err != nil {
+			_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "vault.replaceSecret: read key file: ", err))
+			return
+		}
+		value = contents
+	}
+
+	creds, err := s.credMeta.LoadCredentials()
+	if err != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		return
+	}
+	profiles, err := s.profiles.LoadProfiles()
+	if err != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		return
+	}
+	groups, err := s.groups.LoadGroups()
+	if err != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		return
+	}
+	inputs := s.vaultInventoryInputs(creds, profiles, groups)
+
+	if err := s.vaultLifecycle.ReplaceSecret(context.Background(), params.ID, credential.NewSecret(value), inputs); err != nil {
+		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "vault.replaceSecret: ", err))
 		return
 	}
 

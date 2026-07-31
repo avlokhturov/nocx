@@ -445,3 +445,96 @@ func TestVaultRenameSecret_RejectsSecretID(t *testing.T) {
 		t.Fatal("expected an error for a SecretID addressed rename")
 	}
 }
+
+// ── vault.replaceSecret ────────────────────────────────────────────────
+
+// The DTO's own conformance: the replace result is an empty object, and the
+// schema pins that shape.
+func TestVaultReplaceSecret_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "vault.replaceSecret.schema.json")
+	raw, err := json.Marshal(struct{}{})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "vault.replaceSecret DTO")
+}
+
+// The real method through the real socket, with the fields the renderer sends
+// (the row handle the inventory carried). Nothing here names a field, so
+// nothing here can omit one.
+func TestVaultReplaceSecret_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "vault.replaceSecret.schema.json")
+	h := newInventoryHarness(t)
+	h.setupAndUnseal()
+
+	jsonrpcCall(t, h.conn, "vault.createSecret", map[string]any{
+		"name": "prod password", "kind": "password", "value": "hunter2",
+	})
+	inv := h.callInventory()
+	if len(inv.Entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(inv.Entries))
+	}
+
+	replaceResp := jsonrpcCall(t, h.conn, "vault.replaceSecret", map[string]any{
+		"id": inv.Entries[0].ID, "value": "hunter3",
+	})
+	var replaceEnvelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(replaceResp, &replaceEnvelope); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, string(replaceResp))
+	}
+	if replaceEnvelope.Error != nil {
+		t.Fatalf("vault.replaceSecret: %+v", replaceEnvelope.Error)
+	}
+	validateJSON(t, schema, replaceEnvelope.Result, "vault.replaceSecret result")
+}
+
+// ── dialog.openFile ────────────────────────────────────────────────────
+
+// The DTO's own conformance: an absolute path, or an empty string for a
+// cancelled picker. The `path` field is required and the key set is exact.
+func TestDialogOpenFile_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "dialog.openFile.schema.json")
+	dto := struct {
+		Path string `json:"path"`
+	}{Path: "/home/dev/.ssh/id_ed25519"}
+	raw, err := json.Marshal(dto)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "dialog.openFile DTO")
+
+	// The cancelled case: an empty path is still a valid result.
+	rawCancel, err := json.Marshal(struct {
+		Path string `json:"path"`
+	}{})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, rawCancel, "dialog.openFile cancelled DTO")
+}
+
+// The real method through the real socket, with the fake service standing in
+// for the Wails runtime. The dev-web harness has no Wails at all, so the
+// absent-service error path is the state this is actually tested in — the
+// surface must degrade, not fail.
+func TestDialogOpenFile_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "dialog.openFile.schema.json")
+	h := newInventoryHarness(t)
+	h.ws.SetDialogService(&fakeDialogService{path: "/home/dev/.ssh/id_ed25519"})
+
+	resp := jsonrpcCall(t, h.conn, "dialog.openFile", map[string]any{})
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, string(resp))
+	}
+	if envelope.Error != nil {
+		t.Fatalf("dialog.openFile: %+v", envelope.Error)
+	}
+	validateJSON(t, schema, envelope.Result, "dialog.openFile result")
+}

@@ -11,6 +11,7 @@ import { createClipboardAccess, ClipboardGate } from './clipboard'
 import { ClipboardBannerImpl } from './banner'
 import { ProfileClient } from './profiles'
 import { VaultClient } from './vault-client'
+import { DialogClient } from './dialog-client'
 import { createVaultState, SetupDialog, UnlockDialog } from './vault'
 import { VaultObserver } from './vault-observer'
 import { Dispatcher } from './dispatcher'
@@ -80,6 +81,7 @@ async function main() {
   await client.connect(port, host, token)
   const profileClient = new ProfileClient(dispatcher)
   const vaultClient = new VaultClient(dispatcher)
+  const dialogClient = new DialogClient(dispatcher)
   const vaultObserver = new VaultObserver(dispatcher)
   const vaultController = createVaultState(vaultClient)
   vaultObserver.start(() => {
@@ -156,7 +158,13 @@ async function main() {
     surfaceType: SURFACE_SETTINGS,
     singletonKey: SINGLETON_SETTINGS,
     factory: () => {
-      const content = new SettingsContent(profileClient, undefined, vaultController, vaultClient)
+      const content = new SettingsContent(
+        profileClient,
+        undefined,
+        vaultController,
+        vaultClient,
+        dialogClient,
+      )
       content.onConnect = (profile) => {
         log.info('nocx: connect from Settings', { profileId: profile.id })
         // Vault preflight: if sealed, ensureBeforeSave shows UnlockDialog

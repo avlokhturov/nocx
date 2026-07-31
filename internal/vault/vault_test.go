@@ -2487,3 +2487,219 @@ func TestRenameSecret_RejectsSecretID(t *testing.T) {
 		t.Errorf("name changed to %q despite refusal", rec.Name)
 	}
 }
+
+// ── ReplaceSecret ──────────────────────────────────────────────────────
+
+// ReplaceSecret overwrites the material behind an existing secret, addressed
+// by the renderer-addressable row handle. The reference must NOT change: the
+// new value lands under the SAME SecretID, so every connection referencing
+// the secret keeps working, and the catalogue record (name, kind) is
+// untouched.
+func TestReplaceSecret_OverwritesValueKeepsReference(t *testing.T) {
+	loweredCost(t)
+	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
+	mustSetup(t, v, "")
+	defer v.Close()
+
+	id, err := v.CreateNamed(context.Background(), credential.NewSecret("old value"),
+		SecretMeta{Name: "prod password", Kind: "password"})
+	if err != nil {
+		t.Fatalf("CreateNamed: %v", err)
+	}
+
+	if repErr := v.ReplaceSecret(context.Background(), rowID(id), credential.NewSecret("new value"), nil); repErr != nil {
+		t.Fatalf("ReplaceSecret: %v", repErr)
+	}
+
+	// The reference is the same id — nothing was repointed.
+	got, err := v.Get(context.Background(), id)
+	if err != nil {
+		t.Fatalf("Get after replace: %v", err)
+	}
+	var val string
+	if err := got.Use(func(b []byte) error { val = string(b); return nil }); err != nil {
+		t.Fatalf("Use: %v", err)
+	}
+	if val != "new value" {
+		t.Errorf("value = %q, want %q", val, "new value")
+	}
+
+	// The record survived untouched: same name, same kind.
+	rec, ok := recordFor(v.doc.Secrets, id)
+	if !ok {
+		t.Fatal("record missing after replace")
+	}
+	if rec.Name != "prod password" {
+		t.Errorf("record name = %q, want %q", rec.Name, "prod password")
+	}
+	if rec.Kind != "password" {
+		t.Errorf("record kind = %q, want %q", rec.Kind, "password")
+	}
+	// No orphan: the id still names exactly one value.
+	if len(v.doc.Secrets) != 1 {
+		t.Errorf("catalogue has %d records, want 1", len(v.doc.Secrets))
+	}
+}
+
+// ReplaceSecret resolves rows that were never recorded — pre-ADR-0016
+// references — through the credential metadata, exactly as RenameSecret does.
+// It overwrites the value; it does not mint a record (nothing about the
+// metadata changed).
+func TestReplaceSecret_UnrecordedRefRow(t *testing.T) {
+	loweredCost(t)
+	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
+	mustSetup(t, v, "")
+	defer v.Close()
+
+	ref := credential.SecretID(refSys)
+	if err := v.ReplaceSecret(context.Background(), "sec:not-a-row", credential.NewSecret("x"), nil); err == nil {
+		t.Fatal("unknown row should fail")
+	}
+
+	// Put a real value under the legacy reference so Get has something to see.
+	prov, _ := v.reg.Writable(ProviderSystem)
+	if err := prov.Put(context.Background(), ref, credential.NewSecret("legacy key")); err != nil {
+		t.Fatalf("seed Put: %v", err)
+	}
+	inputs := []CredentialInventory{
+		{ID: "cred:legacy:1", Username: "deploy", AuthMode: "publicKey", SecretID: refSys},
+	}
+
+	if err := v.ReplaceSecret(context.Background(), rowID(ref), credential.NewSecret("replaced key"), inputs); err != nil {
+		t.Fatalf("ReplaceSecret on unrecorded row: %v", err)
+	}
+
+	got, err := v.Get(context.Background(), ref)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	var val string
+	_ = got.Use(func(b []byte) error { val = string(b); return nil })
+	if val != "replaced key" {
+		t.Errorf("value = %q, want %q", val, "replaced key")
+	}
+	if _, ok := recordFor(v.doc.Secrets, ref); ok {
+		t.Error("replace must not mint a record for an unrecorded row")
+	}
+}
+
+// The renderer may not name a secret (nocx-jb20.1): replace addresses rows by
+// the row handle, and a SecretID sent in its place must be refused.
+func TestReplaceSecret_RejectsSecretID(t *testing.T) {
+	loweredCost(t)
+	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
+	mustSetup(t, v, "")
+	defer v.Close()
+
+	id, err := v.CreateNamed(context.Background(), credential.NewSecret("pw"),
+		SecretMeta{Name: "named", Kind: "password"})
+	if err != nil {
+		t.Fatalf("CreateNamed: %v", err)
+	}
+	if err := v.ReplaceSecret(context.Background(), string(id), credential.NewSecret("x"), nil); err == nil {
+		t.Error("replace addressed by a SecretID should be refused")
+	}
+}
+
+func TestReplaceSecret_UnknownRow(t *testing.T) {
+	loweredCost(t)
+	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
+	mustSetup(t, v, "")
+	defer v.Close()
+
+	if err := v.ReplaceSecret(context.Background(), "secrow:00000000000000000000000000000000", credential.NewSecret("x"), nil); err == nil {
+		t.Error("replace of an unknown row should fail")
+	}
+}
+
+func TestReplaceSecret_RejectsSealedVault(t *testing.T) {
+	loweredCost(t)
+	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
+	mustSetup(t, v, "")
+
+	id, err := v.CreateNamed(context.Background(), credential.NewSecret("pw"),
+		SecretMeta{Name: "named", Kind: "password"})
+	if err != nil {
+		t.Fatalf("CreateNamed: %v", err)
+	}
+	v.Seal()
+
+	if err := v.ReplaceSecret(context.Background(), rowID(id), credential.NewSecret("x"), nil); !errors.Is(err, ErrVaultSealed) {
+		t.Errorf("sealed vault: err = %v, want ErrVaultSealed", err)
+	}
+}
+
+// The journal precedes the provider write, exactly as it does for Create
+// (spec §4.2): a replace that times out may still land, and the entry is what
+// makes the outcome reconcilable.
+func TestReplaceSecret_JournalBeforePut(t *testing.T) {
+	loweredCost(t)
+	sys := newTestProvider(ProviderSystem)
+	v, _, _ := testVault(t, sys)
+	mustSetup(t, v, "")
+
+	id, err := v.CreateNamed(context.Background(), credential.NewSecret("old"),
+		SecretMeta{Name: "named", Kind: "password"})
+	if err != nil {
+		t.Fatalf("CreateNamed: %v", err)
+	}
+
+	var journaled atomic.Bool
+	sys.putHook = func() {
+		v.mu.Lock()
+		defer v.mu.Unlock()
+		for _, e := range v.doc.Journal {
+			if e.Op == "replace" && e.NewID == id && e.Phase == PhasePrepared {
+				journaled.Store(true)
+			}
+		}
+	}
+	if err := v.ReplaceSecret(context.Background(), rowID(id), credential.NewSecret("new"), nil); err != nil {
+		t.Fatalf("ReplaceSecret: %v", err)
+	}
+	if !journaled.Load() {
+		t.Fatal("journal entry (replace, PhasePrepared) must exist when the provider is called")
+	}
+	// The entry is cleared once the write completed: nothing to reconcile.
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	for _, e := range v.doc.Journal {
+		if e.Op == "replace" {
+			t.Errorf("journal entry survived a successful replace: %+v", e)
+		}
+	}
+}
+
+// A failed provider write leaves the entry in the journal rather than
+// pretending nothing happened: the write may have landed despite the error
+// (a keyring timeout), and the entry is what reconciliation acts on.
+func TestReplaceSecret_ProviderFailureLeavesJournalEntry(t *testing.T) {
+	loweredCost(t)
+	sys := newTestProvider(ProviderSystem)
+	v, _, _ := testVault(t, sys)
+	mustSetup(t, v, "")
+
+	id, err := v.CreateNamed(context.Background(), credential.NewSecret("old"),
+		SecretMeta{Name: "named", Kind: "password"})
+	if err != nil {
+		t.Fatalf("CreateNamed: %v", err)
+	}
+
+	sys.fail = errors.New("keyring is having a bad day")
+	if err := v.ReplaceSecret(context.Background(), rowID(id), credential.NewSecret("new"), nil); err == nil {
+		t.Fatal("replace should fail when the provider fails")
+	}
+	sys.fail = nil
+
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	found := false
+	for _, e := range v.doc.Journal {
+		if e.Op == "replace" && e.NewID == id {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("journal entry should survive a failed provider write")
+	}
+}

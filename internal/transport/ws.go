@@ -80,6 +80,13 @@ type WSServer struct {
 	// JSON-RPC error.
 	vaultLifecycle VaultLifecycle
 	vaultReset     VaultResetService
+	// Native dialog capability (dialog.* RPCs). When nil, those methods
+	// return -32601: the dev-web harness has no Wails runtime to open a
+	// dialog with. Set post-construction from main.go's WailsApp.startup,
+	// which is the only place the Wails context exists; guarded because the
+	// handler may read it while startup assigns it.
+	dialogMu      sync.RWMutex
+	dialogService DialogService
 
 	// Profile resolver maps profile IDs to SSH connect configs.
 	resolver ProfileResolver
@@ -782,12 +789,13 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.handleSSHConfigAliases(wconn, req)
 	case "sshConfig.path":
 		s.handleSSHConfigPath(wconn, req)
-
 	case "vault.status", "vault.setup", "vault.unseal", "vault.seal",
 		"vault.changePassphrase", "vault.regenerateRecovery", "vault.setDefaultProvider",
 		"vault.setAutoSeal", "vault.activity", "vault.inventory",
-		"vault.createSecret", "vault.renameSecret":
+		"vault.createSecret", "vault.renameSecret", "vault.replaceSecret":
 		s.handleVaultMethod(wconn, req)
+	case "dialog.openFile":
+		s.handleDialogOpenFile(wconn, req)
 	// Not routed through handleVaultMethod: that gate refuses when the vault
 	// lifecycle is absent, and a reset must work on a vault that is broken or
 	// half-built — which is the only state it is ever wanted in.

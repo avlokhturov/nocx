@@ -20,10 +20,12 @@ import { Tabs } from './ui/tabs'
 import { EmptyState } from './ui/empty-state'
 import { Field } from './ui/field'
 import { FileInput } from './ui/file-input'
-import { SegmentedControl } from './ui/segmented-control'
 import { Badge } from './ui/badge'
 import { IconButton } from './ui/icon-button'
 import { CollectionRow, CollectionView } from './ui/collection-view'
+import { KeyMaterialInput, suppliesMaterial } from './key-material-input'
+import type { KeyInputMode } from './key-material-input'
+import type { DialogClient } from './dialog-client'
 import { CheckCircleIcon, PencilIcon, PlugIcon, TrashIcon } from './ui/icons'
 import {
   createFormValidation,
@@ -170,6 +172,12 @@ export interface ConnectionsViewProps {
    * it asks its parent to show it, and the parent decides how.
    */
   onNavigateToCredentials?: () => void
+  /**
+   * Native dialog capability (dialog.*). Absent in the dev-web harness and
+   * in tests; the key input's Path mode then degrades to typing the path by
+   * hand.
+   */
+  dialogClient?: DialogClient
 }
 
 // ── Component ────────────────────────────────────────────────────────────────
@@ -240,26 +248,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   const [dangerConfirmed, setDangerConfirmed] = createSignal(false)
   const [groupSection, setGroupSection] = createSignal('general')
   const [profileSection, setProfileSection] = createSignal('general')
-
   // ── Three-way key input state (publicKey auth) ───────────────────────
-  type KeyInputMode = 'path' | 'file' | 'material'
-
-  /**
-   * Two of the three modes supply key MATERIAL; only 'path' supplies a path.
-   *
-   * 'file' used to be treated as a path picker, reading `File.path` — an
-   * Electron extension that exists in neither a browser nor a Wails webview,
-   * so the fallback fired every time and a bare filename like `id_ed25519`
-   * was stored as if it were a path. The mode was broken on every target, not
-   * merely in the dev harness.
-   *
-   * Choosing a file now reads its contents, which is what the mode's name says
-   * and the only thing achievable without a native dialog. The difference
-   * between it and 'material' is how the key is supplied, not what is stored —
-   * which is exactly what the design spec means by "path / choose a file /
-   * paste" being three ways to supply one key.
-   */
-  const suppliesMaterial = (m: KeyInputMode) => m === 'material' || m === 'file'
+  // The mode vocabulary and the suppliesMaterial predicate live in
+  // KeyMaterialInput — the same component the Secrets page uses. The state
+  // itself stays here: the save paths and the credential draft own it.
 
   // Profile editor key state
   const [profileKeyMode, setProfileKeyMode] = createSignal<KeyInputMode>('path')
@@ -1017,14 +1009,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             credentialUsage={groupCredDraft() ? credentialUsage()[groupCredDraft()!.id] : undefined}
             publicKeyAction={
               <Field for="group-default-key" label="Private Key">
-                <SegmentedControl
-                  options={[
-                    { value: 'path', label: 'Path' },
-                    { value: 'file', label: 'Choose file' },
-                    { value: 'material', label: 'Paste key' },
-                  ]}
-                  value={groupKeyMode()}
-                  onChange={(value) => {
+                <KeyMaterialInput
+                  id="group-default-key"
+                  mode={groupKeyMode()}
+                  onModeChange={(value) => {
                     const prev = groupKeyMode()
                     if (value === 'material') {
                       handleGroupKeyPathChange(undefined)
@@ -1049,60 +1037,20 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                       setGroupKeyFingerprint(undefined)
                       setGroupKeyTextError(undefined)
                     }
-                    setGroupKeyMode(value as KeyInputMode)
+                    setGroupKeyMode(value)
                   }}
-                  ariaLabel="Key input mode"
+                  pathValue={groupKeyPathValue()}
+                  onPathChange={(v) => handleGroupKeyPathChange(v || undefined)}
+                  pathPlaceholder="— Not set (inherit) —"
+                  materialValue={groupKeyText()}
+                  onMaterialChange={(v) => {
+                    setGroupKeyText(v)
+                    setGroupKeyTextError(undefined)
+                  }}
+                  error={groupKeyTextError()}
+                  fingerprint={groupKeyFingerprint()}
+                  openFileDialog={props.dialogClient?.openFileDialog.bind(props.dialogClient)}
                 />
-                <Show when={groupKeyMode() === 'path'}>
-                  <TextField
-                    id="group-default-key-path"
-                    label="Private Key Path"
-                    value={groupKeyPathValue()}
-                    onInput={(value) => handleGroupKeyPathChange(value || undefined)}
-                    placeholder="— Not set (inherit) —"
-                  />
-                </Show>
-                <Show when={groupKeyMode() === 'file'}>
-                  <FileInput
-                    accept="*"
-                    onChange={(file) => {
-                      if (!file) return
-                      setGroupKeyTextError(undefined)
-                      void file.text().then(
-                        (text) => setGroupKeyText(text),
-                        () =>
-                          setGroupKeyTextError(
-                            'Could not read that file. Choose another, or paste the key.',
-                          ),
-                      )
-                    }}
-                    ariaLabel="Choose private key file"
-                    buttonLabel="Choose file…"
-                  />
-                  {/* The read can fail — an unreadable file, a revoked
-                      permission. Silence there would leave the user
-                      believing a key was loaded. */}
-                  <Show when={groupKeyTextError()}>
-                    <p class="cm-key-file-error">{groupKeyTextError()}</p>
-                  </Show>
-                </Show>
-                <Show when={groupKeyMode() === 'material'}>
-                  <TextField
-                    multiline
-                    id="group-default-key-text"
-                    label="Private Key"
-                    value={groupKeyText()}
-                    onInput={(value) => {
-                      setGroupKeyText(value)
-                      setGroupKeyTextError(undefined)
-                    }}
-                    placeholder="Paste the private key content here"
-                    error={groupKeyTextError()}
-                  />
-                  <Show when={groupKeyFingerprint()}>
-                    <span class="cm-key-fingerprint">Fingerprint: {groupKeyFingerprint()}</span>
-                  </Show>
-                </Show>
               </Field>
             }
           />
@@ -2007,14 +1955,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                     }
                     publicKeyAction={
                       <Field for="profile-key" label="Private Key">
-                        <SegmentedControl
-                          options={[
-                            { value: 'path', label: 'Path' },
-                            { value: 'file', label: 'Choose file' },
-                            { value: 'material', label: 'Paste key' },
-                          ]}
-                          value={profileKeyMode()}
-                          onChange={(value) => {
+                        <KeyMaterialInput
+                          id="profile-key"
+                          mode={profileKeyMode()}
+                          onModeChange={(value) => {
                             const prev = profileKeyMode()
                             if (value === 'material') {
                               handleKeyPathChange(undefined)
@@ -2039,62 +1983,21 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                               setProfileKeyFingerprint(undefined)
                               setProfileKeyTextError(undefined)
                             }
-                            setProfileKeyMode(value as KeyInputMode)
+                            setProfileKeyMode(value)
                           }}
-                          ariaLabel="Key input mode"
+                          pathValue={keyPathValue()}
+                          onPathChange={(v) => handleKeyPathChange(v || undefined)}
+                          materialValue={profileKeyText()}
+                          onMaterialChange={(v) => {
+                            setProfileKeyText(v)
+                            setProfileKeyTextError(undefined)
+                          }}
+                          error={profileKeyTextError()}
+                          fingerprint={profileKeyFingerprint()}
+                          openFileDialog={props.dialogClient?.openFileDialog.bind(
+                            props.dialogClient,
+                          )}
                         />
-                        <Show when={profileKeyMode() === 'path'}>
-                          <TextField
-                            id="profile-key-path"
-                            label="Private Key Path"
-                            value={keyPathValue()}
-                            onInput={(value) => handleKeyPathChange(value || undefined)}
-                            placeholder="~/.ssh/id_ed25519"
-                          />
-                        </Show>
-                        <Show when={profileKeyMode() === 'file'}>
-                          <FileInput
-                            accept="*"
-                            onChange={(file) => {
-                              if (!file) return
-                              setProfileKeyTextError(undefined)
-                              void file.text().then(
-                                (text) => setProfileKeyText(text),
-                                () =>
-                                  setProfileKeyTextError(
-                                    'Could not read that file. Choose another, or paste the key.',
-                                  ),
-                              )
-                            }}
-                            ariaLabel="Choose private key file"
-                            buttonLabel="Choose file…"
-                          />
-                          {/* The read can fail — an unreadable file, a revoked
-                              permission. Silence there would leave the user
-                              believing a key was loaded. */}
-                          <Show when={profileKeyTextError()}>
-                            <p class="cm-key-file-error">{profileKeyTextError()}</p>
-                          </Show>
-                        </Show>
-                        <Show when={profileKeyMode() === 'material'}>
-                          <TextField
-                            multiline
-                            id="profile-key-text"
-                            label="Private Key"
-                            value={profileKeyText()}
-                            onInput={(value) => {
-                              setProfileKeyText(value)
-                              setProfileKeyTextError(undefined)
-                            }}
-                            placeholder="Paste the private key content here"
-                            error={profileKeyTextError()}
-                          />
-                          <Show when={profileKeyFingerprint()}>
-                            <span class="cm-key-fingerprint">
-                              Fingerprint: {profileKeyFingerprint()}
-                            </span>
-                          </Show>
-                        </Show>
                       </Field>
                     }
                   />

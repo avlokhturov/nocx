@@ -97,6 +97,11 @@ func (f *fakeVaultLifecycle) RenameSecret(_ context.Context, row string, name st
 	return f.renameSecretErr
 }
 
+func (f *fakeVaultLifecycle) ReplaceSecret(_ context.Context, row string, _ credential.Secret, _ []vault.CredentialInventory) error {
+	f.renameSecretName = row
+	return f.renameSecretErr
+}
+
 func newFakeVaultLifecycle() *fakeVaultLifecycle {
 	return &fakeVaultLifecycle{
 		state: vault.StateUnsealed,

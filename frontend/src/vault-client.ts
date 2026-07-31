@@ -59,14 +59,28 @@ export interface VaultCreateSecretParams {
   name: string
   /** What the material is: password | key-passphrase | ... */
   kind: InventoryEntry['kind']
-  /** The value to store. Goes to the default store, never back out. */
-  value: string
+  /** The value to store. Goes to the default store, never back out. Either
+   *  this or `path` is sent; never both. */
+  value?: string
+  /** A path the backend dereferences to the file's contents (private keys
+   *  in Path mode). What is stored is the key, never a filename (dcf566b). */
+  path?: string
 }
 
 export interface VaultRenameSecretParams {
   /** The row handle the inventory entry carried — never a SecretID. */
   id: string
   name: string
+}
+
+export interface VaultReplaceSecretParams {
+  /** The row handle the inventory entry carried — never a SecretID. */
+  id: string
+  /** The replacement material. Either this or `path` is sent; never both. */
+  value?: string
+  /** A path the backend dereferences to the file's contents (private keys).
+   *  Never stored as a path — the stored material is the key. */
+  path?: string
 }
 
 export class VaultClient {
@@ -136,6 +150,13 @@ export class VaultClient {
     return this.dispatcher.call('vault.renameSecret', params)
   }
 
+  /** Replace a secret's value, addressed by its inventory row handle — never
+   *  by a secret reference (the renderer may not name one, nocx-jb20.1). The
+   *  reference does not change: every connection using the secret keeps
+   *  working. The old value is never shown back (ADR-0011 §2). */
+  replaceSecret(params: VaultReplaceSecretParams): Promise<Record<string, never>> {
+    return this.dispatcher.call('vault.replaceSecret', params)
+  }
   activity(): Promise<Record<string, never>> {
     return this.dispatcher.call('vault.activity', {})
   }

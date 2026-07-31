@@ -21,3 +21,19 @@ import "github.com/shady2k/nocx/internal/credential"
 func MintReferenceForTest(p ProviderID) (credential.SecretID, error) {
 	return mintID(p)
 }
+
+// ResolveRowForTest resolves a renderer-addressable row handle back to its
+// SecretID, for tests that must observe the material behind a wire-driven
+// operation.
+//
+// Production code never calls this. The renderer may not name a secret, and
+// no production path maps a row back to its reference — values never come
+// back out (ADR-0011 §2), so nothing needs the inverse. Test-support code
+// does: a transport test that creates a secret over the socket and must then
+// read its value back to prove what was stored has no other route.
+func (v *Vault) ResolveRowForTest(row string) (credential.SecretID, bool) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	id, _, ok := v.resolveRowLocked(row, nil)
+	return id, ok
+}

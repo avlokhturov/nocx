@@ -23,15 +23,20 @@ import { Stack } from './ui/stack'
 import { TextField } from './ui/text-field'
 import { SegmentedControl } from './ui/segmented-control'
 import { createFormValidation, required } from './ui/validation'
-import { KeyIcon, LockIcon, PencilIcon } from './ui/icons'
+import { KeyIcon, LockIcon, PencilIcon, ResetIcon } from './ui/icons'
+import { KeyMaterialInput, suppliesMaterial } from './key-material-input'
+import type { KeyInputMode } from './key-material-input'
 import { showToast } from './ui/toast'
 import type { VaultClient, InventoryEntry } from './vault-client'
 import type { VaultController } from './vault'
+import type { DialogClient } from './dialog-client'
 import { log } from './log'
-
 export interface SecretsSectionProps {
   vaultClient: VaultClient
   vaultController: VaultController
+  /** Native dialog capability (dialog.*). Absent in the dev-web harness and
+   *  in tests; the surfaces then degrade to typing paths by hand. */
+  dialogClient?: DialogClient
 }
 
 type LoadState =
@@ -44,26 +49,64 @@ const STORE_LABELS: Record<string, string> = {
   system: 'System keychain',
   file: 'Encrypted nocx storage',
 }
-
 // The kinds a user can create on this page. The wire vocabulary is closed and
-// wider; this page offers the two the surface names today.
+// wider; this page offers the three the surface names today. Private keys are
+// supplied three ways (path / file / paste) through KeyMaterialInput — the
+// same vocabulary the connection editor uses.
 const ADD_KINDS = [
   { value: 'password', label: 'Password' },
   { value: 'key-passphrase', label: 'Key passphrase' },
+  { value: 'private-key', label: 'Private key' },
 ] as const
+
+type AddKind = (typeof ADD_KINDS)[number]['value']
 
 export function SecretsSection(props: SecretsSectionProps) {
   const [loadState, setLoadState] = createSignal<LoadState>({ kind: 'loading' })
 
-  // Add-secret dialog state.
+  // Add-secret dialog state. The value input depends on the kind: passwords
+  // and passphrases take a single field; a private key takes the three-way
+  // input (path / file / paste) shared with the connection editor.
   const [addOpen, setAddOpen] = createSignal(false)
   const [addName, setAddName] = createSignal('')
-  const [addKind, setAddKind] = createSignal<'password' | 'key-passphrase'>('password')
+  const [addKind, setAddKind] = createSignal<AddKind>('password')
   const [addValue, setAddValue] = createSignal('')
+  const [addKeyMode, setAddKeyMode] = createSignal<KeyInputMode>('path')
+  const [addKeyMaterial, setAddKeyMaterial] = createSignal('')
+  const [addKeyPath, setAddKeyPath] = createSignal('')
   const [addBusy, setAddBusy] = createSignal(false)
   const addValidation = createFormValidation({
     name: () => required('Name')(addName()),
-    value: () => required('Value')(addValue()),
+    value: () =>
+      addKind() === 'private-key'
+        ? suppliesMaterial(addKeyMode())
+          ? required('Key')(addKeyMaterial())
+          : required('Path')(addKeyPath())
+        : required('Value')(addValue()),
+  })
+
+  // Replace-value dialog state — the row being replaced, addressed by its
+  // opaque handle, never by a secret reference (nocx-jb20.1). The value
+  // field is EMPTY on open and labelled as a replacement: the vault never
+  // hands the old value back (ADR-0011 §2), so this is "write a new one",
+  // not "edit the value".
+  const [replaceTarget, setReplaceTarget] = createSignal<InventoryEntry | null>(null)
+  const [replaceValue, setReplaceValue] = createSignal('')
+  const [replaceKeyMode, setReplaceKeyMode] = createSignal<KeyInputMode>('path')
+  const [replaceKeyMaterial, setReplaceKeyMaterial] = createSignal('')
+  const [replaceKeyPath, setReplaceKeyPath] = createSignal('')
+  const [replaceBusy, setReplaceBusy] = createSignal(false)
+  const replaceValidation = createFormValidation({
+    value: () => {
+      const entry = replaceTarget()
+      if (!entry) return undefined
+      if (entry.kind === 'private-key') {
+        return suppliesMaterial(replaceKeyMode())
+          ? required('New key')(replaceKeyMaterial())
+          : required('Path')(replaceKeyPath())
+      }
+      return required('New value')(replaceValue())
+    },
   })
 
   // Rename dialog state — the row being renamed, addressed by its opaque
@@ -125,6 +168,9 @@ export function SecretsSection(props: SecretsSectionProps) {
     setAddName('')
     setAddKind('password')
     setAddValue('')
+    setAddKeyMode('path')
+    setAddKeyMaterial('')
+    setAddKeyPath('')
     setAddOpen(true)
   }
 
@@ -140,11 +186,24 @@ export function SecretsSection(props: SecretsSectionProps) {
     }
     setAddBusy(true)
     try {
-      await props.vaultClient.createSecret({
+      // A private key in path mode is dereferenced by the BACKEND at save
+      const params: {
+        name: string
+        kind: 'password' | 'key-passphrase' | 'private-key'
+        value?: string
+        path?: string
+      } = {
         name: addName().trim(),
         kind: addKind(),
-        value: addValue(),
-      })
+      }
+      if (addKind() === 'private-key' && !suppliesMaterial(addKeyMode())) {
+        params.path = addKeyPath().trim()
+      } else if (addKind() === 'private-key') {
+        params.value = addKeyMaterial()
+      } else {
+        params.value = addValue()
+      }
+      await props.vaultClient.createSecret(params)
       setAddOpen(false)
       showToast({ level: 'success', message: `Added "${addName().trim()}"` })
       void load()
@@ -154,6 +213,53 @@ export function SecretsSection(props: SecretsSectionProps) {
       showToast({ level: 'danger', message: `Could not add secret: ${message}` })
     } finally {
       setAddBusy(false)
+    }
+  }
+
+  function openReplace(entry: InventoryEntry): void {
+    replaceValidation.reset()
+    setReplaceTarget(entry)
+    setReplaceValue('')
+    setReplaceKeyMode('path')
+    setReplaceKeyMaterial('')
+    setReplaceKeyPath('')
+  }
+
+  function closeReplace(): void {
+    if (replaceBusy()) return
+    setReplaceTarget(null)
+  }
+
+  async function submitReplace(): Promise<void> {
+    const entry = replaceTarget()
+    if (!entry) return
+    if (!replaceValidation.valid()) {
+      replaceValidation.revealAll()
+      return
+    }
+    setReplaceBusy(true)
+    try {
+      // The reference does not change: replaceSecret writes the new material
+      // under the same SecretID, so every connection using the secret keeps
+      // working (the backend guarantees it; the renderer never sees the id).
+      const params: { id: string; value?: string; path?: string } = { id: entry.id }
+      if (entry.kind === 'private-key' && !suppliesMaterial(replaceKeyMode())) {
+        params.path = replaceKeyPath().trim()
+      } else if (entry.kind === 'private-key') {
+        params.value = replaceKeyMaterial()
+      } else {
+        params.value = replaceValue()
+      }
+      await props.vaultClient.replaceSecret(params)
+      setReplaceTarget(null)
+      showToast({ level: 'success', message: `Replaced the value of "${entry.name}"` })
+      void load()
+    } catch (err) {
+      const message = (err as Error).message
+      log.error('Failed to replace secret', { message })
+      showToast({ level: 'danger', message: `Could not replace the value: ${message}` })
+    } finally {
+      setReplaceBusy(false)
     }
   }
 
@@ -307,6 +413,14 @@ export function SecretsSection(props: SecretsSectionProps) {
                       </Show>
                       <IconButton
                         size="md"
+                        ariaLabel={`Replace value of ${entry.name}`}
+                        title="Replace value"
+                        onClick={() => openReplace(entry)}
+                      >
+                        <ResetIcon />
+                      </IconButton>
+                      <IconButton
+                        size="md"
                         ariaLabel={`Rename ${entry.name}`}
                         title="Rename secret"
                         onClick={() => openRename(entry)}
@@ -357,21 +471,109 @@ export function SecretsSection(props: SecretsSectionProps) {
             <SegmentedControl
               options={ADD_KINDS as unknown as { value: string; label: string }[]}
               value={addKind()}
-              onChange={(v) => setAddKind(v as 'password' | 'key-passphrase')}
+              onChange={(v) => setAddKind(v as AddKind)}
               ariaLabel="Kind"
             />
-            <TextField
-              id="sr-add-value"
-              label="Value"
-              type="password"
-              value={addValue()}
-              onInput={setAddValue}
-              onBlur={() => addValidation.touch('value')}
-              error={addValidation.error('value')}
-              required
-            />
+            <Show when={addKind() !== 'private-key'}>
+              <TextField
+                id="sr-add-value"
+                label="Value"
+                type="password"
+                value={addValue()}
+                onInput={setAddValue}
+                onBlur={() => addValidation.touch('value')}
+                error={addValidation.error('value')}
+                required
+              />
+            </Show>
+            <Show when={addKind() === 'private-key'}>
+              {/* The three-way input, the same vocabulary the connection
+                  editor offers. A key in path mode is dereferenced by the
+                  backend at save time; file and paste supply material. */}
+              <KeyMaterialInput
+                id="sr-add-key"
+                mode={addKeyMode()}
+                onModeChange={setAddKeyMode}
+                pathValue={addKeyPath()}
+                onPathChange={(v) => {
+                  setAddKeyPath(v)
+                  addValidation.touch('value')
+                }}
+                materialValue={addKeyMaterial()}
+                onMaterialChange={setAddKeyMaterial}
+                error={addValidation.error('value')}
+                openFileDialog={props.dialogClient?.openFileDialog.bind(props.dialogClient)}
+              />
+            </Show>
           </Stack>
         </Dialog>
+      </Show>
+
+      {/* Replace-value dialog — the field is EMPTY and labelled as a
+          replacement: the vault never hands the old value back (ADR-0011
+          §2), so "edit the value" would be a lie the interface cannot keep.
+          Addressed by the row's opaque handle. */}
+      <Show when={replaceTarget()}>
+        {(target) => (
+          <Dialog
+            open={true}
+            onClose={closeReplace}
+            title={`Replace value of "${target().name}"`}
+            onSubmit={() => void submitReplace()}
+            footer={
+              <>
+                <Button
+                  variant="primary"
+                  onClick={() => void submitReplace()}
+                  disabled={replaceBusy()}
+                >
+                  Replace value
+                </Button>
+                <Button variant="default" onClick={closeReplace} disabled={replaceBusy()}>
+                  Cancel
+                </Button>
+              </>
+            }
+          >
+            <Stack gap="default">
+              <p class="sr-replace-hint">
+                Write a new value. The stored value is never shown and stays in place until you
+                save. Every connection using this secret keeps working.
+              </p>
+              <Show when={target().kind !== 'private-key'}>
+                <TextField
+                  id="sr-replace-value"
+                  label="New value"
+                  type="password"
+                  value={replaceValue()}
+                  onInput={(v) => {
+                    setReplaceValue(v)
+                    replaceValidation.touch('value')
+                  }}
+                  onBlur={() => replaceValidation.touch('value')}
+                  error={replaceValidation.error('value')}
+                  required
+                />
+              </Show>
+              <Show when={target().kind === 'private-key'}>
+                <KeyMaterialInput
+                  id="sr-replace-key"
+                  mode={replaceKeyMode()}
+                  onModeChange={setReplaceKeyMode}
+                  pathValue={replaceKeyPath()}
+                  onPathChange={(v) => {
+                    setReplaceKeyPath(v)
+                    replaceValidation.touch('value')
+                  }}
+                  materialValue={replaceKeyMaterial()}
+                  onMaterialChange={setReplaceKeyMaterial}
+                  error={replaceValidation.error('value')}
+                  openFileDialog={props.dialogClient?.openFileDialog.bind(props.dialogClient)}
+                />
+              </Show>
+            </Stack>
+          </Dialog>
+        )}
       </Show>
 
       {/* Rename dialog — addressed by the row's opaque handle. */}

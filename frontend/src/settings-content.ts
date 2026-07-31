@@ -33,6 +33,7 @@ export class SettingsContent extends SolidTabContent {
     private readonly observer?: SettingsObserver,
     private readonly vaultController?: VaultController,
     private readonly vaultClient?: import('./vault-client').VaultClient,
+    private readonly dialogClient?: import('./dialog-client').DialogClient,
   ) {
     super()
   }
@@ -44,6 +45,7 @@ export class SettingsContent extends SolidTabContent {
           profileClient: this.profileClient,
           vaultController: this.vaultController,
           vaultClient: this.vaultClient,
+          dialogClient: this.dialogClient,
           observer: this.observer,
           onConnect: (profile: SSHProfile) => {
             this.onConnect?.(profile)

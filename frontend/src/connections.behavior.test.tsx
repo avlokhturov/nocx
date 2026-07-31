@@ -11,6 +11,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
 import { cleanup, render, fireEvent } from '@solidjs/testing-library'
 import { ConnectionsView } from './connections'
 import { ProfileClient } from './profiles'
+import type { DialogClient } from './dialog-client'
 import { Dispatcher } from './dispatcher'
 import { clearToasts, toasts } from './ui'
 import type {
@@ -129,14 +130,19 @@ function mount(
   overrides?: Parameters<typeof createMockClient>[0] & {
     onConnect?: () => void
     onNavigateToCredentials?: () => void
+    openFileDialog?: () => Promise<{ path: string }>
   },
 ) {
   const { client, connectionTest } = createMockClient(overrides)
+  const dialogClient = overrides?.openFileDialog
+    ? ({ openFileDialog: overrides.openFileDialog } as unknown as DialogClient)
+    : undefined
   const container = document.body.appendChild(document.createElement('div'))
   render(
     () => (
       <ConnectionsView
         client={client}
+        dialogClient={dialogClient}
         onConnect={overrides?.onConnect}
         onNavigateToCredentials={overrides?.onNavigateToCredentials}
       />
@@ -1054,6 +1060,86 @@ describe('three-way key input — group editor', () => {
     expect(capturedNewlineCount).toBe(originalNewlineCount)
     expect(capturedNewlineCount).toBeGreaterThan(0)
     expect(capturedArg).toBe(keyContent)
+  })
+})
+
+// ── Native file picker (dialog.openFile) ───────────────────────────────
+
+describe('native file picker — path mode', () => {
+  it('Browse fills the path field with the picked absolute path', async () => {
+    const openFileDialog = vi.fn().mockResolvedValue({ path: '/home/dev/.ssh/id_ed25519' })
+    const { container } = mount({
+      profiles: MOCK_PROFILES.slice(0, 1),
+      openFileDialog,
+    })
+    await waitForProfiles(container, 1)
+    await openProfileEditor(container, 'prod-web')
+    selectProfileSection(container, 'Authentication')
+    clickSegmentedOption(container, 'Public Key')
+
+    await vi.waitFor(() => {
+      expect(container.querySelector('#profile-key-path')).toBeTruthy()
+    })
+
+    const browse = container.querySelector(
+      '[aria-label="Browse for a private key file"]',
+    ) as HTMLButtonElement
+    expect(browse, 'Browse button should be present when a dialog client is wired').toBeTruthy()
+    browse.click()
+
+    await vi.waitFor(() => {
+      expect(openFileDialog).toHaveBeenCalled()
+    })
+    const pathInput = container.querySelector('#profile-key-path') as HTMLInputElement
+    await vi.waitFor(() => {
+      expect(pathInput.value).toBe('/home/dev/.ssh/id_ed25519')
+    })
+  })
+
+  // The dev-web harness has no Wails runtime: the picker rejects, and the
+  // surface must degrade — a hint beside the field, the field still
+  // hand-typable — not fail.
+  it('degrades when the native picker is unavailable', async () => {
+    const openFileDialog = vi.fn().mockRejectedValue(new Error('dialog not available'))
+    const { container } = mount({
+      profiles: MOCK_PROFILES.slice(0, 1),
+      openFileDialog,
+    })
+    await waitForProfiles(container, 1)
+    await openProfileEditor(container, 'prod-web')
+    selectProfileSection(container, 'Authentication')
+    clickSegmentedOption(container, 'Public Key')
+
+    await vi.waitFor(() => {
+      expect(container.querySelector('#profile-key-path')).toBeTruthy()
+    })
+
+    const browse = container.querySelector(
+      '[aria-label="Browse for a private key file"]',
+    ) as HTMLButtonElement
+    browse.click()
+
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain('The native file picker is not available here')
+    })
+
+    // The path field still works by hand.
+    const pathInput = container.querySelector('#profile-key-path') as HTMLInputElement
+    fireEvent.input(pathInput, { target: { value: '~/.ssh/id_ed25519' } })
+    expect(pathInput.value).toBe('~/.ssh/id_ed25519')
+  })
+
+  it('no Browse action when no dialog capability is wired', async () => {
+    const { container } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    await waitForProfiles(container, 1)
+    await openProfileEditor(container, 'prod-web')
+    selectProfileSection(container, 'Authentication')
+    clickSegmentedOption(container, 'Public Key')
+
+    await vi.waitFor(() => {
+      expect(container.querySelector('#profile-key-path')).toBeTruthy()
+    })
+    expect(container.querySelector('[aria-label="Browse for a private key file"]')).toBeNull()
   })
 })
 

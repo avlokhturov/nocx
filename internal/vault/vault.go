@@ -1429,6 +1429,113 @@ func (v *Vault) RenameSecret(ctx context.Context, row string, name string, input
 	return saveDocument(v.store, v.doc)
 }
 
+// ReplaceSecret overwrites the material behind an existing secret, addressed
+// by the renderer-addressable row handle rather than by a SecretID
+// (nocx-jb20.1: the reference is never accepted from the renderer as an
+// identifier). The reference does NOT change: the new value is written to the
+// SAME SecretID through the owning provider, so every connection referencing
+// the secret keeps working and the catalogue record (name, kind) is untouched.
+// inputs are the same credential metadata BuildInventory takes, so a secret
+// referenced by metadata but never recorded (pre-ADR-0016) can be resolved
+// the way RenameSecret resolves it.
+//
+// The write is journaled before the provider call, like every other provider
+// write (spec §4.2) — a replace that times out may still land, and the entry
+// is what makes that reconcilable. A replace is single-store (value only; the
+// record is untouched), so reconciliation has nothing to repair: whichever
+// half of the write landed, the id still names a valid secret.
+func (v *Vault) ReplaceSecret(ctx context.Context, row string, value credential.Secret, inputs []CredentialInventory) error {
+	t0 := time.Now()
+
+	v.mu.Lock()
+	st := v.stateLocked()
+	switch st {
+	case StateUninitialized:
+		v.mu.Unlock()
+		v.logger.Info("vault: refusing ReplaceSecret, not initialized")
+		return ErrVaultUninitialized
+	case StateSealed:
+		v.mu.Unlock()
+		v.logger.Info("vault: refusing ReplaceSecret, sealed")
+		return ErrVaultSealed
+	}
+	gen := v.gen
+
+	id, _, ok := v.resolveRowLocked(row, inputs)
+	if !ok {
+		v.mu.Unlock()
+		return fmt.Errorf("unknown secret row %q", row)
+	}
+
+	provID, err := parseID(id)
+	if err != nil {
+		v.mu.Unlock()
+		return err
+	}
+	prov, ok := v.reg.Writable(provID)
+	if !ok {
+		v.mu.Unlock()
+		return unavailable(provID, ReasonUnknownProvider,
+			fmt.Errorf("provider %q is not writable", provID))
+	}
+
+	// Journal PhasePrepared before delegating — the same discipline as every
+	// other provider write (spec §4.2).
+	v.doc.Journal = append(v.doc.Journal, JournalEntry{
+		Op:    "replace",
+		NewID: id,
+		Phase: PhasePrepared,
+	})
+	if saveErr := saveDocument(v.store, v.doc); saveErr != nil {
+		v.mu.Unlock()
+		return fmt.Errorf("journal save: %w", saveErr)
+	}
+	v.mu.Unlock() // release before provider call
+
+	// Delegation — provider call outside lock.
+	putErr := prov.Put(ctx, id, value)
+
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	// Reject the result if the vault moved under the write (nocx-25k9.20):
+	// sealed, or the generation advanced while the provider call was in
+	// flight. Either way the journal entry survives for reconciliation.
+	if v.rootKey == nil {
+		v.logger.Warn("replace rejected: vault sealed during the provider call",
+			"secretID", id, "provider", provID, "duration", time.Since(t0))
+		return ErrVaultSealed
+	}
+	if v.gen != gen {
+		v.logger.Warn("replace rejected: vault generation advanced during the provider call",
+			"secretID", id, "provider", provID,
+			"genAtStart", gen, "genNow", v.gen, "duration", time.Since(t0))
+		return ErrVaultGenerationChanged
+	}
+	if putErr != nil {
+		v.logger.Warn("provider put failed",
+			"secretID", id, "provider", provID,
+			"error", putErr, "duration", time.Since(t0))
+		return putErr
+	}
+
+	// The write landed. Clear the journal entry: nothing downstream commits a
+	// replace — the vault owns the whole sequence — so the vault clears it.
+	for i := range v.doc.Journal {
+		if v.doc.Journal[i].Op == "replace" && v.doc.Journal[i].NewID == id {
+			v.doc.Journal[i] = JournalEntry{}
+			break
+		}
+	}
+	if saveErr := saveDocument(v.store, v.doc); saveErr != nil {
+		return fmt.Errorf("save after replace: %w", saveErr)
+	}
+
+	v.logger.Info("secret replaced",
+		"secretID", id, "provider", provID, "duration", time.Since(t0))
+	return nil
+}
+
 // resolveRowLocked maps a row handle to its (SecretID, kind). Records are the
 // primary source; unrecorded references come from the credential metadata.
 // Must hold v.mu.
