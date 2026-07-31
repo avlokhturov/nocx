@@ -23,7 +23,7 @@ import { FileInput } from './ui/file-input'
 import { Badge } from './ui/badge'
 import { IconButton } from './ui/icon-button'
 import { CollectionRow, CollectionView } from './ui/collection-view'
-import { KeyMaterialInput, suppliesMaterial } from './key-material-input'
+import { KeyMaterialInput, KeyPassphrasePrompt, suppliesMaterial } from './key-material-input'
 import type { KeyInputMode } from './key-material-input'
 import type { DialogClient } from './dialog-client'
 import { CheckCircleIcon, PencilIcon, PlugIcon, TrashIcon } from './ui/icons'
@@ -193,6 +193,20 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   const [dialogOpen, setDialogOpen] = createSignal(false)
   const [profilePasswordOpen, setProfilePasswordOpen] = createSignal(false)
   const [profilePasswordValue, setProfilePasswordValue] = createSignal('')
+  // ── Key-passphrase ask ─────────────────────────────────────────────────
+  // Saving a passphrase-protected key returns passphraseWanted; the app must
+  // ask for the key's passphrase before the save continues. Promised so the
+  // save flow can pause on it; both outcomes continue (the key stays stored
+  // either way — declining only leaves the passphrase to be asked at connect).
+  const [passphraseAsk, setPassphraseAsk] = createSignal<{
+    credentialId: string
+    keyName: string
+    resolve: (outcome: 'saved' | 'skipped') => void
+  } | null>(null)
+  // Promise.withResolvers needs ES2024 and this project targets ES2021, so the
+  // resolver is captured via the executor form.
+  const askKeyPassphrase = (credentialId: string, keyName: string): Promise<'saved' | 'skipped'> =>
+    new Promise((resolve) => setPassphraseAsk({ credentialId, keyName, resolve }))
 
   // ── Effective/provenance state ─────────────────────────────────────────
   const [effectiveData, setEffectiveData] = createSignal<Record<string, EffectiveProfileDTO>>({})
@@ -521,7 +535,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
 
     if (props.vaultController) {
       try {
-        await props.vaultController.saveSecretWithVault(doExecute)
+        await props.vaultController.saveSecretWithVault(doExecute, 'import connections')
       } catch (err) {
         // The user cancelled the vault prompt — nothing ran, nothing failed.
         // The preview stays open so they can retry or close it deliberately.
@@ -633,9 +647,12 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             credential.name,
           )
           setGroupKeyFingerprint(result.fingerprint)
+          if (result.passphraseWanted) {
+            await askKeyPassphrase(credential.id, credential.name)
+          }
         }
         if (props.vaultController) {
-          await props.vaultController.saveSecretWithVault(saveKeymat)
+          await props.vaultController.saveSecretWithVault(saveKeymat, 'save this key')
         } else {
           await saveKeymat()
         }
@@ -679,10 +696,13 @@ export function ConnectionsView(props: ConnectionsViewProps) {
               credDraft.name,
             )
             setGroupKeyFingerprint(result.fingerprint)
+            if (result.passphraseWanted) {
+              await askKeyPassphrase(credDraft.id, credDraft.name)
+            }
           }
           try {
             if (props.vaultController) {
-              await props.vaultController.saveSecretWithVault(saveKeymat)
+              await props.vaultController.saveSecretWithVault(saveKeymat, 'save this key')
             } else {
               await saveKeymat()
             }
@@ -1390,7 +1410,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           )
         }
         if (props.vaultController) {
-          await props.vaultController.saveSecretWithVault(savePw)
+          await props.vaultController.saveSecretWithVault(savePw, 'save this password')
         } else {
           await savePw()
         }
@@ -1439,9 +1459,15 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             generatedSecretName(profile.options.user, profile.options.host),
           )
           setProfileKeyFingerprint(result.fingerprint)
+          if (result.passphraseWanted) {
+            await askKeyPassphrase(
+              credential!.id,
+              generatedSecretName(profile.options.user, profile.options.host),
+            )
+          }
         }
         if (props.vaultController) {
-          await props.vaultController.saveSecretWithVault(saveKeymat)
+          await props.vaultController.saveSecretWithVault(saveKeymat, 'save this key')
         } else {
           await saveKeymat()
         }
@@ -1521,7 +1547,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         }
         try {
           if (props.vaultController) {
-            await props.vaultController.saveSecretWithVault(savePw)
+            await props.vaultController.saveSecretWithVault(savePw, 'save this password')
           } else {
             await savePw()
           }
@@ -1548,10 +1574,16 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             generatedSecretName(profile.options.user, profile.options.host),
           )
           setProfileKeyFingerprint(result.fingerprint)
+          if (result.passphraseWanted) {
+            await askKeyPassphrase(
+              credDraft.id,
+              generatedSecretName(profile.options.user, profile.options.host),
+            )
+          }
         }
         try {
           if (props.vaultController) {
-            await props.vaultController.saveSecretWithVault(saveKeymat)
+            await props.vaultController.saveSecretWithVault(saveKeymat, 'save this key')
           } else {
             await saveKeymat()
           }
@@ -2606,6 +2638,24 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             )}
           </Show>
         </Dialog>
+      </Show>
+      {/* Key-passphrase ask — raised when a saved key wants its passphrase.
+          Rendered at the root so the top-sheet Prompt floats above the editor
+          dialog it interrupts. */}
+      <Show when={passphraseAsk()}>
+        {(ask) => (
+          <KeyPassphrasePrompt
+            open
+            keyName={ask().keyName}
+            credentialId={ask().credentialId}
+            client={props.client}
+            onResult={(outcome) => {
+              const resolve = ask().resolve
+              setPassphraseAsk(null)
+              resolve(outcome)
+            }}
+          />
+        )}
       </Show>
     </div>
   )

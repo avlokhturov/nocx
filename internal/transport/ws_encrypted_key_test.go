@@ -23,11 +23,14 @@ DEK-Info: AES-128-CBC,0123456789ABCDEF0123456789ABCDEF
 dGhpcyBpcyBub3QgcmVhbCBjaXBoZXJ0ZXh0IGJ1dCB0aGUgaGVhZGVycyBhcmUg
 -----END RSA PRIVATE KEY-----
 `
-	fingerprint, err := parsePrivateKeyMaterial(encryptedPEM)
+	fingerprint, wantsPassphrase, err := parsePrivateKeyMaterial(encryptedPEM)
 	if err != nil {
 		t.Fatalf("rejected a usable encrypted key: %v", err)
 	}
 	if fingerprint != "" {
 		t.Errorf("fingerprint = %q, want empty — the public half is behind the passphrase", fingerprint)
+	}
+	if !wantsPassphrase {
+		t.Error("passphraseWanted = false — the renderer would never ask for the passphrase")
 	}
 }

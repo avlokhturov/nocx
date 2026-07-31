@@ -163,6 +163,7 @@ function mount(
             onUnsealed={() => vaultController!.onUnsealDone()}
             vaultClient={vaultClient!}
             vaultStatus={vaultController!.status()}
+            reason={vaultController!.unlockReason()}
           />
         </Show>
       </>
@@ -653,7 +654,7 @@ describe('three-way key input — connection editor', () => {
     const { container, client } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
     const saveKeyMatSpy = vi
       .spyOn(client, 'saveKeyMaterial')
-      .mockResolvedValue({ fingerprint: 'SHA256:abc123' })
+      .mockResolvedValue({ fingerprint: 'SHA256:abc123', passphraseWanted: false })
     const updateSpy = vi.spyOn(client, 'updateProfile')
     vi.spyOn(client, 'createCredential').mockResolvedValue({
       id: 'cred:keymat',
@@ -702,7 +703,7 @@ describe('three-way key input — connection editor', () => {
     const { container, client } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
     const saveKeyMatSpy = vi
       .spyOn(client, 'saveKeyMaterial')
-      .mockResolvedValue({ fingerprint: 'SHA256:abc123' })
+      .mockResolvedValue({ fingerprint: 'SHA256:abc123', passphraseWanted: false })
     vi.spyOn(client, 'createCredential').mockResolvedValue({
       id: 'cred:keymat',
       name: 'prod-web',
@@ -751,6 +752,169 @@ describe('three-way key input — connection editor', () => {
       // user@host name of the connection it was saved on.
       'deploy@web.example.com',
     )
+  })
+
+  // ── Key-passphrase ask (nocx-dze3) ────────────────────────────────────
+  // Saving a passphrase-protected key must ask for the key's passphrase on
+  // the spot, verify it against the key, and store it — not defer the ask to
+  // connect time, where a wrong passphrase is a dead end. The prompt names
+  // the KEY, so the vault passphrase can never be typed into it by mistake.
+
+  async function openKeyPassphrasePrompt(container: HTMLElement) {
+    await waitForProfiles(container, 1)
+    await openProfileEditor(container, 'prod-web')
+    selectProfileSection(container, 'Authentication')
+    clickSegmentedOption(container, 'Public Key')
+    clickSegmentedOption(container, 'Paste key')
+    await vi.waitFor(() => {
+      expect(container.querySelector('#profile-key-text')).toBeTruthy()
+    })
+    fireEvent.input(container.querySelector('#profile-key-text')!, {
+      target: {
+        value:
+          '-----BEGIN OPENSSH PRIVATE KEY-----\nencrypted-fixture\n-----END OPENSSH PRIVATE KEY-----',
+      },
+    })
+    const dialog = findDialogByTitleContaining(container, 'prod-web')!
+    const saveBtn = Array.from(dialog.querySelectorAll('.ui-button')).find(
+      (b) => b.textContent?.trim() === 'Save Connection',
+    )!
+    fireEvent.click(saveBtn)
+    await vi.waitFor(() => {
+      expect(container.querySelector('.ui-prompt__title')?.textContent).toContain('Passphrase for')
+    })
+  }
+
+  it('asks for the key passphrase when saveKeyMaterial reports passphraseWanted', async () => {
+    const { container, client } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    vi.spyOn(client, 'saveKeyMaterial').mockResolvedValue({
+      fingerprint: 'SHA256:enc123',
+      passphraseWanted: true,
+    })
+    vi.spyOn(client, 'createCredential').mockResolvedValue({
+      id: 'cred:enc',
+      name: 'prod-web',
+      username: 'deploy',
+      auth: 'publicKey',
+    })
+
+    await openKeyPassphrasePrompt(container)
+
+    // The prompt names the KEY it belongs to — not "the vault", not "a
+    // passphrase". The generated secret name is user@host.
+    expect(container.querySelector('.ui-prompt__title')?.textContent).toBe(
+      'Passphrase for deploy@web.example.com',
+    )
+    expect(container.querySelector('.ui-prompt__body')?.textContent).toContain('Key passphrase')
+  })
+
+  it('stores a verified passphrase and continues the save', async () => {
+    const { container, client } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    const savePassphraseSpy = vi.spyOn(client, 'saveKeyPassphrase').mockResolvedValue(true)
+    vi.spyOn(client, 'saveKeyMaterial').mockResolvedValue({
+      fingerprint: 'SHA256:enc123',
+      passphraseWanted: true,
+    })
+    vi.spyOn(client, 'createCredential').mockResolvedValue({
+      id: 'cred:enc',
+      name: 'prod-web',
+      username: 'deploy',
+      auth: 'publicKey',
+    })
+    const patchSpy = vi.spyOn(client, 'patchProfile')
+
+    await openKeyPassphrasePrompt(container)
+
+    fireEvent.input(container.querySelector('#key-passphrase')!, {
+      target: { value: 'correct-horse' },
+    })
+    const saveBtn = Array.from(container.querySelectorAll('.ui-button')).find(
+      (b) => b.textContent?.trim() === 'Save passphrase',
+    )!
+    fireEvent.click(saveBtn)
+
+    await vi.waitFor(() => {
+      expect(savePassphraseSpy).toHaveBeenCalledWith(
+        'cred:enc',
+        'correct-horse',
+        expect.any(String),
+      )
+    })
+    // The save the prompt interrupted continues.
+    await vi.waitFor(() => {
+      expect(patchSpy).toHaveBeenCalled()
+    })
+  })
+
+  it('refuses a wrong passphrase in the prompt, keeping the key saved', async () => {
+    const { container, client } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    const savePassphraseSpy = vi.spyOn(client, 'saveKeyPassphrase').mockRejectedValue(
+      new RpcError('that passphrase does not open this key', -32603, {
+        reason: 'invalid-key-passphrase',
+      }),
+    )
+    vi.spyOn(client, 'saveKeyMaterial').mockResolvedValue({
+      fingerprint: 'SHA256:enc123',
+      passphraseWanted: true,
+    })
+    vi.spyOn(client, 'createCredential').mockResolvedValue({
+      id: 'cred:enc',
+      name: 'prod-web',
+      username: 'deploy',
+      auth: 'publicKey',
+    })
+    const patchSpy = vi.spyOn(client, 'patchProfile')
+
+    await openKeyPassphrasePrompt(container)
+
+    fireEvent.input(container.querySelector('#key-passphrase')!, {
+      target: { value: 'wrong-passphrase' },
+    })
+    const saveBtn = Array.from(container.querySelectorAll('.ui-button')).find(
+      (b) => b.textContent?.trim() === 'Save passphrase',
+    )!
+    fireEvent.click(saveBtn)
+
+    // Refused there and then: the backend's sentence lands in the field, the
+    // prompt stays open, and the deferred save has NOT run.
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain('that passphrase does not open this key')
+    })
+    expect(container.querySelector('.ui-prompt')).toBeTruthy()
+    expect(patchSpy).not.toHaveBeenCalled()
+    // The key material itself was already stored and is not rolled back.
+    expect(savePassphraseSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('declining keeps the key and continues the save', async () => {
+    const { container, client } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    const savePassphraseSpy = vi.spyOn(client, 'saveKeyPassphrase')
+    vi.spyOn(client, 'saveKeyMaterial').mockResolvedValue({
+      fingerprint: 'SHA256:enc123',
+      passphraseWanted: true,
+    })
+    vi.spyOn(client, 'createCredential').mockResolvedValue({
+      id: 'cred:enc',
+      name: 'prod-web',
+      username: 'deploy',
+      auth: 'publicKey',
+    })
+    const patchSpy = vi.spyOn(client, 'patchProfile')
+
+    await openKeyPassphrasePrompt(container)
+
+    const skipBtn = Array.from(container.querySelectorAll('.ui-button')).find(
+      (b) => b.textContent?.trim() === 'Not now',
+    )!
+    fireEvent.click(skipBtn)
+
+    // Declining is allowed: nothing stored, nothing rolled back, the save the
+    // prompt interrupted continues.
+    expect(savePassphraseSpy).not.toHaveBeenCalled()
+    await vi.waitFor(() => {
+      expect(patchSpy).toHaveBeenCalled()
+    })
+    expect(container.querySelector('.ui-prompt')).toBeNull()
   })
 
   it('switching from material to path clears the key text', async () => {
@@ -883,7 +1047,7 @@ describe('three-way key input — connection editor', () => {
     const { container, client } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
     const saveKeyMatSpy = vi
       .spyOn(client, 'saveKeyMaterial')
-      .mockResolvedValue({ fingerprint: 'SHA256:newline-test' })
+      .mockResolvedValue({ fingerprint: 'SHA256:newline-test', passphraseWanted: false })
     vi.spyOn(client, 'createCredential').mockResolvedValue({
       id: 'cred:nl',
       name: 'prod-web',
@@ -1034,7 +1198,7 @@ describe('three-way key input — group editor', () => {
     const { container, client } = mount({ profiles: MOCK_PROFILES, groups: MOCK_GROUPS })
     const saveKeyMatSpy = vi
       .spyOn(client, 'saveKeyMaterial')
-      .mockResolvedValue({ fingerprint: 'SHA256:group-newline' })
+      .mockResolvedValue({ fingerprint: 'SHA256:group-newline', passphraseWanted: false })
     vi.spyOn(client, 'createCredential').mockResolvedValue({
       id: 'cred:grp-nl',
       name: 'Production',

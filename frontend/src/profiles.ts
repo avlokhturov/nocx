@@ -1,4 +1,5 @@
 import { Dispatcher } from './dispatcher'
+import type { SaveKeyMaterialResult } from './generated/credentials.saveKeyMaterial'
 
 // Profile/group models + IPC client for the connection manager.
 // Mirrors the backend internal/profile package (nocx-fxs.1) and the
@@ -433,8 +434,14 @@ export class ProfileClient {
     credentialId: string,
     keyText: string,
     name?: string,
-  ): Promise<{ fingerprint: string }> {
+  ): Promise<SaveKeyMaterialResult> {
     return this.call('credentials.saveKeyMaterial', { credentialId, keyText, name })
+  }
+  /** credentials.saveKeyPassphrase — store the passphrase that opens a stored
+   *  key. The backend verifies it against the key material before storing: a
+   *  wrong passphrase is refused there and then (nocx-dze3). */
+  saveKeyPassphrase(credentialId: string, passphrase: string, name?: string): Promise<boolean> {
+    return this.call('credentials.saveKeyPassphrase', { credentialId, passphrase, name })
   }
   /** credentials.deleteKeyMaterial — remove stored key material from the vault. */
   deleteKeyMaterial(credentialId: string): Promise<Record<string, never>> {

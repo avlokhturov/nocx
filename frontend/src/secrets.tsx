@@ -325,7 +325,10 @@ export function SecretsSection(props: SecretsSectionProps) {
             title="Vault is locked"
             description="Unlock the vault to see what secrets it holds."
             action={
-              <Button variant="primary" onClick={() => props.vaultController.openUnlock()}>
+              <Button
+                variant="primary"
+                onClick={() => props.vaultController.openUnlock('view your secrets')}
+              >
                 Unlock vault
               </Button>
             }

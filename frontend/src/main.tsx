@@ -148,7 +148,7 @@ async function main() {
     profileClient,
     tabStrip,
   )
-  tm.onVaultSealed = () => vaultController.openUnlock()
+  tm.onVaultSealed = () => vaultController.openUnlock('open this connection')
   tm.onActivity = reportActivity
 
   // Surface registry — surfaces declared once, every entry point resolves
@@ -178,7 +178,7 @@ async function main() {
             profile.name,
           )
           return Promise.resolve()
-        })
+        }, 'open this connection')
       }
       return content
     },
@@ -366,6 +366,7 @@ async function main() {
             onUnsealed={() => vaultController.onUnsealDone()}
             vaultClient={vaultClient}
             vaultStatus={vaultController.status()}
+            reason={vaultController.unlockReason()}
           />
         </Show>
       </>

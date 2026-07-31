@@ -114,8 +114,12 @@ export const PasswordEditor: Component<PasswordEditorProps> = (props) => {
     <Prompt
       open={props.open}
       onClose={props.onClose}
-      ariaLabel="Set Password"
+      // The title says WHICH password (the connection's, not the vault's —
+      // nocx-s8jn) and names it; the placeholder repeats it so the eye lands
+      // on the same answer wherever it lands.
+      ariaLabel={props.prompt}
       placement="top-sheet"
+      title={props.prompt}
       actions={
         <>
           <Button variant="primary" onClick={save}>

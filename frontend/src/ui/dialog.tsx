@@ -302,6 +302,13 @@ export const Dialog: Component<DialogProps> = (props) => {
     // on a toast is a click on a descendant that is deliberately outside the
     // panel. Dismissing a notification must not dismiss the form behind it.
     if ((e.target as Element | null)?.closest('.ui-toast-host')) return
+    // Same reasoning, and the same mechanism: a Prompt opened over this dialog
+    // moves itself inside it, because the top layer is escaped by parentage
+    // rather than by a z-index. Its scrim then covers the dialog's own, so
+    // dismissing the prompt would otherwise dismiss the form that asked for
+    // it — the user cancels "which passphrase?" and loses the connection they
+    // were editing, which is the defect light-dismiss exists to avoid.
+    if ((e.target as Element | null)?.closest('.ui-prompt-overlay')) return
     const panel = d.querySelector('.nocx-dialog__panel')
     if (!panel) return
     const r = panel.getBoundingClientRect()

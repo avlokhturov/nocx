@@ -28,6 +28,12 @@ import { SegmentedControl } from './ui/segmented-control'
 import { TextField } from './ui/text-field'
 import { Button } from './ui/button'
 import { FileInput } from './ui/file-input'
+import { Prompt } from './ui/prompt'
+import { Stack } from './ui/stack'
+import { RpcError } from './dispatcher'
+import { log } from './log'
+import { showToast } from './ui/toast'
+import type { ProfileClient } from './profiles'
 
 export type KeyInputMode = 'path' | 'file' | 'material'
 
@@ -189,5 +195,115 @@ export function KeyMaterialInput(props: KeyMaterialInputProps) {
         </Show>
       </Show>
     </>
+  )
+}
+
+export interface KeyPassphrasePromptProps {
+  open: boolean
+  /** The key this passphrase belongs to — the prompt names it, so a vault
+   *  passphrase can never be typed into it by mistake (nocx-s8jn). */
+  keyName: string
+  credentialId: string
+  client: ProfileClient
+  /** 'saved' when a VERIFIED passphrase was stored; 'skipped' when declined
+   *  (the key stays stored, and the connection asks at connect time). */
+  onResult: (outcome: 'saved' | 'skipped') => void
+}
+
+/**
+ * KeyPassphrasePrompt — asked when a passphrase-protected private key has
+ * been saved (saveKeyMaterial reported passphraseWanted). The backend verifies
+ * the passphrase against the stored key material before storing it: a wrong
+ * one is refused there and then, at the moment the user can fix it, instead of
+ * surfacing at connect time where nothing can be done about it (nocx-dze3).
+ */
+export function KeyPassphrasePrompt(props: KeyPassphrasePromptProps) {
+  const [passphrase, setPassphrase] = createSignal('')
+  const [error, setError] = createSignal('')
+  const [saving, setSaving] = createSignal(false)
+
+  const save = async () => {
+    if (!passphrase()) {
+      setError('Enter the key passphrase')
+      return
+    }
+    setError('')
+    setSaving(true)
+    try {
+      await props.client.saveKeyPassphrase(props.credentialId, passphrase(), props.keyName)
+      showToast({ level: 'success', message: 'Key passphrase stored.' })
+      props.onResult('saved')
+    } catch (e) {
+      setSaving(false)
+      if (
+        e instanceof RpcError &&
+        typeof e.data === 'object' &&
+        e.data &&
+        'reason' in e.data &&
+        e.data.reason === 'invalid-key-passphrase'
+      ) {
+        // The backend's own sentence: it distinguishes a wrong passphrase
+        // from a key that cannot be verified at all.
+        setError((e as Error).message)
+        return
+      }
+      const message = (e as Error).message
+      log.error('Failed to store key passphrase', { message })
+      showToast({ level: 'danger', message: `Could not save the key passphrase: ${message}` })
+    }
+  }
+
+  /** Declining is allowed: the key stays stored, and the interface says the
+   *  connection will ask for the passphrase when it connects. */
+  const decline = () => {
+    showToast({
+      level: 'info',
+      message: 'No passphrase stored — the connection will ask for it when it connects.',
+    })
+    props.onResult('skipped')
+  }
+
+  return (
+    <Prompt
+      open={props.open}
+      onClose={decline}
+      ariaLabel={`Passphrase for ${props.keyName}`}
+      placement="top-sheet"
+      title={`Passphrase for ${props.keyName}`}
+      onSubmit={() => {
+        if (saving()) return
+        void save()
+      }}
+      actions={
+        <>
+          <Button variant="primary" disabled={saving()} onClick={() => void save()}>
+            {saving() ? 'Saving…' : 'Save passphrase'}
+          </Button>
+          <Button variant="default" disabled={saving()} onClick={decline}>
+            Not now
+          </Button>
+        </>
+      }
+    >
+      <Stack>
+        <p class="ui-vault-desc-text">
+          This key is encrypted. The passphrase you save here opens it — not the vault, not a
+          connection password.
+        </p>
+        <TextField
+          id="key-passphrase"
+          label="Key passphrase"
+          placeholder="The passphrase that protects this key"
+          type="password"
+          value={passphrase()}
+          onInput={(v) => {
+            setPassphrase(v)
+            setError('')
+          }}
+          error={error()}
+          autoFocus
+        />
+      </Stack>
+    </Prompt>
   )
 }

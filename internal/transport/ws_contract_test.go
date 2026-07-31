@@ -538,3 +538,53 @@ func TestDialogOpenFile_OverTheWireConformsToContract(t *testing.T) {
 	}
 	validateJSON(t, schema, envelope.Result, "dialog.openFile result")
 }
+
+// ── credentials.saveKeyMaterial ────────────────────────────────────────
+
+// The DTO's own conformance: both fields, in both interesting shapes. An
+// encrypted key has an empty fingerprint AND passphraseWanted=true; an
+// unencrypted one has a fingerprint and passphraseWanted=false. A field the
+// renderer must branch on cannot be optional.
+func TestSaveKeyMaterial_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "credentials.saveKeyMaterial.schema.json")
+
+	dto := saveKeyMaterialResult{Fingerprint: "SHA256:abc123", PassphraseWanted: false}
+	raw, err := json.Marshal(dto)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "saveKeyMaterial unencrypted DTO")
+
+	dtoEnc := saveKeyMaterialResult{Fingerprint: "", PassphraseWanted: true}
+	rawEnc, err := json.Marshal(dtoEnc)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, rawEnc, "saveKeyMaterial encrypted DTO")
+}
+
+// The real result off the real socket — the field that must not go missing is
+// passphraseWanted, without which the renderer would never ask for the key's
+// passphrase and the encrypted key would surface its failure at connect time.
+func TestSaveKeyMaterial_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "credentials.saveKeyMaterial.schema.json")
+	h := newKeyMaterialHarness(t)
+	credID := h.createCredential("contract-key", profile.AuthPublicKey)
+
+	pem, _ := testEncryptedKeyPEM(t, "contract-passphrase")
+	_, wantsPass, raw := h.saveKeyMaterial(credID, pem)
+	if !wantsPass {
+		t.Fatalf("precondition: encrypted key not flagged: %s", string(raw))
+	}
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, string(raw))
+	}
+	if envelope.Error != nil {
+		t.Fatalf("saveKeyMaterial: %+v", envelope.Error)
+	}
+	validateJSON(t, schema, envelope.Result, "saveKeyMaterial result")
+}

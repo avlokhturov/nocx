@@ -1,5 +1,11 @@
 import { Show, createEffect, onCleanup, type JSX } from 'solid-js'
-import { popOverlay, pushOverlay, restoreFocus, type OverlayEntry } from './overlay/stack'
+import {
+  popOverlay,
+  pushOverlay,
+  restoreFocus,
+  topOverlayElement,
+  type OverlayEntry,
+} from './overlay/stack'
 
 export interface PromptProps {
   open: boolean
@@ -39,9 +45,25 @@ function focusInitial(panel: HTMLElement): void {
 export function Prompt(props: PromptProps) {
   let element: HTMLDivElement | undefined
   let entry: OverlayEntry | null = null
+  /**
+   * The overlay this prompt renders INSIDE while open, or null to render in
+   * place. A modal `<dialog>` lives in the browser's top layer, which is
+   * above every z-index in the normal layer by definition — being on top of
+   * a top-layer element is not a number, it is a parent. So when the prompt
+   * opens over something (a Dialog, another Prompt), its overlay element is
+   * moved to be a DOM child of that thing: the same mechanism that makes
+   * the connection editor's own password prompt appear above its dialog,
+   * which it is by virtue of being a DOM child of the dialog.
+   *
+   * Captured BEFORE pushOverlay: once the prompt is on the stack, the
+   * topmost overlay element is the prompt itself.
+   */
+  let host: HTMLElement | null = null
 
   createEffect(() => {
     if (props.open && !entry) {
+      const h = topOverlayElement()
+      host = h && h !== element ? h : null
       const onClose = props.onClose
       entry = pushOverlay(
         () => {
@@ -53,11 +75,13 @@ export function Prompt(props: PromptProps) {
       )
       // Escape is supplied by the overlay stack's document-level handler —
       // it closes the topmost overlay, which is this prompt.
+      if (host && element && !host.contains(element)) host.appendChild(element)
       if (element) focusInitial(element)
     } else if (!props.open && entry) {
       popOverlay(entry)
       restoreFocus(entry)
       entry = null
+      host = null
     }
   })
 

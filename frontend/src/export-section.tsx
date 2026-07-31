@@ -405,7 +405,7 @@ function ImportActions(props: { profileClient: ProfileClient; vaultController?: 
 
       if (props.vaultController) {
         try {
-          await props.vaultController.saveSecretWithVault(doExecute)
+          await props.vaultController.saveSecretWithVault(doExecute, 'import connections')
         } catch (err) {
           // The user cancelled the vault prompt: nothing ran, nothing failed.
           if (err instanceof VaultOperationCancelledError) return

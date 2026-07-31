@@ -297,6 +297,38 @@ describe('createVaultState', () => {
       expect(doSave).toHaveBeenCalled()
     })
   })
+
+  it('openUnlock(reason) records the operation that triggered it', () => {
+    const { client } = mockClient()
+    const ctrl = createVaultState(client)
+
+    ctrl.openUnlock('view your secrets')
+    expect(ctrl.showUnlock()).toBe(true)
+    expect(ctrl.unlockReason()).toBe('view your secrets')
+
+    ctrl.closeUnlock()
+    expect(ctrl.showUnlock()).toBe(false)
+    expect(ctrl.unlockReason()).toBeNull()
+  })
+
+  it('ensureBeforeSave carries the reason to the unlock prompt', async () => {
+    const { client } = mockClient()
+    ;(client.status as ReturnType<typeof vi.fn>).mockResolvedValue({
+      state: 'sealed',
+      osKeyAvailable: true,
+      osKeyCapable: true,
+      autoSealMinutes: 0,
+      providers: [],
+      defaultProvider: null,
+    })
+    const ctrl = createVaultState(client)
+    const doSave = vi.fn().mockResolvedValue(undefined)
+    await ctrl.refresh()
+
+    ctrl.ensureBeforeSave(doSave, 'save this connection')
+    expect(ctrl.showUnlock()).toBe(true)
+    expect(ctrl.unlockReason()).toBe('save this connection')
+  })
 })
 
 // ── saveSecretWithVault — operation-first vault error handling ──────────
@@ -402,6 +434,34 @@ describe('saveSecretWithVault', () => {
     ctrl.onUnsealDone()
     await expect(promise).resolves.toBeUndefined()
     expect(savePassword).toHaveBeenCalledTimes(2)
+  })
+
+  it('vault-sealed: unlock reason names the operation', async () => {
+    const { client, status } = mockClient()
+    status.mockResolvedValue({
+      state: 'sealed',
+      osKeyAvailable: true,
+      hasPassphrase: false,
+      autoSealMinutes: 0,
+      providers: [],
+      defaultProvider: null,
+    })
+
+    const ctrl = createVaultState(client)
+    await ctrl.refresh()
+
+    const savePassword = vi
+      .fn<(...args: string[]) => Promise<void>>()
+      .mockRejectedValueOnce(makeRpcError('vault-sealed'))
+      .mockResolvedValueOnce(undefined)
+
+    const promise = ctrl.saveSecretWithVault(() => savePassword('my-pw'), 'save this key')
+
+    await vi.waitFor(() => expect(ctrl.showUnlock()).toBe(true))
+    expect(ctrl.unlockReason()).toBe('save this key')
+
+    ctrl.onUnsealDone()
+    await expect(promise).resolves.toBeUndefined()
   })
 
   it('non-vault error: propagates to caller', async () => {
@@ -651,7 +711,7 @@ describe('UnlockDialog', () => {
 
     const buttons = screen.getAllByText('Passphrase')
     fireEvent.click(buttons[0])
-    const input = screen.getByLabelText('Passphrase')
+    const input = screen.getByLabelText('Vault passphrase')
     fireEvent.input(input, { target: { value: 'mypass' } })
     fireEvent.click(screen.getByText('Unlock'))
 
@@ -668,7 +728,7 @@ describe('UnlockDialog', () => {
     ))
 
     fireEvent.click(screen.getByText('Recovery code'))
-    const input = screen.getByLabelText('Recovery code')
+    const input = screen.getByLabelText('Vault recovery code')
     fireEvent.input(input, { target: { value: 'ABCD-1234' } })
     fireEvent.click(screen.getByText('Unlock'))
 
@@ -687,7 +747,7 @@ describe('UnlockDialog', () => {
     fireEvent.click(buttons[0])
     fireEvent.click(screen.getByText('Unlock'))
 
-    expect(screen.getByText('Enter your passphrase')).toBeTruthy()
+    expect(screen.getByText('Enter your vault passphrase')).toBeTruthy()
     expect(unseal).not.toHaveBeenCalled()
   })
 
@@ -714,7 +774,7 @@ describe('UnlockDialog', () => {
 
     const buttons = screen.getAllByText('Passphrase')
     fireEvent.click(buttons[0])
-    const input = screen.getByLabelText('Passphrase')
+    const input = screen.getByLabelText('Vault passphrase')
     fireEvent.input(input, { target: { value: 'wrongpw' } })
     fireEvent.click(screen.getByText('Unlock'))
 
@@ -748,7 +808,7 @@ describe('UnlockDialog', () => {
     ))
 
     fireEvent.click(screen.getAllByText('Passphrase')[0])
-    const input = screen.getByLabelText('Passphrase')
+    const input = screen.getByLabelText('Vault passphrase')
     fireEvent.input(input, { target: { value: 'my-passphrase' } })
     fireEvent.keyDown(input, { key: 'Enter' })
 
@@ -778,9 +838,36 @@ describe('UnlockDialog', () => {
     fireEvent.click(screen.getAllByText('Passphrase')[0])
     fireEvent.click(screen.getByText('Unlock'))
 
-    expect(screen.getByText('Enter your passphrase')).toBeTruthy()
+    expect(screen.getByText('Enter your vault passphrase')).toBeTruthy()
     expect(document.querySelector('.ui-toast')).toBeNull()
     expect(unseal).not.toHaveBeenCalled()
+  })
+
+  // Every password prompt must say WHICH password it wants and why it is
+  // asking now (nocx-s8jn). A bare "Unlock the vault" cannot be told apart
+  // from the key and connection prompts; the reason names the operation.
+  it('names the operation that triggered it in the title', () => {
+    const { client } = mockClient()
+    render(() => (
+      <UnlockDialog
+        open={true}
+        onClose={vi.fn()}
+        vaultClient={client}
+        vaultStatus={BASE_STATUS}
+        reason="save this connection"
+      />
+    ))
+    expect(screen.getByText('Unlock the vault to save this connection')).toBeTruthy()
+    // The field says which password, not just "Passphrase".
+    expect(screen.getByLabelText('Vault passphrase')).toBeTruthy()
+  })
+
+  it('falls back to a bare title when no operation is given', () => {
+    const { client } = mockClient()
+    render(() => (
+      <UnlockDialog open={true} onClose={vi.fn()} vaultClient={client} vaultStatus={BASE_STATUS} />
+    ))
+    expect(screen.getByText('Unlock the vault')).toBeTruthy()
   })
 })
 
@@ -792,9 +879,9 @@ describe('ChangePassphraseDialog', () => {
     render(() => <ChangePassphraseDialog open={true} onClose={vi.fn()} vaultClient={client} />)
     expect(screen.getByText('I know my passphrase')).toBeTruthy()
     expect(screen.getByText('I have a recovery code')).toBeTruthy()
-    expect(screen.getByLabelText('Current passphrase')).toBeTruthy()
-    expect(screen.getByLabelText('New passphrase')).toBeTruthy()
-    expect(screen.getByLabelText('Confirm new passphrase')).toBeTruthy()
+    expect(screen.getByLabelText('Current vault passphrase')).toBeTruthy()
+    expect(screen.getByLabelText('New vault passphrase')).toBeTruthy()
+    expect(screen.getByLabelText('Confirm new vault passphrase')).toBeTruthy()
   })
 
   it('calls changePassphrase with old passphrase on submit', async () => {
@@ -802,9 +889,13 @@ describe('ChangePassphraseDialog', () => {
     changePassphrase.mockResolvedValue({})
     render(() => <ChangePassphraseDialog open={true} onClose={vi.fn()} vaultClient={client} />)
 
-    fireEvent.input(screen.getByLabelText('Current passphrase'), { target: { value: 'oldpw' } })
-    fireEvent.input(screen.getByLabelText('New passphrase'), { target: { value: 'newpw' } })
-    fireEvent.input(screen.getByLabelText('Confirm new passphrase'), { target: { value: 'newpw' } })
+    fireEvent.input(screen.getByLabelText('Current vault passphrase'), {
+      target: { value: 'oldpw' },
+    })
+    fireEvent.input(screen.getByLabelText('New vault passphrase'), { target: { value: 'newpw' } })
+    fireEvent.input(screen.getByLabelText('Confirm new vault passphrase'), {
+      target: { value: 'newpw' },
+    })
     fireEvent.click(screen.getByText('Change passphrase'))
 
     await vi.waitFor(() => {
@@ -820,9 +911,9 @@ describe('ChangePassphraseDialog', () => {
     render(() => <ChangePassphraseDialog open={true} onClose={vi.fn()} vaultClient={client} />)
 
     fireEvent.click(screen.getByText('I have a recovery code'))
-    expect(() => screen.getByLabelText('Current passphrase')).toThrow()
-    expect(screen.getByLabelText('Recovery code')).toBeTruthy()
-    expect(screen.getByLabelText('New passphrase')).toBeTruthy()
+    expect(() => screen.getByLabelText('Current vault passphrase')).toThrow()
+    expect(screen.getByLabelText('Vault recovery code')).toBeTruthy()
+    expect(screen.getByLabelText('New vault passphrase')).toBeTruthy()
   })
 
   it('calls changePassphrase with recovery code in recovery mode', async () => {
@@ -831,9 +922,13 @@ describe('ChangePassphraseDialog', () => {
     render(() => <ChangePassphraseDialog open={true} onClose={vi.fn()} vaultClient={client} />)
 
     fireEvent.click(screen.getByText('I have a recovery code'))
-    fireEvent.input(screen.getByLabelText('Recovery code'), { target: { value: 'ABCD-1234' } })
-    fireEvent.input(screen.getByLabelText('New passphrase'), { target: { value: 'newpw' } })
-    fireEvent.input(screen.getByLabelText('Confirm new passphrase'), { target: { value: 'newpw' } })
+    fireEvent.input(screen.getByLabelText('Vault recovery code'), {
+      target: { value: 'ABCD-1234' },
+    })
+    fireEvent.input(screen.getByLabelText('New vault passphrase'), { target: { value: 'newpw' } })
+    fireEvent.input(screen.getByLabelText('Confirm new vault passphrase'), {
+      target: { value: 'newpw' },
+    })
     fireEvent.click(screen.getByText('Change passphrase'))
 
     await vi.waitFor(() => {
@@ -848,9 +943,11 @@ describe('ChangePassphraseDialog', () => {
     const { client, changePassphrase } = mockClient()
     render(() => <ChangePassphraseDialog open={true} onClose={vi.fn()} vaultClient={client} />)
 
-    fireEvent.input(screen.getByLabelText('Current passphrase'), { target: { value: 'oldpw' } })
-    fireEvent.input(screen.getByLabelText('New passphrase'), { target: { value: 'newpw' } })
-    fireEvent.input(screen.getByLabelText('Confirm new passphrase'), {
+    fireEvent.input(screen.getByLabelText('Current vault passphrase'), {
+      target: { value: 'oldpw' },
+    })
+    fireEvent.input(screen.getByLabelText('New vault passphrase'), { target: { value: 'newpw' } })
+    fireEvent.input(screen.getByLabelText('Confirm new vault passphrase'), {
       target: { value: 'different' },
     })
     fireEvent.click(screen.getByText('Change passphrase'))
@@ -864,9 +961,13 @@ describe('ChangePassphraseDialog', () => {
     changePassphrase.mockRejectedValue(new RpcError('wrong', -32000, { reason: 'denied' }))
     render(() => <ChangePassphraseDialog open={true} onClose={vi.fn()} vaultClient={client} />)
 
-    fireEvent.input(screen.getByLabelText('Current passphrase'), { target: { value: 'wrong' } })
-    fireEvent.input(screen.getByLabelText('New passphrase'), { target: { value: 'newpw' } })
-    fireEvent.input(screen.getByLabelText('Confirm new passphrase'), { target: { value: 'newpw' } })
+    fireEvent.input(screen.getByLabelText('Current vault passphrase'), {
+      target: { value: 'wrong' },
+    })
+    fireEvent.input(screen.getByLabelText('New vault passphrase'), { target: { value: 'newpw' } })
+    fireEvent.input(screen.getByLabelText('Confirm new vault passphrase'), {
+      target: { value: 'newpw' },
+    })
     fireEvent.click(screen.getByText('Change passphrase'))
 
     await vi.waitFor(() => {
@@ -881,7 +982,7 @@ describe('RecoveryCodeDialog', () => {
   it('shows passphrase input first', () => {
     const { client } = mockClient()
     render(() => <RecoveryCodeDialog open={true} onClose={vi.fn()} vaultClient={client} />)
-    expect(screen.getByLabelText('Current passphrase')).toBeTruthy()
+    expect(screen.getByLabelText('Current vault passphrase')).toBeTruthy()
     expect(screen.getByText('Generate new recovery code')).toBeTruthy()
   })
 
@@ -891,7 +992,9 @@ describe('RecoveryCodeDialog', () => {
     const onClose = vi.fn()
     render(() => <RecoveryCodeDialog open={true} onClose={onClose} vaultClient={client} />)
 
-    fireEvent.input(screen.getByLabelText('Current passphrase'), { target: { value: 'mypw' } })
+    fireEvent.input(screen.getByLabelText('Current vault passphrase'), {
+      target: { value: 'mypw' },
+    })
     fireEvent.click(screen.getByText('Generate new recovery code'))
 
     await vi.waitFor(() => {
@@ -907,7 +1010,9 @@ describe('RecoveryCodeDialog', () => {
     regenerateRecovery.mockRejectedValue(new RpcError('bad', -32000, { reason: 'denied' }))
     render(() => <RecoveryCodeDialog open={true} onClose={vi.fn()} vaultClient={client} />)
 
-    fireEvent.input(screen.getByLabelText('Current passphrase'), { target: { value: 'wrong' } })
+    fireEvent.input(screen.getByLabelText('Current vault passphrase'), {
+      target: { value: 'wrong' },
+    })
     fireEvent.click(screen.getByText('Generate new recovery code'))
 
     await vi.waitFor(() => {
@@ -920,7 +1025,9 @@ describe('RecoveryCodeDialog', () => {
     regenerateRecovery.mockResolvedValue({ recoveryCode: 'SECRET-CODE' })
     render(() => <RecoveryCodeDialog open={true} onClose={vi.fn()} vaultClient={client} />)
 
-    fireEvent.input(screen.getByLabelText('Current passphrase'), { target: { value: 'mypw' } })
+    fireEvent.input(screen.getByLabelText('Current vault passphrase'), {
+      target: { value: 'mypw' },
+    })
     fireEvent.click(screen.getByText('Generate new recovery code'))
 
     await vi.waitFor(() => {

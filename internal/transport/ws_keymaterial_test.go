@@ -104,7 +104,7 @@ func (h *keyMaterialHarness) createCredential(name string, auth profile.AuthMode
 	return got.Result.ID
 }
 
-func (h *keyMaterialHarness) saveKeyMaterial(credID, keyText string) (fingerprint string, raw json.RawMessage) {
+func (h *keyMaterialHarness) saveKeyMaterial(credID, keyText string) (fingerprint string, passphraseWanted bool, raw json.RawMessage) {
 	h.t.Helper()
 	resp := jsonrpcCall(h.t, h.conn, "credentials.saveKeyMaterial", map[string]any{
 		"credentialId": credID,
@@ -112,13 +112,22 @@ func (h *keyMaterialHarness) saveKeyMaterial(credID, keyText string) (fingerprin
 	})
 	var success struct {
 		Result struct {
-			Fingerprint string `json:"fingerprint"`
+			Fingerprint      string `json:"fingerprint"`
+			PassphraseWanted bool   `json:"passphraseWanted"`
 		} `json:"result"`
 	}
 	if err := json.Unmarshal(resp, &success); err == nil {
-		return success.Result.Fingerprint, resp
+		return success.Result.Fingerprint, success.Result.PassphraseWanted, resp
 	}
-	return "", resp
+	return "", false, resp
+}
+
+func (h *keyMaterialHarness) saveKeyPassphrase(credID, passphrase string) json.RawMessage {
+	h.t.Helper()
+	return jsonrpcCall(h.t, h.conn, "credentials.saveKeyPassphrase", map[string]any{
+		"credentialId": credID,
+		"passphrase":   passphrase,
+	})
 }
 
 func (h *keyMaterialHarness) deleteKeyMaterial(credID string) json.RawMessage {
@@ -147,28 +156,34 @@ func (h *keyMaterialHarness) loadCredential(id string) profile.Credential {
 
 func TestParsePrivateKeyMaterial_ValidUnencrypted(t *testing.T) {
 	pem, expectedFP := testPrivateKeyPEM(t)
-	fp, err := parsePrivateKeyMaterial(pem)
+	fp, wantsPassphrase, err := parsePrivateKeyMaterial(pem)
 	if err != nil {
 		t.Fatalf("parsePrivateKeyMaterial(unencrypted): %v", err)
 	}
 	if fp != expectedFP {
 		t.Fatalf("fingerprint mismatch: got %q, want %q", fp, expectedFP)
 	}
+	if wantsPassphrase {
+		t.Fatal("passphraseWanted = true for an unencrypted key")
+	}
 }
 
 func TestParsePrivateKeyMaterial_ValidEncrypted(t *testing.T) {
 	pem, expectedFP := testEncryptedKeyPEM(t, "test-passphrase")
-	fp, err := parsePrivateKeyMaterial(pem)
+	fp, wantsPassphrase, err := parsePrivateKeyMaterial(pem)
 	if err != nil {
 		t.Fatalf("parsePrivateKeyMaterial(encrypted): %v", err)
 	}
 	if fp != expectedFP {
 		t.Fatalf("fingerprint mismatch: got %q, want %q", fp, expectedFP)
 	}
+	if !wantsPassphrase {
+		t.Fatal("passphraseWanted = false for an encrypted key")
+	}
 }
 
 func TestParsePrivateKeyMaterial_InvalidText(t *testing.T) {
-	_, err := parsePrivateKeyMaterial("this is not a private key")
+	_, _, err := parsePrivateKeyMaterial("this is not a private key")
 	if err == nil {
 		t.Fatal("parsePrivateKeyMaterial should reject non-key text")
 	}
@@ -180,7 +195,7 @@ func TestParsePrivateKeyMaterial_InvalidText(t *testing.T) {
 
 // Test that arbitrary binary data is rejected.
 func TestParsePrivateKeyMaterial_BinaryData(t *testing.T) {
-	_, err := parsePrivateKeyMaterial("\x00\x01\x02\x03")
+	_, _, err := parsePrivateKeyMaterial("\x00\x01\x02\x03")
 	if err == nil {
 		t.Fatal("parsePrivateKeyMaterial should reject binary data")
 	}
@@ -193,12 +208,15 @@ func TestSaveKeyMaterial_Success(t *testing.T) {
 	credID := h.createCredential("test-key", profile.AuthPublicKey)
 
 	pem, expectedFP := testPrivateKeyPEM(t)
-	fp, raw := h.saveKeyMaterial(credID, pem)
+	fp, wantsPassphrase, raw := h.saveKeyMaterial(credID, pem)
 	if fp == "" {
 		t.Fatalf("saveKeyMaterial failed: %s", string(raw))
 	}
 	if fp != expectedFP {
 		t.Fatalf("fingerprint mismatch: got %q, want %q", fp, expectedFP)
+	}
+	if wantsPassphrase {
+		t.Fatal("saveKeyMaterial reported passphraseWanted for an unencrypted key")
 	}
 
 	// Verify credential metadata is updated.
@@ -241,12 +259,15 @@ func TestSaveKeyMaterial_EncryptedKey(t *testing.T) {
 	credID := h.createCredential("test-enc-key", profile.AuthPublicKey)
 
 	pem, expectedFP := testEncryptedKeyPEM(t, "correct-passphrase")
-	fp, raw := h.saveKeyMaterial(credID, pem)
+	fp, wantsPassphrase, raw := h.saveKeyMaterial(credID, pem)
 	if fp == "" {
 		t.Fatalf("saveKeyMaterial failed for encrypted key: %s", string(raw))
 	}
 	if fp != expectedFP {
 		t.Fatalf("fingerprint mismatch: got %q, want %q", fp, expectedFP)
+	}
+	if !wantsPassphrase {
+		t.Fatal("saveKeyMaterial did not report passphraseWanted for an encrypted key")
 	}
 
 	cred := h.loadCredential(credID)
@@ -263,7 +284,7 @@ func TestSaveKeyMaterial_RejectsInvalidText(t *testing.T) {
 	h := newKeyMaterialHarness(t)
 	credID := h.createCredential("test-invalid", profile.AuthPublicKey)
 
-	_, raw := h.saveKeyMaterial(credID, "not a valid key at all")
+	_, _, raw := h.saveKeyMaterial(credID, "not a valid key at all")
 
 	// The response should be an error with reason "invalid-key".
 	var errResp struct {
@@ -318,7 +339,7 @@ func TestSaveKeyMaterial_ClearsKeyPath(t *testing.T) {
 
 	// Save key material — should clear KeyPath.
 	pem, _ := testPrivateKeyPEM(t)
-	fp, raw := h.saveKeyMaterial(credID, pem)
+	fp, _, raw := h.saveKeyMaterial(credID, pem)
 	if fp == "" {
 		t.Fatalf("saveKeyMaterial failed: %s", string(raw))
 	}
@@ -334,10 +355,9 @@ func TestSaveKeyMaterial_ClearsKeyPath(t *testing.T) {
 func TestDeleteKeyMaterial_Success(t *testing.T) {
 	h := newKeyMaterialHarness(t)
 	credID := h.createCredential("test-del", profile.AuthPublicKey)
-
 	// Save key material first.
 	pem, _ := testPrivateKeyPEM(t)
-	fp, raw := h.saveKeyMaterial(credID, pem)
+	fp, _, raw := h.saveKeyMaterial(credID, pem)
 	if fp == "" {
 		t.Fatalf("saveKeyMaterial: %s", string(raw))
 	}
@@ -400,13 +420,11 @@ func TestDeleteKeyMaterial_Idempotent(t *testing.T) {
 
 func TestCredentialList_HasKeyMaterialFields(t *testing.T) {
 	h := newKeyMaterialHarness(t)
-
 	// Create two credentials: one with key material, one without.
 	credWithKey := h.createCredential("with-key", profile.AuthPublicKey)
 	credWithoutKey := h.createCredential("no-key", profile.AuthPassword)
-
 	pem, expectedFP := testPrivateKeyPEM(t)
-	fp, raw := h.saveKeyMaterial(credWithKey, pem)
+	fp, _, raw := h.saveKeyMaterial(credWithKey, pem)
 	if fp == "" {
 		t.Fatalf("saveKeyMaterial: %s", string(raw))
 	}
@@ -455,10 +473,9 @@ func TestCredentialList_HasKeyMaterialFields(t *testing.T) {
 func TestUpdateCredential_KeyPathClearsKeyMaterial(t *testing.T) {
 	h := newKeyMaterialHarness(t)
 	credID := h.createCredential("test-exclusive", profile.AuthPublicKey)
-
 	// Save key material.
 	pem, _ := testPrivateKeyPEM(t)
-	fp, raw := h.saveKeyMaterial(credID, pem)
+	fp, _, raw := h.saveKeyMaterial(credID, pem)
 	if fp == "" {
 		t.Fatalf("saveKeyMaterial: %s", string(raw))
 	}
@@ -507,5 +524,108 @@ func TestUpdateCredential_KeyPathClearsKeyMaterial(t *testing.T) {
 	}
 	if exists {
 		t.Error("vault secret should be deleted after setting KeyPath")
+	}
+}
+
+// --- saveKeyPassphrase verification tests ---
+
+// A passphrase that does not open the stored key must be refused there and
+// then. Storing it unverified moves the failure from a moment the user can
+// fix (the editor, with the key still on screen) to a moment they cannot
+// (the connect, where a wrong passphrase is a dead end) — the same deferred
+// lie this surface has been shedding all session.
+func TestSaveKeyPassphrase_RefusesWrongPassphrase(t *testing.T) {
+	h := newKeyMaterialHarness(t)
+	credID := h.createCredential("test-enc-key", profile.AuthPublicKey)
+
+	pem, _ := testEncryptedKeyPEM(t, "correct-passphrase")
+	_, wantsPassphrase, raw := h.saveKeyMaterial(credID, pem)
+	if !wantsPassphrase {
+		t.Fatalf("precondition failed: encrypted key not flagged: %s", string(raw))
+	}
+
+	resp := h.saveKeyPassphrase(credID, "wrong-passphrase")
+	var errResp struct {
+		Error struct {
+			Data struct {
+				Reason string `json:"reason"`
+			} `json:"data"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &errResp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if errResp.Error.Data.Reason != "invalid-key-passphrase" {
+		t.Fatalf("reason = %q, want invalid-key-passphrase", errResp.Error.Data.Reason)
+	}
+
+	// Nothing was stored: the current version still has no passphrase ref.
+	cred := h.loadCredential(credID)
+	if v, ok := cred.Current(); ok && v.PassphraseSecretID != "" {
+		t.Fatal("a refused passphrase must not be stored")
+	}
+}
+
+func TestSaveKeyPassphrase_StoresVerifiedPassphrase(t *testing.T) {
+	h := newKeyMaterialHarness(t)
+	credID := h.createCredential("test-enc-key", profile.AuthPublicKey)
+
+	pem, _ := testEncryptedKeyPEM(t, "correct-passphrase")
+	_, wantsPassphrase, raw := h.saveKeyMaterial(credID, pem)
+	if !wantsPassphrase {
+		t.Fatalf("precondition failed: encrypted key not flagged: %s", string(raw))
+	}
+
+	resp := h.saveKeyPassphrase(credID, "correct-passphrase")
+	var success struct {
+		Result bool `json:"result"`
+		Error  *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &success); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if success.Error != nil {
+		t.Fatalf("saveKeyPassphrase with the correct passphrase refused: %s", success.Error.Message)
+	}
+	if !success.Result {
+		t.Fatal("saveKeyPassphrase returned false")
+	}
+
+	cred := h.loadCredential(credID)
+	if v, ok := cred.Current(); !ok || v.PassphraseSecretID == "" {
+		t.Fatal("verified passphrase not linked to the credential")
+	}
+}
+
+// A credential with no stored key material (a path-based key, a pre-seeded
+// reference) cannot be verified at save time and keeps the prior behaviour:
+// the passphrase is stored and the connection resolves the file and the
+// passphrase together, where the key itself is the verifier.
+func TestSaveKeyPassphrase_StoresWhenNothingToVerifyAgainst(t *testing.T) {
+	h := newKeyMaterialHarness(t)
+	credID := h.createCredential("test-path-key", profile.AuthPublicKey)
+
+	resp := h.saveKeyPassphrase(credID, "some-passphrase")
+	var success struct {
+		Result bool `json:"result"`
+		Error  *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &success); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if success.Error != nil {
+		t.Fatalf("saveKeyPassphrase refused without material: %s", success.Error.Message)
+	}
+	if !success.Result {
+		t.Fatal("saveKeyPassphrase returned false")
+	}
+
+	cred := h.loadCredential(credID)
+	if v, ok := cred.Current(); !ok || v.PassphraseSecretID == "" {
+		t.Fatal("passphrase not linked to the credential")
 	}
 }

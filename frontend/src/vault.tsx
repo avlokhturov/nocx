@@ -138,23 +138,33 @@ export interface VaultController {
   showSetup: Accessor<boolean>
   /** True when the unlock dialog should be shown. */
   showUnlock: Accessor<boolean>
+  /**
+   * The operation that triggered the unlock prompt, or null. Every password
+   * prompt must say WHICH password it wants and why it is asking now
+   * (nocx-s8jn): "Unlock the vault" alone cannot be told apart from the key
+   * and connection prompts. Set by openUnlock/ensureBeforeSave/
+   * saveSecretWithVault, cleared by closeUnlock.
+   */
+  unlockReason: Accessor<string | null>
   refresh(): Promise<boolean>
   /** Preflight-based vault check — see saveSecretWithVault for the operation-first replacement. */
-  ensureBeforeSave(doSave: () => Promise<void>): void
+  ensureBeforeSave(doSave: () => Promise<void>, reason?: string): void
   /** Call when the setup dialog completes so the deferred save can run. */
   onSetupDone(): void
   /** Call when the unlock dialog completes so the deferred save can run. */
   onUnsealDone(): void
-  /** Show the unlock dialog (e.g. after a sealed-on-connect error). */
-  openUnlock(): void
+  /** Show the unlock dialog (e.g. after a sealed-on-connect error). The
+   *  reason names the operation that needs the vault open. */
+  openUnlock(reason?: string): void
   /** Show the setup dialog, for a surface offering to set protection up. */
   openSetup(): void
   closeSetup(): void
   closeUnlock(): void
   /**
-   * Runs `saveFn` and catches vault errors with dialog + retry.
+   * Runs `saveFn` and catches vault errors with dialog + retry. The reason
+   * names the operation for the unlock prompt, when a dialog is shown.
    */
-  saveSecretWithVault(saveFn: () => Promise<void>): Promise<void>
+  saveSecretWithVault(saveFn: () => Promise<void>, reason?: string): Promise<void>
   /** Seal the vault immediately. */
   seal(): Promise<void>
   /** Change the master passphrase using old passphrase or recovery code. */
@@ -174,6 +184,7 @@ export function createVaultState(vaultClient: VaultClient): VaultController {
   const [status_, setStatus] = createSignal<VaultStatus | null>(null)
   const [showSetup, setShowSetup] = createSignal(false)
   const [showUnlock, setShowUnlock] = createSignal(false)
+  const [unlockReason, setUnlockReason] = createSignal<string | null>(null)
 
   // Pending save callback — set when we defer a save to show a dialog
   let pendingSave: (() => Promise<void>) | null = null
@@ -192,7 +203,7 @@ export function createVaultState(vaultClient: VaultClient): VaultController {
     }
   }
 
-  function ensureBeforeSave(doSave: () => Promise<void>): void {
+  function ensureBeforeSave(doSave: () => Promise<void>, reason?: string): void {
     const s = status_()
     if (!s) {
       void refresh().then((ok) => {
@@ -233,6 +244,7 @@ export function createVaultState(vaultClient: VaultClient): VaultController {
 
     // sealed
     pendingSave = () => doSave()
+    setUnlockReason(reason ?? null)
     setShowUnlock(true)
   }
 
@@ -269,8 +281,9 @@ export function createVaultState(vaultClient: VaultClient): VaultController {
     void save().finally(settleAfterRetry)
   }
 
-  function openUnlock(): void {
+  function openUnlock(reason?: string): void {
     pendingSave = null
+    setUnlockReason(reason ?? null)
     setShowUnlock(true)
   }
 
@@ -310,6 +323,7 @@ export function createVaultState(vaultClient: VaultClient): VaultController {
 
   function closeUnlock(): void {
     closeDialog(() => setShowUnlock(false))
+    setUnlockReason(null)
   }
 
   /**
@@ -325,7 +339,7 @@ export function createVaultState(vaultClient: VaultClient): VaultController {
    *    the caller abandons the operation it started — the deferred save has
    *    not run and nothing may be reported as saved.
    */
-  function saveSecretWithVault(saveFn: () => Promise<void>): Promise<void> {
+  function saveSecretWithVault(saveFn: () => Promise<void>, reason?: string): Promise<void> {
     return new Promise<void>((resolve, reject) => {
       pendingResolve = resolve
       pendingReject = reject
@@ -346,16 +360,18 @@ export function createVaultState(vaultClient: VaultClient): VaultController {
               pendingReject = null
               return
             }
-            const reason = (err.data as { reason?: string } | undefined)?.reason
-            if (reason === 'vault-uninitialized') {
+            // Named rpcReason so it cannot shadow the caller's `reason` — the
+            // operation the unlock prompt must name (nocx-s8jn).
+            const rpcReason = (err.data as { reason?: string } | undefined)?.reason
+            if (rpcReason === 'vault-uninitialized') {
               void handleUninitialized(saveFn)
               return
             }
-            if (reason === 'vault-sealed') {
-              void handleSealed(saveFn)
+            if (rpcReason === 'vault-sealed') {
+              void handleSealed(saveFn, reason)
               return
             }
-            if (reason === 'vault-changed' && !retriedOnce) {
+            if (rpcReason === 'vault-changed' && !retriedOnce) {
               // The vault moved under the write — sealed and re-opened, or the
               // default store changed — so the result was discarded. Unlocking
               // does not fix this and asking the user to would be the endless
@@ -424,7 +440,7 @@ export function createVaultState(vaultClient: VaultClient): VaultController {
   }
 
   /** Handle a vault-sealed error: show UnlockDialog, retry on completion. */
-  function handleSealed(saveFn: () => Promise<void>): void {
+  function handleSealed(saveFn: () => Promise<void>, reason?: string): void {
     void refresh()
     pendingSave = (): Promise<void> => {
       return saveFn().then(
@@ -441,6 +457,7 @@ export function createVaultState(vaultClient: VaultClient): VaultController {
       )
     }
 
+    setUnlockReason(reason ?? null)
     setShowUnlock(true)
   }
 
@@ -472,6 +489,7 @@ export function createVaultState(vaultClient: VaultClient): VaultController {
     status: status_,
     showSetup,
     showUnlock,
+    unlockReason,
     refresh,
     ensureBeforeSave,
     onSetupDone,
@@ -865,6 +883,13 @@ export interface UnlockDialogProps {
   onUnsealed?: () => void
   vaultClient: VaultClient
   vaultStatus: VaultStatus | null
+  /**
+   * The operation the unlock is needed for, or null for a bare "Unlock the
+   * vault". Every password prompt must say WHICH password it wants and why it
+   * is asking now (nocx-s8jn): "Unlock the vault" cannot be told apart from
+   * the key and connection prompts a user meets a week later.
+   */
+  reason?: string | null
 }
 
 export const UnlockDialog: Component<UnlockDialogProps> = (props) => {
@@ -898,7 +923,7 @@ export const UnlockDialog: Component<UnlockDialogProps> = (props) => {
     // anything. The OUTCOME of the call is a different kind of message and
     // goes where every other outcome on these surfaces goes — a toast.
     if (m !== 'os' && !secret()) {
-      const lbl = m === 'passphrase' ? 'passphrase' : 'recovery code'
+      const lbl = m === 'passphrase' ? 'vault passphrase' : 'vault recovery code'
       setError(`Enter your ${lbl}`)
       return
     }
@@ -951,13 +976,15 @@ export const UnlockDialog: Component<UnlockDialogProps> = (props) => {
         <p class="ui-vault-desc-text">Unlock with your system keychain — no passphrase needed.</p>
       )
     }
-    const label = m === 'passphrase' ? 'Passphrase' : 'Recovery code'
+    const label = m === 'passphrase' ? 'Vault passphrase' : 'Vault recovery code'
+    const placeholder = m === 'passphrase' ? 'Your vault passphrase' : 'Your vault recovery code'
     const inputId = m === 'passphrase' ? 'vault-unlock-passphrase' : 'vault-unlock-recovery'
     return (
       <Stack>
         <TextField
           id={inputId}
           label={label}
+          placeholder={placeholder}
           type="password"
           value={secret()}
           onInput={(v) => {
@@ -978,9 +1005,12 @@ export const UnlockDialog: Component<UnlockDialogProps> = (props) => {
         reset()
         props.onClose()
       }}
-      ariaLabel="Unlock Vault"
+      // The title says WHICH password and WHY (nocx-s8jn): a bare "Unlock the
+      // vault" cannot be told apart from the key and connection prompts, and
+      // the reason names the operation that made the app ask now.
+      ariaLabel={props.reason ? `Unlock the vault to ${props.reason}` : 'Unlock the vault'}
       placement="top-sheet"
-      title="Unlock Vault"
+      title={props.reason ? `Unlock the vault to ${props.reason}` : 'Unlock the vault'}
       // Enter unlocks, supplied by the Prompt's onSubmit — the same contract
       // Dialog offered. The one control a user reaches for reflexively in a
       // passphrase prompt must not do nothing.
@@ -1042,7 +1072,7 @@ export const ChangePassphraseDialog: Component<ChangePassphraseDialogProps> = (p
     setError('')
     const np = newPassphrase()
     if (!np) {
-      setError('Enter a new passphrase')
+      setError('Enter a new vault passphrase')
       return
     }
     if (np !== confirmPassphrase()) {
@@ -1052,7 +1082,7 @@ export const ChangePassphraseDialog: Component<ChangePassphraseDialogProps> = (p
 
     const m = mode()
     if (m === 'passphrase' && !oldPassphrase()) {
-      setError('Enter your current passphrase')
+      setError('Enter your current vault passphrase')
       return
     }
     if (m === 'recovery' && !recoveryCode()) {
@@ -1138,7 +1168,7 @@ export const ChangePassphraseDialog: Component<ChangePassphraseDialogProps> = (p
         <Show when={mode() === 'passphrase'}>
           <TextField
             id="vault-change-old-passphrase"
-            label="Current passphrase"
+            label="Current vault passphrase"
             type="password"
             value={oldPassphrase()}
             onInput={(v) => {
@@ -1151,7 +1181,7 @@ export const ChangePassphraseDialog: Component<ChangePassphraseDialogProps> = (p
         <Show when={mode() === 'recovery'}>
           <TextField
             id="vault-change-recovery"
-            label="Recovery code"
+            label="Vault recovery code"
             type="password"
             value={recoveryCode()}
             onInput={(v) => {
@@ -1164,7 +1194,7 @@ export const ChangePassphraseDialog: Component<ChangePassphraseDialogProps> = (p
 
         <TextField
           id="vault-change-new-passphrase"
-          label="New passphrase"
+          label="New vault passphrase"
           type="password"
           value={newPassphrase()}
           onInput={(v) => {
@@ -1174,7 +1204,7 @@ export const ChangePassphraseDialog: Component<ChangePassphraseDialogProps> = (p
         />
         <TextField
           id="vault-change-confirm-passphrase"
-          label="Confirm new passphrase"
+          label="Confirm new vault passphrase"
           type="password"
           value={confirmPassphrase()}
           onInput={(v) => {
@@ -1219,7 +1249,7 @@ export const RecoveryCodeDialog: Component<RecoveryCodeDialogProps> = (props) =>
 
   const handleGenerate = async () => {
     if (!passphrase()) {
-      setError('Enter your passphrase')
+      setError('Enter your vault passphrase')
       return
     }
     setError('')
@@ -1284,7 +1314,7 @@ export const RecoveryCodeDialog: Component<RecoveryCodeDialogProps> = (props) =>
         <Stack>
           <TextField
             id="vault-reissue-passphrase"
-            label="Current passphrase"
+            label="Current vault passphrase"
             type="password"
             value={passphrase()}
             onInput={(v) => {
@@ -1531,7 +1561,8 @@ export function VaultSection(props: VaultSectionProps) {
                 disabled={s().state === 'unsealed' && sealing()}
                 onClick={() => {
                   if (s().state === 'uninitialized') setDialog('setup')
-                  else if (s().state === 'sealed') props.vaultController.openUnlock()
+                  else if (s().state === 'sealed')
+                    props.vaultController.openUnlock('change your vault settings')
                   else void handleSeal()
                 }}
               >

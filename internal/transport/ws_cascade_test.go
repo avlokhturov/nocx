@@ -174,6 +174,26 @@ func TestDeleteCascade_RemovesKeyPassphrase(t *testing.T) {
 		Name: "cascade-pp", Username: "bob", Auth: "publicKey",
 	})
 
+	// A passphrase is only storable once it can be verified against the key
+	// material — save an encrypted key first, then its passphrase.
+	pem, _ := testEncryptedKeyPEM(t, "cascade-passphrase-secret")
+	keyResp := jsonrpcCall(h.t, h.conn, "credentials.saveKeyMaterial", map[string]any{
+		"credentialId": id,
+		"keyText":      pem,
+	})
+	var keyGot struct {
+		Result struct {
+			Fingerprint      string `json:"fingerprint"`
+			PassphraseWanted bool   `json:"passphraseWanted"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(keyResp, &keyGot); err != nil || keyGot.Result.Fingerprint == "" {
+		h.t.Fatalf("precondition: saveKeyMaterial failed: %v\nraw: %s", err, string(keyResp))
+	}
+	if !keyGot.Result.PassphraseWanted {
+		h.t.Fatal("precondition: encrypted key not flagged as wanting a passphrase")
+	}
+
 	ppID := h.savePassphraseViaRPC(id, "cascade-passphrase-secret")
 
 	got, err := h.cs.Get(context.Background(), ppID)

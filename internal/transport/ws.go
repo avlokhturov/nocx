@@ -1770,6 +1770,19 @@ func (s *WSServer) handleCredentialMethod(wconn *wsConn, req jsonrpcRequest) {
 			return
 		}
 		if err := s.savePassphraseForCredential(params.CredentialID, params.Passphrase, params.Name); err != nil {
+			var invalidPass *errInvalidKeyPassphrase
+			if errors.As(err, &invalidPass) {
+				_ = wconn.writeJSON(jsonrpcResponse{
+					JSONRPC: "2.0",
+					ID:      req.ID,
+					Error: &jsonrpcErrorObj{
+						Code:    -32603,
+						Message: err.Error(),
+						Data:    &vaultErrorData{Reason: "invalid-key-passphrase"},
+					},
+				})
+				return
+			}
 			_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "", err))
 			return
 		}
@@ -1801,7 +1814,7 @@ func (s *WSServer) handleCredentialMethod(wconn *wsConn, req jsonrpcRequest) {
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: credentialId required"))
 			return
 		}
-		fingerprint, err := s.saveKeyMaterialForCredential(params.CredentialID, params.KeyText, params.Name)
+		fingerprint, passphraseWanted, err := s.saveKeyMaterialForCredential(params.CredentialID, params.KeyText, params.Name)
 		if err != nil {
 			var invalidKey *errInvalidKeyMaterial
 			if errors.As(err, &invalidKey) {
@@ -1819,7 +1832,10 @@ func (s *WSServer) handleCredentialMethod(wconn *wsConn, req jsonrpcRequest) {
 			_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "", err))
 			return
 		}
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(map[string]string{"fingerprint": fingerprint})))
+		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(saveKeyMaterialResult{
+			Fingerprint:      fingerprint,
+			PassphraseWanted: passphraseWanted,
+		})))
 	case "credentials.deleteKeyMaterial":
 		var params struct {
 			CredentialID string `json:"credentialId"`
@@ -1950,28 +1966,44 @@ func (s *WSServer) hasPasswordForCredential(credID string) (bool, error) {
 
 // errInvalidKeyMaterial is returned when key text does not parse as a private
 // key. It maps to error.data.reason: "invalid-key" in the JSON-RPC response.
-type errInvalidKeyMaterial struct{ msg string }
+type (
+	errInvalidKeyMaterial struct{ msg string }
+	// saveKeyMaterialResult is the credentials.saveKeyMaterial result. Declared
+	// here and validated against contracts/credentials.saveKeyMaterial.schema.json
+	// in ws_contract_test.go: the renderer's type is generated from the schema, so
+	// a field this struct carries but the schema does not would fail the DTO test,
+	// and a field the renderer needs that this struct omits would fail the
+	// over-the-wire test.
+	saveKeyMaterialResult struct {
+		Fingerprint      string `json:"fingerprint"`
+		PassphraseWanted bool   `json:"passphraseWanted"`
+	}
+)
+
+// errInvalidKeyPassphrase is returned when a key passphrase cannot be stored:
+// it does not open the stored key, or there is no stored key to verify it
+// against. Maps to error.data.reason: "invalid-key-passphrase".
+type errInvalidKeyPassphrase struct{ msg string }
+
+func (e *errInvalidKeyPassphrase) Error() string { return e.msg }
 
 func (e *errInvalidKeyMaterial) Error() string { return e.msg }
 
 // parsePrivateKeyMaterial validates and extracts the SHA256 fingerprint from
-// private key PEM text. Returns the fingerprint (empty for encrypted keys
-// whose public half is unavailable) or an *errInvalidKeyMaterial if the text
-// is not a valid private key.
-// parsePrivateKeyMaterial validates and extracts the SHA256 fingerprint from
-// private key PEM text. Returns the fingerprint (empty for encrypted keys
-// whose public half is unavailable) or an *errInvalidKeyMaterial if the text
-// is not a valid private key.
-func parsePrivateKeyMaterial(keyText string) (fingerprint string, err error) {
+// private key PEM text. passphraseWanted reports an encrypted key whose
+// passphrase has not been stored — the renderer must ask for it, and a wrong
+// one is refused against the key. Returns an *errInvalidKeyMaterial if the
+// text is not a valid private key.
+func parsePrivateKeyMaterial(keyText string) (fingerprint string, passphraseWanted bool, err error) {
 	keyBytes := []byte(keyText)
 	parsed, parseErr := gossh.ParseRawPrivateKey(keyBytes)
 	if parseErr == nil {
 		// Unencrypted key — wrap as signer and extract fingerprint.
 		signer, signerErr := gossh.NewSignerFromKey(parsed)
 		if signerErr != nil {
-			return "", &errInvalidKeyMaterial{msg: fmt.Sprintf("cannot create signer from key: %v", signerErr)}
+			return "", false, &errInvalidKeyMaterial{msg: fmt.Sprintf("cannot create signer from key: %v", signerErr)}
 		}
-		return gossh.FingerprintSHA256(signer.PublicKey()), nil
+		return gossh.FingerprintSHA256(signer.PublicKey()), false, nil
 	}
 
 	// Encrypted or otherwise unparseable.
@@ -1979,9 +2011,8 @@ func parsePrivateKeyMaterial(keyText string) (fingerprint string, err error) {
 	if errors.As(parseErr, &passErr) {
 		if passErr.PublicKey != nil {
 			// OpenSSH format encrypted key — public half is readable.
-			return gossh.FingerprintSHA256(passErr.PublicKey), nil
+			return gossh.FingerprintSHA256(passErr.PublicKey), true, nil
 		}
-		// Traditional PEM-encrypted key — no public half available.
 		// Traditional PEM-encrypted key: readable, usable, and its public half
 		// is behind the passphrase we were not given.
 		//
@@ -1995,33 +2026,35 @@ func parsePrivateKeyMaterial(keyText string) (fingerprint string, err error) {
 		//
 		// The fingerprint is left empty, which this function's own contract
 		// has always permitted. Empty means unknown-until-unlocked, not
-		// absent: nothing downstream may treat it as an identity.
-		return "", nil
+		// absent: nothing downstream may treat it as an identity. The renderer
+		// is told it wants a passphrase, so the empty fingerprint is never a
+		// silent absence.
+		return "", true, nil
 	}
 
-	return "", &errInvalidKeyMaterial{msg: fmt.Sprintf("not a valid private key: %v", parseErr)}
+	return "", false, &errInvalidKeyMaterial{msg: fmt.Sprintf("not a valid private key: %v", parseErr)}
 }
 
-func (s *WSServer) saveKeyMaterialForCredential(credID, keyText, name string) (string, error) {
+func (s *WSServer) saveKeyMaterialForCredential(credID, keyText, name string) (fingerprint string, passphraseWanted bool, err error) {
 	if s.credMeta == nil {
-		return "", errors.New("profiles not available")
+		return "", false, errors.New("profiles not available")
 	}
 	if s.credentials == nil {
-		return "", errors.New("secret store not available")
+		return "", false, errors.New("secret store not available")
 	}
 
 	cred, ok, err := s.findCredentialByID(credID)
 	if err != nil {
-		return "", fmt.Errorf("load credential %s: %w", credID, err)
+		return "", false, fmt.Errorf("load credential %s: %w", credID, err)
 	}
 	if !ok {
-		return "", fmt.Errorf("credential %s not found", credID)
+		return "", false, fmt.Errorf("credential %s not found", credID)
 	}
 
 	// Parse and validate the key text before storing anything.
-	fingerprint, err := parsePrivateKeyMaterial(keyText)
+	fingerprint, passphraseWanted, err = parsePrivateKeyMaterial(keyText)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 
 	// Store the key material in the vault (write-before-repoint).
@@ -2029,7 +2062,7 @@ func (s *WSServer) saveKeyMaterialForCredential(credID, keyText, name string) (s
 	newID, err := s.createSecret(ctx, credential.NewSecret(keyText),
 		vault.SecretMeta{Name: name, Kind: vault.KindPrivateKey})
 	if err != nil {
-		return "", fmt.Errorf("store key material: %w", err)
+		return "", false, fmt.Errorf("store key material: %w", err)
 	}
 
 	// Determine old key material ref for cleanup.
@@ -2041,7 +2074,7 @@ func (s *WSServer) saveKeyMaterialForCredential(credID, keyText, name string) (s
 	// Update credential metadata: set key material ref, fingerprint, and
 	// clear KeyPath (the store method handles the mutual exclusion).
 	if err := s.credMeta.UpdateCurrentVersionKeyMaterial(credID, string(newID), fingerprint); err != nil {
-		return "", fmt.Errorf("save credential metadata: %w", err)
+		return "", false, fmt.Errorf("save credential metadata: %w", err)
 	}
 
 	// Best-effort delete of the old key material.
@@ -2049,7 +2082,7 @@ func (s *WSServer) saveKeyMaterialForCredential(credID, keyText, name string) (s
 		_ = s.credentials.Delete(ctx, oldID)
 	}
 
-	return fingerprint, nil
+	return fingerprint, passphraseWanted, nil
 }
 
 // deleteKeyMaterialForCredential removes the stored key material from the
@@ -2091,9 +2124,20 @@ func (s *WSServer) deleteKeyMaterialForCredential(credID string) error {
 	return nil
 }
 
-// savePassphraseForCredential stores a key passphrase secret and updates the
-// current version's passphrase reference. Same write-before-repoint pattern.
-// name is the generated display name the connection editor sent (ADR-0016).
+// savePassphraseForCredential verifies a key passphrase against the stored
+// key material when there is any, then stores it and updates the current
+// version's passphrase reference. Same write-before-repoint pattern. name is
+// the generated display name the connection editor sent (ADR-0016).
+//
+// Verification is the point, not the asking: gossh.ParsePrivateKeyWithPassphrase
+// answers whether a passphrase opens a key, and storing an unverified
+// passphrase moves the failure from a moment the user can fix (the editor,
+// with the key still on screen) to a moment they cannot (the connect, where a
+// wrong passphrase is a dead end). A passphrase that does not open the stored
+// key is refused there and then. A credential with no stored key material
+// (a path-based key, a pre-seeded reference) cannot be verified at save time
+// and keeps the prior behaviour — the connection resolves the file and the
+// passphrase together, where the key itself is the verifier.
 func (s *WSServer) savePassphraseForCredential(credID, passphrase, name string) error {
 	if s.credMeta == nil {
 		return errors.New("profiles not available")
@@ -2104,6 +2148,10 @@ func (s *WSServer) savePassphraseForCredential(credID, passphrase, name string) 
 	}
 	if !ok {
 		return fmt.Errorf("credential %s not found", credID)
+	}
+
+	if err = s.verifyKeyPassphrase(cred, []byte(passphrase)); err != nil {
+		return err
 	}
 
 	ctx := context.Background()
@@ -2127,6 +2175,41 @@ func (s *WSServer) savePassphraseForCredential(credID, passphrase, name string) 
 
 	if oldID != "" {
 		_ = s.credentials.Delete(ctx, oldID)
+	}
+	return nil
+}
+
+// verifyKeyPassphrase answers whether the passphrase opens the credential's
+// stored key material. Returns an *errInvalidKeyPassphrase when it does not.
+// With no stored key material there is nothing to verify against — nil, so
+// the save proceeds for path-based keys, whose connect-time resolution pairs
+// the file with the passphrase and verifies them together.
+func (s *WSServer) verifyKeyPassphrase(cred profile.Credential, passphrase []byte) error {
+	if s.credentials == nil {
+		return &errInvalidKeyPassphrase{msg: "secret store not available"}
+	}
+	v, ok := cred.Current()
+	if !ok || v.KeyMaterialSecretID == "" {
+		return nil
+	}
+	secret, err := s.credentials.Get(context.Background(), credential.SecretID(v.KeyMaterialSecretID))
+	if err != nil {
+		return fmt.Errorf("load key material: %w", err)
+	}
+	if secret.IsEmpty() {
+		return nil
+	}
+
+	var opens bool
+	if err := secret.Use(func(keyBytes []byte) error {
+		_, parseErr := gossh.ParsePrivateKeyWithPassphrase(keyBytes, passphrase)
+		opens = parseErr == nil
+		return nil
+	}); err != nil {
+		return fmt.Errorf("read key material: %w", err)
+	}
+	if !opens {
+		return &errInvalidKeyPassphrase{msg: "that passphrase does not open this key"}
 	}
 	return nil
 }

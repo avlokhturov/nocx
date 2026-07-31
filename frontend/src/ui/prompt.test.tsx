@@ -2,6 +2,7 @@
 import { cleanup, fireEvent, render } from '@solidjs/testing-library'
 import { createSignal } from 'solid-js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { Dialog } from './dialog'
 import { Prompt } from './prompt'
 import { ToastHost, clearToasts, showToast } from './toast'
 
@@ -178,5 +179,101 @@ describe('Prompt', () => {
       expect(toast).toBeTruthy()
       expect(toast!.closest('.ui-prompt-overlay')).not.toBeNull()
     })
+  })
+
+  // ── Layering: the reported bug, in a test ────────────────────────────
+  // A Prompt is a plain div in the normal layer, while Dialog uses
+  // showModal() and renders in the browser's top layer — which is above
+  // every z-index in the normal layer by definition. A prompt opened while
+  // a dialog is up therefore painted UNDER the dialog's backdrop: the user
+  // saw the dialog, heard the prompt, and could not type. Being above a
+  // top-layer element is not a number, it is a parent — so the prompt must
+  // render as a child of the topmost open overlay, exactly like the
+  // connection editor's own password prompt, which is a DOM child of the
+  // dialog and appears correctly.
+
+  it('renders inside the topmost open overlay, so a dialog never covers it', () => {
+    const [open, setOpen] = createSignal(false)
+    const { container } = render(() => (
+      <>
+        <Dialog open onClose={() => undefined} title="New Connection">
+          Body
+        </Dialog>
+        <Prompt open={open()} ariaLabel="Password" onClose={() => setOpen(false)} actions={null}>
+          Secret
+        </Prompt>
+      </>
+    ))
+
+    // The dialog registered itself while the prompt was closed. Opening the
+    // prompt now must place it inside the dialog element.
+    setOpen(true)
+
+    const overlay = container.querySelector('.ui-prompt-overlay')
+    expect(overlay).toBeTruthy()
+    expect(overlay!.closest('dialog.nocx-dialog')).not.toBeNull()
+  })
+
+  it('renders in place when no overlay is open', () => {
+    const [open, setOpen] = createSignal(false)
+    const { container } = render(() => (
+      <Prompt open={open()} ariaLabel="Password" onClose={() => setOpen(false)} actions={null}>
+        Secret
+      </Prompt>
+    ))
+
+    setOpen(true)
+    expect(container.querySelector('.ui-prompt-overlay')).toBeTruthy()
+    expect(container.querySelector('.ui-prompt-overlay')!.closest('dialog')).toBeNull()
+  })
+
+  // Moving the prompt inside the dialog puts its scrim on top of the dialog's
+  // own, so one mousedown lands on both. Dismissing "which passphrase?" must
+  // not take the connection editor that asked for it down with it — the same
+  // exemption the toast host already has, for the same reason.
+  it('dismissing a hosted prompt leaves the dialog beneath it open', () => {
+    const [open, setOpen] = createSignal(false)
+    const onDialogClose = vi.fn()
+    const { container } = render(() => (
+      <>
+        <Dialog open onClose={onDialogClose} title="New Connection">
+          Body
+        </Dialog>
+        <Prompt open={open()} ariaLabel="Password" onClose={() => setOpen(false)} actions={null}>
+          Secret
+        </Prompt>
+      </>
+    ))
+    setOpen(true)
+
+    const overlay = container.querySelector('.ui-prompt-overlay')!
+    // Real coordinates: the dialog's light dismiss compares against the
+    // panel's box and ignores a 0,0 click as keyboard-activated.
+    fireEvent.mouseDown(overlay, { clientX: 5, clientY: 5 })
+
+    expect(container.querySelector('.ui-prompt-overlay')).toBeNull()
+    expect(onDialogClose).not.toHaveBeenCalled()
+  })
+
+  // The prompt's element is appended into the dialog, so it no longer sits
+  // where Solid put it. Closing must still remove it — a detached overlay
+  // would sit over the app forever, invisible to the stack that popped it.
+  it('removes a hosted prompt from the dialog when it closes', () => {
+    const [open, setOpen] = createSignal(false)
+    render(() => (
+      <>
+        <Dialog open onClose={() => undefined} title="New Connection">
+          Body
+        </Dialog>
+        <Prompt open={open()} ariaLabel="Password" onClose={() => setOpen(false)} actions={null}>
+          Secret
+        </Prompt>
+      </>
+    ))
+
+    setOpen(true)
+    expect(document.querySelector('.ui-prompt-overlay')).toBeTruthy()
+    setOpen(false)
+    expect(document.querySelector('.ui-prompt-overlay')).toBeNull()
   })
 })

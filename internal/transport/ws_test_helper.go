@@ -13,12 +13,12 @@ import (
 // It implements the new interface (Create/Get/Delete/Exists with context).
 type memSecretStore struct {
 	mu sync.Mutex
-	m  map[credential.SecretID]*[32]byte
+	m  map[credential.SecretID][]byte
 }
 
 // newTestStore returns a fresh in-memory secret store.
 func newTestStore() *memSecretStore {
-	return &memSecretStore{m: make(map[credential.SecretID]*[32]byte)}
+	return &memSecretStore{m: make(map[credential.SecretID][]byte)}
 }
 
 func (s *memSecretStore) Create(_ context.Context, value credential.Secret) (credential.SecretID, error) {
@@ -29,14 +29,14 @@ func (s *memSecretStore) Create(_ context.Context, value credential.Secret) (cre
 		return "", err
 	}
 	id := credential.SecretID(hex.EncodeToString(idB[:]))
-	var buf [32]byte
+	buf := []byte(nil)
 	if err := value.Use(func(b []byte) error {
-		copy(buf[:], b)
+		buf = append(buf, b...)
 		return nil
 	}); err != nil {
 		return "", err
 	}
-	s.m[id] = &buf
+	s.m[id] = buf
 	return id, nil
 }
 
@@ -47,7 +47,7 @@ func (s *memSecretStore) Get(_ context.Context, id credential.SecretID) (credent
 	if !ok {
 		return credential.Secret{}, nil
 	}
-	return credential.NewSecretBytes(buf[:]), nil
+	return credential.NewSecretBytes(buf), nil
 }
 
 func (s *memSecretStore) Delete(_ context.Context, id credential.SecretID) error {
