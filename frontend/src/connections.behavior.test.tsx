@@ -618,6 +618,60 @@ describe('three-way key input — connection editor', () => {
     expect(saveKeyMatSpy).not.toHaveBeenCalled()
   })
 
+  // Choosing a file must STORE THE KEY, not a filename. It used to read
+  // `File.path` — an Electron extension present in neither a browser nor a
+  // Wails webview — so the fallback fired every time and `id_ed25519` was
+  // saved as if it were a path to a key. Broken on every target, and no test
+  // asked what the mode actually produced.
+  it('choose-file mode stores the file contents as key material, not its name', async () => {
+    const { container, client } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    const saveKeyMatSpy = vi
+      .spyOn(client, 'saveKeyMaterial')
+      .mockResolvedValue({ fingerprint: 'SHA256:abc123' })
+    const updateSpy = vi.spyOn(client, 'updateProfile')
+    vi.spyOn(client, 'createCredential').mockResolvedValue({
+      id: 'cred:keymat',
+      name: 'prod-web',
+      username: 'deploy',
+      auth: 'publicKey',
+    })
+
+    await waitForProfiles(container, 1)
+    await openProfileEditor(container, 'prod-web')
+    selectProfileSection(container, 'Authentication')
+    clickSegmentedOption(container, 'Public Key')
+    clickSegmentedOption(container, 'Choose file')
+
+    const KEY = '-----BEGIN PRIVATE KEY-----\nfrom-a-file\n-----END PRIVATE KEY-----'
+    const native = container.querySelector('.ui-file-input__native') as HTMLInputElement
+    expect(native, 'file input not found').toBeTruthy()
+    const file = new File([KEY], 'id_ed25519', { type: 'text/plain' })
+    Object.defineProperty(native, 'files', { value: [file], configurable: true })
+    fireEvent.change(native)
+
+    const dialog = findDialogByTitleContaining(container, 'prod-web')!
+    await vi.waitFor(() => {
+      const btn = Array.from(dialog.querySelectorAll('.ui-button')).find(
+        (b) => b.textContent?.trim() === 'Save Connection',
+      )
+      expect(btn).toBeTruthy()
+    })
+    const saveBtn = Array.from(dialog.querySelectorAll('.ui-button')).find(
+      (b) => b.textContent?.trim() === 'Save Connection',
+    )!
+    fireEvent.click(saveBtn)
+
+    await vi.waitFor(() => {
+      expect(saveKeyMatSpy).toHaveBeenCalled()
+    })
+    // The CONTENTS reached the vault.
+    expect(saveKeyMatSpy.mock.calls[0][1]).toBe(KEY)
+    // And no filename was recorded as a key path.
+    for (const call of updateSpy.mock.calls) {
+      expect(JSON.stringify(call)).not.toContain('id_ed25519')
+    }
+  })
+
   it('material mode calls saveKeyMaterial and records no path', async () => {
     const { container, client } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
     const saveKeyMatSpy = vi

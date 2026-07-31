@@ -244,6 +244,23 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   // ── Three-way key input state (publicKey auth) ───────────────────────
   type KeyInputMode = 'path' | 'file' | 'material'
 
+  /**
+   * Two of the three modes supply key MATERIAL; only 'path' supplies a path.
+   *
+   * 'file' used to be treated as a path picker, reading `File.path` — an
+   * Electron extension that exists in neither a browser nor a Wails webview,
+   * so the fallback fired every time and a bare filename like `id_ed25519`
+   * was stored as if it were a path. The mode was broken on every target, not
+   * merely in the dev harness.
+   *
+   * Choosing a file now reads its contents, which is what the mode's name says
+   * and the only thing achievable without a native dialog. The difference
+   * between it and 'material' is how the key is supplied, not what is stored —
+   * which is exactly what the design spec means by "path / choose a file /
+   * paste" being three ways to supply one key.
+   */
+  const suppliesMaterial = (m: KeyInputMode) => m === 'material' || m === 'file'
+
   // Profile editor key state
   const [profileKeyMode, setProfileKeyMode] = createSignal<KeyInputMode>('path')
   const [profileKeyText, setProfileKeyText] = createSignal('')
@@ -600,7 +617,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       if (
         !defaults.credentialId &&
         defaults.auth === 'publicKey' &&
-        groupKeyMode() === 'material' &&
+        suppliesMaterial(groupKeyMode()) &&
         groupKeyText()
       ) {
         const credential = await props.client.createCredential({
@@ -654,7 +671,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         }
 
         // Key material save for an existing credential
-        if (credDraft.auth === 'publicKey' && groupKeyMode() === 'material' && groupKeyText()) {
+        if (credDraft.auth === 'publicKey' && suppliesMaterial(groupKeyMode()) && groupKeyText()) {
           const saveKeymat = async () => {
             const result = await props.client.saveKeyMaterial(
               credDraft.id,
@@ -1049,14 +1066,25 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                   <FileInput
                     accept="*"
                     onChange={(file) => {
-                      if (file) {
-                        const filePath = (file as File & { path?: string })?.path ?? file.name
-                        handleGroupKeyPathChange(filePath)
-                      }
+                      if (!file) return
+                      setGroupKeyTextError(undefined)
+                      void file.text().then(
+                        (text) => setGroupKeyText(text),
+                        () =>
+                          setGroupKeyTextError(
+                            'Could not read that file. Choose another, or paste the key.',
+                          ),
+                      )
                     }}
                     ariaLabel="Choose private key file"
                     buttonLabel="Choose file…"
                   />
+                  {/* The read can fail — an unreadable file, a revoked
+                      permission. Silence there would leave the user
+                      believing a key was loaded. */}
+                  <Show when={groupKeyTextError()}>
+                    <p class="cm-key-file-error">{groupKeyTextError()}</p>
+                  </Show>
                 </Show>
                 <Show when={groupKeyMode() === 'material'}>
                   <TextField
@@ -1401,7 +1429,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     if (
       !profile.options.credentialId &&
       profile.options.auth === 'publicKey' &&
-      profileKeyMode() === 'material' &&
+      suppliesMaterial(profileKeyMode()) &&
       profileKeyText()
     ) {
       try {
@@ -1492,7 +1520,11 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       }
 
       // Key material save for an existing credential
-      if (credDraft.auth === 'publicKey' && profileKeyMode() === 'material' && profileKeyText()) {
+      if (
+        credDraft.auth === 'publicKey' &&
+        suppliesMaterial(profileKeyMode()) &&
+        profileKeyText()
+      ) {
         const saveKeymat = async () => {
           const result = await props.client.saveKeyMaterial(
             credDraft.id,
@@ -2024,15 +2056,25 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                           <FileInput
                             accept="*"
                             onChange={(file) => {
-                              if (file) {
-                                const filePath =
-                                  (file as File & { path?: string })?.path ?? file.name
-                                handleKeyPathChange(filePath)
-                              }
+                              if (!file) return
+                              setProfileKeyTextError(undefined)
+                              void file.text().then(
+                                (text) => setProfileKeyText(text),
+                                () =>
+                                  setProfileKeyTextError(
+                                    'Could not read that file. Choose another, or paste the key.',
+                                  ),
+                              )
                             }}
                             ariaLabel="Choose private key file"
                             buttonLabel="Choose file…"
                           />
+                          {/* The read can fail — an unreadable file, a revoked
+                              permission. Silence there would leave the user
+                              believing a key was loaded. */}
+                          <Show when={profileKeyTextError()}>
+                            <p class="cm-key-file-error">{profileKeyTextError()}</p>
+                          </Show>
                         </Show>
                         <Show when={profileKeyMode() === 'material'}>
                           <TextField

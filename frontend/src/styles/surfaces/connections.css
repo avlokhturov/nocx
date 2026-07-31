@@ -469,3 +469,12 @@
   font-size: var(--font-size-sm);
   color: var(--color-text-dim);
 }
+
+/* A private key file that could not be read. Beside the chooser rather than in
+   a toast: it is about the control the user just used, and the dialog is still
+   open in front of it. */
+.cm-key-file-error {
+  margin: var(--space-1) 0 0;
+  font-size: var(--font-size-sm);
+  color: var(--color-error);
+}
