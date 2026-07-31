@@ -1,13 +1,16 @@
 package transport
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"path/filepath"
 	"testing"
 
+	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
+	"github.com/shady2k/nocx/internal/vault"
 )
 
 // TestGroupImpact_UpdateDefaultsChange asserts that changing group defaults
@@ -16,7 +19,7 @@ func TestGroupImpact_UpdateDefaultsChange(t *testing.T) {
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
+		WithProfileRepository(ps), WithGroupRepository(ps))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -93,7 +96,7 @@ func TestGroupImpact_UpdateCosmeticOnly(t *testing.T) {
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
+		WithProfileRepository(ps), WithGroupRepository(ps))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -135,12 +138,15 @@ func TestGroupImpact_UpdateCosmeticOnly(t *testing.T) {
 }
 
 // TestGroupImpact_UpdateDangerousField asserts that changing a dangerous field
-// (credentialId) returns dangerous=true.
+// (passwordSecret) returns dangerous=true.
 func TestGroupImpact_UpdateDangerousField(t *testing.T) {
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
+	vl := newFakeVaultLifecycle()
+	vl.resolveRowID = credential.SecretID("sec:v1:test:00112233445566778899aabbccddeeff")
+	vl.resolveRowFound = true
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
+		WithProfileRepository(ps), WithGroupRepository(ps), WithVaultLifecycle(vl))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -149,12 +155,12 @@ func TestGroupImpact_UpdateDangerousField(t *testing.T) {
 	conn := connectWS(t, ws)
 	defer conn.Close() //nolint:errcheck
 
-	// Create a group with credentialId.
+	// Create a group with a password-secret default, named by row handle.
 	jsonrpcCall(t, conn, "groups.create", profile.ProfileGroup{
 		ID: "g1", Name: "Prod",
 		Defaults: &profile.ProfileDefaults{
 			SparseSSHOptions: profile.SparseSSHOptions{
-				CredentialID: profile.Ptr("cred:old:0001"),
+				PasswordSecret: profile.Ptr(vault.RowFor(credential.SecretID("sec:v1:test:00112233445566778899aabbccddeeff"))),
 			},
 		},
 	})
@@ -163,13 +169,14 @@ func TestGroupImpact_UpdateDangerousField(t *testing.T) {
 		Options: profile.StoredSSHProfileOptions{Host: "host-a"},
 	})
 
-	// Propose changing credentialId.
+	// Propose switching the default to a different secret.
+	vl.resolveRowID = credential.SecretID("sec:v1:test:ffffffffffffffffffffffffffffffff")
 	resp := jsonrpcCall(t, conn, "groups.impact", map[string]any{
 		"group": map[string]any{
 			"id":   "g1",
 			"name": "Prod",
 			"defaults": map[string]any{
-				"credentialId": "cred:new:0002",
+				"passwordSecret": vault.RowFor(credential.SecretID("sec:v1:test:ffffffffffffffffffffffffffffffff")),
 			},
 		},
 	})
@@ -185,18 +192,18 @@ func TestGroupImpact_UpdateDangerousField(t *testing.T) {
 		t.Fatalf("expected 1 affected profile, got %d", len(result.Result.AffectedProfiles))
 	}
 
-	foundCred := false
+	foundSecret := false
 	for _, d := range result.Result.AffectedProfiles[0].Diffs {
-		if d.Field == "credentialId" {
-			foundCred = true
+		if d.Field == "passwordSecret" {
+			foundSecret = true
 			if !d.Dangerous {
-				t.Error("credentialId change should be dangerous")
+				t.Error("passwordSecret change should be dangerous")
 			}
 			break
 		}
 	}
-	if !foundCred {
-		t.Error("expected credentialId diff, none found")
+	if !foundSecret {
+		t.Error("expected passwordSecret diff, none found")
 	}
 
 	if !result.Result.Dangerous {
@@ -209,7 +216,7 @@ func TestGroupImpact_UpdateCycle(t *testing.T) {
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
+		WithProfileRepository(ps), WithGroupRepository(ps))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -249,7 +256,7 @@ func TestGroupImpact_DeletePromoteToRoot(t *testing.T) {
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
+		WithProfileRepository(ps), WithGroupRepository(ps))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -294,7 +301,7 @@ func TestGroupUpdate_RejectsParentGroupIDChange(t *testing.T) {
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
+		WithProfileRepository(ps), WithGroupRepository(ps))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -333,7 +340,7 @@ func TestGroupUpdate_RejectsDefaultsChange(t *testing.T) {
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
+		WithProfileRepository(ps), WithGroupRepository(ps))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -373,7 +380,7 @@ func TestGroupUpdate_AllowsCosmeticChange(t *testing.T) {
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
+		WithProfileRepository(ps), WithGroupRepository(ps))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -404,7 +411,7 @@ func TestGroupApply_ParentChange(t *testing.T) {
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
+		WithProfileRepository(ps), WithGroupRepository(ps))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -459,7 +466,7 @@ func TestGroupApply_BulkMultiple(t *testing.T) {
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
+		WithProfileRepository(ps), WithGroupRepository(ps))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -530,7 +537,7 @@ func TestGroupApply_RejectsCycle(t *testing.T) {
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
+		WithProfileRepository(ps), WithGroupRepository(ps))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -596,7 +603,7 @@ func TestGroupDelete_PromotesChildren(t *testing.T) {
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
+		WithProfileRepository(ps), WithGroupRepository(ps))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -641,7 +648,7 @@ func TestGroupImpact_UpdateParentChange(t *testing.T) {
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
+		WithProfileRepository(ps), WithGroupRepository(ps))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -718,7 +725,7 @@ func TestGroupImpact_InvalidParams(t *testing.T) {
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
+		WithProfileRepository(ps), WithGroupRepository(ps))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -781,7 +788,7 @@ func TestGroupImpact_DeleteUnknownGroup(t *testing.T) {
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
+		WithProfileRepository(ps), WithGroupRepository(ps))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -817,7 +824,7 @@ func TestProfileMoveImpact_DefaultsChange(t *testing.T) {
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
+		WithProfileRepository(ps), WithGroupRepository(ps))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -896,7 +903,7 @@ func TestProfileMoveImpact_IdenticalDefaults(t *testing.T) {
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
+		WithProfileRepository(ps), WithGroupRepository(ps))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -955,7 +962,7 @@ func TestProfileMoveImpact_OwnValueOverrides(t *testing.T) {
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
+		WithProfileRepository(ps), WithGroupRepository(ps))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -1019,7 +1026,7 @@ func TestProfileMoveImpact_PromotionToRoot(t *testing.T) {
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
+		WithProfileRepository(ps), WithGroupRepository(ps))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -1081,7 +1088,7 @@ func TestProfileMoveImpact_MultipleProfiles(t *testing.T) {
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
+		WithProfileRepository(ps), WithGroupRepository(ps))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -1159,7 +1166,7 @@ func TestProfileMoveImpact_InvalidParams(t *testing.T) {
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
+		WithProfileRepository(ps), WithGroupRepository(ps))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -1185,5 +1192,222 @@ func TestProfileMoveImpact_InvalidParams(t *testing.T) {
 	}
 	if result.Error == nil {
 		t.Fatal("expected error for empty profileIds, got success")
+	}
+}
+
+// TestGroupSecretDefaults_Seam asserts the ADR-0011 §2 / ADR-0017 seam on the
+// group paths: the renderer addresses secret bindings in group defaults by row
+// handle; storage holds the backend reference; and no reference crosses the
+// wire in either direction (groups.create / groups.list / groups.apply).
+func TestGroupSecretDefaults_Seam(t *testing.T) {
+	dir := t.TempDir()
+	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
+	vl := newFakeVaultLifecycle()
+	vl.resolveRowID = credential.SecretID("sec:v1:test:00112233445566778899aabbccddeeff")
+	vl.resolveRowFound = true
+	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithProfileRepository(ps), WithGroupRepository(ps), WithVaultLifecycle(vl))
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer conn.Close() //nolint:errcheck
+
+	refA := credential.SecretID("sec:v1:test:00112233445566778899aabbccddeeff")
+	rowA := vault.RowFor(refA)
+	// groups.create: the renderer sends the row handle for refA; storage must
+	// hold the backend reference.
+	jsonrpcCall(t, conn, "groups.create", profile.ProfileGroup{
+		ID: "g1", Name: "Prod",
+		Defaults: &profile.ProfileDefaults{
+			SparseSSHOptions: profile.SparseSSHOptions{
+				PasswordSecret: profile.Ptr(rowA),
+			},
+		},
+	})
+
+	stored, err := ps.LoadGroups()
+	if err != nil {
+		t.Fatalf("LoadGroups: %v", err)
+	}
+	if len(stored) != 1 {
+		t.Fatalf("expected 1 stored group, got %d", len(stored))
+	}
+	if got := *stored[0].Defaults.SparseSSHOptions.PasswordSecret; got != string(refA) {
+		t.Errorf("stored defaults hold %q, want the backend reference", got)
+	}
+
+	// groups.list: the renderer receives the row handle, never the ref.
+	listResp := jsonrpcCall(t, conn, "groups.list", nil)
+	var list struct {
+		Result []profile.ProfileGroup `json:"result"`
+	}
+	if listErr := json.Unmarshal(listResp, &list); listErr != nil {
+		t.Fatalf("unmarshal groups.list: %v", listErr)
+	}
+	if len(list.Result) != 1 {
+		t.Fatalf("expected 1 listed group, got %d", len(list.Result))
+	}
+	if got := *list.Result[0].Defaults.SparseSSHOptions.PasswordSecret; got != rowA {
+		t.Errorf("groups.list returned %q, want the row handle %q", got, rowA)
+	}
+	if bytes.Contains(listResp, []byte("sec:v1:")) {
+		t.Errorf("groups.list leaks the backend reference: %s", listResp)
+	}
+
+	// groups.apply: a different row resolves to its ref and is persisted.
+	refB := credential.SecretID("sec:v1:test:ffffffffffffffffffffffffffffffff")
+	rowB := vault.RowFor(refB)
+	vl.resolveRowID = refB
+	applyResp := jsonrpcCall(t, conn, "groups.apply", []any{
+		profile.ProfileGroup{
+			ID: "g1", Name: "Prod",
+			Defaults: &profile.ProfileDefaults{
+				SparseSSHOptions: profile.SparseSSHOptions{
+					PasswordSecret: profile.Ptr(rowB),
+				},
+			},
+		},
+	})
+	if bytes.Contains(applyResp, []byte("sec:v1:")) {
+		t.Errorf("groups.apply response leaks the backend reference: %s", applyResp)
+	}
+	stored, err = ps.LoadGroups()
+	if err != nil {
+		t.Fatalf("LoadGroups: %v", err)
+	}
+	if got := *stored[0].Defaults.SparseSSHOptions.PasswordSecret; got != string(refB) {
+		t.Errorf("applied defaults hold %q, want the resolved reference", got)
+	}
+}
+
+// TestGroupImpact_SecretDiffUsesRows asserts that groups.impact resolves the
+// renderer's row-handle proposal to a reference before computing the diff, so
+// the diff reports row handles (never hashing a handle a second time) and the
+// reference never reaches the renderer.
+func TestGroupImpact_SecretDiffUsesRows(t *testing.T) {
+	dir := t.TempDir()
+	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
+	vl := newFakeVaultLifecycle()
+	vl.resolveRowID = credential.SecretID("sec:v1:test:00112233445566778899aabbccddeeff")
+	vl.resolveRowFound = true
+	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithProfileRepository(ps), WithGroupRepository(ps), WithVaultLifecycle(vl))
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer conn.Close() //nolint:errcheck
+
+	jsonrpcCall(t, conn, "groups.create", profile.ProfileGroup{
+		ID: "g1", Name: "Prod",
+		Defaults: &profile.ProfileDefaults{
+			SparseSSHOptions: profile.SparseSSHOptions{
+				PasswordSecret: profile.Ptr("secrow:abc"),
+			},
+		},
+	})
+	jsonrpcCall(t, conn, "profiles.create", profile.SSHProfile{
+		Base:    profile.Base{ID: "ssh:p:0001", Name: "server-a", Type: "ssh", Group: "g1"},
+		Options: profile.StoredSSHProfileOptions{Host: "host-a"},
+	})
+
+	// The renderer proposes switching the default password to a different row.
+	vl.resolveRowID = credential.SecretID("sec:v1:test:ffffffffffffffffffffffffffffffff")
+	resp := jsonrpcCall(t, conn, "groups.impact", map[string]any{
+		"group": map[string]any{
+			"id":   "g1",
+			"name": "Prod",
+			"defaults": map[string]any{
+				"passwordSecret": "secrow:def",
+			},
+		},
+	})
+	if bytes.Contains(resp, []byte("sec:v1:")) {
+		t.Errorf("groups.impact leaks the backend reference: %s", resp)
+	}
+	var result struct {
+		Result groupImpactResponse `json:"result"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(result.Result.AffectedProfiles) != 1 {
+		t.Fatalf("expected 1 affected profile, got %d", len(result.Result.AffectedProfiles))
+	}
+	var pwDiff *fieldDiff
+	for i := range result.Result.AffectedProfiles[0].Diffs {
+		d := &result.Result.AffectedProfiles[0].Diffs[i]
+		if d.Field == "passwordSecret" {
+			pwDiff = d
+		}
+	}
+	if pwDiff == nil {
+		t.Fatalf("expected a passwordSecret diff, got %+v", result.Result.AffectedProfiles[0].Diffs)
+	}
+	oldWant := vault.RowFor(credential.SecretID("sec:v1:test:00112233445566778899aabbccddeeff"))
+	newWant := vault.RowFor(credential.SecretID("sec:v1:test:ffffffffffffffffffffffffffffffff"))
+	if pwDiff.OldValue != oldWant {
+		t.Errorf("oldValue = %v, want the old binding's row %s", pwDiff.OldValue, oldWant)
+	}
+	if pwDiff.NewValue != newWant {
+		t.Errorf("newValue = %v, want the proposed binding's row %s", pwDiff.NewValue, newWant)
+	}
+	if !pwDiff.Dangerous {
+		t.Error("passwordSecret change must be flagged dangerous")
+	}
+}
+
+// TestGroupUpdate_SecretDefaultsMatch asserts that groups.update accepts a
+// group whose default secret binding is sent as the same row handle: the
+// defaults guard compares resolved references, not a row against a ref.
+func TestGroupUpdate_SecretDefaultsMatch(t *testing.T) {
+	dir := t.TempDir()
+	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
+	vl := newFakeVaultLifecycle()
+	vl.resolveRowID = credential.SecretID("sec:v1:test:00112233445566778899aabbccddeeff")
+	vl.resolveRowFound = true
+	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithProfileRepository(ps), WithGroupRepository(ps), WithVaultLifecycle(vl))
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer conn.Close() //nolint:errcheck
+
+	jsonrpcCall(t, conn, "groups.create", profile.ProfileGroup{
+		ID: "g1", Name: "Prod",
+		Defaults: &profile.ProfileDefaults{
+			SparseSSHOptions: profile.SparseSSHOptions{
+				PasswordSecret: profile.Ptr("secrow:abc"),
+			},
+		},
+	})
+
+	// Same row handle as stored: must not be rejected as a defaults change.
+	updateResp := jsonrpcCall(t, conn, "groups.update", profile.ProfileGroup{
+		ID: "g1", Name: "Prod",
+		Defaults: &profile.ProfileDefaults{
+			SparseSSHOptions: profile.SparseSSHOptions{
+				PasswordSecret: profile.Ptr("secrow:abc"),
+			},
+		},
+	})
+	var check struct {
+		Error *struct {
+			Code int `json:"code"`
+		} `json:"error,omitempty"`
+	}
+	if err := json.Unmarshal(updateResp, &check); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if check.Error != nil {
+		t.Errorf("groups.update rejected an unchanged secret default: %s", updateResp)
 	}
 }

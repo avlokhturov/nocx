@@ -5,15 +5,52 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/gorilla/websocket"
+	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
+	"github.com/shady2k/nocx/internal/vault"
 )
 
-func TestCredentialUsageRPC_EmptyStore(t *testing.T) {
+// seedSecretUsageStore writes a profile with a direct password binding and a
+// profile inheriting one from its group, then returns the WSServer harness.
+func seedSecretUsageStore(t *testing.T) (*profile.JSONStore, *fakeVaultLifecycle, *websocket.Conn, *WSServer) {
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
+
+	if err := ps.CreateGroup(profile.ProfileGroup{
+		ID: "g1", Name: "Prod",
+		Defaults: &profile.ProfileDefaults{
+			SparseSSHOptions: profile.SparseSSHOptions{
+				PasswordSecret: profile.Ptr("sec:group:1"),
+			},
+		},
+	}); err != nil {
+		t.Fatalf("CreateGroup: %v", err)
+	}
+	for _, p := range []profile.SSHProfile{
+		{
+			Base:    profile.Base{ID: "p-direct", Type: "ssh", Name: "direct", Group: "g1"},
+			Options: profile.StoredSSHProfileOptions{Host: "direct.example.com", PasswordSecret: "sec:direct:1"},
+		},
+		{
+			Base:    profile.Base{ID: "p-inherit", Type: "ssh", Name: "inherit", Group: "g1"},
+			Options: profile.StoredSSHProfileOptions{Host: "inherit.example.com"},
+		},
+	} {
+		if err := ps.CreateProfile(p); err != nil {
+			t.Fatalf("CreateProfile %s: %v", p.ID, err)
+		}
+	}
+
+	life := &fakeVaultLifecycle{
+		state:           vault.StateUnsealed,
+		resolveRowID:    credential.SecretID("sec:direct:1"),
+		resolveRowFound: true,
+	}
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
+		WithProfileRepository(ps), WithGroupRepository(ps),
+		WithVaultLifecycle(life))
 	ctx := t.Context()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -22,26 +59,76 @@ func TestCredentialUsageRPC_EmptyStore(t *testing.T) {
 
 	conn := connectWS(t, ws)
 	t.Cleanup(func() { _ = conn.Close() })
+	return ps, life, conn, ws
+}
 
-	resp := jsonrpcCall(t, conn, "credentials.usage", map[string]any{})
+func TestSecretUsageRPC_DirectAndGroupInheritance(t *testing.T) {
+	_, life, conn, _ := seedSecretUsageStore(t)
+
+	// The row for the DIRECT binding: one profile, sourced from the profile.
+	life.resolveRowID = credential.SecretID("sec:direct:1")
+	resp := jsonrpcCall(t, conn, "secrets.usage", map[string]any{"row": "secrow:direct"})
+	var direct struct {
+		Result struct {
+			Profiles []profile.ProfileRef `json:"profiles"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(resp, &direct); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, string(resp))
+	}
+	if len(direct.Result.Profiles) != 1 {
+		t.Fatalf("direct profiles = %d, want 1", len(direct.Result.Profiles))
+	}
+	if direct.Result.Profiles[0].ProfileID != "p-direct" || direct.Result.Profiles[0].Source != "profile" {
+		t.Errorf("direct ref = %+v, want p-direct via profile", direct.Result.Profiles[0])
+	}
+
+	// The row for the GROUP binding: inherited, sourced from the group.
+	life.resolveRowID = credential.SecretID("sec:group:1")
+	resp = jsonrpcCall(t, conn, "secrets.usage", map[string]any{"row": "secrow:group"})
+	var inherited struct {
+		Result struct {
+			Profiles []profile.ProfileRef `json:"profiles"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(resp, &inherited); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, string(resp))
+	}
+	// Only p-inherit uses the group secret: p-direct carries its own, which
+	// wins over the group default.
+	if len(inherited.Result.Profiles) != 1 {
+		t.Fatalf("inherited profiles = %d, want 1", len(inherited.Result.Profiles))
+	}
+	ref := inherited.Result.Profiles[0]
+	if ref.ProfileID != "p-inherit" || ref.Source != "group" {
+		t.Errorf("inherited ref = %+v, want p-inherit via group", ref)
+	}
+}
+
+func TestSecretUsageRPC_UnknownRowReturnsEmpty(t *testing.T) {
+	_, life, conn, _ := seedSecretUsageStore(t)
+	life.resolveRowFound = false
+
+	resp := jsonrpcCall(t, conn, "secrets.usage", map[string]any{"row": "secrow:nonexistent"})
 	var result struct {
 		Result struct {
-			Usage []profile.CredentialUsage `json:"usage"`
+			Profiles []profile.ProfileRef `json:"profiles"`
 		} `json:"result"`
 	}
 	if err := json.Unmarshal(resp, &result); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+		t.Fatalf("unmarshal: %v\nraw: %s", err, string(resp))
 	}
-	if len(result.Result.Usage) != 0 {
-		t.Errorf("expected empty usage list, got %d items", len(result.Result.Usage))
+	if result.Result.Profiles == nil || len(result.Result.Profiles) != 0 {
+		t.Errorf("unknown row profiles = %v, want empty non-nil list", result.Result.Profiles)
 	}
 }
 
-func TestCredentialUsageRPC_DirectAndGroupInheritance(t *testing.T) {
+func TestSecretUsageRPC_Unwired(t *testing.T) {
+	// Without a vault lifecycle, secrets.usage reports itself unavailable.
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
+		WithProfileRepository(ps), WithGroupRepository(ps))
 	ctx := t.Context()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -51,154 +138,19 @@ func TestCredentialUsageRPC_DirectAndGroupInheritance(t *testing.T) {
 	conn := connectWS(t, ws)
 	t.Cleanup(func() { _ = conn.Close() })
 
-	// Create credentials directly through the store for test setup.
-	c1 := profile.Credential{ID: "cred:direct:1", Name: "Direct", Username: "alice"}
-	c2 := profile.Credential{ID: "cred:group:1", Name: "GroupInherit", Username: "bob"}
-	c3 := profile.Credential{ID: "cred:orphan:1", Name: "Orphan", Username: "ghost"}
-
-	if err := ps.CreateCredential(c1); err != nil {
-		t.Fatalf("CreateCredential: %v", err)
-	}
-	if err := ps.CreateCredential(c2); err != nil {
-		t.Fatalf("CreateCredential: %v", err)
-	}
-	if err := ps.CreateCredential(c3); err != nil {
-		t.Fatalf("CreateCredential: %v", err)
-	}
-
-	// Create a group with a credential default.
-	g1 := profile.ProfileGroup{
-		ID:   "g1",
-		Name: "Prod",
-		Defaults: &profile.ProfileDefaults{
-			SparseSSHOptions: profile.SparseSSHOptions{
-				CredentialID: credPtr("cred:group:1"),
-			},
-		},
-	}
-	if err := ps.CreateGroup(g1); err != nil {
-		t.Fatalf("CreateGroup: %v", err)
-	}
-
-	// Create profiles:
-	// p1 — directly names cred:direct:1
-	// p2 — inherits cred:group:1 from g1
-	p1 := profile.SSHProfile{
-		Base: profile.Base{ID: "ssh:p1:1", Type: "ssh", Name: "web-direct"},
-		Options: profile.StoredSSHProfileOptions{
-			Host:         "web.example.com",
-			CredentialID: "cred:direct:1",
-		},
-	}
-	if err := ps.CreateProfile(p1); err != nil {
-		t.Fatalf("CreateProfile: %v", err)
-	}
-	p2 := profile.SSHProfile{
-		Base: profile.Base{ID: "ssh:p2:1", Type: "ssh", Name: "web-inherit", Group: "g1"},
-		Options: profile.StoredSSHProfileOptions{
-			Host: "web2.example.com",
-			// No credentialId — inherits from group
-		},
-	}
-	if err := ps.CreateProfile(p2); err != nil {
-		t.Fatalf("CreateProfile: %v", err)
-	}
-
-	// Call credentials.usage
-	resp := jsonrpcCall(t, conn, "credentials.usage", map[string]any{})
-	var raw struct {
-		Result struct {
-			Usage []profile.CredentialUsage `json:"usage"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal(resp, &raw); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-
-	usage := raw.Result.Usage
-	usageByID := make(map[string]profile.CredentialUsage)
-	for _, u := range usage {
-		usageByID[u.CredentialID] = u
-	}
-
-	// cred:direct:1 — should have p1 with source="profile"
-	direct, ok := usageByID["cred:direct:1"]
-	if !ok {
-		t.Fatal("cred:direct:1 not in usage")
-	}
-	if len(direct.Profiles) != 1 {
-		t.Fatalf("cred:direct:1: expected 1 profile, got %d", len(direct.Profiles))
-	}
-	if direct.Profiles[0].ProfileID != "ssh:p1:1" {
-		t.Errorf("cred:direct:1: expected profile ssh:p1:1, got %s", direct.Profiles[0].ProfileID)
-	}
-	if direct.Profiles[0].Source != "profile" {
-		t.Errorf("cred:direct:1: expected source=profile, got %s", direct.Profiles[0].Source)
-	}
-
-	// cred:group:1 — should have p2 with source="group", groupId="g1"
-	groupCred, ok := usageByID["cred:group:1"]
-	if !ok {
-		t.Fatal("cred:group:1 not in usage")
-	}
-	if len(groupCred.Profiles) != 1 {
-		t.Fatalf("cred:group:1: expected 1 profile, got %d", len(groupCred.Profiles))
-	}
-	ref := groupCred.Profiles[0]
-	if ref.ProfileID != "ssh:p2:1" {
-		t.Errorf("cred:group:1: expected profile ssh:p2:1, got %s", ref.ProfileID)
-	}
-	if ref.Source != "group" {
-		t.Errorf("cred:group:1: expected source=group, got %s", ref.Source)
-	}
-	if ref.GroupID != "g1" {
-		t.Errorf("cred:group:1: expected groupId=g1, got %s", ref.GroupID)
-	}
-	if ref.GroupName != "Prod" {
-		t.Errorf("cred:group:1: expected groupName=Prod, got %s", ref.GroupName)
-	}
-
-	// cred:orphan:1 — must be present with empty profiles
-	orphan, ok := usageByID["cred:orphan:1"]
-	if !ok {
-		t.Fatal("cred:orphan:1 not in usage (must appear even when unused)")
-	}
-	if len(orphan.Profiles) != 0 {
-		t.Errorf("cred:orphan:1: expected empty profiles, got %d", len(orphan.Profiles))
-	}
-}
-
-func TestCredentialUsageRPC_MethodNotFoundWhenNotWired(t *testing.T) {
-	// Without profile/group/credential stores, credentials.usage should return error.
-	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)))
-	ctx := t.Context()
-	if err := ws.Start(ctx); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	t.Cleanup(func() { _ = ws.Stop(ctx) })
-
-	conn := connectWS(t, ws)
-	t.Cleanup(func() { _ = conn.Close() })
-
-	resp := jsonrpcCall(t, conn, "credentials.usage", map[string]any{})
+	resp := jsonrpcCall(t, conn, "secrets.usage", map[string]any{"row": "secrow:x"})
 	var check struct {
 		Error *struct {
-			Code    int    `json:"code"`
-			Message string `json:"message"`
+			Code int `json:"code"`
 		} `json:"error"`
 	}
 	if err := json.Unmarshal(resp, &check); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if check.Error == nil {
-		t.Fatal("expected error for unwired credentials.usage")
+		t.Fatal("expected error for unwired secrets.usage")
 	}
 	if check.Error.Code != -32601 {
 		t.Errorf("error code = %d, want -32601", check.Error.Code)
 	}
-}
-
-// credPtr returns a pointer to the given string, for use in SparseSSHOptions.
-func credPtr(s string) *string {
-	return &s
 }

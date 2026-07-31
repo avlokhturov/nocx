@@ -1,7 +1,7 @@
 import { Dispatcher } from './dispatcher'
 import type { ConnectionTestResult } from './generated/connections.probe'
 import type { TrustHostKeyResult } from './generated/connections.trustHostKey'
-import type { SaveKeyMaterialResult } from './generated/credentials.saveKeyMaterial'
+import type { SaveKeyMaterialMintResult } from './generated/secrets.saveKeyMaterial'
 
 // Profile/group models + IPC client for the connection manager.
 // Mirrors the backend internal/profile package (nocx-fxs.1) and the
@@ -33,21 +33,24 @@ export interface Base {
 export interface SSHProfileOptions {
   host: string
   port?: number
-  // Link to a Credential (УЗ) by ID. If set, user/auth/keyPath come from the credential.
-  // If empty, user/auth below are used directly (legacy/quick-connect).
-  credentialId?: string
-  // Override fields (used only if credentialId is empty)
+  // Secret bindings (ADR-0017 §1): the vault row handles this connection
+  // authenticates with. The backend resolves them to stored references —
+  // the renderer never holds or names a secret reference (ADR-0011 §2).
+  passwordSecret?: string
+  keySecret?: string
+  keyPassphraseSecret?: string
   user?: string
   auth?: AuthMode
+  // KeyPath is the file-based alternative to keySecret: the two are mutually
+  // exclusive.
   keyPath?: string
-  // Note: passwords/keys are NEVER stored here — they live in the Credential's keychain entry.
   keepaliveInterval?: number
   keepaliveCountMax?: number
   readyTimeout?: number
   jumpHost?: string // Profile name or ID of the jump server
   jumpPort?: number // Jump server port
-  jumpUser?: string // Jump server username (resolved from credential)
-  jumpPassword?: string // Jump server password (resolved from credential store)
+  jumpUser?: string // Jump server username
+  jumpPassword?: string // Jump server password
   jumpAuthMode?: AuthMode // Jump server auth mode
   agentForward?: boolean
   canBeJumpServer?: boolean // Whether this profile can be used as a jump server
@@ -66,29 +69,6 @@ export interface ProfileGroup {
   order?: number
   color?: string
   icon?: string
-}
-
-// Credential is a reusable authentication identity (nocx-УЗ).
-// Stored separately from connections so multiple connections can share it.
-export interface Credential {
-  id: string
-  name: string // Display name (e.g. "work-github", "prod-server")
-  username: string
-  auth: AuthMode // Auth method: password, publicKey, agent, keyboardInteractive
-  // Secret depends on auth method:
-  // - password: the password (stored in OS keychain, not here)
-  // - publicKey: path to private key or vault:// URL
-  // - agent/keyboardInteractive: not needed
-  keyPath?: string // Only for publicKey auth
-  /**
-   * Whether this credential has key material stored in the vault.
-   * Only meaningful for publicKey auth. Only present in list responses.
-   */
-  hasKeyMaterial?: boolean
-  /**
-   * The fingerprint of the stored key. Present when hasKeyMaterial is true.
-   */
-  keyFingerprint?: string
 }
 
 // TreeNode is a ProfileGroup with its children resolved — the output of
@@ -209,10 +189,7 @@ export function adoptAliasProfile(
 // ── Effective profile types (wire format from profiles.effective) ──────────
 
 // EffectiveSourceKind is a closed enum — switch on this, never parse id/label.
-export type EffectiveSourceKind =
-  'profile' | 'group' | 'credential' | 'sshConfig' | 'global' | 'default'
-
-// FieldSourceDTO is the provenance source in the wire format.
+export type EffectiveSourceKind = 'profile' | 'group' | 'sshConfig' | 'global' | 'default'
 export interface FieldSourceDTO {
   kind: EffectiveSourceKind
   id: string
@@ -319,7 +296,7 @@ export interface PatchParams {
   unset?: string[]
 }
 
-// ProfileClient is the JSON-RPC client for profile/group/credential CRUD.
+// ProfileClient is the JSON-RPC client for profile/group/secret CRUD.
 // It speaks the control-plane methods wired in nocx-fxs.5 (AD-1).
 // RPC dispatch is delegated to a shared Dispatcher so request-ID allocation
 // and response correlation are owned in one place.
@@ -391,56 +368,32 @@ export class ProfileClient {
     return this.call('profiles.tabbyExecute', { planToken })
   }
 
-  // Credential CRUD (УЗ — reusable authentication identities)
-  listCredentials(): Promise<Credential[]> {
-    return this.call('credentials.list', {})
-  }
-  createCredential(c: Credential): Promise<Credential> {
-    return this.call('credentials.create', c)
-  }
-  updateCredential(c: Credential): Promise<Credential> {
-    return this.call('credentials.update', c)
-  }
-  deleteCredential(id: string): Promise<boolean> {
-    return this.call('credentials.delete', { id })
-  }
+  // Credential CRUD is gone with the aggregate (ADR-0017): the editor binds
+  // vault secrets directly, and nothing here talks to credentials.*.
 
-  // Password storage (OS keychain) — keyed by credential ID
-  // `name` is the generated display name (user@host) the secret owns
-  // (ADR-0016); optional, and the backend falls back to rendering when absent.
-  savePassword(credentialId: string, password: string, name?: string): Promise<boolean> {
-    return this.call('credentials.savePassword', { credentialId, password, name })
+  // ── Secret minting (ADR-0017 §1) ─────────────────────────────────────
+  // Each method mints a secret into the vault and returns the row handle
+  // the editor names; the profile's options carry that handle and the
+  // backend resolves it. `name` is the generated display name the secret
+  // owns (ADR-0016); optional, and the backend falls back to rendering.
+  savePassword(password: string, name?: string): Promise<{ row: string }> {
+    return this.call('secrets.savePassword', { password, name })
   }
-  deletePassword(credentialId: string): Promise<boolean> {
-    return this.call('credentials.deletePassword', { credentialId })
-  }
-  hasPassword(credentialId: string): Promise<boolean> {
-    return this.call('credentials.hasPassword', { credentialId })
-  }
-
-  /** credentials.saveKeyMaterial — store a private key in the vault.
-   *  `name` is the generated display name the secret owns (ADR-0016). */
   saveKeyMaterial(
-    credentialId: string,
     keyText: string,
     name?: string,
-  ): Promise<SaveKeyMaterialResult> {
-    return this.call('credentials.saveKeyMaterial', { credentialId, keyText, name })
+  ): Promise<{ row: string } & SaveKeyMaterialMintResult> {
+    return this.call('secrets.saveKeyMaterial', { keyText, name })
   }
-  /** credentials.saveKeyPassphrase — store the passphrase that opens a stored
-   *  key. The backend verifies it against the key material before storing: a
-   *  wrong passphrase is refused there and then (nocx-dze3). */
-  saveKeyPassphrase(credentialId: string, passphrase: string, name?: string): Promise<boolean> {
-    return this.call('credentials.saveKeyPassphrase', { credentialId, passphrase, name })
+  saveKeyPassphrase(keyRow: string, passphrase: string, name?: string): Promise<{ row: string }> {
+    return this.call('secrets.saveKeyPassphrase', { keyRow, passphrase, name })
   }
-  /** credentials.deleteKeyMaterial — remove stored key material from the vault. */
-  deleteKeyMaterial(credentialId: string): Promise<Record<string, never>> {
-    return this.call('credentials.deleteKeyMaterial', { credentialId })
-  }
-
-  // Credential usage query — which profiles (by resolved inheritance) use each credential.
-  credentialUsage(): Promise<{ usage: CredentialUsage[] }> {
-    return this.call('credentials.usage', {})
+  /** secrets.usage — the profiles (by effective resolution) that use the
+   *  secret behind a row handle. Names the connections a delete would break
+   *  (ADR-0017: the count is the number of profiles whose effective secret
+   *  is this one). */
+  secretUsage(row: string): Promise<{ profiles: ProfileRef[] }> {
+    return this.call('secrets.usage', { row })
   }
 
   /** sessions.status — live + last-used state for a batch of profile IDs. */
@@ -462,7 +415,6 @@ export class ProfileClient {
     return this.call('connections.trustHostKey', { host, key })
   }
 
-  // loadEffective resolves one or more profiles to their effective values
   // with per-field provenance. Batch: pass several IDs in one call.
   loadEffective(ids: string[]): Promise<EffectiveBatchResponse> {
     return this.call('profiles.effective', { ids })
@@ -619,16 +571,11 @@ export class ProfileClient {
   }
 }
 
-// ── Credential usage types ────────────────────────────────────────────────
+// ── Secret usage types ──────────────────────────────────────────────────
 //
-// Returned by credentials.usage — resolved on the backend so inheritance is
-// correctly reflected (a credential used through a group default is still "in
+// Returned by secrets.usage — resolved on the backend so inheritance is
+// correctly reflected (a secret used through a group default is still "in
 // use", and the frontend should not attempt to compute it).
-export interface CredentialUsage {
-  credentialId: string
-  profiles: ProfileRef[]
-}
-
 export interface ProfileRef {
   profileId: string
   profileName: string
@@ -664,7 +611,6 @@ export interface ExportManifest {
 export interface ConfigExport {
   profiles: SSHProfile[]
   groups: ProfileGroup[]
-  credentials: Credential[]
   settings?: Record<string, unknown>
 }
 
@@ -686,8 +632,6 @@ export interface BackupManifest {
 export interface ImportResult {
   profilesImported: number
   groupsImported: number
-  credentialsImported: number
-  unresolvedCredentials?: Credential[]
 }
 
 // ── Tabby import preview types (bead nocx-kqw6) ──────────────────────────
@@ -698,8 +642,8 @@ export interface ProfileEntry {
   action: 'new' | 'overwrite' | 'needs-review'
 }
 
-/** One credential the import would create. */
-export interface CredentialEntry {
+/** One secret the import would create. */
+export interface SecretEntry {
   name: string
   type: 'password' | 'passphrase'
 }
@@ -721,10 +665,10 @@ export interface CollisionInfo {
 export interface TabbyPreviewResponse {
   profilesToImport: number
   groupsToImport: number
-  credentialsToImport: number
+  secretsToImport: number
   profileEntries?: ProfileEntry[]
   groupNames?: string[]
-  credentialEntries?: CredentialEntry[]
+  secretEntries?: SecretEntry[]
   skippedSecrets?: SkippedInfo[]
   collisions?: CollisionInfo[]
   secretProvider: string

@@ -5,11 +5,12 @@ import (
 )
 
 // ConfigExport is the payload for a configuration export.
-// SecretID references travel as-is; no secret material is ever included.
+// Secret references travel as machine-local bindings and are deliberately
+// excluded: they are backend-owned (ADR-0011 §2) and meaningless on any
+// other machine. No secret material is ever included.
 type ConfigExport struct {
-	Profiles    []profile.SSHProfile   `json:"profiles"`
-	Groups      []profile.ProfileGroup `json:"groups"`
-	Credentials []profile.Credential   `json:"credentials"`
+	Profiles []profile.SSHProfile   `json:"profiles"`
+	Groups   []profile.ProfileGroup `json:"groups"`
 	// Settings is populated from the SettingsProvider. nil means no
 	// provider was wired; the field is omitted from JSON in that case.
 	Settings map[string]any `json:"settings,omitempty"`
@@ -18,9 +19,8 @@ type ConfigExport struct {
 // ConfigExportDeps are the repositories and providers needed for a
 // configuration export. All fields are required except Settings.
 type ConfigExportDeps struct {
-	Profiles    profile.ProfileRepository
-	Groups      profile.GroupRepository
-	Credentials profile.CredentialMetadataRepository
+	Profiles profile.ProfileRepository
+	Groups   profile.GroupRepository
 	// Settings is an optional provider for the settings registry.
 	// When nil, the export carries no settings.
 	Settings SettingsProvider
@@ -35,8 +35,11 @@ type SettingsProvider interface {
 }
 
 // ExportConfiguration reads all configuration from the provided
-// repositories and returns a ConfigExport. SecretID references are
-// carried as-is; no secret material is ever resolved.
+// repositories and returns a ConfigExport. Profiles are exported with
+// their secret-binding fields stripped — the bindings are backend-owned
+// AND machine-local (ADR-0011 §2): a reference is meaningless on any
+// other machine, and carrying it would claim a saved password that
+// cannot exist there. No secret material is ever resolved.
 func ExportConfiguration(deps ConfigExportDeps) (*ConfigExport, error) {
 	profiles, err := deps.Profiles.LoadProfiles()
 	if err != nil {
@@ -48,15 +51,17 @@ func ExportConfiguration(deps ConfigExportDeps) (*ConfigExport, error) {
 		return nil, err
 	}
 
-	credentials, err := deps.Credentials.LoadCredentials()
-	if err != nil {
-		return nil, err
+	// Strip the machine-local secret bindings from every exported profile.
+	for i := range profiles {
+		o := &profiles[i].Options
+		o.PasswordSecret = ""
+		o.KeySecret = ""
+		o.KeyPassphraseSecret = ""
 	}
 
 	result := &ConfigExport{
-		Profiles:    profiles,
-		Groups:      groups,
-		Credentials: credentials,
+		Profiles: profiles,
+		Groups:   groups,
 	}
 
 	if deps.Settings != nil {

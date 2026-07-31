@@ -139,7 +139,7 @@ func TestImportTabby_NoVault(t *testing.T) {
 	svc := profile.NewProfileService(ps)
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
 		WithProfileRepository(ps), WithGroupRepository(ps),
-		WithCredentialMetadataRepository(ps), WithCredentialStore(newTestStore()), WithProfileService(svc))
+		WithCredentialStore(newTestStore()), WithProfileService(svc))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -182,7 +182,7 @@ func TestImportTabby_EncryptedVaultNoPassphrase(t *testing.T) {
 	svc := profile.NewProfileService(ps)
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
 		WithProfileRepository(ps), WithGroupRepository(ps),
-		WithCredentialMetadataRepository(ps), WithCredentialStore(newTestStore()), WithProfileService(svc))
+		WithCredentialStore(newTestStore()), WithProfileService(svc))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -221,7 +221,7 @@ func TestImportTabby_WrongPassphrase(t *testing.T) {
 	svc := profile.NewProfileService(ps)
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
 		WithProfileRepository(ps), WithGroupRepository(ps),
-		WithCredentialMetadataRepository(ps), WithCredentialStore(newTestStore()), WithProfileService(svc))
+		WithCredentialStore(newTestStore()), WithProfileService(svc))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -261,7 +261,7 @@ func TestImportTabby_HappyPath(t *testing.T) {
 	cs := newTestStore()
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
 		WithProfileRepository(ps), WithGroupRepository(ps),
-		WithCredentialMetadataRepository(ps), WithCredentialStore(cs),
+		WithCredentialStore(cs),
 		WithProfileService(svc))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
@@ -312,39 +312,21 @@ func TestImportTabby_HappyPath(t *testing.T) {
 		t.Errorf("expected 1 profile imported, got %d", result.Result)
 	}
 
-	// Profile should reference the credential.
+	// The profile carries the minted password binding directly (ADR-0017):
+	// no credential record is created, and the secret exists in the store.
 	profs, _ := ps.LoadProfiles()
 	if len(profs) != 1 {
 		t.Fatalf("expected 1 profile, got %d", len(profs))
 	}
 	p := profs[0]
-	if p.Options.CredentialID == "" {
-		t.Error("profile should have CredentialID set from vault secret matching")
+	if p.Options.PasswordSecret == "" {
+		t.Error("profile should have PasswordSecret set from vault secret matching")
 	}
 	if p.NeedsReview {
-		t.Error("new credential should not mark profile for review")
+		t.Error("imported profile should not be marked for review")
 	}
-
-	// Verify credentials were created in the credential store.
-	creds, _ := ps.LoadCredentials()
-	if len(creds) != 2 {
-		t.Errorf("expected 2 credentials, got %d", len(creds))
-	}
-
-	// Verify the credential references a real secret.
-	for _, c := range creds {
-		if c.SecretID != "" {
-			_, err := cs.Get(context.Background(), credential.SecretID(c.SecretID))
-			if err != nil {
-				t.Errorf("Get secret %q: %v", c.SecretID, err)
-			}
-		}
-		if c.PassphraseSecretID != "" {
-			_, err := cs.Get(context.Background(), credential.SecretID(c.PassphraseSecretID))
-			if err != nil {
-				t.Errorf("Get passphrase secret %q: %v", c.PassphraseSecretID, err)
-			}
-		}
+	if _, err := cs.Get(context.Background(), credential.SecretID(p.Options.PasswordSecret)); err != nil {
+		t.Errorf("bound password secret %q: %v", p.Options.PasswordSecret, err)
 	}
 }
 
@@ -362,7 +344,7 @@ func TestImportTabby_UnhandledSecretTypeIsSkipped(t *testing.T) {
 	svc := profile.NewProfileService(ps)
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
 		WithProfileRepository(ps), WithGroupRepository(ps),
-		WithCredentialMetadataRepository(ps), WithCredentialStore(newTestStore()), WithProfileService(svc))
+		WithCredentialStore(newTestStore()), WithProfileService(svc))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -395,13 +377,15 @@ func TestImportTabby_UnhandledSecretTypeIsSkipped(t *testing.T) {
 		t.Fatalf("an unhandled secret type must not fail the import: %s", got.Error.Message)
 	}
 
-	// The handled secret still arrived.
-	creds, err := ps.LoadCredentials()
+	// The handled secret still arrived, bound to its profile (ADR-0017):
+	// no credential record is created, but the profile carries the minted
+	// password.
+	profs, err := ps.LoadProfiles()
 	if err != nil {
-		t.Fatalf("LoadCredentials: %v", err)
+		t.Fatalf("LoadProfiles: %v", err)
 	}
-	if len(creds) != 1 {
-		t.Fatalf("expected the password secret to import despite the unknown one, got %d credentials", len(creds))
+	if len(profs) != 1 || profs[0].Options.PasswordSecret == "" {
+		t.Fatalf("expected the password secret to import despite the unknown one, got %d profiles with a binding", len(profs))
 	}
 }
 
@@ -411,7 +395,7 @@ func TestImportTabby_InvalidSecretValue(t *testing.T) {
 	svc := profile.NewProfileService(ps)
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
 		WithProfileRepository(ps), WithGroupRepository(ps),
-		WithCredentialMetadataRepository(ps), WithCredentialStore(newTestStore()), WithProfileService(svc))
+		WithCredentialStore(newTestStore()), WithProfileService(svc))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -459,7 +443,7 @@ func TestImportTabby_CreateFailsMidway(t *testing.T) {
 	failStore := newFailAfterStore(2) // succeeds 2 times, fails on 3rd
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
 		WithProfileRepository(ps), WithGroupRepository(ps),
-		WithCredentialMetadataRepository(ps), WithCredentialStore(failStore), WithProfileService(svc))
+		WithCredentialStore(failStore), WithProfileService(svc))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -508,12 +492,6 @@ func TestImportTabby_CreateFailsMidway(t *testing.T) {
 	if orphans > 1 && failStore.created[1] != "s2" {
 		t.Errorf("expected orphan s2, got %q", failStore.created[1])
 	}
-
-	// Metadata store has no credentials — import never reached AtomicImport.
-	creds, _ := ps.LoadCredentials()
-	if len(creds) != 0 {
-		t.Errorf("expected 0 credentials in metadata store (import aborted), got %d", len(creds))
-	}
 }
 
 func TestImportTabby_SealedVault(t *testing.T) {
@@ -527,7 +505,7 @@ func TestImportTabby_SealedVault(t *testing.T) {
 	sealedStore.err = vault.ErrVaultSealed
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
 		WithProfileRepository(ps), WithGroupRepository(ps),
-		WithCredentialMetadataRepository(ps), WithCredentialStore(sealedStore), WithProfileService(svc))
+		WithCredentialStore(sealedStore), WithProfileService(svc))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -577,7 +555,7 @@ func TestImportTabby_VaultSecrets(t *testing.T) {
 	cs := newTestStore()
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
 		WithProfileRepository(ps), WithGroupRepository(ps),
-		WithCredentialMetadataRepository(ps), WithCredentialStore(cs), WithProfileService(svc))
+		WithCredentialStore(cs), WithProfileService(svc))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -606,22 +584,15 @@ func TestImportTabby_VaultSecrets(t *testing.T) {
 		t.Errorf("expected 1 profile imported, got %d", result.Result)
 	}
 
-	// Credential should be in the metadata store.
-	creds, _ := ps.LoadCredentials()
-	if len(creds) != 1 {
-		t.Errorf("expected 1 credential in metadata store, got %d", len(creds))
-	}
-	if creds[0].SecretID == "" {
-		t.Error("credential should reference a secret")
-	}
-
-	// Profile should reference the credential.
 	profs, _ := ps.LoadProfiles()
 	if len(profs) != 1 {
 		t.Fatalf("expected 1 profile, got %d", len(profs))
 	}
-	if profs[0].Options.CredentialID != creds[0].ID {
-		t.Errorf("profile CredentialID = %q, want %q", profs[0].Options.CredentialID, creds[0].ID)
+	if profs[0].Options.PasswordSecret == "" {
+		t.Error("profile should carry the minted password secret")
+	}
+	if _, err := cs.Get(context.Background(), credential.SecretID(profs[0].Options.PasswordSecret)); err != nil {
+		t.Errorf("bound password secret: %v", err)
 	}
 }
 
@@ -631,7 +602,7 @@ func TestImportTabby_NoCredentialStore(t *testing.T) {
 	svc := profile.NewProfileService(ps)
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
 		WithProfileRepository(ps), WithGroupRepository(ps),
-		WithCredentialMetadataRepository(ps), WithProfileService(svc))
+		WithProfileService(svc))
 	// No WithCredentialStore.
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
@@ -666,82 +637,6 @@ func TestImportTabby_NoCredentialStore(t *testing.T) {
 	}
 }
 
-func TestImportTabby_ProfileMatchesExistingCredNotImported(t *testing.T) {
-	// Profile references a credential that already exists locally.
-	// The imported profile should be marked NeedsReview.
-	dir := t.TempDir()
-	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
-	svc := profile.NewProfileService(ps)
-	cs := newTestStore()
-
-	// Pre-populate a credential that the imported profile will reference.
-	secretID, _ := cs.Create(context.Background(), credential.NewSecret("existing-pw"))
-	_ = ps.CreateCredential(profile.Credential{
-		ID:       "cred:local:deploy",
-		Name:     "deploy",
-		Username: "deploy",
-		Auth:     profile.AuthPassword,
-		SecretID: string(secretID),
-	})
-
-	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileRepository(ps), WithGroupRepository(ps),
-		WithCredentialMetadataRepository(ps), WithCredentialStore(cs), WithProfileService(svc))
-	ctx := context.Background()
-	if err := ws.Start(ctx); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	defer func() { _ = ws.Stop(ctx) }()
-	conn := connectWS(t, ws)
-	defer func() { _ = conn.Close() }()
-
-	// Import a profile that has CredentialID set to the existing credential.
-	// This simulates what happens when the vault secret matches against the
-	// existing credential's target (host+port+user).
-	//
-	// The vault secret for password has key "web.example.com:22:deploy" matching
-	// the profile. But the existing credential has ID "cred:local:deploy", not the
-	// newly generated one. So the profile references a DIFFERENT credential than
-	// the local one — no conflict.
-	//
-	// Actually, for this test to trigger NeedsReview, the profile must reference
-	// an EXISTING credential by ID. That happens when the imported credential has
-	// an ID that already exists in the store — but credentials always get NEW IDs
-	// since we use NewCredentialID. So this test needs to check what happens when
-	// a profile is imported that references a credential the importer generates.
-	//
-	// Since NewCredentialID generates unique IDs, the imported credential won't
-	// collide with the existing one. The needs-review case only triggers when
-	// an imported profile references an existing credential by its exact ID.
-	//
-	// This is covered by service-layer tests (TestAtomicImport_*). At the transport
-	// level, what matters is that:
-	// 1. Vault secrets create new credentials with new IDs.
-	// 2. Profiles reference these new credentials.
-	// 3. No collision with existing credentials.
-	vaultContent := `{"config":null,"secrets":[
-		{"type":"ssh:password","key":{"user":"deploy","host":"web.example.com","port":22},"value":"hunter2"}
-	]}`
-	vault := encryptTabbyVaultForTest(t, vaultContent, "pw")
-	config := buildImportConfigYAML(t, &vault, 0)
-
-	resp := jsonrpcCall(t, conn, "profiles.importTabby", map[string]any{
-		"config":     config,
-		"passphrase": "pw",
-	})
-	var result struct {
-		Result int `json:"result"`
-	}
-	if err := json.Unmarshal(resp, &result); err != nil {
-		t.Fatalf("unmarshal: %v\nraw: %s", err, string(resp))
-	}
-	if result.Result != 1 {
-		t.Errorf("expected 1 profile imported, got %d", result.Result)
-	}
-}
-
-// ── Tabby preview + execute tests ────────────────────────────────────────
-
 func TestTabbyPreview_HappyPath(t *testing.T) {
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
@@ -749,7 +644,7 @@ func TestTabbyPreview_HappyPath(t *testing.T) {
 	cs := newTestStore()
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
 		WithProfileRepository(ps), WithGroupRepository(ps),
-		WithCredentialMetadataRepository(ps), WithCredentialStore(cs),
+		WithCredentialStore(cs),
 		WithProfileService(svc))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
@@ -772,13 +667,13 @@ func TestTabbyPreview_HappyPath(t *testing.T) {
 	})
 	var preview struct {
 		Result struct {
-			ProfilesToImport    int             `json:"profilesToImport"`
-			GroupsToImport      int             `json:"groupsToImport"`
-			CredentialsToImport int             `json:"credentialsToImport"`
-			SkippedSecrets      []SkippedInfo   `json:"skippedSecrets"`
-			Collisions          []CollisionInfo `json:"collisions"`
-			SecretProvider      string          `json:"secretProvider"`
-			PlanToken           string          `json:"planToken"`
+			ProfilesToImport int             `json:"profilesToImport"`
+			GroupsToImport   int             `json:"groupsToImport"`
+			SecretsToImport  int             `json:"secretsToImport"`
+			SkippedSecrets   []SkippedInfo   `json:"skippedSecrets"`
+			Collisions       []CollisionInfo `json:"collisions"`
+			SecretProvider   string          `json:"secretProvider"`
+			PlanToken        string          `json:"planToken"`
 		} `json:"result"`
 	}
 	if err := json.Unmarshal(resp, &preview); err != nil {
@@ -790,8 +685,8 @@ func TestTabbyPreview_HappyPath(t *testing.T) {
 	if preview.Result.GroupsToImport != 1 {
 		t.Errorf("groupsToImport=1, got %d", preview.Result.GroupsToImport)
 	}
-	if preview.Result.CredentialsToImport != 2 {
-		t.Errorf("credentialsToImport=2, got %d", preview.Result.CredentialsToImport)
+	if preview.Result.SecretsToImport != 2 {
+		t.Errorf("secretsToImport=2, got %d", preview.Result.SecretsToImport)
 	}
 	if len(preview.Result.SkippedSecrets) > 0 {
 		t.Errorf("unexpected skipped secrets: %+v", preview.Result.SkippedSecrets)
@@ -817,7 +712,7 @@ func TestTabbyPreview_NoPassphrase(t *testing.T) {
 	cs := newTestStore()
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
 		WithProfileRepository(ps), WithGroupRepository(ps),
-		WithCredentialMetadataRepository(ps), WithCredentialStore(cs),
+		WithCredentialStore(cs),
 		WithProfileService(svc))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
@@ -858,7 +753,7 @@ func TestTabbyPreview_UnhandledSecrets(t *testing.T) {
 	cs := newTestStore()
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
 		WithProfileRepository(ps), WithGroupRepository(ps),
-		WithCredentialMetadataRepository(ps), WithCredentialStore(cs),
+		WithCredentialStore(cs),
 		WithProfileService(svc))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
@@ -882,16 +777,16 @@ func TestTabbyPreview_UnhandledSecrets(t *testing.T) {
 	})
 	var preview struct {
 		Result struct {
-			CredentialsToImport int           `json:"credentialsToImport"`
-			SkippedSecrets      []SkippedInfo `json:"skippedSecrets"`
-			PlanToken           string        `json:"planToken"`
+			SecretsToImport int           `json:"secretsToImport"`
+			SkippedSecrets  []SkippedInfo `json:"skippedSecrets"`
+			PlanToken       string        `json:"planToken"`
 		} `json:"result"`
 	}
 	if err := json.Unmarshal(resp, &preview); err != nil {
 		t.Fatalf("unmarshal preview: %v\nraw: %s", err, string(resp))
 	}
-	if preview.Result.CredentialsToImport != 1 {
-		t.Errorf("credentialsToImport=1, got %d", preview.Result.CredentialsToImport)
+	if preview.Result.SecretsToImport != 1 {
+		t.Errorf("secretsToImport=1, got %d", preview.Result.SecretsToImport)
 	}
 	if len(preview.Result.SkippedSecrets) != 1 {
 		t.Fatalf("expected 1 skipped secret, got %d: %+v", len(preview.Result.SkippedSecrets), preview.Result.SkippedSecrets)
@@ -911,7 +806,7 @@ func TestTabbyPreview_Collisions(t *testing.T) {
 	cs := newTestStore()
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
 		WithProfileRepository(ps), WithGroupRepository(ps),
-		WithCredentialMetadataRepository(ps), WithCredentialStore(cs),
+		WithCredentialStore(cs),
 		WithProfileService(svc))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
@@ -988,7 +883,7 @@ func TestTabbyExecute_HappyPath(t *testing.T) {
 	cs := newTestStore()
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
 		WithProfileRepository(ps), WithGroupRepository(ps),
-		WithCredentialMetadataRepository(ps), WithCredentialStore(cs),
+		WithCredentialStore(cs),
 		WithProfileService(svc))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
@@ -1039,75 +934,35 @@ func TestTabbyExecute_HappyPath(t *testing.T) {
 	if execResult.Result.GroupsImported != 1 {
 		t.Errorf("groupsImported=1, got %d", execResult.Result.GroupsImported)
 	}
-	if execResult.Result.CredentialsImported != 2 {
-		t.Errorf("credentialsImported=2, got %d", execResult.Result.CredentialsImported)
-	}
 	if len(execResult.Result.ImportErrors) > 0 {
 		t.Errorf("import errors: %v", execResult.Result.ImportErrors)
 	}
 
-	// Verify the profile references a credential with the correct secret.
+	// The profile carries the minted password binding directly (ADR-0017):
+	// no credential record is created, and the secret exists in the store.
 	profs, _ := ps.LoadProfiles()
 	if len(profs) != 1 {
 		t.Fatalf("expected 1 profile, got %d", len(profs))
 	}
 	p := profs[0]
-	if p.Options.CredentialID == "" {
-		t.Fatal("profile should have CredentialID set")
+	if p.Options.PasswordSecret == "" {
+		t.Fatal("profile should carry the minted password secret")
 	}
 
-	// Verify credentials exist and the resolved secret values match the vault.
-	creds, _ := ps.LoadCredentials()
-	if len(creds) != 2 {
-		t.Fatalf("expected 2 credentials, got %d", len(creds))
+	// The bound secret exists and holds the vault's password.
+	sec, err := cs.Get(context.Background(), credential.SecretID(p.Options.PasswordSecret))
+	if err != nil {
+		t.Fatalf("Get bound secret: %v", err)
 	}
-	for _, c := range creds {
-		if c.SecretID != "" {
-			sec, err := cs.Get(context.Background(), credential.SecretID(c.SecretID))
-			if err != nil {
-				t.Errorf("Get secret %q: %v", c.SecretID, err)
-				continue
-			}
-			var val string
-			if err := sec.Use(func(b []byte) error {
-				val = string(bytes.TrimRight(b, "\x00"))
-				return nil
-			}); err != nil {
-				t.Errorf("Use secret %q: %v", c.SecretID, err)
-			}
-			if val != "hunter2" {
-				t.Errorf("password secret value = %q, want %q", val, "hunter2")
-			}
-		}
-		if c.PassphraseSecretID != "" {
-			sec, err := cs.Get(context.Background(), credential.SecretID(c.PassphraseSecretID))
-			if err != nil {
-				t.Errorf("Get passphrase secret %q: %v", c.PassphraseSecretID, err)
-				continue
-			}
-			var val string
-			if err := sec.Use(func(b []byte) error {
-				val = string(bytes.TrimRight(b, "\x00"))
-				return nil
-			}); err != nil {
-				t.Errorf("Use passphrase secret %q: %v", c.PassphraseSecretID, err)
-			}
-			if val != "passphrase-val" {
-				t.Errorf("passphrase secret value = %q, want %q", val, "passphrase-val")
-			}
-		}
+	var val string
+	if err := sec.Use(func(b []byte) error {
+		val = string(bytes.TrimRight(b, "\x00"))
+		return nil
+	}); err != nil {
+		t.Fatalf("Use bound secret: %v", err)
 	}
-
-	// Verify the profile's credential reference can be resolved through the store.
-	foundCred := false
-	for _, c := range creds {
-		if c.ID == p.Options.CredentialID {
-			foundCred = true
-			break
-		}
-	}
-	if !foundCred {
-		t.Errorf("profile references credential %q, but no credential with that ID exists", p.Options.CredentialID)
+	if val != "hunter2" {
+		t.Errorf("bound password value = %q, want %q", val, "hunter2")
 	}
 }
 
@@ -1118,7 +973,7 @@ func TestTabbyExecute_DoubleConsume(t *testing.T) {
 	cs := newTestStore()
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
 		WithProfileRepository(ps), WithGroupRepository(ps),
-		WithCredentialMetadataRepository(ps), WithCredentialStore(cs),
+		WithCredentialStore(cs),
 		WithProfileService(svc))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
@@ -1193,7 +1048,7 @@ func TestTabbyExecute_SecretStoreFails(t *testing.T) {
 	failStore := newFailAfterStore(0) // fails on first Create
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
 		WithProfileRepository(ps), WithGroupRepository(ps),
-		WithCredentialMetadataRepository(ps), WithCredentialStore(failStore), WithProfileService(svc))
+		WithCredentialStore(failStore), WithProfileService(svc))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -1241,12 +1096,6 @@ func TestTabbyExecute_SecretStoreFails(t *testing.T) {
 	if errResp.Error == nil {
 		t.Fatal("expected error from failing SecretStore, got success")
 	}
-
-	// No metadata written — import never reached AtomicImport.
-	creds, _ := ps.LoadCredentials()
-	if len(creds) != 0 {
-		t.Errorf("expected 0 credentials in store (execute aborted), got %d", len(creds))
-	}
 }
 
 func TestTabbyExecute_ProfileAlreadyExists(t *testing.T) {
@@ -1258,7 +1107,7 @@ func TestTabbyExecute_ProfileAlreadyExists(t *testing.T) {
 	cs := newTestStore()
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
 		WithProfileRepository(ps), WithGroupRepository(ps),
-		WithCredentialMetadataRepository(ps), WithCredentialStore(cs), WithProfileService(svc))
+		WithCredentialStore(cs), WithProfileService(svc))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -1378,7 +1227,7 @@ func TestTabbyExecute_VaultRetry(t *testing.T) {
 	onceStore := newFailOnceStore()
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
 		WithProfileRepository(ps), WithGroupRepository(ps),
-		WithCredentialMetadataRepository(ps), WithCredentialStore(onceStore), WithProfileService(svc))
+		WithCredentialStore(onceStore), WithProfileService(svc))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -1441,9 +1290,6 @@ func TestTabbyExecute_VaultRetry(t *testing.T) {
 	}
 	if result2.Result.ProfilesImported != 1 {
 		t.Errorf("profilesImported=1, got %d", result2.Result.ProfilesImported)
-	}
-	if result2.Result.CredentialsImported != 1 {
-		t.Errorf("credentialsImported=1, got %d", result2.Result.CredentialsImported)
 	}
 
 	// Third execute with the same token — should fail (consumed after success).

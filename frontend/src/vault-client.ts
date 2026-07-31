@@ -88,7 +88,9 @@ export interface VaultDeleteSecretParams {
   id: string
 }
 export class VaultClient {
-  constructor(private dispatcher: Dispatcher) {}
+  /** The shared control-plane dispatcher. Public so the vault state module
+   *  can install the sealed-access hook (the vault owns the unlock prompt). */
+  constructor(readonly dispatcher: Dispatcher) {}
 
   status(): Promise<VaultStatus> {
     return this.dispatcher.call('vault.status', {})
@@ -166,7 +168,7 @@ export class VaultClient {
    *  handle — never by a secret reference (the renderer may not name one,
    *  nocx-jb20.1). Metadata first, stored secret second (ADR-0011 §4): any
    *  connection that used the secret is told before this is called, and the
-   *  credential reference is cleared with the delete. */
+   *  profile references are cleared with the delete. */
   deleteSecret(params: VaultDeleteSecretParams): Promise<Record<string, never>> {
     return this.dispatcher.call('vault.deleteSecret', params)
   }

@@ -133,7 +133,7 @@ export const PasswordEditor: Component<PasswordEditorProps> = (props) => {
     >
       <div class="password-generator-output">
         <TextField
-          id="credential-password"
+          id="password-value"
           type={visible() ? 'text' : 'password'}
           value={draft()}
           onInput={setDraft}

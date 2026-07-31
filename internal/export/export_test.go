@@ -13,7 +13,6 @@ import (
 	"github.com/shady2k/nocx/internal/export"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
-	"github.com/shady2k/nocx/internal/vault"
 )
 
 // --- test helpers ---
@@ -93,106 +92,6 @@ func (r *fakeGroupRepo) DeleteGroup(id string) error {
 		}
 	}
 	return nil
-}
-
-// fakeCredRepo is an in-memory CredentialMetadataRepository.
-type fakeCredRepo struct{ creds []profile.Credential }
-
-func (r *fakeCredRepo) LoadCredentials() ([]profile.Credential, error) { return r.creds, nil }
-func (r *fakeCredRepo) CreateCredential(c profile.Credential) error {
-	for _, e := range r.creds {
-		if e.ID == c.ID {
-			return profile.ErrCredentialExists
-		}
-	}
-	r.creds = append(r.creds, c)
-	return nil
-}
-
-func (r *fakeCredRepo) UpdateCredential(id string, p profile.CredentialPatch) (profile.Credential, error) {
-	for i, e := range r.creds {
-		if e.ID == id {
-			r.creds[i] = e.WithPatch(p)
-			return r.creds[i], nil
-		}
-	}
-	return profile.Credential{}, profile.ErrCredentialNotFound
-}
-
-func (r *fakeCredRepo) UpdateSecretRefs(id, passwordSecretID, passphraseSecretID string) error {
-	for i, e := range r.creds {
-		if e.ID == id {
-			r.creds[i].SecretID = passwordSecretID
-			r.creds[i].PassphraseSecretID = passphraseSecretID
-			return nil
-		}
-	}
-	return profile.ErrCredentialNotFound
-}
-
-func (r *fakeCredRepo) UpdateKeyMaterial(id, keyMaterialSecretID, keyFingerprint string) error {
-	for i, e := range r.creds {
-		if e.ID == id {
-			r.creds[i].KeyMaterialSecretID = keyMaterialSecretID
-			r.creds[i].KeyFingerprint = keyFingerprint
-			r.creds[i].KeyPath = ""
-			return nil
-		}
-	}
-	return profile.ErrCredentialNotFound
-}
-
-func (r *fakeCredRepo) DeleteCredential(id string) error {
-	for i, c := range r.creds {
-		if c.ID == id {
-			r.creds = append(r.creds[:i], r.creds[i+1:]...)
-			return nil
-		}
-	}
-	return nil
-}
-
-func (r *fakeCredRepo) ClearSecretReferences(secretID string) error {
-	for i := range r.creds {
-		c := &r.creds[i]
-		if c.SecretID == secretID {
-			c.SecretID = ""
-		}
-		if c.PassphraseSecretID == secretID {
-			c.PassphraseSecretID = ""
-		}
-		if c.KeyMaterialSecretID == secretID {
-			c.KeyMaterialSecretID = ""
-			c.KeyFingerprint = ""
-		}
-	}
-	return nil
-}
-
-var (
-	_ profile.ProfileRepository            = (*fakeProfileRepo)(nil)
-	_ profile.GroupRepository              = (*fakeGroupRepo)(nil)
-	_ profile.CredentialMetadataRepository = (*fakeCredRepo)(nil)
-)
-
-func makeCredential(t *testing.T, name, username, auth string) profile.Credential {
-	secretID, err := vault.MintReferenceForTest(vault.ProviderFile)
-	if err != nil {
-		t.Fatalf("MintReferenceForTest: %v", err)
-	}
-
-	passphraseSecretID, err := vault.MintReferenceForTest(vault.ProviderFile)
-	if err != nil {
-		t.Fatalf("MintReferenceForTest: %v", err)
-	}
-	return profile.Credential{
-		ID:                 profile.NewCredentialID(name),
-		Name:               name,
-		Username:           username,
-		Auth:               profile.AuthMode(auth),
-		SecretID:           string(secretID),
-		PassphraseSecretID: string(passphraseSecretID),
-	}
 }
 
 func makeProfile(id, name, host string) profile.SSHProfile {
@@ -299,16 +198,20 @@ func TestManifestFor_Import(t *testing.T) {
 // Configuration export
 // =========================================================================
 
-func TestExportConfiguration_ContainsSecretID_NotMaterial(t *testing.T) {
-	cred := makeCredential(t, "work-github", "alice", string(profile.AuthPassword))
-	profiles := []profile.SSHProfile{makeProfile("ssh:custom:test:0001", "test-host", "example.com")}
+// Secret bindings are backend-owned AND machine-local (ADR-0011 §2): the
+// export must strip them, so a reimport never claims a saved password that
+// cannot exist on the receiving machine.
+func TestExportConfiguration_StripsSecretBindings(t *testing.T) {
+	prof := makeProfile("ssh:custom:test:0001", "test-host", "example.com")
+	prof.Options.PasswordSecret = "sec:v1:file:aaaa"
+	prof.Options.KeySecret = "sec:v1:file:bbbb"
+	prof.Options.KeyPassphraseSecret = "sec:v1:file:cccc"
+	profiles := []profile.SSHProfile{prof}
 	groups := []profile.ProfileGroup{makeGroup("group-1", "Work")}
-	creds := []profile.Credential{cred}
 
 	deps := export.ConfigExportDeps{
-		Profiles:    &fakeProfileRepo{profiles: profiles},
-		Groups:      &fakeGroupRepo{groups: groups},
-		Credentials: &fakeCredRepo{creds: creds},
+		Profiles: &fakeProfileRepo{profiles: profiles},
+		Groups:   &fakeGroupRepo{groups: groups},
 	}
 
 	result, err := export.ExportConfiguration(deps)
@@ -321,48 +224,37 @@ func TestExportConfiguration_ContainsSecretID_NotMaterial(t *testing.T) {
 	if len(result.Groups) != 1 {
 		t.Errorf("groups = %d, want 1", len(result.Groups))
 	}
-	if len(result.Credentials) != 1 {
-		t.Errorf("credentials = %d, want 1", len(result.Credentials))
-	}
 
-	exported := result.Credentials[0]
-	if exported.SecretID == "" {
-		t.Error("SecretID is empty — must be present")
+	exported := result.Profiles[0]
+	if exported.Options.PasswordSecret != "" ||
+		exported.Options.KeySecret != "" ||
+		exported.Options.KeyPassphraseSecret != "" {
+		t.Errorf("secret bindings survived the export: %+v", exported.Options)
 	}
-	if exported.PassphraseSecretID == "" {
-		t.Error("PassphraseSecretID is empty — must be present")
-	}
-
-	raw, err := json.Marshal(result)
-	if err != nil {
-		t.Fatalf("json.Marshal: %v", err)
-	}
-	if strings.Contains(string(raw), "[REDACTED]") {
-		t.Error("JSON contains [REDACTED] — a credential.Secret leaked into the export")
+	if exported.Options.Host != "example.com" || exported.Name != "test-host" {
+		t.Errorf("profile identity changed by stripping: %+v", exported)
 	}
 }
 
 func TestExportConfiguration_EmptyRepos(t *testing.T) {
 	deps := export.ConfigExportDeps{
-		Profiles:    &fakeProfileRepo{},
-		Groups:      &fakeGroupRepo{},
-		Credentials: &fakeCredRepo{},
+		Profiles: &fakeProfileRepo{},
+		Groups:   &fakeGroupRepo{},
 	}
 	result, err := export.ExportConfiguration(deps)
 	if err != nil {
 		t.Fatalf("ExportConfiguration: %v", err)
 	}
-	if len(result.Profiles) != 0 || len(result.Groups) != 0 || len(result.Credentials) != 0 {
+	if len(result.Profiles) != 0 || len(result.Groups) != 0 {
 		t.Error("expected empty result from empty repos")
 	}
 }
 
 func TestExportConfiguration_NilSettingsProvider(t *testing.T) {
 	deps := export.ConfigExportDeps{
-		Profiles:    &fakeProfileRepo{},
-		Groups:      &fakeGroupRepo{},
-		Credentials: &fakeCredRepo{},
-		Settings:    nil,
+		Profiles: &fakeProfileRepo{},
+		Groups:   &fakeGroupRepo{},
+		Settings: nil,
 	}
 	result, err := export.ExportConfiguration(deps)
 	if err != nil {
@@ -378,15 +270,12 @@ func TestExportConfiguration_NilSettingsProvider(t *testing.T) {
 // =========================================================================
 
 func TestPortableEncrypted_RoundTrip(t *testing.T) {
-	cred := makeCredential(t, "work-github", "alice", string(profile.AuthPassword))
 	profiles := []profile.SSHProfile{makeProfile("ssh:custom:test:0001", "test-host", "example.com")}
 	groups := []profile.ProfileGroup{makeGroup("group-1", "Work")}
-	creds := []profile.Credential{cred}
 
 	configDeps := export.ConfigExportDeps{
-		Profiles:    &fakeProfileRepo{profiles: profiles},
-		Groups:      &fakeGroupRepo{groups: groups},
-		Credentials: &fakeCredRepo{creds: creds},
+		Profiles: &fakeProfileRepo{profiles: profiles},
+		Groups:   &fakeGroupRepo{groups: groups},
 	}
 	portableDeps := export.PortableEncryptedDeps{
 		ConfigExport: configDeps,
@@ -412,16 +301,15 @@ func TestPortableEncrypted_RoundTrip(t *testing.T) {
 	if len(decrypted.Config.Profiles) != 1 {
 		t.Errorf("decrypted profiles = %d, want 1", len(decrypted.Config.Profiles))
 	}
-	if decrypted.Config.Credentials[0].SecretID != cred.SecretID {
-		t.Errorf("decrypted SecretID = %q, want %q", decrypted.Config.Credentials[0].SecretID, cred.SecretID)
+	if len(decrypted.Config.Groups) != 1 {
+		t.Errorf("decrypted groups = %d, want 1", len(decrypted.Config.Groups))
 	}
 }
 
 func TestPortableEncrypted_NilContentDB(t *testing.T) {
 	configDeps := export.ConfigExportDeps{
-		Profiles:    &fakeProfileRepo{},
-		Groups:      &fakeGroupRepo{},
-		Credentials: &fakeCredRepo{},
+		Profiles: &fakeProfileRepo{},
+		Groups:   &fakeGroupRepo{},
 	}
 	portableDeps := export.PortableEncryptedDeps{
 		ConfigExport: configDeps,
@@ -450,11 +338,9 @@ func TestPortableEncrypted_NilContentDB(t *testing.T) {
 }
 
 func TestPortableEncrypted_WrongPassphrase(t *testing.T) {
-	cred := makeCredential(t, "work-github", "alice", string(profile.AuthPassword))
 	configDeps := export.ConfigExportDeps{
-		Profiles:    &fakeProfileRepo{},
-		Groups:      &fakeGroupRepo{},
-		Credentials: &fakeCredRepo{creds: []profile.Credential{cred}},
+		Profiles: &fakeProfileRepo{},
+		Groups:   &fakeGroupRepo{},
 	}
 	portableDeps := export.PortableEncryptedDeps{
 		ConfigExport: configDeps,
@@ -473,9 +359,8 @@ func TestPortableEncrypted_WrongPassphrase(t *testing.T) {
 
 func TestPortableEncrypted_PrivateContentNotIncludedByDefault(t *testing.T) {
 	configDeps := export.ConfigExportDeps{
-		Profiles:    &fakeProfileRepo{},
-		Groups:      &fakeGroupRepo{},
-		Credentials: &fakeCredRepo{},
+		Profiles: &fakeProfileRepo{},
+		Groups:   &fakeGroupRepo{},
 	}
 	portableDeps := export.PortableEncryptedDeps{
 		ConfigExport: configDeps,
@@ -595,17 +480,14 @@ func TestBackup_ContentDBPresent(t *testing.T) {
 // =========================================================================
 
 func TestImportConfiguration_RoundTrip(t *testing.T) {
-	cred := makeCredential(t, "work-github", "alice", string(profile.AuthPassword))
 	original := &export.ConfigExport{
-		Profiles:    []profile.SSHProfile{makeProfile("ssh:custom:test:0001", "test-host", "example.com")},
-		Groups:      []profile.ProfileGroup{makeGroup("group-1", "Work")},
-		Credentials: []profile.Credential{cred},
+		Profiles: []profile.SSHProfile{makeProfile("ssh:custom:test:0001", "test-host", "example.com")},
+		Groups:   []profile.ProfileGroup{makeGroup("group-1", "Work")},
 	}
 
 	importDeps := export.ImportDeps{
-		Profiles:    &fakeProfileRepo{},
-		Groups:      &fakeGroupRepo{},
-		Credentials: &fakeCredRepo{},
+		Profiles: &fakeProfileRepo{},
+		Groups:   &fakeGroupRepo{},
 	}
 
 	result, err := export.ImportConfiguration(importDeps, original)
@@ -618,76 +500,20 @@ func TestImportConfiguration_RoundTrip(t *testing.T) {
 	if result.GroupsImported != 1 {
 		t.Errorf("GroupsImported = %d, want 1", result.GroupsImported)
 	}
-	if result.CredentialsImported != 1 {
-		t.Errorf("CredentialsImported = %d, want 1", result.CredentialsImported)
-	}
 
 	profiles, _ := importDeps.Profiles.LoadProfiles()
 	if len(profiles) != 1 {
 		t.Errorf("profiles after import = %d, want 1", len(profiles))
 	}
-	creds, _ := importDeps.Credentials.LoadCredentials()
-	if len(creds) != 1 {
-		t.Errorf("credentials after import = %d, want 1", len(creds))
-	}
-	if creds[0].SecretID != cred.SecretID {
-		t.Errorf("imported SecretID = %q, want %q", creds[0].SecretID, cred.SecretID)
-	}
-}
-
-func TestImportConfiguration_DoesNotResolveSecrets(t *testing.T) {
-	passSecretID, err := vault.MintReferenceForTest(vault.ProviderFile)
-	if err != nil {
-		t.Fatalf("MintReferenceForTest: %v", err)
-	}
-	passphraseSecretID, err := vault.MintReferenceForTest(vault.ProviderFile)
-	if err != nil {
-		t.Fatalf("MintReferenceForTest: %v", err)
-	}
-	cred := profile.Credential{
-		ID:                 profile.NewCredentialID("test"),
-		Name:               "test",
-		Username:           "alice",
-		Auth:               profile.AuthPassword,
-		SecretID:           string(passSecretID),
-		PassphraseSecretID: string(passphraseSecretID),
-	}
-
-	original := &export.ConfigExport{Credentials: []profile.Credential{cred}}
-
-	importDeps := export.ImportDeps{
-		Profiles:    &fakeProfileRepo{},
-		Groups:      &fakeGroupRepo{},
-		Credentials: &fakeCredRepo{},
-	}
-
-	result, err := export.ImportConfiguration(importDeps, original)
-	if err != nil {
-		t.Fatalf("ImportConfiguration: %v", err)
-	}
-
-	if len(result.UnresolvedCredentials) == 0 {
-		t.Error("UnresolvedCredentials is empty — import must report credentials needing secret mapping")
-	}
-
-	creds, _ := importDeps.Credentials.LoadCredentials()
-	if len(creds) != 1 {
-		t.Fatalf("credentials after import = %d, want 1", len(creds))
-	}
-	if creds[0].SecretID != cred.SecretID {
-		t.Errorf("imported SecretID changed: got %q, want %q", creds[0].SecretID, cred.SecretID)
-	}
 }
 
 func TestImportConfiguration_FullRoundTrip(t *testing.T) {
-	cred := makeCredential(t, "work-github", "alice", string(profile.AuthPassword))
 	originalProfile := makeProfile("ssh:custom:test:0001", "test-host", "example.com")
 	originalGroup := makeGroup("group-1", "Work")
 
 	exportDeps := export.ConfigExportDeps{
-		Profiles:    &fakeProfileRepo{profiles: []profile.SSHProfile{originalProfile}},
-		Groups:      &fakeGroupRepo{groups: []profile.ProfileGroup{originalGroup}},
-		Credentials: &fakeCredRepo{creds: []profile.Credential{cred}},
+		Profiles: &fakeProfileRepo{profiles: []profile.SSHProfile{originalProfile}},
+		Groups:   &fakeGroupRepo{groups: []profile.ProfileGroup{originalGroup}},
 	}
 	exported, err := export.ExportConfiguration(exportDeps)
 	if err != nil {
@@ -695,9 +521,8 @@ func TestImportConfiguration_FullRoundTrip(t *testing.T) {
 	}
 
 	importDeps := export.ImportDeps{
-		Profiles:    &fakeProfileRepo{},
-		Groups:      &fakeGroupRepo{},
-		Credentials: &fakeCredRepo{},
+		Profiles: &fakeProfileRepo{},
+		Groups:   &fakeGroupRepo{},
 	}
 	result, err := export.ImportConfiguration(importDeps, exported)
 	if err != nil {
@@ -709,9 +534,6 @@ func TestImportConfiguration_FullRoundTrip(t *testing.T) {
 	if result.GroupsImported != 1 {
 		t.Errorf("GroupsImported = %d, want 1", result.GroupsImported)
 	}
-	if result.CredentialsImported != 1 {
-		t.Errorf("CredentialsImported = %d, want 1", result.CredentialsImported)
-	}
 
 	profiles, _ := importDeps.Profiles.LoadProfiles()
 	if profiles[0].Name != originalProfile.Name {
@@ -720,10 +542,6 @@ func TestImportConfiguration_FullRoundTrip(t *testing.T) {
 	groups, _ := importDeps.Groups.LoadGroups()
 	if groups[0].Name != originalGroup.Name {
 		t.Errorf("group name = %q, want %q", groups[0].Name, originalGroup.Name)
-	}
-	creds, _ := importDeps.Credentials.LoadCredentials()
-	if creds[0].SecretID != cred.SecretID {
-		t.Errorf("SecretID changed: got %q, want %q", creds[0].SecretID, cred.SecretID)
 	}
 }
 
@@ -735,12 +553,9 @@ func TestNoModeResolvesASecret(t *testing.T) {
 	// credential.Secret fails json.Marshal by design. If any mode
 	// inadvertently included a Secret, json.Marshal would fail — this
 	// test proves that doesn't happen.
-
-	cred := makeCredential(t, "test", "alice", string(profile.AuthPassword))
 	deps := export.ConfigExportDeps{
-		Profiles:    &fakeProfileRepo{},
-		Groups:      &fakeGroupRepo{},
-		Credentials: &fakeCredRepo{creds: []profile.Credential{cred}},
+		Profiles: &fakeProfileRepo{},
+		Groups:   &fakeGroupRepo{},
 	}
 	result, err := export.ExportConfiguration(deps)
 	if err != nil {

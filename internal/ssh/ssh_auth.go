@@ -152,6 +152,13 @@ func (rc *RealClient) addVaultKeyMethod(ctx context.Context, chain *[]authChainE
 		if cfg.PassphraseSecretID == "" {
 			s, parseErr := gossh.ParsePrivateKey(keyBytes)
 			if parseErr != nil {
+				var passErr *gossh.PassphraseMissingError
+				if errors.As(parseErr, &passErr) {
+					// Typed so the probe reports "needs interactive" and the
+					// renderer can ask for the passphrase instead of failing
+					// the connection (the key is fine; it is only locked).
+					return &ErrEncryptedKey{Path: "the stored key"}
+				}
 				return fmt.Errorf("parse vault key: %w", parseErr)
 			}
 			signer = s

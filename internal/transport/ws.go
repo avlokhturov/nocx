@@ -68,13 +68,11 @@ type WSServer struct {
 	listenAddr string
 	listener   net.Listener
 	upgrader   websocket.Upgrader
-
-	// Optional profile/group/credential stores for the connection-manager
-	// control plane (profiles.*, groups.*, credentials.*). When nil, those
-	// methods return a JSON-RPC error.
+	// Optional profile/group stores for the connection-manager control
+	// plane (profiles.*, groups.*). When nil, those methods return a
+	// JSON-RPC error.
 	profiles    profile.ProfileRepository
 	groups      profile.GroupRepository
-	credMeta    profile.CredentialMetadataRepository
 	credentials credential.SecretStore
 	// Vault lifecycle for vault.* RPC methods. When nil, those methods return a
 	// JSON-RPC error.
@@ -91,8 +89,8 @@ type WSServer struct {
 	// Profile resolver maps profile IDs to SSH connect configs.
 	resolver ProfileResolver
 
-	// Profile service provides a single validated write path for profiles,
-	// groups, and credentials through the domain layer.
+	// Profile service provides a single validated write path for profiles
+	// and groups through the domain layer.
 	profileSvc *profile.ProfileService
 
 	// settings registry backs the settings.* JSON-RPC methods.
@@ -165,11 +163,19 @@ type importPlan struct {
 	creds    []credentialPlan
 }
 
-// credentialPlan pairs a credential's metadata with its decrypted secret value.
+// credentialPlan pairs a decrypted tabby secret with the connection target it
+// was keyed to. For a password, target* records the connection the tabby vault
+// keyed the secret to — the profile whose options match carries the binding
+// (ADR-0017). Passphrases have no target: a passphrase belongs to a private
+// key, not to a connection, and stays an unbound vault row the editor can
+// bind.
 type credentialPlan struct {
-	cred         profile.Credential
+	name         string
 	secret       string
 	isPassphrase bool
+	targetUser   string
+	targetHost   string
+	targetPort   int
 }
 
 // planTTL is how long a plan remains valid after creation.
@@ -286,18 +292,13 @@ func WithGroupRepository(gr profile.GroupRepository) WSServerOption {
 	return func(s *WSServer) { s.groups = gr }
 }
 
-// WithCredentialMetadataRepository attaches a credential metadata repository
-// to the server, enabling the credentials.create/update/delete/list JSON-RPC
-// methods.
-func WithCredentialMetadataRepository(cmr profile.CredentialMetadataRepository) WSServerOption {
-	return func(s *WSServer) { s.credMeta = cmr }
-}
-
 // WithCredentialStore attaches a credential store, enabling the
-// credentials.* JSON-RPC methods.
+// secrets.* and vault.* secret operations.
 func WithCredentialStore(cs credential.SecretStore) WSServerOption {
 	return func(s *WSServer) { s.credentials = cs }
 }
+
+// WithCredentialStore attaches a credential store, enabling the
 
 // WithSettingsRegistry attaches a settings registry to the server, enabling
 // the settings.* JSON-RPC methods. Also wires the registry's change notifier
@@ -746,21 +747,16 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.handleTabbyExecute(wconn, req)
 	case "profiles.moveImpact":
 		s.handleProfileMoveImpact(wconn, req)
+	case "secrets.usage":
+		s.handleSecretUsageMethod(wconn, req)
+	case "secrets.savePassword", "secrets.saveKeyMaterial", "secrets.saveKeyPassphrase":
+		s.handleSecretMintMethod(wconn, req)
 	case "groups.impact":
 		s.handleGroupImpact(wconn, req)
 	case "groups.apply":
 		s.handleGroupApply(wconn, req)
 	case "groups.list", "groups.create", "groups.update", "groups.delete":
 		s.handleGroupMethod(wconn, req)
-	case "credentials.list", "credentials.create", "credentials.update", "credentials.delete":
-		s.handleCredentialCRUDMethod(wconn, req)
-	case "credentials.usage":
-		s.handleCredentialUsageMethod(wconn, req)
-	case "credentials.savePassword", "credentials.deletePassword",
-		"credentials.hasPassword",
-		"credentials.saveKeyPassphrase", "credentials.deleteKeyPassphrase",
-		"credentials.saveKeyMaterial", "credentials.deleteKeyMaterial":
-		s.handleCredentialMethod(wconn, req)
 	case "settings.describe", "settings.getSnapshot", "settings.set", "settings.reset",
 		"settings.secretSet", "settings.secretDelete", "settings.secretExists":
 		s.handleSettingsMethod(wconn, req)
@@ -930,6 +926,14 @@ func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connSta
 	sess, err := s.registry.Open(ctx, cfg)
 	if err != nil {
 		s.log.Error("failed to open session", "error", err)
+		// A sealed vault surfaces here for EVERY connection that needs it —
+		// this is still a vault access, and the renderer must get the reason
+		// so the vault-owned unlock prompt appears instead of an error
+		// (the dispatcher intercepts reason="vault-sealed" on any RPC).
+		if errors.Is(err, vault.ErrVaultSealed) || errors.Is(err, vault.ErrVaultUninitialized) {
+			_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "", err))
+			return
+		}
 		// Classify the SSH error through the same taxonomy the probe uses
 		// so the user sees what actually failed, not "Internal error".
 		pr := classifyProbeError(err)
@@ -1299,11 +1303,11 @@ func (s *WSServer) closeSession(sid session.ID) {
 	_ = s.registry.Close(sid)
 }
 
-// --- profile/group/credential control-plane handlers ---------------------
+// --- profile/group control-plane handlers -------------------------------
 //
 // These methods back the connection-manager JSON-RPC calls (AD-1 control
 // plane). Each returns a JSON-RPC error (-32601) when the relevant store is
-// not wired (WithProfileRepository/WithGroupRepository/WithCredentialMetadataRepository not called).
+// not wired (WithProfileRepository/WithGroupRepository not called).
 
 func (s *WSServer) handleProfileMethod(wconn *wsConn, req jsonrpcRequest) {
 	if s.profiles == nil {
@@ -1317,6 +1321,10 @@ func (s *WSServer) handleProfileMethod(wconn *wsConn, req jsonrpcRequest) {
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
 			return
 		}
+		// Secret references stay backend-owned: hand the renderer row handles.
+		for i := range profs {
+			profs[i] = wireProfile(profs[i])
+		}
 		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(profs)))
 	case "profiles.create":
 		var p profile.SSHProfile
@@ -1328,11 +1336,18 @@ func (s *WSServer) handleProfileMethod(wconn *wsConn, req jsonrpcRequest) {
 		if p.ID == "" {
 			p.ID = profile.NewProfileID("ssh", p.Name)
 		}
+		// The renderer names secrets by row handle; resolve to references
+		// before storage.
+		var wireErr error
+		if p.Options, wireErr = s.optionsFromWire(p.Options); wireErr != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, wireErr.Error()))
+			return
+		}
 		if err := s.profiles.CreateProfile(p); err != nil {
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, profileMethodErrorCode(err), err.Error()))
 			return
 		}
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(p)))
+		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(wireProfile(p))))
 	case "profiles.update":
 		var p profile.SSHProfile
 		if err := json.Unmarshal(req.Params, &p); err != nil {
@@ -1343,11 +1358,16 @@ func (s *WSServer) handleProfileMethod(wconn *wsConn, req jsonrpcRequest) {
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "id required"))
 			return
 		}
+		var wireErr error
+		if p.Options, wireErr = s.optionsFromWire(p.Options); wireErr != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, wireErr.Error()))
+			return
+		}
 		if err := s.profiles.UpdateProfile(p); err != nil {
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, profileMethodErrorCode(err), err.Error()))
 			return
 		}
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(p)))
+		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(wireProfile(p))))
 	case "profiles.delete":
 		var params struct {
 			ID string `json:"id"`
@@ -1380,6 +1400,11 @@ func (s *WSServer) handleGroupMethod(wconn *wsConn, req jsonrpcRequest) {
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
 			return
 		}
+		// The renderer addresses secret bindings by row handle (ADR-0011 §2):
+		// convert every stored reference in the defaults before marshaling.
+		for i := range groups {
+			groups[i] = wireGroup(groups[i])
+		}
 		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(groups)))
 	case "groups.create":
 		var g profile.ProfileGroup
@@ -1391,11 +1416,19 @@ func (s *WSServer) handleGroupMethod(wconn *wsConn, req jsonrpcRequest) {
 		if g.ID == "" {
 			g.ID = profile.NewGroupID(g.Name)
 		}
+		// Resolve the defaults' row handles to stored references (ADR-0011 §2)
+		// so storage never holds a secrow handle.
+		wg, werr := s.groupFromWire(g)
+		if werr != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, werr.Error()))
+			return
+		}
+		g = wg
 		if err := s.groups.CreateGroup(g); err != nil {
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, profileMethodErrorCode(err), err.Error()))
 			return
 		}
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(g)))
+		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(wireGroup(g))))
 	case "groups.update":
 		var g profile.ProfileGroup
 		if err := json.Unmarshal(req.Params, &g); err != nil {
@@ -1406,6 +1439,14 @@ func (s *WSServer) handleGroupMethod(wconn *wsConn, req jsonrpcRequest) {
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "id required"))
 			return
 		}
+		// Resolve the defaults' row handles before comparing against storage,
+		// or the guard below would see every secret binding as a change.
+		wg, werr := s.groupFromWire(g)
+		if werr != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, werr.Error()))
+			return
+		}
+		g = wg
 		// Guard: ParentGroupID and Defaults cannot be changed through generic
 		// CRUD — the renderer MUST use groups.impact + groups.apply.
 		allGroups, loadErr := s.groups.LoadGroups()
@@ -1438,7 +1479,7 @@ func (s *WSServer) handleGroupMethod(wconn *wsConn, req jsonrpcRequest) {
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, profileMethodErrorCode(err), err.Error()))
 			return
 		}
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(g)))
+		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(wireGroup(g))))
 	case "groups.delete":
 		var params struct {
 			ID string `json:"id"`
@@ -1466,167 +1507,6 @@ func (s *WSServer) handleGroupMethod(wconn *wsConn, req jsonrpcRequest) {
 	}
 }
 
-func (s *WSServer) handleCredentialCRUDMethod(wconn *wsConn, req jsonrpcRequest) {
-	if s.credMeta == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "profiles not available"))
-		return
-	}
-	switch req.Method {
-	case "credentials.list":
-		creds, err := s.credMeta.LoadCredentials()
-		if err != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
-			return
-		}
-		// Strip SecretID fields — the renderer must never see them (ADR-0011 SS2).
-		for i := range creds {
-			// Populate computed response fields from the record, then strip
-			// backend-owned secret references (ADR-0011 §2).
-			creds[i].HasKeyMaterial = creds[i].KeyMaterialSecretID != ""
-			creds[i].SecretID = ""
-			creds[i].PassphraseSecretID = ""
-			creds[i].KeyMaterialSecretID = ""
-		}
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(creds)))
-	case "credentials.create":
-		var in credentialCreateDTO
-		if err := json.Unmarshal(req.Params, &in); err != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
-			return
-		}
-		if in.SecretID != "" || in.PassphraseSecretID != "" {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602,
-				"secretId/passphraseSecretId are backend-owned"))
-			return
-		}
-		// The renderer's id is ignored, not honoured: it was minted from the first
-		// keystroke of the name and never revised (spec §2.4).
-		c := profile.Credential{
-			ID:       profile.NewCredentialID(in.Name),
-			Name:     in.Name,
-			Username: in.Username,
-			Auth:     in.Auth,
-			KeyPath:  in.KeyPath,
-		}
-		if err := s.credMeta.CreateCredential(c); err != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, credentialErrorCode(err), err.Error()))
-			return
-		}
-		c.SecretID = ""
-		c.PassphraseSecretID = ""
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(c)))
-	case "credentials.update":
-		var in credentialUpdateDTO
-		if err := json.Unmarshal(req.Params, &in); err != nil || in.ID == "" {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: id required"))
-			return
-		}
-		// Exclusivity: if the patch sets KeyPath on a credential that holds
-		// key material, delete the stored material and clear the reference.
-		if in.KeyPath != nil && *in.KeyPath != "" && s.credentials != nil {
-			if cred, ok, findErr := s.findCredentialByID(in.ID); findErr == nil && ok {
-				if cred.KeyMaterialSecretID != "" {
-					// Delete the vault secret.
-					_ = s.credentials.Delete(context.Background(), credential.SecretID(cred.KeyMaterialSecretID))
-					// Clear the metadata reference and fingerprint.
-					_ = s.credMeta.UpdateKeyMaterial(in.ID, "", "")
-				}
-			}
-		}
-
-		merged, err := s.credMeta.UpdateCredential(in.ID, in.Patch())
-		if err != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, credentialErrorCode(err), err.Error()))
-			return
-		}
-		// Populate computed response fields from the record, then strip
-		// backend-owned secret references (ADR-0011 §2).
-		merged.HasKeyMaterial = merged.KeyMaterialSecretID != ""
-		merged.SecretID = ""
-		merged.PassphraseSecretID = ""
-		merged.KeyMaterialSecretID = ""
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(merged)))
-	case "credentials.delete":
-		var params struct {
-			ID string `json:"id"`
-		}
-		if err := json.Unmarshal(req.Params, &params); err != nil || params.ID == "" {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: id required"))
-			return
-		}
-		if err := s.deleteCredentialCascade(params.ID); err != nil {
-			_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "", err))
-			return
-		}
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(true)))
-	}
-}
-
-func (s *WSServer) handleCredentialUsageMethod(wconn *wsConn, req jsonrpcRequest) {
-	if s.credMeta == nil || s.profiles == nil || s.groups == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "credentials not available"))
-		return
-	}
-
-	creds, err := s.credMeta.LoadCredentials()
-	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
-		return
-	}
-
-	profiles, err := s.profiles.LoadProfiles()
-	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
-		return
-	}
-
-	groups, err := s.groups.LoadGroups()
-	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
-		return
-	}
-
-	usage := profile.ComputeCredentialUsage(creds, profiles, groups, profile.SparseSSHOptions{})
-
-	result := struct {
-		Usage []profile.CredentialUsage `json:"usage"`
-	}{Usage: usage}
-
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(result)))
-}
-
-// credentialCreateDTO is the renderer's create payload. SecretID and
-// PassphraseSecretID appear here only so a renderer that sends them can be
-// REJECTED rather than silently ignored — they are never read into the record.
-type credentialCreateDTO struct {
-	Name               string           `json:"name"`
-	Username           string           `json:"username"`
-	Auth               profile.AuthMode `json:"auth"`
-	KeyPath            string           `json:"keyPath"`
-	SecretID           string           `json:"secretId"`
-	PassphraseSecretID string           `json:"passphraseSecretId"`
-}
-
-// credentialUpdateDTO is sparse: a field the renderer did not send stays nil
-// and the stored value survives. That is the whole fix for the orphaned-secret
-// defect — the previous handler decoded into the record type, so an absent
-// field arrived as a zero value indistinguishable from a deliberate clear.
-type credentialUpdateDTO struct {
-	ID                 string            `json:"id"`
-	Name               *string           `json:"name"`
-	Username           *string           `json:"username"`
-	Auth               *profile.AuthMode `json:"auth"`
-	KeyPath            *string           `json:"keyPath"`
-	SecretID           string            `json:"secretId"`
-	PassphraseSecretID string            `json:"passphraseSecretId"`
-}
-
-func (d credentialUpdateDTO) Patch() profile.CredentialPatch {
-	return profile.CredentialPatch{
-		Name: d.Name, Username: d.Username, Auth: d.Auth, KeyPath: d.KeyPath,
-	}
-}
-
 // profileMethodErrorCode maps a store error to a JSON-RPC code, same pattern
 // as credentialErrorCode.
 func profileMethodErrorCode(err error) int {
@@ -1637,21 +1517,6 @@ func profileMethodErrorCode(err error) int {
 		errors.Is(err, profile.ErrGroupExists),
 		errors.Is(err, profile.ErrGroupNotFound),
 		errors.Is(err, profile.ErrGroupIDRequired):
-		return -32602
-	default:
-		return -32603
-	}
-}
-
-// credentialErrorCode maps a store error to a JSON-RPC code. A caller mistake
-// is -32602 so the renderer can name the field to fix; anything else is -32603
-// (nocx-wd2m established this distinction for the host binding).
-func credentialErrorCode(err error) int {
-	switch {
-	case errors.Is(err, profile.ErrCredentialExists),
-		errors.Is(err, profile.ErrCredentialNotFound),
-		errors.Is(err, profile.ErrCredentialIDRequired),
-		errors.Is(err, profile.ErrCredentialNameRequired):
 		return -32602
 	default:
 		return -32603
@@ -1675,147 +1540,6 @@ func defaultsChanged(a, b *profile.ProfileDefaults) bool {
 	return string(aJSON) != string(bJSON)
 }
 
-func (s *WSServer) handleCredentialMethod(wconn *wsConn, req jsonrpcRequest) {
-	if s.credentials == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "credentials not available"))
-		return
-	}
-	switch req.Method {
-	case "credentials.savePassword":
-		var params struct {
-			CredentialID string `json:"credentialId"`
-			Password     string `json:"password"`
-			// Name is the generated display name (user@host, from the
-			// connection being saved) — ADR-0016. Optional: a nameless secret
-			// still renders, by fallback.
-			Name string `json:"name,omitempty"`
-		}
-		if err := json.Unmarshal(req.Params, &params); err != nil || params.CredentialID == "" {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: credentialId required"))
-			return
-		}
-		if err := s.savePasswordForCredential(params.CredentialID, params.Password, params.Name); err != nil {
-			_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "", err))
-			return
-		}
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(true)))
-	case "credentials.deletePassword":
-		var params struct {
-			CredentialID string `json:"credentialId"`
-		}
-		if err := json.Unmarshal(req.Params, &params); err != nil || params.CredentialID == "" {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: credentialId required"))
-			return
-		}
-		if err := s.deletePasswordForCredential(params.CredentialID); err != nil {
-			_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "", err))
-			return
-		}
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(true)))
-	case "credentials.hasPassword":
-		var params struct {
-			CredentialID string `json:"credentialId"`
-		}
-		if err := json.Unmarshal(req.Params, &params); err != nil || params.CredentialID == "" {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: credentialId required"))
-			return
-		}
-		has, err := s.hasPasswordForCredential(params.CredentialID)
-		if err != nil {
-			_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "", err))
-			return
-		}
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(has)))
-	case "credentials.saveKeyPassphrase":
-		var params struct {
-			CredentialID string `json:"credentialId"`
-			Passphrase   string `json:"passphrase"`
-			Name         string `json:"name,omitempty"`
-		}
-		if err := json.Unmarshal(req.Params, &params); err != nil || params.CredentialID == "" {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: credentialId required"))
-			return
-		}
-		if err := s.savePassphraseForCredential(params.CredentialID, params.Passphrase, params.Name); err != nil {
-			var invalidPass *errInvalidKeyPassphrase
-			if errors.As(err, &invalidPass) {
-				_ = wconn.writeJSON(jsonrpcResponse{
-					JSONRPC: "2.0",
-					ID:      req.ID,
-					Error: &jsonrpcErrorObj{
-						Code:    -32603,
-						Message: err.Error(),
-						Data:    &vaultErrorData{Reason: "invalid-key-passphrase"},
-					},
-				})
-				return
-			}
-			_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "", err))
-			return
-		}
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(true)))
-	case "credentials.deleteKeyPassphrase":
-		var params struct {
-			CredentialID string `json:"credentialId"`
-		}
-		if err := json.Unmarshal(req.Params, &params); err != nil || params.CredentialID == "" {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: credentialId required"))
-			return
-		}
-		if err := s.deletePassphraseForCredential(params.CredentialID); err != nil {
-			_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "", err))
-			return
-		}
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(true)))
-
-	case "credentials.saveKeyMaterial":
-		var params struct {
-			CredentialID string `json:"credentialId"`
-			KeyText      string `json:"keyText"`
-			Name         string `json:"name,omitempty"`
-		}
-		if err := json.Unmarshal(req.Params, &params); err != nil || params.CredentialID == "" {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: credentialId required"))
-			return
-		}
-		fingerprint, passphraseWanted, err := s.saveKeyMaterialForCredential(params.CredentialID, params.KeyText, params.Name)
-		if err != nil {
-			var invalidKey *errInvalidKeyMaterial
-			if errors.As(err, &invalidKey) {
-				_ = wconn.writeJSON(jsonrpcResponse{
-					JSONRPC: "2.0",
-					ID:      req.ID,
-					Error: &jsonrpcErrorObj{
-						Code:    -32603,
-						Message: err.Error(),
-						Data:    &vaultErrorData{Reason: "invalid-key"},
-					},
-				})
-				return
-			}
-			_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "", err))
-			return
-		}
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(saveKeyMaterialResult{
-			Fingerprint:      fingerprint,
-			PassphraseWanted: passphraseWanted,
-		})))
-	case "credentials.deleteKeyMaterial":
-		var params struct {
-			CredentialID string `json:"credentialId"`
-		}
-		if err := json.Unmarshal(req.Params, &params); err != nil || params.CredentialID == "" {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: credentialId required"))
-			return
-		}
-		if err := s.deleteKeyMaterialForCredential(params.CredentialID); err != nil {
-			_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "", err))
-			return
-		}
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(struct{}{})))
-	}
-}
-
 // createSecret stores a secret with its catalogue metadata (ADR-0016): the
 // display name generated by the connection editor (or asked of the user on
 // the Secrets page) and the kind, both riding the vault's create sequence.
@@ -1828,108 +1552,9 @@ func (s *WSServer) createSecret(ctx context.Context, value credential.Secret, me
 	return s.credentials.Create(ctx, value)
 }
 
-// savePasswordForCredential stores a password secret and points the
-// credential's record-level password reference at it. The new secret is
-// written under a fresh ID first, then metadata is updated, then the old
-// secret (if any) is best-effort deleted — write-before-repoint prevents a
-// crash from orphaning the new secret.
-//
-// name is the generated display name (user@host) the connection editor sent —
-// the secret owns its name (ADR-0016). Empty falls back to rendering.
-//
-// No production context available — this is called from a JSON-RPC handler
-// that has no request scoping. The vault caps waiting via its own deadline.
-func (s *WSServer) savePasswordForCredential(credID, password, name string) error {
-	if s.credMeta == nil {
-		return errors.New("profiles not available")
-	}
-	cred, ok, err := s.findCredentialByID(credID)
-	if err != nil {
-		return fmt.Errorf("load credential %s: %w", credID, err)
-	}
-	if !ok {
-		return fmt.Errorf("credential %s not found", credID)
-	}
-
-	ctx := context.Background()
-	newID, err := s.createSecret(ctx, credential.NewSecret(password),
-		vault.SecretMeta{Name: name, Kind: vault.KindPassword})
-	if err != nil {
-		return fmt.Errorf("store secret: %w", err)
-	}
-
-	// Old password ref for cleanup; the passphrase ref is carried over
-	// unchanged on the record.
-	oldID := credential.SecretID(cred.SecretID)
-	if err := s.credMeta.UpdateSecretRefs(credID, string(newID), cred.PassphraseSecretID); err != nil {
-		return fmt.Errorf("save credential metadata: %w", err)
-	}
-
-	// Best-effort delete of the old secret.
-	if oldID != "" {
-		_ = s.credentials.Delete(ctx, oldID)
-	}
-	return nil
-}
-
-func (s *WSServer) deletePasswordForCredential(credID string) error {
-	if s.credMeta == nil {
-		return errors.New("profiles not available")
-	}
-	cred, ok, err := s.findCredentialByID(credID)
-	if err != nil {
-		return fmt.Errorf("load credential %s: %w", credID, err)
-	}
-	if !ok {
-		return fmt.Errorf("credential %s not found", credID)
-	}
-
-	oldID := credential.SecretID(cred.SecretID)
-	if err := s.credMeta.UpdateSecretRefs(credID, "", cred.PassphraseSecretID); err != nil {
-		return fmt.Errorf("save credential metadata: %w", err)
-	}
-
-	if oldID != "" {
-		_ = s.credentials.Delete(context.Background(), oldID)
-	}
-	return nil
-}
-
-// hasPasswordForCredential checks whether a password secret exists for the
-// credential. Returns false when the credential is not found.
-func (s *WSServer) hasPasswordForCredential(credID string) (bool, error) {
-	if s.credMeta == nil {
-		return false, nil
-	}
-	cred, ok, err := s.findCredentialByID(credID)
-	if err != nil {
-		return false, err
-	}
-	if !ok {
-		return false, nil
-	}
-	// Check the record-level password reference.
-	if cred.SecretID == "" {
-		return false, nil
-	}
-	return s.credentials.Exists(context.Background(), credential.SecretID(cred.SecretID))
-}
-
 // errInvalidKeyMaterial is returned when key text does not parse as a private
 // key. It maps to error.data.reason: "invalid-key" in the JSON-RPC response.
-type (
-	errInvalidKeyMaterial struct{ msg string }
-	// saveKeyMaterialResult is the credentials.saveKeyMaterial result. Declared
-	// here and validated against contracts/credentials.saveKeyMaterial.schema.json
-	// in ws_contract_test.go: the renderer's type is generated from the schema, so
-	// a field this struct carries but the schema does not would fail the DTO test,
-	// and a field the renderer needs that this struct omits would fail the
-	// over-the-wire test.
-	saveKeyMaterialResult struct {
-		Fingerprint      string `json:"fingerprint"`
-		PassphraseWanted bool   `json:"passphraseWanted"`
-	}
-)
+type errInvalidKeyMaterial struct{ msg string }
 
 // errInvalidKeyPassphrase is returned when a key passphrase cannot be stored:
 // it does not open the stored key, or there is no stored key to verify it
@@ -1940,11 +1565,6 @@ func (e *errInvalidKeyPassphrase) Error() string { return e.msg }
 
 func (e *errInvalidKeyMaterial) Error() string { return e.msg }
 
-// parsePrivateKeyMaterial validates and extracts the SHA256 fingerprint from
-// private key PEM text. passphraseWanted reports an encrypted key whose
-// passphrase has not been stored — the renderer must ask for it, and a wrong
-// one is refused against the key. Returns an *errInvalidKeyMaterial if the
-// text is not a valid private key.
 func parsePrivateKeyMaterial(keyText string) (fingerprint string, passphraseWanted bool, err error) {
 	keyBytes := []byte(keyText)
 	parsed, parseErr := gossh.ParseRawPrivateKey(keyBytes)
@@ -1986,288 +1606,14 @@ func parsePrivateKeyMaterial(keyText string) (fingerprint string, passphraseWant
 	return "", false, &errInvalidKeyMaterial{msg: fmt.Sprintf("not a valid private key: %v", parseErr)}
 }
 
-func (s *WSServer) saveKeyMaterialForCredential(credID, keyText, name string) (fingerprint string, passphraseWanted bool, err error) {
-	if s.credMeta == nil {
-		return "", false, errors.New("profiles not available")
-	}
-	if s.credentials == nil {
-		return "", false, errors.New("secret store not available")
-	}
-
-	cred, ok, err := s.findCredentialByID(credID)
-	if err != nil {
-		return "", false, fmt.Errorf("load credential %s: %w", credID, err)
-	}
-	if !ok {
-		return "", false, fmt.Errorf("credential %s not found", credID)
-	}
-
-	// Parse and validate the key text before storing anything.
-	fingerprint, passphraseWanted, err = parsePrivateKeyMaterial(keyText)
-	if err != nil {
-		return "", false, err
-	}
-
-	// Store the key material in the vault (write-before-repoint).
-	ctx := context.Background()
-	newID, err := s.createSecret(ctx, credential.NewSecret(keyText),
-		vault.SecretMeta{Name: name, Kind: vault.KindPrivateKey})
-	if err != nil {
-		return "", false, fmt.Errorf("store key material: %w", err)
-	}
-
-	// Old key material ref for cleanup.
-	oldID := credential.SecretID(cred.KeyMaterialSecretID)
-
-	// Update credential metadata: set key material ref, fingerprint, and
-	// clear KeyPath (the store method handles the mutual exclusion).
-	if err := s.credMeta.UpdateKeyMaterial(credID, string(newID), fingerprint); err != nil {
-		return "", false, fmt.Errorf("save credential metadata: %w", err)
-	}
-
-	// Best-effort delete of the old key material.
-	if oldID != "" {
-		_ = s.credentials.Delete(ctx, oldID)
-	}
-
-	return fingerprint, passphraseWanted, nil
-}
-
-// deleteKeyMaterialForCredential removes the stored key material from the
-// vault and clears the reference on the credential record.
-func (s *WSServer) deleteKeyMaterialForCredential(credID string) error {
-	if s.credMeta == nil {
-		return errors.New("profiles not available")
-	}
-	if s.credentials == nil {
-		return errors.New("secret store not available")
-	}
-
-	cred, ok, err := s.findCredentialByID(credID)
-	if err != nil {
-		return fmt.Errorf("load credential %s: %w", credID, err)
-	}
-	if !ok {
-		return fmt.Errorf("credential %s not found", credID)
-	}
-
-	// Old key material ref to delete from vault.
-	ctx := context.Background()
-	oldID := credential.SecretID(cred.KeyMaterialSecretID)
-
-	// Clear the reference on the credential record and clear KeyPath.
-	// Use empty values to clear the fields.
-	if err := s.credMeta.UpdateKeyMaterial(credID, "", ""); err != nil {
-		return fmt.Errorf("update credential metadata: %w", err)
-	}
-
-	// Delete the vault secret.
-	if oldID != "" {
-		_ = s.credentials.Delete(ctx, oldID)
-	}
-
-	return nil
-}
-
-// savePassphraseForCredential verifies a key passphrase against the stored
-// key material when there is any, then stores it and points the credential's
-// record-level passphrase reference at it. Same write-before-repoint pattern.
-// name is the generated display name the connection editor sent (ADR-0016).
-//
-// Verification is the point, not the asking: gossh.ParsePrivateKeyWithPassphrase
-// answers whether a passphrase opens a key, and storing an unverified
-// passphrase moves the failure from a moment the user can fix (the editor,
-// with the key still on screen) to a moment they cannot (the connect, where a
-// wrong passphrase is a dead end). A passphrase that does not open the stored
-// key is refused there and then. A credential with no stored key material
-// (a path-based key, a pre-seeded reference) cannot be verified at save time
-// and keeps the prior behaviour — the connection resolves the file and the
-// passphrase together, where the key itself is the verifier.
-func (s *WSServer) savePassphraseForCredential(credID, passphrase, name string) error {
-	if s.credMeta == nil {
-		return errors.New("profiles not available")
-	}
-	cred, ok, err := s.findCredentialByID(credID)
-	if err != nil {
-		return fmt.Errorf("load credential %s: %w", credID, err)
-	}
-	if !ok {
-		return fmt.Errorf("credential %s not found", credID)
-	}
-
-	if err = s.verifyKeyPassphrase(cred, []byte(passphrase)); err != nil {
-		return err
-	}
-
-	ctx := context.Background()
-	newID, err := s.createSecret(ctx, credential.NewSecret(passphrase),
-		vault.SecretMeta{Name: name, Kind: vault.KindKeyPassphrase})
-	if err != nil {
-		return fmt.Errorf("store passphrase: %w", err)
-	}
-
-	// Old passphrase ref for cleanup; the password ref is carried over
-	// unchanged on the record.
-	oldID := credential.SecretID(cred.PassphraseSecretID)
-	if err := s.credMeta.UpdateSecretRefs(credID, cred.SecretID, string(newID)); err != nil {
-		return fmt.Errorf("save credential metadata: %w", err)
-	}
-
-	if oldID != "" {
-		_ = s.credentials.Delete(ctx, oldID)
-	}
-	return nil
-}
-
-// verifyKeyPassphrase answers whether the passphrase opens the credential's
-// stored key material. Returns an *errInvalidKeyPassphrase when it does not.
-// With no stored key material there is nothing to verify against — nil, so
-// the save proceeds for path-based keys, whose connect-time resolution pairs
-// the file with the passphrase and verifies them together.
-func (s *WSServer) verifyKeyPassphrase(cred profile.Credential, passphrase []byte) error {
-	if s.credentials == nil {
-		return &errInvalidKeyPassphrase{msg: "secret store not available"}
-	}
-	if cred.KeyMaterialSecretID == "" {
-		return nil
-	}
-	secret, err := s.credentials.Get(context.Background(), credential.SecretID(cred.KeyMaterialSecretID))
-	if err != nil {
-		return fmt.Errorf("load key material: %w", err)
-	}
-	if secret.IsEmpty() {
-		return nil
-	}
-
-	var opens bool
-	if err := secret.Use(func(keyBytes []byte) error {
-		_, parseErr := gossh.ParsePrivateKeyWithPassphrase(keyBytes, passphrase)
-		opens = parseErr == nil
-		return nil
-	}); err != nil {
-		return fmt.Errorf("read key material: %w", err)
-	}
-	if !opens {
-		return &errInvalidKeyPassphrase{msg: "that passphrase does not open this key"}
-	}
-	return nil
-}
-
-// deletePassphraseForCredential removes the stored key passphrase secret and
-// clears the record-level passphrase reference.
-func (s *WSServer) deletePassphraseForCredential(credID string) error {
-	if s.credMeta == nil {
-		return errors.New("profiles not available")
-	}
-	cred, ok, err := s.findCredentialByID(credID)
-	if err != nil {
-		return fmt.Errorf("load credential %s: %w", credID, err)
-	}
-	if !ok {
-		return fmt.Errorf("credential %s not found", credID)
-	}
-
-	// Old passphrase ref for cleanup; the password ref is carried over
-	// unchanged on the record.
-	oldID := credential.SecretID(cred.PassphraseSecretID)
-	if err := s.credMeta.UpdateSecretRefs(credID, cred.SecretID, ""); err != nil {
-		return fmt.Errorf("save credential metadata: %w", err)
-	}
-
-	if oldID != "" {
-		_ = s.credentials.Delete(context.Background(), oldID)
-	}
-	return nil
-}
-
-// deleteCredentialCascade removes a credential's metadata and every secret
-// it references, in an order that cannot strand a secret.
-//
-// # Order: metadata-first, then best-effort secrets (ADR-0011 §4)
-//
-// Metadata is deleted first and its deletion stands; secret deletion is
-// best-effort afterwards. A brief unreachable orphan (secret with no
-// metadata pointing at it) is safer than metadata pointing at a secret
-// that is gone. With SecretID, both secrets are reachable by their stable
-// IDs from the metadata — the private key file no longer needs to exist.
-//
-// # Missing secrets are not errors
-//
-// Deleting a credential that never had a password (or whose passphrase was
-// never saved) must succeed. SecretStore.Delete treats "already absent" as
-// success, so no special-casing is needed.
-func (s *WSServer) deleteCredentialCascade(id string) error {
-	// Load the metadata BEFORE deleting it: all SecretIDs across versions
-	// are needed to reach the keychain entries, and once the row is gone
-	// they are unrecoverable.
-	cred, ok, err := s.findCredentialByID(id)
-	if err != nil {
-		return fmt.Errorf("load credential %s: %w", id, err)
-	}
-
-	// Collect every secret ID from the record-level fields.
-	var ids []credential.SecretID
-	if ok {
-		if cred.SecretID != "" {
-			ids = append(ids, credential.SecretID(cred.SecretID))
-		}
-		if cred.PassphraseSecretID != "" {
-			ids = append(ids, credential.SecretID(cred.PassphraseSecretID))
-		}
-		if cred.KeyMaterialSecretID != "" {
-			ids = append(ids, credential.SecretID(cred.KeyMaterialSecretID))
-		}
-	}
-
-	// Delete metadata first. Its deletion stands regardless of secret
-	// deletion outcome (ADR-0011 §4: a brief orphan beats a dangling ref).
-	if err := s.credMeta.DeleteCredential(id); err != nil {
-		return fmt.Errorf("delete credential metadata %s: %w", id, err)
-	}
-
-	// No metadata found → nothing referenced any secret. Idempotent.
-	if !ok {
-		return nil
-	}
-
-	// Best-effort secret deletion.
-	if s.credentials == nil {
-		return nil
-	}
-	var errs []error
-	ctx := context.Background()
-	for _, secretID := range ids {
-		if err := s.credentials.Delete(ctx, secretID); err != nil {
-			errs = append(errs, fmt.Errorf("delete secret %s for %s: %w", secretID, id, err))
-		}
-	}
-	return errors.Join(errs...)
-}
-
-// findCredentialByID loads a single credential by ID from the profile store.
-// ok is false (not an error) when no credential with that ID exists — that
-// is the idempotent-delete path. A store error is returned as-is.
-func (s *WSServer) findCredentialByID(id string) (profile.Credential, bool, error) {
-	creds, err := s.credMeta.LoadCredentials()
-	if err != nil {
-		return profile.Credential{}, false, err
-	}
-	for _, c := range creds {
-		if c.ID == id {
-			return c, true, nil
-		}
-	}
-	return profile.Credential{}, false, nil
-}
-
 // handleImportTabby parses a Tabby config YAML and imports SSH profiles,
 // groups, and optionally vault secrets into the wired profile/group
 // repositories and SecretStore.
 //
 // When the config carries an encrypted vault section and passphrase is provided,
-// every decrypted secret is stored via Vault.Create and imported as a
-// profile.Credential, with password secrets matched to their profiles by
-// host+port+user. An encrypted vault without a passphrase is an error.
+// every decrypted secret is stored via Vault.Create and bound to the profile
+// whose connection target the tabby vault keyed it to, by host+port+user. An
+// encrypted vault without a passphrase is an error.
 //
 // Order (ADR-0011 §4): secrets are written first, then the metadata that
 // references them. A crash mid-import orphans secrets — reconciliation
@@ -2275,12 +1621,11 @@ func (s *WSServer) findCredentialByID(id string) (profile.Credential, bool, erro
 // nothing, which is a broken profile the user must repair by hand.
 //
 // Collision policy (nocx-y910.1): profiles and groups overwrite on duplicate
-// ID; duplicate credential IDs are refused. A profile naming an existing local
-// credential is marked NeedsReview.
+// ID.
 //
 // The passphrase is a parameter of the operation, asked once, stored nowhere
 // — no field, no cache, no package variable.
-// privateKeyLabel names the credential that carries an imported private-key
+// privateKeyLabel names the secret that carries an imported private-key
 // passphrase. Tabby identifies the key only by a hash, which is unreadable on
 // its own, so the label says what it is and keeps enough of the hash to tell
 // two of them apart.
@@ -2288,16 +1633,16 @@ func (s *WSServer) findCredentialByID(id string) (profile.Credential, bool, erro
 
 // TabbyPreviewResponse is returned by profiles.tabbyPreview.
 type TabbyPreviewResponse struct {
-	ProfilesToImport    int               `json:"profilesToImport"`
-	GroupsToImport      int               `json:"groupsToImport"`
-	CredentialsToImport int               `json:"credentialsToImport"`
-	ProfileEntries      []ProfileEntry    `json:"profileEntries,omitempty"`
-	GroupNames          []string          `json:"groupNames,omitempty"`
-	CredentialEntries   []CredentialEntry `json:"credentialEntries,omitempty"`
-	SkippedSecrets      []SkippedInfo     `json:"skippedSecrets,omitempty"`
-	Collisions          []CollisionInfo   `json:"collisions,omitempty"`
-	SecretProvider      string            `json:"secretProvider"`
-	PlanToken           string            `json:"planToken"`
+	ProfilesToImport int             `json:"profilesToImport"`
+	GroupsToImport   int             `json:"groupsToImport"`
+	SecretsToImport  int             `json:"secretsToImport"`
+	ProfileEntries   []ProfileEntry  `json:"profileEntries,omitempty"`
+	GroupNames       []string        `json:"groupNames,omitempty"`
+	SecretEntries    []SecretEntry   `json:"secretEntries,omitempty"`
+	SkippedSecrets   []SkippedInfo   `json:"skippedSecrets,omitempty"`
+	Collisions       []CollisionInfo `json:"collisions,omitempty"`
+	SecretProvider   string          `json:"secretProvider"`
+	PlanToken        string          `json:"planToken"`
 }
 
 // ProfileEntry describes one profile the import would create or modify.
@@ -2306,8 +1651,8 @@ type ProfileEntry struct {
 	Action string `json:"action"` // "new", "overwrite", "needs-review"
 }
 
-// CredentialEntry describes one credential the import would create.
-type CredentialEntry struct {
+// SecretEntry describes one secret the import would create.
+type SecretEntry struct {
 	Name string `json:"name"`
 	Type string `json:"type"` // "password" or "passphrase"
 }
@@ -2331,7 +1676,7 @@ type tabbyExecuteParams struct {
 }
 
 // planTabbyImport parses a Tabby config, decrypts its vault (if passphrase
-// supplied), and plans every profile, group, and credential WITHOUT writing
+// supplied), and plans every profile, group, and secret WITHOUT writing
 // anything. Returns the full importPlan for execution and a preview response
 // for the renderer. The plan is stored server-side by the returned token.
 func (s *WSServer) planTabbyImport(configYAML, passphrase string) (*importPlan, *TabbyPreviewResponse, error) {
@@ -2340,13 +1685,10 @@ func (s *WSServer) planTabbyImport(configYAML, passphrase string) (*importPlan, 
 		return nil, nil, err
 	}
 
-	// Decrypt vault and build credentials + profile matching.
+	// Decrypt vault and build secret plans. Each password plan carries
+	// the connection target the tabby vault keyed it to, so execution can
+	// bind the minted secret onto the right profile (ADR-0017 §1).
 	var credentials []credentialPlan
-	type pwKey struct {
-		user, host string
-		port       int
-	}
-	pwLookup := make(map[pwKey]string)
 	skipped := make([]SkippedInfo, 0)
 
 	if cfg.Vault != nil && cfg.Vault.Encrypted {
@@ -2384,18 +1726,12 @@ func (s *WSServer) planTabbyImport(configYAML, passphrase string) (*importPlan, 
 					continue
 				}
 				name := t.User + "@" + t.Host
-				credID := profile.NewCredentialID(name)
-				cred := profile.Credential{
-					ID:       credID,
-					Name:     name,
-					Username: t.User,
-					Auth:     profile.AuthPassword,
-				}
-				pk := pwKey{user: t.User, host: t.Host, port: t.Port}
-				pwLookup[pk] = credID
 				credentials = append(credentials, credentialPlan{
-					cred:   cred,
-					secret: val,
+					name:       name,
+					secret:     val,
+					targetUser: t.User,
+					targetHost: t.Host,
+					targetPort: t.Port,
 				})
 
 			case "ssh:key-passphrase":
@@ -2411,13 +1747,8 @@ func (s *WSServer) planTabbyImport(configYAML, passphrase string) (*importPlan, 
 					continue
 				}
 				keyName := privateKeyLabel(k.Hash)
-				cred := profile.Credential{
-					ID:   profile.NewCredentialID(keyName),
-					Name: keyName,
-					Auth: profile.AuthPublicKey,
-				}
 				credentials = append(credentials, credentialPlan{
-					cred:         cred,
+					name:         keyName,
 					secret:       val,
 					isPassphrase: true,
 				})
@@ -2431,26 +1762,15 @@ func (s *WSServer) planTabbyImport(configYAML, passphrase string) (*importPlan, 
 		}
 	}
 
-	// Convert profiles and match credentials.
+	// Convert profiles.
 	var profiles []profile.SSHProfile
 	for _, tp := range cfg.Profiles {
 		if tp.Type != "ssh" {
 			continue
 		}
 		p := importer.ConvertProfile(tp)
-		if p.Options.User != nil && p.Options.Host != "" {
-			port := 0
-			if p.Options.Port != nil {
-				port = *p.Options.Port
-			}
-			user := ""
-			if p.Options.User != nil {
-				user = *p.Options.User
-			}
-			if credID, ok := pwLookup[pwKey{user: user, host: p.Options.Host, port: port}]; ok {
-				p.Options.CredentialID = credID
-			}
-		}
+		// Profiles no longer link to credentials (ADR-0017): a profile's
+		// secret references are backend-owned, and an import brings none.
 		profiles = append(profiles, p)
 	}
 
@@ -2479,7 +1799,7 @@ func (s *WSServer) planTabbyImport(configYAML, passphrase string) (*importPlan, 
 	// Build per-entry preview lists.
 	profileEntries := make([]ProfileEntry, 0, len(profiles))
 	groupNames := make([]string, 0, len(groups))
-	credentialEntries := make([]CredentialEntry, 0, len(credentials))
+	secretEntries := make([]SecretEntry, 0, len(credentials))
 
 	// Determine which profiles collide (for setting their action).
 	existingProfileIDs := make(map[string]bool)
@@ -2494,16 +1814,8 @@ func (s *WSServer) planTabbyImport(configYAML, passphrase string) (*importPlan, 
 		if p.ID != "" && existingProfileIDs[p.ID] {
 			action = "overwrite"
 		}
-		// Check if this profile references an existing local credential.
-		if p.Options.CredentialID != "" && s.credMeta != nil {
-			existingCreds, _ := s.credMeta.LoadCredentials()
-			for _, c := range existingCreds {
-				if c.ID == p.Options.CredentialID {
-					action = "needs-review"
-					break
-				}
-			}
-		}
+		// No import-time credential linking remains (ADR-0017): a profile's
+		// secret references are backend-owned and imports carry none.
 		profileEntries = append(profileEntries, ProfileEntry{Name: p.Name, Action: action})
 	}
 	for _, g := range groups {
@@ -2514,18 +1826,18 @@ func (s *WSServer) planTabbyImport(configYAML, passphrase string) (*importPlan, 
 		if cp.isPassphrase {
 			typ = "passphrase"
 		}
-		credentialEntries = append(credentialEntries, CredentialEntry{Name: cp.cred.Name, Type: typ})
+		secretEntries = append(secretEntries, SecretEntry{Name: cp.name, Type: typ})
 	}
 
 	// Build preview response with collision info.
 	preview := &TabbyPreviewResponse{
-		ProfilesToImport:    len(profiles),
-		GroupsToImport:      len(groups),
-		CredentialsToImport: len(credentials),
-		ProfileEntries:      profileEntries,
-		GroupNames:          groupNames,
-		CredentialEntries:   credentialEntries,
-		SkippedSecrets:      skipped,
+		ProfilesToImport: len(profiles),
+		GroupsToImport:   len(groups),
+		SecretsToImport:  len(credentials),
+		ProfileEntries:   profileEntries,
+		GroupNames:       groupNames,
+		SecretEntries:    secretEntries,
+		SkippedSecrets:   skipped,
 	}
 
 	// Detect collisions by checking against current store state.
@@ -2558,34 +1870,6 @@ func (s *WSServer) planTabbyImport(configYAML, passphrase string) (*importPlan, 
 					Kind:   "group",
 					Name:   g.Name,
 					Policy: "overwrite",
-				})
-			}
-		}
-	}
-
-	if s.credMeta != nil {
-		existingCreds, _ := s.credMeta.LoadCredentials()
-		existingIDs := make(map[string]bool, len(existingCreds))
-		for _, c := range existingCreds {
-			existingIDs[c.ID] = true
-		}
-		for _, cp := range credentials {
-			if cp.cred.ID != "" && existingIDs[cp.cred.ID] {
-				preview.Collisions = append(preview.Collisions, CollisionInfo{
-					Kind:   "credential",
-					Name:   cp.cred.Name,
-					Policy: "refuse",
-				})
-			}
-		}
-		// Check for profiles that would reference existing local credentials
-		// (needs-review case). This applies even for credentials not in the plan.
-		for _, p := range profiles {
-			if p.Options.CredentialID != "" && existingIDs[p.Options.CredentialID] {
-				preview.Collisions = append(preview.Collisions, CollisionInfo{
-					Kind:   "profile",
-					Name:   p.Name,
-					Policy: "needs-review",
 				})
 			}
 		}
@@ -2678,33 +1962,44 @@ func (s *WSServer) handleTabbyExecute(wconn *wsConn, req jsonrpcRequest) {
 		}
 	}()
 
-	// Recompute credentials with actual secret IDs.
+	// Mint every secret, binding each password onto the profile whose options
+	// match the target the tabby vault keyed it to (ADR-0017 §1). Passphrases
+	// are minted as unbound rows: a passphrase belongs to a private key the
+	// import cannot fingerprint, and the connection editor binds it.
 	ctx := context.Background()
-	for i, cp := range plan.creds {
+	for _, cp := range plan.creds {
 		kind := vault.KindPassword
 		if cp.isPassphrase {
 			kind = vault.KindKeyPassphrase
 		}
 		secretID, err := s.createSecret(ctx, credential.NewSecret(cp.secret),
-			vault.SecretMeta{Name: cp.cred.Name, Kind: kind})
+			vault.SecretMeta{Name: cp.name, Kind: kind})
 		if err != nil {
 			_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "Store secret: ", err))
 			return
 		}
 		if cp.isPassphrase {
-			plan.creds[i].cred.PassphraseSecretID = string(secretID)
-		} else {
-			plan.creds[i].cred.SecretID = string(secretID)
+			continue
+		}
+		for i := range plan.profiles {
+			o := &plan.profiles[i].Options
+			port := 0
+			if o.Port != nil {
+				port = *o.Port
+			}
+			user := ""
+			if o.User != nil {
+				user = *o.User
+			}
+			if user == cp.targetUser && o.Host == cp.targetHost && port == cp.targetPort {
+				o.PasswordSecret = string(secretID)
+				break
+			}
 		}
 	}
 
-	// Build the credential list for import.
-	var creds []profile.Credential
-	for _, cp := range plan.creds {
-		creds = append(creds, cp.cred)
-	}
-
-	result := s.profileSvc.AtomicImport(plan.profiles, plan.groups, creds)
+	// No credential records are imported: the bindings live on the profiles.
+	result := s.profileSvc.AtomicImport(plan.profiles, plan.groups)
 	if len(result.ImportErrors) > 0 {
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Import failed: "+result.ImportErrors[0]))
 		return
@@ -2745,12 +2040,14 @@ func (s *WSServer) handleImportTabby(wconn *wsConn, req jsonrpcRequest) {
 	}
 
 	// Decrypt vault and build credentials + profile matching.
-	var credentials []profile.Credential
+	// Profiles carry their secret bindings directly (ADR-0017): the minted
+	// password reference goes into the profile's own options, matched by the
+	// connection target the tabby vault keyed it to.
 	type pwKey struct {
 		user, host string
 		port       int
 	}
-	pwLookup := make(map[pwKey]string)
+	pwLookup := make(map[pwKey]credential.SecretID)
 
 	if cfg.Vault != nil && cfg.Vault.Encrypted {
 		if s.credentials == nil {
@@ -2854,23 +2151,15 @@ func (s *WSServer) handleImportTabby(wconn *wsConn, req jsonrpcRequest) {
 			}
 			switch p.ts.Type {
 			case "ssh:password":
-				cred := profile.Credential{
-					ID:       profile.NewCredentialID(name),
-					Name:     name,
-					Username: p.keyTarget.user,
-					Auth:     profile.AuthPassword,
-					SecretID: string(secretID),
-				}
-				credentials = append(credentials, cred)
-				pwLookup[*p.keyTarget] = cred.ID
+				// The secret is bound to the connection it belongs to; no
+				// credential record is minted (ADR-0017 §1).
+				pwLookup[*p.keyTarget] = secretID
 			case "ssh:key-passphrase":
-				cred := profile.Credential{
-					ID:                 profile.NewCredentialID(p.keyName),
-					Name:               p.keyName,
-					Auth:               profile.AuthPublicKey,
-					PassphraseSecretID: string(secretID),
-				}
-				credentials = append(credentials, cred)
+				// Passphrases stay unbound rows: a passphrase belongs to a
+				// private key, and the imported key is a path whose
+				// fingerprint is not readable at import time. The connection
+				// editor's secret picker binds it where the user chooses.
+				_ = p.keyName
 			}
 		}
 	}
@@ -2891,8 +2180,8 @@ func (s *WSServer) handleImportTabby(wconn *wsConn, req jsonrpcRequest) {
 			if p.Options.User != nil {
 				user = *p.Options.User
 			}
-			if credID, ok := pwLookup[pwKey{user: user, host: p.Options.Host, port: port}]; ok {
-				p.Options.CredentialID = credID
+			if secretID, ok := pwLookup[pwKey{user: user, host: p.Options.Host, port: port}]; ok {
+				p.Options.PasswordSecret = string(secretID)
 			}
 		}
 		profiles = append(profiles, p)
@@ -2920,7 +2209,7 @@ func (s *WSServer) handleImportTabby(wconn *wsConn, req jsonrpcRequest) {
 		})
 	}
 
-	result := s.profileSvc.AtomicImport(profiles, groups, credentials)
+	result := s.profileSvc.AtomicImport(profiles, groups)
 	if len(result.ImportErrors) > 0 {
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Import failed: "+result.ImportErrors[0]))
 		return
@@ -2929,7 +2218,6 @@ func (s *WSServer) handleImportTabby(wconn *wsConn, req jsonrpcRequest) {
 }
 
 // --- settings control-plane handlers -------------------------------------
-
 // findDescriptor looks up a setting declaration by key.
 func (s *WSServer) findDescriptor(key string) settings.Descriptor {
 	for _, d := range s.settings.Descriptors() {

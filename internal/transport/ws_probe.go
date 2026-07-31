@@ -151,7 +151,10 @@ func (s *WSServer) handleConnectionsTest(wconn *wsConn, req jsonrpcRequest) {
 
 	host, connectCfg, err := s.resolver.Resolve(params.ProfileID)
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Resolve failed: "+err.Error()))
+		// Resolving reads the stored secret, so a sealed vault surfaces here —
+		// the renderer needs the reason to offer the unlock prompt (the vault
+		// owns it; no call site wraps its own vault calls).
+		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "Resolve failed: ", err))
 		return
 	}
 
@@ -169,7 +172,9 @@ func (s *WSServer) handleConnectionsTest(wconn *wsConn, req jsonrpcRequest) {
 	}
 
 	if result.err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, result.err.Error()))
+		// A sealed vault surfaces here too — the renderer needs the reason to
+		// offer the unlock prompt instead of showing an error.
+		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "probe config: ", result.err))
 		return
 	}
 

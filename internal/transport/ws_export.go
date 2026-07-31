@@ -26,13 +26,12 @@ func (a *settingsProviderAdapter) All() (map[string]any, error) {
 }
 
 // --- export.* control-plane handlers ------------------------------------
-
 // handleExportMethod dispatches export.* RPCs.
-// All export modes work purely through the profile/group/credential-metadata
-// repositories and storage paths — the credential.CredentialStore is never
-// consulted, so no mode can resolve a secret (ADR-0011 §2, §7).
+// All export modes work purely through the profile/group repositories and
+// storage paths — the credential.CredentialStore is never consulted, so no
+// mode can resolve a secret (ADR-0011 §2, §7).
 func (s *WSServer) handleExportMethod(wconn *wsConn, req jsonrpcRequest) {
-	if s.profiles == nil || s.groups == nil || s.credMeta == nil {
+	if s.profiles == nil || s.groups == nil {
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "profiles not available"))
 		return
 	}
@@ -189,17 +188,13 @@ func (s *WSServer) handleExportImportPortable(wconn *wsConn, req jsonrpcRequest)
 	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(result)))
 }
 
-// --- helpers ------------------------------------------------------------
-
 // buildConfigExportDeps assembles a ConfigExportDeps from the wired
-// repositories and settings adapter. The credential.CredentialStore is
-// deliberately absent — no export mode may resolve a secret
-// (ADR-0011 §2, §7).
+// repositories and settings adapter. The secret store is deliberately
+// absent — no export mode may resolve a secret (ADR-0011 §2, §7).
 func (s *WSServer) buildConfigExportDeps() export.ConfigExportDeps {
 	deps := export.ConfigExportDeps{
-		Profiles:    s.profiles,
-		Groups:      s.groups,
-		Credentials: s.credMeta,
+		Profiles: s.profiles,
+		Groups:   s.groups,
 	}
 	if s.settings != nil {
 		deps.Settings = &settingsProviderAdapter{reg: s.settings}

@@ -5,20 +5,15 @@
   "description": "Result of the vault.reset JSON-RPC method: what was actually destroyed, and what could not be. The vault is uninitialized afterwards whether or not every store answered, so this is a success shape with residue rather than an error.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["secretCount", "credentialCount", "connectionCount", "residue"],
+  "required": ["secretCount", "profileCount", "residue"],
   "properties": {
     "secretCount": {
       "description": "Distinct stored secrets whose references were cleared.",
       "type": "integer",
       "minimum": 0
     },
-    "credentialCount": {
-      "description": "Saved logins that held at least one of them.",
-      "type": "integer",
-      "minimum": 0
-    },
-    "connectionCount": {
-      "description": "Connections that will ask for a password again.",
+    "profileCount": {
+      "description": "Connections that held at least one of them and will ask for a password again.",
       "type": "integer",
       "minimum": 0
     },

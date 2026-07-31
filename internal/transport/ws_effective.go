@@ -48,12 +48,6 @@ func (s *WSServer) handleEffective(wconn *wsConn, req jsonrpcRequest) {
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, fmt.Sprintf("load groups: %v", err)))
 		return
 	}
-	allCreds, err := s.credMeta.LoadCredentials()
-	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, fmt.Sprintf("load credentials: %v", err)))
-		return
-	}
-
 	// Build lookups first.
 	profByID := make(map[string]profile.SSHProfile, len(allProfiles))
 	for _, p := range allProfiles {
@@ -62,10 +56,6 @@ func (s *WSServer) handleEffective(wconn *wsConn, req jsonrpcRequest) {
 	groupByID := make(map[string]profile.ProfileGroup, len(allGroups))
 	for _, g := range allGroups {
 		groupByID[g.ID] = g
-	}
-	credByID := make(map[string]profile.Credential, len(allCreds))
-	for _, c := range allCreds {
-		credByID[c.ID] = c
 	}
 
 	var dtos []profile.EffectiveProfileDTO
@@ -78,19 +68,17 @@ func (s *WSServer) handleEffective(wconn *wsConn, req jsonrpcRequest) {
 			continue
 		}
 
+		// Identity lives inline on the profile (ADR-0017): the effective
+		// options are the resolved options.
 		eff, err := profile.ResolveEffectiveProfile(p, allGroups, profile.SparseSSHOptions{})
 		if err != nil {
 			errs = append(errs, profileErrorEntry{ID: id, Error: err.Error()})
 			continue
 		}
 
-		if eff.ResolvedOptions.CredentialID != "" {
-			if cred, ok := credByID[eff.ResolvedOptions.CredentialID]; ok {
-				eff = profile.ApplyCredentialLayer(eff, &cred)
-			}
-		}
-
-		dto := profile.ToEffectiveDTO(eff, groupByID, credByID)
+		// Secret references stay backend-owned: hand the renderer row handles.
+		dto := profile.ToEffectiveDTO(eff, groupByID)
+		wireEffectiveSecretFields(&dto)
 		dtos = append(dtos, dto)
 	}
 
@@ -157,20 +145,13 @@ func (s *WSServer) handlePatch(wconn *wsConn, req jsonrpcRequest) {
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, fmt.Sprintf("load groups: %v", err)))
 		return
 	}
-	allCreds, err := s.credMeta.LoadCredentials()
-	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, fmt.Sprintf("load credentials: %v", err)))
-		return
-	}
+	// No credential layer exists (ADR-0017): identity lives inline on the
+	// profile, and the effective options are the resolved options.
 
 	// Build lookups first for later use.
 	groupByID := make(map[string]profile.ProfileGroup, len(allGroups))
 	for _, g := range allGroups {
 		groupByID[g.ID] = g
-	}
-	credByID := make(map[string]profile.Credential, len(allCreds))
-	for _, c := range allCreds {
-		credByID[c.ID] = c
 	}
 
 	var target *profile.SSHProfile
@@ -185,10 +166,26 @@ func (s *WSServer) handlePatch(wconn *wsConn, req jsonrpcRequest) {
 		return
 	}
 
-	// Apply set/unset operations directly on the stored (presence-aware) options.
+	// Apply set/unset operations directly on the stored (presence-aware)
+	// options. The renderer names secrets by row handle: resolve the three
+	// secret paths' values to references before they are stored.
 	opts := &target.Options
 	for path, value := range params.Set {
-		profile.ApplyPatchSet(opts, path, value)
+		switch path {
+		case "options.passwordSecret", "options.keySecret", "options.keyPassphraseSecret":
+			row, isStr := value.(string)
+			if !isStr {
+				_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, path+" must be a string"))
+				return
+			}
+			resolved, resolveErr := s.rowToSecretRef(row)
+			if resolveErr != nil {
+				_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, resolveErr.Error()))
+				return
+			}
+			params.Set[path] = resolved
+		}
+		profile.ApplyPatchSet(opts, path, params.Set[path])
 	}
 	for _, path := range params.Unset {
 		profile.ApplyPatchUnset(opts, path)
@@ -215,12 +212,7 @@ func (s *WSServer) handlePatch(wconn *wsConn, req jsonrpcRequest) {
 		return
 	}
 
-	if eff.ResolvedOptions.CredentialID != "" {
-		if cred, ok := credByID[eff.ResolvedOptions.CredentialID]; ok {
-			eff = profile.ApplyCredentialLayer(eff, &cred)
-		}
-	}
-
-	dto := profile.ToEffectiveDTO(eff, groupByID, credByID)
+	dto := profile.ToEffectiveDTO(eff, groupByID)
+	wireEffectiveSecretFields(&dto)
 	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(dto)))
 }

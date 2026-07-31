@@ -9,40 +9,35 @@ import (
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
+	"github.com/shady2k/nocx/internal/vault"
 )
 
 // TestEffectiveProfile_ProvenanceAndPatch is the required validation test
 // from the brief (§6, items 1-7).
-//
-//  1. Store a profile with no local port, user or auth.
-//  2. Give its group port 2222 and credential prod-ops.
-//  3. Make that credential supply user deploy, auth publicKey, and fake
-//     secret-reference canaries in its secret fields.
-//  4. Call profiles.effective. Assert: port provenance is the group;
-//     credentialId provenance is the group; user and auth provenance is the
-//     credential.
-//  5. Assert the raw JSON contains none of the canaries.
-//  6. profiles.patch set options.port, then unset it.
-//  7. Reload from storage: assert the stored port is absent, not 2222,
+//  1. Store a profile with no local port or user.
+//  2. Give its group port 2222 and a password-secret binding.
+//  3. Call profiles.effective. Assert: port provenance is the group and the
+//     passwordSecret field carries the row handle, never the reference.
+//  4. Assert the raw JSON contains none of the reference canaries.
+//  5. profiles.patch set options.port, then unset it.
+//  6. Reload from storage: assert the stored port is absent, not 2222,
 //     while the returned effective port is 2222 sourced from the group.
 func TestEffectiveProfile_ProvenanceAndPatch(t *testing.T) {
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(dir + "/p.json")
-	cs := newTestStore()
-
-	// Step 2-3: Create a group with port 2222 and credentialId.
+	// Step 2-3: Create a group with port 2222 and a password-secret binding.
 	const groupID = "group-prod"
-	// Not a credential — an opaque record id, which is what makes it safe to
-	// assert on. gosec pattern-matches the name, not the meaning.
-	const credID = "cred:prod-ops:1" //nolint:gosec // record id, not a secret
+	// A backend-owned reference (ADR-0011 §2) — it must never reach the
+	// renderer; the effective DTO carries its row handle instead.
+	const pwRef = "sec:v1:test:00112233445566778899aabbccddeeff" //nolint:gosec // a synthetic backend-owned reference (ADR-0011 §2) for the wire-contract test, not a credential
 
 	grp := profile.ProfileGroup{
 		ID:   groupID,
 		Name: "Prod",
 		Defaults: &profile.ProfileDefaults{
 			SparseSSHOptions: profile.SparseSSHOptions{
-				Port:         intPtr(2222),
-				CredentialID: strPtr(credID),
+				Port:           intPtr(2222),
+				PasswordSecret: strPtr(pwRef),
 			},
 		},
 	}
@@ -50,24 +45,8 @@ func TestEffectiveProfile_ProvenanceAndPatch(t *testing.T) {
 		t.Fatalf("CreateGroup: %v", err)
 	}
 
-	// Step 3: Credential with user deploy, auth publicKey, and canary secrets.
-	// Create canary secrets FIRST so we can use their generated IDs in the
-	// credential record.
-	pwID, _ := cs.Create(context.Background(), credential.NewSecret("hunter2"))
-	ppID, _ := cs.Create(context.Background(), credential.NewSecret("passphrase"))
-
-	// Step 3: Credential with user deploy, auth publicKey, and canary secrets.
-	cred := profile.Credential{
-		ID:                 credID,
-		Name:               "prod-ops",
-		Username:           "deploy",
-		Auth:               profile.AuthPublicKey,
-		SecretID:           string(pwID),
-		PassphraseSecretID: string(ppID),
-	}
-	if err := ps.CreateCredential(cred); err != nil {
-		t.Fatalf("CreateCredential: %v", err)
-	}
+	// Identity lives inline on the profile (ADR-0017): user and auth are the
+	// profile's own, never resolved from a credential record.
 	prof := profile.SSHProfile{
 		Base: profile.Base{
 			ID:    "ssh:prod-api:1",
@@ -77,6 +56,8 @@ func TestEffectiveProfile_ProvenanceAndPatch(t *testing.T) {
 		},
 		Options: profile.StoredSSHProfileOptions{
 			Host: "api.prod.example.com",
+			User: strPtr("deploy"),
+			Auth: profile.Ptr(profile.AuthPublicKey),
 		},
 	}
 	if err := ps.CreateProfile(prof); err != nil {
@@ -86,7 +67,7 @@ func TestEffectiveProfile_ProvenanceAndPatch(t *testing.T) {
 	// Wire WSServer with stores.
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
 		WithProfileRepository(ps), WithGroupRepository(ps),
-		WithCredentialMetadataRepository(ps), WithCredentialStore(cs))
+		WithCredentialStore(newTestStore()))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -140,19 +121,20 @@ func TestEffectiveProfile_ProvenanceAndPatch(t *testing.T) {
 		t.Errorf("port source label = %q, want Prod", portField.Source.Label)
 	}
 
-	// Assert credentialId provenance is group.
-	credField, ok := dto.Fields["credentialId"]
+	// Assert passwordSecret provenance is group, and its value is the ROW
+	// HANDLE, never the reference.
+	pwField, ok := dto.Fields["passwordSecret"]
 	if !ok {
-		t.Fatal("missing field: credentialId")
+		t.Fatal("missing field: passwordSecret")
 	}
-	if credField.Value != credID {
-		t.Errorf("credentialId value = %v, want %s", credField.Value, credID)
+	if pwField.Value != vault.RowFor(credential.SecretID(pwRef)) {
+		t.Errorf("passwordSecret value = %v, want the row handle of %s", pwField.Value, pwRef)
 	}
-	if credField.Source.Kind != profile.EffectiveSourceGroup {
-		t.Errorf("credentialId source kind = %q, want %q", credField.Source.Kind, profile.EffectiveSourceGroup)
+	if pwField.Source.Kind != profile.EffectiveSourceGroup {
+		t.Errorf("passwordSecret source kind = %q, want %q", pwField.Source.Kind, profile.EffectiveSourceGroup)
 	}
 
-	// Assert user provenance is credential.
+	// Assert user provenance is the profile itself (ADR-0017).
 	userField, ok := dto.Fields["user"]
 	if !ok {
 		t.Fatal("missing field: user")
@@ -160,17 +142,11 @@ func TestEffectiveProfile_ProvenanceAndPatch(t *testing.T) {
 	if userField.Value != "deploy" {
 		t.Errorf("user value = %v, want deploy", userField.Value)
 	}
-	if userField.Source.Kind != profile.EffectiveSourceCredential {
-		t.Errorf("user source kind = %q, want %q", userField.Source.Kind, profile.EffectiveSourceCredential)
-	}
-	if userField.Source.ID != credID {
-		t.Errorf("user source id = %q, want %s", userField.Source.ID, credID)
-	}
-	if userField.Source.Label != "prod-ops" {
-		t.Errorf("user source label = %q, want prod-ops", userField.Source.Label)
+	if userField.Source.Kind != profile.EffectiveSourceProfile {
+		t.Errorf("user source kind = %q, want %q", userField.Source.Kind, profile.EffectiveSourceProfile)
 	}
 
-	// Assert auth provenance is credential.
+	// Assert auth provenance is the profile itself (ADR-0017).
 	authField, ok := dto.Fields["auth"]
 	if !ok {
 		t.Fatal("missing field: auth")
@@ -178,23 +154,23 @@ func TestEffectiveProfile_ProvenanceAndPatch(t *testing.T) {
 	if authField.Value != "publicKey" {
 		t.Errorf("auth value = %v, want publicKey", authField.Value)
 	}
-	if authField.Source.Kind != profile.EffectiveSourceCredential {
-		t.Errorf("auth source kind = %q, want %q", authField.Source.Kind, profile.EffectiveSourceCredential)
+	if authField.Source.Kind != profile.EffectiveSourceProfile {
+		t.Errorf("auth source kind = %q, want %q", authField.Source.Kind, profile.EffectiveSourceProfile)
 	}
 
-	// Step 5: Assert raw JSON contains none of the canary secret references.
+	// Step 5: Assert raw JSON contains none of the canary secret references —
+	// the wire carries the row handle, and nothing else.
 	rawJSON, err := json.Marshal(effResult.Result)
 	if err != nil {
 		t.Fatalf("marshal result: %v", err)
 	}
 	rawStr := string(rawJSON)
-	canaries := []string{"sec:canary-password", "sec:canary-passphrase"}
-	for _, c := range canaries {
-		if strings.Contains(rawStr, c) {
-			t.Errorf("raw JSON leaks canary %q", c)
-		}
+	if strings.Contains(rawStr, pwRef) {
+		t.Errorf("raw JSON leaks the secret reference %q", pwRef)
 	}
-
+	if !strings.Contains(rawStr, vault.RowFor(credential.SecretID(pwRef))) {
+		t.Errorf("raw JSON does not carry the row handle for %q", pwRef)
+	}
 	// Step 6: Patch set options.port=2200, then unset options.port.
 	patchSetResp := jsonrpcCall(t, conn, "profiles.patch", map[string]any{
 		"id":  "ssh:prod-api:1",
@@ -263,9 +239,10 @@ func TestEffectiveProfile_ProvenanceAndPatch(t *testing.T) {
 // "profile explicit false/zero" remains distinguishable from "inherit"
 // through a store-load-resolve cycle.
 //
-// This is the foundational bug from §3.3: before this change, sshOptionsToSparse
-// treated false as "not set", so agentForward=false in a profile with
-// group default agentForward=true resolved to true, sourced "group".
+// This is the foundational bug from §3.3: before this change, the dense-to-
+// sparse projection treated false as "not set", so agentForward=false in a
+// profile with group default agentForward=true resolved to true, sourced
+// "group".
 func TestEffectiveProfile_ExplicitFalseSurvivesRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(dir + "/p.json")

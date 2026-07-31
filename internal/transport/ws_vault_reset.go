@@ -28,8 +28,7 @@ func WithVaultReset(s VaultResetService) WSServerOption {
 
 type vaultResetPreviewResponse struct {
 	SecretCount             int  `json:"secretCount"`
-	CredentialCount         int  `json:"credentialCount"`
-	ConnectionCount         int  `json:"connectionCount"`
+	ProfileCount            int  `json:"profileCount"`
 	SystemKeychainReachable bool `json:"systemKeychainReachable"`
 	VaultInitialized        bool `json:"vaultInitialized"`
 }
@@ -40,10 +39,9 @@ type vaultResetResidueEntry struct {
 }
 
 type vaultResetResponse struct {
-	SecretCount     int                      `json:"secretCount"`
-	CredentialCount int                      `json:"credentialCount"`
-	ConnectionCount int                      `json:"connectionCount"`
-	Residue         []vaultResetResidueEntry `json:"residue"`
+	SecretCount  int                      `json:"secretCount"`
+	ProfileCount int                      `json:"profileCount"`
+	Residue      []vaultResetResidueEntry `json:"residue"`
 }
 
 func (s *WSServer) handleVaultResetPreview(wconn *wsConn, req jsonrpcRequest) {
@@ -58,8 +56,7 @@ func (s *WSServer) handleVaultResetPreview(wconn *wsConn, req jsonrpcRequest) {
 	}
 	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(vaultResetPreviewResponse{
 		SecretCount:             p.Impact.SecretCount,
-		CredentialCount:         p.Impact.CredentialCount,
-		ConnectionCount:         p.Impact.ProfileCount,
+		ProfileCount:            p.Impact.ProfileCount,
 		SystemKeychainReachable: p.SystemKeychainReachable,
 		VaultInitialized:        p.VaultInitialized,
 	})))
@@ -87,9 +84,8 @@ func (s *WSServer) handleVaultReset(wconn *wsConn, req jsonrpcRequest) {
 	s.broadcastVaultChanged()
 
 	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(vaultResetResponse{
-		SecretCount:     result.Impact.SecretCount,
-		CredentialCount: result.Impact.CredentialCount,
-		ConnectionCount: result.Impact.ProfileCount,
-		Residue:         residue,
+		SecretCount:  result.Impact.SecretCount,
+		ProfileCount: result.Impact.ProfileCount,
+		Residue:      residue,
 	})))
 }

@@ -46,24 +46,34 @@ type Base struct {
 	BehaviorOnSessionEnd BehaviorOnSessionEnd `json:"behaviorOnSessionEnd,omitempty"`
 	Weight               int                  `json:"weight,omitempty"`
 	IsBuiltin            bool                 `json:"isBuiltin,omitempty"`
-	IsTemplate           bool                 `json:"isTemplate,omitempty"`
-	// NeedsReview marks a profile that references a credential whose
-	// identity was resolved from a local credential during import.
-	// Such profiles must be reviewed by a human before they can be
-	// resolved for connection. The resolver refuses profiles with this
-	// flag set; the UI for clearing it belongs to a later wave.
+	// NeedsReview marks a profile whose identity was resolved from local
+	// state during import. Such profiles must be reviewed by a human before
+	// they can be resolved for connection. The resolver refuses profiles
+	// with this flag set; the UI for clearing it belongs to a later wave.
 	NeedsReview bool `json:"needsReview,omitempty"`
 }
 
 // SSHProfileOptions is the SSH-specific options block on an SSHProfile.
-// CredentialID references a reusable Credential (УЗ) by ID. If set,
-// username/auth/keyPath are resolved from the credential at connect time.
-// If empty, inline User/Auth/PrivateKeys are used (legacy mode).
+// PasswordSecret, KeySecret and KeyPassphraseSecret reference the secrets
+// (ADR-0011 §2) the connection authenticates with: the stored password, the
+// stored private key and the stored key passphrase. They are BACKEND-OWNED
+// references (sec:v1:...); on the wire the transport replaces them with the
+// renderer's row handles (secrow:...), so a reference never crosses the
+// boundary (ADR-0017 §1).
 type SSHProfileOptions struct {
-	Host         string `json:"host"`
-	Port         int    `json:"port,omitempty"`
-	CredentialID string `json:"credentialId,omitempty"` // Link to Credential.ID
-	// Inline fields (used only if CredentialID is empty)
+	Host string `json:"host"`
+	Port int    `json:"port,omitempty"`
+	// PasswordSecret is the stored password the connection authenticates with.
+	PasswordSecret string `json:"passwordSecret,omitempty"`
+	// KeySecret is the stored private key. Mutually exclusive with KeyPath:
+	// storing key material clears KeyPath, and setting KeyPath clears KeySecret.
+	KeySecret string `json:"keySecret,omitempty"`
+	// KeyPassphraseSecret is the stored passphrase for the private key, when
+	// the key is encrypted. Bound only alongside a key.
+	KeyPassphraseSecret string `json:"keyPassphraseSecret,omitempty"`
+	// Inline fields. User and Auth are always the profile's own (ADR-0017);
+	// KeyPath is the file-based alternative to KeySecret.
+	KeyPath           string   `json:"keyPath,omitempty"`
 	User              string   `json:"user,omitempty"`
 	Auth              AuthMode `json:"auth,omitempty"`
 	KeepaliveInterval int      `json:"keepaliveInterval,omitempty"`
@@ -76,7 +86,7 @@ type SSHProfileOptions struct {
 
 // SSHProfile is a connection profile for an SSH host. It holds only
 // *identity* (host/port/user) and configuration — never secrets.
-// Credentials live in the CredentialStore, addressed by identity.
+// Secret references live in the vault, addressed by reference (ADR-0017).
 // Options uses the presence-aware StoredSSHProfileOptions so nil
 // pointer fields distinguish "not set" from "explicitly zero/false".
 type SSHProfile struct {
@@ -91,12 +101,15 @@ type SSHProfile struct {
 type StoredSSHProfileOptions struct {
 	Host                 string                `json:"host"`
 	Port                 *int                  `json:"port,omitempty"`
-	CredentialID         string                `json:"credentialId,omitempty"`
+	PasswordSecret       string                `json:"passwordSecret,omitempty"`
+	KeySecret            string                `json:"keySecret,omitempty"`
+	KeyPassphraseSecret  string                `json:"keyPassphraseSecret,omitempty"`
 	User                 *string               `json:"user,omitempty"`
 	Auth                 *AuthMode             `json:"auth,omitempty"`
 	KeepaliveInterval    *int                  `json:"keepaliveInterval,omitempty"`
 	KeepaliveCountMax    *int                  `json:"keepaliveCountMax,omitempty"`
 	ReadyTimeout         *int                  `json:"readyTimeout,omitempty"`
+	KeyPath              *string               `json:"keyPath,omitempty"`
 	JumpHost             *string               `json:"jumpHost,omitempty"`
 	AgentForward         *bool                 `json:"agentForward,omitempty"`
 	CanBeJumpServer      *bool                 `json:"canBeJumpServer,omitempty"`
@@ -108,8 +121,17 @@ type StoredSSHProfileOptions struct {
 // "inherit" in the resolution engine.
 func (s StoredSSHProfileOptions) ToDense() SSHProfileOptions {
 	o := SSHProfileOptions{Host: s.Host}
-	if s.CredentialID != "" {
-		o.CredentialID = s.CredentialID
+	if s.PasswordSecret != "" {
+		o.PasswordSecret = s.PasswordSecret
+	}
+	if s.KeySecret != "" {
+		o.KeySecret = s.KeySecret
+	}
+	if s.KeyPassphraseSecret != "" {
+		o.KeyPassphraseSecret = s.KeyPassphraseSecret
+	}
+	if s.KeyPath != nil {
+		o.KeyPath = *s.KeyPath
 	}
 	if s.Port != nil {
 		o.Port = *s.Port
@@ -143,12 +165,22 @@ func (s StoredSSHProfileOptions) ToDense() SSHProfileOptions {
 
 // StoredOptionsFromDense converts dense SSHProfileOptions to the presence-aware
 // stored representation. Zero/false values become nil (inherit), matching the
-// sshOptionsToSparse semantics. For explicit zero/false from patch operations,
+// storedOptsToSparse semantics. For explicit zero/false from patch operations,
 // construct StoredSSHProfileOptions directly with the desired pointer values.
 func StoredOptionsFromDense(o SSHProfileOptions) StoredSSHProfileOptions {
 	s := StoredSSHProfileOptions{Host: o.Host}
-	if o.CredentialID != "" {
-		s.CredentialID = o.CredentialID
+	if o.PasswordSecret != "" {
+		s.PasswordSecret = o.PasswordSecret
+	}
+	if o.KeySecret != "" {
+		s.KeySecret = o.KeySecret
+	}
+	if o.KeyPassphraseSecret != "" {
+		s.KeyPassphraseSecret = o.KeyPassphraseSecret
+	}
+	if o.KeyPath != "" {
+		v := o.KeyPath
+		s.KeyPath = &v
 	}
 	if o.Port != 0 {
 		v := o.Port
@@ -191,13 +223,24 @@ func StoredOptionsFromDense(o SSHProfileOptions) StoredSSHProfileOptions {
 
 // storedOptsToSparse converts StoredSSHProfileOptions (pointer-based,
 // presence-aware) directly to SparseSSHOptions, preserving nil vs non-nil
-// for every field including bools. Unlike sshOptionsToSparse, this is
-// lossless: *false stays *false, *0 stays *0.
+// for every field including bools. This is lossless: *false stays *false,
+// *0 stays *0.
 func storedOptsToSparse(o StoredSSHProfileOptions) SparseSSHOptions {
 	s := SparseSSHOptions{}
-	if o.CredentialID != "" {
-		v := o.CredentialID
-		s.CredentialID = &v
+	if o.PasswordSecret != "" {
+		v := o.PasswordSecret
+		s.PasswordSecret = &v
+	}
+	if o.KeySecret != "" {
+		v := o.KeySecret
+		s.KeySecret = &v
+	}
+	if o.KeyPassphraseSecret != "" {
+		v := o.KeyPassphraseSecret
+		s.KeyPassphraseSecret = &v
+	}
+	if o.KeyPath != nil {
+		s.KeyPath = o.KeyPath
 	}
 	s.Port = o.Port
 	s.User = o.User
@@ -231,7 +274,9 @@ type ProfileGroup struct {
 // The stored SSHProfile.Options uses the pointer-based StoredSSHProfileOptions.
 // Only groups/globals use this sparse type for inheritance.
 type SparseSSHOptions struct {
-	CredentialID         *string               `json:"credentialId,omitempty"`
+	PasswordSecret       *string               `json:"passwordSecret,omitempty"`
+	KeySecret            *string               `json:"keySecret,omitempty"`
+	KeyPassphraseSecret  *string               `json:"keyPassphraseSecret,omitempty"`
 	Port                 *int                  `json:"port,omitempty"`
 	User                 *string               `json:"user,omitempty"`
 	KeyPath              *string               `json:"keyPath,omitempty"`
@@ -258,7 +303,9 @@ type ProfileDefaults struct {
 // allowedDefaultKeys returns the set of JSON field names ProfileDefaults
 // accepts. Used in custom unmarshaling and DecodeDefaults.
 var allowedFields = map[string]bool{
-	"credentialId":         true,
+	"passwordSecret":       true,
+	"keySecret":            true,
+	"keyPassphraseSecret":  true,
 	"port":                 true,
 	"user":                 true,
 	"keyPath":              true,
@@ -567,9 +614,17 @@ func ResolveEffectiveProfile(
 // provenance. acc is updated in place ONLY for fields that are nil in acc
 // or that src explicitly sets (including explicit false for bools).
 func applySparseLayer(acc *SparseSSHOptions, source *map[string]FieldSource, src SparseSSHOptions, layer FieldSource) {
-	if src.CredentialID != nil {
-		acc.CredentialID = src.CredentialID
-		setSource(source, "credentialId", layer)
+	if src.PasswordSecret != nil {
+		acc.PasswordSecret = src.PasswordSecret
+		setSource(source, "passwordSecret", layer)
+	}
+	if src.KeySecret != nil {
+		acc.KeySecret = src.KeySecret
+		setSource(source, "keySecret", layer)
+	}
+	if src.KeyPassphraseSecret != nil {
+		acc.KeyPassphraseSecret = src.KeyPassphraseSecret
+		setSource(source, "keyPassphraseSecret", layer)
 	}
 	if src.Port != nil {
 		acc.Port = src.Port
@@ -621,60 +676,22 @@ func setSource(source *map[string]FieldSource, field string, layer FieldSource) 
 	(*source)[field] = layer
 }
 
-// sshOptionsToSparse converts a dense SSHProfileOptions to a sparse
-// representation. Zero values become nil (inherit); non-zero values become
-// pointer-set. For bools, only true is captured — false is treated as
-// "not set" because it cannot be distinguished from an unset field in a
-// JSON-omitempty store. (The caller constructs the effective profile and
-// the stored profile directly for tests that need explicit false.)
-func sshOptionsToSparse(o SSHProfileOptions) SparseSSHOptions {
-	s := SparseSSHOptions{}
-	if o.CredentialID != "" {
-		v := o.CredentialID
-		s.CredentialID = &v
-	}
-	if o.Port != 0 {
-		v := o.Port
-		s.Port = &v
-	}
-	if o.User != "" {
-		v := o.User
-		s.User = &v
-	}
-	if o.Auth != "" {
-		v := o.Auth
-		s.Auth = &v
-	}
-	if o.KeepaliveInterval != 0 {
-		v := o.KeepaliveInterval
-		s.KeepaliveInterval = &v
-	}
-	if o.KeepaliveCountMax != 0 {
-		v := o.KeepaliveCountMax
-		s.KeepaliveCountMax = &v
-	}
-	if o.ReadyTimeout != 0 {
-		v := o.ReadyTimeout
-		s.ReadyTimeout = &v
-	}
-	if o.JumpHost != "" {
-		v := o.JumpHost
-		s.JumpHost = &v
-	}
-	if o.AgentForward {
-		v := true
-		s.AgentForward = &v
-	}
-	return s
-}
-
 // sparseToOptions converts a sparse representation back to dense SSHProfileOptions.
 // BehaviorOnSessionEnd is NOT handled here — it lives on Base, not Options.
 // The caller applies it to the result's Base separately.
 func sparseToOptions(s SparseSSHOptions) SSHProfileOptions {
 	o := SSHProfileOptions{}
-	if s.CredentialID != nil {
-		o.CredentialID = *s.CredentialID
+	if s.PasswordSecret != nil {
+		o.PasswordSecret = *s.PasswordSecret
+	}
+	if s.KeySecret != nil {
+		o.KeySecret = *s.KeySecret
+	}
+	if s.KeyPassphraseSecret != nil {
+		o.KeyPassphraseSecret = *s.KeyPassphraseSecret
+	}
+	if s.KeyPath != nil {
+		o.KeyPath = *s.KeyPath
 	}
 	if s.Port != nil {
 		o.Port = *s.Port
@@ -879,54 +896,6 @@ func newUUID() string {
 // Suppress unused import safety — uuid helper.
 var _ = hex.EncodeToString
 
-// FieldSourceCredential is the prefix for credential-source provenance.
-// Actual source is "credential:<id>".
-// Not a credential: the name of a provenance layer. gosec matches the
-// identifier, not what it holds.
-const FieldSourceCredential FieldSource = "credential:" //nolint:gosec // provenance kind, not a secret
-
-// ApplyCredentialLayer overlays credential user/auth onto the resolved
-// effective profile. Per §3.5 precedence, credential user/auth outrank the
-// profile field when credentialId is in effect. The returned EffectiveProfile
-// has updated Options.User, Options.Auth and Options.KeyPath (from the
-// credential) and provenance entries reflecting the credential source.
-//
-// credential is required: pass the resolved credential identified by
-// eff.Profile.Options.CredentialID. Pass nil when no credential applies.
-func ApplyCredentialLayer(eff EffectiveProfile, credential *Credential) EffectiveProfile {
-	if credential == nil {
-		return eff
-	}
-
-	// Build sparse overlay from credential fields.
-	overlay := SparseSSHOptions{}
-	if credential.Username != "" {
-		v := credential.Username
-		overlay.User = &v
-	}
-	if credential.Auth != "" {
-		v := credential.Auth
-		overlay.Auth = &v
-	}
-	if credential.KeyPath != "" {
-		v := credential.KeyPath
-		overlay.KeyPath = &v
-	}
-
-	// Apply overlay to the existing accumulator, recording credential provenance.
-	acc := sshOptionsToSparse(eff.ResolvedOptions)
-	source := make(map[string]FieldSource, len(eff.Source))
-	for k, v := range eff.Source {
-		source[k] = v
-	}
-	applySparseLayer(&acc, &source, overlay, FieldSource(string(FieldSourceCredential)+credential.ID))
-
-	// Convert back to dense resolved options.
-	result := eff.Profile
-	resolvedOpts := sparseToOptions(acc)
-	return EffectiveProfile{Profile: result, ResolvedOptions: resolvedOpts, Source: source}
-}
-
 // ---------------------------------------------------------------------------
 // Effective profile DTO — wire format with closed-enum source kinds
 // ---------------------------------------------------------------------------
@@ -935,12 +904,11 @@ func ApplyCredentialLayer(eff EffectiveProfile, credential *Credential) Effectiv
 type EffectiveSourceKind string
 
 const (
-	EffectiveSourceProfile    EffectiveSourceKind = "profile"
-	EffectiveSourceGroup      EffectiveSourceKind = "group"
-	EffectiveSourceCredential EffectiveSourceKind = "credential"
-	EffectiveSourceSSHConfig  EffectiveSourceKind = "sshConfig"
-	EffectiveSourceGlobal     EffectiveSourceKind = "global"
-	EffectiveSourceDefault    EffectiveSourceKind = "default"
+	EffectiveSourceProfile   EffectiveSourceKind = "profile"
+	EffectiveSourceGroup     EffectiveSourceKind = "group"
+	EffectiveSourceSSHConfig EffectiveSourceKind = "sshConfig"
+	EffectiveSourceGlobal    EffectiveSourceKind = "global"
+	EffectiveSourceDefault   EffectiveSourceKind = "default"
 )
 
 // EffectiveFieldDTO is the per-field wire representation.
@@ -971,13 +939,13 @@ type EffectiveBatchResponse struct {
 // into the wire format. Returned fields include every inheritable option
 // even when zero/false/empty — omission would make "false" indistinguishable
 // from "unresolved".
-func ToEffectiveDTO(eff EffectiveProfile, groupByID map[string]ProfileGroup, credentialByID map[string]Credential) EffectiveProfileDTO {
+func ToEffectiveDTO(eff EffectiveProfile, groupByID map[string]ProfileGroup) EffectiveProfileDTO {
 	fields := make(map[string]EffectiveFieldDTO)
 	p := eff.ResolvedOptions
 
 	// Helper to add a field with provenance.
 	addField := func(name string, value any, source FieldSource) {
-		kind, id, label := parseFieldSource(source, groupByID, credentialByID)
+		kind, id, label := parseFieldSource(source, groupByID)
 		fields[name] = EffectiveFieldDTO{
 			Value:  value,
 			Source: FieldSourceDTO{Kind: kind, ID: id, Label: label},
@@ -987,7 +955,9 @@ func ToEffectiveDTO(eff EffectiveProfile, groupByID map[string]ProfileGroup, cre
 	// Options fields.
 	addField("host", p.Host, eff.Source["host"])
 	addField("port", p.Port, eff.Source["port"])
-	addField("credentialId", p.CredentialID, eff.Source["credentialId"])
+	addField("passwordSecret", p.PasswordSecret, eff.Source["passwordSecret"])
+	addField("keySecret", p.KeySecret, eff.Source["keySecret"])
+	addField("keyPassphraseSecret", p.KeyPassphraseSecret, eff.Source["keyPassphraseSecret"])
 	addField("user", p.User, eff.Source["user"])
 	addField("auth", string(p.Auth), eff.Source["auth"])
 	addField("keepaliveInterval", p.KeepaliveInterval, eff.Source["keepaliveInterval"])
@@ -1002,8 +972,8 @@ func ToEffectiveDTO(eff EffectiveProfile, groupByID map[string]ProfileGroup, cre
 }
 
 // parseFieldSource converts an internal FieldSource string into the closed-enum
-// wire format with resolved group/credential labels.
-func parseFieldSource(src FieldSource, groupByID map[string]ProfileGroup, credentialByID map[string]Credential) (kind EffectiveSourceKind, id, label string) {
+// wire format with resolved group labels.
+func parseFieldSource(src FieldSource, groupByID map[string]ProfileGroup) (kind EffectiveSourceKind, id, label string) {
 	if src == "" {
 		return EffectiveSourceDefault, "", ""
 	}
@@ -1027,15 +997,6 @@ func parseFieldSource(src FieldSource, groupByID map[string]ProfileGroup, creden
 		}
 		return
 	}
-	if strings.HasPrefix(s, "credential:") {
-		cid := s[11:]
-		kind = EffectiveSourceCredential
-		id = cid
-		if c, ok := credentialByID[cid]; ok {
-			label = c.Name
-		}
-		return
-	}
 
 	// Unknown — treat as default.
 	return EffectiveSourceDefault, "", ""
@@ -1050,7 +1011,9 @@ const (
 	patchPort                 patchPath = "options.port"
 	patchUser                 patchPath = "options.user"
 	patchAuth                 patchPath = "options.auth"
-	patchCredentialID         patchPath = "options.credentialId"
+	patchPasswordSecret       patchPath = "options.passwordSecret"
+	patchKeySecret            patchPath = "options.keySecret" //nolint:gosec // a JSON patch path naming the key-secret field, not a credential
+	patchKeyPassphraseSecret  patchPath = "options.keyPassphraseSecret"
 	patchKeepaliveInterval    patchPath = "options.keepaliveInterval"
 	patchKeepaliveCountMax    patchPath = "options.keepaliveCountMax"
 	patchReadyTimeout         patchPath = "options.readyTimeout"
@@ -1075,7 +1038,9 @@ func allowedPatchPaths() map[patchPath]bool {
 		patchPort:                 true,
 		patchUser:                 true,
 		patchAuth:                 true,
-		patchCredentialID:         true,
+		patchPasswordSecret:       true,
+		patchKeySecret:            true,
+		patchKeyPassphraseSecret:  true,
 		patchKeepaliveInterval:    true,
 		patchKeepaliveCountMax:    true,
 		patchReadyTimeout:         true,
@@ -1102,9 +1067,15 @@ func ApplyPatchSet(opts *StoredSSHProfileOptions, path string, value any) bool {
 		v := toString(value)
 		am := AuthMode(v)
 		opts.Auth = &am
-	case patchCredentialID:
+	case patchPasswordSecret:
 		v := toString(value)
-		opts.CredentialID = v
+		opts.PasswordSecret = v
+	case patchKeySecret:
+		v := toString(value)
+		opts.KeySecret = v
+	case patchKeyPassphraseSecret:
+		v := toString(value)
+		opts.KeyPassphraseSecret = v
 	case patchKeepaliveInterval:
 		v := toInt(value)
 		opts.KeepaliveInterval = &v
@@ -1144,8 +1115,12 @@ func ApplyPatchUnset(opts *StoredSSHProfileOptions, path string) bool {
 		opts.User = nil
 	case patchAuth:
 		opts.Auth = nil
-	case patchCredentialID:
-		opts.CredentialID = ""
+	case patchPasswordSecret:
+		opts.PasswordSecret = ""
+	case patchKeySecret:
+		opts.KeySecret = ""
+	case patchKeyPassphraseSecret:
+		opts.KeyPassphraseSecret = ""
 	case patchKeepaliveInterval:
 		opts.KeepaliveInterval = nil
 	case patchKeepaliveCountMax:

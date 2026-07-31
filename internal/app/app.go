@@ -131,21 +131,19 @@ func New(opts ...Option) (*App, error) {
 	// Probe result store: operational evidence for connections.test.
 	// Process-lifetime only (not persisted across restarts).
 	probeResultStore := transport.NewProbeResultStore()
-	// Profile service: single validated write path for profiles, groups,
-	// and credentials. Used by the import handlers and version transitions.
+	// Profile service: single validated write path for profiles and groups.
+	// Used by the import handlers and version transitions.
 	profileSvc := profile.NewProfileService(profileStore)
-
 	// One resolver, one consumer family: connections.test probes and
 	// ordinary connects resolve identically.
 	resolver := connection.NewResolver(
-		profileStore, profileStore, profileStore, v,
+		profileStore, profileStore, v,
 		connection.WithConfigResolver(sshCfgResolver),
 	)
 
 	tpOpts := []transport.WSServerOption{
 		transport.WithProfileRepository(profileStore),
 		transport.WithGroupRepository(profileStore),
-		transport.WithCredentialMetadataRepository(profileStore),
 		transport.WithCredentialStore(v),
 		transport.WithVaultLifecycle(v),
 		transport.WithVaultReset(vaultreset.New(v, profileStore, slogger)),

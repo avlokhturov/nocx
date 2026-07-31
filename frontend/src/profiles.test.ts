@@ -112,7 +112,7 @@ describe('parseQuickConnect', () => {
 })
 
 describe('SSHProfile shape', () => {
-  it('has the expected fields for credential selection', () => {
+  it('has the expected secret binding fields', () => {
     const p: SSHProfile = {
       id: 'ssh:custom:test:0001',
       type: 'ssh',
@@ -121,11 +121,11 @@ describe('SSHProfile shape', () => {
       options: {
         host: 'example.com',
         port: 22,
-        credentialId: 'cred:alice:123456',
+        passwordSecret: 'secrow:abc',
       },
     }
     expect(p.type).toBe('ssh')
-    expect(p.options.credentialId).toBe('cred:alice:123456')
+    expect(p.options.passwordSecret).toBe('secrow:abc')
   })
 })
 
@@ -135,7 +135,7 @@ describe('EffectiveProfile types', () => {
       value: 2222,
       source: { kind: 'group', id: 'g1', label: 'Prod' },
     }
-    expect(field.source.kind).toMatch(/^(profile|group|credential|sshConfig|global|default)$/)
+    expect(field.source.kind).toMatch(/^(profile|group|sshConfig|global|default)$/)
     expect(field.value).toBe(2222)
     expect(field.source.label).toBe('Prod')
   })
@@ -146,15 +146,6 @@ describe('EffectiveProfile types', () => {
       source: { kind: 'profile', id: '', label: '' },
     }
     expect(field.source.kind).toBe('profile')
-  })
-
-  it('credential source kind links to credential', () => {
-    const field: EffectiveFieldDTO = {
-      value: 'deploy',
-      source: { kind: 'credential', id: 'cred:prod-ops', label: 'prod-ops' },
-    }
-    expect(field.source.id).toBe('cred:prod-ops')
-    expect(field.source.label).toBe('prod-ops')
   })
 
   it('sshConfig source kind has no id', () => {

@@ -43,7 +43,7 @@ test.describe('Connections inside Settings', () => {
 
     // Fill in the profile form (Name, Host, User).
     //
-    // User is required whenever no credential is selected (nocx-74cn added the
+    // User is required whenever no secret is selected (nocx-74cn added the
     // rule; nocx-vjhz is this spec catching up). Leaving it empty does not fail
     // here — it fails 20 lines down, where Create is refused, no profile is
     // written and the tab count that Connect was supposed to change reads one

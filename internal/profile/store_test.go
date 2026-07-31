@@ -11,65 +11,100 @@ func newTestStore(t *testing.T) *JSONStore {
 	return NewJSONStore(filepath.Join(t.TempDir(), "p.json"))
 }
 
-func TestCreateCredential_RejectsDuplicateID(t *testing.T) {
+// ClearSecretRefs is the metadata-first half of deleting a secret
+// (ADR-0011 §4): every profile binding to the secret — password, key and
+// key-passphrase — is removed in ONE write, so nothing keeps pointing at a
+// store entry that is about to be gone. Group-default bindings are cleared
+// too: they are metadata that points at the same store entry.
+func TestClearSecretRefs_ClearsEveryBindingInOneWrite(t *testing.T) {
 	s := newTestStore(t)
-	c := Credential{ID: "cred:a:1", Name: "a", Username: "u", Auth: AuthPassword, SecretID: "sec:1"}
-	if err := s.CreateCredential(c); err != nil {
-		t.Fatalf("first create: %v", err)
+	if err := s.CreateProfile(SSHProfile{
+		Base: Base{ID: "p1", Type: "ssh", Name: "one"},
+		Options: StoredSSHProfileOptions{
+			Host:                "h1",
+			PasswordSecret:      "sec:password",
+			KeySecret:           "sec:key",
+			KeyPassphraseSecret: "sec:passphrase",
+		},
+	}); err != nil {
+		t.Fatalf("create p1: %v", err)
+	}
+	if err := s.CreateProfile(SSHProfile{
+		Base:    Base{ID: "p2", Type: "ssh", Name: "two"},
+		Options: StoredSSHProfileOptions{Host: "h2", PasswordSecret: "sec:other"},
+	}); err != nil {
+		t.Fatalf("create p2: %v", err)
+	}
+	if err := s.CreateGroup(ProfileGroup{
+		ID: "g1", Name: "Prod",
+		Defaults: &ProfileDefaults{
+			SparseSSHOptions: SparseSSHOptions{
+				PasswordSecret: Ptr("sec:password"),
+			},
+		},
+	}); err != nil {
+		t.Fatalf("create g1: %v", err)
 	}
 
-	dup := Credential{ID: "cred:a:1", Name: "impostor", Username: "u2", Auth: AuthAgent}
-	if err := s.CreateCredential(dup); !errors.Is(err, ErrCredentialExists) {
-		t.Fatalf("second create err = %v, want ErrCredentialExists", err)
+	if err := s.ClearSecretRefs("sec:password"); err != nil {
+		t.Fatalf("ClearSecretRefs: %v", err)
 	}
 
-	got, err := s.LoadCredentials()
+	profiles, err := s.LoadProfiles()
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if len(got) != 1 || got[0].Name != "a" || got[0].SecretID != "sec:1" {
-		t.Fatalf("a refused create must not modify the stored record, got %+v", got)
+	var p1, p2 SSHProfile
+	for _, p := range profiles {
+		switch p.ID {
+		case "p1":
+			p1 = p
+		case "p2":
+			p2 = p
+		}
+	}
+	if p1.Options.PasswordSecret != "" {
+		t.Errorf("p1 password ref = %q, want cleared", p1.Options.PasswordSecret)
+	}
+	if p1.Options.KeySecret != "sec:key" {
+		t.Errorf("p1 key ref changed: %q", p1.Options.KeySecret)
+	}
+	if p1.Options.KeyPassphraseSecret != "sec:passphrase" {
+		t.Errorf("p1 passphrase ref changed: %q", p1.Options.KeyPassphraseSecret)
+	}
+	if p2.Options.PasswordSecret != "sec:other" {
+		t.Errorf("p2 password ref changed: %q", p2.Options.PasswordSecret)
+	}
+
+	groups, err := s.LoadGroups()
+	if err != nil {
+		t.Fatalf("load groups: %v", err)
+	}
+	if g := groups[0].Defaults.SparseSSHOptions.PasswordSecret; g != nil {
+		t.Errorf("group default password ref = %v, want cleared", *g)
 	}
 }
 
-func TestCreateCredential_RejectsEmptyID(t *testing.T) {
+// Deleting a secret nothing references is a no-op write: the store stays
+// intact and the call succeeds.
+func TestClearSecretRefs_NoReferenceIsIdempotent(t *testing.T) {
 	s := newTestStore(t)
-	err := s.CreateCredential(Credential{Name: "a", Username: "u"})
-	if !errors.Is(err, ErrCredentialIDRequired) {
-		t.Fatalf("err = %v, want ErrCredentialIDRequired", err)
-	}
-}
-
-func TestUpdateCredential_RejectsMissingID(t *testing.T) {
-	s := newTestStore(t)
-	_, err := s.UpdateCredential("cred:nope:1", CredentialPatch{})
-	if !errors.Is(err, ErrCredentialNotFound) {
-		t.Fatalf("err = %v, want ErrCredentialNotFound", err)
-	}
-	got, _ := s.LoadCredentials()
-	if len(got) != 0 {
-		t.Fatalf("a refused update must create nothing, got %d", len(got))
-	}
-}
-
-func TestUpdateCredential_MergesAndKeepsSecretID(t *testing.T) {
-	s := newTestStore(t)
-	if err := s.CreateCredential(Credential{
-		ID: "cred:a:1", Name: "a", Username: "u", Auth: AuthPassword, SecretID: "sec:1",
+	if err := s.CreateProfile(SSHProfile{
+		Base:    Base{ID: "p1", Type: "ssh", Name: "one"},
+		Options: StoredSSHProfileOptions{Host: "h1"},
 	}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 
-	name := "renamed"
-	got, err := s.UpdateCredential("cred:a:1", CredentialPatch{Name: &name})
+	if err := s.ClearSecretRefs("sec:never-stored"); err != nil {
+		t.Fatalf("ClearSecretRefs(absent): %v", err)
+	}
+	profiles, err := s.LoadProfiles()
 	if err != nil {
-		t.Fatalf("update: %v", err)
+		t.Fatalf("load: %v", err)
 	}
-	if got.Name != "renamed" {
-		t.Errorf("Name = %q, want renamed", got.Name)
-	}
-	if got.SecretID != "sec:1" {
-		t.Errorf("SecretID = %q, want sec:1", got.SecretID)
+	if len(profiles) != 1 {
+		t.Fatalf("profiles = %d, want 1", len(profiles))
 	}
 }
 
@@ -205,104 +240,5 @@ func TestApplyGroups_EmptySlice(t *testing.T) {
 	}
 	if err := s.ApplyGroups([]ProfileGroup{}); err != nil {
 		t.Fatalf("empty slice: %v", err)
-	}
-}
-
-// ClearSecretReferences is the metadata-first half of deleting a secret
-// (ADR-0011 §4): every reference to the secret — record-level password,
-// passphrase and key material — is removed in ONE write, so nothing keeps
-// pointing at a store entry that is about to be gone. A single write matters:
-// a loop of per-field setters could fail halfway, leaving some references
-// cleared and the deletion aborted.
-func TestClearSecretReferences_ClearsEveryFieldInOneWrite(t *testing.T) {
-	s := newTestStore(t)
-	if err := s.CreateCredential(Credential{
-		ID:                  "cred:clear:1",
-		Name:                "clear",
-		Username:            "u",
-		Auth:                AuthPublicKey,
-		SecretID:            "sec:record-password",
-		PassphraseSecretID:  "sec:record-passphrase",
-		KeyMaterialSecretID: "sec:record-key",
-		KeyFingerprint:      "SHA256:abcd",
-	}); err != nil {
-		t.Fatalf("create: %v", err)
-	}
-
-	if err := s.ClearSecretReferences("sec:record-passphrase"); err != nil {
-		t.Fatalf("ClearSecretReferences: %v", err)
-	}
-
-	creds, err := s.LoadCredentials()
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	if len(creds) != 1 {
-		t.Fatalf("credentials = %d, want 1 — clearing a reference must not delete the credential", len(creds))
-	}
-	got := creds[0]
-	if got.SecretID != "sec:record-password" {
-		t.Errorf("password ref changed: %q", got.SecretID)
-	}
-	if got.PassphraseSecretID != "" {
-		t.Errorf("passphrase ref = %q, want cleared", got.PassphraseSecretID)
-	}
-	if got.KeyMaterialSecretID != "sec:record-key" {
-		t.Errorf("key ref changed: %q", got.KeyMaterialSecretID)
-	}
-	if got.KeyFingerprint != "SHA256:abcd" {
-		t.Errorf("fingerprint changed: %q", got.KeyFingerprint)
-	}
-}
-
-// Clearing a key-material reference also clears the credential's fingerprint:
-// the two describe the same material, and deleteKeyMaterialForCredential
-// already clears them together — the bulk clear must not leave a fingerprint
-// claiming a key the credential no longer holds.
-func TestClearSecretReferences_KeyMaterialClearsFingerprint(t *testing.T) {
-	s := newTestStore(t)
-	if err := s.CreateCredential(Credential{
-		ID:                  "cred:clear:2",
-		Name:                "clear2",
-		Username:            "u",
-		Auth:                AuthPublicKey,
-		KeyMaterialSecretID: "sec:key",
-		KeyFingerprint:      "SHA256:abcd",
-	}); err != nil {
-		t.Fatalf("create: %v", err)
-	}
-
-	if err := s.ClearSecretReferences("sec:key"); err != nil {
-		t.Fatalf("ClearSecretReferences: %v", err)
-	}
-
-	creds, err := s.LoadCredentials()
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	if got := creds[0]; got.KeyMaterialSecretID != "" || got.KeyFingerprint != "" {
-		t.Errorf("after clear: key ref = %q, fingerprint = %q — both must be empty", got.KeyMaterialSecretID, got.KeyFingerprint)
-	}
-}
-
-// Deleting a secret nothing references is a no-op write: the store stays
-// intact and the call succeeds.
-func TestClearSecretReferences_NoReferenceIsIdempotent(t *testing.T) {
-	s := newTestStore(t)
-	if err := s.CreateCredential(Credential{
-		ID: "cred:clear:3", Name: "clear3", Username: "u", Auth: AuthPassword,
-	}); err != nil {
-		t.Fatalf("create: %v", err)
-	}
-
-	if err := s.ClearSecretReferences("sec:never-stored"); err != nil {
-		t.Fatalf("ClearSecretReferences(absent): %v", err)
-	}
-	creds, err := s.LoadCredentials()
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	if len(creds) != 1 {
-		t.Fatalf("credentials = %d, want 1", len(creds))
 	}
 }

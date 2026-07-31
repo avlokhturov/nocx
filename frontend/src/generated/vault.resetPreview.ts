@@ -14,17 +14,13 @@
  */
 export interface VaultResetPreview {
   /**
-   * Distinct stored secrets that will be destroyed. A secret shared by two credential versions counts once — it is one thing the user loses.
+   * Distinct stored secrets that will be destroyed. A secret shared by two connections counts once — it is one thing the user loses.
    */
   secretCount: number
   /**
-   * Saved logins holding at least one of those secrets. Logins that store nothing — agent auth, a key read from a path — are not counted, because they lose nothing.
+   * Connections holding at least one of those secrets. Connections that store nothing — agent auth, a key read from a path — are not counted, because they lose nothing. Each of these will ask for a password again afterwards.
    */
-  credentialCount: number
-  /**
-   * Connections that will ask for a password again afterwards. Counted separately from the other two because it is the only one that describes what the user will notice.
-   */
-  connectionCount: number
+  profileCount: number
   /**
    * False when the OS keychain is not answering, so secrets stored there cannot be removed and will remain readable. The user is told this BEFORE confirming, so proceeding is an informed choice rather than a surprise half-way through. True when there is no system keychain on this platform at all: an absent store is not a broken one.
    */

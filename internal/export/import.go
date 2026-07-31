@@ -13,28 +13,21 @@ import (
 
 // ImportResult reports the outcome of an import operation.
 type ImportResult struct {
-	ProfilesImported    int `json:"profilesImported"`
-	GroupsImported      int `json:"groupsImported"`
-	CredentialsImported int `json:"credentialsImported"`
-	// UnresolvedCredentials are credentials whose SecretID references
-	// were present in the import payload; the user must map existing
-	// credentials or supply missing secrets (ADR-0011 §7).
-	UnresolvedCredentials []profile.Credential `json:"unresolvedCredentials,omitempty"`
+	ProfilesImported int `json:"profilesImported"`
+	GroupsImported   int `json:"groupsImported"`
 }
 
 // ImportDeps are the repositories to write into during import.
 type ImportDeps struct {
-	Profiles    profile.ProfileRepository
-	Groups      profile.GroupRepository
-	Credentials profile.CredentialMetadataRepository
+	Profiles profile.ProfileRepository
+	Groups   profile.GroupRepository
 }
 
 // ImportConfiguration imports a ConfigExport into the given repositories.
 //
-// Import never resolves or invents a secret (ADR-0011 §2, §7). Credentials
-// are imported with their SecretID references intact. Every credential in
-// the import payload is reported in UnresolvedCredentials so the UI can
-// prompt the user to map existing credentials or supply missing secrets.
+// Import never resolves or invents a secret (ADR-0011 §2, §7). Imported
+// profiles carry no secret bindings — the export strips them, and the
+// receiving machine's user binds their own secrets afterwards.
 func ImportConfiguration(deps ImportDeps, data *ConfigExport) (*ImportResult, error) {
 	result := &ImportResult{}
 
@@ -67,40 +60,20 @@ func ImportConfiguration(deps ImportDeps, data *ConfigExport) (*ImportResult, er
 		result.GroupsImported++
 	}
 
-	for _, c := range data.Credentials {
-		if err := deps.Credentials.CreateCredential(c); err != nil {
-			return nil, fmt.Errorf("import credential %s: %w", c.ID, err)
-		}
-		result.CredentialsImported++
-		// Every credential is unresolved — the user must map secrets.
-		result.UnresolvedCredentials = append(result.UnresolvedCredentials, c)
-	}
-
 	return result, nil
 }
 
 // ImportConfigurationWithService imports a ConfigExport through the
-// domain service, ensuring atomicity and validation. Returns the
-// combined import result with unresolved credentials.
+// domain service, ensuring atomicity and validation.
 func ImportConfigurationWithService(svc *profile.ProfileService, data *ConfigExport) (*ImportResult, error) {
-	svcResult := svc.AtomicImport(data.Profiles, data.Groups, data.Credentials)
+	svcResult := svc.AtomicImport(data.Profiles, data.Groups)
 
 	if len(svcResult.ImportErrors) > 0 {
 		return nil, fmt.Errorf("import failed: %s", svcResult.ImportErrors[0])
 	}
 
-	result := &ImportResult{
-		ProfilesImported:    svcResult.ProfilesImported,
-		GroupsImported:      svcResult.GroupsImported,
-		CredentialsImported: svcResult.CredentialsImported,
-	}
-
-	// Every credential is unresolved — the user must map secrets.
-	for _, c := range data.Credentials {
-		if c.ID != "" {
-			result.UnresolvedCredentials = append(result.UnresolvedCredentials, c)
-		}
-	}
-
-	return result, nil
+	return &ImportResult{
+		ProfilesImported: svcResult.ProfilesImported,
+		GroupsImported:   svcResult.GroupsImported,
+	}, nil
 }

@@ -4,10 +4,10 @@
 // # Why this is its own package
 //
 // A reset spans two stores that must not learn about each other. The vault
-// owns key material and provider storage; the credential records own the
-// references that point at it. Putting the operation on *vault.Vault would
-// make the vault package the owner of profiles.json, and putting it on the
-// profile store would make the profile store understand provider namespaces.
+// owns key material and provider storage; the profiles own the references
+// that point at it. Putting the operation on *vault.Vault would make the
+// vault package the owner of profiles.json, and putting it on the profile
+// store would make the profile store understand provider namespaces.
 // The order between them is the whole of the operation, so the order gets a
 // module.
 //
@@ -54,27 +54,24 @@ type VaultPurger interface {
 	Purge(ctx context.Context) ([]vault.PurgeFailure, error)
 }
 
-// SecretReferenceStore is the credential records seen from here: the two bulk
+// SecretReferenceStore is the profile store seen from here: the two bulk
 // operations over secret references and nothing else.
 type SecretReferenceStore interface {
 	CountSecretReferences() (profile.SecretReferenceImpact, error)
 	ClearAllSecretReferences() (profile.SecretReferenceImpact, error)
 }
 
-// Impact is what a reset costs, in three quantities that answer different
-// questions: what is destroyed, where it was attached, and what behaves
-// differently afterwards.
+// Impact is what a reset costs, in the two quantities that answer different
+// questions: what is destroyed, and what behaves differently afterwards.
 type Impact struct {
-	SecretCount     int
-	CredentialCount int
-	ProfileCount    int
+	SecretCount  int
+	ProfileCount int
 }
 
 func impactFrom(i profile.SecretReferenceImpact) Impact {
 	return Impact{
-		SecretCount:     i.SecretCount,
-		CredentialCount: i.CredentialCount,
-		ProfileCount:    i.ProfileCount,
+		SecretCount:  i.SecretCount,
+		ProfileCount: i.ProfileCount,
 	}
 }
 
@@ -125,7 +122,7 @@ func New(v VaultPurger, refs SecretReferenceStore, logger *slog.Logger) *Service
 // Preview reports what a reset would cost and whether the keychain can be
 // reached, changing nothing.
 //
-// The counts come from the credential records, not from the vault: the vault
+// The counts come from the profile records, not from the vault: the vault
 // is sealed whenever a reset is wanted — that is why it is wanted — and it
 // keeps no catalogue of what it holds in any case.
 func (s *Service) Preview(ctx context.Context) (Preview, error) {
@@ -181,7 +178,7 @@ func (s *Service) Execute(ctx context.Context) (Result, error) {
 			"stores", len(residue), "error", purgeErr)
 	} else {
 		s.logger.Info("vault reset complete",
-			"secrets", impact.SecretCount, "credentials", impact.CredentialCount)
+			"secrets", impact.SecretCount, "profiles", impact.ProfileCount)
 	}
 
 	// Not an error. The vault IS reset — the document is gone either way — and

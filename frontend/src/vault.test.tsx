@@ -1768,8 +1768,7 @@ describe('ResetVaultDialog', () => {
   }) {
     const resetPreview = vi.fn().mockResolvedValue({
       secretCount: 3,
-      credentialCount: 2,
-      connectionCount: 5,
+      profileCount: 5,
       systemKeychainReachable: true,
       vaultInitialized: true,
       ...overrides?.preview,
@@ -1779,8 +1778,7 @@ describe('ResetVaultDialog', () => {
         ? vi.fn().mockRejectedValue(overrides.resetRejects)
         : vi.fn().mockResolvedValue({
             secretCount: 3,
-            credentialCount: 2,
-            connectionCount: 5,
+            profileCount: 5,
             residue: [],
             ...overrides?.result,
           })
@@ -1889,7 +1887,7 @@ describe('ResetVaultDialog', () => {
   })
 
   it('says so when there is nothing to delete', async () => {
-    await openReset({ preview: { secretCount: 0, credentialCount: 0, connectionCount: 0 } })
+    await openReset({ preview: { secretCount: 0, profileCount: 0 } })
     await vi.waitFor(() => {
       expect(document.querySelector('.ui-vault-reset-impact')!.textContent).toBe(
         'There are no saved secrets to delete.',

@@ -4,7 +4,7 @@
  * Full-width connection list with dialog-based editing (wave 6).
  * Spec §5 of the connection manager design: nothing hidden, nothing asked twice.
  *
- * Pattern follows credentials.tsx: full-width list, editing in a Dialog.
+ * Pattern follows the manager surfaces: full-width list, editing in a Dialog.
  * Tabby import moved to Export / Backup / Import section.
  */
 import { For, Show, createSignal, createMemo, createEffect, on, onMount, type JSX } from 'solid-js'
@@ -43,7 +43,6 @@ import {
 import type {
   SSHProfile,
   ProfileGroup,
-  Credential,
   AuthMode,
   TreeNode,
   EffectiveProfileDTO,
@@ -55,6 +54,7 @@ import type {
   GroupImpactResponse,
   ConfigExport,
   SSHConfigPathResult,
+  ImportResult,
   TabbyPreviewResponse,
 } from './profiles'
 import { ProfileClient, buildGroupTree, parseQuickConnect } from './profiles'
@@ -64,6 +64,7 @@ import { AuthenticationEditor } from './authentication-editor'
 import { log } from './log'
 import { showToast } from './ui/toast'
 import { VaultOperationCancelledError, type VaultController } from './vault'
+import type { InventoryEntry, VaultClient } from './vault-client'
 
 // ── Provenance helpers ───────────────────────────────────────────────────────
 
@@ -73,8 +74,6 @@ export function sourceLabel(source: FieldSourceDTO): string {
       return 'set here'
     case 'group':
       return `from group ${source.label || source.id}`
-    case 'credential':
-      return `from credential ${source.label || source.id}`
     case 'sshConfig':
       return 'from ~/.ssh/config'
     case 'global':
@@ -121,7 +120,7 @@ function loginLabel(user: string | undefined, host: string | undefined): string 
 }
 
 /** The same naming for a subject that is already a label — a group's defaults
- *  name their credential, not a login. Never empty: a nameless row cannot be
+ *  name their secret, not a login. Never empty: a nameless row cannot be
  *  told from another nameless row. */
 function secretNameFor(kind: GeneratedSecretKind, subject: string): string {
   const s = subject.trim()
@@ -204,6 +203,9 @@ type ImportSource = 'sshConfig' | 'tabby' | 'backup'
 export interface ConnectionsViewProps {
   client: ProfileClient
   vaultController?: VaultController
+  /** Vault inventory for the secret pickers. Optional: the dev-web harness
+   *  has no vault, and the pickers then offer nothing. */
+  vaultClient?: VaultClient
   onConnect?: (profile: SSHProfile) => void
   /**
    * Monotonic counter — every increment opens a blank profile for editing, the
@@ -214,11 +216,11 @@ export interface ConnectionsViewProps {
    */
   newProfileRequest?: number
   /**
-   * Navigate from the Connections page to the Credentials page (in the same
-   * Settings tab). The Connections page does not import CredentialsSection —
+   * Navigate from the Connections page to the Secrets page (in the same
+   * Settings tab). The Connections page does not import SecretsSection —
    * it asks its parent to show it, and the parent decides how.
    */
-  onNavigateToCredentials?: () => void
+  onNavigateToSecrets?: () => void
   /**
    * Native dialog capability (dialog.*). Absent in the dev-web harness and
    * in tests; the key input's Path mode then degrades to typing the path by
@@ -233,28 +235,38 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   // ── Data state ──────────────────────────────────────────────────────────
   const [profiles, setProfiles] = createSignal<SSHProfile[]>([])
   const [groups, setGroups] = createSignal<ProfileGroup[]>([])
-  const [credentials, setCredentials] = createSignal<Credential[]>([])
+  /** The vault inventory for the secret pickers (ADR-0017). Empty when the
+   *  vault is sealed or absent (dev harness). */
+  const [secretRows, setSecretRows] = createSignal<InventoryEntry[]>([])
+
+  /** The pickers only ever offer live vault data: while the vault is sealed
+   *  or uninitialized, stale rows from an earlier load must not be offered.
+   *  Without a controller there is no status to read — trust the loaded
+   *  rows, exactly as loadAll does without one. */
+  const vaultOffersSecrets = createMemo(() => {
+    const state = props.vaultController?.status()?.state
+    return state === undefined || state === 'unsealed'
+  })
 
   // ── Selection / dialog state ─────────────────────────────────────────────
   const [editing, setEditing] = createSignal<SSHProfile | null>(null)
   const [dialogOpen, setDialogOpen] = createSignal(false)
   const [profilePasswordOpen, setProfilePasswordOpen] = createSignal(false)
   const [profilePasswordValue, setProfilePasswordValue] = createSignal('')
-  // ── Key-passphrase ask ─────────────────────────────────────────────────
-  // Saving a passphrase-protected key returns passphraseWanted; the app must
-  // ask for the key's passphrase before the save continues. Promised so the
-  // save flow can pause on it; both outcomes continue (the key stays stored
-  // either way — declining only leaves the passphrase to be asked at connect).
   const [passphraseAsk, setPassphraseAsk] = createSignal<{
-    credentialId: string
+    keyRow: string
     keyName: string
-    resolve: (outcome: 'saved' | 'skipped') => void
+    passphraseName: string
+    resolve: (outcome: { saved: boolean; row?: string }) => void
   } | null>(null)
   // Promise.withResolvers needs ES2024 and this project targets ES2021, so the
   // resolver is captured via the executor form.
-  const askKeyPassphrase = (credentialId: string, keyName: string): Promise<'saved' | 'skipped'> =>
-    new Promise((resolve) => setPassphraseAsk({ credentialId, keyName, resolve }))
-
+  const askKeyPassphrase = (
+    keyRow: string,
+    keyName: string,
+    passphraseName: string,
+  ): Promise<{ saved: boolean; row?: string }> =>
+    new Promise((resolve) => setPassphraseAsk({ keyRow, keyName, passphraseName, resolve }))
   // ── Effective/provenance state ─────────────────────────────────────────
   const [effectiveData, setEffectiveData] = createSignal<Record<string, EffectiveProfileDTO>>({})
   const [dirtyFields, setDirtyFields] = createSignal<Set<string>>(new Set())
@@ -290,13 +302,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   const [previewOpen, setPreviewOpen] = createSignal(false)
   // Where the SSH config actually is, per the backend. Null until asked.
   const [sshConfigPath, setSSHConfigPath] = createSignal<SSHConfigPathResult | null>(null)
-
-  // ── Inline credential editing (profile editor) ──────────────────────
-  const [profileCredDraft, setProfileCredDraft] = createSignal<Credential | null>(null)
-  const [credentialUsage, setCredentialUsage] = createSignal<Record<string, number>>({})
-  // ── Inline credential editing (group editor) ─────────────────────────
-  const [groupCredDraft, setGroupCredDraft] = createSignal<Credential | null>(null)
-
   // ── Group editor dialog ──────────────────────────────────────────────
   const [editingGroup, setEditingGroup] = createSignal<ProfileGroup | null>(null)
   const [groupDialogOpen, setGroupDialogOpen] = createSignal(false)
@@ -318,10 +323,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   const [dangerConfirmed, setDangerConfirmed] = createSignal(false)
   const [groupSection, setGroupSection] = createSignal('general')
   const [profileSection, setProfileSection] = createSignal('general')
-  // ── Three-way key input state (publicKey auth) ───────────────────────
+  // ── Four-way key input state (publicKey auth) ────────────────────────
   // The mode vocabulary and the suppliesMaterial predicate live in
   // KeyMaterialInput — the same component the Secrets page uses. The state
-  // itself stays here: the save paths and the credential draft own it.
+  // itself stays here: the save paths and the bound-row secret own it.
 
   // Profile editor key state
   const [profileKeyMode, setProfileKeyMode] = createSignal<KeyInputMode>(DEFAULT_KEY_MODE)
@@ -362,14 +367,9 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   // ── Data loading ────────────────────────────────────────────────────────
   async function loadAll() {
     try {
-      const [p, g, c] = await Promise.all([
-        props.client.listProfiles(),
-        props.client.listGroups(),
-        props.client.listCredentials(),
-      ])
+      const [p, g] = await Promise.all([props.client.listProfiles(), props.client.listGroups()])
       setProfiles(p ?? [])
       setGroups(g ?? [])
-      setCredentials(c ?? [])
     } catch (err) {
       const message = (err as Error).message
       log.error('Failed to load connections', { message })
@@ -380,56 +380,24 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     }
   }
 
-  async function loadCredentialUsage() {
+  /** Load the vault inventory for the secret pickers. Called when an editor
+   *  opens — the vault is accessed for data at that moment, not when the
+   *  connections LIST is shown (the list does not need the vault). If the
+   *  vault is sealed, the dispatcher's vault seam raises the unlock prompt
+   *  and retries on success; cancelling leaves the rows empty. */
+  async function loadSecretRows(): Promise<void> {
+    // Clear first: a re-opened editor must not briefly offer rows from a
+    // previous load while this request awaits (possibly an unlock dialog).
+    setSecretRows([])
+    let rows: InventoryEntry[] = []
     try {
-      const result = await props.client.credentialUsage()
-      const map: Record<string, number> = {}
-      for (const entry of result.usage) {
-        map[entry.credentialId] = entry.profiles.length
-      }
-      setCredentialUsage(map)
-    } catch (err) {
-      log.error('Failed to load credential usage', { message: (err as Error).message })
+      const inv = await props.vaultClient?.inventory()
+      rows = inv?.entries ?? []
+    } catch {
+      rows = []
     }
+    setSecretRows(rows)
   }
-
-  // ── Credential draft management (inline editing) ──────────────────────
-
-  createEffect(
-    on(
-      () => [editing()?.options?.credentialId, credentials()] as const,
-      ([credId]) => {
-        if (credId) {
-          const cred = credentials().find((c) => c.id === credId)
-          if (cred && (!profileCredDraft() || profileCredDraft()?.id !== credId)) {
-            setProfileCredDraft({ ...cred })
-          }
-        } else {
-          setProfileCredDraft(null)
-        }
-      },
-    ),
-  )
-
-  createEffect(
-    on(
-      () => {
-        const defaults = groupDraft()?.defaults
-        return [
-          defaults ? (defaults.credentialId as string | undefined) : undefined,
-          credentials(),
-        ] as const
-      },
-      ([credId]) => {
-        if (credId) {
-          const cred = credentials().find((c) => c.id === credId)
-          if (cred) setGroupCredDraft({ ...cred })
-        } else {
-          setGroupCredDraft(null)
-        }
-      },
-    ),
-  )
 
   // ── Import ────────────────────────────────────────────────────────────
 
@@ -455,7 +423,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         return `Reads ${where} and saves its aliases as connections. An alias whose name or host is already saved is skipped, so running it twice is safe.`
       }
       case 'tabby':
-        return 'Connections, groups and credentials from a Tabby configuration. A preview is shown before anything is written so you can review collisions and skipped secrets.'
+        return 'Connections, groups and secrets from a Tabby configuration. A preview is shown before anything is written so you can review collisions and skipped secrets.'
       case 'backup':
     }
   })
@@ -485,29 +453,8 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     setImportPassphrase('')
   }
 
-  /**
-   * An import that leaves credentials unmapped has half-succeeded, and the half
-   * that failed needs the user to do something about it — so it is raised as a
-   * sticky warning rather than a success that scrolls away in four seconds.
-   */
-  function reportImport(result: {
-    profilesImported: number
-    groupsImported: number
-    credentialsImported: number
-    unresolvedCredentials?: unknown[]
-  }) {
-    const summary =
-      `Imported ${result.profilesImported} connections, ` +
-      `${result.groupsImported} groups, ${result.credentialsImported} credentials`
-    const unresolved = result.unresolvedCredentials?.length ?? 0
-    if (unresolved > 0) {
-      showToast({
-        level: 'warning',
-        duration: 0,
-        message: `${summary} — ${unresolved} credentials need secret mapping`,
-      })
-      return
-    }
+  function reportImport(result: ImportResult) {
+    const summary = `Imported ${result.profilesImported} connections, ${result.groupsImported} groups`
     showToast({ level: 'success', message: summary })
   }
 
@@ -617,10 +564,12 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     setDangerConfirmed(false)
     setGroupSection('general')
     groupValidation.reset()
-    setGroupKeyMode(DEFAULT_KEY_MODE)
+    const gd = group.defaults ?? {}
+    setGroupKeyMode(gd.keySecret ? 'secret' : gd.keyPath ? 'path' : DEFAULT_KEY_MODE)
     setGroupKeyText('')
     setGroupKeyFingerprint(undefined)
     setGroupKeyTextError(undefined)
+    void loadSecretRows()
     setGroupDialogOpen(true)
   }
 
@@ -646,7 +595,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     setGroupKeyText('')
     setGroupKeyFingerprint(undefined)
     setGroupKeyTextError(undefined)
-    setGroupCredDraft(null)
   }
 
   async function computeGroupImpact(draft: ProfileGroup) {
@@ -676,120 +624,71 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       return
     }
     setGroupApplyBusy(true)
-    // Set when this attempt creates a credential for a key it is about to
-    // save, so a cancelled vault prompt can undo exactly that credential —
-    // the credential the recursion saves with belongs to a different call.
-    let createdCredential: Credential | null = null
     try {
       // Key material save (publicKey paste mode in group defaults)
       const defaults = draft.defaults ?? {}
-      if (
-        !defaults.credentialId &&
-        defaults.auth === 'publicKey' &&
-        suppliesMaterial(groupKeyMode()) &&
-        groupKeyText()
-      ) {
-        const credential = await props.client.createCredential({
-          id: '',
-          name: draft.name,
-          username: (defaults.user as string | undefined) ?? '',
-          auth: 'publicKey',
-        })
-        createdCredential = credential
-        const saveKeymat = async () => {
-          const result = await props.client.saveKeyMaterial(
-            credential.id,
-            groupKeyText(),
-            secretNameFor('private-key', credential.name),
+      if (defaults.auth === 'publicKey' && suppliesMaterial(groupKeyMode()) && groupKeyText()) {
+        const generatedName = secretNameFor('private-key', draft.name)
+        const saveKeymat = () => props.client.saveKeyMaterial(groupKeyText(), generatedName)
+        let result: { row: string; fingerprint: string; passphraseWanted: boolean } | null = null
+        const run = async () => {
+          result = await saveKeymat()
+        }
+        try {
+          if (props.vaultController) {
+            await props.vaultController.saveSecretWithVault(run, 'save this key')
+          } else {
+            await run()
+          }
+        } catch (err) {
+          if (err instanceof VaultOperationCancelledError) return
+          const message = (err as Error).message
+          log.error('Failed to save key material for group defaults', { message })
+          showToast({ level: 'danger', message: `Could not save the key: ${message}` })
+          return
+        }
+        const saved = result!
+        setGroupDefaultsField('keySecret', saved.row)
+        setGroupDefaultsField('keyPath', undefined)
+        if (saved.passphraseWanted) {
+          const outcome = await askKeyPassphrase(
+            saved.row,
+            // The prompt names the LOGIN the key belongs to — not the key's
+            // own generated name ("Key for …"), which would title the prompt
+            // "Passphrase for Key for deploy@host".
+            draft.name,
+            secretNameFor('key-passphrase', draft.name),
           )
-          setGroupKeyFingerprint(result.fingerprint)
-          if (result.passphraseWanted) {
-            await askKeyPassphrase(credential.id, credential.name)
+          if (outcome.saved && outcome.row) {
+            setGroupDefaultsField('keyPassphraseSecret', outcome.row)
           }
         }
-        if (props.vaultController) {
-          await props.vaultController.saveSecretWithVault(saveKeymat, 'save this key')
-        } else {
-          await saveKeymat()
-        }
-        // Update the draft to link credential and remove keyPath
-        const updatedDefaults: Record<string, unknown> = Object.fromEntries(
-          Object.entries(defaults).filter(([k]) => k !== 'keyPath'),
-        )
-        updatedDefaults.credentialId = credential.id
-        // The recursion below re-reads groupDraft(), so the updated draft has to
-        // go back into the signal. Building it and dropping it meant the second
-        // pass saved the ORIGINAL group — keyPath intact, credential unlinked —
-        // while the key material sat in the vault owned by nobody.
-        setGroupDraft({ ...draft, defaults: updatedDefaults } as ProfileGroup)
         setGroupKeyText('')
-        // Recurse to save the updated draft
+        // Recurse to save the updated draft: the recursion re-reads
+        // groupDraft(), which the setGroupDefaultsField calls above updated.
         return saveGroup()
       }
-
-      // Save credential draft if the credential's fields were edited inline
-      const credDraft = groupCredDraft()
-      if (credDraft && credDraft.id) {
-        const original = credentials().find((c) => c.id === credDraft.id)
-        if (
-          original &&
-          (original.name !== credDraft.name ||
-            original.username !== credDraft.username ||
-            original.auth !== credDraft.auth)
-        ) {
-          await props.client.updateCredential(credDraft)
-          // Update the local credentials list so stale data doesn't reappear
-          setCredentials((prev) => prev.map((c) => (c.id === credDraft.id ? credDraft : c)))
-          setGroupCredDraft(null)
-        }
-
-        // Key material save for an existing credential
-        if (credDraft.auth === 'publicKey' && suppliesMaterial(groupKeyMode()) && groupKeyText()) {
-          const saveKeymat = async () => {
-            const result = await props.client.saveKeyMaterial(
-              credDraft.id,
-              groupKeyText(),
-              secretNameFor('private-key', credDraft.name),
-            )
-            setGroupKeyFingerprint(result.fingerprint)
-            if (result.passphraseWanted) {
-              await askKeyPassphrase(credDraft.id, credDraft.name)
-            }
-          }
-          try {
-            if (props.vaultController) {
-              await props.vaultController.saveSecretWithVault(saveKeymat, 'save this key')
-            } else {
-              await saveKeymat()
-            }
-          } catch (err) {
-            if (err instanceof VaultOperationCancelledError) return
-            const message = (err as Error).message
-            log.error('Failed to save key material for group credential', { message })
-            showToast({ level: 'danger', message: `Could not save the key: ${message}` })
-            return
-          }
-          setGroupKeyText('')
-          setGroupKeyFingerprint(undefined)
-          setGroupKeyTextError(undefined)
+      // A group whose defaults name vault secrets IS a vault access: while
+      // the vault is sealed the user must be asked to unlock, never silently
+      // allowed to bind rows the vault cannot currently back.
+      const gd = draft.defaults ?? {}
+      const hasBindings = !!(gd.passwordSecret || gd.keySecret || gd.keyPassphraseSecret)
+      const persist = async (): Promise<void> => {
+        if (!draft.id) {
+          await props.client.createGroup(draft)
+        } else {
+          await props.client.groupApply([draft])
         }
       }
-
-      if (!draft.id) {
-        await props.client.createGroup(draft)
+      if (hasBindings && props.vaultController) {
+        await props.vaultController.saveSecretWithVault(persist, 'use a saved secret')
       } else {
-        await props.client.groupApply([draft])
+        await persist()
       }
       closeGroupEditor()
       await loadAll()
       showToast({ level: 'success', message: `Saved group "${draft.name}"` })
     } catch (err) {
-      if (createdCredential && err instanceof VaultOperationCancelledError) {
-        // Cancelled the vault prompt: abandon the group save and undo the
-        // credential created for it; the editor stays open with input intact.
-        await cleanupCredential(createdCredential.id)
-        return
-      }
       if (
         err instanceof RpcError &&
         typeof err.data === 'object' &&
@@ -900,8 +799,8 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   /**
    * The group's defaults, split the way the connection editor splits the same
    * settings. Nine fields in one list is what made this dialog a tube; they
-   * were never one subject anyway — a credential and a keepalive interval are
-   * not read at the same moment.
+   * were never one subject anyway — a secret binding and a keepalive
+   * interval are not read at the same moment.
    */
   const CONNECTION_DEFAULTS: { key: string; label: string }[] = [
     { key: 'port', label: 'Port' },
@@ -918,7 +817,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   /** Human-readable field labels for the impact summary. */
   function fieldLabel(key: string): string {
     const m: Record<string, string> = {
-      credentialId: 'credential',
       port: 'port',
       user: 'username',
       auth: 'auth mode',
@@ -1073,19 +971,11 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       )
     }
 
-    /** When a credential is selected, keyPath lives on the credential draft. */
-    const groupKeyPathValue = () => {
-      const cred = groupCredDraft()
-      if (cred) return cred.keyPath ?? ''
-      return (gv('keyPath') as string | undefined) ?? ''
-    }
+    const groupKeyPathValue = () => (gv('keyPath') as string | undefined) ?? ''
     function handleGroupKeyPathChange(v: string | undefined) {
-      const cred = groupCredDraft()
-      if (cred) {
-        setGroupCredDraft({ ...cred, keyPath: v })
-      } else {
-        setGroupDefaultsField('keyPath', v || undefined)
-      }
+      setGroupDefaultsField('keyPath', v || undefined)
+      // A path and a bound key secret are mutually exclusive (ADR-0017).
+      setGroupDefaultsField('keySecret', undefined)
     }
     function renderConnectionDefaults(): JSX.Element {
       // An accessor, not a value: this function is called from a JSX position,
@@ -1102,16 +992,15 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           </p>
           <AuthenticationEditor
             id="group-default-auth"
-            credentials={credentials()}
-            credentialId={(gv('credentialId') as string | undefined) || undefined}
-            onCredentialChange={(value) => setGroupDefaultsField('credentialId', value)}
             username={(gv('user') as string | undefined) || undefined}
             onUsernameChange={(value) => setGroupDefaultsField('user', value)}
             auth={auth() === undefined ? undefined : (auth() as AuthMode)}
             onAuthChange={(value) => setGroupDefaultsField('auth', value)}
-            credentialDraft={groupCredDraft() ?? undefined}
-            onCredentialDraftChange={(draft) => setGroupCredDraft(draft)}
-            credentialUsage={groupCredDraft() ? credentialUsage()[groupCredDraft()!.id] : undefined}
+            passwordSecrets={
+              vaultOffersSecrets() ? secretRows().filter((e) => e.kind === 'password') : []
+            }
+            passwordSecret={(gv('passwordSecret') as string | undefined) || undefined}
+            onPasswordSecretChange={(value) => setGroupDefaultsField('passwordSecret', value)}
             publicKeyAction={
               <Field for="group-default-key" label="Private Key">
                 <KeyMaterialInput
@@ -1122,20 +1011,19 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                     if (value === 'material') {
                       handleGroupKeyPathChange(undefined)
                     } else if (prev === 'material') {
-                      const credId = gv('credentialId') as string | undefined
                       setGroupKeyText('')
                       setGroupKeyFingerprint(undefined)
                       setGroupKeyTextError(undefined)
-                      if (!groupCredDraft()) {
-                        setGroupDefaultsField('credentialId', undefined)
-                      }
-                      if (credId) {
-                        props.client.deleteKeyMaterial(credId).catch((err: unknown) => {
-                          log.error('Failed to delete key material', {
-                            message: (err as Error).message,
-                          })
-                        })
-                      }
+                    }
+                    if (value === 'secret') {
+                      // Entering secret mode: the bound row replaces any
+                      // typed/pasted material, and a path cannot stay set.
+                      setGroupKeyText('')
+                      setGroupKeyFingerprint(undefined)
+                      setGroupKeyTextError(undefined)
+                      setGroupDefaultsField('keyPath', undefined)
+                    } else if (prev === 'secret') {
+                      setGroupDefaultsField('keySecret', undefined)
                     }
                     if (value === 'path' || value === 'file') {
                       setGroupKeyText('')
@@ -1143,6 +1031,21 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                       setGroupKeyTextError(undefined)
                     }
                     setGroupKeyMode(value)
+                  }}
+                  secrets={
+                    vaultOffersSecrets() ? secretRows().filter((e) => e.kind === 'private-key') : []
+                  }
+                  secretValue={(gv('keySecret') as string | undefined) || undefined}
+                  onSecretChange={(v) => {
+                    if (v) {
+                      setGroupDefaultsField('keySecret', v)
+                      setGroupDefaultsField('keyPath', undefined)
+                      setGroupKeyText('')
+                      setGroupKeyFingerprint(undefined)
+                      setGroupKeyTextError(undefined)
+                    } else {
+                      setGroupDefaultsField('keySecret', undefined)
+                    }
                   }}
                   pathValue={groupKeyPathValue()}
                   onPathChange={(v) => handleGroupKeyPathChange(v || undefined)}
@@ -1270,6 +1173,37 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     try {
       const res = await props.client.connectionTest(profile.id)
       if (
+        res.outcome === 'needs-interactive' &&
+        profile.options.keySecret &&
+        !profile.options.keyPassphraseSecret
+      ) {
+        // An encrypted vault key with no stored passphrase: the key is fine,
+        // it is only locked. Ask for the passphrase, bind it, and re-test —
+        // not an error the user must decode.
+        const outcome = await askKeyPassphrase(
+          profile.options.keySecret,
+          loginLabel(profile.options.user, profile.options.host),
+          secretNameFor('key-passphrase', loginLabel(profile.options.user, profile.options.host)),
+        )
+        if (outcome.saved && outcome.row) {
+          const bound = {
+            ...profile,
+            options: { ...profile.options, keyPassphraseSecret: outcome.row },
+          }
+          try {
+            await props.client.updateProfile(bound)
+            await loadAll()
+          } catch (err) {
+            const message = (err as Error).message
+            log.error('Failed to save the key passphrase binding', { message })
+            showToast({ level: 'danger', message: `Could not save the passphrase: ${message}` })
+            return
+          }
+          return handleTest(bound)
+        }
+        return
+      }
+      if (
         (res.outcome === 'host-key-unknown' || res.outcome === 'host-key-changed') &&
         res.hostKey
       ) {
@@ -1329,7 +1263,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   // profiles are set, so the async continuation does not need to be tracked.
   onMount(() => {
     void loadAll()
-    void loadCredentialUsage()
   })
 
   // After profiles load, fetch session status and effective data for them.
@@ -1409,6 +1342,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     setProfileKeyFingerprint(undefined)
     setProfileKeyTextError(undefined)
     setDialogOpen(true)
+    void loadSecretRows()
   }
 
   function openEditDialog(profile: SSHProfile) {
@@ -1416,11 +1350,17 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     setEditing(profile)
     setDirtyFields(new Set<string>())
     profileValidation.reset()
-    setProfileKeyMode(DEFAULT_KEY_MODE)
+    // Open on the key source the connection actually uses: the bound secret,
+    // the path, or the default. A saved connection must show what it
+    // authenticates with, not the first segment (b5bu).
+    setProfileKeyMode(
+      profile.options.keySecret ? 'secret' : profile.options.keyPath ? 'path' : DEFAULT_KEY_MODE,
+    )
     setProfileKeyText('')
     setProfileKeyFingerprint(undefined)
     setProfileKeyTextError(undefined)
     setDialogOpen(true)
+    void loadSecretRows()
   }
 
   function closeDialog() {
@@ -1434,7 +1374,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     setProfileKeyText('')
     setProfileKeyFingerprint(undefined)
     setProfileKeyTextError(undefined)
-    setProfileCredDraft(null)
   }
 
   // ── Validation ──────────────────────────────────────────────────────────
@@ -1447,6 +1386,16 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     name: () => required('Name')(formProfile()?.name ?? ''),
     host: () => combine(required('Host'), hostname())(formProfile()?.options.host ?? ''),
     port: () => combine(required('Port'), portRule())(String(formProfile()?.options.port ?? '')),
+    // A Public Key connection with no key is a dead end: nothing to offer
+    // at connect time. The key may come from a stored secret, a path, or
+    // material about to be minted on save — but it must come from somewhere.
+    key: () => {
+      const p = formProfile()
+      if (!p || p.options.auth !== 'publicKey') return undefined
+      if (p.options.keySecret || p.options.keyPath) return undefined
+      if (suppliesMaterial(profileKeyMode()) && profileKeyText()) return undefined
+      return 'Choose a private key: a file, a path, pasted material, or a stored secret'
+    },
     keepaliveInterval: () =>
       nonNegativeInteger('Keepalive interval')(
         String(formProfile()?.options.keepaliveInterval ?? ''),
@@ -1473,124 +1422,32 @@ export function ConnectionsView(props: ConnectionsViewProps) {
 
   // ── Save / delete / connect ────────────────────────────────────────────
 
-  /** Undo a credential that was created for a save the user then cancelled.
-   *  The cancellation must leave no credential behind — deleting is the
-   *  rollback half of "abandon the operation the user started". */
-  async function cleanupCredential(id: string): Promise<void> {
-    try {
-      await props.client.deleteCredential(id)
-    } catch (err) {
-      const message = (err as Error).message
-      log.error('Failed to clean up credential after a cancelled save', { message })
-    }
-  }
-
   async function saveProfile(profile: SSHProfile) {
     if (!gate(profileValidation)) return
 
+    // Key material save (publicKey paste/upload mode)
     if (
-      !profile.options.credentialId &&
-      profile.options.auth === 'password' &&
-      profilePasswordValue()
-    ) {
-      let credential: Credential | null = null
-      try {
-        credential = await props.client.createCredential({
-          id: '',
-          name: profile.name,
-          username: profile.options.user ?? '',
-          auth: 'password',
-        })
-        const savePw = async () => {
-          await props.client.savePassword(
-            credential!.id,
-            profilePasswordValue(),
-            generatedSecretName('password', profile.options.user, profile.options.host),
-          )
-        }
-        if (props.vaultController) {
-          await props.vaultController.saveSecretWithVault(savePw, 'save this password')
-        } else {
-          await savePw()
-        }
-        const linked = {
-          ...profile,
-          options: { ...profile.options, credentialId: credential.id },
-        }
-        setEditing(linked)
-        setProfilePasswordValue('')
-        setDirtyFields((prev) => new Set(prev).add('credentialId'))
-        await saveProfile(linked)
-      } catch (err) {
-        // The credential was minted BEFORE the secret it exists to hold, so
-        // any exit that did not link it leaves a record with nothing in it.
-        // Undoing it on the vault-cancel path alone is what filled one store
-        // with ten empty credentials for a single host (nocx-0ev7): every
-        // refused key, every backend error, left one behind, invisible
-        // because an empty credential has no secret to show on the Secrets
-        // page. The rule is the whole rule — created and not linked means
-        // undone.
-        if (credential) await cleanupCredential(credential.id)
-        if (err instanceof VaultOperationCancelledError) {
-          // Cancelling the vault prompt abandons the save with the editor
-          // still open and the input intact; there is nothing more to say.
-          return
-        }
-        const message = (err as Error).message
-        log.error('Failed to save inline password credential', { message })
-        showToast({ level: 'danger', message: `Could not save the password: ${message}` })
-      }
-      return
-    }
-
-    // Key material save (publicKey paste mode)
-    if (
-      !profile.options.credentialId &&
       profile.options.auth === 'publicKey' &&
       suppliesMaterial(profileKeyMode()) &&
       profileKeyText()
     ) {
-      let credential: Credential | null = null
+      const generatedName = generatedSecretName(
+        'private-key',
+        profile.options.user,
+        profile.options.host,
+      )
+      const saveKeymat = () => props.client.saveKeyMaterial(profileKeyText(), generatedName)
+      let result: { row: string; fingerprint: string; passphraseWanted: boolean } | null = null
+      const run = async () => {
+        result = await saveKeymat()
+      }
       try {
-        credential = await props.client.createCredential({
-          id: '',
-          name: profile.name,
-          username: profile.options.user ?? '',
-          auth: 'publicKey',
-        })
-        const saveKeymat = async () => {
-          const result = await props.client.saveKeyMaterial(
-            credential!.id,
-            profileKeyText(),
-            generatedSecretName('private-key', profile.options.user, profile.options.host),
-          )
-          setProfileKeyFingerprint(result.fingerprint)
-          if (result.passphraseWanted) {
-            await askKeyPassphrase(
-              credential!.id,
-              loginLabel(profile.options.user, profile.options.host),
-            )
-          }
-        }
         if (props.vaultController) {
-          await props.vaultController.saveSecretWithVault(saveKeymat, 'save this key')
+          await props.vaultController.saveSecretWithVault(run, 'save this key')
         } else {
-          await saveKeymat()
+          await run()
         }
-        const linked = {
-          ...profile,
-          options: { ...profile.options, credentialId: credential.id, keyPath: undefined },
-        }
-        setEditing(linked)
-        setProfileKeyText('')
-        setDirtyFields((prev) => new Set(prev).add('credentialId'))
-        await saveProfile(linked)
       } catch (err) {
-        // Created and not linked means undone — see the password path above.
-        // A refused key is the commonest way here: paste a .pub by mistake,
-        // read the error, fix it, and the credential from the failed attempt
-        // stays forever with nothing in it.
-        if (credential) await cleanupCredential(credential.id)
         if (err instanceof VaultOperationCancelledError) {
           return
         }
@@ -1617,101 +1474,75 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         const message = (err as Error).message
         log.error('Failed to save key material', { message })
         showToast({ level: 'danger', message: `Could not save the key: ${message}` })
+        return
       }
+      const saved = result!
+      setProfileKeyFingerprint(saved.fingerprint)
+      let keyPassphraseRow: string | undefined
+      if (saved.passphraseWanted) {
+        const outcome = await askKeyPassphrase(
+          saved.row,
+          // The prompt names the LOGIN the key belongs to, not the key's own
+          // generated name — see the group flow for the same reasoning.
+          loginLabel(profile.options.user, profile.options.host),
+          secretNameFor('key-passphrase', loginLabel(profile.options.user, profile.options.host)),
+        )
+        if (outcome.saved && outcome.row) keyPassphraseRow = outcome.row
+      }
+      // Bind the minted rows on the draft and re-enter: the save below must
+      // persist the profile with the bindings on it.
+      const linked = {
+        ...profile,
+        options: {
+          ...profile.options,
+          keySecret: saved.row,
+          keyPath: undefined,
+          ...(keyPassphraseRow ? { keyPassphraseSecret: keyPassphraseRow } : {}),
+        },
+      }
+      setEditing(linked)
+      setProfileKeyText('')
+      setDirtyFields((prev) => {
+        const next = new Set(prev)
+        next.add('keySecret')
+        if (keyPassphraseRow) next.add('keyPassphraseSecret')
+        return next
+      })
+      await saveProfile(linked)
       return
-    }
-    // Save credential draft if the credential's fields were edited inline
-    const credDraft = profileCredDraft()
-    if (credDraft && credDraft.id) {
-      const original = credentials().find((c) => c.id === credDraft.id)
-      if (
-        original &&
-        (original.name !== credDraft.name ||
-          original.username !== credDraft.username ||
-          original.auth !== credDraft.auth)
-      ) {
-        try {
-          await props.client.updateCredential(credDraft)
-          // Update the local credentials list so stale data doesn't reappear
-          // on the next editor open.
-          setCredentials((prev) => prev.map((c) => (c.id === credDraft.id ? credDraft : c)))
-          setProfileCredDraft(null)
-        } catch (err) {
-          const message = (err as Error).message
-          log.error('Failed to update credential', { message })
-          showToast({ level: 'danger', message: `Could not update credential: ${message}` })
-          return
-        }
-      }
-
-      // Password save for an existing credential
-      if (profilePasswordValue()) {
-        const savePw = async () => {
-          await props.client.savePassword(
-            credDraft.id,
-            profilePasswordValue(),
-            generatedSecretName('password', profile.options.user, profile.options.host),
-          )
-        }
-        try {
-          if (props.vaultController) {
-            await props.vaultController.saveSecretWithVault(savePw, 'save this password')
-          } else {
-            await savePw()
-          }
-        } catch (err) {
-          if (err instanceof VaultOperationCancelledError) return
-          const message = (err as Error).message
-          log.error('Failed to save password for credential', { message })
-          showToast({ level: 'danger', message: `Could not save the password: ${message}` })
-          return
-        }
-        setProfilePasswordValue('')
-      }
-
-      // Key material save for an existing credential
-      if (
-        credDraft.auth === 'publicKey' &&
-        suppliesMaterial(profileKeyMode()) &&
-        profileKeyText()
-      ) {
-        const saveKeymat = async () => {
-          const result = await props.client.saveKeyMaterial(
-            credDraft.id,
-            profileKeyText(),
-            generatedSecretName('private-key', profile.options.user, profile.options.host),
-          )
-          setProfileKeyFingerprint(result.fingerprint)
-          if (result.passphraseWanted) {
-            await askKeyPassphrase(
-              credDraft.id,
-              loginLabel(profile.options.user, profile.options.host),
-            )
-          }
-        }
-        try {
-          if (props.vaultController) {
-            await props.vaultController.saveSecretWithVault(saveKeymat, 'save this key')
-          } else {
-            await saveKeymat()
-          }
-        } catch (err) {
-          if (err instanceof VaultOperationCancelledError) return
-          const message = (err as Error).message
-          log.error('Failed to save key material for credential', { message })
-          showToast({ level: 'danger', message: `Could not save the key: ${message}` })
-          return
-        }
-        setProfileKeyText('')
-        setProfileKeyFingerprint(undefined)
-        setProfileKeyTextError(undefined)
-      }
     }
     const isNew = !profile.id || !profiles().some((x) => x.id === profile.id)
 
+    const hasBindings = !!(
+      profile.options.passwordSecret ||
+      profile.options.keySecret ||
+      profile.options.keyPassphraseSecret
+    )
+    // Saving a profile that names vault secrets IS a vault access: while the
+    // vault is sealed the user must be asked to unlock, never silently
+    // allowed to bind rows the vault cannot currently back (the backend
+    // resolves the row even when sealed, which is exactly the silent path
+    // this closes).
+    let persisted: SSHProfile | null = null
+    const persist = async (): Promise<void> => {
+      if (isNew) {
+        persisted = await props.client.createProfile(profile)
+      } else {
+        persisted = await props.client.updateProfile(profile)
+      }
+    }
+    const persistGuarded = async (): Promise<SSHProfile> => {
+      if (hasBindings && props.vaultController) {
+        await props.vaultController.saveSecretWithVault(persist, 'use a saved secret')
+        return persisted!
+      }
+      await persist()
+      return persisted!
+    }
+
     if (isNew) {
       try {
-        const saved = await props.client.createProfile(profile)
+        const saved = await persistGuarded()
         closeDialog()
         await loadAll()
         void loadSessionStatuses()
@@ -1740,7 +1571,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
 
       case 'update':
         try {
-          const saved = await props.client.updateProfile(profile)
+          const saved = await persistGuarded()
           closeDialog()
           await loadAll()
           await loadEffective([saved.id])
@@ -1755,7 +1586,22 @@ export function ConnectionsView(props: ConnectionsViewProps) {
 
       case 'patch':
         try {
-          const eff = await props.client.patchProfile({ id: profile.id, set: route.patchSet })
+          const eff = await (route.patchSet &&
+          Object.keys(route.patchSet).some((k) =>
+            ['options.passwordSecret', 'options.keySecret', 'options.keyPassphraseSecret'].includes(
+              k,
+            ),
+          ) &&
+          props.vaultController
+            ? (async () => {
+                let out: EffectiveProfileDTO
+                const client = props.client
+                await props.vaultController!.saveSecretWithVault(async () => {
+                  out = await client.patchProfile({ id: profile.id, set: route.patchSet })
+                }, 'use a saved secret')
+                return out!
+              })()
+            : props.client.patchProfile({ id: profile.id, set: route.patchSet }))
           setEffectiveData((prev) => ({ ...prev, [profile.id]: eff }))
           closeDialog()
           showToast({ level: 'success', message: `Saved "${profile.name}"` })
@@ -1828,19 +1674,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   function renderRow(p: SSHProfile) {
     const status = () => sessionStatuses()[p.id]
     const isTesting = () => probeBusy().has(p.id)
-
-    // Credential lookup
-    const eff = () => effectiveData()[p.id]
-    const effCredId = () => {
-      const e = eff()
-      return e?.fields?.credentialId?.value as string | undefined
-    }
-    const credObj = () => credentials().find((c) => c.id === effCredId())
-    const credSource = () => {
-      const e = eff()
-      return e?.fields?.credentialId?.source
-    }
-
     return (
       <CollectionRow
         info={
@@ -1874,25 +1707,8 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                 )}
               </Show>
             </div>
-            {/* Credential info */}
-            <Show when={credObj()} keyed>
-              {(cred) => (
-                <div class="cm-item-credential">
-                  <span class="cm-credential-key">Credential:</span>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => props.onNavigateToCredentials?.()}
-                    ariaLabel={`Open credentials for ${cred.name}`}
-                  >
-                    {cred.name}
-                  </Button>
-                  <Show when={credSource()} keyed>
-                    {(src) => <span class="cm-provenance-label">{sourceLabel(src)}</span>}
-                  </Show>
-                </div>
-              )}
-            </Show>
+            {/* Secret bindings are shown in the editor; the Secrets page is
+                where they are managed (ADR-0017). */}
           </>
         }
         actions={
@@ -2017,20 +1833,17 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       })
     }
 
-    /** When a credential is selected, keyPath lives on the credential draft. */
-    const keyPathValue = () => {
-      const cred = profileCredDraft()
-      if (cred) return cred.keyPath ?? ''
-      return fvStr('keyPath')
-    }
+    const keyPathValue = () => fvStr('keyPath')
     function handleKeyPathChange(v: string | undefined) {
-      const cred = profileCredDraft()
-      if (cred) {
-        setProfileCredDraft({ ...cred, keyPath: v })
-      } else {
-        setOption('keyPath', v || undefined)
-      }
+      setOption('keyPath', v || undefined)
+      // A path and a bound key secret are mutually exclusive (ADR-0017).
+      setOption('keySecret', undefined)
     }
+
+    /** The bound password secret's display name, for the Password action. */
+    const boundPasswordName = createMemo(
+      () => secretRows().find((e) => e.id === fvStr('passwordSecret'))?.name,
+    )
 
     function effField(field: string): EffectiveFieldDTO | undefined {
       const eff = effectiveData()[profile().id]
@@ -2169,24 +1982,31 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                 <Stack>
                   <AuthenticationEditor
                     id="profile-auth"
-                    credentials={credentials()}
-                    credentialId={fvStr('credentialId') || undefined}
-                    onCredentialChange={(value) => setOption('credentialId', value)}
                     username={fvStr('user')}
                     onUsernameChange={(value) => setOption('user', value)}
                     auth={fvStr('auth') as AuthMode}
                     onAuthChange={(value) => setOption('auth', value)}
-                    credentialDraft={profileCredDraft() ?? undefined}
-                    onCredentialDraftChange={(draft) => setProfileCredDraft(draft)}
+                    passwordSecrets={
+                      vaultOffersSecrets() ? secretRows().filter((e) => e.kind === 'password') : []
+                    }
+                    passwordSecret={fvStr('passwordSecret') || undefined}
+                    onPasswordSecretChange={(value) => {
+                      setOption('passwordSecret', value)
+                      // A picked secret replaces any typed-new draft: a later
+                      // "Set Password" must not silently override the pick.
+                      setProfilePasswordValue('')
+                    }}
                     passwordAction={
                       <Field for="profile-password-action" label="Password">
-                        <div class="credential-secret-action">
-                          <span class="credential-secret-description">
-                            {profilePasswordValue() ? 'Password ready to save' : 'No password set'}
+                        <div class="secret-action">
+                          <span class="secret-description">
+                            {boundPasswordName()
+                              ? `Password: ${boundPasswordName()}`
+                              : 'No password set'}
                           </span>
-                          <div class="credential-secret-actions">
+                          <div class="secret-actions">
                             <Button variant="default" onClick={() => setProfilePasswordOpen(true)}>
-                              {profilePasswordValue() ? 'Change Password' : 'Set Password'}
+                              {boundPasswordName() ? 'Change Password' : 'Set Password'}
                             </Button>
                           </div>
                         </div>
@@ -2202,20 +2022,20 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                             if (value === 'material') {
                               handleKeyPathChange(undefined)
                             } else if (prev === 'material') {
-                              const credId = fvStr('credentialId')
                               setProfileKeyText('')
                               setProfileKeyFingerprint(undefined)
                               setProfileKeyTextError(undefined)
-                              if (!profileCredDraft()) {
-                                setOption('credentialId', undefined)
-                              }
-                              if (credId) {
-                                props.client.deleteKeyMaterial(credId).catch((err: unknown) => {
-                                  log.error('Failed to delete key material', {
-                                    message: (err as Error).message,
-                                  })
-                                })
-                              }
+                            }
+                            if (value === 'secret') {
+                              // Entering secret mode: the bound row replaces
+                              // any typed/pasted material, and a path cannot
+                              // stay set.
+                              setProfileKeyText('')
+                              setProfileKeyFingerprint(undefined)
+                              setProfileKeyTextError(undefined)
+                              setOption('keyPath', undefined)
+                            } else if (prev === 'secret') {
+                              setOption('keySecret', undefined)
                             }
                             if (value === 'path' || value === 'file') {
                               setProfileKeyText('')
@@ -2223,6 +2043,23 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                               setProfileKeyTextError(undefined)
                             }
                             setProfileKeyMode(value)
+                          }}
+                          secrets={
+                            vaultOffersSecrets()
+                              ? secretRows().filter((e) => e.kind === 'private-key')
+                              : []
+                          }
+                          secretValue={fvStr('keySecret') || undefined}
+                          onSecretChange={(v) => {
+                            if (v) {
+                              setOption('keySecret', v)
+                              setOption('keyPath', undefined)
+                              setProfileKeyText('')
+                              setProfileKeyFingerprint(undefined)
+                              setProfileKeyTextError(undefined)
+                            } else {
+                              setOption('keySecret', undefined)
+                            }
                           }}
                           pathValue={keyPathValue()}
                           onPathChange={(v) => handleKeyPathChange(v || undefined)}
@@ -2439,7 +2276,45 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                 editing()?.options.user || editing()?.options.host || 'connection'
               }`}
               onClose={() => setProfilePasswordOpen(false)}
-              onSave={setProfilePasswordValue}
+              onSave={(password) => {
+                // Mint-and-bind at the action moment (ADR-0017): the secret is
+                // stored and bound when the user presses OK, not when the
+                // profile is saved. The editor closes immediately; the mint
+                // continues in the background.
+                const current = profile()
+                const generatedName = secretNameFor(
+                  'password',
+                  loginLabel(current.options.user, current.options.host),
+                )
+                const savePw = () => props.client.savePassword(password, generatedName)
+                let row: { row: string } | null = null
+                const run = async () => {
+                  row = await savePw()
+                }
+                const bind = () => {
+                  if (!row) return
+                  const updated = {
+                    ...current,
+                    options: { ...current.options, passwordSecret: row.row },
+                  }
+                  setEditing(updated)
+                  setDirtyFields((prev) => new Set(prev).add('passwordSecret'))
+                  setProfilePasswordValue('')
+                }
+                const fail = (err: unknown) => {
+                  if (err instanceof VaultOperationCancelledError) return
+                  const message = (err as Error).message
+                  log.error('Failed to save password', { message })
+                  showToast({ level: 'danger', message: `Could not save the password: ${message}` })
+                }
+                if (props.vaultController) {
+                  void props.vaultController
+                    .saveSecretWithVault(run, 'save this password')
+                    .then(bind, fail)
+                } else {
+                  void run().then(bind, fail)
+                }
+              }}
             />
           </Dialog>
         )}
@@ -2578,8 +2453,8 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                 {preview().profilesToImport === 1 ? 'profile' : 'profiles'},{' '}
                 <strong>{preview().groupsToImport}</strong>{' '}
                 {preview().groupsToImport === 1 ? 'group' : 'groups'}, and{' '}
-                <strong>{preview().credentialsToImport}</strong>{' '}
-                {preview().credentialsToImport === 1 ? 'credential' : 'credentials'}.
+                <strong>{preview().secretsToImport}</strong>{' '}
+                {preview().secretsToImport === 1 ? 'secret' : 'secrets'}.
               </p>
 
               <Show when={preview().profileEntries && preview().profileEntries!.length > 0}>
@@ -2607,11 +2482,11 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                 <For each={preview().groupNames || []}>{(name) => <p>{name}</p>}</For>
               </Show>
 
-              <Show when={preview().credentialEntries && preview().credentialEntries!.length > 0}>
+              <Show when={preview().secretEntries && preview().secretEntries!.length > 0}>
                 <p>
-                  <strong>Credentials</strong>
+                  <strong>Secrets</strong>
                 </p>
-                <For each={preview().credentialEntries || []}>
+                <For each={preview().secretEntries || []}>
                   {(entry) => (
                     <p>
                       {entry.name} ({entry.type})
@@ -2781,12 +2656,13 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           <KeyPassphrasePrompt
             open
             keyName={ask().keyName}
-            credentialId={ask().credentialId}
+            keyRow={ask().keyRow}
+            passphraseName={ask().passphraseName}
             client={props.client}
-            onResult={(outcome) => {
+            onResult={(outcome, row) => {
               const resolve = ask().resolve
               setPassphraseAsk(null)
-              resolve(outcome)
+              resolve(outcome === 'saved' ? { saved: true, row } : { saved: false })
             }}
           />
         )}

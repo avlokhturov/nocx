@@ -3,7 +3,7 @@
  * Behavior tests for ConnectionsView — the user-facing list of SSH profiles.
  *
  * These tests cover what a user would notice breaking: filtering, live state,
- * probe (Test) outcome display, credential navigation, the dialog editor, and
+ * probe (Test) outcome display, bound-secret display, the dialog editor, and
  * group-tree rendering. Internal refactors (save route, field revert, form
  * validation) are tested in connections.test.tsx.
  */
@@ -13,14 +13,13 @@ import { cleanup, render, fireEvent } from '@solidjs/testing-library'
 import { ConnectionsView } from './connections'
 import { ProfileClient } from './profiles'
 import { createVaultState, UnlockDialog, type VaultController } from './vault'
-import type { VaultClient } from './vault-client'
+import type { VaultClient, InventoryEntry } from './vault-client'
 import type { DialogClient } from './dialog-client'
 import { Dispatcher, RpcError } from './dispatcher'
 import { clearToasts, toasts } from './ui'
 import type {
   SSHProfile,
   ProfileGroup,
-  Credential,
   EffectiveProfileDTO,
   SessionStatus,
   ConnectionTestResult,
@@ -78,21 +77,32 @@ const MOCK_PROFILES: SSHProfile[] = [
 
 const MOCK_GROUPS: ProfileGroup[] = [{ id: 'group:prod', name: 'Production' }]
 
-const MOCK_CREDENTIALS: Credential[] = [
+const MOCK_SECRET_ROWS: InventoryEntry[] = [
   {
-    id: 'cred:prod-key',
-    name: 'prod-key',
-    username: 'deploy',
-    auth: 'publicKey',
-    keyPath: '/home/user/.ssh/id_rsa',
+    id: 'secrow:prod-key',
+    name: 'Key for prod-web',
+    kind: 'private-key',
+    provider: 'test',
+    ownerId: '',
+    usedBy: 0,
+    reachable: true,
+  },
+  {
+    id: 'secrow:prod-pass',
+    name: 'Password for prod-web',
+    kind: 'password',
+    provider: 'test',
+    ownerId: '',
+    usedBy: 0,
+    reachable: true,
   },
 ]
 
 const MOCK_EFFECTIVE_CRED: EffectiveProfileDTO = {
   id: 'ssh:p1',
   fields: {
-    credentialId: {
-      value: 'cred:prod-key',
+    passwordSecret: {
+      value: 'secrow:prod-pass',
       source: { kind: 'profile', id: 'ssh:p1', label: 'prod-web' },
     },
   },
@@ -109,7 +119,7 @@ const MOCK_SESSION_STATUSES: Record<string, SessionStatus> = {
 function createMockClient(overrides?: {
   profiles?: SSHProfile[]
   groups?: ProfileGroup[]
-  credentials?: Credential[]
+  secretRows?: InventoryEntry[]
   sessionStatuses?: Record<string, SessionStatus>
   effectiveProfiles?: EffectiveProfileDTO[]
   connectionTestResult?: ConnectionTestResult
@@ -118,10 +128,8 @@ function createMockClient(overrides?: {
 
   vi.spyOn(pc, 'listProfiles').mockResolvedValue(overrides?.profiles ?? [])
   vi.spyOn(pc, 'listGroups').mockResolvedValue(overrides?.groups ?? [])
-  vi.spyOn(pc, 'listCredentials').mockResolvedValue(overrides?.credentials ?? [])
   vi.spyOn(pc, 'sessionStatus').mockResolvedValue({ statuses: overrides?.sessionStatuses ?? {} })
   vi.spyOn(pc, 'loadEffective').mockResolvedValue({ profiles: overrides?.effectiveProfiles ?? [] })
-  vi.spyOn(pc, 'credentialUsage').mockResolvedValue({ usage: [] })
   const connectionTest = vi
     .spyOn(pc, 'connectionTest')
     .mockResolvedValue(overrides?.connectionTestResult ?? { outcome: 'accepted' })
@@ -132,7 +140,7 @@ function createMockClient(overrides?: {
 function mount(
   overrides?: Parameters<typeof createMockClient>[0] & {
     onConnect?: () => void
-    onNavigateToCredentials?: () => void
+    onNavigateToSecrets?: () => void
     openFileDialog?: () => Promise<{ path: string }>
     /** Vault controller wired like main.tsx wires it, with the dialog shown
      *  beside the surface. Absent → ConnectionsView runs without a vault. */
@@ -142,7 +150,11 @@ function mount(
 ) {
   const { client, connectionTest, trustHostKey } = createMockClient(overrides)
   const vaultController = overrides?.vaultController
-  const vaultClient = overrides?.vaultClient
+  const vaultClient =
+    overrides?.vaultClient ??
+    ({
+      inventory: () => ({ entries: overrides?.secretRows ?? [] }),
+    } as unknown as VaultClient)
   const dialogClient = overrides?.openFileDialog
     ? ({ openFileDialog: overrides.openFileDialog } as unknown as DialogClient)
     : undefined
@@ -154,15 +166,16 @@ function mount(
           client={client}
           dialogClient={dialogClient}
           vaultController={vaultController}
+          vaultClient={vaultClient}
           onConnect={overrides?.onConnect}
-          onNavigateToCredentials={overrides?.onNavigateToCredentials}
+          onNavigateToSecrets={overrides?.onNavigateToSecrets}
         />
         <Show when={vaultController && vaultClient}>
           <UnlockDialog
             open={vaultController!.showUnlock()}
             onClose={() => vaultController!.closeUnlock()}
             onUnsealed={() => vaultController!.onUnsealDone()}
-            vaultClient={vaultClient!}
+            vaultClient={vaultClient}
             vaultStatus={vaultController!.status()}
             reason={vaultController!.unlockReason()}
           />
@@ -471,31 +484,42 @@ describe('host key accept', () => {
   })
 })
 
-// ── Credential link navigates ────────────────────────────────────────
+// ── The bound secret is visible before Connect is pressed (b5bu) ────────
 
-describe('credential link', () => {
-  it('clicking a credential link calls onNavigateToCredentials', async () => {
-    const onNavigateToCredentials = vi.fn()
+describe('bound password secret', () => {
+  it('shows the bound secret under the Password method in the editor', async () => {
+    const PROFILE_WITH_PASSWORD_SECRET: SSHProfile = {
+      ...MOCK_PROFILES[0],
+      options: {
+        ...MOCK_PROFILES[0].options,
+        auth: 'password',
+        passwordSecret: 'secrow:prod-pass',
+      },
+    }
     const { container } = mount({
-      profiles: MOCK_PROFILES.slice(0, 1),
-      credentials: MOCK_CREDENTIALS,
-      effectiveProfiles: [MOCK_EFFECTIVE_CRED],
-      onNavigateToCredentials,
+      profiles: [PROFILE_WITH_PASSWORD_SECRET],
+      secretRows: MOCK_SECRET_ROWS,
     })
 
     await waitForProfiles(container, 1)
+    await openProfileEditor(container, 'prod-web')
+    selectProfileSection(container, 'Authentication')
 
+    // The Password action names the bound row, and the picker holds it as
+    // the current value — an empty credential is visible before Connect is
+    // pressed, not remembered by the user.
     await vi.waitFor(() => {
-      const link = container.querySelector('[aria-label="Open credentials for prod-key"]')
-      expect(link, 'Credential link not found').toBeTruthy()
+      expect(container.textContent).toContain('Password: Password for prod-web')
     })
-
-    const link = container.querySelector(
-      '[aria-label="Open credentials for prod-key"]',
-    ) as HTMLElement
-    fireEvent.click(link)
-
-    expect(onNavigateToCredentials).toHaveBeenCalledTimes(1)
+    const changeBtn = Array.from(container.querySelectorAll('.ui-button')).find(
+      (b) => b.textContent?.trim() === 'Change Password',
+    )
+    expect(changeBtn, 'Change Password not found').toBeTruthy()
+    const picker = container
+      .querySelector('label[for="profile-auth-secret"]')!
+      .closest('.ui-field')!
+      .querySelector('.ui-select') as HTMLSelectElement
+    expect(picker.value).toBe('secrow:prod-pass')
   })
 })
 
@@ -582,13 +606,63 @@ describe('quick connect', () => {
   })
 })
 
-// ── Inline credential creation from connection form ──────────────────────
+// ── Inline secret minting from the connection form (ADR-0017) ─────────────
 
-describe('inline credential creation', () => {
-  // ADR-0016: "+ New Credential" left the connection editor. Selecting an
-  // existing credential stays; creating one by hand is gone — the secret owns
-  // its name, so a secret created from a password save is named by the
-  // connection (user@host), not built in a form.
+describe('inline password minting', () => {
+  // Setting a password mints the secret at the action moment and binds the
+  // returned row to the profile. There is no credential object to create or
+  // name: the secret owns its name, and the profile saves with
+  // options.passwordSecret holding the minted row (ADR-0017 §1).
+  it('Set Password mints the secret and binds its row to the profile', async () => {
+    const { container, client } = mount({
+      profiles: MOCK_PROFILES.slice(0, 1),
+      secretRows: [{ ...MOCK_SECRET_ROWS[1], id: 'secrow:pass-1' }],
+    })
+    const savePasswordSpy = vi.spyOn(client, 'savePassword').mockResolvedValue({
+      row: 'secrow:pass-1',
+    })
+    const patchSpy = vi.spyOn(client, 'patchProfile').mockResolvedValue(MOCK_EFFECTIVE_CRED)
+
+    await waitForProfiles(container, 1)
+    await openProfileEditor(container, 'prod-web')
+    selectProfileSection(container, 'Authentication')
+    clickSegmentedOption(container, 'Password')
+
+    clickButtonByText(container, 'Set Password')
+    await vi.waitFor(() => expect(container.querySelector('#password-value')).toBeTruthy())
+    fireEvent.input(container.querySelector('#password-value')!, {
+      target: { value: 'hunter2' },
+    })
+    clickButtonByText(container, 'OK')
+
+    // The mint carries the generated name — what the secret is, plus whose
+    // login it is (ADR-0016).
+    await vi.waitFor(() => {
+      expect(savePasswordSpy).toHaveBeenCalledWith('hunter2', 'Password for deploy@web.example.com')
+    })
+
+    // The minted row is bound on the draft before the profile save is
+    // pressed: the Password action now names the bound secret.
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain('Password: Password for prod-web')
+    })
+
+    // Saving the profile now persists the binding.
+    const dialog = findDialogByTitleContaining(container, 'prod-web')!
+    const saveBtn = Array.from(dialog.querySelectorAll('.ui-button')).find(
+      (b) => b.textContent?.trim() === 'Save Connection',
+    )
+    expect(saveBtn, 'Save Connection button not found').toBeTruthy()
+    fireEvent.click(saveBtn!)
+
+    await vi.waitFor(() => {
+      expect(patchSpy).toHaveBeenCalled()
+    })
+    expect(patchSpy.mock.calls[0][0].set).toMatchObject({
+      'options.passwordSecret': 'secrow:pass-1',
+    })
+  })
+
   it('the connection editor no longer offers to create a credential by hand', async () => {
     const { container } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
 
@@ -604,7 +678,7 @@ describe('inline credential creation', () => {
     })
 
     // The "+" button beside the credential select is gone — the only way to
-    // get a credential here is to select one that already exists.
+    // authenticate with an existing secret is to pick a vault row.
     const plusBtn = container.querySelector('[aria-label="New credential"]')
     expect(plusBtn).toBeNull()
     // And no credential creation form is reachable from the editor.
@@ -620,7 +694,7 @@ const IMPACT_DANGEROUS: GroupImpactResponse = {
     {
       profileId: 'ssh:p2',
       profileName: 'prod-db',
-      diffs: [{ field: 'credentialId', oldValue: null, newValue: 'cred:new', dangerous: true }],
+      diffs: [{ field: 'passwordSecret', oldValue: null, newValue: 'secrow:new', dangerous: true }],
     },
   ],
 }
@@ -733,10 +807,10 @@ function clickSegmentedOption(container: HTMLElement, label: string) {
   ;(option! as HTMLElement).click()
 }
 
-// ── Three-way key input: connection editor ──────────────────────────────
+// ── Four-way key input: connection editor ───────────────────────────────
 
-describe('three-way key input — connection editor', () => {
-  it('shows three modes (Path, Choose file, Paste key) for publicKey auth', async () => {
+describe('four-way key input — connection editor', () => {
+  it('shows four modes (Path, Choose file, Paste key, Secret) for publicKey auth', async () => {
     const { container } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
     await waitForProfiles(container, 1)
 
@@ -752,15 +826,16 @@ describe('three-way key input — connection editor', () => {
       expect(container.querySelector('#profile-key-path')).toBeTruthy()
     })
 
-    // The SegmentedControl should have all three options
+    // The SegmentedControl should have all four options
     const segments = container.querySelectorAll('[role="radio"]')
     const keySegments = Array.from(segments).filter(
       (s) =>
         s.textContent?.trim() === 'Path' ||
         s.textContent?.trim() === 'Choose file' ||
-        s.textContent?.trim() === 'Paste key',
+        s.textContent?.trim() === 'Paste key' ||
+        s.textContent?.trim() === 'Secret',
     )
-    expect(keySegments.length).toBe(3)
+    expect(keySegments.length).toBe(4)
   })
 
   // The editor used to open on Path, which is the one mode that asks the user
@@ -824,16 +899,12 @@ describe('three-way key input — connection editor', () => {
   // asked what the mode actually produced.
   it('choose-file mode stores the file contents as key material, not its name', async () => {
     const { container, client } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
-    const saveKeyMatSpy = vi
-      .spyOn(client, 'saveKeyMaterial')
-      .mockResolvedValue({ fingerprint: 'SHA256:abc123', passphraseWanted: false })
-    const updateSpy = vi.spyOn(client, 'updateProfile')
-    vi.spyOn(client, 'createCredential').mockResolvedValue({
-      id: 'cred:keymat',
-      name: 'prod-web',
-      username: 'deploy',
-      auth: 'publicKey',
+    const saveKeyMatSpy = vi.spyOn(client, 'saveKeyMaterial').mockResolvedValue({
+      row: 'secrow:key-file',
+      fingerprint: 'SHA256:abc123',
+      passphraseWanted: false,
     })
+    const patchSpy = vi.spyOn(client, 'patchProfile').mockResolvedValue(MOCK_EFFECTIVE_CRED)
 
     await waitForProfiles(container, 1)
     await openProfileEditor(container, 'prod-web')
@@ -864,24 +935,28 @@ describe('three-way key input — connection editor', () => {
       expect(saveKeyMatSpy).toHaveBeenCalled()
     })
     // The CONTENTS reached the vault.
-    expect(saveKeyMatSpy.mock.calls[0][1]).toBe(KEY)
-    // And no filename was recorded as a key path.
-    for (const call of updateSpy.mock.calls) {
+    expect(saveKeyMatSpy.mock.calls[0][0]).toBe(KEY)
+    // The minted row is bound on the profile — and no filename is anywhere
+    // on the wire.
+    await vi.waitFor(() => {
+      expect(patchSpy).toHaveBeenCalled()
+    })
+    expect(patchSpy.mock.calls[0][0].set).toMatchObject({
+      'options.keySecret': 'secrow:key-file',
+    })
+    for (const call of patchSpy.mock.calls) {
       expect(JSON.stringify(call)).not.toContain('id_ed25519')
     }
   })
 
   it('material mode calls saveKeyMaterial and records no path', async () => {
     const { container, client } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
-    const saveKeyMatSpy = vi
-      .spyOn(client, 'saveKeyMaterial')
-      .mockResolvedValue({ fingerprint: 'SHA256:abc123', passphraseWanted: false })
-    vi.spyOn(client, 'createCredential').mockResolvedValue({
-      id: 'cred:keymat',
-      name: 'prod-web',
-      username: 'deploy',
-      auth: 'publicKey',
+    const saveKeyMatSpy = vi.spyOn(client, 'saveKeyMaterial').mockResolvedValue({
+      row: 'secrow:key-mat',
+      fingerprint: 'SHA256:abc123',
+      passphraseWanted: false,
     })
+    const patchSpy = vi.spyOn(client, 'patchProfile').mockResolvedValue(MOCK_EFFECTIVE_CRED)
 
     await waitForProfiles(container, 1)
     await openProfileEditor(container, 'prod-web')
@@ -913,12 +988,19 @@ describe('three-way key input — connection editor', () => {
       expect(saveKeyMatSpy).toHaveBeenCalled()
     })
 
-    // NOTE: the "and no path is recorded" half of the criterion is not asserted here.
-    // With a credential selected the path input is not rendered, so there is nothing to
-    // query; proving it needs the credential's stored KeyPath, which this test does not
-    // have access to. Filed rather than faked.
+    // And no path is recorded: the profile binds the minted row instead —
+    // the half of the criterion that used to be unassertable with a
+    // credential in the way.
+    await vi.waitFor(() => {
+      expect(patchSpy).toHaveBeenCalled()
+    })
+    expect(patchSpy.mock.calls[0][0].set).toMatchObject({
+      'options.keySecret': 'secrow:key-mat',
+    })
+    for (const call of patchSpy.mock.calls) {
+      expect(JSON.stringify(call)).not.toContain('keyPath')
+    }
     expect(saveKeyMatSpy).toHaveBeenCalledWith(
-      expect.any(String),
       expect.stringContaining('BEGIN PRIVATE KEY'),
       // ADR-0016: the secret owns its name — the save carries the generated
       // name, which says WHAT the secret is as well as whose login it is. A
@@ -962,14 +1044,9 @@ describe('three-way key input — connection editor', () => {
   it('asks for the key passphrase when saveKeyMaterial reports passphraseWanted', async () => {
     const { container, client } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
     vi.spyOn(client, 'saveKeyMaterial').mockResolvedValue({
+      row: 'secrow:key-enc',
       fingerprint: 'SHA256:enc123',
       passphraseWanted: true,
-    })
-    vi.spyOn(client, 'createCredential').mockResolvedValue({
-      id: 'cred:enc',
-      name: 'prod-web',
-      username: 'deploy',
-      auth: 'publicKey',
     })
 
     await openKeyPassphrasePrompt(container)
@@ -979,23 +1056,21 @@ describe('three-way key input — connection editor', () => {
     expect(container.querySelector('.ui-prompt__title')?.textContent).toBe(
       'Passphrase for deploy@web.example.com',
     )
+
     expect(container.querySelector('.ui-prompt__body')?.textContent).toContain('Key passphrase')
   })
 
   it('stores a verified passphrase and continues the save', async () => {
     const { container, client } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
-    const savePassphraseSpy = vi.spyOn(client, 'saveKeyPassphrase').mockResolvedValue(true)
+    const savePassphraseSpy = vi
+      .spyOn(client, 'saveKeyPassphrase')
+      .mockResolvedValue({ row: 'secrow:pass-enc' })
     vi.spyOn(client, 'saveKeyMaterial').mockResolvedValue({
+      row: 'secrow:key-enc',
       fingerprint: 'SHA256:enc123',
       passphraseWanted: true,
     })
-    vi.spyOn(client, 'createCredential').mockResolvedValue({
-      id: 'cred:enc',
-      name: 'prod-web',
-      username: 'deploy',
-      auth: 'publicKey',
-    })
-    const patchSpy = vi.spyOn(client, 'patchProfile')
+    const patchSpy = vi.spyOn(client, 'patchProfile').mockResolvedValue(MOCK_EFFECTIVE_CRED)
 
     await openKeyPassphrasePrompt(container)
 
@@ -1009,14 +1084,18 @@ describe('three-way key input — connection editor', () => {
 
     await vi.waitFor(() => {
       expect(savePassphraseSpy).toHaveBeenCalledWith(
-        'cred:enc',
+        'secrow:key-enc',
         'correct-horse',
-        expect.any(String),
+        'Passphrase for deploy@web.example.com',
       )
     })
-    // The save the prompt interrupted continues.
+    // The save the prompt interrupted continues — with both minted rows bound.
     await vi.waitFor(() => {
       expect(patchSpy).toHaveBeenCalled()
+    })
+    expect(patchSpy.mock.calls[0][0].set).toMatchObject({
+      'options.keySecret': 'secrow:key-enc',
+      'options.keyPassphraseSecret': 'secrow:pass-enc',
     })
   })
 
@@ -1028,16 +1107,11 @@ describe('three-way key input — connection editor', () => {
       }),
     )
     vi.spyOn(client, 'saveKeyMaterial').mockResolvedValue({
+      row: 'secrow:key-enc',
       fingerprint: 'SHA256:enc123',
       passphraseWanted: true,
     })
-    vi.spyOn(client, 'createCredential').mockResolvedValue({
-      id: 'cred:enc',
-      name: 'prod-web',
-      username: 'deploy',
-      auth: 'publicKey',
-    })
-    const patchSpy = vi.spyOn(client, 'patchProfile')
+    const patchSpy = vi.spyOn(client, 'patchProfile').mockResolvedValue(MOCK_EFFECTIVE_CRED)
 
     await openKeyPassphrasePrompt(container)
 
@@ -1064,16 +1138,11 @@ describe('three-way key input — connection editor', () => {
     const { container, client } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
     const savePassphraseSpy = vi.spyOn(client, 'saveKeyPassphrase')
     vi.spyOn(client, 'saveKeyMaterial').mockResolvedValue({
+      row: 'secrow:key-enc',
       fingerprint: 'SHA256:enc123',
       passphraseWanted: true,
     })
-    vi.spyOn(client, 'createCredential').mockResolvedValue({
-      id: 'cred:enc',
-      name: 'prod-web',
-      username: 'deploy',
-      auth: 'publicKey',
-    })
-    const patchSpy = vi.spyOn(client, 'patchProfile')
+    const patchSpy = vi.spyOn(client, 'patchProfile').mockResolvedValue(MOCK_EFFECTIVE_CRED)
 
     await openKeyPassphrasePrompt(container)
 
@@ -1117,116 +1186,82 @@ describe('three-way key input — connection editor', () => {
     expect(container.querySelector('#profile-key-path')).toBeTruthy()
   })
 
-  it('shows fingerprint for credential with hasKeyMaterial', async () => {
-    const CRED_WITH_KEYMAT: Credential = {
-      id: 'cred:kmat',
-      name: 'key-cred',
-      username: 'deploy',
-      auth: 'publicKey',
-      hasKeyMaterial: true,
-      keyFingerprint: 'SHA256:testfingerprint123',
-    }
-    const PROFILE_WITH_KEYMAT: SSHProfile = {
+  it('shows the bound key secret as the current value of the Secret picker', async () => {
+    const PROFILE_WITH_KEY_SECRET: SSHProfile = {
       ...MOCK_PROFILES[0],
       options: {
         ...MOCK_PROFILES[0].options,
-        credentialId: 'cred:kmat',
+        auth: 'publicKey',
+        keySecret: 'secrow:kmat',
       },
     }
     const { container } = mount({
-      profiles: [PROFILE_WITH_KEYMAT],
-      credentials: [CRED_WITH_KEYMAT],
+      profiles: [PROFILE_WITH_KEY_SECRET],
+      secretRows: [{ ...MOCK_SECRET_ROWS[0], id: 'secrow:kmat' }],
     })
     await waitForProfiles(container, 1)
     await openProfileEditor(container, 'prod-web')
     selectProfileSection(container, 'Authentication')
 
+    // The bound row is the picker's current value — visible before Connect
+    // is pressed, not an empty credential the user must remember (b5bu).
+    clickSegmentedOption(container, 'Secret')
     await vi.waitFor(() => {
-      const fp = container.querySelector('.cm-key-fingerprint')
-      expect(fp, 'Key fingerprint not shown').toBeTruthy()
-      expect(fp!.textContent).toContain('testfingerprint123')
+      const picker = container
+        .querySelector('label[for="profile-key-secret"]')!
+        .closest('.ui-field')!
+        .querySelector('.ui-select') as HTMLSelectElement
+      expect(picker, 'Secret picker not found').toBeTruthy()
+      expect(picker.value).toBe('secrow:kmat')
     })
   })
-  it('shows editable credential fields when credential selected', async () => {
-    const cred: Credential = {
-      id: 'cred:edit-test',
-      name: 'my-cred',
-      username: 'admin',
-      auth: 'password',
-    }
-    const PROFILE_WITH_CRED: SSHProfile = {
-      ...MOCK_PROFILES[0],
-      options: { ...MOCK_PROFILES[0].options, credentialId: 'cred:edit-test' },
-    }
-    const { container } = mount({ profiles: [PROFILE_WITH_CRED], credentials: [cred] })
-    await waitForProfiles(container, 1)
-    await openProfileEditor(container, 'prod-web')
-    selectProfileSection(container, 'Authentication')
-
-    await vi.waitFor(() => {
-      expect(container.querySelector('#profile-auth-cred-name')).toBeTruthy()
-      expect(container.querySelector('#profile-auth-cred-user')).toBeTruthy()
+  it('selecting a row in the secret picker binds it on save', async () => {
+    const { container, client } = mount({
+      profiles: MOCK_PROFILES.slice(0, 1),
+      secretRows: MOCK_SECRET_ROWS,
     })
-    const nameField = container.querySelector('#profile-auth-cred-name') as HTMLInputElement
-    expect(nameField.value).toBe('my-cred')
-    const userField = container.querySelector('#profile-auth-cred-user') as HTMLInputElement
-    expect(userField.value).toBe('admin')
-  })
-
-  it('saves credential draft changes via updateCredential', async () => {
-    const cred: Credential = {
-      id: 'cred:update-test',
-      name: 'old-name',
-      username: 'admin',
-      auth: 'password',
-    }
-    const PROFILE_WITH_CRED: SSHProfile = {
-      ...MOCK_PROFILES[0],
-      options: { ...MOCK_PROFILES[0].options, credentialId: 'cred:update-test' },
-    }
-    const { container, client } = mount({ profiles: [PROFILE_WITH_CRED], credentials: [cred] })
-    const updateSpy = vi.spyOn(client, 'updateCredential').mockResolvedValue(cred)
-    vi.spyOn(client, 'patchProfile').mockResolvedValue(MOCK_EFFECTIVE_CRED)
+    const patchSpy = vi.spyOn(client, 'patchProfile').mockResolvedValue(MOCK_EFFECTIVE_CRED)
 
     await waitForProfiles(container, 1)
     await openProfileEditor(container, 'prod-web')
     selectProfileSection(container, 'Authentication')
+    clickSegmentedOption(container, 'Password')
+    // The password source is a two-way choice now (ADR-0017 §1): type a new
+    // one, or pick an existing secret. Pick the existing-secret side.
+    clickSegmentedOption(container, 'Use existing secret')
+
+    // Pick an existing password row.
+    const picker = await vi.waitFor(() => {
+      const el = container
+        .querySelector('label[for="profile-auth-secret"]')!
+        .closest('.ui-field')!
+        .querySelector('.ui-select') as HTMLSelectElement
+      expect(el, 'password picker not found').toBeTruthy()
+      return el
+    })
+    fireEvent.change(picker, { target: { value: 'secrow:prod-pass' } })
+
+    const dialog = findDialogByTitleContaining(container, 'prod-web')!
+    const saveBtn = Array.from(dialog.querySelectorAll('.ui-button')).find(
+      (b) => b.textContent?.trim() === 'Save Connection',
+    )
+    expect(saveBtn, 'Save Connection button not found').toBeTruthy()
+    fireEvent.click(saveBtn!)
 
     await vi.waitFor(() => {
-      expect(container.querySelector('#profile-auth-cred-name')).toBeTruthy()
+      expect(patchSpy).toHaveBeenCalledTimes(1)
     })
-    const nameField = container.querySelector('#profile-auth-cred-name') as HTMLInputElement
-    expect(nameField).toBeTruthy()
-    fireEvent.input(nameField, { target: { value: 'new-name' } })
-
-    // Find "Save Connection" and click it
-    const saveBtn = await vi.waitFor(() => {
-      const btn = Array.from(container.querySelectorAll('.ui-button')).find(
-        (b) => b.textContent?.trim() === 'Save Connection',
-      )
-      expect(btn, 'Save Connection button not found').toBeTruthy()
-      return btn!
-    })
-    fireEvent.click(saveBtn)
-
-    await vi.waitFor(() => {
-      expect(updateSpy).toHaveBeenCalledTimes(1)
-      expect(updateSpy).toHaveBeenCalledWith(
-        expect.objectContaining({ id: 'cred:update-test', name: 'new-name' }),
-      )
+    expect(patchSpy.mock.calls[0][0].set).toMatchObject({
+      'options.passwordSecret': 'secrow:prod-pass',
     })
   })
 
   it('preserves newlines in pasted key text on save', async () => {
     const { container, client } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
-    const saveKeyMatSpy = vi
-      .spyOn(client, 'saveKeyMaterial')
-      .mockResolvedValue({ fingerprint: 'SHA256:newline-test', passphraseWanted: false })
-    vi.spyOn(client, 'createCredential').mockResolvedValue({
-      id: 'cred:nl',
-      name: 'prod-web',
-      username: 'deploy',
-      auth: 'publicKey',
+    const saveKeyMatSpy = vi.spyOn(client, 'saveKeyMaterial').mockResolvedValue({
+      row: 'secrow:key-nl',
+      fingerprint: 'SHA256:newline-test',
+      passphraseWanted: false,
     })
 
     await waitForProfiles(container, 1)
@@ -1261,7 +1296,7 @@ describe('three-way key input — connection editor', () => {
       expect(saveKeyMatSpy).toHaveBeenCalled()
     })
 
-    const capturedArg = saveKeyMatSpy.mock.calls[0][1]
+    const capturedArg = saveKeyMatSpy.mock.calls[0][0]
     const capturedNewlineCount = (capturedArg.match(/\n/g) || []).length
     expect(capturedNewlineCount).toBe(originalNewlineCount)
     expect(capturedNewlineCount).toBeGreaterThan(0)
@@ -1272,8 +1307,8 @@ describe('three-way key input — connection editor', () => {
 
 // ── Three-way key input: group editor ──────────────────────────────────
 
-describe('three-way key input — group editor', () => {
-  it('shows three modes for publicKey in group defaults', async () => {
+describe('four-way key input — group editor', () => {
+  it('shows four modes for publicKey in group defaults', async () => {
     const { container } = mount({ profiles: MOCK_PROFILES, groups: MOCK_GROUPS })
     await waitForProfiles(container, 3)
 
@@ -1299,15 +1334,16 @@ describe('three-way key input — group editor', () => {
       expect(container.querySelector('#group-default-key-path')).toBeTruthy()
     })
 
-    // The SegmentedControl should have three key input options
+    // The SegmentedControl should have all four key input options
     const segments = container.querySelectorAll('[role="radio"]')
     const keySegments = Array.from(segments).filter(
       (s) =>
         s.textContent?.trim() === 'Path' ||
         s.textContent?.trim() === 'Choose file' ||
-        s.textContent?.trim() === 'Paste key',
+        s.textContent?.trim() === 'Paste key' ||
+        s.textContent?.trim() === 'Secret',
     )
-    expect(keySegments.length).toBe(3)
+    expect(keySegments.length).toBe(4)
   })
 
   it('path mode records a path in group defaults', async () => {
@@ -1383,14 +1419,10 @@ describe('three-way key input — group editor', () => {
 
   it('preserves newlines in pasted key text on group save', async () => {
     const { container, client } = mount({ profiles: MOCK_PROFILES, groups: MOCK_GROUPS })
-    const saveKeyMatSpy = vi
-      .spyOn(client, 'saveKeyMaterial')
-      .mockResolvedValue({ fingerprint: 'SHA256:group-newline', passphraseWanted: false })
-    vi.spyOn(client, 'createCredential').mockResolvedValue({
-      id: 'cred:grp-nl',
-      name: 'Production',
-      username: 'deploy',
-      auth: 'publicKey',
+    const saveKeyMatSpy = vi.spyOn(client, 'saveKeyMaterial').mockResolvedValue({
+      row: 'secrow:grp-nl',
+      fingerprint: 'SHA256:group-newline',
+      passphraseWanted: false,
     })
     vi.spyOn(client, 'groupApply').mockResolvedValue([])
     vi.spyOn(client, 'groupImpact').mockResolvedValue(IMPACT_COSMETIC)
@@ -1426,7 +1458,7 @@ describe('three-way key input — group editor', () => {
       expect(saveKeyMatSpy).toHaveBeenCalled()
     })
 
-    const capturedArg = saveKeyMatSpy.mock.calls[0][1]
+    const capturedArg = saveKeyMatSpy.mock.calls[0][0]
     const capturedNewlineCount = (capturedArg.match(/\n/g) || []).length
     expect(capturedNewlineCount).toBe(originalNewlineCount)
     expect(capturedNewlineCount).toBeGreaterThan(0)
@@ -1755,11 +1787,9 @@ describe('profile move preview', () => {
 })
 
 // ── Vault prompt cancellation abandons the save ─────────────────────────
-// Creating the profile and saving the secret are two steps, and cancelling
-// the second used to leave the first done: the connection was created
-// claiming an auth method whose secret was never stored. Cancelling the
-// prompt must abandon the operation the user started — no profile created,
-// no credential left behind, editor open with their input intact.
+// Minting the secret and saving the profile are two steps, and cancelling
+// the vault prompt must abandon the operation the user started — no profile
+// created, nothing stored, editor open with their input intact.
 
 function sealedVaultClient() {
   const status = vi.fn().mockResolvedValue({
@@ -1779,6 +1809,7 @@ function sealedVaultClient() {
   const setDefaultProvider = vi.fn().mockResolvedValue({})
   const setAutoSeal = vi.fn().mockResolvedValue({})
   const activity = vi.fn().mockResolvedValue({})
+  const inventory = vi.fn().mockResolvedValue({ entries: [] })
   const vaultClient = {
     status,
     unseal,
@@ -1789,6 +1820,7 @@ function sealedVaultClient() {
     setDefaultProvider,
     setAutoSeal,
     activity,
+    inventory,
   } as unknown as VaultClient
   const vaultController = createVaultState(vaultClient)
   return { vaultClient, vaultController }
@@ -1811,16 +1843,9 @@ describe('vault prompt cancellation', () => {
     const { container, client } = mount({ profiles: [], vaultController, vaultClient })
 
     const createProfileSpy = vi.spyOn(client, 'createProfile')
-    const createCredentialSpy = vi.spyOn(client, 'createCredential').mockResolvedValue({
-      id: 'cred:new-1',
-      name: 'web.example.com',
-      username: '',
-      auth: 'password',
-    })
-    const deleteCredentialSpy = vi.spyOn(client, 'deleteCredential').mockResolvedValue(true)
-    vi.spyOn(client, 'savePassword').mockRejectedValue(
-      new RpcError('vault error', -32000, { reason: 'vault-sealed' }),
-    )
+    const savePasswordSpy = vi
+      .spyOn(client, 'savePassword')
+      .mockRejectedValue(new RpcError('vault error', -32000, { reason: 'vault-sealed' }))
 
     await waitForProfiles(container, 0)
 
@@ -1837,17 +1862,16 @@ describe('vault prompt cancellation', () => {
     selectProfileSection(container, 'Authentication')
     clickSegmentedOption(container, 'Password')
     clickButtonByText(container, 'Set Password')
-    await vi.waitFor(() => expect(container.querySelector('#credential-password')).toBeTruthy())
-    fireEvent.input(container.querySelector('#credential-password')!, {
+    await vi.waitFor(() => expect(container.querySelector('#password-value')).toBeTruthy())
+    fireEvent.input(container.querySelector('#password-value')!, {
       target: { value: 'hunter2' },
     })
     clickButtonByText(container, 'OK')
 
-    // Create Connection → the vault asks to unlock
-    const editor = findDialogByTitleContaining(container, 'New Connection')!
-    clickButtonByText(container, 'Create Connection', editor)
+    // The mint is attempted at the action moment — the vault asks to unlock
+    // before any profile is created.
     await vi.waitFor(() => {
-      expect(createCredentialSpy).toHaveBeenCalled()
+      expect(savePasswordSpy).toHaveBeenCalled()
       expect(container.querySelector('.ui-prompt[data-placement="top-sheet"]')).toBeTruthy()
     })
 
@@ -1855,15 +1879,13 @@ describe('vault prompt cancellation', () => {
     const prompt = container.querySelector('.ui-prompt')!
     clickButtonByText(container, 'Cancel', prompt)
 
-    // The whole save is abandoned: no profile, credential cleaned up, editor
-    // still open with the password still staged.
-    await vi.waitFor(() => {
-      expect(deleteCredentialSpy).toHaveBeenCalledWith('cred:new-1')
-    })
+    // The whole save is abandoned: no profile created, nothing stored, editor
+    // still open.
     expect(createProfileSpy).not.toHaveBeenCalled()
-    expect(container.querySelector('.ui-prompt')).toBeNull()
+    await vi.waitFor(() => {
+      expect(container.querySelector('.ui-prompt')).toBeNull()
+    })
     expect(container.querySelector('#profile-host')).toBeTruthy()
-    expect(container.textContent).toContain('Password ready to save')
   })
 
   it('cancel on the unlock prompt abandons the group save', async () => {
@@ -1878,16 +1900,9 @@ describe('vault prompt cancellation', () => {
 
     const createGroupSpy = vi.spyOn(client, 'createGroup')
     const groupApplySpy = vi.spyOn(client, 'groupApply')
-    const createCredentialSpy = vi.spyOn(client, 'createCredential').mockResolvedValue({
-      id: 'cred:group-1',
-      name: 'Production',
-      username: '',
-      auth: 'publicKey',
-    })
-    const deleteCredentialSpy = vi.spyOn(client, 'deleteCredential').mockResolvedValue(true)
-    vi.spyOn(client, 'saveKeyMaterial').mockRejectedValue(
-      new RpcError('vault error', -32000, { reason: 'vault-sealed' }),
-    )
+    const saveKeyMaterialSpy = vi
+      .spyOn(client, 'saveKeyMaterial')
+      .mockRejectedValue(new RpcError('vault error', -32000, { reason: 'vault-sealed' }))
 
     await waitForProfiles(container, 3)
     await openGroupEditorByName(container, 'Production')
@@ -1902,19 +1917,18 @@ describe('vault prompt cancellation', () => {
     const groupEditor = findDialogByTitle(container, 'Edit Group: Production')!
     clickButtonByText(container, 'Save Group', groupEditor)
     await vi.waitFor(() => {
-      expect(createCredentialSpy).toHaveBeenCalled()
+      expect(saveKeyMaterialSpy).toHaveBeenCalled()
       expect(container.querySelector('.ui-prompt[data-placement="top-sheet"]')).toBeTruthy()
     })
 
     const prompt = container.querySelector('.ui-prompt')!
     clickButtonByText(container, 'Cancel', prompt)
 
-    await vi.waitFor(() => {
-      expect(deleteCredentialSpy).toHaveBeenCalledWith('cred:group-1')
-    })
     expect(createGroupSpy).not.toHaveBeenCalled()
     expect(groupApplySpy).not.toHaveBeenCalled()
-    expect(container.querySelector('.ui-prompt')).toBeNull()
+    await vi.waitFor(() => {
+      expect(container.querySelector('.ui-prompt')).toBeNull()
+    })
     expect(findDialogByTitle(container, 'Edit Group: Production')).toBeTruthy()
   })
 })
@@ -2016,19 +2030,17 @@ describe('eager validation', () => {
 describe('generated secret names', () => {
   it('names a key and its passphrase differently for one login', async () => {
     const { container, client } = mount({ profiles: [] })
-    const saveKeyMat = vi
-      .spyOn(client, 'saveKeyMaterial')
-      .mockResolvedValue({ fingerprint: 'SHA256:zz', passphraseWanted: true })
-    const savePassphrase = vi.spyOn(client, 'saveKeyPassphrase').mockResolvedValue(true)
-    vi.spyOn(client, 'createCredential').mockResolvedValue({
-      id: 'cred:named',
-      name: 'box',
-      username: 'root',
-      auth: 'publicKey',
+    const saveKeyMat = vi.spyOn(client, 'saveKeyMaterial').mockResolvedValue({
+      row: 'secrow:key-named',
+      fingerprint: 'SHA256:zz',
+      passphraseWanted: true,
     })
-    vi.spyOn(client, 'createProfile').mockImplementation((p) =>
-      Promise.resolve({ ...p, id: 'ssh:named' }),
-    )
+    const savePassphrase = vi
+      .spyOn(client, 'saveKeyPassphrase')
+      .mockResolvedValue({ row: 'secrow:pass-named' })
+    const createProfileSpy = vi
+      .spyOn(client, 'createProfile')
+      .mockImplementation((p) => Promise.resolve({ ...p, id: 'ssh:named' }))
 
     await waitForProfiles(container, 0)
     clickButtonByText(container, '+ New connection')
@@ -2053,8 +2065,7 @@ describe('generated secret names', () => {
     // The key is named for what it is…
     await vi.waitFor(() => {
       expect(saveKeyMat).toHaveBeenCalledWith(
-        expect.any(String),
-        expect.any(String),
+        expect.stringContaining('BEGIN PRIVATE KEY'),
         'Key for root@box.example.com',
       )
     })
@@ -2072,10 +2083,17 @@ describe('generated secret names', () => {
 
     await vi.waitFor(() => {
       expect(savePassphrase).toHaveBeenCalledWith(
-        expect.any(String),
+        'secrow:key-named',
         'letmein',
         'Passphrase for root@box.example.com',
       )
     })
+    // And both minted rows are bound on the profile that is created.
+    await vi.waitFor(() => {
+      expect(createProfileSpy).toHaveBeenCalled()
+    })
+    const created = createProfileSpy.mock.calls[0][0]
+    expect(created.options.keySecret).toBe('secrow:key-named')
+    expect(created.options.keyPassphraseSecret).toBe('secrow:pass-named')
   })
 })

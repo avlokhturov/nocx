@@ -32,7 +32,7 @@ const FIRST_PORT = 19890
 //
 // The secret's key names the SAME connection as the profile below, on purpose.
 // An earlier fixture named a host that appears nowhere in the config, so the
-// import created an orphan credential — "not used by anything" — and a test
+// import left the secret unbound — "not used by anything" — and a test
 // asserting only that a row appeared was perfectly happy with it.
 const CONFIG_YAML = `\
 version: 1
@@ -129,7 +129,7 @@ test.describe('Tabby import preview + execute', () => {
   // says nothing about the secret it points at, and this feature's entire job
   // is moving secrets — an import that created rows referencing nothing would
   // pass every weaker check.
-  test('imports Tabby encrypted config via preview -> confirm -> execute, profile+credential appear', async ({
+  test('imports Tabby encrypted config via preview -> confirm -> execute, profile+secret appear', async ({
     page,
   }) => {
     const ep = await backend.start(FIRST_PORT)
@@ -177,7 +177,7 @@ test.describe('Tabby import preview + execute', () => {
     // Verify the preview shows expected counts.
     await expect(page.getByRole('dialog').filter({ hasText: '1 profile' })).toBeVisible()
     await expect(page.getByRole('dialog').filter({ hasText: '1 group' })).toBeVisible()
-    await expect(page.getByRole('dialog').filter({ hasText: '1 credential' })).toBeVisible()
+    await expect(page.getByRole('dialog').filter({ hasText: '1 secret' })).toBeVisible()
 
     // Confirm the import — scoped to the preview dialog.
     await page
@@ -226,12 +226,12 @@ test.describe('Tabby import preview + execute', () => {
     // The imported secret is real and attached to the profile that needs it.
     //
     // The vault entry's key names deploy@web.example.com:22, which is exactly
-    // the profile in the config, so a correct import creates the credential AND
-    // links it. "The row appeared" proves metadata was written and says nothing
-    // about the secret it points at — and moving secrets is this feature's
-    // entire job, so an import leaving rows that reference nothing would pass
-    // every weaker check.
-    await page.locator('.ui-settings-section-nav-item[data-section="Credentials"]').click()
+    // the profile in the config, so a correct import binds the secret onto
+    // the profile. "The row appeared" proves metadata was written and says
+    // nothing about the secret it points at — and moving secrets is this
+    // feature's entire job, so an import leaving rows that reference nothing
+    // would pass every weaker check.
+    await page.locator('.ui-settings-section-nav-item[data-section="Secrets"]').click()
     const credRow = page.locator('.ui-collection-row').filter({ hasText: 'deploy@web.example.com' })
     await expect(credRow).toBeVisible({ timeout: 10_000 })
     await expect(credRow).not.toContainText('not used by anything')

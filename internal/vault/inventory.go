@@ -178,8 +178,14 @@ func (v *Vault) BuildInventory(ctx context.Context, inputs []CredentialInventory
 			}
 			if name == "" {
 				// The name did not land (crash gap, or a pre-ADR secret):
-				// fall back to the derived label where an owner exists.
-				name = deriveLabel(sr, cred)
+				// fall back to the derived label where an owner exists. The
+				// RECORD's kind is the authority on what the secret is
+				// (ADR-0016), so the label derives from it — a passphrase
+				// must not render as "SSH password for …" just because the
+				// input slot was the password field.
+				srForLabel := sr
+				srForLabel.kind = kind
+				name = deriveLabel(srForLabel, cred)
 			}
 			if name == "" {
 				name = kindLabel(kind)

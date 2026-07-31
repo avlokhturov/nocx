@@ -193,6 +193,34 @@ export function createVaultState(vaultClient: VaultClient): VaultController {
   let pendingResolve: ((value: undefined) => void) | null = null
   let pendingReject: ((reason: unknown) => void) | null = null
 
+  // The vault layer owns the unlock prompt: ANY control-plane RPC that lands
+  // on a sealed vault defers through this promise — no call site wraps its
+  // own vault calls (the dispatcher installs this seam). Concurrent sealed
+  // calls coalesce on ONE dialog and ONE promise; onUnsealDone resolves it
+  // (each RPC retries exactly once in the dispatcher), cancelling rejects it
+  // with VaultOperationCancelledError so the caller abandons its operation.
+  let sealedAccessResolve: (() => void) | null = null
+  let sealedAccessReject: ((e: unknown) => void) | null = null
+  let sealedUnlock: Promise<void> | null = null
+
+  // Test doubles may lack the real dispatcher; the seam is the real wiring's
+  // job, and a double without it simply keeps the caller-side behavior.
+  if (vaultClient.dispatcher) {
+    vaultClient.dispatcher.onVaultSealed = () => {
+      if (!sealedUnlock) {
+        sealedUnlock = new Promise<void>((resolve, reject) => {
+          sealedAccessResolve = resolve
+          sealedAccessReject = reject
+          setUnlockReason('The vault is locked. Unlock it to continue.')
+          setShowUnlock(true)
+        }).finally(() => {
+          sealedUnlock = null
+        })
+      }
+      return sealedUnlock
+    }
+  }
+
   async function refresh(): Promise<boolean> {
     try {
       const s = await vaultClient.status()
@@ -276,6 +304,13 @@ export function createVaultState(vaultClient: VaultClient): VaultController {
     const save = pendingSave
     pendingSave = null
     void refresh()
+    // Resume any RPCs that deferred on a sealed vault: each retries exactly
+    // once inside the dispatcher.
+    if (sealedAccessResolve) {
+      sealedAccessResolve()
+      sealedAccessResolve = null
+      sealedAccessReject = null
+    }
     if (!save) return
     retryInFlight = true
     void save().finally(settleAfterRetry)
@@ -322,10 +357,17 @@ export function createVaultState(vaultClient: VaultClient): VaultController {
   }
 
   function closeUnlock(): void {
+    // Cancelling a sealed-access prompt rejects the deferred RPCs so their
+    // callers abandon the operations they started. A save deferred through
+    // pendingSave is rejected by closeDialog below, unchanged.
+    if (!retryInFlight && sealedAccessReject) {
+      sealedAccessReject(new VaultOperationCancelledError())
+      sealedAccessResolve = null
+      sealedAccessReject = null
+    }
     closeDialog(() => setShowUnlock(false))
     setUnlockReason(null)
   }
-
   /**
    * saveSecretWithVault — operation-first vault error handling with retry.
    *
@@ -827,7 +869,7 @@ export const ResetVaultDialog: Component<ResetVaultDialogProps> = (props) => {
               <Show when={p().secretCount > 0}>
                 <p class="ui-vault-reset-impact">
                   {countPhrase(p().secretCount, 'saved secret', 'saved secrets')} will be deleted.{' '}
-                  {countPhrase(p().connectionCount, 'connection', 'connections')} will ask for a
+                  {countPhrase(p().profileCount, 'connection', 'connections')} will ask for a
                   password again.
                 </p>
               </Show>

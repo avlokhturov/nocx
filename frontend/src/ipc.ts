@@ -348,7 +348,7 @@ export class WSClient {
   }
 
   // openSSHSession opens an SSH session via a profile ID. The backend
-  // resolves host, credentials and jump host from the profile store.
+  // resolves host, auth and jump host from the profile store.
   // Passwords are never sent over the wire.
   openSSHSession(cols: number, rows: number, profileId: string): Promise<SessionHandle> {
     return this.dispatcher

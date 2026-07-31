@@ -1,7 +1,6 @@
 package profile
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -122,8 +121,8 @@ func TestResolveEffectiveProfile_BasicInheritance(t *testing.T) {
 	groups := []ProfileGroup{
 		{ID: "g1", Name: "Prod", Defaults: &ProfileDefaults{
 			SparseSSHOptions: SparseSSHOptions{
-				CredentialID: new("cred:prod:1"),
-				Port:         new(2222),
+				PasswordSecret: new("sec:prod:1"),
+				Port:           new(2222),
 			},
 		}},
 	}
@@ -134,14 +133,14 @@ func TestResolveEffectiveProfile_BasicInheritance(t *testing.T) {
 	if eff.ResolvedOptions.Port != 2222 {
 		t.Errorf("port = %d, want 2222 (inherited from group)", eff.ResolvedOptions.Port)
 	}
-	if eff.ResolvedOptions.CredentialID != "cred:prod:1" {
-		t.Errorf("credentialId = %q, want cred:prod:1", eff.ResolvedOptions.CredentialID)
+	if eff.ResolvedOptions.PasswordSecret != "sec:prod:1" {
+		t.Errorf("passwordSecret = %q, want sec:prod:1", eff.ResolvedOptions.PasswordSecret)
 	}
 	if src, ok := eff.Source["port"]; !ok || string(src) != "group:g1" {
 		t.Errorf("provenance for port = %q, want group:g1", src)
 	}
-	if src, ok := eff.Source["credentialId"]; !ok || string(src) != "group:g1" {
-		t.Errorf("provenance for credentialId = %q, want group:g1", src)
+	if src, ok := eff.Source["passwordSecret"]; !ok || string(src) != "group:g1" {
+		t.Errorf("provenance for passwordSecret = %q, want group:g1", src)
 	}
 }
 
@@ -278,8 +277,8 @@ func TestResolveEffectiveProfile_GlobalDefaults(t *testing.T) {
 		},
 	}
 	global := SparseSSHOptions{
-		CredentialID: new("cred:global:1"),
-		Port:         new(2222),
+		PasswordSecret: new("sec:global:1"),
+		Port:           new(2222),
 	}
 	eff, err := ResolveEffectiveProfile(profile, nil, global)
 	if err != nil {
@@ -363,8 +362,8 @@ func TestValidateGroupTree_DepthExceeded(t *testing.T) {
 
 func TestDecodeDefaults_UnknownKeyRecorded(t *testing.T) {
 	m := map[string]any{
-		"credentialId": "cred:prod:1",
-		"unknownField": "value",
+		"passwordSecret": "sec:prod:1",
+		"unknownField":   "value",
 	}
 	d, err := DecodeDefaults(m)
 	if err != nil {
@@ -380,17 +379,17 @@ func TestDecodeDefaults_UnknownKeyRecorded(t *testing.T) {
 
 func TestDecodeDefaults_LegacyMapDecodes(t *testing.T) {
 	m := map[string]any{
-		"credentialId": "cred:prod:1",
-		"port":         2222.0,
-		"user":         "bob",
+		"passwordSecret": "sec:prod:1",
+		"port":           2222.0,
+		"user":           "bob",
 	}
 	d, err := DecodeDefaults(m)
 	if err != nil {
 		t.Fatalf("DecodeDefaults: %v", err)
 	}
 	s := d.SparseSSHOptions
-	if s.CredentialID == nil || *s.CredentialID != "cred:prod:1" {
-		t.Errorf("credentialId = %v, want cred:prod:1", s.CredentialID)
+	if s.PasswordSecret == nil || *s.PasswordSecret != "sec:prod:1" {
+		t.Errorf("passwordSecret = %v, want sec:prod:1", s.PasswordSecret)
 	}
 	if s.Port == nil || *s.Port != 2222 {
 		t.Errorf("port = %v, want 2222", s.Port)
@@ -423,7 +422,7 @@ func TestDecodeDefaults_UnknownKeysListed(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestProfileDefaultsUnmarshal_UnknownKeyRecorded(t *testing.T) {
-	data := []byte(`{"credentialId":"cred:x","host":"forbidden"}`)
+	data := []byte(`{"passwordSecret":"sec:x","host":"forbidden"}`)
 	var d ProfileDefaults
 	if err := d.UnmarshalJSON(data); err != nil {
 		t.Fatalf("UnmarshalJSON should not error with unknown keys: %v", err)
@@ -437,14 +436,14 @@ func TestProfileDefaultsUnmarshal_UnknownKeyRecorded(t *testing.T) {
 }
 
 func TestProfileDefaultsUnmarshal_ValidKeys(t *testing.T) {
-	data := []byte(`{"credentialId":"cred:x","port":2222,"agentForward":true}`)
+	data := []byte(`{"passwordSecret":"sec:x","port":2222,"agentForward":true}`)
 	var d ProfileDefaults
 	if err := d.UnmarshalJSON(data); err != nil {
 		t.Fatalf("UnmarshalJSON: %v", err)
 	}
 	s := d.SparseSSHOptions
-	if s.CredentialID == nil || *s.CredentialID != "cred:x" {
-		t.Errorf("credentialId = %v", s.CredentialID)
+	if s.PasswordSecret == nil || *s.PasswordSecret != "sec:x" {
+		t.Errorf("passwordSecret = %v", s.PasswordSecret)
 	}
 	if s.Port == nil || *s.Port != 2222 {
 		t.Errorf("port = %v", s.Port)
@@ -591,62 +590,6 @@ func TestJSONStoreAtomicWrite(t *testing.T) {
 		if e.Name() != "profiles.json" {
 			t.Errorf("unexpected file/dir leftover: %s", e.Name())
 		}
-	}
-}
-
-// TestSaveCredentialValidatesIdentity checks that a credential without a name
-// or username is rejected at save time.
-func TestSaveCredentialValidatesIdentity(t *testing.T) {
-	store := NewJSONStore(filepath.Join(t.TempDir(), "profiles.json"))
-
-	noName := Credential{
-		ID:       NewCredentialID(""), // will get an ID anyway
-		Username: "bob",
-		Auth:     AuthPassword,
-	}
-	if err := store.CreateCredential(noName); err == nil {
-		t.Fatal("CreateCredential accepted a credential with no name")
-	} else if !errors.Is(err, ErrCredentialNameRequired) {
-		t.Fatalf("want ErrCredentialNameRequired, got %T: %v", err, err)
-	}
-
-	noUser := Credential{
-		ID:   NewCredentialID("nameless"),
-		Name: "has-id",
-		Auth: AuthPassword,
-	}
-	if err := store.CreateCredential(noUser); err != nil {
-		t.Fatalf("CreateCredential rejected an empty username: %v", err)
-	}
-
-	creds, err := store.LoadCredentials()
-	if err != nil {
-		t.Fatalf("LoadCredentials: %v", err)
-	}
-	if len(creds) != 1 {
-		t.Fatalf("only the credential with an optional username should persist; store holds %d", len(creds))
-	}
-}
-
-func TestSaveCredentialAcceptsValidCredential(t *testing.T) {
-	store := NewJSONStore(filepath.Join(t.TempDir(), "profiles.json"))
-
-	c := Credential{
-		ID:       NewCredentialID("valid"),
-		Name:     "valid",
-		Username: "bob",
-		Auth:     AuthPassword,
-	}
-	if err := store.CreateCredential(c); err != nil {
-		t.Fatalf("CreateCredential rejected a valid credential: %v", err)
-	}
-
-	creds, err := store.LoadCredentials()
-	if err != nil {
-		t.Fatalf("LoadCredentials: %v", err)
-	}
-	if len(creds) != 1 {
-		t.Fatalf("expected 1 credential, got %d", len(creds))
 	}
 }
 

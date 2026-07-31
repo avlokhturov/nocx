@@ -26,6 +26,8 @@
 import { createSignal, Show } from 'solid-js'
 import { SegmentedControl } from './ui/segmented-control'
 import { TextField } from './ui/text-field'
+import { Field } from './ui/field'
+import { Select } from './ui/select'
 import { Button } from './ui/button'
 import { FileInput } from './ui/file-input'
 import { Prompt } from './ui/prompt'
@@ -34,10 +36,11 @@ import { RpcError } from './dispatcher'
 import { log } from './log'
 import { showToast } from './ui/toast'
 import type { ProfileClient } from './profiles'
+import type { InventoryEntry } from './vault-client'
 
-export type KeyInputMode = 'path' | 'file' | 'material'
+export type KeyInputMode = 'path' | 'file' | 'material' | 'secret'
 
-/** Two of the three modes supply key MATERIAL; only 'path' supplies a path.
+/** Three of the four modes supply key MATERIAL; only 'path' supplies a path.
  *  Spelling that out once beats repeating `mode === 'file' || mode ===
  *  'material'` at every save site and losing the reason. */
 export const suppliesMaterial = (m: KeyInputMode) => m === 'material' || m === 'file'
@@ -46,7 +49,23 @@ const KEY_MODES: { value: KeyInputMode; label: string }[] = [
   { value: 'file', label: 'Choose file' },
   { value: 'path', label: 'Path' },
   { value: 'material', label: 'Paste key' },
+  { value: 'secret', label: 'Secret' },
 ]
+
+/** Select options for a vault-row picker: the inventory rows plus, when the
+ *  bound row is missing from the inventory (vault locked, row filtered out),
+ *  a fallback option carrying the opaque handle — so a bound secret is never
+ *  shown as "None". The handle is a row id, not a secret reference. */
+export function secretOptions(
+  entries: InventoryEntry[],
+  bound?: string,
+): { value: string; label: string }[] {
+  const opts = entries.map((entry) => ({ value: entry.id, label: entry.name }))
+  if (bound && !opts.some((o) => o.value === bound)) {
+    opts.push({ value: bound, label: bound })
+  }
+  return opts
+}
 
 /**
  * What the input opens on, everywhere it is used.
@@ -87,6 +106,13 @@ export interface KeyMaterialInputProps {
   /** Native file picker (dialog.openFile). When present, Path mode gets a
    *  Browse action that fills the path with a real absolute path. */
   openFileDialog?: () => Promise<{ path: string }>
+  /** Secret mode: the vault's private-key rows, with the bound one as the
+   *  current value (ADR-0017 §1, b5bu). Empty when the vault is locked. The
+   *  props are optional because call sites that only create material (the
+   *  Secrets page) never offer an existing secret. */
+  secrets?: InventoryEntry[]
+  secretValue?: string
+  onSecretChange?: (value: string | undefined) => void
 }
 
 /**
@@ -210,6 +236,16 @@ export function KeyMaterialInput(props: KeyMaterialInputProps) {
           <span class="cm-key-fingerprint">Fingerprint: {props.fingerprint}</span>
         </Show>
       </Show>
+      <Show when={props.mode === 'secret'}>
+        <Field for={`${props.id}-secret`} label="Private Key Secret">
+          <Select
+            value={props.secretValue ?? ''}
+            onChange={(value) => props.onSecretChange?.(value || undefined)}
+            options={secretOptions(props.secrets ?? [], props.secretValue)}
+            placeholder={'\u2014 None \u2014'}
+          />
+        </Field>
+      </Show>
     </>
   )
 }
@@ -219,11 +255,17 @@ export interface KeyPassphrasePromptProps {
   /** The key this passphrase belongs to — the prompt names it, so a vault
    *  passphrase can never be typed into it by mistake (nocx-s8jn). */
   keyName: string
-  credentialId: string
+  /** Row handle of the key secret whose passphrase is wanted (ADR-0017). */
+  keyRow: string
+  /** The display name the minted passphrase secret owns (ADR-0016) — the
+   *  key's own name ("Key for root@host") is not it: the prompt stores a
+   *  passphrase, and says so ("Passphrase for root@host"). */
+  passphraseName: string
   client: ProfileClient
-  /** 'saved' when a VERIFIED passphrase was stored; 'skipped' when declined
+  /** 'saved' when a VERIFIED passphrase was stored — the minted passphrase
+   *  row rides along so the caller can bind it; 'skipped' when declined
    *  (the key stays stored, and the connection asks at connect time). */
-  onResult: (outcome: 'saved' | 'skipped') => void
+  onResult: (outcome: 'saved' | 'skipped', row?: string) => void
 }
 
 /**
@@ -247,15 +289,15 @@ export function KeyPassphrasePrompt(props: KeyPassphrasePromptProps) {
     setSaving(true)
     try {
       // The prompt is asked about the KEY; the secret it stores is the
-      // passphrase, and it says so. Passing an already-prefixed name in would
-      // title the prompt "Passphrase for Passphrase for root@host".
-      await props.client.saveKeyPassphrase(
-        props.credentialId,
+      // passphrase, and it says so. The stored name is the caller's
+      // passphraseName — never the key's own name ("Key for root@host").
+      const result = await props.client.saveKeyPassphrase(
+        props.keyRow,
         passphrase(),
-        `Passphrase for ${props.keyName}`,
+        props.passphraseName,
       )
       showToast({ level: 'success', message: 'Key passphrase stored.' })
-      props.onResult('saved')
+      props.onResult('saved', result.row)
     } catch (e) {
       setSaving(false)
       if (

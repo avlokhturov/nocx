@@ -319,8 +319,21 @@ func sshOptionsFromConfig(cfg *ssh.ConnectConfig) []ssh.ConnectOption {
 	if cfg.JumpSecrets != nil {
 		opts = append(opts, ssh.WithJumpCredentials(cfg.JumpSecrets, cfg.JumpSecretID))
 	}
+	if cfg.JumpPassphraseSecretID != "" {
+		opts = append(opts, ssh.WithJumpPassphraseSecretID(cfg.JumpPassphraseSecretID))
+	}
 	if cfg.Secrets != nil {
 		opts = append(opts, ssh.WithCredentials(cfg.Secrets, cfg.SecretID))
+	}
+	// The vault-stored key (and its passphrase) ride the same store: without
+	// them the dial sees publicKey auth with nothing to offer — the probe
+	// works because it uses the resolved config directly, the session loses
+	// the binding here. ADR-0017: a connection references a secret.
+	if cfg.KeySecretID != "" {
+		opts = append(opts, ssh.WithKeySecretID(cfg.KeySecretID))
+	}
+	if cfg.PassphraseSecretID != "" {
+		opts = append(opts, ssh.WithPassphraseSecretID(cfg.PassphraseSecretID))
 	}
 
 	if cfg.AuthorizedEndpoint != "" {

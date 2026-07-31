@@ -24,8 +24,8 @@ type VaultLifecycle interface {
 	Seal()
 	ChangePassphrase(ctx context.Context, req vault.ChangePassphraseRequest) error
 	RegenerateRecovery(ctx context.Context, req vault.RegenerateRequest) (string, error)
-	// BuildInventory assembles the vault inventory from credential metadata.
-	// Returns vault.ErrVaultSealed when the vault is sealed.
+	// BuildInventory assembles the vault inventory from profile secret
+	// bindings. Returns vault.ErrVaultSealed when the vault is sealed.
 	BuildInventory(ctx context.Context, inputs []vault.CredentialInventory) ([]vault.InventoryEntry, error)
 	// CreateNamed stores value with the secret's catalogue metadata — display
 	// name and kind (ADR-0016). The name joins Create's journal sequence; it
@@ -37,7 +37,7 @@ type VaultLifecycle interface {
 	// ResolveRow maps a renderer-addressable row handle to the SecretID
 	// behind it. Backend-only: the renderer never receives a SecretID
 	// (nocx-jb20.1). The transport resolves the row first so it can clear
-	// credential references — metadata first (ADR-0011 §4) — before the
+	// profile references — metadata first (ADR-0011 §4) — before the
 	// stored secret is deleted.
 	ResolveRow(row string, inputs []vault.CredentialInventory) (credential.SecretID, bool)
 	// ReplaceSecret overwrites the material behind an existing secret,
@@ -118,12 +118,11 @@ func newVaultError(id json.RawMessage, code int, msg string, err error) jsonrpcR
 	}
 }
 
-// newJSONRPCError. The renderer tells "the vault needs setting up" apart from
-// a genuine failure by reading data.reason; a bare -32603 with a prose message
+// rpcErrorFor wraps a vault-domain error in a JSON-RPC error with the reason
+// attached. The renderer tells "the vault needs setting up" apart from a
+// genuine failure by reading data.reason; a bare -32603 with a prose message
 // is indistinguishable from a disk error, so the setup dialog never opens and
-// the user is shown a toast instead. That was the whole of nocx-25k9.7: the
-// vault handlers attached the reason and the older credentials.* handlers,
-// which are the ones the connection form actually calls, did not.
+// the user is shown a toast instead. That was the whole of nocx-25k9.7.
 func rpcErrorFor(id json.RawMessage, fallback int, msgPrefix string, err error) jsonrpcResponse {
 	return newVaultError(id, vaultErrorCode(err, fallback), msgPrefix+err.Error(), err)
 }
@@ -428,14 +427,8 @@ func (s *WSServer) handleVaultActivity(wconn *wsConn, req jsonrpcRequest) {
 }
 
 func (s *WSServer) handleVaultInventory(wconn *wsConn, req jsonrpcRequest) {
-	if s.credMeta == nil || s.profiles == nil || s.groups == nil {
+	if s.profiles == nil || s.groups == nil {
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "vault.inventory not available"))
-		return
-	}
-
-	creds, err := s.credMeta.LoadCredentials()
-	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
 		return
 	}
 
@@ -451,7 +444,7 @@ func (s *WSServer) handleVaultInventory(wconn *wsConn, req jsonrpcRequest) {
 		return
 	}
 
-	inputs := s.vaultInventoryInputs(creds, profiles, groups)
+	inputs := s.vaultInventoryInputs(profiles, groups)
 
 	entries, err := s.vaultLifecycle.BuildInventory(context.Background(), inputs)
 	if err != nil {
@@ -466,46 +459,45 @@ func (s *WSServer) handleVaultInventory(wconn *wsConn, req jsonrpcRequest) {
 	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(result)))
 }
 
-// vaultInventoryInputs projects credential metadata into the vault's
-// inventory input shape: usage counts, single-use host/port, and every
-// secret reference the vault needs to resolve rows against. The same inputs
-// feed BuildInventory and RenameSecret, so both address the same rows.
-func (s *WSServer) vaultInventoryInputs(creds []profile.Credential, profiles []profile.SSHProfile, groups []profile.ProfileGroup) []vault.CredentialInventory {
-	usage := profile.ComputeCredentialUsage(creds, profiles, groups, profile.SparseSSHOptions{})
+// vaultInventoryInputs projects profile secret bindings into the vault's
+// inventory input shape: one entry per distinct bound secret, with its usage
+// count and, for a single-use secret, the effective host and port of the
+// sole profile (ADR-0017: a connection references a secret).
+//
+// Every input ref lands in the SecretID slot and the KIND is not carried
+// here: BuildInventory takes it from the vault's own catalogue record
+// (ADR-0016), which every bound secret has — every mint path goes through
+// CreateNamed. The slot's fallback kind therefore never mislabels a real
+// secret; it would only affect a recordless pre-ADR-0016 reference, which
+// the wired app cannot produce.
+func (s *WSServer) vaultInventoryInputs(profiles []profile.SSHProfile, groups []profile.ProfileGroup) []vault.CredentialInventory {
+	usage := profile.ComputeSecretUsage(profiles, groups, profile.SparseSSHOptions{})
 
-	// Build profile lookup for single-use label resolution.
+	// Build profile lookup for label resolution and single-use ownership.
 	profByID := make(map[string]profile.SSHProfile, len(profiles))
 	for _, p := range profiles {
 		profByID[p.ID] = p
 	}
 
-	// Build usage maps.
-	usageCount := make(map[string]int, len(usage))
-	usageRefs := make(map[string][]profile.ProfileRef, len(usage))
+	inputs := make([]vault.CredentialInventory, 0, len(usage))
 	for _, u := range usage {
-		usageCount[u.CredentialID] = len(u.Profiles)
-		usageRefs[u.CredentialID] = u.Profiles
-	}
-
-	inputs := make([]vault.CredentialInventory, 0, len(creds))
-	for _, c := range creds {
 		ci := vault.CredentialInventory{
-			ID:                  c.ID,
-			Username:            c.Username,
-			AuthMode:            string(c.Auth),
-			SecretID:            c.SecretID,
-			PassphraseSecretID:  c.PassphraseSecretID,
-			KeyMaterialSecretID: c.KeyMaterialSecretID,
-			KeyFingerprint:      c.KeyFingerprint,
-			UsageCount:          usageCount[c.ID],
+			SecretID:   u.SecretID,
+			UsageCount: len(u.Profiles),
 		}
 
-		// For single-use passwords, resolve the sole profile to get host:port.
-		if ci.UsageCount == 1 {
-			if refs, ok := usageRefs[c.ID]; ok && len(refs) > 0 {
-				if p, ok := profByID[refs[0].ProfileID]; ok {
-					eff, resolveErr := profile.ResolveEffectiveProfile(p, groups, profile.SparseSSHOptions{})
-					if resolveErr == nil {
+		// Labels derive from the first user of the secret; the renderer-safe
+		// owner id and the single-use host:port come from the sole profile
+		// when there is one. A SecretID is NEVER used as an owner id — it
+		// would leak the reference onto the inventory wire (ADR-0011 §2).
+		if len(u.Profiles) > 0 {
+			if p, ok := profByID[u.Profiles[0].ProfileID]; ok {
+				eff, resolveErr := profile.ResolveEffectiveProfile(p, groups, profile.SparseSSHOptions{})
+				if resolveErr == nil {
+					ci.Username = eff.ResolvedOptions.User
+					ci.AuthMode = string(eff.ResolvedOptions.Auth)
+					if len(u.Profiles) == 1 {
+						ci.ID = u.Profiles[0].ProfileID
 						ci.SingleHost = eff.ResolvedOptions.Host
 						ci.SinglePort = eff.ResolvedOptions.Port
 					}
@@ -622,7 +614,7 @@ type vaultRenameSecretParams struct {
 // row set is the same one the inventory shows, so an unrecorded
 // (pre-ADR-0016) reference can be renamed too.
 func (s *WSServer) handleVaultRenameSecret(wconn *wsConn, req jsonrpcRequest) {
-	if s.credMeta == nil || s.profiles == nil || s.groups == nil {
+	if s.profiles == nil || s.groups == nil {
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "vault.renameSecret not available"))
 		return
 	}
@@ -644,11 +636,6 @@ func (s *WSServer) handleVaultRenameSecret(wconn *wsConn, req jsonrpcRequest) {
 		return
 	}
 
-	creds, err := s.credMeta.LoadCredentials()
-	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
-		return
-	}
 	profiles, err := s.profiles.LoadProfiles()
 	if err != nil {
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
@@ -659,7 +646,7 @@ func (s *WSServer) handleVaultRenameSecret(wconn *wsConn, req jsonrpcRequest) {
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
 		return
 	}
-	inputs := s.vaultInventoryInputs(creds, profiles, groups)
+	inputs := s.vaultInventoryInputs(profiles, groups)
 
 	if err := s.vaultLifecycle.RenameSecret(context.Background(), params.ID, params.Name, inputs); err != nil {
 		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "vault.renameSecret: ", err))
@@ -687,7 +674,7 @@ type vaultReplaceSecretParams struct {
 // Like create, a private key may be supplied by PATH, which the backend
 // dereferences to the file's contents.
 func (s *WSServer) handleVaultReplaceSecret(wconn *wsConn, req jsonrpcRequest) {
-	if s.credMeta == nil || s.profiles == nil || s.groups == nil {
+	if s.profiles == nil || s.groups == nil {
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "vault.replaceSecret not available"))
 		return
 	}
@@ -715,11 +702,6 @@ func (s *WSServer) handleVaultReplaceSecret(wconn *wsConn, req jsonrpcRequest) {
 		value = contents
 	}
 
-	creds, err := s.credMeta.LoadCredentials()
-	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
-		return
-	}
 	profiles, err := s.profiles.LoadProfiles()
 	if err != nil {
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
@@ -730,7 +712,7 @@ func (s *WSServer) handleVaultReplaceSecret(wconn *wsConn, req jsonrpcRequest) {
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
 		return
 	}
-	inputs := s.vaultInventoryInputs(creds, profiles, groups)
+	inputs := s.vaultInventoryInputs(profiles, groups)
 
 	if err := s.vaultLifecycle.ReplaceSecret(context.Background(), params.ID, credential.NewSecret(value), inputs); err != nil {
 		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "vault.replaceSecret: ", err))
@@ -754,14 +736,14 @@ type vaultDeleteSecretParams struct {
 //
 // "Deletion goes metadata-first with a retriable secret deletion after: a
 // brief unreachable orphan is safer than metadata pointing at a secret that
-// is gone." The credential records are the metadata that point at this
-// secret, so every reference is cleared BEFORE the vault deletes the stored
-// value — the vault's own catalogue record and journal go with the provider
-// delete, in Vault.Delete's existing metadata-first sequence. A failed
-// provider delete therefore leaves a brief unreachable orphan (the journal
-// retries it), never a connection claiming a password that cannot exist.
+// is gone." The profile records are the metadata that point at this secret,
+// so every reference is cleared BEFORE the vault deletes the stored value —
+// the vault's own catalogue record and journal go with the provider delete,
+// in Vault.Delete's existing metadata-first sequence. A failed provider
+// delete therefore leaves a brief unreachable orphan (the journal retries
+// it), never a connection claiming a password that cannot exist.
 func (s *WSServer) handleVaultDeleteSecret(wconn *wsConn, req jsonrpcRequest) {
-	if s.credMeta == nil || s.profiles == nil || s.groups == nil {
+	if s.profiles == nil || s.groups == nil {
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "vault.deleteSecret not available"))
 		return
 	}
@@ -783,11 +765,6 @@ func (s *WSServer) handleVaultDeleteSecret(wconn *wsConn, req jsonrpcRequest) {
 		return
 	}
 
-	creds, err := s.credMeta.LoadCredentials()
-	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
-		return
-	}
 	profiles, err := s.profiles.LoadProfiles()
 	if err != nil {
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
@@ -798,7 +775,7 @@ func (s *WSServer) handleVaultDeleteSecret(wconn *wsConn, req jsonrpcRequest) {
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
 		return
 	}
-	inputs := s.vaultInventoryInputs(creds, profiles, groups)
+	inputs := s.vaultInventoryInputs(profiles, groups)
 
 	// Resolve the row to the secret it names before touching anything: the
 	// reference must be found while the metadata still holds it.
@@ -808,9 +785,14 @@ func (s *WSServer) handleVaultDeleteSecret(wconn *wsConn, req jsonrpcRequest) {
 		return
 	}
 
-	// Metadata first (ADR-0011 §4): clear every reference in the credential
+	// Metadata first (ADR-0011 §4): clear every reference in the profile
 	// records — one atomic write. If this fails, nothing was deleted.
-	if err := s.credMeta.ClearSecretReferences(string(id)); err != nil {
+	pc, ok := s.profiles.(interface{ ClearSecretRefs(string) error })
+	if !ok {
+		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "vault.deleteSecret: ", errors.New("profile store does not support reference clearing")))
+		return
+	}
+	if err := pc.ClearSecretRefs(string(id)); err != nil {
 		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "vault.deleteSecret: ", err))
 		return
 	}

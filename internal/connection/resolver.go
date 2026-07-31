@@ -24,7 +24,6 @@ import (
 type Resolver struct {
 	profiles profile.ProfileRepository
 	groups   profile.GroupRepository
-	credMeta profile.CredentialMetadataRepository
 	secrets  credential.SecretStore
 	// configResolver resolves ~/.ssh/config directives using ssh -G.
 	// Injected at the composition root, shared with the RealClient so both
@@ -41,8 +40,8 @@ func WithConfigResolver(resolver ssh.ConfigResolver) ResolverOption {
 }
 
 // NewResolver creates a Resolver backed by the given stores.
-func NewResolver(pr profile.ProfileRepository, gr profile.GroupRepository, cmr profile.CredentialMetadataRepository, ss credential.SecretStore, opts ...ResolverOption) *Resolver {
-	r := &Resolver{profiles: pr, groups: gr, credMeta: cmr, secrets: ss}
+func NewResolver(pr profile.ProfileRepository, gr profile.GroupRepository, ss credential.SecretStore, opts ...ResolverOption) *Resolver {
+	r := &Resolver{profiles: pr, groups: gr, secrets: ss}
 	for _, o := range opts {
 		o(r)
 	}
@@ -52,16 +51,16 @@ func NewResolver(pr profile.ProfileRepository, gr profile.GroupRepository, cmr p
 // Resolve maps a profile ID to a Resolved ready for SSH connection.
 // The returned config has:
 //   - Host from the profile (for ~/.ssh/config alias resolution)
-//   - User/AuthMode/KeyPath from the credential (if CredentialID is set) or
-//     from the profile's inline fields
-//   - SecretStore + SecretID wired for late-bound password resolution
-//     (only when a credential is linked)
+//   - User/AuthMode/KeyPath from the effective profile (profile + group
+//     inheritance + global defaults)
+//   - SecretStore + the bound secret references wired for late-bound
+//     password/key/passphrase resolution (ADR-0017 §1)
 //   - Jump host fields resolved recursively (with cycle detection)
 //   - KeepaliveInterval/KeepaliveCountMax/ReadyTimeout/AgentForward from the
-//     effective profile (profile + group inheritance + global defaults)
+//     effective profile
 //   - AuthorizedEndpoint from the profile's Host, resolved through
-//     ~/.ssh/config to the canonical hostname (not the alias). The credential
-//     is authorized for this resolved endpoint, verified at connect time
+//     ~/.ssh/config to the canonical hostname (not the alias). The secret is
+//     authorized for this resolved endpoint, verified at connect time
 //     against the freshly-resolved dial target.
 //
 // Passwords are never set as plaintext on the returned config.
@@ -129,47 +128,50 @@ func (r *Resolver) buildConfig(prof *profile.SSHProfile, visited map[string]bool
 	}
 	cfg.AgentForward = eff.ResolvedOptions.AgentForward
 
-	credID := eff.ResolvedOptions.CredentialID
-	if credID != "" {
-		cred, err := r.findCredential(credID)
-		if err != nil {
-			return nil, fmt.Errorf("profile %s: %w", prof.ID, err)
-		}
-		cfg.User = cred.Username
-		cfg.CredentialID = credID
+	// Identity comes from the profile itself (ADR-0017): User and Auth are
+	// always inline, and the secret bindings are the references the profile
+	// authenticates with.
+	o := eff.ResolvedOptions
+	cfg.User = o.User
+	cfg.AuthMode = string(o.Auth)
+	cfg.KeyFile = o.KeyPath
 
-		cfg.AuthMode = string(cred.Auth)
-		cfg.KeyFile = cred.KeyPath
-		// Authorized endpoint: the profile's Host is resolved through
-		// ~/.ssh/config to get the canonical hostname (not the alias), then
-		// stored as the authorization identity. At connect time, the same
-		// resolution is applied to the dial target, so an alias connects and
-		// a HostName change (drift) is detected as a mismatch.
-		authHost := r.resolveProfileHost(prof.Options.Host)
-		cfg.AuthorizedEndpoint = authHost
-		if cfg.Port > 0 {
-			cfg.AuthorizedEndpoint = net.JoinHostPort(authHost, strconv.Itoa(cfg.Port))
-		}
-		// Wire SecretStore for late-bound password/passphrase resolution
-		// via opaque SecretID references (ADR-0011 §2).
-		cfg.Secrets = r.secrets
-
-		// Publish the credential's record-level secret references onto the
-		// config. One generation of material, held on the record (ADR-0017).
-		if cred.SecretID != "" {
-			cfg.SecretID = credential.SecretID(cred.SecretID)
-		}
-		if cred.PassphraseSecretID != "" {
-			cfg.PassphraseSecretID = credential.SecretID(cred.PassphraseSecretID)
-		}
-		if cred.KeyMaterialSecretID != "" {
-			cfg.KeySecretID = credential.SecretID(cred.KeyMaterialSecretID)
-		}
-	} else {
-		// No credential linked — use inline fields from the profile.
-		cfg.User = eff.ResolvedOptions.User
-		cfg.AuthMode = string(eff.ResolvedOptions.Auth)
+	// Authorized endpoint: the profile's Host is resolved through
+	// ~/.ssh/config to get the canonical hostname (not the alias), then
+	// stored as the authorization identity. At connect time, the same
+	// resolution is applied to the dial target, so an alias connects and
+	// a HostName change (drift) is detected as a mismatch.
+	authHost := r.resolveProfileHost(prof.Options.Host)
+	cfg.AuthorizedEndpoint = authHost
+	if cfg.Port > 0 {
+		cfg.AuthorizedEndpoint = net.JoinHostPort(authHost, strconv.Itoa(cfg.Port))
 	}
+
+	// Wire SecretStore for late-bound password/passphrase/key resolution via
+	// opaque SecretID references (ADR-0011 §2). The bindings live on the
+	// effective profile, one per auth method (ADR-0017 §1).
+	if o.PasswordSecret != "" || o.KeySecret != "" || o.KeyPassphraseSecret != "" {
+		cfg.Secrets = r.secrets
+	}
+	if o.PasswordSecret != "" {
+		cfg.SecretID = credential.SecretID(o.PasswordSecret)
+	}
+	if o.KeyPassphraseSecret != "" {
+		cfg.PassphraseSecretID = credential.SecretID(o.KeyPassphraseSecret)
+	}
+	if o.KeySecret != "" {
+		cfg.KeySecretID = credential.SecretID(o.KeySecret)
+	}
+
+	// Transitional principal for session revocation: sessions are matched by
+	// the auth material they were opened with. With the credential aggregate
+	// gone this is the bound secret itself (ADR-0017); the field is renamed
+	// in the same sweep that deletes the aggregate.
+	principal := o.PasswordSecret
+	if principal == "" {
+		principal = o.KeySecret
+	}
+	cfg.CredentialID = principal
 
 	// Resolve jump host if set (from effective profile, which may inherit it).
 	jumpHostID := eff.ResolvedOptions.JumpHost
@@ -216,20 +218,6 @@ func (r *Resolver) buildConfig(prof *profile.SSHProfile, visited map[string]bool
 	return cfg, nil
 }
 
-// findCredential loads a credential by ID from the credential metadata store.
-func (r *Resolver) findCredential(id string) (profile.Credential, error) {
-	creds, err := r.credMeta.LoadCredentials()
-	if err != nil {
-		return profile.Credential{}, fmt.Errorf("load credentials: %w", err)
-	}
-	for _, c := range creds {
-		if c.ID == id {
-			return c, nil
-		}
-	}
-	return profile.Credential{}, fmt.Errorf("credential %s: %w", id, ErrProfileNotFound)
-}
-
 // resolveProfileHost applies the ConfigResolver's HostName resolution to a
 // profile's host, returning the canonical hostname. When no resolver is
 // configured, the original host is returned unchanged (no resolution).
@@ -247,5 +235,5 @@ func (r *Resolver) resolveProfileHost(host string) string {
 	return resolved
 }
 
-// ErrProfileNotFound is returned when a profile or credential ID is not found.
+// ErrProfileNotFound is returned when a profile ID is not found.
 var ErrProfileNotFound = errors.New("not found")

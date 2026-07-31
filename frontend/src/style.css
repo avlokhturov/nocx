@@ -299,6 +299,13 @@
   flex: none;
 }
 
+/* Markerless sessions (plain SSH, serial) before the first OSC 133: the
+   terminal fills the pane because there are no scrollback blocks to show.
+   Sized inline by the controller, like live-fullscreen. */
+.xterm-live-container.live-unstructured {
+  flex: none;
+}
+
 /* Inner wrapper: always has a stable min-height so xterm.fit() produces
    a sane grid even when the clip container is 36px tall. xterm mounts
    into this element, not the clip container. overflow:hidden is

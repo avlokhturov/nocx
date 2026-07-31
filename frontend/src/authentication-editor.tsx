@@ -1,9 +1,24 @@
-import { Show, createMemo, type Component, type JSX } from 'solid-js'
+/**
+ * AuthenticationEditor — the SSH authentication source editor shared by
+ * connections and groups (ADR-0017 §1).
+ *
+ * The editor owns the domain rule that a connection authenticates with the
+ * secrets it names: the vault rows bound to the profile's options, or the
+ * inline user/method the user types here. There is no Credential control —
+ * the credential aggregate is gone, and the word never appears (ADR-0017 §4).
+ *
+ * The parent owns the minting flows (password dialog, key input with its
+ * file picker and passphrase prompt) and passes their JSX into the method
+ * slots, exactly as the editor's previous incarnation did. What the editor
+ * adds is the secret picker: under Password, the vault's password rows,
+ * with the bound one shown as the current value.
+ */
+import { Show, createMemo, createSignal, untrack, type Component, type JSX } from 'solid-js'
 import { AUTH_SEGMENTS } from './auth-methods'
-import type { AuthMode, Credential } from './profiles'
+import type { InventoryEntry } from './vault-client'
+import type { AuthMode } from './profiles'
+import { secretOptions } from './key-material-input'
 import { Field } from './ui/field'
-import { IconButton } from './ui/icon-button'
-import { PlusIcon } from './ui/icons'
 import { SegmentedControl } from './ui/segmented-control'
 import { Select, type SelectOption } from './ui/select'
 import { Stack } from './ui/stack'
@@ -13,10 +28,6 @@ const INHERIT_AUTH = '__inherit__'
 
 export interface AuthenticationEditorProps {
   id: string
-  credentials: Credential[]
-  credentialId?: string
-  onCredentialChange: (value: string | undefined) => void
-  onCreateCredential?: () => void
   username?: string
   onUsernameChange: (value: string | undefined) => void
   auth?: AuthMode
@@ -24,14 +35,13 @@ export interface AuthenticationEditorProps {
   inherit?: boolean
   passwordAction?: JSX.Element
   publicKeyAction?: JSX.Element
-  credentialSuffix?: JSX.Element
   authSuffix?: JSX.Element
-  /** Draft of the selected credential for inline editing. */
-  credentialDraft?: Credential
-  /** Called when an inline credential field changes. */
-  onCredentialDraftChange?: (draft: Credential) => void
-  /** How many connections use the selected credential. */
-  credentialUsage?: number
+  /** The vault's password rows, for the picker under the Password method.
+   *  Empty when the vault is locked — the picker then offers nothing. */
+  passwordSecrets: InventoryEntry[]
+  /** The bound password secret's row handle (ADR-0017 §1). */
+  passwordSecret?: string
+  onPasswordSecretChange: (value: string | undefined) => void
 }
 
 export interface AuthMethodEditorProps {
@@ -74,116 +84,91 @@ export const AuthMethodEditor: Component<AuthMethodEditorProps> = (props) => {
   )
 }
 
+/** SecretPicker — one vault row kind as a Select. The bound row, when it is
+ *  in the inventory, is the current value: an empty credential is visible
+ *  before Connect is pressed (b5bu). */
+export const SecretPicker: Component<{
+  id: string
+  label: string
+  secrets: InventoryEntry[]
+  value?: string
+  onChange: (value: string | undefined) => void
+  placeholder?: string
+}> = (props) => {
+  // The bound row, when it is in the inventory, is the current value: an
+  // empty credential is visible before Connect is pressed (b5bu). When the
+  // row is missing from the inventory (vault locked), a fallback option
+  // carries the opaque handle so the bound secret is never shown as "None".
+  const options = createMemo((): SelectOption[] => secretOptions(props.secrets, props.value))
+  return (
+    <Field for={`${props.id}-secret`} label={props.label}>
+      <Select
+        value={props.value ?? ''}
+        onChange={(value) => props.onChange(value || undefined)}
+        options={options()}
+        placeholder={props.placeholder ?? '\u2014 None \u2014'}
+      />
+    </Field>
+  )
+}
+
 /**
  * The SSH authentication source editor shared by connections and groups.
  *
  * UI primitives remain in ui/. This component owns the domain rule that a
- * Credential answers username and method together, so manual authentication
- * controls must not compete with it.
+ * connection authenticates with a bound secret or an inline user+method —
+ * never with an invisible object (ADR-0017).
  */
 export const AuthenticationEditor: Component<AuthenticationEditorProps> = (props) => {
-  const credentialOptions = createMemo((): SelectOption[] =>
-    props.credentials.map((credential) => ({
-      value: credential.id,
-      label: credential.username ? `${credential.name} (${credential.username})` : credential.name,
-    })),
+  // The password method offers the same two-way choice the key method's
+  // four segments do: type a new one, or use a secret the vault already
+  const [passwordMode, setPasswordMode] = createSignal<'new' | 'secret'>(
+    untrack(() => (props.passwordSecret ? 'secret' : 'new')),
   )
-  const selectedCredential = createMemo(() =>
-    props.credentials.find((credential) => credential.id === props.credentialId),
-  )
+
   return (
     <Stack>
-      <Field for={`${props.id}-credential`} label="Credential">
-        <div class="cm-field-row">
-          <Select
-            value={props.credentialId ?? ''}
-            onChange={(value) => props.onCredentialChange(value || undefined)}
-            options={credentialOptions()}
-            placeholder={
-              props.inherit
-                ? '\u2014 Not set (inherit) \u2014'
-                : '\u2014 None (specify below) \u2014'
-            }
-          />
-          <Show when={props.onCreateCredential}>
-            <IconButton
-              size="md"
-              ariaLabel="New credential"
-              title="Create a new credential"
-              onClick={() => props.onCreateCredential?.()}
-            >
-              <PlusIcon />
-            </IconButton>
-          </Show>
-          {props.credentialSuffix}
-        </div>
-      </Field>
-      <Show
-        when={selectedCredential()}
-        fallback={
-          <>
-            <TextField
-              id={`${props.id}-user`}
-              label="User"
-              value={props.username ?? ''}
-              placeholder={
-                props.inherit
-                  ? '\u2014 Not set (inherit) \u2014'
-                  : '\u2014 Your local username \u2014'
-              }
-              onInput={(value) => props.onUsernameChange(value || undefined)}
-            />
-            <AuthMethodEditor
-              id={props.id}
-              auth={props.auth}
-              onAuthChange={props.onAuthChange}
-              inherit={props.inherit}
-              passwordAction={props.passwordAction}
-              publicKeyAction={props.publicKeyAction}
-              suffix={props.authSuffix}
-            />
-          </>
+      <TextField
+        id={`${props.id}-user`}
+        label="User"
+        value={props.username ?? ''}
+        placeholder={
+          props.inherit ? '\u2014 Not set (inherit) \u2014' : '\u2014 Your local username \u2014'
         }
-      >
-        {(credential) => {
-          const draft = () => props.credentialDraft ?? credential()
-          return (
-            <>
-              <TextField
-                id={`${props.id}-cred-name`}
-                label="Name"
-                required
-                value={draft().name}
-                onInput={(v) => props.onCredentialDraftChange?.({ ...draft(), name: v })}
-              />
-              <TextField
-                id={`${props.id}-cred-user`}
-                label="Username"
-                value={draft().username}
-                onInput={(v) => props.onCredentialDraftChange?.({ ...draft(), username: v })}
-              />
-              <AuthMethodEditor
-                id={`${props.id}-cred-auth`}
-                auth={draft().auth}
-                onAuthChange={(value) =>
-                  props.onCredentialDraftChange?.({ ...draft(), auth: value ?? '' })
-                }
-                passwordAction={props.passwordAction}
-                publicKeyAction={props.publicKeyAction}
-                suffix={props.authSuffix}
-              />
-              <Show when={credential().keyFingerprint}>
-                <p class="cm-key-fingerprint">Key fingerprint: {credential().keyFingerprint}</p>
-              </Show>
-              <Show when={props.credentialUsage !== undefined}>
-                <p class="cm-credential-usage">
-                  Used by {props.credentialUsage} connection
-                  {(props.credentialUsage ?? 0) === 1 ? '' : 's'}
-                </p>
-              </Show>
-            </>
-          )
-        }}
+        onInput={(value) => props.onUsernameChange(value || undefined)}
+      />
+      <AuthMethodEditor
+        id={props.id}
+        auth={props.auth}
+        onAuthChange={props.onAuthChange}
+        inherit={props.inherit}
+        passwordAction={props.passwordAction}
+        publicKeyAction={props.publicKeyAction}
+        suffix={props.authSuffix}
+      />
+      <Show when={props.auth === 'password'}>
+        <Field for={`${props.id}-password-source`} label="Password">
+          <SegmentedControl
+            options={[
+              { value: 'new', label: 'Type a new one' },
+              { value: 'secret', label: 'Use existing secret' },
+            ]}
+            value={passwordMode()}
+            onChange={(value) => setPasswordMode(value as 'new' | 'secret')}
+            ariaLabel="Password source"
+          />
+        </Field>
+        <Show when={passwordMode() === 'new'}>{props.passwordAction}</Show>
+        <Show when={passwordMode() === 'secret'}>
+          <SecretPicker
+            id={props.id}
+            label="Existing secret"
+            secrets={props.passwordSecrets}
+            value={props.passwordSecret}
+            onChange={props.onPasswordSecretChange}
+            placeholder={props.inherit ? '\u2014 Not set (inherit) \u2014' : '\u2014 None \u2014'}
+          />
+        </Show>
       </Show>
     </Stack>
   )

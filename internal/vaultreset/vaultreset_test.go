@@ -164,7 +164,7 @@ func TestExecute_ReportsWhatWasActuallyCleared(t *testing.T) {
 	order := []string{}
 	v := &fakeVault{snap: sealedSnapshot(true), order: &order}
 	r := &fakeRefs{
-		impact: profile.SecretReferenceImpact{SecretCount: 4, CredentialCount: 2, ProfileCount: 6},
+		impact: profile.SecretReferenceImpact{SecretCount: 4, ProfileCount: 6},
 		order:  &order,
 	}
 
@@ -172,7 +172,7 @@ func TestExecute_ReportsWhatWasActuallyCleared(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
-	want := vaultreset.Impact{SecretCount: 4, CredentialCount: 2, ProfileCount: 6}
+	want := vaultreset.Impact{SecretCount: 4, ProfileCount: 6}
 	if got.Impact != want {
 		t.Errorf("Impact = %+v, want %+v", got.Impact, want)
 	}

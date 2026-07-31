@@ -527,7 +527,17 @@ it('adds a private key from pasted material', async () => {
   inventory.mockResolvedValue({ entries: [MOCK_ENTRY_1] })
   createSecret.mockResolvedValue({})
 
-  const { container } = await mount(client)
+  // The mint path verifies the key and detects encryption; the add routes
+  // material through it instead of vault.createSecret.
+  const saveKeyMaterial = vi.fn().mockResolvedValue({
+    row: 'secrow:added-key',
+    fingerprint: 'SHA256:abc',
+    passphraseWanted: false,
+  })
+  const pc = { saveKeyMaterial } as unknown as ProfileClient
+
+  const { container } = await mount(client, pc)
+
   await vi.waitFor(() => {
     expect(container.querySelector('.sr-row-label')).toBeTruthy()
   })
@@ -579,12 +589,13 @@ it('adds a private key from pasted material', async () => {
   submit!.click()
 
   await vi.waitFor(() => {
-    expect(createSecret).toHaveBeenCalledWith({
-      name: 'deploy key',
-      kind: 'private-key',
-      value: '-----BEGIN PRIVATE KEY-----\nMIIE\n-----END PRIVATE KEY-----',
-    })
+    expect(saveKeyMaterial).toHaveBeenCalledWith(
+      '-----BEGIN PRIVATE KEY-----\nMIIE\n-----END PRIVATE KEY-----',
+      'deploy key',
+    )
   })
+  // The material path never reaches vault.createSecret.
+  expect(createSecret).not.toHaveBeenCalled()
 })
 
 /**
@@ -853,17 +864,12 @@ it('names the connections a delete would break before offering the danger button
   inventory.mockResolvedValueOnce({ entries: [MOCK_ENTRY_1] }).mockResolvedValue({ entries: [] })
   deleteSecret.mockResolvedValue({})
 
-  const credentialUsage = vi.fn()
-  const pc = { credentialUsage } as unknown as ProfileClient
-  credentialUsage.mockResolvedValue({
-    usage: [
-      {
-        credentialId: 'cred:prod-deploy',
-        profiles: [
-          { profileId: 'ssh:p1:1', profileName: 'web-prod', source: 'profile' },
-          { profileId: 'ssh:p2:1', profileName: 'db-prod', source: 'profile' },
-        ],
-      },
+  const secretUsage = vi.fn()
+  const pc = { secretUsage } as unknown as ProfileClient
+  secretUsage.mockResolvedValue({
+    profiles: [
+      { profileId: 'ssh:p1:1', profileName: 'web-prod', source: 'profile' },
+      { profileId: 'ssh:p2:1', profileName: 'db-prod', source: 'profile' },
     ],
   })
 
@@ -905,9 +911,9 @@ it('keeps the delete button disabled until the breaking connections are named', 
   client.status = vi.fn().mockResolvedValue(UNSEALED_STATUS)
   inventory.mockResolvedValue({ entries: [MOCK_ENTRY_1] })
 
-  let resolveUsage: (v: { usage: never[] }) => void
+  let resolveUsage: (v: { profiles: [] }) => void
   const pc = {
-    credentialUsage: vi.fn(
+    secretUsage: vi.fn(
       () =>
         new Promise((resolve) => {
           resolveUsage = resolve
@@ -933,7 +939,7 @@ it('keeps the delete button disabled until the breaking connections are named', 
   expect(confirm.disabled).toBe(true)
   expect(container.textContent).toContain('Checking which connections use this secret')
 
-  resolveUsage!({ usage: [] })
+  resolveUsage!({ profiles: [] })
   await vi.waitFor(() => {
     expect(confirm.disabled).toBe(false)
   })
@@ -948,7 +954,7 @@ it('refuses to delete when the breaking connections cannot be named', async () =
   inventory.mockResolvedValue({ entries: [MOCK_ENTRY_1] })
 
   const pc = {
-    credentialUsage: vi.fn().mockRejectedValue(new Error('backend unreachable')),
+    secretUsage: vi.fn().mockRejectedValue(new Error('backend unreachable')),
   } as unknown as ProfileClient
 
   const { container } = await mount(client, pc)

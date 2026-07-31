@@ -17,7 +17,7 @@ func TestProfilesRPC_ListEmpty(t *testing.T) {
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
+		WithProfileRepository(ps), WithGroupRepository(ps))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -43,7 +43,7 @@ func TestProfilesRPC_CreateList(t *testing.T) {
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
+		WithProfileRepository(ps), WithGroupRepository(ps))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -93,7 +93,7 @@ func TestProfilesRPC_Delete(t *testing.T) {
 	_ = ps.CreateProfile(p)
 
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
+		WithProfileRepository(ps), WithGroupRepository(ps))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -119,7 +119,7 @@ func TestGroupsRPC_Create(t *testing.T) {
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
+		WithProfileRepository(ps), WithGroupRepository(ps))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -142,7 +142,7 @@ func TestGroupsRPC_Create(t *testing.T) {
 	}
 }
 
-func TestCredentialsRPC_MethodNotFound(t *testing.T) {
+func TestProfilesRPC_UnwiredDoesNotCrash(t *testing.T) {
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
@@ -181,48 +181,41 @@ func TestNoPlaintextSecretsOnWire(t *testing.T) {
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
 	cs := newTestStore()
 
-	// Save a credential with password auth (target).
+	// Target profile carries a bound password secret (ADR-0017): the wire
+	// must never leak its material.
 	tgtPWID, _ := cs.Create(context.Background(), credential.NewSecret(targetCanary))
-	_ = ps.CreateCredential(profile.Credential{
-		ID:       "cred:canary:aaa",
-		Name:     "canary-cred",
-		Username: "canary",
-		Auth:     "password",
-		SecretID: string(tgtPWID),
-	})
-
-	// Save a jump credential (public key).
-	jumpPWID, _ := cs.Create(context.Background(), credential.NewSecret(jumpCanary))
-	_ = ps.CreateCredential(profile.Credential{
-		ID:       "cred:canary:bbb",
-		Name:     "jump-canary",
-		Username: "jump-canary",
-		Auth:     "publicKey",
-		KeyPath:  "/home/canary/.ssh/id_rsa",
-		SecretID: string(jumpPWID),
-	})
-
-	// Create a jump profile.
-	_ = ps.CreateProfile(profile.SSHProfile{
-		Base:    profile.Base{ID: "profile:canary-jump", Name: "canary-jump"},
-		Options: profile.StoredSSHProfileOptions{Host: "jump.canary.example.com", CredentialID: "cred:canary:bbb"},
-	})
-
-	// Create a target profile with a jump host.
 	_ = ps.CreateProfile(profile.SSHProfile{
 		Base: profile.Base{ID: "profile:canary-tgt", Name: "canary-target"},
 		Options: profile.StoredSSHProfileOptions{
-			Host:         "target.canary.example.com",
-			Port:         profile.Ptr(2222),
-			CredentialID: "cred:canary:aaa",
-			JumpHost:     profile.Ptr("profile:canary-jump"),
+			Host:           "target.canary.example.com",
+			Port:           profile.Ptr(2222),
+			User:           profile.Ptr("canary"),
+			Auth:           profile.Ptr(profile.AuthMode("password")),
+			PasswordSecret: string(tgtPWID),
+			JumpHost:       profile.Ptr("profile:canary-jump"),
 		},
 	})
 
-	resolver := connection.NewResolver(ps, ps, ps, cs)
+	// Jump profile with its own bound password secret.
+	jumpPWID, _ := cs.Create(context.Background(), credential.NewSecret(jumpCanary))
+
+	// Create a jump profile.
+	_ = ps.CreateProfile(profile.SSHProfile{
+		Base: profile.Base{ID: "profile:canary-jump", Name: "canary-jump"},
+		Options: profile.StoredSSHProfileOptions{
+			Host:           "jump.canary.example.com",
+			User:           profile.Ptr("jump-canary"),
+			Auth:           profile.Ptr(profile.AuthMode("password")),
+			PasswordSecret: string(jumpPWID),
+		},
+	})
+
+	// The target profile above jumps through it; nothing else to seed.
+
+	resolver := connection.NewResolver(ps, ps, cs)
 	ws := NewWSServer(
 		log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps),
+		WithProfileRepository(ps), WithGroupRepository(ps),
 		WithCredentialStore(cs),
 		WithProfileResolver(resolver),
 	)
@@ -274,7 +267,7 @@ func TestProfilesRPC_CreateRejectsDuplicateID(t *testing.T) {
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
+		WithProfileRepository(ps), WithGroupRepository(ps))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -320,7 +313,7 @@ func TestProfilesRPC_UpdateRejectsMissingID(t *testing.T) {
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
+		WithProfileRepository(ps), WithGroupRepository(ps))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -350,7 +343,7 @@ func TestGroupsRPC_CreateRejectsDuplicateID(t *testing.T) {
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
+		WithProfileRepository(ps), WithGroupRepository(ps))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -378,7 +371,7 @@ func TestGroupsRPC_UpdateRejectsMissingID(t *testing.T) {
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
+		WithProfileRepository(ps), WithGroupRepository(ps))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)

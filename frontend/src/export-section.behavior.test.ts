@@ -11,14 +11,12 @@ import type { ExportManifest, ConfigExport } from './profiles'
 // rendering and interactivity without a real backend.
 const MOCK_MANIFEST: ExportManifest = {
   mode: 'config-export',
-  carries: ['Profiles and groups', 'Credential metadata (not secrets)'],
+  carries: ['Profiles and groups'],
   omits: ['Stored passwords', 'Private keys', 'SSH agent state'],
 }
-
 const MOCK_CONFIG: ConfigExport = {
   profiles: [],
   groups: [],
-  credentials: [],
   settings: { theme: 'dark' },
 }
 
@@ -44,12 +42,10 @@ function createMockClient() {
   vi.spyOn(pc, 'importConfig').mockResolvedValue({
     profilesImported: 3,
     groupsImported: 1,
-    credentialsImported: 2,
   })
   vi.spyOn(pc, 'importPortable').mockResolvedValue({
     profilesImported: 5,
     groupsImported: 2,
-    credentialsImported: 3,
   })
   return { client: pc, manifestSpy }
 }
@@ -134,7 +130,7 @@ describe('export section — mode cards', () => {
   it('renders all four summaries', () => {
     const { container } = mount()
     const text = container.textContent
-    expect(text).toContain('Profiles, groups, credential metadata, and settings')
+    expect(text).toContain('Profiles, groups, and settings')
     expect(text).toContain('Configuration encrypted under a new passphrase')
     expect(text).toContain('File paths to copy; secrets stay in the OS keychain')
     expect(text).toContain('Restore a configuration export into this machine')

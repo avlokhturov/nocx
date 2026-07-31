@@ -2,6 +2,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { render, fireEvent } from '@solidjs/testing-library'
 import { KeyMaterialInput, publicKeyMistake } from './key-material-input'
+import type { InventoryEntry } from './vault-client'
 
 // Uploading `id_ed25519.pub` instead of `id_ed25519` is the mistake this
 // catches, and it is the one a user actually made: the backend answered "not a
@@ -88,5 +89,78 @@ describe('KeyMaterialInput error reporting', () => {
       // And it is the local one, which names the file the user wants.
       expect(shown[0].textContent).toContain('.pub')
     })
+  })
+})
+
+// The Secret segment is the ADR-0017 way to bind an existing vault row: the
+// picker lists the vault's private-key rows, the bound one is the current
+// value, and choosing a row reports it upward.
+describe('KeyMaterialInput secret mode', () => {
+  const KEY_ROWS: InventoryEntry[] = [
+    {
+      id: 'secrow:key-1',
+      name: 'Key for prod-web',
+      kind: 'private-key',
+      provider: 'test',
+      ownerId: '',
+      usedBy: 0,
+      reachable: true,
+    },
+    {
+      id: 'secrow:key-2',
+      name: 'Key for prod-db',
+      kind: 'private-key',
+      provider: 'test',
+      ownerId: '',
+      usedBy: 0,
+      reachable: true,
+    },
+  ]
+
+  function renderSecret(
+    extra?: Partial<{
+      secretValue?: string
+      onSecretChange: (value: string | undefined) => void
+    }>,
+  ) {
+    return render(() => (
+      <KeyMaterialInput
+        id="k"
+        mode="secret"
+        onModeChange={() => {}}
+        pathValue=""
+        onPathChange={() => {}}
+        materialValue=""
+        onMaterialChange={() => {}}
+        secrets={KEY_ROWS}
+        secretValue={extra?.secretValue}
+        onSecretChange={extra?.onSecretChange ?? (() => {})}
+      />
+    ))
+  }
+
+  function picker(container: HTMLElement): HTMLSelectElement {
+    const field = container.querySelector('label[for="k-secret"]')?.closest('.ui-field')
+    expect(field, 'secret picker field not found').toBeTruthy()
+    return field!.querySelector('.ui-select') as HTMLSelectElement
+  }
+
+  it('selecting a secret reports the row handle', () => {
+    const onSecretChange = vi.fn()
+    const { container } = renderSecret({ onSecretChange })
+    fireEvent.change(picker(container), { target: { value: 'secrow:key-2' } })
+    expect(onSecretChange).toHaveBeenCalledWith('secrow:key-2')
+  })
+
+  it('shows the bound row as the current value', () => {
+    const { container } = renderSecret({ secretValue: 'secrow:key-1' })
+    expect(picker(container).value).toBe('secrow:key-1')
+  })
+
+  it('clearing the picker reports undefined', () => {
+    const onSecretChange = vi.fn()
+    const { container } = renderSecret({ onSecretChange })
+    fireEvent.change(picker(container), { target: { value: '' } })
+    expect(onSecretChange).toHaveBeenCalledWith(undefined)
   })
 })

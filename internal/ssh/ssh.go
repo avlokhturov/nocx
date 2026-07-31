@@ -234,6 +234,27 @@ func WithJumpCredentials(store credential.SecretStore, id credential.SecretID) C
 	}
 }
 
+// WithKeySecretID wires the vault-stored private key for the connection:
+// the auth chain loads key bytes from the SecretStore by KeySecretID instead
+// of reading a file. WithPassphraseSecretID pairs the key's stored
+// passphrase with it; both are set by the resolver from the profile's secret
+// bindings (ADR-0017), and the session layer must carry them verbatim.
+func WithKeySecretID(id credential.SecretID) ConnectOption {
+	return func(c *ConnectConfig) { c.KeySecretID = id }
+}
+
+// WithPassphraseSecretID wires the vault-stored passphrase for the
+// connection's private key. Only meaningful alongside WithKeySecretID.
+func WithPassphraseSecretID(id credential.SecretID) ConnectOption {
+	return func(c *ConnectConfig) { c.PassphraseSecretID = id }
+}
+
+// WithJumpPassphraseSecretID wires the vault-stored passphrase for the JUMP
+// host's key. Mirrors WithPassphraseSecretID but for the jump hop.
+func WithJumpPassphraseSecretID(id credential.SecretID) ConnectOption {
+	return func(c *ConnectConfig) { c.JumpPassphraseSecretID = id }
+}
+
 // WithCredentials injects a SecretStore for late-bind of stored
 // passwords by SecretID. The store is the seam between the profile manager
 // and the secret store.

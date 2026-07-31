@@ -255,5 +255,5 @@ func ImportTabbyWithService(cfg *TabbyConfig, svc *profile.ProfileService, typeF
 		})
 	}
 
-	return svc.AtomicImport(profiles, groups, nil)
+	return svc.AtomicImport(profiles, groups)
 }

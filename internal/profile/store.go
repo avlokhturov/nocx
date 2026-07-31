@@ -25,26 +25,6 @@ type GroupRepository interface {
 	DeleteGroup(id string) error
 }
 
-type CredentialMetadataRepository interface {
-	LoadCredentials() ([]Credential, error)
-	CreateCredential(c Credential) error
-	UpdateCredential(id string, p CredentialPatch) (Credential, error)
-	DeleteCredential(id string) error
-	// UpdateSecretRefs sets the credential's record-level password and
-	// passphrase secret references. Pass empty strings to clear a field.
-	UpdateSecretRefs(id string, passwordSecretID, passphraseSecretID string) error
-	// UpdateKeyMaterial sets the credential's record-level key material
-	// secret reference and fingerprint, and clears KeyPath so path and
-	// stored material are never both set. Pass empty strings to clear.
-	UpdateKeyMaterial(id string, keyMaterialSecretID, keyFingerprint string) error
-	// ClearSecretReferences removes every reference to secretID from all
-	// credentials — the record-level password, passphrase and key-material
-	// fields — in one write. It is the metadata-first half of deleting a
-	// secret (ADR-0011 §4): nothing may keep pointing at a store entry that
-	// is about to be gone. A secret nothing references is a no-op.
-	ClearSecretReferences(secretID string) error
-}
-
 // JSONStore persists profiles and groups to a single JSON file on disk.
 // The file format is:
 //
@@ -74,9 +54,8 @@ func NewJSONStoreWithDocStore(docStore storage.DocumentStore, fileName string) *
 }
 
 type storeData struct {
-	Profiles    []SSHProfile   `json:"profiles,omitempty"`
-	Groups      []ProfileGroup `json:"groups,omitempty"`
-	Credentials []Credential   `json:"credentials,omitempty"`
+	Profiles []SSHProfile   `json:"profiles,omitempty"`
+	Groups   []ProfileGroup `json:"groups,omitempty"`
 }
 
 func (s *JSONStore) load() (*storeData, error) {
@@ -97,9 +76,9 @@ func (s *JSONStore) writeLocked(d *storeData) error {
 	return s.docStore.Write(s.fileName, d)
 }
 
-// LoadAll returns the full document state — all profiles, groups, and
-// credentials. Used by the domain service for atomic import operations,
-// where the caller needs a consistent snapshot of the entire store.
+// LoadAll returns the full document state — all profiles and groups.
+// Used by the domain service for atomic import operations, where the
+// caller needs a consistent snapshot of the entire store.
 func (s *JSONStore) LoadAll() (*storeData, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -135,7 +114,7 @@ func (s *JSONStore) LoadProfiles() ([]SSHProfile, error) {
 }
 
 // ErrProfileIDRequired, ErrProfileExists and ErrProfileNotFound make
-// create and update distinguishable — the same pattern as credentials.
+// create and update distinguishable.
 var (
 	ErrProfileIDRequired = errors.New("profile ID is required")
 	ErrProfileExists     = errors.New("profile already exists")
@@ -402,188 +381,4 @@ func (s *JSONStore) ApplyGroups(groups []ProfileGroup) error {
 	}
 
 	return s.writeLocked(d)
-}
-
-// ---------------------------------------------------------------------------
-// Credential CRUD
-// ---------------------------------------------------------------------------
-
-func (s *JSONStore) LoadCredentials() ([]Credential, error) {
-	d, err := s.load()
-	if err != nil {
-		return nil, err
-	}
-	return d.Credentials, nil
-}
-
-// ErrCredentialIDRequired, ErrCredentialExists and ErrCredentialNotFound make
-// create and update distinguishable. The single SaveCredential upsert they
-// replace accepted an empty ID and silently overwrote an existing record, so a
-// create could destroy data it never read (nocx-u5ai).
-var (
-	ErrCredentialIDRequired = errors.New("credential ID is required")
-	ErrCredentialExists     = errors.New("credential already exists")
-	ErrCredentialNotFound   = errors.New("credential not found")
-)
-
-// CreateCredential stores a new credential. It refuses an empty ID and refuses
-// to overwrite an existing one.
-func (s *JSONStore) CreateCredential(c Credential) error {
-	if c.ID == "" {
-		return ErrCredentialIDRequired
-	}
-	if err := c.Validate(); err != nil {
-		return err
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	d, err := s.load()
-	if err != nil {
-		return err
-	}
-	for _, existing := range d.Credentials {
-		if existing.ID == c.ID {
-			return fmt.Errorf("%s: %w", c.ID, ErrCredentialExists)
-		}
-	}
-	d.Credentials = append(d.Credentials, c)
-	return s.writeLocked(d)
-}
-
-// UpdateCredential merges a sparse patch onto the stored record and returns the
-// result. The read-merge-write runs under the mutex: doing it in the caller
-// would let a concurrent savePassword land between the read and the write and
-// be silently discarded.
-func (s *JSONStore) UpdateCredential(id string, p CredentialPatch) (Credential, error) {
-	if id == "" {
-		return Credential{}, ErrCredentialIDRequired
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	d, err := s.load()
-	if err != nil {
-		return Credential{}, err
-	}
-	for i, existing := range d.Credentials {
-		if existing.ID == id {
-			merged := existing.WithPatch(p)
-			if err := merged.Validate(); err != nil {
-				return Credential{}, err
-			}
-			d.Credentials[i] = merged
-			if err := s.writeLocked(d); err != nil {
-				return Credential{}, err
-			}
-			return merged, nil
-		}
-	}
-	return Credential{}, fmt.Errorf("%s: %w", id, ErrCredentialNotFound)
-}
-
-// UpdateSecretRefs sets the credential's record-level password and passphrase
-// secret references. Pass empty strings to clear a field.
-func (s *JSONStore) UpdateSecretRefs(id string, passwordSecretID, passphraseSecretID string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	d, err := s.load()
-	if err != nil {
-		return err
-	}
-	for i, existing := range d.Credentials {
-		if existing.ID == id {
-			d.Credentials[i].SecretID = passwordSecretID
-			d.Credentials[i].PassphraseSecretID = passphraseSecretID
-			return s.writeLocked(d)
-		}
-	}
-	return fmt.Errorf("%s: %w", id, ErrCredentialNotFound)
-}
-
-// UpdateKeyMaterial sets the credential's record-level key material secret
-// reference and fingerprint, and clears KeyPath so path and stored material
-// are never both set. Pass empty strings to clear the fields.
-func (s *JSONStore) UpdateKeyMaterial(id string, keyMaterialSecretID, keyFingerprint string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	d, err := s.load()
-	if err != nil {
-		return err
-	}
-	for i, existing := range d.Credentials {
-		if existing.ID == id {
-			d.Credentials[i].KeyMaterialSecretID = keyMaterialSecretID
-			d.Credentials[i].KeyFingerprint = keyFingerprint
-			// Clear KeyPath — stored key material and a path are
-			// mutually exclusive (brief §3).
-			d.Credentials[i].KeyPath = ""
-			return s.writeLocked(d)
-		}
-	}
-	return fmt.Errorf("%s: %w", id, ErrCredentialNotFound)
-}
-
-// ClearSecretReferences removes every reference to secretID from all
-// credentials — the record-level password, passphrase and key-material
-// fields — in ONE write. It is the metadata-first half of deleting a
-// secret (ADR-0011 §4): nothing may keep pointing at a store entry that is
-// about to be gone, and a loop of per-field setters could fail halfway,
-// leaving a partial clear. Clearing the key material reference clears the
-// fingerprint too — the two describe the same material, and
-// deleteKeyMaterialForCredential already clears them together.
-//
-// Idempotent: a secret nothing references clears nothing and succeeds.
-func (s *JSONStore) ClearSecretReferences(secretID string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	d, err := s.load()
-	if err != nil {
-		return err
-	}
-
-	changed := false
-	for i := range d.Credentials {
-		c := &d.Credentials[i]
-		if c.SecretID == secretID {
-			c.SecretID = ""
-			changed = true
-		}
-		if c.PassphraseSecretID == secretID {
-			c.PassphraseSecretID = ""
-			changed = true
-		}
-		if c.KeyMaterialSecretID == secretID {
-			c.KeyMaterialSecretID = ""
-			c.KeyFingerprint = ""
-			changed = true
-		}
-	}
-
-	if !changed {
-		return nil
-	}
-	return s.writeLocked(d)
-}
-
-func (s *JSONStore) DeleteCredential(id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	d, err := s.load()
-	if err != nil {
-		return err
-	}
-	for i, existing := range d.Credentials {
-		if existing.ID == id {
-			d.Credentials = append(d.Credentials[:i], d.Credentials[i+1:]...)
-			return s.writeLocked(d)
-		}
-	}
-	return nil
 }

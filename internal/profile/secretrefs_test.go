@@ -2,26 +2,25 @@ package profile
 
 import "testing"
 
-// A credential holding a reference in every record-level field. The point of
+// A profile holding a reference in every secret-binding field. The point of
 // the fixture is that a reset must find all of them: a sweep that clears only
 // one field leaves a store that still claims to hold secrets that are gone.
-func credentialWithReferencesEverywhere() Credential {
-	return Credential{
-		ID:       "cred:everywhere:1",
-		Name:     "everywhere",
-		Username: "u",
-		Auth:     AuthPassword,
-		// Record-level fields.
-		SecretID:            "sec:v1:file:aaaa",
-		PassphraseSecretID:  "sec:v1:file:bbbb",
-		KeyMaterialSecretID: "sec:v1:file:cccc",
+func profileWithReferencesEverywhere() SSHProfile {
+	return SSHProfile{
+		Base: Base{ID: "ssh:everywhere:1", Type: "ssh", Name: "everywhere"},
+		Options: StoredSSHProfileOptions{
+			Host:                "h",
+			PasswordSecret:      "sec:v1:file:aaaa",
+			KeySecret:           "sec:v1:file:bbbb",
+			KeyPassphraseSecret: "sec:v1:file:cccc",
+		},
 	}
 }
 
 func TestCountSecretReferences_CountsEveryPlaceAReferenceLives(t *testing.T) {
 	s := newTestStore(t)
-	if err := s.CreateCredential(credentialWithReferencesEverywhere()); err != nil {
-		t.Fatalf("CreateCredential: %v", err)
+	if err := s.CreateProfile(profileWithReferencesEverywhere()); err != nil {
+		t.Fatalf("CreateProfile: %v", err)
 	}
 
 	impact, err := s.CountSecretReferences()
@@ -31,24 +30,26 @@ func TestCountSecretReferences_CountsEveryPlaceAReferenceLives(t *testing.T) {
 	if impact.SecretCount != 3 {
 		t.Errorf("SecretCount = %d, want 3", impact.SecretCount)
 	}
-	if impact.CredentialCount != 1 {
-		t.Errorf("CredentialCount = %d, want 1", impact.CredentialCount)
+	if impact.ProfileCount != 1 {
+		t.Errorf("ProfileCount = %d, want 1", impact.ProfileCount)
 	}
 }
 
-// Distinct secrets, not distinct fields. One secret shared by two record-level
+// Distinct secrets, not distinct fields. One secret shared by two binding
 // fields is one thing the user loses, and telling them "2 saved passwords"
 // when there is one overstates the damage in a confirmation they are reading
 // to decide.
 func TestCountSecretReferences_CountsASharedSecretOnce(t *testing.T) {
 	s := newTestStore(t)
-	shared := Credential{
-		ID: "cred:shared:1", Name: "shared", Username: "u", Auth: AuthPassword,
-		SecretID:           "sec:v1:file:same",
-		PassphraseSecretID: "sec:v1:file:same",
-	}
-	if err := s.CreateCredential(shared); err != nil {
-		t.Fatalf("CreateCredential: %v", err)
+	if err := s.CreateProfile(SSHProfile{
+		Base: Base{ID: "ssh:shared:1", Type: "ssh", Name: "shared"},
+		Options: StoredSSHProfileOptions{
+			Host:           "h",
+			PasswordSecret: "sec:v1:file:same",
+			KeySecret:      "sec:v1:file:same",
+		},
+	}); err != nil {
+		t.Fatalf("CreateProfile: %v", err)
 	}
 
 	impact, err := s.CountSecretReferences()
@@ -60,46 +61,39 @@ func TestCountSecretReferences_CountsASharedSecretOnce(t *testing.T) {
 	}
 }
 
-// A credential with no stored material must not be counted as affected — the
+// A profile with no stored material must not be counted as affected — the
 // confirmation would name connections that lose nothing.
-func TestCountSecretReferences_IgnoresCredentialsHoldingNothing(t *testing.T) {
+func TestCountSecretReferences_IgnoresProfilesHoldingNothing(t *testing.T) {
 	s := newTestStore(t)
-	if err := s.CreateCredential(Credential{
-		ID: "cred:agent:1", Name: "agent", Username: "u", Auth: AuthAgent,
+	if err := s.CreateProfile(SSHProfile{
+		Base:    Base{ID: "ssh:agent:1", Type: "ssh", Name: "agent"},
+		Options: StoredSSHProfileOptions{Host: "h"},
 	}); err != nil {
-		t.Fatalf("CreateCredential: %v", err)
+		t.Fatalf("CreateProfile: %v", err)
 	}
 
 	impact, err := s.CountSecretReferences()
 	if err != nil {
 		t.Fatalf("CountSecretReferences: %v", err)
 	}
-	if impact.SecretCount != 0 || impact.CredentialCount != 0 {
+	if impact.SecretCount != 0 || impact.ProfileCount != 0 {
 		t.Errorf("impact = %+v, want zero", impact)
 	}
 }
 
-func TestCountSecretReferences_CountsProfilesUsingAffectedCredentials(t *testing.T) {
+func TestCountSecretReferences_CountsProfilesHoldingReferences(t *testing.T) {
 	s := newTestStore(t)
-	if err := s.CreateCredential(credentialWithReferencesEverywhere()); err != nil {
-		t.Fatalf("CreateCredential: %v", err)
-	}
-	if err := s.CreateCredential(Credential{
-		ID: "cred:agent:1", Name: "agent", Username: "u", Auth: AuthAgent,
-	}); err != nil {
-		t.Fatalf("CreateCredential: %v", err)
-	}
-	profileUsing := func(id, name, credID string) SSHProfile {
+	profileUsing := func(id, name, ref string) SSHProfile {
 		return SSHProfile{
 			Base:    Base{ID: id, Type: "ssh", Name: name},
-			Options: StoredSSHProfileOptions{Host: "h", CredentialID: credID},
+			Options: StoredSSHProfileOptions{Host: "h", PasswordSecret: ref},
 		}
 	}
 	for _, p := range []SSHProfile{
-		profileUsing("p1", "one", "cred:everywhere:1"),
-		profileUsing("p2", "two", "cred:everywhere:1"),
-		// Uses the credential that stores nothing: unaffected.
-		profileUsing("p3", "three", "cred:agent:1"),
+		profileUsing("p1", "one", "sec:everywhere:1"),
+		profileUsing("p2", "two", "sec:everywhere:1"),
+		// Holds nothing: unaffected.
+		profileUsing("p3", "three", ""),
 	} {
 		if err := s.CreateProfile(p); err != nil {
 			t.Fatalf("CreateProfile %s: %v", p.ID, err)
@@ -116,13 +110,13 @@ func TestCountSecretReferences_CountsProfilesUsingAffectedCredentials(t *testing
 }
 
 // The operation the reset performs. Every reference goes; nothing else about
-// the credential does — the user keeps their connections, their usernames and
+// the profile does — the user keeps their connections, their usernames and
 // their key paths, and only stops claiming to hold secrets that no longer
 // exist.
 func TestClearAllSecretReferences_ClearsEveryPlaceAndKeepsTheRest(t *testing.T) {
 	s := newTestStore(t)
-	if err := s.CreateCredential(credentialWithReferencesEverywhere()); err != nil {
-		t.Fatalf("CreateCredential: %v", err)
+	if err := s.CreateProfile(profileWithReferencesEverywhere()); err != nil {
+		t.Fatalf("CreateProfile: %v", err)
 	}
 
 	impact, err := s.ClearAllSecretReferences()
@@ -133,21 +127,21 @@ func TestClearAllSecretReferences_ClearsEveryPlaceAndKeepsTheRest(t *testing.T) 
 		t.Errorf("reported SecretCount = %d, want 3", impact.SecretCount)
 	}
 
-	creds, err := s.LoadCredentials()
+	profiles, err := s.LoadProfiles()
 	if err != nil {
-		t.Fatalf("LoadCredentials: %v", err)
+		t.Fatalf("LoadProfiles: %v", err)
 	}
-	if len(creds) != 1 {
-		t.Fatalf("credential count = %d, want 1 — clearing references must not delete records", len(creds))
+	if len(profiles) != 1 {
+		t.Fatalf("profile count = %d, want 1 — clearing references must not delete records", len(profiles))
 	}
-	c := creds[0]
+	p := profiles[0]
 
-	if c.SecretID != "" || c.PassphraseSecretID != "" || c.KeyMaterialSecretID != "" {
-		t.Errorf("record-level references survived: %+v", c)
+	if p.Options.PasswordSecret != "" || p.Options.KeySecret != "" || p.Options.KeyPassphraseSecret != "" {
+		t.Errorf("secret bindings survived: %+v", p.Options)
 	}
-	// The identity of the credential is untouched.
-	if c.Name != "everywhere" || c.Username != "u" {
-		t.Errorf("clearing references changed the credential itself: %+v", c)
+	// The identity of the profile is untouched.
+	if p.Name != "everywhere" || p.Options.Host != "h" {
+		t.Errorf("clearing references changed the profile itself: %+v", p)
 	}
 }
 
@@ -156,8 +150,8 @@ func TestClearAllSecretReferences_ClearsEveryPlaceAndKeepsTheRest(t *testing.T) 
 // in order not to claim it destroyed something again.
 func TestClearAllSecretReferences_IsIdempotent(t *testing.T) {
 	s := newTestStore(t)
-	if err := s.CreateCredential(credentialWithReferencesEverywhere()); err != nil {
-		t.Fatalf("CreateCredential: %v", err)
+	if err := s.CreateProfile(profileWithReferencesEverywhere()); err != nil {
+		t.Fatalf("CreateProfile: %v", err)
 	}
 	if _, err := s.ClearAllSecretReferences(); err != nil {
 		t.Fatalf("first clear: %v", err)
@@ -178,7 +172,7 @@ func TestClearAllSecretReferences_OnAnEmptyStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ClearAllSecretReferences: %v", err)
 	}
-	if impact.SecretCount != 0 || impact.CredentialCount != 0 || impact.ProfileCount != 0 {
+	if impact.SecretCount != 0 || impact.ProfileCount != 0 {
 		t.Errorf("impact = %+v, want zero", impact)
 	}
 }

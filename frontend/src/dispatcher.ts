@@ -41,6 +41,11 @@ const MAX_BACKOFF_MS = 5000
 interface PendingCall {
   resolve: (v: unknown) => void
   reject: (e: Error) => void
+  // The request itself, so a sealed response can be re-sent verbatim (with a
+  // fresh id) after the vault layer raises the unlock prompt.
+  method: string
+  params: unknown
+  sealedRetried: boolean
 }
 
 export class Dispatcher {
@@ -120,10 +125,26 @@ export class Dispatcher {
 
   // --- RPC -----------------------------------------------------------------
 
+  /**
+   * Installed by the vault layer. When set, a response reporting the vault
+   * sealed defers the caller's promise until this hook resolves (the vault
+   * was unsealed), then retries the request exactly once. The hook may
+   * reject (user cancelled) — that rejection replaces the caller's error.
+   * This is the ONE seam where a sealed vault raises the unlock prompt; no
+   * call site wraps its own vault calls.
+   */
+  onVaultSealed?: (method: string) => Promise<void>
+
   call<T = unknown>(method: string, params: unknown): Promise<T> {
     return new Promise((resolve, reject) => {
       const id = this.nextID++
-      this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject })
+      this.pending.set(id, {
+        resolve: resolve as (v: unknown) => void,
+        reject,
+        method,
+        params,
+        sealedRetried: false,
+      })
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
         this.pending.delete(id)
         reject(new Error('not connected'))
@@ -216,6 +237,37 @@ export class Dispatcher {
       if (!p) return
       this.pending.delete(msg.id)
       if (msg.error) {
+        if (
+          this.onVaultSealed &&
+          !p.sealedRetried &&
+          msg.error.data &&
+          typeof msg.error.data === 'object' &&
+          'reason' in msg.error.data &&
+          msg.error.data.reason === 'vault-sealed'
+        ) {
+          // Keep the caller's promise pending: raise the unlock prompt (the
+          // vault owns it), then re-send the request verbatim with a fresh
+          // id. Exactly one retry — a second sealed error rejects as-is.
+          p.sealedRetried = true
+          void this.onVaultSealed(p.method).then(
+            () => {
+              const id = this.nextID++
+              this.pending.set(id, p)
+              if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+                this.pending.delete(id)
+                p.reject(new Error('not connected'))
+                return
+              }
+              this.ws.send(
+                JSON.stringify({ jsonrpc: '2.0', id, method: p.method, params: p.params }),
+              )
+            },
+            (e: unknown) => {
+              p.reject(e instanceof Error ? e : new Error(String(e)))
+            },
+          )
+          return
+        }
         p.reject(new RpcError(msg.error.message ?? 'rpc error', msg.error.code, msg.error.data))
       } else {
         p.resolve(msg.result)

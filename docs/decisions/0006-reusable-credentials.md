@@ -1,6 +1,8 @@
 # ADR-0006 — Reusable Credentials (УЗ) for SSH Connections
 
-- **Status:** Accepted (amended 2026-07-29)
+- **Status:** Superseded by ADR-0017 (Accepted 2026-07-31). The credential
+  aggregate is deleted, not renamed — see ADR-0017 for what happens to each
+  of its jobs. Kept for the record; no part of it describes the current model.
 - **Date:** 2026-07-24
 - **Related:** Connection Manager UI, SSH authentication, `nocx-ec2u`, `nocx-j685`, `nocx-0w2f`
 

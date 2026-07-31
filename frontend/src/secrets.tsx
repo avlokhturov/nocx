@@ -24,7 +24,12 @@ import { TextField } from './ui/text-field'
 import { SegmentedControl } from './ui/segmented-control'
 import { createFormValidation, required } from './ui/validation'
 import { KeyIcon, LockIcon, PencilIcon, ResetIcon, TrashIcon } from './ui/icons'
-import { DEFAULT_KEY_MODE, KeyMaterialInput, suppliesMaterial } from './key-material-input'
+import {
+  DEFAULT_KEY_MODE,
+  KeyMaterialInput,
+  KeyPassphrasePrompt,
+  suppliesMaterial,
+} from './key-material-input'
 import type { KeyInputMode } from './key-material-input'
 import { showToast } from './ui/toast'
 import type { VaultClient, InventoryEntry } from './vault-client'
@@ -38,7 +43,7 @@ export interface SecretsSectionProps {
   /** Native dialog capability (dialog.*). Absent in the dev-web harness and
    *  in tests; the surfaces then degrade to typing paths by hand. */
   dialogClient?: DialogClient
-  /** Connection usage (credentials.usage). Needed to NAME the connections a
+  /** Connection usage (secrets.usage). Needed to NAME the connections a
    *  delete would break — the delete confirmation says which connections
    *  stop working before anything is deleted. */
   profileClient?: ProfileClient
@@ -88,6 +93,18 @@ export function SecretsSection(props: SecretsSectionProps) {
   const [addName, setAddName] = createSignal('')
   const [addKind, setAddKind] = createSignal<AddKind>('password')
   const [addValue, setAddValue] = createSignal('')
+  const [keyPassphraseAsk, setKeyPassphraseAsk] = createSignal<{
+    keyRow: string
+    keyName: string
+    passphraseName: string
+    resolve: (outcome: { saved: boolean; row?: string }) => void
+  } | null>(null)
+  const askKeyPassphrase = (
+    keyRow: string,
+    keyName: string,
+    passphraseName: string,
+  ): Promise<{ saved: boolean; row?: string }> =>
+    new Promise((resolve) => setKeyPassphraseAsk({ keyRow, keyName, passphraseName, resolve }))
   const [addKeyMode, setAddKeyMode] = createSignal<KeyInputMode>(DEFAULT_KEY_MODE)
   const [addKeyMaterial, setAddKeyMaterial] = createSignal('')
   const [addKeyPath, setAddKeyPath] = createSignal('')
@@ -139,7 +156,7 @@ export function SecretsSection(props: SecretsSectionProps) {
   // confirmation").
   const [deleteTarget, setDeleteTarget] = createSignal<InventoryEntry | null>(null)
   const [deleteBusy, setDeleteBusy] = createSignal(false)
-  // Connection names for the target's owning credential. null while loading,
+  // Connection names for the target secret. null while loading,
   // [] once loaded with nothing to name. Only fetched for rows in use — a
   // plain confirmation for a secret nothing uses.
   const [deleteNames, setDeleteNames] = createSignal<string[] | null>(null)
@@ -217,7 +234,7 @@ export function SecretsSection(props: SecretsSectionProps) {
     }
     setAddBusy(true)
     try {
-      // A private key in path mode is dereferenced by the BACKEND at save
+      // A private key in path mode is dereferenced by the BACKEND at save.
       const params: {
         name: string
         kind: 'password' | 'key-passphrase' | 'private-key'
@@ -234,7 +251,38 @@ export function SecretsSection(props: SecretsSectionProps) {
       } else {
         params.value = addValue()
       }
-      await props.vaultClient.createSecret(params)
+      // An encrypted private key needs its passphrase stored with it: mint
+      // through the same verified path the connection editor uses, and ask
+      // for the passphrase when the backend reports the key is locked. A
+      // cancelled or wrong passphrase aborts the add — the key is not
+      if (addKind() === 'private-key' && suppliesMaterial(addKeyMode())) {
+        const pc = props.profileClient
+        if (!pc) {
+          setAddOpen(false)
+          showToast({ level: 'danger', message: 'This window cannot add a private key.' })
+          void load()
+          return
+        }
+        const minted = await pc.saveKeyMaterial(addKeyMaterial(), addName().trim())
+        if (minted.passphraseWanted) {
+          const outcome = await askKeyPassphrase(
+            minted.row,
+            addName().trim(),
+            `Passphrase for ${addName().trim()}`,
+          )
+          if (!outcome.saved) {
+            setAddOpen(false)
+            showToast({
+              level: 'info',
+              message: 'Key added without a passphrase — a connection using it will ask for one.',
+            })
+            void load()
+            return
+          }
+        }
+      } else {
+        await props.vaultClient.createSecret(params)
+      }
       setAddOpen(false)
       showToast({ level: 'success', message: `Added "${addName().trim()}"` })
       void load()
@@ -350,8 +398,7 @@ export function SecretsSection(props: SecretsSectionProps) {
       return
     }
     try {
-      const { usage } = await pc.credentialUsage()
-      const refs = usage.find((u) => u.credentialId === entry.ownerId)?.profiles ?? []
+      const { profiles: refs } = await pc.secretUsage(entry.id)
       setDeleteNames(refs.map((r) => r.profileName).filter(Boolean))
     } catch (err) {
       const message = (err as Error).message
@@ -611,6 +658,27 @@ export function SecretsSection(props: SecretsSectionProps) {
             </Show>
           </Stack>
         </Dialog>
+      </Show>
+
+      {/* Key-passphrase ask — an encrypted private key was just minted; the
+          passphrase is asked for right there, verified against the key. */}
+      <Show when={keyPassphraseAsk()}>
+        {(ask) => (
+          <Show when={props.profileClient}>
+            <KeyPassphrasePrompt
+              open
+              keyName={ask().keyName}
+              keyRow={ask().keyRow}
+              passphraseName={ask().passphraseName}
+              client={props.profileClient!}
+              onResult={(outcome, row) => {
+                const resolve = ask().resolve
+                setKeyPassphraseAsk(null)
+                resolve(outcome === 'saved' ? { saved: true, row } : { saved: false })
+              }}
+            />
+          </Show>
+        )}
       </Show>
 
       {/* Replace-value dialog — the field is EMPTY and labelled as a

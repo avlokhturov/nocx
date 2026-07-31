@@ -64,11 +64,13 @@ type groupImpactResponse struct {
 
 // dangerousFields is the set of field names whose change is auth-affecting.
 var dangerousFields = map[string]bool{
-	"credentialId": true,
-	"user":         true,
-	"auth":         true,
-	"jumpHost":     true,
-	"port":         true,
+	"passwordSecret":      true,
+	"keySecret":           true,
+	"keyPassphraseSecret": true,
+	"user":                true,
+	"auth":                true,
+	"jumpHost":            true,
+	"port":                true,
 }
 
 func isDangerousField(field string) bool {
@@ -76,7 +78,7 @@ func isDangerousField(field string) bool {
 }
 
 func (s *WSServer) handleGroupImpact(wconn *wsConn, req jsonrpcRequest) {
-	if s.groups == nil || s.profiles == nil || s.credMeta == nil {
+	if s.groups == nil || s.profiles == nil {
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "groups not available"))
 		return
 	}
@@ -102,18 +104,19 @@ func (s *WSServer) handleGroupImpact(wconn *wsConn, req jsonrpcRequest) {
 		return
 	}
 
-	// Load credentials for credential-layer resolution.
-	allCreds, err := s.credMeta.LoadCredentials()
-	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
-		return
-	}
-
 	if params.Group != nil {
-		resp := computeGroupUpdateImpact(*params.Group, allProfiles, allGroups, allCreds)
+		// The renderer proposes bindings by row handle: resolve them to
+		// stored references before computing impact, or the resolution of
+		// the proposed defaults would carry row handles into the diff.
+		proposed, werr := s.groupFromWire(*params.Group)
+		if werr != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, werr.Error()))
+			return
+		}
+		resp := computeGroupUpdateImpact(proposed, allProfiles, allGroups)
 		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(resp)))
 	} else {
-		resp := computeGroupDeleteImpact(params.DeleteGroupID, allProfiles, allGroups, allCreds)
+		resp := computeGroupDeleteImpact(params.DeleteGroupID, allProfiles, allGroups)
 		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(resp)))
 	}
 }
@@ -124,7 +127,6 @@ func computeGroupUpdateImpact(
 	proposed profile.ProfileGroup,
 	allProfiles []profile.SSHProfile,
 	allGroups []profile.ProfileGroup,
-	allCreds []profile.Credential,
 ) groupImpactResponse {
 	// Find the current group position.
 	curIdx := -1
@@ -160,12 +162,6 @@ func computeGroupUpdateImpact(
 		}
 	}
 
-	// Build credential lookup.
-	credByID := make(map[string]profile.Credential, len(allCreds))
-	for _, c := range allCreds {
-		credByID[c.ID] = c
-	}
-
 	// Resolve every profile with current groups and with modified groups.
 	// Collect only profiles whose effective options actually change.
 	var impacts []profileImpact
@@ -180,17 +176,8 @@ func computeGroupUpdateImpact(
 			continue
 		}
 
-		// Apply credential layer to both.
-		if oldErr == nil && oldEff.ResolvedOptions.CredentialID != "" {
-			if cred, ok := credByID[oldEff.ResolvedOptions.CredentialID]; ok {
-				oldEff = profile.ApplyCredentialLayer(oldEff, &cred)
-			}
-		}
-		if newErr == nil && newEff.ResolvedOptions.CredentialID != "" {
-			if cred, ok := credByID[newEff.ResolvedOptions.CredentialID]; ok {
-				newEff = profile.ApplyCredentialLayer(newEff, &cred)
-			}
-		}
+		// Identity lives inline on the profile (ADR-0017): no credential
+		// layer is applied.
 
 		// Compute diffs between old and new resolved options.
 		diffs := diffResolvedOptions(oldEff, newEff, oldErr, newErr)
@@ -230,7 +217,6 @@ func computeGroupDeleteImpact(
 	deleteGroupID string,
 	allProfiles []profile.SSHProfile,
 	allGroups []profile.ProfileGroup,
-	allCreds []profile.Credential,
 ) groupImpactResponse {
 	// Find the group to delete.
 	found := false
@@ -296,12 +282,6 @@ func computeGroupDeleteImpact(
 		di.Reason = fmt.Sprintf("%d child groups will be promoted to root", len(childGroups))
 	}
 
-	// Build credential lookup.
-	credByID := make(map[string]profile.Credential, len(allCreds))
-	for _, c := range allCreds {
-		credByID[c.ID] = c
-	}
-
 	// Compute profile impact.
 	var impacts []profileImpact
 	anyDangerous := false
@@ -313,17 +293,8 @@ func computeGroupDeleteImpact(
 		if oldErr != nil && newErr != nil && oldErr.Error() == newErr.Error() {
 			continue
 		}
-
-		if oldErr == nil && oldEff.ResolvedOptions.CredentialID != "" {
-			if cred, ok := credByID[oldEff.ResolvedOptions.CredentialID]; ok {
-				oldEff = profile.ApplyCredentialLayer(oldEff, &cred)
-			}
-		}
-		if newErr == nil && newEff.ResolvedOptions.CredentialID != "" {
-			if cred, ok := credByID[newEff.ResolvedOptions.CredentialID]; ok {
-				newEff = profile.ApplyCredentialLayer(newEff, &cred)
-			}
-		}
+		// Identity lives inline on the profile (ADR-0017): no credential
+		// layer is applied.
 
 		diffs := diffResolvedOptions(oldEff, newEff, oldErr, newErr)
 		if len(diffs) == 0 {
@@ -402,7 +373,9 @@ func diffResolvedOptions(oldEff, newEff profile.EffectiveProfile, oldErr, newErr
 		})
 	}
 
-	addDiff("credentialId", oldOpts.CredentialID, newOpts.CredentialID)
+	addDiff("passwordSecret", secretRefToRow(oldOpts.PasswordSecret), secretRefToRow(newOpts.PasswordSecret))
+	addDiff("keySecret", secretRefToRow(oldOpts.KeySecret), secretRefToRow(newOpts.KeySecret))
+	addDiff("keyPassphraseSecret", secretRefToRow(oldOpts.KeyPassphraseSecret), secretRefToRow(newOpts.KeyPassphraseSecret))
 	addDiff("port", oldOpts.Port, newOpts.Port)
 	addDiff("user", oldOpts.User, newOpts.User)
 	addDiff("auth", oldOpts.Auth, newOpts.Auth)
@@ -433,7 +406,7 @@ func (p profileMoveImpactParams) validate() error {
 }
 
 func (s *WSServer) handleProfileMoveImpact(wconn *wsConn, req jsonrpcRequest) {
-	if s.groups == nil || s.profiles == nil || s.credMeta == nil {
+	if s.groups == nil || s.profiles == nil {
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "profiles not available"))
 		return
 	}
@@ -458,13 +431,8 @@ func (s *WSServer) handleProfileMoveImpact(wconn *wsConn, req jsonrpcRequest) {
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
 		return
 	}
-	allCreds, err := s.credMeta.LoadCredentials()
-	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
-		return
-	}
 
-	resp := computeProfileMoveImpact(params.ProfileIDs, params.TargetGroupID, allProfiles, allGroups, allCreds)
+	resp := computeProfileMoveImpact(params.ProfileIDs, params.TargetGroupID, allProfiles, allGroups)
 	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(resp)))
 }
 
@@ -478,18 +446,11 @@ func computeProfileMoveImpact(
 	targetGroupID string,
 	allProfiles []profile.SSHProfile,
 	allGroups []profile.ProfileGroup,
-	allCreds []profile.Credential,
 ) groupImpactResponse {
 	// Build profile lookup.
 	profileByID := make(map[string]profile.SSHProfile, len(allProfiles))
 	for _, p := range allProfiles {
 		profileByID[p.ID] = p
-	}
-
-	// Build credential lookup.
-	credByID := make(map[string]profile.Credential, len(allCreds))
-	for _, c := range allCreds {
-		credByID[c.ID] = c
 	}
 
 	var impacts []profileImpact
@@ -514,17 +475,8 @@ func computeProfileMoveImpact(
 			continue
 		}
 
-		// Apply credential layer to both.
-		if oldErr == nil && oldEff.ResolvedOptions.CredentialID != "" {
-			if cred, ok := credByID[oldEff.ResolvedOptions.CredentialID]; ok {
-				oldEff = profile.ApplyCredentialLayer(oldEff, &cred)
-			}
-		}
-		if newErr == nil && newEff.ResolvedOptions.CredentialID != "" {
-			if cred, ok := credByID[newEff.ResolvedOptions.CredentialID]; ok {
-				newEff = profile.ApplyCredentialLayer(newEff, &cred)
-			}
-		}
+		// Identity lives inline on the profile (ADR-0017): no credential
+		// layer is applied.
 
 		// Compute diffs.
 		diffs := diffResolvedOptions(oldEff, newEff, oldErr, newErr)
@@ -586,6 +538,17 @@ func (s *WSServer) handleGroupApply(wconn *wsConn, req jsonrpcRequest) {
 		return
 	}
 
+	// The renderer names secret bindings by row handle (ADR-0011 §2):
+	// resolve them to stored references so storage never holds a secrow.
+	for i := range groups {
+		wg, werr := s.groupFromWire(groups[i])
+		if werr != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, werr.Error()))
+			return
+		}
+		groups[i] = wg
+	}
+
 	ag, ok := s.groups.(interface {
 		ApplyGroups([]profile.ProfileGroup) error
 	})
@@ -598,5 +561,10 @@ func (s *WSServer) handleGroupApply(wconn *wsConn, req jsonrpcRequest) {
 		return
 	}
 
+	// The echo carries the row handles the renderer addressed, never the
+	// stored references (ADR-0011 §2).
+	for i := range groups {
+		groups[i] = wireGroup(groups[i])
+	}
 	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(groups)))
 }

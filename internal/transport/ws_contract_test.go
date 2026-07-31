@@ -145,9 +145,8 @@ func TestVaultStatus_OverTheWireConformsToContract(t *testing.T) {
 func TestVaultReset_DTOsConformToContract(t *testing.T) {
 	preview := loadSchema(t, "vault.resetPreview.schema.json")
 	result := loadSchema(t, "vault.reset.schema.json")
-
 	rawPreview, err := json.Marshal(vaultResetPreviewResponse{
-		SecretCount: 3, CredentialCount: 2, ConnectionCount: 5,
+		SecretCount: 3, ProfileCount: 5,
 		SystemKeychainReachable: false, VaultInitialized: true,
 	})
 	if err != nil {
@@ -155,10 +154,8 @@ func TestVaultReset_DTOsConformToContract(t *testing.T) {
 	}
 	validateJSON(t, preview, rawPreview, "vault.resetPreview DTO")
 
-	// Residue populated, including the optional reason — the field a sparse
-	// payload would hide.
 	rawWithResidue, err := json.Marshal(vaultResetResponse{
-		SecretCount: 3, CredentialCount: 2, ConnectionCount: 5,
+		SecretCount: 3, ProfileCount: 5,
 		Residue: []vaultResetResidueEntry{{Store: "system", Reason: "no-service"}},
 	})
 	if err != nil {
@@ -234,7 +231,7 @@ type fakeVaultReset struct{}
 
 func (f *fakeVaultReset) Preview(_ context.Context) (vaultreset.Preview, error) {
 	return vaultreset.Preview{
-		Impact:                  vaultreset.Impact{SecretCount: 3, CredentialCount: 2, ProfileCount: 5},
+		Impact:                  vaultreset.Impact{SecretCount: 3, ProfileCount: 5},
 		SystemKeychainReachable: false,
 		VaultInitialized:        true,
 	}, nil
@@ -242,7 +239,7 @@ func (f *fakeVaultReset) Preview(_ context.Context) (vaultreset.Preview, error) 
 
 func (f *fakeVaultReset) Execute(_ context.Context) (vaultreset.Result, error) {
 	return vaultreset.Result{
-		Impact:  vaultreset.Impact{SecretCount: 3, CredentialCount: 2, ProfileCount: 5},
+		Impact:  vaultreset.Impact{SecretCount: 3, ProfileCount: 5},
 		Residue: []vaultreset.Residue{{Store: "system", Reason: "no-service"}},
 	}, nil
 }
@@ -309,25 +306,39 @@ func TestVaultInventory_OverTheWireConformsToContract(t *testing.T) {
 	h := newInventoryHarness(t)
 	h.setupAndUnseal()
 
-	// A secret saved on a connection: the renderer sends the generated name.
-	idCred := h.createCredential(profile.Credential{
-		Name: "prod", Username: "deploy", Auth: profile.AuthPassword,
+	// A secret saved on a connection: minted via secrets.savePassword and
+	// bound onto a profile's options by row handle (ADR-0017).
+	prof := profile.SSHProfile{
+		Base: profile.Base{
+			ID:   "ssh:prod:1",
+			Name: "prod",
+			Type: "ssh",
+		},
+		Options: profile.StoredSSHProfileOptions{
+			Host: "vm-dsm01",
+			User: profile.Ptr("deploy"),
+		},
+	}
+	h.createProfile(prof)
+	passRow := h.mintPassword("hunter2", "deploy@vm-dsm01")
+	resp := jsonrpcCall(t, h.conn, "profiles.patch", map[string]any{
+		"id":  "ssh:prod:1",
+		"set": map[string]any{"options.passwordSecret": passRow},
 	})
-	h.savePasswordNamed(idCred, "hunter2", "deploy@vm-dsm01")
-
-	// A secret created on the Secrets page — no credential references it.
-	resp := jsonrpcCall(t, h.conn, "vault.createSecret", map[string]any{
-		"name": "prod password", "kind": "password", "value": "hunter2",
-	})
-	var createResult struct {
+	var patchResult struct {
 		Error *jsonrpcErrorObj `json:"error"`
 	}
-	if err := json.Unmarshal(resp, &createResult); err != nil {
-		t.Fatalf("vault.createSecret unmarshal: %v\nraw: %s", err, string(resp))
+	if err := json.Unmarshal(resp, &patchResult); err != nil {
+		t.Fatalf("profiles.patch unmarshal: %v\nraw: %s", err, string(resp))
 	}
-	if createResult.Error != nil {
-		t.Fatalf("vault.createSecret: %+v", createResult.Error)
+	if patchResult.Error != nil {
+		t.Fatalf("profiles.patch: %+v", patchResult.Error)
 	}
+
+	// A secret created on the Secrets page — no profile references it.
+	jsonrpcCall(t, h.conn, "vault.createSecret", map[string]any{
+		"name": "prod password", "kind": "password", "value": "hunter2",
+	})
 
 	invResp := vaultCall(t, h.conn, "vault.inventory", map[string]any{}, 1)
 	if invResp.Error != nil {
@@ -541,23 +552,32 @@ func TestDialogOpenFile_OverTheWireConformsToContract(t *testing.T) {
 	validateJSON(t, schema, envelope.Result, "dialog.openFile result")
 }
 
-// ── credentials.saveKeyMaterial ────────────────────────────────────────
+// ── secrets.saveKeyMaterial ─────────────────────────────────────────────
 
-// The DTO's own conformance: both fields, in both interesting shapes. An
-// encrypted key has an empty fingerprint AND passphraseWanted=true; an
-// unencrypted one has a fingerprint and passphraseWanted=false. A field the
-// renderer must branch on cannot be optional.
+// The DTO's own conformance: the mint result has row + fingerprint +
+// passphraseWanted, in both interesting shapes. An encrypted key has an empty
+// fingerprint AND passphraseWanted=true; an unencrypted one has a fingerprint
+// and passphraseWanted=false. A field the renderer must branch on cannot be
+// optional.
 func TestSaveKeyMaterial_DTOConformsToContract(t *testing.T) {
-	schema := loadSchema(t, "credentials.saveKeyMaterial.schema.json")
+	schema := loadSchema(t, "secrets.saveKeyMaterial.schema.json")
 
-	dto := saveKeyMaterialResult{Fingerprint: "SHA256:abc123", PassphraseWanted: false}
+	dto := struct {
+		Row              string `json:"row"`
+		Fingerprint      string `json:"fingerprint"`
+		PassphraseWanted bool   `json:"passphraseWanted"`
+	}{Row: "secrow:abc", Fingerprint: "SHA256:abc123", PassphraseWanted: false}
 	raw, err := json.Marshal(dto)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
 	validateJSON(t, schema, raw, "saveKeyMaterial unencrypted DTO")
 
-	dtoEnc := saveKeyMaterialResult{Fingerprint: "", PassphraseWanted: true}
+	dtoEnc := struct {
+		Row              string `json:"row"`
+		Fingerprint      string `json:"fingerprint"`
+		PassphraseWanted bool   `json:"passphraseWanted"`
+	}{Row: "secrow:def", Fingerprint: "", PassphraseWanted: true}
 	rawEnc, err := json.Marshal(dtoEnc)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -569,15 +589,15 @@ func TestSaveKeyMaterial_DTOConformsToContract(t *testing.T) {
 // passphraseWanted, without which the renderer would never ask for the key's
 // passphrase and the encrypted key would surface its failure at connect time.
 func TestSaveKeyMaterial_OverTheWireConformsToContract(t *testing.T) {
-	schema := loadSchema(t, "credentials.saveKeyMaterial.schema.json")
-	h := newKeyMaterialHarness(t)
-	credID := h.createCredential("contract-key", profile.AuthPublicKey)
+	schema := loadSchema(t, "secrets.saveKeyMaterial.schema.json")
+	h := newInventoryHarness(t)
+	h.setupAndUnseal()
 
 	pem, _ := testEncryptedKeyPEM(t, "contract-passphrase")
-	_, wantsPass, raw := h.saveKeyMaterial(credID, pem)
-	if !wantsPass {
-		t.Fatalf("precondition: encrypted key not flagged: %s", string(raw))
-	}
+	raw := jsonrpcCall(t, h.conn, "secrets.saveKeyMaterial", map[string]any{
+		"keyText": pem,
+		"name":    "contract-key",
+	})
 	var envelope struct {
 		Result json.RawMessage  `json:"result"`
 		Error  *jsonrpcErrorObj `json:"error"`
@@ -589,6 +609,11 @@ func TestSaveKeyMaterial_OverTheWireConformsToContract(t *testing.T) {
 		t.Fatalf("saveKeyMaterial: %+v", envelope.Error)
 	}
 	validateJSON(t, schema, envelope.Result, "saveKeyMaterial result")
+
+	// The wire carries the row handle, never a secret reference.
+	if strings.Contains(string(envelope.Result), "sec:v1:") {
+		t.Errorf("saveKeyMaterial result leaks a secret reference: %s", envelope.Result)
+	}
 }
 
 // ── vault.deleteSecret ────────────────────────────────────────────────
@@ -606,41 +631,63 @@ func TestVaultDeleteSecret_DTOConformsToContract(t *testing.T) {
 
 // The real method through the real socket, with the fields the renderer sends
 // (the row handle the inventory carried). After deletion the row is gone from
-// the inventory, the stored secret is gone from the vault, and the credential
-// no longer claims a password is saved — metadata first, stored secret second
+// the inventory, the stored secret is gone from the vault, and the profile no
+// longer claims a password is saved — metadata first, stored secret second
 // (ADR-0011 §4).
 func TestVaultDeleteSecret_OverTheWireConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "vault.deleteSecret.schema.json")
 	h := newInventoryHarness(t)
 	h.setupAndUnseal()
 
-	credID := h.createCredential(profile.Credential{
-		Name: "prod", Username: "deploy", Auth: profile.AuthPassword,
+	// A password minted on a connection and bound to a profile.
+	prof := profile.SSHProfile{
+		Base: profile.Base{
+			ID:   "ssh:prod:1",
+			Name: "prod",
+			Type: "ssh",
+		},
+		Options: profile.StoredSSHProfileOptions{
+			Host: "vm-dsm01",
+			User: profile.Ptr("deploy"),
+		},
+	}
+	h.createProfile(prof)
+	passRow := h.mintPassword("hunter2", "deploy@vm-dsm01")
+	patchResp := jsonrpcCall(t, h.conn, "profiles.patch", map[string]any{
+		"id":  "ssh:prod:1",
+		"set": map[string]any{"options.passwordSecret": passRow},
 	})
-	h.savePasswordNamed(credID, "hunter2", "deploy@vm-dsm01")
+	var patchEnvelope struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(patchResp, &patchEnvelope); err != nil {
+		t.Fatalf("profiles.patch unmarshal: %v\nraw: %s", err, string(patchResp))
+	}
+	if patchEnvelope.Error != nil {
+		t.Fatalf("profiles.patch: %+v", patchEnvelope.Error)
+	}
 
 	inv := h.callInventory()
 	if len(inv.Entries) != 1 {
 		t.Fatalf("precondition: expected 1 entry, got %d", len(inv.Entries))
 	}
 
-	// The renderer never sees the SecretID; read it from the metadata to
-	// assert the stored secret is really gone afterwards.
+	// The renderer never sees the SecretID; read it from the stored profile
+	// to assert the stored secret is really gone afterwards.
 	var secretID credential.SecretID
 	{
-		creds, err := h.ps.LoadCredentials()
+		profs, err := h.ps.LoadProfiles()
 		if err != nil {
-			t.Fatalf("LoadCredentials: %v", err)
+			t.Fatalf("LoadProfiles: %v", err)
 		}
-		for _, c := range creds {
-			if c.ID != credID {
-				continue
+		for _, p := range profs {
+			if p.ID == "ssh:prod:1" {
+				secretID = credential.SecretID(p.Options.PasswordSecret)
 			}
-			secretID = credential.SecretID(c.SecretID)
 		}
 	}
 	if secretID == "" {
-		t.Fatalf("precondition: no password reference on credential %s", credID)
+		t.Fatal("precondition: no password reference on profile ssh:prod:1")
 	}
 
 	deleteResp := jsonrpcCall(t, h.conn, "vault.deleteSecret", map[string]any{
@@ -673,17 +720,14 @@ func TestVaultDeleteSecret_OverTheWireConformsToContract(t *testing.T) {
 		t.Error("stored secret still exists after delete")
 	}
 
-	// The credential reference is gone: nothing points at the deleted secret.
-	credsAfter, err := h.ps.LoadCredentials()
+	// The profile reference is gone: nothing points at the deleted secret.
+	profsAfter, err := h.ps.LoadProfiles()
 	if err != nil {
-		t.Fatalf("LoadCredentials after delete: %v", err)
+		t.Fatalf("LoadProfiles after delete: %v", err)
 	}
-	for _, c := range credsAfter {
-		if c.ID != credID {
-			continue
-		}
-		if c.SecretID != "" {
-			t.Errorf("credential still references the deleted secret: %q", c.SecretID)
+	for _, p := range profsAfter {
+		if p.ID == "ssh:prod:1" && p.Options.PasswordSecret != "" {
+			t.Errorf("profile still references the deleted secret: %q", p.Options.PasswordSecret)
 		}
 	}
 }

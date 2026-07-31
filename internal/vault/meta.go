@@ -70,3 +70,12 @@ func rowID(id credential.SecretID) string {
 	sum := sha256.Sum256([]byte(id))
 	return "secrow:" + hex.EncodeToString(sum[:16])
 }
+
+// RowFor derives the renderer-addressable handle for a secret reference —
+// the pure half of row resolution. The transport uses it to translate
+// backend-owned references to row handles before a response crosses the
+// wire (ADR-0017 §1); the inverse (row → reference) needs the vault and
+// goes through ResolveRow.
+func RowFor(id credential.SecretID) string {
+	return rowID(id)
+}

@@ -7,24 +7,18 @@
   "additionalProperties": false,
   "required": [
     "secretCount",
-    "credentialCount",
-    "connectionCount",
+    "profileCount",
     "systemKeychainReachable",
     "vaultInitialized"
   ],
   "properties": {
     "secretCount": {
-      "description": "Distinct stored secrets that will be destroyed. A secret shared by two credential versions counts once — it is one thing the user loses.",
+      "description": "Distinct stored secrets that will be destroyed. A secret shared by two connections counts once — it is one thing the user loses.",
       "type": "integer",
       "minimum": 0
     },
-    "credentialCount": {
-      "description": "Saved logins holding at least one of those secrets. Logins that store nothing — agent auth, a key read from a path — are not counted, because they lose nothing.",
-      "type": "integer",
-      "minimum": 0
-    },
-    "connectionCount": {
-      "description": "Connections that will ask for a password again afterwards. Counted separately from the other two because it is the only one that describes what the user will notice.",
+    "profileCount": {
+      "description": "Connections holding at least one of those secrets. Connections that store nothing — agent auth, a key read from a path — are not counted, because they lose nothing. Each of these will ask for a password again afterwards.",
       "type": "integer",
       "minimum": 0
     },

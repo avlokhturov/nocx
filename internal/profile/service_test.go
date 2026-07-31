@@ -33,15 +33,6 @@ func makeTestProfile(id, name, host string) SSHProfile {
 	}
 }
 
-func makeTestCred(id, name, username, auth string) Credential {
-	return Credential{
-		ID:       id,
-		Name:     name,
-		Username: username,
-		Auth:     AuthMode(auth),
-	}
-}
-
 func makeTestGroup(id, name string, defaults *ProfileDefaults) ProfileGroup {
 	return ProfileGroup{ID: id, Name: name, Defaults: defaults}
 }
@@ -148,52 +139,6 @@ func TestServiceSaveGroup_ValidatesTree(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// SaveCredential — collision policy
-// ---------------------------------------------------------------------------
-
-func TestServiceSaveCredential_CreatesNew(t *testing.T) {
-	s := svc(t)
-	c := makeTestCred("cred:a:1", "a", "alice", "password")
-	if err := s.SaveCredential(c); err != nil {
-		t.Fatalf("SaveCredential: %v", err)
-	}
-	all, _ := s.store.LoadAll()
-	if len(all.Credentials) != 1 || all.Credentials[0].ID != "cred:a:1" {
-		t.Fatalf("expected 1 credential, got %d", len(all.Credentials))
-	}
-}
-
-func TestServiceSaveCredential_RefusesOverwrite(t *testing.T) {
-	s := svc(t)
-	c := makeTestCred("cred:a:1", "a", "alice", "password")
-	if err := s.SaveCredential(c); err != nil {
-		t.Fatalf("first SaveCredential: %v", err)
-	}
-	err := s.SaveCredential(c)
-	if !errors.Is(err, ErrCredentialExists) {
-		t.Fatalf("expected ErrCredentialExists, got %v", err)
-	}
-	all, _ := s.store.LoadAll()
-	if len(all.Credentials) != 1 {
-		t.Fatalf("credential count changed after refused overwrite: %d", len(all.Credentials))
-	}
-}
-
-func TestServiceSaveCredential_ValidatesFields(t *testing.T) {
-	s := svc(t)
-	c := Credential{ID: "cred:a:1", Username: "alice", Auth: AuthPassword}
-	err := s.SaveCredential(c)
-	if !errors.Is(err, ErrCredentialNameRequired) {
-		t.Fatalf("expected ErrCredentialNameRequired, got %v", err)
-	}
-	c = Credential{ID: "cred:a:1", Name: "a", Auth: AuthPassword}
-	err = s.SaveCredential(c)
-	if err != nil {
-		t.Fatalf("empty username should inherit the SSH default, got %v", err)
-	}
-}
-
-// ---------------------------------------------------------------------------
 // AtomicImport — basic success
 // ---------------------------------------------------------------------------
 
@@ -204,9 +149,8 @@ func TestAtomicImport_FullSuccess(t *testing.T) {
 		makeTestProfile("ssh:custom:p2:1", "db", "db.example.com"),
 	}
 	groups := []ProfileGroup{makeTestGroup("g1", "Prod", nil)}
-	creds := []Credential{makeTestCred("cred:a:1", "prod-pass", "deploy", "password")}
 
-	result := s.AtomicImport(profiles, groups, creds)
+	result := s.AtomicImport(profiles, groups)
 	if len(result.ImportErrors) > 0 {
 		t.Fatalf("unexpected errors: %v", result.ImportErrors)
 	}
@@ -216,13 +160,10 @@ func TestAtomicImport_FullSuccess(t *testing.T) {
 	if result.GroupsImported != 1 {
 		t.Errorf("GroupsImported = %d, want 1", result.GroupsImported)
 	}
-	if result.CredentialsImported != 1 {
-		t.Errorf("CredentialsImported = %d, want 1", result.CredentialsImported)
-	}
 	all, _ := s.store.LoadAll()
-	if len(all.Profiles) != 2 || len(all.Groups) != 1 || len(all.Credentials) != 1 {
-		t.Fatalf("store state: profiles=%d groups=%d creds=%d",
-			len(all.Profiles), len(all.Groups), len(all.Credentials))
+	if len(all.Profiles) != 2 || len(all.Groups) != 1 {
+		t.Fatalf("store state: profiles=%d groups=%d",
+			len(all.Profiles), len(all.Groups))
 	}
 }
 
@@ -238,7 +179,7 @@ func TestAtomicImport_ProfileOverwrite(t *testing.T) {
 	}
 	result := s.AtomicImport(
 		[]SSHProfile{makeTestProfile("ssh:custom:p1:1", "overwritten", "new.example.com")},
-		nil, nil,
+		nil,
 	)
 	if len(result.ImportErrors) > 0 {
 		t.Fatalf("import errors: %v", result.ImportErrors)
@@ -261,7 +202,6 @@ func TestAtomicImport_GroupOverwrite(t *testing.T) {
 	result := s.AtomicImport(
 		nil,
 		[]ProfileGroup{makeTestGroup("g1", "Overwritten", nil)},
-		nil,
 	)
 	if len(result.ImportErrors) > 0 {
 		t.Fatalf("import errors: %v", result.ImportErrors)
@@ -272,61 +212,11 @@ func TestAtomicImport_GroupOverwrite(t *testing.T) {
 	}
 }
 
-func TestAtomicImport_CredentialOverwriteRefused(t *testing.T) {
-	s := svc(t)
-	c1 := makeTestCred("cred:a:1", "original", "alice", "password")
-	if err := s.SaveCredential(c1); err != nil {
-		t.Fatalf("SaveCredential: %v", err)
-	}
-	result := s.AtomicImport(
-		nil, nil,
-		[]Credential{makeTestCred("cred:a:1", "impostor", "bob", "password")},
-	)
-	if result.CredentialsRefused != 1 {
-		t.Errorf("CredentialsRefused = %d, want 1", result.CredentialsRefused)
-	}
-	if len(result.ImportErrors) == 0 {
-		t.Fatal("expected import errors, got none")
-	}
-	all, _ := s.store.LoadAll()
-	if len(all.Credentials) != 1 || all.Credentials[0].Name != "original" {
-		t.Errorf("credential was modified despite refusal; got Name=%q", all.Credentials[0].Name)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// AtomicImport — imported profile naming existing local credential
-// ---------------------------------------------------------------------------
-
-func TestAtomicImport_ProfileReferencingExistingCredentialMarkedForReview(t *testing.T) {
-	s := svc(t)
-	localCred := makeTestCred("cred:local:1", "local-pass", "deploy", "password")
-	if err := s.SaveCredential(localCred); err != nil {
-		t.Fatalf("SaveCredential: %v", err)
-	}
-	importedProfile := makeTestProfile("ssh:custom:p1:1", "web", "web.example.com")
-	importedProfile.Options.CredentialID = "cred:local:1"
-
-	result := s.AtomicImport([]SSHProfile{importedProfile}, nil, nil)
-	if len(result.ImportErrors) > 0 {
-		t.Fatalf("import errors: %v", result.ImportErrors)
-	}
-	if result.ProfilesMarkedReview != 1 {
-		t.Errorf("ProfilesMarkedReview = %d, want 1", result.ProfilesMarkedReview)
-	}
-	all, _ := s.store.LoadAll()
-	if len(all.Profiles) != 1 || !all.Profiles[0].NeedsReview {
-		t.Errorf("profile not marked for review, NeedsReview=%v", all.Profiles[0].NeedsReview)
-	}
-}
-
-func TestAtomicImport_NewCredentialNotMarkedForReview(t *testing.T) {
+func TestAtomicImport_NewProfileNotMarkedForReview(t *testing.T) {
 	s := svc(t)
 	prof := makeTestProfile("ssh:custom:p1:1", "web", "web.example.com")
-	prof.Options.CredentialID = "cred:new:1"
-	cred := makeTestCred("cred:new:1", "new-pass", "deploy", "password")
 
-	result := s.AtomicImport([]SSHProfile{prof}, nil, []Credential{cred})
+	result := s.AtomicImport([]SSHProfile{prof}, nil)
 	if len(result.ImportErrors) > 0 {
 		t.Fatalf("import errors: %v", result.ImportErrors)
 	}
@@ -358,20 +248,14 @@ func TestAtomicImport_Transactional_LastRecordFailure(t *testing.T) {
 
 	profiles := []SSHProfile{
 		makeTestProfile("ssh:custom:p1:1", "web", "web.example.com"),
-		makeTestProfile("ssh:custom:p2:1", "db", "db.example.com"),
+		// Invalid profile — missing host. Fatal: nothing is written.
+		{Base: Base{ID: "ssh:custom:p2:1", Type: "ssh", Name: "db"}},
 	}
 	groups := []ProfileGroup{makeTestGroup("g1", "Prod", nil)}
-	// Invalid credential — missing Name.
-	creds := []Credential{
-		{ID: "cred:bad:1", Auth: AuthPassword},
-	}
 
-	result := s.AtomicImport(profiles, groups, creds)
+	result := s.AtomicImport(profiles, groups)
 	if len(result.ImportErrors) == 0 {
-		t.Fatal("expected import errors for invalid credential, got none")
-	}
-	if result.CredentialsImported != 0 {
-		t.Errorf("CredentialsImported = %d, want 0", result.CredentialsImported)
+		t.Fatal("expected import errors for invalid profile, got none")
 	}
 
 	// Read raw file after import.
@@ -386,46 +270,6 @@ func TestAtomicImport_Transactional_LastRecordFailure(t *testing.T) {
 
 	if !bytes.Equal(preRaw, postRaw) {
 		t.Error("store file changed byte-for-byte after failed import")
-	}
-}
-
-func TestAtomicImport_Transactional_CredentialCollision(t *testing.T) {
-	s, storePath := newTestService(t)
-
-	// Pre-populate a credential.
-	existing := makeTestCred("cred:keep:1", "keep-me", "alice", "password")
-	if err := s.SaveCredential(existing); err != nil {
-		t.Fatalf("SaveCredential: %v", err)
-	}
-
-	// #nosec G304 -- t.TempDir() path, never user input
-	preRaw, err := os.ReadFile(storePath)
-	if err != nil {
-		t.Fatalf("read before: %v", err)
-	}
-
-	// Import with credential collision — should fail entirely.
-	result := s.AtomicImport(
-		[]SSHProfile{makeTestProfile("ssh:custom:p1:1", "web", "web.example.com")},
-		nil,
-		[]Credential{makeTestCred("cred:keep:1", "impostor", "mallory", "password")},
-	)
-	if result.CredentialsRefused != 1 {
-		t.Errorf("CredentialsRefused = %d, want 1", result.CredentialsRefused)
-	}
-
-	// #nosec G304 -- t.TempDir() path, never user input
-	postRaw, err := os.ReadFile(storePath)
-	if err != nil {
-		t.Fatalf("read after: %v", err)
-	}
-	if !bytes.Equal(preRaw, postRaw) {
-		t.Error("store file changed byte-for-byte after failed import")
-	}
-
-	all, _ := s.store.LoadAll()
-	if len(all.Credentials) != 1 || all.Credentials[0].Name != "keep-me" {
-		t.Errorf("existing credential modified: got Name=%q", all.Credentials[0].Name)
 	}
 }
 

@@ -9,20 +9,16 @@ import (
 	"github.com/shady2k/nocx/internal/vault"
 )
 
-// stubProfileStore implements both profile.ProfileRepository and
-// profile.CredentialMetadataRepository in memory, for tests that
-// need both.
+// stubProfileStore implements profile.ProfileRepository in memory.
 type stubProfileStore struct {
-	profiles    map[string]profile.SSHProfile
-	groups      map[string]profile.ProfileGroup
-	credentials map[string]profile.Credential
+	profiles map[string]profile.SSHProfile
+	groups   map[string]profile.ProfileGroup
 }
 
 func newStubProfileStore() *stubProfileStore {
 	return &stubProfileStore{
-		profiles:    make(map[string]profile.SSHProfile),
-		groups:      make(map[string]profile.ProfileGroup),
-		credentials: make(map[string]profile.Credential),
+		profiles: make(map[string]profile.SSHProfile),
+		groups:   make(map[string]profile.ProfileGroup),
 	}
 }
 
@@ -57,28 +53,7 @@ func (s *stubProfileStore) DeleteProfile(id string) error {
 	return nil
 }
 
-// --- profile.CredentialMetadataRepository ---
-
-func (s *stubProfileStore) LoadCredentials() ([]profile.Credential, error) {
-	out := make([]profile.Credential, 0, len(s.credentials))
-	for _, c := range s.credentials {
-		out = append(out, c)
-	}
-	return out, nil
-}
-
-// SaveCredential is no longer part of CredentialMetadataRepository — it was the
-// upsert that made create and update indistinguishable. It survives here as a
-// test-local helper because the resolver fixtures below only ever need "put this
-// credential in the store", not the create/update distinction the interface now
-// draws.
-func (s *stubProfileStore) SaveCredential(c profile.Credential) error {
-	s.credentials[c.ID] = c
-	return nil
-}
-
-// SaveProfile is a test-local helper like SaveCredential — the interface
-// now uses CreateProfile/UpdateProfile, but test fixtures want "put this
+// SaveProfile is a test-local helper: test fixtures want "put this
 // in the store" without worrying about existence.
 func (s *stubProfileStore) SaveProfile(p profile.SSHProfile) error {
 	s.profiles[p.ID] = p
@@ -91,8 +66,8 @@ func (s *stubProfileStore) SaveGroup(g profile.ProfileGroup) error {
 	return nil
 }
 
-// LoadGroups / CreateGroup / UpdateGroup / DeleteGroup are needed for
-// the stub to satisfy profile.GroupRepository where required.
+// LoadGroups / CreateGroup / UpdateGroup / DeleteGroup satisfy
+// profile.GroupRepository where required.
 func (s *stubProfileStore) LoadGroups() ([]profile.ProfileGroup, error) {
 	out := make([]profile.ProfileGroup, 0, len(s.groups))
 	for _, g := range s.groups {
@@ -119,70 +94,6 @@ func (s *stubProfileStore) UpdateGroup(g profile.ProfileGroup) error {
 
 func (s *stubProfileStore) DeleteGroup(id string) error {
 	delete(s.groups, id)
-	return nil
-}
-
-func (s *stubProfileStore) CreateCredential(c profile.Credential) error {
-	if _, ok := s.credentials[c.ID]; ok {
-		return profile.ErrCredentialExists
-	}
-	s.credentials[c.ID] = c
-	return nil
-}
-
-func (s *stubProfileStore) UpdateCredential(id string, p profile.CredentialPatch) (profile.Credential, error) {
-	existing, ok := s.credentials[id]
-	if !ok {
-		return profile.Credential{}, profile.ErrCredentialNotFound
-	}
-	merged := existing.WithPatch(p)
-	s.credentials[id] = merged
-	return merged, nil
-}
-
-func (s *stubProfileStore) UpdateSecretRefs(id, passwordSecretID, passphraseSecretID string) error {
-	existing, ok := s.credentials[id]
-	if !ok {
-		return profile.ErrCredentialNotFound
-	}
-	existing.SecretID = passwordSecretID
-	existing.PassphraseSecretID = passphraseSecretID
-	s.credentials[id] = existing
-	return nil
-}
-
-func (s *stubProfileStore) UpdateKeyMaterial(id, keyMaterialSecretID, keyFingerprint string) error {
-	existing, ok := s.credentials[id]
-	if !ok {
-		return profile.ErrCredentialNotFound
-	}
-	existing.KeyMaterialSecretID = keyMaterialSecretID
-	existing.KeyFingerprint = keyFingerprint
-	existing.KeyPath = ""
-	s.credentials[id] = existing
-	return nil
-}
-
-func (s *stubProfileStore) ClearSecretReferences(secretID string) error {
-	for id := range s.credentials {
-		c := s.credentials[id]
-		if c.SecretID == secretID {
-			c.SecretID = ""
-		}
-		if c.PassphraseSecretID == secretID {
-			c.PassphraseSecretID = ""
-		}
-		if c.KeyMaterialSecretID == secretID {
-			c.KeyMaterialSecretID = ""
-			c.KeyFingerprint = ""
-		}
-		s.credentials[id] = c
-	}
-	return nil
-}
-
-func (s *stubProfileStore) DeleteCredential(id string) error {
-	delete(s.credentials, id)
 	return nil
 }
 
@@ -223,31 +134,25 @@ func (s *stubSecretStore) Exists(ctx context.Context, id credential.SecretID) (b
 }
 
 //nolint:errcheck
-func TestResolver_CredentialMode(t *testing.T) {
+func TestResolver_BoundSecretMode(t *testing.T) {
 	ps := newStubProfileStore()
 	ss := newStubSecretStore()
 
 	pwID, _ := ss.Create(context.Background(), credential.NewSecret("s3cret"))
 
-	_ = ps.SaveCredential(profile.Credential{
-		ID:       "cred:work:abc123",
-		Name:     "work-key",
-		Username: "deploy",
-		Auth:     "publicKey",
-		KeyPath:  "/home/user/.ssh/work_rsa",
-		SecretID: string(pwID),
-	})
-
 	_ = ps.SaveProfile(profile.SSHProfile{
 		Base: profile.Base{ID: "profile:1", Name: "staging"},
 		Options: profile.StoredSSHProfileOptions{
-			Host:         "staging.example.com",
-			Port:         profile.Ptr(2222),
-			CredentialID: "cred:work:abc123",
+			Host:           "staging.example.com",
+			Port:           profile.Ptr(2222),
+			User:           profile.Ptr("deploy"),
+			Auth:           profile.Ptr(profile.AuthMode("publicKey")),
+			KeyPath:        profile.Ptr("/home/user/.ssh/work_rsa"),
+			PasswordSecret: string(pwID),
 		},
 	})
 
-	r := NewResolver(ps, ps, ps, ss)
+	r := NewResolver(ps, ps, ss)
 	host, cfg, err := r.Resolve("profile:1")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
@@ -292,7 +197,7 @@ func TestResolver_InlineMode(t *testing.T) {
 		},
 	})
 
-	r := NewResolver(ps, ps, ps, ss)
+	r := NewResolver(ps, ps, ss)
 	host, cfg, err := r.Resolve("profile:inline")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
@@ -320,7 +225,7 @@ func TestResolver_UnknownProfile(t *testing.T) {
 	ps := newStubProfileStore()
 	ss := newStubSecretStore()
 
-	r := NewResolver(ps, ps, ps, ss)
+	r := NewResolver(ps, ps, ss)
 	_, _, err := r.Resolve("nonexistent")
 	if err == nil {
 		t.Fatal("expected error for unknown profile")
@@ -334,36 +239,32 @@ func TestResolver_JumpHost(t *testing.T) {
 
 	// Jump profile
 	jumpPWID, _ := ss.Create(context.Background(), credential.NewSecret("jump-secret"))
-	_ = ps.SaveCredential(profile.Credential{
-		ID: "cred:jump:xyz", Name: "jump-cred", Username: "jumpuser", Auth: "publicKey",
-		KeyPath:  "/home/user/.ssh/jump_rsa",
-		SecretID: string(jumpPWID),
-	})
 	_ = ps.SaveProfile(profile.SSHProfile{
-		Base:    profile.Base{ID: "profile:jump", Name: "jump"},
-		Options: profile.StoredSSHProfileOptions{Host: "jump.example.com", Port: profile.Ptr(22), CredentialID: "cred:jump:xyz"},
+		Base: profile.Base{ID: "profile:jump", Name: "jump"},
+		Options: profile.StoredSSHProfileOptions{
+			Host:           "jump.example.com",
+			Port:           profile.Ptr(22),
+			User:           profile.Ptr("jumpuser"),
+			Auth:           profile.Ptr(profile.AuthMode("password")),
+			PasswordSecret: string(jumpPWID),
+		},
 	})
 
 	// Target profile
 	tgtPWID, _ := ss.Create(context.Background(), credential.NewSecret("tgt-secret"))
-	_ = ps.SaveCredential(profile.Credential{
-		ID:       "cred:tgt:def",
-		Name:     "tgt-cred",
-		Username: "tgtuser",
-		Auth:     "password",
-		SecretID: string(tgtPWID),
-	})
 	_ = ps.SaveProfile(profile.SSHProfile{
 		Base: profile.Base{ID: "profile:tgt", Name: "target"},
 		Options: profile.StoredSSHProfileOptions{
-			Host:         "target.internal",
-			Port:         profile.Ptr(2222),
-			CredentialID: "cred:tgt:def",
-			JumpHost:     profile.Ptr("profile:jump"),
+			Host:           "target.internal",
+			Port:           profile.Ptr(2222),
+			User:           profile.Ptr("tgtuser"),
+			Auth:           profile.Ptr(profile.AuthMode("password")),
+			PasswordSecret: string(tgtPWID),
+			JumpHost:       profile.Ptr("profile:jump"),
 		},
 	})
 
-	r := NewResolver(ps, ps, ps, ss)
+	r := NewResolver(ps, ps, ss)
 	host, cfg, err := r.Resolve("profile:tgt")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
@@ -423,7 +324,7 @@ func TestResolver_JumpHostInlineMode(t *testing.T) {
 		},
 	})
 
-	r := NewResolver(ps, ps, ps, ss)
+	r := NewResolver(ps, ps, ss)
 	host, cfg, err := r.Resolve("profile:tgt2")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
@@ -446,19 +347,18 @@ func TestResolver_CarriesTargetBinding(t *testing.T) {
 	ss := newStubSecretStore()
 
 	pwID, _ := ss.Create(context.Background(), credential.NewSecret("pw"))
-	_ = ps.SaveCredential(profile.Credential{
-		ID:       "cred:bound:aaa",
-		Name:     "bound-cred",
-		Username: "u",
-		Auth:     "password",
-		SecretID: string(pwID),
-	})
 	_ = ps.SaveProfile(profile.SSHProfile{
-		Base:    profile.Base{ID: "profile:bound", Name: "bound"},
-		Options: profile.StoredSSHProfileOptions{Host: "bound.example.com", Port: profile.Ptr(2222), CredentialID: "cred:bound:aaa"},
+		Base: profile.Base{ID: "profile:bound", Name: "bound"},
+		Options: profile.StoredSSHProfileOptions{
+			Host:           "bound.example.com",
+			Port:           profile.Ptr(2222),
+			User:           profile.Ptr("u"),
+			Auth:           profile.Ptr(profile.AuthMode("password")),
+			PasswordSecret: string(pwID),
+		},
 	})
 
-	r := NewResolver(ps, ps, ps, ss)
+	r := NewResolver(ps, ps, ss)
 	_, cfg, err := r.Resolve("profile:bound")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
@@ -469,26 +369,26 @@ func TestResolver_CarriesTargetBinding(t *testing.T) {
 	}
 }
 
-// TestResolver_UnboundCredentialSurfacesEmpty pin that a credential with no
-// Host/Port fields still produces an AuthorizedEndpoint from its profile.
-func TestResolver_LinkedCredentialSurfacesAuthorizedEndpoint(t *testing.T) {
+// TestResolver_BoundSecretSurfacesAuthorizedEndpoint pins that a profile
+// whose bound secret carries no endpoint still produces an AuthorizedEndpoint
+// from the profile itself.
+func TestResolver_BoundSecretSurfacesAuthorizedEndpoint(t *testing.T) {
 	ps := newStubProfileStore()
 	ss := newStubSecretStore()
 
 	pwID, _ := ss.Create(context.Background(), credential.NewSecret("pw"))
-	_ = ps.SaveCredential(profile.Credential{
-		ID:       "cred:unbound:bbb",
-		Name:     "unbound",
-		Username: "u",
-		Auth:     "password",
-		SecretID: string(pwID),
-	})
 	_ = ps.SaveProfile(profile.SSHProfile{
-		Base:    profile.Base{ID: "profile:unbound", Name: "unbound"},
-		Options: profile.StoredSSHProfileOptions{Host: "any.example.com", Port: profile.Ptr(22), CredentialID: "cred:unbound:bbb"},
+		Base: profile.Base{ID: "profile:unbound", Name: "unbound"},
+		Options: profile.StoredSSHProfileOptions{
+			Host:           "any.example.com",
+			Port:           profile.Ptr(22),
+			User:           profile.Ptr("u"),
+			Auth:           profile.Ptr(profile.AuthMode("password")),
+			PasswordSecret: string(pwID),
+		},
 	})
 
-	r := NewResolver(ps, ps, ps, ss)
+	r := NewResolver(ps, ps, ss)
 	_, cfg, err := r.Resolve("profile:unbound")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
@@ -508,33 +408,32 @@ func TestResolver_CarriesJumpBinding(t *testing.T) {
 
 	// Jump credential with binding
 	jumpPWID, _ := ss.Create(context.Background(), credential.NewSecret("jpw"))
-	_ = ps.SaveCredential(profile.Credential{
-		ID:       "cred:jumpbound:ccc",
-		Name:     "jump-bound",
-		Username: "ju",
-		Auth:     "password",
-		SecretID: string(jumpPWID),
-	})
 	_ = ps.SaveProfile(profile.SSHProfile{
-		Base:    profile.Base{ID: "profile:jumpb", Name: "jumpb"},
-		Options: profile.StoredSSHProfileOptions{Host: "jump-bound.example.com", Port: profile.Ptr(2222), CredentialID: "cred:jumpbound:ccc"},
+		Base: profile.Base{ID: "profile:jumpb", Name: "jumpb"},
+		Options: profile.StoredSSHProfileOptions{
+			Host:           "jump-bound.example.com",
+			Port:           profile.Ptr(2222),
+			User:           profile.Ptr("ju"),
+			Auth:           profile.Ptr(profile.AuthMode("password")),
+			PasswordSecret: string(jumpPWID),
+		},
 	})
 
 	// Target
 	tgtPWID, _ := ss.Create(context.Background(), credential.NewSecret("tpw"))
-	_ = ps.SaveCredential(profile.Credential{
-		ID:       "cred:tgtbound:ddd",
-		Name:     "tgt-bound",
-		Username: "tu",
-		Auth:     "password",
-		SecretID: string(tgtPWID),
-	})
 	_ = ps.SaveProfile(profile.SSHProfile{
-		Base:    profile.Base{ID: "profile:tgtb", Name: "tgtb"},
-		Options: profile.StoredSSHProfileOptions{Host: "tgt-bound.example.com", Port: profile.Ptr(3333), CredentialID: "cred:tgtbound:ddd", JumpHost: profile.Ptr("profile:jumpb")},
+		Base: profile.Base{ID: "profile:tgtb", Name: "tgtb"},
+		Options: profile.StoredSSHProfileOptions{
+			Host:           "tgt-bound.example.com",
+			Port:           profile.Ptr(3333),
+			User:           profile.Ptr("tu"),
+			Auth:           profile.Ptr(profile.AuthMode("password")),
+			PasswordSecret: string(tgtPWID),
+			JumpHost:       profile.Ptr("profile:jumpb"),
+		},
 	})
 
-	r := NewResolver(ps, ps, ps, ss)
+	r := NewResolver(ps, ps, ss)
 	_, cfg, err := r.Resolve("profile:tgtb")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
@@ -548,46 +447,40 @@ func TestResolver_CarriesJumpBinding(t *testing.T) {
 	}
 }
 
-// TestResolve_PublishesRecordSecret pins the contract between the credential
-// record and the connection pool. poolKeyFor (ssh_dial.go:38) keys on
-// cfg.SecretID, so publishing the record's reference is what makes a rotation
-// (vault.replaceSecret keeping the id, changing the material) produce the same
-// pool key, while replacing the reference produces a different one — with no
-// change anywhere in internal/ssh. Asserting it here is what stops a later
-// refactor from quietly publishing something else.
+// TestResolve_PublishesBoundSecret pins the contract between the profile's
+// secret binding and the connection pool. poolKeyFor (ssh_dial.go:38) keys
+// on cfg.SecretID, so publishing the bound reference is what makes a rotation
+// (vault.replaceSecret keeping the id, changing the material) produce the
+// same pool key, while replacing the reference produces a different one —
+// with no change anywhere in internal/ssh. Asserting it here is what stops a
+// later refactor from quietly publishing something else.
 //
 //nolint:errcheck
-func TestResolve_PublishesRecordSecret(t *testing.T) {
+func TestResolve_PublishesBoundSecret(t *testing.T) {
 	ps := newStubProfileStore()
 	ss := newStubSecretStore()
 
-	cred := profile.Credential{
-		ID: "cred:ops:1", Name: "ops", Username: "ops", Auth: profile.AuthPassword,
-		SecretID: "sec:7",
-	}
-	_ = ps.SaveCredential(cred)
-
 	prof := profile.SSHProfile{
 		Base:    profile.Base{ID: "ssh:custom:web-1:1", Type: "ssh", Name: "web-1"},
-		Options: profile.StoredSSHProfileOptions{Host: "10.0.0.1", Port: profile.Ptr(22), CredentialID: cred.ID},
+		Options: profile.StoredSSHProfileOptions{Host: "10.0.0.1", Port: profile.Ptr(22), PasswordSecret: "sec:7"},
 	}
 	_ = ps.SaveProfile(prof)
 
-	r := NewResolver(ps, ps, ps, ss)
+	r := NewResolver(ps, ps, ss)
 
 	_, cfg, err := r.Resolve(prof.ID)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
 	if string(cfg.SecretID) != "sec:7" {
-		t.Fatalf("SecretID = %q, want sec:7 (the record's reference)", cfg.SecretID)
+		t.Fatalf("SecretID = %q, want sec:7 (the profile's binding)", cfg.SecretID)
 	}
 	first := cfg.SecretID
 
-	// Replace the record's reference (a new password saved over the old one)
-	// and resolve again.
-	cred.SecretID = "sec:8"
-	_ = ps.SaveCredential(cred)
+	// Replace the binding (a new password saved over the old one) and
+	// resolve again.
+	prof.Options.PasswordSecret = "sec:8"
+	_ = ps.SaveProfile(prof)
 
 	_, cfg2, err := r.Resolve(prof.ID)
 	if err != nil {
@@ -597,7 +490,7 @@ func TestResolve_PublishesRecordSecret(t *testing.T) {
 		t.Fatalf("SecretID = %q, want sec:8", cfg2.SecretID)
 	}
 	if cfg2.SecretID == first {
-		t.Fatal("replacing the reference left the SecretID unchanged; the pool would reuse the old transport")
+		t.Fatal("replacing the binding left the SecretID unchanged; the pool would reuse the old transport")
 	}
 }
 
@@ -609,53 +502,46 @@ func TestResolver_MultiHopJump(t *testing.T) {
 
 	// Inner bastion (closest to client) - jumps through no one
 	innerPWID, _ := ss.Create(context.Background(), credential.NewSecret("inner-secret"))
-	_ = ps.SaveCredential(profile.Credential{
-		ID: "cred:inner:1", Name: "inner-cred", Username: "inneruser", Auth: "password",
-		SecretID: string(innerPWID),
-	})
 	_ = ps.SaveProfile(profile.SSHProfile{
 		Base: profile.Base{ID: "profile:inner", Name: "inner-bastion"},
 		Options: profile.StoredSSHProfileOptions{
-			Host:         "inner.corp.net",
-			Port:         profile.Ptr(2201),
-			CredentialID: "cred:inner:1",
+			Host:           "inner.corp.net",
+			Port:           profile.Ptr(2201),
+			User:           profile.Ptr("inneruser"),
+			Auth:           profile.Ptr(profile.AuthMode("password")),
+			PasswordSecret: string(innerPWID),
 		},
 	})
 
 	// Outer bastion (closest to target) - jumps through inner
 	outerPWID, _ := ss.Create(context.Background(), credential.NewSecret("outer-secret"))
-	_ = ps.SaveCredential(profile.Credential{
-		ID: "cred:outer:1", Name: "outer-cred", Username: "outeruser", Auth: "publicKey",
-		KeyPath:  "/home/user/.ssh/outer_rsa",
-		SecretID: string(outerPWID),
-	})
 	_ = ps.SaveProfile(profile.SSHProfile{
 		Base: profile.Base{ID: "profile:outer", Name: "outer-bastion"},
 		Options: profile.StoredSSHProfileOptions{
-			Host:         "outer.corp.net",
-			Port:         profile.Ptr(2200),
-			CredentialID: "cred:outer:1",
-			JumpHost:     profile.Ptr("profile:inner"),
+			Host:           "outer.corp.net",
+			Port:           profile.Ptr(2200),
+			User:           profile.Ptr("outeruser"),
+			Auth:           profile.Ptr(profile.AuthMode("password")),
+			PasswordSecret: string(outerPWID),
+			JumpHost:       profile.Ptr("profile:inner"),
 		},
 	})
 
 	// Target profile - jumps through outer
 	tgtPWID, _ := ss.Create(context.Background(), credential.NewSecret("tgt-secret"))
-	_ = ps.SaveCredential(profile.Credential{
-		ID: "cred:tgt:1", Name: "tgt-cred", Username: "tgtuser", Auth: "password",
-		SecretID: string(tgtPWID),
-	})
 	_ = ps.SaveProfile(profile.SSHProfile{
 		Base: profile.Base{ID: "profile:tgt", Name: "target"},
 		Options: profile.StoredSSHProfileOptions{
-			Host:         "target.internal",
-			Port:         profile.Ptr(2222),
-			CredentialID: "cred:tgt:1",
-			JumpHost:     profile.Ptr("profile:outer"),
+			Host:           "target.internal",
+			Port:           profile.Ptr(2222),
+			User:           profile.Ptr("tgtuser"),
+			Auth:           profile.Ptr(profile.AuthMode("password")),
+			PasswordSecret: string(tgtPWID),
+			JumpHost:       profile.Ptr("profile:outer"),
 		},
 	})
 
-	r := NewResolver(ps, ps, ps, ss)
+	r := NewResolver(ps, ps, ss)
 	host, cfg, err := r.Resolve("profile:tgt")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
@@ -722,43 +608,34 @@ func TestResolver_MultiHopCycleDetected(t *testing.T) {
 		},
 	})
 
-	r := NewResolver(ps, ps, ps, ss)
+	r := NewResolver(ps, ps, ss)
 	_, _, err := r.Resolve("profile:a")
 	if err == nil {
 		t.Fatal("expected cycle detection error, got nil")
 	}
 }
 
-// TestResolver_KeyMaterialSecretID verifies that the credential's record-level
-// KeyMaterialSecretID and PassphraseSecretID are resolved into cfg.KeySecretID
-// and cfg.PassphraseSecretID on the ConnectConfig.
+// TestResolver_KeySecretBinding verifies that the profile's key and
+// passphrase bindings are resolved into cfg.KeySecretID and
+// cfg.PassphraseSecretID on the ConnectConfig.
 //
 //nolint:errcheck
-func TestResolver_KeyMaterialSecretID(t *testing.T) {
+func TestResolver_KeySecretBinding(t *testing.T) {
 	ps := newStubProfileStore()
 	ss := newStubSecretStore()
-
-	pwID, _ := ss.Create(context.Background(), credential.NewSecret("s3cret"))
-
-	_ = ps.SaveCredential(profile.Credential{
-		ID:                  "cred:km:abc",
-		Name:                "key-material",
-		Username:            "deploy",
-		Auth:                "publicKey",
-		SecretID:            string(pwID),
-		KeyMaterialSecretID: "vault-sec:abc123",
-		PassphraseSecretID:  "vault-sec:pass456",
-	})
 
 	_ = ps.SaveProfile(profile.SSHProfile{
 		Base: profile.Base{ID: "profile:km:1", Name: "km-test"},
 		Options: profile.StoredSSHProfileOptions{
-			Host:         "km.example.com",
-			CredentialID: "cred:km:abc",
+			Host:                "km.example.com",
+			User:                profile.Ptr("deploy"),
+			Auth:                profile.Ptr(profile.AuthMode("publicKey")),
+			KeySecret:           "vault-sec:abc123",
+			KeyPassphraseSecret: "vault-sec:pass456",
 		},
 	})
 
-	r := NewResolver(ps, ps, ps, ss)
+	r := NewResolver(ps, ps, ss)
 	_, cfg, err := r.Resolve("profile:km:1")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)

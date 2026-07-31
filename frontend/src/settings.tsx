@@ -328,10 +328,11 @@ export function SettingsComponent(props: SettingsComponentProps) {
         <ConnectionsView
           client={props.profileClient}
           vaultController={props.vaultController}
+          vaultClient={props.vaultClient}
           dialogClient={props.dialogClient}
           onConnect={props.onConnect}
           newProfileRequest={newConnectionRequest()}
-          onNavigateToCredentials={() => setActiveComponentPage('secrets')}
+          onNavigateToSecrets={() => setActiveComponentPage('secrets')}
         />
       ),
     }

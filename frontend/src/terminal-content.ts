@@ -280,7 +280,15 @@ export class TerminalContent extends BaseTabContent {
         return
       }
 
+      // False until the first OSC 133 marker: a markerless session (plain
+      // SSH) keeps the terminal visible in the unstructured full-pane mode.
+      let shellIntegrated = false
+
       renderer.onCommandMarker((marker) => {
+        // Any OSC 133 marker means the remote shell has nocx integration:
+        // from here the scrollback-block layout owns the presentation and
+        // the unstructured full-pane mode is never used again.
+        shellIntegrated = true
         this.inputState.dispatch({ type: 'marker', kind: marker.kind })
         if (marker.kind === 'D' && marker.exitCode !== undefined) {
           this._lastExitCode = marker.exitCode
@@ -300,6 +308,13 @@ export class TerminalContent extends BaseTabContent {
         this.inputState.dispatch({ type: 'buffer', buffer: type })
         if (type === 'alternate') {
           this.scrollback?.enterFullscreen()
+        } else if (!shellIntegrated) {
+          // A markerless session returning from an alt-screen program must
+          // not collapse to the hidden idle layout: leave fullscreen first
+          // (setUnstructured declines while an alt-screen program owns the
+          // pane), then fill the pane again.
+          this.scrollback?.exitFullscreen()
+          this.scrollback?.setUnstructured()
         } else {
           this.scrollback?.exitFullscreen()
         }
@@ -321,9 +336,20 @@ export class TerminalContent extends BaseTabContent {
           this.editor!.hide()
           renderer.setReadOnly(false)
           renderer.focus()
-          this.scrollback?.setIdle()
+          // Markerless session (still no OSC 133): the terminal must stay
+          // visible — the scrollback-block model never takes over.
+          if (!shellIntegrated) {
+            this.scrollback?.setUnstructured()
+          } else {
+            this.scrollback?.setIdle()
+          }
         }
       })
+
+      // The input-state machine starts RAW and onChange may not fire for the
+      // initial state: present an unintegrated session with the terminal
+      // visible from the first byte.
+      this.scrollback?.setUnstructured()
 
       // ── Focus bounce (P0-4) ────────────────────────────────────────────
       target.addEventListener('focusin', () => {

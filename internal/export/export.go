@@ -1,15 +1,16 @@
 // Package export implements four distinct export/backup/import modes
 // as required by ADR-0011 §7:
 //
-//  1. Configuration export — profiles, groups, credential metadata, settings.
-//     Secret references (SecretID) are present but unresolved.
+//  1. Configuration export — profiles, groups, settings. Secret references
+//     are machine-local bindings and are stripped: the export carries
+//     neither material nor the backend-owned references to it.
 //  2. Portable encrypted export — configuration encrypted under a new
 //     user-supplied passphrase. Private content (conversations, command
 //     history) is never silently included; it requires an explicit opt-in.
 //  3. Same-machine backup — configuration documents and content.db locations,
 //     with a plain statement that secrets stay in the OS keychain.
-//  4. Import — metadata first; the user maps existing credentials or supplies
-//     missing secrets. Import never resolves or invents a secret.
+//  4. Import — metadata first; the user binds their own secrets afterwards.
+//     Import never resolves or invents a secret.
 //
 // Hard constraints (ADR-0011 §2, §7):
 //   - No mode resolves a secret. No code path in this package calls
@@ -23,8 +24,8 @@ package export
 type Mode string
 
 const (
-	// ModeConfigExport exports profiles, groups, credential metadata, and
-	// settings. SecretID references travel as-is; no secret material is
+	// ModeConfigExport exports profiles, groups, and settings. Secret
+	// references are machine-local and are stripped; no secret material is
 	// ever resolved or included.
 	ModeConfigExport Mode = "config-export"
 
@@ -62,15 +63,15 @@ func ManifestFor(mode Mode) Manifest {
 			Carries: []string{
 				"SSH connection profiles",
 				"Profile groups and folder structure",
-				"Credential metadata (username, key path, auth method)",
 				"Settings and preferences",
 			},
 			Omits: []string{
-				"Secret material (passwords, key passphrases) — only SecretID references travel",
+				"Secret material (passwords, key passphrases) — never exported",
+				"Secret references — machine-local bindings, not exported",
 				"Private content (AI conversations, command history)",
 			},
 			Notes: []string{
-				"SecretID values are opaque references; the receiving machine must have its own secrets",
+				"Imported connections have no saved passwords until secrets are bound on the receiving machine",
 			},
 		}
 	case ModePortableEncrypted:
@@ -93,7 +94,7 @@ func ManifestFor(mode Mode) Manifest {
 		return Manifest{
 			Mode: mode,
 			Carries: []string{
-				"Configuration documents (profiles, groups, credentials, settings)",
+				"Configuration documents (profiles, groups, settings)",
 				"Content database (content.db), if it exists",
 			},
 			Omits: []string{
@@ -110,14 +111,13 @@ func ManifestFor(mode Mode) Manifest {
 			Carries: []string{
 				"SSH connection profiles",
 				"Profile groups and folder structure",
-				"Credential metadata (with SecretID references intact)",
 			},
 			Omits: []string{
 				"Secret resolution — import never invents or resolves secrets",
+				"Secret references — machine-local bindings never travel",
 			},
 			Notes: []string{
-				"After import, map existing credentials or supply missing secrets",
-				"Unresolved credentials are reported so the UI can prompt the user",
+				"After import, bind the machine's own secrets to the connections that need them",
 			},
 		}
 	default:

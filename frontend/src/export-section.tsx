@@ -12,7 +12,13 @@
 import { For, Show, onMount } from 'solid-js'
 import { createStore } from 'solid-js/store'
 import { render } from 'solid-js/web'
-import type { ProfileClient, ExportManifest, ConfigExport, SSHConfigImportResult } from './profiles'
+import type {
+  ProfileClient,
+  ExportManifest,
+  ConfigExport,
+  SSHConfigImportResult,
+  ImportResult,
+} from './profiles'
 import { VaultOperationCancelledError, type VaultController } from './vault'
 import { downloadJSON, downloadBinary } from './export-utils'
 import { PageSection } from './ui/page-section'
@@ -40,7 +46,7 @@ const MODES: ModeDef[] = [
   {
     mode: 'config-export',
     label: 'Configuration Export',
-    summary: 'Profiles, groups, credential metadata, and settings',
+    summary: 'Profiles, groups, and settings',
   },
   {
     mode: 'portable-encrypted',
@@ -247,30 +253,13 @@ function ImportActions(props: { profileClient: ProfileClient; vaultController?: 
     tabbyBusy: false,
     sshBusy: false,
   })
-
   /**
-   * An import that leaves credentials unmapped has half-succeeded, and the half
-   * that failed needs the user to do something about it — so it is raised as a
-   * sticky warning rather than a success that scrolls away in four seconds.
+   * An import either completed or failed — there is nothing to map, because
+   * imported profiles carry no secret bindings (the export strips them and
+   * the receiving machine binds its own, ADR-0017).
    */
-  const reportImport = (result: {
-    profilesImported: number
-    groupsImported: number
-    credentialsImported: number
-    unresolvedCredentials?: unknown[]
-  }) => {
-    const summary =
-      `Imported ${result.profilesImported} profiles, ` +
-      `${result.groupsImported} groups, ${result.credentialsImported} credentials`
-    const unresolved = result.unresolvedCredentials?.length ?? 0
-    if (unresolved > 0) {
-      showToast({
-        level: 'warning',
-        duration: 0,
-        message: `${summary} — ${unresolved} credentials need secret mapping`,
-      })
-      return
-    }
+  const reportImport = (result: ImportResult) => {
+    const summary = `Imported ${result.profilesImported} profiles, ${result.groupsImported} groups`
     showToast({ level: 'success', message: summary })
   }
 
@@ -332,7 +321,7 @@ function ImportActions(props: { profileClient: ProfileClient; vaultController?: 
       // Build confirmation details with per-entry info.
       const parts: string[] = [
         `${preview.profilesToImport} profile(s), ${preview.groupsToImport} group(s),` +
-          ` ${preview.credentialsToImport} credential(s)`,
+          ` ${preview.secretsToImport} secret(s)`,
       ]
       if (preview.profileEntries && preview.profileEntries.length > 0) {
         parts.push('')
@@ -351,10 +340,10 @@ function ImportActions(props: { profileClient: ProfileClient; vaultController?: 
         parts.push('')
         parts.push('Groups: ' + preview.groupNames.join(', '))
       }
-      if (preview.credentialEntries && preview.credentialEntries.length > 0) {
+      if (preview.secretEntries && preview.secretEntries.length > 0) {
         parts.push('')
-        parts.push('Credentials:')
-        for (const e of preview.credentialEntries) {
+        parts.push('Secrets:')
+        for (const e of preview.secretEntries) {
           parts.push(`  ${e.name} (${e.type})`)
         }
       }
@@ -397,9 +386,7 @@ function ImportActions(props: { profileClient: ProfileClient; vaultController?: 
       const doExecute = async (): Promise<void> => {
         const result = await pc.tabbyExecute(preview.planToken)
         setState('tabbyFile', null)
-        const execSummary =
-          `Imported ${result.profilesImported} connections, ` +
-          `${result.groupsImported} groups, ${result.credentialsImported} credentials`
+        const execSummary = `Imported ${result.profilesImported} connections, ${result.groupsImported} groups`
         showToast({ level: 'success', message: execSummary })
       }
 
