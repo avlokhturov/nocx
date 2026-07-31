@@ -51,8 +51,11 @@ credential and then offered them the credential. Two objects, one intent.
    inline (`options.user`, `options.auth`, `options.keyPath`), and the editor shows the
    profile's, not the credential's. This is duplication, not a job.
 2. **Versions and rollout** — `Versions`, `CurrentVersionID`, `CandidateVersionID`, and
-   `rollout.run`, which stages a candidate and probes it before promotion. This is real, it
-   is tested, and nothing else in the codebase does it.
+   `rollout.run`, which stages a candidate and probes it before promotion. The backend is
+   wired (`app.go:165`) and the method answers on the wire. **The user cannot reach any of
+   it:** `RolloutPanel` is imported by its own test and by nothing else, because the
+   Credentials page that hosted it was removed. So this is real, tested, unique — and
+   currently a feature no user can invoke. It is filed as `nocx-si5z`.
 3. **The authorization anchor** — ADR-0006 wave 2 removed host binding and replaced it with
    a computed proof: the saved profile resolves to an effective (credential version,
    endpoint) pair, and that pair is authorised at connect time. The argument there is subtle
@@ -91,6 +94,11 @@ rollout machinery is the reason ADR-0006's aggregate exists, and it may not be d
 before its replacement carries the same guarantee — including the one ADR-0006 states
 explicitly, that a rejected candidate is **never** silently retried with the working secret,
 because that is indistinguishable from password spraying to the host being probed.
+
+What this is _not_ is a reason to defer the decision. Rotation is unreachable from the
+interface today (`nocx-si5z`), so nothing a user can do stops working while versions move.
+The order above is about not deleting a guarantee before its replacement exists — it is not
+a claim that a working feature is at risk.
 
 ### 3. The authorization proof is re-anchored, not weakened
 
