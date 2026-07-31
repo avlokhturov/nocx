@@ -1,14 +1,12 @@
 # ADR-0017 — A connection references a secret, not a credential
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-07-31
 - **Related:** ADR-0006 (reusable credentials), ADR-0011 §2 (secrets as opaque
   references), ADR-0016 (a secret owns its name), beads `nocx-b5bu` (a secret saved on
   the Secrets page cannot be attached to a connection), `nocx-gqzg`, `nocx-cx03`
-- **Supersedes, if accepted:** ADR-0006's credential as a thing the user picks. The
-  aggregate's other jobs are re-homed rather than dropped; the Decision says where each
-  one goes, and none of them may be deleted before its replacement carries the same
-  guarantee.
+- **Supersedes:** ADR-0006 in full. The credential aggregate is deleted, not renamed; the
+  Decision says what happens to each of its three jobs.
 
 ## Context
 
@@ -55,14 +53,16 @@ credential and then offered them the credential. Two objects, one intent.
    wired (`app.go:165`) and the method answers on the wire. **The user cannot reach any of
    it:** `RolloutPanel` is imported by its own test and by nothing else, because the
    Credentials page that hosted it was removed. So this is real, tested, unique — and
-   currently a feature no user can invoke. It is filed as `nocx-si5z`.
+   currently a feature no user can invoke (`nocx-si5z`).
 3. **The authorization anchor** — ADR-0006 wave 2 removed host binding and replaced it with
    a computed proof: the saved profile resolves to an effective (credential version,
    endpoint) pair, and that pair is authorised at connect time. The argument there is subtle
    and worth keeping: authorisation is proven from the profile the user selected, never from
    the fact that some _other_ profile uses the same credential at the same endpoint.
 
-Only (2) and (3) are jobs. Neither of them requires the user to see the word "Credential".
+Only (2) and (3) are jobs. Neither of them requires the user to see the word "Credential" —
+and (2) is deleted outright by this ADR, for reasons the storage model forces rather than
+taste. See the Decision, §2.
 
 ## Decision
 
@@ -70,7 +70,7 @@ Only (2) and (3) are jobs. Neither of them requires the user to see the word "Cr
 holds, and picking one is what "this connection authenticates with that" means. `Credential`
 stops being a concept the user selects, names, or is offered.
 
-Three parts, in the order they must land:
+Four parts, in the order they must land:
 
 ### 1. The editor picks a secret
 
@@ -82,47 +82,73 @@ What changes is that a secret which already exists is reachable, which today it 
 
 The word "Credential" leaves the interface.
 
-### 2. Versions move onto the secret
+### 2. Versions and rollout are deleted
 
-Rotation belongs to the thing being rotated. The vault gains versioned material — a secret
-keeps its `SecretID` and its name across a rotation, and `rollout.run` stages a candidate
-version of the **secret** instead of the credential.
+The first draft of this ADR planned to move versions onto the secret, and treated that as
+the expensive part. The decision is the opposite: **versions and rollout are removed from
+the product.** `Versions`, `CurrentVersionID`, `CandidateVersionID`, `rollout.run`, the
+runner, `ResolveWithVersion` and `RolloutPanel` all go.
 
-This is where the work is, and it is the part that must not be hand-waved: `ReplaceSecret`
-overwrites material in place today, so there is no version history in the vault at all. The
-rollout machinery is the reason ADR-0006's aggregate exists, and it may not be deleted
-before its replacement carries the same guarantee — including the one ADR-0006 states
-explicitly, that a rejected candidate is **never** silently retried with the working secret,
-because that is indistinguishable from password spraying to the host being probed.
+Two reasons, and the second is the one that settles it:
 
-What this is _not_ is a reason to defer the decision. Rotation is unreachable from the
-interface today (`nocx-si5z`), so nothing a user can do stops working while versions move.
-The order above is about not deleting a guarantee before its replacement exists — it is not
-a claim that a working feature is at risk.
+- **Nothing reaches it.** `RolloutPanel` is imported by its own test and by nothing else,
+  because the Credentials page that hosted it was removed. No user has ever staged a
+  candidate.
+- **It cannot survive the storage model.** A version is a second generation of material
+  addressable at the same time as the first, and that is not something the stores this
+  product is built on will give us. The OS keychain has one entry per key: two generations
+  means inventing a naming convention on top of somebody else's namespace and hoping nothing
+  else writes there. An external store — HashiCorp Vault and its peers — **owns** versioning
+  itself, with its own semantics for what current means and its own retention; a second
+  version scheme layered above it is either ignored or actively wrong. Rotation as an
+  application-level aggregate only works for a store we fully control, and we deliberately
+  do not require one (ADR-0011 §1: the SecretStore is a boundary, not a file we write).
+
+So ADR-0006's aggregate does not need a replacement. The guarantee it carried — that a
+rejected candidate is never silently retried with the working secret — is not weakened by
+this, because with no staging there is no candidate and no retry; a probe authenticates with
+the one secret the connection names, and a rejection is reported.
+
+Rotating a secret remains what the Secrets page already does: `vault.replaceSecret`
+overwrites the material behind a secret that keeps its id and its name. That is a rotation in
+the sense a user means, and it is the only one the storage model can honestly support.
 
 ### 3. The authorization proof is re-anchored, not weakened
 
-The pair becomes (secret version, endpoint), proven the same way and from the same place:
+The pair becomes (secret, endpoint), proven the same way and from the same place:
 
 ```
 selected saved profile
   -> resolve its group inheritance chain
-  -> obtain its effective secretId and secret version
+  -> obtain its effective secretId
   -> resolve its canonical endpoint once
-  -> authorize that (secret version, endpoint) pair
+  -> authorize that (secret, endpoint) pair
 ```
 
-Per hop, justified by the effective profile that supplies **that hop's** secret. Nothing
-about the argument in ADR-0006 wave 2 changes except the noun.
+Per hop, justified by the effective profile that supplies **that hop's** secret — never by
+the fact that some other profile happens to use the same secret at the same endpoint. That
+is the whole of ADR-0006 wave 2's argument, and nothing in it changes except the noun and
+the disappearance of the version.
+
+### 4. Nothing named "credential" is left
+
+The word goes from the interface, from the wire, from the stores and from the type names.
+Not renamed and kept — removed. A search of the tree for `credential` finds the
+`credential.Secret`/`credential.SecretStore` boundary of ADR-0011 §2 and nothing else; that
+boundary is about secret **material** and is untouched by this ADR. The rule is the
+repository's own: no compatibility shims, no dead code, delete it.
 
 ## Consequences
 
-- **`internal/credential`'s metadata aggregate goes away** once §2 and §3 land. The
-  `credential.SecretStore` boundary stays exactly as it is — ADR-0011 §2 is untouched, and a
-  secret value still never reaches the renderer.
-- **`credentials.*` RPCs are replaced by `vault.*` ones.** `savePassword`,
-  `saveKeyMaterial`, `saveKeyPassphrase` become operations on a secret, and each gets a
-  contract schema in `contracts/` as it is touched.
+- **The credential aggregate is deleted**: `profile.Credential`, `CredentialVersion`,
+  `CredentialPatch`, the metadata repository, `internal/rollout`, `ws_rollout.go`,
+  `ResolveWithVersion` and `RolloutPanel`. The `credential.Secret` / `credential.SecretStore`
+  boundary stays exactly as it is — ADR-0011 §2 is untouched, and a secret value still never
+  reaches the renderer.
+- **`credentials.*` and `rollout.*` RPCs go.** `savePassword`, `saveKeyMaterial`,
+  `saveKeyPassphrase` become operations that mint a secret and hand back the row handle the
+  editor then names; each gets a contract schema in `contracts/` as it is touched. A method
+  that disappears is a wire change like any other.
 - **Profiles carry `secretId` where they carried `credentialId`.** Group inheritance is
   unchanged; it inherits a different field.
 - **The "N connections" count becomes answerable directly** — it is the number of profiles
@@ -130,9 +156,10 @@ about the argument in ADR-0006 wave 2 changes except the noun.
   counting through an owner that may not exist, and both dissolve here rather than being
   fixed twice.
 - **Migration is a one-way conversion at load**, in the spirit of ADR-0006's own legacy
-  handling: a profile with a `credentialId` resolves to the credential's current version's
-  secret and is rewritten to name that secret. There is no compatibility shim afterwards —
-  this is a greenfield product and the repository's rule is to break and refactor.
+  handling: a profile with a `credentialId` resolves to that credential's current secret and
+  is rewritten to name the secret directly. Runs once, writes the converted document, and
+  leaves nothing behind to read the old shape — this is a greenfield product and the
+  repository's rule is to break and refactor.
 - **The renderer gets simpler in a way worth naming.** `AuthenticationEditor` currently
   juggles a credential id, a credential draft, a usage count and an inline-creation path
   that mints a credential the user never asked for. Most of that exists to keep an invisible
@@ -144,10 +171,10 @@ about the argument in ADR-0006 wave 2 changes except the noun.
 picking one that has no credential mints a credential behind the scenes. This fixes the
 reported bug in a day and preserves every line of the rollout machinery.
 
-Rejected as an end state, and it is the strongest alternative: it keeps two objects for one
-concept, which is precisely the drift this ADR exists to stop, and every future surface pays
-the tax of asking which one it means. It is, however, a legitimate **first step** if §2
-proves large — with the ADR accepted, so the direction is not in doubt.
+Rejected. It keeps two objects for one concept, which is precisely the drift this ADR exists
+to stop, and every future surface pays the tax of asking which one it means. It was worth
+considering as a staging step while §2 looked expensive; once versions are deleted rather
+than moved, the expensive part is gone and there is nothing left to stage.
 
 **Do nothing; teach the Secrets page not to create ownerless secrets.** This is the
 consistent version of ADR-0006, and it means reverting ADR-0016's central promise: a secret
@@ -156,9 +183,9 @@ right — storing a key before wiring it up is an ordinary thing to want.
 
 ## Not decided here
 
-- Where versioned secret material is physically stored, and whether a version is a new
-  `SecretID` or a generation inside one. §2 states the requirement; the storage design is
-  its own decision.
+- Whether a future need for staged rotation is met by the store rather than by us. If one
+  arrives, the place to look is the store's own versioning — HashiCorp Vault has it — not a
+  second scheme above it. That is a reversal of this ADR and needs its own.
 - Whether a secret may be restricted to particular endpoints as a user-set property. Today
   authorisation is computed, never declared, and this ADR keeps it that way.
 - The Secrets page's own surface (delete, kind badges, usage counts) — `nocx-pf8b`,
