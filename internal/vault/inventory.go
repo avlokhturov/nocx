@@ -12,13 +12,17 @@ import (
 // Types
 // ---------------------------------------------------------------------------
 
-// InventoryEntry is one item in the vault.inventory response.
+// InventoryEntry is one item in the vault.inventory response. The secret owns
+// its name (ADR-0016): Name comes from the vault's catalogue record, falling
+// back to the derived label where an owner exists and to the kind otherwise —
+// never blank, never the SecretID.
 type InventoryEntry struct {
-	Kind      string `json:"kind"`      // "password" | "key-passphrase"
-	Label     string `json:"label"`     // derived description (never user-invented)
+	ID        string `json:"id"`        // renderer-addressable row handle; never a SecretID
+	Name      string `json:"name"`      // the secret's display name, owned by the vault
+	Kind      string `json:"kind"`      // "password" | "key-passphrase" | ...
 	Provider  string `json:"provider"`  // provider tag from the secret reference
-	OwnerID   string `json:"ownerId"`   // credential ID that owns this secret
-	UsedBy    int    `json:"usedBy"`    // how many profiles reference the credential
+	OwnerID   string `json:"ownerId"`   // credential ID that owns this secret, "" when unowned
+	UsedBy    int    `json:"usedBy"`    // how many profiles reference the owning credential
 	Reachable bool   `json:"reachable"` // whether the provider reports Status().Ready
 }
 
@@ -80,11 +84,15 @@ func (v *Vault) ProviderStatus(ctx context.Context, id credential.SecretID) (pro
 	return p, status.Ready, status.Reason, nil
 }
 
-// BuildInventory assembles the full inventory from credential metadata. It
-// traverses every credential's versions (and legacy bare fields) to collect
-// unique secret references, maps each to its provider, checks reachability,
-// and derives the label — all within the vault package where reference
-// parsing is private.
+// BuildInventory assembles the full inventory. It traverses the credential
+// metadata for unique secret references, reads each secret's name from the
+// vault's own catalogue record (ADR-0016) instead of deriving it, and also
+// enumerates records no credential references — the unowned secrets the ADR
+// exists to make possible. Reference parsing stays private to this package.
+//
+// A secret whose name did not land falls back to the derived label where an
+// owner exists, and to the kind otherwise. It never renders blank, and never
+// renders the SecretID.
 //
 // An unregistered provider tag does not fail the call: the entry reports
 // reachable=false and the caller continues.
@@ -94,6 +102,7 @@ func (v *Vault) ProviderStatus(ctx context.Context, id credential.SecretID) (pro
 func (v *Vault) BuildInventory(ctx context.Context, inputs []CredentialInventory) ([]InventoryEntry, error) {
 	v.mu.Lock()
 	state := v.stateLocked()
+	records := append([]SecretRecord(nil), v.doc.Secrets...)
 	v.mu.Unlock()
 
 	switch state {
@@ -108,12 +117,15 @@ func (v *Vault) BuildInventory(ctx context.Context, inputs []CredentialInventory
 	// an empty vault. usage.go:54-57 documents this exact trap — "a Go test
 	// asserting len == 0 passes either way, which is exactly how the wrong
 	// wire format stays green" — and this is it happening again.
-	entries := make([]InventoryEntry, 0, len(inputs))
+	entries := make([]InventoryEntry, 0, len(inputs)+len(records))
+	referenced := make(map[credential.SecretID]bool, len(inputs))
 
 	for _, cred := range inputs {
 		refs := collectRefs(cred)
 
 		for _, sr := range refs {
+			referenced[sr.ref] = true
+
 			providerID, err := parseID(sr.ref)
 			if err != nil {
 				// Malformed reference — skip this entry, don't fail the whole call.
@@ -128,17 +140,64 @@ func (v *Vault) BuildInventory(ctx context.Context, inputs []CredentialInventory
 				reachable = status.Ready
 			}
 
-			label := deriveLabel(sr, cred)
+			kind := sr.kind
+			name := ""
+			if rec, ok := recordFor(records, sr.ref); ok {
+				kind = rec.Kind
+				name = rec.Name
+			}
+			if name == "" {
+				// The name did not land (crash gap, or a pre-ADR secret):
+				// fall back to the derived label where an owner exists.
+				name = deriveLabel(sr, cred)
+			}
+			if name == "" {
+				name = kindLabel(kind)
+			}
 
 			entries = append(entries, InventoryEntry{
-				Kind:      sr.kind,
-				Label:     label,
+				ID:        rowID(sr.ref),
+				Name:      name,
+				Kind:      kind,
 				Provider:  string(providerID),
 				OwnerID:   cred.ID,
 				UsedBy:    cred.UsageCount,
 				Reachable: reachable,
 			})
 		}
+	}
+
+	// Unowned records: the vault holds a secret no credential references.
+	// The record is the only source — nothing derived it, and a record whose
+	// name did not land renders as the kind.
+	for _, rec := range records {
+		if referenced[rec.ID] {
+			continue
+		}
+		providerID, err := parseID(rec.ID)
+		if err != nil {
+			continue
+		}
+		prov, provOK := v.reg.Get(providerID)
+		reachable := false
+		if provOK {
+			status := prov.Status(ctx)
+			reachable = status.Ready
+		}
+		name := rec.Name
+		if name == "" {
+			name = kindLabel(rec.Kind)
+		}
+
+		entries = append(entries, InventoryEntry{
+			ID:        rowID(rec.ID),
+			Name:      name,
+			Kind:      rec.Kind,
+			Provider:  string(providerID),
+			OwnerID:   "",
+			UsedBy:    0,
+			Reachable: reachable,
+		})
 	}
 
 	sort.Slice(entries, func(i, j int) bool {
@@ -151,6 +210,16 @@ func (v *Vault) BuildInventory(ctx context.Context, inputs []CredentialInventory
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+// recordFor finds the catalogue record for id in a snapshot of doc.Secrets.
+func recordFor(records []SecretRecord, id credential.SecretID) (SecretRecord, bool) {
+	for _, rec := range records {
+		if rec.ID == id {
+			return rec, true
+		}
+	}
+	return SecretRecord{}, false
+}
 
 // collectRefs gathers unique secret references from a credential's versions
 // AND its legacy bare fields (which may coexist during migration). Unconditional
@@ -201,7 +270,8 @@ func collectRefs(cred CredentialInventory) []secretRef {
 	return refs
 }
 
-// deriveLabel produces the user-facing label for a secret entry.
+// deriveLabel produces the fallback label for a secret entry whose name did
+// not land, from the owner that references it.
 //
 // Rules:
 //   - password used by one profile → "SSH password for {user}@{host}:{port}"

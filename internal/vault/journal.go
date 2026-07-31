@@ -36,6 +36,12 @@ type JournalEntry struct {
 	NewID  credential.SecretID `json:"newId"`
 	Target string              `json:"target"`
 	Phase  Phase               `json:"phase"`
+	// Name and Kind carry the secret's catalogue record through the create
+	// sequence (ADR-0016): the name joins the journal at PhasePrepared and
+	// lands in the durable record at PhaseSecretWritten. They are metadata,
+	// never secret bytes.
+	Name string `json:"name,omitempty"`
+	Kind string `json:"kind,omitempty"`
 }
 
 // String returns a compact representation for logging. It emits identifiers
@@ -51,12 +57,17 @@ func (e JournalEntry) String() string {
 // It is idempotent: the second run is a no-op.
 //
 // Entries in PhasePrepared or PhaseSecretWritten with an empty Target
-// represent a new secret that was never referenced by metadata — the orphan
-// is deleted and the entry cleared.
+// represent a new secret that was never referenced by metadata. The record
+// (doc.Secrets, ADR-0016) decides what happened:
+//
+//   - no record — the create's durable half never landed; the orphan is
+//     deleted and the entry cleared;
+//   - record present — the create completed (value and record were written in
+//     one journal step); the entry is cleared and the secret kept.
 //
 // Entries in PhaseMetadataRepointed represent a completed metadata repoint
 // with a possibly-stale old secret. The new secret is verified accessible,
-// then the old secret is deleted best-effort.
+// then the old secret is deleted best-effort and its record, if any, removed.
 //
 // An entry whose provider is not in reg, or whose identifier is malformed,
 // is retained (never cleared) and returned in the blocked slice. It is never
@@ -97,9 +108,17 @@ func Reconcile(ctx context.Context, doc *Document, reg *Registry) []JournalEntry
 		switch entry.Phase {
 		case PhasePrepared, PhaseSecretWritten:
 			if entry.Target == "" {
+				if hasRecord(doc, entry.NewID) {
+					// The create's durable half landed: value and record were
+					// written together. Nothing downstream can have happened
+					// (no metadata target), and the record proves the secret
+					// exists, so the entry is simply cleared.
+					*entry = JournalEntry{}
+					continue
+				}
 				// Nothing downstream can have happened — the caller had not
-				// yet attached a metadata target. Delete the orphan secret
-				// and clear the entry.
+				// yet attached a metadata target and no record landed.
+				// Delete the orphan secret and clear the entry.
 				if err := wp.Delete(ctx, entry.NewID); err != nil {
 					// Transient provider failure — retain the entry so the
 					// orphan is retried on the next startup.
@@ -138,6 +157,7 @@ func Reconcile(ctx context.Context, doc *Document, reg *Registry) []JournalEntry
 					blocked = append(blocked, *entry)
 					continue
 				}
+				dropRecord(doc, entry.OldID)
 			}
 			*entry = JournalEntry{}
 
@@ -148,4 +168,24 @@ func Reconcile(ctx context.Context, doc *Document, reg *Registry) []JournalEntry
 	}
 
 	return blocked
+}
+
+// hasRecord reports whether the document carries a catalogue record for id.
+func hasRecord(doc *Document, id credential.SecretID) bool {
+	for _, rec := range doc.Secrets {
+		if rec.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// dropRecord removes the catalogue record for id, if any.
+func dropRecord(doc *Document, id credential.SecretID) {
+	for i := range doc.Secrets {
+		if doc.Secrets[i].ID == id {
+			doc.Secrets = append(doc.Secrets[:i], doc.Secrets[i+1:]...)
+			return
+		}
+	}
 }

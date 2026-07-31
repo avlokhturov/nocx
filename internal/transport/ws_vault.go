@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
+	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/vault"
 )
@@ -23,6 +25,13 @@ type VaultLifecycle interface {
 	// BuildInventory assembles the vault inventory from credential metadata.
 	// Returns vault.ErrVaultSealed when the vault is sealed.
 	BuildInventory(ctx context.Context, inputs []vault.CredentialInventory) ([]vault.InventoryEntry, error)
+	// CreateNamed stores value with the secret's catalogue metadata — display
+	// name and kind (ADR-0016). The name joins Create's journal sequence; it
+	// is never written by a second, independent path.
+	CreateNamed(ctx context.Context, value credential.Secret, meta vault.SecretMeta) (credential.SecretID, error)
+	// RenameSecret sets a secret's display name, addressed by its
+	// renderer-addressable row handle — never by a SecretID (nocx-jb20.1).
+	RenameSecret(ctx context.Context, row string, name string, inputs []vault.CredentialInventory) error
 	SetDefaultProvider(ctx context.Context, p vault.ProviderID) error
 	SetAutoSeal(ctx context.Context, minutes int) error
 	Activity()
@@ -95,10 +104,6 @@ func newVaultError(id json.RawMessage, code int, msg string, err error) jsonrpcR
 	}
 }
 
-// rpcErrorFor renders err as a JSON-RPC error, preserving the vault reason
-// code when err wraps one.
-//
-// Every handler that can reach the SecretStore must use this rather than
 // newJSONRPCError. The renderer tells "the vault needs setting up" apart from
 // a genuine failure by reading data.reason; a bare -32603 with a prose message
 // is indistinguishable from a disk error, so the setup dialog never opens and
@@ -138,6 +143,10 @@ func (s *WSServer) handleVaultMethod(wconn *wsConn, req jsonrpcRequest) {
 		s.handleVaultActivity(wconn, req)
 	case "vault.inventory":
 		s.handleVaultInventory(wconn, req)
+	case "vault.createSecret":
+		s.handleVaultCreateSecret(wconn, req)
+	case "vault.renameSecret":
+		s.handleVaultRenameSecret(wconn, req)
 	}
 }
 
@@ -424,6 +433,26 @@ func (s *WSServer) handleVaultInventory(wconn *wsConn, req jsonrpcRequest) {
 		return
 	}
 
+	inputs := s.vaultInventoryInputs(creds, profiles, groups)
+
+	entries, err := s.vaultLifecycle.BuildInventory(context.Background(), inputs)
+	if err != nil {
+		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "vault.inventory: ", err))
+		return
+	}
+
+	result := struct {
+		Entries []vault.InventoryEntry `json:"entries"`
+	}{Entries: entries}
+
+	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(result)))
+}
+
+// vaultInventoryInputs projects credential metadata into the vault's
+// inventory input shape: usage counts, single-use host/port, and every
+// secret reference the vault needs to resolve rows against. The same inputs
+// feed BuildInventory and RenameSecret, so both address the same rows.
+func (s *WSServer) vaultInventoryInputs(creds []profile.Credential, profiles []profile.SSHProfile, groups []profile.ProfileGroup) []vault.CredentialInventory {
 	usage := profile.ComputeCredentialUsage(creds, profiles, groups, profile.SparseSSHOptions{})
 
 	// Build profile lookup for single-use label resolution.
@@ -440,7 +469,6 @@ func (s *WSServer) handleVaultInventory(wconn *wsConn, req jsonrpcRequest) {
 		usageRefs[u.CredentialID] = u.Profiles
 	}
 
-	// Build vault inventory inputs.
 	inputs := make([]vault.CredentialInventory, 0, len(creds))
 	for _, c := range creds {
 		ci := vault.CredentialInventory{
@@ -476,18 +504,103 @@ func (s *WSServer) handleVaultInventory(wconn *wsConn, req jsonrpcRequest) {
 
 		inputs = append(inputs, ci)
 	}
+	return inputs
+}
 
-	entries, err := s.vaultLifecycle.BuildInventory(context.Background(), inputs)
-	if err != nil {
-		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "vault.inventory: ", err))
+type vaultCreateSecretParams struct {
+	Name  string `json:"name"`
+	Kind  string `json:"kind"`
+	Value string `json:"value"`
+}
+
+// handleVaultCreateSecret stores a secret the user created on the Secrets
+// page: they were asked for the name and the kind, so both are required. The
+// value goes to the default provider; the name and kind go into the vault's
+// catalogue record — in the same create sequence, never a second path
+// (ADR-0016).
+func (s *WSServer) handleVaultCreateSecret(wconn *wsConn, req jsonrpcRequest) {
+	var params vaultCreateSecretParams
+	if !isJSONObject(req.Params) {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		return
+	}
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		return
+	}
+	if strings.TrimSpace(params.Name) == "" {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: name is required"))
 		return
 	}
 
-	result := struct {
-		Entries []vault.InventoryEntry `json:"entries"`
-	}{Entries: entries}
+	_, err := s.vaultLifecycle.CreateNamed(context.Background(), credential.NewSecret(params.Value),
+		vault.SecretMeta{Name: params.Name, Kind: params.Kind})
+	if err != nil {
+		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "vault.createSecret: ", err))
+		return
+	}
 
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(result)))
+	s.broadcastVaultChanged()
+	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(struct{}{})))
+}
+
+type vaultRenameSecretParams struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// handleVaultRenameSecret sets a secret's display name. The row is addressed
+// by its renderer-addressable handle, which the backend resolves — a SecretID
+// is never accepted from the renderer as an identifier (nocx-jb20.1). The
+// row set is the same one the inventory shows, so an unrecorded
+// (pre-ADR-0016) reference can be renamed too.
+func (s *WSServer) handleVaultRenameSecret(wconn *wsConn, req jsonrpcRequest) {
+	if s.credMeta == nil || s.profiles == nil || s.groups == nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "vault.renameSecret not available"))
+		return
+	}
+	var params vaultRenameSecretParams
+	if !isJSONObject(req.Params) {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		return
+	}
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		return
+	}
+	if strings.TrimSpace(params.Name) == "" {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: name is required"))
+		return
+	}
+	if strings.TrimSpace(params.ID) == "" {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: id is required"))
+		return
+	}
+
+	creds, err := s.credMeta.LoadCredentials()
+	if err != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		return
+	}
+	profiles, err := s.profiles.LoadProfiles()
+	if err != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		return
+	}
+	groups, err := s.groups.LoadGroups()
+	if err != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		return
+	}
+	inputs := s.vaultInventoryInputs(creds, profiles, groups)
+
+	if err := s.vaultLifecycle.RenameSecret(context.Background(), params.ID, params.Name, inputs); err != nil {
+		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "vault.renameSecret: ", err))
+		return
+	}
+
+	s.broadcastVaultChanged()
+	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(struct{}{})))
 }
 
 // broadcastVaultChanged sends a vault.changed notification to every connected

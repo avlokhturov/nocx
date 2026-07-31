@@ -2263,3 +2263,227 @@ func (p *refusingPurgeProvider) Get(_ context.Context, _ credential.SecretID) (c
 func (p *refusingPurgeProvider) PurgeAll(_ context.Context) error {
 	return errors.New("keychain is not answering")
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0016 — the secret owns its name: records
+// ---------------------------------------------------------------------------
+
+// CreateNamed persists the catalogue record in the same journal step that
+// advances to PhaseSecretWritten, and the journal entry carries the metadata
+// from PhasePrepared — the name joins the sequence, never a second path.
+func TestCreateNamed_PersistsRecordAndJournal(t *testing.T) {
+	loweredCost(t)
+	sys := newTestProvider(ProviderSystem)
+	fp := newTestFileProvider(ProviderFile)
+	v, _, _ := testVault(t, sys, fp)
+	mustSetup(t, v, "")
+	defer v.Close()
+
+	id, err := v.CreateNamed(context.Background(), credential.NewSecret("pw"),
+		SecretMeta{Name: "root@192.168.0.57", Kind: "password"})
+	if err != nil {
+		t.Fatalf("CreateNamed: %v", err)
+	}
+
+	var rec *SecretRecord
+	for i := range v.doc.Secrets {
+		if v.doc.Secrets[i].ID == id {
+			rec = &v.doc.Secrets[i]
+			break
+		}
+	}
+	if rec == nil {
+		t.Fatal("no catalogue record for the created secret")
+	}
+	if rec.Name != "root@192.168.0.57" {
+		t.Errorf("record name = %q, want %q", rec.Name, "root@192.168.0.57")
+	}
+	if rec.Kind != "password" {
+		t.Errorf("record kind = %q, want %q", rec.Kind, "password")
+	}
+
+	// The journal entry at PhasePrepared/PhaseSecretWritten carries the same
+	// metadata — that is the "name joins the sequence" part.
+	var entry *JournalEntry
+	for i := range v.doc.Journal {
+		if v.doc.Journal[i].NewID == id {
+			entry = &v.doc.Journal[i]
+			break
+		}
+	}
+	if entry == nil {
+		t.Fatal("no journal entry for the created secret")
+	}
+	if entry.Name != "root@192.168.0.57" || entry.Kind != "password" {
+		t.Errorf("journal carries name=%q kind=%q", entry.Name, entry.Kind)
+	}
+	if entry.Phase != PhaseSecretWritten {
+		t.Errorf("journal phase = %q, want %q", entry.Phase, PhaseSecretWritten)
+	}
+}
+
+// The nameless form (the SecretStore interface) still records: the record is
+// the durable proof that lets Reconcile keep the secret, and a nameless
+// record renders by fallback.
+func TestCreate_RecordsNamelessPasswordKind(t *testing.T) {
+	loweredCost(t)
+	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
+	mustSetup(t, v, "")
+	defer v.Close()
+
+	id, err := v.Create(context.Background(), credential.NewSecret("pw"))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	rec, ok := recordFor(v.doc.Secrets, id)
+	if !ok {
+		t.Fatal("Create left no catalogue record")
+	}
+	if rec.Kind != "password" {
+		t.Errorf("record kind = %q, want %q", rec.Kind, "password")
+	}
+	if rec.Name != "" {
+		t.Errorf("record name = %q, want empty", rec.Name)
+	}
+}
+
+// Delete removes the catalogue record with the metadata-first journal write:
+// no dangling row after the secret is gone.
+func TestDelete_RemovesRecord(t *testing.T) {
+	loweredCost(t)
+	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
+	mustSetup(t, v, "")
+	defer v.Close()
+
+	id, err := v.CreateNamed(context.Background(), credential.NewSecret("pw"),
+		SecretMeta{Name: "prod password", Kind: "password"})
+	if err != nil {
+		t.Fatalf("CreateNamed: %v", err)
+	}
+	if _, ok := recordFor(v.doc.Secrets, id); !ok {
+		t.Fatal("record missing before delete")
+	}
+
+	if err := v.Delete(context.Background(), id); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if _, ok := recordFor(v.doc.Secrets, id); ok {
+		t.Error("record still present after Delete")
+	}
+}
+
+// RenameSecret addresses a row by its renderer-addressable handle and sets
+// the name on the vault's own record. It must never accept a SecretID.
+func TestRenameSecret_RecordRow(t *testing.T) {
+	loweredCost(t)
+	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
+	mustSetup(t, v, "")
+	defer v.Close()
+
+	id, err := v.CreateNamed(context.Background(), credential.NewSecret("pw"),
+		SecretMeta{Name: "old name", Kind: "key-passphrase"})
+	if err != nil {
+		t.Fatalf("CreateNamed: %v", err)
+	}
+
+	if err := v.RenameSecret(context.Background(), rowID(id), "the prod passphrase", nil); err != nil {
+		t.Fatalf("RenameSecret: %v", err)
+	}
+
+	rec, ok := recordFor(v.doc.Secrets, id)
+	if !ok {
+		t.Fatal("record missing after rename")
+	}
+	if rec.Name != "the prod passphrase" {
+		t.Errorf("record name = %q, want %q", rec.Name, "the prod passphrase")
+	}
+	// The kind's owner is the vault: a rename never changes it.
+	if rec.Kind != "key-passphrase" {
+		t.Errorf("record kind = %q, want %q", rec.Kind, "key-passphrase")
+	}
+}
+
+// RenameSecret resolves rows that were never recorded — pre-ADR-0016
+// references — through the credential metadata, and gives them a record.
+func TestRenameSecret_UnrecordedRefRow(t *testing.T) {
+	loweredCost(t)
+	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
+	mustSetup(t, v, "")
+	defer v.Close()
+
+	ref := credential.SecretID(refSys)
+	inputs := []CredentialInventory{
+		{ID: "cred:legacy:1", Username: "deploy", AuthMode: "password", SecretID: refSys},
+	}
+
+	if err := v.RenameSecret(context.Background(), rowID(ref), "deploy box", inputs); err != nil {
+		t.Fatalf("RenameSecret: %v", err)
+	}
+
+	rec, ok := recordFor(v.doc.Secrets, ref)
+	if !ok {
+		t.Fatal("rename did not record the unrecorded ref")
+	}
+	if rec.Name != "deploy box" {
+		t.Errorf("record name = %q, want %q", rec.Name, "deploy box")
+	}
+	if rec.Kind != "password" {
+		t.Errorf("record kind = %q, want %q", rec.Kind, "password")
+	}
+}
+
+func TestRenameSecret_RejectsEmptyName(t *testing.T) {
+	loweredCost(t)
+	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
+	mustSetup(t, v, "")
+	defer v.Close()
+
+	id, err := v.CreateNamed(context.Background(), credential.NewSecret("pw"),
+		SecretMeta{Name: "named", Kind: "password"})
+	if err != nil {
+		t.Fatalf("CreateNamed: %v", err)
+	}
+
+	if err := v.RenameSecret(context.Background(), rowID(id), "   ", nil); err == nil {
+		t.Error("rename with a blank name should be refused")
+	}
+	rec, _ := recordFor(v.doc.Secrets, id)
+	if rec.Name != "named" {
+		t.Errorf("name changed to %q despite refusal", rec.Name)
+	}
+}
+
+func TestRenameSecret_UnknownRow(t *testing.T) {
+	loweredCost(t)
+	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
+	mustSetup(t, v, "")
+	defer v.Close()
+
+	if err := v.RenameSecret(context.Background(), "secrow:00000000000000000000000000000000", "x", nil); err == nil {
+		t.Error("rename of an unknown row should fail")
+	}
+}
+
+func TestRenameSecret_RejectsSecretID(t *testing.T) {
+	loweredCost(t)
+	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
+	mustSetup(t, v, "")
+	defer v.Close()
+
+	id, err := v.CreateNamed(context.Background(), credential.NewSecret("pw"),
+		SecretMeta{Name: "named", Kind: "password"})
+	if err != nil {
+		t.Fatalf("CreateNamed: %v", err)
+	}
+
+	// A SecretID is not a row handle: it must not address the secret
+	// (nocx-jb20.1 — the reference is never accepted as an identifier).
+	if err := v.RenameSecret(context.Background(), string(id), "x", nil); err == nil {
+		t.Error("rename addressed by SecretID should fail")
+	}
+	rec, _ := recordFor(v.doc.Secrets, id)
+	if rec.Name != "named" {
+		t.Errorf("name changed to %q despite refusal", rec.Name)
+	}
+}

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/gorilla/websocket"
+	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/storage"
@@ -94,6 +95,26 @@ func (h *inventoryHarness) savePassword(credID, password string) {
 	}
 }
 
+// savePasswordNamed saves a password the way the renderer does once the
+// secret owns its name (ADR-0016): with the generated name attached.
+func (h *inventoryHarness) savePasswordNamed(credID, password, name string) {
+	h.t.Helper()
+	resp := jsonrpcCall(h.t, h.conn, "credentials.savePassword", map[string]any{
+		"credentialId": credID,
+		"password":     password,
+		"name":         name,
+	})
+	var result struct {
+		Result bool `json:"result"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		h.t.Fatalf("credentials.savePassword unmarshal: %v\nraw: %s", err, string(resp))
+	}
+	if !result.Result {
+		h.t.Fatal("credentials.savePassword returned false")
+	}
+}
+
 func (h *inventoryHarness) savePassphrase(credID, passphrase string) {
 	h.t.Helper()
 	resp := jsonrpcCall(h.t, h.conn, "credentials.saveKeyPassphrase", map[string]any{
@@ -127,8 +148,9 @@ type inventoryResponse struct {
 }
 
 type inventoryEntryDTO struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
 	Kind      string `json:"kind"`
-	Label     string `json:"label"`
 	Provider  string `json:"provider"`
 	OwnerID   string `json:"ownerId"`
 	UsedBy    int    `json:"usedBy"`
@@ -251,8 +273,8 @@ func TestVaultInventory_MixedCredentials(t *testing.T) {
 	if !passEntry.Reachable {
 		t.Error("password reachable should be true")
 	}
-	if passEntry.Label != "SSH password for deploy" {
-		t.Errorf("password label = %q, want %q", passEntry.Label, "SSH password for deploy")
+	if passEntry.Name != "SSH password for deploy" {
+		t.Errorf("password name = %q, want %q", passEntry.Name, "SSH password for deploy")
 	}
 
 	if keyEntry == nil {
@@ -269,8 +291,8 @@ func TestVaultInventory_MixedCredentials(t *testing.T) {
 	}
 	// KeyFingerprint is not populated by saveKeyPassphrase; label shows
 	// "SHA256:…" with an empty fingerprint — a known data gap in writer.
-	if keyEntry.Label != "Passphrase for key SHA256:…" {
-		t.Errorf("key label = %q, want %q", keyEntry.Label, "Passphrase for key SHA256:…")
+	if keyEntry.Name != "Passphrase for key SHA256:…" {
+		t.Errorf("key name = %q, want %q", keyEntry.Name, "Passphrase for key SHA256:…")
 	}
 }
 
@@ -341,5 +363,61 @@ func TestVaultInventory_NotWired(t *testing.T) {
 	}
 	if errResult.Error.Code != -32601 {
 		t.Errorf("error code = %d, want -32601", errResult.Error.Code)
+	}
+}
+
+// A secret created through the production save path survives a restart.
+// The journal contract used to be test-only: production never calls
+// AttachTarget/CommitMetadata, so a PhaseSecretWritten entry with an empty
+// target was deleted by Reconcile at the next startup. The catalogue record
+// (ADR-0016) is the durable proof: the entry is cleared, the secret kept,
+// and the row still renders with its name.
+func TestVaultInventory_SecretSurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+	docStore := storage.NewDocumentStore(dir)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	newVault := func() (*vault.Vault, func()) {
+		reg, err := vault.NewRegistry(file.New(docStore, "vault-blob.json"))
+		if err != nil {
+			t.Fatalf("NewRegistry: %v", err)
+		}
+		v, err := vault.New(docStore, reg, logger)
+		if err != nil {
+			t.Fatalf("vault.New: %v", err)
+		}
+		return v, v.Close
+	}
+
+	v, closeV := newVault()
+	if _, err := v.Setup(t.Context(), vault.SetupRequest{Passphrase: "test"}); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	id, err := v.CreateNamed(t.Context(), credential.NewSecret("hunter2"),
+		vault.SecretMeta{Name: "deploy@web.example.com", Kind: vault.KindPassword})
+	if err != nil {
+		t.Fatalf("CreateNamed: %v", err)
+	}
+	closeV()
+
+	// Restart: reconciliation runs, the record proves the secret exists.
+	v2, closeV2 := newVault()
+	defer closeV2()
+	if unsealErr := v2.Unseal(t.Context(), vault.UnsealRequest{Passphrase: "test"}); unsealErr != nil {
+		t.Fatalf("Unseal after restart: %v", unsealErr)
+	}
+	ok, err := v2.Exists(t.Context(), id)
+	if err != nil {
+		t.Fatalf("Exists after restart: %v", err)
+	}
+	if !ok {
+		t.Fatal("secret was deleted by reconciliation at startup")
+	}
+	entries, err := v2.BuildInventory(t.Context(), nil)
+	if err != nil {
+		t.Fatalf("BuildInventory after restart: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name != "deploy@web.example.com" {
+		t.Fatalf("inventory after restart = %+v, want the named ownerless row", entries)
 	}
 }

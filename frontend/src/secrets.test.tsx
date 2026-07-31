@@ -3,7 +3,7 @@ import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { cleanup, render } from '@solidjs/testing-library'
 import { SecretsSection } from './secrets'
 import { createVaultState } from './vault'
-import type { VaultClient, VaultInventory, VaultInventoryEntry } from './vault-client'
+import type { VaultClient, VaultInventory, InventoryEntry } from './vault-client'
 
 // ── jsdom patch: native <dialog> showModal/close are unsupported ──────
 const origShowModal = HTMLDialogElement.prototype.showModal.bind(HTMLDialogElement.prototype)
@@ -22,6 +22,16 @@ afterEach(() => {
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
+const SEALED_STATUS = {
+  state: 'sealed' as const,
+  osKeyAvailable: false,
+  osKeyCapable: false,
+  hasPassphrase: false,
+  autoSealMinutes: 0,
+  providers: [],
+  defaultProvider: null,
+}
+
 function mockClient() {
   const status = vi.fn()
   const setup = vi.fn()
@@ -33,6 +43,8 @@ function mockClient() {
   const setAutoSeal = vi.fn()
   const activity = vi.fn()
   const inventory = vi.fn<() => Promise<VaultInventory>>()
+  const createSecret = vi.fn()
+  const renameSecret = vi.fn()
   const client = {
     status,
     setup,
@@ -44,18 +56,10 @@ function mockClient() {
     setAutoSeal,
     activity,
     inventory,
+    createSecret,
+    renameSecret,
   } as unknown as VaultClient
-  return { client, inventory, status }
-}
-
-const SEALED_STATUS = {
-  state: 'sealed' as const,
-  osKeyAvailable: false,
-  osKeyCapable: false,
-  hasPassphrase: false,
-  autoSealMinutes: 0,
-  providers: [],
-  defaultProvider: null,
+  return { client, inventory, createSecret, renameSecret, status }
 }
 
 const UNSEALED_STATUS = {
@@ -68,18 +72,20 @@ const UNSEALED_STATUS = {
   defaultProvider: null,
 }
 
-const MOCK_ENTRY_1: VaultInventoryEntry = {
+const MOCK_ENTRY_1: InventoryEntry = {
+  id: 'secrow:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
   kind: 'password',
-  label: 'SSH password for deploy',
+  name: 'SSH password for deploy',
   provider: 'system',
   ownerId: 'cred:prod-deploy',
   usedBy: 12,
   reachable: true,
 }
 
-const MOCK_ENTRY_2: VaultInventoryEntry = {
+const MOCK_ENTRY_2: InventoryEntry = {
+  id: 'secrow:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
   kind: 'password',
-  label: 'SSH password for shady@vm-dsm01:22',
+  name: 'SSH password for shady@vm-dsm01:22',
   provider: 'system',
   ownerId: 'cred:shady',
   usedBy: 0,
@@ -179,7 +185,7 @@ describe('SecretsSection', () => {
   it('shows "store unreachable" when entry is not reachable', async () => {
     const { client, inventory } = mockClient()
     client.status = vi.fn().mockResolvedValue(UNSEALED_STATUS)
-    const unreachable: VaultInventoryEntry = {
+    const unreachable: InventoryEntry = {
       ...MOCK_ENTRY_1,
       reachable: false,
     }
@@ -303,5 +309,128 @@ describe('SecretsSection', () => {
         expect(container.textContent?.trim(), `state ${state} rendered nothing`).not.toBe('')
       })
     }
+  })
+
+  // ADR-0016: the vault owns the name. A row renders the vault's name for the
+  // secret — the backend resolves the fallbacks, so the page renders verbatim
+  // and never a blank.
+  it('renders the vault-owned name, not a derived label', async () => {
+    const { client, inventory } = mockClient()
+    client.status = vi.fn().mockResolvedValue(UNSEALED_STATUS)
+    inventory.mockResolvedValue({
+      entries: [{ ...MOCK_ENTRY_1, name: 'prod password', ownerId: '' }],
+    })
+
+    const { container } = await mount(client)
+
+    await vi.waitFor(() => {
+      expect(container.querySelector('.sr-row-label')?.textContent).toBe('prod password')
+    })
+  })
+
+  // Add: the user was asked for the name because they set out to create a
+  // secret. The control exists in the loaded state, opens the dialog, and the
+  // create call carries name, kind and value to the wire.
+  it('adds a secret by name and kind from the loaded state', async () => {
+    const { client, inventory, createSecret } = mockClient()
+    client.status = vi.fn().mockResolvedValue(UNSEALED_STATUS)
+    inventory.mockResolvedValue({ entries: [MOCK_ENTRY_1] })
+    createSecret.mockResolvedValue({})
+
+    const { container } = await mount(client)
+
+    await vi.waitFor(() => {
+      expect(container.querySelector('.sr-row-label')).toBeTruthy()
+    })
+
+    const addButton = Array.from(container.querySelectorAll('button')).find((b) =>
+      b.textContent?.includes('Add a secret'),
+    )
+    expect(addButton).toBeTruthy()
+    addButton!.click()
+
+    await vi.waitFor(() => {
+      expect(container.querySelector('.nocx-dialog__title')?.textContent).toContain('Add secret')
+    })
+
+    // The dialog asks for the name — the user did set out to create a secret.
+    const nameInput = container.querySelector('#sr-add-name') as HTMLInputElement
+    expect(nameInput).toBeTruthy()
+    nameInput.value = 'prod password'
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+
+    const valueInput = container.querySelector('#sr-add-value') as HTMLInputElement
+    valueInput.value = 'hunter2'
+    valueInput.dispatchEvent(new Event('input', { bubbles: true }))
+
+    const submit = Array.from(container.querySelectorAll('.nocx-dialog button')).find(
+      (b) => b.textContent === 'Add secret',
+    ) as HTMLButtonElement | undefined
+    submit!.click()
+
+    await vi.waitFor(() => {
+      expect(createSecret).toHaveBeenCalledWith({
+        name: 'prod password',
+        kind: 'password',
+        value: 'hunter2',
+      })
+    })
+  })
+
+  // Rename: addressed by the row handle, never by a secret reference — the
+  // renderer may not name one (nocx-jb20.1).
+  it('renames a secret by its row handle', async () => {
+    const { client, inventory, renameSecret } = mockClient()
+    client.status = vi.fn().mockResolvedValue(UNSEALED_STATUS)
+    inventory.mockResolvedValue({ entries: [MOCK_ENTRY_1] })
+    renameSecret.mockResolvedValue({})
+
+    const { container } = await mount(client)
+
+    await vi.waitFor(() => {
+      expect(container.querySelector('.sr-row-label')).toBeTruthy()
+    })
+
+    const renameButton = container.querySelector('[aria-label^="Rename"]') as HTMLButtonElement
+    expect(renameButton).toBeTruthy()
+    renameButton.click()
+
+    await vi.waitFor(() => {
+      expect(container.querySelector('.nocx-dialog__title')?.textContent).toContain('Rename')
+    })
+
+    const nameInput = container.querySelector('#sr-rename-name') as HTMLInputElement
+    nameInput.value = 'the prod password'
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+
+    const submit = Array.from(container.querySelectorAll('.nocx-dialog button')).find(
+      (b) => b.textContent === 'Rename',
+    ) as HTMLButtonElement | undefined
+    submit!.click()
+
+    await vi.waitFor(() => {
+      expect(renameSecret).toHaveBeenCalledWith({
+        id: MOCK_ENTRY_1.id,
+        name: 'the prod password',
+      })
+    })
+  })
+
+  // An unowned secret — no connection uses it — is a row like any other: that
+  // is the point of ADR-0016, not a side effect.
+  it('renders a secret with no connection using it', async () => {
+    const { client, inventory } = mockClient()
+    client.status = vi.fn().mockResolvedValue(UNSEALED_STATUS)
+    inventory.mockResolvedValue({
+      entries: [{ ...MOCK_ENTRY_1, ownerId: '', usedBy: 0, name: 'prod password' }],
+    })
+
+    const { container } = await mount(client)
+
+    await vi.waitFor(() => {
+      expect(container.querySelector('.sr-row-label')?.textContent).toBe('prod password')
+    })
+    const usage = container.querySelector('.sr-row-usage')
+    expect(usage?.textContent).toBe('0 connections')
   })
 })

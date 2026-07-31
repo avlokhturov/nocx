@@ -11,6 +11,7 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/vault"
 	"github.com/shady2k/nocx/internal/vaultreset"
 )
@@ -242,4 +243,205 @@ func (f *fakeVaultReset) Execute(_ context.Context) (vaultreset.Result, error) {
 		Impact:  vaultreset.Impact{SecretCount: 3, CredentialCount: 2, ProfileCount: 5},
 		Residue: []vaultreset.Residue{{Store: "system", Reason: "no-service"}},
 	}, nil
+}
+
+// ── vault.inventory ───────────────────────────────────────────────────
+
+// The DTO's own conformance: field tags, nil-slice-as-null, enum spelling.
+// The case that matters is the empty one — entries must marshal to [] never
+// null (nocx-25k9.14), and every field must be present (additionalProperties
+// false + required makes the key set exact in both directions).
+func TestVaultInventory_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "vault.inventory.schema.json")
+
+	cases := map[string]struct {
+		entries []vault.InventoryEntry
+	}{
+		"populated": {
+			entries: []vault.InventoryEntry{
+				{
+					ID:        "secrow:9f0c8a1b2c3d4e5faabbccdd00112233",
+					Name:      "root@192.168.0.57",
+					Kind:      "password",
+					Provider:  "system",
+					OwnerID:   "cred:prod:1",
+					UsedBy:    3,
+					Reachable: true,
+				},
+				{
+					ID:        "secrow:aabbccdd00112233aabbccdd00112233",
+					Name:      "Key passphrase",
+					Kind:      "key-passphrase",
+					Provider:  "file",
+					OwnerID:   "",
+					UsedBy:    0,
+					Reachable: false,
+				},
+			},
+		},
+		// The empty vault is the one that must not serialise `entries` as
+		// null — the renderer's first `.map` would throw. The vault's
+		// BuildInventory always hands back a non-nil slice; this case pins
+		// that the response shape then satisfies the schema.
+		"empty": {entries: []vault.InventoryEntry{}},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(struct {
+				Entries []vault.InventoryEntry `json:"entries"`
+			}{Entries: tc.entries})
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "vault.inventory DTO")
+		})
+	}
+}
+
+// The real result off the real socket: the inventory the renderer actually
+// receives. A populated vault (a saved password) and an ownerless secret
+// created on the Secrets page — the case ADR-0016 exists for.
+func TestVaultInventory_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "vault.inventory.schema.json")
+	h := newInventoryHarness(t)
+	h.setupAndUnseal()
+
+	// A secret saved on a connection: the renderer sends the generated name.
+	idCred := h.createCredential(profile.Credential{
+		Name: "prod", Username: "deploy", Auth: profile.AuthPassword,
+	})
+	h.savePasswordNamed(idCred, "hunter2", "deploy@vm-dsm01")
+
+	// A secret created on the Secrets page — no credential references it.
+	resp := jsonrpcCall(t, h.conn, "vault.createSecret", map[string]any{
+		"name": "prod password", "kind": "password", "value": "hunter2",
+	})
+	var createResult struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &createResult); err != nil {
+		t.Fatalf("vault.createSecret unmarshal: %v\nraw: %s", err, string(resp))
+	}
+	if createResult.Error != nil {
+		t.Fatalf("vault.createSecret: %+v", createResult.Error)
+	}
+
+	invResp := vaultCall(t, h.conn, "vault.inventory", map[string]any{}, 1)
+	if invResp.Error != nil {
+		t.Fatalf("vault.inventory: %+v", invResp.Error)
+	}
+	validateJSON(t, schema, invResp.Result, "vault.inventory result")
+
+	// And the wire carries no secret reference anywhere: every row id is a
+	// row handle, every name is a name, and the SecretID appears in neither.
+	var inv struct {
+		Result struct {
+			Entries []struct {
+				ID   string `json:"id"`
+				Name string `json:"name"`
+			} `json:"entries"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(invResp.Result, &inv.Result); err != nil {
+		t.Fatalf("unmarshal inventory: %v", err)
+	}
+	if len(inv.Result.Entries) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(inv.Result.Entries))
+	}
+	for _, e := range inv.Result.Entries {
+		if strings.HasPrefix(e.ID, "sec:v1:") {
+			t.Errorf("row id %q looks like a secret reference", e.ID)
+		}
+		if e.Name == "" {
+			t.Error("a name is blank")
+		}
+	}
+}
+
+// ── vault.createSecret / vault.renameSecret ───────────────────────────
+
+// The create and rename results are empty objects, but the schema pins that
+// shape and the socket test drives the REAL methods with the fields the
+// renderer sends (and the renderer leaves nothing out — there is nothing to
+// leave out).
+func TestVaultCreateAndRename_OverTheWireConformToContract(t *testing.T) {
+	createSchema := loadSchema(t, "vault.createSecret.schema.json")
+	renameSchema := loadSchema(t, "vault.renameSecret.schema.json")
+	h := newInventoryHarness(t)
+	h.setupAndUnseal()
+
+	createResp := jsonrpcCall(t, h.conn, "vault.createSecret", map[string]any{
+		"name": "prod password", "kind": "password", "value": "hunter2",
+	})
+	var createEnvelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(createResp, &createEnvelope); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, string(createResp))
+	}
+	if createEnvelope.Error != nil {
+		t.Fatalf("vault.createSecret: %+v", createEnvelope.Error)
+	}
+	validateJSON(t, createSchema, createEnvelope.Result, "vault.createSecret result")
+
+	// Rename needs the row handle the inventory carries.
+	inv := h.callInventory()
+	if len(inv.Entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(inv.Entries))
+	}
+
+	renameResp := jsonrpcCall(t, h.conn, "vault.renameSecret", map[string]any{
+		"id": inv.Entries[0].ID, "name": "the prod password",
+	})
+	var renameEnvelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(renameResp, &renameEnvelope); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, string(renameResp))
+	}
+	if renameEnvelope.Error != nil {
+		t.Fatalf("vault.renameSecret: %+v", renameEnvelope.Error)
+	}
+	validateJSON(t, renameSchema, renameEnvelope.Result, "vault.renameSecret result")
+
+	// The rename landed on the vault's own record: the inventory shows it.
+	inv2 := h.callInventory()
+	if len(inv2.Entries) != 1 {
+		t.Fatalf("expected 1 entry after rename, got %d", len(inv2.Entries))
+	}
+	if inv2.Entries[0].Name != "the prod password" {
+		t.Errorf("name after rename = %q, want %q", inv2.Entries[0].Name, "the prod password")
+	}
+}
+
+// The renderer may not name a secret (nocx-jb20.1): rename accepts the row
+// handle, and a SecretID sent in its place must be refused — a row handle is
+// a one-way derivative, never the reference.
+func TestVaultRenameSecret_RejectsSecretID(t *testing.T) {
+	h := newInventoryHarness(t)
+	h.setupAndUnseal()
+
+	jsonrpcCall(t, h.conn, "vault.createSecret", map[string]any{
+		"name": "prod password", "kind": "password", "value": "hunter2",
+	})
+
+	// A secret reference is not a valid row handle: unknown row.
+	resp := jsonrpcCall(t, h.conn, "vault.renameSecret", map[string]any{
+		"id": "sec:v1:file:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "name": "x",
+	})
+	var errResult struct {
+		Error *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &errResult); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, string(resp))
+	}
+	if errResult.Error == nil {
+		t.Fatal("expected an error for a SecretID addressed rename")
+	}
 }

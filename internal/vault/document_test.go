@@ -55,7 +55,7 @@ func TestDocument_RoundTrip(t *testing.T) {
 		Threads:    4,
 	}
 	orig := Document{
-		Version:         1,
+		Version:         2,
 		Instance:        "devbox",
 		DefaultProvider: ProviderFile,
 		Passphrase:      pass,
@@ -119,7 +119,7 @@ func TestDocument_Absent(t *testing.T) {
 // test fails loudly the day somebody adds a Secret field to Document.
 func TestDocument_JSONMarshal(t *testing.T) {
 	doc := Document{
-		Version:         1,
+		Version:         2,
 		Instance:        "testbox",
 		DefaultProvider: ProviderSystem,
 		Passphrase: &Envelope{
@@ -167,7 +167,7 @@ func TestDocument_JSONMarshal(t *testing.T) {
 func TestDocument_NilEnvelopesIsRepresentable(t *testing.T) {
 	store := &fakeDocStore{}
 	orig := Document{
-		Version:         1,
+		Version:         2,
 		Instance:        "os-only",
 		DefaultProvider: ProviderSystem,
 		HasOSKey:        true,

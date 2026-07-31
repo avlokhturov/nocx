@@ -167,17 +167,24 @@ created / verified
 owner             an opaque token naming the card that owns it
 ```
 
-No display name. No secret value. No storage locator — the provider derives its own key from
-the `SecretID` (vault design §4.1).
+No secret value. No storage locator — the provider derives its own key from
+the `SecretID` (vault design §4.1). ~~No display name.~~ **Superseded by
+ADR-0016: the secret owns its name.** The registry holds `{name, kind}` per
+`SecretID`, written in the same journal sequence as the secret itself — never
+by a second, independent path — and the surfaces read it from there. The
+derived label survives only as the fallback for a secret whose name did not
+land.
 
 ### 4.2 This is not the catalogue that peer review killed
 
 Vault design §4.1 rejected a catalogue mapping `SecretID → (provider, locator, name, kind,
 timestamps)` on three counts. Taken in turn:
 
-- _"name and kind would have two persisted owners"_ — the registry holds no name. It holds
-  `kind`, and after this design the vault is the only owner of it: the kind describes the
-  material, and the material is the vault's.
+- _"name and kind would have two persisted owners"_ — **superseded by ADR-0016.** The
+  objection ruled out the arrangement where both the credential and the vault persist a
+  name; choosing the secret as the single owner keeps it a one-owner arrangement. The
+  registry holds `name` and `kind`, and the vault is the only owner of both: the kind
+  describes the material, and the material is the vault's.
 - _"a second document breaks the all-or-nothing metadata guarantee"_ — stands, and is the
   real cost. See §4.3.
 - _"it introduces a third crash gap in every write"_ — likely avoidable. See §4.3.
@@ -296,11 +303,12 @@ on save. Ours is a minted opaque `sec:v1:<provider>:<32 hex>` with no meaning in
 deliberately (vault design §4.1), which buys sharing and fresh-id rotation and costs the free
 label.
 
-So the label comes from **the owner of the reference**, which knows the meaning, while the
-vault stays mute about it. Where a secret is shared the label says so — "12 connections" —
-instead of naming one host, which is the case Tabby's model cannot express at all. And where
-Tabby falls back to `Unknown secret of type {type} for {key}` printing raw JSON, we have
-`kind` as an explicit registry field, so a new kind does not degrade into "unknown".
+**Superseded by ADR-0016: the secret owns its name.** The vault persists a display
+name per `SecretID` and the surface reads it from there; the owner-derived label is
+now only the fallback for a secret whose name did not land, and "12 connections"
+is gone — a shared secret has one name like any other. Where a name is still missing
+and no owner exists, `kind` carries the row as an explicit registry field, so a new
+kind does not degrade into "unknown".
 
 **The credential record does not appear on this page, or anywhere else the user looks.** It
 survives as plumbing for the three reasons §3 gives — the renderer may not name a secret, so

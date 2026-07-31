@@ -51,7 +51,6 @@ import type {
 } from './profiles'
 import { ProfileClient, buildGroupTree, parseQuickConnect } from './profiles'
 import { RpcError } from './dispatcher'
-import { CredentialForm, type CredentialFormHandle } from './credential-form'
 import { PasswordEditor } from './password-editor'
 import { AuthenticationEditor } from './authentication-editor'
 import { log } from './log'
@@ -75,6 +74,17 @@ export function sourceLabel(source: FieldSourceDTO): string {
     case 'default':
       return 'default'
   }
+}
+
+// ── Secret naming (ADR-0016) ──────────────────────────────────────────────
+
+// The generated display name for a secret saved on a connection: derived from
+// host and user — never from any secret material. Empty when neither is
+// known; the backend then falls back to rendering.
+function generatedSecretName(user: string | undefined, host: string | undefined): string {
+  const u = (user ?? '').trim()
+  const h = (host ?? '').trim()
+  return u && h ? `${u}@${h}` : u || h
 }
 
 // ── Probe outcome helpers ────────────────────────────────────────────────────
@@ -203,11 +213,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   // Where the SSH config actually is, per the backend. Null until asked.
   const [sshConfigPath, setSSHConfigPath] = createSignal<SSHConfigPathResult | null>(null)
 
-  // ── Inline credential creation dialog ─────────────────────────────────
-  const [credDialogOpen, setCredDialogOpen] = createSignal(false)
-  const [credDraft, setCredDraft] = createSignal<Credential | null>(null)
-  const [credPasswordValue, setCredPasswordValue] = createSignal('')
-  const credFormRef = { current: null as CredentialFormHandle | null }
   // ── Inline credential editing (profile editor) ──────────────────────
   const [profileCredDraft, setProfileCredDraft] = createSignal<Credential | null>(null)
   const [credentialUsage, setCredentialUsage] = createSignal<Record<string, number>>({})
@@ -605,7 +610,11 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           auth: 'publicKey',
         })
         const saveKeymat = async () => {
-          const result = await props.client.saveKeyMaterial(credential.id, groupKeyText())
+          const result = await props.client.saveKeyMaterial(
+            credential.id,
+            groupKeyText(),
+            credential.name,
+          )
           setGroupKeyFingerprint(result.fingerprint)
         }
         if (props.vaultController) {
@@ -647,7 +656,11 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         // Key material save for an existing credential
         if (credDraft.auth === 'publicKey' && groupKeyMode() === 'material' && groupKeyText()) {
           const saveKeymat = async () => {
-            const result = await props.client.saveKeyMaterial(credDraft.id, groupKeyText())
+            const result = await props.client.saveKeyMaterial(
+              credDraft.id,
+              groupKeyText(),
+              credDraft.name,
+            )
             setGroupKeyFingerprint(result.fingerprint)
           }
           if (props.vaultController) {
@@ -1357,7 +1370,11 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           auth: 'password',
         })
         const savePw = async () => {
-          await props.client.savePassword(credential.id, profilePasswordValue())
+          await props.client.savePassword(
+            credential.id,
+            profilePasswordValue(),
+            generatedSecretName(profile.options.user, profile.options.host),
+          )
         }
         if (props.vaultController) {
           await props.vaultController.saveSecretWithVault(savePw)
@@ -1395,7 +1412,11 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           auth: 'publicKey',
         })
         const saveKeymat = async () => {
-          const result = await props.client.saveKeyMaterial(credential.id, profileKeyText())
+          const result = await props.client.saveKeyMaterial(
+            credential.id,
+            profileKeyText(),
+            generatedSecretName(profile.options.user, profile.options.host),
+          )
           setProfileKeyFingerprint(result.fingerprint)
         }
         if (props.vaultController) {
@@ -1456,7 +1477,11 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       // Password save for an existing credential
       if (profilePasswordValue()) {
         const savePw = async () => {
-          await props.client.savePassword(credDraft.id, profilePasswordValue())
+          await props.client.savePassword(
+            credDraft.id,
+            profilePasswordValue(),
+            generatedSecretName(profile.options.user, profile.options.host),
+          )
         }
         if (props.vaultController) {
           await props.vaultController.saveSecretWithVault(savePw)
@@ -1469,7 +1494,11 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       // Key material save for an existing credential
       if (credDraft.auth === 'publicKey' && profileKeyMode() === 'material' && profileKeyText()) {
         const saveKeymat = async () => {
-          const result = await props.client.saveKeyMaterial(credDraft.id, profileKeyText())
+          const result = await props.client.saveKeyMaterial(
+            credDraft.id,
+            profileKeyText(),
+            generatedSecretName(profile.options.user, profile.options.host),
+          )
           setProfileKeyFingerprint(result.fingerprint)
         }
         if (props.vaultController) {
@@ -1570,86 +1599,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     }
   }
 
-  // ── Inline credential creation (from within connection form) ────────────
-
-  function openCredDialog() {
-    const profile = editing()
-    const username = profile?.options.user?.trim() ?? ''
-    const host = profile?.options.host?.trim() ?? ''
-    const connectionName = profile?.name.trim() ?? ''
-    const endpointName = username && host ? `${username}@${host}` : host
-
-    setCredDraft({
-      id: '',
-      name: connectionName || endpointName || 'SSH credential',
-      username,
-      auth: profile?.options.auth ?? '',
-    })
-    setCredPasswordValue('')
-    credFormRef.current?.reset()
-    // This is a drill-in from the connection editor, not a second decision
-    // layered over it. Keep the connection draft in memory and hand the single
-    // modal slot to the credential editor.
-    setDialogOpen(false)
-    setCredDialogOpen(true)
-  }
-
-  function closeCredDialog() {
-    setCredDialogOpen(false)
-    setCredDraft(null)
-    setCredPasswordValue('')
-    // Return to the connection draft on both Save and Cancel.
-    if (editing()) setDialogOpen(true)
-  }
-
-  async function handleCredSave() {
-    const cred = credDraft()
-    if (!cred) return
-    if (!credFormRef.current?.valid()) {
-      credFormRef.current?.revealAll()
-      const msg = credFormRef.current?.error('name') ?? 'Please fill in all required fields'
-      showToast({ level: 'warning', message: msg })
-      return
-    }
-
-    try {
-      const saved = await props.client.createCredential(cred)
-
-      if (cred.auth === 'password' && credPasswordValue()) {
-        const savePw = async () => {
-          await props.client.savePassword(saved.id, credPasswordValue())
-        }
-        if (props.vaultController) {
-          await props.vaultController.saveSecretWithVault(savePw)
-        } else {
-          await savePw()
-        }
-      }
-
-      // Refresh the credential list and select the new one
-      const updated = await props.client.listCredentials()
-      setCredentials(updated ?? [])
-
-      // Select the new credential on the connection being edited
-      const p = editing()
-      if (p) {
-        const updatedProfile = { ...p, options: { ...p.options, credentialId: saved.id } }
-        setEditing(updatedProfile)
-        setDirtyFields((prev: Set<string>) => {
-          const next = new Set(prev)
-          next.add('credentialId')
-          return next
-        })
-      }
-
-      closeCredDialog()
-      showToast({ level: 'success', message: `Created credential "${saved.name}"` })
-    } catch (err) {
-      const message = (err as Error).message
-      log.error('Failed to create credential from form', { message })
-      showToast({ level: 'danger', message: `Could not create credential: ${message}` })
-    }
-  }
   // ── Derived data ──────────────────────────────────────────────────────
 
   const jumpServerProfiles = createMemo(() => profiles().filter((p) => p.options.canBeJumpServer))
@@ -2004,7 +1953,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                     credentials={credentials()}
                     credentialId={fvStr('credentialId') || undefined}
                     onCredentialChange={(value) => setOption('credentialId', value)}
-                    onCreateCredential={openCredDialog}
                     username={fvStr('user')}
                     onUsernameChange={(value) => setOption('user', value)}
                     auth={fvStr('auth') as AuthMode}
@@ -2520,39 +2468,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                 <strong>Destination:</strong> {preview().secretProvider}
               </p>
             </Stack>
-          </Dialog>
-        )}
-      </Show>
-
-      {/* Credential creation Dialog (from within connection form) */}
-      <Show when={credDraft()}>
-        {(cred) => (
-          <Dialog
-            open={credDialogOpen()}
-            onClose={closeCredDialog}
-            title="New Credential"
-            size="lg"
-            onSubmit={() => void handleCredSave()}
-            footer={
-              <>
-                <Button variant="primary" onClick={() => void handleCredSave()}>
-                  Save Credential
-                </Button>
-                <Button variant="default" onClick={closeCredDialog}>
-                  Cancel
-                </Button>
-              </>
-            }
-          >
-            <CredentialForm
-              credential={cred()}
-              onFieldChange={(key, value) => {
-                setCredDraft({ ...cred(), [key]: value })
-              }}
-              passwordValue={credPasswordValue()}
-              onPasswordChange={setCredPasswordValue}
-              ref={credFormRef}
-            />
           </Dialog>
         )}
       </Show>

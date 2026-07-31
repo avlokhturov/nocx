@@ -3,10 +3,9 @@
 
 import type { Dispatcher } from './dispatcher'
 
-// The wire types are GENERATED from `contracts/vault.status.schema.json`
-// (`npm run contracts`). They are re-exported here so callers keep importing
-// them from the client, and so this module stays the one place that says what
-// vault.* speaks.
+// The wire types are GENERATED from the contracts (npm run contracts). They
+// are re-exported here so callers keep importing them from the client, and so
+// this module stays the one place that says what vault.* speaks.
 //
 // They used to be hand-written, and that is precisely how `defaultProvider`
 // came to be declared here, read on every render, and never sent: a
@@ -15,9 +14,11 @@ import type { Dispatcher } from './dispatcher'
 export type { VaultStatus, ProviderStatus } from './generated/vault.status'
 export type { VaultResetPreview } from './generated/vault.resetPreview'
 export type { VaultResetResult, ResidueEntry } from './generated/vault.reset'
+export type { VaultInventory, InventoryEntry } from './generated/vault.inventory'
 import type { VaultStatus } from './generated/vault.status'
 import type { VaultResetPreview } from './generated/vault.resetPreview'
 import type { VaultResetResult } from './generated/vault.reset'
+import type { VaultInventory, InventoryEntry } from './generated/vault.inventory'
 
 /** The vault's lifecycle state, as the schema's enum spells it. */
 export type VaultState = VaultStatus['state']
@@ -53,22 +54,19 @@ export interface VaultUnsealParams {
   secret?: string
 }
 
-export interface VaultInventoryEntry {
-  kind: 'password' | 'key-passphrase'
-  /** Already human-readable, derived by the backend. Render verbatim. */
-  label: string
-  /** Provider id: 'system' for OS keychain, 'file' for encrypted nocx storage. */
-  provider: 'system' | 'file'
-  /** Credential id that owns this secret, for navigation. */
-  ownerId: string
-  /** Number of connections that reference the owning credential. */
-  usedBy: number
-  /** Whether the provider that holds this secret is reachable right now. */
-  reachable: boolean
+export interface VaultCreateSecretParams {
+  /** The name the user was asked for on the Secrets page. Required. */
+  name: string
+  /** What the material is: password | key-passphrase | ... */
+  kind: InventoryEntry['kind']
+  /** The value to store. Goes to the default store, never back out. */
+  value: string
 }
 
-export interface VaultInventory {
-  entries: VaultInventoryEntry[]
+export interface VaultRenameSecretParams {
+  /** The row handle the inventory entry carried — never a SecretID. */
+  id: string
+  name: string
 }
 
 export class VaultClient {
@@ -124,6 +122,18 @@ export class VaultClient {
 
   inventory(): Promise<VaultInventory> {
     return this.dispatcher.call('vault.inventory', {})
+  }
+
+  /** Store a secret created on the Secrets page: name and kind were asked of
+   *  the user, the value goes to the default store and never comes back. */
+  createSecret(params: VaultCreateSecretParams): Promise<Record<string, never>> {
+    return this.dispatcher.call('vault.createSecret', params)
+  }
+
+  /** Rename a secret, addressed by its inventory row handle — never by a
+   *  secret reference (the renderer may not name one, nocx-jb20.1). */
+  renameSecret(params: VaultRenameSecretParams): Promise<Record<string, never>> {
+    return this.dispatcher.call('vault.renameSecret', params)
   }
 
   activity(): Promise<Record<string, never>> {

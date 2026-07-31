@@ -211,8 +211,8 @@ func TestBuildInventory_PassphraseEntry(t *testing.T) {
 	if e.Kind != "key-passphrase" {
 		t.Errorf("kind = %q, want %q", e.Kind, "key-passphrase")
 	}
-	if e.Label != "Passphrase for key SHA256:bdc73f37…" {
-		t.Errorf("label = %q, want %q", e.Label, "Passphrase for key SHA256:bdc73f37…")
+	if e.Name != "Passphrase for key SHA256:bdc73f37…" {
+		t.Errorf("want name = %q, want %q", e.Name, "Passphrase for key SHA256:bdc73f37…")
 	}
 }
 
@@ -240,8 +240,8 @@ func TestBuildInventory_SingleUseLabelIncludesHostPort(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("got %d entries, want 1", len(entries))
 	}
-	if entries[0].Label != "SSH password for deploy@vm-dsm01:22" {
-		t.Errorf("label = %q, want %q", entries[0].Label, "SSH password for deploy@vm-dsm01:22")
+	if entries[0].Name != "SSH password for deploy@vm-dsm01:22" {
+		t.Errorf("want name = %q, want %q", entries[0].Name, "SSH password for deploy@vm-dsm01:22")
 	}
 }
 
@@ -267,8 +267,8 @@ func TestBuildInventory_SharedLabelOmitsHost(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("got %d entries, want 1", len(entries))
 	}
-	if entries[0].Label != "SSH password for deploy" {
-		t.Errorf("label = %q, want %q", entries[0].Label, "SSH password for deploy")
+	if entries[0].Name != "SSH password for deploy" {
+		t.Errorf("want name = %q, want %q", entries[0].Name, "SSH password for deploy")
 	}
 }
 
@@ -494,5 +494,132 @@ func TestBuildInventory_EmptyMarshalsToArrayNotNull(t *testing.T) {
 	}
 	if got := string(b); got != `{"entries":[]}` {
 		t.Fatalf("empty inventory marshalled as %s, want {\"entries\":[]}", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0016 — the secret owns its name
+// ---------------------------------------------------------------------------
+
+// The record's name is the entry's name: BuildInventory reads the vault's own
+// record instead of deriving the label from whoever references the secret.
+func TestBuildInventory_RecordNameWins(t *testing.T) {
+	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
+	mustSetup(t, v, "test-pass")
+	defer v.Close()
+
+	id, err := v.CreateNamed(context.Background(), credential.NewSecret("pw"),
+		SecretMeta{Name: "prod password", Kind: "password"})
+	if err != nil {
+		t.Fatalf("CreateNamed: %v", err)
+	}
+
+	// The credential still carries usage the label would once have been
+	// derived from. The name must come from the record, not from here.
+	inputs := []CredentialInventory{
+		{
+			ID:         "cred:test:1",
+			Username:   "deploy",
+			AuthMode:   "password",
+			SecretID:   string(id),
+			UsageCount: 1,
+			SingleHost: "vm-dsm01",
+			SinglePort: 22,
+		},
+	}
+
+	entries, err := v.BuildInventory(context.Background(), inputs)
+	if err != nil {
+		t.Fatalf("BuildInventory: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries, want 1", len(entries))
+	}
+	if entries[0].Name != "prod password" {
+		t.Errorf("name = %q, want %q", entries[0].Name, "prod password")
+	}
+}
+
+// The fallback that keeps a nameless secret renderable. Whatever the journal
+// guarantees, a secret whose name did not land is still a row the page has to
+// draw: where an owner exists it falls back to the derived label.
+func TestBuildInventory_NamelessSecretFallsBackToDerivedLabel(t *testing.T) {
+	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
+	mustSetup(t, v, "test-pass")
+	defer v.Close()
+
+	id, err := v.CreateNamed(context.Background(), credential.NewSecret("pw"),
+		SecretMeta{Kind: "password"}) // name never landed
+	if err != nil {
+		t.Fatalf("CreateNamed: %v", err)
+	}
+
+	inputs := []CredentialInventory{
+		{
+			ID:         "cred:test:1",
+			Username:   "deploy",
+			AuthMode:   "password",
+			SecretID:   string(id),
+			UsageCount: 3,
+		},
+	}
+
+	entries, err := v.BuildInventory(context.Background(), inputs)
+	if err != nil {
+		t.Fatalf("BuildInventory: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries, want 1", len(entries))
+	}
+	if entries[0].Name != "SSH password for deploy" {
+		t.Errorf("name = %q, want derived label %q", entries[0].Name, "SSH password for deploy")
+	}
+}
+
+// The same fallback with no owner to derive from: the kind carries the row.
+// Never blank, and never the SecretID.
+func TestBuildInventory_NamelessOwnerlessFallsBackToKind(t *testing.T) {
+	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
+	mustSetup(t, v, "test-pass")
+	defer v.Close()
+
+	id, err := v.CreateNamed(context.Background(), credential.NewSecret("pw"),
+		SecretMeta{Kind: "key-passphrase"}) // name never landed, no owner
+	if err != nil {
+		t.Fatalf("CreateNamed: %v", err)
+	}
+
+	// No credential references this secret: the row exists because the vault
+	// holds the record, which is the whole point of ADR-0016.
+	entries, err := v.BuildInventory(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("BuildInventory: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries, want 1", len(entries))
+	}
+	e := entries[0]
+	if e.Name != "Key passphrase" {
+		t.Errorf("name = %q, want kind fallback %q", e.Name, "Key passphrase")
+	}
+	if e.OwnerID != "" {
+		t.Errorf("ownerId = %q, want empty", e.OwnerID)
+	}
+	if e.UsedBy != 0 {
+		t.Errorf("usedBy = %d, want 0", e.UsedBy)
+	}
+	// Never blank, never the SecretID — and the row handle is not the SecretID
+	// either (the renderer may not hold a secret reference, nocx-jb20.1).
+	if e.Name == "" {
+		t.Error("name is blank")
+	}
+	if e.Name == string(id) {
+		t.Error("name is the SecretID")
+	}
+	if e.ID == "" {
+		t.Error("row id is blank")
+	}
+	if e.ID == string(id) {
+		t.Error("row id is the SecretID")
 	}
 }

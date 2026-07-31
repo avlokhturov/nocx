@@ -424,7 +424,11 @@ describe('quick connect', () => {
 // ── Inline credential creation from connection form ──────────────────────
 
 describe('inline credential creation', () => {
-  it('a "+" button sits beside the credential select in the form', async () => {
+  // ADR-0016: "+ New Credential" left the connection editor. Selecting an
+  // existing credential stays; creating one by hand is gone — the secret owns
+  // its name, so a secret created from a password save is named by the
+  // connection (user@host), not built in a form.
+  it('the connection editor no longer offers to create a credential by hand', async () => {
     const { container } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
 
     await waitForProfiles(container, 1)
@@ -438,116 +442,12 @@ describe('inline credential creation', () => {
       expect(container.querySelector('.nocx-dialog__panel')).toBeTruthy()
     })
 
-    // Find the "+" button beside the credential select
+    // The "+" button beside the credential select is gone — the only way to
+    // get a credential here is to select one that already exists.
     const plusBtn = container.querySelector('[aria-label="New credential"]')
-    expect(plusBtn, 'New credential button not found beside credential select').toBeTruthy()
-  })
-
-  it('clicking the "+" button opens a credential creation dialog', async () => {
-    const { container } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
-
-    await waitForProfiles(container, 1)
-
-    // Open edit dialog
-    const editBtn = container.querySelector('.ui-collection-row__actions [aria-label^="Edit "]')
-    expect(editBtn).toBeTruthy()
-    ;(editBtn! as HTMLElement).click()
-
-    await vi.waitFor(() => {
-      expect(container.querySelector('.nocx-dialog__panel')).toBeTruthy()
-    })
-
-    // Click "+"
-    const plusBtn = container.querySelector('[aria-label="New credential"]') as HTMLElement
-    expect(plusBtn).toBeTruthy()
-    plusBtn.click()
-
-    // Credential dialog should appear
-    await vi.waitFor(() => {
-      const credNameInput = container.querySelector('#cred-name') as HTMLInputElement
-      expect(credNameInput, 'Credential form did not open').toBeTruthy()
-      expect(credNameInput.value).toBe('prod-web')
-    })
-  })
-
-  it('creating a credential from the form selects it and keeps the connection intact', async () => {
-    const { container, client } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
-
-    // Spy on createCredential to return a canned credential
-    const newCred: Credential = {
-      id: 'cred:new-key',
-      name: 'prod-key-2',
-      username: 'deploy',
-      auth: 'publicKey',
-      keyPath: '/home/user/.ssh/id_rsa',
-    }
-    const createSpy = vi.spyOn(client, 'createCredential').mockResolvedValue(newCred)
-    vi.spyOn(client, 'listCredentials').mockResolvedValue([...MOCK_CREDENTIALS, newCred])
-
-    await waitForProfiles(container, 1)
-
-    // Open edit dialog
-    const editBtn = container.querySelector('.ui-collection-row__actions [aria-label^="Edit "]')
-    expect(editBtn).toBeTruthy()
-    fireEvent.click(editBtn!)
-
-    await vi.waitFor(() => {
-      expect(container.querySelector('.nocx-dialog__panel')).toBeTruthy()
-    })
-
-    // Save the connection form's host value before opening credential dialog
-    const origHostValue = (container.querySelector('#profile-host') as HTMLInputElement)?.value
-
-    // Click "+" beside credential select
-    const plusBtn = container.querySelector('[aria-label="New credential"]') as HTMLElement
-    expect(plusBtn).toBeTruthy()
-    fireEvent.click(plusBtn)
-
-    // Fill in credential name
-    await vi.waitFor(() => {
-      const credNameInput = container.querySelector('#cred-name') as HTMLInputElement
-      expect(credNameInput, 'Credential form should open').toBeTruthy()
-    })
-
-    const nameInput = container.querySelector('#cred-name') as HTMLInputElement
-    fireEvent.input(nameInput, { target: { value: 'prod-key-2' } })
-
-    const usernameInput = container.querySelector('#cred-username') as HTMLInputElement
-    fireEvent.input(usernameInput, { target: { value: 'deploy' } })
-
-    // Find "Save Credential" first, then click once
-    const saveBtn = await vi.waitFor(() => {
-      const btn = Array.from(container.querySelectorAll('.ui-button')).find(
-        (b) => b.textContent?.trim() === 'Save Credential',
-      )
-      expect(btn).toBeTruthy()
-      return btn!
-    })
-    fireEvent.click(saveBtn)
-
-    // Wait for the create call
-    await vi.waitFor(() => {
-      expect(createSpy).toHaveBeenCalled()
-    })
-
-    // Credential dialog should close
-    await vi.waitFor(() => {
-      expect(container.querySelector('#cred-name')).toBeFalsy()
-    })
-
-    // Connection form should still be open (profile-host still visible)
-    expect(container.querySelector('#profile-host')).toBeTruthy()
-
-    // The connection form's host value is preserved
-    expect((container.querySelector('#profile-host') as HTMLInputElement).value).toBe(origHostValue)
-
-    // The credential select has the new credential selected. Scoped to the
-    // Authentication section: the form has sections now, and the General one
-    // also holds a Select (the group), so the first .ui-select on the page is
-    // no longer this one.
-    const credSelect = container.querySelector('#ui-tabpanel-auth .ui-select') as HTMLSelectElement
-    expect(credSelect, 'Credential select element not found').toBeTruthy()
-    expect(credSelect.value).toBe('cred:new-key')
+    expect(plusBtn).toBeNull()
+    // And no credential creation form is reachable from the editor.
+    expect(container.querySelector('#cred-name')).toBeNull()
   })
 })
 
@@ -767,6 +667,9 @@ describe('three-way key input — connection editor', () => {
     expect(saveKeyMatSpy).toHaveBeenCalledWith(
       expect.any(String),
       expect.stringContaining('BEGIN PRIVATE KEY'),
+      // ADR-0016: the secret owns its name — the save carries the generated
+      // user@host name of the connection it was saved on.
+      'deploy@web.example.com',
     )
   })
 

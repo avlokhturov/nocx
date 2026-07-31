@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -924,9 +925,30 @@ func (v *Vault) SetDefaultProvider(ctx context.Context, p ProviderID) error {
 
 // --- credential.SecretStore ---
 
-// Create mints a fresh reference, journals PhasePrepared, delegates to the
-// default writable provider, then journals PhaseSecretWritten.
+// Create implements credential.SecretStore: mints a fresh reference, journals
+// PhasePrepared, delegates to the default writable provider, then journals
+// PhaseSecretWritten together with the catalogue record (ADR-0016). Callers
+// that know the secret's name and kind — connection saves, the Secrets page —
+// use CreateNamed; this form records a nameless password-kind secret, which
+// the surfaces render by fallback.
 func (v *Vault) Create(ctx context.Context, value credential.Secret) (credential.SecretID, error) {
+	return v.create(ctx, value, SecretMeta{Kind: KindPassword})
+}
+
+// CreateNamed is Create with the secret's catalogue metadata: the display
+// name (generated from host and user by connection saves, asked of the user
+// on the Secrets page) and the kind. The name joins the journal at
+// PhasePrepared and is persisted with the record at PhaseSecretWritten — it
+// is never written by a second, independent path (ADR-0016).
+func (v *Vault) CreateNamed(ctx context.Context, value credential.Secret, meta SecretMeta) (credential.SecretID, error) {
+	if err := validateKind(meta.Kind); err != nil {
+		return "", err
+	}
+	meta.Name = strings.TrimSpace(meta.Name)
+	return v.create(ctx, value, meta)
+}
+
+func (v *Vault) create(ctx context.Context, value credential.Secret, meta SecretMeta) (credential.SecretID, error) {
 	t0 := time.Now()
 
 	v.mu.Lock()
@@ -960,12 +982,14 @@ func (v *Vault) Create(ctx context.Context, value credential.Secret) (credential
 		v.mu.Unlock()
 		return "", mintErr
 	}
-
-	// Journal PhasePrepared before delegating.
+	// Journal PhasePrepared before delegating. The entry carries the
+	// catalogue metadata (ADR-0016): the name rides the sequence from here.
 	v.doc.Journal = append(v.doc.Journal, JournalEntry{
 		Op:    "create",
 		NewID: id,
 		Phase: PhasePrepared,
+		Name:  meta.Name,
+		Kind:  meta.Kind,
 	})
 	if saveErr := saveDocument(v.store, v.doc); saveErr != nil {
 		v.mu.Unlock()
@@ -1001,7 +1025,7 @@ func (v *Vault) Create(ctx context.Context, value credential.Secret) (credential
 		return "", ErrVaultGenerationChanged
 	}
 
-	// Clear the journal entry on success.
+	// The put failed — the journal entry survives for reconciliation.
 	if putErr != nil {
 		v.logger.Warn("provider put failed",
 			"secretID", id, "provider", provID,
@@ -1009,14 +1033,20 @@ func (v *Vault) Create(ctx context.Context, value credential.Secret) (credential
 		return "", putErr
 	}
 
-	// Advance to PhaseSecretWritten — do not clear. The entry stays until
-	// the caller attaches a metadata target and commits (ADR-0011 §4).
+	// Advance to PhaseSecretWritten and land the catalogue record in the
+	// SAME save (ADR-0016): the value and the name are two writes in one
+	// sequence, never two paths. A crash before this save leaves the entry
+	// at PhasePrepared with no record — Reconcile deletes the orphan; a
+	// crash after leaves the record proving the secret exists. The entry
+	// itself stays until the caller attaches a metadata target and commits
+	// (ADR-0011 §4).
 	for i := range v.doc.Journal {
 		if v.doc.Journal[i].NewID == id {
 			v.doc.Journal[i].Phase = PhaseSecretWritten
 			break
 		}
 	}
+	v.setRecordLocked(SecretRecord{ID: id, Name: meta.Name, Kind: meta.Kind})
 	if saveErr := saveDocument(v.store, v.doc); saveErr != nil {
 		return "", fmt.Errorf("save after create: %w", saveErr)
 	}
@@ -1134,6 +1164,11 @@ func (v *Vault) Delete(ctx context.Context, id credential.SecretID) error {
 		NewID: id,
 		Phase: PhasePrepared,
 	})
+	// The catalogue record goes with the journal write, not after the
+	// provider delete: deletion is metadata-first (ADR-0011 §4), and the
+	// record is metadata. A failed provider delete leaves an invisible
+	// orphan, never a dangling row.
+	dropRecord(&v.doc, id)
 	if saveErr := saveDocument(v.store, v.doc); saveErr != nil {
 		v.mu.Unlock()
 		return fmt.Errorf("journal save: %w", saveErr)
@@ -1282,7 +1317,6 @@ func (v *Vault) AttachTarget(ctx context.Context, id credential.SecretID, target
 
 // CommitMetadata advances the journal entry to PhaseMetadataRepointed,
 // best-effort deletes the old secret if one is named, then clears the entry.
-// Step 2 of the two-phase commit that clears the journal entry left by Create.
 func (v *Vault) CommitMetadata(ctx context.Context, id credential.SecretID) error {
 	v.mu.Lock()
 
@@ -1302,6 +1336,13 @@ func (v *Vault) CommitMetadata(ctx context.Context, id credential.SecretID) erro
 		return fmt.Errorf("no PhaseSecretWritten entry for %q", id)
 	}
 
+	// The old secret's record dies with the old secret: a record naming a
+	// value that is about to be deleted is a dangling row (ADR-0016). It is
+	// dropped in the same write as the phase advance, like Delete drops it
+	// with the journal — metadata first.
+	if oldID != "" {
+		dropRecord(&v.doc, oldID)
+	}
 	if saveErr := saveDocument(v.store, v.doc); saveErr != nil {
 		v.mu.Unlock()
 		return fmt.Errorf("save before finalize: %w", saveErr)
@@ -1328,6 +1369,83 @@ func (v *Vault) CommitMetadata(ctx context.Context, id credential.SecretID) erro
 	v.mu.Unlock()
 
 	return nil
+}
+
+// setRecordLocked upserts a catalogue record by SecretID. Must hold v.mu.
+func (v *Vault) setRecordLocked(rec SecretRecord) {
+	for i := range v.doc.Secrets {
+		if v.doc.Secrets[i].ID == rec.ID {
+			v.doc.Secrets[i] = rec
+			return
+		}
+	}
+	v.doc.Secrets = append(v.doc.Secrets, rec)
+}
+
+// RenameSecret sets the display name of a secret, addressing it by the
+// renderer-addressable row handle rather than by a SecretID (nocx-jb20.1:
+// the reference is never accepted from the renderer as an identifier).
+// inputs are the same credential metadata BuildInventory takes, so a secret
+// referenced by metadata but never recorded (pre-ADR-0016) can be resolved
+// and gains its record here.
+//
+// Refuses an empty name — a renamed secret is never left nameless — and
+// refuses sealed/uninitialized vaults like every other mutation.
+func (v *Vault) RenameSecret(ctx context.Context, row string, name string, inputs []CredentialInventory) error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	st := v.stateLocked()
+	switch st {
+	case StateUninitialized:
+		return ErrVaultUninitialized
+	case StateSealed:
+		return ErrVaultSealed
+	}
+
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return errors.New("secret name is required")
+	}
+
+	id, kind, ok := v.resolveRowLocked(row, inputs)
+	if !ok {
+		return fmt.Errorf("unknown secret row %q", row)
+	}
+	if err := validateKind(kind); err != nil {
+		return err
+	}
+
+	// A recorded secret keeps its recorded kind — the vault is the kind's
+	// owner once it has been recorded. An unrecorded reference takes the kind
+	// its metadata implies.
+	for i := range v.doc.Secrets {
+		if v.doc.Secrets[i].ID == id {
+			v.doc.Secrets[i].Name = name
+			return saveDocument(v.store, v.doc)
+		}
+	}
+	v.doc.Secrets = append(v.doc.Secrets, SecretRecord{ID: id, Name: name, Kind: kind})
+	return saveDocument(v.store, v.doc)
+}
+
+// resolveRowLocked maps a row handle to its (SecretID, kind). Records are the
+// primary source; unrecorded references come from the credential metadata.
+// Must hold v.mu.
+func (v *Vault) resolveRowLocked(row string, inputs []CredentialInventory) (credential.SecretID, string, bool) {
+	for _, rec := range v.doc.Secrets {
+		if rowID(rec.ID) == row {
+			return rec.ID, rec.Kind, true
+		}
+	}
+	for _, cred := range inputs {
+		for _, sr := range collectRefs(cred) {
+			if rowID(sr.ref) == row {
+				return sr.ref, sr.kind, true
+			}
+		}
+	}
+	return "", "", false
 }
 
 // reportOrphanedOSKey deletes the OS-held root key written earlier in a Setup

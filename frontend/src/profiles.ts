@@ -415,8 +415,10 @@ export class ProfileClient {
   }
 
   // Password storage (OS keychain) — keyed by credential ID
-  savePassword(credentialId: string, password: string): Promise<boolean> {
-    return this.call('credentials.savePassword', { credentialId, password })
+  // `name` is the generated display name (user@host) the secret owns
+  // (ADR-0016); optional, and the backend falls back to rendering when absent.
+  savePassword(credentialId: string, password: string, name?: string): Promise<boolean> {
+    return this.call('credentials.savePassword', { credentialId, password, name })
   }
   deletePassword(credentialId: string): Promise<boolean> {
     return this.call('credentials.deletePassword', { credentialId })
@@ -425,10 +427,14 @@ export class ProfileClient {
     return this.call('credentials.hasPassword', { credentialId })
   }
 
-  // Key material storage (vault) — keyed by credential ID
-  /** credentials.saveKeyMaterial — store a private key in the vault. */
-  saveKeyMaterial(credentialId: string, keyText: string): Promise<{ fingerprint: string }> {
-    return this.call('credentials.saveKeyMaterial', { credentialId, keyText })
+  /** credentials.saveKeyMaterial — store a private key in the vault.
+   *  `name` is the generated display name the secret owns (ADR-0016). */
+  saveKeyMaterial(
+    credentialId: string,
+    keyText: string,
+    name?: string,
+  ): Promise<{ fingerprint: string }> {
+    return this.call('credentials.saveKeyMaterial', { credentialId, keyText, name })
   }
   /** credentials.deleteKeyMaterial — remove stored key material from the vault. */
   deleteKeyMaterial(credentialId: string): Promise<Record<string, never>> {

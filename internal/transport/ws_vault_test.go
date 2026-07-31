@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/vault"
 )
@@ -30,6 +31,10 @@ type fakeVaultLifecycle struct {
 	activityCalled        bool
 	inventoryErr          error
 	inventoryResult       []vault.InventoryEntry
+	createNamedErr        error
+	createNamedID         credential.SecretID
+	renameSecretErr       error
+	renameSecretName      string
 }
 
 func (f *fakeVaultLifecycle) State() vault.State { return f.state }
@@ -78,6 +83,18 @@ func (f *fakeVaultLifecycle) BuildInventory(_ context.Context, _ []vault.Credent
 		return nil, f.inventoryErr
 	}
 	return f.inventoryResult, nil
+}
+
+func (f *fakeVaultLifecycle) CreateNamed(_ context.Context, _ credential.Secret, _ vault.SecretMeta) (credential.SecretID, error) {
+	if f.createNamedErr != nil {
+		return "", f.createNamedErr
+	}
+	return f.createNamedID, nil
+}
+
+func (f *fakeVaultLifecycle) RenameSecret(_ context.Context, row string, name string, _ []vault.CredentialInventory) error {
+	f.renameSecretName = name
+	return f.renameSecretErr
 }
 
 func newFakeVaultLifecycle() *fakeVaultLifecycle {

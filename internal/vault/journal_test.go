@@ -478,3 +478,82 @@ func mustRegister(t *testing.T, providers ...*vaulttest.Fake) *vault.Registry {
 	}
 	return reg
 }
+
+// The record decides what an orphaned journal entry means (ADR-0016).
+// An entry with no record is a genuine orphan and is deleted; an entry whose
+// record landed is a completed create whose metadata attach never happened —
+// the record proves the secret exists, so it is kept, not deleted. Without
+// this, every secret created by a caller that never attaches metadata (the
+// production save paths) would be deleted at the next startup.
+func TestReconcile_PhaseSecretWrittenWithRecordKeepsSecret(t *testing.T) {
+	ctx := context.Background()
+	fake := vaulttest.NewFake()
+	reg := mustRegister(t, fake)
+
+	recID := credential.SecretID("sec:v1:file:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
+	if err := fake.Put(ctx, recID, credential.NewSecret("kept")); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	doc := &vault.Document{
+		Secrets: []vault.SecretRecord{
+			{ID: recID, Name: "prod password", Kind: "password"},
+		},
+		Journal: []vault.JournalEntry{
+			{Op: "create", NewID: recID, Phase: vault.PhaseSecretWritten},
+		},
+	}
+
+	blocked := vault.Reconcile(ctx, doc, reg)
+
+	if doc.Journal[0].Op != "" {
+		t.Error("journal entry should be cleared")
+	}
+	if len(blocked) != 0 {
+		t.Fatalf("expected 0 blocked, got %d", len(blocked))
+	}
+	if _, err := fake.Get(ctx, recID); err != nil {
+		t.Error("secret with a landed record should NOT be deleted", err)
+	}
+	if len(doc.Secrets) != 1 {
+		t.Error("the record should survive reconciliation")
+	}
+}
+
+// A completed metadata repoint deletes the old secret AND its record: a
+// record naming a value that no longer exists is a dangling row.
+func TestReconcile_MetadataRepointedDropsOldRecord(t *testing.T) {
+	ctx := context.Background()
+	fake := vaulttest.NewFake()
+	reg := mustRegister(t, fake)
+
+	newID := credential.SecretID("sec:v1:file:11111111111111111111111111111111")
+	oldID := credential.SecretID("sec:v1:file:22222222222222222222222222222222")
+	if err := fake.Put(ctx, newID, credential.NewSecret("new")); err != nil {
+		t.Fatalf("Put new: %v", err)
+	}
+	if err := fake.Put(ctx, oldID, credential.NewSecret("old")); err != nil {
+		t.Fatalf("Put old: %v", err)
+	}
+
+	doc := &vault.Document{
+		Secrets: []vault.SecretRecord{
+			{ID: newID, Name: "rotated", Kind: "password"},
+			{ID: oldID, Name: "old name", Kind: "password"},
+		},
+		Journal: []vault.JournalEntry{
+			{Op: "rotate", OldID: oldID, NewID: newID, Target: "profile:x", Phase: vault.PhaseMetadataRepointed},
+		},
+	}
+
+	blocked := vault.Reconcile(ctx, doc, reg)
+	if len(blocked) != 0 {
+		t.Fatalf("expected 0 blocked, got %d", len(blocked))
+	}
+	if _, err := fake.Get(ctx, oldID); err == nil {
+		t.Error("old secret should have been deleted")
+	}
+	if len(doc.Secrets) != 1 || doc.Secrets[0].ID != newID {
+		t.Errorf("old record should be dropped, got %v", doc.Secrets)
+	}
+}
