@@ -12,28 +12,19 @@
 // Surfaces import createVaultState for reactive state + the two dialogs,
 // calling ensureBeforeSave to intercept the password-save flow.
 
-import {
-  createSignal,
-  createEffect,
-  onMount,
-  Show,
-  For,
-  type Component,
-  type Accessor,
-} from 'solid-js'
+import { createSignal, onMount, Show, For, type Component, type Accessor } from 'solid-js'
 import { Dialog } from './ui/dialog'
 import { Button } from './ui/button'
 import { Stack } from './ui/stack'
 import { TextField } from './ui/text-field'
 import { CodeBlock } from './ui/code-block'
 import { IconButton } from './ui/icon-button'
-import { PageSection, Select, Field } from './ui'
-import { CopyIcon } from './ui/icons'
+import { PageSection, Select, Field, StatusCard, StatusDot, Badge } from './ui'
+import type { StatusCardTone, BadgeTone } from './ui'
+import { CopyIcon, LockIcon, LockOpenIcon } from './ui/icons'
 import { showToast } from './ui/toast'
 import { RpcError } from './dispatcher'
 import type { VaultClient, VaultStatus, ProviderStatus } from './vault-client'
-import { Tabs } from './ui/tabs'
-import type { TabItem, TabItemStatus } from './ui/tabs'
 
 // ── Error mapping ───────────────────────────────────────────────────────
 // The Dispatcher currently drops structured RPC error fields and surfaces
@@ -86,7 +77,14 @@ function storeStateSentence(p: ProviderStatus): string {
   return `Not answering: ${msg}`
 }
 
-function storeRowStatus(p: ProviderStatus): TabItemStatus {
+/** A store's health, as the list row shows it: a tone for the dot and a name
+ *  for the dot's meaning, since a coloured circle says nothing out loud. */
+interface StoreRowStatus {
+  tone: 'ok' | 'warning' | 'error'
+  accessibleName: string
+}
+
+function storeRowStatus(p: ProviderStatus): StoreRowStatus {
   if (!p.ready) {
     const label = p.reason ? (REASON_MESSAGES[p.reason] ?? 'Not available') : 'Not available'
     return { tone: 'error', accessibleName: label }
@@ -1069,7 +1067,6 @@ export function VaultSection(props: VaultSectionProps) {
 
   const [dialog, setDialog] = createSignal<'setup' | 'passphrase' | 'recovery' | null>(null)
   const [sealing, setSealing] = createSignal(false)
-  const [activeStore, setActiveStore] = createSignal<string | null>(null)
   const [lastTestRun, setLastTestRun] = createSignal<Record<string, number>>({})
 
   const handleSeal = async () => {
@@ -1108,10 +1105,16 @@ export function VaultSection(props: VaultSectionProps) {
   const actionDisabledReason = () => {
     const s = status()
     if (!s) return ''
-    if (s.state === 'uninitialized') return 'Protection is not set up yet.'
-    if (s.state === 'sealed') return 'Vault is locked.'
-    // unsealed but no passphrase envelope
-    return 'Only available when a passphrase is configured.'
+    // An instruction, not a restatement. The card at the top of the page has
+    // already said what state the vault is in; repeating "Vault is locked."
+    // here answered a question nobody had asked and left the actual one —
+    // what do I do about it — unanswered.
+    if (s.state === 'uninitialized')
+      return 'Set up protection first; there is nothing to change yet.'
+    if (s.state === 'sealed') return 'Unlock the vault to change how it is protected.'
+    // Unsealed, but the vault has no passphrase envelope: it is held by an
+    // OS key alone, and both of these actions are about a passphrase.
+    return 'This vault is held by an OS key alone, so there is no passphrase to change or recover.'
   }
 
   const AUTO_LOCK_OPTIONS = [
@@ -1132,136 +1135,187 @@ export function VaultSection(props: VaultSectionProps) {
     }
   }
 
-  const handleRefresh = async () => {
-    const before = Date.now()
-    await props.vaultController.refresh()
-    return before
-  }
-
-  // Build store tab items for the vertical rail
-  const storeItems = () => {
-    const s = status()
-    if (!s) return [] as TabItem[]
-    return s.providers.map((p) => ({
-      id: p.id,
-      label: storeLabelName(p.id),
-      status: storeRowStatus(p),
-      content: () => {
-        const isDefault = s.defaultProvider === p.id
-        const storeLabel = storeLabelName(p.id)
-        const lastCheck = lastTestRun()[p.id]
-        return (
-          <Stack>
-            <p>
-              <strong>{storeLabel}</strong>
-            </p>
-
-            <p>{storeStateSentence(p)}</p>
-            <div>
-              <Button
-                variant="default"
-                onClick={() => {
-                  void handleRefresh().then((ts) => setLastTestRun((r) => ({ ...r, [p.id]: ts })))
-                }}
-              >
-                Test
-              </Button>
-              <Show when={lastCheck}>
-                {(ts) => <span> · Last checked: {new Date(ts()).toLocaleTimeString()}</span>}
-              </Show>
-            </div>
-            <div>
-              <Show
-                when={isDefault}
-                fallback={
-                  <Button
-                    variant="ghost"
-                    onClick={() => {
-                      void handleDefaultProvider(p.id)
-                    }}
-                  >
-                    Store new secrets here
-                  </Button>
-                }
-              >
-                <span>Storing new secrets here</span>
-              </Show>
-            </div>
-          </Stack>
-        )
-      },
-    })) as TabItem[]
-  }
-
-  // Sync active store when providers change
-  createEffect(() => {
-    const items = storeItems()
-    if (items.length > 0 && !items.find((t) => t.id === activeStore())) {
-      setActiveStore(items[0].id)
+  // Test re-probes every store and reports what THIS one answered.
+  //
+  // It used to refresh and stamp a timestamp, which is a record of when the
+  // question was asked and no answer at all: on a store that was already
+  // failing, pressing Test changed one line of small print and nothing else,
+  // so the button read as broken. The dot and the sentence do update — but
+  // only if they change, and the common case for a Test press is that they do
+  // not.
+  const handleTest = async (id: string) => {
+    const asked = Date.now()
+    try {
+      await props.vaultController.refresh()
+    } catch (e: unknown) {
+      showToast({ level: 'danger', message: vaultErrorMessage(e) })
+      return
     }
-  })
+    setLastTestRun((r) => ({ ...r, [id]: asked }))
+
+    const p = status()?.providers.find((x) => x.id === id)
+    if (!p) {
+      showToast({ level: 'warning', message: `${storeLabelName(id)} is no longer registered.` })
+      return
+    }
+    showToast({
+      level: p.ready ? 'success' : 'danger',
+      message: storeStateSentence(p),
+    })
+  }
+
+  // ── The state card ──────────────────────────────────────────────────
+  // The headline fact of this page is a condition, not a control, and it was
+  // rendered as a paragraph with a button beside it — which made the most
+  // important sentence on the page the least prominent thing on it.
+
+  const cardTone = (): StatusCardTone => {
+    const s = status()
+    if (!s) return 'neutral'
+    if (s.state === 'unsealed') return 'ok'
+    if (s.state === 'uninitialized') return 'warning'
+    return 'neutral'
+  }
+
+  const cardTitle = (): string => {
+    const s = status()
+    if (!s) return ''
+    if (s.state === 'unsealed') return 'Vault is unlocked'
+    if (s.state === 'sealed') return 'Vault is locked'
+    return 'Protection is not set up yet'
+  }
+
+  const cardDescription = (): string => {
+    const s = status()
+    if (!s) return ''
+    if (s.state === 'unsealed') {
+      return s.autoSealMinutes > 0
+        ? `Saved passwords and key passphrases are available to your connections, and lock again after ${s.autoSealMinutes} minutes idle.`
+        : 'Saved passwords and key passphrases are available to your connections.'
+    }
+    if (s.state === 'sealed') {
+      return 'Saved passwords and key passphrases stay encrypted until you unlock. Connections that need one will ask.'
+    }
+    return 'nocx keeps the passwords and key passphrases you save for your connections. Set up protection to start storing them encrypted.'
+  }
+
+  const diagStateTone = (): BadgeTone => {
+    const s = status()
+    if (!s) return 'neutral'
+    if (s.state === 'unsealed') return 'success'
+    if (s.state === 'uninitialized') return 'warning'
+    return 'neutral'
+  }
+
+  const cardActionLabel = (): string => {
+    const s = status()
+    if (!s) return ''
+    if (s.state === 'unsealed') return sealing() ? 'Locking…' : 'Lock now'
+    return s.state === 'sealed' ? 'Unlock' : 'Set up protection'
+  }
+
+  // ── The store list ──────────────────────────────────────────────────
+  // A row per store, every state visible at once. This was a vertical Tabs
+  // rail, whose only advantage was compactness and whose cost the user paid
+  // twice: the store that is not answering is the one you are not looking at,
+  // and the rail's fixed 9.5rem clipped both store names — which, because a
+  // scroll container on one axis forces the other, put a horizontal scrollbar
+  // under the rail that looked like a rendering artefact.
+
+  const stores = () => status()?.providers ?? []
 
   return (
     <div>
-      {/* Top: state + single primary action */}
-      <div class="ui-vault-status-row">
-        <p>nocx protects passwords and key passphrases saved for your connections.</p>
-        <Show when={status()}>
-          {(s) => (
-            <Button
-              variant="primary"
-              disabled={s().state === 'unsealed' && sealing()}
-              onClick={() => {
-                if (s().state === 'uninitialized') setDialog('setup')
-                else if (s().state === 'sealed') props.vaultController.openUnlock()
-                else void handleSeal()
-              }}
-            >
-              {s().state === 'unsealed'
-                ? sealing()
-                  ? 'Locking…'
-                  : 'Lock now'
-                : s().state === 'sealed'
-                  ? 'Unlock'
-                  : 'Set up protection'}
-            </Button>
-          )}
-        </Show>
-      </div>
+      <Show when={status()}>
+        {(s) => (
+          <StatusCard
+            tone={cardTone()}
+            icon={s().state === 'unsealed' ? <LockOpenIcon /> : <LockIcon />}
+            title={cardTitle()}
+            description={cardDescription()}
+            action={
+              <Button
+                variant="primary"
+                disabled={s().state === 'unsealed' && sealing()}
+                onClick={() => {
+                  if (s().state === 'uninitialized') setDialog('setup')
+                  else if (s().state === 'sealed') props.vaultController.openUnlock()
+                  else void handleSeal()
+                }}
+              >
+                {cardActionLabel()}
+              </Button>
+            }
+          />
+        )}
+      </Show>
 
       {/* Where it is stored */}
-      <Show when={storeItems().length > 0}>
-        <PageSection title="Where it is stored">
-          <Tabs
-            items={storeItems()}
-            active={activeStore() ?? ''}
-            onChange={setActiveStore}
-            orientation="vertical"
-            ariaLabel="Storage providers"
-          />
+      <Show when={stores().length > 0}>
+        <PageSection title="Where it is stored" divided>
+          <For each={stores()}>
+            {(p) => {
+              const rowStatus = storeRowStatus(p)
+              const isDefault = () => status()?.defaultProvider === p.id
+              const lastCheck = () => lastTestRun()[p.id]
+              // A store that is not answering cannot be told to take new
+              // secrets: the write would fail at the moment the user saves a
+              // password, which is the worst possible moment to discover it.
+              // The row already says why — the state sentence is right below —
+              // so the disabled button needs no explanation of its own.
+              const canTakeNewSecrets = () => p.ready && p.writable
+              return (
+                <div class="ui-vault-store" data-default={isDefault() ? 'true' : undefined}>
+                  <div class="ui-vault-store__head">
+                    <StatusDot tone={rowStatus.tone} accessibleName={rowStatus.accessibleName}>
+                      <span class="ui-vault-store__name">{storeLabelName(p.id)}</span>
+                    </StatusDot>
+                    <Show when={isDefault()}>
+                      <Badge tone="info">New secrets go here</Badge>
+                    </Show>
+                    <div class="ui-vault-store__actions">
+                      <Show when={!isDefault()}>
+                        <Button
+                          variant="default"
+                          disabled={!canTakeNewSecrets()}
+                          onClick={() => {
+                            void handleDefaultProvider(p.id)
+                          }}
+                        >
+                          Store new secrets here
+                        </Button>
+                      </Show>
+                      <Button
+                        variant="default"
+                        onClick={() => {
+                          void handleTest(p.id)
+                        }}
+                      >
+                        Test
+                      </Button>
+                    </div>
+                  </div>
+                  <p class="ui-vault-store__state">
+                    {storeStateSentence(p)}
+                    <Show when={lastCheck()}>
+                      {(ts) => <> · Last checked: {new Date(ts()).toLocaleTimeString()}</>}
+                    </Show>
+                  </p>
+                </div>
+              )
+            }}
+          </For>
         </PageSection>
       </Show>
 
-      {/* Protection */}
-      <PageSection title="Protection" divided>
-        <Field
-          for="vault-lock-now"
-          label="Lock now"
-          orientation="horizontal"
-          description={(() => {
-            const s = status()
-            if (!s || s.state === 'unsealed') return undefined
-            return s.state === 'sealed' ? 'Vault is locked.' : 'Protection is not set up yet.'
-          })()}
-        >
-          <Button
-            variant="default"
-            disabled={sealing() || status()?.state !== 'unsealed'}
-            onClick={() => void handleSeal()}
-          >
-            {sealing() ? 'Locking…' : 'Lock now'}
-          </Button>
-        </Field>
+      {/* Protection. The reason these controls are unavailable is stated once,
+          for the section — not repeated under each of them, which is what put
+          "Vault is locked." on this page three times. */}
+      <PageSection
+        title="Protection"
+        description={!actionCanRun() ? actionDisabledReason() : undefined}
+        divided
+      >
         <Show when={status()?.state === 'unsealed'}>
           <Field for="vault-auto-lock" label="Lock automatically after" orientation="horizontal">
             <Select
@@ -1278,7 +1332,7 @@ export function VaultSection(props: VaultSectionProps) {
           for="vault-change-passphrase"
           label="Change passphrase"
           orientation="horizontal"
-          description={!actionCanRun() ? actionDisabledReason() : undefined}
+          description="The passphrase that unlocks the vault on a machine with no OS-held key."
         >
           <Button
             variant="default"
@@ -1292,7 +1346,7 @@ export function VaultSection(props: VaultSectionProps) {
           for="vault-reissue-recovery"
           label="Recovery code"
           orientation="horizontal"
-          description={!actionCanRun() ? actionDisabledReason() : undefined}
+          description="The one-time code that recovers the vault when the passphrase is lost."
         >
           <Button
             variant="default"
@@ -1308,12 +1362,20 @@ export function VaultSection(props: VaultSectionProps) {
       <Show when={status()}>
         <details class="ui-vault-diagnostics">
           <summary>Diagnostics</summary>
+          {/* Values are Badges, not fine print. These lines are read while
+              something is wrong, by someone comparing "Ready" against "Not
+              ready" down a column — the difference has to be visible before
+              it is read, and a smaller-than-body type size was working
+              directly against that. The tone carries it: `success` says
+              nothing to do here, which is the whole reason Badge grew one. */}
           <div>
             <Field for="vault-state-raw" label="State" orientation="horizontal">
-              <span>{status()!.state}</span>
+              <Badge tone={diagStateTone()}>{status()!.state}</Badge>
             </Field>
             <Field for="vault-oskey-raw" label="OS-held key" orientation="horizontal">
-              <span>{status()!.osKeyAvailable ? 'Available' : 'Not available'}</span>
+              <Badge tone={status()!.osKeyAvailable ? 'success' : 'neutral'}>
+                {status()!.osKeyAvailable ? 'Available' : 'Not available'}
+              </Badge>
             </Field>
             <Show when={status()!.providers.length > 0}>
               <For each={status()!.providers}>
@@ -1323,12 +1385,16 @@ export function VaultSection(props: VaultSectionProps) {
                     label={storeLabelName(p.id)}
                     orientation="horizontal"
                   >
-                    <span>
+                    <Badge tone={p.writable ? 'neutral' : 'warning'}>
                       {p.writable ? 'Writable' : 'Read-only'}
-                      {' · '}
+                    </Badge>
+                    <Badge tone={p.ready ? 'success' : 'danger'}>
                       {p.ready ? 'Ready' : 'Not ready'}
-                      {p.reason ? ` · ${p.reason}` : ''}
-                    </span>
+                    </Badge>
+                    {/* The reason code, verbatim. Everywhere else the surface
+                        turns it into a sentence; here the raw code is the
+                        point — it is what goes in a bug report. */}
+                    <Show when={p.reason}>{(r) => <Badge tone="danger">{r()}</Badge>}</Show>
                   </Field>
                 )}
               </For>

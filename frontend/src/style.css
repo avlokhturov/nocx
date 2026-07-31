@@ -21,6 +21,8 @@
 @import './styles/components/section.css';
 @import './styles/components/badge.css';
 @import './styles/components/empty-state.css';
+@import './styles/components/status-card.css';
+@import './styles/components/status-dot.css';
 @import './styles/components/toolbar.css';
 @import './styles/components/dialog.css';
 @import './styles/components/prompt.css';

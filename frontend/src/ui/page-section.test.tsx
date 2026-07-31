@@ -51,6 +51,24 @@ describe('PageSection', () => {
     expect(document.querySelector('section')?.getAttribute('class')).toBe('ui-page-section')
   })
 
+  // One explanation for the section beats the same sentence repeated under
+  // every row in it — which is what the Vault page did with "Vault is locked."
+  describe('description', () => {
+    it('states the description above the children when given one', () => {
+      subject({ description: 'Unlock the vault to change how it is protected.' })
+      const desc = document.querySelector('.ui-page-section__desc')
+      expect(desc).not.toBeNull()
+      expect(desc!.textContent).toBe('Unlock the vault to change how it is protected.')
+      // Above the content, not inside it: it explains the whole section.
+      expect(desc!.nextElementSibling?.classList.contains('ui-stack')).toBe(true)
+    })
+
+    it('renders no description element when there is none', () => {
+      subject()
+      expect(document.querySelector('.ui-page-section__desc')).toBeNull()
+    })
+  })
+
   describe('divided', () => {
     it('forwards divided prop to inner Stack', () => {
       subject({ divided: true })

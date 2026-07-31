@@ -150,8 +150,9 @@ describe('SecretsSection', () => {
       expect(container.querySelector('.sr-row-label')).toBeTruthy()
     })
 
-    // A row is a div.sr-row — no longer a ghost Button.
-    const rows = Array.from(container.querySelectorAll('.sr-row'))
+    // A row is the kit's CollectionRow — no longer a ghost Button, and no
+    // longer a hand-rolled div either.
+    const rows = Array.from(container.querySelectorAll('.ui-collection-row'))
     expect(rows.length).toBe(2)
 
     // Row 1: label, store, usage
@@ -183,12 +184,14 @@ describe('SecretsSection', () => {
 
     const { container } = await mount(client)
 
+    // A status is a Badge, not a bespoke red span the surface drew itself.
     await vi.waitFor(() => {
-      expect(container.querySelector('.sr-row-unreachable')).toBeTruthy()
+      expect(container.querySelector('.ui-badge')).toBeTruthy()
     })
 
-    const unreachableEl = container.querySelector('.sr-row-unreachable')
-    expect(unreachableEl?.textContent).toBe('Store unreachable')
+    const badge = container.querySelector('.ui-badge')
+    expect(badge?.textContent).toBe('Store unreachable')
+    expect(badge?.getAttribute('data-tone')).toBe('danger')
   })
 
   it('no secret value appears in rendered output and no copy/reveal controls exist', async () => {

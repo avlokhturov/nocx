@@ -12,29 +12,30 @@ Every one renders a stable **base class** naming itself, on the element that car
 appearance — not merely on a wrapper. Variance is a typed `data-*` attribute. None of
 them takes a `class` prop; the structural containers that still do are marked.
 
-| Component            | Module                  | Identity                                                        | Variance                                                                                                                       |
-| -------------------- | ----------------------- | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| **Stack**            | `stack.tsx`             | `ui-stack`                                                      | `data-gap`: default \| loose; `data-divided`                                                                                   |
-| **Button**           | `button.tsx`            | `ui-button`                                                     | `data-variant`: default \| primary \| danger \| ghost; `data-size`                                                             |
-| **IconButton**       | `icon-button.tsx`       | `ui-icon-button`                                                | `data-size`; `selected` → `aria-selected`; `ariaLabel` is **required**                                                         |
-| **TextField**        | `text-field.tsx`        | `ui-text-field`, `ui-text-field__input`                         | input types text \| number \| password; `data-multiline` → `<textarea>`; composes Field for label/desc/error                   |
-| **SearchField**      | `search-field.tsx`      | `ui-search-field`, `__input`, `__icon`                          | —                                                                                                                              |
-| **Select**           | `select.tsx`            | `ui-select`                                                     | native `<select>`, `appearance: none` (ADR-0014)                                                                               |
-| **Checkbox**         | `checkbox.tsx`          | `ui-checkbox`, `ui-checkbox__control`                           | `data-variant`: checkbox \| switch                                                                                             |
-| **Radio**            | `radio.tsx`             | `ui-radio`, `ui-radio__control`                                 | —                                                                                                                              |
-| **SegmentedControl** | `segmented-control.tsx` | `ui-segmented-control`, `__option`                              | one row; same `radiogroup` ARIA as Radio, for few and short options                                                            |
-| **FileInput**        | `file-input.tsx`        | `ui-file-input`, `__native`, `__name`                           | kit Button as trigger; native input hidden but focusable                                                                       |
-| **Toast**            | `toast.tsx`             | `ui-toast-host`, `ui-toast`, `__message`                        | `data-level`: info \| success \| warning \| danger                                                                             |
-| **MarkerList**       | `marker-list.tsx`       | `ui-marker-list` + `__item/__marker/__text`                     | `data-tone`: included \| excluded \| note                                                                                      |
-| **CodeBlock**        | `code-block.tsx`        | `ui-code-block`                                                 | preformatted machine output; scroll-capped                                                                                     |
-| **Badge**            | `badge.tsx`             | `ui-badge`                                                      | `data-tone`: neutral \| info \| warning \| danger                                                                              |
-| **EmptyState**       | `empty-state.tsx`       | `ui-empty-state` + `__title/__desc/__action`                    | —                                                                                                                              |
-| **CollectionView**   | `collection-view.tsx`   | `ui-collection-view`, `ui-collection-row`                       | Searchable manager shell and shared list row                                                                                   |
-| **Prompt**           | `prompt.tsx`            | `ui-prompt-overlay`, `ui-prompt`                                | `data-placement`: floating \| top-sheet                                                                                        |
-| **Field**            | `field.tsx`             | `ui-field`, `+ ui-field-horizontal`                             | `orientation`; `data-label` follows orientation (horizontal→primary)                                                           |
-| **Section**          | `section.tsx`           | `ui-section`                                                    | children spaced by Stack; `divided`; no `class` passthrough                                                                    |
-| **Toolbar**          | `toolbar.tsx`           | `ui-toolbar`                                                    | keeps `class`, **layout only**                                                                                                 |
-| **Tabs**             | `tabs.tsx`              | `ui-tabs`, `ui-tabs__list`, `ui-tabs__panel`, `ui-tabs__status` | `data-orientation`: vertical \| horizontal; rows are ghost Buttons; optional `data-tone` on `__status`: ok \| warning \| error |
+| Component            | Module                  | Identity                                                                | Variance                                                                                                                       |
+| -------------------- | ----------------------- | ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| **Stack**            | `stack.tsx`             | `ui-stack`                                                              | `data-gap`: default \| loose; `data-divided`                                                                                   |
+| **Button**           | `button.tsx`            | `ui-button`                                                             | `data-variant`: default \| primary \| danger \| ghost; `data-size`                                                             |
+| **IconButton**       | `icon-button.tsx`       | `ui-icon-button`                                                        | `data-size`; `selected` → `aria-selected`; `ariaLabel` is **required**                                                         |
+| **TextField**        | `text-field.tsx`        | `ui-text-field`, `ui-text-field__input`                                 | input types text \| number \| password; `data-multiline` → `<textarea>`; composes Field for label/desc/error                   |
+| **SearchField**      | `search-field.tsx`      | `ui-search-field`, `__input`, `__icon`                                  | —                                                                                                                              |
+| **Select**           | `select.tsx`            | `ui-select`                                                             | native `<select>`, `appearance: none` (ADR-0014)                                                                               |
+| **Checkbox**         | `checkbox.tsx`          | `ui-checkbox`, `ui-checkbox__control`                                   | `data-variant`: checkbox \| switch                                                                                             |
+| **Radio**            | `radio.tsx`             | `ui-radio`, `ui-radio__control`                                         | —                                                                                                                              |
+| **SegmentedControl** | `segmented-control.tsx` | `ui-segmented-control`, `__option`                                      | one row; same `radiogroup` ARIA as Radio, for few and short options                                                            |
+| **FileInput**        | `file-input.tsx`        | `ui-file-input`, `__native`, `__name`                                   | kit Button as trigger; native input hidden but focusable                                                                       |
+| **Toast**            | `toast.tsx`             | `ui-toast-host`, `ui-toast`, `__message`                                | `data-level`: info \| success \| warning \| danger                                                                             |
+| **MarkerList**       | `marker-list.tsx`       | `ui-marker-list` + `__item/__marker/__text`                             | `data-tone`: included \| excluded \| note                                                                                      |
+| **CodeBlock**        | `code-block.tsx`        | `ui-code-block`                                                         | preformatted machine output; scroll-capped                                                                                     |
+| **Badge**            | `badge.tsx`             | `ui-badge`                                                              | `data-tone`: neutral \| info \| warning \| danger                                                                              |
+| **EmptyState**       | `empty-state.tsx`       | `ui-empty-state` + `__icon/__title/__desc/__action`                     | optional `icon`                                                                                                                |
+| **StatusCard**       | `status-card.tsx`       | `ui-status-card` + `__icon/__body/__title/__desc/__action`              | `data-tone`: neutral \| ok \| warning \| danger; a state and the one action for it                                             |
+| **CollectionView**   | `collection-view.tsx`   | `ui-collection-view`, `ui-collection-row`                               | Searchable manager shell and shared list row                                                                                   |
+| **Prompt**           | `prompt.tsx`            | `ui-prompt-overlay`, `ui-prompt`                                        | `data-placement`: floating \| top-sheet                                                                                        |
+| **Field**            | `field.tsx`             | `ui-field`, `+ ui-field-horizontal`                                     | `orientation`; `data-label` follows orientation (horizontal→primary)                                                           |
+| **Section**          | `section.tsx`           | `ui-section`                                                            | children spaced by Stack; `divided`; no `class` passthrough                                                                    |
+| **Toolbar**          | `toolbar.tsx`           | `ui-toolbar`                                                            | keeps `class`, **layout only**                                                                                                 |
+| **Tabs**             | `tabs.tsx`              | `ui-tabs`, `ui-tabs__list`, `ui-tabs__panel`; row marker is `StatusDot` | `data-orientation`: vertical \| horizontal; rows are ghost Buttons; optional `data-tone` on `__status`: ok \| warning \| error |
 
 ## A container's size is the container's decision, never its content's
 
@@ -176,15 +177,15 @@ behavioural unit, not a styled button. Feature components like it are declared i
 
 ### Page primitives (separate ownership — not merged with kit Section)
 
-| Component       | Module              | Notes                                                                             |
-| --------------- | ------------------- | --------------------------------------------------------------------------------- |
-| Page            | `page.tsx`          | Page layout container                                                             |
-| PageHeader      | `page-header.tsx`   | Page header                                                                       |
-| PageBody        | `page-body.tsx`     | Page body                                                                         |
-| PageRail        | `page-rail.tsx`     | Side navigation rail                                                              |
-| PageScroller    | `page-scroller.tsx` | Scroll owner                                                                      |
-| **PageSection** | `page-section.tsx`  | Semantic `<section>` within a Page, with `id` for deep linking; accepts `divided` |
-| SidebarView     | `sidebar-view.tsx`  | Sidebar view wrapper                                                              |
+| Component       | Module              | Notes                                                                                                                         |
+| --------------- | ------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| Page            | `page.tsx`          | Page layout container                                                                                                         |
+| PageHeader      | `page-header.tsx`   | Page header                                                                                                                   |
+| PageBody        | `page-body.tsx`     | Page body                                                                                                                     |
+| PageRail        | `page-rail.tsx`     | Side navigation rail                                                                                                          |
+| PageScroller    | `page-scroller.tsx` | Scroll owner                                                                                                                  |
+| **PageSection** | `page-section.tsx`  | Semantic `<section>` within a Page, with `id` for deep linking; accepts `divided` and one `description` for the whole section |
+| SidebarView     | `sidebar-view.tsx`  | Sidebar view wrapper                                                                                                          |
 
 ### `Section` vs `PageSection` overlap
 

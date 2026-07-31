@@ -1392,6 +1392,18 @@ type Snapshot struct {
 	// that constructs it for the exact locking window.
 	AutoSealMinutes int `json:"autoSealMinutes"`
 
+	// DefaultProvider is the store new secrets are written to. Empty on an
+	// uninitialized vault, which has not chosen one yet.
+	//
+	// It is STATE and it is chosen exactly once, by Setup, from what was ready
+	// at that moment — it never follows the machine afterwards. A keychain that
+	// appears later does not silently take over the store of record, because
+	// secrets already written to the file provider would stay there while new
+	// ones went elsewhere, and nothing would have told the user their material
+	// is now in two places. Moving is SetDefaultProvider, and that is a
+	// decision the user makes.
+	DefaultProvider ProviderID `json:"defaultProvider"`
+
 	Providers []ProviderSnapshot `json:"providers"`
 }
 
@@ -1404,6 +1416,7 @@ func (v *Vault) Snapshot(ctx context.Context) Snapshot {
 	hasOSKey := v.doc.HasOSKey
 	hasPass := v.doc.Passphrase != nil
 	autoSealMins := v.doc.AutoSealMinutes
+	defaultProv := v.doc.DefaultProvider
 	providers := v.reg.List()
 	v.mu.Unlock()
 	snap := Snapshot{
@@ -1411,6 +1424,7 @@ func (v *Vault) Snapshot(ctx context.Context) Snapshot {
 		HasOSKey:        hasOSKey,
 		HasPassphrase:   hasPass,
 		AutoSealMinutes: autoSealMins,
+		DefaultProvider: defaultProv,
 	}
 
 	for _, p := range providers {

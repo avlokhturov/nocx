@@ -34,6 +34,7 @@
 
 import { For, Show, type JSX } from 'solid-js'
 import { Button } from './button'
+import { StatusDot } from './status-dot'
 
 export interface TabItemStatus {
   /** The visual tone of the row's status indicator. */
@@ -121,11 +122,9 @@ export function Tabs(props: TabsProps) {
             >
               <Show when={item.status} fallback={item.label}>
                 {(status) => (
-                  <>
-                    <span class="ui-tabs__status" data-tone={status().tone} aria-hidden="true" />
+                  <StatusDot tone={status().tone} accessibleName={status().accessibleName}>
                     {item.label}
-                    <span class="ui-visually-hidden">{status().accessibleName}</span>
-                  </>
+                  </StatusDot>
                 )}
               </Show>
             </Button>

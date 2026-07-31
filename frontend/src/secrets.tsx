@@ -11,6 +11,9 @@ import { For, Show, createSignal, createEffect, onMount } from 'solid-js'
 import { Button } from './ui/button'
 import { EmptyState } from './ui/empty-state'
 import { PageSection } from './ui/page-section'
+import { CollectionRow } from './ui/collection-view'
+import { Badge } from './ui/badge'
+import { KeyIcon, LockIcon } from './ui/icons'
 import { showToast } from './ui/toast'
 import type { VaultClient, VaultInventoryEntry } from './vault-client'
 import type { VaultController } from './vault'
@@ -79,6 +82,7 @@ export function SecretsSection(props: SecretsSectionProps) {
         when={status()?.state !== 'sealed'}
         fallback={
           <EmptyState
+            icon={<LockIcon />}
             title="Vault is locked"
             description="Unlock the vault to see what secrets it holds."
             action={
@@ -94,6 +98,7 @@ export function SecretsSection(props: SecretsSectionProps) {
           fallback={
             <Show when={loadState().kind === 'empty'}>
               <EmptyState
+                icon={<KeyIcon />}
                 title="Vault is empty"
                 description="There are no passwords or key passphrases in the vault yet. They appear here when you add a password to a connection."
               />
@@ -103,19 +108,35 @@ export function SecretsSection(props: SecretsSectionProps) {
           <PageSection title="Secrets" divided>
             <For each={(loadState() as Extract<LoadState, { kind: 'loaded' }>).entries}>
               {(entry) => (
-                <div class="sr-row">
-                  <span class="sr-row-icon">{entry.provider === 'file' ? '🗝️' : '🔑'}</span>
-                  <div class="sr-row-body">
-                    <span class="sr-row-label">{entry.label}</span>
-                    <span class="sr-row-usage">
-                      {entry.usedBy} connection{entry.usedBy === 1 ? '' : 's'}
-                    </span>
-                  </div>
-                  <span class="sr-row-store">{STORE_LABELS[entry.provider] ?? entry.provider}</span>
-                  <Show when={!entry.reachable}>
-                    <span class="sr-row-unreachable">Store unreachable</span>
-                  </Show>
-                </div>
+                <CollectionRow
+                  info={
+                    <div class="sr-row-info">
+                      {/* One glyph for every kind. The emoji pair this replaced
+                          encoded which store holds the secret — which the store
+                          name on the right of the same row already says, in
+                          words, and says for stores no emoji was chosen for. */}
+                      <span class="sr-row-icon">
+                        <KeyIcon />
+                      </span>
+                      <div class="sr-row-body">
+                        <span class="sr-row-label">{entry.label}</span>
+                        <span class="sr-row-usage">
+                          {entry.usedBy} connection{entry.usedBy === 1 ? '' : 's'}
+                        </span>
+                      </div>
+                    </div>
+                  }
+                  actions={
+                    <>
+                      <span class="sr-row-store">
+                        {STORE_LABELS[entry.provider] ?? entry.provider}
+                      </span>
+                      <Show when={!entry.reachable}>
+                        <Badge tone="danger">Store unreachable</Badge>
+                      </Show>
+                    </>
+                  }
+                />
               )}
             </For>
           </PageSection>

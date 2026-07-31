@@ -125,6 +125,7 @@ host_gate "prettier --check" sh -c 'cd frontend && npm run format:check'
 if [ "$RUN_FE" = 1 ]; then
     host_gate "eslint" sh -c 'cd frontend && npm run lint'
     host_gate "solid negative fixture gate" sh -c 'cd frontend && npm run lint:fixture-check'
+    host_gate "wire contracts current" sh -c 'cd frontend && npm run contracts:check'
     host_gate "tsc --noEmit" sh -c 'cd frontend && npm run typecheck'
 else
     ok "eslint, fixture gate, tsc — skipped (no frontend/ changes staged)"

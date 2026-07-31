@@ -17,6 +17,8 @@ export { Field, type FieldProps } from './field'
 export { Badge, type BadgeProps, type BadgeTone } from './badge'
 export { FileInput, type FileInputProps } from './file-input'
 export { EmptyState, type EmptyStateProps } from './empty-state'
+export { StatusCard, type StatusCardProps, type StatusCardTone } from './status-card'
+export { StatusDot, type StatusDotProps, type StatusDotTone } from './status-dot'
 export {
   CollectionView,
   CollectionRow,

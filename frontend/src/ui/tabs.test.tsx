@@ -38,12 +38,12 @@ describe('Tabs', () => {
   })
 
   describe('status indicator', () => {
-    it('does not render .ui-tabs__status when no status is set', () => {
+    it('does not render .ui-status-dot when no status is set', () => {
       subject()
-      expect(document.querySelector('.ui-tabs__status')).toBeNull()
+      expect(document.querySelector('.ui-status-dot')).toBeNull()
     })
 
-    it('renders .ui-tabs__status when status is set', () => {
+    it('renders .ui-status-dot when status is set', () => {
       const status: TabItemStatus = { tone: 'ok', accessibleName: 'Available' }
       subject({
         items: [
@@ -51,7 +51,7 @@ describe('Tabs', () => {
           { id: 'b', label: 'Store B', content: () => 'B' },
         ],
       })
-      expect(document.querySelector('.ui-tabs__status')).toBeTruthy()
+      expect(document.querySelector('.ui-status-dot')).toBeTruthy()
     })
 
     it('sets data-tone attribute matching the tone', () => {
@@ -59,7 +59,7 @@ describe('Tabs', () => {
       subject({
         items: [{ id: 'a', label: 'A', content: () => 'A', status }],
       })
-      const marker = document.querySelector('.ui-tabs__status')
+      const marker = document.querySelector('.ui-status-dot')
       expect(marker!.getAttribute('data-tone')).toBe('ok')
     })
 
@@ -81,7 +81,7 @@ describe('Tabs', () => {
           },
         ],
       })
-      const markers = document.querySelectorAll('.ui-tabs__status')
+      const markers = document.querySelectorAll('.ui-status-dot')
       expect(markers[0].getAttribute('data-tone')).toBe('ok')
       expect(markers[1].getAttribute('data-tone')).toBe('warning')
       expect(markers[2].getAttribute('data-tone')).toBe('error')
@@ -115,7 +115,7 @@ describe('Tabs', () => {
           },
         ],
       })
-      const marker = document.querySelector('.ui-tabs__status')
+      const marker = document.querySelector('.ui-status-dot')
       expect(marker!.getAttribute('aria-hidden')).toBe('true')
     })
 
@@ -132,7 +132,7 @@ describe('Tabs', () => {
           { id: 'b', label: 'Store B', content: () => 'B' },
         ],
       })
-      const marker = document.querySelector('.ui-tabs__status')
+      const marker = document.querySelector('.ui-status-dot')
       expect(marker).toBeTruthy()
       // The marker must be visible even when its row is not selected —
       // that is the entire point of the feature.

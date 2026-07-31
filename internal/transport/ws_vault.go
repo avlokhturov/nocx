@@ -142,11 +142,15 @@ func (s *WSServer) handleVaultMethod(wconn *wsConn, req jsonrpcRequest) {
 }
 
 type vaultStatusResponse struct {
-	State           string                     `json:"state"`
-	OSKeyAvailable  bool                       `json:"osKeyAvailable"`
-	OSKeyCapable    bool                       `json:"osKeyCapable"`
-	HasPassphrase   bool                       `json:"hasPassphrase"`
-	AutoSealMinutes int                        `json:"autoSealMinutes"`
+	State           string `json:"state"`
+	OSKeyAvailable  bool   `json:"osKeyAvailable"`
+	OSKeyCapable    bool   `json:"osKeyCapable"`
+	HasPassphrase   bool   `json:"hasPassphrase"`
+	AutoSealMinutes int    `json:"autoSealMinutes"`
+	// Pointer, so an uninitialized vault sends null rather than "". The
+	// renderer has to tell "no store chosen yet" from "a store id I do not
+	// recognise", and an empty string reads as the second.
+	DefaultProvider *string                    `json:"defaultProvider"`
 	Providers       []vaultStatusProviderEntry `json:"providers"`
 }
 
@@ -165,6 +169,17 @@ func vaultSnapToStatus(snap vault.Snapshot) vaultStatusResponse {
 		HasPassphrase:   snap.HasPassphrase,
 		AutoSealMinutes: snap.AutoSealMinutes,
 	}
+	if snap.DefaultProvider != "" {
+		id := string(snap.DefaultProvider)
+		resp.DefaultProvider = &id
+	}
+	// Empty, not nil. A nil slice marshals to `null`, and the renderer's type
+	// says `providers: ProviderStatus[]` — so on a vault with no providers
+	// registered, the first `.map` over it throws. The same defect shipped once
+	// already on the inventory (nocx-25k9.14); the contract schema is what
+	// caught it here, because `"type": "array"` refuses null and no
+	// hand-written test had thought to ask.
+	resp.Providers = make([]vaultStatusProviderEntry, 0, len(snap.Providers))
 	for _, p := range snap.Providers {
 		entry := vaultStatusProviderEntry{
 			ID:       string(p.ID),

@@ -26,19 +26,48 @@
   margin: 0;
 }
 
-/* Status row at the top of the page — sentence + primary action */
-.ui-vault-status-row {
-  margin-bottom: 24px;
+/* ── A store in "Where it is stored" ─────────────────────────────────────
+   A row per store, not a tab. Layout only — the Button, Badge and status dot
+   bring their own appearance. */
+
+.ui-vault-store__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
 }
 
-.ui-vault-status-row p {
-  margin: 0 0 12px 0;
+/* The name takes the space, so the actions land on the right edge of the
+   measure and line up down the list however long the names are. This is what
+   the fixed-width rail could not do: it clipped instead. */
+.ui-vault-store__name {
+  font-size: var(--font-size-md);
+  font-weight: 500;
+  color: var(--color-text);
+}
+
+.ui-vault-store__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-left: auto;
+}
+
+/* Indented to the name rather than to the dot: the sentence belongs to the
+   store, and starting it under the dot would read as a second column. */
+.ui-vault-store__state {
+  margin: var(--space-1) 0 0 calc(8px + var(--space-2));
+  max-width: 72ch;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-dim);
 }
 
 /* Diagnostics disclosure — collapsed by default, wraps raw diagnostic info */
+/* No type-size override. It was set one step below body, which is the wrong
+   instruction for a block whose whole job is to be legible when something has
+   gone wrong and someone is reading it into a bug report. Badge already sits a
+   register below its row's label; making the row smaller too compounded it. */
 .ui-vault-diagnostics {
-  margin-top: 24px;
-  font-size: var(--font-size-sm);
+  margin-top: var(--space-6);
 }
 
 .ui-vault-diagnostics summary {

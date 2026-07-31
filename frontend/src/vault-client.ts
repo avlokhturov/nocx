@@ -3,49 +3,20 @@
 
 import type { Dispatcher } from './dispatcher'
 
-export type VaultState = 'uninitialized' | 'sealed' | 'unsealed'
+// The wire types are GENERATED from `contracts/vault.status.schema.json`
+// (`npm run contracts`). They are re-exported here so callers keep importing
+// them from the client, and so this module stays the one place that says what
+// vault.* speaks.
+//
+// They used to be hand-written, and that is precisely how `defaultProvider`
+// came to be declared here, read on every render, and never sent: a
+// hand-written type can want a field the wire does not carry. A generated one
+// cannot. Do not re-declare these — change the schema.
+export type { VaultStatus, ProviderStatus } from './generated/vault.status'
+import type { VaultStatus } from './generated/vault.status'
 
-export interface ProviderStatus {
-  id: string
-  writable: boolean
-  ready: boolean
-  reason?: string
-}
-
-export interface VaultStatus {
-  state: VaultState
-  /**
-   * STATE: this vault holds an OS-held key, so it can be unsealed by one.
-   * False until setup has stored one. Ask this before offering "unlock with
-   * the OS key".
-   */
-  osKeyAvailable: boolean
-  /**
-   * CAPABILITY: this machine has a system keyring that is ready and writable,
-   * so setup can mint an OS-held key with no passphrase. Ask this before
-   * deciding whether setup must prompt.
-   *
-   * The two are one word apart and mean different things, which is how
-   * nocx-25k9.8 happened: the silent-setup branch read the state, which is
-   * false on every uninitialized vault by construction, so it never ran and
-   * the OS keychain was unreachable. If you are about to use one of these,
-   * decide first whether you are asking about the machine or about the vault.
-   */
-  osKeyCapable: boolean
-  /**
-   * STATE: this vault holds a passphrase envelope.
-   * False on OS-key-only vaults, where changing the passphrase or
-   * regenerating the recovery code is denied — a factor that only
-   * unseals must not replace the factor that recovers.
-   */
-  hasPassphrase: boolean
-  /**
-   * Auto-seal idle timeout in minutes. 0 means off.
-   */
-  autoSealMinutes: number
-  providers: ProviderStatus[]
-  defaultProvider: string | null
-}
+/** The vault's lifecycle state, as the schema's enum spells it. */
+export type VaultState = VaultStatus['state']
 
 export interface VaultSetupParams {
   passphrase?: string

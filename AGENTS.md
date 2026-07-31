@@ -181,6 +181,80 @@ find the deadlock or the lifecycle races, because those are _missing_ code and t
 interleavings, and mutation operators only delete and replace what is already written. It is a
 complement to this section, not a substitute for it.
 
+### Two green suites, one broken feature: the wire is a party to the contract
+
+The two sections above are about a test agreeing with the code it was written from. This
+one is what happens when **two** codebases each agree with themselves and disagree with
+each other, and there is nothing in between to notice.
+
+Measured on 2026-07-31. `vault.status` had never sent `defaultProvider`. The renderer's
+`VaultStatus` declared the field, the Vault page read it on every render to mark which
+store new secrets go to, and `vault.SetDefaultProvider` wrote a value nobody could ever
+read back. The page therefore showed two storage providers, neither marked, both
+offering to become the default one of them already was. Found by a user looking at the
+screen; every gate was green, on both sides.
+
+Neither side was under-tested. They were tested **separately**, and each side's tests
+were written from that side's belief about the wire:
+
+- The Go tests decode the result into an anonymous struct naming the two or three fields
+  that test is about. **A field nobody names is a field whose absence nobody notices** —
+  there is no assertion in the language for "and nothing else".
+- The frontend tests mock the client with hand-written fixtures, and those fixtures were
+  written _from the interface_. They contained `defaultProvider` because the renderer
+  wanted it, not because the backend sent it. The mock encoded the wish.
+
+So: **every JSON-RPC result shape is declared once, as a JSON Schema in `contracts/`.**
+The renderer's types are **generated** from it; the Go transport is **validated** against
+it. Not two declarations checked against each other — one declaration that belongs to
+neither party.
+
+```
+                  contracts/vault.status.schema.json
+                                 │
+               ┌─────────────────┴──────────────────┐
+     generated │                                    │ validated
+               ▼                                    ▼
+frontend/src/generated/vault.status.ts     the marshalled Go DTO, and the
+(committed; never hand-edited)             real result off the WebSocket
+```
+
+The two directions are deliberately not symmetric. On the renderer, drift is
+**impossible**: the types are generated and committed, `vault-client.ts` re-exports them
+and declares nothing of its own, so a type that wants a field the wire does not carry
+cannot be written. On the Go side it is **reliably detected** rather than impossible —
+generating Go wire DTOs would either infect the domain types or need a mapping layer, and
+this seam has not earned that. `additionalProperties: false` plus an explicit `required`
+is what makes the check exact in both directions; a schema without both is theatre.
+
+Three checks, and the third is the point:
+
+- `npm run contracts:check` (pre-commit) — the committed generated file still matches the
+  schema.
+- `TestVaultStatus_DTOConformsToContract` — the Go struct marshals to something the schema
+  accepts. Catches field tags, `omitempty`, a nil slice becoming `null`, an enum spelled
+  differently.
+- `TestVaultStatus_OverTheWireConformsToContract` — the **real result, off the real
+  socket**, satisfies the schema. This is the one that would have caught
+  `defaultProvider`. A test that validates a payload the test itself built proves the
+  struct is well-formed, not that the server sends it.
+
+Two things learned by getting them wrong, both within an hour of writing the above:
+
+- **A sample is not a contract.** The first version of `contracts/` was a fully-populated
+  sample response compared by key set. It cannot express types, nullability or enums —
+  changing `autoSealMinutes` from `int` to `string` kept it green. A schema replaced it.
+- **The schema finds things immediately, so write it before you believe the code.** On its
+  first run it caught a second defect: `providers` marshalled as `null` rather than `[]`
+  when no providers are registered, which is the same class as `nocx-25k9.14` and would
+  have thrown on the renderer's first `.map`.
+
+`contracts/` covers `vault.status` today and is filled in **as methods are touched** — a
+method you add or change gets its schema in the same commit (`nocx-bt3w` tracks the
+sweep). See `contracts/README.md` for how to add one. Until a method has a schema its wire
+format is unchecked, and you should assume the two sides disagree, because once they
+demonstrably did.
+
 ### Before you fix anything: find out whether it is already decided or already filed
 
 A bug report is a symptom, not a mandate to start editing. Four checks, in this order,

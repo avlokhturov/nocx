@@ -9,6 +9,7 @@ import {
   RecoveryCodeDialog,
   VaultSection,
 } from './vault'
+import { ToastHost, clearToasts } from './ui/toast'
 import type { VaultClient } from './vault-client'
 import { RpcError } from './dispatcher'
 
@@ -898,11 +899,11 @@ describe('VaultSection', () => {
     return { client, ctrl }
   }
 
-  /** Return the primary button within the top status row. */
+  /** Return the primary button within the state card at the top of the page. */
   function statusRowPrimary(): HTMLElement | null {
-    const row = document.querySelector('.ui-vault-status-row')
-    if (!row) return null
-    return row.querySelector('button[data-variant="primary"]')
+    const card = document.querySelector('.ui-status-card')
+    if (!card) return null
+    return card.querySelector('button[data-variant="primary"]')
   }
 
   // ── Acceptance 1: primary action by state ─────────────────────────
@@ -934,10 +935,10 @@ describe('VaultSection', () => {
     expect(btn!.getAttribute('data-variant')).toBe('primary')
   })
 
-  it('exactly one primary button in status row per state', async () => {
+  it('exactly one primary button in the state card per state', async () => {
     await renderVaultSection(UNINIT_STATUS)
-    let row = document.querySelector('.ui-vault-status-row')
-    expect(row!.querySelectorAll('button[data-variant="primary"]').length).toBe(1)
+    let card = document.querySelector('.ui-status-card')
+    expect(card!.querySelectorAll('button[data-variant="primary"]').length).toBe(1)
     cleanup()
 
     const { client } = mockClient()
@@ -945,8 +946,21 @@ describe('VaultSection', () => {
     const ctrl = createVaultState(client)
     await ctrl.refresh()
     render(() => <VaultSection vaultClient={client} vaultController={ctrl} />)
-    row = document.querySelector('.ui-vault-status-row')
-    expect(row!.querySelectorAll('button[data-variant="primary"]').length).toBe(1)
+    card = document.querySelector('.ui-status-card')
+    expect(card!.querySelectorAll('button[data-variant="primary"]').length).toBe(1)
+  })
+
+  it('the card carries the tone of the state it announces', async () => {
+    await renderVaultSection(UNSEALED_STATUS)
+    expect(document.querySelector('.ui-status-card')!.getAttribute('data-tone')).toBe('ok')
+    cleanup()
+
+    const { client } = mockClient()
+    ;(client.status as ReturnType<typeof vi.fn>).mockResolvedValue(UNINIT_STATUS)
+    const ctrl = createVaultState(client)
+    await ctrl.refresh()
+    render(() => <VaultSection vaultClient={client} vaultController={ctrl} />)
+    expect(document.querySelector('.ui-status-card')!.getAttribute('data-tone')).toBe('warning')
   })
 
   // ── Primary action behavior ───────────────────────────────────────
@@ -978,7 +992,10 @@ describe('VaultSection', () => {
 
   // ── Acceptance 2: store rows with status markers ───────────────────
 
-  it('each store row label appears in the tablist', async () => {
+  // Every store's name and every store's state are on screen together. The
+  // rail this replaced showed one and hid the rest behind a click, so the
+  // store that was not answering was reliably the one not being looked at.
+  it('names every store and states every store, all at once', async () => {
     const status = {
       state: 'unsealed' as const,
       osKeyAvailable: true,
@@ -991,10 +1008,57 @@ describe('VaultSection', () => {
       defaultProvider: 'system',
     }
     await renderVaultSection(status)
-    const tablist = document.querySelector('[role="tablist"]')
-    expect(tablist).toBeTruthy()
-    expect(tablist!.textContent).toContain('System keychain')
-    expect(tablist!.textContent).toContain('Encrypted nocx storage')
+    const rows = document.querySelectorAll('.ui-vault-store')
+    expect(rows.length).toBe(2)
+
+    const text = Array.from(rows).map((r) => r.textContent ?? '')
+    expect(text[0]).toContain('System keychain')
+    expect(text[0]).toContain('is available and answering')
+    expect(text[1]).toContain('Encrypted nocx storage')
+    expect(text[1]).toContain('Not answering')
+  })
+
+  // A name that does not fit is a name the user cannot read. The rail clipped
+  // both of these at 9.5rem, and clipped them silently.
+  it('leaves no store name to be truncated by a fixed-width container', async () => {
+    const status = {
+      state: 'unsealed' as const,
+      osKeyAvailable: true,
+      hasPassphrase: true,
+      autoSealMinutes: 0,
+      providers: [
+        { id: 'system', writable: true, ready: true },
+        { id: 'file', writable: true, ready: true },
+      ],
+      defaultProvider: 'system',
+    }
+    await renderVaultSection(status)
+    const names = Array.from(document.querySelectorAll('.ui-vault-store__name')).map(
+      (n) => n.textContent,
+    )
+    expect(names).toEqual(['System keychain', 'Encrypted nocx storage'])
+    // Nothing in the section is a scroll container, so nothing in it can grow
+    // a scrollbar over a name.
+    expect(document.querySelector('.ui-vault-store [style*="overflow"]')).toBeNull()
+  })
+
+  it('each store carries a status dot toned to its health', async () => {
+    const status = {
+      state: 'unsealed' as const,
+      osKeyAvailable: true,
+      hasPassphrase: true,
+      autoSealMinutes: 0,
+      providers: [
+        { id: 'system', writable: true, ready: true },
+        { id: 'file', writable: true, ready: false, reason: 'locked' },
+      ],
+      defaultProvider: 'system',
+    }
+    await renderVaultSection(status)
+    const tones = Array.from(document.querySelectorAll('.ui-status-dot')).map((d) =>
+      d.getAttribute('data-tone'),
+    )
+    expect(tones).toEqual(['ok', 'error'])
   })
 
   it('unready store identifiable without selecting it', async () => {
@@ -1059,7 +1123,9 @@ describe('VaultSection', () => {
     ).not.toBeNull()
     // Description appears twice (once per field)
     expect(
-      screen.getAllByText('Only available when a passphrase is configured.').length,
+      screen.getAllByText(
+        'This vault is held by an OS key alone, so there is no passphrase to change or recover.',
+      ).length,
     ).toBeGreaterThanOrEqual(1)
   })
 
@@ -1081,7 +1147,9 @@ describe('VaultSection', () => {
     expect(
       screen.getByRole('button', { name: 'Reissue recovery code' }).getAttribute('disabled'),
     ).not.toBeNull()
-    expect(screen.getAllByText('Protection is not set up yet.').length).toBeGreaterThanOrEqual(1)
+    expect(
+      screen.getAllByText('Set up protection first; there is nothing to change yet.').length,
+    ).toBeGreaterThanOrEqual(1)
   })
 
   it('protection actions disabled on sealed with explanation', async () => {
@@ -1092,27 +1160,42 @@ describe('VaultSection', () => {
     expect(
       screen.getByRole('button', { name: 'Reissue recovery code' }).getAttribute('disabled'),
     ).not.toBeNull()
-    expect(screen.getAllByText('Vault is locked.').length).toBeGreaterThanOrEqual(1)
+    expect(
+      screen.getAllByText('Unlock the vault to change how it is protected.').length,
+    ).toBeGreaterThanOrEqual(1)
   })
 
-  // ── Lock now button in Protection section ─────────────────────────
+  // ── Locking is offered once, by the state card ────────────────────
+  // There used to be two "Lock now" buttons — the card's and a disabled one in
+  // Protection with "Vault is locked." underneath it. A control that cannot
+  // run is not information; the card already says the state.
 
-  it('Lock now disabled when sealed with explanation', async () => {
+  it('offers Lock now exactly once, and only while the vault is unlocked', async () => {
+    await renderVaultSection(UNSEALED_STATUS)
+    const enabled = screen
+      .getAllByText('Lock now')
+      .filter((el) => el.tagName === 'BUTTON' && !el.hasAttribute('disabled'))
+    expect(enabled.length).toBe(1)
+    expect(enabled[0].closest('.ui-status-card')).not.toBeNull()
+  })
+
+  it('does not offer Lock now at all when the vault is already locked', async () => {
     await renderVaultSection(SEALED_STATUS)
-    const lockNowBtns = screen.getAllByText('Lock now').filter((el) => el.tagName === 'BUTTON')
-    for (const btn of lockNowBtns) {
-      expect(btn.getAttribute('disabled')).not.toBeNull()
-    }
-    expect(screen.getAllByText('Vault is locked.').length).toBeGreaterThanOrEqual(1)
+    expect(screen.queryAllByText('Lock now').filter((el) => el.tagName === 'BUTTON')).toEqual([])
   })
 
-  it('Lock now disabled when uninitialized with explanation', async () => {
+  it('does not offer Lock now at all when protection is not set up', async () => {
     await renderVaultSection(UNINIT_STATUS)
-    const lockNowBtns = screen.getAllByText('Lock now').filter((el) => el.tagName === 'BUTTON')
-    for (const btn of lockNowBtns) {
-      expect(btn.getAttribute('disabled')).not.toBeNull()
-    }
-    expect(screen.getAllByText('Protection is not set up yet.').length).toBeGreaterThanOrEqual(1)
+    expect(screen.queryAllByText('Lock now').filter((el) => el.tagName === 'BUTTON')).toEqual([])
+  })
+
+  // The reason the protection controls are unavailable is stated for the
+  // section, once — not repeated under every control the state disabled.
+  it('states why protection cannot be changed exactly once', async () => {
+    await renderVaultSection(SEALED_STATUS)
+    const stated = screen.getAllByText('Unlock the vault to change how it is protected.')
+    expect(stated.length).toBe(1)
+    expect(stated[0].classList.contains('ui-page-section__desc')).toBe(true)
   })
   // ── Auto-lock select ──────────────────────────────────────────────
 
@@ -1158,9 +1241,60 @@ describe('VaultSection', () => {
 
   // ── Default provider ("Store new secrets here") ───────────────────
 
-  it('default store shows "Storing new secrets here" text', async () => {
+  it('the default store is marked, and is not offered the button to become one', async () => {
     await renderVaultSection(UNSEALED_STATUS)
-    expect(screen.getByText('Storing new secrets here')).toBeTruthy()
+    const row = document.querySelector('.ui-vault-store')!
+    expect(row.querySelector('.ui-badge')!.textContent).toBe('New secrets go here')
+    expect(Array.from(row.querySelectorAll('button')).map((b) => b.textContent)).not.toContain(
+      'Store new secrets here',
+    )
+  })
+
+  // A store that is not answering cannot be told to take new secrets: the write
+  // would fail at the moment the user saves a password, which is the worst
+  // moment to find out. Measured on a machine with no Secret Service, where the
+  // action was enabled on the store that had just reported no-service.
+  it('refuses to offer an unreachable store as the place for new secrets', async () => {
+    const status = {
+      state: 'unsealed' as const,
+      osKeyAvailable: false,
+      hasPassphrase: true,
+      autoSealMinutes: 0,
+      providers: [
+        { id: 'system', writable: true, ready: false, reason: 'no-service' },
+        { id: 'file', writable: true, ready: true },
+      ],
+      defaultProvider: 'file',
+    }
+    await renderVaultSection(status)
+
+    const btn = screen
+      .getAllByText('Store new secrets here')
+      .find((el) => el.tagName === 'BUTTON') as HTMLButtonElement
+    expect(btn).toBeTruthy()
+    expect(btn.hasAttribute('disabled')).toBe(true)
+    // It is not a ghost. A control that decides where every future password
+    // lands has to look like something you press.
+    expect(btn.getAttribute('data-variant')).toBe('default')
+  })
+
+  it('offers a reachable read-only store nothing either', async () => {
+    const status = {
+      state: 'unsealed' as const,
+      osKeyAvailable: false,
+      hasPassphrase: true,
+      autoSealMinutes: 0,
+      providers: [
+        { id: 'system', writable: false, ready: true },
+        { id: 'file', writable: true, ready: true },
+      ],
+      defaultProvider: 'file',
+    }
+    await renderVaultSection(status)
+    const btn = screen
+      .getAllByText('Store new secrets here')
+      .find((el) => el.tagName === 'BUTTON') as HTMLButtonElement
+    expect(btn.hasAttribute('disabled')).toBe(true)
   })
 
   it('non-default store shows Store new secrets here button', async () => {
@@ -1256,13 +1390,41 @@ describe('VaultSection', () => {
     expect(bodyText).not.toMatch(/sec:v1:/)
   })
 
-  // ── Top description sentence ──────────────────────────────────────
+  // ── The state card says what the state means ──────────────────────
+  // Not one sentence about the page for every state, which said nothing about
+  // the state the user is actually in.
 
-  it('shows description sentence at top', async () => {
-    await renderVaultSection(UNSEALED_STATUS)
-    expect(
-      screen.getByText('nocx protects passwords and key passphrases saved for your connections.'),
-    ).toBeTruthy()
+  it('the card explains what being locked means for the user', async () => {
+    await renderVaultSection(SEALED_STATUS)
+    const card = document.querySelector('.ui-status-card')!
+    expect(card.querySelector('.ui-status-card__title')!.textContent).toBe('Vault is locked')
+    expect(card.querySelector('.ui-status-card__desc')!.textContent).toContain(
+      'stay encrypted until you unlock',
+    )
+  })
+
+  it('the card explains what being unlocked means, and when it will lock again', async () => {
+    const { client } = mockClient()
+    ;(client.status as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ...UNSEALED_STATUS,
+      autoSealMinutes: 15,
+    })
+    const ctrl = createVaultState(client)
+    await ctrl.refresh()
+    render(() => <VaultSection vaultClient={client} vaultController={ctrl} />)
+    const card = document.querySelector('.ui-status-card')!
+    expect(card.querySelector('.ui-status-card__title')!.textContent).toBe('Vault is unlocked')
+    expect(card.querySelector('.ui-status-card__desc')!.textContent).toContain(
+      'lock again after 15 minutes idle',
+    )
+  })
+
+  it('the card says protection is missing before it says anything else', async () => {
+    await renderVaultSection(UNINIT_STATUS)
+    const card = document.querySelector('.ui-status-card')!
+    expect(card.querySelector('.ui-status-card__title')!.textContent).toBe(
+      'Protection is not set up yet',
+    )
   })
 
   // ── Test button ───────────────────────────────────────────────────
@@ -1271,5 +1433,99 @@ describe('VaultSection', () => {
     await renderVaultSection(UNSEALED_STATUS)
     const testButtons = screen.getAllByText('Test').filter((el) => el.tagName === 'BUTTON')
     expect(testButtons.length).toBeGreaterThan(0)
+  })
+
+  // Pressing Test on a store that was already failing used to change exactly
+  // one line of small print — the timestamp — and nothing else, because the dot
+  // and the sentence only move when the answer moves, and the common case for a
+  // Test press is that it does not. The button read as broken. It has to say
+  // what it found, every time.
+  /** Renders the section with the toast overlay the app mounts, so a test can
+   *  see what the user would see rather than what the store holds. */
+  async function renderWithToasts(mockStatus: object) {
+    clearToasts()
+    const { client } = mockClient()
+    ;(client.status as ReturnType<typeof vi.fn>).mockResolvedValue(mockStatus)
+    const ctrl = createVaultState(client)
+    await ctrl.refresh()
+    render(() => (
+      <>
+        <VaultSection vaultClient={client} vaultController={ctrl} />
+        <ToastHost />
+      </>
+    ))
+    return { client, ctrl }
+  }
+
+  it('Test says what the store answered, not merely when it was asked', async () => {
+    const status = {
+      state: 'unsealed' as const,
+      osKeyAvailable: false,
+      hasPassphrase: true,
+      autoSealMinutes: 0,
+      providers: [{ id: 'system', writable: true, ready: false, reason: 'no-service' }],
+      defaultProvider: null,
+    }
+    await renderWithToasts(status)
+
+    const testBtn = screen.getAllByText('Test').find((el) => el.tagName === 'BUTTON')!
+    fireEvent.click(testBtn)
+
+    await vi.waitFor(() => {
+      const toast = document.querySelector('.ui-toast')
+      expect(toast).toBeTruthy()
+      expect(toast!.getAttribute('data-level')).toBe('danger')
+      expect(toast!.textContent).toContain('No system keyring available')
+    })
+  })
+
+  it('Test reports success on a store that answers', async () => {
+    await renderWithToasts(UNSEALED_STATUS)
+
+    const testBtn = screen.getAllByText('Test').find((el) => el.tagName === 'BUTTON')!
+    fireEvent.click(testBtn)
+
+    await vi.waitFor(() => {
+      const toast = document.querySelector('.ui-toast')
+      expect(toast).toBeTruthy()
+      expect(toast!.getAttribute('data-level')).toBe('success')
+      expect(toast!.textContent).toContain('is available and answering')
+    })
+  })
+
+  // ── Diagnostics values are badges ─────────────────────────────────
+
+  it('states every diagnostics value as a badge, toned to what it means', async () => {
+    const status = {
+      state: 'unsealed' as const,
+      osKeyAvailable: false,
+      hasPassphrase: true,
+      autoSealMinutes: 0,
+      providers: [
+        { id: 'system', writable: true, ready: false, reason: 'no-service' },
+        { id: 'file', writable: true, ready: true },
+      ],
+      defaultProvider: 'file',
+    }
+    await renderVaultSection(status)
+    const details = document.querySelector('details.ui-vault-diagnostics')!
+
+    const badges = Array.from(details.querySelectorAll('.ui-badge')).map((b) => [
+      b.textContent,
+      b.getAttribute('data-tone'),
+    ])
+    expect(badges).toContainEqual(['unsealed', 'success'])
+    expect(badges).toContainEqual(['Not available', 'neutral'])
+    expect(badges).toContainEqual(['Not ready', 'danger'])
+    expect(badges).toContainEqual(['Ready', 'success'])
+    // The raw reason code, verbatim — this is the line that goes in a bug
+    // report, so it must not be reworded into a sentence here.
+    expect(badges).toContainEqual(['no-service', 'danger'])
+  })
+
+  it('does not set the diagnostics block below the page type size', async () => {
+    await renderVaultSection(UNSEALED_STATUS)
+    const details = document.querySelector('details.ui-vault-diagnostics')!
+    expect((details as HTMLElement).style.fontSize).toBe('')
   })
 })
