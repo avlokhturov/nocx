@@ -71,48 +71,7 @@ func (r *Resolver) Resolve(profileID string) (host string, cfg *ssh.ConnectConfi
 		return "", nil, err
 	}
 	visited := map[string]bool{profileID: true}
-	cfg, err = r.buildConfig(&prof, visited, nil)
-	if err != nil {
-		return "", nil, err
-	}
-
-	return prof.Options.Host, cfg, nil
-}
-
-// versionOverride names one credential version to resolve instead of the
-// credential's current one. It carries the credential ID as well as the version
-// so the resolver can refuse a profile that turns out to use a different
-// credential, rather than silently applying the override to whatever it finds.
-type versionOverride struct {
-	credentialID string
-	versionID    string
-}
-
-// ResolveWithVersion is Resolve pinned to one explicit credential version. It
-// exists for the rollout probe, which must authenticate with a staged candidate
-// rather than with the version ordinary connections use.
-//
-// The contract that matters is what it does NOT do. If versionID does not exist
-// on the credential, this returns ErrVersionNotFound — it never falls back to
-// the current version. A fallback here would mean a candidate rejection
-// followed by an invisible retry with the working password, which is
-// indistinguishable from password spraying to the host being probed and burns
-// a MaxAuthTries slot the operator did not ask to spend. Callers get an error
-// and decide; the resolver never decides for them.
-//
-// The override applies to the target profile only. A jump host resolves with
-// its own credential's current version: rotating a credential must not change
-// how the bastion in front of it is authenticated.
-func (r *Resolver) ResolveWithVersion(profileID, credentialID, versionID string) (host string, cfg *ssh.ConnectConfig, err error) {
-	if credentialID == "" || versionID == "" {
-		return "", nil, fmt.Errorf("resolve %s: credential id and version id are required", profileID)
-	}
-	prof, err := r.findProfile(profileID)
-	if err != nil {
-		return "", nil, err
-	}
-	visited := map[string]bool{profileID: true}
-	cfg, err = r.buildConfig(&prof, visited, &versionOverride{credentialID: credentialID, versionID: versionID})
+	cfg, err = r.buildConfig(&prof, visited)
 	if err != nil {
 		return "", nil, err
 	}
@@ -136,9 +95,7 @@ func (r *Resolver) findProfile(id string) (profile.SSHProfile, error) {
 
 // buildConfig constructs a ConnectConfig from a profile, handling credential
 // resolution, effective profile inheritance, and jump host recursion.
-// override, when non-nil, names one credential version to use instead of the
-// credential's current one; it is never passed down to a jump host.
-func (r *Resolver) buildConfig(prof *profile.SSHProfile, visited map[string]bool, override *versionOverride) (*ssh.ConnectConfig, error) {
+func (r *Resolver) buildConfig(prof *profile.SSHProfile, visited map[string]bool) (*ssh.ConnectConfig, error) {
 	cfg := &ssh.ConnectConfig{}
 
 	// Resolve effective profile (profile + group inheritance + defaults).
@@ -197,72 +154,19 @@ func (r *Resolver) buildConfig(prof *profile.SSHProfile, visited map[string]bool
 		// via opaque SecretID references (ADR-0011 §2).
 		cfg.Secrets = r.secrets
 
-		// Determine which version to use. Priority: override > pinned > current.
-		// Override is for the rollout probe (ResolveWithVersion).
-		var v profile.CredentialVersion
-		var ok bool
-		var versionErr error
-
-		if override != nil {
-			// ResolveWithVersion path — caller-named version.
-			if credID != override.credentialID {
-				return nil, fmt.Errorf("profile %s uses credential %s, not %s: %w", prof.ID, credID, override.credentialID, ErrCredentialMismatch)
-			}
-			v, ok = cred.Version(override.versionID)
-			if !ok {
-				return nil, fmt.Errorf("credential %s version %s: %w", credID, override.versionID, ErrVersionNotFound)
-			}
-			if v.RetiredAt != nil {
-				return nil, fmt.Errorf("credential %s version %s: %w", credID, override.versionID, profile.ErrVersionRetired)
-			}
-			versionErr = nil
-		} else if prof.PinnedVersionID != "" {
-			// Pinned profile: use the pinned version regardless of retirement.
-			// A pin IS the thing retirement does not break (nocx-383c.4).
-			v, ok = cred.Version(prof.PinnedVersionID)
-			if !ok {
-				return nil, fmt.Errorf("credential %s pinned version %s: %w", credID, prof.PinnedVersionID, ErrVersionNotFound)
-			}
-			// Pinned profiles still resolve even after retirement — that is
-			// the entire purpose of a pin. Do NOT check RetiredAt here.
-			versionErr = nil
-		} else {
-			// Normal path: use the current version.
-			v, ok = cred.Current()
-			if !ok {
-				// Current() returns false when CurrentVersionID is empty,
-				// the version is missing, or the version is retired.
-				// Check which case to give the right error.
-				if cred.CurrentVersionID != "" {
-					if cv, found := cred.Version(cred.CurrentVersionID); found && cv.RetiredAt != nil {
-						return nil, fmt.Errorf("credential %s current version %s: %w", credID, cred.CurrentVersionID, profile.ErrVersionRetired)
-					}
-				}
-				// Fallthrough: version not found or no current set.
-			}
-			versionErr = nil
+		// Publish the credential's record-level secret references onto the
+		// config. One generation of material, held on the record (ADR-0017).
+		if cred.SecretID != "" {
+			cfg.SecretID = credential.SecretID(cred.SecretID)
 		}
-
-		// When Current() returned false and we couldn't find a better error,
-		// proceed without the version (ok will be false).
-		if ok {
-			if v.PasswordSecretID != "" {
-				cfg.SecretID = credential.SecretID(v.PasswordSecretID)
-			}
-			if v.PassphraseSecretID != "" {
-				cfg.PassphraseSecretID = credential.SecretID(v.PassphraseSecretID)
-			}
-			if v.KeyMaterialSecretID != "" {
-				cfg.KeySecretID = credential.SecretID(v.KeyMaterialSecretID)
-			}
-			cfg.CredentialVersionID = v.ID
+		if cred.PassphraseSecretID != "" {
+			cfg.PassphraseSecretID = credential.SecretID(cred.PassphraseSecretID)
 		}
-		_ = versionErr // used for future error enrichment
+		if cred.KeyMaterialSecretID != "" {
+			cfg.KeySecretID = credential.SecretID(cred.KeyMaterialSecretID)
+		}
 	} else {
 		// No credential linked — use inline fields from the profile.
-		if override != nil {
-			return nil, fmt.Errorf("profile %s uses no credential, cannot resolve version %s: %w", prof.ID, override.versionID, ErrCredentialMismatch)
-		}
 		cfg.User = eff.ResolvedOptions.User
 		cfg.AuthMode = string(eff.ResolvedOptions.Auth)
 	}
@@ -280,8 +184,7 @@ func (r *Resolver) buildConfig(prof *profile.SSHProfile, visited map[string]bool
 			return nil, fmt.Errorf("jump host %s: %w", jumpHostID, err)
 		}
 
-		// nil, not override: the bastion keeps its own current version.
-		jumpCfg, err := r.buildConfig(&jumpProf, visited, nil)
+		jumpCfg, err := r.buildConfig(&jumpProf, visited)
 		if err != nil {
 			return nil, fmt.Errorf("jump host %s: %w", jumpHostID, err)
 		}
@@ -346,13 +249,3 @@ func (r *Resolver) resolveProfileHost(host string) string {
 
 // ErrProfileNotFound is returned when a profile or credential ID is not found.
 var ErrProfileNotFound = errors.New("not found")
-
-// ErrVersionNotFound is returned by ResolveWithVersion when the named
-// credential version does not exist. It is deliberately an error rather than a
-// fallback: see the contract on ResolveWithVersion.
-var ErrVersionNotFound = errors.New("credential version not found")
-
-// ErrCredentialMismatch is returned by ResolveWithVersion when the profile does
-// not in fact use the credential the caller named. A rollout that has selected
-// the wrong target must stop rather than probe with somebody else's secret.
-var ErrCredentialMismatch = errors.New("profile does not use the named credential")

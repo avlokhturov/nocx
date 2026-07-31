@@ -135,10 +135,8 @@ func New(opts ...Option) (*App, error) {
 	// and credentials. Used by the import handlers and version transitions.
 	profileSvc := profile.NewProfileService(profileStore)
 
-	// One resolver, two consumers: the connections.test handler and the
-	// rollout runner. They must resolve identically — a rollout that probed
-	// through a differently-configured resolver would prove nothing about
-	// the connection the user will later make.
+	// One resolver, one consumer family: connections.test probes and
+	// ordinary connects resolve identically.
 	resolver := connection.NewResolver(
 		profileStore, profileStore, profileStore, v,
 		connection.WithConfigResolver(sshCfgResolver),
@@ -162,8 +160,7 @@ func New(opts ...Option) (*App, error) {
 
 		transport.WithProbeResultStore(probeResultStore),
 		transport.WithSSHConfigResolver(sshCfgResolver, sshConfigPath),
-		transport.WithVersionSessionRegistry(&versionSessionRegistryAdapter{reg: sess}),
-		transport.WithRolloutRunner(resolver, profileStore),
+
 	}
 	// WithWSAddr set the field and nothing read it, so NOCX_WS_ADDR was accepted
 	// and ignored and the listener always took an ephemeral port. The dev stand
@@ -262,22 +259,4 @@ func (a *proberAdapter) TrustHostKey(ctx context.Context, addr string, key []byt
 	return a.client.TrustHostKey(addr, key)
 }
 
-// versionSessionRegistryAdapter adapts session.Registry to the narrow
-// transport.VersionSessionRegistry interface.
-type versionSessionRegistryAdapter struct {
-	reg *session.Reg
-}
 
-func (a *versionSessionRegistryAdapter) FindByCredentialVersion(credentialID, versionID string) []session.ID {
-	var ids []session.ID
-	for _, s := range a.reg.List() {
-		if s.CredentialID() == credentialID && s.CredentialVersionID() == versionID {
-			ids = append(ids, s.ID())
-		}
-	}
-	return ids
-}
-
-func (a *versionSessionRegistryAdapter) Close(id session.ID) error {
-	return a.reg.Close(id)
-}

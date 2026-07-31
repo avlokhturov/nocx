@@ -481,32 +481,7 @@ var TabPlacement = MustRegisterSelect(SelectSpec{
 	},
 })
 
-// CredentialRotationEnabled gates the staged password rollout — candidate
-// versions, canaries, batched probing and the promotion threshold.
-//
-// Off by default, and the reason is worth recording rather than rediscovering.
-// The whole apparatus exists for a STAGGERED change: hosts take the new
-// password one at a time, so the app has to work out when it is safe to switch.
-// Where a domain controller changes the password centrally, every host starts
-// accepting it at the same moment and there is no window to stage — the machine
-// is answering a question that is not asked.
-//
-// It also has a known gap while it is off the main path: rollout.run takes its
-// target list from the renderer and nothing proves that list is complete, while
-// promotion checks only how many hosts accepted. A short list therefore
-// promotes with hosts unvisited. That is why this is a flag rather than a
-// button somebody might find (nocx-jb20.4).
-var CredentialRotationEnabled = MustRegisterBool(BoolSpec{
-	Key: "credentials.rotationEnabled",
-	// Its own section, so a half-built feature is never mixed in with settings
-	// somebody is expected to use. A reader landing on "Connections" should not
-	// have to work out which of the switches there are provisional.
-	Section:     "Experimental",
-	Label:       "Staged password rollout",
-	Description: "Shows the rollout tools on a credential: stage a new password as a candidate, probe hosts in batches, and promote it once enough have accepted. Only useful when hosts take a new password one at a time — where a domain controller changes it centrally, there is nothing to stage.",
-	DataClass:   PublicConfig,
-	Default:     false,
-})
+
 
 // UITheme controls which colour theme the UI and terminals use.
 // The frontend resolves it to a theme file matching the id; adding a new theme

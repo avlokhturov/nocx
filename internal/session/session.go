@@ -42,14 +42,9 @@ type Config struct {
 	// last used (nocx-uxs5.4). Empty for ad-hoc/local sessions.
 	ProfileID string
 	// CredentialID records the credential this session was opened with.
-	// Used by revocation to find sessions by (credential, version).
+	// Used by revocation to find sessions running that credential.
 	// Empty for sessions with no linked credential (inline auth).
 	CredentialID string
-	// CredentialVersionID records the credential version selected by the
-	// resolver when this session was opened. Used by revocation to find
-	// sessions running a specific version. Empty for sessions with no
-	// credential (inline auth) and for local sessions.
-	CredentialVersionID string
 }
 
 type PTYFactory interface {
@@ -68,10 +63,7 @@ type Session interface {
 	// ProfileID returns the profile ID this session was opened from.
 	// Empty for ad-hoc/local sessions (nocx-uxs5.4).
 	ProfileID() string
-	// CredentialVersionID returns the credential version this session was
-	// opened with. Empty for sessions with no linked credential (inline
-	// auth) and for local/ad-hoc sessions.
-	CredentialVersionID() string
+
 	// CredentialID returns the credential ID this session was opened with.
 	// Empty for sessions with no linked credential (inline auth) and for
 	// local/ad-hoc sessions.
@@ -197,14 +189,13 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 	id := NewID()
 
 	s := &realSession{
-		id:                  id,
-		kind:                cfg.Kind,
-		cwd:                 resolveSessionCwd(cfg.Cwd),
-		profileID:           cfg.ProfileID,
-		credentialID:        cfg.CredentialID,
-		credentialVersionID: cfg.CredentialVersionID,
-		ch:                  ch,
-		log:                 r.log.With("session_id", string(id)),
+		id:           id,
+		kind:         cfg.Kind,
+		cwd:          resolveSessionCwd(cfg.Cwd),
+		profileID:    cfg.ProfileID,
+		credentialID: cfg.CredentialID,
+		ch:           ch,
+		log:          r.log.With("session_id", string(id)),
 	}
 
 	r.mu.Lock()
@@ -354,7 +345,7 @@ type realSession struct {
 	cwd                 string
 	profileID           string
 	credentialID        string
-	credentialVersionID string
+
 	ch                  Channel
 	log                 log.Logger
 	handler             OutputHandler
@@ -368,7 +359,6 @@ func (s *realSession) Cwd() string          { return s.cwd }
 func (s *realSession) ProfileID() string    { return s.profileID }
 func (s *realSession) CredentialID() string { return s.credentialID }
 
-func (s *realSession) CredentialVersionID() string { return s.credentialVersionID }
 
 func (s *realSession) Write(p []byte) (int, error) {
 	return s.ch.Write(p)

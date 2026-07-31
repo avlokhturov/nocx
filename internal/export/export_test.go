@@ -3,7 +3,6 @@ package export_test
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -120,120 +119,23 @@ func (r *fakeCredRepo) UpdateCredential(id string, p profile.CredentialPatch) (p
 	return profile.Credential{}, profile.ErrCredentialNotFound
 }
 
-func (r *fakeCredRepo) UpdateCurrentVersionRefs(id, passwordSecretID, passphraseSecretID string) error {
+func (r *fakeCredRepo) UpdateSecretRefs(id, passwordSecretID, passphraseSecretID string) error {
 	for i, e := range r.creds {
 		if e.ID == id {
-			if len(e.Versions) == 0 {
-				r.creds[i].SecretID = passwordSecretID
-				r.creds[i].PassphraseSecretID = passphraseSecretID
-			} else {
-				for j := range r.creds[i].Versions {
-					if r.creds[i].Versions[j].ID == r.creds[i].CurrentVersionID {
-						r.creds[i].Versions[j].PasswordSecretID = passwordSecretID
-						r.creds[i].Versions[j].PassphraseSecretID = passphraseSecretID
-						break
-					}
-				}
-			}
+			r.creds[i].SecretID = passwordSecretID
+			r.creds[i].PassphraseSecretID = passphraseSecretID
 			return nil
 		}
 	}
 	return profile.ErrCredentialNotFound
 }
 
-func (r *fakeCredRepo) UpdateCurrentVersionKeyMaterial(id, keyMaterialSecretID, keyFingerprint string) error {
+func (r *fakeCredRepo) UpdateKeyMaterial(id, keyMaterialSecretID, keyFingerprint string) error {
 	for i, e := range r.creds {
 		if e.ID == id {
-			if len(e.Versions) == 0 {
-				r.creds[i].KeyMaterialSecretID = keyMaterialSecretID
-			} else {
-				for j := range r.creds[i].Versions {
-					if r.creds[i].Versions[j].ID == r.creds[i].CurrentVersionID {
-						r.creds[i].Versions[j].KeyMaterialSecretID = keyMaterialSecretID
-						r.creds[i].Versions[j].KeyFingerprint = keyFingerprint
-						break
-					}
-				}
-			}
-			return nil
-		}
-	}
-	return profile.ErrCredentialNotFound
-}
-
-func (r *fakeCredRepo) AppendCredentialVersion(id, passwordSecretID, passphraseSecretID string) error {
-	for i, e := range r.creds {
-		if e.ID == id {
-			if len(e.Versions) == 0 {
-				r.creds[i].Versions = []profile.CredentialVersion{
-					{
-						ID:                 "v1",
-						PasswordSecretID:   e.SecretID,
-						PassphraseSecretID: e.PassphraseSecretID,
-					},
-				}
-				r.creds[i].CurrentVersionID = "v1"
-				r.creds[i].SecretID = ""
-				r.creds[i].PassphraseSecretID = ""
-			}
-			nextID := fmt.Sprintf("v%d", len(r.creds[i].Versions)+1)
-			r.creds[i].Versions = append(r.creds[i].Versions, profile.CredentialVersion{
-				ID:                 nextID,
-				PasswordSecretID:   passwordSecretID,
-				PassphraseSecretID: passphraseSecretID,
-			})
-			r.creds[i].CurrentVersionID = nextID
-			return nil
-		}
-	}
-	return profile.ErrCredentialNotFound
-}
-
-func (r *fakeCredRepo) SetCandidateVersion(id, passwordSecretID, passphraseSecretID string) error {
-	for i, e := range r.creds {
-		if e.ID == id {
-			if e.CandidateVersionID != "" {
-				return profile.ErrCandidateExists
-			}
-			if len(e.Versions) == 0 {
-				r.creds[i].Versions = []profile.CredentialVersion{
-					{
-						ID:                 "v1",
-						PasswordSecretID:   e.SecretID,
-						PassphraseSecretID: e.PassphraseSecretID,
-					},
-				}
-				r.creds[i].CurrentVersionID = "v1"
-				r.creds[i].SecretID = ""
-				r.creds[i].PassphraseSecretID = ""
-			}
-			nextID := fmt.Sprintf("v%d", len(r.creds[i].Versions)+1)
-			r.creds[i].Versions = append(r.creds[i].Versions, profile.CredentialVersion{
-				ID:                 nextID,
-				PasswordSecretID:   passwordSecretID,
-				PassphraseSecretID: passphraseSecretID,
-			})
-			r.creds[i].CandidateVersionID = nextID
-			return nil
-		}
-	}
-	return profile.ErrCredentialNotFound
-}
-
-func (r *fakeCredRepo) ClearCandidateVersion(id string) error {
-	for i, e := range r.creds {
-		if e.ID == id {
-			if e.CandidateVersionID == "" {
-				return nil
-			}
-			remaining := make([]profile.CredentialVersion, 0, len(e.Versions)-1)
-			for _, v := range r.creds[i].Versions {
-				if v.ID != e.CandidateVersionID {
-					remaining = append(remaining, v)
-				}
-			}
-			r.creds[i].Versions = remaining
-			r.creds[i].CandidateVersionID = ""
+			r.creds[i].KeyMaterialSecretID = keyMaterialSecretID
+			r.creds[i].KeyFingerprint = keyFingerprint
+			r.creds[i].KeyPath = ""
 			return nil
 		}
 	}
@@ -261,38 +163,10 @@ func (r *fakeCredRepo) ClearSecretReferences(secretID string) error {
 		}
 		if c.KeyMaterialSecretID == secretID {
 			c.KeyMaterialSecretID = ""
-		}
-		for j := range c.Versions {
-			if c.Versions[j].PasswordSecretID == secretID {
-				c.Versions[j].PasswordSecretID = ""
-			}
-			if c.Versions[j].PassphraseSecretID == secretID {
-				c.Versions[j].PassphraseSecretID = ""
-			}
-			if c.Versions[j].KeyMaterialSecretID == secretID {
-				c.Versions[j].KeyMaterialSecretID = ""
-				c.Versions[j].KeyFingerprint = ""
-			}
+			c.KeyFingerprint = ""
 		}
 	}
 	return nil
-}
-
-// The version transitions are part of the repository interface but never
-// exercised by export: a backup carries credential records, not rotation
-// state. They are here to satisfy the interface, and each fails loudly rather
-// than returning a zero value, so an export path that starts calling one is a
-// test failure instead of a silent no-op.
-func (r *fakeCredRepo) PromoteVersion(id string) (profile.Credential, error) {
-	return profile.Credential{}, fmt.Errorf("PromoteVersion(%q): export does not promote versions", id)
-}
-
-func (r *fakeCredRepo) RetireVersion(id, versionID string) error {
-	return fmt.Errorf("RetireVersion(%q, %q): export does not retire versions", id, versionID)
-}
-
-func (r *fakeCredRepo) UnretireVersion(id, versionID string) error {
-	return fmt.Errorf("UnretireVersion(%q, %q): export does not unretire versions", id, versionID)
 }
 
 var (
@@ -302,11 +176,11 @@ var (
 )
 
 func makeCredential(t *testing.T, name, username, auth string) profile.Credential {
-	t.Helper()
 	secretID, err := vault.MintReferenceForTest(vault.ProviderFile)
 	if err != nil {
 		t.Fatalf("MintReferenceForTest: %v", err)
 	}
+
 	passphraseSecretID, err := vault.MintReferenceForTest(vault.ProviderFile)
 	if err != nil {
 		t.Fatalf("MintReferenceForTest: %v", err)

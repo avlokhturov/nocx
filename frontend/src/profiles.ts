@@ -68,13 +68,7 @@ export interface ProfileGroup {
   icon?: string
 }
 
-export interface CredentialVersion {
-  id: string
-  auth?: AuthMode
-  keyFingerprint?: string
-  created?: string
-  retiredAt?: string | null
-}
+
 
 // Credential is a reusable authentication identity (nocx-УЗ).
 // Stored separately from connections so multiple connections can share it.
@@ -97,10 +91,6 @@ export interface Credential {
    * The fingerprint of the stored key. Present when hasKeyMaterial is true.
    */
   keyFingerprint?: string
-  // Version tracking (wave 8 — rollouts)
-  versions?: CredentialVersion[]
-  currentVersionId?: string
-  candidateVersionId?: string
 }
 
 // TreeNode is a ProfileGroup with its children resolved — the output of
@@ -455,50 +445,6 @@ export class ProfileClient {
     return this.call('credentials.usage', {})
   }
 
-  // ── Rollout and version methods (wave 8 — nocx-383c.5) ─────────────
-
-  /** credentials.stagePassword — stage a candidate password without affecting current. */
-  stagePassword(credentialId: string, password: string): Promise<boolean> {
-    return this.call('credentials.stagePassword', { credentialId, password })
-  }
-
-  /** credentials.discardCandidate — remove the staged candidate version. */
-  discardCandidate(credentialId: string): Promise<boolean> {
-    return this.call('credentials.discardCandidate', { credentialId })
-  }
-
-  /** rollout.run — run a rollout to probe endpoints with the candidate version. */
-  rolloutRun(params: RolloutRunParams): Promise<RolloutRunResult> {
-    return this.call('rollout.run', params)
-  }
-
-  /** versions.impact — preview what a retire/revoke would affect. */
-  versionImpact(credentialId: string, versionId: string): Promise<VersionImpactResult> {
-    return this.call('versions.impact', { credentialId, versionId })
-  }
-
-  /** versions.promote — promote the candidate to current, gated by a threshold. */
-  versionPromote(credentialId: string, threshold: PromoteThreshold): Promise<VersionPromoteResult> {
-    return this.call('versions.promote', { credentialId, threshold })
-  }
-
-  /** versions.retire — retire a version, optionally draining existing sessions. */
-  versionRetire(
-    credentialId: string,
-    versionId: string,
-    drainExisting: boolean,
-  ): Promise<VersionActionResult> {
-    return this.call('versions.retire', { credentialId, versionId, drainExisting })
-  }
-  /** versions.revoke — immediately revoke a version, closing all sessions. */
-  versionRevoke(credentialId: string, versionId: string): Promise<VersionActionResult> {
-    return this.call('versions.revoke', { credentialId, versionId })
-  }
-
-  // ── Effective profile resolution (profiles.effective / profiles.patch) ──
-
-  // ── Session and probe methods (wave 6 — nocx-uxs5) ─────────────────────
-
   /** sessions.status — live + last-used state for a batch of profile IDs. */
   sessionStatus(profileIds: string[]): Promise<{ statuses: Record<string, SessionStatus> }> {
     return this.call('sessions.status', { profileIds })
@@ -693,107 +639,7 @@ export interface ProfileRef {
   groupName?: string
 }
 
-// ── Rollout and version types (wave 8 — nocx-383c.5) ────────────────────
 
-/** One version of a credential's secret material. */
-
-/** Threshold for promoting a candidate version. */
-export interface PromoteThreshold {
-  minAccepted: number
-}
-
-/** Evidence measured during promotion threshold validation. */
-export interface PromoteEvidence {
-  accepted: number
-  total: number
-}
-
-/** Result from versions.promote — carries the evidence measured. */
-export interface VersionPromoteResult {
-  versionId: string
-  evidence: PromoteEvidence
-}
-
-/** Result from versions.retire / versions.revoke. */
-export interface VersionActionResult {
-  versionId: string
-  retired: boolean
-  sessionsClosed: number
-}
-
-export interface SessionRef {
-  sessionId: string
-  profileId: string
-  profileName: string
-}
-
-/**
- * A profile named by versions.impact. Deliberately NOT ProfileRef: that type
- * carries `source` provenance which versions.impact does not send, so reusing
- * it would let the compiler promise a field that arrives undefined.
- */
-export interface ImpactProfileRef {
-  profileId: string
-  profileName: string
-}
-
-/** Result from versions.impact — preview the blast radius of a transition. */
-export interface VersionImpactResult {
-  versionId: string
-  isCurrent: boolean
-  isCandidate: boolean
-  retired: boolean
-  liveSessions: SessionRef[]
-  pinnedProfiles: ImpactProfileRef[]
-  profilesUsing: ImpactProfileRef[]
-}
-
-/** Params for rollout.run. */
-export interface RolloutRunParams {
-  credentialId: string
-  versionId: string
-  targetIds: string[]
-  canaryIds?: string[]
-  batchSize?: number
-  globalConcurrency?: number
-  bastionConcurrency?: number
-}
-
-/** One endpoint result from a rollout run. */
-export interface EndpointResult {
-  profileId: string
-  endpoint: string
-  bastion?: string
-  username: string
-  authPolicy?: string
-  fingerprint?: string
-  outcome: ProbeOutcome
-  detail?: string
-  timestamp: string
-}
-
-/** A target excluded from the rollout with a reason. */
-export interface Exclusion {
-  profileId: string
-  endpoint: string
-  reason: string
-}
-
-/** A target not attempted during the rollout. */
-export interface NotAttempted {
-  profileId: string
-  endpoint: string
-}
-
-/** Result from rollout.run. */
-export interface RolloutRunResult {
-  status: string
-  probed?: EndpointResult[]
-  excluded?: Exclusion[]
-  notAttempted?: NotAttempted[]
-  startedAt: string
-  completedAt?: string
-}
 
 /**
  * Closed-enum outcome from connections.test. Derived from the generated

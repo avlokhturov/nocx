@@ -13,7 +13,6 @@ func testIdentity(seq int) ProbeResultIdentity {
 	return ProbeResultIdentity{
 		Endpoint:           "host.example.com:22",
 		HostKeyFingerprint: "SHA256:testfingerprint",
-		CredentialVersion:  "v1",
 		Username:           "testuser",
 		AuthPolicy:         "auto",
 		Timestamp:          time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC),
@@ -24,12 +23,13 @@ func altIdentity(seq int) ProbeResultIdentity {
 	return ProbeResultIdentity{
 		Endpoint:           "other.example.com:2222",
 		HostKeyFingerprint: "SHA256:otherfp",
-		CredentialVersion:  "v2",
 		Username:           "admin",
 		AuthPolicy:         "password",
 		Timestamp:          time.Date(2026, 7, 29, 13, 0, 0, 0, time.UTC),
 	}
 }
+
+
 
 // ---------------------------------------------------------------------------
 // Store and Lookup
@@ -97,24 +97,6 @@ func TestProbeResultStore_Lookup_WrongFingerprint(t *testing.T) {
 	got := s.Lookup(id, rec.ConfigMtime, rec.GroupChain)
 	if got != nil {
 		t.Fatal("expected nil for different host key fingerprint")
-	}
-}
-
-func TestProbeResultStore_Lookup_WrongCredentialVersion(t *testing.T) {
-	s := NewProbeResultStore()
-	rec := ProbeResultRecord{
-		Identity:    testIdentity(0),
-		Outcome:     OutcomeAccepted,
-		ConfigMtime: time.Date(2026, 7, 29, 10, 0, 0, 0, time.UTC),
-		GroupChain:  []string{"g:1"},
-	}
-	s.Store(rec)
-
-	id := testIdentity(0)
-	id.CredentialVersion = "v3"
-	got := s.Lookup(id, rec.ConfigMtime, rec.GroupChain)
-	if got != nil {
-		t.Fatal("expected nil for different credential version")
 	}
 }
 
@@ -512,9 +494,9 @@ func TestProbeResultStore_ExportImport_Multiple(t *testing.T) {
 
 func TestProbeResultStore_Import_SkipsEmptyEndpoint(t *testing.T) {
 	data := `[
-		{"identity": {"endpoint": "h:22", "hostKeyFingerprint": "fp", "credentialVersion": "v1", "username": "u", "authPolicy": "auto", "timestamp": "2026-07-29T12:00:00Z"}, "outcome": "accepted"},
-		{"identity": {"endpoint": "", "hostKeyFingerprint": "", "credentialVersion": "", "username": "", "authPolicy": "", "timestamp": "0001-01-01T00:00:00Z"}, "outcome": "accepted"},
-		{"identity": {"endpoint": "o:99", "hostKeyFingerprint": "fp2", "credentialVersion": "v2", "username": "a", "authPolicy": "pw", "timestamp": "2026-07-29T13:00:00Z"}, "outcome": "rejected"}
+		{"identity": {"endpoint": "h:22", "hostKeyFingerprint": "fp", "username": "u", "authPolicy": "auto", "timestamp": "2026-07-29T12:00:00Z"}, "outcome": "accepted"},
+		{"identity": {"endpoint": "", "hostKeyFingerprint": "", "username": "", "authPolicy": "", "timestamp": "0001-01-01T00:00:00Z"}, "outcome": "accepted"},
+		{"identity": {"endpoint": "o:99", "hostKeyFingerprint": "fp2", "username": "a", "authPolicy": "pw", "timestamp": "2026-07-29T13:00:00Z"}, "outcome": "rejected"}
 	]`
 
 	s := NewProbeResultStore()

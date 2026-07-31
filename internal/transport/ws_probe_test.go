@@ -539,10 +539,9 @@ func TestConnectionsTest_StoresResult(t *testing.T) {
 		WithProfileResolver(&fakeResolver{
 			resolveFn: func(profileID string) (string, *ssh.ConnectConfig, error) {
 				return "host.example.com", &ssh.ConnectConfig{
-					User:                "test",
-					Port:                2222,
-					AuthMode:            "publicKey",
-					CredentialVersionID: "v7",
+					User:     "test",
+					Port:     2222,
+					AuthMode: "publicKey",
 				}, nil
 			},
 		}),
@@ -595,9 +594,6 @@ func TestConnectionsTest_StoresResult(t *testing.T) {
 	}
 	if rec.Identity.AuthPolicy != "publicKey" {
 		t.Errorf("expected auth policy publicKey, got %s", rec.Identity.AuthPolicy)
-	}
-	if rec.Identity.CredentialVersion != "v7" {
-		t.Errorf("expected credential version v7, got %s", rec.Identity.CredentialVersion)
 	}
 	if rec.Identity.Timestamp.IsZero() {
 		t.Errorf("expected non-zero timestamp")

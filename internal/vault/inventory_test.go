@@ -188,15 +188,11 @@ func TestBuildInventory_PassphraseEntry(t *testing.T) {
 
 	inputs := []CredentialInventory{
 		{
-			ID:       "cred:test:1",
-			Username: "deploy",
-			AuthMode: "publicKey",
-			Versions: []CredentialVersionInventory{
-				{
-					PassphraseSecretID: refSys,
-					KeyFingerprint:     "bdc73f37a1b2c3d4e5f6a7b8c9d0e1f2",
-				},
-			},
+			ID:                 "cred:test:1",
+			Username:           "deploy",
+			AuthMode:           "publicKey",
+			PassphraseSecretID: refSys,
+			KeyFingerprint:     "bdc73f37a1b2c3d4e5f6a7b8c9d0e1f2",
 		},
 	}
 
@@ -227,16 +223,12 @@ func TestBuildInventory_PrivateKeyEntryOwnedByCredential(t *testing.T) {
 
 	inputs := []CredentialInventory{
 		{
-			ID:         "cred:test:key",
-			Username:   "root",
-			AuthMode:   "publicKey",
-			UsageCount: 1,
-			Versions: []CredentialVersionInventory{
-				{
-					KeyMaterialSecretID: refSys,
-					KeyFingerprint:      "bdc73f37a1b2c3d4e5f6a7b8c9d0e1f2",
-				},
-			},
+			ID:                  "cred:test:key",
+			Username:            "root",
+			AuthMode:            "publicKey",
+			UsageCount:          1,
+			KeyMaterialSecretID: refSys,
+			KeyFingerprint:      "bdc73f37a1b2c3d4e5f6a7b8c9d0e1f2",
 		},
 	}
 
@@ -371,20 +363,19 @@ func TestBuildInventory_MalformedRefSkipped(t *testing.T) {
 	}
 }
 
-func TestBuildInventory_DedupReferencesAcrossVersions(t *testing.T) {
+func TestBuildInventory_DedupReferences(t *testing.T) {
 	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
 	mustSetup(t, v, "test-pass")
 	defer v.Close()
 
 	inputs := []CredentialInventory{
 		{
-			ID:       "cred:test:1",
+			ID:       "cred:test:dedup",
 			Username: "root",
 			AuthMode: "password",
-			Versions: []CredentialVersionInventory{
-				{PasswordSecretID: refSys},
-				{PasswordSecretID: refSys}, // same ref carried forward
-			},
+			// Same ref on two record-level fields — carried forward.
+			SecretID:           refSys,
+			PassphraseSecretID: refSys,
 		},
 	}
 
@@ -473,7 +464,7 @@ func TestBuildInventory_RealFileProvider(t *testing.T) {
 	}
 }
 
-func TestBuildInventory_LegacyAndVersionRefsCombined(t *testing.T) {
+func TestBuildInventory_RecordLevelRefsCombined(t *testing.T) {
 	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
 	mustSetup(t, v, "test-pass")
 	defer v.Close()
@@ -484,15 +475,13 @@ func TestBuildInventory_LegacyAndVersionRefsCombined(t *testing.T) {
 
 	inputs := []CredentialInventory{
 		{
-			ID:                 "cred:mixed:1",
-			Username:           "mixed",
-			AuthMode:           "password",
-			SecretID:           refA, // legacy
-			PassphraseSecretID: refB, // legacy
-			Versions: []CredentialVersionInventory{
-				{PasswordSecretID: refA}, // same as legacy — dedup
-				{PassphraseSecretID: refC, KeyFingerprint: "abcdef1234567890abcdef1234567890"},
-			},
+			ID:                  "cred:mixed:1",
+			Username:            "mixed",
+			AuthMode:            "password",
+			SecretID:            refA,
+			PassphraseSecretID:  refB,
+			KeyMaterialSecretID: refC,
+			KeyFingerprint:      "abcdef1234567890abcdef1234567890",
 		},
 	}
 
@@ -501,7 +490,7 @@ func TestBuildInventory_LegacyAndVersionRefsCombined(t *testing.T) {
 		t.Fatalf("BuildInventory: %v", err)
 	}
 	if len(entries) != 3 {
-		t.Fatalf("expected 3 entries (2 from legacy + 1 from versions, 1 dedup'd), got %d", len(entries))
+		t.Fatalf("expected 3 entries, got %d", len(entries))
 	}
 
 	// Verify all three unique refs are present.
@@ -514,6 +503,9 @@ func TestBuildInventory_LegacyAndVersionRefsCombined(t *testing.T) {
 	}
 	if !seen["key-passphrase:system"] {
 		t.Error("missing key-passphrase entry")
+	}
+	if !seen["private-key:system"] {
+		t.Error("missing private-key entry")
 	}
 }
 

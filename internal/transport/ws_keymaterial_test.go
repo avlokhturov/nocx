@@ -221,18 +221,13 @@ func TestSaveKeyMaterial_Success(t *testing.T) {
 
 	// Verify credential metadata is updated.
 	cred := h.loadCredential(credID)
-	var keyMaterialSecretID string
-	if v, ok := cred.Current(); !ok {
-		t.Fatal("credential has no current version")
-	} else {
-		if v.KeyMaterialSecretID == "" {
-			t.Fatal("key material secret ID not recorded on version")
-		}
-		if v.KeyFingerprint != expectedFP {
-			t.Fatalf("key fingerprint mismatch on version: got %q, want %q", v.KeyFingerprint, expectedFP)
-		}
-		keyMaterialSecretID = v.KeyMaterialSecretID
+	if cred.KeyMaterialSecretID == "" {
+		t.Fatal("key material secret ID not recorded on the credential")
 	}
+	if cred.KeyFingerprint != expectedFP {
+		t.Fatalf("key fingerprint mismatch: got %q, want %q", cred.KeyFingerprint, expectedFP)
+	}
+	keyMaterialSecretID := cred.KeyMaterialSecretID
 
 	// Verify KeyPath is cleared.
 	if cred.KeyPath != "" {
@@ -271,12 +266,11 @@ func TestSaveKeyMaterial_EncryptedKey(t *testing.T) {
 	}
 
 	cred := h.loadCredential(credID)
-	if v, ok := cred.Current(); !ok {
-		t.Fatal("credential has no current version")
-	} else if v.KeyMaterialSecretID == "" {
+	if cred.KeyMaterialSecretID == "" {
 		t.Fatal("key material secret ID not recorded for encrypted key")
-	} else if v.KeyFingerprint != expectedFP {
-		t.Fatalf("key fingerprint mismatch: got %q, want %q", v.KeyFingerprint, expectedFP)
+	}
+	if cred.KeyFingerprint != expectedFP {
+		t.Fatalf("key fingerprint mismatch: got %q, want %q", cred.KeyFingerprint, expectedFP)
 	}
 }
 
@@ -313,7 +307,7 @@ func TestSaveKeyMaterial_RejectsInvalidText(t *testing.T) {
 	}
 	for _, c := range creds {
 		if c.ID == credID {
-			if v, ok := c.Current(); ok && v.KeyMaterialSecretID != "" {
+			if c.KeyMaterialSecretID != "" {
 				t.Fatal("key material was stored despite invalid key text")
 			}
 		}
@@ -364,8 +358,7 @@ func TestDeleteKeyMaterial_Success(t *testing.T) {
 
 	// Get the secret ID before deletion.
 	cred := h.loadCredential(credID)
-	v, _ := cred.Current()
-	secretID := v.KeyMaterialSecretID
+	secretID := cred.KeyMaterialSecretID
 
 	// Delete key material.
 	resp := h.deleteKeyMaterial(credID)
@@ -378,15 +371,12 @@ func TestDeleteKeyMaterial_Success(t *testing.T) {
 
 	// Verify reference is cleared.
 	cred = h.loadCredential(credID)
-	if v, ok := cred.Current(); ok {
-		if v.KeyMaterialSecretID != "" {
-			t.Fatalf("KeyMaterialSecretID should be cleared, got %q", v.KeyMaterialSecretID)
-		}
-		if v.KeyFingerprint != "" {
-			t.Fatalf("KeyFingerprint should be cleared, got %q", v.KeyFingerprint)
-		}
+	if cred.KeyMaterialSecretID != "" {
+		t.Fatalf("KeyMaterialSecretID should be cleared, got %q", cred.KeyMaterialSecretID)
 	}
-
+	if cred.KeyFingerprint != "" {
+		t.Fatalf("KeyFingerprint should be cleared, got %q", cred.KeyFingerprint)
+	}
 	// Verify secret is deleted from vault.
 	exists, err := h.cs.Exists(t.Context(), credential.SecretID(secretID))
 	if err != nil {
@@ -435,17 +425,9 @@ func TestCredentialList_HasKeyMaterialFields(t *testing.T) {
 		t.Fatalf("LoadCredentials: %v", err)
 	}
 
-	// Populate response fields the same way the handler does.
 	for i := range creds {
-		creds[i].SecretID = ""
-		creds[i].PassphraseSecretID = ""
-		creds[i].KeyMaterialSecretID = ""
-		if v, ok := creds[i].Current(); ok {
-			if v.KeyMaterialSecretID != "" {
-				creds[i].HasKeyMaterial = true
-			}
-			creds[i].KeyFingerprint = v.KeyFingerprint
-		}
+		// Populate response fields the same way the handler does.
+		creds[i].HasKeyMaterial = creds[i].KeyMaterialSecretID != ""
 	}
 
 	for _, c := range creds {
@@ -482,8 +464,7 @@ func TestUpdateCredential_KeyPathClearsKeyMaterial(t *testing.T) {
 
 	// Get the vault secret ID before update.
 	cred := h.loadCredential(credID)
-	v, _ := cred.Current()
-	oldSecretID := credential.SecretID(v.KeyMaterialSecretID)
+	oldSecretID := credential.SecretID(cred.KeyMaterialSecretID)
 
 	// Now set KeyPath via credentials.update.
 	newKeyPath := "/home/user/.ssh/other_key"
@@ -508,13 +489,11 @@ func TestUpdateCredential_KeyPathClearsKeyMaterial(t *testing.T) {
 
 	// Verify the persisted credential metadata was cleared.
 	cred = h.loadCredential(credID)
-	if v, ok := cred.Current(); ok {
-		if v.KeyMaterialSecretID != "" {
-			t.Errorf("KeyMaterialSecretID should be cleared, got %q", v.KeyMaterialSecretID)
-		}
-		if v.KeyFingerprint != "" {
-			t.Errorf("KeyFingerprint should be cleared, got %q", v.KeyFingerprint)
-		}
+	if cred.KeyMaterialSecretID != "" {
+		t.Errorf("KeyMaterialSecretID should be cleared, got %q", cred.KeyMaterialSecretID)
+	}
+	if cred.KeyFingerprint != "" {
+		t.Errorf("KeyFingerprint should be cleared, got %q", cred.KeyFingerprint)
 	}
 
 	// Verify the vault secret was deleted.
@@ -559,9 +538,9 @@ func TestSaveKeyPassphrase_RefusesWrongPassphrase(t *testing.T) {
 		t.Fatalf("reason = %q, want invalid-key-passphrase", errResp.Error.Data.Reason)
 	}
 
-	// Nothing was stored: the current version still has no passphrase ref.
+	// Nothing was stored: the credential record still has no passphrase ref.
 	cred := h.loadCredential(credID)
-	if v, ok := cred.Current(); ok && v.PassphraseSecretID != "" {
+	if cred.PassphraseSecretID != "" {
 		t.Fatal("a refused passphrase must not be stored")
 	}
 }
@@ -594,7 +573,7 @@ func TestSaveKeyPassphrase_StoresVerifiedPassphrase(t *testing.T) {
 	}
 
 	cred := h.loadCredential(credID)
-	if v, ok := cred.Current(); !ok || v.PassphraseSecretID == "" {
+	if cred.PassphraseSecretID == "" {
 		t.Fatal("verified passphrase not linked to the credential")
 	}
 }
@@ -625,7 +604,7 @@ func TestSaveKeyPassphrase_StoresWhenNothingToVerifyAgainst(t *testing.T) {
 	}
 
 	cred := h.loadCredential(credID)
-	if v, ok := cred.Current(); !ok || v.PassphraseSecretID == "" {
+	if cred.PassphraseSecretID == "" {
 		t.Fatal("passphrase not linked to the credential")
 	}
 }

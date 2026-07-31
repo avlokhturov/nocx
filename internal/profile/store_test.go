@@ -208,121 +208,12 @@ func TestApplyGroups_EmptySlice(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// PromoteVersion
-// ---------------------------------------------------------------------------
-
-func TestPromoteVersion_NoVersionsError(t *testing.T) {
-	s := newTestStore(t)
-	if err := s.CreateCredential(Credential{
-		ID:                 "cred:test:1",
-		Name:               "test",
-		Username:           "u",
-		Auth:               AuthPassword,
-		SecretID:           "sec:old",
-		CandidateVersionID: "v2", // no Versions list
-	}); err != nil {
-		t.Fatalf("create: %v", err)
-	}
-
-	_, err := s.PromoteVersion("cred:test:1")
-	if err == nil {
-		t.Fatal("PromoteVersion: expected error for credential with no versions, got nil")
-	}
-}
-
-func TestPromoteVersion_NoCandidateError(t *testing.T) {
-	s := newTestStore(t)
-	if err := s.CreateCredential(Credential{
-		ID:       "cred:test:2",
-		Name:     "test",
-		Username: "u",
-		Auth:     AuthPassword,
-		Versions: []CredentialVersion{
-			{ID: "v1", PasswordSecretID: "sec:1"},
-		},
-		CurrentVersionID: "v1",
-	}); err != nil {
-		t.Fatalf("create: %v", err)
-	}
-
-	_, err := s.PromoteVersion("cred:test:2")
-	if err == nil {
-		t.Fatal("PromoteVersion: expected error for no candidate, got nil")
-	}
-}
-
-func TestPromoteVersion_Success(t *testing.T) {
-	s := newTestStore(t)
-	if err := s.CreateCredential(Credential{
-		ID:       "cred:test:3",
-		Name:     "test",
-		Username: "u",
-		Auth:     AuthPassword,
-		Versions: []CredentialVersion{
-			{ID: "v1", PasswordSecretID: "sec:1"},
-			{ID: "v2", PasswordSecretID: "sec:2"},
-		},
-		CurrentVersionID:   "v1",
-		CandidateVersionID: "v2",
-	}); err != nil {
-		t.Fatalf("create: %v", err)
-	}
-
-	cred, err := s.PromoteVersion("cred:test:3")
-	if err != nil {
-		t.Fatalf("PromoteVersion: %v", err)
-	}
-	if cred.CurrentVersionID != "v2" {
-		t.Errorf("CurrentVersionID = %q, want v2", cred.CurrentVersionID)
-	}
-	if cred.CandidateVersionID != "" {
-		t.Errorf("CandidateVersionID = %q, want empty", cred.CandidateVersionID)
-	}
-}
-
-func TestPromoteVersion_PreviousVersionSelectableByPin(t *testing.T) {
-	s := newTestStore(t)
-	if err := s.CreateCredential(Credential{
-		ID:       "cred:test:4",
-		Name:     "test",
-		Username: "u",
-		Auth:     AuthPassword,
-		Versions: []CredentialVersion{
-			{ID: "v1", PasswordSecretID: "sec:1"},
-			{ID: "v2", PasswordSecretID: "sec:2"},
-		},
-		CurrentVersionID:   "v1",
-		CandidateVersionID: "v2",
-	}); err != nil {
-		t.Fatalf("create: %v", err)
-	}
-
-	// Promote v2 to current.
-	cred, err := s.PromoteVersion("cred:test:4")
-	if err != nil {
-		t.Fatalf("PromoteVersion: %v", err)
-	}
-	if cred.CurrentVersionID != "v2" {
-		t.Fatalf("CurrentVersionID = %q, want v2", cred.CurrentVersionID)
-	}
-
-	// v1 should still be in the version list and selectable.
-	v, ok := cred.Version("v1")
-	if !ok {
-		t.Fatal("v1 not found after promotion")
-	}
-	if v.PasswordSecretID != "sec:1" {
-		t.Errorf("v1 PasswordSecretID = %q, want sec:1", v.PasswordSecretID)
-	}
-}
-
 // ClearSecretReferences is the metadata-first half of deleting a secret
-// (ADR-0011 §4): every reference to the secret — record-level and in every
-// version, password, passphrase and key material — is removed in ONE write,
-// so nothing keeps pointing at a store entry that is about to be gone. A
-// single write matters: a loop of per-field setters could fail halfway,
-// leaving some references cleared and the deletion aborted.
+// (ADR-0011 §4): every reference to the secret — record-level password,
+// passphrase and key material — is removed in ONE write, so nothing keeps
+// pointing at a store entry that is about to be gone. A single write matters:
+// a loop of per-field setters could fail halfway, leaving some references
+// cleared and the deletion aborted.
 func TestClearSecretReferences_ClearsEveryFieldInOneWrite(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.CreateCredential(Credential{
@@ -333,28 +224,12 @@ func TestClearSecretReferences_ClearsEveryFieldInOneWrite(t *testing.T) {
 		SecretID:            "sec:record-password",
 		PassphraseSecretID:  "sec:record-passphrase",
 		KeyMaterialSecretID: "sec:record-key",
-		Versions: []CredentialVersion{
-			{
-				ID:                  "v1",
-				PasswordSecretID:    "sec:v1-password",
-				PassphraseSecretID:  "sec:v1-passphrase",
-				KeyMaterialSecretID: "sec:v1-key",
-				KeyFingerprint:      "SHA256:abcd",
-			},
-			{
-				ID:                  "v2",
-				PasswordSecretID:    "sec:v2-password",
-				PassphraseSecretID:  "sec:v2-passphrase",
-				KeyMaterialSecretID: "sec:v2-key",
-				KeyFingerprint:      "SHA256:efgh",
-			},
-		},
-		CurrentVersionID: "v2",
+		KeyFingerprint:      "SHA256:abcd",
 	}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 
-	if err := s.ClearSecretReferences("sec:v2-passphrase"); err != nil {
+	if err := s.ClearSecretReferences("sec:record-passphrase"); err != nil {
 		t.Fatalf("ClearSecretReferences: %v", err)
 	}
 
@@ -366,42 +241,33 @@ func TestClearSecretReferences_ClearsEveryFieldInOneWrite(t *testing.T) {
 		t.Fatalf("credentials = %d, want 1 — clearing a reference must not delete the credential", len(creds))
 	}
 	got := creds[0]
-	if got.SecretID != "sec:record-password" ||
-		got.PassphraseSecretID != "sec:record-passphrase" ||
-		got.KeyMaterialSecretID != "sec:record-key" {
-		t.Errorf("record-level refs changed: %+v", got)
+	if got.SecretID != "sec:record-password" {
+		t.Errorf("password ref changed: %q", got.SecretID)
 	}
-	if got.Versions[0].PasswordSecretID != "sec:v1-password" ||
-		got.Versions[0].PassphraseSecretID != "sec:v1-passphrase" ||
-		got.Versions[0].KeyMaterialSecretID != "sec:v1-key" {
-		t.Errorf("v1 refs changed: %+v", got.Versions[0])
+	if got.PassphraseSecretID != "" {
+		t.Errorf("passphrase ref = %q, want cleared", got.PassphraseSecretID)
 	}
-	if got.Versions[1].PasswordSecretID != "sec:v2-password" {
-		t.Errorf("v2 password ref changed: %q", got.Versions[1].PasswordSecretID)
+	if got.KeyMaterialSecretID != "sec:record-key" {
+		t.Errorf("key ref changed: %q", got.KeyMaterialSecretID)
 	}
-	if got.Versions[1].PassphraseSecretID != "" {
-		t.Errorf("v2 passphrase ref = %q, want cleared", got.Versions[1].PassphraseSecretID)
-	}
-	if got.Versions[1].KeyMaterialSecretID != "sec:v2-key" {
-		t.Errorf("v2 key ref changed: %q", got.Versions[1].KeyMaterialSecretID)
+	if got.KeyFingerprint != "SHA256:abcd" {
+		t.Errorf("fingerprint changed: %q", got.KeyFingerprint)
 	}
 }
 
-// Clearing a key-material reference also clears that version's fingerprint:
+// Clearing a key-material reference also clears the credential's fingerprint:
 // the two describe the same material, and deleteKeyMaterialForCredential
 // already clears them together — the bulk clear must not leave a fingerprint
-// claiming a key the version no longer holds.
+// claiming a key the credential no longer holds.
 func TestClearSecretReferences_KeyMaterialClearsFingerprint(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.CreateCredential(Credential{
-		ID:       "cred:clear:2",
-		Name:     "clear2",
-		Username: "u",
-		Auth:     AuthPublicKey,
-		Versions: []CredentialVersion{
-			{ID: "v1", KeyMaterialSecretID: "sec:key", KeyFingerprint: "SHA256:abcd"},
-		},
-		CurrentVersionID: "v1",
+		ID:                  "cred:clear:2",
+		Name:                "clear2",
+		Username:            "u",
+		Auth:                AuthPublicKey,
+		KeyMaterialSecretID: "sec:key",
+		KeyFingerprint:      "SHA256:abcd",
 	}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -414,7 +280,7 @@ func TestClearSecretReferences_KeyMaterialClearsFingerprint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if got := creds[0].Versions[0]; got.KeyMaterialSecretID != "" || got.KeyFingerprint != "" {
+	if got := creds[0]; got.KeyMaterialSecretID != "" || got.KeyFingerprint != "" {
 		t.Errorf("after clear: key ref = %q, fingerprint = %q — both must be empty", got.KeyMaterialSecretID, got.KeyFingerprint)
 	}
 }
@@ -440,3 +306,5 @@ func TestClearSecretReferences_NoReferenceIsIdempotent(t *testing.T) {
 		t.Fatalf("credentials = %d, want 1", len(creds))
 	}
 }
+
+

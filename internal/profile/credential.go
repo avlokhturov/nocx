@@ -2,9 +2,7 @@ package profile
 
 import (
 	"errors"
-	"fmt"
 	"strings"
-	"time"
 )
 
 // Credential is a reusable authentication identity. It holds identity only —
@@ -33,153 +31,14 @@ type Credential struct {
 	// KeyPath, and setting KeyPath deletes stored key material.
 	KeyMaterialSecretID string `json:"keyMaterialSecretId,omitempty"`
 
-	// HasKeyMaterial is a computed response field: true when the credential's
-	// current version carries stored key material. Set only in list/create/update
-	// responses; never persisted.
+	// HasKeyMaterial is a computed response field: true when the credential
+	// carries stored key material. Set only in list/create/update responses;
+	// never persisted.
 	HasKeyMaterial bool `json:"hasKeyMaterial"`
 	// KeyFingerprint is a computed response field: the SHA256 fingerprint of
-	// the credential's current version key. Set only in list/create/update
-	// responses; never persisted.
+	// the credential's stored key. Set only in list/create/update responses;
+	// never persisted.
 	KeyFingerprint string `json:"keyFingerprint"`
-
-	// Versions holds the history of secret material for this credential.
-	// A record written before versions existed has no Versions list and a
-	// bare SecretID; Current() synthesises one current version from those
-	// fields, so existing stores load with no migration step.
-	Versions []CredentialVersion `json:"versions,omitempty"`
-
-	// CurrentVersionID names the version a normal connection uses.
-	// The resolver publishes its secret references onto the config.
-	CurrentVersionID string `json:"currentVersionId,omitempty"`
-
-	// CandidateVersionID names a version being staged for rollout.
-	// Unused until wave 8 — carried here so the model exists, not built on.
-	CandidateVersionID string `json:"candidateVersionId,omitempty"`
-}
-
-// CredentialVersion is one generation of a credential's secret material. It is
-// typed per auth method: a generic "version with a SecretID" would be
-// password-shaped and would break on the first key rotation.
-type CredentialVersion struct {
-	ID string `json:"id"`
-
-	// Auth is the credential's auth mode at the time this version was created.
-	// Used to validate version consistency against the credential's auth type.
-	Auth AuthMode `json:"auth,omitempty"`
-
-	// PasswordSecretID is the keychain reference for the password.
-	PasswordSecretID string `json:"passwordSecretId,omitempty"`
-	// PassphraseSecretID is the keychain reference for the key passphrase.
-	PassphraseSecretID string `json:"passphraseSecretId,omitempty"`
-	// KeyMaterialSecretID is the keychain reference for the stored private key
-	// material.
-	KeyMaterialSecretID string `json:"keyMaterialSecretId,omitempty"`
-
-	// KeyFingerprint is the SHA256 of the credential's public key, recorded
-	// by the backend when a key is saved. It is the identity of a key version.
-	KeyFingerprint string `json:"keyFingerprint,omitempty"`
-
-	// Created records when this version was created.
-	Created time.Time `json:"created,omitempty"`
-
-	// RetiredAt records when this version was retired. Nil means the version
-	// is active. A retired version is not selected for new connections
-	// (the resolver returns ErrVersionRetired), but existing sessions on it
-	// keep running unless the caller explicitly drains them.
-	RetiredAt *time.Time `json:"retiredAt,omitempty"`
-}
-
-const initialVersionID = "v1"
-
-// ErrVersionRetired is returned when trying to select a retired credential version.
-// The resolver returns this when a profile's credential's current version has been
-// retired, or when a pinned version is retired.
-var ErrVersionRetired = errors.New("credential version is retired")
-
-// ErrThresholdNotMet is returned when promoting a candidate and the probe
-// evidence does not meet the declared threshold.
-type ErrThresholdNotMet struct {
-	Threshold int `json:"threshold"`
-	Accepted  int `json:"accepted"`
-	Total     int `json:"total"`
-}
-
-func (e *ErrThresholdNotMet) Error() string {
-	return fmt.Sprintf("promote threshold not met: need %d accepted, have %d out of %d", e.Threshold, e.Accepted, e.Total)
-}
-
-// Current returns the version a normal connection uses. A record written before
-// versions existed has no list and a bare SecretID; it reads as a single
-// current version, so an existing store loads with no migration step and no
-// window in which a password is unreachable.
-//
-// When the named current version has been retired, Current returns false
-// rather than returning a retired version. The initial state (no Versions
-// list) is never retired and always succeeds.
-func (c Credential) Current() (CredentialVersion, bool) {
-	if len(c.Versions) == 0 {
-		return CredentialVersion{
-			ID:                  initialVersionID,
-			PasswordSecretID:    c.SecretID,
-			PassphraseSecretID:  c.PassphraseSecretID,
-			KeyMaterialSecretID: c.KeyMaterialSecretID,
-		}, true
-	}
-	if c.CurrentVersionID == "" {
-		return CredentialVersion{}, false
-	}
-	v, ok := c.Version(c.CurrentVersionID)
-	if !ok {
-		return CredentialVersion{}, false
-	}
-	if v.RetiredAt != nil {
-		return CredentialVersion{}, false
-	}
-	return v, true
-}
-
-// Candidate returns the staged version being evaluated for rollout, or false
-// when no candidate exists. The candidate never participates in an ordinary
-// connection — only the current version does — and sits here so a rollout
-// probe can authenticate with it explicitly.
-func (c Credential) Candidate() (CredentialVersion, bool) {
-	if c.CandidateVersionID == "" {
-		return CredentialVersion{}, false
-	}
-	return c.Version(c.CandidateVersionID)
-}
-
-// Version returns the version with the given ID, or false if not found.
-func (c Credential) Version(id string) (CredentialVersion, bool) {
-	for _, v := range c.Versions {
-		if v.ID == id {
-			return v, true
-		}
-	}
-	return CredentialVersion{}, false
-}
-
-func (v CredentialVersion) ValidateVersion() error {
-	switch v.Auth {
-	case AuthPassword, AuthKeyboardInteractive:
-		if v.KeyFingerprint != "" {
-			return errors.New("password/keyboard-interactive credential version carries a key fingerprint")
-		}
-		if v.KeyMaterialSecretID != "" {
-			return errors.New("password/keyboard-interactive credential version carries key material")
-		}
-	case AuthPublicKey:
-		// Public key versions may have a key fingerprint, key material,
-		// and/or passphrase.
-	case AuthAgent:
-		if v.PasswordSecretID != "" || v.KeyFingerprint != "" {
-			return errors.New("agent credential version carries keys or passwords")
-		}
-		if v.KeyMaterialSecretID != "" {
-			return errors.New("agent credential version carries key material")
-		}
-	}
-	return nil
 }
 
 // CredentialPatch is a sparse update. A nil field means "not mentioned, leave
@@ -228,16 +87,7 @@ func (c Credential) Validate() error {
 	if strings.TrimSpace(c.Name) == "" {
 		return ErrCredentialNameRequired
 	}
-	for _, v := range c.Versions {
-		if err := v.ValidateVersion(); err != nil {
-			return fmt.Errorf("credential %q version %q: %w", c.Name, v.ID, err)
-		}
-	}
 	return nil
 }
 
-var (
-	ErrCredentialNameRequired = errors.New("credential name is required")
-	ErrCandidateExists        = errors.New("a candidate version already exists; discard it first")
-	ErrVersionNotFound        = errors.New("credential version not found")
-)
+var ErrCredentialNameRequired = errors.New("credential name is required")

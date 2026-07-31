@@ -2,10 +2,7 @@ package connection
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"testing"
-	"time"
 
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/profile"
@@ -143,53 +140,24 @@ func (s *stubProfileStore) UpdateCredential(id string, p profile.CredentialPatch
 	return merged, nil
 }
 
-func (s *stubProfileStore) UpdateCurrentVersionRefs(id, passwordSecretID, passphraseSecretID string) error {
+func (s *stubProfileStore) UpdateSecretRefs(id, passwordSecretID, passphraseSecretID string) error {
 	existing, ok := s.credentials[id]
 	if !ok {
 		return profile.ErrCredentialNotFound
 	}
-	if len(existing.Versions) == 0 {
-		existing.SecretID = passwordSecretID
-		existing.PassphraseSecretID = passphraseSecretID
-	} else {
-		for j := range existing.Versions {
-			if existing.Versions[j].ID == existing.CurrentVersionID {
-				existing.Versions[j].PasswordSecretID = passwordSecretID
-				existing.Versions[j].PassphraseSecretID = passphraseSecretID
-				break
-			}
-		}
-	}
+	existing.SecretID = passwordSecretID
+	existing.PassphraseSecretID = passphraseSecretID
 	s.credentials[id] = existing
 	return nil
 }
 
-func (s *stubProfileStore) UpdateCurrentVersionKeyMaterial(id, keyMaterialSecretID, keyFingerprint string) error {
+func (s *stubProfileStore) UpdateKeyMaterial(id, keyMaterialSecretID, keyFingerprint string) error {
 	existing, ok := s.credentials[id]
 	if !ok {
 		return profile.ErrCredentialNotFound
 	}
-	if len(existing.Versions) == 0 {
-		existing.Versions = []profile.CredentialVersion{{
-			ID:                  "v1",
-			PasswordSecretID:    existing.SecretID,
-			PassphraseSecretID:  existing.PassphraseSecretID,
-			KeyMaterialSecretID: keyMaterialSecretID,
-			KeyFingerprint:      keyFingerprint,
-		}}
-		existing.CurrentVersionID = "v1"
-		existing.SecretID = ""
-		existing.PassphraseSecretID = ""
-		existing.KeyMaterialSecretID = ""
-	} else {
-		for j := range existing.Versions {
-			if existing.Versions[j].ID == existing.CurrentVersionID {
-				existing.Versions[j].KeyMaterialSecretID = keyMaterialSecretID
-				existing.Versions[j].KeyFingerprint = keyFingerprint
-				break
-			}
-		}
-	}
+	existing.KeyMaterialSecretID = keyMaterialSecretID
+	existing.KeyFingerprint = keyFingerprint
 	existing.KeyPath = ""
 	s.credentials[id] = existing
 	return nil
@@ -206,156 +174,18 @@ func (s *stubProfileStore) ClearSecretReferences(secretID string) error {
 		}
 		if c.KeyMaterialSecretID == secretID {
 			c.KeyMaterialSecretID = ""
-		}
-		for j := range c.Versions {
-			if c.Versions[j].PasswordSecretID == secretID {
-				c.Versions[j].PasswordSecretID = ""
-			}
-			if c.Versions[j].PassphraseSecretID == secretID {
-				c.Versions[j].PassphraseSecretID = ""
-			}
-			if c.Versions[j].KeyMaterialSecretID == secretID {
-				c.Versions[j].KeyMaterialSecretID = ""
-				c.Versions[j].KeyFingerprint = ""
-			}
+			c.KeyFingerprint = ""
 		}
 		s.credentials[id] = c
 	}
 	return nil
 }
-
-func (s *stubProfileStore) AppendCredentialVersion(id, passwordSecretID, passphraseSecretID string) error {
-	existing, ok := s.credentials[id]
-	if !ok {
-		return profile.ErrCredentialNotFound
-	}
-	if len(existing.Versions) == 0 {
-		existing.Versions = []profile.CredentialVersion{
-			{
-				ID:                 "v1",
-				PasswordSecretID:   existing.SecretID,
-				PassphraseSecretID: existing.PassphraseSecretID,
-			},
-		}
-		existing.CurrentVersionID = "v1"
-		existing.SecretID = ""
-		existing.PassphraseSecretID = ""
-	}
-	nextID := fmt.Sprintf("v%d", len(existing.Versions)+1)
-	existing.Versions = append(existing.Versions, profile.CredentialVersion{
-		ID:                 nextID,
-		PasswordSecretID:   passwordSecretID,
-		PassphraseSecretID: passphraseSecretID,
-	})
-	existing.CurrentVersionID = nextID
-	s.credentials[id] = existing
-	return nil
-}
-
-func (s *stubProfileStore) SetCandidateVersion(id, passwordSecretID, passphraseSecretID string) error {
-	existing, ok := s.credentials[id]
-	if !ok {
-		return profile.ErrCredentialNotFound
-	}
-	if existing.CandidateVersionID != "" {
-		return profile.ErrCandidateExists
-	}
-	if len(existing.Versions) == 0 {
-		existing.Versions = []profile.CredentialVersion{
-			{
-				ID:                 "v1",
-				PasswordSecretID:   existing.SecretID,
-				PassphraseSecretID: existing.PassphraseSecretID,
-			},
-		}
-		existing.CurrentVersionID = "v1"
-		existing.SecretID = ""
-		existing.PassphraseSecretID = ""
-	}
-	nextID := fmt.Sprintf("v%d", len(existing.Versions)+1)
-	newVersion := profile.CredentialVersion{
-		ID:                 nextID,
-		PasswordSecretID:   passwordSecretID,
-		PassphraseSecretID: passphraseSecretID,
-	}
-	if err := newVersion.ValidateVersion(); err != nil {
-		return err
-	}
-	existing.Versions = append(existing.Versions, newVersion)
-	existing.CandidateVersionID = nextID
-	s.credentials[id] = existing
-	return nil
-}
-
-func (s *stubProfileStore) ClearCandidateVersion(id string) error {
-	existing, ok := s.credentials[id]
-	if !ok {
-		return profile.ErrCredentialNotFound
-	}
-	if existing.CandidateVersionID == "" {
-		return nil // idempotent
-	}
-	remaining := make([]profile.CredentialVersion, 0, len(existing.Versions)-1)
-	for _, v := range existing.Versions {
-		if v.ID != existing.CandidateVersionID {
-			remaining = append(remaining, v)
-		}
-	}
-	existing.Versions = remaining
-	existing.CandidateVersionID = ""
-	s.credentials[id] = existing
-	return nil
-}
-
 func (s *stubProfileStore) DeleteCredential(id string) error {
 	delete(s.credentials, id)
 	return nil
 }
 
-func (s *stubProfileStore) PromoteVersion(id string) (profile.Credential, error) {
-	existing, ok := s.credentials[id]
-	if !ok {
-		return profile.Credential{}, profile.ErrCredentialNotFound
-	}
-	if existing.CandidateVersionID == "" {
-		return profile.Credential{}, fmt.Errorf("%s: no candidate to promote", id)
-	}
-	existing.CurrentVersionID = existing.CandidateVersionID
-	existing.CandidateVersionID = ""
-	s.credentials[id] = existing
-	return existing, nil
-}
 
-func (s *stubProfileStore) RetireVersion(id string, versionID string) error {
-	existing, ok := s.credentials[id]
-	if !ok {
-		return profile.ErrCredentialNotFound
-	}
-	for i, v := range existing.Versions {
-		if v.ID == versionID {
-			now := time.Now()
-			existing.Versions[i].RetiredAt = &now
-			s.credentials[id] = existing
-			return nil
-		}
-	}
-	return profile.ErrVersionNotFound
-}
-
-func (s *stubProfileStore) UnretireVersion(id string, versionID string) error {
-	existing, ok := s.credentials[id]
-	if !ok {
-		return profile.ErrCredentialNotFound
-	}
-	for i, v := range existing.Versions {
-		if v.ID == versionID {
-			existing.Versions[i].RetiredAt = nil
-			s.credentials[id] = existing
-			return nil
-		}
-	}
-	return profile.ErrVersionNotFound
-}
 
 // stubSecretStore implements credential.SecretStore in memory.
 type stubSecretStore struct {
@@ -719,26 +549,22 @@ func TestResolver_CarriesJumpBinding(t *testing.T) {
 	}
 }
 
-// TestResolve_UsesCurrentVersionSecret pins the contract between the credential
-// version model and the connection pool. poolKeyFor (ssh_dial.go:38) keys on
-// cfg.SecretID, so publishing the SELECTED version's reference is what makes
-// moving `current` produce a different pool key — with no change anywhere in
-// internal/ssh. Asserting it here is what stops a later refactor from quietly
-// publishing the record-level SecretID again and re-pooling two versions
-// together.
+// TestResolve_PublishesRecordSecret pins the contract between the credential
+// record and the connection pool. poolKeyFor (ssh_dial.go:38) keys on
+// cfg.SecretID, so publishing the record's reference is what makes a rotation
+// (vault.replaceSecret keeping the id, changing the material) produce the same
+// pool key, while replacing the reference produces a different one — with no
+// change anywhere in internal/ssh. Asserting it here is what stops a later
+// refactor from quietly publishing something else.
 //
 //nolint:errcheck
-func TestResolve_UsesCurrentVersionSecret(t *testing.T) {
+func TestResolve_PublishesRecordSecret(t *testing.T) {
 	ps := newStubProfileStore()
 	ss := newStubSecretStore()
 
 	cred := profile.Credential{
 		ID: "cred:ops:1", Name: "ops", Username: "ops", Auth: profile.AuthPassword,
-		Versions: []profile.CredentialVersion{
-			{ID: "v7", PasswordSecretID: "sec:7"},
-			{ID: "v8", PasswordSecretID: "sec:8"},
-		},
-		CurrentVersionID: "v7",
+		SecretID: "sec:7",
 	}
 	_ = ps.SaveCredential(cred)
 
@@ -755,23 +581,24 @@ func TestResolve_UsesCurrentVersionSecret(t *testing.T) {
 		t.Fatalf("Resolve: %v", err)
 	}
 	if string(cfg.SecretID) != "sec:7" {
-		t.Fatalf("SecretID = %q, want sec:7 (the current version)", cfg.SecretID)
+		t.Fatalf("SecretID = %q, want sec:7 (the record's reference)", cfg.SecretID)
 	}
 	first := cfg.SecretID
 
-	// Move current to v8 and resolve again.
-	cred.CurrentVersionID = "v8"
+	// Replace the record's reference (a new password saved over the old one)
+	// and resolve again.
+	cred.SecretID = "sec:8"
 	_ = ps.SaveCredential(cred)
 
 	_, cfg2, err := r.Resolve(prof.ID)
 	if err != nil {
-		t.Fatalf("Resolve after promotion: %v", err)
+		t.Fatalf("Resolve after replacement: %v", err)
 	}
 	if string(cfg2.SecretID) != "sec:8" {
 		t.Fatalf("SecretID = %q, want sec:8", cfg2.SecretID)
 	}
 	if cfg2.SecretID == first {
-		t.Fatal("promoting a version left the SecretID unchanged; the pool would reuse the old transport")
+		t.Fatal("replacing the reference left the SecretID unchanged; the pool would reuse the old transport")
 	}
 }
 
@@ -903,411 +730,10 @@ func TestResolver_MultiHopCycleDetected(t *testing.T) {
 	}
 }
 
-// --- ResolveWithVersion: what it must refuse -------------------------------
-//
-// These assert the absence of a fallback. The rollout probe authenticates with
-// a staged candidate; if the resolver quietly substituted the current version
-// when the candidate was missing, a probe would spend a second password against
-// the same host and the operator would see a success that proves nothing.
 
-// rotationFixture builds a profile whose credential has a current and a
-// candidate version, each with its own password secret.
-func rotationFixture(t *testing.T) (*stubProfileStore, *stubSecretStore, credential.SecretID, credential.SecretID) {
-	t.Helper()
-	ps := newStubProfileStore()
-	ss := newStubSecretStore()
-
-	curID, err := ss.Create(context.Background(), credential.NewSecret("current-pw"))
-	if err != nil {
-		t.Fatalf("create current: %v", err)
-	}
-	candID, err := ss.Create(context.Background(), credential.NewSecret("candidate-pw"))
-	if err != nil {
-		t.Fatalf("create candidate: %v", err)
-	}
-
-	_ = ps.SaveCredential(profile.Credential{
-		ID:       "cred:rot:aaa",
-		Name:     "rot",
-		Username: "ru",
-		Auth:     "password",
-		Versions: []profile.CredentialVersion{
-			{ID: "v1", Auth: "password", PasswordSecretID: string(curID)},
-			{ID: "v2", Auth: "password", PasswordSecretID: string(candID)},
-		},
-		CurrentVersionID:   "v1",
-		CandidateVersionID: "v2",
-	})
-	_ = ps.SaveProfile(profile.SSHProfile{
-		Base:    profile.Base{ID: "profile:rot", Name: "rot"},
-		Options: profile.StoredSSHProfileOptions{Host: "rot.example.com", CredentialID: "cred:rot:aaa"},
-	})
-	return ps, ss, curID, candID
-}
-
-func TestResolveWithVersion_UsesTheNamedVersion(t *testing.T) {
-	ps, ss, _, candID := rotationFixture(t)
-
-	_, cfg, err := NewResolver(ps, ps, ps, ss).ResolveWithVersion("profile:rot", "cred:rot:aaa", "v2")
-	if err != nil {
-		t.Fatalf("ResolveWithVersion: %v", err)
-	}
-	if cfg.SecretID != candID {
-		t.Errorf("SecretID = %q, want the candidate %q", cfg.SecretID, candID)
-	}
-	if cfg.CredentialVersionID != "v2" {
-		t.Errorf("CredentialVersionID = %q, want v2", cfg.CredentialVersionID)
-	}
-}
-
-func TestResolveWithVersion_MissingVersionDoesNotFallBack(t *testing.T) {
-	ps, ss, curID, _ := rotationFixture(t)
-
-	_, cfg, err := NewResolver(ps, ps, ps, ss).ResolveWithVersion("profile:rot", "cred:rot:aaa", "v99")
-	if !errors.Is(err, ErrVersionNotFound) {
-		t.Fatalf("err = %v, want ErrVersionNotFound", err)
-	}
-	if cfg != nil {
-		t.Fatalf("cfg = %+v, want nil — a config carrying %q would be the silent retry this forbids", cfg, curID)
-	}
-}
-
-func TestResolveWithVersion_WrongCredentialIsRefused(t *testing.T) {
-	ps, ss, _, _ := rotationFixture(t)
-
-	_, cfg, err := NewResolver(ps, ps, ps, ss).ResolveWithVersion("profile:rot", "cred:someone-else:zzz", "v2")
-	if !errors.Is(err, ErrCredentialMismatch) {
-		t.Fatalf("err = %v, want ErrCredentialMismatch", err)
-	}
-	if cfg != nil {
-		t.Fatalf("cfg = %+v, want nil", cfg)
-	}
-}
-
-func TestResolveWithVersion_LeavesTheBastionOnItsCurrentVersion(t *testing.T) {
-	ps, ss, _, candID := rotationFixture(t)
-
-	// A bastion with its own credential, one version, in front of the target.
-	jumpID, err := ss.Create(context.Background(), credential.NewSecret("jump-pw"))
-	if err != nil {
-		t.Fatalf("create jump: %v", err)
-	}
-	_ = ps.SaveCredential(profile.Credential{
-		ID:               "cred:bastion:bbb",
-		Name:             "bastion",
-		Username:         "bu",
-		Auth:             "password",
-		Versions:         []profile.CredentialVersion{{ID: "b1", Auth: "password", PasswordSecretID: string(jumpID)}},
-		CurrentVersionID: "b1",
-	})
-	_ = ps.SaveProfile(profile.SSHProfile{
-		Base:    profile.Base{ID: "profile:bastion", Name: "bastion"},
-		Options: profile.StoredSSHProfileOptions{Host: "bastion.example.com", CredentialID: "cred:bastion:bbb"},
-	})
-	tgt := ps.profiles["profile:rot"]
-	tgt.Options.JumpHost = profile.Ptr("profile:bastion")
-	_ = ps.SaveProfile(tgt)
-
-	_, cfg, err := NewResolver(ps, ps, ps, ss).ResolveWithVersion("profile:rot", "cred:rot:aaa", "v2")
-	if err != nil {
-		t.Fatalf("ResolveWithVersion: %v", err)
-	}
-	if cfg.SecretID != candID {
-		t.Errorf("target SecretID = %q, want the candidate %q", cfg.SecretID, candID)
-	}
-	if cfg.JumpSecretID != jumpID {
-		t.Errorf("JumpSecretID = %q, want the bastion's own %q — rotating one credential must not touch the bastion", cfg.JumpSecretID, jumpID)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Pinned version tests
-// ---------------------------------------------------------------------------
-
-// TestResolve_PinnedVersion uses the pinned version instead of current.
-func TestResolve_PinnedVersion(t *testing.T) {
-	ps := newStubProfileStore()
-	ss := newStubSecretStore()
-
-	v1ID, err := ss.Create(context.Background(), credential.NewSecret("pw-v1"))
-	if err != nil {
-		t.Fatalf("create v1: %v", err)
-	}
-	v2ID, err := ss.Create(context.Background(), credential.NewSecret("pw-v2"))
-	if err != nil {
-		t.Fatalf("create v2: %v", err)
-	}
-	v3ID, err := ss.Create(context.Background(), credential.NewSecret("pw-v3"))
-	if err != nil {
-		t.Fatalf("create v3: %v", err)
-	}
-
-	_ = ps.SaveCredential(profile.Credential{
-		ID:       "cred:test:aaa",
-		Name:     "test",
-		Username: "tu",
-		Auth:     "password",
-		Versions: []profile.CredentialVersion{
-			{ID: "v1", Auth: "password", PasswordSecretID: string(v1ID)},
-			{ID: "v2", Auth: "password", PasswordSecretID: string(v2ID)},
-			{ID: "v3", Auth: "password", PasswordSecretID: string(v3ID)},
-		},
-		CurrentVersionID: "v1",
-	})
-
-	_ = ps.SaveProfile(profile.SSHProfile{
-		Base:    profile.Base{ID: "profile:pin", Name: "pinned", PinnedVersionID: "v3"},
-		Options: profile.StoredSSHProfileOptions{Host: "host.example.com", CredentialID: "cred:test:aaa"},
-	})
-
-	_, cfg, err := NewResolver(ps, ps, ps, ss).Resolve("profile:pin")
-	if err != nil {
-		t.Fatalf("Resolve: %v", err)
-	}
-	if cfg.CredentialVersionID != "v3" {
-		t.Errorf("CredentialVersionID = %q, want pinned version v3", cfg.CredentialVersionID)
-	}
-	if cfg.SecretID != v3ID {
-		t.Errorf("SecretID = %q, want the pinned version's secret %q", cfg.SecretID, v3ID)
-	}
-}
-
-// TestResolve_PinnedVersionOverridesCurrent verifies that a pinned profile
-// ignores CurrentVersionID changes — the pin wins.
-func TestResolve_PinnedVersionOverridesCurrent(t *testing.T) {
-	ps := newStubProfileStore()
-	ss := newStubSecretStore()
-
-	v1ID, err := ss.Create(context.Background(), credential.NewSecret("pw-v1"))
-	if err != nil {
-		t.Fatalf("create v1: %v", err)
-	}
-	v2ID, err := ss.Create(context.Background(), credential.NewSecret("pw-v2"))
-	if err != nil {
-		t.Fatalf("create v2: %v", err)
-	}
-
-	_ = ps.SaveCredential(profile.Credential{
-		ID:       "cred:test:bbb",
-		Name:     "test",
-		Username: "tu",
-		Auth:     "password",
-		Versions: []profile.CredentialVersion{
-			{ID: "v1", Auth: "password", PasswordSecretID: string(v1ID)},
-			{ID: "v2", Auth: "password", PasswordSecretID: string(v2ID)},
-		},
-		CurrentVersionID: "v2", // v2 is current
-	})
-
-	// Profile pins to v1 — should resolve to v1 even though v2 is current.
-	_ = ps.SaveProfile(profile.SSHProfile{
-		Base:    profile.Base{ID: "profile:pin-old", Name: "pinned-old", PinnedVersionID: "v1"},
-		Options: profile.StoredSSHProfileOptions{Host: "host.example.com", CredentialID: "cred:test:bbb"},
-	})
-
-	_, cfg, err := NewResolver(ps, ps, ps, ss).Resolve("profile:pin-old")
-	if err != nil {
-		t.Fatalf("Resolve: %v", err)
-	}
-	if cfg.CredentialVersionID != "v1" {
-		t.Errorf("CredentialVersionID = %q, want pinned version v1", cfg.CredentialVersionID)
-	}
-	if cfg.SecretID != v1ID {
-		t.Errorf("SecretID = %q, want v1 secret %q", cfg.SecretID, v1ID)
-	}
-}
-
-// TestResolve_PinnedVersionSurvivesRetirement verifies that pinning a profile
-// to a retired version still resolves. A pin is the thing retirement does not
-// break.
-func TestResolve_PinnedVersionSurvivesRetirement(t *testing.T) {
-	ps := newStubProfileStore()
-	ss := newStubSecretStore()
-
-	v1ID, err := ss.Create(context.Background(), credential.NewSecret("pw-v1"))
-	if err != nil {
-		t.Fatalf("create v1: %v", err)
-	}
-	v2ID, err := ss.Create(context.Background(), credential.NewSecret("pw-v2"))
-	if err != nil {
-		t.Fatalf("create v2: %v", err)
-	}
-
-	now := time.Now()
-	cred := profile.Credential{
-		ID:       "cred:test:ccc",
-		Name:     "test",
-		Username: "tu",
-		Auth:     "password",
-		Versions: []profile.CredentialVersion{
-			{ID: "v1", Auth: "password", PasswordSecretID: string(v1ID), RetiredAt: &now},
-			{ID: "v2", Auth: "password", PasswordSecretID: string(v2ID)},
-		},
-		CurrentVersionID: "v2",
-	}
-	if err = ps.SaveCredential(cred); err != nil {
-		t.Fatalf("save credential: %v", err)
-	}
-
-	// Profile pins to v1 — v1 is retired but the pin should make it work.
-	_ = ps.SaveProfile(profile.SSHProfile{
-		Base:    profile.Base{ID: "profile:pin-retired", Name: "pinned-retired", PinnedVersionID: "v1"},
-		Options: profile.StoredSSHProfileOptions{Host: "host.example.com", CredentialID: "cred:test:ccc"},
-	})
-
-	_, cfg, err := NewResolver(ps, ps, ps, ss).Resolve("profile:pin-retired")
-	if err != nil {
-		t.Fatalf("Resolve: %v", err)
-	}
-	if cfg.CredentialVersionID != "v1" {
-		t.Errorf("CredentialVersionID = %q, want pinned version v1", cfg.CredentialVersionID)
-	}
-	if cfg.SecretID != v1ID {
-		t.Errorf("SecretID = %q, want v1 secret %q", cfg.SecretID, v1ID)
-	}
-}
-
-// TestResolve_PinnedVersionNotFound fails when the pinned version does not
-// exist on the credential.
-func TestResolve_PinnedVersionNotFound(t *testing.T) {
-	ps := newStubProfileStore()
-	ss := newStubSecretStore()
-
-	v1ID, _ := ss.Create(context.Background(), credential.NewSecret("pw-v1"))
-
-	_ = ps.SaveCredential(profile.Credential{
-		ID:       "cred:test:ddd",
-		Name:     "test",
-		Username: "tu",
-		Auth:     "password",
-		Versions: []profile.CredentialVersion{
-			{ID: "v1", Auth: "password", PasswordSecretID: string(v1ID)},
-		},
-		CurrentVersionID: "v1",
-	})
-
-	// Pin to v2 — does not exist.
-	_ = ps.SaveProfile(profile.SSHProfile{
-		Base:    profile.Base{ID: "profile:pin-missing", Name: "pinned-missing", PinnedVersionID: "v2"},
-		Options: profile.StoredSSHProfileOptions{Host: "host.example.com", CredentialID: "cred:test:ddd"},
-	})
-
-	_, _, err := NewResolver(ps, ps, ps, ss).Resolve("profile:pin-missing")
-	if err == nil {
-		t.Fatal("expected error for missing pinned version, got nil")
-	}
-}
-
-// TestResolve_RetiredCurrentVersion verifies that Current() returns false
-// for a retired current version and the resolver returns ErrVersionRetired.
-func TestResolve_RetiredCurrentVersion(t *testing.T) {
-	ps := newStubProfileStore()
-	ss := newStubSecretStore()
-
-	v1ID, err := ss.Create(context.Background(), credential.NewSecret("pw-v1"))
-	if err != nil {
-		t.Fatalf("create v1: %v", err)
-	}
-
-	now := time.Now()
-	_ = ps.SaveCredential(profile.Credential{
-		ID:       "cred:test:eee",
-		Name:     "test",
-		Username: "tu",
-		Auth:     "password",
-		Versions: []profile.CredentialVersion{
-			{ID: "v1", Auth: "password", PasswordSecretID: string(v1ID), RetiredAt: &now},
-		},
-		CurrentVersionID: "v1",
-	})
-
-	_ = ps.SaveProfile(profile.SSHProfile{
-		Base:    profile.Base{ID: "profile:retired-current", Name: "retired-current"},
-		Options: profile.StoredSSHProfileOptions{Host: "host.example.com", CredentialID: "cred:test:eee"},
-	})
-
-	_, _, err = NewResolver(ps, ps, ps, ss).Resolve("profile:retired-current")
-	if !errors.Is(err, profile.ErrVersionRetired) {
-		t.Fatalf("expected ErrVersionRetired, got %v", err)
-	}
-}
-
-// TestResolveWithVersion_RetiredVersionIsRefused verifies that
-// ResolveWithVersion refuses an explicitly retired version.
-func TestResolveWithVersion_RetiredVersionIsRefused(t *testing.T) {
-	ps, ss, _, _ := rotationFixture(t)
-
-	// Retire v1 on the credential.
-	err := ps.RetireVersion("cred:rot:aaa", "v1")
-	if err != nil {
-		t.Fatalf("RetireVersion: %v", err)
-	}
-
-	// ResolveWithVersion v1 — should refuse.
-	_, _, err = NewResolver(ps, ps, ps, ss).ResolveWithVersion("profile:rot", "cred:rot:aaa", "v1")
-	if !errors.Is(err, profile.ErrVersionRetired) {
-		t.Fatalf("expected ErrVersionRetired for retired version, got %v", err)
-	}
-}
-
-// TestResolve_NoCredentialProfilePinsDifferentEndpointTwoProfiles verifies
-// that pinning profile A does not affect profile B even when both point at
-// the same endpoint.
-func TestResolve_PinProfileADoesNotPinProfileB(t *testing.T) {
-	ps := newStubProfileStore()
-	ss := newStubSecretStore()
-
-	v1ID, err := ss.Create(context.Background(), credential.NewSecret("pw-v1"))
-	if err != nil {
-		t.Fatalf("create v1: %v", err)
-	}
-	v2ID, err := ss.Create(context.Background(), credential.NewSecret("pw-v2"))
-	if err != nil {
-		t.Fatalf("create v2: %v", err)
-	}
-
-	_ = ps.SaveCredential(profile.Credential{
-		ID:       "cred:shared:fff",
-		Name:     "shared",
-		Username: "tu",
-		Auth:     "password",
-		Versions: []profile.CredentialVersion{
-			{ID: "v1", Auth: "password", PasswordSecretID: string(v1ID)},
-			{ID: "v2", Auth: "password", PasswordSecretID: string(v2ID)},
-		},
-		CurrentVersionID: "v2", // v2 is current
-	})
-
-	// Profile A pins to v1.
-	_ = ps.SaveProfile(profile.SSHProfile{
-		Base:    profile.Base{ID: "profile:a", Name: "a", PinnedVersionID: "v1"},
-		Options: profile.StoredSSHProfileOptions{Host: "shared.example.com", CredentialID: "cred:shared:fff"},
-	})
-	// Profile B has no pin — uses current (v2).
-	_ = ps.SaveProfile(profile.SSHProfile{
-		Base:    profile.Base{ID: "profile:b", Name: "b"},
-		Options: profile.StoredSSHProfileOptions{Host: "shared.example.com", CredentialID: "cred:shared:fff"},
-	})
-
-	_, cfgA, err := NewResolver(ps, ps, ps, ss).Resolve("profile:a")
-	if err != nil {
-		t.Fatalf("Resolve A: %v", err)
-	}
-	_, cfgB, err := NewResolver(ps, ps, ps, ss).Resolve("profile:b")
-	if err != nil {
-		t.Fatalf("Resolve B: %v", err)
-	}
-
-	if cfgA.CredentialVersionID != "v1" {
-		t.Errorf("A CredentialVersionID = %q, want v1", cfgA.CredentialVersionID)
-	}
-	if cfgB.CredentialVersionID != "v2" {
-		t.Errorf("B CredentialVersionID = %q, want v2 (current)", cfgB.CredentialVersionID)
-	}
-}
-
-// TestResolver_KeyMaterialSecretID verifies that KeyMaterialSecretID on a
-// credential version is resolved into cfg.KeySecretID on the ConnectConfig.
+// TestResolver_KeyMaterialSecretID verifies that the credential's record-level
+// KeyMaterialSecretID and PassphraseSecretID are resolved into cfg.KeySecretID
+// and cfg.PassphraseSecretID on the ConnectConfig.
 //
 //nolint:errcheck
 func TestResolver_KeyMaterialSecretID(t *testing.T) {
@@ -1317,19 +743,13 @@ func TestResolver_KeyMaterialSecretID(t *testing.T) {
 	pwID, _ := ss.Create(context.Background(), credential.NewSecret("s3cret"))
 
 	_ = ps.SaveCredential(profile.Credential{
-		ID:       "cred:km:abc",
-		Name:     "key-material",
-		Username: "deploy",
-		Auth:     "publicKey",
-		Versions: []profile.CredentialVersion{
-			{
-				ID:                  "v1",
-				PasswordSecretID:    string(pwID),
-				KeyMaterialSecretID: "vault-sec:abc123",
-				PassphraseSecretID:  "vault-sec:pass456",
-			},
-		},
-		CurrentVersionID: "v1",
+		ID:                  "cred:km:abc",
+		Name:                "key-material",
+		Username:            "deploy",
+		Auth:                "publicKey",
+		SecretID:            string(pwID),
+		KeyMaterialSecretID: "vault-sec:abc123",
+		PassphraseSecretID:  "vault-sec:pass456",
 	})
 
 	_ = ps.SaveProfile(profile.SSHProfile{

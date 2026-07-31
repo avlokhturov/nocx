@@ -226,7 +226,6 @@ func (s *WSServer) storeProbeResult(host string, cfg *ssh.ConnectConfig, fingerp
 		Identity: ProbeResultIdentity{
 			Endpoint:           endpoint,
 			HostKeyFingerprint: fingerprint,
-			CredentialVersion:  cfg.CredentialVersionID,
 			Username:           cfg.User,
 			AuthPolicy:         authPolicy,
 			Timestamp:          time.Now(),
