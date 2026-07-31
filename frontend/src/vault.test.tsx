@@ -687,18 +687,25 @@ describe('UnlockDialog', () => {
     expect(unseal).not.toHaveBeenCalled()
   })
 
-  it('shows error when vaultClient.unseal rejects', async () => {
+  it('reports a refused passphrase as a toast, naming what was refused', async () => {
+    clearToasts()
     const { client, unseal } = mockClient()
-    unseal.mockRejectedValue(new Error('wrong passphrase'))
+    // What the backend actually sends when the passphrase does not fit: the
+    // reason code, not prose. It used to reach the user as the literal words
+    // "unseal failed", because REASON_MESSAGES had no line for it.
+    unseal.mockRejectedValue(new RpcError('unseal failed', -32003, { reason: 'unseal-failed' }))
     const onUnsealed = vi.fn()
     render(() => (
-      <UnlockDialog
-        open={true}
-        onClose={vi.fn()}
-        vaultClient={client}
-        vaultStatus={BASE_STATUS}
-        onUnsealed={onUnsealed}
-      />
+      <>
+        <UnlockDialog
+          open={true}
+          onClose={vi.fn()}
+          vaultClient={client}
+          vaultStatus={BASE_STATUS}
+          onUnsealed={onUnsealed}
+        />
+        <ToastHost />
+      </>
     ))
 
     const buttons = screen.getAllByText('Passphrase')
@@ -708,10 +715,61 @@ describe('UnlockDialog', () => {
     fireEvent.click(screen.getByText('Unlock'))
 
     await vi.waitFor(() => {
-      expect(screen.getByText('wrong passphrase')).toBeTruthy()
+      const toast = document.querySelector('.ui-toast')
+      expect(toast).toBeTruthy()
+      expect(toast!.getAttribute('data-level')).toBe('danger')
+      expect(toast!.textContent).toBe('That passphrase does not unlock this vault.')
     })
+    // Never the backend's own words.
+    expect(document.body.textContent).not.toContain('unseal failed')
     // Dialog stays open, onUnsealed not called
     expect(onUnsealed).not.toHaveBeenCalled()
+  })
+
+  // Enter is what a person presses in a passphrase prompt without thinking.
+  // Dialog has offered `onSubmit` since it was written; this dialog never
+  // passed one, so Enter did nothing at all.
+  it('unlocks on Enter in the passphrase field', async () => {
+    const { client, unseal } = mockClient()
+    unseal.mockResolvedValue({})
+    render(() => (
+      <UnlockDialog open={true} onClose={vi.fn()} vaultClient={client} vaultStatus={BASE_STATUS} />
+    ))
+
+    fireEvent.click(screen.getAllByText('Passphrase')[0])
+    const input = screen.getByLabelText('Passphrase')
+    fireEvent.input(input, { target: { value: 'my-passphrase' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+
+    await vi.waitFor(() => {
+      expect(unseal).toHaveBeenCalledWith({ means: 'passphrase', secret: 'my-passphrase' })
+    })
+  })
+
+  // An empty box is not an outcome to report — it is a correction to make in
+  // the box, which is still on screen and clears as you type. Outcomes go to
+  // toasts; field validation stays in the field.
+  it('keeps the empty-field prompt in the field rather than raising a toast', () => {
+    clearToasts()
+    const { client, unseal } = mockClient()
+    render(() => (
+      <>
+        <UnlockDialog
+          open={true}
+          onClose={vi.fn()}
+          vaultClient={client}
+          vaultStatus={BASE_STATUS}
+        />
+        <ToastHost />
+      </>
+    ))
+
+    fireEvent.click(screen.getAllByText('Passphrase')[0])
+    fireEvent.click(screen.getByText('Unlock'))
+
+    expect(screen.getByText('Enter your passphrase')).toBeTruthy()
+    expect(document.querySelector('.ui-toast')).toBeNull()
+    expect(unseal).not.toHaveBeenCalled()
   })
 })
 

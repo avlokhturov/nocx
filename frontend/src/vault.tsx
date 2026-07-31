@@ -38,6 +38,15 @@ const REASON_MESSAGES: Record<string, string> = {
   timeout: 'The operation timed out. Please try again.',
   'unsupported-platform': 'System keyring is not supported on this platform.',
   'unknown-provider': 'This secret reference names a provider not available in this build.',
+  // Without this entry the reason fell through to the backend's own words and
+  // the user was shown "unseal failed" — an internal phrase, in lower case,
+  // naming an operation no interface mentions. Every reason the transport can
+  // send needs a line here; that is what makes this table the single owner of
+  // user-facing wording rather than a partial one.
+  'unseal-failed': 'That did not unlock the vault. Check what you entered and try again.',
+  'vault-changed': 'The vault changed while this was open. Try again.',
+  'vault-sealed': 'The vault is locked.',
+  'vault-uninitialized': 'Protection has not been set up yet.',
 }
 
 function vaultErrorMessage(err: unknown): string {
@@ -640,8 +649,23 @@ export const UnlockDialog: Component<UnlockDialogProps> = (props) => {
     setUnlocking(false)
   }
 
+  /** What to say when the vault refuses. The generic reason line cannot name
+   *  the thing the user actually typed, and this is the one place that knows
+   *  which of the two it was. */
+  const refusalMessage = (m: UnlockMeans, e: unknown): string => {
+    const generic = vaultErrorMessage(e)
+    if (generic !== REASON_MESSAGES['unseal-failed']) return generic
+    if (m === 'passphrase') return 'That passphrase does not unlock this vault.'
+    if (m === 'recovery') return 'That recovery code does not unlock this vault.'
+    return 'The system key did not unlock this vault.'
+  }
+
   const handleUnseal = async (overrideMeans?: UnlockMeans) => {
     const m = overrideMeans ?? currentMeans()
+    // Field validation stays in the field: it is about what is in the box, it
+    // clears as you type, and it is answered without asking the backend
+    // anything. The OUTCOME of the call is a different kind of message and
+    // goes where every other outcome on these surfaces goes — a toast.
     if (m !== 'os' && !secret()) {
       const lbl = m === 'passphrase' ? 'passphrase' : 'recovery code'
       setError(`Enter your ${lbl}`)
@@ -652,11 +676,12 @@ export const UnlockDialog: Component<UnlockDialogProps> = (props) => {
     try {
       await props.vaultClient.unseal(m === 'os' ? { means: m } : { means: m, secret: secret() })
       reset()
+      showToast({ level: 'success', message: 'Vault unlocked.' })
       props.onUnsealed?.()
       props.onClose()
     } catch (e: unknown) {
       setUnlocking(false)
-      setError(vaultErrorMessage(e))
+      showToast({ level: 'danger', message: refusalMessage(m, e) })
     }
   }
 
@@ -720,6 +745,13 @@ export const UnlockDialog: Component<UnlockDialogProps> = (props) => {
         props.onClose()
       }}
       title="Unlock Vault"
+      // Enter unlocks. Dialog has offered this since it was written and this
+      // dialog never asked for it, so the one control a user reaches for
+      // reflexively in a passphrase prompt did nothing at all.
+      onSubmit={() => {
+        if (unlocking()) return
+        void handleUnseal()
+      }}
       footer={
         <>
           <Button
@@ -989,6 +1021,14 @@ export const RecoveryCodeDialog: Component<RecoveryCodeDialogProps> = (props) =>
         props.onClose()
       }}
       title="Reissue recovery code"
+      // Enter submits the passphrase, the same as everywhere else a passphrase
+      // is asked for. Only while it is still being asked: once the code is on
+      // screen the affirmative action is Done, and Enter must not dismiss a
+      // one-time code the user has not written down yet.
+      onSubmit={() => {
+        if (recoveryCode() !== null || generating()) return
+        void handleGenerate()
+      }}
     >
       <Show when={recoveryCode() === null}>
         <Stack>
