@@ -32,28 +32,18 @@ type SecretReferenceImpact struct {
 }
 
 // secretRefFields returns pointers to every field on a credential that can
-// hold a secret reference, across record-level fields and all versions.
+// hold a secret reference — the record-level fields.
 //
 // One list, used by both counting and clearing, so the two cannot disagree
 // about where a reference may live. They did not disagree here — but the shape
 // where a "count" walks one set of fields and a "clear" walks another is how a
 // preview promises to destroy 3 things and destroys 5.
 func secretRefFields(c *Credential) []*string {
-	refs := []*string{
+	return []*string{
 		&c.SecretID,
 		&c.PassphraseSecretID,
 		&c.KeyMaterialSecretID,
 	}
-	for i := range c.Versions {
-		v := &c.Versions[i]
-		refs = append(
-			refs,
-			&v.PasswordSecretID,
-			&v.PassphraseSecretID,
-			&v.KeyMaterialSecretID,
-		)
-	}
-	return refs
 }
 
 // impactOf computes the impact of clearing every reference in d, without
@@ -110,8 +100,8 @@ func (s *JSONStore) CountSecretReferences() (SecretReferenceImpact, error) {
 // ClearAllSecretReferences removes every secret reference from every
 // credential, in one write, and reports what it cleared.
 //
-// It clears references only. The credential records, their names, usernames,
-// key paths and version history all survive: the user's connections keep
+// It clears references only. The credential records, their names, usernames
+// and key paths all survive: the user's connections keep
 // working and simply stop believing a password is saved. Deleting the records
 // would be a different and much larger destruction than the one the user
 // agreed to.

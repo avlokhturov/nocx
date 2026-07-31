@@ -136,13 +136,8 @@ type ConnectConfig struct {
 	// the connect fails with an error.
 	AgentForward bool
 
-	// CredentialVersionID identifies the credential version selected by the
-	// resolver for this connection. Set by the resolver during profile
-	// resolution; empty when no credential is linked (inline auth).
-	CredentialVersionID string
 	// CredentialID identifies which credential this config was resolved from.
-	// Used together with CredentialVersionID by revocation to scope session
-	// matching by credential, not just by version ID.
+	// Used by revocation to scope session matching by credential.
 	CredentialID string
 }
 

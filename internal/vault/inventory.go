@@ -32,41 +32,31 @@ type CredentialInventory struct {
 	ID                  string
 	Username            string
 	AuthMode            string // "password", "publicKey", "agent", etc.
-	SecretID            string // legacy bare reference
-	PassphraseSecretID  string // legacy bare reference
-	KeyMaterialSecretID string // legacy bare reference to stored private key
-	Versions            []CredentialVersionInventory
+	SecretID            string
+	PassphraseSecretID  string
+	KeyMaterialSecretID string
+	KeyFingerprint      string
 	UsageCount          int
 	// For single-use passwords, the effective host and port of the sole profile.
 	SingleHost string
 	SinglePort int
 }
 
-// CredentialVersionInventory projects the version metadata the label needs.
-type CredentialVersionInventory struct {
-	PasswordSecretID    string
-	PassphraseSecretID  string
-	KeyMaterialSecretID string
-	KeyFingerprint      string
-}
-
 // secretRef is an internal representation of a unique secret reference found
-// during traversal of all credential versions.
+// during traversal of a credential's record-level fields.
 type secretRef struct {
 	ref            credential.SecretID
 	kind           string // "password" | "key-passphrase"
 	keyFingerprint string // non-empty only for "key-passphrase"
 }
 
-// collectRefs gathers unique secret references from a credential's versions
-// AND its legacy bare fields (which may coexist during migration). Unconditional
-// collection of both sources followed by deduplication ensures no secret is
-// missed when a credential transitions from the legacy format.
+// collectRefs gathers unique secret references from a credential's
+// record-level fields. Unconditional collection of all three followed by
+// deduplication ensures no secret is missed.
 func collectRefs(cred CredentialInventory) []secretRef {
 	seen := make(map[credential.SecretID]bool)
 	var refs []secretRef
 
-	// Legacy bare top-level fields.
 	if cred.SecretID != "" {
 		id := credential.SecretID(cred.SecretID)
 		if !seen[id] {
@@ -78,7 +68,11 @@ func collectRefs(cred CredentialInventory) []secretRef {
 		id := credential.SecretID(cred.PassphraseSecretID)
 		if !seen[id] {
 			seen[id] = true
-			refs = append(refs, secretRef{ref: id, kind: "key-passphrase"})
+			refs = append(refs, secretRef{
+				ref:            id,
+				kind:           "key-passphrase",
+				keyFingerprint: cred.KeyFingerprint,
+			})
 		}
 	}
 	if cred.KeyMaterialSecretID != "" {
@@ -86,35 +80,6 @@ func collectRefs(cred CredentialInventory) []secretRef {
 		if !seen[id] {
 			seen[id] = true
 			refs = append(refs, secretRef{ref: id, kind: "private-key"})
-		}
-	}
-
-	// Version-level fields.
-	for _, v := range cred.Versions {
-		if v.PasswordSecretID != "" {
-			id := credential.SecretID(v.PasswordSecretID)
-			if !seen[id] {
-				seen[id] = true
-				refs = append(refs, secretRef{ref: id, kind: "password"})
-			}
-		}
-		if v.PassphraseSecretID != "" {
-			id := credential.SecretID(v.PassphraseSecretID)
-			if !seen[id] {
-				seen[id] = true
-				refs = append(refs, secretRef{
-					ref:            id,
-					kind:           "key-passphrase",
-					keyFingerprint: v.KeyFingerprint,
-				})
-			}
-		}
-		if v.KeyMaterialSecretID != "" {
-			id := credential.SecretID(v.KeyMaterialSecretID)
-			if !seen[id] {
-				seen[id] = true
-				refs = append(refs, secretRef{ref: id, kind: "private-key"})
-			}
 		}
 	}
 

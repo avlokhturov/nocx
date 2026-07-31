@@ -19,7 +19,7 @@ import (
 	"github.com/shady2k/nocx/internal/importer"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
-	"github.com/shady2k/nocx/internal/rollout"
+
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/ssh"
@@ -117,19 +117,14 @@ type WSServer struct {
 	// When nil, probe results are not stored (the probe still runs and
 	// returns its outcome to the caller).
 	probeResultStore *ProbeResultStore
-	// rolloutRunner performs credential rollout probes (rollout.run).
-	// When nil, the handler returns a JSON-RPC error.
-	rolloutRunner rollout.Runner
+
 
 	// profileUsage tracks last-used timestamps for the sessions.status RPC.
 	// When nil, the handler reports live-state from the registry but
 	// last-used timestamps are unavailable (nocx-uxs5.4).
 	profileUsage session.ProfileUsageTracker
-	// versionRegistry provides session lookup by credential version for
-	// revocation. When nil, session draining/revocation is a no-op.
-	versionRegistry VersionSessionRegistry
 
-	// Export/backup/import dependencies (ADR-0011 §7).
+
 	// When nil, export.* methods return a JSON-RPC error.
 	// The fields are populated by WithPaths, WithContentDB.
 	// The credential.CredentialStore is deliberately absent —
@@ -766,8 +761,7 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 	case "credentials.savePassword", "credentials.deletePassword",
 		"credentials.hasPassword",
 		"credentials.saveKeyPassphrase", "credentials.deleteKeyPassphrase",
-		"credentials.saveKeyMaterial", "credentials.deleteKeyMaterial",
-		"credentials.stagePassword", "credentials.discardCandidate":
+		"credentials.saveKeyMaterial", "credentials.deleteKeyMaterial":
 		s.handleCredentialMethod(wconn, req)
 	case "settings.describe", "settings.getSnapshot", "settings.set", "settings.reset",
 		"settings.secretSet", "settings.secretDelete", "settings.secretExists":
@@ -781,16 +775,6 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.handleConnectionsTest(wconn, req)
 	case "connections.trustHostKey":
 		s.handleConnectionsTrustHostKey(wconn, req)
-	case "versions.promote":
-		s.handleVersionsPromote(wconn, req)
-	case "versions.retire":
-		s.handleVersionsRetire(wconn, req)
-	case "versions.revoke":
-		s.handleVersionsRevoke(wconn, req)
-	case "versions.impact":
-		s.handleVersionsImpact(wconn, req)
-	case "rollout.run":
-		s.handleRolloutRun(wconn, req)
 	case "sshConfig.aliases":
 		s.handleSSHConfigAliases(wconn, req)
 	case "sshConfig.path":
@@ -886,12 +870,9 @@ func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connSta
 			// id, so the association is the backend's own conclusion rather than
 			// the renderer's claim.
 			cfg.ProfileID = params.ProfileID
-			// CredentialVersionID from the resolver: the session needs this
-			// for revocation to find sessions by version. Empty for sessions
-			// with no linked credential (inline auth).
-			cfg.CredentialVersionID = remote.CredentialVersionID
-			// CredentialID from the resolver: paired with CredentialVersionID
-			// for scoped revocation matching.
+			// CredentialID from the resolver: scoped revocation matches
+			// sessions by credential. Empty for sessions with no linked
+			// credential (inline auth).
 			cfg.CredentialID = remote.CredentialID
 
 		} else if params.Host != "" {
@@ -1500,23 +1481,13 @@ func (s *WSServer) handleCredentialCRUDMethod(wconn *wsConn, req jsonrpcRequest)
 			return
 		}
 		// Strip SecretID fields — the renderer must never see them (ADR-0011 SS2).
-		// Also strip per-version secret references.
 		for i := range creds {
+			// Populate computed response fields from the record, then strip
+			// backend-owned secret references (ADR-0011 §2).
+			creds[i].HasKeyMaterial = creds[i].KeyMaterialSecretID != ""
 			creds[i].SecretID = ""
 			creds[i].PassphraseSecretID = ""
 			creds[i].KeyMaterialSecretID = ""
-			// Populate computed response fields from the current version.
-			if v, ok := creds[i].Current(); ok {
-				if v.KeyMaterialSecretID != "" {
-					creds[i].HasKeyMaterial = true
-				}
-				creds[i].KeyFingerprint = v.KeyFingerprint
-			}
-			for j := range creds[i].Versions {
-				creds[i].Versions[j].PasswordSecretID = ""
-				creds[i].Versions[j].PassphraseSecretID = ""
-				creds[i].Versions[j].KeyMaterialSecretID = ""
-			}
 		}
 		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(creds)))
 	case "credentials.create":
@@ -1556,11 +1527,11 @@ func (s *WSServer) handleCredentialCRUDMethod(wconn *wsConn, req jsonrpcRequest)
 		// key material, delete the stored material and clear the reference.
 		if in.KeyPath != nil && *in.KeyPath != "" && s.credentials != nil {
 			if cred, ok, findErr := s.findCredentialByID(in.ID); findErr == nil && ok {
-				if v, currentOk := cred.Current(); currentOk && v.KeyMaterialSecretID != "" {
+				if cred.KeyMaterialSecretID != "" {
 					// Delete the vault secret.
-					_ = s.credentials.Delete(context.Background(), credential.SecretID(v.KeyMaterialSecretID))
+					_ = s.credentials.Delete(context.Background(), credential.SecretID(cred.KeyMaterialSecretID))
 					// Clear the metadata reference and fingerprint.
-					_ = s.credMeta.UpdateCurrentVersionKeyMaterial(in.ID, "", "")
+					_ = s.credMeta.UpdateKeyMaterial(in.ID, "", "")
 				}
 			}
 		}
@@ -1570,21 +1541,12 @@ func (s *WSServer) handleCredentialCRUDMethod(wconn *wsConn, req jsonrpcRequest)
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, credentialErrorCode(err), err.Error()))
 			return
 		}
+		// Populate computed response fields from the record, then strip
+		// backend-owned secret references (ADR-0011 §2).
+		merged.HasKeyMaterial = merged.KeyMaterialSecretID != ""
 		merged.SecretID = ""
 		merged.PassphraseSecretID = ""
 		merged.KeyMaterialSecretID = ""
-		// Also blank per-version secret references and populate computed fields.
-		if v, ok := merged.Current(); ok {
-			if v.KeyMaterialSecretID != "" {
-				merged.HasKeyMaterial = true
-			}
-			merged.KeyFingerprint = v.KeyFingerprint
-		}
-		for j := range merged.Versions {
-			merged.Versions[j].PasswordSecretID = ""
-			merged.Versions[j].PassphraseSecretID = ""
-			merged.Versions[j].KeyMaterialSecretID = ""
-		}
 		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(merged)))
 	case "credentials.delete":
 		var params struct {
@@ -1807,10 +1769,7 @@ func (s *WSServer) handleCredentialMethod(wconn *wsConn, req jsonrpcRequest) {
 			return
 		}
 		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(true)))
-	case "credentials.stagePassword":
-		s.handleStagePassword(wconn, req)
-	case "credentials.discardCandidate":
-		s.handleDiscardCandidate(wconn, req)
+
 	case "credentials.saveKeyMaterial":
 		var params struct {
 			CredentialID string `json:"credentialId"`
@@ -1871,11 +1830,11 @@ func (s *WSServer) createSecret(ctx context.Context, value credential.Secret, me
 	return s.credentials.Create(ctx, value)
 }
 
-// savePasswordForCredential stores a password secret, appends a credential
-// version, and moves CurrentVersionID to it. The new secret is written under a
-// fresh ID first, then metadata is updated, then the old secret (if any) is
-// best-effort deleted — write-before-repoint prevents a crash from orphaning
-// the new secret.
+// savePasswordForCredential stores a password secret and points the
+// credential's record-level password reference at it. The new secret is
+// written under a fresh ID first, then metadata is updated, then the old
+// secret (if any) is best-effort deleted — write-before-repoint prevents a
+// crash from orphaning the new secret.
 //
 // name is the generated display name (user@host) the connection editor sent —
 // the secret owns its name (ADR-0016). Empty falls back to rendering.
@@ -1901,16 +1860,11 @@ func (s *WSServer) savePasswordForCredential(credID, password, name string) erro
 		return fmt.Errorf("store secret: %w", err)
 	}
 
-	// Load the current version to find the old secret ID and carry
-	// over the existing passphrase to the new version.
-	oldID := credential.SecretID("")
-	passphraseRef := ""
-	if v, ok := cred.Current(); ok {
-		oldID = credential.SecretID(v.PasswordSecretID)
-		passphraseRef = v.PassphraseSecretID
-	}
-	if err := s.credMeta.AppendCredentialVersion(credID, string(newID), passphraseRef); err != nil {
-		return fmt.Errorf("save credential version: %w", err)
+	// Old password ref for cleanup; the passphrase ref is carried over
+	// unchanged on the record.
+	oldID := credential.SecretID(cred.SecretID)
+	if err := s.credMeta.UpdateSecretRefs(credID, string(newID), cred.PassphraseSecretID); err != nil {
+		return fmt.Errorf("save credential metadata: %w", err)
 	}
 
 	// Best-effort delete of the old secret.
@@ -1932,15 +1886,8 @@ func (s *WSServer) deletePasswordForCredential(credID string) error {
 		return fmt.Errorf("credential %s not found", credID)
 	}
 
-	// Determine old secret and current passphrase ref from the current version.
-	oldID := credential.SecretID("")
-	passphraseRef := ""
-	if v, ok := cred.Current(); ok {
-		oldID = credential.SecretID(v.PasswordSecretID)
-		passphraseRef = v.PassphraseSecretID
-	}
-
-	if err := s.credMeta.UpdateCurrentVersionRefs(credID, "", passphraseRef); err != nil {
+	oldID := credential.SecretID(cred.SecretID)
+	if err := s.credMeta.UpdateSecretRefs(credID, "", cred.PassphraseSecretID); err != nil {
 		return fmt.Errorf("save credential metadata: %w", err)
 	}
 
@@ -1949,6 +1896,8 @@ func (s *WSServer) deletePasswordForCredential(credID string) error {
 	}
 	return nil
 }
+
+
 
 // hasPasswordForCredential checks whether a password secret exists for the
 // credential. Returns false when the credential is not found.
@@ -1963,12 +1912,11 @@ func (s *WSServer) hasPasswordForCredential(credID string) (bool, error) {
 	if !ok {
 		return false, nil
 	}
-	// Check the current version's password reference.
-	v, ok := cred.Current()
-	if !ok || v.PasswordSecretID == "" {
+	// Check the record-level password reference.
+	if cred.SecretID == "" {
 		return false, nil
 	}
-	return s.credentials.Exists(context.Background(), credential.SecretID(v.PasswordSecretID))
+	return s.credentials.Exists(context.Background(), credential.SecretID(cred.SecretID))
 }
 
 // errInvalidKeyMaterial is returned when key text does not parse as a private
@@ -2072,15 +2020,12 @@ func (s *WSServer) saveKeyMaterialForCredential(credID, keyText, name string) (f
 		return "", false, fmt.Errorf("store key material: %w", err)
 	}
 
-	// Determine old key material ref for cleanup.
-	oldID := credential.SecretID("")
-	if v, ok := cred.Current(); ok {
-		oldID = credential.SecretID(v.KeyMaterialSecretID)
-	}
+	// Old key material ref for cleanup.
+	oldID := credential.SecretID(cred.KeyMaterialSecretID)
 
 	// Update credential metadata: set key material ref, fingerprint, and
 	// clear KeyPath (the store method handles the mutual exclusion).
-	if err := s.credMeta.UpdateCurrentVersionKeyMaterial(credID, string(newID), fingerprint); err != nil {
+	if err := s.credMeta.UpdateKeyMaterial(credID, string(newID), fingerprint); err != nil {
 		return "", false, fmt.Errorf("save credential metadata: %w", err)
 	}
 
@@ -2093,8 +2038,9 @@ func (s *WSServer) saveKeyMaterialForCredential(credID, keyText, name string) (f
 }
 
 // deleteKeyMaterialForCredential removes the stored key material from the
-// vault and clears the reference on the credential version.
+// vault and clears the reference on the credential record.
 func (s *WSServer) deleteKeyMaterialForCredential(credID string) error {
+
 	if s.credMeta == nil {
 		return errors.New("profiles not available")
 	}
@@ -2110,16 +2056,13 @@ func (s *WSServer) deleteKeyMaterialForCredential(credID string) error {
 		return fmt.Errorf("credential %s not found", credID)
 	}
 
-	// Find the current key material ref to delete from vault.
+	// Old key material ref to delete from vault.
 	ctx := context.Background()
-	oldID := credential.SecretID("")
-	if v, ok := cred.Current(); ok {
-		oldID = credential.SecretID(v.KeyMaterialSecretID)
-	}
+	oldID := credential.SecretID(cred.KeyMaterialSecretID)
 
-	// Clear the reference on the credential version and clear KeyPath.
+	// Clear the reference on the credential record and clear KeyPath.
 	// Use empty values to clear the fields.
-	if err := s.credMeta.UpdateCurrentVersionKeyMaterial(credID, "", ""); err != nil {
+	if err := s.credMeta.UpdateKeyMaterial(credID, "", ""); err != nil {
 		return fmt.Errorf("update credential metadata: %w", err)
 	}
 
@@ -2130,11 +2073,10 @@ func (s *WSServer) deleteKeyMaterialForCredential(credID string) error {
 
 	return nil
 }
-
 // savePassphraseForCredential verifies a key passphrase against the stored
-// key material when there is any, then stores it and updates the current
-// version's passphrase reference. Same write-before-repoint pattern. name is
-// the generated display name the connection editor sent (ADR-0016).
+// key material when there is any, then stores it and points the credential's
+// record-level passphrase reference at it. Same write-before-repoint pattern.
+// name is the generated display name the connection editor sent (ADR-0016).
 //
 // Verification is the point, not the asking: gossh.ParsePrivateKeyWithPassphrase
 // answers whether a passphrase opens a key, and storing an unverified
@@ -2168,15 +2110,10 @@ func (s *WSServer) savePassphraseForCredential(credID, passphrase, name string) 
 		return fmt.Errorf("store passphrase: %w", err)
 	}
 
-	// Determine old passphrase ref and current password ref.
-	oldID := credential.SecretID("")
-	passwordRef := ""
-	if v, ok := cred.Current(); ok {
-		oldID = credential.SecretID(v.PassphraseSecretID)
-		passwordRef = v.PasswordSecretID
-	}
-
-	if err := s.credMeta.UpdateCurrentVersionRefs(credID, passwordRef, string(newID)); err != nil {
+	// Old passphrase ref for cleanup; the password ref is carried over
+	// unchanged on the record.
+	oldID := credential.SecretID(cred.PassphraseSecretID)
+	if err := s.credMeta.UpdateSecretRefs(credID, cred.SecretID, string(newID)); err != nil {
 		return fmt.Errorf("save credential metadata: %w", err)
 	}
 
@@ -2195,11 +2132,10 @@ func (s *WSServer) verifyKeyPassphrase(cred profile.Credential, passphrase []byt
 	if s.credentials == nil {
 		return &errInvalidKeyPassphrase{msg: "secret store not available"}
 	}
-	v, ok := cred.Current()
-	if !ok || v.KeyMaterialSecretID == "" {
+	if cred.KeyMaterialSecretID == "" {
 		return nil
 	}
-	secret, err := s.credentials.Get(context.Background(), credential.SecretID(v.KeyMaterialSecretID))
+	secret, err := s.credentials.Get(context.Background(), credential.SecretID(cred.KeyMaterialSecretID))
 	if err != nil {
 		return fmt.Errorf("load key material: %w", err)
 	}
@@ -2222,7 +2158,7 @@ func (s *WSServer) verifyKeyPassphrase(cred profile.Credential, passphrase []byt
 }
 
 // deletePassphraseForCredential removes the stored key passphrase secret and
-// clears the current version's passphrase reference.
+// clears the record-level passphrase reference.
 func (s *WSServer) deletePassphraseForCredential(credID string) error {
 	if s.credMeta == nil {
 		return errors.New("profiles not available")
@@ -2235,15 +2171,10 @@ func (s *WSServer) deletePassphraseForCredential(credID string) error {
 		return fmt.Errorf("credential %s not found", credID)
 	}
 
-	// Determine old passphrase ref and current password ref.
-	oldID := credential.SecretID("")
-	passwordRef := ""
-	if v, ok := cred.Current(); ok {
-		oldID = credential.SecretID(v.PassphraseSecretID)
-		passwordRef = v.PasswordSecretID
-	}
-
-	if err := s.credMeta.UpdateCurrentVersionRefs(credID, passwordRef, ""); err != nil {
+	// Old passphrase ref for cleanup; the password ref is carried over
+	// unchanged on the record.
+	oldID := credential.SecretID(cred.PassphraseSecretID)
+	if err := s.credMeta.UpdateSecretRefs(credID, cred.SecretID, ""); err != nil {
 		return fmt.Errorf("save credential metadata: %w", err)
 	}
 
@@ -2278,7 +2209,7 @@ func (s *WSServer) deleteCredentialCascade(id string) error {
 		return fmt.Errorf("load credential %s: %w", id, err)
 	}
 
-	// Collect every secret ID from record-level fields AND all versions.
+	// Collect every secret ID from the record-level fields.
 	var ids []credential.SecretID
 	if ok {
 		if cred.SecretID != "" {
@@ -2287,13 +2218,8 @@ func (s *WSServer) deleteCredentialCascade(id string) error {
 		if cred.PassphraseSecretID != "" {
 			ids = append(ids, credential.SecretID(cred.PassphraseSecretID))
 		}
-		for _, v := range cred.Versions {
-			if v.PasswordSecretID != "" {
-				ids = append(ids, credential.SecretID(v.PasswordSecretID))
-			}
-			if v.PassphraseSecretID != "" {
-				ids = append(ids, credential.SecretID(v.PassphraseSecretID))
-			}
+		if cred.KeyMaterialSecretID != "" {
+			ids = append(ids, credential.SecretID(cred.KeyMaterialSecretID))
 		}
 	}
 

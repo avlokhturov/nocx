@@ -636,9 +636,7 @@ func TestVaultDeleteSecret_OverTheWireConformsToContract(t *testing.T) {
 			if c.ID != credID {
 				continue
 			}
-			if v, ok := c.Current(); ok {
-				secretID = credential.SecretID(v.PasswordSecretID)
-			}
+			secretID = credential.SecretID(c.SecretID)
 		}
 	}
 	if secretID == "" {
@@ -684,12 +682,11 @@ func TestVaultDeleteSecret_OverTheWireConformsToContract(t *testing.T) {
 		if c.ID != credID {
 			continue
 		}
-		if v, ok := c.Current(); ok && v.PasswordSecretID != "" {
-			t.Errorf("credential still references the deleted secret: %q", v.PasswordSecretID)
+		if c.SecretID != "" {
+			t.Errorf("credential still references the deleted secret: %q", c.SecretID)
 		}
 	}
 }
-
 // The renderer may not name a secret (nocx-jb20.1): delete accepts the row
 // handle, and a SecretID sent in its place must be refused.
 func TestVaultDeleteSecret_RejectsSecretID(t *testing.T) {

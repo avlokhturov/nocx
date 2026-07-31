@@ -19,14 +19,13 @@ import (
 //
 //	Endpoint — the resolved dial target (host:port)
 //	HostKeyFingerprint — the host public-key fingerprint observed at probe time
-//	CredentialVersion — the credential version ID that was probed ("v1", "v2", …)
+
 //	Username — the effective username after all inheritance and ~/.ssh/config
 //	AuthPolicy — the auth mode string (AuthMode value or "auto")
 //	Timestamp — when the probe was performed
 type ProbeResultIdentity struct {
 	Endpoint           string    `json:"endpoint"`
 	HostKeyFingerprint string    `json:"hostKeyFingerprint"`
-	CredentialVersion  string    `json:"credentialVersion"`
 	Username           string    `json:"username"`
 	AuthPolicy         string    `json:"authPolicy"`
 	Timestamp          time.Time `json:"timestamp"`
@@ -270,7 +269,7 @@ func (s *ProbeResultStore) Import(data []byte) error {
 func identitiesEqual(a, b ProbeResultIdentity) bool {
 	return a.Endpoint == b.Endpoint &&
 		a.HostKeyFingerprint == b.HostKeyFingerprint &&
-		a.CredentialVersion == b.CredentialVersion &&
+
 		a.Username == b.Username &&
 		a.AuthPolicy == b.AuthPolicy &&
 		a.Timestamp.Equal(b.Timestamp)

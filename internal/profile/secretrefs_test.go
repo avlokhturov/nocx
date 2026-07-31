@@ -2,28 +2,19 @@ package profile
 
 import "testing"
 
-// A credential holding a reference in every place one can live. The point of
-// the fixture is that a reset must find all of them: the record-level fields
-// that predate versions, the current version, a historical version nobody
-// reads any more, and a staged candidate. A sweep that clears only the current
-// version leaves a store that still claims to hold secrets that are gone.
+// A credential holding a reference in every record-level field. The point of
+// the fixture is that a reset must find all of them: a sweep that clears only
+// one field leaves a store that still claims to hold secrets that are gone.
 func credentialWithReferencesEverywhere() Credential {
 	return Credential{
 		ID:       "cred:everywhere:1",
 		Name:     "everywhere",
 		Username: "u",
 		Auth:     AuthPassword,
-		// Record-level: written before versions existed.
+		// Record-level fields.
 		SecretID:            "sec:v1:file:aaaa",
 		PassphraseSecretID:  "sec:v1:file:bbbb",
 		KeyMaterialSecretID: "sec:v1:file:cccc",
-		Versions: []CredentialVersion{
-			{ID: "v1", PasswordSecretID: "sec:v1:system:dddd"},
-			{ID: "v2", PasswordSecretID: "sec:v1:file:eeee", PassphraseSecretID: "sec:v1:file:ffff"},
-			{ID: "v3", KeyMaterialSecretID: "sec:v1:system:0000"},
-		},
-		CurrentVersionID:   "v2",
-		CandidateVersionID: "v3",
 	}
 }
 
@@ -37,26 +28,24 @@ func TestCountSecretReferences_CountsEveryPlaceAReferenceLives(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CountSecretReferences: %v", err)
 	}
-	if impact.SecretCount != 7 {
-		t.Errorf("SecretCount = %d, want 7", impact.SecretCount)
+	if impact.SecretCount != 3 {
+		t.Errorf("SecretCount = %d, want 3", impact.SecretCount)
 	}
 	if impact.CredentialCount != 1 {
 		t.Errorf("CredentialCount = %d, want 1", impact.CredentialCount)
 	}
 }
 
-// Distinct secrets, not distinct fields. One secret shared by two versions is
-// one thing the user loses, and telling them "2 saved passwords" when there is
-// one overstates the damage in a confirmation they are reading to decide.
+// Distinct secrets, not distinct fields. One secret shared by two record-level
+// fields is one thing the user loses, and telling them "2 saved passwords"
+// when there is one overstates the damage in a confirmation they are reading
+// to decide.
 func TestCountSecretReferences_CountsASharedSecretOnce(t *testing.T) {
 	s := newTestStore(t)
 	shared := Credential{
 		ID: "cred:shared:1", Name: "shared", Username: "u", Auth: AuthPassword,
-		Versions: []CredentialVersion{
-			{ID: "v1", PasswordSecretID: "sec:v1:file:same"},
-			{ID: "v2", PasswordSecretID: "sec:v1:file:same"},
-		},
-		CurrentVersionID: "v2",
+		SecretID:           "sec:v1:file:same",
+		PassphraseSecretID: "sec:v1:file:same",
 	}
 	if err := s.CreateCredential(shared); err != nil {
 		t.Fatalf("CreateCredential: %v", err)
@@ -70,7 +59,6 @@ func TestCountSecretReferences_CountsASharedSecretOnce(t *testing.T) {
 		t.Errorf("SecretCount = %d, want 1", impact.SecretCount)
 	}
 }
-
 // A credential with no stored material must not be counted as affected — the
 // confirmation would name connections that lose nothing.
 func TestCountSecretReferences_IgnoresCredentialsHoldingNothing(t *testing.T) {
@@ -140,8 +128,8 @@ func TestClearAllSecretReferences_ClearsEveryPlaceAndKeepsTheRest(t *testing.T) 
 	if err != nil {
 		t.Fatalf("ClearAllSecretReferences: %v", err)
 	}
-	if impact.SecretCount != 7 {
-		t.Errorf("reported SecretCount = %d, want 7", impact.SecretCount)
+	if impact.SecretCount != 3 {
+		t.Errorf("reported SecretCount = %d, want 3", impact.SecretCount)
 	}
 
 	creds, err := s.LoadCredentials()
@@ -156,19 +144,9 @@ func TestClearAllSecretReferences_ClearsEveryPlaceAndKeepsTheRest(t *testing.T) 
 	if c.SecretID != "" || c.PassphraseSecretID != "" || c.KeyMaterialSecretID != "" {
 		t.Errorf("record-level references survived: %+v", c)
 	}
-	for _, v := range c.Versions {
-		if v.PasswordSecretID != "" || v.PassphraseSecretID != "" || v.KeyMaterialSecretID != "" {
-			t.Errorf("version %s still holds a reference: %+v", v.ID, v)
-		}
-	}
 	// The identity of the credential is untouched.
 	if c.Name != "everywhere" || c.Username != "u" {
 		t.Errorf("clearing references changed the credential itself: %+v", c)
-	}
-	// Versions are kept, not deleted: their fingerprints and ordering are the
-	// credential's history, and the history did not stop being true.
-	if len(c.Versions) != 3 {
-		t.Errorf("version count = %d, want 3", len(c.Versions))
 	}
 }
 

@@ -110,7 +110,7 @@ func (h *vaultReasonHarness) reasonOf(method string, params map[string]any) stri
 	return got.Error.Data.Reason
 }
 
-// the three write paths a user can reach from the connection and credential
+// the two write paths a user can reach from the connection and credential
 // forms. Each one calls SecretStore.Create under the hood.
 func (h *vaultReasonHarness) writePaths() map[string]map[string]any {
 	return map[string]map[string]any{
@@ -119,9 +119,6 @@ func (h *vaultReasonHarness) writePaths() map[string]map[string]any {
 		},
 		"credentials.saveKeyPassphrase": {
 			"credentialId": h.credA, "passphrase": "hunter2",
-		},
-		"credentials.stagePassword": {
-			"credentialId": h.credA, "password": "hunter2",
 		},
 	}
 }

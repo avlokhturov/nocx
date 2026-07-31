@@ -161,10 +161,10 @@ func (rc *RealClient) Connect(ctx context.Context, host string, opts ...ConnectO
 // (sending exactly one auth method — the caller's responsibility to restrict),
 // and closes immediately without launching a shell or running a command.
 //
-// This is the primitive for credential validation (e.g. fleet password
-// rollout) where MaxAuthTries is finite: sending several passwords against
-// one host causes account lockouts and is indistinguishable from password
-// spraying. The caller MUST supply exactly ONE auth method per Probe call.
+// This is the primitive for credential validation where MaxAuthTries is
+// finite: sending several passwords against one host causes account lockouts
+// and is indistinguishable from password spraying. The caller MUST supply
+// exactly ONE auth method per Probe call.
 //
 // Host key verification runs before authentication, via the standard
 // known_hosts callback. If the host is unknown or the key has changed,

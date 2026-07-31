@@ -68,17 +68,13 @@ func TestCredentialsRPC_UpdatePreservesSecretRefs(t *testing.T) {
 	if got.Name != "prod-ops-renamed" {
 		t.Errorf("Name = %q, want prod-ops-renamed", got.Name)
 	}
-	v, ok := got.Current()
-	if !ok {
-		t.Fatal("Current version not present after update")
+	if got.SecretID != string(pwID) {
+		t.Errorf("SecretID = %q, want %q — the update orphaned the stored password",
+			got.SecretID, pwID)
 	}
-	if v.PasswordSecretID != string(pwID) {
-		t.Errorf("current version PasswordSecretID = %q, want %q — the update orphaned the stored password",
-			v.PasswordSecretID, pwID)
-	}
-	if v.PassphraseSecretID != string(ppID) {
-		t.Errorf("current version PassphraseSecretID = %q, want %q — the update orphaned the passphrase",
-			v.PassphraseSecretID, ppID)
+	if got.PassphraseSecretID != string(ppID) {
+		t.Errorf("PassphraseSecretID = %q, want %q — the update orphaned the passphrase",
+			got.PassphraseSecretID, ppID)
 	}
 
 	// The secrets themselves are untouched either way; the defect is that

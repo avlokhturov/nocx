@@ -496,17 +496,8 @@ func (s *WSServer) vaultInventoryInputs(creds []profile.Credential, profiles []p
 			SecretID:            c.SecretID,
 			PassphraseSecretID:  c.PassphraseSecretID,
 			KeyMaterialSecretID: c.KeyMaterialSecretID,
+			KeyFingerprint:      c.KeyFingerprint,
 			UsageCount:          usageCount[c.ID],
-		}
-
-		// Populate versions.
-		for _, v := range c.Versions {
-			ci.Versions = append(ci.Versions, vault.CredentialVersionInventory{
-				PasswordSecretID:    v.PasswordSecretID,
-				PassphraseSecretID:  v.PassphraseSecretID,
-				KeyMaterialSecretID: v.KeyMaterialSecretID,
-				KeyFingerprint:      v.KeyFingerprint,
-			})
 		}
 
 		// For single-use passwords, resolve the sole profile to get host:port.

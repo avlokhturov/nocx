@@ -45,7 +45,6 @@
 @import './styles/surfaces/export.css';
 @import './styles/surfaces/connections.css';
 @import './styles/surfaces/secrets.css';
-@import './styles/surfaces/rollout.css';
 @import './styles/surfaces/vault.css';
 
 /* ── App body row: activity bar | sidebar | panes ────────────────────── */
