@@ -934,9 +934,16 @@ func (v *Vault) Create(ctx context.Context, value credential.Secret) (credential
 	switch st {
 	case StateUninitialized:
 		v.mu.Unlock()
+		v.logger.Info("vault: refusing Create, not initialized")
 		return "", ErrVaultUninitialized
 	case StateSealed:
+		hasInstance := v.doc.Instance != ""
 		v.mu.Unlock()
+		// Logged because "the page says unlocked and the write says sealed" is
+		// otherwise indistinguishable from a genuine contradiction: nothing on
+		// this path said anything at INFO, so a whole diagnosis had to proceed
+		// by elimination.
+		v.logger.Info("vault: refusing Create, sealed", "hasInstance", hasInstance)
 		return "", ErrVaultSealed
 	}
 	gen := v.gen
@@ -972,12 +979,26 @@ func (v *Vault) Create(ctx context.Context, value credential.Secret) (credential
 	v.mu.Lock()
 	defer v.mu.Unlock()
 
-	// Reject result if vault was sealed during the call.
-	if v.rootKey == nil || v.gen != gen {
+	// Reject the result if the vault moved under the write. Two DIFFERENT
+	// things can have happened and they used to share one error, which made
+	// them indistinguishable from outside: the vault was sealed (rootKey
+	// cleared), or the generation advanced while the provider call was in
+	// flight. Reporting the second as ErrVaultSealed tells the UI to raise
+	// Unlock — and unlocking does not fix a generation change, so the user
+	// unlocks, retries, and is asked to unlock again, forever. That loop is
+	// what nocx-25k9.20 records.
+	if v.rootKey == nil {
 		// Journal entry survives for reconciliation — do not clear it.
-		v.logger.Warn("create result rejected by generation change",
+		v.logger.Warn("create rejected: vault sealed during the provider call",
 			"secretID", id, "provider", provID, "duration", time.Since(t0))
 		return "", ErrVaultSealed
+	}
+	if v.gen != gen {
+		// Journal entry survives for reconciliation — do not clear it.
+		v.logger.Warn("create rejected: vault generation advanced during the provider call",
+			"secretID", id, "provider", provID,
+			"genAtStart", gen, "genNow", v.gen, "duration", time.Since(t0))
+		return "", ErrVaultGenerationChanged
 	}
 
 	// Clear the journal entry on success.

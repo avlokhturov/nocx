@@ -70,6 +70,11 @@ func reasonForError(err error) *vaultErrorData {
 		return &vaultErrorData{Reason: "vault-uninitialized"}
 	case errors.Is(err, vault.ErrVaultSealed):
 		return &vaultErrorData{Reason: "vault-sealed"}
+	case errors.Is(err, vault.ErrVaultGenerationChanged):
+		// NOT "vault-sealed". The renderer turns that reason into an Unlock
+		// dialog, and unlocking cannot fix a generation change — which is how
+		// the retry loop in nocx-25k9.20 became endless.
+		return &vaultErrorData{Reason: "vault-changed"}
 	case errors.Is(err, vault.ErrUnsealFailed):
 		return &vaultErrorData{Reason: "unseal-failed"}
 	default:

@@ -12,7 +12,15 @@
 // Surfaces import createVaultState for reactive state + the two dialogs,
 // calling ensureBeforeSave to intercept the password-save flow.
 
-import { createSignal, createEffect, Show, For, type Component, type Accessor } from 'solid-js'
+import {
+  createSignal,
+  createEffect,
+  onMount,
+  Show,
+  For,
+  type Component,
+  type Accessor,
+} from 'solid-js'
 import { Dialog } from './ui/dialog'
 import { Button } from './ui/button'
 import { Stack } from './ui/stack'
@@ -268,6 +276,8 @@ export function createVaultState(vaultClient: VaultClient): VaultController {
       pendingResolve = resolve
       pendingReject = reject
 
+      let retriedOnce = false
+
       const attempt = (): void => {
         void saveFn()
           .then(() => {
@@ -289,6 +299,16 @@ export function createVaultState(vaultClient: VaultClient): VaultController {
             }
             if (reason === 'vault-sealed') {
               void handleSealed(saveFn)
+              return
+            }
+            if (reason === 'vault-changed' && !retriedOnce) {
+              // The vault moved under the write — sealed and re-opened, or the
+              // default store changed — so the result was discarded. Unlocking
+              // does not fix this and asking the user to would be the endless
+              // loop of nocx-25k9.20. Retry the operation once, silently, which
+              // is what the error actually calls for.
+              retriedOnce = true
+              attempt()
               return
             }
             // Non-vault RPC error — propagate
@@ -1036,6 +1056,17 @@ export interface VaultSectionProps {
 }
 
 export function VaultSection(props: VaultSectionProps) {
+  // Re-read the state from the backend on every mount. Without this the page
+  // renders the controller's CACHED status, so a vault that sealed while the
+  // user was elsewhere — by the idle timer, or from another surface — still
+  // shows "Lock now" and offers actions that cannot work. It also cost hours of
+  // diagnosis: every "the page says unsealed but the write says sealed" reading
+  // was the cache disagreeing with the truth, not the backend contradicting
+  // itself.
+  onMount(() => {
+    void props.vaultController.refresh()
+  })
+
   const [dialog, setDialog] = createSignal<'setup' | 'passphrase' | 'recovery' | null>(null)
   const [sealing, setSealing] = createSignal(false)
   const [activeStore, setActiveStore] = createSignal<string | null>(null)
