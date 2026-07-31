@@ -83,6 +83,17 @@ dialog.nocx-dialog::backdrop {
   overflow-y: auto;
 }
 
+/* While the panel is mid-transition it is pinned to the height it is leaving,
+   so a body sized for the height it is arriving at overflows and shows a
+   scrollbar for the duration. Suppressing it is not cosmetic: a bar that
+   appears and vanishes inside 180ms is the part of the movement the eye
+   reliably catches, and it reads as a glitch. It returns when the panel
+   settles, because the attribute is removed then and the rule above is all
+   that is left. */
+.nocx-dialog__panel[data-animating] .nocx-dialog__body {
+  overflow-y: hidden;
+}
+
 .nocx-dialog__body > * {
   max-width: 100%;
   min-width: 0;

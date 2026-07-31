@@ -145,6 +145,7 @@ export const Dialog: Component<DialogProps> = (props) => {
     animating = false
     panel.style.height = ''
     panel.style.transition = ''
+    panel.removeAttribute('data-animating')
   }
 
   /**
@@ -178,6 +179,14 @@ export const Dialog: Component<DialogProps> = (props) => {
       return
     }
     animating = true
+    // Marks the window in which the panel is pinned to the OLD height while its
+    // content is already the NEW size. The body is a scroll container, so for
+    // exactly that window it overflows and flashes a scrollbar — the most
+    // visible artefact of the whole transition, and it reads as a glitch rather
+    // than as movement. The CSS hides the body's overflow while this is set;
+    // releasePanelHeight removes it, so a body that genuinely does not fit gets
+    // its scrollbar back the moment the panel settles.
+    p.setAttribute('data-animating', 'true')
     p.style.transition = 'none'
     p.style.height = `${from}px`
     void p.offsetHeight // commit the pin so the transition starts from it

@@ -334,6 +334,29 @@ describe('Dialog panel height animation', () => {
     fireEvent(panel, ev)
   }
 
+  // The artefact a user actually sees. Mid-transition the panel is pinned to
+  // the height it is leaving while the body is already sized for the height it
+  // is arriving at, so the body overflows and flashes a scrollbar for the whole
+  // 180ms. Reported from the running app, not from any test — every assertion
+  // about heights passed while the transition looked broken.
+  it('does not let the body flash a scrollbar while the panel is mid-transition', () => {
+    const { container } = subject()
+    const panel = container.querySelector('.nocx-dialog__panel') as HTMLElement
+    stubPanelHeight(panel, 200)
+    fireResize()
+    expect(panel.hasAttribute('data-animating')).toBe(false)
+
+    stubPanelHeight(panel, 320)
+    fireResize()
+    // The marker the stylesheet hangs `overflow-y: hidden` on.
+    expect(panel.hasAttribute('data-animating')).toBe(true)
+
+    endTransition(panel)
+    // And it must come back: a body that genuinely does not fit still scrolls
+    // once the panel has settled.
+    expect(panel.hasAttribute('data-animating')).toBe(false)
+  })
+
   it('pins the panel height to the new size when the content resizes', () => {
     const { container } = subject()
     const panel = container.querySelector('.nocx-dialog__panel') as HTMLElement
