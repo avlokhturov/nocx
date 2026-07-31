@@ -585,3 +585,52 @@ func TestStatusStoreUnreachable(t *testing.T) {
 		t.Fatal("Status with broken store has empty reason, want a store-relevant reason")
 	}
 }
+
+// A brand-new vault has no blob yet, so the file provider has a root key and no
+// data key. Unlock's doc comment promises "the first mutation creates the blob
+// lazily"; before this test Put refused instead, and refused with
+// ErrVaultSealed — a lie that the renderer turns into an Unlock dialog, so the
+// user unlocked, retried and was asked to unlock again forever (nocx-25k9.20).
+//
+// Asserting "Put returns no error" would be enough to catch it. Reading the
+// secret back as well is what proves the minted key is the one the blob was
+// written with.
+func TestPut_FirstWriteToEmptyStoreMintsDataKey(t *testing.T) {
+	docs := newMemDocStore()
+	p := New(docs, "vault-blob")
+	p.SetInstanceID("inst-1")
+
+	rootKey := testRootKey()
+	if err := p.Unlock(rootKey); err != nil {
+		t.Fatalf("Unlock on an empty store: %v", err)
+	}
+
+	id := credential.SecretID("sec:v1:file:0123456789abcdef0123456789abcdef")
+	if err := p.Put(context.Background(), id, credential.NewSecret("hunter2")); err != nil {
+		t.Fatalf("first Put after Unlock: %v", err)
+	}
+
+	got, err := p.Get(context.Background(), id)
+	if err != nil {
+		t.Fatalf("Get after first Put: %v", err)
+	}
+	var read string
+	if err := got.Use(func(b []byte) error { read = string(b); return nil }); err != nil {
+		t.Fatalf("Use: %v", err)
+	}
+	if read != "hunter2" {
+		t.Fatalf("read back %q, want %q", read, "hunter2")
+	}
+}
+
+// The genuinely sealed case must keep saying sealed.
+func TestPut_WithoutRootKeyStillReportsSealed(t *testing.T) {
+	docs := newMemDocStore()
+	p := New(docs, "vault-blob")
+
+	err := p.Put(context.Background(), credential.SecretID("sec:v1:file:0123456789abcdef0123456789abcdef"),
+		credential.NewSecret("x"))
+	if !errors.Is(err, vault.ErrVaultSealed) {
+		t.Fatalf("Put with no root key: got %v, want ErrVaultSealed", err)
+	}
+}

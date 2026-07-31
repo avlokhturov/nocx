@@ -92,7 +92,11 @@ func (p *Provider) SetInstanceID(id string) {
 func (p *Provider) NewDataKey() ([]byte, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	return p.newDataKeyLocked()
+}
 
+// newDataKeyLocked is NewDataKey's body, callable by a holder of p.mu.
+func (p *Provider) newDataKeyLocked() ([]byte, error) {
 	if p.rootKey == nil {
 		return nil, vault.ErrVaultSealed
 	}
@@ -229,8 +233,24 @@ func (p *Provider) Put(_ context.Context, id credential.SecretID, s credential.S
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	// "The first mutation creates the blob lazily" is what Unlock's own doc
+	// comment promises when no document exists yet, and this is where the
+	// promise has to be kept. It was not: Put refused with ErrVaultSealed, so
+	// on a brand-new vault every single write failed with "vault is sealed"
+	// while the vault was wide open — and because the renderer turns that
+	// reason into an Unlock dialog, the user unlocked, retried, and was asked
+	// to unlock again, forever (nocx-25k9.20).
+	//
+	// No data key AND no root key is the genuinely sealed case. No data key
+	// with a root key in hand is the first write to an empty store, and it
+	// mints one.
 	if p.dataKey == nil {
-		return vault.ErrVaultSealed
+		if p.rootKey == nil {
+			return vault.ErrVaultSealed
+		}
+		if _, err := p.newDataKeyLocked(); err != nil {
+			return fmt.Errorf("mint data key for first write: %w", err)
+		}
 	}
 
 	var plaintext []byte
