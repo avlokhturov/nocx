@@ -276,4 +276,39 @@ describe('Prompt', () => {
     setOpen(false)
     expect(document.querySelector('.ui-prompt-overlay')).toBeNull()
   })
+
+  // Escape's other route to the same damage. The browser answers a close
+  // request by firing `cancel` at the dialog — the dialog is still the target
+  // even when the prompt on top of it is a child of it — so the dialog closed
+  // underneath a prompt the user was only trying to dismiss. Dispatching
+  // `cancel` is what Escape does; jsdom does not synthesise it from a keydown,
+  // so the event is raised directly rather than tested through a key that
+  // does nothing here.
+  it('ignores the native cancel while a prompt is open above it', () => {
+    const [open, setOpen] = createSignal(false)
+    const onDialogClose = vi.fn()
+    render(() => (
+      <>
+        <Dialog open onClose={onDialogClose} title="New Connection">
+          Body
+        </Dialog>
+        <Prompt open={open()} ariaLabel="Password" onClose={() => setOpen(false)} actions={null}>
+          Secret
+        </Prompt>
+      </>
+    ))
+    setOpen(true)
+
+    const dialog = document.querySelector('dialog.nocx-dialog')!
+    const cancel = new Event('cancel', { bubbles: false, cancelable: true })
+    dialog.dispatchEvent(cancel)
+
+    expect(onDialogClose).not.toHaveBeenCalled()
+    expect(cancel.defaultPrevented).toBe(true)
+
+    // …and once the prompt is gone the dialog owns Escape again.
+    setOpen(false)
+    dialog.dispatchEvent(new Event('cancel', { bubbles: false, cancelable: true }))
+    expect(onDialogClose).toHaveBeenCalledOnce()
+  })
 })

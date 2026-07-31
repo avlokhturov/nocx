@@ -24,7 +24,7 @@ import { TextField } from './ui/text-field'
 import { SegmentedControl } from './ui/segmented-control'
 import { createFormValidation, required } from './ui/validation'
 import { KeyIcon, LockIcon, PencilIcon, ResetIcon } from './ui/icons'
-import { KeyMaterialInput, suppliesMaterial } from './key-material-input'
+import { DEFAULT_KEY_MODE, KeyMaterialInput, suppliesMaterial } from './key-material-input'
 import type { KeyInputMode } from './key-material-input'
 import { showToast } from './ui/toast'
 import type { VaultClient, InventoryEntry } from './vault-client'
@@ -71,7 +71,7 @@ export function SecretsSection(props: SecretsSectionProps) {
   const [addName, setAddName] = createSignal('')
   const [addKind, setAddKind] = createSignal<AddKind>('password')
   const [addValue, setAddValue] = createSignal('')
-  const [addKeyMode, setAddKeyMode] = createSignal<KeyInputMode>('path')
+  const [addKeyMode, setAddKeyMode] = createSignal<KeyInputMode>(DEFAULT_KEY_MODE)
   const [addKeyMaterial, setAddKeyMaterial] = createSignal('')
   const [addKeyPath, setAddKeyPath] = createSignal('')
   const [addBusy, setAddBusy] = createSignal(false)
@@ -92,7 +92,7 @@ export function SecretsSection(props: SecretsSectionProps) {
   // not "edit the value".
   const [replaceTarget, setReplaceTarget] = createSignal<InventoryEntry | null>(null)
   const [replaceValue, setReplaceValue] = createSignal('')
-  const [replaceKeyMode, setReplaceKeyMode] = createSignal<KeyInputMode>('path')
+  const [replaceKeyMode, setReplaceKeyMode] = createSignal<KeyInputMode>(DEFAULT_KEY_MODE)
   const [replaceKeyMaterial, setReplaceKeyMaterial] = createSignal('')
   const [replaceKeyPath, setReplaceKeyPath] = createSignal('')
   const [replaceBusy, setReplaceBusy] = createSignal(false)
@@ -168,7 +168,7 @@ export function SecretsSection(props: SecretsSectionProps) {
     setAddName('')
     setAddKind('password')
     setAddValue('')
-    setAddKeyMode('path')
+    setAddKeyMode(DEFAULT_KEY_MODE)
     setAddKeyMaterial('')
     setAddKeyPath('')
     setAddOpen(true)
@@ -220,7 +220,7 @@ export function SecretsSection(props: SecretsSectionProps) {
     replaceValidation.reset()
     setReplaceTarget(entry)
     setReplaceValue('')
-    setReplaceKeyMode('path')
+    setReplaceKeyMode(DEFAULT_KEY_MODE)
     setReplaceKeyMaterial('')
     setReplaceKeyPath('')
   }

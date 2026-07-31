@@ -579,6 +579,18 @@ function selectProfileSection(container: HTMLElement, label: string) {
   ;(btn! as HTMLElement).click()
 }
 
+/**
+ * The key input opens on Choose file (nocx-uvb3), which is what a user meets.
+ * A test that is about the PATH field has to ask for it the way a user does —
+ * by pressing the segment — rather than assuming the mode it used to open on.
+ */
+async function selectKeyPathMode(container: HTMLElement) {
+  await vi.waitFor(() => {
+    expect(container.querySelector('[aria-label="Key input mode"]')).toBeTruthy()
+  })
+  clickSegmentedOption(container, 'Path')
+}
+
 function clickSegmentedOption(container: HTMLElement, label: string) {
   const option = Array.from(container.querySelectorAll('[role="radio"]')).find(
     (r) => r.textContent?.trim() === label,
@@ -601,6 +613,7 @@ describe('three-way key input — connection editor', () => {
     clickSegmentedOption(container, 'Public Key')
 
     // Wait for the key input field
+    await selectKeyPathMode(container)
     await vi.waitFor(() => {
       expect(container.querySelector('#profile-key-path')).toBeTruthy()
     })
@@ -616,6 +629,30 @@ describe('three-way key input — connection editor', () => {
     expect(keySegments.length).toBe(3)
   })
 
+  // The editor used to open on Path, which is the one mode that asks the user
+  // for something they have to know — an absolute path, typed from memory,
+  // with the native picker behind Browse absent outside a packaged build.
+  // Asserted from the state a user starts in: the segment is selected without
+  // anybody clicking it, and the path field is not the one on screen.
+  it('opens on Choose file, the mode that asks for nothing', async () => {
+    const { container } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    await waitForProfiles(container, 1)
+
+    await openProfileEditor(container, 'prod-web')
+    selectProfileSection(container, 'Authentication')
+    clickSegmentedOption(container, 'Public Key')
+
+    const group = await vi.waitFor(() => {
+      const g = container.querySelector('[aria-label="Key input mode"]')
+      expect(g).toBeTruthy()
+      return g!
+    })
+    const segments = Array.from(group.querySelectorAll('[role="radio"]'))
+    expect(segments[0].textContent?.trim()).toBe('Choose file')
+    expect(segments[0].getAttribute('aria-checked')).toBe('true')
+    expect(container.querySelector('#profile-key-path')).toBeNull()
+  })
+
   it('path mode records a path and calls no vault method', async () => {
     const { container, client } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
     const saveKeyMatSpy = vi.spyOn(client, 'saveKeyMaterial')
@@ -625,6 +662,7 @@ describe('three-way key input — connection editor', () => {
     selectProfileSection(container, 'Authentication')
     clickSegmentedOption(container, 'Public Key')
 
+    await selectKeyPathMode(container)
     await vi.waitFor(() => {
       expect(container.querySelector('#profile-key-path')).toBeTruthy()
     })
@@ -1109,6 +1147,18 @@ describe('three-way key input — group editor', () => {
     // Set auth to Public Key (the group editor has an AuthMethodEditor inside)
     clickSegmentedOption(container, 'Public Key')
 
+    const group = await vi.waitFor(() => {
+      const g = container.querySelector('[aria-label="Key input mode"]')
+      expect(g).toBeTruthy()
+      return g!
+    })
+    // Group defaults open on the same mode the connection editor does, and it
+    // is the leftmost segment (nocx-uvb3).
+    const first = group.querySelector('[role="radio"]')!
+    expect(first.textContent?.trim()).toBe('Choose file')
+    expect(first.getAttribute('aria-checked')).toBe('true')
+
+    await selectKeyPathMode(container)
     await vi.waitFor(() => {
       expect(container.querySelector('#group-default-key-path')).toBeTruthy()
     })
@@ -1132,6 +1182,7 @@ describe('three-way key input — group editor', () => {
     selectGroupSection(container, 'Connection')
     clickSegmentedOption(container, 'Public Key')
 
+    await selectKeyPathMode(container)
     await vi.waitFor(() => {
       expect(container.querySelector('#group-default-key-path')).toBeTruthy()
     })
@@ -1172,6 +1223,7 @@ describe('three-way key input — group editor', () => {
     clickSegmentedOption(container, 'Public Key')
 
     // Enter path mode value
+    await selectKeyPathMode(container)
     const pathInput = container.querySelector('#group-default-key-path') as HTMLInputElement
     fireEvent.input(pathInput, { target: { value: '/tmp/test-key' } })
 
@@ -1183,8 +1235,7 @@ describe('three-way key input — group editor', () => {
     })
 
     // Switch back to Path — the path should be cleared
-    clickSegmentedOption(container, 'Path')
-
+    await selectKeyPathMode(container)
     await vi.waitFor(() => {
       expect(container.querySelector('#group-default-key-path')).toBeTruthy()
     })
@@ -1261,6 +1312,7 @@ describe('native file picker — path mode', () => {
     selectProfileSection(container, 'Authentication')
     clickSegmentedOption(container, 'Public Key')
 
+    await selectKeyPathMode(container)
     await vi.waitFor(() => {
       expect(container.querySelector('#profile-key-path')).toBeTruthy()
     })
@@ -1294,6 +1346,7 @@ describe('native file picker — path mode', () => {
     selectProfileSection(container, 'Authentication')
     clickSegmentedOption(container, 'Public Key')
 
+    await selectKeyPathMode(container)
     await vi.waitFor(() => {
       expect(container.querySelector('#profile-key-path')).toBeTruthy()
     })
@@ -1320,6 +1373,7 @@ describe('native file picker — path mode', () => {
     selectProfileSection(container, 'Authentication')
     clickSegmentedOption(container, 'Public Key')
 
+    await selectKeyPathMode(container)
     await vi.waitFor(() => {
       expect(container.querySelector('#profile-key-path')).toBeTruthy()
     })

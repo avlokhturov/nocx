@@ -547,9 +547,13 @@ it('adds a private key from pasted material', async () => {
   privateKeyKind.click()
   await vi.waitFor(() => {
     // The three-way input replaced the single value field.
-    expect(container.querySelector('#sr-add-key-path')).toBeTruthy()
+    expect(container.querySelector('[aria-label="Key input mode"]')).toBeTruthy()
   })
   expect(container.querySelector('#sr-add-value')).toBeNull()
+  // …and it opens on the mode that asks the user for nothing (nocx-uvb3).
+  const firstSegment = container.querySelector('[aria-label="Key input mode"] [role="radio"]')!
+  expect(firstSegment.textContent?.trim()).toBe('Choose file')
+  expect(firstSegment.getAttribute('aria-checked')).toBe('true')
 
   const modeOptions = Array.from(container.querySelectorAll('[role="radio"]'))
   const paste = modeOptions.find((o) => o.textContent?.trim() === 'Paste key') as HTMLElement
@@ -575,6 +579,19 @@ it('adds a private key from pasted material', async () => {
     })
   })
 })
+
+/**
+ * The three-way key input opens on Choose file (nocx-uvb3). A test that is
+ * about the PATH field presses the segment, the way a user does, instead of
+ * assuming the mode the input used to open on.
+ */
+function selectKeyPathMode(container: HTMLElement) {
+  const option = Array.from(container.querySelectorAll('[role="radio"]')).find(
+    (o) => o.textContent?.trim() === 'Path',
+  ) as HTMLElement | undefined
+  expect(option, 'Path segment not found').toBeTruthy()
+  option!.click()
+}
 
 // Path mode sends the path for the BACKEND to dereference — the renderer
 // cannot read arbitrary paths, and the stored material is the key, never a
@@ -608,6 +625,7 @@ it('adds a private key from a path the backend dereferences', async () => {
   ) as HTMLElement
   privateKeyKind.click()
 
+  selectKeyPathMode(container)
   await vi.waitFor(() => {
     expect(container.querySelector('#sr-add-key-path')).toBeTruthy()
   })
@@ -716,6 +734,7 @@ it('replaces a private key secret via the three-way input', async () => {
   ) as HTMLButtonElement
   replaceButton.click()
 
+  selectKeyPathMode(container)
   await vi.waitFor(() => {
     expect(container.querySelector('#sr-replace-key-path')).toBeTruthy()
   })

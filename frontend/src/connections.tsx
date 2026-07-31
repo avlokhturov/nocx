@@ -23,7 +23,12 @@ import { FileInput } from './ui/file-input'
 import { Badge } from './ui/badge'
 import { IconButton } from './ui/icon-button'
 import { CollectionRow, CollectionView } from './ui/collection-view'
-import { KeyMaterialInput, KeyPassphrasePrompt, suppliesMaterial } from './key-material-input'
+import {
+  DEFAULT_KEY_MODE,
+  KeyMaterialInput,
+  KeyPassphrasePrompt,
+  suppliesMaterial,
+} from './key-material-input'
 import type { KeyInputMode } from './key-material-input'
 import type { DialogClient } from './dialog-client'
 import { CheckCircleIcon, PencilIcon, PlugIcon, TrashIcon } from './ui/icons'
@@ -268,7 +273,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   // itself stays here: the save paths and the credential draft own it.
 
   // Profile editor key state
-  const [profileKeyMode, setProfileKeyMode] = createSignal<KeyInputMode>('path')
+  const [profileKeyMode, setProfileKeyMode] = createSignal<KeyInputMode>(DEFAULT_KEY_MODE)
   const [profileKeyText, setProfileKeyText] = createSignal('')
   const [profileKeyFingerprint, setProfileKeyFingerprint] = createSignal<string | undefined>(
     undefined,
@@ -276,7 +281,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   const [profileKeyTextError, setProfileKeyTextError] = createSignal<string | undefined>(undefined)
 
   // Group editor key state
-  const [groupKeyMode, setGroupKeyMode] = createSignal<KeyInputMode>('path')
+  const [groupKeyMode, setGroupKeyMode] = createSignal<KeyInputMode>(DEFAULT_KEY_MODE)
   const [groupKeyText, setGroupKeyText] = createSignal('')
   const [groupKeyFingerprint, setGroupKeyFingerprint] = createSignal<string | undefined>(undefined)
   const [groupKeyTextError, setGroupKeyTextError] = createSignal<string | undefined>(undefined)
@@ -561,7 +566,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     setDangerConfirmed(false)
     setGroupSection('general')
     groupValidation.reset()
-    setGroupKeyMode('path')
+    setGroupKeyMode(DEFAULT_KEY_MODE)
     setGroupKeyText('')
     setGroupKeyFingerprint(undefined)
     setGroupKeyTextError(undefined)
@@ -586,7 +591,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     setGroupImpact(null)
     setGroupImpactBusy(false)
     setDangerConfirmed(false)
-    setGroupKeyMode('path')
+    setGroupKeyMode(DEFAULT_KEY_MODE)
     setGroupKeyText('')
     setGroupKeyFingerprint(undefined)
     setGroupKeyTextError(undefined)
@@ -1305,7 +1310,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     setEditing(profile)
     setDirtyFields(new Set<string>())
     profileValidation.reset()
-    setProfileKeyMode('path')
+    setProfileKeyMode(DEFAULT_KEY_MODE)
     setProfileKeyText('')
     setProfileKeyFingerprint(undefined)
     setProfileKeyTextError(undefined)
@@ -1317,7 +1322,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     setEditing(profile)
     setDirtyFields(new Set<string>())
     profileValidation.reset()
-    setProfileKeyMode('path')
+    setProfileKeyMode(DEFAULT_KEY_MODE)
     setProfileKeyText('')
     setProfileKeyFingerprint(undefined)
     setProfileKeyTextError(undefined)
@@ -1331,7 +1336,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     setProfilePasswordValue('')
     setDirtyFields(new Set<string>())
     setProfileMoveImpact(null)
-    setProfileKeyMode('path')
+    setProfileKeyMode(DEFAULT_KEY_MODE)
     setProfileKeyText('')
     setProfileKeyFingerprint(undefined)
     setProfileKeyTextError(undefined)

@@ -45,7 +45,7 @@ import {
   Show,
 } from 'solid-js'
 import { render } from 'solid-js/web'
-import { pushOverlay, popOverlay, restoreFocus } from './overlay/stack'
+import { pushOverlay, popOverlay, restoreFocus, topOverlay } from './overlay/stack'
 import { Button } from './button'
 
 export interface DialogProps {
@@ -270,6 +270,18 @@ export const Dialog: Component<DialogProps> = (props) => {
     // form behind it. The native `<dialog>` cancel (Escape) targets the dialog
     // itself; anything else reaching here belongs to a descendant.
     if (e.target !== ref) return
+    // Escape belongs to the topmost overlay, which is what the stack is for.
+    // A Prompt opened over this dialog renders inside it, so the dialog is
+    // still the element the browser fires `cancel` at — and a user cancelling
+    // "which passphrase do you want?" was losing the connection they had just
+    // filled in. The stack's own Escape handler closes the prompt; this one
+    // stands down until the dialog is topmost again. `cancel` is cancelable,
+    // and preventing it is what keeps the dialog open.
+    const own = entry()
+    if (own && topOverlay() !== own) {
+      e.preventDefault()
+      return
+    }
     props.onClose()
   }
 

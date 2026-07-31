@@ -43,10 +43,26 @@ export type KeyInputMode = 'path' | 'file' | 'material'
 export const suppliesMaterial = (m: KeyInputMode) => m === 'material' || m === 'file'
 
 const KEY_MODES: { value: KeyInputMode; label: string }[] = [
-  { value: 'path', label: 'Path' },
   { value: 'file', label: 'Choose file' },
+  { value: 'path', label: 'Path' },
   { value: 'material', label: 'Paste key' },
 ]
+
+/**
+ * What the input opens on, everywhere it is used.
+ *
+ * Choosing a file, because it is the only one of the three that asks the user
+ * for nothing they have to know: Path wants an absolute path typed from
+ * memory — and the native picker that would fill it in is absent outside a
+ * packaged Wails build — while Paste wants the key on the clipboard. The
+ * first segment is the same one, so the selected option is also the leftmost
+ * and the control reads in the order a user tries things.
+ *
+ * Exported rather than repeated: the mode is reset to its initial value on
+ * every open and close of every editor, and four call sites spelling the
+ * default themselves is four places for it to drift.
+ */
+export const DEFAULT_KEY_MODE: KeyInputMode = 'file'
 
 export interface KeyMaterialInputProps {
   /** Element-id prefix: `<id>-path` and `<id>-text`. Call sites pass e.g.
