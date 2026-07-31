@@ -157,6 +157,21 @@ sticky, because an error the user was not looking at is an error they never saw.
 explicit `duration` overrides the level's default and `0` means sticky, which is what a
 half-succeeded import uses.
 
+**Never raise a Toast from inside an open Dialog. It cannot be seen.** `Dialog` uses
+`showModal()`, so it paints in the browser's **top layer** — above every `z-index` in
+the normal layer, including `ToastHost`'s 300. A toast raised while a modal is open is
+drawn behind it, so the button that raised it looks like it did nothing at all. A
+message that belongs to a dialog goes on the field it is about (`TextField`'s `error`)
+or in the dialog's own body; a message about an outcome that CLOSES the dialog is fine,
+because by the time it is on screen the modal is gone.
+
+This has now been learned twice — `connections.tsx:271`, where a required-name error was
+reported to a place hidden behind the thing the user was looking at, and the vault unlock
+prompt, where a refused passphrase was moved to a toast and vanished. **Neither was caught
+by a test**: the jsdom setup stubs `showModal`, so there is no top layer in the test
+environment and the invisible toast is perfectly queryable. Assert the message lands on
+the field.
+
 The rule this replaces a pattern for: **a message about an action does not live in the
 document flow.** The export page kept a `.st-export-status` div under every action,
 holding an empty line on four sections forever so that a message could appear without
