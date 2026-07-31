@@ -1786,3 +1786,66 @@ describe('ResetVaultDialog', () => {
     })
   })
 })
+
+// ── Copying the recovery code ──────────────────────────────────────────
+// A recovery code is shown exactly once. Silence after pressing Copy is the
+// dangerous outcome, not the missing one: the user presses Done believing the
+// code is on the clipboard, and it is gone for good.
+
+describe('copying a one-time recovery code', () => {
+  function withClipboard(write: () => Promise<void>) {
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText: vi.fn(write) },
+      configurable: true,
+    })
+  }
+
+  async function showRecoveryCode() {
+    clearToasts()
+    const { client, setup } = mockClient()
+    setup.mockResolvedValue({ recoveryCode: 'r1pw-1js2-j4cx' })
+    render(() => (
+      <>
+        <SetupDialog open={true} onClose={vi.fn()} onSetupComplete={vi.fn()} vaultClient={client} />
+        <ToastHost />
+      </>
+    ))
+    fireEvent.input(screen.getByLabelText('Master passphrase'), {
+      target: { value: 'my-passphrase' },
+    })
+    fireEvent.input(screen.getByLabelText('Confirm passphrase'), {
+      target: { value: 'my-passphrase' },
+    })
+    fireEvent.click(screen.getAllByText('Set Up').find((el) => el.tagName === 'BUTTON')!)
+    await vi.waitFor(() => expect(screen.getByText('r1pw-1js2-j4cx')).toBeTruthy())
+    const copy = document.querySelector('.ui-vault-action-row .ui-icon-button') as HTMLButtonElement
+    expect(copy).toBeTruthy()
+    return copy
+  }
+
+  it('confirms the code reached the clipboard', async () => {
+    withClipboard(() => Promise.resolve())
+    const copy = await showRecoveryCode()
+    fireEvent.click(copy)
+
+    await vi.waitFor(() => {
+      const toast = document.querySelector('.ui-toast')!
+      expect(toast.getAttribute('data-level')).toBe('success')
+      expect(toast.textContent).toContain('copied to the clipboard')
+    })
+  })
+
+  // The one that matters. A copy that failed silently is worse than no copy
+  // button at all, because the user acts on a promise nothing made.
+  it('says the copy failed, and says what to do instead', async () => {
+    withClipboard(() => Promise.reject(new Error('denied')))
+    const copy = await showRecoveryCode()
+    fireEvent.click(copy)
+
+    await vi.waitFor(() => {
+      const toast = document.querySelector('.ui-toast')!
+      expect(toast.getAttribute('data-level')).toBe('danger')
+      expect(toast.textContent).toContain('Write it down before closing this')
+    })
+  })
+})

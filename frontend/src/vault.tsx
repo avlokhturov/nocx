@@ -521,13 +521,21 @@ export const SetupDialog: Component<SetupDialogProps> = (props) => {
     }
   }
 
+  // A recovery code is shown exactly once. A copy that silently failed is
+  // therefore not a small annoyance: the user presses Done believing the code
+  // is on the clipboard, and it is gone for good. Both outcomes are stated.
   const handleCopy = async () => {
     try {
       await navigator.clipboard.writeText(recoveryCode())
       setCopied(true)
       setTimeout(() => setCopied(false), 3000)
+      showToast({ level: 'success', message: 'Recovery code copied to the clipboard.' })
     } catch {
-      // clipboard write may fail; copy silently
+      showToast({
+        level: 'danger',
+        message: 'Could not copy the recovery code. Write it down before closing this.',
+        duration: 0,
+      })
     }
   }
 
@@ -1179,15 +1187,22 @@ export const RecoveryCodeDialog: Component<RecoveryCodeDialogProps> = (props) =>
     }
   }
 
+  // Shown once, so a silent failure costs the code — see SetupDialog's copy
+  // handler for the same reasoning.
   const handleCopy = () => {
     const code = recoveryCode()
     if (!code) return
     void navigator.clipboard.writeText(code).then(
       () => {
         setCopied(true)
+        showToast({ level: 'success', message: 'Recovery code copied to the clipboard.' })
       },
       () => {
-        /* clipboard not available */
+        showToast({
+          level: 'danger',
+          message: 'Could not copy the recovery code. Write it down before closing this.',
+          duration: 0,
+        })
       },
     )
   }
