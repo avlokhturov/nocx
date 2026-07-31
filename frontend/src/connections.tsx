@@ -86,13 +86,46 @@ export function sourceLabel(source: FieldSourceDTO): string {
 
 // ── Secret naming (ADR-0016) ──────────────────────────────────────────────
 
+/** What the secret is, in the generated name. A connection that stores a key
+ *  and its passphrase produces two secrets for one login, and `root@host`
+ *  twice is not a name — it is the same name written down twice. The kind
+ *  badge tells them apart in the list; the NAME has to tell them apart
+ *  everywhere else, starting with the picker that chooses between them. */
+const SECRET_NAME_PREFIX = {
+  password: 'Password for',
+  'private-key': 'Key for',
+  'key-passphrase': 'Passphrase for',
+} as const
+
+type GeneratedSecretKind = keyof typeof SECRET_NAME_PREFIX
+
 // The generated display name for a secret saved on a connection: derived from
-// host and user — never from any secret material. Empty when neither is
-// known; the backend then falls back to rendering.
-function generatedSecretName(user: string | undefined, host: string | undefined): string {
+// what it is plus host and user — never from any secret material. Falls back
+// to the bare login when neither is known, and to the kind alone when nothing
+// is: a name is what the user reads, so it is never empty.
+function generatedSecretName(
+  kind: GeneratedSecretKind,
+  user: string | undefined,
+  host: string | undefined,
+): string {
+  return secretNameFor(kind, loginLabel(user, host))
+}
+
+/** `root@host`, or whichever half is known. The subject a generated name is
+ *  about — and what the passphrase prompt calls the key it is asking for,
+ *  which is a different thing from what it calls the secret it stores. */
+function loginLabel(user: string | undefined, host: string | undefined): string {
   const u = (user ?? '').trim()
   const h = (host ?? '').trim()
   return u && h ? `${u}@${h}` : u || h
+}
+
+/** The same naming for a subject that is already a label — a group's defaults
+ *  name their credential, not a login. Never empty: a nameless row cannot be
+ *  told from another nameless row. */
+function secretNameFor(kind: GeneratedSecretKind, subject: string): string {
+  const s = subject.trim()
+  return s ? `${SECRET_NAME_PREFIX[kind]} ${s}` : SECRET_NAME_PREFIX[kind].replace(' for', '')
 }
 // ── Probe outcome helpers ────────────────────────────────────────────────────
 
@@ -667,7 +700,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           const result = await props.client.saveKeyMaterial(
             credential.id,
             groupKeyText(),
-            credential.name,
+            secretNameFor('private-key', credential.name),
           )
           setGroupKeyFingerprint(result.fingerprint)
           if (result.passphraseWanted) {
@@ -716,7 +749,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             const result = await props.client.saveKeyMaterial(
               credDraft.id,
               groupKeyText(),
-              credDraft.name,
+              secretNameFor('private-key', credDraft.name),
             )
             setGroupKeyFingerprint(result.fingerprint)
             if (result.passphraseWanted) {
@@ -1472,7 +1505,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           await props.client.savePassword(
             credential!.id,
             profilePasswordValue(),
-            generatedSecretName(profile.options.user, profile.options.host),
+            generatedSecretName('password', profile.options.user, profile.options.host),
           )
         }
         if (props.vaultController) {
@@ -1522,13 +1555,13 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           const result = await props.client.saveKeyMaterial(
             credential!.id,
             profileKeyText(),
-            generatedSecretName(profile.options.user, profile.options.host),
+            generatedSecretName('private-key', profile.options.user, profile.options.host),
           )
           setProfileKeyFingerprint(result.fingerprint)
           if (result.passphraseWanted) {
             await askKeyPassphrase(
               credential!.id,
-              generatedSecretName(profile.options.user, profile.options.host),
+              loginLabel(profile.options.user, profile.options.host),
             )
           }
         }
@@ -1608,7 +1641,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           await props.client.savePassword(
             credDraft.id,
             profilePasswordValue(),
-            generatedSecretName(profile.options.user, profile.options.host),
+            generatedSecretName('password', profile.options.user, profile.options.host),
           )
         }
         try {
@@ -1637,13 +1670,13 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           const result = await props.client.saveKeyMaterial(
             credDraft.id,
             profileKeyText(),
-            generatedSecretName(profile.options.user, profile.options.host),
+            generatedSecretName('private-key', profile.options.user, profile.options.host),
           )
           setProfileKeyFingerprint(result.fingerprint)
           if (result.passphraseWanted) {
             await askKeyPassphrase(
               credDraft.id,
-              generatedSecretName(profile.options.user, profile.options.host),
+              loginLabel(profile.options.user, profile.options.host),
             )
           }
         }

@@ -246,7 +246,14 @@ export function KeyPassphrasePrompt(props: KeyPassphrasePromptProps) {
     setError('')
     setSaving(true)
     try {
-      await props.client.saveKeyPassphrase(props.credentialId, passphrase(), props.keyName)
+      // The prompt is asked about the KEY; the secret it stores is the
+      // passphrase, and it says so. Passing an already-prefixed name in would
+      // title the prompt "Passphrase for Passphrase for root@host".
+      await props.client.saveKeyPassphrase(
+        props.credentialId,
+        passphrase(),
+        `Passphrase for ${props.keyName}`,
+      )
       showToast({ level: 'success', message: 'Key passphrase stored.' })
       props.onResult('saved')
     } catch (e) {

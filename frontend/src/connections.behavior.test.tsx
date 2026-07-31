@@ -921,8 +921,10 @@ describe('three-way key input — connection editor', () => {
       expect.any(String),
       expect.stringContaining('BEGIN PRIVATE KEY'),
       // ADR-0016: the secret owns its name — the save carries the generated
-      // user@host name of the connection it was saved on.
-      'deploy@web.example.com',
+      // name, which says WHAT the secret is as well as whose login it is. A
+      // connection that stores a key and its passphrase would otherwise
+      // produce two rows called `deploy@web.example.com`.
+      'Key for deploy@web.example.com',
     )
   })
 
@@ -2000,6 +2002,80 @@ describe('eager validation', () => {
     fireEvent.blur(host)
     await vi.waitFor(() => {
       expect(container.textContent).toContain('Host is required')
+    })
+  })
+})
+
+// ── A generated name says what the secret is ─────────────────────────────
+// Reported from the running app: a connection with an encrypted key stores
+// the key and its passphrase, and the Secrets page showed two rows both
+// called `root@192.168.0.57`. The kind badge tells them apart in the list;
+// the name has to tell them apart everywhere else, starting with any picker
+// that chooses between them.
+
+describe('generated secret names', () => {
+  it('names a key and its passphrase differently for one login', async () => {
+    const { container, client } = mount({ profiles: [] })
+    const saveKeyMat = vi
+      .spyOn(client, 'saveKeyMaterial')
+      .mockResolvedValue({ fingerprint: 'SHA256:zz', passphraseWanted: true })
+    const savePassphrase = vi.spyOn(client, 'saveKeyPassphrase').mockResolvedValue(true)
+    vi.spyOn(client, 'createCredential').mockResolvedValue({
+      id: 'cred:named',
+      name: 'box',
+      username: 'root',
+      auth: 'publicKey',
+    })
+    vi.spyOn(client, 'createProfile').mockImplementation((p) =>
+      Promise.resolve({ ...p, id: 'ssh:named' }),
+    )
+
+    await waitForProfiles(container, 0)
+    clickButtonByText(container, '+ New connection')
+    await vi.waitFor(() => expect(container.querySelector('#quick-connect-input')).toBeTruthy())
+    fireEvent.input(container.querySelector('#quick-connect-input')!, {
+      target: { value: 'root@box.example.com' },
+    })
+    clickButtonByText(container, 'Next')
+    await vi.waitFor(() => expect(container.querySelector('#profile-host')).toBeTruthy())
+
+    selectProfileSection(container, 'Authentication')
+    clickSegmentedOption(container, 'Public Key')
+    clickSegmentedOption(container, 'Paste key')
+    await vi.waitFor(() => expect(container.querySelector('#profile-key-text')).toBeTruthy())
+    fireEvent.input(container.querySelector('#profile-key-text')!, {
+      target: { value: '-----BEGIN PRIVATE KEY-----\nx\n-----END PRIVATE KEY-----' },
+    })
+
+    const editor = findDialogByTitleContaining(container, 'New Connection')!
+    clickButtonByText(container, 'Create Connection', editor)
+
+    // The key is named for what it is…
+    await vi.waitFor(() => {
+      expect(saveKeyMat).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.any(String),
+        'Key for root@box.example.com',
+      )
+    })
+
+    // …and the passphrase prompt, which is asked about the KEY, stores its
+    // own secret under its own name rather than repeating the key's.
+    const prompt = await vi.waitFor(() => {
+      const p = container.querySelector('.ui-prompt')
+      expect(p).toBeTruthy()
+      return p!
+    })
+    expect(prompt.textContent).toContain('root@box.example.com')
+    fireEvent.input(container.querySelector('#key-passphrase')!, { target: { value: 'letmein' } })
+    clickButtonByText(container, 'Save passphrase', prompt)
+
+    await vi.waitFor(() => {
+      expect(savePassphrase).toHaveBeenCalledWith(
+        expect.any(String),
+        'letmein',
+        'Passphrase for root@box.example.com',
+      )
     })
   })
 })
