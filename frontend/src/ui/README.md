@@ -39,30 +39,48 @@ them takes a `class` prop; the structural containers that still do are marked.
 
 ## A container's size is the container's decision, never its content's
 
-**A component that holds swappable content declares a definite size for it.** Not a
-`max-width`, not a `min-height` — a size the content cannot argue with.
+**A component that holds swappable content declares a definite size for it.**
+Not a `max-width`, not a `min-height` — a size the content cannot argue with.
+There is one honest exception, and the trade it makes is documented below.
 
-Two components make this promise, and both learned it the same way. `Dialog`'s panel
-was `max-width: 480px` on a `<dialog>`, which is `width: fit-content`: the panel
-therefore shrank to whatever the body needed, so a body with sections redrew the dialog
-at a different width on every section — 356px on one, the full 560 on the next. `Tabs`
-had the same defect vertically. In both cases the visible symptom is the same and it is
-not cosmetic: **the footer buttons move out from under the pointer that is reaching for
-them**, and a control that moves while being aimed at is a control that gets misclicked.
+`Dialog`'s panel was `max-width: 480px` on a `<dialog>`, which is
+`width: fit-content`: the panel therefore shrank to whatever the body needed,
+so a body with sections redrew the dialog at a different width on every
+section — 356px on one, the full 560 on the next. The visible symptom is the
+same as Tabs' and it is not cosmetic: **the footer buttons move out from under
+the pointer that is reaching for them**, and a control that moves while being
+aimed at is a control that gets misclicked. `Dialog` names its width through
+`size` — a definite width, not a cap.
 
-`Dialog` names its width through `size` — a definite width, not a cap.
+Height is the exception, and the exception is real. Width can be named because
+it is one number for every form the dialog holds; height is a different number
+for each. Naming it was tried twice and both numbers were wrong — 420px sat
+below the panel's natural height and did nothing at all, and 45rem left a
+third of the dialog empty below the footer. A guessed height is either too
+small, and then a short section scrolls in a window with room to spare, or too
+large, and then every section but one sits in a half-empty box.
 
-`Tabs` **measures** rather than names: every section is rendered into one grid cell, so
-the box is the size of the largest section and switching cannot change it. A fixed
-height was tried first and was wrong for a reason worth keeping — a guessed height is
-either too small, and then a short section scrolls inside a window with room to spare,
-or too large, and then every section but one sits in a half-empty box. The inactive
-sections are `visibility: hidden`, which keeps them out of the tab order and the
-accessibility tree while they still contribute their size; `display: none` would take
-away the very thing they are there for.
+So `Tabs` **sizes to the section it is showing**: the inactive panels are
+`hidden` (`display: none`), which keeps them out of the tab order and the
+accessibility tree and also stops them contributing height, so the box is the
+active section's size rather than the tallest's. Switching sections therefore
+changes the dialog's height — and `Dialog` **animates that change**, which is
+what buys the stability back. The footer moves, but it moves visibly and
+predictably instead of teleporting, so it never escapes a pointer mid-reach.
 
-The general form: if switching what is inside a component can change that component's
-outer size, the component is missing a size, not the caller.
+The animation is measure-and-transition, owned by `Dialog` because it owns the
+panel and its `max-height`: the settled height is pinned, the new natural
+height is measured (with the `max-height` applied, so a short viewport still
+scrolls rather than overflow), the panel transitions between them, and it
+releases back to `auto` on `transitionend`. Transitioning to and from
+`height: auto` itself would need `interpolate-size` / `calc-size()`, which is
+above both declared browser floors (ADR-0013 §3), so the pin-and-release is
+the technique. Under `prefers-reduced-motion: reduce` there is no transition.
+
+The general form: if switching what is inside a component can change that
+component's outer size and you cannot name a size (one number that is right
+for every content), then you animate the change — the size stays the content's
+decision, and the movement stays the container's.
 
 ## Dialog body text is body text
 

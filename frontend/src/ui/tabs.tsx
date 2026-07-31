@@ -131,16 +131,18 @@ export function Tabs(props: TabsProps) {
           )}
         </For>
       </div>
-      {/* Every section is rendered, and all of them share one grid cell, so the
-          box is as tall and as wide as the tallest and widest of them. That is
-          what keeps switching sections from resizing the dialog WITHOUT
-          inventing a height: a fixed one is a guess, and a wrong guess scrolls
-          a short section in a window with room to spare.
+      {/* Every section is still rendered (the content functions are called
+          for all of them, so each keeps its own state), but only the active
+          one takes layout space. The inactive panels carry `hidden`, which
+          every browser renders as `display: none`: they contribute no height,
+          so the box is the ACTIVE section's size, not the tallest's. The
+          dialog around this animates the resulting height change, which is
+          what buys back the stability the shared-cell approach provided.
 
-          The inactive ones are `visibility: hidden`, which takes them out of
-          the tab order and out of the accessibility tree — `display: none`
-          would do that too and would also stop them contributing their size,
-          which is the entire point. */}
+          `hidden` also keeps the inactive panels out of the tab order and out
+          of the accessibility tree, exactly like the `visibility: hidden`
+          they replaced — it only stops them contributing their size, which
+          was the entire reason that choice was made and is now the point. */}
       <div class="ui-tabs__panels">
         <For each={props.items}>
           {(item) => (
@@ -150,6 +152,7 @@ export function Tabs(props: TabsProps) {
               id={`ui-tabpanel-${item.id}`}
               aria-labelledby={`ui-tab-${item.id}`}
               data-active={props.active === item.id ? 'true' : undefined}
+              hidden={props.active !== item.id}
               tabIndex={props.active === item.id ? 0 : -1}
             >
               {item.content()}

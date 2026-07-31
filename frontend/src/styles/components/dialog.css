@@ -49,6 +49,21 @@ dialog.nocx-dialog::backdrop {
   flex-direction: column;
   max-height: calc(100vh - var(--space-6, 24px) * 2);
   overflow: hidden;
+  /* Height changes — a section switch, a control revealing fields — are
+     animated so the footer moves visibly instead of teleporting out from
+     under the pointer reaching for it. Dialog measures and pins the height
+     (see dialog.tsx), and this transition runs the change; the reduced-motion
+     override sits below, next to the other components' (toast.css,
+     prompt.css). The panel must stay bounded by its max-height at every point
+     of the animation: both the pin and the target come from measured heights,
+     which CSS clamps to the max-height. */
+  transition: height 180ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nocx-dialog__panel {
+    transition: none;
+  }
 }
 
 .nocx-dialog__panel > * {

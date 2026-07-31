@@ -35,7 +35,15 @@
  * ```
  */
 
-import { createEffect, createSignal, onCleanup, type Component, type JSX, Show } from 'solid-js'
+import {
+  createEffect,
+  createSignal,
+  onCleanup,
+  onMount,
+  type Component,
+  type JSX,
+  Show,
+} from 'solid-js'
 import { render } from 'solid-js/web'
 import { pushOverlay, popOverlay, restoreFocus } from './overlay/stack'
 import { Button } from './button'
@@ -107,12 +115,104 @@ function focusInitial(d: HTMLDialogElement): void {
 export const Dialog: Component<DialogProps> = (props) => {
   let ref: HTMLDialogElement | undefined
   const [entry, setEntry] = createSignal<ReturnType<typeof pushOverlay> | null>(null)
+  let panel: HTMLDivElement | undefined
+
+  /* ── Panel height animation ──────────────────────────────────────────
+     The panel's height is `auto` and content-driven: it grows and shrinks
+     when the body's content changes (a section switch in Tabs, a control
+     revealing fields). Those changes are animated here — the footer moves
+     visibly instead of teleporting out from under the pointer reaching for
+     it, which is the stability the old fixed-size approach bought.
+
+     Transitioning to and from `height: auto` itself needs
+     interpolate-size / calc-size(), which is above both declared browser
+     floors (WebKitGTK 2.40, Safari 16.2 — ADR-0013 §3), so this is
+     measure-and-transition: pin the settled height, set the target height,
+     transition, release back to `auto` on transitionend. The transition
+     property lives in dialog.css with the reduced-motion override, next to
+     the other components' (toast.css, prompt.css). */
+  let ro: ResizeObserver | null = null
+  let animating = false
+  let lastHeight: number | null = null
+
+  /** True under `prefers-reduced-motion: reduce` — no transition at all. */
+  const reducedMotion = () =>
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia('(prefers-reduced-motion: reduce)').matches
+
+  const releasePanelHeight = () => {
+    if (!panel) return
+    animating = false
+    panel.style.height = ''
+    panel.style.transition = ''
+  }
+
+  /**
+   * Measure-and-transition the panel to its new natural height.
+   *
+   * The ResizeObserver fires after layout with the panel already at the new
+   * natural height (at rest the height is `auto`), so the current
+   * getBoundingClientRect IS the target. `lastHeight` is the settled height
+   * from before the change: we pin to it, force a reflow so the transition
+   * starts from it, then set the target. The target was measured with the
+   * panel's `max-height` applied and the pin is a settled height, so neither
+   * can exceed the max-height mid-animation — a short viewport scrolls
+   * rather than overflow.
+   *
+   * The size changes this animation itself causes (the pin, the transition)
+   * re-fire the observer every frame; `animating` suppresses those. A content
+   * change mid-transition is caught at transitionend: releasing to `auto`
+   * changes the size again and the observer re-runs this from the new
+   * settled height.
+   */
+  const syncPanelHeight = () => {
+    const p = panel
+    const d = ref
+    if (!p || !d || !d.open) return
+    if (animating) return
+    if (reducedMotion()) return
+    const to = p.getBoundingClientRect().height
+    const from = lastHeight ?? to
+    if (Math.abs(from - to) < 0.5) {
+      lastHeight = to
+      return
+    }
+    animating = true
+    p.style.transition = 'none'
+    p.style.height = `${from}px`
+    void p.offsetHeight // commit the pin so the transition starts from it
+    p.style.transition = ''
+    p.style.height = `${to}px`
+  }
+
+  /** The transition ended (or was cancelled): record where it settled and
+      release to `auto`, so the CSS max-height, not a stale inline number,
+      governs from here on. */
+  const settlePanelHeight = () => {
+    if (!panel) return
+    lastHeight = panel.getBoundingClientRect().height
+    releasePanelHeight()
+  }
+
+  const onPanelTransitionEnd = (e: TransitionEvent) => {
+    if (e.target !== panel || e.propertyName !== 'height') return
+    settlePanelHeight()
+  }
+
+  const onPanelTransitionCancel = (e: TransitionEvent) => {
+    if (e.target !== panel || e.propertyName !== 'height') return
+    settlePanelHeight()
+  }
 
   createEffect(() => {
     const d = ref
     if (!d) return
 
     if (props.open && !d.open) {
+      // Fresh open: no animation from a previous session's sizes — the panel
+      // appears at its natural height and the first observation settles it.
+      releasePanelHeight()
+      lastHeight = null
       d.showModal()
       // The callback is stored and invoked later, when Escape or an outside
       // interaction reaches the top of the overlay stack — i.e. as an event
@@ -131,11 +231,26 @@ export const Dialog: Component<DialogProps> = (props) => {
       setEntry(e)
       focusInitial(d)
     } else if (!props.open && d.open) {
+      // Closing mid-animation cancels the transition without a transitionend;
+      // drop the pin so the panel does not reopen at a stale inline height.
+      releasePanelHeight()
+      lastHeight = null
       const e = entry()
       if (e) popOverlay(e)
       d.close()
       if (e) restoreFocus(e)
     }
+  })
+
+  // Watch the panel's own box: any content-driven size change (a section
+  // switch, a revealed field) is a change to animate. jsdom has no layout, so
+  // tests drive this observer by hand; in a browser it fires once on observe
+  // with the initial size, which syncPanelHeight settles with no animation.
+  onMount(() => {
+    const p = panel
+    if (!p) return
+    ro = new ResizeObserver(() => syncPanelHeight())
+    ro.observe(p)
   })
 
   // Handle native cancel event (Escape key).
@@ -144,6 +259,9 @@ export const Dialog: Component<DialogProps> = (props) => {
   }
 
   onCleanup(() => {
+    ro?.disconnect()
+    ro = null
+    releasePanelHeight()
     const e = entry()
     if (e) {
       popOverlay(e)
@@ -209,7 +327,13 @@ export const Dialog: Component<DialogProps> = (props) => {
       onMouseDown={onPointerDown}
       onKeyDown={onKeyDown}
     >
-      <div class="nocx-dialog__panel" data-size={props.size ?? 'md'}>
+      <div
+        class="nocx-dialog__panel"
+        data-size={props.size ?? 'md'}
+        ref={panel}
+        onTransitionEnd={onPanelTransitionEnd}
+        onTransitionCancel={onPanelTransitionCancel}
+      >
         <Show when={props.title}>
           <h2 class="nocx-dialog__title">{props.title}</h2>
         </Show>

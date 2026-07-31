@@ -275,6 +275,136 @@ describe('Dialog', () => {
   })
 })
 
+/* ── Panel height animation ──────────────────────────────────────────── */
+
+describe('Dialog panel height animation', () => {
+  // jsdom has no layout and ResizeObserver is stubbed to never fire, so we
+  // capture the callback the component registers and drive it by hand, with
+  // getBoundingClientRect stubbed to report the heights a browser would.
+  let roCallback: (() => void) | null = null
+
+  beforeEach(() => {
+    roCallback = null
+    ;(globalThis as Record<string, unknown>).ResizeObserver = class {
+      constructor(cb: () => void) {
+        roCallback = cb
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+  })
+
+  function subject(overrides?: Partial<DialogProps>) {
+    const props: DialogProps = {
+      open: true,
+      onClose: vi.fn(),
+      title: 'Test Dialog',
+      children: 'Dialog body content',
+      ...overrides,
+    }
+    return render(() => <Dialog {...props} />)
+  }
+
+  function stubPanelHeight(panel: HTMLElement, height: number) {
+    Object.defineProperty(panel, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => ({
+        x: 0,
+        y: 0,
+        width: 480,
+        height,
+        top: 0,
+        left: 0,
+        right: 480,
+        bottom: height,
+        toJSON: () => ({}),
+      }),
+    })
+  }
+
+  function fireResize() {
+    expect(roCallback).not.toBeNull()
+    roCallback!()
+  }
+
+  function endTransition(panel: HTMLElement) {
+    const ev = new Event('transitionend', { bubbles: true })
+    Object.defineProperty(ev, 'propertyName', { value: 'height' })
+    fireEvent(panel, ev)
+  }
+
+  it('pins the panel height to the new size when the content resizes', () => {
+    const { container } = subject()
+    const panel = container.querySelector('.nocx-dialog__panel') as HTMLElement
+    stubPanelHeight(panel, 200)
+    fireResize()
+    // At rest the height is auto — nothing pinned.
+    expect(panel.style.height).toBe('')
+
+    // The body grows (a section switch, a revealed field): the panel must be
+    // measured at the settled size, pinned, and transitioned to the new one —
+    // the footer moves visibly instead of teleporting.
+    stubPanelHeight(panel, 400)
+    fireResize()
+    expect(panel.style.height).toBe('400px')
+  })
+
+  it('releases the panel back to auto when the height transition ends', () => {
+    const { container } = subject()
+    const panel = container.querySelector('.nocx-dialog__panel') as HTMLElement
+    stubPanelHeight(panel, 200)
+    fireResize()
+    stubPanelHeight(panel, 400)
+    fireResize()
+    expect(panel.style.height).toBe('400px')
+
+    endTransition(panel)
+    // Back to auto so the CSS max-height, not a stale inline number, governs.
+    expect(panel.style.height).toBe('')
+    expect(panel.style.transition).toBe('')
+  })
+
+  it('never pins a height above the panel max-height', () => {
+    const { container } = subject()
+    const panel = container.querySelector('.nocx-dialog__panel') as HTMLElement
+    panel.style.maxHeight = '300px'
+    stubPanelHeight(panel, 200)
+    fireResize()
+    // A body whose natural height (500px) exceeds the cap: a real browser
+    // clamps the measurement to the max-height, and the animation must pin to
+    // that clamped value — a short viewport scrolls instead of overflowing.
+    stubPanelHeight(panel, 300)
+    fireResize()
+    expect(panel.style.height).toBe('300px')
+  })
+
+  it('does not animate under prefers-reduced-motion', () => {
+    // jsdom ships no matchMedia; install a reduce-answering one. The
+    // component must skip pinning and transitioning entirely under it.
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: () => ({
+        matches: true,
+        media: '(prefers-reduced-motion: reduce)',
+        onchange: null,
+        addListener: () => {},
+        removeListener: () => {},
+        addEventListener: () => {},
+        removeEventListener: () => {},
+        dispatchEvent: () => false,
+      }),
+    })
+    const { container } = subject()
+    const panel = container.querySelector('.nocx-dialog__panel') as HTMLElement
+    stubPanelHeight(panel, 200)
+    fireResize()
+    stubPanelHeight(panel, 400)
+    fireResize()
+    // No pin, no transition: the height jumps, as reduced motion requires.
+    expect(panel.style.height).toBe('')
+  })
+})
 /* ── showConfirm imperative helper ─────────────────────────────────── */
 
 describe('showConfirm', () => {

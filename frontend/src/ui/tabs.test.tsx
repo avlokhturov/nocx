@@ -141,4 +141,36 @@ describe('Tabs', () => {
       expect(style.visibility).not.toBe('hidden')
     })
   })
+
+  describe('active section sizing', () => {
+    it('hides the inactive panel so only the active section sizes the box', () => {
+      subject()
+      const panels = document.querySelectorAll<HTMLElement>('.ui-tabs__panel')
+      expect(panels).toHaveLength(2)
+      // `hidden` renders as `display: none` in every browser: the inactive
+      // panel contributes no height, so the box is the ACTIVE section's size,
+      // not the tallest's — the empty space below a short section's footer is
+      // gone. It also keeps the panel out of the tab order and the
+      // accessibility tree, which is what `visibility: hidden` used to buy.
+      expect(panels[0].hidden).toBe(false)
+      expect(panels[1].hidden).toBe(true)
+    })
+
+    it('hides whichever section is inactive', () => {
+      subject({ active: 'b' })
+      const panels = document.querySelectorAll<HTMLElement>('.ui-tabs__panel')
+      expect(panels[0].hidden).toBe(true)
+      expect(panels[1].hidden).toBe(false)
+    })
+
+    it('keeps the inactive panel out of the accessibility tree', () => {
+      subject()
+      // Only the active panel is exposed as a tabpanel — `hidden` renders as
+      // `display: none`, which removes the inactive one from the tree, the
+      // same exclusion `visibility: hidden` used to provide.
+      const panels = screen.queryAllByRole('tabpanel')
+      expect(panels).toHaveLength(1)
+      expect(panels[0].getAttribute('id')).toBe('ui-tabpanel-a')
+    })
+  })
 })
