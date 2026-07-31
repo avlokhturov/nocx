@@ -115,8 +115,11 @@ describe('SecretsSection', () => {
     expect(container.querySelector('.sr-row-label')).toBeNull()
     // No usage count anywhere
     expect(container.textContent).not.toMatch(/\d+\s*connections?/)
-    // The permanent description IS always visible
-    expect(container.textContent).toMatch(/passwords and key passphrases/)
+    // "Sealed: a locked state and one action. Nothing else." — the surface spec
+    // (.internal/specs/2026-07-30). A standing line of body copy above the
+    // plate broke that rule and looked like it: a paragraph with no heading
+    // over it and a centred plate floating underneath.
+    expect(container.textContent).not.toMatch(/passwords and key passphrases/)
   })
 
   it('shows empty state when unsealed with no entries — different from sealed', async () => {
@@ -221,7 +224,10 @@ describe('SecretsSection', () => {
     expect(rowLabels[0].textContent).not.toMatch(/^sec:v1:/)
   })
 
-  it('permanently shows the explanation text', async () => {
+  // The promise "never shown back to you" answers a question you only have
+  // once you are looking at a list of secrets and wondering whether you can
+  // read one — so it belongs to that section, not to the top of the page.
+  it('explains the list where the list is, not above every state', async () => {
     const { client, inventory } = mockClient()
     client.status = vi.fn().mockResolvedValue(UNSEALED_STATUS)
     inventory.mockResolvedValue({ entries: [MOCK_ENTRY_1] })
@@ -232,7 +238,8 @@ describe('SecretsSection', () => {
       expect(container.querySelector('.sr-row-label')).toBeTruthy()
     })
 
-    const description = container.querySelector('.sr-description')
+    const description = container.querySelector('.ui-page-section__desc')
     expect(description?.textContent).toMatch(/passwords and key passphrases/)
+    expect(description?.textContent).toMatch(/never shown back to you/)
   })
 })

@@ -1523,6 +1523,24 @@ describe('VaultSection', () => {
     expect(badges).toContainEqual(['no-service', 'danger'])
   })
 
+  // The rows were a bare <div>, so nothing spaced them and they sat flush
+  // against each other. Vertical rhythm in this kit is Stack's job, and a
+  // surface is not allowed to substitute margins for it — the CSS integrity
+  // gate refuses that. So the assertion is that the rows are IN a Stack, which
+  // is the thing that cannot be true and unspaced at the same time.
+  it('spaces the diagnostics rows with the Stack primitive, not by touching', async () => {
+    await renderVaultSection(UNSEALED_STATUS)
+    const details = document.querySelector('details.ui-vault-diagnostics')!
+    const stack = details.querySelector(':scope > .ui-stack')
+    expect(stack).not.toBeNull()
+    // Every row is a child of it, not a sibling that missed the rhythm.
+    const rows = details.querySelectorAll('.ui-field')
+    expect(rows.length).toBeGreaterThan(0)
+    for (const row of rows) {
+      expect(row.parentElement).toBe(stack)
+    }
+  })
+
   it('does not set the diagnostics block below the page type size', async () => {
     await renderVaultSection(UNSEALED_STATUS)
     const details = document.querySelector('details.ui-vault-diagnostics')!

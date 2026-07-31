@@ -1368,7 +1368,7 @@ export function VaultSection(props: VaultSectionProps) {
               it is read, and a smaller-than-body type size was working
               directly against that. The tone carries it: `success` says
               nothing to do here, which is the whole reason Badge grew one. */}
-          <div>
+          <Stack>
             <Field for="vault-state-raw" label="State" orientation="horizontal">
               <Badge tone={diagStateTone()}>{status()!.state}</Badge>
             </Field>
@@ -1399,7 +1399,7 @@ export function VaultSection(props: VaultSectionProps) {
                 )}
               </For>
             </Show>
-          </div>
+          </Stack>
         </details>
       </Show>
 

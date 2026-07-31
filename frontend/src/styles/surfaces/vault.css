@@ -66,15 +66,19 @@
    instruction for a block whose whole job is to be legible when something has
    gone wrong and someone is reading it into a bug report. Badge already sits a
    register below its row's label; making the row smaller too compounded it. */
+/* The disclosure owns the gap between its summary and its content through its
+   own `gap`, not through a margin on the Stack inside it — the rows' rhythm
+   belongs to Stack and the integrity gate is right to refuse a surface reaching
+   in to set it. The rows used to be a bare <div> and sat flush against each
+   other for exactly that reason: nothing was spacing them at all. */
 .ui-vault-diagnostics {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
   margin-top: var(--space-6);
 }
 
 .ui-vault-diagnostics summary {
   cursor: pointer;
   user-select: none;
-}
-
-.ui-vault-diagnostics > div {
-  margin-top: 8px;
 }

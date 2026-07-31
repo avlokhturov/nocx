@@ -73,11 +73,15 @@ export function SecretsSection(props: SecretsSectionProps) {
 
   return (
     <div class="sr-root">
-      <p class="sr-description">
-        These are the passwords and key passphrases nocx keeps for your connections. They are stored
-        encrypted and never shown back to you.
-      </p>
+      {/* No standing description line above everything. It used to sit at the
+          very top of the page in every state, so a locked vault showed a wall
+          of body copy with no heading over it and a centred plate floating
+          below — the spec's own rule for this surface is "sealed: a locked
+          state and one action, nothing else", and the line broke it.
 
+          Where it belongs is on the section it describes: "never shown back to
+          you" answers a question you only have once you are looking at a list
+          of secrets and wondering whether you can read one. */}
       <Show
         when={status()?.state !== 'sealed'}
         fallback={
@@ -105,7 +109,11 @@ export function SecretsSection(props: SecretsSectionProps) {
             </Show>
           }
         >
-          <PageSection title="Secrets" divided>
+          <PageSection
+            title="Secrets"
+            description="These are the passwords and key passphrases nocx keeps for your connections. They are stored encrypted and never shown back to you."
+            divided
+          >
             <For each={(loadState() as Extract<LoadState, { kind: 'loaded' }>).entries}>
               {(entry) => (
                 <CollectionRow
