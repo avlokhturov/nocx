@@ -5,6 +5,33 @@
 export type NotificationHandler = (params: unknown) => void
 export type LifecycleHandler = () => void
 
+/**
+ * RpcError carries a JSON-RPC error response intact: its `code` and, crucially,
+ * its `data`.
+ *
+ * The dispatcher used to reject with a plain `Error` built from `message`
+ * alone, which threw `data` away. That is fine while the only thing a surface
+ * does with a failure is show its text, and wrong the moment the backend needs
+ * to tell the UI *which action to offer* — "start a Secret Service", "unlock
+ * your login keychain" and "retry" are three different remedies behind one
+ * "provider unavailable" message. Recovering that distinction by matching on
+ * message text is exactly the brittleness a machine-readable discriminator
+ * exists to avoid.
+ *
+ * It extends Error, so every existing `catch` that reads `.message` or checks
+ * `instanceof Error` keeps working unchanged.
+ */
+export class RpcError extends Error {
+  constructor(
+    message: string,
+    readonly code?: number,
+    readonly data?: unknown,
+  ) {
+    super(message)
+    this.name = 'RpcError'
+  }
+}
+
 // Reconnect backoff: start at 250 ms, double each attempt, cap at 5 s.
 // Jitter of up to 50 % of the current backoff is added so a reload storm
 // from many clients does not synchronise onto the server.
@@ -173,7 +200,7 @@ export class Dispatcher {
     let msg: {
       id?: number
       result?: unknown
-      error?: { code?: number; message?: string }
+      error?: { code?: number; message?: string; data?: unknown }
       method?: string
       params?: unknown
     }
@@ -189,7 +216,7 @@ export class Dispatcher {
       if (!p) return
       this.pending.delete(msg.id)
       if (msg.error) {
-        p.reject(new Error(msg.error.message ?? 'rpc error'))
+        p.reject(new RpcError(msg.error.message ?? 'rpc error', msg.error.code, msg.error.data))
       } else {
         p.resolve(msg.result)
       }

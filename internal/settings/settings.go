@@ -20,6 +20,7 @@
 package settings
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -846,29 +847,53 @@ func (r *Registry) Reset(d Descriptor) error {
 }
 
 // ── Secret-class methods ───────────────────────────────────────────────
-
 // SecretSet stores a secret-class setting value in the SecretStore. Mints
 // an opaque SecretID on first set and persists only the reference in the
 // settings document — the plaintext never leaves the SecretStore.
+//
+// No production context available: this is called from an RPC handler path
+// that has no request scoping. The vault caps waiting via its own deadline.
 func (r *Registry) SecretSet(s *Secret, value string) error {
 	r.mu.Lock()
+	ctx := context.Background()
 	id, ok := r.refs[s.key]
 	if !ok {
-		id = credential.NewSecretID()
+		var err error
+		id, err = r.secrets.Create(ctx, credential.NewSecret(value))
+		if err != nil {
+			r.mu.Unlock()
+			return fmt.Errorf("settings: secret set %q: %w", s.key, err)
+		}
+		newRefs := copyRefs(r.refs)
+		newRefs[s.key] = id
+		ch, err := r.commitLocked(r.values, newRefs, []string{s.key})
+		r.mu.Unlock()
+		if err == nil {
+			r.finishCommit(ch)
+		}
+		return err
 	}
-	secret := credential.NewSecret(value)
-	if err := r.secrets.Set(id, secret); err != nil {
+
+	// Existing ref: Create a new secret, swap the ref on success, then
+	// best-effort delete the old. Commit failure leaves the old ref intact
+	// and the new secret is an orphan — safer than a dangling ref.
+	newID, err := r.secrets.Create(ctx, credential.NewSecret(value))
+	if err != nil {
 		r.mu.Unlock()
 		return fmt.Errorf("settings: secret set %q: %w", s.key, err)
 	}
 	newRefs := copyRefs(r.refs)
-	newRefs[s.key] = id
-	ch, err := r.commitLocked(r.values, newRefs, []string{s.key})
+	newRefs[s.key] = newID
+	ch, commitErr := r.commitLocked(r.values, newRefs, []string{s.key})
 	r.mu.Unlock()
-	if err == nil {
+	if commitErr == nil {
 		r.finishCommit(ch)
+		// Best-effort delete of the old secret — only after the new ref
+		// is persisted, so a crash between the two leaves the old value
+		// reachable (ADR-0011 §4: orphan beats dangling ref).
+		_ = r.secrets.Delete(ctx, id)
 	}
-	return err
+	return commitErr
 }
 
 // SecretDelete removes a secret-class setting value from the SecretStore
@@ -881,9 +906,7 @@ func (r *Registry) SecretDelete(s *Secret) error {
 		r.mu.Unlock()
 		return nil
 	}
-	if err := r.secrets.Delete(refID); err != nil {
-		slog.Warn("settings: secret delete failed (may be orphaned)", "key", s.key, "error", err)
-	}
+	_ = r.secrets.Delete(context.Background(), refID)
 	newRefs := copyRefs(r.refs)
 	delete(newRefs, s.key)
 	ch, err := r.commitLocked(r.values, newRefs, []string{s.key})
@@ -902,7 +925,7 @@ func (r *Registry) SecretExists(s *Secret) (bool, error) {
 	if !ok {
 		return false, nil
 	}
-	return r.secrets.Exists(id)
+	return r.secrets.Exists(context.Background(), id)
 }
 
 // ── Persistence ────────────────────────────────────────────────────────

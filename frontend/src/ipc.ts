@@ -377,6 +377,41 @@ export class WSClient {
       })
   }
 
+  // openSSHSessionByHost opens a direct SSH session by hostname/alias,
+  // resolved through ~/.ssh/config on the backend. No saved profile needed.
+  openSSHSessionByHost(
+    cols: number,
+    rows: number,
+    host: string,
+    user?: string,
+  ): Promise<SessionHandle> {
+    return this.dispatcher
+      .call<{ sessionId?: string; cwd?: string }>('open', {
+        cols,
+        rows,
+        xpixel: 0,
+        ypixel: 0,
+        kind: 'ssh',
+        host,
+        user,
+      })
+      .then((result) => {
+        const sid = result?.sessionId
+        if (!sid || !isSessionID(sid)) {
+          throw new Error(`nocx: invalid session-id from server: ${sid}`)
+        }
+        this.sessions.set(sid, {
+          decoder: new UTF8StreamDecoder(),
+          offset: 0,
+          dataCallback: null,
+          pendingData: '',
+          exitCallback: null,
+          resetCallback: null,
+        })
+        return new SessionHandle(this, sid, result?.cwd ?? '')
+      })
+  }
+
   // --- reattach -----------------------------------------------------------
 
   private _sendAttach(sessionId: string, offset: number): Promise<AttachResult> {

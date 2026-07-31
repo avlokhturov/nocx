@@ -1,4 +1,7 @@
 import { Dispatcher } from './dispatcher'
+import type { ConnectionTestResult } from './generated/connections.probe'
+import type { TrustHostKeyResult } from './generated/connections.trustHostKey'
+import type { SaveKeyMaterialResult } from './generated/credentials.saveKeyMaterial'
 
 // Profile/group models + IPC client for the connection manager.
 // Mirrors the backend internal/profile package (nocx-fxs.1) and the
@@ -36,6 +39,7 @@ export interface SSHProfileOptions {
   // Override fields (used only if credentialId is empty)
   user?: string
   auth?: AuthMode
+  keyPath?: string
   // Note: passwords/keys are NEVER stored here — they live in the Credential's keychain entry.
   keepaliveInterval?: number
   keepaliveCountMax?: number
@@ -57,11 +61,11 @@ export interface ProfileGroup {
   id: string
   parentGroupId?: string
   name: string
-  icon?: string
-  color?: string
+  description?: string
   defaults?: Record<string, unknown>
-  editable?: boolean
-  children?: ProfileGroup[]
+  order?: number
+  color?: string
+  icon?: string
 }
 
 // Credential is a reusable authentication identity (nocx-УЗ).
@@ -76,14 +80,15 @@ export interface Credential {
   // - publicKey: path to private key or vault:// URL
   // - agent/keyboardInteractive: not needed
   keyPath?: string // Only for publicKey auth
-  // The host this credential may be submitted to. Required: an empty host is
-  // refused at connect time, because "any host" is what lets this renderer
-  // aim a credential at a host it controls (nocx-mon). Matching happens on the
-  // backend against the RESOLVED hostname, never this alias.
-  host?: string
-  // Unset means "this host, any port" — a stated exception, not an oversight:
-  // host is the load-bearing half of the identity.
-  port?: number
+  /**
+   * Whether this credential has key material stored in the vault.
+   * Only meaningful for publicKey auth. Only present in list responses.
+   */
+  hasKeyMaterial?: boolean
+  /**
+   * The fingerprint of the stored key. Present when hasKeyMaterial is true.
+   */
+  keyFingerprint?: string
 }
 
 // TreeNode is a ProfileGroup with its children resolved — the output of
@@ -96,11 +101,12 @@ export interface TreeNode extends ProfileGroup {
 // Orphaned groups (parent not found) become roots.
 export function buildGroupTree(groups: ProfileGroup[]): TreeNode[] {
   const map = new Map<string, TreeNode>()
+  const roots: TreeNode[] = []
+
   for (const g of groups) {
     map.set(g.id, { ...g, children: [] })
   }
 
-  const roots: TreeNode[] = []
   for (const g of groups) {
     const node = map.get(g.id)!
     if (g.parentGroupId && map.has(g.parentGroupId)) {
@@ -109,80 +115,210 @@ export function buildGroupTree(groups: ProfileGroup[]): TreeNode[] {
       roots.push(node)
     }
   }
+
   return roots
 }
 
 // resolveGroupPath walks the parent chain returning breadcrumb names
 // (root first, leaf last). Cycle-guarded at 32 levels.
 export function resolveGroupPath(groups: ProfileGroup[], id: string): string[] {
-  const map = new Map<string, ProfileGroup>()
-  for (const g of groups) map.set(g.id, g)
-
+  const map = new Map(groups.map((g) => [g.id, g]))
   const path: string[] = []
-  let current = id
-  for (let depth = 0; current && depth < 32; depth++) {
-    const g = map.get(current)
-    if (!g) {
-      path.unshift(current)
-      break
-    }
-    if (g.name) path.unshift(g.name)
-    current = g.parentGroupId ?? ''
+  let current: ProfileGroup | undefined = map.get(id)
+  let guard = 0
+  while (current && guard < 32) {
+    path.unshift(current.name)
+    current = current.parentGroupId ? map.get(current.parentGroupId) : undefined
+    guard++
   }
   return path
 }
 
-// parseQuickConnect parses "user@host:port" / "user@host" / "host" /
-// "[host]:port" into a sparse SSHProfile (quick-connect entry).
+// parseQuickConnect parses "ssh://user@host:port", "user@host:port", "user@host",
+// "host", "[host]:port" into a sparse SSHProfile (quick-connect entry).
 export function parseQuickConnect(query: string): SSHProfile {
   let user = ''
-  let host = query
+  let host = ''
   let port = 22
+  let rest = query.trim()
 
-  if (host.includes('@')) {
-    const at = host.indexOf('@')
-    user = host.slice(0, at)
-    host = host.slice(at + 1)
+  // Strip ssh:// prefix — accept "ssh://user@host:port" as well as "user@host:port"
+  const SSH_SCHEME = 'ssh://'
+  if (rest.slice(0, SSH_SCHEME.length).toLowerCase() === SSH_SCHEME) {
+    rest = rest.slice(SSH_SCHEME.length)
   }
 
-  if (host.includes('[')) {
-    const close = host.indexOf(']')
-    if (close > 0) {
-      const inner = host.slice(1, close)
-      const rest = host.slice(close + 1)
-      host = inner
-      if (rest.startsWith(':')) {
-        const p = parseInt(rest.slice(1), 10)
-        if (p > 0) port = p
+  if (rest.startsWith('[')) {
+    // IPv6: [::1]:port or [::1]
+    const closeBracket = rest.indexOf(']')
+    if (closeBracket === -1) {
+      host = rest
+    } else {
+      host = rest.slice(1, closeBracket)
+      if (rest[closeBracket + 1] === ':') {
+        port = parseInt(rest.slice(closeBracket + 2), 10) || 22
       }
     }
-  } else if (host.includes(':')) {
-    const colon = host.lastIndexOf(':')
-    const p = parseInt(host.slice(colon + 1), 10)
-    if (p > 0) {
-      port = p
-      host = host.slice(0, colon)
+  } else {
+    // IPv4 or hostname
+    const atIdx = rest.lastIndexOf('@')
+    if (atIdx !== -1) {
+      user = rest.slice(0, atIdx)
+      rest = rest.slice(atIdx + 1)
+    }
+    const colonIdx = rest.lastIndexOf(':')
+    if (colonIdx !== -1) {
+      host = rest.slice(0, colonIdx)
+      port = parseInt(rest.slice(colonIdx + 1), 10) || 22
+    } else {
+      host = rest
     }
   }
 
   return {
     id: '',
     type: 'ssh',
-    name: query,
-    options: { host, port, user },
+    name: host,
+    options: { host, port, user: user || undefined },
   }
 }
 
-// newProfileID creates a namespaced profile id client-side for display while
-// the user fills the form. On save the profile is sent to the backend, which
-// either uses it or generates its own.
-export function newProfileID(type: string, name: string): string {
-  const uuid =
-    typeof crypto !== 'undefined' && crypto.randomUUID
-      ? crypto.randomUUID()
-      : `nocx-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
-  return `${type}:custom:${name}:${uuid}`
+/** Build a saved SSHProfile from an SSH config alias. The host is set to the
+ *  alias itself (not the resolved hostName) so palette suppression compares
+ *  alias-to-alias, and user/port are only included when the config provided
+ *  them — absent means "not set" rather than "explicit default". */
+export function adoptAliasProfile(
+  alias: string,
+  user: string | undefined,
+  port: number | undefined,
+): SSHProfile {
+  // No id. The backend mints it (ws.go, profiles.create) and returns the
+  // record; the renderer minting one is what nocx-uxs5.10 removed, and the
+  // caller must use the id createProfile hands back.
+  const profile: SSHProfile = {
+    id: '',
+    name: alias,
+    type: 'ssh',
+    options: { host: alias },
+  }
+  if (user) profile.options.user = user
+  if (port) profile.options.port = port
+  return profile
 }
+
+// ── Effective profile types (wire format from profiles.effective) ──────────
+
+// EffectiveSourceKind is a closed enum — switch on this, never parse id/label.
+export type EffectiveSourceKind =
+  'profile' | 'group' | 'credential' | 'sshConfig' | 'global' | 'default'
+
+// FieldSourceDTO is the provenance source in the wire format.
+export interface FieldSourceDTO {
+  kind: EffectiveSourceKind
+  id: string
+  label: string
+}
+
+// EffectiveFieldDTO is the per-field wire representation.
+export interface EffectiveFieldDTO {
+  value: unknown
+  source: FieldSourceDTO
+}
+
+// EffectiveProfileDTO is the per-profile wire representation.
+export interface EffectiveProfileDTO {
+  id: string
+  fields: Record<string, EffectiveFieldDTO>
+}
+
+// EffectiveBatchResponse is the response from profiles.effective.
+export interface EffectiveBatchResponse {
+  profiles: EffectiveProfileDTO[]
+  errors?: { id: string; error: string }[]
+}
+
+// ── SSH config alias types (wave 7 — nocx-c2ym.3) ─────────────────────
+//
+// Returned by sshConfig.aliases — live aliases from ~/.ssh/config.
+
+/** One SSH host alias from ~/.ssh/config. */
+export interface SSHAliasEntry {
+  /** The Host pattern as written by the user. This is the identity. */
+  readonly alias: string
+  /** Resolved HostName (may equal alias when config sets none). */
+  readonly hostName: string
+  /** Resolved User (omitted when config sets none). */
+  readonly user?: string
+  /** Resolved Port (omitted when config sets none). */
+  readonly port?: number
+}
+
+/** Why the SSH config could not be read. */
+export interface SSHAliasUnavailable {
+  readonly reason: 'no-ssh-binary' | 'timeout' | 'parse-failure'
+  readonly detail: string
+}
+
+/** Response from sshConfig.aliases. */
+export interface SSHAliasResponse {
+  readonly aliases: SSHAliasEntry[]
+  /** null when the read succeeded. */
+  readonly unavailable: SSHAliasUnavailable | null
+}
+
+/** Result from importing ~/.ssh/config aliases. */
+export interface SSHConfigImportResult {
+  readonly profilesImported: number
+  readonly skipped: number
+}
+
+/** Where the machine's SSH config lives, as the backend computed it. */
+export interface SSHConfigPathResult {
+  readonly path: string
+  /** False when no SSH config resolver is wired — importing would fail. */
+  readonly available: boolean
+}
+
+// ── Group impact types (wave 6 — nocx-uxs5) ──────────────────────────
+//
+// Returned by groups.impact — computed on the backend so inheritance
+// is correctly reflected. The frontend renders what the backend answers.
+
+/** One field that would change for a profile under a proposed group change. */
+export interface FieldDiff {
+  field: string
+  oldValue: unknown
+  newValue: unknown
+  dangerous: boolean
+}
+
+/** Effective-field diff for one profile. */
+export interface ProfileImpact {
+  profileId: string
+  profileName: string
+  diffs: FieldDiff[]
+}
+
+/** What happens to children when a group is deleted. */
+export interface DeleteImpact {
+  action: string // "promote_to_root" | "refuse"
+  reason: string // human-readable explanation
+  affectedGroupIds?: string[] // child groups that would be reparented
+}
+
+/** Response from groups.impact. */
+export interface GroupImpactResponse {
+  dangerous: boolean
+  affectedProfiles?: ProfileImpact[]
+  deleteImpact?: DeleteImpact
+}
+// PatchParams is the request for profiles.patch.
+export interface PatchParams {
+  id: string
+  set?: Record<string, unknown>
+  unset?: string[]
+}
+
 // ProfileClient is the JSON-RPC client for profile/group/credential CRUD.
 // It speaks the control-plane methods wired in nocx-fxs.5 (AD-1).
 // RPC dispatch is delegated to a shared Dispatcher so request-ID allocation
@@ -220,8 +356,39 @@ export class ProfileClient {
     return this.call('groups.delete', { id })
   }
 
-  importTabby(configYAML: string): Promise<number> {
-    return this.call('profiles.importTabby', { config: configYAML })
+  /** groups.impact — preview the effect of a proposed group change or delete. */
+  groupImpact(params: {
+    group?: ProfileGroup
+    deleteGroupId?: string
+  }): Promise<GroupImpactResponse> {
+    return this.call('groups.impact', params)
+  }
+
+  /** groups.apply — atomically apply one or more group changes. */
+  groupApply(groups: ProfileGroup[]): Promise<ProfileGroup[]> {
+    return this.call('groups.apply', groups)
+  }
+
+  /** profiles.moveImpact — preview the effect of moving profile(s) to a new group. */
+  moveImpact(params: {
+    profileIds: string[]
+    targetGroupId: string
+  }): Promise<GroupImpactResponse> {
+    return this.call('profiles.moveImpact', params)
+  }
+
+  importTabby(configYAML: string, passphrase?: string): Promise<number> {
+    return this.call('profiles.importTabby', { config: configYAML, passphrase })
+  }
+
+  tabbyPreview(configYAML: string, passphrase?: string): Promise<TabbyPreviewResponse> {
+    const params: Record<string, string> = { config: configYAML }
+    if (passphrase) params.passphrase = passphrase
+    return this.call('profiles.tabbyPreview', params)
+  }
+
+  tabbyExecute(planToken: string): Promise<ImportResult> {
+    return this.call('profiles.tabbyExecute', { planToken })
   }
 
   // Credential CRUD (УЗ — reusable authentication identities)
@@ -239,8 +406,10 @@ export class ProfileClient {
   }
 
   // Password storage (OS keychain) — keyed by credential ID
-  savePassword(credentialId: string, password: string): Promise<boolean> {
-    return this.call('credentials.savePassword', { credentialId, password })
+  // `name` is the generated display name (user@host) the secret owns
+  // (ADR-0016); optional, and the backend falls back to rendering when absent.
+  savePassword(credentialId: string, password: string, name?: string): Promise<boolean> {
+    return this.call('credentials.savePassword', { credentialId, password, name })
   }
   deletePassword(credentialId: string): Promise<boolean> {
     return this.call('credentials.deletePassword', { credentialId })
@@ -249,6 +418,147 @@ export class ProfileClient {
     return this.call('credentials.hasPassword', { credentialId })
   }
 
+  /** credentials.saveKeyMaterial — store a private key in the vault.
+   *  `name` is the generated display name the secret owns (ADR-0016). */
+  saveKeyMaterial(
+    credentialId: string,
+    keyText: string,
+    name?: string,
+  ): Promise<SaveKeyMaterialResult> {
+    return this.call('credentials.saveKeyMaterial', { credentialId, keyText, name })
+  }
+  /** credentials.saveKeyPassphrase — store the passphrase that opens a stored
+   *  key. The backend verifies it against the key material before storing: a
+   *  wrong passphrase is refused there and then (nocx-dze3). */
+  saveKeyPassphrase(credentialId: string, passphrase: string, name?: string): Promise<boolean> {
+    return this.call('credentials.saveKeyPassphrase', { credentialId, passphrase, name })
+  }
+  /** credentials.deleteKeyMaterial — remove stored key material from the vault. */
+  deleteKeyMaterial(credentialId: string): Promise<Record<string, never>> {
+    return this.call('credentials.deleteKeyMaterial', { credentialId })
+  }
+
+  // Credential usage query — which profiles (by resolved inheritance) use each credential.
+  credentialUsage(): Promise<{ usage: CredentialUsage[] }> {
+    return this.call('credentials.usage', {})
+  }
+
+  /** sessions.status — live + last-used state for a batch of profile IDs. */
+  sessionStatus(profileIds: string[]): Promise<{ statuses: Record<string, SessionStatus> }> {
+    return this.call('sessions.status', { profileIds })
+  }
+
+  /** connections.test — probe one profile, return typed outcome. */
+  connectionTest(profileId: string): Promise<ConnectionTestResult> {
+    return this.call('connections.test', { profileId })
+  }
+
+  /**
+   * connections.trustHostKey — append the offered host key to known_hosts
+   * (accept-on-first-use). host and key are echoed verbatim from the
+   * connections.test result's hostKey evidence; the write is backend-side.
+   */
+  trustHostKey(host: string, key: string): Promise<TrustHostKeyResult> {
+    return this.call('connections.trustHostKey', { host, key })
+  }
+
+  // loadEffective resolves one or more profiles to their effective values
+  // with per-field provenance. Batch: pass several IDs in one call.
+  loadEffective(ids: string[]): Promise<EffectiveBatchResponse> {
+    return this.call('profiles.effective', { ids })
+  }
+
+  // patchProfile applies atomic set/unset operations to a profile and returns
+  // its new effective entry. Use set for overrides, unset to revert to inherited.
+  patchProfile(params: PatchParams): Promise<EffectiveProfileDTO> {
+    return this.call('profiles.patch', params)
+  }
+
+  // ── SSH config aliases (wave 7 — nocx-c2ym.3) ─────────────────────
+
+  /** List SSH host aliases from the machine's SSH config with resolved values. */
+  listSSHAliases(): Promise<SSHAliasResponse> {
+    return this.call('sshConfig.aliases', {})
+  }
+
+  /**
+   * Which file listSSHAliases reads, and whether it can be read at all.
+   *
+   * Cheap by construction — no stat, no `ssh -G` — so a surface may ask merely
+   * to name the file in its own text instead of assuming "~/.ssh/config".
+   */
+  sshConfigPath(): Promise<SSHConfigPathResult> {
+    return this.call('sshConfig.path', {})
+  }
+
+  /**
+   * Import ~/.ssh/config aliases as detached (non-live) nocx profiles.
+   * Skips aliases whose name or host already exists among saved profiles.
+   * Collision check is frontend-side, so concurrent edits may race — the
+   * returned count is best-effort rather than exact.
+   */
+  async importSSHConfig(): Promise<SSHConfigImportResult> {
+    const [aliasResp, existing] = await Promise.all([this.listSSHAliases(), this.listProfiles()])
+
+    if (aliasResp.unavailable) {
+      throw new Error(aliasResp.unavailable.detail)
+    }
+
+    // Build collision sets from existing profiles.
+    const existingNames = new Set(existing.map((p) => p.name))
+    const existingHosts = new Set(existing.map((p) => p.options.host))
+
+    // Track seen-in-batch names and hosts for same-source dedup.
+    const seenNames = new Set<string>()
+    const seenHosts = new Set<string>()
+
+    let imported = 0
+    let skipped = 0
+
+    for (const entry of aliasResp.aliases) {
+      // Skip by name collision.
+      if (existingNames.has(entry.alias) || seenNames.has(entry.alias)) {
+        skipped++
+        continue
+      }
+      // Skip by host collision.
+      if (existingHosts.has(entry.hostName) || seenHosts.has(entry.hostName)) {
+        skipped++
+        continue
+      }
+
+      seenNames.add(entry.alias)
+      seenHosts.add(entry.hostName)
+
+      // No id: the backend mints it on profiles.create and returns the record.
+      // Minting one here is what nocx-uxs5.10 removed.
+      const p: SSHProfile = {
+        id: '',
+        type: 'ssh',
+        name: entry.alias,
+        options: {
+          host: entry.hostName,
+          ...(entry.user !== undefined ? { user: entry.user } : {}),
+          ...(entry.port !== undefined ? { port: entry.port } : {}),
+        },
+      }
+
+      try {
+        await this.createProfile(p)
+        imported++
+      } catch (e) {
+        // Race: profile created between our list and the create call.
+        // Only count profile-exists errors as collisions; propagate all others.
+        if (String(e).includes('profile already exists')) {
+          skipped++
+        } else {
+          throw e
+        }
+      }
+    }
+
+    return { profilesImported: imported, skipped }
+  }
   // Settings RPC (nocx-9m5 / STORE-5b).  No secret value ever appears in a
   // response — secrets go through secretSet/secretDelete/secretExists only.
   describeSettings(): Promise<{ declarations: unknown[] }> {
@@ -305,8 +615,41 @@ export class ProfileClient {
   }
 
   importPortable(payloadBase64: string, passphrase: string): Promise<ImportResult> {
-    return this.call('export.importPortable', { payload: payloadBase64, passphrase })
+    return this.call('export.portableImport', { payload: payloadBase64, passphrase })
   }
+}
+
+// ── Credential usage types ────────────────────────────────────────────────
+//
+// Returned by credentials.usage — resolved on the backend so inheritance is
+// correctly reflected (a credential used through a group default is still "in
+// use", and the frontend should not attempt to compute it).
+export interface CredentialUsage {
+  credentialId: string
+  profiles: ProfileRef[]
+}
+
+export interface ProfileRef {
+  profileId: string
+  profileName: string
+  source: 'profile' | 'group' | 'global' // 'group' and 'global' = inherited
+  groupId?: string
+  groupName?: string
+}
+
+/**
+ * Closed-enum outcome from connections.test. Derived from the generated
+ * ConnectionTestResult so the renderer's union and the wire enum cannot
+ * drift apart.
+ */
+export type ProbeOutcome = ConnectionTestResult['outcome']
+
+export type { ConnectionTestResult }
+
+/** Session state for one profile ID from sessions.status. */
+export interface SessionStatus {
+  live: boolean
+  lastUsed?: string
 }
 
 // ── Export/backup/import types (ADR-0011 §7) ─────────────────────────────
@@ -345,4 +688,45 @@ export interface ImportResult {
   groupsImported: number
   credentialsImported: number
   unresolvedCredentials?: Credential[]
+}
+
+// ── Tabby import preview types (bead nocx-kqw6) ──────────────────────────
+
+/** One profile to import and what would happen. */
+export interface ProfileEntry {
+  name: string
+  action: 'new' | 'overwrite' | 'needs-review'
+}
+
+/** One credential the import would create. */
+export interface CredentialEntry {
+  name: string
+  type: 'password' | 'passphrase'
+}
+
+/** One skipped secret and why. */
+export interface SkippedInfo {
+  secretType: string
+  reason: string
+}
+
+/** One collision and the policy that applies. */
+export interface CollisionInfo {
+  kind: string
+  name: string
+  policy: string
+}
+
+/** Response from profiles.tabbyPreview. */
+export interface TabbyPreviewResponse {
+  profilesToImport: number
+  groupsToImport: number
+  credentialsToImport: number
+  profileEntries?: ProfileEntry[]
+  groupNames?: string[]
+  credentialEntries?: CredentialEntry[]
+  skippedSecrets?: SkippedInfo[]
+  collisions?: CollisionInfo[]
+  secretProvider: string
+  planToken: string
 }

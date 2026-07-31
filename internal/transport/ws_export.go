@@ -145,13 +145,8 @@ func (s *WSServer) handleExportImport(wconn *wsConn, req jsonrpcRequest) {
 		return
 	}
 
-	deps := export.ImportDeps{
-		Profiles:    s.profiles,
-		Groups:      s.groups,
-		Credentials: s.credMeta,
-	}
-
-	result, err := export.ImportConfiguration(deps, &data)
+	// Domain service path: atomic import.
+	result, err := export.ImportConfigurationWithService(s.profileSvc, &data)
 	if err != nil {
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
 		return
@@ -159,8 +154,7 @@ func (s *WSServer) handleExportImport(wconn *wsConn, req jsonrpcRequest) {
 	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(result)))
 }
 
-// --- export.importPortable ---------------------------------------------
-
+// exportImportPortableParams is decoded from the export.importPortable RPC payload.
 type exportImportPortableParams struct {
 	Payload    string `json:"payload"` // base64-encoded encrypted blob
 	Passphrase string `json:"passphrase"`
@@ -186,15 +180,10 @@ func (s *WSServer) handleExportImportPortable(wconn *wsConn, req jsonrpcRequest)
 		return
 	}
 
-	deps := export.ImportDeps{
-		Profiles:    s.profiles,
-		Groups:      s.groups,
-		Credentials: s.credMeta,
-	}
-
-	result, err := export.ImportConfiguration(deps, &plain.Config)
-	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+	// Domain service path: atomic import.
+	result, impErr := export.ImportConfigurationWithService(s.profileSvc, &plain.Config)
+	if impErr != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, impErr.Error()))
 		return
 	}
 	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(result)))
