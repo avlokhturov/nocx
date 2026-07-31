@@ -8,11 +8,14 @@
  * validation) are tested in connections.test.tsx.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
+import { Show } from 'solid-js'
 import { cleanup, render, fireEvent } from '@solidjs/testing-library'
 import { ConnectionsView } from './connections'
 import { ProfileClient } from './profiles'
+import { createVaultState, UnlockDialog, type VaultController } from './vault'
+import type { VaultClient } from './vault-client'
 import type { DialogClient } from './dialog-client'
-import { Dispatcher } from './dispatcher'
+import { Dispatcher, RpcError } from './dispatcher'
 import { clearToasts, toasts } from './ui'
 import type {
   SSHProfile,
@@ -122,7 +125,6 @@ function createMockClient(overrides?: {
   const connectionTest = vi
     .spyOn(pc, 'connectionTest')
     .mockResolvedValue(overrides?.connectionTestResult ?? { outcome: 'accepted' })
-
   return { client: pc, connectionTest }
 }
 
@@ -131,21 +133,39 @@ function mount(
     onConnect?: () => void
     onNavigateToCredentials?: () => void
     openFileDialog?: () => Promise<{ path: string }>
+    /** Vault controller wired like main.tsx wires it, with the dialog shown
+     *  beside the surface. Absent → ConnectionsView runs without a vault. */
+    vaultController?: VaultController
+    vaultClient?: VaultClient
   },
 ) {
   const { client, connectionTest } = createMockClient(overrides)
+  const vaultController = overrides?.vaultController
+  const vaultClient = overrides?.vaultClient
   const dialogClient = overrides?.openFileDialog
     ? ({ openFileDialog: overrides.openFileDialog } as unknown as DialogClient)
     : undefined
   const container = document.body.appendChild(document.createElement('div'))
   render(
     () => (
-      <ConnectionsView
-        client={client}
-        dialogClient={dialogClient}
-        onConnect={overrides?.onConnect}
-        onNavigateToCredentials={overrides?.onNavigateToCredentials}
-      />
+      <>
+        <ConnectionsView
+          client={client}
+          dialogClient={dialogClient}
+          vaultController={vaultController}
+          onConnect={overrides?.onConnect}
+          onNavigateToCredentials={overrides?.onNavigateToCredentials}
+        />
+        <Show when={vaultController && vaultClient}>
+          <UnlockDialog
+            open={vaultController!.showUnlock()}
+            onClose={() => vaultController!.closeUnlock()}
+            onUnsealed={() => vaultController!.onUnsealDone()}
+            vaultClient={vaultClient!}
+            vaultStatus={vaultController!.status()}
+          />
+        </Show>
+      </>
     ),
     { container },
   )
@@ -1377,5 +1397,170 @@ describe('profile move preview', () => {
       profileIds: ['ssh:p2'],
       targetGroupId: '',
     })
+  })
+})
+
+// ── Vault prompt cancellation abandons the save ─────────────────────────
+// Creating the profile and saving the secret are two steps, and cancelling
+// the second used to leave the first done: the connection was created
+// claiming an auth method whose secret was never stored. Cancelling the
+// prompt must abandon the operation the user started — no profile created,
+// no credential left behind, editor open with their input intact.
+
+function sealedVaultClient() {
+  const status = vi.fn().mockResolvedValue({
+    state: 'sealed',
+    osKeyAvailable: false,
+    osKeyCapable: false,
+    hasPassphrase: false,
+    autoSealMinutes: 0,
+    providers: [],
+    defaultProvider: null,
+  })
+  const unseal = vi.fn().mockResolvedValue({})
+  const setup = vi.fn().mockResolvedValue({})
+  const seal = vi.fn().mockResolvedValue({})
+  const changePassphrase = vi.fn().mockResolvedValue({})
+  const regenerateRecovery = vi.fn().mockResolvedValue({ recoveryCode: 'X' })
+  const setDefaultProvider = vi.fn().mockResolvedValue({})
+  const setAutoSeal = vi.fn().mockResolvedValue({})
+  const activity = vi.fn().mockResolvedValue({})
+  const vaultClient = {
+    status,
+    unseal,
+    setup,
+    seal,
+    changePassphrase,
+    regenerateRecovery,
+    setDefaultProvider,
+    setAutoSeal,
+    activity,
+  } as unknown as VaultClient
+  const vaultController = createVaultState(vaultClient)
+  return { vaultClient, vaultController }
+}
+
+function clickButtonByText(container: HTMLElement, text: string, scope?: ParentNode): HTMLElement {
+  const root = scope ?? container
+  const btn = Array.from(root.querySelectorAll('.ui-button')).find(
+    (b) => b.textContent?.trim() === text,
+  )
+  expect(btn, `button "${text}" not found`).toBeTruthy()
+  ;(btn! as HTMLElement).click()
+  return btn! as HTMLElement
+}
+
+describe('vault prompt cancellation', () => {
+  it('cancel on the unlock prompt abandons the connection save', async () => {
+    const { vaultClient, vaultController } = sealedVaultClient()
+    await vaultController.refresh()
+    const { container, client } = mount({ profiles: [], vaultController, vaultClient })
+
+    const createProfileSpy = vi.spyOn(client, 'createProfile')
+    const createCredentialSpy = vi.spyOn(client, 'createCredential').mockResolvedValue({
+      id: 'cred:new-1',
+      name: 'web.example.com',
+      username: '',
+      auth: 'password',
+    })
+    const deleteCredentialSpy = vi.spyOn(client, 'deleteCredential').mockResolvedValue(true)
+    vi.spyOn(client, 'savePassword').mockRejectedValue(
+      new RpcError('vault error', -32000, { reason: 'vault-sealed' }),
+    )
+
+    await waitForProfiles(container, 0)
+
+    // + New connection → quick-connect → full form
+    clickButtonByText(container, '+ New connection')
+    await vi.waitFor(() => expect(container.querySelector('#quick-connect-input')).toBeTruthy())
+    fireEvent.input(container.querySelector('#quick-connect-input')!, {
+      target: { value: 'web.example.com' },
+    })
+    clickButtonByText(container, 'Next')
+    await vi.waitFor(() => expect(container.querySelector('#profile-host')).toBeTruthy())
+
+    // Authentication → Password → set a password
+    selectProfileSection(container, 'Authentication')
+    clickSegmentedOption(container, 'Password')
+    clickButtonByText(container, 'Set Password')
+    await vi.waitFor(() => expect(container.querySelector('#credential-password')).toBeTruthy())
+    fireEvent.input(container.querySelector('#credential-password')!, {
+      target: { value: 'hunter2' },
+    })
+    clickButtonByText(container, 'OK')
+
+    // Create Connection → the vault asks to unlock
+    const editor = findDialogByTitleContaining(container, 'New Connection')!
+    clickButtonByText(container, 'Create Connection', editor)
+    await vi.waitFor(() => {
+      expect(createCredentialSpy).toHaveBeenCalled()
+      expect(container.querySelector('.ui-prompt[data-placement="top-sheet"]')).toBeTruthy()
+    })
+
+    // Cancel the unlock prompt
+    const prompt = container.querySelector('.ui-prompt')!
+    clickButtonByText(container, 'Cancel', prompt)
+
+    // The whole save is abandoned: no profile, credential cleaned up, editor
+    // still open with the password still staged.
+    await vi.waitFor(() => {
+      expect(deleteCredentialSpy).toHaveBeenCalledWith('cred:new-1')
+    })
+    expect(createProfileSpy).not.toHaveBeenCalled()
+    expect(container.querySelector('.ui-prompt')).toBeNull()
+    expect(container.querySelector('#profile-host')).toBeTruthy()
+    expect(container.textContent).toContain('Password ready to save')
+  })
+
+  it('cancel on the unlock prompt abandons the group save', async () => {
+    const { vaultClient, vaultController } = sealedVaultClient()
+    await vaultController.refresh()
+    const { container, client } = mount({
+      profiles: MOCK_PROFILES,
+      groups: MOCK_GROUPS,
+      vaultController,
+      vaultClient,
+    })
+
+    const createGroupSpy = vi.spyOn(client, 'createGroup')
+    const groupApplySpy = vi.spyOn(client, 'groupApply')
+    const createCredentialSpy = vi.spyOn(client, 'createCredential').mockResolvedValue({
+      id: 'cred:group-1',
+      name: 'Production',
+      username: '',
+      auth: 'publicKey',
+    })
+    const deleteCredentialSpy = vi.spyOn(client, 'deleteCredential').mockResolvedValue(true)
+    vi.spyOn(client, 'saveKeyMaterial').mockRejectedValue(
+      new RpcError('vault error', -32000, { reason: 'vault-sealed' }),
+    )
+
+    await waitForProfiles(container, 3)
+    await openGroupEditorByName(container, 'Production')
+    selectGroupSection(container, 'Connection')
+    clickSegmentedOption(container, 'Public Key')
+    clickSegmentedOption(container, 'Paste key')
+    await vi.waitFor(() => expect(container.querySelector('#group-default-key-text')).toBeTruthy())
+    fireEvent.input(container.querySelector('#group-default-key-text')!, {
+      target: { value: '-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----' },
+    })
+
+    const groupEditor = findDialogByTitle(container, 'Edit Group: Production')!
+    clickButtonByText(container, 'Save Group', groupEditor)
+    await vi.waitFor(() => {
+      expect(createCredentialSpy).toHaveBeenCalled()
+      expect(container.querySelector('.ui-prompt[data-placement="top-sheet"]')).toBeTruthy()
+    })
+
+    const prompt = container.querySelector('.ui-prompt')!
+    clickButtonByText(container, 'Cancel', prompt)
+
+    await vi.waitFor(() => {
+      expect(deleteCredentialSpy).toHaveBeenCalledWith('cred:group-1')
+    })
+    expect(createGroupSpy).not.toHaveBeenCalled()
+    expect(groupApplySpy).not.toHaveBeenCalled()
+    expect(container.querySelector('.ui-prompt')).toBeNull()
+    expect(findDialogByTitle(container, 'Edit Group: Production')).toBeTruthy()
   })
 })

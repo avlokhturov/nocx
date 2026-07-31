@@ -13,7 +13,7 @@ import { For, Show, onMount } from 'solid-js'
 import { createStore } from 'solid-js/store'
 import { render } from 'solid-js/web'
 import type { ProfileClient, ExportManifest, ConfigExport, SSHConfigImportResult } from './profiles'
-import type { VaultController } from './vault'
+import { VaultOperationCancelledError, type VaultController } from './vault'
 import { downloadJSON, downloadBinary } from './export-utils'
 import { PageSection } from './ui/page-section'
 import { Button } from './ui/button'
@@ -404,7 +404,13 @@ function ImportActions(props: { profileClient: ProfileClient; vaultController?: 
       }
 
       if (props.vaultController) {
-        await props.vaultController.saveSecretWithVault(doExecute)
+        try {
+          await props.vaultController.saveSecretWithVault(doExecute)
+        } catch (err) {
+          // The user cancelled the vault prompt: nothing ran, nothing failed.
+          if (err instanceof VaultOperationCancelledError) return
+          throw err
+        }
       } else {
         await doExecute()
       }

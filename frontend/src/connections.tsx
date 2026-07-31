@@ -57,7 +57,7 @@ import { PasswordEditor } from './password-editor'
 import { AuthenticationEditor } from './authentication-editor'
 import { log } from './log'
 import { showToast } from './ui/toast'
-import type { VaultController } from './vault'
+import { VaultOperationCancelledError, type VaultController } from './vault'
 
 // ── Provenance helpers ───────────────────────────────────────────────────────
 
@@ -523,6 +523,9 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       try {
         await props.vaultController.saveSecretWithVault(doExecute)
       } catch (err) {
+        // The user cancelled the vault prompt — nothing ran, nothing failed.
+        // The preview stays open so they can retry or close it deliberately.
+        if (err instanceof VaultOperationCancelledError) return
         const message = (err as Error).message
         log.error('Tabby import failed', { message })
         showToast({ level: 'danger', message: `Tabby import failed: ${message}` })
@@ -603,6 +606,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       return
     }
     setGroupApplyBusy(true)
+    // Set when this attempt creates a credential for a key it is about to
+    // save, so a cancelled vault prompt can undo exactly that credential —
+    // the credential the recursion saves with belongs to a different call.
+    let createdCredential: Credential | null = null
     try {
       // Key material save (publicKey paste mode in group defaults)
       const defaults = draft.defaults ?? {}
@@ -618,6 +625,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           username: (defaults.user as string | undefined) ?? '',
           auth: 'publicKey',
         })
+        createdCredential = credential
         const saveKeymat = async () => {
           const result = await props.client.saveKeyMaterial(
             credential.id,
@@ -672,10 +680,18 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             )
             setGroupKeyFingerprint(result.fingerprint)
           }
-          if (props.vaultController) {
-            await props.vaultController.saveSecretWithVault(saveKeymat)
-          } else {
-            await saveKeymat()
+          try {
+            if (props.vaultController) {
+              await props.vaultController.saveSecretWithVault(saveKeymat)
+            } else {
+              await saveKeymat()
+            }
+          } catch (err) {
+            if (err instanceof VaultOperationCancelledError) return
+            const message = (err as Error).message
+            log.error('Failed to save key material for group credential', { message })
+            showToast({ level: 'danger', message: `Could not save the key: ${message}` })
+            return
           }
           setGroupKeyText('')
           setGroupKeyFingerprint(undefined)
@@ -692,6 +708,12 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       await loadAll()
       showToast({ level: 'success', message: `Saved group "${draft.name}"` })
     } catch (err) {
+      if (createdCredential && err instanceof VaultOperationCancelledError) {
+        // Cancelled the vault prompt: abandon the group save and undo the
+        // credential created for it; the editor stays open with input intact.
+        await cleanupCredential(createdCredential.id)
+        return
+      }
       if (
         err instanceof RpcError &&
         typeof err.data === 'object' &&
@@ -1332,6 +1354,18 @@ export function ConnectionsView(props: ConnectionsViewProps) {
 
   // ── Save / delete / connect ────────────────────────────────────────────
 
+  /** Undo a credential that was created for a save the user then cancelled.
+   *  The cancellation must leave no credential behind — deleting is the
+   *  rollback half of "abandon the operation the user started". */
+  async function cleanupCredential(id: string): Promise<void> {
+    try {
+      await props.client.deleteCredential(id)
+    } catch (err) {
+      const message = (err as Error).message
+      log.error('Failed to clean up credential after a cancelled save', { message })
+    }
+  }
+
   async function saveProfile(profile: SSHProfile) {
     if (!gate(profileValidation)) return
 
@@ -1340,8 +1374,9 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       profile.options.auth === 'password' &&
       profilePasswordValue()
     ) {
+      let credential: Credential | null = null
       try {
-        const credential = await props.client.createCredential({
+        credential = await props.client.createCredential({
           id: '',
           name: profile.name,
           username: profile.options.user ?? '',
@@ -1349,7 +1384,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         })
         const savePw = async () => {
           await props.client.savePassword(
-            credential.id,
+            credential!.id,
             profilePasswordValue(),
             generatedSecretName(profile.options.user, profile.options.host),
           )
@@ -1368,6 +1403,13 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         setDirtyFields((prev) => new Set(prev).add('credentialId'))
         await saveProfile(linked)
       } catch (err) {
+        if (credential && err instanceof VaultOperationCancelledError) {
+          // The user cancelled the vault prompt: the save is abandoned. The
+          // credential created for it is undone, and the editor stays open
+          // with their input intact — the profile was never created.
+          await cleanupCredential(credential.id)
+          return
+        }
         const message = (err as Error).message
         log.error('Failed to save inline password credential', { message })
         showToast({ level: 'danger', message: `Could not save the password: ${message}` })
@@ -1382,8 +1424,9 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       suppliesMaterial(profileKeyMode()) &&
       profileKeyText()
     ) {
+      let credential: Credential | null = null
       try {
-        const credential = await props.client.createCredential({
+        credential = await props.client.createCredential({
           id: '',
           name: profile.name,
           username: profile.options.user ?? '',
@@ -1391,7 +1434,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         })
         const saveKeymat = async () => {
           const result = await props.client.saveKeyMaterial(
-            credential.id,
+            credential!.id,
             profileKeyText(),
             generatedSecretName(profile.options.user, profile.options.host),
           )
@@ -1411,6 +1454,12 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         setDirtyFields((prev) => new Set(prev).add('credentialId'))
         await saveProfile(linked)
       } catch (err) {
+        if (credential && err instanceof VaultOperationCancelledError) {
+          // Cancelled the vault prompt: abandon the save and undo the
+          // credential created for it; the editor stays open.
+          await cleanupCredential(credential.id)
+          return
+        }
         if (
           err instanceof RpcError &&
           typeof err.data === 'object' &&
@@ -1470,10 +1519,18 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             generatedSecretName(profile.options.user, profile.options.host),
           )
         }
-        if (props.vaultController) {
-          await props.vaultController.saveSecretWithVault(savePw)
-        } else {
-          await savePw()
+        try {
+          if (props.vaultController) {
+            await props.vaultController.saveSecretWithVault(savePw)
+          } else {
+            await savePw()
+          }
+        } catch (err) {
+          if (err instanceof VaultOperationCancelledError) return
+          const message = (err as Error).message
+          log.error('Failed to save password for credential', { message })
+          showToast({ level: 'danger', message: `Could not save the password: ${message}` })
+          return
         }
         setProfilePasswordValue('')
       }
@@ -1492,10 +1549,18 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           )
           setProfileKeyFingerprint(result.fingerprint)
         }
-        if (props.vaultController) {
-          await props.vaultController.saveSecretWithVault(saveKeymat)
-        } else {
-          await saveKeymat()
+        try {
+          if (props.vaultController) {
+            await props.vaultController.saveSecretWithVault(saveKeymat)
+          } else {
+            await saveKeymat()
+          }
+        } catch (err) {
+          if (err instanceof VaultOperationCancelledError) return
+          const message = (err as Error).message
+          log.error('Failed to save key material for credential', { message })
+          showToast({ level: 'danger', message: `Could not save the key: ${message}` })
+          return
         }
         setProfileKeyText('')
         setProfileKeyFingerprint(undefined)

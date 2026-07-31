@@ -8,6 +8,7 @@ import {
   ChangePassphraseDialog,
   RecoveryCodeDialog,
   VaultSection,
+  VaultOperationCancelledError,
   ResetVaultDialog,
 } from './vault'
 import { ToastHost, clearToasts } from './ui/toast'
@@ -474,7 +475,7 @@ describe('saveSecretWithVault', () => {
     expect(savePassword).toHaveBeenCalledTimes(2)
   })
 
-  it('user cancels setup dialog: resolves without saving', async () => {
+  it('user cancels setup dialog: rejects, abandoning the deferred save', async () => {
     const { client, status } = mockClient()
     status.mockResolvedValue({
       state: 'uninitialized',
@@ -497,11 +498,13 @@ describe('saveSecretWithVault', () => {
     await vi.waitFor(() => expect(ctrl.showSetup()).toBe(true))
     ctrl.closeSetup()
 
-    await expect(promise).resolves.toBeUndefined()
+    // The caller's promise rejects so it can abandon the operation it
+    // started — the save never ran, and nothing may be reported as saved.
+    await expect(promise).rejects.toBeInstanceOf(VaultOperationCancelledError)
     expect(savePassword).toHaveBeenCalledTimes(1)
   })
 
-  it('user cancels unlock dialog: resolves without saving', async () => {
+  it('user cancels unlock dialog: rejects, abandoning the deferred save', async () => {
     const { client, status } = mockClient()
     status.mockResolvedValue({
       state: 'sealed',
@@ -524,7 +527,7 @@ describe('saveSecretWithVault', () => {
     await vi.waitFor(() => expect(ctrl.showUnlock()).toBe(true))
     ctrl.closeUnlock()
 
-    await expect(promise).resolves.toBeUndefined()
+    await expect(promise).rejects.toBeInstanceOf(VaultOperationCancelledError)
     expect(savePassword).toHaveBeenCalledTimes(1)
   })
 })
@@ -721,21 +724,22 @@ describe('UnlockDialog', () => {
       expect(toast!.getAttribute('data-level')).toBe('danger')
       expect(toast!.textContent).toBe('That passphrase does not unlock this vault.')
     })
-    // The property that makes it reachable rather than merely present: a modal
-    // <dialog> paints in the top layer, so a toast is visible only if it is
-    // rendered INSIDE that element. ToastHost portals itself there. Asserting
-    // presence alone would pass either way, because jsdom stubs showModal and
-    // has no top layer to hide anything.
-    expect(document.querySelector('.ui-toast')!.closest('dialog')).not.toBeNull()
+    // The property that makes it reachable rather than merely present: the
+    // toast is only visible if it is rendered INSIDE the topmost overlay.
+    // ToastHost portals itself there, and the Unlock prompt registers itself
+    // as one — a Prompt pushes its element onto the overlay stack, exactly
+    // like a modal dialog does. Asserting presence alone would pass either
+    // way, because jsdom has no top layer to hide anything.
+    expect(document.querySelector('.ui-toast')!.closest('.ui-prompt-overlay')).not.toBeNull()
     // Never the backend's own words.
     expect(document.body.textContent).not.toContain('unseal failed')
-    // Dialog stays open, onUnsealed not called
+    // Prompt stays open, onUnsealed not called
     expect(onUnsealed).not.toHaveBeenCalled()
   })
 
   // Enter is what a person presses in a passphrase prompt without thinking.
-  // Dialog has offered `onSubmit` since it was written; this dialog never
-  // passed one, so Enter did nothing at all.
+  // The Prompt's onSubmit offers it with the same contract Dialog did; this
+  // prompt passes one, so Enter unlocks.
   it('unlocks on Enter in the passphrase field', async () => {
     const { client, unseal } = mockClient()
     unseal.mockResolvedValue({})

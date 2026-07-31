@@ -22,6 +22,7 @@ import {
   type Accessor,
 } from 'solid-js'
 import { Dialog } from './ui/dialog'
+import { Prompt } from './ui/prompt'
 import { Button } from './ui/button'
 import { Stack } from './ui/stack'
 import { TextField } from './ui/text-field'
@@ -40,10 +41,20 @@ import type {
   ResidueEntry,
 } from './vault-client'
 
-// ── Error mapping ───────────────────────────────────────────────────────
-// The Dispatcher currently drops structured RPC error fields and surfaces
-// only message text, but hidden/mock clients may provide `reason` directly.
-// Check both: reason-code first, then message text as fallback.
+/**
+ * Thrown when the user cancels the vault prompt that was deferring a save.
+ *
+ * saveSecretWithVault rejects the caller's promise with this when its dialog
+ * is cancelled before the deferred save ran. A caller that treated cancel as
+ * success continued as if the save had happened — the profile was created
+ * while the secret was never stored, a two-step save silently halved.
+ */
+export class VaultOperationCancelledError extends Error {
+  constructor() {
+    super('Vault operation cancelled')
+    this.name = 'VaultOperationCancelledError'
+  }
+}
 
 const REASON_MESSAGES: Record<string, string> = {
   'no-service': 'No system keyring available. Use a passphrase to unlock.',
@@ -270,13 +281,23 @@ export function createVaultState(vaultClient: VaultClient): VaultController {
     pendingSave = null
     setShowSetup(true)
   }
-
   /** Closing a dialog cancels a pending operation — unless one is already
-   *  running, in which case that operation owns the promise. */
+   *  running, in which case that operation owns the promise.
+   *
+   *  When the cancel interrupts a DEFERRED save (pendingSave set, save not
+   *  yet run), the caller's promise is rejected with VaultOperationCancelled
+   *  so the caller can abandon the operation it started. Resolving there was
+   *  how a cancelled unlock left the profile created with the secret never
+   *  stored: the caller continued as if the save had happened. */
   function closeDialog(hide: () => void): void {
+    const deferredSavePending = pendingSave !== null
     pendingSave = null
     if (!retryInFlight) {
-      pendingResolve?.(undefined)
+      if (deferredSavePending) {
+        pendingReject?.(new VaultOperationCancelledError())
+      } else {
+        pendingResolve?.(undefined)
+      }
       pendingResolve = null
       pendingReject = null
     }
@@ -300,7 +321,9 @@ export function createVaultState(vaultClient: VaultClient): VaultController {
    *    !osKeyCapable → SetupDialog, retry on completion.
    * 3. On vault-sealed: UnlockDialog, retry on completion.
    * 4. On any other error: rejects (propagates to caller's catch).
-   * 5. User cancels a dialog: resolves (no-op, caller continues without saving).
+   * 5. User cancels a dialog: rejects with VaultOperationCancelledError, so
+   *    the caller abandons the operation it started — the deferred save has
+   *    not run and nothing may be reported as saved.
    */
   function saveSecretWithVault(saveFn: () => Promise<void>): Promise<void> {
     return new Promise<void>((resolve, reject) => {
@@ -604,23 +627,59 @@ export const SetupDialog: Component<SetupDialogProps> = (props) => {
 
   const hasRecoveryCode = () => recoveryCode().length > 0
 
+  // The recovery-code step is not an interruption: it shows a one-time code
+  // the user must copy down, and there is nothing to type. It stays a Dialog.
+  // The passphrase step is a vault password prompt — it slides in as a
+  // top-sheet, the same treatment as unlock and change-passphrase.
+  //
+  // The switch between the two is a <Show>: a component body executes once,
+  // so a top-level ternary would freeze the first branch and the recovery
+  // code could never appear.
   return (
-    <Dialog
-      open={props.open}
-      onClose={() => {
-        reset()
-        props.onClose()
-      }}
-      title={hasRecoveryCode() ? 'Recovery Code' : 'Set Up Vault'}
-      onSubmit={
-        hasRecoveryCode()
-          ? undefined
-          : () => {
-              void handleSetup()
-            }
+    <Show
+      when={hasRecoveryCode()}
+      fallback={
+        <Prompt
+          open={props.open}
+          onClose={() => {
+            reset()
+            props.onClose()
+          }}
+          ariaLabel="Set Up Vault"
+          placement="top-sheet"
+          title="Set Up Vault"
+          onSubmit={() => {
+            void handleSetup()
+          }}
+          actions={
+            <>
+              <Button
+                variant="primary"
+                disabled={saving()}
+                onClick={() => {
+                  void handleSetup()
+                }}
+              >
+                {saving() ? 'Setting up…' : 'Set Up'}
+              </Button>
+              <Button variant="default" disabled={saving()} onClick={props.onClose}>
+                Cancel
+              </Button>
+            </>
+          }
+        >
+          {passphraseView}
+        </Prompt>
       }
-      footer={
-        hasRecoveryCode() ? (
+    >
+      <Dialog
+        open={props.open}
+        onClose={() => {
+          reset()
+          props.onClose()
+        }}
+        title="Recovery Code"
+        footer={
           <Button
             variant="primary"
             onClick={() => {
@@ -631,28 +690,11 @@ export const SetupDialog: Component<SetupDialogProps> = (props) => {
           >
             Done
           </Button>
-        ) : (
-          <>
-            <Button
-              variant="primary"
-              disabled={saving()}
-              onClick={() => {
-                void handleSetup()
-              }}
-            >
-              {saving() ? 'Setting up…' : 'Set Up'}
-            </Button>
-            <Button variant="default" disabled={saving()} onClick={props.onClose}>
-              Cancel
-            </Button>
-          </>
-        )
-      }
-    >
-      <Show when={hasRecoveryCode()} fallback={passphraseView}>
+        }
+      >
         {recoveryView}
-      </Show>
-    </Dialog>
+      </Dialog>
+    </Show>
   )
 }
 
@@ -930,21 +972,23 @@ export const UnlockDialog: Component<UnlockDialogProps> = (props) => {
   }
 
   return (
-    <Dialog
+    <Prompt
       open={props.open}
       onClose={() => {
         reset()
         props.onClose()
       }}
+      ariaLabel="Unlock Vault"
+      placement="top-sheet"
       title="Unlock Vault"
-      // Enter unlocks. Dialog has offered this since it was written and this
-      // dialog never asked for it, so the one control a user reaches for
-      // reflexively in a passphrase prompt did nothing at all.
+      // Enter unlocks, supplied by the Prompt's onSubmit — the same contract
+      // Dialog offered. The one control a user reaches for reflexively in a
+      // passphrase prompt must not do nothing.
       onSubmit={() => {
         if (unlocking()) return
         void handleUnseal()
       }}
-      footer={
+      actions={
         <>
           <Button
             variant="primary"
@@ -963,7 +1007,7 @@ export const UnlockDialog: Component<UnlockDialogProps> = (props) => {
     >
       {meansRow}
       {meansForm()}
-    </Dialog>
+    </Prompt>
   )
 }
 
@@ -1033,17 +1077,19 @@ export const ChangePassphraseDialog: Component<ChangePassphraseDialogProps> = (p
   }
 
   return (
-    <Dialog
+    <Prompt
       open={props.open}
       onClose={() => {
         reset()
         props.onClose()
       }}
+      ariaLabel="Change vault passphrase"
+      placement="top-sheet"
       title="Change vault passphrase"
       onSubmit={() => {
         void handleChange()
       }}
-      footer={
+      actions={
         <>
           <Button
             variant="primary"
@@ -1144,7 +1190,7 @@ export const ChangePassphraseDialog: Component<ChangePassphraseDialogProps> = (p
           factor that recovers.
         </p>
       </Stack>
-    </Dialog>
+    </Prompt>
   )
 }
 
@@ -1213,12 +1259,14 @@ export const RecoveryCodeDialog: Component<RecoveryCodeDialogProps> = (props) =>
   }
 
   return (
-    <Dialog
+    <Prompt
       open={props.open}
       onClose={() => {
         reset()
         props.onClose()
       }}
+      ariaLabel="Reissue recovery code"
+      placement="top-sheet"
       title="Reissue recovery code"
       // Enter submits the passphrase, the same as everywhere else a passphrase
       // is asked for. Only while it is still being asked: once the code is on
@@ -1228,6 +1276,9 @@ export const RecoveryCodeDialog: Component<RecoveryCodeDialogProps> = (props) =>
         if (recoveryCode() !== null || generating()) return
         void handleGenerate()
       }}
+      // The buttons live in the body, one set per step — the code-display
+      // step has only Done, no Cancel, so there is no shared action row.
+      actions={<></>}
     >
       <Show when={recoveryCode() === null}>
         <Stack>
@@ -1281,7 +1332,7 @@ export const RecoveryCodeDialog: Component<RecoveryCodeDialogProps> = (props) =>
           </Button>
         </Stack>
       </Show>
-    </Dialog>
+    </Prompt>
   )
 }
 

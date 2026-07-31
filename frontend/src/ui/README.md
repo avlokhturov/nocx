@@ -191,6 +191,38 @@ document flow.** The export page kept a `.st-export-status` div under every acti
 holding an empty line on four sections forever so that a message could appear without
 shifting the layout — and shifting it anyway when the message ran to two lines.
 
+## Prompt: a modal that is not a `<dialog>`
+
+**Prompt** (`prompt.tsx`) is the overlay treatment for asking one thing of the
+user without burying what is behind it. `data-placement="top-sheet"` slides a
+panel down from the top edge and leaves the surface it interrupted visible —
+that is why the vault's password prompts are top-sheets while the New
+Connection form they interrupt stays a `Dialog`.
+
+Everything a `<dialog>` gives for free is either supplied by the overlay stack
+or by Prompt itself, and the boundary matters:
+
+- **Escape** comes from the overlay stack's document-level handler — Prompt
+  registers with `pushOverlay` like every other overlay, so Escape closes the
+  topmost one. Tested, not assumed.
+- **Enter** is `onSubmit`, opt-in with the same contract as `Dialog`'s: a
+  single-line input fires it, a textarea and a button own their own Enter, and
+  an IME's Enter accepts a candidate. The vault prompts all pass one.
+- **Focus** is Prompt's job: on open it focuses the `autofocus` field, else
+  the first field, else the first button (the same order a native modal
+  chooses); on close it restores focus to whatever had it before — the overlay
+  stack records that on push.
+- **Toasts are visible from inside a Prompt.** `ToastHost` portals into the
+  topmost overlay's element, and a Prompt's element is on the stack, so a
+  toast raised while the prompt is open renders inside it. A one-time
+  recovery code that cannot be copied is reported by a sticky toast — it must
+  survive, and it does.
+
+One trap the kit records for the next reader: **a component body executes
+once.** Switching a surface between a Prompt and a Dialog on state is a
+`<Show>` with the two as branches — a top-level ternary freezes on the first
+branch and the second can never appear.
+
 **`Tab` is not a kit primitive either.** It carries `role=tab`, drag and reorder,
 middle-click close, activity indicators, `aria-controls` and two orientations: a
 behavioural unit, not a styled button. Feature components like it are declared in
