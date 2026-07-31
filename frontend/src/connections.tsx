@@ -699,8 +699,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         'reason' in err.data &&
         err.data.reason === 'invalid-key'
       ) {
-        setGroupKeyTextError('Invalid private key format')
-        log.error('Invalid key material in group defaults', { message: (err as Error).message })
+        const detail = (err as Error).message
+        setGroupKeyTextError(detail)
+        showToast({ level: 'danger', message: `Could not save the key: ${detail}` })
+        log.error('Invalid key material in group defaults', { message: detail })
         setGroupApplyBusy(false)
         return
       }
@@ -1416,8 +1418,17 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           'reason' in err.data &&
           err.data.reason === 'invalid-key'
         ) {
-          setProfileKeyTextError('Invalid private key format')
-          log.error('Invalid key material', { message: (err as Error).message })
+          // Both, and neither alone is enough. The field error marks WHICH
+          // control is wrong and survives on screen while it is corrected; the
+          // toast is what makes the press of Create visibly do something —
+          // without it the button appeared inert, which is how this was
+          // reported. The backend's own sentence is used rather than a generic
+          // one: it distinguishes a public key from a corrupt file from a
+          // PEM-encrypted key needing conversion.
+          const detail = (err as Error).message
+          setProfileKeyTextError(detail)
+          showToast({ level: 'danger', message: `Could not save the key: ${detail}` })
+          log.error('Invalid key material', { message: detail })
           return
         }
         const message = (err as Error).message

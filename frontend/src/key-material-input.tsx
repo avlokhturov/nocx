@@ -67,6 +67,24 @@ export interface KeyMaterialInputProps {
   openFileDialog?: () => Promise<{ path: string }>
 }
 
+/**
+ * The one mistake worth catching before the round trip: uploading `id_x.pub`
+ * instead of `id_x`.
+ *
+ * Deliberately narrow. This does not attempt to validate a private key —
+ * that is the backend's job, it has the parser, and a second opinion in the
+ * renderer would be a second source of truth about what a key is. This only
+ * recognises an OpenSSH PUBLIC key, which is a single line beginning with its
+ * algorithm name, and says so in the words the user needs.
+ */
+export function publicKeyMistake(text: string): string | undefined {
+  const first = text.trim().split('\n', 1)[0] ?? ''
+  if (/^(ssh-(rsa|dss|ed25519)|ecdsa-sha2-|sk-(ssh|ecdsa))/.test(first)) {
+    return 'That is a public key. nocx needs the private key — the file without the .pub suffix.'
+  }
+  return undefined
+}
+
 export function KeyMaterialInput(props: KeyMaterialInputProps) {
   const [fileError, setFileError] = createSignal<string | undefined>(undefined)
   const [browseHint, setBrowseHint] = createSignal<string | undefined>(undefined)
@@ -132,7 +150,10 @@ export function KeyMaterialInput(props: KeyMaterialInputProps) {
             const change = props.onMaterialChange
             setFileError(undefined)
             void file.text().then(
-              (text) => change(text),
+              (text) => {
+                setFileError(publicKeyMistake(text))
+                change(text)
+              },
               () => setFileError('Could not read that file. Choose another, or paste the key.'),
             )
           }}
@@ -145,6 +166,15 @@ export function KeyMaterialInput(props: KeyMaterialInputProps) {
           <p class="cm-key-file-error">{fileError()}</p>
         </Show>
       </Show>
+      {/* The parent's verdict on the material — "not a private key", and the
+          like. It used to be passed only to the paste-mode TextField, so a
+          file chosen in file mode that turned out to be a public key set an
+          error nothing rendered: the user pressed Create and saw literally
+          nothing happen. The error belongs to the material, and the material
+          can arrive by any of the three routes. */}
+      <Show when={props.error && props.mode !== 'material'}>
+        <p class="cm-key-file-error">{props.error}</p>
+      </Show>
       <Show when={props.mode === 'material'}>
         <TextField
           multiline
@@ -152,11 +182,11 @@ export function KeyMaterialInput(props: KeyMaterialInputProps) {
           label="Private Key"
           value={props.materialValue}
           onInput={(value) => {
-            setFileError(undefined)
+            setFileError(publicKeyMistake(value))
             props.onMaterialChange(value)
           }}
           placeholder="Paste the private key content here"
-          error={props.error}
+          error={props.error ?? fileError()}
         />
         <Show when={props.fingerprint}>
           <span class="cm-key-fingerprint">Fingerprint: {props.fingerprint}</span>
