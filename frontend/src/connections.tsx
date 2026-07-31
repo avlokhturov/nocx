@@ -1522,11 +1522,18 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         setDirtyFields((prev) => new Set(prev).add('credentialId'))
         await saveProfile(linked)
       } catch (err) {
-        if (credential && err instanceof VaultOperationCancelledError) {
-          // The user cancelled the vault prompt: the save is abandoned. The
-          // credential created for it is undone, and the editor stays open
-          // with their input intact — the profile was never created.
-          await cleanupCredential(credential.id)
+        // The credential was minted BEFORE the secret it exists to hold, so
+        // any exit that did not link it leaves a record with nothing in it.
+        // Undoing it on the vault-cancel path alone is what filled one store
+        // with ten empty credentials for a single host (nocx-0ev7): every
+        // refused key, every backend error, left one behind, invisible
+        // because an empty credential has no secret to show on the Secrets
+        // page. The rule is the whole rule — created and not linked means
+        // undone.
+        if (credential) await cleanupCredential(credential.id)
+        if (err instanceof VaultOperationCancelledError) {
+          // Cancelling the vault prompt abandons the save with the editor
+          // still open and the input intact; there is nothing more to say.
           return
         }
         const message = (err as Error).message
@@ -1579,10 +1586,12 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         setDirtyFields((prev) => new Set(prev).add('credentialId'))
         await saveProfile(linked)
       } catch (err) {
-        if (credential && err instanceof VaultOperationCancelledError) {
-          // Cancelled the vault prompt: abandon the save and undo the
-          // credential created for it; the editor stays open.
-          await cleanupCredential(credential.id)
+        // Created and not linked means undone — see the password path above.
+        // A refused key is the commonest way here: paste a .pub by mistake,
+        // read the error, fix it, and the credential from the failed attempt
+        // stays forever with nothing in it.
+        if (credential) await cleanupCredential(credential.id)
+        if (err instanceof VaultOperationCancelledError) {
           return
         }
         if (
