@@ -1037,7 +1037,12 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       }
     }
     function renderConnectionDefaults(): JSX.Element {
-      const auth = gv('auth')
+      // An accessor, not a value: this function is called from a JSX position,
+      // so a read here is a read by the computation that builds the whole tab.
+      // `const auth = gv('auth')` made every keystroke in User rebuild the
+      // section and drop the caret — the same defect the comment at the top of
+      // this editor describes, reintroduced one line lower.
+      const auth = () => gv('auth')
       return (
         <Stack>
           <p class="cm-hint">
@@ -1051,7 +1056,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             onCredentialChange={(value) => setGroupDefaultsField('credentialId', value)}
             username={(gv('user') as string | undefined) || undefined}
             onUsernameChange={(value) => setGroupDefaultsField('user', value)}
-            auth={auth === undefined ? undefined : (auth as AuthMode)}
+            auth={auth() === undefined ? undefined : (auth() as AuthMode)}
             onAuthChange={(value) => setGroupDefaultsField('auth', value)}
             credentialDraft={groupCredDraft() ?? undefined}
             onCredentialDraftChange={(draft) => setGroupCredDraft(draft)}
@@ -1123,7 +1128,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                     required
                     value={gv('name') as string}
                     error={groupValidation.error('name')}
-                    onInput={(v) => setG('name', v)}
+                    onInput={(v) => {
+                      setG('name', v)
+                      groupValidation.answer('name', v)
+                    }}
                     onBlur={() => groupValidation.touch('name')}
                   />
                   <TextField
@@ -1877,9 +1885,25 @@ export function ConnectionsView(props: ConnectionsViewProps) {
 
   // ── Dialog form (profile editor) ──────────────────────────────────────
 
-  function renderProfileForm(profile: SSHProfile) {
+  /**
+   * The profile arrives as an ACCESSOR, and that is load-bearing rather than
+   * a style choice.
+   *
+   * This function is called from a JSX insert position, so Solid wraps the
+   * call in a computation and tracks whatever it reads. Taking the profile by
+   * value meant reading `editing()` at the call site, so every keystroke —
+   * each one writes a new profile object through setOption — invalidated that
+   * computation and rebuilt the entire form. The input the user was typing
+   * into was replaced by a new element mid-word: one character landed, focus
+   * fell to `<body>`, and the next keystroke went nowhere. Measured in a
+   * browser, not deduced: `document.activeElement` was `BODY` after one key.
+   *
+   * With an accessor, nothing is read when the form is built, so the call
+   * runs once and only the individual bindings that read it re-run.
+   */
+  function renderProfileForm(profile: () => SSHProfile) {
     function setOption(key: keyof SSHProfile['options'], value: unknown) {
-      const updated = { ...profile, options: { ...profile.options, [key]: value } }
+      const updated = { ...profile(), options: { ...profile().options, [key]: value } }
       setEditing(updated)
       setDirtyFields((prev: Set<string>) => {
         const next = new Set(prev)
@@ -1889,7 +1913,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     }
 
     function onNameChange(v: string) {
-      const updated = { ...profile, name: v }
+      const updated = { ...profile(), name: v }
       setEditing(updated)
       setDirtyFields((prev: Set<string>) => {
         const next = new Set(prev)
@@ -1914,7 +1938,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     }
 
     function effField(field: string): EffectiveFieldDTO | undefined {
-      const eff = effectiveData()[profile.id]
+      const eff = effectiveData()[profile().id]
       return eff?.fields[field]
     }
 
@@ -1928,14 +1952,14 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       // Effective values are only the fallback for a field this profile omits.
       // Reading effective first replaced a saved host with the resolver's empty
       // default and rendered the Host input blank.
-      const own = (profile.options as unknown as Record<string, unknown>)[key]
+      const own = (profile().options as unknown as Record<string, unknown>)[key]
       if (own !== undefined && own !== null) return own
       const eff = effField(key)
       if (eff !== undefined) return eff.value
       return undefined
     }
 
-    const isSaved = () => !!profile.id && profiles().some((x) => x.id === profile.id)
+    const isSaved = () => !!profile().id && profiles().some((x) => x.id === profile().id)
     function fvStr(key: string): string {
       const v = fieldValue(key)
       if (typeof v === 'string') return v
@@ -1985,9 +2009,12 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                     id="profile-name"
                     label="Name"
                     required
-                    value={profile.name}
+                    value={profile().name}
                     error={profileValidation.error('name')}
-                    onInput={onNameChange}
+                    onInput={(v) => {
+                      onNameChange(v)
+                      profileValidation.answer('name', v)
+                    }}
                     onBlur={() => profileValidation.touch('name')}
                   />
                   {fieldRow(
@@ -1998,7 +2025,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                       required
                       value={fvStr('host')}
                       error={profileValidation.error('host')}
-                      onInput={(v) => setOption('host', v)}
+                      onInput={(v) => {
+                        setOption('host', v)
+                        profileValidation.answer('host', v)
+                      }}
                       onBlur={() => profileValidation.touch('host')}
                     />,
                   )}
@@ -2014,6 +2044,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                       onInput={(v) => {
                         const n = parseInt(v, 10)
                         setOption('port', isNaN(n) ? 0 : n)
+                        profileValidation.answer('port', v)
                       }}
                       onBlur={() => profileValidation.touch('port')}
                     />,
@@ -2021,12 +2052,12 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                   <Show when={isSaved()}>
                     <Field for="profile-group" label="Group">
                       <Select
-                        value={profile.group ?? ''}
+                        value={profile().group ?? ''}
                         onChange={(v) => {
                           const targetGroupId = v || ''
-                          setEditing({ ...profile, group: targetGroupId || undefined })
+                          setEditing({ ...profile(), group: targetGroupId || undefined })
                           setDirtyFields((prev) => new Set(prev).add('group'))
-                          if (profile.id) void computeMoveImpact(profile.id, targetGroupId)
+                          if (profile().id) void computeMoveImpact(profile().id, targetGroupId)
                         }}
                         options={groupOptions()}
                         placeholder="&mdash; No group &mdash;"
@@ -2134,6 +2165,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                       onInput={(v) => {
                         const n = parseInt(v, 10)
                         setOption('keepaliveInterval', isNaN(n) ? 0 : n)
+                        profileValidation.answer('keepaliveInterval', v)
                       }}
                       onBlur={() => profileValidation.touch('keepaliveInterval')}
                     />,
@@ -2150,6 +2182,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                       onInput={(v) => {
                         const n = parseInt(v, 10)
                         setOption('keepaliveCountMax', isNaN(n) ? 0 : n)
+                        profileValidation.answer('keepaliveCountMax', v)
                       }}
                       onBlur={() => profileValidation.touch('keepaliveCountMax')}
                     />,
@@ -2166,6 +2199,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                       onInput={(v) => {
                         const n = parseInt(v, 10)
                         setOption('readyTimeout', isNaN(n) ? 0 : n)
+                        profileValidation.answer('readyTimeout', v)
                       }}
                       onBlur={() => profileValidation.touch('readyTimeout')}
                     />,
@@ -2302,7 +2336,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
               </>
             }
           >
-            {renderProfileForm(profile())}
+            {renderProfileForm(profile)}
             <PasswordEditor
               open={profilePasswordOpen()}
               value={profilePasswordValue()}

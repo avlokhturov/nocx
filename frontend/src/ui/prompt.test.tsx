@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render } from '@solidjs/testing-library'
-import { createSignal } from 'solid-js'
+import { Show, createSignal } from 'solid-js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Dialog } from './dialog'
 import { Prompt } from './prompt'
 import { ToastHost, clearToasts, showToast } from './toast'
+import { stackDepth } from './overlay/stack'
 
 afterEach(() => {
   clearToasts()
@@ -275,6 +276,64 @@ describe('Prompt', () => {
     expect(document.querySelector('.ui-prompt-overlay')).toBeTruthy()
     setOpen(false)
     expect(document.querySelector('.ui-prompt-overlay')).toBeNull()
+  })
+
+  // Closing the prompt must hand the keyboard back to the dialog it
+  // interrupted. It landed on <body> instead: the overlay stack skipped its
+  // focus return whenever the previous focus was inside an open dialog, on the
+  // assumption that the browser would do it — which is true when a <dialog>
+  // closes and false for a plain div.
+  it('returns focus into the dialog it was raised over', () => {
+    vi.useFakeTimers()
+    const [open, setOpen] = createSignal(false)
+    render(() => (
+      <>
+        <Dialog open onClose={() => undefined} title="New Connection">
+          <input id="host-field" />
+        </Dialog>
+        <Prompt open={open()} ariaLabel="Password" onClose={() => setOpen(false)} actions={null}>
+          <input />
+        </Prompt>
+      </>
+    ))
+    const field = document.querySelector('#host-field') as HTMLInputElement
+    field.focus()
+    expect(document.activeElement).toBe(field)
+
+    setOpen(true)
+    vi.runAllTimers()
+    setOpen(false)
+    vi.runAllTimers()
+
+    expect(document.activeElement).toBe(field)
+    vi.useRealTimers()
+  })
+
+  // The way the vault actually closes its prompts: the owner is unmounted
+  // (`<Show when={unlockOpen()}>`), not merely told `open={false}`. Moving the
+  // element into the dialog by hand meant Solid removed nothing on unmount and
+  // the panel stayed on screen with the overlay entry already popped — the
+  // first Escape then did nothing and the second took the dialog with it.
+  it('leaves nothing behind when its owner unmounts while open', () => {
+    const [mounted, setMounted] = createSignal(true)
+    render(() => (
+      <>
+        <Dialog open onClose={() => undefined} title="New Connection">
+          Body
+        </Dialog>
+        <Show when={mounted()}>
+          <Prompt open ariaLabel="Password" onClose={() => undefined} actions={null}>
+            Secret
+          </Prompt>
+        </Show>
+      </>
+    ))
+    expect(document.querySelector('.ui-prompt-overlay')).toBeTruthy()
+    expect(stackDepth()).toBe(2)
+
+    setMounted(false)
+    expect(document.querySelector('.ui-prompt-overlay')).toBeNull()
+    expect(stackDepth()).toBe(1)
   })
 
   // Escape's other route to the same damage. The browser answers a close

@@ -1782,3 +1782,90 @@ describe('vault prompt cancellation', () => {
     expect(findDialogByTitle(container, 'Edit Group: Production')).toBeTruthy()
   })
 })
+
+// ── The caret stays where the user put it ────────────────────────────────
+// Reported from the running app and reproduced in a browser before it was
+// fixed: after one character `document.activeElement` was `<body>` and the
+// next keystroke went nowhere. The cause is Solid, not the kit — a render
+// helper called from a JSX position that reads its draft signal synchronously
+// becomes one computation over the whole form, so every keystroke rebuilds the
+// DOM and replaces the very input being typed into. These tests assert the
+// symptom a user feels rather than the mechanism, so they survive a rewrite of
+// how the form is assembled.
+
+describe('typing does not steal the caret', () => {
+  it('keeps focus in the connection editor Host field across keystrokes', async () => {
+    const { container } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    await waitForProfiles(container, 1)
+    await openProfileEditor(container, 'prod-web')
+
+    const host = container.querySelector('#profile-host') as HTMLInputElement
+    host.focus()
+    expect(document.activeElement).toBe(host)
+
+    fireEvent.input(host, { target: { value: 'exampl' } })
+    expect(document.activeElement).toBe(container.querySelector('#profile-host'))
+
+    fireEvent.input(container.querySelector('#profile-host')!, { target: { value: 'example' } })
+    expect(document.activeElement).toBe(container.querySelector('#profile-host'))
+    expect((container.querySelector('#profile-host') as HTMLInputElement).value).toBe('example')
+  })
+
+  it('keeps focus in the group editor User field across keystrokes', async () => {
+    const { container } = mount({ profiles: MOCK_PROFILES, groups: MOCK_GROUPS })
+    await waitForProfiles(container, 3)
+    await openGroupEditorByName(container, 'Production')
+    selectGroupSection(container, 'Connection')
+
+    const user = await vi.waitFor(() => {
+      const el = container.querySelector<HTMLInputElement>('#group-default-auth-user')
+      expect(el).toBeTruthy()
+      return el!
+    })
+    user.focus()
+    expect(document.activeElement).toBe(user)
+
+    fireEvent.input(user, { target: { value: 'ro' } })
+    expect(document.activeElement).toBe(container.querySelector('#group-default-auth-user'))
+
+    fireEvent.input(container.querySelector('#group-default-auth-user')!, {
+      target: { value: 'roo' },
+    })
+    expect(document.activeElement).toBe(container.querySelector('#group-default-auth-user'))
+  })
+})
+
+// ── Validation reports a wrong answer while it is still on screen ────────
+// "Почему мы сразу не показываем, что нам что-то не нравится?" — a host with
+// characters a host cannot contain looked accepted until Create was pressed.
+// Being unanswered still waits; being wrong does not.
+
+describe('eager validation', () => {
+  it('shows the host message while typing, with no blur and no submit', async () => {
+    const { container } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    await waitForProfiles(container, 1)
+    await openProfileEditor(container, 'prod-web')
+
+    const host = container.querySelector('#profile-host') as HTMLInputElement
+    fireEvent.input(host, { target: { value: 'фывфы' } })
+
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain('Host contains characters that are not valid')
+    })
+  })
+
+  it('says nothing about an empty field until it is left or submitted', async () => {
+    const { container } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    await waitForProfiles(container, 1)
+    await openProfileEditor(container, 'prod-web')
+
+    const host = container.querySelector('#profile-host') as HTMLInputElement
+    fireEvent.input(host, { target: { value: '' } })
+    expect(container.textContent).not.toContain('Host is required')
+
+    fireEvent.blur(host)
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain('Host is required')
+    })
+  })
+})

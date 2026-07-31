@@ -176,11 +176,13 @@ export function restoreFocus(entry: OverlayEntry): void {
   const el = entry.prevFocus
   if (!el) return
 
-  // HTMLDialogElement has special focus behaviour when closed — the browser
-  // restores focus automatically. Do NOT double-focus in that case.
-  if (el instanceof HTMLDialogElement || el.closest?.('dialog[open]')) {
-    return
-  }
+  // A <dialog> restores focus itself when it closes, so doing it again here
+  // would fight the browser — but only a <dialog> does. Both halves matter:
+  // keying on `prevFocus` alone made a Prompt raised over a dialog drop focus
+  // onto <body> when it closed, because the focus it should have returned was
+  // inside a dialog that is still open and nothing was going to restore it.
+  const closingDialog = entry.element instanceof HTMLDialogElement
+  if (closingDialog && (el instanceof HTMLDialogElement || el.closest?.('dialog[open]'))) return
 
   // xterm stores focus in a hidden textarea that is not a normal focusable
   // element. A standard .focus() call does not work on it in some webview

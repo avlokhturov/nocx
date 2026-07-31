@@ -1,4 +1,5 @@
-import { Show, createEffect, onCleanup, type JSX } from 'solid-js'
+import { Show, createEffect, createMemo, onCleanup, untrack, type JSX } from 'solid-js'
+import { Portal } from 'solid-js/web'
 import {
   popOverlay,
   pushOverlay,
@@ -47,23 +48,31 @@ export function Prompt(props: PromptProps) {
   let entry: OverlayEntry | null = null
   /**
    * The overlay this prompt renders INSIDE while open, or null to render in
-   * place. A modal `<dialog>` lives in the browser's top layer, which is
-   * above every z-index in the normal layer by definition — being on top of
-   * a top-layer element is not a number, it is a parent. So when the prompt
-   * opens over something (a Dialog, another Prompt), its overlay element is
-   * moved to be a DOM child of that thing: the same mechanism that makes
-   * the connection editor's own password prompt appear above its dialog,
-   * which it is by virtue of being a DOM child of the dialog.
+   * place. A modal `<dialog>` lives in the browser's top layer, which is above
+   * every z-index in the normal layer by definition — being on top of a
+   * top-layer element is not a number, it is a parent. So a prompt opened over
+   * something must be a DOM child of it, which is also how the connection
+   * editor's own password prompt has always appeared above its dialog.
    *
-   * Captured BEFORE pushOverlay: once the prompt is on the stack, the
-   * topmost overlay element is the prompt itself.
+   * A `Portal`, not `host.appendChild(element)`. Moving the node by hand put
+   * it where Solid does not expect it: closing the prompt by unmounting its
+   * owner — which is what `<Show when={unlockOpen()}>` does — removed nothing,
+   * because Solid removes from the parent it inserted into. The overlay entry
+   * popped and the panel stayed on screen with the caret still in it, so the
+   * first Escape appeared to do nothing and the second closed the panel *and*
+   * the dialog under it, the panel having been a child of that dialog all
+   * along. Measured in a browser; the entry was gone from the stack while the
+   * element was still in the DOM.
+   *
+   * `untrack` is what makes this the overlay we opened OVER: read reactively,
+   * pushing ourselves would immediately re-point it at this prompt. It is
+   * recomputed only when `open` flips, and computed during render — before the
+   * effect below pushes.
    */
-  let host: HTMLElement | null = null
+  const host = createMemo(() => (props.open ? untrack(topOverlayElement) : null))
 
   createEffect(() => {
     if (props.open && !entry) {
-      const h = topOverlayElement()
-      host = h && h !== element ? h : null
       const onClose = props.onClose
       entry = pushOverlay(
         () => {
@@ -75,13 +84,11 @@ export function Prompt(props: PromptProps) {
       )
       // Escape is supplied by the overlay stack's document-level handler —
       // it closes the topmost overlay, which is this prompt.
-      if (host && element && !host.contains(element)) host.appendChild(element)
       if (element) focusInitial(element)
     } else if (!props.open && entry) {
       popOverlay(entry)
       restoreFocus(entry)
       entry = null
-      host = null
     }
   })
 
@@ -109,32 +116,41 @@ export function Prompt(props: PromptProps) {
     props.onSubmit()
   }
 
+  const panel = () => (
+    <div
+      ref={element}
+      class="ui-prompt-overlay"
+      data-placement={props.placement ?? 'floating'}
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) props.onClose()
+      }}
+    >
+      <section
+        class="ui-prompt"
+        data-placement={props.placement ?? 'floating'}
+        role="dialog"
+        aria-modal="true"
+        aria-label={props.ariaLabel}
+        onKeyDown={onKeyDown}
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <Show when={props.title}>
+          <h2 class="ui-prompt__title">{props.title}</h2>
+        </Show>
+        <div class="ui-prompt__body">{props.children}</div>
+        <div class="ui-prompt__actions">{props.actions}</div>
+      </section>
+    </div>
+  )
+
   return (
     <Show when={props.open}>
-      <div
-        ref={element}
-        class="ui-prompt-overlay"
-        data-placement={props.placement ?? 'floating'}
-        onMouseDown={(event) => {
-          if (event.target === event.currentTarget) props.onClose()
-        }}
-      >
-        <section
-          class="ui-prompt"
-          data-placement={props.placement ?? 'floating'}
-          role="dialog"
-          aria-modal="true"
-          aria-label={props.ariaLabel}
-          onKeyDown={onKeyDown}
-          onMouseDown={(event) => event.stopPropagation()}
-        >
-          <Show when={props.title}>
-            <h2 class="ui-prompt__title">{props.title}</h2>
-          </Show>
-          <div class="ui-prompt__body">{props.children}</div>
-          <div class="ui-prompt__actions">{props.actions}</div>
-        </section>
-      </div>
+      {/* `keyed` because Portal reads `mount` once — the same reason ToastHost
+          keys its own host. `host` only changes when the prompt opens, so this
+          never re-creates a panel the user is typing into. */}
+      <Show when={host()} keyed fallback={panel()}>
+        {(el) => <Portal mount={el}>{panel()}</Portal>}
+      </Show>
     </Show>
   )
 }
