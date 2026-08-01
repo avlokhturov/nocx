@@ -51,13 +51,13 @@
 .ui-recall-panel__title {
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  font-size: var(--font-size-2xs);
+  font-size: var(--font-size-xs);
   font-weight: 600;
   color: var(--color-text-muted);
 }
 
 .ui-recall-panel__count {
-  font-size: var(--font-size-2xs);
+  font-size: var(--font-size-xs);
   color: var(--color-text-dim);
   margin-left: auto;
 }
@@ -66,7 +66,7 @@
    when the rung is exhausted and not already the top of the ladder, which
    is exactly when the next Up at the top row widens (see climbWider). */
 .ui-recall-panel__widen {
-  font-size: var(--font-size-2xs);
+  font-size: var(--font-size-xs);
   color: var(--color-text-dim);
 }
 
@@ -79,7 +79,7 @@
 
 /* The relative timestamp on a row's right edge. */
 .ui-recall-panel__time {
-  font-size: var(--font-size-2xs);
+  font-size: var(--font-size-xs);
   color: var(--color-text-dim);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
@@ -96,7 +96,7 @@
   white-space: nowrap;
   padding: var(--space-2) var(--space-3);
   border-top: 1px solid var(--color-divider);
-  font-size: var(--font-size-2xs);
+  font-size: var(--font-size-xs);
   color: var(--color-text-muted);
   flex: 0 0 auto;
 }
