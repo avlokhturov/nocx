@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"sync"
 
 	"github.com/shady2k/nocx/internal/credential"
@@ -955,6 +956,130 @@ func (r *Registry) Reset(d Descriptor) error {
 		r.finishCommit(ch)
 	}
 	return err
+}
+
+// ── Import-time restore ────────────────────────────────────────────────
+
+// ApplyValues restores a snapshot of non-secret setting values, validating
+// each through its declaration. It is the import-time counterpart of
+// GetSnapshot: whatever the snapshot exported, ApplyValues restores, and
+// nothing else. Unknown keys and secret-class keys are rejected — a value
+// the receiving build cannot restore must not be silently dropped, and
+// import never resolves or invents a secret (ADR-0011 §2).
+//
+// Every value is validated before anything is committed: an invalid value
+// leaves the registry unchanged, so a restore cannot half-apply.
+func (r *Registry) ApplyValues(values map[string]any) error {
+	if len(values) == 0 {
+		return nil
+	}
+
+	r.mu.Lock()
+
+	newValues := copyValues(r.values)
+	var changed []string
+
+	for key, value := range values {
+		d := descriptorByKey(key)
+		if d == nil {
+			r.mu.Unlock()
+			return &ValidationError{SettingKey: key, Message: "unknown setting cannot be restored"}
+		}
+		if d.Control() == ControlSecret {
+			r.mu.Unlock()
+			return &ValidationError{SettingKey: key, Message: "secret-class setting cannot be restored by import"}
+		}
+		typed, err := coerceValue(d, value)
+		if err != nil {
+			r.mu.Unlock()
+			return err
+		}
+		if current, ok := r.values[key]; ok && reflect.DeepEqual(current, typed) {
+			continue
+		}
+		newValues[key] = typed
+		changed = append(changed, key)
+	}
+
+	if len(changed) == 0 {
+		r.mu.Unlock()
+		return nil
+	}
+
+	ch, err := r.commitLocked(newValues, r.refs, changed)
+	r.mu.Unlock()
+	if err == nil {
+		r.finishCommit(ch)
+	}
+	return err
+}
+
+// coerceValue validates a JSON-decoded snapshot value against a setting's
+// declaration and returns the typed value the registry stores. The checks
+// mirror the typed setters' — the two paths validate the same values.
+func coerceValue(d Descriptor, value any) (any, error) {
+	switch d.Control() {
+	case ControlToggle:
+		b, ok := value.(bool)
+		if !ok {
+			return nil, &ValidationError{SettingKey: d.Key(), Value: value, Message: "expected a boolean"}
+		}
+		return b, nil
+	case ControlText:
+		s, ok := value.(string)
+		if !ok {
+			return nil, &ValidationError{SettingKey: d.Key(), Value: value, Message: "expected a string"}
+		}
+		str, ok := d.(*String)
+		if !ok {
+			return nil, &ValidationError{SettingKey: d.Key(), Message: "declared as text but is not a String key"}
+		}
+		if s == "" && str.default_ != "" {
+			return nil, &ValidationError{SettingKey: d.Key(), Value: s, Message: "value must not be empty"}
+		}
+		return s, nil
+	case ControlSelect:
+		s, ok := value.(string)
+		if !ok {
+			return nil, &ValidationError{SettingKey: d.Key(), Value: value, Message: "expected a string"}
+		}
+		sel, ok := d.(*Select)
+		if !ok {
+			return nil, &ValidationError{SettingKey: d.Key(), Message: "declared as select but is not a Select key"}
+		}
+		for _, opt := range sel.options {
+			if opt.Value == s {
+				return s, nil
+			}
+		}
+		return nil, &ValidationError{
+			SettingKey: d.Key(), Value: s,
+			Message: fmt.Sprintf("value %q is not a valid option", s),
+		}
+	case ControlNumber:
+		f, ok := toFloat64(value)
+		if !ok {
+			return nil, &ValidationError{SettingKey: d.Key(), Value: value, Message: "expected a number"}
+		}
+		n, ok := d.(*Number)
+		if !ok {
+			return nil, &ValidationError{SettingKey: d.Key(), Message: "declared as number but is not a Number key"}
+		}
+		if n.min != nil && f < *n.min {
+			return nil, &ValidationError{
+				SettingKey: d.Key(), Value: f,
+				Message: fmt.Sprintf("value %v below minimum %v", f, *n.min),
+			}
+		}
+		if n.max != nil && f > *n.max {
+			return nil, &ValidationError{
+				SettingKey: d.Key(), Value: f,
+				Message: fmt.Sprintf("value %v above maximum %v", f, *n.max),
+			}
+		}
+		return f, nil
+	}
+	return nil, &ValidationError{SettingKey: d.Key(), Value: value, Message: "unsupported control kind"}
 }
 
 // ── Secret-class methods ───────────────────────────────────────────────

@@ -18,19 +18,11 @@
   line-height: 1.5;
 }
 
-/* ── Mode section ───────────────────────────────────────────────────────
-   Each mode is a section of the Export page now, not a collapsible card in a
-   list. The border and radius drew a frame around content that already sits
-   under a PageSection heading rule — a box inside a box. */
-
-/* `margin: 0` is load-bearing. PageSection already spaces its children through
-   Stack, so a margin here does not replace that gap — it adds to it, which is
-   what put 28px between a section's one-line summary and the list under it. */
-.st-export-card-summary {
-  font-size: var(--font-size-sm);
-  color: var(--color-text-dim);
-  margin: 0;
-}
+/* ── Page description ───────────────────────────────────────────────────
+   The two-verb page has no mode cards: each verb is a PageSection, and the
+   section heading carries the words. The old `.st-export-card-summary`
+   (a one-line summary under each of four mode headings) is gone with the
+   cards — PageSection's own description slot owns that line now. */
 
 /* ── Loading / error ─────────────────────────────────────────────────── */
 

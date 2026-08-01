@@ -24,11 +24,6 @@ function downloadBlob(filename: string, blob: Blob): void {
   URL.revokeObjectURL(url)
 }
 
-/** Download a JSON object as a file. */
-export function downloadJSON(filename: string, data: unknown): void {
-  downloadBlob(filename, new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }))
-}
-
 /** Download a base64-encoded binary payload as a file. */
 export function downloadBinary(filename: string, payload: string): void {
   const bytes = base64ToBytes(payload)

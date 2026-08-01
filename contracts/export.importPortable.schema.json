@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/export.importPortable.schema.json",
+  "title": "ImportResult",
+  "description": "Result of the export.importPortable JSON-RPC method: what a passphrase-encrypted backup restored. Settings and private content (conversations, command history) are restored alongside the profiles and groups when the backup carries them; failures there fail the whole call, so the counts describe a complete restore.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["profilesImported", "groupsImported"],
+  "properties": {
+    "profilesImported": {
+      "description": "SSH connection profiles restored (created or replaced).",
+      "type": "integer"
+    },
+    "groupsImported": {
+      "description": "Profile groups restored (created or replaced).",
+      "type": "integer"
+    }
+  }
+}

@@ -2,6 +2,7 @@ import { Dispatcher } from './dispatcher'
 import type { ConnectionTestResult } from './generated/connections.probe'
 import type { TrustHostKeyResult } from './generated/connections.trustHostKey'
 import type { SaveKeyMaterialMintResult } from './generated/secrets.saveKeyMaterial'
+import type { ImportResult } from './generated/export.import'
 
 // Profile/group models + IPC client for the connection manager.
 // Mirrors the backend internal/profile package (nocx-fxs.1) and the
@@ -567,7 +568,7 @@ export class ProfileClient {
   }
 
   importPortable(payloadBase64: string, passphrase: string): Promise<ImportResult> {
-    return this.call('export.portableImport', { payload: payloadBase64, passphrase })
+    return this.call('export.importPortable', { payload: payloadBase64, passphrase })
   }
 }
 
@@ -629,10 +630,7 @@ export interface BackupManifest {
   omits: string[]
 }
 
-export interface ImportResult {
-  profilesImported: number
-  groupsImported: number
-}
+export type { ImportResult }
 
 // ── Tabby import preview types (bead nocx-kqw6) ──────────────────────────
 

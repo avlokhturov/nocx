@@ -693,3 +693,117 @@ func TestNumberZeroLabelOnTheWire(t *testing.T) {
 		t.Error("history.retentionDays: the description still explains 0; ZeroLabel owns that now")
 	}
 }
+
+// ── ApplyValues (import-time restore) ──────────────────────────────────
+
+// Whatever GetSnapshot exports, ApplyValues restores: the two are inverse
+// operations over the non-secret settings (nocx-ojxa — import used to drop
+// settings the export carried).
+func TestApplyValues_RestoresSnapshot(t *testing.T) {
+	src := settings.New(&fakeDoc{}, &fakeSecretStore{})
+	if err := src.SetBool(settings.HistoryEnabled, true); err != nil {
+		t.Fatalf("SetBool: %v", err)
+	}
+	if err := src.SetNumber(settings.HistoryRetentionDays, 90); err != nil {
+		t.Fatalf("SetNumber: %v", err)
+	}
+	if err := src.SetSelect(settings.TabPlacement, "vertical"); err != nil {
+		t.Fatalf("SetSelect: %v", err)
+	}
+
+	snap, err := src.GetSnapshot()
+	if err != nil {
+		t.Fatalf("GetSnapshot: %v", err)
+	}
+
+	dst := settings.New(&fakeDoc{}, &fakeSecretStore{})
+	if applyErr := dst.ApplyValues(snap.Values); applyErr != nil {
+		t.Fatalf("ApplyValues: %v", applyErr)
+	}
+
+	got, err := dst.GetSnapshot()
+	if err != nil {
+		t.Fatalf("GetSnapshot: %v", err)
+	}
+	for key, want := range snap.Values {
+		if got.Values[key] != want {
+			t.Errorf("%s after restore = %v, want %v", key, got.Values[key], want)
+		}
+	}
+	for _, key := range snap.Overridden {
+		found := false
+		for _, k := range got.Overridden {
+			if k == key {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("%s is not marked overridden after restore", key)
+		}
+	}
+}
+
+func TestApplyValues_UnknownKeyRejected(t *testing.T) {
+	reg := settings.New(&fakeDoc{}, &fakeSecretStore{})
+	err := reg.ApplyValues(map[string]any{"no.such.setting": true})
+	if err == nil {
+		t.Fatal("unknown key applied, want error")
+	}
+	if !errors.Is(err, settings.ErrValidation) {
+		t.Errorf("error is %T, want ValidationError wrapping ErrValidation", err)
+	}
+}
+
+// Import never resolves or invents a secret (ADR-0011 §2): a snapshot key
+// that names a secret-class setting is refused, not applied.
+func TestApplyValues_SecretClassKeyRejected(t *testing.T) {
+	reg := settings.New(&fakeDoc{}, &fakeSecretStore{})
+	err := reg.ApplyValues(map[string]any{"test.secretExample": "value"})
+	if err == nil {
+		t.Fatal("secret-class key applied, want error")
+	}
+}
+
+// Every value is validated before anything is committed: one invalid value
+// leaves the whole restore undone, never half-applied.
+func TestApplyValues_InvalidValueRejectedAtomically(t *testing.T) {
+	reg := settings.New(&fakeDoc{}, &fakeSecretStore{})
+	// First value is valid; the second is not. The valid one must not land.
+	// clipboard.osc52Suppressed defaults to false, so "did not land" is
+	// observable (history.enabled defaults to true and could not prove it).
+	err := reg.ApplyValues(map[string]any{
+		"clipboard.osc52Suppressed": true,
+		"test.selectExample":        "not-an-option",
+	})
+	if err == nil {
+		t.Fatal("invalid select value applied, want error")
+	}
+	got, gerr := reg.GetBool(settings.ClipboardOSC52Suppressed)
+	if gerr != nil {
+		t.Fatalf("GetBool: %v", gerr)
+	}
+	if got {
+		t.Error("clipboard.osc52Suppressed became true despite the map being rejected as a whole")
+	}
+
+	if err := reg.ApplyValues(map[string]any{"test.numberExample": float64(500)}); err == nil {
+		t.Fatal("out-of-bounds number applied, want error")
+	}
+	if err := reg.ApplyValues(map[string]any{"clipboard.osc52Suppressed": "yes"}); err == nil {
+		t.Fatal("string where a boolean is declared applied, want error")
+	}
+	if err := reg.ApplyValues(map[string]any{"test.stringExample": ""}); err == nil {
+		t.Fatal("empty string for a non-empty-default setting applied, want error")
+	}
+}
+
+func TestApplyValues_EmptyMapIsNoop(t *testing.T) {
+	reg := settings.New(&fakeDoc{}, &fakeSecretStore{})
+	if err := reg.ApplyValues(nil); err != nil {
+		t.Fatalf("ApplyValues(nil): %v", err)
+	}
+	if err := reg.ApplyValues(map[string]any{}); err != nil {
+		t.Fatalf("ApplyValues(empty): %v", err)
+	}
+}
