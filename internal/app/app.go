@@ -98,7 +98,7 @@ func New(opts ...Option) (*App, error) {
 	// Vault (ADR-0011 as amended): owns provider routing, key material and
 	// the seal lifecycle. Two providers are compiled on every platform:
 	// system (OS keychain) and file (encrypted document).
-	paths, err := storage.NewOSPaths("nocx")
+	paths, err := storage.NewAppPaths()
 	if err != nil {
 		return nil, fmt.Errorf("storage paths: %w", err)
 	}
