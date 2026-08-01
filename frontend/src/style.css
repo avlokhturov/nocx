@@ -226,15 +226,32 @@
 }
 
 /* A command word the session's snapshot says does not exist (OSC 636,
-   shell-highlight.ts). An underline, not a red foreground: red reads as a
-   guaranteed syntax error, an underline reads as a remark about one word —
-   which is what this is. Dotted so it stays a remark. */
+   shell-highlight.ts).
+
+   It gives up the command colour and takes the ordinary text colour, because
+   the command colour is a claim — "this word is a command" — and the whole
+   point of this class is that it is not one. Wearing green while underlined
+   said both things at once. Warp does the same, and it is the right call for
+   the same reason.
+
+   The verdict itself is carried by the underline rather than a red
+   foreground: red reads as a guaranteed syntax error, an underline reads as
+   a remark about one word, which is what this is. Dotted so it stays a
+   remark. */
 .tok-unresolved {
   text-decoration-line: underline;
   text-decoration-style: dotted;
   text-decoration-thickness: 1px;
   text-underline-offset: 2px;
   text-decoration-color: var(--color-warning);
+}
+
+/* Compound on purpose. The element carries both classes, so a bare
+   .tok-unresolved would beat .tok-command only by sitting later in this
+   file — and a rule whose correctness depends on its line number breaks the
+   first time somebody reorders the block. */
+.tok-command.tok-unresolved {
+  color: var(--color-text);
 }
 
 /* CodeMirror 6 surface (ADR-0010). Auto-grow is layout, not arithmetic: the

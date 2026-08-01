@@ -97,24 +97,30 @@ __nocx_prompt_command() {
         fi
     fi
 
-    # Command-existence snapshot (OSC 636): start the background compgen once
-    # at the FIRST prompt, emit the finished payload once from a LATER prompt
-    # — never in front of a prompt, and only while the shell is the sole
-    # writer to the tty, so the payload cannot interleave with other output.
+    # Command-existence snapshot (OSC 636): the background compgen started at
+    # source time (below). The FIRST prompt gives it a bounded grace period
+    # so a freshly opened tab is marked immediately — the owner's test is
+    # typing a nonexistent command before running anything, and a snapshot
+    # that arrives only after an unrelated command reads as a broken feature.
+    # On timeout (compgen takes seconds on NFS) the snapshot is left for a
+    # later prompt rather than delaying this one; the wait applies once per
+    # session. The payload is only ever written from a prompt, while the
+    # shell is the sole writer to the tty, so it cannot interleave with
+    # command output.
     if [[ -n "${__nocx_snap_staging:-}" ]] && [[ "${__nocx_snapshot_done:-0}" != "1" ]]; then
-        if [[ "${__nocx_snapshot_started:-0}" != "1" ]]; then
-            __nocx_snapshot_started=1
-            # >| ignores a user's noclobber: the staging file already exists
-            # (mktemp made it at source time), so a plain > would refuse.
-            ( compgen -c 2>/dev/null | LC_ALL=C sort -u | __nocx_snapshot_build \
-                >| "$__nocx_snap_staging" 2>/dev/null \
-                && mv -f "$__nocx_snap_staging" "$__nocx_snap_file" ) &
-            __nocx_snap_job=$!
-        elif [[ -f "$__nocx_snap_file" ]]; then
-            __nocx_snapshot_done=1
-            __nocx_payload="$(< "$__nocx_snap_file")"
-            builtin printf '\e]636;S;%s;%s\a' "$__nocx_snapshot_nonce" "$__nocx_payload"
-            rm -f "$__nocx_snap_staging" "$__nocx_snap_file"
+        if [[ -f "$__nocx_snap_file" ]]; then
+            __nocx_snapshot_emit
+        elif [[ "${__nocx_snapshot_waiting:-0}" != "1" ]]; then
+            __nocx_snapshot_waiting=1
+            local __nocx_waited=0
+            while (( __nocx_waited < __nocx_snapshot_wait_ms )); do
+                if [[ -f "$__nocx_snap_file" ]]; then
+                    __nocx_snapshot_emit
+                    break
+                fi
+                sleep 0.025
+                __nocx_waited=$(( __nocx_waited + 25 ))
+            done
         fi
     fi
     __nocx_in_prompt_command=0
@@ -192,12 +198,17 @@ fi
 #
 # compgen -c | sort -u measures ~37 ms on this machine and can take seconds
 # on NFS, so it must never sit in front of the prompt. The snapshot is
-# computed in a background job started at the FIRST prompt (the environment
-# is final only once the rc has finished) and emitted from the NEXT prompt —
-# the only moment the shell is the sole writer to the tty, so the payload
-# can never interleave with other output. One snapshot per session; staleness
-# is deliberately a later problem (per-prompt fingerprints cost the same
-# enumeration they were meant to save).
+# computed in a background job started at SOURCE time — the old reason for
+# deferring it to the first prompt was "the environment is final only once
+# the rc has finished", weighed and rejected: the gate line is appended at
+# the END of ~/.bashrc, so in the common case sourcing already happens last
+# and commands defined after it are missed either way. Starting early is what
+# makes a freshly opened tab mark commands before the user runs anything.
+# The payload is emitted from a prompt — the only moment the shell is the
+# sole writer to the tty — so it can never interleave with other output. One
+# snapshot per session; staleness is deliberately a later problem
+# (per-prompt fingerprints cost the same enumeration they were meant to
+# save).
 #
 # The snapshot is staged in a mktemp file whose name carries no secret — the
 # nonce must never appear in a path, in any argv, or exported — and mode 600
@@ -229,25 +240,46 @@ export -n __nocx_snapshot_nonce
 # payload is complete; the .snap name inherits the staging file's 600 mode.
 __nocx_snap_staging="$(mktemp "${TMPDIR:-/tmp}/nocx-snap.XXXXXX" 2>/dev/null)"
 __nocx_snap_file="${__nocx_snap_staging:+${__nocx_snap_staging}.snap}"
-__nocx_snapshot_started=0
 __nocx_snapshot_done=0
+
+# How long the FIRST prompt waits for the source-time snapshot job before
+# degrading to the later-prompt schedule. 250 ms: fast when compgen is local,
+# bounded when it is not (NFS); the prompt never waits longer than this, and
+# only once per session.
+#
+# The __nocx_ prefix is not decoration: this script is sourced INTO the user's
+# interactive shell, so every name it defines is a name the user no longer
+# has. A readonly one is worse — it cannot even be unset, so a collision
+# breaks their shell for the rest of the session with no way back.
+readonly __nocx_snapshot_wait_ms=250
 
 # Nothing may survive the shell: a session that exits before the snapshot was
 # emitted (the leak path) must leave no file behind. Kill the background
 # compgen first — it could otherwise mv the .snap name into place AFTER the
 # rm below — then remove both files, then chain the shell's pre-existing EXIT
-# trap, the same pattern the DEBUG trap above uses. jobs -p guards the kill:
-# a long-lived interactive session's job is long done, and killing a reaped
-# PID could hit a reused one.
+# trap, the same pattern the DEBUG trap above uses.
+#
+# The job is disowned (see the start below) so it prints no job-control
+# notification, which means `jobs -p` can no longer vouch for it. The kill is
+# guarded by a process-identity check instead: the job's PID plus the start
+# time captured at spawn, read back via `ps -o lstart=` at exit. A reaped
+# child's PID may have been reused — a reused PID has a different start time,
+# so it is never killed.
 __nocx_old_exit="$(trap -p EXIT 2>/dev/null | sed "s/^trap -- '//;s/' EXIT$//")"
 __nocx_exit_cleanup() {
     # The DEBUG trap fires for every simple command below (and inside trap
     # handlers on some bash versions); mark the exit path as "in a prompt
     # command" so the wrapper suppresses any spurious OSC 133 C.
     __nocx_in_prompt_command=1
-    if [[ -n "${__nocx_snap_job:-}" ]] \
-        && jobs -p 2>/dev/null | grep -qx "$__nocx_snap_job"; then
-        kill "$__nocx_snap_job" 2>/dev/null
+    if [[ -n "${__nocx_snap_job:-}" ]] && [[ -n "${__nocx_snap_lstart:-}" ]] \
+        && [[ "$(ps -o lstart= -p "$__nocx_snap_job" 2>/dev/null | tr -s ' ')" == "$__nocx_snap_lstart" ]]; then
+        # Group-kill when the job is a process-group leader (interactive job
+        # control): that also stops the pipeline's compgen/sort/build, which a
+        # plain kill of the subshell would orphan. In scripts (no job control)
+        # the group form fails harmlessly and the fallback kills the subshell.
+        kill -- -"$__nocx_snap_job" 2>/dev/null || kill "$__nocx_snap_job" 2>/dev/null
+        # wait closes the rename-in-flight window: after it returns the job is
+        # dead, so no mv can recreate the .snap name after the rm below.
         wait "$__nocx_snap_job" 2>/dev/null
     fi
     if [[ -n "${__nocx_snap_staging:-}" ]]; then
@@ -312,6 +344,31 @@ __nocx_snapshot_build() {
     fi
     return 1
 }
+
+# Emit the finished snapshot once and remove the staging files. Only ever
+# called from __nocx_prompt_command — the shell is the sole writer to the
+# tty there, so the payload cannot interleave with command output.
+__nocx_snapshot_emit() {
+    __nocx_snapshot_done=1
+    __nocx_payload="$(< "$__nocx_snap_file")"
+    builtin printf '\e]636;S;%s;%s\a' "$__nocx_snapshot_nonce" "$__nocx_payload"
+    rm -f "$__nocx_snap_staging" "$__nocx_snap_file"
+}
+
+# The snapshot job starts HERE, at source time — not at the first prompt —
+# so a freshly opened tab is marked before the user runs anything (see the
+# protocol comment above for why the late start was rejected). The first
+# prompt grants a bounded grace period (__nocx_snapshot_wait_ms).
+( compgen -c 2>/dev/null | LC_ALL=C sort -u | __nocx_snapshot_build \
+    >| "$__nocx_snap_staging" 2>/dev/null \
+    && mv -f "$__nocx_snap_staging" "$__nocx_snap_file" ) &
+__nocx_snap_job=$!
+# Record the job's identity for the EXIT trap (PID + start time), then
+# disown: without disown, bash prints "[N]+ Done ( compgen ... )" — the
+# job's implementation, verbatim — into the user's output when it finishes.
+# Only OUR job is disowned, so no other job loses its notification.
+__nocx_snap_lstart="$(ps -o lstart= -p "$__nocx_snap_job" 2>/dev/null | tr -s ' ')"
+disown "$__nocx_snap_job" 2>/dev/null
 
 # Announce the session nonce before the first prompt.
 builtin printf '\e]636;H;%s\a' "$__nocx_snapshot_nonce"

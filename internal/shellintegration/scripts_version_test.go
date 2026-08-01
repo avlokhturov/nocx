@@ -34,6 +34,7 @@ func TestScriptVersionTracksScriptContent(t *testing.T) {
 	// the same as not having the check.
 	digests := map[string]string{
 		"8": "ca89bf20e58c0a4669ecfb0754173ce721e436273b0b06549c7e0162e9b06dc8",
+		"9": "26ee0a75cf83df3a773c97ee39265c96912629c4bcdb629edea51ba5bcc5529d",
 	}
 
 	h := sha256.New()

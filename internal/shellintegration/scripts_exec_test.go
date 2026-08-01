@@ -2,11 +2,16 @@ package shellintegration
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/creack/pty"
 )
 
 // writeScriptFile materialises an embedded script to a temp file so a real
@@ -468,10 +473,10 @@ func TestEnsureInstalled_SkipsVersionWhenGateFails(t *testing.T) {
 
 // TestBashSnapshotEmitsHelloThenSnapshot drives the real bash hooks through
 // two prompt cycles: sourcing emits the OSC 636 hello (a 32-hex session
-// nonce) exactly once, the FIRST prompt starts the background compgen, and
-// the SECOND prompt emits the snapshot — carrying the same nonce and real
-// command names (pwd is a builtin, so it is always in compgen -c). The
-// snapshot must never appear in front of the first prompt.
+// nonce) exactly once, and the FIRST prompt emits the snapshot — carrying
+// the same nonce and real command names (pwd is a builtin, so it is always
+// in compgen -c). The snapshot must be there before the first prompt is
+// usable, not after an unrelated command has run.
 func TestBashSnapshotEmitsHelloThenSnapshot(t *testing.T) {
 	bash := requireShell(t, "bash")
 	script := writeScriptFile(t, "nocx.bash", bashScript)
@@ -480,7 +485,6 @@ func TestBashSnapshotEmitsHelloThenSnapshot(t *testing.T) {
 export NOCX_SHELL_INTEGRATION=1
 source "$1"
 __nocx_prompt_command
-sleep 0.5
 __nocx_prompt_command
 `
 	out := runShellProg(t, bash, prog, script)
@@ -497,6 +501,25 @@ __nocx_prompt_command
 		t.Errorf("the hello is not the first OSC 636 message: %q", out)
 	}
 
+	// The snapshot must arrive DURING the first prompt cycle: after the first
+	// 133;A and before the second one. That is the freshly-opened-tab case.
+	firstA := strings.Index(out, "]133;A")
+	if firstA < 0 {
+		t.Fatalf("no 133;A marker: %q", out)
+	}
+	secondA := strings.Index(out[firstA+len("]133;A"):], "]133;A")
+	if secondA < 0 {
+		t.Fatalf("no second 133;A marker (second prompt missing): %q", out)
+	}
+	snap := strings.Index(out, "]636;S;")
+	if snap < 0 {
+		t.Fatalf("no snapshot emitted: %q", out)
+	}
+	if snap < firstA || snap > firstA+len("]133;A")+secondA {
+		t.Errorf("snapshot must be emitted within the FIRST prompt cycle (between the first and second 133;A); positions: first A=%d, second A=%d, S=%d in %q",
+			firstA, firstA+len("]133;A")+secondA, snap, out)
+	}
+
 	// Extract the hello nonce and require the snapshot to carry the same one.
 	after := strings.SplitN(out, "]636;H;", 2)
 	if len(after) < 2 {
@@ -507,38 +530,62 @@ __nocx_prompt_command
 		t.Errorf("nonce = %q, want 32 hex chars", nonce)
 	}
 
-	snap := out[strings.Index(out, "]636;S;")+len("]636;S;"):]
-	if !strings.HasPrefix(snap, nonce) {
-		t.Errorf("snapshot nonce does not match the hello nonce: %q", snap[:min(len(snap), 40)])
+	snapPayload := out[snap+len("]636;S;"):]
+	if !strings.HasPrefix(snapPayload, nonce) {
+		t.Errorf("snapshot nonce does not match the hello nonce: %q", snapPayload[:min(len(snapPayload), 40)])
 	}
-	if !strings.Contains(snap, ";pwd;") {
-		t.Errorf("snapshot payload missing the pwd builtin: %q", snap[:min(len(snap), 200)])
+	if !strings.Contains(snapPayload, ";pwd;") {
+		t.Errorf("snapshot payload missing the pwd builtin: %q", snapPayload[:min(len(snapPayload), 200)])
 	}
 }
 
-// TestBashSnapshotNeverInFrontOfTheFirstPrompt asserts the compgen work is
-// off the prompt-critical path: a single prompt cycle emits the hello and the
-// 133/7 markers but no snapshot — the background job started at the first
-// prompt cannot be ready when the prompt itself is drawn.
-func TestBashSnapshotNeverInFrontOfTheFirstPrompt(t *testing.T) {
+// TestBashSnapshotFirstPromptBoundedWait drives the hook with a compgen that
+// sleeps longer than the 250 ms first-prompt bound. The FIRST prompt must not
+// wait for it: the snapshot is deferred to a later prompt, and the prompt is
+// still reached within the 250 ms bound. The still-sleeping job is killed by
+// the EXIT trap, so nothing is left behind either.
+func TestBashSnapshotFirstPromptBoundedWait(t *testing.T) {
 	bash := requireShell(t, "bash")
 	script := writeScriptFile(t, "nocx.bash", bashScript)
+	tmp := t.TempDir()
 
 	prog := `
+enable -n compgen
+compgen() { printf 'pwd\n'; sleep 1; }
 export NOCX_SHELL_INTEGRATION=1
 source "$1"
-__nocx_prompt_command
+TIMEFORMAT='PROMPT_MS=%R'
+{ time __nocx_prompt_command; } 2>&1
 `
-	out := runShellProg(t, bash, prog, script)
+	out := runShellProgEnv(t, bash, prog, script, "TMPDIR="+tmp)
 
+	// The snapshot cannot be ready: the stub compgen is still sleeping.
 	if strings.Contains(out, "]636;S;") {
-		t.Errorf("a snapshot was emitted during the first prompt cycle: %q", out)
+		t.Errorf("a snapshot was emitted while compgen was still running: %q", out)
 	}
-	if got := strings.Count(out, "]636;H;"); got != 1 {
-		t.Errorf("expected exactly one OSC 636 hello; got %d in %q", got, out)
+
+	// The first prompt must not have waited for compgen.
+	idx := strings.Index(out, "PROMPT_MS=")
+	if idx < 0 {
+		t.Fatalf("no PROMPT_MS timing captured: %q", out)
 	}
-	if !strings.Contains(out, "]133;A") {
-		t.Errorf("first prompt cycle lost the OSC 133 A marker: %q", out)
+	secs, err := strconv.ParseFloat(strings.TrimSpace(strings.SplitN(out[idx+len("PROMPT_MS="):], "\n", 2)[0]), 64)
+	if err != nil {
+		t.Fatalf("PROMPT_MS is not a number: %q", out)
+	}
+	if secs > 1.0 {
+		t.Errorf("first prompt waited %.3fs for the snapshot — the bound is 250 ms", secs)
+	}
+
+	// The still-running job was killed by the EXIT trap: nothing survives.
+	entries, err := os.ReadDir(tmp)
+	if err != nil {
+		t.Fatalf("read %s: %v", tmp, err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "nocx-snap") {
+			t.Errorf("snapshot file %q survived shell exit", e.Name())
+		}
 	}
 }
 
@@ -585,16 +632,22 @@ func TestBashSnapshotTempFilesStayPrivate(t *testing.T) {
 	prog := `
 # A pre-existing EXIT trap must be chained, not overwritten.
 trap 'printf CHAINED_EXIT' EXIT
+# A compgen that sleeps longer than the first-prompt bound: the snapshot never
+# becomes ready, so the
+# first prompt's bounded wait times out and the files are still on disk when
+# the shell exits — the leak path.
+enable -n compgen
+compgen() { printf 'pwd\n'; sleep 1; }
 export NOCX_SHELL_INTEGRATION=1
 source "$1"
 # The staging file exists from source time (mktemp, mode 600) — observe it
-# before the first prompt, while the background compgen has not even started.
+# before the first prompt; the background compgen is still sleeping.
 printf '\nMODE_SOURCE\n'
 ls -l "$TMPDIR"/nocx-snap.* 2>/dev/null
 printf '\nLS_SOURCE\n'
 ls -A "$TMPDIR"
 __nocx_prompt_command
-# Exit without a second prompt: the snapshot is never emitted, so any file
+# Exit without a second prompt: the snapshot was never emitted, so any file
 # left behind is a leak. The EXIT trap must clean both files.
 `
 	out := runShellProgEnv(t, bash, prog, script, "TMPDIR="+tmp)
@@ -660,4 +713,216 @@ __nocx_prompt_command
 			t.Errorf("snapshot file %q survived shell exit", e.Name())
 		}
 	}
+}
+
+// oscMarker is one parsed OSC 636/133 marker, in stream order.
+type oscMarker struct {
+	kind string // H, S, A, B, C, D
+	pos  int    // byte offset in the raw output
+}
+
+// extractOscMarkers returns the 133 A/B/C/D and 636 H/S markers in order.
+func extractOscMarkers(out string) []oscMarker {
+	var ms []oscMarker
+	for i := 0; i+2 <= len(out); {
+		if out[i] != 0x1b || out[i+1] != ']' {
+			i++
+			continue
+		}
+		rel := strings.IndexByte(out[i:], 0x07)
+		if rel < 0 {
+			break
+		}
+		head := strings.SplitN(out[i+2:i+rel], ";", 3)
+		if len(head) >= 2 {
+			switch head[0] {
+			case "133":
+				if k := head[1]; k == "A" || k == "B" || k == "C" || k == "D" {
+					ms = append(ms, oscMarker{k, i})
+				}
+			case "636":
+				if k := head[1]; k == "H" || k == "S" {
+					ms = append(ms, oscMarker{k, i})
+				}
+			}
+		}
+		i += rel + 1
+	}
+	return ms
+}
+
+// stripOsc removes every OSC sequence from out — the protocol payloads the
+// frontend consumes — leaving the plain text a user would see on the tty.
+func stripOsc(out string) string {
+	var b strings.Builder
+	for i := 0; i < len(out); {
+		if i+2 <= len(out) && out[i] == 0x1b && out[i+1] == ']' {
+			if rel := strings.IndexByte(out[i:], 0x07); rel >= 0 {
+				i += rel + 1
+				continue
+			}
+		}
+		b.WriteByte(out[i])
+		i++
+	}
+	return b.String()
+}
+
+// TestBashSnapshotArrivesBeforeFirstPrompt drives a REAL interactive bash in
+// marker-only mode (the mode the app uses) on a pty, installed the way the
+// app installs it (the gate line in ~/.bashrc sourcing ~/.nocx/
+// shell-integration.bash). It asserts the marker order the owner's acceptance
+// depends on: 636;S arrives before the first 133;B — before the first prompt
+// is usable — so typing a nonexistent command in a freshly opened tab marks
+// it. It also asserts the snapshot never appears between a 133;C and its
+// 133;D, that the disowned background job prints no job-control notification
+// (none of Done/compgen/__nocx_snap outside the OSC payloads), exactly one
+// snapshot per session, and that no snapshot file survives the session.
+func TestBashSnapshotArrivesBeforeFirstPrompt(t *testing.T) {
+	bash := requireShell(t, "bash")
+	home := t.TempDir()
+	tmp := t.TempDir()
+	nocxDir := filepath.Join(home, ".nocx")
+	if err := os.MkdirAll(nocxDir, 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", nocxDir, err)
+	}
+	if err := os.WriteFile(filepath.Join(nocxDir, "shell-integration.bash"), []byte(bashScript), 0o600); err != nil {
+		t.Fatalf("write hook: %v", err)
+	}
+	gate := "# nocx terminal shell integration\n" +
+		`[[ -n "$NOCX_SHELL_INTEGRATION" ]] && source "$HOME/.nocx/shell-integration.bash"` + "\n"
+	if err := os.WriteFile(filepath.Join(home, ".bashrc"), []byte(gate), 0o600); err != nil {
+		t.Fatalf("write .bashrc: %v", err)
+	}
+
+	// #nosec G204 — bash is the path resolved by the test helper above, not
+	// input; an interactive shell on a pty is the only way to observe the
+	// prompt-time ordering this test is about.
+	cmd := exec.Command(bash, "-i")
+	cmd.Env = append(
+		os.Environ(),
+		"HOME="+home,
+		"TMPDIR="+tmp,
+		"NOCX_SHELL_INTEGRATION=1",
+		"NOCX_PROMPT_MODE=marker-only",
+		"NOCX_SESSION_ID=ptytest",
+	)
+	ptmx, err := pty.Start(cmd)
+	if err != nil {
+		t.Fatalf("pty start: %v", err)
+	}
+	defer func() { _ = ptmx.Close() }()
+
+	done := make(chan []byte, 1)
+	go func() {
+		out, _ := io.ReadAll(ptmx)
+		done <- out
+	}()
+
+	// Let the first prompt render (hello, A, snapshot, B), then run one
+	// command — bracketed by C/D — then exit.
+	time.Sleep(300 * time.Millisecond)
+	if _, werr := ptmx.Write([]byte("true\n")); werr != nil {
+		t.Fatalf("write command: %v", werr)
+	}
+	time.Sleep(300 * time.Millisecond)
+	if _, werr := ptmx.Write([]byte("exit\n")); werr != nil {
+		t.Fatalf("write exit: %v", werr)
+	}
+
+	var out []byte
+	select {
+	case out = <-done:
+	case <-time.After(15 * time.Second):
+		_ = cmd.Process.Kill()
+		t.Fatal("timed out waiting for the interactive session to end")
+	}
+	if werr := cmd.Wait(); werr != nil {
+		t.Logf("bash exited non-zero (may be benign): %v", werr)
+	}
+	output := string(out)
+
+	ms := extractOscMarkers(output)
+	firstH, firstS, firstB := -1, -1, -1
+	for _, m := range ms {
+		if firstH < 0 && m.kind == "H" {
+			firstH = m.pos
+		}
+		if firstS < 0 && m.kind == "S" {
+			firstS = m.pos
+		}
+		if firstB < 0 && m.kind == "B" {
+			firstB = m.pos
+		}
+	}
+	if firstH < 0 || firstS < 0 || firstB < 0 {
+		t.Fatalf("missing markers (H=%d S=%d B=%d) in %q", firstH, firstS, firstB, output)
+	}
+	if firstS > firstB {
+		t.Errorf("the snapshot arrived AFTER the first prompt was usable: S at %d, first B at %d", firstS, firstB)
+	}
+	if firstH > firstS {
+		t.Errorf("the hello did not precede the snapshot: H at %d, S at %d", firstH, firstS)
+	}
+
+	// No snapshot between a command-start (C) and its command-end (D).
+	for i, m := range ms {
+		if m.kind != "C" {
+			continue
+		}
+		nextD := -1
+		for j := i + 1; j < len(ms); j++ {
+			if ms[j].kind == "D" {
+				nextD = ms[j].pos
+				break
+			}
+		}
+		if nextD < 0 {
+			continue // trailing C at exit; no D follows
+		}
+		for _, s := range ms {
+			if s.kind == "S" && s.pos > m.pos && s.pos < nextD {
+				t.Errorf("snapshot interleaved with command output (between C at %d and D at %d)", m.pos, nextD)
+			}
+		}
+	}
+
+	if n := countMarkers(ms, "S"); n != 1 {
+		t.Errorf("expected exactly one snapshot; got %d", n)
+	}
+	if n := countMarkers(ms, "H"); n != 1 {
+		t.Errorf("expected exactly one hello; got %d", n)
+	}
+
+	// The disowned job prints no job-control notification: outside the OSC
+	// payloads the session output must contain none of the strings the owner
+	// saw printed into his output region.
+	visible := stripOsc(output)
+	for _, s := range []string{"Done", "compgen", "__nocx_snap"} {
+		if strings.Contains(visible, s) {
+			t.Errorf("job-control notification leaked into the session output (found %q): %q", s, visible)
+		}
+	}
+
+	// Nothing survives the session.
+	entries, err := os.ReadDir(tmp)
+	if err != nil {
+		t.Fatalf("read %s: %v", tmp, err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "nocx-snap") {
+			t.Errorf("snapshot file %q survived the session", e.Name())
+		}
+	}
+}
+
+// countMarkers counts markers of one kind.
+func countMarkers(ms []oscMarker, kind string) int {
+	n := 0
+	for _, m := range ms {
+		if m.kind == kind {
+			n++
+		}
+	}
+	return n
 }
