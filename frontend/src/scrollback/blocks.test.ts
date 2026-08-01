@@ -140,6 +140,52 @@ describe('createCommandBlock', () => {
     expect(output?.innerHTML).toContain('file.txt')
   })
 
+  it('double-clicking command output selects the whole token, not the browser word', () => {
+    const el = createCommandBlock(
+      1,
+      'ls',
+      '~',
+      '',
+      '<span class="term-line">profile-usage.json</span>',
+      10,
+      0,
+      'success',
+      c,
+      noopSelect,
+      freshStore(),
+    )
+    document.body.appendChild(el)
+    const line = el.querySelector<HTMLElement>('.term-line')
+    const node = line?.firstChild as Text | null
+    expect(node).not.toBeNull()
+    // jsdom has no hit-testing; point caretRangeFromPoint inside the token
+    // ('usage') so the handler's browser seam resolves like a real click.
+    const proto = Object.getOwnPropertyDescriptor(document, 'caretRangeFromPoint')
+    Object.defineProperty(document, 'caretRangeFromPoint', {
+      configurable: true,
+      value: () => {
+        const r = document.createRange()
+        r.setStart(node!, 8)
+        r.collapse(true)
+        return r
+      },
+    })
+    try {
+      line?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
+      const selected = window.getSelection()?.toString() ?? ''
+      // The whole filename is one token — the browser's native segmentation
+      // (which stops at the hyphen and the dot) is overridden.
+      expect(selected).toBe('profile-usage.json')
+    } finally {
+      if (proto) {
+        Object.defineProperty(document, 'caretRangeFromPoint', proto)
+      } else {
+        delete (document as { caretRangeFromPoint?: unknown }).caretRangeFromPoint
+      }
+      el.remove()
+    }
+  })
+
   it('includes duration', () => {
     const el = createCommandBlock(
       1,

@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest'
 import { parseOsc7, parseOsc133, XtermRenderer } from './xterm'
+import { WORD_SEPARATORS } from '../word-selection'
 import type { CommandMarkerEvent } from './types'
 import { CommandSnapshotStore } from '../command-snapshot'
 
@@ -42,6 +43,21 @@ describe('XtermRenderer setReadOnly', () => {
     r.setReadOnly(false)
     expect(term!.options.disableStdin).toBe(false)
 
+    r.dispose()
+  })
+
+  it('uses the same word separator policy as the frozen block (parity by construction)', async () => {
+    stubBrowser()
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+    const term = (r as unknown as Record<string, unknown>).term as
+      { options: { wordSeparator?: string } } | undefined
+    // The live terminal and the frozen block share ONE separator set, so a
+    // double-click selects the same token on both surfaces.
+    expect(term?.options.wordSeparator).toBe(WORD_SEPARATORS)
     r.dispose()
   })
 })

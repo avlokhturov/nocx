@@ -8,6 +8,7 @@ import { getCurrentTheme } from '../renderers/theme-adapter'
 import { highlightShellText, onShellHighlightReady } from '../shell-highlight'
 import type { CommandSnapshotStore } from '../command-snapshot'
 import type { IBufferLine } from '@xterm/xterm'
+import { wordRangeIn } from '../word-selection'
 
 // ── Clipboard helper ────────────────────────────────────────────────────────
 
@@ -467,6 +468,29 @@ export function createCommandBlock(
 
   // Full-block click-to-select with drag distinction (P1-7, P1-8).
   wireBlockSelection(wrapper, getContainer(), overflow, id, onSelect)
+
+  // Double-click selects a whole token (nocx-w7h.8): the frozen block's
+  // serialized DOM otherwise falls back to the browser's native word
+  // segmentation, which stops at the `-` and `.` in `profile-usage.json`.
+  // The same separator policy as the live xterm terminal (wordSeparator) is
+  // applied here so both surfaces select the same text.
+  wrapper.addEventListener('dblclick', (e) => {
+    const target = e.target as HTMLElement
+    if (target.closest('.cmd-overflow-btn, .cmd-overflow-menu')) return
+    const caret = document.caretRangeFromPoint?.(e.clientX, e.clientY)
+    if (!caret || caret.startContainer.nodeType !== Node.TEXT_NODE) return
+    const line = caret.startContainer.parentElement?.closest<HTMLElement>(
+      '.term-line, .cmd-header-text',
+    )
+    if (!line) return
+    const range = wordRangeIn(line, caret.startContainer as Text, caret.startOffset)
+    if (!range) return
+    const sel = window.getSelection()
+    if (!sel) return
+    sel.removeAllRanges()
+    sel.addRange(range)
+    e.preventDefault()
+  })
 
   return wrapper
 }

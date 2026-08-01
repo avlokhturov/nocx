@@ -14,10 +14,19 @@
 //
 // The state machine is a discriminated union on `state`, never flags on the
 // editor: `closed → opened (draft captured) → navigating (preview in the
-// editor) → accepted | dismissed`. `opened` is what an empty history looks
-// like — the panel is up and says so, with nothing to highlight. `accepted`
-// submits the previewed command through the editor; `dismissed` restores
-// the draft, the selection and the scroll exactly as they were.
+// editor) → accepted | dismissed | abandoned-to-edit`. `opened` is what an
+// empty history looks like — the panel is up and says so, with nothing to
+// highlight. `accepted` submits the previewed command through the editor;
+// `dismissed` restores the draft, the selection and the scroll exactly as
+// they were; the third exit (v8 §1) closes the overlay and KEEPS the
+// previewed command as the new draft when an insertion, a deletion or a
+// caret move arrives while navigating — editing what you recalled is the
+// ordinary way shell history is used.
+//
+// Arrows navigate and nothing else: at either end of the rung they stop,
+// and the list scrolls to keep the selected row in view so every entry is
+// reachable. Widening the ladder rung is its own key (shift+Up, shown in
+// the footer) and preserves the selected command (v8 §4).
 //
 // Rows are served behind the generated `history.query` types. Until the
 // persistent store lands, the query function maps the in-memory
@@ -215,12 +224,8 @@ export class RecallOverlay {
     if (result.entries.length > 0) {
       // Display order is oldest at the top, newest at the bottom (Warp's
       // model — the first Up gives the command you just ran), so the row
-      // selected on open is the LAST one, and the list must open scrolled
-      // to the bottom: a list taller than the panel that opens showing the
-      // top would hide the selected row entirely.
+      // selected on open is the LAST one; render() scrolls it into view.
       this.enterNavigating(rung, result, result.entries.length - 1)
-      const list = this.root.querySelector<HTMLElement>('.ui-recall-panel__list')
-      if (list) list.scrollTop = list.scrollHeight
     }
   }
   /**
@@ -242,22 +247,25 @@ export class RecallOverlay {
         return false
       case 'opened':
         // Empty history: nothing to accept. Escape dismisses; so does Enter
-        // (accepting nothing must not feel like a dead key). Up climbs to a
-        // wider rung when this one is exhausted — an empty directory must not
-        // hide commands that ran elsewhere on the same host.
+        // (accepting nothing must not feel like a dead key). Arrows do
+        // nothing here — there are no rows to walk — and widening is its own
+        // key (shift+Up), not an arrow.
         if (e.key === 'Escape' || e.key === 'Enter') {
           e.preventDefault()
           e.stopPropagation()
           this.dismiss()
           return true
         }
-        if (e.key === 'ArrowUp') {
+        if (e.key === 'ArrowUp' && e.shiftKey) {
           e.preventDefault()
           e.stopPropagation()
-          // At the widest rung this is a no-op: the empty overlay stays up —
-          // Up must not make an empty history disappear.
           this.climbWider()
           return true
+        }
+        if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+          e.preventDefault()
+          e.stopPropagation()
+          return true // stop: no rows to navigate
         }
         return this.passThroughOrDismiss(e)
       case 'navigating':
@@ -273,6 +281,12 @@ export class RecallOverlay {
           this.accept()
           return true
         }
+        if (e.key === 'ArrowUp' && e.shiftKey) {
+          e.preventDefault()
+          e.stopPropagation()
+          this.climbWider()
+          return true
+        }
         if (e.key === 'ArrowUp') {
           e.preventDefault()
           e.stopPropagation()
@@ -285,14 +299,26 @@ export class RecallOverlay {
           this.move(1)
           return true
         }
-        return this.passThroughOrDismiss(e)
+        if (e.ctrlKey && !e.metaKey && !e.altKey && (e.key === 'c' || e.key === 'C')) {
+          e.preventDefault()
+          e.stopPropagation()
+          this.dismiss()
+          return true
+        }
+        // Everything else — an insertion, a deletion, a caret move — hands
+        // the line to the editor: close the overlay KEEPING the previewed
+        // command as the new draft (the third exit, brief nocx-w7h.8 §1).
+        this.abandonToEdit()
+        return false
     }
   }
 
-  /** Widen the ladder rung when the current page is exhausted: Up at the top
-   *  row of a navigating page, or Up in an empty rung. Returns true when the
-   *  rung changed. Rungs are monotone (directory ⊆ host ⊆ everywhere), so a
-   *  wider page can never be shorter than the current one. */
+  /** Widen the ladder rung (shift+Up — the explicit widen key, never an
+   *  arrow). The narrower rung's entries are a subset of the wider one's, so
+   *  the selected command still exists: the selection stays on that same
+   *  command instead of jumping to either end. If it genuinely cannot be
+   *  located, the selection keeps the same distance from the newest entry.
+   *  Returns true when the rung changed. */
   private climbWider(): boolean {
     const s = this.state
     if (s.name !== 'opened' && s.name !== 'navigating') return false
@@ -300,19 +326,33 @@ export class RecallOverlay {
     const wider = nextScope(s.scope)
     if (wider === s.scope) return false
     const result = this.query(wider)
-    if (result.entries.length > 0) {
-      this.enterNavigating(wider, result, 0)
-    } else {
+    if (result.entries.length === 0) {
       this.state = { name: 'opened', draft: s.draft, scope: wider, query: result }
       this.render()
+      return true
     }
+    // Preserve the selected command when navigating; widening from an empty
+    // rung opens on the newest entry, like open() does.
+    let selected = result.entries.length - 1
+    if (s.name === 'navigating') {
+      const wireIndex = s.query.entries.length - 1 - s.selected
+      const id = s.query.entries[wireIndex]?.id
+      const at = id !== undefined ? result.entries.findIndex((e) => e.id === id) : -1
+      if (at >= 0) {
+        selected = result.entries.length - 1 - at
+      } else {
+        const distance = s.query.entries.length - 1 - s.selected
+        selected = Math.max(0, result.entries.length - 1 - distance)
+      }
+    }
+    this.enterNavigating(wider, result, selected)
     return true
   }
 
-  /** Any other key closes recall and passes through, so the keystroke lands
-   *  in the restored draft — typing while recalling means "give my draft
-   *  back". Ctrl-C is the exception: it dismisses and is CONSUMED, because
-   *  recalling must never interrupt the shell. */
+  /** Any other key in the OPENED (empty) panel closes recall and passes
+   *  through, so the keystroke lands in the restored draft — there is no
+   *  preview to keep. Ctrl-C is the exception: it dismisses and is CONSUMED,
+   *  because recalling must never interrupt the shell. */
   private passThroughOrDismiss(e: KeyboardEvent): boolean {
     if (e.ctrlKey && !e.metaKey && !e.altKey && (e.key === 'c' || e.key === 'C')) {
       this.dismiss()
@@ -322,20 +362,23 @@ export class RecallOverlay {
     return false
   }
 
+  /** The third exit (brief nocx-w7h.8 §1): an insertion, a deletion or a
+   *  caret move while navigating hands the line to the editor. The overlay
+   *  closes, the previewed command STAYS as the new draft, and the key that
+   *  triggered this lands on it. Neither `dismiss` (restores the captured
+   *  draft — that is what cleared the line) nor `accept` (submits) applies. */
+  private abandonToEdit(): void {
+    if (this.state.name !== 'navigating') return
+    this.close()
+  }
+
   private move(dir: -1 | 1): void {
     const s = this.state
     if (s.name !== 'navigating') return
-    const total = s.query.entries.length
-    let next = s.selected + dir
-    if (next < 0) {
-      // At the top row of an exhausted rung, Up climbs to the next wider one
-      // (schema: exhausted decides "the next Up climbs to a wider rung rather
-      // than paging further down this one"). The rung is visible in the
-      // header, so a climb is never silent.
-      this.climbWider()
-      return
-    }
-    if (next >= total) next = total - 1 // at the bottom: stay
+    const next = s.selected + dir
+    // Arrows navigate and nothing else: at either end of the rung they
+    // stop. Widening is the explicit shift+Up key, never an arrow (v8).
+    if (next < 0 || next >= s.query.entries.length) return
     this.enterNavigating(s.scope, s.query, next)
   }
 
@@ -408,16 +451,6 @@ export class RecallOverlay {
     rung.textContent = SCOPE_LABELS[s.scope]
     header.appendChild(rung)
 
-    // The next Up widens the rung when this one is exhausted and not already
-    // the top of the ladder — the exact condition climbWider acts on, so the
-    // hint never promises a climb the next Up cannot perform.
-    if (s.query.exhausted && s.scope !== 'everywhere') {
-      const widen = document.createElement('span')
-      widen.className = 'ui-recall-panel__widen'
-      widen.textContent = '↑ widens'
-      header.appendChild(widen)
-    }
-
     const count = document.createElement('span')
     count.className = 'ui-recall-panel__count'
     count.textContent = `${s.query.entries.length} ${s.query.entries.length === 1 ? 'result' : 'results'}`
@@ -477,10 +510,24 @@ export class RecallOverlay {
     }
     this.root.appendChild(list)
 
+    // Keep the selected row in view — on open (it is the bottom row) and on
+    // every move — so a rung taller than the panel is fully walkable: the
+    // list scrolls with the selection instead of stranding rows past the
+    // visible window (v8 §3). 'nearest' scrolls the minimum distance.
+    if (s.name === 'navigating') {
+      const selectedEl = list.querySelector<HTMLElement>('.ui-collection-row[data-selected="true"]')
+      // jsdom implements no scrollIntoView; the guard keeps tests honest and
+      // the call live in real browsers (the sequence test spies on it).
+      if (selectedEl && typeof selectedEl.scrollIntoView === 'function') {
+        selectedEl.scrollIntoView({ block: 'nearest' })
+      }
+    }
+
     // ── One footer, one line, every hint in it: what Enter does, how to
-    //    move, how to get out — key groups separated by a real gap. The
-    //    execute group only appears when there IS something to execute
-    //    (the empty panel must not promise what Enter cannot do there). ──
+    //    move, how to widen, how to get out — key groups separated by a real
+    //    gap. The execute group only appears when there IS something to
+    //    execute; the widen group only when the rung can widen (the empty
+    //    panel must not promise what a key cannot do there). ──
     const footer = document.createElement('div')
     footer.className = 'ui-recall-panel__footer'
     if (s.name === 'navigating') {
@@ -490,9 +537,15 @@ export class RecallOverlay {
     }
     const navigate = document.createElement('span')
     navigate.textContent = '↑ ↓ to navigate'
+    footer.appendChild(navigate)
+    if (s.query.exhausted && s.scope !== 'everywhere') {
+      const widen = document.createElement('span')
+      widen.textContent = 'shift+↑ widen'
+      footer.appendChild(widen)
+    }
     const dismiss = document.createElement('span')
     dismiss.textContent = 'esc to dismiss'
-    footer.append(navigate, dismiss)
+    footer.appendChild(dismiss)
     this.root.appendChild(footer)
   }
 }

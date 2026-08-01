@@ -16,6 +16,7 @@ import type {
   TerminalRenderer,
 } from './types'
 import { getCurrentTheme, subscribeThemeChanges } from './theme-adapter'
+import { WORD_SEPARATORS } from '../word-selection'
 import { decodeOsc52 } from '../clipboard'
 import { CommandSnapshotStore } from '../command-snapshot'
 
@@ -158,6 +159,10 @@ export class XtermRenderer implements TerminalRenderer {
       // that combination; disable it so right-click pastes what the user
       // expects.
       rightClickSelectsWord: false,
+      // The word-selection policy is shared with the frozen command blocks
+      // (word-selection.ts): xterm's default separator set, made explicit so
+      // double-click selects the same token on both surfaces (nocx-w7h.8).
+      wordSeparator: WORD_SEPARATORS,
       theme: getCurrentTheme(),
     })
     this.term = term

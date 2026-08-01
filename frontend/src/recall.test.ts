@@ -110,20 +110,47 @@ describe('recall: Enter executes the previewed command', () => {
     expect(submit).not.toHaveBeenCalled() // and nothing was sent
   })
 
-  it('typing while recall is open gives the draft back and lets the key land', () => {
-    const { ed, view, recall } = setupRecall({ query: mkQuery(['rm -rf build']) })
+  it('typing while navigating keeps the previewed command as the new draft', () => {
+    const { ed, view, recall } = setupRecall({ query: mkQuery(['docker compose up']) })
     ed.show()
     ed.insertText('git s')
     key(view, { key: 'ArrowUp' })
     expect(recall.isOpen).toBe(true)
-    // A stray key dismisses recall and restores the draft; the key itself is
-    // not consumed, so a real keystroke lands in the restored draft (jsdom
-    // cannot synthesize CM6's input events, so the landing itself is not
-    // observable here — the not-consumed contract is).
-    const ev = key(view, { key: 't' })
+    expect(ed.getDoc()).toBe('docker compose up') // previewed
+    // An insertion hands the line to the editor: the overlay closes and the
+    // preview STAYS as the new draft. Restoring the captured draft (dismiss)
+    // is what cleared the line; the third exit must not do that. jsdom cannot
+    // synthesize CM6's input events, so the 'd' landing is not observable —
+    // the not-consumed contract and the kept line are.
+    const ev = key(view, { key: 'd' })
     expect(recall.isOpen).toBe(false)
-    expect(ed.getDoc()).toBe('git s')
+    expect(ed.getDoc()).toBe('docker compose up')
     expect(ev.defaultPrevented).toBe(false)
+  })
+
+  it('deleting while navigating keeps the previewed command as the new draft', () => {
+    const { ed, view, recall } = setupRecall({ query: mkQuery(['docker compose up']) })
+    ed.show()
+    key(view, { key: 'ArrowUp' })
+    expect(ed.getDoc()).toBe('docker compose up')
+    // Backspace lands ON the preview (CM6 runs its deletion on the keydown,
+    // unlike text insertion which jsdom cannot synthesize): the overlay is
+    // gone and the kept command carries the edit — 'docker compose u'.
+    key(view, { key: 'Backspace' })
+    expect(recall.isOpen).toBe(false)
+    expect(ed.getDoc()).toBe('docker compose u')
+  })
+
+  it('a caret move while navigating keeps the previewed command as the new draft', () => {
+    const { ed, view, recall } = setupRecall({ query: mkQuery(['docker compose up']) })
+    ed.show()
+    key(view, { key: 'ArrowUp' })
+    expect(ed.getDoc()).toBe('docker compose up')
+    // CM6 owns the caret afterwards (it consumes the arrow key for movement),
+    // which is exactly the point: the overlay released the line, preview kept.
+    key(view, { key: 'ArrowRight' })
+    expect(recall.isOpen).toBe(false)
+    expect(ed.getDoc()).toBe('docker compose up')
   })
 
   it('Ctrl-C while recall is open dismisses it and never interrupts the shell', () => {
@@ -206,6 +233,62 @@ describe("recall: oldest at the top, newest at the bottom (Warp's model)", () =>
     )
     expect(selected?.textContent).toContain('only')
     expect(ed.getDoc()).toBe('only')
+  })
+})
+
+describe('recall: arrows navigate, the list follows, widening is its own key (v8)', () => {
+  const twelve = Array.from({ length: 12 }, (_, i) => `c${i + 1}`) // c1 newest
+
+  it('Up and Down walk every entry of a twelve-result rung, the scroll following', () => {
+    const { ed, view } = setupRecall({ query: mkQuery(twelve) })
+    const spy = vi.fn()
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const proto = Element.prototype.scrollIntoView
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollIntoView = spy
+    try {
+      key(view, { key: 'ArrowUp' }) // opens on the newest (bottom) row
+      expect(ed.getDoc()).toBe('c1')
+      // Hold Up past the visible window to the top of the rung.
+      for (let i = 0; i < 11; i++) key(view, { key: 'ArrowUp' })
+      expect(ed.getDoc()).toBe('c12') // the oldest entry — all 12 reachable
+      // Down returns through everything Up passed.
+      for (let i = 0; i < 11; i++) key(view, { key: 'ArrowDown' })
+      expect(ed.getDoc()).toBe('c1')
+      // Every move asked the browser to keep the selected row in view — the
+      // mechanism that makes a 12-result rung walkable past an 8-row window.
+      expect(spy).toHaveBeenCalledWith({ block: 'nearest' })
+      expect(spy.mock.calls.length).toBeGreaterThanOrEqual(12)
+    } finally {
+      Element.prototype.scrollIntoView = proto
+    }
+  })
+
+  it('Up at the oldest entry stops: no widen, no teleport', () => {
+    const { container, ed, view } = setupRecall({ query: mkQuery(['c1', 'c2', 'c3']) })
+    key(view, { key: 'ArrowUp' }) // opens on c1 (newest)
+    key(view, { key: 'ArrowUp' }) // c2
+    key(view, { key: 'ArrowUp' }) // c3 (oldest, display top)
+    key(view, { key: 'ArrowUp' }) // must stop
+    expect(ed.getDoc()).toBe('c3') // selection unchanged
+    expect(panelOf(container).textContent).toContain('this directory') // no widen
+  })
+
+  it('the widen key (shift+Up) preserves the selected command across rungs', () => {
+    const { container, ed, view } = setupRecall({
+      query: (scope) => {
+        const entries =
+          scope === 'directory'
+            ? [mkEntry('c1'), mkEntry('c2'), mkEntry('c3')]
+            : [mkEntry('c1'), mkEntry('c2'), mkEntry('c3'), mkEntry('c4')]
+        return { entries, scope, exhausted: true, source: 'session' }
+      },
+    })
+    key(view, { key: 'ArrowUp' }) // c1 (newest, bottom)
+    key(view, { key: 'ArrowUp' }) // c2
+    key(view, { key: 'ArrowUp', shiftKey: true }) // widen
+    expect(panelOf(container).textContent).toContain('this host')
+    expect(ed.getDoc()).toBe('c2') // the same command, not either end
   })
 })
 
@@ -317,7 +400,7 @@ describe('recall: what the panel says', () => {
     expect(text).toContain('this directory')
   })
 
-  it('a rung that can widen says so; the top rung does not', () => {
+  it('the widen key is shown when the rung can widen, and not at the top rung', () => {
     const narrow = {
       entries: [mkEntry('ls')],
       scope: 'directory' as const,
@@ -337,15 +420,19 @@ describe('recall: what the panel says', () => {
         source: 'session',
       }),
     })
-    key(view, { key: 'ArrowUp' }) // climbs: directory 1, host 1 → everywhere
+    key(view, { key: 'ArrowUp' }) // open-time climb: directory 1, host 1 → everywhere
     const text = panelOf(container).textContent ?? ''
     expect(text).toContain('everywhere') // the top rung is named
-    expect(text).not.toContain('↑ widens') // nothing wider to promise
+    expect(text).not.toContain('shift+↑ widen') // nothing wider to promise
+
+    const second = setupRecall({ query: mkQuery(['one', 'two', 'three']) })
+    key(second.view, { key: 'ArrowUp' })
+    expect(panelOf(second.container).textContent).toContain('shift+↑ widen')
   })
 })
 
 describe('recall: the footer and the labels say what the keys do', () => {
-  it('all hints are one line: three key groups in one footer, real gaps between them', () => {
+  it('all hints are one line: the key groups in one footer, real gaps between them', () => {
     const { container, view } = setupRecall({ query: mkQuery(['one', 'two', 'three']) })
     key(view, { key: 'ArrowUp' })
     const footer = container.querySelector<HTMLElement>('.ui-recall-panel__footer')
@@ -354,10 +441,11 @@ describe('recall: the footer and the labels say what the keys do', () => {
     // out on one line with a real gap (white-space: nowrap; display: flex),
     // so no hint gets its own row and none can wrap apart from the others.
     const groups = footer?.querySelectorAll<HTMLElement>(':scope > span') ?? []
-    expect(groups.length).toBe(3)
+    expect(groups.length).toBe(4)
     expect(groups[0]?.textContent).toBe('↵ to execute')
     expect(groups[1]?.textContent).toBe('↑ ↓ to navigate')
-    expect(groups[2]?.textContent).toBe('esc to dismiss')
+    expect(groups[2]?.textContent).toBe('shift+↑ widen')
+    expect(groups[3]?.textContent).toBe('esc to dismiss')
     expect(footer?.querySelector('br')).toBeNull()
   })
 

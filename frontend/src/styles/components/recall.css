@@ -62,12 +62,11 @@
   margin-left: auto;
 }
 
-/* "↑ widens" — the affordance that names what the next Up does. Shown only
-   when the rung is exhausted and not already the top of the ladder, which
-   is exactly when the next Up at the top row widens (see climbWider). */
-.ui-recall-panel__widen {
-  font-size: var(--font-size-xs);
-  color: var(--color-text-dim);
+.ui-recall-panel__list {
+  overflow-y: auto;
+  min-height: 0;
+  padding: var(--space-1) 0;
+  flex: 1 1 auto;
 }
 
 .ui-recall-panel__list {
