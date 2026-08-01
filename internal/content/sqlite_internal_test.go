@@ -3,6 +3,7 @@ package content
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -379,5 +380,38 @@ func TestTwoProcessesShareDatabase(t *testing.T) {
 	// The same database keeps working across processes: a fresh store writes.
 	if err := db.CommandHistory().Add(ctx, CommandRecord{Command: "after-kills", Cwd: "/", Host: "", Status: StatusSuccess}); err != nil {
 		t.Fatalf("Add after kills: %v", err)
+	}
+}
+
+// The retention sweep is best-effort by design: the INSERT is already
+// durable when the sweep runs, so a sweep failure must log and leave Add
+// successful — otherwise a caller retrying Add would duplicate the command.
+func TestRetentionSweepFailureIsBestEffort(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "content.db")
+	db, err := openTestStore(t, path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	sc, ok := db.(*sqliteContent)
+	if !ok {
+		t.Fatalf("store is %T, want *sqliteContent", db)
+	}
+	sc.policy.SetRetentionDays(1)
+	sc.sweep = func(context.Context, int64) error { return errors.New("sweep failed") }
+
+	now := time.Now().UnixMilli()
+	if addErr := db.CommandHistory().Add(context.Background(), CommandRecord{
+		Command: "sweep-failure-row", Cwd: "/", Host: "", Status: StatusSuccess, EndedAt: &now,
+	}); addErr != nil {
+		t.Fatalf("Add with a failing sweep returned an error: %v", addErr)
+	}
+	recs, err := db.CommandHistory().List(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("rows = %d, want the inserted row to survive a failed sweep", len(recs))
 	}
 }

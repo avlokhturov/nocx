@@ -31,6 +31,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	sqlite3 "github.com/ncruces/go-sqlite3"
 	"github.com/ncruces/go-sqlite3/driver"
@@ -50,6 +51,9 @@ type Config struct {
 	// Budget is the two-number storage budget (nocx-rtg0.11); a zero budget
 	// is refused at Open.
 	Budget Budget
+	// Policy is the live History policy (keep/enable, retention, output).
+	// When nil, the default policy applies (history kept, no age limit).
+	Policy *Policy
 	// Logger receives operational logging. When nil, the default slog
 	// adapter is used.
 	Logger log.Logger
@@ -73,6 +77,13 @@ type sqliteContent struct {
 	db     *sql.DB
 	keyHex string
 	path   string
+	policy *Policy
+	// sweep removes rows older than cutoff (age retention). A field so the
+	// failure path is testable: the default runs the DELETE; tests inject a
+	// failing one to prove Add stays nil (the sweep is best-effort by
+	// design — the INSERT is already durable, so a sweep failure must not
+	// make Add fail or a retry would duplicate the command).
+	sweep func(ctx context.Context, cutoff int64) error
 
 	// writeCh serializes every mutation (design §5.3: one writer goroutine,
 	// short transactions). It is NEVER closed: Close signals via stop, so a
@@ -108,6 +119,9 @@ func Open(ctx context.Context, cfg Config) (ContentDB, error) {
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = log.NewSlogAdapter(nil)
+	}
+	if cfg.Policy == nil {
+		cfg.Policy = NewPolicy()
 	}
 
 	dir := filepath.Dir(cfg.Path)
@@ -184,6 +198,12 @@ func Open(ctx context.Context, cfg Config) (ContentDB, error) {
 		db:     db,
 		keyHex: keyHex,
 		path:   cfg.Path,
+		policy: cfg.Policy,
+	}
+	s.sweep = func(ctx context.Context, cutoff int64) error {
+		_, err := s.db.ExecContext(ctx,
+			`DELETE FROM command_history WHERE ended_at IS NOT NULL AND ended_at < ?`, cutoff)
+		return err
 	}
 	s.writeCh = make(chan writeReq)
 	s.stop = make(chan struct{})
@@ -209,6 +229,7 @@ CREATE TABLE IF NOT EXISTS command_history (
 ) STRICT;
 CREATE INDEX IF NOT EXISTS command_history_by_scope ON command_history (cwd, host, id DESC);
 CREATE INDEX IF NOT EXISTS command_history_by_host  ON command_history (host, id DESC);
+CREATE INDEX IF NOT EXISTS command_history_by_ended ON command_history (ended_at);
 `
 
 // keyedURI is the ONE file-creating path (canary rule): every file this
@@ -253,10 +274,22 @@ func (s *sqliteContent) doAdd(ctx context.Context, r CommandRecord) error {
 		(command, cwd, host, status, exit_code, started_at, ended_at, trusted)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.Command, r.Cwd, r.Host, string(r.Status), r.ExitCode, r.StartedAt, r.EndedAt, r.Trusted)
-	if err == nil {
-		enforceFileModes(s.path)
+	if err != nil {
+		return err
 	}
-	return err
+	enforceFileModes(s.path)
+
+	// Age-based retention, run in the same writer turn: completed commands
+	// older than the limit are removed from nocx. Deletion is a short
+	// autocommit transaction and uses the ended_at index; a crash between
+	// the insert and the sweep only delays the sweep.
+	if days := s.policy.RetentionDays(); days > 0 {
+		cutoff := time.Now().Add(-time.Duration(days) * 24 * time.Hour).UnixMilli()
+		if err := s.sweep(ctx, cutoff); err != nil {
+			s.log.Warn("retention sweep failed", "error", err)
+		}
+	}
+	return nil
 }
 
 // Add serializes the insert through the single writer goroutine. The row id
@@ -264,6 +297,11 @@ func (s *sqliteContent) doAdd(ctx context.Context, r CommandRecord) error {
 func (s *sqliteContent) Add(ctx context.Context, record CommandRecord) error {
 	if s.closed.Load() {
 		return ErrClosed
+	}
+	// Keep-history-off: a command runs and no row appears. Decided before the
+	// writer is invoked, so nothing is serialized for a record nobody wants.
+	if !s.policy.Enabled() {
+		return nil
 	}
 	req := writeReq{ctx: ctx, record: record, err: make(chan error, 1)}
 	select {

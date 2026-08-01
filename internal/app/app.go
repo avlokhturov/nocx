@@ -43,16 +43,51 @@ type App struct {
 	vaultCloser interface{ Close() }
 }
 
-// contentBudget is the two-number storage budget the composition root
-// supplies to the ContentDB store (design §5.4, nocx-rtg0.11). The values
-// are PROVISIONAL: the retention settings surface (a later bead) owns the
-// real knobs and defaults; per spec §5.4 "the default is still ours", and
-// these placeholders let the store open today. The owner should ratify or
-// replace them when the settings knobs land.
-var contentBudget = content.Budget{
-	RetentionBytes:   4 << 30, // 4 GiB logical retained content
-	DiskCeilingBytes: 8 << 30, // 8 GiB physical ceiling (db + WAL)
-	CompactionFloor:  0.8,
+// contentCompactionFloor is the hysteresis fraction of the disk ceiling at
+// which an in-progress compaction stops (design §5.4 names hysteresis as
+// part of the ceiling). A mechanism parameter, not a user knob.
+const contentCompactionFloor = 0.8
+
+// budgetFromSettings builds the store's two-number budget from the History
+// settings (nocx-rtg0.11): the user's retention size and disk ceiling, in
+// MiB, become the logical and physical byte budgets. A zero or inverted
+// budget is refused, so an unavailable or invalid configuration keeps the
+// store closed rather than shipping an unbounded database.
+func budgetFromSettings(reg *settings.Registry) (content.Budget, error) {
+	retentionMiB, err := reg.GetNumber(settings.HistoryRetentionMiB)
+	if err != nil {
+		return content.Budget{}, fmt.Errorf("history retention size: %w", err)
+	}
+	ceilingMiB, err := reg.GetNumber(settings.HistoryDiskCeilingMiB)
+	if err != nil {
+		return content.Budget{}, fmt.Errorf("history disk ceiling: %w", err)
+	}
+	b := content.Budget{
+		RetentionBytes:   int64(retentionMiB) << 20,
+		DiskCeilingBytes: int64(ceilingMiB) << 20,
+		CompactionFloor:  contentCompactionFloor,
+	}
+	if err := b.Validate(); err != nil {
+		return content.Budget{}, err
+	}
+	return b, nil
+}
+
+// policyFromSettings builds the live History policy from the settings. The
+// composition root updates the same *content.Policy from the settings
+// change notifier, so a toggle applies without a restart.
+func policyFromSettings(reg *settings.Registry) *content.Policy {
+	p := content.NewPolicy()
+	if v, err := reg.GetBool(settings.HistoryEnabled); err == nil {
+		p.SetEnabled(v)
+	}
+	if v, err := reg.GetNumber(settings.HistoryRetentionDays); err == nil {
+		p.SetRetentionDays(int(v))
+	}
+	if v, err := reg.GetBool(settings.HistoryOutputEnabled); err == nil {
+		p.SetOutputEnabled(v)
+	}
+	return p
 }
 
 // SetDialogService attaches the native dialog capability (dialog.* RPCs). It
@@ -153,27 +188,55 @@ func New(opts ...Option) (*App, error) {
 	// The ContentDB key, once at startup (nocx-rtg0.9): minted through the
 	// provider seam on first run, read through the provider seam on every
 	// start, and held here for the life of the process — a vault auto-seal
-	// must never make history unreadable. On every failure path the app
-	// starts WITHOUT durable history (the stub) and says so: a terminal
-	// that refuses to start because its history database could not open a
-	// key is worse than one that starts and admits the gap.
-	if key, keyErr := contentkey.LoadOrCreate(ctx, contentkey.Config{
+	// must never make history unreadable. The History settings (keep on/off,
+	// age, the two-number budget, output) wire into the store the same way:
+	// read here, live-updated below. On every failure path the app starts
+	// WITHOUT durable history (the stub) and says so: a terminal that
+	// refuses to start because its history database could not open a key is
+	// worse than one that starts and admits the gap.
+	historyPolicy := policyFromSettings(settingsRegistry)
+	budget, budgetErr := budgetFromSettings(settingsRegistry)
+	if budgetErr != nil {
+		slogger.Warn("durable command history unavailable; starting without it", "reason", budgetErr)
+	} else if key, keyErr := contentkey.LoadOrCreate(ctx, contentkey.Config{
 		Policy:   v,
 		Registry: reg,
-		RefStore: settingsRegistry,
+		DBPath:   filepath.Join(paths.DataDir(), "content.db"),
 		Logger:   logger,
 	}); keyErr != nil {
 		slogger.Warn("durable command history unavailable; starting without it", "reason", keyErr)
 	} else if db, openErr := content.Open(ctx, content.Config{
 		Path:   filepath.Join(paths.DataDir(), "content.db"),
 		Key:    key,
-		Budget: contentBudget,
+		Budget: budget,
+		Policy: historyPolicy,
 		Logger: logger,
 	}); openErr != nil {
 		slogger.Warn("durable command history unavailable; starting without it", "reason", openErr)
 	} else {
 		contentDB = db
 	}
+
+	// Live History policy: a Settings toggle applies without a restart. The
+	// transport's own notifier broadcasts settings.changed to the renderer;
+	// this second listener keeps the store's policy in sync.
+	settingsRegistry.AddNotifier(func(_ int, keys []string) {
+		for _, k := range keys {
+			switch k {
+			case settings.HistoryEnabled.Key(), settings.HistoryRetentionDays.Key(),
+				settings.HistoryOutputEnabled.Key():
+				if v, err := settingsRegistry.GetBool(settings.HistoryEnabled); err == nil {
+					historyPolicy.SetEnabled(v)
+				}
+				if v, err := settingsRegistry.GetNumber(settings.HistoryRetentionDays); err == nil {
+					historyPolicy.SetRetentionDays(int(v))
+				}
+				if v, err := settingsRegistry.GetBool(settings.HistoryOutputEnabled); err == nil {
+					historyPolicy.SetOutputEnabled(v)
+				}
+			}
+		}
+	})
 	// Profile usage tracker for the sessions.status RPC (nocx-uxs5.4).
 	usageStore := session.NewDocumentUsageStore(docStore)
 	sess = sess.WithProfileUsageTracker(usageStore)

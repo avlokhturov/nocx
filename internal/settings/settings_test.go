@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -613,62 +614,34 @@ func findSecret(t *testing.T, reg *settings.Registry, key string) *settings.Secr
 	return nil
 }
 
-// ── ContentDB key reference seam (nocx-rtg0.9) ───────────────────────────
+// ── History section (the user's decisions) ───────────────────────────────
 
-func TestContentDBKeyRefRoundTripsAndPersists(t *testing.T) {
-	fd := &fakeDoc{}
-	reg := settings.New(fd, &fakeSecretStore{data: map[credential.SecretID]string{}})
-
-	// Nothing set yet.
-	if _, ok := reg.SecretRef(settings.ContentDBKey); ok {
-		t.Fatal("ContentDBKey ref present on a fresh registry")
-	}
-
-	ref := credential.SecretID("sec:v1:file:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-	if err := reg.SetSecretRef(settings.ContentDBKey, ref); err != nil {
-		t.Fatalf("SetSecretRef: %v", err)
-	}
-	got, ok := reg.SecretRef(settings.ContentDBKey)
-	if !ok || got != ref {
-		t.Fatalf("SecretRef = %q, %v; want %q, true", got, ok, ref)
-	}
-
-	// A re-constructed registry (restart) reads the persisted ref back.
-	reg2 := settings.New(fd, &fakeSecretStore{data: map[credential.SecretID]string{}})
-	got2, ok := reg2.SecretRef(settings.ContentDBKey)
-	if !ok || got2 != ref {
-		t.Fatalf("restarted registry SecretRef = %q, %v; want the persisted ref", got2, ok)
-	}
-}
-
-func TestSetSecretRefRejectsNilAndEmpty(t *testing.T) {
+// The History section renders the decisions a user actually has: keep or
+// not, how long, how much disk (two numbers), output separately. The
+// retention label says "removed from nocx", never "securely erased"
+// (internal/content's package doc: ordinary DELETE leaves data in WAL pages
+// and free space).
+func TestHistorySectionDeclaresUserDecisions(t *testing.T) {
+	rendered := map[string]settings.Declaration{}
 	reg := settings.New(&fakeDoc{}, &fakeSecretStore{data: map[credential.SecretID]string{}})
-	if err := reg.SetSecretRef(nil, "sec:v1:file:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"); err == nil {
-		t.Fatal("SetSecretRef(nil) accepted")
+	for _, d := range reg.Declarations() {
+		if d.Section == "History" {
+			rendered[d.Key] = d
+		}
 	}
-	if err := reg.SetSecretRef(settings.ContentDBKey, ""); err == nil {
-		t.Fatal("SetSecretRef(empty ref) accepted")
+	for _, want := range []string{
+		"history.enabled", "history.retentionDays",
+		"history.retentionMiB", "history.diskCeilingMiB", "history.outputEnabled",
+	} {
+		if _, ok := rendered[want]; !ok {
+			t.Errorf("History section missing %q — a promise the screen does not make", want)
+		}
 	}
-}
-
-// A failed commit must leave the prior reference untouched — the invariant
-// the content-key crash recovery depends on (the slot is the source of
-// truth; a torn settings write must not half-apply).
-func TestSetSecretRefFailedCommitLeavesPriorRef(t *testing.T) {
-	fd := &fakeDoc{}
-	reg := settings.New(fd, &fakeSecretStore{data: map[credential.SecretID]string{}})
-	old := credential.SecretID("sec:v1:system:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-	if err := reg.SetSecretRef(settings.ContentDBKey, old); err != nil {
-		t.Fatalf("SetSecretRef: %v", err)
+	retention := rendered["history.retentionDays"].Description
+	if !strings.Contains(retention, "removed from nocx") {
+		t.Errorf("retention label does not use the honest wording: %q", retention)
 	}
-
-	fd.writeErr = errors.New("disk full")
-	newRef := credential.SecretID("sec:v1:system:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
-	if err := reg.SetSecretRef(settings.ContentDBKey, newRef); err == nil {
-		t.Fatal("SetSecretRef with failing store succeeded")
-	}
-	got, ok := reg.SecretRef(settings.ContentDBKey)
-	if !ok || got != old {
-		t.Fatalf("after failed commit SecretRef = %q, %v; want the prior ref %q", got, ok, old)
+	if strings.Contains(retention, "securely erased") {
+		t.Errorf("retention label promises secure erasure: %q", retention)
 	}
 }

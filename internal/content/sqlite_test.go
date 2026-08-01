@@ -11,6 +11,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"time"
 
 	sqlite3 "github.com/ncruces/go-sqlite3"
 	"github.com/ncruces/go-sqlite3/driver"
@@ -585,4 +586,103 @@ func keyHex(t *testing.T) string {
 		fmt.Fprintf(&b, "%02x", c)
 	}
 	return b.String()
+}
+
+// ── History policy behaviour (settings wired to the store) ───────────────
+
+// Keep-history-off: a command runs and no row appears — through the store,
+// not the toggle's own state. The decision applies live: toggling back on
+// records again without a restart.
+func TestAddHonorsDisabledHistory(t *testing.T) {
+	policy := content.NewPolicy()
+	policy.SetEnabled(false)
+
+	dir := t.TempDir()
+	db, err := content.Open(context.Background(), content.Config{
+		Path:   filepath.Join(dir, "content.db"),
+		Key:    testKey(),
+		Budget: testBudget,
+		Policy: policy,
+		Logger: log.NewSlogAdapter(nil),
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	hist := db.CommandHistory()
+
+	// A command runs while history is off: no row appears, no error.
+	if addErr := hist.Add(context.Background(), markerRecord("off-1")); addErr != nil {
+		t.Fatalf("Add while disabled returned an error: %v", addErr)
+	}
+	recs, err := hist.List(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(recs) != 0 {
+		t.Fatalf("history disabled but %d rows appeared", len(recs))
+	}
+
+	// Live toggle: enabled again, the next command is recorded.
+	policy.SetEnabled(true)
+	if addErr := hist.Add(context.Background(), markerRecord("on-1")); addErr != nil {
+		t.Fatalf("Add: %v", addErr)
+	}
+	recs, err = hist.List(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(recs) != 1 || recs[0].Command != "on-1" {
+		t.Fatalf("after re-enable rows = %+v, want exactly the new command", recs)
+	}
+}
+
+// Retention by age: the transition is what is proven. An old command added
+// while retention is off survives; turning retention on and recording a new
+// command sweeps the old one — removed from nocx, not hidden.
+func TestRetentionSweepRemovesOldCommands(t *testing.T) {
+	policy := content.NewPolicy() // retention off (0 = unbounded)
+	dir := t.TempDir()
+	db, err := content.Open(context.Background(), content.Config{
+		Path:   filepath.Join(dir, "content.db"),
+		Key:    testKey(),
+		Budget: testBudget,
+		Policy: policy,
+		Logger: log.NewSlogAdapter(nil),
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	hist := db.CommandHistory()
+	ctx := context.Background()
+
+	old := time.Now().Add(-48 * time.Hour).UnixMilli()
+	oldRec := content.CommandRecord{Command: "old-command", Cwd: "/old", Host: "", Status: content.StatusSuccess, EndedAt: &old}
+	if addErr := hist.Add(ctx, oldRec); addErr != nil {
+		t.Fatalf("Add old: %v", addErr)
+	}
+
+	// Retention is off: the old command survives.
+	recs, err := hist.List(ctx, 10)
+	if err != nil || len(recs) != 1 {
+		t.Fatalf("before retention: %d rows (err %v), want the old command kept", len(recs), err)
+	}
+
+	// Turn retention on (1 day) and record a fresh command: the sweep runs
+	// in that writer turn and removes the old one.
+	policy.SetRetentionDays(1)
+	now := time.Now().UnixMilli()
+	fresh := content.CommandRecord{Command: "fresh-command", Cwd: "/new", Host: "", Status: content.StatusSuccess, EndedAt: &now}
+	if addErr := hist.Add(ctx, fresh); addErr != nil {
+		t.Fatalf("Add fresh: %v", addErr)
+	}
+
+	recs, err = hist.List(ctx, 10)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(recs) != 1 || recs[0].Command != "fresh-command" {
+		t.Fatalf("after sweep rows = %+v, want only the fresh command (old one removed)", recs)
+	}
 }

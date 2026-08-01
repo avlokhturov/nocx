@@ -452,17 +452,76 @@ func assertValidKey(key string) {
 
 // ── Declared settings ──────────────────────────────────────────────────
 
-// ContentDBKey holds the persisted reference to the ContentDB key
-// (ADR-0018 §3, nocx-rtg0.9). The key itself lives in a provider; the
-// settings document carries only the reference, like every secret-class
-// setting. The app manages it — there is no user-facing set/delete surface
-// for it beyond what the vault's own lifecycle provides.
-var ContentDBKey = MustRegisterSecret(SecretSpec{
-	Key:         "contentdb.key",
+// fp is a pointer-to-float64 helper for NumberSpec bounds.
+func fp(v float64) *float64 { return &v }
+
+// HistoryEnabled is the "keep history at all" decision. Off means the store
+// is not written to: a command runs and no row appears.
+var HistoryEnabled = MustRegisterBool(BoolSpec{
+	Key:         "history.enabled",
 	Section:     "History",
-	Label:       "Command history key",
-	Description: "Reference to the encrypted key that protects durable command history. Managed by the application; read once at startup so a sealed vault never makes history unreadable.",
-	DataClass:   PrivateMetadata,
+	Label:       "Keep command history",
+	Description: "Record commands for recall after a restart. When off, new commands are not stored and the recall panel shows only the current session; existing history stays until its retention limit.",
+	DataClass:   PublicConfig,
+	Default:     true,
+})
+
+// HistoryRetentionDays is the age-based retention limit. The label is honest
+// by design (internal/content's package doc): ordinary DELETE leaves rows in
+// WAL pages and free space, so the wording says "removed from nocx", never
+// "securely erased".
+var HistoryRetentionDays = MustRegisterNumber(NumberSpec{
+	Key:         "history.retentionDays",
+	Section:     "History",
+	Label:       "Keep history for",
+	Description: "How many days a completed command is kept. Older commands are removed from nocx — removal is not secure erasure, deleted rows can remain in the database file's free space. 0 keeps everything until the disk limit is reached.",
+	DataClass:   PublicConfig,
+	Default:     0,
+	Min:         fp(0),
+	Max:         fp(3650),
+})
+
+// HistoryRetentionMiB is the logical retained-content budget (nocx-rtg0.11):
+// the number the user reasons about, what eviction acts on. Measured
+// amplification is ~3.2x (256 MiB of content ≈ 811 MiB on disk), so the
+// label states the real footprint rather than promising it away.
+var HistoryRetentionMiB = MustRegisterNumber(NumberSpec{
+	Key:         "history.retentionMiB",
+	Section:     "History",
+	Label:       "Command history size",
+	Description: "How much command text to keep, in MiB. When it is reached the oldest commands are removed from nocx (again, not securely erased). The on-disk footprint is larger than this number: measured ~3.2x — 256 MiB of content is about 811 MiB on disk — because of the search index and encrypted pages.",
+	DataClass:   PublicConfig,
+	Default:     4096,
+	Min:         fp(64),
+	Max:         fp(1 << 20),
+})
+
+// HistoryDiskCeilingMiB is the physical ceiling over the main database plus
+// its WAL — the second number of the two-number budget. It is separate from
+// the content size on purpose: deleting content shrinks what you keep, not
+// necessarily the file.
+var HistoryDiskCeilingMiB = MustRegisterNumber(NumberSpec{
+	Key:         "history.diskCeilingMiB",
+	Section:     "History",
+	Label:       "Disk space limit",
+	Description: "Physical ceiling for the history database plus its write-ahead log, in MiB. A separate number from the content size: deleting content shrinks what you keep, not necessarily the file. When this is reached the store compacts rather than deleting more.",
+	DataClass:   PublicConfig,
+	Default:     8192,
+	Min:         fp(128),
+	Max:         fp(2 << 20),
+})
+
+// HistoryOutputEnabled is the "keep command output separately" decision —
+// a different switch from keeping the commands, because output has very
+// different privacy and size consequences. Wired to the store's policy; the
+// capture path that produces output is nocx-de7's epic.
+var HistoryOutputEnabled = MustRegisterBool(BoolSpec{
+	Key:         "history.outputEnabled",
+	Section:     "History",
+	Label:       "Keep command output",
+	Description: "Whether the text commands printed is kept alongside the commands. Output is larger and more sensitive than the command line; commands are kept without output when this is off.",
+	DataClass:   PublicConfig,
+	Default:     true,
 })
 
 // ClipboardOSC52Suppressed persists the "Don't show again" decision on the
@@ -551,13 +610,13 @@ type ChangeNotifier func(revision int, keys []string)
 // Registry holds the runtime state of all settings: persisted values
 // (non-secret) in a DocumentStore and secret values in a SecretStore.
 type Registry struct {
-	mu       sync.Mutex
-	doc      storage.DocumentStore
-	secrets  credential.SecretStore
-	values   map[string]any
-	refs     map[string]credential.SecretID // secret key → SecretID
-	revision int                            // monotonic, in-memory, bumps only on successful mutation
-	notifier ChangeNotifier
+	mu        sync.Mutex
+	doc       storage.DocumentStore
+	secrets   credential.SecretStore
+	values    map[string]any
+	refs      map[string]credential.SecretID // secret key → SecretID
+	revision  int                            // monotonic, in-memory, bumps only on successful mutation
+	notifiers []ChangeNotifier
 }
 
 // SettingsSnapshot is the wire contract for settings.getSnapshot.
@@ -616,9 +675,18 @@ func New(doc storage.DocumentStore, secrets credential.SecretStore) *Registry {
 }
 
 // SetNotifier registers a callback invoked after every successful mutation.
-// Must be called before the registry is used concurrently (setup only).
+// Multiple listeners are allowed (each mutation invokes all of them); the
+// transport uses one for the settings.changed broadcast, and the composition
+// root may register another to keep the ContentDB policy in sync.
 func (r *Registry) SetNotifier(n ChangeNotifier) {
-	r.notifier = n
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.notifiers = append(r.notifiers, n)
+}
+
+// AddNotifier is SetNotifier under its honest name: appends a listener.
+func (r *Registry) AddNotifier(n ChangeNotifier) {
+	r.SetNotifier(n)
 }
 
 func descriptorByKey(key string) Descriptor {
@@ -930,39 +998,6 @@ func (r *Registry) SecretDelete(s *Secret) error {
 	return err
 }
 
-// SecretRef returns the persisted reference for a secret-class setting, or
-// ok=false when no value was ever set. The reference is not material: it is
-// the opaque SecretID the value lives behind, and returning it does not
-// violate the "no registry method returns plaintext" rule.
-func (r *Registry) SecretRef(s *Secret) (credential.SecretID, bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	id, ok := r.refs[s.key]
-	return id, ok
-}
-
-// SetSecretRef persists an already-created reference for a secret-class
-// setting. This is the narrow seam for a caller that minted and stored the
-// value itself (the ContentDB key, nocx-rtg0.9): the value is never handed
-// to the registry, only its reference, so the plaintext rule holds.
-func (r *Registry) SetSecretRef(s *Secret, id credential.SecretID) error {
-	if s == nil {
-		return fmt.Errorf("settings: SetSecretRef: nil secret key")
-	}
-	if id == "" {
-		return fmt.Errorf("settings: SetSecretRef %q: empty reference", s.key)
-	}
-	r.mu.Lock()
-	newRefs := copyRefs(r.refs)
-	newRefs[s.key] = id
-	ch, err := r.commitLocked(r.values, newRefs, []string{s.key})
-	r.mu.Unlock()
-	if err == nil {
-		r.finishCommit(ch)
-	}
-	return err
-}
-
 // SecretExists reports whether a secret-class setting has a stored value.
 func (r *Registry) SecretExists(s *Secret) (bool, error) {
 	r.mu.Lock()
@@ -979,9 +1014,9 @@ func (r *Registry) SecretExists(s *Secret) (bool, error) {
 // change captures notification state from a successful commit. The caller
 // MUST release r.mu and then call finishCommit.
 type change struct {
-	rev      int
-	notifier ChangeNotifier
-	keys     []string
+	rev       int
+	notifiers []ChangeNotifier
+	keys      []string
 }
 
 // commitLocked persists values and refs, commits the new state, and bumps
@@ -996,14 +1031,16 @@ func (r *Registry) commitLocked(values map[string]any, refs map[string]credentia
 	r.revision++
 	ck := make([]string, len(keys))
 	copy(ck, keys)
-	return change{rev: r.revision, notifier: r.notifier, keys: ck}, nil
+	return change{rev: r.revision, notifiers: append([]ChangeNotifier(nil), r.notifiers...), keys: ck}, nil
 }
 
-// finishCommit invokes the notifier if one is set. Must be called after r.mu
+// finishCommit invokes every registered notifier. Must be called after r.mu
 // is released.
 func (r *Registry) finishCommit(ch change) {
-	if ch.notifier != nil {
-		ch.notifier(ch.rev, ch.keys)
+	for _, n := range ch.notifiers {
+		if n != nil {
+			n(ch.rev, ch.keys)
+		}
 	}
 }
 

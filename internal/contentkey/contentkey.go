@@ -1,23 +1,20 @@
 // Package contentkey owns the ContentDB key's lifecycle (nocx-rtg0.9,
 // ADR-0018 §3).
 //
-// The one non-negotiable property: auto-seal must never make history
-// unreadable. The resolution is lifecycle, not crypto — the key is read ONCE
-// at startup and held by the store for the life of the process, so a later
-// vault seal is irrelevant. That requires the read to bypass the vault's
-// user-secret gates (Create/Get refuse sealed and uninitialized states), so
-// the key is stored and read through the PROVIDER seam directly — the same
-// providers every other secret uses, chosen the way everything else chooses
-// them (the vault's default provider, with the setup rule as the unset
-// fallback), so a machine with no Secret Service gets the file provider
-// instead of an error.
+// The reference is DERIVED, never persisted. settings.json is a portable
+// document — it syncs between machines, is backed up, gets copied — and a
+// sec:v1:<provider>:<id> reference points at a provider slot on THIS
+// machine: carried elsewhere it points at nothing. So at startup the id is
+// recomputed (the osKeyID shape), the provider's slot is asked, and the key
+// is found or created. The provider slot is the source of truth.
 //
-// The reference (a deterministic sec:v1:<provider>:… id, the osKeyID shape)
-// is persisted in the settings document, like every other secret reference.
-// The provider slot is the source of truth: if a Put landed but the
-// reference never persisted, the next startup finds the slot and repairs the
-// reference instead of minting a new key — a settings-write failure must
-// never rotate the key and strand an existing database.
+// Two consequences. The read goes through the raw provider Get (no vault
+// seal gate), so the key is read ONCE at startup and held for the process —
+// a vault auto-seal can never make history unreadable. And the database's
+// existence is the "was history ever created" marker: when no slot holds a
+// key but content.db exists, the key is LOST and must never be re-minted (a
+// new key would strand the existing database while the UI claimed history
+// worked).
 package contentkey
 
 import (
@@ -25,22 +22,21 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"os"
 
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/vault"
 )
 
-// ErrKeyLost reports a persisted reference whose material is gone. The key
-// is cryptographically unrecoverable (ADR-0018 §5) and MUST NOT be re-minted
-// — a new key would make the existing content.db unreadable while the UI
-// claimed history worked.
-var ErrKeyLost = errors.New("content key: stored reference exists but its material is gone")
+// ErrKeyLost reports that the database exists but no provider slot holds its
+// key. The key is cryptographically unrecoverable (ADR-0018 §5) and MUST NOT
+// be re-minted.
+var ErrKeyLost = errors.New("content key: database exists but its key is gone from every provider slot")
 
 // KeyPolicy is the vault surface contentkey needs: default-provider routing
-// and the system-key reference grammar. Implemented by *vault.Vault — the
-// reference syntax stays owned by the vault (internal/vault/id.go).
+// and the deterministic system-key reference. Implemented by *vault.Vault —
+// the reference grammar stays owned by the vault (internal/vault/id.go).
 type KeyPolicy interface {
 	DefaultProvider() vault.ProviderID
 	ContentKeyID(p vault.ProviderID) (credential.SecretID, error)
@@ -51,71 +47,75 @@ type KeyPolicy interface {
 type ProviderRegistry interface {
 	Get(id vault.ProviderID) (vault.Provider, bool)
 	Writable(id vault.ProviderID) (vault.WritableProvider, bool)
-}
-
-// RefStore persists the reference in the settings document.
-// Implemented by *settings.Registry.
-type RefStore interface {
-	SecretRef(s *settings.Secret) (credential.SecretID, bool)
-	SetSecretRef(s *settings.Secret, id credential.SecretID) error
+	List() []vault.Provider
 }
 
 // Config is the dependency set for the key lifecycle.
 type Config struct {
 	Policy   KeyPolicy
 	Registry ProviderRegistry
-	RefStore RefStore
-	Logger   log.Logger
+	// DBPath is the content.db path. Its existence distinguishes first run
+	// (create the key) from a lost key (never re-mint). The database lives
+	// in the DATA directory beside the key's slot — never in the portable
+	// config directory.
+	DBPath string
+	Logger log.Logger
 }
 
-// LoadOrCreate returns the 32-byte ContentDB key, minting it on first run
-// through the provider seam. Called once at startup; the caller holds the
-// bytes for the life of the process.
+// LoadOrCreate returns the 32-byte ContentDB key. Called once at startup;
+// the caller holds the bytes for the life of the process.
 func LoadOrCreate(ctx context.Context, cfg Config) ([]byte, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = log.NewSlogAdapter(nil)
 	}
-	ref, ok := cfg.RefStore.SecretRef(settings.ContentDBKey)
-	if !ok {
-		return create(ctx, cfg)
+
+	// Find the key in any provider's derived slot. The default provider (or
+	// the setup rule when unset) is asked first; the others follow, so a
+	// default-provider change never strands the key — the reference is
+	// immutable and its provider is encoded in the derivation.
+	for _, p := range providerOrder(ctx, cfg) {
+		id, err := cfg.Policy.ContentKeyID(p)
+		if err != nil {
+			return nil, err
+		}
+		sec, err := providerGet(ctx, cfg, id)
+		switch {
+		case err == nil:
+			key, ok := secretBytes(sec)
+			if !ok || len(key) != 32 {
+				return nil, fmt.Errorf("content key: slot %q holds unusable material (len %d)", id, len(key))
+			}
+			return key, nil
+		case !errors.Is(err, vault.ErrSecretNotFound):
+			return nil, fmt.Errorf("content key: probe %q: %w", p, err)
+		}
 	}
-	return read(ctx, cfg, ref)
+
+	// No slot holds a key. If the database exists, the key is LOST — re-
+	// minting would rotate it and strand the database. If not, first run.
+	if _, err := os.Stat(cfg.DBPath); err == nil {
+		return nil, ErrKeyLost
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("content key: stat database: %w", err)
+	}
+	return create(ctx, cfg)
 }
 
-// create mints the key on first run. The provider slot is probed first: a
-// Put that landed without its reference (settings write failed) must be
-// repaired, not overwritten — key rotation would strand the existing
-// database.
+// create mints the key at the first provider in the order (the default, or
+// the setup rule when unset) and stores it in its derived slot.
 func create(ctx context.Context, cfg Config) ([]byte, error) {
-	p := cfg.Policy.DefaultProvider()
-	if p == "" {
-		p = setupRule(ctx, cfg.Registry)
+	order := providerOrder(ctx, cfg)
+	if len(order) == 0 {
+		return nil, errors.New("content key: no provider available")
+	}
+	p := order[0]
+	w, ok := cfg.Registry.Writable(p)
+	if !ok {
+		return nil, fmt.Errorf("content key: provider %q is not writable", p)
 	}
 	id, err := cfg.Policy.ContentKeyID(p)
 	if err != nil {
 		return nil, err
-	}
-
-	// Slot probe: crash-recovery for Put-without-ref.
-	sec, getErr := providerGet(ctx, cfg, id)
-	switch {
-	case getErr == nil:
-		key, ok := secretBytes(sec)
-		if !ok || len(key) != 32 {
-			return nil, fmt.Errorf("content key: provider slot %q holds unusable material (len %d)", id, len(key))
-		}
-		if err := cfg.RefStore.SetSecretRef(settings.ContentDBKey, id); err != nil {
-			return nil, fmt.Errorf("content key: persist reference: %w", err)
-		}
-		cfg.Logger.Info("content key: reused existing provider slot, repaired missing reference")
-		return key, nil
-	case !errors.Is(getErr, vault.ErrSecretNotFound):
-		return nil, fmt.Errorf("content key: probe provider slot: %w", getErr)
-	}
-
-	w, ok := cfg.Registry.Writable(p)
-	if !ok {
-		return nil, fmt.Errorf("content key: provider %q is not writable", p)
 	}
 	key := make([]byte, 32)
 	if _, err := rand.Read(key); err != nil {
@@ -124,32 +124,40 @@ func create(ctx context.Context, cfg Config) ([]byte, error) {
 	if err := w.Put(ctx, id, credential.NewSecretBytes(key)); err != nil {
 		return nil, fmt.Errorf("content key: store at %q: %w", p, err)
 	}
-	if err := cfg.RefStore.SetSecretRef(settings.ContentDBKey, id); err != nil {
-		// The key IS stored; only the pointer failed. The next startup's
-		// slot probe repairs it. This session keeps the key it holds.
-		cfg.Logger.Warn("content key stored but reference not persisted; will repair on next startup", "error", err)
-	}
+	cfg.Logger.Info("content key minted", "provider", p)
 	return key, nil
 }
 
-// read loads a persisted reference's material through its named provider.
-func read(ctx context.Context, cfg Config, ref credential.SecretID) ([]byte, error) {
-	p, err := cfg.Policy.ProviderOf(ref)
-	if err != nil {
-		return nil, fmt.Errorf("content key: malformed persisted reference: %w", err)
+// providerOrder is the deterministic probe order: the default provider (or
+// the setup rule when the vault has none), then every other REGISTERED
+// provider — read-only ones included, because a key stored before a
+// provider lost its write capability must still be discoverable. The
+// registry is bounded (system + file at the composition root), so this is
+// at most two probes. Writability is checked only on the creation
+// candidate, never on the recovery set.
+func providerOrder(ctx context.Context, cfg Config) []vault.ProviderID {
+	var order []vault.ProviderID
+	if p := cfg.Policy.DefaultProvider(); p != "" {
+		order = append(order, p)
+	} else if p := setupRule(ctx, cfg.Registry); p != "" {
+		order = append(order, p)
 	}
-	sec, err := providerGet(ctx, cfg, ref)
-	if err != nil {
-		if errors.Is(err, vault.ErrSecretNotFound) {
-			return nil, ErrKeyLost
+	for _, prov := range cfg.Registry.List() {
+		order = append(order, prov.ID())
+	}
+	return dedupe(order)
+}
+
+func dedupe(in []vault.ProviderID) []vault.ProviderID {
+	out := make([]vault.ProviderID, 0, len(in))
+	seen := map[vault.ProviderID]bool{}
+	for _, p := range in {
+		if !seen[p] {
+			seen[p] = true
+			out = append(out, p)
 		}
-		return nil, fmt.Errorf("content key: read from %q: %w", p, err)
 	}
-	key, ok := secretBytes(sec)
-	if !ok || len(key) != 32 {
-		return nil, fmt.Errorf("content key: reference %q holds %d bytes, want 32", ref, len(key))
-	}
-	return key, nil
+	return out
 }
 
 // providerGet reads a secret through the raw provider seam — no vault seal
