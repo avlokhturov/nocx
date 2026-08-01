@@ -47,6 +47,11 @@ export interface EditorActions {
    *  Receives the suggested alias value. The editor replaces the partial `ssh ` line
    *  with `ssh <alias>` before calling this hook. */
   onAcceptHint?: (alias: string) => void
+  /** Fired when the user presses Up with the caret already on the first line
+   *  (or an empty draft): there is no further upward movement, so the caller
+   *  may open recall instead of moving the caret (design §8.10 v6 — Up is
+   *  caret movement first). */
+  onUpAtTop?: () => void
 }
 
 export class CommandEditor {
@@ -69,6 +74,17 @@ export class CommandEditor {
    *  value the way `textarea.value = …` did, which fired no input event, so
    *  they must not fire onInputChange either. */
   private _programmatic = false
+  /** Optional keyboard arbiter: called (capture phase) BEFORE the editor's
+   *  own key handling. Return true to consume the key. The recall overlay
+   *  registers here, so an open overlay owns navigation/accept/dismiss and
+   *  nothing the editor handles — submit, clear, interrupt — can fire while
+   *  it is up (nocx-w7h.4: the keyboard arbiter is part of the recall task). */
+  private keyArbiter: ((e: KeyboardEvent) => boolean) | null = null
+
+  /** Register (or clear) the keyboard arbiter. Cleared on dispose. */
+  setKeyArbiter(arbiter: ((e: KeyboardEvent) => boolean) | null): void {
+    this.keyArbiter = arbiter
+  }
   /** Callback for the onSelectionEnd seam (W3 wires the copy policy to it). */
   private _selectionEndCb: ((text: string) => void) | null = null
 
@@ -305,6 +321,11 @@ export class CommandEditor {
     // W1 check 3). keyCode 229 is the legacy WebKit composition sentinel.
     if (e.isComposing || e.keyCode === 229) return
 
+    // The keyboard arbiter (recall overlay) gets first refusal: while it is
+    // open, Up/Down/Enter/Escape and the open shortcut belong to it, and
+    // nothing the editor handles — submit, clear, interrupt — may fire.
+    if (this.keyArbiter?.(e)) return
+
     if (this._hintItems.length > 0) {
       if (e.key === 'ArrowDown') {
         e.preventDefault()
@@ -336,6 +357,19 @@ export class CommandEditor {
       }
     }
 
+    // Up is caret movement first (design §8.10 v6): recall opens only when
+    // there is no further upward movement — caret on the first line or an
+    // empty draft. Otherwise the key falls through to CM6's caret handling.
+    // Hint navigation above has already had its turn with ArrowUp.
+    if (e.key === 'ArrowUp' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      if (this.caretAtTop()) {
+        e.preventDefault()
+        e.stopPropagation()
+        this.actions.onUpAtTop?.()
+      }
+      return
+    }
+
     // Standard editor keys when no hint is active.
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
@@ -360,6 +394,13 @@ export class CommandEditor {
       this.clearDoc()
       this.actions.cancel()
     }
+  }
+
+  /** True when the caret is on the first line (or the doc is empty): Up has
+   *  no further upward movement, so recall may open (design §8.10 v6). */
+  private caretAtTop(): boolean {
+    const head = this.view.state.selection.main.head
+    return this.view.state.doc.lineAt(head).number <= 1
   }
 
   // ── hint management ───────────────────────────────────────────────────
@@ -460,6 +501,41 @@ export class CommandEditor {
     if (this.isVisible) this.view.focus()
   }
 
+  /** The current document text. */
+  getDoc(): string {
+    return this.view.state.doc.toString()
+  }
+
+  /** The current selection. */
+  getSelection(): { from: number; to: number } {
+    const sel = this.view.state.selection.main
+    return { from: sel.from, to: sel.to }
+  }
+
+  /** Replace the whole document programmatically (fires no input events),
+   *  placing the caret at `from` (default: the end of the text). The recall
+   *  overlay uses this to preview a history row and to restore the draft. */
+  replaceDoc(text: string, from?: number, to?: number): void {
+    this._programmatic = true
+    try {
+      const anchor = from ?? text.length
+      this.view.dispatch({
+        changes: { from: 0, to: this.view.state.doc.length, insert: text },
+        selection: { anchor, head: to ?? anchor },
+      })
+    } finally {
+      this._programmatic = false
+    }
+  }
+
+  /** The editor's vertical scroll offset — for exact draft restoration. */
+  getScrollTop(): number {
+    return this.view.scrollDOM.scrollTop
+  }
+
+  setScrollTop(top: number): void {
+    this.view.scrollDOM.scrollTop = top
+  }
   /**
    * Insert text at the caret, replacing any selection, then focus.
    * Used by right-click/middle-click paste while the editor owns input: at the
@@ -479,7 +555,6 @@ export class CommandEditor {
     }
     this.view.focus()
   }
-
   hide(): void {
     // Stopped, not left running. Every tab owns an editor, so a timer that
     // outlives visibility is one wakeup per second per tab for a chip nobody can
@@ -507,6 +582,9 @@ export class CommandEditor {
     // case rather than the edge one — hide() would never run and the interval
     // would outlive everything it refers to.
     this.stopClock()
+    // The arbiter outlives the overlay it points at otherwise; a closed tab
+    // must not keep consuming keys through a dead closure.
+    this.keyArbiter = null
     this.root.removeEventListener('keydown', this.onKeydown, true)
     this.view.destroy()
     this.root.remove()

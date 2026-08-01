@@ -24,6 +24,7 @@ import {
   makeBanner,
   type ClipboardFake,
   type RendererMock,
+  type SessionFake,
 } from './test-support/tabs-fixtures'
 import { XtermRenderer } from './renderers/xterm'
 import { ClipboardGate } from './clipboard'
@@ -248,6 +249,53 @@ describe('shell highlighting is actually wired (nocx-dgs)', () => {
       expect(classes).toContain('tok-command')
       expect(classes).toContain('tok-flag')
     } finally {
+      teardown()
+    }
+  })
+})
+
+describe('recall overlay is actually wired (nocx-w7h.4)', () => {
+  /** Dispatch a keydown exactly where a user's keystroke lands. */
+  const key = (view: EditorView, init: KeyboardEventInit): void => {
+    view.contentDOM.dispatchEvent(
+      new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init }),
+    )
+  }
+
+  // Reachability + the non-negotiable acceptance. The editor-level suite
+  // tests the overlay's own keys; this one exists because an overlay that
+  // nothing wires to the editor is a feature the product does not have, and
+  // because "Enter fills, never executes" must be asserted on the session's
+  // send — the path a real command takes — not on a flag.
+  it('Enter in the recall overlay fills the line and sends nothing to the session', async () => {
+    const { view, ed, content, teardown } = await mountTerminal(makeClipboard())
+    const session = (content as unknown as { session: SessionFake }).session
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoScrollIntoView = Element.prototype.scrollIntoView
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    try {
+      content.setVisible(true)
+      // A real command through the real submit path populates the ledger.
+      ed.show()
+      ed.insertText('make deploy')
+      key(view, { key: 'Enter' }) // the one legitimate send
+      expect(session.send.mock.calls.length).toBe(1)
+      const sentBefore = session.send.mock.calls.length
+
+      // The submit cleared the editor; Up at the empty prompt opens recall.
+      key(view, { key: 'ArrowUp' })
+      expect(ed.root.querySelector('.ui-recall-panel')).not.toBeNull()
+      expect(ed.getDoc()).toBe('make deploy') // previewing the only row
+
+      key(view, { key: 'Enter' }) // accept — fills the line, must not send
+      expect(ed.getDoc()).toBe('make deploy')
+      expect(session.send.mock.calls.length).toBe(sentBefore)
+    } finally {
+      Element.prototype.scrollTo = protoScrollTo
+      Element.prototype.scrollIntoView = protoScrollIntoView
       teardown()
     }
   })

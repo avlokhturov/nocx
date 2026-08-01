@@ -1,0 +1,83 @@
+/* Recall overlay (design §8.10) — the history palette above the prompt.
+   Owns one identity family: `ui-recall-panel` + its __parts. The rows are
+   kit `ui-collection-row` identities (the selected variance lives in
+   collection-view.css); the empty state is the kit's `ui-empty-state`; the
+   rung and source captions are kit `ui-badge` tones. Colours are tokens
+   only — no literals outside themes/ (ADR-0013 §4). */
+
+.ui-recall-panel {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 100%; /* the panel floats above the editor it sits on */
+  margin-bottom: 6px;
+  display: none;
+  flex-direction: column;
+  max-height: 45vh;
+  min-width: 320px;
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-divider);
+  border-radius: var(--control-radius-md);
+  overflow: hidden;
+  font-family: var(--font-family-ui);
+}
+
+.ui-recall-panel[data-open='true'] {
+  display: flex;
+}
+
+.ui-recall-panel__header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--color-divider);
+  flex: 0 0 auto;
+}
+
+.ui-recall-panel__title {
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: var(--font-size-2xs);
+  font-weight: 600;
+  color: var(--color-text-muted);
+}
+
+.ui-recall-panel__count {
+  font-size: var(--font-size-2xs);
+  color: var(--color-text-dim);
+  margin-left: auto;
+}
+
+.ui-recall-panel__list {
+  overflow-y: auto;
+  min-height: 0;
+  padding: var(--space-1) 0;
+  flex: 1 1 auto;
+}
+
+/* The relative timestamp on a row's right edge. */
+.ui-recall-panel__time {
+  font-size: var(--font-size-2xs);
+  color: var(--color-text-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* The separate line explaining the two-step flow: the command is in the
+   editor now; Enter in the editor executes it. */
+.ui-recall-panel__hint {
+  padding: var(--space-2) var(--space-3);
+  border-top: 1px solid var(--color-divider);
+  font-size: var(--font-size-2xs);
+  color: var(--color-text-muted);
+  flex: 0 0 auto;
+}
+
+.ui-recall-panel__footer {
+  padding: var(--space-2) var(--space-3);
+  border-top: 1px solid var(--color-divider);
+  font-size: var(--font-size-2xs);
+  color: var(--color-text-muted);
+  flex: 0 0 auto;
+}

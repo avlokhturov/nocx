@@ -46,6 +46,12 @@
 .ui-collection-row:hover {
   background: color-mix(in srgb, white, transparent 97%);
 }
+/* Selected-row variance: the recall overlay (design §8.10) highlights the
+   row it is previewing in the editor. A typed data-* on the kit row, so the
+   highlight lives with the component, not in a surface's rules. */
+.ui-collection-row[data-selected='true'] {
+  background: var(--color-surface-hover);
+}
 
 .ui-collection-row__info {
   flex: 1 1 auto;

@@ -28,6 +28,7 @@
 @import './styles/components/text-field.css';
 @import './styles/components/search-field.css';
 @import './styles/components/select.css';
+@import './styles/components/recall.css';
 @import './styles/components/checkbox.css';
 @import './styles/components/radio.css';
 @import './styles/components/file-input.css';

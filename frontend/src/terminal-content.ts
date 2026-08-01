@@ -8,6 +8,7 @@ import type { TerminalRenderer, MarkerAdapter } from './renderers/types'
 import { InputStateController } from './input-state'
 import { CommandEditor } from './editor'
 import { shellExtensions } from './shell-highlight'
+import { RecallOverlay, queryLedgerHistory } from './recall'
 import { ShellInputTarget } from './input-target'
 import { submitCommand } from './submit'
 import { shouldShowEditor, NATIVE_RESTORE } from './native-mode'
@@ -87,6 +88,7 @@ export class TerminalContent extends BaseTabContent {
   private shellTarget: ShellInputTarget | null = null
   private scrollback: ScrollbackController | null = null
   private ledger: CommandLedger | null = null
+  private recall: RecallOverlay | null = null
   private inputState = new InputStateController()
   private _markers = new Map<number, MarkerAdapter>()
   private _pendingCommand = ''
@@ -273,6 +275,9 @@ export class TerminalContent extends BaseTabContent {
           onInputChange: (text) => this._onEditorInput(text),
           /** Hint acceptance — no cache to invalidate. */
           onAcceptHint: () => {},
+          /** Up on the first line (or an empty draft): no further caret
+           *  movement, so open the recall overlay (design §8.10 v6). */
+          onUpAtTop: () => this.recall?.open('directory'),
         },
         // The language is chosen HERE, not inside the editor. CommandEditor
         // must stay language-agnostic (ADR-0010 §Decision 3): the agent target
@@ -282,10 +287,24 @@ export class TerminalContent extends BaseTabContent {
         // this is where the shell layer is named.
         shellExtensions(renderer.snapshotStore),
       )
-
       this.editor.mount(target)
 
+      // ── Recall overlay (Provenance Recall, design §8.10) ────────────────
+      // The history palette above the prompt. Served from the in-memory
+      // ledger behind the generated history.query types with source 'session'
+      // until the persistent store lands — when it does, only the query
+      // function changes. The editor's key arbiter gives the overlay first
+      // refusal while it is open, so Enter fills the line and never submits.
+      this.recall = new RecallOverlay({
+        editor: this.editor,
+        query: (scope) => queryLedgerHistory(this.ledger, scope, this._cwd, this._host),
+      })
+      this.recall.mount(this.editor.root)
+      this.editor.setKeyArbiter((e) => this.recall!.handleKey(e))
+
       if (signal.aborted) {
+        this.recall?.destroy()
+        this.recall = null
         this.editor.dispose()
         renderer.dispose()
         this.scrollback.dispose()
@@ -843,6 +862,8 @@ export class TerminalContent extends BaseTabContent {
     this.session?.close()
     this.renderer?.dispose()
     this.editor?.dispose()
+    this.recall?.destroy()
+    this.recall = null
     this.scrollback?.dispose()
     this._disposeAllMarkers()
     this.ledger = null
