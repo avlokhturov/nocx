@@ -13,7 +13,13 @@ import { describe, it, expect, vi } from 'vitest'
 import { EditorView, keymap } from '@codemirror/view'
 import { defaultKeymap } from '@codemirror/commands'
 import { CommandEditor, type EditorActions } from './editor'
-import { RecallOverlay, queryLedgerHistory, relativeTime, type RecallScope } from './recall'
+import {
+  RecallOverlay,
+  queryLedgerHistory,
+  relativeTime,
+  scrollTopToReveal,
+  type RecallScope,
+} from './recall'
 import { CommandLedger } from './command-ledger'
 import type { HistoryEntry, HistoryQuery } from './generated/history.query'
 
@@ -236,32 +242,19 @@ describe("recall: oldest at the top, newest at the bottom (Warp's model)", () =>
   })
 })
 
-describe('recall: arrows navigate, the list follows, widening is its own key (v8)', () => {
+describe('recall: arrows navigate, widening is its own key (v8)', () => {
   const twelve = Array.from({ length: 12 }, (_, i) => `c${i + 1}`) // c1 newest
 
-  it('Up and Down walk every entry of a twelve-result rung, the scroll following', () => {
+  it('Up and Down walk every entry of a twelve-result rung', () => {
     const { ed, view } = setupRecall({ query: mkQuery(twelve) })
-    const spy = vi.fn()
-    /* eslint-disable @typescript-eslint/unbound-method */
-    const proto = Element.prototype.scrollIntoView
-    /* eslint-enable @typescript-eslint/unbound-method */
-    Element.prototype.scrollIntoView = spy
-    try {
-      key(view, { key: 'ArrowUp' }) // opens on the newest (bottom) row
-      expect(ed.getDoc()).toBe('c1')
-      // Hold Up past the visible window to the top of the rung.
-      for (let i = 0; i < 11; i++) key(view, { key: 'ArrowUp' })
-      expect(ed.getDoc()).toBe('c12') // the oldest entry — all 12 reachable
-      // Down returns through everything Up passed.
-      for (let i = 0; i < 11; i++) key(view, { key: 'ArrowDown' })
-      expect(ed.getDoc()).toBe('c1')
-      // Every move asked the browser to keep the selected row in view — the
-      // mechanism that makes a 12-result rung walkable past an 8-row window.
-      expect(spy).toHaveBeenCalledWith({ block: 'nearest' })
-      expect(spy.mock.calls.length).toBeGreaterThanOrEqual(12)
-    } finally {
-      Element.prototype.scrollIntoView = proto
-    }
+    key(view, { key: 'ArrowUp' }) // opens on the newest (bottom) row
+    expect(ed.getDoc()).toBe('c1')
+    // Hold Up past the visible window to the top of the rung.
+    for (let i = 0; i < 11; i++) key(view, { key: 'ArrowUp' })
+    expect(ed.getDoc()).toBe('c12') // the oldest entry — all 12 reachable
+    // Down returns through everything Up passed.
+    for (let i = 0; i < 11; i++) key(view, { key: 'ArrowDown' })
+    expect(ed.getDoc()).toBe('c1')
   })
 
   it('Up at the oldest entry stops: no widen, no teleport', () => {
@@ -289,6 +282,52 @@ describe('recall: arrows navigate, the list follows, widening is its own key (v8
     key(view, { key: 'ArrowUp', shiftKey: true }) // widen
     expect(panelOf(container).textContent).toContain('this host')
     expect(ed.getDoc()).toBe('c2') // the same command, not either end
+  })
+})
+
+describe('recall: the selected row is fully inside the list box after any move (v9 §1)', () => {
+  const rect = (el: HTMLElement, top: number, bottom: number): void => {
+    Object.defineProperty(el, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => ({
+        top,
+        bottom,
+        left: 0,
+        right: 0,
+        width: 0,
+        height: bottom - top,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      }),
+    })
+  }
+
+  it('a row straddling the bottom edge scrolls up so it is fully visible', () => {
+    const list = document.createElement('div')
+    const row = document.createElement('div')
+    list.scrollTop = 64
+    rect(list, 397, 691)
+    rect(row, 689, 721) // 2px visible at the bottom edge
+    expect(scrollTopToReveal(list, row)).toBe(94) // 64 + (721 - 691)
+  })
+
+  it('a row poking above the top edge scrolls down so it is fully visible', () => {
+    const list = document.createElement('div')
+    const row = document.createElement('div')
+    list.scrollTop = 64
+    rect(list, 397, 691)
+    rect(row, 380, 412) // pokes 17px above the top
+    expect(scrollTopToReveal(list, row)).toBe(47) // 64 - (397 - 380)
+  })
+
+  it('a fully visible row leaves the scroll position untouched', () => {
+    const list = document.createElement('div')
+    const row = document.createElement('div')
+    list.scrollTop = 64
+    rect(list, 397, 691)
+    rect(row, 561, 593) // fully inside
+    expect(scrollTopToReveal(list, row)).toBe(64)
   })
 })
 

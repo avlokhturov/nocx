@@ -173,6 +173,30 @@ func TestDeclarations(t *testing.T) {
 	}
 }
 
+// The wire declaration carries the unit a number setting is measured in, and
+// the three History settings declare the units the owner reads (nocx-w7h.7).
+func TestNumberUnitOnTheWire(t *testing.T) {
+	reg := settings.New(&fakeDoc{}, &fakeSecretStore{})
+	byKey := map[string]settings.Declaration{}
+	for _, d := range reg.Declarations() {
+		byKey[d.Key] = d
+	}
+	for key, want := range map[string]string{
+		"history.retentionDays":  "days",
+		"history.retentionMiB":   "MiB",
+		"history.diskCeilingMiB": "MiB",
+	} {
+		got := byKey[key].Unit
+		if got != want {
+			t.Errorf("%s: wire unit = %q, want %q", key, got, want)
+		}
+	}
+	// A number without a unit declares none — the field renders no suffix.
+	if got := byKey["test.numberExample"].Unit; got != "" {
+		t.Errorf("test.numberExample: wire unit = %q, want empty", got)
+	}
+}
+
 // ── Bool get/set/reset ─────────────────────────────────────────────────
 
 func TestBoolGetSet(t *testing.T) {

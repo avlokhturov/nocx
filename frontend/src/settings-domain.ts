@@ -16,6 +16,81 @@
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
+/**
+ * A setting's wire declaration — mirrors the backend's Declaration
+ * (internal/settings). The screen is generated from these; Min/Max and the
+ * unit live HERE, beside the key and label, so every write path sees the
+ * same bounds. The screen never validates on its own.
+ */
+export interface Declaration {
+  key: string
+  section: string
+  label: string
+  description: string
+  control: 'toggle' | 'text' | 'number' | 'select' | 'secret'
+  dataClass: 'publicConfig' | 'privateMetadata' | 'privateContent' | 'secretAuthenticator'
+  default?: unknown
+  options?: { value: string; label: string }[]
+  min?: number
+  max?: number
+  /** The unit a number setting is measured in ('days', 'MiB') — rendered as
+   *  a suffix beside the value, never buried in the description. */
+  unit?: string
+}
+
+/** The permanent caption under a number field: its allowed range, read from
+ *  the declaration's Min/Max — never a literal the screen invents. */
+export function numberRangeCaption(decl: Declaration): string | undefined {
+  const suffix = decl.unit !== undefined ? ' ' + decl.unit : ''
+  if (decl.min !== undefined && decl.max !== undefined) {
+    return `${decl.min} – ${decl.max}${suffix}`
+  }
+  if (decl.min !== undefined) return `≥ ${decl.min}${suffix}`
+  if (decl.max !== undefined) return `≤ ${decl.max}${suffix}`
+  return undefined
+}
+
+/** The out-of-range error for a numeric value, derived from the declaration's
+ *  Min/Max. Returns undefined when the value is inside the bounds. */
+export function numberRangeError(decl: Declaration, value: number): string | undefined {
+  const suffix = decl.unit !== undefined ? ' ' + decl.unit : ''
+  if (decl.min !== undefined && value < decl.min) {
+    return `Must be at least ${decl.min}${suffix}`
+  }
+  if (decl.max !== undefined && value > decl.max) {
+    return `Must be at most ${decl.max}${suffix}`
+  }
+  return undefined
+}
+
+/**
+ * The save error a field should show BENEATH itself — undefined when the
+ * field's own caption slot already carries the same fact.
+ *
+ * Both layers legitimately reject an out-of-range number: the screen from
+ * the declaration's Min/Max, and the backend because it is the authority and
+ * must never take the value on the screen's word. Rendering both puts the
+ * fact on screen twice, the second time in the backend's language — measured
+ * in a real browser on 2026-08-01: a caption reading "Must be at least 128
+ * MiB" with `settings: "history.diskCeilingMiB" validation failed: value 1
+ * below minimum 128` directly under it, wider than the field's column.
+ *
+ * Suppression is narrow on purpose. It applies only when the caption slot is
+ * ALREADY showing the range error for this very value; a rejection the
+ * screen did not predict (an unknown key, a transport failure, a rule the
+ * declaration does not express) still reaches the user verbatim, because a
+ * silent save failure is the worse defect.
+ */
+export function fieldSaveError(
+  decl: Declaration,
+  value: number,
+  saveError: string | undefined,
+): string | undefined {
+  if (saveError === undefined) return undefined
+  if (decl.control === 'number' && numberRangeError(decl, value) !== undefined) return undefined
+  return saveError
+}
+
 /** A raw settings snapshot from the backend, *before* revision checking. */
 export interface SettingsSnapshot {
   values: Record<string, unknown>

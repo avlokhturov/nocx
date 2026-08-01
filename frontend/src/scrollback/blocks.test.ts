@@ -3,7 +3,7 @@
 
 // @vitest-environment jsdom
 
-import { describe, it, expect, beforeEach, beforeAll } from 'vitest'
+import { describe, it, expect, vi, beforeEach, beforeAll } from 'vitest'
 import {
   BlockManager,
   createCommandBlock,
@@ -140,7 +140,7 @@ describe('createCommandBlock', () => {
     expect(output?.innerHTML).toContain('file.txt')
   })
 
-  it('double-clicking command output selects the whole token, not the browser word', () => {
+  it('a double-click applies the whole-token selection ONCE, at the second mousedown', () => {
     const el = createCommandBlock(
       1,
       'ls',
@@ -156,7 +156,7 @@ describe('createCommandBlock', () => {
     )
     document.body.appendChild(el)
     const line = el.querySelector<HTMLElement>('.term-line')
-    const node = line?.firstChild as Text | null
+    const node = (line?.firstChild as Text | null) ?? null
     expect(node).not.toBeNull()
     // jsdom has no hit-testing; point caretRangeFromPoint inside the token
     // ('usage') so the handler's browser seam resolves like a real click.
@@ -171,11 +171,27 @@ describe('createCommandBlock', () => {
       },
     })
     try {
+      const sel = window.getSelection()
+      const addRangeSpy = vi.spyOn(sel!, 'addRange')
+      // The browser creates its native word selection on the SECOND mousedown
+      // (event.detail === 2), before the dblclick event fires. The handler
+      // must prevent that default and apply OUR token range in one operation
+      // — exactly one selection state, nothing for copy-on-select to race.
+      const ev = new MouseEvent('mousedown', {
+        bubbles: true,
+        cancelable: true,
+        detail: 2,
+        clientX: 10,
+        clientY: 10,
+      })
+      line?.dispatchEvent(ev)
+      expect(ev.defaultPrevented).toBe(true) // native word-select stopped
+      expect(addRangeSpy).toHaveBeenCalledTimes(1) // ours, and only ours
+      expect(sel?.toString()).toBe('profile-usage.json')
+      // No dblclick listener remains: the event does nothing further.
       line?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
-      const selected = window.getSelection()?.toString() ?? ''
-      // The whole filename is one token — the browser's native segmentation
-      // (which stops at the hyphen and the dot) is overridden.
-      expect(selected).toBe('profile-usage.json')
+      expect(addRangeSpy).toHaveBeenCalledTimes(1)
+      expect(sel?.toString()).toBe('profile-usage.json')
     } finally {
       if (proto) {
         Object.defineProperty(document, 'caretRangeFromPoint', proto)
@@ -184,6 +200,34 @@ describe('createCommandBlock', () => {
       }
       el.remove()
     }
+  })
+
+  it('a single mousedown is not intercepted — native selection and click-to-select keep working', () => {
+    const el = createCommandBlock(
+      1,
+      'ls',
+      '~',
+      '',
+      '<span class="term-line">profile-usage.json</span>',
+      10,
+      0,
+      'success',
+      c,
+      noopSelect,
+      freshStore(),
+    )
+    document.body.appendChild(el)
+    const line = el.querySelector<HTMLElement>('.term-line')
+    const ev = new MouseEvent('mousedown', {
+      bubbles: true,
+      cancelable: true,
+      detail: 1,
+      clientX: 10,
+      clientY: 10,
+    })
+    line?.dispatchEvent(ev)
+    expect(ev.defaultPrevented).toBe(false) // drag selection must survive
+    el.remove()
   })
 
   it('includes duration', () => {

@@ -37,6 +37,26 @@
 import type { HistoryEntry, HistoryQuery } from './generated/history.query'
 import type { CommandLedger } from './command-ledger'
 
+/**
+ * The scrollTop that puts `row` FULLY inside `list`'s visible box — its top
+ * at or below the list's top and its bottom at or above the list's bottom.
+ * Computed from live rects against the LIST only: the panel floats over the
+ * scrollback, so scrollIntoView's ancestor walk can resolve the row against
+ * the wrong scroller (spec v9 §1 — measured in a real browser: the selected row
+ * straddled the list's bottom edge because 'nearest' never un-straddles a
+ * partially visible row). Returns the current scrollTop when already fully
+ * visible, so moving within the window never nudges the list.
+ */
+export function scrollTopToReveal(list: HTMLElement, row: HTMLElement): number {
+  const listRect = list.getBoundingClientRect()
+  const rowRect = row.getBoundingClientRect()
+  const above = listRect.top - rowRect.top
+  const below = rowRect.bottom - listRect.bottom
+  if (above > 0) return list.scrollTop - above
+  if (below > 0) return list.scrollTop + below
+  return list.scrollTop
+}
+
 /** The ladder rung a page of history was drawn from. */
 export type RecallScope = 'directory' | 'host' | 'everywhere'
 
@@ -510,19 +530,6 @@ export class RecallOverlay {
     }
     this.root.appendChild(list)
 
-    // Keep the selected row in view — on open (it is the bottom row) and on
-    // every move — so a rung taller than the panel is fully walkable: the
-    // list scrolls with the selection instead of stranding rows past the
-    // visible window (v8 §3). 'nearest' scrolls the minimum distance.
-    if (s.name === 'navigating') {
-      const selectedEl = list.querySelector<HTMLElement>('.ui-collection-row[data-selected="true"]')
-      // jsdom implements no scrollIntoView; the guard keeps tests honest and
-      // the call live in real browsers (the sequence test spies on it).
-      if (selectedEl && typeof selectedEl.scrollIntoView === 'function') {
-        selectedEl.scrollIntoView({ block: 'nearest' })
-      }
-    }
-
     // ── One footer, one line, every hint in it: what Enter does, how to
     //    move, how to widen, how to get out — key groups separated by a real
     //    gap. The execute group only appears when there IS something to
@@ -547,5 +554,19 @@ export class RecallOverlay {
     dismiss.textContent = 'esc to dismiss'
     footer.appendChild(dismiss)
     this.root.appendChild(footer)
+
+    // Keep the selected row FULLY in view — on open (it is the bottom row)
+    // and on every move — so a rung taller than the panel is walkable: the
+    // list scrolls with the selection instead of stranding rows past the
+    // visible window (v8 §3). Measured AFTER the footer is in place, because
+    // the list's visible height is only final once the whole panel is laid
+    // out. scrollIntoView({block:'nearest'}) was not doing this job: in a
+    // real browser the selected row straddled the list's bottom edge on
+    // open (2px visible of a 32px row) — so the reveal is computed from
+    // live rects against the list itself (nocx-w7h.10, spec v9 §1).
+    if (s.name === 'navigating') {
+      const selectedEl = list.querySelector<HTMLElement>('.ui-collection-row[data-selected="true"]')
+      if (selectedEl) list.scrollTop = scrollTopToReveal(list, selectedEl)
+    }
   }
 }

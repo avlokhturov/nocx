@@ -37,6 +37,28 @@ export interface TextFieldProps {
   required?: boolean
   autoFocus?: boolean
   trailing?: JSX.Element
+  /**
+   * A numeric field's unit ('days', 'MiB'), rendered as a suffix inside the
+   * control so the number and its unit read — and copy — as one thing.
+   * Declared by the setting's NumberSpec, never invented by a screen.
+   */
+  unit?: string
+  /**
+   * A permanent caption beneath the control — a number field's allowed
+   * range. When `error` is present it REPLACES the caption in this same
+   * single-line slot, so the layout does not jump and the two never
+   * compete. Without a caption the error renders through Field as before.
+   */
+  caption?: string
+  /**
+   * Which edge the caption is flush with — 'start' (the default) or 'end'.
+   *
+   * It follows the column the field sits in, not the field: on a settings
+   * page the controls are pinned to the right of the row, so captions set
+   * 'start' leave a ragged right edge down the whole section, while 'end'
+   * lines every one of them up with the fields above and below it.
+   */
+  captionAlign?: 'start' | 'end'
 }
 
 export function TextField(props: TextFieldProps) {
@@ -98,34 +120,61 @@ export function TextField(props: TextFieldProps) {
   )
 
   const input = () => (
-    <div
-      class="ui-text-field__control"
-      data-trailing={props.trailing && !props.multiline ? 'true' : 'false'}
-    >
-      <Switch>
-        <Match when={props.multiline === true}>{textareaElement()}</Match>
-        <Match when={true}>{inputElement()}</Match>
-      </Switch>
-      <Show when={!props.multiline && props.trailing}>
-        <span class="ui-text-field__trailing">{props.trailing}</span>
+    <>
+      <div
+        class="ui-text-field__control"
+        data-trailing={props.trailing !== undefined || props.unit !== undefined ? 'true' : 'false'}
+      >
+        <Switch>
+          <Match when={props.multiline === true}>{textareaElement()}</Match>
+          <Match when={true}>{inputElement()}</Match>
+        </Switch>
+        <Show when={!props.multiline && props.trailing}>
+          <span class="ui-text-field__trailing">{props.trailing}</span>
+        </Show>
+        <Show when={!props.multiline && props.unit !== undefined}>
+          <span class="ui-text-field__unit">{props.unit}</span>
+        </Show>
+      </div>
+      {/* One caption slot beneath the control: the permanent caption, or the
+          error in its place — never both, never a second line, so the field's
+          height does not change when a value goes out of range. */}
+      <Show when={props.caption !== undefined}>
+        <p
+          class="ui-text-field__caption"
+          data-align={props.captionAlign ?? 'start'}
+          data-tone={props.error !== undefined ? 'error' : 'caption'}
+          role={props.error !== undefined ? 'alert' : undefined}
+        >
+          {props.error ?? props.caption}
+        </p>
       </Show>
-    </div>
+    </>
   )
 
+  // Whether Field has anything to draw around the control. An error counts
+  // ONLY when there is no caption slot to put it in: with a caption the error
+  // is rendered in that slot, so letting it pull in a Field wrapper would
+  // change the DOM — and the height — the moment a value went out of range.
+  // Measured in a real browser on 2026-08-01: the wrapper appearing on error
+  // grew a bare number field from 48.7px to 52.7px, and the row under it
+  // shifted, which is exactly what the single caption slot exists to prevent.
   const hasFieldContent = () =>
     props.label !== undefined ||
     props.description !== undefined ||
-    props.error !== undefined ||
+    (props.error !== undefined && props.caption === undefined) ||
     props.required === true
 
   return (
     <div class="ui-text-field" data-multiline={props.multiline ? 'true' : undefined}>
       <Show when={hasFieldContent()} fallback={input()}>
+        {/* When a caption slot exists it OWNS the error (the error replaces the
+            caption in that slot); Field must not render a second one. */}
         <Field
           for={inputId()}
           label={props.label}
           description={props.description}
-          error={props.error}
+          error={props.caption !== undefined ? undefined : props.error}
           required={props.required}
         >
           {input()}

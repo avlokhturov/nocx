@@ -33,6 +33,10 @@ import { Tab } from './tabs'
 import { TerminalContent } from './terminal-content'
 import { SURFACE_TERMINAL } from './tab-content'
 import type { WSClient } from './ipc'
+import { createCommandBlock } from './scrollback/blocks'
+import { CommandSnapshotStore } from './command-snapshot'
+import type { ScrollbackController } from './scrollback/controller'
+import { pushOverlay, popOverlay } from './ui/overlay/stack'
 
 // Mock the XtermRenderer class before any imports use it (same as tabs.test.ts).
 vi.mock('./renderers/xterm', () => ({
@@ -242,6 +246,226 @@ describe('document-level keydown redirect with a block selected (W4)', () => {
   })
 })
 
+describe('Escape with the editor visible but unfocused (focus-loss rescue)', () => {
+  /** Dispatch Escape where a user's keystroke lands after clicking away —
+   *  on the body, not on the editor surface. */
+  const escapeOnBody = (): KeyboardEvent => {
+    const ev = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+    document.body.dispatchEvent(ev)
+    return ev
+  }
+
+  it('Escape clears the draft after a click outside the editor took the focus', async () => {
+    const { view, ed, content, teardown } = await mountTerminal(makeClipboard(), {
+      attachToDocument: true,
+    })
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoScrollIntoView = Element.prototype.scrollIntoView
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    try {
+      content.setVisible(true)
+      ed.show()
+      ed.insertText('ls -la')
+      expect(ed.isVisible).toBe(true)
+
+      // A click on the scrollback moves the focus off the editor surface.
+      view.contentDOM.blur()
+      expect(document.activeElement).not.toBe(view.contentDOM)
+
+      const ev = escapeOnBody()
+      expect(ev.defaultPrevented).toBe(true)
+      expect(ed.getDoc()).toBe('')
+    } finally {
+      Element.prototype.scrollTo = protoScrollTo
+      Element.prototype.scrollIntoView = protoScrollIntoView
+      teardown()
+    }
+  })
+
+  it('Escape dismisses an open recall overlay and restores the captured draft, not clears it', async () => {
+    const { view, ed, content, teardown } = await mountTerminal(makeClipboard(), {
+      attachToDocument: true,
+    })
+    // TerminalContent keeps the session private; tests reach the live fake
+    // through the same escape hatch editorOf uses.
+    const withSession = content as unknown as { session: SessionFake }
+    const session = withSession.session
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoScrollIntoView = Element.prototype.scrollIntoView
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    try {
+      content.setVisible(true)
+      // A real submitted command populates the history ledger.
+      ed.show()
+      ed.insertText('make deploy')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      expect(session.send.mock.calls.length).toBe(1)
+
+      // A non-empty draft opens recall on Up-at-top; the overlay previews
+      // the newest row into the editor.
+      ed.show()
+      ed.insertText('echo kept')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true }),
+      )
+      expect(ed.root.querySelector('.ui-recall-panel')).not.toBeNull()
+      expect(ed.getDoc()).toBe('make deploy') // previewing the only row
+
+      // The user clicked the scrollback while the overlay was up.
+      view.contentDOM.blur()
+      const ev = escapeOnBody()
+      expect(ev.defaultPrevented).toBe(true)
+      // The overlay dismissed and restored the captured draft — a clear
+      // path would have emptied the doc and left the panel open. The panel
+      // node stays mounted after close (its `dataset.open` is the
+      // visibility contract, not its presence in the DOM).
+      const panel = ed.root.querySelector<HTMLElement>('.ui-recall-panel')
+      expect(panel?.dataset.open).toBe('false')
+      expect(ed.getDoc()).toBe('echo kept')
+    } finally {
+      Element.prototype.scrollTo = protoScrollTo
+      Element.prototype.scrollIntoView = protoScrollIntoView
+      teardown()
+    }
+  })
+
+  it("Escape in somebody else's text control leaves the draft alone", async () => {
+    const { ed, content, teardown } = await mountTerminal(makeClipboard(), {
+      attachToDocument: true,
+    })
+    const input = document.createElement('input')
+    document.body.append(input)
+    try {
+      content.setVisible(true)
+      ed.show()
+      ed.insertText('ls -la')
+      input.focus()
+      const ev = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+      input.dispatchEvent(ev)
+      expect(ev.defaultPrevented).toBe(false)
+      expect(ed.getDoc()).toBe('ls -la')
+    } finally {
+      input.remove()
+      teardown()
+    }
+  })
+
+  it('Escape with a modal overlay open leaves the draft alone', async () => {
+    const { ed, content, teardown } = await mountTerminal(makeClipboard(), {
+      attachToDocument: true,
+    })
+    let closed = false
+    const entry = pushOverlay(() => {
+      closed = true
+      return true
+    })
+    try {
+      content.setVisible(true)
+      ed.show()
+      ed.insertText('ls -la')
+      const ev = escapeOnBody()
+      // The overlay stack owns Escape while a modal is up: its own handler
+      // closes the overlay (and preventDefaults); the terminal rescue
+      // stands down and the draft survives.
+      expect(closed).toBe(true)
+      expect(ev.defaultPrevented).toBe(true)
+      expect(ed.getDoc()).toBe('ls -la')
+    } finally {
+      popOverlay(entry)
+      teardown()
+    }
+  })
+
+  it('Escape with the block action menu open closes the menu, not the draft', async () => {
+    const { view, ed, content, tab, teardown } = await mountTerminal(makeClipboard(), {
+      attachToDocument: true,
+    })
+    const results = vi.mocked(XtermRenderer).mock.results
+    const renderer = results[results.length - 1].value as RendererMock
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoScrollIntoView = Element.prototype.scrollIntoView
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    try {
+      content.setVisible(true)
+      // A completed shell cycle paints a frozen block with its ⋮ button.
+      const marker = (kind: 'A' | 'B' | 'C' | 'D', line = 0, exitCode?: number): void =>
+        renderer._fireCommandMarker({
+          kind,
+          line,
+          col: 0,
+          buffer: 'normal',
+          ...(exitCode === undefined ? {} : { exitCode }),
+        })
+      marker('A')
+      marker('B')
+      marker('C')
+      marker('D', 0, 0)
+      marker('A')
+      marker('B')
+
+      ed.insertText('ls -la')
+      const overflowBtn = tab.pane.querySelector<HTMLElement>('.cmd-overflow-btn')
+      expect(overflowBtn).not.toBeNull()
+      overflowBtn!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      expect(document.querySelector('.cmd-overflow-menu')).not.toBeNull()
+
+      // The pane's focus bounce returned focus to the editor on the click;
+      // a click on the scrollback then moves it to <body>, menu still open.
+      view.contentDOM.blur()
+      expect(document.activeElement).not.toBe(view.contentDOM)
+      const ev = escapeOnBody()
+      // The menu's own document listener closes it; the rescue stood down
+      // and the draft survives.
+      expect(document.querySelector('.cmd-overflow-menu')).toBeNull()
+      expect(ev.defaultPrevented).toBe(false)
+      expect(ed.getDoc()).toBe('ls -la')
+    } finally {
+      Element.prototype.scrollTo = protoScrollTo
+      Element.prototype.scrollIntoView = protoScrollIntoView
+      teardown()
+    }
+  })
+
+  it('Escape clears the draft when focus is parked in the live grid', async () => {
+    const { ed, content, tab, teardown } = await mountTerminal(makeClipboard(), {
+      attachToDocument: true,
+    })
+    let gridInput: HTMLTextAreaElement | null = null
+    try {
+      content.setVisible(true)
+      ed.show()
+      const live = tab.pane.querySelector<HTMLElement>('.xterm-live-container')
+      expect(live).not.toBeNull()
+      // xterm's real hidden input lives inside the live container; while
+      // the editor is up the grid is read-only dead space, so focus parked
+      // there must be rescued like a click on the scrollback.
+      gridInput = document.createElement('textarea')
+      live!.appendChild(gridInput)
+      ed.insertText('ls -la')
+      gridInput.focus()
+      expect(document.activeElement).toBe(gridInput)
+
+      const ev = escapeOnBody()
+      expect(ev.defaultPrevented).toBe(true)
+      expect(ed.getDoc()).toBe('')
+    } finally {
+      gridInput?.remove()
+      teardown()
+    }
+  })
+})
+
 describe('shell highlighting is actually wired (nocx-dgs)', () => {
   // Reachability, not tokenisation. shell-highlight.ts has its own tests for
   // what the tokens are; this one exists because a language layer that nothing
@@ -317,6 +541,67 @@ describe('recall overlay is actually wired (nocx-w7h.4)', () => {
     } finally {
       Element.prototype.scrollTo = protoScrollTo
       Element.prototype.scrollIntoView = protoScrollIntoView
+      teardown()
+    }
+  })
+})
+
+describe('paste with focus on a frozen block (nocx-w7h.9)', () => {
+  it('Cmd/Ctrl+V redirects to the editor, deselects the block, and never reaches the session', async () => {
+    const { ed, content, teardown } = await mountTerminal(makeClipboard(), {
+      attachToDocument: true,
+    })
+    const session = (content as unknown as { session: SessionFake }).session
+    const scrollback = (content as unknown as { scrollback: ScrollbackController }).scrollback
+    try {
+      content.setVisible(true)
+      ed.show()
+      // A real frozen block, appended to the real scrollback DOM. The
+      // onSelect wires the same way BlockManager.freezeBlock wires it — into
+      // the manager's selection state, so deselectBlocks() knows about it.
+      const manager = scrollback.blockManager as unknown as {
+        _onBlockSelected(id: number): void
+        _onBlockDeselected(id: number): void
+      }
+      const block = createCommandBlock(
+        1,
+        'ls',
+        '~',
+        '',
+        '<span class="term-line">out</span>',
+        10,
+        0,
+        'success',
+        () => scrollback.scrollbackInner,
+        (bid, sel) => {
+          if (sel) manager._onBlockSelected(bid)
+          else manager._onBlockDeselected(bid)
+        },
+        new CommandSnapshotStore(),
+      )
+      scrollback.scrollbackInner.appendChild(block)
+      // Click the block (mousedown + mouseup without movement) → selected.
+      block.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+      block.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))
+      expect(block.classList.contains('cmd-block-selected')).toBe(true)
+
+      const sentBefore = session.send.mock.calls.length
+      // Cmd/Ctrl+V lands on the block, bubbles to the document-level rescue.
+      const ev = new KeyboardEvent('keydown', {
+        key: 'v',
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      })
+      block.dispatchEvent(ev)
+      // The editor owns the paste now: focus moved, block deselected, and
+      // nothing was sent to the session (jsdom cannot run the native paste;
+      // the inserted text is verified in a real browser).
+      expect(document.activeElement !== null && ed.root.contains(document.activeElement)).toBe(true)
+      expect(block.classList.contains('cmd-block-selected')).toBe(false)
+      expect(session.send.mock.calls.length).toBe(sentBefore)
+      expect(ev.defaultPrevented).toBe(false) // native paste still runs
+    } finally {
       teardown()
     }
   })

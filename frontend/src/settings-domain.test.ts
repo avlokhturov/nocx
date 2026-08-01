@@ -2,10 +2,13 @@
 import { describe, it, expect } from 'vitest'
 import {
   createMirror,
+  numberRangeCaption,
+  numberRangeError,
   recordSaveOutcome,
   canResetSetting,
   applyAcceptedSnapshot,
   AcceptedSnapshot,
+  type Declaration,
   type SettingsMirror,
   type SettingsSnapshot,
 } from './settings-domain'
@@ -291,5 +294,38 @@ describe('applyAcceptedSnapshot', () => {
     expect(next.errors).toEqual({})
     expect(next.values['k']).toBe('new')
     expect(next.overridden.size).toBe(0)
+  })
+})
+
+describe('number range caption and error (nocx-w7h.7)', () => {
+  const daysDecl: Declaration = {
+    key: 'history.retentionDays',
+    section: 'History',
+    label: 'Keep history for',
+    description: 'How long a completed command is kept.',
+    control: 'number',
+    dataClass: 'publicConfig',
+    min: 0,
+    max: 3650,
+    unit: 'days',
+  }
+
+  it('the caption reads the range from Min/Max, with the unit', () => {
+    expect(numberRangeCaption(daysDecl)).toBe('0 – 3650 days')
+  })
+
+  it('one-sided bounds produce one-sided captions; no bounds produce none', () => {
+    const minOnly: Declaration = { ...daysDecl, max: undefined }
+    const maxOnly: Declaration = { ...daysDecl, min: undefined }
+    const none: Declaration = { ...daysDecl, min: undefined, max: undefined }
+    expect(numberRangeCaption(minOnly)).toBe('≥ 0 days')
+    expect(numberRangeCaption(maxOnly)).toBe('≤ 3650 days')
+    expect(numberRangeCaption(none)).toBeUndefined()
+  })
+
+  it('a value outside the range yields the error; inside yields none', () => {
+    expect(numberRangeError(daysDecl, -1)).toBe('Must be at least 0 days')
+    expect(numberRangeError(daysDecl, 4000)).toBe('Must be at most 3650 days')
+    expect(numberRangeError(daysDecl, 30)).toBeUndefined()
   })
 })

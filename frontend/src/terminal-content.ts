@@ -19,6 +19,7 @@ import { ScrollbackController } from './scrollback/controller'
 import { log } from './log'
 import type { WSClient, SessionHandle } from './ipc'
 import { showConfirm } from './ui/dialog'
+import { hasOpenOverlays } from './ui/overlay/stack'
 import { BaseTabContent, type TabHost, type ContentViewport } from './tab-content'
 import { type ProfileClient, type SSHAliasEntry } from './profiles'
 import { RpcError } from './dispatcher'
@@ -418,6 +419,58 @@ export class TerminalContent extends BaseTabContent {
             e.preventDefault()
             return
           }
+        }
+        // Paste (Cmd/Ctrl+V) belongs to the same rescue policy: wherever in
+        // the pane the user clicked — a frozen block, the scrollback, the
+        // running grid — the paste must reach the command editor, and it
+        // must never reach the shell as a literal \x16. The same isTextEntry
+        // guard keeps other surfaces' paste to themselves (a settings field,
+        // quick connect, a dialog). When the overlay is open, its arbiter
+        // runs before this document listener on the editor's own keys and
+        // decides first; when the editor itself has focus this branch is
+        // skipped by the guard and the editor's own paste path runs.
+        // Focus-only, deliberately: leave the keydown uncancelled so the
+        // browser emits its paste event at the now-focused editor and CM6's
+        // own paste inserts at the caret — reading the clipboard here would
+        // bypass CM6 and fight the gesture.
+        if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 'v') {
+          if (isTextEntry(document.activeElement)) return
+          if (this.editor?.isVisible) {
+            this.scrollback?.deselectBlocks()
+            this.editor.focus()
+          }
+          return
+        }
+        // Escape with the editor on screen but out of focus: the editor's
+        // own capture listener only sees keys that traverse its surface, so
+        // after a click elsewhere — a frozen block, the scrollback, the
+        // chrome — the key never reaches it and the draft survives an
+        // Escape, which reads as "Esc does nothing". The same rescue policy
+        // as the typing path below: somebody else's text control keeps its
+        // Escape (an input clears itself, a dialog closes itself), the
+        // overlay stack owns Escape while a modal is up, and the block
+        // action menu closes itself. The editor routes the key through its
+        // own decision order — the recall arbiter first, so an open overlay
+        // dismisses and restores its captured draft instead of having the
+        // draft cleared under it. When the editor itself has focus this
+        // branch is skipped by the rootContains guard and the editor's own
+        // handling (which stops propagation) decides.
+        if (e.key === 'Escape' && this.editor?.isVisible) {
+          const active = document.activeElement
+          if (active && this.editor.rootContains(active)) return
+          // A click on the live grid parks focus in xterm's hidden
+          // textarea — the terminal's own surface, not somebody else's
+          // field: while the editor is up the grid is read-only dead
+          // space, so the rescue runs here too (when the editor is hidden
+          // this branch never runs and the key reaches the shell as
+          // before).
+          const onLiveGrid =
+            active !== null && this.scrollback?.xtermLiveContainer.contains(active) === true
+          if (!onLiveGrid && isTextEntry(active)) return
+          if (hasOpenOverlays()) return
+          if (document.querySelector('.cmd-overflow-menu')) return
+          if (this.editor.handleExternalEscape(e)) e.preventDefault()
+          return
         }
         if (!this.editor?.isVisible) return
         if (e.key.length !== 1 || e.ctrlKey || e.metaKey || e.altKey) return

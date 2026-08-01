@@ -469,14 +469,22 @@ export function createCommandBlock(
   // Full-block click-to-select with drag distinction (P1-7, P1-8).
   wireBlockSelection(wrapper, getContainer(), overflow, id, onSelect)
 
-  // Double-click selects a whole token (nocx-w7h.8): the frozen block's
-  // serialized DOM otherwise falls back to the browser's native word
-  // segmentation, which stops at the `-` and `.` in `profile-usage.json`.
-  // The same separator policy as the live xterm terminal (wordSeparator) is
-  // applied here so both surfaces select the same text.
-  wrapper.addEventListener('dblclick', (e) => {
-    const target = e.target as HTMLElement
-    if (target.closest('.cmd-overflow-btn, .cmd-overflow-menu')) return
+  // Double-click selects a whole token the way xterm does it (nocx-w7h.11,
+  // spec v9 §2): xterm's SelectionService.handleMouseDown calls
+  // preventDefault() FIRST — "Tell the browser not to start a regular
+  // selection" — and only then branches on event.detail, computing the word
+  // bounds from its own model and applying the selection once. The frozen
+  // block mirrors that ordering. The browser's native word selection would
+  // otherwise be created on the SECOND MOUSEDOWN (event.detail === 2),
+  // before the dblclick event fires — observed by copy-on-select on mouseup
+  // and copied, one word, before any later expansion could run. Intercepting
+  // the mousedown means exactly one selection state exists, already correct,
+  // and there is no race to order. A single mousedown (detail 1) is not
+  // intercepted: drag selection and click-to-select keep working.
+  wrapper.addEventListener('mousedown', (e: MouseEvent) => {
+    if ((e.target as HTMLElement).closest('.cmd-overflow-btn, .cmd-overflow-menu')) return
+    if (e.detail !== 2) return
+    e.preventDefault()
     const caret = document.caretRangeFromPoint?.(e.clientX, e.clientY)
     if (!caret || caret.startContainer.nodeType !== Node.TEXT_NODE) return
     const line = caret.startContainer.parentElement?.closest<HTMLElement>(
@@ -489,7 +497,6 @@ export function createCommandBlock(
     if (!sel) return
     sel.removeAllRanges()
     sel.addRange(range)
-    e.preventDefault()
   })
 
   return wrapper

@@ -83,3 +83,38 @@
   min-height: calc(var(--control-height-md) * 2);
   field-sizing: content;
 }
+
+/* The unit suffix of a number field — inside the control, so the number and
+   its unit read (and copy) as one thing. Positioned like the trailing slot;
+   the input's padding comes from data-trailing. */
+.ui-text-field__unit {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  transform: translateY(-50%);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-dim);
+  pointer-events: none;
+}
+
+/* The caption slot beneath the control — a number field's allowed range,
+   smaller than the description (--font-size-2xs vs --font-size-sm), always
+   visible, quiet. The error replaces the caption in this same slot, so the
+   field's height never changes when a value goes out of range. */
+.ui-text-field__caption {
+  margin: 2px 0 0;
+  font-size: var(--font-size-2xs);
+  line-height: 1.4;
+  color: var(--color-text-dim);
+}
+
+.ui-text-field__caption[data-tone='error'] {
+  color: var(--color-danger);
+}
+
+/* The caption follows the column, not the field: where the controls are
+   pinned to the right of a row (the settings screen), a start-aligned
+   caption leaves a ragged right edge down the section. */
+.ui-text-field__caption[data-align='end'] {
+  text-align: right;
+}

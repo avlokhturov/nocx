@@ -24,10 +24,14 @@ import {
   AcceptedSnapshot,
   applyAcceptedSnapshot,
   canResetSetting,
+  fieldSaveError,
   isSettingModified,
   monotonicRevisionPolicy,
+  numberRangeCaption,
+  numberRangeError,
   reconnectRevisionPolicy,
   recordSaveOutcome,
+  type Declaration,
   type RevisionPolicy,
   type SaveOutcome,
   type SettingsMirror,
@@ -78,18 +82,8 @@ export function keyToDomId(key: string): string {
 
 // ── Types ──────────────────────────────────────────────────────────────
 
-export interface Declaration {
-  key: string
-  section: string
-  label: string
-  description: string
-  control: 'toggle' | 'text' | 'number' | 'select' | 'secret'
-  dataClass: 'publicConfig' | 'privateMetadata' | 'privateContent' | 'secretAuthenticator'
-  default?: unknown
-  options?: { value: string; label: string }[]
-  min?: number
-  max?: number
-}
+// The wire declaration (with its Min/Max/unit validation) lives in the
+// settings domain; the screen renders from it and never validates itself.
 
 type LoadState = 'loading' | 'ready' | 'failed' | 'empty'
 
@@ -758,20 +752,6 @@ export function SettingsComponent(props: SettingsComponentProps) {
             </Show>
           }
         >
-          <Show when={decl.control === 'number'}>
-            <span class="ui-settings-bounds">
-              <Show when={decl.min !== undefined && decl.max !== undefined}>
-                {String(decl.min) + ' – ' + String(decl.max)}
-              </Show>
-              <Show when={decl.min !== undefined && decl.max === undefined}>
-                {'≥ ' + String(decl.min)}
-              </Show>
-              <Show when={decl.max !== undefined && decl.min === undefined}>
-                {'≤ ' + String(decl.max)}
-              </Show>
-            </span>
-          </Show>
-
           {/* One line: the control and its reset affordance, side by side. The
               wrapper is the surface's own, so the reset sits level with the
               control without the surface reaching into Field's column. */}
@@ -798,6 +778,10 @@ export function SettingsComponent(props: SettingsComponentProps) {
                 value={displayValue(eff(), decl)}
                 min={decl.min}
                 max={decl.max}
+                unit={decl.unit}
+                caption={numberRangeCaption(decl)}
+                captionAlign="end"
+                error={numberRangeError(decl, Number(displayValue(eff(), decl)))}
                 onInput={(v) => {
                   const n = Number(v)
                   void saveSetting(decl.key, isNaN(n) ? Number(displayValue(eff(), decl)) : n)
@@ -837,7 +821,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
             <ProvenanceBadge decl={decl} />
           </div>
 
-          <Show when={err()}>
+          <Show when={fieldSaveError(decl, Number(displayValue(eff(), decl)), err())}>
             <div class="ui-settings-error">{err()}</div>
           </Show>
         </Field>

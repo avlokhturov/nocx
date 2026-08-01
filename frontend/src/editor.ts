@@ -384,7 +384,7 @@ export class CommandEditor {
     if (e.key === 'Escape') {
       e.preventDefault()
       e.stopPropagation()
-      this.clearDoc()
+      this.escapeClear()
       return
     }
     // Ctrl-C cancels the composed line like a shell prompt. A real selection is
@@ -404,6 +404,41 @@ export class CommandEditor {
   private caretAtTop(): boolean {
     const head = this.view.state.selection.main.head
     return this.view.state.doc.lineAt(head).number <= 1
+  }
+
+  /**
+   * The Escape tail shared by the editor's own keydown and the host's
+   * document rescue: hint dismissal, then the clear. The keyboard arbiter
+   * is NOT consulted here — the internal path already consulted it for the
+   * whole key, and the external path consults it before calling, so an open
+   * recall overlay dismisses itself (restoring its captured draft) instead
+   * of having the draft cleared under it.
+   */
+  private escapeClear(): void {
+    if (this._hintItems.length > 0) {
+      this._hintDismissed = true
+      this.hideAliasHints()
+      return
+    }
+    this.clearDoc()
+  }
+
+  /**
+   * Route an Escape that reached the HOST's document listener, not this
+   * editor's own keydown: the editor is on screen but a click elsewhere
+   * moved the focus out of its surface, so the key never traversed `root`
+   * and onKeydown never saw it. The decision order mirrors the internal
+   * one — the keyboard arbiter gets first refusal, then hint dismissal,
+   * then the clear — and focus returns so the next keystroke lands in the
+   * prompt, exactly as the typing rescue promises. Returns true when the
+   * key was consumed (the caller preventDefaults).
+   */
+  handleExternalEscape(e: KeyboardEvent): boolean {
+    if (e.isComposing || e.keyCode === 229) return false
+    if (this.keyArbiter?.(e)) return true
+    this.escapeClear()
+    this.view.focus()
+    return true
   }
 
   // ── hint management ───────────────────────────────────────────────────

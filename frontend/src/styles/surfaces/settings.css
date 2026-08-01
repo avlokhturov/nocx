@@ -210,14 +210,6 @@
   letter-spacing: 0.3px;
 }
 
-/* ── Bounds indicator for number fields ────────────────────────────── */
-
-.ui-settings-bounds {
-  font-size: var(--font-size-sm);
-  color: var(--color-text-dim);
-  white-space: nowrap;
-}
-
 /* ── Secret field ─────────────────────────────────────────────────── */
 
 .ui-settings-secret {

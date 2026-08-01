@@ -116,6 +116,7 @@ type Declaration struct {
 	Options     []SelectOption `json:"options,omitempty"`
 	Min         *float64       `json:"min,omitempty"`
 	Max         *float64       `json:"max,omitempty"`
+	Unit        string         `json:"unit,omitempty"`
 }
 
 // ── Typed setting spec types ───────────────────────────────────────────
@@ -150,6 +151,11 @@ type NumberSpec struct {
 	Default     float64
 	Min         *float64
 	Max         *float64
+	// Unit is what the number is measured in ("days", "MiB"). Declared here,
+	// beside Min/Max, so every consumer — the settings screen, an export, a
+	// future CLI — renders the same suffix. The unit never lives in prose:
+	// a description says what the setting means, not what the number counts.
+	Unit string
 }
 
 // SelectSpec is the declaration site for a dropdown setting.
@@ -251,6 +257,7 @@ type Number struct {
 	default_    float64
 	min         *float64
 	max         *float64
+	unit        string
 }
 
 func (n *Number) Key() string             { return n.key }
@@ -275,6 +282,7 @@ func (n *Number) toDeclaration() Declaration {
 		Default:     n.default_,
 		Min:         n.min,
 		Max:         n.max,
+		Unit:        n.unit,
 	}
 }
 
@@ -400,6 +408,7 @@ func MustRegisterNumber(spec NumberSpec) *Number {
 		default_:    spec.Default,
 		min:         spec.Min,
 		max:         spec.Max,
+		unit:        spec.Unit,
 	}
 	assertValidKey(n.key)
 	allDecls = append(allDecls, n)
@@ -474,11 +483,12 @@ var HistoryRetentionDays = MustRegisterNumber(NumberSpec{
 	Key:         "history.retentionDays",
 	Section:     "History",
 	Label:       "Keep history for",
-	Description: "How many days a completed command is kept. Older commands are removed from nocx — removal is not secure erasure, deleted rows can remain in the database file's free space. 0 keeps everything until the disk limit is reached.",
+	Description: "How long a completed command is kept. Older commands are removed from nocx — removal is not secure erasure, deleted rows can remain in the database file's free space. 0 keeps everything until the disk limit is reached.",
 	DataClass:   PublicConfig,
 	Default:     0,
 	Min:         fp(0),
 	Max:         fp(3650),
+	Unit:        "days",
 })
 
 // HistoryRetentionMiB is the logical retained-content budget (nocx-rtg0.11):
@@ -489,11 +499,12 @@ var HistoryRetentionMiB = MustRegisterNumber(NumberSpec{
 	Key:         "history.retentionMiB",
 	Section:     "History",
 	Label:       "Command history size",
-	Description: "How much command text to keep, in MiB. When it is reached the oldest commands are removed from nocx (again, not securely erased). The on-disk footprint is larger than this number: measured ~3.2x — 256 MiB of content is about 811 MiB on disk — because of the search index and encrypted pages.",
+	Description: "How much command text to keep. When it is reached the oldest commands are removed from nocx (again, not securely erased). The on-disk footprint is larger than this number: measured ~3.2x — 256 MiB of content is about 811 MiB on disk — because of the search index and encrypted pages.",
 	DataClass:   PublicConfig,
 	Default:     4096,
 	Min:         fp(64),
 	Max:         fp(1 << 20),
+	Unit:        "MiB",
 })
 
 // HistoryDiskCeilingMiB is the physical ceiling over the main database plus
@@ -504,11 +515,12 @@ var HistoryDiskCeilingMiB = MustRegisterNumber(NumberSpec{
 	Key:         "history.diskCeilingMiB",
 	Section:     "History",
 	Label:       "Disk space limit",
-	Description: "Physical ceiling for the history database plus its write-ahead log, in MiB. A separate number from the content size: deleting content shrinks what you keep, not necessarily the file. When this is reached the store compacts rather than deleting more.",
+	Description: "Physical ceiling for the history database plus its write-ahead log. A separate number from the content size: deleting content shrinks what you keep, not necessarily the file. When this is reached the store compacts rather than deleting more.",
 	DataClass:   PublicConfig,
 	Default:     8192,
 	Min:         fp(128),
 	Max:         fp(2 << 20),
+	Unit:        "MiB",
 })
 
 // HistoryOutputEnabled is the "keep command output separately" decision —
