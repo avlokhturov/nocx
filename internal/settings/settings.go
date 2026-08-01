@@ -452,6 +452,19 @@ func assertValidKey(key string) {
 
 // ── Declared settings ──────────────────────────────────────────────────
 
+// ContentDBKey holds the persisted reference to the ContentDB key
+// (ADR-0018 §3, nocx-rtg0.9). The key itself lives in a provider; the
+// settings document carries only the reference, like every secret-class
+// setting. The app manages it — there is no user-facing set/delete surface
+// for it beyond what the vault's own lifecycle provides.
+var ContentDBKey = MustRegisterSecret(SecretSpec{
+	Key:         "contentdb.key",
+	Section:     "History",
+	Label:       "Command history key",
+	Description: "Reference to the encrypted key that protects durable command history. Managed by the application; read once at startup so a sealed vault never makes history unreadable.",
+	DataClass:   PrivateMetadata,
+})
+
 // ClipboardOSC52Suppressed persists the "Don't show again" decision on the
 // OSC 52 clipboard permission banner. Currently in-memory only
 // (ClipboardGate._suppressed in frontend/src/clipboard.ts); making it
@@ -909,6 +922,39 @@ func (r *Registry) SecretDelete(s *Secret) error {
 	_ = r.secrets.Delete(context.Background(), refID)
 	newRefs := copyRefs(r.refs)
 	delete(newRefs, s.key)
+	ch, err := r.commitLocked(r.values, newRefs, []string{s.key})
+	r.mu.Unlock()
+	if err == nil {
+		r.finishCommit(ch)
+	}
+	return err
+}
+
+// SecretRef returns the persisted reference for a secret-class setting, or
+// ok=false when no value was ever set. The reference is not material: it is
+// the opaque SecretID the value lives behind, and returning it does not
+// violate the "no registry method returns plaintext" rule.
+func (r *Registry) SecretRef(s *Secret) (credential.SecretID, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	id, ok := r.refs[s.key]
+	return id, ok
+}
+
+// SetSecretRef persists an already-created reference for a secret-class
+// setting. This is the narrow seam for a caller that minted and stored the
+// value itself (the ContentDB key, nocx-rtg0.9): the value is never handed
+// to the registry, only its reference, so the plaintext rule holds.
+func (r *Registry) SetSecretRef(s *Secret, id credential.SecretID) error {
+	if s == nil {
+		return fmt.Errorf("settings: SetSecretRef: nil secret key")
+	}
+	if id == "" {
+		return fmt.Errorf("settings: SetSecretRef %q: empty reference", s.key)
+	}
+	r.mu.Lock()
+	newRefs := copyRefs(r.refs)
+	newRefs[s.key] = id
 	ch, err := r.commitLocked(r.values, newRefs, []string{s.key})
 	r.mu.Unlock()
 	if err == nil {
