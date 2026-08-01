@@ -8,7 +8,11 @@
 // destructive commands crossed with a changed environment makes running from
 // a list unacceptable — the `rm -rf build` you ran in one repo is a
 // different command in another. Enter fills the line; the editor's own Enter
-// is what executes, and the "↵ to execute" caption says so.
+// is what executes, and the panel's label says what its Enter does — it
+// fills the line ("↵ to fill the line"), never "↵ to execute". A label that
+// promises execution inside the panel measured as a defect: the owner
+// pressed Enter, the panel closed, nothing ran, and it was filed as a bug.
+// The words were wrong, not the behaviour — the behaviour stays.
 //
 // The state machine is a discriminated union on `state`, never flags on the
 // editor: `closed → opened (draft captured) → navigating (preview in the
@@ -28,6 +32,22 @@ import type { CommandLedger } from './command-ledger'
 
 /** The ladder rung a page of history was drawn from. */
 export type RecallScope = 'directory' | 'host' | 'everywhere'
+
+/** The smallest page a rung may show before opening on the next rung up.
+ *  A directory holding one match is honest and useless: it reads as results
+ *  appearing at random, and the user climbs anyway (§8.10 v7 — the owner
+ *  amended v6's "never an automatic widening" after using the feature: the
+ *  widening happens at OPEN, once, to the first rung with a useful page; Up
+ *  still widens on demand after that). */
+export const MIN_USEFUL_ROWS = 3
+
+/** What each ladder rung means, in the user's words — the raw scope names
+ *  (`directory`, `host`) are the schema's jargon and explain nothing. */
+export const SCOPE_LABELS: Record<RecallScope, string> = {
+  directory: 'this directory',
+  host: 'this host',
+  everywhere: 'everywhere',
+}
 
 /** What the user was composing when recall opened — captured so Esc can
  *  restore it exactly, not approximately. */
@@ -176,12 +196,23 @@ export class RecallOverlay {
       to: sel.to,
       scrollTop: this.editor.getScrollTop(),
     }
-    const result = this.query(scope)
-    this.state = { name: 'opened', draft, scope, query: result }
+    // Open on the first rung with a useful page. A directory holding one
+    // match is honest and useless — the next Up would climb anyway, and
+    // opening there reads as results appearing at random (§8.10 v7). Rungs
+    // are monotone (directory ⊆ host ⊆ everywhere), so climbing never hides
+    // a row the narrower rung showed; the climb stops at the top of the
+    // ladder even when the widest rung is thin.
+    let rung = scope
+    let result = this.query(rung)
+    while (result.entries.length < MIN_USEFUL_ROWS && rung !== 'everywhere') {
+      rung = nextScope(rung)
+      result = this.query(rung)
+    }
+    this.state = { name: 'opened', draft, scope: rung, query: result }
     this.root.dataset.open = 'true'
     this.render()
     if (result.entries.length > 0) {
-      this.enterNavigating(scope, result, 0)
+      this.enterNavigating(rung, result, 0)
     }
   }
 
@@ -368,8 +399,18 @@ export class RecallOverlay {
     const rung = document.createElement('span')
     rung.className = 'ui-badge ui-recall-panel__rung'
     rung.dataset.tone = 'neutral'
-    rung.textContent = s.scope
+    rung.textContent = SCOPE_LABELS[s.scope]
     header.appendChild(rung)
+
+    // The next Up widens the rung when this one is exhausted and not already
+    // the top of the ladder — the exact condition climbWider acts on, so the
+    // hint never promises a climb the next Up cannot perform.
+    if (s.query.exhausted && s.scope !== 'everywhere') {
+      const widen = document.createElement('span')
+      widen.className = 'ui-recall-panel__widen'
+      widen.textContent = '↑ widens'
+      header.appendChild(widen)
+    }
 
     const count = document.createElement('span')
     count.className = 'ui-recall-panel__count'
@@ -426,18 +467,25 @@ export class RecallOverlay {
     }
     this.root.appendChild(list)
 
-    // ── "↵ to execute": the separate line explaining the two-step flow.
-    //    The command is in the editor now; Enter in the editor executes it. ──
+    // ── "↵ to fill the line": the separate line explaining the two-step
+    //    flow. Enter HERE inserts the previewed command into the editor and
+    //    nothing else; the editor's own Enter, later, is what executes — a
+    //    label promising execution inside the panel is a lie (it measured as
+    //    one: the owner pressed Enter, the panel closed, nothing ran). ──
     if (s.name === 'navigating') {
       const hint = document.createElement('div')
       hint.className = 'ui-recall-panel__hint'
-      hint.textContent = '↵ to execute'
+      hint.textContent = '↵ to fill the line'
       this.root.appendChild(hint)
     }
 
     const footer = document.createElement('div')
     footer.className = 'ui-recall-panel__footer'
-    footer.textContent = '↑ ↓ to navigate  esc to dismiss'
+    const navigate = document.createElement('span')
+    navigate.textContent = '↑ ↓ to navigate'
+    const dismiss = document.createElement('span')
+    dismiss.textContent = 'esc to dismiss'
+    footer.append(navigate, dismiss)
     this.root.appendChild(footer)
   }
 }

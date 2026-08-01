@@ -200,22 +200,112 @@ describe('recall: what the panel says', () => {
     expect(recall.isOpen).toBe(false)
   })
 
-  it('an empty directory rung climbs to a wider rung on Up instead of dismissing', () => {
+  it('an empty directory rung opens on the first rung that has rows', () => {
     const { container, view, recall } = setupRecall({
       query: (scope) =>
         scope === 'directory'
           ? { entries: [], scope, exhausted: true, source: 'session' }
-          : { entries: [mkEntry('ls /tmp')], scope, exhausted: true, source: 'session' },
+          : {
+              entries: [mkEntry('ls /tmp'), mkEntry('pwd'), mkEntry('whoami')],
+              scope,
+              exhausted: true,
+              source: 'session',
+            },
     })
     key(view, { key: 'ArrowUp' })
     expect(recall.isOpen).toBe(true)
-    const before = panelOf(container).textContent ?? ''
-    expect(before).toContain('no history yet')
+    const text = panelOf(container).textContent ?? ''
+    expect(text).not.toContain('no history yet') // never the near-empty rung
+    expect(text).toContain('this host') // the rung widened and is named
+    expect(text).toContain('ls /tmp') // and the rows appeared with it
+  })
+
+  it('a directory with one match opens on a wider rung, not on the near-empty one', () => {
+    const { container, view } = setupRecall({
+      query: (scope) =>
+        scope === 'directory'
+          ? { entries: [mkEntry('ls')], scope, exhausted: true, source: 'session' }
+          : {
+              entries: [mkEntry('ls'), mkEntry('make deploy'), mkEntry('git status')],
+              scope,
+              exhausted: true,
+              source: 'session',
+            },
+    })
     key(view, { key: 'ArrowUp' })
-    const after = panelOf(container).textContent ?? ''
-    expect(after).toContain('host') // the rung widened
-    expect(after).toContain('ls /tmp') // and rows appeared
-    expect(recall.isOpen).toBe(true)
+    const text = panelOf(container).textContent ?? ''
+    expect(text).toContain('this host') // the rung is named on screen
+    expect(text).toContain('make deploy') // and its rows are there
+  })
+
+  it('a rung with a useful page stays on that rung', () => {
+    const { container, view } = setupRecall({
+      query: (scope) => ({
+        entries:
+          scope === 'directory'
+            ? [mkEntry('ls'), mkEntry('git status'), mkEntry('make')]
+            : [mkEntry('ls'), mkEntry('git status'), mkEntry('make'), mkEntry('x')],
+        scope,
+        exhausted: true,
+        source: 'session',
+      }),
+    })
+    key(view, { key: 'ArrowUp' })
+    const text = panelOf(container).textContent ?? ''
+    expect(text).toContain('this directory')
+  })
+
+  it('a rung that can widen says so; the top rung does not', () => {
+    const narrow = {
+      entries: [mkEntry('ls')],
+      scope: 'directory' as const,
+      exhausted: true,
+      source: 'session' as const,
+    }
+    const { container, view } = setupRecall({
+      query: (scope) => ({
+        entries:
+          scope === 'directory'
+            ? narrow.entries
+            : scope === 'host'
+              ? narrow.entries
+              : [mkEntry('ls'), mkEntry('make'), mkEntry('git')],
+        scope,
+        exhausted: true,
+        source: 'session',
+      }),
+    })
+    key(view, { key: 'ArrowUp' }) // climbs: directory 1, host 1 → everywhere
+    const text = panelOf(container).textContent ?? ''
+    expect(text).toContain('everywhere') // the top rung is named
+    expect(text).not.toContain('↑ widens') // nothing wider to promise
+  })
+})
+
+describe('recall: the footer and the labels say what the keys do', () => {
+  it('the footer is one line: two key groups in one footer, a real gap between them', () => {
+    const { container, view } = setupRecall({ query: mkQuery(['one', 'two', 'three']) })
+    key(view, { key: 'ArrowUp' })
+    const footer = container.querySelector<HTMLElement>('.ui-recall-panel__footer')
+    expect(footer).not.toBeNull()
+    // Two key groups as siblings of one footer element — the CSS lays them
+    // out on one line with a gap (white-space: nowrap; display: flex), so
+    // "navigate" and "esc" can never run together and never wrap apart.
+    const groups = footer?.querySelectorAll<HTMLElement>(':scope > span') ?? []
+    expect(groups.length).toBe(2)
+    expect(groups[0]?.textContent).toBe('↑ ↓ to navigate')
+    expect(groups[1]?.textContent).toBe('esc to dismiss')
+    expect(footer?.querySelector('br')).toBeNull()
+  })
+
+  it('Enter is labelled as filling the line, never as executing', () => {
+    const { container, view } = setupRecall({
+      query: mkQuery(['rm -rf build', 'ls', 'git status']),
+    })
+    key(view, { key: 'ArrowUp' })
+    const text = panelOf(container).textContent ?? ''
+    expect(text).toContain('↵ to fill the line')
+    expect(text).not.toContain('execute')
   })
 })
 
