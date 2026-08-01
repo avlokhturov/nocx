@@ -10,6 +10,7 @@ import (
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
+	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
@@ -938,4 +939,115 @@ func TestConnectionsTrustHostKey_OverTheWireConformsToContract(t *testing.T) {
 	if !truster.called {
 		t.Fatal("expected the truster to be called")
 	}
+}
+
+// ── history.query ─────────────────────────────────────────────────────────
+
+// The DTO's own conformance: field tags, omitempty behaviour, null-vs-omitted
+// for the nullable fields, enum spelling, and the never-null entries slice.
+func TestHistoryQuery_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "history.query.schema.json")
+
+	exit := 1
+	ended := int64(1_750_000_000_000)
+	cases := map[string]historyQueryResponse{
+		// Everything populated, including the nullable fields — a running
+		// entry must render exitCode as null and endedAt as null, never as 0
+		// and never as the epoch.
+		"running": {
+			Entries: []historyQueryEntry{
+				{ID: "9", Command: "make test", Cwd: "/repo", Host: "", Status: "running"},
+			},
+			Scope:     "directory",
+			Exhausted: true,
+			Source:    "store",
+		},
+		"populated": {
+			Entries: []historyQueryEntry{
+				{ID: "42", Command: "ssh prod deploy", Cwd: "/srv/api", Host: "prod.example.com", Status: "failure", ExitCode: &exit, EndedAt: &ended},
+			},
+			Scope:     "host",
+			Exhausted: false,
+			Source:    "store",
+		},
+		// The empty answer: the store answered and the rung had no matches.
+		// entries must marshal to [] never null (nocx-25k9.14 class), and the
+		// four required fields must all be present.
+		"empty rung": {
+			Entries:   []historyQueryEntry{},
+			Scope:     "everywhere",
+			Exhausted: true,
+			Source:    "store",
+		},
+		// The unanswerable question: no store at all.
+		"no store": {
+			Entries:   []historyQueryEntry{},
+			Scope:     "directory",
+			Exhausted: true,
+			Source:    "session",
+		},
+	}
+
+	for name, resp := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(resp)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "history.query DTO")
+		})
+	}
+}
+
+// The real method through the real socket. Nothing here names a field, so
+// nothing here can omit one; the schema's additionalProperties:false plus
+// required makes the key set exact in both directions. Two states are driven:
+// a store with rows (source=store) and the source=session fallback the
+// overlay must label "this session only".
+func TestHistoryQuery_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "history.query.schema.json")
+	ctx := context.Background()
+
+	t.Run("store answered", func(t *testing.T) {
+		ended := int64(1_750_000_000_000)
+		exit := 0
+		fake := &fakeHistoryDB{page: content.HistoryPage{
+			Entries: []content.CommandRecord{
+				{ID: 7, Command: "git status", Cwd: "/repo", Host: "", Status: content.StatusSuccess, ExitCode: &exit, EndedAt: &ended},
+				{ID: 6, Command: "make", Cwd: "/repo", Host: "", Status: content.StatusFailure},
+			},
+			HasRows:   true,
+			Exhausted: true,
+		}}
+		ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+			WithContentDB(fake))
+		if err := ws.Start(ctx); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		defer func() { _ = ws.Stop(ctx) }()
+
+		conn := connectWS(t, ws)
+		resp := vaultCall(t, conn, "history.query", map[string]any{
+			"scope": "directory", "cwd": "/repo", "limit": 50,
+		}, 1)
+		if resp.Error != nil {
+			t.Fatalf("unexpected error: %+v", resp.Error)
+		}
+		validateJSON(t, schema, resp.Result, "history.query result (store)")
+	})
+
+	t.Run("no store answers session", func(t *testing.T) {
+		ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)))
+		if err := ws.Start(ctx); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		defer func() { _ = ws.Stop(ctx) }()
+
+		conn := connectWS(t, ws)
+		resp := vaultCall(t, conn, "history.query", map[string]any{"scope": "everywhere"}, 1)
+		if resp.Error != nil {
+			t.Fatalf("unexpected error: %+v", resp.Error)
+		}
+		validateJSON(t, schema, resp.Result, "history.query result (session)")
+	})
 }

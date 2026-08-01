@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 
@@ -30,7 +31,7 @@ func (a *settingsProviderAdapter) All() (map[string]any, error) {
 // All export modes work purely through the profile/group repositories and
 // storage paths — the credential.CredentialStore is never consulted, so no
 // mode can resolve a secret (ADR-0011 §2, §7).
-func (s *WSServer) handleExportMethod(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleExportMethod(ctx context.Context, wconn *wsConn, req jsonrpcRequest) {
 	if s.profiles == nil || s.groups == nil {
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "profiles not available"))
 		return
@@ -44,7 +45,7 @@ func (s *WSServer) handleExportMethod(wconn *wsConn, req jsonrpcRequest) {
 	case "export.portableEncrypted":
 		s.handleExportPortableEncrypted(wconn, req)
 	case "export.backup":
-		s.handleExportBackup(wconn, req)
+		s.handleExportBackup(ctx, wconn, req)
 	case "export.import":
 		s.handleExportImport(wconn, req)
 	case "export.importPortable":
@@ -111,13 +112,13 @@ func (s *WSServer) handleExportPortableEncrypted(wconn *wsConn, req jsonrpcReque
 
 // --- export.backup -----------------------------------------------------
 
-func (s *WSServer) handleExportBackup(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleExportBackup(ctx context.Context, wconn *wsConn, req jsonrpcRequest) {
 	if s.exportPaths == nil {
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "backup not available (paths not wired)"))
 		return
 	}
-	deps := export.BackupDeps{Paths: s.exportPaths}
-	result, err := export.Backup(deps)
+	deps := export.BackupDeps{Paths: s.exportPaths, ContentDB: s.exportContentDB}
+	result, err := export.Backup(ctx, deps)
 	if err != nil {
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
 		return

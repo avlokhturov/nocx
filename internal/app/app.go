@@ -105,6 +105,14 @@ func New(opts ...Option) (*App, error) {
 	docStore := storage.NewDocumentStore(paths.ConfigDir())
 	profileStore := profile.NewJSONStoreWithDocStore(docStore, "profiles.json")
 
+	// ContentDB (ADR-0018, amended 2026-08-01): the one SQLite database for
+	// unbounded private content, encrypted at rest by the adiantum VFS
+	// (ncruces/go-sqlite3 — no cgo). The stub is the null implementation
+	// per AD-8; the store is constructed here once the ContentDB key exists
+	// (nocx-rtg0.9 reads the keychain; this package never does). history.query
+	// answers source=session until then, which the overlay labels honestly.
+	contentDB := content.NewStub(logger)
+
 	sysProv := system.New()
 	fileProv := file.New(docStore, "vault-file.json")
 	reg, err := vault.NewRegistry(sysProv, fileProv)
@@ -151,7 +159,12 @@ func New(opts ...Option) (*App, error) {
 		transport.WithSettingsRegistry(settingsRegistry),
 		transport.WithProfileUsageStore(usageStore),
 		transport.WithExportPaths(paths),
-		transport.WithExportContentDB(content.NewStub(logger)),
+		// One ContentDB at the composition root (AD-8): the same store backs
+		// export and history.query. A stub is correct until the SQLCipher
+		// backing lands (ADR-0018 gate); history.query then answers
+		// source=session, which the overlay labels "this session only".
+		transport.WithExportContentDB(contentDB),
+		transport.WithContentDB(contentDB),
 		transport.WithProber(&proberAdapter{client: sshClient}),
 		transport.WithProfileService(profileSvc),
 		transport.WithHostKeyTruster(&proberAdapter{client: sshClient}),

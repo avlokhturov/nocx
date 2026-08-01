@@ -128,6 +128,12 @@ type WSServer struct {
 	exportPaths     storage.Paths
 	exportContentDB content.ContentDB
 
+	// contentDB is the durable content store backing history.query. When
+	// nil, the method answers source=session — the overlay then labels what
+	// it shows "this session only" instead of presenting the in-memory
+	// ledger as all history (contracts/history.query.schema.json).
+	contentDB content.ContentDB
+
 	// ringsMu protects rx and stopped. One sessionRx per session;
 	// keyed by session.ID. When stopped is true, getOrCreateRx returns nil
 	// so no new rings are created after the server begins shutting down.
@@ -323,6 +329,15 @@ func WithExportPaths(p storage.Paths) WSServerOption {
 // content.db has not yet been created (ADR-0011 §5).
 func WithExportContentDB(db content.ContentDB) WSServerOption {
 	return func(s *WSServer) { s.exportContentDB = db }
+}
+
+// WithContentDB attaches the durable content store backing history.query.
+// When absent, the method answers source=session so the overlay labels what
+// it shows "this session only" instead of presenting the in-memory ledger
+// as all history (contracts/history.query.schema.json). The composition
+// root passes the same ContentDB it hands WithExportContentDB.
+func WithContentDB(db content.ContentDB) WSServerOption {
+	return func(s *WSServer) { s.contentDB = db }
 }
 
 // WithProfileService attaches a profile domain service for import
@@ -760,11 +775,11 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 	case "settings.describe", "settings.getSnapshot", "settings.set", "settings.reset",
 		"settings.secretSet", "settings.secretDelete", "settings.secretExists":
 		s.handleSettingsMethod(wconn, req)
-	case "export.manifest", "export.configExport", "export.portableEncrypted",
-		"export.backup", "export.import", "export.importPortable":
-		s.handleExportMethod(wconn, req)
 	case "sessions.status":
 		s.handleSessionsStatus(wconn, req)
+	case "export.manifest", "export.configExport", "export.portableEncrypted",
+		"export.backup", "export.import", "export.importPortable":
+		s.handleExportMethod(ctx, wconn, req)
 	case "connections.test":
 		s.handleConnectionsTest(wconn, req)
 	case "connections.trustHostKey":
@@ -773,6 +788,8 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.handleSSHConfigAliases(wconn, req)
 	case "sshConfig.path":
 		s.handleSSHConfigPath(wconn, req)
+	case "history.query":
+		s.handleHistoryQuery(ctx, wconn, req)
 	case "vault.status", "vault.setup", "vault.unseal", "vault.seal",
 		"vault.changePassphrase", "vault.regenerateRecovery", "vault.setDefaultProvider",
 		"vault.setAutoSeal", "vault.activity", "vault.inventory",

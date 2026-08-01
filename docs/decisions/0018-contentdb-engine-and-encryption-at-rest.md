@@ -1,6 +1,6 @@
 # ADR-0018 — ContentDB: SQLite, encrypted at rest, with its own key
 
-- **Status:** Accepted
+- **Status:** Accepted (amended 2026-08-01 — driver superseded)
 - **Date:** 2026-08-01
 - **Related:** [ADR-0011](0011-persistence-storage-capabilities-and-secret-references.md)
   §1 and §5 (three storage capabilities; ContentDB declared as a seam, its SQLite
@@ -11,6 +11,68 @@
   §5, §9, §17.2.
 - **Fulfils:** ADR-0011 §5's "the SQLite dependency lands with whichever feature needs
   it first". Durable command memory is that feature.
+
+## Amendment (2026-08-01) — the engine is SQLite, the encryption is the Adiantum VFS, not SQLCipher
+
+The original decision named SQLCipher and deferred the Go driver to a spike. The spike
+contacted every published Go driver and none survived: `mattn/go-sqlite3` removed its
+SQLCipher build tag, `mutecomm/go-sqlite3` bundles SQLite 3.20.1 (no STRICT, no JSON1, no
+FTS5, no THREADSAFE), and every amalgamation-bundling fork is deleted from GitHub. A
+re-spike then proved an alternative that is not SQLCipher and is why the search missed it
+the first time: **`github.com/ncruces/go-sqlite3` v0.35.2** — real SQLite 3.53.3 compiled to
+WASM and transpiled to native Go at module build time — with its **`vfs/adiantum`**
+encryption VFS (XChaCha12 + AES, Argon2id KDF, 4 KiB blocks). Proven by execution, not by
+README (probe in `scratchpad/vfs-probe/`):
+
+- The database file and its `-wal` contain no plaintext and no SQLite header; the wrong key
+  is refused ("file is not a database") and the file is left byte-identical; no key is
+  refused outright.
+- STRICT tables, JSON1, `foreign_keys=ON`, `auto_vacuum=INCREMENTAL` at creation, FTS5
+  under encryption, WAL crash recovery after SIGKILL (`integrity_check` = ok), and one
+  writer with concurrent readers all work — verified by execution.
+- 50k-row history: batched insert ~60k rows/s, single-row (autocommit) ~110 µs/row, overlay
+  queries 23–117 µs avg (p95 < 145 µs), sort-heavy query 11.5 ms, resident ~17 MB.
+
+**What we get and what we deliberately do not get** (the owner's scope decision on
+2026-08-01, after an adversarial review raised tamper, rollback and authenticated
+encryption):
+
+> Adiantum VFS gives confidentiality of database and journal contents against a detached
+> copy of the file. It does not give authenticity, rollback detection, secure deletion, or
+> protection from a process running as the user. That is a deliberate fit to the threat
+> model, not an oversight: an attacker who can write the file already holds the keychain
+> item, the process memory and the binary.
+
+No authenticity, no MACs, no rollback detection, no secure deletion are built. The goal is
+exactly one thing: a detached copy of the file is not readable.
+
+**Costs and properties of the adopted driver:**
+
+- **No cgo.** `grep 'import "C"'` across the driver: no matches. This removes the
+  packaging cost §2 below priced for SQLCipher — the Wails release matrix does not grow.
+  Correcting the earlier framing: the SQLite WASM is transpiled to Go at module-generation
+  time (`wasm2go`), so there is no interpreter at runtime — performance is native-compiled.
+- **Licences:** MIT (`ncruces/go-sqlite3`), MIT-0 (the WASM translation),
+  MIT (`lukechampine.com/adiantum`), BSD-3 (`golang.org/x/crypto`, already in the graph).
+- **Binary cost:** ~+3 MB (driver + embedded SQLite + FTS5 + Adiantum).
+- **`vfs/xts`** (AES-XTS, NIST/FIPS 140-3 primitives only) is a one-line DSN change if FIPS
+  primitives are ever required — **it changes the on-disk format, so it is not a toggle once
+  data exists.**
+- **Every file-creating path must use the keyed URI form**
+  `file:<path>?vfs=adiantum&hexkey=<key>`. Verified by canary probe: the SQLite backup API,
+  `ATTACH` and `VACUUM INTO` write through the URI-selected VFS; omitting the VFS/key fails
+  loudly ("unable to open database file") but must never be the route — the store routes all
+  file creation through one helper (`keyedURI`).
+- **Multi-process:** WAL plus SQLite's file locking (busy_timeout) make `content.db` safe to
+  share across processes; the app's one-writer goroutine is the in-process discipline. The
+  same-user process remains in the threat model: it can ask the keychain for the key.
+
+**Supersedes:** §2 (the SQLCipher mechanism, its cgo consequence, and its compile-options
+adoption gate — the driver is now chosen and proven), the SQLCipher rows of the Rationale
+table, and the §2 spike-revisit condition. §1 (SQLite is the engine), §3 (ContentDB has its
+own key in the OS keychain, outside the vault's seal) and §4 (the threat model) stand
+unchanged. The original decision text below is preserved for context; where it names
+SQLCipher, the amendment above is the current state.
 
 ## Context
 

@@ -30,12 +30,23 @@ import (
 // ErrNotImplemented is the sentinel error returned by every Stub method.
 var ErrNotImplemented = errors.New("content stub: not implemented")
 
+// ErrClosed is returned by operations on a ContentDB that has been Closed.
+var ErrClosed = errors.New("content: store is closed")
+
 // ContentDB is the capability for unbounded, query-oriented private content
 // (ADR-0011 §5). It owns a single SQLite database and exposes typed repository
 // interfaces for each entity class.
 type ContentDB interface {
 	Conversations() ConversationRepository
 	CommandHistory() CommandHistoryRepository
+	// Backup writes a consistent, encrypted snapshot of the whole database
+	// to destPath. The destination is created through the same keyed VFS as
+	// the live database (ADR-0018 amendment — the plaintext-canary rule), so
+	// a restore is: replace content.db with the snapshot and open with the
+	// same key. This is the only supported way to copy the database: WAL
+	// mode means the live store is content.db plus -wal plus -shm, and
+	// copying the single file while running produces a torn backup.
+	Backup(ctx context.Context, destPath string) error
 	Close() error
 }
 
@@ -67,6 +78,32 @@ type CommandRecord struct {
 	Trusted   bool
 }
 
+// Scope is the recall-ladder rung a history query is answered from (design
+// §10.6). The server answers from the rung it was asked for and never
+// silently widens: a ladder whose rung you cannot see is a filter.
+type Scope string
+
+const (
+	ScopeDirectory  Scope = "directory"  // the exact working directory
+	ScopeHost       Scope = "host"       // the exact host; "" is the local machine
+	ScopeEverywhere Scope = "everywhere" // no rung filter
+)
+
+// HistoryPage is one page of command history, newest first.
+type HistoryPage struct {
+	// Entries is the page. Never nil: no matches is an empty slice
+	// (contracts/history.query.schema.json: "Never null: no matches is []").
+	Entries []CommandRecord
+	// Exhausted is true when no further entries exist beyond this page.
+	Exhausted bool
+	// HasRows reports whether the store holds any rows at all, read in the
+	// same transaction as the page. The transport uses it to tell "the
+	// store answered and had nothing" (source=store, entries=[]) from "the
+	// store has nothing to answer from" (source=session): an empty answer
+	// and an unanswerable question must not look alike.
+	HasRows bool
+}
+
 // Conversation is a conversation with an AI agent.
 type Conversation struct {
 	ID        string
@@ -95,4 +132,11 @@ type CommandHistoryRepository interface {
 	List(ctx context.Context, limit int) ([]CommandRecord, error)
 	GetByID(ctx context.Context, id int64) (*CommandRecord, error)
 	FindByPrefix(ctx context.Context, prefix string, limit int) ([]CommandRecord, error)
+	// Query returns one page of command history for the given recall-ladder
+	// rung, newest first. cwd is required for ScopeDirectory, host for
+	// ScopeHost (both ignored for ScopeEverywhere). before, when non-nil, is
+	// the opaque row id (the string form of a CommandRecord.ID) the previous
+	// page ended at; the page contains only rows strictly older than it.
+	// limit must be >= 1.
+	Query(ctx context.Context, scope Scope, cwd, host string, limit int, before *int64) (HistoryPage, error)
 }

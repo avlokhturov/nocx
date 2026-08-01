@@ -401,6 +401,7 @@ func TestPortableEncrypted_PrivateContentNotIncludedByDefault(t *testing.T) {
 // =========================================================================
 
 func TestBackup_ReportsPaths(t *testing.T) {
+	ctx := context.Background()
 	tmp := t.TempDir()
 	configDir := filepath.Join(tmp, "config")
 	dataDir := filepath.Join(tmp, "data")
@@ -411,7 +412,7 @@ func TestBackup_ReportsPaths(t *testing.T) {
 		Paths: &staticPaths{config: configDir, data: dataDir, cache: filepath.Join(tmp, "cache")},
 	}
 
-	result, err := export.Backup(deps)
+	result, err := export.Backup(ctx, deps)
 	if err != nil {
 		t.Fatalf("Backup: %v", err)
 	}
@@ -427,6 +428,7 @@ func TestBackup_ReportsPaths(t *testing.T) {
 }
 
 func TestBackup_ContentDBAbsent(t *testing.T) {
+	ctx := context.Background()
 	tmp := t.TempDir()
 	configDir := filepath.Join(tmp, "config")
 	dataDir := filepath.Join(tmp, "data")
@@ -436,7 +438,7 @@ func TestBackup_ContentDBAbsent(t *testing.T) {
 	deps := export.BackupDeps{
 		Paths: &staticPaths{config: configDir, data: dataDir, cache: filepath.Join(tmp, "cache")},
 	}
-	result, err := export.Backup(deps)
+	result, err := export.Backup(ctx, deps)
 	if err != nil {
 		t.Fatalf("Backup: %v", err)
 	}
@@ -449,6 +451,7 @@ func TestBackup_ContentDBAbsent(t *testing.T) {
 }
 
 func TestBackup_ContentDBPresent(t *testing.T) {
+	ctx := context.Background()
 	tmp := t.TempDir()
 	configDir := filepath.Join(tmp, "config")
 	dataDir := filepath.Join(tmp, "data")
@@ -463,7 +466,7 @@ func TestBackup_ContentDBPresent(t *testing.T) {
 	deps := export.BackupDeps{
 		Paths: &staticPaths{config: configDir, data: dataDir, cache: filepath.Join(tmp, "cache")},
 	}
-	result, err := export.Backup(deps)
+	result, err := export.Backup(ctx, deps)
 	if err != nil {
 		t.Fatalf("Backup: %v", err)
 	}
@@ -598,5 +601,121 @@ func TestExportDoesNotImportCredential(t *testing.T) {
 		if imp == "github.com/shady2k/nocx/internal/credential" {
 			t.Fatal("INTERNAL/EXPORT IMPORTS CREDENTIAL — this is the ADR-0011 §2 structural invariant. No export mode may resolve a secret. Remove the credential import and wire the RPCs so they call into the export package, never passing a resolved secret.")
 		}
+	}
+}
+
+// The same-machine backup of a live store must produce a consistent,
+// encrypted, single-file snapshot — never a torn copy of the three live
+// WAL files. This is correctness, not a threat-model nicety: WAL mode means
+// the running store is content.db + -wal + -shm.
+func TestBackup_SnapshotWithRealStore(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+	configDir := filepath.Join(tmp, "config")
+	dataDir := filepath.Join(tmp, "data")
+	_ = os.MkdirAll(configDir, 0o700)
+	_ = os.MkdirAll(dataDir, 0o700)
+
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	store, err := content.Open(ctx, content.Config{
+		Path:   filepath.Join(dataDir, "content.db"),
+		Key:    key,
+		Budget: content.Budget{RetentionBytes: 1 << 30, DiskCeilingBytes: 2 << 30, CompactionFloor: 0.8},
+		Logger: nil,
+	})
+	if err != nil {
+		t.Fatalf("content.Open: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+	for range 5 {
+		if addErr := store.CommandHistory().Add(ctx, content.CommandRecord{
+			Command: "exported-cmd", Cwd: "/repo", Host: "", Status: content.StatusSuccess,
+		}); addErr != nil {
+			t.Fatalf("Add: %v", addErr)
+		}
+	}
+	// Deliberately leave the WAL uncheckpointed: the newest rows are live
+	// only in -wal when the snapshot is taken.
+
+	deps := export.BackupDeps{
+		Paths:     &staticPaths{config: configDir, data: dataDir, cache: filepath.Join(tmp, "cache")},
+		ContentDB: store,
+	}
+	result, err := export.Backup(ctx, deps)
+	if err != nil {
+		t.Fatalf("Backup: %v", err)
+	}
+	if result.ContentDBSnapshotPath == "" {
+		t.Fatal("manifest carries no snapshot path, want the consistent snapshot")
+	}
+	if result.ContentDBSnapshotPath != filepath.Join(dataDir, "content.db.snapshot") {
+		t.Fatalf("snapshot path = %q, want content.db.snapshot next to the live db", result.ContentDBSnapshotPath)
+	}
+
+	// The snapshot is encrypted (no plaintext marker, no SQLite header) and
+	// is a complete database: it reopens with the key and holds the rows
+	// that were WAL-only at backup time.
+	data, err := os.ReadFile(result.ContentDBSnapshotPath)
+	if err != nil {
+		t.Fatalf("read snapshot: %v", err)
+	}
+	if len(data) >= 15 && string(data[:15]) == "SQLite format 3" {
+		t.Fatal("snapshot has a plaintext SQLite header")
+	}
+	if strings.Contains(string(data), "exported-cmd") {
+		t.Fatal("snapshot contains plaintext of a written row")
+	}
+
+	snap, err := content.Open(ctx, content.Config{
+		Path:   result.ContentDBSnapshotPath,
+		Key:    key,
+		Budget: content.Budget{RetentionBytes: 1 << 30, DiskCeilingBytes: 2 << 30, CompactionFloor: 0.8},
+		Logger: nil,
+	})
+	if err != nil {
+		t.Fatalf("snapshot does not reopen with the key: %v", err)
+	}
+	defer func() { _ = snap.Close() }()
+	recs, err := snap.CommandHistory().List(ctx, 10)
+	if err != nil {
+		t.Fatalf("List from snapshot: %v", err)
+	}
+	if len(recs) != 5 {
+		t.Fatalf("snapshot holds %d rows, want 5 (WAL-only rows lost)", len(recs))
+	}
+}
+
+// Without a wired store (stub mode) the manifest must still name the live
+// WAL set, so a copy step that ignores the snapshot API copies all three
+// files rather than a torn single file.
+func TestBackup_NoStoreReportsLiveWALSet(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+	configDir := filepath.Join(tmp, "config")
+	dataDir := filepath.Join(tmp, "data")
+	_ = os.MkdirAll(configDir, 0o700)
+	_ = os.MkdirAll(dataDir, 0o700)
+
+	dbPath := filepath.Join(dataDir, "content.db")
+	if err := os.WriteFile(dbPath, []byte("stub"), 0o600); err != nil {
+		t.Fatalf("write content.db: %v", err)
+	}
+	if err := os.WriteFile(dbPath+"-wal", []byte("wal"), 0o600); err != nil {
+		t.Fatalf("write -wal: %v", err)
+	}
+
+	deps := export.BackupDeps{Paths: &staticPaths{config: configDir, data: dataDir, cache: filepath.Join(tmp, "cache")}}
+	result, err := export.Backup(ctx, deps)
+	if err != nil {
+		t.Fatalf("Backup: %v", err)
+	}
+	if result.ContentDBSnapshotPath != "" {
+		t.Fatalf("no store wired but snapshot path set: %q", result.ContentDBSnapshotPath)
+	}
+	if result.ContentDBWalPath != dbPath+"-wal" {
+		t.Fatalf("ContentDBWalPath = %q, want the live -wal named for the copy step", result.ContentDBWalPath)
 	}
 }
