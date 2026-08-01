@@ -45,6 +45,16 @@ If a push stops with a beads failure, fix the sync — do not reach for
 `--no-verify`. That path leaves everyone else on a backlog that looks current
 and is not, which is precisely the failure this setup exists to prevent.
 
+**Your dev profile is not the installed app's.** Anything you build or run from
+this repo — `wails dev`, `make dev-web`, `make build`, and the Playwright suite,
+which launches a backend of its own — resolves `nocx-dev` rather than `nocx`,
+because the directory is chosen by the build tag and only `-tags release` picks
+the shipped one (`internal/storage/appdir.go`). So a dev stand starts with no
+profiles and no vault, and that is correct: before this, an e2e run wrote the
+developer's real settings and reset their theme on every pass (nocx-ti8w). If
+you want your real SSH profiles in the dev stand, copy them across by hand —
+nothing migrates them for you, and nothing should.
+
 ## Repository layout
 
 - `docs/` — living source-of-truth docs (`vision.md`, `architecture.md`, `decisions/` ADRs).

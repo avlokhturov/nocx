@@ -7,8 +7,18 @@ WAILS ?= wails
 
 all: lint test build
 
+# A local build is a DEVELOPMENT build: it resolves the nocx-dev profile, so it
+# cannot read or clobber the documents an installed nocx owns
+# (internal/storage/appdir.go). Use build-release to produce the shipped
+# artefact; CI does that from a tag.
 build:
 	$(WAILS) build
+
+# The shipped artefact. `-tags release` is what selects the real profile
+# directory, and it is deliberately the side that needs the flag: a build made
+# without it costs a developer an empty profile, never a user their data.
+build-release:
+	$(WAILS) build -tags release
 
 dev:
 	$(WAILS) dev
@@ -30,6 +40,8 @@ format:
 
 test:
 	$(GO) test -v -race -count=1 ./...
+	@echo "=== go test -tags release (the shipped profile directory) ==="
+	$(GO) test -race -count=1 -tags release ./internal/storage/...
 
 # Conformance against the real ssh binary. Skipped by the ordinary suite on
 # purpose: it needs an ssh on PATH and reads a config it writes itself, so it
