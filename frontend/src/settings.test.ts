@@ -22,6 +22,7 @@ import type { TabHost } from './tab-content'
 import { VaultSection } from './vault'
 import type { VaultClient } from './vault-client'
 import { render, cleanup, fireEvent } from '@solidjs/testing-library'
+import { log } from './log'
 // ── Test declarations ────────────────────────────────────────────────
 // 5 declarations spanning 3 sections and all control types.
 
@@ -568,6 +569,46 @@ describe('SettingsContent', () => {
       expect(slot?.textContent).toBe('Must be at most 3650 days')
     })
     expect(target.querySelectorAll('.ui-text-field__caption').length).toBe(3)
+  })
+
+  // displayValue exists to turn a value into the TEXT of a control, and it
+  // warns when it can find neither a usable value nor a usable default —
+  // which is precisely what a boolean looks like to it. Routing the
+  // range/error checks through it for EVERY row therefore printed
+  // "unusable value and default for setting history.enabled, got boolean,
+  // defaultType boolean" on every mount. Reported from the console, where
+  // it is the only place it shows.
+  it('mounting a page of toggles logs nothing', async () => {
+    const warn = vi.spyOn(log, 'warn')
+    mockReady(client, {
+      declarations: [
+        {
+          key: 'history.enabled',
+          section: 'History',
+          label: 'Keep command history',
+          description: 'Record commands for recall after a restart.',
+          control: 'toggle',
+          dataClass: 'publicConfig',
+          default: true,
+        },
+        {
+          key: 'history.outputEnabled',
+          section: 'History',
+          label: 'Keep command output',
+          description: 'Whether the text commands printed is kept.',
+          control: 'toggle',
+          dataClass: 'publicConfig',
+          default: true,
+        },
+      ],
+      values: { 'history.enabled': true, 'history.outputEnabled': false },
+    })
+    await content.mount(target, host, signal)
+
+    // Two rows, each with its switch (the rail's own modified filter is a
+    // checkbox too, so scope the count to the rows).
+    expect(target.querySelectorAll('.ui-settings-row .ui-checkbox').length).toBe(2)
+    expect(warn).not.toHaveBeenCalled()
   })
 
   // The value the owner actually sees on a fresh install is the sentinel,

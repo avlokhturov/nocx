@@ -33,6 +33,17 @@
   padding-right: 84px;
 }
 
+/* A unit is not a trailing slot. 84px is the room two icon buttons need,
+   and lending it to a three-letter word made the value sit a long way from
+   it and the box wider than it had any reason to be — and, because the
+   width was then content-driven, made "days" and "MiB" fields different
+   widths in the same column. A unit gets its own reserve and the control
+   gets one width, so a column of number fields is a column. */
+.ui-text-field__control[data-unit='true'] .ui-text-field__input {
+  width: var(--control-width-number);
+  padding-right: 40px;
+}
+
 .ui-text-field__trailing {
   position: absolute;
   top: 50%;
@@ -90,7 +101,7 @@
 .ui-text-field__unit {
   position: absolute;
   top: 50%;
-  right: 8px;
+  right: 10px;
   transform: translateY(-50%);
   font-size: var(--font-size-sm);
   color: var(--color-text-dim);
@@ -100,12 +111,35 @@
 /* The caption slot beneath the control — a number field's allowed range,
    smaller than the description (--font-size-2xs vs --font-size-sm), always
    visible, quiet. The error replaces the caption in this same slot, so the
-   field's height never changes when a value goes out of range. */
+   field's height never changes when a value goes out of range.
+
+   It is taken OUT OF FLOW, and that is the whole point rather than a
+   detail. A settings control is sized by its content, so a caption left in
+   flow makes the field as wide as the longest thing the caption might ever
+   say: the same field measured 176px under "0 – 3650 days" and stretched
+   under "Kept until the size limit is reached", so the box moved when the
+   value changed. Out of flow it can neither widen the field nor, if it ever
+   wrapped, make it taller — the field reserves exactly one line for it, and
+   a caption longer than the control simply extends away from the edge it is
+   aligned to. */
+.ui-text-field:has(> .ui-text-field__caption) {
+  position: relative;
+  padding-bottom: calc(var(--font-size-2xs) * 1.4 + 2px);
+}
+
 .ui-text-field__caption {
-  margin: 2px 0 0;
+  position: absolute;
+  top: 100%;
+  margin: 0;
+  transform: translateY(calc(-1 * (var(--font-size-2xs) * 1.4 + 2px) + 2px));
   font-size: var(--font-size-2xs);
   line-height: 1.4;
   color: var(--color-text-dim);
+  white-space: nowrap;
+}
+
+.ui-text-field__caption[data-align='start'] {
+  left: 0;
 }
 
 .ui-text-field__caption[data-tone='error'] {
@@ -114,7 +148,10 @@
 
 /* The caption follows the column, not the field: where the controls are
    pinned to the right of a row (the settings screen), a start-aligned
-   caption leaves a ragged right edge down the section. */
+   caption leaves a ragged right edge down the section. Out of flow, that is
+   the edge it is anchored to — so a caption wider than the control grows
+   leftwards, into the empty gutter, instead of pushing the control. */
 .ui-text-field__caption[data-align='end'] {
+  right: 0;
   text-align: right;
 }

@@ -123,7 +123,8 @@ export function TextField(props: TextFieldProps) {
     <>
       <div
         class="ui-text-field__control"
-        data-trailing={props.trailing !== undefined || props.unit !== undefined ? 'true' : 'false'}
+        data-trailing={props.trailing !== undefined ? 'true' : 'false'}
+        data-unit={props.unit !== undefined && props.multiline !== true ? 'true' : undefined}
       >
         <Switch>
           <Match when={props.multiline === true}>{textareaElement()}</Match>

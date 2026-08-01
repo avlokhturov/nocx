@@ -712,6 +712,15 @@ export function SettingsComponent(props: SettingsComponentProps) {
     const decl = props.decl
     const eff = () => effectiveValue(decl.key)
     const err = () => errors[decl.key]
+    // The number this row shows, for the two consumers that reason about
+    // bounds. Guarded by the control kind: displayValue coerces to a string
+    // and warns when it can find neither a usable value nor a usable
+    // default, which is exactly what a boolean looks like to it — so
+    // calling it for every row filled the console with "unusable value and
+    // default for setting history.enabled, got boolean, defaultType
+    // boolean". NaN for a row that is not a number; every caller of a range
+    // check treats NaN as "no opinion".
+    const numeric = () => (decl.control === 'number' ? Number(displayValue(eff(), decl)) : NaN)
     const showBreadcrumb = () => isSearching() && sectionFilter() === null
 
     return (
@@ -779,9 +788,9 @@ export function SettingsComponent(props: SettingsComponentProps) {
                 min={decl.min}
                 max={decl.max}
                 unit={decl.unit}
-                caption={numberRangeCaption(decl, Number(displayValue(eff(), decl)))}
+                caption={numberRangeCaption(decl, numeric())}
                 captionAlign="end"
-                error={numberRangeError(decl, Number(displayValue(eff(), decl)))}
+                error={numberRangeError(decl, numeric())}
                 onInput={(v) => {
                   const n = Number(v)
                   void saveSetting(decl.key, isNaN(n) ? Number(displayValue(eff(), decl)) : n)
@@ -821,7 +830,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
             <ProvenanceBadge decl={decl} />
           </div>
 
-          <Show when={fieldSaveError(decl, Number(displayValue(eff(), decl)), err())}>
+          <Show when={fieldSaveError(decl, numeric(), err())}>
             <div class="ui-settings-error">{err()}</div>
           </Show>
         </Field>
