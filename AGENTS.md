@@ -277,6 +277,59 @@ sweep). See `contracts/README.md` for how to add one. Until a method has a schem
 format is unchecked, and you should assume the two sides disagree, because once they
 demonstrably did.
 
+### Every epic proves its happy path
+
+**Every epic that is not a chore exists to let a user do something they could not do
+before. Say what that is in one sentence a user would recognise, and close the epic only
+when one automated check has watched them do it, end to end, through the seam they
+actually reach.** Not the unit. Not the handler. Not a metric that correlates with it.
+
+The three sections above are each a version of "the test agreed with the code and both
+were wrong". This one is worse and simpler: **every test passed, every gate was green, and
+the feature was never built at all.**
+
+Measured on 2026-08-01. `nocx-rtg0` — "your commands survive a restart" — shipped an
+encrypted SQLite store, a key lifecycle, a two-number budget, a retention policy, a
+`history.query` method with a JSON Schema, and a Settings section with five controls.
+`ContentDB.Add` was implemented, tested, and **called by nothing outside its own tests**.
+No command was ever recorded. The owner found it by using the terminal.
+
+Two things let it through, and both are things a careful person would have accepted:
+
+- **The acceptance criterion was `deadcode` being empty, and `deadcode` was empty.** It was
+  empty because `Query` is genuinely reachable from `history.query`. A reachable read path
+  hid an unreachable write path in the same package. The metric answered _is this package
+  reachable_ when the question was _does a command get recorded_. `deadcode` and coverage
+  are floors, never criteria: **neither can tell you a feature is missing, only that
+  written code is used.**
+- **The blocker was reported and read past.** The worker's own message said "production
+  wiring of the store is blocked on nocx-rtg0.9; deadcode reports the store test-reachable
+  only". The next round said "deadcode empty" and that was read as "history works". A
+  worker reporting that production wiring is blocked is an **event**: it becomes a bead
+  with a dependency edge in the same minute, or it evaporates between rounds. It
+  evaporated.
+
+There was also a second, independent failure that the same check would have caught: on any
+machine with no OS keyring the content key sits behind the vault seal and is unreadable at
+startup, so the store never opened at all — every start, structurally, not intermittently.
+`contentkey` had tests for that error path and none asserting that on an ordinary machine
+the key is obtainable. **For every "returns an error when…" there is a paired "and on a
+normal machine it succeeds".**
+
+So, concretely, before an epic closes:
+
+- **One end-to-end check per epic, written in the user's words.** For `nocx-rtg0`: _run a
+  command, restart, press Up, the command is there and the panel says `source: store`._
+  Costs one test. Would have failed on day one. `cmd/devharness` runs the real backend
+  headless — no wails, no GTK, no display — so there is no excuse about the harness.
+- **Write it when the epic is created, not when it is nearly done.** By the end you know
+  what the code does, and that is exactly the knowledge that makes you write the test the
+  implementation passes.
+- **A soft degrade must be visible in the product, not only in a log.** History failing to
+  open is a `slog.Warn` while Settings goes on offering a keep-history toggle, a retention
+  age and a budget that govern nothing. A silent degrade the UI contradicts is how a
+  feature that does not exist survives a release.
+
 ### Before you fix anything: find out whether it is already decided or already filed
 
 A bug report is a symptom, not a mandate to start editing. Four checks, in this order,
@@ -494,22 +547,29 @@ two disjoint epics without coordinating. What you never do is `--claim` the epic
 as though it were a task; `--exclude-type epic` on every task-level query keeps that from
 happening by accident.
 
-**Creating an epic.** Five things, and the first is the one that gets skipped:
+**Creating an epic.** Six things, and the first two are the ones that get skipped:
 
 1. Scope it to a deliverable, not a code area. "Persistence" and "Quality gates" were areas;
    both had to be closed and split because every new bug in the area landed in them, so they
    could never finish and could only be cherry-picked. Ask: can one person be handed this
    whole and finish it?
-2. Write a criterion that stops being false exactly once, and name what is deliberately out.
+2. **Unless it is a chore, name what a user can do that they could not before — and say how
+   you will watch them do it.** See [Every epic proves its happy
+   path](#every-epic-proves-its-happy-path): the epic carries one end-to-end check through
+   the seam a person actually reaches, and it is written when the epic is created, not
+   when the epic is nearly closed. An epic with no sentence a user would recognise is
+   either a chore — label it and move on — or it is an area of code wearing an epic's
+   clothes, which is failure 1 again.
+3. Write a criterion that stops being false exactly once, and name what is deliberately out.
    This one is **enforced**, not advised: `validation.on-create` is `error`, so `bd create -t
 epic` without acceptance criteria fails and creates nothing. Pass `--acceptance "..."`, or
    put a `## Success Criteria` heading in the description — `bd lint` accepts either. An area
    of code has no such criterion by construction, which is precisely why `nocx-6ek` and
    `nocx-k0xk` could never close; the gate exists to stop the next one being created.
-3. Set the status deliberately. `bd create` leaves it `open`, which means _free to assign_ —
+4. Set the status deliberately. `bd create` leaves it `open`, which means _free to assign_ —
    correct for a real backlog item, wrong if you already own it.
-4. Add `blocks` edges only against epics whose files it collides with (above).
-5. Label it `mvp`, `phase-2`, `phase-3` or `infra`, and check the ordering invariant still
+5. Add `blocks` edges only against epics whose files it collides with (above).
+6. Label it `mvp`, `phase-2`, `phase-3` or `infra`, and check the ordering invariant still
    holds: no `mvp` epic sits behind a deferred one.
 
 Prefer more, smaller epics. The backlog went from 15 to 23 doing exactly this, and that was
