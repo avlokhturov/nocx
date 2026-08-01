@@ -21,6 +21,9 @@
     "contracts:check": "node scripts/gen-contracts.mjs --check"
   },
   "dependencies": {
+    "@codemirror/commands": "6.10.4",
+    "@codemirror/state": "6.7.1",
+    "@codemirror/view": "6.43.7",
     "@xterm/addon-canvas": "^0.7.0",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/addon-unicode11": "^0.8.0",

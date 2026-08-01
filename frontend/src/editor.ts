@@ -1,7 +1,21 @@
-// Passive DOM command editor (ADR-0004 §3). Holds text + selection only; a
-// registered action decides where a submit goes. Keyboard routing to/from the
-// PTY is by FOCUS: while shown the textarea captures keys; while hidden the
-// xterm has focus and keys flow to the PTY as usual.
+// Passive DOM command editor (ADR-0004 §3, ADR-0010). Holds text + selection
+// only; a registered action decides where a submit goes. Keyboard routing
+// to/from the PTY is by FOCUS: while shown the editor captures keys; while
+// hidden the xterm has focus and keys flow to the PTY as usual.
+//
+// The input surface is a CodeMirror 6 EditorView mounted inside the
+// `.nocx-editor` card (ADR-0010 §1). The public API is the contract and is
+// unchanged except that the `textarea` getter is replaced by
+// `onSelectionEnd(cb)` (§Decision 2 of the editor-core spec).
+//
+// Key handling deliberately stays a native capture-phase listener on `root`,
+// NOT a CM6 keymap: the listener runs before CM6's own contentDOM handlers
+// for whatever extension list the caller installs, so Enter/Escape/Ctrl-C
+// decide exactly as they did on the textarea. Binding these keys as a CM6
+// keymap at Prec.highest is W2's job; W1 only preserves today's behaviour.
+
+import { EditorState, Extension } from '@codemirror/state'
+import { EditorView } from '@codemirror/view'
 
 const MAX_ROWS = 10
 
@@ -16,10 +30,10 @@ export interface EditorActions {
   submit: (doc: string) => void
   // cancel discards the composed line the way Ctrl-C does at a shell prompt:
   // the editor clears and the shell is interrupted so a fresh prompt returns.
-  // Without it, Ctrl-C in the textarea is a no-op and the stale text corrupts
+  // Without it, Ctrl-C in the editor is a no-op and the stale text corrupts
   // the next command.
   cancel: () => void
-  /** Fired on every textarea input event with the current value.
+  /** Fired on every user-driven document change with the current value.
    *  Use to drive external hint/filter logic without coupling the hint
    *  data source to the editor. */
   onInputChange?: (text: string) => void
@@ -37,11 +51,11 @@ export interface EditorActions {
 
 export class CommandEditor {
   readonly root: HTMLElement
-  private ta: HTMLTextAreaElement
+  private view: EditorView
   private chrome: HTMLElement
   private cwdChip: HTMLElement
   private timeChip: HTMLElement
-  /** Hint dropdown — lives between the chrome and textarea. */
+  /** Hint dropdown — lives between the chrome and the editor surface. */
   private hintContainer: HTMLElement
   /** Current hint items (empty when hidden). */
   private _hintItems: AliasSuggestion[] = []
@@ -49,8 +63,83 @@ export class CommandEditor {
   private _hintDismissed = false
   /** Index of the currently highlighted item in _hintItems. */
   private _hintSelectedIndex = 0
+  /** The row count (capped at MAX_ROWS) the host was last told about. */
+  private _lastRowCount = 1
+  /** True while a programmatic document edit is in flight: such edits set the
+   *  value the way `textarea.value = …` did, which fired no input event, so
+   *  they must not fire onInputChange either. */
+  private _programmatic = false
+  /** Callback for the onSelectionEnd seam (W3 wires the copy policy to it). */
+  private _selectionEndCb: ((text: string) => void) | null = null
 
-  constructor(private readonly actions: EditorActions) {
+  /**
+   * The clock ticks only while the editor is on screen.
+   *
+   * It used to be stamped once, by the input-state transition that revealed the
+   * editor, and then left alone — so the chip showed the second the prompt
+   * appeared and stayed there. Sit at a prompt for ten minutes and it is ten
+   * minutes wrong, which is worse than showing nothing: a wrong clock is still
+   * read as a clock.
+   *
+   * A block in the scrollback is the opposite case and keeps its frozen stamp:
+   * it records when that command ran. This chip is not a record, it is the
+   * present, and the editor is where the present is (nocx-6w4z).
+   */
+  private clock: ReturnType<typeof setInterval> | null = null
+
+  /**
+   * The editor's own surface styling. Kept as a CM6 theme (not style.css)
+   * because a theme extension deterministically overrides the base theme,
+   * which is what these two rules must do: kill the base theme's dotted focus
+   * outline (the textarea had `outline: none`) and paint the caret in the
+   * app's text colour (the base theme uses black/white).
+   */
+  private static readonly editorTheme = EditorView.theme({
+    '&.cm-focused': { outline: 'none' },
+    '.cm-content': { caretColor: 'var(--color-text)' },
+    '.cm-cursor': { borderLeftColor: 'var(--color-text)' },
+  })
+
+  /**
+   * Bridge from CM6 transactions to the host's callbacks.
+   *
+   * - onInputChange mirrors the old textarea `input` event, but only for
+   *   user-driven changes: programmatic edits are flagged and must not fire it
+   *   (a paste or alias accept never fired `input` on the textarea, and firing
+   *   it would re-trigger the async alias fetch after the hints were accepted).
+   * - resized is the _grow() port: the host is told when the capped row count
+   *   (1..MAX_ROWS) changes. The box's real height is CSS (max-height:
+   *   ten lines, overflow-y: auto), so the row count is the trigger, exactly
+   *   as rows were before.
+   *
+   * Both callbacks are wrapped: an exception from a consumer must not corrupt
+   * CM6's update cycle (fail-open).
+   */
+  private readonly onViewUpdate = EditorView.updateListener.of((update) => {
+    if (!update.docChanged) return
+    const text = update.state.doc.toString()
+    if (!this._programmatic) {
+      try {
+        this.actions.onInputChange?.(text)
+      } catch (err) {
+        console.error('nocx: onInputChange failed', err)
+      }
+    }
+    const rows = Math.min(MAX_ROWS, Math.max(1, text.split('\n').length))
+    if (rows !== this._lastRowCount) {
+      this._lastRowCount = rows
+      try {
+        this.actions.resized?.()
+      } catch (err) {
+        console.error('nocx: resized failed', err)
+      }
+    }
+  })
+
+  constructor(
+    private readonly actions: EditorActions,
+    extensions: Extension[] = [],
+  ) {
     this.root = document.createElement('div')
     this.root.className = 'nocx-editor'
     this.root.style.display = 'none'
@@ -74,32 +163,42 @@ export class CommandEditor {
     this.hintContainer.style.display = 'none'
     this.root.appendChild(this.hintContainer)
 
-    // ── Textarea ────────────────────────────────────────────────────────
-    this.ta = document.createElement('textarea')
-    this.ta.className = 'nocx-editor-input'
-    this.ta.rows = 1
-    this.ta.spellcheck = false
-    this.ta.autocapitalize = 'off'
-    this.ta.addEventListener('keydown', this.onKeydown)
-    // Auto-grow: resize rows to fit content (1..MAX_ROWS).
-    this.ta.addEventListener('input', this.onInput)
-    this.root.appendChild(this.ta)
-  }
+    // ── CodeMirror 6 surface (ADR-0010) ────────────────────────────────
+    // The extension list is a constructor parameter: the editor must not
+    // hard-code its language or decoration set (spec §Decision 4). What is
+    // hard-coded here is the editor's own identity — line wrapping matches
+    // the old pre-wrap textarea, and the surface theme above.
+    this.view = new EditorView({
+      state: EditorState.create({
+        doc: '',
+        extensions: [
+          EditorView.lineWrapping,
+          CommandEditor.editorTheme,
+          this.onViewUpdate,
+          ...extensions,
+        ],
+      }),
+      parent: this.root,
+    })
+    this.view.contentDOM.classList.add('nocx-editor-input')
+    this.view.contentDOM.spellcheck = false
+    this.view.contentDOM.setAttribute('autocapitalize', 'off')
 
-  /**
-   * The clock ticks only while the editor is on screen.
-   *
-   * It used to be stamped once, by the input-state transition that revealed the
-   * editor, and then left alone — so the chip showed the second the prompt
-   * appeared and stayed there. Sit at a prompt for ten minutes and it is ten
-   * minutes wrong, which is worse than showing nothing: a wrong clock is still
-   * read as a clock.
-   *
-   * A block in the scrollback is the opposite case and keeps its frozen stamp:
-   * it records when that command ran. This chip is not a record, it is the
-   * present, and the editor is where the present is (nocx-6w4z).
-   */
-  private clock: ReturnType<typeof setInterval> | null = null
+    // Key handling: capture on the card, so our decisions run before CM6's
+    // own contentDOM handlers no matter what keymap the caller installs
+    // (verified empirically: a capture-phase listener on an ancestor
+    // preempts the defaultKeymap's Enter binding).
+    this.root.addEventListener('keydown', this.onKeydown, true)
+
+    // Selection-gesture seam (spec §Decision 2): fires with the selected text
+    // when a mouse selection completes. It copies nothing — the policy lives
+    // with the consumer (W3).
+    this.view.contentDOM.addEventListener('mouseup', () => {
+      const sel = this.view.state.selection.main
+      if (sel.from === sel.to) return
+      this._selectionEndCb?.(this.view.state.sliceDoc(sel.from, sel.to))
+    })
+  }
 
   private startClock(): void {
     this.setTime(new Date())
@@ -142,19 +241,36 @@ export class CommandEditor {
 
   // ── keyboard ──────────────────────────────────────────────────────────
 
-  private onInput = (): void => {
-    this._grow()
-    this.actions.onInputChange?.(this.ta.value)
+  /** Register the selection-end callback (replaces the textarea getter). */
+  onSelectionEnd(cb: (text: string) => void): void {
+    this._selectionEndCb = cb
   }
 
-  /** Submit the current textarea value, then hide and clear (ADR-0004 §2). */
+  /**
+   * Replace the whole document without firing onInputChange (the textarea's
+   * `value = ''` fired no input event).
+   */
+  private clearDoc(): void {
+    this._programmatic = true
+    try {
+      this.view.dispatch({
+        changes: { from: 0, to: this.view.state.doc.length },
+      })
+    } finally {
+      this._programmatic = false
+    }
+    this._lastRowCount = 1
+  }
+
+  /** Submit the current document, then hide and clear (ADR-0004 §2). */
   private submit(): void {
     this.hideAliasHints()
-    const doc = this.ta.value
-    // Atomic handoff (ADR-0004 §2): hide + clear BEFORE sending, so the
-    // committed command is painted once by the shell, not echoed twice.
-    this.ta.value = ''
-    this.ta.rows = 1
+    const doc = this.view.state.doc.toString()
+    // Atomic handoff (ADR-0004 §2): clear + hide BEFORE sending, so the
+    // committed command is painted once by the shell, not echoed twice. The
+    // observed order from the textarea implementation — value → rows →
+    // hide() → submit() — is preserved.
+    this.clearDoc()
     this.hide()
     this.actions.submit(doc)
   }
@@ -164,28 +280,42 @@ export class CommandEditor {
   private acceptHint(): void {
     const item = this._hintItems[this._hintSelectedIndex]
     if (!item) return
-    const v = this.ta.value
+    const v = this.view.state.doc.toString()
     const sshIdx = v.search(/\bssh\s+/)
     if (sshIdx === -1) return
     const before = v.slice(0, sshIdx + 4) // "ssh "
     const after = v.slice(sshIdx).replace(/^ssh\s+\S*/, '')
     const cmd = `${before}${item.alias}${after}`
-    this.ta.value = cmd
-    this._grow()
+    this._programmatic = true
+    try {
+      this.view.dispatch({
+        changes: { from: 0, to: v.length, insert: cmd },
+      })
+    } finally {
+      this._programmatic = false
+    }
     this.hideAliasHints()
     this.actions.onAcceptHint?.(item.alias)
   }
 
   private onKeydown = (e: KeyboardEvent): void => {
+    // IME in progress: the composition owns the key stream, and CM6 handles
+    // composition itself. Interpreting a composing Enter as submit or a
+    // composing Ctrl-C as interrupt would destroy the composition (spec
+    // W1 check 3). keyCode 229 is the legacy WebKit composition sentinel.
+    if (e.isComposing || e.keyCode === 229) return
+
     if (this._hintItems.length > 0) {
       if (e.key === 'ArrowDown') {
         e.preventDefault()
+        e.stopPropagation()
         this._hintSelectedIndex = (this._hintSelectedIndex + 1) % this._hintItems.length
         this._renderHints()
         return
       }
       if (e.key === 'ArrowUp') {
         e.preventDefault()
+        e.stopPropagation()
         this._hintSelectedIndex =
           (this._hintSelectedIndex - 1 + this._hintItems.length) % this._hintItems.length
         this._renderHints()
@@ -193,11 +323,13 @@ export class CommandEditor {
       }
       if (e.key === 'Enter') {
         e.preventDefault()
+        e.stopPropagation()
         this.acceptHint()
         return
       }
       if (e.key === 'Escape') {
         e.preventDefault()
+        e.stopPropagation()
         this._hintDismissed = true
         this.hideAliasHints()
         return
@@ -207,23 +339,25 @@ export class CommandEditor {
     // Standard editor keys when no hint is active.
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
+      e.stopPropagation()
       this.submit()
       return
     }
     // Escape clears the draft without interrupting the shell (Ctrl-C).
     if (e.key === 'Escape') {
       e.preventDefault()
-      this.ta.value = ''
-      this.ta.rows = 1
+      e.stopPropagation()
+      this.clearDoc()
       return
     }
     // Ctrl-C cancels the composed line like a shell prompt. A real selection is
     // left alone so Ctrl-C still copies; with nothing selected, interrupt.
     if (e.ctrlKey && !e.metaKey && !e.altKey && (e.key === 'c' || e.key === 'C')) {
-      if (this.ta.selectionStart !== this.ta.selectionEnd) return
+      const sel = this.view.state.selection.main
+      if (sel.from !== sel.to) return
       e.preventDefault()
-      this.ta.value = ''
-      this.ta.rows = 1
+      e.stopPropagation()
+      this.clearDoc()
       this.actions.cancel()
     }
   }
@@ -315,29 +449,35 @@ export class CommandEditor {
     // where that decision belongs.
     this.root.style.visibility = ''
     this.startClock()
-    this.ta.focus()
+    // A view that was display:none can cache zero or stale geometry; ask CM6
+    // to re-measure before it is painted and focused (spec W1 check 5).
+    this.view.requestMeasure()
+    this.view.focus()
   }
 
-  /** Focus the textarea if the editor is visible. Safe to call when hidden. */
+  /** Focus the editor if it is visible. Safe to call when hidden. */
   focus(): void {
-    if (this.isVisible) this.ta.focus()
+    if (this.isVisible) this.view.focus()
   }
 
   /**
-   * Insert text at the caret, replacing any selection, then grow + focus.
+   * Insert text at the caret, replacing any selection, then focus.
    * Used by right-click/middle-click paste while the editor owns input: at the
    * prompt the terminal is read-only (setReadOnly), so a paste must land in the
    * composed command, not the (disabled) grid.
    */
   insertText(text: string): void {
-    const start = this.ta.selectionStart
-    const end = this.ta.selectionEnd
-    const v = this.ta.value
-    this.ta.value = v.slice(0, start) + text + v.slice(end)
-    const caret = start + text.length
-    this.ta.selectionStart = this.ta.selectionEnd = caret
-    this._grow()
-    this.ta.focus()
+    const sel = this.view.state.selection.main
+    this._programmatic = true
+    try {
+      this.view.dispatch({
+        changes: { from: sel.from, to: sel.to, insert: text },
+        selection: { anchor: sel.from + text.length },
+      })
+    } finally {
+      this._programmatic = false
+    }
+    this.view.focus()
   }
 
   hide(): void {
@@ -345,7 +485,7 @@ export class CommandEditor {
     // outlives visibility is one wakeup per second per tab for a chip nobody can
     // see — and they accumulate for the life of the window.
     this.stopClock()
-    this.ta.blur()
+    this.view.contentDOM.blur()
     this.root.style.display = 'none'
     this.hideAliasHints()
   }
@@ -355,15 +495,11 @@ export class CommandEditor {
   }
 
   /** Whether the editor's root element contains `el`. Used to scope the
-   *  focus-bounce so clicks on the textarea / cwd chip
-   *  are not swallowed. */
+   *  focus-bounce so clicks on the editor surface / cwd chip
+   *  are not swallowed. CM6's contentDOM lives inside root, so the contract
+   *  the focus-bounce tests against holds unchanged. */
   rootContains(el: Node | null): boolean {
     return this.root.contains(el)
-  }
-
-  /** The raw textarea element — exposed so the Tab can wire copy-on-select. */
-  get textarea(): HTMLTextAreaElement {
-    return this.ta
   }
 
   dispose(): void {
@@ -371,22 +507,8 @@ export class CommandEditor {
     // case rather than the edge one — hide() would never run and the interval
     // would outlive everything it refers to.
     this.stopClock()
-    this.ta.removeEventListener('keydown', this.onKeydown)
-    this.ta.removeEventListener('input', this.onInput)
+    this.root.removeEventListener('keydown', this.onKeydown, true)
+    this.view.destroy()
     this.root.remove()
-  }
-
-  // ── internal ──────────────────────────────────────────────────────────
-
-  private _grow(): void {
-    const lines = this.ta.value.split('\n').length
-    const rows = Math.min(MAX_ROWS, Math.max(1, lines))
-    if (rows === this.ta.rows) return
-    this.ta.rows = rows
-    // Typing a second line makes this box taller, which makes the scrollback
-    // area shorter — and nothing was recomputing the view for that, so the
-    // bottom of the transcript slid underneath the editor instead of moving up
-    // out of its way (nocx-6w4z).
-    this.actions.resized?.()
   }
 }

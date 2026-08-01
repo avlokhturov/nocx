@@ -182,6 +182,30 @@
   word-break: break-word;
 }
 
+/* CodeMirror 6 surface (ADR-0010). Auto-grow is layout, not arithmetic: the
+   box is capped at ten lines — 10 × line-height 1.2 × font-size (the em in
+   the calc resolves against .cm-editor's font-size) plus the 6px vertical
+   padding, border-box — and scrolls past that (spec §Decision 3). The old
+   `rows` counting and MAX_ROWS live only in the editor's resized trigger now. */
+.nocx-editor .cm-editor {
+  font-size: var(--font-size-terminal);
+  max-height: calc(12em + 6px);
+}
+
+.nocx-editor .cm-scroller {
+  font-family: var(--font-family-mono);
+  line-height: 1.2;
+  overflow-y: auto;
+}
+
+.nocx-editor .cm-content {
+  padding: 2px 8px 4px;
+}
+
+.nocx-editor .cm-line {
+  padding: 0;
+}
+
 /* ── Command-ledger gutter glyphs (ADR-0008) ────────────────────────── */
 
 .nocx-gutter-glyph {

@@ -414,12 +414,10 @@ export class TerminalContent extends BaseTabContent {
       })
 
       // ── Editor copy-on-select (item 6) ─────────────────────────────────
-      this.editor.textarea.addEventListener('mouseup', () => {
-        const ta = this.editor!.textarea
-        const start = ta.selectionStart
-        const end = ta.selectionEnd
-        if (start === end) return
-        const text = ta.value.slice(start, end)
+      // The DOM mechanics of "a selection gesture finished" live in the
+      // editor (onSelectionEnd); the policy — should this be copied, and the
+      // clipboard write — stays here (ADR-0010 §Decision 2).
+      this.editor.onSelectionEnd((text) => {
         if (shouldCopy(text)) {
           this.clipboard.writeText(text).catch((e) => {
             console.warn('nocx: clipboard write failed (editor selection)', e)
