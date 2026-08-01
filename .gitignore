@@ -23,7 +23,8 @@ _bmad/core/config.yaml
 **/config.user.toml
 **/config.user.yaml
 /bin/
-/build/
+/build/*
+!/build/darwin/
 /dist/
 /go/build/
 /tools/bin/
