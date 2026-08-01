@@ -317,7 +317,9 @@ describe('Escape with the editor visible but unfocused (focus-loss rescue)', () 
         new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true }),
       )
       expect(ed.root.querySelector('.ui-recall-panel')).not.toBeNull()
-      expect(ed.getDoc()).toBe('make deploy') // previewing the only row
+      // The recall query crosses the control plane (nocx-rtg0.13); the
+      // preview lands when the answer does.
+      await vi.waitFor(() => expect(ed.getDoc()).toBe('make deploy')) // previewing the only row
 
       // The user clicked the scrollback while the overlay was up.
       view.contentDOM.blur()
@@ -526,7 +528,9 @@ describe('recall overlay is actually wired (nocx-w7h.4)', () => {
       // The submit cleared the editor; Up at the empty prompt opens recall.
       key(view, { key: 'ArrowUp' })
       expect(ed.root.querySelector('.ui-recall-panel')).not.toBeNull()
-      expect(ed.getDoc()).toBe('make deploy') // previewing the only row
+      // The recall query crosses the control plane (nocx-rtg0.13); the
+      // preview lands when the answer does.
+      await vi.waitFor(() => expect(ed.getDoc()).toBe('make deploy')) // previewing the only row
 
       key(view, { key: 'Enter' }) // accept — executes the previewed command
       // One more send, and it is the SAME wire shape as the typed submit:

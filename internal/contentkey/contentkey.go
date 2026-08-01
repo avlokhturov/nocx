@@ -1,20 +1,39 @@
 // Package contentkey owns the ContentDB key's lifecycle (nocx-rtg0.9,
-// ADR-0018 §3).
+// amended by nocx-rtg0.14, ADR-0018 §3).
+//
+// The key has two homes, and the vault's file provider appears in neither:
+//
+//   - An OS keystore exists (macOS Keychain, freedesktop Secret Service,
+//     Windows Credential Manager) → the key lives there, in the system
+//     provider's derived slot — the same arrangement as before the
+//     amendment, reached without the vault instance.
+//   - There is none → the key is DERIVED at startup from a per-machine salt
+//     and the machine's identity. No passphrase is ever requested for
+//     history, on any platform.
+//
+// The threat model is narrow and stated (owner decision 2026-08-02): a copy
+// of the FILE must not be readable as it stands. Not a live attacker, not
+// other processes running as this user — that boundary is not defensible on
+// a desktop. What encryption must defeat is the DETACHED copy: a backup, a
+// synced folder, an exported file, a pulled disk. So the salt is 32 random
+// bytes, mode 0600, in the CONFIG directory — never in the data directory
+// beside content.db: a copy of the data directory carries nothing that opens
+// it. The machine-id is not a secret (/etc/machine-id is mode 444), which is
+// exactly why it cannot be the only ingredient.
 //
 // The reference is DERIVED, never persisted. settings.json is a portable
 // document — it syncs between machines, is backed up, gets copied — and a
 // sec:v1:<provider>:<id> reference points at a provider slot on THIS
-// machine: carried elsewhere it points at nothing. So at startup the id is
-// recomputed (the osKeyID shape), the provider's slot is asked, and the key
-// is found or created. The provider slot is the source of truth.
+// machine: carried elsewhere it points at nothing. The slot itself is the
+// source of truth in the keystore branch.
 //
-// Two consequences. The read goes through the raw provider Get (no vault
-// seal gate), so the key is read ONCE at startup and held for the process —
-// a vault auto-seal can never make history unreadable. And the database's
-// existence is the "was history ever created" marker: when no slot holds a
-// key but content.db exists, the key is LOST and must never be re-minted (a
-// new key would strand the existing database while the UI claimed history
-// worked).
+// Two invariants carry the whole lifecycle. The read never passes through a
+// vault seal gate: the key is read ONCE at startup and held for the process,
+// so a vault auto-seal can never make history unreadable. And the database's
+// existence is the "was history ever created" marker: when the key cannot be
+// reconstructed — no keystore slot, no salt — but content.db exists, the key
+// is LOST and must never be re-minted (a new key would strand the existing
+// database while the UI claimed history worked).
 package contentkey
 
 import (
@@ -23,43 +42,57 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/vault"
 )
 
-// ErrKeyLost reports that the database exists but no provider slot holds its
-// key. The key is cryptographically unrecoverable (ADR-0018 §5) and MUST NOT
-// be re-minted.
-var ErrKeyLost = errors.New("content key: database exists but its key is gone from every provider slot")
-
-// KeyPolicy is the vault surface contentkey needs: default-provider routing
-// and the deterministic system-key reference. Implemented by *vault.Vault —
-// the reference grammar stays owned by the vault (internal/vault/id.go).
-type KeyPolicy interface {
-	DefaultProvider() vault.ProviderID
-	ContentKeyID(p vault.ProviderID) (credential.SecretID, error)
-	ProviderOf(id credential.SecretID) (vault.ProviderID, error)
-}
+// ErrKeyLost reports that the database exists but its key is gone from every
+// home — no OS keystore slot holds it and no salt remains to derive it. The
+// key is cryptographically unrecoverable (ADR-0018 §5) and MUST NOT be
+// re-minted.
+var ErrKeyLost = errors.New("content key: database exists but its key is gone (no keystore slot, no salt)")
 
 // ProviderRegistry is the provider seam. Implemented by *vault.Registry.
+// Only the system provider — the OS keystore — is ever used, and only when
+// it is available; the file provider is deliberately out of this key's
+// lifecycle (nocx-rtg0.14).
 type ProviderRegistry interface {
 	Get(id vault.ProviderID) (vault.Provider, bool)
 	Writable(id vault.ProviderID) (vault.WritableProvider, bool)
-	List() []vault.Provider
 }
 
 // Config is the dependency set for the key lifecycle.
 type Config struct {
-	Policy   KeyPolicy
+	// Registry reaches the providers. The system provider (the OS keystore)
+	// is the key's home when one exists.
 	Registry ProviderRegistry
+	// KeyID derives the deterministic keystore slot reference. The sec:v1
+	// grammar is vault-owned; the default is vault.ContentKeyID.
+	KeyID func(p vault.ProviderID) (credential.SecretID, error)
+	// SystemReady reports whether an OS keystore is available. Injected so
+	// the composition root probes once — a probe is a real keychain write,
+	// and probing twice at startup would be a second permission prompt.
+	SystemReady bool
 	// DBPath is the content.db path. Its existence distinguishes first run
 	// (create the key) from a lost key (never re-mint). The database lives
-	// in the DATA directory beside the key's slot — never in the portable
-	// config directory.
+	// in the DATA directory, never in the portable config directory.
 	DBPath string
-	Logger log.Logger
+	// SaltPath is the 0600 salt file in the CONFIG directory — never beside
+	// content.db. Its existence means "this machine's key is derived"; it is
+	// authoritative, so a keystore appearing later cannot strand derived
+	// history by minting elsewhere.
+	SaltPath string
+	// MachineID and UserID supply the derivation ingredients. When nil, the
+	// platform identity is read (Linux: /etc/machine-id + uid; macOS:
+	// IOPlatformUUID + uid; Windows: MachineGuid + user SID). Injectable so
+	// the failure path is testable without a machine that cannot name
+	// itself.
+	MachineID func() (string, error)
+	UserID    func() (string, error)
+	Logger    log.Logger
 }
 
 // LoadOrCreate returns the 32-byte ContentDB key. Called once at startup;
@@ -68,54 +101,69 @@ func LoadOrCreate(ctx context.Context, cfg Config) ([]byte, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = log.NewSlogAdapter(nil)
 	}
-
-	// Find the key in any provider's derived slot. The default provider (or
-	// the setup rule when unset) is asked first; the others follow, so a
-	// default-provider change never strands the key — the reference is
-	// immutable and its provider is encoded in the derivation.
-	for _, p := range providerOrder(ctx, cfg) {
-		id, err := cfg.Policy.ContentKeyID(p)
-		if err != nil {
-			return nil, err
-		}
-		sec, err := providerGet(ctx, cfg, id)
-		switch {
-		case err == nil:
-			key, ok := secretBytes(sec)
-			if !ok || len(key) != 32 {
-				return nil, fmt.Errorf("content key: slot %q holds unusable material (len %d)", id, len(key))
-			}
-			return key, nil
-		case !errors.Is(err, vault.ErrSecretNotFound):
-			return nil, fmt.Errorf("content key: probe %q: %w", p, err)
-		}
+	if cfg.KeyID == nil {
+		cfg.KeyID = vault.ContentKeyID
 	}
 
-	// No slot holds a key. If the database exists, the key is LOST — re-
-	// minting would rotate it and strand the database. If not, first run.
+	// A salt file means the key was derived on this machine, and the salt is
+	// authoritative: even if an OS keystore has appeared since, minting into
+	// it would rotate the key under the existing database. Derive.
+	if _, err := os.Stat(cfg.SaltPath); err == nil {
+		return deriveKey(cfg)
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("content key: stat salt: %w", err)
+	}
+
+	// No salt: the OS keystore is the key's home when one exists.
+	if cfg.SystemReady {
+		return keystoreFindOrCreate(ctx, cfg)
+	}
+
+	// Neither salt nor keystore. If the database exists the key is LOST —
+	// re-minting would rotate it and strand the database. If not, first run.
 	if _, err := os.Stat(cfg.DBPath); err == nil {
 		return nil, ErrKeyLost
 	} else if !os.IsNotExist(err) {
 		return nil, fmt.Errorf("content key: stat database: %w", err)
 	}
-	return create(ctx, cfg)
+	return createDerived(ctx, cfg)
 }
 
-// create mints the key at the first provider in the order (the default, or
-// the setup rule when unset) and stores it in its derived slot.
-func create(ctx context.Context, cfg Config) ([]byte, error) {
-	order := providerOrder(ctx, cfg)
-	if len(order) == 0 {
-		return nil, errors.New("content key: no provider available")
+// keystoreFindOrCreate finds the key in the system provider's derived slot,
+// or mints it there on first run. The database's existence is the
+// lost-key marker: an empty slot beside an existing database means the key
+// is gone, never to be re-minted.
+func keystoreFindOrCreate(ctx context.Context, cfg Config) ([]byte, error) {
+	const p = vault.ProviderSystem
+	prov, ok := cfg.Registry.Get(p)
+	if !ok {
+		return nil, fmt.Errorf("content key: provider %q unavailable", p)
 	}
-	p := order[0]
+	id, err := cfg.KeyID(p)
+	if err != nil {
+		return nil, err
+	}
+	sec, err := prov.Get(ctx, id)
+	switch {
+	case err == nil:
+		key, usable := secretBytes(sec)
+		if !usable || len(key) != 32 {
+			return nil, fmt.Errorf("content key: slot %q holds unusable material (len %d)", id, len(key))
+		}
+		return key, nil
+	case !errors.Is(err, vault.ErrSecretNotFound):
+		return nil, fmt.Errorf("content key: probe %q: %w", p, err)
+	}
+
+	if _, err := os.Stat(cfg.DBPath); err == nil {
+		return nil, ErrKeyLost
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("content key: stat database: %w", err)
+	}
+
 	w, ok := cfg.Registry.Writable(p)
 	if !ok {
 		return nil, fmt.Errorf("content key: provider %q is not writable", p)
-	}
-	id, err := cfg.Policy.ContentKeyID(p)
-	if err != nil {
-		return nil, err
 	}
 	key := make([]byte, 32)
 	if _, err := rand.Read(key); err != nil {
@@ -128,66 +176,106 @@ func create(ctx context.Context, cfg Config) ([]byte, error) {
 	return key, nil
 }
 
-// providerOrder is the deterministic probe order: the default provider (or
-// the setup rule when the vault has none), then every other REGISTERED
-// provider — read-only ones included, because a key stored before a
-// provider lost its write capability must still be discoverable. The
-// registry is bounded (system + file at the composition root), so this is
-// at most two probes. Writability is checked only on the creation
-// candidate, never on the recovery set.
-func providerOrder(ctx context.Context, cfg Config) []vault.ProviderID {
-	var order []vault.ProviderID
-	if p := cfg.Policy.DefaultProvider(); p != "" {
-		order = append(order, p)
-	} else if p := setupRule(ctx, cfg.Registry); p != "" {
-		order = append(order, p)
+// createDerived mints the salt and derives the key from it. The machine
+// identity is read BEFORE the salt is written: a host that cannot name
+// itself must not leave a salt behind, or the next start would derive and
+// fail again with a salt that now exists.
+func createDerived(ctx context.Context, cfg Config) ([]byte, error) {
+	salt := make([]byte, saltLen)
+	if _, err := rand.Read(salt); err != nil {
+		return nil, fmt.Errorf("content key: generate salt: %w", err)
 	}
-	for _, prov := range cfg.Registry.List() {
-		order = append(order, prov.ID())
-	}
-	return dedupe(order)
-}
-
-func dedupe(in []vault.ProviderID) []vault.ProviderID {
-	out := make([]vault.ProviderID, 0, len(in))
-	seen := map[vault.ProviderID]bool{}
-	for _, p := range in {
-		if !seen[p] {
-			seen[p] = true
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
-// providerGet reads a secret through the raw provider seam — no vault seal
-// gate — so the startup read works on a sealed vault for providers that do
-// not lock (the system provider). The file provider requires the vault to be
-// unsealed (its material is encrypted under the root key); the resulting
-// failure is the caller's no-history fallback.
-func providerGet(ctx context.Context, cfg Config, id credential.SecretID) (credential.Secret, error) {
-	p, err := cfg.Policy.ProviderOf(id)
+	key, err := deriveKeyWithSalt(cfg, salt)
 	if err != nil {
-		return credential.Secret{}, err
+		return nil, err
 	}
-	prov, ok := cfg.Registry.Get(p)
-	if !ok {
-		return credential.Secret{}, fmt.Errorf("%w: %s", vault.ErrProviderUnavailable, p)
+	if err := writeSalt(cfg.SaltPath, salt); err != nil {
+		return nil, err
 	}
-	return prov.Get(ctx, id)
+	cfg.Logger.Info("content key derived", "salt", cfg.SaltPath)
+	return key, nil
 }
 
-// setupRule mirrors the vault's own choice when no default is set: the
-// system provider when it is writable and ready, else the file provider.
-// A machine with no Secret Service gets the other provider instead of an
-// error — the owner's correction verbatim.
-func setupRule(ctx context.Context, reg ProviderRegistry) vault.ProviderID {
-	for _, p := range []vault.ProviderID{vault.ProviderSystem, vault.ProviderFile} {
-		if w, ok := reg.Writable(p); ok && w.Status(ctx).Ready {
-			return p
-		}
+// deriveKey reads the persisted salt and derives from it. The caller has
+// already established the salt exists; a read failure here is corruption,
+// never a first run.
+func deriveKey(cfg Config) ([]byte, error) {
+	salt, err := os.ReadFile(cfg.SaltPath)
+	if err != nil {
+		return nil, fmt.Errorf("content key: read salt: %w", err)
 	}
-	return ""
+	if len(salt) != saltLen {
+		return nil, fmt.Errorf("content key: salt file is corrupt (len %d, want %d)", len(salt), saltLen)
+	}
+	return deriveKeyWithSalt(cfg, salt)
+}
+
+// deriveKeyWithSalt runs the HKDF derivation (nocx-rtg0.14):
+//
+//	key = HKDF-SHA256( ikm = salt ‖ machine-id ‖ uid, info = "nocx-contentdb-v1" )
+//
+// The concatenation is length-framed so no two (salt, machine-id, uid)
+// triples can collide at the boundaries; the brief's ingredients are exactly
+// the input key material. machine-id is not a secret — the salt is the
+// secret ingredient, which is precisely why the salt must never sit beside
+// content.db.
+func deriveKeyWithSalt(cfg Config, salt []byte) ([]byte, error) {
+	machineID := cfg.MachineID
+	if machineID == nil {
+		// The salt's own directory is the config directory, which is also
+		// where a minted id belongs when the host exposes none of its own.
+		configDir := filepath.Dir(cfg.SaltPath)
+		machineID = func() (string, error) { return machineIDOrMinted(configDir) }
+	}
+	userID := cfg.UserID
+	if userID == nil {
+		userID = readUserID
+	}
+	machine, err := machineID()
+	if err != nil {
+		return nil, fmt.Errorf("content key: machine identity: %w", err)
+	}
+	user, err := userID()
+	if err != nil {
+		return nil, fmt.Errorf("content key: user identity: %w", err)
+	}
+
+	ikm := make([]byte, 0, saltLen+8+len(machine)+8+len(user))
+	ikm = append(ikm, salt...)
+	ikm = appendUint64(ikm, uint64(len(machine)))
+	ikm = append(ikm, machine...)
+	ikm = appendUint64(ikm, uint64(len(user)))
+	ikm = append(ikm, user...)
+	return hkdfKey(ikm)
+}
+
+func appendUint64(b []byte, v uint64) []byte {
+	return append(b,
+		byte(v>>56), byte(v>>48), byte(v>>40), byte(v>>32),
+		byte(v>>24), byte(v>>16), byte(v>>8), byte(v))
+}
+
+// writeSalt writes the salt atomically-enough: O_EXCL with 0600, so a racing
+// second start cannot clobber the first salt (0600 has no group/other bits,
+// so a umask cannot widen it). The parent — the config directory — is
+// created 0700 if missing: on a fresh machine nothing has written there yet,
+// and the salt must not be the first casualty of that.
+func writeSalt(path string, salt []byte) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("content key: create salt dir: %w", err)
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // path is the app-owned config-dir salt, never caller input
+	if err != nil {
+		return fmt.Errorf("content key: create salt: %w", err)
+	}
+	if _, err := f.Write(salt); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("content key: write salt: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("content key: close salt: %w", err)
+	}
+	return nil
 }
 
 // secretBytes extracts the plaintext through Use. Returns ok=false when Use

@@ -9,6 +9,10 @@
 // own submit path — the ordinary "type a command and press Enter", with the
 // typing done for you. Esc restores the draft, caret and scroll exactly; Up
 // is caret movement first.
+//
+// The query crosses the control plane (nocx-rtg0.13): open() is async, so
+// every test that opens the panel waits for the observable it asserts — the
+// panel's own settled content — never for a duration.
 import { describe, it, expect, vi } from 'vitest'
 import { EditorView, keymap } from '@codemirror/view'
 import { defaultKeymap } from '@codemirror/commands'
@@ -33,6 +37,17 @@ const key = (view: EditorView, init: KeyboardEventInit) => {
   return ev
 }
 
+/** Wait until the overlay has settled out of its loading state: the answer
+ *  to the opening rung (and any open-time climb) landed and the panel
+ *  rendered. Waits on the panel's own content — the loading state is the
+ *  '…' count — so the wait is for the observable, not for a duration. */
+async function settled(container: HTMLElement): Promise<void> {
+  await vi.waitFor(() => {
+    const text = panelOf(container).textContent ?? ''
+    expect(text).not.toContain('…')
+  })
+}
+
 function mkEntry(command: string, endedAt: number | null = 1000): HistoryEntry {
   return {
     id: `${command}-${endedAt}`,
@@ -47,21 +62,24 @@ function mkEntry(command: string, endedAt: number | null = 1000): HistoryEntry {
 function mkQuery(
   commands: string[],
   source: 'store' | 'session' = 'session',
-): (scope: RecallScope) => HistoryQuery {
-  return (scope) => ({
-    entries: commands.map((c, i) => mkEntry(c, 1000 - i)),
-    scope,
-    exhausted: true,
-    source,
-  })
+): (scope: RecallScope) => Promise<HistoryQuery> {
+  return (scope) =>
+    Promise.resolve({
+      entries: commands.map((c, i) => mkEntry(c, 1000 - i)),
+      scope,
+      exhausted: true,
+      source,
+    })
 }
 
-function emptyQuery(source: 'store' | 'session' = 'session'): (scope: RecallScope) => HistoryQuery {
-  return (scope) => ({ entries: [], scope, exhausted: true, source })
+function emptyQuery(
+  source: 'store' | 'session' = 'session',
+): (scope: RecallScope) => Promise<HistoryQuery> {
+  return (scope) => Promise.resolve({ entries: [], scope, exhausted: true, source })
 }
 
 function setupRecall(opts: {
-  query?: (scope: RecallScope) => HistoryQuery
+  query?: (scope: RecallScope) => Promise<HistoryQuery>
   actions?: Partial<EditorActions>
 }) {
   const container = document.createElement('div')
@@ -75,7 +93,9 @@ function setupRecall(opts: {
   recall.mount(ed.root)
   ed.setKeyArbiter((e) => recall.handleKey(e))
   // The terminal-content wiring: Up at the top of a draft opens recall.
-  actions.onUpAtTop = () => recall.open('directory')
+  actions.onUpAtTop = () => {
+    void recall.open('directory')
+  }
   return { container, ed, view, recall, submit }
 }
 
@@ -86,12 +106,15 @@ const panelOf = (container: HTMLElement): HTMLElement => {
 }
 
 describe('recall: Enter executes the previewed command', () => {
-  it('Enter while navigating submits the previewed command and closes the overlay', () => {
-    const { ed, view, recall, submit } = setupRecall({ query: mkQuery(['rm -rf build']) })
+  it('Enter while navigating submits the previewed command and closes the overlay', async () => {
+    const { container, ed, view, recall, submit } = setupRecall({
+      query: mkQuery(['rm -rf build']),
+    })
     ed.show()
 
     // Empty draft, caret at top: Up opens recall; the row is previewed.
     key(view, { key: 'ArrowUp' })
+    await settled(container)
     expect(recall.isOpen).toBe(true)
     expect(ed.getDoc()).toBe('rm -rf build')
 
@@ -103,11 +126,14 @@ describe('recall: Enter executes the previewed command', () => {
     expect(submit).toHaveBeenCalledWith('rm -rf build')
   })
 
-  it('Esc after previewing restores the draft and sends nothing', () => {
-    const { ed, view, recall, submit } = setupRecall({ query: mkQuery(['rm -rf build']) })
+  it('Esc after previewing restores the draft and sends nothing', async () => {
+    const { container, ed, view, recall, submit } = setupRecall({
+      query: mkQuery(['rm -rf build']),
+    })
     ed.show()
     ed.insertText('git s')
     key(view, { key: 'ArrowUp' })
+    await settled(container)
     expect(ed.getDoc()).toBe('rm -rf build') // previewed
 
     key(view, { key: 'Escape' })
@@ -116,11 +142,12 @@ describe('recall: Enter executes the previewed command', () => {
     expect(submit).not.toHaveBeenCalled() // and nothing was sent
   })
 
-  it('typing while navigating keeps the previewed command as the new draft', () => {
-    const { ed, view, recall } = setupRecall({ query: mkQuery(['docker compose up']) })
+  it('typing while navigating keeps the previewed command as the new draft', async () => {
+    const { container, ed, view, recall } = setupRecall({ query: mkQuery(['docker compose up']) })
     ed.show()
     ed.insertText('git s')
     key(view, { key: 'ArrowUp' })
+    await settled(container)
     expect(recall.isOpen).toBe(true)
     expect(ed.getDoc()).toBe('docker compose up') // previewed
     // An insertion hands the line to the editor: the overlay closes and the
@@ -134,10 +161,11 @@ describe('recall: Enter executes the previewed command', () => {
     expect(ev.defaultPrevented).toBe(false)
   })
 
-  it('deleting while navigating keeps the previewed command as the new draft', () => {
-    const { ed, view, recall } = setupRecall({ query: mkQuery(['docker compose up']) })
+  it('deleting while navigating keeps the previewed command as the new draft', async () => {
+    const { container, ed, view, recall } = setupRecall({ query: mkQuery(['docker compose up']) })
     ed.show()
     key(view, { key: 'ArrowUp' })
+    await settled(container)
     expect(ed.getDoc()).toBe('docker compose up')
     // Backspace lands ON the preview (CM6 runs its deletion on the keydown,
     // unlike text insertion which jsdom cannot synthesize): the overlay is
@@ -147,10 +175,11 @@ describe('recall: Enter executes the previewed command', () => {
     expect(ed.getDoc()).toBe('docker compose u')
   })
 
-  it('a caret move while navigating keeps the previewed command as the new draft', () => {
-    const { ed, view, recall } = setupRecall({ query: mkQuery(['docker compose up']) })
+  it('a caret move while navigating keeps the previewed command as the new draft', async () => {
+    const { container, ed, view, recall } = setupRecall({ query: mkQuery(['docker compose up']) })
     ed.show()
     key(view, { key: 'ArrowUp' })
+    await settled(container)
     expect(ed.getDoc()).toBe('docker compose up')
     // CM6 owns the caret afterwards (it consumes the arrow key for movement),
     // which is exactly the point: the overlay released the line, preview kept.
@@ -159,11 +188,15 @@ describe('recall: Enter executes the previewed command', () => {
     expect(ed.getDoc()).toBe('docker compose up')
   })
 
-  it('Ctrl-C while recall is open dismisses it and never interrupts the shell', () => {
+  it('Ctrl-C while recall is open dismisses it and never interrupts the shell', async () => {
     const cancel = vi.fn()
-    const { ed, view, recall } = setupRecall({ query: mkQuery(['ls']), actions: { cancel } })
+    const { container, ed, view, recall } = setupRecall({
+      query: mkQuery(['ls']),
+      actions: { cancel },
+    })
     ed.show()
     key(view, { key: 'ArrowUp' })
+    await settled(container)
     expect(recall.isOpen).toBe(true)
     key(view, { key: 'c', ctrlKey: true })
     expect(recall.isOpen).toBe(false)
@@ -172,8 +205,8 @@ describe('recall: Enter executes the previewed command', () => {
   })
 })
 describe('recall: Esc restores the draft, caret and scroll exactly', () => {
-  it('restores text, selection and scroll after navigating', () => {
-    const { ed, view, recall } = setupRecall({ query: mkQuery(['one', 'two']) })
+  it('restores text, selection and scroll after navigating', async () => {
+    const { container, ed, view, recall } = setupRecall({ query: mkQuery(['one', 'two']) })
     ed.show()
     ed.insertText('line one\nline two')
     // The user had a selection and a scroll offset when recall opened.
@@ -182,6 +215,7 @@ describe('recall: Esc restores the draft, caret and scroll exactly', () => {
 
     // The explicit shortcut opens recall from anywhere — even line 2.
     key(view, { key: 'r', ctrlKey: true })
+    await settled(container)
     expect(recall.isOpen).toBe(true)
     key(view, { key: 'ArrowDown' }) // at the newest (bottom): stays
     key(view, { key: 'ArrowUp' }) // older
@@ -196,11 +230,12 @@ describe('recall: Esc restores the draft, caret and scroll exactly', () => {
 })
 
 describe("recall: oldest at the top, newest at the bottom (Warp's model)", () => {
-  it('renders oldest at the top and selects the newest (bottom) row on open', () => {
+  it('renders oldest at the top and selects the newest (bottom) row on open', async () => {
     // mkQuery lists commands newest-first — the wire order; the renderer
     // reverses for display.
     const { container, view } = setupRecall({ query: mkQuery(['newest', 'middle', 'oldest']) })
     key(view, { key: 'ArrowUp' })
+    await settled(container)
     const rows = container.querySelectorAll<HTMLElement>('.ui-collection-row')
     expect(rows.length).toBe(3)
     expect(rows[0]?.textContent).toContain('oldest') // oldest at the top
@@ -211,9 +246,10 @@ describe("recall: oldest at the top, newest at the bottom (Warp's model)", () =>
     expect(selected?.textContent).toContain('newest') // the bottom row
   })
 
-  it('Up from the bottom moves to the previous (older) command', () => {
+  it('Up from the bottom moves to the previous (older) command', async () => {
     const { container, view } = setupRecall({ query: mkQuery(['newest', 'middle', 'oldest']) })
     key(view, { key: 'ArrowUp' }) // opens with the newest (bottom) selected
+    await settled(container)
     key(view, { key: 'ArrowUp' }) // older
     const selected = container.querySelector<HTMLElement>(
       '.ui-collection-row[data-selected="true"]',
@@ -221,9 +257,10 @@ describe("recall: oldest at the top, newest at the bottom (Warp's model)", () =>
     expect(selected?.textContent).toContain('middle')
   })
 
-  it('Down at the bottom stays on the newest command', () => {
+  it('Down at the bottom stays on the newest command', async () => {
     const { container, view } = setupRecall({ query: mkQuery(['newest', 'middle', 'oldest']) })
     key(view, { key: 'ArrowUp' })
+    await settled(container)
     key(view, { key: 'ArrowDown' })
     const selected = container.querySelector<HTMLElement>(
       '.ui-collection-row[data-selected="true"]',
@@ -231,9 +268,10 @@ describe("recall: oldest at the top, newest at the bottom (Warp's model)", () =>
     expect(selected?.textContent).toContain('newest')
   })
 
-  it('a single row is selected and previewed on open', () => {
+  it('a single row is selected and previewed on open', async () => {
     const { ed, container, view } = setupRecall({ query: mkQuery(['only']) })
     key(view, { key: 'ArrowUp' })
+    await settled(container)
     const selected = container.querySelector<HTMLElement>(
       '.ui-collection-row[data-selected="true"]',
     )
@@ -245,9 +283,10 @@ describe("recall: oldest at the top, newest at the bottom (Warp's model)", () =>
 describe('recall: arrows navigate, widening is its own key (v8)', () => {
   const twelve = Array.from({ length: 12 }, (_, i) => `c${i + 1}`) // c1 newest
 
-  it('Up and Down walk every entry of a twelve-result rung', () => {
-    const { ed, view } = setupRecall({ query: mkQuery(twelve) })
+  it('Up and Down walk every entry of a twelve-result rung', async () => {
+    const { container, ed, view } = setupRecall({ query: mkQuery(twelve) })
     key(view, { key: 'ArrowUp' }) // opens on the newest (bottom) row
+    await settled(container)
     expect(ed.getDoc()).toBe('c1')
     // Hold Up past the visible window to the top of the rung.
     for (let i = 0; i < 11; i++) key(view, { key: 'ArrowUp' })
@@ -257,9 +296,10 @@ describe('recall: arrows navigate, widening is its own key (v8)', () => {
     expect(ed.getDoc()).toBe('c1')
   })
 
-  it('Up at the oldest entry stops: no widen, no teleport', () => {
+  it('Up at the oldest entry stops: no widen, no teleport', async () => {
     const { container, ed, view } = setupRecall({ query: mkQuery(['c1', 'c2', 'c3']) })
     key(view, { key: 'ArrowUp' }) // opens on c1 (newest)
+    await settled(container)
     key(view, { key: 'ArrowUp' }) // c2
     key(view, { key: 'ArrowUp' }) // c3 (oldest, display top)
     key(view, { key: 'ArrowUp' }) // must stop
@@ -267,20 +307,25 @@ describe('recall: arrows navigate, widening is its own key (v8)', () => {
     expect(panelOf(container).textContent).toContain('this directory') // no widen
   })
 
-  it('the widen key (shift+Up) preserves the selected command across rungs', () => {
+  it('the widen key (shift+Up) preserves the selected command across rungs', async () => {
     const { container, ed, view } = setupRecall({
       query: (scope) => {
         const entries =
           scope === 'directory'
             ? [mkEntry('c1'), mkEntry('c2'), mkEntry('c3')]
             : [mkEntry('c1'), mkEntry('c2'), mkEntry('c3'), mkEntry('c4')]
-        return { entries, scope, exhausted: true, source: 'session' }
+        return Promise.resolve({ entries, scope, exhausted: true, source: 'session' })
       },
     })
     key(view, { key: 'ArrowUp' }) // c1 (newest, bottom)
+    await settled(container)
     key(view, { key: 'ArrowUp' }) // c2
     key(view, { key: 'ArrowUp', shiftKey: true }) // widen
-    expect(panelOf(container).textContent).toContain('this host')
+    // The wider rung's answer lands async; wait for its own observable — the
+    // rung badge names the wider rung.
+    await vi.waitFor(() => {
+      expect(panelOf(container).textContent).toContain('this host')
+    })
     expect(ed.getDoc()).toBe('c2') // the same command, not either end
   })
 })
@@ -349,33 +394,46 @@ describe('recall: Up is caret movement first (design §8.10 v6)', () => {
     expect(onUpAtTop).not.toHaveBeenCalled()
     expect(ev.defaultPrevented).toBe(true) // CM6's own Up command handled it
   })
-  it('Up on an empty draft opens recall', () => {
-    const { view, recall } = setupRecall({ query: mkQuery(['one']) })
+  it('Up on an empty draft opens recall', async () => {
+    const { container, view, recall } = setupRecall({ query: mkQuery(['one']) })
     key(view, { key: 'ArrowUp' })
+    await settled(container)
     expect(recall.isOpen).toBe(true)
   })
 
-  it('the explicit shortcut (Ctrl-R) opens recall from anywhere', () => {
-    const { ed, view, recall } = setupRecall({ query: mkQuery(['one']) })
+  it('the explicit shortcut (Ctrl-R) opens recall from anywhere', async () => {
+    const { container, ed, view, recall } = setupRecall({ query: mkQuery(['one']) })
     ed.show()
     ed.insertText('line one\nline two') // caret on line 2
     key(view, { key: 'r', ctrlKey: true })
+    await settled(container)
     expect(recall.isOpen).toBe(true)
     expect(ed.getDoc()).toBe('one')
   })
 })
 
 describe('recall: what the panel says', () => {
-  it("with source 'session' the panel says what it is showing", () => {
+  it("with source 'session' the panel says what it is showing", async () => {
     const { container, view } = setupRecall({ query: mkQuery(['one'], 'session') })
     key(view, { key: 'ArrowUp' })
+    await settled(container)
     const text = panelOf(container).textContent ?? ''
     expect(text).toContain('this session only')
   })
 
-  it('empty history opens an overlay that says it is empty', () => {
+  it("with source 'store' the panel does not say 'this session only'", async () => {
+    const { container, view } = setupRecall({ query: mkQuery(['one'], 'store') })
+    key(view, { key: 'ArrowUp' })
+    await settled(container)
+    const text = panelOf(container).textContent ?? ''
+    expect(text).not.toContain('this session only') // the store answered
+    expect(text).toContain('one')
+  })
+
+  it('empty history opens an overlay that says it is empty', async () => {
     const { container, view, recall } = setupRecall({ query: emptyQuery() })
     key(view, { key: 'ArrowUp' })
+    await settled(container)
     expect(recall.isOpen).toBe(true)
     const text = panelOf(container).textContent ?? ''
     expect(text).toContain('no history yet')
@@ -384,19 +442,22 @@ describe('recall: what the panel says', () => {
     expect(recall.isOpen).toBe(false)
   })
 
-  it('an empty directory rung opens on the first rung that has rows', () => {
+  it('an empty directory rung opens on the first rung that has rows', async () => {
     const { container, view, recall } = setupRecall({
       query: (scope) =>
-        scope === 'directory'
-          ? { entries: [], scope, exhausted: true, source: 'session' }
-          : {
-              entries: [mkEntry('ls /tmp'), mkEntry('pwd'), mkEntry('whoami')],
-              scope,
-              exhausted: true,
-              source: 'session',
-            },
+        Promise.resolve(
+          scope === 'directory'
+            ? { entries: [], scope, exhausted: true, source: 'session' }
+            : {
+                entries: [mkEntry('ls /tmp'), mkEntry('pwd'), mkEntry('whoami')],
+                scope,
+                exhausted: true,
+                source: 'session',
+              },
+        ),
     })
     key(view, { key: 'ArrowUp' })
+    await settled(container)
     expect(recall.isOpen).toBe(true)
     const text = panelOf(container).textContent ?? ''
     expect(text).not.toContain('no history yet') // never the near-empty rung
@@ -404,42 +465,47 @@ describe('recall: what the panel says', () => {
     expect(text).toContain('ls /tmp') // and the rows appeared with it
   })
 
-  it('a directory with one match opens on a wider rung, not on the near-empty one', () => {
+  it('a directory with one match opens on a wider rung, not on the near-empty one', async () => {
     const { container, view } = setupRecall({
       query: (scope) =>
-        scope === 'directory'
-          ? { entries: [mkEntry('ls')], scope, exhausted: true, source: 'session' }
-          : {
-              entries: [mkEntry('ls'), mkEntry('make deploy'), mkEntry('git status')],
-              scope,
-              exhausted: true,
-              source: 'session',
-            },
+        Promise.resolve(
+          scope === 'directory'
+            ? { entries: [mkEntry('ls')], scope, exhausted: true, source: 'session' }
+            : {
+                entries: [mkEntry('ls'), mkEntry('make deploy'), mkEntry('git status')],
+                scope,
+                exhausted: true,
+                source: 'session',
+              },
+        ),
     })
     key(view, { key: 'ArrowUp' })
+    await settled(container)
     const text = panelOf(container).textContent ?? ''
     expect(text).toContain('this host') // the rung is named on screen
     expect(text).toContain('make deploy') // and its rows are there
   })
 
-  it('a rung with a useful page stays on that rung', () => {
+  it('a rung with a useful page stays on that rung', async () => {
     const { container, view } = setupRecall({
-      query: (scope) => ({
-        entries:
-          scope === 'directory'
-            ? [mkEntry('ls'), mkEntry('git status'), mkEntry('make')]
-            : [mkEntry('ls'), mkEntry('git status'), mkEntry('make'), mkEntry('x')],
-        scope,
-        exhausted: true,
-        source: 'session',
-      }),
+      query: (scope) =>
+        Promise.resolve({
+          entries:
+            scope === 'directory'
+              ? [mkEntry('ls'), mkEntry('git status'), mkEntry('make')]
+              : [mkEntry('ls'), mkEntry('git status'), mkEntry('make'), mkEntry('x')],
+          scope,
+          exhausted: true,
+          source: 'session',
+        }),
     })
     key(view, { key: 'ArrowUp' })
+    await settled(container)
     const text = panelOf(container).textContent ?? ''
     expect(text).toContain('this directory')
   })
 
-  it('the widen key is shown when the rung can widen, and not at the top rung', () => {
+  it('the widen key is shown when the rung can widen, and not at the top rung', async () => {
     const narrow = {
       entries: [mkEntry('ls')],
       scope: 'directory' as const,
@@ -447,33 +513,37 @@ describe('recall: what the panel says', () => {
       source: 'session' as const,
     }
     const { container, view } = setupRecall({
-      query: (scope) => ({
-        entries:
-          scope === 'directory'
-            ? narrow.entries
-            : scope === 'host'
+      query: (scope) =>
+        Promise.resolve({
+          entries:
+            scope === 'directory'
               ? narrow.entries
-              : [mkEntry('ls'), mkEntry('make'), mkEntry('git')],
-        scope,
-        exhausted: true,
-        source: 'session',
-      }),
+              : scope === 'host'
+                ? narrow.entries
+                : [mkEntry('ls'), mkEntry('make'), mkEntry('git')],
+          scope,
+          exhausted: true,
+          source: 'session',
+        }),
     })
     key(view, { key: 'ArrowUp' }) // open-time climb: directory 1, host 1 → everywhere
+    await settled(container)
     const text = panelOf(container).textContent ?? ''
     expect(text).toContain('everywhere') // the top rung is named
     expect(text).not.toContain('shift+↑ widen') // nothing wider to promise
 
     const second = setupRecall({ query: mkQuery(['one', 'two', 'three']) })
     key(second.view, { key: 'ArrowUp' })
+    await settled(second.container)
     expect(panelOf(second.container).textContent).toContain('shift+↑ widen')
   })
 })
 
 describe('recall: the footer and the labels say what the keys do', () => {
-  it('all hints are one line: the key groups in one footer, real gaps between them', () => {
+  it('all hints are one line: the key groups in one footer, real gaps between them', async () => {
     const { container, view } = setupRecall({ query: mkQuery(['one', 'two', 'three']) })
     key(view, { key: 'ArrowUp' })
+    await settled(container)
     const footer = container.querySelector<HTMLElement>('.ui-recall-panel__footer')
     expect(footer).not.toBeNull()
     // The key groups are siblings of one footer element — the CSS lays them
@@ -488,19 +558,21 @@ describe('recall: the footer and the labels say what the keys do', () => {
     expect(footer?.querySelector('br')).toBeNull()
   })
 
-  it('Enter is labelled as executing the previewed command', () => {
+  it('Enter is labelled as executing the previewed command', async () => {
     const { container, view } = setupRecall({
       query: mkQuery(['rm -rf build', 'ls', 'git status']),
     })
     key(view, { key: 'ArrowUp' })
+    await settled(container)
     const text = panelOf(container).textContent ?? ''
     expect(text).toContain('↵ to execute')
     expect(text).not.toContain('fill the line')
   })
 
-  it('the empty panel does not promise execution', () => {
+  it('the empty panel does not promise execution', async () => {
     const { container, view } = setupRecall({ query: emptyQuery() })
     key(view, { key: 'ArrowUp' })
+    await settled(container)
     const text = panelOf(container).textContent ?? ''
     expect(text).toContain('no history yet')
     expect(text).not.toContain('↵ to execute') // nothing to execute
@@ -508,16 +580,18 @@ describe('recall: the footer and the labels say what the keys do', () => {
 })
 
 describe('recall: relative time', () => {
-  it('endedAt null renders as running, never as the epoch', () => {
+  it('endedAt null renders as running, never as the epoch', async () => {
     const { container, view } = setupRecall({
-      query: (scope) => ({
-        entries: [mkEntry('sleep 5', null)],
-        scope,
-        exhausted: true,
-        source: 'session',
-      }),
+      query: (scope) =>
+        Promise.resolve({
+          entries: [mkEntry('sleep 5', null)],
+          scope,
+          exhausted: true,
+          source: 'session',
+        }),
     })
     key(view, { key: 'ArrowUp' })
+    await settled(container)
     const time = container.querySelector<HTMLElement>('.ui-recall-panel__time')
     expect(time?.textContent).toBe('running')
     expect(time?.textContent).not.toBe('1970')
@@ -531,7 +605,7 @@ describe('recall: relative time', () => {
   })
 })
 
-describe('queryLedgerHistory: the session stopgap behind the generated types', () => {
+describe('queryLedgerHistory: the session fallback behind the generated types', () => {
   it('maps the ledger newest-first, filtered to the ladder rung', () => {
     const now = () => 1000
     const ledger = new CommandLedger({ now })

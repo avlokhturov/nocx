@@ -107,12 +107,24 @@ type Option func(*optionSet)
 
 type optionSet struct {
 	wsAddr string
+	// keystoreProbe overrides the OS-keystore availability decision that
+	// picks the ContentDB key's home (nocx-rtg0.14). Test-only: production
+	// probes the real system provider once at startup and logs the outcome.
+	keystoreProbe func(context.Context) bool
 }
 
 // WithWSAddr pins the WebSocket listen address instead of the default
 // 127.0.0.1:0. Dev-only; shipped code should never set this.
 func WithWSAddr(addr string) Option {
 	return func(o *optionSet) { o.wsAddr = addr }
+}
+
+// WithKeystoreProbe overrides the OS-keystore availability decision for the
+// ContentDB key. Test-only: it makes the composition root deterministic on
+// hosts that do (or do not) run a Secret Service, so the no-keystore branch
+// of the key lifecycle can be asserted without depending on the machine.
+func WithKeystoreProbe(probe func(context.Context) bool) Option {
+	return func(o *optionSet) { o.keystoreProbe = probe }
 }
 
 func New(opts ...Option) (*App, error) {
@@ -170,13 +182,22 @@ func New(opts ...Option) (*App, error) {
 		return nil, fmt.Errorf("vault registry: %w", err)
 	}
 
-	// Probe the system provider once at startup and log the outcome.
-	// A machine with no Secret Service says so in the log rather than
-	// failing mysteriously later.
 	ctx := context.Background()
-	probeStatus := sysProv.Probe(ctx)
+	// Probe the system provider once at startup and log the outcome. A
+	// machine with no Secret Service says so in the log rather than
+	// failing mysteriously later. The WithKeystoreProbe override (tests)
+	// replaces the probe entirely — a probe is a real keychain write and
+	// must not run on a host the test claims has no keystore.
+	probeStatus := vault.Status{}
+	systemReady := false
+	if o.keystoreProbe != nil {
+		systemReady = o.keystoreProbe(ctx)
+	} else {
+		probeStatus = sysProv.Probe(ctx)
+		systemReady = probeStatus.Ready
+	}
 	slogger.Info("vault system-provider availability probe",
-		"ready", probeStatus.Ready, "reason", probeStatus.Reason)
+		"ready", systemReady, "reason", probeStatus.Reason)
 
 	v, err := vault.New(docStore, reg, slogger)
 	if err != nil {
@@ -185,23 +206,30 @@ func New(opts ...Option) (*App, error) {
 
 	settingsRegistry := settings.New(docStore, v)
 
-	// The ContentDB key, once at startup (nocx-rtg0.9): minted through the
-	// provider seam on first run, read through the provider seam on every
-	// start, and held here for the life of the process — a vault auto-seal
-	// must never make history unreadable. The History settings (keep on/off,
-	// age, the two-number budget, output) wire into the store the same way:
-	// read here, live-updated below. On every failure path the app starts
-	// WITHOUT durable history (the stub) and says so: a terminal that
-	// refuses to start because its history database could not open a key is
-	// worse than one that starts and admits the gap.
+	// The ContentDB key, once at startup (nocx-rtg0.9 as amended by
+	// nocx-rtg0.14): the OS keystore's derived slot when one exists, else
+	// DERIVED at startup from a per-machine salt — the vault and its seal
+	// are irrelevant to it, and no passphrase is ever requested for history.
+	// The key is held here for the life of the process, so a vault
+	// auto-seal can never make history unreadable. The History settings
+	// (keep on/off, age, the two-number budget, output) wire into the store
+	// the same way: read here, live-updated below. On every failure path
+	// the app starts WITHOUT durable history (the stub) and says so: a
+	// terminal that refuses to start because its history database could not
+	// open a key is worse than one that starts and admits the gap.
 	historyPolicy := policyFromSettings(settingsRegistry)
 	budget, budgetErr := budgetFromSettings(settingsRegistry)
 	if budgetErr != nil {
 		slogger.Warn("durable command history unavailable; starting without it", "reason", budgetErr)
 	} else if key, keyErr := contentkey.LoadOrCreate(ctx, contentkey.Config{
-		Policy:   v,
-		Registry: reg,
-		DBPath:   filepath.Join(paths.DataDir(), "content.db"),
+		Registry:    reg,
+		KeyID:       vault.ContentKeyID,
+		SystemReady: systemReady,
+		DBPath:      filepath.Join(paths.DataDir(), "content.db"),
+		// The salt lives in the CONFIG directory — never in the data
+		// directory beside content.db: a copy of the data directory must
+		// carry nothing that opens it (nocx-rtg0.14).
+		SaltPath: filepath.Join(paths.ConfigDir(), "contentkey.salt"),
 		Logger:   logger,
 	}); keyErr != nil {
 		slogger.Warn("durable command history unavailable; starting without it", "reason", keyErr)

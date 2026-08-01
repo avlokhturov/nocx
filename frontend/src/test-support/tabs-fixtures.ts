@@ -216,6 +216,10 @@ export interface ClientFake {
   onSessionData: ReturnType<typeof vi.fn>
   onSessionExit: ReturnType<typeof vi.fn>
   onSessionReset: ReturnType<typeof vi.fn>
+  /** Control-plane calls (history.record, history.query, …). Rejects by
+   *  default — the no-store state, which the recall overlay labels
+   *  source=session. */
+  call: ReturnType<typeof vi.fn>
   readonly connected: boolean
   /** Sessions created by openSession calls, in order. */
   _sessions: SessionFake[]
@@ -241,6 +245,7 @@ export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
     onSessionData: vi.fn(),
     onSessionExit: vi.fn(),
     onSessionReset: vi.fn(),
+    call: vi.fn().mockRejectedValue(new Error('no store wired (fake)')),
     get connected() {
       return true
     },

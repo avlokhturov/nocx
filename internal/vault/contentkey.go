@@ -29,19 +29,17 @@ const contentKeyNamespace = "nocx-contentdb-key"
 // the given provider. Same shape as osKeyID: sec:v1:<provider>:<32hex>.
 // The provider is baked into the reference (references are immutable), so a
 // default-provider change later cannot silently move the key.
-func (v *Vault) ContentKeyID(p ProviderID) (credential.SecretID, error) {
+//
+// Package-level since nocx-rtg0.14: the content key's home is decided by
+// keystore availability, never by the vault's default-provider policy, and
+// the key lifecycle holds no *Vault. The reference grammar stays here — this
+// package is the only owner of mintID/parseID/validProviderTag.
+func ContentKeyID(p ProviderID) (credential.SecretID, error) {
 	if err := validProviderTag(p); err != nil {
 		return "", fmt.Errorf("content key: %w", err)
 	}
 	h := sha256.Sum256([]byte(contentKeyNamespace + ":" + string(p)))
 	return credential.SecretID(fmt.Sprintf("sec:v1:%s:%x", p, h[:16])), nil
-}
-
-// ProviderOf returns the provider tag encoded in a persisted reference,
-// without any seal or initialization gate. The reference is immutable and
-// names its own provider (spec §4.1).
-func (v *Vault) ProviderOf(id credential.SecretID) (ProviderID, error) {
-	return parseID(id)
 }
 
 // DefaultProvider returns the vault's chosen default provider — the way the

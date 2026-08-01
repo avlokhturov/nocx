@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, beforeEach } from 'vitest'
-import { CommandLedger } from './command-ledger'
+import { CommandLedger, type CommandRecord } from './command-ledger'
 
 // Fake lineOf that returns the number we feed it. The ledger never caches
 // the result, so tests call this through the ledger's own API.
@@ -334,5 +334,84 @@ describe('CommandLedger', () => {
     l.onMarker('D', 0)
     // Cycle is complete, nothing running.
     expect(() => l.finalizeOpen()).not.toThrow()
+  })
+})
+
+describe('CommandLedger onComplete seam (nocx-rtg0.13)', () => {
+  it('emits exactly once when D finalizes a trusted command', () => {
+    const completed: CommandRecord[] = []
+    const l = new CommandLedger({ now: fixtureNow(500), onComplete: (r) => completed.push(r) })
+    const rec = l.open('make deploy', '/repo', '', fakeLineOf(0))
+    l.onMarker('A')
+    l.onMarker('B')
+    l.onMarker('C')
+    l.onMarker('D', 0)
+    expect(completed).toHaveLength(1)
+    expect(completed[0]).toBe(rec)
+    expect(completed[0].status).toBe('success')
+    expect(completed[0].exitCode).toBe(0)
+    expect(completed[0].endedAt).toBe(500)
+  })
+
+  it('emits when an A interrupts a running command', () => {
+    const completed: CommandRecord[] = []
+    const l = new CommandLedger({ now: fixtureNow(500), onComplete: (r) => completed.push(r) })
+    l.open('sleep 10', '/', '', fakeLineOf(0))
+    l.onMarker('A')
+    l.onMarker('B')
+    l.onMarker('C')
+    l.onMarker('A') // fresh prompt without D
+    expect(completed).toHaveLength(1)
+    expect(completed[0].status).toBe('interrupted')
+  })
+
+  it('emits when open() interrupts a still-running record (L2)', () => {
+    const completed: CommandRecord[] = []
+    const l = new CommandLedger({ now: fixtureNow(500), onComplete: (r) => completed.push(r) })
+    l.open('first', '/', '', fakeLineOf(0))
+    l.onMarker('A')
+    l.onMarker('B')
+    l.onMarker('C')
+    l.open('second', '/', '', fakeLineOf(1))
+    expect(completed).toHaveLength(1)
+    expect(completed[0].command).toBe('first')
+    expect(completed[0].status).toBe('interrupted')
+  })
+
+  it('emits when finalizeOpen closes a running command', () => {
+    const completed: CommandRecord[] = []
+    const l = new CommandLedger({ now: fixtureNow(500), onComplete: (r) => completed.push(r) })
+    l.open('cmd', '/', '', fakeLineOf(0))
+    l.onMarker('A')
+    l.onMarker('B')
+    l.onMarker('C')
+    l.finalizeOpen()
+    expect(completed).toHaveLength(1)
+    expect(completed[0].status).toBe('interrupted')
+  })
+
+  it('never emits for a record that never started, and never twice for one record', () => {
+    const completed: CommandRecord[] = []
+    const l = new CommandLedger({ now: fixtureNow(500), onComplete: (r) => completed.push(r) })
+    const rec = l.open('cmd', '/', '', fakeLineOf(0))
+    l.onMarker('D', 0) // D with no running record: ignored
+    expect(completed).toHaveLength(0)
+    l.onMarker('A')
+    l.onMarker('B')
+    l.onMarker('C')
+    l.onMarker('D', 0)
+    l.finalizeOpen() // nothing running: no second emit
+    expect(completed).toHaveLength(1)
+    expect(completed[0]).toBe(rec)
+  })
+
+  it('without a callback the ledger still finalizes records (optional seam)', () => {
+    const l = new CommandLedger({ now: fixtureNow(500) })
+    const rec = l.open('cmd', '/', '', fakeLineOf(0))
+    l.onMarker('A')
+    l.onMarker('B')
+    l.onMarker('C')
+    l.onMarker('D', 0)
+    expect(rec.status).toBe('success')
   })
 })

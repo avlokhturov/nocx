@@ -102,9 +102,18 @@ export interface RecallEditor {
   submit(): void
 }
 
-export type RecallQuery = (scope: RecallScope) => HistoryQuery
+export type RecallQuery = (scope: RecallScope) => Promise<HistoryQuery>
 export type RecallState =
   | { readonly name: 'closed' }
+  | {
+      // The panel is up and the first rung's answer is in flight. The
+      // query is served by the store over the control plane, so opening is
+      // async; Escape dismisses from here, everything else passes through
+      // exactly as it does in `opened`.
+      readonly name: 'loading'
+      readonly draft: DraftSnapshot
+      readonly scope: RecallScope
+    }
   | {
       readonly name: 'opened'
       readonly draft: DraftSnapshot
@@ -214,10 +223,19 @@ export class RecallOverlay {
   mount(container: HTMLElement): void {
     container.appendChild(this.root)
   }
-
-  /** Open the overlay on the given ladder rung. The current draft, selection
-   *  and scroll are captured so Esc can restore them exactly. */
-  open(scope: RecallScope): void {
+  /**
+   * Open the overlay on the given ladder rung. The current draft, selection
+   * and scroll are captured so Esc can restore them exactly. The panel is
+   * shown immediately (loading) and the first rung is fetched from the
+   * store; opening is async because the query crosses the control plane.
+   * The rung-climb happens after each answer: a directory holding one
+   * match is honest and useless — the next Up would climb anyway, and
+   * opening there reads as results appearing at random (§8.10 v7). Rungs
+   * are monotone (directory ⊆ host ⊆ everywhere), so climbing never hides
+   * a row the narrower rung showed; the climb stops at the top of the
+   * ladder even when the widest rung is thin.
+   */
+  async open(scope: RecallScope): Promise<void> {
     if (this.isOpen) return
     const sel = this.editor.getSelection()
     const draft: DraftSnapshot = {
@@ -226,20 +244,21 @@ export class RecallOverlay {
       to: sel.to,
       scrollTop: this.editor.getScrollTop(),
     }
-    // Open on the first rung with a useful page. A directory holding one
-    // match is honest and useless — the next Up would climb anyway, and
-    // opening there reads as results appearing at random (§8.10 v7). Rungs
-    // are monotone (directory ⊆ host ⊆ everywhere), so climbing never hides
-    // a row the narrower rung showed; the climb stops at the top of the
-    // ladder even when the widest rung is thin.
+    this.state = { name: 'loading', draft, scope }
+    this.root.dataset.open = 'true'
+    this.render()
+
     let rung = scope
-    let result = this.query(rung)
+    let result = await this.query(rung)
     while (result.entries.length < MIN_USEFUL_ROWS && rung !== 'everywhere') {
       rung = nextScope(rung)
-      result = this.query(rung)
+      result = await this.query(rung)
     }
+    // Dismissed (or re-opened) while the answers were in flight: the
+    // captured draft is gone; drop the result.
+    if (this.state.name !== 'loading') return
+
     this.state = { name: 'opened', draft, scope: rung, query: result }
-    this.root.dataset.open = 'true'
     this.render()
     if (result.entries.length > 0) {
       // Display order is oldest at the top, newest at the bottom (Warp's
@@ -261,10 +280,27 @@ export class RecallOverlay {
         if (isRecallShortcut(e)) {
           e.preventDefault()
           e.stopPropagation()
-          this.open('directory')
+          void this.open('directory')
           return true
         }
         return false
+      case 'loading':
+        // The first rung is still in flight. Escape dismisses; so does
+        // Enter (accepting nothing must not feel like a dead key). Arrows
+        // do nothing — there are no rows to walk — and everything else
+        // passes through exactly as it does in `opened`.
+        if (e.key === 'Escape' || e.key === 'Enter') {
+          e.preventDefault()
+          e.stopPropagation()
+          this.dismiss()
+          return true
+        }
+        if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+          e.preventDefault()
+          e.stopPropagation()
+          return true // stop: no rows to navigate
+        }
+        return this.passThroughOrDismiss(e)
       case 'opened':
         // Empty history: nothing to accept. Escape dismisses; so does Enter
         // (accepting nothing must not feel like a dead key). Arrows do
@@ -338,34 +374,45 @@ export class RecallOverlay {
    *  the selected command still exists: the selection stays on that same
    *  command instead of jumping to either end. If it genuinely cannot be
    *  located, the selection keeps the same distance from the newest entry.
-   *  Returns true when the rung changed. */
+   *  The wider rung is fetched over the control plane; the transition is
+   *  applied when the answer lands, and dropped if the panel closed first.
+   *  Returns true when a wider rung exists. */
   private climbWider(): boolean {
     const s = this.state
     if (s.name !== 'opened' && s.name !== 'navigating') return false
     if (!s.query.exhausted) return false
     const wider = nextScope(s.scope)
     if (wider === s.scope) return false
-    const result = this.query(wider)
-    if (result.entries.length === 0) {
-      this.state = { name: 'opened', draft: s.draft, scope: wider, query: result }
-      this.render()
-      return true
-    }
-    // Preserve the selected command when navigating; widening from an empty
-    // rung opens on the newest entry, like open() does.
-    let selected = result.entries.length - 1
-    if (s.name === 'navigating') {
-      const wireIndex = s.query.entries.length - 1 - s.selected
-      const id = s.query.entries[wireIndex]?.id
-      const at = id !== undefined ? result.entries.findIndex((e) => e.id === id) : -1
-      if (at >= 0) {
-        selected = result.entries.length - 1 - at
-      } else {
-        const distance = s.query.entries.length - 1 - s.selected
-        selected = Math.max(0, result.entries.length - 1 - distance)
+
+    const draft = s.draft
+    const wasNavigating = s.name === 'navigating'
+    const previous = s
+    void this.query(wider).then((result) => {
+      // The panel moved on (dismissed, re-opened, or climbing again) while
+      // the answer was in flight: apply nothing.
+      if (this.state.name !== 'opened' && this.state.name !== 'navigating') return
+      if (this.state.draft !== draft) return
+      if (result.entries.length === 0) {
+        this.state = { name: 'opened', draft, scope: wider, query: result }
+        this.render()
+        return
       }
-    }
-    this.enterNavigating(wider, result, selected)
+      // Preserve the selected command when navigating; widening from an
+      // empty rung opens on the newest entry, like open() does.
+      let selected = result.entries.length - 1
+      if (wasNavigating && previous.name === 'navigating') {
+        const wireIndex = previous.query.entries.length - 1 - previous.selected
+        const id = previous.query.entries[wireIndex]?.id
+        const at = id !== undefined ? result.entries.findIndex((e) => e.id === id) : -1
+        if (at >= 0) {
+          selected = result.entries.length - 1 - at
+        } else {
+          const distance = previous.query.entries.length - 1 - previous.selected
+          selected = Math.max(0, result.entries.length - 1 - distance)
+        }
+      }
+      this.enterNavigating(wider, result, selected)
+    })
     return true
   }
 
@@ -430,7 +477,7 @@ export class RecallOverlay {
   private dismiss(): void {
     const s = this.state
     if (s.name === 'closed') return
-    if (s.name === 'opened' || s.name === 'navigating') {
+    if (s.name === 'loading' || s.name === 'opened' || s.name === 'navigating') {
       const d = s.draft
       this.editor.replaceDoc(d.text, d.from, d.to)
       this.editor.setScrollTop(d.scrollTop)
@@ -455,7 +502,6 @@ export class RecallOverlay {
     const s = this.state
     if (s.name === 'closed') return
     this.root.replaceChildren()
-
     // ── Header: title, rung, count, source note ──────────────────────
     const header = document.createElement('div')
     header.className = 'ui-recall-panel__header'
@@ -473,10 +519,14 @@ export class RecallOverlay {
 
     const count = document.createElement('span')
     count.className = 'ui-recall-panel__count'
-    count.textContent = `${s.query.entries.length} ${s.query.entries.length === 1 ? 'result' : 'results'}`
+    if (s.name === 'loading') {
+      count.textContent = '…'
+    } else {
+      count.textContent = `${s.query.entries.length} ${s.query.entries.length === 1 ? 'result' : 'results'}`
+    }
     header.appendChild(count)
 
-    if (s.query.source === 'session') {
+    if (s.name !== 'loading' && s.query.source === 'session') {
       const note = document.createElement('span')
       note.className = 'ui-badge ui-recall-panel__source'
       note.dataset.tone = 'warning'
@@ -490,7 +540,17 @@ export class RecallOverlay {
     list.className = 'ui-recall-panel__list'
     list.setAttribute('role', 'listbox')
 
-    if (s.query.entries.length === 0) {
+    if (s.name === 'loading') {
+      // The first rung is still in flight — a brief state on a local
+      // socket, but it must not read as "no history yet".
+      const empty = document.createElement('div')
+      empty.className = 'ui-empty-state'
+      const emptyTitle = document.createElement('div')
+      emptyTitle.className = 'ui-empty-state__title'
+      emptyTitle.textContent = '…'
+      empty.appendChild(emptyTitle)
+      list.appendChild(empty)
+    } else if (s.query.entries.length === 0) {
       const empty = document.createElement('div')
       empty.className = 'ui-empty-state'
       const emptyTitle = document.createElement('div')
@@ -545,7 +605,7 @@ export class RecallOverlay {
     const navigate = document.createElement('span')
     navigate.textContent = '↑ ↓ to navigate'
     footer.appendChild(navigate)
-    if (s.query.exhausted && s.scope !== 'everywhere') {
+    if (s.name !== 'loading' && s.query.exhausted && s.scope !== 'everywhere') {
       const widen = document.createElement('span')
       widen.textContent = 'shift+↑ widen'
       footer.appendChild(widen)

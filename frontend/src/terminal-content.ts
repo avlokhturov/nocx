@@ -15,6 +15,7 @@ import { shouldShowEditor, NATIVE_RESTORE } from './native-mode'
 import { shouldCopy, type ClipboardAccess, type ClipboardGate } from './clipboard'
 import type { ClipboardBanner } from './banner'
 import { CommandLedger } from './command-ledger'
+import { queryHistory, recordCommand } from './history-client'
 import { ScrollbackController } from './scrollback/controller'
 import { log } from './log'
 import type { WSClient, SessionHandle } from './ipc'
@@ -236,7 +237,15 @@ export class TerminalContent extends BaseTabContent {
       this.rows = renderer.rows
 
       // ── Command ledger (ADR-0008) ────────────────────────────────────────
-      this.ledger = new CommandLedger({ now: () => performance.now() })
+      // A completed record is shipped to the store over the control plane
+      // (nocx-rtg0.13, AD-1 as amended): the renderer derives the facts
+      // from the byte stream it already owns, and recordCommand is the one
+      // seam that crosses. Best-effort by design — a dropped record is a
+      // session-lost entry, never a terminal error.
+      this.ledger = new CommandLedger({
+        now: () => performance.now(),
+        onComplete: (rec) => recordCommand(this.client, rec),
+      })
 
       // ── Wire input ownership BEFORE opening the session ─────────────────
       this.shellTarget = new ShellInputTarget(
@@ -278,7 +287,9 @@ export class TerminalContent extends BaseTabContent {
           onAcceptHint: () => {},
           /** Up on the first line (or an empty draft): no further caret
            *  movement, so open the recall overlay (design §8.10 v6). */
-          onUpAtTop: () => this.recall?.open('directory'),
+          onUpAtTop: () => {
+            void this.recall?.open('directory')
+          },
         },
         // The language is chosen HERE, not inside the editor. CommandEditor
         // must stay language-agnostic (ADR-0010 §Decision 3): the agent target
@@ -291,15 +302,24 @@ export class TerminalContent extends BaseTabContent {
       this.editor.mount(target)
 
       // ── Recall overlay (Provenance Recall, design §8.10) ────────────────
-      // The history palette above the prompt. Served from the in-memory
-      // ledger behind the generated history.query types with source 'session'
-      // until the persistent store lands — when it does, only the query
-      // function changes. The editor's key arbiter gives the overlay first
-      // refusal while it is open; navigating previews into the editor, and
-      // Enter executes through the editor's own submit path (nocx-w7h.5).
+      // The history palette above the prompt. Rows are served by the store
+      // over the control plane (history.query, source=store); when the
+      // store cannot answer, the overlay falls back to the in-memory ledger
+      // with source=session, which the panel labels "this session only" —
+      // presenting one session as all history is the same lie as marking
+      // every command green. The editor's key arbiter gives the overlay
+      // first refusal while it is open; navigating previews into the
+      // editor, and Enter executes through the editor's own submit path
+      // (nocx-w7h.5).
       this.recall = new RecallOverlay({
         editor: this.editor,
-        query: (scope) => queryLedgerHistory(this.ledger, scope, this._cwd, this._host),
+        query: async (scope) => {
+          try {
+            return await queryHistory(this.client, scope, this._cwd, this._host)
+          } catch {
+            return queryLedgerHistory(this.ledger, scope, this._cwd, this._host)
+          }
+        },
       })
       this.recall.mount(this.editor.root)
       this.editor.setKeyArbiter((e) => this.recall!.handleKey(e))

@@ -1,0 +1,333 @@
+package transport
+
+// history.record (nocx-rtg0.13) — the write half of the history family.
+// The frontend sends a completed command's facts over the control plane
+// (AD-1 as amended); the handler hands them to the store. These tests drive
+// the real handler through the real socket, so the wire is a party to the
+// contract: history.record followed by history.query is the same round trip
+// a user's terminal makes.
+
+import (
+	"context"
+	"encoding/json"
+	"sync"
+	"testing"
+
+	"github.com/gorilla/websocket"
+
+	"github.com/shady2k/nocx/internal/content"
+)
+
+// fakeRecordHistoryDB is a real-behaving in-memory ContentDB: Add stores,
+// Query serves, so a record-then-query round trip through the socket proves
+// the handler persisted what it was handed. The real store's policy gating
+// (history.enabled off → no row) is the store's own behaviour, already
+// asserted in internal/content; this fake deliberately stores everything.
+type fakeRecordHistoryDB struct {
+	mu      sync.Mutex
+	nextID  int64
+	records []content.CommandRecord
+}
+
+func newFakeRecordHistoryDB() *fakeRecordHistoryDB {
+	return &fakeRecordHistoryDB{nextID: 1}
+}
+
+func (f *fakeRecordHistoryDB) CommandHistory() content.CommandHistoryRepository { return f }
+func (f *fakeRecordHistoryDB) Conversations() content.ConversationRepository    { return nil }
+func (f *fakeRecordHistoryDB) Backup(_ context.Context, _ string) error {
+	return content.ErrNotImplemented
+}
+func (f *fakeRecordHistoryDB) Close() error { return nil }
+
+func (f *fakeRecordHistoryDB) Add(_ context.Context, record content.CommandRecord) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	record.ID = f.nextID
+	f.nextID++
+	f.records = append(f.records, record)
+	return nil
+}
+
+func (f *fakeRecordHistoryDB) List(_ context.Context, limit int) ([]content.CommandRecord, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]content.CommandRecord, 0, len(f.records))
+	for i := len(f.records) - 1; i >= 0 && len(out) < limit; i-- {
+		out = append(out, f.records[i])
+	}
+	return out, nil
+}
+
+func (f *fakeRecordHistoryDB) GetByID(_ context.Context, id int64) (*content.CommandRecord, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := range f.records {
+		if f.records[i].ID == id {
+			r := f.records[i]
+			return &r, nil
+		}
+	}
+	return nil, nil
+}
+
+func (f *fakeRecordHistoryDB) FindByPrefix(_ context.Context, _ string, limit int) ([]content.CommandRecord, error) {
+	return f.List(context.Background(), limit)
+}
+
+func (f *fakeRecordHistoryDB) Query(_ context.Context, scope content.Scope, cwd, host string, limit int, before *int64) (content.HistoryPage, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var entries []content.CommandRecord
+	for i := len(f.records) - 1; i >= 0; i-- {
+		r := f.records[i]
+		switch scope {
+		case content.ScopeDirectory:
+			if r.Cwd != cwd || r.Host != host {
+				continue
+			}
+		case content.ScopeHost:
+			if r.Host != host {
+				continue
+			}
+		}
+		if before != nil && r.ID >= *before {
+			continue
+		}
+		entries = append(entries, r)
+		if len(entries) >= limit {
+			break
+		}
+	}
+	return content.HistoryPage{
+		Entries:   entries,
+		Exhausted: len(entries) < len(f.records),
+		HasRows:   len(f.records) > 0,
+	}, nil
+}
+
+func (f *fakeRecordHistoryDB) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.records)
+}
+
+func recordParams(overrides map[string]any) map[string]any {
+	p := map[string]any{
+		"command":   "ls -la",
+		"cwd":       "/srv/api",
+		"host":      "",
+		"status":    "success",
+		"exitCode":  0,
+		"startedAt": int64(1_750_000_000_000),
+		"endedAt":   int64(1_750_000_000_001),
+		"trusted":   true,
+	}
+	for k, v := range overrides {
+		p[k] = v
+	}
+	return p
+}
+
+// ── the write path ────────────────────────────────────────────────────────
+
+// A completed command's facts, sent over the real socket, land in the store:
+// the record round trip is record → Add → query, and the query answers
+// source=store with the row — the same seam the recall panel uses.
+func TestHistoryRecord_ThenQuerySeesTheRow(t *testing.T) {
+	db := newFakeRecordHistoryDB()
+	ws, stop := newHistoryWSServer(t, db)
+	defer stop()
+	conn := connectWS(t, ws)
+
+	resp := vaultCall(t, conn, "history.record", recordParams(nil), 1)
+	if resp.Error != nil {
+		t.Fatalf("record error: %+v", resp.Error)
+	}
+	if db.count() != 1 {
+		t.Fatalf("store holds %d rows, want 1", db.count())
+	}
+
+	got := decodeHistoryResult(t, vaultCall(t, conn, "history.query", map[string]any{
+		"scope": "directory", "cwd": "/srv/api", "host": "", "limit": 50,
+	}, 2))
+	if got.Source != "store" {
+		t.Fatalf("source = %q, want store", got.Source)
+	}
+	if len(got.Entries) != 1 || got.Entries[0].Command != "ls -la" {
+		t.Fatalf("entries = %+v, want the recorded command", got.Entries)
+	}
+	if got.Entries[0].Status != "success" || got.Entries[0].ExitCode == nil || *got.Entries[0].ExitCode != 0 {
+		t.Fatalf("entry does not carry the recorded facts: %+v", got.Entries[0])
+	}
+}
+
+// The record carries the full fact set the ledger derived — cwd, host, exit
+// code, timestamps, trust — each field verified in the store, not guessed
+// from the request echo.
+func TestHistoryRecord_PersistsEveryFact(t *testing.T) {
+	db := newFakeRecordHistoryDB()
+	ws, stop := newHistoryWSServer(t, db)
+	defer stop()
+	conn := connectWS(t, ws)
+
+	resp := vaultCall(t, conn, "history.record", recordParams(map[string]any{
+		"command":   "sleep 10",
+		"cwd":       "/tmp",
+		"host":      "prod.example.com",
+		"status":    "interrupted",
+		"exitCode":  137,
+		"startedAt": int64(100),
+		"endedAt":   int64(200),
+		"trusted":   true,
+	}), 1)
+	if resp.Error != nil {
+		t.Fatalf("record error: %+v", resp.Error)
+	}
+
+	rows, err := db.List(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	r := rows[0]
+	if r.Command != "sleep 10" || r.Cwd != "/tmp" || r.Host != "prod.example.com" {
+		t.Fatalf("record = %+v, want the sent facts", r)
+	}
+	if r.Status != content.StatusInterrupted || r.ExitCode == nil || *r.ExitCode != 137 {
+		t.Fatalf("status/exitCode = %q/%v, want interrupted/137", r.Status, r.ExitCode)
+	}
+	if r.StartedAt == nil || *r.StartedAt != 100 || r.EndedAt == nil || *r.EndedAt != 200 {
+		t.Fatalf("timestamps = %v/%v, want 100/200", r.StartedAt, r.EndedAt)
+	}
+	if !r.Trusted {
+		t.Fatal("trusted = false, want true")
+	}
+}
+
+// A record whose command is empty or whitespace-only is rejected: the store
+// must never hold a row that is not a command.
+func TestHistoryRecord_RejectsEmptyCommand(t *testing.T) {
+	ws, stop := newHistoryWSServer(t, newFakeRecordHistoryDB())
+	defer stop()
+	conn := connectWS(t, ws)
+
+	for _, cmd := range []string{"", "   ", "\t\n"} {
+		resp := vaultCall(t, conn, "history.record", recordParams(map[string]any{"command": cmd}), 1)
+		if resp.Error == nil || resp.Error.Code != -32602 {
+			t.Fatalf("command %q: error = %+v, want -32602", cmd, resp.Error)
+		}
+	}
+}
+
+// An unknown status is rejected: the closed set in command-ledger.ts is the
+// only vocabulary the store understands.
+func TestHistoryRecord_RejectsUnknownStatus(t *testing.T) {
+	ws, stop := newHistoryWSServer(t, newFakeRecordHistoryDB())
+	defer stop()
+	conn := connectWS(t, ws)
+
+	resp := vaultCall(t, conn, "history.record", recordParams(map[string]any{"status": "crashed"}), 1)
+	if resp.Error == nil || resp.Error.Code != -32602 {
+		t.Fatalf("error = %+v, want -32602", resp.Error)
+	}
+}
+
+// Garbage params are rejected, not interpreted.
+func TestHistoryRecord_RejectsGarbageParams(t *testing.T) {
+	ws, stop := newHistoryWSServer(t, newFakeRecordHistoryDB())
+	defer stop()
+	conn := connectWS(t, ws)
+
+	req, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "method": "history.record", "params": "not-an-object", "id": 1,
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, req); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	resp := readVaultResult(t, conn)
+	if resp.Error == nil || resp.Error.Code != -32602 {
+		t.Fatalf("error = %+v, want -32602", resp.Error)
+	}
+}
+
+// With no store wired the request is accepted and recorded nowhere — the
+// same state where history.query answers source=session.
+func TestHistoryRecord_NoStoreIsAcceptedAndRecordsNothing(t *testing.T) {
+	ws, stop := newHistoryWSServer(t, nil)
+	defer stop()
+	conn := connectWS(t, ws)
+
+	resp := vaultCall(t, conn, "history.record", recordParams(nil), 1)
+	if resp.Error != nil {
+		t.Fatalf("record error: %+v", resp.Error)
+	}
+	got := decodeHistoryResult(t, vaultCall(t, conn, "history.query", map[string]any{"scope": "everywhere"}, 2))
+	if got.Source != "session" {
+		t.Fatalf("source = %q, want session", got.Source)
+	}
+}
+
+// A store that fails to Add is an error the caller can act on, never a
+// silent drop: broken and unavailable must not collapse into each other.
+func TestHistoryRecord_StoreErrorIsRPCError(t *testing.T) {
+	db := &fakeHistoryDB{} // Add returns ErrNotImplemented
+	ws, stop := newHistoryWSServer(t, db)
+	defer stop()
+	conn := connectWS(t, ws)
+
+	resp := vaultCall(t, conn, "history.record", recordParams(nil), 1)
+	if resp.Error == nil || resp.Error.Code != -32603 {
+		t.Fatalf("error = %+v, want -32603", resp.Error)
+	}
+}
+
+// ── the contract ──────────────────────────────────────────────────────────
+
+// The DTO's own conformance: the ack marshals to exactly {}, which the
+// schema accepts and nothing else.
+func TestHistoryRecord_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "history.record.schema.json")
+	raw, err := json.Marshal(historyRecordResponse{})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "history.record DTO")
+}
+
+// The real result off the real socket satisfies the schema — not a payload
+// the test itself built. An extra field in the ack would fail here even
+// though the DTO test would stay green.
+func TestHistoryRecord_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "history.record.schema.json")
+	db := newFakeRecordHistoryDB()
+	ws, stop := newHistoryWSServer(t, db)
+	defer stop()
+	conn := connectWS(t, ws)
+
+	resp := vaultCall(t, conn, "history.record", recordParams(nil), 1)
+	if resp.Error != nil {
+		t.Fatalf("record error: %+v", resp.Error)
+	}
+	validateJSON(t, schema, resp.Result, "history.record result (real socket)")
+}
+
+// readVaultResult reads one JSON-RPC response off the socket — the
+// raw-message variant of vaultCall, for requests built by hand.
+func readVaultResult(t *testing.T, conn *websocket.Conn) *vaultRPCResult {
+	t.Helper()
+	_, raw, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	var resp vaultRPCResult
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	return &resp
+}
