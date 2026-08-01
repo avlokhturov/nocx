@@ -63,5 +63,5 @@ playwright-report/
 # bd worktree
 .worktrees/nocx-q36/
 
-# local harness state (graphify skill install)
+# local harness state
 .pi/

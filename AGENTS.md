@@ -11,18 +11,40 @@ OpenCode, …) contributing to the repo. Read it before writing code.
   (`AD-1`…`AD-10`), module boundaries, the WebSocket protocol. **The ADs are binding.**
 - The task backlog lives in **beads** (`bd`), not in prose. Get work with `bd ready`.
 - **New here?** The [README setup](README.md#agent-tooling) is the full install guide —
-  the toolchain _and_ the per-machine agent tooling (`bd`, the `beads-superpowers`
-  plugin, and optional `graphify`). `make init` does not install any of it.
+  the toolchain _and_ the per-machine agent tooling (`bd` and the `beads-superpowers`
+  plugin). `make init` does not install any of it.
 
 ## First thing in a fresh clone
 
 Two kinds of setup, in order. **First, install the tooling on your machine** — the
 toolchain (Go, Node, Wails, `bd`) _and_ the agent tooling that is not vendored:
 the [`beads-superpowers`](https://github.com/DollarDill/beads-superpowers) Claude
-Code plugin (Superpowers skills + the `bd` session hooks) and, optionally,
-`graphify` for knowledge-graph code search. The [README](README.md#agent-tooling)
-has the exact commands; `make init` installs none of it and assumes the tools
-already exist.
+Code plugin (Superpowers skills + the `bd` session hooks). The
+[README](README.md#agent-tooling) has the exact commands; `make init` installs
+none of it and assumes the tools already exist.
+
+### Code search
+
+**`grep`, `glob` and reading the file.** There is no code-knowledge-graph index in
+this repo, and nothing sits in front of a file read.
+
+A graph index (`graphify`) was vendored here and removed on 2026-08-01 after being
+measured over one design-and-review session: five queries, zero answers. It returned
+symbol names ranked by graph proximity, truncated to a token budget — while every
+finding that actually mattered came from `grep`. Two of those findings rewrote a
+design section and closed a bug: the `serializeRange` call at `blocks.ts:671` that
+made an entire output-capture mechanism unnecessary, and the absence of the
+`z-index: 20` rule that three code comments still claim exists.
+
+It also cost: 91 MB of generated output committed to the repository across 16
+commits, a `PreToolUse` hook that made a graph query **mandatory before every file
+read and every grep**, and workers regenerating the index unasked — one of them
+dropped 326 000 lines of derived data into a diff that was under review.
+
+The lesson is narrower than "graphs are useless": our questions are almost always
+_does this exist, and who calls it_, which is exactly what `grep` answers exactly
+and cheaply. Do not reintroduce an index — or any hook in front of a file read —
+without measuring it against that baseline first.
 
 **Then wire up the repo:**
 

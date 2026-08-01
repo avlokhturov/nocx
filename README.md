@@ -145,7 +145,6 @@ the rest through the language toolchains:
 go install github.com/wailsapp/wails/v2/cmd/wails@latest
 go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8   # exactly this — nixpkgs ships v2, which rejects .golangci.yml
 CGO_ENABLED=0 go install github.com/steveyegge/beads/cmd/bd@latest        # server-mode bd; add gcc only for the embedded cgo build
-uv tool install graphifyy && graphify install
 ```
 
 `bd` is not in upstream nixpkgs, so `go install` is the clean route (or package
@@ -325,7 +324,6 @@ not install them:
 | ----------------------------------------------------------------------------- | -------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
 | `bd` (beads)                                                                  | The backlog — **required** (also in [Prerequisites](#prerequisites)) | `brew install beads` (or `npm i -g @beads/bd`)                                                                                            |
 | [`beads-superpowers`](https://github.com/DollarDill/beads-superpowers) plugin | Superpowers skills + the `bd` session hooks — **recommended**        | `claude plugin marketplace add DollarDill/beads-superpowers` then `claude plugin install beads-superpowers@beads-superpowers-marketplace` |
-| [`graphify`](https://github.com/Graphify-Labs/graphify)                       | Knowledge-graph code search — **optional**                           | `uv tool install graphifyy` then `graphify install`                                                                                       |
 
 - **Install `bd` before the plugin.** The plugin's hooks call `bd` on every
   session start, so a missing `bd` makes them fail.
@@ -334,12 +332,6 @@ not install them:
   [marketplace README](https://github.com/DollarDill/beads-superpowers) has the
   per-agent variant. (Inside a running session the same two steps are
   `/plugin marketplace add …` and `/plugin install …`.)
-- `graphify` builds the code knowledge-graph under `graphify-out/`. **That map is
-  committed**, so [`graphify-out/GRAPH_REPORT.md`](graphify-out/GRAPH_REPORT.md)
-  is readable with nothing installed. Install the CLI only to rebuild it
-  (`/graphify .`) or query it live (`/graphify query "…"`). Without graphify,
-  code search falls back to plain grep/glob — it still works, just slower and
-  less precise.
 
 ### Set your BMAD identity
 
