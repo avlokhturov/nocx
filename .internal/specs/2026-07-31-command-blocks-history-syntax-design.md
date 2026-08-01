@@ -69,6 +69,33 @@ for chunked output, the loss policy when the outbox overflows, the durable water
 makes §5.4's coverage claim computable after eviction, and the schema-v1 defects in
 §5.2's fine print.
 
+**Then §8 was reviewed the same way, and it was in worse shape than §7.**
+
+- **A capability that cannot be built was promised.** "`Tab` falls through to the shell as
+  a real completion request" (§8.7) is impossible: the editor owns the text, ADR-0004 hands
+  the line over atomically at submit, so the shell's buffer holds something else and a raw
+  `\t` completes it. Withdrawn, replaced by three real options in §17.1. Nothing may promise
+  shell-native completion until one is built.
+- **Labelling a dangerous irrelevance is not safety** (§8.5). A local PATH candidate offered
+  inside an SSH session is wrong even when it says "local". Applicability became part of the
+  provider contract: a provider declares where it applies and is not consulted elsewhere.
+- **§8 had no types.** `Candidate` was a word, provider merge had no rules, ranking features
+  were named without semantics, and the overlay had no state machine or keyboard arbiter.
+  §8.9 adds all four, because a worker given only §8.1–§8.8 builds a plausible popup that is
+  wrong in multiline, remote and stale-async — which are the only cases that matter.
+- **§12 contradicted itself about E6**, promising a session-scoped increment in the table
+  and calling it shipped pain in the paragraph below. Resolved by the rung indicator: the
+  surface ships early and says "this session only", because a history that states its scope
+  is honest and one that looks complete is not.
+- **The signature interaction is named** (§8.10): **Provenance Recall** — pick a past
+  command and, before it runs, see why this one and what changed since. Outcome ranking
+  alone is invisible, the guardrail alone is another warning, search over output is post-hoc;
+  this is the one moment where `Environment`, `confidence`, `status` and `edges` pay off
+  together, and it sits inside tracks E and M.
+- **Highlighting does not justify CM6 on its own** (§8.6). A mirrored highlight layer behind
+  the existing textarea delivers it with none of the prompt-line risk, and ADR-0010 must
+  weigh both rather than inherit the answer.
+
 ### What changed in v4
 
 Five changes, from mapping the pains against the model rather than reviewing the model
@@ -1022,6 +1049,22 @@ listing channel that would make it possible. That is a promise the code cannot k
 knowledge ships when the channel does, and until then every candidate is **labelled with its
 source and freshness**, so a local path never masquerades as a remote one.
 
+**v6 correction: a label is not enough, and applicability is part of the contract.** v5
+concluded that a local candidate offered inside a remote session is acceptable as long as
+it says "local". It is not. `rm` found on this laptop may not exist on the host you are
+typing at, or may be a different binary with different flags — and a candidate that is
+merely mislabelled is still a candidate the ranker can promote and ghost text can offer.
+The honest rule:
+
+> **A provider declares which environments it applies to, and is not consulted outside
+> them.** The local PATH and local-path providers are inactive in a remote environment.
+> They may appear in an explicitly non-executable reference section, never in ghost text
+> and never as a default selection.
+
+Disabling an inapplicable provider is a smaller failure than labelling a dangerous
+irrelevance. This also makes `confidence` load-bearing rather than decorative: a provider
+cannot claim applicability for an environment whose facets are `unknown`.
+
 ### 8.6 Highlighting
 
 Shell mode via CM6 legacy-modes (versioned in `nocx-2gf` W1) over the composed intent, and the
@@ -1029,18 +1072,63 @@ same highlighter re-run as a static pass on frozen block headers. When the activ
 not the shell, the shell highlighter is off — highlighting an agent prompt as shell syntax is
 worse than no highlighting.
 
+**But highlighting does not by itself justify CM6, and ADR-0010 must weigh that.** The
+tokenizer is the cheap half of this section; what is expensive and unproven is CM6 _in the
+prompt line_ — focus interplay with xterm, `defaultKeymap` shadowing Enter/Escape/Ctrl-C,
+IME, measurement under `visibility:hidden` — and the de-risk spike W0 that would have
+measured it in our own WebKitGTK webview was removed (§12). If highlighting is the whole
+near-term want, a **mirrored highlight layer behind the existing textarea** delivers it
+without any of that risk: the same tokenizer output painted into a positioned layer, with
+the textarea keeping the caret, selection, IME and keymap it already has.
+
+That is a genuinely different cost curve, and it is a real decision rather than a fallback:
+the mirrored layer is cheaper for highlighting alone and pays nothing toward ghost text,
+the completion dropdown or the recall overlay, which all want a real editor. ADR-0010 must
+carry both, plus one measurement, before W1 — otherwise the choice will have been made by
+whoever starts first.
+
 ### 8.7 Ghost text and Tab
 
 Ghost text is an inline decoration from the top-ranked candidate, environment-scoped.
 Acceptance must not fight W2's `Prec.highest` keymap (Enter / Shift-Enter / Escape / Ctrl-C):
 the accept binding lives inside that same layer.
 
-**Tab is a product decision.** Spending it on ghost-text acceptance forecloses shell-native
-completion — the only mechanism that knows remote paths, git subcommands and every dynamic
-completer a shell defines, which is exactly what §8.5 cannot ship. Default: `→` and `End`
-accept ghost text; `Tab` opens the dropdown when candidates exist and otherwise **falls
-through to the shell** as a real completion request. Listed in §17 as needing confirmation,
-because it is reversible only before habits form.
+Acceptance has preconditions, and v5 stated none of them. `→` accepts only when the caret
+sits at the end of the candidate's replacement range, the selection is empty, no IME
+composition is active, the keystroke would not otherwise move the caret, and the suggestion
+still belongs to the current document revision. `End` has the same conflict: with the caret
+mid-line it stays a caret movement and does not accept. A stale asynchronous suggestion is
+discarded, never applied. Per §9, an entry marked sensitive is never eligible to become
+ghost text — and the `Candidate` contract in §8.9 has to express that, because a rule the
+type cannot state is a rule the next provider will break.
+
+#### Tab: v5 promised something the architecture cannot do
+
+v5's default read: "`Tab` opens the dropdown when candidates exist and otherwise **falls
+through to the shell** as a real completion request." **That is withdrawn — it is not
+implementable, and it would have been built.**
+
+The editor owns the text in the DOM, and per ADR-0004 the line reaches the shell only as
+an atomic write at submit. The shell's `readline`/`zle` buffer therefore does not contain
+what the user is looking at. A raw `\t` forwarded to the PTY asks the shell to complete an
+empty or stale buffer — which will appear to work often enough to ship and be wrong in a
+way nobody can reproduce. The motivation was sound (only the shell knows remote paths, git
+subcommands and every dynamic completer, which is exactly what §8.5 cannot ship); the
+mechanism does not exist.
+
+Three real options, and choosing between them is what §17.1 now asks:
+
+1. **Tab opens our dropdown; with no candidates it sends nothing** and offers an explicit
+   route into a native-input mode. Cheapest, honest, and gives up dynamic completion.
+2. **A per-shell completion adapter** that synchronises the buffer with the shell and
+   retrieves its completions. Real capability, real per-shell cost, and a second thing that
+   can desynchronise.
+3. **An explicit native-input mode** in which the shell genuinely owns the line, entered
+   deliberately, with the editor stepping aside.
+
+**Until 2 or 3 exists, no document and no UI may promise shell-native completion.** Naming
+a capability we cannot deliver is how a worker builds a feature that is correct in tests
+and broken in a terminal.
 
 ### 8.8 The `InputTarget` seam grows extensions
 
@@ -1054,6 +1142,134 @@ editorExtensions?(): Extension[]   // allow-listed; cannot override the W2 keyma
 `ShellInputTarget` supplies shell mode and its providers. `AgentInputTarget` later supplies its
 own and mints `kind='agent'` entries through the same contract. ADR-0004 §3's "never edit the
 editor to add a target" is preserved, and now exercised.
+
+### 8.9 Four contracts before any pixel
+
+Everything above §8.9 describes behaviour. None of it says what the pieces _are_, and a
+worker handed §8.1–§8.8 would build a plausible popup that is wrong in exactly the cases
+that matter: multiline, remote, and stale-async. **The editor work starts here, not with a
+dropdown.**
+
+**1. `Candidate` is a type, not a word.** §8.4 returns `Candidate[]` and never says what
+one holds. At minimum:
+
+```ts
+interface Candidate {
+  id: string // stable — dedup across providers depends on it
+  targetId: string
+  providerId: string
+  displayText: string // what is shown
+  insertText: string // what is inserted — deliberately not the same field
+  replacement: { from: number; to: number } // where it goes; ghost text needs this
+  matchRanges: Array<{ from: number; to: number }> // why it matched, for highlighting
+  source: CandidateSource
+  scope?: RecallScope // which rung of §10.6 this came from
+  freshness?: Freshness
+  outcome?: OutcomeEvidence // §8.10's evidence column
+  environment?: EnvironmentEvidence
+  eligibleForGhostText: boolean // §9 sensitivity, expressed in the type
+}
+```
+
+Display text and insert text are separate fields on purpose: the evidence column (§8.10)
+is displayed and must never be inserted.
+
+**2. Provider applicability and merge.** "One ranker within the active target" (§8.4) does
+not answer: when the first results render; whether a slow provider is waited for; whether a
+late arrival may move the selection (**it may not** — a list that shifts under the fingers
+is worse than a slow one); how the same command arriving from history and from aliases is
+deduplicated; what a provider's error does to the others; the latency budget; and whether a
+provider may return after abort (it may not). Applicability from §8.5 belongs to this
+contract too.
+
+**3. Ranking features have semantics or they have none.** §8.4 names prefix quality,
+recency, frequency, environment match, outcome and provider prior — and defines none. The
+one that decides correctness: **what "environment match" means when a facet is `unknown`.
+Unknown is never a wildcard**, or the exact rung becomes a lie. This needs golden ranking
+cases in the bead, as assertions, or every worker writes a different heuristic.
+
+**4. Two state machines and one keyboard arbiter.** The completion dropdown and the recall
+overlay (§8.10) are separate surfaces with separate lifecycles, and nothing currently says
+which owns a keystroke when both could be open, what `↑` does inside an open dropdown, what
+`Tab` does inside the overlay, or whether the palette may open above either. Without an
+ownership rule this becomes competing keymaps and z-index defects — the failure already
+listed in `nocx-2gf`'s risk table and the reason `nocx-0oc` exists.
+
+### 8.10 Recall is a surface, and its signature is provenance
+
+The near-term goal is history, highlighting and hints. This section is what makes the first
+of those something a competitor cannot copy by adding a column.
+
+**`↑` opens an overlay; it does not cycle the line.** Not for novelty — because a cycled
+line has nowhere to show which rung of the ladder (§10.6) the result came from, no room for
+provenance, and no way to restore the draft. But the rule needs a boundary v5 never drew:
+in a multiline document `↑` stays caret movement first, and recall opens on an empty line
+or when there is no further movement upward; an explicit shortcut opens it from anywhere;
+`Esc` restores the draft, selection and scroll exactly as they were.
+
+**Enter inserts. It never executes.** A history of destructive commands crossed with an
+environment that may have changed since makes running straight from a list unacceptable.
+This is an acceptance assertion, not a preference.
+
+**The signature interaction — Provenance Recall.** Pick a past command and, _before it
+runs_, see why this one and what has changed since:
+
+```
+make dep␣↑
+
+  ⌂ prod/api · /srv/api                                    8 results
+    exact environment
+
+    make deploy                              ✕  failed twice
+    └─ make deploy REGION=eu                 ✓  worked next · 3 weeks ago
+
+  THEN                     NOW
+  staging                  prod                changed
+  deploy@10.0.0.4          deploy@10.0.0.8     changed
+  /srv/api                 /srv/api
+  main                     release/4.2         changed
+  privilege: yes           unknown             uncertain
+```
+
+Four rules that make this honest rather than clever:
+
+- **The failure stays visible.** Defaulting the selection to the successor is allowed;
+  hiding the command that failed is not. The user must see that nocx offered a substitute,
+  never that it rewrote what happened.
+- **Unknown renders as unknown** — never as absent, never as a guess (§10.1).
+- **The rung is shown, and relaxing it is the user's move**: "no more here · search same
+  host › · repository › · everywhere ›". Never an automatic widening.
+- **Accepting inserts; a significant context diff makes the next Enter open a short review**
+  rather than run silently — by §10.2's rule, escalating on where you are.
+
+Why this and not the alternatives, since all of them are reachable on §3's model: outcome
+ranking on its own is _invisible_ — it looks like odd sorting and earns no credit; the
+guardrail on its own reads as one more warning; search over output is powerful and is
+post-hoc investigation. Provenance Recall is the only one that puts `Environment`,
+`confidence`, `status` and `edges` together at the single moment with immediate value —
+**the instant before re-running a real command.** Its promise fits in a sentence: _nocx does
+not merely remember the command; it remembers where it worked, and says what has changed
+since._
+
+It is also reachable inside tracks E and M (§12): it needs `status`, durable entries,
+`edges` and the recall overlay. No output capture, no FTS, no agent.
+
+**The evidence column replaces descriptions.** Warp's dropdown says what a command _is_,
+from a curated specification database we do not have and will not build. Ours says what
+happened when **you** ran it — which no curated database can ever know:
+
+```
+make deploy REGION=eu      ✓ worked here · 3 weeks ago · /srv/api · main
+kubectl logs api-7c9…      ✓ ran 6× here · last 2 days ago · exact environment
+ssh deploy@api             history · last exit unknown · context partly known
+./scripts/release          path · local cwd · seen just now
+```
+
+Not poorer than a description — a different and more useful axis, answering _why is nocx
+offering this, and can I trust it here?_ What it must never be is a manufactured substitute:
+no "ssh — a command named ssh", no `--help` parsing on the keystroke path, no generated
+prose. If local man pages ever supply real descriptions, that is an optional provider with
+a named source, not an authoritative column.
 
 ---
 
@@ -1403,9 +1619,21 @@ E0 resolves before either track lands in it.
 | M5  | Both ends of every interval + the startup sweep                  | `nocx-rtg0.6` |
 | M6  | `command-ledger.ts` as cache, not a second writer                | `nocx-rtg0.7` |
 
-**The tracks meet at E6.** Up/Down over a session-only history would ship the exact pain the
-domain ranks first — _I closed the tab and lost it_ — dressed as a feature. Track M is what
-stops E6 being hollow, and that is why it runs alongside rather than after.
+**The tracks meet at E6** — and v5 said two incompatible things about it. The table promised
+"session ledger first, the ladder when it exists", while the paragraph below said Up/Down
+over a session-only history would ship the exact pain the domain ranks first — _I closed the
+tab and lost it_ — dressed as a feature. Both positions stood in the document at once.
+
+**v6 resolves it, and the resolution is the rung display.** E6 ships the _surface_ — the
+overlay, the contracts of §8.9, the draft/preview/insert-not-execute state machine — before
+Track M lands, and the scope indicator from §10.6 is what makes that honest: the overlay
+says **"this session only"** at its head, in the same place it will later say "exact
+environment". A history that states its scope is not pretending; a history that silently
+returns one tab's worth while looking complete is. So the surface is not blocked on M, and
+the _claim_ is bounded by what the store can back.
+
+Track M is still what makes E6 worth having, which is why it runs alongside rather than
+after — but the dependency is on the honesty of the label, not on the order of the work.
 
 ### Then, in order
 
@@ -1634,13 +1862,30 @@ would silently reverse:
     (§9.2).
 18. **A leading space means the entry does not exist.** Not redacted, not stored
     unindexed — not recorded (§9).
+19. **Recall inserts; it never executes.** Enter in the overlay puts the command in the
+    editor and stops there (§8.10).
+20. **Unknown is never a match.** A facet at `confidence='unknown'` cannot satisfy a rung
+    of the recall ladder, cannot make a provider applicable, and renders as unknown rather
+    than as absent (§8.5, §8.9, §10.1).
+21. **A provider declares where it applies, and is silent elsewhere.** Labelling a
+    candidate that does not apply to the current environment is not a substitute for not
+    offering it (§8.5).
+22. **Recall shows a substitute as a substitute.** When outcome evidence promotes a
+    successor over the command the user reached for, the original stays visible (§8.10).
 
 ---
 
 ## 17. Open — needs the owner's decision
 
-1. **Tab** (§8.7). Ghost-text acceptance versus falling through to shell completion. Proposal:
-   `→` accepts, `Tab` opens the dropdown or falls through. Reversible only before habits form.
+1. **Tab** (§8.7) — **re-posed in v6, because the previous proposal was impossible.** v5
+   offered "`Tab` opens the dropdown or falls through to the shell". The fall-through cannot
+   be built: the editor owns the text and the shell's line buffer does not have it, so a raw
+   `\t` completes a stale buffer. The question is now which of three we take — (1) our
+   dropdown only, sending nothing when there are no candidates, with an explicit route into
+   a native-input mode; (2) a per-shell completion adapter that syncs the buffer; (3) an
+   explicit native-input mode where the shell owns the line. Proposal: **(1) now, (3) next**
+   — (2) is a per-shell maintenance surface that should not be entered without evidence
+   users want it. Until (2) or (3), nothing may promise shell-native completion.
 2. ~~**Database encryption at rest**~~ — **CLOSED 2026-08-01, ADR-0018.** Encrypted, via
    SQLCipher. The objection recorded here (a sealed-vault dependency on every read,
    including recall at startup) was correct and is what forced the resolution: the
