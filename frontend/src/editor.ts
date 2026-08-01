@@ -380,6 +380,18 @@ export class CommandEditor {
       this.submit()
       return
     }
+    // Tab belongs to completion, and completion is not built yet (nocx-w7h.2,
+    // .3, nocx-4ff.23). Until it is, Tab is SWALLOWED rather than left to the
+    // browser: unbound, it is an ordinary focus-move, so pressing it in a
+    // terminal silently took the focus out of the prompt and the next
+    // keystroke went nowhere. Measured 2026-08-02 — document.activeElement
+    // went from cm-content to nothing. Doing nothing is not the end state; it
+    // is the honest one until Tab has something to complete with.
+    if (e.key === 'Tab' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault()
+      e.stopPropagation()
+      return
+    }
     // Escape clears the draft without interrupting the shell (Ctrl-C).
     if (e.key === 'Escape') {
       e.preventDefault()

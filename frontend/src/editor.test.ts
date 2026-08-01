@@ -95,6 +95,28 @@ describe('CommandEditor', () => {
     expect(submit).toHaveBeenCalledWith('echo "a\tb"  &&\nprintf ok')
   })
 
+  // Tab is completion's key, and completion is not built yet. What it must
+  // NOT be meanwhile is the browser's focus-move: measured in a real browser
+  // on 2026-08-02, pressing Tab at the prompt took document.activeElement
+  // from .cm-content to nothing, so the next keystroke went nowhere. The
+  // keydown is cancelled and the document is untouched — pressing Tab does
+  // nothing, visibly, instead of doing something invisible and wrong.
+  it('Tab is swallowed at the prompt rather than moving the focus away', () => {
+    const { ed, view } = setup()
+    ed.show()
+    ed.insertText('ec')
+    const delivered = key(view, { key: 'Tab' })
+    expect(delivered).toBe(false) // preventDefault: no browser focus move
+    expect(view.state.doc.toString()).toBe('ec')
+  })
+
+  it('Ctrl/Cmd+Tab is left alone — it belongs to the window, not the prompt', () => {
+    const { ed, view } = setup()
+    ed.show()
+    expect(key(view, { key: 'Tab', ctrlKey: true })).toBe(true)
+    expect(key(view, { key: 'Tab', metaKey: true })).toBe(true)
+  })
+
   it('Shift+Enter does not submit', () => {
     const { ed, view, submit } = setup()
     ed.show()
