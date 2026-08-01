@@ -403,6 +403,22 @@ export class TerminalContent extends BaseTabContent {
         // the shell. Whitelisting the editor and the grid was not enough, because
         // any control OUTSIDE the terminal is equally not ours.
         if (isTextEntry(active)) return
+        // Focus-only, deliberately. The keydown's target was fixed when it was
+        // dispatched — this keystroke started outside the editor, so the event
+        // never reaches the editor's own keydown listener. The design contract
+        // is: move focus synchronously, then leave the browser's native
+        // insertion uncancelled, and let the character arrive as the native
+        // default action of the keydown that is still in flight — it targets
+        // whatever is focused when it runs, which is the contentDOM this
+        // focus() just made active. So this path must NOT do what the block
+        // path above does: preventDefault() would throw the native insertion
+        // away, and insertText() on top of it would risk a second copy of the
+        // same character. The asymmetry is the point — the block path's event
+        // target is a block, never an editing host, so it has no native
+        // insertion to lean on. (How faithfully the native path lands is
+        // engine-dependent and is verified in a real browser, not in jsdom,
+        // which performs no native insertion at all.)
+
         this.editor.focus()
       }
       document.addEventListener('keydown', this._globalKeydown)

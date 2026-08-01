@@ -23,7 +23,9 @@ import {
   makeClipboard,
   makeBanner,
   type ClipboardFake,
+  type RendererMock,
 } from './test-support/tabs-fixtures'
+import { XtermRenderer } from './renderers/xterm'
 import { ClipboardGate } from './clipboard'
 import { CommandEditor } from './editor'
 import { Tab } from './tabs'
@@ -50,12 +52,24 @@ const viewOf = (ed: CommandEditor): EditorView => {
   const withView = ed as unknown as { view: EditorView }
   return withView.view
 }
+/** Mount options. */
+interface MountOpts {
+  /** Append the tab's pane to document.body. The document-level keydown
+   *  handler bails on a disconnected target, so tests that exercise it need
+   *  the pane in the tree. Default false — the copy-on-select tests do not. */
+  attachToDocument?: boolean
+}
 
 /** Mount a real TerminalContent inside a Tab and return the live editor view. */
-async function mountTerminal(clipboard: ClipboardFake = makeClipboard()): Promise<{
+async function mountTerminal(
+  clipboard: ClipboardFake = makeClipboard(),
+  opts: MountOpts = {},
+): Promise<{
   view: EditorView
   ed: CommandEditor
   clipboard: ClipboardFake
+  content: TerminalContent
+  tab: Tab
   teardown: () => void
 }> {
   const client = makeClient()
@@ -82,6 +96,7 @@ async function mountTerminal(clipboard: ClipboardFake = makeClipboard()): Promis
   )
   const paneParent = document.createElement('div')
   paneParent.append(tab.pane)
+  if (opts.attachToDocument) document.body.append(paneParent)
   await tab.start()
   await expect(content.ready).resolves.toBe(true)
 
@@ -90,6 +105,8 @@ async function mountTerminal(clipboard: ClipboardFake = makeClipboard()): Promis
     view: viewOf(ed),
     ed,
     clipboard,
+    content,
+    tab,
     teardown: () => {
       tab.close()
       paneParent.remove()
@@ -142,6 +159,75 @@ describe('editor copy-on-select wiring (W3)', () => {
       await vi.waitFor(() => expect(warn).toHaveBeenCalled())
     } finally {
       warn.mockRestore()
+      teardown()
+    }
+  })
+})
+
+describe('document-level keydown redirect with a block selected (W4)', () => {
+  it('a printable key lands exactly one character and deselects the block', async () => {
+    const { view, ed, content, tab, teardown } = await mountTerminal(makeClipboard(), {
+      attachToDocument: true,
+    })
+    const results = vi.mocked(XtermRenderer).mock.results
+    const renderer = results[results.length - 1].value as RendererMock
+    try {
+      // jsdom does not implement Element.scrollTo (or, in some versions,
+      // scrollIntoView); the controller uses both to pin the scrollback when
+      // the layout changes. Real browsers have them — stub the missing DOM
+      // APIs the way this suite stubs ResizeObserver, and restore after.
+      // unbound-method is about calling a detached method with the wrong
+      // `this`. These two are never called — they are saved so the prototype
+      // can be put back in `finally`, which is the opposite concern.
+      /* eslint-disable @typescript-eslint/unbound-method */
+      const protoScrollTo = Element.prototype.scrollTo
+      const protoScrollIntoView = Element.prototype.scrollIntoView
+      /* eslint-enable @typescript-eslint/unbound-method */
+      Element.prototype.scrollTo = () => {}
+      Element.prototype.scrollIntoView = () => {}
+      try {
+        // No TabManager activated this tab, and the handler is gated on the
+        // active flag: drive what setActive would have driven.
+        content.setVisible(true)
+
+        // A complete shell cycle through the renderer seam: A/B opens the
+        // editor, C starts a block, D freezes it, A/B returns to a fresh prompt.
+        const marker = (kind: 'A' | 'B' | 'C' | 'D', line = 0, exitCode?: number): void =>
+          renderer._fireCommandMarker({
+            kind,
+            line,
+            col: 0,
+            buffer: 'normal',
+            ...(exitCode === undefined ? {} : { exitCode }),
+          })
+        marker('A')
+        marker('B')
+        marker('C')
+        marker('D', 0, 0)
+        marker('A')
+        marker('B')
+
+        // Select the block the way a user does: click it.
+        const block = tab.pane.querySelector<HTMLElement>('.cmd-block')
+        expect(block).not.toBeNull()
+        block!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+        block!.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))
+        expect(tab.pane.querySelector('.cmd-block-selected')).not.toBeNull()
+        expect(ed.isVisible).toBe(true)
+
+        // Type one printable character with focus on <body>.
+        const ev = new KeyboardEvent('keydown', { key: 'x', bubbles: true, cancelable: true })
+        document.body.dispatchEvent(ev)
+
+        // Exactly one character in the document; the block is deselected.
+        expect(view.state.doc.toString()).toBe('x')
+        expect(ev.defaultPrevented).toBe(true)
+        expect(tab.pane.querySelector('.cmd-block-selected')).toBeNull()
+      } finally {
+        Element.prototype.scrollTo = protoScrollTo
+        Element.prototype.scrollIntoView = protoScrollIntoView
+      }
+    } finally {
       teardown()
     }
   })
