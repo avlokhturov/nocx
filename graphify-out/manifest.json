@@ -215,8 +215,8 @@
     "semantic_hash": ""
   },
   "internal/app/app.go": {
-    "mtime": 1785530487.5028646,
-    "ast_hash": "62776e1e921c077294e52bc61d933ece",
+    "mtime": 1785598103.9703834,
+    "ast_hash": "ce8c5fe0e996ceaf91bb14e77dc00b91",
     "semantic_hash": ""
   },
   "internal/app/app_test.go": {
@@ -370,8 +370,8 @@
     "semantic_hash": ""
   },
   ".github/workflows/ci.yml": {
-    "mtime": 1785525791.4938,
-    "ast_hash": "9987ae0f69b3be465fc918e76e698dbf",
+    "mtime": 1785598167.4901989,
+    "ast_hash": "10413f21acd7ca43d69f9a762a326fc1",
     "semantic_hash": ""
   },
   ".golangci.yml": {
@@ -380,8 +380,8 @@
     "semantic_hash": "ebdc80bb5d778b728d46cd55226c961c"
   },
   "AGENTS.md": {
-    "mtime": 1785525791.4938,
-    "ast_hash": "fd5b963fa85ebf7bef3dc37f9468c500",
+    "mtime": 1785598256.9843335,
+    "ast_hash": "bb5915549248ef7ce9dd9326aa2f56f6",
     "semantic_hash": ""
   },
   "CLAUDE.md": {
@@ -395,8 +395,8 @@
     "semantic_hash": ""
   },
   "docs/architecture.md": {
-    "mtime": 1785134182.1169915,
-    "ast_hash": "4450a972b5a596c8f95a2bbb7dad8dea",
+    "mtime": 1785598224.3409214,
+    "ast_hash": "fe03c5cf4e8213017ce249b443cc712c",
     "semantic_hash": ""
   },
   "docs/decisions/0001-xterm-js-as-vt-frontend.md": {
@@ -2710,8 +2710,8 @@
     "semantic_hash": ""
   },
   ".github/workflows/release.yml": {
-    "mtime": 1785094700.7460961,
-    "ast_hash": "70fe8982444c1f8d22fc2faec2feea21",
+    "mtime": 1785598190.5003738,
+    "ast_hash": "ae5d70490288d5e0959ff1ef7b8177dc",
     "semantic_hash": ""
   },
   ".internal/plans/2026-07-24-warp-editable-command-input.md": {
@@ -3480,13 +3480,13 @@
     "semantic_hash": ""
   },
   "internal/storage/paths.go": {
-    "mtime": 1785053463.327486,
-    "ast_hash": "f35e3211d11d1d2b281744156877aa30",
+    "mtime": 1785598094.874266,
+    "ast_hash": "d632d5a6b78b70fb3739ba95addbe41f",
     "semantic_hash": ""
   },
   "internal/storage/paths_test.go": {
-    "mtime": 1785053463.327486,
-    "ast_hash": "9c1b9914cfd79b80d527cd728aab0e52",
+    "mtime": 1785598078.7246048,
+    "ast_hash": "9c1aedf5056841f341ebbd6a6eb10121",
     "semantic_hash": ""
   },
   ".internal/plans/2026-07-26-persistence-storage-capabilities.md": {
@@ -5377,6 +5377,31 @@
   "docs/decisions/0017-a-connection-references-a-secret.md": {
     "mtime": 1785525791.4947999,
     "ast_hash": "c2b861f54c114e1a668dd625e31af5c9",
+    "semantic_hash": ""
+  },
+  "internal/storage/appdir.go": {
+    "mtime": 1785598020.6452997,
+    "ast_hash": "67c1cb1bf18ae757d64143b6dc17f88a",
+    "semantic_hash": ""
+  },
+  "internal/storage/appdir_dev.go": {
+    "mtime": 1785598027.2923868,
+    "ast_hash": "4b751d0a472f98c8fa8b55e22793d66a",
+    "semantic_hash": ""
+  },
+  "internal/storage/appdir_dev_test.go": {
+    "mtime": 1785598114.55452,
+    "ast_hash": "1f11b0e0f45b88cd07badcf18c307df7",
+    "semantic_hash": ""
+  },
+  "internal/storage/appdir_release.go": {
+    "mtime": 1785598031.0144355,
+    "ast_hash": "efb235dc4a0925964e6d369c72928e33",
+    "semantic_hash": ""
+  },
+  "internal/storage/appdir_release_test.go": {
+    "mtime": 1785597996.0849767,
+    "ast_hash": "8225fefa75b571cc790f867c15d84fbe",
     "semantic_hash": ""
   }
 }
