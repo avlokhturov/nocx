@@ -57,7 +57,7 @@ test.describe('enhanced input raw routing', () => {
       timeout: 5000,
     })
     await promptReady(page)
-    await expect(page.locator(INPUT)).toHaveValue('', {
+    await expect(page.locator(INPUT)).toHaveText('', {
       timeout: 5000,
     })
 
