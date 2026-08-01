@@ -721,3 +721,46 @@ describe('overflow menu (P1-6)', () => {
     document.body.removeChild(container)
   })
 })
+
+describe('frozen block header highlighting', () => {
+  it('highlights the frozen header with the same token classes as the live editor', () => {
+    const container = document.createElement('div')
+    const el = createCommandBlock(
+      1,
+      'ls -la | grep foo > out.txt',
+      '~',
+      '',
+      '<div></div>',
+      100,
+      0,
+      'success',
+      () => container,
+      noopSelect,
+    )
+    const byClass = new Map<string, string[]>()
+    for (const span of el.querySelectorAll<HTMLElement>('.cmd-header-text [class^="tok-"]')) {
+      const cls = span.className
+      byClass.set(cls, [...(byClass.get(cls) ?? []), span.textContent ?? ''])
+    }
+    expect(byClass.get('tok-command')).toEqual(['ls', 'grep'])
+    expect(byClass.get('tok-flag')).toEqual(['-la'])
+    expect(byClass.get('tok-operator')).toEqual(['|', '>'])
+    expect(byClass.get('tok-path')).toEqual(['out.txt'])
+    // The visible text is unchanged by the highlight pass.
+    expect(el.querySelector('.cmd-header-text')?.textContent).toBe('ls -la | grep foo > out.txt')
+  })
+
+  it('keeps a running header plain (no token spans)', () => {
+    const container = document.createElement('div')
+    const el = createRunningBlock(
+      1,
+      'ls -la | grep foo > out.txt',
+      '~',
+      '',
+      () => container,
+      noopSelect,
+    )
+    expect(el.querySelector('.cmd-header-text')?.textContent).toBe('ls -la | grep foo > out.txt')
+    expect(el.querySelectorAll('.cmd-header-text [class^="tok-"]').length).toBe(0)
+  })
+})

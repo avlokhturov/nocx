@@ -182,6 +182,49 @@
   word-break: break-word;
 }
 
+/* ── Shell syntax highlighting (shell-highlight.ts) ────────────────────
+   Token classes are emitted by the same lexer + highlighter in the live
+   editor and the frozen block headers, so this class set is the parity
+   contract between the two surfaces. Colours are semantic theme tokens,
+   not literals (ADR-0013 §4): a theme switch recolours both surfaces. */
+.tok-comment,
+.tok-meta {
+  color: var(--color-text-dim);
+}
+
+.tok-keyword {
+  color: var(--color-accent-secondary);
+}
+
+.tok-command {
+  color: var(--color-success);
+}
+
+.tok-flag,
+.tok-atom {
+  color: var(--color-warning);
+}
+
+.tok-operator {
+  color: var(--color-accent);
+}
+
+.tok-string {
+  color: var(--color-success);
+}
+
+.tok-heredoc {
+  color: var(--color-success-hover);
+}
+
+.tok-variable {
+  color: var(--color-danger);
+}
+
+.tok-path {
+  color: var(--color-accent-secondary);
+}
+
 /* CodeMirror 6 surface (ADR-0010). Auto-grow is layout, not arithmetic: the
    box is capped at ten lines — 10 × line-height 1.2 × font-size (the em in
    the calc resolves against .cm-editor's font-size) plus the 6px vertical

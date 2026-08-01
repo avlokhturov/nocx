@@ -232,3 +232,23 @@ describe('document-level keydown redirect with a block selected (W4)', () => {
     }
   })
 })
+
+describe('shell highlighting is actually wired (nocx-dgs)', () => {
+  // Reachability, not tokenisation. shell-highlight.ts has its own tests for
+  // what the tokens are; this one exists because a language layer that nothing
+  // passes to the editor is a feature the product does not have. It fails if
+  // the second constructor argument at the composition point is dropped.
+  it('the editor the real mount builds colours shell syntax', async () => {
+    const { view, ed, teardown } = await mountTerminal()
+    try {
+      ed.insertText('ls -la')
+      const classes = [...view.contentDOM.querySelectorAll<HTMLElement>('[class^="tok-"]')].map(
+        (span) => span.className,
+      )
+      expect(classes).toContain('tok-command')
+      expect(classes).toContain('tok-flag')
+    } finally {
+      teardown()
+    }
+  })
+})

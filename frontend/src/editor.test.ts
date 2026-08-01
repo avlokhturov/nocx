@@ -19,6 +19,7 @@ import { Extension } from '@codemirror/state'
 import { EditorView, keymap } from '@codemirror/view'
 import { defaultKeymap } from '@codemirror/commands'
 import { CommandEditor, EditorActions } from './editor'
+import { shellExtensions, highlightShellText } from './shell-highlight'
 
 /**
  * The editor's internal CM6 view. CommandEditor keeps it private; tests
@@ -506,5 +507,73 @@ describe('alias hints', () => {
     ed.showAliasHints(HINT_ITEMS) // must render again — dismissal was per-session
     expect(hintEl(container).style.display).not.toBe('none')
     expect(container.querySelectorAll('.nocx-editor-hint__item').length).toBe(3)
+  })
+})
+
+// ── Shell syntax highlighting (shell-highlight.ts) ─────────────────────
+
+describe('shell syntax highlighting', () => {
+  /** Read the live line's token spans as [class, text] pairs, in DOM order. */
+  const liveTokens = (doc: string): Array<[string, string]> => {
+    const { ed, view } = setup({}, shellExtensions)
+    ed.show()
+    ed.insertText(doc)
+    return [...view.contentDOM.querySelectorAll<HTMLElement>('[class^="tok-"]')].map((span) => [
+      span.className,
+      span.textContent ?? '',
+    ])
+  }
+
+  /** Read the static pass's token spans the same way, from a template element. */
+  const staticTokens = (html: string): Array<[string, string]> => {
+    const root = document.createElement('div')
+    root.innerHTML = html
+    return [...root.querySelectorAll<HTMLElement>('[class^="tok-"]')].map((span) => [
+      span.className,
+      span.textContent ?? '',
+    ])
+  }
+
+  it('command name, flag, pipe and redirect target are distinguishable token classes', () => {
+    const byClass = new Map<string, string[]>()
+    for (const [cls, text] of liveTokens('ls -la | grep foo > out.txt')) {
+      byClass.set(cls, [...(byClass.get(cls) ?? []), text])
+    }
+    expect(byClass.get('tok-command')).toEqual(['ls', 'grep'])
+    expect(byClass.get('tok-flag')).toEqual(['-la'])
+    expect(byClass.get('tok-operator')).toEqual(['|', '>'])
+    expect(byClass.get('tok-path')).toEqual(['out.txt'])
+  })
+
+  it('a quoted string containing a pipe is one string token', () => {
+    const tokens = liveTokens('echo "a|b"')
+    expect(tokens.filter(([cls]) => cls === 'tok-string')).toEqual([['tok-string', '"a|b"']])
+    expect(tokens.some(([cls, text]) => cls === 'tok-operator' && text === '|')).toBe(false)
+  })
+
+  it('a pipe inside a comment is not an operator', () => {
+    const tokens = liveTokens('# ls | grep foo')
+    expect(tokens).toContainEqual(['tok-comment', '# ls | grep foo'])
+    expect(tokens.some(([cls, text]) => cls === 'tok-operator' && text === '|')).toBe(false)
+  })
+
+  it('highlighting is off when no shell language is installed (non-shell target)', () => {
+    const { ed, view } = setup() // extensions default to []
+    ed.show()
+    ed.insertText('ls -la | grep foo > out.txt')
+    expect(view.contentDOM.querySelectorAll('[class^="tok-"]').length).toBe(0)
+  })
+
+  it('the frozen-header pass emits the same classes as the live line for the same text', () => {
+    const doc = 'ls -la | grep foo > out.txt'
+    expect(staticTokens(highlightShellText(doc))).toEqual(liveTokens(doc))
+  })
+
+  it('the static pass escapes the command text (no markup injection)', () => {
+    const html = highlightShellText('echo "<script>alert(1)</script>"')
+    expect(html).not.toContain('<script>')
+    const root = document.createElement('div')
+    root.innerHTML = html
+    expect(root.textContent).toBe('echo "<script>alert(1)</script>"')
   })
 })

@@ -7,6 +7,7 @@ import { XtermRenderer } from './renderers/xterm'
 import type { TerminalRenderer, MarkerAdapter } from './renderers/types'
 import { InputStateController } from './input-state'
 import { CommandEditor } from './editor'
+import { shellExtensions } from './shell-highlight'
 import { ShellInputTarget } from './input-target'
 import { submitCommand } from './submit'
 import { shouldShowEditor, NATIVE_RESTORE } from './native-mode'
@@ -236,39 +237,48 @@ export class TerminalContent extends BaseTabContent {
         (text: string) => renderer.paste(text),
         (data: string) => this.session!.send(data),
       )
-      this.editor = new CommandEditor({
-        submit: (doc: string) => {
-          this._pendingCommand = doc
-          if (this.ledger) {
-            let markerLine: () => number | undefined = () => undefined
-            const rec = this.ledger.open(doc, this._cwd, this._host, () => markerLine())
-            const m = renderer.registerMarker()
-            if (m) {
-              markerLine = () => m.line()
-              this._markers.set(rec.id, m)
-              m.onDispose(() => {
-                this.ledger?.dispose(rec.id)
-                this._markers.delete(rec.id)
-              })
+      this.editor = new CommandEditor(
+        {
+          submit: (doc: string) => {
+            this._pendingCommand = doc
+            if (this.ledger) {
+              let markerLine: () => number | undefined = () => undefined
+              const rec = this.ledger.open(doc, this._cwd, this._host, () => markerLine())
+              const m = renderer.registerMarker()
+              if (m) {
+                markerLine = () => m.line()
+                this._markers.set(rec.id, m)
+                m.onDispose(() => {
+                  this.ledger?.dispose(rec.id)
+                  this._markers.delete(rec.id)
+                })
+              }
             }
-          }
-          this.scrollback?.maybeClear(doc)
-          submitCommand(doc, {
-            dispatchSubmit: () => this.inputState.dispatch({ type: 'submit' }),
-            focusGrid: () => renderer.focus(),
-            sendDoc: (d) => void this.shellTarget!.submit(d),
-          })
+            this.scrollback?.maybeClear(doc)
+            submitCommand(doc, {
+              dispatchSubmit: () => this.inputState.dispatch({ type: 'submit' }),
+              focusGrid: () => renderer.focus(),
+              sendDoc: (d) => void this.shellTarget!.submit(d),
+            })
+          },
+          cancel: () => this.session?.send('\x03'),
+          // A taller editor is a shorter scrollback. Keep the bottom of the
+          // transcript where it belongs — just above the editor — instead of
+          // letting it slide underneath.
+          resized: () => this.scrollback?.scrollToBottom(),
+          /** Detect `ssh <partial>` pattern and show matching aliases. */
+          onInputChange: (text) => this._onEditorInput(text),
+          /** Hint acceptance — no cache to invalidate. */
+          onAcceptHint: () => {},
         },
-        cancel: () => this.session?.send('\x03'),
-        // A taller editor is a shorter scrollback. Keep the bottom of the
-        // transcript where it belongs — just above the editor — instead of
-        // letting it slide underneath.
-        resized: () => this.scrollback?.scrollToBottom(),
-        /** Detect `ssh <partial>` pattern and show matching aliases. */
-        onInputChange: (text) => this._onEditorInput(text),
-        /** Hint acceptance — no cache to invalidate. */
-        onAcceptHint: () => {},
-      })
+        // The language is chosen HERE, not inside the editor. CommandEditor
+        // must stay language-agnostic (ADR-0010 §Decision 3): the agent target
+        // will want prose with mentions on this same surface, and an editor
+        // that defaults to shell would have to be edited to gain one — exactly
+        // what ADR-0004 §3 exists to prevent. This is the composition point, so
+        // this is where the shell layer is named.
+        shellExtensions,
+      )
 
       this.editor.mount(target)
 

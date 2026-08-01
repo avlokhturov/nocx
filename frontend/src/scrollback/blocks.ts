@@ -5,6 +5,7 @@
 
 import { serializeRange, fromITheme } from './serializer'
 import { getCurrentTheme } from '../renderers/theme-adapter'
+import { highlightShellText } from '../shell-highlight'
 import type { IBufferLine } from '@xterm/xterm'
 
 // ── Clipboard helper ────────────────────────────────────────────────────────
@@ -174,9 +175,19 @@ function createHeader(
   header.appendChild(chipsRow)
 
   // ── Command text (below chips) ─────────────────────────────────────
+  // A frozen header carries the same syntactic highlight pass as the live
+  // editor (same lexer, same classes — see shell-highlight.ts). A running
+  // header stays plain: the command is still being executed, and the static
+  // pass is for reading a finished command back. The frozen branch is
+  // innerHTML by design, but the pass escapes every byte of the text, so
+  // command content can never inject markup.
   const cmdSpan = document.createElement('span')
   cmdSpan.className = 'cmd-header-text'
-  cmdSpan.textContent = command || '(empty)'
+  if (status === 'running') {
+    cmdSpan.textContent = command || '(empty)'
+  } else {
+    cmdSpan.innerHTML = command ? highlightShellText(command) : '(empty)'
+  }
   header.appendChild(cmdSpan)
 
   return header
