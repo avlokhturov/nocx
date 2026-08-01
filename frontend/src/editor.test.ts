@@ -14,12 +14,12 @@
 // visibility. The document is read back directly in exactly three places
 // where no public channel exists and the assertion is state integrity
 // (cleared after a throwing submit; untouched by a no-op Ctrl-C).
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeAll } from 'vitest'
 import { Extension } from '@codemirror/state'
 import { EditorView, keymap } from '@codemirror/view'
 import { defaultKeymap } from '@codemirror/commands'
 import { CommandEditor, EditorActions } from './editor'
-import { shellExtensions, highlightShellText } from './shell-highlight'
+import { shellExtensions, highlightShellText, shellHighlightReady } from './shell-highlight'
 
 /**
  * The editor's internal CM6 view. CommandEditor keeps it private; tests
@@ -513,6 +513,12 @@ describe('alias hints', () => {
 // ── Shell syntax highlighting (shell-highlight.ts) ─────────────────────
 
 describe('shell syntax highlighting', () => {
+  // The grammar loads asynchronously at module init; every test below needs
+  // the tokenizer ready so live and frozen classes are deterministic.
+  beforeAll(async () => {
+    await shellHighlightReady
+  })
+
   /** Read the live line's token spans as [class, text] pairs, in DOM order. */
   const liveTokens = (doc: string): Array<[string, string]> => {
     const { ed, view } = setup({}, shellExtensions)
@@ -542,7 +548,10 @@ describe('shell syntax highlighting', () => {
     expect(byClass.get('tok-command')).toEqual(['ls', 'grep'])
     expect(byClass.get('tok-flag')).toEqual(['-la'])
     expect(byClass.get('tok-operator')).toEqual(['|', '>'])
-    expect(byClass.get('tok-path')).toEqual(['out.txt'])
+    // The VS Code grammar styles every bare word after the command as an
+    // unquoted argument, so the redirect target and the plain argument `foo`
+    // share the path role.
+    expect(byClass.get('tok-path')).toEqual(['foo', 'out.txt'])
   })
 
   it('a quoted string containing a pipe is one string token', () => {
@@ -575,5 +584,67 @@ describe('shell syntax highlighting', () => {
     const root = document.createElement('div')
     root.innerHTML = html
     expect(root.textContent).toBe('echo "<script>alert(1)</script>"')
+  })
+
+  it('the corpus: every command word, real or invented, lands in the same class', () => {
+    const cases: Array<[string, string]> = [
+      ['ls -la', 'ls'],
+      ['pwd', 'pwd'],
+      ['cargo test', 'cargo'],
+      ['kubectl get pods', 'kubectl'],
+      ['docker compose up', 'docker'],
+      ['./scripts/release', './scripts/release'],
+      ['sdf dffd', 'sdf'],
+    ]
+    for (const [line, word] of cases) {
+      const classes = liveTokens(line)
+        .filter(([, text]) => text === word)
+        .map(([cls]) => cls)
+      // Exactly the command class and nothing else — `sdf` is styled like any
+      // other command word and gets no diagnostic (no existence claim).
+      expect(classes).toEqual(['tok-command'])
+    }
+  })
+
+  it('the corpus: live and frozen produce identical classes for identical text', () => {
+    const corpus = [
+      'ls -la',
+      'pwd',
+      'cargo test',
+      'kubectl get pods',
+      'docker compose up',
+      './scripts/release',
+      'FOO=bar make build',
+      'sudo -u deploy make release',
+      'echo "a|b"',
+      '# ls | grep foo',
+      'sdf dffd',
+    ]
+    for (const line of corpus) {
+      expect(staticTokens(highlightShellText(line))).toEqual(liveTokens(line))
+    }
+  })
+
+  it('an assignment keeps its variable and operator roles distinct from the command', () => {
+    const tokens = liveTokens('FOO=bar make build')
+    expect(tokens).toContainEqual(['tok-variable', 'FOO'])
+    expect(tokens).toContainEqual(['tok-operator', '='])
+    expect(tokens).toContainEqual(['tok-command', 'make'])
+    // `build` is make's argument, so the grammar styles it as an unquoted
+    // argument, not a command — only the command-position word is special.
+    expect(tokens).toContainEqual(['tok-path', 'build'])
+  })
+
+  it('a multiline document colours every line (document-wide token offsets)', () => {
+    const tokens = liveTokens('kubectl get pods\nls -la')
+    expect(tokens).toContainEqual(['tok-command', 'kubectl'])
+    expect(tokens).toContainEqual(['tok-command', 'ls'])
+    expect(tokens).toContainEqual(['tok-flag', '-la'])
+  })
+
+  it('a heredoc body across lines keeps the heredoc role', () => {
+    const tokens = staticTokens(highlightShellText('cat <<EOF\nhello world\nEOF'))
+    expect(tokens).toContainEqual(['tok-heredoc', 'hello world'])
+    expect(tokens).toContainEqual(['tok-heredoc', 'EOF'])
   })
 })

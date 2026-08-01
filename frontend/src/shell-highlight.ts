@@ -1,122 +1,220 @@
 // Read-only shell syntax highlighting (ADR-0010 §Decision 4: the language
 // layer arrives as a constructor-passed extension, not as editor hard-coding).
 //
-// Two surfaces consume the SAME lexer and the SAME highlighter, so their
-// token classes agree by construction:
-//   - the live command editor installs `shellExtensions`;
+// Two surfaces consume the SAME tokenizer, so their token classes agree by
+// construction:
+//   - the live command editor installs `shellExtensions` (CM6 decorations);
 //   - frozen block headers run the static `highlightShellText` pass.
 // Both are recoloured by a theme switch because the tok-* classes resolve to
 // `--color-*` semantic tokens in style.css (ADR-0013: colour literals live in
 // themes/ only).
 //
-// Scope is deliberately syntactic: the lexer never asks whether a command is
-// on PATH, whether it is an alias or a function, whether a flag is real, or
-// whether a path exists. Those need the session's own shell and are out of
-// scope (the brief names them explicitly).
+// The tokenizer is the VS Code `shellscript` TextMate grammar run through
+// Shiki's pure-JS regex engine (`shiki/engine/javascript`) — no Oniguruma
+// WASM, so the packaged app's CSP is never involved. `includeExplanation:
+// 'scopeName'` yields the grammar's scope names, not theme colours: the
+// palette stays with the `--color-*` tokens. The grammar loads asynchronously
+// at module init; until it is ready both surfaces render plain text, and the
+// live editor re-decorates as soon as the load completes (first paint is
+// never blocked; the prompt never waits).
+//
+// Scope is deliberately syntactic: the tokenizer never asks whether a command
+// is on PATH, whether it is an alias or a function, whether a flag is real,
+// or whether a path exists. Those need the session's own shell and are out of
+// scope (the brief names them explicitly). `sdf` is a command like any other
+// word in command position — no existence claim, no diagnostic.
 
-import {
-  HighlightStyle,
-  StreamLanguage,
-  StringStream,
-  syntaxHighlighting,
-} from '@codemirror/language'
-import type { StreamParser } from '@codemirror/language'
-import { shell } from '@codemirror/legacy-modes/mode/shell'
-import { Tag, highlightTree, tags } from '@lezer/highlight'
-import type { Extension } from '@codemirror/state'
+import { createHighlighterCore } from 'shiki/core'
+import type { HighlighterCore } from 'shiki/core'
+import { createJavaScriptRegexEngine } from 'shiki/engine/javascript'
+import { StateEffect } from '@codemirror/state'
+import type { Extension, Range } from '@codemirror/state'
+import { Decoration, EditorView, ViewPlugin } from '@codemirror/view'
+import type { DecorationSet, ViewUpdate } from '@codemirror/view'
 
-/** Fresh tag for the redirect-target role, which the legacy mode cannot express. */
-const pathTag = Tag.define()
+// ── Grammar loading ─────────────────────────────────────────────────────────
 
-/** Characters the legacy shell mode leaves unstyled: pipes, redirects, separators. */
-const OPERATORS: Record<string, true> = { '|': true, '>': true, ';': true, '&': true }
+/** The loaded highlighter, or null until the async init below completes. */
+let highlighter: HighlighterCore | null = null
 
-/** The shell mode's own token stack, plus our redirect flag. */
-interface ShellState {
-  tokens: unknown[]
-  redirect: boolean
+/** Callbacks that want to run once the tokenizer exists (frozen-header repaint). */
+const readyCallbacks = new Set<() => void>()
+
+/**
+ * Resolves when the tokenizer is ready to colour text. Tests await this
+ * before asserting classes; the app never blocks on it (plain text until
+ * ready). The grammar module is ~45 KB and the engine is pure JS, so this
+ * completes in a few milliseconds at startup.
+ */
+export const shellHighlightReady: Promise<void> = (async () => {
+  const hl = await createHighlighterCore({
+    langs: [import('@shikijs/langs/shellscript')],
+    themes: [import('@shikijs/themes/nord')],
+    engine: createJavaScriptRegexEngine(),
+  })
+  highlighter = hl
+  for (const cb of readyCallbacks) cb()
+  readyCallbacks.clear()
+})()
+
+/**
+ * Run `cb` once the tokenizer is ready (on a microtask if it already is).
+ * Used by the frozen-header path to repaint headers that were rendered while
+ * the grammar was still loading.
+ */
+export function onShellHighlightReady(cb: () => void): void {
+  if (highlighter !== null) {
+    queueMicrotask(cb)
+    return
+  }
+  readyCallbacks.add(cb)
+}
+
+// ── Scope-name → tok-* class mapping ────────────────────────────────────────
+//
+// Matched by longest prefix first, so `string.unquoted.argument` beats
+// `string.` and `keyword.operator` beats `keyword.`. The grammar's full scope
+// vocabulary is not enumerated here — only the roles the existing `.tok-*`
+// classes in style.css express.
+
+const SCOPE_CLASSES: ReadonlyArray<readonly [prefix: string, cls: string]> = [
+  ['punctuation.definition.string.heredoc', 'tok-heredoc'],
+  ['punctuation.terminator.statement', 'tok-operator'],
+  ['punctuation.separator.statement', 'tok-operator'],
+  ['punctuation.definition.string', 'tok-string'],
+  ['string.unquoted.heredoc', 'tok-heredoc'],
+  ['support.function.builtin', 'tok-command'],
+  ['string.unquoted.argument', 'tok-path'],
+  ['constant.other.option', 'tok-flag'],
+  ['entity.name.function', 'tok-command'],
+  ['entity.name.command', 'tok-command'],
+  ['keyword.operator', 'tok-operator'],
+  ['variable.', 'tok-variable'],
+  ['constant.', 'tok-atom'],
+  ['keyword.', 'tok-keyword'],
+  ['comment.', 'tok-comment'],
+  ['string.', 'tok-string'],
+]
+
+// ── Shared tokenizer ────────────────────────────────────────────────────────
+
+interface ShellToken {
+  from: number
+  to: number
+  cls: string
 }
 
 /**
- * The legacy shell mode styles words, flags, strings, comments, variables,
- * heredocs and numbers, but nothing else: `|`, `>`, `;`, `&` and redirect
- * targets fall through unstyled. This wrapper fills exactly those two gaps
- * and delegates everything else to the mode, so nothing the mode already
- * colours (including quoted strings containing operators) changes.
+ * The one tokenizer. Synchronous once the grammar is loaded (measured ~0.23 ms
+ * per realistic command line); returns [] while the grammar is still loading.
+ *
+ * A token's explanation carries the grammar's scope stack for that token,
+ * outermost first, possibly across several nested rules. The innermost scope
+ * is the most specific role, so scopes are walked inside-out; the first scope
+ * that names a role we style wins. Adjacent tokens that map to the same class
+ * (e.g. `"` + content + `"` of a quoted string) are merged into one span so
+ * the live line and the frozen header render identically.
  */
-const shellStream: StreamParser<ShellState> = {
-  name: 'shell',
-  startState(): ShellState {
-    return { tokens: [], redirect: false }
-  },
-  token(stream: StringStream, state: ShellState): string | null {
-    if (stream.eatSpace()) return null
-
-    // The token right after a `>`/`>>`/`>&` redirection is its target.
-    if (state.redirect) {
-      state.redirect = false
-      const ch = stream.peek()
-      if (ch !== undefined && OPERATORS[ch] !== true && ch !== '"' && ch !== "'" && ch !== '`') {
-        stream.eatWhile(/[^\s|;&<>()'"]/)
-        return 'path'
+function tokenizeShell(text: string): ShellToken[] {
+  const hl = highlighter
+  if (!hl || text.length === 0) return []
+  const { tokens } = hl.codeToTokens(text, {
+    lang: 'shellscript',
+    theme: 'nord',
+    includeExplanation: 'scopeName',
+  })
+  const out: ShellToken[] = []
+  for (const lineTokens of tokens) {
+    for (const t of lineTokens) {
+      if (t.content.length === 0 || /^\s+$/.test(t.content)) continue
+      let cls: string | null = null
+      const explanation = t.explanation ?? []
+      for (let k = explanation.length - 1; k >= 0 && cls === null; k--) {
+        const scopes = explanation[k].scopes
+        for (let j = scopes.length - 1; j >= 0 && cls === null; j--) {
+          const scopeName = scopes[j].scopeName
+          for (const [prefix, candidate] of SCOPE_CLASSES) {
+            if (scopeName.startsWith(prefix)) {
+              cls = candidate
+              break
+            }
+          }
+        }
       }
-      // `>&1`-style fd targets fall through to the operator handling below.
-    }
-
-    const ch = stream.peek()
-    if (ch !== undefined && OPERATORS[ch] === true) {
-      stream.next()
-      // Consume the second character of `||`, `&&`, `>>`, `|&`, `>&`, `>|`.
-      const next = stream.peek()
-      if (
-        next !== undefined &&
-        (next === ch ||
-          (ch === '|' && next === '&') ||
-          (ch === '>' && (next === '&' || next === '|')) ||
-          (ch === '&' && next === '>'))
-      ) {
-        stream.next()
+      if (cls === null) continue
+      // Shiki 4.x reports offsets absolute in the document, not per line.
+      const from = t.offset
+      const to = from + t.content.length
+      const prev = out[out.length - 1]
+      if (prev && prev.to === from && prev.cls === cls) {
+        prev.to = to
+      } else {
+        out.push({ from, to, cls })
       }
-      if (ch === '>') state.redirect = true
-      return 'operator'
     }
-
-    return shell.token(stream, state)
-  },
-  // Maps our custom style name to a real tag; every other name the mode
-  // emits resolves through the standard legacy-name table (e.g. 'builtin' →
-  // variableName.standard, 'attribute' → attributeName).
-  tokenTable: { path: pathTag },
-  languageData: shell.languageData,
+  }
+  return out
 }
 
-/** The shell language: one lexer for the live editor and the frozen pass. */
-export const shellLanguage = StreamLanguage.define<ShellState>(shellStream)
+// ── Live editor: CM6 decorations from the tokens ────────────────────────────
 
-/**
- * Token colours as classes, resolved to `--color-*` tokens in style.css.
- * The class set is the parity contract between the live line and the frozen
- * headers — both surfaces produce exactly these classes or none.
- */
-export const shellHighlightStyle = HighlightStyle.define([
-  { tag: tags.comment, class: 'tok-comment' },
-  { tag: tags.meta, class: 'tok-meta' },
-  { tag: tags.keyword, class: 'tok-keyword' },
-  { tag: tags.standard(tags.variableName), class: 'tok-command' },
-  { tag: tags.attributeName, class: 'tok-flag' },
-  { tag: tags.operator, class: 'tok-operator' },
-  { tag: tags.string, class: 'tok-string' },
-  { tag: tags.special(tags.string), class: 'tok-heredoc' },
-  { tag: tags.definition(tags.variableName), class: 'tok-variable' },
-  { tag: tags.atom, class: 'tok-atom' },
-  { tag: pathTag, class: 'tok-path' },
-])
+/** Forces every live surface to re-tokenize (fired once the grammar loads). */
+const refreshEffect = StateEffect.define<null>()
+
+/** One mark decoration per tok-* class, shared across ranges and views. */
+const MARKS: Record<string, Decoration> = Object.fromEntries(
+  [...new Set(SCOPE_CLASSES.map(([, cls]) => cls))].map((cls) => [
+    cls,
+    Decoration.mark({ class: cls }),
+  ]),
+)
+
+function computeDecorations(text: string): DecorationSet {
+  const ranges: Array<Range<Decoration>> = []
+  for (const { from, to, cls } of tokenizeShell(text)) {
+    ranges.push(MARKS[cls].range(from, to))
+  }
+  return Decoration.set(ranges, true)
+}
+
+class ShellHighlight {
+  decorations: DecorationSet
+  /** False once the owning view is destroyed; gates the async re-decoration. */
+  private alive = true
+
+  constructor(view: EditorView) {
+    this.decorations = computeDecorations(view.state.doc.toString())
+    if (highlighter === null) {
+      void shellHighlightReady.then(() => {
+        if (this.alive) view.dispatch({ effects: refreshEffect.of(null) })
+      })
+    }
+  }
+
+  destroy() {
+    this.alive = false
+  }
+
+  update(update: ViewUpdate) {
+    if (
+      update.docChanged ||
+      update.transactions.some((tr) => tr.effects.some((e) => e.is(refreshEffect)))
+    ) {
+      this.decorations = computeDecorations(update.state.doc.toString())
+    } else {
+      this.decorations = this.decorations.map(update.changes)
+    }
+  }
+}
+
+const shellHighlightPlugin = ViewPlugin.fromClass(ShellHighlight, {
+  decorations: (v) => v.decorations,
+})
 
 /** Install in a CommandEditor to colour the live command line. */
-export const shellExtensions: Extension[] = [
-  shellLanguage.extension,
-  syntaxHighlighting(shellHighlightStyle),
-]
+export const shellExtensions: Extension[] = [shellHighlightPlugin]
+
+// ── Frozen headers: the same tokens as HTML ─────────────────────────────────
 
 const ESCAPE: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;' }
 
@@ -126,21 +224,20 @@ function escapeHtml(text: string): string {
 }
 
 /**
- * Static pass for frozen block headers: tokenize `text` with the same lexer
- * and highlighter the live editor uses, and return HTML where every token
- * range is wrapped in its class. The text itself is always escaped, so the
- * result is safe to assign to innerHTML.
+ * Static pass for frozen block headers: tokenize `text` with the same
+ * tokenizer the live editor uses, and return HTML where every token range is
+ * wrapped in its class. The text itself is always escaped, so the result is
+ * safe to assign to innerHTML. While the grammar is still loading this is the
+ * plain escaped text — identical to what the live editor shows pre-ready.
  */
 export function highlightShellText(text: string): string {
-  const ranges: Array<[number, number, string]> = []
-  highlightTree(shellLanguage.parser.parse(text), shellHighlightStyle, (from, to, classes) => {
-    if (from < to) ranges.push([from, to, classes])
-  })
+  const tokens = tokenizeShell(text)
+  if (tokens.length === 0) return escapeHtml(text)
   let html = ''
   let pos = 0
-  for (const [from, to, classes] of ranges) {
+  for (const { from, to, cls } of tokens) {
     html += escapeHtml(text.slice(pos, from))
-    html += `<span class="${classes}">${escapeHtml(text.slice(from, to))}</span>`
+    html += `<span class="${cls}">${escapeHtml(text.slice(from, to))}</span>`
     pos = to
   }
   html += escapeHtml(text.slice(pos))

@@ -5,7 +5,7 @@
 
 import { serializeRange, fromITheme } from './serializer'
 import { getCurrentTheme } from '../renderers/theme-adapter'
-import { highlightShellText } from '../shell-highlight'
+import { highlightShellText, onShellHighlightReady } from '../shell-highlight'
 import type { IBufferLine } from '@xterm/xterm'
 
 // ── Clipboard helper ────────────────────────────────────────────────────────
@@ -98,6 +98,31 @@ function cwdLabel(cwd: string): string {
   return parts.slice(-2).join('/')
 }
 
+// ── Frozen-header highlight readiness ────────────────────────────────────────
+//
+// The Shiki grammar loads asynchronously at module init. A header frozen in
+// the few milliseconds before that resolves would stay plain forever, so
+// spans rendered pre-ready are registered here and repainted by
+// `highlightShellText` once the tokenizer exists. After that the registration
+// is a no-op: the grammar is loaded and every later header is coloured at
+// freeze time.
+
+let tokenizerLoaded = false
+const pendingHeaderSpans = new Set<HTMLElement>()
+
+function refreshPendingHeaderSpans(): void {
+  for (const span of pendingHeaderSpans) {
+    const text = span.textContent ?? ''
+    if (text && text !== '(empty)') span.innerHTML = highlightShellText(text)
+  }
+  pendingHeaderSpans.clear()
+}
+
+onShellHighlightReady(() => {
+  tokenizerLoaded = true
+  refreshPendingHeaderSpans()
+})
+
 // ── Block DOM factory ───────────────────────────────────────────────────────
 
 /**
@@ -187,6 +212,7 @@ function createHeader(
     cmdSpan.textContent = command || '(empty)'
   } else {
     cmdSpan.innerHTML = command ? highlightShellText(command) : '(empty)'
+    if (!tokenizerLoaded) pendingHeaderSpans.add(cmdSpan)
   }
   header.appendChild(cmdSpan)
 

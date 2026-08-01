@@ -3,7 +3,7 @@
 
 // @vitest-environment jsdom
 
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, beforeAll } from 'vitest'
 import {
   BlockManager,
   createCommandBlock,
@@ -12,6 +12,7 @@ import {
   deselectAllBlocks,
   getSelectedBlock,
 } from './blocks'
+import { shellHighlightReady } from '../shell-highlight'
 import { BufferLine } from './test-helpers'
 import { setCurrentTheme, _resetThemeState } from '../renderers/theme-adapter'
 
@@ -723,6 +724,12 @@ describe('overflow menu (P1-6)', () => {
 })
 
 describe('frozen block header highlighting', () => {
+  // The frozen header is highlighted by the same Shiki tokenizer as the live
+  // editor; the grammar loads asynchronously at module init, so wait for it.
+  beforeAll(async () => {
+    await shellHighlightReady
+  })
+
   it('highlights the frozen header with the same token classes as the live editor', () => {
     const container = document.createElement('div')
     const el = createCommandBlock(
@@ -745,7 +752,9 @@ describe('frozen block header highlighting', () => {
     expect(byClass.get('tok-command')).toEqual(['ls', 'grep'])
     expect(byClass.get('tok-flag')).toEqual(['-la'])
     expect(byClass.get('tok-operator')).toEqual(['|', '>'])
-    expect(byClass.get('tok-path')).toEqual(['out.txt'])
+    // Bare words after the command are unquoted arguments in the VS Code
+    // grammar, so `foo` shares the path role with the redirect target.
+    expect(byClass.get('tok-path')).toEqual(['foo', 'out.txt'])
     // The visible text is unchanged by the highlight pass.
     expect(el.querySelector('.cmd-header-text')?.textContent).toBe('ls -la | grep foo > out.txt')
   })
