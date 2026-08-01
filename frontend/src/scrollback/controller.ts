@@ -4,6 +4,7 @@
 
 import type { TerminalRenderer } from '../renderers/types'
 import { BlockManager, type GetLineFn } from './blocks'
+import type { CommandSnapshotStore } from '../command-snapshot'
 
 export type LiveRegionMode = 'idle' | 'running' | 'fullscreen' | 'unstructured'
 
@@ -12,6 +13,8 @@ export interface ScrollbackControllerOpts {
   pane: HTMLElement
   /** The renderer for the terminal. */
   renderer: TerminalRenderer
+  /** The renderer's per-tab command-existence snapshot store (OSC 636). */
+  snapshotStore: CommandSnapshotStore
   /** Injectable clock. */
   now?: () => number
 }
@@ -85,7 +88,10 @@ export class ScrollbackController {
     // which is absolute-positioned).
     opts.pane.insertBefore(this.scrollbackLayout, opts.pane.firstChild)
 
-    this._blockManager = new BlockManager(this.scrollbackInner, this.xtermLiveContainer, { now })
+    this._blockManager = new BlockManager(this.scrollbackInner, this.xtermLiveContainer, {
+      now,
+      snapshotStore: opts.snapshotStore,
+    })
 
     // ── Follow state ─────────────────────────────────────────────────────
     // Whether the end of the live output is on screen. Not "did the last scroll

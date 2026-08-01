@@ -6,6 +6,7 @@
 import { serializeRange, fromITheme } from './serializer'
 import { getCurrentTheme } from '../renderers/theme-adapter'
 import { highlightShellText, onShellHighlightReady } from '../shell-highlight'
+import type { CommandSnapshotStore } from '../command-snapshot'
 import type { IBufferLine } from '@xterm/xterm'
 
 // ── Clipboard helper ────────────────────────────────────────────────────────
@@ -108,12 +109,14 @@ function cwdLabel(cwd: string): string {
 // freeze time.
 
 let tokenizerLoaded = false
-const pendingHeaderSpans = new Set<HTMLElement>()
+/** Spans frozen before the grammar loaded, keyed by the tab's snapshot store
+ *  so the repaint judges against the right tab's command set. */
+const pendingHeaderSpans = new Map<HTMLElement, CommandSnapshotStore>()
 
 function refreshPendingHeaderSpans(): void {
-  for (const span of pendingHeaderSpans) {
-    const text = span.textContent ?? ''
-    if (text && text !== '(empty)') span.innerHTML = highlightShellText(text)
+  for (const [el, store] of pendingHeaderSpans) {
+    const text = el.textContent ?? ''
+    if (text && text !== '(empty)') el.innerHTML = highlightShellText(text, store)
   }
   pendingHeaderSpans.clear()
 }
@@ -136,6 +139,7 @@ function createHeader(
   durationMs: number | null,
   exitCode: number | null,
   status: 'running' | 'success' | 'failure',
+  store: CommandSnapshotStore,
 ): HTMLElement {
   const header = div('cmd-header')
 
@@ -211,8 +215,8 @@ function createHeader(
   if (status === 'running') {
     cmdSpan.textContent = command || '(empty)'
   } else {
-    cmdSpan.innerHTML = command ? highlightShellText(command) : '(empty)'
-    if (!tokenizerLoaded) pendingHeaderSpans.add(cmdSpan)
+    cmdSpan.innerHTML = command ? highlightShellText(command, store) : '(empty)'
+    if (!tokenizerLoaded) pendingHeaderSpans.set(cmdSpan, store)
   }
   header.appendChild(cmdSpan)
 
@@ -437,12 +441,13 @@ export function createCommandBlock(
   status: 'success' | 'failure',
   getContainer: () => HTMLElement,
   onSelect: (id: number, selected: boolean) => void,
+  store: CommandSnapshotStore,
 ): HTMLElement {
   const wrapper = document.createElement('div')
   wrapper.className = 'cmd-block'
   wrapper.setAttribute('data-block-id', String(id))
 
-  const header = createHeader(command, cwd, location, durationMs, exitCode, status)
+  const header = createHeader(command, cwd, location, durationMs, exitCode, status, store)
 
   let outputEl: HTMLElement | null = null
   if (outputHtml && !isOutputEmpty(outputHtml)) {
@@ -476,12 +481,13 @@ export function createRunningBlock(
   location: string,
   getContainer: () => HTMLElement,
   onSelect: (id: number, selected: boolean) => void,
+  store: CommandSnapshotStore,
 ): HTMLElement {
   const wrapper = document.createElement('div')
   wrapper.className = 'cmd-block cmd-block-running'
   wrapper.setAttribute('data-block-id', String(id))
 
-  const header = createHeader(command, cwd, location, null, null, 'running')
+  const header = createHeader(command, cwd, location, null, null, 'running', store)
 
   // Overflow menu — minimal: copy command only while running.
   // Always the LAST element of header-right (owner directive).
@@ -509,6 +515,7 @@ export function freezeBlock(
   exitCode: number | null,
   getContainer: () => HTMLElement,
   onSelect: (id: number, selected: boolean) => void,
+  store: CommandSnapshotStore,
 ): HTMLElement {
   const newEl = createCommandBlock(
     id,
@@ -521,6 +528,7 @@ export function freezeBlock(
     exitCode === 0 ? 'success' : 'failure',
     getContainer,
     onSelect,
+    store,
   )
 
   if (el.parentNode) {
@@ -534,6 +542,9 @@ export function freezeBlock(
 
 export interface BlockManagerOpts {
   now?: () => number
+  /** The tab's command-existence snapshot store (OSC 636), passed through to
+   *  every frozen header this manager creates. */
+  snapshotStore: CommandSnapshotStore
 }
 
 export class BlockManager {
@@ -546,15 +557,13 @@ export class BlockManager {
   private _cmdStartTime: number | null = null
   /** Currently selected block id, or null if none selected (P1-8). */
   private _selectedBlockId: number | null = null
+  private _snapshotStore: CommandSnapshotStore
 
-  constructor(
-    scrollbackInner: HTMLElement,
-    xtermContainer: HTMLElement,
-    opts: BlockManagerOpts = {},
-  ) {
+  constructor(scrollbackInner: HTMLElement, xtermContainer: HTMLElement, opts: BlockManagerOpts) {
     this._scrollbackInner = scrollbackInner
     this._xtermContainer = xtermContainer
     this._now = opts.now ?? (() => performance.now())
+    this._snapshotStore = opts.snapshotStore
   }
 
   get blocks(): readonly BlockRecord[] {
@@ -647,6 +656,7 @@ export class BlockManager {
         if (sel) this._onBlockSelected(bid)
         else this._onBlockDeselected(bid)
       },
+      this._snapshotStore,
     )
     this._scrollbackInner.insertBefore(el, this._xtermContainer)
 
@@ -721,6 +731,7 @@ export class BlockManager {
         if (sel) this._onBlockSelected(bid)
         else this._onBlockDeselected(bid)
       },
+      this._snapshotStore,
     )
 
     this._stopTicker()

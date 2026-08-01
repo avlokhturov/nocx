@@ -465,3 +465,199 @@ func TestEnsureInstalled_SkipsVersionWhenGateFails(t *testing.T) {
 		t.Fatal("VERSION was written despite a gate-append failure — integration would be stranded (nocx-1dx)")
 	}
 }
+
+// TestBashSnapshotEmitsHelloThenSnapshot drives the real bash hooks through
+// two prompt cycles: sourcing emits the OSC 636 hello (a 32-hex session
+// nonce) exactly once, the FIRST prompt starts the background compgen, and
+// the SECOND prompt emits the snapshot — carrying the same nonce and real
+// command names (pwd is a builtin, so it is always in compgen -c). The
+// snapshot must never appear in front of the first prompt.
+func TestBashSnapshotEmitsHelloThenSnapshot(t *testing.T) {
+	bash := requireShell(t, "bash")
+	script := writeScriptFile(t, "nocx.bash", bashScript)
+
+	prog := `
+export NOCX_SHELL_INTEGRATION=1
+source "$1"
+__nocx_prompt_command
+sleep 0.5
+__nocx_prompt_command
+`
+	out := runShellProg(t, bash, prog, script)
+
+	if got := strings.Count(out, "]636;H;"); got != 1 {
+		t.Errorf("expected exactly one OSC 636 hello; got %d in %q", got, out)
+	}
+	if got := strings.Count(out, "]636;S;"); got != 1 {
+		t.Errorf("expected exactly one OSC 636 snapshot; got %d in %q", got, out)
+	}
+
+	// The hello is the FIRST 636 message: nothing before it may carry the code.
+	if strings.Index(out, "]636;H;") != strings.Index(out, "]636;") {
+		t.Errorf("the hello is not the first OSC 636 message: %q", out)
+	}
+
+	// Extract the hello nonce and require the snapshot to carry the same one.
+	after := strings.SplitN(out, "]636;H;", 2)
+	if len(after) < 2 {
+		t.Fatalf("no OSC 636 hello emitted: %q", out)
+	}
+	nonce := strings.SplitN(after[1], "\x07", 2)[0]
+	if len(nonce) != 32 {
+		t.Errorf("nonce = %q, want 32 hex chars", nonce)
+	}
+
+	snap := out[strings.Index(out, "]636;S;")+len("]636;S;"):]
+	if !strings.HasPrefix(snap, nonce) {
+		t.Errorf("snapshot nonce does not match the hello nonce: %q", snap[:min(len(snap), 40)])
+	}
+	if !strings.Contains(snap, ";pwd;") {
+		t.Errorf("snapshot payload missing the pwd builtin: %q", snap[:min(len(snap), 200)])
+	}
+}
+
+// TestBashSnapshotNeverInFrontOfTheFirstPrompt asserts the compgen work is
+// off the prompt-critical path: a single prompt cycle emits the hello and the
+// 133/7 markers but no snapshot — the background job started at the first
+// prompt cannot be ready when the prompt itself is drawn.
+func TestBashSnapshotNeverInFrontOfTheFirstPrompt(t *testing.T) {
+	bash := requireShell(t, "bash")
+	script := writeScriptFile(t, "nocx.bash", bashScript)
+
+	prog := `
+export NOCX_SHELL_INTEGRATION=1
+source "$1"
+__nocx_prompt_command
+`
+	out := runShellProg(t, bash, prog, script)
+
+	if strings.Contains(out, "]636;S;") {
+		t.Errorf("a snapshot was emitted during the first prompt cycle: %q", out)
+	}
+	if got := strings.Count(out, "]636;H;"); got != 1 {
+		t.Errorf("expected exactly one OSC 636 hello; got %d in %q", got, out)
+	}
+	if !strings.Contains(out, "]133;A") {
+		t.Errorf("first prompt cycle lost the OSC 133 A marker: %q", out)
+	}
+}
+
+// runShellProgEnv is runShellProg with extra environment entries appended
+// (for duplicate keys the LAST entry wins, which is how TMPDIR is overridden).
+func runShellProgEnv(t *testing.T, shell, prog, arg string, extraEnv ...string) string {
+	t.Helper()
+	cmd := exec.Command(shell, "-c", prog, shell, arg)
+	cmd.Env = append(os.Environ(), "HOSTNAME=testhost")
+	cmd.Env = append(cmd.Env, extraEnv...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Logf("%s exited non-zero (may be benign): %v", shell, err)
+	}
+	return string(out)
+}
+
+// helloNonce extracts the 32-hex session nonce from the OSC 636 hello.
+func helloNonce(t *testing.T, out string) string {
+	t.Helper()
+	after := strings.SplitN(out, "]636;H;", 2)
+	if len(after) < 2 {
+		t.Fatalf("no OSC 636 hello emitted: %q", out)
+	}
+	nonce := strings.SplitN(after[1], "\x07", 2)[0]
+	if len(nonce) != 32 {
+		t.Fatalf("nonce = %q, want 32 hex chars", nonce)
+	}
+	return nonce
+}
+
+// TestBashSnapshotTempFilesStayPrivate drives the real bash hook through one
+// prompt cycle and then exits WITHOUT a second prompt — the exact path that
+// used to leave the session nonce world-readable on disk. The nonce must
+// never appear in the $TMPDIR listing, every snapshot file must be mode 600
+// from creation (mktemp, no chmod window), and nothing may survive the
+// shell: the chained EXIT trap must remove both the staging file and the
+// .snap final even though the snapshot was never emitted.
+func TestBashSnapshotTempFilesStayPrivate(t *testing.T) {
+	bash := requireShell(t, "bash")
+	script := writeScriptFile(t, "nocx.bash", bashScript)
+	tmp := t.TempDir()
+
+	prog := `
+# A pre-existing EXIT trap must be chained, not overwritten.
+trap 'printf CHAINED_EXIT' EXIT
+export NOCX_SHELL_INTEGRATION=1
+source "$1"
+# The staging file exists from source time (mktemp, mode 600) — observe it
+# before the first prompt, while the background compgen has not even started.
+printf '\nMODE_SOURCE\n'
+ls -l "$TMPDIR"/nocx-snap.* 2>/dev/null
+printf '\nLS_SOURCE\n'
+ls -A "$TMPDIR"
+__nocx_prompt_command
+# Exit without a second prompt: the snapshot is never emitted, so any file
+# left behind is a leak. The EXIT trap must clean both files.
+`
+	out := runShellProgEnv(t, bash, prog, script, "TMPDIR="+tmp)
+	nonce := helloNonce(t, out)
+
+	// The pre-existing EXIT trap survived: the hook chained it, not replaced it.
+	if !strings.Contains(out, "CHAINED_EXIT") {
+		t.Errorf("the pre-existing EXIT trap was not chained: %q", out)
+	}
+
+	// The snapshot must not have been emitted: this is the early-exit path.
+	if strings.Contains(out, "]636;S;") {
+		t.Errorf("a snapshot was emitted before the second prompt: %q", out)
+	}
+
+	// 1) The nonce never appears in any $TMPDIR listing during the session.
+	lsIdx := strings.Index(out, "LS_SOURCE")
+	if lsIdx < 0 {
+		t.Fatalf("LS_SOURCE section missing from output: %q", out)
+	}
+	lsSection := out[lsIdx+len("LS_SOURCE"):]
+	if idx := strings.Index(lsSection, nonce); idx >= 0 {
+		t.Errorf("session nonce %q appears in the $TMPDIR listing at byte %d: %q",
+			nonce, idx, lsSection[:min(len(lsSection), 200)])
+	}
+
+	// 2) The snapshot file present mid-session is mode 600 (rw-------).
+	modeIdx := strings.Index(out, "MODE_SOURCE")
+	if modeIdx < 0 {
+		t.Fatalf("MODE_SOURCE section missing from output: %q", out)
+	}
+	modeSection := out[modeIdx+len("MODE_SOURCE"):]
+	if end := strings.Index(modeSection, "LS_SOURCE"); end >= 0 {
+		modeSection = modeSection[:end]
+	}
+
+	seen := 0
+	for _, line := range strings.Split(modeSection, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		seen++
+		if len(fields) < 9 {
+			t.Errorf("unexpected ls -l line %q", line)
+			continue
+		}
+		if fields[0] != "-rw-------" {
+			t.Errorf("snapshot file %s has mode %s, want -rw------- (600)", fields[8], fields[0])
+		}
+	}
+	if seen == 0 {
+		t.Error("no snapshot file was observed mid-session (mktemp failed?)")
+	}
+
+	// 3) The shell exited between the first and second prompt: nothing survives.
+	entries, err := os.ReadDir(tmp)
+	if err != nil {
+		t.Fatalf("read %s: %v", tmp, err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "nocx-snap") {
+			t.Errorf("snapshot file %q survived shell exit", e.Name())
+		}
+	}
+}

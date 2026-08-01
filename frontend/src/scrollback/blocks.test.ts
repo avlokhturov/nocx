@@ -15,6 +15,7 @@ import {
 import { shellHighlightReady } from '../shell-highlight'
 import { BufferLine } from './test-helpers'
 import { setCurrentTheme, _resetThemeState } from '../renderers/theme-adapter'
+import { CommandSnapshotStore } from '../command-snapshot'
 
 /** Helper: returns a container supplier that references the given element. */
 function makeContainer(el: HTMLElement): () => HTMLElement {
@@ -23,10 +24,13 @@ function makeContainer(el: HTMLElement): () => HTMLElement {
 
 const noopSelect = (): void => {}
 
+/** A fresh, empty store — verdicts default to "no snapshot" per test. */
+const freshStore = (): CommandSnapshotStore => new CommandSnapshotStore()
+
 describe('createRunningBlock', () => {
   it('creates a div with classes cmd-block and cmd-block-running', () => {
     const container = document.createElement('div')
-    const el = createRunningBlock(1, 'ls -la', '~', '', () => container, noopSelect)
+    const el = createRunningBlock(1, 'ls -la', '~', '', () => container, noopSelect, freshStore())
     expect(el.tagName).toBe('DIV')
     expect(el.classList.contains('cmd-block')).toBe(true)
     expect(el.classList.contains('cmd-block-running')).toBe(true)
@@ -35,7 +39,7 @@ describe('createRunningBlock', () => {
 
   it('includes command text in header', () => {
     const container = document.createElement('div')
-    const el = createRunningBlock(1, 'ls -la', '~', '', () => container, noopSelect)
+    const el = createRunningBlock(1, 'ls -la', '~', '', () => container, noopSelect, freshStore())
     const text = el.querySelector('.cmd-header-text')
     expect(text?.textContent).toBe('ls -la')
   })
@@ -49,6 +53,7 @@ describe('createRunningBlock', () => {
       '',
       () => container,
       noopSelect,
+      freshStore(),
     )
     const cwd = el.querySelector('.cmd-header-cwd')
     expect(cwd?.textContent).toBe('\u{1F4C1} dev/projects')
@@ -57,21 +62,21 @@ describe('createRunningBlock', () => {
 
   it('shows a spinner for running state', () => {
     const container = document.createElement('div')
-    const el = createRunningBlock(1, 'sleep 10', '~', '', () => container, noopSelect)
+    const el = createRunningBlock(1, 'sleep 10', '~', '', () => container, noopSelect, freshStore())
     const spinner = el.querySelector('.cmd-header-spinner')
     expect(spinner).not.toBeNull()
   })
 
   it('has no output area until freeze (P0-3)', () => {
     const container = document.createElement('div')
-    const el = createRunningBlock(1, 'cmd', '~', '', () => container, noopSelect)
+    const el = createRunningBlock(1, 'cmd', '~', '', () => container, noopSelect, freshStore())
     const output = el.querySelector('.cmd-output')
     expect(output).toBeNull()
   })
 
   it('includes overflow menu button (P2-9)', () => {
     const container = document.createElement('div')
-    const el = createRunningBlock(1, 'cmd', '~', '', () => container, noopSelect)
+    const el = createRunningBlock(1, 'cmd', '~', '', () => container, noopSelect, freshStore())
     const btn = el.querySelector('.cmd-overflow-btn')
     expect(btn).not.toBeNull()
   })
@@ -92,6 +97,7 @@ describe('createCommandBlock', () => {
       'success',
       c,
       noopSelect,
+      freshStore(),
     )
     expect(el.classList.contains('cmd-block')).toBe(true)
     const exit = el.querySelector('.cmd-header-exit-ok')
@@ -99,7 +105,19 @@ describe('createCommandBlock', () => {
   })
 
   it('creates a frozen block with failure status', () => {
-    const el = createCommandBlock(2, 'false', '~', '', '', 5, 1, 'failure', c, noopSelect)
+    const el = createCommandBlock(
+      2,
+      'false',
+      '~',
+      '',
+      '',
+      5,
+      1,
+      'failure',
+      c,
+      noopSelect,
+      freshStore(),
+    )
     const exit = el.querySelector('.cmd-header-exit-fail')
     expect(exit?.textContent).toBe('exit 1')
   })
@@ -116,6 +134,7 @@ describe('createCommandBlock', () => {
       'success',
       c,
       noopSelect,
+      freshStore(),
     )
     const output = el.querySelector('.cmd-output')
     expect(output?.innerHTML).toContain('file.txt')
@@ -133,18 +152,43 @@ describe('createCommandBlock', () => {
       'success',
       c,
       noopSelect,
+      freshStore(),
     )
     const dur = el.querySelector('.cmd-header-duration')
     expect(dur?.textContent).toBe('1.2s')
   })
 
   it('omits exit badge when exitCode is null', () => {
-    const el = createCommandBlock(1, 'cmd', '~', '', 'out', null, null, 'success', c, noopSelect)
+    const el = createCommandBlock(
+      1,
+      'cmd',
+      '~',
+      '',
+      'out',
+      null,
+      null,
+      'success',
+      c,
+      noopSelect,
+      freshStore(),
+    )
     expect(el.querySelector('.cmd-header-exit')).toBeNull()
   })
 
   it('omits .cmd-output when outputHtml is empty (P0-3)', () => {
-    const el = createCommandBlock(1, 'cd repos', '~', '', '', 3, 0, 'success', c, noopSelect)
+    const el = createCommandBlock(
+      1,
+      'cd repos',
+      '~',
+      '',
+      '',
+      3,
+      0,
+      'success',
+      c,
+      noopSelect,
+      freshStore(),
+    )
     expect(el.querySelector('.cmd-output')).toBeNull()
   })
 
@@ -160,12 +204,25 @@ describe('createCommandBlock', () => {
       'success',
       c,
       noopSelect,
+      freshStore(),
     )
     expect(el.querySelector('.cmd-output')).toBeNull()
   })
 
   it('includes overflow menu button (P2-9)', () => {
-    const el = createCommandBlock(1, 'ls', '~', '', 'output', 10, 0, 'success', c, noopSelect)
+    const el = createCommandBlock(
+      1,
+      'ls',
+      '~',
+      '',
+      'output',
+      10,
+      0,
+      'success',
+      c,
+      noopSelect,
+      freshStore(),
+    )
     const btn = el.querySelector('.cmd-overflow-btn')
     expect(btn).not.toBeNull()
   })
@@ -182,6 +239,7 @@ describe('createCommandBlock', () => {
       'success',
       c,
       noopSelect,
+      freshStore(),
     )
     const cwdEl = el.querySelector('.cmd-header-cwd')
     expect(cwdEl?.textContent).toBe('\u{1F4C1} user/repos')
@@ -192,7 +250,15 @@ describe('freezeBlock', () => {
   it('replaces a running block with a frozen one in the DOM', () => {
     const parent = document.createElement('div')
     const container = document.createElement('div')
-    const running = createRunningBlock(1, 'sleep 5', '~', '', () => container, noopSelect)
+    const running = createRunningBlock(
+      1,
+      'sleep 5',
+      '~',
+      '',
+      () => container,
+      noopSelect,
+      freshStore(),
+    )
     parent.appendChild(running)
 
     const frozen = freezeBlock(
@@ -206,6 +272,7 @@ describe('freezeBlock', () => {
       0,
       () => container,
       noopSelect,
+      freshStore(),
     )
     expect(parent.children.length).toBe(1)
     expect(parent.children[0]).toBe(frozen)
@@ -217,7 +284,7 @@ describe('freezeBlock', () => {
   it('adds overflow menu to frozen block (P2-9)', () => {
     const parent = document.createElement('div')
     const container = document.createElement('div')
-    const running = createRunningBlock(1, 'ls', '~', '', () => container, noopSelect)
+    const running = createRunningBlock(1, 'ls', '~', '', () => container, noopSelect, freshStore())
     parent.appendChild(running)
     const frozen = freezeBlock(
       running,
@@ -230,6 +297,7 @@ describe('freezeBlock', () => {
       0,
       () => container,
       noopSelect,
+      freshStore(),
     )
     expect(frozen.querySelector('.cmd-overflow-btn')).not.toBeNull()
   })
@@ -250,6 +318,7 @@ describe('block selection model (P1-7, P1-8)', () => {
       'success',
       makeContainer(parent),
       noopSelect,
+      freshStore(),
     )
 
     parent.appendChild(el)
@@ -277,6 +346,7 @@ describe('block selection model (P1-7, P1-8)', () => {
       'success',
       makeContainer(parent),
       noopSelect,
+      freshStore(),
     )
     const el2 = createCommandBlock(
       2,
@@ -289,6 +359,7 @@ describe('block selection model (P1-7, P1-8)', () => {
       'success',
       makeContainer(parent),
       noopSelect,
+      freshStore(),
     )
     parent.append(el1, el2)
 
@@ -321,6 +392,7 @@ describe('block selection model (P1-7, P1-8)', () => {
       'success',
       makeContainer(parent),
       noopSelect,
+      freshStore(),
     )
     parent.appendChild(el)
 
@@ -352,6 +424,7 @@ describe('block selection model (P1-7, P1-8)', () => {
       'success',
       makeContainer(parent),
       noopSelect,
+      freshStore(),
     )
     parent.appendChild(el)
 
@@ -379,6 +452,7 @@ describe('block selection model (P1-7, P1-8)', () => {
       'success',
       makeContainer(parent),
       noopSelect,
+      freshStore(),
     )
     parent.appendChild(el)
 
@@ -408,6 +482,7 @@ describe('block selection model (P1-7, P1-8)', () => {
       'success',
       makeContainer(parent),
       noopSelect,
+      freshStore(),
     )
     parent.appendChild(el)
 
@@ -435,6 +510,7 @@ describe('BlockManager', () => {
     fixedNow = 1000
     manager = new BlockManager(inner, xtermContainer, {
       now: () => fixedNow,
+      snapshotStore: freshStore(),
     })
   })
 
@@ -609,6 +685,7 @@ describe('overflow menu (P1-6)', () => {
       'success',
       () => container,
       noopSelect,
+      freshStore(),
     )
     container.appendChild(el)
 
@@ -641,6 +718,7 @@ describe('overflow menu (P1-6)', () => {
       'success',
       () => container,
       noopSelect,
+      freshStore(),
     )
     container.appendChild(el)
 
@@ -676,6 +754,7 @@ describe('overflow menu (P1-6)', () => {
       'success',
       () => container,
       noopSelect,
+      freshStore(),
     )
     container.appendChild(el)
 
@@ -706,6 +785,7 @@ describe('overflow menu (P1-6)', () => {
       'success',
       () => container,
       noopSelect,
+      freshStore(),
     )
     container.appendChild(el)
 
@@ -743,6 +823,7 @@ describe('frozen block header highlighting', () => {
       'success',
       () => container,
       noopSelect,
+      freshStore(),
     )
     const byClass = new Map<string, string[]>()
     for (const span of el.querySelectorAll<HTMLElement>('.cmd-header-text [class^="tok-"]')) {
@@ -768,8 +849,108 @@ describe('frozen block header highlighting', () => {
       '',
       () => container,
       noopSelect,
+      freshStore(),
     )
     expect(el.querySelector('.cmd-header-text')?.textContent).toBe('ls -la | grep foo > out.txt')
     expect(el.querySelectorAll('.cmd-header-text [class^="tok-"]').length).toBe(0)
+  })
+})
+
+// ── Frozen headers carry command-existence verdicts (OSC 636) ──────────────
+// The verdict is read at freeze time from the session snapshot: a header
+// frozen before the snapshot arrives keeps no verdict (the one-shot snapshot
+// never changes, so a frozen verdict can never go stale).
+
+describe('frozen headers and the command snapshot', () => {
+  beforeAll(async () => {
+    await shellHighlightReady
+  })
+
+  const c = (): HTMLElement => document.createElement('div')
+  const SEED_NONCE = 'a1b2c3d4e5f60718293a4b5c6d7e8f90'
+  /** A fresh tab store seeded with the given names (or left empty). */
+  const makeStore = (names?: string[]): CommandSnapshotStore => {
+    const store = freshStore()
+    if (names) {
+      store.ingest(`H;${SEED_NONCE}`)
+      store.ingest(`S;${SEED_NONCE};${names.join(';')}`)
+    }
+    return store
+  }
+
+  it('a frozen header of an unknown command carries the underline class', () => {
+    const el = createCommandBlock(
+      1,
+      'sdfsdf',
+      '~',
+      '',
+      'out',
+      10,
+      0,
+      'success',
+      c,
+      noopSelect,
+      makeStore(['pwd']),
+    )
+    const span = el.querySelector<HTMLElement>('.cmd-header-text span')
+    expect(span?.className).toBe('tok-command tok-unresolved')
+  })
+
+  it('a frozen header of a known builtin keeps the plain command class', () => {
+    const el = createCommandBlock(
+      2,
+      'pwd',
+      '~',
+      '',
+      'out',
+      10,
+      0,
+      'success',
+      c,
+      noopSelect,
+      makeStore(['pwd']),
+    )
+    const span = el.querySelector<HTMLElement>('.cmd-header-text span')
+    expect(span?.className).toBe('tok-command')
+  })
+
+  it('with no snapshot a frozen header carries no verdict', () => {
+    const el = createCommandBlock(
+      3,
+      'sdfsdf',
+      '~',
+      '',
+      'out',
+      10,
+      0,
+      'success',
+      c,
+      noopSelect,
+      makeStore(),
+    )
+    const span = el.querySelector<HTMLElement>('.cmd-header-text span')
+    expect(span?.className).toBe('tok-command')
+  })
+
+  it("a header frozen against one tab's snapshot never sees another tab's names", () => {
+    const other = makeStore(['kubectl']) // the sibling tab's session…
+    const mine = makeStore(['pwd']) // …vs this tab's session
+    expect(other.has('kubectl')).toBe(true)
+    expect(mine.has('kubectl')).toBe(false)
+    const el = createCommandBlock(
+      4,
+      'kubectl',
+      '~',
+      '',
+      'out',
+      10,
+      0,
+      'success',
+      c,
+      noopSelect,
+      mine,
+    )
+    const span = el.querySelector<HTMLElement>('.cmd-header-text span')
+    expect(span?.className).toBe('tok-command tok-unresolved')
   })
 })

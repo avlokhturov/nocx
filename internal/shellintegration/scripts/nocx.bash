@@ -96,6 +96,27 @@ __nocx_prompt_command() {
             eval "$__nocx_old_pc"
         fi
     fi
+
+    # Command-existence snapshot (OSC 636): start the background compgen once
+    # at the FIRST prompt, emit the finished payload once from a LATER prompt
+    # — never in front of a prompt, and only while the shell is the sole
+    # writer to the tty, so the payload cannot interleave with other output.
+    if [[ -n "${__nocx_snap_staging:-}" ]] && [[ "${__nocx_snapshot_done:-0}" != "1" ]]; then
+        if [[ "${__nocx_snapshot_started:-0}" != "1" ]]; then
+            __nocx_snapshot_started=1
+            # >| ignores a user's noclobber: the staging file already exists
+            # (mktemp made it at source time), so a plain > would refuse.
+            ( compgen -c 2>/dev/null | LC_ALL=C sort -u | __nocx_snapshot_build \
+                >| "$__nocx_snap_staging" 2>/dev/null \
+                && mv -f "$__nocx_snap_staging" "$__nocx_snap_file" ) &
+            __nocx_snap_job=$!
+        elif [[ -f "$__nocx_snap_file" ]]; then
+            __nocx_snapshot_done=1
+            __nocx_payload="$(< "$__nocx_snap_file")"
+            builtin printf '\e]636;S;%s;%s\a' "$__nocx_snapshot_nonce" "$__nocx_payload"
+            rm -f "$__nocx_snap_staging" "$__nocx_snap_file"
+        fi
+    fi
     __nocx_in_prompt_command=0
 }
 
@@ -155,6 +176,145 @@ if [[ "${NOCX_PROMPT_MODE:-}" == "marker-only" ]] && [[ -z "${__nocx_owned_sessi
     export __nocx_owned_session
     __nocx_arm_marker_only=1
 fi
+
+#   OSC 636 ; S ; <nonce> ; <names> ST          snapshot; <names> is
+#                                               `;`-joined and hex-escaped
+#                                               (\\ for backslash, \xHH for
+#                                               control/C1 bytes and ';')
+#   OSC 636 ; H ; <nonce> ST                    session hello — the FIRST 636
+#                                               message, before any command
+# The nonce is a per-session secret generated here: any process can print an
+# OSC — a command's own output can forge a snapshot — so the frontend
+# discards any payload that does not carry the established nonce. It is
+# emitted at source time, before the first prompt, when no user command has
+# run; the frontend accepts exactly one hello, so a forged re-hello cannot
+# re-anchor the nonce.
+#
+# compgen -c | sort -u measures ~37 ms on this machine and can take seconds
+# on NFS, so it must never sit in front of the prompt. The snapshot is
+# computed in a background job started at the FIRST prompt (the environment
+# is final only once the rc has finished) and emitted from the NEXT prompt —
+# the only moment the shell is the sole writer to the tty, so the payload
+# can never interleave with other output. One snapshot per session; staleness
+# is deliberately a later problem (per-prompt fingerprints cost the same
+# enumeration they were meant to save).
+#
+# The snapshot is staged in a mktemp file whose name carries no secret — the
+# nonce must never appear in a path, in any argv, or exported — and mode 600
+# from creation. An EXIT trap (chained, like the DEBUG trap) removes the
+# staging and final files even when the shell exits before the snapshot was
+# emitted, and the final name only exists after the atomic mv, so a prompt
+# can never read a partial payload.
+__nocx_gen_nonce() {
+    # 32 hex chars from the kernel RNG; RANDOM+$$ fallback if od is missing.
+    local n
+    n="$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
+    if [[ -n "$n" ]]; then
+        builtin printf '%s' "$n"
+    else
+        builtin printf '%04x%04x%04x%04x' "$RANDOM" "$RANDOM" "$RANDOM" "$RANDOM"
+    fi
+}
+__nocx_snapshot_nonce="$(__nocx_gen_nonce)"
+# A user rc running under `set -a` would auto-export every assignment,
+# publishing the nonce in /proc/<pid>/environ; drop the export attribute
+# explicitly (the nonce is assigned exactly once, so this sticks).
+export -n __nocx_snapshot_nonce
+# The snapshot is staged in a mktemp file whose name carries NO secret: the
+# nonce must never appear in a path (ls /tmp is world-readable), in any argv
+# (ps reads argv), or exported (/proc/<pid>/environ) — the nonce is the whole
+# forgery defence of OSC 636. mktemp creates the file mode 600 from the
+# start (no create-then-chmod window) with O_EXCL (no symlink pre-emption).
+# The atomic mv to the .snap name below is what tells a later prompt the
+# payload is complete; the .snap name inherits the staging file's 600 mode.
+__nocx_snap_staging="$(mktemp "${TMPDIR:-/tmp}/nocx-snap.XXXXXX" 2>/dev/null)"
+__nocx_snap_file="${__nocx_snap_staging:+${__nocx_snap_staging}.snap}"
+__nocx_snapshot_started=0
+__nocx_snapshot_done=0
+
+# Nothing may survive the shell: a session that exits before the snapshot was
+# emitted (the leak path) must leave no file behind. Kill the background
+# compgen first — it could otherwise mv the .snap name into place AFTER the
+# rm below — then remove both files, then chain the shell's pre-existing EXIT
+# trap, the same pattern the DEBUG trap above uses. jobs -p guards the kill:
+# a long-lived interactive session's job is long done, and killing a reaped
+# PID could hit a reused one.
+__nocx_old_exit="$(trap -p EXIT 2>/dev/null | sed "s/^trap -- '//;s/' EXIT$//")"
+__nocx_exit_cleanup() {
+    # The DEBUG trap fires for every simple command below (and inside trap
+    # handlers on some bash versions); mark the exit path as "in a prompt
+    # command" so the wrapper suppresses any spurious OSC 133 C.
+    __nocx_in_prompt_command=1
+    if [[ -n "${__nocx_snap_job:-}" ]] \
+        && jobs -p 2>/dev/null | grep -qx "$__nocx_snap_job"; then
+        kill "$__nocx_snap_job" 2>/dev/null
+        wait "$__nocx_snap_job" 2>/dev/null
+    fi
+    if [[ -n "${__nocx_snap_staging:-}" ]]; then
+        rm -f "$__nocx_snap_staging" "$__nocx_snap_file"
+    fi
+    if [[ -n "${__nocx_old_exit:-}" ]]; then
+        eval "$__nocx_old_exit"
+    fi
+}
+trap '__nocx_exit_cleanup' EXIT
+
+# Hex-escape one command name into the global payload accumulator, appending
+# a `;` separator. Bytes that would break or fake the OSC sequence are
+# escaped as \xHH; backslash is \\ (VS Code's scheme). Raw UTF-8 (>= 0xa0)
+# passes through — the terminal decodes the byte stream, and escaping every
+# byte would double the payload for no safety.
+__nocx_encode_hex_into() {
+    local s="$1" i c code hex LC_ALL=C
+    for ((i = 0; i < ${#s}; i++)); do
+        c="${s:i:1}"
+        if [[ "$c" == '\' ]]; then
+            __nocx_payload+='\\'
+        elif [[ "$c" == ';' ]]; then
+            __nocx_payload+='\x3b'
+        else
+            builtin printf -v code '%d' "'$c"
+            (( code < 0 )) && (( code += 256 ))
+            if (( code < 32 || (code >= 127 && code <= 159) )); then
+                builtin printf -v hex '%02x' "$code"
+                __nocx_payload+="\\x$hex"
+            else
+                __nocx_payload+="$c"
+            fi
+        fi
+    done
+    __nocx_payload+=';'
+}
+
+# Fill __nocx_payload with the hex-escaped, `;`-joined names, capped at
+# 8192 names and 65536 encoded characters. Returns non-zero when the list is
+# empty — an empty snapshot must never reach the frontend: "every command is
+# unknown" is the same lie as "every command exists", pointing the other way.
+__nocx_snapshot_build() {
+    __nocx_payload=''
+    local line n=0 before LC_ALL=C
+    while IFS= read -r line; do
+        before=${#__nocx_payload}
+        __nocx_encode_hex_into "$line"
+        if (( ${#__nocx_payload} > 65536 )); then
+            __nocx_payload="${__nocx_payload:0:before}"
+            break
+        fi
+        n=$((n + 1))
+        if (( n >= 8192 )); then
+            break
+        fi
+    done
+    # Emit the payload on stdout — the caller redirects it into the temp file.
+    if [[ -n "$__nocx_payload" ]]; then
+        builtin printf '%s' "$__nocx_payload"
+        return 0
+    fi
+    return 1
+}
+
+# Announce the session nonce before the first prompt.
+builtin printf '\e]636;H;%s\a' "$__nocx_snapshot_nonce"
 
 # Native-mode escape (nocx-4ff.9): restore a visible prompt.
 __nocx_native_mode() {

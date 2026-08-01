@@ -2,6 +2,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { ScrollbackController } from './controller'
 import type { TerminalRenderer } from '../renderers/types'
+import { CommandSnapshotStore } from '../command-snapshot'
 
 function makeRenderer(): TerminalRenderer {
   return {
@@ -25,7 +26,11 @@ function makeRenderer(): TerminalRenderer {
 
 function makeController() {
   const pane = document.createElement('div')
-  const controller = new ScrollbackController({ pane, renderer: makeRenderer() })
+  const controller = new ScrollbackController({
+    pane,
+    renderer: makeRenderer(),
+    snapshotStore: new CommandSnapshotStore(),
+  })
   // jsdom does no layout: give the scrollback area a real height so the
   // fill-the-pane sizing has something to read.
   Object.defineProperty(controller.scrollbackArea, 'clientHeight', {

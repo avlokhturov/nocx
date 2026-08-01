@@ -2,6 +2,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { parseOsc7, parseOsc133, XtermRenderer } from './xterm'
 import type { CommandMarkerEvent } from './types'
+import { CommandSnapshotStore } from '../command-snapshot'
 
 describe('XtermRenderer setReadOnly', () => {
   const stubBrowser = () => {
@@ -214,5 +215,145 @@ describe('onCommandMarker fan-out', () => {
     expect(typeof ev.line).toBe('number')
     expect(typeof ev.col).toBe('number')
     r.dispose()
+  })
+})
+
+describe('OSC 636 command-existence snapshot', () => {
+  const stubBrowser = () => {
+    window.matchMedia = (query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addListener: () => {},
+      removeListener: () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      dispatchEvent: () => false,
+    })
+    ;(globalThis as Record<string, unknown>).ResizeObserver = class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+  }
+
+  const NONCE = 'a1b2c3d4e5f60718293a4b5c6d7e8f90'
+
+  async function mountRenderer(): Promise<XtermRenderer> {
+    stubBrowser()
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+    return r
+  }
+
+  it('forwards a hello + snapshot through the real parser into the store', async () => {
+    const r = await mountRenderer()
+
+    const applied = new Promise<void>((resolve) => {
+      const un = r.snapshotStore.subscribe(() => {
+        un()
+        resolve()
+      })
+    })
+    r.write(`\x1b]636;H;${NONCE}\x07`)
+    r.write(`\x1b]636;S;${NONCE};pwd;ls;café\x07`)
+    await applied
+
+    expect(r.snapshotStore.status).toBe('ready')
+    expect(r.snapshotStore.has('pwd')).toBe(true)
+    expect(r.snapshotStore.has('ls')).toBe(true)
+    expect(r.snapshotStore.has('café')).toBe(true)
+    r.dispose()
+  })
+
+  it('a snapshot carrying the wrong nonce is discarded', async () => {
+    const r = await mountRenderer()
+
+    // The 133 marker after the 636 bytes is a stream-order sync point: writes
+    // are async, and a discarded snapshot notifies nobody.
+    let markerDone: () => void
+    const marker = new Promise<void>((resolve) => {
+      markerDone = resolve
+    })
+    r.onCommandMarker(() => markerDone())
+
+    r.write(`\x1b]636;H;${NONCE}\x07`)
+    r.write('\x1b]636;S;deadbeefdeadbeefdeadbeefdeadbeef;pwd\nls\x07')
+    r.write('\x1b]133;D;0\x07')
+    await marker
+
+    expect(r.snapshotStore.status).toBe('unavailable')
+    r.dispose()
+  })
+
+  it('two renderers keep their snapshots separate (per-tab stores)', async () => {
+    const r1 = await mountRenderer()
+    const r2 = await mountRenderer()
+    const NONCE_B = 'deadbeefdeadbeefdeadbeefdeadbeef'
+
+    const applied1 = new Promise<void>((resolve) => {
+      const un = r1.snapshotStore.subscribe(() => {
+        un()
+        resolve()
+      })
+    })
+    r1.write(`\x1b]636;H;${NONCE}\x07`)
+    r1.write(`\x1b]636;S;${NONCE};pwd;ls\x07`)
+    await applied1
+
+    const applied2 = new Promise<void>((resolve) => {
+      const un = r2.snapshotStore.subscribe(() => {
+        un()
+        resolve()
+      })
+    })
+    r2.write(`\x1b]636;H;${NONCE_B}\x07`)
+    r2.write(`\x1b]636;S;${NONCE_B};kubectl\x07`)
+    await applied2
+
+    // Tab 1 resolves only its own names; tab 2 resolves only its own. Under
+    // the old module singleton, r2's hello would have been discarded (nonce
+    // already anchored by r1) and its snapshot rejected, leaving r2 judged
+    // against r1's command set — this is the defect this test pins.
+    expect(r1.snapshotStore.status).toBe('ready')
+    expect(r1.snapshotStore.has('pwd')).toBe(true)
+    expect(r1.snapshotStore.has('ls')).toBe(true)
+    expect(r1.snapshotStore.has('kubectl')).toBe(false)
+    expect(r2.snapshotStore.status).toBe('ready')
+    expect(r2.snapshotStore.has('kubectl')).toBe(true)
+    expect(r2.snapshotStore.has('pwd')).toBe(false)
+    r1.dispose()
+    r2.dispose()
+  })
+
+  it('a renderer whose session never sent a snapshot reports unavailable even when another tab has one', async () => {
+    const r1 = await mountRenderer()
+    const r2 = await mountRenderer()
+
+    const applied1 = new Promise<void>((resolve) => {
+      const un = r1.snapshotStore.subscribe(() => {
+        un()
+        resolve()
+      })
+    })
+    r1.write(`\x1b]636;H;${NONCE}\x07`)
+    r1.write(`\x1b]636;S;${NONCE};pwd;ls\x07`)
+    await applied1
+
+    // r2 never received a hello or snapshot — it must not inherit r1's.
+    expect(r1.snapshotStore.status).toBe('ready')
+    expect(r2.snapshotStore.status).toBe('unavailable')
+    expect(r2.snapshotStore.has('pwd')).toBe(false)
+    r1.dispose()
+    r2.dispose()
+  })
+
+  it('a fresh renderer carries a fresh store (CommandSnapshotStore instance)', () => {
+    const r = new XtermRenderer()
+    expect(r.snapshotStore).toBeInstanceOf(CommandSnapshotStore)
+    expect(r.snapshotStore.status).toBe('unavailable')
   })
 })

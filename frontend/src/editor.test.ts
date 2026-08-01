@@ -20,6 +20,7 @@ import { EditorView, keymap } from '@codemirror/view'
 import { defaultKeymap } from '@codemirror/commands'
 import { CommandEditor, EditorActions } from './editor'
 import { shellExtensions, highlightShellText, shellHighlightReady } from './shell-highlight'
+import { CommandSnapshotStore } from './command-snapshot'
 
 /**
  * The editor's internal CM6 view. CommandEditor keeps it private; tests
@@ -512,33 +513,36 @@ describe('alias hints', () => {
 
 // ── Shell syntax highlighting (shell-highlight.ts) ─────────────────────
 
+/** Read the live line's token spans as [class, text] pairs, in DOM order. */
+function liveTokens(doc: string, store?: CommandSnapshotStore): Array<[string, string]> {
+  const { ed, view } = setup({}, shellExtensions(store ?? new CommandSnapshotStore()))
+  ed.show()
+  ed.insertText(doc)
+  return [...view.contentDOM.querySelectorAll<HTMLElement>('[class^="tok-"]')].map((span) => [
+    span.className,
+    span.textContent ?? '',
+  ])
+}
+
+/** A fresh, empty store — "no snapshot" verdicts for the pure-syntax tests. */
+const freshStore = (): CommandSnapshotStore => new CommandSnapshotStore()
+
+/** Read the static pass's token spans the same way, from a template element. */
+function staticTokens(html: string): Array<[string, string]> {
+  const root = document.createElement('div')
+  root.innerHTML = html
+  return [...root.querySelectorAll<HTMLElement>('[class^="tok-"]')].map((span) => [
+    span.className,
+    span.textContent ?? '',
+  ])
+}
+
 describe('shell syntax highlighting', () => {
   // The grammar loads asynchronously at module init; every test below needs
   // the tokenizer ready so live and frozen classes are deterministic.
   beforeAll(async () => {
     await shellHighlightReady
   })
-
-  /** Read the live line's token spans as [class, text] pairs, in DOM order. */
-  const liveTokens = (doc: string): Array<[string, string]> => {
-    const { ed, view } = setup({}, shellExtensions)
-    ed.show()
-    ed.insertText(doc)
-    return [...view.contentDOM.querySelectorAll<HTMLElement>('[class^="tok-"]')].map((span) => [
-      span.className,
-      span.textContent ?? '',
-    ])
-  }
-
-  /** Read the static pass's token spans the same way, from a template element. */
-  const staticTokens = (html: string): Array<[string, string]> => {
-    const root = document.createElement('div')
-    root.innerHTML = html
-    return [...root.querySelectorAll<HTMLElement>('[class^="tok-"]')].map((span) => [
-      span.className,
-      span.textContent ?? '',
-    ])
-  }
 
   it('command name, flag, pipe and redirect target are distinguishable token classes', () => {
     const byClass = new Map<string, string[]>()
@@ -575,11 +579,11 @@ describe('shell syntax highlighting', () => {
 
   it('the frozen-header pass emits the same classes as the live line for the same text', () => {
     const doc = 'ls -la | grep foo > out.txt'
-    expect(staticTokens(highlightShellText(doc))).toEqual(liveTokens(doc))
+    expect(staticTokens(highlightShellText(doc, freshStore()))).toEqual(liveTokens(doc))
   })
 
   it('the static pass escapes the command text (no markup injection)', () => {
-    const html = highlightShellText('echo "<script>alert(1)</script>"')
+    const html = highlightShellText('echo "<script>alert(1)</script>"', freshStore())
     expect(html).not.toContain('<script>')
     const root = document.createElement('div')
     root.innerHTML = html
@@ -621,7 +625,7 @@ describe('shell syntax highlighting', () => {
       'sdf dffd',
     ]
     for (const line of corpus) {
-      expect(staticTokens(highlightShellText(line))).toEqual(liveTokens(line))
+      expect(staticTokens(highlightShellText(line, freshStore()))).toEqual(liveTokens(line))
     }
   })
 
@@ -643,8 +647,102 @@ describe('shell syntax highlighting', () => {
   })
 
   it('a heredoc body across lines keeps the heredoc role', () => {
-    const tokens = staticTokens(highlightShellText('cat <<EOF\nhello world\nEOF'))
+    const tokens = staticTokens(highlightShellText('cat <<EOF\nhello world\nEOF', freshStore()))
     expect(tokens).toContainEqual(['tok-heredoc', 'hello world'])
     expect(tokens).toContainEqual(['tok-heredoc', 'EOF'])
+  })
+})
+
+// ── Command-existence verdicts (OSC 636 snapshot) ──────────────────────────
+
+describe('command existence verdicts', () => {
+  // The tokenizer must be ready so the verdict classes are deterministic.
+  beforeAll(async () => {
+    await shellHighlightReady
+  })
+
+  const SEED_NONCE = 'a1b2c3d4e5f60718293a4b5c6d7e8f90'
+  const snap = (names: string[]) => `S;${SEED_NONCE};${names.join(';')}`
+  /** A fresh tab store, seeded with the given names (or left empty). */
+  const makeStore = (names?: string[]): CommandSnapshotStore => {
+    const store = freshStore()
+    if (names) {
+      store.ingest(`H;${SEED_NONCE}`)
+      store.ingest(snap(names))
+    }
+    return store
+  }
+
+  it('pwd — a builtin, not a file — renders resolved with no underline', () => {
+    expect(liveTokens('pwd', makeStore(['pwd', 'ls']))).toEqual([['tok-command', 'pwd']])
+  })
+
+  it('sdfsdf renders unresolved: the command class plus the underline class, not a red foreground', () => {
+    expect(liveTokens('sdfsdf', makeStore(['pwd', 'ls']))).toEqual([
+      ['tok-command tok-unresolved', 'sdfsdf'],
+    ])
+  })
+
+  it('$TOOL build renders indeterminate — nothing is underlined', () => {
+    expect(
+      liveTokens('$TOOL build', makeStore(['pwd', 'ls'])).some(([cls]) =>
+        cls.includes('tok-unresolved'),
+      ),
+    ).toBe(false)
+  })
+
+  it('"$(pick)" arg renders indeterminate — the name inside a substitution is not checked', () => {
+    expect(
+      liveTokens('"$(pick)" arg', makeStore(['pwd', 'ls'])).some(([cls]) =>
+        cls.includes('tok-unresolved'),
+      ),
+    ).toBe(false)
+  })
+
+  it('a command inside $( ) renders indeterminate even when it exists', () => {
+    expect(
+      liveTokens('x=$(ls)', makeStore(['pwd', 'ls'])).some(([cls]) =>
+        cls.includes('tok-unresolved'),
+      ),
+    ).toBe(false)
+  })
+
+  it('with no snapshot everything is unavailable and nothing is underlined', () => {
+    const tokens = liveTokens('sdfsdf && pwd', makeStore())
+    expect(tokens.some(([cls]) => cls.includes('tok-unresolved'))).toBe(false)
+    expect(tokens.filter(([cls]) => cls === 'tok-command')).toEqual([
+      ['tok-command', 'sdfsdf'],
+      ['tok-command', 'pwd'],
+    ])
+  })
+
+  it('the live line re-decorates when the snapshot arrives mid-typing', () => {
+    const store = freshStore()
+    const { ed, view } = setup({}, shellExtensions(store))
+    ed.show()
+    ed.insertText('sdfsdf')
+    expect(view.contentDOM.querySelectorAll('.tok-unresolved').length).toBe(0)
+    store.ingest(`H;${SEED_NONCE}`)
+    store.ingest(snap(['pwd']))
+    expect(view.contentDOM.querySelectorAll('.tok-unresolved').length).toBe(1)
+  })
+
+  it('the frozen-header pass carries the same verdict classes', () => {
+    const store = makeStore(['pwd'])
+    expect(staticTokens(highlightShellText('pwd', store))).toEqual([['tok-command', 'pwd']])
+    expect(staticTokens(highlightShellText('sdfsdf', store))).toEqual([
+      ['tok-command tok-unresolved', 'sdfsdf'],
+    ])
+  })
+
+  it('a tab whose session never sent a snapshot reports unavailable even when another tab has one', () => {
+    const other = makeStore(['pwd']) // this tab is ready…
+    const mine = makeStore() // …this tab never received a snapshot
+    expect(other.status).toBe('ready')
+    expect(mine.status).toBe('unavailable')
+    // No underline in the snapshot-less tab — unavailable never collapses
+    // into unresolved, even while a sibling tab is fully seeded.
+    expect(liveTokens('sdfsdf', mine)).toEqual([['tok-command', 'sdfsdf']])
+    expect(liveTokens('sdfsdf', other)).toEqual([['tok-command tok-unresolved', 'sdfsdf']])
   })
 })

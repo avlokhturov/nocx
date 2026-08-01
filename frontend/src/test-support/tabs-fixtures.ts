@@ -16,6 +16,7 @@ import type {
   TitleCallback,
   TerminalRenderer,
 } from '../renderers/types'
+import { CommandSnapshotStore } from '../command-snapshot'
 import type { ClipboardAccess } from '../clipboard'
 import type { ClipboardGate } from '../clipboard'
 import type { ClipboardBanner } from '../banner'
@@ -36,6 +37,8 @@ export const FIXTURE_DIRECTORY_LABEL = 'repos/nocx'
 // ═══════════════════════════════════════════════════════════════════════════
 
 export interface RendererMock extends TerminalRenderer {
+  /** This tab's OSC 636 store — XtermRenderer owns one, so the mock must too. */
+  snapshotStore: CommandSnapshotStore
   _cbs: {
     onData?: DataCallback
     onResize?: ResizeCallback
@@ -116,6 +119,12 @@ export function createRendererMock(): RendererMock {
     liveContentHeight: vi.fn().mockReturnValue(0),
     cols: 80,
     rows: 24,
+    // A REAL store, not a stub: the composition point hands
+    // renderer.snapshotStore to the editor and to the scrollback's frozen
+    // headers, so a mock without one crashes the CM6 plugin at mount. It is
+    // per mock, exactly like the per-renderer instance it stands in for —
+    // tests that want a snapshot ingest into this one.
+    snapshotStore: new CommandSnapshotStore(),
     _cbs: cbs,
     _fireBufferChange(type: 'normal' | 'alternate') {
       cbs.onBufferChange?.(type)

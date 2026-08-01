@@ -213,6 +213,9 @@ export class TerminalContent extends BaseTabContent {
         pane: target,
         renderer,
         now: () => performance.now(),
+        // The renderer owns this tab's OSC 636 store; the scrollback's frozen
+        // headers and the editor below must judge against the same instance.
+        snapshotStore: renderer.snapshotStore,
       })
 
       log.info('nocx: mounting renderer')
@@ -277,7 +280,7 @@ export class TerminalContent extends BaseTabContent {
         // that defaults to shell would have to be edited to gain one — exactly
         // what ADR-0004 §3 exists to prevent. This is the composition point, so
         // this is where the shell layer is named.
-        shellExtensions,
+        shellExtensions(renderer.snapshotStore),
       )
 
       this.editor.mount(target)

@@ -225,6 +225,18 @@
   color: var(--color-accent-secondary);
 }
 
+/* A command word the session's snapshot says does not exist (OSC 636,
+   shell-highlight.ts). An underline, not a red foreground: red reads as a
+   guaranteed syntax error, an underline reads as a remark about one word —
+   which is what this is. Dotted so it stays a remark. */
+.tok-unresolved {
+  text-decoration-line: underline;
+  text-decoration-style: dotted;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+  text-decoration-color: var(--color-warning);
+}
+
 /* CodeMirror 6 surface (ADR-0010). Auto-grow is layout, not arithmetic: the
    box is capped at ten lines — 10 × line-height 1.2 × font-size (the em in
    the calc resolves against .cm-editor's font-size) plus the 6px vertical
