@@ -55,6 +55,15 @@ developer's real settings and reset their theme on every pass (nocx-ti8w). If
 you want your real SSH profiles in the dev stand, copy them across by hand —
 nothing migrates them for you, and nothing should.
 
+**And the e2e suite gets a disposable `$HOME`.** On the default path
+`playwright.config.ts` applies it to the `wails dev` backend and you need do
+nothing. On the **headless** path you start the backend yourself, so the suite
+cannot isolate it and refuses to run until you say you have: export
+`NOCX_E2E_HOME_DIR` and launch devharness with that `HOME` — `e2e/preflight.ts`
+prints the exact command when it stops you. Do not work around it by unsetting
+`NOCX_WS_PORT`; the boundary is what keeps a run off your settings, your vault
+documents, your `~/.nocx` and your shell rc files.
+
 ## Repository layout
 
 - `docs/` — living source-of-truth docs (`vision.md`, `architecture.md`, `decisions/` ADRs).

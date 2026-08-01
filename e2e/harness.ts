@@ -80,10 +80,22 @@ import { spawn, execSync, type ChildProcess } from 'node:child_process'
 import { existsSync, readFileSync, openSync } from 'node:fs'
 import { resolve } from 'node:path'
 
-export interface XdgDirs {
-  data: string
-  config: string
-  cache: string
+import { createHomeIsolation, type HomeIsolation } from './home-isolation'
+
+/**
+ * A disposable directory the caller owns and cleans up. The backend's whole
+ * home is placed inside it, so its settings, profiles, vault documents, shell
+ * integration and rc files all land there and nowhere else.
+ *
+ * This replaced an XDG_CONFIG_HOME/DATA/CACHE trio. Two reasons, and the second
+ * is why it was worth the churn: the home covers ~/.nocx, the rc files and
+ * ~/.ssh/config, which the trio never did — and the trio is Linux-only, because
+ * internal/storage's darwin resolver goes straight to os.UserHomeDir() and
+ * never looks at XDG. On a Mac the vault specs believed they were isolated and
+ * were writing the developer's real Application Support directory.
+ */
+export interface DisposableRoot {
+  root: string
 }
 
 export interface BackendEndpoint {
@@ -95,9 +107,12 @@ export class VaultBackend {
   private proc: ChildProcess | null = null
   private logPath = ''
 
+  /** The canonical home this backend was given, once it has been started. */
+  private isolation: HomeIsolation | null = null
+
   constructor(
     private readonly binary: string,
-    private readonly xdg: XdgDirs,
+    private readonly disposable: DisposableRoot,
     /**
      * Cut the backend off from the session bus, so its system provider probes
      * as unavailable no matter what is running around the test.
@@ -119,21 +134,24 @@ export class VaultBackend {
   /** Start devharness on the given port, wait for WSPORT/WSTOKEN. */
   async start(port: number): Promise<BackendEndpoint> {
     if (this.proc) throw new Error('backend already running; call stop() first')
-    const logDir = resolve(this.xdg.data, '..')
-    const name = `devharness-${port}.log`
-    this.logPath = resolve(logDir, name)
+    this.logPath = resolve(this.disposable.root, `devharness-${port}.log`)
     const logFd = openSync(this.logPath, 'w')
 
-    const env: Record<string, string> = {
-      ...(process.env as Record<string, string>),
-      NOCX_WS_ADDR: `127.0.0.1:${port}`,
-      XDG_DATA_HOME: this.xdg.data,
-      XDG_CONFIG_HOME: this.xdg.config,
-      XDG_CACHE_HOME: this.xdg.cache,
-    }
+    const overrideEnv: Record<string, string> = { NOCX_WS_ADDR: `127.0.0.1:${port}` }
     if (this.withoutSecretService) {
-      env.DBUS_SESSION_BUS_ADDRESS = 'unix:path=/nonexistent/nocx-e2e-no-secret-service'
+      overrideEnv.DBUS_SESSION_BUS_ADDRESS = 'unix:path=/nonexistent/nocx-e2e-no-secret-service'
     }
+
+    // The same boundary the default path gets from playwright.config.ts. Built
+    // per start() rather than per instance so a restart re-derives it: if the
+    // root were ever swapped underneath, the refusals fire again rather than a
+    // stale environment being replayed.
+    this.isolation = createHomeIsolation({
+      inheritedEnv: process.env,
+      overrideEnv,
+      root: this.disposable.root,
+    })
+    const env = this.isolation.env as Record<string, string>
 
     this.proc = spawn(this.binary, [], { env, stdio: ['ignore', logFd, logFd], detached: false })
 
@@ -195,5 +213,16 @@ export class VaultBackend {
 
   get running(): boolean {
     return this.proc !== null && this.proc.exitCode === null
+  }
+
+  /**
+   * The canonical home this backend was launched with, for a spec that wants to
+   * assert the backend actually resolved it rather than trust that it was
+   * handed over. Throws before the first start(), because there is no honest
+   * answer then and returning a guess is how an unchecked boundary starts.
+   */
+  get isolatedHome(): string {
+    if (!this.isolation) throw new Error('backend has not been started yet')
+    return this.isolation.isolatedHome
   }
 }
