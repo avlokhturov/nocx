@@ -323,6 +323,20 @@ describe('number range caption and error (nocx-w7h.7)', () => {
     expect(numberRangeCaption(none)).toBeUndefined()
   })
 
+  // A sentinel explained only in prose is a sentinel nobody reads — the
+  // owner's verdict on `Keep history for = 0`. The caption says what the
+  // value MEANS while it is the sentinel, and goes back to the range as
+  // soon as the number is an ordinary one.
+  it('at a declared sentinel the caption says what the value means, not the range', () => {
+    const withZero: Declaration = { ...daysDecl, zeroLabel: 'Kept until the size limit is reached' }
+    expect(numberRangeCaption(withZero, 0)).toBe('Kept until the size limit is reached')
+    expect(numberRangeCaption(withZero, 30)).toBe('0 – 3650 days')
+    // A zero with nothing declared about it is just a number.
+    expect(numberRangeCaption(daysDecl, 0)).toBe('0 – 3650 days')
+    // And with no value to judge, the range is all there is to say.
+    expect(numberRangeCaption(withZero)).toBe('0 – 3650 days')
+  })
+
   it('a value outside the range yields the error; inside yields none', () => {
     expect(numberRangeError(daysDecl, -1)).toBe('Must be at least 0 days')
     expect(numberRangeError(daysDecl, 4000)).toBe('Must be at most 3650 days')

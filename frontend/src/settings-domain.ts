@@ -36,11 +36,22 @@ export interface Declaration {
   /** The unit a number setting is measured in ('days', 'MiB') — rendered as
    *  a suffix beside the value, never buried in the description. */
   unit?: string
+  /** What the value 0 MEANS when 0 is a sentinel rather than a quantity
+   *  ('Kept until the size limit is reached'). Declared, not inferred. */
+  zeroLabel?: string
 }
 
-/** The permanent caption under a number field: its allowed range, read from
- *  the declaration's Min/Max — never a literal the screen invents. */
-export function numberRangeCaption(decl: Declaration): string | undefined {
+/**
+ * The permanent caption under a number field, read from the declaration —
+ * never a literal the screen invents.
+ *
+ * It says what the CURRENT value means before it says what values are
+ * allowed: at a sentinel the range is the less useful of the two, and a
+ * field reading "0" above "0 – 3650 days" tells a user nothing about what
+ * zero does. Away from the sentinel the range comes back.
+ */
+export function numberRangeCaption(decl: Declaration, value?: number): string | undefined {
+  if (value === 0 && decl.zeroLabel !== undefined) return decl.zeroLabel
   const suffix = decl.unit !== undefined ? ' ' + decl.unit : ''
   if (decl.min !== undefined && decl.max !== undefined) {
     return `${decl.min} – ${decl.max}${suffix}`

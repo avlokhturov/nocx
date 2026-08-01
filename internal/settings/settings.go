@@ -117,6 +117,7 @@ type Declaration struct {
 	Min         *float64       `json:"min,omitempty"`
 	Max         *float64       `json:"max,omitempty"`
 	Unit        string         `json:"unit,omitempty"`
+	ZeroLabel   string         `json:"zeroLabel,omitempty"`
 }
 
 // ── Typed setting spec types ───────────────────────────────────────────
@@ -156,6 +157,13 @@ type NumberSpec struct {
 	// future CLI — renders the same suffix. The unit never lives in prose:
 	// a description says what the setting means, not what the number counts.
 	Unit string
+	// ZeroLabel is what the value 0 MEANS when 0 is a sentinel rather than a
+	// quantity — "Kept until the size limit is reached", not "0 days". A
+	// sentinel that is explained only in prose is a sentinel nobody reads:
+	// the owner's verdict on `Keep history for = 0` was "совсем неочевидно",
+	// and the fourth sentence of the description had been explaining it.
+	// Empty means 0 is an ordinary number and needs no explanation.
+	ZeroLabel string
 }
 
 // SelectSpec is the declaration site for a dropdown setting.
@@ -258,6 +266,7 @@ type Number struct {
 	min         *float64
 	max         *float64
 	unit        string
+	zeroLabel   string
 }
 
 func (n *Number) Key() string             { return n.key }
@@ -283,6 +292,7 @@ func (n *Number) toDeclaration() Declaration {
 		Min:         n.min,
 		Max:         n.max,
 		Unit:        n.unit,
+		ZeroLabel:   n.zeroLabel,
 	}
 }
 
@@ -409,6 +419,7 @@ func MustRegisterNumber(spec NumberSpec) *Number {
 		min:         spec.Min,
 		max:         spec.Max,
 		unit:        spec.Unit,
+		zeroLabel:   spec.ZeroLabel,
 	}
 	assertValidKey(n.key)
 	allDecls = append(allDecls, n)
@@ -483,12 +494,19 @@ var HistoryRetentionDays = MustRegisterNumber(NumberSpec{
 	Key:         "history.retentionDays",
 	Section:     "History",
 	Label:       "Keep history for",
-	Description: "How long a completed command is kept. Older commands are removed from nocx — removal is not secure erasure, deleted rows can remain in the database file's free space. 0 keeps everything until the disk limit is reached.",
+	Description: "How long a completed command is kept. Older commands are removed from nocx — removal is not secure erasure, deleted rows can remain in the database file's free space.",
 	DataClass:   PublicConfig,
 	Default:     0,
 	Min:         fp(0),
 	Max:         fp(3650),
 	Unit:        "days",
+	// The default. Age expiry is opt-in: a terminal that quietly forgets
+	// commands after N days surprises you exactly when you are looking for
+	// something old, so growth is bounded by the size budget instead. That
+	// makes 0 the value most people see, which is precisely why it has to
+	// say what it means on the screen rather than in the fourth sentence of
+	// the description.
+	ZeroLabel: "Kept until the size limit is reached",
 })
 
 // HistoryRetentionMiB is the logical retained-content budget (nocx-rtg0.11):

@@ -554,6 +554,7 @@ describe('SettingsContent', () => {
       (e) => e.textContent,
     )
     expect(captions).toEqual(['0 – 3650 days', '64 – 1048576 MiB', '128 – 2097152 MiB'])
+    // (retentionDays is 30 here — an ordinary number, so the range shows.)
     expect(target.querySelector('.ui-settings-bounds')).toBeNull()
 
     // A value outside the range replaces the caption with the error in the
@@ -567,6 +568,40 @@ describe('SettingsContent', () => {
       expect(slot?.textContent).toBe('Must be at most 3650 days')
     })
     expect(target.querySelectorAll('.ui-text-field__caption').length).toBe(3)
+  })
+
+  // The value the owner actually sees on a fresh install is the sentinel,
+  // and "0" above "0 – 3650 days" says nothing about what zero does. The
+  // caption slot explains it until the number becomes an ordinary one.
+  it('a number sitting at its declared sentinel reads what the sentinel means', async () => {
+    const decl: Declaration = {
+      key: 'history.retentionDays',
+      section: 'History',
+      label: 'Keep history for',
+      description: 'How long a completed command is kept.',
+      control: 'number',
+      dataClass: 'publicConfig',
+      default: 0,
+      min: 0,
+      max: 3650,
+      unit: 'days',
+      zeroLabel: 'Kept until the size limit is reached',
+    }
+    mockReady(client, { declarations: [decl], values: { 'history.retentionDays': 0 } })
+    await content.mount(target, host, signal)
+
+    const slot = () => target.querySelector('.ui-text-field__caption')
+    expect(slot()?.textContent).toBe('Kept until the size limit is reached')
+    // Still the quiet caption tone, not an error — zero is a valid value.
+    expect(slot()?.getAttribute('data-tone')).toBe('caption')
+
+    // Type a real number and the range comes back in the same slot.
+    const input = target.querySelector<HTMLInputElement>('input[type="number"]')!
+    fireEvent.input(input, { target: { value: '30' } })
+    await vi.waitFor(() => {
+      expect(slot()?.textContent).toBe('0 – 3650 days')
+    })
+    expect(target.querySelectorAll('.ui-text-field__caption').length).toBe(1)
   })
 
   // Both layers reject an out-of-range number — the screen from the

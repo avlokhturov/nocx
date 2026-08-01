@@ -669,3 +669,27 @@ func TestHistorySectionDeclaresUserDecisions(t *testing.T) {
 		t.Errorf("retention label promises secure erasure: %q", retention)
 	}
 }
+
+// A sentinel that is explained only in prose is a sentinel nobody reads. The
+// meaning of 0 travels on the wire beside the unit and the bounds, so the
+// screen has nothing to infer (nocx-w7h.12).
+func TestNumberZeroLabelOnTheWire(t *testing.T) {
+	reg := settings.New(&fakeDoc{}, &fakeSecretStore{})
+	byKey := map[string]settings.Declaration{}
+	for _, d := range reg.Declarations() {
+		byKey[d.Key] = d
+	}
+	got := byKey["history.retentionDays"]
+	if got.ZeroLabel == "" {
+		t.Error("history.retentionDays: no ZeroLabel on the wire; 0 is its default and means 'no age limit'")
+	}
+	// The setting whose 0 is an ordinary number declares none.
+	if z := byKey["history.retentionMiB"].ZeroLabel; z != "" {
+		t.Errorf("history.retentionMiB: ZeroLabel = %q, want empty", z)
+	}
+	// And the sentinel's meaning is no longer duplicated in the prose that
+	// used to carry it — one statement, one place.
+	if strings.Contains(got.Description, "0 keeps everything") {
+		t.Error("history.retentionDays: the description still explains 0; ZeroLabel owns that now")
+	}
+}

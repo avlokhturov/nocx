@@ -779,7 +779,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
                 min={decl.min}
                 max={decl.max}
                 unit={decl.unit}
-                caption={numberRangeCaption(decl)}
+                caption={numberRangeCaption(decl, Number(displayValue(eff(), decl)))}
                 captionAlign="end"
                 error={numberRangeError(decl, Number(displayValue(eff(), decl)))}
                 onInput={(v) => {
