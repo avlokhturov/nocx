@@ -12,7 +12,7 @@ import { test as base, expect, type Page } from '@playwright/test'
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { VaultBackend, type BackendEndpoint, type XdgDirs } from './harness'
+import { VaultBackend, type BackendEndpoint, type DisposableRoot } from './harness'
 
 const test = base
 
@@ -76,8 +76,8 @@ function createXdgDirs(): XdgDirsResult {
   }
 }
 
-function asXdgDirs(r: XdgDirsResult): XdgDirs {
-  return { data: r.data, config: r.config, cache: r.cache }
+function asDisposableRoot(r: XdgDirsResult): DisposableRoot {
+  return { root: r.root }
 }
 
 /**
@@ -114,8 +114,8 @@ test.describe('Tabby import preview + execute', () => {
 
   test.beforeAll(() => {
     xdg = createXdgDirs()
-    backend = new VaultBackend(DEVHARNESS_BIN, asXdgDirs(xdg), true)
-    configPath = join(xdg.data, 'tabby-e2e-test.yml')
+    backend = new VaultBackend(DEVHARNESS_BIN, asDisposableRoot(xdg), true)
+    configPath = join(xdg.root, 'tabby-e2e-test.yml')
     writeFileSync(configPath, CONFIG_YAML, 'utf-8')
   })
 

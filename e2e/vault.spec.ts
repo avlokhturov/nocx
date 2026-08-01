@@ -17,7 +17,7 @@ import { execSync } from 'node:child_process'
 import { mkdtempSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { VaultBackend, type BackendEndpoint, type XdgDirs } from './harness'
+import { VaultBackend, type BackendEndpoint, type DisposableRoot } from './harness'
 
 const DEVHARNESS_BIN = process.env.NOCX_VAULT_BIN ?? '/tmp/nocx-devharness'
 
@@ -49,8 +49,8 @@ function createXdgDirs(): XdgDirsResult {
   }
 }
 
-function asXdgDirs(r: XdgDirsResult): XdgDirs {
-  return { data: r.data, config: r.config, cache: r.cache }
+function asDisposableRoot(r: XdgDirsResult): DisposableRoot {
+  return { root: r.root }
 }
 
 /**
@@ -96,7 +96,7 @@ test.describe('Vault — no keyring, full round trip', () => {
     xdg = createXdgDirs()
     // `true` = no Secret Service for this backend, regardless of the session
     // the suite runs in. These two cases are ABOUT the passphrase path.
-    backend = new VaultBackend(DEVHARNESS_BIN, asXdgDirs(xdg), true)
+    backend = new VaultBackend(DEVHARNESS_BIN, asDisposableRoot(xdg), true)
   })
 
   test.afterAll(() => {
@@ -272,7 +272,7 @@ test.describe('Vault — recovery code unseal', () => {
     xdg = createXdgDirs()
     // `true` = no Secret Service for this backend, regardless of the session
     // the suite runs in. These two cases are ABOUT the passphrase path.
-    backend = new VaultBackend(DEVHARNESS_BIN, asXdgDirs(xdg), true)
+    backend = new VaultBackend(DEVHARNESS_BIN, asDisposableRoot(xdg), true)
   })
 
   test.afterAll(() => {
@@ -436,7 +436,7 @@ test.describe('Vault — with keyring, silent setup', () => {
 
     // ── Start the backend under the existing keyring session ────────────
     const xdg = createXdgDirs()
-    const backend = new VaultBackend(DEVHARNESS_BIN, asXdgDirs(xdg))
+    const backend = new VaultBackend(DEVHARNESS_BIN, asDisposableRoot(xdg))
 
     try {
       const ep = await backend.start(FIRST_PORT)
