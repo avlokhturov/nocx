@@ -278,8 +278,11 @@ export class CommandEditor {
     this._lastRowCount = 1
   }
 
-  /** Submit the current document, then hide and clear (ADR-0004 §2). */
-  private submit(): void {
+  /** Submit the current document, then hide and clear (ADR-0004 §2). Also
+   *  the overlay's execution path: RecallOverlay calls this so Enter in the
+   *  palette runs the previewed command through exactly the same path a
+   *  typed Enter takes. */
+  submit(): void {
     this.hideAliasHints()
     const doc = this.view.state.doc.toString()
     // Atomic handoff (ADR-0004 §2): clear + hide BEFORE sending, so the

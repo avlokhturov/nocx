@@ -294,7 +294,8 @@ export class TerminalContent extends BaseTabContent {
       // ledger behind the generated history.query types with source 'session'
       // until the persistent store lands — when it does, only the query
       // function changes. The editor's key arbiter gives the overlay first
-      // refusal while it is open, so Enter fills the line and never submits.
+      // refusal while it is open; navigating previews into the editor, and
+      // Enter executes through the editor's own submit path (nocx-w7h.5).
       this.recall = new RecallOverlay({
         editor: this.editor,
         query: (scope) => queryLedgerHistory(this.ledger, scope, this._cwd, this._host),

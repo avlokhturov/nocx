@@ -1,25 +1,23 @@
-// Provenance Recall overlay (design §8.10, brief nocx-w7h.4): a Warp-style
-// history palette above the prompt. One row per past command, a relative
-// timestamp on the right, the ladder rung it was drawn from, and a footer
-// with the navigation keys.
+// Provenance Recall overlay (design §8.10): a Warp-style history palette
+// above the prompt — oldest at the top, newest at the bottom, the newest
+// row selected on open, so the first Up gives the command you just ran.
+// One row per past command, a relative timestamp on the right, the ladder
+// rung it was drawn from, and a footer with the navigation keys.
 //
-// The rule that is not negotiable: **Enter in the overlay inserts the
-// command into the editor and does not execute it.** A history of
-// destructive commands crossed with a changed environment makes running from
-// a list unacceptable — the `rm -rf build` you ran in one repo is a
-// different command in another. Enter fills the line; the editor's own Enter
-// is what executes, and the panel's label says what its Enter does — it
-// fills the line ("↵ to fill the line"), never "↵ to execute". A label that
-// promises execution inside the panel measured as a defect: the owner
-// pressed Enter, the panel closed, nothing ran, and it was filed as a bug.
-// The words were wrong, not the behaviour — the behaviour stays.
+// The rule (brief nocx-w7h.5 reversed the v4 one): navigating previews the
+// selected command INTO the editor, and Enter executes what you can see —
+// through the editor's own submit path, exactly as if the user had typed it
+// and pressed Enter. The v4 argument ("running from a list is unsafe when
+// the environment changed") applied to running blind; it does not apply to
+// a command sitting in the input line, visible, with its existence check
+// applied. The preview is the safety, so the label says "↵ to execute".
 //
 // The state machine is a discriminated union on `state`, never flags on the
 // editor: `closed → opened (draft captured) → navigating (preview in the
 // editor) → accepted | dismissed`. `opened` is what an empty history looks
 // like — the panel is up and says so, with nothing to highlight. `accepted`
-// leaves the command in the editor; `dismissed` restores the draft, the
-// selection and the scroll exactly as they were.
+// submits the previewed command through the editor; `dismissed` restores
+// the draft, the selection and the scroll exactly as they were.
 //
 // Rows are served behind the generated `history.query` types. Until the
 // persistent store lands, the query function maps the in-memory
@@ -69,10 +67,13 @@ export interface RecallEditor {
   replaceDoc(text: string, from?: number, to?: number): void
   setScrollTop(top: number): void
   focus(): void
+  /** Submit the current document through the editor's normal submit path —
+   *  the same one a typed Enter fires. The overlay calls this to execute the
+   *  previewed command; nothing is bypassed, no second route exists. */
+  submit(): void
 }
 
 export type RecallQuery = (scope: RecallScope) => HistoryQuery
-
 export type RecallState =
   | { readonly name: 'closed' }
   | {
@@ -212,10 +213,16 @@ export class RecallOverlay {
     this.root.dataset.open = 'true'
     this.render()
     if (result.entries.length > 0) {
-      this.enterNavigating(rung, result, 0)
+      // Display order is oldest at the top, newest at the bottom (Warp's
+      // model — the first Up gives the command you just ran), so the row
+      // selected on open is the LAST one, and the list must open scrolled
+      // to the bottom: a list taller than the panel that opens showing the
+      // top would hide the selected row entirely.
+      this.enterNavigating(rung, result, result.entries.length - 1)
+      const list = this.root.querySelector<HTMLElement>('.ui-recall-panel__list')
+      if (list) list.scrollTop = list.scrollHeight
     }
   }
-
   /**
    * Keyboard arbiter — the editor calls this BEFORE its own handling, so an
    * open overlay owns navigation, accept and dismiss and nothing the editor
@@ -338,25 +345,24 @@ export class RecallOverlay {
     this.state = { name: 'navigating', draft: s.draft, scope, query: result, selected }
     // Preview the highlighted row in the editor — programmatic, so no input
     // events fire (the alias-hint fetch must not run while recalling).
-    const entry = result.entries[selected]
+    // `selected` is a DISPLAY index (0 = top = oldest); the wire is newest
+    // first, so the wire index is the mirror of the display index.
+    const wireIndex = result.entries.length - 1 - selected
+    const entry = result.entries[wireIndex]
     if (entry) this.editor.replaceDoc(entry.command)
     this.render()
   }
 
-  /** Enter: the previewed command stays in the editor. Nothing is executed —
-   *  that is the editor's own Enter, later, with the environment as it is
-   *  now. */
+  /** Enter: the previewed command is already in the editor (navigating
+   *  previewed it); submit it through the editor's own submit path — the
+   *  same one a typed Enter fires, with the command visible in the line.
+   *  Nothing is bypassed, no second route exists. */
   private accept(): void {
     const s = this.state
     if (s.name !== 'navigating') return
-    const entry = s.query.entries[s.selected]
-    if (entry) {
-      this.editor.replaceDoc(entry.command)
-      this.editor.focus()
-    }
     this.close()
+    this.editor.submit()
   }
-
   /** Esc: restore the draft, the selection and the scroll position exactly. */
   private dismiss(): void {
     const s = this.state
@@ -446,11 +452,15 @@ export class RecallOverlay {
     } else {
       const selected = s.name === 'navigating' ? s.selected : -1
       const now = performance.now()
-      s.query.entries.forEach((entry, i) => {
+      // Display order is oldest at the top, newest at the bottom — the
+      // reverse of the wire (the contract belongs to neither side, and the
+      // schema says `entries` is newest first, so the renderer mirrors).
+      for (let d = 0; d < s.query.entries.length; d++) {
+        const entry = s.query.entries[s.query.entries.length - 1 - d]
         const row = document.createElement('div')
         row.className = 'ui-collection-row'
         row.setAttribute('role', 'option')
-        if (i === selected) row.dataset.selected = 'true'
+        if (d === selected) row.dataset.selected = 'true'
         const info = document.createElement('div')
         info.className = 'ui-collection-row__info'
         info.textContent = entry.command
@@ -463,24 +473,21 @@ export class RecallOverlay {
         row.appendChild(info)
         row.appendChild(actions)
         list.appendChild(row)
-      })
+      }
     }
     this.root.appendChild(list)
 
-    // ── "↵ to fill the line": the separate line explaining the two-step
-    //    flow. Enter HERE inserts the previewed command into the editor and
-    //    nothing else; the editor's own Enter, later, is what executes — a
-    //    label promising execution inside the panel is a lie (it measured as
-    //    one: the owner pressed Enter, the panel closed, nothing ran). ──
-    if (s.name === 'navigating') {
-      const hint = document.createElement('div')
-      hint.className = 'ui-recall-panel__hint'
-      hint.textContent = '↵ to fill the line'
-      this.root.appendChild(hint)
-    }
-
+    // ── One footer, one line, every hint in it: what Enter does, how to
+    //    move, how to get out — key groups separated by a real gap. The
+    //    execute group only appears when there IS something to execute
+    //    (the empty panel must not promise what Enter cannot do there). ──
     const footer = document.createElement('div')
     footer.className = 'ui-recall-panel__footer'
+    if (s.name === 'navigating') {
+      const execute = document.createElement('span')
+      execute.textContent = '↵ to execute'
+      footer.appendChild(execute)
+    }
     const navigate = document.createElement('span')
     navigate.textContent = '↑ ↓ to navigate'
     const dismiss = document.createElement('span')

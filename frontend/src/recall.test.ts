@@ -1,10 +1,14 @@
 // @vitest-environment jsdom
-// Recall overlay (design §8.10, brief nocx-w7h.4): the history palette above
-// the prompt. Written as a user reaching the feature — the editor is real, the
-// keys land on it, and the overlay is wired through the same arbiter the
-// terminal uses. The rule that is not negotiable: Enter in the overlay fills
-// the line and never executes; Esc restores the draft, caret and scroll
-// exactly; Up is caret movement first.
+// Recall overlay (design §8.10): the history palette above the prompt —
+// oldest at the top, newest at the bottom, the newest row selected on open,
+// so the first Up gives the command you just ran. Written as a user reaching
+// the feature — the editor is real, the keys land on it, and the overlay is
+// wired through the same arbiter the terminal uses. The rule (brief
+// nocx-w7h.5 reversed the v4 one): navigating previews the selected command
+// INTO the editor, and Enter executes what you can see through the editor's
+// own submit path — the ordinary "type a command and press Enter", with the
+// typing done for you. Esc restores the draft, caret and scroll exactly; Up
+// is caret movement first.
 import { describe, it, expect, vi } from 'vitest'
 import { EditorView, keymap } from '@codemirror/view'
 import { defaultKeymap } from '@codemirror/commands'
@@ -75,23 +79,35 @@ const panelOf = (container: HTMLElement): HTMLElement => {
   return p
 }
 
-describe('recall: Enter fills the line and never executes', () => {
-  it('the recall overlay consumes Enter while open — the editor does not submit', () => {
+describe('recall: Enter executes the previewed command', () => {
+  it('Enter while navigating submits the previewed command and closes the overlay', () => {
     const { ed, view, recall, submit } = setupRecall({ query: mkQuery(['rm -rf build']) })
     ed.show()
 
-    // Empty draft, caret at top: Up opens recall; the first row is previewed.
+    // Empty draft, caret at top: Up opens recall; the row is previewed.
     key(view, { key: 'ArrowUp' })
     expect(recall.isOpen).toBe(true)
     expect(ed.getDoc()).toBe('rm -rf build')
 
     key(view, { key: 'Enter' })
     expect(recall.isOpen).toBe(false)
-    // The command stays in the editor — the fill is the whole action.
-    expect(ed.getDoc()).toBe('rm -rf build')
-    // The session's send path is uncalled: the only way to reach it is the
-    // editor's submit action, which the overlay's Enter must never fire.
-    expect(submit).not.toHaveBeenCalled()
+    // The previewed command went out through the editor's own submit action —
+    // the same one a typed Enter fires — not through a second route.
+    expect(submit).toHaveBeenCalledTimes(1)
+    expect(submit).toHaveBeenCalledWith('rm -rf build')
+  })
+
+  it('Esc after previewing restores the draft and sends nothing', () => {
+    const { ed, view, recall, submit } = setupRecall({ query: mkQuery(['rm -rf build']) })
+    ed.show()
+    ed.insertText('git s')
+    key(view, { key: 'ArrowUp' })
+    expect(ed.getDoc()).toBe('rm -rf build') // previewed
+
+    key(view, { key: 'Escape' })
+    expect(recall.isOpen).toBe(false)
+    expect(ed.getDoc()).toBe('git s') // the draft, not the preview, is back
+    expect(submit).not.toHaveBeenCalled() // and nothing was sent
   })
 
   it('typing while recall is open gives the draft back and lets the key land', () => {
@@ -122,7 +138,6 @@ describe('recall: Enter fills the line and never executes', () => {
     expect(cancel).not.toHaveBeenCalled() // no \x03 went to the shell
   })
 })
-
 describe('recall: Esc restores the draft, caret and scroll exactly', () => {
   it('restores text, selection and scroll after navigating', () => {
     const { ed, view, recall } = setupRecall({ query: mkQuery(['one', 'two']) })
@@ -135,15 +150,62 @@ describe('recall: Esc restores the draft, caret and scroll exactly', () => {
     // The explicit shortcut opens recall from anywhere — even line 2.
     key(view, { key: 'r', ctrlKey: true })
     expect(recall.isOpen).toBe(true)
-    key(view, { key: 'ArrowDown' })
-    key(view, { key: 'ArrowUp' })
-    expect(ed.getDoc()).toBe('one') // previewing the highlighted row
+    key(view, { key: 'ArrowDown' }) // at the newest (bottom): stays
+    key(view, { key: 'ArrowUp' }) // older
+    expect(ed.getDoc()).toBe('two') // previewing the older row
 
     key(view, { key: 'Escape' })
     expect(recall.isOpen).toBe(false)
     expect(ed.getDoc()).toBe('line one\nline two')
     expect(ed.getSelection()).toEqual({ from: 2, to: 5 })
     expect(ed.getScrollTop()).toBe(37)
+  })
+})
+
+describe("recall: oldest at the top, newest at the bottom (Warp's model)", () => {
+  it('renders oldest at the top and selects the newest (bottom) row on open', () => {
+    // mkQuery lists commands newest-first — the wire order; the renderer
+    // reverses for display.
+    const { container, view } = setupRecall({ query: mkQuery(['newest', 'middle', 'oldest']) })
+    key(view, { key: 'ArrowUp' })
+    const rows = container.querySelectorAll<HTMLElement>('.ui-collection-row')
+    expect(rows.length).toBe(3)
+    expect(rows[0]?.textContent).toContain('oldest') // oldest at the top
+    expect(rows[2]?.textContent).toContain('newest') // newest at the bottom
+    const selected = container.querySelector<HTMLElement>(
+      '.ui-collection-row[data-selected="true"]',
+    )
+    expect(selected?.textContent).toContain('newest') // the bottom row
+  })
+
+  it('Up from the bottom moves to the previous (older) command', () => {
+    const { container, view } = setupRecall({ query: mkQuery(['newest', 'middle', 'oldest']) })
+    key(view, { key: 'ArrowUp' }) // opens with the newest (bottom) selected
+    key(view, { key: 'ArrowUp' }) // older
+    const selected = container.querySelector<HTMLElement>(
+      '.ui-collection-row[data-selected="true"]',
+    )
+    expect(selected?.textContent).toContain('middle')
+  })
+
+  it('Down at the bottom stays on the newest command', () => {
+    const { container, view } = setupRecall({ query: mkQuery(['newest', 'middle', 'oldest']) })
+    key(view, { key: 'ArrowUp' })
+    key(view, { key: 'ArrowDown' })
+    const selected = container.querySelector<HTMLElement>(
+      '.ui-collection-row[data-selected="true"]',
+    )
+    expect(selected?.textContent).toContain('newest')
+  })
+
+  it('a single row is selected and previewed on open', () => {
+    const { ed, container, view } = setupRecall({ query: mkQuery(['only']) })
+    key(view, { key: 'ArrowUp' })
+    const selected = container.querySelector<HTMLElement>(
+      '.ui-collection-row[data-selected="true"]',
+    )
+    expect(selected?.textContent).toContain('only')
+    expect(ed.getDoc()).toBe('only')
   })
 })
 
@@ -283,29 +345,38 @@ describe('recall: what the panel says', () => {
 })
 
 describe('recall: the footer and the labels say what the keys do', () => {
-  it('the footer is one line: two key groups in one footer, a real gap between them', () => {
+  it('all hints are one line: three key groups in one footer, real gaps between them', () => {
     const { container, view } = setupRecall({ query: mkQuery(['one', 'two', 'three']) })
     key(view, { key: 'ArrowUp' })
     const footer = container.querySelector<HTMLElement>('.ui-recall-panel__footer')
     expect(footer).not.toBeNull()
-    // Two key groups as siblings of one footer element — the CSS lays them
-    // out on one line with a gap (white-space: nowrap; display: flex), so
-    // "navigate" and "esc" can never run together and never wrap apart.
+    // The key groups are siblings of one footer element — the CSS lays them
+    // out on one line with a real gap (white-space: nowrap; display: flex),
+    // so no hint gets its own row and none can wrap apart from the others.
     const groups = footer?.querySelectorAll<HTMLElement>(':scope > span') ?? []
-    expect(groups.length).toBe(2)
-    expect(groups[0]?.textContent).toBe('↑ ↓ to navigate')
-    expect(groups[1]?.textContent).toBe('esc to dismiss')
+    expect(groups.length).toBe(3)
+    expect(groups[0]?.textContent).toBe('↵ to execute')
+    expect(groups[1]?.textContent).toBe('↑ ↓ to navigate')
+    expect(groups[2]?.textContent).toBe('esc to dismiss')
     expect(footer?.querySelector('br')).toBeNull()
   })
 
-  it('Enter is labelled as filling the line, never as executing', () => {
+  it('Enter is labelled as executing the previewed command', () => {
     const { container, view } = setupRecall({
       query: mkQuery(['rm -rf build', 'ls', 'git status']),
     })
     key(view, { key: 'ArrowUp' })
     const text = panelOf(container).textContent ?? ''
-    expect(text).toContain('↵ to fill the line')
-    expect(text).not.toContain('execute')
+    expect(text).toContain('↵ to execute')
+    expect(text).not.toContain('fill the line')
+  })
+
+  it('the empty panel does not promise execution', () => {
+    const { container, view } = setupRecall({ query: emptyQuery() })
+    key(view, { key: 'ArrowUp' })
+    const text = panelOf(container).textContent ?? ''
+    expect(text).toContain('no history yet')
+    expect(text).not.toContain('↵ to execute') // nothing to execute
   })
 })
 

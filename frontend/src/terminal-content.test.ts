@@ -48,6 +48,14 @@ const editorOf = (content: TerminalContent): CommandEditor => {
   return withEditor.editor
 }
 
+/** TerminalContent also keeps the renderer private; tests reach the live
+ *  mock through the same escape hatch editorOf uses (the field is typed
+ *  TerminalRenderer in the class, structurally the mock). */
+const rendererOf = (content: TerminalContent): RendererMock => {
+  const withRenderer = content as unknown as { renderer: RendererMock }
+  return withRenderer.renderer
+}
+
 /** The editor's internal CM6 view — reached only to seed selections. */
 const viewOf = (ed: CommandEditor): EditorView => {
   const withView = ed as unknown as { view: EditorView }
@@ -262,14 +270,16 @@ describe('recall overlay is actually wired (nocx-w7h.4)', () => {
     )
   }
 
-  // Reachability + the non-negotiable acceptance. The editor-level suite
-  // tests the overlay's own keys; this one exists because an overlay that
-  // nothing wires to the editor is a feature the product does not have, and
-  // because "Enter fills, never executes" must be asserted on the session's
-  // send — the path a real command takes — not on a flag.
-  it('Enter in the recall overlay fills the line and sends nothing to the session', async () => {
+  // Reachability + the acceptance that the v4 rule inverted (nocx-w7h.5):
+  // navigating previews the command INTO the editor, and Enter executes what
+  // you can see through the NORMAL submit path — the same one a typed Enter
+  // takes — with nothing bypassed. The command text reaches the PTY via the
+  // renderer's paste handoff and the trailing '\r' via the session, so both
+  // are asserted: a second, parallel route would look different.
+  it('Enter in the recall overlay executes the previewed command through the normal submit path', async () => {
     const { view, ed, content, teardown } = await mountTerminal(makeClipboard())
     const session = (content as unknown as { session: SessionFake }).session
+    const renderer = rendererOf(content)
     /* eslint-disable @typescript-eslint/unbound-method */
     const protoScrollTo = Element.prototype.scrollTo
     const protoScrollIntoView = Element.prototype.scrollIntoView
@@ -284,15 +294,26 @@ describe('recall overlay is actually wired (nocx-w7h.4)', () => {
       key(view, { key: 'Enter' }) // the one legitimate send
       expect(session.send.mock.calls.length).toBe(1)
       const sentBefore = session.send.mock.calls.length
+      // The send payload is a string; String() gives the linter a typed value
+      // without assuming the exact wire bytes (the '\r' the shell target
+      // appends today could legitimately change).
+      const sentShape = String(session.send.mock.calls[sentBefore - 1][0])
 
       // The submit cleared the editor; Up at the empty prompt opens recall.
       key(view, { key: 'ArrowUp' })
       expect(ed.root.querySelector('.ui-recall-panel')).not.toBeNull()
       expect(ed.getDoc()).toBe('make deploy') // previewing the only row
 
-      key(view, { key: 'Enter' }) // accept — fills the line, must not send
-      expect(ed.getDoc()).toBe('make deploy')
-      expect(session.send.mock.calls.length).toBe(sentBefore)
+      key(view, { key: 'Enter' }) // accept — executes the previewed command
+      // One more send, and it is the SAME wire shape as the typed submit:
+      // the command went through the renderer paste handoff, '\r' through the
+      // session. No second route exists to assert against.
+      expect(session.send.mock.calls.length).toBe(sentBefore + 1)
+      expect(session.send).toHaveBeenLastCalledWith(sentShape)
+      // `paste` is a method declaration on TerminalRenderer, so referencing it
+      // detached trips unbound-method; the mock property type does not.
+      const pasteMock = renderer as unknown as { paste: ReturnType<typeof vi.fn> }
+      expect(pasteMock.paste).toHaveBeenLastCalledWith('make deploy')
     } finally {
       Element.prototype.scrollTo = protoScrollTo
       Element.prototype.scrollIntoView = protoScrollIntoView

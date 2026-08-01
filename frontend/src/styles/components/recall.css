@@ -85,19 +85,10 @@
   white-space: nowrap;
 }
 
-/* The separate line explaining the two-step flow: Enter here fills the
-   line; the editor's own Enter, later, is what executes. */
-.ui-recall-panel__hint {
-  padding: var(--space-2) var(--space-3);
-  border-top: 1px solid var(--color-divider);
-  font-size: var(--font-size-2xs);
-  color: var(--color-text-muted);
-  flex: 0 0 auto;
-}
-
-/* One line, two key groups: the groups are spans laid out by flex with a
-   real gap between them and nowrap, so "navigate" and "esc" can neither
-   run together nor wrap onto a second line. */
+/* One line, every hint in it: the groups are spans laid out by flex with a
+   real gap between them and nowrap, so "↵ to execute", "↑ ↓ to navigate"
+   and "esc to dismiss" can neither get their own rows nor wrap apart. The
+   execute group is emitted only when there is something to execute. */
 .ui-recall-panel__footer {
   display: flex;
   align-items: center;
