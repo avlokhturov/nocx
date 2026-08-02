@@ -56,10 +56,17 @@ runs in its own process group so cancellation reaches the children.
 
 **3. Interactivity is a protocol transition, not a failure.** When a program activates the
 alternate screen or blocks reading stdin, the lane enters **`awaiting-takeover`**: the agent
-loses write authority, and the human takes over, answers with a bounded response, detaches
-the process, or kills it. This is the answer to "the agent could get stuck forever", and it
-is better than a timeout in the case that matters — the program is still there and still
+is **demoted, not evicted** — it loses write authority and keeps the right to read the
+screen and advise — and the human takes over, answers with a bounded response, detaches the
+process, or kills it. This is the answer to "the agent could get stuck forever", and it is
+better than a timeout in the case that matters — the program is still there and still
 usable, rather than killed for the crime of being interactive.
+
+Demotion rather than eviction is deliberate and is where the next feature lives: the
+frontend already holds the screen (AD-6 puts render state there), so the state in which a
+TUI owns the lane is exactly the state in which an assistant can explain what is on screen
+and what the choices are. Anything beyond advice — sending keystrokes — is governed by
+rule 6 and by the staleness rule that a separate decision will own (`nocx-x8s2`).
 
 **4. Attempts are first class.** An `executions` table sits between an entry and its
 artifacts: `entry_id`, lane, attempt number, lease bounds, interactivity policy, process
