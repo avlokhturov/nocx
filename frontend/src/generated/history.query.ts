@@ -75,4 +75,42 @@ export interface HistoryEntry {
    * The kinds that were masked, deduplicated in first-occurrence order, from the closed vocabulary of internal/secrets: openai, github-pat, slack, aws-access-key, gitlab, jwt, private-key, url-userinfo, db-connstring, auth-header, env-assignment, high-entropy. Never the secret's value — kind and count are the fact, the matched text is the thing being removed. Never null: no mask is [].
    */
   maskedKinds: string[]
+  /**
+   * The row's structured redaction segments, in row order, offsets in UTF-16 code units into command. The renderer draws an unresolved chip at each segment and refuses to run the command as written; a segment the user saved to a vault reference is gone from this list and the reference sits in command instead. Never null when present: no redaction is []. Optional because the session-ledger path (source=session) synthesises entries that never passed the store's mask — a backend that always sends it (the store always does) satisfies the schema.
+   */
+  redactions?: Redaction[]
+}
+export interface Redaction {
+  /**
+   * The closed vocabulary of internal/secrets: openai, github-pat, slack, aws-access-key, gitlab, jwt, private-key, url-userinfo, db-connstring, auth-header, env-assignment, high-entropy.
+   */
+  kind:
+    | 'openai'
+    | 'github-pat'
+    | 'slack'
+    | 'aws-access-key'
+    | 'gitlab'
+    | 'jwt'
+    | 'private-key'
+    | 'url-userinfo'
+    | 'db-connstring'
+    | 'auth-header'
+    | 'env-assignment'
+    | 'high-entropy'
+  /**
+   * Inclusive UTF-16 code-unit offset into command.
+   */
+  start: number
+  /**
+   * Exclusive UTF-16 code-unit offset into command.
+   */
+  end: number
+  /**
+   * The head of the value the mask shows (the first 4 characters), or "" when the mask shows no material. Exactly the text already visible in the masked command.
+   */
+  prefix: string
+  /**
+   * The tail of the value the mask shows (the last 4 characters), or "" when the mask shows no material. Exactly the text already visible in the masked command.
+   */
+  suffix: string
 }

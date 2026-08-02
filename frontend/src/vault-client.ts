@@ -14,11 +14,17 @@ export type { VaultResetPreview } from './generated/vault.resetPreview'
 export type { VaultResetResult, ResidueEntry } from './generated/vault.reset'
 export type { VaultInventory, InventoryEntry } from './generated/vault.inventory'
 export type { VaultResolveLine, ResolveRef } from './generated/vault.resolveLine'
+export type { SecretsDetect } from './generated/secrets.detect'
+export type { SecretsCaptureSave } from './generated/secrets.captureSave'
+export type { SecretsCaptureDismiss } from './generated/secrets.captureDismiss'
 import type { VaultStatus } from './generated/vault.status'
 import type { VaultResetPreview } from './generated/vault.resetPreview'
 import type { VaultResetResult } from './generated/vault.reset'
 import type { VaultInventory, InventoryEntry } from './generated/vault.inventory'
 import type { VaultResolveLine } from './generated/vault.resolveLine'
+import type { SecretsDetect } from './generated/secrets.detect'
+import type { SecretsCaptureSave } from './generated/secrets.captureSave'
+import type { SecretsCaptureDismiss } from './generated/secrets.captureDismiss'
 
 /** The vault's lifecycle state, as the schema's enum spells it. */
 export type VaultState = VaultStatus['state']
@@ -193,6 +199,28 @@ export class VaultClient {
    *  receives the line with the reference INTACT. */
   resolveLine(line: string): Promise<VaultResolveLine> {
     return this.dispatcher.call('vault.resolveLine', { line })
+  }
+
+  /** The ONE detector, over the wire: findings for a line, with UTF-16
+   *  code-unit offsets, echoing the revision they were computed for. The
+   *  caller drops a response whose revision no longer matches the current
+   *  document — never adjusting an old range onto a newer one. */
+  detect(line: string, revision: number): Promise<SecretsDetect> {
+    return this.dispatcher.call('secrets.detect', { line, revision })
+  }
+
+  /** Settle a pending capture into the vault: create the secret (the vault
+   *  resolves name collisions atomically and the real name comes back) and
+   *  rewrite the linked history rows to the reference. Idempotent: retrying
+   *  with the same capture id returns the recorded outcome. */
+  captureSave(params: { captureId: string; name?: string }): Promise<SecretsCaptureSave> {
+    return this.dispatcher.call('secrets.captureSave', params)
+  }
+
+  /** Destroy a pending capture and suppress its value for the rest of the
+   *  application session. Idempotent. */
+  captureDismiss(captureId: string): Promise<SecretsCaptureDismiss> {
+    return this.dispatcher.call('secrets.captureDismiss', { captureId })
   }
 
   activity(): Promise<Record<string, never>> {

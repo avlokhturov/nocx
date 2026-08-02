@@ -73,10 +73,31 @@ const (
 // safe to slice with s[Start:End]; the secret's VALUE never appears in a
 // finding — kind and offsets are the fact, the matched text is the thing
 // being removed.
+//
+// ValueStart/ValueEnd bound the CREDENTIAL inside the finding, by byte
+// offset into the same input: the thing a capture holds and a save stores.
+// For whole-match rules they equal the finding span; for structural rules
+// (env assignment, auth header, db connstring, URL userinfo, high-entropy)
+// they are the value token, surrounding quotes stripped. The value itself
+// never appears in a finding — these are offsets only.
 type Finding struct {
 	Kind  Kind
 	Start int
 	End   int
+	// ValueStart/ValueEnd bound the credential inside the finding.
+	ValueStart int
+	ValueEnd   int
+}
+
+// Segment is the durable shape of one replacement: where it landed in the
+// MASKED string, and the head/tail the mask shows. Prefix/Suffix are
+// exactly the text already visible in the masked command (the head-4/tail-4
+// maskSecret keeps, "" when the mask shows no material) — a segment never
+// carries secret material.
+type Segment struct {
+	Start, End int
+	Prefix     string
+	Suffix     string
 }
 
 // Mask returns the input with every detected secret replaced and the
@@ -85,17 +106,83 @@ type Finding struct {
 // exactly the set of replacements made, so a caller can report
 // count-and-kinds without ever re-deriving them.
 func Mask(s string) (masked string, findings []Finding) {
+	masked, findings, _ = MaskWithSegments(s)
+	return masked, findings
+}
+
+// MaskWithSegments is Mask plus, per finding, the segment the durable row
+// keeps: the replacement's span in the MASKED string (byte offsets, safe to
+// slice masked[start:end]) and the head/tail the mask shows. The findings
+// and the segments are parallel and in the same order. Callers that only
+// need the masked text and the facts use Mask; the store seam needs the
+// segments so a later save can find the span to rewrite.
+func MaskWithSegments(s string) (masked string, findings []Finding, segs []Segment) {
 	ms := detectMatches(s)
 	var b strings.Builder
 	b.Grow(len(s))
 	last := 0
+	findings = make([]Finding, 0, len(ms))
+	segs = make([]Segment, 0, len(ms))
 	for _, m := range ms {
 		b.WriteString(s[last:m.start])
+		outStart := b.Len()
 		b.WriteString(m.repl)
 		last = m.end
+		findings = append(findings, Finding{
+			Kind:       m.kind,
+			Start:      m.start,
+			End:        m.end,
+			ValueStart: m.valStart,
+			ValueEnd:   m.valEnd,
+		})
+		segs = append(segs, Segment{
+			Start:  outStart + m.segStart,
+			End:    outStart + m.segEnd,
+			Prefix: maskHead(s[m.valStart:m.valEnd], m.wholeMasked),
+			Suffix: maskTail(s[m.valStart:m.valEnd], m.wholeMasked),
+		})
 	}
 	b.WriteString(s[last:])
-	return b.String(), toFindings(ms)
+	return b.String(), findings, segs
+}
+
+// maskHead and maskTail are the head-4/tail-4 the mask keeps for a value,
+// or "" when the mask shows no material: a value below the 12-rune floor
+// becomes "***", and wholeMasked rules (private keys, db-connstring and URL
+// passwords) show a fixed placeholder regardless.
+func maskHead(value string, wholeMasked bool) string {
+	if wholeMasked {
+		return ""
+	}
+	r := []rune(value)
+	if len(r) < 12 {
+		return ""
+	}
+	return string(r[:4])
+}
+
+func maskTail(value string, wholeMasked bool) string {
+	if wholeMasked {
+		return ""
+	}
+	r := []rune(value)
+	if len(r) < 12 {
+		return ""
+	}
+	return string(r[len(r)-4:])
+}
+
+// valueSpanOf returns the value's byte span, stripping one pair of
+// surrounding matching quotes so the SAVED credential is the inner text —
+// TOKEN="abc" stores abc, not "abc".
+func valueSpanOf(input string, start, end int) (int, int) {
+	if end-start >= 2 {
+		q := input[start]
+		if (q == '\'' || q == '"') && input[end-1] == q {
+			return start + 1, end - 1
+		}
+	}
+	return start, end
 }
 
 // Detect returns the findings without producing a masked string.
@@ -193,13 +280,25 @@ func valueIsMaskable(value string) bool {
 
 // ── rules ─────────────────────────────────────────────────────────────────
 
-// candidate is one match of one rule: the byte span and the replacement
-// that will be emitted for it.
+// candidate is one match of one rule: the byte span, the credential's own
+// span within it, the span of the value's MASK within the replacement, and
+// the replacement itself.
 type candidate struct {
-	start, end int
-	repl       string
+	start, end       int
+	valStart, valEnd int
+	// segStart/segEnd bound the masked value WITHIN repl — the part the
+	// durable row's segment covers. For whole-match rules they span the
+	// whole repl; for composite rules (env-assign, auth header, db
+	// connstring, URL userinfo, high-entropy) they are the value's mask
+	// only, so a save can rewrite the value and keep the context
+	// (OPENAI_TOKEN= stays, the token becomes the reference).
+	segStart, segEnd int
+	// wholeMasked marks rules whose mask shows no head/tail material (a
+	// fixed placeholder): private-key blocks, db-connstring and URL
+	// passwords. The segment's prefix/suffix are "" for these.
+	wholeMasked bool
+	repl        string
 }
-
 type rule struct {
 	kind Kind
 	find func(input string) []candidate
@@ -243,7 +342,8 @@ func prefixFinder(kind Kind, pattern string) func(string) []candidate {
 			if end < len(input) && isTokenChar(input[end]) {
 				continue
 			}
-			out = append(out, candidate{start: start, end: end, repl: maskSecret(input[start:end])})
+			repl := maskSecret(input[start:end])
+			out = append(out, candidate{start: start, end: end, valStart: start, valEnd: end, segStart: 0, segEnd: len(repl), repl: repl})
 		}
 		return out
 	}
@@ -260,7 +360,7 @@ var privateKeyRE = regexp.MustCompile(`-----BEGIN[A-Z ]*PRIVATE KEY-----[\s\S]*?
 func findPrivateKey(input string) []candidate {
 	var out []candidate
 	for _, loc := range privateKeyRE.FindAllStringIndex(input, -1) {
-		out = append(out, candidate{start: loc[0], end: loc[1], repl: "[REDACTED PRIVATE KEY]"})
+		out = append(out, candidate{start: loc[0], end: loc[1], valStart: loc[0], valEnd: loc[1], segStart: 0, segEnd: len("[REDACTED PRIVATE KEY]"), wholeMasked: true, repl: "[REDACTED PRIVATE KEY]"})
 	}
 	return out
 }
@@ -274,7 +374,8 @@ var jwtRE = regexp.MustCompile(`eyJ[A-Za-z0-9_-]{10,}(?:\.[A-Za-z0-9_=-]{4,}){0,
 func findJWT(input string) []candidate {
 	var out []candidate
 	for _, loc := range jwtRE.FindAllStringIndex(input, -1) {
-		out = append(out, candidate{start: loc[0], end: loc[1], repl: maskSecret(input[loc[0]:loc[1]])})
+		repl := maskSecret(input[loc[0]:loc[1]])
+		out = append(out, candidate{start: loc[0], end: loc[1], valStart: loc[0], valEnd: loc[1], segStart: 0, segEnd: len(repl), repl: repl})
 	}
 	return out
 }
@@ -293,10 +394,17 @@ func findDBConnstring(input string) []candidate {
 		if isReference(password) {
 			continue
 		}
+		head := input[loc[2]:loc[3]]
+		repl := head + "***" + input[loc[6]:loc[7]]
 		out = append(out, candidate{
-			start: loc[0],
-			end:   loc[1],
-			repl:  input[loc[2]:loc[3]] + "***" + input[loc[6]:loc[7]],
+			start:       loc[0],
+			end:         loc[1],
+			valStart:    loc[4],
+			valEnd:      loc[5],
+			segStart:    len(head),
+			segEnd:      len(head) + 3,
+			wholeMasked: true,
+			repl:        repl,
 		})
 	}
 	return out
@@ -318,10 +426,16 @@ func findURLUserinfo(input string) []candidate {
 		if isReference(password) {
 			continue
 		}
+		repl := input[loc[2]:loc[3]] + "://" + input[loc[4]:loc[5]] + ":***@"
 		out = append(out, candidate{
-			start: loc[0],
-			end:   loc[1],
-			repl:  input[loc[2]:loc[3]] + "://" + input[loc[4]:loc[5]] + ":***@",
+			start:       loc[0],
+			end:         loc[1],
+			valStart:    loc[6],
+			valEnd:      loc[7],
+			segStart:    len(repl) - 4,
+			segEnd:      len(repl) - 1,
+			wholeMasked: true,
+			repl:        repl,
 		})
 	}
 	return out
@@ -375,10 +489,16 @@ func findAuthHeader(input string) []candidate {
 		if scheme == "" && isAuthScheme(token) {
 			continue
 		}
+		head := input[loc[2]:loc[3]]
+		repl := head + scheme + maskSecret(token)
 		out = append(out, candidate{
-			start: loc[0],
-			end:   loc[1],
-			repl:  input[loc[2]:loc[3]] + scheme + maskSecret(token),
+			start:    loc[0],
+			end:      loc[1],
+			valStart: loc[6],
+			valEnd:   loc[7],
+			segStart: len(head) + len(scheme),
+			segEnd:   len(repl),
+			repl:     repl,
 		})
 	}
 	for _, loc := range secretHeaderRE.FindAllStringSubmatchIndex(input, -1) {
@@ -386,10 +506,16 @@ func findAuthHeader(input string) []candidate {
 		if isReference(value) {
 			continue
 		}
+		head := input[loc[2]:loc[3]]
+		repl := head + maskSecret(value)
 		out = append(out, candidate{
-			start: loc[0],
-			end:   loc[1],
-			repl:  input[loc[2]:loc[3]] + maskSecret(value),
+			start:    loc[0],
+			end:      loc[1],
+			valStart: loc[4],
+			valEnd:   loc[5],
+			segStart: len(head),
+			segEnd:   len(repl),
+			repl:     repl,
 		})
 	}
 	return out
@@ -421,10 +547,20 @@ func findEnvAssignment(input string) []candidate {
 		if !valueIsMaskable(value) {
 			continue
 		}
+		vs, ve := valueSpanOf(input, loc[6], loc[7])
+		repl := key + sep + maskTokenValue(value)
+		qoff := 0
+		if vs != loc[6] {
+			qoff = 1 // the value was quoted; the mask sits inside the quotes
+		}
 		out = append(out, candidate{
-			start: loc[0],
-			end:   loc[1],
-			repl:  key + sep + maskTokenValue(value),
+			start:    loc[0],
+			end:      loc[1],
+			valStart: vs,
+			valEnd:   ve,
+			segStart: len(key) + len(sep) + qoff,
+			segEnd:   len(repl) - qoff,
+			repl:     repl,
 		})
 	}
 	return out
@@ -462,15 +598,30 @@ func findHighEntropy(input string) []candidate {
 			continue
 		}
 		repl := flag + sep
+		vs, ve := 0, 0
+		qoff := 0
 		switch {
 		case loc[6] >= 0:
 			repl += "'" + maskSecret(value) + "'"
+			vs, ve = valueSpanOf(input, loc[6], loc[7])
+			qoff = 1
 		case loc[8] >= 0:
 			repl += `"` + maskSecret(value) + `"`
+			vs, ve = valueSpanOf(input, loc[8], loc[9])
+			qoff = 1
 		default:
 			repl += maskSecret(value)
+			vs, ve = loc[10], loc[11]
 		}
-		out = append(out, candidate{start: loc[0], end: loc[1], repl: repl})
+		out = append(out, candidate{
+			start:    loc[0],
+			end:      loc[1],
+			valStart: vs,
+			valEnd:   ve,
+			segStart: len(flag) + len(sep) + qoff,
+			segEnd:   len(repl) - qoff,
+			repl:     repl,
+		})
 	}
 	return out
 }
@@ -478,9 +629,12 @@ func findHighEntropy(input string) []candidate {
 // ── the deterministic pass ─────────────────────────────────────────────────
 
 type match struct {
-	kind       Kind
-	start, end int
-	repl       string
+	kind             Kind
+	start, end       int
+	valStart, valEnd int
+	segStart, segEnd int
+	wholeMasked      bool
+	repl             string
 }
 
 // referenceSpanRE is a `{{secret:NAME}}` reference, whole. Everything inside
@@ -513,7 +667,7 @@ func detectMatches(input string) []match {
 			if inReference(c) || overlapsAny(c, kept) {
 				continue
 			}
-			kept = append(kept, match{kind: r.kind, start: c.start, end: c.end, repl: c.repl})
+			kept = append(kept, match{kind: r.kind, start: c.start, end: c.end, valStart: c.valStart, valEnd: c.valEnd, segStart: c.segStart, segEnd: c.segEnd, wholeMasked: c.wholeMasked, repl: c.repl})
 		}
 	}
 	sort.SliceStable(kept, func(i, j int) bool {
@@ -537,7 +691,220 @@ func overlapsAny(c candidate, kept []match) bool {
 func toFindings(ms []match) []Finding {
 	findings := make([]Finding, 0, len(ms))
 	for _, m := range ms {
-		findings = append(findings, Finding{Kind: m.kind, Start: m.start, End: m.end})
+		findings = append(findings, Finding{
+			Kind:       m.kind,
+			Start:      m.start,
+			End:        m.end,
+			ValueStart: m.valStart,
+			ValueEnd:   m.valEnd,
+		})
 	}
 	return findings
+}
+
+// ── wire conversion ─────────────────────────────────────────────────────────
+
+// ToUTF16Span converts byte offsets in s to UTF-16 code-unit offsets — the
+// positions CodeMirror and JS string slicing use. A rune outside the BMP
+// counts two units, a combining mark or Cyrillic letter one, so the wire
+// offsets diverge from Go's byte offsets exactly where the renderer would
+// decorate the wrong text on any line with an emoji, a combining mark or
+// Cyrillic before the credential. Convert once, at the wire.
+func ToUTF16Span(s string, start, end int) (u16start, u16end int) {
+	units := 0
+	for i, r := range s {
+		if i == start {
+			u16start = units
+		}
+		if i == end {
+			u16end = units
+			break
+		}
+		units++
+		if r > 0xFFFF {
+			units++
+		}
+	}
+	if start >= len(s) {
+		u16start = units
+	}
+	if end >= len(s) {
+		u16end = units
+	}
+	return u16start, u16end
+}
+
+// ── the suggested name ──────────────────────────────────────────────────────
+
+// The URL schemes a credential can be sent to: the web schemes plus the
+// database families the detector already knows. The host derivation looks
+// for any of these in the invocation containing the credential.
+var urlAuthorityRE = regexp.MustCompile(
+	`(?:https?|wss?|ftp|postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp)://([^\s/"';()]+)`,
+)
+
+// SuggestName derives the vault name a detected credential should be saved
+// under (ADR-0016): the host of the command invocation that contains the
+// credential-bearing argument, else the environment variable name, else the
+// kind. The host is the word the user would search for — the owner's
+// analogy is Bitwarden, which names an entry after the site you logged into.
+//
+// The invocation boundary is deliberate: |, &&, ||, ; and a command
+// substitution each start another command, and a payload URL or a proxy
+// host in another command is not the target. Ambiguity falls back rather
+// than guessing — a boring name beats a confidently wrong one on a
+// production credential.
+func SuggestName(line string, f Finding) string {
+	depth, quoted := scanLine(line)
+	start, end, d := invocationOf(line, depth, quoted, f)
+	if h := hostOf(line, depth, start, end, d); h != "" {
+		return h
+	}
+	if f.Kind == KindEnvAssignment {
+		if k := envKeyOf(line, f); k != "" {
+			return k
+		}
+	}
+	return string(f.Kind)
+}
+
+// scanLine walks the line tracking nesting depth and quote state so the
+// name derivation can bound an invocation without parsing a grammar it does
+// not own. depth[i] rises inside $(...), `...` and bare ( ... ) and falls
+// at the matching close; quoted[i] is true inside quotes (and for a
+// backslash-escaped byte), so a ; or | inside quotes never splits and an
+// escaped one never does either.
+func scanLine(line string) (depth []int, quoted []bool) {
+	depth = make([]int, len(line)+1)
+	quoted = make([]bool, len(line)+1)
+	d := 0
+	var q byte
+	for i := 0; i < len(line); i++ {
+		depth[i] = d
+		c := line[i]
+		if q != 0 {
+			quoted[i] = true
+			if c == '\\' && q == '"' {
+				i++
+				if i < len(line) {
+					depth[i] = d
+					quoted[i] = true
+				}
+				continue
+			}
+			if c == q {
+				q = 0
+			}
+			continue
+		}
+		switch c {
+		case '\'', '"':
+			q = c
+			quoted[i] = true
+		case '`':
+			d++
+		case '(':
+			d++
+		case ')':
+			if d > 0 {
+				d--
+			}
+		case '\\':
+			i++
+			if i < len(line) {
+				depth[i] = d
+				quoted[i] = true
+			}
+		}
+	}
+	depth[len(line)] = d
+	return depth, quoted
+}
+
+// isSeparator reports whether the byte at i opens a command boundary: |, ;,
+// && or || — the brief's list exactly. A bare & (background) or >/|
+// redirection is not a boundary.
+func isSeparator(line string, i int) bool {
+	switch line[i] {
+	case '|', ';':
+		return true
+	case '&':
+		return i+1 < len(line) && line[i+1] == '&'
+	}
+	return false
+}
+
+// invocationOf returns the byte region of the command invocation containing
+// the finding, plus the finding's nesting depth. The region is bounded by
+// separators at that depth and by the region's own parens (a depth-0
+// finding's invocation spans the whole top-level segment, including any
+// command substitutions in it; a deeper finding's invocation is the
+// substitution body it sits in).
+func invocationOf(line string, depth []int, quoted []bool, f Finding) (start, end, d int) {
+	d = depth[f.Start]
+	start, end = f.Start, f.End
+	for start > 0 {
+		i := start - 1
+		if depth[i] < d || (depth[i] == d && !quoted[i] && isSeparator(line, i)) {
+			break
+		}
+		start = i
+	}
+	for end < len(line) {
+		if depth[end] < d || (depth[end] == d && !quoted[end] && isSeparator(line, end)) {
+			break
+		}
+		end++
+	}
+	return start, end, d
+}
+
+// hostOf returns the host of the first URL at the finding's depth inside the
+// invocation, or "" when there is none. A URL inside a nested region (a
+// command substitution) belongs to another command and is skipped.
+func hostOf(line string, depth []int, start, end, d int) string {
+	seg := line[start:end]
+	for _, loc := range urlAuthorityRE.FindAllStringSubmatchIndex(seg, -1) {
+		at := start + loc[0]
+		if depth[at] != d {
+			continue
+		}
+		return hostOfAuthority(seg[loc[2]:loc[3]])
+	}
+	return ""
+}
+
+// hostOfAuthority strips userinfo and port from a URL authority:
+// user:pass@github.com:22 → github.com.
+func hostOfAuthority(authority string) string {
+	if i := strings.LastIndex(authority, "@"); i >= 0 {
+		authority = authority[i+1:]
+	}
+	// IPv6 bracket form: [::1]:8080 — the port is after the bracket.
+	if strings.HasPrefix(authority, "[") {
+		if i := strings.Index(authority, "]"); i >= 0 {
+			return authority[:i+1]
+		}
+	}
+	if i := strings.Index(authority, ":"); i >= 0 {
+		return authority[:i]
+	}
+	return authority
+}
+
+// envKeyOf extracts the variable name of an env-assignment finding: the
+// text between the finding start and the '=' that opens the value,
+// normalised to the name a reference would read (lowercase, hyphenated) —
+// GITHUB_TOKEN= → github-token.
+func envKeyOf(line string, f Finding) string {
+	head := line[f.Start:f.ValueStart]
+	sep := strings.LastIndex(head, "=")
+	if sep < 0 {
+		return ""
+	}
+	key := strings.TrimSpace(head[:sep])
+	if key == "" {
+		return ""
+	}
+	return strings.ReplaceAll(strings.ToLower(key), "_", "-")
 }

@@ -33,6 +33,9 @@ type fakeVaultLifecycle struct {
 	inventoryResult       []vault.InventoryEntry
 	createNamedErr        error
 	createNamedID         credential.SecretID
+	resolvedName          string
+	usedName              string
+	createNamedCalled     int
 	renameSecretErr       error
 	renameSecretName      string
 	resolveRowID          credential.SecretID
@@ -95,6 +98,15 @@ func (f *fakeVaultLifecycle) CreateNamed(_ context.Context, _ credential.Secret,
 		return "", f.createNamedErr
 	}
 	return f.createNamedID, nil
+}
+
+func (f *fakeVaultLifecycle) CreateNamedResolved(_ context.Context, _ credential.Secret, meta vault.SecretMeta) (credential.SecretID, string, error) {
+	f.createNamedCalled++
+	if f.createNamedErr != nil {
+		return "", "", f.createNamedErr
+	}
+	f.usedName = meta.Name
+	return f.createNamedID, f.resolvedName, nil
 }
 
 func (f *fakeVaultLifecycle) RenameSecret(_ context.Context, row string, name string, _ []vault.CredentialInventory) error {

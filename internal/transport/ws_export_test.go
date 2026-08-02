@@ -53,8 +53,12 @@ func (r *recordingConvRepo) List(context.Context, int) ([]content.Conversation, 
 
 type recordingHistRepo struct{ db *recordingContentDB }
 
-func (r *recordingHistRepo) Add(_ context.Context, rec content.CommandRecord) error {
+func (r *recordingHistRepo) Add(_ context.Context, rec content.CommandRecord) (int64, error) {
 	r.db.history = append(r.db.history, rec)
+	return 0, nil
+}
+
+func (r *recordingHistRepo) RewriteRedaction(_ context.Context, _ int64, _ content.Redaction, _ string) error {
 	return nil
 }
 

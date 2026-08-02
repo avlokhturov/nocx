@@ -190,11 +190,15 @@ func (r *fakeConvRepo) List(context.Context, int) ([]content.Conversation, error
 
 type fakeHistRepo struct{ db *fakeContentDB }
 
-func (r *fakeHistRepo) Add(_ context.Context, rec content.CommandRecord) error {
+func (r *fakeHistRepo) Add(_ context.Context, rec content.CommandRecord) (int64, error) {
 	if r.db.addErr != nil {
-		return r.db.addErr
+		return 0, r.db.addErr
 	}
 	r.db.addedHistory = append(r.db.addedHistory, rec)
+	return 0, nil
+}
+
+func (r *fakeHistRepo) RewriteRedaction(_ context.Context, _ int64, _ content.Redaction, _ string) error {
 	return nil
 }
 
@@ -1028,7 +1032,7 @@ func TestBackup_SnapshotWithRealStore(t *testing.T) {
 	}
 	defer func() { _ = store.Close() }()
 	for range 5 {
-		if addErr := store.CommandHistory().Add(ctx, content.CommandRecord{
+		if _, addErr := store.CommandHistory().Add(ctx, content.CommandRecord{
 			Command: "exported-cmd", Cwd: "/repo", Host: "", Status: content.StatusSuccess,
 		}); addErr != nil {
 			t.Fatalf("Add: %v", addErr)

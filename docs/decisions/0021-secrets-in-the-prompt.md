@@ -1,13 +1,13 @@
 # ADR-0021 — Secrets in the prompt: mask what we keep, resolve what we can't
 
-- **Status:** Proposed
-- **Date:** 2026-08-02
+- **Status:** Accepted
+- **Date:** 2026-08-02 (amended 2026-08-03)
 - **Related:** [ADR-0008](0008-*.md) (output is never retained), ADR-0018
   (the encrypted store the masked rows land in), ADR-0011 §2 (a secret never
   comes back out of the backend), [ADR-0016](0016-a-secret-owns-its-name.md)
   (the vault owns the name `{{secret:NAME}}` resolves by), AD-6 (the backend
   never sniffs the byte stream).
-- **Design:** this round's brief (secrets, round 1) and
+- **Design:** this round's brief (secrets, rounds 1 and 2) and
   `.internal/plans/2026-07-30-vault-v1.md` (the reference grammar is private
   to `internal/vault`).
 
@@ -25,17 +25,30 @@ durable files from direct reading, not the running process from the machine.
 
 ## Decision
 
-**One durable text, always masked.** The user sees the real value on screen;
-the durable history gets the masked one. There is ONE durable text and it is
-masked — no redaction map, no two artifacts, no per-consumer filter, because
-fewer places to forget is the whole design. The live viewport is untouched:
-xterm renders what the program printed, and rewriting that stream would
-violate AD-6. Masking happens at the wire, in exactly one place
-(`internal/transport/ws_history_record.go`), the single writer of durable
-rows. The row and both contracts carry the count and the kinds of what was
-masked, so a block can say "3 secrets masked: openai, jwt" — an honest
-redaction that says nothing is indistinguishable from there having been
-nothing to redact.
+**One durable text, always masked, shaped for a later save.** The user sees
+the real value on screen; the durable history gets the masked one, and the
+row also keeps a STRUCTURED redaction segment per finding — the kind, the
+span of the replacement in the masked command, and the head/tail the mask
+shows (`prefix`/`suffix`, exactly the text already visible in the mask). A
+segment carries no secret material, and it is what makes the next round's
+receipt possible: the renderer draws an unresolved chip at the segment and
+refuses to execute the command, and a save rewrites exactly that span to
+`{{secret:NAME}}`. Rows carry stable ids so the save can address one entry.
+The live viewport is untouched: xterm renders what the program printed, and
+rewriting that stream would violate AD-6. Masking happens at the wire, in
+exactly one place (`internal/transport/ws_history_record.go`), the single
+writer of durable rows. The row and both contracts carry the count, the
+kinds and the segments of what was masked, so a block can say "3 secrets
+masked: openai, jwt" — an honest redaction that says nothing is
+indistinguishable from there having been nothing to redact.
+
+This amends the round-1 text "no redaction map, no two artifacts": the
+segments are not a second copy of the text (the masked text is still the
+only durable text) but the shape of the masks already in it — kind, span,
+mask head/tail — so a later remediation is not guesswork. The store rebuilds
+on a schema change and logs how many rows it discarded; there is no
+migration, because spans flattened before this change cannot be told from
+text the user typed.
 
 **A line may reference a vault secret by name; the backend resolves it at
 submit.** `{{secret:NAME}}` where NAME is the vault inventory name
@@ -49,38 +62,61 @@ dangerous. A sealed vault is a specific, actionable error (`-32001`,
 retry" from "no such secret"; unresolved names are reported, never silently
 left as literal text.
 
+**A submitted credential awaiting a save decision is held by the backend,
+never the renderer.** The offer moves to AFTER submit: the backend receives
+the command at the history-write seam, holds the plaintext as a single-use
+pending capture in process memory, and hands the renderer an opaque capture
+id plus non-secret display metadata. The full contract (expiry, destruction
+triggers, idempotent single-use save, fingerprint suppression) is pasted
+into `internal/credential/capture.go`. Saving is two stores in one order —
+create the vault secret (name collisions resolved atomically in the vault,
+the real name comes back), then rewrite the linked history rows by stable
+id — and a partial failure keeps the secret, leaves history safely masked,
+and lets the rewrite be retried without minting `openrouter.ai-2`.
+Detection is one implementation (`internal/secrets`) exposed over the wire
+as `secrets.detect`; the TS port is deleted, and the renderer's prompt hint
+calls the wire after its existing 500 ms debounce — one call per pause.
+
 ### What we can promise
 
 - The secret does not reach our ledger: the durable command text is the
-  masked one, and the mask facts are counts and kinds, never values. This
-  round ships that half, end to end.
-- The secret does not reach the shell's own history file. The line that
-  reaches the shell is written by us, not retyped by the user, and the
-  write seam that submits a resolved line to the PTY is the one place the
-  shell-history boundary can be enforced (a leading space under
-  `HISTCONTROL=ignorespace`, or bracketing the write with history
-  suppression). That seam is the renderer's next round — nothing calls
-  `vault.resolveLine` from the frontend yet — and this ADR pins the
-  requirement it must satisfy: a resolved line submitted by the app must
-  not be recorded by the interactive shell's own history the way a typed
-  command is. What the shell does with a stream we deliberately hand it is
-  ours to control at the write; what it does with a stream the user types
-  is the user's own history policy, which this design never touches.
+  masked one, and the mask facts are kinds, spans and mask heads/tails,
+  never values. The store's own pass decides the row; a finding shown to
+  the renderer is advice, never trusted. This round ships that, end to end,
+  and the save path rewrites the row to a reference only after the vault
+  holds the value.
 - The secret never enters a model context: nothing in this seam feeds a
   model, and ADR-0011 §2 already refuses to hand stored values back out of
   the backend except through the value's single crossing, which is the PTY
   write.
 
-### What we cannot promise — and why it is not a defect in the design
+### What we cannot promise — measured, and corrected
 
-**Substitution puts the value in the process's argv, and argv is readable by
-`ps` for every process of that user, and is recorded by audit and by sudo.**
-No architecture of ours removes that — it is how exec works. A reference
-resolved into `argv[0]`'s argument vector is indistinguishable from a pasted
-key from the moment the process starts. What the design does is bound the
-value's lifetime to that one submission: it is not in the ledger, not in the
-shell's history, not in any log. The exposure window is the command's own
-execution, which is the window any pasted key already has.
+**The shell's own history file DOES record the resolved line — unless the
+write is suppressed.** Measured 2026-08-03 on bash 5.3, zsh 5.9, fish 4.8
+(interactive shells, disposable `$HOME`, a real reference-carrying command
+written to the PTY the way the app writes it): all three record the line
+with the resolved value in their history file after a clean exit, all three
+render the echoed line in the scrollback, and all three expose the value in
+`argv` to `ps` during the run. The round-1 text claimed "the secret does
+not reach the shell's own history file"; that is false for a plain write.
+The suppression seam works where the round-1 text guessed it would — the
+same measurement shows a leading space suppresses the line under
+`HISTCONTROL=ignorespace` (bash), `HIST_IGNORE_SPACE` (zsh) and fish's
+default leading-space rule — so the write seam MUST emit the suppressed
+form, and even then the shell must honor it. The product's language is
+therefore "save for reuse", never "protect": the user's shell history is
+the user's own history policy, and the app's promise is that it never
+writes the plaintext anywhere it controls.
+
+**Substitution puts the value in the process's argv, and argv is readable
+by `ps`** for every process of that user, and is recorded by audit and by
+sudo. No architecture of ours removes that — it is how exec works,
+confirmed by the same measurement. What the design does is bound the
+value's lifetime to that one submission: it is not in the ledger, not in
+any log, and the app never writes it to the shell's history. The exposure
+window is the command's own execution, which is the window any pasted key
+already has.
 
 ## Consequences
 
@@ -97,7 +133,20 @@ the row. That is the feature, not a gap, and the search panel's coverage
 line will have to say it: history is searchable, and key material is not in
 it.
 
-**An existing dev database that no longer opens is acceptable.** The schema
-gains columns on a greenfield table; there are no migrations and we wrote
-none. A dev database created before this change fails to open cleanly rather
-than silently losing the new columns' meaning.
+**A schema change rebuilds the store and says what it discarded.** The
+schema gains the `redactions` column on a greenfield table; there are no
+migrations and we wrote none. A database written by the previous schema is
+rebuilt at open, and the log states how many rows were discarded — "your
+history was discarded" is a fact the user is entitled to rather than
+something to infer from an empty panel. This supersedes the round-1 text
+that a mismatched database merely "fails to open cleanly".
+
+**Suppression by value equality is session-scoped, deliberately.** The
+fingerprint is HMAC(app-owned key, canonical secret bytes) with a key that
+dies with the process: pending, saved and dismissed lookups work for the
+application session, and a restart re-offers a value the user never decided
+on — the same boundary the round's brief draws for dismissal ("for the rest
+of the application session, not forever"). Making saved-status durable
+would require a durable fingerprint key, and a key stored beside the
+fingerprints would be an offline password oracle; this round does not build
+a second key lifecycle for it.

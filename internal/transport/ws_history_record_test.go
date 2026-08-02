@@ -41,12 +41,16 @@ func (f *fakeRecordHistoryDB) Backup(_ context.Context, _ string) error {
 }
 func (f *fakeRecordHistoryDB) Close() error { return nil }
 
-func (f *fakeRecordHistoryDB) Add(_ context.Context, record content.CommandRecord) error {
+func (f *fakeRecordHistoryDB) Add(_ context.Context, record content.CommandRecord) (int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	record.ID = f.nextID
 	f.nextID++
 	f.records = append(f.records, record)
+	return record.ID, nil
+}
+
+func (f *fakeRecordHistoryDB) RewriteRedaction(_ context.Context, _ int64, _ content.Redaction, _ string) error {
 	return nil
 }
 
@@ -310,7 +314,7 @@ func TestHistoryRecord_AcceptsEpochTimestamps(t *testing.T) {
 	}
 
 	// Null timestamps are a valid record (nothing observed yet).
-	if err := db.Add(context.Background(), content.CommandRecord{
+	if _, err := db.Add(context.Background(), content.CommandRecord{
 		Command: "null-times", Cwd: "/", Host: "", Status: content.StatusRunning,
 	}); err != nil {
 		t.Fatalf("null-timestamp record rejected by the store: %v", err)
@@ -415,8 +419,31 @@ func TestHistoryRecord_StoresReferenceUnchanged(t *testing.T) {
 func TestHistoryRecord_DTOConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "history.record.schema.json")
 	cases := map[string]historyRecordResponse{
-		"nothing masked": {MaskedCount: 0, MaskedKinds: []string{}},
-		"two kinds":      {MaskedCount: 2, MaskedKinds: []string{"openai", "jwt"}},
+		"nothing masked": {
+			MaskedCount: 0,
+			MaskedKinds: []string{},
+			Redactions:  []redactionWire{},
+			Captures:    []captureWire{},
+		},
+		"two kinds": {
+			MaskedCount: 2,
+			MaskedKinds: []string{"openai", "jwt"},
+			Redactions: []redactionWire{
+				{Kind: "openai", Start: 10, End: 21, Prefix: "sk-p", Suffix: "7890"},
+			},
+			Captures: []captureWire{},
+		},
+		"with an offer": {
+			MaskedCount: 1,
+			MaskedKinds: []string{"openai"},
+			EntryID:     "7",
+			Redactions:  []redactionWire{{Kind: "openai", Start: 10, End: 21, Prefix: "sk-p", Suffix: "7890"}},
+			Captures: []captureWire{{
+				ID: "cap_abc", EntryID: "7",
+				Redaction:     redactionWire{Kind: "openai", Start: 10, End: 21, Prefix: "sk-p", Suffix: "7890"},
+				SuggestedName: "openrouter.ai",
+			}},
+		},
 	}
 	for name, resp := range cases {
 		t.Run(name, func(t *testing.T) {

@@ -100,7 +100,7 @@ func TestPlaintextCanary(t *testing.T) {
 		t.Fatalf("Open: %v", openErr)
 	}
 	hist := db.CommandHistory()
-	if addErr := hist.Add(ctx, CommandRecord{Command: canaryMarker, Cwd: "/srv", Host: "", Status: StatusSuccess}); addErr != nil {
+	if _, addErr := hist.Add(ctx, CommandRecord{Command: canaryMarker, Cwd: "/srv", Host: "", Status: StatusSuccess}); addErr != nil {
 		t.Fatalf("Add: %v", addErr)
 	}
 
@@ -229,7 +229,7 @@ func TestBackupProducesConsistentEncryptedSnapshot(t *testing.T) {
 	hist := db.CommandHistory()
 	const rows = 50
 	for i := range rows {
-		if err := hist.Add(ctx, CommandRecord{
+		if _, err := hist.Add(ctx, CommandRecord{
 			Command: fmt.Sprintf("cmd-%d", i), Cwd: "/repo", Host: "", Status: StatusSuccess,
 		}); err != nil {
 			t.Fatalf("Add: %v", err)
@@ -294,7 +294,7 @@ func childWriter(t *testing.T) {
 	ctx := context.Background()
 	hist := db.CommandHistory()
 	for i := 0; ; i++ {
-		if err := hist.Add(ctx, CommandRecord{
+		if _, err := hist.Add(ctx, CommandRecord{
 			Command: fmt.Sprintf("child-row-%d", i), Cwd: "/proc", Host: "", Status: StatusSuccess,
 		}); err != nil {
 			os.Exit(4)
@@ -378,7 +378,7 @@ func TestTwoProcessesShareDatabase(t *testing.T) {
 	}
 
 	// The same database keeps working across processes: a fresh store writes.
-	if err := db.CommandHistory().Add(ctx, CommandRecord{Command: "after-kills", Cwd: "/", Host: "", Status: StatusSuccess}); err != nil {
+	if _, err := db.CommandHistory().Add(ctx, CommandRecord{Command: "after-kills", Cwd: "/", Host: "", Status: StatusSuccess}); err != nil {
 		t.Fatalf("Add after kills: %v", err)
 	}
 }
@@ -402,7 +402,7 @@ func TestRetentionSweepFailureIsBestEffort(t *testing.T) {
 	sc.sweep = func(context.Context, int64) error { return errors.New("sweep failed") }
 
 	now := time.Now().UnixMilli()
-	if addErr := db.CommandHistory().Add(context.Background(), CommandRecord{
+	if _, addErr := db.CommandHistory().Add(context.Background(), CommandRecord{
 		Command: "sweep-failure-row", Cwd: "/", Host: "", Status: StatusSuccess, EndedAt: &now,
 	}); addErr != nil {
 		t.Fatalf("Add with a failing sweep returned an error: %v", addErr)

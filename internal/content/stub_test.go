@@ -79,7 +79,7 @@ func TestConversationListReturnsSentinel(t *testing.T) {
 
 func TestCommandHistoryAddReturnsSentinel(t *testing.T) {
 	chr := content.NewStub(&testLogger{}).CommandHistory()
-	err := chr.Add(context.Background(), content.CommandRecord{Command: "ls"})
+	_, err := chr.Add(context.Background(), content.CommandRecord{Command: "ls"})
 	if !errors.Is(err, content.ErrNotImplemented) {
 		t.Errorf("expected ErrNotImplemented, got %v", err)
 	}

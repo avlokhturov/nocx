@@ -31,7 +31,12 @@ type VaultLifecycle interface {
 	// name and kind (ADR-0016). The name joins Create's journal sequence; it
 	// is never written by a second, independent path.
 	CreateNamed(ctx context.Context, value credential.Secret, meta vault.SecretMeta) (credential.SecretID, error)
-	// RenameSecret sets a secret's display name, addressed by its
+	// CreateNamedResolved is CreateNamed with atomic name-collision
+	// resolution: when the requested name is taken, the next free suffixed
+	// name is chosen under the vault lock and the name ACTUALLY used comes
+	// back — the renderer must never predict that a suffixed name is free;
+	// two tabs can save at once.
+	CreateNamedResolved(ctx context.Context, value credential.Secret, meta vault.SecretMeta) (credential.SecretID, string, error)
 	// renderer-addressable row handle — never by a SecretID (nocx-jb20.1).
 	RenameSecret(ctx context.Context, row string, name string, inputs []vault.CredentialInventory) error
 	// ResolveRow maps a renderer-addressable row handle to the SecretID
@@ -306,6 +311,13 @@ func (s *WSServer) handleVaultUnseal(wconn *wsConn, req jsonrpcRequest) {
 
 func (s *WSServer) handleVaultSeal(wconn *wsConn, req jsonrpcRequest) {
 	s.vaultLifecycle.Seal()
+	// Vault seal destroys every pending capture: the offer's plaintext
+	// must not outlive the lock it was offered under (the capture
+	// contract's destruction list names it). A save in flight is left to
+	// settle — the registry skips non-pending captures.
+	if s.captures != nil {
+		s.captures.DestroyAll()
+	}
 	s.broadcastVaultChanged()
 	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(struct{}{})))
 }

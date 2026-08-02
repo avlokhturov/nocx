@@ -74,6 +74,28 @@ function setup(
         })),
       }),
     ),
+    // The wire detector is the ONE implementation; this fake mirrors the
+    // two shapes these tests exercise (a vendor-prefix token, an env
+    // assignment) and the reference-span exclusion, with the same UTF-16
+    // offsets the real detector would report.
+    detect: vi.fn((line: string, revision: number) => {
+      const findings: Array<{ kind: string; start: number; end: number }> = []
+      if (!line.includes('{{secret:')) {
+        const token = line.match(/sk-proj-[A-Za-z0-9]+/)
+        if (token && token.index !== undefined) {
+          findings.push({ kind: 'openai', start: token.index, end: token.index + token[0].length })
+        }
+        const env = line.match(/TOKEN=[A-Za-z0-9]+/)
+        if (env && env.index !== undefined) {
+          findings.push({
+            kind: 'env-assignment',
+            start: env.index,
+            end: env.index + env[0].length,
+          })
+        }
+      }
+      return Promise.resolve({ revision, findings })
+    }),
     createSecret: vi.fn(() => Promise.resolve({})),
     setup: vi.fn(() => Promise.resolve({})),
   }

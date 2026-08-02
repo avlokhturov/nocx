@@ -33,6 +33,11 @@ var ErrNotImplemented = errors.New("content stub: not implemented")
 // ErrClosed is returned by operations on a ContentDB that has been Closed.
 var ErrClosed = errors.New("content: store is closed")
 
+// ErrNotFound is returned when an operation addresses a row id no row
+// carries — most often a history entry the retention sweep removed between
+// the record and a later rewrite.
+var ErrNotFound = errors.New("content: no such history row")
+
 // ContentDB is the capability for unbounded, query-oriented private content
 // (ADR-0011 §5). It owns a single SQLite database and exposes typed repository
 // interfaces for each entity class.
@@ -83,6 +88,29 @@ type CommandRecord struct {
 	// internal/secrets, deduplicated in first-occurrence order.
 	MaskedCount int
 	MaskedKinds []string
+	// Redactions are the structured segments the mask left on Command: one
+	// per finding, kind and byte span into Command plus the head/tail the
+	// mask shows (no secret material — prefix/suffix are exactly the text
+	// already visible in the masked command). A row whose redaction was
+	// saved to a vault reference has the segment replaced by the reference
+	// and dropped from this list; a row with no secrets has nil. The
+	// renderer draws an unresolved chip at each segment and refuses to run
+	// the command as written.
+	Redactions []Redaction
+}
+
+// Redaction is one structured redaction segment on a history row. Offsets
+// are BYTE offsets into the row's stored (masked) Command — the store
+// slices bytes; the transport converts them to the UTF-16 code-unit
+// positions the renderer decorates with, once, at the wire. The segment
+// never carries secret material: Prefix/Suffix are the head-4/tail-4 the
+// mask shows, exactly what is already visible in the masked command.
+type Redaction struct {
+	Kind   string `json:"kind"`
+	Start  int    `json:"start"`
+	End    int    `json:"end"`
+	Prefix string `json:"prefix"`
+	Suffix string `json:"suffix"`
 }
 
 // Scope is the recall-ladder rung a history query is answered from (design
@@ -142,10 +170,24 @@ type ConversationRepository interface {
 
 // CommandHistoryRepository is the typed repository for command history.
 type CommandHistoryRepository interface {
-	Add(ctx context.Context, record CommandRecord) error
+	// Add stores one completed command's facts and returns the backend
+	// assigned row id — the row's stable identity, which a later
+	// RewriteRedaction addresses. When the live History policy is off, Add
+	// succeeds and returns (0, nil): a command runs and no row appears,
+	// never an error the caller has to swallow.
+	Add(ctx context.Context, record CommandRecord) (int64, error)
 	List(ctx context.Context, limit int) ([]CommandRecord, error)
 	GetByID(ctx context.Context, id int64) (*CommandRecord, error)
 	FindByPrefix(ctx context.Context, prefix string, limit int) ([]CommandRecord, error)
+	// RewriteRedaction replaces the redaction segment at span in the row's
+	// stored command with reference (a vault reference), removing the
+	// segment from the row's redactions. The row is addressed by its stable
+	// id. Idempotent: a segment already holding the same reference is
+	// replaced by the same reference again. Returns ErrNotFound when no row
+	// carries id, and an error when the span no longer fits the stored
+	// command (the row changed shape underneath — refuse rather than
+	// corrupt).
+	RewriteRedaction(ctx context.Context, id int64, span Redaction, reference string) error
 	// Query returns one page of command history for the given recall-ladder
 	// rung, newest first. cwd is required for ScopeDirectory, host for
 	// ScopeHost (both ignored for ScopeEverywhere). before, when non-nil, is

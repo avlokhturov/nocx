@@ -68,7 +68,7 @@ func markerRecord(marker string) content.CommandRecord {
 func TestOpenCreatesEncryptedStoreWithAtRestPosture(t *testing.T) {
 	db, dir := newTestStore(t)
 	ctx := context.Background()
-	if addErr := db.CommandHistory().Add(ctx, markerRecord("canary-51e21c88-command")); addErr != nil {
+	if _, addErr := db.CommandHistory().Add(ctx, markerRecord("canary-51e21c88-command")); addErr != nil {
 		t.Fatalf("Add: %v", addErr)
 	}
 
@@ -146,7 +146,7 @@ func TestOpenCreatesEncryptedStoreWithAtRestPosture(t *testing.T) {
 func TestWrongKeyFailsCleanly(t *testing.T) {
 	db, dir := newTestStore(t)
 	ctx := context.Background()
-	if err := db.CommandHistory().Add(ctx, markerRecord("wrongkey-marker")); err != nil {
+	if _, err := db.CommandHistory().Add(ctx, markerRecord("wrongkey-marker")); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 	if err := db.Close(); err != nil {
@@ -237,7 +237,7 @@ func TestAddListGetByIDFindByPrefix(t *testing.T) {
 		{Command: "ssh prod deploy", Cwd: "/srv/api", Host: "prod.example.com", Status: content.StatusFailure},
 	}
 	for _, r := range recs {
-		if err := hist.Add(ctx, r); err != nil {
+		if _, err := hist.Add(ctx, r); err != nil {
 			t.Fatalf("Add %q: %v", r.Command, err)
 		}
 	}
@@ -298,7 +298,7 @@ func TestQueryScopesPagingAndHasRows(t *testing.T) {
 
 	add := func(cmd, cwd, host string) {
 		t.Helper()
-		if addErr := hist.Add(ctx, content.CommandRecord{Command: cmd, Cwd: cwd, Host: host, Status: content.StatusSuccess}); addErr != nil {
+		if _, addErr := hist.Add(ctx, content.CommandRecord{Command: cmd, Cwd: cwd, Host: host, Status: content.StatusSuccess}); addErr != nil {
 			t.Fatalf("Add %q: %v", cmd, addErr)
 		}
 	}
@@ -388,7 +388,7 @@ func TestQueryTextFilterWithinRung(t *testing.T) {
 
 	add := func(cmd, cwd, host string) {
 		t.Helper()
-		if addErr := hist.Add(ctx, content.CommandRecord{Command: cmd, Cwd: cwd, Host: host, Status: content.StatusSuccess}); addErr != nil {
+		if _, addErr := hist.Add(ctx, content.CommandRecord{Command: cmd, Cwd: cwd, Host: host, Status: content.StatusSuccess}); addErr != nil {
 			t.Fatalf("Add %q: %v", cmd, addErr)
 		}
 	}
@@ -475,14 +475,14 @@ func TestQueryCoverageIsStoreWideHorizon(t *testing.T) {
 	newest := int64(3_000)
 	add := func(cmd, cwd, host string, endedAt int64) {
 		t.Helper()
-		if addErr := hist.Add(ctx, content.CommandRecord{Command: cmd, Cwd: cwd, Host: host, Status: content.StatusSuccess, EndedAt: &endedAt}); addErr != nil {
+		if _, addErr := hist.Add(ctx, content.CommandRecord{Command: cmd, Cwd: cwd, Host: host, Status: content.StatusSuccess, EndedAt: &endedAt}); addErr != nil {
 			t.Fatalf("Add %q: %v", cmd, addErr)
 		}
 	}
 	add("oldest", "/old", "", old)
 	// A running entry (ended_at NULL) must not corrupt the MIN — NULLs are
 	// ignored, so the horizon stays the oldest completed row.
-	if addErr := hist.Add(ctx, content.CommandRecord{Command: "running", Cwd: "/old", Host: "", Status: content.StatusRunning}); addErr != nil {
+	if _, addErr := hist.Add(ctx, content.CommandRecord{Command: "running", Cwd: "/old", Host: "", Status: content.StatusRunning}); addErr != nil {
 		t.Fatalf("Add running: %v", addErr)
 	}
 	add("newest", "/new", "", newest)
@@ -536,7 +536,7 @@ func TestConcurrentReadersWithOneWriter(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := range total {
-			if err := hist.Add(ctx, content.CommandRecord{
+			if _, err := hist.Add(ctx, content.CommandRecord{
 				Command: fmt.Sprintf("cmd-%d", i), Cwd: "/repo", Host: "", Status: content.StatusSuccess,
 			}); err != nil {
 				errCh <- fmt.Errorf("writer: %w", err)
@@ -599,14 +599,14 @@ func TestDiskFullProducesActionableError(t *testing.T) {
 	t.Cleanup(func() { _ = syscall.Setrlimit(syscall.RLIMIT_FSIZE, &original) })
 
 	big := strings.Repeat("x", 2<<20) // 2 MiB row, far over the cap
-	if err := hist.Add(ctx, content.CommandRecord{Command: big, Cwd: "/", Host: "", Status: content.StatusSuccess}); err == nil {
+	if _, err := hist.Add(ctx, content.CommandRecord{Command: big, Cwd: "/", Host: "", Status: content.StatusSuccess}); err == nil {
 		t.Fatal("oversized write succeeded, want a disk-full-class error")
 	}
 
 	// The store is intact: after the limit is lifted, small writes work and
 	// the failed write left nothing behind.
 	_ = syscall.Setrlimit(syscall.RLIMIT_FSIZE, &original)
-	if err := hist.Add(ctx, markerRecord("after-full")); err != nil {
+	if _, err := hist.Add(ctx, markerRecord("after-full")); err != nil {
 		t.Fatalf("Add after the condition cleared: %v", err)
 	}
 	recs, err := hist.List(ctx, 10)
@@ -672,7 +672,7 @@ func TestAddAfterCloseReturnsErrClosed(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	err := db.CommandHistory().Add(ctx, markerRecord("late"))
+	_, err := db.CommandHistory().Add(ctx, markerRecord("late"))
 	if !errors.Is(err, content.ErrClosed) {
 		t.Fatalf("Add after Close = %v, want ErrClosed", err)
 	}
@@ -686,7 +686,7 @@ func TestAddAfterCloseReturnsErrClosed(t *testing.T) {
 func TestAutoVacuumDecidedAtCreation(t *testing.T) {
 	db, dir := newTestStore(t)
 	ctx := context.Background()
-	if err := db.CommandHistory().Add(ctx, markerRecord("av")); err != nil {
+	if _, err := db.CommandHistory().Add(ctx, markerRecord("av")); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 	if err := db.Close(); err != nil {
@@ -757,7 +757,7 @@ func TestAddHonorsDisabledHistory(t *testing.T) {
 	hist := db.CommandHistory()
 
 	// A command runs while history is off: no row appears, no error.
-	if addErr := hist.Add(context.Background(), markerRecord("off-1")); addErr != nil {
+	if _, addErr := hist.Add(context.Background(), markerRecord("off-1")); addErr != nil {
 		t.Fatalf("Add while disabled returned an error: %v", addErr)
 	}
 	recs, err := hist.List(context.Background(), 10)
@@ -770,7 +770,7 @@ func TestAddHonorsDisabledHistory(t *testing.T) {
 
 	// Live toggle: enabled again, the next command is recorded.
 	policy.SetEnabled(true)
-	if addErr := hist.Add(context.Background(), markerRecord("on-1")); addErr != nil {
+	if _, addErr := hist.Add(context.Background(), markerRecord("on-1")); addErr != nil {
 		t.Fatalf("Add: %v", addErr)
 	}
 	recs, err = hist.List(context.Background(), 10)
@@ -804,7 +804,7 @@ func TestRetentionSweepRemovesOldCommands(t *testing.T) {
 
 	old := time.Now().Add(-48 * time.Hour).UnixMilli()
 	oldRec := content.CommandRecord{Command: "old-command", Cwd: "/old", Host: "", Status: content.StatusSuccess, EndedAt: &old}
-	if addErr := hist.Add(ctx, oldRec); addErr != nil {
+	if _, addErr := hist.Add(ctx, oldRec); addErr != nil {
 		t.Fatalf("Add old: %v", addErr)
 	}
 
@@ -819,7 +819,7 @@ func TestRetentionSweepRemovesOldCommands(t *testing.T) {
 	policy.SetRetentionDays(1)
 	now := time.Now().UnixMilli()
 	fresh := content.CommandRecord{Command: "fresh-command", Cwd: "/new", Host: "", Status: content.StatusSuccess, EndedAt: &now}
-	if addErr := hist.Add(ctx, fresh); addErr != nil {
+	if _, addErr := hist.Add(ctx, fresh); addErr != nil {
 		t.Fatalf("Add fresh: %v", addErr)
 	}
 
@@ -861,7 +861,7 @@ func TestRetentionSweepKeepsFreshRowAt30Days(t *testing.T) {
 
 	now := time.Now().UnixMilli()
 	rec := content.CommandRecord{Command: "recorded-now", Cwd: "/now", Host: "", Status: content.StatusSuccess, EndedAt: &now}
-	if addErr := hist.Add(ctx, rec); addErr != nil {
+	if _, addErr := hist.Add(ctx, rec); addErr != nil {
 		t.Fatalf("Add: %v", addErr)
 	}
 
@@ -886,12 +886,12 @@ func TestMaskFactsRoundTrip(t *testing.T) {
 	withFacts := markerRecord("curl -H \"Authorization: Bearer sk-p...7890\" https://api")
 	withFacts.MaskedCount = 1
 	withFacts.MaskedKinds = []string{"openai"}
-	if addErr := hist.Add(ctx, withFacts); addErr != nil {
+	if _, addErr := hist.Add(ctx, withFacts); addErr != nil {
 		t.Fatalf("Add: %v", addErr)
 	}
 
 	plain := markerRecord("echo hello")
-	if addErr := hist.Add(ctx, plain); addErr != nil {
+	if _, addErr := hist.Add(ctx, plain); addErr != nil {
 		t.Fatalf("Add plain: %v", addErr)
 	}
 

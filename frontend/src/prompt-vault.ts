@@ -7,10 +7,14 @@
 //      is PASSIVE: typing continues into the line and the controller pushes
 //      the trigger word's continuation into the picker's filter on every
 //      document change (space and no-match close it — see secret-picker.ts).
-//   2. The offer-to-save: detectSecrets (the TS port of internal/secrets)
-//      over the line while it is still ours; a detected key is offered a
-//      store into the vault under a suggested name, and on accept the
-//      literal is replaced by its reference, which renders as the chip.
+//   2. The offer-to-save: secrets.detect over the wire (the ONE detector —
+//      the TS port this round deletes) after the settle debounce, so
+//      detection is one call per pause, never per keystroke. A detected
+//      key is offered a store into the vault under a suggested name, and
+//      on accept the literal is replaced by its reference, which renders
+//      as the chip. The backend holds the credential after submit (the
+//      capture flow this round ships); this pre-submit offer is the
+//      next round's to retire in favour of the after-submit receipt.
 //      Non-modal: the row is ignorable and typing continues (the owner's
 //      decision). A decline marks the value declined for the session — "the
 //      masked text is served everywhere else and that is the whole policy"
@@ -24,11 +28,18 @@
 //
 // The resolve-at-submit half lives in submit.ts (planSubmit) — the host's
 // submit action runs it through the editor's beforeSubmit seam.
-import { detectSecrets, maskSecret, type SecretKind, type SecretFinding } from './secret-detect'
 import { findReferences } from './secret-reference'
 import { SecretPicker } from './ui/secret-picker'
 import { SecretOffer } from './ui/secret-offer'
-import type { VaultClient } from './vault-client'
+import type { SecretsDetect, VaultClient } from './vault-client'
+
+/** The closed kind vocabulary, as the wire's generated union spells it.
+ *  A new kind is a deliberate addition to internal/secrets, and this type
+ *  follows the schema, never a hand-rolled list. */
+type SecretKind = SecretsDetect['findings'][number]['kind']
+
+/** One finding on the wire: kind plus UTF-16 offsets into the line. */
+type SecretFinding = SecretsDetect['findings'][number]
 
 /** The minimal editor surface the controller drives. CommandEditor
  *  satisfies it; tests substitute a fake. */
@@ -101,6 +112,17 @@ function sanitizeName(name: string): string {
   return name.replace(/[{}]/g, '').trim()
 }
 
+/** The offer's preview of what will be stored, masked — the shape the
+ *  backend's mask keeps (head-4/tail-4, floor 12). Display-only: the
+ *  authoritative mask is produced by internal/secrets at the store write,
+ *  and the after-submit receipt (next round) draws it from the history
+ *  segment's prefix/suffix instead. */
+function maskPreview(value: string): string {
+  const runes = Array.from(value)
+  if (runes.length < 12) return '***'
+  return runes.slice(0, 4).join('') + '...' + runes.slice(-4).join('')
+}
+
 /** The RPC reason codes the offer can meet, in the vault's own words
  *  (REASON_MESSAGES in vault.tsx is the full map; these two are the ones a
  *  store-from-the-prompt can hit). */
@@ -128,6 +150,11 @@ export class PromptVaultController {
    *  `${kind}:${value}`, never re-offered while they stay in the doc. */
   private readonly declined = new Set<string>()
   private settleTimer: ReturnType<typeof setTimeout> | null = null
+  /** The document revision the detection round-trip is checked against:
+   *  bumped on every change, sent with the request, and the echo is
+   *  compared on the way back — a stale response is dropped, never
+   *  adjusted onto a newer document. */
+  private revision = 0
 
   constructor(private readonly deps: PromptVaultDeps) {
     this.picker = new SecretPicker(
@@ -165,6 +192,7 @@ export class PromptVaultController {
   /** Every user-driven document change: drive the offer and the picker's
    *  passive filter. */
   onDocChanged(text: string): void {
+    this.revision++
     this.updateOffer(text)
     this.updatePickerFilter(text)
   }
@@ -253,26 +281,26 @@ export class PromptVaultController {
   // ── the offer-to-save ────────────────────────────────────────────────────
 
   private updateOffer(text: string): void {
-    const references = findReferences(text)
     // A reference's NAME is not a secret: findings inside a reference span
     // are never offered (the backend shares the blind spot — a name that
     // LOOKS like a vendor key is masked inside the reference; reported).
-    const findings = detectSecrets(text).filter(
-      (f) => !references.some((r) => f.start >= r.from && f.end <= r.to),
-    )
 
-    // The currently-offered finding: hide when its value left the doc.
+    // The currently-offered finding: hide when its value left the doc. The
+    // detection itself is async now (the wire is the ONE detector), so the
+    // still-there check is a local slice at the offered span.
     if (this.offerTarget !== null) {
-      const stillThere = findings.some(
-        (f) => text.slice(f.start, f.end) === this.offerTarget!.value,
-      )
+      const stillThere =
+        text.slice(this.offerTarget.finding.start, this.offerTarget.finding.end) ===
+        this.offerTarget.value
       if (!stillThere) this.dismissOffer()
     }
 
     if (this.offerTarget !== null) return
 
     // The timer is a DEBOUNCE — it waits for the typing to stop — and it must
-    // therefore restart on every change and re-detect when it fires.
+    // therefore restart on every change and re-detect when it fires. The wire
+    // call happens once per pause, never per keystroke, which is what makes
+    // the RPC cheap enough to be the single detector.
     //
     // It used to be armed once, by the first change that produced a finding,
     // and then to look for that same finding by re-slicing the CURRENT
@@ -281,34 +309,46 @@ export class PromptVaultController {
     // has grown from `sk-proj-abc` to the whole key, the stale slice matches
     // nothing, and the offer never appears at all. A key you TYPE is the case
     // that must work — the one you paste is already on the clipboard.
-    if (!findings.some((f) => !this.declined.has(`${f.kind}:${text.slice(f.start, f.end)}`))) {
-      return
-    }
     if (this.settleTimer !== null) clearTimeout(this.settleTimer)
     this.settleTimer = setTimeout(() => {
       this.settleTimer = null
-      // Re-detect: what the timer promised is "the user has stopped typing",
-      // never "this exact span is still there".
-      const doc = this.deps.editor.getDoc()
-      const refs = findReferences(doc)
-      const current = detectSecrets(doc).find(
-        (f) =>
-          !refs.some((r) => f.start >= r.from && f.end <= r.to) &&
-          !this.declined.has(`${f.kind}:${doc.slice(f.start, f.end)}`),
-      )
-      if (!current) return
-      const value = doc.slice(current.start, current.end)
-      this.offerTarget = { finding: current, value }
-      this.offer.show({
-        kindLabel: KIND_LABELS[current.kind],
-        suggestedName: suggestName(current.kind, value),
-        // What will actually be stored, masked. The detector could have taken
-        // the wrong boundaries — a trailing quote in, a last character out —
-        // and a wrong value is a secret that fails days later for no visible
-        // reason. head-4/tail-4 is exactly where a boundary error shows.
-        maskedValue: maskSecret(value),
-      })
+      void this.detectAndOffer()
     }, OFFER_SETTLE_MS)
+  }
+
+  /** One detection round over the current document. The revision captured
+   *  at call time travels with the request; a response computed for an
+   *  older document is dropped — never adjusted onto the newer one (the
+   *  contract's revision rule). A failed call shows nothing: a hint from a
+   *  broken pass is worse than no hint. */
+  private async detectAndOffer(): Promise<void> {
+    const rev = this.revision
+    const doc = this.deps.editor.getDoc()
+    let resp: SecretsDetect
+    try {
+      resp = await this.deps.vault.detect(doc, rev)
+    } catch {
+      return
+    }
+    if (resp.revision !== this.revision) return
+    const refs = findReferences(doc)
+    const current = resp.findings.find(
+      (f) =>
+        !refs.some((r) => f.start >= r.from && f.end <= r.to) &&
+        !this.declined.has(`${f.kind}:${doc.slice(f.start, f.end)}`),
+    )
+    if (!current) return
+    const value = doc.slice(current.start, current.end)
+    this.offerTarget = { finding: current, value }
+    this.offer.show({
+      kindLabel: KIND_LABELS[current.kind],
+      suggestedName: suggestName(current.kind, value),
+      // What will actually be stored, masked. The detector could have taken
+      // the wrong boundaries — a trailing quote in, a last character out —
+      // and a wrong value is a secret that fails days later for no visible
+      // reason. head-4/tail-4 is exactly where a boundary error shows.
+      maskedValue: maskPreview(value),
+    })
   }
 
   private dismissOffer(): void {

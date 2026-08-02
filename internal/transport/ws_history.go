@@ -10,6 +10,7 @@ import (
 	"strconv"
 
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/secrets"
 )
 
 // historyQueryParams is the request the recall overlay sends. There is
@@ -53,6 +54,11 @@ type historyQueryEntry struct {
 	// (contracts/history.query.schema.json).
 	MaskedCount int      `json:"maskedCount"`
 	MaskedKinds []string `json:"maskedKinds"`
+	// Redactions are the row's structured segments, offsets in UTF-16 code
+	// units into Command (the store holds bytes; the wire converts once).
+	// A segment the user saved to a vault reference is gone from this list
+	// — the reference sits in Command instead. Never null: none is [].
+	Redactions []redactionWire `json:"redactions"`
 }
 
 // historyQueryResponse is the result of history.query. Entries is never nil:
@@ -116,6 +122,13 @@ func (s *WSServer) handleHistoryQuery(ctx context.Context, wconn *wsConn, req js
 		if kinds == nil {
 			kinds = []string{}
 		}
+		reds := make([]redactionWire, 0, len(r.Redactions))
+		for _, red := range r.Redactions {
+			start, end := secrets.ToUTF16Span(r.Command, red.Start, red.End)
+			reds = append(reds, redactionWire{
+				Kind: red.Kind, Start: start, End: end, Prefix: red.Prefix, Suffix: red.Suffix,
+			})
+		}
 		resp.Entries = append(resp.Entries, historyQueryEntry{
 			ID:          strconv.FormatInt(r.ID, 10),
 			Command:     r.Command,
@@ -127,6 +140,7 @@ func (s *WSServer) handleHistoryQuery(ctx context.Context, wconn *wsConn, req js
 			EndedAt:     r.EndedAt,
 			MaskedCount: r.MaskedCount,
 			MaskedKinds: kinds,
+			Redactions:  reds,
 		})
 	}
 	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(resp)))

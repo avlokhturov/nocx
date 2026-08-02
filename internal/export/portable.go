@@ -235,7 +235,10 @@ func RestorePrivateContent(db content.ContentDB, pc *PrivateContent) error {
 		}
 	}
 	for _, rec := range pc.CommandHistory {
-		if err := db.CommandHistory().Add(ctx, rec); err != nil {
+		// The restored id is the row's stable identity; the store
+		// re-assigns ids on insert, so the caller ignores what Add returns
+		// (the restored record's own ID was informational at export time).
+		if _, err := db.CommandHistory().Add(ctx, rec); err != nil {
 			return fmt.Errorf("restore command history: %w", err)
 		}
 	}

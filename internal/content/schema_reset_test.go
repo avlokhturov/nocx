@@ -104,7 +104,7 @@ func TestOpenRebuildsADatabaseWrittenByAnOlderSchema(t *testing.T) {
 
 	// The store WORKS — this is the assertion that used to fail, and it fails
 	// on a write as well as on a read, so both are exercised.
-	if err := db.CommandHistory().Add(context.Background(), CommandRecord{
+	if _, err := db.CommandHistory().Add(context.Background(), CommandRecord{
 		Command: "echo new", Cwd: "/srv", Host: "", Status: StatusSuccess,
 	}); err != nil {
 		t.Fatalf("Add after rebuild: %v", err)
@@ -136,7 +136,7 @@ func TestReopeningACurrentDatabaseKeepsItsRows(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "content.db")
 
 	first := openStore(t, path)
-	if err := first.CommandHistory().Add(context.Background(), CommandRecord{
+	if _, err := first.CommandHistory().Add(context.Background(), CommandRecord{
 		Command: "echo keep", Cwd: "/srv", Host: "", Status: StatusSuccess,
 	}); err != nil {
 		t.Fatalf("Add: %v", err)

@@ -10,7 +10,7 @@
  */
 
 /**
- * Result of the history.record JSON-RPC method (nocx-rtg0.13) — the write half of the history family. The ack: the request was accepted and handed to the store. It claims nothing more — whether a row appears is decided by the live History policy (history.enabled) and is answered by history.query, never by this ack. MaskedCount and MaskedKinds report what was redacted from the command text before it was handed to the store: the durable command is always the masked one, and the block can say "3 secrets masked: openai, jwt" from this ack alone.
+ * Result of the history.record JSON-RPC method (nocx-rtg0.13) — the write half of the history family, and the seam where a submitted credential becomes a pending capture. The ack: the request was accepted and handed to the store. It claims nothing more — whether a row appears is decided by the live History policy (history.enabled) and is answered by history.query, never by this ack. MaskedCount and MaskedKinds report what was redacted from the command text before it was handed to the store: the durable command is always the masked one, and the block can say "3 secrets masked: openai, jwt" from this ack alone. EntryID is the row's stable identity; Redactions are the structured segments the row keeps (kind, span, the head/tail the mask shows — never secret material); Captures is the offer list — one opaque capture id plus display metadata per detected credential, empty when there is nothing to offer.
  */
 export interface HistoryRecord {
   /**
@@ -21,4 +21,64 @@ export interface HistoryRecord {
    * The kinds that were masked, deduplicated in first-occurrence order, from the closed vocabulary of internal/secrets: openai, github-pat, slack, aws-access-key, gitlab, jwt, private-key, url-userinfo, db-connstring, auth-header, env-assignment, high-entropy. Never the secret's value — kind and count are the fact, the matched text is the thing being removed. Never null: no mask is [].
    */
   maskedKinds: string[]
+  /**
+   * The stable row id of the recorded entry, as history.query reports it — the address a later save rewrites by. Empty when the live History policy wrote no row (history.enabled off).
+   */
+  entryId: string
+  /**
+   * The row's structured redaction segments, in row order. The renderer draws an unresolved chip at each segment and refuses to run the command as written; a segment the user saved to a vault reference is absent here and the reference sits in the command instead. Offsets are UTF-16 code units into the recorded command. A segment never carries secret material — prefix/suffix are exactly the text already visible in the masked command. Never null: no redaction is [].
+   */
+  redactions: Redaction[]
+  /**
+   * The pending-capture offers, one per detected credential. Each carries an opaque, single-use capture id (the only way to save or dismiss the plaintext the backend holds), the entry it first attached to, this entry's redaction segment, and the backend-derived suggested vault name. Never null: nothing to offer is [].
+   */
+  captures: {
+    /**
+     * Opaque capture id. Holding it is the only way to save or dismiss the capture; it carries no secret material.
+     */
+    id: string
+    /**
+     * The history row the capture will rewrite on save. Empty when no row was written.
+     */
+    entryId: string
+    redaction: Redaction
+    /**
+     * The backend-derived vault name the offer suggests: the host of the command invocation containing the credential, else the environment variable name, else the kind. The renderer may edit it; the vault resolves collisions and the real name comes back on save.
+     */
+    suggestedName: string
+  }[]
+}
+export interface Redaction {
+  /**
+   * The closed vocabulary of internal/secrets.
+   */
+  kind:
+    | 'openai'
+    | 'github-pat'
+    | 'slack'
+    | 'aws-access-key'
+    | 'gitlab'
+    | 'jwt'
+    | 'private-key'
+    | 'url-userinfo'
+    | 'db-connstring'
+    | 'auth-header'
+    | 'env-assignment'
+    | 'high-entropy'
+  /**
+   * Inclusive UTF-16 code-unit offset into the recorded command.
+   */
+  start: number
+  /**
+   * Exclusive UTF-16 code-unit offset into the recorded command.
+   */
+  end: number
+  /**
+   * The head of the value the mask shows (the first 4 characters), or "" when the mask shows no material. Exactly the text already visible in the masked command.
+   */
+  prefix: string
+  /**
+   * The tail of the value the mask shows (the last 4 characters), or "" when the mask shows no material. Exactly the text already visible in the masked command.
+   */
+  suffix: string
 }

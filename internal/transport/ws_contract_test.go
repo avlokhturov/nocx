@@ -958,7 +958,7 @@ func TestHistoryQuery_DTOConformsToContract(t *testing.T) {
 		// and never as the epoch; a store with a horizon states it.
 		"running": {
 			Entries: []historyQueryEntry{
-				{ID: "9", Command: "make test", Cwd: "/repo", Host: "", Status: "running", MaskedCount: 0, MaskedKinds: []string{}},
+				{ID: "9", Command: "make test", Cwd: "/repo", Host: "", Status: "running", MaskedCount: 0, MaskedKinds: []string{}, Redactions: []redactionWire{}},
 			},
 			Scope:     "directory",
 			Exhausted: true,
@@ -967,7 +967,7 @@ func TestHistoryQuery_DTOConformsToContract(t *testing.T) {
 		},
 		"populated": {
 			Entries: []historyQueryEntry{
-				{ID: "42", Command: "ssh prod deploy", Cwd: "/srv/api", Host: "prod.example.com", Status: "failure", ExitCode: &exit, StartedAt: &started, EndedAt: &ended, MaskedCount: 2, MaskedKinds: []string{"openai", "jwt"}},
+				{ID: "42", Command: "ssh prod deploy", Cwd: "/srv/api", Host: "prod.example.com", Status: "failure", ExitCode: &exit, StartedAt: &started, EndedAt: &ended, MaskedCount: 2, MaskedKinds: []string{"openai", "jwt"}, Redactions: []redactionWire{{Kind: "openai", Start: 31, End: 42, Prefix: "sk-p", Suffix: "7890"}}},
 			},
 			Scope:     "host",
 			Exhausted: false,

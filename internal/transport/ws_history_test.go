@@ -33,8 +33,12 @@ func (f *fakeHistoryDB) Conversations() content.ConversationRepository    { retu
 func (f *fakeHistoryDB) Backup(_ context.Context, _ string) error         { return content.ErrNotImplemented }
 func (f *fakeHistoryDB) Close() error                                     { return nil }
 
-func (f *fakeHistoryDB) Add(_ context.Context, _ content.CommandRecord) error {
-	return content.ErrNotImplemented
+func (f *fakeHistoryDB) Add(_ context.Context, _ content.CommandRecord) (int64, error) {
+	return 0, content.ErrNotImplemented
+}
+
+func (f *fakeHistoryDB) RewriteRedaction(_ context.Context, _ int64, _ content.Redaction, _ string) error {
+	return nil
 }
 
 func (f *fakeHistoryDB) List(_ context.Context, _ int) ([]content.CommandRecord, error) {

@@ -96,11 +96,37 @@ type sqliteContent struct {
 	wg      sync.WaitGroup
 }
 
-// writeReq is one mutation on the serialized write path.
+// writeOp is one kind of mutation on the serialized write path.
+type writeOp int
+
+const (
+	opAdd writeOp = iota
+	opRewrite
+)
+
+// writeReq is one mutation on the serialized write path. The writer answers
+// on done with the outcome: the assigned row id (opAdd) and any error.
 type writeReq struct {
 	ctx    context.Context
-	record CommandRecord
-	err    chan error
+	op     writeOp
+	record CommandRecord  // opAdd
+	rew    rewriteRequest // opRewrite
+	done   chan writeOutcome
+}
+
+// rewriteRequest is the opRewrite payload: address the row by its stable
+// id, replace the redaction segment at span with reference, drop the
+// segment from the row's redactions.
+type rewriteRequest struct {
+	id        int64
+	span      Redaction
+	reference string
+}
+
+// writeOutcome is the writer's answer to one writeReq.
+type writeOutcome struct {
+	id  int64
+	err error
 }
 
 var _ ContentDB = (*sqliteContent)(nil)
@@ -231,7 +257,7 @@ func Open(ctx context.Context, cfg Config) (ContentDB, error) {
 // half-broken store is worse than no store, so the file is rebuilt instead —
 // and it says so, because "your history was discarded" is a fact the user is
 // entitled to rather than something to infer from an empty panel.
-const schemaVersion = 1
+const schemaVersion = 2
 
 // resetIfSchemaChanged rebuilds the file when it was written by a different
 // schema. Rows are lost by design: they belong to a shape this build cannot
@@ -289,7 +315,8 @@ CREATE TABLE IF NOT EXISTS command_history (
   ended_at     INTEGER,
   trusted      INTEGER NOT NULL DEFAULT 0,
   masked_count INTEGER NOT NULL DEFAULT 0,
-  masked_kinds TEXT    NOT NULL DEFAULT '[]'
+  masked_kinds TEXT    NOT NULL DEFAULT '[]',
+  redactions   TEXT    NOT NULL DEFAULT '[]'
 ) STRICT;
 CREATE INDEX IF NOT EXISTS command_history_by_scope ON command_history (cwd, host, id DESC);
 CREATE INDEX IF NOT EXISTS command_history_by_host  ON command_history (host, id DESC);
@@ -325,29 +352,43 @@ func (s *sqliteContent) writer() {
 	for {
 		select {
 		case req := <-s.writeCh:
-			req.err <- s.doAdd(req.ctx, req.record)
+			switch req.op {
+			case opAdd:
+				id, err := s.doAdd(req.ctx, req.record)
+				req.done <- writeOutcome{id: id, err: err}
+			case opRewrite:
+				req.done <- writeOutcome{err: s.doRewrite(req.ctx, req.rew)}
+			}
 		case <-s.stop:
 			return
 		}
 	}
 }
 
-func (s *sqliteContent) doAdd(ctx context.Context, r CommandRecord) error {
+func (s *sqliteContent) doAdd(ctx context.Context, r CommandRecord) (int64, error) {
 	kinds := r.MaskedKinds
 	if kinds == nil {
 		kinds = []string{}
 	}
 	kindsJSON, err := json.Marshal(kinds)
 	if err != nil {
-		return err
+		return 0, err
+	}
+	redactions := r.Redactions
+	if redactions == nil {
+		redactions = []Redaction{}
+	}
+	redactionsJSON, err := json.Marshal(redactions)
+	if err != nil {
+		return 0, err
 	}
 	// One INSERT, one autocommit transaction: short, atomic, replay-safe.
-	_, err = s.db.ExecContext(ctx, `INSERT INTO command_history
-		(command, cwd, host, status, exit_code, started_at, ended_at, trusted, masked_count, masked_kinds)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.Command, r.Cwd, r.Host, string(r.Status), r.ExitCode, r.StartedAt, r.EndedAt, r.Trusted, r.MaskedCount, string(kindsJSON))
+	res, err := s.db.ExecContext(ctx, `INSERT INTO command_history
+		(command, cwd, host, status, exit_code, started_at, ended_at, trusted, masked_count, masked_kinds, redactions)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.Command, r.Cwd, r.Host, string(r.Status), r.ExitCode, r.StartedAt, r.EndedAt, r.Trusted, r.MaskedCount, string(kindsJSON), string(redactionsJSON))
 	if err != nil {
-		return err
+		return 0, err
 	}
 	enforceFileModes(s.path)
 
@@ -357,25 +398,62 @@ func (s *sqliteContent) doAdd(ctx context.Context, r CommandRecord) error {
 	// the insert and the sweep only delays the sweep.
 	if days := s.policy.RetentionDays(); days > 0 {
 		cutoff := time.Now().Add(-time.Duration(days) * 24 * time.Hour).UnixMilli()
-		if err := s.sweep(ctx, cutoff); err != nil {
-			s.log.Warn("retention sweep failed", "error", err)
+		if sweepErr := s.sweep(ctx, cutoff); sweepErr != nil {
+			s.log.Warn("retention sweep failed", "error", sweepErr)
 		}
 	}
-	return nil
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	return id, nil
 }
 
-// Add serializes the insert through the single writer goroutine. The row id
-// is backend-assigned (autoincrement); the record's ID field is informational.
-func (s *sqliteContent) Add(ctx context.Context, record CommandRecord) error {
+// Add serializes the insert through the single writer goroutine and returns
+// the backend-assigned row id — the row's stable identity, which a later
+// RewriteRedaction addresses. The record's ID field is informational.
+func (s *sqliteContent) Add(ctx context.Context, record CommandRecord) (int64, error) {
 	if s.closed.Load() {
-		return ErrClosed
+		return 0, ErrClosed
 	}
 	// Keep-history-off: a command runs and no row appears. Decided before the
 	// writer is invoked, so nothing is serialized for a record nobody wants.
 	if !s.policy.Enabled() {
-		return nil
+		return 0, nil
 	}
-	req := writeReq{ctx: ctx, record: record, err: make(chan error, 1)}
+	req := writeReq{ctx: ctx, op: opAdd, record: record, done: make(chan writeOutcome, 1)}
+	select {
+	case s.writeCh <- req:
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	case <-s.stop:
+		return 0, ErrClosed
+	}
+	select {
+	case out := <-req.done:
+		return out.id, out.err
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	case <-s.stop:
+		return 0, ErrClosed
+	}
+}
+
+// RewriteRedaction replaces the redaction segment at span in the row's
+// stored command with reference, dropping the segment from the row's
+// redactions. Read-modify-write happens inside one writer turn, so no
+// concurrent mutation can interleave. Idempotent for a span already holding
+// the same reference.
+func (s *sqliteContent) RewriteRedaction(ctx context.Context, id int64, span Redaction, reference string) error {
+	if s.closed.Load() {
+		return ErrClosed
+	}
+	req := writeReq{
+		ctx:  ctx,
+		op:   opRewrite,
+		rew:  rewriteRequest{id: id, span: span, reference: reference},
+		done: make(chan writeOutcome, 1),
+	}
 	select {
 	case s.writeCh <- req:
 	case <-ctx.Done():
@@ -384,8 +462,8 @@ func (s *sqliteContent) Add(ctx context.Context, record CommandRecord) error {
 		return ErrClosed
 	}
 	select {
-	case err := <-req.err:
-		return err
+	case out := <-req.done:
+		return out.err
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-s.stop:
@@ -393,16 +471,75 @@ func (s *sqliteContent) Add(ctx context.Context, record CommandRecord) error {
 	}
 }
 
-const recordCols = "id, command, cwd, host, status, exit_code, started_at, ended_at, trusted, masked_count, masked_kinds"
+func (s *sqliteContent) doRewrite(ctx context.Context, rr rewriteRequest) error {
+	var command string
+	var redactionsJSON string
+	err := s.db.QueryRowContext(
+		ctx,
+		"SELECT command, redactions FROM command_history WHERE id = ?", rr.id,
+	).Scan(&command, &redactionsJSON)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	var redactions []Redaction
+	if uerr := json.Unmarshal([]byte(redactionsJSON), &redactions); uerr != nil {
+		return uerr
+	}
+	// The span is byte offsets into the stored command. A span that no
+	// longer fits means the row changed shape underneath this caller —
+	// refuse rather than corrupt.
+	if rr.span.Start < 0 || rr.span.End > len(command) || rr.span.Start > rr.span.End {
+		return fmt.Errorf("content: redaction span [%d:%d] out of range for row %d", rr.span.Start, rr.span.End, rr.id)
+	}
+	// Idempotency: the span must be one of the row's CURRENT redactions.
+	// A retried save (a lost response) re-sends the span it captured at
+	// record time; the first attempt already removed it, so the retry is a
+	// no-op instead of replacing text at stale offsets.
+	matched := false
+	kept := make([]Redaction, 0, len(redactions))
+	for _, r := range redactions {
+		if r.Start == rr.span.Start && r.End == rr.span.End && r.Kind == rr.span.Kind {
+			matched = true
+			continue
+		}
+		kept = append(kept, r)
+	}
+	if !matched {
+		return nil
+	}
+	newCommand := command[:rr.span.Start] + rr.reference + command[rr.span.End:]
+	keptJSON, err := json.Marshal(kept)
+	if err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(
+		ctx,
+		"UPDATE command_history SET command = ?, redactions = ? WHERE id = ?",
+		newCommand, string(keptJSON), rr.id,
+	); err != nil {
+		return err
+	}
+	enforceFileModes(s.path)
+	return nil
+}
+
+const recordCols = "id, command, cwd, host, status, exit_code, started_at, ended_at, trusted, masked_count, masked_kinds, redactions"
 
 func scanRecord(row interface{ Scan(...any) error }) (CommandRecord, error) {
 	var r CommandRecord
 	var kindsJSON string
-	err := row.Scan(&r.ID, &r.Command, &r.Cwd, &r.Host, &r.Status, &r.ExitCode, &r.StartedAt, &r.EndedAt, &r.Trusted, &r.MaskedCount, &kindsJSON)
+	var redactionsJSON string
+	err := row.Scan(&r.ID, &r.Command, &r.Cwd, &r.Host, &r.Status, &r.ExitCode, &r.StartedAt, &r.EndedAt, &r.Trusted, &r.MaskedCount, &kindsJSON, &redactionsJSON)
 	if err != nil {
 		return CommandRecord{}, err
 	}
 	if err := json.Unmarshal([]byte(kindsJSON), &r.MaskedKinds); err != nil {
+		return CommandRecord{}, err
+	}
+	if err := json.Unmarshal([]byte(redactionsJSON), &r.Redactions); err != nil {
 		return CommandRecord{}, err
 	}
 	return r, nil

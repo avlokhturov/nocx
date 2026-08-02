@@ -158,15 +158,22 @@ func callAppWS(t *testing.T, conn *websocket.Conn, method string, params map[str
 	if writeErr := conn.WriteMessage(websocket.TextMessage, req); writeErr != nil {
 		t.Fatalf("write %s: %v", method, writeErr)
 	}
-	_, raw, err := conn.ReadMessage()
-	if err != nil {
-		t.Fatalf("read %s response: %v", method, err)
+	// Responses may arrive out of order (a slow handler answering an
+	// earlier id after a later request was sent): read until the response
+	// for THIS id shows up.
+	for {
+		_, raw, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("read %s response: %v", method, err)
+		}
+		var resp wsRPCResult
+		if err := json.Unmarshal(raw, &resp); err != nil {
+			t.Fatalf("decode %s response: %v (raw %s)", method, err, raw)
+		}
+		if resp.ID == id {
+			return &resp
+		}
 	}
-	var resp wsRPCResult
-	if err := json.Unmarshal(raw, &resp); err != nil {
-		t.Fatalf("decode %s response: %v (raw %s)", method, err, raw)
-	}
-	return &resp
 }
 
 // The guard, end to end, in the owner's words: a command carrying a real key

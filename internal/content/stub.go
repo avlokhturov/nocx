@@ -43,9 +43,9 @@ type histStub struct {
 	log log.Logger
 }
 
-func (s *histStub) Add(_ context.Context, record CommandRecord) error {
+func (s *histStub) Add(_ context.Context, record CommandRecord) (int64, error) {
 	s.log.Info("content stub: CommandHistoryRepository.Add", "command", record.Command)
-	return ErrNotImplemented
+	return 0, ErrNotImplemented
 }
 
 func (s *histStub) List(_ context.Context, limit int) ([]CommandRecord, error) {
@@ -61,6 +61,11 @@ func (s *histStub) GetByID(_ context.Context, id int64) (*CommandRecord, error) 
 func (s *histStub) FindByPrefix(_ context.Context, prefix string, limit int) ([]CommandRecord, error) {
 	s.log.Info("content stub: CommandHistoryRepository.FindByPrefix", "prefix", prefix, "limit", limit)
 	return nil, ErrNotImplemented
+}
+
+func (s *histStub) RewriteRedaction(_ context.Context, id int64, span Redaction, reference string) error {
+	s.log.Info("content stub: CommandHistoryRepository.RewriteRedaction", "id", id, "span", span, "reference", reference)
+	return ErrNotImplemented
 }
 
 func (s *histStub) Query(_ context.Context, scope Scope, cwd, host string, limit int, _ *int64, text string) (HistoryPage, error) {
