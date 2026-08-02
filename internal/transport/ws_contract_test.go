@@ -958,7 +958,7 @@ func TestHistoryQuery_DTOConformsToContract(t *testing.T) {
 		// and never as the epoch; a store with a horizon states it.
 		"running": {
 			Entries: []historyQueryEntry{
-				{ID: "9", Command: "make test", Cwd: "/repo", Host: "", Status: "running"},
+				{ID: "9", Command: "make test", Cwd: "/repo", Host: "", Status: "running", MaskedCount: 0, MaskedKinds: []string{}},
 			},
 			Scope:     "directory",
 			Exhausted: true,
@@ -967,7 +967,7 @@ func TestHistoryQuery_DTOConformsToContract(t *testing.T) {
 		},
 		"populated": {
 			Entries: []historyQueryEntry{
-				{ID: "42", Command: "ssh prod deploy", Cwd: "/srv/api", Host: "prod.example.com", Status: "failure", ExitCode: &exit, StartedAt: &started, EndedAt: &ended},
+				{ID: "42", Command: "ssh prod deploy", Cwd: "/srv/api", Host: "prod.example.com", Status: "failure", ExitCode: &exit, StartedAt: &started, EndedAt: &ended, MaskedCount: 2, MaskedKinds: []string{"openai", "jwt"}},
 			},
 			Scope:     "host",
 			Exhausted: false,
@@ -1176,4 +1176,67 @@ func TestFsComplete_OverTheWireConformsToContract(t *testing.T) {
 			t.Errorf("error code = %d, want -32602", resp.Error.Code)
 		}
 	})
+}
+
+// ── vault.resolveLine ──────────────────────────────────────────────────────
+
+// The DTO's own conformance: field tags, the never-null refs slice, and the
+// two-valued resolved flag. The handler never sends a null refs list — no
+// references is [].
+func TestVaultResolveLine_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "vault.resolveLine.schema.json")
+	cases := map[string]vaultResolveLineResponse{
+		"no refs": {
+			Line: "ls -la",
+			Refs: []vaultResolveLineRef{},
+		},
+		"mixed": {
+			Line: "run --password hunter2 --other {{secret:ghost}}",
+			Refs: []vaultResolveLineRef{
+				{Name: "db-password", Resolved: true},
+				{Name: "ghost", Resolved: false},
+			},
+		},
+	}
+	for name, resp := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(resp)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "vault.resolveLine DTO")
+		})
+	}
+}
+
+// The real method through the real socket: a secret minted the way the
+// Secrets page mints one, resolved by the name the inventory reports. The
+// resolved value rides the line (it is going to the PTY) and the refs carry
+// only the name and the outcome — nothing here names a field, so nothing
+// here can omit one.
+func TestVaultResolveLine_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "vault.resolveLine.schema.json")
+	h := newInventoryHarness(t)
+	h.setupAndUnseal()
+	h.mintPassword("sk-proj-abcdef1234567890", "prod-api-key")
+
+	resp := vaultCall(t, h.conn, "vault.resolveLine", map[string]any{
+		"line": `curl -H "Authorization: Bearer {{secret:prod-api-key}}" https://api`,
+	}, 1)
+	if resp.Error != nil {
+		t.Fatalf("vault.resolveLine: %+v", resp.Error)
+	}
+	validateJSON(t, schema, resp.Result, "vault.resolveLine result (real socket)")
+
+	// The value really landed in the line — the wire carried it to the
+	// caller, which is the only place it is allowed to go.
+	var got struct {
+		Line string `json:"line"`
+	}
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Line != `curl -H "Authorization: Bearer sk-proj-abcdef1234567890" https://api` {
+		t.Errorf("line = %q, want the substituted line", got.Line)
+	}
 }

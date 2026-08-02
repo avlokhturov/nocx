@@ -116,6 +116,8 @@ describe('historyProvider', () => {
             cwd: '/repo',
             host: '',
             status: 'success',
+            maskedCount: 0,
+            maskedKinds: [],
             endedAt: 200,
           },
           {
@@ -124,6 +126,8 @@ describe('historyProvider', () => {
             cwd: '/repo',
             host: '',
             status: 'failure',
+            maskedCount: 0,
+            maskedKinds: [],
             endedAt: 100,
           },
           {
@@ -132,9 +136,20 @@ describe('historyProvider', () => {
             cwd: '/repo',
             host: '',
             status: 'success',
+            maskedCount: 0,
+            maskedKinds: [],
             endedAt: 300,
           },
-          { id: '4', command: 'ls -la', cwd: '/repo', host: '', status: 'success', endedAt: 400 },
+          {
+            id: '4',
+            command: 'ls -la',
+            cwd: '/repo',
+            host: '',
+            status: 'success',
+            endedAt: 400,
+            maskedCount: 0,
+            maskedKinds: [],
+          },
         ],
       }),
     )
@@ -179,6 +194,8 @@ describe('historyProvider', () => {
       cwd: '/repo',
       host: '',
       status: 'success' as const,
+      maskedCount: 0,
+      maskedKinds: [],
       endedAt: 100 + i,
     }))
     const provider = historyProvider({
@@ -207,6 +224,8 @@ describe('historyProvider', () => {
         cwd: '/repo',
         host: '',
         status: 'success' as const,
+        maskedCount: 0,
+        maskedKinds: [],
         endedAt: 100 + i,
       }))
       return historyProvider({
@@ -254,6 +273,8 @@ describe('historyProvider', () => {
               cwd: '/repo',
               host: '',
               status: 'success',
+              maskedCount: 0,
+              maskedKinds: [],
               endedAt: 100,
             },
           ],
@@ -298,6 +319,8 @@ describe('historyProvider', () => {
               cwd: '/repo',
               host: '',
               status: 'success',
+              maskedCount: 0,
+              maskedKinds: [],
               endedAt: 100,
             },
           ],
@@ -331,6 +354,8 @@ describe('historyProvider', () => {
               cwd: '/repo',
               host: '',
               status: 'success',
+              maskedCount: 0,
+              maskedKinds: [],
               endedAt: 100,
             },
           ],
@@ -362,6 +387,8 @@ describe('historyProvider', () => {
               cwd: '/repo',
               host: 'remote',
               status: 'success',
+              maskedCount: 0,
+              maskedKinds: [],
               endedAt: 100,
             },
           ],
@@ -397,6 +424,8 @@ describe('historyProvider', () => {
               cwd: '/repo',
               host: '',
               status: 'success',
+              maskedCount: 0,
+              maskedKinds: [],
               endedAt: 100,
             },
           ],
@@ -577,14 +606,69 @@ describe('fsProvider', () => {
     expect(complete).toHaveBeenCalledWith('./sr', '/repo')
     expect(got.candidates).toHaveLength(1)
     const c = got.candidates[0]
-    expect(c.displayText).toBe('./src/')
+    // Report 3 — the display is the LAST SEGMENT: the typed `./` prefix is
+    // already in the line and is not repeated in the row. insertText (what
+    // a pick inserts) still carries the full path the user wrote.
+    expect(c.displayText).toBe('src/')
     expect(c.insertText).toBe('./src/')
     expect(c.id).toBe('fs:/repo/src')
     expect(c.replacement).toEqual({ from: 3, to: 7 })
-    // The matched prefix `sr` sits inside the completed name (`./src/`).
-    expect(c.matchRanges).toEqual([{ from: 2, to: 4 }])
+    // The matched prefix `sr` sits INSIDE the segment the row shows.
+    expect(c.matchRanges).toEqual([{ from: 0, to: 2 }])
     expect(c.source).toBe('path')
     expect(c.eligibleForGhostText).toBe(true)
+  })
+
+  it('report 3: a multi-level typed prefix is not repeated in the rows', async () => {
+    const complete = vi.fn((text: string): Promise<FsComplete> =>
+      Promise.resolve(
+        text === 'repos/meshynet/'
+          ? { entries: [{ name: 'bin', path: '/repo/repos/meshynet/bin', isDir: true }] }
+          : { entries: [] },
+      ),
+    )
+    const got = await fsProvider({ complete }).suggest(
+      ctx({
+        doc: 'cd repos/meshynet/',
+        token: { text: 'repos/meshynet/', from: 3, to: 19 },
+      }),
+      new AbortController().signal,
+    )
+    expect(got.candidates).toHaveLength(1)
+    const c = got.candidates[0]
+    // The row reads `bin/`, never `repos/meshynet/bin/` — the parent is in
+    // the line, and the full path survives in the id and insertText.
+    expect(c.displayText).toBe('bin/')
+    expect(c.insertText).toBe('repos/meshynet/bin/')
+    expect(c.id).toBe('fs:/repo/repos/meshynet/bin')
+    // A trailing slash means the segment is complete: nothing is marked.
+    expect(c.matchRanges).toEqual([])
+  })
+
+  it('report 3: a partial segment marks the typed part inside the name', async () => {
+    const complete = vi.fn((text: string): Promise<FsComplete> =>
+      Promise.resolve(
+        text === 'repos/meshynet/gr'
+          ? {
+              entries: [
+                { name: 'graphify-out', path: '/repo/repos/meshynet/graphify-out', isDir: true },
+              ],
+            }
+          : { entries: [] },
+      ),
+    )
+    const got = await fsProvider({ complete }).suggest(
+      ctx({
+        doc: 'cd repos/meshynet/gr',
+        token: { text: 'repos/meshynet/gr', from: 3, to: 21 },
+      }),
+      new AbortController().signal,
+    )
+    expect(got.candidates).toHaveLength(1)
+    const c = got.candidates[0]
+    expect(c.displayText).toBe('graphify-out/')
+    expect(c.matchRanges).toEqual([{ from: 0, to: 2 }])
+    expect(c.insertText).toBe('repos/meshynet/graphify-out/')
   })
 
   it('answers nothing on a provider error', async () => {

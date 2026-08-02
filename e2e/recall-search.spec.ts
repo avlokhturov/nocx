@@ -38,7 +38,7 @@ import { test as base, expect, type Page } from '@playwright/test'
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { VaultBackend, type BackendEndpoint, type XdgDirs } from './harness'
+import { VaultBackend, type BackendEndpoint, type DisposableRoot } from './harness'
 
 const DEVHARNESS_BIN = process.env.NOCX_VAULT_BIN ?? '/tmp/nocx-devharness-srch'
 
@@ -70,8 +70,11 @@ function createXdgDirs(): XdgDirsResult {
   }
 }
 
-function asXdgDirs(r: XdgDirsResult): XdgDirs {
-  return { data: r.data, config: r.config, cache: r.cache }
+function asXdgDirs(r: XdgDirsResult): DisposableRoot {
+  // VaultBackend isolates the backend's WHOLE home inside a disposable root
+  // (harness.ts) — the XDG trio alone never covered ~/.nocx and the rc
+  // files, so the root travels with it.
+  return { root: r.root }
 }
 
 async function bindEndpoint(page: Page, endpoint: BackendEndpoint): Promise<void> {
@@ -152,11 +155,25 @@ test.describe('recall: typing narrows, and the panel states its coverage', () =>
 
     // ── Phase 2: open recall — all three commands on the rung ──────────
     await page.keyboard.press('ArrowUp')
-    const panel = page.locator('.ui-recall-panel')
+    const panel = page.locator('.ui-floating-panel[data-variant="recall"]')
     await expect(panel).toBeVisible({ timeout: 10_000 })
     await expect(panel).toContainText(alpha, { timeout: 10_000 })
     await expect(panel).toContainText(beta)
     await expect(panel).toContainText(gamma)
+
+    // ── Report 5: the recall panel is a FloatingPanel variant — the same
+    //    sizing rule as the completion dropdown: content-sized between a
+    //    floor and a ceiling, never full width, with the same footer. ──
+    const recallBox = await panel.boundingBox()
+    expect(recallBox).not.toBeNull()
+    const paneBox = await page.locator('.pane.active').first().boundingBox()
+    expect(paneBox).not.toBeNull()
+    expect(recallBox!.width).toBeLessThan(paneBox!.width * 0.75)
+    expect(recallBox!.width).toBeGreaterThanOrEqual(300)
+    await page.screenshot({ path: '/tmp/nocx-recall-panel.png' })
+    expect(recallBox!.width).toBeLessThanOrEqual(640)
+    await expect(panel.locator('.ui-floating-panel__footer')).toBeVisible()
+    console.log(`E2E recall panel width: ${recallBox!.width}px (report 5)`)
 
     // ── Phase 3: type the substring — only the match remains ───────────
     await page.keyboard.type('alpha')
@@ -171,8 +188,8 @@ test.describe('recall: typing narrows, and the panel states its coverage', () =>
     await expect(panel).toContainText('1 result')
     // The matched substring is bolded inside the surviving row, so the row
     // says why it matched.
-    await expect(panel.locator('strong.ui-recall-panel__match')).toHaveCount(1)
-    await expect(panel.locator('strong.ui-recall-panel__match')).toHaveText('alpha')
+    await expect(panel.locator('mark.ui-floating-panel__match')).toHaveCount(1)
+    await expect(panel.locator('mark.ui-floating-panel__match')).toHaveText('alpha')
 
     // ── Phase 4: the coverage line is on screen, and it is honest ──────
     await expect(panel).toContainText(/oldest entry/, { timeout: 10_000 })

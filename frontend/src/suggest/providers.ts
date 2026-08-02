@@ -302,7 +302,6 @@ export function fsProvider(opts: {
       const t = ctx.token.text
       const lastSlash = t.lastIndexOf('/')
       const tokenPrefix = t.slice(0, lastSlash + 1)
-      const segPrefix = t.slice(lastSlash + 1)
       // `cd`, `pushd` and `rmdir` take directories only; the default for
       // everything else (including unknown commands) is both kinds.
       const directoriesOnly = DIRECTORIES_ONLY[commandWord(ctx)] === true
@@ -321,16 +320,33 @@ export function fsProvider(opts: {
       }
       return {
         candidates: rows.slice(0, MAX_PROVIDER_CANDIDATES).map((e): Candidate => {
-          const display = tokenPrefix + e.name + (e.isDir ? '/' : '')
-          const segStart = display.length - e.name.length - (e.isDir ? 1 : 0)
+          // Report 3 — the display shows the LAST SEGMENT only: the typed
+          // prefix is already in the line, and repeating it in every row is
+          // noise that also forces the panel wider than it needs to be.
+          // `insertText` and the replacement range are UNCHANGED — this is
+          // displayText only, which is exactly why it is a separate field.
+          //
+          // Unambiguity: every row of one listing shares one parent, and
+          // that parent is what the user already wrote in the line; the
+          // candidate id is the FULL resolved path (`fs:<path>`), so two
+          // rows from different parents can never read alike — a merge
+          // dedups by id, and a history row keeps its whole-line display.
+          const display = e.name + (e.isDir ? '/' : '')
+          // The typed part of the SEGMENT (after the last slash) is what
+          // the match marks inside the segment; a trailing slash means the
+          // segment is complete and nothing is highlighted.
+          const segPrefix = t.slice(lastSlash + 1)
+          const matchTo = Math.min(segPrefix.length, e.name.length)
           return {
             id: `fs:${e.path}`,
             targetId: 'shell',
             providerId: 'fs',
             displayText: display,
-            insertText: display,
+            // insertText is UNCHANGED by report 3: what a pick inserts is
+            // the full path the user wrote (the typed prefix + the segment).
+            insertText: tokenPrefix + display,
             replacement: { from: ctx.token.from, to: ctx.token.to },
-            matchRanges: [{ from: segStart, to: segStart + segPrefix.length }],
+            matchRanges: matchTo > 0 ? [{ from: 0, to: matchTo }] : [],
             source: 'path',
             kind: e.isDir ? 'directory' : 'file',
             environment: { cwd: ctx.cwd, confidence: 'asserted' },

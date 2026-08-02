@@ -76,6 +76,13 @@ type CommandRecord struct {
 	StartedAt *int64
 	EndedAt   *int64
 	Trusted   bool
+	// MaskedCount and MaskedKinds record what was redacted from Command
+	// before this row was written (secrets.Mask). A row with no secrets has
+	// 0 and nil — the facts describe the durable text, and the durable text
+	// is always the masked one. The kinds are the closed vocabulary of
+	// internal/secrets, deduplicated in first-occurrence order.
+	MaskedCount int
+	MaskedKinds []string
 }
 
 // Scope is the recall-ladder rung a history query is answered from (design

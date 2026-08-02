@@ -316,7 +316,7 @@ describe('Escape with the editor visible but unfocused (focus-loss rescue)', () 
       view.contentDOM.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true }),
       )
-      expect(ed.root.querySelector('.ui-recall-panel')).not.toBeNull()
+      expect(ed.root.querySelector('.ui-floating-panel[data-variant="recall"]')).not.toBeNull()
       // The recall query crosses the control plane (nocx-rtg0.13); the
       // preview lands when the answer does.
       await vi.waitFor(() => expect(ed.getDoc()).toBe('make deploy')) // previewing the only row
@@ -329,7 +329,7 @@ describe('Escape with the editor visible but unfocused (focus-loss rescue)', () 
       // path would have emptied the doc and left the panel open. The panel
       // node stays mounted after close (its `dataset.open` is the
       // visibility contract, not its presence in the DOM).
-      const panel = ed.root.querySelector<HTMLElement>('.ui-recall-panel')
+      const panel = ed.root.querySelector<HTMLElement>('.ui-floating-panel[data-variant="recall"]')
       expect(panel?.dataset.open).toBe('false')
       expect(ed.getDoc()).toBe('echo kept')
     } finally {
@@ -527,7 +527,7 @@ describe('recall overlay is actually wired (nocx-w7h.4)', () => {
 
       // The submit cleared the editor; Up at the empty prompt opens recall.
       key(view, { key: 'ArrowUp' })
-      expect(ed.root.querySelector('.ui-recall-panel')).not.toBeNull()
+      expect(ed.root.querySelector('.ui-floating-panel[data-variant="recall"]')).not.toBeNull()
       // The recall query crosses the control plane (nocx-rtg0.13); the
       // preview lands when the answer does.
       await vi.waitFor(() => expect(ed.getDoc()).toBe('make deploy')) // previewing the only row

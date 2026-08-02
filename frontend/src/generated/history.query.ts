@@ -40,7 +40,7 @@ export interface HistoryEntry {
    */
   id: string
   /**
-   * The command line as submitted, verbatim. Never truncated here — the overlay decides how much to show.
+   * The command line that was submitted, as recorded. Secrets are masked before the row is written: the durable text is always the masked one (sk-proj-... becomes sk-p...7890), and maskedCount/maskedKinds say what was removed. Never truncated here — the overlay decides how much to show.
    */
   command: string
   /**
@@ -67,4 +67,12 @@ export interface HistoryEntry {
    * Unix milliseconds when the command finished, or null when it has not. The overlay renders the relative time from this; null renders as running, never as the epoch.
    */
   endedAt: number | null
+  /**
+   * How many secret-shaped regions were redacted from command before this row was written. The durable command is always the masked one; 0 means nothing was masked, and the count is always carried so a block reconstructed after a restart can say "3 secrets masked" without re-deriving the facts.
+   */
+  maskedCount: number
+  /**
+   * The kinds that were masked, deduplicated in first-occurrence order, from the closed vocabulary of internal/secrets: openai, github-pat, slack, aws-access-key, gitlab, jwt, private-key, url-userinfo, db-connstring, auth-header, env-assignment, high-entropy. Never the secret's value — kind and count are the fact, the matched text is the thing being removed. Never null: no mask is [].
+   */
+  maskedKinds: string[]
 }

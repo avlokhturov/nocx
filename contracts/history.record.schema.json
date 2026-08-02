@@ -2,9 +2,20 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nocx.local/contracts/history.record.schema.json",
   "title": "HistoryRecord",
-  "description": "Result of the history.record JSON-RPC method (nocx-rtg0.13) — the write half of the history family. The ack: the request was accepted and handed to the store. It claims nothing more — whether a row appears is decided by the live History policy (history.enabled) and is answered by history.query, never by this ack.",
+  "description": "Result of the history.record JSON-RPC method (nocx-rtg0.13) — the write half of the history family. The ack: the request was accepted and handed to the store. It claims nothing more — whether a row appears is decided by the live History policy (history.enabled) and is answered by history.query, never by this ack. MaskedCount and MaskedKinds report what was redacted from the command text before it was handed to the store: the durable command is always the masked one, and the block can say \"3 secrets masked: openai, jwt\" from this ack alone.",
   "type": "object",
   "additionalProperties": false,
-  "required": [],
-  "properties": {}
+  "required": ["maskedCount", "maskedKinds"],
+  "properties": {
+    "maskedCount": {
+      "description": "How many secret-shaped regions were masked out of the command before recording. 0 when there was nothing to mask — an honest redaction that says nothing is indistinguishable from there having been nothing to redact, so the count is always carried.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "maskedKinds": {
+      "description": "The kinds that were masked, deduplicated in first-occurrence order, from the closed vocabulary of internal/secrets: openai, github-pat, slack, aws-access-key, gitlab, jwt, private-key, url-userinfo, db-connstring, auth-header, env-assignment, high-entropy. Never the secret's value — kind and count are the fact, the matched text is the thing being removed. Never null: no mask is [].",
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  }
 }

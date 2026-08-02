@@ -162,7 +162,7 @@ test.describe('history: a command survives a restart and recall answers from the
 
     // ── Phase 3: press Up — the recall panel, served by the store ───────
     await page.keyboard.press('ArrowUp')
-    const panel = page.locator('.ui-recall-panel')
+    const panel = page.locator('.ui-floating-panel[data-variant="recall"]')
     await expect(panel).toBeVisible({ timeout: 10_000 })
     // The command is there — and the session ledger is empty after the
     // reload, so only the store could have answered: the "this session

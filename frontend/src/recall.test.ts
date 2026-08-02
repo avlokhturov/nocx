@@ -59,6 +59,8 @@ function mkEntry(command: string, endedAt: number | null = 1_750_000_000_000): H
     cwd: '~',
     host: '',
     status: 'success',
+    maskedCount: 0,
+    maskedKinds: [],
     endedAt,
   }
 }
@@ -122,7 +124,7 @@ function setupRecall(opts: { query?: RecallQuery; actions?: Partial<EditorAction
 }
 
 const panelOf = (container: HTMLElement): HTMLElement => {
-  const p = container.querySelector<HTMLElement>('.ui-recall-panel')
+  const p = container.querySelector<HTMLElement>('.ui-floating-panel[data-variant="recall"]')
   if (!p) throw new Error('recall panel not mounted')
   return p
 }
@@ -130,7 +132,7 @@ const panelOf = (container: HTMLElement): HTMLElement => {
 /** The query the search field carries — the field's text (the caret is
  *  aria-hidden and carries no text, so textContent is the value). */
 const fieldValue = (container: HTMLElement): string =>
-  container.querySelector<HTMLElement>('.ui-recall-panel__search .ui-search-field__input')
+  container.querySelector<HTMLElement>('.ui-floating-panel__search .ui-search-field__input')
     ?.textContent ?? ''
 
 describe('recall: Enter executes the previewed command', () => {
@@ -409,15 +411,15 @@ describe('recall: a search hands the input to the field (brief search-ui)', () =
     key(view, { key: 'ArrowUp' })
     await settled(container)
     // Empty filter: rows are plain text — no <strong> anywhere.
-    expect(container.querySelectorAll('strong.ui-recall-panel__match')).toHaveLength(0)
+    expect(container.querySelectorAll('mark.ui-floating-panel__match')).toHaveLength(0)
     key(view, { key: 'g' })
     await vi.waitFor(() => expect(fieldValue(container)).toBe('g'))
-    let matches = Array.from(container.querySelectorAll('strong.ui-recall-panel__match'))
+    let matches = Array.from(container.querySelectorAll('mark.ui-floating-panel__match'))
     expect(matches).toHaveLength(2) // git commit, git status
     expect(matches.every((m) => m.textContent === 'g')).toBe(true)
     for (const ch of ['i', 't']) key(view, { key: ch })
     await vi.waitFor(() => expect(fieldValue(container)).toBe('git'))
-    matches = Array.from(container.querySelectorAll('strong.ui-recall-panel__match'))
+    matches = Array.from(container.querySelectorAll('mark.ui-floating-panel__match'))
     expect(matches).toHaveLength(2)
     expect(matches.every((m) => m.textContent === 'git')).toBe(true)
     expect(panelOf(container).textContent).not.toContain('make deploy')
@@ -438,20 +440,20 @@ describe('recall: a search hands the input to the field (brief search-ui)', () =
     key(view, { key: 'ArrowUp' })
     await settled(container)
     const panel = panelOf(container)
-    const search = container.querySelector<HTMLElement>('.ui-recall-panel__search')
+    const search = container.querySelector<HTMLElement>('.ui-floating-panel__search')
     expect(search).not.toBeNull()
     // The search row sits after the list (and detail) and before the footer.
     const children = Array.from(panel.children)
-    const listIdx = children.findIndex((c) => c.classList.contains('ui-recall-panel__list'))
-    const searchIdx = children.findIndex((c) => c.classList.contains('ui-recall-panel__search'))
-    const footerIdx = children.findIndex((c) => c.classList.contains('ui-recall-panel__footer'))
+    const listIdx = children.findIndex((c) => c.classList.contains('ui-floating-panel__list'))
+    const searchIdx = children.findIndex((c) => c.classList.contains('ui-floating-panel__search'))
+    const footerIdx = children.findIndex((c) => c.classList.contains('ui-floating-panel__footer'))
     expect(listIdx).toBeGreaterThanOrEqual(0)
     expect(searchIdx).toBeGreaterThan(listIdx)
     expect(searchIdx).toBeLessThan(footerIdx)
     // The coverage rides the same row at its right-hand end, a property of
     // the search — not a second line of chrome.
     expect(search?.querySelector('.ui-search-field')).not.toBeNull()
-    expect(search?.querySelector('.ui-recall-panel__coverage')?.textContent).toContain(
+    expect(search?.querySelector('.ui-floating-panel__coverage')?.textContent).toContain(
       'oldest entry',
     )
   })
@@ -510,6 +512,8 @@ describe("recall: the detail pane shows the selected row's facts", () => {
               cwd: '/srv/api',
               host: '',
               status: 'failure',
+              maskedCount: 0,
+              maskedKinds: [],
               exitCode: 2,
               startedAt: now - 130_000,
               endedAt: now - 120_000,
@@ -523,7 +527,7 @@ describe("recall: the detail pane shows the selected row's facts", () => {
     })
     key(view, { key: 'ArrowUp' })
     await settled(container)
-    const detail = container.querySelector<HTMLElement>('.ui-recall-panel__detail')
+    const detail = container.querySelector<HTMLElement>('.ui-floating-panel__detail')
     expect(detail).not.toBeNull()
     const text = detail?.textContent ?? ''
     expect(text).toContain('exit code')
@@ -547,6 +551,8 @@ describe("recall: the detail pane shows the selected row's facts", () => {
               cwd: '',
               host: '',
               status: 'running',
+              maskedCount: 0,
+              maskedKinds: [],
               endedAt: null, // startedAt absent too: never observed
             },
           ],
@@ -558,8 +564,8 @@ describe("recall: the detail pane shows the selected row's facts", () => {
     })
     key(view, { key: 'ArrowUp' })
     await settled(container)
-    const detail = container.querySelector<HTMLElement>('.ui-recall-panel__detail')
-    const items = Array.from(detail?.querySelectorAll('.ui-recall-panel__detail-item') ?? [])
+    const detail = container.querySelector<HTMLElement>('.ui-floating-panel__detail')
+    const items = Array.from(detail?.querySelectorAll('.ui-floating-panel__detail-item') ?? [])
     // Term and value are separate spans in one flex column, so textContent
     // joins them without whitespace — assert each item, not the joined text.
     expect(items[0]?.textContent).toContain('exit code')
@@ -948,7 +954,7 @@ describe('recall: the footer and the labels say what the keys do', () => {
     const { container, view } = setupRecall({ query: mkQuery(['one', 'two', 'three']) })
     key(view, { key: 'ArrowUp' })
     await settled(container)
-    const footer = container.querySelector<HTMLElement>('.ui-recall-panel__footer')
+    const footer = container.querySelector<HTMLElement>('.ui-floating-panel__footer')
     expect(footer).not.toBeNull()
     // The key groups are siblings of one footer element — the CSS lays them
     // out on one line with a real gap (white-space: nowrap; display: flex),
@@ -997,7 +1003,7 @@ describe('recall: relative time', () => {
     })
     key(view, { key: 'ArrowUp' })
     await settled(container)
-    const time = container.querySelector<HTMLElement>('.ui-recall-panel__time')
+    const time = container.querySelector<HTMLElement>('.ui-floating-panel__time')
     expect(time?.textContent).toBe('running')
     expect(time?.textContent).not.toBe('1970')
   })
@@ -1029,7 +1035,7 @@ describe('recall: relative time', () => {
     })
     key(view, { key: 'ArrowUp' })
     await settled(container)
-    const time = container.querySelector<HTMLElement>('.ui-recall-panel__time')
+    const time = container.querySelector<HTMLElement>('.ui-floating-panel__time')
     expect(time?.textContent).toBe('2 minutes ago')
   })
 })

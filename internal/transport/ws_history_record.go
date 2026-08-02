@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/secrets"
 )
 
 // historyRecordParams is the request the frontend sends when a command
@@ -33,11 +34,18 @@ type historyRecordParams struct {
 	Trusted   bool   `json:"trusted"`
 }
 
-// historyRecordResponse is the result of history.record: an ack. It claims
-// only that the request was accepted and handed to the store — whether a row
-// appears is decided by the live History policy (history.enabled) and is
-// answered by history.query, never by this ack.
-type historyRecordResponse struct{}
+// historyRecordResponse is the result of history.record: an ack that also
+// reports what was masked. It claims only that the request was accepted and
+// handed to the store — whether a row appears is decided by the live History
+// policy (history.enabled) and is answered by history.query, never by this
+// ack. MaskedCount and MaskedKinds describe the command text that was just
+// recorded (0 and [] when nothing was masked), so the block can say "3
+// secrets masked: openai, jwt" without re-deriving the facts. Never null:
+// no mask is [] (contracts/history.record.schema.json).
+type historyRecordResponse struct {
+	MaskedCount int      `json:"maskedCount"`
+	MaskedKinds []string `json:"maskedKinds"`
+}
 
 // epochFloor is the earliest plausible wall-clock timestamp: 2020-01-01
 // 00:00:00 UTC in Unix epoch milliseconds. The store reads started_at and
@@ -67,30 +75,64 @@ func (s *WSServer) handleHistoryRecord(ctx context.Context, wconn *wsConn, req j
 		return
 	}
 
+	// Mask at the wire, in exactly one place. ws_history_record is the
+	// single writer of durable rows, so it is the single place masking can
+	// be forgotten: the durable command is always the masked one, and the
+	// live viewport is untouched (xterm renders what the program printed,
+	// AD-6). The mask facts are computed first so the ack reports them even
+	// when there is no store to hold the row.
+	maskedCommand, findings := secrets.Mask(p.Command)
+	ack := historyRecordResponse{
+		MaskedCount: len(findings),
+		MaskedKinds: maskedKindsOf(findings),
+	}
+	if ack.MaskedKinds == nil {
+		ack.MaskedKinds = []string{}
+	}
+
 	if s.contentDB == nil {
 		// No store wired (test-only state): the request is accepted and
 		// recorded nowhere; history.query answers source=session in the
 		// same state, which is the honest label for "nothing to answer
 		// from".
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(historyRecordResponse{})))
+		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(ack)))
 		return
 	}
 
 	rec := content.CommandRecord{
-		Command:   p.Command,
-		Cwd:       p.Cwd,
-		Host:      p.Host,
-		Status:    content.CommandStatus(p.Status),
-		ExitCode:  p.ExitCode,
-		StartedAt: p.StartedAt,
-		EndedAt:   p.EndedAt,
-		Trusted:   p.Trusted,
+		Command:     maskedCommand,
+		Cwd:         p.Cwd,
+		Host:        p.Host,
+		Status:      content.CommandStatus(p.Status),
+		ExitCode:    p.ExitCode,
+		StartedAt:   p.StartedAt,
+		EndedAt:     p.EndedAt,
+		Trusted:     p.Trusted,
+		MaskedCount: ack.MaskedCount,
+		MaskedKinds: ack.MaskedKinds,
 	}
 	if err := s.contentDB.CommandHistory().Add(ctx, rec); err != nil {
 		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "history.record: ", err))
 		return
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(historyRecordResponse{})))
+	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(ack)))
+}
+
+// maskedKindsOf deduplicates the findings' kinds in first-occurrence order —
+// the order a block would read them aloud. The kinds are the closed
+// vocabulary of internal/secrets; the secret's VALUE never appears here
+// (the finding carries only kind and offsets).
+func maskedKindsOf(findings []secrets.Finding) []string {
+	seen := make(map[secrets.Kind]struct{}, len(findings))
+	out := make([]string, 0, len(findings))
+	for _, f := range findings {
+		if _, ok := seen[f.Kind]; ok {
+			continue
+		}
+		seen[f.Kind] = struct{}{}
+		out = append(out, string(f.Kind))
+	}
+	return out
 }
 
 // validateHistoryRecord checks the request against the handler contract. The

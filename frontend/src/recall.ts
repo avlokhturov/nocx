@@ -59,6 +59,7 @@
 import type { HistoryEntry, HistoryQuery } from './generated/history.query'
 import type { CommandLedger } from './command-ledger'
 import { createSearchFieldDisplay } from './ui/search-field'
+import { FloatingPanel, type FloatingPanelRow } from './ui/floating-panel'
 
 /**
  * The scrollTop that puts `row` FULLY inside `list`'s visible box — its top
@@ -268,49 +269,48 @@ export function queryLedgerHistory(
       exitCode: rec.exitCode,
       startedAt: rec.startedAt,
       endedAt: rec.endedAt,
+      // Nothing was masked, and that is the truth rather than a placeholder:
+      // masking happens at the wire on the way into the store (ADR-0021), and
+      // this fallback reads the session's own ledger, which is the ephemeral
+      // side of the split — the same side as scrollback, where the value the
+      // program received is the value shown. A row sourced here therefore
+      // carries the text as typed, and claiming a mask count would be a lie in
+      // the opposite direction.
+      maskedCount: 0,
+      maskedKinds: [],
     })
   }
   // The ledger has no further pages: this is the whole session.
   return { entries, scope, exhausted: true, source: 'session', coverage }
 }
 
-/** Build a row's command text as nodes, with the matched substring bolded —
- *  the way Warp shows why a row survived the search. The filter is a plain
- *  case-insensitive substring (the same rule the query applies), so the
+/** The matched substring of a row's command — the first case-insensitive
+ *  occurrence of the filter, the same rule the query applies, so the
  *  highlight is exact, never a heuristic; an empty filter highlights
- *  nothing. A row that somehow does not contain the needle renders plain —
- *  the highlight may never invent emphasis. */
-function commandNodes(command: string, filter: string): Node[] {
-  if (filter === '') return [document.createTextNode(command)]
+ *  nothing. A command that somehow does not contain the needle renders
+ *  plain — the highlight may never invent emphasis. */
+function matchRange(command: string, filter: string): Array<{ from: number; to: number }> {
+  if (filter === '') return []
   const needle = filter.toLowerCase()
-  const hay = command.toLowerCase()
-  const at = hay.indexOf(needle)
-  if (at < 0) return [document.createTextNode(command)]
-  const nodes: Node[] = []
-  if (at > 0) nodes.push(document.createTextNode(command.slice(0, at)))
-  const match = document.createElement('strong')
-  match.className = 'ui-recall-panel__match'
-  match.textContent = command.slice(at, at + needle.length)
-  nodes.push(match)
-  const after = at + needle.length
-  if (after < command.length) nodes.push(document.createTextNode(command.slice(after)))
-  return nodes
+  const at = command.toLowerCase().indexOf(needle)
+  return at < 0 ? [] : [{ from: at, to: at + needle.length }]
 }
 
 export class RecallOverlay {
   private state: RecallState = { name: 'closed' }
   private readonly root: HTMLElement
+  private readonly panel: FloatingPanel
   private readonly editor: RecallEditor
   private readonly query: RecallQuery
-
   constructor(opts: { editor: RecallEditor; query: RecallQuery }) {
     this.editor = opts.editor
     this.query = opts.query
-    this.root = document.createElement('div')
-    this.root.className = 'ui-recall-panel'
-    this.root.setAttribute('role', 'dialog')
-    this.root.setAttribute('aria-label', 'command history')
-    this.root.dataset.open = 'false'
+    this.panel = new FloatingPanel({
+      variant: 'recall',
+      role: 'dialog',
+      ariaLabel: 'command history',
+    })
+    this.root = this.panel.root
   }
 
   get isOpen(): boolean {
@@ -320,7 +320,7 @@ export class RecallOverlay {
   /** Mount the panel as a child of the editor's root, so it floats above the
    *  editor (the root is position: relative). */
   mount(container: HTMLElement): void {
-    container.appendChild(this.root)
+    this.panel.mount(container)
   }
   /**
    * Open the overlay on the given ladder rung. The current draft, selection
@@ -344,7 +344,6 @@ export class RecallOverlay {
       scrollTop: this.editor.getScrollTop(),
     }
     this.state = { name: 'loading', draft, scope }
-    this.root.dataset.open = 'true'
     this.render()
 
     let rung = scope
@@ -715,40 +714,39 @@ export class RecallOverlay {
     }
     this.close()
   }
-
   private close(): void {
     this.state = { name: 'closed' }
-    this.root.dataset.open = 'false'
-    this.root.replaceChildren()
+    this.panel.hide()
   }
 
   destroy(): void {
     this.close()
-    this.root.remove()
+    this.panel.destroy()
   }
 
   /** Rebuild the panel DOM from the current state. */
   private render(): void {
     const s = this.state
     if (s.name === 'closed') return
-    this.root.replaceChildren()
-    // ── Header: title, rung, count, source note ──────────────────────
+
+    // ── Header: title, rung, count, source note — the recall's chrome
+    //    before the shared list. ────────────────────────────────────────
     const header = document.createElement('div')
-    header.className = 'ui-recall-panel__header'
+    header.className = 'ui-floating-panel__header'
 
     const title = document.createElement('span')
-    title.className = 'ui-recall-panel__title'
+    title.className = 'ui-floating-panel__title'
     title.textContent = 'history'
     header.appendChild(title)
 
     const rung = document.createElement('span')
-    rung.className = 'ui-badge ui-recall-panel__rung'
+    rung.className = 'ui-badge ui-floating-panel__rung'
     rung.dataset.tone = 'neutral'
     rung.textContent = SCOPE_LABELS[s.scope]
     header.appendChild(rung)
 
     const count = document.createElement('span')
-    count.className = 'ui-recall-panel__count'
+    count.className = 'ui-floating-panel__count'
     if (s.name === 'loading') {
       count.textContent = '…'
     } else {
@@ -758,86 +756,23 @@ export class RecallOverlay {
 
     if (s.name !== 'loading' && s.query.source === 'session') {
       const note = document.createElement('span')
-      note.className = 'ui-badge ui-recall-panel__source'
+      note.className = 'ui-badge ui-floating-panel__source'
       note.dataset.tone = 'warning'
       note.textContent = 'this session only'
       header.appendChild(note)
     }
-    this.root.appendChild(header)
-
-    // ── Rows, or the kit's empty state ────────────────────────────────
-    const list = document.createElement('div')
-    list.className = 'ui-recall-panel__list'
-    list.setAttribute('role', 'listbox')
-
-    if (s.name === 'loading') {
-      // The first rung is still in flight — a brief state on a local
-      // socket, but it must not read as "no history yet".
-      const empty = document.createElement('div')
-      empty.className = 'ui-empty-state'
-      const emptyTitle = document.createElement('div')
-      emptyTitle.className = 'ui-empty-state__title'
-      emptyTitle.textContent = '…'
-      empty.appendChild(emptyTitle)
-      list.appendChild(empty)
-    } else if (s.query.entries.length === 0) {
-      const empty = document.createElement('div')
-      empty.className = 'ui-empty-state'
-      const emptyTitle = document.createElement('div')
-      emptyTitle.className = 'ui-empty-state__title'
-      const emptyDesc = document.createElement('div')
-      emptyDesc.className = 'ui-empty-state__desc'
-      // The empty state must tell the truth about WHY it is empty: no
-      // history and no matches are different facts, and a filter that
-      // found nothing must not read as a terminal that forgot.
-      if (s.filter !== '') {
-        emptyTitle.textContent = `no matches for "${s.filter}"`
-        emptyDesc.textContent = 'backspace to clear the filter'
-      } else {
-        emptyTitle.textContent = 'no history yet'
-        emptyDesc.textContent = 'commands you run will appear here'
-      }
-      empty.appendChild(emptyTitle)
-      empty.appendChild(emptyDesc)
-      list.appendChild(empty)
-    } else {
-      const selected = s.name === 'navigating' ? s.selected : -1
-      const now = Date.now()
-      // Display order is oldest at the top, newest at the bottom — the
-      // reverse of the wire (the contract belongs to neither side, and the
-      // schema says `entries` is newest first, so the renderer mirrors).
-      for (let d = 0; d < s.query.entries.length; d++) {
-        const entry = s.query.entries[s.query.entries.length - 1 - d]
-        const row = document.createElement('div')
-        row.className = 'ui-collection-row'
-        row.setAttribute('role', 'option')
-        if (d === selected) row.dataset.selected = 'true'
-        const info = document.createElement('div')
-        info.className = 'ui-collection-row__info'
-        for (const node of commandNodes(entry.command, s.filter)) info.appendChild(node)
-        const actions = document.createElement('div')
-        actions.className = 'ui-collection-row__actions'
-        const time = document.createElement('span')
-        time.className = 'ui-recall-panel__time'
-        time.textContent = relativeTime(entry.endedAt, now)
-        actions.appendChild(time)
-        row.appendChild(info)
-        row.appendChild(actions)
-        list.appendChild(row)
-      }
-    }
-    this.root.appendChild(list)
 
     // ── Detail pane: the four facts about the selected row — exit code,
     //    cwd, duration, when it last ran. The data is in the entry; nothing
     //    here is fetched on selection. Unknowns render as unknown (—), never
     //    as zero or as the epoch (design §8.10). ──
+    let detail: HTMLElement | null = null
     if (s.name === 'navigating') {
       const wireIndex = s.query.entries.length - 1 - s.selected
       const entry = s.query.entries[wireIndex]
       if (entry) {
-        const detail = document.createElement('div')
-        detail.className = 'ui-recall-panel__detail'
+        detail = document.createElement('div')
+        detail.className = 'ui-floating-panel__detail'
         const facts: ReadonlyArray<readonly [string, string]> = [
           [
             'exit code',
@@ -849,18 +784,17 @@ export class RecallOverlay {
         ]
         for (const [term, value] of facts) {
           const item = document.createElement('div')
-          item.className = 'ui-recall-panel__detail-item'
+          item.className = 'ui-floating-panel__detail-item'
           const termEl = document.createElement('span')
-          termEl.className = 'ui-recall-panel__detail-term'
+          termEl.className = 'ui-floating-panel__detail-term'
           termEl.textContent = term
           const valueEl = document.createElement('span')
-          valueEl.className = 'ui-recall-panel__detail-value'
+          valueEl.className = 'ui-floating-panel__detail-value'
           valueEl.textContent = value
           item.appendChild(termEl)
           item.appendChild(valueEl)
           detail.appendChild(item)
         }
-        this.root.appendChild(detail)
       }
     }
 
@@ -876,7 +810,7 @@ export class RecallOverlay {
     //    panel says how far back instead of presenting a partial answer as
     //    the whole one). ──
     const search = document.createElement('div')
-    search.className = 'ui-recall-panel__search'
+    search.className = 'ui-floating-panel__search'
     const field = createSearchFieldDisplay({
       value: s.name === 'loading' ? '' : s.filter,
       placeholder: 'search history',
@@ -885,40 +819,60 @@ export class RecallOverlay {
     search.appendChild(field)
     if (s.name !== 'loading' && s.query.coverage !== null) {
       const coverage = document.createElement('span')
-      coverage.className = 'ui-recall-panel__coverage'
+      coverage.className = 'ui-floating-panel__coverage'
       coverage.textContent = `oldest entry ${relativeTime(s.query.coverage, Date.now())}`
       search.appendChild(coverage)
     }
-    this.root.appendChild(search)
 
-    // ── One footer, one line, every hint in it: what Enter does, how to
-    //    move, how to widen, how to get out — key groups separated by a real
-    //    gap. The execute group only appears when there IS something to
-    //    execute; the widen group only when the rung can widen (the empty
-    //    panel must not promise what a key cannot do there). ──
-    const footer = document.createElement('div')
-    footer.className = 'ui-recall-panel__footer'
+    // ── The footer hints — what Enter does, how to move, how to widen,
+    //    how to get out. The execute group only appears when there IS
+    //    something to execute; the widen group only when the rung can widen
+    //    (the empty panel must not promise what a key cannot do there). ──
+    const footer: string[] = []
     if (s.name === 'navigating') {
       // The Enter group names what the key ACTUALLY does in this state: a
       // search hands the input to the field (Enter inserts, never executes);
       // with the filter cleared the previewed command is in the line and
       // Enter is the reviewed run.
-      const enter = document.createElement('span')
-      enter.textContent = s.filter !== '' ? '↵ to insert' : '↵ to execute'
-      footer.appendChild(enter)
+      footer.push(s.filter !== '' ? '↵ to insert' : '↵ to execute')
     }
-    const navigate = document.createElement('span')
-    navigate.textContent = '↑ ↓ to navigate'
-    footer.appendChild(navigate)
+    footer.push('↑ ↓ to navigate')
     if (s.name !== 'loading' && s.query.exhausted && s.scope !== 'everywhere') {
-      const widen = document.createElement('span')
-      widen.textContent = 'shift+↑ widen'
-      footer.appendChild(widen)
+      footer.push('shift+↑ widen')
     }
-    const dismiss = document.createElement('span')
-    dismiss.textContent = 'esc to dismiss'
-    footer.appendChild(dismiss)
-    this.root.appendChild(footer)
+    footer.push('esc to dismiss')
+
+    const selected = s.name === 'navigating' ? s.selected : -1
+    const now = Date.now()
+    // Display order is oldest at the top, newest at the bottom — the
+    // reverse of the wire (the contract belongs to neither side, and the
+    // schema says `entries` is newest first, so the renderer mirrors). The
+    // `selected` DISPLAY index (0 = top = oldest) and the detail pane's
+    // wire index (`length - 1 - selected`) both depend on this order.
+    const rows: FloatingPanelRow[] =
+      s.name === 'loading'
+        ? []
+        : [...s.query.entries].reverse().map((entry) => ({
+            id: entry.id,
+            displayText: entry.command,
+            matchRanges: matchRange(entry.command, s.filter),
+            actions: [this.timeNode(entry, now)],
+          }))
+
+    // The loading and empty states fill the shared list with the kit's
+    // empty state (the panel's list is the scroll owner, so the message
+    // scrolls with the panel, not under it).
+    this.panel.show({
+      rows,
+      selectedIndex: Math.max(selected, 0),
+      before: [header],
+      after: [detail, search].filter((el): el is HTMLElement => el !== null),
+      footer,
+    })
+    if (s.name === 'loading' || s.query.entries.length === 0) {
+      const list = this.panel.list
+      if (list) list.appendChild(this.emptyState(s))
+    }
 
     // Keep the selected row FULLY in view — on open (it is the bottom row)
     // and on every move — so a rung taller than the panel is walkable: the
@@ -930,8 +884,51 @@ export class RecallOverlay {
     // open (2px visible of a 32px row) — so the reveal is computed from
     // live rects against the list itself (nocx-w7h.10, spec v9 §1).
     if (s.name === 'navigating') {
-      const selectedEl = list.querySelector<HTMLElement>('.ui-collection-row[data-selected="true"]')
-      if (selectedEl) list.scrollTop = scrollTopToReveal(list, selectedEl)
+      const list = this.panel.list
+      const selectedEl = list?.querySelector<HTMLElement>(
+        '.ui-collection-row[data-selected="true"]',
+      )
+      if (list && selectedEl) list.scrollTop = scrollTopToReveal(list, selectedEl)
     }
+  }
+
+  /** The relative timestamp on a row's right edge — the recall row's one
+   *  piece of evidence. */
+  private timeNode(entry: HistoryEntry, now: number): HTMLElement {
+    const time = document.createElement('span')
+    time.className = 'ui-floating-panel__time'
+    time.textContent = relativeTime(entry.endedAt, now)
+    return time
+  }
+
+  /** The kit's empty state inside the shared list: loading must not read as
+   *  "no history yet", and a filter that found nothing must not read as a
+   *  terminal that forgot. */
+  private emptyState(s: RecallState): HTMLElement {
+    const empty = document.createElement('div')
+    empty.className = 'ui-empty-state'
+    const emptyTitle = document.createElement('div')
+    emptyTitle.className = 'ui-empty-state__title'
+    const emptyDesc = document.createElement('div')
+    emptyDesc.className = 'ui-empty-state__desc'
+    // `closed` cannot reach render(); the guard keeps the union narrow for
+    // the filter access below.
+    if (s.name === 'loading' || s.name === 'closed') {
+      // The first rung is still in flight — a brief state on a local
+      // socket, but it must not read as "no history yet".
+      emptyTitle.textContent = '…'
+      empty.appendChild(emptyTitle)
+      return empty
+    }
+    if (s.filter !== '') {
+      emptyTitle.textContent = `no matches for "${s.filter}"`
+      emptyDesc.textContent = 'backspace to clear the filter'
+    } else {
+      emptyTitle.textContent = 'no history yet'
+      emptyDesc.textContent = 'commands you run will appear here'
+    }
+    empty.appendChild(emptyTitle)
+    empty.appendChild(emptyDesc)
+    return empty
   }
 }

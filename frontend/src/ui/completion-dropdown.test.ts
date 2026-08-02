@@ -1,13 +1,13 @@
 // @vitest-environment jsdom
-// CompletionDropdown — the kit component's contract: it renders candidates,
-// reports hover/pick, and never inserts anything itself (displayText is what
-// a row shows; insertText belongs to the controller).
+// CompletionDropdown — the completion VARIANT of the kit's FloatingPanel
+// (ui/README table): it maps candidates to rows, renders them through the
+// shared panel, and never inserts anything itself (displayText is what a
+// row shows; insertText belongs to the controller). The shared shell's own
+// contract (sizing, anchoring, overflow) is tested in floating-panel.test.ts;
+// this file pins the completion shape on top of it.
 import { describe, it, expect, vi } from 'vitest'
-import {
-  CompletionDropdown,
-  MAX_DROPDOWN_WIDTH_PX,
-  MIN_DROPDOWN_WIDTH_PX,
-} from './completion-dropdown'
+import { CompletionDropdown } from './completion-dropdown'
+import { MAX_PANEL_WIDTH_PX, MIN_PANEL_WIDTH_PX } from './floating-panel'
 import type { Candidate } from '../suggest/candidate'
 
 const cand = (over: Partial<Candidate>): Candidate => ({
@@ -44,7 +44,7 @@ describe('CompletionDropdown', () => {
     const { dd } = mount()
     dd.show([cand({ id: 'a' }), cand({ id: 'b' })], 1)
     expect(dd.isOpen).toBe(true)
-    const rows = dd.root.querySelectorAll('.ui-completion-dropdown__row')
+    const rows = dd.root.querySelectorAll('.ui-floating-panel__row')
     expect(rows).toHaveLength(2)
     expect(rows[1].getAttribute('aria-selected')).toBe('true')
     expect(rows[0].getAttribute('aria-selected')).toBe('false')
@@ -53,20 +53,20 @@ describe('CompletionDropdown', () => {
   it('renders the hint footer with the selectable list (and only then)', () => {
     const { dd } = mount()
     dd.show([cand({ id: 'a' })], 0)
-    const footer = dd.root.querySelector('.ui-completion-dropdown__footer')
+    const footer = dd.root.querySelector('.ui-floating-panel__footer')
     expect(footer).not.toBeNull()
     expect(footer?.textContent).toContain('↵ to insert')
     expect(footer?.textContent).toContain('tab ↹ to cycle')
     // The empty state deliberately has no footer (nothing to insert or
     // cycle) — a regression here would resurrect the footer-only panel.
     dd.showEmpty('No matches')
-    expect(dd.root.querySelector('.ui-completion-dropdown__footer')).toBeNull()
+    expect(dd.root.querySelector('.ui-floating-panel__footer')).toBeNull()
   })
 
   it('highlights the match ranges inside the display text', () => {
     const { dd } = mount()
     dd.show([cand({ displayText: 'git status', matchRanges: [{ from: 0, to: 7 }] })], 0)
-    const marks = dd.root.querySelectorAll('.ui-completion-dropdown__match')
+    const marks = dd.root.querySelectorAll('.ui-floating-panel__match')
     expect(marks).toHaveLength(1)
     expect(marks[0].textContent).toBe('git sta')
   })
@@ -74,7 +74,7 @@ describe('CompletionDropdown', () => {
   it('shows the source badge — displayed, never inserted', () => {
     const { dd } = mount()
     dd.show([cand({ source: 'path' })], 0)
-    const badge = dd.root.querySelector('.ui-completion-dropdown__source')
+    const badge = dd.root.querySelector('.ui-floating-panel__source')
     expect(badge?.textContent).toBe('path')
   })
 
@@ -87,19 +87,19 @@ describe('CompletionDropdown', () => {
       ],
       0,
     )
-    const kinds = dd.root.querySelectorAll('.ui-completion-dropdown__kind')
+    const kinds = dd.root.querySelectorAll('.ui-floating-panel__kind')
     expect(kinds).toHaveLength(2)
     expect(kinds[0].textContent).toBe('Directory')
     expect(kinds[1].textContent).toBe('File')
     // A row without a kind renders no kind badge.
     dd.show([cand({ id: 'c' })], 0)
-    expect(dd.root.querySelectorAll('.ui-completion-dropdown__kind')).toHaveLength(0)
+    expect(dd.root.querySelectorAll('.ui-floating-panel__kind')).toHaveLength(0)
   })
 
   it('reports hover and pick with the row index', () => {
     const { dd, onHover, onPick } = mount()
     dd.show([cand({ id: 'a' }), cand({ id: 'b' })], 0)
-    const rows = dd.root.querySelectorAll('.ui-completion-dropdown__row')
+    const rows = dd.root.querySelectorAll('.ui-floating-panel__row')
     rows[1].dispatchEvent(new MouseEvent('mouseenter'))
     expect(onHover).toHaveBeenCalledWith(1)
     rows[0].dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))
@@ -111,7 +111,7 @@ describe('CompletionDropdown', () => {
     dd.show([cand({})], 0)
     dd.hide()
     expect(dd.isOpen).toBe(false)
-    expect(dd.root.querySelectorAll('.ui-completion-dropdown__row')).toHaveLength(0)
+    expect(dd.root.querySelectorAll('.ui-floating-panel__row')).toHaveLength(0)
   })
 
   it('showEmpty renders one non-selectable row, no footer, and reports open', () => {
@@ -119,7 +119,7 @@ describe('CompletionDropdown', () => {
     dd.showEmpty('No subdirectories in Downloads')
     expect(dd.isOpen).toBe(true)
     expect(dd.root.dataset.open).toBe('true')
-    const rows = dd.root.querySelectorAll('.ui-completion-dropdown__row')
+    const rows = dd.root.querySelectorAll('.ui-floating-panel__row')
     expect(rows).toHaveLength(1)
     const row = rows[0] as HTMLElement
     expect(row.dataset.empty).toBe('true')
@@ -127,7 +127,7 @@ describe('CompletionDropdown', () => {
     expect(row.getAttribute('aria-disabled')).toBe('true')
     expect(row.textContent).toContain('No subdirectories in Downloads')
     // No hint footer: the hints describe a selectable list.
-    expect(dd.root.querySelector('.ui-completion-dropdown__footer')).toBeNull()
+    expect(dd.root.querySelector('.ui-floating-panel__footer')).toBeNull()
   })
 
   it('sizes to the longest row, capped — never the pane', () => {
@@ -143,7 +143,7 @@ describe('CompletionDropdown', () => {
       fakeScrollWidth(0)
       dd.show([cand({ id: 'a' })], 0)
       // The floor applies to a tiny (here, unmeasurable) list.
-      expect(dd.root.style.width).toBe(`${MIN_DROPDOWN_WIDTH_PX}px`)
+      expect(dd.root.style.width).toBe(`${MIN_PANEL_WIDTH_PX}px`)
       fakeScrollWidth(500)
       dd.show([cand({ id: 'b' })], 0)
       // The panel follows its longest row…
@@ -151,7 +151,7 @@ describe('CompletionDropdown', () => {
       fakeScrollWidth(5000)
       dd.show([cand({ id: 'c' })], 0)
       // …but never past the cap.
-      expect(dd.root.style.width).toBe(`${MAX_DROPDOWN_WIDTH_PX}px`)
+      expect(dd.root.style.width).toBe(`${MAX_PANEL_WIDTH_PX}px`)
     } finally {
       delete (proto as { scrollWidth?: number }).scrollWidth
     }
@@ -209,10 +209,10 @@ describe('CompletionDropdown', () => {
       0,
     )
     // One caption, sitting between the path rows and the history rows.
-    const groups = dd.root.querySelectorAll('.ui-completion-dropdown__group')
+    const groups = dd.root.querySelectorAll('.ui-floating-panel__group')
     expect(groups).toHaveLength(1)
     expect(groups[0].textContent).toBe('History')
-    const rows = dd.root.querySelectorAll('.ui-completion-dropdown__row')
+    const rows = dd.root.querySelectorAll('.ui-floating-panel__row')
     expect(rows).toHaveLength(4)
     // The caption comes right before the first history row.
     expect(groups[0].nextElementSibling?.textContent).toContain('cd Downloads')
@@ -222,7 +222,7 @@ describe('CompletionDropdown', () => {
   it('a pure-history list gets no caption — there is no other group to separate from', () => {
     const { dd } = mount()
     dd.show([cand({ id: 'h1', source: 'history', displayText: 'git status' })], 0)
-    expect(dd.root.querySelector('.ui-completion-dropdown__group')).toBeNull()
+    expect(dd.root.querySelector('.ui-floating-panel__group')).toBeNull()
   })
 
   it('anchors at the caret, clamped inside the editor', () => {
@@ -244,6 +244,6 @@ describe('CompletionDropdown', () => {
     dd.showEmpty('No matches')
     dd.hide()
     expect(dd.isOpen).toBe(false)
-    expect(dd.root.querySelectorAll('.ui-completion-dropdown__row')).toHaveLength(0)
+    expect(dd.root.querySelectorAll('.ui-floating-panel__row')).toHaveLength(0)
   })
 })

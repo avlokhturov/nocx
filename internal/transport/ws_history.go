@@ -46,6 +46,13 @@ type historyQueryEntry struct {
 	ExitCode  *int                  `json:"exitCode,omitempty"`
 	StartedAt *int64                `json:"startedAt,omitempty"`
 	EndedAt   *int64                `json:"endedAt"`
+	// MaskedCount and MaskedKinds are what the store redacted from Command
+	// at record time — the durable text is always the masked one, and the
+	// facts ride the row so a block reconstructed after a restart can say
+	// "3 secrets masked" with the kinds. Never null: no mask is []
+	// (contracts/history.query.schema.json).
+	MaskedCount int      `json:"maskedCount"`
+	MaskedKinds []string `json:"maskedKinds"`
 }
 
 // historyQueryResponse is the result of history.query. Entries is never nil:
@@ -105,15 +112,21 @@ func (s *WSServer) handleHistoryQuery(ctx context.Context, wconn *wsConn, req js
 	resp.Exhausted = page.Exhausted
 	resp.Coverage = page.Coverage
 	for _, r := range page.Entries {
+		kinds := r.MaskedKinds
+		if kinds == nil {
+			kinds = []string{}
+		}
 		resp.Entries = append(resp.Entries, historyQueryEntry{
-			ID:        strconv.FormatInt(r.ID, 10),
-			Command:   r.Command,
-			Cwd:       r.Cwd,
-			Host:      r.Host,
-			Status:    r.Status,
-			ExitCode:  r.ExitCode,
-			StartedAt: r.StartedAt,
-			EndedAt:   r.EndedAt,
+			ID:          strconv.FormatInt(r.ID, 10),
+			Command:     r.Command,
+			Cwd:         r.Cwd,
+			Host:        r.Host,
+			Status:      r.Status,
+			ExitCode:    r.ExitCode,
+			StartedAt:   r.StartedAt,
+			EndedAt:     r.EndedAt,
+			MaskedCount: r.MaskedCount,
+			MaskedKinds: kinds,
 		})
 	}
 	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(resp)))

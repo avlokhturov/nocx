@@ -38,6 +38,8 @@ type fakeVaultLifecycle struct {
 	resolveRowID          credential.SecretID
 	resolveRowFound       bool
 	resolveRowErr         error
+	getSecret             credential.Secret
+	getErr                error
 }
 
 func (f *fakeVaultLifecycle) State() vault.State { return f.state }
@@ -110,6 +112,13 @@ func (f *fakeVaultLifecycle) ResolveRow(row string, _ []vault.CredentialInventor
 		return "", false
 	}
 	return f.resolveRowID, f.resolveRowFound
+}
+
+func (f *fakeVaultLifecycle) Get(_ context.Context, _ credential.SecretID) (credential.Secret, error) {
+	if f.getErr != nil {
+		return credential.Secret{}, f.getErr
+	}
+	return f.getSecret, nil
 }
 
 func newFakeVaultLifecycle() *fakeVaultLifecycle {

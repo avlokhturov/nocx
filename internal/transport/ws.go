@@ -798,7 +798,7 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		"vault.changePassphrase", "vault.regenerateRecovery", "vault.setDefaultProvider",
 		"vault.setAutoSeal", "vault.activity", "vault.inventory",
 		"vault.createSecret", "vault.renameSecret", "vault.replaceSecret",
-		"vault.deleteSecret":
+		"vault.deleteSecret", "vault.resolveLine":
 		s.handleVaultMethod(wconn, req)
 	case "dialog.openFile":
 		s.handleDialogOpenFile(wconn, req)

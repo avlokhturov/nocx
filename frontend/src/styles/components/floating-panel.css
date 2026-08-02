@@ -1,0 +1,229 @@
+/* FloatingPanel (ui/README) — the kit's floating-panel primitive: the shell
+   every surface that floats above the command editor is a variant of (the
+   completion dropdown and the recall overlay). Owns one identity family:
+   `ui-floating-panel` + its __parts. Rows reuse the kit's `ui-collection-row`
+   identity (padding and the selected variance live in collection-view.css);
+   badges are kit `ui-badge` tones; the recall's search row is the kit's
+   search field. Colours are tokens only — no literals outside themes/
+   (ADR-0013 §4).
+   One sizing rule for every variant (the owner's "они должны наследовать
+   один шаблон"): content-sized width between a floor and a ceiling,
+   max-height with the list scrolling inside, one footer, one match. */
+
+.ui-floating-panel {
+  position: absolute;
+  left: 0; /* the kit's default; the component overrides it inline when the
+              caret anchor is known — the panel opens at the caret, not at
+              the pane's edge */
+  bottom: 100%; /* the panel floats above the editor it sits on */
+  margin-bottom: 6px;
+  display: none;
+  flex-direction: column;
+  max-height: 40vh; /* a long list scrolls inside the panel, never grows it */
+  /* Content-sized: as wide as the widest content, floored and capped —
+     never the editor's width. The component sets the exact width inline
+     from one measurement per rendered list; these are the fallbacks before
+     (and beyond) that. */
+  width: max-content;
+  max-width: min(90vw, 640px);
+  min-width: 320px;
+  background: var(--color-surface-raised);
+  /* A real edge, or the panel reads as a region of the terminal: the
+     hairline divider border was nearly the same colour as the surface, so
+     scrollback text appeared to show through the boundary. The outline
+     border token draws the edge; the two shadows (kit pattern from toast:
+     a tight contact shadow plus a wide soft one) lift the panel off the
+     terminal. z-index: 1 keeps the panel above the terminal's positioned
+     layers (the xterm viewport is z-index 0) without competing with
+     overlays that must cover it (toast: 300, prompt: 1 + later in the
+     tree). */
+  border: 1px solid var(--color-border);
+  border-radius: var(--control-radius-md);
+  box-shadow:
+    0 1px 2px color-mix(in srgb, black, transparent 80%),
+    0 8px 24px color-mix(in srgb, black, transparent 65%);
+  z-index: 1;
+  overflow: hidden;
+  font-family: var(--font-family-ui);
+}
+
+.ui-floating-panel[data-open='true'] {
+  display: flex;
+}
+
+.ui-floating-panel__list {
+  overflow-y: auto;
+  max-height: calc(40vh - 2rem);
+  min-height: 0;
+  padding: var(--space-1) 0;
+  flex: 1 1 auto;
+}
+
+/* Rows never wrap: the panel's width is the widest row's, and a wrapped
+   row would under-measure it (scrollWidth reads the longest unwrapped
+   line). A row longer than the ceiling ELLIPSISES inside its info column —
+   never a clipped glyph (the owner's "repos/meshynet/graphify-ou…"). */
+.ui-floating-panel__row {
+  white-space: nowrap;
+}
+
+.ui-floating-panel__row .ui-collection-row__info {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The honest "nothing to choose" row: an explanation, not a selectable
+   item — muted and italic so it never reads as a candidate, and nothing on
+   it reacts to hover or click (the component wires no listeners). */
+.ui-floating-panel__row[data-empty='true'] {
+  color: var(--color-text-muted);
+  font-style: italic;
+  white-space: normal;
+}
+
+/* A section caption (the history group in a mixed completion list): a
+   hairline above the section plus a small label, so a whole-line history
+   row can never read as one more path candidate (a path replaces the
+   current TOKEN; a history row replaces the WHOLE LINE — the list must say
+   the two kinds apart). */
+.ui-floating-panel__group {
+  display: flex;
+  align-items: center;
+  margin-top: var(--space-1);
+  padding: var(--space-1) var(--space-3);
+  border-top: 1px solid var(--color-divider);
+  font-size: var(--font-size-xs);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+/* The matched substring inside a row — why the row survived the search.
+   One treatment for every variant, straight from theme tokens: the accent
+   at 40% over the panel surface, with the glyphs kept at the row's own
+   text token (the weight bump is the recall's original emphasis, carried
+   over). The chip's VISIBILITY is the background channel — asserted by
+   test, not eyeballed: the owner's "a dark chip that blends into the
+   glyphs" was a 15% wash that read as the row itself. */
+.ui-floating-panel__match {
+  background: color-mix(in srgb, var(--color-accent) 40%, transparent);
+  font-weight: 600;
+  border-radius: 2px;
+}
+
+/* One line, every hint in it: the groups are spans laid out by flex with a
+   real gap between them and nowrap, so the key hints can neither get their
+   own rows nor wrap apart. In a narrow content-sized panel the whole row
+   wraps together rather than overflowing. */
+.ui-floating-panel__footer {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+  white-space: nowrap;
+  padding: var(--space-2) var(--space-3);
+  border-top: 1px solid var(--color-divider);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+  flex: 0 0 auto;
+}
+
+/* ── recall variant: header, detail pane, search row ────────────────────
+   These parts belong to the recall layout only; the completion variant
+   renders none of them. They stay in this family's file (ADR-0013 §1). */
+
+.ui-floating-panel__header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--color-divider);
+  flex: 0 0 auto;
+}
+
+.ui-floating-panel__title {
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  color: var(--color-text-muted);
+}
+
+.ui-floating-panel__count {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-dim);
+  margin-left: auto;
+}
+
+/* The relative timestamp on a row's right edge. */
+.ui-floating-panel__time {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* The detail pane: the four facts about the selected row. Unknowns render
+   as unknown (—), never as zero or as the epoch (design §8.10). */
+.ui-floating-panel__detail {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-top: 1px solid var(--color-divider);
+  font-size: var(--font-size-xs);
+  flex: 0 0 auto;
+}
+
+.ui-floating-panel__detail-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.ui-floating-panel__detail-term {
+  color: var(--color-text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.ui-floating-panel__detail-value {
+  color: var(--color-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The search row: the recall panel's one field, at the bottom edge — the
+   kit's search field (ui-search-field identities, display form) carrying
+   what the user typed, with the coverage line at its right-hand end. Keys
+   land on the editor's arbiter, never on an input, so the display form is
+   the kit's own statement of "this is where typing goes". The divider is
+   the detail pane's when it is present — adjacent borders must not double
+   up. */
+.ui-floating-panel__search {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-top: 1px solid var(--color-divider);
+  flex: 0 0 auto;
+}
+
+.ui-floating-panel__detail + .ui-floating-panel__search {
+  border-top: none;
+}
+
+/* Placement only: the field stretches to the row, the coverage rides the
+   right-hand end — the field's own look belongs to search-field.css. */
+.ui-floating-panel__search > .ui-search-field {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.ui-floating-panel__coverage {
+  color: var(--color-text-dim);
+  white-space: nowrap;
+  font-size: var(--font-size-xs);
+}

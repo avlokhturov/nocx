@@ -16,11 +16,11 @@ import path from 'node:path'
 // as completions in his terminal.
 
 const INPUT = '.nocx-editor-input'
-const DROPDOWN = '.ui-completion-dropdown'
+const DROPDOWN = '.ui-floating-panel[data-variant="completion"]'
 
 /** The row the selection currently sits on. */
 const selectedRow = (page: Page) =>
-  page.locator(`${DROPDOWN} .ui-completion-dropdown__row[data-selected="true"]`)
+  page.locator(`${DROPDOWN} .ui-floating-panel__row[data-selected="true"]`)
 
 /** A fixture directory this run owns; the session cds into it. */
 const fixtureDir = (): string => fs.mkdtempSync(path.join(os.tmpdir(), 'nocx-e2e-cmp-'))
@@ -157,7 +157,7 @@ test.describe('tab completion', () => {
       .toContain('No matches')
 
     // One non-selectable row: never the selected variance, no hint footer.
-    const rows = dropdown.locator('.ui-completion-dropdown__row')
+    const rows = dropdown.locator('.ui-floating-panel__row')
     await expect(rows).toHaveCount(1)
     await expect(rows.first()).toHaveAttribute('data-empty', 'true')
     await expect(rows.first()).not.toHaveAttribute('aria-selected', 'true')
@@ -189,7 +189,7 @@ test.describe('tab completion', () => {
       await page.keyboard.press('Tab')
       const dropdown = page.locator(DROPDOWN).first()
       await expect(dropdown).toBeVisible({ timeout: 5000 })
-      const empty = dropdown.locator('.ui-completion-dropdown__row[data-empty="true"]')
+      const empty = dropdown.locator('.ui-floating-panel__row[data-empty="true"]')
       await expect(empty).toHaveCount(1)
       await expect(empty.first()).toContainText('No subdirectories in Downloads')
       await page.screenshot({ path: '/tmp/nocx-c3-cd-onto-files.png' })
@@ -215,7 +215,7 @@ test.describe('tab completion', () => {
       await page.keyboard.press('Tab')
       const dropdown = page.locator(DROPDOWN).first()
       await expect(dropdown).toBeVisible({ timeout: 5000 })
-      await expect(dropdown.locator('.ui-completion-dropdown__row').first()).toContainText('alpha/')
+      await expect(dropdown.locator('.ui-floating-panel__row').first()).toContainText('alpha/')
 
       // Erase the whole line: the panel must CLOSE, not hang showing only
       // its footer.
@@ -263,7 +263,7 @@ test.describe('tab completion', () => {
       // The two directories, each marked Directory with a trailing slash;
       // the file is absent. History rows may sit below the paths (the
       // argument rung puts paths first; the argument cap bounds history).
-      const rows = dropdown.locator('.ui-completion-dropdown__row')
+      const rows = dropdown.locator('.ui-floating-panel__row')
       const first = rows.nth(0)
       const second = rows.nth(1)
       await expect(first).toContainText('alpha/')
@@ -311,6 +311,71 @@ test.describe('tab completion', () => {
       await page.keyboard.press('Enter')
       await expect(page.locator(INPUT)).toHaveText('cd beta/', { timeout: 5000 })
       await expect(dropdown).not.toBeVisible()
+    } finally {
+      fs.rmSync(fixture, { recursive: true, force: true })
+    }
+  })
+
+  test('reports 2-4: last-segment rows, a readable match chip, and no clipped glyphs', async ({
+    page,
+  }) => {
+    const fixture = fixtureDir()
+    // The owner's session: a multi-level path with a long directory name —
+    // the case that used to repeat `repos/meshynet/` in every row and clip
+    // `repos/meshynet/graphify-ou…` at the panel's ceiling.
+    fs.mkdirSync(path.join(fixture, 'repos', 'meshynet'), { recursive: true })
+    fs.mkdirSync(path.join(fixture, 'repos', 'meshynet', 'bin'))
+    fs.mkdirSync(path.join(fixture, 'repos', 'meshynet', 'graphify-output'))
+    try {
+      await page.goto('/')
+      await expect(page.locator('.nocx-tab')).toHaveCount(1)
+      await promptReady(page)
+      await cdInto(page, fixture)
+
+      // ── report 3: the row shows the LAST SEGMENT, never the typed
+      //    prefix repeated — `graphify-output/`, not
+      //    `repos/meshynet/graphify-output/`. Typing a PARTIAL segment
+      //    (`gr`) also leaves a match to assert report 2 against. ──
+      await page.keyboard.type('cd repos/meshynet/gr')
+      await page.keyboard.press('Tab')
+      const dropdown = page.locator(DROPDOWN).first()
+      await expect(dropdown).toBeVisible({ timeout: 8000 })
+      const rows = dropdown.locator('.ui-floating-panel__row')
+      await expect(rows.first()).toBeVisible({ timeout: 5000 })
+      // A PARTIAL segment (`gr`) narrows the listing to the matching entry:
+      // one row, its last segment shown — never `repos/meshynet/…` repeated.
+      await expect(rows.nth(0)).toContainText('graphify-output/')
+      await expect(dropdown).not.toContainText('repos/meshynet/graphify-output')
+      const box = await dropdown.boundingBox()
+      expect(box).not.toBeNull()
+      // Content-sized and never the pane (report 5's rule, this shape).
+      const pane = await page.locator('.pane.active').first().boundingBox()
+      expect(box!.width).toBeLessThan(pane!.width * 0.75)
+      expect(box!.width).toBeLessThanOrEqual(640)
+      console.log(`E2E completion panel width: ${box!.width}px (report 3 shape)`)
+
+      // ── report 2: the match chip is a real highlight — its computed
+      //    background differs from the row it sits on (the intended
+      //    channel), resolved from theme tokens by the browser. ──
+      const match = rows.nth(0).locator('mark.ui-floating-panel__match').first()
+      await expect(match).toBeVisible({ timeout: 5000 })
+      await expect(match).toHaveText('gr')
+      const [markBg, rowBg] = await match.evaluate((el) => {
+        const mark = el as HTMLElement
+        const row = mark.closest('.ui-floating-panel__row') as HTMLElement
+        return [getComputedStyle(mark).backgroundColor, getComputedStyle(row).backgroundColor]
+      })
+      expect(markBg).not.toBe(rowBg)
+      console.log(`E2E match chip bg: ${markBg} vs row bg: ${rowBg} (report 2)`)
+
+      // ── report 4: a row longer than the ceiling ellipsises inside the
+      //    panel — the panel never grows past the ceiling to fit it. ──
+      const infoOverflow = await rows
+        .nth(0)
+        .locator('.ui-collection-row__info')
+        .evaluate((el) => getComputedStyle(el as HTMLElement).textOverflow)
+      expect(infoOverflow).toBe('ellipsis')
+      await page.screenshot({ path: '/tmp/nocx-reports-234.png' })
     } finally {
       fs.rmSync(fixture, { recursive: true, force: true })
     }

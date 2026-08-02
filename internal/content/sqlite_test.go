@@ -873,3 +873,50 @@ func TestRetentionSweepKeepsFreshRowAt30Days(t *testing.T) {
 		t.Fatalf("rows after Add with retention 30d = %+v, want the fresh row to survive the same-turn sweep", recs)
 	}
 }
+
+// The mask facts ride the row: a record written with masked_count and
+// masked_kinds reads them back identically through List and Query, and a
+// record without them reads back 0/[] — the durable facts describe the
+// masked command, never the secret itself.
+func TestMaskFactsRoundTrip(t *testing.T) {
+	db, _ := newTestStore(t)
+	hist := db.CommandHistory()
+	ctx := context.Background()
+
+	withFacts := markerRecord("curl -H \"Authorization: Bearer sk-p...7890\" https://api")
+	withFacts.MaskedCount = 1
+	withFacts.MaskedKinds = []string{"openai"}
+	if addErr := hist.Add(ctx, withFacts); addErr != nil {
+		t.Fatalf("Add: %v", addErr)
+	}
+
+	plain := markerRecord("echo hello")
+	if addErr := hist.Add(ctx, plain); addErr != nil {
+		t.Fatalf("Add plain: %v", addErr)
+	}
+
+	recs, err := hist.List(ctx, 10)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(recs) != 2 {
+		t.Fatalf("List = %d rows, want 2", len(recs))
+	}
+	if recs[0].Command != "echo hello" {
+		t.Fatalf("newest row = %q, want the plain record", recs[0].Command)
+	}
+	if recs[0].MaskedCount != 0 || len(recs[0].MaskedKinds) != 0 {
+		t.Errorf("plain record facts = %d %v, want 0 nil", recs[0].MaskedCount, recs[0].MaskedKinds)
+	}
+	if recs[1].MaskedCount != 1 || len(recs[1].MaskedKinds) != 1 || recs[1].MaskedKinds[0] != "openai" {
+		t.Errorf("masked record facts = %d %v, want 1 [openai]", recs[1].MaskedCount, recs[1].MaskedKinds)
+	}
+
+	page, err := hist.Query(ctx, content.ScopeEverywhere, "", "", 10, nil, "")
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if page.Entries[0].MaskedCount != 0 || page.Entries[1].MaskedCount != 1 {
+		t.Errorf("query facts = %d %d, want 0 then 1", page.Entries[0].MaskedCount, page.Entries[1].MaskedCount)
+	}
+}

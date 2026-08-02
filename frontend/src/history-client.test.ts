@@ -157,6 +157,8 @@ describe('queryHistory', () => {
           cwd: '/repo',
           host: '',
           status: 'success',
+          maskedCount: 0,
+          maskedKinds: [],
           startedAt: 1,
           endedAt: 2,
         },
@@ -175,7 +177,18 @@ describe('queryHistory', () => {
   it('returns the store page the socket answered', async () => {
     const client = fakeClient()
     const page: HistoryQuery = {
-      entries: [{ id: '9', command: 'ls', cwd: '/repo', host: '', status: 'success', endedAt: 1 }],
+      entries: [
+        {
+          id: '9',
+          command: 'ls',
+          cwd: '/repo',
+          host: '',
+          status: 'success',
+          endedAt: 1,
+          maskedCount: 0,
+          maskedKinds: [],
+        },
+      ],
       scope: 'directory',
       exhausted: true,
       source: 'store',

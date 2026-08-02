@@ -142,11 +142,11 @@ const key = (k: string, init: KeyboardEventInit = {}): KeyboardEvent =>
 
 /** The row the selection currently sits on. */
 const selectedRow = (dropdown: CompletionDropdown) =>
-  dropdown.root.querySelector('.ui-completion-dropdown__row[data-selected="true"]')
+  dropdown.root.querySelector('.ui-floating-panel__row[data-selected="true"]')
 
 /** The honest empty row, when the panel shows one. */
 const emptyRow = (dropdown: CompletionDropdown) =>
-  dropdown.root.querySelector('.ui-completion-dropdown__row[data-empty="true"]')
+  dropdown.root.querySelector('.ui-floating-panel__row[data-empty="true"]')
 
 /** Flush microtasks and zero-delay timers, under fake timers or real. */
 const flush = async () => {
@@ -174,7 +174,7 @@ describe('opening', () => {
     controller.open()
     await flush()
     expect(dropdown.isOpen).toBe(true)
-    expect(dropdown.root.querySelectorAll('.ui-completion-dropdown__row')).toHaveLength(1)
+    expect(dropdown.root.querySelectorAll('.ui-floating-panel__row')).toHaveLength(1)
   })
 
   it('with zero candidates Tab opens the honest empty row — never silence', async () => {
@@ -187,9 +187,9 @@ describe('opening', () => {
     expect(emptyRow(dropdown)).not.toBeNull()
     expect(emptyRow(dropdown)?.textContent).toContain('No matches')
     // One row, not selectable, no footer hints (nothing to insert or cycle).
-    expect(dropdown.root.querySelectorAll('.ui-completion-dropdown__row')).toHaveLength(1)
+    expect(dropdown.root.querySelectorAll('.ui-floating-panel__row')).toHaveLength(1)
     expect(emptyRow(dropdown)?.getAttribute('aria-selected')).toBe('false')
-    expect(dropdown.root.querySelector('.ui-completion-dropdown__footer')).toBeNull()
+    expect(dropdown.root.querySelector('.ui-floating-panel__footer')).toBeNull()
   })
 
   it('the empty row names the directory when the fs provider knows it', async () => {
@@ -243,7 +243,7 @@ describe('opening', () => {
     controller.onDocChanged()
     await flush()
     expect(dropdown.isOpen).toBe(false)
-    expect(dropdown.root.querySelectorAll('.ui-completion-dropdown__row')).toHaveLength(0)
+    expect(dropdown.root.querySelectorAll('.ui-floating-panel__row')).toHaveLength(0)
   })
 
   it('an empty line opens nothing (every shipped provider declines)', async () => {
@@ -324,7 +324,7 @@ describe('streaming and selection', () => {
     await flush()
     // The fast provider's batch arrived first; the dropdown is already open.
     expect(dropdown.isOpen).toBe(true)
-    const rows = dropdown.root.querySelectorAll('.ui-completion-dropdown__row')
+    const rows = dropdown.root.querySelectorAll('.ui-floating-panel__row')
     expect(rows).toHaveLength(1)
     expect(rows[0].textContent).toContain('fast-cand')
   })
@@ -345,9 +345,7 @@ describe('streaming and selection', () => {
     // candidate stays selected.
     slow.next().resolve([cand({ id: 'second' })])
     await flush()
-    const selected = dropdown.root.querySelector(
-      '.ui-completion-dropdown__row[data-selected="true"]',
-    )
+    const selected = dropdown.root.querySelector('.ui-floating-panel__row[data-selected="true"]')
     expect(selected?.textContent).toContain('first')
   })
 
@@ -360,7 +358,7 @@ describe('streaming and selection', () => {
     })
     controller.open()
     await flush()
-    expect(dropdown.root.querySelectorAll('.ui-completion-dropdown__row')).toHaveLength(1)
+    expect(dropdown.root.querySelectorAll('.ui-floating-panel__row')).toHaveLength(1)
   })
 
   it('one provider error does not kill the others', async () => {
@@ -403,8 +401,7 @@ describe('streaming and selection', () => {
     await flush()
     expect(controller.handleKey(key('ArrowDown'))).toBe(true)
     expect(
-      dropdown.root.querySelector('.ui-completion-dropdown__row[data-selected="true"]')
-        ?.textContent,
+      dropdown.root.querySelector('.ui-floating-panel__row[data-selected="true"]')?.textContent,
     ).toContain('one')
 
     editor.type('x')
@@ -413,8 +410,7 @@ describe('streaming and selection', () => {
     // The fresh query's first batch replaces the list; selection resets.
     expect(dropdown.isOpen).toBe(true)
     expect(
-      dropdown.root.querySelector('.ui-completion-dropdown__row[data-selected="true"]')
-        ?.textContent,
+      dropdown.root.querySelector('.ui-floating-panel__row[data-selected="true"]')?.textContent,
     ).toContain('one')
   })
 
@@ -514,7 +510,7 @@ describe('streaming and selection', () => {
     ])
     await flush()
 
-    const rows = dropdown.root.querySelectorAll('.ui-completion-dropdown__row')
+    const rows = dropdown.root.querySelectorAll('.ui-floating-panel__row')
     expect(rows[0].textContent).toContain('fs:dir')
     expect(rows[1].textContent).toContain('cd x')
   })
@@ -571,19 +567,16 @@ describe('keyboard', () => {
     await open(controller)
     expect(controller.handleKey(key('ArrowDown'))).toBe(true)
     expect(
-      dropdown.root.querySelector('.ui-completion-dropdown__row[data-selected="true"]')
-        ?.textContent,
+      dropdown.root.querySelector('.ui-floating-panel__row[data-selected="true"]')?.textContent,
     ).toContain('a2')
     expect(controller.handleKey(key('ArrowUp'))).toBe(true)
     expect(
-      dropdown.root.querySelector('.ui-completion-dropdown__row[data-selected="true"]')
-        ?.textContent,
+      dropdown.root.querySelector('.ui-floating-panel__row[data-selected="true"]')?.textContent,
     ).toContain('a1')
     // Wrap up from the top lands on the last row.
     expect(controller.handleKey(key('ArrowUp'))).toBe(true)
     expect(
-      dropdown.root.querySelector('.ui-completion-dropdown__row[data-selected="true"]')
-        ?.textContent,
+      dropdown.root.querySelector('.ui-floating-panel__row[data-selected="true"]')?.textContent,
     ).toContain('a3')
   })
 
@@ -608,6 +601,85 @@ describe('keyboard', () => {
     expect(editor.doc).toBe('git sta')
   })
 
+  // Report 1 (owner): "Type `cd`, press Tab — the panel closes instead of
+  // moving to the next candidate." Not reproducible headlessly (the e2e
+  // suite presses Tab against the real editor, arbiter and providers and
+  // the panel stays open), and reading the controller shows no close path
+  // in the Tab branch: `move` only re-renders an open list. The invariant
+  // is pinned here at the seam that was in doubt — Tab on an open panel
+  // NEVER closes it, and with ONE candidate (nowhere to move) the selection
+  // stays put. Closing on a key that means "next" is never right.
+  it('report 1: Tab on an open panel never closes it — cd + Tab + Tab, command position', async () => {
+    const { editor, dropdown, controller } = rig({
+      providers: [
+        // The command snapshot answers `cd`; history answers one whole-line
+        // row — the owner's shell shape (the fs provider is not applicable
+        // in command position for a bare word).
+        instantProvider('command', (ctx) =>
+          ctx.doc.trim() === '' ? [] : [cand({ id: 'cmd:cd', source: 'command' })],
+        ),
+        instantProvider('history', (ctx) =>
+          ctx.doc.trim() === ''
+            ? []
+            : [
+                cand({
+                  id: 'hist:cd /home/dev/x',
+                  displayText: 'cd /home/dev/x',
+                  insertText: 'cd /home/dev/x',
+                  replacement: { from: 0, to: ctx.doc.length },
+                  matchRanges: [{ from: 0, to: ctx.doc.length }],
+                  source: 'history',
+                }),
+              ],
+        ),
+      ],
+      editorDoc: '',
+    })
+    editor.type('c')
+    controller.onDocChanged()
+    editor.type('d')
+    controller.onDocChanged()
+    await flush()
+    expect(dropdown.isOpen).toBe(false) // typing never opens the dropdown
+
+    controller.open() // Tab #1 through the real seam
+    await flush()
+    expect(dropdown.isOpen).toBe(true)
+    const rowsBefore = dropdown.root.querySelectorAll('.ui-floating-panel__row').length
+    expect(rowsBefore).toBeGreaterThan(0)
+
+    expect(controller.handleKey(key('Tab'))).toBe(true) // Tab #2 — consumed
+    await flush()
+    expect(dropdown.isOpen).toBe(true)
+    expect(selectedRow(dropdown)).not.toBeNull()
+  })
+
+  it('report 1: with a single candidate Tab stays put — the panel stays open', async () => {
+    const { editor, dropdown, controller } = rig({
+      providers: [
+        instantProvider('command', (ctx) =>
+          ctx.doc.trim() === '' ? [] : [cand({ id: 'cmd:cd', source: 'command' })],
+        ),
+        instantProvider('history', () => []),
+      ],
+      editorDoc: '',
+    })
+    editor.type('c')
+    controller.onDocChanged()
+    editor.type('d')
+    controller.onDocChanged()
+    await flush()
+
+    controller.open()
+    await flush()
+    expect(dropdown.isOpen).toBe(true)
+    expect(dropdown.root.querySelectorAll('.ui-floating-panel__row')).toHaveLength(1)
+
+    expect(controller.handleKey(key('Tab'))).toBe(true)
+    await flush()
+    expect(dropdown.isOpen).toBe(true)
+    expect(selectedRow(dropdown)?.textContent).toContain('cd')
+  })
   it('the first Tab SETTLES on the ghosted candidate — a history-first batch must not steal the selection', async () => {
     // The reported case: `cd ` shows the ghost `Downloads/`; the user presses
     // Tab to take it, and the dropdown must open with THAT row selected —

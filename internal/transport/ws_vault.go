@@ -40,6 +40,10 @@ type VaultLifecycle interface {
 	// profile references — metadata first (ADR-0011 §4) — before the
 	// stored secret is deleted.
 	ResolveRow(row string, inputs []vault.CredentialInventory) (credential.SecretID, bool)
+	// Get resolves id to a provider and reads the secret. The value is only
+	// ever used inside Secret.Use; the transport hands the resolved bytes to
+	// the caller for a PTY write and nowhere else.
+	Get(ctx context.Context, id credential.SecretID) (credential.Secret, error)
 	// ReplaceSecret overwrites the material behind an existing secret,
 	// addressed by its renderer-addressable row handle — never by a SecretID
 	// (nocx-jb20.1). The reference does not change: the new value lands under
@@ -164,6 +168,8 @@ func (s *WSServer) handleVaultMethod(wconn *wsConn, req jsonrpcRequest) {
 		s.handleVaultReplaceSecret(wconn, req)
 	case "vault.deleteSecret":
 		s.handleVaultDeleteSecret(wconn, req)
+	case "vault.resolveLine":
+		s.handleVaultResolveLine(wconn, req)
 	}
 }
 

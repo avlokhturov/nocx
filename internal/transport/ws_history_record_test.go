@@ -369,22 +369,71 @@ func TestHistoryRecord_StoreErrorIsRPCError(t *testing.T) {
 	}
 }
 
+// The invariant part 2 exists to protect, end to end: a command carrying a
+// vault reference is recorded with the reference INTACT. Mask leaves
+// {{secret:NAME}} alone, so nothing is masked, the row stores the line
+// byte for byte, and a command that moves to another machine still resolves
+// that machine's secret.
+func TestHistoryRecord_StoresReferenceUnchanged(t *testing.T) {
+	db := newFakeRecordHistoryDB()
+	ws, stop := newHistoryWSServer(t, db)
+	defer stop()
+	conn := connectWS(t, ws)
+
+	command := `curl -H "Authorization: Bearer {{secret:OPENAI}}" https://api`
+	resp := vaultCall(t, conn, "history.record", recordParams(map[string]any{
+		"command": command,
+	}), 1)
+	if resp.Error != nil {
+		t.Fatalf("record error: %+v", resp.Error)
+	}
+	var ack struct {
+		MaskedCount int `json:"maskedCount"`
+	}
+	if err := json.Unmarshal(resp.Result, &ack); err != nil {
+		t.Fatalf("decode ack: %v", err)
+	}
+	if ack.MaskedCount != 0 {
+		t.Fatalf("maskedCount = %d, want 0 — a reference is not a secret", ack.MaskedCount)
+	}
+
+	recs, err := db.List(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(recs) != 1 || recs[0].Command != command {
+		t.Fatalf("stored command = %q, want the reference intact byte for byte (%q)", recs[0].Command, command)
+	}
+}
+
 // ── the contract ──────────────────────────────────────────────────────────
 
-// The DTO's own conformance: the ack marshals to exactly {}, which the
-// schema accepts and nothing else.
+// The DTO's own conformance: field tags, nil-slice-as-null, and the
+// never-null maskedKinds. The handler always sends the facts it computed, so
+// the zero-value struct is not a shape the wire produces — the empty shape
+// is maskedCount 0 with maskedKinds [].
 func TestHistoryRecord_DTOConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "history.record.schema.json")
-	raw, err := json.Marshal(historyRecordResponse{})
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
+	cases := map[string]historyRecordResponse{
+		"nothing masked": {MaskedCount: 0, MaskedKinds: []string{}},
+		"two kinds":      {MaskedCount: 2, MaskedKinds: []string{"openai", "jwt"}},
 	}
-	validateJSON(t, schema, raw, "history.record DTO")
+	for name, resp := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(resp)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "history.record DTO")
+		})
+	}
 }
 
 // The real result off the real socket satisfies the schema — not a payload
 // the test itself built. An extra field in the ack would fail here even
-// though the DTO test would stay green.
+// though the DTO test would stay green. The command carries a real key
+// shape, so the facts off the socket are real: one masked secret of kind
+// openai, and the durable row holds the masked command, never the key.
 func TestHistoryRecord_OverTheWireConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "history.record.schema.json")
 	db := newFakeRecordHistoryDB()
@@ -392,11 +441,34 @@ func TestHistoryRecord_OverTheWireConformsToContract(t *testing.T) {
 	defer stop()
 	conn := connectWS(t, ws)
 
-	resp := vaultCall(t, conn, "history.record", recordParams(nil), 1)
+	resp := vaultCall(t, conn, "history.record", recordParams(map[string]any{
+		"command": `curl -H "Authorization: Bearer sk-proj-abcdef1234567890" https://api`,
+	}), 1)
 	if resp.Error != nil {
 		t.Fatalf("record error: %+v", resp.Error)
 	}
 	validateJSON(t, schema, resp.Result, "history.record result (real socket)")
+
+	var got struct {
+		MaskedCount int      `json:"maskedCount"`
+		MaskedKinds []string `json:"maskedKinds"`
+	}
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatalf("decode ack: %v", err)
+	}
+	if got.MaskedCount != 1 || len(got.MaskedKinds) != 1 || got.MaskedKinds[0] != "openai" {
+		t.Errorf("ack facts = %d %v, want 1 [openai]", got.MaskedCount, got.MaskedKinds)
+	}
+	recs, listErr := db.List(context.Background(), 1)
+	if listErr != nil {
+		t.Fatalf("list: %v", listErr)
+	}
+	if len(recs) != 1 || recs[0].Command != `curl -H "Authorization: Bearer sk-p...7890" https://api` {
+		t.Errorf("stored command = %+v, want the masked one", recs)
+	}
+	if strings.Contains(recs[0].Command, "sk-proj-abcdef1234567890") {
+		t.Errorf("the raw key reached the store: %q", recs[0].Command)
+	}
 }
 
 // readVaultResult reads one JSON-RPC response off the socket — the

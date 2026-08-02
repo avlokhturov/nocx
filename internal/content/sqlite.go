@@ -24,6 +24,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -217,15 +218,17 @@ func Open(ctx context.Context, cfg Config) (ContentDB, error) {
 // fixed here is the engine posture around it (STRICT, auto_vacuum, WAL).
 const schemaV0 = `
 CREATE TABLE IF NOT EXISTS command_history (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT, -- backend seq; the only total order
-  command    TEXT    NOT NULL,
-  cwd        TEXT    NOT NULL,
-  host       TEXT    NOT NULL,
-  status     TEXT    NOT NULL,
-  exit_code  INTEGER,
-  started_at INTEGER,
-  ended_at   INTEGER,
-  trusted    INTEGER NOT NULL DEFAULT 0
+  id           INTEGER PRIMARY KEY AUTOINCREMENT, -- backend seq; the only total order
+  command      TEXT    NOT NULL,
+  cwd          TEXT    NOT NULL,
+  host         TEXT    NOT NULL,
+  status       TEXT    NOT NULL,
+  exit_code    INTEGER,
+  started_at   INTEGER,
+  ended_at     INTEGER,
+  trusted      INTEGER NOT NULL DEFAULT 0,
+  masked_count INTEGER NOT NULL DEFAULT 0,
+  masked_kinds TEXT    NOT NULL DEFAULT '[]'
 ) STRICT;
 CREATE INDEX IF NOT EXISTS command_history_by_scope ON command_history (cwd, host, id DESC);
 CREATE INDEX IF NOT EXISTS command_history_by_host  ON command_history (host, id DESC);
@@ -269,11 +272,19 @@ func (s *sqliteContent) writer() {
 }
 
 func (s *sqliteContent) doAdd(ctx context.Context, r CommandRecord) error {
+	kinds := r.MaskedKinds
+	if kinds == nil {
+		kinds = []string{}
+	}
+	kindsJSON, err := json.Marshal(kinds)
+	if err != nil {
+		return err
+	}
 	// One INSERT, one autocommit transaction: short, atomic, replay-safe.
-	_, err := s.db.ExecContext(ctx, `INSERT INTO command_history
-		(command, cwd, host, status, exit_code, started_at, ended_at, trusted)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.Command, r.Cwd, r.Host, string(r.Status), r.ExitCode, r.StartedAt, r.EndedAt, r.Trusted)
+	_, err = s.db.ExecContext(ctx, `INSERT INTO command_history
+		(command, cwd, host, status, exit_code, started_at, ended_at, trusted, masked_count, masked_kinds)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.Command, r.Cwd, r.Host, string(r.Status), r.ExitCode, r.StartedAt, r.EndedAt, r.Trusted, r.MaskedCount, string(kindsJSON))
 	if err != nil {
 		return err
 	}
@@ -321,14 +332,19 @@ func (s *sqliteContent) Add(ctx context.Context, record CommandRecord) error {
 	}
 }
 
-// ── reads (concurrent, directly on the pool) ─────────────────────────────
-
-const recordCols = "id, command, cwd, host, status, exit_code, started_at, ended_at, trusted"
+const recordCols = "id, command, cwd, host, status, exit_code, started_at, ended_at, trusted, masked_count, masked_kinds"
 
 func scanRecord(row interface{ Scan(...any) error }) (CommandRecord, error) {
 	var r CommandRecord
-	err := row.Scan(&r.ID, &r.Command, &r.Cwd, &r.Host, &r.Status, &r.ExitCode, &r.StartedAt, &r.EndedAt, &r.Trusted)
-	return r, err
+	var kindsJSON string
+	err := row.Scan(&r.ID, &r.Command, &r.Cwd, &r.Host, &r.Status, &r.ExitCode, &r.StartedAt, &r.EndedAt, &r.Trusted, &r.MaskedCount, &kindsJSON)
+	if err != nil {
+		return CommandRecord{}, err
+	}
+	if err := json.Unmarshal([]byte(kindsJSON), &r.MaskedKinds); err != nil {
+		return CommandRecord{}, err
+	}
+	return r, nil
 }
 
 // List returns the limit newest records, newest first.
