@@ -2,17 +2,32 @@
 // OSC 636 snapshot, history over the control plane, and local filesystem
 // paths. Applicability is part of the contract: a provider declares where it
 // applies and is not consulted outside it. In particular the local path
-// provider is inactive on a remote session and for bare words — a local path
-// must never masquerade as a remote one, and a bare word is a command name,
-// not a path.
+// provider is inactive on a remote session (a local path must never
+// masquerade as a remote one) and in command position for a bare word (a
+// bare first word is a command name, not a path) — but in argument position
+// it answers ANY token, including the empty token, which lists the session
+// cwd (`cd ` + Tab is the case the dropdown exists for).
 import type { CommandSnapshotStore } from '../command-snapshot'
 import type { HistoryQuery } from '../generated/history.query'
 import type { FsComplete } from '../generated/fs.complete'
 import type { Candidate } from './candidate'
 import type { CompletionToken } from './token'
+import { looksLikePath } from './token'
 
 /** Per-provider cap on the candidates returned to the merge. */
 export const MAX_PROVIDER_CANDIDATES = 20
+
+/**
+ * How many history rows argument position may return on a LOCAL session.
+ * A history row replaces the whole line; a path candidate replaces one
+ * token, and the token being typed is the more specific intent — so once
+ * paths answer (which they always do there: see fsProvider's applicability),
+ * history must never crowd them out. The owner once counted four directories
+ * in his home and got none, because twenty whole-line history rows buried
+ * them. Command position and remote sessions (where no path provider is in
+ * play) keep the provider-wide cap.
+ */
+export const MAX_HISTORY_IN_ARGUMENT_POSITION = 5
 
 /** Everything a provider needs to answer one query. */
 export interface SuggestContext {
@@ -89,6 +104,16 @@ export function historyProvider(opts: {
     async suggest(ctx, signal) {
       const line = ctx.doc
       if (line === '') return []
+      // In argument position on a local session the path provider always
+      // answers (see fsProvider), so history is a sidebar there — capped so
+      // a flood of whole-line rows can never bury the paths. Command
+      // position and remote sessions keep the provider-wide cap: nothing
+      // else answers there, so capping history would be losing rows, not
+      // making room.
+      const cap =
+        ctx.position === 'argument' && ctx.isLocal
+          ? MAX_HISTORY_IN_ARGUMENT_POSITION
+          : MAX_PROVIDER_CANDIDATES
       const result = await opts.query(ctx.cwd, ctx.host)
       if (signal.aborted) return []
       const seen = new Set<string>()
@@ -113,7 +138,7 @@ export function historyProvider(opts: {
           environment: { cwd: e.cwd, host: e.host, confidence: 'asserted' },
           eligibleForGhostText: true,
         })
-        if (out.length >= MAX_PROVIDER_CANDIDATES) break
+        if (out.length >= cap) break
       }
       return out
     },
@@ -125,8 +150,28 @@ export function historyProvider(opts: {
 // The backend (fs.complete) resolves the partial path and lists the directory
 // it points at. Applicable only when the session is local — the backend's
 // filesystem IS the local machine's, and inside an SSH session that answer
-// would be a local path masquerading as a remote one. A bare word is never a
-// path; the token must carry a slash, a leading dot, or a tilde.
+// would be a local path masquerading as a remote one. In argument position it
+// answers ANY token, including the empty token (which lists the session cwd);
+// in command position only a path invocation (`./run.sh`) — a bare first word
+// is a command name and the command provider owns it.
+
+/**
+ * Commands whose argument is a directory, not a file — their path candidates
+ * are filtered to directories only. The default for anything not listed
+ * here, including a command this table has never heard of, is "both": the
+ * rule is a promise about the command's argument, and for an unknown command
+ * we can promise nothing. Grows by addition.
+ */
+const DIRECTORIES_ONLY: Record<string, true> = { cd: true, pushd: true, rmdir: true }
+
+/** The command word the token completes under ('' in command position — a
+ *  path invocation like `./run.sh` is not a command the table knows, so the
+ *  default "both" applies). */
+function commandWord(ctx: SuggestContext): string {
+  if (ctx.position === 'command') return ''
+  return ctx.doc.slice(0, ctx.token.from).trim().split(/\s+/)[0] ?? ''
+}
+
 export function fsProvider(opts: {
   complete: (text: string, cwd: string) => Promise<FsComplete>
 }): SuggestionProvider {
@@ -135,35 +180,49 @@ export function fsProvider(opts: {
     targetId: 'shell',
     applicable: (ctx) => {
       if (!ctx.isLocal) return false
-      const t = ctx.token.text
-      return t !== '' && (t.includes('/') || t.startsWith('.') || t.startsWith('~'))
+      if (ctx.position === 'argument') return true
+      // Command position: only a path invocation (`./run.sh`) — never a
+      // bare word.
+      return looksLikePath(ctx.token.text)
     },
     async suggest(ctx, signal) {
-      const q = ctx.token.text
+      // The wire refuses empty text (the handler treats it as "no
+      // completion"), so an empty token asks for the session cwd by name:
+      // `./` lists it, and the display below keys off the REAL token, so
+      // rows show bare names — never a `./` the user did not type.
+      const q = ctx.token.text === '' ? './' : ctx.token.text
       const result = await opts.complete(q, ctx.cwd)
       if (signal.aborted) return []
       // The part of the token the user has already typed up to the last
       // slash — display and insert both carry it, so accepting a candidate
       // never loses the directory the user already wrote.
-      const lastSlash = q.lastIndexOf('/')
-      const tokenPrefix = q.slice(0, lastSlash + 1)
-      const segPrefix = q.slice(lastSlash + 1)
-      return result.entries.slice(0, MAX_PROVIDER_CANDIDATES).map((e): Candidate => {
-        const display = tokenPrefix + e.name + (e.isDir ? '/' : '')
-        const segStart = display.length - e.name.length - (e.isDir ? 1 : 0)
-        return {
-          id: `fs:${e.path}`,
-          targetId: 'shell',
-          providerId: 'fs',
-          displayText: display,
-          insertText: display,
-          replacement: { from: ctx.token.from, to: ctx.token.to },
-          matchRanges: [{ from: segStart, to: segStart + segPrefix.length }],
-          source: 'path',
-          environment: { cwd: ctx.cwd, confidence: 'asserted' },
-          eligibleForGhostText: true,
-        }
-      })
+      const t = ctx.token.text
+      const lastSlash = t.lastIndexOf('/')
+      const tokenPrefix = t.slice(0, lastSlash + 1)
+      const segPrefix = t.slice(lastSlash + 1)
+      // `cd`, `pushd` and `rmdir` take directories only; the default for
+      // everything else (including unknown commands) is both kinds.
+      const directoriesOnly = DIRECTORIES_ONLY[commandWord(ctx)] === true
+      return result.entries
+        .filter((e) => !directoriesOnly || e.isDir)
+        .slice(0, MAX_PROVIDER_CANDIDATES)
+        .map((e): Candidate => {
+          const display = tokenPrefix + e.name + (e.isDir ? '/' : '')
+          const segStart = display.length - e.name.length - (e.isDir ? 1 : 0)
+          return {
+            id: `fs:${e.path}`,
+            targetId: 'shell',
+            providerId: 'fs',
+            displayText: display,
+            insertText: display,
+            replacement: { from: ctx.token.from, to: ctx.token.to },
+            matchRanges: [{ from: segStart, to: segStart + segPrefix.length }],
+            source: 'path',
+            kind: e.isDir ? 'directory' : 'file',
+            environment: { cwd: ctx.cwd, confidence: 'asserted' },
+            eligibleForGhostText: true,
+          }
+        })
     },
   }
 }

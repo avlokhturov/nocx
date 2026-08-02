@@ -126,8 +126,12 @@ const rig = (opts: {
   return { editor, dropdown, controller, mount: container }
 }
 
-const key = (k: string): KeyboardEvent =>
-  new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true })
+const key = (k: string, init: KeyboardEventInit = {}): KeyboardEvent =>
+  new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true, ...init })
+
+/** The row the selection currently sits on. */
+const selectedRow = (dropdown: CompletionDropdown) =>
+  dropdown.root.querySelector('.ui-completion-dropdown__row[data-selected="true"]')
 
 /** Flush microtasks and zero-delay timers, under fake timers or real. */
 const flush = async () => {
@@ -339,6 +343,42 @@ describe('streaming and selection', () => {
     await flush()
     expect(dropdown.isOpen).toBe(true)
   })
+
+  it('the path rung holds across async batches — paths stay above history whatever the arrival order', async () => {
+    const history = manualProvider('history', true)
+    const fs = manualProvider('fs', true)
+    const { dropdown, controller } = rig({ providers: [history.provider, fs.provider] })
+    controller.open()
+    await flush()
+
+    // History lands FIRST — the arrival order that used to bury the paths.
+    history.next().resolve([
+      cand({
+        id: 'hist:cd x',
+        providerId: 'history',
+        source: 'history',
+        insertText: 'cd x',
+        replacement: { from: 0, to: 3 },
+      }),
+    ])
+    await flush()
+    // The path candidate lands late.
+    fs.next().resolve([
+      cand({
+        id: 'fs:dir',
+        providerId: 'fs',
+        source: 'path',
+        kind: 'directory',
+        insertText: 'dir/',
+        replacement: { from: 3, to: 3 },
+      }),
+    ])
+    await flush()
+
+    const rows = dropdown.root.querySelectorAll('.ui-completion-dropdown__row')
+    expect(rows[0].textContent).toContain('fs:dir')
+    expect(rows[1].textContent).toContain('cd x')
+  })
 })
 
 // ── keyboard ─────────────────────────────────────────────────────────────
@@ -408,19 +448,39 @@ describe('keyboard', () => {
     ).toContain('a3')
   })
 
-  it('Tab accepts the selection when the dropdown is open', async () => {
+  it('Tab cycles to the next candidate when the dropdown is open — accept stays Enter', async () => {
     const { editor, dropdown, controller } = rig({
       providers: [
-        instantProvider('a', (ctx) => [
-          cand({ id: 'done', replacement: { from: 0, to: ctx.token.to } }),
-        ]),
+        instantProvider('a', () => [cand({ id: 'a1' }), cand({ id: 'a2' }), cand({ id: 'a3' })]),
       ],
       editorDoc: 'git sta',
     })
     await open(controller)
+    // First Tab: next candidate selected, nothing inserted, dropdown stays.
     expect(controller.handleKey(key('Tab'))).toBe(true)
-    expect(editor.doc).toBe('done')
-    expect(dropdown.isOpen).toBe(false)
+    expect(selectedRow(dropdown)?.textContent).toContain('a2')
+    expect(editor.doc).toBe('git sta')
+    expect(dropdown.isOpen).toBe(true)
+    // Wrap: Tab past the last row returns to the first.
+    expect(controller.handleKey(key('Tab'))).toBe(true)
+    expect(selectedRow(dropdown)?.textContent).toContain('a3')
+    expect(controller.handleKey(key('Tab'))).toBe(true)
+    expect(selectedRow(dropdown)?.textContent).toContain('a1')
+    expect(editor.doc).toBe('git sta')
+  })
+
+  it('Shift+Tab cycles back', async () => {
+    const { dropdown, controller } = rig({
+      providers: [
+        instantProvider('a', () => [cand({ id: 'a1' }), cand({ id: 'a2' }), cand({ id: 'a3' })]),
+      ],
+    })
+    await open(controller)
+    // From the top, Shift+Tab wraps to the last row.
+    expect(controller.handleKey(key('Tab', { shiftKey: true }))).toBe(true)
+    expect(selectedRow(dropdown)?.textContent).toContain('a3')
+    expect(controller.handleKey(key('Tab', { shiftKey: true }))).toBe(true)
+    expect(selectedRow(dropdown)?.textContent).toContain('a2')
   })
 
   it('Escape closes exactly the dropdown — one surface per press', async () => {

@@ -555,6 +555,18 @@ describe('tab completion wiring', () => {
     const { view } = setup()
     expect(key(view, { key: 'Tab' })).toBe(false)
   })
+
+  it('Shift+Tab with the dropdown closed is swallowed and opens nothing (Tab opens; Shift+Tab cycles back once open)', () => {
+    const onTab = vi.fn()
+    const { ed, view } = setup({ onTab })
+    ed.show()
+    ed.insertText('ec')
+    expect(key(view, { key: 'Tab', shiftKey: true })).toBe(false)
+    expect(onTab).not.toHaveBeenCalled()
+    // The doc is untouched and the key never reached the browser's
+    // focus-move default.
+    expect(view.state.doc.toString()).toBe('ec')
+  })
 })
 
 // ── Shell syntax highlighting (shell-highlight.ts) ─────────────────────

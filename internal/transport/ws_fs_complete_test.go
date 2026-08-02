@@ -160,3 +160,55 @@ func TestCompleteLocalPath_SortedOrder(t *testing.T) {
 		t.Errorf("order = %v, want sorted [alpha mid zeta]", names(got))
 	}
 }
+
+func TestCompleteLocalPath_SymlinkToDirectoryCompletesAsDirectory(t *testing.T) {
+	dir := t.TempDir()
+	writeFixture(t, dir, nil, []string{"real"})
+	if err := os.Symlink(filepath.Join(dir, "real"), filepath.Join(dir, "link")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	got := completeLocalPath("l", dir, 10)
+	if len(got) != 1 || got[0].Name != "link" {
+		t.Fatalf("completeLocalPath(l) = %v, want one entry link", names(got))
+	}
+	// The dirent type of a symlink is not a directory; the target's is. The
+	// dirs-only rule for cd/pushd/rmdir must see it as a directory or half a
+	// home directory disappears from completion.
+	if !got[0].IsDir {
+		t.Errorf("symlink-to-dir IsDir = false, want true (completion follows the target)")
+	}
+}
+
+func TestCompleteLocalPath_SymlinkToFileStaysAFile(t *testing.T) {
+	dir := t.TempDir()
+	writeFixture(t, dir, []string{"target.txt"}, nil)
+	if err := os.Symlink(filepath.Join(dir, "target.txt"), filepath.Join(dir, "file-link")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	got := completeLocalPath("file-l", dir, 10)
+	if len(got) != 1 || got[0].Name != "file-link" {
+		t.Fatalf("completeLocalPath(file-l) = %v, want one entry file-link", names(got))
+	}
+	if got[0].IsDir {
+		t.Errorf("symlink-to-file IsDir = true, want false")
+	}
+}
+
+func TestCompleteLocalPath_BrokenSymlinkKeepsDirentType(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Symlink(filepath.Join(dir, "does-not-exist"), filepath.Join(dir, "dangling")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	got := completeLocalPath("d", dir, 10)
+	if len(got) != 1 || got[0].Name != "dangling" {
+		t.Fatalf("completeLocalPath(d) = %v, want one entry dangling", names(got))
+	}
+	// The target cannot be stat'ed: the entry must not claim a directory it
+	// is not.
+	if got[0].IsDir {
+		t.Errorf("broken symlink IsDir = true, want false")
+	}
+}

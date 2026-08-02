@@ -64,6 +64,12 @@ export interface Candidate {
   freshness?: number
   outcome?: OutcomeEvidence
   environment?: EnvironmentEvidence
+  /**
+   * The filesystem kind of a path candidate — rendered as the row's type
+   * word (`Directory` / `File`), displayed and never inserted. Absent for
+   * candidates that are not paths (a command name has no kind).
+   */
+  kind?: 'directory' | 'file'
   /** Sensitivity, expressed in the type: false candidates never become ghost
    *  text and never accept via Right/End (design §8.7, §9). */
   readonly eligibleForGhostText: boolean

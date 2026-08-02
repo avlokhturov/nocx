@@ -61,6 +61,24 @@ describe('CompletionDropdown', () => {
     expect(badge?.textContent).toBe('path')
   })
 
+  it('renders the kind word for path rows — displayed, never inserted', () => {
+    const { dd } = mount()
+    dd.show(
+      [
+        cand({ id: 'd', source: 'path', kind: 'directory', displayText: 'src/' }),
+        cand({ id: 'f', source: 'path', kind: 'file', displayText: 'notes.txt' }),
+      ],
+      0,
+    )
+    const kinds = dd.root.querySelectorAll('.ui-completion-dropdown__kind')
+    expect(kinds).toHaveLength(2)
+    expect(kinds[0].textContent).toBe('Directory')
+    expect(kinds[1].textContent).toBe('File')
+    // A row without a kind renders no kind badge.
+    dd.show([cand({ id: 'c' })], 0)
+    expect(dd.root.querySelectorAll('.ui-completion-dropdown__kind')).toHaveLength(0)
+  })
+
   it('reports hover and pick with the row index', () => {
     const { dd, onHover, onPick } = mount()
     dd.show([cand({ id: 'a' }), cand({ id: 'b' })], 0)

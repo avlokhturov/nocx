@@ -20,6 +20,10 @@ export interface CompletionRow {
   readonly displayText: string
   readonly matchRanges: Array<{ from: number; to: number }>
   readonly source: string
+  /** The filesystem kind of a path row — rendered as its type word
+   *  (`Directory` / `File`), the answer to "how do I tell a file from a
+   *  folder". Absent rows render no kind badge. */
+  readonly kind?: 'directory' | 'file'
 }
 
 export interface CompletionDropdownCallbacks {
@@ -35,6 +39,12 @@ const SOURCE_LABEL: Record<string, string> = {
   path: 'path',
 }
 
+/** The type word for a path row — `Directory` / `File` (the owner's ask:
+ *  "how do I tell a file from a folder"). A kit badge, never a repaint. */
+const KIND_LABEL: Record<string, string> = {
+  directory: 'Directory',
+  file: 'File',
+}
 export class CompletionDropdown {
   readonly root: HTMLElement
   private callbacks: CompletionDropdownCallbacks
@@ -85,9 +95,17 @@ export class CompletionDropdown {
       info.appendChild(this.renderDisplay(rowData))
       row.appendChild(info)
 
-      // Evidence column: the source badge. Displayed, never inserted.
+      // Evidence column: the type word for a path row, then the source
+      // badge. Displayed, never inserted.
       const actions = document.createElement('div')
       actions.className = 'ui-collection-row__actions'
+      if (rowData.kind) {
+        const kind = document.createElement('span')
+        kind.className = 'ui-badge ui-completion-dropdown__kind'
+        kind.dataset.tone = 'neutral'
+        kind.textContent = KIND_LABEL[rowData.kind] ?? rowData.kind
+        actions.appendChild(kind)
+      }
       const badge = document.createElement('span')
       badge.className = 'ui-badge ui-completion-dropdown__source'
       badge.dataset.tone = 'neutral'
@@ -108,8 +126,11 @@ export class CompletionDropdown {
     const footer = document.createElement('div')
     footer.className = 'ui-completion-dropdown__footer'
     const accept = document.createElement('span')
-    accept.textContent = 'tab/↵ to insert'
+    accept.textContent = '↵ to insert'
     footer.appendChild(accept)
+    const cycle = document.createElement('span')
+    cycle.textContent = 'tab ↹ to cycle'
+    footer.appendChild(cycle)
     const navigate = document.createElement('span')
     navigate.textContent = '↑ ↓ to navigate'
     footer.appendChild(navigate)

@@ -1,11 +1,16 @@
 // Ranking semantics (design §8.9.3). Features are named so they are
 // testable; the golden cases in rank.test.ts pin the order as assertions.
 //
-// Score = quality × 1000 + recency × 100 + frequency × 10 + environment × 5
-//         + provider prior
+// Score = position rung + quality × 1000 + path-kind rung + recency × 100
+//         + frequency × 10 + environment × 5 + provider prior
 //
 // The rungs, in priority order:
 //
+//  0. The argument-position path rung — in argument position a path
+//     candidate replaces one token, a history row the whole line, and the
+//     token being typed is the more specific intent: path candidates outrank
+//     whole-line history there, whatever history's recency claims. No other
+//     rung crosses it, and it applies in NO other position.
 //  1. Prefix quality — exact match beats a plain prefix, and quality is an
 //     absolute rung: no amount of recency promotes a plain prefix above an
 //     exact match. The "exact rung" must never be a lie.
@@ -30,11 +35,46 @@ export interface RankContext {
   query: string
   /** Wall-clock epoch milliseconds for recency normalisation. */
   now: number
+  /**
+   * Where the completed token sits. In argument position a path candidate
+   * replaces one token while a history row replaces the whole line — the
+   * token being typed is the more specific intent, so path candidates get a
+   * rung above history there (the owner counted four directories in his home
+   * and got none, because history buried them). Absent in callers that do
+   * not know (or that rank a whole document): no rung applies.
+   */
+  position?: 'command' | 'argument'
 }
+
+/**
+ * Argument position: a path candidate replaces one token; a history row
+ * replaces the whole line. The token being typed is the more specific
+ * intent, so path candidates outrank whole-line history there — no amount of
+ * history recency may bury the directories under it. Sized above the entire
+ * rest of the score (quality ×1000 + recency ×100 + frequency ×10 +
+ * environment ×5 + prior), which holds for the shipped providers whose
+ * frequency is never set.
+ */
+const ARGUMENT_PATH_RUNG = 100_000
+
+/**
+ * Within path candidates, a directory outranks a file — descending a tree is
+ * the common motion, so a directory lands under the first Tab. This is the
+ * default for every command that does not filter to directories only (the
+ * dirs-only commands — cd, pushd, rmdir — filter in the provider instead):
+ * we deliberately ship no per-command spec corpus (Warp carries Fig's), and
+ * asking the shell is not cheap — bash has no completion specification for
+ * cd (it is a builtin) and rmdir's is a function name that would have to be
+ * executed to learn anything. When the completion adapter lands, the shell
+ * answers and this default is deleted. Sized below the quality rung (an
+ * exact file match is still the more specific intent) and above everything a
+ * shipped path candidate can score (paths carry no recency or frequency;
+ * environment is uniformly asserted; the fs prior is 0).
+ */
+const PATH_KIND_RUNG = 100
 
 const QUALITY_EXACT = 3
 const QUALITY_PREFIX = 1
-
 /** 0..1, newest candidate in the set = 1, oldest = 0. A single timed
  *  candidate is both newest and oldest and scores 1: it claims recency and
  *  the rest of the set claims none. No timed candidate at all → everyone 0. */
@@ -79,8 +119,15 @@ export function rankCandidates(candidates: Candidate[], ctx: RankContext): Candi
   const scored = candidates.map((c) => {
     const exact = c.insertText === ctx.query
     const quality = exact ? QUALITY_EXACT : QUALITY_PREFIX
+    const argumentRung = ctx.position === 'argument' && c.source === 'path' ? ARGUMENT_PATH_RUNG : 0
+    // A directory path candidate outranks a file one (the tree-descending
+    // default for commands that do not filter). Below quality: an exact
+    // file match is still the more specific intent.
+    const kindRung = c.source === 'path' && c.kind === 'directory' ? PATH_KIND_RUNG : 0
     const score =
+      argumentRung +
       quality * 1000 +
+      kindRung +
       recencyScore(c, newest, oldest) * 100 +
       (c.frequency ?? 0) * 10 +
       environmentScore(c) * 5 +

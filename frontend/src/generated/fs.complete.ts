@@ -28,7 +28,7 @@ export interface FsEntry {
    */
   path: string
   /**
-   * True when the entry is a directory (by directory-entry type, not by following symlinks). The renderer appends a trailing slash to directory candidates.
+   * True when the entry is a directory. The dirent type decides for ordinary entries; a symlink is resolved to its target, so a symlink to a directory completes as a directory (dirs-only commands like cd would otherwise hide half a home directory) and a broken link keeps the dirent type — never a directory it is not. The renderer appends a trailing slash to directory candidates.
    */
   isDir: boolean
 }

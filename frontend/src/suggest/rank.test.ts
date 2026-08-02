@@ -130,6 +130,100 @@ describe('rankCandidates', () => {
     expect(ids(ranked)).toEqual(['cmd', 'path'])
   })
 
+  it('argument position: path candidates outrank whole-line history, whatever its recency', () => {
+    const ranked = rankCandidates(
+      [
+        base({
+          id: 'hist',
+          providerId: 'history',
+          source: 'history',
+          insertText: 'cd projects',
+          freshness: NOW - 1, // as fresh as history gets
+        }),
+        base({
+          id: 'path',
+          providerId: 'fs',
+          source: 'path',
+          insertText: 'projects/',
+        }),
+      ],
+      { query: 'cd ', now: NOW, position: 'argument' },
+    )
+    // A path candidate replaces one token; a history row replaces the whole
+    // line. The token being typed is the more specific intent, so the path
+    // wins even though history is fresher — the §8.4 recency assertion does
+    // not cross this rung.
+    expect(ids(ranked)).toEqual(['path', 'hist'])
+  })
+
+  it('the argument rung applies only in argument position — command position keeps the provider prior', () => {
+    const ranked = rankCandidates(
+      [
+        base({
+          id: 'hist',
+          providerId: 'history',
+          source: 'history',
+          insertText: 'git status',
+          freshness: NOW - 1,
+        }),
+        base({
+          id: 'path',
+          providerId: 'fs',
+          source: 'path',
+          insertText: 'git-tools/',
+        }),
+      ],
+      { query: 'git', now: NOW, position: 'command' },
+    )
+    expect(ids(ranked)).toEqual(['hist', 'path'])
+  })
+
+  it('within path candidates, a directory outranks a file (the tree-descending default)', () => {
+    const ranked = rankCandidates(
+      [
+        base({
+          id: 'file',
+          providerId: 'fs',
+          source: 'path',
+          kind: 'file',
+          insertText: 'beta',
+        }),
+        base({
+          id: 'dir',
+          providerId: 'fs',
+          source: 'path',
+          kind: 'directory',
+          insertText: 'alpha/',
+        }),
+      ],
+      { query: 'a', now: NOW, position: 'argument' },
+    )
+    expect(ids(ranked)).toEqual(['dir', 'file'])
+  })
+
+  it('the path-kind rung yields to an exact file match (quality is the correctness rung)', () => {
+    const ranked = rankCandidates(
+      [
+        base({
+          id: 'exact-file',
+          providerId: 'fs',
+          source: 'path',
+          kind: 'file',
+          insertText: 'alpha',
+        }),
+        base({
+          id: 'dir',
+          providerId: 'fs',
+          source: 'path',
+          kind: 'directory',
+          insertText: 'alphax/',
+        }),
+      ],
+      { query: 'alpha', now: NOW, position: 'argument' },
+    )
+    expect(ids(ranked)).toEqual(['exact-file', 'dir'])
+  })
+
   it('identical scores keep arrival order (stable)', () => {
     const ranked = rankCandidates(
       [base({ id: 'first', insertText: 'gitx' }), base({ id: 'second', insertText: 'gity' })],

@@ -153,10 +153,21 @@ func completeLocalPath(text, cwd string, limit int) []fsCompleteEntry {
 		if !showHidden && strings.HasPrefix(name, ".") {
 			continue
 		}
+		isDir := e.IsDir()
+		if e.Type()&os.ModeSymlink != 0 {
+			// A symlink completes as its TARGET's kind: `cd link-to-dir/` is
+			// the common motion, and the dirs-only rule for cd/pushd/rmdir
+			// would otherwise hide half of a typical home directory. A
+			// broken link keeps the dirent type — never a directory it is
+			// not.
+			if target, err := os.Stat(filepath.Join(base, dir, name)); err == nil {
+				isDir = target.IsDir()
+			}
+		}
 		out = append(out, fsCompleteEntry{
 			Name:  name,
 			Path:  filepath.Join(base, dir, name),
-			IsDir: e.IsDir(),
+			IsDir: isDir,
 		})
 		if len(out) >= limit {
 			break

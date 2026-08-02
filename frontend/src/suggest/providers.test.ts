@@ -4,8 +4,15 @@
 // local path provider must be inactive on a remote session, and the command
 // provider must answer from the running shell's own snapshot.
 import { describe, it, expect, vi } from 'vitest'
+import {
+  commandProvider,
+  historyProvider,
+  fsProvider,
+  MAX_HISTORY_IN_ARGUMENT_POSITION,
+  MAX_PROVIDER_CANDIDATES,
+  type SuggestContext,
+} from './providers'
 import { CommandSnapshotStore } from '../command-snapshot'
-import { commandProvider, historyProvider, fsProvider, type SuggestContext } from './providers'
 import type { HistoryQuery } from '../generated/history.query'
 import type { FsComplete } from '../generated/fs.complete'
 
@@ -139,6 +146,70 @@ describe('historyProvider', () => {
       'store down',
     )
   })
+
+  it('argument position on a local session caps history so paths are never crowded', async () => {
+    const many = Array.from({ length: MAX_PROVIDER_CANDIDATES + 5 }, (_, i) => ({
+      id: String(i),
+      command: `cd x${i}`,
+      cwd: '/repo',
+      host: '',
+      status: 'success' as const,
+      endedAt: 100 + i,
+    }))
+    const provider = historyProvider({
+      query: vi.fn((): Promise<HistoryQuery> =>
+        Promise.resolve({
+          scope: 'directory',
+          exhausted: true,
+          source: 'store',
+          coverage: null,
+          entries: many,
+        }),
+      ),
+    })
+    const got = await provider.suggest(
+      ctx({ doc: 'cd ', token: { text: '', from: 3, to: 3 } }),
+      new AbortController().signal,
+    )
+    expect(got.length).toBe(MAX_HISTORY_IN_ARGUMENT_POSITION)
+  })
+
+  it('command position and remote sessions keep the full provider cap', async () => {
+    const makeProvider = (prefix: string) => {
+      const entries = Array.from({ length: MAX_PROVIDER_CANDIDATES + 5 }, (_, i) => ({
+        id: `${prefix}-${i}`,
+        command: `${prefix} x${i}`,
+        cwd: '/repo',
+        host: '',
+        status: 'success' as const,
+        endedAt: 100 + i,
+      }))
+      return historyProvider({
+        query: vi.fn((): Promise<HistoryQuery> =>
+          Promise.resolve({
+            scope: 'directory',
+            exhausted: true,
+            source: 'store',
+            coverage: null,
+            entries,
+          }),
+        ),
+      })
+    }
+    const inCommand = await makeProvider('git').suggest(
+      ctx({ position: 'command', doc: 'git', token: { text: 'git', from: 0, to: 3 } }),
+      new AbortController().signal,
+    )
+    expect(inCommand.length).toBe(MAX_PROVIDER_CANDIDATES)
+    // Remote argument position: the path provider is inactive, so history is
+    // the only answer — it keeps its full capacity rather than the
+    // argument-position cap, which exists to stop history crowding paths.
+    const onRemote = await makeProvider('cd').suggest(
+      ctx({ isLocal: false, doc: 'cd ', token: { text: '', from: 3, to: 3 } }),
+      new AbortController().signal,
+    )
+    expect(onRemote.length).toBe(MAX_PROVIDER_CANDIDATES)
+  })
 })
 
 describe('fsProvider', () => {
@@ -164,9 +235,83 @@ describe('fsProvider', () => {
     ).toBe(false)
   })
 
-  it('is not applicable for a bare word (a command name, not a path)', () => {
-    expect(provider.applicable(ctx({ token: { text: 'src', from: 3, to: 6 } }))).toBe(false)
-    expect(provider.applicable(ctx({ token: { text: '', from: 4, to: 4 } }))).toBe(false)
+  it('is not applicable in command position for a bare word (a command name, not a path)', () => {
+    expect(
+      provider.applicable(ctx({ position: 'command', token: { text: 'src', from: 0, to: 3 } })),
+    ).toBe(false)
+  })
+
+  it('is applicable in argument position for ANY token — including a bare word and the empty token', () => {
+    // A bare word in argument position (`ls src`) is an argument, and the
+    // argument may be a path — the path provider answers it.
+    expect(provider.applicable(ctx({ token: { text: 'src', from: 3, to: 6 } }))).toBe(true)
+    // The empty token (`cd ` + Tab) lists the session cwd.
+    expect(provider.applicable(ctx({ token: { text: '', from: 4, to: 4 } }))).toBe(true)
+  })
+
+  it('an empty token lists the session cwd (the wire refuses empty text, so it asks for ./)', async () => {
+    const complete = vi.fn((text: string): Promise<FsComplete> =>
+      Promise.resolve(
+        text === './'
+          ? {
+              entries: [
+                { name: 'src', path: '/repo/src', isDir: true },
+                { name: 'notes.txt', path: '/repo/notes.txt', isDir: false },
+              ],
+            }
+          : { entries: [] },
+      ),
+    )
+    const provider = fsProvider({ complete })
+    const got = await provider.suggest(
+      // `ls` keeps both kinds — this test is about the empty-token display,
+      // and `cd` would filter the file out by the dirs-only rule.
+      ctx({ doc: 'ls ', token: { text: '', from: 3, to: 3 } }),
+      new AbortController().signal,
+    )
+    expect(complete).toHaveBeenCalledWith('./', '/repo')
+    // The display keys off the REAL token, so rows show bare names — never a
+    // `./` the user did not type.
+    expect(got.map((c) => c.displayText)).toEqual(['src/', 'notes.txt'])
+    expect(got[0].insertText).toBe('src/')
+    expect(got[0].replacement).toEqual({ from: 3, to: 3 })
+  })
+
+  it('cd, pushd and rmdir take directories only; everything else keeps both kinds', async () => {
+    const complete = vi.fn((): Promise<FsComplete> =>
+      Promise.resolve({
+        entries: [
+          { name: 'docs', path: '/repo/docs', isDir: true },
+          { name: 'notes.txt', path: '/repo/notes.txt', isDir: false },
+        ],
+      }),
+    )
+    const provider = fsProvider({ complete })
+    const forCmd = async (doc: string, token: { text: string; from: number; to: number }) =>
+      provider.suggest(ctx({ doc, token }), new AbortController().signal)
+
+    const gotCd = await forCmd('cd ', { text: '', from: 3, to: 3 })
+    expect(gotCd.map((c) => c.insertText)).toEqual(['docs/'])
+    const gotPushd = await forCmd('pushd ', { text: '', from: 7, to: 7 })
+    expect(gotPushd.map((c) => c.insertText)).toEqual(['docs/'])
+    const gotRmdir = await forCmd('rmdir n', { text: 'n', from: 6, to: 7 })
+    expect(gotRmdir.map((c) => c.insertText)).toEqual(['docs/'])
+
+    // Anything else — including a command the table has never heard of —
+    // keeps the documented default of "both": the rule is a promise about
+    // the command's argument, and for an unknown command we promise nothing.
+    const gotLs = await forCmd('ls ', { text: '', from: 3, to: 3 })
+    expect(gotLs.map((c) => c.insertText)).toEqual(['docs/', 'notes.txt'])
+    const gotUnknown = await forCmd('someday n', { text: 'n', from: 8, to: 9 })
+    expect(gotUnknown.map((c) => c.insertText)).toEqual(['docs/', 'notes.txt'])
+  })
+
+  it('labels every row with its filesystem kind (Directory / File)', async () => {
+    const got = await provider.suggest(
+      ctx({ doc: 'cd ./sr', token: { text: './sr', from: 3, to: 7 } }),
+      new AbortController().signal,
+    )
+    expect(got[0].kind).toBe('directory')
   })
 
   it('maps backend entries to candidates with display, match and slash-for-dirs', async () => {

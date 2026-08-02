@@ -56,8 +56,9 @@ export interface EditorActions {
    *  the dropdown (design §8.7's decided option 1: with no candidates it
    *  sends nothing — never a raw `\t`, which would complete the shell's
    *  empty buffer). While the dropdown is open, the completion arbiter
-   *  consumes Tab to accept the selection, so this fires only when closed.
-   *  Tab never moves the focus either way (nocx-w7h.2/.3). */
+   *  consumes Tab to CYCLE the selection (Shift+Tab back; accept stays
+   *  Enter), so this fires only when closed. Tab never moves the focus
+   *  either way (nocx-w7h.2/.3). */
   onTab?: () => void
 }
 
@@ -93,10 +94,11 @@ export class CommandEditor {
    *  which surface Tab reaches while recall is open (recall's navigating
    *  state hands Tab to the editor via abandonToEdit, and the editor's Tab
    *  then opens completion on the restored draft). While the completion
-   *  dropdown is open it owns ↑/↓ (navigate, wrapping), Enter/Tab (accept),
-   *  Escape (close exactly one surface per press) and Right/End (ghost
-   *  accept when every §8.7 precondition holds). Everything else falls
-   *  through to this editor's own handling and then to CM6. */
+   *  dropdown is open it owns ↑/↓ (navigate, wrapping), Tab (cycle the
+   *  selection, Shift+Tab back — accept stays Enter), Escape (close exactly
+   *  one surface per press) and Right/End (ghost accept when every §8.7
+   *  precondition holds). Everything else falls through to this editor's own
+   *  handling and then to CM6. */
   private keyArbiter: ((e: KeyboardEvent) => boolean) | null = null
 
   /** Register (or clear) the keyboard arbiter. Cleared on dispose. */
@@ -404,12 +406,22 @@ export class CommandEditor {
     // the line over atomically at submit). The key stays SWALLOWED so it can
     // never move the focus out of the prompt (measured 2026-08-02:
     // document.activeElement went from cm-content to nothing). While the
-    // dropdown is open, the completion arbiter consumes Tab to accept the
-    // selection, so this branch only fires when the dropdown is closed.
-    if (e.key === 'Tab' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    // dropdown is open, the completion arbiter consumes Tab to cycle the
+    // selection (and Shift+Tab to go back), so this branch only fires when
+    // the dropdown is closed.
+    if (e.key === 'Tab' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
       e.preventDefault()
       e.stopPropagation()
       this.actions.onTab?.()
+      return
+    }
+    // Shift+Tab with the dropdown closed: Tab opens; Shift+Tab goes BACK,
+    // which only means something once the dropdown is up. Closed, it is
+    // swallowed all the same — never the browser's focus-move, which would
+    // silently strand the next keystroke (the 2026-08-02 measurement above).
+    if (e.key === 'Tab' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault()
+      e.stopPropagation()
       return
     }
     // Escape clears the draft without interrupting the shell (Ctrl-C).

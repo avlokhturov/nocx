@@ -285,10 +285,13 @@ export class CompletionController {
       this.dismiss()
       return false
     }
+    // Tab cycles the selection — the owner's explicit Warp-shaped ask: the
+    // first Tab opens the dropdown, each further Tab moves to the next
+    // candidate (Shift+Tab goes back), and accept stays Enter (and Right/End
+    // for the ghost). Cycling never inserts; the preview is the ghost text.
     if (e.key === 'Tab' && !e.ctrlKey && !e.metaKey && !e.altKey) {
-      if (this.acceptSelected()) return this.consume(e)
-      this.dismiss()
-      return false
+      this.move(e.shiftKey ? -1 : 1)
+      return this.consume(e)
     }
     if (e.key === 'ArrowRight' || e.key === 'End') {
       if (this.canAcceptGhost()) {
@@ -364,21 +367,22 @@ export class CompletionController {
     }
     for (const provider of applicable) {
       Promise.resolve(provider.suggest(ctx, ac.signal))
-        .then((batch) => this.onBatch(gen, batch))
+        .then((batch) => this.onBatch(gen, batch, position))
         .catch(() => {
           // One provider's error does not kill the others; the dropdown
           // shows what the rest answered.
-          this.onBatch(gen, [])
+          this.onBatch(gen, [], position)
         })
     }
   }
 
-  private onBatch(gen: number, batch: Candidate[]): void {
+  private onBatch(gen: number, batch: Candidate[], position: 'command' | 'argument'): void {
     if (gen !== this.generation) return // a provider may not deliver after abort
     if (this.gaveUp && this.state.name === 'closed') return // the budget expired
     const ranked = rankCandidates(batch, {
       query: this.queryDoc,
       now: (this.options.now ?? Date.now)(),
+      position,
     })
 
     // The first batch of a query REPLACES the previous query's list (the
@@ -386,18 +390,29 @@ export class CompletionController {
     // never move the selection off the candidate the user is on.
     const merged =
       this.queryCandidates.length === 0 ? ranked : mergeCandidates(this.queryCandidates, ranked)
-    this.queryCandidates = merged
+    // Re-rank the WHOLE accumulated list, not just the incoming batch: the
+    // rungs — argument position puts paths above whole-line history, and a
+    // path directory above a path file — must hold across async batches.
+    // Whichever provider lands first must not win the top of the list by
+    // arrival order; the selection tracks the candidate id, so re-ranking
+    // never moves the user's row.
+    const ordered = rankCandidates(merged, {
+      query: this.queryDoc,
+      now: (this.options.now ?? Date.now)(),
+      position,
+    })
+    this.queryCandidates = ordered
 
     if (this.state.name === 'open') {
       const selected = preserveSelection(
         { selectedIndex: this.state.selectedIndex, candidates: this.state.candidates },
-        merged,
+        ordered,
       )
-      this.state = { name: 'open', candidates: merged, selectedIndex: selected, generation: gen }
-    } else if (this.openIntent && merged.length > 0) {
+      this.state = { name: 'open', candidates: ordered, selectedIndex: selected, generation: gen }
+    } else if (this.openIntent && ordered.length > 0) {
       // A Tab query opens the dropdown on its first results; a typing query
       // never opens it (the ghost is the typing surface).
-      this.state = { name: 'open', candidates: merged, selectedIndex: 0, generation: gen }
+      this.state = { name: 'open', candidates: ordered, selectedIndex: 0, generation: gen }
     } else {
       this.state = { name: 'closed' }
       this.options.dropdown.hide()
@@ -417,6 +432,7 @@ export class CompletionController {
           displayText: c.displayText,
           matchRanges: c.matchRanges,
           source: c.source,
+          kind: c.kind,
         })),
         s.selectedIndex,
       )
