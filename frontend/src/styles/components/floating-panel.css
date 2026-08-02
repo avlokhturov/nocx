@@ -141,6 +141,13 @@
   min-width: 560px;
 }
 
+/* The secret picker sits between the two floors — a browsing surface with a
+   footer whose rows are short names. Same sizing rule, one floor;
+   MIN_PANEL_WIDTH_PX in floating-panel.ts is the source of truth. */
+.ui-floating-panel[data-variant='secret'] {
+  min-width: 480px;
+}
+
 .ui-floating-panel__header {
   display: flex;
   align-items: center;

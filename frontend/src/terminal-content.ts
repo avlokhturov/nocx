@@ -14,7 +14,17 @@ import { createShellProviders } from './suggest/providers'
 import { CompletionDropdown } from './ui/completion-dropdown'
 import type { FsComplete } from './generated/fs.complete'
 import { ShellInputTarget } from './input-target'
-import { submitCommand } from './submit'
+import {
+  submitCommand,
+  planSubmit,
+  planSubmitSync,
+  isSubmitFailure,
+  type SubmitPlan,
+} from './submit'
+import { secretChipExtension } from './secret-chip'
+import { PromptVaultController } from './prompt-vault'
+import { VaultClient } from './vault-client'
+import { showToast } from './ui/toast'
 import { shouldShowEditor, NATIVE_RESTORE } from './native-mode'
 import { shouldCopy, type ClipboardAccess, type ClipboardGate } from './clipboard'
 import type { ClipboardBanner } from './banner'
@@ -94,6 +104,13 @@ export class TerminalContent extends BaseTabContent {
   private shellTarget: ShellInputTarget | null = null
   private scrollback: ScrollbackController | null = null
   private ledger: CommandLedger | null = null
+  /** The vault RPC client, built over this tab's WS client (the shared
+   *  dispatcher — the sealed-access seam it carries is already installed at
+   *  the app root). */
+  private vault: VaultClient | null = null
+  /** The prompt's vault surfaces: the '@' picker, the offer-to-save, and
+   *  the resolve-at-submit wiring. */
+  private promptVault: PromptVaultController | null = null
   private completion: CompletionController | null = null
   private recall: RecallOverlay | null = null
   private inputState = new InputStateController()
@@ -155,6 +172,10 @@ export class TerminalContent extends BaseTabContent {
     private readonly onAdoptabilityChange?: (adoptable: boolean) => void,
     /** Called when an SSH connection fails because the vault is sealed. */
     private readonly onVaultSealed?: () => void,
+    /** The reference picker's setup offer needs the setup dialog (no OS
+     *  key): the vault layer owns it — wired by main.tsx to
+     *  vaultController.openSetup. */
+    private readonly onSetupVault?: () => void,
   ) {
     super()
     this._readyPromise = new Promise<boolean>((resolve) => {
@@ -280,16 +301,43 @@ export class TerminalContent extends BaseTabContent {
         (text: string) => renderer.paste(text),
         (data: string) => this.session!.send(data),
         // The target carries the shell's editor extensions through the §8.8
-        // seam: the shell highlighter plus the completion surface.
-        [...shellExtensions(renderer.snapshotStore), ...this.completion.extensions()],
+        // seam: the shell highlighter, the completion surface, and the
+        // vault-reference chip (a document-level decoration, not a language).
+        [
+          ...shellExtensions(renderer.snapshotStore),
+          ...this.completion.extensions(),
+          secretChipExtension(),
+        ],
       )
+      const vault = new VaultClient(this.client)
+      this.vault = vault
       this.editor = new CommandEditor(
         {
-          submit: (doc: string) => {
-            this._pendingCommand = doc
+          // The resolve half of ADR-0021, BEFORE the atomic handoff: a line
+          // with references is resolved through vault.resolveLine; the
+          // RESOLVED line goes to the PTY, the reference-intact line to the
+          // ledger and history.record. A sealed vault or an unresolved name
+          // is reported and the draft stays — never a silent send of a
+          // broken line (the editor's beforeSubmit seam keeps the draft on
+          // false). A plain line resolves SYNCHRONOUSLY (planSubmitSync) —
+          // an ordinary Enter keeps its no-gap atomic handoff.
+          beforeSubmit: (doc) => {
+            const sync = planSubmitSync(doc)
+            if (sync) return sync
+            return planSubmit(doc, (line) => vault.resolveLine(line)).then((verdict) => {
+              if (isSubmitFailure(verdict)) {
+                this.reportSubmitFailure(verdict)
+                return false
+              }
+              return verdict
+            })
+          },
+          submit: (doc: string, plan?: SubmitPlan) => {
+            const recordLine = plan?.recordLine ?? doc
+            this._pendingCommand = recordLine
             if (this.ledger) {
               let markerLine: () => number | undefined = () => undefined
-              const rec = this.ledger.open(doc, this._cwd, this._host, () => markerLine())
+              const rec = this.ledger.open(recordLine, this._cwd, this._host, () => markerLine())
               const m = renderer.registerMarker()
               if (m) {
                 markerLine = () => m.line()
@@ -300,7 +348,7 @@ export class TerminalContent extends BaseTabContent {
                 })
               }
             }
-            this.scrollback?.maybeClear(doc)
+            this.scrollback?.maybeClear(recordLine)
             submitCommand(doc, {
               dispatchSubmit: () => this.inputState.dispatch({ type: 'submit' }),
               focusGrid: () => renderer.focus(),
@@ -312,12 +360,24 @@ export class TerminalContent extends BaseTabContent {
           // transcript where it belongs — just above the editor — instead of
           // letting it slide underneath.
           resized: () => this.scrollback?.scrollToBottom(),
-          /** Detect `ssh <partial>` pattern and show matching aliases. */
+          /** Detect `ssh <partial>` pattern and show matching aliases, and
+           *  drive the vault surfaces (the offer's detection, the picker's
+           *  passive filter). */
           onInputChange: (text) => {
             this._onEditorInput(text)
             // A keystroke aborts the completion query in flight and starts a
             // fresh one (design §8.9.2); the ghost text re-anchors.
             this.completion?.onDocChanged()
+            this.promptVault?.onDocChanged(text)
+          },
+          /** A programmatic clear (submit, Esc, Ctrl-C): the vault surfaces
+           *  hold stale findings over a cleared line. */
+          onDocCleared: () => {
+            this.promptVault?.reset()
+          },
+          /** '@' at a word start — the reference picker's passive trigger. */
+          onSecretPicker: (triggerPos) => {
+            this.promptVault?.onSecretPicker(triggerPos)
           },
           /** Hint acceptance — no cache to invalidate. */
           onAcceptHint: () => {},
@@ -340,6 +400,13 @@ export class TerminalContent extends BaseTabContent {
       )
       this.editor.mount(target)
       this.completion.attach(this.editor, this.editor.root)
+      this.promptVault = new PromptVaultController({
+        editor: this.editor,
+        vault,
+        report: (level, message) => showToast({ level, message }),
+        requestSetupDialog: () => this.onSetupVault?.(),
+      })
+      this.promptVault.mount()
 
       // ── Recall overlay (Provenance Recall, design §8.10) ────────────────
       // The history palette above the prompt. Rows are served by the store
@@ -365,24 +432,41 @@ export class TerminalContent extends BaseTabContent {
             return queryLedgerHistory(this.ledger, scope, this._cwd, this._host, text)
           }
         },
+        // The second door into the vault (ADR-0021): Enter on a row whose
+        // text is a mask must not run silently. The overlay leaves the
+        // command in the line and says so; the controller reports why and
+        // opens the picker, so the way out of a masked command is to give it
+        // a live secret. This is the door people will actually walk through —
+        // nobody plans to store a secret in advance, they hit a command that
+        // cannot run.
+        onMaskedRun: (maskedCount) => this.promptVault?.onMaskedRow(maskedCount),
       })
       this.recall.mount(this.editor.root)
-      // ONE arbiter chain (design §8.9.4 — two state machines, one
-      // keyboard): recall first, completion second, the editor's own
-      // handling last. Recall is the higher-priority surface, and the two
-      // never stack: the moment recall opens, the completion dropdown is
-      // dismissed. Esc closes exactly one surface per press, in the same
-      // order.
+      // ONE arbiter chain (design §8.9.4 — three surfaces, one keyboard):
+      // recall first, the vault picker second, completion last, the
+      // editor's own handling at the tail. Recall is the higher-priority
+      // surface and the surfaces never stack: the moment one opens, the
+      // completion dropdown is dismissed. Esc closes exactly one surface
+      // per press, in the same order.
       this.editor.setKeyArbiter((e) => {
         const consumed = this.recall!.handleKey(e)
         if (this.recall!.isOpen) this.completion?.dismiss()
-        return consumed || (this.completion?.handleKey(e) ?? false)
+        if (consumed) return true
+        // The picker outranks completion: while it is open its keys
+        // (arrows, Enter, Tab, Esc) belong to it, and a Right/End ghost
+        // accept must never insert completion text into the line under the
+        // picker.
+        if (this.promptVault!.isPickerOpen) this.completion?.dismiss()
+        if (this.promptVault!.handleKey(e)) return true
+        return this.completion?.handleKey(e) ?? false
       })
 
       if (signal.aborted) {
         this.recall?.destroy()
         this.recall = null
         this.completion?.destroy()
+        this.promptVault?.destroy()
+        this.promptVault = null
         this.completion = null
         this.editor.dispose()
         renderer.dispose()
@@ -992,6 +1076,8 @@ export class TerminalContent extends BaseTabContent {
     this.completion?.destroy()
     this.completion = null
     this.scrollback?.dispose()
+    this.promptVault?.destroy()
+    this.promptVault = null
     this._disposeAllMarkers()
     this.ledger = null
     this.host = null
@@ -1057,5 +1143,36 @@ export class TerminalContent extends BaseTabContent {
       // line was removed.
       (a) => a.alias.toLowerCase().startsWith(lower),
     )
+  }
+
+  /** A submit was refused: an unresolved name or a sealed vault must not
+   *  silently send a broken line (ADR-0021). The report lands where the
+   *  user is looking; the editor's beforeSubmit seam kept the draft. The
+   *  sealed case is rare — the dispatcher's unlock seam normally raises the
+   *  prompt and retries; reaching here means it was cancelled or absent. */
+  private reportSubmitFailure(failure: {
+    reason: 'unresolved' | 'sealed' | 'error'
+    names?: ReadonlyArray<string>
+    message?: string
+  }): void {
+    if (failure.reason === 'unresolved') {
+      const names = (failure.names ?? []).join(', ')
+      showToast({
+        level: 'danger',
+        message: `Unknown secret${(failure.names ?? []).length === 1 ? '' : 's'}: ${names}. The command was not sent.`,
+      })
+      return
+    }
+    if (failure.reason === 'sealed') {
+      showToast({
+        level: 'danger',
+        message: 'The vault is locked. Unlock it and run the command again.',
+      })
+      return
+    }
+    showToast({
+      level: 'danger',
+      message: failure.message ?? 'Could not resolve the command. It was not sent.',
+    })
   }
 }

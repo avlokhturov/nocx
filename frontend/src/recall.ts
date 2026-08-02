@@ -346,9 +346,21 @@ export class RecallOverlay {
   private readonly panel: FloatingPanel
   private readonly editor: RecallEditor
   private readonly query: RecallQuery
-  constructor(opts: { editor: RecallEditor; query: RecallQuery }) {
+  /** Told when Enter lands on a row whose text is a mask rather than a
+   *  command, with how many secrets were masked. The overlay's job ends at
+   *  "this cannot run and here is why"; what to offer instead — a live value
+   *  from the vault — belongs to the host. Absent means the old behaviour,
+   *  which is why it is optional: a recall overlay with no vault around it
+   *  still works. */
+  private readonly onMaskedRun?: (maskedCount: number) => void
+  constructor(opts: {
+    editor: RecallEditor
+    query: RecallQuery
+    onMaskedRun?: (maskedCount: number) => void
+  }) {
     this.editor = opts.editor
     this.query = opts.query
+    this.onMaskedRun = opts.onMaskedRun
     this.panel = new FloatingPanel({
       variant: 'recall',
       role: 'dialog',
@@ -734,6 +746,21 @@ export class RecallOverlay {
   private accept(): void {
     const s = this.state
     if (s.name !== 'navigating') return
+    // A masked row is not a command. The durable text is the masked one
+    // (ADR-0021), so `curl -H "Bearer sk-p...7890"` looks real and cannot
+    // work — it sends the mask and fails somewhere the user cannot read.
+    // ADR-0021 names this consequence and requires that it not run silently:
+    // the overlay closes, the command stays in the line where it can be seen
+    // and edited, and the host is told why so it can offer a live value.
+    // Rows from THIS session never reach here — they carry the real text and
+    // maskedCount 0 (nocx-xkve.4).
+    const wireIndex = s.query.entries.length - 1 - s.selected
+    const masked = s.query.entries[wireIndex]?.maskedCount ?? 0
+    if (masked > 0 && this.onMaskedRun) {
+      this.takeSelected()
+      this.onMaskedRun(masked)
+      return
+    }
     this.close()
     this.editor.submit()
   }

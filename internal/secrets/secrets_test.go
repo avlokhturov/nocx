@@ -259,3 +259,37 @@ func allKinds() []Kind {
 		KindAuthHeader, KindEnvAssignment, KindHighEntropy,
 	}
 }
+
+// A reference NAME that looks like a vendor key is still a NAME. Found by the
+// vault-ui worker's probe: `{{secret:sk-proj-mine}}` came back from the store
+// as `{{secret:sk-p...mine}}`, a reference that can never resolve — the exact
+// invariant the package exists to protect, broken by the one rule family that
+// deliberately skipped the isReference guard.
+func TestMaskNeverReachesInsideAReference(t *testing.T) {
+	for _, in := range []string{
+		`curl -H "Authorization: Bearer {{secret:sk-proj-mine}}" https://api.example.com`,
+		`TOKEN={{secret:ghp_teamwide}} gh repo list`,
+		`curl -H "x-api-key: {{secret:AKIAIOSFODNN7EXAMPLE}}" https://api.example.com`,
+		`echo {{secret:eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9}}`,
+	} {
+		if got, findings := Mask(in); got != in {
+			t.Errorf("Mask(%q)\n = %q\nwant it unchanged (findings %+v)", in, got, findings)
+		}
+	}
+}
+
+// And the guard is not a blanket amnesty: a real key sitting NEXT to a
+// reference is still masked.
+func TestMaskStillCatchesAKeyBesideAReference(t *testing.T) {
+	in := `curl -H "A: {{secret:mine}}" -H "B: sk-proj-abcdef1234567890" x`
+	got, findings := Mask(in)
+	if !strings.Contains(got, `{{secret:mine}}`) {
+		t.Errorf("the reference was altered: %q", got)
+	}
+	if strings.Contains(got, "sk-proj-abcdef1234567890") {
+		t.Errorf("the literal key survived: %q", got)
+	}
+	if len(findings) != 1 {
+		t.Errorf("findings = %+v, want exactly the literal key", findings)
+	}
+}

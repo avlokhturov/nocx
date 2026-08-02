@@ -157,6 +157,44 @@ describe('recall: Enter executes the previewed command', () => {
     expect(submit).toHaveBeenCalledWith('rm -rf build')
   })
 
+  it('Enter on a MASKED row does not run it: the command stays and the host is told', async () => {
+    // ADR-0021's named consequence. The durable text is the masked one, so
+    // `curl -H "Bearer sk-p...7890"` looks real and cannot work; running it
+    // sends the mask and fails somewhere the user cannot read. The overlay
+    // leaves it in the line and reports; the host offers a live secret.
+    const onMaskedRun = vi.fn()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const submit = vi.fn()
+    const ed = new CommandEditor({ submit, cancel: vi.fn() }, [keymap.of([...defaultKeymap])])
+    ed.mount(container)
+    const view = viewOf(ed)
+    const masked: HistoryEntry = { ...mkEntry('curl -H "Bearer sk-p...7890"'), maskedCount: 1 }
+    const recall = new RecallOverlay({
+      editor: ed,
+      query: () =>
+        Promise.resolve({
+          entries: [masked],
+          scope: 'directory' as const,
+          exhausted: true,
+          source: 'store' as const,
+          coverage: null,
+        }),
+      onMaskedRun,
+    })
+    recall.mount(ed.root)
+    ed.setKeyArbiter((e) => recall.handleKey(e))
+    ed.show()
+    await recall.open('directory')
+    await settled(container)
+
+    key(view, { key: 'Enter' })
+    expect(submit).not.toHaveBeenCalled()
+    expect(onMaskedRun).toHaveBeenCalledWith(1)
+    expect(recall.isOpen).toBe(false)
+    expect(ed.getDoc()).toBe('curl -H "Bearer sk-p...7890"') // left to be fixed
+  })
+
   it('Esc after previewing restores the draft and sends nothing', async () => {
     const { container, ed, view, recall, submit } = setupRecall({
       query: mkQuery(['rm -rf build']),

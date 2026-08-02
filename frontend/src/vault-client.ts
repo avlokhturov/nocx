@@ -1,8 +1,6 @@
 // Vault RPC client — typed methods for the vault.* control-plane methods.
 // Sibling of ProfileClient over the same Dispatcher.
 
-import type { Dispatcher } from './dispatcher'
-
 // The wire types are GENERATED from the contracts (npm run contracts). They
 // are re-exported here so callers keep importing them from the client, and so
 // this module stays the one place that says what vault.* speaks.
@@ -15,10 +13,12 @@ export type { VaultStatus, ProviderStatus } from './generated/vault.status'
 export type { VaultResetPreview } from './generated/vault.resetPreview'
 export type { VaultResetResult, ResidueEntry } from './generated/vault.reset'
 export type { VaultInventory, InventoryEntry } from './generated/vault.inventory'
+export type { VaultResolveLine, ResolveRef } from './generated/vault.resolveLine'
 import type { VaultStatus } from './generated/vault.status'
 import type { VaultResetPreview } from './generated/vault.resetPreview'
 import type { VaultResetResult } from './generated/vault.reset'
 import type { VaultInventory, InventoryEntry } from './generated/vault.inventory'
+import type { VaultResolveLine } from './generated/vault.resolveLine'
 
 /** The vault's lifecycle state, as the schema's enum spells it. */
 export type VaultState = VaultStatus['state']
@@ -87,10 +87,24 @@ export interface VaultDeleteSecretParams {
   /** The row handle the inventory entry carried — never a SecretID. */
   id: string
 }
+
+/**
+ * The RPC seam VaultClient speaks over — the full Dispatcher in the app, or
+ * any caller that can route control-plane methods (WSClient's `call`, which
+ * wraps the same dispatcher). The optional sealed hook is the ONE seam where
+ * a sealed vault raises the unlock prompt; the vault layer installs it, and a
+ * caller without a real dispatcher (a test double) simply keeps the
+ * caller-side behavior.
+ */
+export interface VaultRpc {
+  call<T = unknown>(method: string, params: unknown): Promise<T>
+  onVaultSealed?: (method: string) => Promise<void>
+}
+
 export class VaultClient {
   /** The shared control-plane dispatcher. Public so the vault state module
    *  can install the sealed-access hook (the vault owns the unlock prompt). */
-  constructor(readonly dispatcher: Dispatcher) {}
+  constructor(readonly dispatcher: VaultRpc) {}
 
   status(): Promise<VaultStatus> {
     return this.dispatcher.call('vault.status', {})
@@ -172,6 +186,15 @@ export class VaultClient {
   deleteSecret(params: VaultDeleteSecretParams): Promise<Record<string, never>> {
     return this.dispatcher.call('vault.deleteSecret', params)
   }
+
+  /** Resolve every {{secret:NAME}} reference in a command line to its live
+   *  value — the line to write to the PTY, and only that. The result's `line`
+   *  may carry secret values and must never be persisted; history.record
+   *  receives the line with the reference INTACT. */
+  resolveLine(line: string): Promise<VaultResolveLine> {
+    return this.dispatcher.call('vault.resolveLine', { line })
+  }
+
   activity(): Promise<Record<string, never>> {
     return this.dispatcher.call('vault.activity', {})
   }

@@ -14,7 +14,8 @@
 
 import { EditorState, Extension } from '@codemirror/state'
 import { EditorView, keymap } from '@codemirror/view'
-import { history, historyKeymap } from '@codemirror/commands'
+import { defaultKeymap, history, historyKeymap } from '@codemirror/commands'
+import type { SubmitPlan } from './submit'
 
 /**
  * The indent a pasted command arrives with, when it arrives at the very
@@ -59,7 +60,7 @@ export interface AliasSuggestion {
 }
 
 export interface EditorActions {
-  submit: (doc: string) => void
+  submit: (doc: string, plan?: SubmitPlan) => void
   // cancel discards the composed line the way Ctrl-C does at a shell prompt:
   // the editor clears and the shell is interrupted so a fresh prompt returns.
   // Without it, Ctrl-C in the editor is a no-op and the stale text corrupts
@@ -92,6 +93,25 @@ export interface EditorActions {
    *  Enter), so this fires only when closed. Tab never moves the focus
    *  either way (nocx-w7h.2/.3). */
   onTab?: () => void
+  /**
+   * Optional async planning seam, run BEFORE the atomic handoff. The host
+   * resolves references (vault.resolveLine) and vetoes masked history rows
+   * here: return a plan to submit the RESOLVED line while recording the
+   * reference-intact one, or false to keep the draft (the host has already
+   * reported why). While the verdict is in flight a second Enter is swallowed
+   * and an edit to the draft drops the stale plan.
+   */
+  beforeSubmit?: (doc: string) => SubmitPlan | Promise<SubmitPlan | false> | false
+  /** Fired when the user types `@` at a WORD START — the reference picker's
+   *  trigger (the owner's decision). `triggerPos` is the caret position the
+   *  '@' lands at: the picker's replacement range starts there. The '@'
+   *  itself is NOT consumed — it lands in the document, and the picker
+   *  replaces the trigger word with the chosen reference; dismissing leaves
+   *  the literal '@' the user typed. */
+  onSecretPicker?: (triggerPos: number) => void
+  /** Fired after the document is cleared programmatically (submit, Esc,
+   *  Ctrl-C) — the host drops its floating surfaces and offer memory. */
+  onDocCleared?: () => void
 }
 
 export class CommandEditor {
@@ -249,6 +269,15 @@ export class CommandEditor {
           // cannot take back is one we must not make silently.
           history(),
           keymap.of(historyKeymap),
+          // The standard editing keymap — the editor's baseline, not the
+          // caller's: the vault chip's atomicity is a real behavior ("the
+          // caret steps over it as one unit and Backspace removes the whole
+          // reference"), and without these bindings the production prompt
+          // had NO arrow-key caret movement and NO Backspace at all. Our
+          // capture-phase listener still decides Enter/Escape/Tab/Ctrl-C
+          // before this keymap ever sees them (tested: 'Enter still submits
+          // even when a default-precedence keymap binds it').
+          keymap.of(defaultKeymap),
           EditorView.domEventHandlers({
             paste: (event, view) => {
               const text = event.clipboardData?.getData('text/plain')
@@ -339,22 +368,80 @@ export class CommandEditor {
       this._programmatic = false
     }
     this._lastRowCount = 1
+    // The host's floating surfaces (the secret offer, the picker) hold
+    // stale findings after a clear; programmatic clears fire no input
+    // events, so this is the one seam that tells the host.
+    this.actions.onDocCleared?.()
   }
+
+  /** True while a beforeSubmit verdict is in flight: a second Enter in that
+   *  window must not start a second resolve (each would commit a duplicate
+   *  ledger record on success). Cleared when the verdict lands. */
+  private _submitInFlight = false
 
   /** Submit the current document, then hide and clear (ADR-0004 §2). Also
    *  the overlay's execution path: RecallOverlay calls this so Enter in the
    *  palette runs the previewed command through exactly the same path a
-   *  typed Enter takes. */
+   *  typed Enter takes. With a beforeSubmit hook registered, the atomic
+   *  handoff waits for the verdict — a reference line resolves first, a
+   *  veto keeps the draft with the host's report already on screen. */
   submit(): void {
     this.hideAliasHints()
     const doc = this.view.state.doc.toString()
-    // Atomic handoff (ADR-0004 §2): clear + hide BEFORE sending, so the
-    // committed command is painted once by the shell, not echoed twice. The
-    // observed order from the textarea implementation — value → rows →
-    // hide() → submit() — is preserved.
+    const hook = this.actions.beforeSubmit
+    if (!hook) {
+      this.commit(doc)
+      return
+    }
+    if (this._submitInFlight) return
+    let result: SubmitPlan | Promise<SubmitPlan | false> | false
+    try {
+      result = hook(doc)
+    } catch {
+      // Fail-open: a throwing planner keeps the draft; the host reports.
+      return
+    }
+    if (result === false) return
+    if (typeof (result as Promise<SubmitPlan | false>).then === 'function') {
+      // The verdict is in flight (a line with references resolves over the
+      // wire). A second Enter is swallowed; an edit to the draft drops the
+      // stale plan — the user's new text is the draft.
+      this._submitInFlight = true
+      void Promise.resolve(result as Promise<SubmitPlan | false>)
+        .then((plan) => {
+          if (plan !== false && this.view.state.doc.toString() === doc)
+            this.commit(plan.sendLine, plan)
+        })
+        .catch(() => {
+          // Fail-open: the draft stays.
+        })
+        .finally(() => {
+          this._submitInFlight = false
+        })
+      return
+    }
+    // A SYNCHRONOUS verdict (a plain line — no references, no wire call):
+    // the atomic handoff runs NOW, with no microtask gap. A gap would let a
+    // fast-typed key change the draft and drop the commit under the stale-
+    // plan guard, and it would break the sync-after-Enter observers.
+    const plan = result as SubmitPlan
+    this.commit(plan.sendLine, plan)
+  }
+
+  /** The atomic handoff (ADR-0004 §2): clear + hide BEFORE sending, so the
+   *  committed command is painted once by the shell, not echoed twice. The
+   *  observed order from the textarea implementation — value → rows →
+   *  hide() → submit() — is preserved. `plan` is present only after a
+   *  beforeSubmit planner succeeded: the resolved sendLine goes to the PTY,
+   *  the reference-intact recordLine to the ledger. */
+  private commit(sendLine: string, plan?: SubmitPlan): void {
     this.clearDoc()
     this.hide()
-    this.actions.submit(doc)
+    // The plan is present only after a beforeSubmit planner succeeded; the
+    // plain path keeps the exact one-argument call (no resolution happened,
+    // so there is nothing to resolve for the ledger either).
+    if (plan) this.actions.submit(sendLine, plan)
+    else this.actions.submit(sendLine)
   }
 
   /** Accept the currently highlighted hint, replacing `ssh <partial>` with the
@@ -385,12 +472,42 @@ export class CommandEditor {
     // composition itself. Interpreting a composing Enter as submit or a
     // composing Ctrl-C as interrupt would destroy the composition (spec
     // W1 check 3). keyCode 229 is the legacy WebKit composition sentinel.
-    if (e.isComposing || e.keyCode === 229) return
+    // The key is CONSUMED, not merely ignored: with the standard editing
+    // keymap installed, an unguarded composing Enter would reach CM6's
+    // insertNewline and corrupt the draft mid-composition.
+    if (e.isComposing || e.keyCode === 229) {
+      e.preventDefault()
+      e.stopPropagation()
+      return
+    }
 
     // The keyboard arbiter (recall overlay) gets first refusal: while it is
     // open, Up/Down/Enter/Escape and the open shortcut belong to it, and
     // nothing the editor handles — submit, clear, interrupt — may fire.
     if (this.keyArbiter?.(e)) return
+
+    // A key typed into a nested form control (the vault offer's name field
+    // and buttons) belongs to that control, not to the prompt surface: the
+    // editor must never interpret Enter inside the name field as submit, or
+    // Escape as clearing the draft under it.
+    const target = e.target as HTMLElement | null
+    if (target && target.closest('input, textarea, select, button')) return
+
+    // '@' at a WORD START opens the reference picker (the owner's trigger):
+    // after whitespace or at line start. An '@' inside a word — user@host,
+    // git@github.com, an email — is ordinary text and never fires. The word
+    // start is the same rule the ghost text uses (ghostTail's prevChar check
+    // in suggest/controller.ts): prevChar '' (line start) or whitespace.
+    // The '@' itself is NOT consumed — it lands in the document, and the
+    // picker replaces it with the chosen reference; dismissing leaves the
+    // literal '@' the user typed.
+    if (e.key === '@' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      const head = this.view.state.selection.main.head
+      const prevChar = head > 0 ? this.view.state.doc.sliceString(head - 1, head) : ''
+      if (prevChar === '' || /\s/.test(prevChar)) {
+        this.actions.onSecretPicker?.(head)
+      }
+    }
 
     if (this._hintItems.length > 0) {
       if (e.key === 'ArrowDown') {
@@ -616,6 +733,7 @@ export class CommandEditor {
   show(): void {
     this.root.style.display = ''
     this._hintDismissed = false
+
     // CLEARED, not set to 'visible'. An inactive pane is hidden with
     // `visibility: hidden` on purpose (base.css) so its renderer keeps measuring
     // a real size — and `visibility`, unlike `display`, is overridable by a
@@ -630,6 +748,16 @@ export class CommandEditor {
     // to re-measure before it is painted and focused (spec W1 check 5).
     this.view.requestMeasure()
     this.view.focus()
+  }
+
+  /** The caret's x, in px relative to the editor root — the anchor for a
+   *  floating surface that opens at the caret (the secret picker). Null when
+   *  the view has no coordinates yet. */
+  caretAnchorLeft(): number | null {
+    const head = this.view.state.selection.main.head
+    const coords = this.view.coordsAtPos(head)
+    if (!coords) return null
+    return coords.left - this.root.getBoundingClientRect().left
   }
 
   /** Focus the editor if it is visible. Safe to call when hidden. */

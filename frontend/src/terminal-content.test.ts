@@ -25,6 +25,7 @@ import {
   type ClipboardFake,
   type RendererMock,
   type SessionFake,
+  type ClientFake,
 } from './test-support/tabs-fixtures'
 import { XtermRenderer } from './renderers/xterm'
 import { ClipboardGate } from './clipboard'
@@ -77,6 +78,7 @@ interface MountOpts {
 async function mountTerminal(
   clipboard: ClipboardFake = makeClipboard(),
   opts: MountOpts = {},
+  client?: ClientFake,
 ): Promise<{
   view: EditorView
   ed: CommandEditor
@@ -85,9 +87,9 @@ async function mountTerminal(
   tab: Tab
   teardown: () => void
 }> {
-  const client = makeClient()
+  const clientFake = client ?? makeClient()
   // ClientFake is structurally a WSClient; the tab layer expects the real type.
-  const wsClient = client as unknown as WSClient
+  const wsClient = clientFake as unknown as WSClient
   const content = new TerminalContent(
     wsClient,
     clipboard,
@@ -579,6 +581,46 @@ describe('paste with focus on a frozen block (nocx-w7h.9)', () => {
       expect(block.classList.contains('cmd-block-selected')).toBe(false)
       expect(session.send.mock.calls.length).toBe(sentBefore)
       expect(ev.defaultPrevented).toBe(false) // native paste still runs
+    } finally {
+      teardown()
+    }
+  })
+})
+
+describe('vault references in the prompt (ADR-0021, the renderer half)', () => {
+  it('an unresolved reference is NOT sent: the draft stays and the editor stays up', async () => {
+    // The real submit seam: Enter -> beforeSubmit -> planSubmit ->
+    // vault.resolveLine -> the editor keeps the draft on a refusal.
+    const client = makeClient()
+    const callMock = client.call
+    callMock.mockImplementation((method: string, params: unknown) => {
+      if (method === 'vault.resolveLine') {
+        const req = params as { line?: string }
+        const line = typeof req?.line === 'string' ? req.line : ''
+        return Promise.resolve({ line, refs: [{ name: 'nope', resolved: false }] })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const withSession = content as unknown as { session: SessionFake }
+    try {
+      content.setVisible(true)
+      ed.show()
+      ed.insertText('curl {{secret:nope}} https://api')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      // The verdict is async (references resolve over the wire): drain the
+      // chain, then assert the refusal.
+      for (let i = 0; i < 5; i++) await Promise.resolve()
+      expect(withSession.session.send).not.toHaveBeenCalled()
+      // The draft is intact and the editor is still up — nothing was lost.
+      expect(ed.getDoc()).toBe('curl {{secret:nope}} https://api')
+      expect(ed.isVisible).toBe(true)
     } finally {
       teardown()
     }

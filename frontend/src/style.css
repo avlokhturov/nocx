@@ -36,6 +36,8 @@
 @import './styles/components/icon-button.css';
 @import './styles/components/section.css';
 @import './styles/components/badge.css';
+@import './styles/components/secret-chip.css';
+@import './styles/components/secret-offer.css';
 @import './styles/components/empty-state.css';
 @import './styles/components/status-card.css';
 @import './styles/components/status-dot.css';

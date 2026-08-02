@@ -328,6 +328,10 @@ export class TabManager {
   private readonly recentTabIds: number[] = []
   /** Called when an SSH connection fails because the vault is sealed. */
   onVaultSealed?: () => void
+  /** Called when the reference picker's setup offer is activated and the
+   *  machine has no OS key: the vault layer owns the setup dialog, so the
+   *  hook raises it (wired by main.tsx to vaultController.openSetup). */
+  onSetupVault?: () => void
   /** Called when the user performs a UI action that should reset the
    *  vault idle timer. Wired by main.tsx to vaultClient.activity(). */
   onActivity?: () => void
@@ -415,6 +419,7 @@ export class TabManager {
       // fullscreen region lives inside its pane now (nocx-6w4z).
       undefined,
       (subtitle) => tabRef.current?.updateSubtitle(subtitle),
+      this.onSetupVault,
     )
     const descriptor: ContentDescriptor = {
       surfaceType: SURFACE_TERMINAL,
@@ -457,6 +462,7 @@ export class TabManager {
         }
       },
       this.onVaultSealed,
+      this.onSetupVault,
     )
     const descriptor: ContentDescriptor = {
       surfaceType: SURFACE_TERMINAL,

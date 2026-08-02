@@ -457,11 +457,34 @@ type match struct {
 	repl       string
 }
 
+// referenceSpanRE is a `{{secret:NAME}}` reference, whole. Everything inside
+// one is OFF LIMITS to every rule.
+//
+// isReference guards a rule that masks a value it did not recognise, and that
+// was thought to be enough — a vendor prefix is a literal key wherever it
+// appears, so those rules deliberately skipped the guard. Inside a reference
+// it is not: an inventory NAME may legally start with `sk-`, and
+// `{{secret:sk-proj-mine}}` came back from the store as
+// `{{secret:sk-p...mine}}` — a reference that can never resolve, which is the
+// invariant this package exists to protect. So the exclusion belongs to the
+// deterministic pass rather than to any one rule: a rule added later cannot
+// forget what it never has to remember.
+var referenceSpanRE = regexp.MustCompile(`\{\{secret:[^}]*\}\}`)
+
 func detectMatches(input string) []match {
 	var kept []match
+	refs := referenceSpanRE.FindAllStringIndex(input, -1)
+	inReference := func(c candidate) bool {
+		for _, r := range refs {
+			if c.start < r[1] && r[0] < c.end {
+				return true
+			}
+		}
+		return false
+	}
 	for _, r := range rules {
 		for _, c := range r.find(input) {
-			if overlapsAny(c, kept) {
+			if inReference(c) || overlapsAny(c, kept) {
 				continue
 			}
 			kept = append(kept, match{kind: r.kind, start: c.start, end: c.end, repl: c.repl})
