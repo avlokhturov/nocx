@@ -391,7 +391,21 @@ func (s *sqliteContent) FindByPrefix(ctx context.Context, prefix string, limit i
 // (cwd, host) pair — the overlay's own rung semantics, design §10.6. The page
 // and the store-wide row count are read in one read transaction so HasRows
 // cannot race a concurrent write.
-func (s *sqliteContent) Query(ctx context.Context, scope Scope, cwd, host string, limit int, before *int64) (HistoryPage, error) {
+//
+// text is the search filter (nocx-ms7v): a case-insensitive substring over
+// command, applied WITHIN the rung — the server never silently widens. Empty
+// means no filter. There is deliberately no FTS: a substring match cannot use
+// an index, and at command-history sizes a full scan of the rung is cheap —
+// measured 100k rows, filter hit, ~260 µs per query (dev machine, WAL warm),
+// so the overlay's per-keystroke queries are nowhere near a frame budget.
+// FTS arrives with output search, whose indexing unit is still an open
+// decision.
+//
+// Coverage is the store-wide MIN(ended_at) — how far back retention lets this
+// answer see, independent of the rung and the filter. It is read in the same
+// transaction so the horizon and the page cannot disagree about the store's
+// state.
+func (s *sqliteContent) Query(ctx context.Context, scope Scope, cwd, host string, limit int, before *int64, text string) (HistoryPage, error) {
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return HistoryPage{}, err
@@ -406,6 +420,18 @@ func (s *sqliteContent) Query(ctx context.Context, scope Scope, cwd, host string
 			cond += " AND id < ?"
 		}
 		args = append(args, *before)
+	}
+	// The filter is a parameterized case-folded substring predicate, not
+	// LIKE: instr() has no wildcard grammar, so a search for "100%_done"
+	// matches that literal command and nothing else. lower(?) is bound once;
+	// lower(command) is computed per row (no index — the measurement above).
+	if text != "" {
+		if cond == "" {
+			cond = " WHERE instr(lower(command), lower(?)) > 0"
+		} else {
+			cond += " AND instr(lower(command), lower(?)) > 0"
+		}
+		args = append(args, text)
 	}
 	// Fetch limit+1: one extra row proves the rung is not exhausted.
 	// cond and recordCols are package constants — never user input.
@@ -438,10 +464,16 @@ func (s *sqliteContent) Query(ctx context.Context, scope Scope, cwd, host string
 	if err := tx.QueryRowContext(ctx, "SELECT count(*) FROM command_history").Scan(&total); err != nil {
 		return HistoryPage{}, err
 	}
+	// MIN ignores NULL ended_at (running entries), so a store full of
+	// running rows reports no horizon rather than a misleading one.
+	var coverage *int64
+	if err := tx.QueryRowContext(ctx, "SELECT MIN(ended_at) FROM command_history").Scan(&coverage); err != nil {
+		return HistoryPage{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return HistoryPage{}, err
 	}
-	return HistoryPage{Entries: entries, Exhausted: !extra, HasRows: total > 0}, nil
+	return HistoryPage{Entries: entries, Exhausted: !extra, HasRows: total > 0, Coverage: coverage}, nil
 }
 
 func scopeWhere(scope Scope, cwd, host string) (string, []any) {

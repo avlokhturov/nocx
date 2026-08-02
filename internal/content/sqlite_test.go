@@ -288,7 +288,7 @@ func TestQueryScopesPagingAndHasRows(t *testing.T) {
 	hist := db.CommandHistory()
 
 	// A fresh store: HasRows=false — the transport answers source=session.
-	page, err := hist.Query(ctx, content.ScopeEverywhere, "", "", 50, nil)
+	page, err := hist.Query(ctx, content.ScopeEverywhere, "", "", 50, nil, "")
 	if err != nil {
 		t.Fatalf("Query on fresh store: %v", err)
 	}
@@ -310,7 +310,7 @@ func TestQueryScopesPagingAndHasRows(t *testing.T) {
 
 	// directory = (cwd, host). Remote rows are not in the local directory
 	// rung even though the cwd matches; local rows in other dirs are not.
-	page, err = hist.Query(ctx, content.ScopeDirectory, "/srv/api", "", 50, nil)
+	page, err = hist.Query(ctx, content.ScopeDirectory, "/srv/api", "", 50, nil, "")
 	if err != nil {
 		t.Fatalf("Query directory: %v", err)
 	}
@@ -323,7 +323,7 @@ func TestQueryScopesPagingAndHasRows(t *testing.T) {
 		}
 	}
 
-	page, err = hist.Query(ctx, content.ScopeDirectory, "/srv/api", "prod.example.com", 50, nil)
+	page, err = hist.Query(ctx, content.ScopeDirectory, "/srv/api", "prod.example.com", 50, nil, "")
 	if err != nil {
 		t.Fatalf("Query directory remote: %v", err)
 	}
@@ -332,7 +332,7 @@ func TestQueryScopesPagingAndHasRows(t *testing.T) {
 	}
 
 	// host rung: "" is the local machine.
-	page, err = hist.Query(ctx, content.ScopeHost, "", "", 50, nil)
+	page, err = hist.Query(ctx, content.ScopeHost, "", "", 50, nil, "")
 	if err != nil {
 		t.Fatalf("Query host local: %v", err)
 	}
@@ -341,7 +341,7 @@ func TestQueryScopesPagingAndHasRows(t *testing.T) {
 	}
 
 	// everywhere, newest first.
-	page, err = hist.Query(ctx, content.ScopeEverywhere, "", "", 2, nil)
+	page, err = hist.Query(ctx, content.ScopeEverywhere, "", "", 2, nil, "")
 	if err != nil {
 		t.Fatalf("Query everywhere: %v", err)
 	}
@@ -356,7 +356,7 @@ func TestQueryScopesPagingAndHasRows(t *testing.T) {
 	// Five rows, page size 2: page 1 is rows 5,4; page 2 is rows 3,2 and is
 	// NOT exhausted (row 1 remains); page 3 is row 1 and is exhausted.
 	before := page.Entries[1].ID
-	page2, err := hist.Query(ctx, content.ScopeEverywhere, "", "", 2, &before)
+	page2, err := hist.Query(ctx, content.ScopeEverywhere, "", "", 2, &before, "")
 	if err != nil {
 		t.Fatalf("Query page 2: %v", err)
 	}
@@ -367,12 +367,157 @@ func TestQueryScopesPagingAndHasRows(t *testing.T) {
 		t.Fatalf("page 2 contains rows not strictly older than the cursor")
 	}
 	before = page2.Entries[1].ID
-	page3, err := hist.Query(ctx, content.ScopeEverywhere, "", "", 2, &before)
+	page3, err := hist.Query(ctx, content.ScopeEverywhere, "", "", 2, &before, "")
 	if err != nil {
 		t.Fatalf("Query page 3: %v", err)
 	}
 	if len(page3.Entries) != 1 || !page3.Exhausted {
 		t.Fatalf("page 3 = %+v, want the last row, exhausted", page3)
+	}
+}
+
+// ── text filter (nocx-ms7v) and coverage ────────────────────────────────
+
+// The filter is a case-insensitive substring over command, applied WITHIN the
+// rung the caller asked for — the server never silently widens. instr() has
+// no wildcard grammar, so "%" and "_" in the search text match literally.
+func TestQueryTextFilterWithinRung(t *testing.T) {
+	db, _ := newTestStore(t)
+	ctx := context.Background()
+	hist := db.CommandHistory()
+
+	add := func(cmd, cwd, host string) {
+		t.Helper()
+		if addErr := hist.Add(ctx, content.CommandRecord{Command: cmd, Cwd: cwd, Host: host, Status: content.StatusSuccess}); addErr != nil {
+			t.Fatalf("Add %q: %v", cmd, addErr)
+		}
+	}
+	add("make deploy", "/srv/api", "")
+	add("Make Deploy PROD", "/srv/api", "")
+	add("rm -rf build", "/srv/api", "")
+	add("make deploy", "/srv/api", "prod.example.com") // same cwd, remote host
+	add("make test", "/repo", "")
+	add("grep '100%_done'", "/repo", "") // the % and _ are literal
+
+	// Within the directory rung: the remote row and the other cwd are out,
+	// even though their commands match the filter.
+	page, err := hist.Query(ctx, content.ScopeDirectory, "/srv/api", "", 50, nil, "deploy")
+	if err != nil {
+		t.Fatalf("Query directory+deploy: %v", err)
+	}
+	got := make([]string, 0, len(page.Entries))
+	for _, e := range page.Entries {
+		got = append(got, e.Command)
+	}
+	if len(got) != 2 || got[0] != "Make Deploy PROD" || got[1] != "make deploy" {
+		t.Fatalf("directory+deploy = %q, want the two local /srv/api matches newest first", got)
+	}
+
+	// Case-insensitive: an upper-case needle finds the lower-case command.
+	page, err = hist.Query(ctx, content.ScopeEverywhere, "", "", 50, nil, "DEPLOY")
+	if err != nil {
+		t.Fatalf("Query everywhere+DEPLOY: %v", err)
+	}
+	if len(page.Entries) != 3 {
+		t.Fatalf("everywhere+DEPLOY = %d rows, want 3 (both /srv/api dirs + remote)", len(page.Entries))
+	}
+
+	// The empty filter is no filter: the whole rung, same as omitting text.
+	page, err = hist.Query(ctx, content.ScopeEverywhere, "", "", 50, nil, "")
+	if err != nil {
+		t.Fatalf("Query everywhere+empty: %v", err)
+	}
+	if len(page.Entries) != 6 {
+		t.Fatalf("everywhere+empty = %d rows, want 6 (no filter)", len(page.Entries))
+	}
+
+	// % and _ are literals, not LIKE wildcards: the needle matches the
+	// command that contains it and nothing else.
+	page, err = hist.Query(ctx, content.ScopeEverywhere, "", "", 50, nil, "100%_done")
+	if err != nil {
+		t.Fatalf("Query everywhere+literal: %v", err)
+	}
+	if len(page.Entries) != 1 || page.Entries[0].Command != "grep '100%_done'" {
+		t.Fatalf("everywhere+literal = %+v, want only the literal row", page.Entries)
+	}
+
+	// A needle with no matches is an empty page from a store that has rows:
+	// HasRows stays true, so the transport still answers source=store — the
+	// empty answer and the unanswerable question must not look alike.
+	page, err = hist.Query(ctx, content.ScopeEverywhere, "", "", 50, nil, "zzz-no-such-command")
+	if err != nil {
+		t.Fatalf("Query everywhere+miss: %v", err)
+	}
+	if len(page.Entries) != 0 || !page.HasRows || !page.Exhausted {
+		t.Fatalf("everywhere+miss = %+v, want empty page, HasRows, exhausted", page)
+	}
+}
+
+// Coverage is the store-wide horizon — the oldest retained entry's ended_at —
+// independent of the rung and the filter: retention is store-wide, so the
+// answer's horizon is too. A fresh store reports no horizon.
+func TestQueryCoverageIsStoreWideHorizon(t *testing.T) {
+	db, _ := newTestStore(t)
+	ctx := context.Background()
+	hist := db.CommandHistory()
+
+	// A fresh store holds nothing: no horizon to state.
+	page, err := hist.Query(ctx, content.ScopeEverywhere, "", "", 50, nil, "")
+	if err != nil {
+		t.Fatalf("Query on fresh store: %v", err)
+	}
+	if page.Coverage != nil {
+		t.Fatalf("fresh store coverage = %v, want nil", *page.Coverage)
+	}
+
+	old := int64(1_000)
+	mid := int64(2_000)
+	newest := int64(3_000)
+	add := func(cmd, cwd, host string, endedAt int64) {
+		t.Helper()
+		if addErr := hist.Add(ctx, content.CommandRecord{Command: cmd, Cwd: cwd, Host: host, Status: content.StatusSuccess, EndedAt: &endedAt}); addErr != nil {
+			t.Fatalf("Add %q: %v", cmd, addErr)
+		}
+	}
+	add("oldest", "/old", "", old)
+	// A running entry (ended_at NULL) must not corrupt the MIN — NULLs are
+	// ignored, so the horizon stays the oldest completed row.
+	if addErr := hist.Add(ctx, content.CommandRecord{Command: "running", Cwd: "/old", Host: "", Status: content.StatusRunning}); addErr != nil {
+		t.Fatalf("Add running: %v", addErr)
+	}
+	add("newest", "/new", "", newest)
+	add("middle", "/old", "", mid)
+
+	// Store-wide: the oldest row lives in /old; a query on the /new rung —
+	// whose own rows are all recent — still reports the store's horizon.
+	page, err = hist.Query(ctx, content.ScopeDirectory, "/new", "", 50, nil, "")
+	if err != nil {
+		t.Fatalf("Query /new: %v", err)
+	}
+	if page.Coverage == nil || *page.Coverage != old {
+		t.Fatalf("/new rung coverage = %v, want store-wide %d", page.Coverage, old)
+	}
+
+	// The filter does not narrow the horizon either: a needle matching only
+	// the newest row still reports the oldest retained entry.
+	page, err = hist.Query(ctx, content.ScopeEverywhere, "", "", 50, nil, "newest")
+	if err != nil {
+		t.Fatalf("Query filter=newest: %v", err)
+	}
+	if page.Coverage == nil || *page.Coverage != old {
+		t.Fatalf("filtered coverage = %v, want store-wide %d", page.Coverage, old)
+	}
+	if len(page.Entries) != 1 || page.Entries[0].Command != "newest" {
+		t.Fatalf("filter=newest entries = %+v, want only the newest row", page.Entries)
+	}
+
+	// And the unfiltered everywhere page reports the same horizon.
+	page, err = hist.Query(ctx, content.ScopeEverywhere, "", "", 50, nil, "")
+	if err != nil {
+		t.Fatalf("Query everywhere: %v", err)
+	}
+	if page.Coverage == nil || *page.Coverage != old {
+		t.Fatalf("everywhere coverage = %v, want %d", page.Coverage, old)
 	}
 }
 
@@ -405,7 +550,7 @@ func TestConcurrentReadersWithOneWriter(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for range 100 {
-				page, err := hist.Query(ctx, content.ScopeEverywhere, "", "", 10, nil)
+				page, err := hist.Query(ctx, content.ScopeEverywhere, "", "", 10, nil, "")
 				if err != nil {
 					errCh <- fmt.Errorf("reader: %w", err)
 					return

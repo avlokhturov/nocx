@@ -210,7 +210,7 @@ func (r *fakeHistRepo) FindByPrefix(context.Context, string, int) ([]content.Com
 	return nil, nil
 }
 
-func (r *fakeHistRepo) Query(context.Context, content.Scope, string, string, int, *int64) (content.HistoryPage, error) {
+func (r *fakeHistRepo) Query(context.Context, content.Scope, string, string, int, *int64, string) (content.HistoryPage, error) {
 	return content.HistoryPage{}, nil
 }
 

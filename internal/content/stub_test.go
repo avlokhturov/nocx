@@ -111,7 +111,7 @@ func TestCommandHistoryFindByPrefixReturnsSentinel(t *testing.T) {
 
 func TestCommandHistoryQueryReturnsSentinel(t *testing.T) {
 	chr := content.NewStub(&testLogger{}).CommandHistory()
-	_, err := chr.Query(context.Background(), content.ScopeDirectory, "/repo", "", 10, nil)
+	_, err := chr.Query(context.Background(), content.ScopeDirectory, "/repo", "", 10, nil, "")
 	if !errors.Is(err, content.ErrNotImplemented) {
 		t.Errorf("expected ErrNotImplemented, got %v", err)
 	}

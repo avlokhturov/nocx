@@ -118,6 +118,60 @@ describe('queryHistory', () => {
     expect(client.call).toHaveBeenCalledWith('history.query', { scope: 'everywhere' })
   })
 
+  it('text filter rides on every rung when present', async () => {
+    const client = fakeClient()
+    client.call.mockResolvedValue({
+      entries: [],
+      scope: 'everywhere',
+      exhausted: true,
+      source: 'store',
+      coverage: null,
+    })
+    await queryHistory(client as unknown as WSClient, 'everywhere', '/repo', '', 'deploy')
+    expect(client.call).toHaveBeenCalledWith('history.query', {
+      scope: 'everywhere',
+      text: 'deploy',
+    })
+  })
+
+  it('omits text when empty: no filter is one state on the wire, not two', async () => {
+    const client = fakeClient()
+    client.call.mockResolvedValue({
+      entries: [],
+      scope: 'everywhere',
+      exhausted: true,
+      source: 'store',
+      coverage: null,
+    })
+    await queryHistory(client as unknown as WSClient, 'everywhere', '/repo', '', '')
+    expect(client.call).toHaveBeenCalledWith('history.query', { scope: 'everywhere' })
+  })
+
+  it('returns the store page with its coverage', async () => {
+    const client = fakeClient()
+    const page: HistoryQuery = {
+      entries: [
+        {
+          id: '9',
+          command: 'ls',
+          cwd: '/repo',
+          host: '',
+          status: 'success',
+          startedAt: 1,
+          endedAt: 2,
+        },
+      ],
+      scope: 'directory',
+      exhausted: true,
+      source: 'store',
+      coverage: 1,
+    }
+    client.call.mockResolvedValue(page)
+    const got = await queryHistory(client as unknown as WSClient, 'directory', '/repo', '')
+    expect(got.coverage).toBe(1)
+    expect(got.entries[0]?.startedAt).toBe(1)
+  })
+
   it('returns the store page the socket answered', async () => {
     const client = fakeClient()
     const page: HistoryQuery = {
@@ -125,6 +179,7 @@ describe('queryHistory', () => {
       scope: 'directory',
       exhausted: true,
       source: 'store',
+      coverage: null,
     }
     client.call.mockResolvedValue(page)
     const got = await queryHistory(client as unknown as WSClient, 'directory', '/repo', '')

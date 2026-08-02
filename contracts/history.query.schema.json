@@ -5,7 +5,7 @@
   "description": "Result of the history.query JSON-RPC method — the rungs of the recall ladder (design §8.10, nocx-ms7v.1). One page of past commands, newest first, already filtered to the requested scope. This is the seam between the store that owns the rows and the overlay that draws them: the overlay reads only what is declared here, and the store's schema is free to change underneath as long as this does not.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["entries", "scope", "exhausted", "source"],
+  "required": ["entries", "scope", "exhausted", "source", "coverage"],
   "properties": {
     "entries": {
       "description": "The page, newest first. Never null: no matches is [].",
@@ -23,6 +23,10 @@
     "source": {
       "description": "Where the rows came from. 'session' means the in-memory ledger only — the persistent store is unavailable or empty, and the overlay must say so rather than presenting one session as all history. 'store' means the persistent store answered. Distinguishing them is the same rule as unavailable-never-collapses-into-unresolved: an empty answer and an unanswerable question must not look alike.",
       "enum": ["store", "session"]
+    },
+    "coverage": {
+      "description": "How far back the answer's source can see: the oldest retained entry's ended_at in Unix milliseconds, store-wide — independent of the rung and of the text filter, because retention is store-wide. With retention set, a search can only see part of history; the overlay renders this line so a partial answer is not presented as the whole one. Null when the source holds no completed rows (nothing to state a horizon for).",
+      "type": ["integer", "null"]
     }
   },
   "$defs": {
@@ -53,6 +57,10 @@
         },
         "exitCode": {
           "description": "Process exit status, or null when it never produced one (still running, or never observed). Null is not zero.",
+          "type": ["integer", "null"]
+        },
+        "startedAt": {
+          "description": "Unix milliseconds when the command started, or null when it was never observed. The detail pane derives the duration from startedAt..endedAt; null renders as unknown, never as the epoch.",
           "type": ["integer", "null"]
         },
         "endedAt": {

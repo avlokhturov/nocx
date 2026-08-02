@@ -24,6 +24,7 @@ type fakeHistoryDB struct {
 	gotHost   string
 	gotLimit  int
 	gotBefore *int64
+	gotText   string
 	calls     int
 }
 
@@ -48,18 +49,18 @@ func (f *fakeHistoryDB) FindByPrefix(_ context.Context, _ string, _ int) ([]cont
 	return nil, content.ErrNotImplemented
 }
 
-func (f *fakeHistoryDB) Query(_ context.Context, scope content.Scope, cwd, host string, limit int, before *int64) (content.HistoryPage, error) {
+func (f *fakeHistoryDB) Query(_ context.Context, scope content.Scope, cwd, host string, limit int, before *int64, text string) (content.HistoryPage, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
-	f.gotScope, f.gotCwd, f.gotHost, f.gotLimit, f.gotBefore = scope, cwd, host, limit, before
+	f.gotScope, f.gotCwd, f.gotHost, f.gotLimit, f.gotBefore, f.gotText = scope, cwd, host, limit, before, text
 	return f.page, f.err
 }
 
-func (f *fakeHistoryDB) recorded() (content.Scope, string, string, int, *int64, int) {
+func (f *fakeHistoryDB) recorded() (content.Scope, string, string, int, *int64, string, int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.gotScope, f.gotCwd, f.gotHost, f.gotLimit, f.gotBefore, f.calls
+	return f.gotScope, f.gotCwd, f.gotHost, f.gotLimit, f.gotBefore, f.gotText, f.calls
 }
 
 // newHistoryWSServer builds a server with the given store wired. A nil db
@@ -81,17 +82,19 @@ func newHistoryWSServer(t *testing.T, db content.ContentDB) (*WSServer, func()) 
 // historyQueryResult is the decoded history.query result for assertions.
 type historyQueryResult struct {
 	Entries []struct {
-		ID       string `json:"id"`
-		Command  string `json:"command"`
-		Cwd      string `json:"cwd"`
-		Host     string `json:"host"`
-		Status   string `json:"status"`
-		ExitCode *int   `json:"exitCode"`
-		EndedAt  *int64 `json:"endedAt"`
+		ID        string `json:"id"`
+		Command   string `json:"command"`
+		Cwd       string `json:"cwd"`
+		Host      string `json:"host"`
+		Status    string `json:"status"`
+		ExitCode  *int   `json:"exitCode"`
+		StartedAt *int64 `json:"startedAt"`
+		EndedAt   *int64 `json:"endedAt"`
 	} `json:"entries"`
 	Scope     string `json:"scope"`
 	Exhausted bool   `json:"exhausted"`
 	Source    string `json:"source"`
+	Coverage  *int64 `json:"coverage"`
 }
 
 func decodeHistoryResult(t *testing.T, resp *vaultRPCResult) historyQueryResult {
@@ -227,7 +230,7 @@ func TestHistoryQuery_AnswersFromAskedRung(t *testing.T) {
 	// semantics (frontend/src/recall.ts). The handler must forward BOTH to
 	// the store, or a remote command in the same cwd leaks into the local
 	// directory rung.
-	scope, cwd, host, limit, _, calls := fake.recorded()
+	scope, cwd, host, limit, _, _, calls := fake.recorded()
 	if calls != 1 || scope != content.ScopeDirectory || cwd != "/srv/api" || host != "" || limit != 10 {
 		t.Fatalf("store asked with scope=%q cwd=%q host=%q limit=%d calls=%d, want directory /srv/api \"\" 10 1",
 			scope, cwd, host, limit, calls)
@@ -248,7 +251,7 @@ func TestHistoryQuery_DirectoryRungForwardsHost(t *testing.T) {
 	if got := decodeHistoryResult(t, resp); got.Source != "store" {
 		t.Fatalf("source = %q, want store", got.Source)
 	}
-	_, cwd, host, _, _, _ := fake.recorded()
+	_, cwd, host, _, _, _, _ := fake.recorded()
 	if cwd != "/srv/api" || host != "prod.example.com" {
 		t.Fatalf("directory rung forwarded cwd=%q host=%q, want /srv/api prod.example.com", cwd, host)
 	}
@@ -268,7 +271,7 @@ func TestHistoryQuery_HostRungPassesHostVerbatim(t *testing.T) {
 	if got.Scope != "host" || got.Source != "store" {
 		t.Fatalf("scope=%q source=%q, want host store", got.Scope, got.Source)
 	}
-	_, _, host, _, _, _ := fake.recorded()
+	_, _, host, _, _, _, _ := fake.recorded()
 	if host != "" {
 		t.Fatalf("host = %q, want the local-machine rung '' passed through", host)
 	}
@@ -285,7 +288,7 @@ func TestHistoryQuery_EverywhereSendsNoRung(t *testing.T) {
 	if got := decodeHistoryResult(t, resp); got.Source != "store" {
 		t.Fatalf("source = %q, want store", got.Source)
 	}
-	scope, cwd, host, _, _, _ := fake.recorded()
+	scope, cwd, host, _, _, _, _ := fake.recorded()
 	if scope != content.ScopeEverywhere || cwd != "" || host != "" {
 		t.Fatalf("store asked with scope=%q cwd=%q host=%q, want everywhere '' ''", scope, cwd, host)
 	}
@@ -305,10 +308,84 @@ func TestHistoryQuery_PagesWithBeforeCursor(t *testing.T) {
 	if got := decodeHistoryResult(t, resp); got.Exhausted != true {
 		t.Fatal("exhausted = false, want the fake's answer")
 	}
-	_, _, _, _, before, _ := fake.recorded()
+	_, _, _, _, before, _, _ := fake.recorded()
 	if before == nil || *before != 77 {
 		t.Fatalf("before = %v, want 77 passed through", before)
 	}
+}
+
+// ── text filter (nocx-ms7v) ──────────────────────────────────────────────
+
+// The filter crosses the wire and reaches the store verbatim — case is the
+// store's problem, not the handler's. Absent and empty are the same state:
+// no filter.
+func TestHistoryQuery_TextFilterForwardedVerbatim(t *testing.T) {
+	fake := &fakeHistoryDB{page: content.HistoryPage{HasRows: true, Exhausted: true}}
+	ws, stop := newHistoryWSServer(t, fake)
+	defer stop()
+	conn := connectWS(t, ws)
+	resp := vaultCall(t, conn, "history.query", map[string]any{
+		"scope": "directory", "cwd": "/srv/api", "text": "DePlOy",
+	}, 1)
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %+v", resp.Error)
+	}
+	if _, _, _, _, _, text, _ := fake.recorded(); text != "DePlOy" {
+		t.Fatalf("text = %q, want the filter passed through verbatim", text)
+	}
+}
+
+// No text on the wire is no filter: the store receives "" — the same state
+// the client uses when it has nothing to filter by.
+func TestHistoryQuery_AbsentTextForwardsEmpty(t *testing.T) {
+	fake := &fakeHistoryDB{page: content.HistoryPage{HasRows: true, Exhausted: true}}
+	ws, stop := newHistoryWSServer(t, fake)
+	defer stop()
+	conn := connectWS(t, ws)
+	resp := vaultCall(t, conn, "history.query", map[string]any{
+		"scope": "everywhere",
+	}, 1)
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %+v", resp.Error)
+	}
+	if _, _, _, _, _, text, _ := fake.recorded(); text != "" {
+		t.Fatalf("text = %q, want the empty no-filter state", text)
+	}
+}
+
+// ── coverage over the wire ───────────────────────────────────────────────
+
+// The store's horizon is part of the real result off the real socket — the
+// fake's HistoryPage.Coverage must reach the renderer, and an empty store
+// must report null rather than omitting the field (the schema requires it).
+func TestHistoryQuery_CoverageOverTheWire(t *testing.T) {
+	t.Run("store horizon reaches the result", func(t *testing.T) {
+		horizon := int64(1_750_000_000_000)
+		fake := &fakeHistoryDB{page: content.HistoryPage{
+			HasRows:   true,
+			Exhausted: true,
+			Coverage:  &horizon,
+		}}
+		ws, stop := newHistoryWSServer(t, fake)
+		defer stop()
+		conn := connectWS(t, ws)
+		resp := vaultCall(t, conn, "history.query", map[string]any{"scope": "everywhere"}, 1)
+		got := decodeHistoryResult(t, resp)
+		if got.Coverage == nil || *got.Coverage != horizon {
+			t.Fatalf("coverage = %v, want %d off the real socket", got.Coverage, horizon)
+		}
+	})
+
+	t.Run("empty store reports null, not absence", func(t *testing.T) {
+		ws, stop := newHistoryWSServer(t, nil)
+		defer stop()
+		conn := connectWS(t, ws)
+		resp := vaultCall(t, conn, "history.query", map[string]any{"scope": "everywhere"}, 1)
+		got := decodeHistoryResult(t, resp)
+		if got.Source != "session" || got.Coverage != nil {
+			t.Fatalf("session answer coverage = %v, want null (no horizon to state)", got.Coverage)
+		}
+	})
 }
 
 func TestHistoryQuery_RejectsMalformedBefore(t *testing.T) {
@@ -341,7 +418,7 @@ func TestHistoryQuery_LimitClamp(t *testing.T) {
 		if resp.Error != nil {
 			t.Fatalf("limit=%d: unexpected error %+v", c.sent, resp.Error)
 		}
-		_, _, _, limit, _, _ := fake.recorded()
+		_, _, _, limit, _, _, _ := fake.recorded()
 		if limit != c.want {
 			t.Fatalf("limit=%d: store asked with %d, want %d", c.sent, limit, c.want)
 		}

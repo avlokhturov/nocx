@@ -76,7 +76,7 @@ func (f *fakeRecordHistoryDB) FindByPrefix(_ context.Context, _ string, limit in
 	return f.List(context.Background(), limit)
 }
 
-func (f *fakeRecordHistoryDB) Query(_ context.Context, scope content.Scope, cwd, host string, limit int, before *int64) (content.HistoryPage, error) {
+func (f *fakeRecordHistoryDB) Query(_ context.Context, scope content.Scope, cwd, host string, limit int, before *int64, _ string) (content.HistoryPage, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var entries []content.CommandRecord

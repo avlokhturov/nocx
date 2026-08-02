@@ -1,0 +1,165 @@
+/**
+ * e2e: recall search — typing narrows the rung, and the panel states its
+ * coverage (nocx-ms7v).
+ *
+ * The acceptance check, in the owner's words:
+ *
+ *   Run two commands, open recall, type a substring of one of them, and
+ *   only that one remains — driven through the real UI against the real
+ *   backend, with the panel showing the coverage line.
+ *
+ * Three commands are run (the open-time rung-climb wants a useful page),
+ * recall is opened with Up, and typing "alpha" into the panel — keys land
+ * on the editor, the overlay's arbiter captures them — leaves exactly the
+ * alpha command, with the beta and gamma commands gone, "1 result" in the
+ * count, and the "oldest entry …" coverage line on screen.
+ *
+ * The backend runs with `history.retentionDays: 30` seeded into the
+ * profile's settings.json BEFORE the first launch (the same posture as
+ * history-persistence.spec.ts, nocx-rtg0.16): retention is the reason the
+ * coverage line exists — with a 30-day horizon a search can only see part
+ * of history, and the panel says how far back instead of presenting a
+ * partial answer as the whole one.
+ *
+ * Drives the real frontend against cmd/devharness with NO Secret Service
+ * for the backend and fresh XDG directories.
+ */
+import { test as base, expect, type Page } from '@playwright/test'
+import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+import { VaultBackend, type BackendEndpoint, type XdgDirs } from './harness'
+
+const DEVHARNESS_BIN = process.env.NOCX_VAULT_BIN ?? '/tmp/nocx-devharness-srch'
+
+// Outside the ranges used by `wails dev` (34115), the e2e suite default
+// (9876), `dev-web.sh` (9880/5180), `npm run dev` (5173), and the other
+// history/vault specs (19876-19879), so the suites can run in parallel.
+const PORT = 19880
+
+const TITLE = '.nocx-tab-title'
+const INPUT = '.pane.active .nocx-editor-input'
+
+interface XdgDirsResult {
+  root: string
+  data: string
+  config: string
+  cache: string
+}
+
+function createXdgDirs(): XdgDirsResult {
+  const root = mkdtempSync(join(tmpdir(), 'nocx-recall-search-'))
+  for (const d of ['data', 'config', 'cache'] as const) {
+    mkdirSync(join(root, d), { recursive: true })
+  }
+  return {
+    root,
+    data: join(root, 'data'),
+    config: join(root, 'config'),
+    cache: join(root, 'cache'),
+  }
+}
+
+function asXdgDirs(r: XdgDirsResult): XdgDirs {
+  return { data: r.data, config: r.config, cache: r.cache }
+}
+
+async function bindEndpoint(page: Page, endpoint: BackendEndpoint): Promise<void> {
+  await page.context().addInitScript(
+    (opts: { p: number; t: string }) => {
+      ;(window as unknown as { go: unknown }).go = {
+        main: {
+          WailsApp: {
+            GetWSPort: () => Promise.resolve(opts.p),
+            GetWSToken: () => Promise.resolve(opts.t),
+            CheckForUpdate: () => Promise.resolve(null),
+            ReportHealthy: () => Promise.resolve(),
+            ApplyUpdate: () => Promise.resolve(),
+          },
+        },
+      }
+    },
+    { p: endpoint.port, t: endpoint.token },
+  )
+}
+
+const test = base
+
+test.describe('recall: typing narrows, and the panel states its coverage', () => {
+  test.use({ viewport: { width: 1280, height: 900 } })
+
+  let backend: VaultBackend
+  let xdg: XdgDirsResult
+
+  test.beforeAll(() => {
+    xdg = createXdgDirs()
+    // Seed retention before the backend starts — the coverage line's reason
+    // for existing is a store that cannot see all of history.
+    const settingsDir = join(xdg.config, 'nocx')
+    mkdirSync(settingsDir, { recursive: true })
+    writeFileSync(
+      join(settingsDir, 'settings.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        values: { 'history.retentionDays': 30 },
+        secretRefs: {},
+      }),
+    )
+    backend = new VaultBackend(DEVHARNESS_BIN, asXdgDirs(xdg), true)
+  })
+
+  test.afterAll(() => {
+    backend?.stop()
+  })
+
+  test('run three commands, type a substring, only the match remains, coverage line visible', async ({
+    page,
+  }) => {
+    const marker = Date.now()
+    const alpha = `echo alpha-${marker}`
+    const beta = `echo beta-${marker}`
+    const gamma = `echo gamma-${marker}`
+
+    // ── Phase 1: launch, run three commands ─────────────────────────────
+    const ep = await backend.start(PORT)
+    await bindEndpoint(page, ep)
+    await page.goto('/')
+    await expect(page.locator(TITLE).first()).not.toHaveText('', { timeout: 15_000 })
+
+    const input = page.locator(INPUT)
+    await expect(input).toBeVisible({ timeout: 10_000 })
+    await expect(input).toBeFocused({ timeout: 10_000 })
+    for (const cmd of [alpha, beta, gamma]) {
+      await input.fill(cmd)
+      await page.keyboard.press('Enter')
+      // The block's presence is the completed OSC 133 cycle, which is what
+      // finalizes the ledger record; then give history.record a moment to
+      // cross the socket (fire-and-forget by design, nocx-rtg0.13).
+      const block = page.locator('.cmd-block', { hasText: cmd }).first()
+      await expect(block).toBeVisible({ timeout: 15_000 })
+      await page.waitForTimeout(800)
+    }
+
+    // ── Phase 2: open recall — all three commands on the rung ──────────
+    await page.keyboard.press('ArrowUp')
+    const panel = page.locator('.ui-recall-panel')
+    await expect(panel).toBeVisible({ timeout: 10_000 })
+    await expect(panel).toContainText(alpha, { timeout: 10_000 })
+    await expect(panel).toContainText(beta)
+    await expect(panel).toContainText(gamma)
+
+    // ── Phase 3: type the substring — only the match remains ───────────
+    await page.keyboard.type('alpha')
+    await expect(panel).toContainText('filter: alpha', { timeout: 10_000 })
+    await expect(panel).toContainText(alpha)
+    await expect(panel.getByText(beta)).toHaveCount(0)
+    await expect(panel.getByText(gamma)).toHaveCount(0)
+    await expect(panel).toContainText('1 result')
+
+    // ── Phase 4: the coverage line is on screen, and it is honest ──────
+    await expect(panel).toContainText(/oldest entry/, { timeout: 10_000 })
+    // The store answered (three rows exist), so the panel must NOT claim
+    // "this session only".
+    await expect(panel.getByText('this session only')).toHaveCount(0)
+  })
+})

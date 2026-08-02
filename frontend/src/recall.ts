@@ -122,6 +122,9 @@ export type RecallState =
       readonly draft: DraftSnapshot
       readonly scope: RecallScope
       readonly query: HistoryQuery
+      // The search filter (nocx-ms7v): typing narrows the rung. Empty is
+      // the no-filter state — what Up and Ctrl+R open with.
+      readonly filter: string
     }
   | {
       readonly name: 'navigating'
@@ -129,6 +132,7 @@ export type RecallState =
       readonly scope: RecallScope
       readonly query: HistoryQuery
       readonly selected: number
+      readonly filter: string
     }
 
 /** The explicit shortcut: Ctrl/Cmd+R, the chord every terminal user maps to
@@ -137,6 +141,13 @@ export type RecallState =
 export function isRecallShortcut(e: KeyboardEvent): boolean {
   const mod = e.ctrlKey || e.metaKey
   return mod && !e.shiftKey && !e.altKey && (e.key === 'r' || e.key === 'R')
+}
+
+/** A key that narrows the filter: one printable code point, unmodified.
+ *  Space counts (a filter may contain it); Tab and chorded keys do not —
+ *  they fall through to the editor's own handling. */
+function isFilterKey(e: KeyboardEvent): boolean {
+  return e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey
 }
 
 /** The next wider rung, or the same rung at the top of the ladder. */
@@ -171,6 +182,29 @@ export function relativeTime(endedAt: number | null, now: number): string {
   return `${months} month${months === 1 ? '' : 's'} ago`
 }
 
+/** Human duration from a millisecond span (the detail pane's "duration").
+ *  Sub-second shows milliseconds, seconds carry one decimal under 10,
+ *  then minutes and hours. Rounds, never floors, so a 61.6 s run reads
+ *  "1m 2s" rather than "1m 1s". */
+export function formatDuration(ms: number): string {
+  if (ms < 1000) return `${Math.max(0, Math.round(ms))}ms`
+  const s = ms / 1000
+  if (s < 60) {
+    const tenths = Math.round(s * 10)
+    return `${tenths % 10 === 0 ? tenths / 10 : (tenths / 10).toFixed(1)}s`
+  }
+  const m = Math.floor(s / 60)
+  if (m < 60) return `${m}m ${Math.round(s % 60)}s`
+  return `${Math.floor(m / 60)}h ${m % 60}m`
+}
+
+/** The detail pane's duration fact: running while open, unknown when the
+ *  start was never observed, else the span between the two timestamps. */
+function detailDuration(entry: HistoryEntry): string {
+  if (entry.endedAt === null) return 'running'
+  if (entry.startedAt === null || entry.startedAt === undefined) return '—'
+  return formatDuration(entry.endedAt - entry.startedAt)
+}
 /**
  * Serve a history page from the in-memory ledger, newest first, filtered to
  * the requested rung. `source` is always 'session': this is the stopgap
@@ -185,6 +219,15 @@ export function queryLedgerHistory(
   text?: string,
 ): HistoryQuery {
   const records = ledger ? [...ledger.records()].reverse() : []
+  // Coverage: the session's own horizon — the oldest completed entry's
+  // endedAt, session-wide. The rung narrows rows, never the horizon; the
+  // store's coverage is store-wide for the same reason.
+  let coverage: number | null = null
+  for (const rec of records) {
+    if (rec.endedAt !== null && (coverage === null || rec.endedAt < coverage)) {
+      coverage = rec.endedAt
+    }
+  }
   const entries: HistoryEntry[] = []
   // The fallback filters the same way the store does, or the same keystroke
   // returns a different set depending on whether the store answered.
@@ -200,11 +243,12 @@ export function queryLedgerHistory(
       host: rec.host,
       status: rec.status,
       exitCode: rec.exitCode,
+      startedAt: rec.startedAt,
       endedAt: rec.endedAt,
     })
   }
   // The ledger has no further pages: this is the whole session.
-  return { entries, scope, exhausted: true, source: 'session' }
+  return { entries, scope, exhausted: true, source: 'session', coverage }
 }
 
 export class RecallOverlay {
@@ -267,13 +311,13 @@ export class RecallOverlay {
     // captured draft is gone; drop the result.
     if (this.state.name !== 'loading') return
 
-    this.state = { name: 'opened', draft, scope: rung, query: result }
+    this.state = { name: 'opened', draft, scope: rung, query: result, filter: '' }
     this.render()
     if (result.entries.length > 0) {
       // Display order is oldest at the top, newest at the bottom (Warp's
       // model — the first Up gives the command you just ran), so the row
       // selected on open is the LAST one; render() scrolls it into view.
-      this.enterNavigating(rung, result, result.entries.length - 1)
+      this.enterNavigating(rung, result, result.entries.length - 1, '')
     }
   }
   /**
@@ -314,7 +358,9 @@ export class RecallOverlay {
         // Empty history: nothing to accept. Escape dismisses; so does Enter
         // (accepting nothing must not feel like a dead key). Arrows do
         // nothing here — there are no rows to walk — and widening is its own
-        // key (shift+Up), not an arrow.
+        // key (shift+Up), not an arrow. Typing starts (or narrows) the
+        // filter: the panel owns printable keys while it is up, so they
+        // never land in the editor under it.
         if (e.key === 'Escape' || e.key === 'Enter') {
           e.preventDefault()
           e.stopPropagation()
@@ -331,6 +377,18 @@ export class RecallOverlay {
           e.preventDefault()
           e.stopPropagation()
           return true // stop: no rows to navigate
+        }
+        if (isFilterKey(e)) {
+          e.preventDefault()
+          e.stopPropagation()
+          this.appendFilter(e.key)
+          return true
+        }
+        if (e.key === 'Backspace' && s.filter !== '') {
+          e.preventDefault()
+          e.stopPropagation()
+          this.trimFilter()
+          return true
         }
         return this.passThroughOrDismiss(e)
       case 'navigating':
@@ -370,6 +428,22 @@ export class RecallOverlay {
           this.dismiss()
           return true
         }
+        // Typing narrows: printable keys are the filter, never the editor.
+        if (isFilterKey(e)) {
+          e.preventDefault()
+          e.stopPropagation()
+          this.appendFilter(e.key)
+          return true
+        }
+        // Backspace clears the filter when there is one; with an empty
+        // filter it falls through to the third exit — a deletion hands the
+        // line to the editor, the ordinary way shell history is edited.
+        if (e.key === 'Backspace' && s.filter !== '') {
+          e.preventDefault()
+          e.stopPropagation()
+          this.trimFilter()
+          return true
+        }
         // Everything else — an insertion, a deletion, a caret move — hands
         // the line to the editor: close the overlay KEEPING the previewed
         // command as the new draft (the third exit, brief nocx-w7h.8 §1).
@@ -394,15 +468,20 @@ export class RecallOverlay {
     if (wider === s.scope) return false
 
     const draft = s.draft
+    const filter = s.filter
     const wasNavigating = s.name === 'navigating'
     const previous = s
-    void this.query(wider).then((result) => {
+    // The filter rides the climb: a search that narrows on this rung must
+    // keep narrowing on the wider one, or the climb silently widens the
+    // search too.
+    void this.query(wider, filter).then((result) => {
       // The panel moved on (dismissed, re-opened, or climbing again) while
       // the answer was in flight: apply nothing.
       if (this.state.name !== 'opened' && this.state.name !== 'navigating') return
       if (this.state.draft !== draft) return
+      if (this.state.filter !== filter) return
       if (result.entries.length === 0) {
-        this.state = { name: 'opened', draft, scope: wider, query: result }
+        this.state = { name: 'opened', draft, scope: wider, query: result, filter }
         this.render()
         return
       }
@@ -420,7 +499,7 @@ export class RecallOverlay {
           selected = Math.max(0, result.entries.length - 1 - distance)
         }
       }
-      this.enterNavigating(wider, result, selected)
+      this.enterNavigating(wider, result, selected, filter)
     })
     return true
   }
@@ -448,20 +527,25 @@ export class RecallOverlay {
     this.close()
   }
 
+  /** Arrows navigate and nothing else: at either end of the rung they
+   *  stop. Widening is the explicit shift+Up key, never an arrow (v8). */
   private move(dir: -1 | 1): void {
     const s = this.state
     if (s.name !== 'navigating') return
     const next = s.selected + dir
-    // Arrows navigate and nothing else: at either end of the rung they
-    // stop. Widening is the explicit shift+Up key, never an arrow (v8).
     if (next < 0 || next >= s.query.entries.length) return
-    this.enterNavigating(s.scope, s.query, next)
+    this.enterNavigating(s.scope, s.query, next, s.filter)
   }
 
-  private enterNavigating(scope: RecallScope, result: HistoryQuery, selected: number): void {
+  private enterNavigating(
+    scope: RecallScope,
+    result: HistoryQuery,
+    selected: number,
+    filter: string,
+  ): void {
     const s = this.state
     if (s.name !== 'opened' && s.name !== 'navigating') return
-    this.state = { name: 'navigating', draft: s.draft, scope, query: result, selected }
+    this.state = { name: 'navigating', draft: s.draft, scope, query: result, selected, filter }
     // Preview the highlighted row in the editor — programmatic, so no input
     // events fire (the alias-hint fetch must not run while recalling).
     // `selected` is a DISPLAY index (0 = top = oldest); the wire is newest
@@ -470,6 +554,57 @@ export class RecallOverlay {
     const entry = result.entries[wireIndex]
     if (entry) this.editor.replaceDoc(entry.command)
     this.render()
+  }
+
+  /** Append a printable key to the filter and re-query the rung. */
+  private appendFilter(ch: string): void {
+    this.setFilter((f) => f + ch)
+  }
+
+  /** Drop the last code point of the filter and re-query the rung. */
+  private trimFilter(): void {
+    this.setFilter((f) => Array.from(f).slice(0, -1).join(''))
+  }
+
+  /** Change the filter and fetch the narrowed page. The new filter text is
+   *  shown immediately; the answer lands async, and a later keystroke's
+   *  answer supersedes an earlier one (each landing compares the filter it
+   *  was asked with against the state's current filter). */
+  private setFilter(update: (f: string) => string): void {
+    const s = this.state
+    if (s.name !== 'opened' && s.name !== 'navigating') return
+    const filter = update(s.filter)
+    if (filter === s.filter) return
+    const wasNavigating = s.name === 'navigating'
+    const previous = s
+    this.state = { ...s, filter }
+    this.render()
+    void this.query(s.scope, filter).then((result) => {
+      // The panel moved on, or a newer keystroke superseded this answer:
+      // apply nothing.
+      if (this.state.name !== 'opened' && this.state.name !== 'navigating') return
+      if (this.state.filter !== filter) return
+      if (this.state.draft !== s.draft) return
+      if (result.entries.length === 0) {
+        // Nothing matches: back to the empty rung state. `opened` means
+        // "the editor holds the draft", so the stale preview must go.
+        this.state = { name: 'opened', draft: s.draft, scope: s.scope, query: result, filter }
+        const d = s.draft
+        this.editor.replaceDoc(d.text, d.from, d.to)
+        this.render()
+        return
+      }
+      // Preserve the selected command when it survives the narrowing; a
+      // fresh filter opens on the newest match, like open() does.
+      let selected = result.entries.length - 1
+      if (wasNavigating && previous.name === 'navigating') {
+        const wireIndex = previous.query.entries.length - 1 - previous.selected
+        const id = previous.query.entries[wireIndex]?.id
+        const at = id !== undefined ? result.entries.findIndex((e) => e.id === id) : -1
+        if (at >= 0) selected = result.entries.length - 1 - at
+      }
+      this.enterNavigating(s.scope, result, selected, filter)
+    })
   }
 
   /** Enter: the previewed command is already in the editor (navigating
@@ -544,6 +679,37 @@ export class RecallOverlay {
     }
     this.root.appendChild(header)
 
+    // ── Filter + coverage bar: what narrows the page (left) and how far
+    //    back the answer can see (right). The filter is a display of the
+    //    captured text — keys land on the editor's arbiter, never on an
+    //    input — so the empty state is the affordance ("type to filter")
+    //    and the active state names the needle. The coverage line is the
+    //    honesty seam (nocx-ms7v): with retention set, a search can only
+    //    see part of history, and the panel says how far back instead of
+    //    presenting a partial answer as the whole one. ──
+    const bar = document.createElement('div')
+    bar.className = 'ui-recall-panel__bar'
+    const filterEl = document.createElement('span')
+    filterEl.className = 'ui-recall-panel__filter'
+    if (s.name !== 'loading') {
+      if (s.filter !== '') {
+        filterEl.dataset.active = 'true'
+        filterEl.textContent = `filter: ${s.filter}`
+      } else {
+        filterEl.textContent = 'type to filter'
+      }
+    } else {
+      filterEl.textContent = 'type to filter'
+    }
+    bar.appendChild(filterEl)
+    if (s.name !== 'loading' && s.query.coverage !== null) {
+      const coverage = document.createElement('span')
+      coverage.className = 'ui-recall-panel__coverage'
+      coverage.textContent = `oldest entry ${relativeTime(s.query.coverage, Date.now())}`
+      bar.appendChild(coverage)
+    }
+    this.root.appendChild(bar)
+
     // ── Rows, or the kit's empty state ────────────────────────────────
     const list = document.createElement('div')
     list.className = 'ui-recall-panel__list'
@@ -564,10 +730,18 @@ export class RecallOverlay {
       empty.className = 'ui-empty-state'
       const emptyTitle = document.createElement('div')
       emptyTitle.className = 'ui-empty-state__title'
-      emptyTitle.textContent = 'no history yet'
       const emptyDesc = document.createElement('div')
       emptyDesc.className = 'ui-empty-state__desc'
-      emptyDesc.textContent = 'commands you run will appear here'
+      // The empty state must tell the truth about WHY it is empty: no
+      // history and no matches are different facts, and a filter that
+      // found nothing must not read as a terminal that forgot.
+      if (s.filter !== '') {
+        emptyTitle.textContent = `no matches for "${s.filter}"`
+        emptyDesc.textContent = 'backspace to clear the filter'
+      } else {
+        emptyTitle.textContent = 'no history yet'
+        emptyDesc.textContent = 'commands you run will appear here'
+      }
       empty.appendChild(emptyTitle)
       empty.appendChild(emptyDesc)
       list.appendChild(empty)
@@ -598,6 +772,42 @@ export class RecallOverlay {
       }
     }
     this.root.appendChild(list)
+
+    // ── Detail pane: the four facts about the selected row — exit code,
+    //    cwd, duration, when it last ran. The data is in the entry; nothing
+    //    here is fetched on selection. Unknowns render as unknown (—), never
+    //    as zero or as the epoch (design §8.10). ──
+    if (s.name === 'navigating') {
+      const wireIndex = s.query.entries.length - 1 - s.selected
+      const entry = s.query.entries[wireIndex]
+      if (entry) {
+        const detail = document.createElement('div')
+        detail.className = 'ui-recall-panel__detail'
+        const facts: ReadonlyArray<readonly [string, string]> = [
+          [
+            'exit code',
+            entry.exitCode === null || entry.exitCode === undefined ? '—' : String(entry.exitCode),
+          ],
+          ['cwd', entry.cwd === '' ? '—' : entry.cwd],
+          ['duration', detailDuration(entry)],
+          ['last ran', relativeTime(entry.endedAt, Date.now())],
+        ]
+        for (const [term, value] of facts) {
+          const item = document.createElement('div')
+          item.className = 'ui-recall-panel__detail-item'
+          const termEl = document.createElement('span')
+          termEl.className = 'ui-recall-panel__detail-term'
+          termEl.textContent = term
+          const valueEl = document.createElement('span')
+          valueEl.className = 'ui-recall-panel__detail-value'
+          valueEl.textContent = value
+          item.appendChild(termEl)
+          item.appendChild(valueEl)
+          detail.appendChild(item)
+        }
+        this.root.appendChild(detail)
+      }
+    }
 
     // ── One footer, one line, every hint in it: what Enter does, how to
     //    move, how to widen, how to get out — key groups separated by a real

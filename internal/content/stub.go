@@ -63,8 +63,8 @@ func (s *histStub) FindByPrefix(_ context.Context, prefix string, limit int) ([]
 	return nil, ErrNotImplemented
 }
 
-func (s *histStub) Query(_ context.Context, scope Scope, cwd, host string, limit int, _ *int64) (HistoryPage, error) {
-	s.log.Info("content stub: CommandHistoryRepository.Query", "scope", scope, "cwd", cwd, "host", host, "limit", limit)
+func (s *histStub) Query(_ context.Context, scope Scope, cwd, host string, limit int, _ *int64, text string) (HistoryPage, error) {
+	s.log.Info("content stub: CommandHistoryRepository.Query", "scope", scope, "cwd", cwd, "host", host, "limit", limit, "text", text)
 	return HistoryPage{}, ErrNotImplemented
 }
 

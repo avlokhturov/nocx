@@ -373,7 +373,7 @@ func TestTwoProcessesShareDatabase(t *testing.T) {
 	if n == 0 {
 		t.Fatal("no rows survived two processes writing to one database")
 	}
-	if _, err := db.CommandHistory().Query(ctx, ScopeEverywhere, "", "", 10, nil); err != nil {
+	if _, err := db.CommandHistory().Query(ctx, ScopeEverywhere, "", "", 10, nil, ""); err != nil {
 		t.Fatalf("query after kills: %v", err)
 	}
 

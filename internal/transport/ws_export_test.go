@@ -70,7 +70,7 @@ func (r *recordingHistRepo) List(context.Context, int) ([]content.CommandRecord,
 	return r.db.history, nil
 }
 
-func (r *recordingHistRepo) Query(context.Context, content.Scope, string, string, int, *int64) (content.HistoryPage, error) {
+func (r *recordingHistRepo) Query(context.Context, content.Scope, string, string, int, *int64, string) (content.HistoryPage, error) {
 	return content.HistoryPage{}, nil
 }
 

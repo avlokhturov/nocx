@@ -102,6 +102,13 @@ type HistoryPage struct {
 	// store has nothing to answer from" (source=session): an empty answer
 	// and an unanswerable question must not look alike.
 	HasRows bool
+	// Coverage is the store-wide horizon the answer can see: the oldest
+	// retained entry's ended_at, in Unix milliseconds, regardless of the
+	// rung or the text filter (retention is store-wide, so the horizon is
+	// too). The overlay renders it so a search under retention does not
+	// present a partial history as the whole one. Nil when the store holds
+	// no completed rows — nothing to state a horizon for.
+	Coverage *int64
 }
 
 // Conversation is a conversation with an AI agent.
@@ -137,6 +144,10 @@ type CommandHistoryRepository interface {
 	// ScopeHost (both ignored for ScopeEverywhere). before, when non-nil, is
 	// the opaque row id (the string form of a CommandRecord.ID) the previous
 	// page ended at; the page contains only rows strictly older than it.
-	// limit must be >= 1.
-	Query(ctx context.Context, scope Scope, cwd, host string, limit int, before *int64) (HistoryPage, error)
+	// limit must be >= 1. text is the search filter (nocx-ms7v): a
+	// case-insensitive substring over command, applied WITHIN the rung the
+	// caller asked for — the server never silently widens. Empty or absent
+	// means no filter. The page's Coverage is store-wide and independent of
+	// both the rung and the filter.
+	Query(ctx context.Context, scope Scope, cwd, host string, limit int, before *int64, text string) (HistoryPage, error)
 }

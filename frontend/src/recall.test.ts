@@ -19,9 +19,11 @@ import { defaultKeymap } from '@codemirror/commands'
 import { CommandEditor, type EditorActions } from './editor'
 import {
   RecallOverlay,
+  formatDuration,
   queryLedgerHistory,
   relativeTime,
   scrollTopToReveal,
+  type RecallQuery,
   type RecallScope,
 } from './recall'
 import { CommandLedger } from './command-ledger'
@@ -71,19 +73,37 @@ function mkQuery(
       scope,
       exhausted: true,
       source,
+      // The session/ledger answer states its own horizon: the oldest entry.
+      coverage: commands.length > 0 ? 1000 - (commands.length - 1) : null,
     })
 }
 
 function emptyQuery(
   source: 'store' | 'session' = 'session',
 ): (scope: RecallScope) => Promise<HistoryQuery> {
-  return (scope) => Promise.resolve({ entries: [], scope, exhausted: true, source })
+  return (scope) => Promise.resolve({ entries: [], scope, exhausted: true, source, coverage: null })
 }
 
-function setupRecall(opts: {
-  query?: (scope: RecallScope) => Promise<HistoryQuery>
-  actions?: Partial<EditorActions>
-}) {
+/** A query that actually narrows on `text`, the way the store does — for the
+ *  typing-narrows tests, where a static fixture would ignore the filter. */
+function filteringQuery(
+  commands: string[],
+  source: 'store' | 'session' = 'session',
+): (scope: RecallScope, text?: string) => Promise<HistoryQuery> {
+  return (scope, text) => {
+    const needle = text ?? ''
+    const matched = commands.filter((c) => c.toLowerCase().includes(needle.toLowerCase()))
+    return Promise.resolve({
+      entries: matched.map((c, i) => mkEntry(c, 1000 - i)),
+      scope,
+      exhausted: true,
+      source,
+      coverage: matched.length > 0 ? 1000 - (matched.length - 1) : null,
+    })
+  }
+}
+
+function setupRecall(opts: { query?: RecallQuery; actions?: Partial<EditorActions> }) {
   const container = document.createElement('div')
   document.body.appendChild(container)
   const submit = opts.actions?.submit ?? vi.fn()
@@ -144,7 +164,7 @@ describe('recall: Enter executes the previewed command', () => {
     expect(submit).not.toHaveBeenCalled() // and nothing was sent
   })
 
-  it('typing while navigating keeps the previewed command as the new draft', async () => {
+  it('typing while navigating narrows the filter — the panel owns printable keys', async () => {
     const { container, ed, view, recall } = setupRecall({ query: mkQuery(['docker compose up']) })
     ed.show()
     ed.insertText('git s')
@@ -152,15 +172,15 @@ describe('recall: Enter executes the previewed command', () => {
     await settled(container)
     expect(recall.isOpen).toBe(true)
     expect(ed.getDoc()).toBe('docker compose up') // previewed
-    // An insertion hands the line to the editor: the overlay closes and the
-    // preview STAYS as the new draft. Restoring the captured draft (dismiss)
-    // is what cleared the line; the third exit must not do that. jsdom cannot
-    // synthesize CM6's input events, so the 'd' landing is not observable —
-    // the not-consumed contract and the kept line are.
+    // A printable key is the filter (nocx-ms7v), never a keystroke for the
+    // editor under the panel: it is consumed, the overlay stays up, and the
+    // panel says what it is filtering by.
     const ev = key(view, { key: 'd' })
-    expect(recall.isOpen).toBe(false)
-    expect(ed.getDoc()).toBe('docker compose up')
-    expect(ev.defaultPrevented).toBe(false)
+    expect(ev.defaultPrevented).toBe(true)
+    expect(recall.isOpen).toBe(true)
+    const text = panelOf(container).textContent ?? ''
+    expect(text).toContain('filter: d')
+    expect(ed.getDoc()).toBe('docker compose up') // the preview did not move
   })
 
   it('deleting while navigating keeps the previewed command as the new draft', async () => {
@@ -204,6 +224,245 @@ describe('recall: Enter executes the previewed command', () => {
     expect(recall.isOpen).toBe(false)
     expect(ed.getDoc()).toBe('') // the draft (empty) was restored
     expect(cancel).not.toHaveBeenCalled() // no \x03 went to the shell
+  })
+})
+
+describe('recall: typing narrows the rung (nocx-ms7v)', () => {
+  it('a printable key is consumed into the filter and only matching rows remain', async () => {
+    const { container, view } = setupRecall({
+      query: filteringQuery(['make deploy', 'make test', 'git status']),
+    })
+    key(view, { key: 'ArrowUp' })
+    await settled(container)
+    expect(panelOf(container).textContent).toContain('3 results')
+    // Type "make t": the narrowing answers are async and each keystroke
+    // supersedes the previous — the settled panel is the last one's.
+    for (const ch of ['m', 'a', 'k', 'e', ' ', 't']) key(view, { key: ch })
+    await vi.waitFor(() => {
+      const text = panelOf(container).textContent ?? ''
+      expect(text).toContain('filter: make t')
+      expect(text).toContain('1 result')
+      expect(text).toContain('make test')
+      expect(text).not.toContain('make deploy')
+      expect(text).not.toContain('git status')
+    })
+  })
+
+  it('backspace trims the filter, re-widening the rung', async () => {
+    const { container, view } = setupRecall({
+      query: filteringQuery(['make deploy', 'make test', 'git status']),
+    })
+    key(view, { key: 'ArrowUp' })
+    await settled(container)
+    for (const ch of ['m', 'a', 'k', 'e', ' ', 't']) key(view, { key: ch })
+    await vi.waitFor(() => expect(panelOf(container).textContent).toContain('filter: make t'))
+    key(view, { key: 'Backspace' }) // "make t" → "make "
+    await vi.waitFor(() => {
+      const text = panelOf(container).textContent ?? ''
+      expect(text).toContain('filter: make ')
+      expect(text).toContain('2 results')
+      expect(text).toContain('make deploy')
+    })
+    key(view, { key: 'Backspace' }) // "make " → "make"
+    await vi.waitFor(() => expect(panelOf(container).textContent).toContain('filter: make'))
+    for (let i = 0; i < 4; i++) key(view, { key: 'Backspace' }) // back to no filter
+    await vi.waitFor(() => expect(panelOf(container).textContent).toContain('3 results'))
+  })
+
+  it('a filter with no matches says so and restores the draft to the editor', async () => {
+    const { container, ed, view, recall } = setupRecall({
+      query: filteringQuery(['make deploy', 'git status']),
+    })
+    ed.show()
+    ed.insertText('git s')
+    key(view, { key: 'ArrowUp' })
+    await settled(container)
+    expect(ed.getDoc()).toBe('make deploy') // the newest row is previewed
+    key(view, { key: 'z' })
+    await vi.waitFor(() => {
+      const text = panelOf(container).textContent ?? ''
+      expect(text).toContain('no matches for "z"')
+    })
+    // The empty rung state means "the editor holds the draft", never a
+    // stale preview of a command the filter removed.
+    expect(ed.getDoc()).toBe('git s')
+    expect(recall.isOpen).toBe(true)
+    key(view, { key: 'Backspace' }) // clears the filter — the rung returns
+    await vi.waitFor(() => {
+      const text = panelOf(container).textContent ?? ''
+      expect(text).not.toContain('no matches')
+      expect(text).toContain('make deploy')
+    })
+  })
+
+  it('Esc with an active filter restores the ORIGINAL draft, not the preview', async () => {
+    const { container, ed, view, recall } = setupRecall({
+      query: filteringQuery(['make deploy', 'git status']),
+    })
+    ed.show()
+    ed.insertText('git s')
+    key(view, { key: 'ArrowUp' })
+    await settled(container)
+    key(view, { key: 'm' })
+    await vi.waitFor(() => expect(panelOf(container).textContent).toContain('filter: m'))
+    key(view, { key: 'Escape' })
+    expect(recall.isOpen).toBe(false)
+    expect(ed.getDoc()).toBe('git s') // the draft captured at open, exactly
+  })
+
+  it('the filter rides the ladder climb — shift+Up keeps narrowing', async () => {
+    const { container, view } = setupRecall({
+      query: (scope, text) => {
+        const needle = text ?? ''
+        const pool =
+          scope === 'directory'
+            ? ['make deploy', 'make test', 'git status']
+            : ['make deploy', 'make test', 'git status', 'docker build']
+        const matched = pool.filter((c) => c.toLowerCase().includes(needle.toLowerCase()))
+        return Promise.resolve({
+          entries: matched.map((c, i) => mkEntry(c, 1000 - i)),
+          scope,
+          exhausted: true,
+          source: 'session',
+          coverage: matched.length > 0 ? 1000 - (matched.length - 1) : null,
+        })
+      },
+    })
+    key(view, { key: 'ArrowUp' })
+    await settled(container) // 3 rows on the directory rung: no open-time climb
+    expect(panelOf(container).textContent).toContain('this directory')
+    key(view, { key: 'm' })
+    await vi.waitFor(() => expect(panelOf(container).textContent).toContain('filter: m'))
+    key(view, { key: 'ArrowUp', shiftKey: true }) // widen to host
+    await vi.waitFor(() => {
+      const text = panelOf(container).textContent ?? ''
+      expect(text).toContain('this host')
+      expect(text).toContain('filter: m') // the filter survived the climb
+      expect(text).toContain('make deploy')
+      expect(text).not.toContain('docker build') // still narrowed
+      expect(text).not.toContain('git status')
+    })
+  })
+})
+
+describe('recall: the coverage line (nocx-ms7v)', () => {
+  it('renders the answer horizon when the store states one', async () => {
+    const now = Date.now()
+    const { container, view } = setupRecall({
+      query: (scope) =>
+        Promise.resolve({
+          entries: [mkEntry('ls', now - 2 * 86_400_000)],
+          scope,
+          exhausted: true,
+          source: 'store',
+          coverage: now - 21 * 86_400_000, // the oldest retained entry: 3 weeks
+        }),
+    })
+    key(view, { key: 'ArrowUp' })
+    await settled(container)
+    expect(panelOf(container).textContent).toContain('oldest entry 3 weeks ago')
+  })
+
+  it('no coverage line when the answer has no horizon', async () => {
+    const { container, view } = setupRecall({ query: emptyQuery('store') })
+    key(view, { key: 'ArrowUp' })
+    await settled(container)
+    expect(panelOf(container).textContent).not.toContain('oldest entry')
+  })
+})
+
+describe("recall: the detail pane shows the selected row's facts", () => {
+  it('renders exit code, cwd, duration and last ran from the entry', async () => {
+    const now = Date.now()
+    const { container, view } = setupRecall({
+      query: (scope) =>
+        Promise.resolve({
+          entries: [
+            {
+              id: '7',
+              command: 'make deploy',
+              cwd: '/srv/api',
+              host: '',
+              status: 'failure',
+              exitCode: 2,
+              startedAt: now - 130_000,
+              endedAt: now - 120_000,
+            },
+          ],
+          scope,
+          exhausted: true,
+          source: 'store',
+          coverage: now - 3 * 86_400_000,
+        }),
+    })
+    key(view, { key: 'ArrowUp' })
+    await settled(container)
+    const detail = container.querySelector<HTMLElement>('.ui-recall-panel__detail')
+    expect(detail).not.toBeNull()
+    const text = detail?.textContent ?? ''
+    expect(text).toContain('exit code')
+    expect(text).toContain('2')
+    expect(text).toContain('cwd')
+    expect(text).toContain('/srv/api')
+    expect(text).toContain('duration')
+    expect(text).toContain('10s')
+    expect(text).toContain('last ran')
+    expect(text).toContain('2 minutes ago')
+  })
+
+  it('unknowns render as — and a running entry as running, never as zero or 1970', async () => {
+    const { container, view } = setupRecall({
+      query: (scope) =>
+        Promise.resolve({
+          entries: [
+            {
+              id: '7',
+              command: 'sleep 5',
+              cwd: '',
+              host: '',
+              status: 'running',
+              endedAt: null, // startedAt absent too: never observed
+            },
+          ],
+          scope,
+          exhausted: true,
+          source: 'store',
+          coverage: null,
+        }),
+    })
+    key(view, { key: 'ArrowUp' })
+    await settled(container)
+    const detail = container.querySelector<HTMLElement>('.ui-recall-panel__detail')
+    const items = Array.from(detail?.querySelectorAll('.ui-recall-panel__detail-item') ?? [])
+    // Term and value are separate spans in one flex column, so textContent
+    // joins them without whitespace — assert each item, not the joined text.
+    expect(items[0]?.textContent).toContain('exit code')
+    expect(items[0]?.textContent).toContain('—')
+    expect(items[1]?.textContent).toContain('cwd')
+    expect(items[1]?.textContent).toContain('—')
+    expect(items[2]?.textContent).toContain('duration')
+    expect(items[2]?.textContent).toContain('running')
+    expect(items[3]?.textContent).toContain('last ran')
+    expect(items[3]?.textContent).toContain('running')
+    const text = detail?.textContent ?? ''
+    expect(text).not.toContain('1970')
+    expect(text).not.toContain('0s')
+  })
+})
+
+describe('recall: formatDuration', () => {
+  it('renders the human span: ms, tenths of a second, minutes, hours', () => {
+    expect(formatDuration(0)).toBe('0ms')
+    expect(formatDuration(800)).toBe('800ms')
+    expect(formatDuration(2_300)).toBe('2.3s')
+    expect(formatDuration(10_000)).toBe('10s')
+    expect(formatDuration(61_600)).toBe('1m 2s')
+    expect(formatDuration(3_599_000)).toBe('59m 59s')
+    expect(formatDuration(3_600_000)).toBe('1h 0m')
+  })
+
+  it('a skewed clock never renders a negative duration', () => {
+    expect(formatDuration(-500)).toBe('0ms')
   })
 })
 describe('recall: Esc restores the draft, caret and scroll exactly', () => {
@@ -316,7 +575,13 @@ describe('recall: arrows navigate, widening is its own key (v8)', () => {
           scope === 'directory'
             ? [mkEntry('c1'), mkEntry('c2'), mkEntry('c3')]
             : [mkEntry('c1'), mkEntry('c2'), mkEntry('c3'), mkEntry('c4')]
-        return Promise.resolve({ entries, scope, exhausted: true, source: 'session' })
+        return Promise.resolve({
+          entries,
+          scope,
+          exhausted: true,
+          source: 'session',
+          coverage: null,
+        })
       },
     })
     key(view, { key: 'ArrowUp' }) // c1 (newest, bottom)
@@ -449,12 +714,13 @@ describe('recall: what the panel says', () => {
       query: (scope) =>
         Promise.resolve(
           scope === 'directory'
-            ? { entries: [], scope, exhausted: true, source: 'session' }
+            ? { entries: [], scope, exhausted: true, source: 'session', coverage: null }
             : {
                 entries: [mkEntry('ls /tmp'), mkEntry('pwd'), mkEntry('whoami')],
                 scope,
                 exhausted: true,
                 source: 'session',
+                coverage: null,
               },
         ),
     })
@@ -472,12 +738,19 @@ describe('recall: what the panel says', () => {
       query: (scope) =>
         Promise.resolve(
           scope === 'directory'
-            ? { entries: [mkEntry('ls')], scope, exhausted: true, source: 'session' }
+            ? {
+                entries: [mkEntry('ls')],
+                scope,
+                exhausted: true,
+                source: 'session',
+                coverage: null,
+              }
             : {
                 entries: [mkEntry('ls'), mkEntry('make deploy'), mkEntry('git status')],
                 scope,
                 exhausted: true,
                 source: 'session',
+                coverage: null,
               },
         ),
     })
@@ -499,6 +772,7 @@ describe('recall: what the panel says', () => {
           scope,
           exhausted: true,
           source: 'session',
+          coverage: null,
         }),
     })
     key(view, { key: 'ArrowUp' })
@@ -513,6 +787,7 @@ describe('recall: what the panel says', () => {
       scope: 'directory' as const,
       exhausted: true,
       source: 'session' as const,
+      coverage: null,
     }
     const { container, view } = setupRecall({
       query: (scope) =>
@@ -526,6 +801,7 @@ describe('recall: what the panel says', () => {
           scope,
           exhausted: true,
           source: 'session',
+          coverage: null,
         }),
     })
     key(view, { key: 'ArrowUp' }) // open-time climb: directory 1, host 1 → everywhere
@@ -590,6 +866,7 @@ describe('recall: relative time', () => {
           scope,
           exhausted: true,
           source: 'session',
+          coverage: null,
         }),
     })
     key(view, { key: 'ArrowUp' })
@@ -621,6 +898,7 @@ describe('recall: relative time', () => {
           scope,
           exhausted: true,
           source: 'store',
+          coverage: null,
         }),
     })
     key(view, { key: 'ArrowUp' })
@@ -647,5 +925,54 @@ describe('queryLedgerHistory: the session fallback behind the generated types', 
 
     const everywhere = queryLedgerHistory(ledger, 'everywhere', '/a', 'h1')
     expect(everywhere.entries.map((e) => e.command)).toEqual(['third', 'second', 'first'])
+  })
+
+  it('filters by text the same way the store does, case-insensitively', () => {
+    const now = () => 1000
+    const ledger = new CommandLedger({ now })
+    ledger.open('make deploy', '/a', 'h1', () => undefined)
+    ledger.open('git status', '/a', 'h1', () => undefined)
+    ledger.open('MAKE PROD', '/a', 'h1', () => undefined)
+
+    const filtered = queryLedgerHistory(ledger, 'everywhere', '/a', 'h1', 'make')
+    expect(filtered.entries.map((e) => e.command)).toEqual(['MAKE PROD', 'make deploy'])
+
+    const miss = queryLedgerHistory(ledger, 'everywhere', '/a', 'h1', 'zzz')
+    expect(miss.entries).toEqual([])
+
+    const none = queryLedgerHistory(ledger, 'everywhere', '/a', 'h1', '')
+    expect(none.entries).toHaveLength(3) // empty filter is no filter
+  })
+  it('states the session horizon and carries startedAt', () => {
+    const now = () => 1000
+    const ledger = new CommandLedger({ now })
+    // The full marker cycle: A (clean prompt) → B → C (start) → D (done).
+    // Only completed records carry endedAt, so only they set the horizon.
+    const run = (command: string) => {
+      ledger.open(command, '/a', 'h1', () => undefined)
+      ledger.onMarker('A')
+      ledger.onMarker('B')
+      ledger.onMarker('C')
+      ledger.onMarker('D', 0)
+    }
+    run('first')
+    run('second')
+    ledger.open('third', '/a', 'h2', () => undefined) // still running
+
+    const dir = queryLedgerHistory(ledger, 'directory', '/a', 'h1')
+    expect(dir.coverage).toBe(1000) // the oldest completed entry, session-wide
+    expect(dir.entries[0]?.startedAt).toBe(1000)
+
+    // The rung narrows rows, never the horizon: the everywhere answer sees
+    // the same oldest entry the directory rung does.
+    const everywhere = queryLedgerHistory(ledger, 'everywhere', '/a', 'h1')
+    expect(everywhere.coverage).toBe(1000)
+  })
+  it('a ledger with nothing completed states no horizon', () => {
+    const now = () => 1000
+    const ledger = new CommandLedger({ now })
+    ledger.open('only', '/a', 'h1', () => undefined) // still running
+    const q = queryLedgerHistory(ledger, 'everywhere', '/a', 'h1')
+    expect(q.coverage).toBe(null)
   })
 })

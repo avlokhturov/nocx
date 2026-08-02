@@ -29,6 +29,10 @@ export interface HistoryQuery {
    * Where the rows came from. 'session' means the in-memory ledger only — the persistent store is unavailable or empty, and the overlay must say so rather than presenting one session as all history. 'store' means the persistent store answered. Distinguishing them is the same rule as unavailable-never-collapses-into-unresolved: an empty answer and an unanswerable question must not look alike.
    */
   source: 'store' | 'session'
+  /**
+   * How far back the answer's source can see: the oldest retained entry's ended_at in Unix milliseconds, store-wide — independent of the rung and of the text filter, because retention is store-wide. With retention set, a search can only see part of history; the overlay renders this line so a partial answer is not presented as the whole one. Null when the source holds no completed rows (nothing to state a horizon for).
+   */
+  coverage: number | null
 }
 export interface HistoryEntry {
   /**
@@ -55,6 +59,10 @@ export interface HistoryEntry {
    * Process exit status, or null when it never produced one (still running, or never observed). Null is not zero.
    */
   exitCode?: number | null
+  /**
+   * Unix milliseconds when the command started, or null when it was never observed. The detail pane derives the duration from startedAt..endedAt; null renders as unknown, never as the epoch.
+   */
+  startedAt?: number | null
   /**
    * Unix milliseconds when the command finished, or null when it has not. The overlay renders the relative time from this; null renders as running, never as the epoch.
    */

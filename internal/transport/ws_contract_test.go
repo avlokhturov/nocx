@@ -950,10 +950,12 @@ func TestHistoryQuery_DTOConformsToContract(t *testing.T) {
 
 	exit := 1
 	ended := int64(1_750_000_000_000)
+	started := ended - 2_300
+	horizon := int64(1_700_000_000_000)
 	cases := map[string]historyQueryResponse{
 		// Everything populated, including the nullable fields — a running
 		// entry must render exitCode as null and endedAt as null, never as 0
-		// and never as the epoch.
+		// and never as the epoch; a store with a horizon states it.
 		"running": {
 			Entries: []historyQueryEntry{
 				{ID: "9", Command: "make test", Cwd: "/repo", Host: "", Status: "running"},
@@ -961,30 +963,37 @@ func TestHistoryQuery_DTOConformsToContract(t *testing.T) {
 			Scope:     "directory",
 			Exhausted: true,
 			Source:    "store",
+			Coverage:  &horizon,
 		},
 		"populated": {
 			Entries: []historyQueryEntry{
-				{ID: "42", Command: "ssh prod deploy", Cwd: "/srv/api", Host: "prod.example.com", Status: "failure", ExitCode: &exit, EndedAt: &ended},
+				{ID: "42", Command: "ssh prod deploy", Cwd: "/srv/api", Host: "prod.example.com", Status: "failure", ExitCode: &exit, StartedAt: &started, EndedAt: &ended},
 			},
 			Scope:     "host",
 			Exhausted: false,
 			Source:    "store",
+			Coverage:  &horizon,
 		},
 		// The empty answer: the store answered and the rung had no matches.
 		// entries must marshal to [] never null (nocx-25k9.14 class), and the
-		// four required fields must all be present.
+		// five required fields must all be present.
 		"empty rung": {
 			Entries:   []historyQueryEntry{},
 			Scope:     "everywhere",
 			Exhausted: true,
 			Source:    "store",
+			Coverage:  &horizon,
 		},
-		// The unanswerable question: no store at all.
+		// The unanswerable question: no store at all. Coverage is null —
+		// the schema's ["integer","null"] — never omitted: the overlay
+		// decides what to render from its value, and a missing key would
+		// throw on read.
 		"no store": {
 			Entries:   []historyQueryEntry{},
 			Scope:     "directory",
 			Exhausted: true,
 			Source:    "session",
+			Coverage:  nil,
 		},
 	}
 
@@ -1002,22 +1011,25 @@ func TestHistoryQuery_DTOConformsToContract(t *testing.T) {
 // The real method through the real socket. Nothing here names a field, so
 // nothing here can omit one; the schema's additionalProperties:false plus
 // required makes the key set exact in both directions. Two states are driven:
-// a store with rows (source=store) and the source=session fallback the
-// overlay must label "this session only".
+// a store with rows (source=store, with a horizon) and the source=session
+// fallback the overlay must label "this session only".
 func TestHistoryQuery_OverTheWireConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "history.query.schema.json")
 	ctx := context.Background()
 
 	t.Run("store answered", func(t *testing.T) {
 		ended := int64(1_750_000_000_000)
+		started := ended - 4_100
+		horizon := int64(1_700_000_000_000)
 		exit := 0
 		fake := &fakeHistoryDB{page: content.HistoryPage{
 			Entries: []content.CommandRecord{
-				{ID: 7, Command: "git status", Cwd: "/repo", Host: "", Status: content.StatusSuccess, ExitCode: &exit, EndedAt: &ended},
+				{ID: 7, Command: "git status", Cwd: "/repo", Host: "", Status: content.StatusSuccess, ExitCode: &exit, StartedAt: &started, EndedAt: &ended},
 				{ID: 6, Command: "make", Cwd: "/repo", Host: "", Status: content.StatusFailure},
 			},
 			HasRows:   true,
 			Exhausted: true,
+			Coverage:  &horizon,
 		}}
 		ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
 			WithContentDB(fake))
@@ -1034,6 +1046,18 @@ func TestHistoryQuery_OverTheWireConformsToContract(t *testing.T) {
 			t.Fatalf("unexpected error: %+v", resp.Error)
 		}
 		validateJSON(t, schema, resp.Result, "history.query result (store)")
+
+		// The horizon is a real value off the real socket, not a field the
+		// test built — decode and name it, the way the renderer will.
+		var got struct {
+			Coverage *int64 `json:"coverage"`
+		}
+		if err := json.Unmarshal(resp.Result, &got); err != nil {
+			t.Fatalf("decode coverage: %v", err)
+		}
+		if got.Coverage == nil || *got.Coverage != horizon {
+			t.Fatalf("coverage off the socket = %v, want %d", got.Coverage, horizon)
+		}
 	})
 
 	t.Run("no store answers session", func(t *testing.T) {
