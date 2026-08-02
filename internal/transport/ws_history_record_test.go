@@ -10,6 +10,7 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"sync"
 	"testing"
 
@@ -177,8 +178,8 @@ func TestHistoryRecord_PersistsEveryFact(t *testing.T) {
 		"host":      "prod.example.com",
 		"status":    "interrupted",
 		"exitCode":  137,
-		"startedAt": int64(100),
-		"endedAt":   int64(200),
+		"startedAt": int64(1_750_000_000_000),
+		"endedAt":   int64(1_750_000_000_100),
 		"trusted":   true,
 	}), 1)
 	if resp.Error != nil {
@@ -199,8 +200,8 @@ func TestHistoryRecord_PersistsEveryFact(t *testing.T) {
 	if r.Status != content.StatusInterrupted || r.ExitCode == nil || *r.ExitCode != 137 {
 		t.Fatalf("status/exitCode = %q/%v, want interrupted/137", r.Status, r.ExitCode)
 	}
-	if r.StartedAt == nil || *r.StartedAt != 100 || r.EndedAt == nil || *r.EndedAt != 200 {
-		t.Fatalf("timestamps = %v/%v, want 100/200", r.StartedAt, r.EndedAt)
+	if r.StartedAt == nil || *r.StartedAt != 1_750_000_000_000 || r.EndedAt == nil || *r.EndedAt != 1_750_000_000_100 {
+		t.Fatalf("timestamps = %v/%v, want 1750000000000/1750000000100", r.StartedAt, r.EndedAt)
 	}
 	if !r.Trusted {
 		t.Fatal("trusted = false, want true")
@@ -232,6 +233,87 @@ func TestHistoryRecord_RejectsUnknownStatus(t *testing.T) {
 	resp := vaultCall(t, conn, "history.record", recordParams(map[string]any{"status": "crashed"}), 1)
 	if resp.Error == nil || resp.Error.Code != -32602 {
 		t.Fatalf("error = %+v, want -32602", resp.Error)
+	}
+}
+
+// A performance.now()-shaped timestamp (milliseconds since page load) is
+// rejected: the store reads ended_at as Unix epoch milliseconds and sweeps
+// anything below retention, so a 1970 timestamp is deleted the moment it is
+// written. The wrong clock must surface as an error the renderer can log,
+// never as a row that vanishes (nocx-rtg0.16). Each field is checked
+// independently, and the message names the field that failed.
+func TestHistoryRecord_RejectsPerformanceNowTimestamps(t *testing.T) {
+	ws, stop := newHistoryWSServer(t, newFakeRecordHistoryDB())
+	defer stop()
+	conn := connectWS(t, ws)
+
+	cases := []struct {
+		name   string
+		params map[string]any
+		field  string
+	}{
+		{
+			name:   "endedAt at page-load milliseconds (the rtg0.16 repro)",
+			params: map[string]any{"startedAt": int64(755), "endedAt": int64(757)},
+			field:  "startedAt",
+		},
+		{
+			name:   "endedAt alone is page-load milliseconds",
+			params: map[string]any{"endedAt": int64(757)},
+			field:  "endedAt",
+		},
+		{
+			name:   "startedAt alone is page-load milliseconds",
+			params: map[string]any{"startedAt": int64(755)},
+			field:  "startedAt",
+		},
+		{
+			name:   "one second before the 2020-01-01 floor",
+			params: map[string]any{"startedAt": int64(1_577_836_799_999), "endedAt": int64(1_750_000_000_000)},
+			field:  "startedAt",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := vaultCall(t, conn, "history.record", recordParams(tc.params), 1)
+			if resp.Error == nil || resp.Error.Code != -32602 {
+				t.Fatalf("error = %+v, want -32602", resp.Error)
+			}
+			if !strings.Contains(resp.Error.Message, tc.field) {
+				t.Fatalf("error message %q does not name the field %q", resp.Error.Message, tc.field)
+			}
+		})
+	}
+}
+
+// The paired acceptance (rule: for every "returns an error when…" there is
+// an "and on a normal input it succeeds"): a record whose timestamps are
+// ordinary epoch milliseconds — including exactly the 2020-01-01 floor —
+// is accepted and lands in the store. A null timestamp stays valid too:
+// the ledger only stamps what it observed, and the schema keeps both
+// fields nullable.
+func TestHistoryRecord_AcceptsEpochTimestamps(t *testing.T) {
+	db := newFakeRecordHistoryDB()
+	ws, stop := newHistoryWSServer(t, db)
+	defer stop()
+	conn := connectWS(t, ws)
+
+	resp := vaultCall(t, conn, "history.record", recordParams(map[string]any{
+		"startedAt": int64(1_577_836_800_000), // 2020-01-01T00:00:00Z exactly
+		"endedAt":   int64(1_750_000_000_000),
+	}), 1)
+	if resp.Error != nil {
+		t.Fatalf("record error at the epoch floor: %+v", resp.Error)
+	}
+	if db.count() != 1 {
+		t.Fatalf("store holds %d rows, want 1", db.count())
+	}
+
+	// Null timestamps are a valid record (nothing observed yet).
+	if err := db.Add(context.Background(), content.CommandRecord{
+		Command: "null-times", Cwd: "/", Host: "", Status: content.StatusRunning,
+	}); err != nil {
+		t.Fatalf("null-timestamp record rejected by the store: %v", err)
 	}
 }
 

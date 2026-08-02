@@ -6,6 +6,16 @@
  *   Run a command. Restart. Press Up. The command is there, and the panel
  *   says source: store.
  *
+ * The backend runs with `history.retentionDays: 30` written into the
+ * profile's settings.json BEFORE the first launch, the way a user's profile
+ * carries it. This is deliberate (nocx-rtg0.16): the defect this spec
+ * guards was hidden by the default of 0 — with retention off the age sweep
+ * never runs, so the acceptance e2e stayed green while the frontend stamped
+ * startedAt/endedAt with performance.now() and every user who set retention
+ * lost every command microseconds after it was recorded (1970 timestamps,
+ * swept in the same writer turn as the INSERT). Do not "simplify" this back
+ * to the default: the setting is the point.
+ *
  * Drives the real frontend against cmd/devharness with NO Secret Service for
  * the backend (the `true` argument) and fresh XDG directories, so the
  * content key is DERIVED at startup from the machine salt — the vault and
@@ -21,7 +31,7 @@
  * answered.
  */
 import { test as base, expect, type Page } from '@playwright/test'
-import { mkdtempSync, mkdirSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { VaultBackend, type BackendEndpoint, type XdgDirs } from './harness'
@@ -94,6 +104,20 @@ test.describe('history: a command survives a restart and recall answers from the
 
   test.beforeAll(() => {
     xdg = createXdgDirs()
+    // Seed the profile with the owner's retention value before the backend
+    // starts (nocx-rtg0.16 — see the header comment): the age sweep must be
+    // live for this spec to prove anything, and it must run against real
+    // wall-clock timestamps.
+    const settingsDir = join(xdg.config, 'nocx')
+    mkdirSync(settingsDir, { recursive: true })
+    writeFileSync(
+      join(settingsDir, 'settings.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        values: { 'history.retentionDays': 30 },
+        secretRefs: {},
+      }),
+    )
     // `true` = no Secret Service for this backend, regardless of the
     // session the suite runs in — the derived-key branch is the point.
     backend = new VaultBackend(DEVHARNESS_BIN, asXdgDirs(xdg), true)

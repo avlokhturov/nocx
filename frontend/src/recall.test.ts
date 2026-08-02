@@ -48,7 +48,9 @@ async function settled(container: HTMLElement): Promise<void> {
   })
 }
 
-function mkEntry(command: string, endedAt: number | null = 1000): HistoryEntry {
+// Entries carry wall-clock epoch milliseconds (the units the store
+// persists and the panel renders against — nocx-rtg0.16).
+function mkEntry(command: string, endedAt: number | null = 1_750_000_000_000): HistoryEntry {
   return {
     id: `${command}-${endedAt}`,
     command,
@@ -602,6 +604,29 @@ describe('recall: relative time', () => {
     expect(relativeTime(now - 30_000, now)).toBe('just now')
     expect(relativeTime(now - 21 * 3_600_000, now)).toBe('21 hours ago')
     expect(relativeTime(now - 7 * 86_400_000, now)).toBe('1 week ago')
+  })
+
+  it('renders a stored row against the wall clock, not the page clock (nocx-rtg0.16)', async () => {
+    // The panel's clock must be the same wall clock the store persists:
+    // a stored endedAt two minutes before now must read "2 minutes ago".
+    // On the old performance.now() clock the diff of an epoch timestamp
+    // against page-load milliseconds clamped to zero and every row read
+    // "just now" — and rows stamped by the ledger's own wrong clock read
+    // as 1970. Asserting an exact label makes the clock path observable.
+    const now = Date.now()
+    const { container, view } = setupRecall({
+      query: (scope) =>
+        Promise.resolve({
+          entries: [mkEntry('echo wall-clock', now - 2 * 60_000)],
+          scope,
+          exhausted: true,
+          source: 'store',
+        }),
+    })
+    key(view, { key: 'ArrowUp' })
+    await settled(container)
+    const time = container.querySelector<HTMLElement>('.ui-recall-panel__time')
+    expect(time?.textContent).toBe('2 minutes ago')
   })
 })
 

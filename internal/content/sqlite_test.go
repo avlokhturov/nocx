@@ -686,3 +686,45 @@ func TestRetentionSweepRemovesOldCommands(t *testing.T) {
 		t.Fatalf("after sweep rows = %+v, want only the fresh command (old one removed)", recs)
 	}
 }
+
+// The nocx-rtg0.16 guard: a row recorded NOW survives the age sweep that
+// runs in the same writer turn as the INSERT when retention is 30 days (the
+// owner's value). The defect this pins: a caller clocking in
+// performance.now() units made every ended_at land in January 1970, so the
+// sweep deleted each row microseconds after it was written. The store
+// cannot tell a 1970 timestamp from a real one — the sweep must only ever
+// see wall-clock epoch milliseconds, which is the transport's boundary
+// check. What the store itself must never regress is this: a fresh
+// epoch-millisecond row survives a retention sweep.
+func TestRetentionSweepKeepsFreshRowAt30Days(t *testing.T) {
+	policy := content.NewPolicy()
+	policy.SetRetentionDays(30)
+	dir := t.TempDir()
+	db, err := content.Open(context.Background(), content.Config{
+		Path:   filepath.Join(dir, "content.db"),
+		Key:    testKey(),
+		Budget: testBudget,
+		Policy: policy,
+		Logger: log.NewSlogAdapter(nil),
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	hist := db.CommandHistory()
+	ctx := context.Background()
+
+	now := time.Now().UnixMilli()
+	rec := content.CommandRecord{Command: "recorded-now", Cwd: "/now", Host: "", Status: content.StatusSuccess, EndedAt: &now}
+	if addErr := hist.Add(ctx, rec); addErr != nil {
+		t.Fatalf("Add: %v", addErr)
+	}
+
+	recs, err := hist.List(ctx, 10)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(recs) != 1 || recs[0].Command != "recorded-now" {
+		t.Fatalf("rows after Add with retention 30d = %+v, want the fresh row to survive the same-turn sweep", recs)
+	}
+}

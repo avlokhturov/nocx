@@ -148,9 +148,10 @@ export function nextScope(scope: RecallScope): RecallScope {
   }
 }
 
-/** Relative time from a ledger timestamp (performance.now() units, so the
- *  diff is wall time). `endedAt: null` renders as running — never as the
- *  epoch, which would read as 1970. */
+/** Relative time from a stored timestamp (wall-clock epoch milliseconds,
+ *  `Date.now()` units — the same clock the ledger stamps and the store
+ *  persists). `endedAt: null` renders as running — never as the epoch,
+ *  which would read as 1970. */
 export function relativeTime(endedAt: number | null, now: number): string {
   if (endedAt === null) return 'running'
   const diff = Math.max(0, now - endedAt)
@@ -564,7 +565,7 @@ export class RecallOverlay {
       list.appendChild(empty)
     } else {
       const selected = s.name === 'navigating' ? s.selected : -1
-      const now = performance.now()
+      const now = Date.now()
       // Display order is oldest at the top, newest at the bottom — the
       // reverse of the wire (the contract belongs to neither side, and the
       // schema says `entries` is newest first, so the renderer mirrors).

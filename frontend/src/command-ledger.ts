@@ -25,7 +25,16 @@ export interface CommandRecord {
 }
 
 export interface LedgerOpts {
-  /** Injectable clock. Default: `() => performance.now()`. Never call Date.now(). */
+  /**
+   * Injectable wall clock in Unix epoch milliseconds (`Date.now()` units).
+   * startedAt/endedAt are persisted, survive a restart, and render as
+   * "3 days ago" across sessions — only a wall clock can express that.
+   * A monotonic clock (`performance.now()`, milliseconds since page load)
+   * would stamp values the store reads as January 1970 and sweeps the
+   * moment the row is written (nocx-rtg0.16). If a duration in the ledger
+   * ever needs monotonic time, keep a second, separate clock for it —
+   * never one clock serving both meanings.
+   */
   now: () => number
   /**
    * Called once when a record reaches a terminal state — the OSC 133 D with

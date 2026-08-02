@@ -335,6 +335,27 @@ describe('CommandLedger', () => {
     // Cycle is complete, nothing running.
     expect(() => l.finalizeOpen()).not.toThrow()
   })
+
+  it('stamps wall-clock epoch milliseconds from the injected clock (nocx-rtg0.16)', () => {
+    // startedAt/endedAt are persisted, survive a restart, and render as
+    // "3 days ago" across sessions — only a wall clock can express that.
+    // The backend rejects anything below 2020-01-01 (1577836800000), so a
+    // performance.now() clock (milliseconds since page load) would be
+    // swept as 1970 the moment the row was written. The ledger must pass
+    // the injected clock's epoch values through untouched.
+    const epoch = 1_750_000_000_123
+    const l = new CommandLedger({ now: fixtureNow(epoch) })
+    l.open('ls', '/', '', fakeLineOf(3))
+    l.onMarker('A')
+    l.onMarker('B')
+    l.onMarker('C')
+    l.onMarker('D', 0)
+    const rec = l.records()[0]
+    expect(rec.startedAt).toBe(epoch)
+    expect(rec.endedAt).toBe(epoch)
+    expect(rec.startedAt!).toBeGreaterThanOrEqual(1_577_836_800_000)
+    expect(rec.endedAt!).toBeGreaterThanOrEqual(1_577_836_800_000)
+  })
 })
 
 describe('CommandLedger onComplete seam (nocx-rtg0.13)', () => {

@@ -12,6 +12,7 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/shady2k/nocx/internal/content"
@@ -37,6 +38,17 @@ type historyRecordParams struct {
 // appears is decided by the live History policy (history.enabled) and is
 // answered by history.query, never by this ack.
 type historyRecordResponse struct{}
+
+// epochFloor is the earliest plausible wall-clock timestamp: 2020-01-01
+// 00:00:00 UTC in Unix epoch milliseconds. The store reads started_at and
+// ended_at as epoch milliseconds and sweeps anything older than the
+// retention limit — so a performance.now() reading (milliseconds since
+// page load, the nocx-rtg0.16 defect) lands in January 1970 and the row is
+// deleted microseconds after it is written. The boundary rejects the wrong
+// clock at the wire, where the renderer can log the error, instead of
+// letting a row silently vanish. Nil stays valid: the ledger only stamps
+// what it observed.
+const epochFloor int64 = 1_577_836_800_000 // 2020-01-01T00:00:00Z
 
 // handleHistoryRecord accepts a completed command's facts and persists them
 // through the ContentDB seam. The store's Add enforces the live History
@@ -92,6 +104,21 @@ func validateHistoryRecord(p historyRecordParams) string {
 		content.StatusInterrupted, content.StatusUnknown:
 	default:
 		return "status must be one of running, success, failure, interrupted, unknown"
+	}
+	// Each timestamp is checked independently; a null field stays valid
+	// (the ledger only stamps what it observed). The message names the
+	// field so a wrong clock surfaces as a diagnosable error, never as a
+	// row the retention sweep silently deletes.
+	for _, f := range []struct {
+		name string
+		v    *int64
+	}{
+		{name: "startedAt", v: p.StartedAt},
+		{name: "endedAt", v: p.EndedAt},
+	} {
+		if f.v != nil && *f.v < epochFloor {
+			return fmt.Sprintf("%s must be epoch milliseconds on or after 2020-01-01 (got %d)", f.name, *f.v)
+		}
 	}
 	return ""
 }

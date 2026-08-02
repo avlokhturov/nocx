@@ -243,7 +243,10 @@ export class TerminalContent extends BaseTabContent {
       // seam that crosses. Best-effort by design — a dropped record is a
       // session-lost entry, never a terminal error.
       this.ledger = new CommandLedger({
-        now: () => performance.now(),
+        // Wall-clock epoch milliseconds: the ledger's timestamps are
+        // persisted, survive a restart, and render as relative wall time
+        // (nocx-rtg0.16) — performance.now() would be swept as 1970.
+        now: () => Date.now(),
         onComplete: (rec) => recordCommand(this.client, rec),
       })
 

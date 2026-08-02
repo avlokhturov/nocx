@@ -66,8 +66,8 @@ func TestHistory_NoKeystoreSealedVault_RecordSurvivesRestart(t *testing.T) {
 		"host":      "",
 		"status":    "success",
 		"exitCode":  0,
-		"startedAt": int64(1_000),
-		"endedAt":   int64(1_200),
+		"startedAt": int64(1_750_000_000_000),
+		"endedAt":   int64(1_750_000_000_100),
 		"trusted":   true,
 	}, 1); resp.Error != nil {
 		t.Fatalf("history.record: %+v", resp.Error)

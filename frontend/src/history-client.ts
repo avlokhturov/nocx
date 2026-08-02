@@ -36,8 +36,9 @@ export function recordCommand(client: WSClient, rec: CommandRecord): void {
     host: rec.host,
     status: rec.status,
     exitCode: rec.exitCode,
-    // The ledger clocks performance.now(), which is a float; the store
-    // persists int64 (the schema says integer), so the wire copy rounds.
+    // The ledger clocks wall-clock epoch milliseconds (Date.now()), already
+    // integral; the rounding is defensive for an injected fractional clock
+    // in tests — the schema says integer, so the wire copy rounds.
     startedAt: rec.startedAt === null ? null : Math.round(rec.startedAt),
     endedAt: rec.endedAt === null ? null : Math.round(rec.endedAt),
     trusted: rec.trusted,
