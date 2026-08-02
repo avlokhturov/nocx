@@ -244,6 +244,23 @@ function findURLUserinfo(input: string): Candidate[] {
 /** "[Proxy-]Authorization:" with any scheme plus the bare-credential form,
  *  and x-api-key style headers. The header name and scheme survive; the
  *  credential token is masked. */
+/** An authentication SCHEME rather than a credential — RFC 7235's registered
+ *  vocabulary plus the two AWS uses. A scheme standing alone means the
+ *  credential has not been typed yet. Parity: isAuthScheme in
+ *  internal/secrets/secrets.go. */
+function isAuthScheme(word: string): boolean {
+  return [
+    'bearer',
+    'basic',
+    'token',
+    'digest',
+    'negotiate',
+    'ntlm',
+    'aws4-hmac-sha256',
+    'hoba',
+  ].includes(word.toLowerCase())
+}
+
 function findAuthHeader(input: string): Candidate[] {
   const out: Candidate[] = []
   for (const m of input.matchAll(authHeaderRE)) {
@@ -251,6 +268,12 @@ function findAuthHeader(input: string): Candidate[] {
     const token = input.slice(g[3]![0], g[3]![1])
     if (isReference(token)) continue
     const scheme = g[2] ? input.slice(g[2][0], g[2][1]) : ''
+    // With no scheme group, a lone scheme WORD is what the token matched:
+    // there is no credential in `Authorization: Bearer` yet, and offering to
+    // store the word "Bearer" is worse than saying nothing. The Go side
+    // additionally PANICKED here on the absent group (fixed with this) — the
+    // two copies had already drifted, which is what nocx-xkve.6 is about.
+    if (scheme === '' && isAuthScheme(token)) continue
     out.push({
       start: g[0]![0],
       end: g[0]![1],

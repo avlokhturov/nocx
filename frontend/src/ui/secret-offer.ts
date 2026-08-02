@@ -51,6 +51,10 @@ export class SecretOffer {
 
     this.dismissButton = document.createElement('button')
     this.dismissButton.className = 'ui-button ui-secret-offer__dismiss'
+    // Without a variant the kit's base class carries no height and no colours
+    // — they live on [data-variant] — so the button fell through to the
+    // browser's own rendering and read as foreign to the app.
+    this.dismissButton.dataset.variant = 'default'
     this.dismissButton.textContent = 'Not now'
 
     this.storeButton.addEventListener('click', () => {
@@ -92,7 +96,7 @@ export class SecretOffer {
 
   /** Show the offer for one finding. Does NOT focus the field — non-modal
    *  means the next keystroke stays in the prompt. */
-  show(opts: { kindLabel: string; suggestedName: string }): void {
+  show(opts: { kindLabel: string; suggestedName: string; maskedValue: string }): void {
     const badge = document.createElement('span')
     badge.className = 'ui-badge ui-secret-offer__kind'
     badge.dataset.tone = 'info'
@@ -100,6 +104,14 @@ export class SecretOffer {
     // Replace any previous kind badge (one offer at a time).
     this.rootEl.querySelector('.ui-secret-offer__kind')?.remove()
     this.rootEl.insertBefore(badge, this.nameInput)
+    // What will be stored, masked — the ends are where a boundary error in
+    // the detector shows, and a value taken one character wrong is a secret
+    // that fails days later with nothing on screen to explain it.
+    this.rootEl.querySelector('.ui-secret-offer__value')?.remove()
+    const value = document.createElement('code')
+    value.className = 'ui-secret-offer__value'
+    value.textContent = opts.maskedValue
+    this.rootEl.insertBefore(value, this.nameInput)
     this.nameInput.value = opts.suggestedName
     this._visible = true
     this.rootEl.hidden = false

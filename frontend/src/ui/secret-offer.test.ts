@@ -20,7 +20,7 @@ const setup = () => {
 describe('SecretOffer', () => {
   it('show renders the kind badge, message, prefilled name and the two actions', () => {
     const { offer, container } = setup()
-    offer.show({ kindLabel: 'OpenAI key', suggestedName: 'openai-key' })
+    offer.show({ kindLabel: 'OpenAI key', suggestedName: 'openai-key', maskedValue: 'sk-p...7890' })
     expect(offer.isVisible).toBe(true)
     const text = container.textContent ?? ''
     expect(text).toContain('OpenAI key')
@@ -33,13 +33,13 @@ describe('SecretOffer', () => {
 
   it('show does NOT steal focus — the next keystroke stays in the prompt (non-modal)', () => {
     const { offer, container } = setup()
-    offer.show({ kindLabel: 'OpenAI key', suggestedName: 'openai-key' })
+    offer.show({ kindLabel: 'OpenAI key', suggestedName: 'openai-key', maskedValue: 'sk-p...7890' })
     expect(document.activeElement).not.toBe(container.querySelector('.ui-secret-offer__name'))
   })
 
   it('Enter in the name field stores under the typed name and hides', () => {
     const { offer, callbacks, container } = setup()
-    offer.show({ kindLabel: 'OpenAI key', suggestedName: 'openai-key' })
+    offer.show({ kindLabel: 'OpenAI key', suggestedName: 'openai-key', maskedValue: 'sk-p...7890' })
     const input = container.querySelector<HTMLInputElement>('.ui-secret-offer__name')!
     input.value = 'my-api-key'
     input.dispatchEvent(
@@ -51,7 +51,7 @@ describe('SecretOffer', () => {
 
   it('an empty name does not store', () => {
     const { offer, callbacks, container } = setup()
-    offer.show({ kindLabel: 'OpenAI key', suggestedName: '' })
+    offer.show({ kindLabel: 'OpenAI key', suggestedName: '', maskedValue: 'sk-p...7890' })
     const input = container.querySelector<HTMLInputElement>('.ui-secret-offer__name')!
     input.dispatchEvent(
       new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
@@ -61,7 +61,7 @@ describe('SecretOffer', () => {
 
   it('Escape in the name field dismisses and stops the key (the draft survives)', () => {
     const { offer, callbacks, container } = setup()
-    offer.show({ kindLabel: 'OpenAI key', suggestedName: 'openai-key' })
+    offer.show({ kindLabel: 'OpenAI key', suggestedName: 'openai-key', maskedValue: 'sk-p...7890' })
     const input = container.querySelector<HTMLInputElement>('.ui-secret-offer__name')!
     const ev = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
     input.dispatchEvent(ev)
@@ -72,10 +72,10 @@ describe('SecretOffer', () => {
 
   it('Store click stores; Not now click dismisses', () => {
     const { offer, callbacks, container } = setup()
-    offer.show({ kindLabel: 'OpenAI key', suggestedName: 'openai-key' })
+    offer.show({ kindLabel: 'OpenAI key', suggestedName: 'openai-key', maskedValue: 'sk-p...7890' })
     container.querySelector<HTMLButtonElement>('.ui-secret-offer__store')!.click()
     expect(callbacks.onStore).toHaveBeenCalledWith('openai-key')
-    offer.show({ kindLabel: 'OpenAI key', suggestedName: 'openai-key' })
+    offer.show({ kindLabel: 'OpenAI key', suggestedName: 'openai-key', maskedValue: 'sk-p...7890' })
     container.querySelector<HTMLButtonElement>('.ui-secret-offer__dismiss')!.click()
     expect(callbacks.onDismiss).toHaveBeenCalledTimes(1)
   })
@@ -83,7 +83,7 @@ describe('SecretOffer', () => {
   it('a rejecting onStore leaves the offer hidden (the controller reports)', async () => {
     const { offer, callbacks } = setup()
     callbacks.onStore.mockRejectedValue(new Error('store failed'))
-    offer.show({ kindLabel: 'OpenAI key', suggestedName: 'openai-key' })
+    offer.show({ kindLabel: 'OpenAI key', suggestedName: 'openai-key', maskedValue: 'sk-p...7890' })
     const input = offer.root.querySelector<HTMLInputElement>('.ui-secret-offer__name')!
     input.dispatchEvent(
       new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),

@@ -292,3 +292,31 @@ describe('findReferences', () => {
     expect(findReferences('curl https://api')).toEqual([])
   })
 })
+
+// Parity with internal/secrets/secrets_test.go's TestAuthHeaderWithNoCredentialYet:
+// deleting a key to paste a new one leaves `Authorization: Bearer ` on screen.
+// The Go side PANICKED on the absent scheme group; this side offered to store
+// the word "Bearer", which the owner saw as `Auth...arer` in the offer row.
+describe('an Authorization header with no credential yet', () => {
+  it('is not a secret, with or without the scheme', () => {
+    for (const input of [
+      'curl -H "Authorization: Bearer " https://api',
+      'curl -H "Authorization: Bearer" https://api',
+      'curl -H "Authorization: Basic " https://api',
+      'curl -H "Authorization: " https://api',
+      'curl -H "Proxy-Authorization: Digest " https://api',
+    ]) {
+      expect(maskSecrets(input)).toBe(input)
+      expect(detectSecrets(input)).toEqual([])
+    }
+  })
+
+  it('still masks a real credential', () => {
+    expect(maskSecrets('curl -H "Authorization: Bearer abcdefghijklmnop" x')).toBe(
+      'curl -H "Authorization: Bearer abcd...mnop" x',
+    )
+    expect(maskSecrets('curl -H "Authorization: abcdefghijklmnop" x')).toBe(
+      'curl -H "Authorization: abcd...mnop" x',
+    )
+  })
+})

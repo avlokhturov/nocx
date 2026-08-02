@@ -342,6 +342,17 @@ var authHeaderRE = regexp.MustCompile(`((?:Proxy-)?Authorization:\s*)([A-Za-z][\
 // masking turns value corruption into syntax corruption.
 var secretHeaderRE = regexp.MustCompile(`((?:x-api-key|x-goog-api-key|api-key|apikey|x-api-token|x-auth-token|x-access-token)\s*:\s*)([^\s"']+)`)
 
+// isAuthScheme reports whether the word is an authentication SCHEME rather
+// than a credential — the vocabulary RFC 7235 registers, plus the two AWS
+// uses. A scheme standing alone means the credential has not been typed yet.
+func isAuthScheme(word string) bool {
+	switch strings.ToLower(word) {
+	case "bearer", "basic", "token", "digest", "negotiate", "ntlm", "aws4-hmac-sha256", "hoba":
+		return true
+	}
+	return false
+}
+
 func findAuthHeader(input string) []candidate {
 	var out []candidate
 	for _, loc := range authHeaderRE.FindAllStringSubmatchIndex(input, -1) {
@@ -349,10 +360,25 @@ func findAuthHeader(input string) []candidate {
 		if isReference(token) {
 			continue
 		}
+		// The scheme group is OPTIONAL, so it may not participate — and an
+		// absent group's indexes are -1, which sliced the input as [:-1] and
+		// PANICKED. `curl -H "Authorization: Bearer "`, an ordinary line the
+		// moment somebody deletes the key to paste a new one, took the whole
+		// record handler down with it.
+		scheme := ""
+		if loc[4] >= 0 {
+			scheme = input[loc[4]:loc[5]]
+		}
+		// With no scheme group, a lone scheme WORD is what the token matched:
+		// there is no credential in `Authorization: Bearer` and offering to
+		// store the word "Bearer" is worse than saying nothing.
+		if scheme == "" && isAuthScheme(token) {
+			continue
+		}
 		out = append(out, candidate{
 			start: loc[0],
 			end:   loc[1],
-			repl:  input[loc[2]:loc[3]] + input[loc[4]:loc[5]] + maskSecret(token),
+			repl:  input[loc[2]:loc[3]] + scheme + maskSecret(token),
 		})
 	}
 	for _, loc := range secretHeaderRE.FindAllStringSubmatchIndex(input, -1) {

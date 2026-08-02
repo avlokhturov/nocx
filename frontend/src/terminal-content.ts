@@ -557,7 +557,17 @@ export class TerminalContent extends BaseTabContent {
         this.editor.focus()
       })
 
-      this.editor.root.addEventListener('click', () => {
+      // Click anywhere on the editor card and the prompt takes focus — the
+      // card's padding and chrome are all "the prompt" as far as a user is
+      // concerned. Except a control the user clicked ON PURPOSE: the vault
+      // offer's name field and its buttons live inside this root, so an
+      // unconditional focus() bounced the caret straight back to the prompt
+      // and the field could not be typed into at all. Same guard the keydown
+      // path uses — a nested form control owns its own focus and its own
+      // keys.
+      this.editor.root.addEventListener('click', (e) => {
+        const target = e.target as HTMLElement | null
+        if (target?.closest('input, textarea, select, button')) return
         this.editor?.focus()
       })
 

@@ -293,3 +293,41 @@ func TestMaskStillCatchesAKeyBesideAReference(t *testing.T) {
 		t.Errorf("findings = %+v, want exactly the literal key", findings)
 	}
 }
+
+// An Authorization header whose credential has not been typed yet. Found in
+// the product: deleting a key to paste a new one leaves
+// `Authorization: Bearer ` on screen, and this PANICKED — the scheme group is
+// optional, an absent group's indexes are -1, and the replacement sliced the
+// input as [:-1], taking the record handler down with it. The second half is
+// the false positive it exposed: a lone scheme word is not a credential.
+func TestAuthHeaderWithNoCredentialYet(t *testing.T) {
+	for _, in := range []string{
+		`curl -H "Authorization: Bearer " https://api`,
+		`curl -H "Authorization: Bearer" https://api`,
+		`curl -H "Authorization: Basic " https://api`,
+		`curl -H "Authorization: " https://api`,
+		`curl -H "Authorization:" https://api`,
+		`curl -H "Proxy-Authorization: Digest " https://api`,
+	} {
+		got, findings := Mask(in)
+		if got != in {
+			t.Errorf("Mask(%q) = %q, want unchanged — no credential was typed", in, got)
+		}
+		if len(findings) != 0 {
+			t.Errorf("Mask(%q) findings = %+v, want none", in, findings)
+		}
+	}
+}
+
+// And the header still masks a real credential, with and without a scheme.
+func TestAuthHeaderStillMasksARealCredential(t *testing.T) {
+	cases := map[string]string{
+		`curl -H "Authorization: Bearer abcdefghijklmnop" x`: `curl -H "Authorization: Bearer abcd...mnop" x`,
+		`curl -H "Authorization: abcdefghijklmnop" x`:        `curl -H "Authorization: abcd...mnop" x`,
+	}
+	for in, want := range cases {
+		if got, _ := Mask(in); got != want {
+			t.Errorf("Mask(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

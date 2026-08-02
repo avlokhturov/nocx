@@ -24,7 +24,7 @@
 //
 // The resolve-at-submit half lives in submit.ts (planSubmit) — the host's
 // submit action runs it through the editor's beforeSubmit seam.
-import { detectSecrets, type SecretKind, type SecretFinding } from './secret-detect'
+import { detectSecrets, maskSecret, type SecretKind, type SecretFinding } from './secret-detect'
 import { findReferences } from './secret-reference'
 import { SecretPicker } from './ui/secret-picker'
 import { SecretOffer } from './ui/secret-offer'
@@ -269,20 +269,32 @@ export class PromptVaultController {
       if (!stillThere) this.dismissOffer()
     }
 
-    if (this.offerTarget !== null || this.settleTimer !== null) return
+    if (this.offerTarget !== null) return
 
-    // A finding not yet offered and not declined starts the settle timer.
-    const next = findings.find((f) => {
-      const value = text.slice(f.start, f.end)
-      return !this.declined.has(`${f.kind}:${value}`)
-    })
-    if (!next) return
+    // The timer is a DEBOUNCE — it waits for the typing to stop — and it must
+    // therefore restart on every change and re-detect when it fires.
+    //
+    // It used to be armed once, by the first change that produced a finding,
+    // and then to look for that same finding by re-slicing the CURRENT
+    // document at the OLD offsets. That works for a paste, which is one
+    // change, and fails for everything typed: by the time it fires the value
+    // has grown from `sk-proj-abc` to the whole key, the stale slice matches
+    // nothing, and the offer never appears at all. A key you TYPE is the case
+    // that must work — the one you paste is already on the clipboard.
+    if (!findings.some((f) => !this.declined.has(`${f.kind}:${text.slice(f.start, f.end)}`))) {
+      return
+    }
+    if (this.settleTimer !== null) clearTimeout(this.settleTimer)
     this.settleTimer = setTimeout(() => {
       this.settleTimer = null
+      // Re-detect: what the timer promised is "the user has stopped typing",
+      // never "this exact span is still there".
       const doc = this.deps.editor.getDoc()
+      const refs = findReferences(doc)
       const current = detectSecrets(doc).find(
         (f) =>
-          f.kind === next.kind && doc.slice(f.start, f.end) === doc.slice(next.start, next.end),
+          !refs.some((r) => f.start >= r.from && f.end <= r.to) &&
+          !this.declined.has(`${f.kind}:${doc.slice(f.start, f.end)}`),
       )
       if (!current) return
       const value = doc.slice(current.start, current.end)
@@ -290,6 +302,11 @@ export class PromptVaultController {
       this.offer.show({
         kindLabel: KIND_LABELS[current.kind],
         suggestedName: suggestName(current.kind, value),
+        // What will actually be stored, masked. The detector could have taken
+        // the wrong boundaries — a trailing quote in, a last character out —
+        // and a wrong value is a secret that fails days later for no visible
+        // reason. head-4/tail-4 is exactly where a boundary error shows.
+        maskedValue: maskSecret(value),
       })
     }, OFFER_SETTLE_MS)
   }
