@@ -172,6 +172,29 @@ describe('recall: Enter executes the previewed command', () => {
     expect(submit).not.toHaveBeenCalled() // and nothing was sent
   })
 
+  it('Tab takes the command into the line, runs nothing, and is not passed on', async () => {
+    // The third exit finally has a key. It also has to be CONSUMED: left to
+    // fall through it reached the editor and the completion dropdown opened
+    // over the recalled command, offering to complete a directory inside it.
+    const { container, ed, view, recall, submit } = setupRecall({
+      query: mkQuery(['rm -rf build']),
+    })
+    ed.show()
+    ed.insertText('git s')
+    key(view, { key: 'ArrowUp' })
+    await settled(container)
+
+    const consumed = recall.handleKey(
+      new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }),
+    )
+    expect(consumed).toBe(true)
+    expect(recall.isOpen).toBe(false)
+    // The recalled command is the new draft — Esc is the key that puts a
+    // draft back, and it is deliberately the only one.
+    expect(ed.getDoc()).toBe('rm -rf build')
+    expect(submit).not.toHaveBeenCalled()
+  })
+
   it('typing while navigating narrows the filter — the panel owns printable keys', async () => {
     const { container, ed, view, recall } = setupRecall({ query: mkQuery(['docker compose up']) })
     ed.show()
@@ -793,6 +816,31 @@ describe('recall: Up is caret movement first (design §8.10 v6)', () => {
     expect(onUpAtTop).not.toHaveBeenCalled()
     expect(ev.defaultPrevented).toBe(true) // CM6's own Up command handled it
   })
+  it('Up on line 1 of a MULTI-LINE draft does not open recall — the paste is not at risk', () => {
+    // Recall previews over the draft, so one stray Up on a pasted block would
+    // put somebody else's command where twenty lines were. `git ` + Up (below)
+    // still works: a one-line draft costs a retype, and Esc brings it back.
+    const onUpAtTop = vi.fn()
+    const { ed, view, recall } = setupRecall({ query: mkQuery(['one']), actions: { onUpAtTop } })
+    ed.show()
+    // Caret on line 1 — "no further upward movement" holds, and before this
+    // change that was the whole condition.
+    ed.replaceDoc('curl https://api.example.com \\\n  -H "Content-Type: application/json"', 0, 0)
+    key(view, { key: 'ArrowUp' })
+    expect(recall.isOpen).toBe(false)
+    expect(onUpAtTop).not.toHaveBeenCalled()
+    expect(ed.getDoc()).toContain('curl https://api.example.com')
+  })
+
+  it('Up on a single-line draft still opens recall — the everyday gesture', async () => {
+    const { container, ed, view, recall } = setupRecall({ query: mkQuery(['one']) })
+    ed.show()
+    ed.insertText('git s')
+    key(view, { key: 'ArrowUp' })
+    await settled(container)
+    expect(recall.isOpen).toBe(true)
+  })
+
   it('Up on an empty draft opens recall', async () => {
     const { container, view, recall } = setupRecall({ query: mkQuery(['one']) })
     key(view, { key: 'ArrowUp' })
@@ -960,11 +1008,12 @@ describe('recall: the footer and the labels say what the keys do', () => {
     // out on one line with a real gap (white-space: nowrap; display: flex),
     // so no hint gets its own row and none can wrap apart from the others.
     const groups = footer?.querySelectorAll<HTMLElement>(':scope > span') ?? []
-    expect(groups.length).toBe(4)
+    expect(groups.length).toBe(5)
     expect(groups[0]?.textContent).toBe('↵ to execute')
-    expect(groups[1]?.textContent).toBe('↑ ↓ to navigate')
-    expect(groups[2]?.textContent).toBe('shift+↑ widen')
-    expect(groups[3]?.textContent).toBe('esc to dismiss')
+    expect(groups[1]?.textContent).toBe('tab to edit')
+    expect(groups[2]?.textContent).toBe('↑ ↓ to navigate')
+    expect(groups[3]?.textContent).toBe('shift+↑ widen')
+    expect(groups[4]?.textContent).toBe('esc to dismiss')
     expect(footer?.querySelector('br')).toBeNull()
   })
 

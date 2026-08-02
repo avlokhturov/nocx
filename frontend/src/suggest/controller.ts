@@ -131,6 +131,44 @@ class GhostWidget extends WidgetType {
   }
 }
 
+/**
+ * What the ghost may draw after the caret, or null for "draw nothing".
+ *
+ * The ghost and the dropdown row are two renderings of ONE candidate — the
+ * selected one (see syncGhost) — so they can never offer different things.
+ * What they may differ in is FORM: the row shows the candidate's display
+ * text, and the ghost shows the part of the insertion the user has not typed
+ * yet, because it has to read as a continuation of the line.
+ *
+ * That makes the rule below the whole contract: `typed + ghost` must equal
+ * insertText exactly. Slicing by the LENGTH of the replaced range looks
+ * equivalent and is not — it assumes the typed text is a character-for-
+ * character prefix of the insertion, and where it is not the tail overlaps
+ * what is already on screen. `cd ~` against `Documents/` dropped the `D` and
+ * drew `cd ~ocuments/`: a path that never existed and could not be typed.
+ *
+ * A candidate that REWRITES the typed text has nothing honest to ghost, so
+ * the ghost declines and the dropdown carries it instead — accepting still
+ * applies the full replacement. Declining is not a divergence: showing a
+ * different candidate would be. The test is startsWith rather than a length
+ * for the same reason a case-insensitive match (`doc` → `Documents/`) must
+ * decline: it is the identical lie, one letter smaller.
+ */
+export function ghostTail(insertText: string, typed: string, prevChar: string): string | null {
+  // An empty token previews only at a WORD START. After `cd ` the user is
+  // positioned to begin a path and the preview is the point; after the
+  // closing quote of a pasted `-d '{…}'` they are not, and the cwd listing
+  // arrived drawn onto the end of a JSON body as `}'Downloads/`. Our
+  // tokenizer treats a quote as a boundary so the token reads empty, while
+  // the shell would call `'a'b` one word — the character before the caret is
+  // what tells a fresh word from the tail of a quoted one. The dropdown is
+  // unaffected: an explicit Tab still lists the directory.
+  if (typed === '' && prevChar !== '' && !/\s/.test(prevChar)) return null
+  if (!insertText.startsWith(typed)) return null
+  const tail = insertText.slice(typed.length)
+  return tail === '' ? null : tail
+}
+
 /** The inline ghost decoration: the completion tail at the caret, only when
  *  every §8.7 precondition holds at render time. */
 function ghostDecorations(view: EditorView, box: GhostBox): DecorationSet {
@@ -141,8 +179,23 @@ function ghostDecorations(view: EditorView, box: GhostBox): DecorationSet {
   if (sel.from !== sel.to) return Decoration.none
   const head = sel.head
   if (head !== c.replacement.to) return Decoration.none
-  const tail = c.insertText.slice(head - c.replacement.from)
-  if (tail === '') return Decoration.none
+  // Never draw a suggestion that cannot be taken. Right/End accept the ghost
+  // only at the end of a line (canAcceptGhost), so a ghost drawn mid-line is
+  // a suggestion with no key that takes it: editing `Bearer |" \` in the
+  // middle of a pasted curl put `Downloads/` inside the header, where no
+  // keystroke could accept it and nothing but retyping made it go away. The
+  // condition is deliberately the SAME one canAcceptGhost uses — two rules
+  // that must agree are one rule, and they drifted apart because the render
+  // path never asked whether the accept path would say yes.
+  if (head < view.state.doc.length && view.state.doc.sliceString(head, head + 1) !== '\n') {
+    return Decoration.none
+  }
+  const tail = ghostTail(
+    c.insertText,
+    view.state.doc.sliceString(c.replacement.from, head),
+    head > 0 ? view.state.doc.sliceString(head - 1, head) : '',
+  )
+  if (tail === null) return Decoration.none
   return Decoration.set([Decoration.widget({ widget: new GhostWidget(tail), side: 1 }).range(head)])
 }
 
@@ -163,6 +216,11 @@ export class CompletionController {
    *  first Tab settles on it, whatever batch arrives first. Cleared when no
    *  ghost was showing (typing queries never seed). */
   private seedId: string | undefined
+  /** The token range the query in flight was issued for. A candidate whose
+   *  replacement is exactly this range COMPLETES THE TOKEN; one that spans
+   *  more (a whole-line history row) is a different action, and the two are
+   *  counted separately when deciding whether the completion is unique. */
+  private queryTokenRange: { from: number; to: number } | null = null
   /** Whether the query in flight may open the dropdown (Tab) or is a typing
    *  query that may only re-anchor the ghost. */
   private openIntent = false
@@ -405,6 +463,7 @@ export class CompletionController {
     this.delivered = 0
     this.bestReason = null
     const token = tokenAt(doc, caret)
+    this.queryTokenRange = { from: token.from, to: token.to }
     const position = positionOf(doc, caret)
     const env = this.options.env()
     const ctx: SuggestContext = {
@@ -518,6 +577,7 @@ export class CompletionController {
         this.state = { name: 'closed' }
         this.options.dropdown.hide()
       }
+      if (this.applyUniqueCompletion()) return
       this.render()
       return
     }
@@ -528,6 +588,58 @@ export class CompletionController {
     this.trackEmptyReason(batch.emptyReason)
     this.settleIfDone()
     this.render()
+  }
+
+  /**
+   * A Tab with exactly ONE way to complete the token just completes it —
+   * the shell's own rule, and the owner's: "один вариант предлагать не
+   * нужно, нужно сразу по табу выводить всё название". A single-row panel
+   * asks the user to choose between one thing and nothing.
+   *
+   * Three conditions, and each is load-bearing:
+   *
+   *   - EVERY applicable provider has delivered. Uniqueness is a property of
+   *     the finished list; acting on the first batch to arrive would insert
+   *     whatever provider happened to be fastest and call it the only match.
+   *   - The candidate replaces exactly the TOKEN. A whole-line history row is
+   *     a different action — silently rewriting the whole line because it was
+   *     the only suggestion is not completion, it is substitution.
+   *   - It adds something. When the token is already the full name, inserting
+   *     it changes nothing, and the panel is better left showing that this is
+   *     the only match than flickering shut for a no-op.
+   *
+   * Only an explicit Tab does this. Typing must never rewrite the line under
+   * the fingers.
+   */
+  private applyUniqueCompletion(): boolean {
+    if (!this.openIntent) return false
+    if (this.delivered < this.applicableCount) return false
+    const range = this.queryTokenRange
+    if (!range) return false
+    // A completion is a candidate that finishes the WORD. `source` is what
+    // says so, not the range: on a one-word line the whole line and the token
+    // are the same span, so a range test silently classes a history row as a
+    // completion — and a regression test caught it doing exactly that on
+    // `cd`. The range is still checked, because a completion that does not
+    // replace the token is not one whatever it calls itself.
+    const completions = this.queryCandidates.filter(
+      (c) =>
+        c.source !== 'history' &&
+        c.replacement.from === range.from &&
+        c.replacement.to === range.to,
+    )
+    // Whole-line history rows deliberately do NOT count here. In the report
+    // that produced this rule the list held `test.txt` and the history line
+    // `rm test.txt`, and there was still only one way to complete the word
+    // under the caret. Counting the history row would keep the panel open to
+    // offer a choice the user never faces: the completion extends what they
+    // typed, and the line it produces is the history row anyway.
+    if (completions.length !== 1) return false
+    const only = completions[0]
+    if (only.insertText === this.queryDoc.slice(range.from, range.to)) return false
+    if (!this.revisionHolds(only)) return false
+    this.apply(only)
+    return true
   }
 
   /**
@@ -686,9 +798,25 @@ export class CompletionController {
     this.apply(c)
   }
 
-  /** Apply the candidate and close the surface. */
+  /**
+   * Apply the candidate. Accepting ENDS the completion — except when the
+   * candidate is a directory, which is not an answer but a step: the user
+   * has committed to `Downloads/` and the thing they want next is what is
+   * inside it. Closing there makes them press Tab again to resume a walk
+   * they never left, and closing on the keystroke the footer calls "accept"
+   * is what made this read as the panel dismissing itself.
+   *
+   * The continuation is a plain re-query against the new document, so the
+   * ordinary rules apply to it: if the directory holds nothing this command
+   * can take, the list says so rather than vanishing, and a stale generation
+   * still cannot open anything.
+   */
   private apply(c: Candidate): void {
     this.editor?.applyReplacement(c.replacement.from, c.replacement.to, c.insertText)
+    if (c.kind === 'directory') {
+      this.runQuery(true)
+      return
+    }
     this.dismiss()
   }
 

@@ -229,8 +229,11 @@ describe('FloatingPanel', () => {
   it('sizes to the widest row, floored and capped — never the pane width', () => {
     const { panel } = mount()
     withGeometry(0, 0, () => panel.show({ rows: [row({ id: 'a' })], selectedIndex: 0 }))
-    // The floor applies to a tiny (here, unmeasurable) list.
-    expect(panel.root.style.width).toBe(`${MIN_PANEL_WIDTH_PX}px`)
+    // The floor applies to a tiny (here, unmeasurable) list. It is per
+    // variant — recall is a browsing surface and must not collapse to the
+    // completion's floor — while the RULE (hug the content between a floor
+    // and the ceiling) is the one both share.
+    expect(panel.root.style.width).toBe(`${MIN_PANEL_WIDTH_PX.completion}px`)
     panel.hide()
 
     withGeometry(500, 500, () => {
@@ -247,6 +250,24 @@ describe('FloatingPanel', () => {
       }),
     )
     // …but never past the ceiling.
+    expect(panel.root.style.width).toBe(`${MAX_PANEL_WIDTH_PX}px`)
+  })
+
+  it('recall does not collapse to the completion floor: an empty history is still a panel', () => {
+    // What the owner saw: recall open on "no history yet", sized to rows it
+    // did not have, rendered as a narrow column beside a full-width pane.
+    const { panel } = mount('recall')
+    withGeometry(0, 0, () => panel.show({ rows: [], selectedIndex: -1 }))
+    expect(panel.root.style.width).toBe(`${MIN_PANEL_WIDTH_PX.recall}px`)
+    expect(MIN_PANEL_WIDTH_PX.recall).toBeGreaterThan(MIN_PANEL_WIDTH_PX.completion)
+    // The ceiling is still shared — a higher floor is not a second rule.
+    panel.hide()
+    withGeometry(5000, 5000, () =>
+      panel.show({
+        rows: [row({ id: 'endless', displayText: 'x'.repeat(300) })],
+        selectedIndex: 0,
+      }),
+    )
     expect(panel.root.style.width).toBe(`${MAX_PANEL_WIDTH_PX}px`)
   })
 

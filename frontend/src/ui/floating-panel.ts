@@ -26,8 +26,20 @@
  *  content and never spans the pane (the owner's "why full width?"). */
 export const MAX_PANEL_WIDTH_PX = 640
 
-/** Floor: a single short row must not leave a sliver of a panel. */
-export const MIN_PANEL_WIDTH_PX = 320
+/** Floor: a single short row must not leave a sliver of a panel.
+ *
+ *  The floor is per variant because the two surfaces are read differently,
+ *  not because their sizing rules differ — the rule (hug the content between
+ *  a floor and the ceiling) is one copy. The completion dropdown sits at the
+ *  caret and is glanced at, so a short list may be narrow. Recall is a
+ *  BROWSING surface with a search field and a footer: sized to its rows it
+ *  collapses to a sliver whenever the rows are short — and to nothing at all
+ *  when there are no rows, where "no history yet" then reads as a broken
+ *  panel rather than an empty one. */
+export const MIN_PANEL_WIDTH_PX: Record<FloatingPanelVariant, number> = {
+  completion: 320,
+  recall: 560,
+}
 
 /** The two surfaces that float over the editor — one shell, two layouts. */
 export type FloatingPanelVariant = 'completion' | 'recall'
@@ -92,6 +104,8 @@ export class FloatingPanel {
   /** The content signature of the rows currently rendered. The selection
    *  index is deliberately not part of it. */
   private rowsSignature = ''
+  /** Which surface this is — the width floor is read from it. */
+  private readonly variant: FloatingPanelVariant
 
   constructor(opts: {
     variant: FloatingPanelVariant
@@ -100,6 +114,7 @@ export class FloatingPanel {
     callbacks?: FloatingPanelCallbacks
   }) {
     this.callbacks = opts.callbacks ?? {}
+    this.variant = opts.variant
     this.root = document.createElement('div')
     this.root.className = 'ui-floating-panel'
     this.root.dataset.variant = opts.variant
@@ -233,11 +248,12 @@ export class FloatingPanel {
     // of one open list (the owner's "every Tab press makes the window
     // narrower"). A selection change re-renders the same rows and must not
     // re-measure; a list that CHANGES (a late batch merging in) re-measures.
+    const floor = MIN_PANEL_WIDTH_PX[this.variant]
     if (this.measuredSignature !== this.rowsSignature) {
-      this.measuredWidth = Math.max(this.root.scrollWidth, MIN_PANEL_WIDTH_PX)
+      this.measuredWidth = Math.max(this.root.scrollWidth, floor)
       this.measuredSignature = this.rowsSignature
     }
-    this.root.style.width = `${Math.min(this.measuredWidth ?? MIN_PANEL_WIDTH_PX, cap)}px`
+    this.root.style.width = `${Math.min(this.measuredWidth ?? floor, cap)}px`
 
     if (anchorLeft === null || anchorLeft === undefined) {
       this.root.style.left = ''

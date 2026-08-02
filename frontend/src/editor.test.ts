@@ -18,7 +18,7 @@ import { describe, it, expect, vi, beforeAll } from 'vitest'
 import { Extension } from '@codemirror/state'
 import { EditorView, keymap } from '@codemirror/view'
 import { defaultKeymap } from '@codemirror/commands'
-import { CommandEditor, EditorActions } from './editor'
+import { CommandEditor, stripPastedIndent, EditorActions } from './editor'
 import { shellExtensions, highlightShellText, shellHighlightReady } from './shell-highlight'
 import { CommandSnapshotStore } from './command-snapshot'
 
@@ -219,15 +219,48 @@ describe('CommandEditor', () => {
     expect(resized).toHaveBeenCalledTimes(2) // 4 lines
   })
 
-  it('multiline: growth reports stop at the ten-line cap', () => {
+  it('Ctrl+Z undoes an edit — the prompt has a history', () => {
+    // `@codemirror/commands` was a dependency and `history()` was installed
+    // nowhere, so Ctrl+Z in the prompt did nothing. Asserted through the real
+    // keystroke rather than by calling undo(), because what was missing was
+    // the wiring, not the command.
+    const { ed, view } = setup()
+    ed.show()
+    ed.insertText('git status')
+    expect(ed.getDoc()).toBe('git status')
+    key(view, { key: 'z', ctrlKey: true })
+    expect(ed.getDoc()).toBe('')
+  })
+
+  it('a pasted command loses the indent that would hide it from shell history', () => {
+    // A leading space is HISTCONTROL=ignorespace: the command runs and the
+    // shell does not record it. Every docs site indents its examples, so the
+    // flag would be set by accident and invisibly.
+    expect(stripPastedIndent('  curl https://x \\\n    -H "A: b"', true)).toBe(
+      'curl https://x \\\n    -H "A: b"',
+    )
+    // Only the first line: inside quotes whitespace is data.
+    expect(stripPastedIndent('  a\n    b\n  c', true)).toBe('a\n    b\n  c')
+    // Not at a line start: the paste is landing mid-line, where a space is
+    // just a space.
+    expect(stripPastedIndent('  curl', false)).toBe('  curl')
+    // Nothing to strip is left alone (the handler then lets CM6 paste).
+    expect(stripPastedIndent('curl', true)).toBe('curl')
+  })
+
+  it('multiline: growth reports stop at the cap', () => {
+    // The cap is 30 lines and must equal the CSS max-height in style.css:
+    // past it the box no longer grows, so there is nothing for the scrollback
+    // to follow. Ten lines was the original cap and was raised because a
+    // pasted curl with a JSON body is twenty.
     const resized = vi.fn()
     const { ed } = setup({ resized })
     ed.show()
-    ed.insertText(Array(15).fill('line').join('\n'))
-    expect(resized).toHaveBeenCalledTimes(1) // capped at 10, fired once
+    ed.insertText(Array(35).fill('line').join('\n'))
+    expect(resized).toHaveBeenCalledTimes(1) // capped at 30, fired once
 
-    ed.insertText('\nline16')
-    expect(resized).toHaveBeenCalledTimes(1) // still 10 rows — no further report
+    ed.insertText('\nline36')
+    expect(resized).toHaveBeenCalledTimes(1) // still 30 rows — no further report
   })
 
   it('setCwd updates the cwd chip text', () => {

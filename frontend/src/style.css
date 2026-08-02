@@ -256,13 +256,21 @@
 }
 
 /* CodeMirror 6 surface (ADR-0010). Auto-grow is layout, not arithmetic: the
-   box is capped at ten lines — 10 × line-height 1.2 × font-size (the em in
-   the calc resolves against .cm-editor's font-size) plus the 6px vertical
-   padding, border-box — and scrolls past that (spec §Decision 3). The old
-   `rows` counting and MAX_ROWS live only in the editor's resized trigger now. */
+   box grows with its content and scrolls past the cap (spec §Decision 3).
+
+   The cap is 30 lines — 30 × line-height 1.2 × font-size (the em in the calc
+   resolves against .cm-editor's font-size) plus the 6px vertical padding,
+   border-box — and never more than half the pane. Ten lines was the original
+   cap and it is too tight for the thing people actually paste: a curl with a
+   JSON body is twenty lines, and it arrived as a small scrolling window onto
+   a command the user could not see. Half the pane is the other side of that:
+   the prompt may take the room it needs, but never so much that the block it
+   belongs to disappears. MAX_ROWS in editor.ts is the same cap — the row
+   count is what fires `resized`, so a CSS box that keeps growing past it
+   stops telling the scrollback to follow. */
 .nocx-editor .cm-editor {
   font-size: var(--font-size-terminal);
-  max-height: calc(12em + 6px);
+  max-height: min(50vh, calc(36em + 6px));
 }
 
 .nocx-editor .cm-scroller {

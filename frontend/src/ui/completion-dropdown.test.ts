@@ -143,7 +143,7 @@ describe('CompletionDropdown', () => {
       fakeScrollWidth(0)
       dd.show([cand({ id: 'a' })], 0)
       // The floor applies to a tiny (here, unmeasurable) list.
-      expect(dd.root.style.width).toBe(`${MIN_PANEL_WIDTH_PX}px`)
+      expect(dd.root.style.width).toBe(`${MIN_PANEL_WIDTH_PX.completion}px`)
       fakeScrollWidth(500)
       dd.show([cand({ id: 'b' })], 0)
       // The panel follows its longest row…

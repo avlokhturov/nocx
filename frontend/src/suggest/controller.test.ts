@@ -7,7 +7,12 @@
 // open decision but an explicit Tab's open intent survives it, and ghost
 // text accepts only under every §8.7 precondition.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { CompletionController, LATENCY_BUDGET_MS, type CompletionEditor } from './controller'
+import {
+  CompletionController,
+  ghostTail,
+  LATENCY_BUDGET_MS,
+  type CompletionEditor,
+} from './controller'
 import { CompletionDropdown } from '../ui/completion-dropdown'
 import type { Candidate } from './candidate'
 import type { SuggestionProvider, SuggestContext, EmptyReason } from './providers'
@@ -827,6 +832,45 @@ describe('keyboard', () => {
 
 // ── ghost text ───────────────────────────────────────────────────────────
 
+// The ghost and the dropdown row are two renderings of ONE candidate, so the
+// contract is not "they look alike" but "typed + ghost is exactly what accept
+// inserts". Stated as the invariant rather than as the `~` case, because the
+// case is only the cheapest way to violate it.
+describe('ghost tail', () => {
+  it('typed + ghost is always exactly the insertion', () => {
+    for (const [insert, typed] of [
+      ['Documents/', 'Doc'],
+      ['git status', 'git sta'],
+      ['repos/meshynet/bin/', 'repos/mesh'],
+      ['Downloads/', ''],
+    ] as const) {
+      const tail = ghostTail(insert, typed, typed === '' ? ' ' : typed.slice(-1))
+      expect(typed + (tail ?? '')).toBe(insert)
+    }
+  })
+
+  it('declines rather than overlapping what is on screen', () => {
+    // The owner's `cd ~ocuments/`: the typed text is not a prefix of the
+    // insertion, so slicing by length drew over the `D`.
+    expect(ghostTail('Documents/', '~', '~')).toBeNull()
+    // Same lie, one letter smaller: a case-insensitive match.
+    expect(ghostTail('Documents/', 'doc', 'c')).toBeNull()
+    // Nothing left to add is nothing to draw.
+    expect(ghostTail('Documents/', 'Documents/', '/')).toBeNull()
+  })
+
+  it('an empty token previews at a word start, never after a closing quote', () => {
+    // `cd ` — the case the owner asked for.
+    expect(ghostTail('Downloads/', '', ' ')).toBe('Downloads/')
+    // Start of the line: nothing before the caret at all.
+    expect(ghostTail('Downloads/', '', '')).toBe('Downloads/')
+    // The pasted `-d '{…}'`: the cwd listing must not attach itself to the
+    // end of a JSON body.
+    expect(ghostTail('Downloads/', '', "'")).toBeNull()
+    expect(ghostTail('Downloads/', '', ')')).toBeNull()
+  })
+})
+
 describe('ghost text', () => {
   const ghostEditor = (doc: string) => {
     const e = new FakeEditor(doc)
@@ -860,6 +904,42 @@ describe('ghost text', () => {
     expect(controller.handleKey(e)).toBe(true)
     expect(editor.doc).toBe('git status')
     expect(dropdown.isOpen).toBe(false)
+  })
+
+  // The owner's report: with `cd Downloads/` ghosted, Right inserted it and
+  // the panel shut. A directory is not an answer, it is a step — the walk
+  // must continue where it was, not have to be restarted with another Tab.
+  it('accepting a directory continues the walk; accepting a file ends it', async () => {
+    const mk = async (kind: 'directory' | 'file', insertText: string) => {
+      const editor = ghostEditor('cd Down')
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const dropdown = new CompletionDropdown({ onHover: () => {}, onPick: () => {} })
+      const controller = new CompletionController({
+        providers: [
+          instantProvider('p', () => [
+            cand({ id: `path:${insertText}`, insertText, kind, replacement: { from: 3, to: 7 } }),
+          ]),
+        ],
+        dropdown,
+        env: () => ({ isLocal: true, cwd: '/repo', host: '' }),
+        now: () => 1_750_000_000_000,
+      })
+      controller.attach(editor, container)
+      controller.onDocChanged()
+      await flush()
+      expect(controller.handleKey(key('ArrowRight'))).toBe(true)
+      await flush()
+      return { editor, dropdown }
+    }
+
+    const dir = await mk('directory', 'Downloads/')
+    expect(dir.editor.doc).toBe('cd Downloads/')
+    expect(dir.dropdown.isOpen).toBe(true)
+
+    const file = await mk('file', 'Downloads')
+    expect(file.editor.doc).toBe('cd Downloads')
+    expect(file.dropdown.isOpen).toBe(false)
   })
 
   it('End accepts at line end, but stays a caret movement mid-line', async () => {

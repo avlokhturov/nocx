@@ -478,6 +478,16 @@ export class RecallOverlay {
           this.move(1)
           return true
         }
+        // Tab TAKES the command without running it, and the overlay must
+        // consume it: left to fall through, it reached the editor and the
+        // completion dropdown opened over the recalled command offering to
+        // complete a directory inside it.
+        if (e.key === 'Tab' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+          e.preventDefault()
+          e.stopPropagation()
+          this.takeSelected()
+          return true
+        }
         if (e.ctrlKey && !e.metaKey && !e.altKey && (e.key === 'c' || e.key === 'C')) {
           e.preventDefault()
           e.stopPropagation()
@@ -693,8 +703,32 @@ export class RecallOverlay {
    *  branch). The draft snapshot is deliberately NOT restored: the inserted
    *  command IS the new draft. */
   private insert(): void {
+    if (this.state.name !== 'navigating' || this.state.filter === '') return
+    this.takeSelected()
+  }
+
+  /**
+   * Close the overlay and leave the selected command in the line, unrun.
+   *
+   * The exit itself is not new — any edit while navigating already did this
+   * (abandonToEdit), which is how shell history is ordinarily used. What was
+   * missing is a key that SAYS so: the footer offered execute, navigate,
+   * widen and dismiss, so "take it but do not run it" existed and could only
+   * be found by accident.
+   *
+   * Tab is the key because Tab already means "take this candidate" in the
+   * completion dropdown, and because it was the key that misbehaved: the
+   * overlay did not consume it, so it fell through to the editor and the
+   * completion dropdown opened ON TOP of the just-recalled command, offering
+   * to complete a directory in the middle of it.
+   *
+   * The draft snapshot is deliberately not restored — the taken command IS
+   * the new draft. Esc is what puts the draft back, and it stays the only
+   * key that does.
+   */
+  private takeSelected(): void {
     const s = this.state
-    if (s.name !== 'navigating' || s.filter === '') return
+    if (s.name !== 'navigating') return
     const wireIndex = s.query.entries.length - 1 - s.selected
     const entry = s.query.entries[wireIndex]
     if (!entry) return
@@ -835,6 +869,12 @@ export class RecallOverlay {
       // with the filter cleared the previewed command is in the line and
       // Enter is the reviewed run.
       footer.push(s.filter !== '' ? '↵ to insert' : '↵ to execute')
+      // Naming the take-without-running exit is half the point of adding the
+      // key: it already existed through any edit, and nothing said so, which
+      // left execute-or-lose-it as the only visible choice. Only when the
+      // filter is empty, because there Enter already inserts and a second
+      // hint for the same outcome is noise.
+      if (s.filter === '') footer.push('tab to edit')
     }
     footer.push('↑ ↓ to navigate')
     if (s.name !== 'loading' && s.query.exhausted && s.scope !== 'everywhere') {

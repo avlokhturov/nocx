@@ -26,7 +26,7 @@
      (and beyond) that. */
   width: max-content;
   max-width: min(90vw, 640px);
-  min-width: 320px;
+  min-width: 320px; /* the completion floor; recall's is below */
   background: var(--color-surface-raised);
   /* A real edge, or the panel reads as a region of the terminal: the
      hairline divider border was nearly the same colour as the surface, so
@@ -131,6 +131,15 @@
 /* ── recall variant: header, detail pane, search row ────────────────────
    These parts belong to the recall layout only; the completion variant
    renders none of them. They stay in this family's file (ADR-0013 §1). */
+
+/* Recall is a browsing surface — a search field, a header and a footer around
+   the rows — so the completion's floor leaves it a sliver whenever the rows
+   are short, and a bare column when there are none. Same sizing rule, higher
+   floor; MIN_PANEL_WIDTH_PX in floating-panel.ts is the source of truth and
+   sets the width inline. */
+.ui-floating-panel[data-variant='recall'] {
+  min-width: 560px;
+}
 
 .ui-floating-panel__header {
   display: flex;

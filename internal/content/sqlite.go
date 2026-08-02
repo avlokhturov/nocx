@@ -180,8 +180,14 @@ func Open(ctx context.Context, cfg Config) (ContentDB, error) {
 		if _, err := createConn.ExecContext(ctx, "SELECT count(*) FROM sqlite_master"); err != nil {
 			return fmt.Errorf("content: open %s: %w (wrong key or corrupt file)", cfg.Path, err)
 		}
+		if err := resetIfSchemaChanged(ctx, createConn, cfg.Logger); err != nil {
+			return err
+		}
 		if _, err := createConn.ExecContext(ctx, schemaV0); err != nil {
 			return fmt.Errorf("content: schema: %w", err)
+		}
+		if _, err := createConn.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version=%d", schemaVersion)); err != nil {
+			return fmt.Errorf("content: stamp schema version: %w", err)
 		}
 		return nil
 	}()
@@ -211,6 +217,61 @@ func Open(ctx context.Context, cfg Config) (ContentDB, error) {
 	s.wg.Add(1)
 	go s.writer()
 	return s, nil
+}
+
+// schemaVersion stamps the shape below into the file's user_version. Bump it
+// in the same commit as any change to schemaV0 — that is the whole protocol.
+//
+// We write no migrations (greenfield), and `CREATE TABLE IF NOT EXISTS` is a
+// no-op against a table that already exists, so before this check an added
+// column produced a database that opened perfectly and then failed every
+// INSERT and every SELECT with "no such column". The store went on reporting
+// itself healthy while recording nothing; recall quietly fell back to the
+// session, which is the only reason it was noticeable at all. A silent
+// half-broken store is worse than no store, so the file is rebuilt instead —
+// and it says so, because "your history was discarded" is a fact the user is
+// entitled to rather than something to infer from an empty panel.
+const schemaVersion = 1
+
+// resetIfSchemaChanged rebuilds the file when it was written by a different
+// schema. Rows are lost by design: they belong to a shape this build cannot
+// read, and inventing a migration to keep them is the backwards compatibility
+// this project deliberately does not carry.
+func resetIfSchemaChanged(ctx context.Context, conn *sql.Conn, logger log.Logger) error {
+	var onDisk int
+	if err := conn.QueryRowContext(ctx, "PRAGMA user_version").Scan(&onDisk); err != nil {
+		return fmt.Errorf("content: read schema version: %w", err)
+	}
+	if onDisk == schemaVersion {
+		return nil
+	}
+	// A fresh file is version 0 with no tables — that is a creation, not a
+	// reset, and must not be announced as data loss.
+	var tables int
+	if err := conn.QueryRowContext(
+		ctx,
+		"SELECT count(*) FROM sqlite_master WHERE type='table' AND name='command_history'",
+	).Scan(&tables); err != nil {
+		return fmt.Errorf("content: probe schema: %w", err)
+	}
+	if tables == 0 {
+		return nil
+	}
+	// Count first: the number is the only measure of what the user lost, and
+	// after the DROP nobody can state it. A count that fails is not a reason
+	// to abandon the rebuild — report it as unknown and carry on.
+	rows := -1
+	if err := conn.QueryRowContext(ctx, "SELECT count(*) FROM command_history").Scan(&rows); err != nil {
+		rows = -1
+	}
+	if _, err := conn.ExecContext(ctx, "DROP TABLE command_history"); err != nil {
+		return fmt.Errorf("content: rebuild for schema %d: %w", schemaVersion, err)
+	}
+	if logger != nil {
+		logger.Warn("content: history discarded — the database was written by an older schema",
+			"was", onDisk, "now", schemaVersion, "rowsDiscarded", rows)
+	}
+	return nil
 }
 
 // schemaV0 is the interim command-history table. The full entry/edge/artifact

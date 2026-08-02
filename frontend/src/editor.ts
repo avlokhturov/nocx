@@ -15,9 +15,43 @@
 // keymap at Prec.highest is W2's job; W1 only preserves today's behaviour.
 
 import { EditorState, Extension } from '@codemirror/state'
-import { EditorView } from '@codemirror/view'
+import { EditorView, keymap } from '@codemirror/view'
+import { history, historyKeymap } from '@codemirror/commands'
 
-const MAX_ROWS = 10
+/**
+ * The indent a pasted command arrives with, when it arrives at the very
+ * start of the line — and only there, and only the first line.
+ *
+ * This is not cosmetics. A leading space is the shell's `HISTCONTROL=
+ * ignorespace` flag: the command runs and the shell does not record it. Every
+ * documentation site indents its examples, so pasting one silently sets a
+ * flag the user never chose and cannot see, and the command goes missing from
+ * their shell history with no explanation.
+ *
+ * Only the FIRST line, and only on a paste:
+ *
+ *  - Later lines are left exactly as they are. Inside quotes whitespace is
+ *    data — a here-doc, a `python -c '…'`, an embedded JSON string — and the
+ *    only generic transform that is safe there (drop the common prefix) does
+ *    nothing for the shapes people actually paste, where the closing `}'`
+ *    already sits in column zero.
+ *  - A space TYPED at the start of a line is untouched, because there it is
+ *    the deliberate gesture this flag exists for. Paste is not intent;
+ *    typing is.
+ *
+ * And it is undoable: Ctrl+Z is wired now, so a paste we changed can be put
+ * back exactly as it came.
+ */
+export function stripPastedIndent(text: string, atLineStart: boolean): string {
+  if (!atLineStart) return text
+  return text.replace(/^[ \t]+/, '')
+}
+
+/** The row count at which `resized` stops firing — it must match the CSS cap
+ *  in style.css (`.nocx-editor .cm-editor`, 30 lines), because past the cap
+ *  the box no longer grows and the scrollback has nothing to follow. Raise
+ *  both or neither. */
+const MAX_ROWS = 30
 
 export interface AliasSuggestion {
   alias: string
@@ -209,6 +243,33 @@ export class CommandEditor {
         doc: '',
         extensions: [
           EditorView.lineWrapping,
+          // Undo, and it belongs to the editor's own identity rather than to
+          // whatever the caller installs: `@codemirror/commands` was a
+          // dependency and `history()` was installed nowhere, so Ctrl+Z in
+          // the prompt did nothing at all. In a one-line prompt that is a
+          // nuisance; in a box that now holds thirty pasted lines it is the
+          // difference between a slip and lost work — and it is the
+          // precondition for ever transforming a paste, because a change we
+          // cannot take back is one we must not make silently.
+          history(),
+          keymap.of(historyKeymap),
+          EditorView.domEventHandlers({
+            paste: (event, view) => {
+              const text = event.clipboardData?.getData('text/plain')
+              if (!text) return false
+              const sel = view.state.selection.main
+              const atLineStart = sel.from === view.state.doc.lineAt(sel.from).from
+              const cleaned = stripPastedIndent(text, atLineStart)
+              if (cleaned === text) return false
+              event.preventDefault()
+              view.dispatch({
+                changes: { from: sel.from, to: sel.to, insert: cleaned },
+                selection: { anchor: sel.from + cleaned.length },
+                userEvent: 'input.paste',
+              })
+              return true
+            },
+          }),
           CommandEditor.editorTheme,
           this.onViewUpdate,
           ...extensions,
@@ -384,8 +445,19 @@ export class CommandEditor {
     // there is no further upward movement — caret on the first line or an
     // empty draft. Otherwise the key falls through to CM6's caret handling.
     // Hint navigation above has already had its turn with ArrowUp.
+    //
+    // And only from a SINGLE-LINE draft. Recall previews the selected command
+    // over the draft, so on a multi-line draft one stray Up puts somebody
+    // else's command where twenty pasted lines were. Esc restores it and Tab
+    // is not destructive, but the next keystroke need not be either of those:
+    // Enter runs the recalled command, and an edit keeps it as the new draft.
+    // The risk is not symmetric — losing `git ` costs a retype, losing a
+    // pasted curl costs the paste — and neither is the gesture: `git ` + Up
+    // is how every shell works and must keep working, while a multi-line
+    // draft is a block being edited, where Up plainly means "up". The
+    // explicit shortcut still opens recall from anywhere.
     if (e.key === 'ArrowUp' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
-      if (this.caretAtTop()) {
+      if (this.caretAtTop() && this.view.state.doc.lines <= 1) {
         e.preventDefault()
         e.stopPropagation()
         this.actions.onUpAtTop?.()
