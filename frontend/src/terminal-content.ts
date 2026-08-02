@@ -8,7 +8,7 @@ import type { TerminalRenderer, MarkerAdapter } from './renderers/types'
 import { InputStateController } from './input-state'
 import { CommandEditor } from './editor'
 import { shellExtensions } from './shell-highlight'
-import { RecallOverlay, queryLedgerHistory } from './recall'
+import { RecallOverlay, queryLedgerHistory, withSessionText } from './recall'
 import { CompletionController } from './suggest/controller'
 import { createShellProviders } from './suggest/providers'
 import { CompletionDropdown } from './ui/completion-dropdown'
@@ -355,7 +355,12 @@ export class TerminalContent extends BaseTabContent {
         editor: this.editor,
         query: async (scope, text) => {
           try {
-            return await queryHistory(this.client, scope, this._cwd, this._host, text)
+            const page = await queryHistory(this.client, scope, this._cwd, this._host, text)
+            // A command run in THIS session comes back as it was run, not as
+            // the store had to keep it (nocx-xkve.4). Recall only — the
+            // completion provider above keeps reading the store, so ghost
+            // text and candidates stay masked.
+            return withSessionText(page, this.ledger)
           } catch {
             return queryLedgerHistory(this.ledger, scope, this._cwd, this._host, text)
           }
@@ -586,19 +591,14 @@ export class TerminalContent extends BaseTabContent {
         }
       })
 
-      // ── Editor copy-on-select (item 6) ─────────────────────────────────
-      // The DOM mechanics of "a selection gesture finished" live in the
-      // editor (onSelectionEnd); the policy — should this be copied, and the
-      // clipboard write — stays here (ADR-0010 §Decision 2).
-      this.editor.onSelectionEnd((text) => {
-        if (shouldCopy(text)) {
-          this.clipboard.writeText(text).catch((e) => {
-            console.warn('nocx: clipboard write failed (editor selection)', e)
-          })
-        }
-      })
-
       // ── DOM block copy-on-select (P0-5) ───────────────────────────────
+      // Frozen output only. Copy-on-select is the terminal's convention and it
+      // belongs to text you can only read: selecting output is how you take
+      // it. In the EDITOR the same gesture means the opposite — you select in
+      // order to replace — so copying there overwrites the clipboard with the
+      // very text about to be deleted. The owner selected part of a header to
+      // paste a key over it and the key was gone. Explicit Ctrl/Cmd+C still
+      // copies from the editor; nothing takes the clipboard unasked.
       this.scrollback?.scrollbackArea.addEventListener('mouseup', () => {
         const sel = window.getSelection()
         if (!sel || sel.isCollapsed) return

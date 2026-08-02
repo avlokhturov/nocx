@@ -4,9 +4,7 @@
 // hidden the xterm has focus and keys flow to the PTY as usual.
 //
 // The input surface is a CodeMirror 6 EditorView mounted inside the
-// `.nocx-editor` card (ADR-0010 §1). The public API is the contract and is
-// unchanged except that the `textarea` getter is replaced by
-// `onSelectionEnd(cb)` (§Decision 2 of the editor-core spec).
+// `.nocx-editor` card (ADR-0010 §1).
 //
 // Key handling deliberately stays a native capture-phase listener on `root`,
 // NOT a CM6 keymap: the listener runs before CM6's own contentDOM handlers
@@ -139,8 +137,6 @@ export class CommandEditor {
   setKeyArbiter(arbiter: ((e: KeyboardEvent) => boolean) | null): void {
     this.keyArbiter = arbiter
   }
-  /** Callback for the onSelectionEnd seam (W3 wires the copy policy to it). */
-  private _selectionEndCb: ((text: string) => void) | null = null
 
   /**
    * The clock ticks only while the editor is on screen.
@@ -286,15 +282,6 @@ export class CommandEditor {
     // (verified empirically: a capture-phase listener on an ancestor
     // preempts the defaultKeymap's Enter binding).
     this.root.addEventListener('keydown', this.onKeydown, true)
-
-    // Selection-gesture seam (spec §Decision 2): fires with the selected text
-    // when a mouse selection completes. It copies nothing — the policy lives
-    // with the consumer (W3).
-    this.view.contentDOM.addEventListener('mouseup', () => {
-      const sel = this.view.state.selection.main
-      if (sel.from === sel.to) return
-      this._selectionEndCb?.(this.view.state.sliceDoc(sel.from, sel.to))
-    })
   }
 
   private startClock(): void {
@@ -337,11 +324,6 @@ export class CommandEditor {
   }
 
   // ── keyboard ──────────────────────────────────────────────────────────
-
-  /** Register the selection-end callback (replaces the textarea getter). */
-  onSelectionEnd(cb: (text: string) => void): void {
-    this._selectionEndCb = cb
-  }
 
   /**
    * Replace the whole document without firing onInputChange (the textarea's

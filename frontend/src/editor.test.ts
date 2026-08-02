@@ -10,7 +10,7 @@
 // (`viewOf` — the same transaction a mouse drag produces) and dispatch
 // keydown/mouseup on the view's contentDOM (where real events land). Almost
 // every outcome is then observed through the public callbacks — submit,
-// cancel, onInputChange, onSelectionEnd, resized, onAcceptHint, focus,
+// cancel, onInputChange, resized, onAcceptHint, focus,
 // visibility. The document is read back directly in exactly three places
 // where no public channel exists and the assertion is state integrity
 // (cleared after a throwing submit; untouched by a no-op Ctrl-C).
@@ -310,28 +310,6 @@ describe('CommandEditor', () => {
     enter(view)
     expect(submit).toHaveBeenCalledWith('first + second') // editing still works
     requestMeasure.mockRestore()
-  })
-
-  it('onSelectionEnd fires with the selected text when a selection gesture completes', () => {
-    const onSelectionEnd = vi.fn()
-    const { ed, view } = setup()
-    ed.onSelectionEnd(onSelectionEnd) // a method, not a constructor action
-    ed.show()
-    ed.insertText('echo hello world')
-    select(view, 5, 10) // "hello"
-    view.contentDOM.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))
-    expect(onSelectionEnd).toHaveBeenCalledWith('hello')
-    expect(onSelectionEnd).toHaveBeenCalledTimes(1)
-  })
-
-  it('onSelectionEnd does not fire for a collapsed selection', () => {
-    const onSelectionEnd = vi.fn()
-    const { ed, view } = setup()
-    ed.onSelectionEnd(onSelectionEnd)
-    ed.show()
-    ed.insertText('echo hi')
-    view.contentDOM.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))
-    expect(onSelectionEnd).not.toHaveBeenCalled()
   })
 
   it('onInputChange fires on a user-driven document change with the text', () => {

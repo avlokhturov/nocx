@@ -405,5 +405,21 @@ export function serializeRange(
   while (groups.length > 0 && groups[groups.length - 1] === '') {
     groups.pop()
   }
+  // Leading empties go too, and for a stronger reason than the trailing ones.
+  // The rows between the C marker and the program's first output are where
+  // readline ERASED its own rendering of the command: a submitted document is
+  // pasted, readline draws it, and on accept it blanks those rows and redraws
+  // lower. They are echo scaffolding, not output, and the block already shows
+  // the command in its header from our own intent — so they arrive as a band
+  // of empty term-lines above the output. Measured 2026-08-02: an eight-line
+  // curl left SIXTEEN of them, a single-line one four; the count tracks the
+  // rows the command occupied, which is what gives it away.
+  //
+  // A program that deliberately prints a leading blank line loses it. That is
+  // the same trade the trailing trim already makes, for the same reason: one
+  // line of spacing is cheaper than a screenful of nothing.
+  let lead = 0
+  while (lead < groups.length && groups[lead] === '') lead++
+  groups.splice(0, lead)
   return groups.map((g) => `<span class="term-line">${g}</span>`).join('')
 }

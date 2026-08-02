@@ -132,46 +132,20 @@ const mouseupOn = (view: EditorView): void => {
   view.contentDOM.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))
 }
 
-describe('editor copy-on-select wiring (W3)', () => {
-  it('a completed selection gesture copies exactly the selected text', async () => {
+describe('the editor never copies on selection (nocx-w7h.17)', () => {
+  // Copy-on-select is the terminal's convention and belongs to text you can
+  // only read. In the editor the same gesture means the opposite — you select
+  // in order to replace — so copying there overwrote the clipboard with the
+  // very text about to be deleted: the owner selected part of a header to
+  // paste a key over it, and the key was gone.
+  it('a completed selection gesture in the editor writes nothing to the clipboard', async () => {
     const { view, ed, clipboard, teardown } = await mountTerminal()
     try {
       ed.insertText('echo hello world')
       view.dispatch({ selection: { anchor: 5, head: 10 } }) // "hello"
       mouseupOn(view)
-      expect(clipboard.writeText).toHaveBeenCalledWith('hello')
-      expect(clipboard.writeText).toHaveBeenCalledTimes(1)
-    } finally {
-      teardown()
-    }
-  })
-
-  it('a whitespace-only selection is not copied (shouldCopy policy)', async () => {
-    const { view, ed, clipboard, teardown } = await mountTerminal()
-    try {
-      ed.insertText('   ')
-      view.dispatch({ selection: { anchor: 0, head: 3 } })
-      mouseupOn(view)
       expect(clipboard.writeText).not.toHaveBeenCalled()
     } finally {
-      teardown()
-    }
-  })
-
-  it('a rejected clipboard write is caught, not thrown', async () => {
-    const clipboard = makeClipboard({
-      writeText: vi.fn().mockRejectedValue(new Error('denied')),
-    })
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    const { view, ed, teardown } = await mountTerminal(clipboard)
-    try {
-      ed.insertText('echo hello world')
-      view.dispatch({ selection: { anchor: 5, head: 10 } })
-      expect(() => mouseupOn(view)).not.toThrow()
-      await vi.waitFor(() => expect(clipboard.writeText).toHaveBeenCalledWith('hello'))
-      await vi.waitFor(() => expect(warn).toHaveBeenCalled())
-    } finally {
-      warn.mockRestore()
       teardown()
     }
   })

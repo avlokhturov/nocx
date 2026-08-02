@@ -230,6 +230,50 @@ function detailDuration(entry: HistoryEntry): string {
   return formatDuration(entry.endedAt - entry.startedAt)
 }
 /**
+ * Give back the text a command was actually RUN with, for the commands run in
+ * this session (nocx-xkve.4).
+ *
+ * Masking happens at the wire on the way into the store (ADR-0021), so the
+ * durable row reads `sk-p...7890` — correct for a durable row, and useless
+ * the moment you press Up to re-run what you just ran. The session ledger is
+ * sitting right there holding the real text, because it never crossed the
+ * wire; recall simply asked the wrong one of the two.
+ *
+ * The split is the one ADR-0021 already drew and a person already
+ * understands: this session is ephemeral and real, history is durable and
+ * masked. Nothing new is written anywhere — the real text lives in the
+ * renderer's memory and dies with the tab.
+ *
+ * Recall ONLY. Ghost text and completion candidates keep reading the store,
+ * so they stay masked: recall is a surface you asked for by pressing a key,
+ * and those two appear on their own. A secret must not turn up unasked.
+ *
+ * Rows are matched on startedAt, which is the same wall-clock value the
+ * renderer sent for that row (rounded at the wire, so rounded here), plus cwd
+ * and host. When a row is replaced its mask facts are cleared with it —
+ * saying "1 secret masked" over the unmasked text would be the same class of
+ * lie the masking exists to prevent.
+ */
+export function withSessionText(page: HistoryQuery, ledger: CommandLedger | null): HistoryQuery {
+  if (!ledger) return page
+  const bySlot = new Map<string, string>()
+  for (const rec of ledger.records()) {
+    if (rec.startedAt === null) continue
+    bySlot.set(`${Math.round(rec.startedAt)} ${rec.cwd} ${rec.host}`, rec.command)
+  }
+  if (bySlot.size === 0) return page
+  let changed = false
+  const entries = page.entries.map((e) => {
+    if (e.startedAt === null || e.startedAt === undefined) return e
+    const live = bySlot.get(`${e.startedAt} ${e.cwd} ${e.host}`)
+    if (live === undefined || live === e.command) return e
+    changed = true
+    return { ...e, command: live, maskedCount: 0, maskedKinds: [] }
+  })
+  return changed ? { ...page, entries } : page
+}
+
+/**
  * Serve a history page from the in-memory ledger, newest first, filtered to
  * the requested rung. `source` is always 'session': this is the stopgap
  * behind the generated types until the persistent store answers. Only the

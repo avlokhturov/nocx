@@ -22,6 +22,7 @@ import {
   formatDuration,
   queryLedgerHistory,
   relativeTime,
+  withSessionText,
   scrollTopToReveal,
   type RecallQuery,
   type RecallScope,
@@ -1086,6 +1087,69 @@ describe('recall: relative time', () => {
     await settled(container)
     const time = container.querySelector<HTMLElement>('.ui-floating-panel__time')
     expect(time?.textContent).toBe('2 minutes ago')
+  })
+})
+
+describe('withSessionText: this session comes back as it was run (nocx-xkve.4)', () => {
+  const page = (entries: HistoryEntry[]): HistoryQuery => ({
+    entries,
+    scope: 'directory',
+    exhausted: true,
+    source: 'store',
+    coverage: null,
+  })
+  const storeRow = (over: Partial<HistoryEntry> & { id: string }): HistoryEntry => ({
+    command: 'curl -H "Authorization: Bearer sk-p...7249"',
+    cwd: '/a',
+    host: 'h1',
+    status: 'success',
+    startedAt: 1000,
+    endedAt: 2000,
+    maskedCount: 1,
+    maskedKinds: ['openai'],
+    ...over,
+  })
+
+  /** A ledger holding one command that actually RAN: startedAt is stamped by
+   *  the OSC 133 C marker, not by open(), and it is the match key. */
+  const ran = (command: string, cwd: string, host: string): CommandLedger => {
+    const ledger = new CommandLedger({ now: () => 1000 })
+    ledger.open(command, cwd, host, () => undefined)
+    ledger.onMarker('C')
+    return ledger
+  }
+
+  it('replaces the masked text with what the command was RUN with', () => {
+    const ledger = ran('curl -H "Authorization: Bearer sk-or-v1-realkeyhere"', '/a', 'h1')
+    const got = withSessionText(page([storeRow({ id: '1' })]), ledger)
+    expect(got.entries[0].command).toBe('curl -H "Authorization: Bearer sk-or-v1-realkeyhere"')
+    // The mask facts go with the mask: "1 secret masked" over unmasked text
+    // is the same class of lie the masking exists to prevent.
+    expect(got.entries[0].maskedCount).toBe(0)
+    expect(got.entries[0].maskedKinds).toEqual([])
+  })
+
+  it('leaves rows from other sessions alone — those are the durable, masked ones', () => {
+    const ledger = ran('something else', '/a', 'h1')
+    // Same directory, different moment: not this session's row.
+    const older = storeRow({ id: '9', startedAt: 500, endedAt: 600 })
+    const got = withSessionText(page([older]), ledger)
+    expect(got.entries[0].command).toBe(older.command)
+    expect(got.entries[0].maskedCount).toBe(1)
+  })
+
+  it('matches on the directory and host too, never on the moment alone', () => {
+    const ledger = ran('real one', '/a', 'h1')
+    const elsewhere = storeRow({ id: '2', cwd: '/b' })
+    expect(withSessionText(page([elsewhere]), ledger).entries[0].command).toBe(elsewhere.command)
+    const otherHost = storeRow({ id: '3', host: 'h2' })
+    expect(withSessionText(page([otherHost]), ledger).entries[0].command).toBe(otherHost.command)
+  })
+
+  it('no ledger, or nothing to replace, returns the page untouched', () => {
+    const p = page([storeRow({ id: '4' })])
+    expect(withSessionText(p, null)).toBe(p)
+    expect(withSessionText(p, ran('unrelated', '/zzz', 'nobody'))).toBe(p)
   })
 })
 
