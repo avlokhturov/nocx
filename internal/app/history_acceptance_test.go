@@ -23,6 +23,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/shady2k/nocx/internal/storage"
+
 	"github.com/gorilla/websocket"
 )
 
@@ -49,11 +51,14 @@ func TestHistory_NoKeystoreSealedVault_RecordSurvivesRestart(t *testing.T) {
 	// The derived-key artifacts landed where the design says: the salt in
 	// the CONFIG directory — a copy of the data directory carries nothing
 	// that opens it — and the database in the DATA directory.
-	saltPath := filepath.Join(cfgHome, "nocx", "contentkey.salt")
+	// storage.AppDirName, never the literal: dev and release own separate
+	// profile directories (nocx-ti8w), and a test that hardcodes one asserts
+	// against a build it is not running.
+	saltPath := filepath.Join(cfgHome, storage.AppDirName, "contentkey.salt")
 	if _, statErr := os.Stat(saltPath); statErr != nil {
 		t.Fatalf("salt not minted in config dir: %v", statErr)
 	}
-	dbPath := filepath.Join(dataHome, "nocx", "content.db")
+	dbPath := filepath.Join(dataHome, storage.AppDirName, "content.db")
 	if _, statErr := os.Stat(dbPath); statErr != nil {
 		t.Fatalf("content.db not created in data dir: %v", statErr)
 	}
