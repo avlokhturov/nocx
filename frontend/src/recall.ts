@@ -102,7 +102,10 @@ export interface RecallEditor {
   submit(): void
 }
 
-export type RecallQuery = (scope: RecallScope) => Promise<HistoryQuery>
+/** `text` is the search filter (nocx-ms7v): absent or empty means "the rung as
+ *  it stands", which is what Up and Ctrl+R ask for. The seam carries it so the
+ *  overlay can grow a filter without the composition root changing again. */
+export type RecallQuery = (scope: RecallScope, text?: string) => Promise<HistoryQuery>
 export type RecallState =
   | { readonly name: 'closed' }
   | {
@@ -179,12 +182,17 @@ export function queryLedgerHistory(
   scope: RecallScope,
   cwd: string,
   host: string,
+  text?: string,
 ): HistoryQuery {
   const records = ledger ? [...ledger.records()].reverse() : []
   const entries: HistoryEntry[] = []
+  // The fallback filters the same way the store does, or the same keystroke
+  // returns a different set depending on whether the store answered.
+  const needle = text === undefined ? '' : text.toLowerCase()
   for (const rec of records) {
     if (scope === 'directory' && (rec.cwd !== cwd || rec.host !== host)) continue
     if (scope === 'host' && rec.host !== host) continue
+    if (needle !== '' && !rec.command.toLowerCase().includes(needle)) continue
     entries.push({
       id: String(rec.id),
       command: rec.command,

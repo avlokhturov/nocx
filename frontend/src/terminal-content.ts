@@ -316,11 +316,11 @@ export class TerminalContent extends BaseTabContent {
       // (nocx-w7h.5).
       this.recall = new RecallOverlay({
         editor: this.editor,
-        query: async (scope) => {
+        query: async (scope, text) => {
           try {
-            return await queryHistory(this.client, scope, this._cwd, this._host)
+            return await queryHistory(this.client, scope, this._cwd, this._host, text)
           } catch {
-            return queryLedgerHistory(this.ledger, scope, this._cwd, this._host)
+            return queryLedgerHistory(this.ledger, scope, this._cwd, this._host, text)
           }
         },
       })

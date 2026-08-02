@@ -53,6 +53,7 @@ export async function queryHistory(
   scope: RecallScope,
   cwd: string,
   host: string,
+  text?: string,
 ): Promise<HistoryQuery> {
   const params: Record<string, unknown> = { scope }
   if (scope === 'directory') {
@@ -61,5 +62,8 @@ export async function queryHistory(
   } else if (scope === 'host') {
     params.host = host
   }
+  // The search filter (nocx-ms7v). Omitted when empty rather than sent as "",
+  // so "no filter" is one state on the wire and not two.
+  if (text !== undefined && text !== '') params.text = text
   return client.call<HistoryQuery>('history.query', params)
 }
