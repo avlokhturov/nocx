@@ -1075,3 +1075,105 @@ func TestHistoryQuery_OverTheWireConformsToContract(t *testing.T) {
 		validateJSON(t, schema, resp.Result, "history.query result (session)")
 	})
 }
+
+// ── fs.complete ──────────────────────────────────────────────────────────
+
+// The DTO's own conformance: field tags, omitempty behaviour, and the
+// never-null entries slice.
+func TestFsComplete_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "fs.complete.schema.json")
+
+	cases := map[string]fsCompleteResponse{
+		// Everything populated: a file and a directory. isDir must marshal
+		// exactly, and path is the absolute path the renderer keys on.
+		"populated": {
+			Entries: []fsCompleteEntry{
+				{Name: "src", Path: "/repo/src", IsDir: true},
+				{Name: "main.go", Path: "/repo/main.go", IsDir: false},
+			},
+		},
+		// The empty answer: no matches is [] never null (nocx-25k9.14 class).
+		"empty": {
+			Entries: []fsCompleteEntry{},
+		},
+	}
+
+	for name, resp := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(resp)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "fs.complete DTO")
+		})
+	}
+}
+
+// The real method through the real socket. Nothing here names a field, so
+// nothing here can omit one; the schema's additionalProperties:false plus
+// required makes the key set exact in both directions. The fixture is a real
+// directory on the backend's filesystem — the only honest source for a
+// filesystem completion.
+func TestFsComplete_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "fs.complete.schema.json")
+	ctx := context.Background()
+
+	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)))
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+
+	conn := connectWS(t, ws)
+
+	t.Run("relative completion", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("x"), 0o600); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		if err := os.Mkdir(filepath.Join(dir, "src"), 0o750); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+
+		resp := vaultCall(t, conn, "fs.complete", map[string]any{"text": "ma", "cwd": dir}, 2)
+		if resp.Error != nil {
+			t.Fatalf("unexpected error: %+v", resp.Error)
+		}
+		validateJSON(t, schema, resp.Result, "fs.complete result (relative)")
+
+		var got fsCompleteResponse
+		if err := json.Unmarshal(resp.Result, &got); err != nil {
+			t.Fatalf("unmarshal result: %v", err)
+		}
+		if len(got.Entries) != 1 || got.Entries[0].Name != "main.go" || got.Entries[0].IsDir {
+			t.Errorf("entries = %+v, want exactly [main.go (file)]", got.Entries)
+		}
+	})
+
+	t.Run("no match answers empty", func(t *testing.T) {
+		dir := t.TempDir()
+		resp := vaultCall(t, conn, "fs.complete", map[string]any{"text": "zzz", "cwd": dir}, 3)
+		if resp.Error != nil {
+			t.Fatalf("unexpected error: %+v", resp.Error)
+		}
+		validateJSON(t, schema, resp.Result, "fs.complete result (empty)")
+
+		var got fsCompleteResponse
+		if err := json.Unmarshal(resp.Result, &got); err != nil {
+			t.Fatalf("unmarshal result: %v", err)
+		}
+		if got.Entries == nil || len(got.Entries) != 0 {
+			t.Errorf("entries = %v, want [] (never null)", got.Entries)
+		}
+	})
+
+	t.Run("empty text is refused", func(t *testing.T) {
+		resp := vaultCall(t, conn, "fs.complete", map[string]any{"text": "", "cwd": t.TempDir()}, 4)
+		if resp.Error == nil {
+			t.Fatal("empty text must be an invalid-params error, got success")
+		}
+		if resp.Error.Code != -32602 {
+			t.Errorf("error code = %d, want -32602", resp.Error.Code)
+		}
+	})
+}

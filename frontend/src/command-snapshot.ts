@@ -153,7 +153,7 @@ function decodeHex(s: string): string | null {
  */
 export class CommandSnapshotStore {
   private nonce: string | null = null
-  private names: Set<string> | null = null
+  private _names: Set<string> | null = null
   private listeners = new Set<() => void>()
 
   ingest(payload: string): void {
@@ -168,16 +168,16 @@ export class CommandSnapshotStore {
     }
     // Snapshot: the nonce must have been established and must match.
     if (this.nonce === null || msg.nonce !== this.nonce) return
-    this.names = new Set(msg.names)
+    this._names = new Set(msg.names)
     for (const cb of this.listeners) cb()
   }
 
   get status(): 'unavailable' | 'ready' {
-    return this.names === null ? 'unavailable' : 'ready'
+    return this._names === null ? 'unavailable' : 'ready'
   }
 
   has(name: string): boolean {
-    return this.names !== null && this.names.has(name)
+    return this._names !== null && this._names.has(name)
   }
 
   /** Fires when a snapshot is applied (a discard notifies nobody). */
@@ -188,8 +188,22 @@ export class CommandSnapshotStore {
     }
   }
 
+  /**
+   * The command names starting with `prefix`, sorted — the completion
+   * provider's read seam (design §8.5: the command provider reads the
+   * snapshot the running shell produced). A fresh array every call: the
+   * store never hands out its internal set, so no consumer can corrupt the
+   * snapshot for the rest of the session. Empty when no snapshot has
+   * applied — "unavailable" and "no commands" must not look alike, so the
+   * caller checks `status` first.
+   */
+  matching(prefix: string): string[] {
+    if (this._names === null) return []
+    return [...this._names].filter((n) => n.startsWith(prefix)).sort()
+  }
+
   reset(): void {
     this.nonce = null
-    this.names = null
+    this._names = null
   }
 }

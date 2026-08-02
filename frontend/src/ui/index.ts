@@ -55,3 +55,4 @@ export {
   type ToastLevel,
   type ToastOptions,
 } from './toast'
+export { CompletionDropdown, type CompletionDropdownCallbacks } from './completion-dropdown'

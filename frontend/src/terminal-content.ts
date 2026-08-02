@@ -9,6 +9,10 @@ import { InputStateController } from './input-state'
 import { CommandEditor } from './editor'
 import { shellExtensions } from './shell-highlight'
 import { RecallOverlay, queryLedgerHistory } from './recall'
+import { CompletionController } from './suggest/controller'
+import { createShellProviders } from './suggest/providers'
+import { CompletionDropdown } from './ui/completion-dropdown'
+import type { FsComplete } from './generated/fs.complete'
 import { ShellInputTarget } from './input-target'
 import { submitCommand } from './submit'
 import { shouldShowEditor, NATIVE_RESTORE } from './native-mode'
@@ -90,6 +94,7 @@ export class TerminalContent extends BaseTabContent {
   private shellTarget: ShellInputTarget | null = null
   private scrollback: ScrollbackController | null = null
   private ledger: CommandLedger | null = null
+  private completion: CompletionController | null = null
   private recall: RecallOverlay | null = null
   private inputState = new InputStateController()
   private _markers = new Map<number, MarkerAdapter>()
@@ -251,9 +256,32 @@ export class TerminalContent extends BaseTabContent {
       })
 
       // ── Wire input ownership BEFORE opening the session ─────────────────
+      // Completion (design §8.7–§8.9): the dropdown + ghost text surface,
+      // composed here so the editor stays passive. Providers: command names
+      // from the OSC 636 snapshot (this renderer's own — correct on a remote
+      // host, it is the running shell's answer), history over the control
+      // plane (environment-scoped, the directory rung), and local filesystem
+      // paths — active only when this tab's session is a local shell, so a
+      // local path can never masquerade as a remote one (§8.5).
+      this.completion = new CompletionController({
+        providers: createShellProviders({
+          store: renderer.snapshotStore,
+          queryHistory: (cwd, host) => queryHistory(this.client, 'directory', cwd, host),
+          completeFs: (text, cwd) => this.client.call<FsComplete>('fs.complete', { text, cwd }),
+        }),
+        dropdown: new CompletionDropdown({
+          onHover: (index) => this.completion?.select(index),
+          onPick: (index) => this.completion?.acceptIndex(index),
+        }),
+        env: () => ({ isLocal: !this.sshOpts, cwd: this._cwd, host: this._host }),
+        recallIsOpen: () => this.recall?.isOpen ?? false,
+      })
       this.shellTarget = new ShellInputTarget(
         (text: string) => renderer.paste(text),
         (data: string) => this.session!.send(data),
+        // The target carries the shell's editor extensions through the §8.8
+        // seam: the shell highlighter plus the completion surface.
+        [...shellExtensions(renderer.snapshotStore), ...this.completion.extensions()],
       )
       this.editor = new CommandEditor(
         {
@@ -285,7 +313,12 @@ export class TerminalContent extends BaseTabContent {
           // letting it slide underneath.
           resized: () => this.scrollback?.scrollToBottom(),
           /** Detect `ssh <partial>` pattern and show matching aliases. */
-          onInputChange: (text) => this._onEditorInput(text),
+          onInputChange: (text) => {
+            this._onEditorInput(text)
+            // A keystroke aborts the completion query in flight and starts a
+            // fresh one (design §8.9.2); the ghost text re-anchors.
+            this.completion?.onDocChanged()
+          },
           /** Hint acceptance — no cache to invalidate. */
           onAcceptHint: () => {},
           /** Up on the first line (or an empty draft): no further caret
@@ -293,16 +326,20 @@ export class TerminalContent extends BaseTabContent {
           onUpAtTop: () => {
             void this.recall?.open('directory')
           },
+          /** Tab opens the completion dropdown (§8.7's decided option 1). */
+          onTab: () => this.completion?.open(),
         },
         // The language is chosen HERE, not inside the editor. CommandEditor
         // must stay language-agnostic (ADR-0010 §Decision 3): the agent target
         // will want prose with mentions on this same surface, and an editor
         // that defaults to shell would have to be edited to gain one — exactly
-        // what ADR-0004 §3 exists to prevent. This is the composition point, so
-        // this is where the shell layer is named.
-        shellExtensions(renderer.snapshotStore),
+        // what ADR-0004 §3 exists to prevent. The seam (design §8.8) carries
+        // the shell layer: the target supplies its extensions, the editor
+        // never hard-codes them.
+        this.shellTarget.editorExtensions?.() ?? [],
       )
       this.editor.mount(target)
+      this.completion.attach(this.editor, this.editor.root)
 
       // ── Recall overlay (Provenance Recall, design §8.10) ────────────────
       // The history palette above the prompt. Rows are served by the store
@@ -325,18 +362,29 @@ export class TerminalContent extends BaseTabContent {
         },
       })
       this.recall.mount(this.editor.root)
-      this.editor.setKeyArbiter((e) => this.recall!.handleKey(e))
+      // ONE arbiter chain (design §8.9.4 — two state machines, one
+      // keyboard): recall first, completion second, the editor's own
+      // handling last. Recall is the higher-priority surface, and the two
+      // never stack: the moment recall opens, the completion dropdown is
+      // dismissed. Esc closes exactly one surface per press, in the same
+      // order.
+      this.editor.setKeyArbiter((e) => {
+        const consumed = this.recall!.handleKey(e)
+        if (this.recall!.isOpen) this.completion?.dismiss()
+        return consumed || (this.completion?.handleKey(e) ?? false)
+      })
 
       if (signal.aborted) {
         this.recall?.destroy()
         this.recall = null
+        this.completion?.destroy()
+        this.completion = null
         this.editor.dispose()
         renderer.dispose()
         this.scrollback.dispose()
         this._readyResolve(false)
         return
       }
-
       // False until the first OSC 133 marker: a markerless session (plain
       // SSH) keeps the terminal visible in the unstructured full-pane mode.
       let shellIntegrated = false
@@ -941,6 +989,8 @@ export class TerminalContent extends BaseTabContent {
     this.editor?.dispose()
     this.recall?.destroy()
     this.recall = null
+    this.completion?.destroy()
+    this.completion = null
     this.scrollback?.dispose()
     this._disposeAllMarkers()
     this.ledger = null

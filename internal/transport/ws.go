@@ -792,6 +792,8 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.handleHistoryQuery(ctx, wconn, req)
 	case "history.record":
 		s.handleHistoryRecord(ctx, wconn, req)
+	case "fs.complete":
+		s.handleFsComplete(wconn, req)
 	case "vault.status", "vault.setup", "vault.unseal", "vault.seal",
 		"vault.changePassphrase", "vault.regenerateRecovery", "vault.setDefaultProvider",
 		"vault.setAutoSeal", "vault.activity", "vault.inventory",

@@ -1,0 +1,216 @@
+package transport
+
+// fs.complete — local filesystem path completion (design §8.5, nocx-w7h.3).
+// The result shape is declared once in contracts/fs.complete.schema.json and
+// belongs to neither side; this file serves it from the backend's own
+// filesystem — which is exactly why the frontend's local-path provider is
+// inactive on a remote session: the backend's filesystem is the local
+// machine's, and a local candidate offered inside an SSH session is wrong
+// even when it says "local".
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+// fsCompleteParams is the request the local-path provider sends. There is
+// deliberately no params schema (contracts/README.md): the handler is the
+// check, and rejects what it cannot parse.
+//
+//	text  — required; the partial path being completed (the current word)
+//	cwd   — optional; the session's working directory, used only when text
+//	        is relative. Missing/empty means relative text completes nothing.
+//	limit — optional; <1 → 50, >200 → 200
+type fsCompleteParams struct {
+	Text  string `json:"text"`
+	Cwd   string `json:"cwd"`
+	Limit *int   `json:"limit"`
+}
+
+// fsCompleteEntry is one row of the fs.complete result, matching the schema
+// exactly. Path is always absolute once resolved.
+type fsCompleteEntry struct {
+	Name  string `json:"name"`
+	Path  string `json:"path"`
+	IsDir bool   `json:"isDir"`
+}
+
+// fsCompleteResponse is the result of fs.complete. Entries is never nil: no
+// matches is [] (the schema says so, and a null would throw the renderer's
+// first .map — the nocx-25k9.14 defect class).
+type fsCompleteResponse struct {
+	Entries []fsCompleteEntry `json:"entries"`
+}
+
+// defaultFsCompleteLimit is the page size when the caller sends none.
+const defaultFsCompleteLimit = 50
+
+// maxFsCompleteLimit caps a page so a runaway completion cannot read a whole
+// directory tree into the renderer.
+const maxFsCompleteLimit = 200
+
+// handleFsComplete serves the fs.complete method.
+//
+// Completion fails soft, never loud: a typo'd or unreadable directory answers
+// an empty page, because the dropdown is a convenience and a JSON-RPC error
+// for a path that merely does not exist yet would surface as a toast for
+// every half-typed path. The renderer's own applicability rule (local session
+// only) is the hard gate; this handler answers the backend's filesystem
+// regardless, because the backend cannot see the session's host.
+func (s *WSServer) handleFsComplete(wconn *wsConn, req jsonrpcRequest) {
+	text, cwd, limit, errMsg := parseFsCompleteParams(req)
+	if errMsg != "" {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: "+errMsg))
+		return
+	}
+
+	resp := fsCompleteResponse{Entries: []fsCompleteEntry{}}
+	if text != "" {
+		resp.Entries = completeLocalPath(text, cwd, limit)
+	}
+	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(resp)))
+}
+
+// parseFsCompleteParams validates the request against the handler contract
+// above. The returned message is empty when the params are usable.
+func parseFsCompleteParams(req jsonrpcRequest) (string, string, int, string) {
+	var p fsCompleteParams
+	if err := json.Unmarshal(req.Params, &p); err != nil {
+		return "", "", 0, "params must be an object"
+	}
+	if p.Text == "" {
+		return "", "", 0, "text is required"
+	}
+	limit := defaultFsCompleteLimit
+	if p.Limit != nil {
+		limit = *p.Limit
+		if limit < 1 {
+			limit = defaultFsCompleteLimit
+		} else if limit > maxFsCompleteLimit {
+			limit = maxFsCompleteLimit
+		}
+	}
+	return p.Text, p.Cwd, limit, ""
+}
+
+// completeLocalPath resolves text against cwd and returns the directory
+// entries whose name starts with the last path segment, capped at limit.
+//
+// Resolution rules, mirroring what a shell's path completion does:
+//
+//   - empty text is no completion — the handler refuses it, and the helper
+//     refuses it too, so a future caller cannot bypass the guard and get a
+//     full directory listing by accident;
+//   - text starting with `~` (alone or as `~/…`) resolves against the
+//     current user's home directory; `~user` cannot be resolved cheaply and
+//     answers nothing;
+//   - text starting with `/` is absolute;
+//   - anything else is relative to cwd; with no cwd (the session never
+//     reported one) relative text answers nothing;
+//   - the text up to the last `/` is the directory to list; the last segment
+//     is the prefix. A trailing `/` means "list this directory": empty prefix;
+//   - `.` and `..` as the final segment list that directory itself;
+//   - hidden entries (leading `.`) are listed only when the prefix itself
+//     starts with `.`, so a bare prefix never surfaces dotfiles (shell
+//     behaviour).
+//
+// Any listing failure (missing directory, permission, race) answers an empty
+// page — see handleFsComplete for why.
+func completeLocalPath(text, cwd string, limit int) []fsCompleteEntry {
+	if text == "" {
+		return []fsCompleteEntry{}
+	}
+	// Resolve the base directory the text points into.
+	base, rest, ok := resolvePathBase(text, cwd)
+	if !ok {
+		return []fsCompleteEntry{}
+	}
+
+	dir, prefix := splitDirPrefix(rest)
+
+	// The final segment being "." or ".." means "list that directory", not
+	// "match names starting with ." — the shell completes `cd ..` by showing
+	// the parent's entries.
+	if prefix == "." || prefix == ".." {
+		dir = filepath.Join(dir, prefix)
+		prefix = ""
+	}
+
+	entries, err := os.ReadDir(filepath.Join(base, dir))
+	if err != nil {
+		return []fsCompleteEntry{}
+	}
+
+	showHidden := strings.HasPrefix(prefix, ".")
+	out := make([]fsCompleteEntry, 0, min(limit, len(entries)))
+	for _, e := range entries {
+		name := e.Name()
+		if prefix != "" && !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		if !showHidden && strings.HasPrefix(name, ".") {
+			continue
+		}
+		out = append(out, fsCompleteEntry{
+			Name:  name,
+			Path:  filepath.Join(base, dir, name),
+			IsDir: e.IsDir(),
+		})
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+// resolvePathBase returns the absolute base directory text points into, the
+// remainder of the text after the base, and whether the text is resolvable at
+// all. rest is "" when text names the base itself.
+func resolvePathBase(text, cwd string) (base, rest string, ok bool) {
+	if strings.HasPrefix(text, "~") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", "", false
+		}
+		if text == "~" {
+			return home, "", true
+		}
+		if !strings.HasPrefix(text, "~/") {
+			// `~user/…` — resolving another user needs a passwd lookup that
+			// completion is not worth; answer nothing.
+			return "", "", false
+		}
+		return home, text[2:], true
+	}
+	if strings.HasPrefix(text, "/") {
+		return "/", strings.TrimPrefix(text, "/"), true
+	}
+	if cwd == "" {
+		return "", "", false
+	}
+	return cwd, text, true
+}
+
+// splitDirPrefix splits the text (relative to its base) into the directory
+// part and the last-segment prefix. `a/b/c` → ("a/b", "c"); `a/b/` → ("a/b",
+// ""); `c` → ("", "c").
+func splitDirPrefix(rest string) (dir, prefix string) {
+	if rest == "" {
+		return "", ""
+	}
+	if i := strings.LastIndex(rest, "/"); i >= 0 {
+		return rest[:i], rest[i+1:]
+	}
+	return "", rest
+}
+
+// min is Go 1.21's builtin; keep a local copy so this file reads without
+// relying on the toolchain's exact version.
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}

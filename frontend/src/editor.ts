@@ -52,6 +52,13 @@ export interface EditorActions {
    *  may open recall instead of moving the caret (design §8.10 v6 — Up is
    *  caret movement first). */
   onUpAtTop?: () => void
+  /** Fired when Tab is pressed with the completion dropdown closed. Tab opens
+   *  the dropdown (design §8.7's decided option 1: with no candidates it
+   *  sends nothing — never a raw `\t`, which would complete the shell's
+   *  empty buffer). While the dropdown is open, the completion arbiter
+   *  consumes Tab to accept the selection, so this fires only when closed.
+   *  Tab never moves the focus either way (nocx-w7h.2/.3). */
+  onTab?: () => void
 }
 
 export class CommandEditor {
@@ -75,10 +82,21 @@ export class CommandEditor {
    *  they must not fire onInputChange either. */
   private _programmatic = false
   /** Optional keyboard arbiter: called (capture phase) BEFORE the editor's
-   *  own key handling. Return true to consume the key. The recall overlay
-   *  registers here, so an open overlay owns navigation/accept/dismiss and
-   *  nothing the editor handles — submit, clear, interrupt — can fire while
-   *  it is up (nocx-w7h.4: the keyboard arbiter is part of the recall task). */
+   *  own key handling. Return true to consume the key. One arbiter chain,
+   *  composed at the root (terminal-content.ts): recall first, completion
+   *  second, editor defaults last.
+   *
+   *  THE OWNERSHIP RULE (design §8.9.4 — two state machines, one keyboard):
+   *  recall is the higher-priority surface. While it is open it owns every
+   *  key, and the composition dismisses the completion dropdown the moment
+   *  recall opens — the two never stack, so there is never a question of
+   *  which surface Tab reaches while recall is open (recall's navigating
+   *  state hands Tab to the editor via abandonToEdit, and the editor's Tab
+   *  then opens completion on the restored draft). While the completion
+   *  dropdown is open it owns ↑/↓ (navigate, wrapping), Enter/Tab (accept),
+   *  Escape (close exactly one surface per press) and Right/End (ghost
+   *  accept when every §8.7 precondition holds). Everything else falls
+   *  through to this editor's own handling and then to CM6. */
   private keyArbiter: ((e: KeyboardEvent) => boolean) | null = null
 
   /** Register (or clear) the keyboard arbiter. Cleared on dispose. */
@@ -380,16 +398,18 @@ export class CommandEditor {
       this.submit()
       return
     }
-    // Tab belongs to completion, and completion is not built yet (nocx-w7h.2,
-    // .3, nocx-4ff.23). Until it is, Tab is SWALLOWED rather than left to the
-    // browser: unbound, it is an ordinary focus-move, so pressing it in a
-    // terminal silently took the focus out of the prompt and the next
-    // keystroke went nowhere. Measured 2026-08-02 — document.activeElement
-    // went from cm-content to nothing. Doing nothing is not the end state; it
-    // is the honest one until Tab has something to complete with.
+    // Tab opens the completion dropdown (design §8.7's decided option 1: our
+    // dropdown only; with no candidates it sends nothing — never a raw `\t`,
+    // which would complete the shell's empty buffer, since ADR-0004 hands
+    // the line over atomically at submit). The key stays SWALLOWED so it can
+    // never move the focus out of the prompt (measured 2026-08-02:
+    // document.activeElement went from cm-content to nothing). While the
+    // dropdown is open, the completion arbiter consumes Tab to accept the
+    // selection, so this branch only fires when the dropdown is closed.
     if (e.key === 'Tab' && !e.ctrlKey && !e.metaKey && !e.altKey) {
       e.preventDefault()
       e.stopPropagation()
+      this.actions.onTab?.()
       return
     }
     // Escape clears the draft without interrupting the shell (Ctrl-C).
@@ -604,6 +624,24 @@ export class CommandEditor {
       this._programmatic = false
     }
     this.view.focus()
+  }
+
+  /**
+   * Replace [from, to) with text and place the caret after it (programmatic
+   * — fires no input events). The completion controller applies a candidate
+   * over its replacement range through this seam (design §8.9: insertText is
+   * what is inserted; displayText is never).
+   */
+  applyReplacement(from: number, to: number, text: string): void {
+    this._programmatic = true
+    try {
+      this.view.dispatch({
+        changes: { from, to, insert: text },
+        selection: { anchor: from + text.length },
+      })
+    } finally {
+      this._programmatic = false
+    }
   }
   hide(): void {
     // Stopped, not left running. Every tab owns an editor, so a timer that

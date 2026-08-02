@@ -533,6 +533,30 @@ describe('alias hints', () => {
   })
 })
 
+describe('tab completion wiring', () => {
+  it('Tab fires onTab and is consumed (never submits, never moves focus)', () => {
+    const onTab = vi.fn()
+    const { view, submit } = setup({ onTab })
+    // dispatchEvent resolves false when the event was canceled — the Tab was
+    // swallowed, so it can never reach the browser's focus-move default.
+    expect(key(view, { key: 'Tab' })).toBe(false)
+    expect(onTab).toHaveBeenCalledTimes(1)
+    expect(submit).not.toHaveBeenCalled()
+  })
+
+  it('Ctrl-Tab is not completion — it falls through untouched', () => {
+    const onTab = vi.fn()
+    const { view } = setup({ onTab })
+    expect(key(view, { key: 'Tab', ctrlKey: true })).toBe(true)
+    expect(onTab).not.toHaveBeenCalled()
+  })
+
+  it('with no onTab action, Tab is still swallowed (focus never leaves)', () => {
+    const { view } = setup()
+    expect(key(view, { key: 'Tab' })).toBe(false)
+  })
+})
+
 // ── Shell syntax highlighting (shell-highlight.ts) ─────────────────────
 
 /** Read the live line's token spans as [class, text] pairs, in DOM order. */
