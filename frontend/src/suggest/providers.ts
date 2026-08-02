@@ -29,6 +29,34 @@ export const MAX_PROVIDER_CANDIDATES = 20
  */
 export const MAX_HISTORY_IN_ARGUMENT_POSITION = 5
 
+/**
+ * Why an applicable provider answered nothing. Zero candidates is a state
+ * the product shows, never silence: the controller renders one
+ * non-selectable row naming the reason when it is specific, and the generic
+ * "no matches" otherwise.
+ */
+export type EmptyReason =
+  /** Nothing matched the prefix — the default when a provider has no better
+   *  explanation. */
+  | { kind: 'no-match' }
+  /** The directory this command completes lists nothing of the kind it
+   *  takes (`cd Downloads/` where Downloads holds only files). `dir` is the
+   *  display name of the directory, '' when it is the session cwd. */
+  | { kind: 'dirs-only-empty'; dir: string }
+  /** The OSC 636 command snapshot has not arrived yet — command names
+   *  cannot be offered, and pretending the shell has none would be a lie. */
+  | { kind: 'snapshot-pending' }
+
+/** What one provider answers to one query: candidates plus — when it
+ *  answered nothing — the specific reason, so "no matches" is never
+ *  indistinguishable from a broken feature. */
+export interface SuggestBatch {
+  readonly candidates: Candidate[]
+  /** Why this provider contributed nothing, when it has a specific reason
+   *  to name. Absent = the generic "no matches". */
+  readonly emptyReason?: EmptyReason | null
+}
+
 /** Everything a provider needs to answer one query. */
 export interface SuggestContext {
   /** The whole document line. */
@@ -52,7 +80,7 @@ export interface SuggestionProvider {
   applicable(ctx: SuggestContext): boolean
   /** May resolve synchronously — the in-memory command provider has nothing
    *  to await, and a microtask per keystroke is a waste. */
-  suggest(ctx: SuggestContext, signal: AbortSignal): Promise<Candidate[]> | Candidate[]
+  suggest(ctx: SuggestContext, signal: AbortSignal): Promise<SuggestBatch> | SuggestBatch
 }
 
 // ── command: the OSC 636 snapshot ────────────────────────────────────────
@@ -69,19 +97,27 @@ export function commandProvider(store: CommandSnapshotStore): SuggestionProvider
     applicable: (ctx) => ctx.position === 'command' && !ctx.token.text.includes('/'),
     suggest(ctx) {
       const q = ctx.token.text
-      if (q === '') return []
+      if (q === '') return { candidates: [] }
+      // No snapshot yet: name the degrade honestly rather than pretending
+      // the shell has no commands — "command names are still loading" is a
+      // different truth from "nothing matches".
+      if (store.status === 'unavailable') {
+        return { candidates: [], emptyReason: { kind: 'snapshot-pending' } }
+      }
       const names = store.matching(q).slice(0, MAX_PROVIDER_CANDIDATES)
-      return names.map((name): Candidate => ({
-        id: `cmd:${name}`,
-        targetId: 'shell',
-        providerId: 'command',
-        displayText: name,
-        insertText: name,
-        replacement: { from: ctx.token.from, to: ctx.token.to },
-        matchRanges: [{ from: 0, to: q.length }],
-        source: 'command',
-        eligibleForGhostText: true,
-      }))
+      return {
+        candidates: names.map((name): Candidate => ({
+          id: `cmd:${name}`,
+          targetId: 'shell',
+          providerId: 'command',
+          displayText: name,
+          insertText: name,
+          replacement: { from: ctx.token.from, to: ctx.token.to },
+          matchRanges: [{ from: 0, to: q.length }],
+          source: 'command',
+          eligibleForGhostText: true,
+        })),
+      }
     },
   }
 }
@@ -103,7 +139,7 @@ export function historyProvider(opts: {
     applicable: (ctx) => ctx.doc.trim() !== '',
     async suggest(ctx, signal) {
       const line = ctx.doc
-      if (line === '') return []
+      if (line === '') return { candidates: [] }
       // In argument position on a local session the path provider always
       // answers (see fsProvider), so history is a sidebar there — capped so
       // a flood of whole-line rows can never bury the paths. Command
@@ -115,7 +151,7 @@ export function historyProvider(opts: {
           ? MAX_HISTORY_IN_ARGUMENT_POSITION
           : MAX_PROVIDER_CANDIDATES
       const result = await opts.query(ctx.cwd, ctx.host)
-      if (signal.aborted) return []
+      if (signal.aborted) return { candidates: [] }
       const seen = new Set<string>()
       const out: Candidate[] = []
       for (const e of result.entries) {
@@ -140,7 +176,7 @@ export function historyProvider(opts: {
         })
         if (out.length >= cap) break
       }
-      return out
+      return { candidates: out }
     },
   }
 }
@@ -172,6 +208,16 @@ function commandWord(ctx: SuggestContext): string {
   return ctx.doc.slice(0, ctx.token.from).trim().split(/\s+/)[0] ?? ''
 }
 
+/** The display name of the directory a token's path prefix lists — '' when
+ *  the listing is the session cwd itself (an empty token, `./` or `../`),
+ *  which the empty row then names as "this folder". */
+function listedDirName(ctx: SuggestContext): string {
+  const t = ctx.token.text
+  const prefix = t.slice(0, t.lastIndexOf('/') + 1)
+  const name = prefix.replace(/\/+$/, '').split('/').pop() ?? ''
+  return name === '.' || name === '..' || name === '' ? '' : name
+}
+
 export function fsProvider(opts: {
   complete: (text: string, cwd: string) => Promise<FsComplete>
 }): SuggestionProvider {
@@ -192,7 +238,7 @@ export function fsProvider(opts: {
       // rows show bare names — never a `./` the user did not type.
       const q = ctx.token.text === '' ? './' : ctx.token.text
       const result = await opts.complete(q, ctx.cwd)
-      if (signal.aborted) return []
+      if (signal.aborted) return { candidates: [] }
       // The part of the token the user has already typed up to the last
       // slash — display and insert both carry it, so accepting a candidate
       // never loses the directory the user already wrote.
@@ -203,10 +249,21 @@ export function fsProvider(opts: {
       // `cd`, `pushd` and `rmdir` take directories only; the default for
       // everything else (including unknown commands) is both kinds.
       const directoriesOnly = DIRECTORIES_ONLY[commandWord(ctx)] === true
-      return result.entries
-        .filter((e) => !directoriesOnly || e.isDir)
-        .slice(0, MAX_PROVIDER_CANDIDATES)
-        .map((e): Candidate => {
+      const rows = result.entries.filter((e) => !directoriesOnly || e.isDir)
+      if (rows.length === 0) {
+        // The query answered nothing — but WHY matters: a directory that
+        // holds only files is a different message from "nothing matches",
+        // and a dirs-only command is the case the dropdown exists for.
+        if (directoriesOnly && result.entries.length > 0) {
+          return {
+            candidates: [],
+            emptyReason: { kind: 'dirs-only-empty', dir: listedDirName(ctx) },
+          }
+        }
+        return { candidates: [] }
+      }
+      return {
+        candidates: rows.slice(0, MAX_PROVIDER_CANDIDATES).map((e): Candidate => {
           const display = tokenPrefix + e.name + (e.isDir ? '/' : '')
           const segStart = display.length - e.name.length - (e.isDir ? 1 : 0)
           return {
@@ -222,7 +279,8 @@ export function fsProvider(opts: {
             environment: { cwd: ctx.cwd, confidence: 'asserted' },
             eligibleForGhostText: true,
           }
-        })
+        }),
+      }
     },
   }
 }

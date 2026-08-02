@@ -1,15 +1,16 @@
 // @vitest-environment jsdom
 // CompletionController — the lifecycle contract (design §8.7, §8.9.2, §8.9.4):
-// Tab opens the dropdown, no candidates sends nothing, first results render
-// as they arrive, a late arrival never moves the selection, a keystroke
-// aborts, one provider's error never kills the others, the latency budget
-// gates the open decision, and ghost text accepts only under every §8.7
-// precondition.
+// Tab opens the dropdown, zero candidates is a state the product shows (the
+// honest empty row — never silence), first results render as they arrive, a
+// late arrival never moves the selection, a keystroke aborts, one provider's
+// error never kills the others, the latency budget gates a TYPING query's
+// open decision but an explicit Tab's open intent survives it, and ghost
+// text accepts only under every §8.7 precondition.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { CompletionController, LATENCY_BUDGET_MS, type CompletionEditor } from './controller'
 import { CompletionDropdown } from '../ui/completion-dropdown'
 import type { Candidate } from './candidate'
-import type { SuggestionProvider, SuggestContext } from './providers'
+import type { SuggestionProvider, SuggestContext, EmptyReason } from './providers'
 
 // ── fakes ────────────────────────────────────────────────────────────────
 
@@ -67,22 +68,32 @@ const manualProvider = (
     suggest: () => {
       const d = deferred()
       queue.push(d)
-      return d.promise
+      return d.promise.then((candidates) => ({ candidates }))
     },
   }
   return { provider, next: () => queue.shift()! }
 }
 
-/** A provider that answers instantly. */
+/** A provider that answers instantly. `emptyReason` lets a test make the
+ *  provider answer NOTHING with a specific explanation. */
 const instantProvider = (
   id: string,
   make: (ctx: SuggestContext) => Candidate[],
   applicable = true,
+  emptyReason?: EmptyReason,
 ): SuggestionProvider => ({
   id,
   targetId: 'shell',
   applicable: () => applicable,
-  suggest: (ctx) => make(ctx),
+  suggest: (ctx) => Promise.resolve({ candidates: make(ctx), emptyReason }),
+})
+
+/** A provider that always answers nothing, with the given reason. */
+const emptyProvider = (id: string, emptyReason?: EmptyReason): SuggestionProvider => ({
+  id,
+  targetId: 'shell',
+  applicable: () => true,
+  suggest: () => Promise.resolve({ candidates: [], emptyReason }),
 })
 
 const cand = (over: Partial<Candidate> & { id: string }): Candidate => ({
@@ -133,6 +144,10 @@ const key = (k: string, init: KeyboardEventInit = {}): KeyboardEvent =>
 const selectedRow = (dropdown: CompletionDropdown) =>
   dropdown.root.querySelector('.ui-completion-dropdown__row[data-selected="true"]')
 
+/** The honest empty row, when the panel shows one. */
+const emptyRow = (dropdown: CompletionDropdown) =>
+  dropdown.root.querySelector('.ui-completion-dropdown__row[data-empty="true"]')
+
 /** Flush microtasks and zero-delay timers, under fake timers or real. */
 const flush = async () => {
   if (vi.isFakeTimers()) {
@@ -162,9 +177,86 @@ describe('opening', () => {
     expect(dropdown.root.querySelectorAll('.ui-completion-dropdown__row')).toHaveLength(1)
   })
 
-  it('with no candidates it sends nothing — the dropdown never opens', async () => {
+  it('with zero candidates Tab opens the honest empty row — never silence', async () => {
     const { dropdown, controller } = rig({
-      providers: [instantProvider('a', () => [])],
+      providers: [emptyProvider('a')],
+    })
+    controller.open()
+    await flush()
+    expect(dropdown.isOpen).toBe(true)
+    expect(emptyRow(dropdown)).not.toBeNull()
+    expect(emptyRow(dropdown)?.textContent).toContain('No matches')
+    // One row, not selectable, no footer hints (nothing to insert or cycle).
+    expect(dropdown.root.querySelectorAll('.ui-completion-dropdown__row')).toHaveLength(1)
+    expect(emptyRow(dropdown)?.getAttribute('aria-selected')).toBe('false')
+    expect(dropdown.root.querySelector('.ui-completion-dropdown__footer')).toBeNull()
+  })
+
+  it('the empty row names the directory when the fs provider knows it', async () => {
+    const { dropdown, controller } = rig({
+      providers: [emptyProvider('fs', { kind: 'dirs-only-empty', dir: 'Downloads' })],
+    })
+    controller.open()
+    await flush()
+    expect(emptyRow(dropdown)?.textContent).toContain('No subdirectories in Downloads')
+  })
+
+  it('a pending command snapshot is named, not hidden', async () => {
+    const { dropdown, controller } = rig({
+      providers: [emptyProvider('cmd', { kind: 'snapshot-pending' })],
+    })
+    controller.open()
+    await flush()
+    expect(emptyRow(dropdown)?.textContent).toContain('Command names are still loading')
+  })
+
+  it('the most specific reason wins when several providers answer nothing', async () => {
+    const { dropdown, controller } = rig({
+      providers: [
+        emptyProvider('history', { kind: 'no-match' }),
+        emptyProvider('cmd', { kind: 'snapshot-pending' }),
+        emptyProvider('fs', { kind: 'dirs-only-empty', dir: 'Downloads' }),
+      ],
+    })
+    controller.open()
+    await flush()
+    expect(emptyRow(dropdown)?.textContent).toContain('No subdirectories in Downloads')
+  })
+  it('erasing the document closes the panel — a footer-only panel is unreachable', async () => {
+    // The provider declines on an empty line exactly like the shipped set
+    // (history and fs both do; the command provider answers nothing for an
+    // empty token), so the erase query settles with zero candidates.
+    const { editor, dropdown, controller } = rig({
+      providers: [
+        instantProvider('a', (ctx) => (ctx.doc.trim() === '' ? [] : [cand({ id: 'x' })])),
+      ],
+    })
+    controller.open()
+    await flush()
+    expect(dropdown.isOpen).toBe(true)
+
+    // The user erases everything: the fresh query has an empty document and
+    // nothing to complete, so the panel must CLOSE — not hang showing a
+    // footer with no rows.
+    editor.doc = ''
+    editor.caret = 0
+    controller.onDocChanged()
+    await flush()
+    expect(dropdown.isOpen).toBe(false)
+    expect(dropdown.root.querySelectorAll('.ui-completion-dropdown__row')).toHaveLength(0)
+  })
+
+  it('an empty line opens nothing (every shipped provider declines)', async () => {
+    const { dropdown, controller } = rig({
+      providers: [
+        {
+          id: 'a',
+          targetId: 'shell',
+          applicable: (ctx) => ctx.doc.trim() !== '',
+          suggest: () => Promise.resolve({ candidates: [cand({ id: 'x' })] }),
+        },
+      ],
+      editorDoc: '',
     })
     controller.open()
     await flush()
@@ -181,19 +273,18 @@ describe('opening', () => {
     expect(suggested).not.toHaveBeenCalled()
   })
 
-  it('an empty line opens nothing (every shipped provider declines)', async () => {
-    const { dropdown, controller } = rig({
-      providers: [
-        {
-          id: 'a',
-          targetId: 'shell',
-          applicable: (ctx) => ctx.doc.trim() !== '',
-          suggest: () => [cand({ id: 'x' })],
-        },
-      ],
-      editorDoc: '',
+  it('erasing the document while the empty row is showing closes it too', async () => {
+    const { editor, dropdown, controller } = rig({
+      providers: [emptyProvider('a')],
     })
     controller.open()
+    await flush()
+    expect(dropdown.isOpen).toBe(true)
+    expect(emptyRow(dropdown)).not.toBeNull()
+
+    editor.doc = ''
+    editor.caret = 0
+    controller.onDocChanged()
     await flush()
     expect(dropdown.isOpen).toBe(false)
   })
@@ -207,6 +298,16 @@ describe('opening', () => {
     await flush()
     // Candidates exist (the ghost shows), but the dropdown stays closed —
     // only Tab may open it.
+    expect(dropdown.isOpen).toBe(false)
+  })
+
+  it('typing with the dropdown closed never opens the empty row either', async () => {
+    const { editor, dropdown, controller } = rig({
+      providers: [emptyProvider('a')],
+    })
+    editor.type('z')
+    controller.onDocChanged()
+    await flush()
     expect(dropdown.isOpen).toBe(false)
   })
 })
@@ -317,7 +418,43 @@ describe('streaming and selection', () => {
     ).toContain('one')
   })
 
-  it('the latency budget gates the open decision', async () => {
+  it('a typing query that finds nothing while the panel is open shows the honest row', async () => {
+    const { editor, dropdown, controller } = rig({
+      providers: [instantProvider('a', () => [])],
+    })
+    // Tab opens with candidates…
+    controller.open()
+    await flush()
+    expect(dropdown.isOpen).toBe(true)
+    expect(emptyRow(dropdown)).not.toBeNull()
+    // …the user keeps typing; the row is replaced by candidates when they
+    // arrive, and stays the honest "No matches" while they do not.
+    editor.type('x')
+    controller.onDocChanged()
+    await flush()
+    expect(dropdown.isOpen).toBe(true)
+    expect(emptyRow(dropdown)?.textContent).toContain('No matches')
+  })
+
+  it('the latency budget gates the open decision of a TYPING query', async () => {
+    vi.useRealTimers()
+    const slow = manualProvider('slow', true)
+    const { editor, dropdown, controller } = rig({
+      providers: [slow.provider],
+      latencyBudgetMs: 50,
+    })
+    // A typing query (not Tab): nothing arrived within the budget, so the
+    // dropdown stays closed and the late answer is discarded — a dropdown
+    // must not flash open under the fingers.
+    editor.type('t')
+    controller.onDocChanged()
+    await new Promise((r) => setTimeout(r, 80))
+    slow.next().resolve([cand({ id: 'late' })])
+    await flush()
+    expect(dropdown.isOpen).toBe(false)
+  })
+
+  it('a late batch for an explicit Tab opens the dropdown after the budget — the open intent survives', async () => {
     vi.useRealTimers()
     const slow = manualProvider('slow', true)
     const { dropdown, controller } = rig({
@@ -325,12 +462,14 @@ describe('streaming and selection', () => {
       latencyBudgetMs: 50,
     })
     controller.open()
+    // Nothing within the budget; the Tab query is willing to wait.
     await new Promise((r) => setTimeout(r, 80))
-    // Nothing arrived within the budget: the dropdown stays closed, and the
-    // late answer is discarded for this query.
+    expect(dropdown.isOpen).toBe(false)
     slow.next().resolve([cand({ id: 'late' })])
     await flush()
-    expect(dropdown.isOpen).toBe(false)
+    // The late batch still opens the dropdown — Tab asked for the list.
+    expect(dropdown.isOpen).toBe(true)
+    expect(dropdown.root.textContent).toContain('late')
   })
 
   it('a first result inside the budget opens the dropdown', async () => {
@@ -492,6 +631,37 @@ describe('keyboard', () => {
     expect(controller.handleKey(e)).toBe(true)
     expect(dropdown.isOpen).toBe(false)
     expect(editor.doc).toBe('git sta') // the draft is untouched
+  })
+
+  it('the empty row is never selectable: arrows pass through, Enter submits, Esc closes, Tab re-asks', async () => {
+    const { editor, dropdown, controller } = rig({
+      providers: [emptyProvider('a')],
+    })
+    await open(controller)
+    expect(emptyRow(dropdown)).not.toBeNull()
+
+    // Arrows are not consumed — nothing to navigate, the caret moves.
+    const down = key('ArrowDown')
+    expect(controller.handleKey(down)).toBe(false)
+    expect(down.defaultPrevented).toBe(false)
+    // No row ever carries the selected variance.
+    expect(selectedRow(dropdown)).toBeNull()
+
+    // Enter is not consumed — it falls through to the editor's submit.
+    const enter = key('Enter')
+    expect(controller.handleKey(enter)).toBe(false)
+    expect(enter.defaultPrevented).toBe(false)
+
+    // Esc closes exactly the panel.
+    const esc = key('Escape')
+    expect(controller.handleKey(esc)).toBe(true)
+    expect(dropdown.isOpen).toBe(false)
+
+    // A Tab with the panel closed re-asks (falls through to the editor's
+    // onTab, which calls open() again) — it is not swallowed as a cycle.
+    const tab = key('Tab')
+    expect(controller.handleKey(tab)).toBe(false)
+    expect(editor.doc).toBe('git sta')
   })
 
   it('a plain key falls through so the keystroke can re-query', async () => {

@@ -7,13 +7,19 @@
 
 .ui-completion-dropdown {
   position: absolute;
-  left: 0;
-  right: 0;
+  left: 0; /* the kit's default; the component overrides it inline when the
+              caret anchor is known — the panel opens at the caret, not at
+              the pane's edge */
   bottom: 100%; /* the panel floats above the editor it sits on */
   margin-bottom: 6px;
   display: none;
   flex-direction: column;
   max-height: 40vh;
+  /* Content-sized: as wide as the longest row, capped — never the editor's
+     width. The component sets the exact width inline from the list's
+     scrollWidth; these are the fallbacks before (and beyond) that. */
+  width: max-content;
+  max-width: min(90vw, 640px);
   min-width: 320px;
   background: var(--color-surface-raised);
   border: 1px solid var(--color-border);
@@ -35,6 +41,24 @@
   max-height: calc(40vh - 2rem);
 }
 
+/* Rows never wrap: the panel's width is the widest row's, and a wrapped
+   row would under-measure it (scrollWidth reads the longest unwrapped
+   line). */
+.ui-completion-dropdown__row {
+  white-space: nowrap;
+}
+
+/* The honest "nothing to choose" row: an explanation, not a selectable
+   item — muted and italic so it never reads as a candidate, and nothing on
+   it reacts to hover or click (the component wires no listeners). */
+.ui-completion-dropdown__row[data-empty='true'] {
+  color: var(--color-text-muted);
+  font-style: italic;
+  white-space: normal;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* The matched prefix inside a row's display text: a soft accent wash that
    reads as "this is the part you typed", never as a selection. */
 .ui-completion-dropdown__match {
@@ -44,11 +68,13 @@
 
 /* One line, every hint in it: the groups are spans laid out by flex with a
    real gap between them and nowrap, so the key hints can neither get their
-   own rows nor wrap apart. */
+   own rows nor wrap apart. In a narrow content-sized panel the whole row
+   wraps together rather than overflowing. */
 .ui-completion-dropdown__footer {
   display: flex;
   align-items: center;
-  gap: var(--space-4);
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
   white-space: nowrap;
   padding: var(--space-2) var(--space-3);
   border-top: 1px solid var(--color-divider);

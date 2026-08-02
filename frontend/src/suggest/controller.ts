@@ -46,7 +46,7 @@ import type { Candidate } from './candidate'
 import { mergeCandidates, preserveSelection } from './merge'
 import { rankCandidates } from './rank'
 import { tokenAt, positionOf } from './token'
-import type { SuggestionProvider, SuggestContext } from './providers'
+import type { SuggestionProvider, SuggestContext, SuggestBatch, EmptyReason } from './providers'
 import type { CompletionDropdown } from '../ui/completion-dropdown'
 
 /** How long the dropdown waits for a first result before giving up on
@@ -90,7 +90,16 @@ interface OpenState {
   readonly generation: number
 }
 
-type DropdownState = { readonly name: 'closed' } | OpenState
+/** The honest "nothing to choose" state: one non-selectable row explaining
+ *  why, never a panel with no rows and only a footer. */
+interface EmptyState {
+  readonly name: 'empty'
+  /** The generation whose emptiness is displayed. */
+  readonly generation: number
+  readonly message: string
+}
+
+type DropdownState = { readonly name: 'closed' } | OpenState | EmptyState
 
 /** The shared box between the controller and the ghost ViewPlugin. The
  *  plugin renders only while the box's revision still matches the view's
@@ -153,6 +162,14 @@ export class CompletionController {
   /** Whether the query in flight may open the dropdown (Tab) or is a typing
    *  query that may only re-anchor the ghost. */
   private openIntent = false
+  /** How many applicable providers the query in flight has — the query is
+   *  "settled" when this many batches have delivered (or the budget expired
+   *  for a typing query). */
+  private applicableCount = 0
+  private delivered = 0
+  /** The most specific empty reason any delivered batch named — what the
+   *  honest empty row says when the query settles with zero candidates. */
+  private bestReason: EmptyReason | null = null
   private editor: CompletionEditor | null = null
   private readonly ghostBox: GhostBox = { candidate: null, queryDoc: '', view: null }
 
@@ -264,6 +281,17 @@ export class CompletionController {
       return false
     }
 
+    if (s.name === 'empty') {
+      // A non-selectable explanation row owns nothing: Esc closes it, and
+      // every other key falls through — Enter submits the line, typing
+      // re-queries, Tab re-asks. The row must never trap a keystroke.
+      if (e.key === 'Escape') {
+        this.dismiss()
+        return this.consume(e)
+      }
+      return false
+    }
+
     if (e.key === 'ArrowDown') {
       this.move(1)
       return this.consume(e)
@@ -307,7 +335,7 @@ export class CompletionController {
   /** Close the dropdown and drop the ghost (Esc, or the recall overlay
    *  taking the surface). The draft is untouched. */
   dismiss(): void {
-    if (this.state.name === 'open') {
+    if (this.state.name !== 'closed') {
       this.state = { name: 'closed' }
       this.options.dropdown.hide()
     }
@@ -324,11 +352,18 @@ export class CompletionController {
     const editor = this.editor
     if (!editor) return
     this.abort?.abort()
+    // A stale timer from an earlier query must never settle the new one.
+    if (this.budgetTimer !== undefined) {
+      clearTimeout(this.budgetTimer)
+      this.budgetTimer = undefined
+    }
     const ac = new AbortController()
     this.abort = ac
     const gen = ++this.generation
     this.queryDoc = editor.getDoc()
     this.queryCandidates = []
+    this.delivered = 0
+    this.bestReason = null
     this.gaveUp = false
     // Only a Tab (open()) may OPEN the dropdown; a keystroke (onDocChanged)
     // re-anchors the ghost and — if the dropdown is already open — keeps it
@@ -350,36 +385,58 @@ export class CompletionController {
       host: env.host,
     }
 
-    // The budget bounds the OPEN decision only: nothing within the budget →
-    // the dropdown stays closed for this query, whatever arrives later.
+    // The budget bounds the OPEN decision of a TYPING query only: nothing
+    // within the budget and the dropdown stays closed for that query, even
+    // if a provider answers later — a dropdown must not flash open under
+    // the fingers. An explicit Tab is the user asking for the list and
+    // willing to wait a moment: the open intent survives the budget, so a
+    // late batch for a Tab query still opens the dropdown.
     const budget = this.options.latencyBudgetMs ?? LATENCY_BUDGET_MS
     if (budget > 0) {
       this.budgetTimer = setTimeout(() => {
         this.budgetTimer = undefined
-        if (this.state.name === 'closed') this.gaveUp = true
+        if (!this.openIntent) {
+          // The budget bounds a TYPING query's open decision: a dropdown
+          // must not flash open under the fingers, so a typing query that
+          // nothing answered within the budget gives up — its late batches
+          // never open a closed panel. An explicit Tab is the user asking
+          // for the list and willing to wait: the open intent survives the
+          // budget, so a late batch for a Tab query still opens the
+          // dropdown, and the empty row waits for the providers rather
+          // than guessing.
+          if (this.state.name === 'closed') this.gaveUp = true
+          this.settleIfDone()
+          this.render()
+        }
       }, budget)
     }
-
     const applicable = this.options.providers.filter((p) => p.applicable(ctx))
+    this.applicableCount = applicable.length
     if (applicable.length === 0) {
       this.abort = null
+      // Nothing was consulted: the query is settled empty. An empty line
+      // closes the panel; a non-empty one shows the honest row (a typing
+      // query with a closed panel still shows nothing).
+      this.settleIfDone()
+      this.render()
       return
     }
     for (const provider of applicable) {
       Promise.resolve(provider.suggest(ctx, ac.signal))
         .then((batch) => this.onBatch(gen, batch, position))
         .catch(() => {
-          // One provider's error does not kill the others; the dropdown
-          // shows what the rest answered.
-          this.onBatch(gen, [], position)
+          // One provider's error does not kill the others; an errored
+          // provider counts as delivered and contributes no reason.
+          this.onBatch(gen, { candidates: [] }, position)
         })
     }
   }
 
-  private onBatch(gen: number, batch: Candidate[], position: 'command' | 'argument'): void {
+  private onBatch(gen: number, batch: SuggestBatch, position: 'command' | 'argument'): void {
     if (gen !== this.generation) return // a provider may not deliver after abort
-    if (this.gaveUp && this.state.name === 'closed') return // the budget expired
-    const ranked = rankCandidates(batch, {
+    if (this.gaveUp && this.state.name === 'closed') return // a typing query gave up
+    this.delivered++
+    const ranked = rankCandidates(batch.candidates, {
       query: this.queryDoc,
       now: (this.options.now ?? Date.now)(),
       position,
@@ -403,21 +460,100 @@ export class CompletionController {
     })
     this.queryCandidates = ordered
 
-    if (this.state.name === 'open') {
-      const selected = preserveSelection(
-        { selectedIndex: this.state.selectedIndex, candidates: this.state.candidates },
-        ordered,
-      )
-      this.state = { name: 'open', candidates: ordered, selectedIndex: selected, generation: gen }
-    } else if (this.openIntent && ordered.length > 0) {
-      // A Tab query opens the dropdown on its first results; a typing query
-      // never opens it (the ghost is the typing surface).
-      this.state = { name: 'open', candidates: ordered, selectedIndex: 0, generation: gen }
-    } else {
-      this.state = { name: 'closed' }
-      this.options.dropdown.hide()
+    if (ordered.length > 0) {
+      // Candidates always win: an earlier empty reason is moot.
+      this.bestReason = null
+      if (this.state.name === 'open') {
+        const selected = preserveSelection(
+          { selectedIndex: this.state.selectedIndex, candidates: this.state.candidates },
+          ordered,
+        )
+        this.state = { name: 'open', candidates: ordered, selectedIndex: selected, generation: gen }
+      } else if (this.openIntent || this.state.name === 'empty') {
+        // A Tab query opens the dropdown on its first results — and so does
+        // a LATE batch for a Tab query the budget had already settled empty
+        // (the open intent survives the budget). A typing query never opens
+        // a closed dropdown; one that is already open keeps its list live.
+        this.state = { name: 'open', candidates: ordered, selectedIndex: 0, generation: gen }
+      } else {
+        this.state = { name: 'closed' }
+        this.options.dropdown.hide()
+      }
+      this.render()
+      return
     }
+
+    // An empty batch: remember why it was empty, then settle once every
+    // applicable provider has answered — zero candidates is a state the
+    // product shows, never silence.
+    this.trackEmptyReason(batch.emptyReason)
+    this.settleIfDone()
     this.render()
+  }
+
+  /**
+   * The current query has zero candidates and is settled (every applicable
+   * provider delivered, or a typing query gave up at the budget): show the
+   * honest empty row — or close the panel when the document is empty, where
+   * a panel with no rows and only a footer must be unreachable. Typing
+   * never OPENS a closed panel; only Tab (or an already-open panel)
+   * renders the row.
+   */
+  private settleIfDone(): void {
+    if (this.queryCandidates.length > 0) return
+    if (this.delivered < this.applicableCount && !this.gaveUp) return
+    if (this.queryDoc.trim() === '') {
+      this.dismiss()
+      return
+    }
+    const s = this.state
+    if (this.openIntent || s.name === 'empty' || s.name === 'open') {
+      this.state = { name: 'empty', generation: this.generation, message: this.emptyMessage() }
+    }
+  }
+
+  private trackEmptyReason(reason: EmptyReason | null | undefined): void {
+    if (!reason) return
+    if (this.bestReason === null) {
+      this.bestReason = reason
+      return
+    }
+    // Prefer the most specific reason: a directory that has no
+    // subdirectories of the kind the command takes beats "snapshot pending"
+    // beats the generic "no matches".
+    const priority: Record<EmptyReason['kind'], number> = {
+      'dirs-only-empty': 0,
+      'snapshot-pending': 1,
+      'no-match': 2,
+    }
+    if (priority[reason.kind] < priority[this.bestReason.kind]) this.bestReason = reason
+  }
+
+  private emptyMessage(): string {
+    switch (this.bestReason?.kind) {
+      case 'dirs-only-empty':
+        return this.bestReason.dir === ''
+          ? 'No subdirectories in this folder'
+          : `No subdirectories in ${this.bestReason.dir}`
+      case 'snapshot-pending':
+        return 'Command names are still loading — press Tab again in a moment'
+      default:
+        return 'No matches'
+    }
+  }
+
+  /** The dropdown's left anchor, in px relative to the editor root: the
+   *  caret's on-screen x when a CM6 view is attached, null otherwise (the
+   *  kit keeps its left edge default). */
+  private caretAnchor(): number | null {
+    const view = this.ghostBox.view
+    if (!view) return null
+    const root = this.options.dropdown.root.parentElement
+    if (!root) return null
+    const head = view.state.selection.main.head
+    const coords = view.coordsAtPos(head)
+    if (!coords) return null
+    return coords.left - root.getBoundingClientRect().left
   }
 
   /** Push the current state to the dropdown and the ghost. */
@@ -435,7 +571,10 @@ export class CompletionController {
           kind: c.kind,
         })),
         s.selectedIndex,
+        this.caretAnchor(),
       )
+    } else if (s.name === 'empty') {
+      this.options.dropdown.showEmpty(s.message, this.caretAnchor())
     } else {
       this.options.dropdown.hide()
     }

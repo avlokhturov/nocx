@@ -124,26 +124,109 @@ test.describe('tab completion', () => {
     }
   })
 
-  test('no candidates: Tab sends nothing and opens nothing', async ({ page }) => {
+  test('no candidates: Tab opens a row that says nothing matched — never silence', async ({
+    page,
+  }) => {
     await page.goto('/')
     await expect(page.locator('.nocx-tab')).toHaveCount(1)
     await promptReady(page)
 
     // A prefix that matches no command, no history row and no path.
     await page.keyboard.type('zzznocxe2enope')
-    await page.keyboard.press('Tab')
 
-    // The dropdown never opens, and the line is untouched — the key was
-    // swallowed, never forwarded to the shell as a raw tab.
+    // The command snapshot may still be loading on a slow machine — the
+    // honest row names that ("command names are still loading"); retry Tab
+    // until the snapshot has arrived and the row says the generic no-match.
     const dropdown = page.locator(DROPDOWN).first()
-    await page.waitForTimeout(600)
-    await expect(dropdown).not.toBeVisible()
-    await expect(page.locator(INPUT)).toHaveText('zzznocxe2enope')
+    await expect
+      .poll(
+        async () => {
+          await page.keyboard.press('Tab')
+          await page.waitForTimeout(400)
+          if (!(await dropdown.isVisible())) return 'not-visible'
+          const text = await dropdown.innerText()
+          if (text.includes('Command names are still loading')) {
+            // Esc closes exactly the panel; the draft survives.
+            await page.keyboard.press('Escape')
+            return 'still-loading'
+          }
+          return text
+        },
+        { timeout: 20_000, intervals: [1_000] },
+      )
+      .toContain('No matches')
 
-    // The editor still owns input: Escape clears it, proving the session
-    // never left the prompt.
-    await page.keyboard.press('Escape')
-    await expect(page.locator(INPUT)).toHaveText('', { timeout: 5000 })
+    // One non-selectable row: never the selected variance, no hint footer.
+    const rows = dropdown.locator('.ui-completion-dropdown__row')
+    await expect(rows).toHaveCount(1)
+    await expect(rows.first()).toHaveAttribute('data-empty', 'true')
+    await expect(rows.first()).not.toHaveAttribute('aria-selected', 'true')
+    await expect(page.locator(INPUT)).toHaveText('zzznocxe2enope')
+    await page.screenshot({ path: '/tmp/nocx-c3-no-matches.png' })
+
+    // Enter falls through to the editor's submit — nothing was selected and
+    // nothing blocked the key; the shell runs the line.
+    await page.keyboard.press('Enter')
+    await promptReady(page)
+  })
+
+  test('cd onto a directory holding only a file names why there is nothing to choose', async ({
+    page,
+  }) => {
+    const fixture = fixtureDir()
+    // The owner's exact case: `~/Downloads` holds one entry, a file, and cd
+    // takes directories only — zero candidates, and the reason is specific.
+    const downloads = path.join(fixture, 'Downloads')
+    fs.mkdirSync(downloads)
+    fs.writeFileSync(path.join(downloads, 'nocx-backup.enc'), 'x')
+    try {
+      await page.goto('/')
+      await expect(page.locator('.nocx-tab')).toHaveCount(1)
+      await promptReady(page)
+      await cdInto(page, fixture)
+
+      await page.keyboard.type(`cd ${downloads}/`)
+      await page.keyboard.press('Tab')
+      const dropdown = page.locator(DROPDOWN).first()
+      await expect(dropdown).toBeVisible({ timeout: 5000 })
+      const empty = dropdown.locator('.ui-completion-dropdown__row[data-empty="true"]')
+      await expect(empty).toHaveCount(1)
+      await expect(empty.first()).toContainText('No subdirectories in Downloads')
+      await page.screenshot({ path: '/tmp/nocx-c3-cd-onto-files.png' })
+
+      // Enter is not blocked by the row: the line submits as typed.
+      await page.keyboard.press('Enter')
+      await promptReady(page)
+    } finally {
+      fs.rmSync(fixture, { recursive: true, force: true })
+    }
+  })
+
+  test('erasing the line closes the panel entirely — no footer-only panel', async ({ page }) => {
+    const fixture = fixtureDir()
+    fs.mkdirSync(path.join(fixture, 'alpha'))
+    try {
+      await page.goto('/')
+      await expect(page.locator('.nocx-tab')).toHaveCount(1)
+      await promptReady(page)
+      await cdInto(page, fixture)
+
+      await page.keyboard.type('cd ')
+      await page.keyboard.press('Tab')
+      const dropdown = page.locator(DROPDOWN).first()
+      await expect(dropdown).toBeVisible({ timeout: 5000 })
+      await expect(dropdown.locator('.ui-completion-dropdown__row').first()).toContainText('alpha/')
+
+      // Erase the whole line: the panel must CLOSE, not hang showing only
+      // its footer.
+      await page.keyboard.press('Control+a')
+      await page.keyboard.press('Backspace')
+      await expect(dropdown).not.toBeVisible({ timeout: 5000 })
+      await expect(page.locator(INPUT)).toHaveText('')
+      await page.screenshot({ path: '/tmp/nocx-c3-erased-closed.png' })
+    } finally {
+      fs.rmSync(fixture, { recursive: true, force: true })
+    }
   })
 
   test('acceptance: cd + Tab lists directories with kind and trailing slash, Tab cycles and previews', async ({
@@ -180,7 +263,6 @@ test.describe('tab completion', () => {
       await expect(second).toContainText('beta/')
       await expect(second).toContainText('Directory')
       await expect(dropdown).not.toContainText('notes.txt')
-
       // The first Tab opened the dropdown with the first directory selected;
       // the next Tab moves to the second and previews it in the line.
       await expect(first).toHaveAttribute('aria-selected', 'true')
@@ -189,8 +271,17 @@ test.describe('tab completion', () => {
       const ghost = page.locator(`${INPUT} .nocx-editor-ghost`).first()
       await expect(ghost).toContainText('beta/')
 
+      // Content-sized: the panel hugs its rows, it never spans the pane.
+      const box = await dropdown.boundingBox()
+      const pane = await page.locator('.pane.active').first().boundingBox()
+      expect(box).not.toBeNull()
+      expect(pane).not.toBeNull()
+      expect(box!.width).toBeLessThan(pane!.width * 0.75)
+      expect(box!.width).toBeGreaterThanOrEqual(300)
+      expect(box!.width).toBeLessThanOrEqual(640)
+
       // Screenshot — the acceptance evidence the owner asked for.
-      await page.screenshot({ path: '/tmp/nocx-c2-acceptance.png' })
+      await page.screenshot({ path: '/tmp/nocx-c3-acceptance.png' })
 
       // Enter accepts the cycled-to candidate; nothing was submitted.
       await page.keyboard.press('Enter')

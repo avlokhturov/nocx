@@ -45,9 +45,18 @@ const KIND_LABEL: Record<string, string> = {
   directory: 'Directory',
   file: 'File',
 }
+
+/** How wide a row may make the panel, in px — the panel hugs its longest
+ *  row and never spans the pane (the owner's "why full width?"). */
+export const MAX_DROPDOWN_WIDTH_PX = 640
+
+/** Floor: a single short row must not leave a sliver of a panel. */
+export const MIN_DROPDOWN_WIDTH_PX = 320
+
 export class CompletionDropdown {
   readonly root: HTMLElement
   private callbacks: CompletionDropdownCallbacks
+  private list: HTMLElement | null = null
   private _open = false
 
   constructor(callbacks: CompletionDropdownCallbacks) {
@@ -72,8 +81,11 @@ export class CompletionDropdown {
   /**
    * Render the current candidate list. Selected index is the controller's
    * decision (it owns the state machine); the view only draws it.
+   * `anchorLeft` is the caret's x, in px relative to the panel's offset
+   * parent (the editor root) — the panel opens at the caret, not at the
+   * pane's edge; null keeps the kit's left-edge default.
    */
-  show(rows: CompletionRow[], selectedIndex: number): void {
+  show(rows: CompletionRow[], selectedIndex: number, anchorLeft?: number | null): void {
     this._open = true
     this.root.dataset.open = 'true'
     this.root.replaceChildren()
@@ -122,6 +134,7 @@ export class CompletionDropdown {
     }
 
     this.root.appendChild(list)
+    this.list = list
 
     const footer = document.createElement('div')
     footer.className = 'ui-completion-dropdown__footer'
@@ -141,6 +154,38 @@ export class CompletionDropdown {
     dismiss.textContent = 'esc to dismiss'
     footer.appendChild(dismiss)
     this.root.appendChild(footer)
+
+    this.applyGeometry(anchorLeft)
+  }
+
+  /**
+   * The honest "nothing to choose" state: one non-selectable row naming why
+   * (zero candidates is a state the product shows, never silence). No
+   * footer — the hints describe a selectable list, and this row has nothing
+   * to insert, cycle or navigate.
+   */
+  showEmpty(message: string, anchorLeft?: number | null): void {
+    this._open = true
+    this.root.dataset.open = 'true'
+    this.root.replaceChildren()
+
+    const list = document.createElement('div')
+    list.className = 'ui-completion-dropdown__list'
+    const row = document.createElement('div')
+    row.className = 'ui-collection-row ui-completion-dropdown__row'
+    row.dataset.empty = 'true'
+    row.setAttribute('role', 'option')
+    row.setAttribute('aria-selected', 'false')
+    row.setAttribute('aria-disabled', 'true')
+    const info = document.createElement('div')
+    info.className = 'ui-collection-row__info'
+    info.textContent = message
+    row.appendChild(info)
+    list.appendChild(row)
+    this.root.appendChild(list)
+    this.list = list
+
+    this.applyGeometry(anchorLeft)
   }
 
   /** Close the panel and drop its rows. */
@@ -148,11 +193,35 @@ export class CompletionDropdown {
     this._open = false
     this.root.dataset.open = 'false'
     this.root.replaceChildren()
+    this.list = null
   }
 
   destroy(): void {
     this.hide()
     this.root.remove()
+  }
+
+  /**
+   * The panel is as wide as its longest row, capped — content-sized, never
+   * the editor's width. The footer wraps within that width and contributes
+   * nothing to it (the list's scrollWidth is the widest nowrap row). The
+   * left edge is the caret anchor, clamped so the panel never runs off the
+   * editor's right edge.
+   */
+  private applyGeometry(anchorLeft: number | null | undefined): void {
+    const cap = Math.min(MAX_DROPDOWN_WIDTH_PX, window.innerWidth * 0.9)
+    const widest = Math.max(this.list?.scrollWidth ?? 0, MIN_DROPDOWN_WIDTH_PX)
+    this.root.style.width = `${Math.min(widest, cap)}px`
+
+    if (anchorLeft === null || anchorLeft === undefined) {
+      this.root.style.left = ''
+      return
+    }
+    const parent = this.root.parentElement
+    const parentWidth = parent?.clientWidth ?? window.innerWidth
+    const width = this.root.offsetWidth
+    const left = Math.max(0, Math.min(anchorLeft, Math.max(0, parentWidth - width)))
+    this.root.style.left = `${left}px`
   }
 
   /** The display column: displayText with the matched ranges as <mark>. */

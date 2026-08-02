@@ -57,20 +57,45 @@ describe('commandProvider', () => {
       ctx({ position: 'command', token: { text: 'git', from: 0, to: 3 }, doc: 'git' }),
       new AbortController().signal,
     )
-    expect(got.map((c) => c.insertText)).toEqual(['git', 'gitk', 'gittool'])
-    expect(got[0].id).toBe('cmd:git')
-    expect(got[0].replacement).toEqual({ from: 0, to: 3 })
-    expect(got[0].matchRanges).toEqual([{ from: 0, to: 3 }])
-    expect(got[0].eligibleForGhostText).toBe(true)
+    expect(got.candidates.map((c) => c.insertText)).toEqual(['git', 'gitk', 'gittool'])
+    expect(got.candidates[0].id).toBe('cmd:git')
+    expect(got.candidates[0].replacement).toEqual({ from: 0, to: 3 })
+    expect(got.candidates[0].matchRanges).toEqual([{ from: 0, to: 3 }])
+    expect(got.candidates[0].eligibleForGhostText).toBe(true)
   })
 
-  it('an empty snapshot answers nothing', async () => {
+  it('an empty snapshot payload cannot apply — the store stays pending, named honestly', async () => {
+    // The store rejects an empty name list ("every command is unknown" is a
+    // lie), so the snapshot never applies and the provider must say the
+    // snapshot is still pending rather than "no matches".
     const empty = commandProvider(snapshotted([]))
     const got = await empty.suggest(
       ctx({ position: 'command', token: { text: 'git', from: 0, to: 3 }, doc: 'git' }),
       new AbortController().signal,
     )
-    expect(got).toEqual([])
+    expect(got.candidates).toEqual([])
+    expect(got.emptyReason).toEqual({ kind: 'snapshot-pending' })
+  })
+
+  it('a snapshot that has not arrived yet is named, not hidden', async () => {
+    // A fresh store: the OSC 636 hello and snapshot have not been ingested.
+    const pending = commandProvider(new CommandSnapshotStore())
+    const got = await pending.suggest(
+      ctx({ position: 'command', token: { text: 'vi', from: 0, to: 2 }, doc: 'vi' }),
+      new AbortController().signal,
+    )
+    expect(got.candidates).toEqual([])
+    expect(got.emptyReason).toEqual({ kind: 'snapshot-pending' })
+  })
+
+  it('an empty token asks for nothing — no reason, the line has no intent yet', async () => {
+    const pending = commandProvider(new CommandSnapshotStore())
+    const got = await pending.suggest(
+      ctx({ position: 'command', token: { text: '', from: 0, to: 0 }, doc: '' }),
+      new AbortController().signal,
+    )
+    expect(got.candidates).toEqual([])
+    expect(got.emptyReason).toBeUndefined()
   })
 })
 
@@ -119,11 +144,11 @@ describe('historyProvider', () => {
     expect(query).toHaveBeenCalledWith('/repo', '')
     // Only commands starting with the line; the duplicate `git status` keeps
     // the newest row (freshness 200), and the line itself is the replacement.
-    expect(got.map((c) => c.insertText)).toEqual(['git status', 'git stash pop'])
-    expect(got[0].freshness).toBe(200)
-    expect(got[0].replacement).toEqual({ from: 0, to: 7 })
-    expect(got[0].outcome).toEqual({ status: 'success' })
-    expect(got[0].environment?.confidence).toBe('asserted')
+    expect(got.candidates.map((c) => c.insertText)).toEqual(['git status', 'git stash pop'])
+    expect(got.candidates[0].freshness).toBe(200)
+    expect(got.candidates[0].replacement).toEqual({ from: 0, to: 7 })
+    expect(got.candidates[0].outcome).toEqual({ status: 'success' })
+    expect(got.candidates[0].environment?.confidence).toBe('asserted')
   })
 
   it('is applicable even with a trailing space (the line is non-empty)', () => {
@@ -171,7 +196,7 @@ describe('historyProvider', () => {
       ctx({ doc: 'cd ', token: { text: '', from: 3, to: 3 } }),
       new AbortController().signal,
     )
-    expect(got.length).toBe(MAX_HISTORY_IN_ARGUMENT_POSITION)
+    expect(got.candidates.length).toBe(MAX_HISTORY_IN_ARGUMENT_POSITION)
   })
 
   it('command position and remote sessions keep the full provider cap', async () => {
@@ -200,7 +225,7 @@ describe('historyProvider', () => {
       ctx({ position: 'command', doc: 'git', token: { text: 'git', from: 0, to: 3 } }),
       new AbortController().signal,
     )
-    expect(inCommand.length).toBe(MAX_PROVIDER_CANDIDATES)
+    expect(inCommand.candidates.length).toBe(MAX_PROVIDER_CANDIDATES)
     // Remote argument position: the path provider is inactive, so history is
     // the only answer — it keeps its full capacity rather than the
     // argument-position cap, which exists to stop history crowding paths.
@@ -208,7 +233,7 @@ describe('historyProvider', () => {
       ctx({ isLocal: false, doc: 'cd ', token: { text: '', from: 3, to: 3 } }),
       new AbortController().signal,
     )
-    expect(onRemote.length).toBe(MAX_PROVIDER_CANDIDATES)
+    expect(onRemote.candidates.length).toBe(MAX_PROVIDER_CANDIDATES)
   })
 })
 
@@ -272,9 +297,9 @@ describe('fsProvider', () => {
     expect(complete).toHaveBeenCalledWith('./', '/repo')
     // The display keys off the REAL token, so rows show bare names — never a
     // `./` the user did not type.
-    expect(got.map((c) => c.displayText)).toEqual(['src/', 'notes.txt'])
-    expect(got[0].insertText).toBe('src/')
-    expect(got[0].replacement).toEqual({ from: 3, to: 3 })
+    expect(got.candidates.map((c) => c.displayText)).toEqual(['src/', 'notes.txt'])
+    expect(got.candidates[0].insertText).toBe('src/')
+    expect(got.candidates[0].replacement).toEqual({ from: 3, to: 3 })
   })
 
   it('cd, pushd and rmdir take directories only; everything else keeps both kinds', async () => {
@@ -291,19 +316,65 @@ describe('fsProvider', () => {
       provider.suggest(ctx({ doc, token }), new AbortController().signal)
 
     const gotCd = await forCmd('cd ', { text: '', from: 3, to: 3 })
-    expect(gotCd.map((c) => c.insertText)).toEqual(['docs/'])
+    expect(gotCd.candidates.map((c) => c.insertText)).toEqual(['docs/'])
     const gotPushd = await forCmd('pushd ', { text: '', from: 7, to: 7 })
-    expect(gotPushd.map((c) => c.insertText)).toEqual(['docs/'])
+    expect(gotPushd.candidates.map((c) => c.insertText)).toEqual(['docs/'])
     const gotRmdir = await forCmd('rmdir n', { text: 'n', from: 6, to: 7 })
-    expect(gotRmdir.map((c) => c.insertText)).toEqual(['docs/'])
+    expect(gotRmdir.candidates.map((c) => c.insertText)).toEqual(['docs/'])
 
     // Anything else — including a command the table has never heard of —
     // keeps the documented default of "both": the rule is a promise about
     // the command's argument, and for an unknown command we promise nothing.
     const gotLs = await forCmd('ls ', { text: '', from: 3, to: 3 })
-    expect(gotLs.map((c) => c.insertText)).toEqual(['docs/', 'notes.txt'])
+    expect(gotLs.candidates.map((c) => c.insertText)).toEqual(['docs/', 'notes.txt'])
     const gotUnknown = await forCmd('someday n', { text: 'n', from: 8, to: 9 })
-    expect(gotUnknown.map((c) => c.insertText)).toEqual(['docs/', 'notes.txt'])
+    expect(gotUnknown.candidates.map((c) => c.insertText)).toEqual(['docs/', 'notes.txt'])
+  })
+
+  it('a dirs-only command whose directory holds no subdirectories names that, not "no matches"', async () => {
+    // The owner's exact case: `cd Downloads/` where Downloads holds only a
+    // file. The dirs-only filter removes the file, leaving zero candidates —
+    // and the reason must say WHY: the directory has no subdirectories.
+    const complete = vi.fn((): Promise<FsComplete> =>
+      Promise.resolve({
+        entries: [
+          { name: 'nocx-backup.enc', path: '/repo/Downloads/nocx-backup.enc', isDir: false },
+        ],
+      }),
+    )
+    const provider = fsProvider({ complete })
+    const got = await provider.suggest(
+      ctx({ doc: 'cd Downloads/', token: { text: 'Downloads/', from: 3, to: 13 }, cwd: '/repo' }),
+      new AbortController().signal,
+    )
+    expect(got.candidates).toEqual([])
+    expect(got.emptyReason).toEqual({ kind: 'dirs-only-empty', dir: 'Downloads' })
+  })
+
+  it('the cwd itself is named as "this folder" when it holds no subdirectories', async () => {
+    const complete = vi.fn((): Promise<FsComplete> =>
+      Promise.resolve({
+        entries: [{ name: 'notes.txt', path: '/repo/notes.txt', isDir: false }],
+      }),
+    )
+    const provider = fsProvider({ complete })
+    const got = await provider.suggest(
+      ctx({ doc: 'cd ', token: { text: '', from: 3, to: 3 }, cwd: '/repo' }),
+      new AbortController().signal,
+    )
+    expect(got.candidates).toEqual([])
+    expect(got.emptyReason).toEqual({ kind: 'dirs-only-empty', dir: '' })
+  })
+
+  it('a non-dirs command whose directory is empty says nothing specific (generic no-match)', async () => {
+    const complete = vi.fn((): Promise<FsComplete> => Promise.resolve({ entries: [] }))
+    const provider = fsProvider({ complete })
+    const got = await provider.suggest(
+      ctx({ doc: 'ls empty/', token: { text: 'empty/', from: 3, to: 9 } }),
+      new AbortController().signal,
+    )
+    expect(got.candidates).toEqual([])
+    expect(got.emptyReason).toBeUndefined()
   })
 
   it('labels every row with its filesystem kind (Directory / File)', async () => {
@@ -311,7 +382,7 @@ describe('fsProvider', () => {
       ctx({ doc: 'cd ./sr', token: { text: './sr', from: 3, to: 7 } }),
       new AbortController().signal,
     )
-    expect(got[0].kind).toBe('directory')
+    expect(got.candidates[0].kind).toBe('directory')
   })
 
   it('maps backend entries to candidates with display, match and slash-for-dirs', async () => {
@@ -320,8 +391,8 @@ describe('fsProvider', () => {
       new AbortController().signal,
     )
     expect(complete).toHaveBeenCalledWith('./sr', '/repo')
-    expect(got).toHaveLength(1)
-    const c = got[0]
+    expect(got.candidates).toHaveLength(1)
+    const c = got.candidates[0]
     expect(c.displayText).toBe('./src/')
     expect(c.insertText).toBe('./src/')
     expect(c.id).toBe('fs:/repo/src')
