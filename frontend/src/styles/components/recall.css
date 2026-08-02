@@ -69,13 +69,6 @@
   flex: 1 1 auto;
 }
 
-.ui-recall-panel__list {
-  overflow-y: auto;
-  min-height: 0;
-  padding: var(--space-1) 0;
-  flex: 1 1 auto;
-}
-
 /* The relative timestamp on a row's right edge. */
 .ui-recall-panel__time {
   font-size: var(--font-size-xs);
@@ -100,41 +93,44 @@
   flex: 0 0 auto;
 }
 
-/* The filter + coverage bar: what narrows the page (left) and how far back
-   the answer can see (right). The filter is a display of text captured by
-   the overlay's arbiter — there is no input element — so the empty state is
-   the affordance and the active state names the needle. */
-.ui-recall-panel__bar {
+/* The search row: the panel's one field, at the bottom edge — the kit's
+   search field (ui-search-field identities, display form) carrying what
+   the user typed, with the coverage line at its right-hand end. Keys land
+   on the editor's arbiter, never on an input, so the display form is the
+   kit's own statement of "this is where typing goes". The divider is the
+   detail pane's when it is present — adjacent borders must not double up. */
+.ui-recall-panel__search {
   display: flex;
   align-items: center;
   gap: var(--space-3);
-  padding: var(--space-1) var(--space-3);
-  border-bottom: 1px solid var(--color-divider);
-  font-size: var(--font-size-xs);
+  padding: var(--space-2) var(--space-3);
+  border-top: 1px solid var(--color-divider);
   flex: 0 0 auto;
 }
 
-.ui-recall-panel__filter {
-  flex: 1 1 auto;
-  min-width: 0;
-  color: var(--color-text-dim);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.ui-recall-panel__detail + .ui-recall-panel__search {
+  border-top: none;
 }
 
-.ui-recall-panel__filter[data-active='true'] {
-  color: var(--color-text);
+/* Placement only: the field stretches to the row, the coverage rides the
+   right-hand end — the field's own look belongs to search-field.css. */
+.ui-recall-panel__search > .ui-search-field {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .ui-recall-panel__coverage {
   color: var(--color-text-dim);
   white-space: nowrap;
+  font-size: var(--font-size-xs);
 }
 
-/* The detail pane: the four facts about the selected row, one line under
-   the list. Term above value, values ellipsize rather than wrap — the pane
-   is a fixed row, not a second document. */
+/* The bolded matched substring inside a row — why the row survived the
+   search (Warp does the same). The filter is a plain case-insensitive
+   substring, so the range is exact; an empty filter bolds nothing. */
+.ui-recall-panel__match {
+  font-weight: 600;
+}
 .ui-recall-panel__detail {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));

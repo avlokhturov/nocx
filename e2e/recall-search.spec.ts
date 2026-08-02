@@ -1,18 +1,28 @@
 /**
- * e2e: recall search — typing narrows the rung, and the panel states its
- * coverage (nocx-ms7v).
+ * e2e: recall search — the panel's one field narrows the rung, the matched
+ * text is bolded, and a search's Enter inserts instead of executing
+ * (brief search-ui; the search half of nocx-ms7v).
  *
  * The acceptance check, in the owner's words:
  *
  *   Run two commands, open recall, type a substring of one of them, and
  *   only that one remains — driven through the real UI against the real
- *   backend, with the panel showing the coverage line.
+ *   backend, with the panel showing a search field carrying what you typed
+ *   and the coverage line at its right-hand end.
  *
  * Three commands are run (the open-time rung-climb wants a useful page),
  * recall is opened with Up, and typing "alpha" into the panel — keys land
  * on the editor, the overlay's arbiter captures them — leaves exactly the
  * alpha command, with the beta and gamma commands gone, "1 result" in the
- * count, and the "oldest entry …" coverage line on screen.
+ * count, "alpha" bolded inside the surviving row, and the "oldest entry …"
+ * coverage line on the same row as the field.
+ *
+ * Then the Enter rule that is the real fix (brief search-ui §3): with the
+ * filter non-empty, Enter INSERTS the alpha command into the line without
+ * running it (no new command block, panel closed); the second Enter — now
+ * with an empty filter and the command visible — runs it. A blind run from
+ * a typed search and a reviewed run of a visible command must not share
+ * one keystroke.
  *
  * The backend runs with `history.retentionDays: 30` seeded into the
  * profile's settings.json BEFORE the first launch (the same posture as
@@ -150,16 +160,39 @@ test.describe('recall: typing narrows, and the panel states its coverage', () =>
 
     // ── Phase 3: type the substring — only the match remains ───────────
     await page.keyboard.type('alpha')
-    await expect(panel).toContainText('filter: alpha', { timeout: 10_000 })
+    // The panel's one field — at the bottom edge, with a magnifier and a
+    // caret — carries what was typed. It replaced the old "filter: …"
+    // status line (brief search-ui).
+    const field = panel.locator('.ui-search-field__input')
+    await expect(field).toContainText('alpha', { timeout: 10_000 })
     await expect(panel).toContainText(alpha)
     await expect(panel.getByText(beta)).toHaveCount(0)
     await expect(panel.getByText(gamma)).toHaveCount(0)
     await expect(panel).toContainText('1 result')
+    // The matched substring is bolded inside the surviving row, so the row
+    // says why it matched.
+    await expect(panel.locator('strong.ui-recall-panel__match')).toHaveCount(1)
+    await expect(panel.locator('strong.ui-recall-panel__match')).toHaveText('alpha')
 
     // ── Phase 4: the coverage line is on screen, and it is honest ──────
     await expect(panel).toContainText(/oldest entry/, { timeout: 10_000 })
     // The store answered (three rows exist), so the panel must NOT claim
     // "this session only".
     await expect(panel.getByText('this session only')).toHaveCount(0)
+
+    // ── Phase 5: a search's Enter INSERTS without running; the second
+    //    Enter — the command now visible in the line — runs it. A blind
+    //    run from a typed search and a reviewed run of a visible command
+    //    must not share one keystroke (brief search-ui §3). ────────────
+    await page.keyboard.press('Enter')
+    await expect(panel).toBeHidden({ timeout: 10_000 })
+    await expect(input).toContainText(alpha, { timeout: 10_000 })
+    const blocksBefore = await page.locator('.cmd-block').count()
+    await page.waitForTimeout(300) // give a phantom run a moment to surface
+    expect(await page.locator('.cmd-block').count()).toBe(blocksBefore)
+    await page.keyboard.press('Enter')
+    await expect(page.locator('.cmd-block')).toHaveCount(blocksBefore + 1, {
+      timeout: 15_000,
+    })
   })
 })

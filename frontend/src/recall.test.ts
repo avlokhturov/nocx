@@ -127,6 +127,12 @@ const panelOf = (container: HTMLElement): HTMLElement => {
   return p
 }
 
+/** The query the search field carries — the field's text (the caret is
+ *  aria-hidden and carries no text, so textContent is the value). */
+const fieldValue = (container: HTMLElement): string =>
+  container.querySelector<HTMLElement>('.ui-recall-panel__search .ui-search-field__input')
+    ?.textContent ?? ''
+
 describe('recall: Enter executes the previewed command', () => {
   it('Enter while navigating submits the previewed command and closes the overlay', async () => {
     const { container, ed, view, recall, submit } = setupRecall({
@@ -174,13 +180,17 @@ describe('recall: Enter executes the previewed command', () => {
     expect(ed.getDoc()).toBe('docker compose up') // previewed
     // A printable key is the filter (nocx-ms7v), never a keystroke for the
     // editor under the panel: it is consumed, the overlay stays up, and the
-    // panel says what it is filtering by.
+    // field carries the needle.
     const ev = key(view, { key: 'd' })
     expect(ev.defaultPrevented).toBe(true)
     expect(recall.isOpen).toBe(true)
-    const text = panelOf(container).textContent ?? ''
-    expect(text).toContain('filter: d')
-    expect(ed.getDoc()).toBe('docker compose up') // the preview did not move
+    expect(fieldValue(container)).toBe('d')
+    // A non-empty filter hands the input to the field (brief search-ui §3):
+    // the row is highlighted but NOT previewed, so the line keeps the draft
+    // — the screen must not hold the query and somebody else's command at
+    // once. The draft is restored when the narrowed answer lands (async,
+    // like every re-query); the preview returns when the filter clears.
+    await vi.waitFor(() => expect(ed.getDoc()).toBe('git s'))
   })
 
   it('deleting while navigating keeps the previewed command as the new draft', async () => {
@@ -240,7 +250,7 @@ describe('recall: typing narrows the rung (nocx-ms7v)', () => {
     for (const ch of ['m', 'a', 'k', 'e', ' ', 't']) key(view, { key: ch })
     await vi.waitFor(() => {
       const text = panelOf(container).textContent ?? ''
-      expect(text).toContain('filter: make t')
+      expect(fieldValue(container)).toBe('make t')
       expect(text).toContain('1 result')
       expect(text).toContain('make test')
       expect(text).not.toContain('make deploy')
@@ -255,16 +265,16 @@ describe('recall: typing narrows the rung (nocx-ms7v)', () => {
     key(view, { key: 'ArrowUp' })
     await settled(container)
     for (const ch of ['m', 'a', 'k', 'e', ' ', 't']) key(view, { key: ch })
-    await vi.waitFor(() => expect(panelOf(container).textContent).toContain('filter: make t'))
+    await vi.waitFor(() => expect(fieldValue(container)).toBe('make t'))
     key(view, { key: 'Backspace' }) // "make t" → "make "
     await vi.waitFor(() => {
       const text = panelOf(container).textContent ?? ''
-      expect(text).toContain('filter: make ')
+      expect(fieldValue(container)).toBe('make ')
       expect(text).toContain('2 results')
       expect(text).toContain('make deploy')
     })
     key(view, { key: 'Backspace' }) // "make " → "make"
-    await vi.waitFor(() => expect(panelOf(container).textContent).toContain('filter: make'))
+    await vi.waitFor(() => expect(fieldValue(container)).toBe('make'))
     for (let i = 0; i < 4; i++) key(view, { key: 'Backspace' }) // back to no filter
     await vi.waitFor(() => expect(panelOf(container).textContent).toContain('3 results'))
   })
@@ -304,7 +314,7 @@ describe('recall: typing narrows the rung (nocx-ms7v)', () => {
     key(view, { key: 'ArrowUp' })
     await settled(container)
     key(view, { key: 'm' })
-    await vi.waitFor(() => expect(panelOf(container).textContent).toContain('filter: m'))
+    await vi.waitFor(() => expect(fieldValue(container)).toBe('m'))
     key(view, { key: 'Escape' })
     expect(recall.isOpen).toBe(false)
     expect(ed.getDoc()).toBe('git s') // the draft captured at open, exactly
@@ -332,16 +342,132 @@ describe('recall: typing narrows the rung (nocx-ms7v)', () => {
     await settled(container) // 3 rows on the directory rung: no open-time climb
     expect(panelOf(container).textContent).toContain('this directory')
     key(view, { key: 'm' })
-    await vi.waitFor(() => expect(panelOf(container).textContent).toContain('filter: m'))
+    await vi.waitFor(() => expect(fieldValue(container)).toBe('m'))
     key(view, { key: 'ArrowUp', shiftKey: true }) // widen to host
     await vi.waitFor(() => {
       const text = panelOf(container).textContent ?? ''
       expect(text).toContain('this host')
-      expect(text).toContain('filter: m') // the filter survived the climb
+      expect(fieldValue(container)).toBe('m') // the filter survived the climb
       expect(text).toContain('make deploy')
       expect(text).not.toContain('docker build') // still narrowed
       expect(text).not.toContain('git status')
     })
+  })
+})
+
+describe('recall: a search hands the input to the field (brief search-ui)', () => {
+  it('Enter with a non-empty filter INSERTS without running; the second Enter runs it', async () => {
+    const { container, ed, view, recall, submit } = setupRecall({
+      query: filteringQuery(['rm -rf build', 'ls', 'git status']),
+    })
+    ed.show()
+    ed.insertText('git s')
+    key(view, { key: 'ArrowUp' })
+    await settled(container)
+    expect(ed.getDoc()).toBe('rm -rf build') // empty filter: previewed
+    key(view, { key: 'r' }) // filter 'r' — only rm -rf build survives
+    await vi.waitFor(() => expect(fieldValue(container)).toBe('r'))
+    expect(ed.getDoc()).toBe('git s') // the draft is back: not previewed
+    key(view, { key: 'Enter' })
+    // Inserted, NOT executed: the panel closed, the command sits in the
+    // line, and nothing went out over the submit path.
+    expect(recall.isOpen).toBe(false)
+    expect(ed.getDoc()).toBe('rm -rf build')
+    expect(submit).not.toHaveBeenCalled()
+    // The second Enter — now an empty-filter Enter with the command visible
+    // — is the reviewed run, through the editor's own submit path.
+    key(view, { key: 'Enter' })
+    expect(submit).toHaveBeenCalledTimes(1)
+    expect(submit).toHaveBeenCalledWith('rm -rf build')
+  })
+
+  it('with a non-empty filter, arrows highlight but never preview; clearing the filter resumes the preview', async () => {
+    const { container, ed, view } = setupRecall({
+      query: filteringQuery(['make deploy', 'make test', 'git status']),
+    })
+    ed.show()
+    ed.insertText('git s')
+    key(view, { key: 'ArrowUp' })
+    await settled(container)
+    expect(ed.getDoc()).toBe('make deploy') // empty filter: newest row previewed
+    key(view, { key: 'm' })
+    await vi.waitFor(() => expect(fieldValue(container)).toBe('m'))
+    expect(ed.getDoc()).toBe('git s') // the draft is back — no preview
+    key(view, { key: 'ArrowUp' }) // older match
+    expect(ed.getDoc()).toBe('git s') // still the draft; only the highlight moved
+    // Backspace clears the filter; the preview resumes from the highlighted
+    // row — the selection survived the narrowing.
+    key(view, { key: 'Backspace' })
+    await vi.waitFor(() => expect(fieldValue(container)).toBe(''))
+    expect(ed.getDoc()).toBe('make test')
+  })
+
+  it('bolds the matched substring in every surviving row; an empty filter bolds nothing', async () => {
+    const { container, view } = setupRecall({
+      query: filteringQuery(['make deploy', 'git commit', 'git status']),
+    })
+    key(view, { key: 'ArrowUp' })
+    await settled(container)
+    // Empty filter: rows are plain text — no <strong> anywhere.
+    expect(container.querySelectorAll('strong.ui-recall-panel__match')).toHaveLength(0)
+    key(view, { key: 'g' })
+    await vi.waitFor(() => expect(fieldValue(container)).toBe('g'))
+    let matches = Array.from(container.querySelectorAll('strong.ui-recall-panel__match'))
+    expect(matches).toHaveLength(2) // git commit, git status
+    expect(matches.every((m) => m.textContent === 'g')).toBe(true)
+    for (const ch of ['i', 't']) key(view, { key: ch })
+    await vi.waitFor(() => expect(fieldValue(container)).toBe('git'))
+    matches = Array.from(container.querySelectorAll('strong.ui-recall-panel__match'))
+    expect(matches).toHaveLength(2)
+    expect(matches.every((m) => m.textContent === 'git')).toBe(true)
+    expect(panelOf(container).textContent).not.toContain('make deploy')
+  })
+
+  it('the field is the panel bottom edge, above the footer, with the coverage on the same row', async () => {
+    const now = Date.now()
+    const { container, view } = setupRecall({
+      query: (scope) =>
+        Promise.resolve({
+          entries: [mkEntry('ls', now - 2 * 86_400_000)],
+          scope,
+          exhausted: true,
+          source: 'store',
+          coverage: now - 21 * 86_400_000,
+        }),
+    })
+    key(view, { key: 'ArrowUp' })
+    await settled(container)
+    const panel = panelOf(container)
+    const search = container.querySelector<HTMLElement>('.ui-recall-panel__search')
+    expect(search).not.toBeNull()
+    // The search row sits after the list (and detail) and before the footer.
+    const children = Array.from(panel.children)
+    const listIdx = children.findIndex((c) => c.classList.contains('ui-recall-panel__list'))
+    const searchIdx = children.findIndex((c) => c.classList.contains('ui-recall-panel__search'))
+    const footerIdx = children.findIndex((c) => c.classList.contains('ui-recall-panel__footer'))
+    expect(listIdx).toBeGreaterThanOrEqual(0)
+    expect(searchIdx).toBeGreaterThan(listIdx)
+    expect(searchIdx).toBeLessThan(footerIdx)
+    // The coverage rides the same row at its right-hand end, a property of
+    // the search — not a second line of chrome.
+    expect(search?.querySelector('.ui-search-field')).not.toBeNull()
+    expect(search?.querySelector('.ui-recall-panel__coverage')?.textContent).toContain(
+      'oldest entry',
+    )
+  })
+
+  it('the footer names the Enter action: execute on an empty filter, insert on a search', async () => {
+    const { container, view } = setupRecall({
+      query: filteringQuery(['make deploy', 'git status']),
+    })
+    key(view, { key: 'ArrowUp' })
+    await settled(container)
+    expect(panelOf(container).textContent).toContain('↵ to execute')
+    expect(panelOf(container).textContent).not.toContain('↵ to insert')
+    key(view, { key: 'g' })
+    await vi.waitFor(() => expect(fieldValue(container)).toBe('g'))
+    expect(panelOf(container).textContent).toContain('↵ to insert')
+    expect(panelOf(container).textContent).not.toContain('↵ to execute')
   })
 })
 

@@ -4,24 +4,37 @@
 // One row per past command, a relative timestamp on the right, the ladder
 // rung it was drawn from, and a footer with the navigation keys.
 //
-// The rule (brief nocx-w7h.5 reversed the v4 one): navigating previews the
-// selected command INTO the editor, and Enter executes what you can see —
-// through the editor's own submit path, exactly as if the user had typed it
-// and pressed Enter. The v4 argument ("running from a list is unsafe when
-// the environment changed") applied to running blind; it does not apply to
-// a command sitting in the input line, visible, with its existence check
-// applied. The preview is the safety, so the label says "↵ to execute".
+// The rule (brief nocx-w7h.5 reversed the v4 one): with an EMPTY filter,
+// navigating previews the selected command INTO the editor, and Enter
+// executes what you can see — through the editor's own submit path, exactly
+// as if the user had typed it and pressed Enter. The v4 argument ("running
+// from a list is unsafe when the environment changed") applied to running
+// blind; it does not apply to a command sitting in the input line, visible,
+// with its existence check applied. The preview is the safety, so the label
+// says "↵ to execute".
+//
+// With a NON-EMPTY filter the same keystroke would be the lie §8.10 forbids:
+// the screen would hold two different texts — the query in the panel and
+// somebody else's command in the line — and Enter would run a command the
+// user never read while staring at their search. So a search hands the
+// input to the field: the selected row is highlighted but NOT previewed,
+// Enter INSERTS it into the line without running it ("↵ to insert"), and a
+// second Enter — now with an empty filter and the command visible — runs
+// it. A blind run from a typed search and a reviewed run of a visible
+// command must not share one keystroke.
 //
 // The state machine is a discriminated union on `state`, never flags on the
 // editor: `closed → opened (draft captured) → navigating (preview in the
-// editor) → accepted | dismissed | abandoned-to-edit`. `opened` is what an
-// empty history looks like — the panel is up and says so, with nothing to
-// highlight. `accepted` submits the previewed command through the editor;
-// `dismissed` restores the draft, the selection and the scroll exactly as
-// they were; the third exit (v8 §1) closes the overlay and KEEPS the
-// previewed command as the new draft when an insertion, a deletion or a
-// caret move arrives while navigating — editing what you recalled is the
-// ordinary way shell history is used.
+// editor, or highlight only when the filter is active) → accepted | inserted
+// | dismissed | abandoned-to-edit`. `opened` is what an empty history looks
+// like — the panel is up and says so, with nothing to highlight. `accepted`
+// submits the previewed command through the editor; `inserted` replaces the
+// draft with the selected command and closes WITHOUT submitting (the second
+// Enter runs it); `dismissed` restores the draft, the selection and the
+// scroll exactly as they were; the third exit (v8 §1) closes the overlay and
+// KEEPS the previewed command as the new draft when an insertion, a deletion
+// or a caret move arrives while navigating — editing what you recalled is
+// the ordinary way shell history is used.
 //
 // Arrows navigate and nothing else: at either end of the rung they stop,
 // and the list scrolls to keep the selected row in view so every entry is
@@ -33,9 +46,19 @@
 // CommandLedger with `source: 'session'`, and the panel says so on screen —
 // presenting one session as all of history is the same lie as marking every
 // command green. When the backend arrives, only the query function changes.
-
+//
+// One panel, two doors — and it stays that way. Up (at the top of an empty
+// draft) and Ctrl/Cmd+R (from anywhere) open the SAME overlay: the same
+// rows, the same rung ladder, the same keys. Warp splits them because its
+// Ctrl+R searches several KINDS (history, prompts, workflows) while Up
+// searches only history — the split is the set of kinds, never the
+// mechanism. We have exactly one kind, so we have exactly one panel; when a
+// second kind arrives the answer is a kind selector inside this panel,
+// never a second panel — two surfaces answering one question is how the
+// same keystroke starts returning different results depending on the door.
 import type { HistoryEntry, HistoryQuery } from './generated/history.query'
 import type { CommandLedger } from './command-ledger'
+import { createSearchFieldDisplay } from './ui/search-field'
 
 /**
  * The scrollTop that puts `row` FULLY inside `list`'s visible box — its top
@@ -251,6 +274,29 @@ export function queryLedgerHistory(
   return { entries, scope, exhausted: true, source: 'session', coverage }
 }
 
+/** Build a row's command text as nodes, with the matched substring bolded —
+ *  the way Warp shows why a row survived the search. The filter is a plain
+ *  case-insensitive substring (the same rule the query applies), so the
+ *  highlight is exact, never a heuristic; an empty filter highlights
+ *  nothing. A row that somehow does not contain the needle renders plain —
+ *  the highlight may never invent emphasis. */
+function commandNodes(command: string, filter: string): Node[] {
+  if (filter === '') return [document.createTextNode(command)]
+  const needle = filter.toLowerCase()
+  const hay = command.toLowerCase()
+  const at = hay.indexOf(needle)
+  if (at < 0) return [document.createTextNode(command)]
+  const nodes: Node[] = []
+  if (at > 0) nodes.push(document.createTextNode(command.slice(0, at)))
+  const match = document.createElement('strong')
+  match.className = 'ui-recall-panel__match'
+  match.textContent = command.slice(at, at + needle.length)
+  nodes.push(match)
+  const after = at + needle.length
+  if (after < command.length) nodes.push(document.createTextNode(command.slice(after)))
+  return nodes
+}
+
 export class RecallOverlay {
   private state: RecallState = { name: 'closed' }
   private readonly root: HTMLElement
@@ -401,7 +447,18 @@ export class RecallOverlay {
         if (e.key === 'Enter') {
           e.preventDefault()
           e.stopPropagation()
-          this.accept()
+          // The branch that must never be "simplified" back: Enter INSERTS
+          // when the filter is non-empty and EXECUTES when it is empty.
+          // A typed search makes the row a candidate, not a verdict — the
+          // screen holds the query and the row's text, and Enter would run
+          // a command the user never read (design §8.10: "Enter inserts. It
+          // never executes."). Inserting drops the filter with the command
+          // visible in the line; the SECOND Enter — an empty-filter Enter,
+          // the command read — is the reviewed run. A blind run from a
+          // typed search and a reviewed run of a visible command must not
+          // share one keystroke.
+          if (s.filter !== '') this.insert()
+          else this.accept()
           return true
         }
         if (e.key === 'ArrowUp' && e.shiftKey) {
@@ -546,13 +603,23 @@ export class RecallOverlay {
     const s = this.state
     if (s.name !== 'opened' && s.name !== 'navigating') return
     this.state = { name: 'navigating', draft: s.draft, scope, query: result, selected, filter }
-    // Preview the highlighted row in the editor — programmatic, so no input
-    // events fire (the alias-hint fetch must not run while recalling).
-    // `selected` is a DISPLAY index (0 = top = oldest); the wire is newest
-    // first, so the wire index is the mirror of the display index.
-    const wireIndex = result.entries.length - 1 - selected
-    const entry = result.entries[wireIndex]
-    if (entry) this.editor.replaceDoc(entry.command)
+    if (filter === '') {
+      // Preview the highlighted row in the editor — programmatic, so no
+      // input events fire (the alias-hint fetch must not run while
+      // recalling). `selected` is a DISPLAY index (0 = top = oldest); the
+      // wire is newest first, so the wire index is the mirror of the
+      // display index.
+      const wireIndex = result.entries.length - 1 - selected
+      const entry = result.entries[wireIndex]
+      if (entry) this.editor.replaceDoc(entry.command)
+    } else {
+      // A non-empty filter hands the input to the field: the row is
+      // HIGHLIGHTED but not previewed, or the screen holds two commands —
+      // the query and somebody else's line. The editor keeps the captured
+      // draft; Enter will insert the row into it (see the Enter branch).
+      const d = s.draft
+      this.editor.replaceDoc(d.text, d.from, d.to)
+    }
     this.render()
   }
 
@@ -607,15 +674,34 @@ export class RecallOverlay {
     })
   }
 
-  /** Enter: the previewed command is already in the editor (navigating
-   *  previewed it); submit it through the editor's own submit path — the
-   *  same one a typed Enter fires, with the command visible in the line.
-   *  Nothing is bypassed, no second route exists. */
+  /** Enter with an EMPTY filter: the previewed command is already in the
+   *  editor (navigating previewed it); submit it through the editor's own
+   *  submit path — the same one a typed Enter fires, with the command
+   *  visible in the line. Nothing is bypassed, no second route exists. */
   private accept(): void {
     const s = this.state
     if (s.name !== 'navigating') return
     this.close()
     this.editor.submit()
+  }
+
+  /** Enter with a NON-EMPTY filter: the row was highlighted, never
+   *  previewed — the line holds the draft. Insert the selected command into
+   *  the editor WITHOUT submitting: the panel closes, the command sits in
+   *  the line, and the second Enter — the empty-filter Enter, the reviewed
+   *  run — executes it. A blind run from a typed search and a reviewed run
+   *  of a visible command must not share one keystroke (see the Enter
+   *  branch). The draft snapshot is deliberately NOT restored: the inserted
+   *  command IS the new draft. */
+  private insert(): void {
+    const s = this.state
+    if (s.name !== 'navigating' || s.filter === '') return
+    const wireIndex = s.query.entries.length - 1 - s.selected
+    const entry = s.query.entries[wireIndex]
+    if (!entry) return
+    this.close()
+    this.editor.replaceDoc(entry.command)
+    this.editor.focus()
   }
   /** Esc: restore the draft, the selection and the scroll position exactly. */
   private dismiss(): void {
@@ -679,37 +765,6 @@ export class RecallOverlay {
     }
     this.root.appendChild(header)
 
-    // ── Filter + coverage bar: what narrows the page (left) and how far
-    //    back the answer can see (right). The filter is a display of the
-    //    captured text — keys land on the editor's arbiter, never on an
-    //    input — so the empty state is the affordance ("type to filter")
-    //    and the active state names the needle. The coverage line is the
-    //    honesty seam (nocx-ms7v): with retention set, a search can only
-    //    see part of history, and the panel says how far back instead of
-    //    presenting a partial answer as the whole one. ──
-    const bar = document.createElement('div')
-    bar.className = 'ui-recall-panel__bar'
-    const filterEl = document.createElement('span')
-    filterEl.className = 'ui-recall-panel__filter'
-    if (s.name !== 'loading') {
-      if (s.filter !== '') {
-        filterEl.dataset.active = 'true'
-        filterEl.textContent = `filter: ${s.filter}`
-      } else {
-        filterEl.textContent = 'type to filter'
-      }
-    } else {
-      filterEl.textContent = 'type to filter'
-    }
-    bar.appendChild(filterEl)
-    if (s.name !== 'loading' && s.query.coverage !== null) {
-      const coverage = document.createElement('span')
-      coverage.className = 'ui-recall-panel__coverage'
-      coverage.textContent = `oldest entry ${relativeTime(s.query.coverage, Date.now())}`
-      bar.appendChild(coverage)
-    }
-    this.root.appendChild(bar)
-
     // ── Rows, or the kit's empty state ────────────────────────────────
     const list = document.createElement('div')
     list.className = 'ui-recall-panel__list'
@@ -759,7 +814,7 @@ export class RecallOverlay {
         if (d === selected) row.dataset.selected = 'true'
         const info = document.createElement('div')
         info.className = 'ui-collection-row__info'
-        info.textContent = entry.command
+        for (const node of commandNodes(entry.command, s.filter)) info.appendChild(node)
         const actions = document.createElement('div')
         actions.className = 'ui-collection-row__actions'
         const time = document.createElement('span')
@@ -809,6 +864,33 @@ export class RecallOverlay {
       }
     }
 
+    // ── Search row: the panel's one field, at the bottom edge — what the
+    //    user typed, where the user typed it. Warp's palette has exactly one
+    //    input (magnifier, query, caret) with results above it; we built a
+    //    readout where a field belongs, so this row is the kit's search
+    //    field (createSearchFieldDisplay — no focusable input: the editor's
+    //    arbiter owns every key, the field states where typing goes). The
+    //    coverage line is a property of the search, not a second line of
+    //    chrome, so it rides the same row at the right-hand end (nocx-ms7v:
+    //    with retention set, a search can only see part of history, and the
+    //    panel says how far back instead of presenting a partial answer as
+    //    the whole one). ──
+    const search = document.createElement('div')
+    search.className = 'ui-recall-panel__search'
+    const field = createSearchFieldDisplay({
+      value: s.name === 'loading' ? '' : s.filter,
+      placeholder: 'search history',
+      ariaLabel: 'search history',
+    })
+    search.appendChild(field)
+    if (s.name !== 'loading' && s.query.coverage !== null) {
+      const coverage = document.createElement('span')
+      coverage.className = 'ui-recall-panel__coverage'
+      coverage.textContent = `oldest entry ${relativeTime(s.query.coverage, Date.now())}`
+      search.appendChild(coverage)
+    }
+    this.root.appendChild(search)
+
     // ── One footer, one line, every hint in it: what Enter does, how to
     //    move, how to widen, how to get out — key groups separated by a real
     //    gap. The execute group only appears when there IS something to
@@ -817,9 +899,13 @@ export class RecallOverlay {
     const footer = document.createElement('div')
     footer.className = 'ui-recall-panel__footer'
     if (s.name === 'navigating') {
-      const execute = document.createElement('span')
-      execute.textContent = '↵ to execute'
-      footer.appendChild(execute)
+      // The Enter group names what the key ACTUALLY does in this state: a
+      // search hands the input to the field (Enter inserts, never executes);
+      // with the filter cleared the previewed command is in the line and
+      // Enter is the reviewed run.
+      const enter = document.createElement('span')
+      enter.textContent = s.filter !== '' ? '↵ to insert' : '↵ to execute'
+      footer.appendChild(enter)
     }
     const navigate = document.createElement('span')
     navigate.textContent = '↑ ↓ to navigate'

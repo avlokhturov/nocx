@@ -73,3 +73,40 @@
   opacity: 0.5;
   cursor: not-allowed;
 }
+
+/* ── Display form (createSearchFieldDisplay) ───────────────────────────
+   The same field without a focusable input: keys are owned by the caller's
+   arbiter, so the element is a statement of where typing goes, not a
+   control. The value is a text node; `data-empty` flips placeholder and
+   caret, which is why the placeholder is `attr(data-placeholder)` rather
+   than an element — one attribute drives both states. The caret is a
+   fixed-width block, the terminal's own vocabulary for "input goes here". */
+.ui-search-field__input[data-display] {
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  white-space: nowrap;
+  cursor: text;
+}
+
+.ui-search-field__input[data-display]::before {
+  content: attr(data-placeholder);
+  color: var(--color-text-dim);
+}
+
+/* A value means the placeholder is a lie — drop it and show the text. */
+.ui-search-field__input[data-display]:not([data-empty])::before {
+  content: none;
+}
+
+.ui-search-field__caret {
+  flex: 0 0 auto;
+  width: 1ch;
+  height: 1.1em;
+  margin-left: 1px;
+  background: var(--color-text);
+}
+
+.ui-search-field__input[data-display][data-empty] .ui-search-field__caret {
+  opacity: 0.6;
+}
