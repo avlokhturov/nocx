@@ -73,6 +73,17 @@ const ARGUMENT_PATH_RUNG = 100_000
  */
 const PATH_KIND_RUNG = 100
 
+/**
+ * A history row whose trailing token is a path that no longer exists ranks
+ * LAST — demoted, never dropped: re-running a command to see it fail is
+ * legitimate, and hiding history because the filesystem moved would be a
+ * lie about what was run. Sized below every positive score (argument rung
+ * 100 000 + quality 3000 + path kind 100 + recency 100 + frequency 10 +
+ * environment 5 + provider prior 2), so a stale row can never outrank a
+ * live one — and the list still shows it, at the bottom.
+ */
+const STALE_PATH_PENALTY = 1_000_000
+
 const QUALITY_EXACT = 3
 const QUALITY_PREFIX = 1
 /** 0..1, newest candidate in the set = 1, oldest = 0. A single timed
@@ -124,6 +135,9 @@ export function rankCandidates(candidates: Candidate[], ctx: RankContext): Candi
     // default for commands that do not filter). Below quality: an exact
     // file match is still the more specific intent.
     const kindRung = c.source === 'path' && c.kind === 'directory' ? PATH_KIND_RUNG : 0
+    // A history row whose trailing token is a path that no longer exists
+    // ranks LAST — demoted, never dropped (see STALE_PATH_PENALTY above).
+    const stalePenalty = c.stalePath ? -STALE_PATH_PENALTY : 0
     const score =
       argumentRung +
       quality * 1000 +
@@ -131,7 +145,8 @@ export function rankCandidates(candidates: Candidate[], ctx: RankContext): Candi
       recencyScore(c, newest, oldest) * 100 +
       (c.frequency ?? 0) * 10 +
       environmentScore(c) * 5 +
-      (PROVIDER_PRIOR[c.providerId] ?? 0)
+      (PROVIDER_PRIOR[c.providerId] ?? 0) +
+      stalePenalty
     return { c, score }
   })
 

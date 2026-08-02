@@ -46,6 +46,11 @@ const KIND_LABEL: Record<string, string> = {
   file: 'File',
 }
 
+/** The group caption above the history rows in a mixed list — one
+ *  vocabulary with the source badge: the badge names each row, the caption
+ *  names the section. */
+const GROUP_LABEL = 'History'
+
 /** How wide a row may make the panel, in px — the panel hugs its longest
  *  row and never spans the pane (the owner's "why full width?"). */
 export const MAX_DROPDOWN_WIDTH_PX = 640
@@ -58,6 +63,17 @@ export class CompletionDropdown {
   private callbacks: CompletionDropdownCallbacks
   private list: HTMLElement | null = null
   private _open = false
+  /** The measured panel width for the CURRENT list content, plus the
+   *  content signature it was measured against. The width is stable for the
+   *  life of one open list (the owner's "every Tab press makes the window
+   *  narrower"): measured once per rendered list, never re-measured on a
+   *  selection change — a narrower selected row must not shrink the panel
+   *  under the cursor. hide() clears both, so the next list measures fresh. */
+  private measuredWidth: number | null = null
+  private measuredSignature: string | null = null
+  /** The content signature of the rows currently rendered. The selection
+   *  index is deliberately not part of it. */
+  private rowsSignature = ''
 
   constructor(callbacks: CompletionDropdownCallbacks) {
     this.callbacks = callbacks
@@ -93,8 +109,25 @@ export class CompletionDropdown {
     const list = document.createElement('div')
     list.className = 'ui-completion-dropdown__list'
 
+    // History rows are their own group, at the end: a path candidate
+    // replaces the current TOKEN, a history candidate replaces the WHOLE
+    // LINE, and a mixed list must say the two kinds apart (the owner's
+    // "this suggestion looks strange" — a whole-line row in a list of path
+    // rows). The caption is one part of this component's identity family;
+    // a pure-history list (no paths to separate from) needs no caption.
+    const mixed =
+      rows.some((r) => r.source !== 'history') && rows.some((r) => r.source === 'history')
+    let historyGrouped = false
     for (let i = 0; i < rows.length; i++) {
       const rowData = rows[i]
+      if (mixed && rowData.source === 'history' && !historyGrouped) {
+        historyGrouped = true
+        const group = document.createElement('div')
+        group.className = 'ui-completion-dropdown__group'
+        group.setAttribute('role', 'presentation')
+        group.textContent = GROUP_LABEL
+        list.appendChild(group)
+      }
       const row = document.createElement('div')
       row.className = 'ui-collection-row ui-completion-dropdown__row'
       row.setAttribute('role', 'option')
@@ -154,7 +187,13 @@ export class CompletionDropdown {
     dismiss.textContent = 'esc to dismiss'
     footer.appendChild(dismiss)
     this.root.appendChild(footer)
-
+    // The width cache key: the row content that decides the widest row.
+    // The selection index is deliberately not part of it — cycling through
+    // the same list must never re-measure (the width is stable for the
+    // life of one open list).
+    this.rowsSignature = rows
+      .map((r) => `${r.id}\u0000${r.displayText}\u0000${r.source}\u0000${r.kind ?? ''}`)
+      .join('\u0001')
     this.applyGeometry(anchorLeft)
   }
 
@@ -184,16 +223,20 @@ export class CompletionDropdown {
     list.appendChild(row)
     this.root.appendChild(list)
     this.list = list
-
+    this.rowsSignature = message
     this.applyGeometry(anchorLeft)
   }
 
-  /** Close the panel and drop its rows. */
+  /** Close the panel and drop its rows. The width cache dies with the
+   *  list — the next open list measures fresh. */
   hide(): void {
     this._open = false
     this.root.dataset.open = 'false'
     this.root.replaceChildren()
     this.list = null
+    this.measuredWidth = null
+    this.measuredSignature = null
+    this.rowsSignature = ''
   }
 
   destroy(): void {
@@ -210,8 +253,15 @@ export class CompletionDropdown {
    */
   private applyGeometry(anchorLeft: number | null | undefined): void {
     const cap = Math.min(MAX_DROPDOWN_WIDTH_PX, window.innerWidth * 0.9)
-    const widest = Math.max(this.list?.scrollWidth ?? 0, MIN_DROPDOWN_WIDTH_PX)
-    this.root.style.width = `${Math.min(widest, cap)}px`
+    // One measurement per rendered list: the width is stable for the life
+    // of one open list (the owner's "every Tab press makes the window
+    // narrower"). A selection change re-renders the same rows and must not
+    // re-measure; a list that CHANGES (a late batch merging in) re-measures.
+    if (this.measuredSignature !== this.rowsSignature) {
+      this.measuredWidth = Math.max(this.list?.scrollWidth ?? 0, MIN_DROPDOWN_WIDTH_PX)
+      this.measuredSignature = this.rowsSignature
+    }
+    this.root.style.width = `${Math.min(this.measuredWidth ?? MIN_DROPDOWN_WIDTH_PX, cap)}px`
 
     if (anchorLeft === null || anchorLeft === undefined) {
       this.root.style.left = ''

@@ -248,6 +248,14 @@ test.describe('tab completion', () => {
       // `cd ` + Tab — the empty token, the case that used to offer history
       // rows only, every one labelled "history".
       await page.keyboard.type('cd ')
+      // The ghost shows the top candidate BEFORE the Tab: what the user is
+      // looking at is what the first Tab must settle on (completion pass
+      // 4's "the first Tab takes what is shown").
+      const ghost = page.locator(`${INPUT} .nocx-editor-ghost`).first()
+      await expect(ghost).toBeVisible({ timeout: 5000 })
+      const ghostText = (await ghost.innerText()).trim()
+      expect(ghostText.length).toBeGreaterThan(0)
+
       await page.keyboard.press('Tab')
       const dropdown = page.locator(DROPDOWN).first()
       await expect(dropdown).toBeVisible({ timeout: 5000 })
@@ -263,13 +271,29 @@ test.describe('tab completion', () => {
       await expect(second).toContainText('beta/')
       await expect(second).toContainText('Directory')
       await expect(dropdown).not.toContainText('notes.txt')
-      // The first Tab opened the dropdown with the first directory selected;
-      // the next Tab moves to the second and previews it in the line.
-      await expect(first).toHaveAttribute('aria-selected', 'true')
+      // The FIRST Tab SETTLED on the ghosted candidate: the row the
+      // dropdown opened on is the row the ghost was showing — it did not
+      // advance to the next folder.
+      const settled = (
+        await selectedRow(page).locator('.ui-collection-row__info').innerText()
+      ).trim()
+      expect(settled).toBe(ghostText)
+      // Let the list settle (a late history batch may still merge in — a
+      // list that grows legitimately re-measures), then pin the width.
+      await page.waitForTimeout(500)
+      const widthAtOpen = (await dropdown.boundingBox())!.width
+      await page.screenshot({ path: '/tmp/nocx-c4-tab-settled.png' })
+
+      // The next Tab moves to the second candidate and previews it in the
+      // line — and the panel's width does not change between the presses
+      // (the owner's "every Tab press makes the window narrower").
       await page.keyboard.press('Tab')
       await expect(second).toHaveAttribute('aria-selected', 'true')
-      const ghost = page.locator(`${INPUT} .nocx-editor-ghost`).first()
-      await expect(ghost).toContainText('beta/')
+      const ghost2 = page.locator(`${INPUT} .nocx-editor-ghost`).first()
+      await expect(ghost2).toContainText('beta/')
+      const widthAfterCycle = (await dropdown.boundingBox())!.width
+      expect(widthAfterCycle).toBe(widthAtOpen)
+      await page.screenshot({ path: '/tmp/nocx-c4-tab-cycled.png' })
 
       // Content-sized: the panel hugs its rows, it never spans the pane.
       const box = await dropdown.boundingBox()

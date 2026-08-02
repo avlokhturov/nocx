@@ -235,6 +235,190 @@ describe('historyProvider', () => {
     )
     expect(onRemote.candidates.length).toBe(MAX_PROVIDER_CANDIDATES)
   })
+
+  it('a history row whose trailing token no longer exists is marked stalePath — demoted, never dropped', async () => {
+    // The reported case: the user deleted the file, and the whole-line row
+    // `rm zzz-e2e-cmp-msbojbc7` still matches the typed prefix.
+    const completeFs = vi.fn((): Promise<FsComplete> => Promise.resolve({ entries: [] }))
+    const provider = historyProvider({
+      query: vi.fn((): Promise<HistoryQuery> =>
+        Promise.resolve({
+          scope: 'directory',
+          exhausted: true,
+          source: 'store',
+          coverage: null,
+          entries: [
+            {
+              id: '1',
+              command: 'rm zzz-e2e-cmp-msbojbc7',
+              cwd: '/repo',
+              host: '',
+              status: 'success',
+              endedAt: 100,
+            },
+          ],
+        }),
+      ),
+      completeFs,
+    })
+    const got = await provider.suggest(
+      ctx({
+        doc: 'rm zzz-e2e-cmp-msbojbc7',
+        token: { text: 'zzz-e2e-cmp-msbojbc7', from: 3, to: 22 },
+      }),
+      new AbortController().signal,
+    )
+    // The row is still offered (demotion is not hiding)…
+    expect(got.candidates).toHaveLength(1)
+    // …but marked stale: the backend answered no entry named exactly the
+    // token (soft-empty for a missing path), so the rank sinks it last.
+    expect(got.candidates[0].stalePath).toBe(true)
+    expect(completeFs).toHaveBeenCalledWith('zzz-e2e-cmp-msbojbc7', '/repo')
+  })
+
+  it('an exact entry-name match is existence — the row is not demoted', async () => {
+    const completeFs = vi.fn((): Promise<FsComplete> =>
+      Promise.resolve({
+        entries: [
+          { name: 'zzz-e2e-cmp-msbojbc7', path: '/repo/zzz-e2e-cmp-msbojbc7', isDir: false },
+        ],
+      }),
+    )
+    const provider = historyProvider({
+      query: vi.fn((): Promise<HistoryQuery> =>
+        Promise.resolve({
+          scope: 'directory',
+          exhausted: true,
+          source: 'store',
+          coverage: null,
+          entries: [
+            {
+              id: '1',
+              command: 'rm zzz-e2e-cmp-msbojbc7',
+              cwd: '/repo',
+              host: '',
+              status: 'success',
+              endedAt: 100,
+            },
+          ],
+        }),
+      ),
+      completeFs,
+    })
+    const got = await provider.suggest(
+      ctx({
+        doc: 'rm zzz-e2e-cmp-msbojbc7',
+        token: { text: 'zzz-e2e-cmp-msbojbc7', from: 3, to: 22 },
+      }),
+      new AbortController().signal,
+    )
+    expect(got.candidates[0].stalePath).toBeUndefined()
+  })
+
+  it('an option-looking trailing token is never checked (it is not a path)', async () => {
+    const completeFs = vi.fn((): Promise<FsComplete> => Promise.resolve({ entries: [] }))
+    const provider = historyProvider({
+      query: vi.fn((): Promise<HistoryQuery> =>
+        Promise.resolve({
+          scope: 'directory',
+          exhausted: true,
+          source: 'store',
+          coverage: null,
+          entries: [
+            {
+              id: '1',
+              command: 'ls -la',
+              cwd: '/repo',
+              host: '',
+              status: 'success',
+              endedAt: 100,
+            },
+          ],
+        }),
+      ),
+      completeFs,
+    })
+    const got = await provider.suggest(
+      ctx({ doc: 'ls -', token: { text: '-', from: 3, to: 4 } }),
+      new AbortController().signal,
+    )
+    expect(got.candidates[0].stalePath).toBeUndefined()
+    expect(completeFs).not.toHaveBeenCalled()
+  })
+
+  it('a remote session never calls the filesystem — "exists" cannot be known there', async () => {
+    const completeFs = vi.fn((): Promise<FsComplete> => Promise.resolve({ entries: [] }))
+    const provider = historyProvider({
+      query: vi.fn((): Promise<HistoryQuery> =>
+        Promise.resolve({
+          scope: 'directory',
+          exhausted: true,
+          source: 'store',
+          coverage: null,
+          entries: [
+            {
+              id: '1',
+              command: 'rm zzz-e2e-cmp-msbojbc7',
+              cwd: '/repo',
+              host: 'remote',
+              status: 'success',
+              endedAt: 100,
+            },
+          ],
+        }),
+      ),
+      completeFs,
+    })
+    const got = await provider.suggest(
+      ctx({
+        isLocal: false,
+        doc: 'rm zzz-e2e-cmp-msbojbc7',
+        token: { text: 'zzz-e2e-cmp-msbojbc7', from: 3, to: 22 },
+      }),
+      new AbortController().signal,
+    )
+    expect(got.candidates[0].stalePath).toBeUndefined()
+    expect(completeFs).not.toHaveBeenCalled()
+  })
+
+  it('one fs.complete call per token, cached for the life of the open list', async () => {
+    const completeFs = vi.fn((): Promise<FsComplete> => Promise.resolve({ entries: [] }))
+    const provider = historyProvider({
+      query: vi.fn((): Promise<HistoryQuery> =>
+        Promise.resolve({
+          scope: 'directory',
+          exhausted: true,
+          source: 'store',
+          coverage: null,
+          entries: [
+            {
+              id: '1',
+              command: 'rm zzz-e2e-cmp-msbojbc7',
+              cwd: '/repo',
+              host: '',
+              status: 'success',
+              endedAt: 100,
+            },
+          ],
+        }),
+      ),
+      completeFs,
+    })
+    // Two queries within the same interaction (each document extends the
+    // previous — the user typed more); the trailing token is unchanged.
+    await provider.suggest(
+      ctx({ doc: 'rm zzz', token: { text: 'zzz', from: 3, to: 6 } }),
+      new AbortController().signal,
+    )
+    await provider.suggest(
+      ctx({
+        doc: 'rm zzz-e2e-cmp-msbojbc7',
+        token: { text: 'zzz-e2e-cmp-msbojbc7', from: 3, to: 22 },
+      }),
+      new AbortController().signal,
+    )
+    expect(completeFs).toHaveBeenCalledTimes(1)
+  })
 })
 
 describe('fsProvider', () => {

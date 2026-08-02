@@ -608,6 +608,75 @@ describe('keyboard', () => {
     expect(editor.doc).toBe('git sta')
   })
 
+  it('the first Tab SETTLES on the ghosted candidate — a history-first batch must not steal the selection', async () => {
+    // The reported case: `cd ` shows the ghost `Downloads/`; the user presses
+    // Tab to take it, and the dropdown must open with THAT row selected —
+    // not move to the next folder. The regression is the arrival order: if
+    // the Tab query's HISTORY batch lands before the path batch, the open
+    // selection must still be the ghosted path (the old code opened on the
+    // first batch and preserveSelection then kept the wrong row when the
+    // paths landed).
+    const history = manualProvider('history', true)
+    const fs = manualProvider('fs', true)
+    const dirCand = (id: string, text: string): Candidate => ({
+      targetId: 'shell',
+      providerId: 'fs',
+      id,
+      displayText: text,
+      insertText: text,
+      replacement: { from: 3, to: 3 },
+      matchRanges: [],
+      source: 'path',
+      kind: 'directory',
+      eligibleForGhostText: true,
+    })
+    const histCand = (id: string, text: string): Candidate => ({
+      targetId: 'shell',
+      providerId: 'history',
+      id,
+      displayText: text,
+      insertText: text,
+      replacement: { from: 0, to: 3 },
+      matchRanges: [],
+      source: 'history',
+      eligibleForGhostText: true,
+    })
+    const { editor, dropdown, controller } = rig({
+      providers: [history.provider, fs.provider],
+      editorDoc: 'cd ',
+    })
+    // A typing query anchors the ghost: both batches land, the argument
+    // rung puts Downloads/ on top — that is what the ghost shows.
+    controller.onDocChanged()
+    fs.next().resolve([dirCand('fs:Downloads', 'Downloads/'), dirCand('fs:go', 'go/')])
+    history.next().resolve([histCand('hist:cd Downloads', 'cd Downloads')])
+    await flush()
+    expect(dropdown.isOpen).toBe(false) // typing never opens the panel
+
+    // Tab, through the real seam: the arbiter declines while closed, and
+    // the editor's onTab calls open() (terminal-content.ts wiring).
+    expect(controller.handleKey(key('Tab'))).toBe(false)
+    controller.open()
+    // The Tab query's HISTORY batch lands first — the arrival order that
+    // used to open the panel on a whole-line row.
+    history.next().resolve([histCand('hist:cd Downloads', 'cd Downloads')])
+    await flush()
+    // The dropdown opened with the ghosted PATH candidate selected — not
+    // the history row, and not advanced to the next folder.
+    expect(dropdown.isOpen).toBe(true)
+    expect(selectedRow(dropdown)?.textContent).toContain('Downloads/')
+    expect(editor.doc).toBe('cd ') // nothing inserted, only selected
+
+    // The late path batch lands; the selection stays on the ghosted row.
+    fs.next().resolve([dirCand('fs:Downloads', 'Downloads/'), dirCand('fs:go', 'go/')])
+    await flush()
+    expect(selectedRow(dropdown)?.textContent).toContain('Downloads/')
+
+    // The SECOND Tab moves — the first one settled, the ones after cycle.
+    expect(controller.handleKey(key('Tab'))).toBe(true)
+    expect(selectedRow(dropdown)?.textContent).toContain('go/')
+  })
+
   it('Shift+Tab cycles back', async () => {
     const { dropdown, controller } = rig({
       providers: [

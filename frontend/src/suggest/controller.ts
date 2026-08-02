@@ -159,6 +159,10 @@ export class CompletionController {
   private abort: AbortController | null = null
   private budgetTimer: number | undefined
   private gaveUp = false
+  /** The id of the ghosted candidate carried into an open (Tab) query — the
+   *  first Tab settles on it, whatever batch arrives first. Cleared when no
+   *  ghost was showing (typing queries never seed). */
+  private seedId: string | undefined
   /** Whether the query in flight may open the dropdown (Tab) or is a typing
    *  query that may only re-anchor the ghost. */
   private openIntent = false
@@ -206,9 +210,14 @@ export class CompletionController {
         },
         { decorations: (v) => v.decorations },
       ),
-      // The ghost span's style: a muted tail, scoped to this editor.
+      // The ghost span's style: a SUGGESTION, not typed text — a faint tail
+      // derived from the theme's text token (no literal colour), scoped to
+      // this editor. The owner's "it reads as typed": --color-text-dim was
+      // too strong a weight for text the user has not committed to.
       EditorView.theme({
-        '.nocx-editor-ghost': { color: 'var(--color-text-dim)' },
+        '.nocx-editor-ghost': {
+          color: 'color-mix(in srgb, var(--color-text) 50%, transparent)',
+        },
       }),
     ]
   }
@@ -313,10 +322,14 @@ export class CompletionController {
       this.dismiss()
       return false
     }
-    // Tab cycles the selection — the owner's explicit Warp-shaped ask: the
-    // first Tab opens the dropdown, each further Tab moves to the next
-    // candidate (Shift+Tab goes back), and accept stays Enter (and Right/End
-    // for the ghost). Cycling never inserts; the preview is the ghost text.
+    // Tab semantics — the rule, and the next change must keep all three
+    // lines (design §8.7, the owner's "the first Tab takes what is shown"):
+    //   - Ghost showing, dropdown CLOSED: the first Tab opens the dropdown
+    //     with the ghosted candidate selected. It does not advance — what
+    //     the user is looking at is what they get.
+    //   - Dropdown OPEN: Tab moves to the next candidate, Shift+Tab back.
+    //   - Accept stays Enter (and Right/End for the ghost).
+    // Cycling never inserts; the preview is the ghost text.
     if (e.key === 'Tab' && !e.ctrlKey && !e.metaKey && !e.altKey) {
       this.move(e.shiftKey ? -1 : 1)
       return this.consume(e)
@@ -357,13 +370,29 @@ export class CompletionController {
       clearTimeout(this.budgetTimer)
       this.budgetTimer = undefined
     }
+    // The FIRST Tab settles on the ghosted candidate — the one the previous
+    // query's ghost is showing (queryCandidates[0] while closed). It seeds
+    // the new accumulation so the dropdown opens with it selected whatever
+    // batch arrives first: a history-first batch must not open the panel on
+    // a whole-line row while the ghosted path still waits in a later fs
+    // batch — the selection would then preserve that wrong row when the
+    // paths land (the owner's "Tab jumps to the next folder").
+    const prevDoc = this.queryDoc
+    const ghosted =
+      openIntent && this.state.name === 'closed' ? (this.queryCandidates[0] ?? null) : null
     const ac = new AbortController()
     this.abort = ac
     const gen = ++this.generation
     this.queryDoc = editor.getDoc()
     this.queryCandidates = []
-    this.delivered = 0
-    this.bestReason = null
+    this.seedId = undefined
+    if (ghosted && prevDoc === this.queryDoc) {
+      // Same document, same candidate: carry it over as the first row, and
+      // remember its id so the open selection below is what the ghost
+      // showed — not blindly the first row of the first batch to arrive.
+      this.queryCandidates = [ghosted]
+      this.seedId = ghosted.id
+    }
     this.gaveUp = false
     // Only a Tab (open()) may OPEN the dropdown; a keystroke (onDocChanged)
     // re-anchors the ghost and — if the dropdown is already open — keeps it
@@ -373,6 +402,8 @@ export class CompletionController {
 
     const doc = this.queryDoc
     const caret = editor.getSelection().from
+    this.delivered = 0
+    this.bestReason = null
     const token = tokenAt(doc, caret)
     const position = positionOf(doc, caret)
     const env = this.options.env()
@@ -459,7 +490,6 @@ export class CompletionController {
       position,
     })
     this.queryCandidates = ordered
-
     if (ordered.length > 0) {
       // Candidates always win: an earlier empty reason is moot.
       this.bestReason = null
@@ -474,7 +504,16 @@ export class CompletionController {
         // a LATE batch for a Tab query the budget had already settled empty
         // (the open intent survives the budget). A typing query never opens
         // a closed dropdown; one that is already open keeps its list live.
-        this.state = { name: 'open', candidates: ordered, selectedIndex: 0, generation: gen }
+        // The first Tab SETTLES: the opening selection is the ghosted
+        // candidate (seeded in runQuery, found by id here) — not blindly
+        // the first row of whichever batch happened to arrive first.
+        const at = this.seedId !== undefined ? ordered.findIndex((c) => c.id === this.seedId) : -1
+        this.state = {
+          name: 'open',
+          candidates: ordered,
+          selectedIndex: at >= 0 ? at : 0,
+          generation: gen,
+        }
       } else {
         this.state = { name: 'closed' }
         this.options.dropdown.hide()

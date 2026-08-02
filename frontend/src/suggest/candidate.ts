@@ -70,6 +70,16 @@ export interface Candidate {
    * candidates that are not paths (a command name has no kind).
    */
   kind?: 'directory' | 'file'
+  /**
+   * A history row whose trailing token is a path that no longer exists on
+   * the session's filesystem (checked once per open list through the
+   * fs.complete seam the path provider uses). The row is DEMOTED to the end
+   * of the list, never dropped — re-running a command to see it fail is
+   * legitimate, and hiding history because the filesystem moved would be a
+   * lie about what was run. Absent for candidates that were not checked (a
+   * remote session, where the backend's filesystem is not the session's).
+   */
+  stalePath?: boolean
   /** Sensitivity, expressed in the type: false candidates never become ghost
    *  text and never accept via Right/End (design §8.7, §9). */
   readonly eligibleForGhostText: boolean

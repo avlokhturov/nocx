@@ -94,6 +94,49 @@ describe('rankCandidates', () => {
     expect(ids(ranked)).toEqual(['common', 'rare'])
   })
 
+  it('a stale-path history row ranks last — demoted below every live row, never dropped', () => {
+    // The reported case: the file the row names is gone. The stale row must
+    // sink below a FRESH row of the same line, below a plain history row,
+    // and below a path candidate — but still be present (re-running a
+    // command to see it fail is legitimate).
+    const ranked = rankCandidates(
+      [
+        base({
+          id: 'stale-fresh',
+          providerId: 'history',
+          source: 'history',
+          insertText: 'rm zzz-e2e-cmp-msbojbc7',
+          freshness: NOW - 1_000,
+          stalePath: true,
+        }),
+        base({
+          id: 'stale-old',
+          providerId: 'history',
+          source: 'history',
+          insertText: 'rm zzz-e2e-cmp-msbojbc7',
+          freshness: NOW - 100_000,
+          stalePath: true,
+        }),
+        base({
+          id: 'live-hist',
+          providerId: 'history',
+          source: 'history',
+          insertText: 'rm other-file',
+          freshness: NOW - 10_000,
+        }),
+        base({
+          id: 'path',
+          providerId: 'fs',
+          source: 'path',
+          kind: 'directory',
+          insertText: 'zzz/',
+        }),
+      ],
+      { query: 'rm zzz', now: NOW, position: 'argument' },
+    )
+    expect(ids(ranked)).toEqual(['path', 'live-hist', 'stale-fresh', 'stale-old'])
+  })
+
   it('environment match: an unknown facet is never a wildcard', () => {
     const ranked = rankCandidates(
       [

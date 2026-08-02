@@ -11,7 +11,7 @@ import type { CommandSnapshotStore } from '../command-snapshot'
 import type { HistoryQuery } from '../generated/history.query'
 import type { FsComplete } from '../generated/fs.complete'
 import type { Candidate } from './candidate'
-import type { CompletionToken } from './token'
+import type { CompletionToken, TokenPosition } from './token'
 import { looksLikePath } from './token'
 
 /** Per-provider cap on the candidates returned to the merge. */
@@ -128,9 +128,41 @@ export function commandProvider(store: CommandSnapshotStore): SuggestionProvider
 // entry whose command starts with the line replaces the entire line. Rows are
 // environment-scoped by the store (the directory rung); the same command
 // arriving twice dedups by id, keeping the newest.
+/** The last whitespace-delimited word of a whole-line candidate — the
+ *  argument the command acts on. '' when the line ends in whitespace. */
+function trailingToken(line: string): string {
+  const m = line.trimEnd().match(/(\S+)$/)
+  return m ? m[1] : ''
+}
+
+/** Whether a history row's trailing token is worth an existence check: in
+ *  argument position any non-option word is the file the command acts on
+ *  (the surface already treats argument words as paths — the fs provider
+ *  answers ANY argument token); in command position only a path form
+ *  (`./run.sh`, `~/x`, `/etc/hosts`). '' means no check. */
+function checkableTrailingToken(line: string, position: TokenPosition): string {
+  const t = trailingToken(line)
+  if (t === '' || t.startsWith('-')) return ''
+  if (position === 'argument') return t
+  return looksLikePath(t) ? t : ''
+}
+
 export function historyProvider(opts: {
   query: (cwd: string, host: string) => Promise<HistoryQuery>
+  /** The fs.complete seam — the same backend call the path provider makes.
+   *  Checks whether a history row's trailing token still exists, so a row
+   *  whose file is gone is DEMOTED — never hidden (re-running a command to
+   *  see it fail is legitimate). Absent on a remote session: the backend's
+   *  filesystem is not the session's, and no call may be made. */
+  completeFs?: (text: string, cwd: string) => Promise<FsComplete>
 }): SuggestionProvider {
+  // The existence cache: one fs.complete call per (cwd, trailing token),
+  // for the life of the open list. A query whose document extends the
+  // previous query's is the same interaction (the user typed more); a
+  // document that does not is a new interaction, and the cache resets so a
+  // file created or deleted since can change the verdict.
+  const exists = new Map<string, boolean>()
+  let lastDoc: string | null = null
   return {
     id: 'history',
     targetId: 'shell',
@@ -175,6 +207,31 @@ export function historyProvider(opts: {
           eligibleForGhostText: true,
         })
         if (out.length >= cap) break
+      }
+      // A history row whose trailing token is a path that no longer exists
+      // is demoted — never dropped — so it ranks last (the owner's "I
+      // deleted the file and this suggestion looks strange"). The check is
+      // the fs.complete seam (one call per token, cached for the life of
+      // the open list) and is skipped entirely on a remote session, where
+      // the backend's filesystem is not the session's and "exists" cannot
+      // be known. An exact entry-name match is existence; the backend
+      // answers soft-empty for a missing directory, so any other answer
+      // demotes.
+      if (ctx.isLocal && opts.completeFs) {
+        if (lastDoc !== null && !ctx.doc.startsWith(lastDoc)) exists.clear()
+        lastDoc = ctx.doc
+        for (const c of out) {
+          const token = checkableTrailingToken(c.insertText, ctx.position)
+          if (token === '') continue
+          const key = `${ctx.cwd}\u0000${token}`
+          let missing = exists.get(key)
+          if (missing === undefined) {
+            const result = await opts.completeFs(token, ctx.cwd)
+            missing = !result.entries.some((e) => e.name === token)
+            exists.set(key, missing)
+          }
+          if (missing) c.stalePath = true
+        }
       }
       return { candidates: out }
     },
@@ -293,7 +350,10 @@ export function createShellProviders(opts: {
 }): SuggestionProvider[] {
   return [
     commandProvider(opts.store),
-    historyProvider({ query: opts.queryHistory }),
+    // The fs.complete seam travels to history too: the stale-path demotion
+    // (a history row whose trailing token no longer exists ranks last)
+    // uses the same backend call the path provider makes.
+    historyProvider({ query: opts.queryHistory, completeFs: opts.completeFs }),
     fsProvider({ complete: opts.completeFs }),
   ]
 }
