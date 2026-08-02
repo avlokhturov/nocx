@@ -65,3 +65,6 @@ playwright-report/
 
 # local harness state
 .pi/
+
+# Disposable home for e2e runs (playwright.config.ts home boundary, nocx-ti8w)
+.e2e/

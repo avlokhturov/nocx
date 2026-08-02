@@ -76,6 +76,13 @@ jobs:
       - name: Test
         run: go test -race -count=1 ./...
 
+      # The shipped profile directory lives behind `-tags release`
+      # (internal/storage/appdir.go), so the ordinary run never compiles it. One
+      # package, one assertion — but without it a typo there ships an app that
+      # cannot find any existing installation's documents.
+      - name: Test (release build tag)
+        run: go test -race -count=1 -tags release ./internal/storage/...
+
   # backend-linux — Go tests on Linux, with and without a Secret Service.
   #
   # Runner decision: ubuntu-latest is the standard CI Linux image. The macOS

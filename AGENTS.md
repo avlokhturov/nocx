@@ -25,6 +25,25 @@ Afterwards `git commit` stages the export and `git push` runs `bd dolt push`. If
 fails on beads, fix the sync; `--no-verify` leaves everyone on a backlog that looks
 current and is not.
 
+**Your dev profile is not the installed app's.** Anything you build or run from
+this repo — `wails dev`, `make dev-web`, `make build`, and the Playwright suite,
+which launches a backend of its own — resolves `nocx-dev` rather than `nocx`,
+because the directory is chosen by the build tag and only `-tags release` picks
+the shipped one (`internal/storage/appdir.go`). So a dev stand starts with no
+profiles and no vault, and that is correct: before this, an e2e run wrote the
+developer's real settings and reset their theme on every pass (nocx-ti8w). If
+you want your real SSH profiles in the dev stand, copy them across by hand —
+nothing migrates them for you, and nothing should.
+
+**And the e2e suite gets a disposable `$HOME`.** On the default path
+`playwright.config.ts` applies it to the `wails dev` backend and you need do
+nothing. On the **headless** path you start the backend yourself, so the suite
+cannot isolate it and refuses to run until you say you have: export
+`NOCX_E2E_HOME_DIR` and launch devharness with that `HOME` — `e2e/preflight.ts`
+prints the exact command when it stops you. Do not work around it by unsetting
+`NOCX_WS_PORT`; the boundary is what keeps a run off your settings, your vault
+documents, your `~/.nocx` and your shell rc files.
+
 ## Repository layout
 
 - `docs/` — `vision.md`, `architecture.md`, `decisions/` (ADRs).
