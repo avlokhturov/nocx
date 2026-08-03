@@ -30,15 +30,19 @@ func TestScriptVersionTracksScriptContent(t *testing.T) {
 	// WHEN THIS FAILS: you changed a shell integration script. Bump `version`
 	// in scripts.go, then add an entry here for the new version with the digest
 	// the failure prints. Do not edit an existing entry — a released version
-	// number describes one exact pair of scripts, and rewriting it in place is
+	// number describes one exact set of scripts, and rewriting it in place is
 	// the same as not having the check.
+	// The digest covers every script in the `scripts` map: a change to
+	// nocx.posix without a bump strands installs exactly like a bash change
+	// would.
 	digests := map[string]string{
-		"8": "ca89bf20e58c0a4669ecfb0754173ce721e436273b0b06549c7e0162e9b06dc8",
-		"9": "26ee0a75cf83df3a773c97ee39265c96912629c4bcdb629edea51ba5bcc5529d",
+		"8":  "ca89bf20e58c0a4669ecfb0754173ce721e436273b0b06549c7e0162e9b06dc8",
+		"9":  "26ee0a75cf83df3a773c97ee39265c96912629c4bcdb629edea51ba5bcc5529d",
+		"10": "17c0fdf278e54cd6fea16aed814b9c96b0daaff6e5d54c6ced03ebd93fc111aa",
 	}
 
 	h := sha256.New()
-	for _, name := range []string{"scripts/nocx.bash", "scripts/nocx.zsh"} {
+	for _, name := range []string{"scripts/nocx.bash", "scripts/nocx.zsh", "scripts/nocx.posix"} {
 		h.Write([]byte(name))
 		h.Write([]byte{0})
 		h.Write([]byte(scriptFor(t, name)))
@@ -70,6 +74,8 @@ func scriptFor(t *testing.T, path string) string {
 		return bashScript
 	case "scripts/nocx.zsh":
 		return zshScript
+	case "scripts/nocx.posix":
+		return posixScript
 	default:
 		t.Fatalf("no embedded script for %q", path)
 		return ""

@@ -106,12 +106,46 @@ func runLauncherOnPTY(t *testing.T, shPath, cmd string, env []string, lines ...s
 	return string(out)
 }
 
-// TestShellUnknownIsRefused pins the pinned contract: an unknown shell is
-// never a best-effort guess.
-func TestShellUnknownIsRefused(t *testing.T) {
+// TestShellUnknownGetsPosixTier pins the deliberate decision (nocx-518d):
+// ShellUnknown is the minimal tier, not a refusal — spec §6 names dash /
+// busybox ash / POSIX sh as a real, verified tier, and refusing them
+// forever would contradict D4. The posix command is POSIX-only (parsed by
+// an explicit /bin/sh, execs ${SHELL:-/bin/sh}), so an unknown shell that
+// ignores ENV still gets a plain shell — the refusal outcome, minus the
+// refusal.
+func TestShellUnknownGetsPosixTier(t *testing.T) {
 	cmd, reason, ok := NewRemoteLauncher().StartCommand(ShellUnknown, LaunchOptions{})
+	if !ok {
+		t.Fatalf("ShellUnknown refused: reason=%q", reason)
+	}
+	if reason != ReasonNone {
+		t.Errorf("reason = %q, want none", reason)
+	}
+	if !strings.Contains(cmd, "/bin/sh -c ") {
+		t.Errorf("posix command does not run through an explicit /bin/sh: %q", cmd)
+	}
+	if !strings.Contains(cmd, "nocx-posix") {
+		t.Errorf("posix command missing transient dir marker: %q", cmd)
+	}
+	// The exec target is ${SHELL:-/bin/sh}, never a named bash/zsh binary —
+	// the far shell is unknown by definition, and the payload must stay
+	// POSIX-only (the embedded script's prose mentions bash/zsh, so a raw
+	// substring check on the whole command would be noise).
+	if strings.Contains(cmd, `exec bash`) || strings.Contains(cmd, `exec zsh`) {
+		t.Errorf("posix command must never exec a named bash/zsh binary: %q", cmd)
+	}
+	if !strings.Contains(cmd, `exec "${SHELL:-/bin/sh}" -l`) {
+		t.Errorf("posix command does not exec the login shell via ${SHELL:-/bin/sh}: %q", cmd)
+	}
+}
+
+// TestUnmappedShellKindRefused is the default-arm tripwire: a ShellKind that
+// has no launcher must refuse loudly rather than silently get the posix
+// tier — a new kind is a decision, not a fallback.
+func TestUnmappedShellKindRefused(t *testing.T) {
+	cmd, reason, ok := NewRemoteLauncher().StartCommand(ShellKind("fish"), LaunchOptions{})
 	if ok {
-		t.Fatalf("ShellUnknown accepted; got command %q", cmd)
+		t.Fatalf("unmapped kind accepted; got command %q", cmd)
 	}
 	if reason != ReasonUnsupportedShell {
 		t.Errorf("reason = %q, want %q", reason, ReasonUnsupportedShell)
@@ -125,7 +159,7 @@ func TestShellUnknownIsRefused(t *testing.T) {
 // when Enhanced": the launcher fails closed rather than emit a marker-only
 // session the ownership protocol cannot anchor.
 func TestEnhancedRequiresSessionID(t *testing.T) {
-	for _, kind := range []ShellKind{ShellBash, ShellZsh} {
+	for _, kind := range []ShellKind{ShellBash, ShellZsh, ShellUnknown} {
 		cmd, reason, ok := NewRemoteLauncher().StartCommand(kind, LaunchOptions{Enhanced: true})
 		if ok {
 			t.Errorf("%s: enhanced with empty SessionID accepted; got %q", kind, cmd)
@@ -140,7 +174,7 @@ func TestEnhancedRequiresSessionID(t *testing.T) {
 // — a NUL would corrupt the rcfile stream.
 func TestLauncherCommandsHaveNoNul(t *testing.T) {
 	l := NewRemoteLauncher()
-	for _, kind := range []ShellKind{ShellBash, ShellZsh} {
+	for _, kind := range []ShellKind{ShellBash, ShellZsh, ShellUnknown} {
 		cmd, _, ok := l.StartCommand(kind, LaunchOptions{Enhanced: true, SessionID: "abcdef0123456789"})
 		if !ok {
 			t.Fatalf("%s: refused", kind)
@@ -155,7 +189,7 @@ func TestLauncherCommandsHaveNoNul(t *testing.T) {
 // conservative ARG_MAX bound (see maxLauncherLen).
 func TestLauncherCommandsUnderCap(t *testing.T) {
 	l := NewRemoteLauncher()
-	for _, kind := range []ShellKind{ShellBash, ShellZsh} {
+	for _, kind := range []ShellKind{ShellBash, ShellZsh, ShellUnknown} {
 		cmd, _, ok := l.StartCommand(kind, LaunchOptions{Enhanced: true, SessionID: "abcdef0123456789"})
 		if !ok {
 			t.Fatalf("%s: refused", kind)
@@ -175,7 +209,7 @@ func TestLauncherRefusesOverCap(t *testing.T) {
 	t.Cleanup(func() { maxLauncherLen = old })
 
 	l := NewRemoteLauncher()
-	for _, kind := range []ShellKind{ShellBash, ShellZsh} {
+	for _, kind := range []ShellKind{ShellBash, ShellZsh, ShellUnknown} {
 		cmd, reason, ok := l.StartCommand(kind, LaunchOptions{Enhanced: true, SessionID: "abcdef0123456789"})
 		if ok {
 			t.Errorf("%s: over-cap command accepted (%d bytes)", kind, len(cmd))
