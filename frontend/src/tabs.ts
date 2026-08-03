@@ -332,6 +332,10 @@ export class TabManager {
    *  machine has no OS key: the vault layer owns the setup dialog, so the
    *  hook raises it (wired by main.tsx to vaultController.openSetup). */
   onSetupVault?: () => void
+
+  /** The prompt picker's "Add a secret…" row — opens Settings → Secrets
+   *  with the add dialog up. */
+  onCreateSecret?: () => void
   /** Called when the user performs a UI action that should reset the
    *  vault idle timer. Wired by main.tsx to vaultClient.activity(). */
   onActivity?: () => void
@@ -421,6 +425,7 @@ export class TabManager {
       {
         onSubtitleChange: (subtitle) => tabRef.current?.updateSubtitle(subtitle),
         onSetupVault: this.onSetupVault,
+        onCreateSecret: this.onCreateSecret,
       },
     )
     const descriptor: ContentDescriptor = {
@@ -466,6 +471,7 @@ export class TabManager {
         },
         onVaultSealed: this.onVaultSealed,
         onSetupVault: this.onSetupVault,
+        onCreateSecret: this.onCreateSecret,
       },
     )
     const descriptor: ContentDescriptor = {

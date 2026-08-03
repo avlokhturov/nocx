@@ -44,6 +44,11 @@ export interface SecretPickerSource {
    *  dialog is the surface now), false when setup happened silently and the
    *  list can reload. */
   requestSetup(): Promise<boolean>
+  /** The user activated "Add a secret…": the host opens the vault's own
+   *  create dialog, which owns the surface from there. The panel closes —
+   *  a secret needs a name AND a value, and a floating row over the prompt
+   *  is not where a value gets typed. */
+  requestCreate(): void
 }
 
 export interface SecretPickerCallbacks {
@@ -64,6 +69,10 @@ export interface SecretEntry {
  *  mechanism a future reference kind joins as (the owner's decision: ONE
  *  list, grouped; a submenu is a mouse in a keyboard-first tool). */
 const GROUP_LABEL = 'Secrets'
+
+/** The synthetic last row of the list state: "Add a secret…". Not a vault
+ *  entry, so it is addressed by a reserved id rather than by index alone. */
+const CREATE_ROW_ID = '\u0000create'
 
 /** Why the picker is open. 'insert' is the '@' trigger — the person is
  *  composing and wants to reach for a secret. 'resolve' is a recalled
@@ -239,9 +248,9 @@ export class SecretPicker {
   private move(dir: -1 | 1): void {
     const s = this.state
     if (s.name !== 'list') return
-    const rows = this.matches(s.entries, s.filter)
-    if (rows.length === 0) return
-    const next = (s.selected + dir + rows.length) % rows.length
+    // One past the last entry is the "Add a secret…" row.
+    const count = this.matches(s.entries, s.filter).length + 1
+    const next = (s.selected + dir + count) % count
     this.state = { ...s, selected: next }
     this.render()
   }
@@ -260,6 +269,12 @@ export class SecretPicker {
     switch (s.name) {
       case 'list': {
         const rows = this.matches(s.entries, s.filter)
+        // The create row sits one past the last entry.
+        if (s.selected >= rows.length) {
+          this.close()
+          this.source.requestCreate()
+          return
+        }
         const entry = rows[s.selected]
         if (!entry) return
         this.close()
@@ -301,7 +316,15 @@ export class SecretPicker {
     try {
       const entries = await this.source.list()
       if (entries.length === 0) {
-        this.state = { name: 'empty' }
+        // An empty vault is not a dead end when you are reaching for a
+        // secret: the list state with no entries still renders the "Add a
+        // secret…" row, which is the whole answer to "there is nothing
+        // here". Resolving a recalled command is different — what is
+        // missing there is the key itself, and the empty state says so.
+        this.state =
+          this.purpose === 'resolve'
+            ? { name: 'empty' }
+            : { name: 'list', entries: [], filter: '', selected: 0 }
         this.render()
         return
       }
@@ -389,14 +412,28 @@ export class SecretPicker {
       return
     }
     const rows = this.matches(s.entries, s.filter)
+    // "Add a secret…" is always the last row, including when the list is
+    // empty: the answer to "the one I want is not here" belongs where the
+    // question is asked, not in a settings page the user has to know about.
+    // Its display text carries the typed filter, because that is almost
+    // always the name they were reaching for.
+    const createRow: FloatingPanelRow = {
+      id: CREATE_ROW_ID,
+      displayText: s.filter === '' ? 'Add a secret…' : `Add "${s.filter}" to the vault…`,
+      matchRanges: [],
+      group: GROUP_LABEL,
+    }
     this.panel.show({
-      rows: rows.map((entry) => ({
-        id: entry.id,
-        displayText: entry.name,
-        matchRanges: this.matchRange(entry.name, s.filter),
-        group: GROUP_LABEL,
-      })),
-      selectedIndex: Math.min(s.selected, rows.length - 1),
+      rows: [
+        ...rows.map((entry) => ({
+          id: entry.id,
+          displayText: entry.name,
+          matchRanges: this.matchRange(entry.name, s.filter),
+          group: GROUP_LABEL,
+        })),
+        createRow,
+      ],
+      selectedIndex: Math.min(s.selected, rows.length),
       footer: ['↑ ↓ to navigate', '↵ to insert', 'esc to dismiss'],
     })
   }

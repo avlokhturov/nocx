@@ -150,6 +150,7 @@ async function main() {
   )
   tm.onVaultSealed = () => vaultController.openUnlock('open this connection')
   tm.onSetupVault = () => vaultController.openSetup()
+  tm.onCreateSecret = () => openSettingsTab().startNewSecret()
   tm.onActivity = reportActivity
 
   // Surface registry — surfaces declared once, every entry point resolves

@@ -70,6 +70,10 @@ export class SettingsContent extends SolidTabContent {
       this.pendingNewConnection = false
       this.handle.newConnection()
     }
+    if (this.pendingNewSecret) {
+      this.pendingNewSecret = false
+      this.handle.newSecret()
+    }
   }
 
   focus(): void {
@@ -106,5 +110,17 @@ export class SettingsContent extends SolidTabContent {
     this.pendingNewConnection = true
   }
 
+  /** Open the Secrets page with the add dialog up — the prompt's '@' picker
+   *  offering to create the secret it could not find. Queued before mount
+   *  for the same reason as startNewConnection. */
+  startNewSecret(): void {
+    if (this.handle) {
+      this.handle.newSecret()
+      return
+    }
+    this.pendingNewSecret = true
+  }
+
   private pendingNewConnection = false
+  private pendingNewSecret = false
 }

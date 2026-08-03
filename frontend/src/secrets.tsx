@@ -12,7 +12,7 @@
  * No Reveal, no Copy of a stored value. Settlement: ADR-0011 §2 and
  * vault design §3.1.
  */
-import { For, Show, Switch, Match, createSignal, createEffect, onMount } from 'solid-js'
+import { For, Show, Switch, Match, createSignal, createEffect, on, onMount } from 'solid-js'
 import { Button } from './ui/button'
 import { IconButton } from './ui/icon-button'
 import { EmptyState } from './ui/empty-state'
@@ -47,6 +47,11 @@ export interface SecretsSectionProps {
    *  delete would break — the delete confirmation says which connections
    *  stop working before anything is deleted. */
   profileClient?: ProfileClient
+  /** "Add a secret" asked for from outside the page — the prompt's '@'
+   *  picker. A counter, not a flag, for the same reason the Connections
+   *  page uses one: the request has to work the second time too, and a
+   *  boolean needs a reset both sides must remember. Zero = nobody asked. */
+  addSecretRequest?: number
 }
 
 type LoadState =
@@ -90,6 +95,15 @@ export function SecretsSection(props: SecretsSectionProps) {
   // and passphrases take a single field; a private key takes the three-way
   // input (path / file / paste) shared with the connection editor.
   const [addOpen, setAddOpen] = createSignal(false)
+  // The outside request ('@' → "Add a secret…").
+  createEffect(
+    on(
+      () => props.addSecretRequest ?? 0,
+      (n) => {
+        if (n > 0) openAdd()
+      },
+    ),
+  )
   const [addName, setAddName] = createSignal('')
   const [addKind, setAddKind] = createSignal<AddKind>('password')
   const [addValue, setAddValue] = createSignal('')

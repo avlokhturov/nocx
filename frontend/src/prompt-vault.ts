@@ -68,6 +68,11 @@ export interface PromptVaultDeps {
    *  the vault layer owns the setup dialog, so this hook raises it. Wired
    *  by the host through TabManager to vaultController.openSetup. */
   requestSetupDialog?: () => void
+  /** "Add a secret…" was activated: the host opens the vault's own create
+   *  dialog (Settings → Secrets), which owns the surface from there. A
+   *  secret needs a name AND a value, and a floating row over the prompt is
+   *  not where a value gets typed. */
+  requestCreateSecret?: () => void
 }
 
 /** How long a detected key must settle before the hint appears — a paste
@@ -132,6 +137,7 @@ export class PromptVaultController {
         list: () => deps.vault.inventory().then((i) => i.entries),
         requestUnseal: () => deps.vault.inventory().then(() => undefined),
         requestSetup: () => this.setupVault(),
+        requestCreate: () => deps.requestCreateSecret?.(),
       },
       { onInsert: (name) => this.insertReference(name) },
     )

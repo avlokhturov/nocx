@@ -95,6 +95,11 @@ export interface SettingsComponentHandle {
    * quick-connect palette's "New connection" entry point.
    */
   newConnection(): void
+  /**
+   * Show the Secrets page with the add dialog open — the prompt's '@'
+   * picker offering to create a secret when the one you want is not there.
+   */
+  newSecret(): void
   /** Resolves when the initial data load completes. */
   ready(): Promise<void>
 }
@@ -129,6 +134,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
   // boolean would need a reset that both sides have to remember to do. Zero
   // means "nobody asked", which is what a normally-opened Settings tab reads.
   const [newConnectionRequest, setNewConnectionRequest] = createSignal(0)
+  const [newSecretRequest, setNewSecretRequest] = createSignal(0)
   const [sectionFilter, setSectionFilter] = createSignal<string | null>(null)
 
   // Promise that resolves when the initial data load finishes.
@@ -349,6 +355,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
             vaultController={props.vaultController!}
             dialogClient={props.dialogClient}
             profileClient={props.profileClient}
+            addSecretRequest={newSecretRequest()}
           />
         </Show>
       ),
@@ -561,6 +568,14 @@ export function SettingsComponent(props: SettingsComponentProps) {
       setSectionFilter(null)
       setActiveComponentPage('connections')
       setNewConnectionRequest((n) => n + 1)
+    },
+    newSecret(): void {
+      // Same reason as newConnection: an active search hides the page the
+      // request is addressed to.
+      setSearchQuery('')
+      setSectionFilter(null)
+      setActiveComponentPage('secrets')
+      setNewSecretRequest((n) => n + 1)
     },
     ready(): Promise<void> {
       return readyPromise

@@ -37,6 +37,7 @@ interface Harness {
     status: ReturnType<typeof vi.fn>
     list: ReturnType<typeof vi.fn>
     requestUnseal: ReturnType<typeof vi.fn>
+    requestCreate: ReturnType<typeof vi.fn>
     requestSetup: ReturnType<typeof vi.fn>
   }
   onInsert: ReturnType<typeof vi.fn>
@@ -48,6 +49,7 @@ function setup(status: VaultStatus = UNSEALED, entries: InventoryEntry[] = []): 
     status: vi.fn(() => Promise.resolve(status)),
     list: vi.fn(() => Promise.resolve(entries)),
     requestUnseal: vi.fn(() => Promise.resolve()),
+    requestCreate: vi.fn(),
     requestSetup: vi.fn(() => Promise.resolve(false)),
   } satisfies SecretPickerSource
   const onInsert = vi.fn()
@@ -84,7 +86,9 @@ describe('SecretPicker: the list', () => {
     await flush()
     expect(h.picker.isOpen).toBe(true)
     const rowEls = rows(h.container)
-    expect(rowEls.map((r) => r.text)).toEqual(['openai-key', 'github-pat'])
+    // "Add a secret…" is always the last row: the answer to "the one I
+    // want is not here" belongs where the question is asked.
+    expect(rowEls.map((r) => r.text)).toEqual(['openai-key', 'github-pat', 'Add a secret…'])
     expect(rowEls[0].selected).toBe(true)
     expect(h.container.querySelector('.ui-floating-panel__group')?.textContent).toBe('Secrets')
   })
@@ -112,8 +116,11 @@ describe('SecretPicker: the list', () => {
     const h = setup(UNSEALED, [entry('a'), entry('b'), entry('c')])
     await h.picker.open()
     await flush()
-    key(h.picker, { key: 'ArrowUp' }) // wrap to the last
+    key(h.picker, { key: 'ArrowUp' }) // wrap to the last, which is the create row
+    expect(rows(h.container).find((r) => r.selected)?.text).toBe('Add a secret…')
+    key(h.picker, { key: 'ArrowUp' })
     expect(rows(h.container).find((r) => r.selected)?.text).toBe('c')
+    key(h.picker, { key: 'ArrowDown' })
     key(h.picker, { key: 'ArrowDown' }) // back to the first
     expect(rows(h.container).find((r) => r.selected)?.text).toBe('a')
   })
@@ -144,7 +151,10 @@ describe('SecretPicker: the list', () => {
     release()
     await opened
     await flush()
-    expect(rows(h.container).map((r) => r.text)).toEqual(['github-pat'])
+    expect(rows(h.container).map((r) => r.text)).toEqual([
+      'github-pat',
+      'Add "github" to the vault…',
+    ])
   })
 
   it('a no-match filter typed while loading closes the panel when the list lands', async () => {
@@ -185,7 +195,11 @@ describe('SecretPicker: the passive filter', () => {
     await flush()
     h.picker.setFilter('openai')
     const rowEls = rows(h.container)
-    expect(rowEls.map((r) => r.text)).toEqual(['openai-key', 'openai-secret'])
+    expect(rowEls.map((r) => r.text)).toEqual([
+      'openai-key',
+      'openai-secret',
+      'Add "openai" to the vault…',
+    ])
     expect(h.container.querySelectorAll('.ui-floating-panel__match').length).toBe(2)
   })
 
@@ -223,7 +237,7 @@ describe('SecretPicker: vault lifecycle states are OFFERS', () => {
     expect(h.source.requestUnseal).toHaveBeenCalledTimes(1)
     await flush()
     // The vault opened: the list loads in the same open picker session.
-    expect(rows(h.container).map((r) => r.text)).toEqual(['openai-key'])
+    expect(rows(h.container).map((r) => r.text)).toEqual(['openai-key', 'Add a secret…'])
   })
 
   it('an uninitialized vault offers to set up, and Enter sets up then lists', async () => {
@@ -234,15 +248,32 @@ describe('SecretPicker: vault lifecycle states are OFFERS', () => {
     key(h.picker, { key: 'Enter' })
     expect(h.source.requestSetup).toHaveBeenCalledTimes(1)
     await flush()
-    expect(rows(h.container).map((r) => r.text)).toEqual(['openai-key'])
+    expect(rows(h.container).map((r) => r.text)).toEqual(['openai-key', 'Add a secret…'])
   })
 
-  it('an unsealed vault with no secrets shows the honest empty state', async () => {
+  // An empty vault is not a dead end when you are reaching for a secret —
+  // it is exactly the moment to make one, and sending the user off to find
+  // a settings page is how the feature goes unused.
+  it('an unsealed vault with no secrets offers to create one', async () => {
     const h = setup(UNSEALED, [])
     await h.picker.open()
     await flush()
     expect(h.picker.isOpen).toBe(true)
-    expect(h.container.querySelector('[data-empty="true"]')?.textContent).toBe('no secrets yet')
+    expect(rows(h.container).map((r) => r.text)).toEqual(['Add a secret…'])
+    key(h.picker, { key: 'Enter' })
+    expect(h.source.requestCreate).toHaveBeenCalledTimes(1)
+    expect(h.picker.isOpen).toBe(false)
+  })
+
+  // Resolving a recalled command is the other question: what is missing
+  // there is the key itself, and a create dialog is not the answer.
+  it('an empty vault opened to RESOLVE says the key is missing instead', async () => {
+    const h = setup(UNSEALED, [])
+    await h.picker.open('resolve')
+    await flush()
+    expect(h.container.querySelector('[data-empty="true"]')?.textContent).toContain(
+      'the key was removed from this command',
+    )
   })
 
   it('a passphrase-required setup raises the dialog and CLOSES the panel (no stale row behind it)', async () => {

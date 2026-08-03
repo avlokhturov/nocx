@@ -1044,3 +1044,41 @@ describe('frozen headers and the command snapshot', () => {
     expect(span?.className).toBe('tok-command tok-unresolved')
   })
 })
+
+describe('a vault reference in a block reads as a chip, not as its own syntax', () => {
+  // The editor draws {{secret:NAME}} as a chip and the block drew it raw, so
+  // the same command looked like two different things depending on whether
+  // it had been submitted yet.
+  it('renders the reference as the resolved chip and keeps the text for copy', () => {
+    const command = 'curl -H "Authorization: Bearer {{secret:openrouter.ai}}" https://api'
+    const container = document.createElement('div')
+    const running = createRunningBlock(
+      1,
+      command,
+      '~',
+      '',
+      () => container,
+      noopSelect,
+      freshStore(),
+    )
+    const el = freezeBlock(
+      running,
+      1,
+      command,
+      '~',
+      '',
+      '<span>ok</span>',
+      100,
+      0,
+      () => container,
+      noopSelect,
+      freshStore(),
+    )
+    const chip = el.querySelector('.ui-secret-chip')
+    expect(chip).not.toBeNull()
+    expect(chip?.textContent).toContain('openrouter.ai')
+    expect(el.querySelector('.cmd-header-text')?.textContent).not.toContain('{{secret:')
+    // Copy still yields the command as typed — the chip is a label.
+    expect(el.dataset.recordedCommand).toBe(command)
+  })
+})

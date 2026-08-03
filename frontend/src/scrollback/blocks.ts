@@ -9,7 +9,8 @@ import { highlightShellText, onShellHighlightReady } from '../shell-highlight'
 import type { CommandSnapshotStore } from '../command-snapshot'
 import type { IBufferLine } from '@xterm/xterm'
 import { wordRangeIn } from '../word-selection'
-import { createSecretChipUnresolved } from '../ui/secret-chip'
+import { createSecretChip, createSecretChipUnresolved } from '../ui/secret-chip'
+import { findReferences } from '../secret-reference'
 import { KIND_LABELS, type SecretKind } from '../secret-kind'
 // ── Clipboard helper ────────────────────────────────────────────────────────
 
@@ -214,7 +215,21 @@ function createHeader(
   // command content can never inject markup.
   const cmdSpan = document.createElement('span')
   cmdSpan.className = 'cmd-header-text'
-  if (status === 'running') {
+  const refs = command ? findReferences(command) : []
+  if (refs.length > 0) {
+    // A vault reference reads as a chip here, exactly as it does in the
+    // editor — it is the same fact about the same text, and showing
+    // `{{secret:openrouter.ai}}` raw in the block made the block look like
+    // a different thing from the line the user typed.
+    //
+    // Chips and shell highlighting do not compose: the highlighter emits
+    // one HTML string for the whole command, and cutting chips into it
+    // would mean tokenising the fragments between them, where a quote
+    // opened before a reference closes after it. A command carrying a
+    // reference therefore renders plain, the way a masked one already does
+    // (renderRecordedCommand) — the chip is the emphasis.
+    cmdSpan.replaceChildren(referenceFragment(command, refs))
+  } else if (status === 'running') {
     cmdSpan.textContent = command || '(empty)'
   } else {
     cmdSpan.innerHTML = command ? highlightShellText(command, store) : '(empty)'
@@ -223,6 +238,24 @@ function createHeader(
   header.appendChild(cmdSpan)
 
   return header
+}
+
+/** The command's text with every `{{secret:NAME}}` replaced by the resolved
+ *  chip. Text nodes for everything else — the reference's own text is the
+ *  chip's label and never appears raw. */
+function referenceFragment(
+  command: string,
+  refs: ReadonlyArray<{ from: number; to: number; name: string }>,
+): DocumentFragment {
+  const frag = document.createDocumentFragment()
+  let pos = 0
+  for (const ref of refs) {
+    if (ref.from > pos) frag.appendChild(document.createTextNode(command.slice(pos, ref.from)))
+    frag.appendChild(createSecretChip(ref.name))
+    pos = ref.to
+  }
+  if (pos < command.length) frag.appendChild(document.createTextNode(command.slice(pos)))
+  return frag
 }
 
 /**
@@ -452,6 +485,13 @@ export function createCommandBlock(
 ): HTMLElement {
   const wrapper = document.createElement('div')
   wrapper.className = 'cmd-block'
+  // A command carrying a vault reference renders its references as chips,
+  // so the header's own text no longer spells the command. Copy reads the
+  // full text from here — the reference intact, which is what the user
+  // typed, what the store keeps, and what pastes usefully onto another
+  // machine. renderRecordedCommand overwrites it with the masked text when
+  // the ack lands, which is the same rule one step later.
+  if (command && findReferences(command).length > 0) wrapper.dataset.recordedCommand = command
   wrapper.setAttribute('data-block-id', String(id))
 
   const header = createHeader(command, cwd, location, durationMs, exitCode, status, store)
@@ -522,6 +562,7 @@ export function createRunningBlock(
 ): HTMLElement {
   const wrapper = document.createElement('div')
   wrapper.className = 'cmd-block cmd-block-running'
+  if (command && findReferences(command).length > 0) wrapper.dataset.recordedCommand = command
   wrapper.setAttribute('data-block-id', String(id))
 
   const header = createHeader(command, cwd, location, null, null, 'running', store)
