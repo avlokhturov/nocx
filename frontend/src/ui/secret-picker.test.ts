@@ -157,7 +157,7 @@ describe('SecretPicker: the list', () => {
     ])
   })
 
-  it('a no-match filter typed while loading closes the panel when the list lands', async () => {
+  it('a no-match filter typed while loading lands on the create row', async () => {
     let release!: () => void
     const gate = new Promise<void>((resolve) => {
       release = resolve
@@ -174,7 +174,8 @@ describe('SecretPicker: the list', () => {
     release()
     await opened
     await flush()
-    expect(h.picker.isOpen).toBe(false)
+    expect(h.picker.isOpen).toBe(true)
+    expect(rows(h.container).map((r) => r.text)).toEqual(['Add "zzz" to the vault…'])
   })
 
   it('printable keys and space fall through to the line (the passive contract)', async () => {
@@ -203,12 +204,19 @@ describe('SecretPicker: the passive filter', () => {
     expect(h.container.querySelectorAll('.ui-floating-panel__match').length).toBe(2)
   })
 
-  it('nothing matches -> closes SILENTLY (the passive trigger is not Tab)', async () => {
+  // A no-match used to close the panel, which was right while the panel
+  // could only offer what the vault already held. Typing a name it does
+  // NOT hold is exactly when "Add …" is the answer, and closing on that
+  // keystroke took the offer away as the user reached for it.
+  it('nothing matches -> stays open on the create row', async () => {
     const h = setup(UNSEALED, [entry('openai-key')])
     await h.picker.open()
     await flush()
     h.picker.setFilter('zzz')
-    expect(h.picker.isOpen).toBe(false)
+    expect(h.picker.isOpen).toBe(true)
+    expect(rows(h.container).map((r) => r.text)).toEqual(['Add "zzz" to the vault…'])
+    key(h.picker, { key: 'Enter' })
+    expect(h.source.requestCreate).toHaveBeenCalledTimes(1)
   })
 
   it('a space in the filter closes (the trigger word ended)', async () => {

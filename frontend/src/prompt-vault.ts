@@ -72,7 +72,7 @@ export interface PromptVaultDeps {
    *  dialog (Settings → Secrets), which owns the surface from there. A
    *  secret needs a name AND a value, and a floating row over the prompt is
    *  not where a value gets typed. */
-  requestCreateSecret?: () => void
+  requestCreateSecret?: (name: string) => void
 }
 
 /** How long a detected key must settle before the hint appears — a paste
@@ -137,7 +137,7 @@ export class PromptVaultController {
         list: () => deps.vault.inventory().then((i) => i.entries),
         requestUnseal: () => deps.vault.inventory().then(() => undefined),
         requestSetup: () => this.setupVault(),
-        requestCreate: () => deps.requestCreateSecret?.(),
+        requestCreate: (name) => deps.requestCreateSecret?.(name),
       },
       { onInsert: (name) => this.insertReference(name) },
     )

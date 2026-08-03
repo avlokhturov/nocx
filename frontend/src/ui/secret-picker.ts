@@ -47,8 +47,10 @@ export interface SecretPickerSource {
   /** The user activated "Add a secret…": the host opens the vault's own
    *  create dialog, which owns the surface from there. The panel closes —
    *  a secret needs a name AND a value, and a floating row over the prompt
-   *  is not where a value gets typed. */
-  requestCreate(): void
+   *  is not where a value gets typed. `name` is what was typed after '@',
+   *  which is almost always the name they were reaching for; asking them
+   *  to type it again is how a feature goes unused. */
+  requestCreate(name: string): void
 }
 
 export interface SecretPickerCallbacks {
@@ -180,14 +182,16 @@ export class SecretPicker {
       return
     }
     if (s.name !== 'list') return
+    // A filter that matches nothing used to close the panel silently. That
+    // was right when the panel could only offer what the vault already
+    // held: nothing to show, so get out of the way. It stopped being right
+    // when "Add a secret…" arrived — typing a name the vault does not have
+    // is precisely the moment to offer making it, and closing at exactly
+    // that keystroke takes the offer away as the user reaches for it. A
+    // space still ends the trigger word (above): that is what "I am not
+    // naming a secret any more" actually looks like.
     const rows = this.matches(s.entries, filter)
-    if (rows.length === 0) {
-      // Nothing matches -> close SILENTLY (see the header — the passive
-      // trigger's no-match is not the completion's no-match).
-      this.close()
-      return
-    }
-    const selected = Math.min(s.selected, rows.length - 1)
+    const selected = Math.min(s.selected, rows.length)
     this.state = { ...s, filter, selected }
     this.render()
   }
@@ -271,8 +275,9 @@ export class SecretPicker {
         const rows = this.matches(s.entries, s.filter)
         // The create row sits one past the last entry.
         if (s.selected >= rows.length) {
+          const typed = s.filter
           this.close()
-          this.source.requestCreate()
+          this.source.requestCreate(typed)
           return
         }
         const entry = rows[s.selected]
@@ -330,14 +335,10 @@ export class SecretPicker {
       }
       // A filter that arrived while loading wins over the open's initial
       // one — typing '@ope' before the inventory lands must not render
-      // every secret, and a no-match filter closes the panel silently.
+      // every secret. A no-match filter no longer closes the panel: see
+      // setFilter for why.
       const initialFilter = this.pendingFilter ?? filter
       this.pendingFilter = null
-      const rows = this.matches(entries, initialFilter)
-      if (rows.length === 0) {
-        this.close()
-        return
-      }
       this.state = { name: 'list', entries, filter: initialFilter, selected: 0 }
       this.render()
     } catch {

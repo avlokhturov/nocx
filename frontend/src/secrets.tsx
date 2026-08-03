@@ -52,6 +52,11 @@ export interface SecretsSectionProps {
    *  page uses one: the request has to work the second time too, and a
    *  boolean needs a reset both sides must remember. Zero = nobody asked. */
   addSecretRequest?: number
+  /** The name to prefill when that request fires — the word typed after
+   *  '@'. Almost always the name they were reaching for, and asking them to
+   *  type it a second time is the kind of friction that makes people give
+   *  up on the vault. */
+  addSecretName?: string
 }
 
 type LoadState =
@@ -100,7 +105,7 @@ export function SecretsSection(props: SecretsSectionProps) {
     on(
       () => props.addSecretRequest ?? 0,
       (n) => {
-        if (n > 0) openAdd()
+        if (n > 0) openAdd(props.addSecretName ?? '')
       },
     ),
   )
@@ -225,9 +230,9 @@ export function SecretsSection(props: SecretsSectionProps) {
     }
   })
 
-  function openAdd(): void {
+  function openAdd(prefillName = ''): void {
     addValidation.reset()
-    setAddName('')
+    setAddName(prefillName)
     setAddKind('password')
     setAddValue('')
     setAddKeyMode(DEFAULT_KEY_MODE)
@@ -509,7 +514,7 @@ export function SecretsSection(props: SecretsSectionProps) {
             searchPlaceholder="Filter secrets"
             searchLabel="Filter secrets"
             actions={
-              <Button variant="primary" onClick={openAdd}>
+              <Button variant="primary" onClick={() => openAdd()}>
                 + Add a secret
               </Button>
             }

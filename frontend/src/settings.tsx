@@ -99,7 +99,7 @@ export interface SettingsComponentHandle {
    * Show the Secrets page with the add dialog open — the prompt's '@'
    * picker offering to create a secret when the one you want is not there.
    */
-  newSecret(): void
+  newSecret(name?: string): void
   /** Resolves when the initial data load completes. */
   ready(): Promise<void>
 }
@@ -135,6 +135,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
   // means "nobody asked", which is what a normally-opened Settings tab reads.
   const [newConnectionRequest, setNewConnectionRequest] = createSignal(0)
   const [newSecretRequest, setNewSecretRequest] = createSignal(0)
+  const [newSecretName, setNewSecretName] = createSignal('')
   const [sectionFilter, setSectionFilter] = createSignal<string | null>(null)
 
   // Promise that resolves when the initial data load finishes.
@@ -356,6 +357,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
             dialogClient={props.dialogClient}
             profileClient={props.profileClient}
             addSecretRequest={newSecretRequest()}
+            addSecretName={newSecretName()}
           />
         </Show>
       ),
@@ -569,12 +571,15 @@ export function SettingsComponent(props: SettingsComponentProps) {
       setActiveComponentPage('connections')
       setNewConnectionRequest((n) => n + 1)
     },
-    newSecret(): void {
+    newSecret(name?: string): void {
       // Same reason as newConnection: an active search hides the page the
       // request is addressed to.
       setSearchQuery('')
       setSectionFilter(null)
       setActiveComponentPage('secrets')
+      // The name BEFORE the counter: the effect that opens the dialog runs
+      // on the counter and reads the name as it stands then.
+      setNewSecretName(name ?? '')
       setNewSecretRequest((n) => n + 1)
     },
     ready(): Promise<void> {

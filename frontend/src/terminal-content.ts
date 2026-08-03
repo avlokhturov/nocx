@@ -106,7 +106,7 @@ export interface TerminalContentHooks {
   onSetupVault?: () => void
   /** The reference picker's "Add a secret…" row: open the vault's own
    *  create dialog — wired by main.tsx to the Settings tab's Secrets page. */
-  onCreateSecret?: () => void
+  onCreateSecret?: (name: string) => void
 }
 
 // No placeholder title — see the descriptor in tabs.ts for why. A tab with no
@@ -512,7 +512,7 @@ export class TerminalContent extends BaseTabContent {
         vault,
         report: (level, message) => showToast({ level, message }),
         requestSetupDialog: () => this.hooks.onSetupVault?.(),
-        requestCreateSecret: () => this.hooks.onCreateSecret?.(),
+        requestCreateSecret: (name) => this.hooks.onCreateSecret?.(name),
       })
       this.promptVault.mount()
 

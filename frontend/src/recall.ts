@@ -60,6 +60,7 @@ import type { HistoryEntry, HistoryQuery, Redaction } from './generated/history.
 import type { CommandLedger } from './command-ledger'
 import { createSearchFieldDisplay } from './ui/search-field'
 import { FloatingPanel, type FloatingPanelRow } from './ui/floating-panel'
+import { commandFragment } from './command-text'
 
 /**
  * The scrollTop that puts `row` FULLY inside `list`'s visible box — its top
@@ -981,6 +982,11 @@ export class RecallOverlay {
             id: entry.id,
             displayText: entry.command,
             matchRanges: matchRange(entry.command, s.filter),
+            // These rows are COMMANDS: a vault reference reads as a chip
+            // here for the same reason it does in the editor and in the
+            // block — it is the same fact about the same text. The kit
+            // cannot know that, so the renderer is passed in.
+            renderText: (text, marks, markClass) => commandFragment(text, marks, markClass),
             actions: [this.timeNode(entry, now)],
           }))
 

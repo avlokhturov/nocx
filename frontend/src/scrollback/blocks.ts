@@ -9,8 +9,9 @@ import { highlightShellText, onShellHighlightReady } from '../shell-highlight'
 import type { CommandSnapshotStore } from '../command-snapshot'
 import type { IBufferLine } from '@xterm/xterm'
 import { wordRangeIn } from '../word-selection'
-import { createSecretChip, createSecretChipUnresolved } from '../ui/secret-chip'
+import { createSecretChipUnresolved } from '../ui/secret-chip'
 import { findReferences } from '../secret-reference'
+import { commandFragment } from '../command-text'
 import { KIND_LABELS, type SecretKind } from '../secret-kind'
 // ── Clipboard helper ────────────────────────────────────────────────────────
 
@@ -228,7 +229,7 @@ function createHeader(
     // opened before a reference closes after it. A command carrying a
     // reference therefore renders plain, the way a masked one already does
     // (renderRecordedCommand) — the chip is the emphasis.
-    cmdSpan.replaceChildren(referenceFragment(command, refs))
+    cmdSpan.replaceChildren(commandFragment(command))
   } else if (status === 'running') {
     cmdSpan.textContent = command || '(empty)'
   } else {
@@ -238,24 +239,6 @@ function createHeader(
   header.appendChild(cmdSpan)
 
   return header
-}
-
-/** The command's text with every `{{secret:NAME}}` replaced by the resolved
- *  chip. Text nodes for everything else — the reference's own text is the
- *  chip's label and never appears raw. */
-function referenceFragment(
-  command: string,
-  refs: ReadonlyArray<{ from: number; to: number; name: string }>,
-): DocumentFragment {
-  const frag = document.createDocumentFragment()
-  let pos = 0
-  for (const ref of refs) {
-    if (ref.from > pos) frag.appendChild(document.createTextNode(command.slice(pos, ref.from)))
-    frag.appendChild(createSecretChip(ref.name))
-    pos = ref.to
-  }
-  if (pos < command.length) frag.appendChild(document.createTextNode(command.slice(pos)))
-  return frag
 }
 
 /**

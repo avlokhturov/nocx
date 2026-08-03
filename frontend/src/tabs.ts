@@ -335,7 +335,7 @@ export class TabManager {
 
   /** The prompt picker's "Add a secret…" row — opens Settings → Secrets
    *  with the add dialog up. */
-  onCreateSecret?: () => void
+  onCreateSecret?: (name: string) => void
   /** Called when the user performs a UI action that should reset the
    *  vault idle timer. Wired by main.tsx to vaultClient.activity(). */
   onActivity?: () => void

@@ -26,6 +26,10 @@
  *  content and never spans the pane (the owner's "why full width?"). */
 export const MAX_PANEL_WIDTH_PX = 640
 
+/** The matched substring's class — handed to a row's own renderer so the
+ *  highlight stays the panel's, wherever the text is built. */
+const MATCH_CLASS = 'ui-floating-panel__match'
+
 /** Floor: a single short row must not leave a sliver of a panel.
  *
  *  The floor is per variant because the two surfaces are read differently,
@@ -54,6 +58,20 @@ export type FloatingPanelVariant = 'completion' | 'recall' | 'secret'
  *  variant's domain object is: the variant maps candidates/entries to rows
  *  before showing them, so the kit never depends back on the app. */
 export interface FloatingPanelRow {
+  /** Render the display column yourself.
+   *
+   *  The kit cannot know that a row holds a shell command, and it must not
+   *  learn: ui/ may not import from outside itself, or the kit starts
+   *  depending on the surfaces that depend on it. So a surface whose rows
+   *  need more than text-plus-marks — recall, whose rows are commands and
+   *  whose vault references read as chips — passes the renderer in. The
+   *  kit hands it the mark class so the highlight still belongs to the
+   *  panel. Absent: the plain text-plus-marks path below. */
+  renderText?: (
+    text: string,
+    matchRanges: ReadonlyArray<{ from: number; to: number }>,
+    markClass: string,
+  ) => DocumentFragment
   readonly id: string
   /** What a row shows — never what a pick inserts (the controller owns
    *  insertText and the replacement range). */
@@ -303,8 +321,15 @@ export class FloatingPanel {
     return rowEl
   }
 
-  /** The display column: displayText with the matched ranges as marks. */
+  /** The display column: displayText with the matched ranges as marks, and
+   *  — when the row holds a COMMAND — its vault references as chips. The
+   *  command rendering is shared with every other surface that shows one
+   *  (command-text.ts), so a reference does not have to be taught to each
+   *  window separately. */
   private renderDisplay(r: FloatingPanelRow): DocumentFragment {
+    if (r.renderText) {
+      return r.renderText(r.displayText, r.matchRanges, MATCH_CLASS)
+    }
     const frag = document.createDocumentFragment()
     let pos = 0
     const ranges = [...r.matchRanges].sort((a, b) => a.from - b.from)
@@ -314,7 +339,7 @@ export class FloatingPanel {
       if (from > pos) frag.appendChild(document.createTextNode(r.displayText.slice(pos, from)))
       if (to > from) {
         const mark = document.createElement('mark')
-        mark.className = 'ui-floating-panel__match'
+        mark.className = MATCH_CLASS
         mark.textContent = r.displayText.slice(from, to)
         frag.appendChild(mark)
       }
