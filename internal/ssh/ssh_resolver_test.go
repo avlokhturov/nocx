@@ -151,6 +151,7 @@ func TestParseSSHGOutput_InvalidPort(t *testing.T) {
 		t.Errorf("Port = %d, want 0 (unset on unparseable port — caller determines default)", cfg.Port)
 	}
 }
+
 func TestParseSSHGOutput_RemoteCommand(t *testing.T) {
 	t.Run("set", func(t *testing.T) {
 		output := "remotecommand top -d 1\n"

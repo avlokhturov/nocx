@@ -53,7 +53,8 @@ exit
 			// table of literals, never from input.
 			cmd := exec.Command(tc.shell, append(tc.args, "-i")...)
 			cmd.Dir = dir1
-			cmd.Env = append(os.Environ(),
+			cmd.Env = append(
+				os.Environ(),
 				"HOSTNAME=testhost",
 				"NOCX_SHELL_INTEGRATION=1",
 				"NOCX_SCRIPT_PATH="+script,
