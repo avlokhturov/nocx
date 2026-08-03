@@ -126,6 +126,17 @@
   user-select: none;
 }
 
+/* Left chip group: the location + cwd chips sit together, the clock keeps
+   the right edge of the chrome row. Placement only — the chips carry their
+   own appearance (ui/README: a surface may place a kit component, never
+   repaint it). */
+.nocx-editor-chrome-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
 /* ── Chip ────────────────────────────────────────────────────────────── */
 
 .nocx-chip {
