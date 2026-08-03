@@ -18,9 +18,13 @@ type darwinService struct {
 }
 
 // New returns the Seatbelt-backed Service for the current platform.
-func New(logger log.Logger) Service {
+func New(logger log.Logger, _ string) Service {
 	return &darwinService{log: logger}
 }
+
+// MaybeHelper is a no-op on non-Linux platforms: the sandbox helper is a
+// Linux-only mechanism.
+func MaybeHelper() bool { return false }
 
 func (s *darwinService) Status(_ context.Context) Status {
 	return Status{Available: false, Backend: BackendSeatbelt, Reason: ReasonSandboxExecUnavailable}

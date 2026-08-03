@@ -14,9 +14,13 @@ import (
 type unsupportedService struct{}
 
 // New returns the unsupported-platform Service for the current platform.
-func New(logger log.Logger) Service {
+func New(logger log.Logger, _ string) Service {
 	return unsupportedService{}
 }
+
+// MaybeHelper is a no-op on unsupported platforms: the sandbox helper is a
+// Linux-only mechanism.
+func MaybeHelper() bool { return false }
 
 func (unsupportedService) Status(_ context.Context) Status {
 	return Status{Available: false, Backend: BackendUnsupported, Reason: ReasonUnsupportedPlatform}
