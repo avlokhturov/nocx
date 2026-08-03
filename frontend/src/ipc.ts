@@ -1,31 +1,15 @@
 import { decodeFrame, encodeFrame, isSessionID } from './frame'
 import { Dispatcher } from './dispatcher'
+import type { OpenResult } from './generated/open'
+import type { SandboxStatus } from './generated/sandbox.status'
 
 // ── Sandbox wire types (ADR-0019 §3.3, §4.2) ────────────────────────────
 
+export type { SandboxStatus }
+
 /** Immutable sandbox metadata carried by a sandboxed tab and by the open
  *  result: backend, canonical workspace, and the realized writable roots. */
-export interface SessionSandboxInfo {
-  backend: string
-  workspace: string
-  writableRoots: string[]
-}
-
-/** Backend availability for the sandboxed-shell action (sandbox.status). */
-export interface SandboxStatus {
-  available: boolean
-  backend: string
-  reason?: string
-  detail?: string
-  abi?: number
-}
-
-/** The open RPC result. `sandbox` is present exactly for sandboxed sessions. */
-interface OpenResult {
-  sessionId?: string
-  cwd?: string
-  sandbox?: SessionSandboxInfo
-}
+export type SessionSandboxInfo = NonNullable<OpenResult['sandbox']>
 
 // Ack throttle: at most one ack per session per ~100 ms. Per-frame acks on
 // a fast-scrolling terminal would flood the control plane with thousands of

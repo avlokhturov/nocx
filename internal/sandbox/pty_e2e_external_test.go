@@ -64,6 +64,15 @@ func TestNewLocal_SandboxedEndToEnd(t *testing.T) {
 		t.Fatalf("shell interaction: %v", err)
 	}
 
+	// /dev stays read-only except for the finite interactive-terminal allowlist.
+	// This proves a real shell can redirect output and reopen its controlling
+	// terminal without granting write access to arbitrary device hierarchies.
+	const deviceReady = "sandbox-device-ok"
+	const deviceReadyCommand = "printf ignored >/dev/null && exec 3</dev/tty && exec 3>&- && printf 'sandbox-device-ok\\n'\n"
+	if err := writeAndAwait(lp, deviceReadyCommand, deviceReady); err != nil {
+		t.Fatalf("sandbox device interaction: %v", err)
+	}
+
 	// Close tears down the process and the per-session runtime tree once.
 	// Close tears down the process; the runtime tree is removed by the
 	// waiter goroutine once the process exits. Wait for it (bounded).

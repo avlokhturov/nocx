@@ -117,25 +117,27 @@ func readPayload(r io.Reader) (*helperPayload, error) {
 	return &payload, nil
 }
 
-// buildRules converts the common policy into Landlock path rules. A
-// read-write rule subsumes a read-only duplicate; the policy builder already
-// deduplicated, so rules here map one-to-one. The shell executable is a
-// regular file and must not ride the directory rules (landlock_add_rule
-// rejects directory access rights on files), so it is granted via ROFiles.
+// buildRules converts the common policy into Landlock path rules. The policy
+// keeps surfaced writable roots separate from its finite device allowlist, so
+// the latter cannot accidentally become a broad write grant. Executable files
+// are granted through ROFiles; directories through RODirs.
 func buildRules(p *Policy) []landlock.Rule {
-	rules := make([]landlock.Rule, 0, 3)
-	roDirs := make([]string, 0, len(p.ReadOnlyRoots))
-	for _, r := range p.ReadOnlyRoots {
-		if r == p.Shell {
-			continue // shell is a file: granted via ROFiles below
-		}
-		roDirs = append(roDirs, r)
+	rules := make([]landlock.Rule, 0, 5)
+	if len(p.ReadOnlyRoots) > 0 {
+		rules = append(rules, landlock.RODirs(p.ReadOnlyRoots...))
 	}
-	if len(roDirs) > 0 {
-		rules = append(rules, landlock.RODirs(roDirs...))
+	if len(p.WritableRoots) > 0 {
+		rules = append(rules, landlock.RWDirs(p.WritableRoots...))
 	}
-	rules = append(rules, landlock.RWDirs(p.WritableRoots...))
-	rules = append(rules, landlock.ROFiles(p.Shell))
+	if len(p.WritableDirs) > 0 {
+		rules = append(rules, landlock.RWDirs(p.WritableDirs...))
+	}
+	if len(p.ReadOnlyFiles) > 0 {
+		rules = append(rules, landlock.ROFiles(p.ReadOnlyFiles...))
+	}
+	if len(p.WritableFiles) > 0 {
+		rules = append(rules, landlock.RWFiles(p.WritableFiles...))
+	}
 	return rules
 }
 

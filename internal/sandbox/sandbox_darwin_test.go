@@ -71,7 +71,7 @@ func TestSeatbeltEnforcement(t *testing.T) {
 		t.Fatalf("renderProfile: %v", err)
 	}
 
-	cmd := exec.Command(sandboxExecPath, "-p", profile, exe, "-test.run=TestDarwinChildProcess")
+	cmd := exec.Command(sandboxExecPath, "-p", profile, exe, "-test.run=TestDarwinChildProcess") //nolint:gosec // test injects the sandbox-exec seam; arguments are asserted below
 	cmd.Env = probeEnv
 	cmd.Dir = workspace
 	var out strings.Builder

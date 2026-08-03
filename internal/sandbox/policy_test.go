@@ -50,16 +50,14 @@ func TestBuildPolicy_Roots(t *testing.T) {
 		}
 	}
 
-	// Read-only roots: documented system set (existing ones, canonicalized),
-	// canonical shell, existing absolute PATH dirs. Missing/relative PATH
-	// entries are skipped, and a PATH dir that is the workspace is subsumed
-	// by the read-write rule.
+	// Read-only roots: documented system set, canonical execution directories,
+	// and existing absolute PATH dirs. The shell itself is a read-only file.
 	roSet := make(map[string]bool, len(p.ReadOnlyRoots))
-	for _, r := range p.ReadOnlyRoots {
-		if roSet[r] {
-			t.Errorf("duplicate read-only root %q", r)
+	for _, root := range p.ReadOnlyRoots {
+		if roSet[root] {
+			t.Errorf("duplicate read-only root %q", root)
 		}
-		roSet[r] = true
+		roSet[root] = true
 	}
 	for _, root := range systemReadOnlyRoots() {
 		if _, stErr := os.Stat(root); stErr != nil {
@@ -77,8 +75,8 @@ func TestBuildPolicy_Roots(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EvalSymlinks(shell): %v", err)
 	}
-	if !roSet[shellCanon] {
-		t.Errorf("read-only roots missing canonical shell %q", shellCanon)
+	if len(p.ReadOnlyFiles) != 1 || p.ReadOnlyFiles[0] != shellCanon {
+		t.Errorf("ReadOnlyFiles = %v, want canonical shell %q", p.ReadOnlyFiles, shellCanon)
 	}
 	pathCanon, err := filepath.EvalSymlinks(pathDir)
 	if err != nil {
@@ -91,6 +89,9 @@ func TestBuildPolicy_Roots(t *testing.T) {
 		if roSet[forbidden] {
 			t.Errorf("read-only roots must not contain %q (workspace is RW; missing skipped)", forbidden)
 		}
+	}
+	if len(p.WritableFiles) == 0 {
+		t.Error("policy must grant the interactive device-file allowlist")
 	}
 
 	// The policy must validate cleanly end to end.

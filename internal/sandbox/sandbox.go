@@ -10,6 +10,7 @@ package sandbox
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"sync"
 )
@@ -74,9 +75,13 @@ type PreparedCommand struct {
 	Backend string
 	Policy  *Policy
 
-	waitReady func(context.Context) error
-	cleanup   func()
-	once      sync.Once
+	// policyFile is the sole parent-side owner of the Linux helper's policy
+	// descriptor. ExtraFiles duplicates it for the child; cleanup closes this
+	// object once, never the raw descriptor number.
+	policyFile *os.File
+	waitReady  func(context.Context) error
+	cleanup    func()
+	once       sync.Once
 }
 
 // WaitReady blocks until the sandboxed process reports enforcement

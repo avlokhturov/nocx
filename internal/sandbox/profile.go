@@ -41,20 +41,19 @@ func renderProfile(p *Policy) (string, error) {
 	b.WriteString("(allow network*)\n")
 
 	for _, root := range p.ReadOnlyRoots {
-		if root == p.Shell {
-			continue // the shell is a file: literal clause below
-		}
 		esc, err := escapeSBPL(root)
 		if err != nil {
 			return "", err
 		}
 		b.WriteString("(allow file-read* (subpath \"" + esc + "\"))\n")
 	}
-	esc, err := escapeSBPL(p.Shell)
-	if err != nil {
-		return "", err
+	for _, file := range p.ReadOnlyFiles {
+		esc, err := escapeSBPL(file)
+		if err != nil {
+			return "", err
+		}
+		b.WriteString("(allow file-read* (literal \"" + esc + "\"))\n")
 	}
-	b.WriteString("(allow file-read* (literal \"" + esc + "\"))\n")
 	for _, root := range p.WritableRoots {
 		esc, err := escapeSBPL(root)
 		if err != nil {
@@ -62,10 +61,21 @@ func renderProfile(p *Policy) (string, error) {
 		}
 		b.WriteString("(allow file-write* (subpath \"" + esc + "\"))\n")
 	}
-	// The PTY is inherited, but the shell may re-open /dev/tty: allow the
-	// character-device operations an interactive terminal needs.
-	b.WriteString("(allow file-write-data (vnode-type CHARACTER-DEVICE))\n")
-	b.WriteString("(allow file-ioctl (vnode-type CHARACTER-DEVICE))\n")
+	for _, dir := range p.WritableDirs {
+		esc, err := escapeSBPL(dir)
+		if err != nil {
+			return "", err
+		}
+		b.WriteString("(allow file-write* (subpath \"" + esc + "\"))\n")
+	}
+	for _, file := range p.WritableFiles {
+		esc, err := escapeSBPL(file)
+		if err != nil {
+			return "", err
+		}
+		b.WriteString("(allow file-write* (literal \"" + esc + "\"))\n")
+		b.WriteString("(allow file-ioctl (literal \"" + esc + "\"))\n")
+	}
 	return b.String(), nil
 }
 

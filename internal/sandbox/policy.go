@@ -19,6 +19,9 @@ type Policy struct {
 	Workspace     string   `json:"workspace"`
 	WritableRoots []string `json:"writableRoots"`
 	ReadOnlyRoots []string `json:"readOnlyRoots"`
+	WritableFiles []string `json:"writableFiles"`
+	WritableDirs  []string `json:"writableDirs"`
+	ReadOnlyFiles []string `json:"readOnlyFiles"`
 	Shell         string   `json:"shell"`
 	Home          string   `json:"home"`
 	Tmp           string   `json:"tmp"`
@@ -64,9 +67,9 @@ func BuildPolicy(workspace, shellPath, runtimeRoot string, env []string) (*Polic
 	}
 	writable = append(writable, home, tmp)
 
-	// Read-only roots: documented system set, canonical shell, absolute
-	// directories from inherited PATH. Missing optional roots are skipped;
-	// permission and canonicalization errors are fatal.
+	// Read-only roots: documented system set, canonical execution roots, and
+	// absolute directories from inherited PATH. Missing optional roots are
+	// skipped; permission and canonicalization errors are fatal.
 	readonly := make([]string, 0, len(systemReadOnlyRoots())+16)
 	for _, root := range systemReadOnlyRoots() {
 		c, ok, e := canonicalOptionalDir(root)
@@ -82,10 +85,9 @@ func BuildPolicy(workspace, shellPath, runtimeRoot string, env []string) (*Polic
 	if err != nil {
 		return nil, NewSetupErrorf("shell %q: %v", shellPath, err)
 	}
-	if fi, err := os.Stat(shellCanon); err != nil || fi.IsDir() {
+	if fi, statErr := os.Stat(shellCanon); statErr != nil || !fi.Mode().IsRegular() {
 		return nil, NewSetupErrorf("shell %q is not a regular file", shellCanon)
 	}
-	readonly = append(readonly, shellCanon)
 
 	for _, dir := range pathEntries(env) {
 		if dir == "" || !filepath.IsAbs(dir) {
@@ -99,11 +101,24 @@ func BuildPolicy(workspace, shellPath, runtimeRoot string, env []string) (*Polic
 			readonly = append(readonly, c)
 		}
 	}
+	executionRoots, err := runtimeReadOnlyRoots(shellCanon, env)
+	if err != nil {
+		return nil, NewSetupErrorf("runtime roots: %v", err)
+	}
+	readonly = append(readonly, executionRoots...)
+
+	deviceFiles, deviceDirs, err := writableDevicePaths()
+	if err != nil {
+		return nil, NewSetupErrorf("device paths: %v", err)
+	}
 
 	p := &Policy{
 		Workspace:     canon,
 		WritableRoots: writable,
 		ReadOnlyRoots: readonly,
+		WritableFiles: deviceFiles,
+		WritableDirs:  deviceDirs,
+		ReadOnlyFiles: []string{shellCanon},
 		Shell:         shellCanon,
 		Home:          home,
 		Tmp:           tmp,
@@ -120,19 +135,23 @@ func BuildPolicy(workspace, shellPath, runtimeRoot string, env []string) (*Polic
 // root-count bounds. It is the first check the Linux helper applies to the
 // decoded FD payload.
 func ValidatePolicy(p *Policy) error {
-	seenRW := make(map[string]bool, len(p.WritableRoots))
-	for _, r := range p.WritableRoots {
-		if err := validatePolicyPath(r); err != nil {
-			return err
+	seenRW := make(map[string]bool, len(p.WritableRoots)+len(p.WritableFiles)+len(p.WritableDirs))
+	for _, roots := range [][]string{p.WritableRoots, p.WritableFiles, p.WritableDirs} {
+		for _, root := range roots {
+			if err := validatePolicyPath(root); err != nil {
+				return err
+			}
+			seenRW[root] = true
 		}
-		seenRW[r] = true
 	}
-	for _, r := range p.ReadOnlyRoots {
-		if err := validatePolicyPath(r); err != nil {
-			return err
-		}
-		if seenRW[r] {
-			return fmt.Errorf("sandbox: conflicting permissions for %q: read-write and read-only", r)
+	for _, roots := range [][]string{p.ReadOnlyRoots, p.ReadOnlyFiles} {
+		for _, root := range roots {
+			if err := validatePolicyPath(root); err != nil {
+				return err
+			}
+			if seenRW[root] {
+				return fmt.Errorf("sandbox: conflicting permissions for %q: read-write and read-only", root)
+			}
 		}
 	}
 	for _, field := range []string{p.Workspace, p.Shell, p.Home, p.Tmp} {
@@ -140,7 +159,7 @@ func ValidatePolicy(p *Policy) error {
 			return err
 		}
 	}
-	if len(p.WritableRoots)+len(p.ReadOnlyRoots) > maxRoots {
+	if len(p.WritableRoots)+len(p.WritableFiles)+len(p.WritableDirs)+len(p.ReadOnlyRoots)+len(p.ReadOnlyFiles) > maxRoots {
 		return fmt.Errorf("sandbox: policy exceeds %d roots", maxRoots)
 	}
 	if _, err := p.Bytes(); err != nil {
@@ -162,22 +181,18 @@ func (p *Policy) Bytes() ([]byte, error) {
 	return b, nil
 }
 
-// normalize deduplicates roots, lets a read-write rule subsume a read-only
-// duplicate, and drops read-only roots that are already writable.
 func (p *Policy) normalize() error {
 	p.WritableRoots = dedupeKeepOrder(p.WritableRoots)
-	writable := make(map[string]bool, len(p.WritableRoots))
-	for _, r := range p.WritableRoots {
-		writable[r] = true
-	}
-	ro := make([]string, 0, len(p.ReadOnlyRoots))
-	for _, r := range p.ReadOnlyRoots {
-		if writable[r] {
-			continue
+	p.WritableFiles = dedupeKeepOrder(p.WritableFiles)
+	p.WritableDirs = dedupeKeepOrder(p.WritableDirs)
+	writable := make(map[string]bool, len(p.WritableRoots)+len(p.WritableFiles)+len(p.WritableDirs))
+	for _, roots := range [][]string{p.WritableRoots, p.WritableFiles, p.WritableDirs} {
+		for _, root := range roots {
+			writable[root] = true
 		}
-		ro = append(ro, r)
 	}
-	p.ReadOnlyRoots = dedupeKeepOrder(ro)
+	p.ReadOnlyRoots = removeWritable(p.ReadOnlyRoots, writable)
+	p.ReadOnlyFiles = removeWritable(p.ReadOnlyFiles, writable)
 	return ValidatePolicy(p)
 }
 
@@ -192,6 +207,16 @@ func dedupeKeepOrder(in []string) []string {
 		out = append(out, s)
 	}
 	return out
+}
+
+func removeWritable(in []string, writable map[string]bool) []string {
+	out := make([]string, 0, len(in))
+	for _, root := range in {
+		if !writable[root] {
+			out = append(out, root)
+		}
+	}
+	return dedupeKeepOrder(out)
 }
 
 func validatePolicyPath(p string) error {

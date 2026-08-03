@@ -76,24 +76,25 @@ func (s *linuxService) Prepare(ctx context.Context, req Request, spec CommandSpe
 	if err != nil {
 		return fail(NewSetupErrorf("policy fd: %v", err))
 	}
-	if _, wErr := unix.Write(policyFD, data); wErr != nil {
-		_ = unix.Close(policyFD)
+	policyFile := os.NewFile(uintptr(policyFD), "policy")
+	if _, wErr := policyFile.Write(data); wErr != nil {
+		_ = policyFile.Close()
 		return fail(NewSetupErrorf("write policy: %v", wErr))
 	}
-	if _, sErr := unix.Seek(policyFD, 0, 0); sErr != nil {
-		_ = unix.Close(policyFD)
+	if _, sErr := policyFile.Seek(0, 0); sErr != nil {
+		_ = policyFile.Close()
 		return fail(NewSetupErrorf("rewind policy: %v", sErr))
 	}
 
 	statusR, statusW, err := os.Pipe()
 	if err != nil {
-		_ = unix.Close(policyFD)
+		_ = policyFile.Close()
 		return fail(NewSetupErrorf("status pipe: %v", err))
 	}
 
 	exe, err := os.Executable()
 	if err != nil {
-		_ = unix.Close(policyFD)
+		_ = policyFile.Close()
 		_ = statusR.Close()
 		_ = statusW.Close()
 		return fail(NewSetupErrorf("executable path: %v", err))
@@ -103,29 +104,30 @@ func (s *linuxService) Prepare(ctx context.Context, req Request, spec CommandSpe
 	cmd.Env = spec.Env
 	cmd.Dir = spec.Dir
 	cmd.ExtraFiles = []*os.File{
-		os.NewFile(uintptr(policyFD), "policy"),
+		policyFile,
 		statusW,
 	}
 	// Stdout/Stderr/Stdin stay nil: the PTY path attaches them via
 	// pty.StartWithSize; the session must not exist before enforcement.
 
 	pc := &PreparedCommand{
-		Cmd:     cmd,
-		Backend: BackendLandlock,
-		Policy:  pol,
+		Cmd:        cmd,
+		Backend:    BackendLandlock,
+		Policy:     pol,
+		policyFile: policyFile,
 		waitReady: func(ctx context.Context) error {
 			return readStatus(ctx, statusR, statusW)
 		},
-		cleanup: func() {
-			_ = unix.Close(policyFD)
-			_ = statusR.Close()
-			_ = statusW.Close()
-			if cmd.Process != nil && cmd.ProcessState == nil {
-				_ = cmd.Process.Kill()
-				_ = cmd.Wait()
-			}
-			RemoveRuntimeRoot(runtimeRoot)
-		},
+	}
+	pc.cleanup = func() {
+		_ = pc.policyFile.Close()
+		_ = statusR.Close()
+		_ = statusW.Close()
+		if cmd.Process != nil && cmd.ProcessState == nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+		RemoveRuntimeRoot(runtimeRoot)
 	}
 	return pc, nil
 }

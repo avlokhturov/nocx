@@ -92,6 +92,7 @@ func TestLandlockEnforcement(t *testing.T) {
 
 	probeEnv := append(os.Environ(),
 		envProbe+"=1",
+		"NOCX_SB_SHELL=/bin/sh",
 		"NOCX_SB_WORKSPACE="+workspace,
 		"NOCX_SB_SENTINEL="+sentinel,
 		"NOCX_SB_PREHARD="+preHard,

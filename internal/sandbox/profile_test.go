@@ -61,23 +61,26 @@ func TestRenderProfile_Clauses(t *testing.T) {
 		}
 	}
 	for _, root := range p.ReadOnlyRoots {
-		if root == p.Shell {
-			continue
-		}
 		want := `(allow file-read* (subpath "` + root + `"))`
 		if !strings.Contains(profile, want) {
 			t.Errorf("profile missing read-only clause for %q", root)
 		}
 	}
-	wantShell := `(allow file-read* (literal "` + p.Shell + `"))`
-	if !strings.Contains(profile, wantShell) {
-		t.Errorf("profile missing literal shell clause for %q", p.Shell)
+	for _, file := range p.ReadOnlyFiles {
+		want := `(allow file-read* (literal "` + file + `"))`
+		if !strings.Contains(profile, want) {
+			t.Errorf("profile missing read-only file clause for %q", file)
+		}
 	}
-	if !strings.Contains(profile, "(allow file-write-data (vnode-type CHARACTER-DEVICE))") {
-		t.Error("profile missing PTY character-device write clause")
+	for _, file := range p.WritableFiles {
+		write := `(allow file-write* (literal "` + file + `"))`
+		ioctl := `(allow file-ioctl (literal "` + file + `"))`
+		if !strings.Contains(profile, write) || !strings.Contains(profile, ioctl) {
+			t.Errorf("profile missing exact device clauses for %q", file)
+		}
 	}
-	if !strings.Contains(profile, "(allow file-ioctl (vnode-type CHARACTER-DEVICE))") {
-		t.Error("profile missing PTY character-device ioctl clause")
+	if strings.Contains(profile, "vnode-type CHARACTER-DEVICE") {
+		t.Error("profile must not grant every character device")
 	}
 }
 

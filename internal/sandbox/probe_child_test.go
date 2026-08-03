@@ -74,6 +74,26 @@ func runProbe() int {
 		ok("read system root")
 	}
 
+	// A usable shell is a positive requirement, not an inferred side effect of
+	// denial assertions. The pipeline exercises executable lookup and the
+	// redirect exercises the finite writable /dev device allowlist.
+	shell := os.Getenv("NOCX_SB_SHELL")
+	if shell == "" {
+		shell = "/bin/sh"
+	}
+	pipeline := exec.Command(shell, "-c", "printf sandbox | cat") //nolint:gosec // shell path is supplied by the parent-side probe fixture
+	if output, err := pipeline.Output(); err != nil || string(output) != "sandbox" {
+		fail("shell pipeline: output=%q err=%v", output, err)
+	} else {
+		ok("shell pipeline")
+	}
+	redirect := exec.Command(shell, "-c", "printf sandbox >/dev/null") //nolint:gosec // shell path is supplied by the parent-side probe fixture
+	if output, err := redirect.CombinedOutput(); err != nil {
+		fail("shell redirect to /dev/null: output=%q err=%v", output, err)
+	} else {
+		ok("shell redirect to /dev/null")
+	}
+
 	// Sentinel outside all roots: unreadable and unwritable.
 	if _, err := os.ReadFile(sentinel); err == nil { //nolint:gosec // probe asserts the cage denies
 		fail("read of sentinel outside roots succeeded")
@@ -112,10 +132,13 @@ func runProbe() int {
 		ok("rename of sentinel blocked")
 	}
 
-	// Subprocess: children inherit the domain.
-	sub := exec.Command("/bin/sh", "-c", "cat '"+sentinel+"' >/dev/null 2>&1") //nolint:gosec // probe asserts the cage denies the escape
-	if err := sub.Run(); err == nil {
-		fail("subprocess read the sentinel")
+	// Subprocesses inherit the domain. Capture output instead of redirecting:
+	// a failed redirect must not masquerade as a denied sentinel read.
+	sub := exec.Command(shell, "-c", "cat \"$1\"", "sandbox-probe", sentinel) //nolint:gosec // probe asserts the cage denies the escape
+	if output, err := sub.CombinedOutput(); err == nil {
+		fail("subprocess read the sentinel: output=%q", output)
+	} else if strings.Contains(string(output), "top secret") {
+		fail("subprocess exposed sentinel content: output=%q", output)
 	} else {
 		ok("subprocess blocked from sentinel")
 	}
