@@ -7,7 +7,7 @@
 // provider breaks.
 
 /** Which kind of surface produced the candidate. */
-export type CandidateSource = 'command' | 'history' | 'path'
+export type CandidateSource = 'command' | 'history' | 'path' | 'host'
 
 /** Which rung of the recall ladder (§10.6) the candidate came from. */
 export type CandidateScope = 'directory' | 'host' | 'everywhere'

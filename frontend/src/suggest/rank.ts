@@ -6,11 +6,12 @@
 //
 // The rungs, in priority order:
 //
-//  0. The argument-position path rung — in argument position a path
-//     candidate replaces one token, a history row the whole line, and the
-//     token being typed is the more specific intent: path candidates outrank
-//     whole-line history there, whatever history's recency claims. No other
-//     rung crosses it, and it applies in NO other position.
+//  0. The argument-position token rung — in argument position a path or
+//     host candidate replaces one token, a history row the whole line, and
+//     the token being typed is the more specific intent: path and host
+//     candidates outrank whole-line history there, whatever history's
+//     recency claims. No other rung crosses it, and it applies in NO other
+//     position.
 //  1. Prefix quality — exact match beats a plain prefix, and quality is an
 //     absolute rung: no amount of recency promotes a plain prefix above an
 //     exact match. The "exact rung" must never be a lie.
@@ -25,9 +26,10 @@
 //     unknown facet is never a wildcard. A candidate carrying no environment
 //     evidence at all scores full marks, because its provider vouches for
 //     applicability by construction (§8.5).
-//  5. Provider prior — the last tiebreak, tuned per provider: the command
-//     store is the shell's own answer and wins ties; the user's history is
-//     next; a filesystem path is last.
+//  5. Provider prior — the last tiebreak, tuned per provider: a configured
+//     host is the explicit intent and wins ties; the command store is the
+//     shell's own answer; the user's history is next; a filesystem path is
+//     last.
 import type { Candidate } from './candidate'
 
 export interface RankContext {
@@ -47,15 +49,16 @@ export interface RankContext {
 }
 
 /**
- * Argument position: a path candidate replaces one token; a history row
- * replaces the whole line. The token being typed is the more specific
- * intent, so path candidates outrank whole-line history there — no amount of
- * history recency may bury the directories under it. Sized above the entire
- * rest of the score (quality ×1000 + recency ×100 + frequency ×10 +
- * environment ×5 + prior), which holds for the shipped providers whose
- * frequency is never set.
+ * Argument position: a path or host candidate replaces one token; a
+ * history row replaces the whole line. The token being typed is the more
+ * specific intent, so path and host candidates outrank whole-line history
+ * there — no amount of history recency may bury them under it (`ssh <TAB>`
+ * must offer hosts, never the history rows that were never the answer).
+ * Sized above the entire rest of the score (quality ×1000 + recency ×100 +
+ * frequency ×10 + environment ×5 + prior), which holds for the shipped
+ * providers whose frequency is never set.
  */
-const ARGUMENT_PATH_RUNG = 100_000
+const ARGUMENT_TOKEN_RUNG = 100_000
 
 /**
  * Within path candidates, a directory outranks a file — descending a tree is
@@ -109,7 +112,7 @@ function environmentScore(c: Candidate): number {
   }
 }
 
-const PROVIDER_PRIOR: Record<string, number> = { command: 2, history: 1, fs: 0 }
+const PROVIDER_PRIOR: Record<string, number> = { command: 2, history: 1, fs: 0, host: 3 }
 
 /**
  * Rank candidates in place of the dropdown order. Stable: candidates with
@@ -130,7 +133,10 @@ export function rankCandidates(candidates: Candidate[], ctx: RankContext): Candi
   const scored = candidates.map((c) => {
     const exact = c.insertText === ctx.query
     const quality = exact ? QUALITY_EXACT : QUALITY_PREFIX
-    const argumentRung = ctx.position === 'argument' && c.source === 'path' ? ARGUMENT_PATH_RUNG : 0
+    const argumentRung =
+      ctx.position === 'argument' && (c.source === 'path' || c.source === 'host')
+        ? ARGUMENT_TOKEN_RUNG
+        : 0
     // A directory path candidate outranks a file one (the tree-descending
     // default for commands that do not filter). Below quality: an exact
     // file match is still the more specific intent.

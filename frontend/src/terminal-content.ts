@@ -11,6 +11,7 @@ import { shellExtensions } from './shell-highlight'
 import { RecallOverlay, queryLedgerHistory, withSessionText } from './recall'
 import { CompletionController } from './suggest/controller'
 import { createShellProviders } from './suggest/providers'
+import { hostProvider } from './suggest/host-provider'
 import { CompletionDropdown } from './ui/completion-dropdown'
 import type { FsComplete } from './generated/fs.complete'
 import { ShellInputTarget } from './input-target'
@@ -368,6 +369,12 @@ export class TerminalContent extends BaseTabContent {
           store: renderer.snapshotStore,
           queryHistory: (cwd, host) => queryHistory(this.client, 'directory', cwd, host),
           completeFs: (text, cwd) => this.client.call<FsComplete>('fs.complete', { text, cwd }),
+          // The host provider is constructed HERE (not inside
+          // createShellProviders) because it needs this tab's ProfileClient
+          // and imports the DOM-bound quick-connect assembly.
+          hostProvider: this.profileClient
+            ? hostProvider({ profileClient: this.profileClient })
+            : undefined,
         }),
         dropdown: new CompletionDropdown({
           onHover: (index) => this.completion?.select(index),

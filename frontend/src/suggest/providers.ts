@@ -1,12 +1,15 @@
-// The three shipped providers (design §8.4, §8.5) — command names from the
-// OSC 636 snapshot, history over the control plane, and local filesystem
-// paths. Applicability is part of the contract: a provider declares where it
-// applies and is not consulted outside it. In particular the local path
-// provider is inactive on a remote session (a local path must never
-// masquerade as a remote one) and in command position for a bare word (a
-// bare first word is a command name, not a path) — but in argument position
-// it answers ANY token, including the empty token, which lists the session
-// cwd (`cd ` + Tab is the case the dropdown exists for).
+// The shipped providers (design §8.4, §8.5) — command names from the
+// OSC 636 snapshot, history over the control plane, local filesystem
+// paths, and SSH hosts routed from the quick-connect assembly (host
+// candidates are built in host-provider.ts, which providers.ts never
+// imports — see createShellProviders). Applicability is part of the
+// contract: a provider declares where it applies and is not consulted
+// outside it. In particular the local path provider is inactive on a
+// remote session (a local path must never masquerade as a remote one) and
+// in command position for a bare word (a bare first word is a command
+// name, not a path) — but in argument position it answers ANY token,
+// including the empty token, which lists the session cwd (`cd ` + Tab is
+// the case the dropdown exists for).
 import type { CommandSnapshotStore } from '../command-snapshot'
 import type { HistoryQuery } from '../generated/history.query'
 import type { FsComplete } from '../generated/fs.complete'
@@ -46,6 +49,11 @@ export type EmptyReason =
   /** The OSC 636 command snapshot has not arrived yet — command names
    *  cannot be offered, and pretending the shell has none would be a lie. */
   | { kind: 'snapshot-pending' }
+  /** The quick-connect alias resolver (`ssh -G`) could not answer — the
+   *  degraded condition the picker would surface is routed through, never
+   *  rebuilt: hosts cannot be offered, and naming WHY beats the generic
+   *  "no matches" (an empty list would read as "you have no hosts"). */
+  | { kind: 'hosts-unavailable'; reason: string; detail: string }
 
 /** What one provider answers to one query: candidates plus — when it
  *  answered nothing — the specific reason, so "no matches" is never
@@ -259,8 +267,10 @@ const DIRECTORIES_ONLY: Record<string, true> = { cd: true, pushd: true, rmdir: t
 
 /** The command word the token completes under ('' in command position — a
  *  path invocation like `./run.sh` is not a command the table knows, so the
- *  default "both" applies). */
-function commandWord(ctx: SuggestContext): string {
+ *  default "both" applies). Also gates the host provider: hosts are offered
+ *  only under the `ssh` command, and this is the same derivation the path
+ *  provider uses for its dirs-only table. */
+export function commandWord(ctx: SuggestContext): string {
   if (ctx.position === 'command') return ''
   return ctx.doc.slice(0, ctx.token.from).trim().split(/\s+/)[0] ?? ''
 }
@@ -358,14 +368,27 @@ export function fsProvider(opts: {
   }
 }
 
-/** The shell target's provider set, wired at the composition root. */
+/**
+ * The shell target's provider set, wired at the composition root. The host
+ * provider is INJECTED rather than constructed here: it needs the
+ * ProfileClient, which lives at the root — and its assembly module
+ * (quick-connect.tsx) is DOM-bound, so providers.ts never imports it.
+ * Registered ABOVE history: in `ssh` argument position hosts must outrank
+ * whole-line history rows (the rank rung enforces it; registration order
+ * only breaks the exact ties).
+ */
 export function createShellProviders(opts: {
   store: CommandSnapshotStore
   queryHistory: (cwd: string, host: string) => Promise<HistoryQuery>
   completeFs: (text: string, cwd: string) => Promise<FsComplete>
+  /** Present when a ProfileClient is wired (the app); absent in tests and
+   *  raw-mode contexts where no connection manager exists — a provider that
+   *  can never answer is not registered. */
+  hostProvider?: SuggestionProvider
 }): SuggestionProvider[] {
   return [
     commandProvider(opts.store),
+    ...(opts.hostProvider ? [opts.hostProvider] : []),
     // The fs.complete seam travels to history too: the stale-path demotion
     // (a history row whose trailing token no longer exists ranks last)
     // uses the same backend call the path provider makes.
