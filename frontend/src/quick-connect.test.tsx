@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
-import { describe, expect, it, vi, afterEach, beforeEach } from 'vitest'
+import { describe, expect, it, vi, afterEach, beforeEach, type Mock } from 'vitest'
 import { cleanup } from '@solidjs/testing-library'
 import {
   ActionsQuickConnectProvider,
   SSHQuickConnectProvider,
   SSHAliasQuickConnectProvider,
+  AdHocQuickConnectProvider,
   QuickConnectController,
   type QuickConnectItem,
   type QuickConnectProvider,
@@ -706,5 +707,238 @@ describe('SSHAliasQuickConnectProvider', () => {
     // Label uses alias directly, no user or port decoration
     expect(items[0].label).toBe('minimal')
     expect(items[0].detail).toBe('10.0.0.1')
+  })
+})
+/* ── Free-form (ad-hoc) connect provider ────────────────────────────── */
+
+describe('AdHocQuickConnectProvider', () => {
+  it('offers a Connect item for a bare host', () => {
+    const newTabByHost = vi.fn()
+    const provider = new AdHocQuickConnectProvider(newTabByHost)
+
+    const items = provider.getQueryItems('example.com')
+
+    expect(items).toHaveLength(1)
+    expect(items[0].id).toBe('__ad_hoc_connect__')
+    expect(items[0].label).toBe('Connect to example.com')
+    expect(items[0].system).toBe(true)
+    expect(items[0].badge).toBe('ad-hoc')
+
+    items[0].run()
+    expect(newTabByHost).toHaveBeenCalledWith('example.com', undefined, 22)
+  })
+
+  it('parses user@host:port into host, user and port', () => {
+    const newTabByHost = vi.fn()
+    const provider = new AdHocQuickConnectProvider(newTabByHost)
+
+    const items = provider.getQueryItems('deploy@example.com:2222')
+
+    expect(items).toHaveLength(1)
+    expect(items[0].label).toBe('Connect to deploy@example.com')
+    expect(items[0].detail).toBe('port 2222')
+
+    items[0].run()
+    expect(newTabByHost).toHaveBeenCalledWith('example.com', 'deploy', 2222)
+  })
+
+  it('accepts the ssh:// scheme', () => {
+    const newTabByHost = vi.fn()
+    const provider = new AdHocQuickConnectProvider(newTabByHost)
+
+    const items = provider.getQueryItems('ssh://deploy@10.0.0.1:2222')
+    items[0].run()
+    expect(newTabByHost).toHaveBeenCalledWith('10.0.0.1', 'deploy', 2222)
+  })
+
+  it('accepts a bracketed IPv6 literal', () => {
+    const newTabByHost = vi.fn()
+    const provider = new AdHocQuickConnectProvider(newTabByHost)
+
+    const items = provider.getQueryItems('[::1]:2222')
+    items[0].run()
+    expect(newTabByHost).toHaveBeenCalledWith('::1', undefined, 2222)
+  })
+
+  it('trims surrounding whitespace', () => {
+    const provider = new AdHocQuickConnectProvider(vi.fn())
+    expect(provider.getQueryItems('  example.com  ')).toHaveLength(1)
+  })
+
+  it('offers nothing for an empty query', () => {
+    const provider = new AdHocQuickConnectProvider(vi.fn())
+    expect(provider.getQueryItems('')).toHaveLength(0)
+    expect(provider.getQueryItems('   ')).toHaveLength(0)
+  })
+
+  it('offers nothing for a malformed string with no host', () => {
+    const provider = new AdHocQuickConnectProvider(vi.fn())
+    expect(provider.getQueryItems('user@')).toHaveLength(0)
+    expect(provider.getQueryItems(':2222')).toHaveLength(0)
+    expect(provider.getQueryItems('ssh://')).toHaveLength(0)
+  })
+
+  it('hides the default port from the detail line', () => {
+    const provider = new AdHocQuickConnectProvider(vi.fn())
+    expect(provider.getQueryItems('example.com:22')[0].detail).toBeUndefined()
+  })
+
+  it('contributes no static items', () => {
+    const provider = new AdHocQuickConnectProvider(vi.fn())
+    expect(provider.getItems()).toHaveLength(0)
+  })
+})
+
+/* ── Free-form connect entry in the picker ──────────────────────────── */
+
+describe('free-form connect entry', () => {
+  let container: HTMLDivElement
+
+  beforeEach(() => {
+    container = document.createElement('div')
+    document.body.append(container)
+  })
+
+  afterEach(() => {
+    container.remove()
+  })
+
+  /** Wait for microtasks (createEffect's async body) to settle. */
+  async function waitForItems(): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, 0))
+  }
+
+  function typeQuery(input: HTMLInputElement, value: string): void {
+    input.value = value
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+  }
+
+  function makePicker(newTabByHost: Mock): QuickConnectController {
+    const ctrl = new QuickConnectController()
+    afterEach(() => ctrl.destroy())
+    const providers: QuickConnectProvider[] = [
+      new ActionsQuickConnectProvider(vi.fn(), vi.fn()),
+      new SSHQuickConnectProvider(
+        { listProfiles: vi.fn().mockResolvedValue([]) } as never,
+        vi.fn(),
+      ),
+      new AdHocQuickConnectProvider(newTabByHost),
+    ]
+    ctrl.mount(container, providers)
+    ctrl.show()
+    return ctrl
+  }
+
+  it('offers Connect for a query matching nothing and connects via newTabByHost', async () => {
+    const newTabByHost = vi.fn()
+    makePicker(newTabByHost)
+    await waitForItems()
+
+    const input = container.querySelector<HTMLInputElement>('.quick-connect__search input')
+    expect(input).toBeTruthy()
+    typeQuery(input!, 'unknown-host')
+
+    const items = container.querySelectorAll('.quick-connect__item')
+    expect(items).toHaveLength(1)
+    expect(items[0].textContent).toContain('Connect to unknown-host')
+
+    // Reachable by keyboard alone: the row is selected and Enter activates it.
+    input!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+
+    expect(newTabByHost).toHaveBeenCalledWith('unknown-host', undefined, 22)
+    const dialog = container.querySelector<HTMLDialogElement>('dialog.nocx-dialog')
+    expect(dialog?.open).toBe(false)
+
+    // Nothing was persisted: the ad-hoc path only ever called newTabByHost —
+    // the picker's profile client has no write method on this path at all.
+    expect(newTabByHost).toHaveBeenCalledOnce()
+  })
+
+  it('ranks a matching saved profile above the ad-hoc entry — suppresses it', async () => {
+    const ctrl = new QuickConnectController()
+    afterEach(() => ctrl.destroy())
+    const providers: QuickConnectProvider[] = [
+      new ActionsQuickConnectProvider(vi.fn(), vi.fn()),
+      new SSHQuickConnectProvider(
+        {
+          listProfiles: vi.fn().mockResolvedValue([
+            {
+              id: 'ssh:custom:prod:uuid',
+              type: 'ssh' as const,
+              name: 'Production DB',
+              options: { host: 'example.com', port: 22, user: 'deploy' },
+            },
+          ]),
+        } as never,
+        vi.fn(),
+      ),
+      new AdHocQuickConnectProvider(vi.fn()),
+    ]
+    ctrl.mount(container, providers)
+    ctrl.show()
+    await waitForItems()
+
+    const input = container.querySelector<HTMLInputElement>('.quick-connect__search input')
+    expect(input).toBeTruthy()
+    typeQuery(input!, 'example.com')
+
+    const items = container.querySelectorAll('.quick-connect__item')
+    expect(items).toHaveLength(1)
+    expect(items[0].textContent).toContain('deploy@example.com')
+    expect(items[0].textContent).not.toContain('Connect to')
+  })
+
+  it('ranks a matching alias above the ad-hoc entry — suppresses it', async () => {
+    const ctrl = new QuickConnectController()
+    afterEach(() => ctrl.destroy())
+    const providers: QuickConnectProvider[] = [
+      new ActionsQuickConnectProvider(vi.fn(), vi.fn()),
+      new SSHQuickConnectProvider(
+        { listProfiles: vi.fn().mockResolvedValue([]) } as never,
+        vi.fn(),
+      ),
+      new SSHAliasQuickConnectProvider(
+        {
+          listProfiles: vi.fn().mockResolvedValue([]),
+          listSSHAliases: vi.fn().mockResolvedValue({
+            aliases: [{ alias: 'example.com', hostName: '10.0.0.1' }],
+            unavailable: null,
+          }),
+        } as never,
+        vi.fn(),
+      ),
+      new AdHocQuickConnectProvider(vi.fn()),
+    ]
+    ctrl.mount(container, providers)
+    ctrl.show()
+    await waitForItems()
+
+    const input = container.querySelector<HTMLInputElement>('.quick-connect__search input')
+    expect(input).toBeTruthy()
+    typeQuery(input!, 'example.com')
+
+    const items = container.querySelectorAll('.quick-connect__item')
+    expect(items).toHaveLength(1)
+    expect(items[0].textContent).toContain('example.com')
+    expect(items[0].textContent).toContain('alias')
+    expect(items[0].textContent).not.toContain('Connect to')
+  })
+
+  it('reports a malformed string instead of connecting', async () => {
+    const newTabByHost = vi.fn()
+    makePicker(newTabByHost)
+    await waitForItems()
+
+    const input = container.querySelector<HTMLInputElement>('.quick-connect__search input')
+    expect(input).toBeTruthy()
+    typeQuery(input!, 'user@')
+
+    expect(container.querySelectorAll('.quick-connect__item')).toHaveLength(0)
+    const empty = container.querySelector('.quick-connect__empty')
+    expect(empty?.textContent).toContain('Could not parse')
+    expect(empty?.textContent).toContain('user@host:port')
+
+    input!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    expect(newTabByHost).not.toHaveBeenCalled()
   })
 })

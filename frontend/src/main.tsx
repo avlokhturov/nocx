@@ -26,6 +26,7 @@ import { bootstrapPlatform } from './platform'
 import {
   QuickConnectController,
   ActionsQuickConnectProvider,
+  AdHocQuickConnectProvider,
   SSHQuickConnectProvider,
   SSHAliasQuickConnectProvider,
   type QuickConnectProvider,
@@ -286,6 +287,10 @@ async function main() {
     new SSHAliasQuickConnectProvider(profileClient, (host, user, port) =>
       tm.newSSHTab('', host, user, port),
     ),
+    // Free-form fallback: "Connect to <host>" when the typed query matches
+    // neither a saved profile nor an alias. Same host path as aliases — the
+    // dialog only reaches it after every real match missed.
+    new AdHocQuickConnectProvider((host, user, port) => tm.newSSHTab('', host, user, port)),
   ]
 
   const qc = new QuickConnectController()

@@ -33,7 +33,7 @@ import {
   type Setter,
 } from 'solid-js'
 import { render } from 'solid-js/web'
-import type { ProfileClient } from './profiles'
+import { parseQuickConnect, type ProfileClient } from './profiles'
 import type { Tab } from './tabs'
 import { Dialog } from './ui/dialog'
 import { SearchField } from './ui/search-field'
@@ -53,6 +53,8 @@ export interface QuickConnectItem {
    *  not from a user-saved connection. Visually distinguished from saved
    *  connections. */
   readonly system?: boolean
+  /** Badge text for system entries; defaults to "alias". */
+  readonly badge?: string
   /** Invoked when the item is activated (click or Enter). */
   readonly run: () => void
 }
@@ -62,6 +64,12 @@ export interface QuickConnectProvider {
   readonly label: string
   /** Return the current list of items. Called on every open. */
   getItems(): QuickConnectItem[] | Promise<QuickConnectItem[]>
+  /**
+   * Optional query-dependent items. Consulted only when nothing from getItems
+   * matched the filter — the free-form "connect to the typed host" fallback.
+   * Runs on every keystroke, so it must stay synchronous.
+   */
+  getQueryItems?(query: string): QuickConnectItem[]
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -194,6 +202,53 @@ export class SSHAliasQuickConnectProvider implements QuickConnectProvider {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Free-form connect provider — "I know this host and you do not"
+//
+// Contributes nothing to the static list. It answers the dialog's
+// query-dependent fallback: when the typed query parses as a host, offer a
+// Connect entry that opens the same newTabByHost path the alias provider
+// uses — nothing is persisted. The dialog only consults it when no saved
+// profile or alias matched, so a mistyped alias can never silently become an
+// ad-hoc connection to a host that merely shares its name.
+// ═══════════════════════════════════════════════════════════════════════════
+
+export class AdHocQuickConnectProvider implements QuickConnectProvider {
+  readonly id = 'ad-hoc'
+  readonly label = 'Quick Connect'
+
+  constructor(private newTabByHost: (host: string, user?: string, port?: number) => Tab) {}
+
+  getItems(): QuickConnectItem[] {
+    return []
+  }
+
+  getQueryItems(query: string): QuickConnectItem[] {
+    const trimmed = query.trim()
+    if (!trimmed) return []
+
+    const parsed = parseQuickConnect(trimmed)
+    const host = (parsed.options.host ?? '').trim()
+    // Same judgement as connections.tsx's quick-connect handler: input that
+    // contained '@' or ':' yet parsed to an empty host was malformed and must
+    // not connect to whatever fell out of the parser — the dialog explains why.
+    if (!host) return []
+
+    const user = parsed.options.user
+    const port = parsed.options.port
+    return [
+      {
+        id: '__ad_hoc_connect__',
+        label: `Connect to ${user ? `${user}@` : ''}${host}`,
+        detail: port != null && port !== 22 ? `port ${port}` : undefined,
+        system: true,
+        badge: 'ad-hoc',
+        run: () => void this.newTabByHost(host, user, port),
+      },
+    ]
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // QuickConnect dialog component
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -279,11 +334,38 @@ const QuickConnectDialog: Component<QuickConnectDialogProps> = (props) => {
   const filteredItems = createMemo(() => {
     const q = query().toLowerCase().trim()
     if (!q) return items()
-    return items().filter(
+    const matched = items().filter(
       (it) =>
         it.label.toLowerCase().includes(q) ||
         (it.detail !== undefined && it.detail.toLowerCase().includes(q)),
     )
+    if (matched.length > 0) return matched
+
+    // Nothing static matched — consult the query-dependent providers (the
+    // ad-hoc "Connect to <host>" fallback). Only reached when every real
+    // match missed, so the free-form entry can never outrank a saved profile
+    // or an alias; a mistyped alias cannot silently become an ad-hoc
+    // connection to a host that merely shares its name.
+    const queryItems: GroupedItem[] = []
+    for (const provider of props.providers) {
+      const providerItems = provider.getQueryItems?.(query()) ?? []
+      queryItems.push(...providerItems.map((item) => ({ ...item, providerId: provider.id })))
+    }
+    return queryItems
+  })
+
+  // Parse-failure notice for the empty state. Reuses the connections.tsx
+  // quick-connect judgement: input that contained '@' or ':' yet parsed to an
+  // empty host was malformed — say why rather than showing a bare "No
+  // matches" (or worse, connecting to whatever fell out of the parser).
+  const parseFailureMessage = createMemo(() => {
+    const q = query().trim()
+    if (!q || filteredItems().length > 0) return null
+    const hadAtOrColon = q.includes('@') || q.includes(':')
+    if (!hadAtOrColon) return null
+    const parsed = parseQuickConnect(q)
+    if (parsed.options.host != null && parsed.options.host.trim() !== '') return null
+    return `Could not parse "${q}": try "user@host:port" or "ssh://user@host:port"`
   })
 
   // Clamp selected index when the filtered list changes.
@@ -341,7 +423,7 @@ const QuickConnectDialog: Component<QuickConnectDialogProps> = (props) => {
             is not something to announce either. */}
         <Show
           when={filteredItems().length > 0}
-          fallback={<div class="quick-connect__empty">No matches</div>}
+          fallback={<div class="quick-connect__empty">{parseFailureMessage() ?? 'No matches'}</div>}
         >
           <div class="quick-connect__list" role="listbox" aria-label="Connection list">
             <For each={filteredItems()}>
@@ -367,7 +449,7 @@ const QuickConnectDialog: Component<QuickConnectDialogProps> = (props) => {
                   >
                     <span class="quick-connect__item-label">{item.label}</span>
                     <Show when={item.system === true}>
-                      <span class="quick-connect__item-badge">alias</span>
+                      <span class="quick-connect__item-badge">{item.badge ?? 'alias'}</span>
                     </Show>
                     <Show when={item.detail !== undefined}>
                       <span class="quick-connect__item-detail">{item.detail}</span>
