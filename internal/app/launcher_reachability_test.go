@@ -411,7 +411,7 @@ func reachWriteAndReadEcho(t *testing.T, conn *websocket.Conn, sid string) {
 // grep RemoteLauncher in internal/app and internal/transport returned nothing.
 func TestRemoteLauncher_ReachableThroughRealTransport(t *testing.T) {
 	srv := startReachSSHServer(t)
-	ws, conn := reachStack(t, srv, &remoteLauncherAdapter{inner: shellintegration.NewRemoteLauncher()})
+	ws, conn := reachStack(t, srv, &remoteLauncherAdapter{inner: shellintegration.NewRemoteLauncher(), logger: log.NewSlogAdapter(nil)})
 	_ = ws
 
 	sid, reason := reachOpenSSH(t, conn, true)
@@ -444,7 +444,7 @@ func TestRemoteLauncher_ReachableThroughRealTransport(t *testing.T) {
 // the wire instead of dying in a log.
 func TestRemoteLauncher_DeclineLeavesUsableSessionWithReasonOnWire(t *testing.T) {
 	srv := startReachSSHServer(t)
-	declining := &remoteLauncherAdapter{inner: decliningSILauncher{reason: shellintegration.ReasonNoSecureTemp}}
+	declining := &remoteLauncherAdapter{inner: decliningSILauncher{reason: shellintegration.ReasonNoSecureTemp}, logger: log.NewSlogAdapter(nil)}
 	_, conn := reachStack(t, srv, declining)
 
 	sid, reason := reachOpenSSH(t, conn, false)
@@ -486,4 +486,60 @@ type decliningSILauncher struct {
 
 func (d decliningSILauncher) StartCommand(shellintegration.ShellKind, shellintegration.LaunchOptions) (string, shellintegration.RefusalReason, bool) {
 	return "", d.reason, false
+}
+
+// A launcher reason the ssh vocabulary does not know: the session still opens
+// as a usable plain shell, the wire carries the distinct "unknown" reason
+// (never the ReasonNone that renders as "integration succeeded"), the backend
+// does not panic, and the contradiction is shouted into the log — the
+// fail-open half of the tripwire that used to be a crash (ADR-0004:60).
+func TestRemoteLauncher_UnmappedReason_UnknownOnWire(t *testing.T) {
+	srv := startReachSSHServer(t)
+	logger, buf := captureAdapterLogs(t)
+	declining := &remoteLauncherAdapter{inner: decliningSILauncher{reason: shellintegration.RefusalReason("brand-new-reason")}, logger: logger}
+	_, conn := reachStack(t, srv, declining)
+
+	sid, reason := reachOpenSSH(t, conn, false)
+	if reason != "unknown" {
+		t.Errorf("shellIntegrationReason = %q, want %q", reason, "unknown")
+	}
+	if !strings.Contains(buf.String(), "unmapped refusal reason") {
+		t.Errorf("expected the loud unmapped-reason log, got:\n%s", buf.String())
+	}
+	srv.waitForShell(t, 10*time.Second)
+	if n := srv.execCount(); n != 0 {
+		t.Errorf("%d exec(s) sent despite the unmapped decline; want a plain shell", n)
+	}
+	reachWriteAndReadEcho(t, conn, sid)
+}
+
+// A launcher that accepts while naming a refusal: the adapter declines, the
+// claimed reason reaches the wire, and the session is still a usable plain
+// shell — the contradiction is shouted, never fatal (ADR-0004:60).
+func TestRemoteLauncher_AcceptedWithReason_DeclinesOnWire(t *testing.T) {
+	srv := startReachSSHServer(t)
+	logger, buf := captureAdapterLogs(t)
+	contradicting := &remoteLauncherAdapter{inner: contradictingSILauncher{}, logger: logger}
+	_, conn := reachStack(t, srv, contradicting)
+
+	sid, reason := reachOpenSSH(t, conn, false)
+	if reason != "unsupported-shell" {
+		t.Errorf("shellIntegrationReason = %q, want %q", reason, "unsupported-shell")
+	}
+	if !strings.Contains(buf.String(), "accepted while naming a refusal reason") {
+		t.Errorf("expected the loud contradiction log, got:\n%s", buf.String())
+	}
+	srv.waitForShell(t, 10*time.Second)
+	if n := srv.execCount(); n != 0 {
+		t.Errorf("%d exec(s) sent despite the contradicting launcher; want a plain shell", n)
+	}
+	reachWriteAndReadEcho(t, conn, sid)
+}
+
+// contradictingSILauncher is a scripted shellintegration.RemoteLauncher that
+// violates the StartCommand contract: ok=true while naming a refusal.
+type contradictingSILauncher struct{}
+
+func (contradictingSILauncher) StartCommand(shellintegration.ShellKind, shellintegration.LaunchOptions) (string, shellintegration.RefusalReason, bool) {
+	return "exec bash -i", shellintegration.ReasonUnsupportedShell, true
 }
