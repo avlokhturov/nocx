@@ -69,7 +69,6 @@ type captureWire struct {
 	EntryID       string        `json:"entryId"`
 	Redaction     redactionWire `json:"redaction"`
 	SuggestedName string        `json:"suggestedName"`
-	TTLMs         int64         `json:"ttlMs"`
 }
 
 // historyRecordResponse is the result of history.record: an ack that
@@ -284,7 +283,6 @@ func (s *WSServer) handleHistoryRecord(ctx context.Context, wconn *wsConn, state
 					EntryID:       entryID,
 					Redaction:     ack.Redactions[i],
 					SuggestedName: res.SuggestedName,
-					TTLMs:         credential.DefaultCaptureExpiry.Milliseconds(),
 				})
 			}
 		}

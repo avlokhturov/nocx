@@ -8,24 +8,36 @@
 //	A submitted credential awaiting a save decision is held only in
 //	backend process memory as a single-use pending capture; the renderer
 //	receives only an opaque capture id and non-secret display metadata. A
-//	pending capture is scoped to the originating tab, session, submitted
-//	history-entry id and command generation. It expires after 30 seconds
-//	and is destroyed immediately on save, dismissal, a superseding
-//	submission from that tab, tab or session closure, vault seal or app
-//	lock, transport disconnect, application shutdown, or history-record
-//	failure.
+//	pending capture is scoped to the originating tab, session and
+//	submitted history-entry id. It is destroyed immediately on save,
+//	dismissal, tab or session closure, vault seal or app lock, transport
+//	disconnect, application shutdown, or history-record failure.
 //
 //	Saving consumes the capture exactly once through an idempotent
-//	operation. Expiry or destruction leaves the already-written masked
-//	history entry unchanged. A save that races with lock or expiry either
-//	acquires the vault operation before the lock barrier and completes, or
-//	fails without creating a secret; the outcome must never depend on
-//	renderer timing. Pending plaintext must not enter DOM state, logs,
-//	telemetry, crash metadata, JSON responses or durable storage.
+//	operation. Destruction leaves the already-written masked history entry
+//	unchanged. A save that races with the lock either acquires the vault
+//	operation before the lock barrier and completes, or fails without
+//	creating a secret; the outcome must never depend on renderer timing.
+//	Pending plaintext must not enter DOM state, logs, telemetry, crash
+//	metadata, JSON responses or durable storage.
 //
-// The one deliberate exception: typing the next command must NOT destroy
-// the capture — people type immediately after Enter. Destruction is on the
-// next SUBMISSION from that tab.
+// Two clauses were in the brief and are deliberately NOT here, both removed
+// after the first round of real use (the owner's decision, 2026-08-03).
+//
+// There is no expiry timer. It bounded how long one credential sits in this
+// process's memory — while the same command sits in cleartext in the
+// shell's own history file on disk, which this product has decided not to
+// treat as a threat. What it bought in exchange was an offer that retired
+// itself while the user was still reading the output that came with it.
+//
+// And a superseding submission no longer destroys anything. Deciding about
+// a key is rarely the next thing you do — you run one more command to check
+// something, and under that rule the offer was gone for good. Several
+// unsaved captures can now be pending at once, one per block that has an
+// unanswered offer, and each lives until it is saved, dismissed, or one of
+// the real events above takes it. The cost is one credential in memory per
+// unanswered offer for the life of the tab, which is the trade this product
+// has already made everywhere else.
 //
 // Neither Go nor JS can promise physical erasure: a copied byte can
 // outlive the heap it came from, and the operating system owns the page
@@ -42,32 +54,13 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-	"time"
 
 	"github.com/shady2k/nocx/internal/content"
 )
 
-// DefaultCaptureExpiry is how long a pending capture lives before it is
-// destroyed.
-//
-// It was 30 seconds, chosen on paper, and in front of a user it was simply
-// too short: the offer arrives when the command finishes, the person is
-// still reading the output, and the receipt retires itself before they have
-// decided anything. An offer that expires while you are looking at it is
-// worse than no offer.
-//
-// Five minutes, because the real bound is not this timer. A capture is
-// destroyed by the next submission from that tab, by the tab closing, by
-// the vault sealing, by a transport drop and by shutdown — so in ordinary
-// use the plaintext lives exactly as long as the block it belongs to is the
-// newest one. This constant is the backstop for a terminal left open and
-// untouched, and five minutes of an idle process holding one credential in
-// memory is not the threat this feature exists to answer.
-const DefaultCaptureExpiry = 5 * time.Minute
-
 // ErrCaptureUnknown is returned when a save/dismiss addresses a capture
-// that is not pending or settled: expired, destroyed, or never minted.
-var ErrCaptureUnknown = errors.New("capture: unknown or expired")
+// that is not pending or settled: destroyed, or never minted.
+var ErrCaptureUnknown = errors.New("capture: unknown")
 
 // ErrCaptureConsumed is returned when a save addresses a dismissed capture
 // — the single-use token was spent by the dismissal.
@@ -181,7 +174,6 @@ type capture struct {
 	suggestedName string
 	scope         CaptureScope
 	links         []CaptureLink
-	expiresAt     time.Time
 	state         captureState
 
 	// done closes when the capture leaves pending: the settlement (saved,
@@ -210,8 +202,6 @@ type capture struct {
 type CaptureRegistry struct {
 	mu   sync.Mutex
 	key  []byte
-	now  func() time.Time
-	ttl  time.Duration
 	byID map[CaptureID]*capture
 	// byPending maps a fingerprint to its ONE pending capture, so a
 	// re-submission links instead of minting a second offer.
@@ -225,21 +215,16 @@ type CaptureRegistry struct {
 }
 
 // NewCaptureRegistry builds an empty registry with a fresh per-process
-// fingerprint key. now must be monotonic-safe for the caller's use (time.Now
-// in production; an injectable clock in tests). ttl is the capture lifetime;
-// pass DefaultCaptureExpiry in production.
-func NewCaptureRegistry(now func() time.Time, ttl time.Duration) (*CaptureRegistry, error) {
+// fingerprint key. There is no clock and no lifetime: a capture lives until
+// it is settled or one of the destruction events takes it (see the contract
+// at the top of this file).
+func NewCaptureRegistry() (*CaptureRegistry, error) {
 	key := make([]byte, 32)
 	if _, err := rand.Read(key); err != nil {
 		return nil, fmt.Errorf("capture registry: fingerprint key: %w", err)
 	}
-	if now == nil {
-		now = time.Now
-	}
 	return &CaptureRegistry{
 		key:       key,
-		now:       now,
-		ttl:       ttl,
 		byID:      make(map[CaptureID]*capture),
 		byPending: make(map[string]*capture),
 		saved:     make(map[string]string),
@@ -282,18 +267,6 @@ func (r *CaptureRegistry) SavedName(fingerprint string) (string, bool) {
 func (r *CaptureRegistry) Submit(scope CaptureScope, creds []PendingCredential) []RegisterResult {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.purgeExpiredLocked()
-
-	submitted := make(map[string]bool, len(creds))
-	for _, cred := range creds {
-		submitted[r.fingerprintLocked(cred.Value)] = true
-	}
-	for _, c := range r.byID {
-		if c.state == statePending && c.scope.Tab == scope.Tab &&
-			c.scope.Generation < scope.Generation && !submitted[c.fingerprint] {
-			r.destroyLocked(c)
-		}
-	}
 
 	results := make([]RegisterResult, 0, len(creds))
 	for _, cred := range creds {
@@ -342,7 +315,6 @@ func (r *CaptureRegistry) Submit(scope CaptureScope, creds []PendingCredential) 
 			suggestedName: cred.SuggestedName,
 			scope:         scope,
 			links:         []CaptureLink{{EntryID: scope.EntryID, Redaction: cred.Redaction}},
-			expiresAt:     r.now().Add(r.ttl),
 			state:         statePending,
 			done:          make(chan struct{}),
 		}
@@ -369,7 +341,7 @@ func (r *CaptureRegistry) Reserve(id CaptureID) (SaveHandle, error) {
 	for {
 		r.mu.Lock()
 		c, ok := r.byID[id]
-		if !ok || c.expired(r.now()) {
+		if !ok {
 			r.mu.Unlock()
 			return SaveHandle{}, ErrCaptureUnknown
 		}
@@ -503,28 +475,9 @@ func (r *CaptureRegistry) DestroyAll() {
 	}
 }
 
-// PurgeExpired destroys captures past their expiry. Expiry behaves like a
-// dismissal only in that the plaintext stops being reachable; it does NOT
-// suppress the value for the session — the next command re-offers what was
-// just ignored, because no decision was ever made. The transport calls this
-// on a ticker; Submit and Reserve also purge/check lazily.
-func (r *CaptureRegistry) PurgeExpired() {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.purgeExpiredLocked()
-}
-
-func (r *CaptureRegistry) purgeExpiredLocked() {
-	for _, c := range r.byID {
-		if c.state == statePending && c.expired(r.now()) {
-			r.destroyLocked(c)
-		}
-	}
-}
-
 // destroyLocked removes a pending capture entirely: the id is spent, the
 // value is released, waiters wake. The already-written masked history entry
-// is untouched — expiry and destruction never rewrite a row.
+// is untouched — destruction never rewrites a row.
 func (r *CaptureRegistry) destroyLocked(c *capture) {
 	delete(r.byID, c.id)
 	if r.byPending[c.fingerprint] == c {
@@ -532,10 +485,6 @@ func (r *CaptureRegistry) destroyLocked(c *capture) {
 	}
 	c.value = Secret{}
 	close(c.done)
-}
-
-func (c *capture) expired(now time.Time) bool {
-	return !now.Before(c.expiresAt)
 }
 
 func (r *CaptureRegistry) fingerprintLocked(value []byte) string {

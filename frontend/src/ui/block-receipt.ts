@@ -20,9 +20,12 @@
 //   - Hovering a row emphasises the corresponding chip in the block's
 //     command line (the host wires the highlight; the receipt only reports
 //     which row is under the pointer).
-//   - The capture dies after ttlMs. A button that silently becomes an
-//     error is worse than no button, so when the window closes the receipt
-//     retires itself with an honest line and no actions that could fail.
+//   - The receipt does not expire. It lives on its block until the offer is
+//     answered — Save or Dismiss — or until one of the real destruction
+//     events takes the capture with it (the tab closing, the vault sealing,
+//     the transport dropping, the app quitting). Several blocks can carry an
+//     unanswered receipt at once; deciding about a key is rarely the next
+//     thing anyone does.
 //
 // All controls are the kit's identities: ui-button, ui-text-field__input,
 // ui-badge. The receipt places them and never repaints them — its own CSS
@@ -36,9 +39,6 @@ export interface BlockReceiptCapture {
   readonly maskedValue: string
   /** The backend's suggested vault name, pre-filled. */
   readonly suggestedName: string
-  /** The capture's remaining lifetime, relative milliseconds — the
-   *  capture package's own constant on the wire. */
-  readonly ttlMs: number
 }
 
 export interface BlockReceiptCallbacks {
@@ -50,16 +50,9 @@ export interface BlockReceiptCallbacks {
   /** Hover moved between rows: emphasise that row's chip in the block
    *  (null = no row under the pointer). */
   onHover(captureId: string | null): void
-  /** The capture window closed: the receipt has retired itself. */
-  onExpired(): void
   /** Escape from inside the receipt: return focus to the editor. */
   onExitReview(): void
 }
-
-/** The receipt's retired state — the honest line when the capture window
- *  closed before a decision. */
-const EXPIRED_MESSAGE =
-  'The key is no longer held — the command stays stored masked. A key can still be added from Settings → Vault.'
 
 export class BlockReceipt {
   readonly root: HTMLElement
@@ -67,8 +60,6 @@ export class BlockReceipt {
   private readonly rows: Map<string, { rowEl: HTMLElement; input: HTMLInputElement }> = new Map()
   private readonly primaryBtn: HTMLButtonElement
   private readonly actionsEl: HTMLElement
-  private expireTimer: ReturnType<typeof setTimeout> | null = null
-  private _expired = false
 
   constructor(captures: ReadonlyArray<BlockReceiptCapture>, callbacks: BlockReceiptCallbacks) {
     this.callbacks = callbacks
@@ -91,14 +82,6 @@ export class BlockReceipt {
     this.actionsEl.appendChild(this.primaryBtn)
     this.root.appendChild(this.actionsEl)
     this.updatePrimaryLabel()
-
-    // The capture window: relative on the wire, so a clock cannot be
-    // wrong about it. The registry mints one submission's captures
-    // together, so the first capture's ttl is the receipt's.
-    const ttlMs = captures[0]?.ttlMs ?? 0
-    if (ttlMs > 0) {
-      this.expireTimer = setTimeout(() => this.expire(), ttlMs)
-    }
 
     // Escape returns focus to the editor; ⌘S performs the primary action.
     // Only reachable while focus is INSIDE the receipt — the editor's own
@@ -123,13 +106,8 @@ export class BlockReceipt {
     container.appendChild(this.root)
   }
 
-  get isExpired(): boolean {
-    return this._expired
-  }
-
   /** The primary action: collect the current names and hand them over. */
   saveAll(): void {
-    if (this._expired) return
     const rows: Array<{ captureId: string; name: string }> = []
     for (const [captureId, row] of this.rows) {
       rows.push({ captureId, name: row.input.value.trim() })
@@ -138,17 +116,21 @@ export class BlockReceipt {
   }
 
   /** A row saved cleanly: remove it. The primary label recomputes; when
-   *  the last row goes, so does the receipt (the toast already said so). */
-  removeRow(captureId: string): void {
+   *  the last row goes, so does the receipt (the toast already said so).
+   *  Returns true once the receipt is empty, so the host can forget it —
+   *  otherwise a destroyed receipt stays in the host's map and keeps being
+   *  offered the save chord. */
+  removeRow(captureId: string): boolean {
     const row = this.rows.get(captureId)
-    if (!row) return
+    if (!row) return this.rows.size === 0
     row.rowEl.remove()
     this.rows.delete(captureId)
     if (this.rows.size === 0) {
       this.destroy()
-      return
+      return true
     }
     this.updatePrimaryLabel()
+    return false
   }
 
   /** A row's save failed (or is partial): show the message on the row and
@@ -167,31 +149,12 @@ export class BlockReceipt {
 
   /** ⇧⌘S: review mode — focus the first row's name field. */
   enterReview(): void {
-    if (this._expired) return
     const first = this.rows.values().next().value as { input: HTMLInputElement } | undefined
     first?.input.focus()
   }
 
   destroy(): void {
-    if (this.expireTimer !== null) {
-      clearTimeout(this.expireTimer)
-      this.expireTimer = null
-    }
     this.root.remove()
-  }
-
-  /** The window closed: retire the receipt — the honest line, no actions
-   *  that could fail. */
-  private expire(): void {
-    if (this._expired) return
-    this._expired = true
-    this.expireTimer = null
-    this.root.replaceChildren()
-    const message = document.createElement('div')
-    message.className = 'ui-block-receipt__expired'
-    message.textContent = EXPIRED_MESSAGE
-    this.root.appendChild(message)
-    this.callbacks.onExpired()
   }
 
   private buildRow(capture: BlockReceiptCapture): HTMLElement {

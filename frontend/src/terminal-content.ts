@@ -115,12 +115,20 @@ export class TerminalContent extends BaseTabContent {
    *  dispatcher — the sealed-access seam it carries is already installed at
    *  the app root). */
   private vault: VaultClient | null = null
-  /** The after-submit capture receipt attached to its frozen block, plus
-   *  the block it lives in. One receipt at a time: a superseding
-   *  submission destroys the previous command's captures on the backend,
-   *  so its receipt is retired the moment a new command is submitted. */
+  /** The after-submit capture receipts, keyed by the frozen block each one
+   *  is mounted in. Several can be open at once: an offer lives until it is
+   *  answered, and deciding about a key is rarely the next thing anyone
+   *  does — you run one more command first, and under the old
+   *  one-at-a-time rule that lost the offer for good.
+   *
+   *  `receipt` is the newest of them: the one ⌘S acts on and the one the
+   *  focus-bounce yields to. */
+  private readonly receipts = new Map<HTMLElement, BlockReceipt>()
   private receipt: BlockReceipt | null = null
   private receiptBlockEl: HTMLElement | null = null
+  /** Capture id → the block its receipt is mounted in, so a hover
+   *  emphasises the chip in the RIGHT block when several are open. */
+  private readonly receiptChipBlocks = new Map<string, HTMLElement>()
   /** Ledger record id → the block record captured at onComplete time (the
    *  same object freezeBlock mutates in place). The ack is an async round
    *  trip, so by the time it resolves the block is frozen — but the user
@@ -383,10 +391,10 @@ export class TerminalContent extends BaseTabContent {
           submit: (doc: string, plan?: SubmitPlan) => {
             const recordLine = plan?.recordLine ?? doc
             this._pendingCommand = recordLine
-            // A superseding submission destroys the previous command's
-            // pending captures on the backend: retire its receipt now,
-            // before the new command's own ack can attach one.
-            this.destroyReceipt()
+            // The previous command's receipt is deliberately LEFT alone.
+            // Submitting again used to destroy its capture on the backend
+            // and retire the receipt here, which meant that running one
+            // more command before deciding lost the offer for good.
             if (this.ledger) {
               let markerLine: () => number | undefined = () => undefined
               const rec = this.ledger.open(recordLine, this._cwd, this._host, () => markerLine())
@@ -448,11 +456,9 @@ export class TerminalContent extends BaseTabContent {
            *  for review. Returns whether anything was triggered (the editor
            *  consumes the chord either way). */
           onSave: (shift) => {
-            // An EXPIRED receipt is still held (its retired line has to be
-            // removable), but it has no action left — the chord must fall
-            // through to the composition-time candidate rather than being
-            // swallowed by a receipt that can no longer save anything.
-            if (this.receipt && !this.receipt.isExpired) {
+            // The chord acts on the NEWEST unanswered receipt; with none
+            // open it falls through to the composition-time candidate.
+            if (this.receipt) {
               if (shift) this.receipt.enterReview()
               else this.receipt.saveAll()
               return true
@@ -1272,12 +1278,15 @@ export class TerminalContent extends BaseTabContent {
       renderRecordedCommand(blockEl, ack.maskedCommand, ack.redactions)
     }
     if (ack.captures.length === 0) return
-    this.destroyReceipt()
+    // One receipt per block: a re-recorded block replaces its own, never
+    // anybody else's.
+    this.receipts.get(blockEl)?.destroy()
     this.receiptBlockEl = blockEl
     for (const c of ack.captures) {
       this.receiptChipSpans.set(c.id, { start: c.redaction.start, end: c.redaction.end })
+      this.receiptChipBlocks.set(c.id, blockEl)
     }
-    this.receipt = new BlockReceipt(
+    const receipt = new BlockReceipt(
       ack.captures.map((c) => ({
         captureId: c.id,
         kindLabel: KIND_LABELS[c.redaction.kind],
@@ -1286,35 +1295,43 @@ export class TerminalContent extends BaseTabContent {
             ? `${c.redaction.prefix}...${c.redaction.suffix}`
             : '***',
         suggestedName: c.suggestedName,
-        ttlMs: c.ttlMs,
       })),
       {
-        onSaveAll: (rows) => void this.saveReceiptRows(this.receipt!, rows),
-        onDismiss: (captureId) => void this.dismissReceiptRow(this.receipt!, captureId),
+        onSaveAll: (rows) => void this.saveReceiptRows(receipt, blockEl, rows),
+        onDismiss: (captureId) => void this.dismissReceiptRow(receipt, blockEl, captureId),
         onHover: (captureId) => this.emphasiseChip(captureId),
-        onExpired: () => {
-          // The view retired itself with the honest line and there is
-          // nothing owed to the backend any more — but the reference is
-          // KEPT. Nulling it here orphaned the retired element: nothing
-          // held it, so the line "the key is no longer held" stayed in the
-          // transcript for the rest of the session, above every command
-          // that followed. destroyReceipt at the next submission is what
-          // takes it away, and it needs something to take away.
-          this.receiptChipSpans.clear()
-        },
         onExitReview: () => this.editor?.focus(),
       },
     )
-    this.receipt.mount(blockEl)
+    this.receipts.set(blockEl, receipt)
+    this.receipt = receipt
+    receipt.mount(blockEl)
   }
 
-  /** Retire the live receipt, if any (a superseding submission destroys
-   *  its captures on the backend; the tab's dispose path does the same). */
+  /** A receipt is finished with (every row saved or dismissed): forget it,
+   *  and hand `receipt` to whichever one is still open, newest first. */
+  private retireReceipt(blockEl: HTMLElement): void {
+    this.receipts.delete(blockEl)
+    if (this.receiptBlockEl === blockEl) this.receiptBlockEl = null
+    let newest: BlockReceipt | null = null
+    let newestEl: HTMLElement | null = null
+    for (const [el, r] of this.receipts) {
+      newest = r
+      newestEl = el
+    }
+    this.receipt = newest
+    if (this.receiptBlockEl === null) this.receiptBlockEl = newestEl
+  }
+
+  /** Tear every receipt down — the tab is going away, and the backend
+   *  destroys its captures on the same event. */
   private destroyReceipt(): void {
-    this.receipt?.destroy()
+    for (const r of this.receipts.values()) r.destroy()
+    this.receipts.clear()
     this.receipt = null
     this.receiptBlockEl = null
     this.receiptChipSpans.clear()
+    this.receiptChipBlocks.clear()
   }
 
   /** The receipt's primary action: settle every row still in play. The
@@ -1324,6 +1341,7 @@ export class TerminalContent extends BaseTabContent {
    *  sent. */
   private async saveReceiptRows(
     receipt: BlockReceipt,
+    blockEl: HTMLElement,
     rows: ReadonlyArray<{ captureId: string; name: string }>,
   ): Promise<void> {
     // Saving into a vault that does not exist yet cannot work, and the
@@ -1349,7 +1367,7 @@ export class TerminalContent extends BaseTabContent {
           continue
         }
         showToast({ level: 'success', message: `Stored "${res.name}" in the vault.` })
-        receipt.removeRow(row.captureId)
+        if (receipt.removeRow(row.captureId)) this.retireReceipt(blockEl)
       } catch {
         showToast({
           level: 'danger',
@@ -1400,11 +1418,15 @@ export class TerminalContent extends BaseTabContent {
 
   /** A row's drop control: dismiss that capture (and suppress its
    *  fingerprint for the session). A failed dismiss keeps the row. */
-  private async dismissReceiptRow(receipt: BlockReceipt, captureId: string): Promise<void> {
+  private async dismissReceiptRow(
+    receipt: BlockReceipt,
+    blockEl: HTMLElement,
+    captureId: string,
+  ): Promise<void> {
     if (!this.vault) return
     try {
       await this.vault.captureDismiss(captureId)
-      receipt.removeRow(captureId)
+      if (receipt.removeRow(captureId)) this.retireReceipt(blockEl)
     } catch {
       showToast({
         level: 'danger',
@@ -1418,7 +1440,8 @@ export class TerminalContent extends BaseTabContent {
    *  (data-redaction-start/end), stamped by renderRecordedCommand; the
    *  receipt row carries the capture id, mapped back here to the span. */
   private emphasiseChip(captureId: string | null): void {
-    const blockEl = this.receiptBlockEl
+    const blockEl =
+      captureId === null ? this.receiptBlockEl : (this.receiptChipBlocks.get(captureId) ?? null)
     if (!blockEl) return
     const span = captureId === null ? undefined : this.receiptChipSpans.get(captureId)
     const chips = blockEl.querySelectorAll<HTMLElement>('.ui-secret-chip[data-redaction-start]')

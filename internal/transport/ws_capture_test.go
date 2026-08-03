@@ -141,7 +141,7 @@ func (f *captureFakeDB) Query(_ context.Context, scope content.Scope, cwd, host 
 // name is fixed so the tests can assert what the save actually used.
 func newCaptureWSServer(t *testing.T, db *captureFakeDB, clock *time.Time) (*WSServer, *fakeVaultLifecycle, func()) {
 	t.Helper()
-	caps, err := credential.NewCaptureRegistry(func() time.Time { return *clock }, credential.DefaultCaptureExpiry)
+	caps, err := credential.NewCaptureRegistry()
 	if err != nil {
 		t.Fatalf("NewCaptureRegistry: %v", err)
 	}
@@ -153,6 +153,26 @@ func newCaptureWSServer(t *testing.T, db *captureFakeDB, clock *time.Time) (*WSS
 		t.Fatalf("Start: %v", err)
 	}
 	return ws, fv, func() { _ = ws.Stop(ctx) }
+}
+
+// Same server, handing back the registry instead of the vault fake — the
+// tests that need to trigger a destruction event directly.
+func newCaptureWSServerWithRegistry(
+	t *testing.T, db *captureFakeDB, clock *time.Time,
+) (*WSServer, *credential.CaptureRegistry, func()) {
+	t.Helper()
+	caps, err := credential.NewCaptureRegistry()
+	if err != nil {
+		t.Fatalf("NewCaptureRegistry: %v", err)
+	}
+	fv := &fakeVaultLifecycle{resolvedName: "openrouter.ai", createNamedID: "sec:v1:file:abc123"}
+	opts := []WSServerOption{WithContentDB(db), WithVaultLifecycle(fv), WithCaptureRegistry(caps)}
+	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)), opts...)
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	return ws, caps, func() { _ = ws.Stop(ctx) }
 }
 
 type recordAck struct {
@@ -341,13 +361,14 @@ func TestHistoryRecord_CaptureSaveRetryIsIdempotent(t *testing.T) {
 	}
 }
 
-// TestHistoryRecord_ExpiredCaptureSavesNothing: the capture expires, the
-// save is refused, and the row keeps its structured redaction — a masked
-// history entry is never left pointing at a half-save.
-func TestHistoryRecord_ExpiredCaptureSavesNothing(t *testing.T) {
+// TestHistoryRecord_DestroyedCaptureSavesNothing: the capture is destroyed
+// (here by the transport-wide destruction the contract lists), the save is
+// refused, and the row keeps its structured redaction — a masked history
+// entry is never left pointing at a half-save.
+func TestHistoryRecord_DestroyedCaptureSavesNothing(t *testing.T) {
 	clock := time.Unix(1_750_000_000, 0)
 	db := newCaptureFakeDB()
-	ws, _, stop := newCaptureWSServer(t, db, &clock)
+	ws, caps, stop := newCaptureWSServerWithRegistry(t, db, &clock)
 	defer stop()
 	conn := connectWS(t, ws)
 	defer func() { _ = conn.Close() }()
@@ -358,13 +379,13 @@ func TestHistoryRecord_ExpiredCaptureSavesNothing(t *testing.T) {
 		t.Fatalf("redactions = %+v, want the structured segment", ack.Redactions)
 	}
 
-	clock = clock.Add(credential.DefaultCaptureExpiry + time.Second)
+	caps.DestroyAll()
 	resp := vaultCall(t, conn, "secrets.captureSave", map[string]any{"captureId": capID}, 2)
 	if resp.Error == nil {
-		t.Fatal("save of an expired capture must fail")
+		t.Fatal("save of a destroyed capture must fail")
 	}
 	if resp.Error.Code != -32010 {
-		t.Errorf("error code = %d, want -32010 (capture-expired)", resp.Error.Code)
+		t.Errorf("error code = %d, want -32010 (capture unknown)", resp.Error.Code)
 	}
 	// The masked row is untouched: the redaction segment is still there.
 	recs, err := db.List(context.Background(), 10)
@@ -372,7 +393,7 @@ func TestHistoryRecord_ExpiredCaptureSavesNothing(t *testing.T) {
 		t.Fatalf("list: %v", err)
 	}
 	if len(recs) != 1 || len(recs[0].Redactions) != 1 {
-		t.Fatalf("row after expired save = %+v, want the structured redaction intact", recs)
+		t.Fatalf("row after refused save = %+v, want the structured redaction intact", recs)
 	}
 	if !strings.Contains(recs[0].Command, "TOKEN=abcd...3456") {
 		t.Errorf("command = %q, want the masked form", recs[0].Command)
@@ -455,35 +476,12 @@ func TestHistoryRecord_AlreadyPendingLinks(t *testing.T) {
 	}
 }
 
-// TestHistoryRecord_SupersedingSubmissionDestroysOlderCapture: a new
-// submission from the same tab destroys the previous pending capture.
-func TestHistoryRecord_SupersedingSubmissionDestroysOlderCapture(t *testing.T) {
-	clock := time.Unix(1_750_000_000, 0)
-	db := newCaptureFakeDB()
-	ws, _, stop := newCaptureWSServer(t, db, &clock)
-	defer stop()
-	conn := connectWS(t, ws)
-	defer func() { _ = conn.Close() }()
-
-	ack1 := recordAndDecode(t, conn, "TOKEN=abcdefghijklmnopqrstuvwxyz123456", 1)
-	recordAndDecode(t, conn, `curl -H "Authorization: Bearer sk-proj-abcdef1234567890" https://api`, 2)
-
-	resp := vaultCall(t, conn, "secrets.captureSave", map[string]any{"captureId": ack1.Captures[0].ID}, 3)
-	if resp.Error == nil || resp.Error.Code != -32010 {
-		t.Fatalf("save of a superseded capture = %+v, want -32010 (unknown/expired)", resp.Error)
-	}
-}
-
-// TestHistoryRecord_OrdinarySubmissionSupersedesToo: the next command
-// destroys the pending capture even when it carries no credential of its
-// own — which is the ordinary case and the one that was broken.
-//
-// The registry's supersede step is the first thing Submit does, and the
-// call was gated on the new command having credentials. So `ls` after a
-// curl left the previous key pending, and the plaintext lived until the
-// expiry timer instead of until the person moved on. The sibling test
-// above missed it precisely because its second command carries a key.
-func TestHistoryRecord_OrdinarySubmissionSupersedesToo(t *testing.T) {
+// TestHistoryRecord_LaterSubmissionsLeaveOlderCapturesAlone: an offer waits
+// to be answered. It used to die at the next submission, which meant that
+// running one more command before deciding — the ordinary thing to do —
+// lost it for good. Both shapes of "next command" are exercised: one
+// carrying its own key, and one carrying none.
+func TestHistoryRecord_LaterSubmissionsLeaveOlderCapturesAlone(t *testing.T) {
 	clock := time.Unix(1_750_000_000, 0)
 	db := newCaptureFakeDB()
 	ws, _, stop := newCaptureWSServer(t, db, &clock)
@@ -495,11 +493,12 @@ func TestHistoryRecord_OrdinarySubmissionSupersedesToo(t *testing.T) {
 	if len(ack1.Captures) != 1 {
 		t.Fatalf("ack1 captures = %d, want the one offer", len(ack1.Captures))
 	}
-	recordAndDecode(t, conn, "ls -la", 2)
+	recordAndDecode(t, conn, `curl -H "Authorization: Bearer sk-proj-abcdef1234567890" https://api`, 2)
+	recordAndDecode(t, conn, "ls -la", 3)
 
-	resp := vaultCall(t, conn, "secrets.captureSave", map[string]any{"captureId": ack1.Captures[0].ID}, 3)
-	if resp.Error == nil || resp.Error.Code != -32010 {
-		t.Fatalf("save after an ordinary next command = %+v, want -32010 (unknown/expired)", resp.Error)
+	resp := vaultCall(t, conn, "secrets.captureSave", map[string]any{"captureId": ack1.Captures[0].ID}, 4)
+	if resp.Error != nil {
+		t.Fatalf("save after two later commands = %+v, want the offer still answerable", resp.Error)
 	}
 }
 

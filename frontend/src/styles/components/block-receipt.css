@@ -45,8 +45,3 @@
   display: flex;
   justify-content: flex-end;
 }
-
-.ui-block-receipt__expired {
-  font-size: var(--font-size-sm);
-  color: var(--color-text-muted);
-}

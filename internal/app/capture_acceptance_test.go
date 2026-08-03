@@ -3,7 +3,8 @@ package app
 // The capture round's acceptance over the REAL composition root and the
 // real socket (the brief's words): submit a command carrying a key, get a
 // capture id back, save it, and read the history row as a reference — then
-// repeat with the capture expired and read it as a structured redaction.
+// then leave a second offer unanswered while other commands run, and
+// answer it afterwards — the offer waits.
 // The vault is set up with a passphrase (no keystore on this host), so the
 // save path runs against the real file provider and the real encrypted
 // content store.
@@ -17,7 +18,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-func TestCapture_SaveAndExpiryOverTheRealSocket(t *testing.T) {
+func TestCapture_SaveNowAndSaveLaterOverTheRealSocket(t *testing.T) {
 	cfgHome := t.TempDir()
 	dataHome := t.TempDir()
 	cacheHome := t.TempDir()
@@ -129,15 +130,12 @@ func TestCapture_SaveAndExpiryOverTheRealSocket(t *testing.T) {
 		t.Errorf("row redactions = %+v, want the saved segment gone", page.Entries[0].Redactions)
 	}
 
-	// ── leg 2: a key whose capture dies before it is saved ───────────────
-	// A second submission from the same tab supersedes only PENDING
-	// captures; the saved one above is settled and untouched.
-	//
-	// This leg used to wait out the real expiry — 32 seconds of wall clock
-	// in the suite for a timer whose behaviour internal/credential already
-	// pins with an injected clock. It asserts the same thing through the
-	// destruction path a person actually triggers: submit the next command,
-	// and the previous command's pending capture is gone.
+	// ── leg 2: an offer left unanswered while work carries on ────────────
+	// The offer waits. It used to die at the next submission and, before
+	// that, on a 30-second timer; both cost the decision, because deciding
+	// about a key is rarely the next thing anyone does. Two more commands
+	// run here — one carrying its own key, one carrying none — and the
+	// first offer is still answerable afterwards.
 	record2 := callAppWS(t, conn, "history.record", map[string]any{
 		"command": "TOKEN=abcdefghijklmnopqrstuvwxyz123456 ./run.sh",
 		"cwd":     "/srv", "host": "", "status": "success", "exitCode": 0,
@@ -163,7 +161,7 @@ func TestCapture_SaveAndExpiryOverTheRealSocket(t *testing.T) {
 		t.Fatalf("ack2 = %+v, want one capture and one structured redaction", ack2)
 	}
 
-	// The next command from the same tab: leg 2's capture is superseded.
+	// Ordinary work carries on in the same tab.
 	record3 := callAppWS(t, conn, "history.record", map[string]any{
 		"command": "echo done",
 		"cwd":     "/srv", "host": "", "status": "success", "exitCode": 0,
@@ -173,16 +171,13 @@ func TestCapture_SaveAndExpiryOverTheRealSocket(t *testing.T) {
 		t.Fatalf("history.record (leg 3): %+v", record3.Error)
 	}
 
-	expired := callAppWS(t, conn, "secrets.captureSave", map[string]any{"captureId": ack2.Captures[0].ID}, 6)
-	if expired.Error == nil {
-		t.Fatal("save of a destroyed capture must fail")
-	}
-	if expired.Error.Code != -32010 {
-		t.Errorf("expired save code = %d, want -32010 (capture-expired)", expired.Error.Code)
+	still := callAppWS(t, conn, "secrets.captureSave", map[string]any{"captureId": ack2.Captures[0].ID}, 6)
+	if still.Error != nil {
+		t.Fatalf("save after later commands = %+v, want the offer still answerable", still.Error)
 	}
 
-	// The row still carries the structured redaction — expiry never
-	// rewrites a masked history entry.
+	// And the row that was saved through the offer now reads as a
+	// reference, with the structured redaction gone.
 	q2 := callAppWS(t, conn, "history.query", map[string]any{
 		"scope": "directory", "cwd": "/srv", "host": "", "limit": 50,
 	}, 7)
@@ -203,7 +198,7 @@ func TestCapture_SaveAndExpiryOverTheRealSocket(t *testing.T) {
 	if err := json.Unmarshal(q2.Result, &page2); err != nil {
 		t.Fatalf("decode query2: %v", err)
 	}
-	var expiredRow *struct {
+	var lateRow *struct {
 		Command     string `json:"command"`
 		MaskedCount int    `json:"maskedCount"`
 		Redactions  []struct {
@@ -214,21 +209,24 @@ func TestCapture_SaveAndExpiryOverTheRealSocket(t *testing.T) {
 	}
 	for i := range page2.Entries {
 		if strings.HasPrefix(page2.Entries[i].Command, "TOKEN=") {
-			expiredRow = &page2.Entries[i]
+			lateRow = &page2.Entries[i]
 			break
 		}
 	}
-	if expiredRow == nil {
+	if lateRow == nil {
 		t.Fatal("the leg-2 row is missing from history")
 	}
-	if !strings.Contains(expiredRow.Command, "TOKEN=abcd...3456") {
-		t.Errorf("leg-2 command = %q, want the masked form", expiredRow.Command)
+	// Answered late, and the answer landed: the row reads as a reference and
+	// its structured redaction is gone, exactly as leg 1's did — two
+	// unrelated commands having run in between changes nothing.
+	if !strings.Contains(lateRow.Command, "{{secret:") {
+		t.Errorf("leg-2 command = %q, want the vault reference after the late save", lateRow.Command)
 	}
-	if len(expiredRow.Redactions) != 1 || expiredRow.Redactions[0].Kind != "env-assignment" {
-		t.Errorf("leg-2 redactions = %+v, want the structured segment (kind env-assignment)", expiredRow.Redactions)
+	if strings.Contains(lateRow.Command, "abcdefghijklmnopqrstuvwxyz123456") {
+		t.Errorf("leg-2 command carries the raw value: %q", lateRow.Command)
 	}
-	if expiredRow.Redactions[0].Prefix != "abcd" || expiredRow.Redactions[0].Suffix != "3456" {
-		t.Errorf("leg-2 prefix/suffix = %q/%q, want the mask's head/tail", expiredRow.Redactions[0].Prefix, expiredRow.Redactions[0].Suffix)
+	if len(lateRow.Redactions) != 0 {
+		t.Errorf("leg-2 redactions = %+v, want the saved segment gone", lateRow.Redactions)
 	}
 }
 

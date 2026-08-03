@@ -50,10 +50,6 @@ export interface HistoryRecord {
      * The backend-derived vault name the offer suggests: the host of the command invocation containing the credential, else the environment variable name, else the kind. The renderer may edit it; the vault resolves collisions and the real name comes back on save.
      */
     suggestedName: string
-    /**
-     * How long the capture stays alive, relative milliseconds from the ack — the capture package's own constant on the wire, so the renderer never hardcodes a duplicate lifetime. The receipt retires itself when the window closes.
-     */
-    ttlMs: number
   }[]
 }
 export interface Redaction {

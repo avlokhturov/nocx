@@ -445,7 +445,6 @@ func TestHistoryRecord_DTOConformsToContract(t *testing.T) {
 				ID: "cap_abc", EntryID: "7",
 				Redaction:     redactionWire{Kind: "openai", Start: 10, End: 21, Prefix: "sk-p", Suffix: "7890"},
 				SuggestedName: "openrouter.ai",
-				TTLMs:         30_000,
 			}},
 		},
 	}
@@ -485,7 +484,8 @@ func TestHistoryRecord_OverTheWireConformsToContract(t *testing.T) {
 		MaskedKinds   []string `json:"maskedKinds"`
 		MaskedCommand string   `json:"maskedCommand"`
 		Captures      []struct {
-			TTLMs int64 `json:"ttlMs"`
+			ID            string `json:"id"`
+			SuggestedName string `json:"suggestedName"`
 		} `json:"captures"`
 	}
 	if err := json.Unmarshal(resp.Result, &got); err != nil {
@@ -500,8 +500,8 @@ func TestHistoryRecord_OverTheWireConformsToContract(t *testing.T) {
 	if strings.Contains(got.MaskedCommand, "sk-proj-abcdef1234567890") {
 		t.Errorf("maskedCommand carries the raw key: %q", got.MaskedCommand)
 	}
-	if len(got.Captures) != 1 || got.Captures[0].TTLMs <= 0 {
-		t.Errorf("captures = %+v, want one offer with the registry's ttlMs populated", got.Captures)
+	if len(got.Captures) != 1 || got.Captures[0].ID == "" || got.Captures[0].SuggestedName == "" {
+		t.Errorf("captures = %+v, want one offer carrying its id and suggested name", got.Captures)
 	}
 	recs, listErr := db.List(context.Background(), 1)
 	if listErr != nil {

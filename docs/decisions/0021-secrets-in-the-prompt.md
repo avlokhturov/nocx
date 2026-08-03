@@ -66,9 +66,30 @@ left as literal text.
 never the renderer.** The offer moves to AFTER submit: the backend receives
 the command at the history-write seam, holds the plaintext as a single-use
 pending capture in process memory, and hands the renderer an opaque capture
-id plus non-secret display metadata. The full contract (expiry, destruction
+id plus non-secret display metadata. The full contract (destruction
 triggers, idempotent single-use save, fingerprint suppression) is pasted
-into `internal/credential/capture.go`. Saving is two stores in one order —
+into `internal/credential/capture.go`.
+
+**A pending capture has no lifetime of its own** (amended 2026-08-03, after
+the first round of real use). Round 1 gave it a 30-second expiry and killed
+it at the next submission from that tab. Both were wrong, and for the same
+reason: what they bounded was how long one credential sits in this
+process's memory, while the same command sits in cleartext in the shell's
+own history file on disk — which this ADR has already measured and decided
+not to treat as a threat. What they cost was the decision itself. The
+offer arrives when the command finishes, the person is still reading the
+output it produced, and thirty seconds later it retired itself; and
+deciding about a key is rarely the next thing anyone does, so running one
+more command to check something lost the offer for good.
+
+So a capture now lives until it is saved, dismissed, or one of the real
+events takes it: the tab or session closing, the vault sealing, the
+transport dropping, the application quitting, or the history record
+failing. Several can be pending at once — one per block with an unanswered
+offer — and the cost is one credential in memory per unanswered offer for
+the life of the tab. That is the trade this product has already made
+everywhere else, and unlike a timer it is a boundary the user can see: the
+offer sits on its block until they answer it. Saving is two stores in one order —
 create the vault secret (name collisions resolved atomically in the vault,
 the real name comes back), then rewrite the linked history rows by stable
 id — and a partial failure keeps the secret, leaves history safely masked,

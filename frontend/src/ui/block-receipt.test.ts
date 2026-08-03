@@ -15,7 +15,6 @@ function capture(overrides: Partial<BlockReceiptCapture> = {}): BlockReceiptCapt
     kindLabel: 'OpenAI key',
     maskedValue: 'sk-p...7890',
     suggestedName: 'openrouter.ai',
-    ttlMs: 30_000,
     ...overrides,
   }
 }
@@ -30,7 +29,6 @@ function mount(
     onSaveAll: ReturnType<typeof vi.fn>
     onDismiss: ReturnType<typeof vi.fn>
     onHover: ReturnType<typeof vi.fn>
-    onExpired: ReturnType<typeof vi.fn>
     onExitReview: ReturnType<typeof vi.fn>
   }
 } {
@@ -43,7 +41,6 @@ function makeReceipt(
     onSaveAll: (rows: ReadonlyArray<{ captureId: string; name: string }>) => void
     onDismiss: (captureId: string) => void
     onHover: (captureId: string | null) => void
-    onExpired: () => void
     onExitReview: () => void
   }>,
 ): {
@@ -53,7 +50,6 @@ function makeReceipt(
     onSaveAll: ReturnType<typeof vi.fn>
     onDismiss: ReturnType<typeof vi.fn>
     onHover: ReturnType<typeof vi.fn>
-    onExpired: ReturnType<typeof vi.fn>
     onExitReview: ReturnType<typeof vi.fn>
   }
 } {
@@ -61,14 +57,12 @@ function makeReceipt(
     onSaveAll: vi.fn(),
     onDismiss: vi.fn(),
     onHover: vi.fn(),
-    onExpired: vi.fn(),
     onExitReview: vi.fn(),
   }
   const receipt = new BlockReceipt(captures, {
     onSaveAll: callbacks.onSaveAll ?? calls.onSaveAll,
     onDismiss: callbacks.onDismiss ?? calls.onDismiss,
     onHover: callbacks.onHover ?? calls.onHover,
-    onExpired: callbacks.onExpired ?? calls.onExpired,
     onExitReview: callbacks.onExitReview ?? calls.onExitReview,
   })
   const container = document.createElement('div')
@@ -185,23 +179,25 @@ describe('BlockReceipt: the kit contract', () => {
     expect(document.activeElement).toBe(container.querySelector('.ui-text-field__input'))
   })
 
-  it('after ttlMs the receipt retires itself: the honest line, no actions that could fail', () => {
+  // The offer used to retire itself on a timer, and in front of a user it
+  // expired while they were still reading the output the command had just
+  // produced. There is no timer now: the receipt waits for an answer.
+  it('does not retire itself over time — the offer waits for an answer', () => {
     vi.useFakeTimers()
-    const { container, calls } = mount([capture({ ttlMs: 100 })])
-    vi.advanceTimersByTime(150)
-    expect(calls.onExpired).toHaveBeenCalledTimes(1)
-    expect(container.querySelector('.ui-block-receipt__expired')).not.toBeNull()
-    expect(container.querySelector('.ui-block-receipt__row')).toBeNull()
-    expect(container.querySelector('button')).toBeNull()
-    expect(container.textContent).toContain('no longer held')
+    const { receipt, container, calls } = mount([capture()])
+    vi.advanceTimersByTime(10 * 60_000)
+    expect(container.querySelector('.ui-block-receipt__row')).not.toBeNull()
+    receipt.saveAll()
+    expect(calls.onSaveAll).toHaveBeenCalledTimes(1)
+    vi.useRealTimers()
   })
 
-  it('after expiry the primary action is a no-op: no row is handed over', () => {
-    vi.useFakeTimers()
-    const { receipt, container, calls } = mount([capture({ ttlMs: 100 })])
-    vi.advanceTimersByTime(150)
-    container.querySelectorAll('button').forEach((b) => b.click())
-    receipt.saveAll()
-    expect(calls.onSaveAll).not.toHaveBeenCalled()
+  // The host keeps its receipts in a map keyed by block; a receipt that has
+  // destroyed itself must say so, or it stays in that map and keeps being
+  // handed the save chord.
+  it('reports emptiness when its last row goes, and not before', () => {
+    const { receipt } = mount([capture(), capture({ captureId: 'cap_2' })])
+    expect(receipt.removeRow('cap_1')).toBe(false)
+    expect(receipt.removeRow('cap_2')).toBe(true)
   })
 })

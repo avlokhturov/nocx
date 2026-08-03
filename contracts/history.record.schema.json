@@ -36,7 +36,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "entryId", "redaction", "suggestedName", "ttlMs"],
+        "required": ["id", "entryId", "redaction", "suggestedName"],
         "properties": {
           "id": {
             "description": "Opaque capture id. Holding it is the only way to save or dismiss the capture; it carries no secret material.",
@@ -50,11 +50,6 @@
           "suggestedName": {
             "description": "The backend-derived vault name the offer suggests: the host of the command invocation containing the credential, else the environment variable name, else the kind. The renderer may edit it; the vault resolves collisions and the real name comes back on save.",
             "type": "string"
-          },
-          "ttlMs": {
-            "description": "How long the capture stays alive, relative milliseconds from the ack — the capture package's own constant on the wire, so the renderer never hardcodes a duplicate lifetime. The receipt retires itself when the window closes.",
-            "type": "integer",
-            "minimum": 0
           }
         }
       }

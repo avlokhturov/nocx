@@ -520,7 +520,11 @@ describe('the receipt save semantics', () => {
     }
   })
 
-  it('after ttlMs the receipt retires itself with the honest line and no actions', async () => {
+  // The offer used to die two ways, and both cost the user the decision:
+  // a 30-second timer, and the very next submission. Deciding about a key
+  // is rarely the next thing anyone does — you run one more command to
+  // check something first. Neither death exists now.
+  it('survives the next command and the clock: the offer waits to be answered', async () => {
     const client = makeClient()
     client.call.mockImplementation((method: string) => {
       if (method === 'history.record') {
@@ -532,7 +536,6 @@ describe('the receipt save semantics', () => {
                 entryId: '7',
                 redaction: { kind: 'openai', start: 31, end: 42, prefix: 'sk-p', suffix: '7890' },
                 suggestedName: 'openrouter.ai',
-                ttlMs: 50,
               },
             ],
           }),
@@ -543,17 +546,19 @@ describe('the receipt save semantics', () => {
     const { ed, content, tab, teardown } = await mountTerminal(client)
     try {
       runCommand(rendererOf(content), content, ed, COMMAND)
-      // The receipt's expiry timer must be born under the fake clock: arm
-      // fake timers AFTER the submit (the ack resolves on the flush below,
-      // constructing the receipt under the fake clock), then advance.
-      vi.useFakeTimers()
       await flush()
       expect(tab.pane.querySelector('.ui-block-receipt__primary')).not.toBeNull()
-      await vi.advanceTimersByTimeAsync(120)
-      const receipt = tab.pane.querySelector<HTMLElement>('.ui-block-receipt')!
-      expect(receipt.querySelector('.ui-block-receipt__expired')).not.toBeNull()
-      expect(receipt.textContent).toContain('no longer held')
-      expect(receipt.querySelector('button')).toBeNull()
+
+      vi.useFakeTimers()
+      await vi.advanceTimersByTimeAsync(10 * 60_000)
+      vi.useRealTimers()
+      expect(tab.pane.querySelector('.ui-block-receipt__primary')).not.toBeNull()
+
+      // And an ordinary next command in the same tab leaves it alone.
+      runCommand(rendererOf(content), content, ed, 'ls -la')
+      await flush()
+      expect(tab.pane.querySelectorAll('.ui-block-receipt__row').length).toBeGreaterThan(0)
+      expect(tab.pane.querySelector('.ui-block-receipt__primary')).not.toBeNull()
     } finally {
       vi.useRealTimers()
       teardown()

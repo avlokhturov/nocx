@@ -115,8 +115,6 @@ type WSServer struct {
 	// nextConnID assigns the per-connection (per-tab) identity captures
 	// are scoped to.
 	nextConnID atomic.Uint64
-	sweepStop  chan struct{}
-	sweepWg    sync.WaitGroup
 	// prober validates credentials without opening a session (connections.test).
 	// When nil, the handler returns a JSON-RPC error.
 	prober Prober
@@ -360,14 +358,11 @@ func WithProfileService(svc *profile.ProfileService) WSServerOption {
 }
 
 // WithCaptureRegistry injects the pending-capture registry. Test seam:
-// production constructs its own with the real clock and expiry. The
-// injected registry must not be shared across servers.
+// production constructs its own. The injected registry must not be shared
+// across servers.
 func WithCaptureRegistry(r *credential.CaptureRegistry) WSServerOption {
 	return func(s *WSServer) {
 		s.captures = r
-		if r != nil && s.sweepStop == nil {
-			s.sweepStop = make(chan struct{})
-		}
 	}
 }
 
@@ -390,14 +385,13 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 		conns:   make(map[*wsConn]struct{}),
 		origins: LoopbackOriginPolicy{},
 	}
-	if caps, err := credential.NewCaptureRegistry(time.Now, credential.DefaultCaptureExpiry); err != nil {
+	if caps, err := credential.NewCaptureRegistry(); err != nil {
 		// No entropy for the fingerprint key: no offers are made and
 		// capture saves are refused. A predictable fingerprint key would be
 		// worse than none — the equality facts would be forgeable.
 		logger.Error("capture registry unavailable; no offers will be made", "error", err)
 	} else {
 		s.captures = caps
-		s.sweepStop = make(chan struct{})
 	}
 	for _, o := range opts {
 		o(s)
@@ -444,27 +438,6 @@ func (s *WSServer) Start(ctx context.Context) error {
 		}
 	}()
 
-	// The capture-expiry sweeper: pending captures live 30 seconds, so the
-	// tick is a coarse slice of that. The registry also purges lazily on
-	// Submit and checks expiry in Reserve; the ticker bounds the plaintext
-	// lifetime even when no submission ever comes again.
-	if s.captures != nil {
-		s.sweepWg.Add(1)
-		go func() {
-			defer s.sweepWg.Done()
-			t := time.NewTicker(5 * time.Second)
-			defer t.Stop()
-			for {
-				select {
-				case <-t.C:
-					s.captures.PurgeExpired()
-				case <-s.sweepStop:
-					return
-				}
-			}
-		}()
-	}
-
 	s.log.Info("ws server started", "port", s.port)
 	return nil
 }
@@ -497,12 +470,10 @@ func (s *WSServer) Stop(ctx context.Context) error {
 	}
 
 	// Application shutdown destroys every pending capture (the contract's
-	// list names it), and the sweeper stops with the server.
+	// list names it).
 	if s.captures != nil {
 		s.captures.DestroyAll()
-		close(s.sweepStop)
 	}
-	s.sweepWg.Wait()
 
 	return shutdownErr
 }

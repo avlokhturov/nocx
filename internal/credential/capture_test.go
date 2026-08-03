@@ -18,7 +18,7 @@ import (
 func newTestRegistry(t *testing.T, start time.Time) (*CaptureRegistry, *time.Time) {
 	t.Helper()
 	clock := start
-	r, err := NewCaptureRegistry(func() time.Time { return clock }, DefaultCaptureExpiry)
+	r, err := NewCaptureRegistry()
 	if err != nil {
 		t.Fatalf("NewCaptureRegistry: %v", err)
 	}
@@ -87,32 +87,24 @@ func TestSubmitSuppression(t *testing.T) {
 	}
 }
 
-func TestExpiryDestroysAndNextCommandReOffers(t *testing.T) {
+// A pending capture has no lifetime of its own. The timer bounded how long
+// one credential sat in this process's memory while the same command sat in
+// cleartext in the shell's own history file, and what it bought in exchange
+// was an offer that retired itself while the user was still reading the
+// output. Only the destruction events end a capture now.
+func TestPendingCaptureHasNoLifetimeOfItsOwn(t *testing.T) {
 	r, clock := newTestRegistry(t, time.Unix(1_750_000_000, 0))
 
-	res := r.Submit(scope("t", 1), []PendingCredential{cred("sk-proj-expiring-value-1234567890", "exp.ai")})
+	res := r.Submit(scope("t", 1), []PendingCredential{cred("sk-proj-long-lived-value-12345", "long.ai")})
 	id := res[0].CaptureID
 
-	// Inside the window: still pending.
+	// A day later, and after several unrelated submissions from the same
+	// tab, the offer is still answerable.
+	*clock = clock.Add(24 * time.Hour)
+	r.Submit(scope("t", 2), []PendingCredential{cred("sk-proj-another-value-123456789", "other.ai")})
+	r.Submit(scope("t", 3), nil)
 	if _, err := r.Reserve(id); err != nil {
-		t.Fatalf("reserve before expiry: %v", err)
-	}
-
-	// A fresh capture, then expire it.
-	res = r.Submit(scope("t", 2), []PendingCredential{cred("sk-proj-expiring-value-1234567890", "exp.ai")})
-	id2 := res[0].CaptureID
-	if res[0].Outcome != OutcomeCaptured {
-		t.Fatalf("after a consumed capture, re-submit = %+v, want a fresh capture", res)
-	}
-	*clock = clock.Add(DefaultCaptureExpiry + time.Second)
-	r.PurgeExpired()
-	if _, err := r.Reserve(id2); !errors.Is(err, ErrCaptureUnknown) {
-		t.Fatalf("reserve after expiry = %v, want ErrCaptureUnknown", err)
-	}
-	// The next command re-offers: a fresh capture, not a suppression.
-	res = r.Submit(scope("t", 3), []PendingCredential{cred("sk-proj-expiring-value-1234567890", "exp.ai")})
-	if len(res) != 1 || res[0].Outcome != OutcomeCaptured {
-		t.Fatalf("re-submit after expiry = %+v, want a fresh capture (expiry re-offers)", res)
+		t.Fatalf("reserve after a day and three submissions: %v", err)
 	}
 }
 
@@ -227,41 +219,27 @@ func TestDismissConsumesTheToken(t *testing.T) {
 	}
 }
 
-func TestSupersedingSubmissionDestroysOlderPending(t *testing.T) {
+// The next submission no longer destroys anything. Deciding about a key is
+// rarely the next thing anyone does — you run one more command to check
+// something, and under the old rule the offer was gone for good. Several
+// unanswered captures coexist, one per block that still has an offer.
+func TestSubmissionsDoNotSupersedeOlderPending(t *testing.T) {
 	r, _ := newTestRegistry(t, time.Unix(1_750_000_000, 0))
 
-	// Two pending captures from tab1, then a third submission supersedes
-	// both older ones.
 	resA := r.Submit(scope("tab1", 1), []PendingCredential{cred("sk-proj-super-a-1234567890123", "a.ai")})
 	resB := r.Submit(scope("tab1", 2), []PendingCredential{cred("sk-proj-super-b-1234567890123", "b.ai")})
 	idA, idB := resA[0].CaptureID, resB[0].CaptureID
+
+	// A third submission carrying its own key, and an ordinary one carrying
+	// none: neither touches what is already pending.
 	r.Submit(scope("tab1", 3), []PendingCredential{cred("sk-proj-super-c-1234567890123", "c.ai")})
-	if _, err := r.Reserve(idA); !errors.Is(err, ErrCaptureUnknown) {
-		t.Fatalf("older capture A after supersede = %v, want unknown", err)
-	}
-	if _, err := r.Reserve(idB); !errors.Is(err, ErrCaptureUnknown) {
-		t.Fatalf("older capture B after supersede = %v, want unknown", err)
-	}
-}
+	r.Submit(scope("tab1", 4), nil)
 
-func TestSupersedeIsScopedToTheTab(t *testing.T) {
-	r, _ := newTestRegistry(t, time.Unix(1_750_000_000, 0))
-
-	// tab2's pending capture survives a superseding submission from tab1.
-	resD := r.Submit(scope("tab2", 1), []PendingCredential{cred("sk-proj-super-d-1234567890123", "d.ai")})
-	idD := resD[0].CaptureID
-	r.Submit(scope("tab1", 1), []PendingCredential{cred("sk-proj-super-e-1234567890123", "e.ai")})
-	if _, err := r.Reserve(idD); err != nil {
-		t.Fatalf("another tab's capture after an unrelated supersede = %v, want live", err)
+	if _, err := r.Reserve(idA); err != nil {
+		t.Fatalf("capture A after later submissions = %v, want live", err)
 	}
-
-	// tab2's own next submission supersedes ITS older pending capture (a
-	// fresh one — the previous was consumed by the alive-check above).
-	resF := r.Submit(scope("tab2", 2), []PendingCredential{cred("sk-proj-super-f-1234567890123", "f.ai")})
-	idF := resF[0].CaptureID
-	r.Submit(scope("tab2", 3), []PendingCredential{cred("sk-proj-super-g-1234567890123", "g.ai")})
-	if _, err := r.Reserve(idF); !errors.Is(err, ErrCaptureUnknown) {
-		t.Fatalf("tab2's older capture after its own supersede = %v, want unknown", err)
+	if _, err := r.Reserve(idB); err != nil {
+		t.Fatalf("capture B after later submissions = %v, want live", err)
 	}
 }
 
