@@ -18,6 +18,11 @@ type RealChannel struct {
 	stdout  io.Reader
 	done    chan struct{}
 
+	// shellIntegrationReason is why shell integration did not happen,
+	// decided by openShell when the session started (nocx-r52q). ReasonNone
+	// means integration succeeded or was never attempted.
+	shellIntegrationReason RefusalReason
+
 	closeOnce sync.Once
 	closeCb   func()
 	// releasePoolRef drops this channel's reference to the pooled ssh.Client.
@@ -50,6 +55,10 @@ func (c *RealChannel) Close() error {
 
 func (c *RealChannel) Done() <-chan struct{} {
 	return c.done
+}
+
+func (c *RealChannel) ShellIntegrationReason() RefusalReason {
+	return c.shellIntegrationReason
 }
 
 // Resize sends a window-change request to the remote end.

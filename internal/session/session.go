@@ -74,6 +74,11 @@ type Session interface {
 	Close() error
 	Done() <-chan struct{}
 	StartOutput(ctx context.Context, onOutput OutputHandler) error
+	// ShellIntegrationReason reports why shell integration did not happen
+	// for this session (nocx-r52q). Remote sessions surface the refusal
+	// reason decided when the shell started; local sessions always return
+	// ReasonNone. The transport carries this value to the UI.
+	ShellIntegrationReason() ssh.RefusalReason
 }
 
 // ProfileUsageTracker records profile session activity (nocx-uxs5.4).
@@ -157,6 +162,12 @@ func (r *Reg) WithProfileUsageTracker(t ProfileUsageTracker) *Reg {
 }
 
 func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
+	// Mint the session ID BEFORE any connect: the remote launcher embeds it
+	// as NOCX_SESSION_ID in the start command (nocx-r52q), so the ID the
+	// session is later registered under must already exist while Connect
+	// runs. A failed connect registers nothing — the ID is simply unused.
+	id := NewID()
+
 	var ch Channel
 	var err error
 
@@ -167,7 +178,12 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 		if cfg.Remote == nil {
 			return nil, fmt.Errorf("remote session requires ConnectConfig")
 		}
-		ch, err = r.ssh.Connect(ctx, cfg.Host, sshOptionsFromConfig(cfg.Remote)...)
+		opts := sshOptionsFromConfig(cfg.Remote)
+		opts = append(opts, ssh.WithSessionID(string(id)))
+		if cfg.Enhanced {
+			opts = append(opts, ssh.WithEnhanced())
+		}
+		ch, err = r.ssh.Connect(ctx, cfg.Host, opts...)
 		if err != nil {
 			return nil, fmt.Errorf("ssh connect: %w", err)
 		}
@@ -185,8 +201,6 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 		}
 		ch = pt
 	}
-
-	id := NewID()
 
 	s := &realSession{
 		id:           id,
@@ -342,6 +356,9 @@ func sshOptionsFromConfig(cfg *ssh.ConnectConfig) []ssh.ConnectOption {
 	if cfg.JumpAuthorizedEndpoint != "" {
 		opts = append(opts, ssh.WithJumpAuthorizedEndpoint(cfg.JumpAuthorizedEndpoint))
 	}
+	if cfg.RemoteLauncher != nil {
+		opts = append(opts, ssh.WithRemoteLauncher(cfg.RemoteLauncher))
+	}
 	if cfg.RemoteInstaller != nil {
 		opts = append(opts, ssh.WithRemoteInstaller(cfg.RemoteInstaller))
 	}
@@ -391,6 +408,17 @@ func (s *realSession) Close() error {
 
 func (s *realSession) Done() <-chan struct{} {
 	return s.ch.Done()
+}
+
+// ShellIntegrationReason surfaces the connect-time refusal reason (nocx-r52q).
+// The unified Channel has no such method — local PTYs have nothing to report —
+// so this is an optional-method check: remote channels (ssh.Channel) carry it,
+// everything else is ReasonNone.
+func (s *realSession) ShellIntegrationReason() ssh.RefusalReason {
+	if rc, ok := s.ch.(interface{ ShellIntegrationReason() ssh.RefusalReason }); ok {
+		return rc.ShellIntegrationReason()
+	}
+	return ssh.ReasonNone
 }
 
 func (s *realSession) StartOutput(ctx context.Context, onOutput OutputHandler) error {

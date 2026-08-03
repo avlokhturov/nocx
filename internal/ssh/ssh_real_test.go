@@ -46,6 +46,11 @@ type testSSHServer struct {
 	shellReadyDo sync.Once
 	// windowChanged carries one signal per processed window-change request.
 	windowChanged chan struct{}
+	// execCommands records every accepted "exec" request command
+	// (session.Start payloads). Buffered; tests drain after Connect returns.
+	execCommands chan string
+	// shellRequests counts answered "shell" requests (session.Shell calls).
+	shellRequests int
 }
 
 func startTestSSHServer(t *testing.T) *testSSHServer {
@@ -77,6 +82,7 @@ func startTestSSHServer(t *testing.T) *testSSHServer {
 		addr:          listener.Addr().String(),
 		shellReady:    make(chan struct{}),
 		windowChanged: make(chan struct{}, 8),
+		execCommands:  make(chan string, 8),
 	}
 
 	go srv.acceptLoop(config)
@@ -114,6 +120,7 @@ func startTestSSHServerWithUserKey(t *testing.T, userKey gossh.Signer) *testSSHS
 		addr:          listener.Addr().String(),
 		shellReady:    make(chan struct{}),
 		windowChanged: make(chan struct{}, 8),
+		execCommands:  make(chan string, 8),
 	}
 
 	go srv.acceptLoop(config)
@@ -205,6 +212,20 @@ func (s *testSSHServer) handleSession(ch gossh.Channel, reqs <-chan *gossh.Reque
 				_ = req.Reply(true, nil)
 				s.mu.Lock()
 				s.shellCh = ch
+				s.shellRequests++
+				s.mu.Unlock()
+				s.shellReadyDo.Do(func() { close(s.shellReady) })
+
+			case "exec":
+				var m struct{ Command string }
+				if err := gossh.Unmarshal(req.Payload, &m); err != nil {
+					_ = req.Reply(false, nil)
+					continue
+				}
+				_ = req.Reply(true, nil)
+				s.mu.Lock()
+				s.shellCh = ch
+				s.execCommands <- m.Command
 				s.mu.Unlock()
 				s.shellReadyDo.Do(func() { close(s.shellReady) })
 

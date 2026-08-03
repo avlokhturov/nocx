@@ -16,6 +16,11 @@ type Channel interface {
 	// Done returns a channel closed when the remote shell exits or the
 	// underlying connection is lost — the Disconnected signal from AD-7.
 	Done() <-chan struct{}
+	// ShellIntegrationReason reports why shell integration did not happen
+	// for this channel (nocx-r52q). ReasonNone means integration succeeded
+	// or was never attempted — a plain shell is the default. The transport
+	// carries this value to the UI; it must never be log-only.
+	ShellIntegrationReason() RefusalReason
 }
 
 // RemoteInstaller installs shell integration scripts on a remote host via
@@ -25,6 +30,51 @@ type RemoteInstaller interface {
 	EnsureInstalledRemote(ctx context.Context, sshClient *gossh.Client, remoteHome string) error
 	GetRemoteHome(sshClient *gossh.Client) (string, error)
 	RemoteStartCommand() string
+}
+
+// ---------------------------------------------------------------------------
+// Remote shell launcher — the pinned nocx-xs1d contract for bringing up an
+// integrated interactive shell on the far host.
+//
+// The canonical declarations land in internal/shellintegration (a parallel
+// worktree); they are mirrored here because internal/ssh must not depend on
+// that package, and Go interface satisfaction requires identical named types.
+// The composition root adapts the two declarations at wiring time.
+// ---------------------------------------------------------------------------
+
+// ShellKind names the far shell a launcher builds a start command for.
+type ShellKind string
+
+const (
+	ShellBash    ShellKind = "bash"
+	ShellZsh     ShellKind = "zsh"
+	ShellUnknown ShellKind = "unknown"
+)
+
+// RefusalReason is why integration did not happen, in a form the product
+// renders. The empty string means "no refusal".
+type RefusalReason string
+
+const (
+	ReasonNone             RefusalReason = ""
+	ReasonUnsupportedShell RefusalReason = "unsupported-shell"
+	ReasonNoSecureTemp     RefusalReason = "no-secure-temp"
+	ReasonRemoteCommand    RefusalReason = "remote-command"
+)
+
+// LaunchOptions carries what the start command must embed.
+type LaunchOptions struct {
+	SessionID string // NOCX_SESSION_ID for this session; never empty when Enhanced
+	Enhanced  bool   // request marker-only prompt mode (ADR-0006)
+}
+
+// RemoteLauncher builds the command string passed to an SSH session's Start()
+// to bring up an integrated interactive shell on the far host.
+type RemoteLauncher interface {
+	// StartCommand returns the remote command for the given far shell.
+	// ok is false when this shell cannot be integrated; reason then says
+	// why, and the caller falls back to a plain shell.
+	StartCommand(shell ShellKind, opts LaunchOptions) (cmd string, reason RefusalReason, ok bool)
 }
 
 type SSH interface {
@@ -46,6 +96,23 @@ type ConnectConfig struct {
 	AuthMethods     []gossh.AuthMethod
 	KeyExchanges    []string
 	RemoteInstaller RemoteInstaller
+
+	// RemoteLauncher builds the start command for an integrated remote shell
+	// (nocx-xs1d). openShell consults it unless the destination configures a
+	// RemoteCommand (which refuses a command-line remote command); when it
+	// declines, openShell starts a plain shell and surfaces the reason on the
+	// channel. The legacy RemoteInstaller is consulted only when no launcher
+	// is wired.
+	RemoteLauncher RemoteLauncher
+
+	// SessionID is the backend-assigned session ID (AD-7) for the session
+	// this connection serves. The launcher embeds it as NOCX_SESSION_ID;
+	// never empty when Enhanced is set.
+	SessionID string
+
+	// Enhanced requests the marker-only prompt mode (ADR-0006) for the
+	// remote shell; forwarded to the launcher in LaunchOptions.
+	Enhanced bool
 
 	// AuthMode controls which auth buckets are tried (null=Auto with full
 	// fallback-chain; a specific value restricts which buckets are attempted).
@@ -199,9 +266,29 @@ func WithAuthMethods(auths []gossh.AuthMethod) ConnectOption {
 	return func(c *ConnectConfig) { c.AuthMethods = auths }
 }
 
+// WithRemoteLauncher injects the launcher that builds the start command for
+// an integrated remote shell (nocx-xs1d). When it declines, openShell falls
+// back to a plain shell and the refusal reason is surfaced on the channel.
+func WithRemoteLauncher(l RemoteLauncher) ConnectOption {
+	return func(c *ConnectConfig) { c.RemoteLauncher = l }
+}
+
+// WithSessionID binds the backend-assigned session ID (AD-7) to the
+// connection; the launcher embeds it as NOCX_SESSION_ID.
+func WithSessionID(id string) ConnectOption {
+	return func(c *ConnectConfig) { c.SessionID = id }
+}
+
+// WithEnhanced requests the marker-only prompt mode (ADR-0006) for the
+// remote shell.
+func WithEnhanced() ConnectOption {
+	return func(c *ConnectConfig) { c.Enhanced = true }
+}
+
 // WithRemoteInstaller injects a shell integration installer for the remote
-// session. When set, openShell installs scripts via SFTP and starts the
-// shell with the integration activated.
+// session. It remains as an EXPLICIT opt-in for the later persistent-install
+// flow: openShell consults it only when no RemoteLauncher is wired, so the
+// default path never SFTP-mutates a remote home (nocx-r52q).
 func WithRemoteInstaller(ri RemoteInstaller) ConnectOption {
 	return func(c *ConnectConfig) { c.RemoteInstaller = ri }
 }
@@ -333,4 +420,8 @@ func (c *StubChannel) Done() <-chan struct{} {
 
 func (c *StubChannel) Resize(_ context.Context, cols, rows, xpixel, ypixel uint16) error {
 	return nil
+}
+
+func (c *StubChannel) ShellIntegrationReason() RefusalReason {
+	return ReasonNone
 }
