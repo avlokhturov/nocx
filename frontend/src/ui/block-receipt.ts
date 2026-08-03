@@ -68,8 +68,11 @@ export class BlockReceipt {
     this.root.setAttribute('role', 'group')
     this.root.setAttribute('aria-label', 'save detected secret')
 
+    const rowEls: HTMLElement[] = []
     for (const capture of captures) {
-      this.root.appendChild(this.buildRow(capture))
+      const rowEl = this.buildRow(capture)
+      rowEls.push(rowEl)
+      this.root.appendChild(rowEl)
     }
 
     // ── The one primary action, labelled with its scope ────────────────
@@ -79,8 +82,18 @@ export class BlockReceipt {
     this.primaryBtn.className = 'ui-button ui-block-receipt__primary'
     this.primaryBtn.dataset.variant = 'primary'
     this.primaryBtn.addEventListener('click', () => this.saveAll())
-    this.actionsEl.appendChild(this.primaryBtn)
-    this.root.appendChild(this.actionsEl)
+
+    // With one capture the two buttons belong on the same line — Save is
+    // the whole receipt's action AND that row's action, and stacking them
+    // in a bar of their own left one button orphaned under another with
+    // room to spare beside it. With several, Save names its scope
+    // ("Save 2") and cannot sit inside any single row, so it keeps the bar.
+    if (rowEls.length === 1) {
+      rowEls[0].appendChild(this.primaryBtn)
+    } else {
+      this.actionsEl.appendChild(this.primaryBtn)
+      this.root.appendChild(this.actionsEl)
+    }
     this.updatePrimaryLabel()
 
     // Escape returns focus to the editor; ⌘S performs the primary action.

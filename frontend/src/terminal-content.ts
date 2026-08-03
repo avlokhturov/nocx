@@ -61,6 +61,19 @@ const RESIZE_SETTLE_MS = 80
 const RESIZE_ECHO_MS = 400
 
 /**
+ * Whether a settle call failed because the backend no longer holds the
+ * capture — it was destroyed by the tab closing, the vault sealing, the
+ * transport dropping, or the record that carried it failing.
+ *
+ * The distinction matters at the surface: this one can never succeed, so
+ * the row goes and the receipt says the offer is gone. Every other failure
+ * is worth another press.
+ */
+function isCaptureGone(err: unknown): boolean {
+  return err instanceof RpcError && (err.code === -32010 || err.code === -32011)
+}
+
+/**
  * Whether `el` is somewhere the user types on purpose.
  *
  * Used to keep the terminal's document-level key rescue off other people's
@@ -72,6 +85,25 @@ function isTextEntry(el: Element | null): boolean {
   if (el.isContentEditable) return true
   const tag = el.tagName
   return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT'
+}
+
+/** The host callbacks a tab may hand a TerminalContent. Named rather than
+ *  positional: they are all optional functions, so any misalignment between
+ *  them type-checks cleanly and fails only in front of a user. */
+export interface TerminalContentHooks {
+  /** Pushes the strip's optional second line — the tab's location, or ''
+   *  when the title already says it. Only TerminalContent holds both halves
+   *  of that question. */
+  onSubtitleChange?: (subtitle: string) => void
+  /** The session is an alias (not a saved profile) and can be adopted as a
+   *  nocx connection. True = adoptable, false = not. */
+  onAdoptabilityChange?: (adoptable: boolean) => void
+  /** An SSH connection failed because the vault is sealed. */
+  onVaultSealed?: () => void
+  /** The reference picker's setup offer needs the setup dialog (no OS key):
+   *  the vault layer owns it — wired by main.tsx to
+   *  vaultController.openSetup. */
+  onSetupVault?: () => void
 }
 
 // No placeholder title — see the descriptor in tabs.ts for why. A tab with no
@@ -196,18 +228,13 @@ export class TerminalContent extends BaseTabContent {
       user?: string
       port?: number
     },
-    /** Pushes the strip's optional second line — the tab's location, or '' when the
-     *  title already says it. Only this class holds both halves of that question. */
-    private readonly onSubtitleChange?: (subtitle: string) => void,
-    /** Called when the session is an alias (not a saved profile) and can be
-     *  adopted as a nocx connection. True = adoptable, False = not. */
-    private readonly onAdoptabilityChange?: (adoptable: boolean) => void,
-    /** Called when an SSH connection fails because the vault is sealed. */
-    private readonly onVaultSealed?: () => void,
-    /** The reference picker's setup offer needs the setup dialog (no OS
-     *  key): the vault layer owns it — wired by main.tsx to
-     *  vaultController.openSetup. */
-    private readonly onSetupVault?: () => void,
+    /** The optional host callbacks, NAMED. They used to be four trailing
+     *  positional parameters, and a caller that skipped the middle two put
+     *  onSetupVault into the onAdoptabilityChange slot — so on a local tab
+     *  the picker's "set up the vault" row answered Enter by calling
+     *  nothing, and nothing could have caught it: every one of them is an
+     *  optional function, so every misalignment type-checks. */
+    private readonly hooks: TerminalContentHooks = {},
   ) {
     super()
     this._readyPromise = new Promise<boolean>((resolve) => {
@@ -232,7 +259,7 @@ export class TerminalContent extends BaseTabContent {
     // The location line earns a row only when the title is a name of its own.
     // With no program title the title IS the location, and a second line would
     // print the first one again.
-    this.onSubtitleChange?.(this.programTitle ? this.locationLine() : '')
+    this.hooks.onSubtitleChange?.(this.programTitle ? this.locationLine() : '')
   }
 
   /** Where this tab is: `user@host` for SSH, the working directory otherwise. */
@@ -481,7 +508,7 @@ export class TerminalContent extends BaseTabContent {
         editor: this.editor,
         vault,
         report: (level, message) => showToast({ level, message }),
-        requestSetupDialog: () => this.onSetupVault?.(),
+        requestSetupDialog: () => this.hooks.onSetupVault?.(),
       })
       this.promptVault.mount()
 
@@ -847,7 +874,7 @@ export class TerminalContent extends BaseTabContent {
       // to sessions that actually connected — a failed connect never
       // reaches this point (it throws to the outer catch).
       if (this.sshOpts && !this.sshOpts.profileId) {
-        this.onAdoptabilityChange?.(true)
+        this.hooks.onAdoptabilityChange?.(true)
       }
       this.pushTitle()
 
@@ -1007,7 +1034,7 @@ export class TerminalContent extends BaseTabContent {
       if (err instanceof RpcError) {
         const data = err.data as { reason?: string } | undefined
         if (data?.reason === 'vault-sealed') {
-          this.onVaultSealed?.()
+          this.hooks.onVaultSealed?.()
           this._readyResolve(false)
           return
         }
@@ -1368,11 +1395,21 @@ export class TerminalContent extends BaseTabContent {
         }
         showToast({ level: 'success', message: `Stored "${res.name}" in the vault.` })
         if (receipt.removeRow(row.captureId)) this.retireReceipt(blockEl)
-      } catch {
+      } catch (err) {
+        // A capture the backend no longer holds cannot be retried, so the
+        // row must go rather than sit there offering an action that will
+        // fail every time. Anything else is worth another attempt.
+        if (isCaptureGone(err)) {
+          showToast({
+            level: 'warning',
+            message: 'This offer is no longer held — the command stays stored masked.',
+          })
+          if (receipt.removeRow(row.captureId)) this.retireReceipt(blockEl)
+          continue
+        }
         showToast({
           level: 'danger',
-          message:
-            'Could not save the secret — the capture may have expired. The command stays stored masked; add the key from Settings → Vault.',
+          message: 'Could not save the secret — the command stays stored masked.',
         })
         receipt.markFailed(row.captureId, 'could not save — try again')
       }
@@ -1412,7 +1449,7 @@ export class TerminalContent extends BaseTabContent {
     }
     // No OS key: setting up needs a passphrase, and a passphrase needs a
     // dialog the vault layer owns. The receipt survives it.
-    this.onSetupVault?.()
+    this.hooks.onSetupVault?.()
     return false
   }
 
@@ -1427,7 +1464,20 @@ export class TerminalContent extends BaseTabContent {
     try {
       await this.vault.captureDismiss(captureId)
       if (receipt.removeRow(captureId)) this.retireReceipt(blockEl)
-    } catch {
+      // Say what the refusal actually means. Dismissing suppresses THIS
+      // value for the rest of the application session, so the same key in
+      // the same command will not ask again — a consequence worth stating
+      // once rather than letting it read as the feature having broken.
+      showToast({
+        level: 'info',
+        message: 'Dismissed — this key will not be offered again in this session.',
+      })
+    } catch (err) {
+      if (isCaptureGone(err)) {
+        // Already gone: the user's intent is satisfied either way.
+        if (receipt.removeRow(captureId)) this.retireReceipt(blockEl)
+        return
+      }
       showToast({
         level: 'danger',
         message: 'Could not dismiss the offer — try again.',

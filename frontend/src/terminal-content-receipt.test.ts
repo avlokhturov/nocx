@@ -79,7 +79,11 @@ interface Mounted {
   teardown: () => void
 }
 
-async function mountTerminal(client: ClientFake, attachToDocument = true): Promise<Mounted> {
+async function mountTerminal(
+  client: ClientFake,
+  attachToDocument = true,
+  hooks: { onSetupVault?: () => void } = {},
+): Promise<Mounted> {
   const content = new TerminalContent(
     client as unknown as WSClient,
     makeClipboard(),
@@ -87,6 +91,8 @@ async function mountTerminal(client: ClientFake, attachToDocument = true): Promi
     makeBanner(),
     null,
     () => {},
+    undefined,
+    hooks,
   )
   const tab = new Tab(
     content,
@@ -767,6 +773,50 @@ describe('one floating host, mutually exclusive modes', () => {
       )
       await vi.waitFor(() => expect(openPanels(ed)).toContain('secret'))
       expect(openPanels(ed)).not.toContain('completion')
+    } finally {
+      teardown()
+    }
+  })
+})
+
+// The picker's "set up the vault" row is the only way into the vault from a
+// terminal tab when the machine has no OS key, and on a LOCAL tab it did
+// nothing at all: the callback was passed positionally and landed two slots
+// early, in onAdoptabilityChange. Every one of those parameters is an
+// optional function, so the misalignment type-checked and nothing failed
+// until a person pressed Enter and watched the panel sit there.
+describe('the vault setup offer reaches the host', () => {
+  it('Enter on the setup row calls the host hook', async () => {
+    const onSetupVault = vi.fn()
+    const client = makeClient()
+    client.call.mockImplementation((method: string) => {
+      if (method === 'vault.status') {
+        return Promise.resolve({
+          state: 'uninitialized',
+          osKeyAvailable: false,
+          osKeyCapable: false,
+          hasPassphrase: false,
+          autoSealMinutes: 15,
+          defaultProvider: null,
+          providers: [],
+        })
+      }
+      return Promise.reject(new Error('no wire handler (fake)'))
+    })
+    const { view, teardown } = await mountTerminal(client, true, { onSetupVault })
+    try {
+      view.dispatch({ changes: { from: 0, insert: '@' } })
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: '@', bubbles: true, cancelable: true }),
+      )
+      await flush()
+      await flush()
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      await flush()
+      await flush()
+      expect(onSetupVault).toHaveBeenCalled()
     } finally {
       teardown()
     }

@@ -418,8 +418,10 @@ export class TabManager {
       // a viewport-sized fullscreen xterm would not paint through it; the
       // fullscreen region lives inside its pane now (nocx-6w4z).
       undefined,
-      (subtitle) => tabRef.current?.updateSubtitle(subtitle),
-      this.onSetupVault,
+      {
+        onSubtitleChange: (subtitle) => tabRef.current?.updateSubtitle(subtitle),
+        onSetupVault: this.onSetupVault,
+      },
     )
     const descriptor: ContentDescriptor = {
       surfaceType: SURFACE_TERMINAL,
@@ -451,18 +453,20 @@ export class TabManager {
       this.profileClient,
       (tooltip) => tabRef.current?.updateTooltip(tooltip),
       sshOpts,
-      (subtitle) => tabRef.current?.updateSubtitle(subtitle),
-      (adoptable: boolean) => {
-        const tab = tabRef.current
-        if (!tab) return
-        if (adoptable) {
-          tab.setAdoptState(true, () => this._adoptAlias(host, user, port, tab))
-        } else {
-          tab.setAdoptState(false, () => {})
-        }
+      {
+        onSubtitleChange: (subtitle) => tabRef.current?.updateSubtitle(subtitle),
+        onAdoptabilityChange: (adoptable: boolean) => {
+          const tab = tabRef.current
+          if (!tab) return
+          if (adoptable) {
+            tab.setAdoptState(true, () => this._adoptAlias(host, user, port, tab))
+          } else {
+            tab.setAdoptState(false, () => {})
+          }
+        },
+        onVaultSealed: this.onVaultSealed,
+        onSetupVault: this.onSetupVault,
       },
-      this.onVaultSealed,
-      this.onSetupVault,
     )
     const descriptor: ContentDescriptor = {
       surfaceType: SURFACE_TERMINAL,
