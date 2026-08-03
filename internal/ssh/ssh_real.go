@@ -71,8 +71,39 @@ func NewReal(logger log.Logger, opts ...RealClientOption) (*RealClient, error) {
 	return rc, nil
 }
 
-// Connect implements SSH.Connect.
-func (rc *RealClient) Connect(ctx context.Context, host string, opts ...ConnectOption) (Channel, error) {
+// acquiredPooled bundles the result of resolving and acquiring a pooled
+// connection: the raw client, the pooled wrapper (for per-connection
+// features like agent forwarding), the handle owning this reference, and the
+// caller's effective config. Connect and TunnelConn share this path so a
+// forward is authorized and keyed exactly like a tab (AD-4) — a tunnel to a
+// host the credential is not bound to is the same authorization violation as
+// a tab to it.
+type acquiredPooled struct {
+	handle   *poolHandle
+	pconn    *pooledSSHConn
+	client   *gossh.Client
+	resolved *resolvedConfig
+	cfg      *ConnectConfig
+}
+
+// acquirePooled resolves the connection config, enforces credential
+// authorization, and acquires a pooled connection. On success the caller
+// owns the returned handle and MUST release it exactly once.
+//
+// Authorization is enforced BEFORE any dial. Only a linked credential
+// (Secrets != nil) carries an authorized endpoint to check; inline auth has
+// no stored secret to redirect.
+//
+// Resolve the authorized endpoint through ~/.ssh/config separately from the
+// dial target. The resolver stores the canonical (resolved) hostname, and
+// this pass re-resolves it through the current SSH config. If ~/.ssh/config
+// changed since the resolver ran (drift), the two resolutions yield different
+// results and the check fails. For binding tests that bypass the resolver,
+// this pass also resolves aliases set directly as AuthorizedEndpoint.
+//
+// The host parameter and cfg.AuthorizedEndpoint are separate inputs, so
+// comparing their resolved forms is not self-authorizing.
+func (rc *RealClient) acquirePooled(ctx context.Context, host string, opts []ConnectOption) (*acquiredPooled, error) {
 	cfg := &ConnectConfig{}
 	for _, o := range opts {
 		o(cfg)
@@ -82,19 +113,6 @@ func (rc *RealClient) Connect(ctx context.Context, host string, opts ...ConnectO
 	if err != nil {
 		return nil, fmt.Errorf("resolve config for %s: %w", host, err)
 	}
-	// Enforce computed authorization BEFORE any dial. Only a linked credential
-	// (Secrets != nil) carries an authorized endpoint to check; inline auth has
-	// no stored secret to redirect.
-	//
-	// Resolve the authorized endpoint through ~/.ssh/config separately from the
-	// dial target. The resolver stores the canonical (resolved) hostname, and
-	// this pass re-resolves it through the current SSH config. If ~/.ssh/config
-	// changed since the resolver ran (drift), the two resolutions yield different
-	// results and the check fails. For binding tests that bypass the resolver,
-	// this pass also resolves aliases set directly as AuthorizedEndpoint.
-	//
-	// The host parameter and cfg.AuthorizedEndpoint are separate inputs, so
-	// comparing their resolved forms is not self-authorizing.
 	if cfg.Secrets != nil {
 		resolvedAuthz := rc.resolveAuthzEndpoint(ctx, cfg.AuthorizedEndpoint)
 		if authErr := checkAuthorization(resolvedAuthz, resolved, string(cfg.SecretID), false); authErr != nil {
@@ -119,44 +137,51 @@ func (rc *RealClient) Connect(ctx context.Context, host string, opts ...ConnectO
 		rc.pool.Release(handle)
 		return nil, fmt.Errorf("internal: pooled client is not *gossh.Client (%T)", pconn.client)
 	}
+	return &acquiredPooled{handle: handle, pconn: pconn, client: gclient, resolved: resolved, cfg: cfg}, nil
+}
+
+// Connect implements SSH.Connect.
+func (rc *RealClient) Connect(ctx context.Context, host string, opts ...ConnectOption) (Channel, error) {
+	acq, err := rc.acquirePooled(ctx, host, opts)
+	if err != nil {
+		return nil, err
+	}
 
 	// Agent forwarding: register the per-connection channel handler once
 	// (initAgentForward is guarded by agentForwardOnce), then request it
 	// per-session inside openShell. Fail early if the user asked for
 	// forwarding but no agent is reachable.
-	if cfg.AgentForward {
+	if acq.cfg.AgentForward {
 		if !rc.agentAvailable() {
-			rc.pool.Release(handle)
+			rc.pool.Release(acq.handle)
 			return nil, fmt.Errorf("agent forwarding requested but no SSH agent available (SSH_AUTH_SOCK not set)")
 		}
-		if fwdErr := pconn.initAgentForward(gclient, os.Getenv("SSH_AUTH_SOCK")); fwdErr != nil {
-			rc.pool.Release(handle)
+		if fwdErr := acq.pconn.initAgentForward(acq.client, os.Getenv("SSH_AUTH_SOCK")); fwdErr != nil {
+			rc.pool.Release(acq.handle)
 			return nil, fmt.Errorf("agent-forward setup: %w", fwdErr)
 		}
 	}
 
-	ch, err := rc.openShell(ctx, gclient, resolved, cfg)
+	ch, err := rc.openShell(ctx, acq.client, acq.resolved, acq.cfg, func() { rc.pool.Release(acq.handle) })
 	if err != nil {
 		// Failed to open the shell — release our reference so the
 		// connection can close if we were the only tab. Without this the
 		// failed Connect path leaks a pooled ref (and a jump transport)
 		// for the process life.
-		rc.pool.Release(handle)
+		rc.pool.Release(acq.handle)
 		return nil, err
 	}
 
-	// Wire the channel's close to release our pool reference. RealChannel.Close
-	// runs closeCb exactly once (sync.Once), so the handle is released exactly
-	// once even if the session errors and the tab then closes. Releasing the
-	// handle drops the target refcount; when it hits zero the pooledSSHConn
-	// closes the gossh.Client AND releases the jump handle, which closes the
-	// bastion when its own refcount hits zero. One Close per channel, one
-	// Release per handle, no leak.
-	ch.releasePoolRef = func() { rc.pool.Release(handle) }
+	// openShell wired the channel's close to release our pool reference.
+	// RealChannel.Close runs closeCb exactly once (sync.Once), so the handle
+	// is released exactly once even if the session errors and the tab then
+	// closes. Releasing the handle drops the target refcount; when it hits
+	// zero the pooledSSHConn closes the gossh.Client AND releases the jump
+	// handle, which closes the bastion when its own refcount hits zero. One
+	// Close per channel, one Release per handle, no leak.
 	return ch, nil
 }
 
-// Probe attempts SSH authentication with only the supplied auth method,
 // BYPASSING the connection pool. It verifies the host key, authenticates
 // (sending exactly one auth method — the caller's responsibility to restrict),
 // and closes immediately without launching a shell or running a command.
@@ -557,8 +582,13 @@ func (rc *RealClient) shellStartCommand(ctx context.Context, gclient *gossh.Clie
 }
 
 // openShell opens a session, requests a PTY, optionally requests agent
-// forwarding, and starts a shell.
-func (rc *RealClient) openShell(ctx context.Context, gclient *gossh.Client, resolved *resolvedConfig, cfg *ConnectConfig) (*RealChannel, error) {
+// forwarding, and starts a shell. releaseRef drops the caller's pooled
+// reference when the remote session ends; it is assigned to the channel
+// BEFORE the session watcher starts, so the watcher can never observe the
+// field unset (a race the old assign-after-openShell shape had: a session
+// dying in the window left Close reading a nil callback or racing the
+// write).
+func (rc *RealClient) openShell(ctx context.Context, gclient *gossh.Client, resolved *resolvedConfig, cfg *ConnectConfig, releaseRef func()) (*RealChannel, error) {
 	startCmd, reason := rc.shellStartCommand(ctx, gclient, resolved, cfg)
 
 	session, err := gclient.NewSession()
@@ -623,8 +653,11 @@ func (rc *RealClient) openShell(ctx context.Context, gclient *gossh.Client, reso
 		closeCb: func() {
 			_ = session.Close()
 		},
+		releasePoolRef: releaseRef,
 	}
 
+	// The watcher starts AFTER releasePoolRef is set (above), so a session
+	// that ends during the assignment window cannot race the field.
 	go func() {
 		_ = session.Wait()
 		// Remote session ended — release the pool reference. Close is
