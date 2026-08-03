@@ -325,6 +325,16 @@ clean A→B (ADR-0006:77).
 **The launcher is visible in remote process arguments and server audit logs**,
 so it carries no secret and no session authentication material.
 
+**A passport fact is a claim, and the claimant is part of the fact.** Canonical
+environment identity is never derived from the hostname or user the remote shell
+reports: those are assertions made from inside the shell, and a container can
+call itself anything. The endpoint, profile and jump route are known to the
+backend; the hostname, user and shell are asserted by the far side. They stay
+separate, separately confidence-labelled inputs to identity, and a disagreement
+between them is rendered as a disagreement — `endpoint: asserted by connection`
+beside `hostname: asserted by shell` — never silently collapsed into one string.
+Collapsing them is the exact failure `nocx-uahp` was created to end.
+
 **History.** The remote shell's live and persisted history must contain exactly
 what the shell executed, and the nocx ledger exactly what the user typed. Where
 an explicit adapter makes them differ, both values and the reason are shown. A
@@ -335,7 +345,61 @@ concurrent shells and can destroy the user's own commands.
 to another machine's home directory becomes something the user asked for, with
 the diff shown first and an uninstall after.
 
-## 8. Surfaces
+## 8. What the integration is for
+
+Markers over SSH are the mechanism, not the point. Five promises, chosen because
+each is nearly free once the launcher exists and each is something no terminal
+does today. The through-line: **nocx always knows what it knows, shows it before
+Enter, and never pretends integration or recovery is stronger than it is.**
+
+**8.1 The readiness payload carries an environment passport.** The launcher must
+acknowledge itself anyway (§7); it carries shell and version, `$USER`/`$EUID`,
+login/interactive state and the negotiated tier while it is at it. **Shell
+variables and builtins only** — no subprocess, no filesystem walk, nothing on the
+latency-critical path to the first prompt. `uname`, git, kubernetes, container
+detection and package managers are explicitly excluded (§11); discover those
+lazily, when a visible feature needs that specific facet.
+
+**8.2 The context rail sits above the pending command.** While composing — not
+after submitting — the user sees where Enter will land:
+`profile → jump route → endpoint · user/privilege · cwd · integration`. Almost
+entirely presentation: bind the editor document to the passport and the live
+OSC 7 state; no classification, no per-keystroke remote call. The hard
+requirement is the failure edge — when markers stop, the rail says *inner context
+unknown* immediately. It must never keep rendering the last trusted cwd as
+though it were current. That is exactly the false precision `nocx-uahp` exists to
+prevent.
+
+**8.3 Failed integration becomes a native mode that still earns its keep.** Not a
+grey "unavailable" chip: a typed reason — `remote-command`,
+`force-command-suspected`, `restricted-shell`, `unsupported-shell`,
+`no-secure-temp`, `startup-exited`, `readiness-timeout`, `cleanup-failed` — each
+mapping to an honest capability set and only the actions that are actually valid
+(retry in a new session, integrate explicitly from a trusted prompt, disable
+here, copy diagnostics). **The ledger keeps recording** what the user typed, with
+`outcome: unknown` and the environment's uncertain facets. Recall stays useful
+without pretending exit status or cwd is trusted. This is where every competitor
+gives up, and it costs a reason taxonomy plus a schema-backed result — no new
+remote probe.
+
+**8.4 Recovery states what it actually restored.** Explicit states —
+`bootstrapping → native usable → integrated/owned → ownership lost → native
+recovered`. The draft survives locally throughout and is **never auto-submitted**.
+AD-9 replay restores output; it does not restore trust, so "scrollback restored"
+is surfaced separately from "shell verified", and a reconnect never inherits the
+previous passport (assertion 19).
+
+**8.5 The command-existence snapshot rides along, free.** `nocx.bash:362`
+already starts `compgen -c` in the background at source time and emits the result
+over OSC 636. The moment the launcher sources that script on the far side, it
+works there — so typing `systemctl` on a host without systemd, or `apt` on RHEL,
+is marked **before Enter**, using knowledge of the remote machine. Cost is
+genuinely zero; the code exists. Its one dependency is a writable
+`${TMPDIR:-/tmp}` on the remote — the same dependency as the zsh launcher — and
+when that is absent the snapshot is simply absent and the facet reads `unknown`,
+never "every command is fine".
+
+## 9. Surfaces
 
 Every control comes from `frontend/src/ui/` — the kit already has what this
 needs, so nothing bespoke is built.
@@ -360,7 +424,7 @@ needs, so nothing bespoke is built.
   auditable manifest — paths, hashes, insertion anchor — and removes only bytes
   whose hash still matches, presenting a three-way diff otherwise.
 
-## 9. Repairs folded in
+## 10. Repairs folded in
 
 - `nocx-zys2` — remote `VERSION` written before the gates.
 - `nocx-difd` — `ssh -G` must surface `RemoteCommand` (and `RequestTTY`).
@@ -370,7 +434,7 @@ needs, so nothing bespoke is built.
   remote helper" and defers it. Warp's warpify is Tier A shell hooks — this
   epic, not deferred. Renamed here.
 
-## 10. Acceptance, as assertions
+## 11. Acceptance, as assertions
 
 Authored before implementation (AGENTS.md rule 4), stated as intervals where the
 invariant is one (rule 3).
@@ -435,9 +499,36 @@ invariant is one (rule 3).
     there with the right environment identity and exit status, recall, exit to
     the parent, ownership restored.
 
+For the five promises of §8:
+
+21. **The passport, and its provenance.** Connecting through a jump host as a
+    non-root user yields one readiness passport, and the surface renders
+    endpoint, route, user, shell and integration each with its correct
+    confidence; an omitted facet renders `unknown`. A container that reports a
+    hostname contradicting the connection endpoint renders **both** claims with
+    their claimants, and neither overwrites the other.
+22. **The passport costs no subprocess.** The remote process accounting for the
+    startup interval shows no fork for `uname`, `git`, `kubectl`, a package
+    manager or container detection, and time-to-first-prompt on a fixture host
+    stays within a stated budget of the unintegrated baseline.
+23. **The rail tells the truth at the edge.** A draft composed on host A and
+    carried to host B behind a jump host is shown paired with B's endpoint and
+    cwd before Enter; after entering an unintegrated inner shell the affected
+    facets read `unknown` on the next render, and the last trusted cwd is never
+    presented as current.
+24. **Native mode still earns its keep.** Against a `ForceCommand` fixture, the
+    session remains usable through native input, the typed reason is visible, the
+    ledger holds the typed command with `outcome: unknown`, no enhanced ownership
+    is claimed, and only the actions valid for that reason are offered.
+25. **The remote snapshot marks before Enter.** On a host without `systemd`, the
+    word `systemctl` is marked unknown in the editor before submission, using the
+    remote host's command set; on a host with no writable `${TMPDIR:-/tmp}` no
+    snapshot arrives, the facet reads `unknown`, and **no** word is marked — the
+    absent snapshot never renders as "every command exists".
+
 `cmd/devharness` runs the real backend headless, so this is reachable.
 
-## 11. Explicitly out of scope
+## 12. Explicitly out of scope
 
 - The Tier-B helper: remote file tree, remote editing, codebase indexing.
 - `fish`. Windows remote hosts. Port forwarding (`nocx-wzc4`).
@@ -446,7 +537,43 @@ invariant is one (rule 3).
 - Automatic repair of drifted rc files — detect and offer a diff; do not become
   a remote dotfile manager.
 
-## 12. Scope, decided
+Deferred to their own epics, because each is a body of work the launcher does
+not supply and would otherwise hold this epic hostage:
+
+- **Destructive-command guardrails** — "this is production, you are root, and
+  this command is unusual here". Needs a conservative shell AST, criticality
+  (`nocx-uahp.3`), a confidence-aware policy and false-positive measurement.
+  `nocx-euze` owns it. Shipping a verb matcher instead ("warn on `rm`") would
+  become wallpaper within a week, which is worse than shipping nothing.
+- **"This failed here; here is what worked"** — needs durable environment
+  identity plus causal edges (`rerun-of`, `supersedes`); text similarity is not
+  enough. Belongs with `nocx-ms7v`.
+- **A cross-session operations palette** over three tabs' ledgers. Belongs with
+  the ledger/environment epics; cramming it here turns shell bootstrap into
+  workspace management.
+- **Environment-bound secret readiness** — does `{{secret:NAME}}` resolve *here*,
+  answered from metadata without sending the secret anywhere. A vault-policy
+  feature; this epic only guarantees remote submissions travel the same
+  vault-safe editor path.
+- **A remote session that outlives nocx.** Startup shell code cannot make a
+  process survive; that honestly needs tmux integration or the Tier-B helper,
+  with its own threat model and lifecycle contract.
+
+Rejected outright, as tempting and wrong:
+
+- **A comprehensive startup census** — OS release, git branch, container runtime,
+  k8s context, cloud account, tool versions. Several are expensive, some trigger
+  network or credential-helper activity, and all are stale the moment the user
+  changes directory. Collect only what establishes identity and honesty (§8.1);
+  discover the rest lazily when a visible feature needs it.
+- **Automatic replay or migration of a command between hosts.** Files,
+  credentials, versions and side effects are not portable, and no environment
+  diff can prove equivalence. Insertion with visible provenance is useful;
+  automatic execution elsewhere is a remote foot-gun.
+- **A generative copilot at the prompt.** nocx's advantage here is authoritative
+  context, not generated prose. Make the known facts impossible to miss first.
+
+## 13. Scope, decided
 
 **This epic ships nocx-opened SSH plus the explicit in-band fallback.** The
 `docker exec` / `sudo` / `su` adapters of §5.3 move to a follow-on epic: each is
