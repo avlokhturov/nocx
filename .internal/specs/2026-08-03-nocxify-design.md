@@ -415,11 +415,13 @@ invariant is one (rule 3).
 14. **History truth.** After one nocxified command, live and persisted remote
     history hold exactly what the shell executed and the ledger exactly what the
     user typed; any difference is visible with its reason.
-15. **No silent rewrite.** Aliases, functions, pipelines, redirections, multiline
-    input, `--` and conflicting TTY flags all send the editor document unchanged;
-    the integration action is unavailable or demands confirmation.
-16. **Adapter transparency.** Per adapter: exit 0, nonzero, signal termination,
-    Ctrl-C, Ctrl-Z, resize and disconnect match the unwrapped command.
+15. **No silent rewrite** *(this epic: holds vacuously — nothing rewrites a
+    command yet, and the assertion is what keeps it that way)*. Aliases,
+    functions, pipelines, redirections, multiline input, `--` and conflicting
+    TTY flags all send the editor document unchanged.
+16. **Adapter transparency** *(owned by `nocx-eepi`, not asserted here)*. Per
+    adapter: exit 0, nonzero, signal termination, Ctrl-C, Ctrl-Z, resize and
+    disconnect match the unwrapped command.
 17. **Ownership interval.** Ownership begins only after readiness plus a clean
     A→B, ends at submit/C/alternate-buffer/anomaly, and cannot resume without
     another clean A→B.
