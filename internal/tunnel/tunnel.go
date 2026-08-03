@@ -1,0 +1,342 @@
+// Package tunnel implements the port-forwarding domain model (spec §7): one
+// record covering local (-L), remote (-R) and dynamic (-D) forwards from day
+// one, with the LOCAL strategy implemented behind a strategy interface
+// (AD-8). Remote and dynamic land later into the same model — a direction
+// flag threaded into one forwarding loop collapses under both, which is why
+// the model carries all three now.
+package tunnel
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"net"
+	"sync"
+
+	"github.com/shady2k/nocx/internal/ssh"
+)
+
+// Direction names the three forwarding strategies the model covers.
+type Direction string
+
+const (
+	// DirectionLocal forwards a local listener to a remote destination via
+	// one direct-tcpip channel per accepted connection (-L). The only
+	// implemented strategy.
+	DirectionLocal Direction = "local"
+	// DirectionRemote creates a listener on the remote host (-R): governed
+	// by the server's AllowTcpForwarding / PermitListen, needs its own
+	// threat warning. Not yet implemented.
+	DirectionRemote Direction = "remote"
+	// DirectionDynamic serves a local SOCKS proxy (-D): needs a SOCKS
+	// server and a destination policy. Not yet implemented.
+	DirectionDynamic Direction = "dynamic"
+)
+
+// Bind is an address:port pair — requested or actual.
+type Bind struct {
+	Host string
+	Port int
+}
+
+// DefaultLocalHost is the default local bind address: IPv4 loopback.
+// `localhost` is ambiguous across systems, and all-interfaces is an explicit
+// advanced choice carrying a warning — never the default (spec §7.1).
+const DefaultLocalHost = "127.0.0.1"
+
+// Provenance says where a tunnel definition came from (spec §7): a human
+// typed it, a detected row created it, or a profile established it.
+type Provenance string
+
+const (
+	ProvenanceManual   Provenance = "manual"
+	ProvenanceDetected Provenance = "detected"
+	ProvenanceProfile  Provenance = "profile"
+)
+
+// Spec is the static definition of a forward: what was asked for, before any
+// lifecycle state. One definition covers all three directions (spec D4).
+type Spec struct {
+	Direction   Direction
+	Bind        Bind   // requested bind; Port 0 allocates (resolved at start)
+	Destination string // "host:port"; empty for dynamic
+	Scope       string // owning tab id or profile id (spec §7 scope/owner)
+	Provenance  Provenance
+}
+
+// State is the lifecycle state of a tunnel.
+type State string
+
+const (
+	// StateStarting: created, not yet bound.
+	StateStarting State = "starting"
+	// StateRunning: bound and forwarding.
+	StateRunning State = "running"
+	// StateStopped: no longer forwarding, for a named reason.
+	StateStopped State = "stopped"
+)
+
+// StopReason explains why a stopped tunnel stopped.
+type StopReason string
+
+const (
+	// StopReasonUser: stopped by the owner.
+	StopReasonUser StopReason = "user"
+	// StopReasonConnectionLost: the SSH connection died. The tunnel never
+	// silently rebinds and never claims to still be running; restoration is
+	// nocx-9le.7's boundary.
+	StopReasonConnectionLost StopReason = "connection lost"
+	// StopReasonError: a bind or acquire failure at start.
+	StopReasonError StopReason = "error"
+)
+
+// Outcome explains why a strategy stopped. Valid once the strategy's done
+// channel has closed.
+type Outcome struct {
+	StopReason StopReason
+	Err        error
+}
+
+// Connector acquires an owned lease on the pooled SSH connection for a
+// forward. The strategies take their OWN lease (spec §7.3) — never the tab's
+// reference — so closing the creating tab releases the tab's reference, not
+// the forward's, and one tab's teardown never kills another tab's forward on
+// the same connection.
+type Connector interface {
+	TunnelConn(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.TunnelConn, error)
+}
+
+// strategy implements one forwarding direction behind an interface (AD-8):
+// local is implemented; remote and dynamic land later into this same slot.
+// There is never a direction switch inside an implementation.
+type strategy interface {
+	// start acquires the connection lease, binds the listener, and begins
+	// forwarding. The bind happens BEFORE it reports (spec §7.1): EADDRINUSE,
+	// an invalid address and a permission error are synchronous,
+	// user-visible failures, never discoveries by a later goroutine. On
+	// success it returns the ACTUAL bind — a requested port 0 is resolved
+	// by the OS and reported, never left as 0. The port is never pre-checked
+	// (TOCTOU); the listen itself is the check.
+	start(ctx context.Context, host string, opts []ssh.ConnectOption) (Bind, error)
+	// stop tears the listener and in-flight streams down (user stop).
+	stop()
+	// done closes when the strategy stops for any reason: user, error,
+	// connection loss.
+	done() <-chan struct{}
+	// outcome is valid once done has closed.
+	outcome() Outcome
+}
+
+// Tunnel is one forward. It carries the full record the spec §7 names —
+// direction, requested and actual bind, destination, scope/owner, lifecycle
+// state, error reason, provenance — plus the strategy behind it (AD-8).
+// Static fields are immutable after New; lifecycle state is read through the
+// accessors.
+type Tunnel struct {
+	ID          string
+	Direction   Direction
+	Bind        Bind // requested bind
+	Destination string
+	Scope       string
+	Provenance  Provenance
+
+	conn Connector
+
+	mu         sync.Mutex
+	impl       strategy
+	ActualBind Bind
+	state      State
+	stopReason StopReason
+	err        error
+
+	done     chan struct{}
+	doneOnce sync.Once
+}
+
+// New creates a Tunnel record for spec. It does not start anything. The bind
+// host defaults to DefaultLocalHost when empty; the requested port is left
+// untouched — the OS answers at start (trap 2: no pre-checking).
+func New(spec Spec, conn Connector) (*Tunnel, error) {
+	switch spec.Direction {
+	case DirectionLocal, DirectionRemote:
+		if spec.Destination == "" {
+			return nil, fmt.Errorf("tunnel: %s destination is required", spec.Direction)
+		}
+		if _, _, err := net.SplitHostPort(spec.Destination); err != nil {
+			return nil, fmt.Errorf("tunnel: invalid %s destination %q: %w", spec.Direction, spec.Destination, err)
+		}
+	case DirectionDynamic:
+		// no destination
+	case "":
+		return nil, errors.New("tunnel: direction is required")
+	default:
+		return nil, fmt.Errorf("tunnel: unknown direction %q", spec.Direction)
+	}
+	if conn == nil {
+		return nil, errors.New("tunnel: nil connector")
+	}
+	if spec.Bind.Host == "" {
+		spec.Bind.Host = DefaultLocalHost
+	}
+	return &Tunnel{
+		ID:          newID(),
+		Direction:   spec.Direction,
+		Bind:        spec.Bind,
+		Destination: spec.Destination,
+		Scope:       spec.Scope,
+		Provenance:  spec.Provenance,
+		conn:        conn,
+		state:       StateStarting,
+		done:        make(chan struct{}),
+	}, nil
+}
+
+// newID mints the tunnel's backend id (spec §7.3: every forward has its own
+// backend id). Same shape as session.NewID: crypto/rand failure is treated
+// as unreachable, and a deterministic fallback would mint colliding ids.
+func newID() string {
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	return hex.EncodeToString(b[:])
+}
+
+// Start binds the listener and begins forwarding. The bind happens before
+// this returns (spec §7.1): EADDRINUSE, an invalid address and a permission
+// error are synchronous, user-visible failures. On success ActualBind
+// carries the real bound address — a requested port 0 is resolved to the
+// OS-assigned port. On failure the tunnel is stopped with StopReasonError.
+func (t *Tunnel) Start(ctx context.Context, host string, opts ...ssh.ConnectOption) error {
+	t.mu.Lock()
+	if t.state != StateStarting {
+		t.mu.Unlock()
+		return fmt.Errorf("tunnel %s: already started (state %s)", t.ID, t.state)
+	}
+	impl, err := strategyFor(t.Direction, t.Bind, t.Destination, t.conn)
+	if err != nil {
+		t.state = StateStopped
+		t.stopReason = StopReasonError
+		t.err = err
+		t.mu.Unlock()
+		t.doneOnce.Do(func() { close(t.done) })
+		return err
+	}
+	t.impl = impl
+	t.mu.Unlock()
+
+	actual, err := impl.start(ctx, host, opts)
+	if err != nil {
+		t.mu.Lock()
+		t.state = StateStopped
+		t.stopReason = StopReasonError
+		t.err = err
+		t.mu.Unlock()
+		t.doneOnce.Do(func() { close(t.done) })
+		return err
+	}
+
+	t.mu.Lock()
+	t.ActualBind = actual
+	t.state = StateRunning
+	t.mu.Unlock()
+
+	// Watch the strategy: when it stops — user, error, connection loss —
+	// move the record to stopped and signal Done. If Stop already moved it,
+	// the state guard below keeps the earlier reason.
+	go func() {
+		<-impl.done()
+		out := impl.outcome()
+		t.mu.Lock()
+		if t.state == StateRunning {
+			t.state = StateStopped
+			t.stopReason = out.StopReason
+			t.err = out.Err
+		}
+		t.mu.Unlock()
+		t.doneOnce.Do(func() { close(t.done) })
+	}()
+	return nil
+}
+
+// Stop tears the tunnel down: the listener closes, in-flight streams are
+// closed, and the connection lease is released. The record moves to
+// stopped:user. Idempotent.
+func (t *Tunnel) Stop() {
+	t.mu.Lock()
+	impl := t.impl
+	t.mu.Unlock()
+	if impl != nil {
+		impl.stop()
+	}
+	t.stopRecord(StopReasonUser, nil)
+}
+
+// stopRecord moves the record to stopped unless it already stopped for an
+// earlier reason — a user Stop never overwrites a connection loss, and a
+// late loss never overwrites a user stop.
+func (t *Tunnel) stopRecord(reason StopReason, cause error) {
+	t.mu.Lock()
+	// A never-started tunnel (Stop before Start) also lands here; a stopped
+	// tunnel keeps its earlier reason — a user Stop never overwrites a
+	// connection loss, and a late loss never overwrites a user stop.
+	if t.state == StateRunning || t.state == StateStarting {
+		t.state = StateStopped
+		t.stopReason = reason
+		t.err = cause
+	}
+	t.mu.Unlock()
+	t.doneOnce.Do(func() { close(t.done) })
+}
+
+// Done closes when the tunnel stops for any reason: user stop, bind error,
+// connection loss.
+func (t *Tunnel) Done() <-chan struct{} { return t.done }
+
+// State returns the lifecycle state.
+func (t *Tunnel) State() State {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.state
+}
+
+// StopReason explains why a stopped tunnel stopped. Valid once State is
+// StateStopped.
+func (t *Tunnel) StopReason() StopReason {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.stopReason
+}
+
+// Err is the error behind a stopped tunnel: the bind or acquire failure, or
+// the transport error behind a connection loss. Nil for a clean user stop.
+func (t *Tunnel) Err() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.err
+}
+
+// Actual returns the actual bind — the address the listener really holds.
+// Only meaningful after Start succeeded: a requested port 0 is resolved to
+// the OS-assigned port here, never reported as 0.
+func (t *Tunnel) Actual() Bind {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.ActualBind
+}
+
+// strategyFor picks the strategy behind the AD-8 interface. This is the only
+// place a direction maps to an implementation; the strategies themselves
+// never switch on direction.
+func strategyFor(dir Direction, bind Bind, dest string, conn Connector) (strategy, error) {
+	switch dir {
+	case DirectionLocal:
+		return newLocal(bind, dest, conn), nil
+	case DirectionRemote:
+		return nil, fmt.Errorf("tunnel: remote (-R) strategy is not implemented yet")
+	case DirectionDynamic:
+		return nil, fmt.Errorf("tunnel: dynamic (-D) strategy is not implemented yet")
+	default:
+		return nil, fmt.Errorf("tunnel: unknown direction %q", dir)
+	}
+}

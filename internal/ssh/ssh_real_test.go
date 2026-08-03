@@ -51,6 +51,27 @@ type testSSHServer struct {
 	execCommands chan string
 	// shellRequests counts answered "shell" requests (session.Shell calls).
 	shellRequests int
+
+	// liveConns tracks established server-side SSH connections so a test can
+	// kill them to simulate transport loss. Guarded by liveMu (serveConn
+	// registers from the accept loop while a test may kill concurrently).
+	liveMu    sync.Mutex
+	liveConns map[*gossh.ServerConn]struct{}
+}
+
+// killConns closes every established server-side connection, simulating
+// transport loss for the clients. Closing the server side makes the
+// client's transport fail, which is what a real network loss does.
+func (s *testSSHServer) killConns() {
+	s.liveMu.Lock()
+	conns := make([]*gossh.ServerConn, 0, len(s.liveConns))
+	for c := range s.liveConns {
+		conns = append(conns, c)
+	}
+	s.liveMu.Unlock()
+	for _, c := range conns {
+		_ = c.Close()
+	}
 }
 
 func startTestSSHServer(t *testing.T) *testSSHServer {
@@ -73,7 +94,6 @@ func startTestSSHServer(t *testing.T) *testSSHServer {
 	if err != nil {
 		t.Fatalf("test server listen: %v", err)
 	}
-
 	srv := &testSSHServer{
 		t:             t,
 		hostSigner:    hostKey,
@@ -83,6 +103,7 @@ func startTestSSHServer(t *testing.T) *testSSHServer {
 		shellReady:    make(chan struct{}),
 		windowChanged: make(chan struct{}, 8),
 		execCommands:  make(chan string, 8),
+		liveConns:     make(map[*gossh.ServerConn]struct{}),
 	}
 
 	go srv.acceptLoop(config)
@@ -121,6 +142,7 @@ func startTestSSHServerWithUserKey(t *testing.T, userKey gossh.Signer) *testSSHS
 		shellReady:    make(chan struct{}),
 		windowChanged: make(chan struct{}, 8),
 		execCommands:  make(chan string, 8),
+		liveConns:     make(map[*gossh.ServerConn]struct{}),
 	}
 
 	go srv.acceptLoop(config)
@@ -150,6 +172,15 @@ func (s *testSSHServer) serveConn(conn net.Conn, config *gossh.ServerConfig) {
 		_ = conn.Close()
 		return
 	}
+	s.liveMu.Lock()
+	s.liveConns[sshConn] = struct{}{}
+	s.liveMu.Unlock()
+	defer func() {
+		s.liveMu.Lock()
+		delete(s.liveConns, sshConn)
+		s.liveMu.Unlock()
+	}()
+
 	go gossh.DiscardRequests(reqs)
 
 	for newChan := range chans {
@@ -172,7 +203,6 @@ func (s *testSSHServer) serveConn(conn net.Conn, config *gossh.ServerConfig) {
 			_ = newChan.Reject(gossh.UnknownChannelType, "unknown channel type")
 		}
 	}
-
 	_ = sshConn.Close()
 }
 

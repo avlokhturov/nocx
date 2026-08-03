@@ -48,6 +48,8 @@ func startTestSSHServerWithKey(t *testing.T, signer gossh.Signer) *testSSHServer
 		addr:          listener.Addr().String(),
 		shellReady:    make(chan struct{}),
 		windowChanged: make(chan struct{}, 8),
+		execCommands:  make(chan string, 8),
+		liveConns:     make(map[*gossh.ServerConn]struct{}),
 	}
 
 	go srv.acceptLoop(config)
