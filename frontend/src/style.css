@@ -510,9 +510,18 @@
   color: var(--color-text-dim);
 }
 
+/* Left-to-right: the chips that say WHERE (location, cwd) group at the start,
+   and the right-hand group is pushed out by its own auto margin.
+
+   This used to be `justify-content: space-between`, which is right for two
+   children and wrong for three. A local block has no location chip, so the row
+   was [cwd, right] and space-between put them at the two ends, exactly as
+   intended. An SSH block adds the location chip, and the same rule then spaced
+   three children evenly — parking the cwd chip in the dead centre of the
+   header. Nobody saw it until shell integration started producing blocks over
+   SSH at all. */
 .cmd-header-chips {
   display: flex;
-  justify-content: space-between;
   align-items: center;
   gap: 8px;
 }
@@ -522,6 +531,7 @@
   align-items: center;
   gap: 8px;
   flex: none;
+  margin-left: auto;
 }
 
 .cmd-header-text {
