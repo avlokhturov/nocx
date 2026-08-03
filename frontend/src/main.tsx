@@ -281,6 +281,30 @@ async function main() {
     new ActionsQuickConnectProvider(
       () => tm.newTab(),
       () => openSettingsTab().startNewConnection(),
+      // Sandboxed shell… action (ADR-0019 §3.2): live flag + backend status
+      // on every open; picker → new sandboxed tab. Cancellation is a no-op.
+      {
+        state: async () => {
+          const snap = await profileClient.getSnapshot()
+          const enabled = snap.values['sandbox.enabled'] === true
+          let status: Awaited<ReturnType<WSClient['sandboxStatus']>> | null = null
+          if (enabled) {
+            try {
+              status = await client.sandboxStatus()
+            } catch {
+              status = null
+            }
+          }
+          return { enabled, status }
+        },
+        open: () => {
+          void (async () => {
+            const picked = await dialogClient.openDirectoryDialog()
+            if (!picked.path) return // cancelled: no-op
+            tm.newSandboxedTab(picked.path)
+          })()
+        },
+      },
     ),
     sshProvider,
     new SSHAliasQuickConnectProvider(profileClient, (host, user, port) =>
