@@ -37,6 +37,7 @@ import { parseQuickConnect, type ProfileClient } from './profiles'
 import type { Tab } from './tabs'
 import { Dialog } from './ui/dialog'
 import { SearchField } from './ui/search-field'
+import { aliasRows, profileRows } from './quick-connect-assembly'
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Public interfaces
@@ -121,26 +122,17 @@ export class SSHQuickConnectProvider implements QuickConnectProvider {
   ) {}
 
   async getItems(): Promise<QuickConnectItem[]> {
-    const profiles = await this.profileClient.listProfiles()
-    // A profile saved before its host was filled in is not a connection: opening
-    // it hands the backend an empty address and the tab comes up on "Terminal
-    // failed to start". It also rendered as a row with an empty primary label —
-    // a stray indent rather than a line. The palette lists what can be
-    // connected to; finishing such a profile is what the New-connection action
-    // above is for.
-    return profiles
-      .filter((p) => p.options.host != null && p.options.host.trim() !== '')
-      .map((p) => {
-        const user = p.options.user
-        const host = p.options.host
-        const label = user ? `${user}@${host}` : host
-        return {
-          id: p.id,
-          label,
-          detail: p.name,
-          run: () => void this.newSSHTab(p.id, host, user),
-        }
-      })
+    // The saved-profile half of the shared host assembly
+    // (quick-connect-assembly.ts): the picker and completion list the same
+    // rows — only the run callback is this provider's. A profile saved
+    // before its host was filled in is filtered out there, not here.
+    const profiles = profileRows(await this.profileClient.listProfiles())
+    return profiles.map((p) => ({
+      id: p.id,
+      label: p.label,
+      detail: p.detail,
+      run: () => void this.newSSHTab(p.id, p.host, p.user),
+    }))
   }
 }
 
@@ -160,7 +152,10 @@ export class SSHAliasQuickConnectProvider implements QuickConnectProvider {
   async getItems(): Promise<QuickConnectItem[]> {
     const response = await this.profileClient.listSSHAliases()
 
-    // Degraded resolver: surface the condition rather than hiding it.
+    // Degraded resolver: surface the condition rather than hiding it. The
+    // row is rendered from the typed condition (quick-connect-assembly.ts
+    // carries it as data, never as a label) — an empty list would read as
+    // "you have no hosts".
     if (response.unavailable != null) {
       return [
         {
@@ -177,27 +172,21 @@ export class SSHAliasQuickConnectProvider implements QuickConnectProvider {
       return []
     }
 
-    // Get saved profiles for deduplication: an alias already targeted by a
-    // saved profile is suppressed (priority is ours).
-    const profiles = await this.profileClient.listProfiles()
-    const coveredAliases = new Set(
-      profiles
-        .filter((p) => p.options.host != null && p.options.host.trim() !== '')
-        .map((p) => p.options.host),
-    )
-
-    return response.aliases
-      .filter((a) => !coveredAliases.has(a.alias))
-      .map((a) => {
-        const label = a.user ? `${a.user}@${a.alias}` : a.alias
-        return {
-          id: `__ssh_alias:${a.alias}`,
-          label,
-          detail: a.hostName !== a.alias ? a.hostName : undefined,
-          system: true,
-          run: () => void this.newTabByHost(a.alias, a.user, a.port),
-        }
-      })
+    // The live half of the shared host assembly: aliases, deduped against
+    // the saved profiles (an alias covered by a profile is suppressed — the
+    // profile is ours and wins). Only the run callback is this provider's.
+    const { aliases } = aliasRows({
+      profiles: await this.profileClient.listProfiles(),
+      aliases: response.aliases,
+      unavailable: null,
+    })
+    return aliases.map((a) => ({
+      id: a.id,
+      label: a.label,
+      detail: a.detail,
+      system: true,
+      run: () => void this.newTabByHost(a.alias, a.user, a.port),
+    }))
   }
 }
 

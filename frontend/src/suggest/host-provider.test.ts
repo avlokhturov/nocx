@@ -1,10 +1,9 @@
-// @vitest-environment jsdom
+// @vitest-environment node
 // Host provider contracts (bead nocx-n9i6): `ssh <TAB>` offers the hosts
 // the quick-connect picker shows — profiles plus live aliases, deduped and
 // degraded-resolver-surfaced by the SAME assembly (host-provider.ts routes
-// it, it does not rebuild it). The tests live here rather than in
-// providers.test.ts (node) because the routed assembly is the quick-connect
-// UI module, whose solid-js/web import chain needs a DOM.
+// quick-connect-assembly.ts, it does not rebuild it). Node environment:
+// the assembly is plain code now, so these tests need no DOM.
 import { describe, it, expect, vi } from 'vitest'
 import { hostProvider } from './host-provider'
 import type { SuggestContext } from './providers'

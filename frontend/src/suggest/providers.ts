@@ -1,8 +1,9 @@
 // The shipped providers (design §8.4, §8.5) — command names from the
 // OSC 636 snapshot, history over the control plane, local filesystem
 // paths, and SSH hosts routed from the quick-connect assembly (host
-// candidates are built in host-provider.ts, which providers.ts never
-// imports — see createShellProviders). Applicability is part of the
+// candidates are built in host-provider.ts from the shared non-UI module
+// quick-connect-assembly.ts — see createShellProviders). Applicability is
+// part of the
 // contract: a provider declares where it applies and is not consulted
 // outside it. In particular the local path provider is inactive on a
 // remote session (a local path must never masquerade as a remote one) and
@@ -16,6 +17,8 @@ import type { FsComplete } from '../generated/fs.complete'
 import type { Candidate } from './candidate'
 import type { CompletionToken, TokenPosition } from './token'
 import { looksLikePath } from './token'
+import { hostProvider } from './host-provider'
+import type { ProfileClient } from '../profiles'
 
 /** Per-provider cap on the candidates returned to the merge. */
 export const MAX_PROVIDER_CANDIDATES = 20
@@ -370,12 +373,12 @@ export function fsProvider(opts: {
 
 /**
  * The shell target's provider set, wired at the composition root. The host
- * provider is INJECTED rather than constructed here: it needs the
- * ProfileClient, which lives at the root — and its assembly module
- * (quick-connect.tsx) is DOM-bound, so providers.ts never imports it.
- * Registered ABOVE history: in `ssh` argument position hosts must outrank
- * whole-line history rows (the rank rung enforces it; registration order
- * only breaks the exact ties).
+ * provider is built HERE: it needs a ProfileClient, and the assembly it
+ * routes (quick-connect-assembly.ts) is plain non-UI code, so providers.ts
+ * can import it — the DOM-bound quick-connect module never enters this
+ * chain. Registered ABOVE history: in `ssh` argument position hosts must
+ * outrank whole-line history rows (the rank rung enforces it; registration
+ * order only breaks the exact ties).
  */
 export function createShellProviders(opts: {
   store: CommandSnapshotStore
@@ -384,11 +387,11 @@ export function createShellProviders(opts: {
   /** Present when a ProfileClient is wired (the app); absent in tests and
    *  raw-mode contexts where no connection manager exists — a provider that
    *  can never answer is not registered. */
-  hostProvider?: SuggestionProvider
+  profileClient?: ProfileClient
 }): SuggestionProvider[] {
   return [
     commandProvider(opts.store),
-    ...(opts.hostProvider ? [opts.hostProvider] : []),
+    ...(opts.profileClient ? [hostProvider({ profileClient: opts.profileClient })] : []),
     // The fs.complete seam travels to history too: the stale-path demotion
     // (a history row whose trailing token no longer exists ranks last)
     // uses the same backend call the path provider makes.

@@ -1,35 +1,17 @@
 // The host provider (bead nocx-n9i6): `ssh <TAB>` offers the hosts the
 // quick-connect picker shows — the same profiles-plus-aliases assembly,
-// ROUTED not rebuilt. The quick-connect providers already do the dedup (an
-// alias covered by a saved profile is suppressed, because the profile is
-// ours and wins) and the degraded-resolver surfacing (when `ssh -G` cannot
-// answer, the picker says so instead of showing an empty list); completion
-// instantiates them read-only and reads their labels. Two derivations of
-// "which hosts do I know" would drift, and the completion popup's copy would
-// be the one nobody notices is stale — so there is only the picker's.
-//
-// This module imports the quick-connect UI module, which is DOM-bound
-// (solid-js/web's delegateEvents runs at module scope), so it can only be
-// loaded in a DOM context: its tests are jsdom, and the composition root
-// (terminal-content.ts) is browser/jsdom-only. providers.ts never imports
-// it — the host provider is INJECTED there. The coordinator is sequencing
-// lifting the assembly into a shared non-UI module; until then this is the
-// single derivation's read-only consumer.
-import { SSHQuickConnectProvider, SSHAliasQuickConnectProvider } from '../quick-connect'
-import type { QuickConnectItem } from '../quick-connect'
+// ROUTED not rebuilt. quick-connect-assembly.ts is the shared non-UI module
+// (plain code, no solid-js): quick-connect.tsx renders its rows, completion
+// reads them. Two derivations of "which hosts do I know" would drift, and
+// the completion popup's copy would be the one nobody notices is stale — so
+// there is only the picker's. The degraded-resolver condition is typed data
+// on the assembly, never a label to parse: when `ssh -G` cannot answer, it
+// is surfaced as the empty reason instead of an empty list.
+import { aliasRows, profileRows } from '../quick-connect-assembly'
 import type { ProfileClient } from '../profiles'
 import type { Candidate, CandidateRange } from './candidate'
 import type { SuggestionProvider } from './providers'
 import { commandWord } from './providers'
-
-/** The item id the quick-connect alias provider emits when `ssh -G` cannot
- *  answer (quick-connect.tsx). The completion reads the degraded condition
- *  back off that row instead of re-deriving it. */
-const ALIASES_UNAVAILABLE_ID = '__ssh_aliases_unavailable__'
-/** The label prefix that row carries (`SSH config: ${reason}`). The reason
- *  code is not a field on the item, so it is recovered from the label — the
- *  coupling the shared assembly module will remove. */
-const UNAVAILABLE_LABEL_PREFIX = 'SSH config: '
 
 /**
  * Where the query sits in a host label, or null when it does not match.
@@ -60,24 +42,7 @@ function hostPartAt(label: string, query: string): number {
   return host.startsWith(query) ? at + 1 : -1
 }
 
-/** The reason code off the degraded row's label — the item carries it only
- *  there (`SSH config: ${reason}`, quick-connect.tsx); the whole label is
- *  the fallback if that format ever changes. */
-function degradedReason(item: QuickConnectItem): string {
-  return item.label.startsWith(UNAVAILABLE_LABEL_PREFIX)
-    ? item.label.slice(UNAVAILABLE_LABEL_PREFIX.length)
-    : item.label
-}
-
 export function hostProvider(opts: { profileClient: ProfileClient }): SuggestionProvider {
-  // The picker's assembly, instantiated read-only: completion never
-  // activates an item (no tab is opened from a completion), so the run
-  // callbacks are unreachable and say so.
-  const neverRun = (): never => {
-    throw new Error('a completion host item is never activated')
-  }
-  const profiles = new SSHQuickConnectProvider(opts.profileClient, neverRun)
-  const aliases = new SSHAliasQuickConnectProvider(opts.profileClient, neverRun)
   return {
     id: 'host',
     targetId: 'shell',
@@ -88,24 +53,28 @@ export function hostProvider(opts: { profileClient: ProfileClient }): Suggestion
     applicable: (ctx) =>
       ctx.position === 'argument' && commandWord(ctx) === 'ssh' && !ctx.token.text.includes('/'),
     async suggest(ctx, signal) {
-      const [profileItems, aliasItems] = await Promise.all([
-        profiles.getItems(),
-        aliases.getItems(),
+      // One assembly, one fetch: profiles and aliases are read together so
+      // the dedup (an alias covered by a saved profile is suppressed) sees
+      // the same snapshot both halves were built from.
+      const [profileList, aliasesResponse] = await Promise.all([
+        opts.profileClient.listProfiles(),
+        opts.profileClient.listSSHAliases(),
       ])
       if (signal.aborted) return { candidates: [] }
 
-      // The degraded-resolver row is the condition, not a host: it is
-      // surfaced as the empty reason when nothing else answered, and never
-      // offered as a candidate (profiles still answer on their own).
-      const degraded = aliasItems.find((it) => it.id === ALIASES_UNAVAILABLE_ID)
-      const rows = degraded === undefined ? aliasItems : aliasItems.filter((it) => it !== degraded)
+      const profiles = profileRows(profileList)
+      const { aliases, degraded } = aliasRows({
+        profiles: profileList,
+        aliases: aliasesResponse.aliases,
+        unavailable: aliasesResponse.unavailable,
+      })
 
       const candidates: Candidate[] = []
-      for (const item of [...profileItems, ...rows]) {
+      for (const item of [...profiles, ...aliases]) {
         const matchRanges = hostMatchRanges(item.label, ctx.token.text)
         if (matchRanges === null) continue
         candidates.push({
-          // The item's own id (a profile id, or `__ssh_alias:<alias>`) is
+          // The row's own id (a profile id, or `__ssh_alias:<alias>`) is
           // the stable identity the merge dedups on — unique across both
           // halves, and the same host can never read alike twice.
           id: `host:${item.id}`,
@@ -121,13 +90,16 @@ export function hostProvider(opts: { profileClient: ProfileClient }): Suggestion
           eligibleForGhostText: true,
         })
       }
-      if (candidates.length > 0 || degraded === undefined) return { candidates }
+      // The degraded condition is data, not a row: it is surfaced as the
+      // empty reason when nothing else answered, and never offered as a
+      // candidate (profiles still answer on their own).
+      if (candidates.length > 0 || degraded === null) return { candidates }
       return {
         candidates: [],
         emptyReason: {
           kind: 'hosts-unavailable',
-          reason: degradedReason(degraded),
-          detail: degraded.detail ?? '',
+          reason: degraded.reason,
+          detail: degraded.detail,
         },
       }
     },
