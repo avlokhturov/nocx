@@ -3,7 +3,12 @@ export { Checkbox, type CheckboxProps } from './checkbox'
 export { IconButton, type IconButtonSize } from './icon-button'
 export { Select, type SelectProps, type SelectOption } from './select'
 export { TextField, type TextFieldProps } from './text-field'
-export { SearchField, type SearchFieldProps } from './search-field'
+export {
+  SearchField,
+  createSearchFieldDisplay,
+  type SearchFieldProps,
+  type SearchFieldDisplayOptions,
+} from './search-field'
 export { Toolbar, type ToolbarProps } from './toolbar'
 export { Section, type SectionProps } from './section'
 export { Page, type PageProps, type PageScrollerHandle } from './page'
@@ -55,3 +60,4 @@ export {
   type ToastLevel,
   type ToastOptions,
 } from './toast'
+export { CompletionDropdown, type CompletionDropdownCallbacks } from './completion-dropdown'

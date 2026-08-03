@@ -10,6 +10,7 @@ import (
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
+	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
@@ -765,6 +766,91 @@ func TestVaultDeleteSecret_RejectsSecretID(t *testing.T) {
 	}
 }
 
+// ── vault.createSecret ─────────────────────────────────────────────────
+
+// The DTO's own conformance: the response always carries the name that was
+// used — the requested one for an ordinary create, the collision-resolved
+// one when the caller asked for resolution. The renderer builds the
+// {{secret:NAME}} reference from this answer, never from the name it sent.
+func TestVaultCreateSecret_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "vault.createSecret.schema.json")
+	cases := map[string]vaultCreateSecretResponse{
+		"plain create":    {Name: "prod-password"},
+		"resolved create": {Name: "prod-password-2"},
+	}
+	for name, resp := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(resp)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "vault.createSecret DTO")
+		})
+	}
+}
+
+func TestVaultCreateSecret_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "vault.createSecret.schema.json")
+	h := newInventoryHarness(t)
+	h.setupAndUnseal()
+
+	first := jsonrpcCall(t, h.conn, "vault.createSecret", map[string]any{
+		"name": "openrouter.ai", "kind": "password", "value": "sk-first",
+	})
+	firstRaw := decodeCreateSecretResult(t, first)
+	validateJSON(t, schema, firstRaw, "vault.createSecret result (real socket, plain)")
+	var firstResult vaultCreateSecretResponse
+	if err := json.Unmarshal(firstRaw, &firstResult); err != nil {
+		t.Fatalf("decode first result: %v", err)
+	}
+	if firstResult.Name != "openrouter.ai" {
+		t.Errorf("plain create name = %q, want the requested name", firstResult.Name)
+	}
+
+	// The same name again, with resolution: the vault picks the next free
+	// suffix and reports it. The renderer could never predict this.
+	second := jsonrpcCall(t, h.conn, "vault.createSecret", map[string]any{
+		"name": "openrouter.ai", "kind": "password", "value": "sk-second", "resolve": true,
+	})
+	secondRaw := decodeCreateSecretResult(t, second)
+	validateJSON(t, schema, secondRaw, "vault.createSecret result (real socket, resolved)")
+	var secondResult vaultCreateSecretResponse
+	if err := json.Unmarshal(secondRaw, &secondResult); err != nil {
+		t.Fatalf("decode second result: %v", err)
+	}
+	if secondResult.Name == "openrouter.ai" {
+		t.Errorf("resolved create returned the collided name %q — the vault must suffix", secondResult.Name)
+	}
+
+	// Both rows exist in the inventory under their real names.
+	inv := h.callInventory()
+	names := make([]string, 0, len(inv.Entries))
+	for _, e := range inv.Entries {
+		names = append(names, e.Name)
+	}
+	if len(names) != 2 || names[0] == names[1] {
+		t.Errorf("inventory names = %v, want two distinct rows", names)
+	}
+}
+
+// decodeCreateSecretResult reads the raw `result` bytes of a createSecret
+// response — the exact payload the socket carried, which is what the
+// over-the-wire rule validates — and fails on a JSON-RPC error.
+func decodeCreateSecretResult(t *testing.T, raw json.RawMessage) json.RawMessage {
+	t.Helper()
+	var env struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, string(raw))
+	}
+	if env.Error != nil {
+		t.Fatalf("vault.createSecret: %+v", env.Error)
+	}
+	return env.Result
+}
+
 // ── connections.test / connections.trustHostKey ────────────────────────
 
 // The DTO's own conformance: both host-key shapes, and the one field that
@@ -937,5 +1023,305 @@ func TestConnectionsTrustHostKey_OverTheWireConformsToContract(t *testing.T) {
 	validateJSON(t, schema, envelope.Result, "connections.trustHostKey result over the wire")
 	if !truster.called {
 		t.Fatal("expected the truster to be called")
+	}
+}
+
+// ── history.query ─────────────────────────────────────────────────────────
+
+// The DTO's own conformance: field tags, omitempty behaviour, null-vs-omitted
+// for the nullable fields, enum spelling, and the never-null entries slice.
+func TestHistoryQuery_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "history.query.schema.json")
+
+	exit := 1
+	ended := int64(1_750_000_000_000)
+	started := ended - 2_300
+	horizon := int64(1_700_000_000_000)
+	cases := map[string]historyQueryResponse{
+		// Everything populated, including the nullable fields — a running
+		// entry must render exitCode as null and endedAt as null, never as 0
+		// and never as the epoch; a store with a horizon states it.
+		"running": {
+			Entries: []historyQueryEntry{
+				{ID: "9", Command: "make test", Cwd: "/repo", Host: "", Status: "running", MaskedCount: 0, MaskedKinds: []string{}, Redactions: []redactionWire{}},
+			},
+			Scope:     "directory",
+			Exhausted: true,
+			Source:    "store",
+			Coverage:  &horizon,
+		},
+		"populated": {
+			Entries: []historyQueryEntry{
+				{ID: "42", Command: "ssh prod deploy", Cwd: "/srv/api", Host: "prod.example.com", Status: "failure", ExitCode: &exit, StartedAt: &started, EndedAt: &ended, MaskedCount: 2, MaskedKinds: []string{"openai", "jwt"}, Redactions: []redactionWire{{Kind: "openai", Start: 31, End: 42, Prefix: "sk-p", Suffix: "7890"}}},
+			},
+			Scope:     "host",
+			Exhausted: false,
+			Source:    "store",
+			Coverage:  &horizon,
+		},
+		// The empty answer: the store answered and the rung had no matches.
+		// entries must marshal to [] never null (nocx-25k9.14 class), and the
+		// five required fields must all be present.
+		"empty rung": {
+			Entries:   []historyQueryEntry{},
+			Scope:     "everywhere",
+			Exhausted: true,
+			Source:    "store",
+			Coverage:  &horizon,
+		},
+		// The unanswerable question: no store at all. Coverage is null —
+		// the schema's ["integer","null"] — never omitted: the overlay
+		// decides what to render from its value, and a missing key would
+		// throw on read.
+		"no store": {
+			Entries:   []historyQueryEntry{},
+			Scope:     "directory",
+			Exhausted: true,
+			Source:    "session",
+			Coverage:  nil,
+		},
+	}
+
+	for name, resp := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(resp)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "history.query DTO")
+		})
+	}
+}
+
+// The real method through the real socket. Nothing here names a field, so
+// nothing here can omit one; the schema's additionalProperties:false plus
+// required makes the key set exact in both directions. Two states are driven:
+// a store with rows (source=store, with a horizon) and the source=session
+// fallback the overlay must label "this session only".
+func TestHistoryQuery_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "history.query.schema.json")
+	ctx := context.Background()
+
+	t.Run("store answered", func(t *testing.T) {
+		ended := int64(1_750_000_000_000)
+		started := ended - 4_100
+		horizon := int64(1_700_000_000_000)
+		exit := 0
+		fake := &fakeHistoryDB{page: content.HistoryPage{
+			Entries: []content.CommandRecord{
+				{ID: 7, Command: "git status", Cwd: "/repo", Host: "", Status: content.StatusSuccess, ExitCode: &exit, StartedAt: &started, EndedAt: &ended},
+				{ID: 6, Command: "make", Cwd: "/repo", Host: "", Status: content.StatusFailure},
+			},
+			HasRows:   true,
+			Exhausted: true,
+			Coverage:  &horizon,
+		}}
+		ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+			WithContentDB(fake))
+		if err := ws.Start(ctx); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		defer func() { _ = ws.Stop(ctx) }()
+
+		conn := connectWS(t, ws)
+		resp := vaultCall(t, conn, "history.query", map[string]any{
+			"scope": "directory", "cwd": "/repo", "limit": 50,
+		}, 1)
+		if resp.Error != nil {
+			t.Fatalf("unexpected error: %+v", resp.Error)
+		}
+		validateJSON(t, schema, resp.Result, "history.query result (store)")
+
+		// The horizon is a real value off the real socket, not a field the
+		// test built — decode and name it, the way the renderer will.
+		var got struct {
+			Coverage *int64 `json:"coverage"`
+		}
+		if err := json.Unmarshal(resp.Result, &got); err != nil {
+			t.Fatalf("decode coverage: %v", err)
+		}
+		if got.Coverage == nil || *got.Coverage != horizon {
+			t.Fatalf("coverage off the socket = %v, want %d", got.Coverage, horizon)
+		}
+	})
+
+	t.Run("no store answers session", func(t *testing.T) {
+		ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)))
+		if err := ws.Start(ctx); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		defer func() { _ = ws.Stop(ctx) }()
+
+		conn := connectWS(t, ws)
+		resp := vaultCall(t, conn, "history.query", map[string]any{"scope": "everywhere"}, 1)
+		if resp.Error != nil {
+			t.Fatalf("unexpected error: %+v", resp.Error)
+		}
+		validateJSON(t, schema, resp.Result, "history.query result (session)")
+	})
+}
+
+// ── fs.complete ──────────────────────────────────────────────────────────
+
+// The DTO's own conformance: field tags, omitempty behaviour, and the
+// never-null entries slice.
+func TestFsComplete_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "fs.complete.schema.json")
+
+	cases := map[string]fsCompleteResponse{
+		// Everything populated: a file and a directory. isDir must marshal
+		// exactly, and path is the absolute path the renderer keys on.
+		"populated": {
+			Entries: []fsCompleteEntry{
+				{Name: "src", Path: "/repo/src", IsDir: true},
+				{Name: "main.go", Path: "/repo/main.go", IsDir: false},
+			},
+		},
+		// The empty answer: no matches is [] never null (nocx-25k9.14 class).
+		"empty": {
+			Entries: []fsCompleteEntry{},
+		},
+	}
+
+	for name, resp := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(resp)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "fs.complete DTO")
+		})
+	}
+}
+
+// The real method through the real socket. Nothing here names a field, so
+// nothing here can omit one; the schema's additionalProperties:false plus
+// required makes the key set exact in both directions. The fixture is a real
+// directory on the backend's filesystem — the only honest source for a
+// filesystem completion.
+func TestFsComplete_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "fs.complete.schema.json")
+	ctx := context.Background()
+
+	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)))
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+
+	conn := connectWS(t, ws)
+
+	t.Run("relative completion", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("x"), 0o600); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		if err := os.Mkdir(filepath.Join(dir, "src"), 0o750); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+
+		resp := vaultCall(t, conn, "fs.complete", map[string]any{"text": "ma", "cwd": dir}, 2)
+		if resp.Error != nil {
+			t.Fatalf("unexpected error: %+v", resp.Error)
+		}
+		validateJSON(t, schema, resp.Result, "fs.complete result (relative)")
+
+		var got fsCompleteResponse
+		if err := json.Unmarshal(resp.Result, &got); err != nil {
+			t.Fatalf("unmarshal result: %v", err)
+		}
+		if len(got.Entries) != 1 || got.Entries[0].Name != "main.go" || got.Entries[0].IsDir {
+			t.Errorf("entries = %+v, want exactly [main.go (file)]", got.Entries)
+		}
+	})
+
+	t.Run("no match answers empty", func(t *testing.T) {
+		dir := t.TempDir()
+		resp := vaultCall(t, conn, "fs.complete", map[string]any{"text": "zzz", "cwd": dir}, 3)
+		if resp.Error != nil {
+			t.Fatalf("unexpected error: %+v", resp.Error)
+		}
+		validateJSON(t, schema, resp.Result, "fs.complete result (empty)")
+
+		var got fsCompleteResponse
+		if err := json.Unmarshal(resp.Result, &got); err != nil {
+			t.Fatalf("unmarshal result: %v", err)
+		}
+		if got.Entries == nil || len(got.Entries) != 0 {
+			t.Errorf("entries = %v, want [] (never null)", got.Entries)
+		}
+	})
+
+	t.Run("empty text is refused", func(t *testing.T) {
+		resp := vaultCall(t, conn, "fs.complete", map[string]any{"text": "", "cwd": t.TempDir()}, 4)
+		if resp.Error == nil {
+			t.Fatal("empty text must be an invalid-params error, got success")
+		}
+		if resp.Error.Code != -32602 {
+			t.Errorf("error code = %d, want -32602", resp.Error.Code)
+		}
+	})
+}
+
+// ── vault.resolveLine ──────────────────────────────────────────────────────
+
+// The DTO's own conformance: field tags, the never-null refs slice, and the
+// two-valued resolved flag. The handler never sends a null refs list — no
+// references is [].
+func TestVaultResolveLine_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "vault.resolveLine.schema.json")
+	cases := map[string]vaultResolveLineResponse{
+		"no refs": {
+			Line: "ls -la",
+			Refs: []vaultResolveLineRef{},
+		},
+		"mixed": {
+			Line: "run --password hunter2 --other {{secret:ghost}}",
+			Refs: []vaultResolveLineRef{
+				{Name: "db-password", Resolved: true},
+				{Name: "ghost", Resolved: false},
+			},
+		},
+	}
+	for name, resp := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(resp)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "vault.resolveLine DTO")
+		})
+	}
+}
+
+// The real method through the real socket: a secret minted the way the
+// Secrets page mints one, resolved by the name the inventory reports. The
+// resolved value rides the line (it is going to the PTY) and the refs carry
+// only the name and the outcome — nothing here names a field, so nothing
+// here can omit one.
+func TestVaultResolveLine_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "vault.resolveLine.schema.json")
+	h := newInventoryHarness(t)
+	h.setupAndUnseal()
+	h.mintPassword("sk-proj-abcdef1234567890", "prod-api-key")
+
+	resp := vaultCall(t, h.conn, "vault.resolveLine", map[string]any{
+		"line": `curl -H "Authorization: Bearer {{secret:prod-api-key}}" https://api`,
+	}, 1)
+	if resp.Error != nil {
+		t.Fatalf("vault.resolveLine: %+v", resp.Error)
+	}
+	validateJSON(t, schema, resp.Result, "vault.resolveLine result (real socket)")
+
+	// The value really landed in the line — the wire carried it to the
+	// caller, which is the only place it is allowed to go.
+	var got struct {
+		Line string `json:"line"`
+	}
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Line != `curl -H "Authorization: Bearer sk-proj-abcdef1234567890" https://api` {
+		t.Errorf("line = %q, want the substituted line", got.Line)
 	}
 }

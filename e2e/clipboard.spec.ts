@@ -119,8 +119,10 @@ test.describe('paste', () => {
       button: 'right',
     })
 
-    // Wait for the paste to land in the editor.
-    await expect(page.locator(INPUT)).toHaveValue(pastedCommand, {
+    // Wait for the paste to land in the editor. The input surface is CM6's
+    // contenteditable contentDOM (ADR-0010), so the text is read back from the
+    // DOM, not from a .value property.
+    await expect(page.locator(INPUT)).toHaveText(pastedCommand, {
       timeout: 3000,
     })
 

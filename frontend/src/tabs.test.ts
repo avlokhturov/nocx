@@ -1421,33 +1421,53 @@ describe('TabManager', () => {
   })
 
   describe('B.5 geometry authority', () => {
-    // ResizeObserver callback captured by the stub so we can trigger it.
-    let roCallback: ((entries: Array<{ contentRect: DOMRectReadOnly }>) => void) | null = null
+    // ResizeObserver stub that records each observer's callback keyed by the
+    // element it was asked to observe, so tests can drive the observer that
+    // belongs to a specific pane. The real observer is created in
+    // Tab.setupViewportObserver() — but CM6's EditorView also constructs its
+    // own ResizeObservers (in CommandEditor's constructor during content
+    // mount, for scroll/tooltip measurement), so a single captured callback
+    // would silently point fireResize at the editor's observer.
+    type ViewportObserverStub = {
+      callback: (entries: Array<{ contentRect: DOMRectReadOnly }>) => void
+      observed: Element[]
+    }
+    let observerStubs: ViewportObserverStub[] = []
 
     beforeEach(() => {
       resetSessionCounter()
       vi.clearAllMocks()
-      roCallback = null
-      // Stub ResizeObserver so we capture the callback rather than relying
-      // on jsdom's missing implementation. The real observer is created in
-      // Tab.setupViewportObserver().
+      observerStubs = []
       ;(globalThis as Record<string, unknown>).ResizeObserver = class {
-        constructor(cb: (entries: Array<{ contentRect: DOMRectReadOnly }>) => void) {
-          roCallback = cb
+        callback: ViewportObserverStub['callback']
+        observed: Element[] = []
+        constructor(cb: ViewportObserverStub['callback']) {
+          this.callback = cb
+          observerStubs.push(this)
         }
-        observe() {}
+        observe(el: Element) {
+          this.observed.push(el)
+        }
         unobserve() {}
         disconnect() {}
       }
     })
 
+    /** The stub whose observe() was called with `el` — the pane observer Tab
+     *  created, never one of the editor's. */
+    function observerOf(el: Element): ViewportObserverStub {
+      const stub = observerStubs.find((s) => s.observed.includes(el))
+      expect(stub).toBeDefined()
+      return stub as ViewportObserverStub
+    }
+
     /**
-     * Helper: trigger the captured ResizeObserver callback with the given
-     * contentRect, then flush the rAF that _deliverViewport schedules.
+     * Helper: trigger the captured ResizeObserver callback for `pane` with
+     * the given contentRect, then flush the rAF that _deliverViewport
+     * schedules.
      */
-    async function fireResize(width: number, height: number): Promise<void> {
-      expect(roCallback).not.toBeNull()
-      roCallback!([{ contentRect: { width, height } as DOMRectReadOnly }])
+    async function fireResize(pane: Element, width: number, height: number): Promise<void> {
+      observerOf(pane).callback([{ contentRect: { width, height } as DOMRectReadOnly }])
       // Flush the requestAnimationFrame that coalesces delivery.
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
     }
@@ -1483,7 +1503,7 @@ describe('TabManager', () => {
 
       // Simulate a pane resize through the ResizeObserver (which Tab created
       // when the pane entered the DOM via addTab).
-      await fireResize(1024, 768)
+      await fireResize(tab.pane, 1024, 768)
 
       // The presentation layer's observer must have delivered the viewport
       // through content.viewportChanged → renderer.fitViewport.
@@ -1545,7 +1565,7 @@ describe('TabManager', () => {
       })
 
       // Fire resize BEFORE mount starts.
-      await fireResize(1024, 768)
+      await fireResize(tab.pane, 1024, 768)
 
       // Clean up.
       tab.pane.remove()
@@ -1576,8 +1596,8 @@ describe('TabManager', () => {
         configurable: true,
       })
 
-      await fireResize(800, 600)
-      await fireResize(800, 600) // same rect — must be suppressed
+      await fireResize(tab.pane, 800, 600)
+      await fireResize(tab.pane, 800, 600) // same rect — must be suppressed
 
       const renderers = await getRendererMocks()
       // eslint-disable-next-line @typescript-eslint/unbound-method
@@ -1627,7 +1647,7 @@ describe('TabManager', () => {
         configurable: true,
       })
 
-      await fireResize(0, 0)
+      await fireResize(tab.pane, 0, 0)
 
       // Must NOT deliver a zero viewport.
       // eslint-disable-next-line @typescript-eslint/unbound-method

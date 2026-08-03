@@ -79,7 +79,7 @@ func TestConversationListReturnsSentinel(t *testing.T) {
 
 func TestCommandHistoryAddReturnsSentinel(t *testing.T) {
 	chr := content.NewStub(&testLogger{}).CommandHistory()
-	err := chr.Add(context.Background(), content.CommandRecord{Command: "ls"})
+	_, err := chr.Add(context.Background(), content.CommandRecord{Command: "ls"})
 	if !errors.Is(err, content.ErrNotImplemented) {
 		t.Errorf("expected ErrNotImplemented, got %v", err)
 	}
@@ -104,6 +104,14 @@ func TestCommandHistoryGetByIDReturnsSentinel(t *testing.T) {
 func TestCommandHistoryFindByPrefixReturnsSentinel(t *testing.T) {
 	chr := content.NewStub(&testLogger{}).CommandHistory()
 	_, err := chr.FindByPrefix(context.Background(), "git", 5)
+	if !errors.Is(err, content.ErrNotImplemented) {
+		t.Errorf("expected ErrNotImplemented, got %v", err)
+	}
+}
+
+func TestCommandHistoryQueryReturnsSentinel(t *testing.T) {
+	chr := content.NewStub(&testLogger{}).CommandHistory()
+	_, err := chr.Query(context.Background(), content.ScopeDirectory, "/repo", "", 10, nil, "")
 	if !errors.Is(err, content.ErrNotImplemented) {
 		t.Errorf("expected ErrNotImplemented, got %v", err)
 	}

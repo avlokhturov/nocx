@@ -17,11 +17,12 @@ import { createComponent } from 'solid-js'
 import { SettingsContent, SURFACE_SETTINGS, SINGLETON_SETTINGS } from './settings-content'
 import { ProfileClient } from './profiles'
 import { Dispatcher } from './dispatcher'
-import type { Declaration } from './settings'
+import type { Declaration } from './settings-domain'
 import type { TabHost } from './tab-content'
 import { VaultSection } from './vault'
 import type { VaultClient } from './vault-client'
-import { render, cleanup } from '@solidjs/testing-library'
+import { render, cleanup, fireEvent } from '@solidjs/testing-library'
+import { log } from './log'
 // ── Test declarations ────────────────────────────────────────────────
 // 5 declarations spanning 3 sections and all control types.
 
@@ -489,6 +490,228 @@ describe('SettingsContent', () => {
     expect(labels).toContain('Terminal')
     expect(labels).toContain('Application')
     expect(labels).toContain('AI')
+  })
+
+  // ── Number rows: unit suffix, range caption, out-of-range error (nocx-w7h.7) ──
+
+  it('number rows render the unit beside the value, the range caption beneath, and the error in the same slot', async () => {
+    const historyDecls: Declaration[] = [
+      {
+        key: 'history.retentionDays',
+        section: 'History',
+        label: 'Keep history for',
+        description: 'How long a completed command is kept.',
+        control: 'number',
+        dataClass: 'publicConfig',
+        default: 0,
+        min: 0,
+        max: 3650,
+        unit: 'days',
+      },
+      {
+        key: 'history.retentionMiB',
+        section: 'History',
+        label: 'Command history size',
+        description: 'How much command text to keep.',
+        control: 'number',
+        dataClass: 'publicConfig',
+        default: 4096,
+        min: 64,
+        max: 1048576,
+        unit: 'MiB',
+      },
+      {
+        key: 'history.diskCeilingMiB',
+        section: 'History',
+        label: 'Disk space limit',
+        description: 'Physical ceiling for the history database plus its write-ahead log.',
+        control: 'number',
+        dataClass: 'publicConfig',
+        default: 8192,
+        min: 128,
+        max: 2097152,
+        unit: 'MiB',
+      },
+    ]
+    mockReady(client, {
+      declarations: historyDecls,
+      values: {
+        'history.retentionDays': 30,
+        'history.retentionMiB': 4096,
+        'history.diskCeilingMiB': 8192,
+      },
+    })
+    await content.mount(target, host, signal)
+
+    // The units the owner will read: days, MiB, MiB — beside each value.
+    const units = Array.from(target.querySelectorAll('.ui-text-field__unit')).map(
+      (e) => e.textContent,
+    )
+    expect(units).toEqual(['days', 'MiB', 'MiB'])
+
+    // The range caption beneath each field, read from the declaration's
+    // Min/Max — and the old floating bounds span is gone.
+    const captions = Array.from(target.querySelectorAll('.ui-text-field__caption')).map(
+      (e) => e.textContent,
+    )
+    expect(captions).toEqual(['0 – 3650 days', '64 – 1048576 MiB', '128 – 2097152 MiB'])
+    // (retentionDays is 30 here — an ordinary number, so the range shows.)
+    expect(target.querySelector('.ui-settings-bounds')).toBeNull()
+
+    // A value outside the range replaces the caption with the error in the
+    // same slot — still exactly one slot per field.
+    const daysInput = Array.from(
+      target.querySelectorAll<HTMLInputElement>('input[type="number"]'),
+    )[0]
+    fireEvent.input(daysInput, { target: { value: '5000' } })
+    await vi.waitFor(() => {
+      const slot = target.querySelector('.ui-text-field__caption[data-tone="error"]')
+      expect(slot?.textContent).toBe('Must be at most 3650 days')
+    })
+    expect(target.querySelectorAll('.ui-text-field__caption').length).toBe(3)
+  })
+
+  // displayValue exists to turn a value into the TEXT of a control, and it
+  // warns when it can find neither a usable value nor a usable default —
+  // which is precisely what a boolean looks like to it. Routing the
+  // range/error checks through it for EVERY row therefore printed
+  // "unusable value and default for setting history.enabled, got boolean,
+  // defaultType boolean" on every mount. Reported from the console, where
+  // it is the only place it shows.
+  it('mounting a page of toggles logs nothing', async () => {
+    const warn = vi.spyOn(log, 'warn')
+    mockReady(client, {
+      declarations: [
+        {
+          key: 'history.enabled',
+          section: 'History',
+          label: 'Keep command history',
+          description: 'Record commands for recall after a restart.',
+          control: 'toggle',
+          dataClass: 'publicConfig',
+          default: true,
+        },
+        {
+          key: 'history.outputEnabled',
+          section: 'History',
+          label: 'Keep command output',
+          description: 'Whether the text commands printed is kept.',
+          control: 'toggle',
+          dataClass: 'publicConfig',
+          default: true,
+        },
+      ],
+      values: { 'history.enabled': true, 'history.outputEnabled': false },
+    })
+    await content.mount(target, host, signal)
+
+    // Two rows, each with its switch (the rail's own modified filter is a
+    // checkbox too, so scope the count to the rows).
+    expect(target.querySelectorAll('.ui-settings-row .ui-checkbox').length).toBe(2)
+    expect(warn).not.toHaveBeenCalled()
+  })
+
+  // The value the owner actually sees on a fresh install is the sentinel,
+  // and "0" above "0 – 3650 days" says nothing about what zero does. The
+  // caption slot explains it until the number becomes an ordinary one.
+  it('a number sitting at its declared sentinel reads what the sentinel means', async () => {
+    const decl: Declaration = {
+      key: 'history.retentionDays',
+      section: 'History',
+      label: 'Keep history for',
+      description: 'How long a completed command is kept.',
+      control: 'number',
+      dataClass: 'publicConfig',
+      default: 0,
+      min: 0,
+      max: 3650,
+      unit: 'days',
+      zeroLabel: 'Kept until the size limit is reached',
+    }
+    mockReady(client, { declarations: [decl], values: { 'history.retentionDays': 0 } })
+    await content.mount(target, host, signal)
+
+    const slot = () => target.querySelector('.ui-text-field__caption')
+    expect(slot()?.textContent).toBe('Kept until the size limit is reached')
+    // Still the quiet caption tone, not an error — zero is a valid value.
+    expect(slot()?.getAttribute('data-tone')).toBe('caption')
+
+    // Type a real number and the range comes back in the same slot.
+    const input = target.querySelector<HTMLInputElement>('input[type="number"]')!
+    fireEvent.input(input, { target: { value: '30' } })
+    await vi.waitFor(() => {
+      expect(slot()?.textContent).toBe('0 – 3650 days')
+    })
+    expect(target.querySelectorAll('.ui-text-field__caption').length).toBe(1)
+  })
+
+  // Both layers reject an out-of-range number — the screen from the
+  // declaration's Min/Max, the backend because it is the authority. Only one
+  // of them talks to the user. Found in a real browser, not here: the
+  // backend's `settings: "history.diskCeilingMiB" validation failed: value 1
+  // below minimum 128` rendered directly under the caption that already said
+  // "Must be at least 128 MiB", in the backend's language and wider than the
+  // field's column.
+  it('the backend rejection is not repeated under a field whose caption already says it', async () => {
+    const decl: Declaration = {
+      key: 'history.diskCeilingMiB',
+      section: 'History',
+      label: 'Disk space limit',
+      description: 'Physical ceiling for the history database.',
+      control: 'number',
+      dataClass: 'publicConfig',
+      default: 8192,
+      min: 128,
+      max: 2097152,
+      unit: 'MiB',
+    }
+    mockReady(client, { declarations: [decl], values: { 'history.diskCeilingMiB': 8192 } })
+    const backendMessage =
+      'settings: "history.diskCeilingMiB" validation failed: value 1 below minimum 128'
+    vi.spyOn(client, 'setSetting').mockRejectedValue(new Error(backendMessage))
+    await content.mount(target, host, signal)
+
+    const input = target.querySelector<HTMLInputElement>('input[type="number"]')!
+    fireEvent.input(input, { target: { value: '1' } })
+
+    await vi.waitFor(() => {
+      const slot = target.querySelector('.ui-text-field__caption[data-tone="error"]')
+      expect(slot?.textContent).toBe('Must be at least 128 MiB')
+    })
+    expect(target.querySelector('.ui-settings-error')).toBeNull()
+    expect(target.textContent).not.toContain('validation failed')
+  })
+
+  // The narrowness of that suppression is the point: a rejection the screen
+  // could NOT predict still reaches the user verbatim, because a save that
+  // fails silently is the worse defect.
+  it('a rejection the declaration does not predict still reaches the user verbatim', async () => {
+    const decl: Declaration = {
+      key: 'history.diskCeilingMiB',
+      section: 'History',
+      label: 'Disk space limit',
+      description: 'Physical ceiling for the history database.',
+      control: 'number',
+      dataClass: 'publicConfig',
+      default: 8192,
+      min: 128,
+      max: 2097152,
+      unit: 'MiB',
+    }
+    mockReady(client, { declarations: [decl], values: { 'history.diskCeilingMiB': 8192 } })
+    vi.spyOn(client, 'setSetting').mockRejectedValue(new Error('settings: store is read-only'))
+    await content.mount(target, host, signal)
+
+    // In range — the caption slot has nothing to say, so the surface must.
+    const input = target.querySelector<HTMLInputElement>('input[type="number"]')!
+    fireEvent.input(input, { target: { value: '4096' } })
+
+    await vi.waitFor(() => {
+      expect(target.querySelector('.ui-settings-error')?.textContent).toBe(
+        'settings: store is read-only',
+      )
+    })
+    expect(target.querySelector('.ui-text-field__caption[data-tone="error"]')).toBeNull()
   })
 })
 

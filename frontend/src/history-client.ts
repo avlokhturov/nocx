@@ -1,0 +1,76 @@
+// The one frontend seam that ships command history over the control plane
+// (nocx-rtg0.13, AD-1 as amended by nocx-m64b). The renderer owns the VT
+// state (AD-6) and derives the facts of a completed command from it; these
+// two functions are where those facts cross — a small structured record
+// after the fact, never a copy of the output. When a fuller event envelope
+// lands (nocx-rtg0.3), only this module changes: the ledger and the recall
+// overlay call here and nowhere else.
+
+import type { CommandRecord } from './command-ledger'
+import type { HistoryQuery } from './generated/history.query'
+import type { HistoryRecord } from './generated/history.record'
+import type { WSClient } from './ipc'
+import type { RecallScope } from './recall'
+
+/** The history.record request — the ledger's facts minus what never crosses
+ *  (the session-local id, the live marker-line accessor, the disposed flag)
+ *  and minus the output, which is never retained (ADR-0008). */
+export interface HistoryRecordParams {
+  command: string
+  cwd: string
+  host: string
+  status: CommandRecord['status']
+  exitCode: number | null
+  startedAt: number | null
+  endedAt: number | null
+  trusted: boolean
+}
+
+/** Send one completed command's facts to the store. Best-effort by design: a
+ *  socket drop or an unavailable store loses the entry for this session —
+ *  the honest cost of not blocking the terminal — and the recall overlay
+ *  still answers from the session ledger until the store comes back.
+ *
+ *  Resolves with the store's ack — what was masked and, when a credential
+ *  was detected, the pending-capture offers — or null on failure. The ack
+ *  is what lets the block show the masked command and attach the
+ *  after-submit receipt; a dropped record must never surface as a terminal
+ *  error, so the caller treats null exactly like "nothing to show". */
+export function recordCommand(client: WSClient, rec: CommandRecord): Promise<HistoryRecord | null> {
+  const params: HistoryRecordParams = {
+    command: rec.command,
+    cwd: rec.cwd,
+    host: rec.host,
+    status: rec.status,
+    exitCode: rec.exitCode,
+    // The ledger clocks wall-clock epoch milliseconds (Date.now()), already
+    // integral; the rounding is defensive for an injected fractional clock
+    // in tests — the schema says integer, so the wire copy rounds.
+    startedAt: rec.startedAt === null ? null : Math.round(rec.startedAt),
+    endedAt: rec.endedAt === null ? null : Math.round(rec.endedAt),
+    trusted: rec.trusted,
+  }
+  return client
+    .call<HistoryRecord>('history.record', params)
+    .then((ack) => ack)
+    .catch(() => null)
+}
+export async function queryHistory(
+  client: WSClient,
+  scope: RecallScope,
+  cwd: string,
+  host: string,
+  text?: string,
+): Promise<HistoryQuery> {
+  const params: Record<string, unknown> = { scope }
+  if (scope === 'directory') {
+    params.cwd = cwd
+    params.host = host
+  } else if (scope === 'host') {
+    params.host = host
+  }
+  // The search filter (nocx-ms7v). Omitted when empty rather than sent as "",
+  // so "no filter" is one state on the wire and not two.
+  if (text !== undefined && text !== '') params.text = text
+  return client.call<HistoryQuery>('history.query', params)
+}

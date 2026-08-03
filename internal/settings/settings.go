@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"sync"
 
 	"github.com/shady2k/nocx/internal/credential"
@@ -116,6 +117,8 @@ type Declaration struct {
 	Options     []SelectOption `json:"options,omitempty"`
 	Min         *float64       `json:"min,omitempty"`
 	Max         *float64       `json:"max,omitempty"`
+	Unit        string         `json:"unit,omitempty"`
+	ZeroLabel   string         `json:"zeroLabel,omitempty"`
 }
 
 // ── Typed setting spec types ───────────────────────────────────────────
@@ -150,6 +153,18 @@ type NumberSpec struct {
 	Default     float64
 	Min         *float64
 	Max         *float64
+	// Unit is what the number is measured in ("days", "MiB"). Declared here,
+	// beside Min/Max, so every consumer — the settings screen, an export, a
+	// future CLI — renders the same suffix. The unit never lives in prose:
+	// a description says what the setting means, not what the number counts.
+	Unit string
+	// ZeroLabel is what the value 0 MEANS when 0 is a sentinel rather than a
+	// quantity — "Kept until the size limit is reached", not "0 days". A
+	// sentinel that is explained only in prose is a sentinel nobody reads:
+	// the owner's verdict on `Keep history for = 0` was "совсем неочевидно",
+	// and the fourth sentence of the description had been explaining it.
+	// Empty means 0 is an ordinary number and needs no explanation.
+	ZeroLabel string
 }
 
 // SelectSpec is the declaration site for a dropdown setting.
@@ -251,6 +266,8 @@ type Number struct {
 	default_    float64
 	min         *float64
 	max         *float64
+	unit        string
+	zeroLabel   string
 }
 
 func (n *Number) Key() string             { return n.key }
@@ -275,6 +292,8 @@ func (n *Number) toDeclaration() Declaration {
 		Default:     n.default_,
 		Min:         n.min,
 		Max:         n.max,
+		Unit:        n.unit,
+		ZeroLabel:   n.zeroLabel,
 	}
 }
 
@@ -400,6 +419,8 @@ func MustRegisterNumber(spec NumberSpec) *Number {
 		default_:    spec.Default,
 		min:         spec.Min,
 		max:         spec.Max,
+		unit:        spec.Unit,
+		zeroLabel:   spec.ZeroLabel,
 	}
 	assertValidKey(n.key)
 	allDecls = append(allDecls, n)
@@ -451,6 +472,88 @@ func assertValidKey(key string) {
 }
 
 // ── Declared settings ──────────────────────────────────────────────────
+
+// fp is a pointer-to-float64 helper for NumberSpec bounds.
+func fp(v float64) *float64 { return &v }
+
+// HistoryEnabled is the "keep history at all" decision. Off means the store
+// is not written to: a command runs and no row appears.
+var HistoryEnabled = MustRegisterBool(BoolSpec{
+	Key:         "history.enabled",
+	Section:     "History",
+	Label:       "Keep command history",
+	Description: "Record commands for recall after a restart. When off, new commands are not stored and the recall panel shows only the current session; existing history stays until its retention limit.",
+	DataClass:   PublicConfig,
+	Default:     true,
+})
+
+// HistoryRetentionDays is the age-based retention limit. The label is honest
+// by design (internal/content's package doc): ordinary DELETE leaves rows in
+// WAL pages and free space, so the wording says "removed from nocx", never
+// "securely erased".
+var HistoryRetentionDays = MustRegisterNumber(NumberSpec{
+	Key:         "history.retentionDays",
+	Section:     "History",
+	Label:       "Keep history for",
+	Description: "How long a completed command is kept. Older commands are removed from nocx — removal is not secure erasure, deleted rows can remain in the database file's free space.",
+	DataClass:   PublicConfig,
+	Default:     0,
+	Min:         fp(0),
+	Max:         fp(3650),
+	Unit:        "days",
+	// The default. Age expiry is opt-in: a terminal that quietly forgets
+	// commands after N days surprises you exactly when you are looking for
+	// something old, so growth is bounded by the size budget instead. That
+	// makes 0 the value most people see, which is precisely why it has to
+	// say what it means on the screen rather than in the fourth sentence of
+	// the description.
+	ZeroLabel: "Kept until the size limit is reached",
+})
+
+// HistoryRetentionMiB is the logical retained-content budget (nocx-rtg0.11):
+// the number the user reasons about, what eviction acts on. Measured
+// amplification is ~3.2x (256 MiB of content ≈ 811 MiB on disk), so the
+// label states the real footprint rather than promising it away.
+var HistoryRetentionMiB = MustRegisterNumber(NumberSpec{
+	Key:         "history.retentionMiB",
+	Section:     "History",
+	Label:       "Command history size",
+	Description: "How much command text to keep. When it is reached the oldest commands are removed from nocx (again, not securely erased). The on-disk footprint is larger than this number: measured ~3.2x — 256 MiB of content is about 811 MiB on disk — because of the search index and encrypted pages.",
+	DataClass:   PublicConfig,
+	Default:     4096,
+	Min:         fp(64),
+	Max:         fp(1 << 20),
+	Unit:        "MiB",
+})
+
+// HistoryDiskCeilingMiB is the physical ceiling over the main database plus
+// its WAL — the second number of the two-number budget. It is separate from
+// the content size on purpose: deleting content shrinks what you keep, not
+// necessarily the file.
+var HistoryDiskCeilingMiB = MustRegisterNumber(NumberSpec{
+	Key:         "history.diskCeilingMiB",
+	Section:     "History",
+	Label:       "Disk space limit",
+	Description: "Physical ceiling for the history database plus its write-ahead log. A separate number from the content size: deleting content shrinks what you keep, not necessarily the file. When this is reached the store compacts rather than deleting more.",
+	DataClass:   PublicConfig,
+	Default:     8192,
+	Min:         fp(128),
+	Max:         fp(2 << 20),
+	Unit:        "MiB",
+})
+
+// HistoryOutputEnabled is the "keep command output separately" decision —
+// a different switch from keeping the commands, because output has very
+// different privacy and size consequences. Wired to the store's policy; the
+// capture path that produces output is nocx-de7's epic.
+var HistoryOutputEnabled = MustRegisterBool(BoolSpec{
+	Key:         "history.outputEnabled",
+	Section:     "History",
+	Label:       "Keep command output",
+	Description: "Whether the text commands printed is kept alongside the commands. Output is larger and more sensitive than the command line; commands are kept without output when this is off.",
+	DataClass:   PublicConfig,
+	Default:     true,
+})
 
 // ClipboardOSC52Suppressed persists the "Don't show again" decision on the
 // OSC 52 clipboard permission banner. Currently in-memory only
@@ -538,13 +641,13 @@ type ChangeNotifier func(revision int, keys []string)
 // Registry holds the runtime state of all settings: persisted values
 // (non-secret) in a DocumentStore and secret values in a SecretStore.
 type Registry struct {
-	mu       sync.Mutex
-	doc      storage.DocumentStore
-	secrets  credential.SecretStore
-	values   map[string]any
-	refs     map[string]credential.SecretID // secret key → SecretID
-	revision int                            // monotonic, in-memory, bumps only on successful mutation
-	notifier ChangeNotifier
+	mu        sync.Mutex
+	doc       storage.DocumentStore
+	secrets   credential.SecretStore
+	values    map[string]any
+	refs      map[string]credential.SecretID // secret key → SecretID
+	revision  int                            // monotonic, in-memory, bumps only on successful mutation
+	notifiers []ChangeNotifier
 }
 
 // SettingsSnapshot is the wire contract for settings.getSnapshot.
@@ -603,9 +706,18 @@ func New(doc storage.DocumentStore, secrets credential.SecretStore) *Registry {
 }
 
 // SetNotifier registers a callback invoked after every successful mutation.
-// Must be called before the registry is used concurrently (setup only).
+// Multiple listeners are allowed (each mutation invokes all of them); the
+// transport uses one for the settings.changed broadcast, and the composition
+// root may register another to keep the ContentDB policy in sync.
 func (r *Registry) SetNotifier(n ChangeNotifier) {
-	r.notifier = n
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.notifiers = append(r.notifiers, n)
+}
+
+// AddNotifier is SetNotifier under its honest name: appends a listener.
+func (r *Registry) AddNotifier(n ChangeNotifier) {
+	r.SetNotifier(n)
 }
 
 func descriptorByKey(key string) Descriptor {
@@ -846,6 +958,130 @@ func (r *Registry) Reset(d Descriptor) error {
 	return err
 }
 
+// ── Import-time restore ────────────────────────────────────────────────
+
+// ApplyValues restores a snapshot of non-secret setting values, validating
+// each through its declaration. It is the import-time counterpart of
+// GetSnapshot: whatever the snapshot exported, ApplyValues restores, and
+// nothing else. Unknown keys and secret-class keys are rejected — a value
+// the receiving build cannot restore must not be silently dropped, and
+// import never resolves or invents a secret (ADR-0011 §2).
+//
+// Every value is validated before anything is committed: an invalid value
+// leaves the registry unchanged, so a restore cannot half-apply.
+func (r *Registry) ApplyValues(values map[string]any) error {
+	if len(values) == 0 {
+		return nil
+	}
+
+	r.mu.Lock()
+
+	newValues := copyValues(r.values)
+	var changed []string
+
+	for key, value := range values {
+		d := descriptorByKey(key)
+		if d == nil {
+			r.mu.Unlock()
+			return &ValidationError{SettingKey: key, Message: "unknown setting cannot be restored"}
+		}
+		if d.Control() == ControlSecret {
+			r.mu.Unlock()
+			return &ValidationError{SettingKey: key, Message: "secret-class setting cannot be restored by import"}
+		}
+		typed, err := coerceValue(d, value)
+		if err != nil {
+			r.mu.Unlock()
+			return err
+		}
+		if current, ok := r.values[key]; ok && reflect.DeepEqual(current, typed) {
+			continue
+		}
+		newValues[key] = typed
+		changed = append(changed, key)
+	}
+
+	if len(changed) == 0 {
+		r.mu.Unlock()
+		return nil
+	}
+
+	ch, err := r.commitLocked(newValues, r.refs, changed)
+	r.mu.Unlock()
+	if err == nil {
+		r.finishCommit(ch)
+	}
+	return err
+}
+
+// coerceValue validates a JSON-decoded snapshot value against a setting's
+// declaration and returns the typed value the registry stores. The checks
+// mirror the typed setters' — the two paths validate the same values.
+func coerceValue(d Descriptor, value any) (any, error) {
+	switch d.Control() {
+	case ControlToggle:
+		b, ok := value.(bool)
+		if !ok {
+			return nil, &ValidationError{SettingKey: d.Key(), Value: value, Message: "expected a boolean"}
+		}
+		return b, nil
+	case ControlText:
+		s, ok := value.(string)
+		if !ok {
+			return nil, &ValidationError{SettingKey: d.Key(), Value: value, Message: "expected a string"}
+		}
+		str, ok := d.(*String)
+		if !ok {
+			return nil, &ValidationError{SettingKey: d.Key(), Message: "declared as text but is not a String key"}
+		}
+		if s == "" && str.default_ != "" {
+			return nil, &ValidationError{SettingKey: d.Key(), Value: s, Message: "value must not be empty"}
+		}
+		return s, nil
+	case ControlSelect:
+		s, ok := value.(string)
+		if !ok {
+			return nil, &ValidationError{SettingKey: d.Key(), Value: value, Message: "expected a string"}
+		}
+		sel, ok := d.(*Select)
+		if !ok {
+			return nil, &ValidationError{SettingKey: d.Key(), Message: "declared as select but is not a Select key"}
+		}
+		for _, opt := range sel.options {
+			if opt.Value == s {
+				return s, nil
+			}
+		}
+		return nil, &ValidationError{
+			SettingKey: d.Key(), Value: s,
+			Message: fmt.Sprintf("value %q is not a valid option", s),
+		}
+	case ControlNumber:
+		f, ok := toFloat64(value)
+		if !ok {
+			return nil, &ValidationError{SettingKey: d.Key(), Value: value, Message: "expected a number"}
+		}
+		n, ok := d.(*Number)
+		if !ok {
+			return nil, &ValidationError{SettingKey: d.Key(), Message: "declared as number but is not a Number key"}
+		}
+		if n.min != nil && f < *n.min {
+			return nil, &ValidationError{
+				SettingKey: d.Key(), Value: f,
+				Message: fmt.Sprintf("value %v below minimum %v", f, *n.min),
+			}
+		}
+		if n.max != nil && f > *n.max {
+			return nil, &ValidationError{
+				SettingKey: d.Key(), Value: f,
+				Message: fmt.Sprintf("value %v above maximum %v", f, *n.max),
+			}
+		}
+		return f, nil
+	}
+	return nil, &ValidationError{SettingKey: d.Key(), Value: value, Message: "unsupported control kind"}
+}
+
 // ── Secret-class methods ───────────────────────────────────────────────
 // SecretSet stores a secret-class setting value in the SecretStore. Mints
 // an opaque SecretID on first set and persists only the reference in the
@@ -933,9 +1169,9 @@ func (r *Registry) SecretExists(s *Secret) (bool, error) {
 // change captures notification state from a successful commit. The caller
 // MUST release r.mu and then call finishCommit.
 type change struct {
-	rev      int
-	notifier ChangeNotifier
-	keys     []string
+	rev       int
+	notifiers []ChangeNotifier
+	keys      []string
 }
 
 // commitLocked persists values and refs, commits the new state, and bumps
@@ -950,14 +1186,16 @@ func (r *Registry) commitLocked(values map[string]any, refs map[string]credentia
 	r.revision++
 	ck := make([]string, len(keys))
 	copy(ck, keys)
-	return change{rev: r.revision, notifier: r.notifier, keys: ck}, nil
+	return change{rev: r.revision, notifiers: append([]ChangeNotifier(nil), r.notifiers...), keys: ck}, nil
 }
 
-// finishCommit invokes the notifier if one is set. Must be called after r.mu
+// finishCommit invokes every registered notifier. Must be called after r.mu
 // is released.
 func (r *Registry) finishCommit(ch change) {
-	if ch.notifier != nil {
-		ch.notifier(ch.rev, ch.keys)
+	for _, n := range ch.notifiers {
+		if n != nil {
+			n(ch.rev, ch.keys)
+		}
 	}
 }
 

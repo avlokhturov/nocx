@@ -30,3 +30,11 @@ if (typeof HTMLDialogElement !== 'undefined' && !HTMLDialogElement.prototype.sho
     this.dispatchEvent(new Event('close', { bubbles: false }))
   }
 }
+
+// jsdom (≤ 25) does not implement Range.getClientRects; CodeMirror 6 calls it
+// to measure text geometry (coordsAtPos, measureTextSize). There is no layout
+// in jsdom, so an empty rect list is the honest answer — it stops CM6 from
+// crashing on the measurement path while never fabricating geometry.
+if (typeof Range !== 'undefined' && !Range.prototype.getClientRects) {
+  Range.prototype.getClientRects = () => []
+}

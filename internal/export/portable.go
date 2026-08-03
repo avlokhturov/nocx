@@ -207,3 +207,40 @@ func collectPrivateContent(db content.ContentDB) *PrivateContent {
 	pc.Available = true
 	return pc
 }
+
+// RestorePrivateContent writes conversations and command history carried by
+// a portable export back into the ContentDB. It is a no-op when the payload's
+// private block is nil or unavailable — such a payload carries nothing to
+// restore. When it does carry content, every item is written and the first
+// failure aborts the restore: an import must not report success after
+// silently dropping what the archive promised to carry (nocx-ojxa).
+//
+// Command history rows are restored with their timestamps; row IDs are
+// assigned by the receiving store (the record's ID field is informational).
+// Conversations keep their IDs, titles and message timelines.
+func RestorePrivateContent(db content.ContentDB, pc *PrivateContent) error {
+	if pc == nil || !pc.Available {
+		// The payload carries nothing to restore.
+		return nil
+	}
+	if db == nil {
+		// The archive carries private content and this machine has no store
+		// to put it in. Silently dropping it is the defect this fixes.
+		return errors.New("restore private content: no content database is available")
+	}
+	ctx := context.Background()
+	for _, conv := range pc.Conversations {
+		if err := db.Conversations().Save(ctx, conv); err != nil {
+			return fmt.Errorf("restore conversation %s: %w", conv.ID, err)
+		}
+	}
+	for _, rec := range pc.CommandHistory {
+		// The restored id is the row's stable identity; the store
+		// re-assigns ids on insert, so the caller ignores what Add returns
+		// (the restored record's own ID was informational at export time).
+		if _, err := db.CommandHistory().Add(ctx, rec); err != nil {
+			return fmt.Errorf("restore command history: %w", err)
+		}
+	}
+	return nil
+}

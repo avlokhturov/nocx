@@ -265,6 +265,16 @@ describe('serializeRange', () => {
     expect(html).toBe('<span class="term-line">output</span>')
   })
 
+  it('trims leading empty lines — the rows readline erased its own echo from', () => {
+    // Measured 2026-08-02: an eight-line curl left sixteen blank rows above
+    // its output and a single-line one four. They are where readline blanked
+    // its rendering of the pasted command before redrawing lower, and the
+    // count tracks the rows the command occupied.
+    const lines = [makeLine(''), makeLine(''), makeLine('output')]
+    const html = serializeRange(DEFAULT_SNAPSHOT, (y) => lines[y], 0, 2)
+    expect(html).toBe('<span class="term-line">output</span>')
+  })
+
   it('preserves interior blank lines', () => {
     const lines = [makeLine('a'), makeLine(''), makeLine('b'), makeLine('')]
     const html = serializeRange(DEFAULT_SNAPSHOT, (y) => lines[y], 0, 3)

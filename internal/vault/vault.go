@@ -932,7 +932,8 @@ func (v *Vault) SetDefaultProvider(ctx context.Context, p ProviderID) error {
 // use CreateNamed; this form records a nameless password-kind secret, which
 // the surfaces render by fallback.
 func (v *Vault) Create(ctx context.Context, value credential.Secret) (credential.SecretID, error) {
-	return v.create(ctx, value, SecretMeta{Kind: KindPassword})
+	id, _, err := v.createNamed(ctx, value, SecretMeta{Kind: KindPassword}, false)
+	return id, err
 }
 
 // CreateNamed is Create with the secret's catalogue metadata: the display
@@ -941,14 +942,33 @@ func (v *Vault) Create(ctx context.Context, value credential.Secret) (credential
 // PhasePrepared and is persisted with the record at PhaseSecretWritten — it
 // is never written by a second, independent path (ADR-0016).
 func (v *Vault) CreateNamed(ctx context.Context, value credential.Secret, meta SecretMeta) (credential.SecretID, error) {
-	if err := validateKind(meta.Kind); err != nil {
-		return "", err
-	}
-	meta.Name = strings.TrimSpace(meta.Name)
-	return v.create(ctx, value, meta)
+	id, _, err := v.createNamedResolved(ctx, value, meta, false)
+	return id, err
 }
 
-func (v *Vault) create(ctx context.Context, value credential.Secret, meta SecretMeta) (credential.SecretID, error) {
+// CreateNamedResolved is CreateNamed with atomic name-collision resolution:
+// when the requested name is already taken by a catalogue record, the next
+// free suffixed name (openrouter.ai-2, openrouter.ai-3, …) is chosen under
+// the vault lock, in the same sequence as the journal and the record, and
+// the name ACTUALLY used comes back. Two tabs saving at once can therefore
+// never both claim a name the renderer predicted — the renderer must never
+// predict that openrouter.ai-2 is free; the vault is where the real name is
+// decided. The idempotency that keeps a lost response from minting a second
+// suffixed secret lives at the caller: the save path holds the capture and
+// never re-runs the vault for a settled outcome.
+func (v *Vault) CreateNamedResolved(ctx context.Context, value credential.Secret, meta SecretMeta) (credential.SecretID, string, error) {
+	return v.createNamedResolved(ctx, value, meta, true)
+}
+
+func (v *Vault) createNamedResolved(ctx context.Context, value credential.Secret, meta SecretMeta, resolveCollisions bool) (credential.SecretID, string, error) {
+	if err := validateKind(meta.Kind); err != nil {
+		return "", "", err
+	}
+	meta.Name = strings.TrimSpace(meta.Name)
+	return v.createNamed(ctx, value, meta, resolveCollisions)
+}
+
+func (v *Vault) createNamed(ctx context.Context, value credential.Secret, meta SecretMeta, resolveCollisions bool) (credential.SecretID, string, error) {
 	t0 := time.Now()
 
 	v.mu.Lock()
@@ -957,7 +977,7 @@ func (v *Vault) create(ctx context.Context, value credential.Secret, meta Secret
 	case StateUninitialized:
 		v.mu.Unlock()
 		v.logger.Info("vault: refusing Create, not initialized")
-		return "", ErrVaultUninitialized
+		return "", "", ErrVaultUninitialized
 	case StateSealed:
 		hasInstance := v.doc.Instance != ""
 		v.mu.Unlock()
@@ -966,21 +986,30 @@ func (v *Vault) create(ctx context.Context, value credential.Secret, meta Secret
 		// this path said anything at INFO, so a whole diagnosis had to proceed
 		// by elimination.
 		v.logger.Info("vault: refusing Create, sealed", "hasInstance", hasInstance)
-		return "", ErrVaultSealed
+		return "", "", ErrVaultSealed
 	}
 	gen := v.gen
+
+	// Collision resolution happens HERE, under the lock, before the journal
+	// is written: the resolved name rides the same sequence as the record
+	// (ADR-0016), and two concurrent creates cannot both pick the same
+	// suffix.
+	name := meta.Name
+	if resolveCollisions && name != "" {
+		name = nextAvailableNameLocked(v.doc.Secrets, name)
+	}
 
 	prov, err := v.defaultWritableLocked()
 	if err != nil {
 		v.mu.Unlock()
-		return "", err
+		return "", "", err
 	}
 	provID := prov.ID()
 
 	id, mintErr := mintID(provID)
 	if mintErr != nil {
 		v.mu.Unlock()
-		return "", mintErr
+		return "", "", mintErr
 	}
 	// Journal PhasePrepared before delegating. The entry carries the
 	// catalogue metadata (ADR-0016): the name rides the sequence from here.
@@ -988,12 +1017,12 @@ func (v *Vault) create(ctx context.Context, value credential.Secret, meta Secret
 		Op:    "create",
 		NewID: id,
 		Phase: PhasePrepared,
-		Name:  meta.Name,
+		Name:  name,
 		Kind:  meta.Kind,
 	})
 	if saveErr := saveDocument(v.store, v.doc); saveErr != nil {
 		v.mu.Unlock()
-		return "", fmt.Errorf("journal save: %w", saveErr)
+		return "", "", fmt.Errorf("journal save: %w", saveErr)
 	}
 	v.mu.Unlock() // release before provider call
 
@@ -1015,14 +1044,14 @@ func (v *Vault) create(ctx context.Context, value credential.Secret, meta Secret
 		// Journal entry survives for reconciliation — do not clear it.
 		v.logger.Warn("create rejected: vault sealed during the provider call",
 			"secretID", id, "provider", provID, "duration", time.Since(t0))
-		return "", ErrVaultSealed
+		return "", "", ErrVaultSealed
 	}
 	if v.gen != gen {
 		// Journal entry survives for reconciliation — do not clear it.
 		v.logger.Warn("create rejected: vault generation advanced during the provider call",
 			"secretID", id, "provider", provID,
 			"genAtStart", gen, "genNow", v.gen, "duration", time.Since(t0))
-		return "", ErrVaultGenerationChanged
+		return "", "", ErrVaultGenerationChanged
 	}
 
 	// The put failed — the journal entry survives for reconciliation.
@@ -1030,7 +1059,7 @@ func (v *Vault) create(ctx context.Context, value credential.Secret, meta Secret
 		v.logger.Warn("provider put failed",
 			"secretID", id, "provider", provID,
 			"error", putErr, "duration", time.Since(t0))
-		return "", putErr
+		return "", "", putErr
 	}
 
 	// Advance to PhaseSecretWritten and land the catalogue record in the
@@ -1046,14 +1075,39 @@ func (v *Vault) create(ctx context.Context, value credential.Secret, meta Secret
 			break
 		}
 	}
-	v.setRecordLocked(SecretRecord{ID: id, Name: meta.Name, Kind: meta.Kind})
+	v.setRecordLocked(SecretRecord{ID: id, Name: name, Kind: meta.Kind})
 	if saveErr := saveDocument(v.store, v.doc); saveErr != nil {
-		return "", fmt.Errorf("save after create: %w", saveErr)
+		return "", "", fmt.Errorf("save after create: %w", saveErr)
 	}
 
 	v.logger.Info("secret created",
 		"secretID", id, "provider", provID, "duration", time.Since(t0))
-	return id, nil
+	return id, name, nil
+}
+
+// nextAvailableNameLocked returns the requested name when no catalogue
+// record uses it, else name-2, name-3, … — the first free suffix. Must hold
+// v.mu: the check and the journal write must be one critical section, or
+// two concurrent creates would both pick the same suffix.
+func nextAvailableNameLocked(records []SecretRecord, name string) string {
+	if !nameTaken(records, name) {
+		return name
+	}
+	for i := 2; ; i++ {
+		candidate := fmt.Sprintf("%s-%d", name, i)
+		if !nameTaken(records, candidate) {
+			return candidate
+		}
+	}
+}
+
+func nameTaken(records []SecretRecord, name string) bool {
+	for _, r := range records {
+		if r.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // ReasonUnknownProvider is returned when a provider ID does not match any

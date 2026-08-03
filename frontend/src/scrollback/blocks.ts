@@ -5,8 +5,14 @@
 
 import { serializeRange, fromITheme } from './serializer'
 import { getCurrentTheme } from '../renderers/theme-adapter'
+import { highlightShellText, onShellHighlightReady } from '../shell-highlight'
+import type { CommandSnapshotStore } from '../command-snapshot'
 import type { IBufferLine } from '@xterm/xterm'
-
+import { wordRangeIn } from '../word-selection'
+import { createSecretChipUnresolved } from '../ui/secret-chip'
+import { findReferences } from '../secret-reference'
+import { commandFragment } from '../command-text'
+import { KIND_LABELS, type SecretKind } from '../secret-kind'
 // ── Clipboard helper ────────────────────────────────────────────────────────
 
 function clipboardFallback(text: string): void {
@@ -97,6 +103,33 @@ function cwdLabel(cwd: string): string {
   return parts.slice(-2).join('/')
 }
 
+// ── Frozen-header highlight readiness ────────────────────────────────────────
+//
+// The Shiki grammar loads asynchronously at module init. A header frozen in
+// the few milliseconds before that resolves would stay plain forever, so
+// spans rendered pre-ready are registered here and repainted by
+// `highlightShellText` once the tokenizer exists. After that the registration
+// is a no-op: the grammar is loaded and every later header is coloured at
+// freeze time.
+
+let tokenizerLoaded = false
+/** Spans frozen before the grammar loaded, keyed by the tab's snapshot store
+ *  so the repaint judges against the right tab's command set. */
+const pendingHeaderSpans = new Map<HTMLElement, CommandSnapshotStore>()
+
+function refreshPendingHeaderSpans(): void {
+  for (const [el, store] of pendingHeaderSpans) {
+    const text = el.textContent ?? ''
+    if (text && text !== '(empty)') el.innerHTML = highlightShellText(text, store)
+  }
+  pendingHeaderSpans.clear()
+}
+
+onShellHighlightReady(() => {
+  tokenizerLoaded = true
+  refreshPendingHeaderSpans()
+})
+
 // ── Block DOM factory ───────────────────────────────────────────────────────
 
 /**
@@ -110,6 +143,7 @@ function createHeader(
   durationMs: number | null,
   exitCode: number | null,
   status: 'running' | 'success' | 'failure',
+  store: CommandSnapshotStore,
 ): HTMLElement {
   const header = div('cmd-header')
 
@@ -174,9 +208,34 @@ function createHeader(
   header.appendChild(chipsRow)
 
   // ── Command text (below chips) ─────────────────────────────────────
+  // A frozen header carries the same syntactic highlight pass as the live
+  // editor (same lexer, same classes — see shell-highlight.ts). A running
+  // header stays plain: the command is still being executed, and the static
+  // pass is for reading a finished command back. The frozen branch is
+  // innerHTML by design, but the pass escapes every byte of the text, so
+  // command content can never inject markup.
   const cmdSpan = document.createElement('span')
   cmdSpan.className = 'cmd-header-text'
-  cmdSpan.textContent = command || '(empty)'
+  const refs = command ? findReferences(command) : []
+  if (refs.length > 0) {
+    // A vault reference reads as a chip here, exactly as it does in the
+    // editor — it is the same fact about the same text, and showing
+    // `{{secret:openrouter.ai}}` raw in the block made the block look like
+    // a different thing from the line the user typed.
+    //
+    // Chips and shell highlighting do not compose: the highlighter emits
+    // one HTML string for the whole command, and cutting chips into it
+    // would mean tokenising the fragments between them, where a quote
+    // opened before a reference closes after it. A command carrying a
+    // reference therefore renders plain, the way a masked one already does
+    // (renderRecordedCommand) — the chip is the emphasis.
+    cmdSpan.replaceChildren(commandFragment(command))
+  } else if (status === 'running') {
+    cmdSpan.textContent = command || '(empty)'
+  } else {
+    cmdSpan.innerHTML = command ? highlightShellText(command, store) : '(empty)'
+    if (!tokenizerLoaded) pendingHeaderSpans.set(cmdSpan, store)
+  }
   header.appendChild(cmdSpan)
 
   return header
@@ -256,13 +315,18 @@ function buildOverflowMenu(command: string, outputEl: HTMLElement | null): HTMLE
     // Build the dropdown.
     menu = document.createElement('div')
     menu.className = 'cmd-overflow-menu'
-
     const copyCmd = document.createElement('button')
     copyCmd.className = 'cmd-overflow-menu-item'
     copyCmd.textContent = 'Copy command'
     copyCmd.addEventListener('click', (ev) => {
       ev.stopPropagation()
-      clipboardFallback(command)
+      // Once history.record acks, the block shows — and therefore copies —
+      // the MASKED command: what you see is what went to the store, and the
+      // renderer no longer holds the plaintext for that block (ADR-0021,
+      // the receipt round's named trade). The full masked text lives in
+      // data-recorded-command; the chips in the header are labels.
+      const recorded = btn.closest('.cmd-block')?.getAttribute('data-recorded-command')
+      clipboardFallback(recorded ?? command)
       closeMenu()
     })
 
@@ -275,14 +339,14 @@ function buildOverflowMenu(command: string, outputEl: HTMLElement | null): HTMLE
       clipboardFallback(text)
       closeMenu()
     })
-
     const copyAll = document.createElement('button')
     copyAll.className = 'cmd-overflow-menu-item'
     copyAll.textContent = 'Copy all'
     copyAll.addEventListener('click', (ev) => {
       ev.stopPropagation()
       const outText = blockOutputText(outputEl)
-      clipboardFallback(`${command}\n${outText}`)
+      const recorded = btn.closest('.cmd-block')?.getAttribute('data-recorded-command')
+      clipboardFallback(`${recorded ?? command}\n${outText}`)
       closeMenu()
     })
 
@@ -400,12 +464,20 @@ export function createCommandBlock(
   status: 'success' | 'failure',
   getContainer: () => HTMLElement,
   onSelect: (id: number, selected: boolean) => void,
+  store: CommandSnapshotStore,
 ): HTMLElement {
   const wrapper = document.createElement('div')
   wrapper.className = 'cmd-block'
+  // A command carrying a vault reference renders its references as chips,
+  // so the header's own text no longer spells the command. Copy reads the
+  // full text from here — the reference intact, which is what the user
+  // typed, what the store keeps, and what pastes usefully onto another
+  // machine. renderRecordedCommand overwrites it with the masked text when
+  // the ack lands, which is the same rule one step later.
+  if (command && findReferences(command).length > 0) wrapper.dataset.recordedCommand = command
   wrapper.setAttribute('data-block-id', String(id))
 
-  const header = createHeader(command, cwd, location, durationMs, exitCode, status)
+  const header = createHeader(command, cwd, location, durationMs, exitCode, status, store)
 
   let outputEl: HTMLElement | null = null
   if (outputHtml && !isOutputEmpty(outputHtml)) {
@@ -426,6 +498,36 @@ export function createCommandBlock(
   // Full-block click-to-select with drag distinction (P1-7, P1-8).
   wireBlockSelection(wrapper, getContainer(), overflow, id, onSelect)
 
+  // Double-click selects a whole token the way xterm does it (nocx-w7h.11,
+  // spec v9 §2): xterm's SelectionService.handleMouseDown calls
+  // preventDefault() FIRST — "Tell the browser not to start a regular
+  // selection" — and only then branches on event.detail, computing the word
+  // bounds from its own model and applying the selection once. The frozen
+  // block mirrors that ordering. The browser's native word selection would
+  // otherwise be created on the SECOND MOUSEDOWN (event.detail === 2),
+  // before the dblclick event fires — observed by copy-on-select on mouseup
+  // and copied, one word, before any later expansion could run. Intercepting
+  // the mousedown means exactly one selection state exists, already correct,
+  // and there is no race to order. A single mousedown (detail 1) is not
+  // intercepted: drag selection and click-to-select keep working.
+  wrapper.addEventListener('mousedown', (e: MouseEvent) => {
+    if ((e.target as HTMLElement).closest('.cmd-overflow-btn, .cmd-overflow-menu')) return
+    if (e.detail !== 2) return
+    e.preventDefault()
+    const caret = document.caretRangeFromPoint?.(e.clientX, e.clientY)
+    if (!caret || caret.startContainer.nodeType !== Node.TEXT_NODE) return
+    const line = caret.startContainer.parentElement?.closest<HTMLElement>(
+      '.term-line, .cmd-header-text',
+    )
+    if (!line) return
+    const range = wordRangeIn(line, caret.startContainer as Text, caret.startOffset)
+    if (!range) return
+    const sel = window.getSelection()
+    if (!sel) return
+    sel.removeAllRanges()
+    sel.addRange(range)
+  })
+
   return wrapper
 }
 
@@ -439,12 +541,14 @@ export function createRunningBlock(
   location: string,
   getContainer: () => HTMLElement,
   onSelect: (id: number, selected: boolean) => void,
+  store: CommandSnapshotStore,
 ): HTMLElement {
   const wrapper = document.createElement('div')
   wrapper.className = 'cmd-block cmd-block-running'
+  if (command && findReferences(command).length > 0) wrapper.dataset.recordedCommand = command
   wrapper.setAttribute('data-block-id', String(id))
 
-  const header = createHeader(command, cwd, location, null, null, 'running')
+  const header = createHeader(command, cwd, location, null, null, 'running', store)
 
   // Overflow menu — minimal: copy command only while running.
   // Always the LAST element of header-right (owner directive).
@@ -472,6 +576,7 @@ export function freezeBlock(
   exitCode: number | null,
   getContainer: () => HTMLElement,
   onSelect: (id: number, selected: boolean) => void,
+  store: CommandSnapshotStore,
 ): HTMLElement {
   const newEl = createCommandBlock(
     id,
@@ -484,8 +589,8 @@ export function freezeBlock(
     exitCode === 0 ? 'success' : 'failure',
     getContainer,
     onSelect,
+    store,
   )
-
   if (el.parentNode) {
     el.parentNode.replaceChild(newEl, el)
   }
@@ -493,10 +598,59 @@ export function freezeBlock(
   return newEl
 }
 
+/**
+ * Re-render a frozen block's command line once history.record acks: the
+ * MASKED command with an unresolved chip at every redaction span — what
+ * you see in the block is what went to the store, and the receipt has
+ * something to point at when a row is hovered. The chips carry their
+ * redaction span (data-redaction-start/end) so the receipt's hover can
+ * emphasise exactly one.
+ *
+ * Copying the block copies the MASKED text: the full masked command lives
+ * in data-recorded-command (the chips in the header are labels, never the
+ * stored text), and the overflow menu prefers it over the pre-ack line.
+ * This is the round's named trade — after the ack the renderer no longer
+ * holds the plaintext for this block, and neither does the clipboard.
+ */
+export function renderRecordedCommand(
+  blockEl: HTMLElement,
+  maskedCommand: string,
+  redactions: ReadonlyArray<{ kind: SecretKind; start: number; end: number }>,
+): void {
+  blockEl.dataset.recordedCommand = maskedCommand
+  const headerText = blockEl.querySelector<HTMLElement>('.cmd-header-text')
+  if (!headerText) return
+  // The segments are plain text (no shell highlighting): a mask breaks the
+  // token the highlighter would colour anyway, and the chips are the
+  // emphasis now. Offsets are UTF-16 units into maskedCommand, clamped so
+  const frag = document.createDocumentFragment()
+  let pos = 0
+  redactions.forEach((r, i) => {
+    const from = Math.max(pos, Math.min(r.start, maskedCommand.length))
+    const to = Math.max(from, Math.min(r.end, maskedCommand.length))
+    if (from > pos) frag.appendChild(document.createTextNode(maskedCommand.slice(pos, from)))
+    if (to > from) {
+      const chip = createSecretChipUnresolved(KIND_LABELS[r.kind])
+      chip.dataset.redactionIndex = String(i)
+      chip.dataset.redactionStart = String(r.start)
+      chip.dataset.redactionEnd = String(r.end)
+      frag.appendChild(chip)
+    }
+    pos = to
+  })
+  if (pos < maskedCommand.length) {
+    frag.appendChild(document.createTextNode(maskedCommand.slice(pos)))
+  }
+  headerText.replaceChildren(frag)
+}
+
 // ── Block manager ──────────────────────────────────────────────────────────
 
 export interface BlockManagerOpts {
   now?: () => number
+  /** The tab's command-existence snapshot store (OSC 636), passed through to
+   *  every frozen header this manager creates. */
+  snapshotStore: CommandSnapshotStore
 }
 
 export class BlockManager {
@@ -509,15 +663,13 @@ export class BlockManager {
   private _cmdStartTime: number | null = null
   /** Currently selected block id, or null if none selected (P1-8). */
   private _selectedBlockId: number | null = null
+  private _snapshotStore: CommandSnapshotStore
 
-  constructor(
-    scrollbackInner: HTMLElement,
-    xtermContainer: HTMLElement,
-    opts: BlockManagerOpts = {},
-  ) {
+  constructor(scrollbackInner: HTMLElement, xtermContainer: HTMLElement, opts: BlockManagerOpts) {
     this._scrollbackInner = scrollbackInner
     this._xtermContainer = xtermContainer
     this._now = opts.now ?? (() => performance.now())
+    this._snapshotStore = opts.snapshotStore
   }
 
   get blocks(): readonly BlockRecord[] {
@@ -610,6 +762,7 @@ export class BlockManager {
         if (sel) this._onBlockSelected(bid)
         else this._onBlockDeselected(bid)
       },
+      this._snapshotStore,
     )
     this._scrollbackInner.insertBefore(el, this._xtermContainer)
 
@@ -684,6 +837,7 @@ export class BlockManager {
         if (sel) this._onBlockSelected(bid)
         else this._onBlockDeselected(bid)
       },
+      this._snapshotStore,
     )
 
     this._stopTicker()

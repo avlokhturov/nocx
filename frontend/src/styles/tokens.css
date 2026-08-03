@@ -31,6 +31,10 @@ html {
   --control-height-sm: 24px;
   --control-height-md: 32px;
   --control-height-lg: 38px;
+  /* One width for a number entry, so a column of them is a column rather
+     than a set of boxes sized by whatever text each happens to hold. Wide
+     enough for a seven-digit value beside its unit (2097152 MiB). */
+  --control-width-number: 132px;
   --control-radius-sm: 4px;
   --control-radius-md: 6px;
   --control-radius-lg: 8px;

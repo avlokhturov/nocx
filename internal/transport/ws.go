@@ -10,7 +10,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -101,9 +103,18 @@ type WSServer struct {
 	// When nil, the handler returns a JSON-RPC error. The resolver
 	// answers values via ssh -G; enumeration reads Host patterns from
 	// the config file directly (see internal/ssh/aliases.go for the
-	// split documentation).
+	// mechanics).
 	sshConfigResolver ssh.ConfigResolver
 	sshConfigPath     string
+
+	// Pending-capture registry: the backend-side holder of submitted
+	// credentials awaiting a save decision (internal/credential). Created
+	// at construction; nil only when its fingerprint key could not be
+	// minted, in which case no offers are made and saves are refused.
+	captures *credential.CaptureRegistry
+	// nextConnID assigns the per-connection (per-tab) identity captures
+	// are scoped to.
+	nextConnID atomic.Uint64
 	// prober validates credentials without opening a session (connections.test).
 	// When nil, the handler returns a JSON-RPC error.
 	prober Prober
@@ -127,6 +138,12 @@ type WSServer struct {
 	// no export mode may resolve a secret (ADR-0011 §2).
 	exportPaths     storage.Paths
 	exportContentDB content.ContentDB
+
+	// contentDB is the durable content store backing history.query. When
+	// nil, the method answers source=session — the overlay then labels what
+	// it shows "this session only" instead of presenting the in-memory
+	// ledger as all history (contracts/history.query.schema.json).
+	contentDB content.ContentDB
 
 	// ringsMu protects rx and stopped. One sessionRx per session;
 	// keyed by session.ID. When stopped is true, getOrCreateRx returns nil
@@ -325,10 +342,28 @@ func WithExportContentDB(db content.ContentDB) WSServerOption {
 	return func(s *WSServer) { s.exportContentDB = db }
 }
 
+// WithContentDB attaches the durable content store backing history.query.
+// When absent, the method answers source=session so the overlay labels what
+// it shows "this session only" instead of presenting the in-memory ledger
+// as all history (contracts/history.query.schema.json). The composition
+// root passes the same ContentDB it hands WithExportContentDB.
+func WithContentDB(db content.ContentDB) WSServerOption {
+	return func(s *WSServer) { s.contentDB = db }
+}
+
 // WithProfileService attaches a profile domain service for import
 // operations, providing a single validated write path and atomic imports.
 func WithProfileService(svc *profile.ProfileService) WSServerOption {
 	return func(s *WSServer) { s.profileSvc = svc }
+}
+
+// WithCaptureRegistry injects the pending-capture registry. Test seam:
+// production constructs its own. The injected registry must not be shared
+// across servers.
+func WithCaptureRegistry(r *credential.CaptureRegistry) WSServerOption {
+	return func(s *WSServer) {
+		s.captures = r
+	}
 }
 
 // WithVaultLifecycle attaches the vault seal-lifecycle surface, enabling the
@@ -349,6 +384,14 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 		rx:      make(map[session.ID]*sessionRx),
 		conns:   make(map[*wsConn]struct{}),
 		origins: LoopbackOriginPolicy{},
+	}
+	if caps, err := credential.NewCaptureRegistry(); err != nil {
+		// No entropy for the fingerprint key: no offers are made and
+		// capture saves are refused. A predictable fingerprint key would be
+		// worse than none — the equality facts would be forgeable.
+		logger.Error("capture registry unavailable; no offers will be made", "error", err)
+	} else {
+		s.captures = caps
 	}
 	for _, o := range opts {
 		o(s)
@@ -426,6 +469,12 @@ func (s *WSServer) Stop(ctx context.Context) error {
 		_ = s.registry.Close(sess.ID())
 	}
 
+	// Application shutdown destroys every pending capture (the contract's
+	// list names it).
+	if s.captures != nil {
+		s.captures.DestroyAll()
+	}
+
 	return shutdownErr
 }
 
@@ -469,13 +518,17 @@ func (s *WSServer) removeRx(id session.ID) {
 // The gorilla package does not support concurrent writes — callers must
 // serialize writes to a single *websocket.Conn. The mutex here provides that
 // serialization across ringToConn, monitorExit, and handleOpen/handleAttach.
+//
+// id is the per-connection (per-tab) identity the capture registry scopes
+// captures to: backend-assigned, monotonic, and never reused.
 type wsConn struct {
 	mu   sync.Mutex
 	conn *websocket.Conn
+	id   uint64
 }
 
-func newWSConn(conn *websocket.Conn) *wsConn {
-	return &wsConn{conn: conn}
+func newWSConn(conn *websocket.Conn, id uint64) *wsConn {
+	return &wsConn{conn: conn, id: id}
 }
 
 func (w *wsConn) writeJSON(v any) error {
@@ -494,13 +547,26 @@ func (w *wsConn) writeMessage(msgType int, data []byte) error {
 // reattached). On disconnect the entries are discarded — sessions and their
 // rings survive (AD-9). It still gates data-frame/resize/close so a
 // connection cannot touch a session it has not opened or reattached to.
+// generation is the tab's command-submission counter: it is what makes
+// "a superseding submission from that tab" a backend fact — the capture
+// scope rides on it (the renderer's session-local command ids never cross
+// the wire).
 type connState struct {
-	mu       sync.Mutex
-	sessions map[session.ID]session.Session
+	mu         sync.Mutex
+	sessions   map[session.ID]session.Session
+	generation uint64
 }
 
 func newConnState() *connState {
 	return &connState{sessions: make(map[session.ID]session.Session)}
+}
+
+// nextGeneration advances and returns the tab's submission counter.
+func (c *connState) nextGeneration() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.generation++
+	return c.generation
 }
 
 func (c *connState) add(sess session.Session) {
@@ -646,7 +712,7 @@ func (s *WSServer) handleSession(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
-	wconn := newWSConn(conn)
+	wconn := newWSConn(conn, s.nextConnID.Add(1))
 	s.registerConn(wconn)
 	defer s.unregisterConn(wconn)
 	state := newConnState()
@@ -751,6 +817,12 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.handleSecretUsageMethod(wconn, req)
 	case "secrets.savePassword", "secrets.saveKeyMaterial", "secrets.saveKeyPassphrase":
 		s.handleSecretMintMethod(wconn, req)
+	case "secrets.detect":
+		s.handleSecretsDetect(wconn, req)
+	case "secrets.captureSave":
+		s.handleCaptureSave(wconn, req)
+	case "secrets.captureDismiss":
+		s.handleCaptureDismiss(wconn, req)
 	case "groups.impact":
 		s.handleGroupImpact(wconn, req)
 	case "groups.apply":
@@ -760,11 +832,11 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 	case "settings.describe", "settings.getSnapshot", "settings.set", "settings.reset",
 		"settings.secretSet", "settings.secretDelete", "settings.secretExists":
 		s.handleSettingsMethod(wconn, req)
-	case "export.manifest", "export.configExport", "export.portableEncrypted",
-		"export.backup", "export.import", "export.importPortable":
-		s.handleExportMethod(wconn, req)
 	case "sessions.status":
 		s.handleSessionsStatus(wconn, req)
+	case "export.manifest", "export.configExport", "export.portableEncrypted",
+		"export.backup", "export.import", "export.importPortable":
+		s.handleExportMethod(ctx, wconn, req)
 	case "connections.test":
 		s.handleConnectionsTest(wconn, req)
 	case "connections.trustHostKey":
@@ -773,11 +845,17 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.handleSSHConfigAliases(wconn, req)
 	case "sshConfig.path":
 		s.handleSSHConfigPath(wconn, req)
+	case "history.query":
+		s.handleHistoryQuery(ctx, wconn, req)
+	case "history.record":
+		s.handleHistoryRecord(ctx, wconn, state, req)
+	case "fs.complete":
+		s.handleFsComplete(wconn, req)
 	case "vault.status", "vault.setup", "vault.unseal", "vault.seal",
 		"vault.changePassphrase", "vault.regenerateRecovery", "vault.setDefaultProvider",
 		"vault.setAutoSeal", "vault.activity", "vault.inventory",
 		"vault.createSecret", "vault.renameSecret", "vault.replaceSecret",
-		"vault.deleteSecret":
+		"vault.deleteSecret", "vault.resolveLine":
 		s.handleVaultMethod(wconn, req)
 	case "dialog.openFile":
 		s.handleDialogOpenFile(wconn, req)
@@ -2484,7 +2562,7 @@ func (s *WSServer) handleSettingsSecretExists(wconn *wsConn, req jsonrpcRequest)
 func mustMarshal(v any) json.RawMessage {
 	out, err := json.Marshal(v)
 	if err != nil {
-		return json.RawMessage("null")
+		panic("marshal: " + err.Error())
 	}
 	return out
 }
@@ -2498,11 +2576,16 @@ func (s *WSServer) registerConn(wc *wsConn) {
 	s.connsMu.Unlock()
 }
 
-// unregisterConn removes a connection from the broadcast set.
+// unregisterConn removes a connection from the broadcast set and destroys
+// its pending captures: a transport disconnect and a tab closure are both
+// on the capture contract's destruction list.
 func (s *WSServer) unregisterConn(wc *wsConn) {
 	s.connsMu.Lock()
 	delete(s.conns, wc)
 	s.connsMu.Unlock()
+	if s.captures != nil {
+		s.captures.DestroyTab(strconv.FormatUint(wc.id, 10))
+	}
 }
 
 // broadcastSettingsChanged sends a settings.changed notification to every

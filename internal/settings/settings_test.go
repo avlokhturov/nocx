@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -14,7 +15,8 @@ import (
 
 // fakeDoc is an in-memory DocumentStore for testing.
 type fakeDoc struct {
-	data map[string][]byte
+	data     map[string][]byte
+	writeErr error
 }
 
 func (f *fakeDoc) Read(name string, into any) (bool, error) {
@@ -26,6 +28,9 @@ func (f *fakeDoc) Read(name string, into any) (bool, error) {
 }
 
 func (f *fakeDoc) Write(name string, doc any) error {
+	if f.writeErr != nil {
+		return f.writeErr
+	}
 	b, err := json.Marshal(doc)
 	if err != nil {
 		return err
@@ -165,6 +170,30 @@ func TestDeclarations(t *testing.T) {
 		if d.Key == "" || d.Control == "" || d.Label == "" {
 			t.Errorf("wire declaration %q has empty fields", d.Key)
 		}
+	}
+}
+
+// The wire declaration carries the unit a number setting is measured in, and
+// the three History settings declare the units the owner reads (nocx-w7h.7).
+func TestNumberUnitOnTheWire(t *testing.T) {
+	reg := settings.New(&fakeDoc{}, &fakeSecretStore{})
+	byKey := map[string]settings.Declaration{}
+	for _, d := range reg.Declarations() {
+		byKey[d.Key] = d
+	}
+	for key, want := range map[string]string{
+		"history.retentionDays":  "days",
+		"history.retentionMiB":   "MiB",
+		"history.diskCeilingMiB": "MiB",
+	} {
+		got := byKey[key].Unit
+		if got != want {
+			t.Errorf("%s: wire unit = %q, want %q", key, got, want)
+		}
+	}
+	// A number without a unit declares none — the field renders no suffix.
+	if got := byKey["test.numberExample"].Unit; got != "" {
+		t.Errorf("test.numberExample: wire unit = %q, want empty", got)
 	}
 }
 
@@ -607,4 +636,174 @@ func findSecret(t *testing.T, reg *settings.Registry, key string) *settings.Secr
 	}
 	t.Fatalf("secret setting %q not found", key)
 	return nil
+}
+
+// ── History section (the user's decisions) ───────────────────────────────
+
+// The History section renders the decisions a user actually has: keep or
+// not, how long, how much disk (two numbers), output separately. The
+// retention label says "removed from nocx", never "securely erased"
+// (internal/content's package doc: ordinary DELETE leaves data in WAL pages
+// and free space).
+func TestHistorySectionDeclaresUserDecisions(t *testing.T) {
+	rendered := map[string]settings.Declaration{}
+	reg := settings.New(&fakeDoc{}, &fakeSecretStore{data: map[credential.SecretID]string{}})
+	for _, d := range reg.Declarations() {
+		if d.Section == "History" {
+			rendered[d.Key] = d
+		}
+	}
+	for _, want := range []string{
+		"history.enabled", "history.retentionDays",
+		"history.retentionMiB", "history.diskCeilingMiB", "history.outputEnabled",
+	} {
+		if _, ok := rendered[want]; !ok {
+			t.Errorf("History section missing %q — a promise the screen does not make", want)
+		}
+	}
+	retention := rendered["history.retentionDays"].Description
+	if !strings.Contains(retention, "removed from nocx") {
+		t.Errorf("retention label does not use the honest wording: %q", retention)
+	}
+	if strings.Contains(retention, "securely erased") {
+		t.Errorf("retention label promises secure erasure: %q", retention)
+	}
+}
+
+// A sentinel that is explained only in prose is a sentinel nobody reads. The
+// meaning of 0 travels on the wire beside the unit and the bounds, so the
+// screen has nothing to infer (nocx-w7h.12).
+func TestNumberZeroLabelOnTheWire(t *testing.T) {
+	reg := settings.New(&fakeDoc{}, &fakeSecretStore{})
+	byKey := map[string]settings.Declaration{}
+	for _, d := range reg.Declarations() {
+		byKey[d.Key] = d
+	}
+	got := byKey["history.retentionDays"]
+	if got.ZeroLabel == "" {
+		t.Error("history.retentionDays: no ZeroLabel on the wire; 0 is its default and means 'no age limit'")
+	}
+	// The setting whose 0 is an ordinary number declares none.
+	if z := byKey["history.retentionMiB"].ZeroLabel; z != "" {
+		t.Errorf("history.retentionMiB: ZeroLabel = %q, want empty", z)
+	}
+	// And the sentinel's meaning is no longer duplicated in the prose that
+	// used to carry it — one statement, one place.
+	if strings.Contains(got.Description, "0 keeps everything") {
+		t.Error("history.retentionDays: the description still explains 0; ZeroLabel owns that now")
+	}
+}
+
+// ── ApplyValues (import-time restore) ──────────────────────────────────
+
+// Whatever GetSnapshot exports, ApplyValues restores: the two are inverse
+// operations over the non-secret settings (nocx-ojxa — import used to drop
+// settings the export carried).
+func TestApplyValues_RestoresSnapshot(t *testing.T) {
+	src := settings.New(&fakeDoc{}, &fakeSecretStore{})
+	if err := src.SetBool(settings.HistoryEnabled, true); err != nil {
+		t.Fatalf("SetBool: %v", err)
+	}
+	if err := src.SetNumber(settings.HistoryRetentionDays, 90); err != nil {
+		t.Fatalf("SetNumber: %v", err)
+	}
+	if err := src.SetSelect(settings.TabPlacement, "vertical"); err != nil {
+		t.Fatalf("SetSelect: %v", err)
+	}
+
+	snap, err := src.GetSnapshot()
+	if err != nil {
+		t.Fatalf("GetSnapshot: %v", err)
+	}
+
+	dst := settings.New(&fakeDoc{}, &fakeSecretStore{})
+	if applyErr := dst.ApplyValues(snap.Values); applyErr != nil {
+		t.Fatalf("ApplyValues: %v", applyErr)
+	}
+
+	got, err := dst.GetSnapshot()
+	if err != nil {
+		t.Fatalf("GetSnapshot: %v", err)
+	}
+	for key, want := range snap.Values {
+		if got.Values[key] != want {
+			t.Errorf("%s after restore = %v, want %v", key, got.Values[key], want)
+		}
+	}
+	for _, key := range snap.Overridden {
+		found := false
+		for _, k := range got.Overridden {
+			if k == key {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("%s is not marked overridden after restore", key)
+		}
+	}
+}
+
+func TestApplyValues_UnknownKeyRejected(t *testing.T) {
+	reg := settings.New(&fakeDoc{}, &fakeSecretStore{})
+	err := reg.ApplyValues(map[string]any{"no.such.setting": true})
+	if err == nil {
+		t.Fatal("unknown key applied, want error")
+	}
+	if !errors.Is(err, settings.ErrValidation) {
+		t.Errorf("error is %T, want ValidationError wrapping ErrValidation", err)
+	}
+}
+
+// Import never resolves or invents a secret (ADR-0011 §2): a snapshot key
+// that names a secret-class setting is refused, not applied.
+func TestApplyValues_SecretClassKeyRejected(t *testing.T) {
+	reg := settings.New(&fakeDoc{}, &fakeSecretStore{})
+	err := reg.ApplyValues(map[string]any{"test.secretExample": "value"})
+	if err == nil {
+		t.Fatal("secret-class key applied, want error")
+	}
+}
+
+// Every value is validated before anything is committed: one invalid value
+// leaves the whole restore undone, never half-applied.
+func TestApplyValues_InvalidValueRejectedAtomically(t *testing.T) {
+	reg := settings.New(&fakeDoc{}, &fakeSecretStore{})
+	// First value is valid; the second is not. The valid one must not land.
+	// clipboard.osc52Suppressed defaults to false, so "did not land" is
+	// observable (history.enabled defaults to true and could not prove it).
+	err := reg.ApplyValues(map[string]any{
+		"clipboard.osc52Suppressed": true,
+		"test.selectExample":        "not-an-option",
+	})
+	if err == nil {
+		t.Fatal("invalid select value applied, want error")
+	}
+	got, gerr := reg.GetBool(settings.ClipboardOSC52Suppressed)
+	if gerr != nil {
+		t.Fatalf("GetBool: %v", gerr)
+	}
+	if got {
+		t.Error("clipboard.osc52Suppressed became true despite the map being rejected as a whole")
+	}
+
+	if err := reg.ApplyValues(map[string]any{"test.numberExample": float64(500)}); err == nil {
+		t.Fatal("out-of-bounds number applied, want error")
+	}
+	if err := reg.ApplyValues(map[string]any{"clipboard.osc52Suppressed": "yes"}); err == nil {
+		t.Fatal("string where a boolean is declared applied, want error")
+	}
+	if err := reg.ApplyValues(map[string]any{"test.stringExample": ""}); err == nil {
+		t.Fatal("empty string for a non-empty-default setting applied, want error")
+	}
+}
+
+func TestApplyValues_EmptyMapIsNoop(t *testing.T) {
+	reg := settings.New(&fakeDoc{}, &fakeSecretStore{})
+	if err := reg.ApplyValues(nil); err != nil {
+		t.Fatalf("ApplyValues(nil): %v", err)
+	}
+	if err := reg.ApplyValues(map[string]any{}); err != nil {
+		t.Fatalf("ApplyValues(empty): %v", err)
+	}
 }

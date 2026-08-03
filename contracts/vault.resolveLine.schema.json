@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/vault.resolveLine.schema.json",
+  "title": "VaultResolveLine",
+  "description": "Result of the vault.resolveLine JSON-RPC method. A line may carry references to vault secrets by name ({{secret:NAME}}, where NAME is the name vault.inventory reports); the backend resolves each reference to the stored value and returns the substituted line. The resolved value goes to the caller for the PTY write and nowhere else: it is never recorded in history (history.record receives the line with the reference intact), never logged, never enters a model context. The refs list reports each reference and whether it resolved — an unresolved name is reported, never silently left as literal text. A sealed vault is an error (code -32001, reason vault-sealed), distinct from 'no such secret'.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["line", "refs"],
+  "properties": {
+    "line": {
+      "description": "The input line with every {{secret:NAME}} reference replaced by the resolved value when the name resolved, and left as literal text when it did not (the refs entry says which). This is the line to write to the PTY. It may carry secret values — the caller must not persist it.",
+      "type": "string"
+    },
+    "refs": {
+      "description": "One entry per reference in the line, in first-occurrence order. Never null: a line with no references is []. The name is the reference as written; resolved is false when the vault holds no secret with that name (or the value could not be read), and the caller must surface that instead of running the literal reference.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/resolveRef" }
+    }
+  },
+  "$defs": {
+    "resolveRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "resolved"],
+      "properties": {
+        "name": {
+          "description": "The secret's name as written in the line, inside {{secret:...}} — the vault inventory name (ADR-0016), never a secret reference and never the value.",
+          "type": "string"
+        },
+        "resolved": {
+          "description": "True when the name mapped to a stored secret whose value was substituted into the line; false when no such secret exists or its store did not answer. False is a fact the caller must show, not a silent pass-through.",
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

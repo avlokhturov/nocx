@@ -28,6 +28,7 @@
 @import './styles/components/text-field.css';
 @import './styles/components/search-field.css';
 @import './styles/components/select.css';
+@import './styles/components/floating-panel.css';
 @import './styles/components/checkbox.css';
 @import './styles/components/radio.css';
 @import './styles/components/file-input.css';
@@ -35,6 +36,8 @@
 @import './styles/components/icon-button.css';
 @import './styles/components/section.css';
 @import './styles/components/badge.css';
+@import './styles/components/secret-chip.css';
+@import './styles/components/block-receipt.css';
 @import './styles/components/empty-state.css';
 @import './styles/components/status-card.css';
 @import './styles/components/status-dot.css';
@@ -180,6 +183,123 @@
   white-space: pre-wrap;
   overflow-wrap: break-word;
   word-break: break-word;
+}
+
+/* ── Shell syntax highlighting (shell-highlight.ts) ────────────────────
+   Token classes are emitted by the same lexer + highlighter in the live
+   editor and the frozen block headers, so this class set is the parity
+   contract between the two surfaces. Colours are semantic theme tokens,
+   not literals (ADR-0013 §4): a theme switch recolours both surfaces. */
+.tok-comment,
+.tok-meta {
+  color: var(--color-text-dim);
+}
+
+.tok-keyword {
+  color: var(--color-accent-secondary);
+}
+
+.tok-command {
+  color: var(--color-success);
+}
+
+.tok-flag,
+.tok-atom {
+  color: var(--color-warning);
+}
+
+.tok-operator {
+  color: var(--color-accent);
+}
+
+.tok-string {
+  color: var(--color-success);
+}
+
+.tok-heredoc {
+  color: var(--color-success-hover);
+}
+
+.tok-variable {
+  color: var(--color-danger);
+}
+
+.tok-path {
+  color: var(--color-accent-secondary);
+}
+
+/* A command word the session's snapshot says does not exist (OSC 636,
+   shell-highlight.ts).
+
+   It gives up the command colour and takes the ordinary text colour, because
+   the command colour is a claim — "this word is a command" — and the whole
+   point of this class is that it is not one. Wearing green while underlined
+   said both things at once. Warp does the same, and it is the right call for
+   the same reason.
+
+   The verdict itself is carried by the underline rather than a red
+   foreground: red reads as a guaranteed syntax error, an underline reads as
+   a remark about one word, which is what this is. Dotted so it stays a
+   remark. */
+.tok-unresolved {
+  text-decoration-line: underline;
+  text-decoration-style: dotted;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+  text-decoration-color: var(--color-warning);
+}
+
+/* Compound on purpose. The element carries both classes, so a bare
+   .tok-unresolved would beat .tok-command only by sitting later in this
+   file — and a rule whose correctness depends on its line number breaks the
+   first time somebody reorders the block. */
+.tok-command.tok-unresolved {
+  color: var(--color-text);
+}
+
+/* CodeMirror 6 surface (ADR-0010). Auto-grow is layout, not arithmetic: the
+   box grows with its content and scrolls past the cap (spec §Decision 3).
+
+   The cap is 30 lines — 30 × line-height 1.2 × font-size (the em in the calc
+   resolves against .cm-editor's font-size) plus the 6px vertical padding,
+   border-box — and never more than half the pane. Ten lines was the original
+   cap and it is too tight for the thing people actually paste: a curl with a
+   JSON body is twenty lines, and it arrived as a small scrolling window onto
+   a command the user could not see. Half the pane is the other side of that:
+   the prompt may take the room it needs, but never so much that the block it
+   belongs to disappears. MAX_ROWS in editor.ts is the same cap — the row
+   count is what fires `resized`, so a CSS box that keeps growing past it
+   stops telling the scrollback to follow. */
+.nocx-editor .cm-editor {
+  font-size: var(--font-size-terminal);
+  max-height: min(50vh, calc(36em + 6px));
+}
+
+.nocx-editor .cm-scroller {
+  font-family: var(--font-family-mono);
+  line-height: 1.2;
+  overflow-y: auto;
+}
+
+.nocx-editor .cm-content {
+  padding: 2px 8px 4px;
+}
+
+.nocx-editor .cm-line {
+  padding: 0;
+}
+
+/* ── The composition-time secret candidate mark (ADR-0021) ─────────────
+
+   A detected credential while the user is still typing: a quiet dotted
+   underline, nothing more — no panel, no focus change, no selection. The
+   mark says "⌘S will store this span", and it is the only thing it says.
+   The tier that decides which findings earn it lives in secret-kind.ts. */
+.nocx-editor .cm-secret-candidate {
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-decoration-color: var(--color-warning);
+  text-underline-offset: 3px;
 }
 
 /* ── Command-ledger gutter glyphs (ADR-0008) ────────────────────────── */

@@ -33,11 +33,16 @@ type fakeVaultLifecycle struct {
 	inventoryResult       []vault.InventoryEntry
 	createNamedErr        error
 	createNamedID         credential.SecretID
+	resolvedName          string
+	usedName              string
+	createNamedCalled     int
 	renameSecretErr       error
 	renameSecretName      string
 	resolveRowID          credential.SecretID
 	resolveRowFound       bool
 	resolveRowErr         error
+	getSecret             credential.Secret
+	getErr                error
 }
 
 func (f *fakeVaultLifecycle) State() vault.State { return f.state }
@@ -95,6 +100,15 @@ func (f *fakeVaultLifecycle) CreateNamed(_ context.Context, _ credential.Secret,
 	return f.createNamedID, nil
 }
 
+func (f *fakeVaultLifecycle) CreateNamedResolved(_ context.Context, _ credential.Secret, meta vault.SecretMeta) (credential.SecretID, string, error) {
+	f.createNamedCalled++
+	if f.createNamedErr != nil {
+		return "", "", f.createNamedErr
+	}
+	f.usedName = meta.Name
+	return f.createNamedID, f.resolvedName, nil
+}
+
 func (f *fakeVaultLifecycle) RenameSecret(_ context.Context, row string, name string, _ []vault.CredentialInventory) error {
 	f.renameSecretName = name
 	return f.renameSecretErr
@@ -110,6 +124,13 @@ func (f *fakeVaultLifecycle) ResolveRow(row string, _ []vault.CredentialInventor
 		return "", false
 	}
 	return f.resolveRowID, f.resolveRowFound
+}
+
+func (f *fakeVaultLifecycle) Get(_ context.Context, _ credential.SecretID) (credential.Secret, error) {
+	if f.getErr != nil {
+		return credential.Secret{}, f.getErr
+	}
+	return f.getSecret, nil
 }
 
 func newFakeVaultLifecycle() *fakeVaultLifecycle {

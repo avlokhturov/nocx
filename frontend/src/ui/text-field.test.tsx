@@ -183,6 +183,82 @@ describe('TextField', () => {
   })
 })
 
+describe('TextField number variance: unit and caption slot (nocx-w7h.7)', () => {
+  it('renders the unit as a suffix inside the control', () => {
+    const { container } = subject({ type: 'number', value: 4096, unit: 'MiB' })
+    const unit = container.querySelector('.ui-text-field__unit')
+    expect(unit?.textContent).toBe('MiB')
+    const control = container.querySelector('.ui-text-field__control')
+    expect(control?.contains(unit)).toBe(true) // one thing with the value
+  })
+
+  it('renders no unit suffix when none is given', () => {
+    const { container } = subject({ type: 'number', value: 4096 })
+    expect(container.querySelector('.ui-text-field__unit')).toBeNull()
+  })
+
+  it('renders the caption beneath the control, in its own slot', () => {
+    const { container } = subject({ type: 'number', value: 4096, caption: '64 – 1048576 MiB' })
+    const caption = container.querySelector('.ui-text-field__caption')
+    expect(caption?.textContent).toBe('64 – 1048576 MiB')
+    const control = container.querySelector('.ui-text-field__control')
+    expect(control?.contains(caption)).toBe(false) // beneath, not inside
+  })
+
+  it('the error replaces the caption in the same slot — one element, no jump', () => {
+    const { container } = subject({
+      type: 'number',
+      value: 5000,
+      caption: '64 – 1048576 MiB',
+      error: 'Must be at most 1048576 MiB',
+    })
+    const caption = container.querySelector('.ui-text-field__caption')
+    expect(caption?.textContent).toBe('Must be at most 1048576 MiB')
+    expect(caption?.getAttribute('data-tone')).toBe('error')
+    expect(caption?.getAttribute('role')).toBe('alert')
+    // Exactly one slot element — the caption and the error never coexist.
+    expect(container.querySelectorAll('.ui-text-field__caption').length).toBe(1)
+    // Field must not render a second error alongside the slot.
+    expect(container.querySelector('.ui-field-error')).toBeNull()
+  })
+
+  it('without a caption, the error still renders through Field as before', () => {
+    const { container } = subject({ error: 'Required' })
+    expect(container.querySelector('.ui-field-error')?.textContent).toBe('Required')
+    expect(container.querySelector('.ui-text-field__caption')).toBeNull()
+  })
+
+  // "No jump" is a claim about the box, and jsdom has no boxes — so the
+  // property is pinned as the structure that causes the jump: a captioned
+  // field must render the SAME element tree in both states. Measured in a
+  // real browser on 2026-08-01, going out of range wrapped the control in a
+  // Field that was not there before and the field grew 48.7px → 52.7px.
+  it('a captioned field keeps the same structure when its value goes out of range', () => {
+    const ok = subject({ type: 'number', value: 4096, caption: '64 – 1048576 MiB' })
+    const bad = subject({
+      type: 'number',
+      value: 1,
+      caption: '64 – 1048576 MiB',
+      error: 'Must be at least 64 MiB',
+    })
+    const shape = (c: Element) =>
+      [...c.querySelectorAll('*')].map((e) => e.tagName + '.' + (e.className || '')).join(' > ')
+    expect(shape(bad.container)).toBe(shape(ok.container))
+    expect(bad.container.querySelector('.ui-field')).toBeNull()
+  })
+
+  it('a captioned field aligns its caption to the column it is told to follow', () => {
+    const start = subject({ type: 'number', value: 1, caption: '0 – 10' })
+    expect(
+      start.container.querySelector('.ui-text-field__caption')?.getAttribute('data-align'),
+    ).toBe('start')
+    const end = subject({ type: 'number', value: 1, caption: '0 – 10', captionAlign: 'end' })
+    expect(end.container.querySelector('.ui-text-field__caption')?.getAttribute('data-align')).toBe(
+      'end',
+    )
+  })
+})
+
 describe('composition with Field', () => {
   // TextField's label is optional and Field's was not, so the composition
   // originally carried `label={props.label!}` — an assertion silencing a case

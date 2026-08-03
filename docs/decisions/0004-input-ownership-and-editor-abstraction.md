@@ -119,6 +119,19 @@ handles mouse caret placement, selection, multiline, IME, clipboard, and native
 undo. CodeMirror is introduced only when syntax-aware editing or inline widgets
 justify it. Avoid `contenteditable`.
 
+> **Superseded on 2026-08-01 by [ADR-0010](0010-codemirror-6-as-the-editor-core.md)
+> — this clause fired as written.** Syntax-aware editing and inline widgets now
+> justify it: shell token highlighting, ghost text with a completion dropdown, and
+> the recall overlay all need a render layer independent of the input surface and
+> character-level caret coordinates, none of which a `<textarea>` exposes. The
+> editor core is CodeMirror 6.
+>
+> **"Avoid `contenteditable`" is narrowed, not lifted.** It targeted the
+> hand-rolled variant, and the IME, undo and selection failures behind it are what
+> a maintained editor engine exists to solve. **Building an input surface on a
+> hand-rolled `contenteditable` remains prohibited** — do not read the sentence
+> above as licence for one.
+
 ### 4. Output stays in one xterm; no freeze in the MVP
 
 One continuous xterm instance and its scrollback own all output and selection.

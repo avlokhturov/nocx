@@ -43,9 +43,9 @@ type histStub struct {
 	log log.Logger
 }
 
-func (s *histStub) Add(_ context.Context, record CommandRecord) error {
+func (s *histStub) Add(_ context.Context, record CommandRecord) (int64, error) {
 	s.log.Info("content stub: CommandHistoryRepository.Add", "command", record.Command)
-	return ErrNotImplemented
+	return 0, ErrNotImplemented
 }
 
 func (s *histStub) List(_ context.Context, limit int) ([]CommandRecord, error) {
@@ -63,6 +63,16 @@ func (s *histStub) FindByPrefix(_ context.Context, prefix string, limit int) ([]
 	return nil, ErrNotImplemented
 }
 
+func (s *histStub) RewriteRedaction(_ context.Context, id int64, span Redaction, reference string) error {
+	s.log.Info("content stub: CommandHistoryRepository.RewriteRedaction", "id", id, "span", span, "reference", reference)
+	return ErrNotImplemented
+}
+
+func (s *histStub) Query(_ context.Context, scope Scope, cwd, host string, limit int, _ *int64, text string) (HistoryPage, error) {
+	s.log.Info("content stub: CommandHistoryRepository.Query", "scope", scope, "cwd", cwd, "host", host, "limit", limit, "text", text)
+	return HistoryPage{}, ErrNotImplemented
+}
+
 // Conversations returns a stub ConversationRepository.
 func (s *Stub) Conversations() ConversationRepository {
 	s.log.Info("content stub: Conversations called (no-op)")
@@ -73,6 +83,12 @@ func (s *Stub) Conversations() ConversationRepository {
 func (s *Stub) CommandHistory() CommandHistoryRepository {
 	s.log.Info("content stub: CommandHistory called (no-op)")
 	return &histStub{log: s.log}
+}
+
+// Backup returns ErrNotImplemented: the stub has nothing to snapshot.
+func (s *Stub) Backup(_ context.Context, destPath string) error {
+	s.log.Info("content stub: Backup called (no-op)", "dest", destPath)
+	return ErrNotImplemented
 }
 
 // Close is a no-op.

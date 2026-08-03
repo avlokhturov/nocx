@@ -70,6 +70,11 @@ export class SettingsContent extends SolidTabContent {
       this.pendingNewConnection = false
       this.handle.newConnection()
     }
+    if (this.pendingNewSecret !== null) {
+      const name = this.pendingNewSecret
+      this.pendingNewSecret = null
+      this.handle.newSecret(name)
+    }
   }
 
   focus(): void {
@@ -106,5 +111,19 @@ export class SettingsContent extends SolidTabContent {
     this.pendingNewConnection = true
   }
 
+  /** Open the Secrets page with the add dialog up — the prompt's '@' picker
+   *  offering to create the secret it could not find. Queued before mount
+   *  for the same reason as startNewConnection. */
+  startNewSecret(name = ''): void {
+    if (this.handle) {
+      this.handle.newSecret(name)
+      return
+    }
+    this.pendingNewSecret = name
+  }
+
   private pendingNewConnection = false
+  /** The queued request's prefilled name, or null when nothing is queued.
+   *  A string (including '') means "asked"; null means "nobody asked". */
+  private pendingNewSecret: string | null = null
 }

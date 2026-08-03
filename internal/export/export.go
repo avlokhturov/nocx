@@ -78,15 +78,18 @@ func ManifestFor(mode Mode) Manifest {
 		return Manifest{
 			Mode: mode,
 			Carries: []string{
-				"Everything in a configuration export, encrypted under your passphrase",
+				"SSH connection profiles",
+				"Profile groups and folder structure",
+				"Settings and preferences",
+				"Private content (conversations, command history) — when you tick the box",
 			},
 			Omits: []string{
-				"Secret material — never resolved, never encrypted",
-				"Private content (AI conversations, command history) — unless you explicitly opt in",
+				"Secret material (passwords, key passphrases) — never exported",
+				"Secret references — machine-local bindings, not exported",
 			},
 			Notes: []string{
 				"Encryption: NaCl secretbox (XSalsa20-Poly1305) with Argon2id key derivation",
-				"Lose the passphrase and the export is unrecoverable",
+				"Lose the passphrase and the backup is unrecoverable",
 				"Private content is frequently more sensitive than host metadata; it is excluded by default",
 			},
 		}
@@ -111,6 +114,7 @@ func ManifestFor(mode Mode) Manifest {
 			Carries: []string{
 				"SSH connection profiles",
 				"Profile groups and folder structure",
+				"Settings and preferences",
 			},
 			Omits: []string{
 				"Secret resolution — import never invents or resolves secrets",
@@ -118,6 +122,7 @@ func ManifestFor(mode Mode) Manifest {
 			},
 			Notes: []string{
 				"After import, bind the machine's own secrets to the connections that need them",
+				"Existing profiles, groups and settings with the same identifiers are replaced",
 			},
 		}
 	default:

@@ -1,0 +1,47 @@
+/* BlockReceipt (ui/README table) — the after-submit capture receipt,
+   attached to the frozen block of the command that carried a credential.
+   This file owns the ui-block-receipt identity family only. The controls
+   inside are the kit's own — ui-button, ui-text-field__input, ui-badge —
+   and this file never repaints them (ADR-0013, gate 3). Colours are tokens
+   only, no literals. */
+.ui-block-receipt {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 8px 12px 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--control-radius-md);
+  background: var(--color-surface-raised, var(--color-surface));
+}
+
+.ui-block-receipt__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ui-block-receipt__value {
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 40%;
+}
+
+.ui-block-receipt__row .ui-text-field__input {
+  min-width: 0;
+  flex: 1;
+}
+
+.ui-block-receipt__row-error {
+  font-size: var(--font-size-sm);
+  color: var(--color-danger);
+}
+
+.ui-block-receipt__actions {
+  display: flex;
+  justify-content: flex-end;
+}

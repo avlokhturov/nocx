@@ -9,6 +9,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/connection"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/contentkey"
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
@@ -42,6 +43,53 @@ type App struct {
 	vaultCloser interface{ Close() }
 }
 
+// contentCompactionFloor is the hysteresis fraction of the disk ceiling at
+// which an in-progress compaction stops (design §5.4 names hysteresis as
+// part of the ceiling). A mechanism parameter, not a user knob.
+const contentCompactionFloor = 0.8
+
+// budgetFromSettings builds the store's two-number budget from the History
+// settings (nocx-rtg0.11): the user's retention size and disk ceiling, in
+// MiB, become the logical and physical byte budgets. A zero or inverted
+// budget is refused, so an unavailable or invalid configuration keeps the
+// store closed rather than shipping an unbounded database.
+func budgetFromSettings(reg *settings.Registry) (content.Budget, error) {
+	retentionMiB, err := reg.GetNumber(settings.HistoryRetentionMiB)
+	if err != nil {
+		return content.Budget{}, fmt.Errorf("history retention size: %w", err)
+	}
+	ceilingMiB, err := reg.GetNumber(settings.HistoryDiskCeilingMiB)
+	if err != nil {
+		return content.Budget{}, fmt.Errorf("history disk ceiling: %w", err)
+	}
+	b := content.Budget{
+		RetentionBytes:   int64(retentionMiB) << 20,
+		DiskCeilingBytes: int64(ceilingMiB) << 20,
+		CompactionFloor:  contentCompactionFloor,
+	}
+	if err := b.Validate(); err != nil {
+		return content.Budget{}, err
+	}
+	return b, nil
+}
+
+// policyFromSettings builds the live History policy from the settings. The
+// composition root updates the same *content.Policy from the settings
+// change notifier, so a toggle applies without a restart.
+func policyFromSettings(reg *settings.Registry) *content.Policy {
+	p := content.NewPolicy()
+	if v, err := reg.GetBool(settings.HistoryEnabled); err == nil {
+		p.SetEnabled(v)
+	}
+	if v, err := reg.GetNumber(settings.HistoryRetentionDays); err == nil {
+		p.SetRetentionDays(int(v))
+	}
+	if v, err := reg.GetBool(settings.HistoryOutputEnabled); err == nil {
+		p.SetOutputEnabled(v)
+	}
+	return p
+}
+
 // SetDialogService attaches the native dialog capability (dialog.* RPCs). It
 // is wired from main.go's WailsApp.startup — the Wails context it needs only
 // exists there, after the transport was built — and must be called before
@@ -59,12 +107,24 @@ type Option func(*optionSet)
 
 type optionSet struct {
 	wsAddr string
+	// keystoreProbe overrides the OS-keystore availability decision that
+	// picks the ContentDB key's home (nocx-rtg0.14). Test-only: production
+	// probes the real system provider once at startup and logs the outcome.
+	keystoreProbe func(context.Context) bool
 }
 
 // WithWSAddr pins the WebSocket listen address instead of the default
 // 127.0.0.1:0. Dev-only; shipped code should never set this.
 func WithWSAddr(addr string) Option {
 	return func(o *optionSet) { o.wsAddr = addr }
+}
+
+// WithKeystoreProbe overrides the OS-keystore availability decision for the
+// ContentDB key. Test-only: it makes the composition root deterministic on
+// hosts that do (or do not) run a Secret Service, so the no-keystore branch
+// of the key lifecycle can be asserted without depending on the machine.
+func WithKeystoreProbe(probe func(context.Context) bool) Option {
+	return func(o *optionSet) { o.keystoreProbe = probe }
 }
 
 func New(opts ...Option) (*App, error) {
@@ -105,6 +165,16 @@ func New(opts ...Option) (*App, error) {
 	docStore := storage.NewDocumentStore(paths.ConfigDir())
 	profileStore := profile.NewJSONStoreWithDocStore(docStore, "profiles.json")
 
+	// ContentDB (ADR-0018, amended 2026-08-01): the one SQLite database for
+	// unbounded private content, encrypted at rest by the adiantum VFS
+	// (ncruces/go-sqlite3 — no cgo). The real store is constructed below,
+	// after the vault exists, via the content key lifecycle (nocx-rtg0.9);
+	// the stub is the null implementation per AD-8 and the fallback when
+	// the key cannot be read (the terminal starts without durable history
+	// and history.query answers source=session, which the overlay labels
+	// honestly).
+	var contentDB content.ContentDB = content.NewStub(logger)
+
 	sysProv := system.New()
 	fileProv := file.New(docStore, "vault-file.json")
 	reg, err := vault.NewRegistry(sysProv, fileProv)
@@ -112,19 +182,89 @@ func New(opts ...Option) (*App, error) {
 		return nil, fmt.Errorf("vault registry: %w", err)
 	}
 
-	// Probe the system provider once at startup and log the outcome.
-	// A machine with no Secret Service says so in the log rather than
-	// failing mysteriously later.
 	ctx := context.Background()
-	probeStatus := sysProv.Probe(ctx)
+	// Probe the system provider once at startup and log the outcome. A
+	// machine with no Secret Service says so in the log rather than
+	// failing mysteriously later. The WithKeystoreProbe override (tests)
+	// replaces the probe entirely — a probe is a real keychain write and
+	// must not run on a host the test claims has no keystore.
+	probeStatus := vault.Status{}
+	systemReady := false
+	if o.keystoreProbe != nil {
+		systemReady = o.keystoreProbe(ctx)
+	} else {
+		probeStatus = sysProv.Probe(ctx)
+		systemReady = probeStatus.Ready
+	}
 	slogger.Info("vault system-provider availability probe",
-		"ready", probeStatus.Ready, "reason", probeStatus.Reason)
+		"ready", systemReady, "reason", probeStatus.Reason)
 
 	v, err := vault.New(docStore, reg, slogger)
 	if err != nil {
 		return nil, fmt.Errorf("vault init: %w", err)
 	}
+
 	settingsRegistry := settings.New(docStore, v)
+
+	// The ContentDB key, once at startup (nocx-rtg0.9 as amended by
+	// nocx-rtg0.14): the OS keystore's derived slot when one exists, else
+	// DERIVED at startup from a per-machine salt — the vault and its seal
+	// are irrelevant to it, and no passphrase is ever requested for history.
+	// The key is held here for the life of the process, so a vault
+	// auto-seal can never make history unreadable. The History settings
+	// (keep on/off, age, the two-number budget, output) wire into the store
+	// the same way: read here, live-updated below. On every failure path
+	// the app starts WITHOUT durable history (the stub) and says so: a
+	// terminal that refuses to start because its history database could not
+	// open a key is worse than one that starts and admits the gap.
+	historyPolicy := policyFromSettings(settingsRegistry)
+	budget, budgetErr := budgetFromSettings(settingsRegistry)
+	if budgetErr != nil {
+		slogger.Warn("durable command history unavailable; starting without it", "reason", budgetErr)
+	} else if key, keyErr := contentkey.LoadOrCreate(ctx, contentkey.Config{
+		Registry:    reg,
+		KeyID:       vault.ContentKeyID,
+		SystemReady: systemReady,
+		DBPath:      filepath.Join(paths.DataDir(), "content.db"),
+		// The salt lives in the CONFIG directory — never in the data
+		// directory beside content.db: a copy of the data directory must
+		// carry nothing that opens it (nocx-rtg0.14).
+		SaltPath: filepath.Join(paths.ConfigDir(), "contentkey.salt"),
+		Logger:   logger,
+	}); keyErr != nil {
+		slogger.Warn("durable command history unavailable; starting without it", "reason", keyErr)
+	} else if db, openErr := content.Open(ctx, content.Config{
+		Path:   filepath.Join(paths.DataDir(), "content.db"),
+		Key:    key,
+		Budget: budget,
+		Policy: historyPolicy,
+		Logger: logger,
+	}); openErr != nil {
+		slogger.Warn("durable command history unavailable; starting without it", "reason", openErr)
+	} else {
+		contentDB = db
+	}
+
+	// Live History policy: a Settings toggle applies without a restart. The
+	// transport's own notifier broadcasts settings.changed to the renderer;
+	// this second listener keeps the store's policy in sync.
+	settingsRegistry.AddNotifier(func(_ int, keys []string) {
+		for _, k := range keys {
+			switch k {
+			case settings.HistoryEnabled.Key(), settings.HistoryRetentionDays.Key(),
+				settings.HistoryOutputEnabled.Key():
+				if v, err := settingsRegistry.GetBool(settings.HistoryEnabled); err == nil {
+					historyPolicy.SetEnabled(v)
+				}
+				if v, err := settingsRegistry.GetNumber(settings.HistoryRetentionDays); err == nil {
+					historyPolicy.SetRetentionDays(int(v))
+				}
+				if v, err := settingsRegistry.GetBool(settings.HistoryOutputEnabled); err == nil {
+					historyPolicy.SetOutputEnabled(v)
+				}
+			}
+		}
+	})
 	// Profile usage tracker for the sessions.status RPC (nocx-uxs5.4).
 	usageStore := session.NewDocumentUsageStore(docStore)
 	sess = sess.WithProfileUsageTracker(usageStore)
@@ -151,7 +291,12 @@ func New(opts ...Option) (*App, error) {
 		transport.WithSettingsRegistry(settingsRegistry),
 		transport.WithProfileUsageStore(usageStore),
 		transport.WithExportPaths(paths),
-		transport.WithExportContentDB(content.NewStub(logger)),
+		// One ContentDB at the composition root (AD-8): the same store backs
+		// export and history.query. A stub is correct until the SQLCipher
+		// backing lands (ADR-0018 gate); history.query then answers
+		// source=session, which the overlay labels "this session only".
+		transport.WithExportContentDB(contentDB),
+		transport.WithContentDB(contentDB),
 		transport.WithProber(&proberAdapter{client: sshClient}),
 		transport.WithProfileService(profileSvc),
 		transport.WithHostKeyTruster(&proberAdapter{client: sshClient}),

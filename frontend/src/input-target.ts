@@ -2,6 +2,8 @@
 // registered InputTarget decides where a submitted document goes. New kinds
 // (shell now, LLM agent later) are added by registering a target, never by
 // editing the editor.
+
+import type { Extension } from '@codemirror/state'
 export interface SubmitContext {
   readonly targetId: string
 }
@@ -10,6 +12,15 @@ export interface InputTarget {
   readonly id: string
   readonly label: string
   submit(doc: string, ctx: SubmitContext): Promise<void>
+  /**
+   * The editor extensions this target supplies (design §8.8): the shell
+   * mode, syntax highlighting and the completion surface for the shell
+   * target; an agent target later supplies its own. Allow-listed — they
+   * cannot override the W2 keymap. The editor stays passive: the caller
+   * feeds these to the CommandEditor constructor; the editor never calls
+   * this itself.
+   */
+  editorExtensions?(): Extension[]
 }
 
 export interface InputTargetRegistry {
@@ -17,7 +28,6 @@ export interface InputTargetRegistry {
   setActive(id: string): void
   active(): InputTarget
 }
-
 // ShellInputTarget routes a submitted document to the active PTY using the
 // ADR-0004 §2 atomic handoff: the editor hides itself (caller's job), then the
 // renderer pastes the complete document before raw CR accepts it. The renderer
@@ -30,7 +40,15 @@ export class ShellInputTarget implements InputTarget {
   constructor(
     private readonly paste: (text: string) => void,
     private readonly sendRaw: (data: string) => void,
+    /** The shell's editor extensions (highlighting + completion), composed
+     *  at the root and carried through the target so the seam is exercised:
+     *  the editor receives its surface from the target, never from itself. */
+    private readonly extensions: Extension[] = [],
   ) {}
+
+  editorExtensions(): Extension[] {
+    return this.extensions
+  }
 
   submit(doc: string): Promise<void> {
     this.paste(doc)

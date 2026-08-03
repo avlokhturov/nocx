@@ -2703,3 +2703,88 @@ func TestReplaceSecret_ProviderFailureLeavesJournalEntry(t *testing.T) {
 		t.Error("journal entry should survive a failed provider write")
 	}
 }
+
+// CreateNamedResolved resolves name collisions atomically and returns the
+// name ACTUALLY used (the capture-save path): two saves wanting the same
+// name must never both claim it, and the renderer must never predict that
+// openrouter.ai-2 is free.
+func TestCreateNamedResolved_ResolvesCollisionsAtomically(t *testing.T) {
+	loweredCost(t)
+	sys := newTestProvider(ProviderSystem)
+	fp := newTestFileProvider(ProviderFile)
+	v, _, _ := testVault(t, sys, fp)
+	mustSetup(t, v, "")
+	defer v.Close()
+
+	ctx := context.Background()
+	id1, name1, err := v.CreateNamedResolved(ctx, credential.NewSecret("pw-one"),
+		SecretMeta{Name: "openrouter.ai", Kind: "password"})
+	if err != nil {
+		t.Fatalf("first create: %v", err)
+	}
+	id2, name2, err := v.CreateNamedResolved(ctx, credential.NewSecret("pw-two"),
+		SecretMeta{Name: "openrouter.ai", Kind: "password"})
+	if err != nil {
+		t.Fatalf("second create: %v", err)
+	}
+	if name1 != "openrouter.ai" {
+		t.Errorf("first name = %q, want the requested name", name1)
+	}
+	if name2 != "openrouter.ai-2" {
+		t.Errorf("second name = %q, want the suffixed name", name2)
+	}
+	if id1 == id2 {
+		t.Fatal("two creates returned the same SecretID")
+	}
+
+	// The resolved name is what the catalogue record carries — the surface
+	// the renderer reads names from (ADR-0016).
+	var rec *SecretRecord
+	for i := range v.doc.Secrets {
+		if v.doc.Secrets[i].ID == id2 {
+			rec = &v.doc.Secrets[i]
+			break
+		}
+	}
+	if rec == nil || rec.Name != "openrouter.ai-2" {
+		t.Fatalf("record for the second create = %+v, want name openrouter.ai-2", rec)
+	}
+
+	// A third create walks past the taken suffix.
+	_, name3, err := v.CreateNamedResolved(ctx, credential.NewSecret("pw-three"),
+		SecretMeta{Name: "openrouter.ai", Kind: "password"})
+	if err != nil {
+		t.Fatalf("third create: %v", err)
+	}
+	if name3 != "openrouter.ai-3" {
+		t.Errorf("third name = %q, want openrouter.ai-3", name3)
+	}
+
+	// The plain CreateNamed path is unchanged: the name is taken and the
+	// create still succeeds WITHOUT renaming (the caller asked for no
+	// resolution — duplicate names are legal for that path).
+	_, err = v.CreateNamed(ctx, credential.NewSecret("pw-four"), SecretMeta{Name: "openrouter.ai", Kind: "password"})
+	if err != nil {
+		t.Fatalf("CreateNamed with a taken name: %v", err)
+	}
+}
+
+// An empty requested name stays empty: the fallback label path is
+// untouched by collision resolution.
+func TestCreateNamedResolved_EmptyNameStaysEmpty(t *testing.T) {
+	loweredCost(t)
+	sys := newTestProvider(ProviderSystem)
+	fp := newTestFileProvider(ProviderFile)
+	v, _, _ := testVault(t, sys, fp)
+	mustSetup(t, v, "")
+	defer v.Close()
+
+	_, name, err := v.CreateNamedResolved(context.Background(), credential.NewSecret("pw"),
+		SecretMeta{Kind: "password"})
+	if err != nil {
+		t.Fatalf("CreateNamedResolved: %v", err)
+	}
+	if name != "" {
+		t.Errorf("name = %q, want empty (nameless secrets render by fallback)", name)
+	}
+}

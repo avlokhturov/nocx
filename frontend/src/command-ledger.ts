@@ -25,8 +25,25 @@ export interface CommandRecord {
 }
 
 export interface LedgerOpts {
-  /** Injectable clock. Default: `() => performance.now()`. Never call Date.now(). */
+  /**
+   * Injectable wall clock in Unix epoch milliseconds (`Date.now()` units).
+   * startedAt/endedAt are persisted, survive a restart, and render as
+   * "3 days ago" across sessions — only a wall clock can express that.
+   * A monotonic clock (`performance.now()`, milliseconds since page load)
+   * would stamp values the store reads as January 1970 and sweeps the
+   * moment the row is written (nocx-rtg0.16). If a duration in the ledger
+   * ever needs monotonic time, keep a second, separate clock for it —
+   * never one clock serving both meanings.
+   */
   now: () => number
+  /**
+   * Called once when a record reaches a terminal state — the OSC 133 D with
+   * its exit code, an A interrupting it, an open() while it is still
+   * running, or a finalize at reset/exit. The record's status, exitCode and
+   * endedAt are final; the caller persists it (history.record, nocx-rtg0.13)
+   * or drops it. Never called twice for the same record.
+   */
+  onComplete?: (rec: CommandRecord) => void
 }
 
 type MarkerEvent = 'A' | 'B' | 'C' | 'D'
@@ -52,10 +69,12 @@ export class CommandLedger {
   private _records: CommandRecord[] = []
   private _nextId = 1
   private readonly _now: () => number
+  private readonly _onComplete: ((rec: CommandRecord) => void) | undefined
   private _cycle: CycleState = createCycle()
 
   constructor(opts: LedgerOpts) {
     this._now = opts.now
+    this._onComplete = opts.onComplete
   }
 
   /**
@@ -109,6 +128,7 @@ export class CommandLedger {
         if (this._cycle.running) {
           this._cycle.running.status = this._cycle.running.trusted ? 'interrupted' : 'unknown'
           this._cycle.running.endedAt = this._now()
+          this._emitComplete(this._cycle.running)
         }
         // Start a new prompt cycle. Trusted only when we didn't interrupt
         // a running command — i.e. the cycle was idle or completed.
@@ -152,6 +172,7 @@ export class CommandLedger {
           rec.status =
             rec.exitCode === 0 ? 'success' : rec.exitCode !== null ? 'failure' : 'unknown'
           this._cycle = createCycle()
+          this._emitComplete(rec)
         }
         break
       }
@@ -186,8 +207,14 @@ export class CommandLedger {
     if (this._cycle.running) {
       this._cycle.running.status = this._cycle.running.trusted ? 'interrupted' : 'unknown'
       this._cycle.running.endedAt = this._now()
+      this._emitComplete(this._cycle.running)
     }
     this._cycle = createCycle()
+  }
+
+  /** Internal: hand a finalized record to the persistence seam exactly once. */
+  private _emitComplete(rec: CommandRecord): void {
+    this._onComplete?.(rec)
   }
 
   /**

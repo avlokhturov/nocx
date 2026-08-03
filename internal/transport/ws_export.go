@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 
@@ -25,12 +26,25 @@ func (a *settingsProviderAdapter) All() (map[string]any, error) {
 	return snap.Values, nil
 }
 
+// settingsSinkAdapter bridges settings.Registry into export.SettingsSink.
+// It is the write-side counterpart of settingsProviderAdapter: whatever
+// GetSnapshot exported is what ApplyValues restores, and nothing else
+// (ADR-0011 §3). The export package never imports settings, and this
+// adapter preserves that structural invariant.
+type settingsSinkAdapter struct {
+	reg *settings.Registry
+}
+
+func (a *settingsSinkAdapter) Apply(values map[string]any) error {
+	return a.reg.ApplyValues(values)
+}
+
 // --- export.* control-plane handlers ------------------------------------
 // handleExportMethod dispatches export.* RPCs.
 // All export modes work purely through the profile/group repositories and
 // storage paths — the credential.CredentialStore is never consulted, so no
 // mode can resolve a secret (ADR-0011 §2, §7).
-func (s *WSServer) handleExportMethod(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleExportMethod(ctx context.Context, wconn *wsConn, req jsonrpcRequest) {
 	if s.profiles == nil || s.groups == nil {
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "profiles not available"))
 		return
@@ -44,7 +58,7 @@ func (s *WSServer) handleExportMethod(wconn *wsConn, req jsonrpcRequest) {
 	case "export.portableEncrypted":
 		s.handleExportPortableEncrypted(wconn, req)
 	case "export.backup":
-		s.handleExportBackup(wconn, req)
+		s.handleExportBackup(ctx, wconn, req)
 	case "export.import":
 		s.handleExportImport(wconn, req)
 	case "export.importPortable":
@@ -111,13 +125,13 @@ func (s *WSServer) handleExportPortableEncrypted(wconn *wsConn, req jsonrpcReque
 
 // --- export.backup -----------------------------------------------------
 
-func (s *WSServer) handleExportBackup(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleExportBackup(ctx context.Context, wconn *wsConn, req jsonrpcRequest) {
 	if s.exportPaths == nil {
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "backup not available (paths not wired)"))
 		return
 	}
-	deps := export.BackupDeps{Paths: s.exportPaths}
-	result, err := export.Backup(deps)
+	deps := export.BackupDeps{Paths: s.exportPaths, ContentDB: s.exportContentDB}
+	result, err := export.Backup(ctx, deps)
 	if err != nil {
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
 		return
@@ -144,8 +158,9 @@ func (s *WSServer) handleExportImport(wconn *wsConn, req jsonrpcRequest) {
 		return
 	}
 
-	// Domain service path: atomic import.
-	result, err := export.ImportConfigurationWithService(s.profileSvc, &data)
+	// Domain service path: atomic import, then restore the settings the
+	// export carried (nocx-ojxa — import used to drop them silently).
+	result, err := export.ImportConfigurationWithService(s.profileSvc, &data, s.buildSettingsSink())
 	if err != nil {
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
 		return
@@ -179,13 +194,29 @@ func (s *WSServer) handleExportImportPortable(wconn *wsConn, req jsonrpcRequest)
 		return
 	}
 
-	// Domain service path: atomic import.
-	result, impErr := export.ImportConfigurationWithService(s.profileSvc, &plain.Config)
+	// Domain service path: atomic import of the configuration, then restore
+	// the settings and private content the backup carried (nocx-ojxa — both
+	// used to be dropped at the import end).
+	result, impErr := export.ImportConfigurationWithService(s.profileSvc, &plain.Config, s.buildSettingsSink())
 	if impErr != nil {
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, impErr.Error()))
 		return
 	}
+	if err := export.RestorePrivateContent(s.exportContentDB, plain.Private); err != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		return
+	}
 	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(result)))
+}
+
+// buildSettingsSink returns the settings sink when a registry is wired,
+// else nil. It mirrors buildConfigExportDeps: provider and sink come from
+// the same registry, so what export writes is what import can restore.
+func (s *WSServer) buildSettingsSink() export.SettingsSink {
+	if s.settings == nil {
+		return nil
+	}
+	return &settingsSinkAdapter{reg: s.settings}
 }
 
 // buildConfigExportDeps assembles a ConfigExportDeps from the wired

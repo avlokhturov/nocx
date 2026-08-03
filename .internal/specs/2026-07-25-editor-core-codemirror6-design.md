@@ -234,12 +234,25 @@ code already in hand.
   no `.value`/`.rows`/`.selectionStart` pokes. It goes red, then W1 makes it green.
 - **Acceptance:** the rewritten unit suite is green; the editor renders, accepts typing,
   places the caret on click, edits mid-line and handles multiline as before; the submit
-  path is byte-identical to before the swap (see invariant 1); `show()`/`hide()` keep the
-  `_shownOnce` layout reservation — first hide uses `display:none`, every later hide uses
-  `visibility:hidden` so the flex box keeps its height and the pane does not jump.
-- **Explicitly verify under `visibility:hidden`:** CM6 measures its own layout, and a
-  hidden view can cache wrong geometry. Assert the editor is correctly sized and
-  focusable on the show that follows a hide.
+  path is byte-identical to before the swap (see invariant 1); `hide()` sets
+  `display:none` **every time** and `show()` clears it.
+
+  > **Corrected 2026-08-01 — this clause was stale and a worker caught it.** It used to
+  > require the `_shownOnce` reservation (first hide `display:none`, later hides
+  > `visibility:hidden` to keep the flex box's height). That reservation was
+  > **deliberately deleted on 2026-07-28**, three days after this spec was written:
+  > `editor.ts`'s `hide()` comment records why — the stability it bought was paid for in
+  > "a strip of dead canvas below every running command, which the owner reported twice",
+  > so "the reservation goes; the jump comes back and is the smaller of the two problems".
+  > `style.css` agrees in its own comment. W1 is behaviour-preserving, so reinstating it
+  > would be a user-visible regression inside a swap that promises none.
+
+- **Explicitly verify geometry across a hide/show cycle:** CM6 measures its own layout, and
+  a view that was hidden can cache wrong geometry. This survives the policy correction
+  above unchanged — it is the real risk the clause was pointing at. Assert that after a
+  `hide()`/`show()` cycle the editor is correctly sized, focusable, and places the caret on
+  click. If `display:none` turns out to make CM6's measurement worse than `visibility:hidden`
+  did, that is a finding to report — never a reason to quietly reinstate the reservation.
 
 ### W2 — Keymap at highest precedence
 

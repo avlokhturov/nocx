@@ -31,7 +31,12 @@ type VaultLifecycle interface {
 	// name and kind (ADR-0016). The name joins Create's journal sequence; it
 	// is never written by a second, independent path.
 	CreateNamed(ctx context.Context, value credential.Secret, meta vault.SecretMeta) (credential.SecretID, error)
-	// RenameSecret sets a secret's display name, addressed by its
+	// CreateNamedResolved is CreateNamed with atomic name-collision
+	// resolution: when the requested name is taken, the next free suffixed
+	// name is chosen under the vault lock and the name ACTUALLY used comes
+	// back — the renderer must never predict that a suffixed name is free;
+	// two tabs can save at once.
+	CreateNamedResolved(ctx context.Context, value credential.Secret, meta vault.SecretMeta) (credential.SecretID, string, error)
 	// renderer-addressable row handle — never by a SecretID (nocx-jb20.1).
 	RenameSecret(ctx context.Context, row string, name string, inputs []vault.CredentialInventory) error
 	// ResolveRow maps a renderer-addressable row handle to the SecretID
@@ -40,6 +45,10 @@ type VaultLifecycle interface {
 	// profile references — metadata first (ADR-0011 §4) — before the
 	// stored secret is deleted.
 	ResolveRow(row string, inputs []vault.CredentialInventory) (credential.SecretID, bool)
+	// Get resolves id to a provider and reads the secret. The value is only
+	// ever used inside Secret.Use; the transport hands the resolved bytes to
+	// the caller for a PTY write and nowhere else.
+	Get(ctx context.Context, id credential.SecretID) (credential.Secret, error)
 	// ReplaceSecret overwrites the material behind an existing secret,
 	// addressed by its renderer-addressable row handle — never by a SecretID
 	// (nocx-jb20.1). The reference does not change: the new value lands under
@@ -164,6 +173,8 @@ func (s *WSServer) handleVaultMethod(wconn *wsConn, req jsonrpcRequest) {
 		s.handleVaultReplaceSecret(wconn, req)
 	case "vault.deleteSecret":
 		s.handleVaultDeleteSecret(wconn, req)
+	case "vault.resolveLine":
+		s.handleVaultResolveLine(wconn, req)
 	}
 }
 
@@ -300,6 +311,13 @@ func (s *WSServer) handleVaultUnseal(wconn *wsConn, req jsonrpcRequest) {
 
 func (s *WSServer) handleVaultSeal(wconn *wsConn, req jsonrpcRequest) {
 	s.vaultLifecycle.Seal()
+	// Vault seal destroys every pending capture: the offer's plaintext
+	// must not outlive the lock it was offered under (the capture
+	// contract's destruction list names it). A save in flight is left to
+	// settle — the registry skips non-pending captures.
+	if s.captures != nil {
+		s.captures.DestroyAll()
+	}
 	s.broadcastVaultChanged()
 	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(struct{}{})))
 }
@@ -515,6 +533,21 @@ type vaultCreateSecretParams struct {
 	Kind  string `json:"kind"`
 	Value string `json:"value,omitempty"`
 	Path  string `json:"path,omitempty"`
+	// Resolve asks for atomic name-collision resolution — the same path
+	// secrets.captureSave takes (vault.CreateNamedResolved) — and for the
+	// name ACTUALLY used in the response. The Secrets page's ordinary
+	// create keeps CreateNamed's exact-name semantics and an empty result.
+	// The renderer must never predict that a suffixed name is free; the
+	// vault is where the real name is decided.
+	Resolve bool `json:"resolve,omitempty"`
+}
+
+// vaultCreateSecretResponse carries the name ACTUALLY used, so a caller
+// that asked for collision resolution (the prompt's ⌘S save) can build the
+// {{secret:NAME}} reference from the vault's answer, never from the name it
+// sent. The Secrets page ignores it.
+type vaultCreateSecretResponse struct {
+	Name string `json:"name"`
 }
 
 // handleVaultCreateSecret stores a secret the user created on the Secrets
@@ -553,15 +586,26 @@ func (s *WSServer) handleVaultCreateSecret(wconn *wsConn, req jsonrpcRequest) {
 		value = contents
 	}
 
-	_, err := s.vaultLifecycle.CreateNamed(context.Background(), credential.NewSecret(value),
-		vault.SecretMeta{Name: params.Name, Kind: params.Kind})
-	if err != nil {
-		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "vault.createSecret: ", err))
-		return
+	name := params.Name
+	if params.Resolve {
+		_, realName, err := s.vaultLifecycle.CreateNamedResolved(context.Background(), credential.NewSecret(value),
+			vault.SecretMeta{Name: params.Name, Kind: params.Kind})
+		if err != nil {
+			_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "vault.createSecret: ", err))
+			return
+		}
+		name = realName
+	} else {
+		_, err := s.vaultLifecycle.CreateNamed(context.Background(), credential.NewSecret(value),
+			vault.SecretMeta{Name: params.Name, Kind: params.Kind})
+		if err != nil {
+			_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "vault.createSecret: ", err))
+			return
+		}
 	}
 
 	s.broadcastVaultChanged()
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(struct{}{})))
+	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(vaultCreateSecretResponse{Name: name})))
 }
 
 // readKeyFile reads the file the user chose in Path mode. A leading ~ is

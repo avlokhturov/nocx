@@ -328,6 +328,14 @@ export class TabManager {
   private readonly recentTabIds: number[] = []
   /** Called when an SSH connection fails because the vault is sealed. */
   onVaultSealed?: () => void
+  /** Called when the reference picker's setup offer is activated and the
+   *  machine has no OS key: the vault layer owns the setup dialog, so the
+   *  hook raises it (wired by main.tsx to vaultController.openSetup). */
+  onSetupVault?: () => void
+
+  /** The prompt picker's "Add a secret…" row — opens Settings → Secrets
+   *  with the add dialog up. */
+  onCreateSecret?: (name: string) => void
   /** Called when the user performs a UI action that should reset the
    *  vault idle timer. Wired by main.tsx to vaultClient.activity(). */
   onActivity?: () => void
@@ -414,7 +422,11 @@ export class TabManager {
       // a viewport-sized fullscreen xterm would not paint through it; the
       // fullscreen region lives inside its pane now (nocx-6w4z).
       undefined,
-      (subtitle) => tabRef.current?.updateSubtitle(subtitle),
+      {
+        onSubtitleChange: (subtitle) => tabRef.current?.updateSubtitle(subtitle),
+        onSetupVault: this.onSetupVault,
+        onCreateSecret: this.onCreateSecret,
+      },
     )
     const descriptor: ContentDescriptor = {
       surfaceType: SURFACE_TERMINAL,
@@ -446,17 +458,21 @@ export class TabManager {
       this.profileClient,
       (tooltip) => tabRef.current?.updateTooltip(tooltip),
       sshOpts,
-      (subtitle) => tabRef.current?.updateSubtitle(subtitle),
-      (adoptable: boolean) => {
-        const tab = tabRef.current
-        if (!tab) return
-        if (adoptable) {
-          tab.setAdoptState(true, () => this._adoptAlias(host, user, port, tab))
-        } else {
-          tab.setAdoptState(false, () => {})
-        }
+      {
+        onSubtitleChange: (subtitle) => tabRef.current?.updateSubtitle(subtitle),
+        onAdoptabilityChange: (adoptable: boolean) => {
+          const tab = tabRef.current
+          if (!tab) return
+          if (adoptable) {
+            tab.setAdoptState(true, () => this._adoptAlias(host, user, port, tab))
+          } else {
+            tab.setAdoptState(false, () => {})
+          }
+        },
+        onVaultSealed: this.onVaultSealed,
+        onSetupVault: this.onSetupVault,
+        onCreateSecret: this.onCreateSecret,
       },
-      this.onVaultSealed,
     )
     const descriptor: ContentDescriptor = {
       surfaceType: SURFACE_TERMINAL,

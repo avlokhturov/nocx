@@ -17,8 +17,9 @@ import { test, expect, promptReady } from './harness'
 // is the path every one of those bugs travelled through.
 //
 // Post nocx-4ff the editor owns input at every prompt (ADR-0004). The focus
-// target is therefore .nocx-editor-input (the CommandEditor textarea), not
-// .xterm-helper-textarea (the raw terminal grid). The path itself is identical.
+// target is therefore .nocx-editor-input — CM6's contenteditable contentDOM
+// (ADR-0010), which keeps the class — not .xterm-helper-textarea (the raw
+// terminal grid). The path itself is identical.
 
 const PANE = '.pane.active'
 const INPUT = '.nocx-editor-input'

@@ -7,16 +7,41 @@ import { XtermRenderer } from './renderers/xterm'
 import type { TerminalRenderer, MarkerAdapter } from './renderers/types'
 import { InputStateController } from './input-state'
 import { CommandEditor } from './editor'
+import { shellExtensions } from './shell-highlight'
+import { RecallOverlay, queryLedgerHistory, withSessionText } from './recall'
+import { CompletionController } from './suggest/controller'
+import { createShellProviders } from './suggest/providers'
+import { CompletionDropdown } from './ui/completion-dropdown'
+import type { FsComplete } from './generated/fs.complete'
 import { ShellInputTarget } from './input-target'
-import { submitCommand } from './submit'
+import {
+  submitCommand,
+  planSubmit,
+  planSubmitSync,
+  isSubmitFailure,
+  type SubmitPlan,
+} from './submit'
+import { secretChipExtension } from './secret-chip'
+import { secretCandidateExtension } from './secret-candidate'
+import { unresolvedRedactionField } from './unresolved-redactions'
+import { PromptVaultController } from './prompt-vault'
+import { VaultClient } from './vault-client'
+import { showToast } from './ui/toast'
+import { BlockReceipt } from './ui/block-receipt'
+import type { HistoryRecord } from './generated/history.record'
+import { renderRecordedCommand } from './scrollback/blocks'
+import { KIND_LABELS } from './secret-kind'
 import { shouldShowEditor, NATIVE_RESTORE } from './native-mode'
 import { shouldCopy, type ClipboardAccess, type ClipboardGate } from './clipboard'
 import type { ClipboardBanner } from './banner'
-import { CommandLedger } from './command-ledger'
 import { ScrollbackController } from './scrollback/controller'
+import type { BlockRecord } from './scrollback/blocks'
+import { CommandLedger } from './command-ledger'
+import { queryHistory, recordCommand } from './history-client'
 import { log } from './log'
 import type { WSClient, SessionHandle } from './ipc'
 import { showConfirm } from './ui/dialog'
+import { hasOpenOverlays } from './ui/overlay/stack'
 import { BaseTabContent, type TabHost, type ContentViewport } from './tab-content'
 import { type ProfileClient, type SSHAliasEntry } from './profiles'
 import { RpcError } from './dispatcher'
@@ -36,6 +61,19 @@ const RESIZE_SETTLE_MS = 80
 const RESIZE_ECHO_MS = 400
 
 /**
+ * Whether a settle call failed because the backend no longer holds the
+ * capture — it was destroyed by the tab closing, the vault sealing, the
+ * transport dropping, or the record that carried it failing.
+ *
+ * The distinction matters at the surface: this one can never succeed, so
+ * the row goes and the receipt says the offer is gone. Every other failure
+ * is worth another press.
+ */
+function isCaptureGone(err: unknown): boolean {
+  return err instanceof RpcError && (err.code === -32010 || err.code === -32011)
+}
+
+/**
  * Whether `el` is somewhere the user types on purpose.
  *
  * Used to keep the terminal's document-level key rescue off other people's
@@ -47,6 +85,28 @@ function isTextEntry(el: Element | null): boolean {
   if (el.isContentEditable) return true
   const tag = el.tagName
   return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT'
+}
+
+/** The host callbacks a tab may hand a TerminalContent. Named rather than
+ *  positional: they are all optional functions, so any misalignment between
+ *  them type-checks cleanly and fails only in front of a user. */
+export interface TerminalContentHooks {
+  /** Pushes the strip's optional second line — the tab's location, or ''
+   *  when the title already says it. Only TerminalContent holds both halves
+   *  of that question. */
+  onSubtitleChange?: (subtitle: string) => void
+  /** The session is an alias (not a saved profile) and can be adopted as a
+   *  nocx connection. True = adoptable, false = not. */
+  onAdoptabilityChange?: (adoptable: boolean) => void
+  /** An SSH connection failed because the vault is sealed. */
+  onVaultSealed?: () => void
+  /** The reference picker's setup offer needs the setup dialog (no OS key):
+   *  the vault layer owns it — wired by main.tsx to
+   *  vaultController.openSetup. */
+  onSetupVault?: () => void
+  /** The reference picker's "Add a secret…" row: open the vault's own
+   *  create dialog — wired by main.tsx to the Settings tab's Secrets page. */
+  onCreateSecret?: (name: string) => void
 }
 
 // No placeholder title — see the descriptor in tabs.ts for why. A tab with no
@@ -86,6 +146,40 @@ export class TerminalContent extends BaseTabContent {
   private shellTarget: ShellInputTarget | null = null
   private scrollback: ScrollbackController | null = null
   private ledger: CommandLedger | null = null
+  /** The vault RPC client, built over this tab's WS client (the shared
+   *  dispatcher — the sealed-access seam it carries is already installed at
+   *  the app root). */
+  private vault: VaultClient | null = null
+  /** The after-submit capture receipts, keyed by the frozen block each one
+   *  is mounted in. Several can be open at once: an offer lives until it is
+   *  answered, and deciding about a key is rarely the next thing anyone
+   *  does — you run one more command first, and under the old
+   *  one-at-a-time rule that lost the offer for good.
+   *
+   *  `receipt` is the newest of them: the one ⌘S acts on and the one the
+   *  focus-bounce yields to. */
+  private readonly receipts = new Map<HTMLElement, BlockReceipt>()
+  private receipt: BlockReceipt | null = null
+  private receiptBlockEl: HTMLElement | null = null
+  /** Capture id → the block its receipt is mounted in, so a hover
+   *  emphasises the chip in the RIGHT block when several are open. */
+  private readonly receiptChipBlocks = new Map<string, HTMLElement>()
+  /** Ledger record id → the block record captured at onComplete time (the
+   *  same object freezeBlock mutates in place). The ack is an async round
+   *  trip, so by the time it resolves the block is frozen — but the user
+   *  may have submitted again or cleared the scrollback; the identity is
+   *  checked against the live DOM, never looked up as "the most recent
+   *  block". */
+  private readonly pendingReceiptBlocks = new Map<number, BlockRecord>()
+  /** Capture id → the redaction span of the chip in the block's command
+   *  line, for the receipt's hover emphasis (chips carry the span; rows
+   *  carry the capture id). */
+  private readonly receiptChipSpans = new Map<string, { start: number; end: number }>()
+  /** The prompt's vault surfaces: the '@' picker, the composition-time
+   *  candidate, and the resolve-at-submit wiring. */
+  private promptVault: PromptVaultController | null = null
+  private completion: CompletionController | null = null
+  private recall: RecallOverlay | null = null
   private inputState = new InputStateController()
   private _markers = new Map<number, MarkerAdapter>()
   private _pendingCommand = ''
@@ -137,14 +231,13 @@ export class TerminalContent extends BaseTabContent {
       user?: string
       port?: number
     },
-    /** Pushes the strip's optional second line — the tab's location, or '' when the
-     *  title already says it. Only this class holds both halves of that question. */
-    private readonly onSubtitleChange?: (subtitle: string) => void,
-    /** Called when the session is an alias (not a saved profile) and can be
-     *  adopted as a nocx connection. True = adoptable, False = not. */
-    private readonly onAdoptabilityChange?: (adoptable: boolean) => void,
-    /** Called when an SSH connection fails because the vault is sealed. */
-    private readonly onVaultSealed?: () => void,
+    /** The optional host callbacks, NAMED. They used to be four trailing
+     *  positional parameters, and a caller that skipped the middle two put
+     *  onSetupVault into the onAdoptabilityChange slot — so on a local tab
+     *  the picker's "set up the vault" row answered Enter by calling
+     *  nothing, and nothing could have caught it: every one of them is an
+     *  optional function, so every misalignment type-checks. */
+    private readonly hooks: TerminalContentHooks = {},
   ) {
     super()
     this._readyPromise = new Promise<boolean>((resolve) => {
@@ -169,7 +262,7 @@ export class TerminalContent extends BaseTabContent {
     // The location line earns a row only when the title is a name of its own.
     // With no program title the title IS the location, and a second line would
     // print the first one again.
-    this.onSubtitleChange?.(this.programTitle ? this.locationLine() : '')
+    this.hooks.onSubtitleChange?.(this.programTitle ? this.locationLine() : '')
   }
 
   /** Where this tab is: `user@host` for SSH, the working directory otherwise. */
@@ -212,6 +305,9 @@ export class TerminalContent extends BaseTabContent {
         pane: target,
         renderer,
         now: () => performance.now(),
+        // The renderer owns this tab's OSC 636 store; the scrollback's frozen
+        // headers and the editor below must judge against the same instance.
+        snapshotStore: renderer.snapshotStore,
       })
 
       log.info('nocx: mounting renderer')
@@ -229,57 +325,272 @@ export class TerminalContent extends BaseTabContent {
       this.rows = renderer.rows
 
       // ── Command ledger (ADR-0008) ────────────────────────────────────────
-      this.ledger = new CommandLedger({ now: () => performance.now() })
+      // A completed record is shipped to the store over the control plane
+      // (nocx-rtg0.13, AD-1 as amended): the renderer derives the facts
+      // from the byte stream it already owns, and recordCommand is the one
+      // seam that crosses. Best-effort by design — a dropped record is a
+      // session-lost entry, never a terminal error.
+      this.ledger = new CommandLedger({
+        // Wall-clock epoch milliseconds: the ledger's timestamps are
+        // persisted, survive a restart, and render as relative wall time
+        // (nocx-rtg0.16) — performance.now() would be swept as 1970.
+        now: () => Date.now(),
+        onComplete: (rec) => {
+          // The block identity, captured at onComplete time: at the D
+          // marker this runs BEFORE scrollback.onCommandEnd freezes the
+          // block, so the running block record IS the object freezeBlock
+          // mutates in place. The ack is an async round trip — by the time
+          // it resolves the block is frozen, but the user may have
+          // submitted again or cleared the scrollback — so the receipt
+          // attaches by this captured identity, never "the most recent
+          // block", and a block that is gone by then drops the receipt
+          // silently.
+          const block = this.scrollback?.blockManager.runningBlock
+          if (block) this.pendingReceiptBlocks.set(rec.id, block)
+          void recordCommand(this.client, rec).then((ack) => {
+            this.pendingReceiptBlocks.delete(rec.id)
+            if (ack === null || ack.maskedCommand === undefined) return
+            this.attachRecordedAck(rec.id, block, ack)
+          })
+        },
+      })
 
       // ── Wire input ownership BEFORE opening the session ─────────────────
+      // Completion (design §8.7–§8.9): the dropdown + ghost text surface,
+      // composed here so the editor stays passive. Providers: command names
+      // from the OSC 636 snapshot (this renderer's own — correct on a remote
+      // host, it is the running shell's answer), history over the control
+      // plane (environment-scoped, the directory rung), and local filesystem
+      // paths — active only when this tab's session is a local shell, so a
+      // local path can never masquerade as a remote one (§8.5).
+      this.completion = new CompletionController({
+        providers: createShellProviders({
+          store: renderer.snapshotStore,
+          queryHistory: (cwd, host) => queryHistory(this.client, 'directory', cwd, host),
+          completeFs: (text, cwd) => this.client.call<FsComplete>('fs.complete', { text, cwd }),
+        }),
+        dropdown: new CompletionDropdown({
+          onHover: (index) => this.completion?.select(index),
+          onPick: (index) => this.completion?.acceptIndex(index),
+        }),
+        env: () => ({ isLocal: !this.sshOpts, cwd: this._cwd, host: this._host }),
+        recallIsOpen: () => this.recall?.isOpen ?? false,
+      })
       this.shellTarget = new ShellInputTarget(
         (text: string) => renderer.paste(text),
         (data: string) => this.session!.send(data),
+        // The target carries the shell's editor extensions through the §8.8
+        // seam: the shell highlighter, the completion surface, the
+        // vault-reference chip (a document-level decoration, not a
+        // language), the quiet composition-time candidate mark, and the
+        // unresolved-redaction field a recalled masked row registers in.
+        [
+          ...shellExtensions(renderer.snapshotStore),
+          ...this.completion.extensions(),
+          secretChipExtension(),
+          secretCandidateExtension(),
+          unresolvedRedactionField,
+        ],
       )
-      this.editor = new CommandEditor({
-        submit: (doc: string) => {
-          this._pendingCommand = doc
-          if (this.ledger) {
-            let markerLine: () => number | undefined = () => undefined
-            const rec = this.ledger.open(doc, this._cwd, this._host, () => markerLine())
-            const m = renderer.registerMarker()
-            if (m) {
-              markerLine = () => m.line()
-              this._markers.set(rec.id, m)
-              m.onDispose(() => {
-                this.ledger?.dispose(rec.id)
-                this._markers.delete(rec.id)
-              })
+      const vault = new VaultClient(this.client)
+      this.vault = vault
+      this.editor = new CommandEditor(
+        {
+          // The resolve half of ADR-0021, BEFORE the atomic handoff: a line
+          // with references is resolved through vault.resolveLine; the
+          // RESOLVED line goes to the PTY, the reference-intact line to the
+          // ledger and history.record. A sealed vault or an unresolved name
+          // is reported and the draft stays — never a silent send of a
+          // broken line (the editor's beforeSubmit seam keeps the draft on
+          // false). A plain line resolves SYNCHRONOUSLY (planSubmitSync) —
+          // an ordinary Enter keeps its no-gap atomic handoff. A recalled
+          // masked row is refused first: the draft stays and resolution
+          // opens on the first chip (ADR-0021's consequence).
+          beforeSubmit: (doc) => {
+            if (this.promptVault?.openResolution()) return false
+            const sync = planSubmitSync(doc)
+            if (sync) return sync
+            return planSubmit(doc, (line) => vault.resolveLine(line)).then((verdict) => {
+              if (isSubmitFailure(verdict)) {
+                this.reportSubmitFailure(verdict)
+                return false
+              }
+              return verdict
+            })
+          },
+          submit: (doc: string, plan?: SubmitPlan) => {
+            const recordLine = plan?.recordLine ?? doc
+            this._pendingCommand = recordLine
+            // The previous command's receipt is deliberately LEFT alone.
+            // Submitting again used to destroy its capture on the backend
+            // and retire the receipt here, which meant that running one
+            // more command before deciding lost the offer for good.
+            if (this.ledger) {
+              let markerLine: () => number | undefined = () => undefined
+              const rec = this.ledger.open(recordLine, this._cwd, this._host, () => markerLine())
+              const m = renderer.registerMarker()
+              if (m) {
+                markerLine = () => m.line()
+                this._markers.set(rec.id, m)
+                m.onDispose(() => {
+                  this.ledger?.dispose(rec.id)
+                  this._markers.delete(rec.id)
+                })
+              }
             }
-          }
-          this.scrollback?.maybeClear(doc)
-          submitCommand(doc, {
-            dispatchSubmit: () => this.inputState.dispatch({ type: 'submit' }),
-            focusGrid: () => renderer.focus(),
-            sendDoc: (d) => void this.shellTarget!.submit(d),
-          })
+            this.scrollback?.maybeClear(recordLine)
+            submitCommand(doc, {
+              dispatchSubmit: () => this.inputState.dispatch({ type: 'submit' }),
+              focusGrid: () => renderer.focus(),
+              sendDoc: (d) => void this.shellTarget!.submit(d),
+            })
+          },
+          cancel: () => this.session?.send('\x03'),
+          // A taller editor is a shorter scrollback. Keep the bottom of the
+          // transcript where it belongs — just above the editor — instead of
+          // letting it slide underneath.
+          resized: () => this.scrollback?.scrollToBottom(),
+          /** Detect `ssh <partial>` pattern and show matching aliases, and
+           *  drive the vault surfaces (the candidate's detection, the
+           *  picker's passive filter). */
+          onInputChange: (text) => {
+            this._onEditorInput(text)
+            // A keystroke aborts the completion query in flight and starts a
+            // fresh one (design §8.9.2); the ghost text re-anchors.
+            this.completion?.onDocChanged()
+            this.promptVault?.onDocChanged(text)
+          },
+          /** A programmatic clear (submit, Esc, Ctrl-C): the vault surfaces
+           *  hold stale findings over a cleared line. */
+          onDocCleared: () => {
+            this.promptVault?.reset()
+          },
+          /** '@' at a word start — the reference picker's passive trigger.
+           *  Opening it closes the completion dropdown: the surfaces never
+           *  stack (the mutual-exclusion rule). */
+          onSecretPicker: (triggerPos) => {
+            this.completion?.dismiss()
+            this.promptVault?.onSecretPicker(triggerPos)
+          },
+          /** Hint acceptance — no cache to invalidate. */
+          onAcceptHint: () => {},
+          /** Up on the first line (or an empty draft): no further caret
+           *  movement, so open the recall overlay (design §8.10 v6). */
+          onUpAtTop: () => {
+            void this.recall?.open('directory')
+          },
+          /** Tab opens the completion dropdown (§8.7's decided option 1). */
+          onTab: () => this.completion?.open(),
+          /** The save chord: a live receipt's primary action outranks the
+           *  composition-time candidate; ⇧⌘S moves focus into the receipt
+           *  for review. Returns whether anything was triggered (the editor
+           *  consumes the chord either way). */
+          onSave: (shift) => {
+            // The chord acts on the NEWEST unanswered receipt; with none
+            // open it falls through to the composition-time candidate.
+            if (this.receipt) {
+              if (shift) this.receipt.enterReview()
+              else this.receipt.saveAll()
+              return true
+            }
+            return this.promptVault?.saveCandidate() ?? false
+          },
         },
-        cancel: () => this.session?.send('\x03'),
-        // A taller editor is a shorter scrollback. Keep the bottom of the
-        // transcript where it belongs — just above the editor — instead of
-        // letting it slide underneath.
-        resized: () => this.scrollback?.scrollToBottom(),
-        /** Detect `ssh <partial>` pattern and show matching aliases. */
-        onInputChange: (text) => this._onEditorInput(text),
-        /** Hint acceptance — no cache to invalidate. */
-        onAcceptHint: () => {},
+        // The language is chosen HERE, not inside the editor. CommandEditor
+        // must stay language-agnostic (ADR-0010 §Decision 3): the agent target
+        // will want prose with mentions on this same surface, and an editor
+        // that defaults to shell would have to be edited to gain one — exactly
+        // what ADR-0004 §3 exists to prevent. The seam (design §8.8) carries
+        // the shell layer: the target supplies its extensions, the editor
+        // never hard-codes them.
+        this.shellTarget.editorExtensions?.() ?? [],
+      )
+      this.editor.mount(target)
+      this.completion.attach(this.editor, this.editor.root)
+      this.promptVault = new PromptVaultController({
+        editor: this.editor,
+        vault,
+        report: (level, message) => showToast({ level, message }),
+        requestSetupDialog: () => this.hooks.onSetupVault?.(),
+        requestCreateSecret: (name) => this.hooks.onCreateSecret?.(name),
+      })
+      this.promptVault.mount()
+
+      // ── Recall overlay (Provenance Recall, design §8.10) ────────────────
+      // The history palette above the prompt. Rows are served by the store
+      // over the control plane (history.query, source=store); when the
+      // store cannot answer, the overlay falls back to the in-memory ledger
+      // with source=session, which the panel labels "this session only" —
+      // presenting one session as all history is the same lie as marking
+      // every command green. The editor's key arbiter gives the overlay
+      // first refusal while it is open; navigating previews into the
+      // editor, and Enter executes through the editor's own submit path
+      // (nocx-w7h.5).
+      this.recall = new RecallOverlay({
+        editor: this.editor,
+        query: async (scope, text) => {
+          try {
+            const page = await queryHistory(this.client, scope, this._cwd, this._host, text)
+            // A command run in THIS session comes back as it was run, not as
+            // the store had to keep it (nocx-xkve.4). Recall only — the
+            // completion provider above keeps reading the store, so ghost
+            // text and candidates stay masked.
+            return withSessionText(page, this.ledger)
+          } catch {
+            return queryLedgerHistory(this.ledger, scope, this._cwd, this._host, text)
+          }
+        },
+        // A recalled masked row cannot run as written (ADR-0021): the
+        // overlay reports the row's redaction spans every time it places
+        // text in the editor (preview, insert, draft restore), the editor
+        // renders them as unresolved chips, and the beforeSubmit seam
+        // refuses to run the command while any remain — opening resolution
+        // on the first chip. This is the door people will actually walk
+        // through: nobody plans to store a secret in advance, they hit a
+        // command that cannot run.
+        onDocContent: (doc, redactions) =>
+          this.promptVault?.onRecalledRow(
+            redactions.map((r) => ({ from: r.start, to: r.end, kind: r.kind })),
+          ),
+      })
+      this.recall.mount(this.editor.root)
+      // ONE arbiter chain (design §8.9.4 — three surfaces, one keyboard):
+      // recall first, the vault picker second, completion last, the
+      // editor's own handling at the tail. Recall is the higher-priority
+      // surface and the surfaces never stack: opening any one closes the
+      // others — the completion dropdown is dismissed the moment recall or
+      // the picker opens, and the picker is dismissed the moment recall
+      // opens (a Ctrl/Cmd+R can land while the picker is up). Esc closes
+      // exactly one surface per press, in the same order.
+      this.editor.setKeyArbiter((e) => {
+        const consumed = this.recall!.handleKey(e)
+        if (this.recall!.isOpen) {
+          this.completion?.dismiss()
+          this.promptVault?.closePicker()
+        }
+        if (consumed) return true
+        // The picker outranks completion: while it is open its keys
+        // (arrows, Enter, Tab, Esc) belong to it, and a Right/End ghost
+        // accept must never insert completion text into the line under the
+        // picker.
+        if (this.promptVault!.isPickerOpen) this.completion?.dismiss()
+        if (this.promptVault!.handleKey(e)) return true
+        return this.completion?.handleKey(e) ?? false
       })
 
-      this.editor.mount(target)
-
       if (signal.aborted) {
+        this.recall?.destroy()
+        this.recall = null
+        this.completion?.destroy()
+        this.promptVault?.destroy()
+        this.promptVault = null
+        this.completion = null
         this.editor.dispose()
         renderer.dispose()
         this.scrollback.dispose()
         this._readyResolve(false)
         return
       }
-
       // False until the first OSC 133 marker: a markerless session (plain
       // SSH) keeps the terminal visible in the unstructured full-pane mode.
       let shellIntegrated = false
@@ -355,15 +666,31 @@ export class TerminalContent extends BaseTabContent {
       target.addEventListener('focusin', () => {
         if (!this.editor?.isVisible) return
         const active = document.activeElement
+        // The receipt's review mode is the ONE place in this design where
+        // focus leaves the editor: ⇧⌘S parks it in the name fields. The
+        // bounce must yield to it, or the caret snaps straight back and the
+        // receipt cannot be edited at all.
         if (
           active &&
-          (this.editor.rootContains(active) || this.scrollback?.xtermLiveContainer.contains(active))
+          (this.editor.rootContains(active) ||
+            this.scrollback?.xtermLiveContainer.contains(active) ||
+            this.receipt?.root.contains(active))
         )
           return
         this.editor.focus()
       })
 
-      this.editor.root.addEventListener('click', () => {
+      // Click anywhere on the editor card and the prompt takes focus — the
+      // card's padding and chrome are all "the prompt" as far as a user is
+      // concerned. Except a control the user clicked ON PURPOSE: the vault
+      // offer's name field and its buttons live inside this root, so an
+      // unconditional focus() bounced the caret straight back to the prompt
+      // and the field could not be typed into at all. Same guard the keydown
+      // path uses — a nested form control owns its own focus and its own
+      // keys.
+      this.editor.root.addEventListener('click', (e) => {
+        const target = e.target as HTMLElement | null
+        if (target?.closest('input, textarea, select, button')) return
         this.editor?.focus()
       })
 
@@ -386,6 +713,58 @@ export class TerminalContent extends BaseTabContent {
             return
           }
         }
+        // Paste (Cmd/Ctrl+V) belongs to the same rescue policy: wherever in
+        // the pane the user clicked — a frozen block, the scrollback, the
+        // running grid — the paste must reach the command editor, and it
+        // must never reach the shell as a literal \x16. The same isTextEntry
+        // guard keeps other surfaces' paste to themselves (a settings field,
+        // quick connect, a dialog). When the overlay is open, its arbiter
+        // runs before this document listener on the editor's own keys and
+        // decides first; when the editor itself has focus this branch is
+        // skipped by the guard and the editor's own paste path runs.
+        // Focus-only, deliberately: leave the keydown uncancelled so the
+        // browser emits its paste event at the now-focused editor and CM6's
+        // own paste inserts at the caret — reading the clipboard here would
+        // bypass CM6 and fight the gesture.
+        if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 'v') {
+          if (isTextEntry(document.activeElement)) return
+          if (this.editor?.isVisible) {
+            this.scrollback?.deselectBlocks()
+            this.editor.focus()
+          }
+          return
+        }
+        // Escape with the editor on screen but out of focus: the editor's
+        // own capture listener only sees keys that traverse its surface, so
+        // after a click elsewhere — a frozen block, the scrollback, the
+        // chrome — the key never reaches it and the draft survives an
+        // Escape, which reads as "Esc does nothing". The same rescue policy
+        // as the typing path below: somebody else's text control keeps its
+        // Escape (an input clears itself, a dialog closes itself), the
+        // overlay stack owns Escape while a modal is up, and the block
+        // action menu closes itself. The editor routes the key through its
+        // own decision order — the recall arbiter first, so an open overlay
+        // dismisses and restores its captured draft instead of having the
+        // draft cleared under it. When the editor itself has focus this
+        // branch is skipped by the rootContains guard and the editor's own
+        // handling (which stops propagation) decides.
+        if (e.key === 'Escape' && this.editor?.isVisible) {
+          const active = document.activeElement
+          if (active && this.editor.rootContains(active)) return
+          // A click on the live grid parks focus in xterm's hidden
+          // textarea — the terminal's own surface, not somebody else's
+          // field: while the editor is up the grid is read-only dead
+          // space, so the rescue runs here too (when the editor is hidden
+          // this branch never runs and the key reaches the shell as
+          // before).
+          const onLiveGrid =
+            active !== null && this.scrollback?.xtermLiveContainer.contains(active) === true
+          if (!onLiveGrid && isTextEntry(active)) return
+          if (hasOpenOverlays()) return
+          if (document.querySelector('.cmd-overflow-menu')) return
+          if (this.editor.handleExternalEscape(e)) e.preventDefault()
+          return
+        }
         if (!this.editor?.isVisible) return
         if (e.key.length !== 1 || e.ctrlKey || e.metaKey || e.altKey) return
         const active = document.activeElement
@@ -403,6 +782,22 @@ export class TerminalContent extends BaseTabContent {
         // the shell. Whitelisting the editor and the grid was not enough, because
         // any control OUTSIDE the terminal is equally not ours.
         if (isTextEntry(active)) return
+        // Focus-only, deliberately. The keydown's target was fixed when it was
+        // dispatched — this keystroke started outside the editor, so the event
+        // never reaches the editor's own keydown listener. The design contract
+        // is: move focus synchronously, then leave the browser's native
+        // insertion uncancelled, and let the character arrive as the native
+        // default action of the keydown that is still in flight — it targets
+        // whatever is focused when it runs, which is the contentDOM this
+        // focus() just made active. So this path must NOT do what the block
+        // path above does: preventDefault() would throw the native insertion
+        // away, and insertText() on top of it would risk a second copy of the
+        // same character. The asymmetry is the point — the block path's event
+        // target is a block, never an editing host, so it has no native
+        // insertion to lean on. (How faithfully the native path lands is
+        // engine-dependent and is verified in a real browser, not in jsdom,
+        // which performs no native insertion at all.)
+
         this.editor.focus()
       }
       document.addEventListener('keydown', this._globalKeydown)
@@ -413,21 +808,14 @@ export class TerminalContent extends BaseTabContent {
         }
       })
 
-      // ── Editor copy-on-select (item 6) ─────────────────────────────────
-      this.editor.textarea.addEventListener('mouseup', () => {
-        const ta = this.editor!.textarea
-        const start = ta.selectionStart
-        const end = ta.selectionEnd
-        if (start === end) return
-        const text = ta.value.slice(start, end)
-        if (shouldCopy(text)) {
-          this.clipboard.writeText(text).catch((e) => {
-            console.warn('nocx: clipboard write failed (editor selection)', e)
-          })
-        }
-      })
-
       // ── DOM block copy-on-select (P0-5) ───────────────────────────────
+      // Frozen output only. Copy-on-select is the terminal's convention and it
+      // belongs to text you can only read: selecting output is how you take
+      // it. In the EDITOR the same gesture means the opposite — you select in
+      // order to replace — so copying there overwrites the clipboard with the
+      // very text about to be deleted. The owner selected part of a header to
+      // paste a key over it and the key was gone. Explicit Ctrl/Cmd+C still
+      // copies from the editor; nothing takes the clipboard unasked.
       this.scrollback?.scrollbackArea.addEventListener('mouseup', () => {
         const sel = window.getSelection()
         if (!sel || sel.isCollapsed) return
@@ -490,7 +878,7 @@ export class TerminalContent extends BaseTabContent {
       // to sessions that actually connected — a failed connect never
       // reaches this point (it throws to the outer catch).
       if (this.sshOpts && !this.sshOpts.profileId) {
-        this.onAdoptabilityChange?.(true)
+        this.hooks.onAdoptabilityChange?.(true)
       }
       this.pushTitle()
 
@@ -650,7 +1038,7 @@ export class TerminalContent extends BaseTabContent {
       if (err instanceof RpcError) {
         const data = err.data as { reason?: string } | undefined
         if (data?.reason === 'vault-sealed') {
-          this.onVaultSealed?.()
+          this.hooks.onVaultSealed?.()
           this._readyResolve(false)
           return
         }
@@ -816,7 +1204,14 @@ export class TerminalContent extends BaseTabContent {
     this.session?.close()
     this.renderer?.dispose()
     this.editor?.dispose()
+    this.recall?.destroy()
+    this.recall = null
     this.scrollback?.dispose()
+    this.destroyReceipt()
+    this.promptVault?.destroy()
+    this.promptVault = null
+    this.completion?.destroy()
+    this.completion = null
     this._disposeAllMarkers()
     this.ledger = null
     this.host = null
@@ -882,5 +1277,265 @@ export class TerminalContent extends BaseTabContent {
       // line was removed.
       (a) => a.alias.toLowerCase().startsWith(lower),
     )
+  }
+
+  // ── the after-submit receipt (ADR-0021, the receipt round) ──────────────
+
+  /** The history.record ack crossed: paint the block with what was stored
+   *  and, when captures came back, attach the receipt to THAT block. The
+   *  block identity was captured at onComplete time; a block that is gone
+   *  by now (cleared scrollback, disposed tab, or never frozen) drops the
+   *  receipt silently. */
+  private attachRecordedAck(
+    _recId: number,
+    block: BlockRecord | null | undefined,
+    ack: HistoryRecord,
+  ): void {
+    if (!block) return
+    const blockEl = block.el
+    // The block must be frozen (the D marker froze it) and still in the
+    // DOM: a running block means the D never arrived for this record, and
+    // a disconnected element means the scrollback was cleared or the tab
+    // disposed. Both drop the receipt silently — the capture died with
+    // them on the backend anyway.
+    if (
+      !blockEl.isConnected ||
+      blockEl.classList.contains('cmd-block-running') ||
+      !blockEl.classList.contains('cmd-block')
+    ) {
+      return
+    }
+    if (ack.redactions.length > 0) {
+      renderRecordedCommand(blockEl, ack.maskedCommand, ack.redactions)
+    }
+    if (ack.captures.length === 0) return
+    // One receipt per block: a re-recorded block replaces its own, never
+    // anybody else's.
+    this.receipts.get(blockEl)?.destroy()
+    this.receiptBlockEl = blockEl
+    for (const c of ack.captures) {
+      this.receiptChipSpans.set(c.id, { start: c.redaction.start, end: c.redaction.end })
+      this.receiptChipBlocks.set(c.id, blockEl)
+    }
+    const receipt = new BlockReceipt(
+      ack.captures.map((c) => ({
+        captureId: c.id,
+        kindLabel: KIND_LABELS[c.redaction.kind],
+        maskedValue:
+          c.redaction.prefix !== '' || c.redaction.suffix !== ''
+            ? `${c.redaction.prefix}...${c.redaction.suffix}`
+            : '***',
+        suggestedName: c.suggestedName,
+      })),
+      {
+        onSaveAll: (rows) => void this.saveReceiptRows(receipt, blockEl, rows),
+        onDismiss: (captureId) => void this.dismissReceiptRow(receipt, blockEl, captureId),
+        onHover: (captureId) => this.emphasiseChip(captureId),
+        onExitReview: () => this.editor?.focus(),
+      },
+    )
+    this.receipts.set(blockEl, receipt)
+    this.receipt = receipt
+    receipt.mount(blockEl)
+  }
+
+  /** A receipt is finished with (every row saved or dismissed): forget it,
+   *  and hand `receipt` to whichever one is still open, newest first. */
+  private retireReceipt(blockEl: HTMLElement): void {
+    this.receipts.delete(blockEl)
+    if (this.receiptBlockEl === blockEl) this.receiptBlockEl = null
+    let newest: BlockReceipt | null = null
+    let newestEl: HTMLElement | null = null
+    for (const [el, r] of this.receipts) {
+      newest = r
+      newestEl = el
+    }
+    this.receipt = newest
+    if (this.receiptBlockEl === null) this.receiptBlockEl = newestEl
+  }
+
+  /** Tear every receipt down — the tab is going away, and the backend
+   *  destroys its captures on the same event. */
+  private destroyReceipt(): void {
+    for (const r of this.receipts.values()) r.destroy()
+    this.receipts.clear()
+    this.receipt = null
+    this.receiptBlockEl = null
+    this.receiptChipSpans.clear()
+    this.receiptChipBlocks.clear()
+  }
+
+  /** The receipt's primary action: settle every row still in play. The
+   *  capture id is the idempotency key — a partial failure keeps the row
+   *  and a retry of the SAME id finishes the owed rewrite without minting
+   *  a second secret. The name shown is the RESPONSE's, never the one
+   *  sent. */
+  private async saveReceiptRows(
+    receipt: BlockReceipt,
+    blockEl: HTMLElement,
+    rows: ReadonlyArray<{ captureId: string; name: string }>,
+  ): Promise<void> {
+    // Saving into a vault that does not exist yet cannot work, and the
+    // receipt is the moment the person actually wants one — sending them to
+    // Settings to come back afterwards guarantees they will not, and the
+    // capture dies meanwhile. So Save sets the vault up first: silently when
+    // the machine has an OS key, otherwise through the vault layer's own
+    // setup dialog, which then owns the rest of the flow.
+    if (!(await this.ensureVaultForSave())) return
+    for (const row of rows) {
+      if (!this.vault) continue
+      try {
+        const res = await this.vault.captureSave({ captureId: row.captureId, name: row.name })
+        if (res.partial) {
+          showToast({
+            level: 'warning',
+            message: `"${res.name}" saved, but the history rewrite is still owed — retry to finish it.`,
+          })
+          receipt.markFailed(
+            row.captureId,
+            `"${res.name}" is saved — the history rewrite is still owed; retry to finish it`,
+          )
+          continue
+        }
+        showToast({ level: 'success', message: `Stored "${res.name}" in the vault.` })
+        if (receipt.removeRow(row.captureId)) this.retireReceipt(blockEl)
+      } catch (err) {
+        // A capture the backend no longer holds cannot be retried, so the
+        // row must go rather than sit there offering an action that will
+        // fail every time. Anything else is worth another attempt.
+        if (isCaptureGone(err)) {
+          showToast({
+            level: 'warning',
+            message: 'This offer is no longer held — the command stays stored masked.',
+          })
+          if (receipt.removeRow(row.captureId)) this.retireReceipt(blockEl)
+          continue
+        }
+        showToast({
+          level: 'danger',
+          message: 'Could not save the secret — the command stays stored masked.',
+        })
+        receipt.markFailed(row.captureId, 'could not save — try again')
+      }
+    }
+  }
+
+  /** Make the vault able to receive a secret, or say why it cannot.
+   *
+   *  Returns true when the save may proceed. False means the flow moved
+   *  somewhere else — the setup dialog is up, or the vault is locked — and
+   *  the receipt stays as it is, so the same Save finishes the job once the
+   *  person comes back. */
+  private async ensureVaultForSave(): Promise<boolean> {
+    if (!this.vault) return false
+    let status
+    try {
+      status = await this.vault.status()
+    } catch {
+      return true // let the save itself report the real failure
+    }
+    if (status.state === 'unsealed') return true
+    if (status.state === 'sealed') {
+      showToast({ level: 'warning', message: 'Unlock the vault to save this key.' })
+      return false
+    }
+    if (status.osKeyCapable) {
+      try {
+        await this.vault.setup({})
+        return true
+      } catch {
+        showToast({
+          level: 'danger',
+          message: 'Could not set the vault up — the key was not saved.',
+        })
+        return false
+      }
+    }
+    // No OS key: setting up needs a passphrase, and a passphrase needs a
+    // dialog the vault layer owns. The receipt survives it.
+    this.hooks.onSetupVault?.()
+    return false
+  }
+
+  /** A row's drop control: dismiss that capture (and suppress its
+   *  fingerprint for the session). A failed dismiss keeps the row. */
+  private async dismissReceiptRow(
+    receipt: BlockReceipt,
+    blockEl: HTMLElement,
+    captureId: string,
+  ): Promise<void> {
+    if (!this.vault) return
+    try {
+      await this.vault.captureDismiss(captureId)
+      if (receipt.removeRow(captureId)) this.retireReceipt(blockEl)
+      // Say what the refusal actually means. Dismissing suppresses THIS
+      // value for the rest of the application session, so the same key in
+      // the same command will not ask again — a consequence worth stating
+      // once rather than letting it read as the feature having broken.
+      showToast({
+        level: 'info',
+        message: 'Dismissed — this key will not be offered again in this session.',
+      })
+    } catch (err) {
+      if (isCaptureGone(err)) {
+        // Already gone: the user's intent is satisfied either way.
+        if (receipt.removeRow(captureId)) this.retireReceipt(blockEl)
+        return
+      }
+      showToast({
+        level: 'danger',
+        message: 'Could not dismiss the offer — try again.',
+      })
+    }
+  }
+
+  /** Hovering a receipt row emphasises that row's chip in the block's
+   *  command line — and only that one. Chips carry their redaction span
+   *  (data-redaction-start/end), stamped by renderRecordedCommand; the
+   *  receipt row carries the capture id, mapped back here to the span. */
+  private emphasiseChip(captureId: string | null): void {
+    const blockEl =
+      captureId === null ? this.receiptBlockEl : (this.receiptChipBlocks.get(captureId) ?? null)
+    if (!blockEl) return
+    const span = captureId === null ? undefined : this.receiptChipSpans.get(captureId)
+    const chips = blockEl.querySelectorAll<HTMLElement>('.ui-secret-chip[data-redaction-start]')
+    for (const chip of chips) {
+      const matches =
+        span !== undefined &&
+        chip.dataset.redactionStart === String(span.start) &&
+        chip.dataset.redactionEnd === String(span.end)
+      chip.classList.toggle('ui-secret-chip--emphasised', matches)
+    }
+  }
+
+  /** A submit was refused: an unresolved name or a sealed vault must not
+   *  silently send a broken line (ADR-0021). The report lands where the
+   *  user is looking; the editor's beforeSubmit seam kept the draft. The
+   *  sealed case is rare — the dispatcher's unlock seam normally raises the
+   *  prompt and retries; reaching here means it was cancelled or absent. */
+  private reportSubmitFailure(failure: {
+    reason: 'unresolved' | 'sealed' | 'error'
+    names?: ReadonlyArray<string>
+    message?: string
+  }): void {
+    if (failure.reason === 'unresolved') {
+      const names = (failure.names ?? []).join(', ')
+      showToast({
+        level: 'danger',
+        message: `Unknown secret${(failure.names ?? []).length === 1 ? '' : 's'}: ${names}. The command was not sent.`,
+      })
+      return
+    }
+    if (failure.reason === 'sealed') {
+      showToast({
+        level: 'danger',
+        message: 'The vault is locked. Unlock it and run the command again.',
+      })
+      return
+    }
+    showToast({
+      level: 'danger',
+      message: failure.message ?? 'Could not resolve the command. It was not sent.',
+    })
   }
 }

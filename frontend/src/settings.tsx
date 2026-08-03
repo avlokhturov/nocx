@@ -24,10 +24,14 @@ import {
   AcceptedSnapshot,
   applyAcceptedSnapshot,
   canResetSetting,
+  fieldSaveError,
   isSettingModified,
   monotonicRevisionPolicy,
+  numberRangeCaption,
+  numberRangeError,
   reconnectRevisionPolicy,
   recordSaveOutcome,
+  type Declaration,
   type RevisionPolicy,
   type SaveOutcome,
   type SettingsMirror,
@@ -78,18 +82,8 @@ export function keyToDomId(key: string): string {
 
 // ── Types ──────────────────────────────────────────────────────────────
 
-export interface Declaration {
-  key: string
-  section: string
-  label: string
-  description: string
-  control: 'toggle' | 'text' | 'number' | 'select' | 'secret'
-  dataClass: 'publicConfig' | 'privateMetadata' | 'privateContent' | 'secretAuthenticator'
-  default?: unknown
-  options?: { value: string; label: string }[]
-  min?: number
-  max?: number
-}
+// The wire declaration (with its Min/Max/unit validation) lives in the
+// settings domain; the screen renders from it and never validates itself.
 
 type LoadState = 'loading' | 'ready' | 'failed' | 'empty'
 
@@ -101,6 +95,11 @@ export interface SettingsComponentHandle {
    * quick-connect palette's "New connection" entry point.
    */
   newConnection(): void
+  /**
+   * Show the Secrets page with the add dialog open — the prompt's '@'
+   * picker offering to create a secret when the one you want is not there.
+   */
+  newSecret(name?: string): void
   /** Resolves when the initial data load completes. */
   ready(): Promise<void>
 }
@@ -135,6 +134,8 @@ export function SettingsComponent(props: SettingsComponentProps) {
   // boolean would need a reset that both sides have to remember to do. Zero
   // means "nobody asked", which is what a normally-opened Settings tab reads.
   const [newConnectionRequest, setNewConnectionRequest] = createSignal(0)
+  const [newSecretRequest, setNewSecretRequest] = createSignal(0)
+  const [newSecretName, setNewSecretName] = createSignal('')
   const [sectionFilter, setSectionFilter] = createSignal<string | null>(null)
 
   // Promise that resolves when the initial data load finishes.
@@ -355,6 +356,8 @@ export function SettingsComponent(props: SettingsComponentProps) {
             vaultController={props.vaultController!}
             dialogClient={props.dialogClient}
             profileClient={props.profileClient}
+            addSecretRequest={newSecretRequest()}
+            addSecretName={newSecretName()}
           />
         </Show>
       ),
@@ -568,6 +571,17 @@ export function SettingsComponent(props: SettingsComponentProps) {
       setActiveComponentPage('connections')
       setNewConnectionRequest((n) => n + 1)
     },
+    newSecret(name?: string): void {
+      // Same reason as newConnection: an active search hides the page the
+      // request is addressed to.
+      setSearchQuery('')
+      setSectionFilter(null)
+      setActiveComponentPage('secrets')
+      // The name BEFORE the counter: the effect that opens the dialog runs
+      // on the counter and reads the name as it stands then.
+      setNewSecretName(name ?? '')
+      setNewSecretRequest((n) => n + 1)
+    },
     ready(): Promise<void> {
       return readyPromise
     },
@@ -718,6 +732,15 @@ export function SettingsComponent(props: SettingsComponentProps) {
     const decl = props.decl
     const eff = () => effectiveValue(decl.key)
     const err = () => errors[decl.key]
+    // The number this row shows, for the two consumers that reason about
+    // bounds. Guarded by the control kind: displayValue coerces to a string
+    // and warns when it can find neither a usable value nor a usable
+    // default, which is exactly what a boolean looks like to it — so
+    // calling it for every row filled the console with "unusable value and
+    // default for setting history.enabled, got boolean, defaultType
+    // boolean". NaN for a row that is not a number; every caller of a range
+    // check treats NaN as "no opinion".
+    const numeric = () => (decl.control === 'number' ? Number(displayValue(eff(), decl)) : NaN)
     const showBreadcrumb = () => isSearching() && sectionFilter() === null
 
     return (
@@ -758,20 +781,6 @@ export function SettingsComponent(props: SettingsComponentProps) {
             </Show>
           }
         >
-          <Show when={decl.control === 'number'}>
-            <span class="ui-settings-bounds">
-              <Show when={decl.min !== undefined && decl.max !== undefined}>
-                {String(decl.min) + ' – ' + String(decl.max)}
-              </Show>
-              <Show when={decl.min !== undefined && decl.max === undefined}>
-                {'≥ ' + String(decl.min)}
-              </Show>
-              <Show when={decl.max !== undefined && decl.min === undefined}>
-                {'≤ ' + String(decl.max)}
-              </Show>
-            </span>
-          </Show>
-
           {/* One line: the control and its reset affordance, side by side. The
               wrapper is the surface's own, so the reset sits level with the
               control without the surface reaching into Field's column. */}
@@ -798,6 +807,10 @@ export function SettingsComponent(props: SettingsComponentProps) {
                 value={displayValue(eff(), decl)}
                 min={decl.min}
                 max={decl.max}
+                unit={decl.unit}
+                caption={numberRangeCaption(decl, numeric())}
+                captionAlign="end"
+                error={numberRangeError(decl, numeric())}
                 onInput={(v) => {
                   const n = Number(v)
                   void saveSetting(decl.key, isNaN(n) ? Number(displayValue(eff(), decl)) : n)
@@ -837,7 +850,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
             <ProvenanceBadge decl={decl} />
           </div>
 
-          <Show when={err()}>
+          <Show when={fieldSaveError(decl, numeric(), err())}>
             <div class="ui-settings-error">{err()}</div>
           </Show>
         </Field>
