@@ -107,6 +107,12 @@ type WSServer struct {
 	sshConfigResolver ssh.ConfigResolver
 	sshConfigPath     string
 
+	// remoteLauncher builds the start command for integrated remote shells
+	// (nocx-xs1d), adapted from shellintegration at the composition root.
+	// Wired through WithRemoteLauncher; when nil, remote sessions open a
+	// plain shell and report reason none.
+	remoteLauncher ssh.RemoteLauncher
+
 	// Pending-capture registry: the backend-side holder of submitted
 	// credentials awaiting a save decision (internal/credential). Created
 	// at construction; nil only when its fingerprint key could not be
@@ -285,6 +291,17 @@ func WithProfileResolver(r ProfileResolver) WSServerOption {
 // error.
 func WithSSHConfigResolver(resolver ssh.ConfigResolver, configPath string) WSServerOption {
 	return func(s *WSServer) { s.sshConfigResolver = resolver; s.sshConfigPath = configPath }
+}
+
+// WithRemoteLauncher attaches the remote shell launcher that builds the start
+// command for integrated remote shells (nocx-xs1d). The composition root
+// adapts shellintegration.NewRemoteLauncher through its own ssh.RemoteLauncher
+// adapter; this option is how the transport passes it into every ConnectConfig
+// it builds. When not wired, remote sessions fall back to a plain shell and
+// report reason none — the launcher is an opt-in per connection, never a
+// transport default.
+func WithRemoteLauncher(l ssh.RemoteLauncher) WSServerOption {
+	return func(s *WSServer) { s.remoteLauncher = l }
 }
 
 // WithProbeResultStore attaches a probe result store for recording outcomes
@@ -932,6 +949,7 @@ func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connSta
 			remote.Rows = params.Rows
 			remote.XPixel = params.XPixel
 			remote.YPixel = params.YPixel
+			remote.RemoteLauncher = s.remoteLauncher
 
 			s.log.Info("SSH open via profile", "profileId", params.ProfileID, "host", host, "user", remote.User)
 
@@ -980,11 +998,12 @@ func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connSta
 				keyFile = resolved.IdentityFile
 			}
 			remote = &ssh.ConnectConfig{
-				User:    user,
-				Port:    port,
-				KeyFile: keyFile,
-				Cols:    params.Cols,
-				Rows:    params.Rows,
+				User:           user,
+				Port:           port,
+				KeyFile:        keyFile,
+				Cols:           params.Cols,
+				Rows:           params.Rows,
+				RemoteLauncher: s.remoteLauncher,
 			}
 
 			s.log.Info("SSH open via direct host", "host", params.Host, "resolvedHost", remoteHost, "user", user)
@@ -1041,9 +1060,15 @@ func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connSta
 	// cwd rides the open result so the tab has a name before any program sets
 	// a title (nocx-9vr). It is the starting directory only — following `cd`
 	// needs OSC 7 (nocx-5mn.2).
+	// shellIntegrationReason rides it too: a launcher decline (or a
+	// configured RemoteCommand) must be visible in the product, never
+	// log-only (AGENTS.md), and the open ack is the one result every session
+	// produces before any of its traffic. ReasonNone means integration
+	// succeeded or was never attempted (nocx-r52q, nocx-xs1d).
 	result := map[string]string{
-		"sessionId": string(sess.ID()),
-		"cwd":       sess.Cwd(),
+		"sessionId":              string(sess.ID()),
+		"cwd":                    sess.Cwd(),
+		"shellIntegrationReason": string(sess.ShellIntegrationReason()),
 	}
 	resultJSON, _ := json.Marshal(result)
 	resp := newJSONRPCResult(req.ID, resultJSON)

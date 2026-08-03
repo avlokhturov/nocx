@@ -14,6 +14,8 @@ import (
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
+	"github.com/shady2k/nocx/internal/pty"
+	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/vault"
 	"github.com/shady2k/nocx/internal/vaultreset"
@@ -1324,4 +1326,143 @@ func TestVaultResolveLine_OverTheWireConformsToContract(t *testing.T) {
 	if got.Line != `curl -H "Authorization: Bearer sk-proj-abcdef1234567890" https://api` {
 		t.Errorf("line = %q, want the substituted line", got.Line)
 	}
+}
+
+// ── open ─────────────────────────────────────────────────────────────────
+
+// The DTO's own conformance: the three fields the open ack always carries.
+// shellIntegrationReason is present even when empty — a missing field would
+// read as "integration happened" to a renderer that defaults to that, which
+// is exactly the soft degrade AGENTS.md forbids.
+func TestOpen_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "open.schema.json")
+
+	raw, err := json.Marshal(map[string]string{
+		"sessionId":              "0123456789abcdef0123456789abcdef",
+		"cwd":                    "~/work",
+		"shellIntegrationReason": "no-secure-temp",
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "open DTO (launcher refusal)")
+
+	rawNone, err := json.Marshal(map[string]string{
+		"sessionId":              "0123456789abcdef0123456789abcdef",
+		"cwd":                    "~/work",
+		"shellIntegrationReason": "",
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, rawNone, "open DTO (integration succeeded)")
+}
+
+// openProfileResolver resolves every profile to a fixed host and a minimal
+// ConnectConfig — the launcher wiring the transport adds is what the test
+// is about, so nothing else in the resolved config may interfere.
+type openProfileResolver struct {
+	host string
+}
+
+func (r *openProfileResolver) Resolve(_ string) (string, *ssh.ConnectConfig, error) {
+	return r.host, &ssh.ConnectConfig{User: "test"}, nil
+}
+
+// openSSHFactory is a session.SSHFactory that records the ConnectOptions the
+// registry built and returns a channel carrying a scripted refusal reason.
+type openSSHFactory struct {
+	channel ssh.Channel
+	host    string
+	opts    []ssh.ConnectOption
+}
+
+func (f *openSSHFactory) Connect(_ context.Context, host string, opts ...ssh.ConnectOption) (ssh.Channel, error) {
+	f.host = host
+	f.opts = append([]ssh.ConnectOption{}, opts...)
+	return f.channel, nil
+}
+
+// reasonChannel overrides the stub channel's reason so the wire actually
+// carries a non-empty refusal.
+type reasonChannel struct {
+	*ssh.StubChannel
+	reason ssh.RefusalReason
+}
+
+func (c *reasonChannel) ShellIntegrationReason() ssh.RefusalReason {
+	return c.reason
+}
+
+// The real method through the real socket: an SSH open with the launcher
+// wired, validated against the schema and asserted to carry the reason the
+// channel reports. Nothing here names a field, so nothing here can omit one;
+// additionalProperties:false plus required makes the key set exact in both
+// directions. It also proves the composition chain that was missing: the
+// transport option lands in the ConnectConfig the registry turns into
+// ConnectOptions (nocx-ei04).
+func TestOpen_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "open.schema.json")
+
+	reg := session.New(log.NewSlogAdapter(nil), &stubPTYFactory{stub: pty.NewStub(log.NewSlogAdapter(nil))})
+	factory := &openSSHFactory{
+		channel: &reasonChannel{StubChannel: ssh.NewStubChannel(log.NewSlogAdapter(nil)), reason: ssh.ReasonNoSecureTemp},
+	}
+	reg = reg.WithSSHFactory(factory)
+
+	ws := NewWSServer(log.NewSlogAdapter(nil), reg,
+		WithProfileResolver(&openProfileResolver{host: "host.example.com"}),
+		WithRemoteLauncher(&fakeRemoteLauncher{}),
+	)
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	resp := jsonrpcCall(t, conn, "open", map[string]any{
+		"cols": 80, "rows": 24, "xpixel": 0, "ypixel": 0,
+		"kind": "ssh", "profileId": "ssh:test:1",
+	})
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, string(resp))
+	}
+	if envelope.Error != nil {
+		t.Fatalf("open: %+v", envelope.Error)
+	}
+	validateJSON(t, schema, envelope.Result, "open result (real socket)")
+
+	var got struct {
+		ShellIntegrationReason string `json:"shellIntegrationReason"`
+	}
+	if err := json.Unmarshal(envelope.Result, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.ShellIntegrationReason != "no-secure-temp" {
+		t.Errorf("shellIntegrationReason = %q, want %q", got.ShellIntegrationReason, "no-secure-temp")
+	}
+
+	// The launcher the transport option attached must have reached the
+	// registry's ConnectOptions — the exact chain that was dead before.
+	cfg := &ssh.ConnectConfig{}
+	for _, o := range factory.opts {
+		o(cfg)
+	}
+	if cfg.RemoteLauncher == nil {
+		t.Error("WithRemoteLauncher did not reach the ConnectConfig: RemoteLauncher is nil in the options the SSH factory received")
+	}
+}
+
+// fakeRemoteLauncher is the transport-side double: the transport must not
+// care which launcher it carries, only that it carries one.
+type fakeRemoteLauncher struct{}
+
+func (fakeRemoteLauncher) StartCommand(ssh.ShellKind, ssh.LaunchOptions) (string, ssh.RefusalReason, bool) {
+	return "", ssh.ReasonNone, false
 }
