@@ -33,6 +33,32 @@ const (
 	BehaviorClose     BehaviorOnSessionEnd = "close"
 )
 
+// ShellIntegrationMode controls whether an SSH connection attempts shell
+// integration (the nocxify launcher). ShellIntegrationAuto (the default)
+// integrates at startup, silently, in the interval nocx owns;
+// ShellIntegrationAsk integrates only on explicit request;
+// ShellIntegrationOff never integrates.
+type ShellIntegrationMode string
+
+const (
+	ShellIntegrationAuto ShellIntegrationMode = "auto"
+	ShellIntegrationAsk  ShellIntegrationMode = "ask"
+	ShellIntegrationOff  ShellIntegrationMode = "off"
+)
+
+// validShellIntegration reports whether v is a value this build recognises.
+// An unrecognised stored value is not an error at decode time — it falls back
+// to the default at resolution (see ResolveEffectiveProfile) so an explicit
+// user choice never becomes a silent no-op.
+func validShellIntegration(v ShellIntegrationMode) bool {
+	switch v {
+	case ShellIntegrationAuto, ShellIntegrationAsk, ShellIntegrationOff:
+		return true
+	default:
+		return false
+	}
+}
+
 // Base holds the generic profile fields shared by all profile types
 // (SSH now, future types later). Mirrors Tabby's Profile interface.
 type Base struct {
@@ -73,15 +99,16 @@ type SSHProfileOptions struct {
 	KeyPassphraseSecret string `json:"keyPassphraseSecret,omitempty"`
 	// Inline fields. User and Auth are always the profile's own (ADR-0017);
 	// KeyPath is the file-based alternative to KeySecret.
-	KeyPath           string   `json:"keyPath,omitempty"`
-	User              string   `json:"user,omitempty"`
-	Auth              AuthMode `json:"auth,omitempty"`
-	KeepaliveInterval int      `json:"keepaliveInterval,omitempty"`
-	KeepaliveCountMax int      `json:"keepaliveCountMax,omitempty"`
-	ReadyTimeout      int      `json:"readyTimeout,omitempty"`
-	JumpHost          string   `json:"jumpHost,omitempty"` // Profile name or ID of the jump server
-	AgentForward      bool     `json:"agentForward,omitempty"`
-	CanBeJumpServer   bool     `json:"canBeJumpServer,omitempty"` // Whether this profile can be used as a jump server
+	KeyPath           string               `json:"keyPath,omitempty"`
+	User              string               `json:"user,omitempty"`
+	Auth              AuthMode             `json:"auth,omitempty"`
+	KeepaliveInterval int                  `json:"keepaliveInterval,omitempty"`
+	KeepaliveCountMax int                  `json:"keepaliveCountMax,omitempty"`
+	ReadyTimeout      int                  `json:"readyTimeout,omitempty"`
+	JumpHost          string               `json:"jumpHost,omitempty"` // Profile name or ID of the jump server
+	AgentForward      bool                 `json:"agentForward,omitempty"`
+	ShellIntegration  ShellIntegrationMode `json:"shellIntegration,omitempty"`
+	CanBeJumpServer   bool                 `json:"canBeJumpServer,omitempty"` // Whether this profile can be used as a jump server
 }
 
 // SSHProfile is a connection profile for an SSH host. It holds only
@@ -112,6 +139,7 @@ type StoredSSHProfileOptions struct {
 	KeyPath              *string               `json:"keyPath,omitempty"`
 	JumpHost             *string               `json:"jumpHost,omitempty"`
 	AgentForward         *bool                 `json:"agentForward,omitempty"`
+	ShellIntegration     *ShellIntegrationMode `json:"shellIntegration,omitempty"`
 	CanBeJumpServer      *bool                 `json:"canBeJumpServer,omitempty"`
 	BehaviorOnSessionEnd *BehaviorOnSessionEnd `json:"behaviorOnSessionEnd,omitempty"`
 }
@@ -159,6 +187,9 @@ func (s StoredSSHProfileOptions) ToDense() SSHProfileOptions {
 	}
 	if s.CanBeJumpServer != nil {
 		o.CanBeJumpServer = *s.CanBeJumpServer
+	}
+	if s.ShellIntegration != nil {
+		o.ShellIntegration = *s.ShellIntegration
 	}
 	return o
 }
@@ -218,6 +249,10 @@ func StoredOptionsFromDense(o SSHProfileOptions) StoredSSHProfileOptions {
 		v := true
 		s.CanBeJumpServer = &v
 	}
+	if o.ShellIntegration != "" {
+		v := o.ShellIntegration
+		s.ShellIntegration = &v
+	}
 	return s
 }
 
@@ -250,6 +285,7 @@ func storedOptsToSparse(o StoredSSHProfileOptions) SparseSSHOptions {
 	s.KeepaliveCountMax = o.KeepaliveCountMax
 	s.ReadyTimeout = o.ReadyTimeout
 	s.AgentForward = o.AgentForward
+	s.ShellIntegration = o.ShellIntegration
 	s.BehaviorOnSessionEnd = o.BehaviorOnSessionEnd
 	return s
 }
@@ -286,6 +322,7 @@ type SparseSSHOptions struct {
 	KeepaliveCountMax    *int                  `json:"keepaliveCountMax,omitempty"`
 	ReadyTimeout         *int                  `json:"readyTimeout,omitempty"`
 	AgentForward         *bool                 `json:"agentForward,omitempty"`
+	ShellIntegration     *ShellIntegrationMode `json:"shellIntegration,omitempty"`
 	BehaviorOnSessionEnd *BehaviorOnSessionEnd `json:"behaviorOnSessionEnd,omitempty"`
 }
 
@@ -314,6 +351,7 @@ var allowedFields = map[string]bool{
 	"keepaliveCountMax":    true,
 	"readyTimeout":         true,
 	"agentForward":         true,
+	"shellIntegration":     true,
 	"behaviorOnSessionEnd": true,
 }
 
@@ -392,10 +430,12 @@ func hardcodedDefaults() SparseSSHOptions {
 	port := 22
 	user := currentUser()
 	beh := BehaviorAuto
+	si := ShellIntegrationAuto
 	return SparseSSHOptions{
 		Port:                 &port,
 		User:                 &user,
 		BehaviorOnSessionEnd: &beh,
+		ShellIntegration:     &si,
 	}
 }
 
@@ -567,6 +607,7 @@ func ResolveEffectiveProfile(
 	source["port"] = FieldSourceDefault
 	source["user"] = FieldSourceDefault
 	source["behaviorOnSessionEnd"] = FieldSourceDefault
+	source["shellIntegration"] = FieldSourceDefault
 
 	// Apply global defaults.
 	applySparseLayer(&acc, &source, globalDefaults, FieldSourceGlobal)
@@ -597,6 +638,17 @@ func ResolveEffectiveProfile(
 
 	// Apply profile's own options (highest priority).
 	applySparseLayer(&acc, &source, profileSparse, FieldSourceProfile)
+
+	// A shellIntegration value this build does not recognise falls back to
+	// the default (auto) rather than being treated as a silent no-op: auto
+	// is the safe behaviour for an unrecognised choice, and the provenance
+	// records "default" so the effective view shows the fallback instead of
+	// a value that never takes effect.
+	if acc.ShellIntegration != nil && !validShellIntegration(*acc.ShellIntegration) {
+		si := ShellIntegrationAuto
+		acc.ShellIntegration = &si
+		source["shellIntegration"] = FieldSourceDefault
+	}
 
 	// Build resolved dense options from the merged accumulator.
 	result := profile
@@ -662,6 +714,10 @@ func applySparseLayer(acc *SparseSSHOptions, source *map[string]FieldSource, src
 		acc.AgentForward = src.AgentForward
 		setSource(source, "agentForward", layer)
 	}
+	if src.ShellIntegration != nil {
+		acc.ShellIntegration = src.ShellIntegration
+		setSource(source, "shellIntegration", layer)
+	}
 	if src.BehaviorOnSessionEnd != nil {
 		acc.BehaviorOnSessionEnd = src.BehaviorOnSessionEnd
 		setSource(source, "behaviorOnSessionEnd", layer)
@@ -716,6 +772,9 @@ func sparseToOptions(s SparseSSHOptions) SSHProfileOptions {
 	}
 	if s.AgentForward != nil {
 		o.AgentForward = *s.AgentForward
+	}
+	if s.ShellIntegration != nil {
+		o.ShellIntegration = *s.ShellIntegration
 	}
 	return o
 }
@@ -966,6 +1025,7 @@ func ToEffectiveDTO(eff EffectiveProfile, groupByID map[string]ProfileGroup) Eff
 	addField("jumpHost", p.JumpHost, eff.Source["jumpHost"])
 	addField("agentForward", p.AgentForward, eff.Source["agentForward"])
 	addField("canBeJumpServer", p.CanBeJumpServer, eff.Source["canBeJumpServer"])
+	addField("shellIntegration", string(p.ShellIntegration), eff.Source["shellIntegration"])
 	addField("behaviorOnSessionEnd", string(eff.Profile.BehaviorOnSessionEnd), eff.Source["behaviorOnSessionEnd"])
 
 	return EffectiveProfileDTO{ID: eff.Profile.ID, Fields: fields}
@@ -1019,6 +1079,7 @@ const (
 	patchReadyTimeout         patchPath = "options.readyTimeout"
 	patchJumpHost             patchPath = "options.jumpHost"
 	patchAgentForward         patchPath = "options.agentForward"
+	patchShellIntegration     patchPath = "options.shellIntegration"
 	patchCanBeJumpServer      patchPath = "options.canBeJumpServer"
 	patchBehaviorOnSessionEnd patchPath = "options.behaviorOnSessionEnd"
 )
@@ -1046,6 +1107,7 @@ func allowedPatchPaths() map[patchPath]bool {
 		patchReadyTimeout:         true,
 		patchJumpHost:             true,
 		patchAgentForward:         true,
+		patchShellIntegration:     true,
 		patchCanBeJumpServer:      true,
 		patchBehaviorOnSessionEnd: true,
 	}
@@ -1091,6 +1153,10 @@ func ApplyPatchSet(opts *StoredSSHProfileOptions, path string, value any) bool {
 	case patchAgentForward:
 		v := toBool(value)
 		opts.AgentForward = &v
+	case patchShellIntegration:
+		v := toString(value)
+		si := ShellIntegrationMode(v)
+		opts.ShellIntegration = &si
 	case patchCanBeJumpServer:
 		v := toBool(value)
 		opts.CanBeJumpServer = &v
@@ -1131,6 +1197,8 @@ func ApplyPatchUnset(opts *StoredSSHProfileOptions, path string) bool {
 		opts.JumpHost = nil
 	case patchAgentForward:
 		opts.AgentForward = nil
+	case patchShellIntegration:
+		opts.ShellIntegration = nil
 	case patchCanBeJumpServer:
 		opts.CanBeJumpServer = nil
 	case patchBehaviorOnSessionEnd:
