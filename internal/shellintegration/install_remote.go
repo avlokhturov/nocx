@@ -48,21 +48,29 @@ func (s *Impl) EnsureInstalledRemote(ctx context.Context, sshClient *gossh.Clien
 		}
 	}
 
-	// Write version.
-	if err := writeFile(sftpClient, vf, version+"\n"); err != nil {
-		return fmt.Errorf("shellintegration: remote write version: %w", err)
-	}
-
 	// Append gate lines to rc files.
+	gatesOK := true
 	for rcFile, gate := range rcGate {
 		rcPath := path.Join(remoteHome, rcFile)
 		if err := appendGateRemote(sftpClient, rcPath, gate); err != nil {
 			s.log.Warn("shellintegration: failed to append gate to remote rc file",
 				"path", rcPath, "error", err)
+			// Non-fatal: scripts are installed, user can source manually.
+			gatesOK = false
 		}
 	}
 
-	s.log.Info("shellintegration: remote installed", "dir", dir, "version", version)
+	// Write the version marker LAST, and only once the gates are in place. A
+	// matching version short-circuits every future run, so recording success
+	// before a gate is appended would strand the integration forever if the
+	// append failed — the next launch must retry rather than skip.
+	if gatesOK {
+		if err := writeFile(sftpClient, vf, version+"\n"); err != nil {
+			return fmt.Errorf("shellintegration: remote write version: %w", err)
+		}
+	}
+
+	s.log.Info("shellintegration: remote installed", "dir", dir, "version", version, "gatesOK", gatesOK)
 	return nil
 }
 
