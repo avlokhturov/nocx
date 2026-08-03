@@ -262,7 +262,8 @@ func reachStack(t *testing.T, srv *reachSSHServer, launcher ssh.RemoteLauncher) 
 	t.Helper()
 	logger := log.NewSlogAdapter(nil)
 
-	client, err := ssh.NewReal(logger,
+	client, err := ssh.NewReal(
+		logger,
 		ssh.WithKnownHostsFile(reachWriteKnownHosts(t, srv)),
 		ssh.WithConfigResolver(reachResolver{}),
 	)

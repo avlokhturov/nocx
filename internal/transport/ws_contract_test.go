@@ -1410,7 +1410,8 @@ func TestOpen_OverTheWireConformsToContract(t *testing.T) {
 	}
 	reg = reg.WithSSHFactory(factory)
 
-	ws := NewWSServer(log.NewSlogAdapter(nil), reg,
+	ws := NewWSServer(
+		log.NewSlogAdapter(nil), reg,
 		WithProfileResolver(&openProfileResolver{host: "host.example.com"}),
 		WithRemoteLauncher(&fakeRemoteLauncher{}),
 	)
