@@ -122,8 +122,8 @@ func (s *linuxService) Prepare(ctx context.Context, req Request, spec CommandSpe
 			_ = statusW.Close()
 			if cmd.Process != nil && cmd.ProcessState == nil {
 				_ = cmd.Process.Kill()
+				_ = cmd.Wait()
 			}
-			_ = cmd.Wait()
 			RemoveRuntimeRoot(runtimeRoot)
 		},
 	}

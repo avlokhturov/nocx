@@ -23,6 +23,7 @@ import { SettingsIcon } from './ui/icons'
 import { SettingsObserver } from './settings-observer'
 import { bootstrapTheme, reconcileThemeFromGo } from './renderers/theme-bootstrap'
 import { bootstrapPlatform } from './platform'
+import { showToast } from './ui/toast'
 import {
   QuickConnectController,
   ActionsQuickConnectProvider,
@@ -302,7 +303,13 @@ async function main() {
             const picked = await dialogClient.openDirectoryDialog()
             if (!picked.path) return // cancelled: no-op
             tm.newSandboxedTab(picked.path)
-          })()
+          })().catch((err: unknown) => {
+            const message = err instanceof Error ? err.message : String(err)
+            showToast({
+              level: 'danger',
+              message: `Could not open the directory picker: ${message}`,
+            })
+          })
         },
       },
     ),

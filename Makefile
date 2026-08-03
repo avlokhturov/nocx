@@ -63,12 +63,12 @@ sandbox-smoke-linux:
 	$(GO) test -v -count=1 -run 'TestLandlockEnforcement' ./internal/sandbox/
 
 # Real Seatbelt enforcement smoke (ADR-0019 §9.4). Runs the shared probe
-# inside a real sandbox-exec cage on macOS; skipped LOUDLY with a named
-# reason when sandbox-exec is absent. The release gate additionally runs this
-# against the packaged .app — never silently skipped.
+# inside a real sandbox-exec cage on macOS. Absence is a failed release gate:
+# a successful release must prove enforcement rather than skip the check.
 sandbox-smoke-macos:
 	@echo "=== Seatbelt enforcement smoke (macOS) ==="
 	@if [ "$$(uname -s)" != "Darwin" ]; then echo "FAIL: sandbox-smoke-macos requires macOS"; exit 1; fi
+	@if [ ! -x /usr/bin/sandbox-exec ]; then echo "FAIL: sandbox-exec is unavailable — enforcement smoke cannot run"; exit 1; fi
 	$(GO) test -v -count=1 -run 'TestSeatbeltEnforcement|TestDarwinService' ./internal/sandbox/
 
 clean:

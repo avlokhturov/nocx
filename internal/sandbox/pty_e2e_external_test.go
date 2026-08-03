@@ -56,8 +56,11 @@ func TestNewLocal_SandboxedEndToEnd(t *testing.T) {
 		t.Errorf("workspace = %q, want %q", info.Workspace, ws)
 	}
 
-	// The shell runs inside the cage and answers on the PTY.
-	if err := writeAndAwait(lp, "echo NOCX_SANDBOX_SHELL_OK\n", "NOCX_SANDBOX_SHELL_OK"); err != nil {
+	// The shell runs inside the cage and answers on the PTY. The expected result
+	// is computed by the shell, so terminal echo cannot satisfy this assertion.
+	const shellReady = "34055"
+	const shellReadyCommand = "printf '%s\\n' \"$((31337 + 2718))\"\n"
+	if err := writeAndAwait(lp, shellReadyCommand, shellReady); err != nil {
 		t.Fatalf("shell interaction: %v", err)
 	}
 
@@ -98,9 +101,6 @@ func TestNewLocal_SandboxedFailClosed(t *testing.T) {
 // sandboxed shell is alive and interactive. On timeout the reader goroutine
 // stays blocked until the caller's deferred Close unblocks it.
 func writeAndAwait(lp pty.Pty, payload, needle string) error {
-	if _, err := lp.Write([]byte(payload)); err != nil {
-		return err
-	}
 	done := make(chan struct{}, 1)
 	go func() {
 		buf := make([]byte, 4096)
@@ -117,6 +117,9 @@ func writeAndAwait(lp pty.Pty, payload, needle string) error {
 			}
 		}
 	}()
+	if _, err := lp.Write([]byte(payload)); err != nil {
+		return err
+	}
 	select {
 	case <-time.After(15 * time.Second):
 		return errors.New("timeout waiting for " + needle)

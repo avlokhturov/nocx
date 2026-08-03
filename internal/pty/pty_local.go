@@ -204,15 +204,13 @@ func NewLocal(logger log.Logger, cfg Config, opts ...Option) (*LocalPty, error) 
 		prepared: prepared,
 	}
 
-	// Exactly one waiter owns the process. For a sandboxed session that is
-	// the PreparedCommand itself (its Close kills-and-waits once and removes
-	// the runtime tree); for an ordinary session it is this goroutine. A
-	// second cmd.Wait from anywhere else would race the race detector.
+	// Exactly one waiter owns the process. Sandboxed sessions wait for the
+	// child to exit before PreparedCommand.Close releases its runtime tree;
+	// Close itself remains the kill-and-cleanup path for startup failures.
 	go func() {
+		_ = cmd.Wait()
 		if prepared != nil {
 			prepared.Close()
-		} else {
-			_ = cmd.Wait()
 		}
 		close(lp.done)
 	}()

@@ -117,10 +117,10 @@ func TestDarwinServicePrepare_ConstructsWrapper(t *testing.T) {
 	if cmd.Path != "/usr/bin/true" {
 		t.Errorf("Cmd.Path = %q, want seam path", cmd.Path)
 	}
-	if len(cmd.Args) < 4 || cmd.Args[0] != "-p" || cmd.Args[2] != "/bin/sh" || cmd.Args[3] != "-i" {
-		t.Fatalf("Cmd.Args = %v, want [-p <profile> /bin/sh -i]", cmd.Args)
+	if len(cmd.Args) < 5 || cmd.Args[1] != "-p" || cmd.Args[3] != "/bin/sh" || cmd.Args[4] != "-i" {
+		t.Fatalf("Cmd.Args = %v, want [<path> -p <profile> /bin/sh -i]", cmd.Args)
 	}
-	if !strings.Contains(cmd.Args[1], "(deny default)") {
+	if !strings.Contains(cmd.Args[2], "(deny default)") {
 		t.Error("rendered profile must start with deny default")
 	}
 	if cmd.Dir != ws {

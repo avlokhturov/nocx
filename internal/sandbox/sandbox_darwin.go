@@ -81,8 +81,8 @@ func (s *darwinService) Prepare(ctx context.Context, req Request, spec CommandSp
 		cleanup: func() {
 			if cmd.Process != nil && cmd.ProcessState == nil {
 				_ = cmd.Process.Kill()
+				_ = cmd.Wait()
 			}
-			_ = cmd.Wait()
 			RemoveRuntimeRoot(runtimeRoot)
 		},
 	}

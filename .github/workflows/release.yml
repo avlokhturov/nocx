@@ -225,7 +225,7 @@ jobs:
           BIN="build/bin/nocx"
           test -x "$BIN"
           file "$BIN" | grep -q 'ELF 64-bit'
-          reported="$(\"$BIN\" --version)"
+          reported="$("$BIN" --version)"
           echo "reported: $reported"
           echo "$reported" | grep -qw "$VERSION"
 
