@@ -354,19 +354,34 @@ test.describe('tab completion', () => {
       expect(box!.width).toBeLessThanOrEqual(640)
       console.log(`E2E completion panel width: ${box!.width}px (report 3 shape)`)
 
-      // ── report 2: the match chip is a real highlight — its computed
-      //    background differs from the row it sits on (the intended
-      //    channel), resolved from theme tokens by the browser. ──
+      // ── report 2: the match is a real highlight, asserted from the
+      //    browser's own computed styles.
+      //
+      //    The channel changed on 2026-08-03 and the assertion follows it.
+      //    It used to be a background wash, which sits BEHIND the row's own
+      //    glyphs: raising its alpha to make it brighter darkens the
+      //    letters on it, and measured across the theme catalogue there is
+      //    no alpha that reads as emphasis (40% leaves 3.45:1, 55% is
+      //    already 2.44:1). The accent went into the TEXT instead. So the
+      //    proof is that the matched glyphs differ in COLOUR from the row's
+      //    text — and that <mark>'s user-agent background is off, which is
+      //    a real trap: dropping the background declaration does not remove
+      //    a background, it reveals the browser's yellow one. ──
       const match = rows.nth(0).locator('mark.ui-floating-panel__match').first()
       await expect(match).toBeVisible({ timeout: 5000 })
       await expect(match).toHaveText('gr')
-      const [markBg, rowBg] = await match.evaluate((el) => {
+      const [markColor, rowColor, markBg] = await match.evaluate((el) => {
         const mark = el as HTMLElement
         const row = mark.closest('.ui-floating-panel__row') as HTMLElement
-        return [getComputedStyle(mark).backgroundColor, getComputedStyle(row).backgroundColor]
+        return [
+          getComputedStyle(mark).color,
+          getComputedStyle(row).color,
+          getComputedStyle(mark).backgroundColor,
+        ]
       })
-      expect(markBg).not.toBe(rowBg)
-      console.log(`E2E match chip bg: ${markBg} vs row bg: ${rowBg} (report 2)`)
+      expect(markColor).not.toBe(rowColor)
+      expect(markBg).toBe('rgba(0, 0, 0, 0)')
+      console.log(`E2E match: colour ${markColor} vs row ${rowColor}, bg ${markBg} (report 2)`)
 
       // ── report 4: a row longer than the ceiling ellipsises inside the
       //    panel — the panel never grows past the ceiling to fit it. ──

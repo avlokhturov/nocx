@@ -1,27 +1,33 @@
 /**
  * e2e: the vault reaches the prompt (the renderer half of "secrets in the
- * prompt", ADR-0021).
+ * prompt", ADR-0021), and the offer arrives AFTER the command has run.
  *
- * The owner's acceptance, one sentence: paste an API key into the prompt, be
- * offered to store it, accept, see a named chip where the key was, run the
- * command and have it WORK, then press Up a week later — figuratively: after
- * a restart — and get a command that still runs, because what came back is
- * the reference and not a mask.
+ * The owner's acceptance in one sentence, as the product now works: run a
+ * command carrying an API key, be offered to save it on the block that just
+ * finished — never interrupted while typing — accept, and press Up a week
+ * later (figuratively: after a restart) to get a command that still runs,
+ * because what came back is the reference and not the key.
  *
  * The path exercised, end to end through a real backend:
  *   1. set the vault up (Settings -> Secrets -> "Set up protection");
- *   2. type a command carrying a key — the non-modal offer appears, the key
- *      is stored under a name, and the literal becomes `{{secret:NAME}}`,
- *      rendered as the chip;
- *   3. Enter: vault.resolveLine substitutes the live value, the shell runs
- *      the command, and the output proves the VALUE reached the PTY — while
- *      history.record received the reference intact;
- *   4. restart the backend (the vault seals), press Up: the recalled row is
+ *   2. type a command carrying a key: NOTHING interrupts composition — no
+ *      panel above the prompt, focus untouched — and Enter runs it with the
+ *      literal the user typed, which the shell echoes back;
+ *   3. the record ack lands: the block's own command line is redrawn as the
+ *      masked text with a chip, and the receipt appears INSIDE that block
+ *      with the backend's suggested name, while focus stays in the editor;
+ *   4. save it: the vault holds the value and the stored row becomes the
+ *      reference;
+ *   5. restart the backend (the vault seals), press Up: the recalled row is
  *      the REFERENCE, not a mask; Enter raises the unlock prompt, and after
- *      unsealing the command runs again.
+ *      unsealing the command runs again with the live value.
  *
- * The mask never reaches the PTY and the reference never leaves the ledger:
+ * The key never reaches the ledger and the reference resolves at submit:
  * both halves of the invariant are asserted from the outside.
+ *
+ * The pre-submit offer this file used to drive is DELETED, and its absence
+ * is asserted rather than assumed — a panel that interrupts composition is
+ * the defect the round existed to remove.
  */
 import { test as base, expect, type Page } from '@playwright/test'
 import { mkdtempSync, mkdirSync } from 'node:fs'
@@ -110,7 +116,7 @@ test.describe('vault secrets in the prompt — the owner’s acceptance', () => 
 
   const PASS = 'prompt-vault-master-pass'
 
-  test('paste a key -> offered -> chip -> runs -> survives a restart as the reference', async ({
+  test('run a key -> receipt on the block -> saved -> survives a restart as the reference', async ({
     page,
   }) => {
     // ── Phase 1: set the vault up (Settings -> Secrets) ──────────────────
@@ -141,39 +147,59 @@ test.describe('vault secrets in the prompt — the owner’s acceptance', () => 
     })
     await page.getByRole('dialog').getByRole('button', { name: 'Done', exact: true }).click()
 
-    // ── Phase 2: back at the prompt, paste a key, accept the offer ───────
+    // ── Phase 2: type a key and run it — composition is NOT interrupted ──
     await page.locator(TITLE).first().click()
     const input = page.locator(INPUT)
     await expect(input).toBeVisible({ timeout: 10_000 })
     await expect(input).toBeFocused({ timeout: 10_000 })
 
-    // The command must WORK with the resolved value, so the proof is the
-    // shell echoing it back: the offer fires because sk-proj-... is a
-    // detected OpenAI key, and the PTY must receive the live value, not a
-    // mask and not the reference.
+    // The shell echoes the value back, which is what proves the PTY received
+    // the literal the user typed — nothing was substituted on the way in.
     const KEY = 'sk-proj-abcdefghijklmnop'
     await input.fill(`echo ${KEY}`)
 
-    // The non-modal offer row settles in, without stealing focus.
-    const offer = page.locator('.ui-secret-offer')
-    await expect(offer).toBeVisible({ timeout: 5_000 })
-    await expect(offer).toContainText('Store this key in the vault?')
-    const nameField = page.locator('.ui-secret-offer__name')
-    await expect(nameField).toHaveValue('openai-key') // suggested from the kind
-    await page.locator('.ui-secret-offer__store').click()
+    // Nothing appears above the prompt and focus never moves. The old
+    // pre-submit panel is gone; its absence is the assertion.
+    await page.waitForTimeout(1_200) // past the detection settle
+    await expect(page.locator('.ui-secret-offer')).toHaveCount(0)
+    await expect(input).toBeFocused()
 
-    // The literal became the reference, rendered as the chip. The document
-    // holds the reference (the DOM renders the chip in its place), and the
-    // pasted key is gone from the surface entirely.
-    await expect(page.locator('.ui-secret-chip')).toContainText('openai-key', { timeout: 5_000 })
-    await expect(offer).toBeHidden()
-    await expect(input).not.toContainText(KEY)
-    // ── Phase 3: run it — the VALUE reaches the shell, and works ─────────
     await page.keyboard.press('Enter')
-    const block = page.locator('.cmd-block', { hasText: KEY }).first()
-    await expect(block).toBeVisible({ timeout: 15_000 })
-    // The output IS the resolved value: proof the PTY got the live secret.
+
+    // ── Phase 3: the receipt arrives ON the block that just finished ─────
+    const receipt = page.locator('.ui-block-receipt')
+    await expect(receipt).toBeVisible({ timeout: 15_000 })
+    // Attached to the frozen block — never floated over the prompt, never in
+    // the floating host.
+    const receiptInBlock = page.locator('.cmd-block .ui-block-receipt')
+    await expect(receiptInBlock).toHaveCount(1)
+    await expect(page.locator('.ui-floating-panel .ui-block-receipt')).toHaveCount(0)
+    // And it did not steal the keyboard.
+    await expect(input).toBeFocused()
+
+    // The block's own command line now reads as what was stored: the masked
+    // text with a chip where the key was.
+    // `:has()` rather than filter({ has: receiptInBlock }): that filter
+    // resolves its locator INSIDE each candidate, so a page-rooted
+    // `.cmd-block .ui-block-receipt` would be looking for a nested block.
+    const block = page.locator('.cmd-block:has(.ui-block-receipt)').first()
+    await expect(block.locator('.cmd-header-text .ui-secret-chip')).toHaveCount(1)
+    await expect(block.locator('.cmd-header-text')).not.toContainText(KEY)
+    // The OUTPUT still holds the echoed value — that is the program's own
+    // bytes, which we neither touch nor retain (AD-6, ADR-0008).
     await expect(block).toContainText(KEY)
+
+    // One credential, so one row and an action naming its scope.
+    await expect(receipt.locator('.ui-block-receipt__row')).toHaveCount(1)
+    await expect(receipt.locator('.ui-block-receipt__primary')).toHaveText('Save')
+    // The name is the backend's suggestion: no host in `echo`, no env
+    // assignment, so it falls back to the kind.
+    const nameField = receipt.locator('.ui-text-field__input')
+    await expect(nameField).toHaveValue('openai')
+    await receipt.locator('.ui-block-receipt__primary').click()
+
+    // Saved: the receipt is done with, and the vault holds the value.
+    await expect(receipt).toBeHidden({ timeout: 10_000 })
 
     // ── Phase 4: restart (the vault seals), Up, run again ────────────────
     const ep2 = await backend.restart(SECOND_PORT)
@@ -188,7 +214,10 @@ test.describe('vault secrets in the prompt — the owner’s acceptance', () => 
     await page.keyboard.press('ArrowUp')
     const panel = page.locator('.ui-floating-panel[data-variant="recall"]')
     await expect(panel).toBeVisible({ timeout: 10_000 })
-    await expect(panel).toContainText('{{secret:openai-key}}', { timeout: 10_000 })
+    await expect(panel).toContainText('openai', { timeout: 10_000 })
+    // The recalled row is the REFERENCE (rendered as the chip), never a mask.
+    await expect(panel.locator('.ui-secret-chip')).toHaveCount(1)
+    await expect(panel).not.toContainText(KEY)
     await expect(panel).not.toContainText('...')
 
     // Enter on the row submits through the same seam: resolveLine hits the
