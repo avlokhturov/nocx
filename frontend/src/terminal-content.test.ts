@@ -22,6 +22,7 @@ import {
   makeClient,
   makeClipboard,
   makeBanner,
+  makeSession,
   type ClipboardFake,
   type RendererMock,
   type SessionFake,
@@ -622,6 +623,152 @@ describe('vault references in the prompt (ADR-0021, the renderer half)', () => {
       expect(ed.getDoc()).toBe('curl {{secret:nope}} https://api')
       expect(ed.isVisible).toBe(true)
     } finally {
+      teardown()
+    }
+  })
+})
+
+describe('the live prompt says where Enter will land (nocx-3779)', () => {
+  /**
+   * Mount a real TerminalContent over an SSH session (alias path: no saved
+   * profile, host+user resolved through ~/.ssh/config), the same mount a
+   * real SSH tab takes. The chip assertions below must pass through this
+   * seam — a pure editor test could not catch a second derivation of the
+   * host string.
+   */
+  async function mountSshTerminal(): Promise<{
+    ed: CommandEditor
+    content: TerminalContent
+    tab: Tab
+    teardown: () => void
+  }> {
+    const clientFake = makeClient({
+      openSSHSessionByHost: vi.fn(() => Promise.resolve(makeSession())),
+    } as unknown as Partial<ClientFake>)
+    const wsClient = clientFake as unknown as WSClient
+    const content = new TerminalContent(
+      wsClient,
+      makeClipboard(),
+      new ClipboardGate(),
+      makeBanner(),
+      null,
+      () => {},
+      { profileId: '', host: '192.168.0.57', user: 'root' },
+    )
+    const tab = new Tab(
+      content,
+      {
+        surfaceType: SURFACE_TERMINAL,
+        singletonKey: null,
+        restoreDescriptor: { type: 'local' },
+        supportsAttention: true,
+        defaultTitle: 'Terminal',
+      },
+      99,
+    )
+    const paneParent = document.createElement('div')
+    paneParent.append(tab.pane)
+    document.body.append(paneParent)
+    await tab.start()
+    await expect(content.ready).resolves.toBe(true)
+    return {
+      ed: editorOf(content),
+      content,
+      tab,
+      teardown: () => {
+        tab.close()
+        paneParent.remove()
+      },
+    }
+  }
+
+  /** jsdom lacks scrollTo/scrollIntoView; the scrollback controller calls
+   *  both when blocks are created and the layout changes. */
+  function stubScroll(): () => void {
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoScrollIntoView = Element.prototype.scrollIntoView
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    return () => {
+      Element.prototype.scrollTo = protoScrollTo
+      Element.prototype.scrollIntoView = protoScrollIntoView
+    }
+  }
+
+  it('an SSH prompt shows the same location chip the block header shows', async () => {
+    const { ed, content, tab, teardown } = await mountSshTerminal()
+    const restoreScroll = stubScroll()
+    try {
+      content.setVisible(true)
+      const renderer = rendererOf(content)
+      const marker = (kind: 'A' | 'B' | 'C' | 'D', line = 0, exitCode?: number): void =>
+        renderer._fireCommandMarker({
+          kind,
+          line,
+          col: 0,
+          buffer: 'normal',
+          ...(exitCode === undefined ? {} : { exitCode }),
+        })
+
+      marker('A')
+      marker('B')
+      expect(ed.isVisible).toBe(true)
+      const chip = tab.pane.querySelector<HTMLElement>('.nocx-editor-location')
+      expect(chip).not.toBeNull()
+      expect(chip!.style.display).not.toBe('none')
+      expect(chip!.textContent).toBe('root@192.168.0.57')
+
+      // Run a command to completion: the frozen block header must carry the
+      // SAME string — one derivation, routed to both chips.
+      marker('C')
+      marker('D', 0, 0)
+      const headerLoc = tab.pane.querySelector<HTMLElement>('.cmd-header-location')
+      expect(headerLoc?.textContent).toBe('root@192.168.0.57')
+      expect(chip!.textContent).toBe(headerLoc!.textContent)
+
+      // And the next prompt still shows it.
+      marker('A')
+      marker('B')
+      expect(ed.isVisible).toBe(true)
+      expect(chip!.textContent).toBe('root@192.168.0.57')
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
+
+  it('a local session grows no location chip, in the prompt or the block header', async () => {
+    const { ed, content, tab, teardown } = await mountTerminal(makeClipboard(), {
+      attachToDocument: true,
+    })
+    const restoreScroll = stubScroll()
+    try {
+      content.setVisible(true)
+      const renderer = rendererOf(content)
+      const marker = (kind: 'A' | 'B' | 'C' | 'D', line = 0, exitCode?: number): void =>
+        renderer._fireCommandMarker({
+          kind,
+          line,
+          col: 0,
+          buffer: 'normal',
+          ...(exitCode === undefined ? {} : { exitCode }),
+        })
+
+      marker('A')
+      marker('B')
+      expect(ed.isVisible).toBe(true)
+      const chip = tab.pane.querySelector<HTMLElement>('.nocx-editor-location')
+      expect(chip).not.toBeNull()
+      expect(chip!.style.display).toBe('none')
+      expect(chip!.textContent).toBe('')
+
+      marker('C')
+      marker('D', 0, 0)
+      expect(tab.pane.querySelector('.cmd-header-location')).toBeNull()
+    } finally {
+      restoreScroll()
       teardown()
     }
   })

@@ -633,6 +633,10 @@ export class TerminalContent extends BaseTabContent {
       this.inputState.onChange((m) => {
         console.debug('nocx: input-state', m.state, 'trusted=', m.trusted, 'owned=', m.owned)
         this._editorOwned = m.owned
+        // The location chip follows the machine's trust on EVERY transition,
+        // including while the editor is hidden: when markers stop, no later
+        // render may retain the last trusted host (design §8.2).
+        this.editor?.setTrusted(m.trusted)
         if (shouldShowEditor(m.owned, this.nativeMode)) {
           this.editor!.setTime(new Date())
           this.editor!.show()
@@ -859,7 +863,14 @@ export class TerminalContent extends BaseTabContent {
       this._host = this.sshOpts?.host || ''
       // The block header's `user@host`. Empty for a local shell, where the
       // machine is implied and printing it on every block would be noise.
-      this.scrollback?.blockManager.setLocation(this.sshOpts ? this.locationLine() : '')
+      // ONE derivation, routed to both chips — the block header's frozen
+      // record and the prompt's live destination must never disagree.
+      const location = this.sshOpts ? this.locationLine() : ''
+      this.scrollback?.blockManager.setLocation(location)
+      this.editor?.setLocation(location)
+      // Nothing has been verified yet at session open; the chip renders the
+      // machine's trust, which the first clean A→B promotes (design §8.2).
+      this.editor?.setTrusted(this.inputState.trusted)
       this.editor?.setCwd(session.cwd || '')
 
       // Push initial title + tooltip. Title composition lives here.

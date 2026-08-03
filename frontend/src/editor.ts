@@ -59,6 +59,14 @@ export function stripPastedIndent(text: string, atLineStart: boolean): string {
  *  both or neither. */
 const MAX_ROWS = 30
 
+/**
+ * What the location chip shows when the prompt's trust is lost (markers
+ * stopped): the last known host must not keep rendering as current beside
+ * an irreversible action (design §8.2). "unknown" alone could read as a
+ * host literally named unknown; "context unknown" cannot.
+ */
+export const LOCATION_UNKNOWN_LABEL = 'context unknown'
+
 export interface AliasSuggestion {
   alias: string
   hostName: string
@@ -134,8 +142,20 @@ export class CommandEditor {
   readonly root: HTMLElement
   private view: EditorView
   private chrome: HTMLElement
+  /** Left chip group: the location + cwd chips sit together, the clock
+   *  keeps the right edge of the chrome row. */
+  private chromeLeft: HTMLElement
+  private locationChip: HTMLElement
   private cwdChip: HTMLElement
   private timeChip: HTMLElement
+  /** Where the pending command would land: the SAME string the block header
+   *  shows (routed from locationLine, never derived a second way). Empty
+   *  for a local session, where the absence of a chip is the information. */
+  private _location = ''
+  /** Trust from the input-state machine (ADR-0006). False when markers
+   *  stopped or never started cleanly: the last known host must not keep
+   *  rendering as current (design §8.2). */
+  private _trusted = false
   /** Hint dropdown — lives between the chrome and the editor surface. */
   private hintContainer: HTMLElement
   /** Current hint items (empty when hidden). */
@@ -250,13 +270,26 @@ export class CommandEditor {
     this.chrome = document.createElement('div')
     this.chrome.className = 'nocx-editor-chrome'
 
+    // Left group: location + cwd together, the clock keeps the right edge.
+    // Placement only — the chips carry their own appearance (ui/README).
+    this.chromeLeft = document.createElement('div')
+    this.chromeLeft.className = 'nocx-editor-chrome-left'
+
+    // Where the pending command would land: the same chip the block header
+    // shows (`nocx-chip nocx-chip-muted`), fed the same string. Hidden until
+    // setLocation receives a value — a local session grows NO chip.
+    this.locationChip = document.createElement('span')
+    this.locationChip.className = 'nocx-chip nocx-chip-muted nocx-editor-location'
+    this.locationChip.style.display = 'none'
+
     this.cwdChip = document.createElement('span')
     this.cwdChip.className = 'nocx-chip nocx-editor-cwd'
     this.cwdChip.textContent = '📁 ~'
 
     this.timeChip = document.createElement('span')
     this.timeChip.className = 'nocx-chip nocx-editor-time'
-    this.chrome.append(this.cwdChip, this.timeChip)
+    this.chromeLeft.append(this.locationChip, this.cwdChip)
+    this.chrome.append(this.chromeLeft, this.timeChip)
     this.root.appendChild(this.chrome)
 
     // ── Hint dropdown popup ─────────────────────────────────────────────
@@ -366,6 +399,44 @@ export class CommandEditor {
     const parts = path.split('/').filter(Boolean)
     const label = path === '~' || parts.length === 0 ? path : parts.slice(-2).join('/')
     this.cwdChip.textContent = `📁 ${label}`
+  }
+
+  /**
+   * Where the pending command would land — the same string the block header
+   * shows, routed from the one locationLine derivation rather than computed
+   * a second way (two derivations of "which host" are how they start
+   * disagreeing). Empty for a local session: no chip, and the absence is
+   * the information.
+   */
+  setLocation(location: string): void {
+    this._location = location
+    this.renderLocation()
+  }
+
+  /**
+   * Trust from the input-state machine (ADR-0006). When markers stop, the
+   * machine clears trust and the chip must say the context is unknown
+   * immediately — never keep rendering the last trusted host as current
+   * (design §8.2). The unknown state is SHOWN, not hidden: an absent chip
+   * would read as "local", which is a different lie.
+   */
+  setTrusted(trusted: boolean): void {
+    this._trusted = trusted
+    this.renderLocation()
+  }
+
+  /** The chip is the machine's truth: hidden for a local session, the host
+   *  string while the prompt is trusted, the unknown label the moment it is
+   *  not. The block header's chip is a frozen record of where a command
+   *  RAN; this one is where the next Enter would land, so it tracks trust. */
+  private renderLocation(): void {
+    if (!this._location) {
+      this.locationChip.style.display = 'none'
+      this.locationChip.textContent = ''
+      return
+    }
+    this.locationChip.style.display = ''
+    this.locationChip.textContent = this._trusted ? this._location : LOCATION_UNKNOWN_LABEL
   }
 
   // ── keyboard ──────────────────────────────────────────────────────────
