@@ -185,7 +185,7 @@ func TestEnsureInstalledRemote_InstallsScriptsAndGates(t *testing.T) {
 	s := New(testLogger())
 
 	client := dialRemoteTestSSHClient(t, srv)
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	if err := s.EnsureInstalledRemote(ctx, client, remoteHome); err != nil {
 		t.Fatalf("EnsureInstalledRemote: %v", err)
@@ -198,6 +198,7 @@ func TestEnsureInstalledRemote_InstallsScriptsAndGates(t *testing.T) {
 	}
 
 	vf := filepath.Join(remoteHome, dirName, versionFile)
+	// #nosec G304 — test-only path built from t.TempDir + fixed constants.
 	if data, err := os.ReadFile(vf); err != nil {
 		t.Errorf("VERSION missing after install: %v", err)
 	} else if strings.TrimSpace(string(data)) != version {
@@ -205,6 +206,8 @@ func TestEnsureInstalledRemote_InstallsScriptsAndGates(t *testing.T) {
 	}
 
 	for rcFile, gate := range rcGate {
+		// #nosec G304 — test-only path built from t.TempDir + fixed rc filename constants.
+		// #nosec G304 — test-only path built from t.TempDir + fixed rc filename constants.
 		rc, err := os.ReadFile(filepath.Join(remoteHome, rcFile))
 		if err != nil {
 			t.Errorf("gate not appended to %s: %v", rcFile, err)
@@ -243,7 +246,7 @@ func TestEnsureInstalledRemote_SkipsVersionWhenGateFailsThenRetries(t *testing.T
 	}
 
 	client := dialRemoteTestSSHClient(t, srv)
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	if err := s.EnsureInstalledRemote(ctx, client, remoteHome); err != nil {
 		t.Fatalf("EnsureInstalledRemote should stay non-fatal on gate failure: %v", err)
@@ -265,12 +268,14 @@ func TestEnsureInstalledRemote_SkipsVersionWhenGateFailsThenRetries(t *testing.T
 	}
 
 	// End of the interval: the retry completed the install.
+	// #nosec G304 — test-only path built from t.TempDir + fixed constants.
 	if data, err := os.ReadFile(vf); err != nil {
 		t.Fatalf("VERSION still missing after retry — install never recovered: %v", err)
 	} else if strings.TrimSpace(string(data)) != version {
 		t.Errorf("VERSION = %q, want %q", strings.TrimSpace(string(data)), version)
 	}
 
+	// #nosec G304 — test-only path built from t.TempDir + fixed rc filename constants.
 	rc, err := os.ReadFile(filepath.Join(remoteHome, ".bashrc"))
 	if err != nil {
 		t.Fatalf("gate not appended on retry: %v", err)
