@@ -30,6 +30,12 @@ const (
 	ReasonUnsupportedPlatform    = "unsupported-platform"
 )
 
+// helperEnvPrefix marks variables the Linux helper strips before exec so
+// helper internals never reach the shell. Defined here (not in the
+// linux-tagged helper file) because the shared enforcement probe also asserts
+// the strip on every platform.
+const helperEnvPrefix = "NOCX_SANDBOX_HELPER_"
+
 // Request is the wire opt-in carried by the open RPC. Workspace must be
 // canonicalized by the caller before Prepare; the backend never resolves it.
 type Request struct {

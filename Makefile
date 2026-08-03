@@ -62,6 +62,15 @@ sandbox-smoke-linux:
 	if [ "$$abi" -lt 3 ]; then echo "FAIL: Landlock ABI $$abi < 3 — enforcement smoke cannot run on this kernel"; exit 1; fi
 	$(GO) test -v -count=1 -run 'TestLandlockEnforcement' ./internal/sandbox/
 
+# Real Seatbelt enforcement smoke (ADR-0019 §9.4). Runs the shared probe
+# inside a real sandbox-exec cage on macOS; skipped LOUDLY with a named
+# reason when sandbox-exec is absent. The release gate additionally runs this
+# against the packaged .app — never silently skipped.
+sandbox-smoke-macos:
+	@echo "=== Seatbelt enforcement smoke (macOS) ==="
+	@if [ "$$(uname -s)" != "Darwin" ]; then echo "FAIL: sandbox-smoke-macos requires macOS"; exit 1; fi
+	$(GO) test -v -count=1 -run 'TestSeatbeltEnforcement|TestDarwinService' ./internal/sandbox/
+
 clean:
 	$(GO) clean -cache
 	rm -rf build/

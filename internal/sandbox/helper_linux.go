@@ -41,10 +41,6 @@ type helperPayload struct {
 	Command CommandSpec `json:"command"`
 }
 
-// helperEnvPrefix marks variables the helper strips before exec so helper
-// internals never reach the shell.
-const helperEnvPrefix = "NOCX_SANDBOX_HELPER_"
-
 // MaybeHelper runs the sandbox helper when this process was re-executed with
 // the helper marker as argv[1], and returns true (the process has exited).
 // It must be called before app startup (design spec §8.2).
