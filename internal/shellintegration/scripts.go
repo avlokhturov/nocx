@@ -8,6 +8,9 @@ var zshScript string
 //go:embed scripts/nocx.bash
 var bashScript string
 
+//go:embed scripts/nocx.posix
+var posixScript string
+
 // version is the integration script version. Bump when scripts change;
 // EnsureInstalled/EnsureInstalledRemote compare this against the installed
 // VERSION file and rewrite scripts when they differ.

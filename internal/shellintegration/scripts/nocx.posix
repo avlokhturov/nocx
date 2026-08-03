@@ -1,0 +1,59 @@
+# nocx shell integration for POSIX sh (dash, busybox ash, any /bin/sh).
+# Activated when NOCX_SHELL_INTEGRATION is set.
+# Emits OSC 133 A, B and D (with the real exit status) and OSC 7 (cwd),
+# entirely from PS1 — the minimal tier for hosts without bash or zsh.
+#
+# bash/zsh emit a command-start (C) marker from a preexec hook
+# (PROMPT_COMMAND/DEBUG, precmd/preexec_functions). POSIX sh has neither,
+# so C is unreachable through portable prompt hooks and is deliberately
+# never emitted here: a block simply appears already finished, with no
+# running phase. Do not fake C.
+
+if [ -z "${NOCX_SHELL_INTEGRATION:-}" ]; then
+    return 2>/dev/null || exit 0
+fi
+
+if [ -n "${__nocx_loaded:-}" ]; then
+    return 2>/dev/null || exit 0
+fi
+__nocx_loaded=1
+
+# URL-encode the bytes that would break the OSC 7 payload: space, tab,
+# newline — the same set as the bash script. POSIX sh has no
+# ${var//pat/repl}, and sed is line-based so it cannot see a newline, so tr
+# first maps the newline to a sentinel byte (SOH) that sed then rewrites.
+__nocx_encode_url() {
+    printf '%s' "$1" | tr '\n' '\001' | sed "s/ /%20/g; s/$(printf '\t')/%09/g; s/$(printf '\001')/%0a/g"
+}
+
+# The entire prompt. PS1 is re-expanded at every prompt and the command
+# substitution below forks during that expansion, so $? here is the
+# just-finished command's exit status. Capture it BEFORE the OSC 7
+# substitutions below — they would clobber it (nocx-586 is the same bug in
+# bash). The D marker therefore carries the real status on every prompt
+# after the first command.
+#
+# Unlike bash/zsh (whose hooks run in the main shell and carry
+# __nocx_first_prompt state across prompts), a POSIX prompt expansion runs
+# in a forked subshell with no way to write state back — verified against
+# dash and busybox ash. The first prompt therefore emits D;0, the status of
+# the source itself. Every frontend consumer ignores a D with no command
+# running (the ledger, the input machine and the scrollback block manager
+# all no-op), so this is a declared limitation, not a bug to paper over.
+__nocx_prompt() {
+    __nocx_exit=$?
+    __nocx_host=${HOSTNAME:-}
+    __nocx_host=${__nocx_host%%.*}
+    printf '\033]133;D;%s\007' "$__nocx_exit"
+    printf '\033]133;A\007'
+    printf '\033]7;file://%s%s\007' \
+        "$(__nocx_encode_url "$__nocx_host")" \
+        "$(__nocx_encode_url "$PWD")"
+    printf '\033]133;B\007'
+}
+
+# Single-quoted on purpose: double quotes would expand $? once, at install
+# time, and freeze that value into the prompt forever — a naive
+# implementation looks perfect on the first prompt. With single quotes the
+# whole string is re-expanded afresh at every prompt.
+PS1='$(__nocx_prompt)'
