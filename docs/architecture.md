@@ -200,7 +200,7 @@ All decisions below are **[ADOPTED]**. Each carries stable IDs; do not re-litiga
 
 - **Web version** — same core served over the network. Revisit when a non-macOS or remote-access need appears (Phase 2/3).
 - **Secrets vault** — separate encrypted single-machine store, credentials injected through the SSH interface. Revisit at Phase 2 start.
-- **Warpify Tier-B remote helper** — cross-compiled Go binary augmenting the remote shell, feeding the reserved `metadata` msg-type (AD-1). Revisit when Tier A cwd fidelity proves insufficient or richer remote metadata (file-tree) is wanted.
+- **Tier-B remote helper** — cross-compiled Go binary augmenting the remote shell, feeding the reserved `metadata` msg-type (AD-1). Revisit when Tier A cwd fidelity proves insufficient or richer remote metadata (file-tree) is wanted. **Not** what Warp calls warpify: warpify is Tier A shell hooks, which is `nocx-pu4` and is being built now. This entry used to carry that name, which invited a reader to defer the wrong thing — the helper binary is deferred; the shell integration is not.
 - **Splits / panes** — in-window layout above the session model. Revisit at Phase 2.
 - **Scrollback search (find-in-output)** — frontend-owned over existing render state. Revisit at Phase 2.
 - **Plugin API** — no runtime built now; the interface-first + DI + composition-root design already is the seam. Revisit only if third-party extension becomes a goal.
