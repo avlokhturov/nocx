@@ -265,6 +265,14 @@ export function withSessionText(page: HistoryQuery, ledger: CommandLedger | null
   let changed = false
   const entries = page.entries.map((e) => {
     if (e.startedAt === null || e.startedAt === undefined) return e
+    // A row the store REDACTED is never replaced by the session's text.
+    // Two reasons, and either alone is enough. The owner's policy is that a
+    // command carrying a credential comes back masked and is resolved from
+    // the vault, not handed back with the live key in it. And the redaction
+    // spans are offsets into the MASKED command: laying them over the longer
+    // plaintext drew the chip across an arbitrary slice and left the rest of
+    // the key sitting in the line, visible and runnable.
+    if (e.redactions !== undefined && e.redactions.length > 0) return e
     const live = bySlot.get(`${e.startedAt} ${e.cwd} ${e.host}`)
     if (live === undefined || live === e.command) return e
     changed = true

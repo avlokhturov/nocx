@@ -474,6 +474,35 @@ func TestHistoryRecord_SupersedingSubmissionDestroysOlderCapture(t *testing.T) {
 	}
 }
 
+// TestHistoryRecord_OrdinarySubmissionSupersedesToo: the next command
+// destroys the pending capture even when it carries no credential of its
+// own — which is the ordinary case and the one that was broken.
+//
+// The registry's supersede step is the first thing Submit does, and the
+// call was gated on the new command having credentials. So `ls` after a
+// curl left the previous key pending, and the plaintext lived until the
+// expiry timer instead of until the person moved on. The sibling test
+// above missed it precisely because its second command carries a key.
+func TestHistoryRecord_OrdinarySubmissionSupersedesToo(t *testing.T) {
+	clock := time.Unix(1_750_000_000, 0)
+	db := newCaptureFakeDB()
+	ws, _, stop := newCaptureWSServer(t, db, &clock)
+	defer stop()
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	ack1 := recordAndDecode(t, conn, "TOKEN=abcdefghijklmnopqrstuvwxyz123456", 1)
+	if len(ack1.Captures) != 1 {
+		t.Fatalf("ack1 captures = %d, want the one offer", len(ack1.Captures))
+	}
+	recordAndDecode(t, conn, "ls -la", 2)
+
+	resp := vaultCall(t, conn, "secrets.captureSave", map[string]any{"captureId": ack1.Captures[0].ID}, 3)
+	if resp.Error == nil || resp.Error.Code != -32010 {
+		t.Fatalf("save after an ordinary next command = %+v, want -32010 (unknown/expired)", resp.Error)
+	}
+}
+
 // TestHistoryRecord_CaptureDismissOverTheWire: dismiss, then save is
 // refused as consumed, and the row keeps its structured redaction.
 func TestHistoryRecord_CaptureDismissOverTheWire(t *testing.T) {

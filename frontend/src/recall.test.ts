@@ -1228,6 +1228,29 @@ describe('withSessionText: this session comes back as it was run (nocx-xkve.4)',
     expect(got.entries[0].maskedKinds).toEqual([])
   })
 
+  // The row the store actually returns for a masked command carries
+  // structured redactions, and it must come back exactly as stored.
+  //
+  // Two independent reasons, either fatal on its own. The policy: a command
+  // that carried a credential is resolved from the vault, never handed back
+  // with the live key in it. And the arithmetic: the spans are offsets into
+  // the MASKED text, so laying them over the longer session text drew the
+  // chip across an arbitrary slice — in the field it covered `sk-or-v1-c1`
+  // and left the remaining fifty characters of the key sitting in the line,
+  // visible and runnable.
+  it('never replaces a row the store redacted, however well it matches', () => {
+    const ledger = ran('curl -H "Authorization: Bearer sk-or-v1-realkeyhere"', '/a', 'h1')
+    const masked = storeRow({
+      id: '1',
+      redactions: [{ kind: 'openai', start: 32, end: 44, prefix: 'sk-o', suffix: '7249' }],
+    })
+    const got = withSessionText(page([masked]), ledger)
+    expect(got.entries[0].command).toBe('curl -H "Authorization: Bearer sk-p...7249"')
+    expect(got.entries[0].maskedCount).toBe(1)
+    expect(got.entries[0].redactions).toHaveLength(1)
+    expect(got.entries[0].command).not.toContain('realkeyhere')
+  })
+
   it('leaves rows from other sessions alone — those are the durable, masked ones', () => {
     const ledger = ran('something else', '/a', 'h1')
     // Same directory, different moment: not this session's row.

@@ -426,9 +426,9 @@ export class PromptVaultController {
     this.resolveTarget = { from: first.from, to: first.to }
     this.deps.report(
       'warning',
-      'This command contains a masked secret — it cannot run as written. Pick a live secret to substitute.',
+      'The key was removed from this command when it was stored — type it in at the marker, or pick one from the vault.',
     )
-    void this.picker.open()
+    void this.picker.open('resolve')
     return true
   }
 

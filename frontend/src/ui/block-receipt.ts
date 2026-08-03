@@ -219,7 +219,10 @@ export class BlockReceipt {
     const drop = document.createElement('button')
     drop.className = 'ui-button ui-block-receipt__drop'
     drop.dataset.variant = 'ghost'
-    drop.textContent = 'Remove'
+    // Not "Remove": nothing has been stored yet, so there is nothing to
+    // remove, and a destructive word over an offer reads as though
+    // declining will delete something.
+    drop.textContent = 'Dismiss'
     drop.setAttribute('aria-label', `do not save this ${capture.kindLabel}`)
     drop.addEventListener('click', () => this.callbacks.onDismiss(capture.captureId))
 

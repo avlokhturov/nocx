@@ -65,6 +65,12 @@ export interface SecretEntry {
  *  list, grouped; a submenu is a mouse in a keyboard-first tool). */
 const GROUP_LABEL = 'Secrets'
 
+/** Why the picker is open. 'insert' is the '@' trigger — the person is
+ *  composing and wants to reach for a secret. 'resolve' is a recalled
+ *  command whose credential the store removed: the panel's job there is
+ *  first to say what is missing, and only then to offer the vault. */
+export type SecretPickerPurpose = 'insert' | 'resolve'
+
 type PickerState =
   | { readonly name: 'closed' }
   | { readonly name: 'loading' }
@@ -80,6 +86,7 @@ type PickerState =
 
 export class SecretPicker {
   private state: PickerState = { name: 'closed' }
+  private purpose: SecretPickerPurpose = 'insert'
   /** The controller's filter that arrived while the inventory was still in
    *  flight: typing `@ope` before the list lands must not render every
    *  secret unfiltered. Applied when the list renders; null when none. */
@@ -115,9 +122,17 @@ export class SecretPicker {
 
   /** Open the picker at the caret: fetch the vault's lifecycle, then the
    *  list or an offer row. The trigger position is the controller's; this
-   *  surface only renders. */
-  async open(): Promise<void> {
+   *  surface only renders.
+   *
+   *  `purpose` decides what the panel SAYS when it has nothing to list.
+   *  Opened from '@' the question is "which secret do you want here", and
+   *  "set up the vault to store secrets" answers it. Opened to resolve a
+   *  recalled command it is the wrong answer to a different question: the
+   *  key was taken out of that command, and what the person needs to know
+   *  first is that it is missing and that they can simply type it back. */
+  async open(purpose: SecretPickerPurpose = 'insert'): Promise<void> {
     if (this.isOpen) return
+    this.purpose = purpose
     this.state = { name: 'loading' }
     this.render()
     try {
@@ -326,13 +341,20 @@ export class SecretPicker {
       return
     }
     if (s.name === 'empty') {
-      this.panel.showEmpty('no secrets yet')
+      this.panel.showEmpty(
+        this.purpose === 'resolve'
+          ? 'the key was removed from this command — type it here, or save one to the vault to reuse it'
+          : 'no secrets yet',
+      )
       return
     }
     if (s.name === 'sealed') {
       const row: FloatingPanelRow = {
         id: 'offer-unseal',
-        displayText: 'Unlock the vault to use its secrets',
+        displayText:
+          this.purpose === 'resolve'
+            ? 'The key is missing here — unlock the vault to substitute it'
+            : 'Unlock the vault to use its secrets',
         matchRanges: [],
         group: GROUP_LABEL,
         actions: [this.badge('sealed')],
@@ -347,7 +369,14 @@ export class SecretPicker {
     if (s.name === 'uninitialized') {
       const row: FloatingPanelRow = {
         id: 'offer-setup',
-        displayText: 'Set up the vault to store secrets',
+        // Resolving names the missing thing first. "Set up the vault to
+        // store secrets" is a true sentence that answers a question nobody
+        // asked here: the command will not run because its key is gone, and
+        // the fastest way out is to type the key back in.
+        displayText:
+          this.purpose === 'resolve'
+            ? 'The key is missing here — type it in, or set up the vault to keep it'
+            : 'Set up the vault to store secrets',
         matchRanges: [],
         group: GROUP_LABEL,
         actions: [this.badge('not set up')],

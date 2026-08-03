@@ -13,7 +13,6 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -130,9 +129,15 @@ func TestCapture_SaveAndExpiryOverTheRealSocket(t *testing.T) {
 		t.Errorf("row redactions = %+v, want the saved segment gone", page.Entries[0].Redactions)
 	}
 
-	// ── leg 2: a key whose capture is left to expire ─────────────────────
+	// ── leg 2: a key whose capture dies before it is saved ───────────────
 	// A second submission from the same tab supersedes only PENDING
 	// captures; the saved one above is settled and untouched.
+	//
+	// This leg used to wait out the real expiry — 32 seconds of wall clock
+	// in the suite for a timer whose behaviour internal/credential already
+	// pins with an injected clock. It asserts the same thing through the
+	// destruction path a person actually triggers: submit the next command,
+	// and the previous command's pending capture is gone.
 	record2 := callAppWS(t, conn, "history.record", map[string]any{
 		"command": "TOKEN=abcdefghijklmnopqrstuvwxyz123456 ./run.sh",
 		"cwd":     "/srv", "host": "", "status": "success", "exitCode": 0,
@@ -158,12 +163,19 @@ func TestCapture_SaveAndExpiryOverTheRealSocket(t *testing.T) {
 		t.Fatalf("ack2 = %+v, want one capture and one structured redaction", ack2)
 	}
 
-	// Let the 30-second expiry pass (the sweep ticker runs every 5 s).
-	time.Sleep(32 * time.Second)
+	// The next command from the same tab: leg 2's capture is superseded.
+	record3 := callAppWS(t, conn, "history.record", map[string]any{
+		"command": "echo done",
+		"cwd":     "/srv", "host": "", "status": "success", "exitCode": 0,
+		"startedAt": int64(1_750_000_000_400), "endedAt": int64(1_750_000_000_500), "trusted": true,
+	}, 8)
+	if record3.Error != nil {
+		t.Fatalf("history.record (leg 3): %+v", record3.Error)
+	}
 
 	expired := callAppWS(t, conn, "secrets.captureSave", map[string]any{"captureId": ack2.Captures[0].ID}, 6)
 	if expired.Error == nil {
-		t.Fatal("save of an expired capture must fail")
+		t.Fatal("save of a destroyed capture must fail")
 	}
 	if expired.Error.Code != -32010 {
 		t.Errorf("expired save code = %d, want -32010 (capture-expired)", expired.Error.Code)

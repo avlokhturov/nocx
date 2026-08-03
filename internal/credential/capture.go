@@ -48,8 +48,22 @@ import (
 )
 
 // DefaultCaptureExpiry is how long a pending capture lives before it is
-// destroyed. The brief's number: 30 seconds.
-const DefaultCaptureExpiry = 30 * time.Second
+// destroyed.
+//
+// It was 30 seconds, chosen on paper, and in front of a user it was simply
+// too short: the offer arrives when the command finishes, the person is
+// still reading the output, and the receipt retires itself before they have
+// decided anything. An offer that expires while you are looking at it is
+// worse than no offer.
+//
+// Five minutes, because the real bound is not this timer. A capture is
+// destroyed by the next submission from that tab, by the tab closing, by
+// the vault sealing, by a transport drop and by shutdown — so in ordinary
+// use the plaintext lives exactly as long as the block it belongs to is the
+// newest one. This constant is the backstop for a terminal left open and
+// untouched, and five minutes of an idle process holding one credential in
+// memory is not the threat this feature exists to answer.
+const DefaultCaptureExpiry = 5 * time.Minute
 
 // ErrCaptureUnknown is returned when a save/dismiss addresses a capture
 // that is not pending or settled: expired, destroyed, or never minted.

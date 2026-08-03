@@ -448,7 +448,11 @@ export class TerminalContent extends BaseTabContent {
            *  for review. Returns whether anything was triggered (the editor
            *  consumes the chord either way). */
           onSave: (shift) => {
-            if (this.receipt) {
+            // An EXPIRED receipt is still held (its retired line has to be
+            // removable), but it has no action left — the chord must fall
+            // through to the composition-time candidate rather than being
+            // swallowed by a receipt that can no longer save anything.
+            if (this.receipt && !this.receipt.isExpired) {
               if (shift) this.receipt.enterReview()
               else this.receipt.saveAll()
               return true
@@ -1289,9 +1293,14 @@ export class TerminalContent extends BaseTabContent {
         onDismiss: (captureId) => void this.dismissReceiptRow(this.receipt!, captureId),
         onHover: (captureId) => this.emphasiseChip(captureId),
         onExpired: () => {
-          // The view retired itself with the honest line; nothing owed.
-          this.receipt = null
-          this.receiptBlockEl = null
+          // The view retired itself with the honest line and there is
+          // nothing owed to the backend any more — but the reference is
+          // KEPT. Nulling it here orphaned the retired element: nothing
+          // held it, so the line "the key is no longer held" stayed in the
+          // transcript for the rest of the session, above every command
+          // that followed. destroyReceipt at the next submission is what
+          // takes it away, and it needs something to take away.
+          this.receiptChipSpans.clear()
         },
         onExitReview: () => this.editor?.focus(),
       },
@@ -1317,6 +1326,13 @@ export class TerminalContent extends BaseTabContent {
     receipt: BlockReceipt,
     rows: ReadonlyArray<{ captureId: string; name: string }>,
   ): Promise<void> {
+    // Saving into a vault that does not exist yet cannot work, and the
+    // receipt is the moment the person actually wants one — sending them to
+    // Settings to come back afterwards guarantees they will not, and the
+    // capture dies meanwhile. So Save sets the vault up first: silently when
+    // the machine has an OS key, otherwise through the vault layer's own
+    // setup dialog, which then owns the rest of the flow.
+    if (!(await this.ensureVaultForSave())) return
     for (const row of rows) {
       if (!this.vault) continue
       try {
@@ -1343,6 +1359,43 @@ export class TerminalContent extends BaseTabContent {
         receipt.markFailed(row.captureId, 'could not save — try again')
       }
     }
+  }
+
+  /** Make the vault able to receive a secret, or say why it cannot.
+   *
+   *  Returns true when the save may proceed. False means the flow moved
+   *  somewhere else — the setup dialog is up, or the vault is locked — and
+   *  the receipt stays as it is, so the same Save finishes the job once the
+   *  person comes back. */
+  private async ensureVaultForSave(): Promise<boolean> {
+    if (!this.vault) return false
+    let status
+    try {
+      status = await this.vault.status()
+    } catch {
+      return true // let the save itself report the real failure
+    }
+    if (status.state === 'unsealed') return true
+    if (status.state === 'sealed') {
+      showToast({ level: 'warning', message: 'Unlock the vault to save this key.' })
+      return false
+    }
+    if (status.osKeyCapable) {
+      try {
+        await this.vault.setup({})
+        return true
+      } catch {
+        showToast({
+          level: 'danger',
+          message: 'Could not set the vault up — the key was not saved.',
+        })
+        return false
+      }
+    }
+    // No OS key: setting up needs a passphrase, and a passphrase needs a
+    // dialog the vault layer owns. The receipt survives it.
+    this.onSetupVault?.()
+    return false
   }
 
   /** A row's drop control: dismiss that capture (and suppress its

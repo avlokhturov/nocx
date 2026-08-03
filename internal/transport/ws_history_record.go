@@ -260,7 +260,16 @@ func (s *WSServer) handleHistoryRecord(ctx context.Context, wconn *wsConn, state
 	// The offers, decided after the row exists (the capture's first link is
 	// the row it will rewrite). Superseding, linking and suppression are
 	// one atomic registry step.
-	if s.captures != nil && len(creds) > 0 {
+	//
+	// This runs for EVERY record, not only for one carrying credentials.
+	// Submit's first act is to destroy the tab's older pending captures, and
+	// gating the whole call on len(creds) > 0 meant the ordinary next
+	// command — the overwhelmingly common one, which carries no key — never
+	// superseded anything. The plaintext then sat until the expiry timer
+	// rather than until the user moved on, which is the boundary the design
+	// actually promises. With no credentials Submit does the supersede and
+	// returns nothing, which is exactly what is wanted here.
+	if s.captures != nil {
 		scope := credential.CaptureScope{
 			Tab:        tabID(wconn),
 			SessionIDs: sessionIDsOf(state),
