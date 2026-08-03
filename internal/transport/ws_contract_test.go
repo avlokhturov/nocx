@@ -1356,6 +1356,16 @@ func TestOpen_DTOConformsToContract(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 	validateJSON(t, schema, rawNone, "open DTO (integration succeeded)")
+
+	rawUnknown, err := json.Marshal(map[string]string{
+		"sessionId":              "0123456789abcdef0123456789abcdef",
+		"cwd":                    "~/work",
+		"shellIntegrationReason": "unknown",
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, rawUnknown, "open DTO (unclassified refusal)")
 }
 
 // openProfileResolver resolves every profile to a fixed host and a minimal

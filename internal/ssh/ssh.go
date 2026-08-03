@@ -60,6 +60,12 @@ const (
 	ReasonUnsupportedShell RefusalReason = "unsupported-shell"
 	ReasonNoSecureTemp     RefusalReason = "no-secure-temp"
 	ReasonRemoteCommand    RefusalReason = "remote-command"
+	// ReasonUnknown means integration did not happen and the backend cannot
+	// say why — the remoteLauncherAdapter's fail-open for a refusal reason
+	// the ssh vocabulary does not yet know (nocx-axpz). It is a distinct
+	// visible failure, never a synonym for ReasonNone: the product renders
+	// "no refusal" as "integration succeeded", which would be a lie.
+	ReasonUnknown RefusalReason = "unknown"
 )
 
 // LaunchOptions carries what the start command must embed.

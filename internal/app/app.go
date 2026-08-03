@@ -304,7 +304,7 @@ func New(opts ...Option) (*App, error) {
 		// identically-named declarations and wired into every ConnectConfig
 		// the transport builds. Before this line the launcher was reachable
 		// from its own tests and nowhere else (AGENTS.md check 5).
-		transport.WithRemoteLauncher(&remoteLauncherAdapter{inner: shellintegration.NewRemoteLauncher()}),
+		transport.WithRemoteLauncher(&remoteLauncherAdapter{inner: shellintegration.NewRemoteLauncher(), logger: logger}),
 
 		transport.WithProbeResultStore(probeResultStore),
 		transport.WithSSHConfigResolver(sshCfgResolver, sshConfigPath),
@@ -412,12 +412,17 @@ func (a *proberAdapter) TrustHostKey(ctx context.Context, addr string, key []byt
 // RefusalReason on purpose — internal/ssh must not depend on shellintegration
 // — and Go interface satisfaction needs identical named types, so the
 // composition root translates between the two declarations at wiring time.
-// Reasons map explicitly; an unmapped value fails loudly (panic) rather than
-// silently becoming ssh.ReasonNone, which the product renders as "integration
-// succeeded" — a decline that degrades to "no refusal" is how a soft degrade
-// becomes invisible (AGENTS.md).
+// Reasons map explicitly; a value the ssh vocabulary does not know degrades
+// to ssh.ReasonUnknown, a distinct "integration did not happen, and I cannot
+// say why", never to ssh.ReasonNone — the product renders ReasonNone as
+// "integration succeeded", which is how a soft degrade becomes invisible
+// (AGENTS.md). The original tripwire for an unmapped reason was a panic; a
+// crash in the composition root of a terminal backend is the most extreme
+// violation of ADR-0004's fail-open invariant, so the tripwire shouts into
+// the log and hands the caller a usable plain-shell fallback instead.
 type remoteLauncherAdapter struct {
-	inner shellintegration.RemoteLauncher
+	inner  shellintegration.RemoteLauncher
+	logger log.Logger
 }
 
 func (a *remoteLauncherAdapter) StartCommand(shell ssh.ShellKind, opts ssh.LaunchOptions) (string, ssh.RefusalReason, bool) {
@@ -426,14 +431,19 @@ func (a *remoteLauncherAdapter) StartCommand(shell ssh.ShellKind, opts ssh.Launc
 		shellintegration.LaunchOptions{SessionID: opts.SessionID, Enhanced: opts.Enhanced},
 	)
 	if !ok {
-		return "", mapRefusalReason(reason), false
+		return "", a.mapRefusalReason(reason), false
 	}
 	// Accepted: the pinned contract says ok=true means the shell was
 	// integrated, so the reason must be the empty "no refusal" value. A
-	// launcher that accepts while claiming a refusal contradicts itself; fail
-	// loudly rather than dropping the reason on the floor.
+	// launcher that accepts while claiming a refusal contradicts itself; the
+	// ssh layer would drop the reason on an accept, so decline instead — the
+	// claimed reason stays visible on the product and the session falls back
+	// to a plain shell (ADR-0004:60) — and shout the contradiction into the
+	// log rather than killing the backend with a panic.
 	if reason != shellintegration.ReasonNone {
-		panic(fmt.Sprintf("nocx: shellintegration launcher accepted with refusal reason %q; StartCommand must return reason none when ok is true", reason))
+		a.logger.Error("shellintegration launcher accepted while naming a refusal reason; treating as a decline",
+			"reason", reason, "shell", shell, "session_id", opts.SessionID)
+		return "", a.mapRefusalReason(reason), false
 	}
 	return cmd, ssh.ReasonNone, true
 }
@@ -442,8 +452,10 @@ func (a *remoteLauncherAdapter) StartCommand(shell ssh.ShellKind, opts ssh.Launc
 // vocabulary. The switch is exhaustive over the declared set on purpose: the
 // production launcher only ever returns these three, so the default arm is a
 // tripwire for the next reason added to one package and forgotten in the
-// other — panic, never silently become ReasonNone.
-func mapRefusalReason(r shellintegration.RefusalReason) ssh.RefusalReason {
+// other. It degrades to the distinct ssh.ReasonUnknown — never a silent
+// ssh.ReasonNone — and shouts, keeping the tripwire while failing open
+// (ADR-0004:60) instead of crashing the terminal.
+func (a *remoteLauncherAdapter) mapRefusalReason(r shellintegration.RefusalReason) ssh.RefusalReason {
 	switch r {
 	case shellintegration.ReasonNone:
 		return ssh.ReasonNone
@@ -452,6 +464,8 @@ func mapRefusalReason(r shellintegration.RefusalReason) ssh.RefusalReason {
 	case shellintegration.ReasonNoSecureTemp:
 		return ssh.ReasonNoSecureTemp
 	default:
-		panic(fmt.Sprintf("nocx: shellintegration launcher returned unmapped refusal reason %q; add it to remoteLauncherAdapter", r))
+		a.logger.Error("shellintegration launcher returned unmapped refusal reason; add it to remoteLauncherAdapter",
+			"reason", r)
+		return ssh.ReasonUnknown
 	}
 }
