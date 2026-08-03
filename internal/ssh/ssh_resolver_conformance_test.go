@@ -50,6 +50,11 @@ Host nocx-test
     HostName 127.0.0.1
     Port 2222
     IdentityFile ~/.ssh/nocx_test_key
+
+Host tty-test
+    HostName 192.0.2.20
+    RemoteCommand top -d 1
+    RequestTTY yes
 `
 	if err := os.WriteFile(configPath, []byte(configContent), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -100,6 +105,16 @@ Host nocx-test
 		}
 		if cfg.Port != 2222 {
 			t.Errorf("Port = %d, want 2222", cfg.Port)
+		}
+		// dev sets neither RemoteCommand nor RequestTTY; ssh -G renders
+		// the unset directives as "remotecommand none" (or omits the line)
+		// and "requesttty auto", which must resolve to the empty
+		// representation.
+		if cfg.RemoteCommand != "" {
+			t.Errorf("RemoteCommand = %q, want empty (unset)", cfg.RemoteCommand)
+		}
+		if cfg.RequestTTY != "" {
+			t.Errorf("RequestTTY = %q, want empty (unset default)", cfg.RequestTTY)
 		}
 	})
 
@@ -162,6 +177,26 @@ Host nocx-test
 		}
 		if host != "nonexistent" {
 			t.Errorf("ResolveHost(nonexistent) = %q, want nonexistent", host)
+		}
+	})
+
+	// Test 7: Host with RemoteCommand and RequestTTY set in ssh_config.
+	t.Run("host_with_remote_command_and_requesttty", func(t *testing.T) {
+		// cache_invalidation (test 5) overwrites the config file with a
+		// minimal one; restore the full config so tty-test still resolves.
+		if err := os.WriteFile(configPath, []byte(configContent), 0o600); err != nil {
+			t.Fatalf("restore config: %v", err)
+		}
+		resolver := NewSSHConfigResolver(logger, configPath, "")
+		cfg, err := resolver.ResolveConfig(context.Background(), "tty-test")
+		if err != nil {
+			t.Fatalf("ResolveConfig tty-test: %v", err)
+		}
+		if cfg.RemoteCommand != "top -d 1" {
+			t.Errorf("RemoteCommand = %q, want %q", cfg.RemoteCommand, "top -d 1")
+		}
+		if cfg.RequestTTY != "yes" {
+			t.Errorf("RequestTTY = %q, want yes", cfg.RequestTTY)
 		}
 	})
 }

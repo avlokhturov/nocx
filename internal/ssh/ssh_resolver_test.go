@@ -44,10 +44,12 @@ func (s *StubConfigResolver) ResolveHost(_ context.Context, host string) (string
 func (s *StubConfigResolver) ResolveConfig(_ context.Context, host string) (*HostConfig, error) {
 	if e, ok := s.Entries[host]; ok {
 		return &HostConfig{
-			HostName:     e.HostName,
-			User:         e.User,
-			Port:         e.Port,
-			IdentityFile: e.IdentityFile,
+			HostName:      e.HostName,
+			User:          e.User,
+			Port:          e.Port,
+			IdentityFile:  e.IdentityFile,
+			RemoteCommand: e.RemoteCommand,
+			RequestTTY:    e.RequestTTY,
 		}, nil
 	}
 	return &HostConfig{HostName: host, User: currentUser(), Port: 22}, nil
@@ -149,6 +151,65 @@ func TestParseSSHGOutput_InvalidPort(t *testing.T) {
 		t.Errorf("Port = %d, want 0 (unset on unparseable port — caller determines default)", cfg.Port)
 	}
 }
+func TestParseSSHGOutput_RemoteCommand(t *testing.T) {
+	t.Run("set", func(t *testing.T) {
+		output := "remotecommand top -d 1\n"
+		cfg, err := parseSSHGOutput(output, "myhost")
+		if err != nil {
+			t.Fatalf("parseSSHGOutput: %v", err)
+		}
+		if cfg.RemoteCommand != "top -d 1" {
+			t.Errorf("RemoteCommand = %q, want %q", cfg.RemoteCommand, "top -d 1")
+		}
+	})
+
+	t.Run("none_is_absent", func(t *testing.T) {
+		// ssh -G prints "remotecommand none" when the directive is unset;
+		// "none" is the oracle's sentinel for "no command", not a literal
+		// command, so it must normalize to the empty representation.
+		output := "remotecommand none\n"
+		cfg, err := parseSSHGOutput(output, "myhost")
+		if err != nil {
+			t.Fatalf("parseSSHGOutput: %v", err)
+		}
+		if cfg.RemoteCommand != "" {
+			t.Errorf("RemoteCommand = %q, want empty (unset)", cfg.RemoteCommand)
+		}
+	})
+}
+
+func TestParseSSHGOutput_RequestTTY(t *testing.T) {
+	tests := []struct {
+		name string
+		line string
+		want string
+	}{
+		{"yes", "requesttty yes\n", "yes"},
+		// OpenSSH >= 10 serializes booleans as true/false; older versions
+		// print yes/no. Both render the same directive value and normalize
+		// to the canonical yes/no so callers are version-independent.
+		{"true_normalized", "requesttty true\n", "yes"},
+		{"force", "requesttty force\n", "force"},
+		// "auto" is the RequestTTY default; ssh -G prints it when the
+		// directive is unset. It means "ssh decides", and for a command
+		// execution ssh's decision is no TTY — indistinguishable from
+		// unset, so it collapses to the empty representation.
+		{"auto_is_default", "requesttty auto\n", ""},
+		{"false_normalized", "requesttty false\n", "no"},
+		{"no", "requesttty no\n", "no"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := parseSSHGOutput(tt.line, "myhost")
+			if err != nil {
+				t.Fatalf("parseSSHGOutput: %v", err)
+			}
+			if cfg.RequestTTY != tt.want {
+				t.Errorf("RequestTTY = %q, want %q", cfg.RequestTTY, tt.want)
+			}
+		})
+	}
+}
 
 // ---------------------------------------------------------------------------
 // StubConfigResolver tests
@@ -179,9 +240,11 @@ func TestStubConfigResolver_ResolveHost(t *testing.T) {
 func TestStubConfigResolver_ResolveConfig(t *testing.T) {
 	s := NewStubConfigResolver()
 	s.AddEntry("prod", HostConfig{
-		HostName: "10.0.0.1",
-		User:     "deploy",
-		Port:     2222,
+		HostName:      "10.0.0.1",
+		User:          "deploy",
+		Port:          2222,
+		RemoteCommand: "top -d 1",
+		RequestTTY:    "yes",
 	})
 
 	cfg, err := s.ResolveConfig(context.Background(), "prod")
@@ -196,6 +259,12 @@ func TestStubConfigResolver_ResolveConfig(t *testing.T) {
 	}
 	if cfg.Port != 2222 {
 		t.Errorf("Port = %d, want 2222", cfg.Port)
+	}
+	if cfg.RemoteCommand != "top -d 1" {
+		t.Errorf("RemoteCommand = %q, want %q", cfg.RemoteCommand, "top -d 1")
+	}
+	if cfg.RequestTTY != "yes" {
+		t.Errorf("RequestTTY = %q, want yes", cfg.RequestTTY)
 	}
 
 	// Unknown host returns defaults.
@@ -218,7 +287,8 @@ func TestStubConfigResolver_ResolveConfig(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // fakeSSHClient creates a temp dir with a fake ssh binary, an empty config,
-// and a hostnames/ directory. Returns (sshPath, configPath, hostnamesDir).
+// and hostnames/, remotecommands/ and requestttys/ override directories.
+// Returns (sshPath, configPath, hostnamesDir).
 func fakeSSHClient(t *testing.T) (sshPath, configPath, hostnamesDir string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -231,6 +301,15 @@ func fakeSSHClient(t *testing.T) (sshPath, configPath, hostnamesDir string) {
 	hostnamesDir = filepath.Join(dir, "hostnames")
 	if err := os.MkdirAll(hostnamesDir, 0o750); err != nil {
 		t.Fatalf("mkdir hostnames: %v", err)
+	}
+	remotecommandsDir := filepath.Join(dir, "remotecommands")
+	if err := os.MkdirAll(remotecommandsDir, 0o750); err != nil {
+		t.Fatalf("mkdir remotecommands: %v", err)
+	}
+
+	requestttysDir := filepath.Join(dir, "requestttys")
+	if err := os.MkdirAll(requestttysDir, 0o750); err != nil {
+		t.Fatalf("mkdir requestttys: %v", err)
 	}
 
 	counterPath := filepath.Join(dir, "counter")
@@ -258,11 +337,31 @@ else
     hn="$host"
 fi
 
+# Read RemoteCommand override from remotecommands/<host>, fall back to the
+# oracle's rendering of unset: "remotecommand none".
+rc_file="%s/${host}"
+if [ -f "$rc_file" ]; then
+    rc=$(cat "$rc_file")
+else
+    rc="none"
+fi
+
+# Read RequestTTY override from requestttys/<host>, fall back to the
+# oracle's rendering of unset: "requesttty auto".
+tty_file="%s/${host}"
+if [ -f "$tty_file" ]; then
+    tty=$(cat "$tty_file")
+else
+    tty="auto"
+fi
+
 echo "user testuser"
 echo "hostname $hn"
 echo "port 22"
 echo "identityfile ~/.ssh/id_rsa"
-`, counterPath, hostnamesDir)
+echo "remotecommand $rc"
+echo "requesttty $tty"
+`, counterPath, hostnamesDir, remotecommandsDir, requestttysDir)
 	// Write non-executable first (passes G306), then chmod to executable.
 	if err := os.WriteFile(sshPath, []byte(script), 0o600); err != nil {
 		t.Fatalf("write fake ssh: %v", err)
@@ -461,6 +560,48 @@ func TestSSHConfigResolver_EmptySSHPath(t *testing.T) {
 	}
 	if cfg.Port != 0 {
 		t.Errorf("Port = %d, want 0 (unset fallback — caller determines default)", cfg.Port)
+	}
+}
+
+func TestSSHConfigResolver_RemoteCommandAndRequestTTY(t *testing.T) {
+	sshPath, configPath, _ := fakeSSHClient(t)
+	dir := filepath.Dir(sshPath)
+
+	// Host with a RemoteCommand containing spaces and RequestTTY set.
+	if err := os.WriteFile(filepath.Join(dir, "remotecommands", "rc-host"), []byte("top -d 1"), 0o600); err != nil {
+		t.Fatalf("write remotecommand: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "requestttys", "rc-host"), []byte("yes"), 0o600); err != nil {
+		t.Fatalf("write requesttty: %v", err)
+	}
+
+	logger := log.NewSlogAdapter(nil)
+	resolver := NewSSHConfigResolver(logger, configPath, sshPath)
+
+	cfg, err := resolver.ResolveConfig(context.Background(), "rc-host")
+	if err != nil {
+		t.Fatalf("ResolveConfig rc-host: %v", err)
+	}
+	// The parser must preserve the full command, not just its first token.
+	if cfg.RemoteCommand != "top -d 1" {
+		t.Errorf("RemoteCommand = %q, want %q", cfg.RemoteCommand, "top -d 1")
+	}
+	if cfg.RequestTTY != "yes" {
+		t.Errorf("RequestTTY = %q, want yes", cfg.RequestTTY)
+	}
+
+	// A host without overrides: the fake ssh prints "remotecommand none" and
+	// "requesttty auto" — the oracle's rendering of "unset" — which must
+	// resolve to the empty representation.
+	cfg, err = resolver.ResolveConfig(context.Background(), "plain-host")
+	if err != nil {
+		t.Fatalf("ResolveConfig plain-host: %v", err)
+	}
+	if cfg.RemoteCommand != "" {
+		t.Errorf("RemoteCommand = %q, want empty (unset)", cfg.RemoteCommand)
+	}
+	if cfg.RequestTTY != "" {
+		t.Errorf("RequestTTY = %q, want empty (unset default)", cfg.RequestTTY)
 	}
 }
 
