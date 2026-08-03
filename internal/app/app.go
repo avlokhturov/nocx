@@ -300,6 +300,11 @@ func New(opts ...Option) (*App, error) {
 		transport.WithProber(&proberAdapter{client: sshClient}),
 		transport.WithProfileService(profileSvc),
 		transport.WithHostKeyTruster(&proberAdapter{client: sshClient}),
+		// The remote shell launcher (nocx-xs1d), adapted across the two
+		// identically-named declarations and wired into every ConnectConfig
+		// the transport builds. Before this line the launcher was reachable
+		// from its own tests and nowhere else (AGENTS.md check 5).
+		transport.WithRemoteLauncher(&remoteLauncherAdapter{inner: shellintegration.NewRemoteLauncher()}),
 
 		transport.WithProbeResultStore(probeResultStore),
 		transport.WithSSHConfigResolver(sshCfgResolver, sshConfigPath),
@@ -399,4 +404,54 @@ func (a *proberAdapter) ProbeWithResult(ctx context.Context, host string, cfg *s
 
 func (a *proberAdapter) TrustHostKey(ctx context.Context, addr string, key []byte) (string, error) {
 	return a.client.TrustHostKey(addr, key)
+}
+
+// remoteLauncherAdapter adapts shellintegration.RemoteLauncher to
+// ssh.RemoteLauncher (nocx-ei04). internal/ssh and internal/shellintegration
+// declare their own identically-named ShellKind, LaunchOptions and
+// RefusalReason on purpose — internal/ssh must not depend on shellintegration
+// — and Go interface satisfaction needs identical named types, so the
+// composition root translates between the two declarations at wiring time.
+// Reasons map explicitly; an unmapped value fails loudly (panic) rather than
+// silently becoming ssh.ReasonNone, which the product renders as "integration
+// succeeded" — a decline that degrades to "no refusal" is how a soft degrade
+// becomes invisible (AGENTS.md).
+type remoteLauncherAdapter struct {
+	inner shellintegration.RemoteLauncher
+}
+
+func (a *remoteLauncherAdapter) StartCommand(shell ssh.ShellKind, opts ssh.LaunchOptions) (string, ssh.RefusalReason, bool) {
+	cmd, reason, ok := a.inner.StartCommand(
+		shellintegration.ShellKind(shell),
+		shellintegration.LaunchOptions{SessionID: opts.SessionID, Enhanced: opts.Enhanced},
+	)
+	if !ok {
+		return "", mapRefusalReason(reason), false
+	}
+	// Accepted: the pinned contract says ok=true means the shell was
+	// integrated, so the reason must be the empty "no refusal" value. A
+	// launcher that accepts while claiming a refusal contradicts itself; fail
+	// loudly rather than dropping the reason on the floor.
+	if reason != shellintegration.ReasonNone {
+		panic(fmt.Sprintf("nocx: shellintegration launcher accepted with refusal reason %q; StartCommand must return reason none when ok is true", reason))
+	}
+	return cmd, ssh.ReasonNone, true
+}
+
+// mapRefusalReason translates a shellintegration refusal into the ssh
+// vocabulary. The switch is exhaustive over the declared set on purpose: the
+// production launcher only ever returns these three, so the default arm is a
+// tripwire for the next reason added to one package and forgotten in the
+// other — panic, never silently become ReasonNone.
+func mapRefusalReason(r shellintegration.RefusalReason) ssh.RefusalReason {
+	switch r {
+	case shellintegration.ReasonNone:
+		return ssh.ReasonNone
+	case shellintegration.ReasonUnsupportedShell:
+		return ssh.ReasonUnsupportedShell
+	case shellintegration.ReasonNoSecureTemp:
+		return ssh.ReasonNoSecureTemp
+	default:
+		panic(fmt.Sprintf("nocx: shellintegration launcher returned unmapped refusal reason %q; add it to remoteLauncherAdapter", r))
+	}
 }

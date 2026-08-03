@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/open.schema.json",
+  "title": "Open",
+  "description": "Result of the open JSON-RPC method: a session is created and acknowledged (AD-7 — the server assigns the authoritative session id, so the id is minted by the backend, never the renderer). cwd is the session's starting directory, the tab's name until a program sets a title. shellIntegrationReason reports why remote shell integration did not happen (nocx-r52q, nocx-xs1d): empty means integration succeeded or was never attempted, \"unsupported-shell\" and \"no-secure-temp\" are launcher refusals, \"remote-command\" a configured RemoteCommand. The reason must reach the product, never only a log (AGENTS.md), so the field is always present and never omitted.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sessionId", "cwd", "shellIntegrationReason"],
+  "properties": {
+    "sessionId": {
+      "description": "Backend-assigned session id (AD-7).",
+      "type": "string"
+    },
+    "cwd": {
+      "description": "Starting working directory of the session's shell, with the home directory abbreviated to ~.",
+      "type": "string"
+    },
+    "shellIntegrationReason": {
+      "description": "Why remote shell integration did not happen for this session; empty when it succeeded or was never attempted.",
+      "type": "string",
+      "enum": ["", "unsupported-shell", "no-secure-temp", "remote-command"]
+    }
+  }
+}
