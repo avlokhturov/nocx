@@ -59,6 +59,11 @@ func (s *darwinService) Prepare(ctx context.Context, req Request, spec CommandSp
 	if err != nil {
 		return fail(err)
 	}
+	// The shell runs with HOME/XDG/TMPDIR pointed into the ephemeral runtime
+	// tree and NOCX_SANDBOX=filesystem (design spec §5.3); the policy builder
+	// already consumed the base PATH above.
+	spec.Env = sandboxEnv(spec.Env, pol.Home, pol.Tmp)
+
 	profile, err := renderProfile(pol)
 	if err != nil {
 		return fail(err)
@@ -70,7 +75,9 @@ func (s *darwinService) Prepare(ctx context.Context, req Request, spec CommandSp
 	cmd.Env = spec.Env
 
 	pc := &PreparedCommand{
-		Cmd: cmd,
+		Cmd:     cmd,
+		Backend: BackendSeatbelt,
+		Policy:  pol,
 		cleanup: func() {
 			if cmd.Process != nil && cmd.ProcessState == nil {
 				_ = cmd.Process.Kill()

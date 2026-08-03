@@ -28,9 +28,20 @@ const (
 	envStatusFD    = helperEnvPrefix + "STATUS_FD"
 )
 
+// init makes the sandbox test binary double as the sandbox helper when it is
+// re-exec'd with the production argv marker (real Service end-to-end tests,
+// where os.Executable() is the test binary). init runs before the test
+// framework, so the helper child exits here without running the suite.
+func init() {
+	if len(os.Args) > 1 && os.Args[1] == helperArg {
+		os.Exit(helperMain(helperPolicyFD, helperStatusFD))
+	}
+}
+
 // TestSandboxChildProcess is the child entry point: with envHelperChild set
-// it acts as the sandbox helper; with envProbe set it runs the assertions
-// inside the cage. Production uses the argv marker instead (MaybeHelper).
+// it acts as the sandbox helper via injected fds; with envProbe set it runs
+// the assertions inside the cage. (The argv-marker path is handled by init
+// above.)
 func TestSandboxChildProcess(t *testing.T) {
 	switch {
 	case os.Getenv(envHelperChild) == "1":

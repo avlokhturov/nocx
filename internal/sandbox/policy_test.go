@@ -373,3 +373,40 @@ func TestPathEntries(t *testing.T) {
 		t.Fatal("expected nil for env without PATH")
 	}
 }
+
+func TestSandboxEnv(t *testing.T) {
+	home := "/rt/home"
+	tmp := "/rt/tmp"
+	env := []string{"HOME=/real/home", "PATH=/usr/bin:/bin", "TMPDIR=/real/tmp", "KEEP=1"}
+	got := sandboxEnv(env, home, tmp)
+	joined := strings.Join(got, "\n")
+	for _, wantKV := range []string{
+		"HOME=" + home,
+		"XDG_DATA_HOME=" + home + "/.local/share",
+		"XDG_CONFIG_HOME=" + home + "/.config",
+		"XDG_CACHE_HOME=" + home + "/.cache",
+		"XDG_STATE_HOME=" + home + "/.local/state",
+		"TMPDIR=" + tmp,
+		"TMP=" + tmp,
+		"TEMP=" + tmp,
+		"NOCX_SANDBOX=filesystem",
+		"PATH=/usr/bin:/bin",
+		"KEEP=1",
+	} {
+		if !strings.Contains(joined, wantKV) {
+			t.Errorf("sandboxEnv missing %q (got %v)", wantKV, got)
+		}
+	}
+	// No duplicate keys: HOME/TMPDIR appear exactly once.
+	for _, key := range []string{"HOME", "TMPDIR", "NOCX_SANDBOX"} {
+		count := 0
+		for _, kv := range got {
+			if strings.HasPrefix(kv, key+"=") {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Errorf("key %s appears %d times in %v", key, count, got)
+		}
+	}
+}

@@ -16,6 +16,10 @@ func (f *fakeDialogService) OpenFile(_ context.Context) (string, error) {
 	return f.path, f.err
 }
 
+func (f *fakeDialogService) OpenDirectory(_ context.Context) (string, error) {
+	return f.path, f.err
+}
+
 // dialog.openFile is a control-plane capability (AD-1): the renderer cannot
 // reach the Wails runtime, so it asks the backend. The runtime is often
 // absent — the dev-web harness has no Wails at all — and the method must

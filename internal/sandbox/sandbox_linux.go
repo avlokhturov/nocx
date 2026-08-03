@@ -58,6 +58,10 @@ func (s *linuxService) Prepare(ctx context.Context, req Request, spec CommandSpe
 	if err != nil {
 		return fail(err)
 	}
+	// The shell runs with HOME/XDG/TMPDIR pointed into the ephemeral runtime
+	// tree and NOCX_SANDBOX=filesystem (design spec §5.3); the policy builder
+	// already consumed the base PATH above.
+	spec.Env = sandboxEnv(spec.Env, pol.Home, pol.Tmp)
 
 	payload := helperPayload{Policy: pol, Command: spec}
 	data, err := json.Marshal(payload)
@@ -106,7 +110,9 @@ func (s *linuxService) Prepare(ctx context.Context, req Request, spec CommandSpe
 	// pty.StartWithSize; the session must not exist before enforcement.
 
 	pc := &PreparedCommand{
-		Cmd: cmd,
+		Cmd:     cmd,
+		Backend: BackendLandlock,
+		Policy:  pol,
 		waitReady: func(ctx context.Context) error {
 			return readStatus(ctx, statusR, statusW)
 		},

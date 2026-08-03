@@ -67,8 +67,12 @@ type CommandSpec struct {
 // post-start readiness handshake, and idempotent cleanup. WaitReady must be
 // called after the process is started; Close may be called once — later
 // calls are no-ops, so failure and normal-exit paths can both run it.
+// Backend and Policy are the realized enforcement metadata surfaced to the
+// tab (design spec §3.3).
 type PreparedCommand struct {
-	Cmd *exec.Cmd
+	Cmd     *exec.Cmd
+	Backend string
+	Policy  *Policy
 
 	waitReady func(context.Context) error
 	cleanup   func()
@@ -104,4 +108,21 @@ func (p *PreparedCommand) Close() {
 type Service interface {
 	Status(ctx context.Context) Status
 	Prepare(ctx context.Context, req Request, spec CommandSpec) (*PreparedCommand, error)
+}
+
+// SessionInfo is the immutable sandbox metadata carried by a sandboxed tab
+// and returned in the open result (design spec §3.3, §4.5). Ordinary and SSH
+// sessions have none.
+type SessionInfo struct {
+	Backend       string   `json:"backend"`
+	Workspace     string   `json:"workspace"`
+	WritableRoots []string `json:"writableRoots"`
+}
+
+// CanonicalizeWorkspace resolves the open-param workspace to its single
+// canonical value (design spec §6): Abs → EvalSymlinks → Stat, requiring an
+// existing absolute directory. The transport calls it; errors wrap
+// ErrInvalidWorkspace (-32602).
+func CanonicalizeWorkspace(workspace string) (string, error) {
+	return canonicalizeWorkspace(workspace)
 }

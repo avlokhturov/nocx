@@ -330,6 +330,44 @@ func NewRuntimeRoot(cacheDir string) (string, error) {
 	return root, nil
 }
 
+// sandboxEnv redirects HOME and the XDG/temp variables into the ephemeral
+// runtime tree and marks the session (design spec §5.3). The remaining
+// environment is retained.
+func sandboxEnv(env []string, home, tmp string) []string {
+	deltas := map[string]string{
+		"HOME":            home,
+		"XDG_DATA_HOME":   filepath.Join(home, ".local", "share"),
+		"XDG_CONFIG_HOME": filepath.Join(home, ".config"),
+		"XDG_CACHE_HOME":  filepath.Join(home, ".cache"),
+		"XDG_STATE_HOME":  filepath.Join(home, ".local", "state"),
+		"TMPDIR":          tmp,
+		"TMP":             tmp,
+		"TEMP":            tmp,
+		"NOCX_SANDBOX":    "filesystem",
+	}
+	out := make([]string, 0, len(env)+len(deltas))
+	seen := make(map[string]bool, len(deltas))
+	for _, kv := range env {
+		key, _, ok := strings.Cut(kv, "=")
+		if !ok {
+			out = append(out, kv)
+			continue
+		}
+		if v, hit := deltas[key]; hit {
+			out = append(out, key+"="+v)
+			seen[key] = true
+			continue
+		}
+		out = append(out, kv)
+	}
+	for key, v := range deltas {
+		if !seen[key] {
+			out = append(out, key+"="+v)
+		}
+	}
+	return out
+}
+
 // RemoveRuntimeRoot best-effort deletes a per-session runtime tree. Deletion
 // is not secure erase (design spec §5.3).
 func RemoveRuntimeRoot(root string) {
