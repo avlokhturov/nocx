@@ -134,6 +134,13 @@ jobs:
         if: '!matrix.with-keyring'
         run: go test -race -count=1 ./...
 
+      # Real Landlock enforcement smoke (ADR-0019 §8). The release gate that
+      # proves the cage behaves on Linux; it fails loudly when the runner's
+      # kernel is below Landlock ABI 3 — a runner that cannot run it must be
+      # replaced, never silently skipped.
+      - name: Sandbox enforcement smoke (Landlock)
+        run: make sandbox-smoke-linux
+
   frontend:
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
