@@ -26,6 +26,7 @@ import (
 	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/storage"
+	"github.com/shady2k/nocx/internal/tunnel"
 	"github.com/shady2k/nocx/internal/vault"
 	gossh "golang.org/x/crypto/ssh"
 )
@@ -157,6 +158,20 @@ type WSServer struct {
 	ringsMu sync.Mutex
 	rx      map[session.ID]*sessionRx
 	stopped bool
+
+	// tunnelConnector acquires an owned pooled-connection lease for a
+	// forward (spec §7.3). *ssh.RealClient satisfies tunnel.Connector
+	// without an adapter. When nil, the tunnel.* methods return a JSON-RPC
+	// error; the transport never constructs an SSH client itself.
+	tunnelConnector tunnel.Connector
+
+	// tunnelMu guards tunnels and ownerTunnels. tunnels is the backend
+	// id → tunnel map backing tunnel.stop; ownerTunnels scopes teardown to
+	// the tab that opened each forward (spec §7.3) — closing one tab never
+	// stops another tab's forward.
+	tunnelMu     sync.Mutex
+	tunnels      map[string]*tunnel.Tunnel
+	ownerTunnels map[*wsConn]map[string]struct{}
 
 	// connsMu protects conns. One entry per active WebSocket connection.
 	connsMu sync.Mutex
@@ -398,9 +413,11 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 			// call handles origin/host policy before the upgrade.
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
-		rx:      make(map[session.ID]*sessionRx),
-		conns:   make(map[*wsConn]struct{}),
-		origins: LoopbackOriginPolicy{},
+		rx:           make(map[session.ID]*sessionRx),
+		conns:        make(map[*wsConn]struct{}),
+		tunnels:      make(map[string]*tunnel.Tunnel),
+		ownerTunnels: make(map[*wsConn]map[string]struct{}),
+		origins:      LoopbackOriginPolicy{},
 	}
 	if caps, err := credential.NewCaptureRegistry(); err != nil {
 		// No entropy for the fingerprint key: no offers are made and
@@ -862,6 +879,12 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.handleSSHConfigAliases(wconn, req)
 	case "sshConfig.path":
 		s.handleSSHConfigPath(wconn, req)
+	case "tunnel.open":
+		s.handleTunnelOpen(ctx, wconn, req)
+	case "tunnel.stop":
+		s.handleTunnelStop(wconn, req)
+	case "dialog.openFile":
+		s.handleDialogOpenFile(wconn, req)
 	case "history.query":
 		s.handleHistoryQuery(ctx, wconn, req)
 	case "history.record":
@@ -874,8 +897,6 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		"vault.createSecret", "vault.renameSecret", "vault.replaceSecret",
 		"vault.deleteSecret", "vault.resolveLine":
 		s.handleVaultMethod(wconn, req)
-	case "dialog.openFile":
-		s.handleDialogOpenFile(wconn, req)
 	// Not routed through handleVaultMethod: that gate refuses when the vault
 	// lifecycle is absent, and a reset must work on a vault that is broken or
 	// half-built — which is the only state it is ever wanted in.
@@ -2603,7 +2624,10 @@ func (s *WSServer) registerConn(wc *wsConn) {
 
 // unregisterConn removes a connection from the broadcast set and destroys
 // its pending captures: a transport disconnect and a tab closure are both
-// on the capture contract's destruction list.
+// on the capture contract's destruction list. It also stops the tunnels the
+// tab opened — tab-scoped teardown (spec §7.3): each forward holds its OWN
+// pooled reference, so stopping this tab's forwards never touches another
+// tab's on the same shared connection.
 func (s *WSServer) unregisterConn(wc *wsConn) {
 	s.connsMu.Lock()
 	delete(s.conns, wc)
@@ -2611,6 +2635,7 @@ func (s *WSServer) unregisterConn(wc *wsConn) {
 	if s.captures != nil {
 		s.captures.DestroyTab(strconv.FormatUint(wc.id, 10))
 	}
+	s.stopOwnerTunnels(wc)
 }
 
 // broadcastSettingsChanged sends a settings.changed notification to every

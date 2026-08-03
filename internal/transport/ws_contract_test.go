@@ -17,6 +17,7 @@ import (
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
+	"github.com/shady2k/nocx/internal/tunnel"
 	"github.com/shady2k/nocx/internal/vault"
 	"github.com/shady2k/nocx/internal/vaultreset"
 )
@@ -1476,4 +1477,116 @@ type fakeRemoteLauncher struct{}
 
 func (fakeRemoteLauncher) StartCommand(ssh.ShellKind, ssh.LaunchOptions) (string, ssh.RefusalReason, bool) {
 	return "", ssh.ReasonNone, false
+}
+
+// ── tunnel.open / tunnel.stop ──────────────────────────────────────────────
+
+// The DTO's own conformance: field tags, pointer-as-null for stopReason and
+// error, enum spelling. The cases that matter: the running record (both
+// nullable fields must marshal to null, never be omitted — the schema
+// requires them) and the stopped records (the reason and the error that
+// explain the stop).
+func TestTunnelOpen_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "tunnel.open.schema.json")
+
+	userStop := string(tunnel.StopReasonUser)
+	connLost := string(tunnel.StopReasonConnectionLost)
+	errMsg := "ssh: tunnel connection lost"
+
+	cases := map[string]tunnelRecord{
+		"running": {
+			ID:            "ab12",
+			Direction:     string(tunnel.DirectionLocal),
+			RequestedBind: tunnelBind{Host: "127.0.0.1", Port: 0},
+			ActualBind:    tunnelBind{Host: "127.0.0.1", Port: 43210},
+			Destination:   "db.internal:5432",
+			Scope:         "tab:1",
+			State:         string(tunnel.StateRunning),
+		},
+		"stopped-user": {
+			ID:            "ab12",
+			Direction:     string(tunnel.DirectionLocal),
+			RequestedBind: tunnelBind{Host: "127.0.0.1", Port: 8080},
+			ActualBind:    tunnelBind{Host: "127.0.0.1", Port: 8080},
+			Destination:   "db.internal:5432",
+			Scope:         "tab:1",
+			State:         string(tunnel.StateStopped),
+			StopReason:    &userStop,
+		},
+		"stopped-connection-lost": {
+			ID:            "ab12",
+			Direction:     string(tunnel.DirectionLocal),
+			RequestedBind: tunnelBind{Host: "127.0.0.1", Port: 0},
+			ActualBind:    tunnelBind{Host: "127.0.0.1", Port: 43210},
+			Destination:   "db.internal:5432",
+			Scope:         "tab:1",
+			State:         string(tunnel.StateStopped),
+			StopReason:    &connLost,
+			Error:         &errMsg,
+		},
+	}
+
+	for name, rec := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(rec)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "tunnel.open DTO")
+		})
+	}
+}
+
+func TestTunnelStop_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "tunnel.stop.schema.json")
+	userStop := string(tunnel.StopReasonUser)
+	rec := tunnelRecord{
+		ID:            "ab12",
+		Direction:     string(tunnel.DirectionLocal),
+		RequestedBind: tunnelBind{Host: "127.0.0.1", Port: 0},
+		ActualBind:    tunnelBind{Host: "127.0.0.1", Port: 43210},
+		Destination:   "db.internal:5432",
+		Scope:         "tab:1",
+		State:         string(tunnel.StateStopped),
+		StopReason:    &userStop,
+	}
+	raw, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "tunnel.stop DTO")
+}
+
+// The real methods through the real socket, with the real connector against
+// the in-process SSH server: the result bytes are the handler's own, and
+// nothing here names a field, so nothing here can omit one.
+func TestTunnel_OverTheWireConformsToContract(t *testing.T) {
+	openSchema := loadSchema(t, "tunnel.open.schema.json")
+	stopSchema := loadSchema(t, "tunnel.stop.schema.json")
+
+	h := newTunnelHarness(t, nil)
+	defer h.stop()
+	target := startEchoTarget(t)
+	conn := connectWS(t, h.ws)
+
+	openResp := tunnelCall(t, conn, "tunnel.open", map[string]any{
+		"profileId":   "ssh:p1:1",
+		"port":        0,
+		"destination": target,
+	}, 1)
+	if openResp.Error != nil {
+		t.Fatalf("tunnel.open: %+v", openResp.Error)
+	}
+	validateJSON(t, openSchema, openResp.Result, "tunnel.open result")
+
+	var rec tunnelRecord
+	if err := json.Unmarshal(openResp.Result, &rec); err != nil {
+		t.Fatalf("decode open result: %v", err)
+	}
+
+	stopResp := tunnelCall(t, conn, "tunnel.stop", map[string]any{"id": rec.ID}, 2)
+	if stopResp.Error != nil {
+		t.Fatalf("tunnel.stop: %+v", stopResp.Error)
+	}
+	validateJSON(t, stopSchema, stopResp.Result, "tunnel.stop result")
 }

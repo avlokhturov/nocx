@@ -305,6 +305,14 @@ func New(opts ...Option) (*App, error) {
 		// the transport builds. Before this line the launcher was reachable
 		// from its own tests and nowhere else (AGENTS.md check 5).
 		transport.WithRemoteLauncher(&remoteLauncherAdapter{inner: shellintegration.NewRemoteLauncher(), logger: logger}),
+		// The tunnel connector (nocx-8gix): *ssh.RealClient satisfies
+		// tunnel.Connector without an adapter — the signatures are
+		// identical — so a forward acquires its OWN pooled connection
+		// lease through the same client a tab uses, authorized and
+		// pool-keyed exactly like a tab (spec §7.3, AD-4). Before this
+		// line the whole forward model was reachable from its own tests
+		// and nowhere else (AGENTS.md check 5).
+		transport.WithTunnelConnector(sshClient),
 
 		transport.WithProbeResultStore(probeResultStore),
 		transport.WithSSHConfigResolver(sshCfgResolver, sshConfigPath),
