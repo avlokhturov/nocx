@@ -444,15 +444,21 @@ invariant is one (rule 3).
 - Automatic repair of drifted rc files — detect and offer a diff; do not become
   a remote dotfile manager.
 
-## 12. Open scope question
+## 12. Scope, decided
 
-The review's recommendation is to ship **nocx-opened SSH plus the explicit
-in-band fallback first**, and to treat the `docker exec` / `sudo` / `su`
-adapters of §5.3 as a second epic — each is a separate command grammar, and the
-transparency obligations (assertions 14–16) are per-adapter work.
+**This epic ships nocx-opened SSH plus the explicit in-band fallback.** The
+`docker exec` / `sudo` / `su` adapters of §5.3 move to a follow-on epic: each is
+a separate command grammar, and the transparency obligations (assertions 14–16)
+are per-adapter work that would otherwise hold the SSH repair hostage.
 
-The counter-argument is that `nocx-pu4`'s DONE WHEN names docker/tmux depth
-explicitly, so deferring the adapters means the epic closes without its headline
-claim.
+Consequences, taken deliberately:
 
-Both are defensible; this is a scope call, not a technical one.
+- `nocx-pu4`'s DONE WHEN narrows to SSH and jump host. It no longer claims
+  docker/tmux depth, because the epic will not deliver it. Assertion 20's
+  "nested environment entered through the explicit action" is satisfied by the
+  in-band fallback (§4.4), which does work at depth — by hand, on the user's
+  explicit action, with no adapter.
+- §5.3 stays in this spec as the design the follow-on epic implements, so the
+  bounds (allowlisted simple commands, `typedCommand` vs `executedCommand`,
+  ambiguity sends the document unchanged) are settled before anyone writes an
+  adapter, not after.
