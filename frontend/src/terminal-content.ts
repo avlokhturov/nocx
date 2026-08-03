@@ -272,6 +272,26 @@ export class TerminalContent extends BaseTabContent {
         snapshotStore: renderer.snapshotStore,
       })
 
+      log.info('nocx: mounting renderer')
+      await renderer.mount(this.scrollback.mountTarget)
+
+      if (signal.aborted) {
+        renderer.dispose()
+        this.scrollback.dispose()
+        this._readyResolve(false)
+        return
+      }
+
+      log.info('nocx: renderer mounted', { cols: renderer.cols, rows: renderer.rows })
+      this.cols = renderer.cols
+      this.rows = renderer.rows
+
+      // ── Command ledger (ADR-0008) ────────────────────────────────────────
+      // A completed record is shipped to the store over the control plane
+      // (nocx-rtg0.13, AD-1 as amended): the renderer derives the facts
+      // from the byte stream it already owns, and recordCommand is the one
+      // seam that crosses. Best-effort by design — a dropped record is a
+      // session-lost entry, never a terminal error.
       this.ledger = new CommandLedger({
         // Wall-clock epoch milliseconds: the ledger's timestamps are
         // persisted, survive a restart, and render as relative wall time
