@@ -43,15 +43,23 @@ type remoteLauncher struct{}
 func NewRemoteLauncher() RemoteLauncher { return remoteLauncher{} }
 
 // StartCommand implements RemoteLauncher.
+//
+// Selection is deliberate per kind: bash and zsh get their launchers, and
+// ShellUnknown gets the minimal tier — the posix launcher (spec §6: dash /
+// busybox ash / POSIX sh are a real tier, verified; refusing them forever
+// would contradict D4). The default arm is the tripwire for a future
+// ShellKind with no launcher: refuse loudly rather than guess.
 func (remoteLauncher) StartCommand(shell ShellKind, opts LaunchOptions) (string, RefusalReason, bool) {
 	switch shell {
 	case ShellBash:
 		return remoteLauncher{}.bashCommand(opts)
 	case ShellZsh:
 		return remoteLauncher{}.zshCommand(opts)
+	case ShellUnknown:
+		return remoteLauncher{}.posixCommand(opts)
 	default:
-		// Never a best-effort guess: an unknown shell is refused outright
-		// and the caller falls back to a plain shell.
+		// Never a best-effort guess: an unmapped shell kind is refused
+		// outright and the caller falls back to a plain shell.
 		return "", ReasonUnsupportedShell, false
 	}
 }
