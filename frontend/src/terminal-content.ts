@@ -861,7 +861,11 @@ export class TerminalContent extends BaseTabContent {
               this.sshOpts.user,
             )
         : this.hooks.sandbox
-          ? await this.client.openSandboxedSession(this.cols, this.rows, this.hooks.sandbox.workspace)
+          ? await this.client.openSandboxedSession(
+              this.cols,
+              this.rows,
+              this.hooks.sandbox.workspace,
+            )
           : await this.client.openSession(this.cols, this.rows, true)
 
       if (signal.aborted) {
