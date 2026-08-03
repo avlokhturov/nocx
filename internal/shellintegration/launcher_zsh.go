@@ -1,0 +1,135 @@
+package shellintegration
+
+import "strings"
+
+// zshRcfileTemplate is the generated .zshrc the zsh launcher writes into a
+// transient, mode-700 directory and points ZDOTDIR at. zsh has no --rcfile;
+// ZDOTDIR names a directory and cannot name a pipe, so the transient
+// directory is structural (spec §4.1). Order is pinned: capture the
+// bootstrap dir and the original ZDOTDIR, erase the transient dir before
+// any user code runs, restore ZDOTDIR preserving its unset-versus-set
+// state, source the user's real startup file from the original location,
+// and only then install nocx's hooks. @ENV@ is replaced by the session
+// environment block and @NOCX_ZSH@ by the embedded nocx.zsh.
+//
+// Declared equivalence set (what this .zshrc promises, nothing more):
+//   - exported variables, cwd, umask, shell options, functions and aliases,
+//     traps and history configuration are whatever the user's real startup
+//     file leaves them; nocx resets none of them;
+//   - $0 reports the invoked name ("zsh"); login status comes from the -l
+//     flag, so the login startup files are read; SHLVL is one higher than
+//     a native session (the outer /bin/sh is a shell);
+//   - the /etc/zshenv, /etc/zprofile, /etc/zshrc and /etc/zlogin phases run
+//     natively (absolute paths); the user's ~/.zshenv, ~/.zprofile and
+//     ~/.zlogin are shadowed by the transient ZDOTDIR and are not replayed
+//     — declared deviation, only ~/.zshrc is sourced;
+//   - history: zsh reads the history file before startup files run, so the
+//     transient ZDOTDIR shadowed it; HISTFILE is defaulted to the native
+//     location and loaded with fc -R when nothing was read, so an
+//     exit-time save (which replaces the file) preserves the old history.
+//     SAVEHIST and the read/write options are the user's own;
+//   - if the user's startup file execs or exits, control never reaches the
+//     install below: user startup wins. A top-level `return` in the user's
+//     file stops only that file — zsh resumes the source — which is
+//     indistinguishable from completion, so the install proceeds; that
+//     case is a reported limitation, not a silent equivalence (nocx-xs1d).
+const zshRcfileTemplate = `# nocx launcher zshrc — runs at the .zshrc phase of the login zsh whose
+# ZDOTDIR points at a transient directory created by the launcher.
+__nocx_bootstrap="${ZDOTDIR}"
+# Frozen trap (path substituted now): covers a partial startup that never
+# reaches the removal below — a parse error in this very file, an exit
+# during /etc/zshenv or zshenv, anything. The user's rc may replace the
+# EXIT trap later; the directory is already gone by then.
+trap "rm -f \"$__nocx_bootstrap/.zshrc\" \"$__nocx_bootstrap/.zsh_history\" 2>/dev/null; rmdir \"$__nocx_bootstrap\" 2>/dev/null" EXIT
+
+# Restore the original ZDOTDIR state (set vs unset), then drop the carrier
+# variables before any user code runs.
+__nocx_user_zdotdir="${NOCX_ZDOTDIR_ORIG-}"
+if [[ "${NOCX_ZDOTDIR_WAS_SET:-}" == 1 ]]; then
+    export ZDOTDIR="$__nocx_user_zdotdir"
+else
+    unset ZDOTDIR
+fi
+unset NOCX_ZDOTDIR_WAS_SET NOCX_ZDOTDIR_ORIG
+
+# Erase the transient directory before any user code runs (D1: the only
+# write the launcher makes, and it is gone before the user's rc).
+rm -f "$__nocx_bootstrap/.zshrc" "$__nocx_bootstrap/.zsh_history" 2>/dev/null
+rmdir "$__nocx_bootstrap" 2>/dev/null || print -u2 "nocx: could not remove transient dir $__nocx_bootstrap"
+
+@ENV@
+
+# User startup — first, and it wins.
+__nocx_user_rc="${__nocx_user_zdotdir:-$HOME}/.zshrc"
+if [[ -f "$__nocx_user_rc" ]]; then
+    . "$__nocx_user_rc"
+fi
+
+# History: the transient ZDOTDIR shadowed the default history file (zsh
+# read history before startup files ran). Default HISTFILE to the native
+# location and load it when nothing was read, so an exit-time save replaces
+# the file with old+session rather than only this session.
+if [[ -z "${HISTFILE:-}" ]]; then
+    HISTFILE="${HOME}/.zsh_history"
+fi
+if (( ${#history} == 0 )); then
+    fc -R "${HISTFILE}" 2>/dev/null
+fi
+
+# nocx installs last. Re-sourcing after an installer-era gate in the
+# user's file is idempotent (add-zsh-hook dedupes; state is unset first).
+unset __nocx_loaded __nocx_prompt_wrapped __nocx_owned_session
+@NOCX_ZSH@
+`
+
+// zshOuterScript is the POSIX-sh script the launcher sends for ShellZsh. It
+// is parsed by an explicit `/bin/sh -c` (the login shell may be dash, ash,
+// csh or restricted — never rely on it understanding the bootstrap), and
+// every byte of the generated .zshrc travels inside `printf %b "<…>"`
+// printfBEscape-encoded, so the outer script contains no single quotes at
+// all and stays parseable by csh. @ZSHCRC@ is replaced by the encoded rc.
+//
+// Fail-open is absolute (ADR-0004): a host without mktemp or without a
+// writable secure temp degrades to a plain login zsh, never to a dead
+// session. ReasonNoSecureTemp exists in the pinned API but cannot be
+// emitted from the client — remote temp availability is unknowable at
+// build time — so the failure is handled inside the remote script instead.
+// The umask is captured before the bootstrap and restored before every
+// exec: the session must inherit the user's umask, not the bootstrap's.
+const zshOuterScript = `old_umask=$(umask)
+umask 077
+d=$(mktemp -d "${TMPDIR:-/tmp}/nocx-zsh.XXXXXX") 2>/dev/null || { umask "$old_umask"; exec zsh -l; }
+printf %b "@ZSHCRC@" > "$d/.zshrc" 2>/dev/null || { umask "$old_umask"; exec zsh -l; }
+umask "$old_umask"
+if [ "${ZDOTDIR+x}" = x ]; then export NOCX_ZDOTDIR_WAS_SET=1; else export NOCX_ZDOTDIR_WAS_SET=0; fi
+export NOCX_ZDOTDIR_ORIG="${ZDOTDIR-}"
+export ZDOTDIR="$d"
+exec zsh -l
+`
+
+// zshCommand builds the zsh remote command. The outer form is
+// `/usr/bin/env -u BASH_ENV /bin/sh -c '<script>'`: -u BASH_ENV so a
+// bash-as-/bin/sh host (macOS) cannot execute BASH_ENV code in the outer
+// sh, the same spec §4.3 protection the bash launcher gets. `exec zsh -l`
+// rather than `exec -l zsh`: dash and busybox ash reject `exec -l` (they
+// treat -l as the command to exec), while `zsh -l` is portable and makes
+// zsh a login shell, reading the login startup files.
+func (remoteLauncher) zshCommand(opts LaunchOptions) (string, RefusalReason, bool) {
+	if opts.Enhanced && opts.SessionID == "" {
+		// Pinned contract: SessionID is never empty when Enhanced. Fail
+		// closed — a marker-only session with no id cannot anchor the
+		// ownership protocol — rather than emit one that half-works.
+		return "", ReasonUnsupportedShell, false
+	}
+	rc := strings.ReplaceAll(zshRcfileTemplate, "@ENV@", launcherEnvBlock(opts))
+	rc = strings.ReplaceAll(rc, "@NOCX_ZSH@", zshScript)
+	outer := strings.ReplaceAll(zshOuterScript, "@ZSHCRC@", printfBEscape(rc))
+	cmd := "/usr/bin/env -u BASH_ENV /bin/sh -c " + shellQuote(outer)
+	if len(cmd) > maxLauncherLen {
+		// Unreachable with the current embedded script (~7 KiB); a script
+		// that outgrows the cap must refuse rather than emit a command the
+		// far host cannot exec.
+		return "", ReasonUnsupportedShell, false
+	}
+	return cmd, ReasonNone, true
+}
