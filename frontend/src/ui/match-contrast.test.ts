@@ -78,30 +78,22 @@ function contrast(a: string, b: string): number {
   return (hi + 0.05) / (lo + 0.05)
 }
 
-/** The chip the browser paints: the accent at the wash's alpha over the
- *  panel surface (the rule mixes with transparent, so it composites over
- *  the panel's own background). */
-function chip(accent: string, surface: string, alpha: number): string {
-  const [ar, ag, ab] = rgb(accent)
-  const [sr, sg, sb] = rgb(surface)
-  const mix = (a: number, s: number) => Math.round((a * alpha + s * (1 - alpha)) * 255)
-  const toHex = (v: number) => v.toString(16).padStart(2, '0')
-  return `#${toHex(mix(ar, sr))}${toHex(mix(ag, sg))}${toHex(mix(ab, sb))}`
-}
-
 describe('match highlight readability (report 2)', () => {
   const css = readFileSync(CSS, 'utf-8')
 
-  it('the shipped rule themes the background channel with the accent and leaves the text alone', () => {
+  it('the shipped rule themes the TEXT channel with the accent and paints no chip', () => {
     const match = ruleFor(css, '.ui-floating-panel__match')
-    // The intended channel is the BACKGROUND: the highlight is a chip, and
-    // the chip must not blend into the row (the owner's "a dark chip that
-    // blends into the glyphs" — the old 15% wash read as the row itself).
-    expect(match).toContain('background:')
-    expect(match).toContain('var(--color-accent)')
-    // No colour rule: the glyphs keep the row's text token, so their
-    // contrast is the row's own — untouched by the chip.
-    expect(match).not.toMatch(/color:/)
+    // The intended channel is the TEXT. A background wash is a dead end:
+    // it sits BEHIND the row's own glyphs, so raising its alpha to make it
+    // brighter darkens the letters on it — 40% leaves 3.45:1 and 55% is
+    // already 2.44:1, under the emphasized-text bar. Colouring the glyphs
+    // spends the whole budget on visibility instead.
+    expect(match).toMatch(/color:\s*var\(--color-accent\)/)
+    // <mark> carries a UA background (yellow) and a UA colour (black). The
+    // rule must turn the background OFF explicitly; merely not declaring
+    // one leaves the browser's, which is how a highlighter pen appeared in
+    // the middle of a dark panel.
+    expect(match).toMatch(/background:\s*none/)
   })
 
   it('the chip is visible against the surface and the text on it stays readable in every theme', () => {
@@ -111,18 +103,10 @@ describe('match highlight readability (report 2)', () => {
       const text = readFileSync(resolve(THEMES, file), 'utf-8')
       const accent = token(text, 'color-accent')
       const surface = token(text, 'color-surface-raised')
-      const rowText = token(text, 'color-text')
-      // The intended channel is the BACKGROUND: the chip must not blend
-      // into the row it sits on. Resolved, the 40% wash differs from the
-      // panel surface in every theme (the old 15% wash did not).
-      const chipColor = chip(accent, surface, 0.4)
-      expect(chipColor, `${file}: chip ${chipColor} vs surface ${surface}`).not.toBe(surface)
-      // And the glyphs on the chip stay readable. The text is the row's own
-      // token (untouched by the chip), so the floor is the emphasized-text
-      // bar: 3:1. A 2-char emphasis at 600 weight on a visible wash is the
-      // report's fix — the failure was a chip that READ AS the row.
-      const ratio = contrast(rowText, chipColor)
-      expect(ratio, `${file}: text ${rowText} on chip ${chipColor}`).toBeGreaterThanOrEqual(3)
+      // The matched glyphs themselves: the accent against the panel
+      // surface, held to the emphasized-text bar (3:1) in every theme.
+      const ratio = contrast(accent, surface)
+      expect(ratio, `${file}: accent ${accent} on surface ${surface}`).toBeGreaterThanOrEqual(3)
     }
   })
 })

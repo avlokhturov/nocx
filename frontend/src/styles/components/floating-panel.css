@@ -99,16 +99,24 @@
 }
 
 /* The matched substring inside a row — why the row survived the search.
-   One treatment for every variant, straight from theme tokens: the accent
-   at 40% over the panel surface, with the glyphs kept at the row's own
-   text token (the weight bump is the recall's original emphasis, carried
-   over). The chip's VISIBILITY is the background channel — asserted by
-   test, not eyeballed: the owner's "a dark chip that blends into the
-   glyphs" was a 15% wash that read as the row itself. */
+   The accent in the TEXT channel, at full strength, plus the weight bump.
+
+   It used to be a background wash and the wash is a dead end. Washing the
+   accent behind the row's own text darkens the glyphs, so the brighter the
+   chip the less readable the letters on it: measured across the theme
+   catalogue, 40% leaves 3.45:1 and 55% is already down to 2.44 — under the
+   emphasized-text bar. There is no alpha that reads as "brighter". Colour
+   the glyphs instead and the whole budget goes into visibility: the accent
+   against the panel surface holds 3.68:1 at its worst across every theme,
+   and it looks like emphasis rather than like a smudge behind the word. */
 .ui-floating-panel__match {
-  background: color-mix(in srgb, var(--color-accent) 40%, transparent);
+  /* The element is <mark>, and every browser gives it a yellow background
+     and black text of its own. Dropping our background declaration let the
+     UA default through — so the background is turned OFF explicitly, not
+     merely left unset. */
+  background: none;
+  color: var(--color-accent);
   font-weight: 600;
-  border-radius: 2px;
 }
 
 /* One line, every hint in it: the groups are spans laid out by flex with a
