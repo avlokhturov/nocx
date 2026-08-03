@@ -53,6 +53,28 @@ type HostConfig struct {
 	User         string
 	Port         int
 	IdentityFile string
+
+	// RemoteCommand is the command ssh would execute on the remote host,
+	// verbatim from the RemoteCommand directive. The empty string means
+	// "no remote command configured". ssh -G renders an unset directive
+	// as "none" — OpenSSH's own sentinel for "no command" — so that
+	// rendering is normalized to the empty string here. "none" would be
+	// a legitimate literal command in any other context; only the -G
+	// oracle's output is normalized, and only because ssh itself treats
+	// the two as the same thing.
+	RemoteCommand string
+
+	// RequestTTY is the resolved RequestTTY directive, canonicalized to
+	// "yes", "no" or "force". The empty string means the directive is
+	// unset. ssh -G renders an unset directive as "auto" (the default:
+	// ssh decides, which for a command execution is no TTY), so "auto"
+	// is normalized to the empty string — an explicit "auto" and an
+	// unset directive behave identically in ssh, so no information a
+	// caller could act on is lost. OpenSSH >= 10 serializes the boolean
+	// values as true/false while older versions print yes/no; both forms
+	// normalize to the canonical yes/no so callers are independent of
+	// the ssh version that produced the output.
+	RequestTTY string
 }
 
 // Sentinel errors for ssh -G resolution failures. Each is distinguishable
@@ -295,6 +317,34 @@ func parseSSHGOutput(output, host string) (*HostConfig, error) {
 		case "identityfile":
 			if cfg.IdentityFile == "" && value != "" {
 				cfg.IdentityFile = expandPath(value)
+			}
+		case "remotecommand":
+			// ssh -G prints "none" when RemoteCommand is unset; "none" is
+			// OpenSSH's sentinel for "no command" (the man page and ssh
+			// itself special-case it), so it normalizes to the empty
+			// string. A literal command of "none" is only reachable as a
+			// quoting trick ssh itself would also treat as absent — match
+			// the oracle's verdict.
+			if value != "none" {
+				cfg.RemoteCommand = value
+			}
+		case "requesttty":
+			// "auto" is the RequestTTY default; ssh -G prints it when the
+			// directive is unset, and "auto" means "ssh decides" — for a
+			// command execution that is no TTY, indistinguishable from
+			// unset, so it collapses to the empty string. OpenSSH >= 10
+			// prints true/false where older versions print yes/no; both
+			// normalize to the canonical yes/no. Anything else ("force",
+			// future values) passes through verbatim.
+			switch value {
+			case "auto":
+				cfg.RequestTTY = ""
+			case "true":
+				cfg.RequestTTY = "yes"
+			case "false":
+				cfg.RequestTTY = "no"
+			default:
+				cfg.RequestTTY = value
 			}
 		}
 	}
