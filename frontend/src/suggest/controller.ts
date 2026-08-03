@@ -671,10 +671,11 @@ export class CompletionController {
     }
     // Prefer the most specific reason: a directory that has no
     // subdirectories of the kind the command takes beats "snapshot pending"
-    // beats the generic "no matches".
+    // and a degraded ssh config resolver beat the generic "no matches".
     const priority: Record<EmptyReason['kind'], number> = {
       'dirs-only-empty': 0,
       'snapshot-pending': 1,
+      'hosts-unavailable': 1,
       'no-match': 2,
     }
     if (priority[reason.kind] < priority[this.bestReason.kind]) this.bestReason = reason
@@ -688,6 +689,13 @@ export class CompletionController {
           : `No subdirectories in ${this.bestReason.dir}`
       case 'snapshot-pending':
         return 'Command names are still loading — press Tab again in a moment'
+      case 'hosts-unavailable':
+        // The quick-connect vocabulary for the degraded `ssh -G` resolver —
+        // the condition, never silence. The detail names the failure the
+        // reason code abbreviates.
+        return this.bestReason.detail === ''
+          ? `SSH config: ${this.bestReason.reason}`
+          : `SSH config: ${this.bestReason.reason} — ${this.bestReason.detail}`
       default:
         return 'No matches'
     }

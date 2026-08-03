@@ -78,6 +78,19 @@ describe('CompletionDropdown', () => {
     expect(badge?.textContent).toBe('path')
   })
 
+  it('a host row carries its own source badge — a host and a path never look alike', () => {
+    const { dd } = mount()
+    dd.show(
+      [
+        cand({ id: 'h', source: 'host', displayText: 'prod' }),
+        cand({ id: 'p', source: 'path', kind: 'file', displayText: 'prod.txt' }),
+      ],
+      0,
+    )
+    const badges = [...dd.root.querySelectorAll('.ui-floating-panel__source')]
+    expect(badges.map((b) => b.textContent)).toEqual(['host', 'path'])
+  })
+
   it('renders the kind word for path rows — displayed, never inserted', () => {
     const { dd } = mount()
     dd.show(
