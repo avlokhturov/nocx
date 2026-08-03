@@ -61,12 +61,15 @@ type redactionWire struct {
 
 // captureWire is the non-secret display metadata for one pending capture:
 // the opaque id, the row it first attached to, this entry's redaction
-// segment, and the backend-derived suggested vault name.
+// segment, the backend-derived suggested vault name, and the capture's
+// remaining lifetime in relative milliseconds (the registry's own constant
+// on the wire — the renderer never hardcodes a duplicate expiry).
 type captureWire struct {
 	ID            string        `json:"id"`
 	EntryID       string        `json:"entryId"`
 	Redaction     redactionWire `json:"redaction"`
 	SuggestedName string        `json:"suggestedName"`
+	TTLMs         int64         `json:"ttlMs"`
 }
 
 // historyRecordResponse is the result of history.record: an ack that
@@ -81,7 +84,13 @@ type historyRecordResponse struct {
 	MaskedKinds []string        `json:"maskedKinds"`
 	EntryID     string          `json:"entryId"`
 	Redactions  []redactionWire `json:"redactions"`
-	Captures    []captureWire   `json:"captures"`
+	// MaskedCommand is the command exactly as the store keeps it — every
+	// secret replaced by its mask, every already-saved value by its
+	// reference. The renderer shows it on the frozen block and copies it;
+	// the redaction offsets are UTF-16 units into it. Never secret
+	// material: it is the durable row's own text.
+	MaskedCommand string        `json:"maskedCommand"`
+	Captures      []captureWire `json:"captures"`
 }
 
 // epochFloor is the earliest plausible wall-clock timestamp: 2020-01-01
@@ -191,10 +200,11 @@ func (s *WSServer) handleHistoryRecord(ctx context.Context, wconn *wsConn, state
 	}
 
 	ack := historyRecordResponse{
-		MaskedCount: len(findings),
-		MaskedKinds: maskedKindsOf(findings),
-		Redactions:  []redactionWire{},
-		Captures:    []captureWire{},
+		MaskedCount:   len(findings),
+		MaskedKinds:   maskedKindsOf(findings),
+		MaskedCommand: rowCommand,
+		Redactions:    []redactionWire{},
+		Captures:      []captureWire{},
 	}
 	if ack.MaskedKinds == nil {
 		ack.MaskedKinds = []string{}
@@ -265,6 +275,7 @@ func (s *WSServer) handleHistoryRecord(ctx context.Context, wconn *wsConn, state
 					EntryID:       entryID,
 					Redaction:     ack.Redactions[i],
 					SuggestedName: res.SuggestedName,
+					TTLMs:         credential.DefaultCaptureExpiry.Milliseconds(),
 				})
 			}
 		}

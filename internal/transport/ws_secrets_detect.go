@@ -37,10 +37,23 @@ type secretsDetectParams struct {
 }
 
 // secretsDetectFinding is one finding on the wire: kind plus UTF-16
+// offsets, plus the backend-derived suggested vault name (the SAME
+// SuggestName the after-submit captures carry — the renderer must never
+// predict a name; the one it would predict is exactly the duplication the
+// capture round removed).
+//
+// ValueStart/ValueEnd bound the CREDENTIAL inside the finding, in UTF-16
+// units into the line: for structural rules (env assignment, auth header,
+// db connstring, URL userinfo, high-entropy) the finding span covers the
+// whole syntax, and a save must store the value token only — the same
+// bounds the capture path uses — never the `KEY=` or `Bearer ` around it.
 type secretsDetectFinding struct {
-	Kind  string `json:"kind"`
-	Start int    `json:"start"`
-	End   int    `json:"end"`
+	Kind          string `json:"kind"`
+	Start         int    `json:"start"`
+	End           int    `json:"end"`
+	ValueStart    int    `json:"valueStart"`
+	ValueEnd      int    `json:"valueEnd"`
+	SuggestedName string `json:"suggestedName"`
 }
 
 // secretsDetectResponse is the result of secrets.detect. Revision echoes
@@ -72,10 +85,14 @@ func (s *WSServer) handleSecretsDetect(wconn *wsConn, req jsonrpcRequest) {
 	}
 	for _, f := range findings {
 		start, end := secrets.ToUTF16Span(p.Line, f.Start, f.End)
+		vStart, vEnd := secrets.ToUTF16Span(p.Line, f.ValueStart, f.ValueEnd)
 		resp.Findings = append(resp.Findings, secretsDetectFinding{
-			Kind:  string(f.Kind),
-			Start: start,
-			End:   end,
+			Kind:          string(f.Kind),
+			Start:         start,
+			End:           end,
+			ValueStart:    vStart,
+			ValueEnd:      vEnd,
+			SuggestedName: secrets.SuggestName(p.Line, f),
 		})
 	}
 	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(resp)))

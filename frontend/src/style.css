@@ -37,7 +37,7 @@
 @import './styles/components/section.css';
 @import './styles/components/badge.css';
 @import './styles/components/secret-chip.css';
-@import './styles/components/secret-offer.css';
+@import './styles/components/block-receipt.css';
 @import './styles/components/empty-state.css';
 @import './styles/components/status-card.css';
 @import './styles/components/status-dot.css';
@@ -287,6 +287,19 @@
 
 .nocx-editor .cm-line {
   padding: 0;
+}
+
+/* ── The composition-time secret candidate mark (ADR-0021) ─────────────
+
+   A detected credential while the user is still typing: a quiet dotted
+   underline, nothing more — no panel, no focus change, no selection. The
+   mark says "⌘S will store this span", and it is the only thing it says.
+   The tier that decides which findings earn it lives in secret-kind.ts. */
+.nocx-editor .cm-secret-candidate {
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-decoration-color: var(--color-warning);
+  text-underline-offset: 3px;
 }
 
 /* ── Command-ledger gutter glyphs (ADR-0008) ────────────────────────── */

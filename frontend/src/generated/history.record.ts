@@ -26,9 +26,13 @@ export interface HistoryRecord {
    */
   entryId: string
   /**
-   * The row's structured redaction segments, in row order. The renderer draws an unresolved chip at each segment and refuses to run the command as written; a segment the user saved to a vault reference is absent here and the reference sits in the command instead. Offsets are UTF-16 code units into the recorded command. A segment never carries secret material — prefix/suffix are exactly the text already visible in the masked command. Never null: no redaction is [].
+   * The row's structured redaction segments, in row order. The renderer draws an unresolved chip at each segment and refuses to run the command as written; a segment the user saved to a vault reference is absent here and the reference sits in the command instead. Offsets are UTF-16 code units into maskedCommand. A segment never carries secret material — prefix/suffix are exactly the text already visible in the masked command. Never null: no redaction is [].
    */
   redactions: Redaction[]
+  /**
+   * The command exactly as the store keeps it — every secret replaced by its mask, every already-saved value by its reference. This is the text the renderer shows on the frozen block and the text a block copy carries; the redaction offsets are UTF-16 code units into it. Never secret material: it is the durable row's text.
+   */
+  maskedCommand: string
   /**
    * The pending-capture offers, one per detected credential. Each carries an opaque, single-use capture id (the only way to save or dismiss the plaintext the backend holds), the entry it first attached to, this entry's redaction segment, and the backend-derived suggested vault name. Never null: nothing to offer is [].
    */
@@ -46,6 +50,10 @@ export interface HistoryRecord {
      * The backend-derived vault name the offer suggests: the host of the command invocation containing the credential, else the environment variable name, else the kind. The renderer may edit it; the vault resolves collisions and the real name comes back on save.
      */
     suggestedName: string
+    /**
+     * How long the capture stays alive, relative milliseconds from the ack — the capture package's own constant on the wire, so the renderer never hardcodes a duplicate lifetime. The receipt retires itself when the window closes.
+     */
+    ttlMs: number
   }[]
 }
 export interface Redaction {

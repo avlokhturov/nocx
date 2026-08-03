@@ -1,316 +1,428 @@
 // @vitest-environment jsdom
 //
-// The "secrets in the prompt" flow (prompt-vault.ts): the '@' trigger ->
-// picker -> insert-with-replacement, and the detection -> offer -> store ->
-// chip. The editor and vault are fakes; the seams they cross are real.
+// The "secrets in the prompt" flow (prompt-vault.ts) after the receipt
+// round: the '@' trigger -> picker -> insert-with-replacement, the
+// detection round-trip driving a quiet DECORATION (never a panel), the ⌘S
+// save of the candidate or the selection through the collision-resolving
+// create, and the recall resolution door (Enter on a masked row opens the
+// picker TARGETED at the first unresolved chip). The editor and vault are
+// fakes; the seams they cross are real.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { PromptVaultController, type PromptVaultEditor, type PromptVaultDeps } from './prompt-vault'
+import { PromptVaultController, type PromptVaultEditor } from './prompt-vault'
 import type { VaultClient } from './vault-client'
+import type { UnresolvedSpan } from './unresolved-redactions'
 
 /** A fake editor with a real document model: applyReplacement behaves like
- *  the editor's, so the controller's edits are observable. */
+ *  the editor's, so the controller's edits are observable, and the two
+ *  decoration seams record what the controller painted. */
 class FakeEditor implements PromptVaultEditor {
   readonly root = document.createElement('div')
   doc = ''
   caret = 0
+  selection: { from: number; to: number } | null = null
   replacements: Array<{ from: number; to: number; text: string }> = []
+  candidateDecoration: { from: number; to: number } | null = null
+  unresolvedSpans: UnresolvedSpan[] = []
 
   getDoc(): string {
     return this.doc
   }
 
   getSelection(): { from: number; to: number } {
-    return { from: this.caret, to: this.caret }
+    return this.selection ?? { from: this.caret, to: this.caret }
   }
 
   applyReplacement(from: number, to: number, text: string): void {
-    this.replacements.push({ from, to, text })
     this.doc = this.doc.slice(0, from) + text + this.doc.slice(to)
     this.caret = from + text.length
+    this.replacements.push({ from, to, text })
+    // Map the unresolved spans through the change the way CM6's StateField
+    // does: a span wholly replaced (a resolution) collapses to zero and
+    // leaves the list; spans after the change shift by the length delta.
+    const delta = text.length - (to - from)
+    this.unresolvedSpans = this.unresolvedSpans
+      .map((span) => {
+        if (span.to <= from) return span
+        if (span.from >= to) {
+          return { ...span, from: span.from + delta, to: span.to + delta }
+        }
+        if (span.from >= from && span.to <= to) {
+          // Wholly replaced (a resolution): collapse to zero length.
+          return { ...span, from, to: from }
+        }
+        return { ...span, from, to: Math.max(from, span.to + delta) }
+      })
+      .filter((span) => span.to > span.from)
   }
 
-  insert(text: string): void {
-    this.doc = this.doc.slice(0, this.caret) + text + this.doc.slice(this.caret)
-    this.caret += text.length
+  setCandidateDecoration(span: { from: number; to: number } | null): void {
+    this.candidateDecoration = span
+  }
+
+  setUnresolvedSpans(spans: ReadonlyArray<UnresolvedSpan>): void {
+    this.unresolvedSpans = [...spans]
+  }
+
+  firstUnresolvedSpan(): UnresolvedSpan | null {
+    return this.unresolvedSpans.find((s) => s.to > s.from) ?? null
   }
 }
 
-const UNSEALED = {
-  state: 'unsealed',
-  osKeyAvailable: false,
-  osKeyCapable: false,
-  hasPassphrase: true,
-  autoSealMinutes: 0,
-  defaultProvider: 'file',
-  providers: [],
+const UNSEALED = { state: 'unsealed', osKeyCapable: true, defaultProvider: 'file' } as const
+
+/** The VaultClient seams the controller touches, stubbed directly (the
+ *  controller calls the client's METHODS, never the raw dispatcher). */
+interface VaultStub {
+  status: ReturnType<typeof vi.fn>
+  inventory: ReturnType<typeof vi.fn>
+  detect: ReturnType<typeof vi.fn>
+  createSecret: ReturnType<typeof vi.fn>
+  captureSave: ReturnType<typeof vi.fn>
+  captureDismiss: ReturnType<typeof vi.fn>
+  setup: ReturnType<typeof vi.fn>
 }
 
 interface Harness {
-  ctrl: PromptVaultController
+  controller: PromptVaultController
   editor: FakeEditor
-  vault: Record<string, ReturnType<typeof vi.fn>>
-  report: ReturnType<typeof vi.fn>
+  vault: VaultStub
+  reports: Array<{ level: string; message: string }>
   container: HTMLElement
 }
 
 function setup(
-  entries: Array<{ id: string; name: string }> = [
-    { id: 's1', name: 'openai-key' },
-    { id: 's2', name: 'github-pat' },
-  ],
+  entries: Array<{ id: string; name: string }> = [{ id: 'row_1', name: 'openrouter.ai' }],
 ): Harness {
   const editor = new FakeEditor()
-  const vault = {
-    status: vi.fn(() => Promise.resolve(UNSEALED)),
-    inventory: vi.fn(() =>
-      Promise.resolve({
-        entries: entries.map((e) => ({
-          ...e,
-          kind: 'password',
-          provider: 'file',
-          ownerId: '',
-          usedBy: 0,
-          reachable: true,
-        })),
-      }),
-    ),
-    // The wire detector is the ONE implementation; this fake mirrors the
-    // two shapes these tests exercise (a vendor-prefix token, an env
-    // assignment) and the reference-span exclusion, with the same UTF-16
-    // offsets the real detector would report.
-    detect: vi.fn((line: string, revision: number) => {
-      const findings: Array<{ kind: string; start: number; end: number }> = []
-      if (!line.includes('{{secret:')) {
-        const token = line.match(/sk-proj-[A-Za-z0-9]+/)
-        if (token && token.index !== undefined) {
-          findings.push({ kind: 'openai', start: token.index, end: token.index + token[0].length })
-        }
-        const env = line.match(/TOKEN=[A-Za-z0-9]+/)
-        if (env && env.index !== undefined) {
-          findings.push({
-            kind: 'env-assignment',
-            start: env.index,
-            end: env.index + env[0].length,
-          })
-        }
-      }
-      return Promise.resolve({ revision, findings })
-    }),
-    createSecret: vi.fn(() => Promise.resolve({})),
+  const vault: VaultStub = {
+    status: vi.fn(() => Promise.resolve({ ...UNSEALED })),
+    inventory: vi.fn(() => Promise.resolve({ entries })),
+    detect: vi.fn(),
+    createSecret: vi.fn(),
+    captureSave: vi.fn(),
+    captureDismiss: vi.fn(),
     setup: vi.fn(() => Promise.resolve({})),
   }
-  const report = vi.fn()
-  const deps: PromptVaultDeps = {
+  const reports: Harness['reports'] = []
+  const controller = new PromptVaultController({
     editor,
     vault: vault as unknown as VaultClient,
-    report,
-  }
-  const ctrl = new PromptVaultController(deps)
-  ctrl.mount()
-  const container = editor.root
-  return { ctrl, editor, vault, report, container }
+    report: (level, message) => {
+      reports.push({ level, message })
+    },
+  })
+  controller.mount()
+  return { controller, editor, vault, reports, container: editor.root }
 }
 
 const flush = async (): Promise<void> => {
   for (let i = 0; i < 5; i++) await Promise.resolve()
 }
 
-const pickerRows = (c: HTMLElement): string[] =>
-  [...c.querySelectorAll<HTMLElement>('.ui-floating-panel__row')].map(
-    (el) => el.querySelector('.ui-collection-row__info')?.textContent ?? '',
-  )
+/** Type the doc programmatically (one change) and settle the debounce —
+ *  fake timers: the detection fires when the 500 ms settle elapses. */
+async function typeAndSettle(h: Harness, text: string): Promise<void> {
+  h.editor.doc = text
+  h.editor.caret = text.length
+  h.controller.onDocChanged(text)
+  await vi.advanceTimersByTimeAsync(500)
+  await flush()
+}
+
+/** An OpenAI-shaped key — a high-confidence finding. */
+const OPENAI_KEY = 'sk-proj-abcdef1234567890abcdef'
+
+/** A fake detection answer: one openai finding spanning the key. */
+function openaiDetect(revision: number, doc: string, key = OPENAI_KEY) {
+  const start = doc.indexOf(key)
+  const end = start + key.length
+  return {
+    revision,
+    findings: [
+      {
+        kind: 'openai',
+        start,
+        end,
+        valueStart: start,
+        valueEnd: end,
+        suggestedName: 'openrouter.ai',
+      },
+    ],
+  }
+}
+
+let h0: Harness
+
+beforeEach(() => {
+  vi.useFakeTimers()
+  h0 = setup()
+})
+
+afterEach(() => {
+  h0.controller.destroy()
+  vi.useRealTimers()
+})
 
 describe('PromptVaultController: the @ trigger -> picker', () => {
-  it('the trigger opens the picker; picking replaces the trigger word', async () => {
+  it('@ at a word start opens the picker; picking inserts the reference over the trigger word', async () => {
     const h = setup()
-    h.editor.doc = 'echo @ope'
-    h.editor.caret = 9
-    h.ctrl.onSecretPicker(5)
-    await flush()
-    expect(pickerRows(h.container)).toEqual(['openai-key', 'github-pat'])
-    // ArrowDown selects the second, Enter inserts.
-    h.ctrl.handleKey(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }))
-    h.ctrl.handleKey(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
-    expect(h.editor.replacements).toEqual([{ from: 5, to: 9, text: '{{secret:github-pat}}' }])
-    expect(h.editor.doc).toBe('echo {{secret:github-pat}}')
-  })
-
-  it('the picker filters as the trigger word grows', async () => {
-    const h = setup()
-    h.editor.doc = 'echo @'
+    h.editor.doc = 'curl @'
     h.editor.caret = 6
-    h.ctrl.onSecretPicker(5)
+    h.controller.onDocChanged('curl @')
+    h.controller.onSecretPicker(5)
     await flush()
-    h.editor.insert('ope')
-    h.ctrl.onDocChanged('echo @ope')
-    expect(pickerRows(h.container)).toEqual(['openai-key'])
+    expect(h.editor.root.querySelector('.ui-floating-panel[data-variant="secret"]')).not.toBeNull()
+    h.controller.handleKey(
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+    )
+    expect(h.editor.doc).toBe('curl {{secret:openrouter.ai}}')
   })
 
-  it('a space in the trigger word closes the picker (the word ended)', async () => {
+  it('typing continues into the line while the picker is up (passive)', async () => {
     const h = setup()
-    h.editor.doc = 'echo @'
-    h.editor.caret = 6
-    h.ctrl.onSecretPicker(5)
+    h.editor.doc = '@'
+    h.editor.caret = 1
+    h.controller.onDocChanged('@')
+    h.controller.onSecretPicker(0)
     await flush()
-    h.editor.insert(' ')
-    h.ctrl.onDocChanged('echo @ ')
-    expect(h.ctrl.isPickerOpen).toBe(false)
-  })
-
-  it('a stale trigger inserts at the caret instead of replacing an unrelated char', async () => {
-    const h = setup()
-    h.editor.doc = 'echo @ope'
-    h.editor.caret = 9
-    h.ctrl.onSecretPicker(5)
-    await flush()
-    // The user deleted the '@' before picking.
-    h.editor.doc = 'echo ope'
-    h.editor.caret = 8
-    h.ctrl.handleKey(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
-    expect(h.editor.replacements).toEqual([{ from: 8, to: 8, text: '{{secret:openai-key}}' }])
+    h.editor.doc = '@ope'
+    h.editor.caret = 4
+    h.controller.onDocChanged('@ope')
+    expect(h.editor.root.querySelector('.ui-floating-panel[data-variant="secret"]')).not.toBeNull()
   })
 })
 
-describe('PromptVaultController: the offer-to-save', () => {
-  beforeEach(() => {
-    vi.useFakeTimers()
-  })
-  afterEach(() => {
-    vi.useRealTimers()
-  })
-
-  it('a pasted key settles, the offer appears, and Store creates + replaces with a chip', async () => {
+describe('PromptVaultController: detection drives a decoration, never a panel', () => {
+  it('typing a full OpenAI-shaped key produces NO panel and NO floating element, and the decoration appears over the credential', async () => {
     const h = setup()
-    h.editor.doc = 'curl -H "Authorization: Bearer sk-proj-abcdefghijklmnop" https://x'
-    h.editor.caret = h.editor.doc.length
-    h.ctrl.onDocChanged(h.editor.doc)
-    await flush()
-    vi.advanceTimersByTime(500)
-    await flush()
-    // The offer row is up, non-modal, with a suggested name.
-    const offerRoot = h.container.querySelector<HTMLElement>('.ui-secret-offer')
-    expect(offerRoot?.hidden).toBe(false)
-    const input = offerRoot?.querySelector<HTMLInputElement>('.ui-secret-offer__name')
-    expect(input?.value).toBe('openai-key')
-    expect(document.activeElement).not.toBe(input) // focus stays in the prompt
-    // Accept: Enter in the name field.
-    input?.dispatchEvent(
-      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+    h.vault.detect.mockImplementation((line: string, revision: number) =>
+      Promise.resolve(openaiDetect(revision, line)),
     )
-    await flush()
-    expect(h.vault.createSecret).toHaveBeenCalledWith({
-      name: 'openai-key',
-      kind: 'password',
-      value: 'sk-proj-abcdefghijklmnop',
+    const doc = `curl -H "Authorization: Bearer ${OPENAI_KEY}" https://api`
+    await typeAndSettle(h, doc)
+    expect(h.editor.root.querySelector('.ui-secret-offer')).toBeNull()
+    expect(h.editor.root.querySelector('.ui-floating-panel[data-open="true"]')).toBeNull()
+    // The quiet decoration over the credential span — nothing else.
+    expect(h.editor.candidateDecoration).toEqual({
+      from: doc.indexOf(OPENAI_KEY),
+      to: doc.indexOf(OPENAI_KEY) + OPENAI_KEY.length,
     })
-    // The literal became the reference — the chip's text.
-    expect(h.editor.doc).toBe('curl -H "Authorization: Bearer {{secret:openai-key}}" https://x')
-    expect(h.report).toHaveBeenCalledWith('success', expect.stringContaining('openai-key'))
-    expect(offerRoot?.hidden).toBe(true)
   })
 
-  it('a declined key is not offered again while it stays in the doc', async () => {
+  it('a high-entropy-only string produces no composition-time decoration', async () => {
     const h = setup()
-    h.editor.doc = 'TOKEN=abcdefghijklmnopqrstuvwxyz123456'
-    h.editor.caret = h.editor.doc.length
-    h.ctrl.onDocChanged(h.editor.doc)
-    await flush()
-    vi.advanceTimersByTime(500)
-    await flush()
-    const offer = h.container.querySelector<HTMLElement>('.ui-secret-offer')!
-    const input = offer.querySelector<HTMLInputElement>('.ui-secret-offer__name')!
-    input.dispatchEvent(
-      new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+    h.vault.detect.mockImplementation((line: string, revision: number) => {
+      const start = line.indexOf('g3Hk9fQ2mZx7vB4nR8tW1yC5E6a')
+      return Promise.resolve({
+        revision,
+        findings: [
+          {
+            kind: 'high-entropy',
+            start,
+            end: start + 30,
+            valueStart: start,
+            valueEnd: start + 30,
+            suggestedName: 'api-key',
+          },
+        ],
+      })
+    })
+    await typeAndSettle(h, 'export TOKEN=g3Hk9fQ2mZx7vB4nR8tW1yC5E6a')
+    expect(h.editor.candidateDecoration).toBeNull()
+    expect(h.editor.root.querySelector('.ui-secret-offer')).toBeNull()
+  })
+
+  it('a stale detection response (revision mismatch) is dropped', async () => {
+    const h = setup()
+    let responseRevision = 1
+    h.vault.detect.mockImplementation((line: string) =>
+      Promise.resolve(openaiDetect(responseRevision, line)),
     )
-    expect(offer.hidden).toBe(true)
-    // Typing more (the value still in the doc) must not re-offer it.
-    h.editor.insert(' --dry-run')
-    h.ctrl.onDocChanged(h.editor.doc)
+    const doc = `echo ${OPENAI_KEY}`
+    h.editor.doc = doc
+    h.editor.caret = doc.length
+    h.controller.onDocChanged(doc)
+    responseRevision = 0 // the response will echo an OLD revision
+    await vi.advanceTimersByTimeAsync(500)
     await flush()
-    vi.advanceTimersByTime(500)
-    await flush()
-    expect(offer.hidden).toBe(true)
+    expect(h.editor.candidateDecoration).toBeNull()
   })
 
-  it('the offer hides when the value leaves the document', async () => {
+  it('a failed detect call shows nothing', async () => {
     const h = setup()
-    h.editor.doc = 'TOKEN=abcdefghijklmnopqrstuvwxyz123456'
-    h.editor.caret = h.editor.doc.length
-    h.ctrl.onDocChanged(h.editor.doc)
-    await flush()
-    vi.advanceTimersByTime(500)
-    await flush()
-    const offer = h.container.querySelector<HTMLElement>('.ui-secret-offer')!
-    expect(offer.hidden).toBe(false)
-    h.editor.doc = 'echo hi'
-    h.editor.caret = 7
-    h.ctrl.onDocChanged(h.editor.doc)
-    expect(offer.hidden).toBe(true)
+    h.vault.detect.mockRejectedValue(new Error('socket dropped'))
+    await typeAndSettle(h, `echo ${OPENAI_KEY}`)
+    expect(h.editor.candidateDecoration).toBeNull()
+    expect(h.editor.root.querySelector('.ui-secret-offer')).toBeNull()
   })
 
-  it('a reference name is never offered (findings inside {{secret:…}} are skipped)', async () => {
+  it('a finding inside a reference span is never decorated', async () => {
     const h = setup()
-    h.editor.doc = 'curl {{secret:sk-proj-mykey}} https://x'
-    h.editor.caret = h.editor.doc.length
-    h.ctrl.onDocChanged(h.editor.doc)
+    h.vault.detect.mockImplementation((line: string, revision: number) => {
+      const start = line.indexOf('sk-')
+      return Promise.resolve({
+        revision,
+        findings: [
+          {
+            kind: 'openai',
+            start,
+            end: start + 13, // sk-proj-mine
+            valueStart: start,
+            valueEnd: start + 13,
+            suggestedName: 'x',
+          },
+        ],
+      })
+    })
+    await typeAndSettle(h, 'echo {{secret:sk-proj-mine}}')
+    expect(h.editor.candidateDecoration).toBeNull()
+  })
+})
+
+describe('PromptVaultController: ⌘S saves the candidate or the selection', () => {
+  function withDetect(h: Harness, key = OPENAI_KEY): void {
+    h.vault.detect.mockImplementation((line: string, revision: number) => {
+      const start = line.indexOf(key)
+      return Promise.resolve({
+        revision,
+        findings: [
+          {
+            kind: 'openai',
+            start,
+            end: start + key.length,
+            valueStart: start,
+            valueEnd: start + key.length,
+            suggestedName: 'openrouter.ai',
+          },
+        ],
+      })
+    })
+    // The vault resolves the collision: a DIFFERENT name comes back.
+    h.vault.createSecret.mockImplementation((params: { name: string; resolve?: boolean }) => {
+      if (params.resolve !== true) throw new Error('composition save must ask for resolution')
+      return Promise.resolve({ name: `${params.name}-2` })
+    })
+  }
+
+  it('⌘S with a decorated candidate and no selection stores it and leaves {{secret:<RESPONSE name>}} in the document', async () => {
+    const h = setup()
+    withDetect(h)
+    const doc = `curl -H "Authorization: Bearer ${OPENAI_KEY}" https://api`
+    await typeAndSettle(h, doc)
+    expect(h.editor.candidateDecoration).not.toBeNull()
+    const saved = h.controller.saveCandidate()
+    expect(saved).toBe(true)
     await flush()
-    vi.advanceTimersByTime(500)
-    await flush()
-    expect(h.container.querySelector<HTMLElement>('.ui-secret-offer')?.hidden).toBe(true)
+    // The name from the RESPONSE (-2), never the one sent.
+    expect(h.editor.doc).toBe(
+      `curl -H "Authorization: Bearer {{secret:openrouter.ai-2}}" https://api`,
+    )
+    expect(h.vault.createSecret).toHaveBeenCalledTimes(1)
+    expect(h.vault.createSecret).toHaveBeenCalledWith({
+      name: 'openrouter.ai',
+      kind: 'password',
+      value: OPENAI_KEY,
+      resolve: true,
+    })
+    expect(
+      h.reports.some((r) => r.level === 'success' && r.message.includes('openrouter.ai-2')),
+    ).toBe(true)
+    // The decoration is cleared after the save.
+    expect(h.editor.candidateDecoration).toBeNull()
   })
 
-  it('a failed store reports the error and does not re-offer in a loop', async () => {
+  it('⌘S with a selection stores THE SELECTION, not the detector span', async () => {
     const h = setup()
-    h.vault.createSecret.mockRejectedValue(new Error('store exploded'))
-    h.editor.doc = 'TOKEN=abcdefghijklmnopqrstuvwxyz123456'
-    h.editor.caret = h.editor.doc.length
-    h.ctrl.onDocChanged(h.editor.doc)
+    withDetect(h)
+    const doc = `curl -H "Authorization: Bearer ${OPENAI_KEY}" https://api`
+    await typeAndSettle(h, doc)
+    // The user corrects the boundary: a shorter selection.
+    const from = doc.indexOf(OPENAI_KEY)
+    h.editor.selection = { from, to: from + 12 }
+    const saved = h.controller.saveCandidate()
+    expect(saved).toBe(true)
     await flush()
-    vi.advanceTimersByTime(500)
+    expect(h.editor.doc).toBe(
+      `curl -H "Authorization: Bearer {{secret:openrouter.ai-2}}ef1234567890abcdef" https://api`,
+    )
+    expect(h.vault.createSecret).toHaveBeenCalledTimes(1)
+    expect(h.vault.createSecret).toHaveBeenCalledWith(
+      expect.objectContaining({ value: OPENAI_KEY.slice(0, 12), resolve: true }),
+    )
+  })
+
+  it('⌘S with nothing to save is a no-op', () => {
+    const h = setup()
+    expect(h.controller.saveCandidate()).toBe(false)
+    expect(h.vault.createSecret).not.toHaveBeenCalled()
+  })
+
+  it('a sealed vault reports the vault words and keeps the draft', async () => {
+    const h = setup()
+    withDetect(h)
+    const doc = `echo ${OPENAI_KEY}`
+    await typeAndSettle(h, doc)
+    h.vault.detect.mockImplementation((line: string, revision: number) =>
+      Promise.resolve(openaiDetect(revision, line)),
+    )
+    h.vault.createSecret.mockRejectedValue({ data: { reason: 'vault-sealed' } })
+    h.controller.onDocChanged(doc)
+    await vi.advanceTimersByTimeAsync(500)
     await flush()
-    const offer = h.container.querySelector<HTMLElement>('.ui-secret-offer')!
-    const input = offer.querySelector<HTMLInputElement>('.ui-secret-offer__name')!
-    input.dispatchEvent(
+    h.controller.saveCandidate()
+    await flush()
+    expect(h.editor.doc).toBe(doc) // the draft survives
+    expect(
+      h.reports.some((r) => r.level === 'danger' && r.message === 'The vault is locked.'),
+    ).toBe(true)
+  })
+})
+
+describe('PromptVaultController: the recall resolution door', () => {
+  it('a recalled masked row registers its spans as unresolved', () => {
+    const h = setup()
+    h.controller.onRecalledRow([
+      { from: 10, to: 21, kind: 'openai' },
+      { from: 30, to: 40, kind: 'jwt' },
+    ])
+    expect(h.editor.unresolvedSpans).toEqual([
+      { from: 10, to: 21, kind: 'openai' },
+      { from: 30, to: 40, kind: 'jwt' },
+    ])
+  })
+
+  it('openResolution reports why and opens the picker targeted at the first chip; picking replaces exactly that span', async () => {
+    const h = setup()
+    h.editor.doc = 'curl -H "Authorization: Bearer sk-p...7890" https://api'
+    h.controller.onRecalledRow([{ from: 31, to: 42, kind: 'openai' }])
+    const opened = h.controller.openResolution()
+    expect(opened).toBe(true)
+    expect(h.reports.some((r) => r.level === 'warning')).toBe(true)
+    await flush()
+    // Pick a secret: the picker is in list mode after the inventory load.
+    h.controller.handleKey(
       new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
     )
-    await flush()
-    expect(h.report).toHaveBeenCalledWith('danger', 'store exploded')
-    expect(offer.hidden).toBe(true)
-    // The value is still in the doc — but it must not pop again and again.
-    h.ctrl.onDocChanged(h.editor.doc)
-    await flush()
-    vi.advanceTimersByTime(500)
-    await flush()
-    expect(offer.hidden).toBe(true)
+    expect(h.editor.doc).toBe(
+      'curl -H "Authorization: Bearer {{secret:openrouter.ai}}" https://api',
+    )
+    // The span is gone from the unresolved list (zero length after replace).
+    expect(h.editor.firstUnresolvedSpan()).toBeNull()
   })
-})
 
-describe('PromptVaultController: the masked-row door (the reported recall seam)', () => {
-  it('reports why and opens the picker — the command stays in the line', async () => {
+  it('openResolution with nothing unresolved is a no-op', () => {
     const h = setup()
-    h.editor.doc = 'curl -H "Authorization: Bearer sk-p...7890" https://x'
-    h.editor.caret = h.editor.doc.length
-    h.ctrl.onMaskedRow(1)
-    await flush()
-    expect(h.report).toHaveBeenCalledWith('warning', expect.stringContaining('masked secret'))
-    expect(h.ctrl.isPickerOpen).toBe(true)
-    expect(pickerRows(h.container)).toEqual(['openai-key', 'github-pat'])
-    // The previewed (masked) command is untouched — it is the draft.
-    expect(h.editor.doc).toBe('curl -H "Authorization: Bearer sk-p...7890" https://x')
+    expect(h.controller.openResolution()).toBe(false)
   })
-})
 
-describe('PromptVaultController: reset', () => {
-  it('drops every surface and the session offer memory', async () => {
+  it('reset clears the candidate, the picker and the resolve target', async () => {
     const h = setup()
-    h.editor.doc = 'echo @ope'
-    h.editor.caret = 9
-    h.ctrl.onSecretPicker(5)
-    await flush()
-    expect(h.ctrl.isPickerOpen).toBe(true)
-    h.ctrl.reset()
-    expect(h.ctrl.isPickerOpen).toBe(false)
-    h.ctrl.handleKey(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
-    expect(h.editor.replacements).toEqual([])
+    h.vault.detect.mockImplementation((line: string, revision: number) =>
+      Promise.resolve(openaiDetect(revision, line)),
+    )
+    await typeAndSettle(h, `echo ${OPENAI_KEY}`)
+    expect(h.editor.candidateDecoration).not.toBeNull()
+    h.controller.reset()
+    expect(h.editor.candidateDecoration).toBeNull()
   })
 })

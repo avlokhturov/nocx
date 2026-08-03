@@ -45,5 +45,17 @@ export interface SecretsDetect {
      * Exclusive UTF-16 code-unit offset into the line.
      */
     end: number
+    /**
+     * Inclusive UTF-16 offset of the CREDENTIAL inside the finding: for structural rules (env assignment, auth header, db connstring, URL userinfo, high-entropy) the finding span covers the whole syntax, and a save must store the value token only — the same bounds the capture path stores — never the KEY= or Bearer around it. For whole-match rules it equals start.
+     */
+    valueStart: number
+    /**
+     * Exclusive UTF-16 offset of the CREDENTIAL inside the finding (surrounding quotes stripped). For whole-match rules it equals end.
+     */
+    valueEnd: number
+    /**
+     * The backend-derived vault name this credential suggests — the host of the command invocation containing it, else the environment variable name, else the kind. The same SuggestName the after-submit captures carry, so the composition-time ⌘S save and the receipt suggest the same name; the renderer never predicts one.
+     */
+    suggestedName: string
   }[]
 }

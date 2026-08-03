@@ -9,7 +9,8 @@ import { highlightShellText, onShellHighlightReady } from '../shell-highlight'
 import type { CommandSnapshotStore } from '../command-snapshot'
 import type { IBufferLine } from '@xterm/xterm'
 import { wordRangeIn } from '../word-selection'
-
+import { createSecretChipUnresolved } from '../ui/secret-chip'
+import { KIND_LABELS, type SecretKind } from '../secret-kind'
 // ── Clipboard helper ────────────────────────────────────────────────────────
 
 function clipboardFallback(text: string): void {
@@ -298,13 +299,18 @@ function buildOverflowMenu(command: string, outputEl: HTMLElement | null): HTMLE
     // Build the dropdown.
     menu = document.createElement('div')
     menu.className = 'cmd-overflow-menu'
-
     const copyCmd = document.createElement('button')
     copyCmd.className = 'cmd-overflow-menu-item'
     copyCmd.textContent = 'Copy command'
     copyCmd.addEventListener('click', (ev) => {
       ev.stopPropagation()
-      clipboardFallback(command)
+      // Once history.record acks, the block shows — and therefore copies —
+      // the MASKED command: what you see is what went to the store, and the
+      // renderer no longer holds the plaintext for that block (ADR-0021,
+      // the receipt round's named trade). The full masked text lives in
+      // data-recorded-command; the chips in the header are labels.
+      const recorded = btn.closest('.cmd-block')?.getAttribute('data-recorded-command')
+      clipboardFallback(recorded ?? command)
       closeMenu()
     })
 
@@ -317,14 +323,14 @@ function buildOverflowMenu(command: string, outputEl: HTMLElement | null): HTMLE
       clipboardFallback(text)
       closeMenu()
     })
-
     const copyAll = document.createElement('button')
     copyAll.className = 'cmd-overflow-menu-item'
     copyAll.textContent = 'Copy all'
     copyAll.addEventListener('click', (ev) => {
       ev.stopPropagation()
       const outText = blockOutputText(outputEl)
-      clipboardFallback(`${command}\n${outText}`)
+      const recorded = btn.closest('.cmd-block')?.getAttribute('data-recorded-command')
+      clipboardFallback(`${recorded ?? command}\n${outText}`)
       closeMenu()
     })
 
@@ -561,12 +567,57 @@ export function freezeBlock(
     onSelect,
     store,
   )
-
   if (el.parentNode) {
     el.parentNode.replaceChild(newEl, el)
   }
 
   return newEl
+}
+
+/**
+ * Re-render a frozen block's command line once history.record acks: the
+ * MASKED command with an unresolved chip at every redaction span — what
+ * you see in the block is what went to the store, and the receipt has
+ * something to point at when a row is hovered. The chips carry their
+ * redaction span (data-redaction-start/end) so the receipt's hover can
+ * emphasise exactly one.
+ *
+ * Copying the block copies the MASKED text: the full masked command lives
+ * in data-recorded-command (the chips in the header are labels, never the
+ * stored text), and the overflow menu prefers it over the pre-ack line.
+ * This is the round's named trade — after the ack the renderer no longer
+ * holds the plaintext for this block, and neither does the clipboard.
+ */
+export function renderRecordedCommand(
+  blockEl: HTMLElement,
+  maskedCommand: string,
+  redactions: ReadonlyArray<{ kind: SecretKind; start: number; end: number }>,
+): void {
+  blockEl.dataset.recordedCommand = maskedCommand
+  const headerText = blockEl.querySelector<HTMLElement>('.cmd-header-text')
+  if (!headerText) return
+  // The segments are plain text (no shell highlighting): a mask breaks the
+  // token the highlighter would colour anyway, and the chips are the
+  // emphasis now. Offsets are UTF-16 units into maskedCommand, clamped so
+  const frag = document.createDocumentFragment()
+  let pos = 0
+  redactions.forEach((r, i) => {
+    const from = Math.max(pos, Math.min(r.start, maskedCommand.length))
+    const to = Math.max(from, Math.min(r.end, maskedCommand.length))
+    if (from > pos) frag.appendChild(document.createTextNode(maskedCommand.slice(pos, from)))
+    if (to > from) {
+      const chip = createSecretChipUnresolved(KIND_LABELS[r.kind])
+      chip.dataset.redactionIndex = String(i)
+      chip.dataset.redactionStart = String(r.start)
+      chip.dataset.redactionEnd = String(r.end)
+      frag.appendChild(chip)
+    }
+    pos = to
+  })
+  if (pos < maskedCommand.length) {
+    frag.appendChild(document.createTextNode(maskedCommand.slice(pos)))
+  }
+  headerText.replaceChildren(frag)
 }
 
 // ── Block manager ──────────────────────────────────────────────────────────

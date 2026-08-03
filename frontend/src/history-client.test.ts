@@ -33,7 +33,7 @@ describe('recordCommand', () => {
   it('sends the full fact set over history.record, timestamps rounded to ints', () => {
     const client = fakeClient()
     const rec = completedRecord()
-    recordCommand(client as unknown as WSClient, rec)
+    void recordCommand(client as unknown as WSClient, rec)
     expect(client.call).toHaveBeenCalledTimes(1)
     const [method, params] = client.call.mock.calls[0] as [string, Record<string, unknown>]
     expect(method).toBe('history.record')
@@ -53,7 +53,7 @@ describe('recordCommand', () => {
 
   it('never sends the session-owned fields (id, lineOf, disposed) or output', () => {
     const client = fakeClient()
-    recordCommand(client as unknown as WSClient, completedRecord())
+    void recordCommand(client as unknown as WSClient, completedRecord())
     const [, params] = client.call.mock.calls[0] as [string, Record<string, unknown>]
     expect(params).not.toHaveProperty('id')
     expect(params).not.toHaveProperty('lineOf')
@@ -75,7 +75,7 @@ describe('recordCommand', () => {
     const client = { call: vi.fn().mockRejectedValue(new Error('socket closed')) }
     await expect(
       new Promise<void>((resolve) => {
-        recordCommand(client as unknown as WSClient, completedRecord())
+        void recordCommand(client as unknown as WSClient, completedRecord())
         resolve()
       }),
     ).resolves.toBeUndefined()

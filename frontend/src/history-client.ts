@@ -8,6 +8,7 @@
 
 import type { CommandRecord } from './command-ledger'
 import type { HistoryQuery } from './generated/history.query'
+import type { HistoryRecord } from './generated/history.record'
 import type { WSClient } from './ipc'
 import type { RecallScope } from './recall'
 
@@ -28,8 +29,14 @@ export interface HistoryRecordParams {
 /** Send one completed command's facts to the store. Best-effort by design: a
  *  socket drop or an unavailable store loses the entry for this session —
  *  the honest cost of not blocking the terminal — and the recall overlay
- *  still answers from the session ledger until the store comes back. */
-export function recordCommand(client: WSClient, rec: CommandRecord): void {
+ *  still answers from the session ledger until the store comes back.
+ *
+ *  Resolves with the store's ack — what was masked and, when a credential
+ *  was detected, the pending-capture offers — or null on failure. The ack
+ *  is what lets the block show the masked command and attach the
+ *  after-submit receipt; a dropped record must never surface as a terminal
+ *  error, so the caller treats null exactly like "nothing to show". */
+export function recordCommand(client: WSClient, rec: CommandRecord): Promise<HistoryRecord | null> {
   const params: HistoryRecordParams = {
     command: rec.command,
     cwd: rec.cwd,
@@ -43,10 +50,10 @@ export function recordCommand(client: WSClient, rec: CommandRecord): void {
     endedAt: rec.endedAt === null ? null : Math.round(rec.endedAt),
     trusted: rec.trusted,
   }
-  void client.call<Record<string, never>>('history.record', params).catch(() => {
-    // Fire-and-forget: a dropped record is a session-lost entry, never a
-    // crash. The recall panel's source label tells the truth either way.
-  })
+  return client
+    .call<HistoryRecord>('history.record', params)
+    .then((ack) => ack)
+    .catch(() => null)
 }
 export async function queryHistory(
   client: WSClient,

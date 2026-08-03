@@ -157,19 +157,25 @@ describe('recall: Enter executes the previewed command', () => {
     expect(submit).toHaveBeenCalledWith('rm -rf build')
   })
 
-  it('Enter on a MASKED row does not run it: the command stays and the host is told', async () => {
-    // ADR-0021's named consequence. The durable text is the masked one, so
-    // `curl -H "Bearer sk-p...7890"` looks real and cannot work; running it
-    // sends the mask and fails somewhere the user cannot read. The overlay
-    // leaves it in the line and reports; the host offers a live secret.
-    const onMaskedRun = vi.fn()
+  it('previewing a MASKED row reports its redaction spans to the host', async () => {
+    // ADR-0021's named consequence, made structural this round: the durable
+    // text is the masked one, so `curl -H "Bearer sk-p...7890"` looks real
+    // and cannot work. The overlay's job is to REPORT the row's redaction
+    // spans every time it places text in the editor; the refusal lives in
+    // the host's beforeSubmit seam (the composition wires it), so a
+    // recalled masked command never reaches the submit path there.
+    const onDocContent = vi.fn()
     const container = document.createElement('div')
     document.body.appendChild(container)
     const submit = vi.fn()
     const ed = new CommandEditor({ submit, cancel: vi.fn() }, [keymap.of([...defaultKeymap])])
     ed.mount(container)
     const view = viewOf(ed)
-    const masked: HistoryEntry = { ...mkEntry('curl -H "Bearer sk-p...7890"'), maskedCount: 1 }
+    const masked: HistoryEntry = {
+      ...mkEntry('curl -H "Bearer sk-p...7890"'),
+      maskedCount: 1,
+      redactions: [{ kind: 'openai', start: 16, end: 27, prefix: 'sk-p', suffix: '7890' }],
+    }
     const recall = new RecallOverlay({
       editor: ed,
       query: () =>
@@ -180,7 +186,7 @@ describe('recall: Enter executes the previewed command', () => {
           source: 'store' as const,
           coverage: null,
         }),
-      onMaskedRun,
+      onDocContent,
     })
     recall.mount(ed.root)
     ed.setKeyArbiter((e) => recall.handleKey(e))
@@ -188,11 +194,66 @@ describe('recall: Enter executes the previewed command', () => {
     await recall.open('directory')
     await settled(container)
 
-    key(view, { key: 'Enter' })
-    expect(submit).not.toHaveBeenCalled()
-    expect(onMaskedRun).toHaveBeenCalledWith(1)
+    // The preview placed the masked command AND reported its spans — the
+    // host registers them as unresolved chips and refuses to submit.
+    expect(onDocContent).toHaveBeenCalledWith('curl -H "Bearer sk-p...7890"', [
+      { kind: 'openai', start: 16, end: 27, prefix: 'sk-p', suffix: '7890' },
+    ])
+    expect(ed.getDoc()).toBe('curl -H "Bearer sk-p...7890"')
+
+    // Esc restores the draft and clears the spans (the draft is the user's
+    // own text — nothing is unresolved in it).
+    key(view, { key: 'Escape' })
     expect(recall.isOpen).toBe(false)
-    expect(ed.getDoc()).toBe('curl -H "Bearer sk-p...7890"') // left to be fixed
+    expect(onDocContent).toHaveBeenLastCalledWith('', [])
+    expect(submit).not.toHaveBeenCalled()
+  })
+
+  it('a MASKED row entered through the filter inserts and reports its spans', async () => {
+    const onDocContent = vi.fn()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const submit = vi.fn()
+    const ed = new CommandEditor({ submit, cancel: vi.fn() }, [keymap.of([...defaultKeymap])])
+    ed.mount(container)
+    const masked: HistoryEntry = {
+      ...mkEntry('curl -H "Bearer sk-p...7890"'),
+      maskedCount: 1,
+      redactions: [{ kind: 'openai', start: 16, end: 27, prefix: 'sk-p', suffix: '7890' }],
+    }
+    const recall = new RecallOverlay({
+      editor: ed,
+      query: (scope, text) =>
+        Promise.resolve({
+          entries: text ? [masked] : [],
+          scope,
+          exhausted: true,
+          source: 'store' as const,
+          coverage: null,
+        }),
+      onDocContent,
+    })
+    recall.mount(ed.root)
+    ed.setKeyArbiter((e) => recall.handleKey(e))
+    ed.show()
+    await recall.open('directory')
+    await settled(container)
+
+    // The typed search hands the input to the field; Enter inserts the row
+    // (never executes) and reports the spans.
+    for (const ch of 'curl') key(viewOf(ed), { key: ch })
+    // The filter's answer is async: wait for the row to render, then the
+    // Enter INSERTS (never executes) and reports the spans.
+    await vi.waitFor(() => {
+      expect(panelOf(container).querySelectorAll('.ui-collection-row').length).toBe(1)
+    })
+    key(viewOf(ed), { key: 'Enter' })
+    await settled(container)
+    expect(submit).not.toHaveBeenCalled()
+    expect(ed.getDoc()).toBe('curl -H "Bearer sk-p...7890"')
+    expect(onDocContent).toHaveBeenCalledWith('curl -H "Bearer sk-p...7890"', [
+      { kind: 'openai', start: 16, end: 27, prefix: 'sk-p', suffix: '7890' },
+    ])
   })
 
   it('Esc after previewing restores the draft and sends nothing', async () => {

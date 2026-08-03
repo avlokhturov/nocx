@@ -420,28 +420,32 @@ func TestHistoryRecord_DTOConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "history.record.schema.json")
 	cases := map[string]historyRecordResponse{
 		"nothing masked": {
-			MaskedCount: 0,
-			MaskedKinds: []string{},
-			Redactions:  []redactionWire{},
-			Captures:    []captureWire{},
+			MaskedCount:   0,
+			MaskedKinds:   []string{},
+			Redactions:    []redactionWire{},
+			Captures:      []captureWire{},
+			MaskedCommand: "echo hi",
 		},
 		"two kinds": {
-			MaskedCount: 2,
-			MaskedKinds: []string{"openai", "jwt"},
+			MaskedCount:   2,
+			MaskedKinds:   []string{"openai", "jwt"},
+			MaskedCommand: `curl -H "Authorization: Bearer sk-p...7890" https://api`,
 			Redactions: []redactionWire{
 				{Kind: "openai", Start: 10, End: 21, Prefix: "sk-p", Suffix: "7890"},
 			},
 			Captures: []captureWire{},
 		},
 		"with an offer": {
-			MaskedCount: 1,
-			MaskedKinds: []string{"openai"},
-			EntryID:     "7",
-			Redactions:  []redactionWire{{Kind: "openai", Start: 10, End: 21, Prefix: "sk-p", Suffix: "7890"}},
+			MaskedCount:   1,
+			MaskedKinds:   []string{"openai"},
+			EntryID:       "7",
+			MaskedCommand: `curl -H "Authorization: Bearer sk-p...7890" https://api`,
+			Redactions:    []redactionWire{{Kind: "openai", Start: 10, End: 21, Prefix: "sk-p", Suffix: "7890"}},
 			Captures: []captureWire{{
 				ID: "cap_abc", EntryID: "7",
 				Redaction:     redactionWire{Kind: "openai", Start: 10, End: 21, Prefix: "sk-p", Suffix: "7890"},
 				SuggestedName: "openrouter.ai",
+				TTLMs:         30_000,
 			}},
 		},
 	}
@@ -477,14 +481,27 @@ func TestHistoryRecord_OverTheWireConformsToContract(t *testing.T) {
 	validateJSON(t, schema, resp.Result, "history.record result (real socket)")
 
 	var got struct {
-		MaskedCount int      `json:"maskedCount"`
-		MaskedKinds []string `json:"maskedKinds"`
+		MaskedCount   int      `json:"maskedCount"`
+		MaskedKinds   []string `json:"maskedKinds"`
+		MaskedCommand string   `json:"maskedCommand"`
+		Captures      []struct {
+			TTLMs int64 `json:"ttlMs"`
+		} `json:"captures"`
 	}
 	if err := json.Unmarshal(resp.Result, &got); err != nil {
 		t.Fatalf("decode ack: %v", err)
 	}
 	if got.MaskedCount != 1 || len(got.MaskedKinds) != 1 || got.MaskedKinds[0] != "openai" {
 		t.Errorf("ack facts = %d %v, want 1 [openai]", got.MaskedCount, got.MaskedKinds)
+	}
+	if got.MaskedCommand != `curl -H "Authorization: Bearer sk-p...7890" https://api` {
+		t.Errorf("maskedCommand = %q, want the masked command the row keeps", got.MaskedCommand)
+	}
+	if strings.Contains(got.MaskedCommand, "sk-proj-abcdef1234567890") {
+		t.Errorf("maskedCommand carries the raw key: %q", got.MaskedCommand)
+	}
+	if len(got.Captures) != 1 || got.Captures[0].TTLMs <= 0 {
+		t.Errorf("captures = %+v, want one offer with the registry's ttlMs populated", got.Captures)
 	}
 	recs, listErr := db.List(context.Background(), 1)
 	if listErr != nil {

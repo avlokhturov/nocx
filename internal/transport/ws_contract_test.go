@@ -766,6 +766,91 @@ func TestVaultDeleteSecret_RejectsSecretID(t *testing.T) {
 	}
 }
 
+// ── vault.createSecret ─────────────────────────────────────────────────
+
+// The DTO's own conformance: the response always carries the name that was
+// used — the requested one for an ordinary create, the collision-resolved
+// one when the caller asked for resolution. The renderer builds the
+// {{secret:NAME}} reference from this answer, never from the name it sent.
+func TestVaultCreateSecret_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "vault.createSecret.schema.json")
+	cases := map[string]vaultCreateSecretResponse{
+		"plain create":    {Name: "prod-password"},
+		"resolved create": {Name: "prod-password-2"},
+	}
+	for name, resp := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(resp)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "vault.createSecret DTO")
+		})
+	}
+}
+
+func TestVaultCreateSecret_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "vault.createSecret.schema.json")
+	h := newInventoryHarness(t)
+	h.setupAndUnseal()
+
+	first := jsonrpcCall(t, h.conn, "vault.createSecret", map[string]any{
+		"name": "openrouter.ai", "kind": "password", "value": "sk-first",
+	})
+	firstRaw := decodeCreateSecretResult(t, first)
+	validateJSON(t, schema, firstRaw, "vault.createSecret result (real socket, plain)")
+	var firstResult vaultCreateSecretResponse
+	if err := json.Unmarshal(firstRaw, &firstResult); err != nil {
+		t.Fatalf("decode first result: %v", err)
+	}
+	if firstResult.Name != "openrouter.ai" {
+		t.Errorf("plain create name = %q, want the requested name", firstResult.Name)
+	}
+
+	// The same name again, with resolution: the vault picks the next free
+	// suffix and reports it. The renderer could never predict this.
+	second := jsonrpcCall(t, h.conn, "vault.createSecret", map[string]any{
+		"name": "openrouter.ai", "kind": "password", "value": "sk-second", "resolve": true,
+	})
+	secondRaw := decodeCreateSecretResult(t, second)
+	validateJSON(t, schema, secondRaw, "vault.createSecret result (real socket, resolved)")
+	var secondResult vaultCreateSecretResponse
+	if err := json.Unmarshal(secondRaw, &secondResult); err != nil {
+		t.Fatalf("decode second result: %v", err)
+	}
+	if secondResult.Name == "openrouter.ai" {
+		t.Errorf("resolved create returned the collided name %q — the vault must suffix", secondResult.Name)
+	}
+
+	// Both rows exist in the inventory under their real names.
+	inv := h.callInventory()
+	names := make([]string, 0, len(inv.Entries))
+	for _, e := range inv.Entries {
+		names = append(names, e.Name)
+	}
+	if len(names) != 2 || names[0] == names[1] {
+		t.Errorf("inventory names = %v, want two distinct rows", names)
+	}
+}
+
+// decodeCreateSecretResult reads the raw `result` bytes of a createSecret
+// response — the exact payload the socket carried, which is what the
+// over-the-wire rule validates — and fails on a JSON-RPC error.
+func decodeCreateSecretResult(t *testing.T, raw json.RawMessage) json.RawMessage {
+	t.Helper()
+	var env struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, string(raw))
+	}
+	if env.Error != nil {
+		t.Fatalf("vault.createSecret: %+v", env.Error)
+	}
+	return env.Result
+}
+
 // ── connections.test / connections.trustHostKey ────────────────────────
 
 // The DTO's own conformance: both host-key shapes, and the one field that

@@ -246,7 +246,7 @@ describe('CommandEditor: nested form controls own their keys', () => {
     ed.show()
     ed.insertText('curl https://x')
     const input = document.createElement('input')
-    input.className = 'ui-secret-offer__name'
+    input.className = 'nested-control-input'
     container.appendChild(input)
     input.dispatchEvent(
       new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),

@@ -71,6 +71,17 @@ export interface VaultCreateSecretParams {
   /** A path the backend dereferences to the file's contents (private keys
    *  in Path mode). What is stored is the key, never a filename (dcf566b). */
   path?: string
+  /** Ask for atomic name-collision resolution — the same path the capture
+   *  save takes — and for the name ACTUALLY used in the response. The
+   *  prompt's ⌘S save needs it: the {{secret:NAME}} reference is built
+   *  from the vault's answer, never from the name that was sent. */
+  resolve?: boolean
+}
+
+export interface VaultCreateSecretResult {
+  /** The vault inventory name the secret was stored under — the resolved
+   *  name when resolve was asked, the requested name otherwise. */
+  name: string
 }
 
 export interface VaultRenameSecretParams {
@@ -165,8 +176,10 @@ export class VaultClient {
   }
 
   /** Store a secret created on the Secrets page: name and kind were asked of
-   *  the user, the value goes to the default store and never comes back. */
-  createSecret(params: VaultCreateSecretParams): Promise<Record<string, never>> {
+   *  the user, the value goes to the default store and never comes back.
+   *  With resolve, the vault resolves name collisions atomically and the
+   *  response carries the name ACTUALLY used. */
+  createSecret(params: VaultCreateSecretParams): Promise<VaultCreateSecretResult> {
     return this.dispatcher.call('vault.createSecret', params)
   }
 

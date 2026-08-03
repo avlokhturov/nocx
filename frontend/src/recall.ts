@@ -56,7 +56,7 @@
 // second kind arrives the answer is a kind selector inside this panel,
 // never a second panel — two surfaces answering one question is how the
 // same keystroke starts returning different results depending on the door.
-import type { HistoryEntry, HistoryQuery } from './generated/history.query'
+import type { HistoryEntry, HistoryQuery, Redaction } from './generated/history.query'
 import type { CommandLedger } from './command-ledger'
 import { createSearchFieldDisplay } from './ui/search-field'
 import { FloatingPanel, type FloatingPanelRow } from './ui/floating-panel'
@@ -346,21 +346,22 @@ export class RecallOverlay {
   private readonly panel: FloatingPanel
   private readonly editor: RecallEditor
   private readonly query: RecallQuery
-  /** Told when Enter lands on a row whose text is a mask rather than a
-   *  command, with how many secrets were masked. The overlay's job ends at
-   *  "this cannot run and here is why"; what to offer instead — a live value
-   *  from the vault — belongs to the host. Absent means the old behaviour,
-   *  which is why it is optional: a recall overlay with no vault around it
-   *  still works. */
-  private readonly onMaskedRun?: (maskedCount: number) => void
+  /** The editor's content changed through the overlay — a preview, an
+   *  insert, or a draft restore — carrying the redaction spans that apply
+   *  to the CURRENT document ([] for a restored draft). The host registers
+   *  them as unresolved chips and refuses to submit while any remain:
+   *  a masked history row must not run as written (ADR-0021's consequence,
+   *  made structural this round). Absent means a recall overlay with no
+   *  vault around it still works — rows preview and run exactly as before. */
+  private readonly onDocContent?: (doc: string, redactions: ReadonlyArray<Redaction>) => void
   constructor(opts: {
     editor: RecallEditor
     query: RecallQuery
-    onMaskedRun?: (maskedCount: number) => void
+    onDocContent?: (doc: string, redactions: ReadonlyArray<Redaction>) => void
   }) {
     this.editor = opts.editor
     this.query = opts.query
-    this.onMaskedRun = opts.onMaskedRun
+    this.onDocContent = opts.onDocContent
     this.panel = new FloatingPanel({
       variant: 'recall',
       role: 'dialog',
@@ -676,7 +677,10 @@ export class RecallOverlay {
       // display index.
       const wireIndex = result.entries.length - 1 - selected
       const entry = result.entries[wireIndex]
-      if (entry) this.editor.replaceDoc(entry.command)
+      if (entry) {
+        this.editor.replaceDoc(entry.command)
+        this.announceDocContent(entry.command, entry.redactions ?? [])
+      }
     } else {
       // A non-empty filter hands the input to the field: the row is
       // HIGHLIGHTED but not previewed, or the screen holds two commands —
@@ -684,6 +688,7 @@ export class RecallOverlay {
       // draft; Enter will insert the row into it (see the Enter branch).
       const d = s.draft
       this.editor.replaceDoc(d.text, d.from, d.to)
+      this.announceDocContent(d.text, [])
     }
     this.render()
   }
@@ -723,6 +728,7 @@ export class RecallOverlay {
         this.state = { name: 'opened', draft: s.draft, scope: s.scope, query: result, filter }
         const d = s.draft
         this.editor.replaceDoc(d.text, d.from, d.to)
+        this.announceDocContent(d.text, [])
         this.render()
         return
       }
@@ -749,18 +755,12 @@ export class RecallOverlay {
     // A masked row is not a command. The durable text is the masked one
     // (ADR-0021), so `curl -H "Bearer sk-p...7890"` looks real and cannot
     // work — it sends the mask and fails somewhere the user cannot read.
-    // ADR-0021 names this consequence and requires that it not run silently:
-    // the overlay closes, the command stays in the line where it can be seen
-    // and edited, and the host is told why so it can offer a live value.
-    // Rows from THIS session never reach here — they carry the real text and
-    // maskedCount 0 (nocx-xkve.4).
-    const wireIndex = s.query.entries.length - 1 - s.selected
-    const masked = s.query.entries[wireIndex]?.maskedCount ?? 0
-    if (masked > 0 && this.onMaskedRun) {
-      this.takeSelected()
-      this.onMaskedRun(masked)
-      return
-    }
+    // The refusal lives in the editor's beforeSubmit seam (the host's):
+    // the preview already registered this row's redaction spans as
+    // unresolved chips, so Enter reaches the submit path, is vetoed there,
+    // the draft survives, and the host opens resolution on the first chip.
+    // Rows from THIS session never carry spans — they are the real text
+    // (nocx-xkve.4).
     this.close()
     this.editor.submit()
   }
@@ -805,6 +805,7 @@ export class RecallOverlay {
     if (!entry) return
     this.close()
     this.editor.replaceDoc(entry.command)
+    this.announceDocContent(entry.command, entry.redactions ?? [])
     this.editor.focus()
   }
   /** Esc: restore the draft, the selection and the scroll position exactly. */
@@ -814,10 +815,17 @@ export class RecallOverlay {
     if (s.name === 'loading' || s.name === 'opened' || s.name === 'navigating') {
       const d = s.draft
       this.editor.replaceDoc(d.text, d.from, d.to)
+      this.announceDocContent(d.text, [])
       this.editor.setScrollTop(d.scrollTop)
       this.editor.focus()
     }
     this.close()
+  }
+  /** The host's seam: the editor's content changed through the overlay.
+   *  The redaction spans apply to the CURRENT document (the restored draft
+   *  carries none). */
+  private announceDocContent(doc: string, redactions: ReadonlyArray<Redaction>): void {
+    this.onDocContent?.(doc, redactions)
   }
   private close(): void {
     this.state = { name: 'closed' }

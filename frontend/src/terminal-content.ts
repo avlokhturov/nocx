@@ -22,15 +22,22 @@ import {
   type SubmitPlan,
 } from './submit'
 import { secretChipExtension } from './secret-chip'
+import { secretCandidateExtension } from './secret-candidate'
+import { unresolvedRedactionField } from './unresolved-redactions'
 import { PromptVaultController } from './prompt-vault'
 import { VaultClient } from './vault-client'
 import { showToast } from './ui/toast'
+import { BlockReceipt } from './ui/block-receipt'
+import type { HistoryRecord } from './generated/history.record'
+import { renderRecordedCommand } from './scrollback/blocks'
+import { KIND_LABELS } from './secret-kind'
 import { shouldShowEditor, NATIVE_RESTORE } from './native-mode'
 import { shouldCopy, type ClipboardAccess, type ClipboardGate } from './clipboard'
 import type { ClipboardBanner } from './banner'
+import { ScrollbackController } from './scrollback/controller'
+import type { BlockRecord } from './scrollback/blocks'
 import { CommandLedger } from './command-ledger'
 import { queryHistory, recordCommand } from './history-client'
-import { ScrollbackController } from './scrollback/controller'
 import { log } from './log'
 import type { WSClient, SessionHandle } from './ipc'
 import { showConfirm } from './ui/dialog'
@@ -108,8 +115,25 @@ export class TerminalContent extends BaseTabContent {
    *  dispatcher — the sealed-access seam it carries is already installed at
    *  the app root). */
   private vault: VaultClient | null = null
-  /** The prompt's vault surfaces: the '@' picker, the offer-to-save, and
-   *  the resolve-at-submit wiring. */
+  /** The after-submit capture receipt attached to its frozen block, plus
+   *  the block it lives in. One receipt at a time: a superseding
+   *  submission destroys the previous command's captures on the backend,
+   *  so its receipt is retired the moment a new command is submitted. */
+  private receipt: BlockReceipt | null = null
+  private receiptBlockEl: HTMLElement | null = null
+  /** Ledger record id → the block record captured at onComplete time (the
+   *  same object freezeBlock mutates in place). The ack is an async round
+   *  trip, so by the time it resolves the block is frozen — but the user
+   *  may have submitted again or cleared the scrollback; the identity is
+   *  checked against the live DOM, never looked up as "the most recent
+   *  block". */
+  private readonly pendingReceiptBlocks = new Map<number, BlockRecord>()
+  /** Capture id → the redaction span of the chip in the block's command
+   *  line, for the receipt's hover emphasis (chips carry the span; rows
+   *  carry the capture id). */
+  private readonly receiptChipSpans = new Map<string, { start: number; end: number }>()
+  /** The prompt's vault surfaces: the '@' picker, the composition-time
+   *  candidate, and the resolve-at-submit wiring. */
   private promptVault: PromptVaultController | null = null
   private completion: CompletionController | null = null
   private recall: RecallOverlay | null = null
@@ -248,32 +272,29 @@ export class TerminalContent extends BaseTabContent {
         snapshotStore: renderer.snapshotStore,
       })
 
-      log.info('nocx: mounting renderer')
-      await renderer.mount(this.scrollback.mountTarget)
-
-      if (signal.aborted) {
-        renderer.dispose()
-        this.scrollback.dispose()
-        this._readyResolve(false)
-        return
-      }
-
-      log.info('nocx: renderer mounted', { cols: renderer.cols, rows: renderer.rows })
-      this.cols = renderer.cols
-      this.rows = renderer.rows
-
-      // ── Command ledger (ADR-0008) ────────────────────────────────────────
-      // A completed record is shipped to the store over the control plane
-      // (nocx-rtg0.13, AD-1 as amended): the renderer derives the facts
-      // from the byte stream it already owns, and recordCommand is the one
-      // seam that crosses. Best-effort by design — a dropped record is a
-      // session-lost entry, never a terminal error.
       this.ledger = new CommandLedger({
         // Wall-clock epoch milliseconds: the ledger's timestamps are
         // persisted, survive a restart, and render as relative wall time
         // (nocx-rtg0.16) — performance.now() would be swept as 1970.
         now: () => Date.now(),
-        onComplete: (rec) => recordCommand(this.client, rec),
+        onComplete: (rec) => {
+          // The block identity, captured at onComplete time: at the D
+          // marker this runs BEFORE scrollback.onCommandEnd freezes the
+          // block, so the running block record IS the object freezeBlock
+          // mutates in place. The ack is an async round trip — by the time
+          // it resolves the block is frozen, but the user may have
+          // submitted again or cleared the scrollback — so the receipt
+          // attaches by this captured identity, never "the most recent
+          // block", and a block that is gone by then drops the receipt
+          // silently.
+          const block = this.scrollback?.blockManager.runningBlock
+          if (block) this.pendingReceiptBlocks.set(rec.id, block)
+          void recordCommand(this.client, rec).then((ack) => {
+            this.pendingReceiptBlocks.delete(rec.id)
+            if (ack === null || ack.maskedCommand === undefined) return
+            this.attachRecordedAck(rec.id, block, ack)
+          })
+        },
       })
 
       // ── Wire input ownership BEFORE opening the session ─────────────────
@@ -301,12 +322,16 @@ export class TerminalContent extends BaseTabContent {
         (text: string) => renderer.paste(text),
         (data: string) => this.session!.send(data),
         // The target carries the shell's editor extensions through the §8.8
-        // seam: the shell highlighter, the completion surface, and the
-        // vault-reference chip (a document-level decoration, not a language).
+        // seam: the shell highlighter, the completion surface, the
+        // vault-reference chip (a document-level decoration, not a
+        // language), the quiet composition-time candidate mark, and the
+        // unresolved-redaction field a recalled masked row registers in.
         [
           ...shellExtensions(renderer.snapshotStore),
           ...this.completion.extensions(),
           secretChipExtension(),
+          secretCandidateExtension(),
+          unresolvedRedactionField,
         ],
       )
       const vault = new VaultClient(this.client)
@@ -320,8 +345,11 @@ export class TerminalContent extends BaseTabContent {
           // is reported and the draft stays — never a silent send of a
           // broken line (the editor's beforeSubmit seam keeps the draft on
           // false). A plain line resolves SYNCHRONOUSLY (planSubmitSync) —
-          // an ordinary Enter keeps its no-gap atomic handoff.
+          // an ordinary Enter keeps its no-gap atomic handoff. A recalled
+          // masked row is refused first: the draft stays and resolution
+          // opens on the first chip (ADR-0021's consequence).
           beforeSubmit: (doc) => {
+            if (this.promptVault?.openResolution()) return false
             const sync = planSubmitSync(doc)
             if (sync) return sync
             return planSubmit(doc, (line) => vault.resolveLine(line)).then((verdict) => {
@@ -335,6 +363,10 @@ export class TerminalContent extends BaseTabContent {
           submit: (doc: string, plan?: SubmitPlan) => {
             const recordLine = plan?.recordLine ?? doc
             this._pendingCommand = recordLine
+            // A superseding submission destroys the previous command's
+            // pending captures on the backend: retire its receipt now,
+            // before the new command's own ack can attach one.
+            this.destroyReceipt()
             if (this.ledger) {
               let markerLine: () => number | undefined = () => undefined
               const rec = this.ledger.open(recordLine, this._cwd, this._host, () => markerLine())
@@ -361,8 +393,8 @@ export class TerminalContent extends BaseTabContent {
           // letting it slide underneath.
           resized: () => this.scrollback?.scrollToBottom(),
           /** Detect `ssh <partial>` pattern and show matching aliases, and
-           *  drive the vault surfaces (the offer's detection, the picker's
-           *  passive filter). */
+           *  drive the vault surfaces (the candidate's detection, the
+           *  picker's passive filter). */
           onInputChange: (text) => {
             this._onEditorInput(text)
             // A keystroke aborts the completion query in flight and starts a
@@ -375,8 +407,11 @@ export class TerminalContent extends BaseTabContent {
           onDocCleared: () => {
             this.promptVault?.reset()
           },
-          /** '@' at a word start — the reference picker's passive trigger. */
+          /** '@' at a word start — the reference picker's passive trigger.
+           *  Opening it closes the completion dropdown: the surfaces never
+           *  stack (the mutual-exclusion rule). */
           onSecretPicker: (triggerPos) => {
+            this.completion?.dismiss()
             this.promptVault?.onSecretPicker(triggerPos)
           },
           /** Hint acceptance — no cache to invalidate. */
@@ -388,6 +423,18 @@ export class TerminalContent extends BaseTabContent {
           },
           /** Tab opens the completion dropdown (§8.7's decided option 1). */
           onTab: () => this.completion?.open(),
+          /** The save chord: a live receipt's primary action outranks the
+           *  composition-time candidate; ⇧⌘S moves focus into the receipt
+           *  for review. Returns whether anything was triggered (the editor
+           *  consumes the chord either way). */
+          onSave: (shift) => {
+            if (this.receipt) {
+              if (shift) this.receipt.enterReview()
+              else this.receipt.saveAll()
+              return true
+            }
+            return this.promptVault?.saveCandidate() ?? false
+          },
         },
         // The language is chosen HERE, not inside the editor. CommandEditor
         // must stay language-agnostic (ADR-0010 §Decision 3): the agent target
@@ -432,25 +479,34 @@ export class TerminalContent extends BaseTabContent {
             return queryLedgerHistory(this.ledger, scope, this._cwd, this._host, text)
           }
         },
-        // The second door into the vault (ADR-0021): Enter on a row whose
-        // text is a mask must not run silently. The overlay leaves the
-        // command in the line and says so; the controller reports why and
-        // opens the picker, so the way out of a masked command is to give it
-        // a live secret. This is the door people will actually walk through —
-        // nobody plans to store a secret in advance, they hit a command that
-        // cannot run.
-        onMaskedRun: (maskedCount) => this.promptVault?.onMaskedRow(maskedCount),
+        // A recalled masked row cannot run as written (ADR-0021): the
+        // overlay reports the row's redaction spans every time it places
+        // text in the editor (preview, insert, draft restore), the editor
+        // renders them as unresolved chips, and the beforeSubmit seam
+        // refuses to run the command while any remain — opening resolution
+        // on the first chip. This is the door people will actually walk
+        // through: nobody plans to store a secret in advance, they hit a
+        // command that cannot run.
+        onDocContent: (doc, redactions) =>
+          this.promptVault?.onRecalledRow(
+            redactions.map((r) => ({ from: r.start, to: r.end, kind: r.kind })),
+          ),
       })
       this.recall.mount(this.editor.root)
       // ONE arbiter chain (design §8.9.4 — three surfaces, one keyboard):
       // recall first, the vault picker second, completion last, the
       // editor's own handling at the tail. Recall is the higher-priority
-      // surface and the surfaces never stack: the moment one opens, the
-      // completion dropdown is dismissed. Esc closes exactly one surface
-      // per press, in the same order.
+      // surface and the surfaces never stack: opening any one closes the
+      // others — the completion dropdown is dismissed the moment recall or
+      // the picker opens, and the picker is dismissed the moment recall
+      // opens (a Ctrl/Cmd+R can land while the picker is up). Esc closes
+      // exactly one surface per press, in the same order.
       this.editor.setKeyArbiter((e) => {
         const consumed = this.recall!.handleKey(e)
-        if (this.recall!.isOpen) this.completion?.dismiss()
+        if (this.recall!.isOpen) {
+          this.completion?.dismiss()
+          this.promptVault?.closePicker()
+        }
         if (consumed) return true
         // The picker outranks completion: while it is open its keys
         // (arrows, Enter, Tab, Esc) belong to it, and a Right/End ghost
@@ -549,9 +605,15 @@ export class TerminalContent extends BaseTabContent {
       target.addEventListener('focusin', () => {
         if (!this.editor?.isVisible) return
         const active = document.activeElement
+        // The receipt's review mode is the ONE place in this design where
+        // focus leaves the editor: ⇧⌘S parks it in the name fields. The
+        // bounce must yield to it, or the caret snaps straight back and the
+        // receipt cannot be edited at all.
         if (
           active &&
-          (this.editor.rootContains(active) || this.scrollback?.xtermLiveContainer.contains(active))
+          (this.editor.rootContains(active) ||
+            this.scrollback?.xtermLiveContainer.contains(active) ||
+            this.receipt?.root.contains(active))
         )
           return
         this.editor.focus()
@@ -1083,11 +1145,12 @@ export class TerminalContent extends BaseTabContent {
     this.editor?.dispose()
     this.recall?.destroy()
     this.recall = null
-    this.completion?.destroy()
-    this.completion = null
     this.scrollback?.dispose()
+    this.destroyReceipt()
     this.promptVault?.destroy()
     this.promptVault = null
+    this.completion?.destroy()
+    this.completion = null
     this._disposeAllMarkers()
     this.ledger = null
     this.host = null
@@ -1153,6 +1216,146 @@ export class TerminalContent extends BaseTabContent {
       // line was removed.
       (a) => a.alias.toLowerCase().startsWith(lower),
     )
+  }
+
+  // ── the after-submit receipt (ADR-0021, the receipt round) ──────────────
+
+  /** The history.record ack crossed: paint the block with what was stored
+   *  and, when captures came back, attach the receipt to THAT block. The
+   *  block identity was captured at onComplete time; a block that is gone
+   *  by now (cleared scrollback, disposed tab, or never frozen) drops the
+   *  receipt silently. */
+  private attachRecordedAck(
+    _recId: number,
+    block: BlockRecord | null | undefined,
+    ack: HistoryRecord,
+  ): void {
+    if (!block) return
+    const blockEl = block.el
+    // The block must be frozen (the D marker froze it) and still in the
+    // DOM: a running block means the D never arrived for this record, and
+    // a disconnected element means the scrollback was cleared or the tab
+    // disposed. Both drop the receipt silently — the capture died with
+    // them on the backend anyway.
+    if (
+      !blockEl.isConnected ||
+      blockEl.classList.contains('cmd-block-running') ||
+      !blockEl.classList.contains('cmd-block')
+    ) {
+      return
+    }
+    if (ack.redactions.length > 0) {
+      renderRecordedCommand(blockEl, ack.maskedCommand, ack.redactions)
+    }
+    if (ack.captures.length === 0) return
+    this.destroyReceipt()
+    this.receiptBlockEl = blockEl
+    for (const c of ack.captures) {
+      this.receiptChipSpans.set(c.id, { start: c.redaction.start, end: c.redaction.end })
+    }
+    this.receipt = new BlockReceipt(
+      ack.captures.map((c) => ({
+        captureId: c.id,
+        kindLabel: KIND_LABELS[c.redaction.kind],
+        maskedValue:
+          c.redaction.prefix !== '' || c.redaction.suffix !== ''
+            ? `${c.redaction.prefix}...${c.redaction.suffix}`
+            : '***',
+        suggestedName: c.suggestedName,
+        ttlMs: c.ttlMs,
+      })),
+      {
+        onSaveAll: (rows) => void this.saveReceiptRows(this.receipt!, rows),
+        onDismiss: (captureId) => void this.dismissReceiptRow(this.receipt!, captureId),
+        onHover: (captureId) => this.emphasiseChip(captureId),
+        onExpired: () => {
+          // The view retired itself with the honest line; nothing owed.
+          this.receipt = null
+          this.receiptBlockEl = null
+        },
+        onExitReview: () => this.editor?.focus(),
+      },
+    )
+    this.receipt.mount(blockEl)
+  }
+
+  /** Retire the live receipt, if any (a superseding submission destroys
+   *  its captures on the backend; the tab's dispose path does the same). */
+  private destroyReceipt(): void {
+    this.receipt?.destroy()
+    this.receipt = null
+    this.receiptBlockEl = null
+    this.receiptChipSpans.clear()
+  }
+
+  /** The receipt's primary action: settle every row still in play. The
+   *  capture id is the idempotency key — a partial failure keeps the row
+   *  and a retry of the SAME id finishes the owed rewrite without minting
+   *  a second secret. The name shown is the RESPONSE's, never the one
+   *  sent. */
+  private async saveReceiptRows(
+    receipt: BlockReceipt,
+    rows: ReadonlyArray<{ captureId: string; name: string }>,
+  ): Promise<void> {
+    for (const row of rows) {
+      if (!this.vault) continue
+      try {
+        const res = await this.vault.captureSave({ captureId: row.captureId, name: row.name })
+        if (res.partial) {
+          showToast({
+            level: 'warning',
+            message: `"${res.name}" saved, but the history rewrite is still owed — retry to finish it.`,
+          })
+          receipt.markFailed(
+            row.captureId,
+            `"${res.name}" is saved — the history rewrite is still owed; retry to finish it`,
+          )
+          continue
+        }
+        showToast({ level: 'success', message: `Stored "${res.name}" in the vault.` })
+        receipt.removeRow(row.captureId)
+      } catch {
+        showToast({
+          level: 'danger',
+          message:
+            'Could not save the secret — the capture may have expired. The command stays stored masked; add the key from Settings → Vault.',
+        })
+        receipt.markFailed(row.captureId, 'could not save — try again')
+      }
+    }
+  }
+
+  /** A row's drop control: dismiss that capture (and suppress its
+   *  fingerprint for the session). A failed dismiss keeps the row. */
+  private async dismissReceiptRow(receipt: BlockReceipt, captureId: string): Promise<void> {
+    if (!this.vault) return
+    try {
+      await this.vault.captureDismiss(captureId)
+      receipt.removeRow(captureId)
+    } catch {
+      showToast({
+        level: 'danger',
+        message: 'Could not dismiss the offer — try again.',
+      })
+    }
+  }
+
+  /** Hovering a receipt row emphasises that row's chip in the block's
+   *  command line — and only that one. Chips carry their redaction span
+   *  (data-redaction-start/end), stamped by renderRecordedCommand; the
+   *  receipt row carries the capture id, mapped back here to the span. */
+  private emphasiseChip(captureId: string | null): void {
+    const blockEl = this.receiptBlockEl
+    if (!blockEl) return
+    const span = captureId === null ? undefined : this.receiptChipSpans.get(captureId)
+    const chips = blockEl.querySelectorAll<HTMLElement>('.ui-secret-chip[data-redaction-start]')
+    for (const chip of chips) {
+      const matches =
+        span !== undefined &&
+        chip.dataset.redactionStart === String(span.start) &&
+        chip.dataset.redactionEnd === String(span.end)
+      chip.classList.toggle('ui-secret-chip--emphasised', matches)
+    }
   }
 
   /** A submit was refused: an unresolved name or a sealed vault must not

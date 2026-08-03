@@ -15,6 +15,13 @@
 import { EditorState, Extension } from '@codemirror/state'
 import { EditorView, keymap } from '@codemirror/view'
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands'
+import { setSecretCandidate } from './secret-candidate'
+import {
+  firstUnresolved,
+  setUnresolvedSpans,
+  unresolvedRedactionField,
+  type UnresolvedSpan,
+} from './unresolved-redactions'
 import type { SubmitPlan } from './submit'
 
 /**
@@ -112,6 +119,15 @@ export interface EditorActions {
   /** Fired after the document is cleared programmatically (submit, Esc,
    *  Ctrl-C) — the host drops its floating surfaces and offer memory. */
   onDocCleared?: () => void
+  /**
+   * Fired on the save chord (⌘S / Ctrl-S, ⇧⌘S with Shift) — the host's
+   * save seam: a live after-submit receipt's primary action (Shift moves
+   * focus into the receipt for review), or the composition-time secret
+   * save. Returns true when something was triggered. The editor consumes
+   * the chord either way — the browser's Save Page must never fire from
+   * inside the prompt.
+   */
+  onSave?: (shift: boolean) => boolean
 }
 
 export class CommandEditor {
@@ -509,6 +525,17 @@ export class CommandEditor {
       }
     }
 
+    // The save chord (⌘S / Ctrl-S — the same dual-modifier rule recall's
+    // Ctrl/Cmd+R uses): the host's save seam. Handled BEFORE Enter/Escape,
+    // and consumed even when nothing is saveable — the browser's Save Page
+    // must never fire from inside the prompt.
+    if ((e.key === 's' || e.key === 'S') && !e.altKey && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault()
+      e.stopPropagation()
+      this.actions.onSave?.(e.shiftKey)
+      return
+    }
+
     if (this._hintItems.length > 0) {
       if (e.key === 'ArrowDown') {
         e.preventDefault()
@@ -800,6 +827,27 @@ export class CommandEditor {
   setScrollTop(top: number): void {
     this.view.scrollDOM.scrollTop = top
   }
+
+  /**
+   * Replace a document span programmatically — the completion controller
+   * applies a candidate over its replacement range through this seam, and
+   * the vault controller replaces a credential literal with its reference
+   * (design §8.9: insertText is what is inserted; displayText is never).
+   * Fires no input events, so onInputChange does not re-trigger (a
+   * programmatic edit is exactly what the `_programmatic` flag exists
+   * for). The caret lands after the inserted text.
+   */
+  applyReplacement(from: number, to: number, text: string): void {
+    this._programmatic = true
+    try {
+      this.view.dispatch({
+        changes: { from, to, insert: text },
+        selection: { anchor: from + text.length },
+      })
+    } finally {
+      this._programmatic = false
+    }
+  }
   /**
    * Insert text at the caret, replacing any selection, then focus.
    * Used by right-click/middle-click paste while the editor owns input: at the
@@ -820,22 +868,32 @@ export class CommandEditor {
     this.view.focus()
   }
 
-  /**
-   * Replace [from, to) with text and place the caret after it (programmatic
-   * — fires no input events). The completion controller applies a candidate
-   * over its replacement range through this seam (design §8.9: insertText is
-   * what is inserted; displayText is never).
-   */
-  applyReplacement(from: number, to: number, text: string): void {
-    this._programmatic = true
-    try {
-      this.view.dispatch({
-        changes: { from, to, insert: text },
-        selection: { anchor: from + text.length },
-      })
-    } finally {
-      this._programmatic = false
-    }
+  /** Paint or clear the quiet composition-time candidate mark. The
+   *  controller owns WHEN a candidate exists; this is the editor's half of
+   *  the StateField the host's extension installed. */
+  setCandidateDecoration(span: { from: number; to: number } | null): void {
+    this.view.dispatch({ effects: setSecretCandidate.of(span) })
+  }
+
+  /** Replace the unresolved-redaction spans (recalled masked text). The
+   *  spans map through the user's subsequent edits; the host refuses to
+   *  submit while any remain. */
+  setUnresolvedSpans(spans: ReadonlyArray<UnresolvedSpan>): void {
+    this.view.dispatch({ effects: setUnresolvedSpans.of(spans) })
+  }
+
+  /** The first unresolved span still in the document, or null — the one
+   *  Enter opens resolution on. Reads the field the host installed;
+   *  undefined (not installed) reads as none. */
+  firstUnresolvedSpan(): UnresolvedSpan | null {
+    const spans = this.view.state.field(unresolvedRedactionField, false) ?? []
+    return firstUnresolved(spans)
+  }
+
+  /** True while the document still carries any unresolved span. */
+  hasUnresolvedSpans(): boolean {
+    const spans = this.view.state.field(unresolvedRedactionField, false) ?? []
+    return spans.some((s) => s.to > s.from)
   }
   hide(): void {
     // Stopped, not left running. Every tab owns an editor, so a timer that

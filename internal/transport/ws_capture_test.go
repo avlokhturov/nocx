@@ -172,7 +172,18 @@ func TestSecretsDetect_DTOConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "secrets.detect.schema.json")
 	cases := map[string]secretsDetectResponse{
 		"no findings": {Revision: 7, Findings: []secretsDetectFinding{}},
-		"one finding": {Revision: 3, Findings: []secretsDetectFinding{{Kind: "openai", Start: 10, End: 30}}},
+		"one finding": {
+			Revision: 3,
+			Findings: []secretsDetectFinding{
+				{Kind: "openai", Start: 10, End: 30, ValueStart: 10, ValueEnd: 30, SuggestedName: "openrouter.ai"},
+			},
+		},
+		"structural value bounds": {
+			Revision: 3,
+			Findings: []secretsDetectFinding{
+				{Kind: "env-assignment", Start: 0, End: 40, ValueStart: 16, ValueEnd: 40, SuggestedName: "openai-key"},
+			},
+		},
 	}
 	for name, resp := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -202,9 +213,12 @@ func TestSecretsDetect_OverTheWireConformsToContract(t *testing.T) {
 	var got struct {
 		Revision int64 `json:"revision"`
 		Findings []struct {
-			Kind  string `json:"kind"`
-			Start int    `json:"start"`
-			End   int    `json:"end"`
+			Kind          string `json:"kind"`
+			Start         int    `json:"start"`
+			End           int    `json:"end"`
+			ValueStart    int    `json:"valueStart"`
+			ValueEnd      int    `json:"valueEnd"`
+			SuggestedName string `json:"suggestedName"`
 		} `json:"findings"`
 	}
 	if err := json.Unmarshal(resp.Result, &got); err != nil {
@@ -215,6 +229,13 @@ func TestSecretsDetect_OverTheWireConformsToContract(t *testing.T) {
 	}
 	if len(got.Findings) != 1 || got.Findings[0].Kind != "openai" {
 		t.Fatalf("findings = %+v, want one openai", got.Findings)
+	}
+	if got.Findings[0].SuggestedName == "" {
+		t.Errorf("suggestedName = %q, want the backend's SuggestName (a host or a kind)", got.Findings[0].SuggestedName)
+	}
+	if got.Findings[0].ValueStart != got.Findings[0].Start || got.Findings[0].ValueEnd != got.Findings[0].End {
+		t.Errorf("value bounds = [%d,%d), want the whole-match rule's span [%d,%d)",
+			got.Findings[0].ValueStart, got.Findings[0].ValueEnd, got.Findings[0].Start, got.Findings[0].End)
 	}
 	// UTF-16: the emoji before the token is 2 units, so the token's unit
 	// offset is its byte offset minus 2.

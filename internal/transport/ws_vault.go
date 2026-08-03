@@ -533,6 +533,21 @@ type vaultCreateSecretParams struct {
 	Kind  string `json:"kind"`
 	Value string `json:"value,omitempty"`
 	Path  string `json:"path,omitempty"`
+	// Resolve asks for atomic name-collision resolution — the same path
+	// secrets.captureSave takes (vault.CreateNamedResolved) — and for the
+	// name ACTUALLY used in the response. The Secrets page's ordinary
+	// create keeps CreateNamed's exact-name semantics and an empty result.
+	// The renderer must never predict that a suffixed name is free; the
+	// vault is where the real name is decided.
+	Resolve bool `json:"resolve,omitempty"`
+}
+
+// vaultCreateSecretResponse carries the name ACTUALLY used, so a caller
+// that asked for collision resolution (the prompt's ⌘S save) can build the
+// {{secret:NAME}} reference from the vault's answer, never from the name it
+// sent. The Secrets page ignores it.
+type vaultCreateSecretResponse struct {
+	Name string `json:"name"`
 }
 
 // handleVaultCreateSecret stores a secret the user created on the Secrets
@@ -571,15 +586,26 @@ func (s *WSServer) handleVaultCreateSecret(wconn *wsConn, req jsonrpcRequest) {
 		value = contents
 	}
 
-	_, err := s.vaultLifecycle.CreateNamed(context.Background(), credential.NewSecret(value),
-		vault.SecretMeta{Name: params.Name, Kind: params.Kind})
-	if err != nil {
-		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "vault.createSecret: ", err))
-		return
+	name := params.Name
+	if params.Resolve {
+		_, realName, err := s.vaultLifecycle.CreateNamedResolved(context.Background(), credential.NewSecret(value),
+			vault.SecretMeta{Name: params.Name, Kind: params.Kind})
+		if err != nil {
+			_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "vault.createSecret: ", err))
+			return
+		}
+		name = realName
+	} else {
+		_, err := s.vaultLifecycle.CreateNamed(context.Background(), credential.NewSecret(value),
+			vault.SecretMeta{Name: params.Name, Kind: params.Kind})
+		if err != nil {
+			_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "vault.createSecret: ", err))
+			return
+		}
 	}
 
 	s.broadcastVaultChanged()
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(struct{}{})))
+	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(vaultCreateSecretResponse{Name: name})))
 }
 
 // readKeyFile reads the file the user chose in Path mode. A leading ~ is
