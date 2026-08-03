@@ -21,6 +21,11 @@ type resolvedConfig struct {
 	rows         uint16
 	xpixel       uint16
 	ypixel       uint16
+	// remoteCommand is the destination's RemoteCommand directive, empty when
+	// unset. When non-empty, OpenSSH refuses a command-line remote command
+	// alongside it, so openShell runs it as-is and never sends a launcher
+	// (spec §4.2, nocx-r52q).
+	remoteCommand string
 }
 
 // resolveConfig merges ~/.ssh/config values (via the injected ConfigResolver)
@@ -64,6 +69,9 @@ func (rc *RealClient) resolveConfig(ctx context.Context, host string, cfg *Conne
 		}
 		if hostCfg.IdentityFile != "" {
 			resolved.identityFile = hostCfg.IdentityFile
+		}
+		if hostCfg.RemoteCommand != "" {
+			resolved.remoteCommand = hostCfg.RemoteCommand
 		}
 	}
 

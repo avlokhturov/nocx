@@ -501,9 +501,46 @@ func hashedPatternMatches(pattern, normalizedHost string) bool {
 	return hmac.Equal(mac.Sum(nil), want)
 }
 
-// openShell opens a session, requests a PTY, optionally requests agent
-// forwarding, and starts a shell.
-func (rc *RealClient) openShell(ctx context.Context, gclient *gossh.Client, resolved *resolvedConfig, cfg *ConnectConfig) (*RealChannel, error) {
+// shellStartCommand decides what the remote session runs and whether shell
+// integration happened. Precedence:
+//
+//  1. A RemoteCommand configured for the destination wins outright: OpenSSH
+//     refuses a command-line remote command alongside it ("Cannot execute
+//     command-line and remote command"), so the configured command runs
+//     as-is and no launcher or installer is consulted (spec §4.2).
+//  2. The launcher (nocx-xs1d) builds the integrated start command. The far
+//     shell is unknown at this layer — nothing yet tells us reliably which
+//     shell is at the far end — so ShellBash is passed as a temporary
+//     default, not a decision, and the launcher refuses what it cannot do.
+//     A decline (or a contract-violating result) falls back to a plain shell
+//     with the reason: an ordinary, usable terminal with a visible native
+//     prompt is absolute, no failure path may suppress it (ADR-0004:60).
+//  3. The legacy RemoteInstaller is an explicit opt-in only — never the
+//     default. It installs scripts via SFTP and returns its own start
+//     command; the later opt-in persistent-install task reworks it.
+//  4. Nothing wired: a plain shell, reason none.
+func (rc *RealClient) shellStartCommand(ctx context.Context, gclient *gossh.Client, resolved *resolvedConfig, cfg *ConnectConfig) (string, RefusalReason) {
+	if resolved.remoteCommand != "" {
+		return resolved.remoteCommand, ReasonRemoteCommand
+	}
+
+	if cfg.RemoteLauncher != nil {
+		cmd, reason, ok := cfg.RemoteLauncher.StartCommand(ShellBash, LaunchOptions{
+			SessionID: cfg.SessionID,
+			Enhanced:  cfg.Enhanced,
+		})
+		if ok && cmd != "" {
+			return cmd, ReasonNone
+		}
+		// Decline or degenerate result: fall back to a plain shell. Normalize
+		// a missing reason so the degrade stays visible in the product
+		// (AGENTS.md: a soft degrade must never be log-only).
+		if reason == "" {
+			reason = ReasonUnsupportedShell
+		}
+		return "", reason
+	}
+
 	if cfg.RemoteInstaller != nil {
 		remoteHome, err := cfg.RemoteInstaller.GetRemoteHome(gclient)
 		if err != nil {
@@ -513,7 +550,16 @@ func (rc *RealClient) openShell(ctx context.Context, gclient *gossh.Client, reso
 			rc.log.Warn("ssh: shell integration install failed",
 				"host", resolved.hostName, "error", err)
 		}
+		return cfg.RemoteInstaller.RemoteStartCommand(), ReasonNone
 	}
+
+	return "", ReasonNone
+}
+
+// openShell opens a session, requests a PTY, optionally requests agent
+// forwarding, and starts a shell.
+func (rc *RealClient) openShell(ctx context.Context, gclient *gossh.Client, resolved *resolvedConfig, cfg *ConnectConfig) (*RealChannel, error) {
+	startCmd, reason := rc.shellStartCommand(ctx, gclient, resolved, cfg)
 
 	session, err := gclient.NewSession()
 	if err != nil {
@@ -555,8 +601,8 @@ func (rc *RealClient) openShell(ctx context.Context, gclient *gossh.Client, reso
 		return nil, fmt.Errorf("stdout pipe: %w", err)
 	}
 
-	if cfg.RemoteInstaller != nil {
-		if err := session.Start(cfg.RemoteInstaller.RemoteStartCommand()); err != nil {
+	if startCmd != "" {
+		if err := session.Start(startCmd); err != nil {
 			_ = session.Close()
 			return nil, fmt.Errorf("shell start: %w", err)
 		}
@@ -568,11 +614,12 @@ func (rc *RealClient) openShell(ctx context.Context, gclient *gossh.Client, reso
 	}
 
 	ch := &RealChannel{
-		log:     rc.log.With("remote", resolved.hostName),
-		session: session,
-		stdin:   stdin,
-		stdout:  stdout,
-		done:    make(chan struct{}),
+		log:                    rc.log.With("remote", resolved.hostName),
+		session:                session,
+		stdin:                  stdin,
+		stdout:                 stdout,
+		done:                   make(chan struct{}),
+		shellIntegrationReason: reason,
 		closeCb: func() {
 			_ = session.Close()
 		},
