@@ -16,6 +16,7 @@ import (
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/shellintegration"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/tunnel"
 	"github.com/shady2k/nocx/internal/vault"
@@ -1589,4 +1590,133 @@ func TestTunnel_OverTheWireConformsToContract(t *testing.T) {
 		t.Fatalf("tunnel.stop: %+v", stopResp.Error)
 	}
 	validateJSON(t, stopSchema, stopResp.Result, "tunnel.stop result")
+}
+
+// ── shell.integrate ────────────────────────────────────────────────────────
+
+// The DTO's own conformance: field tags and wire names, so the Go struct
+// marshals to something the schema accepts.
+func TestShellIntegrate_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "shell.integrate.schema.json")
+	raw, err := json.Marshal(shellIntegrateResult{
+		Wrapper:    "saved=$(stty -g); NOCX_IB_SRC=$(mktemp \"${TMPDIR:-/tmp}/nocx-ib.XXXXXX\" 2>/dev/null) && stty raw -echo && printf '\\033]1337;NOCX_IB_READY\\a' && sed -n '/^NOCX_IB_EOF$/q;p' > \"$NOCX_IB_SRC\"; stty \"$saved\"; rm -f \"$NOCX_IB_SRC\" 2>/dev/null",
+		Payload:    "# nocx in-band integration — dispatcher (POSIX sh).\n# nocx-ib-complete\n",
+		Terminator: "NOCX_IB_EOF",
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "shell.integrate DTO")
+}
+
+// The real method through the real socket, backed by the REAL
+// *shellintegration.Impl — no fake, because the plan the renderer streams
+// must be the plan the product builds. Nothing here names a field, so
+// nothing here can omit one; the schema's additionalProperties:false plus
+// required makes the key set exact in both directions.
+func TestShellIntegrate_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "shell.integrate.schema.json")
+	ctx := context.Background()
+
+	ws := NewWSServer(
+		log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithInBandBootstrapper(shellintegration.New(nil)),
+	)
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	// Open a local session the way the renderer does: the id that comes
+	// back is the server-authoritative one (AD-7) shell.integrate must
+	// accept.
+	openResp := vaultCall(t, conn, "open", map[string]any{
+		"cols": 80, "rows": 24, "xpixel": 0, "ypixel": 0,
+	}, 1)
+	if openResp.Error != nil {
+		t.Fatalf("open: %+v", openResp.Error)
+	}
+	var opened struct {
+		SessionID string `json:"sessionId"`
+	}
+	if err := json.Unmarshal(openResp.Result, &opened); err != nil {
+		t.Fatalf("decode open result: %v", err)
+	}
+	if opened.SessionID == "" {
+		t.Fatal("open result carried no sessionId")
+	}
+
+	resp := vaultCall(t, conn, "shell.integrate", map[string]any{"sessionId": opened.SessionID}, 2)
+	if resp.Error != nil {
+		t.Fatalf("shell.integrate: %+v", resp.Error)
+	}
+	validateJSON(t, schema, resp.Result, "shell.integrate result (real socket)")
+
+	// The plan is the real plan: decode and name the parts the renderer
+	// executes, not fields the test built.
+	var got struct {
+		Wrapper    string `json:"wrapper"`
+		Payload    string `json:"payload"`
+		Terminator string `json:"terminator"`
+	}
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatalf("decode shell.integrate result: %v", err)
+	}
+	if !strings.Contains(got.Wrapper, "saved=$(stty -g)") || !strings.Contains(got.Wrapper, `stty "$saved"`) {
+		t.Errorf("wrapper lacks the exact save/restore fence: %q", got.Wrapper)
+	}
+	if !strings.Contains(got.Payload, "# nocx-ib-complete") {
+		t.Errorf("payload lacks the completion marker: %q", got.Payload)
+	}
+	if got.Terminator != "NOCX_IB_EOF" {
+		t.Errorf("terminator = %q, want NOCX_IB_EOF", got.Terminator)
+	}
+
+	// A well-formed session id the registry does not know is refused:
+	// session identity is server-authoritative (AD-7).
+	unknown := vaultCall(t, conn, "shell.integrate", map[string]any{
+		"sessionId": "0123456789abcdef0123456789abcdef",
+	}, 3)
+	if unknown.Error == nil || unknown.Error.Code != -32602 {
+		t.Fatalf("unknown sessionId: got %+v, want -32602", unknown.Error)
+	}
+
+	// Missing params are rejected before anything is built.
+	missing := vaultCall(t, conn, "shell.integrate", map[string]any{}, 4)
+	if missing.Error == nil || missing.Error.Code != -32602 {
+		t.Fatalf("missing sessionId: got %+v, want -32602", missing.Error)
+	}
+}
+
+// Not wired: shell.integrate must fail closed (-32603), never build a plan
+// without the capability.
+func TestShellIntegrate_NotWiredFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)))
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	openResp := vaultCall(t, conn, "open", map[string]any{
+		"cols": 80, "rows": 24, "xpixel": 0, "ypixel": 0,
+	}, 1)
+	if openResp.Error != nil {
+		t.Fatalf("open: %+v", openResp.Error)
+	}
+	var opened struct {
+		SessionID string `json:"sessionId"`
+	}
+	if err := json.Unmarshal(openResp.Result, &opened); err != nil {
+		t.Fatalf("decode open result: %v", err)
+	}
+
+	resp := vaultCall(t, conn, "shell.integrate", map[string]any{"sessionId": opened.SessionID}, 2)
+	if resp.Error == nil || resp.Error.Code != -32603 {
+		t.Fatalf("unwired shell.integrate: got %+v, want -32603", resp.Error)
+	}
 }

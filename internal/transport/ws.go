@@ -171,6 +171,10 @@ type WSServer struct {
 	// nil, the ports.* methods return a JSON-RPC error and the cadence hooks
 	// are no-ops.
 	discoverySched *discovery.Scheduler
+	// inBand builds the in-band bootstrap plan for shell.integrate
+	// (nocx-ynsx). When nil, the method returns a JSON-RPC error; the
+	// transport never constructs the capability itself.
+	inBand InBandBootstrapper
 
 	// tunnelMu guards tunnels and ownerTunnels. tunnels is the backend
 	// id → tunnel map backing tunnel.stop; ownerTunnels scopes teardown to
@@ -900,6 +904,8 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.handleHistoryRecord(ctx, wconn, state, req)
 	case "fs.complete":
 		s.handleFsComplete(wconn, req)
+	case "shell.integrate":
+		s.handleShellIntegrate(wconn, req)
 	case "vault.status", "vault.setup", "vault.unseal", "vault.seal",
 		"vault.changePassphrase", "vault.regenerateRecovery", "vault.setDefaultProvider",
 		"vault.setAutoSeal", "vault.activity", "vault.inventory",

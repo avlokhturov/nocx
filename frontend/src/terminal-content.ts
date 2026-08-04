@@ -45,9 +45,17 @@ import { hasOpenOverlays } from './ui/overlay/stack'
 import { BaseTabContent, type TabHost, type ContentViewport } from './tab-content'
 import { type ProfileClient, type SSHAliasEntry } from './profiles'
 import { RpcError } from './dispatcher'
+import { FloatingPanel } from './ui/floating-panel'
+import { ShellClient } from './shell-client'
+import type { ShellIntegrateResult } from './generated/shell.integrate'
 
 // How long the grid must hold still before the PTY is told about it.
 const RESIZE_SETTLE_MS = 80
+
+// How long an in-band integration attempt may run before the lease is
+// released (spec §4.4). Generous on purpose: a slow shell startup or a busy
+// pty must never truncate a stream mid-delivery; the wrapper itself is fast.
+const IN_BAND_TIMEOUT_MS = 15_000
 
 /**
  * How long output is treated as the shell's answer to a resize rather than as
@@ -199,6 +207,30 @@ export class TerminalContent extends BaseTabContent {
   private _editorOwned = false
   /** In-flight alias-fetch counter — generation for stale-request gating. */
   private _aliasFetchId = 0
+
+  // ── In-band integration (nocx-ynsx, spec §4.4) ─────────────────────
+  /** True while an in-band integration lease is held; rejects re-entry. */
+  private _integrating = false
+  /** The OSC 1337 READY listener of the in-flight attempt. */
+  private _inBandReadyUnsub: (() => void) | null = null
+  /** The editor draft (text, selection, scroll) captured at lease start;
+   *  restored byte-for-byte on completion, cancel, timeout and error. */
+  private _inBandDraft: { text: string; from: number; to: number; scrollTop: number } | null = null
+  /** Capture-phase keydown that swallows every key except Esc while the
+   *  lease is held — no user keystroke may interleave with the bootstrap. */
+  private _inBandKeySwallow: ((e: KeyboardEvent) => void) | null = null
+  /** The "Integrating this shell…" indicator (kit FloatingPanel). */
+  private _inBandPanel: FloatingPanel | null = null
+  /** Fires at the next OSC 133 A — the wrapper finished and the shell is
+   *  back at a prompt. */
+  private _inBandDone: (() => void) | null = null
+  /** The plan's terminator, known once the RPC answered. */
+  private _inBandTerminator: string | null = null
+  /** READY was received: the wrapper is inside sed and only the terminator
+   *  can unblock it. */
+  private _inBandReadySeen = false
+  /** Overall attempt deadline; Esc cancels before it. */
+  private _inBandTimer: number | undefined
 
   // ── Title composition ────────────────────────────────────────────────
   // Title = programTitle || cwdTitle (no placeholder — nocx-83a)
@@ -606,6 +638,14 @@ export class TerminalContent extends BaseTabContent {
         // the unstructured full-pane mode is never used again.
         shellIntegrated = true
         this.inputState.dispatch({ type: 'marker', kind: marker.kind })
+        // Completion of an in-band integration: the first A after the
+        // wrapper ran means the wrapper restored termios, sourced the
+        // hooks and returned — the shell is back at a prompt.
+        if (marker.kind === 'A' && this._inBandDone) {
+          const done = this._inBandDone
+          this._inBandDone = null
+          done()
+        }
         if (marker.kind === 'D' && marker.exitCode !== undefined) {
           this._lastExitCode = marker.exitCode
         }
@@ -1210,8 +1250,185 @@ export class TerminalContent extends BaseTabContent {
     this.renderer?.refreshAtlas()
   }
 
+  // ── In-band integration (nocx-ynsx, spec §4.4) ─────────────────────────
+
+  /**
+   * Integrate the shell currently at the trusted prompt, in-band.
+   *
+   * Permitted ONLY while nocx holds a trusted A→B prompt from the current
+   * integrated shell (PROMPT_READY && trusted && owned): consent changes
+   * authorisation, not the identity of the foreground process — if the
+   * thing reading stdin is vim, the payload would be typed into the file.
+   * Anything else is refused with a stated reason rather than attempted.
+   *
+   * An input lease is taken before any byte goes out: the editor draft is
+   * captured byte-for-byte, the editor hides, every key except Esc is
+   * swallowed at document capture phase, and Esc cancels by sending the
+   * terminator. The wrapper is typed only once the lease is held.
+   */
+  integrateShell(): void {
+    if (this._integrating) return
+    const state = this.inputState.state
+    if (state !== 'PROMPT_READY' || !this.inputState.trusted || !this.inputState.owned) {
+      const why =
+        state === 'PROMPT_READY'
+          ? 'Integrate this shell is only available from a trusted prompt'
+          : `Integrate this shell is only available at a trusted prompt, not while ${state}`
+      showToast({ level: 'warning', message: why, duration: 4000 })
+      log.warn('nocx: shell.integrate refused', {
+        state,
+        trusted: this.inputState.trusted,
+        owned: this.inputState.owned,
+      })
+      return
+    }
+    void this._runIntegration()
+  }
+
+  private async _runIntegration(): Promise<void> {
+    const session = this.session
+    const renderer = this.renderer
+    const editor = this.editor
+    if (!session || !renderer || !editor) return
+
+    // The lease, taken BEFORE the plan is fetched: the user cannot type
+    // while the RPC is in flight, and the draft is exactly what it was
+    // when they asked.
+    const sel = editor.getSelection()
+    this._inBandDraft = {
+      text: editor.getDoc(),
+      from: sel.from,
+      to: sel.to,
+      scrollTop: editor.getScrollTop(),
+    }
+    this._integrating = true
+    editor.hide()
+    renderer.setReadOnly(true)
+    this._inBandKeySwallow = (e: KeyboardEvent) => {
+      // Keys aimed at another tab go to that tab's shell — they cannot
+      // reach this pty, so only this tab's keystrokes could interleave.
+      if (!this._active) return
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        e.stopPropagation()
+        this._cancelIntegration()
+        return
+      }
+      // Swallow everything else at capture phase: no keystroke may reach
+      // the shell while the wrapper runs raw.
+      e.preventDefault()
+      e.stopPropagation()
+    }
+    document.addEventListener('keydown', this._inBandKeySwallow, true)
+
+    // The indicator floats in the terminal itself — the editor, its usual
+    // host, is hidden for the lease.
+    const panel = new FloatingPanel({
+      variant: 'recall',
+      role: 'status',
+      ariaLabel: 'shell integration',
+    })
+    panel.mount(this.scrollback?.xtermLiveContainer ?? editor.root)
+    panel.showEmpty('Integrating this shell — Esc to cancel')
+    this._inBandPanel = panel
+
+    this._inBandTimer = setTimeout(() => {
+      if (this._inBandReadySeen) this._sendTerminator()
+      this._finishIntegration('timed out')
+    }, IN_BAND_TIMEOUT_MS)
+
+    let plan: ShellIntegrateResult
+    try {
+      plan = await new ShellClient(this.client).integrate(session.sessionId)
+    } catch {
+      // Nothing was typed yet — the wrapper never ran. Release the lease
+      // and report; the shell is untouched (fail-open).
+      this._finishIntegration('plan fetch failed')
+      showToast({
+        level: 'danger',
+        message: 'Could not fetch the integration plan',
+        duration: 4000,
+      })
+      return
+    }
+    if (!this._integrating) return // cancelled while the plan was in flight
+
+    this._inBandTerminator = plan.terminator
+    this._inBandReadyUnsub = renderer.onInBandReady(() => {
+      // READY proves `stty raw -echo` is on: the payload can be streamed
+      // without being printed to the user.
+      this._inBandReadyUnsub?.()
+      this._inBandReadyUnsub = null
+      this._inBandReadySeen = true
+      session.send(plan.payload + plan.terminator + '\n')
+      // Completion is the next A marker: the wrapper sourced the hooks
+      // and the shell is back at its prompt.
+      this._inBandDone = () => this._finishIntegration('done')
+    })
+    session.send(plan.wrapper + '\r')
+  }
+
+  /** The cancel shape the wrapper's sed recognises: a newline, the
+   *  terminator LINE and a newline (mirrors the pty-test cancel). */
+  private _sendTerminator(): void {
+    if (this._inBandTerminator === null) return
+    this.session?.send('\n' + this._inBandTerminator + '\n')
+  }
+
+  private _cancelIntegration(): void {
+    if (!this._integrating) return
+    this._inBandReadyUnsub?.()
+    this._inBandReadyUnsub = null
+    // If READY was seen, the wrapper is inside sed: the terminator is the
+    // only way to unblock it, and its own `stty "$saved"` restore then
+    // runs. If READY was never seen the wrapper already failed or returned
+    // on its own — sending a terminator would only print a stray line at
+    // the prompt (fail-open noise).
+    if (this._inBandReadySeen) this._sendTerminator()
+    this._finishIntegration('cancelled')
+  }
+
+  private _finishIntegration(reason: string): void {
+    if (!this._integrating) return
+    this._integrating = false
+    this._inBandReadyUnsub?.()
+    this._inBandReadyUnsub = null
+    this._inBandDone = null
+    if (this._inBandTimer !== undefined) {
+      clearTimeout(this._inBandTimer)
+      this._inBandTimer = undefined
+    }
+    if (this._inBandKeySwallow) {
+      document.removeEventListener('keydown', this._inBandKeySwallow, true)
+      this._inBandKeySwallow = null
+    }
+    this._inBandPanel?.destroy()
+    this._inBandPanel = null
+    // Restore the draft byte-for-byte. The machine re-shows the editor at
+    // the next B; when no marker followed (early cancel), restore the
+    // visibility the machine still declares.
+    const draft = this._inBandDraft
+    this._inBandDraft = null
+    if (draft && this.editor) {
+      this.editor.replaceDoc(draft.text, draft.from, draft.to)
+      this.editor.setScrollTop(draft.scrollTop)
+    }
+    this._inBandTerminator = null
+    this._inBandReadySeen = false
+    if (this.editor && shouldShowEditor(this.inputState.owned, this.nativeMode)) {
+      this.editor.show()
+      this.renderer?.setReadOnly(true)
+    }
+    log.info('nocx: in-band integration finished', { reason })
+  }
+
   dispose(): void {
     this._disposed = true
+    if (this._integrating) {
+      // Release the lease before the editor/renderer are torn down; the
+      // wrapper (if any was typed) still restores termios on its own.
+      this._finishIntegration('tab disposed')
+    }
     this.mountAbortController?.abort()
     if (this._globalKeydown) {
       document.removeEventListener('keydown', this._globalKeydown)

@@ -670,6 +670,15 @@ export class TabManager {
     if (this.activeTab) this.closeTab(this.activeTab)
   }
 
+  /** The active tab's terminal content, when the active tab is a terminal.
+   *  Global actions (the quick-connect "Integrate this shell" item,
+   *  nocx-ynsx) reach the shell at the current prompt through this; the
+   *  content itself owns the PROMPT_READY && trusted && owned gate. */
+  activeTerminalContent(): TerminalContent | null {
+    const content = this.activeTab?.content
+    return content instanceof TerminalContent ? content : null
+  }
+
   reorderTab(draggedId: number, targetId: number): void {
     const draggedIndex = this.tabs.findIndex((t) => t.id === draggedId)
     const targetIndex = this.tabs.findIndex((t) => t.id === targetId)

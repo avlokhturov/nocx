@@ -36,6 +36,15 @@ export class InputStateController {
     return this.machine.trusted
   }
 
+  // owned reports whether the DOM editor currently holds keyboard
+  // ownership (ADR-0006 §4): granted only by a clean A→B, cleared by
+  // submit/C/alt-buffer/reset/exit. The in-band integration gate is
+  // PROMPT_READY && trusted && owned (nocx-ynsx) — consent changes
+  // authorisation, not the identity of the foreground process.
+  get owned(): boolean {
+    return this.machine.owned
+  }
+
   dispatch(e: InputEvent): void {
     const next = reduce(this.machine, e)
     if (
