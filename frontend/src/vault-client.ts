@@ -239,4 +239,14 @@ export class VaultClient {
   activity(): Promise<Record<string, never>> {
     return this.dispatcher.call('vault.activity', {})
   }
+
+  /** Report the outcome of a backend-initiated unlock request.
+   *  Sent after the user unlocks or cancels the dialog shown for a
+   *  vault.unlockRequest notification. */
+  unlockResolved(params: {
+    requestId: string
+    outcome: 'unsealed' | 'cancelled'
+  }): Promise<Record<string, never>> {
+    return this.dispatcher.call('vault.unlockResolved', params)
+  }
 }

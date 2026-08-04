@@ -41,6 +41,12 @@ type App struct {
 	Profiles         profile.ProfileRepository
 	Credentials      credential.SecretStore
 
+	// UnlockRequester lets backend code request a vault unlock from the
+	// user (the second direction, nocx-25k9.22). Behind an interface so
+	// app.New() never reaches into the transport directly (AD-8). Set
+	// from the transport after construction.
+	UnlockRequester transport.UnlockRequester
+
 	// vaultCloser releases the vault's background worker and seals it at
 	// shutdown. Held as a minimal interface rather than *vault.Vault so the
 	// composition root keeps depending on behaviour instead of a type.
@@ -301,12 +307,6 @@ func New(opts ...Option) (*App, error) {
 	// Profile service: single validated write path for profiles and groups.
 	// Used by the import handlers and version transitions.
 	profileSvc := profile.NewProfileService(profileStore)
-	// One resolver, one consumer family: connections.test probes and
-	// ordinary connects resolve identically.
-	resolver := connection.NewResolver(
-		profileStore, profileStore, v,
-		connection.WithConfigResolver(sshCfgResolver),
-	)
 
 	tpOpts := []transport.WSServerOption{
 		transport.WithProfileRepository(profileStore),
@@ -314,7 +314,6 @@ func New(opts ...Option) (*App, error) {
 		transport.WithCredentialStore(v),
 		transport.WithVaultLifecycle(v),
 		transport.WithVaultReset(vaultreset.New(v, profileStore, slogger)),
-		transport.WithProfileResolver(resolver),
 		transport.WithSettingsRegistry(settingsRegistry),
 		transport.WithProfileUsageStore(usageStore),
 		transport.WithExportPaths(paths),
@@ -376,6 +375,17 @@ func New(opts ...Option) (*App, error) {
 	}
 	tp := transport.NewWSServer(logger, sess, tpOpts...)
 
+	// One resolver, one consumer family: connections.test probes and
+	// ordinary connects resolve identically. Created after tp so the
+	// UnlockRequester (the second direction, nocx-25k9.22) can be wired
+	// into every ConnectConfig the resolver builds.
+	resolver := connection.NewResolver(
+		profileStore, profileStore, v,
+		connection.WithConfigResolver(sshCfgResolver),
+		connection.WithUnlockRequester(tp.RequestUnlock),
+	)
+	tp.SetProfileResolver(resolver)
+
 	app := &App{
 		Logger:           logger,
 		Pty:              ptf,
@@ -386,6 +396,7 @@ func New(opts ...Option) (*App, error) {
 		Credentials:      v,
 		vaultCloser:      v,
 		discoverySched:   discoverySched,
+		UnlockRequester:  tp,
 	}
 
 	logger.Info("application initialized")

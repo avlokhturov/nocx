@@ -211,6 +211,14 @@ type ConnectConfig struct {
 	// from frontend code.
 	Secrets  credential.SecretStore
 	SecretID credential.SecretID
+	// UnlockRequester is called by auth callbacks when Secrets.Get returns
+	// ErrVaultSealed. It should show the unlock prompt and return nil on
+	// success, or an error if the unlock was refused / not possible.
+	// When nil, a sealed vault is reported as an auth failure (the
+	// existing dispatcher.onVaultSealed path catches it for foreground
+	// RPCs; this field covers background goroutines like forward replay).
+	UnlockRequester func(ctx context.Context, reason string) error
+
 	// PassphraseSecretID is the opaque reference to the stored key
 	// passphrase in the SecretStore.
 	PassphraseSecretID credential.SecretID

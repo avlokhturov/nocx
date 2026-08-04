@@ -197,6 +197,11 @@ type WSServer struct {
 	connsMu sync.Mutex
 	conns   map[*wsConn]struct{}
 
+	// unlockMu protects pendingUnlocks. Pending backend-initiated unlock
+	// requests, keyed by server-assigned opaque request id.
+	unlockMu       sync.Mutex
+	pendingUnlocks map[string]*pendingUnlock
+
 	// planMu guards planStore. Plans are decrypted import plans keyed by
 	// opaque token, stored server-side so secrets never reach the renderer.
 	planMu    sync.Mutex
@@ -317,6 +322,14 @@ type ProfileResolver interface {
 // WithProfileResolver attaches a profile resolver for SSH connection setup.
 func WithProfileResolver(r ProfileResolver) WSServerOption {
 	return func(s *WSServer) { s.resolver = r; s.resolverOK = true }
+}
+
+// SetProfileResolver sets the profile resolver post-construction. Used when
+// the resolver depends on the transport (e.g. for UnlockRequester wiring)
+// and must be created after the transport exists.
+func (s *WSServer) SetProfileResolver(r ProfileResolver) {
+	s.resolver = r
+	s.resolverOK = true
 }
 
 // WithSSHConfigResolver attaches the SSH config resolver and config path
@@ -951,6 +964,8 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.handleVaultResetPreview(wconn, req)
 	case "vault.reset":
 		s.handleVaultReset(wconn, req)
+	case "vault.unlockResolved":
+		s.handleUnlockResolved(wconn, req)
 	default:
 		resp := newJSONRPCError(req.ID, -32601, "Method not found")
 		_ = wconn.writeJSON(resp)

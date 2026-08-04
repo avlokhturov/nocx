@@ -25,6 +25,10 @@ type Resolver struct {
 	profiles profile.ProfileRepository
 	groups   profile.GroupRepository
 	secrets  credential.SecretStore
+	// unlockRequester is called by auth callbacks when a secret read
+	// fails because the vault is sealed. Behind a function so the ssh
+	// package never imports transport (AD-8).
+	unlockRequester func(ctx context.Context, reason string) error
 	// configResolver resolves ~/.ssh/config directives using ssh -G.
 	// Injected at the composition root, shared with the RealClient so both
 	// sides of the authorization comparison go through the same resolution.
@@ -37,6 +41,12 @@ type ResolverOption func(*Resolver)
 
 func WithConfigResolver(resolver ssh.ConfigResolver) ResolverOption {
 	return func(r *Resolver) { r.configResolver = resolver }
+}
+
+// WithUnlockRequester sets the callback to request vault unlock from the
+// user. Wired from the transport at the composition root.
+func WithUnlockRequester(fn func(ctx context.Context, reason string) error) ResolverOption {
+	return func(r *Resolver) { r.unlockRequester = fn }
 }
 
 // NewResolver creates a Resolver backed by the given stores.
@@ -161,6 +171,7 @@ func (r *Resolver) buildConfig(prof *profile.SSHProfile, visited map[string]bool
 	// effective profile, one per auth method (ADR-0017 §1).
 	if o.PasswordSecret != "" || o.KeySecret != "" || o.KeyPassphraseSecret != "" {
 		cfg.Secrets = r.secrets
+		cfg.UnlockRequester = r.unlockRequester
 	}
 	if o.PasswordSecret != "" {
 		cfg.SecretID = credential.SecretID(o.PasswordSecret)
@@ -214,6 +225,7 @@ func (r *Resolver) buildConfig(prof *profile.SSHProfile, visited map[string]bool
 			cfg.JumpSecrets = jumpCfg.Secrets
 			cfg.JumpSecretID = jumpCfg.SecretID
 			cfg.JumpPassphraseSecretID = jumpCfg.PassphraseSecretID
+			cfg.UnlockRequester = r.unlockRequester
 			// Authorized endpoint for the jump credential: resolved through
 			// ~/.ssh/config, same as the target credential.
 			jumpAuthHost := r.resolveProfileHost(jumpProf.Options.Host)

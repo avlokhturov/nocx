@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/vault.unlockRequest.schema.json",
+  "title": "VaultUnlockRequest",
+  "description": "Params of the vault.unlockRequest server-to-client notification. The backend requests an unlock, naming why; the renderer turns this into the unlock dialog.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["requestId", "reason"],
+  "properties": {
+    "requestId": {
+      "description": "Server-assigned opaque id that the vault.unlockResolved response echoes back.",
+      "type": "string"
+    },
+    "reason": {
+      "description": "Why the unlock is needed, for the dialog's context line. A human-readable sentence, never a code.",
+      "type": "string"
+    }
+  }
+}
