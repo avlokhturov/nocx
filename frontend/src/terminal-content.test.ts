@@ -45,6 +45,12 @@ vi.mock('./renderers/xterm', () => ({
   XtermRenderer: vi.fn(createRendererMock),
 }))
 
+// The refusal path calls showToast, which mounts a Solid root; the
+// export-section tests mock the module the same way.
+vi.mock('./ui/toast', () => ({
+  showToast: vi.fn(),
+}))
+
 /**
  * TerminalContent keeps the editor private; tests need the live instance the
  * mount created (same escape hatch editor.test.ts uses for the CM6 view).
@@ -769,6 +775,144 @@ describe('the live prompt says where Enter will land (nocx-3779)', () => {
       expect(tab.pane.querySelector('.cmd-header-location')).toBeNull()
     } finally {
       restoreScroll()
+      teardown()
+    }
+  })
+})
+
+describe('in-band integration (nocx-ynsx)', () => {
+  // The plan shape the backend serves; the assertions only ever compare
+  // against this fixture, never against a field the test invented.
+  const plan = {
+    wrapper:
+      'saved=$(stty -g); NOCX_IB_SRC=$(mktemp) && stty raw -echo && printf "\\033]1337;NOCX_IB_READY\\a" && sed -n "/^NOCX_IB_EOF$/q;p" > "$NOCX_IB_SRC"; stty "$saved"',
+    payload: '# nocx in-band integration — dispatcher\n# nocx-ib-complete\n',
+    terminator: 'NOCX_IB_EOF',
+  }
+
+  const clientWithPlan = (): ClientFake => makeClient({ call: vi.fn().mockResolvedValue(plan) })
+
+  /** Drive the machine to a trusted owned prompt the way markers do. */
+  const trustedPrompt = (renderer: RendererMock): void => {
+    renderer._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
+    renderer._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
+  }
+
+  const sessionSend = (content: TerminalContent): ReturnType<typeof vi.fn> => {
+    const withSession = content as unknown as { session: SessionFake }
+    return withSession.session.send
+  }
+
+  it('refuses outside a trusted prompt and types nothing', async () => {
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, clientWithPlan())
+    try {
+      content.setVisible(true)
+      const send = sessionSend(content)
+      // Fresh mount: RAW, untrusted, unowned.
+      content.integrateShell()
+      expect(send).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a trusted but unowned prompt is refused too', async () => {
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, clientWithPlan())
+    try {
+      content.setVisible(true)
+      const renderer = rendererOf(content)
+      // A alone: PROMPT_READY, trusted, but NOT owned (ADR-0006 §4).
+      renderer._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
+      const send = sessionSend(content)
+      content.integrateShell()
+      expect(send).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('streams the payload only after READY and restores the draft byte-for-byte', async () => {
+    const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, clientWithPlan())
+    try {
+      content.setVisible(true)
+      const renderer = rendererOf(content)
+      trustedPrompt(renderer)
+      ed.insertText('echo half-typed')
+      const draft = ed.getDoc()
+
+      content.integrateShell()
+      const send = sessionSend(content)
+      await vi.waitFor(() => expect(send).toHaveBeenCalledWith(plan.wrapper + '\r'))
+      // The lease hides the editor while the wrapper runs.
+      expect(ed.isVisible).toBe(false)
+
+      // No user byte interleaves: a printable key at document level is
+      // swallowed at capture phase, never sent to the pty.
+      const key = new KeyboardEvent('keydown', { key: 'x', cancelable: true, bubbles: true })
+      document.dispatchEvent(key)
+      expect(key.defaultPrevented).toBe(true)
+      expect(send.mock.calls.every((call) => call[0] !== 'x')).toBe(true)
+
+      // READY proves raw -echo is on: only now does the payload flow.
+      renderer._fireInBandReady()
+      expect(send).toHaveBeenCalledWith(plan.payload + plan.terminator + '\n')
+
+      // The next A completes the attempt; B re-shows the editor with the
+      // byte-for-byte draft.
+      renderer._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
+      renderer._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
+      await vi.waitFor(() => expect(ed.isVisible).toBe(true))
+      expect(ed.getDoc()).toBe(draft)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('Esc cancels via the terminator and restores the draft', async () => {
+    const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, clientWithPlan())
+    try {
+      content.setVisible(true)
+      const renderer = rendererOf(content)
+      trustedPrompt(renderer)
+      ed.insertText('echo keep me')
+      const draft = ed.getDoc()
+
+      content.integrateShell()
+      const send = sessionSend(content)
+      await vi.waitFor(() => expect(send).toHaveBeenCalledWith(plan.wrapper + '\r'))
+      renderer._fireInBandReady()
+      expect(send).toHaveBeenCalledWith(plan.payload + plan.terminator + '\n')
+
+      // Esc sends the terminator alone — the pty-test cancel shape — and
+      // the shell's own `stty "$saved"` restore runs on the other end.
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', cancelable: true, bubbles: true }),
+      )
+      expect(send).toHaveBeenCalledWith('\n' + plan.terminator + '\n')
+      // No marker followed, so the machine still declares ownership: the
+      // editor comes straight back with the byte-for-byte draft.
+      await vi.waitFor(() => expect(ed.isVisible).toBe(true))
+      expect(ed.getDoc()).toBe(draft)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a failed plan fetch releases the lease and types nothing', async () => {
+    const client = makeClient({ call: vi.fn().mockRejectedValue(new Error('backend down')) })
+    const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      content.setVisible(true)
+      trustedPrompt(rendererOf(content))
+      ed.insertText('echo safe')
+      const draft = ed.getDoc()
+
+      content.integrateShell()
+      const send = sessionSend(content)
+      await vi.waitFor(() => expect(ed.isVisible).toBe(true))
+      expect(send).not.toHaveBeenCalled()
+      expect(ed.getDoc()).toBe(draft)
+    } finally {
       teardown()
     }
   })

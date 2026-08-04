@@ -165,6 +165,11 @@ type WSServer struct {
 	// error; the transport never constructs an SSH client itself.
 	tunnelConnector tunnel.Connector
 
+	// inBand builds the in-band bootstrap plan for shell.integrate
+	// (nocx-ynsx). When nil, the method returns a JSON-RPC error; the
+	// transport never constructs the capability itself.
+	inBand InBandBootstrapper
+
 	// tunnelMu guards tunnels and ownerTunnels. tunnels is the backend
 	// id → tunnel map backing tunnel.stop; ownerTunnels scopes teardown to
 	// the tab that opened each forward (spec §7.3) — closing one tab never
@@ -891,6 +896,8 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.handleHistoryRecord(ctx, wconn, state, req)
 	case "fs.complete":
 		s.handleFsComplete(wconn, req)
+	case "shell.integrate":
+		s.handleShellIntegrate(wconn, req)
 	case "vault.status", "vault.setup", "vault.unseal", "vault.seal",
 		"vault.changePassphrase", "vault.regenerateRecovery", "vault.setDefaultProvider",
 		"vault.setAutoSeal", "vault.activity", "vault.inventory",

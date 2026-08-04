@@ -18,16 +18,31 @@ afterEach(() => {
 /* ── Actions provider ───────────────────────────────────────────────── */
 
 describe('ActionsQuickConnectProvider', () => {
-  it('offers the local shell and the new-connection action, in that order', async () => {
-    const provider = new ActionsQuickConnectProvider(vi.fn(), vi.fn())
+  it('offers the local shell, the new-connection action and integrate-this-shell, in that order', async () => {
+    const provider = new ActionsQuickConnectProvider(vi.fn(), vi.fn(), vi.fn())
     const items = await Promise.resolve(provider.getItems())
 
-    // The order is the contract, not an accident: these two are the palette's
-    // first group and the separator below them is drawn from the group boundary.
-    expect(items.map((i) => i.id)).toEqual(['__local__', '__new_connection__'])
+    // The order is the contract, not an accident: these are the palette's
+    // first group and the separator below them is drawn from the group
+    // boundary.
+    expect(items.map((i) => i.id)).toEqual([
+      '__local__',
+      '__new_connection__',
+      '__integrate_shell__',
+    ])
     expect(items[0].label).toBe('Local shell')
     expect(items[0].detail).toContain('local terminal')
     expect(items[1].label).toBe('New connection')
+    expect(items[2].label).toBe('Integrate this shell')
+  })
+
+  it('calls integrateShell when the integrate-this-shell item runs', () => {
+    const integrateShell = vi.fn()
+    const provider = new ActionsQuickConnectProvider(vi.fn(), vi.fn(), integrateShell)
+
+    provider.getItems()[2].run()
+
+    expect(integrateShell).toHaveBeenCalledOnce()
   })
 
   it('calls newTab when the local-shell item runs', () => {

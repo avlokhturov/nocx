@@ -88,6 +88,7 @@ export class ActionsQuickConnectProvider implements QuickConnectProvider {
   constructor(
     private newTab: () => Tab,
     private newConnection: () => void,
+    private integrateShell: () => void = () => {},
   ) {}
 
   getItems(): QuickConnectItem[] {
@@ -103,6 +104,12 @@ export class ActionsQuickConnectProvider implements QuickConnectProvider {
         label: 'New connection',
         detail: 'Define an SSH connection in Settings',
         run: () => this.newConnection(),
+      },
+      {
+        id: '__integrate_shell__',
+        label: 'Integrate this shell',
+        detail: 'Bootstraps the shell at the current prompt (only from a trusted prompt)',
+        run: () => this.integrateShell(),
       },
     ]
   }

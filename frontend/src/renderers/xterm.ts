@@ -120,6 +120,8 @@ export class XtermRenderer implements TerminalRenderer {
   private refreshTimer: ReturnType<typeof setInterval> | null = null
   private commandMarkerSubs: CommandMarkerCallback[] = []
   private osc133Disposable?: { dispose(): void }
+  private inBandReadySubs: Array<() => void> = []
+  private inBandReadyDisposable?: { dispose(): void }
   private scrollSubs: Array<(viewportY: number) => void> = []
   private renderSubs: Array<(range: { start: number; end: number }) => void> = []
   private snapshotOscDisposable?: { dispose(): void }
@@ -336,6 +338,25 @@ export class XtermRenderer implements TerminalRenderer {
       }
       return false
     })
+  }
+
+  onInBandReady(cb: () => void): () => void {
+    this.inBandReadySubs.push(cb)
+    if (!this.inBandReadyDisposable && this.term) {
+      this.inBandReadyDisposable = this.term.parser.registerOscHandler(1337, (data: string) => {
+        // Strict whitelist: the wrapper emits exactly this payload once raw
+        // -echo is on. Any other 1337 content (or a forged echo of the
+        // literal) is discarded — the ready signal must mean raw mode is
+        // provably active, or the payload would be printed to the user.
+        if (data !== 'NOCX_IB_READY') return false
+        for (const sub of this.inBandReadySubs) sub()
+        return false
+      })
+    }
+    return () => {
+      const i = this.inBandReadySubs.indexOf(cb)
+      if (i >= 0) this.inBandReadySubs.splice(i, 1)
+    }
   }
 
   onBell(cb: BellCallback): void {

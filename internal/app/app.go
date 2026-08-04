@@ -313,6 +313,11 @@ func New(opts ...Option) (*App, error) {
 		// line the whole forward model was reachable from its own tests
 		// and nowhere else (AGENTS.md check 5).
 		transport.WithTunnelConnector(sshClient),
+		// The in-band bootstrap builder (nocx-ynsx): *shellintegration.Impl
+		// satisfies transport.InBandBootstrapper without an adapter — the
+		// signatures are identical. Before this line the in-band plan was
+		// reachable from its own tests and nowhere else (AGENTS.md check 5).
+		transport.WithInBandBootstrapper(shint),
 
 		transport.WithProbeResultStore(probeResultStore),
 		transport.WithSSHConfigResolver(sshCfgResolver, sshConfigPath),
