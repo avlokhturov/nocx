@@ -1,73 +1,116 @@
-// The integration axis and the observed capability statement (nocx-4t37.2).
+// Three independent axes replaced the single 'capability' value on
+// 2026-08-04, after codex diagnosed the root cause of the rejected rail's
+// offer-gate disagreement (nocx-atyf.1).
 //
-// The MODEL holds the integration axis the brief named — terminal → nocxify
-// → relay, in ascending order of how much of ours runs on the far host.
-// relay is present from the start (nocx-if6 phase B) and is NEVER offered in
-// the UI: a third value added later becomes a flag threaded through a switch;
-// a third value present from the start is a mode with no implementation —
-// the same move the tunnel model made carrying all three directions before
-// -R and -D existed (nocx-6nh6).
+// The old model collapsed delivery path, observed shell state, and input
+// presentation into one three-valued enum. A shell can emit useful markers
+// while the user has deliberately selected terminal input; a shell can be
+// ELIGIBLE for integration without nocx being AUTHORISED to inject it. One
+// axis cannot say either thing.
 //
-// The UI never shows the axis. The owner's second reading was explicit:
-// "terminal to nocxify to relay" conflates three independent facts — who
-// owns keyboard input, what semantic evidence exists, and whether a helper
-// binary is on the far host. Those are correlated today and are not one
-// axis, and a three-position selector implies free choice where the state is
-// mostly OBSERVED. What the rail shows is a capability statement about what
-// is true right now:
-//
-//   - 'native-input'     — nocx owns no keyboard input and has no semantic
-//                          evidence: a plain shell (no markers ever), or the
-//                          user latched native input. Enter goes to the far
-//                          shell raw and nothing semantic is known about the
-//                          result.
-//   - 'command-blocks'   — the shell speaks our protocol AND nocx owns the
-//                          trusted prompt right now: Enter runs through the
-//                          editor and the result becomes a block.
-//   - 'enhanced-input'   — the shell speaks our protocol (evidence exists:
-//                          cwd, exit codes, blocks from commands already
-//                          run) but nocx does not own the prompt at this
-//                          moment — a command is running, an alt-screen
-//                          program owns the pane, or the prompt is not
-//                          trusted.
-import type { InputState } from './input-state'
+// The action set is derived ONLY after both authorisation and technical
+// eligibility are resolved — the invariant that kills the worst defect in
+// what was rejected: clicking an offered action never produces a
+// prerequisite-rejection message.
 
-export type Capability = 'native-input' | 'command-blocks' | 'enhanced-input'
+/** How nocx delivered (or will deliver) its hooks onto the remote host. */
+export type Delivery = 'launcher' | 'in-band' | 'relay'
 
-export const CAPABILITY_LABELS: Record<Capability, string> = {
-  'native-input': 'Native input',
-  'command-blocks': 'Command blocks',
-  'enhanced-input': 'Enhanced input',
-}
+/** What nocx observes about the shell right now — semantic evidence, not
+ *  keyboard ownership (that lives in input-state.ts). */
+export type ShellState =
+  | 'unsupported' // No markers have ever arrived; plain shell
+  | 'eligible' // Markers arrived, shell speaks our protocol, nocx not
+  // yet authorised for this destination
+  | 'integrating' // In-band bootstrap is running
+  | 'integrated' // Shell is fully integrated and providing markers
+  | 'lost' // Markers stopped unexpectedly (nested env, broken hook)
+  | 'failed' // Integration attempt failed
 
-/** The model axis. Never rendered; carried so the relay third value exists
- *  from the start instead of being threaded through every switch later. */
-export type ShellMode = 'terminal' | 'nocxify' | 'relay'
+/** What the user sees at the prompt. */
+export type InputPresentation = 'editor' | 'terminal'
 
-/** The profile's connection-scope launch policy (auto|ask|off, nocx-p0ug):
- *  the default the tab's capability control starts from. The tab may
- *  override for this session; off refuses even the explicit path. */
+/** The connection-scope launch policy (nocx-4t37.2): the default the tab's
+ *  integration control starts from. auto integrates at session open; ask
+ *  and off open a plain shell and leave the explicit-request path to the
+ *  renderer. off refuses even the explicit path. */
 export type ShellIntegrationPolicy = 'auto' | 'ask' | 'off'
 
-/** The facts the capability statement is derived from (AD-6): the input
- *  machine's observed state and the session's sticky integration flag — the
- *  seam the brief names, never the byte stream. `native` is the user's own
- *  latch (the native-mode escape), which outranks every observation. */
-export interface CapabilityFacts {
+/** One recovery action the UI may offer. Derived ONLY after both
+ *  authorisation and technical eligibility are resolved — never disabled
+ *  and never rejected at click time. */
+export type RecoveryAction =
+  | { kind: 'integrate'; label: string }
+  | { kind: 'enable-editor'; label: string }
+  | { kind: 'retry-integration'; label: string }
+  | { kind: 'restore-editor'; label: string }
+
+/** The facts the action set is derived from. Authorisation and technical
+ *  eligibility are separate gates, resolved BEFORE the action set is
+ *  computed. */
+export interface ActionFacts {
+  shellState: ShellState
+  presentation: InputPresentation
+  delivery: Delivery
+  /** Has the user authorised nocx to own input at this destination? */
+  authorized: boolean
+  /** Is it technically safe for nocx to own input right now?
+   *  (trusted prompt, not alt-screen, editor can show) */
+  eligible: boolean
+}
+
+/**
+ * Derive the actions the UI may offer.
+ *
+ * Returns empty when prerequisites are absent — no disabled-then-rejected
+ * actions exist. The caller need only test array length to decide whether
+ * a chip or menu item should appear at all.
+ */
+export function deriveActions(f: ActionFacts): RecoveryAction[] {
+  if (!f.authorized || !f.eligible) return []
+
+  const actions: RecoveryAction[] = []
+
+  // A shell that has never been integrated: offer the integration path.
+  if (f.shellState === 'unsupported' || f.shellState === 'eligible') {
+    actions.push({ kind: 'integrate', label: 'Integrate this shell' })
+    return actions
+  }
+
+  // A failed integration: offer retry.
+  if (f.shellState === 'failed') {
+    actions.push({ kind: 'retry-integration', label: 'Retry integration' })
+    return actions
+  }
+
+  // Integrated but the user is in terminal input: offer to switch back.
+  if (f.shellState === 'integrated' && f.presentation === 'terminal') {
+    actions.push({ kind: 'enable-editor', label: 'Enable command editor' })
+    return actions
+  }
+
+  // Markers stopped unexpectedly: offer restoration.
+  if (f.shellState === 'lost') {
+    actions.push({ kind: 'restore-editor', label: 'Restore command editor' })
+    return actions
+  }
+
+  // Integrated + editor = healthy state: no actions.
+  return actions
+}
+
+// ── Derivation helpers ─────────────────────────────────────────────────
+
+/** Derive the observed shell state from the facts the renderer holds. */
+export function deriveShellState(opts: {
   integrated: boolean
-  state: InputState
+  integrating: boolean
+  integrationFailed: boolean
   trusted: boolean
-  owned: boolean
-  native: boolean
+}): ShellState {
+  if (opts.integrating) return 'integrating'
+  if (opts.integrationFailed) return 'failed'
+  if (!opts.integrated) return 'unsupported'
+  if (!opts.trusted) return 'lost'
+  return 'integrated'
 }
-
-export function deriveCapability(f: CapabilityFacts): Capability {
-  if (f.native || !f.integrated) return 'native-input'
-  if (f.state === 'PROMPT_READY' && f.trusted && f.owned) return 'command-blocks'
-  return 'enhanced-input'
-}
-
-/** One action the capability popover offers. The action set is derived from
- *  the observed capability + policy — it is never a picker of modes. */
-export type CapabilityAction =
-  { kind: 'integrate'; label: string; disabledReason?: string } | { kind: 'native'; label: string }

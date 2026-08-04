@@ -52,10 +52,11 @@ import { ShellClient } from './shell-client'
 import type { ShellIntegrateResult } from './generated/shell.integrate'
 import { LOCAL_TARGET_ID } from './ports-client'
 import {
-  CAPABILITY_LABELS,
-  deriveCapability,
-  type Capability,
-  type CapabilityAction,
+  deriveActions,
+  deriveShellState,
+  type ShellState,
+  type InputPresentation,
+  type RecoveryAction,
   type ShellIntegrationPolicy,
 } from './capability'
 import { createCapabilityChip } from './ui/capability-chip'
@@ -234,9 +235,12 @@ export class TerminalContent extends BaseTabContent {
    *  was never attempted. A non-empty reason on an auto profile is the
    *  soft degrade AGENTS.md demands be visible in the product. */
   private _openReason: Open['shellIntegrationReason'] = ''
-  /** The observed capability statement (never the axis): what is true
-   *  right now at the pending command. */
-  private _capability: Capability = 'native-input'
+  /** The observed shell state (one of three independent axes). */
+  private _shellState: ShellState = 'unsupported'
+  /** The current input presentation. */
+  private _presentation: InputPresentation = 'terminal'
+  /** Whether an integration attempt failed. */
+  private _integrationFailed = false
   /** The environment degraded or became uncertain — integration declined at
    *  open, or markers stopped on an integrated session the user did not
    *  latch native. Tab chrome renders at most this mark. */
@@ -1373,21 +1377,28 @@ export class TerminalContent extends BaseTabContent {
    *  (the input machine + the sticky integrated flag + the user's own
    *  native latch) — never from the byte stream (AD-6). */
   private _updateCapability(): void {
-    const next = deriveCapability({
+    const shellState = deriveShellState({
       integrated: this._shellIntegrated,
-      state: this.inputState.state,
+      integrating: this._integrating,
+      integrationFailed: this._integrationFailed,
       trusted: this.inputState.trusted,
-      owned: this.inputState.owned,
-      native: this.nativeMode,
     })
+    const presentation: InputPresentation =
+      this.nativeMode || !this.inputState.owned ? 'terminal' : 'editor'
     // A session whose markers stopped without the user latching native is
     // a degrade (nested ssh, docker exec, a broken hook): the tab's small
     // warning mark is the ONLY tab-chrome signal for it.
     const degraded =
       this._openReason !== '' ||
-      (this._shellIntegrated && !this.nativeMode && next === 'native-input')
-    if (next === this._capability && degraded === this._degraded) return
-    this._capability = next
+      (this._shellIntegrated && !this.nativeMode && shellState === 'lost')
+    if (
+      shellState === this._shellState &&
+      presentation === this._presentation &&
+      degraded === this._degraded
+    )
+      return
+    this._shellState = shellState
+    this._presentation = presentation
     this._degraded = degraded
     this.hooks.onWarningChange?.(degraded)
     this._renderRail()
@@ -1398,13 +1409,15 @@ export class TerminalContent extends BaseTabContent {
   private _renderRail(): void {
     if (!this._rail) return
     const actions = this._railActions()
-    const label = CAPABILITY_LABELS[this._capability]
+    const label = this._railLabel()
+    const variant = this._railChipVariant()
+    const disabled = actions.length === 0
     const fresh = createCapabilityChip({
       label,
-      variant: this._capabilityVariant(),
-      disabled: actions.length === 0,
-      title: this._railTitle(actions.length === 0),
-      onClick: () => this._toggleRailPopover(),
+      variant,
+      disabled,
+      title: this._railTitle(disabled),
+      onClick: disabled ? undefined : () => this._toggleRailPopover(),
     })
     if (this._railChip) {
       this._railChip.replaceWith(fresh)
@@ -1414,30 +1427,36 @@ export class TerminalContent extends BaseTabContent {
     this._railChip = fresh
   }
 
-  private _capabilityVariant(): 'native' | 'blocks' | 'enhanced' | 'degraded' {
-    if (this._degraded) return 'degraded'
-    switch (this._capability) {
-      case 'command-blocks':
-        return 'blocks'
-      case 'enhanced-input':
-        return 'enhanced'
-      case 'native-input':
-        return 'native'
-    }
+  private _railLabel(): string {
+    if (this._degraded) return 'Shell integration lost'
+    if (this._presentation === 'terminal')
+      return this._shellState === 'integrated' ? 'Terminal input' : 'Plain terminal'
+    return 'Command blocks'
   }
 
-  /** What the popover may offer right now. Never a picker of modes: the
-   *  actions are the two real transitions, offered exactly when valid. */
-  private _railActions(): CapabilityAction[] {
-    if (this._capability === 'native-input') {
-      if (this._policy === 'off') return []
-      return [{ kind: 'integrate', label: 'Integrate this shell' }]
-    }
-    return [{ kind: 'native', label: 'Use native input' }]
+  private _railChipVariant(): 'native' | 'blocks' | 'enhanced' | 'degraded' {
+    if (this._degraded) return 'degraded'
+    if (this._presentation === 'editor') return 'blocks'
+    if (this._shellState === 'integrated') return 'enhanced'
+    return 'native'
+  }
+
+  /** What the popover may offer right now. Derived from the three axes
+   *  AFTER authorisation and technical eligibility are resolved. */
+  private _railActions(): RecoveryAction[] {
+    const eligible = this.inputState.state === 'PROMPT_READY' && this.inputState.trusted
+    const authorized = this._policy !== 'off'
+    return deriveActions({
+      shellState: this._shellState,
+      presentation: this._presentation,
+      delivery: this._shellIntegrated ? 'in-band' : 'launcher',
+      authorized,
+      eligible,
+    })
   }
 
   private _railTitle(noActions: boolean): string {
-    const base = `Enter goes to the ${this._capability === 'command-blocks' ? 'command editor' : 'shell'}: ${CAPABILITY_LABELS[this._capability]}`
+    const base = `Enter goes to the ${this._presentation === 'editor' ? 'command editor' : 'shell'}: ${this._railLabel()}`
     if (!noActions) return `${base}. Click to change.`
     if (this._policy === 'off') return `${base}. This connection is set to never integrate (off).`
     return base
@@ -1515,13 +1534,20 @@ export class TerminalContent extends BaseTabContent {
     const action = actions[index]
     this._closeRailPopover()
     if (!action) return
-    if (action.kind === 'integrate') this.integrateShell()
-    else this.enterNativeMode()
+    if (action.kind === 'integrate' || action.kind === 'retry-integration') this.integrateShell()
+    else if (action.kind === 'enable-editor' || action.kind === 'restore-editor')
+      this._restoreEditor()
   }
 
-  /** The capability popover's actions, exposed for the e2e and unit seams. */
-  get capability(): Capability {
-    return this._capability
+  /** Leave terminal input and return to the command editor. */
+  private _restoreEditor(): void {
+    this.nativeMode = false
+    this._updateCapability()
+  }
+
+  /** The observed shell state, exposed for the e2e and unit seams. */
+  get shellState(): ShellState {
+    return this._shellState
   }
 
   get policy(): ShellIntegrationPolicy {

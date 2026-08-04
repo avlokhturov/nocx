@@ -994,7 +994,7 @@ describe('the capability rail (nocx-4t37.2)', () => {
       const rail = railOf(tab)
       expect(rail, 'capability rail not mounted').not.toBeNull()
       // A plain ask session has no markers yet: the statement is native input.
-      expect(chipLabel(rail!)).toBe('Native input')
+      expect(chipLabel(rail!)).toBe('Plain terminal')
       // The rail sits ABOVE the editor root (above the pending command).
       const editorRoot = tab.pane.querySelector<HTMLElement>('.nocx-editor')
       expect(editorRoot).not.toBeNull()
@@ -1058,7 +1058,7 @@ describe('the capability rail (nocx-4t37.2)', () => {
     }
   })
 
-  it('the popover offers Integrate this shell on a plain shell, and it runs the gated path', async () => {
+  it('the chip states what is true; actions are absent when none apply', async () => {
     const { content, tab, teardown } = await mountTerminal(
       makeClipboard(),
       { ssh: SSH },
@@ -1068,10 +1068,19 @@ describe('the capability rail (nocx-4t37.2)', () => {
       content.setVisible(true)
       const rail = railOf(tab)!
       const chip = rail.querySelector<HTMLButtonElement>('.ui-capability-chip')!
-      chip.click()
-      const panel = rail.querySelector<HTMLElement>('.ui-floating-panel')
-      expect(panel, 'capability popover did not open').not.toBeNull()
-      expect(panel!.textContent).toContain('Integrate this shell')
+      // No trusted prompt yet: eligible is false, no actions available.
+      expect(chip.disabled).toBe(true)
+      expect(chipLabel(rail)).toBe('Plain terminal')
+
+      // Fire markers to reach integrated + editor = healthy state.
+      const renderer = rendererOf(content)
+      renderer._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
+      renderer._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
+
+      // Healthy state: chip states what is true but offers no action.
+      const freshChip = rail.querySelector<HTMLButtonElement>('.ui-capability-chip')!
+      expect(chipLabel(rail)).toBe('Command blocks')
+      expect(freshChip.disabled).toBe(true) // healthy = no actions needed
     } finally {
       teardown()
     }
@@ -1090,7 +1099,7 @@ describe('the environment stack (nocx-695k.1)', () => {
     return withField._previousIntegrated
   }
 
-  const capabilityOf = (content: TerminalContent): string => content.capability
+  const shellStateOf = (content: TerminalContent): string => content.shellState
 
   it('an environment-entry command clears _shellIntegrated and the D marker restores it', async () => {
     const { ed, content, teardown } = await mountTerminal(makeClipboard(), {
@@ -1123,8 +1132,8 @@ describe('the environment stack (nocx-695k.1)', () => {
       expect(previousIntegrated(content)).toHaveLength(1)
       expect(previousIntegrated(content)[0]).toBe(true)
 
-      // The capability follows: native-input, not enhanced-input.
-      expect(capabilityOf(content)).toBe('native-input')
+      // The shell state follows: unsupported (markers cleared).
+      expect(shellStateOf(content)).toBe('unsupported')
 
       // The command runs; the D marker finishes it.
       renderer._fireCommandMarker({ kind: 'C', line: 0, col: 0, buffer: 'normal' })
