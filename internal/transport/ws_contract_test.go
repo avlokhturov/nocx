@@ -1955,3 +1955,180 @@ func TestVaultUnlockRequest_OverTheWireConformsToContract(t *testing.T) {
 	}
 	validateJSON(t, schema, notif.Params, "vault.unlockRequest params over the wire")
 }
+
+// ── shell.launcherCommand ──────────────────────────────────────────────────
+
+func TestShellLauncherCommand_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "shell.launcherCommand.schema.json")
+
+	// Populated: launcher returned, reason null.
+	launcher := "'/usr/bin/env -u BASH_ENV /bin/sh -c ...'"
+	raw, err := json.Marshal(shellLauncherCommandResult{
+		Launcher: &launcher,
+		Reason:   nil,
+	})
+	if err != nil {
+		t.Fatalf("marshal populated: %v", err)
+	}
+	validateJSON(t, schema, raw, "shell.launcherCommand DTO (populated)")
+
+	// Refused: launcher null, reason set.
+	reason := "remote-command"
+	raw, err = json.Marshal(shellLauncherCommandResult{
+		Launcher: nil,
+		Reason:   &reason,
+	})
+	if err != nil {
+		t.Fatalf("marshal refused: %v", err)
+	}
+	validateJSON(t, schema, raw, "shell.launcherCommand DTO (refused)")
+}
+
+// OverTheWire: the real handler, the real RemoteLauncher — no fake, because
+// the launcher the renderer appends must be the launcher the product builds.
+func TestShellLauncherCommand_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "shell.launcherCommand.schema.json")
+	ctx := context.Background()
+
+	ws := NewWSServer(
+		log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithRemoteLauncher(&realRemoteLauncher{}),
+	)
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	openResp := vaultCall(t, conn, "open", map[string]any{
+		"cols": 80, "rows": 24, "xpixel": 0, "ypixel": 0,
+	}, 1)
+	if openResp.Error != nil {
+		t.Fatalf("open: %+v", openResp.Error)
+	}
+	var opened struct {
+		SessionID string `json:"sessionId"`
+	}
+	if err := json.Unmarshal(openResp.Result, &opened); err != nil {
+		t.Fatalf("decode open result: %v", err)
+	}
+	if opened.SessionID == "" {
+		t.Fatal("open result carried no sessionId")
+	}
+
+	resp := vaultCall(t, conn, "shell.launcherCommand", map[string]any{
+		"destination": "testhost",
+		"sessionId":   opened.SessionID,
+	}, 2)
+	if resp.Error != nil {
+		t.Fatalf("shell.launcherCommand: %+v", resp.Error)
+	}
+	validateJSON(t, schema, resp.Result, "shell.launcherCommand result (real socket)")
+
+	var got shellLauncherCommandResult
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatalf("decode shell.launcherCommand result: %v", err)
+	}
+	if got.Launcher == nil || *got.Launcher == "" {
+		t.Error("launcher is nil or empty; the real launcher must return a non-empty command")
+	}
+	if got.Reason != nil {
+		t.Errorf("reason = %q, want nil when launcher is present", *got.Reason)
+	}
+	// The launcher is shell-quoted: it must start and end with single quotes.
+	if !strings.HasPrefix(*got.Launcher, "'") || !strings.HasSuffix(*got.Launcher, "'") {
+		t.Errorf("launcher not shell-quoted: %q", *got.Launcher)
+	}
+
+	// Unknown sessionId is refused (AD-7).
+	unknown := vaultCall(t, conn, "shell.launcherCommand", map[string]any{
+		"destination": "testhost",
+		"sessionId":   "0123456789abcdef0123456789abcdef",
+	}, 3)
+	if unknown.Error == nil || unknown.Error.Code != -32602 {
+		t.Fatalf("unknown sessionId: got %+v, want -32602", unknown.Error)
+	}
+
+	// Missing params are rejected.
+	missing := vaultCall(t, conn, "shell.launcherCommand", map[string]any{}, 4)
+	if missing.Error == nil || missing.Error.Code != -32602 {
+		t.Fatalf("missing params: got %+v, want -32602", missing.Error)
+	}
+}
+
+// No launcher wired: the handler returns launcher null with reason "unsupported"
+// rather than an error. The renderer sends the original line unchanged.
+func TestShellLauncherCommand_NotWiredReturnsNull(t *testing.T) {
+	ctx := context.Background()
+	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)))
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	openResp := vaultCall(t, conn, "open", map[string]any{
+		"cols": 80, "rows": 24, "xpixel": 0, "ypixel": 0,
+	}, 1)
+	if openResp.Error != nil {
+		t.Fatalf("open: %+v", openResp.Error)
+	}
+	var opened struct {
+		SessionID string `json:"sessionId"`
+	}
+	if err := json.Unmarshal(openResp.Result, &opened); err != nil {
+		t.Fatalf("decode open result: %v", err)
+	}
+
+	resp := vaultCall(t, conn, "shell.launcherCommand", map[string]any{
+		"destination": "testhost",
+		"sessionId":   opened.SessionID,
+	}, 2)
+	if resp.Error != nil {
+		t.Fatalf("shell.launcherCommand: %+v", resp.Error)
+	}
+	var got shellLauncherCommandResult
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Launcher != nil {
+		t.Errorf("launcher = %q, want nil when not wired", *got.Launcher)
+	}
+	if got.Reason == nil || *got.Reason != "unsupported" {
+		t.Errorf("reason = %v, want unsupported", got.Reason)
+	}
+}
+
+// realRemoteLauncher is the production adapter in miniature: it returns
+// the real launcher command so the over-the-wire test exercises the real
+// payload the renderer will append.
+type realRemoteLauncher struct{}
+
+func (realRemoteLauncher) StartCommand(kind ssh.ShellKind, opts ssh.LaunchOptions) (string, ssh.RefusalReason, bool) {
+	// Use the real shellintegration launcher, adapted through the ssh types.
+	// The composition root adapts shellintegration.RemoteLauncher to
+	// ssh.RemoteLauncher; for the test we call the real one directly.
+	l := shellintegration.NewRemoteLauncher()
+	// Map the ssh ShellKind to the shellintegration ShellKind.
+	var sk shellintegration.ShellKind
+	switch kind {
+	case ssh.ShellBash:
+		sk = shellintegration.ShellBash
+	case ssh.ShellZsh:
+		sk = shellintegration.ShellZsh
+	case ssh.ShellUnknown:
+		sk = shellintegration.ShellUnknown
+	case ssh.ShellAuto:
+		sk = shellintegration.ShellAuto
+	default:
+		return "", ssh.ReasonUnsupportedShell, false
+	}
+	lo := shellintegration.LaunchOptions{
+		SessionID: opts.SessionID,
+		Enhanced:  opts.Enhanced,
+	}
+	cmd, reason, ok := l.StartCommand(sk, lo)
+	return cmd, ssh.RefusalReason(reason), ok
+}

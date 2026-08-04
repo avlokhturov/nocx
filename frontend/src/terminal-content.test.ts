@@ -57,6 +57,7 @@ import { CommandEditor } from './editor'
 import { Tab } from './tabs'
 import { TerminalContent } from './terminal-content'
 import { SURFACE_TERMINAL } from './tab-content'
+import { ProfileClient } from './profiles'
 import type { WSClient } from './ipc'
 import { createCommandBlock } from './scrollback/blocks'
 import { CommandSnapshotStore } from './command-snapshot'
@@ -111,6 +112,7 @@ async function mountTerminal(
   clipboard: ClipboardFake = makeClipboard(),
   opts: MountOpts = {},
   client?: ClientFake,
+  profileClient?: ProfileClient | null,
 ): Promise<{
   view: EditorView
   ed: CommandEditor
@@ -127,7 +129,7 @@ async function mountTerminal(
     clipboard,
     new ClipboardGate(),
     makeBanner(),
-    null,
+    profileClient ?? null,
     () => {},
     opts.ssh,
   )
@@ -1096,6 +1098,8 @@ describe('the environment stack (nocx-695k.1)', () => {
       ed.root.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
       )
+      // The beforeSubmit may be async (ssh rewrite RPC); drain microtasks.
+      for (let i = 0; i < 5; i++) await Promise.resolve()
 
       // Inside: the pane names the host we went to, and refuses to speak for
       // its ports — there is no managed connection to a child ssh process.
@@ -1157,6 +1161,7 @@ describe('the environment stack (nocx-695k.1)', () => {
       ed.root.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
       )
+      for (let i = 0; i < 5; i++) await Promise.resolve()
 
       // The marker fact is cleared: the pane is now on a different host.
       expect(shellIntegrated(content)).toBe(false)
@@ -1237,6 +1242,7 @@ describe('the environment stack (nocx-695k.1)', () => {
       ed.root.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
       )
+      for (let i = 0; i < 5; i++) await Promise.resolve()
       expect(shellIntegrated(content)).toBe(false)
       expect(previousIntegrated(content)).toEqual([true])
       renderer._fireCommandMarker({ kind: 'C', line: 0, col: 0, buffer: 'normal' })
@@ -1254,6 +1260,7 @@ describe('the environment stack (nocx-695k.1)', () => {
       ed.root.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
       )
+      for (let i = 0; i < 5; i++) await Promise.resolve()
       expect(shellIntegrated(content)).toBe(false)
       expect(previousIntegrated(content)).toEqual([true])
       renderer._fireCommandMarker({ kind: 'C', line: 0, col: 0, buffer: 'normal' })
@@ -1560,6 +1567,534 @@ describe('terminal/editor input switching (nocx-atyf.5)', () => {
       expect(second.presentation).toBe('editor')
     } finally {
       teardown2()
+    }
+  })
+})
+
+// ── nocx-pu4.6: ssh rewrite rides the launcher ────────────────────────────
+
+/* eslint-disable @typescript-eslint/unbound-method */
+describe('nocxify: ssh command rewrite (nocx-pu4.6)', () => {
+  const LAUNCHER = "'/usr/bin/env -u BASH_ENV /bin/sh -c ...'"
+
+  /** jsdom does not implement scrollTo/scrollIntoView; the
+   *  ScrollbackController calls both. */
+  function stubScroll(): () => void {
+    const pst = Element.prototype.scrollTo
+    const psiv = Element.prototype.scrollIntoView
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    return () => {
+      Element.prototype.scrollTo = pst
+      Element.prototype.scrollIntoView = psiv
+    }
+  }
+
+  it('rewrites an interactive ssh command at submit', async () => {
+    const callMock = vi.fn()
+    callMock.mockResolvedValue({ launcher: LAUNCHER, reason: null })
+    const client = makeClient({ call: callMock })
+    const session = makeSession()
+    client.openSession.mockResolvedValue(session)
+
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restoreScroll = stubScroll()
+    try {
+      content.setVisible(true)
+      ed.show()
+      ed.insertText('ssh testhost')
+
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          bubbles: true,
+          cancelable: true,
+        }),
+      )
+
+      // The rewrite is async (RPC call): drain microtasks.
+      for (let i = 0; i < 5; i++) await Promise.resolve()
+
+      // The RPC was called with the right params.
+      expect(callMock).toHaveBeenCalledWith(
+        'shell.launcherCommand',
+        expect.objectContaining({
+          destination: 'testhost',
+          sessionId: session.sessionId,
+        }),
+      )
+
+      // The paste received the REWRITTEN command, not the original.
+      const renderer = rendererOf(content)
+      expect(renderer.paste).toHaveBeenCalledWith(expect.stringContaining(LAUNCHER))
+      expect(renderer.paste).toHaveBeenCalledWith(expect.stringContaining('-t'))
+      expect(renderer.paste).toHaveBeenCalledWith(expect.stringContaining('ssh'))
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
+
+  it('does NOT rewrite when policy is off', async () => {
+    const callMock = vi.fn()
+    const client = makeClient({ call: callMock })
+    const session = makeSession({ shellIntegration: 'off' })
+    client.openSession.mockResolvedValue(session)
+
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restoreScroll = stubScroll()
+    try {
+      content.setVisible(true)
+      ed.show()
+      ed.insertText('ssh testhost')
+
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          bubbles: true,
+          cancelable: true,
+        }),
+      )
+
+      for (let i = 0; i < 5; i++) await Promise.resolve()
+
+      // shell.launcherCommand was never called.
+      expect(callMock).not.toHaveBeenCalledWith('shell.launcherCommand', expect.anything())
+
+      // The paste received the ORIGINAL line.
+      const renderer = rendererOf(content)
+      expect(renderer.paste).toHaveBeenCalledWith('ssh testhost')
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
+
+  it('does NOT rewrite when launcher is null (fail-open)', async () => {
+    const callMock = vi.fn()
+    callMock.mockResolvedValue({
+      launcher: null,
+      reason: 'remote-command',
+    })
+    const client = makeClient({ call: callMock })
+    const session = makeSession()
+    client.openSession.mockResolvedValue(session)
+
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restoreScroll = stubScroll()
+    try {
+      content.setVisible(true)
+      ed.show()
+      ed.insertText('ssh testhost')
+
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          bubbles: true,
+          cancelable: true,
+        }),
+      )
+
+      for (let i = 0; i < 5; i++) await Promise.resolve()
+
+      // The paste received the ORIGINAL line — fail-open.
+      const renderer = rendererOf(content)
+      expect(renderer.paste).toHaveBeenCalledWith('ssh testhost')
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
+
+  it('does NOT rewrite a non-ssh command', async () => {
+    const callMock = vi.fn()
+    const client = makeClient({ call: callMock })
+    const session = makeSession()
+    client.openSession.mockResolvedValue(session)
+
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restoreScroll = stubScroll()
+    try {
+      content.setVisible(true)
+      ed.show()
+      ed.insertText('ls -la')
+
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          bubbles: true,
+          cancelable: true,
+        }),
+      )
+
+      for (let i = 0; i < 5; i++) await Promise.resolve()
+
+      // shell.launcherCommand was never called for non-ssh lines.
+      expect(callMock).not.toHaveBeenCalledWith('shell.launcherCommand', expect.anything())
+
+      const renderer = rendererOf(content)
+      expect(renderer.paste).toHaveBeenCalledWith('ls -la')
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
+
+  it('sends exactly one line — no write between submit and first marker (safety property)', async () => {
+    const callMock = vi.fn()
+    callMock.mockResolvedValue({ launcher: LAUNCHER, reason: null })
+    const client = makeClient({ call: callMock })
+    const session = makeSession()
+    client.openSession.mockResolvedValue(session)
+
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restoreScroll = stubScroll()
+    try {
+      content.setVisible(true)
+      ed.show()
+      ed.insertText('ssh testhost')
+
+      const sendCallsBefore = session.send.mock.calls.length
+
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          bubbles: true,
+          cancelable: true,
+        }),
+      )
+
+      for (let i = 0; i < 5; i++) await Promise.resolve()
+
+      // The submit path calls paste (which writes to the renderer, not
+      // session.send) and sendRaw('\r') (calls session.send). The rewrite
+      // path sends exactly ONE line — the rewritten ssh command — followed
+      // by CR. Nothing else is typed. This is the safety property: unlike
+      // the in-band family, no wrapper is typed AFTER submit into an
+      // unknown foreground process.
+      const renderer = rendererOf(content)
+      expect(renderer.paste).toHaveBeenCalledTimes(1)
+      expect(renderer.paste).toHaveBeenCalledWith(expect.stringContaining(LAUNCHER))
+
+      // No additional deferred writes after submit — no in-band injection.
+      const sendCallsAfter = session.send.mock.calls.length
+      expect(sendCallsAfter - sendCallsBefore).toBeLessThanOrEqual(2)
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
+})
+/* eslint-enable @typescript-eslint/unbound-method */
+
+// ── nocx-pu4.7: connection offer on hand-typed ssh block ────────────────
+
+describe('connection offer on ssh block (nocx-pu4.7)', () => {
+  /** jsdom does not implement scrollTo/scrollIntoView; the
+   *  ScrollbackController calls both. */
+  function stubScroll(): () => void {
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const pst = Element.prototype.scrollTo
+    const psiv = Element.prototype.scrollIntoView
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    return () => {
+      Element.prototype.scrollTo = pst
+      Element.prototype.scrollIntoView = psiv
+    }
+  }
+
+  /** Create a minimal ProfileClient mock with listProfiles stubbed. */
+  function mockProfileClient(
+    profiles: ReadonlyArray<{ name: string; host: string }> = [],
+  ): ProfileClient {
+    return {
+      listProfiles: vi.fn().mockResolvedValue(
+        profiles.map((p) => ({
+          id: `p_${p.name}`,
+          type: 'ssh',
+          name: p.name,
+          options: { host: p.host },
+        })),
+      ),
+      getSnapshot: vi.fn().mockResolvedValue({ values: {}, overridden: [], revision: 0 }),
+      setSetting: vi.fn().mockResolvedValue({ ok: true }),
+      createProfile: vi
+        .fn()
+        .mockImplementation((p: { name: string }) =>
+          Promise.resolve({ ...p, id: `new_${p.name}` }),
+        ),
+    } as unknown as ProfileClient
+  }
+
+  const LAUNCHER = "'/usr/bin/env -u BASH_ENV /bin/sh -c ...'"
+
+  it('offers to save on block after ssh to unknown host', async () => {
+    const callMock = vi.fn()
+    callMock.mockResolvedValue({ launcher: LAUNCHER, reason: null })
+    const client = makeClient({ call: callMock })
+    const session = makeSession()
+    client.openSession.mockResolvedValue(session)
+    const pc = mockProfileClient([])
+
+    const { view, ed, content, tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+      pc,
+    )
+    const restoreScroll = stubScroll()
+    try {
+      content.setVisible(true)
+      ed.show()
+
+      // Submit ssh to an UNKNOWN host.
+      ed.insertText('ssh pi@newbox')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          bubbles: true,
+          cancelable: true,
+        }),
+      )
+      for (let i = 0; i < 5; i++) await Promise.resolve()
+
+      const renderer = rendererOf(content)
+      // Fire the C marker to create a running block, then D to freeze it.
+      renderer._fireCommandMarker({
+        kind: 'C',
+        line: 0,
+        col: 0,
+        buffer: 'normal',
+      })
+      renderer._fireCommandMarker({
+        kind: 'D',
+        line: 0,
+        col: 0,
+        buffer: 'normal',
+        exitCode: 0,
+      })
+      // The offer is async (profile list + settings): drain.
+      for (let i = 0; i < 5; i++) await Promise.resolve()
+
+      // A receipt should appear on the block.
+      const blocks = tab.pane.querySelectorAll('.cmd-block')
+      expect(blocks.length).toBeGreaterThan(0)
+      const lastBlock = blocks[blocks.length - 1] as HTMLElement | undefined
+      const receipt = lastBlock?.querySelector('.ui-block-receipt')
+      expect(receipt).not.toBeNull()
+
+      // Kind badge says "SSH host".
+      const kind = receipt?.querySelector('.ui-block-receipt__kind')
+      expect(kind?.textContent).toBe('SSH host')
+
+      // The destination is shown.
+      const value = receipt?.querySelector('.ui-block-receipt__value')
+      expect(value?.textContent).toBe('pi@newbox')
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
+
+  it('does NOT offer when the destination is already a saved profile', async () => {
+    const callMock = vi.fn()
+    callMock.mockResolvedValue({ launcher: LAUNCHER, reason: null })
+    const client = makeClient({ call: callMock })
+    const session = makeSession()
+    client.openSession.mockResolvedValue(session)
+    // newbox is a KNOWN profile.
+    const pc = mockProfileClient([{ name: 'my-box', host: 'newbox' }])
+
+    const { view, ed, content, tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+      pc,
+    )
+    const restoreScroll = stubScroll()
+    try {
+      content.setVisible(true)
+      ed.show()
+
+      ed.insertText('ssh pi@newbox')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          bubbles: true,
+          cancelable: true,
+        }),
+      )
+      for (let i = 0; i < 5; i++) await Promise.resolve()
+
+      const renderer = rendererOf(content)
+      renderer._fireCommandMarker({
+        kind: 'C',
+        line: 0,
+        col: 0,
+        buffer: 'normal',
+      })
+      renderer._fireCommandMarker({
+        kind: 'D',
+        line: 0,
+        col: 0,
+        buffer: 'normal',
+        exitCode: 0,
+      })
+      for (let i = 0; i < 5; i++) await Promise.resolve()
+
+      // No receipt — the host is already a profile.
+      const blocks = tab.pane.querySelectorAll('.cmd-block')
+      const lastBlock = blocks[blocks.length - 1] as HTMLElement | undefined
+      expect(lastBlock?.querySelector('.ui-block-receipt')).toBeNull()
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
+
+  it('does NOT offer for non-ssh commands', async () => {
+    const pc = mockProfileClient([])
+    const client = makeClient()
+
+    const { view, ed, content, tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+      pc,
+    )
+    const restoreScroll = stubScroll()
+    try {
+      content.setVisible(true)
+      ed.show()
+
+      ed.insertText('ls -la')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          bubbles: true,
+          cancelable: true,
+        }),
+      )
+      for (let i = 0; i < 5; i++) await Promise.resolve()
+
+      const renderer = rendererOf(content)
+      renderer._fireCommandMarker({
+        kind: 'C',
+        line: 0,
+        col: 0,
+        buffer: 'normal',
+      })
+      renderer._fireCommandMarker({
+        kind: 'D',
+        line: 0,
+        col: 0,
+        buffer: 'normal',
+        exitCode: 0,
+      })
+      for (let i = 0; i < 5; i++) await Promise.resolve()
+
+      // No receipt for non-ssh.
+      const blocks = tab.pane.querySelectorAll('.cmd-block')
+      const lastBlock = blocks[blocks.length - 1] as HTMLElement | undefined
+      expect(lastBlock?.querySelector('.ui-block-receipt')).toBeNull()
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
+
+  it('dismissal persists in settings', async () => {
+    const setSettingsMock = vi.fn().mockResolvedValue({ ok: true })
+    const pc = {
+      listProfiles: vi.fn().mockResolvedValue([]),
+      getSnapshot: vi.fn().mockResolvedValue({ values: {}, overridden: [], revision: 0 }),
+      setSetting: setSettingsMock,
+      createProfile: vi.fn(),
+    } as unknown as ProfileClient
+    const client = makeClient()
+    const callMock = client.call
+    callMock.mockResolvedValue({ launcher: LAUNCHER, reason: null })
+
+    const { view, ed, content, tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+      pc,
+    )
+    const restoreScroll = stubScroll()
+    try {
+      content.setVisible(true)
+      ed.show()
+
+      ed.insertText('ssh box')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          bubbles: true,
+          cancelable: true,
+        }),
+      )
+      for (let i = 0; i < 5; i++) await Promise.resolve()
+
+      const renderer = rendererOf(content)
+      renderer._fireCommandMarker({
+        kind: 'C',
+        line: 0,
+        col: 0,
+        buffer: 'normal',
+      })
+      renderer._fireCommandMarker({
+        kind: 'D',
+        line: 0,
+        col: 0,
+        buffer: 'normal',
+        exitCode: 0,
+      })
+      for (let i = 0; i < 5; i++) await Promise.resolve()
+
+      // Receipt appears.
+      const blocks = tab.pane.querySelectorAll('.cmd-block')
+      const lastBlock = blocks[blocks.length - 1] as HTMLElement | undefined
+      const dismissBtn = lastBlock?.querySelector<HTMLButtonElement>('.ui-block-receipt__drop')
+      expect(dismissBtn).not.toBeNull()
+
+      // Click Dismiss.
+      dismissBtn?.click()
+      for (let i = 0; i < 5; i++) await Promise.resolve()
+
+      // Settings were persisted with the destination.
+      expect(setSettingsMock).toHaveBeenCalledWith(
+        'nocx.connectionOffers.dismissed',
+        expect.stringContaining('box'),
+      )
+
+      // Receipt is gone.
+      expect(lastBlock?.querySelector('.ui-block-receipt')).toBeNull()
+    } finally {
+      restoreScroll()
+      teardown()
     }
   })
 })
