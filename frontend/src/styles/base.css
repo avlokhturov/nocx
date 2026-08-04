@@ -295,6 +295,20 @@ select:focus-visible {
   font-size: var(--font-size-sm);
   text-transform: uppercase;
   letter-spacing: 0.5px;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* The actions slot (SidebarViewDescriptor.actions) pins to the far edge with
+   its own auto margin — never `justify-content: space-between`, which is only
+   correct for exactly two children (nocx-a44m). One child (title only) and
+   two children (title + actions) both lay out correctly. */
+.ui-sidebar-view__actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
 }
 
 .ui-sidebar-view__filter {

@@ -10,10 +10,11 @@
 // never mounts in a vacuum.
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup } from '@solidjs/testing-library'
-import { createSignal } from 'solid-js'
-import { PortsPanel, type PortsPanelServices } from './ports'
+import { Show, createSignal } from 'solid-js'
+import { PortsPanel, createPortsPauseControl, type PortsPanelServices } from './ports'
 import { mountSidebar, type SidebarHandle, type SidebarViewDescriptor } from './sidebar'
-import { PlugIcon } from './ui/icons'
+import { IconButton } from './ui/icon-button'
+import { PauseIcon, PlayIcon, PlugIcon } from './ui/icons'
 import {
   createRendererMock,
   makeClient,
@@ -85,14 +86,40 @@ function fakeServices(over: Partial<PortsPanelServices> = {}): PortsPanelService
   }
 }
 
-/** The view descriptor main.tsx builds — the sidebar's first real view. */
-function portsView(services: PortsPanelServices): SidebarViewDescriptor {
+/** The view descriptor main.tsx builds — the sidebar's first real view. The
+ *  Pause control is created here too, shared between the header action and
+ *  the panel, exactly as main.tsx wires it (nocx-wzc4.9). */
+function portsView(
+  services: PortsPanelServices,
+  activeProfileId: () => string | null,
+): SidebarViewDescriptor {
+  const pause = createPortsPauseControl(services, activeProfileId)
   return {
     id: PORTS_VIEW_ID,
     title: 'Ports',
     icon: PlugIcon,
+    actions: () => (
+      <IconButton
+        data-testid="ports-pause"
+        size="sm"
+        ariaLabel={pause.paused() ? 'Resume sampling' : 'Pause sampling'}
+        title={pause.paused() ? 'Resume sampling' : 'Pause sampling'}
+        selected={pause.paused()}
+        disabled={activeProfileId() === null}
+        onClick={() => pause.toggle()}
+      >
+        <Show when={pause.paused()} fallback={<PauseIcon />}>
+          <PlayIcon />
+        </Show>
+      </IconButton>
+    ),
     view: (props) => (
-      <PortsPanel profileId={props.activeProfileId} services={services} visible={props.visible} />
+      <PortsPanel
+        profileId={props.activeProfileId}
+        services={services}
+        visible={props.visible}
+        pause={pause}
+      />
     ),
     order: 0,
   }
@@ -124,7 +151,13 @@ async function mountApp(services: PortsPanelServices, profileId: string | null =
   const handle = mountSidebar(
     bar,
     panel,
-    [portsView(services)],
+    [
+      /* eslint-disable solid/reactivity -- portsView consumes this accessor
+         inside the view's and the header action's tracked scopes; the gate
+         cannot see across that boundary (same contract as the arg below). */
+      portsView(services, () => activeProfileId()),
+      /* eslint-enable solid/reactivity */
+    ],
     [],
     undefined,
     /* eslint-disable solid/reactivity -- same contract as main.tsx: the
@@ -250,5 +283,32 @@ describe('ports sidebar view', () => {
     expect(document.activeElement).toBe(icon)
 
     document.removeEventListener('keydown', handler)
+  })
+
+  it('pausing from the header stops sampling; resuming restarts it (nocx-wzc4.9)', async () => {
+    const pause = vi.fn().mockResolvedValue({})
+    const status = vi.fn().mockResolvedValue(statusFixture('ssh:p1:1'))
+    const services = fakeServices({ pause, status })
+    const { panel } = await mountApp(services)
+    await vi.waitFor(() => expect(status).toHaveBeenCalled())
+
+    // The action lives in the view's HEADER (SidebarViewDescriptor.actions),
+    // never in the body — the body carries no second vocabulary for it.
+    const pauseBtn = panel.querySelector<HTMLElement>('[data-testid="ports-pause"]')
+    expect(pauseBtn).not.toBeNull()
+    expect(pauseBtn?.closest('.ui-sidebar-view__header')).not.toBeNull()
+    expect(pauseBtn?.closest('.ui-sidebar-view__body')).toBeNull()
+
+    // Pause: the flag reaches the backend (which stops sampling — the
+    // production-host traffic), and the header icon reflects the state.
+    pauseBtn!.click()
+    await vi.waitFor(() => expect(pause).toHaveBeenCalledWith('ssh:p1:1', true))
+    expect(pauseBtn?.getAttribute('aria-selected')).toBe('true')
+    expect(pauseBtn?.getAttribute('aria-label')).toBe('Resume sampling')
+
+    // Resume: sampling restarts.
+    pauseBtn!.click()
+    await vi.waitFor(() => expect(pause).toHaveBeenCalledWith('ssh:p1:1', false))
+    expect(pauseBtn?.getAttribute('aria-selected')).toBeNull()
   })
 })

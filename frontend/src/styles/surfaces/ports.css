@@ -1,29 +1,34 @@
-/* ── Ports surface (nocx-wzc4.2) ─────────────────────────────────────────
-   Placement only: the kit components inside the rows (Badge, Button) are
-   placed — flex, gap, alignment — never repainted. The row itself is a
-   surface-owned list row; its spacing comes from flex, never margins
-   between kit controls (surface-spacing-kit). */
+/* ── Ports surface (nocx-wzc4.2, row layout nocx-wzc4.9) ─────────────────
+   Placement only: the kit components inside the rows (Badge, IconButton,
+   Spinner) are placed — flex, gap, alignment, a bounded share — never
+   repainted. The row itself is a surface-owned list row; its spacing comes
+   from flex, never margins between kit controls (surface-spacing-kit). */
 
 .ports-row {
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
   width: 100%;
+  min-width: 0;
 }
 
-/* The row's single line: address and its actions. A caveat about the bind
-   renders as a second line beneath it (MarkerList note), inside the same row,
-   so the divided list's hairline still bounds one record. */
+/* The row's single line: address, secondary, and its actions. A caveat about
+   the bind renders as a second line beneath it (MarkerList note), inside the
+   same row, so the divided list's hairline still bounds one record. */
 .ports-row__main {
   display: flex;
   align-items: center;
-  gap: var(--space-3);
+  gap: var(--space-2);
   width: 100%;
   min-width: 0;
 }
 
+/* The address is the row's PRIMARY KEY — the thing the user came for — and
+   yields its own width only as a last resort: flex-basis 0 gives it a zero
+   shrink weight, so a tight row squeezes the secondary text and the process
+   chip first; the ellipsis is the floor, not the default (nocx-wzc4.9). */
 .ports-row__addr {
-  flex: 1 1 auto;
+  flex: 1 1 0;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -31,6 +36,46 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* Secondary text (the forward's destination) yields before the address does:
+   a capped share that shrinks to nothing when the row is tight. */
+.ports-row__dest {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The process chip gets a bounded share of the row — placement only. The
+   ellipsis itself is the Badge's truncate variance; this rule only says how
+   much of the row the chip may claim before it has to yield (nocx-wzc4.9). */
+.ports-row__main > .ui-badge {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 45%;
+}
+
 .ports-row__arrow {
+  color: var(--color-text-dim);
+}
+
+/* First open, before the first sample lands: the kit Spinner plus a label —
+   the panel reads as working, never as broken (nocx-wzc4.9). */
+.ports-loading {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-4) var(--space-2);
+  color: var(--color-text-dim);
+  font-size: var(--font-size-sm);
+}
+
+/* The sample's age, in the quiet register: micro-text, never a chip. */
+.ports-meta {
+  margin: var(--space-2) 0 0;
+  font-size: var(--font-size-2xs);
   color: var(--color-text-dim);
 }

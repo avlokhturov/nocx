@@ -54,6 +54,7 @@
 @import './styles/components/toast.css';
 @import './styles/components/marker-list.css';
 @import './styles/components/code-block.css';
+@import './styles/components/spinner.css';
 @import './styles/components/collection-view.css';
 @import './styles/components/tab-strip.css';
 @import './styles/components/row-list.css';

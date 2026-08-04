@@ -46,3 +46,14 @@
   background: color-mix(in srgb, var(--color-danger), transparent 80%);
   color: var(--color-danger);
 }
+
+/* The chip yields to its row (nocx-wzc4.9): never wraps, and ellipsizes at
+   its own box edge. `min-width: 0` is what lets a flex row shrink the chip
+   below its content width; `max-width: 100%` is the no-wrap companion. */
+.ui-badge[data-truncate='true'] {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
