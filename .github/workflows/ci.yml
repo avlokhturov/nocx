@@ -222,7 +222,9 @@ jobs:
           }
           trap cleanup EXIT
 
-          for _ in $(seq 1 150); do
+          # The macOS keychain availability probe may take tens of seconds in
+          # a non-interactive runner before devharness prints its token.
+          for _ in $(seq 1 600); do
             token="$(sed -n 's/^WSTOKEN=//{p;q;}' /tmp/nocx-e2e-backend.log)"
             if [ -n "$token" ]; then break; fi
             sleep 0.1
