@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
@@ -1736,4 +1737,64 @@ func TestShellIntegrate_NotWiredFailsClosed(t *testing.T) {
 	if resp.Error == nil || resp.Error.Code != -32603 {
 		t.Fatalf("unwired shell.integrate: got %+v, want -32603", resp.Error)
 	}
+}
+
+// ── vault.unlockRequest notification contract ─────────────────────────
+// The notification is server→client, so there is no result shape — the
+// params ARE the contract. Validated against the schema both as a DTO and
+// off the real socket.
+
+func TestVaultUnlockRequest_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "vault.unlockRequest.schema.json")
+	raw, err := json.Marshal(map[string]any{
+		"requestId": "abc123",
+		"reason":    "history needs the content key",
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "vault.unlockRequest params DTO")
+}
+
+func TestVaultUnlockRequest_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "vault.unlockRequest.schema.json")
+	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithVaultLifecycle(newFakeVaultLifecycle()))
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+
+	conn := connectWS(t, ws)
+	defer conn.Close() //nolint:errcheck
+
+	// Verify connection is registered.
+	resp := vaultCall(t, conn, "vault.status", nil, 1)
+	if resp.Error != nil {
+		t.Fatalf("vault.status failed: %s", resp.Error.Message)
+	}
+
+	// Request an unlock; this sends the real notification over the socket.
+	go func() { _ = ws.RequestUnlock(ctx, "history needs the content key") }()
+
+	// Read the notification off the real socket.
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, data, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read notification: %v", err)
+	}
+
+	var notif struct {
+		JSONRPC string          `json:"jsonrpc"`
+		Method  string          `json:"method"`
+		Params  json.RawMessage `json:"params"`
+	}
+	if err := json.Unmarshal(data, &notif); err != nil {
+		t.Fatalf("unmarshal notification: %v", err)
+	}
+	if notif.Method != "vault.unlockRequest" {
+		t.Fatalf("expected vault.unlockRequest, got %q", notif.Method)
+	}
+	validateJSON(t, schema, notif.Params, "vault.unlockRequest params over the wire")
 }

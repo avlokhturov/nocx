@@ -95,6 +95,19 @@ async function main() {
   })
   void vaultController.refresh()
 
+  // ── Backend-initiated unlock requests ──────────────────────────────
+  // The dispatcher's onVaultSealed handles renderer-initiated calls.
+  // This subscription handles the OTHER direction: the backend sends a
+  // vault.unlockRequest notification when it needs the vault open (e.g.
+  // to load the ContentDB key at startup). The same dialog, same code.
+  let pendingBackendUnlock: string | null = null
+  dispatcher.subscribe('vault.unlockRequest', (params) => {
+    const p = params as { requestId: string; reason: string }
+    if (!p || !p.requestId) return
+    pendingBackendUnlock = p.requestId
+    vaultController.openUnlock(p.reason || 'The vault is locked.')
+  })
+
   // ── Vault activity signal (nocx-eg80) ──────────────────────────────
   // Throttled: at most one call every 3 seconds. Reports user activity
   // (keyboard, mouse, UI actions) so the vault can reset its idle timer.
@@ -578,8 +591,26 @@ async function main() {
         <Show when={vaultController.showUnlock()}>
           <UnlockDialog
             open={vaultController.showUnlock()}
-            onClose={() => vaultController.closeUnlock()}
-            onUnsealed={() => vaultController.onUnsealDone()}
+            onClose={() => {
+              // Report cancellation for backend-initiated requests.
+              if (pendingBackendUnlock) {
+                vaultClient
+                  .unlockResolved({ requestId: pendingBackendUnlock, outcome: 'cancelled' })
+                  .catch(() => {})
+                pendingBackendUnlock = null
+              }
+              vaultController.closeUnlock()
+            }}
+            onUnsealed={() => {
+              // Report success for backend-initiated requests.
+              if (pendingBackendUnlock) {
+                vaultClient
+                  .unlockResolved({ requestId: pendingBackendUnlock, outcome: 'unsealed' })
+                  .catch(() => {})
+                pendingBackendUnlock = null
+              }
+              vaultController.onUnsealDone()
+            }}
             vaultClient={vaultClient}
             vaultStatus={vaultController.status()}
             reason={vaultController.unlockReason()}
