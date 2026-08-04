@@ -1,13 +1,12 @@
 # CI — quality gates for nocx.
 #
-# Runner decision: back-end job runs on macos-15 because:
+# Runner decision: back-end job runs on macos-latest because:
 #   - darwin is the target platform for this macOS-first MVP (see
 #     docs/architecture.md § "Operational / Environmental Envelope"), so CI
 #     should build and test what ships to users;
 #   - internal/pty exercises creack/pty, and PTY semantics differ between macOS
 #     and Linux — those tests are only meaningful on the target OS;
-#   - the Seatbelt enforcement gate relies on sandbox-exec's supported macOS 15
-#     behaviour, so a pinned image prevents an OS rollout from invalidating it.
+#   - the repo is public, so macos-latest runner minutes are free.
 # (Note: wails/v2 also requires GTK3/WebKit2GTK on Linux; the decision stands
 # on the target-OS argument alone, without measuring ubuntu.)
 # The pre-commit hook and the Makefile `ci` target mirror this same set of
@@ -44,7 +43,7 @@ permissions:
 jobs:
   backend:
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
-    runs-on: macos-15
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
 
@@ -166,7 +165,7 @@ jobs:
 
   # e2e — the checks that only exist in a real browser against the real app.
   #
-  # Runner decision: macos-15, for a different reason than the backend job.
+  # Runner decision: macos-latest, for a different reason than the backend job.
   # Playwright drives the actual frontend through Vite and the actual backend
   # through devharness. Wails itself is intentionally absent: it would compile
   # and launch an unused native webview, while masking the headless binding
@@ -174,7 +173,7 @@ jobs:
   # real PTY and WebSocket transport.
   e2e:
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
-    runs-on: macos-15
+    runs-on: macos-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
