@@ -1098,7 +1098,7 @@ describe('the environment stack (nocx-695k.1)', () => {
   // hidden because a local session grows none, and the cwd chip went on
   // showing the local directory under a remote prompt.
   it('the tab title, the location chip and the ports target follow the environment', async () => {
-    const { ed, content, teardown } = await mountTerminal(makeClipboard(), {
+    const { ed, content, tab, teardown } = await mountTerminal(makeClipboard(), {
       attachToDocument: true,
     })
     const renderer = rendererOf(content)
@@ -1136,11 +1136,20 @@ describe('the environment stack (nocx-695k.1)', () => {
       expect(cwd?.textContent ?? '').not.toContain('home')
 
       renderer._fireCommandMarker({ kind: 'C', line: 0, col: 0, buffer: 'normal' })
+      // The REMOTE shell titles the tab the moment you land. This is the
+      // one that outlived its program: nothing sends another OSC 2 on the
+      // way out, so the tab kept naming a machine it had left, for as long
+      // as the tab lived (owner, 2026-08-04, four times).
+      renderer._fireTitle('pi@raspberrypi: ~')
+      expect(tab.title).toBe('pi@raspberrypi: ~')
+
       renderer._fireCommandMarker({ kind: 'D', line: 0, col: 0, buffer: 'normal', exitCode: 0 })
 
-      // Out again: everything goes back, within one prompt.
+      // Out again: everything goes back, within one prompt — including the
+      // title, because a title set by a program does not outlive it.
       expect(content.portsTargetId).toBe('local')
       expect(content.portsUnavailableReason).toBe('')
+      expect(tab.title).not.toBe('pi@raspberrypi: ~')
     } finally {
       Element.prototype.scrollTo = protoScrollTo
       Element.prototype.scrollIntoView = protoScrollIntoView

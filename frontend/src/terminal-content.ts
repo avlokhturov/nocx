@@ -260,9 +260,17 @@ export class TerminalContent extends BaseTabContent {
   /** Environments entered by commands we submitted, innermost last. Pushed
    *  on submit, popped on the D that ends that command (nocx-695k.2). */
   private _envStack: EnvironmentEntry[] = []
-  /** The cwd we knew before entering each environment, so leaving restores
-   *  it. Inside one we know the host and NOT the directory (nocx-695k.2). */
-  private _previousCwd: string[] = []
+  /** What the pane called itself before entering each environment, so
+   *  leaving restores it. Inside one we know the host and NOT the directory
+   *  (nocx-695k.2).
+   *
+   *  `programTitle` is the crux: it is whatever OSC 2 the running program
+   *  last sent, and the REMOTE shell sends one the moment you land
+   *  (`pi@raspberrypi: ~`). Nothing sends another on the way out — a local
+   *  bash has no reason to re-title an unchanged session — so the tab kept
+   *  the name of a machine it had left, for as long as the tab lived. A
+   *  title set by a program does not outlive that program. */
+  private _previousTitles: Array<{ cwd: string; programTitle: string; cwdTitle: string }> = []
   /** Stack of _shellIntegrated values saved before entering a nested
    *  environment. Pushed on submit when isEnvironmentEntry() is true;
    *  popped on the D marker that ends the command. */
@@ -598,7 +606,11 @@ export class TerminalContent extends BaseTabContent {
               this._previousIntegrated.push(this._shellIntegrated)
               this._shellIntegrated = false
               this._envStack.push(entered)
-              this._previousCwd.push(this._cwd)
+              this._previousTitles.push({
+                cwd: this._cwd,
+                programTitle: this.programTitle,
+                cwdTitle: this.cwdTitle,
+              })
               this._updateCapability()
               this.syncLocation()
               this.hooks.onPortsTargetChange?.()
@@ -807,11 +819,14 @@ export class TerminalContent extends BaseTabContent {
           if (this._previousIntegrated.length > 0) {
             this._shellIntegrated = this._previousIntegrated.pop()!
             this._envStack.pop()
-            const restored = this._previousCwd.pop()
+            const restored = this._previousTitles.pop()
             if (restored !== undefined) {
-              this._cwd = restored
-              this.editor?.setCwd(restored)
-              this.cwdTitle = directoryLabel(restored)
+              this._cwd = restored.cwd
+              this.editor?.setCwd(restored.cwd)
+              // Both halves, and the program title especially: the remote
+              // shell's OSC 2 belongs to the remote shell, which is gone.
+              this.programTitle = restored.programTitle
+              this.cwdTitle = restored.cwd ? directoryLabel(restored.cwd) : restored.cwdTitle
             }
             this._updateCapability()
             this.syncLocation()
