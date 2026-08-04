@@ -32,6 +32,7 @@ import type { HistoryRecord } from './generated/history.record'
 import { renderRecordedCommand } from './scrollback/blocks'
 import { KIND_LABELS } from './secret-kind'
 import { shouldShowEditor, NATIVE_RESTORE } from './native-mode'
+import { isEnvironmentEntry } from './environment-commands'
 import { shouldCopy, type ClipboardAccess, type ClipboardGate } from './clipboard'
 import type { ClipboardBanner } from './banner'
 import { ScrollbackController } from './scrollback/controller'
@@ -247,10 +248,15 @@ export class TerminalContent extends BaseTabContent {
   private _railOpen = false
   private _railOutsideHandler: ((e: MouseEvent) => void) | null = null
   private _railEscapeHandler: ((e: KeyboardEvent) => void) | null = null
-  /** Sticky "any OSC 133 marker arrived this session" — the capability
-   *  statement's evidence that the shell speaks our protocol. Set by the
-   *  marker handler only (AD-6), never by inference. */
+  /** Whether OSC 133 markers have arrived for the shell currently on stdin.
+   *  Environment-scoped: entering a nested environment (ssh, docker exec, …)
+   *  clears it; the D that ends that command restores what was true before.
+   *  Set by the marker handler only (AD-6), never by inference. */
   private _shellIntegrated = false
+  /** Stack of _shellIntegrated values saved before entering a nested
+   *  environment. Pushed on submit when isEnvironmentEntry() is true;
+   *  popped on the D marker that ends the command. */
+  private _previousIntegrated: boolean[] = []
 
   // ── In-band integration (nocx-ynsx, spec §4.4) ─────────────────────
   /** True while an in-band integration lease is held; rejects re-entry. */
@@ -511,6 +517,16 @@ export class TerminalContent extends BaseTabContent {
           submit: (doc: string, plan?: SubmitPlan) => {
             const recordLine = plan?.recordLine ?? doc
             this._pendingCommand = recordLine
+            // Track environment entry (nocx-695k.1): if the submitted
+            // command enters a new shell environment, save the current
+            // marker fact and clear it — the pane is now on a different
+            // host whose markers we have not seen. The D that ends this
+            // command restores the prior value.
+            if (isEnvironmentEntry(recordLine) && this._shellIntegrated) {
+              this._previousIntegrated.push(this._shellIntegrated)
+              this._shellIntegrated = false
+              this._updateCapability()
+            }
             // Proactive save for a hand-typed `ssh <target>` is nocx-pu4.4,
             // NOT part of this task — the ad-hoc SSH tab's adopt affordance
             // already covers the quick-connect path.
@@ -710,6 +726,12 @@ export class TerminalContent extends BaseTabContent {
         if (marker.kind === 'C') {
           this.scrollback?.onCommandStart(this._pendingCommand, this._cwd, marker.line)
         } else if (marker.kind === 'D') {
+          // Leaving the environment the command entered (nocx-695k.1):
+          // restore the marker fact from before that command ran.
+          if (this._previousIntegrated.length > 0) {
+            this._shellIntegrated = this._previousIntegrated.pop()!
+            this._updateCapability()
+          }
           const getLine = (y: number) => renderer.getBufferLine(y)
           this.scrollback?.onCommandEnd(getLine, marker.line, marker.exitCode ?? null)
           renderer.clearViewport()
@@ -1415,10 +1437,7 @@ export class TerminalContent extends BaseTabContent {
 
   /** Build the rail element and mount it above the editor. Called once
    *  from mount() before the editor mounts, so the rail sits between the
-   *  scrollback and the pending command. SSH tabs only: the axis is how
-   *  much of ours runs on the FAR host, and a local shell's capability is
-   *  static (always our own, always integrated) — a permanent chip there
-   *  is the decoration the owner's correction forbids. */
+   *  scrollback and the pending command. */
   private _mountRail(target: HTMLElement): void {
     if (this._rail || !this.sshOpts) return
     const rail = document.createElement('div')
