@@ -21,46 +21,88 @@ descriptions below are what they showed.
 
 ---
 
-## A — `nocx-wzc4.8`: the local machine listens too
+## A — `nocx-wzc4.8`: the local machine listens too, and we ask the kernel
 
 Owner: *"почему для локального шелл мы не показываем порты? Давай показывать."*
+Then, on reading the first version of this brief: *"Как мы узнаем порты в
+зависимости от ОС? У нас же есть абстракция? Нативные вызовы ОС должны идти
+отдельным модулем."* They are right, and the first version of this section was
+wrong. What follows replaces it.
 
-A local tab renders "No active connection". That is wrong: the machine you are
-sitting at listens on ports like any other, and the probe ladder that finds them
-is not SSH-specific — only the transport is.
+A local tab renders "No active connection". The machine you are sitting at
+listens on ports like any other.
 
-**The seam is in the wrong package.** `discovery.Connector` returns
-`ssh.DiscoveryConn`, so `internal/discovery` names the transport it happened to
-be built against first. Invert it: the exec seam becomes an interface in
-`internal/discovery`, `ssh.DiscoveryConn` satisfies it (check — it may already,
-structurally), and a local implementation runs the same ladder through
-`exec.CommandContext`. Interface-first is not decoration here; it is what lets
-the same five result states and the same three-valued process evidence describe
-both cases without a second code path.
+### The command ladder is the remote answer, and only the remote answer
 
-**Forwarding is the part that genuinely differs.** There is nothing to forward
-from the machine you are already on, so a local row must not offer it. What
-replaces it should be useful rather than disabled chrome — copying the address is
-the obvious candidate; argue for whatever you pick. (Exposing a local port to a
-remote host is `-R` and needs a chosen connection; that is a later bead, not this
-one. Say so if you build toward it.)
+`ss` → `netstat` → busybox `netstat` → `lsof` → `sockstat` exists because on
+another machine a shell command is the only thing we can run. That reasoning does
+not reach the local machine, where the kernel will hand us the table directly.
+Shelling out locally would make the feature depend on tools the user may not have
+installed on their own box, and would have us parse version-variant text for data
+we can read structurally. **Do not reuse the ladder locally.**
 
-**The wire needs a target identity for "this machine".** `ports.*` is keyed by
-`profileId` and a local tab has no profile. Define it, put it in the schema, and
-tell worker B the exact shape in your report before you finish — B is blocked on
-that one fact and on nothing else.
+### Two providers, one domain
 
-Local probing has one difference worth thinking about: the process-owner column.
-Non-root `ss` on the local box names only your own processes, exactly as it does
-remotely, so `permission-denied` evidence must render the same way rather than
-looking like a bug on the machine the user controls.
+`internal/discovery` owns the domain — `Listener`, the five result states, the
+three-valued process evidence, the cadence — and must know nothing about how the
+listeners were obtained. One interface there, two implementations behind it,
+chosen at the composition root (AD-8):
 
-**Test first.** A local target lists the machine's listening ports; the ladder
-degrades the same way when `ss` is absent; switching between a local tab and an
-SSH tab re-scopes in **both** directions; the discovery package's own tests no
-longer need an SSH server to exercise the ladder.
+- **remote** — the existing ladder over an exec channel. Unchanged.
+- **local** — native, per OS, **its own package**.
 
----
+That also fixes the inversion the owner is pointing at: `discovery.Connector`
+currently returns `ssh.DiscoveryConn`, so the domain package names the transport
+it happened to be built against first.
+
+### The native module
+
+Follow the house pattern exactly — `internal/contentkey` is the worked example:
+one exported function, `_linux.go` / `_darwin.go` / `_windows.go` behind
+`//go:build`, and an `_other.go` that returns a typed "not implemented on this
+platform" rather than pretending. That fallback maps to the existing `unavailable`
+state, so an unsupported OS degrades into a sentence the panel already knows how
+to render.
+
+- **Linux** — `/proc/net/tcp`, `/proc/net/tcp6`. Owner via the socket inode
+  matched through `/proc/*/fd`, which is also where `permission-denied` evidence
+  comes from naturally: you can only walk the processes you own. Same three-valued
+  evidence as remote, for the same reason, so it must render identically.
+- **Windows** — `GetExtendedTcpTable` through `golang.org/x/sys/windows`
+  (already a dependency, `v0.47.0`). No cgo.
+- **macOS** — this is the one that needs a decision, and it is yours to make with
+  evidence. The native route is `libproc` (`proc_listpids` / `proc_pidfdinfo`),
+  which needs cgo. The repo has **no `import "C"` today and sets `CGO_ENABLED`
+  nowhere**, so check what the Wails build actually does before assuming cgo is
+  free — if `-race` and the release build already pull it in, the cost is nil; if
+  they do not, introducing it is a real change and you must say so rather than
+  slide it in. If you conclude cgo is not worth it, `lsof` on darwin is a
+  defensible fallback **as long as your report says it is a fallback and why**,
+  and it still lives in the native module behind the same interface. nocx ships
+  macOS first, so a shrug here is not an answer.
+
+### Forwarding, and the wire
+
+There is nothing to forward from the machine you are already on, so a local row
+must not offer it. Whatever replaces the action should be useful rather than
+disabled chrome — copying the address is the obvious candidate; argue for what
+you pick. (Exposing a local port on a remote host is `-R` and needs a chosen
+connection: a later bead, not this one.)
+
+`ports.*` is keyed by `profileId` and a local tab has no profile. Define the
+target identity for "this machine", put it in the schema, and **tell worker B the
+exact shape in your report before you finish** — B is blocked on that one fact
+and nothing else.
+
+### Test first
+
+The local provider lists this machine's listening ports and the test asserts a
+port the test itself opened, so it cannot pass against a stale table. An
+unsupported platform degrades to `unavailable` rather than an empty list.
+Switching between a local tab and an SSH tab re-scopes in **both** directions.
+The discovery package's own tests stop needing an SSH server to exercise the
+domain. And per `AGENTS.md`: for every "returns an error when…" there is a paired
+"and on an ordinary machine it succeeds".
 
 ## B — `nocx-wzc4.9`: it has to be readable in a sidebar
 
