@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "shell.launcherCommand.schema.json",
+  "title": "shell.launcherCommand result",
+  "description": "The remote launcher command for rewriting a hand-typed ssh invocation (nocx-pu4.6).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["launcher", "reason"],
+  "properties": {
+    "launcher": {
+      "description": "The shell-quoted remote launcher command, ready to append to an ssh command line. Null when the rewrite is refused.",
+      "type": ["string", "null"]
+    },
+    "reason": {
+      "description": "Why the rewrite was refused. Null when launcher is non-null. 'remote-command' when the destination's ssh config sets RemoteCommand. 'policy-off' when the shell integration policy is off. 'unsupported' when the launcher cannot build a command for this shell.",
+      "type": ["string", "null"],
+      "enum": [null, "remote-command", "unsupported"]
+    }
+  }
+}

@@ -34,6 +34,8 @@ import { renderRecordedCommand } from './scrollback/blocks'
 import { KIND_LABELS } from './secret-kind'
 import { shouldShowEditor, NATIVE_RESTORE } from './native-mode'
 import { environmentEntry, type EnvironmentEntry } from './environment-commands'
+import { isInteractiveTransition, extractDestination, buildRewrite } from './ssh-transition'
+import type { ShellLauncherCommandResult } from './generated/shell.launcherCommand'
 import { shouldCopy, type ClipboardAccess, type ClipboardGate } from './clipboard'
 import type { ClipboardBanner } from './banner'
 import { ScrollbackController } from './scrollback/controller'
@@ -581,7 +583,44 @@ export class TerminalContent extends BaseTabContent {
           beforeSubmit: (doc) => {
             if (this.promptVault?.openResolution()) return false
             const sync = planSubmitSync(doc)
-            if (sync) return sync
+            if (sync) {
+              // nocx-pu4.6: rewrite a hand-typed interactive ssh to ride
+              // the remote launcher. Policy off refuses; anything
+              // uncertain falls through to the original line (fail-open,
+              // ADR-0004 §1). The rewrite is the one path where the
+              // sendLine differs from the recordLine without a secret
+              // reference — the history entry and the block header show
+              // the line the USER typed, while the wire carries the
+              // expanded one (ADR-0004 §2).
+              if (this._policy !== 'off' && isInteractiveTransition(doc)) {
+                const dest = extractDestination(doc)
+                const sid = this.session?.sessionId
+                if (dest && sid) {
+                  return this.client
+                    .call<ShellLauncherCommandResult>('shell.launcherCommand', {
+                      destination: dest,
+                      sessionId: sid,
+                    })
+                    .then((result) => {
+                      if (result.launcher) {
+                        const rewritten = buildRewrite(doc, result.launcher)
+                        if (rewritten) {
+                          return {
+                            sendLine: rewritten,
+                            recordLine: doc,
+                            refs: [],
+                          }
+                        }
+                      }
+                      // Refused (remote-command, unsupported, or cannot
+                      // build): send the original line unchanged.
+                      return sync
+                    })
+                    .catch(() => sync) // RPC failure → original line (fail-open)
+                }
+              }
+              return sync
+            }
             return planSubmit(doc, (line) => vault.resolveLine(line)).then((verdict) => {
               if (isSubmitFailure(verdict)) {
                 this.reportSubmitFailure(verdict)

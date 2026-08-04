@@ -1096,6 +1096,8 @@ describe('the environment stack (nocx-695k.1)', () => {
       ed.root.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
       )
+      // The beforeSubmit may be async (ssh rewrite RPC); drain microtasks.
+      for (let i = 0; i < 5; i++) await Promise.resolve()
 
       // Inside: the pane names the host we went to, and refuses to speak for
       // its ports — there is no managed connection to a child ssh process.
@@ -1157,6 +1159,7 @@ describe('the environment stack (nocx-695k.1)', () => {
       ed.root.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
       )
+      for (let i = 0; i < 5; i++) await Promise.resolve()
 
       // The marker fact is cleared: the pane is now on a different host.
       expect(shellIntegrated(content)).toBe(false)
@@ -1237,6 +1240,7 @@ describe('the environment stack (nocx-695k.1)', () => {
       ed.root.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
       )
+      for (let i = 0; i < 5; i++) await Promise.resolve()
       expect(shellIntegrated(content)).toBe(false)
       expect(previousIntegrated(content)).toEqual([true])
       renderer._fireCommandMarker({ kind: 'C', line: 0, col: 0, buffer: 'normal' })
@@ -1254,6 +1258,7 @@ describe('the environment stack (nocx-695k.1)', () => {
       ed.root.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
       )
+      for (let i = 0; i < 5; i++) await Promise.resolve()
       expect(shellIntegrated(content)).toBe(false)
       expect(previousIntegrated(content)).toEqual([true])
       renderer._fireCommandMarker({ kind: 'C', line: 0, col: 0, buffer: 'normal' })
@@ -1563,3 +1568,239 @@ describe('terminal/editor input switching (nocx-atyf.5)', () => {
     }
   })
 })
+
+// ── nocx-pu4.6: ssh rewrite rides the launcher ────────────────────────────
+
+/* eslint-disable @typescript-eslint/unbound-method */
+describe('nocxify: ssh command rewrite (nocx-pu4.6)', () => {
+  const LAUNCHER = "'/usr/bin/env -u BASH_ENV /bin/sh -c ...'"
+
+  /** jsdom does not implement scrollTo/scrollIntoView; the
+   *  ScrollbackController calls both. */
+  function stubScroll(): () => void {
+    const pst = Element.prototype.scrollTo
+    const psiv = Element.prototype.scrollIntoView
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    return () => {
+      Element.prototype.scrollTo = pst
+      Element.prototype.scrollIntoView = psiv
+    }
+  }
+
+  it('rewrites an interactive ssh command at submit', async () => {
+    const callMock = vi.fn()
+    callMock.mockResolvedValue({ launcher: LAUNCHER, reason: null })
+    const client = makeClient({ call: callMock })
+    const session = makeSession()
+    client.openSession.mockResolvedValue(session)
+
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restoreScroll = stubScroll()
+    try {
+      content.setVisible(true)
+      ed.show()
+      ed.insertText('ssh testhost')
+
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          bubbles: true,
+          cancelable: true,
+        }),
+      )
+
+      // The rewrite is async (RPC call): drain microtasks.
+      for (let i = 0; i < 5; i++) await Promise.resolve()
+
+      // The RPC was called with the right params.
+      expect(callMock).toHaveBeenCalledWith(
+        'shell.launcherCommand',
+        expect.objectContaining({
+          destination: 'testhost',
+          sessionId: session.sessionId,
+        }),
+      )
+
+      // The paste received the REWRITTEN command, not the original.
+      const renderer = rendererOf(content)
+      expect(renderer.paste).toHaveBeenCalledWith(expect.stringContaining(LAUNCHER))
+      expect(renderer.paste).toHaveBeenCalledWith(expect.stringContaining('-t'))
+      expect(renderer.paste).toHaveBeenCalledWith(expect.stringContaining('ssh'))
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
+
+  it('does NOT rewrite when policy is off', async () => {
+    const callMock = vi.fn()
+    const client = makeClient({ call: callMock })
+    const session = makeSession({ shellIntegration: 'off' })
+    client.openSession.mockResolvedValue(session)
+
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restoreScroll = stubScroll()
+    try {
+      content.setVisible(true)
+      ed.show()
+      ed.insertText('ssh testhost')
+
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          bubbles: true,
+          cancelable: true,
+        }),
+      )
+
+      for (let i = 0; i < 5; i++) await Promise.resolve()
+
+      // shell.launcherCommand was never called.
+      expect(callMock).not.toHaveBeenCalledWith('shell.launcherCommand', expect.anything())
+
+      // The paste received the ORIGINAL line.
+      const renderer = rendererOf(content)
+      expect(renderer.paste).toHaveBeenCalledWith('ssh testhost')
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
+
+  it('does NOT rewrite when launcher is null (fail-open)', async () => {
+    const callMock = vi.fn()
+    callMock.mockResolvedValue({
+      launcher: null,
+      reason: 'remote-command',
+    })
+    const client = makeClient({ call: callMock })
+    const session = makeSession()
+    client.openSession.mockResolvedValue(session)
+
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restoreScroll = stubScroll()
+    try {
+      content.setVisible(true)
+      ed.show()
+      ed.insertText('ssh testhost')
+
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          bubbles: true,
+          cancelable: true,
+        }),
+      )
+
+      for (let i = 0; i < 5; i++) await Promise.resolve()
+
+      // The paste received the ORIGINAL line — fail-open.
+      const renderer = rendererOf(content)
+      expect(renderer.paste).toHaveBeenCalledWith('ssh testhost')
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
+
+  it('does NOT rewrite a non-ssh command', async () => {
+    const callMock = vi.fn()
+    const client = makeClient({ call: callMock })
+    const session = makeSession()
+    client.openSession.mockResolvedValue(session)
+
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restoreScroll = stubScroll()
+    try {
+      content.setVisible(true)
+      ed.show()
+      ed.insertText('ls -la')
+
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          bubbles: true,
+          cancelable: true,
+        }),
+      )
+
+      for (let i = 0; i < 5; i++) await Promise.resolve()
+
+      // shell.launcherCommand was never called for non-ssh lines.
+      expect(callMock).not.toHaveBeenCalledWith('shell.launcherCommand', expect.anything())
+
+      const renderer = rendererOf(content)
+      expect(renderer.paste).toHaveBeenCalledWith('ls -la')
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
+
+  it('sends exactly one line — no write between submit and first marker (safety property)', async () => {
+    const callMock = vi.fn()
+    callMock.mockResolvedValue({ launcher: LAUNCHER, reason: null })
+    const client = makeClient({ call: callMock })
+    const session = makeSession()
+    client.openSession.mockResolvedValue(session)
+
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restoreScroll = stubScroll()
+    try {
+      content.setVisible(true)
+      ed.show()
+      ed.insertText('ssh testhost')
+
+      const sendCallsBefore = session.send.mock.calls.length
+
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          bubbles: true,
+          cancelable: true,
+        }),
+      )
+
+      for (let i = 0; i < 5; i++) await Promise.resolve()
+
+      // The submit path calls paste (which writes to the renderer, not
+      // session.send) and sendRaw('\r') (calls session.send). The rewrite
+      // path sends exactly ONE line — the rewritten ssh command — followed
+      // by CR. Nothing else is typed. This is the safety property: unlike
+      // the in-band family, no wrapper is typed AFTER submit into an
+      // unknown foreground process.
+      const renderer = rendererOf(content)
+      expect(renderer.paste).toHaveBeenCalledTimes(1)
+      expect(renderer.paste).toHaveBeenCalledWith(expect.stringContaining(LAUNCHER))
+
+      // No additional deferred writes after submit — no in-band injection.
+      const sendCallsAfter = session.send.mock.calls.length
+      expect(sendCallsAfter - sendCallsBefore).toBeLessThanOrEqual(2)
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
+})
+/* eslint-enable @typescript-eslint/unbound-method */

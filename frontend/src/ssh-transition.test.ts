@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { isInteractiveTransition, extractDestination } from './ssh-transition'
+import { isInteractiveTransition, extractDestination, buildRewrite } from './ssh-transition'
 
 describe('isInteractiveTransition (nocx-atyf.3)', () => {
   it('a simple ssh to a host is interactive', () => {
@@ -46,5 +46,43 @@ describe('isInteractiveTransition (nocx-atyf.3)', () => {
     expect(extractDestination('ssh myserver')).toBe('myserver')
     expect(extractDestination('ssh -p 2222 host')).toBe('host')
     expect(extractDestination('ssh -i key user@host')).toBe('user@host')
+  })
+})
+
+describe('buildRewrite (nocx-pu4.6)', () => {
+  const LAUNCHER = "'/usr/bin/env sh -c ...'"
+
+  it('inserts -t and appends the launcher', () => {
+    expect(buildRewrite('ssh pi@raspberrypi', LAUNCHER)).toBe(`ssh -t pi@raspberrypi ${LAUNCHER}`)
+    expect(buildRewrite('ssh myserver', LAUNCHER)).toBe(`ssh -t myserver ${LAUNCHER}`)
+  })
+
+  it('preserves existing flags', () => {
+    expect(buildRewrite('ssh -p 2222 host', LAUNCHER)).toBe(`ssh -t -p 2222 host ${LAUNCHER}`)
+    expect(buildRewrite('ssh -i ~/.ssh/key user@host', LAUNCHER)).toBe(
+      `ssh -t -i ~/.ssh/key user@host ${LAUNCHER}`,
+    )
+    expect(buildRewrite('ssh -A -X host', LAUNCHER)).toBe(`ssh -t -A -X host ${LAUNCHER}`)
+  })
+
+  it('does not double -t when already present', () => {
+    expect(buildRewrite('ssh -t host', LAUNCHER)).toBe(`ssh -t host ${LAUNCHER}`)
+    expect(buildRewrite('ssh -tt host', LAUNCHER)).toBe(`ssh -tt host ${LAUNCHER}`)
+  })
+
+  it('refuses -T (explicit no-PTY)', () => {
+    expect(buildRewrite('ssh -T host', LAUNCHER)).toBeNull()
+    expect(buildRewrite('ssh -T -A host', LAUNCHER)).toBeNull()
+  })
+
+  it('preserves quoting around flags', () => {
+    expect(buildRewrite('ssh -o "StrictHostKeyChecking no" host', LAUNCHER)).toBe(
+      `ssh -t -o "StrictHostKeyChecking no" host ${LAUNCHER}`,
+    )
+  })
+
+  it('refuses non-ssh lines', () => {
+    expect(buildRewrite('ls -la', LAUNCHER)).toBeNull()
+    expect(buildRewrite('', LAUNCHER)).toBeNull()
   })
 })

@@ -94,6 +94,45 @@ export function extractDestination(line: string): string {
   return ''
 }
 
+/**
+ * Build the rewritten ssh command for nocxify (nocx-pu4.6).
+ *
+ * Inserts `-t` (force PTY allocation) after `ssh` if not already present
+ * and appends the pre-quoted launcher as the final argument. Returns null
+ * when the rewrite is refused — `-T` (explicit no-PTY) or a line we cannot
+ * confidently parse means the original line is sent unchanged.
+ *
+ * Fail-open is the invariant (ADR-0004 §1): anything uncertain about the
+ * rewrite means return null. The launcher must already be shell-quoted
+ * (single quotes with embedded-quote escaping) by the backend.
+ */
+export function buildRewrite(line: string, launcher: string): string | null {
+  const trimmed = line.trim()
+  const tokens = tokenize(trimmed)
+
+  // Fail-open: if we cannot parse the line confidently, refuse.
+  if (tokens.length < 2 || tokens[0] !== 'ssh') return null
+
+  // -T means the user explicitly asked for no PTY allocation.
+  // A remote command without a PTY cannot integrate, so refuse.
+  for (let i = 1; i < tokens.length; i++) {
+    if (tokens[i] === '-T') return null
+  }
+
+  // Check if -t (or -tt, -ttt etc.) is already present.
+  const hasT = tokens.some((tok) => tok === '-t' || /^-t+$/.test(tok))
+
+  // Slice the original text after "ssh" to preserve quoting around flags
+  // and the destination. The tokenizer strips quotes; using the original
+  // text keeps them intact.
+  const afterSsh = trimmed.slice(tokens[0].length).trimStart()
+
+  if (hasT) {
+    return `ssh ${afterSsh} ${launcher}`
+  }
+  return `ssh -t ${afterSsh} ${launcher}`
+}
+
 /** Split a shell command line into tokens, respecting single and double
  *  quotes. Does NOT handle all shell quoting — just enough to find the
  *  destination in `ssh user@host`. */
