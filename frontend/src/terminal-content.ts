@@ -34,7 +34,6 @@ import { renderRecordedCommand } from './scrollback/blocks'
 import { KIND_LABELS } from './secret-kind'
 import { shouldShowEditor, NATIVE_RESTORE } from './native-mode'
 import { environmentEntry, type EnvironmentEntry } from './environment-commands'
-import { isInteractiveTransition, extractDestination } from './ssh-transition'
 import { shouldCopy, type ClipboardAccess, type ClipboardGate } from './clipboard'
 import type { ClipboardBanner } from './banner'
 import { ScrollbackController } from './scrollback/controller'
@@ -246,7 +245,6 @@ export class TerminalContent extends BaseTabContent {
   /** Per-destination consent for in-band integration (nocx-atyf.3).
    *  Session-scoped: a hand-typed ssh to a host the user consented to
    *  integrates silently for the rest of this tab. */
-  private _consent = new Map<string, boolean>()
   /** The environment degraded or became uncertain — integration declined at
    *  open, or markers stopped on an integrated session the user did not
    *  latch native. Tab chrome renders at most this mark. */
@@ -595,6 +593,13 @@ export class TerminalContent extends BaseTabContent {
           submit: (doc: string, plan?: SubmitPlan) => {
             const recordLine = plan?.recordLine ?? doc
             this._pendingCommand = recordLine
+            // Where the command RUNS, captured before anything below can
+            // change it. Entering an environment blanks `_cwd` (we know the
+            // host, not the remote directory), and the ledger and the block
+            // both read it further down — so `ssh pi@…` was recorded with no
+            // directory and vanished from a history scoped to "this
+            // directory". The command ran here, whatever it goes on to do.
+            const submitCwd = this._cwd
             // Track environment entry (nocx-695k.1): if the submitted
             // command enters a new shell environment, save the current
             // marker fact and clear it — the pane is now on a different
@@ -614,23 +619,19 @@ export class TerminalContent extends BaseTabContent {
               this.syncLocation()
               this.hooks.onPortsTargetChange?.()
             }
-            // Interactive SSH transition consent (nocx-atyf.3): if the
-            // user hand-typed a simple `ssh host` and we have not asked
-            // for this destination yet, offer integration once. If already
-            // consented, integrate silently — nothing on screen.
-            if (
-              isInteractiveTransition(recordLine) &&
-              !this._shellIntegrated &&
-              this._policy !== 'off' &&
-              !this._integrating
-            ) {
-              const dest = extractDestination(recordLine)
-              if (this._consent.get(dest) === true) {
-                void this.integrateShell()
-              } else if (!this._consent.has(dest)) {
-                void this._askConsent(dest)
-              }
-            }
+            // A hand-typed `ssh host` is NOT a moment at which we may act.
+            // Between the command and the remote prompt there can be a
+            // password prompt, a 2FA challenge or a host-key confirmation,
+            // and the in-band wrapper typed into any of those is sent as the
+            // secret — to the remote, and into its auth log. There is no
+            // marker to tell us the far shell is ready, because the far
+            // shell is exactly the one that emits none.
+            //
+            // So the offer is the CHIP, not a dialog, and the act is the
+            // user's click at a moment only they can see (nocx-atyf.3 as
+            // corrected by the owner, 2026-08-04). The consent map still
+            // decides whether the chip nags or waits quietly; it never
+            // decides to type.
             // Proactive save for a hand-typed `ssh <target>` is nocx-pu4.4,
             // NOT part of this task — the ad-hoc SSH tab's adopt affordance
             // already covers the quick-connect path.
@@ -640,7 +641,7 @@ export class TerminalContent extends BaseTabContent {
             // more command before deciding lost the offer for good.
             if (this.ledger) {
               let markerLine: () => number | undefined = () => undefined
-              const rec = this.ledger.open(recordLine, this._cwd, this._host, () => markerLine())
+              const rec = this.ledger.open(recordLine, submitCwd, this._host, () => markerLine())
               const m = renderer.registerMarker()
               if (m) {
                 markerLine = () => m.line()
@@ -662,7 +663,7 @@ export class TerminalContent extends BaseTabContent {
             // is the cursor position at submit time; when C arrives (if
             // it does), cReceived is set on the running block.
             if (this.scrollback && this.renderer) {
-              this.scrollback.beginBlock(recordLine, this._cwd, this.renderer.cursorLine())
+              this.scrollback.beginBlock(recordLine, submitCwd, this.renderer.cursorLine())
             }
           },
           cancel: () => this.session?.send('\x03'),
@@ -1584,17 +1585,6 @@ export class TerminalContent extends BaseTabContent {
   /** Ask the user once whether to enable the command editor for this
    *  destination (nocx-atyf.3). The answer is remembered per destination
    *  so later transitions are silent. */
-  private async _askConsent(destination: string): Promise<void> {
-    const label = destination.includes('@') ? destination : `host ${destination}`
-    const message = `Enable command blocks for ${label}?`
-    const confirmed = await showConfirm(message, 'Enable command editor', 'Not now')
-    this._consent.set(destination, confirmed)
-    if (!confirmed) return
-    // If the editor is still visible (prompt still ready), integrate now.
-    // Otherwise wait for the next prompt — the consent is remembered, so
-    // the next ssh to this destination integrates silently.
-    void this.integrateShell()
-  }
 
   /** The native-mode escape (ADR-0004 §1, nocx-4ff.9): latch native input —
    *  the editor never shows again this session, keys route raw, and the
