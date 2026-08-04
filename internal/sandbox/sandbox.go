@@ -76,7 +76,7 @@ type PreparedCommand struct {
 	Policy  *Policy
 
 	// policyFile is the sole parent-side owner of the Linux helper's policy
-	// descriptor. ExtraFiles duplicates it for the child; cleanup closes this
+	// descriptor. ExtraFiles duplicates it for the child; Close releases this
 	// object once, never the raw descriptor number.
 	policyFile *os.File
 	waitReady  func(context.Context) error
@@ -101,6 +101,9 @@ func (p *PreparedCommand) Close() {
 		return
 	}
 	p.once.Do(func() {
+		if p.policyFile != nil {
+			_ = p.policyFile.Close()
+		}
 		if p.cleanup != nil {
 			p.cleanup()
 		}

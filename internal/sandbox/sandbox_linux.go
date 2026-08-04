@@ -120,7 +120,6 @@ func (s *linuxService) Prepare(ctx context.Context, req Request, spec CommandSpe
 		},
 	}
 	pc.cleanup = func() {
-		_ = pc.policyFile.Close()
 		_ = statusR.Close()
 		_ = statusW.Close()
 		if cmd.Process != nil && cmd.ProcessState == nil {

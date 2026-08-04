@@ -116,11 +116,12 @@ func TestLandlockEnforcement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("memfd: %v", err)
 	}
-	defer func() { _ = unix.Close(policyFD) }()
-	if _, wErr := unix.Write(policyFD, data); wErr != nil {
+	policyFile := os.NewFile(uintptr(policyFD), "policy")
+	defer func() { _ = policyFile.Close() }()
+	if _, wErr := policyFile.Write(data); wErr != nil {
 		t.Fatalf("write memfd: %v", wErr)
 	}
-	if _, sErr := unix.Seek(policyFD, 0, 0); sErr != nil {
+	if _, sErr := policyFile.Seek(0, 0); sErr != nil {
 		t.Fatalf("rewind memfd: %v", sErr)
 	}
 
@@ -139,7 +140,7 @@ func TestLandlockEnforcement(t *testing.T) {
 	cmd := exec.Command(exe, "-test.run=TestSandboxChildProcess") //nolint:gosec // test doubles as helper/probe
 	cmd.Env = helperEnv
 	cmd.Dir = workspace
-	cmd.ExtraFiles = []*os.File{os.NewFile(uintptr(policyFD), "policy"), statusW}
+	cmd.ExtraFiles = []*os.File{policyFile, statusW}
 	var out strings.Builder
 	cmd.Stdout = &out
 	cmd.Stderr = &out

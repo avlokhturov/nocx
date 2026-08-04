@@ -209,6 +209,14 @@ jobs:
       # run, and installing only chromium would fail the run outright.
       - run: npx playwright install chromium webkit
 
+      # Stateful vault specs stop and restart the backend themselves. Build the
+      # deterministic binaries they require before Playwright starts Wails.
+      - name: Build e2e devharness binaries
+        run: |
+          go build -o /tmp/nocx-devharness ./cmd/devharness
+          cp /tmp/nocx-devharness /tmp/nocx-devharness-vault
+          cp /tmp/nocx-devharness /tmp/nocx-devharness-srch
+
       - run: npx playwright test
 
       - name: Upload traces
