@@ -260,6 +260,9 @@ export class TerminalContent extends BaseTabContent {
   /** Environments entered by commands we submitted, innermost last. Pushed
    *  on submit, popped on the D that ends that command (nocx-695k.2). */
   private _envStack: EnvironmentEntry[] = []
+  /** The cwd we knew before entering each environment, so leaving restores
+   *  it. Inside one we know the host and NOT the directory (nocx-695k.2). */
+  private _previousCwd: string[] = []
   /** Stack of _shellIntegrated values saved before entering a nested
    *  environment. Pushed on submit when isEnvironmentEntry() is true;
    *  popped on the D marker that ends the command. */
@@ -412,6 +415,12 @@ export class TerminalContent extends BaseTabContent {
     this.scrollback?.blockManager.setLocation(location)
     this.editor?.setLocation(location)
     if (env) {
+      // No folder inside an environment we cannot see into. `ssh` was
+      // launched FROM the local directory, but printing that beside the
+      // remote host reads as "on the Pi, in home/dev" — a place that does
+      // not exist. The host is a true label for the whole block; the
+      // directory is not knowable until OSC 7 arrives (owner, 2026-08-04).
+      this._cwd = ''
       this.editor?.setCwd('')
       this.cwdTitle = env.label
       this.programTitle = ''
@@ -589,6 +598,7 @@ export class TerminalContent extends BaseTabContent {
               this._previousIntegrated.push(this._shellIntegrated)
               this._shellIntegrated = false
               this._envStack.push(entered)
+              this._previousCwd.push(this._cwd)
               this._updateCapability()
               this.syncLocation()
               this.hooks.onPortsTargetChange?.()
@@ -797,6 +807,12 @@ export class TerminalContent extends BaseTabContent {
           if (this._previousIntegrated.length > 0) {
             this._shellIntegrated = this._previousIntegrated.pop()!
             this._envStack.pop()
+            const restored = this._previousCwd.pop()
+            if (restored !== undefined) {
+              this._cwd = restored
+              this.editor?.setCwd(restored)
+              this.cwdTitle = directoryLabel(restored)
+            }
             this._updateCapability()
             this.syncLocation()
             this.hooks.onPortsTargetChange?.()

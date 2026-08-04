@@ -1128,7 +1128,10 @@ describe('the environment stack (nocx-695k.1)', () => {
       expect(loc?.textContent).toBe('pi@192.168.0.93')
       expect(content.portsTargetId).toBeNull()
       expect(content.portsUnavailableReason).toBe('pi@192.168.0.93')
-      // The cwd is NOT invented: we know the host, not the directory.
+      // The cwd is NOT invented: we know the host, not the directory. The
+      // block for the ssh command carries the destination and NO folder —
+      // `📁 home/dev` beside a remote host reads as a place that does not
+      // exist (owner, 2026-08-04).
       const cwd = ed.root.querySelector('.nocx-editor-cwd')
       expect(cwd?.textContent ?? '').not.toContain('home')
 
