@@ -339,4 +339,39 @@ describe('ports sidebar view', () => {
     refreshBtn!.click()
     await vi.waitFor(() => expect(sample).toHaveBeenCalledWith('ssh:p1:1'))
   })
+
+  // ── The loader (nocx-wzc4.11 report 5, re-reported 2026-08-04) ─────────
+  // A user opens the view before the first sample has landed and must see
+  // that nocx is working. This was "fixed" once with no test, and the owner
+  // reported it unfixed twice — so the assertion is what the user sees, at
+  // the two moments that matter: while the first status is in flight, and
+  // while the target is connected but its first sample has not arrived.
+
+  it('shows the spinner while the first status call is still in flight', async () => {
+    let release!: (v: PortsStatusResult) => void
+    const pending = new Promise<PortsStatusResult>((res) => {
+      release = res
+    })
+    const services = fakeServices({ status: vi.fn().mockReturnValue(pending) })
+    const { bar, panel } = await mountApp(services)
+    portsIcon(bar).click()
+    await Promise.resolve()
+
+    expect(panel.querySelector('[data-testid="ports-loading"]')).not.toBeNull()
+
+    release(statusFixture('ssh:p1:1'))
+    await vi.waitFor(() => expect(panel.querySelector('[data-testid="ports-loading"]')).toBeNull())
+  })
+
+  it('keeps the spinner up for a connected target whose first sample has not landed', async () => {
+    const settling = statusFixture('ssh:p1:1')
+    settling.discovery.state = 'pending'
+    const status = vi.fn().mockResolvedValue(settling)
+    const services = fakeServices({ status })
+    const { bar, panel } = await mountApp(services)
+    portsIcon(bar).click()
+    await vi.waitFor(() => expect(status).toHaveBeenCalled())
+
+    expect(panel.querySelector('[data-testid="ports-loading"]')).not.toBeNull()
+  })
 })
