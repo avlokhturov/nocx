@@ -339,6 +339,11 @@ export class TabManager {
   /** Called when the user performs a UI action that should reset the
    *  vault idle timer. Wired by main.tsx to vaultClient.activity(). */
   onActivity?: () => void
+  /** Called when the active tab changes — the seam for chrome that must
+   *  re-scope to the tab in front. The sidebar's ports view follows the
+   *  active tab through this (nocx-wzc4.7); wired by main.tsx to a Solid
+   *  signal. */
+  onActiveTabChange?: () => void
 
   constructor(
     bar: HTMLElement,
@@ -656,9 +661,9 @@ export class TabManager {
     log.info('nocx: tab.setActive(true) called', {
       paneClasses: tab.pane.className,
     })
-
     await tab.start()
     tab.focus()
+    this.onActiveTabChange?.()
   }
 
   activateByIndex(index: number): void {

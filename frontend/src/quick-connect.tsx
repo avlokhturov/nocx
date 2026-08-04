@@ -89,7 +89,6 @@ export class ActionsQuickConnectProvider implements QuickConnectProvider {
     private newTab: () => Tab,
     private newConnection: () => void,
     private integrateShell: () => void = () => {},
-    private openPorts: () => void = () => {},
   ) {}
 
   getItems(): QuickConnectItem[] {
@@ -111,12 +110,6 @@ export class ActionsQuickConnectProvider implements QuickConnectProvider {
         label: 'Integrate this shell',
         detail: 'Bootstraps the shell at the current prompt (only from a trusted prompt)',
         run: () => this.integrateShell(),
-      },
-      {
-        id: '__ports__',
-        label: 'Ports',
-        detail: 'Forwarding for the active connection (saved SSH profiles only)',
-        run: () => this.openPorts(),
       },
     ]
   }

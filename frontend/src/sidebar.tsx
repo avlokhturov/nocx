@@ -33,12 +33,26 @@ const STORAGE_KEY = 'nocx.sidebar.collapsed'
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
+/** Props every sidebar view receives from the shell. Views that need
+ *  profile scope or visibility gating read these inside effects — the
+ *  accessors are reactive, never snapshots. */
+export interface SidebarViewProps {
+  /** True while THIS view is on screen and the panel is expanded.
+   *  Collapsing the sidebar counts as not visible: a view that renders
+   *  background work (polling, sampling) must gate it on this. */
+  visible: () => boolean
+  /** Reactive accessor for the active tab's saved-profile id — the scope
+   *  of profile-bound views (Ports follows the active tab). Null when the
+   *  active tab has no profile (local shell, alias, Settings). */
+  activeProfileId: () => string | null
+}
+
 /** A view whose content is rendered inside the sidebar panel. */
 export interface SidebarViewDescriptor {
   readonly id: string
   readonly title: string // panel header, e.g. "EXPLORER"
   readonly icon: Component // activity-bar icon — a component, never markup
-  readonly view: Component // panel body
+  readonly view: Component<SidebarViewProps> // panel body, receives view props
   readonly actions?: Component // per-view header actions (…, refresh, collapse-all)
   readonly order: number
 }
@@ -60,6 +74,10 @@ export interface SidebarStorage {
 /** Handle returned by mountSidebar. */
 export interface SidebarHandle {
   destroy(): void
+  /** Reveal-or-focus a view from outside the sidebar (keybinding): expands
+   *  the panel on the view when it is hidden, focuses the view's
+   *  activity-bar button when it is already on screen. */
+  revealView(viewId: string): void
 }
 
 function safeLocalStorage(): SidebarStorage | null {
@@ -70,11 +88,10 @@ function safeLocalStorage(): SidebarStorage | null {
   }
 }
 
-// ── Panel content (rendered as a separate Solid root inside #sidebar) ──────
-
 interface PanelRootProps {
   state: AppState
   views: readonly SidebarViewDescriptor[]
+  getActiveProfileId: () => string | null
 }
 
 function PanelRoot(props: PanelRootProps) {
@@ -84,7 +101,11 @@ function PanelRoot(props: PanelRootProps) {
 
   return (
     <Show when={activeDesc()}>
-      <ActiveView desc={activeDesc()!} />
+      <ActiveView
+        desc={activeDesc()!}
+        collapsed={() => props.state.sidebar.collapsed}
+        getActiveProfileId={props.getActiveProfileId}
+      />
     </Show>
   )
 }
@@ -97,7 +118,15 @@ function PanelRoot(props: PanelRootProps) {
  * tracked scope, so switching views would keep rendering the first view's
  * component — the silent-reactivity failure the Solid lint gate exists to catch.
  */
-function ActiveView(props: { desc: SidebarViewDescriptor }) {
+function ActiveView(props: {
+  desc: SidebarViewDescriptor
+  collapsed: () => boolean
+  getActiveProfileId: () => string | null
+}) {
+  // Only the active view renders, so "visible" is exactly the panel's
+  // expanded state — a collapsed sidebar is a hidden view (nocx-wzc4.7).
+  const visible = () => !props.collapsed()
+
   return (
     <SidebarView
       title={props.desc.title}
@@ -105,7 +134,11 @@ function ActiveView(props: { desc: SidebarViewDescriptor }) {
         <Show when={props.desc.actions}>{(Actions) => <Dynamic component={Actions()} />}</Show>
       }
     >
-      <Dynamic component={props.desc.view} />
+      <Dynamic
+        component={props.desc.view}
+        visible={visible}
+        activeProfileId={props.getActiveProfileId}
+      />
     </SidebarView>
   )
 }
@@ -300,11 +333,15 @@ function SidebarSolid(props: SidebarSolidProps) {
  *   1) Activity bar (toolbar with zones) inside `bar`.
  *   2) Panel content inside `panel` (#sidebar host).
  *
- * @param bar     #activitybar element — Solid mounts the activity bar here
- * @param panel   #sidebar element — Solid mounts the panel content here
- * @param views   view descriptors (top zone)
- * @param actions action descriptors (bottom zone)
- * @param storage injectable storage (defaults to localStorage)
+ * @param bar                #activitybar element — Solid mounts the activity bar here
+ * @param panel              #sidebar element — Solid mounts the panel content here
+ * @param views              view descriptors (top zone)
+ * @param actions            action descriptors (bottom zone)
+ * @param storage            injectable storage (defaults to localStorage)
+ * @param getActiveProfileId reactive accessor for the active tab's
+ *                           saved-profile id, forwarded to every view
+ *                           (see SidebarViewProps). Defaults to null —
+ *                           views that need real scope provide one.
  */
 export function mountSidebar(
   bar: HTMLElement,
@@ -312,8 +349,10 @@ export function mountSidebar(
   views: readonly SidebarViewDescriptor[],
   actions: readonly SidebarAction[],
   storage?: SidebarStorage | null,
+  getActiveProfileId?: () => string | null,
 ): SidebarHandle {
   const safeStorage = storage ?? safeLocalStorage()
+  const activeProfileId = getActiveProfileId ?? (() => null)
 
   const [state, storeActions] = createAppStore()
 
@@ -350,12 +389,34 @@ export function mountSidebar(
   )
 
   // ── Render the panel content into `panel` (#sidebar host) ────────────
-  const destroyPanel = render(() => <PanelRoot state={state} views={views} />, panel)
+  const destroyPanel = render(
+    () => <PanelRoot state={state} views={views} getActiveProfileId={activeProfileId} />,
+    panel,
+  )
+
+  /** Reveal-or-focus a view (keybinding entry, nocx-wzc4.7): expand the
+   *  panel on the view when it is hidden; focus its activity-bar button
+   *  when it is already on screen. Unknown ids are a no-op — activating a
+   *  view that is not registered would orphan the panel. */
+  const revealView = (viewId: string): void => {
+    if (!views.some((v) => v.id === viewId)) return
+    const { collapsed, activeViewId } = state.sidebar
+    if (activeViewId === viewId && !collapsed) {
+      const btn = bar.querySelector<HTMLElement>(`button[data-view="${viewId}"]`)
+      btn?.focus()
+      return
+    }
+    // setActiveView switches the active view but never expands a collapsed
+    // panel by itself — the icon-click path compensates the same way.
+    storeActions.setActiveView(viewId)
+    if (collapsed) storeActions.toggleSidebar()
+  }
 
   return {
     destroy() {
       destroyBar()
       destroyPanel()
     },
+    revealView,
   }
 }

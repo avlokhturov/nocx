@@ -1,12 +1,12 @@
 import './style.css'
 import { GetWSPort, GetWSToken, CheckForUpdate, ReportHealthy } from '../wailsjs/go/main/WailsApp'
 import { render } from 'solid-js/web'
-import { Show } from 'solid-js'
+import { Show, createSignal } from 'solid-js'
 import App from './App'
 import { log } from './log'
 import { WSClient } from './ipc'
 import { TabManager } from './tabs'
-import { mountSidebar } from './sidebar'
+import { mountSidebar, type SidebarViewDescriptor } from './sidebar'
 import { createClipboardAccess, ClipboardGate } from './clipboard'
 import { ClipboardBannerImpl } from './banner'
 import { ProfileClient } from './profiles'
@@ -19,7 +19,7 @@ import { SettingsContent, SURFACE_SETTINGS, SINGLETON_SETTINGS } from './setting
 import { HorizontalTabStrip, VerticalTabStrip } from './tab-strip'
 import { SurfaceRegistry, SURFACE_ID_SETTINGS } from './surface-registry'
 import { mountUpdateNotice } from './update-notice'
-import { SettingsIcon } from './ui/icons'
+import { SettingsIcon, PlugIcon } from './ui/icons'
 import { SettingsObserver } from './settings-observer'
 import { bootstrapTheme, reconcileThemeFromGo } from './renderers/theme-bootstrap'
 import { bootstrapPlatform } from './platform'
@@ -31,8 +31,7 @@ import {
   SSHAliasQuickConnectProvider,
   type QuickConnectProvider,
 } from './quick-connect'
-import { createPortsPanelServices } from './ports'
-import { registerPortsKeybinding, registerPortsSurface } from './ports-surface'
+import { PortsPanel, createPortsPanelServices } from './ports'
 
 async function main() {
   log.info('nocx: main() called')
@@ -194,14 +193,16 @@ async function main() {
     },
   })
 
-  // Ports panel (nocx-wzc4.2): scoped to the ACTIVE tab's saved SSH
-  // profile. The factory resolves the profileId at build() time — the
-  // active tab can change between opens, so capturing it at registration
-  // would go stale. openPorts() no-ops when the active tab is not a
-  // saved-profile SSH tab (local shell, alias, Settings): the panel needs
-  // a profile to scope to.
-  const openPorts = registerPortsSurface(registry, createPortsPanelServices(dispatcher), tm)
-
+  // Ports (nocx-wzc4.7): a SIDEBAR VIEW, not a tab. The owner's reference
+  // (Orca's PORTS panel) sits beside the terminal so a port can be watched
+  // while the command that opens it is being typed; a tab replaces the
+  // terminal and cannot do that. The view follows the ACTIVE tab: the
+  // profile accessor below is a Solid signal fed by TabManager's
+  // onActiveTabChange, so switching SSH tabs re-scopes the panel and a
+  // local tab shows the no-connection state instead of a stale host's ports.
+  const portsServices = createPortsPanelServices(dispatcher)
+  const [activeProfileId, setActiveProfileId] = createSignal<string | null>(tm.activeProfileId())
+  tm.onActiveTabChange = () => setActiveProfileId(tm.activeProfileId())
   /**
    * Open (or focus) the Settings tab and hand back the instance that is
    * actually on screen.
@@ -246,17 +247,32 @@ async function main() {
   // App-shell sidebar (nocx-82l9.6) — VS Code-style activity bar plus a
   // collapsible panel.  Views and actions are two separate zones:
   //
-  // - Top zone: views from the registry (currently empty; Explorer, Git,
-  //   and Servers are future beads).
+  // - Top zone: views (Ports is the first real one, nocx-wzc4.7; Explorer,
+  //   Git, and Servers are future beads).
   // - Bottom zone: global actions (currently only the Settings gear).
   //
   // Connections has been removed from the activity bar — it is not a view
   // and not an action (see .internal/specs §2.4).  It is now a Settings
   // sub-page reachable from the Settings rail.
-  mountSidebar(
+  const PORTS_VIEW: SidebarViewDescriptor = {
+    id: 'ports',
+    title: 'Ports',
+    icon: PlugIcon,
+    // The view receives the shell's view props: visible gates sampling,
+    // activeProfileId re-scopes the panel to the tab in front.
+    view: (props) => (
+      <PortsPanel
+        profileId={props.activeProfileId}
+        services={portsServices}
+        visible={props.visible}
+      />
+    ),
+    order: 0,
+  }
+  const sidebar = mountSidebar(
     activityBar,
     sidebarPanel,
-    /* views — empty until nocx-708q */ [],
+    [PORTS_VIEW],
     /* actions */ [
       {
         id: 'settings',
@@ -268,6 +284,12 @@ async function main() {
         },
       },
     ],
+    undefined,
+    /* eslint-disable solid/reactivity -- mountSidebar consumes this accessor
+       reactively (SidebarViewProps.activeProfileId); the reads happen inside
+       the view's tracked scopes, and the gate cannot see across the function
+       boundary. */
+    () => activeProfileId(),
   )
 
   // Cmd/Ctrl+, opens or focuses the Settings tab.
@@ -297,10 +319,6 @@ async function main() {
       // itself owns the PROMPT_READY && trusted && owned gate and refuses
       // with a stated reason outside it.
       () => void tm.activeTerminalContent()?.integrateShell(),
-      // "Ports" (nocx-wzc4.2): the panel for the ACTIVE tab's saved SSH
-      // profile. openPorts() no-ops on tabs with no profile (local shell,
-      // alias, Settings) — the panel needs a profile to scope to.
-      () => void openPorts(),
     ),
     sshProvider,
     new SSHAliasQuickConnectProvider(profileClient, (host, user, port) =>
@@ -347,12 +365,17 @@ async function main() {
     }
   })
 
-  // Ctrl/Cmd+Shift+O — "pOrt": the ports panel for the active connection.
-  // The same entry the quick-connect palette lists, reachable without
-  // opening the picker. The chord and its "free elsewhere" behaviour are
-  // owned by ports-surface.ts (registerPortsKeybinding) so the listener is
-  // exercised by the same test that opens the panel.
-  registerPortsKeybinding(openPorts)
+  // Ctrl/Cmd+Shift+O — reveal-or-focus the Ports sidebar view (nocx-wzc4.7).
+  // Ports is no longer a tab or a palette item — it is a surface you keep
+  // open beside the terminal — so the chord brings the view to the front
+  // (or focuses it when it is already there) instead of opening another
+  // anything.
+  document.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'o') {
+      e.preventDefault()
+      sidebar.revealView('ports')
+    }
+  })
 
   void tm.openInitialTab()
 

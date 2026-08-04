@@ -1,6 +1,12 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { mountSidebar, type SidebarViewDescriptor, type SidebarAction } from './sidebar'
+import { createEffect } from 'solid-js'
+import {
+  mountSidebar,
+  type SidebarViewDescriptor,
+  type SidebarAction,
+  type SidebarViewProps,
+} from './sidebar'
 import type { Component } from 'solid-js'
 
 // VS Code-style shell sidebar: zones for views (top) and actions (bottom).
@@ -208,5 +214,82 @@ describe('sidebar', () => {
       // a real DOM node), not a Text node or a string fragment from innerHTML.
       expect(btn.firstChild?.nodeType).toBe(Node.ELEMENT_NODE)
     }
+  })
+})
+
+describe('sidebar — revealView and view props (nocx-wzc4.7)', () => {
+  beforeEach(() => {
+    localStorage.clear()
+  })
+
+  afterEach(() => {
+    document.body.replaceChildren()
+  })
+
+  it('revealView expands a collapsed panel on the same view', () => {
+    const { bar, panel } = mount()
+    const handle = mountSidebar(bar, panel, TWO_VIEWS, [SETTINGS_ACTION])
+    viewBtn(bar, 'alpha').click() // collapse
+    expect(panel.classList.contains('collapsed')).toBe(true)
+
+    handle.revealView('alpha')
+    expect(panel.classList.contains('collapsed')).toBe(false)
+    expect(panelTitle(panel)).toBe('Alpha')
+  })
+
+  it('revealView switches to a different view, keeping the panel open', () => {
+    const { bar, panel } = mount()
+    const handle = mountSidebar(bar, panel, TWO_VIEWS, [SETTINGS_ACTION])
+
+    handle.revealView('beta')
+    expect(panel.classList.contains('collapsed')).toBe(false)
+    expect(panelTitle(panel)).toBe('Beta')
+    expect(viewBtn(bar, 'beta').getAttribute('aria-selected')).toBe('true')
+  })
+
+  it('revealView focuses the view button when the view is already on screen', () => {
+    const { bar, panel } = mount()
+    const handle = mountSidebar(bar, panel, TWO_VIEWS, [SETTINGS_ACTION])
+    // Move focus somewhere else first — the assertion is that reveal moves it.
+    actionBtn(bar, 'settings').focus()
+
+    handle.revealView('alpha')
+    expect(document.activeElement).toBe(viewBtn(bar, 'alpha'))
+    expect(panel.classList.contains('collapsed')).toBe(false)
+  })
+
+  it('revealView on an unknown view id is a no-op', () => {
+    const { bar, panel } = mount()
+    const handle = mountSidebar(bar, panel, TWO_VIEWS, [SETTINGS_ACTION])
+
+    handle.revealView('nope')
+    expect(panelTitle(panel)).toBe('Alpha')
+    expect(panel.classList.contains('collapsed')).toBe(false)
+  })
+
+  it('passes reactive visible and activeProfileId accessors into the active view', () => {
+    const seen: { visible: boolean; profile: string | null }[] = []
+    const ProbeView: Component<SidebarViewProps> = (props) => {
+      createEffect(() => {
+        seen.push({ visible: props.visible(), profile: props.activeProfileId() })
+      })
+      return <div />
+    }
+    const { bar, panel } = mount()
+    const handle = mountSidebar(
+      bar,
+      panel,
+      [{ id: 'probe', title: 'Probe', icon: TestIcon, view: ProbeView, order: 0 }],
+      [],
+      undefined,
+      () => 'ssh:p1:1',
+    )
+
+    expect(seen[seen.length - 1]).toEqual({ visible: true, profile: 'ssh:p1:1' })
+    viewBtn(bar, 'probe').click() // collapse — visible flips false
+    expect(seen[seen.length - 1]?.visible).toBe(false)
+    expect(seen[seen.length - 1]?.profile).toBe('ssh:p1:1')
+    handle.revealView('probe') // expand — visible flips true
+    expect(seen[seen.length - 1]?.visible).toBe(true)
   })
 })

@@ -8,9 +8,10 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, render, screen, fireEvent, waitFor } from '@solidjs/testing-library'
+import { createSignal } from 'solid-js'
 
 afterEach(cleanup)
-import { PortsPanel, PortsContent, type PortsPanelServices } from './ports'
+import { PortsPanel, POLL_INTERVAL_MS, type PortsPanelServices } from './ports'
 import type { PortsStatusResult } from './generated/ports.status'
 import type { TunnelOpenResult } from './generated/tunnel.open'
 
@@ -82,50 +83,7 @@ function fakeServices(over: Partial<PortsPanelServices> = {}): PortsPanelService
   }
 }
 
-const stubHost = { setTitle: () => {}, requestAttention: () => {}, requestClose: () => {} }
-
-// ── The panel is reachable from the state a user starts in ───────────────
-
-describe('PortsContent', () => {
-  it('mounts as a tab surface from a profileId and renders discovery state', async () => {
-    const services = fakeServices({
-      status: vi.fn().mockResolvedValue(statusFixture({ state: 'available' })),
-    })
-    const content = new PortsContent('ssh:p1:1', services)
-    const titles: string[] = []
-    const target = document.createElement('div')
-    document.body.append(target)
-    await content.mount(
-      target,
-      { ...stubHost, setTitle: (t: string) => titles.push(t) },
-      new AbortController().signal,
-    )
-
-    await waitFor(() => expect(screen.getByText('Nothing is listening')).toBeTruthy())
-    expect(titles).toContain('Ports')
-    content.dispose()
-    target.remove()
-  })
-
-  it('a hidden tab reports visibility, stopping sampling', async () => {
-    const visible = vi.fn().mockResolvedValue({})
-    const services = fakeServices({ visible })
-    const content = new PortsContent('ssh:p1:1', services)
-    const target = document.createElement('div')
-    document.body.append(target)
-    await content.mount(target, stubHost, new AbortController().signal)
-
-    content.setVisible(false)
-    expect(visible).toHaveBeenCalledWith('ssh:p1:1', false)
-    content.setVisible(true)
-    expect(visible).toHaveBeenCalledWith('ssh:p1:1', true)
-    content.dispose()
-    target.remove()
-  })
-})
-
 // ── Detected → Forwarded in one action ───────────────────────────────────
-
 describe('PortsPanel — detected rows', () => {
   it('renders a permission-denied probe as an explanation, not a blank', async () => {
     const services = fakeServices({
@@ -135,7 +93,9 @@ describe('PortsPanel — detected rows', () => {
           statusFixture({ listeners: [listenerFixture(22, 'permission-denied')] }),
         ),
     })
-    render(() => <PortsPanel profileId="ssh:p1:1" services={services} visible={() => true} />)
+    render(() => (
+      <PortsPanel profileId={() => 'ssh:p1:1'} services={services} visible={() => true} />
+    ))
     await waitFor(() => expect(screen.getByText(/run as root to see owners/)).toBeTruthy())
     expect(screen.getByText('0.0.0.0:22')).toBeTruthy()
   })
@@ -149,7 +109,9 @@ describe('PortsPanel — detected rows', () => {
         }),
       ),
     })
-    render(() => <PortsPanel profileId="ssh:p1:1" services={services} visible={() => true} />)
+    render(() => (
+      <PortsPanel profileId={() => 'ssh:p1:1'} services={services} visible={() => true} />
+    ))
     await waitFor(() =>
       expect(screen.getByText('Could not determine what is listening')).toBeTruthy(),
     )
@@ -160,7 +122,9 @@ describe('PortsPanel — detected rows', () => {
     const services = fakeServices({
       status: vi.fn().mockResolvedValue(statusFixture({ state: 'available' })),
     })
-    render(() => <PortsPanel profileId="ssh:p1:1" services={services} visible={() => true} />)
+    render(() => (
+      <PortsPanel profileId={() => 'ssh:p1:1'} services={services} visible={() => true} />
+    ))
     await waitFor(() => expect(screen.getByText('Nothing is listening')).toBeTruthy())
   })
 
@@ -173,7 +137,9 @@ describe('PortsPanel — detected rows', () => {
         }),
       ),
     })
-    render(() => <PortsPanel profileId="ssh:p1:1" services={services} visible={() => true} />)
+    render(() => (
+      <PortsPanel profileId={() => 'ssh:p1:1'} services={services} visible={() => true} />
+    ))
     await waitFor(() => expect(screen.getByText('Discovery refused on this host')).toBeTruthy())
     expect(screen.getByText('additional sessions refused')).toBeTruthy()
   })
@@ -184,7 +150,9 @@ describe('PortsPanel — detected rows', () => {
       status: vi.fn().mockResolvedValue(statusFixture({ listeners: [listenerFixture(6768)] })),
       openForward,
     })
-    render(() => <PortsPanel profileId="ssh:p1:1" services={services} visible={() => true} />)
+    render(() => (
+      <PortsPanel profileId={() => 'ssh:p1:1'} services={services} visible={() => true} />
+    ))
     await waitFor(() => expect(screen.getByText('0.0.0.0:6768')).toBeTruthy())
 
     fireEvent.click(screen.getByTestId('ports-forward'))
@@ -213,7 +181,9 @@ describe('PortsPanel — detected rows', () => {
       status: vi.fn().mockResolvedValue(statusFixture({ listeners: [listenerFixture(6768)] })),
       openForward,
     })
-    render(() => <PortsPanel profileId="ssh:p1:1" services={services} visible={() => true} />)
+    render(() => (
+      <PortsPanel profileId={() => 'ssh:p1:1'} services={services} visible={() => true} />
+    ))
     await waitFor(() => expect(screen.getByText('0.0.0.0:6768')).toBeTruthy())
 
     fireEvent.click(screen.getByTestId('ports-forward'))
@@ -244,7 +214,9 @@ describe('PortsPanel — forwards', () => {
       openForward: vi.fn().mockResolvedValue(runningRecord()),
       stopForward,
     })
-    render(() => <PortsPanel profileId="ssh:p1:1" services={services} visible={() => true} />)
+    render(() => (
+      <PortsPanel profileId={() => 'ssh:p1:1'} services={services} visible={() => true} />
+    ))
     await waitFor(() => expect(screen.getByText('0.0.0.0:6768')).toBeTruthy())
     fireEvent.click(screen.getByTestId('ports-forward'))
     await waitFor(() => expect(screen.getByTestId('forwarded-row')).toBeTruthy())
@@ -272,7 +244,9 @@ describe('PortsPanel — forwards', () => {
         ),
       ),
     })
-    render(() => <PortsPanel profileId="ssh:p1:1" services={services} visible={() => true} />)
+    render(() => (
+      <PortsPanel profileId={() => 'ssh:p1:1'} services={services} visible={() => true} />
+    ))
     await waitFor(() => expect(screen.getByTestId('stopped-row')).toBeTruthy())
     expect(screen.getByText(/connection lost/)).toBeTruthy()
     expect(screen.getByText('connection closed')).toBeTruthy()
@@ -297,7 +271,9 @@ describe('PortsPanel — forwards', () => {
         ),
       ),
     })
-    render(() => <PortsPanel profileId="ssh:p1:1" services={services} visible={() => true} />)
+    render(() => (
+      <PortsPanel profileId={() => 'ssh:p1:1'} services={services} visible={() => true} />
+    ))
     await waitFor(() => expect(screen.getByTestId('stopped-row')).toBeTruthy())
     expect(screen.getByText(/user/)).toBeTruthy()
     expect(screen.queryByTestId('ports-retry-forward')).toBeNull()
@@ -325,7 +301,9 @@ describe('PortsPanel — forwards', () => {
         ),
       ),
     })
-    render(() => <PortsPanel profileId="ssh:p1:1" services={services} visible={() => true} />)
+    render(() => (
+      <PortsPanel profileId={() => 'ssh:p1:1'} services={services} visible={() => true} />
+    ))
     await waitFor(() => expect(screen.getByTestId('forwarded-row')).toBeTruthy())
 
     // The caveat is the backend's Caveat() verbatim: the bind was requested and
@@ -340,7 +318,7 @@ describe('PortsPanel — forwards', () => {
   it('a clean bind renders no caveat chrome', async () => {
     const { container } = render(() => (
       <PortsPanel
-        profileId="ssh:p1:1"
+        profileId={() => 'ssh:p1:1'}
         services={fakeServices({
           status: vi
             .fn()
@@ -354,5 +332,114 @@ describe('PortsPanel — forwards', () => {
     await waitFor(() => expect(screen.getByTestId('forwarded-row')).toBeTruthy())
     expect(screen.queryByText(/not verified/)).toBeNull()
     expect(container.querySelector('.ui-marker-list')).toBeNull()
+  })
+})
+
+// ── The panel follows the ACTIVE tab (nocx-wzc4.7) ───────────────────────
+
+describe('PortsPanel — active-tab scope', () => {
+  it('a local tab (null profile) shows the no-connection state, never a stale host', async () => {
+    const status = vi
+      .fn()
+      .mockResolvedValue(statusFixture({ state: 'available', listeners: [listenerFixture(22)] }))
+    const services = fakeServices({ status })
+    const [pid, setPid] = createSignal<string | null>('ssh:p1:1')
+    render(() => <PortsPanel profileId={pid} services={services} visible={() => true} />)
+    await waitFor(() => expect(screen.getByText('0.0.0.0:22')).toBeTruthy())
+
+    setPid(null)
+    await waitFor(() => expect(screen.getByText('No active connection')).toBeTruthy())
+    expect(screen.queryByText('0.0.0.0:22')).toBeNull()
+    // No further backend calls while unscoped — nothing to sample for.
+    expect(status).toHaveBeenCalledTimes(1)
+  })
+
+  it('switching profile discards the previous connection and re-scopes', async () => {
+    const status = vi
+      .fn()
+      .mockResolvedValueOnce(
+        statusFixture({ state: 'available', listeners: [listenerFixture(22)] }),
+      )
+      .mockResolvedValue(statusFixture({ state: 'available' }))
+    const services = fakeServices({ status })
+    const [pid, setPid] = createSignal<string | null>('ssh:p1:1')
+    render(() => <PortsPanel profileId={pid} services={services} visible={() => true} />)
+    await waitFor(() => expect(screen.getByText('0.0.0.0:22')).toBeTruthy())
+
+    setPid('ssh:p2:2')
+    await waitFor(() => expect(status).toHaveBeenCalledWith('ssh:p2:2'))
+    // The first profile's listeners are gone; the second profile says nothing
+    // is listening — the panel never shows one host under another's scope.
+    await waitFor(() => expect(screen.getByText('Nothing is listening')).toBeTruthy())
+    expect(screen.queryByText('0.0.0.0:22')).toBeNull()
+  })
+
+  it('a late response for a previous profile never paints over the new scope', async () => {
+    let resolveP1!: (st: PortsStatusResult) => void
+    const status = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise<PortsStatusResult>((resolve) => {
+            resolveP1 = resolve
+          }),
+      )
+      .mockResolvedValue(statusFixture({ state: 'available' }))
+    const services = fakeServices({ status })
+    const [pid, setPid] = createSignal<string | null>('ssh:p1:1')
+    render(() => <PortsPanel profileId={pid} services={services} visible={() => true} />)
+
+    setPid('ssh:p2:2')
+    await waitFor(() => expect(status).toHaveBeenCalledWith('ssh:p2:2'))
+    // The in-flight p1 request resolves late — with a listener row it must
+    // never show under the p2 scope.
+    resolveP1(statusFixture({ state: 'available', listeners: [listenerFixture(22)] }))
+    await waitFor(() => expect(screen.getByText('Nothing is listening')).toBeTruthy())
+    expect(screen.queryByText('0.0.0.0:22')).toBeNull()
+  })
+
+  it('reports visibility to the backend, retiring the previous profile on re-scope', async () => {
+    const visible = vi.fn().mockResolvedValue({})
+    const services = fakeServices({ visible })
+    const [pid, setPid] = createSignal<string | null>('ssh:p1:1')
+    const [vis, setVis] = createSignal(true)
+    render(() => <PortsPanel profileId={pid} services={services} visible={vis} />)
+
+    await waitFor(() => expect(visible).toHaveBeenCalledWith('ssh:p1:1', true))
+    setVis(false)
+    await waitFor(() => expect(visible).toHaveBeenCalledWith('ssh:p1:1', false))
+
+    // Re-scope retires the previous profile's flag, then arms the new one
+    // with the CURRENT visibility (false here).
+    setPid('ssh:p2:2')
+    await waitFor(() => expect(visible).toHaveBeenCalledWith('ssh:p1:1', false))
+    await waitFor(() => expect(visible).toHaveBeenCalledWith('ssh:p2:2', false))
+    setVis(true)
+    await waitFor(() => expect(visible).toHaveBeenCalledWith('ssh:p2:2', true))
+  })
+
+  it('a hidden view stops the status poll; re-showing resumes it', async () => {
+    vi.useFakeTimers()
+    try {
+      const status = vi.fn().mockResolvedValue(statusFixture({ state: 'available' }))
+      const services = fakeServices({ status })
+      const [vis, setVis] = createSignal(true)
+      render(() => <PortsPanel profileId={() => 'ssh:p1:1'} services={services} visible={vis} />)
+      await vi.advanceTimersByTimeAsync(0)
+
+      setVis(false)
+      await vi.advanceTimersByTimeAsync(0)
+      const callsAfterHide = status.mock.calls.length
+
+      // Two poll intervals elapse in the dark — no further status calls.
+      await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS * 2)
+      expect(status.mock.calls.length).toBe(callsAfterHide)
+
+      setVis(true)
+      await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS + 1)
+      expect(status.mock.calls.length).toBeGreaterThan(callsAfterHide)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
