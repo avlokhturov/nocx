@@ -18,6 +18,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
+	"github.com/shady2k/nocx/internal/discovery"
 	"github.com/shady2k/nocx/internal/importer"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
@@ -164,6 +165,12 @@ type WSServer struct {
 	// without an adapter. When nil, the tunnel.* methods return a JSON-RPC
 	// error; the transport never constructs an SSH client itself.
 	tunnelConnector tunnel.Connector
+
+	// discoverySched owns the port-discovery cadence (spec §4, nocx-wzc4.2):
+	// settle sample, prompt debounce, hidden-tab pause, one-in-flight. When
+	// nil, the ports.* methods return a JSON-RPC error and the cadence hooks
+	// are no-ops.
+	discoverySched *discovery.Scheduler
 
 	// tunnelMu guards tunnels and ownerTunnels. tunnels is the backend
 	// id → tunnel map backing tunnel.stop; ownerTunnels scopes teardown to
@@ -883,6 +890,8 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.handleTunnelOpen(ctx, wconn, req)
 	case "tunnel.stop":
 		s.handleTunnelStop(wconn, req)
+	case "ports.status", "ports.sample", "ports.pause", "ports.visible":
+		s.handlePortsMethod(wconn, req)
 	case "dialog.openFile":
 		s.handleDialogOpenFile(wconn, req)
 	case "history.query":
@@ -1077,6 +1086,14 @@ func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connSta
 		return
 	}
 	rx.setSubscriber(wconn, state)
+
+	// Port discovery (nocx-wzc4.2): only now, once the session is fully
+	// established (ring created, subscriber attached) is the target "up" —
+	// a session that failed its ring setup must not leave a discovery
+	// target behind with nobody to tear it down.
+	if cfg.ProfileID != "" {
+		s.discoveryUp(cfg.ProfileID, cfg.Host, cfg.Remote)
+	}
 
 	// cwd rides the open result so the tab has a name before any program sets
 	// a title (nocx-9vr). It is the starting directory only — following `cd`
@@ -1394,6 +1411,10 @@ func (s *WSServer) monitorExit(rx *sessionRx, sess session.Session) {
 	s.removeRx(sess.ID())
 	_ = s.registry.Close(sess.ID())
 
+	// Port discovery (nocx-wzc4.2): if this was the last session on its
+	// profile, forget the target and release its lease.
+	s.discoverySessionClosed(sess)
+
 	if wconn == nil {
 		return
 	}
@@ -1419,12 +1440,16 @@ func (s *WSServer) monitorExit(rx *sessionRx, sess session.Session) {
 // instead of creating one — closing a session that has no ring is a no-op
 // for the ring path (DEFECT 6).
 func (s *WSServer) closeSession(sid session.ID) {
+	// The registry entry is needed after Close to decide the discovery
+	// target teardown, so read it first.
+	sess, _ := s.registry.Get(sid)
 	rx := s.getRx(sid)
 	if rx != nil {
 		rx.ring.close()
 	}
 	s.removeRx(sid)
 	_ = s.registry.Close(sid)
+	s.discoverySessionClosed(sess)
 }
 
 // --- profile/group control-plane handlers -------------------------------

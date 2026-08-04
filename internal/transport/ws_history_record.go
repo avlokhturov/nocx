@@ -120,6 +120,13 @@ func (s *WSServer) handleHistoryRecord(ctx context.Context, wconn *wsConn, state
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: params must be an object"))
 		return
 	}
+
+	// A completed command is the discovery cadence's prompt hint (spec §4,
+	// nocx-wzc4.2): the listener set most likely changed, and the debounce
+	// is what keeps an Enter hammering session from queueing probes. The
+	// profile ids come from the tab's own sessions (backend-authoritative),
+	// never from the renderer-reported host.
+	s.discoveryPromptHint(state)
 	if msg := validateHistoryRecord(p); msg != "" {
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: "+msg))
 		return
