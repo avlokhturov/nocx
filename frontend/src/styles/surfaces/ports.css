@@ -6,9 +6,20 @@
 
 .ports-row {
   display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  width: 100%;
+}
+
+/* The row's single line: address and its actions. A caveat about the bind
+   renders as a second line beneath it (MarkerList note), inside the same row,
+   so the divided list's hairline still bounds one record. */
+.ports-row__main {
+  display: flex;
   align-items: center;
   gap: var(--space-3);
   width: 100%;
+  min-width: 0;
 }
 
 .ports-row__addr {

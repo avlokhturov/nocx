@@ -302,4 +302,57 @@ describe('PortsPanel — forwards', () => {
     expect(screen.getByText(/user/)).toBeTruthy()
     expect(screen.queryByTestId('ports-retry-forward')).toBeNull()
   })
+
+  it('a -R forward whose bind sshd replaced shows the caveat as a caution, never as "failed"', async () => {
+    const caveat =
+      'bind address 0.0.0.0 requested but not verified: the server may have bound a different address (GatewayPorts), so a URL built from this forward may only work on the server'
+    const services = fakeServices({
+      status: vi.fn().mockResolvedValue(
+        statusFixture(
+          {},
+          {
+            forwards: [
+              {
+                ...runningRecord({
+                  id: 'fwd-remote',
+                  direction: 'remote',
+                  destination: 'host.example:5901',
+                }),
+                caveat,
+              },
+            ],
+          },
+        ),
+      ),
+    })
+    render(() => <PortsPanel profileId="ssh:p1:1" services={services} visible={() => true} />)
+    await waitFor(() => expect(screen.getByTestId('forwarded-row')).toBeTruthy())
+
+    // The caveat is the backend's Caveat() verbatim: the bind was requested and
+    // is not verified — a caution, never an error. Nothing failed; the forward
+    // is running.
+    const note = screen.getByText(/requested but not verified/)
+    expect(note.textContent).toContain('not verified')
+    expect(note.textContent).not.toMatch(/failed/i)
+    expect(note.closest('.ui-marker-list__item')?.getAttribute('data-tone')).toBe('note')
+  })
+
+  it('a clean bind renders no caveat chrome', async () => {
+    const { container } = render(() => (
+      <PortsPanel
+        profileId="ssh:p1:1"
+        services={fakeServices({
+          status: vi
+            .fn()
+            .mockResolvedValue(
+              statusFixture({}, { forwards: [runningRecord({ id: 'fwd-clean' })] }),
+            ),
+        })}
+        visible={() => true}
+      />
+    ))
+    await waitFor(() => expect(screen.getByTestId('forwarded-row')).toBeTruthy())
+    expect(screen.queryByText(/not verified/)).toBeNull()
+    expect(container.querySelector('.ui-marker-list')).toBeNull()
+  })
 })
