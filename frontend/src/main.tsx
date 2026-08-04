@@ -197,12 +197,14 @@ async function main() {
   // (Orca's PORTS panel) sits beside the terminal so a port can be watched
   // while the command that opens it is being typed; a tab replaces the
   // terminal and cannot do that. The view follows the ACTIVE tab: the
-  // profile accessor below is a Solid signal fed by TabManager's
-  // onActiveTabChange, so switching SSH tabs re-scopes the panel and a
-  // local tab shows the no-connection state instead of a stale host's ports.
+  // target accessor below is a Solid signal fed by TabManager's
+  // onActiveTabChange, so switching SSH tabs re-scopes the panel, a local
+  // tab scopes to the reserved "local" target and shows THIS machine's
+  // listeners, and a tab with no ports scope (alias, Settings) shows the
+  // no-connection state instead of a stale host's ports (nocx-wzc4.8).
   const portsServices = createPortsPanelServices(dispatcher)
-  const [activeProfileId, setActiveProfileId] = createSignal<string | null>(tm.activeProfileId())
-  tm.onActiveTabChange = () => setActiveProfileId(tm.activeProfileId())
+  const [portsTargetId, setPortsTargetId] = createSignal<string | null>(tm.portsTargetId())
+  tm.onActiveTabChange = () => setPortsTargetId(tm.portsTargetId())
   /**
    * Open (or focus) the Settings tab and hand back the instance that is
    * actually on screen.
@@ -257,7 +259,7 @@ async function main() {
   // Pause is a HEADER action, not body chrome (nocx-wzc4.9): one shared
   // controller feeds both the header toggle and the panel's status merges,
   // so the two can never disagree about the backend's flag.
-  const portsPause = createPortsPauseControl(portsServices, () => activeProfileId())
+  const portsPause = createPortsPauseControl(portsServices, () => portsTargetId())
   const PORTS_VIEW: SidebarViewDescriptor = {
     id: 'ports',
     title: 'Ports',
@@ -269,7 +271,7 @@ async function main() {
         ariaLabel={portsPause.paused() ? 'Resume sampling' : 'Pause sampling'}
         title={portsPause.paused() ? 'Resume sampling' : 'Pause sampling'}
         selected={portsPause.paused()}
-        disabled={activeProfileId() === null}
+        disabled={portsTargetId() === null}
         onClick={() => portsPause.toggle()}
       >
         <Show when={portsPause.paused()} fallback={<PauseIcon />}>
@@ -306,10 +308,10 @@ async function main() {
     ],
     undefined,
     /* eslint-disable solid/reactivity -- mountSidebar consumes this accessor
-       reactively (SidebarViewProps.activeProfileId); the reads happen inside
-       the view's tracked scopes, and the gate cannot see across the function
-       boundary. */
-    () => activeProfileId(),
+       reactively (SidebarViewProps.activeProfileId, fed with the ports
+       target); the reads happen inside the view's tracked scopes, and the
+       gate cannot see across the function boundary. */
+    () => portsTargetId(),
   )
 
   // Cmd/Ctrl+, opens or focuses the Settings tab.

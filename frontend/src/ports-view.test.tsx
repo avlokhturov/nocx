@@ -24,6 +24,7 @@ import {
 } from './test-support/tabs-fixtures'
 import type { PortsStatusResult } from './generated/ports.status'
 import type { TunnelOpenResult } from './generated/tunnel.open'
+import { LOCAL_TARGET_ID } from './ports-client'
 
 vi.mock('./renderers/xterm', () => ({
   XtermRenderer: vi.fn(createRendererMock),
@@ -91,9 +92,9 @@ function fakeServices(over: Partial<PortsPanelServices> = {}): PortsPanelService
  *  the panel, exactly as main.tsx wires it (nocx-wzc4.9). */
 function portsView(
   services: PortsPanelServices,
-  activeProfileId: () => string | null,
+  portsTargetId: () => string | null,
 ): SidebarViewDescriptor {
-  const pause = createPortsPauseControl(services, activeProfileId)
+  const pause = createPortsPauseControl(services, portsTargetId)
   return {
     id: PORTS_VIEW_ID,
     title: 'Ports',
@@ -105,7 +106,7 @@ function portsView(
         ariaLabel={pause.paused() ? 'Resume sampling' : 'Pause sampling'}
         title={pause.paused() ? 'Resume sampling' : 'Pause sampling'}
         selected={pause.paused()}
-        disabled={activeProfileId() === null}
+        disabled={portsTargetId() === null}
         onClick={() => pause.toggle()}
       >
         <Show when={pause.paused()} fallback={<PauseIcon />}>
@@ -138,10 +139,8 @@ async function mountApp(services: PortsPanelServices, profileId: string | null =
   const { manager } = await mountTabManager(client)
   if (profileId !== null) manager.newSSHTab(profileId, 'host.example', 'alice')
 
-  const [activeProfileId, setActiveProfileId] = createSignal<string | null>(
-    manager.activeProfileId(),
-  )
-  manager.onActiveTabChange = () => setActiveProfileId(manager.activeProfileId())
+  const [portsTargetId, setPortsTargetId] = createSignal<string | null>(manager.portsTargetId())
+  manager.onActiveTabChange = () => setPortsTargetId(manager.portsTargetId())
 
   const bar = document.createElement('div')
   bar.id = 'activitybar'
@@ -155,14 +154,14 @@ async function mountApp(services: PortsPanelServices, profileId: string | null =
       /* eslint-disable solid/reactivity -- portsView consumes this accessor
          inside the view's and the header action's tracked scopes; the gate
          cannot see across that boundary (same contract as the arg below). */
-      portsView(services, () => activeProfileId()),
+      portsView(services, () => portsTargetId()),
       /* eslint-enable solid/reactivity */
     ],
     [],
     undefined,
     /* eslint-disable solid/reactivity -- same contract as main.tsx: the
        sidebar reads this accessor inside tracked view scopes. */
-    () => activeProfileId(),
+    () => portsTargetId(),
   )
   liveHandles.push(handle)
   return { manager, bar, panel, handle }
@@ -220,14 +219,54 @@ describe('ports sidebar view', () => {
     manager.newSSHTab('ssh:p2:2', 'other.example', 'bob')
     await vi.waitFor(() => expect(status).toHaveBeenCalledWith('ssh:p2:2'))
   })
-  it("a local tab shows the no-connection state, never a stale host's ports", async () => {
-    const status = vi.fn().mockResolvedValue(statusFixture('ssh:p1:1'))
+  it("a local tab shows THIS machine's listeners, scoped to 'local'", async () => {
+    const status = vi.fn().mockResolvedValue({
+      ...statusFixture(LOCAL_TARGET_ID),
+      host: 'my-machine',
+      discovery: {
+        ...statusFixture(LOCAL_TARGET_ID).discovery,
+        listeners: [listenerFixture(22)],
+      },
+    })
     const services = fakeServices({ status })
     const { panel } = await mountApp(services, null)
 
+    // The initial tab is a local shell: the panel asks the backend for the
+    // reserved "local" target and shows this machine's listeners — never
+    // the no-connection state a profile-less tab used to get.
+    await vi.waitFor(() => expect(status).toHaveBeenCalledWith(LOCAL_TARGET_ID))
+    await vi.waitFor(() => expect(panel.textContent).toContain('0.0.0.0:22'))
+    expect(panel.textContent).not.toContain('No active connection')
+    // A local row offers copy-address, never Forward.
+    expect(panel.querySelector('[data-testid="ports-forward"]')).toBeNull()
+    expect(panel.querySelector('[data-testid="ports-copy"]')).not.toBeNull()
+  })
+  it('switching local to SSH and back re-scopes the view both ways', async () => {
+    const status = vi.fn().mockResolvedValue(statusFixture(LOCAL_TARGET_ID))
+    const services = fakeServices({ status })
+    const { manager } = await mountApp(services, null)
+    await vi.waitFor(() => expect(status).toHaveBeenCalledWith(LOCAL_TARGET_ID))
+
+    manager.newSSHTab('ssh:p1:1', 'host.example', 'alice')
+    await vi.waitFor(() => expect(status).toHaveBeenCalledWith('ssh:p1:1'))
+
+    // Back to the local tab (index 0): the panel re-scopes to 'local' — the
+    // SSH host's ports are gone, this machine's are back.
+    manager.activateByIndex(0)
+    const localCalls = () => status.mock.calls.filter(([pid]) => pid === LOCAL_TARGET_ID).length
+    await vi.waitFor(() => expect(localCalls()).toBeGreaterThanOrEqual(2))
+    expect(status.mock.calls[status.mock.calls.length - 1]?.[0]).toBe(LOCAL_TARGET_ID)
+  })
+  it('an alias tab — neither local nor a saved profile — shows the no-connection state', async () => {
+    const status = vi.fn().mockResolvedValue(statusFixture('ssh:p1:1'))
+    const services = fakeServices({ status })
+    const { manager, panel } = await mountApp(services)
+    await vi.waitFor(() => expect(status).toHaveBeenCalledWith('ssh:p1:1'))
+
+    // Alias: an SSH session with no profile id — no ports scope at all.
+    manager.newSSHTab('', 'alias.example', 'bob')
     await vi.waitFor(() => expect(panel.textContent).toContain('No active connection'))
-    expect(panel.textContent).not.toContain('host.example')
-    expect(status).not.toHaveBeenCalled()
+    expect(status).toHaveBeenCalledTimes(1)
   })
 
   it('collapsing the sidebar pauses sampling; expanding resumes it', async () => {

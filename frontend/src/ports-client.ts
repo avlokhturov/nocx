@@ -8,6 +8,13 @@ import type { PortsSampleResult } from './generated/ports.sample'
 import type { PortsPauseResult } from './generated/ports.pause'
 import type { PortsVisibleResult } from './generated/ports.visible'
 
+/** The reserved ports.* target id for the machine nocx itself runs on —
+ *  `discovery.LocalTargetID` in Go. A local tab scopes the ports panel to
+ *  this literal, exactly like a profile id: profile ids are always
+ *  `type:custom:slug:uuid`, so the bare value can never collide with a
+ *  stored profile (nocx-wzc4.8). */
+export const LOCAL_TARGET_ID = 'local'
+
 export class PortsClient {
   constructor(private dispatcher: Dispatcher) {}
 
