@@ -23,6 +23,7 @@ import { Badge } from './ui/badge'
 import { EmptyState } from './ui/empty-state'
 import { Stack } from './ui/stack'
 import { showToast } from './ui/toast'
+import { MarkerList } from './ui/marker-list'
 
 // ── Services seam ─────────────────────────────────────────────────────────
 
@@ -372,26 +373,28 @@ export function PortsPanel(props: PortsPanelProps) {
                       <For each={listeners()}>
                         {(l) => (
                           <div class="ports-row" data-testid="detected-row">
-                            <span class="ports-row__addr">
-                              {l.address}:{l.port}
-                            </span>
-                            <Badge
-                              tone={
-                                l.process.evidence === 'known'
-                                  ? 'neutral'
-                                  : l.process.evidence === 'permission-denied'
-                                    ? 'warning'
-                                    : 'info'
-                              }
-                            >
-                              {processLabel(l.process)}
-                            </Badge>
-                            <Button
-                              data-testid="ports-forward"
-                              onClick={() => void forward(destinationFor(l), l.port)}
-                            >
-                              Forward
-                            </Button>
+                            <div class="ports-row__main">
+                              <span class="ports-row__addr">
+                                {l.address}:{l.port}
+                              </span>
+                              <Badge
+                                tone={
+                                  l.process.evidence === 'known'
+                                    ? 'neutral'
+                                    : l.process.evidence === 'permission-denied'
+                                      ? 'warning'
+                                      : 'info'
+                                }
+                              >
+                                {processLabel(l.process)}
+                              </Badge>
+                              <Button
+                                data-testid="ports-forward"
+                                onClick={() => void forward(destinationFor(l), l.port)}
+                              >
+                                Forward
+                              </Button>
+                            </div>
                           </div>
                         )}
                       </For>
@@ -413,26 +416,39 @@ export function PortsPanel(props: PortsPanelProps) {
                     <For each={runningForwards()}>
                       {(f) => (
                         <div class="ports-row" data-testid="forwarded-row">
-                          <span class="ports-row__addr">
-                            {f.actualBind.host}:{f.actualBind.port}
-                            <span class="ports-row__arrow"> → </span>
-                            {f.destination}
-                          </span>
-                          <Button
-                            data-testid="ports-copy"
-                            onClick={() => copyAddress(`${f.actualBind.host}:${f.actualBind.port}`)}
-                          >
-                            Copy
-                          </Button>
-                          <Button
-                            data-testid="ports-open"
-                            onClick={() => openAddress(`${f.actualBind.host}:${f.actualBind.port}`)}
-                          >
-                            Open
-                          </Button>
-                          <Button data-testid="ports-stop" onClick={() => void stop(f.id)}>
-                            Stop
-                          </Button>
+                          <div class="ports-row__main">
+                            <span class="ports-row__addr">
+                              {f.actualBind.host}:{f.actualBind.port}
+                              <span class="ports-row__arrow"> → </span>
+                              {f.destination}
+                            </span>
+                            <Button
+                              data-testid="ports-copy"
+                              onClick={() =>
+                                copyAddress(`${f.actualBind.host}:${f.actualBind.port}`)
+                              }
+                            >
+                              Copy
+                            </Button>
+                            <Button
+                              data-testid="ports-open"
+                              onClick={() =>
+                                openAddress(`${f.actualBind.host}:${f.actualBind.port}`)
+                              }
+                            >
+                              Open
+                            </Button>
+                            <Button data-testid="ports-stop" onClick={() => void stop(f.id)}>
+                              Stop
+                            </Button>
+                          </div>
+                          {/* A -R forward whose bind sshd silently replaced carries
+                              Caveat() — render it as the kit's note (a caveat about
+                              the item above it), never as an error: the forward is
+                              running. Empty caveat renders nothing. */}
+                          <Show when={f.caveat}>
+                            <MarkerList items={[{ text: f.caveat, tone: 'note' }]} />
+                          </Show>
                         </div>
                       )}
                     </For>
@@ -445,21 +461,23 @@ export function PortsPanel(props: PortsPanelProps) {
                     <For each={stoppedForwards()}>
                       {(f) => (
                         <div class="ports-row" data-testid="stopped-row">
-                          <span class="ports-row__addr">
-                            {f.destination}
-                            <span class="ports-row__arrow"> — </span>
-                            {f.stopReason ?? 'stopped'}
-                          </span>
-                          <Show when={f.error}>
-                            <Badge tone="danger">{f.error ?? ''}</Badge>
-                          </Show>
-                          <Show
-                            when={f.stopReason === 'error' || f.stopReason === 'connection lost'}
-                          >
-                            <Button data-testid="ports-retry-forward" onClick={() => retry(f)}>
-                              Retry
-                            </Button>
-                          </Show>
+                          <div class="ports-row__main">
+                            <span class="ports-row__addr">
+                              {f.destination}
+                              <span class="ports-row__arrow"> — </span>
+                              {f.stopReason ?? 'stopped'}
+                            </span>
+                            <Show when={f.error}>
+                              <Badge tone="danger">{f.error ?? ''}</Badge>
+                            </Show>
+                            <Show
+                              when={f.stopReason === 'error' || f.stopReason === 'connection lost'}
+                            >
+                              <Button data-testid="ports-retry-forward" onClick={() => retry(f)}>
+                                Retry
+                              </Button>
+                            </Show>
+                          </div>
                         </div>
                       )}
                     </For>
