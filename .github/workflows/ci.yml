@@ -166,16 +166,11 @@ jobs:
   # e2e — the checks that only exist in a real browser against the real app.
   #
   # Runner decision: macos-latest, for a different reason than the backend job.
-  # Playwright drives its own Chromium against :34115, so the app's webview
-  # engine (WKWebView here, WebKit2GTK on Linux) is never what these tests
-  # observe — the engine argument does not apply. What decides it is cost of
-  # machinery: `wails dev` on ubuntu needs GTK3/WebKit2GTK and an xvfb display
-  # to open a window we never look at, while a macOS runner has a window server
-  # already and the minutes are free for a public repo.
-  #
-  # No `wails dev` step here: playwright.config.ts starts and stops it, so a
-  # clean checkout runs the suite with one command and nothing is left behind
-  # (see the gracefulShutdown note there).
+  # Playwright drives the actual frontend through Vite and the actual backend
+  # through devharness. Wails itself is intentionally absent: it would compile
+  # and launch an unused native webview, while masking the headless binding
+  # path the e2e suite declares. Both browser engines still exercise the same
+  # real PTY and WebSocket transport.
   e2e:
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: macos-latest
@@ -196,28 +191,54 @@ jobs:
             package-lock.json
             frontend/package-lock.json
 
-      # Pinned to the version in go.mod: the CLI builds the app, so a drift
-      # between the two is a build no developer can reproduce locally.
-      - name: Install Wails CLI
-        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.13.0
-
-      # Root deps are @playwright/test only; `wails dev` runs frontend:install
-      # itself, so the frontend is not installed here.
       - run: npm ci
+      - run: cd frontend && npm ci
       # Both engines the suite declares. WebKit is not a luxury here: the app
       # ships inside WKWebView, so WebKit is the closer of the two to what users
       # run, and installing only chromium would fail the run outright.
       - run: npx playwright install chromium webkit
 
-      # Stateful vault specs stop and restart the backend themselves. Build the
-      # deterministic binaries they require before Playwright starts Wails.
+      # Vault and history specs restart isolated backend instances. Build the
+      # deterministic binaries they require before Playwright starts.
       - name: Build e2e devharness binaries
         run: |
           go build -o /tmp/nocx-devharness ./cmd/devharness
           cp /tmp/nocx-devharness /tmp/nocx-devharness-vault
           cp /tmp/nocx-devharness /tmp/nocx-devharness-srch
 
-      - run: npx playwright test
+      - name: Run headless e2e
+        run: |
+          set -euo pipefail
+          home="$GITHUB_WORKSPACE/.e2e/home"
+          mkdir -p "$home"
+
+          HOME="$home" XDG_CONFIG_HOME= XDG_DATA_HOME= XDG_CACHE_HOME= ZDOTDIR= BASH_ENV= ENV= \
+            NOCX_WS_ADDR=127.0.0.1:9876 /tmp/nocx-devharness > /tmp/nocx-e2e-backend.log 2>&1 &
+          backend_pid=$!
+          vite_pid=''
+          cleanup() {
+            kill "$backend_pid" 2>/dev/null || true
+            [ -z "$vite_pid" ] || kill "$vite_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          for _ in $(seq 1 150); do
+            token="$(sed -n 's/^WSTOKEN=//{p;q;}' /tmp/nocx-e2e-backend.log)"
+            if [ -n "$token" ]; then break; fi
+            sleep 0.1
+          done
+          test -n "${token:-}" || { cat /tmp/nocx-e2e-backend.log; exit 1; }
+
+          (cd frontend && npm run dev -- --host 127.0.0.1 --port 5173) > /tmp/nocx-e2e-vite.log 2>&1 &
+          vite_pid=$!
+          for _ in $(seq 1 150); do
+            curl --fail --silent http://127.0.0.1:5173/ >/dev/null && break
+            sleep 0.1
+          done
+          curl --fail --silent http://127.0.0.1:5173/ >/dev/null
+
+          NOCX_WS_PORT=9876 NOCX_WS_TOKEN="$token" NOCX_BASE_URL=http://127.0.0.1:5173 \
+            NOCX_E2E_HOME_DIR="$home" npx playwright test
 
       - name: Upload traces
         if: failure()
