@@ -55,7 +55,8 @@ type tunnelBind struct {
 
 // tunnelRecord is the full forward record the spec §7 names: direction,
 // requested and actual bind, destination, scope/owner, lifecycle state, stop
-// reason, error. Shared by tunnel.open and tunnel.stop results.
+// reason, error — plus the success-time bind caveat only remote (-R)
+// forwards carry. Shared by tunnel.open and tunnel.stop results.
 type tunnelRecord struct {
 	ID            string     `json:"id"`
 	Direction     string     `json:"direction"`
@@ -63,6 +64,7 @@ type tunnelRecord struct {
 	ActualBind    tunnelBind `json:"actualBind"`
 	Destination   string     `json:"destination"`
 	Scope         string     `json:"scope"`
+	Caveat        string     `json:"caveat"`
 	State         string     `json:"state"`
 	StopReason    *string    `json:"stopReason"`
 	Error         *string    `json:"error"`
@@ -80,6 +82,7 @@ func tunnelRecordFrom(t *tunnel.Tunnel) tunnelRecord {
 		ActualBind:    tunnelBind{Host: t.Actual().Host, Port: t.Actual().Port},
 		Destination:   t.Destination,
 		Scope:         t.Scope,
+		Caveat:        t.Caveat(),
 		State:         string(t.State()),
 	}
 	if t.State() == tunnel.StateStopped {

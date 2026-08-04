@@ -53,6 +53,10 @@ export interface TunnelOpenResult {
    */
   scope: string
   /**
+   * Success-time bind caution, empty when none applies. Only remote (-R) forwards set it: the requested bind address is not verified — the server may have bound a different address (GatewayPorts) — so a URL built from this forward may only work on the server. Never an error: the forward is running.
+   */
+  caveat: string
+  /**
    * Lifecycle state. open returns running (the bind happened before the result); stop returns stopped.
    */
   state: 'starting' | 'running' | 'stopped'

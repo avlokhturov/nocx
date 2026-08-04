@@ -44,6 +44,10 @@ export interface TunnelStopResult {
    */
   scope: string
   /**
+   * Success-time bind caution carried from open, empty when none applies. Only remote (-R) forwards set it: the requested bind address is not verified — the server may have bound a different address (GatewayPorts) — so a URL built from this forward may only work on the server.
+   */
+  caveat: string
+  /**
    * Lifecycle state; always stopped for a successful stop.
    */
   state: 'starting' | 'running' | 'stopped'

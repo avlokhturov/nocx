@@ -4,39 +4,29 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"strconv"
-	"sync"
 
 	"github.com/shady2k/nocx/internal/ssh"
 )
 
 // local implements the local (-L) strategy: a net.Listener locally, Accept,
-// then one direct-tcpip channel per accepted connection to the destination,
-// with a bidirectional copy (spec §7.1).
+// then one direct-tcpip channel per accepted connection to the destination —
+// which resolves on the server's network — with a bidirectional copy
+// (spec §7.1).
 type local struct {
 	conn Connector
-	dest string
 	bind Bind
-
-	mu         sync.Mutex
-	lease      ssh.TunnelConn
-	listener   net.Listener
-	streams    map[net.Conn]struct{}
-	stopOnce   sync.Once
-	doneCh     chan struct{}
-	stopReason StopReason
-	err        error
+	dest string
+	fl   *forwardLifecycle
 }
 
 func newLocal(bind Bind, dest string, conn Connector) *local {
 	return &local{
-		conn:    conn,
-		dest:    dest,
-		bind:    bind,
-		doneCh:  make(chan struct{}),
-		streams: make(map[net.Conn]struct{}),
+		conn: conn,
+		bind: bind,
+		dest: dest,
+		fl:   newForwardLifecycle(),
 	}
 }
 
@@ -60,169 +50,46 @@ func (l *local) start(ctx context.Context, host string, opts []ssh.ConnectOption
 		_ = lease.Close()
 		return Bind{}, err
 	}
-
-	// Publish the lease and listener atomically with a stopped check: if
-	// shutdown already ran (the connection died while we were binding), it
-	// could not close a listener it never saw, so do not publish at all —
-	// fail the start instead of reporting success on a dead connection.
-	l.mu.Lock()
-	select {
-	case <-l.doneCh:
-		l.mu.Unlock()
+	if !l.fl.publish(lease, ln) {
 		_ = lease.Close()
 		_ = ln.Close()
 		return Bind{}, errors.New("tunnel: connection lost before bind completed")
-	default:
 	}
-	l.lease = lease
-	l.listener = ln
-	l.mu.Unlock()
 
 	// The loss watcher starts AFTER the lease and listener are published, so
-	// shutdown can always find and close them. A loss during the bind is
-	// drained immediately: Done is already closed, the receive returns at
-	// once and shutdown runs.
-	go l.watchLoss(lease)
+	// shutdown can always find and close them (see publish).
+	go l.fl.watchLoss(lease)
 
 	hostStr, portStr, err := net.SplitHostPort(ln.Addr().String())
 	if err != nil {
-		// Cannot happen for a TCP listener we just created, but be honest.
-		_ = lease.Close()
-		_ = ln.Close()
+		// Cannot happen for a TCP listener we just created, but be honest:
+		// tear the forward down rather than leaking the bind.
+		l.fl.shutdown(StopReasonError, err)
 		return Bind{}, fmt.Errorf("tunnel: parse actual bind %q: %w", ln.Addr().String(), err)
 	}
 	port, err := strconv.Atoi(portStr)
 	if err != nil {
-		_ = lease.Close()
-		_ = ln.Close()
+		l.fl.shutdown(StopReasonError, err)
 		return Bind{}, fmt.Errorf("tunnel: parse actual port %q: %w", portStr, err)
 	}
 
-	go l.acceptLoop(ln)
+	// One direct-tcpip channel per accepted connection, over the pooled
+	// connection the lease holds.
+	go l.fl.serve(ln, func(c net.Conn) {
+		l.fl.proxy(c, l.dest, lease.Dial)
+	})
 	return Bind{Host: hostStr, Port: port}, nil
-}
-
-// watchLoss moves the strategy to stopped: connection lost when the lease's
-// transport shuts down. The tunnel never silently rebinds and never claims
-// to still be running; restoration is nocx-9le.7.
-func (l *local) watchLoss(lease ssh.TunnelConn) {
-	<-lease.Done()
-	l.shutdown(StopReasonConnectionLost, lease.LostErr())
-}
-
-// acceptLoop serves the listener until it is closed by shutdown. Each
-// accepted connection is handled on its own goroutine with its own
-// direct-tcpip channel (spec §7.1 trap 4).
-func (l *local) acceptLoop(ln net.Listener) {
-	for {
-		c, err := ln.Accept()
-		if err != nil {
-			// Closed by shutdown — the strategy is done. A transient accept
-			// error on a live listener is not expected for TCP; retrying
-			// would spin, so stop and let the loss watcher or owner
-			// conclude.
-			return
-		}
-		l.track(c)
-		go l.handle(c)
-	}
-}
-
-// handle proxies one accepted local connection to the destination over its
-// own direct-tcpip channel. A failing stream — the remote target refusing
-// the connection — affects that stream only, never the listener.
-func (l *local) handle(c net.Conn) {
-	defer func() {
-		l.untrack(c)
-		_ = c.Close()
-	}()
-
-	l.mu.Lock()
-	lease := l.lease
-	l.mu.Unlock()
-	if lease == nil {
-		return
-	}
-
-	remote, err := lease.Dial(l.dest)
-	if err != nil {
-		return
-	}
-	defer func() { _ = remote.Close() }()
-
-	// Bidirectional copy; when either direction ends, close both sides so
-	// the other copy unblocks.
-	done := make(chan struct{}, 2)
-	go func() {
-		_, _ = io.Copy(remote, c)
-		done <- struct{}{}
-	}()
-	go func() {
-		_, _ = io.Copy(c, remote)
-		done <- struct{}{}
-	}()
-	<-done
-}
-
-func (l *local) track(c net.Conn) {
-	l.mu.Lock()
-	if l.streams == nil {
-		// shutdown already ran — the listener closed between Accept and
-		// here, orphaning this stream. Close it and do not track it; the
-		// handler (if it starts) finds no lease and returns.
-		l.mu.Unlock()
-		_ = c.Close()
-		return
-	}
-	l.streams[c] = struct{}{}
-	l.mu.Unlock()
-}
-
-func (l *local) untrack(c net.Conn) {
-	l.mu.Lock()
-	// delete on a nil map is a no-op, so a handler finishing after shutdown
-	// (which nil'd the map) cannot panic.
-	delete(l.streams, c)
-	l.mu.Unlock()
 }
 
 // stop implements strategy.stop: the user stopped the forward.
 func (l *local) stop() {
-	l.shutdown(StopReasonUser, nil)
+	l.fl.shutdown(StopReasonUser, nil)
 }
 
-// shutdown is the single teardown path. stopOnce decides which reason wins
-// when a user stop and a connection loss race: the first to arrive.
-func (l *local) shutdown(reason StopReason, cause error) {
-	l.stopOnce.Do(func() {
-		l.mu.Lock()
-		l.stopReason = reason
-		l.err = cause
-		ln := l.listener
-		l.listener = nil
-		streams := l.streams
-		l.streams = nil
-		lease := l.lease
-		l.lease = nil
-		l.mu.Unlock()
+func (l *local) done() <-chan struct{} { return l.fl.done() }
 
-		if ln != nil {
-			_ = ln.Close()
-		}
-		for s := range streams {
-			_ = s.Close()
-		}
-		if lease != nil {
-			_ = lease.Close()
-		}
-		close(l.doneCh)
-	})
-}
+func (l *local) outcome() Outcome { return l.fl.outcome() }
 
-func (l *local) done() <-chan struct{} { return l.doneCh }
-
-func (l *local) outcome() Outcome {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return Outcome{StopReason: l.stopReason, Err: l.err}
-}
+// caveat implements strategy.caveat: -L has no bind caveat — the local
+// listener's address is the OS's own answer, verified by the bind itself.
+func (l *local) caveat() string { return "" }

@@ -1,9 +1,9 @@
 // Package tunnel implements the port-forwarding domain model (spec §7): one
-// record covering local (-L), remote (-R) and dynamic (-D) forwards from day
-// one, with the LOCAL strategy implemented behind a strategy interface
-// (AD-8). Remote and dynamic land later into the same model — a direction
-// flag threaded into one forwarding loop collapses under both, which is why
-// the model carries all three now.
+// record covering local (-L), remote (-R) and dynamic (-D) forwards, each
+// behind a strategy interface (AD-8). The direction is chosen at
+// construction — never a flag threaded into one forwarding loop — because
+// -R brings remote-listener policy and -D brings SOCKS semantics that
+// collapse under a shared loop.
 package tunnel
 
 import (
@@ -22,16 +22,18 @@ import (
 type Direction string
 
 const (
-	// DirectionLocal forwards a local listener to a remote destination via
-	// one direct-tcpip channel per accepted connection (-L). The only
-	// implemented strategy.
+	// DirectionLocal forwards a local listener to a destination via one
+	// direct-tcpip channel per accepted connection (-L). The destination
+	// resolves on the server's network.
 	DirectionLocal Direction = "local"
 	// DirectionRemote creates a listener on the remote host (-R): governed
-	// by the server's AllowTcpForwarding / PermitListen, needs its own
-	// threat warning. Not yet implemented.
+	// by the server's AllowTcpForwarding / PermitListen, and its own threat
+	// warning — the bind appears on somebody else's host. The destination
+	// resolves on the client's network (OpenSSH -R semantics).
 	DirectionRemote Direction = "remote"
-	// DirectionDynamic serves a local SOCKS proxy (-D): needs a SOCKS
-	// server and a destination policy. Not yet implemented.
+	// DirectionDynamic serves a local SOCKS5 proxy (-D). Each CONNECT target
+	// is dialed as a direct-tcpip channel over the SSH connection, so the
+	// domain-name form resolves at the far end. No fixed destination.
 	DirectionDynamic Direction = "dynamic"
 )
 
@@ -109,8 +111,8 @@ type Connector interface {
 }
 
 // strategy implements one forwarding direction behind an interface (AD-8):
-// local is implemented; remote and dynamic land later into this same slot.
-// There is never a direction switch inside an implementation.
+// local, remote and dynamic each live in their own file. There is never a
+// direction switch inside an implementation.
 type strategy interface {
 	// start acquires the connection lease, binds the listener, and begins
 	// forwarding. The bind happens BEFORE it reports (spec §7.1): EADDRINUSE,
@@ -120,6 +122,12 @@ type strategy interface {
 	// by the OS and reported, never left as 0. The port is never pre-checked
 	// (TOCTOU); the listen itself is the check.
 	start(ctx context.Context, host string, opts []ssh.ConnectOption) (Bind, error)
+	// caveat reports a success-time caution about the bind, empty when none
+	// applies. Only the remote strategy sets one: for a requested
+	// non-loopback bind the tcpip-forward protocol cannot verify what the
+	// server actually bound, so a URL built from the reported actual bind
+	// may only work on the server. Valid after a successful start.
+	caveat() string
 	// stop tears the listener and in-flight streams down (user stop).
 	stop()
 	// done closes when the strategy stops for any reason: user, error,
@@ -147,6 +155,7 @@ type Tunnel struct {
 	mu         sync.Mutex
 	impl       strategy
 	ActualBind Bind
+	caveat     string
 	state      State
 	stopReason StopReason
 	err        error
@@ -168,7 +177,12 @@ func New(spec Spec, conn Connector) (*Tunnel, error) {
 			return nil, fmt.Errorf("tunnel: invalid %s destination %q: %w", spec.Direction, spec.Destination, err)
 		}
 	case DirectionDynamic:
-		// no destination
+		// No destination: the SOCKS CONNECT target arrives per connection,
+		// not from the spec. A destination on a dynamic forward would be
+		// silently ignored — reject it instead.
+		if spec.Destination != "" {
+			return nil, errors.New("tunnel: dynamic destination must be empty")
+		}
 	case "":
 		return nil, errors.New("tunnel: direction is required")
 	default:
@@ -238,6 +252,7 @@ func (t *Tunnel) Start(ctx context.Context, host string, opts ...ssh.ConnectOpti
 
 	t.mu.Lock()
 	t.ActualBind = actual
+	t.caveat = impl.caveat()
 	t.state = StateRunning
 	t.mu.Unlock()
 
@@ -325,6 +340,18 @@ func (t *Tunnel) Actual() Bind {
 	return t.ActualBind
 }
 
+// Caveat reports a success-time caution about the bind, empty for a clean
+// bind. Only remote (-R) forwards set it: the tcpip-forward protocol
+// confirms the port but never the bound host, so a requested non-loopback
+// bind may have been silently rebound by the server (GatewayPorts=no), and a
+// URL built from Actual() may only work on the server. Meaningful once Start
+// succeeded; never an error — nothing failed.
+func (t *Tunnel) Caveat() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.caveat
+}
+
 // strategyFor picks the strategy behind the AD-8 interface. This is the only
 // place a direction maps to an implementation; the strategies themselves
 // never switch on direction.
@@ -333,9 +360,9 @@ func strategyFor(dir Direction, bind Bind, dest string, conn Connector) (strateg
 	case DirectionLocal:
 		return newLocal(bind, dest, conn), nil
 	case DirectionRemote:
-		return nil, fmt.Errorf("tunnel: remote (-R) strategy is not implemented yet")
+		return newRemote(bind, dest, conn), nil
 	case DirectionDynamic:
-		return nil, fmt.Errorf("tunnel: dynamic (-D) strategy is not implemented yet")
+		return newDynamic(bind, conn), nil
 	default:
 		return nil, fmt.Errorf("tunnel: unknown direction %q", dir)
 	}
