@@ -14,7 +14,7 @@
   gap: var(--space-3);
   padding: var(--space-3);
   border: 1px solid var(--color-divider);
-  border-radius: var(--radius-md);
+  border-radius: var(--control-radius-md);
 }
 
 .ui-row-list__content {
