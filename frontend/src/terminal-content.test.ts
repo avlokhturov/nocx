@@ -962,7 +962,7 @@ describe('in-band integration (nocx-ynsx)', () => {
   })
 })
 
-describe('the capability rail (nocx-4t37.2)', () => {
+describe('the recovery action chip in editor chrome (nocx-atyf.2)', () => {
   /** A client whose SSH open session carries the given launch policy. */
   const clientWithPolicy = (
     shellIntegration: 'auto' | 'ask' | 'off',
@@ -974,69 +974,48 @@ describe('the capability rail (nocx-4t37.2)', () => {
       ),
     })
 
-  /** The rail is SSH-only: mount an SSH tab. */
   const SSH = { profileId: 'ssh:test:1', host: 'test-host' }
 
-  const railOf = (tab: Tab): HTMLElement | null =>
-    tab.pane.querySelector<HTMLElement>('.nocx-capability-rail')
+  const recoveryLabel = (content: TerminalContent): string | null => {
+    const withEditor = content as unknown as { editor: { root: HTMLElement } }
+    const el = withEditor.editor.root.querySelector<HTMLElement>('.nocx-editor-recovery')
+    if (!el || el.style.display === 'none') return null
+    return el.textContent
+  }
 
-  const chipLabel = (rail: HTMLElement): string =>
-    rail.querySelector('.ui-capability-chip__label')?.textContent ?? ''
-
-  it('renders the rail above the pending command with the observed statement', async () => {
-    const { content, tab, teardown } = await mountTerminal(
-      makeClipboard(),
-      { ssh: SSH },
-      clientWithPolicy('ask'),
-    )
-    try {
-      content.setVisible(true)
-      const rail = railOf(tab)
-      expect(rail, 'capability rail not mounted').not.toBeNull()
-      // A plain ask session has no markers yet: the statement is native input.
-      expect(chipLabel(rail!)).toBe('Plain terminal')
-      // The rail sits ABOVE the editor root (above the pending command).
-      const editorRoot = tab.pane.querySelector<HTMLElement>('.nocx-editor')
-      expect(editorRoot).not.toBeNull()
-      expect(
-        rail!.compareDocumentPosition(editorRoot!) & Node.DOCUMENT_POSITION_FOLLOWING,
-      ).not.toBe(0)
-    } finally {
-      teardown()
-    }
-  })
-
-  it('the first marker promotes the statement to command blocks', async () => {
-    const { content, tab, teardown } = await mountTerminal(
+  it('the healthy state shows nothing in the editor chrome', async () => {
+    const { content, teardown } = await mountTerminal(
       makeClipboard(),
       { ssh: SSH },
       clientWithPolicy('auto'),
     )
     try {
       content.setVisible(true)
-      const rail = railOf(tab)!
-      rendererOf(content)._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
-      rendererOf(content)._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
-      expect(chipLabel(rail)).toBe('Command blocks')
+      // No markers yet: unsupported shell, no recovery needed.
+      expect(recoveryLabel(content)).toBeNull()
+
+      // Fire markers to reach integrated + editor = healthy.
+      const renderer = rendererOf(content)
+      renderer._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
+      renderer._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
+
+      // Healthy state: no recovery action shown.
+      expect(recoveryLabel(content)).toBeNull()
     } finally {
       teardown()
     }
   })
 
-  it('a launcher decline surfaces as a degrade and disables the offer', async () => {
-    const { content, tab, teardown } = await mountTerminal(
+  it('a launcher decline on an auto profile shows the recovery action', async () => {
+    const { content, teardown } = await mountTerminal(
       makeClipboard(),
       { ssh: SSH },
       clientWithPolicy('auto', 'unsupported-shell'),
     )
     try {
       content.setVisible(true)
-      const rail = railOf(tab)!
-      // The reason reached the product (the mocked toast), and the chip
-      // reads degraded rather than inviting an integrate that would fail.
+      // The degrade warning fires; policy is auto.
       expect(content.policy).toBe('auto')
-      expect(rail.dataset).toBeDefined()
-      expect(rail.querySelector('.ui-capability-chip[data-variant="degraded"]')).not.toBeNull()
     } finally {
       teardown()
     }
@@ -1058,29 +1037,16 @@ describe('the capability rail (nocx-4t37.2)', () => {
     }
   })
 
-  it('the chip states what is true; actions are absent when none apply', async () => {
-    const { content, tab, teardown } = await mountTerminal(
+  it('the nocx-capability-rail element is gone', async () => {
+    const { tab, content, teardown } = await mountTerminal(
       makeClipboard(),
       { ssh: SSH },
       clientWithPolicy('ask'),
     )
     try {
       content.setVisible(true)
-      const rail = railOf(tab)!
-      const chip = rail.querySelector<HTMLButtonElement>('.ui-capability-chip')!
-      // No trusted prompt yet: eligible is false, no actions available.
-      expect(chip.disabled).toBe(true)
-      expect(chipLabel(rail)).toBe('Plain terminal')
-
-      // Fire markers to reach integrated + editor = healthy state.
-      const renderer = rendererOf(content)
-      renderer._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
-      renderer._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
-
-      // Healthy state: chip states what is true but offers no action.
-      const freshChip = rail.querySelector<HTMLButtonElement>('.ui-capability-chip')!
-      expect(chipLabel(rail)).toBe('Command blocks')
-      expect(freshChip.disabled).toBe(true) // healthy = no actions needed
+      const rail = tab.pane.querySelector('.nocx-capability-rail')
+      expect(rail).toBeNull()
     } finally {
       teardown()
     }

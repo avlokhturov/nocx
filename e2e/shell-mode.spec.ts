@@ -168,28 +168,17 @@ test('a plain SSH shell shows the capability, switching to nocxify produces bloc
     await search.fill(profileName)
     await page.keyboard.press('Enter')
 
-    // The SSH tab opens; the plain shell (ask policy) shows the capability
-    // statement at the pending command: Native input.
-    const chip = page.locator('.pane.active .ui-capability-chip')
-    await expect(chip).toBeVisible({ timeout: 20_000 })
-    await expect(chip.locator('.ui-capability-chip__label')).toHaveText('Native input', {
-      timeout: 20_000,
-    })
+    // The SSH tab opens; the plain shell (ask policy) shows the recovery
+    // action in the editor chrome: Integrate this shell.
+    const recovery = page.locator('.pane.active .nocx-editor-recovery')
+    await expect(recovery).toBeVisible({ timeout: 20_000 })
+    await expect(recovery).toHaveText('Integrate this shell', { timeout: 20_000 })
 
-    // The capability control is the ask: click it, take the one action.
-    await chip.click()
-    const panel = page.locator(
-      '.pane.active .ui-floating-panel[data-variant="capability"][data-open="true"]',
-    )
-    await expect(panel).toBeVisible()
-    await expect(panel).toContainText('Integrate this shell')
-    await panel.locator('.ui-floating-panel__row').first().click()
+    // Click the recovery chip — it IS the action, no popover.
+    await recovery.click()
     // The in-band bootstrap runs against the REAL shell; the shell's own
-    // hooks then emit OSC 133 markers. The capability flips to Command
-    // blocks — nocx owns the trusted prompt now.
-    await expect(chip.locator('.ui-capability-chip__label')).toHaveText('Command blocks', {
-      timeout: 20_000,
-    })
+    // hooks then emit OSC 133 markers. The healthy state shows nothing.
+    await expect(recovery).not.toBeVisible({ timeout: 20_000 })
 
     // The user then runs a command through the nocx editor, and it becomes
     // a block — the epic's "switches it to nocxify, and gets blocks".

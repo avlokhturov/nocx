@@ -56,10 +56,8 @@ import {
   deriveShellState,
   type ShellState,
   type InputPresentation,
-  type RecoveryAction,
   type ShellIntegrationPolicy,
 } from './capability'
-import { createCapabilityChip } from './ui/capability-chip'
 import type { Open } from './generated/open'
 
 // How long the grid must hold still before the PTY is told about it.
@@ -245,14 +243,6 @@ export class TerminalContent extends BaseTabContent {
    *  open, or markers stopped on an integrated session the user did not
    *  latch native. Tab chrome renders at most this mark. */
   private _degraded = false
-  /** The pane-level rail above the pending command: the capability chip,
-   *  its action popover, and nothing else. */
-  private _rail: HTMLElement | null = null
-  private _railChip: HTMLElement | null = null
-  private _railPopover: FloatingPanel | null = null
-  private _railOpen = false
-  private _railOutsideHandler: ((e: MouseEvent) => void) | null = null
-  private _railEscapeHandler: ((e: KeyboardEvent) => void) | null = null
   /** Whether OSC 133 markers have arrived for the shell currently on stdin.
    *  Environment-scoped: entering a nested environment (ssh, docker exec, …)
    *  clears it; the D that ends that command restores what was true before.
@@ -1186,10 +1176,6 @@ export class TerminalContent extends BaseTabContent {
         }
       })
 
-      // The rail mounts above the pending command, BEFORE the editor mounts
-      // below it, so a plain shell keeps the capability statement in view.
-      this._mountRail(target)
-
       this._mounted = true
       this._readyResolve(true)
       log.info('nocx: terminal content ready', {
@@ -1373,9 +1359,8 @@ export class TerminalContent extends BaseTabContent {
   // docker exec, sudo, a TUI), and it matters exactly where Enter is about
   // to be pressed.
 
-  /** The capability statement as of now, derived from observed state only
-   *  (the input machine + the sticky integrated flag + the user's own
-   *  native latch) — never from the byte stream (AD-6). */
+  /** Derive the three axes, resolve authorisation + eligibility, and
+   *  update the editor's recovery chip (nocx-atyf.2). */
   private _updateCapability(): void {
     const shellState = deriveShellState({
       integrated: this._shellIntegrated,
@@ -1401,142 +1386,33 @@ export class TerminalContent extends BaseTabContent {
     this._presentation = presentation
     this._degraded = degraded
     this.hooks.onWarningChange?.(degraded)
-    this._renderRail()
+    this._renderRecovery()
   }
 
-  /** (Re)draw the rail chip for the current capability. The chip is the
-   *  statement; it opens the popover unless there is nothing to offer. */
-  private _renderRail(): void {
-    if (!this._rail) return
-    const actions = this._railActions()
-    const label = this._railLabel()
-    const variant = this._railChipVariant()
-    const disabled = actions.length === 0
-    const fresh = createCapabilityChip({
-      label,
-      variant,
-      disabled,
-      title: this._railTitle(disabled),
-      onClick: disabled ? undefined : () => this._toggleRailPopover(),
-    })
-    if (this._railChip) {
-      this._railChip.replaceWith(fresh)
-    } else {
-      this._rail.appendChild(fresh)
-    }
-    this._railChip = fresh
-  }
-
-  private _railLabel(): string {
-    if (this._degraded) return 'Shell integration lost'
-    if (this._presentation === 'terminal')
-      return this._shellState === 'integrated' ? 'Terminal input' : 'Plain terminal'
-    return 'Command blocks'
-  }
-
-  private _railChipVariant(): 'native' | 'blocks' | 'enhanced' | 'degraded' {
-    if (this._degraded) return 'degraded'
-    if (this._presentation === 'editor') return 'blocks'
-    if (this._shellState === 'integrated') return 'enhanced'
-    return 'native'
-  }
-
-  /** What the popover may offer right now. Derived from the three axes
-   *  AFTER authorisation and technical eligibility are resolved. */
-  private _railActions(): RecoveryAction[] {
-    const eligible = this.inputState.state === 'PROMPT_READY' && this.inputState.trusted
+  /** Update the editor's recovery chip: the single action when one exists,
+   *  hidden when none apply. The chip IS the action — one click, no
+   *  popover (nocx-atyf.2). */
+  private _renderRecovery(): void {
+    if (!this.editor) return
+    const eligible = this.inputState.state !== 'ALT_SCREEN'
     const authorized = this._policy !== 'off'
-    return deriveActions({
+    const actions = deriveActions({
       shellState: this._shellState,
       presentation: this._presentation,
       delivery: this._shellIntegrated ? 'in-band' : 'launcher',
       authorized,
       eligible,
     })
-  }
-
-  private _railTitle(noActions: boolean): string {
-    const base = `Enter goes to the ${this._presentation === 'editor' ? 'command editor' : 'shell'}: ${this._railLabel()}`
-    if (!noActions) return `${base}. Click to change.`
-    if (this._policy === 'off') return `${base}. This connection is set to never integrate (off).`
-    return base
-  }
-
-  /** Build the rail element and mount it above the editor. Called once
-   *  from mount() before the editor mounts, so the rail sits between the
-   *  scrollback and the pending command. */
-  private _mountRail(target: HTMLElement): void {
-    if (this._rail || !this.sshOpts) return
-    const rail = document.createElement('div')
-    rail.className = 'nocx-capability-rail'
-    rail.setAttribute('role', 'group')
-    rail.setAttribute('aria-label', 'Shell capability')
-    this._rail = rail
-    this._railPopover = new FloatingPanel({
-      variant: 'capability',
-      role: 'menu',
-      ariaLabel: 'Shell capability actions',
-      callbacks: {
-        onPick: (index) => this._runRailAction(index),
-      },
-    })
-    this._railPopover.mount(rail)
-    target.insertBefore(rail, this.editor?.root ?? null)
-    this._renderRail()
-  }
-
-  private _toggleRailPopover(): void {
-    if (this._railOpen) {
-      this._closeRailPopover()
+    if (actions.length === 0) {
+      this.editor.setRecoveryAction(null, () => {})
       return
     }
-    const actions = this._railActions()
-    if (actions.length === 0) return
-    this._railOpen = true
-    this._railPopover?.show({
-      rows: actions.map((a) => ({
-        id: a.kind,
-        displayText: a.label,
-        matchRanges: [],
-      })),
-      selectedIndex: 0,
+    const action = actions[0]
+    this.editor.setRecoveryAction(action.label, () => {
+      if (action.kind === 'integrate' || action.kind === 'retry-integration') this.integrateShell()
+      else if (action.kind === 'enable-editor' || action.kind === 'restore-editor')
+        this._restoreEditor()
     })
-    this._railOutsideHandler = (e: MouseEvent) => {
-      if (this._rail && !this._rail.contains(e.target as Node)) this._closeRailPopover()
-    }
-    document.addEventListener('mousedown', this._railOutsideHandler, true)
-    this._railEscapeHandler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault()
-        e.stopPropagation()
-        this._closeRailPopover()
-      }
-    }
-    document.addEventListener('keydown', this._railEscapeHandler, true)
-  }
-
-  private _closeRailPopover(): void {
-    if (!this._railOpen) return
-    this._railOpen = false
-    this._railPopover?.hide()
-    if (this._railOutsideHandler) {
-      document.removeEventListener('mousedown', this._railOutsideHandler, true)
-      this._railOutsideHandler = null
-    }
-    if (this._railEscapeHandler) {
-      document.removeEventListener('keydown', this._railEscapeHandler, true)
-      this._railEscapeHandler = null
-    }
-  }
-
-  private _runRailAction(index: number): void {
-    const actions = this._railActions()
-    const action = actions[index]
-    this._closeRailPopover()
-    if (!action) return
-    if (action.kind === 'integrate' || action.kind === 'retry-integration') this.integrateShell()
-    else if (action.kind === 'enable-editor' || action.kind === 'restore-editor')
-      this._restoreEditor()
   }
 
   /** Leave terminal input and return to the command editor. */
@@ -1801,12 +1677,6 @@ export class TerminalContent extends BaseTabContent {
     this._disposeAllMarkers()
     this.ledger = null
     this.host = null
-    this._closeRailPopover()
-    this._railPopover?.destroy()
-    this._railPopover = null
-    this._rail?.remove()
-    this._rail = null
-    this._railChip = null
   }
 
   private _disposeAllMarkers(): void {
