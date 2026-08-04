@@ -577,6 +577,13 @@ export class TerminalContent extends BaseTabContent {
               focusGrid: () => renderer.focus(),
               sendDoc: (d) => void this.shellTarget!.submit(d),
             })
+            // App-owned start (nocx-atyf.4): mark the block as running
+            // immediately, before any OSC marker arrives. The start line
+            // is the cursor position at submit time; when C arrives (if
+            // it does), cReceived is set on the running block.
+            if (this.scrollback && this.renderer) {
+              this.scrollback.beginBlock(recordLine, this._cwd, this.renderer.cursorLine())
+            }
           },
           cancel: () => this.session?.send('\x03'),
           // A taller editor is a shorter scrollback. Keep the bottom of the
@@ -748,7 +755,15 @@ export class TerminalContent extends BaseTabContent {
         }
         this.ledger?.onMarker(marker.kind, marker.exitCode)
         if (marker.kind === 'C') {
-          this.scrollback?.onCommandStart(this._pendingCommand, this._cwd, marker.line)
+          // If a block was already started from the app-owned submit
+          // (nocx-atyf.4), mark C as received and update the start line.
+          if (this.scrollback?.blockManager.runningBlock) {
+            const rb = this.scrollback.blockManager.runningBlock
+            rb.cReceived = true
+            rb.startLine = marker.line
+          } else {
+            this.scrollback?.onCommandStart(this._pendingCommand, this._cwd, marker.line)
+          }
         } else if (marker.kind === 'D') {
           // Leaving the environment the command entered (nocx-695k.1):
           // restore the marker fact from before that command ran.

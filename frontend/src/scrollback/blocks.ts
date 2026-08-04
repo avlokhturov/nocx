@@ -48,6 +48,9 @@ export interface BlockRecord {
   startLine: number
   /** IMarker line for D boundary (approx). */
   endLine: number
+  /** Whether OSC 133 C was received for this command. False when the
+   *  block was started from the app-owned submit (nocx-atyf.4). */
+  cReceived: boolean
   el: HTMLElement
 }
 
@@ -775,6 +778,7 @@ export class BlockManager {
       status: 'running',
       startLine,
       endLine: startLine,
+      cReceived: false,
       el,
     }
     this._blocks.push(rec)
