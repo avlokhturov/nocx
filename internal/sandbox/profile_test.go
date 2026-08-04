@@ -59,6 +59,8 @@ func TestRenderProfile_Clauses(t *testing.T) {
 		"(allow ipc-posix-shm)",
 		"(allow ipc-posix-sem)",
 		"(allow ipc-sysv-sem)",
+		"(allow iokit-open",
+		"(allow iokit-get-properties)",
 		"(allow system-socket (require-all (socket-domain AF_SYSTEM) (socket-protocol 2)))",
 		"(allow pseudo-tty)",
 	} {

@@ -41,6 +41,15 @@ func renderProfile(p *Policy) (string, error) {
 	b.WriteString("(allow ipc-posix-shm)\n")
 	b.WriteString("(allow ipc-posix-sem)\n")
 	b.WriteString("(allow ipc-sysv-sem)\n")
+	// Go's runtime asks IOKit for host capabilities before the probe's main
+	// function can run. These are the same narrow service classes used by
+	// contemporary macOS sandbox profiles; they grant neither file access nor
+	// hardware-control operations.
+	b.WriteString("(allow iokit-open\n")
+	b.WriteString("  (iokit-registry-entry-class \"IOSurfaceRootUserClient\")\n")
+	b.WriteString("  (iokit-registry-entry-class \"RootDomainUserClient\")\n")
+	b.WriteString("  (iokit-user-client-class \"IOSurfaceSendRight\"))\n")
+	b.WriteString("(allow iokit-get-properties)\n")
 	b.WriteString("(allow system-socket (require-all (socket-domain AF_SYSTEM) (socket-protocol 2)))\n")
 	b.WriteString("(allow pseudo-tty)\n")
 	b.WriteString("(allow file-read-metadata)\n")
