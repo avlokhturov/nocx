@@ -331,6 +331,21 @@ describe('CommandEditor', () => {
     expect(container.querySelector('.nocx-editor-time')!.textContent).toContain('12:34:56')
   })
 
+  it('orders the chrome left group before the clock, which the stylesheet pins right (nocx-a44m)', () => {
+    const { ed, container } = setup()
+    ed.show()
+    // jsdom computes no layout, but the intent is source order: the clock is
+    // the LAST direct child of the chrome row, and .nocx-editor-time carries
+    // margin-left: auto so it keeps the right edge for any child count.
+    // A future third sibling lands after the left group, not in the middle.
+    const chrome = container.querySelector<HTMLElement>('.nocx-editor-chrome')!
+    const left = container.querySelector<HTMLElement>('.nocx-editor-chrome-left')!
+    const time = container.querySelector<HTMLElement>('.nocx-editor-time')!
+    const order = [...chrome.children]
+    expect(order.indexOf(left)).toBeLessThan(order.indexOf(time))
+    expect(order.indexOf(time)).toBe(order.length - 1)
+  })
+
   it('rootContains returns true for the input surface and chrome (focus-bounce)', () => {
     const { ed, view, container } = setup()
     ed.show()

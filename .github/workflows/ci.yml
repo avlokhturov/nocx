@@ -73,6 +73,14 @@ jobs:
       - name: Build
         run: go build ./...
 
+      # The shellintegration launcher tests fail, not skip, when the shell
+      # they must prove is absent (nocx-gd84). macOS ships zsh but not dash;
+      # TestBashLauncher_RunsUnderDash and TestPosixLauncher_EmitsMarkersFromPS1
+      # both need dash, so a job that ran the suite as-is would fail them.
+      # ubuntu-latest ships both shells; this step is macOS-only.
+      - name: Install dash (shell integration tests)
+        run: brew install dash
+
       - name: Test
         run: go test -race -count=1 ./...
 

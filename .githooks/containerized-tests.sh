@@ -30,6 +30,21 @@
 GO_IMAGE="golang:1.26-bookworm"
 NODE_IMAGE="node:22-bookworm-slim"
 
+# The Go test runner uses a derived image (GO_TEST_IMAGE) built from
+# .githooks/images/go-tests/Dockerfile — the stock golang image carries bash
+# and dash but NOT zsh, and the shellintegration launcher tests fail, not
+# skip, when the shell they must prove is absent (nocx-gd84). Why a derived
+# image rather than an apt-get in the run command: measured 2026-08-04, an
+# `apt-get update && apt-get install zsh` in a fresh container costs ~28s and
+# needs Debian-mirror network on every commit, which would break the warm-run-
+# offline property (the image and caches are what make a repeat commit run
+# with no network); the build confines the apt cost to first use. The hook
+# builds the image before every run — the BuildKit layer cache makes a warm
+# build ~0.3s — so this Dockerfile is the source of truth: a package added
+# there takes effect on the next commit with no manual rebuild.
+GO_TEST_IMAGE="nocx-hook-go:1.26-bookworm"
+GO_TEST_IMAGE_DIR="$(dirname "$0")/images/go-tests"
+
 HOST_UID="$(id -u)"
 HOST_GID="$(id -g)"
 
@@ -63,6 +78,11 @@ require_docker() {
 # reading something Go cannot see, and the fix is in the test (nocx-ro3h).
 go_test_containerized() {
     require_docker || return 1
+    # The shell tests need zsh, which the stock golang image lacks; the image
+    # and the reason for deriving it are documented at GO_TEST_IMAGE above.
+    # Build before every run: the layer cache makes a warm build ~0.3s
+    # (measured 2026-08-04) and keeps the Dockerfile the source of truth.
+    docker build -q -t "$GO_TEST_IMAGE" "$GO_TEST_IMAGE_DIR" >/dev/null || return 1
     docker run --rm \
         -v "$PWD:/src:ro" \
         -v "$GOMOD_VOL:/cache/gomod" \
@@ -72,7 +92,7 @@ go_test_containerized() {
         -e GOCACHE=/cache/gobuild \
         -e GOMODCACHE=/cache/gomod \
         -w /src \
-        "$GO_IMAGE" \
+        "$GO_TEST_IMAGE" \
         sh -euc '
             chown "$RUN_UID:$RUN_GID" /cache/gomod /cache/gobuild
             exec setpriv --reuid="$RUN_UID" --regid="$RUN_GID" --clear-groups \

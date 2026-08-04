@@ -1,3 +1,13 @@
+//go:build linux
+
+// The in-band PTY bootstrap suite is Linux-only by design (nocx-gd84
+// follow-up): the fixture seeds the pty's Cflag with the 0xF0000 bits that
+// make GNU stty's encoding roundtrip — those bits are Linux termios
+// semantics. On darwin the same bits are flow-control flags (CCTS_OFLOW,
+// CRTS_IFLOW, CDSR_OFLOW, CDTR_IFLOW), so running the suite there would
+// assert Linux encodings and could enable flow control on the test pty. The
+// launcher and scripts suites (no termios seeding) cover the same real
+// shells cross-platform; this suite is the Linux-depth layer.
 package shellintegration
 
 import (
@@ -7,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -81,9 +92,20 @@ func startSession(t *testing.T, shell string, extraEnv ...string) *ptySession {
 	env = append(env, extraEnv...)
 	cmd := exec.Command(path, "-i")
 	cmd.Env = env
-	ptmx, err := pty.Start(cmd)
+	// Open the pty explicitly (instead of pty.Start) so the fixture can seed
+	// the slave's termios BEFORE the child exists. pty.Start's child inherits
+	// the slave, immediately takes it as its controlling terminal, and races
+	// the parent's first termios write; when the child wins, the shell's
+	// captured terminal state lacks the seeded bits and its next termios
+	// write restores the kernel default over the seed — an intermittent
+	// before==after failure (measured ~1 in 7 full-suite runs in the
+	// pre-commit container, 2026-08-04). Seeding the already-open slave fd
+	// before cmd.Start is deterministic: no shell component exists yet, so
+	// every capture sees the canonical encoding and the checks below test
+	// the wrapper's restore, not a race.
+	ptmx, tty, err := pty.Open()
 	if err != nil {
-		t.Fatalf("pty start %s: %v", shell, err)
+		t.Fatalf("pty open %s: %v", shell, err)
 	}
 	// The kernel's fresh pty Cflag (0xBF: output-baud bits only) is an
 	// encoding GNU stty cannot represent: `stty -g` renders it as 0xF00BF
@@ -94,14 +116,24 @@ func startSession(t *testing.T, shell string, extraEnv ...string) *ptySession {
 	// the kernel encoding artifact. dash exercises this directly (no
 	// readline to mask it); bash/zsh would hide it by rewriting termios at
 	// their prompt.
-	ts, err := unix.IoctlGetTermios(int(ptmx.Fd()), unix.TCGETS)
+	ts, err := unix.IoctlGetTermios(int(tty.Fd()), unix.TCGETS)
 	if err != nil {
 		t.Fatalf("seed termios TCGETS: %v", err)
 	}
 	ts.Cflag |= 0xF0000
-	if err := unix.IoctlSetTermios(int(ptmx.Fd()), unix.TCSETS, ts); err != nil {
+	if err := unix.IoctlSetTermios(int(tty.Fd()), unix.TCSETS, ts); err != nil {
 		t.Fatalf("seed termios TCSETS: %v", err)
 	}
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = tty, tty, tty
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true}
+	if err := cmd.Start(); err != nil {
+		_ = ptmx.Close()
+		_ = tty.Close()
+		t.Fatalf("pty start %s: %v", shell, err)
+	}
+	// The child holds the slave through its stdio fds; closing the parent's
+	// copy here mirrors pty.Start (the pty stays alive while the child lives).
+	_ = tty.Close()
 	s := &ptySession{t: t, ptmx: ptmx}
 	go s.pump()
 	t.Cleanup(func() { _ = ptmx.Close() })

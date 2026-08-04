@@ -225,6 +225,23 @@ All four frontend gates FAIL with an actionable message if `node_modules` is abs
 
 Run locally without committing: `make ci` (close mirror of CI — runs the same static analysis and tests, but validates against your existing `node_modules` rather than reinstalling).
 
+**Shell integration tests need dash and zsh.** `internal/shellintegration`
+drives the real bash/zsh/posix launchers on real ptys. The dash and zsh
+launcher tests **fail, not skip**, when the shell they must prove is absent
+(a skipped test reporting success is the failure AGENTS.md's testing rules
+exist to prevent) — install the shells, then run the suite the way CI does:
+
+```bash
+sudo apt-get install -y dash zsh        # Debian/Ubuntu
+brew install dash                       # macOS (zsh ships with the OS)
+go test -race -count=1 ./internal/shellintegration/...
+```
+
+Both gates provision the shells so they prove them: the pre-commit hook runs
+the suite in a container image that carries dash and zsh
+(`.githooks/images/go-tests/Dockerfile`), and CI's macOS backend job runs
+`brew install dash` (ubuntu-latest ships both shells already).
+
 ## Quality gates
 
 Every commit must pass:
