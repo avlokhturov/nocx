@@ -108,6 +108,23 @@
   color: var(--color-text-dim);
 }
 
+/* The row under the pointer says so. This is not decoration: the copy action
+   is revealed on hover, so without a highlight the icon appears with nothing
+   naming the row it belongs to. Same mechanism and same value as the kit's
+   collection row, so a list row looks like a list row everywhere
+   (nocx-wzc4.11). The row is padded by the divided Stack, so the highlight is
+   pulled out to the panel's edges and given the padding back — otherwise it
+   would be a stripe narrower than the row it marks. */
+.ports-row {
+  margin: 0 calc(-1 * var(--space-3));
+  padding: 0 var(--space-3);
+  border-radius: var(--border-radius-sm, 4px);
+}
+
+.ports-row:hover {
+  background: color-mix(in srgb, white, transparent 97%);
+}
+
 /* The row action is revealed by pointing at the row — a column of identical
    icons down a narrow rail is noise, and the address is what the eye is
    scanning. `:focus-within` keeps it reachable from the keyboard, where
