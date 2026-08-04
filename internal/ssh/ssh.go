@@ -49,6 +49,11 @@ const (
 	ShellBash    ShellKind = "bash"
 	ShellZsh     ShellKind = "zsh"
 	ShellUnknown ShellKind = "unknown"
+	// ShellAuto means "the far host decides": the launcher emits a single
+	// strictly-POSIX dispatcher that detects the login shell at runtime and
+	// execs the matching tier (nocx-6rj0). The default when a profile pins
+	// no shell.
+	ShellAuto ShellKind = "auto"
 )
 
 // RefusalReason is why integration did not happen, in a form the product
@@ -119,6 +124,13 @@ type ConnectConfig struct {
 	// Enhanced requests the marker-only prompt mode (ADR-0006) for the
 	// remote shell; forwarded to the launcher in LaunchOptions.
 	Enhanced bool
+
+	// Shell pins the far shell the launcher must target. Empty means
+	// "detect it" — the launcher receives ShellAuto and decides on the far
+	// host, where the login shell can say what it is (nocx-6rj0). A pin
+	// (from the user's profile) wins over detection: a user who says "this
+	// host runs zsh" knows something the detector cannot.
+	Shell ShellKind
 
 	// AuthMode controls which auth buckets are tried (null=Auto with full
 	// fallback-chain; a specific value restricts which buckets are attempted).
@@ -289,6 +301,13 @@ func WithSessionID(id string) ConnectOption {
 // remote shell.
 func WithEnhanced() ConnectOption {
 	return func(c *ConnectConfig) { c.Enhanced = true }
+}
+
+// WithShell pins the far shell the launcher must target, winning over the
+// auto-detecting dispatcher. This is where a profile field that says "this
+// host runs zsh" lands (nocx-6rj0); the empty default means detect.
+func WithShell(shell ShellKind) ConnectOption {
+	return func(c *ConnectConfig) { c.Shell = shell }
 }
 
 // WithRemoteInstaller injects a shell integration installer for the remote

@@ -73,7 +73,13 @@ case "${__nocx_old_opts}" in *x*) set -x;; esac
 unset __nocx_old_opts
 `
 
-// bashCommand builds the bash remote command. The pinned form is
+// bashArg builds the script `bash -c` parses for the bash tier: exec the
+// interactive bash whose rcfile is the escaped payload delivered through
+// process substitution. It is the piece the ShellAuto dispatcher carries as
+// its first positional argument; bashCommand wraps it with shellQuote.
+// ok is false when the pinned Enhanced precondition fails.
+//
+// The pinned form of the full command is
 //
 //	env -u BASH_ENV bash -c 'exec bash --rcfile <(printf %b "<escaped-init>") -i'
 //
@@ -97,16 +103,27 @@ unset __nocx_old_opts
 // Naming bash explicitly is the point: process substitution is a bashism,
 // and sshd hands the remote command to the user's login shell, which may be
 // dash, ash, csh or a restricted shell.
-func (remoteLauncher) bashCommand(opts LaunchOptions) (string, RefusalReason, bool) {
+func (remoteLauncher) bashArg(opts LaunchOptions) (string, bool) {
 	if opts.Enhanced && opts.SessionID == "" {
 		// Pinned contract: SessionID is never empty when Enhanced. Fail
 		// closed — a marker-only session with no id cannot anchor the
 		// ownership protocol — rather than emit one that half-works.
-		return "", ReasonUnsupportedShell, false
+		return "", false
 	}
 	rc := strings.ReplaceAll(bashRcfileTemplate, "@ENV@", launcherEnvBlock(opts))
 	rc = strings.ReplaceAll(rc, "@NOCX_BASH@", bashScript)
-	arg := `exec bash --rcfile <(printf %b "` + printfBEscape(rc) + `") -i`
+	return `exec bash --rcfile <(printf %b "` + printfBEscape(rc) + `") -i`, true
+}
+
+// bashCommand builds the bash remote command: the pinned single-tier form,
+// which is what a client sends when the far shell is already known to be
+// bash. The ShellAuto dispatcher sends bashArg instead, wrapped by its own
+// argv plumbing, so the two paths share one payload.
+func (remoteLauncher) bashCommand(opts LaunchOptions) (string, RefusalReason, bool) {
+	arg, ok := remoteLauncher{}.bashArg(opts)
+	if !ok {
+		return "", ReasonUnsupportedShell, false
+	}
 	cmd := "/usr/bin/env -u BASH_ENV bash -c " + shellQuote(arg)
 	if len(cmd) > maxLauncherLen {
 		// Unreachable with the current embedded script (~19 KiB); a script

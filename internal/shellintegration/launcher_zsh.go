@@ -107,24 +107,54 @@ export ZDOTDIR="$d"
 exec zsh -l
 `
 
-// zshCommand builds the zsh remote command. The outer form is
+// zshArg builds the outer script the zsh tier runs: a strictly-POSIX sh
+// script (parsed by an explicit /bin/sh — the login shell may be dash, ash,
+// csh or restricted — never rely on it understanding the bootstrap) that
+// writes the transient .zshrc and execs a login zsh with ZDOTDIR pointing at
+// it. Every byte of the generated .zshrc travels inside `printf %b "<…>"`
+// printfBEscape-encoded, so the outer script contains no single quotes at
+// all and stays parseable by csh. It is the piece the ShellAuto dispatcher
+// carries as its second positional argument; zshCommand wraps it with
+// shellQuote.
+//
+// Fail-open is absolute (ADR-0004): a host without mktemp or without a
+// writable secure temp degrades to a plain login zsh, never to a dead
+// session. ReasonNoSecureTemp exists in the pinned API but cannot be
+// emitted from the client — remote temp availability is unknowable at
+// build time — so the failure is handled inside the remote script instead.
+// The umask is captured before the bootstrap and restored before every
+// exec: the session must inherit the user's umask, not the bootstrap's.
+func (remoteLauncher) zshArg(opts LaunchOptions) (string, bool) {
+	if opts.Enhanced && opts.SessionID == "" {
+		// Pinned contract: SessionID is never empty when Enhanced. Fail
+		// closed — a marker-only session with no id cannot anchor the
+		// ownership protocol — rather than emit one that half-works.
+		return "", false
+	}
+	rc := strings.ReplaceAll(zshRcfileTemplate, "@ENV@", launcherEnvBlock(opts))
+	rc = strings.ReplaceAll(rc, "@NOCX_ZSH@", zshScript)
+	outer := strings.ReplaceAll(zshOuterScript, "@ZSHCRC@", printfBEscape(rc))
+	// One physical line: a csh login shell splits multi-line quoted
+	// tokens, so the payload must survive that parse (see singleLine).
+	return singleLine(outer), true
+}
+
+// zshCommand builds the zsh remote command: the pinned single-tier form,
+// sent when the far shell is already known to be zsh. The outer form is
 // `/usr/bin/env -u BASH_ENV /bin/sh -c '<script>'`: -u BASH_ENV so a
 // bash-as-/bin/sh host (macOS) cannot execute BASH_ENV code in the outer
 // sh, the same spec §4.3 protection the bash launcher gets. `exec zsh -l`
 // rather than `exec -l zsh`: dash and busybox ash reject `exec -l` (they
 // treat -l as the command to exec), while `zsh -l` is portable and makes
-// zsh a login shell, reading the login startup files.
+// zsh a login shell, reading the login startup files. The ShellAuto
+// dispatcher sends zshArg instead, wrapped by its own argv plumbing, so the
+// two paths share one payload.
 func (remoteLauncher) zshCommand(opts LaunchOptions) (string, RefusalReason, bool) {
-	if opts.Enhanced && opts.SessionID == "" {
-		// Pinned contract: SessionID is never empty when Enhanced. Fail
-		// closed — a marker-only session with no id cannot anchor the
-		// ownership protocol — rather than emit one that half-works.
+	arg, ok := remoteLauncher{}.zshArg(opts)
+	if !ok {
 		return "", ReasonUnsupportedShell, false
 	}
-	rc := strings.ReplaceAll(zshRcfileTemplate, "@ENV@", launcherEnvBlock(opts))
-	rc = strings.ReplaceAll(rc, "@NOCX_ZSH@", zshScript)
-	outer := strings.ReplaceAll(zshOuterScript, "@ZSHCRC@", printfBEscape(rc))
-	cmd := "/usr/bin/env -u BASH_ENV /bin/sh -c " + shellQuote(outer)
+	cmd := "/usr/bin/env -u BASH_ENV /bin/sh -c " + shellQuote(arg)
 	if len(cmd) > maxLauncherLen {
 		// Unreachable with the current embedded script (~7 KiB); a script
 		// that outgrows the cap must refuse rather than emit a command the
