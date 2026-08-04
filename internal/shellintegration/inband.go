@@ -17,10 +17,21 @@ import (
 //  1. The wrapper is ONE line typed at the prompt (readline submits a single
 //     line). It captures the exact prior termios with `stty -g`, enters raw
 //     mode (drops MAX_CANON, kills echo), emits a private READY OSC only
-//     after raw mode is on, and stages the payload through
-//     `sed -n '/^<terminator>$/q;p'` — so the payload stream ends at a
-//     delimiter LINE, not a byte count, and a truncated or cancelled stream
-//     still reaches the restore.
+//     after raw mode is on, and stages the payload through a POSIX
+//     `while IFS= read -r` loop that stops at the <terminator> LINE — so the
+//     payload stream ends at a delimiter LINE, not a byte count, and a
+//     truncated or cancelled stream still reaches the restore.
+//     The stage is shell builtins only, deliberately NOT `sed`: on a pty
+//     stream busybox sed stalls before the terminator — measured: the staged
+//     file stops mid-line 46 bytes short of the payload's end (24576 of
+//     24622 bytes), the markers never arrive, and a second terminator line
+//     written later is what finally wakes it. Busybox sed reads stdin
+//     byte-at-a-time through stdio (bb_get_chunk_from_file, 1024-byte
+//     readahead) and reads one line AHEAD of the line it processes, so even
+//     a fully delivered stream can never fire its `q` on the last line of a
+//     never-EOF tty (nocx-pu4.3). A shell `read` loop reads strictly one
+//     line at a time with no lookahead, so the terminator always fires, on
+//     bash, zsh, dash and busybox ash alike.
 //  2. `stty "$saved"` restores the EXACT prior termios before any user code
 //     runs; `stty sane` is never used (it discards the user's custom modes).
 //     The restore runs on every path: success, cancel (frontend sends the
@@ -110,7 +121,7 @@ return 0 2>/dev/null || exit 0
 // inBandWrapperTemplate is the single line typed at the prompt. Built by
 // concatenation so the READY OSC, the terminator and the completion marker
 // are single-sourced constants.
-const inBandWrapperTemplate = `saved=$(stty -g); NOCX_IB_SRC=$(mktemp "${TMPDIR:-/tmp}/nocx-ib.XXXXXX" 2>/dev/null) && stty raw -echo && printf '` + inBandReadyOSC + `' && sed -n '/^` + inBandTerminator + `$/q;p' > "$NOCX_IB_SRC"; stty "$saved"; if grep -qx '` + inBandCompleteMarker + `' "$NOCX_IB_SRC" 2>/dev/null; then . "$NOCX_IB_SRC"; fi; rm -f "$NOCX_IB_SRC" 2>/dev/null`
+const inBandWrapperTemplate = `saved=$(stty -g); NOCX_IB_SRC=$(mktemp "${TMPDIR:-/tmp}/nocx-ib.XXXXXX" 2>/dev/null) && stty raw -echo && printf '` + inBandReadyOSC + `' && while IFS= read -r __nocx_ib_line; do [ "$__nocx_ib_line" = "` + inBandTerminator + `" ] && break; printf '%s\n' "$__nocx_ib_line"; done > "$NOCX_IB_SRC"; unset __nocx_ib_line; stty "$saved"; if grep -qx '` + inBandCompleteMarker + `' "$NOCX_IB_SRC" 2>/dev/null; then . "$NOCX_IB_SRC"; fi; rm -f "$NOCX_IB_SRC" 2>/dev/null`
 
 // InBandBootstrap builds the in-band integration plan for the given session.
 // The session id anchors NOCX_SESSION_ID in the payload — the same id the

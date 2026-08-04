@@ -383,6 +383,54 @@ func TestInBandBootstrap_RealBashFailOpen(t *testing.T) {
 	_, _ = s.ptmx.Write([]byte("exit\r"))
 }
 
+// missingMktempPath builds a PATH whose staging applets (stty, grep, rm, sed)
+// all resolve, but mktemp is genuinely absent — the minimal-applet box this
+// wrapper is built for (nocx-pu4.3). The wrapper must fail open: the staging
+// chain short-circuits before raw mode, no READY fires, and the shell comes
+// straight back to a usable prompt instead of hanging on the delivery window.
+func missingMktempPath(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	for _, bin := range []string{"stty", "grep", "rm", "sed"} {
+		path, err := exec.LookPath(bin)
+		if err != nil {
+			t.Skipf("%s not installed: %v", bin, err)
+		}
+		if err := os.Symlink(path, filepath.Join(dir, bin)); err != nil {
+			t.Fatalf("symlink %s: %v", bin, err)
+		}
+	}
+	if _, err := exec.LookPath("mktemp"); err != nil {
+		t.Skipf("mktemp not installed: cannot construct a PATH without it")
+	}
+	return dir
+}
+
+// TestInBandBootstrap_RealBashFailOpenMissingApplet drives the one-applet
+// failure: mktemp absent while every other staging applet works. The wrapper
+// must fail open to an ordinary terminal — prompt back, termios untouched, no
+// integration markers, shell usable — the "never a 15-second freeze on
+// somebody's terminal" half of nocx-pu4.3.
+func TestInBandBootstrap_RealBashFailOpenMissingApplet(t *testing.T) {
+	s := startSession(t, "bash", "PATH="+missingMktempPath(t))
+	s.waitFor(inBandTestPrompt, 15*time.Second)
+	before := s.termios()
+
+	p := plan(t, "0123456789abcdef0123456789abcdef")
+	if _, err := s.ptmx.Write([]byte(p.Wrapper + "\r")); err != nil {
+		t.Fatalf("write wrapper: %v", err)
+	}
+	s.waitForPromptAgain(15 * time.Second)
+	s.assertNoIntegrationMarkers()
+	after := s.termios()
+	if before != after {
+		t.Errorf("termios changed on the missing-applet path: before %+v after %+v", before, after)
+	}
+	s.assertEchoUnchanged(before, after)
+	s.typeAndWait("echo FAILOPEN_APPLET_OK\r", "FAILOPEN_APPLET_OK", 15*time.Second)
+	_, _ = s.ptmx.Write([]byte("exit\r"))
+}
+
 // TestInBandBootstrap_RealZshIntegratesAndRestores runs the same happy path
 // under zsh: the wrapper is shell-agnostic, and the dispatcher must select
 // the zsh hooks.

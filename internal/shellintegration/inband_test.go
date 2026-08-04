@@ -27,7 +27,9 @@ func TestInBandBootstrap_WrapperShape(t *testing.T) {
 		"stty raw -echo",                // raw mode for the delivery: -echo keeps the 25 KB payload silent (GNU coreutils raw alone leaves ECHO set)
 		`stty "$saved"`,                 // exact restore — the fence
 		"\\033]1337;NOCX_IB_READY",      // READY OSC, emitted after stty raw
-		`sed -n '/^NOCX_IB_EOF$/q;p'`,   // payload staged until the terminator line
+		"while IFS= read -r",            // payload staged by a shell-builtin line loop, NOT sed (nocx-pu4.3: busybox sed stalls on a pty stream)
+		`= "NOCX_IB_EOF" ] && break`,    // the loop stops at the terminator LINE, like the old /^...$/q
+		`printf '%s\n'`,                 // each staged line re-emitted byte-exact (IFS= and -r preserve it)
 		"grep -qx '# nocx-ib-complete'", // nothing sourced without the completion marker
 		`. "$NOCX_IB_SRC"`,              // the source
 		"rm -f \"$NOCX_IB_SRC\"",        // cleanup on every path
@@ -35,6 +37,9 @@ func TestInBandBootstrap_WrapperShape(t *testing.T) {
 		if !strings.Contains(w, want) {
 			t.Errorf("wrapper missing %q; got %q", want, w)
 		}
+	}
+	if strings.Contains(w, "sed -n") {
+		t.Errorf("wrapper must stage with shell builtins, not sed — busybox sed reads one line ahead and blocks past the terminator on a pty (nocx-pu4.3); got %q", w)
 	}
 	for _, banned := range []string{"stty sane"} {
 		if strings.Contains(w, banned) {
@@ -44,22 +49,23 @@ func TestInBandBootstrap_WrapperShape(t *testing.T) {
 	if strings.Contains(w, "$(stty -g)") && !strings.Contains(w, "saved=$(stty -g)") {
 		t.Errorf("wrapper captures stty -g but not into $saved")
 	}
-	// The READY OSC must be emitted between `stty raw` and the sed stage: the
+	// The READY OSC must be emitted between `stty raw` and the stage loop: the
 	// frontend streams the payload only after READY, so READY proves raw mode
 	// is already on (no echo, no line buffering, no readline merge).
 	rawAt := strings.Index(w, "stty raw")
 	readyAt := strings.Index(w, "NOCX_IB_READY")
-	sedAt := strings.Index(w, "sed -n")
-	if rawAt < 0 || readyAt < 0 || sedAt < 0 {
-		t.Fatalf("wrapper lacks raw/ready/sed ordering anchors: %q", w)
+	loopAt := strings.Index(w, "while IFS= read")
+	if rawAt < 0 || readyAt < 0 || loopAt < 0 {
+		t.Fatalf("wrapper lacks raw/ready/loop ordering anchors: %q", w)
 	}
-	if !(rawAt < readyAt && readyAt < sedAt) {
-		t.Errorf("ordering wrong: stty raw must precede READY must precede sed (raw=%d ready=%d sed=%d)", rawAt, readyAt, sedAt)
+	if !(rawAt < readyAt && readyAt < loopAt) {
+		t.Errorf("ordering wrong: stty raw must precede READY must precede the stage loop (raw=%d ready=%d loop=%d)", rawAt, readyAt, loopAt)
 	}
-	// The terminator must be a complete line on its own: the frontend appends
-	// \n so sed's /^...$/ matches even mid-stream.
-	if !strings.Contains(w, "/^NOCX_IB_EOF$/") {
-		t.Errorf("terminator pattern must anchor the whole line: %q", w)
+	// The terminator must be a complete line on its own: the loop compares the
+	// whole read line against it, so the frontend's \n-terminated terminator
+	// stops the stage even mid-stream.
+	if !strings.Contains(w, `"NOCX_IB_EOF" ] && break`) {
+		t.Errorf("terminator must anchor the whole line: %q", w)
 	}
 }
 
