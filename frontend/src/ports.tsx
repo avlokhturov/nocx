@@ -1,29 +1,31 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // PortsPanel — the Detected / Forwarded / Stopped surface (spec §9,
-// nocx-wzc4.2). Discovery's own state — unavailable, limited, last sample,
-// Pause, Retry — lives in this same surface, because a degrade that is only
-// in a log is the failure AGENTS.md names.
+// nocx-wzc4.2), now a SIDEBAR VIEW (nocx-wzc4.7): the owner's reference
+// (Orca's PORTS panel) sits beside the terminal so a port can be watched
+// while the command that opens it is being typed. The panel follows the
+// ACTIVE tab — profileId is a reactive accessor, never a capture — and
+// pauses when the view is not visible (collapsed sidebar counts as hidden).
+//
+// Discovery's own state — unavailable, limited, last sample, Pause, Retry —
+// lives in this same surface, because a degrade that is only in a log is
+// the failure AGENTS.md names.
 //
 // The ledger labels, it never claims causation (spec D6): a row says what the
 // remote listens on and why we know it, never "opened by <command>".
 // ═══════════════════════════════════════════════════════════════════════════
 
-import { createComponent, createEffect, createSignal, onCleanup, Show, For } from 'solid-js'
-import { render } from 'solid-js/web'
+import { createEffect, createSignal, For, on, onCleanup, Show } from 'solid-js'
 import type { Dispatcher } from './dispatcher'
 import type { PortsStatusResult } from './generated/ports.status'
 import type { TunnelOpenResult } from './generated/tunnel.open'
 import type { TunnelStopResult } from './generated/tunnel.stop'
-import { SolidTabContent, type TabHost } from './solid-tab-content'
-import { Page } from './ui/page'
-import { PageBody } from './ui/page-body'
-import { Section } from './ui/section'
-import { Button } from './ui/button'
 import { Badge } from './ui/badge'
+import { Button } from './ui/button'
 import { EmptyState } from './ui/empty-state'
+import { MarkerList } from './ui/marker-list'
+import { Section } from './ui/section'
 import { Stack } from './ui/stack'
 import { showToast } from './ui/toast'
-import { MarkerList } from './ui/marker-list'
 
 // ── Services seam ─────────────────────────────────────────────────────────
 
@@ -53,61 +55,19 @@ export function createPortsPanelServices(dispatcher: Dispatcher): PortsPanelServ
   }
 }
 
-// ── Content ───────────────────────────────────────────────────────────────
-
-/** The ports panel as a tab surface. Opened with the profileId of the
- *  connection it belongs to — the palette entry resolves the active tab's
- *  profile and constructs this. */
-export class PortsContent extends SolidTabContent {
-  private readonly visible: () => boolean
-  private readonly setVisibleSignal: (visible: boolean) => void
-
-  constructor(
-    private readonly profileId: string,
-    private readonly services: PortsPanelServices,
-  ) {
-    super()
-    const [visible, setVisibleSignal] = createSignal(true)
-    this.visible = visible
-    this.setVisibleSignal = setVisibleSignal
-  }
-
-  renderContent(root: HTMLElement): () => void {
-    return render(
-      () =>
-        createComponent(PortsPanel, {
-          profileId: this.profileId,
-          services: this.services,
-          visible: this.visible,
-        }),
-      root,
-    )
-  }
-
-  async mount(target: HTMLElement, host: TabHost, signal: AbortSignal): Promise<void> {
-    if (this._disposed || this._hostElement) return
-    if (signal.aborted) return
-    host.setTitle('Ports')
-    await super.mount(target, host, signal)
-  }
-
-  /** Hidden tab pauses: hiding the panel stops periodic sampling (the
-   *  scheduler's SetVisible), and the status poll below stops with it. */
-  setVisible(visible: boolean): void {
-    super.setVisible(visible)
-    this.setVisibleSignal(visible)
-    void this.services.visible(this.profileId, visible).catch(() => {})
-  }
-}
-
 // ── Panel ─────────────────────────────────────────────────────────────────
 
-const POLL_INTERVAL_MS = 5_000
+export const POLL_INTERVAL_MS = 5_000
 
 export interface PortsPanelProps {
-  profileId: string
+  /** Reactive scope — the ACTIVE tab's saved-profile id, never a capture.
+   *  Null when the active tab has no profile (local shell, alias,
+   *  Settings): the panel then shows the no-connection state instead of a
+   *  stale host's ports. */
+  profileId: () => string | null
   services: PortsPanelServices
-  /** Reactive visibility; false stops the status poll. */
+  /** Reactive visibility; false stops the status poll and tells the
+   *  backend to pause sampling. A collapsed sidebar is not visible. */
   visible: () => boolean
 }
 
@@ -119,6 +79,10 @@ export function PortsPanel(props: PortsPanelProps) {
   const [busy, setBusy] = createSignal(true)
   const [paused, setPaused] = createSignal(false)
   const [forwards, setForwards] = createSignal<Map<string, ForwardRecord>>(new Map())
+
+  /** The panel's current scope — an alias for the reactive prop, read at
+   *  call sites so every fetch and mutation targets the ACTIVE tab. */
+  const profileId = () => props.profileId()
 
   /** Merge a fresh status: discovery state, cadence flags, and the backend's
    *  tracked forwards (which include connection-loss stops) on top of the
@@ -135,21 +99,62 @@ export function PortsPanel(props: PortsPanelProps) {
   }
 
   // Non-reactive by intent: reads signals, writes state, but must never
-  // re-run when a signal it reads changes — it is a plain fetch.
+  // re-run when a signal it reads changes — it is a plain fetch. The pid is
+  // captured per call and a response applies only while the panel is still
+  // scoped to it: a late answer for a previous tab must never paint over the
+  // current one (nocx-wzc4.7).
   const refresh = async (): Promise<void> => {
+    const pid = profileId()
+    if (pid === null) return
     try {
-      applyStatus(await props.services.status(props.profileId))
+      const st = await props.services.status(pid)
+      if (profileId() !== pid) return
+      applyStatus(st)
     } catch (e) {
+      if (profileId() !== pid) return
       setError(e instanceof Error ? e.message : String(e))
     } finally {
-      setBusy(false)
+      if (profileId() === pid) setBusy(false)
     }
   }
 
+  // Re-scope: the panel follows the ACTIVE tab. A profile switch discards
+  // the previous connection's entire state — a local tab must not keep
+  // showing a stale host's ports.
+  createEffect(
+    on(profileId, () => {
+      setStatus(null)
+      setError(null)
+      setBusy(true)
+      setPaused(false)
+      setForwards(new Map())
+    }),
+  )
+
+  // The backend's per-profile visible flag — the scheduler pauses discovery
+  // sampling while nothing is watching. Re-scope retires the previous
+  // profile's flag before arming the current one.
+  createEffect(
+    on([profileId, () => props.visible()], ([pid, vis], prev) => {
+      const prevPid = prev?.[0] ?? null
+      if (prevPid !== null && prevPid !== pid) {
+        void props.services.visible(prevPid, false).catch(() => {})
+      }
+      if (pid !== null) {
+        void props.services.visible(pid, vis).catch(() => {})
+      }
+    }),
+  )
+
   // Initial load (a tracked scope, so solid/reactivity accepts the call)
-  // plus a visibility-gated poll: hidden tabs stop fetching.
+  // plus a visibility-gated poll: hidden views stop fetching.
   let poll: ReturnType<typeof setInterval> | undefined
   createEffect(() => {
+    const pid = profileId()
+    if (pid === null) {
+      setBusy(false)
+      return
+    }
     void refresh()
     if (!props.visible()) return
     poll = setInterval(() => void refresh(), POLL_INTERVAL_MS)
@@ -173,35 +178,72 @@ export function PortsPanel(props: PortsPanelProps) {
   /** One action from the row (spec §9). When the same numeric port is busy
    *  locally, default to an allocated loopback port. */
   const forward = async (destination: string, port: number): Promise<void> => {
+    const pid = profileId()
+    if (pid === null) return
     try {
-      recordForward(await props.services.openForward(props.profileId, destination, port))
+      const rec = await props.services.openForward(pid, destination, port)
+      if (profileId() !== pid) return
+      recordForward(rec)
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       if (!/address already in use|EADDRINUSE/i.test(msg)) {
-        showToast({ level: 'danger', message: msg })
+        if (profileId() === pid) showToast({ level: 'danger', message: msg })
         return
       }
       try {
-        recordForward(await props.services.openForward(props.profileId, destination, 0))
+        const rec = await props.services.openForward(pid, destination, 0)
+        if (profileId() !== pid) return
+        recordForward(rec)
       } catch (e2) {
-        showToast({ level: 'danger', message: e2 instanceof Error ? e2.message : String(e2) })
+        const msg2 = e2 instanceof Error ? e2.message : String(e2)
+        if (profileId() === pid) showToast({ level: 'danger', message: msg2 })
       }
     }
-    await refresh()
+    if (profileId() === pid) await refresh()
   }
 
   const stop = async (id: string): Promise<void> => {
+    const pid = profileId()
+    if (pid === null) return
     try {
       const rec = await props.services.stopForward(id)
+      if (profileId() !== pid) return
       setForwards((prev) => new Map(prev).set(rec.id, rec))
       await refresh()
     } catch (e) {
-      showToast({ level: 'danger', message: e instanceof Error ? e.message : String(e) })
+      if (profileId() === pid) {
+        showToast({ level: 'danger', message: e instanceof Error ? e.message : String(e) })
+      }
     }
   }
 
   const retry = (rec: ForwardRecord): void => {
     void forward(rec.destination, rec.requestedBind.port)
+  }
+
+  /** The Retry button: force a fresh sample for the current profile. */
+  const sampleNow = async (): Promise<void> => {
+    const pid = profileId()
+    if (pid === null) return
+    setBusy(true)
+    try {
+      const st = await props.services.sample(pid)
+      if (profileId() !== pid) return
+      applyStatus(st)
+    } catch (e) {
+      if (profileId() !== pid) return
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      if (profileId() === pid) setBusy(false)
+    }
+  }
+
+  const togglePause = (): void => {
+    const pid = profileId()
+    if (pid === null) return
+    const next = !paused()
+    setPaused(next)
+    void props.services.pause(pid, next).catch(() => {})
   }
 
   const copyAddress = (addr: string): void => {
@@ -241,10 +283,19 @@ export function PortsPanel(props: PortsPanelProps) {
   }
 
   return (
-    <Page
-      title="Ports"
-      titleHidden
-      actions={
+    <Show
+      when={profileId() !== null}
+      fallback={
+        <EmptyState
+          title="No active connection"
+          description="Switch to an SSH tab — the ports it listens on will appear here."
+        />
+      }
+    >
+      <Stack gap="loose">
+        {/* Controls row — the panel's own header line inside the sidebar
+            body (the SidebarView header hosts the view's actions slot;
+            these need the panel's live state, so they live with it). */}
         <Stack gap="default">
           <Show when={lastSample()}>
             <Badge tone="neutral">{`last sample ${lastSample()}`}</Badge>
@@ -254,240 +305,195 @@ export function PortsPanel(props: PortsPanelProps) {
           </Show>
           <Button
             data-testid="ports-retry"
-            onClick={() => {
-              setBusy(true)
-              void props.services
-                .sample(props.profileId)
-                .then(applyStatus)
-                .catch((e) => setError(e instanceof Error ? e.message : String(e)))
-                .finally(() => setBusy(false))
-            }}
+            onClick={() => void sampleNow()}
             disabled={busy() || st()?.connLost}
           >
             Retry
           </Button>
-          <Button
-            data-testid="ports-pause"
-            onClick={() => {
-              const next = !paused()
-              setPaused(next)
-              void props.services.pause(props.profileId, next).catch(() => {})
-            }}
-          >
+          <Button data-testid="ports-pause" onClick={togglePause}>
             {paused() ? 'Resume' : 'Pause'}
           </Button>
         </Stack>
-      }
-    >
-      <PageBody>
-        <Stack gap="loose">
-          <Show when={error()}>
-            <Badge tone="danger">{error() ?? ''}</Badge>
-          </Show>
+        <Show when={error()}>
+          <Badge tone="danger">{error() ?? ''}</Badge>
+        </Show>
 
-          {/* ── Discovery state ─────────────────────────────────────── */}
-          <Show
-            when={!busy() && st() !== undefined}
-            fallback={
+        {/* ── Discovery state ─────────────────────────────────────── */}
+        <Show
+          when={!busy() && st() !== undefined}
+          fallback={
+            <EmptyState
+              title="Contacting the backend…"
+              description="Reading discovery state for this connection."
+            />
+          }
+        >
+          <Show when={!host() && st()?.state === 'pending'}>
+            <EmptyState
+              title="No active connection"
+              description="Open an SSH session to this profile first — the ports it listens on will appear here."
+            />
+          </Show>
+          <Show when={host() || (st()?.state ?? '') !== 'pending'}>
+            <Show when={st()?.connLost}>
               <EmptyState
-                title="Contacting the backend…"
-                description="Reading discovery state for this connection."
-              />
-            }
-          >
-            <Show when={!host() && st()?.state === 'pending'}>
-              <EmptyState
-                title="No active connection"
-                description="Open an SSH session to this profile first — the ports it listens on will appear here."
+                title="Connection lost"
+                description="Discovery stopped with the connection. It resumes automatically after you reconnect."
+                action={<Button onClick={() => void sampleNow()}>Retry</Button>}
               />
             </Show>
-            <Show when={host() || (st()?.state ?? '') !== 'pending'}>
-              <Show when={st()?.connLost}>
-                <EmptyState
-                  title="Connection lost"
-                  description="Discovery stopped with the connection. It resumes automatically after you reconnect."
-                  action={
-                    <Button
-                      onClick={() =>
-                        void props.services
-                          .sample(props.profileId)
-                          .then(applyStatus)
-                          .catch(() => {})
-                      }
-                    >
-                      Retry
-                    </Button>
-                  }
-                />
-              </Show>
-              <Show when={!st()?.connLost}>
-                <Section title={`Detected${host() ? ` — ${host()}` : ''}`} divided>
-                  <Show when={st()?.state === 'unavailable'}>
-                    <EmptyState
-                      title="Could not determine what is listening"
-                      description={st()?.classification || 'No probe tool is usable on this host.'}
-                    />
-                  </Show>
-                  <Show when={st()?.state === 'failed-transiently'}>
-                    <EmptyState
-                      title="Discovery failed transiently"
-                      description={`${st()?.classification ?? 'The probe failed.'} Retrying automatically with backoff.`}
-                    />
-                  </Show>
-                  <Show when={st()?.state === 'permission-or-policy-refused'}>
-                    <EmptyState
-                      title="Discovery refused on this host"
-                      description={
-                        st()?.classification ?? 'The server refused the additional session.'
-                      }
-                      action={
-                        <Button
-                          onClick={() =>
-                            void props.services
-                              .sample(props.profileId)
-                              .then(applyStatus)
-                              .catch(() => {})
-                          }
-                        >
-                          Retry
-                        </Button>
-                      }
-                    />
-                  </Show>
-                  <Show when={st()?.state === 'pending' && host()}>
-                    <EmptyState
-                      title="Waiting for the first sample"
-                      description="The settle sample runs shortly after the connection comes up."
-                    />
-                  </Show>
-                  <Show when={st()?.state === 'available' || st()?.state === 'available-limited'}>
-                    <Show
-                      when={listeners().length > 0}
-                      fallback={
-                        <EmptyState
-                          title="Nothing is listening"
-                          description={`No listeners observed on ${host()}.`}
-                        />
-                      }
-                    >
-                      <For each={listeners()}>
-                        {(l) => (
-                          <div class="ports-row" data-testid="detected-row">
-                            <div class="ports-row__main">
-                              <span class="ports-row__addr">
-                                {l.address}:{l.port}
-                              </span>
-                              <Badge
-                                tone={
-                                  l.process.evidence === 'known'
-                                    ? 'neutral'
-                                    : l.process.evidence === 'permission-denied'
-                                      ? 'warning'
-                                      : 'info'
-                                }
-                              >
-                                {processLabel(l.process)}
-                              </Badge>
-                              <Button
-                                data-testid="ports-forward"
-                                onClick={() => void forward(destinationFor(l), l.port)}
-                              >
-                                Forward
-                              </Button>
-                            </div>
-                          </div>
-                        )}
-                      </For>
-                    </Show>
-                  </Show>
-                </Section>
-
-                {/* ── Forwarded ─────────────────────────────────────── */}
-                <Section title="Forwarded" divided>
+            <Show when={!st()?.connLost}>
+              <Section title={`Detected${host() ? ` — ${host()}` : ''}`} divided>
+                <Show when={st()?.state === 'unavailable'}>
+                  <EmptyState
+                    title="Could not determine what is listening"
+                    description={st()?.classification || 'No probe tool is usable on this host.'}
+                  />
+                </Show>
+                <Show when={st()?.state === 'failed-transiently'}>
+                  <EmptyState
+                    title="Discovery failed transiently"
+                    description={`${st()?.classification ?? 'The probe failed.'} Retrying automatically with backoff.`}
+                  />
+                </Show>
+                <Show when={st()?.state === 'permission-or-policy-refused'}>
+                  <EmptyState
+                    title="Discovery refused on this host"
+                    description={
+                      st()?.classification ?? 'The server refused the additional session.'
+                    }
+                    action={<Button onClick={() => void sampleNow()}>Retry</Button>}
+                  />
+                </Show>
+                <Show when={st()?.state === 'pending' && host()}>
+                  <EmptyState
+                    title="Waiting for the first sample"
+                    description="The settle sample runs shortly after the connection comes up."
+                  />
+                </Show>
+                <Show when={st()?.state === 'available' || st()?.state === 'available-limited'}>
                   <Show
-                    when={runningForwards().length > 0}
+                    when={listeners().length > 0}
                     fallback={
                       <EmptyState
-                        title="No active forwards"
-                        description="Forward a detected port to make it reachable locally."
+                        title="Nothing is listening"
+                        description={`No listeners observed on ${host()}.`}
                       />
                     }
                   >
-                    <For each={runningForwards()}>
-                      {(f) => (
-                        <div class="ports-row" data-testid="forwarded-row">
+                    <For each={listeners()}>
+                      {(l) => (
+                        <div class="ports-row" data-testid="detected-row">
                           <div class="ports-row__main">
                             <span class="ports-row__addr">
-                              {f.actualBind.host}:{f.actualBind.port}
-                              <span class="ports-row__arrow"> → </span>
-                              {f.destination}
+                              {l.address}:{l.port}
                             </span>
-                            <Button
-                              data-testid="ports-copy"
-                              onClick={() =>
-                                copyAddress(`${f.actualBind.host}:${f.actualBind.port}`)
+                            <Badge
+                              tone={
+                                l.process.evidence === 'known'
+                                  ? 'neutral'
+                                  : l.process.evidence === 'permission-denied'
+                                    ? 'warning'
+                                    : 'info'
                               }
                             >
-                              Copy
-                            </Button>
+                              {processLabel(l.process)}
+                            </Badge>
                             <Button
-                              data-testid="ports-open"
-                              onClick={() =>
-                                openAddress(`${f.actualBind.host}:${f.actualBind.port}`)
-                              }
+                              data-testid="ports-forward"
+                              onClick={() => void forward(destinationFor(l), l.port)}
                             >
-                              Open
-                            </Button>
-                            <Button data-testid="ports-stop" onClick={() => void stop(f.id)}>
-                              Stop
+                              Forward
                             </Button>
                           </div>
-                          {/* A -R forward whose bind sshd silently replaced carries
-                              Caveat() — render it as the kit's note (a caveat about
-                              the item above it), never as an error: the forward is
-                              running. Empty caveat renders nothing. */}
-                          <Show when={f.caveat}>
-                            <MarkerList items={[{ text: f.caveat, tone: 'note' }]} />
-                          </Show>
                         </div>
                       )}
                     </For>
                   </Show>
-                </Section>
-
-                {/* ── Stopped (only when non-empty) ─────────────────── */}
-                <Show when={stoppedForwards().length > 0}>
-                  <Section title="Stopped" divided>
-                    <For each={stoppedForwards()}>
-                      {(f) => (
-                        <div class="ports-row" data-testid="stopped-row">
-                          <div class="ports-row__main">
-                            <span class="ports-row__addr">
-                              {f.destination}
-                              <span class="ports-row__arrow"> — </span>
-                              {f.stopReason ?? 'stopped'}
-                            </span>
-                            <Show when={f.error}>
-                              <Badge tone="danger">{f.error ?? ''}</Badge>
-                            </Show>
-                            <Show
-                              when={f.stopReason === 'error' || f.stopReason === 'connection lost'}
-                            >
-                              <Button data-testid="ports-retry-forward" onClick={() => retry(f)}>
-                                Retry
-                              </Button>
-                            </Show>
-                          </div>
-                        </div>
-                      )}
-                    </For>
-                  </Section>
                 </Show>
+              </Section>
+
+              {/* ── Forwarded ─────────────────────────────────────── */}
+              <Section title="Forwarded" divided>
+                <Show
+                  when={runningForwards().length > 0}
+                  fallback={
+                    <EmptyState
+                      title="No active forwards"
+                      description="Forward a detected port to make it reachable locally."
+                    />
+                  }
+                >
+                  <For each={runningForwards()}>
+                    {(f) => (
+                      <div class="ports-row" data-testid="forwarded-row">
+                        <div class="ports-row__main">
+                          <span class="ports-row__addr">
+                            {f.actualBind.host}:{f.actualBind.port}
+                            <span class="ports-row__arrow"> → </span>
+                            {f.destination}
+                          </span>
+                          <Button
+                            data-testid="ports-copy"
+                            onClick={() => copyAddress(`${f.actualBind.host}:${f.actualBind.port}`)}
+                          >
+                            Copy
+                          </Button>
+                          <Button
+                            data-testid="ports-open"
+                            onClick={() => openAddress(`${f.actualBind.host}:${f.actualBind.port}`)}
+                          >
+                            Open
+                          </Button>
+                          <Button data-testid="ports-stop" onClick={() => void stop(f.id)}>
+                            Stop
+                          </Button>
+                        </div>
+                        {/* A -R forward whose bind sshd silently replaced carries
+                              Caveat() — render it as the kit's note (a caveat about
+                              the item above it), never as an error: the forward is
+                              running. Empty caveat renders nothing. */}
+                        <Show when={f.caveat}>
+                          <MarkerList items={[{ text: f.caveat, tone: 'note' }]} />
+                        </Show>
+                      </div>
+                    )}
+                  </For>
+                </Show>
+              </Section>
+
+              {/* ── Stopped (only when non-empty) ─────────────────── */}
+              <Show when={stoppedForwards().length > 0}>
+                <Section title="Stopped" divided>
+                  <For each={stoppedForwards()}>
+                    {(f) => (
+                      <div class="ports-row" data-testid="stopped-row">
+                        <div class="ports-row__main">
+                          <span class="ports-row__addr">
+                            {f.destination}
+                            <span class="ports-row__arrow"> — </span>
+                            {f.stopReason ?? 'stopped'}
+                          </span>
+                          <Show when={f.error}>
+                            <Badge tone="danger">{f.error ?? ''}</Badge>
+                          </Show>
+                          <Show
+                            when={f.stopReason === 'error' || f.stopReason === 'connection lost'}
+                          >
+                            <Button data-testid="ports-retry-forward" onClick={() => retry(f)}>
+                              Retry
+                            </Button>
+                          </Show>
+                        </div>
+                      </div>
+                    )}
+                  </For>
+                </Section>
               </Show>
             </Show>
           </Show>
-        </Stack>
-      </PageBody>
-    </Page>
+        </Show>
+      </Stack>
+    </Show>
   )
 }
