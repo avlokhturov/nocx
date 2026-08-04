@@ -286,6 +286,14 @@ export class TerminalContent extends BaseTabContent {
     return this._readyPromise
   }
 
+  /** The saved-profile id this tab's session belongs to, when this is a
+   *  saved-profile SSH tab. Null for local tabs and for alias tabs — an
+   *  alias has no profile until it is adopted. The ports panel scopes to
+   *  this id, so an alias tab has no valid ports scope. */
+  get profileId(): string | null {
+    return this.sshOpts?.profileId || null
+  }
+
   /** Push the composed title to the host: program title, else the cwd label. */
   private pushTitle(): void {
     if (!this.host) return

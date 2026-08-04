@@ -679,6 +679,14 @@ export class TabManager {
     return content instanceof TerminalContent ? content : null
   }
 
+  /** The active tab's saved SSH profile id — the scope the ports panel
+   *  needs. Null when the active tab is not a saved-profile SSH terminal
+   *  (local shell, alias tab, Settings, …): the ports entry points are
+   *  no-ops then, because there is no profile to scope the panel to. */
+  activeProfileId(): string | null {
+    return this.activeTerminalContent()?.profileId ?? null
+  }
+
   reorderTab(draggedId: number, targetId: number): void {
     const draggedIndex = this.tabs.findIndex((t) => t.id === draggedId)
     const targetIndex = this.tabs.findIndex((t) => t.id === targetId)
