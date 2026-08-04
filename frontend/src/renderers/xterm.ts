@@ -553,6 +553,13 @@ export class XtermRenderer implements TerminalRenderer {
     return this.term?.buffer.active.getLine(line)
   }
 
+  /** Absolute buffer line of the cursor — the line the next write lands on. */
+  cursorLine(): number {
+    if (!this.term) return 0
+    const buf = this.term.buffer.active
+    return buf.baseY + buf.cursorY
+  }
+
   clearViewport(): void {
     this.term?.clear()
   }

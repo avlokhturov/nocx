@@ -82,6 +82,18 @@ editor.
 > screen" fact, and it stays a refusal. The `-echo` window in the wrapper is
 > the same single-foreground-command exception this file already records
 > below; the machine's fail-open invariant is untouched.
+>
+> **Extended 2026-08-04 (nocx-atyf.3):** when the user hand-types an
+> interactive `ssh host` into the command editor, the explicit Enter gesture
+> THAT SUBMITTED THE COMMAND is the authorisation for in-band delivery — the
+> user initiated both the transition and the integration in the same act.
+> Consent is asked once per destination (the resolved host), remembered for
+> the session, and honoured silently thereafter. This is the same principle
+> as the capability control's click: an explicit user gesture in the editor,
+> not silent injection. A global "automatically integrate shells reached from
+> the command editor" setting would extend this to a standing authorisation
+> rather than a per-destination one, and it is legitimate as an informed
+> opt-in — never as the default.
 
 ### 2. Prompt/echo handling via atomic handoff
 

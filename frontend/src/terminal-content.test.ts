@@ -962,7 +962,7 @@ describe('in-band integration (nocx-ynsx)', () => {
   })
 })
 
-describe('the capability rail (nocx-4t37.2)', () => {
+describe('the recovery action chip in editor chrome (nocx-atyf.2)', () => {
   /** A client whose SSH open session carries the given launch policy. */
   const clientWithPolicy = (
     shellIntegration: 'auto' | 'ask' | 'off',
@@ -974,69 +974,48 @@ describe('the capability rail (nocx-4t37.2)', () => {
       ),
     })
 
-  /** The rail is SSH-only: mount an SSH tab. */
   const SSH = { profileId: 'ssh:test:1', host: 'test-host' }
 
-  const railOf = (tab: Tab): HTMLElement | null =>
-    tab.pane.querySelector<HTMLElement>('.nocx-capability-rail')
+  const recoveryLabel = (content: TerminalContent): string | null => {
+    const withEditor = content as unknown as { editor: { root: HTMLElement } }
+    const el = withEditor.editor.root.querySelector<HTMLElement>('.nocx-editor-recovery')
+    if (!el || el.style.display === 'none') return null
+    return el.textContent
+  }
 
-  const chipLabel = (rail: HTMLElement): string =>
-    rail.querySelector('.ui-capability-chip__label')?.textContent ?? ''
-
-  it('renders the rail above the pending command with the observed statement', async () => {
-    const { content, tab, teardown } = await mountTerminal(
-      makeClipboard(),
-      { ssh: SSH },
-      clientWithPolicy('ask'),
-    )
-    try {
-      content.setVisible(true)
-      const rail = railOf(tab)
-      expect(rail, 'capability rail not mounted').not.toBeNull()
-      // A plain ask session has no markers yet: the statement is native input.
-      expect(chipLabel(rail!)).toBe('Native input')
-      // The rail sits ABOVE the editor root (above the pending command).
-      const editorRoot = tab.pane.querySelector<HTMLElement>('.nocx-editor')
-      expect(editorRoot).not.toBeNull()
-      expect(
-        rail!.compareDocumentPosition(editorRoot!) & Node.DOCUMENT_POSITION_FOLLOWING,
-      ).not.toBe(0)
-    } finally {
-      teardown()
-    }
-  })
-
-  it('the first marker promotes the statement to command blocks', async () => {
-    const { content, tab, teardown } = await mountTerminal(
+  it('the healthy state shows nothing in the editor chrome', async () => {
+    const { content, teardown } = await mountTerminal(
       makeClipboard(),
       { ssh: SSH },
       clientWithPolicy('auto'),
     )
     try {
       content.setVisible(true)
-      const rail = railOf(tab)!
-      rendererOf(content)._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
-      rendererOf(content)._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
-      expect(chipLabel(rail)).toBe('Command blocks')
+      // No markers yet: unsupported shell, no recovery needed.
+      expect(recoveryLabel(content)).toBeNull()
+
+      // Fire markers to reach integrated + editor = healthy.
+      const renderer = rendererOf(content)
+      renderer._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
+      renderer._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
+
+      // Healthy state: no recovery action shown.
+      expect(recoveryLabel(content)).toBeNull()
     } finally {
       teardown()
     }
   })
 
-  it('a launcher decline surfaces as a degrade and disables the offer', async () => {
-    const { content, tab, teardown } = await mountTerminal(
+  it('a launcher decline on an auto profile shows the recovery action', async () => {
+    const { content, teardown } = await mountTerminal(
       makeClipboard(),
       { ssh: SSH },
       clientWithPolicy('auto', 'unsupported-shell'),
     )
     try {
       content.setVisible(true)
-      const rail = railOf(tab)!
-      // The reason reached the product (the mocked toast), and the chip
-      // reads degraded rather than inviting an integrate that would fail.
+      // The degrade warning fires; policy is auto.
       expect(content.policy).toBe('auto')
-      expect(rail.dataset).toBeDefined()
-      expect(rail.querySelector('.ui-capability-chip[data-variant="degraded"]')).not.toBeNull()
     } finally {
       teardown()
     }
@@ -1058,20 +1037,16 @@ describe('the capability rail (nocx-4t37.2)', () => {
     }
   })
 
-  it('the popover offers Integrate this shell on a plain shell, and it runs the gated path', async () => {
-    const { content, tab, teardown } = await mountTerminal(
+  it('the nocx-capability-rail element is gone', async () => {
+    const { tab, content, teardown } = await mountTerminal(
       makeClipboard(),
       { ssh: SSH },
       clientWithPolicy('ask'),
     )
     try {
       content.setVisible(true)
-      const rail = railOf(tab)!
-      const chip = rail.querySelector<HTMLButtonElement>('.ui-capability-chip')!
-      chip.click()
-      const panel = rail.querySelector<HTMLElement>('.ui-floating-panel')
-      expect(panel, 'capability popover did not open').not.toBeNull()
-      expect(panel!.textContent).toContain('Integrate this shell')
+      const rail = tab.pane.querySelector('.nocx-capability-rail')
+      expect(rail).toBeNull()
     } finally {
       teardown()
     }
@@ -1090,7 +1065,7 @@ describe('the environment stack (nocx-695k.1)', () => {
     return withField._previousIntegrated
   }
 
-  const capabilityOf = (content: TerminalContent): string => content.capability
+  const shellStateOf = (content: TerminalContent): string => content.shellState
 
   // What the owner asked for three times (2026-08-04): typing `ssh host` in
   // a local tab left every surface naming the local machine — the tab title
@@ -1188,8 +1163,8 @@ describe('the environment stack (nocx-695k.1)', () => {
       expect(previousIntegrated(content)).toHaveLength(1)
       expect(previousIntegrated(content)[0]).toBe(true)
 
-      // The capability follows: native-input, not enhanced-input.
-      expect(capabilityOf(content)).toBe('native-input')
+      // The shell state follows: unsupported (markers cleared).
+      expect(shellStateOf(content)).toBe('unsupported')
 
       // The command runs; the D marker finishes it.
       renderer._fireCommandMarker({ kind: 'C', line: 0, col: 0, buffer: 'normal' })
@@ -1517,5 +1492,74 @@ describe('the command editor chrome pins the clock to the right edge without dis
 
     expect(chrome).not.toMatch(/justify-content\s*:\s*(space-between|space-around|space-evenly)/)
     expect(time).toMatch(/margin-left\s*:\s*auto/)
+  })
+})
+
+describe('terminal/editor input switching (nocx-atyf.5)', () => {
+  it('switching to terminal input hides the editor and is reversible', async () => {
+    const { content, teardown } = await mountTerminal(makeClipboard(), {
+      attachToDocument: true,
+    })
+    const renderer = rendererOf(content)
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoScrollIntoView = Element.prototype.scrollIntoView
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    try {
+      content.setVisible(true)
+
+      // Start with editor (integrated + trusted).
+      renderer._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
+      renderer._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
+      expect(content.presentation).toBe('editor')
+
+      // Switch to terminal input.
+      content.switchToTerminalInput()
+      expect(content.presentation).toBe('terminal')
+
+      // Switch back to editor.
+      content.switchToEditorInput()
+      expect(content.presentation).toBe('editor')
+    } finally {
+      Element.prototype.scrollTo = protoScrollTo
+      Element.prototype.scrollIntoView = protoScrollIntoView
+      teardown()
+    }
+  })
+
+  it('the choice is session-scoped — a new session is unaffected', async () => {
+    const { content: first, teardown: teardown1 } = await mountTerminal(makeClipboard(), {
+      attachToDocument: true,
+    })
+    try {
+      first.setVisible(true)
+      const renderer1 = rendererOf(first)
+      renderer1._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
+      renderer1._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
+
+      // Switch the first session to terminal input.
+      first.switchToTerminalInput()
+      expect(first.presentation).toBe('terminal')
+    } finally {
+      teardown1()
+    }
+
+    // A brand-new session starts with the default (editor, if integrated).
+    const { content: second, teardown: teardown2 } = await mountTerminal(makeClipboard(), {
+      attachToDocument: true,
+    })
+    try {
+      second.setVisible(true)
+      const renderer2 = rendererOf(second)
+      renderer2._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
+      renderer2._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
+
+      // The new session is unaffected — it starts in editor mode.
+      expect(second.presentation).toBe('editor')
+    } finally {
+      teardown2()
+    }
   })
 })

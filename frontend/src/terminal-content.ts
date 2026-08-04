@@ -34,6 +34,7 @@ import { renderRecordedCommand } from './scrollback/blocks'
 import { KIND_LABELS } from './secret-kind'
 import { shouldShowEditor, NATIVE_RESTORE } from './native-mode'
 import { environmentEntry, type EnvironmentEntry } from './environment-commands'
+import { isInteractiveTransition, extractDestination } from './ssh-transition'
 import { shouldCopy, type ClipboardAccess, type ClipboardGate } from './clipboard'
 import type { ClipboardBanner } from './banner'
 import { ScrollbackController } from './scrollback/controller'
@@ -52,13 +53,12 @@ import { ShellClient } from './shell-client'
 import type { ShellIntegrateResult } from './generated/shell.integrate'
 import { LOCAL_TARGET_ID } from './ports-client'
 import {
-  CAPABILITY_LABELS,
-  deriveCapability,
-  type Capability,
-  type CapabilityAction,
+  deriveActions,
+  deriveShellState,
+  type ShellState,
+  type InputPresentation,
   type ShellIntegrationPolicy,
 } from './capability'
-import { createCapabilityChip } from './ui/capability-chip'
 import type { Open } from './generated/open'
 
 // How long the grid must hold still before the PTY is told about it.
@@ -237,21 +237,20 @@ export class TerminalContent extends BaseTabContent {
    *  was never attempted. A non-empty reason on an auto profile is the
    *  soft degrade AGENTS.md demands be visible in the product. */
   private _openReason: Open['shellIntegrationReason'] = ''
-  /** The observed capability statement (never the axis): what is true
-   *  right now at the pending command. */
-  private _capability: Capability = 'native-input'
+  /** The observed shell state (one of three independent axes). */
+  private _shellState: ShellState = 'unsupported'
+  /** The current input presentation. */
+  private _presentation: InputPresentation = 'terminal'
+  /** Whether an integration attempt failed. */
+  private _integrationFailed = false
+  /** Per-destination consent for in-band integration (nocx-atyf.3).
+   *  Session-scoped: a hand-typed ssh to a host the user consented to
+   *  integrates silently for the rest of this tab. */
+  private _consent = new Map<string, boolean>()
   /** The environment degraded or became uncertain — integration declined at
    *  open, or markers stopped on an integrated session the user did not
    *  latch native. Tab chrome renders at most this mark. */
   private _degraded = false
-  /** The pane-level rail above the pending command: the capability chip,
-   *  its action popover, and nothing else. */
-  private _rail: HTMLElement | null = null
-  private _railChip: HTMLElement | null = null
-  private _railPopover: FloatingPanel | null = null
-  private _railOpen = false
-  private _railOutsideHandler: ((e: MouseEvent) => void) | null = null
-  private _railEscapeHandler: ((e: KeyboardEvent) => void) | null = null
   /** Whether OSC 133 markers have arrived for the shell currently on stdin.
    *  Environment-scoped: entering a nested environment (ssh, docker exec, …)
    *  clears it; the D that ends that command restores what was true before.
@@ -272,7 +271,7 @@ export class TerminalContent extends BaseTabContent {
    *  title set by a program does not outlive that program. */
   private _previousTitles: Array<{ cwd: string; programTitle: string; cwdTitle: string }> = []
   /** Stack of _shellIntegrated values saved before entering a nested
-   *  environment. Pushed on submit when isEnvironmentEntry() is true;
+   *  environment. Pushed on submit when environmentEntry() names one;
    *  popped on the D marker that ends the command. */
   private _previousIntegrated: boolean[] = []
 
@@ -615,6 +614,23 @@ export class TerminalContent extends BaseTabContent {
               this.syncLocation()
               this.hooks.onPortsTargetChange?.()
             }
+            // Interactive SSH transition consent (nocx-atyf.3): if the
+            // user hand-typed a simple `ssh host` and we have not asked
+            // for this destination yet, offer integration once. If already
+            // consented, integrate silently — nothing on screen.
+            if (
+              isInteractiveTransition(recordLine) &&
+              !this._shellIntegrated &&
+              this._policy !== 'off' &&
+              !this._integrating
+            ) {
+              const dest = extractDestination(recordLine)
+              if (this._consent.get(dest) === true) {
+                void this.integrateShell()
+              } else if (!this._consent.has(dest)) {
+                void this._askConsent(dest)
+              }
+            }
             // Proactive save for a hand-typed `ssh <target>` is nocx-pu4.4,
             // NOT part of this task — the ad-hoc SSH tab's adopt affordance
             // already covers the quick-connect path.
@@ -641,6 +657,13 @@ export class TerminalContent extends BaseTabContent {
               focusGrid: () => renderer.focus(),
               sendDoc: (d) => void this.shellTarget!.submit(d),
             })
+            // App-owned start (nocx-atyf.4): mark the block as running
+            // immediately, before any OSC marker arrives. The start line
+            // is the cursor position at submit time; when C arrives (if
+            // it does), cReceived is set on the running block.
+            if (this.scrollback && this.renderer) {
+              this.scrollback.beginBlock(recordLine, this._cwd, this.renderer.cursorLine())
+            }
           },
           cancel: () => this.session?.send('\x03'),
           // A taller editor is a shorter scrollback. Keep the bottom of the
@@ -812,7 +835,15 @@ export class TerminalContent extends BaseTabContent {
         }
         this.ledger?.onMarker(marker.kind, marker.exitCode)
         if (marker.kind === 'C') {
-          this.scrollback?.onCommandStart(this._pendingCommand, this._cwd, marker.line)
+          // If a block was already started from the app-owned submit
+          // (nocx-atyf.4), mark C as received and update the start line.
+          if (this.scrollback?.blockManager.runningBlock) {
+            const rb = this.scrollback.blockManager.runningBlock
+            rb.cReceived = true
+            rb.startLine = marker.line
+          } else {
+            this.scrollback?.onCommandStart(this._pendingCommand, this._cwd, marker.line)
+          }
         } else if (marker.kind === 'D') {
           // Leaving the environment the command entered (nocx-695k.1):
           // restore the marker fact from before that command ran.
@@ -1274,10 +1305,6 @@ export class TerminalContent extends BaseTabContent {
         }
       })
 
-      // The rail mounts above the pending command, BEFORE the editor mounts
-      // below it, so a plain shell keeps the capability statement in view.
-      this._mountRail(target)
-
       this._mounted = true
       this._readyResolve(true)
       log.info('nocx: terminal content ready', {
@@ -1461,163 +1488,112 @@ export class TerminalContent extends BaseTabContent {
   // docker exec, sudo, a TUI), and it matters exactly where Enter is about
   // to be pressed.
 
-  /** The capability statement as of now, derived from observed state only
-   *  (the input machine + the sticky integrated flag + the user's own
-   *  native latch) — never from the byte stream (AD-6). */
+  /** Derive the three axes, resolve authorisation + eligibility, and
+   *  update the editor's recovery chip (nocx-atyf.2). */
   private _updateCapability(): void {
-    const next = deriveCapability({
+    const shellState = deriveShellState({
       integrated: this._shellIntegrated,
-      state: this.inputState.state,
+      integrating: this._integrating,
+      integrationFailed: this._integrationFailed,
       trusted: this.inputState.trusted,
-      owned: this.inputState.owned,
-      native: this.nativeMode,
     })
+    const presentation: InputPresentation =
+      this.nativeMode || !this.inputState.owned ? 'terminal' : 'editor'
     // A session whose markers stopped without the user latching native is
     // a degrade (nested ssh, docker exec, a broken hook): the tab's small
     // warning mark is the ONLY tab-chrome signal for it.
     const degraded =
       this._openReason !== '' ||
-      (this._shellIntegrated && !this.nativeMode && next === 'native-input')
-    if (next === this._capability && degraded === this._degraded) return
-    this._capability = next
+      (this._shellIntegrated && !this.nativeMode && shellState === 'lost')
+    if (
+      shellState === this._shellState &&
+      presentation === this._presentation &&
+      degraded === this._degraded
+    )
+      return
+    this._shellState = shellState
+    this._presentation = presentation
     this._degraded = degraded
     this.hooks.onWarningChange?.(degraded)
-    this._renderRail()
+    this._renderRecovery()
   }
 
-  /** (Re)draw the rail chip for the current capability. The chip is the
-   *  statement; it opens the popover unless there is nothing to offer. */
-  private _renderRail(): void {
-    if (!this._rail) return
-    const actions = this._railActions()
-    const label = CAPABILITY_LABELS[this._capability]
-    const fresh = createCapabilityChip({
-      label,
-      variant: this._capabilityVariant(),
-      disabled: actions.length === 0,
-      title: this._railTitle(actions.length === 0),
-      onClick: () => this._toggleRailPopover(),
+  /** Update the editor's recovery chip: the single action when one exists,
+   *  hidden when none apply. The chip IS the action — one click, no
+   *  popover (nocx-atyf.2). */
+  private _renderRecovery(): void {
+    if (!this.editor) return
+    const eligible = this.inputState.state !== 'ALT_SCREEN'
+    const authorized = this._policy !== 'off'
+    const actions = deriveActions({
+      shellState: this._shellState,
+      presentation: this._presentation,
+      delivery: this._shellIntegrated ? 'in-band' : 'launcher',
+      authorized,
+      eligible,
     })
-    if (this._railChip) {
-      this._railChip.replaceWith(fresh)
-    } else {
-      this._rail.appendChild(fresh)
-    }
-    this._railChip = fresh
-  }
-
-  private _capabilityVariant(): 'native' | 'blocks' | 'enhanced' | 'degraded' {
-    if (this._degraded) return 'degraded'
-    switch (this._capability) {
-      case 'command-blocks':
-        return 'blocks'
-      case 'enhanced-input':
-        return 'enhanced'
-      case 'native-input':
-        return 'native'
-    }
-  }
-
-  /** What the popover may offer right now. Never a picker of modes: the
-   *  actions are the two real transitions, offered exactly when valid. */
-  private _railActions(): CapabilityAction[] {
-    if (this._capability === 'native-input') {
-      if (this._policy === 'off') return []
-      return [{ kind: 'integrate', label: 'Integrate this shell' }]
-    }
-    return [{ kind: 'native', label: 'Use native input' }]
-  }
-
-  private _railTitle(noActions: boolean): string {
-    const base = `Enter goes to the ${this._capability === 'command-blocks' ? 'command editor' : 'shell'}: ${CAPABILITY_LABELS[this._capability]}`
-    if (!noActions) return `${base}. Click to change.`
-    if (this._policy === 'off') return `${base}. This connection is set to never integrate (off).`
-    return base
-  }
-
-  /** Build the rail element and mount it above the editor. Called once
-   *  from mount() before the editor mounts, so the rail sits between the
-   *  scrollback and the pending command. */
-  private _mountRail(target: HTMLElement): void {
-    if (this._rail || !this.sshOpts) return
-    const rail = document.createElement('div')
-    rail.className = 'nocx-capability-rail'
-    rail.setAttribute('role', 'group')
-    rail.setAttribute('aria-label', 'Shell capability')
-    this._rail = rail
-    this._railPopover = new FloatingPanel({
-      variant: 'capability',
-      role: 'menu',
-      ariaLabel: 'Shell capability actions',
-      callbacks: {
-        onPick: (index) => this._runRailAction(index),
-      },
-    })
-    this._railPopover.mount(rail)
-    target.insertBefore(rail, this.editor?.root ?? null)
-    this._renderRail()
-  }
-
-  private _toggleRailPopover(): void {
-    if (this._railOpen) {
-      this._closeRailPopover()
+    if (actions.length === 0) {
+      this.editor.setRecoveryAction(null, () => {})
       return
     }
-    const actions = this._railActions()
-    if (actions.length === 0) return
-    this._railOpen = true
-    this._railPopover?.show({
-      rows: actions.map((a) => ({
-        id: a.kind,
-        displayText: a.label,
-        matchRanges: [],
-      })),
-      selectedIndex: 0,
+    const action = actions[0]
+    this.editor.setRecoveryAction(action.label, () => {
+      if (action.kind === 'integrate' || action.kind === 'retry-integration') this.integrateShell()
+      else if (action.kind === 'enable-editor' || action.kind === 'restore-editor')
+        this._restoreEditor()
     })
-    this._railOutsideHandler = (e: MouseEvent) => {
-      if (this._rail && !this._rail.contains(e.target as Node)) this._closeRailPopover()
-    }
-    document.addEventListener('mousedown', this._railOutsideHandler, true)
-    this._railEscapeHandler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault()
-        e.stopPropagation()
-        this._closeRailPopover()
-      }
-    }
-    document.addEventListener('keydown', this._railEscapeHandler, true)
   }
 
-  private _closeRailPopover(): void {
-    if (!this._railOpen) return
-    this._railOpen = false
-    this._railPopover?.hide()
-    if (this._railOutsideHandler) {
-      document.removeEventListener('mousedown', this._railOutsideHandler, true)
-      this._railOutsideHandler = null
-    }
-    if (this._railEscapeHandler) {
-      document.removeEventListener('keydown', this._railEscapeHandler, true)
-      this._railEscapeHandler = null
-    }
+  /** Leave terminal input and return to the command editor. */
+  private _restoreEditor(): void {
+    this.nativeMode = false
+    this._updateCapability()
   }
 
-  private _runRailAction(index: number): void {
-    const actions = this._railActions()
-    const action = actions[index]
-    this._closeRailPopover()
-    if (!action) return
-    if (action.kind === 'integrate') this.integrateShell()
-    else this.enterNativeMode()
+  /** The current input presentation, exposed for context menu and palette
+   *  (nocx-atyf.5). 'editor' means the nocx command editor is active;
+   *  'terminal' means conventional terminal input is in use. */
+  get presentation(): InputPresentation {
+    return this._presentation
   }
 
-  /** The capability popover's actions, exposed for the e2e and unit seams. */
-  get capability(): Capability {
-    return this._capability
+  /** The observed shell state, exposed for the e2e and unit seams. */
+  get shellState(): ShellState {
+    return this._shellState
+  }
+
+  /** Switch to terminal input for this session (nocx-atyf.5). The escape
+   *  hatch — the editor hides, keys route raw, and the prompt is restored.
+   *  Session-scoped; a new session starts with the default. */
+  switchToTerminalInput(): void {
+    if (this.nativeMode) return
+    this.enterNativeMode()
+  }
+
+  /** Switch back to the nocx command editor (nocx-atyf.5). Only works when
+   *  the shell is integrated and the prompt is trusted. */
+  switchToEditorInput(): void {
+    if (!this.nativeMode) return
+    this._restoreEditor()
   }
 
   get policy(): ShellIntegrationPolicy {
     return this._policy
+  }
+
+  /** Ask the user once whether to enable the command editor for this
+   *  destination (nocx-atyf.3). The answer is remembered per destination
+   *  so later transitions are silent. */
+  private async _askConsent(destination: string): Promise<void> {
+    const label = destination.includes('@') ? destination : `host ${destination}`
+    const message = `Enable command blocks for ${label}?`
+    const confirmed = await showConfirm(message, 'Enable command editor', 'Not now')
+    this._consent.set(destination, confirmed)
+    if (!confirmed) return
+    // If the editor is still visible (prompt still ready), integrate now.
+    // Otherwise wait for the next prompt — the consent is remembered, so
+    // the next ssh to this destination integrates silently.
+    void this.integrateShell()
   }
 
   /** The native-mode escape (ADR-0004 §1, nocx-4ff.9): latch native input —
@@ -1867,12 +1843,6 @@ export class TerminalContent extends BaseTabContent {
     this._disposeAllMarkers()
     this.ledger = null
     this.host = null
-    this._closeRailPopover()
-    this._railPopover?.destroy()
-    this._railPopover = null
-    this._rail?.remove()
-    this._rail = null
-    this._railChip = null
   }
 
   private _disposeAllMarkers(): void {

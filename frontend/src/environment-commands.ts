@@ -1,3 +1,5 @@
+import { isInteractiveTransition, extractDestination } from './ssh-transition'
+
 /**
  * Recognise commands that enter a new shell environment from the line the
  * user submitted (ADR-0004 §2: the renderer knows what it sent — knowledge
@@ -9,7 +11,11 @@
  *
  * **Grows by addition.** When a new environment-entry command is needed,
  * add it here and to the test table in environment-commands.test.ts.
+ *
+ * The `ssh` arm delegates to ssh-transition.ts: ONE parser for "did the user
+ * go somewhere and expect a shell", because two would drift.
  */
+
 /** What we can honestly say about the environment a submitted line entered.
  *
  *  `label` is for a human: the destination as the user wrote it, which is
@@ -22,45 +28,6 @@ export interface EnvironmentEntry {
   kind: 'ssh' | 'docker' | 'podman' | 'kubectl' | 'su' | 'sudo' | 'tmux' | 'screen' | 'nix-shell'
   /** `pi@192.168.0.93`, `docker exec …`'s container, `su bob`. */
   label: string
-}
-
-/** Strip anything that is not part of the destination: `-p 2222`, `-i key`,
- *  and the trailing remote command in `ssh host uptime`. We only ever read a
- *  line we submitted ourselves, so this is parsing our own output — never
- *  inspection of the stream (AD-6). */
-function sshDestination(tokens: string[]): string {
-  const takesValue = new Set([
-    '-p',
-    '-i',
-    '-l',
-    '-o',
-    '-b',
-    '-c',
-    '-D',
-    '-E',
-    '-e',
-    '-F',
-    '-I',
-    '-J',
-    '-L',
-    '-m',
-    '-O',
-    '-Q',
-    '-R',
-    '-S',
-    '-W',
-    '-w',
-  ])
-  for (let i = 1; i < tokens.length; i++) {
-    const t = tokens[i]
-    if (takesValue.has(t)) {
-      i++
-      continue
-    }
-    if (t.startsWith('-')) continue
-    return t
-  }
-  return ''
 }
 
 /** The environment a submitted line enters, or null when it enters none.
@@ -78,13 +45,14 @@ export function environmentEntry(line: string): EnvironmentEntry | null {
   const first = tokens[0]
 
   if (first === 'ssh') {
-    const dest = sshDestination(tokens)
-    if (!dest) return null
-    // `ssh host uptime` runs a command and comes straight back: the token
-    // after the destination means this is not an interactive login.
-    const destIdx = tokens.indexOf(dest)
-    if (destIdx >= 0 && destIdx < tokens.length - 1) return null
-    return { kind: 'ssh', label: dest }
+    // ONE ssh parser for the product. nocx-atyf.3 grew a second one with a
+    // proper tokenizer (quotes, redirection operators) and the correct table
+    // of value-taking flags; this is the same question — "did the user go
+    // somewhere and expect a shell" — so it delegates rather than keeping a
+    // weaker copy that would drift.
+    if (!isInteractiveTransition(trimmed)) return null
+    const dest = extractDestination(trimmed)
+    return dest ? { kind: 'ssh', label: dest } : null
   }
   if (first === 'tmux') return { kind: 'tmux', label: 'tmux' }
   if (first === 'screen') return { kind: 'screen', label: 'screen' }
@@ -99,28 +67,4 @@ export function environmentEntry(line: string): EnvironmentEntry | null {
     return { kind: 'sudo', label: 'root' }
   }
   return null
-}
-
-export function isEnvironmentEntry(line: string): boolean {
-  const trimmed = line.trim()
-  if (trimmed === '') return false
-
-  const tokens = trimmed.split(/\s+/)
-  const firstWord = tokens[0]
-
-  // Commands that always enter a new shell environment.
-  if (firstWord === 'ssh') return true
-  if (firstWord === 'tmux') return true
-  if (firstWord === 'screen') return true
-  if (firstWord === 'su') return true
-  if (firstWord === 'nix-shell') return true
-
-  // Commands where a specific subcommand enters a new environment.
-  if (firstWord === 'docker' && tokens.length >= 2 && tokens[1] === 'exec') return true
-  if (firstWord === 'podman' && tokens.length >= 2 && tokens[1] === 'exec') return true
-  if (firstWord === 'kubectl' && tokens.length >= 2 && tokens[1] === 'exec') return true
-  if (firstWord === 'sudo' && tokens.length >= 2 && (tokens[1] === '-i' || tokens[1] === '-s'))
-    return true
-
-  return false
 }

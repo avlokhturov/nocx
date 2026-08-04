@@ -203,6 +203,8 @@ export interface TerminalRenderer {
    * IBufferLine interface for length, getCell(), isWrapped.
    */
   getBufferLine(line: number): import('@xterm/xterm').IBufferLine | undefined
+  /** Absolute buffer line of the cursor — the line the next write lands on. */
+  cursorLine(): number
 
   /**
    * Clear the visible xterm viewport. Used after freezing a block to

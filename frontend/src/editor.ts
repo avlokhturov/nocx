@@ -148,6 +148,11 @@ export class CommandEditor {
   private locationChip: HTMLElement
   private cwdChip: HTMLElement
   private timeChip: HTMLElement
+  /** Recovery action chip — hidden in the healthy state, shows one action
+   *  label in an exception state. The chip IS the action: one click, no
+   *  popover (nocx-atyf.2). */
+  private recoveryChip: HTMLButtonElement
+  private _recoveryOnClick: (() => void) | null = null
   /** Where the pending command would land: the SAME string the block header
    *  shows (routed from locationLine, never derived a second way). Empty
    *  for a local session, where the absence of a chip is the information. */
@@ -288,7 +293,14 @@ export class CommandEditor {
 
     this.timeChip = document.createElement('span')
     this.timeChip.className = 'nocx-chip nocx-editor-time'
-    this.chromeLeft.append(this.locationChip, this.cwdChip)
+
+    this.recoveryChip = document.createElement('button')
+    this.recoveryChip.type = 'button'
+    this.recoveryChip.className = 'nocx-chip nocx-editor-recovery'
+    this.recoveryChip.style.display = 'none'
+    this.recoveryChip.addEventListener('click', () => this._recoveryOnClick?.())
+
+    this.chromeLeft.append(this.recoveryChip, this.locationChip, this.cwdChip)
     this.chrome.append(this.chromeLeft, this.timeChip)
     this.root.appendChild(this.chrome)
 
@@ -391,6 +403,21 @@ export class CommandEditor {
 
   mount(container: HTMLElement): void {
     container.appendChild(this.root)
+  }
+
+  /** Set or clear the recovery action chip. `label` is the action text
+   *  the user reads ("Enable command editor", "Retry integration",
+   *  "Restore command editor"). Pass null to hide — the healthy state
+   *  shows nothing (nocx-atyf.2). */
+  setRecoveryAction(label: string | null, onClick: () => void): void {
+    this._recoveryOnClick = label === null ? null : onClick
+    if (label === null) {
+      this.recoveryChip.style.display = 'none'
+      this.recoveryChip.textContent = ''
+      return
+    }
+    this.recoveryChip.style.display = ''
+    this.recoveryChip.textContent = label
   }
 
   /** Update the cwd chip text. Uses the same short directoryLabel shape. */

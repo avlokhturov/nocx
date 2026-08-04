@@ -121,6 +121,7 @@ export function createRendererMock(): RendererMock {
     onRender: vi.fn(),
     paneElement: document.createElement('div'),
     getBufferLine: vi.fn().mockReturnValue(undefined),
+    cursorLine: vi.fn().mockReturnValue(0),
     clearViewport: vi.fn(),
     // Zero means "cannot measure", which the caller treats as "keep the current
     // height" — so a fixture that does not care about live-region sizing gets

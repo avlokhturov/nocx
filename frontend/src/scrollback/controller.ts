@@ -304,6 +304,17 @@ export class ScrollbackController {
   }
 
   /**
+   * Called at editor submit time (nocx-atyf.4): start a running block
+   * from the app-owned half of the lifecycle. The block is marked as
+   * running immediately; when C arrives later the cReceived flag is set.
+   */
+  beginBlock(command: string, cwd: string, startLine: number): void {
+    const cmd = command || '(empty)'
+    this._blockManager.startBlock(cmd, cwd, startLine)
+    this.setRunning()
+  }
+
+  /**
    * Called on OSC 133 D: serialize output, freeze the block.
    * @param getLine Accessor for xterm buffer lines.
    * @param endLine Absolute buffer line of the OSC 133 D marker.

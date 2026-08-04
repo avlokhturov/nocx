@@ -1,95 +1,95 @@
 import { describe, it, expect } from 'vitest'
-import { environmentEntry, isEnvironmentEntry } from './environment-commands'
+import { environmentEntry } from './environment-commands'
 
-describe('isEnvironmentEntry', () => {
+describe('environmentEntry recognises an environment change', () => {
   // ── Commands that enter a new environment ──────────────────────────
 
   it('recognises ssh', () => {
-    expect(isEnvironmentEntry('ssh user@host')).toBe(true)
-    expect(isEnvironmentEntry('ssh -i key.pem user@host')).toBe(true)
-    expect(isEnvironmentEntry('ssh pi@192.168.0.93')).toBe(true)
-    expect(isEnvironmentEntry('  ssh user@host  ')).toBe(true)
+    expect(environmentEntry('ssh user@host') !== null).toBe(true)
+    expect(environmentEntry('ssh -i key.pem user@host') !== null).toBe(true)
+    expect(environmentEntry('ssh pi@192.168.0.93') !== null).toBe(true)
+    expect(environmentEntry('  ssh user@host  ') !== null).toBe(true)
   })
 
   it('recognises docker exec', () => {
-    expect(isEnvironmentEntry('docker exec -it container bash')).toBe(true)
-    expect(isEnvironmentEntry('docker exec container ls')).toBe(true)
+    expect(environmentEntry('docker exec -it container bash') !== null).toBe(true)
+    expect(environmentEntry('docker exec container ls') !== null).toBe(true)
   })
 
   it('recognises podman exec', () => {
-    expect(isEnvironmentEntry('podman exec -it container bash')).toBe(true)
-    expect(isEnvironmentEntry('podman exec container ls')).toBe(true)
+    expect(environmentEntry('podman exec -it container bash') !== null).toBe(true)
+    expect(environmentEntry('podman exec container ls') !== null).toBe(true)
   })
 
   it('recognises kubectl exec', () => {
-    expect(isEnvironmentEntry('kubectl exec -it pod -- bash')).toBe(true)
-    expect(isEnvironmentEntry('kubectl exec pod -- ls')).toBe(true)
+    expect(environmentEntry('kubectl exec -it pod -- bash') !== null).toBe(true)
+    expect(environmentEntry('kubectl exec pod -- ls') !== null).toBe(true)
   })
 
   it('recognises su', () => {
-    expect(isEnvironmentEntry('su')).toBe(true)
-    expect(isEnvironmentEntry('su -')).toBe(true)
-    expect(isEnvironmentEntry('su root')).toBe(true)
+    expect(environmentEntry('su') !== null).toBe(true)
+    expect(environmentEntry('su -') !== null).toBe(true)
+    expect(environmentEntry('su root') !== null).toBe(true)
   })
 
   it('recognises sudo -i and sudo -s', () => {
-    expect(isEnvironmentEntry('sudo -i')).toBe(true)
-    expect(isEnvironmentEntry('sudo -s')).toBe(true)
-    expect(isEnvironmentEntry('sudo -i -u root')).toBe(true)
+    expect(environmentEntry('sudo -i') !== null).toBe(true)
+    expect(environmentEntry('sudo -s') !== null).toBe(true)
+    expect(environmentEntry('sudo -i -u root') !== null).toBe(true)
   })
 
   it('recognises nix-shell', () => {
-    expect(isEnvironmentEntry('nix-shell')).toBe(true)
-    expect(isEnvironmentEntry('nix-shell -p hello')).toBe(true)
+    expect(environmentEntry('nix-shell') !== null).toBe(true)
+    expect(environmentEntry('nix-shell -p hello') !== null).toBe(true)
   })
 
   it('recognises tmux', () => {
-    expect(isEnvironmentEntry('tmux')).toBe(true)
-    expect(isEnvironmentEntry('tmux new -s session')).toBe(true)
-    expect(isEnvironmentEntry('tmux attach')).toBe(true)
+    expect(environmentEntry('tmux') !== null).toBe(true)
+    expect(environmentEntry('tmux new -s session') !== null).toBe(true)
+    expect(environmentEntry('tmux attach') !== null).toBe(true)
   })
 
   it('recognises screen', () => {
-    expect(isEnvironmentEntry('screen')).toBe(true)
-    expect(isEnvironmentEntry('screen -S session')).toBe(true)
+    expect(environmentEntry('screen') !== null).toBe(true)
+    expect(environmentEntry('screen -S session') !== null).toBe(true)
   })
 
   // ── Default: not an environment change ─────────────────────────────
 
   it('the default for an unknown command is false', () => {
-    expect(isEnvironmentEntry('ls -la')).toBe(false)
-    expect(isEnvironmentEntry('echo hello')).toBe(false)
-    expect(isEnvironmentEntry('sleep 5')).toBe(false)
-    expect(isEnvironmentEntry('cat /etc/hosts')).toBe(false)
-    expect(isEnvironmentEntry('git status')).toBe(false)
-    expect(isEnvironmentEntry('make build')).toBe(false)
-    expect(isEnvironmentEntry('python')).toBe(false)
-    expect(isEnvironmentEntry('node')).toBe(false)
-    expect(isEnvironmentEntry('vim file.txt')).toBe(false)
-    expect(isEnvironmentEntry('')).toBe(false)
+    expect(environmentEntry('ls -la') !== null).toBe(false)
+    expect(environmentEntry('echo hello') !== null).toBe(false)
+    expect(environmentEntry('sleep 5') !== null).toBe(false)
+    expect(environmentEntry('cat /etc/hosts') !== null).toBe(false)
+    expect(environmentEntry('git status') !== null).toBe(false)
+    expect(environmentEntry('make build') !== null).toBe(false)
+    expect(environmentEntry('python') !== null).toBe(false)
+    expect(environmentEntry('node') !== null).toBe(false)
+    expect(environmentEntry('vim file.txt') !== null).toBe(false)
+    expect(environmentEntry('') !== null).toBe(false)
   })
 
   // ── Partial matches: the command is NOT an environment entry ───────
 
   it('docker without exec is not an environment entry', () => {
-    expect(isEnvironmentEntry('docker ps')).toBe(false)
-    expect(isEnvironmentEntry('docker build .')).toBe(false)
-    expect(isEnvironmentEntry('docker run -it ubuntu bash')).toBe(false)
+    expect(environmentEntry('docker ps') !== null).toBe(false)
+    expect(environmentEntry('docker build .') !== null).toBe(false)
+    expect(environmentEntry('docker run -it ubuntu bash') !== null).toBe(false)
   })
 
   it('podman without exec is not an environment entry', () => {
-    expect(isEnvironmentEntry('podman ps')).toBe(false)
-    expect(isEnvironmentEntry('podman build .')).toBe(false)
+    expect(environmentEntry('podman ps') !== null).toBe(false)
+    expect(environmentEntry('podman build .') !== null).toBe(false)
   })
 
   it('kubectl without exec is not an environment entry', () => {
-    expect(isEnvironmentEntry('kubectl get pods')).toBe(false)
-    expect(isEnvironmentEntry('kubectl logs pod')).toBe(false)
+    expect(environmentEntry('kubectl get pods') !== null).toBe(false)
+    expect(environmentEntry('kubectl logs pod') !== null).toBe(false)
   })
 
   it('sudo without -i or -s is not an environment entry', () => {
-    expect(isEnvironmentEntry('sudo ls')).toBe(false)
-    expect(isEnvironmentEntry('sudo make install')).toBe(false)
+    expect(environmentEntry('sudo ls') !== null).toBe(false)
+    expect(environmentEntry('sudo make install') !== null).toBe(false)
   })
 })
 
