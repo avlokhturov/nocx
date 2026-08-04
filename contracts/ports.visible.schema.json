@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/ports.visible.schema.json",
+  "title": "PortsVisibleResult",
+  "description": "Result of the ports.visible JSON-RPC method: an empty acknowledgement. The method's only observable effect is the scheduler's visible flag, which the next ports.status carries.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": []
+}

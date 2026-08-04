@@ -1,0 +1,25 @@
+/* ── Ports surface (nocx-wzc4.2) ─────────────────────────────────────────
+   Placement only: the kit components inside the rows (Badge, Button) are
+   placed — flex, gap, alignment — never repainted. The row itself is a
+   surface-owned list row; its spacing comes from flex, never margins
+   between kit controls (surface-spacing-kit). */
+
+.ports-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+}
+
+.ports-row__addr {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.ports-row__arrow {
+  color: var(--color-text-dim);
+}

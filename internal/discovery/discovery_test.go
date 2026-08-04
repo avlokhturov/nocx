@@ -27,6 +27,9 @@ type fakeConn struct {
 	done      chan struct{}
 	closed    bool
 	lost      bool
+	// autoValid answers every exec with a valid "normal host" sample,
+	// without consuming a queued response. Used by the scheduler tests.
+	autoValid bool
 }
 
 type fakeResponse struct {
@@ -61,6 +64,9 @@ func (f *fakeConn) Exec(ctx context.Context, cmd string) (*ssh.ExecResult, error
 		return nil, ssh.ErrExecClosed
 	case f.lost:
 		return nil, ssh.ErrExecLost
+	}
+	if f.autoValid {
+		return framed(knownRow), nil
 	}
 	if len(f.responses) == 0 {
 		return nil, errors.New("fake: no queued response for " + cmd)

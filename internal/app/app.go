@@ -6,11 +6,13 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/shady2k/nocx/internal/connection"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/contentkey"
 	"github.com/shady2k/nocx/internal/credential"
+	"github.com/shady2k/nocx/internal/discovery"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/pty"
@@ -41,6 +43,10 @@ type App struct {
 	// shutdown. Held as a minimal interface rather than *vault.Vault so the
 	// composition root keeps depending on behaviour instead of a type.
 	vaultCloser interface{ Close() }
+
+	// discoverySched owns the port-discovery cadence (nocx-wzc4.2); closed
+	// at shutdown so no timer outlives the process.
+	discoverySched *discovery.Scheduler
 }
 
 // contentCompactionFloor is the hysteresis fraction of the disk ceiling at
@@ -268,6 +274,19 @@ func New(opts ...Option) (*App, error) {
 	// Profile usage tracker for the sessions.status RPC (nocx-uxs5.4).
 	usageStore := session.NewDocumentUsageStore(docStore)
 	sess = sess.WithProfileUsageTracker(usageStore)
+	// Port discovery (nocx-wzc4.2): cadence owner for discovery, keyed by
+	// profile. *ssh.RealClient satisfies discovery.Connector without an
+	// adapter — the same shape that satisfies tunnel.Connector. The
+	// cadence timers are named here, at the composition root (spec §4):
+	// one settle sample 1 s after the connection comes up, prompt hints
+	// debounced 1 s, periodic sampling every 10 s while the panel is
+	// visible and nothing is paused.
+	discoverySched := discovery.NewScheduler(
+		sshClient, logger,
+		discovery.WithSettleDelay(1*time.Second),
+		discovery.WithPromptDebounce(time.Second),
+		discovery.WithSampleInterval(10*time.Second),
+	)
 	// Probe result store: operational evidence for connections.test.
 	// Process-lifetime only (not persisted across restarts).
 	probeResultStore := transport.NewProbeResultStore()
@@ -313,6 +332,14 @@ func New(opts ...Option) (*App, error) {
 		// line the whole forward model was reachable from its own tests
 		// and nowhere else (AGENTS.md check 5).
 		transport.WithTunnelConnector(sshClient),
+		// Port discovery (nocx-wzc4.2): the scheduler owns the cadence
+		// (settle sample, prompt debounce, hidden-tab pause, one-in-flight
+		// — spec §4) and acquires its OWN pooled discovery lease per
+		// profile. *ssh.RealClient satisfies discovery.Connector without
+		// an adapter, the same way it satisfies tunnel.Connector. Before
+		// this line the whole discovery package was reachable from its own
+		// tests and nowhere else (AGENTS.md check 5).
+		transport.WithDiscoveryScheduler(discoverySched),
 
 		transport.WithProbeResultStore(probeResultStore),
 		transport.WithSSHConfigResolver(sshCfgResolver, sshConfigPath),
@@ -336,6 +363,7 @@ func New(opts ...Option) (*App, error) {
 		Profiles:         profileStore,
 		Credentials:      v,
 		vaultCloser:      v,
+		discoverySched:   discoverySched,
 	}
 
 	logger.Info("application initialized")
@@ -375,6 +403,11 @@ func (a *App) Shutdown(ctx context.Context) {
 	// live heap on the way out would undo the reason the seal exists.
 	if a.vaultCloser != nil {
 		a.vaultCloser.Close()
+	}
+	// Discovery cadence last: every lease is released and every timer
+	// stopped, so no probe can outlive the process.
+	if a.discoverySched != nil {
+		_ = a.discoverySched.Close()
 	}
 	a.Logger.Info("application stopped")
 }
