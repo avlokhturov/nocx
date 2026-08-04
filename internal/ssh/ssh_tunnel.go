@@ -20,6 +20,18 @@ type TunnelConn interface {
 	// target refusing the connection — never affects the connection or any
 	// other stream.
 	Dial(addr string) (net.Conn, error)
+	// Listen asks the SSH server to open a listening socket on the REMOTE
+	// side (-R): the request carries the address as given, so a bind host
+	// that is a hostname is resolved by the server, never locally. The
+	// returned listener's Addr reports the address the server allocated — a
+	// requested port 0 is resolved by the server and never reported as 0.
+	// Each accepted connection arrives as a forwarded-tcpip channel over
+	// this connection, so the listener must be serviced or the connection
+	// may hang; Accept fails once the connection shuts down. Closing the
+	// listener cancels the remote listen. When the server refuses — its
+	// AllowTcpForwarding is off, or the bind is outside PermitListen — the
+	// error is a refusal, not a dial failure.
+	Listen(addr string) (net.Listener, error)
 	// Done closes when the underlying connection shuts down: connection
 	// loss, server close, keepalive failure. It does NOT close on Close: an
 	// intentional stop while the connection is still shared must not read
@@ -113,6 +125,26 @@ func (c *tunnelConn) Dial(addr string) (net.Conn, error) {
 	default:
 	}
 	return c.client.Dial("tcp", addr)
+}
+
+// Listen opens a remote listener via tcpip-forward — the -R strategy's seam
+// on this lease. Same closed/done guards as Dial: a spent lease never asks
+// a dead connection for a new listener, and a user stop never reads as
+// connection loss. The server's refusal (AllowTcpForwarding off, bind
+// outside PermitListen) comes back as the request failure from
+// Client.Listen, unmodified.
+func (c *tunnelConn) Listen(addr string) (net.Listener, error) {
+	select {
+	case <-c.closed:
+		return nil, ErrTunnelConnClosed
+	default:
+	}
+	select {
+	case <-c.done:
+		return nil, ErrTunnelConnLost
+	default:
+	}
+	return c.client.Listen("tcp", addr)
 }
 
 func (c *tunnelConn) Done() <-chan struct{} { return c.done }

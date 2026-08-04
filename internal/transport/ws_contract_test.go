@@ -1503,6 +1503,16 @@ func TestTunnelOpen_DTOConformsToContract(t *testing.T) {
 			Scope:         "tab:1",
 			State:         string(tunnel.StateRunning),
 		},
+		"running-remote-with-caveat": {
+			ID:            "ab12",
+			Direction:     string(tunnel.DirectionRemote),
+			RequestedBind: tunnelBind{Host: "0.0.0.0", Port: 0},
+			ActualBind:    tunnelBind{Host: "0.0.0.0", Port: 43210},
+			Destination:   "db.internal:5432",
+			Scope:         "tab:1",
+			Caveat:        "bind address 0.0.0.0 requested but not verified: the server may have bound a different address (GatewayPorts), so a URL built from this forward may only work on the server",
+			State:         string(tunnel.StateRunning),
+		},
 		"stopped-user": {
 			ID:            "ab12",
 			Direction:     string(tunnel.DirectionLocal),
@@ -1547,6 +1557,7 @@ func TestTunnelStop_DTOConformsToContract(t *testing.T) {
 		ActualBind:    tunnelBind{Host: "127.0.0.1", Port: 43210},
 		Destination:   "db.internal:5432",
 		Scope:         "tab:1",
+		Caveat:        "",
 		State:         string(tunnel.StateStopped),
 		StopReason:    &userStop,
 	}
@@ -1582,6 +1593,12 @@ func TestTunnel_OverTheWireConformsToContract(t *testing.T) {
 	var rec tunnelRecord
 	if err := json.Unmarshal(openResp.Result, &rec); err != nil {
 		t.Fatalf("decode open result: %v", err)
+	}
+	// A local open carries no bind caveat — the field is present on the
+	// wire (the schema requires it) and empty. The remote strategy's
+	// non-empty caveat is covered by the DTO conformance case above.
+	if rec.Caveat != "" {
+		t.Fatalf("local tunnel caveat = %q, want empty", rec.Caveat)
 	}
 
 	stopResp := tunnelCall(t, conn, "tunnel.stop", map[string]any{"id": rec.ID}, 2)
