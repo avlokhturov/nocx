@@ -1092,6 +1092,59 @@ describe('the environment stack (nocx-695k.1)', () => {
 
   const capabilityOf = (content: TerminalContent): string => content.capability
 
+  // What the owner asked for three times (2026-08-04): typing `ssh host` in
+  // a local tab left every surface naming the local machine — the tab title
+  // was whatever the remote shell's OSC 2 last set, the location chip stayed
+  // hidden because a local session grows none, and the cwd chip went on
+  // showing the local directory under a remote prompt.
+  it('the tab title, the location chip and the ports target follow the environment', async () => {
+    const { ed, content, teardown } = await mountTerminal(makeClipboard(), {
+      attachToDocument: true,
+    })
+    const renderer = rendererOf(content)
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoScrollIntoView = Element.prototype.scrollIntoView
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    try {
+      content.setVisible(true)
+      renderer._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
+      renderer._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
+
+      // A local tab scopes ports to the local target and shows no location.
+      expect(content.portsTargetId).toBe('local')
+      expect(content.portsUnavailableReason).toBe('')
+
+      ed.insertText('ssh pi@192.168.0.93')
+      ed.root.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+
+      // Inside: the pane names the host we went to, and refuses to speak for
+      // its ports — there is no managed connection to a child ssh process.
+      const loc = ed.root.querySelector('.nocx-editor-location')
+      expect(loc?.textContent).toBe('pi@192.168.0.93')
+      expect(content.portsTargetId).toBeNull()
+      expect(content.portsUnavailableReason).toBe('pi@192.168.0.93')
+      // The cwd is NOT invented: we know the host, not the directory.
+      const cwd = ed.root.querySelector('.nocx-editor-cwd')
+      expect(cwd?.textContent ?? '').not.toContain('home')
+
+      renderer._fireCommandMarker({ kind: 'C', line: 0, col: 0, buffer: 'normal' })
+      renderer._fireCommandMarker({ kind: 'D', line: 0, col: 0, buffer: 'normal', exitCode: 0 })
+
+      // Out again: everything goes back, within one prompt.
+      expect(content.portsTargetId).toBe('local')
+      expect(content.portsUnavailableReason).toBe('')
+    } finally {
+      Element.prototype.scrollTo = protoScrollTo
+      Element.prototype.scrollIntoView = protoScrollIntoView
+      teardown()
+    }
+  })
+
   it('an environment-entry command clears _shellIntegrated and the D marker restores it', async () => {
     const { ed, content, teardown } = await mountTerminal(makeClipboard(), {
       attachToDocument: true,

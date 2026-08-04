@@ -107,6 +107,11 @@ export interface PortsPanelProps {
   /** The shared Pause control — the header action toggles it, the panel
    *  reflects and syncs it (nocx-wzc4.9). */
   pause: PortsPauseControl
+  /** When profileId is null because the pane walked into an environment we
+   *  cannot enumerate, this names it — a hand-typed `ssh` has no managed
+   *  connection, so there is no second exec channel to ask on. '' otherwise
+   *  (nocx-695k.3). */
+  unavailableIn?: () => string
 }
 
 type ForwardRecord = TunnelOpenResult | TunnelStopResult
@@ -363,10 +368,24 @@ export function PortsPanel(props: PortsPanelProps) {
     <Show
       when={profileId() !== null}
       fallback={
-        <EmptyState
-          title="No active connection"
-          description="Switch to an SSH tab — the ports it listens on will appear here."
-        />
+        <Show
+          when={props.unavailableIn?.()}
+          fallback={
+            <EmptyState
+              title="No active connection"
+              description="Switch to an SSH tab — the ports it listens on will appear here."
+            />
+          }
+        >
+          {/* The pane walked somewhere we cannot see. Say which host and why,
+              and name what would change it — showing this machine's listeners
+              instead is what made a tab sitting on a Pi look like it was
+              listing the Pi's ports (owner, 2026-08-04). */}
+          <EmptyState
+            title={`Cannot see the ports on ${props.unavailableIn?.() ?? ''}`}
+            description="You reached this shell by hand, so nocx has no connection of its own to it and cannot ask what is listening. Open the host as a connection to see its ports."
+          />
+        </Show>
       }
     >
       <Stack gap="loose">

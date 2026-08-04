@@ -9,7 +9,7 @@
 // These start from a real TabManager and the real mountSidebar — the panel
 // never mounts in a vacuum.
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup } from '@solidjs/testing-library'
+import { cleanup, render } from '@solidjs/testing-library'
 import { createSignal } from 'solid-js'
 import { PortsPanel, createPortsPauseControl, type PortsPanelServices } from './ports'
 import { mountSidebar, type SidebarHandle, type SidebarViewDescriptor } from './sidebar'
@@ -92,6 +92,7 @@ function fakeServices(over: Partial<PortsPanelServices> = {}): PortsPanelService
 function portsView(
   services: PortsPanelServices,
   portsTargetId: () => string | null,
+  unavailableIn: () => string = () => '',
 ): SidebarViewDescriptor {
   const pause = createPortsPauseControl()
   return {
@@ -113,6 +114,7 @@ function portsView(
     view: (props) => (
       <PortsPanel
         profileId={props.activeProfileId}
+        unavailableIn={unavailableIn}
         services={services}
         visible={props.visible}
         pause={pause}
@@ -127,7 +129,11 @@ const liveHandles: SidebarHandle[] = []
 /** Full composition: a real TabManager (with or without an SSH tab in
  *  front), the reactive active-profile signal main.tsx wires, and the
  *  real sidebar mounting the ports view. */
-async function mountApp(services: PortsPanelServices, profileId: string | null = 'ssh:p1:1') {
+async function mountApp(
+  services: PortsPanelServices,
+  profileId: string | null = 'ssh:p1:1',
+  unavailableIn: () => string = () => '',
+) {
   const client = makeClient({
     openSSHSession: vi.fn(() => Promise.resolve(makeSession())),
     openSSHSessionByHost: vi.fn(() => Promise.resolve(makeSession())),
@@ -150,7 +156,7 @@ async function mountApp(services: PortsPanelServices, profileId: string | null =
       /* eslint-disable solid/reactivity -- portsView consumes this accessor
          inside the view's and the header action's tracked scopes; the gate
          cannot see across that boundary (same contract as the arg below). */
-      portsView(services, () => portsTargetId()),
+      portsView(services, () => portsTargetId(), unavailableIn),
       /* eslint-enable solid/reactivity */
     ],
     [],
@@ -448,5 +454,28 @@ describe('ports sidebar view', () => {
       const note = panel.querySelector('[data-testid="ports-target-note"]')
       expect(note?.textContent ?? '').toContain('This machine')
     })
+  })
+  it('says which host it cannot see, instead of listing this machine under its tab', async () => {
+    // The pane walked into a shell reached by hand: there is no managed
+    // connection to it, so there is no second exec channel to ask on, and
+    // reporting the local target here is what put this machine's listeners
+    // under a tab sitting on a Pi (owner, 2026-08-04).
+    const status = vi.fn()
+    const services = fakeServices({ status })
+    const pause = createPortsPauseControl()
+    const { container } = render(() => (
+      <PortsPanel
+        profileId={() => null}
+        unavailableIn={() => 'pi@192.168.0.93'}
+        services={services}
+        visible={() => true}
+        pause={pause}
+      />
+    ))
+    await vi.waitFor(() => {
+      expect(container.textContent ?? '').toContain('pi@192.168.0.93')
+      expect(container.textContent ?? '').toContain('Cannot see the ports')
+    })
+    expect(status).not.toHaveBeenCalled()
   })
 })

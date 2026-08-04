@@ -33,7 +33,7 @@ import type { HistoryRecord } from './generated/history.record'
 import { renderRecordedCommand } from './scrollback/blocks'
 import { KIND_LABELS } from './secret-kind'
 import { shouldShowEditor, NATIVE_RESTORE } from './native-mode'
-import { isEnvironmentEntry } from './environment-commands'
+import { environmentEntry, type EnvironmentEntry } from './environment-commands'
 import { shouldCopy, type ClipboardAccess, type ClipboardGate } from './clipboard'
 import type { ClipboardBanner } from './banner'
 import { ScrollbackController } from './scrollback/controller'
@@ -123,6 +123,9 @@ export interface TerminalContentHooks {
    *  exec). Tab chrome renders at most this small warning mark
    *  (nocx-4t37.2); the capability statement itself lives in the rail. */
   onWarningChange?: (warning: boolean) => void
+  /** The pane entered or left an environment, so the ports panel's target
+   *  changed without the active tab changing (nocx-695k.3). */
+  onPortsTargetChange?: () => void
   /** An SSH connection failed because the vault is sealed. */
   onVaultSealed?: () => void
   /** The reference picker's setup offer needs the setup dialog (no OS key):
@@ -254,6 +257,9 @@ export class TerminalContent extends BaseTabContent {
    *  clears it; the D that ends that command restores what was true before.
    *  Set by the marker handler only (AD-6), never by inference. */
   private _shellIntegrated = false
+  /** Environments entered by commands we submitted, innermost last. Pushed
+   *  on submit, popped on the D that ends that command (nocx-695k.2). */
+  private _envStack: EnvironmentEntry[] = []
   /** Stack of _shellIntegrated values saved before entering a nested
    *  environment. Pushed on submit when isEnvironmentEntry() is true;
    *  popped on the D marker that ends the command. */
@@ -342,8 +348,21 @@ export class TerminalContent extends BaseTabContent {
    *  saved-profile SSH tab, null for an alias tab — an alias has no
    *  profile until it is adopted, so it has no valid ports scope. */
   get portsTargetId(): string | null {
+    // Inside an environment we entered by hand there is nothing we can
+    // speak for: remote discovery needs a MANAGED connection (a second exec
+    // channel on a connection we own), and a hand-typed `ssh` is a child
+    // process of the local shell. Reporting the local target here is what
+    // put this machine's listeners under a tab sitting on a Pi.
+    if (this.currentEnvironment()) return null
     if (this.sshOpts === undefined) return LOCAL_TARGET_ID
     return this.sshOpts.profileId || null
+  }
+
+  /** Why portsTargetId is null, when it is null because the pane went
+   *  somewhere we cannot enumerate. '' when there is no such reason. */
+  get portsUnavailableReason(): string {
+    const env = this.currentEnvironment()
+    return env ? env.label : ''
   }
 
   /** Push the composed title to the host: program title, else the cwd label. */
@@ -357,12 +376,47 @@ export class TerminalContent extends BaseTabContent {
     this.hooks.onSubtitleChange?.(this.programTitle ? this.locationLine() : '')
   }
 
-  /** Where this tab is: `user@host` for SSH, the working directory otherwise. */
+  /** Where this tab is: the nested environment if we are inside one, else
+   *  `user@host` for SSH, else the working directory.
+   *
+   *  The nested case is the one that was missing and it is the common one:
+   *  a user types `ssh pi@192.168.0.93` in a local tab, and every surface
+   *  that named a place went on naming the local machine — the tab title
+   *  kept whatever the remote shell's OSC 2 last set, the location chip
+   *  stayed hidden because a local session grows none, and the cwd chip
+   *  went on showing the local directory while the prompt was elsewhere
+   *  (owner, 2026-08-04, three times). We know the destination because we
+   *  submitted the line (ADR-0004 §2) — no integration, no sniffing. */
   private locationLine(): string {
+    const env = this.currentEnvironment()
+    if (env) return env.label
     if (this.sshOpts) {
       return this.sshOpts.user ? `${this.sshOpts.user}@${this.sshOpts.host}` : this.sshOpts.host
     }
     return this._cwd
+  }
+
+  /** The innermost environment entered by a command we submitted, or null
+   *  when the pane is in the environment its session started in. */
+  private currentEnvironment(): EnvironmentEntry | null {
+    return this._envStack.length > 0 ? this._envStack[this._envStack.length - 1] : null
+  }
+
+  /** Push every surface that names a place at the current environment. The
+   *  cwd is deliberately BLANK inside a nested environment: we know the
+   *  host and we do not know the directory until OSC 7 arrives, and a stale
+   *  local directory under a remote prompt is the lie this fixes. */
+  private syncLocation(): void {
+    const env = this.currentEnvironment()
+    const location = env ? env.label : this.sshOpts ? this.locationLine() : ''
+    this.scrollback?.blockManager.setLocation(location)
+    this.editor?.setLocation(location)
+    if (env) {
+      this.editor?.setCwd('')
+      this.cwdTitle = env.label
+      this.programTitle = ''
+    }
+    this.pushTitle()
   }
 
   // ── TabContent ──────────────────────────────────────────────────────────
@@ -530,10 +584,14 @@ export class TerminalContent extends BaseTabContent {
             // marker fact and clear it — the pane is now on a different
             // host whose markers we have not seen. The D that ends this
             // command restores the prior value.
-            if (isEnvironmentEntry(recordLine) && this._shellIntegrated) {
+            const entered = environmentEntry(recordLine)
+            if (entered) {
               this._previousIntegrated.push(this._shellIntegrated)
               this._shellIntegrated = false
+              this._envStack.push(entered)
               this._updateCapability()
+              this.syncLocation()
+              this.hooks.onPortsTargetChange?.()
             }
             // Proactive save for a hand-typed `ssh <target>` is nocx-pu4.4,
             // NOT part of this task — the ad-hoc SSH tab's adopt affordance
@@ -738,7 +796,10 @@ export class TerminalContent extends BaseTabContent {
           // restore the marker fact from before that command ran.
           if (this._previousIntegrated.length > 0) {
             this._shellIntegrated = this._previousIntegrated.pop()!
+            this._envStack.pop()
             this._updateCapability()
+            this.syncLocation()
+            this.hooks.onPortsTargetChange?.()
           }
           const getLine = (y: number) => renderer.getBufferLine(y)
           this.scrollback?.onCommandEnd(getLine, marker.line, marker.exitCode ?? null)

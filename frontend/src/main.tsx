@@ -221,7 +221,15 @@ async function main() {
   // no-connection state instead of a stale host's ports (nocx-wzc4.8).
   const portsServices = createPortsPanelServices(dispatcher)
   const [portsTargetId, setPortsTargetId] = createSignal<string | null>(tm.portsTargetId())
-  tm.onActiveTabChange = () => setPortsTargetId(tm.portsTargetId())
+  // Why the target is null, when it is null because the pane walked into an
+  // environment we cannot enumerate (a hand-typed ssh has no managed
+  // connection, so no second exec channel) — the panel says which host
+  // rather than showing this machine's listeners under its tab (nocx-695k.3).
+  const [portsUnavailable, setPortsUnavailable] = createSignal<string>(tm.portsUnavailableReason())
+  tm.onActiveTabChange = () => {
+    setPortsTargetId(tm.portsTargetId())
+    setPortsUnavailable(tm.portsUnavailableReason())
+  }
   /**
    * Open (or focus) the Settings tab and hand back the instance that is
    * actually on screen.
@@ -301,6 +309,7 @@ async function main() {
     view: (props) => (
       <PortsPanel
         profileId={props.activeProfileId}
+        unavailableIn={portsUnavailable}
         services={portsServices}
         visible={props.visible}
         pause={portsPause}

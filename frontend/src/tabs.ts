@@ -445,6 +445,7 @@ export class TabManager {
       {
         onSubtitleChange: (subtitle) => tabRef.current?.updateSubtitle(subtitle),
         onWarningChange: (warning) => tabRef.current?.setWarningState(warning),
+        onPortsTargetChange: () => this.onActiveTabChange?.(),
         onSetupVault: this.onSetupVault,
         onCreateSecret: this.onCreateSecret,
       },
@@ -491,6 +492,7 @@ export class TabManager {
           }
         },
         onWarningChange: (warning) => tabRef.current?.setWarningState(warning),
+        onPortsTargetChange: () => this.onActiveTabChange?.(),
         onVaultSealed: this.onVaultSealed,
         onSetupVault: this.onSetupVault,
         onCreateSecret: this.onCreateSecret,
@@ -708,6 +710,12 @@ export class TabManager {
    *  ports entry points are no-ops then. */
   portsTargetId(): string | null {
     return this.activeTerminalContent()?.portsTargetId ?? null
+  }
+
+  /** When portsTargetId is null because the pane walked into an environment
+   *  we cannot enumerate, this names it. '' otherwise (nocx-695k.3). */
+  portsUnavailableReason(): string {
+    return this.activeTerminalContent()?.portsUnavailableReason ?? ''
   }
 
   reorderTab(draggedId: number, targetId: number): void {

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { isEnvironmentEntry } from './environment-commands'
+import { environmentEntry, isEnvironmentEntry } from './environment-commands'
 
 describe('isEnvironmentEntry', () => {
   // ── Commands that enter a new environment ──────────────────────────
@@ -91,4 +91,29 @@ describe('isEnvironmentEntry', () => {
     expect(isEnvironmentEntry('sudo ls')).toBe(false)
     expect(isEnvironmentEntry('sudo make install')).toBe(false)
   })
+})
+
+describe('environmentEntry — the destination we can name because we sent the line', () => {
+  const cases: Array<[string, string | null]> = [
+    ['ssh pi@192.168.0.93', 'pi@192.168.0.93'],
+    ['ssh -p 2222 root@box', 'root@box'],
+    ['ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no bob@h', 'bob@h'],
+    // A remote command comes straight back: not a place the user is sitting in.
+    ['ssh host uptime', null],
+    // A redirection means the shell is doing something with the output.
+    ['ssh host > out.txt', null],
+    ['ssh host | tee log', null],
+    ['docker exec -it web bash', 'docker:web'],
+    ['kubectl exec -it pod-1 -- sh', 'kubectl:pod-1'],
+    ['sudo -i', 'root'],
+    ['su bob', 'su bob'],
+    ['sleep 5', null],
+    ['ls', null],
+    ['', null],
+  ]
+  for (const [line, want] of cases) {
+    it(`${JSON.stringify(line)} -> ${want ?? 'null'}`, () => {
+      expect(environmentEntry(line)?.label ?? null).toBe(want)
+    })
+  }
 })
