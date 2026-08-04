@@ -128,6 +128,15 @@ func (r *Resolver) buildConfig(prof *profile.SSHProfile, visited map[string]bool
 	}
 	cfg.AgentForward = eff.ResolvedOptions.AgentForward
 
+	// Launch policy (nocx-4t37.2): the effective shellIntegration field is
+	// the connection-scope default for whether the launcher may integrate
+	// at open. Auto (the default) integrates at startup, silently, in the
+	// interval nocx owns; ask and off open a plain shell and leave the
+	// explicit-request path to the renderer's capability control. The
+	// launcher is still attached by the transport — the policy gates
+	// whether openShell consults it.
+	cfg.LaunchPolicy = ssh.LaunchPolicy(eff.ResolvedOptions.ShellIntegration)
+
 	// Identity comes from the profile itself (ADR-0017): User and Auth are
 	// always inline, and the secret bindings are the references the profile
 	// authenticates with.

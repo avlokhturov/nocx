@@ -48,6 +48,7 @@ export class Tab implements TabHost {
   private _subtitle = ''
   private _adoptable = false
   private _onAdopt: (() => void) | null = null
+  private _warning = false
   private _disposed = false
   private _mountAbort = new AbortController()
   // ── B.5 geometry authority ──────────────────────────────────────────
@@ -125,6 +126,20 @@ export class Tab implements TabHost {
     this._adoptable = adoptable
     this._onAdopt = adoptable ? onAdopt : null
     this.onDisplayChange?.()
+  }
+
+  /** Mark the tab's environment degraded/uncertain (nocx-4t37.2): the one
+   *  signal tab chrome may carry — a small warning mark, never a permanent
+   *  product badge. The capability statement itself lives in the rail. */
+  setWarningState(warning: boolean): void {
+    if (this._disposed) return
+    if (warning === this._warning) return
+    this._warning = warning
+    this.onDisplayChange?.()
+  }
+
+  get warning(): boolean {
+    return this._warning
   }
 
   setActive(active: boolean): void {
@@ -429,6 +444,7 @@ export class TabManager {
       undefined,
       {
         onSubtitleChange: (subtitle) => tabRef.current?.updateSubtitle(subtitle),
+        onWarningChange: (warning) => tabRef.current?.setWarningState(warning),
         onSetupVault: this.onSetupVault,
         onCreateSecret: this.onCreateSecret,
       },
@@ -474,6 +490,7 @@ export class TabManager {
             tab.setAdoptState(false, () => {})
           }
         },
+        onWarningChange: (warning) => tabRef.current?.setWarningState(warning),
         onVaultSealed: this.onVaultSealed,
         onSetupVault: this.onSetupVault,
         onCreateSecret: this.onCreateSecret,
@@ -516,6 +533,7 @@ export class TabManager {
         showToast({ level: 'danger', message: `Could not save: ${message}` })
       })
   }
+
   /**
    * Open a tab with the given content, deduplicating by singletonKey.
    * If a tab with the same singletonKey already exists, activates it.

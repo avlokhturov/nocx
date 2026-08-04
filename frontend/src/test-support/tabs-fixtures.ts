@@ -177,6 +177,10 @@ export function resetSessionCounter(): void {
 export interface SessionFake {
   sessionId: string
   cwd: string
+  /** The resolved launch policy from the open ack (nocx-4t37.2). */
+  shellIntegration: 'auto' | 'ask' | 'off'
+  /** Why integration did not happen at open; empty = succeeded/never. */
+  shellIntegrationReason: '' | 'unsupported-shell' | 'no-secure-temp' | 'remote-command' | 'unknown'
   send: ReturnType<typeof vi.fn>
   sendResize: ReturnType<typeof vi.fn>
   close: ReturnType<typeof vi.fn>
@@ -199,6 +203,8 @@ export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
   return {
     sessionId: `mock-sid-${++sessionCounter}`,
     cwd: FIXTURE_CWD,
+    shellIntegration: 'auto',
+    shellIntegrationReason: '',
     send: vi.fn(),
     sendResize: vi.fn(),
     close: vi.fn(),
@@ -217,10 +223,11 @@ export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
 // ═══════════════════════════════════════════════════════════════════════════
 // WSClient fake
 // ═══════════════════════════════════════════════════════════════════════════
-
 export interface ClientFake {
   connect: ReturnType<typeof vi.fn>
   openSession: ReturnType<typeof vi.fn>
+  openSSHSession: ReturnType<typeof vi.fn>
+  openSSHSessionByHost: ReturnType<typeof vi.fn>
   close: ReturnType<typeof vi.fn>
   sendToSession: ReturnType<typeof vi.fn>
   sendResize: ReturnType<typeof vi.fn>
@@ -236,20 +243,22 @@ export interface ClientFake {
   /** Sessions created by openSession calls, in order. */
   _sessions: SessionFake[]
 }
-
 /**
  * Create a fake WSClient whose openSession() returns a new makeSession()
  * on every call and records it in _sessions for test inspection.
  */
 export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
   const sessions: SessionFake[] = []
+  const newSession = (): SessionFake => {
+    const s = makeSession()
+    sessions.push(s)
+    return s
+  }
   const client: ClientFake = {
     connect: vi.fn().mockResolvedValue(undefined),
-    openSession: vi.fn(() => {
-      const s = makeSession()
-      sessions.push(s)
-      return Promise.resolve(s)
-    }),
+    openSession: vi.fn(() => Promise.resolve(newSession())),
+    openSSHSession: vi.fn(() => Promise.resolve(newSession())),
+    openSSHSessionByHost: vi.fn(() => Promise.resolve(newSession())),
     close: vi.fn(),
     sendToSession: vi.fn(),
     sendResize: vi.fn(),

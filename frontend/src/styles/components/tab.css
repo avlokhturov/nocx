@@ -285,6 +285,22 @@
   }
 }
 
+/* ── Environment-degraded mark (nocx-4t37.2) ─────────────────────────
+   The ONE signal tab chrome may carry for the capability: a small warning
+   mark in the status line. It appears only when the environment degraded
+   or became uncertain (integration declined, or markers stopped on an
+   integrated session) — a healthy tab is never decorated. */
+
+.nocx-tab-warning {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  margin: 0 7px 0 0;
+  border-radius: 50%;
+  background: var(--color-warning);
+  align-self: center;
+}
+
 /* ── Vertical tab strip overrides ────────────────────────────────────── */
 
 /* A seam between rows, and it has to be its own colour rather than the divider

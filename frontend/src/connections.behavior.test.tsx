@@ -2266,3 +2266,51 @@ describe('portDiscovery', () => {
     expect(sent[0].defaults?.['portDiscovery']).toBe('ask')
   })
 })
+
+// ── shellIntegration (nocx-p0ug, nocx-4t37.2) ────────────────────────────
+
+describe('shellIntegration', () => {
+  it('saves an explicit choice on the profile through the patch route', async () => {
+    const { container, client } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    await waitForProfiles(container, 1)
+    await openProfileEditor(container, 'prod-web')
+    selectProfileSection(container, 'Advanced')
+
+    const label = container.querySelector('label[for="shell-integration"]')
+    expect(label, 'Shell integration field not found').toBeTruthy()
+    const select = label!.closest('.ui-field')?.querySelector('.ui-select') as HTMLSelectElement
+    fireEvent.change(select, { target: { value: 'ask' } })
+
+    const patchSpy = vi.spyOn(client, 'patchProfile').mockResolvedValue(MOCK_EFFECTIVE_CRED)
+    const dialog = findDialogByTitleContaining(container, 'prod-web')!
+    clickButtonByText(container, 'Save Connection', dialog)
+
+    await vi.waitFor(() => {
+      expect(patchSpy).toHaveBeenCalled()
+    })
+    const params = patchSpy.mock.calls[0][0] as { set?: Record<string, unknown> }
+    expect(params.set?.['options.shellIntegration']).toBe('ask')
+  })
+
+  it('the group defaults editor offers shellIntegration as an inheritable default', async () => {
+    const { container, client } = mount({ profiles: MOCK_PROFILES, groups: MOCK_GROUPS })
+    await waitForProfiles(container, 3)
+    await openGroupEditorByName(container, 'Production')
+    selectGroupSection(container, 'Advanced')
+
+    const label = container.querySelector('label[for="group-default-shellIntegration"]')
+    const select = label!.closest('.ui-field')?.querySelector('.ui-select') as HTMLSelectElement
+    expect(select, 'Group shell integration select not found').toBeTruthy()
+    fireEvent.change(select, { target: { value: 'off' } })
+
+    const applySpy = vi.spyOn(client, 'groupApply')
+    const dialog = findDialogByTitle(container, 'Edit Group: Production')!
+    clickButtonByText(container, 'Save Group', dialog)
+
+    await vi.waitFor(() => {
+      expect(applySpy).toHaveBeenCalled()
+    })
+    const sent = applySpy.mock.calls[0][0]
+    expect(sent[0].defaults?.['shellIntegration']).toBe('off')
+  })
+})

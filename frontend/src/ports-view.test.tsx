@@ -20,7 +20,6 @@ import {
   makeClient,
   makeSession,
   mountTabManager,
-  type ClientFake,
 } from './test-support/tabs-fixtures'
 import type { PortsStatusResult } from './generated/ports.status'
 import type { TunnelOpenResult } from './generated/tunnel.open'
@@ -132,7 +131,7 @@ async function mountApp(services: PortsPanelServices, profileId: string | null =
   const client = makeClient({
     openSSHSession: vi.fn(() => Promise.resolve(makeSession())),
     openSSHSessionByHost: vi.fn(() => Promise.resolve(makeSession())),
-  } as unknown as Partial<ClientFake>)
+  })
   const { manager } = await mountTabManager(client)
   if (profileId !== null) manager.newSSHTab(profileId, 'host.example', 'alice')
 

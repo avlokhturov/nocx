@@ -175,6 +175,93 @@ func TestConnect_LauncherAccepted_StartUsesItsCommand(t *testing.T) {
 	}
 }
 
+// TestConnect_LaunchPolicyAsk_OpensPlainShell: a profile whose effective
+// shellIntegration is ask must open a plain shell — the launcher is wired
+// but NOT consulted, no exec command starts, and the reason stays none
+// (integration was never attempted, which is exactly what the renderer's
+// capability control needs to hear) (nocx-4t37.2).
+func TestConnect_LaunchPolicyAsk_OpensPlainShell(t *testing.T) {
+	srv := startTestSSHServer(t)
+	defer srv.close()
+
+	launcher := &fakeLauncher{cmd: "exec bash -i", reason: ReasonNone, ok: true}
+
+	ch := launcherConnect(
+		t, srv, []RealClientOption{WithConfigResolver(NewStubConfigResolver())},
+		WithRemoteLauncher(launcher),
+		WithLaunchPolicy(LaunchPolicyAsk),
+		WithSessionID("sess-ask"),
+		WithEnhanced(),
+	)
+
+	assertUsable(t, srv, ch)
+
+	if n := launcher.callCount(); n != 0 {
+		t.Fatalf("launcher consulted %d times under ask, want 0 (plain shell at open)", n)
+	}
+	if got := srv.lastExecCommand(); got != "" {
+		t.Errorf("session.Start received %q under ask, want a plain shell request", got)
+	}
+	if srv.shellRequestCount() != 1 {
+		t.Errorf("shell requests = %d, want 1 (the plain shell)", srv.shellRequestCount())
+	}
+	if got := ch.ShellIntegrationReason(); got != ReasonNone {
+		t.Errorf("ShellIntegrationReason = %q, want %q (never attempted)", got, ReasonNone)
+	}
+}
+
+// TestConnect_LaunchPolicyOff_OpensPlainShell: off behaves like ask at open —
+// no launcher, plain shell, reason none. The renderer's capability control
+// refuses even the explicit in-band path under off; the open-time gate is
+// the same as ask's.
+func TestConnect_LaunchPolicyOff_OpensPlainShell(t *testing.T) {
+	srv := startTestSSHServer(t)
+	defer srv.close()
+
+	launcher := &fakeLauncher{cmd: "exec bash -i", reason: ReasonNone, ok: true}
+
+	ch := launcherConnect(
+		t, srv, []RealClientOption{WithConfigResolver(NewStubConfigResolver())},
+		WithRemoteLauncher(launcher),
+		WithLaunchPolicy(LaunchPolicyOff),
+	)
+
+	assertUsable(t, srv, ch)
+
+	if n := launcher.callCount(); n != 0 {
+		t.Fatalf("launcher consulted %d times under off, want 0 (plain shell at open)", n)
+	}
+	if got := ch.ShellIntegrationReason(); got != ReasonNone {
+		t.Errorf("ShellIntegrationReason = %q, want %q (never attempted)", got, ReasonNone)
+	}
+}
+
+// TestConnect_LaunchPolicyEmpty_IntegratesLikeAuto: an empty policy is the
+// pre-policy default — every existing caller without a policy keeps
+// integrating at startup. This pins the backwards-compatible reading of the
+// field, so adding it cannot silently change an unconfigured connection.
+func TestConnect_LaunchPolicyEmpty_IntegratesLikeAuto(t *testing.T) {
+	srv := startTestSSHServer(t)
+	defer srv.close()
+
+	launcher := &fakeLauncher{cmd: "exec bash -i", reason: ReasonNone, ok: true}
+
+	ch := launcherConnect(
+		t, srv, []RealClientOption{WithConfigResolver(NewStubConfigResolver())},
+		WithRemoteLauncher(launcher),
+		WithLaunchPolicy(""),
+	)
+
+	assertUsable(t, srv, ch)
+
+	if n := launcher.callCount(); n != 1 {
+		t.Fatalf("launcher consulted %d times with an empty policy, want 1 (auto default)", n)
+	}
+	if got := srv.lastExecCommand(); got != "exec bash -i" {
+		t.Errorf("session.Start received %q, want the launcher command", got)
+	}
+}
+
 // TestConnect_ProfileShellPin_BeatsDetection: a profile that pins the far
 // shell must win over detection — the launcher receives the pinned kind,
 // not ShellAuto, and the user's knowledge of the host is never overridden

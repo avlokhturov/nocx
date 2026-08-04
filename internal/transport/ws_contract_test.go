@@ -1332,10 +1332,13 @@ func TestVaultResolveLine_OverTheWireConformsToContract(t *testing.T) {
 
 // ── open ─────────────────────────────────────────────────────────────────
 
-// The DTO's own conformance: the three fields the open ack always carries.
+// The DTO's own conformance: the four fields the open ack always carries.
 // shellIntegrationReason is present even when empty — a missing field would
 // read as "integration happened" to a renderer that defaults to that, which
-// is exactly the soft degrade AGENTS.md forbids.
+// is exactly the soft degrade AGENTS.md forbids. shellIntegration (the
+// resolved launch policy, nocx-4t37.2) is present for every session,
+// including local ones — a renderer that defaults a missing field to "auto"
+// would show an ask/off tab as silently integrated.
 func TestOpen_DTOConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "open.schema.json")
 
@@ -1343,6 +1346,7 @@ func TestOpen_DTOConformsToContract(t *testing.T) {
 		"sessionId":              "0123456789abcdef0123456789abcdef",
 		"cwd":                    "~/work",
 		"shellIntegrationReason": "no-secure-temp",
+		"shellIntegration":       "auto",
 	})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -1353,21 +1357,23 @@ func TestOpen_DTOConformsToContract(t *testing.T) {
 		"sessionId":              "0123456789abcdef0123456789abcdef",
 		"cwd":                    "~/work",
 		"shellIntegrationReason": "",
+		"shellIntegration":       "ask",
 	})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	validateJSON(t, schema, rawNone, "open DTO (integration succeeded)")
+	validateJSON(t, schema, rawNone, "open DTO (integration never attempted — ask)")
 
 	rawUnknown, err := json.Marshal(map[string]string{
 		"sessionId":              "0123456789abcdef0123456789abcdef",
 		"cwd":                    "~/work",
 		"shellIntegrationReason": "unknown",
+		"shellIntegration":       "off",
 	})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	validateJSON(t, schema, rawUnknown, "open DTO (unclassified refusal)")
+	validateJSON(t, schema, rawUnknown, "open DTO (unclassified refusal, off policy)")
 }
 
 // openProfileResolver resolves every profile to a fixed host and a minimal
@@ -1453,12 +1459,19 @@ func TestOpen_OverTheWireConformsToContract(t *testing.T) {
 
 	var got struct {
 		ShellIntegrationReason string `json:"shellIntegrationReason"`
+		ShellIntegration       string `json:"shellIntegration"`
 	}
 	if err := json.Unmarshal(envelope.Result, &got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	if got.ShellIntegrationReason != "no-secure-temp" {
 		t.Errorf("shellIntegrationReason = %q, want %q", got.ShellIntegrationReason, "no-secure-temp")
+	}
+	// The resolver stamped no policy (openProfileResolver builds a bare
+	// config), so the ack must report the default: auto. A direct-host or
+	// profile-less open integrates at startup whenever a launcher is wired.
+	if got.ShellIntegration != "auto" {
+		t.Errorf("shellIntegration = %q, want %q (default when the resolver stamps none)", got.ShellIntegration, "auto")
 	}
 
 	// The launcher the transport option attached must have reached the

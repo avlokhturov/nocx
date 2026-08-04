@@ -25,4 +25,8 @@ export interface Open {
    * Why remote shell integration did not happen for this session; empty when it succeeded or was never attempted.
    */
   shellIntegrationReason: '' | 'unsupported-shell' | 'no-secure-temp' | 'remote-command' | 'unknown'
+  /**
+   * The resolved launch policy for this session (nocx-4t37.2): the connection-scope default the tab's capability control starts from. auto integrates at startup in the interval nocx owns; ask and off open a plain shell and leave the explicit-request path to the renderer's capability control (shell.integrate). The policy is never proof that integration succeeded — shellIntegrationReason and the arrival of markers are what confirm or downgrade the tab's state.
+   */
+  shellIntegration: 'auto' | 'ask' | 'off'
 }

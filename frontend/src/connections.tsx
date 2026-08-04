@@ -199,6 +199,10 @@ const FORWARD_DIRECTIONS: ForwardDirection[] = ['local', 'remote', 'dynamic']
 /** The closed portDiscovery modes, in display order (spec D3). */
 const PORT_DISCOVERY_MODES = ['auto', 'ask', 'off'] as const
 
+/** The closed shellIntegration launch policies, in display order
+ *  (nocx-p0ug): auto integrates at startup, ask opens a plain shell whose
+ *  tab control is the ask, off refuses even the explicit path. */
+const SHELL_INTEGRATION_MODES = ['auto', 'ask', 'off'] as const
 /**
  * Whether a stored forward's destination is a usable "host:port". The
  * backend's authority is net.SplitHostPort; this mirrors its acceptance
@@ -860,6 +864,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     { key: 'readyTimeout', label: 'Ready timeout (ms)' },
     { key: 'agentForward', label: 'Agent forward' },
     { key: 'portDiscovery', label: 'Port discovery' },
+    { key: 'shellIntegration', label: 'Shell integration' },
   ]
 
   /** Human-readable field labels for the impact summary. */
@@ -874,6 +879,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       readyTimeout: 'ready timeout',
       agentForward: 'agent forwarding',
       portDiscovery: 'port discovery',
+      shellIntegration: 'shell integration',
     }
     return m[key] ?? key
   }
@@ -997,6 +1003,20 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                 value={(gv(key) as string) ?? ''}
                 onChange={(v) => setG(key, v || '')}
                 options={PORT_DISCOVERY_MODES.map((m) => ({ value: m, label: m }))}
+                placeholder="&mdash; Not set (inherit) &mdash;"
+              />
+            </div>
+          </Field>
+        )
+      }
+      if (key === 'shellIntegration') {
+        return (
+          <Field for={`group-default-${key}`} label={label}>
+            <div class="cm-field-row">
+              <Select
+                value={(gv(key) as string) ?? ''}
+                onChange={(v) => setG(key, v || '')}
+                options={SHELL_INTEGRATION_MODES.map((m) => ({ value: m, label: m }))}
                 placeholder="&mdash; Not set (inherit) &mdash;"
               />
             </div>
@@ -2290,6 +2310,16 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                         value={fvStr('portDiscovery')}
                         onChange={(v) => setOption('portDiscovery', v || undefined)}
                         options={PORT_DISCOVERY_MODES.map((m) => ({ value: m, label: m }))}
+                        placeholder="&mdash; Inherited &mdash;"
+                      />
+                    </div>
+                  </Field>
+                  <Field for="shell-integration" label="Shell integration">
+                    <div class="cm-field-row">
+                      <Select
+                        value={fvStr('shellIntegration')}
+                        onChange={(v) => setOption('shellIntegration', v || undefined)}
+                        options={SHELL_INTEGRATION_MODES.map((m) => ({ value: m, label: m }))}
                         placeholder="&mdash; Inherited &mdash;"
                       />
                     </div>
