@@ -41,9 +41,9 @@ export interface SidebarViewProps {
    *  Collapsing the sidebar counts as not visible: a view that renders
    *  background work (polling, sampling) must gate it on this. */
   visible: () => boolean
-  /** Reactive accessor for the active tab's saved-profile id — the scope
-   *  of profile-bound views (Ports follows the active tab). Null when the
-   *  active tab has no profile (local shell, alias, Settings). */
+  /** Reactive accessor for the active tab's ports scope — its saved-profile
+   *  id, or the reserved "local" for a local shell (nocx-wzc4.8). Null when
+   *  the active tab has no ports scope (alias tab, Settings). */
   activeProfileId: () => string | null
 }
 

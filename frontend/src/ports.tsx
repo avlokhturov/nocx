@@ -31,6 +31,7 @@ import { Section } from './ui/section'
 import { Spinner } from './ui/spinner'
 import { Stack } from './ui/stack'
 import { showToast } from './ui/toast'
+import { LOCAL_TARGET_ID } from './ports-client'
 
 // ── Services seam ─────────────────────────────────────────────────────────
 
@@ -101,8 +102,9 @@ export function createPortsPauseControl(
 export const POLL_INTERVAL_MS = 5_000
 
 export interface PortsPanelProps {
-  /** Reactive scope — the ACTIVE tab's saved-profile id, never a capture.
-   *  Null when the active tab has no profile (local shell, alias,
+  /** Reactive scope — the ACTIVE tab's ports target id, never a capture: a
+   *  saved-profile id, or the reserved "local" for a local shell
+   *  (nocx-wzc4.8). Null when the active tab has no ports scope (alias tab,
    *  Settings): the panel then shows the no-connection state instead of a
    *  stale host's ports. */
   profileId: () => string | null
@@ -128,6 +130,12 @@ export function PortsPanel(props: PortsPanelProps) {
   /** The panel's current scope — an alias for the reactive prop, read at
    *  call sites so every fetch and mutation targets the ACTIVE tab. */
   const profileId = () => props.profileId()
+
+  /** True while the panel is scoped to the machine nocx itself runs on —
+   *  the reserved "local" target (nocx-wzc4.8). Nothing can be forwarded
+   *  from the machine you are on, so local rows offer copy-address instead
+   *  of a Forward action. */
+  const isLocal = () => profileId() === LOCAL_TARGET_ID
 
   /** Merge a fresh status: discovery state, cadence flags, and the backend's
    *  tracked forwards (which include connection-loss stops) on top of the
@@ -223,7 +231,11 @@ export function PortsPanel(props: PortsPanelProps) {
    *  locally, default to an allocated loopback port. */
   const forward = async (destination: string, port: number): Promise<void> => {
     const pid = profileId()
-    if (pid === null) return
+    // Nothing to forward from the machine you are on: local rows offer
+    // copy-address, never Forward (nocx-wzc4.8). The guard makes the
+    // invariant structural — the row button is already swapped, but a
+    // stray call must never dial tunnel.open with the "local" target.
+    if (pid === null || pid === LOCAL_TARGET_ID) return
     try {
       const rec = await props.services.openForward(pid, destination, port)
       if (profileId() !== pid) return
@@ -333,10 +345,20 @@ export function PortsPanel(props: PortsPanelProps) {
           }
         >
           <Show when={!host() && st()?.state === 'pending'}>
-            <EmptyState
-              title="No active connection"
-              description="Open an SSH session to this profile first — the ports it listens on will appear here."
-            />
+            <Show
+              when={isLocal()}
+              fallback={
+                <EmptyState
+                  title="No active connection"
+                  description="Open an SSH session to this profile first — the ports it listens on will appear here."
+                />
+              }
+            >
+              <EmptyState
+                title="Waiting for the first sample"
+                description="The settle sample runs shortly after this tab opens."
+              />
+            </Show>
           </Show>
           <Show when={host() || (st()?.state ?? '') !== 'pending'}>
             <Show when={st()?.connLost}>
@@ -413,15 +435,30 @@ export function PortsPanel(props: PortsPanelProps) {
                                 </Badge>
                               </Show>
                             </div>
-                            <IconButton
-                              data-testid="ports-forward"
-                              size="xs"
-                              ariaLabel={`Forward ${destinationFor(l)}`}
-                              title={`Forward ${destinationFor(l)}`}
-                              onClick={() => void forward(destinationFor(l), l.port)}
+                            <Show
+                              when={isLocal()}
+                              fallback={
+                                <IconButton
+                                  data-testid="ports-forward"
+                                  size="xs"
+                                  ariaLabel={`Forward ${destinationFor(l)}`}
+                                  title={`Forward ${destinationFor(l)}`}
+                                  onClick={() => void forward(destinationFor(l), l.port)}
+                                >
+                                  <ArrowRightIcon />
+                                </IconButton>
+                              }
                             >
-                              <ArrowRightIcon />
-                            </IconButton>
+                              <IconButton
+                                data-testid="ports-copy"
+                                size="xs"
+                                ariaLabel={`Copy ${destinationFor(l)}`}
+                                title={`Copy ${destinationFor(l)}`}
+                                onClick={() => copyAddress(destinationFor(l))}
+                              >
+                                <CopyIcon />
+                              </IconButton>
+                            </Show>
                           </div>
                         </div>
                       )}
@@ -430,101 +467,112 @@ export function PortsPanel(props: PortsPanelProps) {
                 </Show>
               </Section>
 
-              {/* ── Forwarded ─────────────────────────────────────── */}
-              <Section title="Forwarded" divided dense>
-                <Show
-                  when={runningForwards().length > 0}
-                  fallback={
-                    <EmptyState
-                      title="No active forwards"
-                      description="Forward a detected port to make it reachable locally."
-                    />
-                  }
-                >
-                  <For each={runningForwards()}>
-                    {(f) => (
-                      <div class="ports-row" data-testid="forwarded-row">
-                        <div class="ports-row__main">
-                          <div class="ports-row__text">
-                            <span class="ports-row__addr">
-                              {f.actualBind.host}:{f.actualBind.port}
-                            </span>
-                            <span class="ports-row__dest">
-                              <span class="ports-row__arrow" aria-hidden="true">
-                                →{' '}
+              {/* The forwarding vocabulary exists only off this machine:
+                  local rows offer copy-address, and the Forwarded / Stopped
+                  sections would be an empty offer of an impossible action
+                  (nothing to forward from the machine you are on,
+                  nocx-wzc4.8). */}
+              <Show when={!isLocal()}>
+                {/* ── Forwarded ─────────────────────────────────────── */}
+                <Section title="Forwarded" divided dense>
+                  <Show
+                    when={runningForwards().length > 0}
+                    fallback={
+                      <EmptyState
+                        title="No active forwards"
+                        description="Forward a detected port to make it reachable locally."
+                      />
+                    }
+                  >
+                    <For each={runningForwards()}>
+                      {(f) => (
+                        <div class="ports-row" data-testid="forwarded-row">
+                          <div class="ports-row__main">
+                            <div class="ports-row__text">
+                              <span class="ports-row__addr">
+                                {f.actualBind.host}:{f.actualBind.port}
                               </span>
-                              {f.destination}
-                            </span>
+                              <span class="ports-row__dest">
+                                <span class="ports-row__arrow" aria-hidden="true">
+                                  →{' '}
+                                </span>
+                                {f.destination}
+                              </span>
+                            </div>
+                            <IconButton
+                              data-testid="ports-copy"
+                              size="xs"
+                              ariaLabel={`Copy ${f.actualBind.host}:${f.actualBind.port}`}
+                              title={`Copy ${f.actualBind.host}:${f.actualBind.port}`}
+                              onClick={() =>
+                                copyAddress(`${f.actualBind.host}:${f.actualBind.port}`)
+                              }
+                            >
+                              <CopyIcon />
+                            </IconButton>
+                            <IconButton
+                              data-testid="ports-open"
+                              size="xs"
+                              ariaLabel={`Open ${f.actualBind.host}:${f.actualBind.port}`}
+                              title={`Open ${f.actualBind.host}:${f.actualBind.port}`}
+                              onClick={() =>
+                                openAddress(`${f.actualBind.host}:${f.actualBind.port}`)
+                              }
+                            >
+                              <ExternalLinkIcon />
+                            </IconButton>
+                            <IconButton
+                              data-testid="ports-stop"
+                              size="xs"
+                              ariaLabel={`Stop forward ${f.destination}`}
+                              title={`Stop forward ${f.destination}`}
+                              onClick={() => void stop(f.id)}
+                            >
+                              <SquareIcon />
+                            </IconButton>
                           </div>
-                          <IconButton
-                            data-testid="ports-copy"
-                            size="xs"
-                            ariaLabel={`Copy ${f.actualBind.host}:${f.actualBind.port}`}
-                            title={`Copy ${f.actualBind.host}:${f.actualBind.port}`}
-                            onClick={() => copyAddress(`${f.actualBind.host}:${f.actualBind.port}`)}
-                          >
-                            <CopyIcon />
-                          </IconButton>
-                          <IconButton
-                            data-testid="ports-open"
-                            size="xs"
-                            ariaLabel={`Open ${f.actualBind.host}:${f.actualBind.port}`}
-                            title={`Open ${f.actualBind.host}:${f.actualBind.port}`}
-                            onClick={() => openAddress(`${f.actualBind.host}:${f.actualBind.port}`)}
-                          >
-                            <ExternalLinkIcon />
-                          </IconButton>
-                          <IconButton
-                            data-testid="ports-stop"
-                            size="xs"
-                            ariaLabel={`Stop forward ${f.destination}`}
-                            title={`Stop forward ${f.destination}`}
-                            onClick={() => void stop(f.id)}
-                          >
-                            <SquareIcon />
-                          </IconButton>
-                        </div>
-                        {/* A -R forward whose bind sshd silently replaced carries
+                          {/* A -R forward whose bind sshd silently replaced carries
                               Caveat() — render it as the kit's note (a caveat about
                               the item above it), never as an error: the forward is
                               running. Empty caveat renders nothing. */}
-                        <Show when={f.caveat}>
-                          <MarkerList items={[{ text: f.caveat, tone: 'note' }]} />
-                        </Show>
-                      </div>
-                    )}
-                  </For>
-                </Show>
-              </Section>
-
-              {/* ── Stopped (only when non-empty) ─────────────────── */}
-              <Show when={stoppedForwards().length > 0}>
-                <Section title="Stopped" divided dense>
-                  <For each={stoppedForwards()}>
-                    {(f) => (
-                      <div class="ports-row" data-testid="stopped-row">
-                        <div class="ports-row__main">
-                          <div class="ports-row__text">
-                            <span class="ports-row__addr">{f.destination}</span>
-                            <span class="ports-row__proc">{f.stopReason ?? 'stopped'}</span>
-                            <Show when={f.error}>
-                              <Badge tone="danger" truncate>
-                                {f.error ?? ''}
-                              </Badge>
-                            </Show>
-                          </div>
-                          <Show
-                            when={f.stopReason === 'error' || f.stopReason === 'connection lost'}
-                          >
-                            <Button data-testid="ports-retry-forward" onClick={() => retry(f)}>
-                              Retry
-                            </Button>
+                          <Show when={f.caveat}>
+                            <MarkerList items={[{ text: f.caveat, tone: 'note' }]} />
                           </Show>
                         </div>
-                      </div>
-                    )}
-                  </For>
+                      )}
+                    </For>
+                  </Show>
                 </Section>
+
+                {/* ── Stopped (only when non-empty) ─────────────────── */}
+                <Show when={stoppedForwards().length > 0}>
+                  <Section title="Stopped" divided dense>
+                    <For each={stoppedForwards()}>
+                      {(f) => (
+                        <div class="ports-row" data-testid="stopped-row">
+                          <div class="ports-row__main">
+                            <div class="ports-row__text">
+                              <span class="ports-row__addr">{f.destination}</span>
+                              <span class="ports-row__proc">{f.stopReason ?? 'stopped'}</span>
+                              <Show when={f.error}>
+                                <Badge tone="danger" truncate>
+                                  {f.error ?? ''}
+                                </Badge>
+                              </Show>
+                            </div>
+                            <Show
+                              when={f.stopReason === 'error' || f.stopReason === 'connection lost'}
+                            >
+                              <Button data-testid="ports-retry-forward" onClick={() => retry(f)}>
+                                Retry
+                              </Button>
+                            </Show>
+                          </div>
+                        </div>
+                      )}
+                    </For>
+                  </Section>
+                </Show>
               </Show>
             </Show>
           </Show>

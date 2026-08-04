@@ -23,6 +23,7 @@ import {
 } from './ports'
 import type { PortsStatusResult } from './generated/ports.status'
 import type { TunnelOpenResult } from './generated/tunnel.open'
+import { LOCAL_TARGET_ID } from './ports-client'
 
 // ── Fixtures ──────────────────────────────────────────────────────────────
 
@@ -488,7 +489,7 @@ describe('PortsPanel — forwards', () => {
 // ── The panel follows the ACTIVE tab (nocx-wzc4.7) ───────────────────────
 
 describe('PortsPanel — active-tab scope', () => {
-  it('a local tab (null profile) shows the no-connection state, never a stale host', async () => {
+  it('a tab with no ports scope (Settings, alias) shows the no-connection state, never a stale host', async () => {
     const status = vi
       .fn()
       .mockResolvedValue(statusFixture({ state: 'available', listeners: [listenerFixture(22)] }))
@@ -591,5 +592,101 @@ describe('PortsPanel — active-tab scope', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+})
+
+// ── The local machine (nocx-wzc4.8) ─────────────────────────────────────
+
+describe('PortsPanel — the local machine (nocx-wzc4.8)', () => {
+  it("a local tab scopes ports.* to the reserved 'local' target and shows this machine's listeners", async () => {
+    const status = vi
+      .fn()
+      .mockResolvedValue(
+        statusFixture(
+          { state: 'available', listeners: [listenerFixture(22)] },
+          { profileId: LOCAL_TARGET_ID, host: 'my-machine' },
+        ),
+      )
+    const openForward = vi.fn()
+    const services = fakeServices({ status, openForward })
+    renderPanel(services, { profileId: () => LOCAL_TARGET_ID })
+
+    await waitFor(() => expect(status).toHaveBeenCalledWith(LOCAL_TARGET_ID))
+    await waitFor(() => expect(screen.getByText('0.0.0.0:22')).toBeTruthy())
+    // The row offers copy-address; Forward is not offered on this machine.
+    expect(screen.queryByTestId('ports-forward')).toBeNull()
+    expect(screen.getByTestId('ports-copy')).toBeTruthy()
+    // No forwarding vocabulary at all on a local scope — the sections would
+    // be an empty offer of an impossible action.
+    expect(screen.queryByText('Forwarded')).toBeNull()
+    expect(screen.queryByText('No active forwards')).toBeNull()
+  })
+
+  it('a local row copies the address and never dials tunnel.open', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    const origClipboard = globalThis.navigator.clipboard
+    Object.defineProperty(globalThis.navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true,
+    })
+    try {
+      const openForward = vi.fn()
+      const services = fakeServices({
+        status: vi
+          .fn()
+          .mockResolvedValue(
+            statusFixture(
+              { state: 'available', listeners: [listenerFixture(22)] },
+              { profileId: LOCAL_TARGET_ID, host: 'my-machine' },
+            ),
+          ),
+        openForward,
+      })
+      renderPanel(services, { profileId: () => LOCAL_TARGET_ID })
+      await waitFor(() => expect(screen.getByText('0.0.0.0:22')).toBeTruthy())
+
+      fireEvent.click(screen.getByTestId('ports-copy'))
+      await waitFor(() => expect(writeText).toHaveBeenCalledWith('my-machine:22'))
+      expect(openForward).not.toHaveBeenCalled()
+    } finally {
+      Object.defineProperty(globalThis.navigator, 'clipboard', {
+        value: origClipboard,
+        configurable: true,
+      })
+    }
+  })
+
+  it('permission-denied evidence renders on a local row exactly as on a remote host', async () => {
+    const services = fakeServices({
+      status: vi
+        .fn()
+        .mockResolvedValue(
+          statusFixture(
+            { state: 'available', listeners: [listenerFixture(22, 'permission-denied')] },
+            { profileId: LOCAL_TARGET_ID, host: 'my-machine' },
+          ),
+        ),
+    })
+    renderPanel(services, { profileId: () => LOCAL_TARGET_ID })
+
+    // The same explanation as a remote row: a fact about privilege, not an
+    // error on the user's own machine.
+    await waitFor(() => expect(screen.getByText(/run as root to see owners/)).toBeTruthy())
+    expect(screen.getByText('0.0.0.0:22')).toBeTruthy()
+    expect(screen.queryByTestId('ports-forward')).toBeNull()
+  })
+
+  it("a local tab pending before the first sample never says 'no connection'", async () => {
+    const services = fakeServices({
+      status: vi
+        .fn()
+        .mockResolvedValue(
+          statusFixture({ state: 'pending' }, { profileId: LOCAL_TARGET_ID, host: '' }),
+        ),
+    })
+    renderPanel(services, { profileId: () => LOCAL_TARGET_ID })
+
+    await waitFor(() => expect(screen.getByText('Waiting for the first sample')).toBeTruthy())
+    expect(screen.queryByText('No active connection')).toBeNull()
   })
 })

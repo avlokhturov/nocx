@@ -48,6 +48,7 @@ import { RpcError } from './dispatcher'
 import { FloatingPanel } from './ui/floating-panel'
 import { ShellClient } from './shell-client'
 import type { ShellIntegrateResult } from './generated/shell.integrate'
+import { LOCAL_TARGET_ID } from './ports-client'
 
 // How long the grid must hold still before the PTY is told about it.
 const RESIZE_SETTLE_MS = 80
@@ -286,12 +287,13 @@ export class TerminalContent extends BaseTabContent {
     return this._readyPromise
   }
 
-  /** The saved-profile id this tab's session belongs to, when this is a
-   *  saved-profile SSH tab. Null for local tabs and for alias tabs — an
-   *  alias has no profile until it is adopted. The ports panel scopes to
-   *  this id, so an alias tab has no valid ports scope. */
-  get profileId(): string | null {
-    return this.sshOpts?.profileId || null
+  /** The ports.* target this tab's session scopes to (nocx-wzc4.8): the
+   *  reserved "local" for a local shell, the saved-profile id for a
+   *  saved-profile SSH tab, null for an alias tab — an alias has no
+   *  profile until it is adopted, so it has no valid ports scope. */
+  get portsTargetId(): string | null {
+    if (this.sshOpts === undefined) return LOCAL_TARGET_ID
+    return this.sshOpts.profileId || null
   }
 
   /** Push the composed title to the host: program title, else the cwd label. */
