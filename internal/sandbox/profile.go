@@ -34,6 +34,14 @@ func renderProfile(p *Policy) (string, error) {
 	b.WriteString("(allow mach-priv-task-port)\n")
 	b.WriteString("(allow mach-lookup)\n")
 	b.WriteString("(allow sysctl-read)\n")
+	// A deny-default Seatbelt child still needs these kernel-mediated runtime
+	// services. They do not grant filesystem paths: filesystem access remains
+	// governed solely by the root/file clauses below.
+	b.WriteString("(allow user-preference-read)\n")
+	b.WriteString("(allow ipc-posix-shm)\n")
+	b.WriteString("(allow ipc-posix-sem)\n")
+	b.WriteString("(allow system-socket (require-all (socket-domain AF_SYSTEM) (socket-protocol 2)))\n")
+	b.WriteString("(allow pseudo-tty)\n")
 	b.WriteString("(allow file-read-metadata)\n")
 	b.WriteString("(allow file-map-executable)\n")
 	// Network isolation is out of scope: the contract leaves network

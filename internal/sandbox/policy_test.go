@@ -47,8 +47,8 @@ func TestBuildPolicy_Roots(t *testing.T) {
 	}
 
 	// Writable roots in the fixed tooltip order: workspace, home, tmp.
-	home := canonicalPath(t, filepath.Join(runtimeRoot, "home"))
-	tmp := canonicalPath(t, filepath.Join(runtimeRoot, "tmp"))
+	home := filepath.Join(runtimeRoot, "home")
+	tmp := filepath.Join(runtimeRoot, "tmp")
 	wantRW := []string{canonicalPath(t, workspace), home, tmp}
 	if len(p.WritableRoots) != len(wantRW) {
 		t.Fatalf("WritableRoots = %v, want %v", p.WritableRoots, wantRW)
@@ -279,8 +279,8 @@ func TestBuildPolicy_GitCommonDirAppearsInWritableRoots(t *testing.T) {
 	want := []string{
 		canonicalPath(t, workspace),
 		canonicalPath(t, common),
-		canonicalPath(t, filepath.Join(base, "runtime", "home")),
-		canonicalPath(t, filepath.Join(base, "runtime", "tmp")),
+		filepath.Join(base, "runtime", "home"),
+		filepath.Join(base, "runtime", "tmp"),
 	}
 	if len(p.WritableRoots) != len(want) {
 		t.Fatalf("WritableRoots = %v, want %v", p.WritableRoots, want)

@@ -54,6 +54,17 @@ func TestRenderProfile_Clauses(t *testing.T) {
 	if !strings.Contains(profile, "(allow network*)") {
 		t.Error("profile must contain (allow network*) — network is out of scope")
 	}
+	for _, clause := range []string{
+		"(allow user-preference-read)",
+		"(allow ipc-posix-shm)",
+		"(allow ipc-posix-sem)",
+		"(allow system-socket (require-all (socket-domain AF_SYSTEM) (socket-protocol 2)))",
+		"(allow pseudo-tty)",
+	} {
+		if !strings.Contains(profile, clause) {
+			t.Errorf("profile missing runtime clause %q", clause)
+		}
+	}
 	for _, root := range p.WritableRoots {
 		want := `(allow file-write* (subpath "` + root + `"))`
 		if !strings.Contains(profile, want) {
