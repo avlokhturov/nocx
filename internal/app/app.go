@@ -14,6 +14,7 @@ import (
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/discovery"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/nativeports"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/session"
@@ -276,13 +277,19 @@ func New(opts ...Option) (*App, error) {
 	sess = sess.WithProfileUsageTracker(usageStore)
 	// Port discovery (nocx-wzc4.2): cadence owner for discovery, keyed by
 	// profile. *ssh.RealClient satisfies discovery.Connector without an
-	// adapter — the same shape that satisfies tunnel.Connector. The
-	// cadence timers are named here, at the composition root (spec §4):
-	// one settle sample 1 s after the connection comes up, prompt hints
-	// debounced 1 s, periodic sampling every 10 s while the panel is
-	// visible and nothing is paused.
+	// adapter — the same shape that satisfies tunnel.Connector. The local
+	// machine (nocx-wzc4.8) samples through the native kernel reader,
+	// wired here at the composition root (AD-8) behind the same Provider
+	// seam the remote ladder implements. The cadence timers are named
+	// here, at the composition root (spec §4): one settle sample 1 s after
+	// the connection comes up, prompt hints debounced 1 s, periodic
+	// sampling every 10 s while the panel is visible and nothing is
+	// paused.
 	discoverySched := discovery.NewScheduler(
 		sshClient, logger,
+		discovery.WithLocalProvider(func(l log.Logger) discovery.Provider {
+			return nativeports.NewProvider(l)
+		}),
 		discovery.WithSettleDelay(1*time.Second),
 		discovery.WithPromptDebounce(time.Second),
 		discovery.WithSampleInterval(10*time.Second),

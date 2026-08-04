@@ -18,6 +18,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/shady2k/nocx/internal/discovery"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/nativeports"
 	"github.com/shady2k/nocx/internal/ssh"
 )
 
@@ -423,4 +424,108 @@ func waitPortsFor(t *testing.T, what string, cond func() bool) {
 
 func testPortsOption() ssh.ConnectOption {
 	return func(c *ssh.ConnectConfig) { c.User = "test" }
+}
+
+// TestPorts_LocalTarget_OverTheWire: the reserved "local" identity serves
+// the machine's own ports through the real handlers — forwards stay empty,
+// the host is the machine's name, and the sample comes from the real local
+// probe, never the scripted SSH connector. Opening a local tab through the
+// real socket is what creates the target; closing the last local tab tears
+// it down while an SSH target keeps sampling (re-scopes both directions).
+func TestPorts_LocalTarget_OverTheWire(t *testing.T) {
+	statusSchema := loadSchema(t, "ports.status.schema.json")
+	connector := &portsFakeConnector{}
+	sched := discovery.NewScheduler(
+		connector, log.NewSlogAdapter(nil),
+		discovery.WithLocalProvider(func(l log.Logger) discovery.Provider {
+			return nativeports.NewProvider(l)
+		}),
+		discovery.WithSettleDelay(5*time.Millisecond),
+		discovery.WithPromptDebounce(5*time.Millisecond),
+		discovery.WithSampleInterval(0),
+	)
+	ws, stop := newPortsHarness(t, sched)
+	defer stop()
+	conn := connectWS(t, ws)
+	// Before any local tab: pending, like any target before its first
+	// sample — never an error and never "no connection".
+	raw := portsCall(t, conn, "ports.status", map[string]any{"profileId": discovery.LocalTargetID}, 1)
+	validateJSON(t, statusSchema, raw, "ports.status local pending")
+	var st portsStatusResult
+	if err := json.Unmarshal(raw, &st); err != nil {
+		t.Fatal(err)
+	}
+	if st.Discovery.State != "pending" {
+		t.Fatalf("local state before any tab = %q, want pending", st.Discovery.State)
+	}
+
+	// A local tab opens through the real socket (handleOpen's local branch
+	// fires the hook): the settle sample probes the real machine.
+	openResp := jsonrpcCallWithID(t, conn, "open", map[string]uint16{
+		"cols": 80, "rows": 24, "xpixel": 0, "ypixel": 0,
+	}, 2)
+	var open struct {
+		Result struct {
+			SessionID string `json:"sessionId"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(openResp, &open); err != nil {
+		t.Fatal(err)
+	}
+	if open.Result.SessionID == "" {
+		t.Fatal("open returned no sessionId")
+	}
+
+	waitPortsFor(t, "local settle sample", func() bool {
+		st := sched.Status(discovery.LocalTargetID).Sample.State
+		return st == "available" || st == "available-limited"
+	})
+	raw = portsCall(t, conn, "ports.status", map[string]any{"profileId": discovery.LocalTargetID}, 3)
+	validateJSON(t, statusSchema, raw, "ports.status local settled")
+	if err := json.Unmarshal(raw, &st); err != nil {
+		t.Fatal(err)
+	}
+	if st.ProfileID != discovery.LocalTargetID {
+		t.Fatalf("profileId = %q, want %q", st.ProfileID, discovery.LocalTargetID)
+	}
+	if st.Discovery.Probe == "" {
+		t.Fatal("local probe = \"\", want a real probe dialect (the ladder ran on this machine)")
+	}
+	if st.Host == "" {
+		t.Fatal("local host empty, want the machine hostname")
+	}
+	if len(st.Forwards) != 0 {
+		t.Fatalf("local forwards = %d, want 0 (nothing to forward from the machine you are on)", len(st.Forwards))
+	}
+	// The scripted SSH connector must never be touched by the local target.
+	if got := len(connector.conns); got != 0 {
+		t.Fatalf("ssh connector leases = %d, want 0 (local never dials)", got)
+	}
+
+	// Re-scope both directions: an SSH target on top of the local one...
+	connector.resp = portsFramed(portsSSMixed)
+	sched.ConnectionUp("ssh:p1:1", "host.example", testPortsOption())
+	waitPortsFor(t, "ssh settle sample", func() bool {
+		return sched.Status("ssh:p1:1").Sample.State == "available"
+	})
+	raw = portsCall(t, conn, "ports.status", map[string]any{"profileId": "ssh:p1:1"}, 4)
+	validateJSON(t, statusSchema, raw, "ports.status ssh")
+	if err := json.Unmarshal(raw, &st); err != nil {
+		t.Fatal(err)
+	}
+	if st.Host != "host.example" || len(st.Discovery.Listeners) != 7 {
+		t.Fatalf("ssh status = host %q with %d listeners, want host.example with 7", st.Host, len(st.Discovery.Listeners))
+	}
+	if got := sched.Status(discovery.LocalTargetID).Sample.State; got != "available" && got != "available-limited" {
+		t.Fatalf("local state while ssh tab is up = %q, want still sampling", got)
+	}
+
+	// ...and closing the local tab tears down the local target only.
+	_ = jsonrpcCallWithID(t, conn, "close", map[string]string{"sessionId": open.Result.SessionID}, 5)
+	waitPortsFor(t, "local target down", func() bool {
+		return sched.Status(discovery.LocalTargetID).Sample.State == "pending"
+	})
+	if st := sched.Status("ssh:p1:1"); st.Sample.State != "available" {
+		t.Fatalf("ssh state after local close = %q, want still available", st.Sample.State)
+	}
 }

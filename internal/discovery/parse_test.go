@@ -284,16 +284,16 @@ func TestSampleState(t *testing.T) {
 	denied := Listener{Port: 2, Process: Process{Evidence: EvidencePermissionDenied}}
 	unsupported := Listener{Port: 3, Process: Process{Evidence: EvidenceUnsupported}}
 
-	if got := sampleState(nil); got != StateAvailable {
+	if got := SampleState(nil); got != StateAvailable {
 		t.Errorf("empty sample state = %v, want available (no listeners observed)", got)
 	}
-	if got := sampleState([]Listener{known, denied}); got != StateAvailable {
+	if got := SampleState([]Listener{known, denied}); got != StateAvailable {
 		t.Errorf("mixed evidence state = %v, want available", got)
 	}
-	if got := sampleState([]Listener{denied, denied}); got != StateAvailableLimited {
+	if got := SampleState([]Listener{denied, denied}); got != StateAvailableLimited {
 		t.Errorf("all-denied state = %v, want available-limited", got)
 	}
-	if got := sampleState([]Listener{unsupported}); got != StateAvailableLimited {
+	if got := SampleState([]Listener{unsupported}); got != StateAvailableLimited {
 		t.Errorf("unsupported evidence state = %v, want available-limited", got)
 	}
 }

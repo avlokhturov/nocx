@@ -2,6 +2,8 @@ package discovery
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -11,17 +13,104 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Scripted fake connector — the scheduler acquires one fakeConn per sample
-// pass that actually reaches a lease, exactly like the production connector
-// (ssh.RealClient) hands out leases. queueConn pre-scripts the NEXT
-// acquisition (a refusal, a loss) instead of pre-seeding a list the scheduler
-// never reads.
+// Scripted ssh-flavored fake — the scheduler's connector surface speaks
+// ssh.DiscoveryConn (the connector stays SSH-shaped at the composition
+// boundary; the scheduler adapts it to the exec seam). queueConn pre-scripts
+// the NEXT acquisition (a refusal, a loss) instead of pre-seeding a list the
+// scheduler never reads.
 // ---------------------------------------------------------------------------
+
+type sshFakeConn struct {
+	mu        sync.Mutex
+	responses []sshFakeResponse
+	execs     []string
+	block     chan struct{} // when non-nil, Exec blocks until ctx done or this closes
+	done      chan struct{}
+	closed    bool
+	lost      bool
+	// autoValid answers every exec with a valid "normal host" sample,
+	// without consuming a queued response.
+	autoValid bool
+}
+
+type sshFakeResponse struct {
+	result *ssh.ExecResult
+	err    error
+}
+
+func newSSHFakeConn() *sshFakeConn {
+	return &sshFakeConn{done: make(chan struct{})}
+}
+
+func (f *sshFakeConn) Exec(ctx context.Context, cmd string) (*ssh.ExecResult, error) {
+	f.mu.Lock()
+	f.execs = append(f.execs, cmd)
+	block := f.block
+	f.mu.Unlock()
+
+	if block != nil {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-block:
+		case <-f.done:
+			return nil, ssh.ErrExecLost
+		}
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	switch {
+	case f.closed:
+		return nil, ssh.ErrExecClosed
+	case f.lost:
+		return nil, ssh.ErrExecLost
+	}
+	if f.autoValid {
+		return framedSSH(knownRow), nil
+	}
+	if len(f.responses) == 0 {
+		return nil, errors.New("fake: no queued response for " + cmd)
+	}
+	resp := f.responses[0]
+	f.responses = f.responses[1:]
+	return resp.result, resp.err
+}
+
+func (f *sshFakeConn) Done() <-chan struct{} { return f.done }
+func (f *sshFakeConn) LostErr() error        { return nil }
+func (f *sshFakeConn) Close() error {
+	f.mu.Lock()
+	f.closed = true
+	f.mu.Unlock()
+	return nil
+}
+
+func (f *sshFakeConn) queue(resps ...sshFakeResponse) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.responses = append(f.responses, resps...)
+}
+
+func (f *sshFakeConn) commands() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.execs...)
+}
+
+// framedSSH builds the ssh lease's version of a sentinel-framed probe
+// response — what the real lease returns, before adaptSSH converts it.
+func framedSSH(body string) *ssh.ExecResult {
+	if body != "" && !strings.HasSuffix(body, "\n") {
+		body += "\n"
+	}
+	return &ssh.ExecResult{Stdout: []byte("NOCX-PD/1\n" + body + "NOCX-PD/1\n"), ExitStatus: 0}
+}
 
 type fakeConnector struct {
 	mu     sync.Mutex
-	conns  []*fakeConn
-	queued []*fakeConn
+	conns  []*sshFakeConn
+	queued []*sshFakeConn
 	err    error
 	// autoValid answers every exec on FRESH conns with a valid "normal
 	// host" sample. queueConn'd conns are scripted by hand and skip this.
@@ -40,23 +129,23 @@ func (c *fakeConnector) DiscoveryConn(_ context.Context, _ string, _ ...ssh.Conn
 		c.conns = append(c.conns, f)
 		return f, nil
 	}
-	f := newFakeConn()
+	f := newSSHFakeConn()
 	f.autoValid = c.autoValid
 	c.conns = append(c.conns, f)
 	return f, nil
 }
 
 // queueConn hands the next acquisition a pre-scripted conn.
-func (c *fakeConnector) queueConn(f *fakeConn) {
+func (c *fakeConnector) queueConn(f *sshFakeConn) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.queued = append(c.queued, f)
 }
 
-func (c *fakeConnector) acquired() []*fakeConn {
+func (c *fakeConnector) acquired() []*sshFakeConn {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return append([]*fakeConn(nil), c.conns...)
+	return append([]*sshFakeConn(nil), c.conns...)
 }
 
 func (c *fakeConnector) execCount() int {
@@ -219,8 +308,8 @@ func TestScheduler_SampleNowActsAsRetry(t *testing.T) {
 	s := testScheduler(t, conn)
 
 	// First sample: the server refuses the extra session (MaxSessions 1).
-	f0 := newFakeConn()
-	f0.queue(fakeResponse{err: ssh.ErrExecSessionRefused})
+	f0 := newSSHFakeConn()
+	f0.queue(sshFakeResponse{err: ssh.ErrExecSessionRefused})
 	conn.queueConn(f0)
 
 	s.ConnectionUp("ssh:p1:1", "host.example", testConnectOption())
@@ -232,7 +321,7 @@ func TestScheduler_SampleNowActsAsRetry(t *testing.T) {
 
 	// Automatic sampling is disabled by the refusal; SampleNow (the panel's
 	// Retry) clears it and samples immediately.
-	f0.queue(fakeResponse{result: framed(knownRow)})
+	f0.queue(sshFakeResponse{result: framedSSH(knownRow)})
 	s.SampleNow("ssh:p1:1")
 	waitFor(t, "retry sample", func() bool {
 		return s.Status("ssh:p1:1").Sample.State == StateAvailable
@@ -261,8 +350,8 @@ func TestScheduler_ConnectionLossMarksLostAndReconnectResamples(t *testing.T) {
 
 	// Reconnect: ConnectionUp resets the stale result and a fresh detector
 	// (fresh lease — probe selection is once per connection) samples.
-	f1 := newFakeConn()
-	f1.queue(fakeResponse{result: framed(knownRow)})
+	f1 := newSSHFakeConn()
+	f1.queue(sshFakeResponse{result: framedSSH(knownRow)})
 	conn.queueConn(f1)
 	s.ConnectionUp("ssh:p1:1", "host.example", testConnectOption())
 	// Wait on the STATE, not the exec count: the count increments while the
@@ -315,6 +404,120 @@ func TestScheduler_StatusPendingBeforeFirstSample(t *testing.T) {
 	}
 	if st.Sample.Listeners != nil {
 		t.Fatalf("no listeners before any sample, got %d", len(st.Sample.Listeners))
+	}
+}
+
+// fakeLocalProvider is a scripted provider for the local target: cadence
+// tests drive it, so the machine itself is never probed in scheduler tests
+// (the real-machine proof lives in internal/nativeports).
+type fakeLocalProvider struct {
+	sample Sample
+}
+
+func (f *fakeLocalProvider) Sample(context.Context) Sample { return f.sample }
+func (f *fakeLocalProvider) Retry()                        {}
+func (f *fakeLocalProvider) Close() error                  { return nil }
+
+// localTestProvider wires a scripted "available" provider for LocalTargetID.
+func localTestProvider() SchedulerOption {
+	return WithLocalProvider(func(log.Logger) Provider {
+		return &fakeLocalProvider{sample: Sample{
+			State: StateAvailable,
+			Listeners: []Listener{{
+				Family:  FamilyIPv4,
+				Address: "127.0.0.1",
+				Port:    9999,
+				Process: Process{Evidence: EvidenceKnown, Name: "test", PID: 1},
+			}},
+			Probe: "fake-local",
+		}}
+	})
+}
+
+// TestScheduler_LocalTarget_SettlesAndSamples: the reserved LocalTargetID
+// behaves like any target — ConnectionUp schedules a settle sample — but
+// the sample comes from the local provider, never from the SSH connector
+// (the local target has nothing to dial).
+func TestScheduler_LocalTarget_SettlesAndSamples(t *testing.T) {
+	conn := &fakeConnector{}
+	s := testScheduler(t, conn, localTestProvider())
+	s.ConnectionUp(LocalTargetID, "machine-host")
+
+	waitFor(t, "local settle sample", func() bool {
+		st := s.Status(LocalTargetID)
+		return st.Sample.State == StateAvailable || st.Sample.State == StateAvailableLimited
+	})
+	st := s.Status(LocalTargetID)
+	if st.Host != "machine-host" {
+		t.Fatalf("host = %q, want machine-host", st.Host)
+	}
+	if got := conn.execCount(); got != 0 {
+		t.Fatalf("ssh connector execs = %d, want 0 (the local target never dials)", got)
+	}
+}
+
+// TestScheduler_LocalAndSSHTargets_RescopeIndependently is the switching
+// contract: a local tab and an SSH tab each scope the panel to their own
+// target, and closing either one tears down exactly that target — never
+// the other.
+func TestScheduler_LocalAndSSHTargets_RescopeIndependently(t *testing.T) {
+	conn := &fakeConnector{}
+	s := testScheduler(t, conn, localTestProvider())
+
+	s.ConnectionUp(LocalTargetID, "machine-host")
+	s.ConnectionUp("ssh:p1:1", "host.example", testConnectOption())
+	waitFor(t, "local settle sample", func() bool {
+		st := s.Status(LocalTargetID)
+		return st.Sample.State == StateAvailable || st.Sample.State == StateAvailableLimited
+	})
+	waitFor(t, "ssh settle sample", func() bool {
+		return s.Status("ssh:p1:1").Sample.State == StateAvailable
+	})
+
+	if got := s.Status(LocalTargetID).Host; got != "machine-host" {
+		t.Fatalf("local host = %q, want machine-host", got)
+	}
+	if got := s.Status("ssh:p1:1").Host; got != "host.example" {
+		t.Fatalf("ssh host = %q, want host.example", got)
+	}
+
+	// Closing the local tab leaves the SSH target sampling.
+	s.ConnectionDown(LocalTargetID)
+	if st := s.Status(LocalTargetID); st.Sample.State != StatePending {
+		t.Fatalf("local state after down = %q, want pending (target forgotten)", st.Sample.State)
+	}
+	if st := s.Status("ssh:p1:1"); st.Sample.State != StateAvailable {
+		t.Fatalf("ssh state after local down = %q, want still available", st.Sample.State)
+	}
+
+	// And the reverse: closing the SSH tab leaves nothing behind.
+	s.ConnectionDown("ssh:p1:1")
+	if st := s.Status("ssh:p1:1"); st.Sample.State != StatePending {
+		t.Fatalf("ssh state after down = %q, want pending", st.Sample.State)
+	}
+}
+
+// TestScheduler_LocalTarget_PauseSuppressesLocalProbes: Pause governs the
+// local machine too — a local target is a background poll like any other.
+func TestScheduler_LocalTarget_PauseSuppressesLocalProbes(t *testing.T) {
+	conn := &fakeConnector{}
+	s := testScheduler(t, conn, localTestProvider())
+	s.ConnectionUp(LocalTargetID, "machine-host")
+	waitFor(t, "local settle sample", func() bool {
+		st := s.Status(LocalTargetID)
+		return st.Sample.State == StateAvailable || st.Sample.State == StateAvailableLimited
+	})
+
+	before := s.Status(LocalTargetID).Sample
+	s.SetPaused(LocalTargetID, true)
+	s.PromptHint(LocalTargetID)
+	time.Sleep(80 * time.Millisecond)
+	after := s.Status(LocalTargetID)
+	if !after.Paused {
+		t.Fatal("Paused not echoed on the local status")
+	}
+	if after.Sample.State != before.State {
+		t.Fatalf("local state changed while paused: %q -> %q", before.State, after.Sample.State)
 	}
 }
 

@@ -1122,8 +1122,14 @@ func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connSta
 	// established (ring created, subscriber attached) is the target "up" —
 	// a session that failed its ring setup must not leave a discovery
 	// target behind with nobody to tear it down.
-	if cfg.ProfileID != "" {
+	switch {
+	case cfg.ProfileID != "":
 		s.discoveryUp(cfg.ProfileID, cfg.Host, cfg.Remote)
+	case cfg.Kind == session.KindLocal:
+		// A local tab is a target too: the machine listens like any host,
+		// and the same ladder finds it (nocx-wzc4.8). Keyed by the
+		// reserved LocalTargetID, torn down when the last local tab closes.
+		s.discoveryUpLocal()
 	}
 
 	// cwd rides the open result so the tab has a name before any program sets
