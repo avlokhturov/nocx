@@ -175,3 +175,11 @@
   font-size: var(--font-size-2xs);
   color: var(--color-text-dim);
 }
+
+/* The panel's subject, as a chip rather than a sentence: a scanned list's
+   subject is a label. Placement only — the Badge is the kit's and is never
+   repainted here (nocx-695k.3). */
+.ports-subject {
+  display: flex;
+  min-width: 0;
+}

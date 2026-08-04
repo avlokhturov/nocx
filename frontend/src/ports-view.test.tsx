@@ -446,7 +446,7 @@ describe('ports sidebar view', () => {
     portsIcon(bar).click()
     await vi.waitFor(() => {
       const note = panel.querySelector('[data-testid="ports-target-note"]')
-      expect(note?.textContent ?? '').toContain('this machine')
+      expect(note?.textContent ?? '').toContain('This machine')
     })
   })
 })
