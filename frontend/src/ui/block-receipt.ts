@@ -217,4 +217,35 @@ export class BlockReceipt {
     const n = this.rows.size
     this.primaryBtn.textContent = n === 1 ? 'Save' : `Save ${n}`
   }
+
+  // ── Connection-offer variant (nocx-pu4.7) ───────────────────────────
+
+  /**
+   * Build a receipt that offers to save an SSH destination as a managed
+   * connection. Same behaviour contract as the vault-capture receipt —
+   * block-attached, non-modal, no focus steal, one primary action, no
+   * expiry — with connection-specific labels. The kit grows by VARIANT
+   * (ui/README.md), not by near-duplicate.
+   */
+  static forConnection(
+    destination: string,
+    suggestedName: string,
+    callbacks: {
+      onSave(name: string): void
+      onDismiss(): void
+    },
+  ): BlockReceipt {
+    const capture: BlockReceiptCapture = {
+      captureId: `conn-offer:${destination}`,
+      kindLabel: 'SSH host',
+      maskedValue: destination,
+      suggestedName,
+    }
+    return new BlockReceipt([capture], {
+      onSaveAll: (rows) => callbacks.onSave(rows[0].name),
+      onDismiss: () => callbacks.onDismiss(),
+      onHover: () => {},
+      onExitReview: () => {},
+    })
+  }
 }

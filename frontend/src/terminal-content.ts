@@ -906,6 +906,7 @@ export class TerminalContent extends BaseTabContent {
           const getLine = (y: number) => renderer.getBufferLine(y)
           this.scrollback?.onCommandEnd(getLine, marker.line, marker.exitCode ?? null)
           renderer.clearViewport()
+          void this._maybeOfferConnection()
         }
       })
 
@@ -2194,5 +2195,158 @@ export class TerminalContent extends BaseTabContent {
       level: 'danger',
       message: failure.message ?? 'Could not resolve the command. It was not sent.',
     })
+  }
+
+  // ── Connection offer on hand-typed ssh block (nocx-pu4.7) ─────────────
+
+  /** After a block freezes, offer to save the destination as a managed
+   *  connection — but only for an interactive ssh to a host that is NOT
+   *  already a saved profile and NOT previously dismissed. The receipt
+   *  follows the BlockReceipt contract: block-attached, non-modal, no
+   *  focus steal, no expiry. */
+  private async _maybeOfferConnection(): Promise<void> {
+    if (!this.profileClient) return
+    const blocks = this.scrollback?.blockManager.blocks
+    if (!blocks || blocks.length === 0) return
+
+    const last = blocks[blocks.length - 1]
+    if (!isInteractiveTransition(last.command)) return
+
+    const dest = extractDestination(last.command)
+    if (!dest) return
+
+    // Already a saved profile? No offer.
+    if (await this._isKnownProfile(dest)) return
+
+    // Already dismissed? No offer.
+    if (await this._isDismissed(dest)) return
+
+    // Already showing for this destination on another block? No duplicate.
+    for (const [, r] of this.receipts) {
+      if (r instanceof BlockReceipt) continue
+    }
+
+    const hostPart = dest.includes('@') ? dest.split('@')[1] : dest
+
+    const receipt = BlockReceipt.forConnection(dest, hostPart, {
+      onSave: (name) => void this._saveConnection(dest, name, last.el, receipt),
+      onDismiss: () => void this._dismissConnectionOffer(dest, last.el, receipt),
+    })
+
+    this.receipts.set(last.el, receipt)
+    this.receiptBlockEl = last.el
+    receipt.mount(last.el)
+  }
+
+  /** Check whether a destination already has a saved SSH profile. */
+  private async _isKnownProfile(dest: string): Promise<boolean> {
+    if (!this.profileClient) return false
+    try {
+      const profiles = await this.profileClient.listProfiles()
+      // A destination "user@host" matches a profile whose host equals the
+      // host part, or user@host equals host (quick-connect profiles).
+      const hostPart = dest.includes('@') ? dest.split('@')[1] : dest
+      return profiles.some(
+        (p) => p.type === 'ssh' && (p.options.host === dest || p.options.host === hostPart),
+      )
+    } catch {
+      // Fail-open: if we cannot list profiles, do not nag.
+      return true
+    }
+  }
+
+  // ── Dismissal persistence via settings (nocx-pu4.7) ──────────────────
+
+  private static readonly DISMISSED_KEY = 'nocx.connectionOffers.dismissed'
+  private _dismissedCache: Set<string> | null = null
+
+  /** Load dismissed destinations from settings. Cached per tab: a new tab
+   *  picks up the latest value at its first ssh. */
+  private async _loadDismissed(): Promise<Set<string>> {
+    if (this._dismissedCache) return this._dismissedCache
+    if (!this.profileClient) return new Set()
+    try {
+      const snap = await this.profileClient.getSnapshot()
+      const raw = snap.values[TerminalContent.DISMISSED_KEY]
+      if (typeof raw === 'string') {
+        this._dismissedCache = new Set(JSON.parse(raw) as string[])
+        return this._dismissedCache
+      }
+    } catch {
+      // Settings unavailable — no persisted dismissals, but the offer
+      // can still be made and dismissed for this session.
+    }
+    this._dismissedCache = new Set()
+    return this._dismissedCache
+  }
+
+  private async _isDismissed(dest: string): Promise<boolean> {
+    const dismissed = await this._loadDismissed()
+    return dismissed.has(dest)
+  }
+
+  private async _persistDismissal(dest: string): Promise<void> {
+    if (!this.profileClient) return
+    const dismissed = await this._loadDismissed()
+    dismissed.add(dest)
+    try {
+      await this.profileClient.setSetting(
+        TerminalContent.DISMISSED_KEY,
+        JSON.stringify([...dismissed]),
+      )
+    } catch {
+      // Settings write failed — the destination is still dismissed for
+      // this session, but will be offered again on restart.
+    }
+  }
+
+  private async _dismissConnectionOffer(
+    dest: string,
+    blockEl: HTMLElement,
+    receipt: BlockReceipt,
+  ): Promise<void> {
+    await this._persistDismissal(dest)
+    receipt.destroy()
+    this.receipts.delete(blockEl)
+    if (this.receiptBlockEl === blockEl) this.receiptBlockEl = null
+    showToast({
+      level: 'info',
+      message: `Dismissed — ${dest} will not be offered again as a connection.`,
+    })
+  }
+
+  private async _saveConnection(
+    dest: string,
+    name: string,
+    blockEl: HTMLElement,
+    receipt: BlockReceipt,
+  ): Promise<void> {
+    if (!this.profileClient) return
+    try {
+      const hostPart = dest.includes('@') ? dest.split('@')[1] : dest
+      const userPart = dest.includes('@') ? dest.split('@')[0] : undefined
+      const profile = await this.profileClient.createProfile({
+        id: '',
+        type: 'ssh',
+        name,
+        options: {
+          host: hostPart,
+          ...(userPart ? { user: userPart } : {}),
+        },
+      })
+      receipt.destroy()
+      this.receipts.delete(blockEl)
+      if (this.receiptBlockEl === blockEl) this.receiptBlockEl = null
+      showToast({
+        level: 'success',
+        message: `Saved "${profile.name}" as a connection.`,
+      })
+    } catch (err) {
+      showToast({
+        level: 'danger',
+        message: `Could not save connection: ${err instanceof Error ? err.message : String(err)}`,
+      })
+      receipt.markFailed(`conn-offer:${dest}`, 'could not save — try again')
+    }
   }
 }
