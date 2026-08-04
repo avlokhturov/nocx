@@ -328,6 +328,17 @@ export function PortsPanel(props: PortsPanelProps) {
     'available-limited',
   ])
 
+  /** Whose listeners the Detected section is about. Always rendered, because
+   *  the alternative is a list of bare addresses whose machine the user has
+   *  to infer — and the thing they will infer it from is the tab title,
+   *  which is set by whatever program last wrote OSC 2 and is not a fact
+   *  about where discovery ran. */
+  const whoseListeners = (): string => {
+    if (isLocal()) return 'Listening on this machine — where nocx itself runs.'
+    const h = host()
+    return h ? `Listening on ${h}.` : 'Listening on the connected host.'
+  }
+
   /** The state string when no arm claims it — '' when one does. */
   const unhandledState = (): string => {
     const s = st()
@@ -392,6 +403,16 @@ export function PortsPanel(props: PortsPanelProps) {
             </Show>
             <Show when={!st()?.connLost}>
               <Section title="Detected" divided dense>
+                {/* Whose listeners these are, said out loud and always. The
+                    panel had no such line, so a tab titled `pi@raspberrypi`
+                    showed this machine's listeners and nothing contradicted
+                    the title (owner, 2026-08-04). A list of addresses is
+                    meaningless without the machine it belongs to, and the
+                    tab title is NOT that machine — it is whatever the last
+                    program set. */}
+                <p class="ports-note" data-testid="ports-target-note">
+                  {whoseListeners()}
+                </p>
                 <Show when={unhandledState()}>
                   <EmptyState
                     title="Discovery is in a state this panel does not know"

@@ -424,4 +424,29 @@ describe('ports sidebar view', () => {
       expect(section?.textContent ?? '').toContain('settling')
     })
   })
+  it('names whose listeners it is showing, so the tab title cannot be mistaken for it', async () => {
+    const { bar, panel } = await mountApp(fakeServices())
+    portsIcon(bar).click()
+    await vi.waitFor(() => {
+      const note = panel.querySelector('[data-testid="ports-target-note"]')
+      expect(note?.textContent ?? '').toContain('host.example')
+    })
+  })
+
+  it('says the local listeners belong to this machine, not to whatever the tab is called', async () => {
+    const local = statusFixture(LOCAL_TARGET_ID)
+    local.host = ''
+    const { bar, panel } = await mountApp(
+      fakeServices({
+        status: vi.fn().mockResolvedValue(local),
+        sample: vi.fn().mockResolvedValue(local),
+      }),
+      LOCAL_TARGET_ID,
+    )
+    portsIcon(bar).click()
+    await vi.waitFor(() => {
+      const note = panel.querySelector('[data-testid="ports-target-note"]')
+      expect(note?.textContent ?? '').toContain('this machine')
+    })
+  })
 })
