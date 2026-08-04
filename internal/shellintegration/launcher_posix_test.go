@@ -17,8 +17,12 @@ import (
 // the user's ~/.profile ran (a login shell really started), and that the
 // launcher's transient ENV file erased itself — nothing survives the
 // session.
+//
+// dash is required, not optional: this test is the minimal tier's only
+// end-to-end proof, so a machine without dash must report "did not run",
+// never green (nocx-gd84, same treatment as the bash/zsh launcher tests).
 func TestPosixLauncher_EmitsMarkersFromPS1(t *testing.T) {
-	dashPath := requireShell(t, "dash")
+	dashPath := requireIntegrationShell(t, "dash")
 
 	home := t.TempDir()
 	// #nosec G306 — test fixture file, intentionally created with restricted permissions.

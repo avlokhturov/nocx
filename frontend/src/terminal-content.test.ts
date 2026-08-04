@@ -16,6 +16,29 @@
 // editor.test.ts uses, and the selection is seeded through the CM6 view —
 // the same transaction a mouse drag produces.
 import { describe, expect, it, vi } from 'vitest'
+// The stylesheet contract assertion below reads the app CSS from disk. The
+// node builtins are untyped here (@types/node is not installed), so the
+// imports sit behind @ts-expect-error and the calls behind a contained
+// no-unsafe disable — the same trade theme-catalogue.test.ts makes at file
+// level, confined to this setup instead.
+/* eslint-disable @typescript-eslint/no-unsafe-assignment,
+                      @typescript-eslint/no-unsafe-call */
+// @ts-expect-error — @types/node not installed; vitest resolves at runtime
+import { readFileSync } from 'node:fs'
+// @ts-expect-error — @types/node not installed; vitest resolves at runtime
+import { resolve } from 'node:path'
+
+declare global {
+  interface ImportMeta {
+    /** Present in the vitest/vite ESM runtime; the stylesheet read needs it. */
+    dirname?: string
+  }
+}
+
+const srcDir = import.meta.dirname ?? resolve(new URL('.', import.meta.url).pathname)
+const STYLE_ENTRY = resolve(srcDir, 'style.css')
+/* eslint-enable @typescript-eslint/no-unsafe-assignment,
+                       @typescript-eslint/no-unsafe-call */
 import { EditorView } from '@codemirror/view'
 import {
   createRendererMock,
@@ -915,5 +938,139 @@ describe('in-band integration (nocx-ynsx)', () => {
     } finally {
       teardown()
     }
+  })
+})
+
+/**
+ * Extract the body of the first top-level rule whose selector contains
+ * `className` as a whole class. Brace-matched, so nested blocks (media
+ * queries) cannot truncate the body. Returns null when no rule matches.
+ */
+function extractRuleBlock(css: string, className: string): string | null {
+  const re = new RegExp(`\\.${className}(?![\\w-])`)
+  let i = 0
+  while (i < css.length) {
+    const open = css.indexOf('{', i)
+    if (open === -1) return null
+    let depth = 1
+    let j = open + 1
+    while (j < css.length && depth > 0) {
+      if (css[j] === '{') depth++
+      else if (css[j] === '}') depth--
+      j++
+    }
+    if (depth !== 0) return null
+    if (re.test(css.slice(i, open))) return css.slice(open + 1, j - 1)
+    i = j
+  }
+  return null
+}
+
+const stripComments = (s: string): string => s.replace(/\/\*[\s\S]*?\*\//g, '')
+
+// The SSH block header regression (nocx-a44m): the cwd chip used to park in
+// the dead centre of the header because `.cmd-header-chips` separated its
+// children with `justify-content: space-between` — right for two children
+// (a local block is [cwd, right]) and wrong for three (an SSH block adds the
+// location chip, and three children space evenly). Fixed in 30014e3 by
+// pushing the right group out with its own `margin-left: auto`, which behaves
+// identically for any child count. jsdom computes no layout, so these
+// assertions pin what jsdom CAN see: the DOM order that expresses the intent
+// ("cwd left, duration and exit right"), and the stylesheet's structural
+// contract that turns that order into position without assuming a count.
+describe('the SSH block header keeps cwd left and duration/exit right (nocx-a44m)', () => {
+  const container = (): HTMLElement => document.createElement('div')
+  const store = (): CommandSnapshotStore => new CommandSnapshotStore()
+  const noop = (): void => {}
+
+  it('orders an SSH block header location, cwd, then the right group', () => {
+    const el = createCommandBlock(
+      1,
+      'deploy',
+      '/srv/www',
+      'user@server', // location — the chip that made the header three children
+      '<span class="term-line">done</span>',
+      1200,
+      0,
+      'success',
+      container,
+      noop,
+      store(),
+    )
+    const chips = el.querySelector('.cmd-header-chips')
+    expect(chips).not.toBeNull()
+    const loc = chips?.querySelector('.cmd-header-location')
+    const cwd = chips?.querySelector('.cmd-header-cwd')
+    const right = chips?.querySelector('.cmd-header-right')
+    expect(loc).not.toBeNull()
+    expect(cwd).not.toBeNull()
+    expect(right).not.toBeNull()
+
+    const order = [...(chips as HTMLElement).children]
+    expect(order.indexOf(loc as HTMLElement)).toBeLessThan(order.indexOf(cwd as HTMLElement))
+    expect(order.indexOf(cwd as HTMLElement)).toBeLessThan(order.indexOf(right as HTMLElement))
+
+    // The right group holds what belongs on the right: duration and exit.
+    expect(right?.querySelector('.cmd-header-duration')).not.toBeNull()
+    expect(right?.querySelector('.cmd-header-exit-ok')).not.toBeNull()
+  })
+
+  it('keeps cwd before the right group on a local block too', () => {
+    const el = createCommandBlock(
+      1,
+      'ls',
+      '~',
+      '',
+      '<span class="term-line">file</span>',
+      42,
+      0,
+      'success',
+      container,
+      noop,
+      store(),
+    )
+    const chips = el.querySelector('.cmd-header-chips')
+    const cwd = chips?.querySelector('.cmd-header-cwd')
+    const right = chips?.querySelector('.cmd-header-right')
+    expect(cwd).not.toBeNull()
+    expect(right).not.toBeNull()
+    const order = [...(chips as HTMLElement).children]
+    expect(order.indexOf(cwd as HTMLElement)).toBeLessThan(order.indexOf(right as HTMLElement))
+  })
+
+  it('the stylesheet pushes the right group with its own auto margin, not space-between', () => {
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-assignment
+    const css: string = readFileSync(STYLE_ENTRY, 'utf8')
+    const chips = stripComments(extractRuleBlock(css, 'cmd-header-chips') ?? '')
+    const right = stripComments(extractRuleBlock(css, 'cmd-header-right') ?? '')
+    expect(chips).not.toBe('')
+    expect(right).not.toBe('')
+
+    // space-between assumes exactly two children; the location chip made the
+    // SSH header three. The container must not distribute, and the right
+    // group must carry its own auto margin — the mechanism that behaves
+    // identically for any child count (nocx-a44m).
+    expect(chips).not.toMatch(/justify-content\s*:\s*(space-between|space-around|space-evenly)/)
+    expect(right).toMatch(/margin-left\s*:\s*auto/)
+  })
+})
+
+// The command editor's chrome row has the same latent class as the SSH
+// header above: `justify-content: space-between` is only correct for exactly
+// two children (left group + clock), and the row must not break if a third
+// joins it. Same fix, same contract assertion: the row does not distribute,
+// and the clock — the right-edge element — carries its own auto margin
+// (nocx-a44m).
+describe('the command editor chrome pins the clock to the right edge without distributing (nocx-a44m)', () => {
+  it('the stylesheet gives the clock its own auto margin, not space-between on the row', () => {
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-assignment
+    const css: string = readFileSync(STYLE_ENTRY, 'utf8')
+    const chrome = stripComments(extractRuleBlock(css, 'nocx-editor-chrome') ?? '')
+    const time = stripComments(extractRuleBlock(css, 'nocx-editor-time') ?? '')
+    expect(chrome).not.toBe('')
+    expect(time).not.toBe('')
+
+    expect(chrome).not.toMatch(/justify-content\s*:\s*(space-between|space-around|space-evenly)/)
+    expect(time).toMatch(/margin-left\s*:\s*auto/)
   })
 })

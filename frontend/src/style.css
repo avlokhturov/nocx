@@ -119,7 +119,6 @@
 
 .nocx-editor-chrome {
   display: flex;
-  justify-content: space-between;
   align-items: center;
   margin-bottom: 8px;
   font-family: var(--font-family-ui);
@@ -128,15 +127,24 @@
   user-select: none;
 }
 
-/* Left chip group: the location + cwd chips sit together, the clock keeps
-   the right edge of the chrome row. Placement only — the chips carry their
-   own appearance (ui/README: a surface may place a kit component, never
-   repaint it). */
+/* Left chip group: the location + cwd chips sit together; the clock pins
+   the right edge of the chrome row with its own auto margin (below). The row
+   itself does NOT distribute (nocx-a44m): space-between is only correct for
+   exactly two children, and this row must not break if a third joins it.
+   Placement only — the chips carry their own appearance (ui/README: a
+   surface may place a kit component, never repaint it). */
 .nocx-editor-chrome-left {
   display: flex;
   align-items: center;
   gap: 8px;
   min-width: 0;
+}
+
+/* The clock is the chrome row's right-edge element: margin-left: auto pushes
+   it to the far right for any child count, the same mechanism as
+   .cmd-header-right. Margin is placement, not appearance. */
+.nocx-editor-time {
+  margin-left: auto;
 }
 
 /* ── Chip ────────────────────────────────────────────────────────────── */

@@ -42,6 +42,42 @@ func requireBinBash(t *testing.T) {
 	}
 }
 
+// requireIntegrationShell fails the test when the shell is absent instead of
+// skipping. Skipping is how the launcher's riskiest path — the zsh
+// transient-ZDOTDIR lifecycle, which creates a directory on somebody else's
+// machine and must erase it before any user code runs — reported green on
+// every box without zsh. That is the silent success AGENTS.md's testing rules
+// exist to prevent (nocx-gd84): the suite must say "this did not run", never
+// pretend it did.
+//
+// The provisioning command is what CI runs the suite with: ubuntu-latest
+// ships both dash and zsh, macOS ships zsh but not dash, so the macOS CI
+// job must install dash itself (see README, "Shell integration tests").
+//
+//	# Debian/Ubuntu (dash and zsh)
+//	sudo apt-get install -y dash zsh
+//	# macOS (zsh ships with the OS)
+//	brew install dash
+//
+// then run the suite the way CI does:
+//
+//	go test -race -count=1 ./internal/shellintegration/...
+func requireIntegrationShell(t *testing.T, shell string) string {
+	t.Helper()
+	path, err := exec.LookPath(shell)
+	if err == nil {
+		return path
+	}
+	t.Fatalf("%s is required by this test and missing from PATH (%v).\n"+
+		"The launcher's riskiest paths must not silently skip.\n"+
+		"Provision the shells CI runs the suite with, then re-run:\n"+
+		"  Debian/Ubuntu: sudo apt-get install -y dash zsh\n"+
+		"  macOS:         brew install dash   (zsh ships with the OS)\n"+
+		"  then:          go test -race -count=1 ./internal/shellintegration/...",
+		shell, err)
+	return ""
+}
+
 // writeZshFixtureHome materialises a fixture $HOME whose .zshrc sets a
 // sentinel, prints a marker, and reports whether the launcher's transient
 // directory still exists at the moment the user's rc runs.
@@ -403,7 +439,7 @@ func TestBashLauncher_UserRcExecPreventsInstall(t *testing.T) {
 // remote command is parsed by the user's login shell, which may be dash.
 // Parsing the same launcher with dash must work identically.
 func TestBashLauncher_RunsUnderDash(t *testing.T) {
-	dash := requireShell(t, "dash")
+	dash := requireIntegrationShell(t, "dash")
 	requireBinBash(t)
 	home := writeBashFixtureHome(t, "")
 	tmp := t.TempDir()
@@ -430,7 +466,7 @@ func TestBashLauncher_RunsUnderDash(t *testing.T) {
 // directory is gone before the first user command, and nothing of it
 // survives the session.
 func TestZshLauncher_TransientDirFlow(t *testing.T) {
-	requireShell(t, "zsh")
+	requireIntegrationShell(t, "zsh")
 	home := writeZshFixtureHome(t, "")
 	tmp := t.TempDir()
 	cmd, _, ok := NewRemoteLauncher().StartCommand(ShellZsh, LaunchOptions{Enhanced: true, SessionID: "test-session-6"})
@@ -470,7 +506,7 @@ func TestZshLauncher_TransientDirFlow(t *testing.T) {
 // TestZshLauncher_CleanupAfterEarlyExit: a user .zshrc that exits early
 // leaves no transient directory behind.
 func TestZshLauncher_CleanupAfterEarlyExit(t *testing.T) {
-	requireShell(t, "zsh")
+	requireIntegrationShell(t, "zsh")
 	home := writeZshFixtureHome(t, "exit 7\n")
 	tmp := t.TempDir()
 	cmd, _, ok := NewRemoteLauncher().StartCommand(ShellZsh, LaunchOptions{Enhanced: true, SessionID: "test-session-7"})
@@ -487,7 +523,7 @@ func TestZshLauncher_CleanupAfterEarlyExit(t *testing.T) {
 // parse (zsh reports and may or may not keep the shell alive) leaves no
 // transient directory behind either way.
 func TestZshLauncher_CleanupAfterSyntaxError(t *testing.T) {
-	requireShell(t, "zsh")
+	requireIntegrationShell(t, "zsh")
 	home := writeZshFixtureHome(t, "if [[\n")
 	tmp := t.TempDir()
 	cmd, _, ok := NewRemoteLauncher().StartCommand(ShellZsh, LaunchOptions{Enhanced: true, SessionID: "test-session-8"})
