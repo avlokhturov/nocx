@@ -79,6 +79,13 @@ export interface DialogProps {
    * Textareas and buttons are exempt — Enter belongs to them.
    */
   onSubmit?: () => void
+  /**
+   * Escape veto. Called when the user presses Escape (via the overlay stack's
+   * handler or the native cancel). Return true to CONSUME the Escape and keep
+   * the dialog open — for an overlay state that walks back a step instead of
+   * closing (the palette's drill-in, nocx-4t37).
+   */
+  onEscape?: () => boolean
 }
 
 /**
@@ -233,6 +240,7 @@ export const Dialog: Component<DialogProps> = (props) => {
       // z-index, so a notification raised while this is open is only visible
       // if it is a child of it.
       const close = () => {
+        if (props.onEscape?.() === true) return false
         props.onClose()
         return true
       }
@@ -279,6 +287,13 @@ export const Dialog: Component<DialogProps> = (props) => {
     // and preventing it is what keeps the dialog open.
     const own = entry()
     if (own && topOverlay() !== own) {
+      e.preventDefault()
+      return
+    }
+    // An overlay state may claim Escape to walk back a step instead of
+    // closing (the palette's drill, nocx-4t37); prevent the cancel so the
+    // dialog stays open.
+    if (props.onEscape?.() === true) {
       e.preventDefault()
       return
     }

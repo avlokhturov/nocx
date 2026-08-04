@@ -30,9 +30,13 @@ import {
   AdHocQuickConnectProvider,
   SSHQuickConnectProvider,
   SSHAliasQuickConnectProvider,
+  type DrillCommand,
   type QuickConnectProvider,
 } from './quick-connect'
 import { PortsPanel, createPortsPanelServices, createPortsPauseControl } from './ports'
+import { profileRows } from './quick-connect-assembly'
+import { showToast } from './ui/toast'
+import type { TunnelOpenResult } from './generated/tunnel.open'
 async function main() {
   log.info('nocx: main() called')
 
@@ -330,6 +334,121 @@ async function main() {
   const sshProvider = new SSHQuickConnectProvider(profileClient, (id, host, user) =>
     tm.newSSHTab(id, host, user),
   )
+  // "Forward a port" (nocx-4t37): a command that needs a target drills in
+  // INSIDE the palette — server, then port — instead of dead-ending or
+  // opening a second dialog. The forward is the same tunnel.open the ports
+  // panel drives; only the owner label differs (no owning tab, so the scope
+  // names the palette).
+  const openForward = async (
+    profileId: string,
+    destination: string,
+    port: number,
+  ): Promise<void> => {
+    const call = <T,>(method: string, params: unknown): Promise<T> =>
+      dispatcher.call<T>(method, params)
+    const announce = (rec: TunnelOpenResult): void => {
+      showToast({
+        level: 'success',
+        message: `Forwarding ${rec.destination} on ${rec.actualBind.host}:${rec.actualBind.port}`,
+      })
+    }
+    const open = (bindPort: number): Promise<TunnelOpenResult> =>
+      call<TunnelOpenResult>('tunnel.open', {
+        profileId,
+        port: bindPort,
+        destination,
+        scope: `palette:${profileId}`,
+      })
+    try {
+      announce(await open(port))
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      if (!/address already in use|EADDRINUSE/i.test(msg)) {
+        showToast({ level: 'danger', message: msg })
+        return
+      }
+      try {
+        announce(await open(0))
+      } catch (e2) {
+        showToast({ level: 'danger', message: e2 instanceof Error ? e2.message : String(e2) })
+      }
+    }
+  }
+
+  const forwardPortCommand: DrillCommand = {
+    id: '__forward_port__',
+    label: 'Forward a port',
+    detail: 'Expose one of the server\u2019s ports on this machine',
+    steps: [
+      {
+        name: 'server',
+        fetch: async () => {
+          // Saved profiles only: a forward is profile-owned (tunnel.open
+          // resolves the profile's config and dials its own connection), so
+          // an alias, which has no profile, cannot be a forward target.
+          const profiles = await profileClient.listProfiles()
+          return profileRows(profiles).map((p) => ({
+            id: p.id,
+            label: p.label,
+            detail: p.detail,
+          }))
+        },
+      },
+      {
+        name: 'port',
+        fetch: async (selections) => {
+          const server = selections[0]
+          const st = await portsServices.sample(server.item.id)
+          if (st.discovery.state === 'available' || st.discovery.state === 'available-limited') {
+            if (st.discovery.listeners.length === 0) {
+              return [
+                {
+                  id: '__no_listeners__',
+                  label: 'No listening ports',
+                  detail: 'This server has nothing listening right now',
+                  system: true,
+                },
+              ]
+            }
+            return st.discovery.listeners.map((l) => {
+              const wildcard = l.address === '0.0.0.0' || l.address === '::' || l.address === ''
+              const destination =
+                wildcard && st.host !== '' ? `${st.host}:${l.port}` : `${l.address}:${l.port}`
+              const process =
+                l.process.evidence === 'known' ? ` — ${l.process.name} (pid ${l.process.pid})` : ''
+              return {
+                id: `__fwd_port:${l.port}`,
+                label: `:${l.port}`,
+                detail: `${destination}${process}`,
+                value: destination,
+              }
+            })
+          }
+          // Typed condition — never an empty list: a degraded source and an
+          // empty source are different facts.
+          return [
+            {
+              id: `__ports_${st.discovery.state}__`,
+              label: `Ports: ${st.discovery.state}`,
+              detail:
+                st.discovery.classification ||
+                st.discovery.stderr ||
+                'No sample yet — open this server in a tab, then try again',
+              system: true,
+            },
+          ]
+        },
+      },
+    ],
+    run: (selections) => {
+      const server = selections[0]
+      const portChoice = selections[1]
+      const destination = portChoice.item.value ?? ''
+      const localPort = Number(portChoice.item.label.replace(/^:/, '')) || 0
+      void openForward(server.item.id, destination, localPort)
+    },
+  }
+
   const qcProviders: QuickConnectProvider[] = [
     new ActionsQuickConnectProvider(
       () => tm.newTab(),
@@ -339,6 +458,7 @@ async function main() {
       // itself owns the PROMPT_READY && trusted && owned gate and refuses
       // with a stated reason outside it.
       () => void tm.activeTerminalContent()?.integrateShell(),
+      forwardPortCommand,
     ),
     sshProvider,
     new SSHAliasQuickConnectProvider(profileClient, (host, user, port) =>
@@ -358,14 +478,16 @@ async function main() {
   }
   wireQuickConnect(tabStrip)
 
-  // Cmd/Ctrl+Shift+P opens the quick-connect picker.
-  // Chosen to match VS Code's command-palette convention. Does not collide
+  // Cmd/Ctrl+Shift+P opens the PALETTE (nocx-4t37): commands and hosts
+  // mixed, each row typed on the right; target-needing commands drill in.
+  // Chosen to match the command-palette convention. The tab-strip caret
+  // (wireQuickConnect above) stays the plain server list. Does not collide
   // with TabManager (Ctrl+T/W/1-9), the terminal (single keystrokes), or
   // CodeMirror (which does not register this binding in its keymap).
   document.addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.key === 'P') {
       e.preventDefault()
-      qc.show()
+      qc.showPalette()
     }
   })
 
