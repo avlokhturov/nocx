@@ -34,6 +34,7 @@ import { renderRecordedCommand } from './scrollback/blocks'
 import { KIND_LABELS } from './secret-kind'
 import { shouldShowEditor, NATIVE_RESTORE } from './native-mode'
 import { isEnvironmentEntry } from './environment-commands'
+import { isInteractiveTransition, extractDestination } from './ssh-transition'
 import { shouldCopy, type ClipboardAccess, type ClipboardGate } from './clipboard'
 import type { ClipboardBanner } from './banner'
 import { ScrollbackController } from './scrollback/controller'
@@ -239,6 +240,10 @@ export class TerminalContent extends BaseTabContent {
   private _presentation: InputPresentation = 'terminal'
   /** Whether an integration attempt failed. */
   private _integrationFailed = false
+  /** Per-destination consent for in-band integration (nocx-atyf.3).
+   *  Session-scoped: a hand-typed ssh to a host the user consented to
+   *  integrates silently for the rest of this tab. */
+  private _consent = new Map<string, boolean>()
   /** The environment degraded or became uncertain — integration declined at
    *  open, or markers stopped on an integrated session the user did not
    *  latch native. Tab chrome renders at most this mark. */
@@ -528,6 +533,23 @@ export class TerminalContent extends BaseTabContent {
               this._previousIntegrated.push(this._shellIntegrated)
               this._shellIntegrated = false
               this._updateCapability()
+            }
+            // Interactive SSH transition consent (nocx-atyf.3): if the
+            // user hand-typed a simple `ssh host` and we have not asked
+            // for this destination yet, offer integration once. If already
+            // consented, integrate silently — nothing on screen.
+            if (
+              isInteractiveTransition(recordLine) &&
+              !this._shellIntegrated &&
+              this._policy !== 'off' &&
+              !this._integrating
+            ) {
+              const dest = extractDestination(recordLine)
+              if (this._consent.get(dest) === true) {
+                void this.integrateShell()
+              } else if (!this._consent.has(dest)) {
+                void this._askConsent(dest)
+              }
             }
             // Proactive save for a hand-typed `ssh <target>` is nocx-pu4.4,
             // NOT part of this task — the ad-hoc SSH tab's adopt affordance
@@ -1428,6 +1450,21 @@ export class TerminalContent extends BaseTabContent {
 
   get policy(): ShellIntegrationPolicy {
     return this._policy
+  }
+
+  /** Ask the user once whether to enable the command editor for this
+   *  destination (nocx-atyf.3). The answer is remembered per destination
+   *  so later transitions are silent. */
+  private async _askConsent(destination: string): Promise<void> {
+    const label = destination.includes('@') ? destination : `host ${destination}`
+    const message = `Enable command blocks for ${label}?`
+    const confirmed = await showConfirm(message, 'Enable command editor', 'Not now')
+    this._consent.set(destination, confirmed)
+    if (!confirmed) return
+    // If the editor is still visible (prompt still ready), integrate now.
+    // Otherwise wait for the next prompt — the consent is remembered, so
+    // the next ssh to this destination integrates silently.
+    void this.integrateShell()
   }
 
   /** The native-mode escape (ADR-0004 §1, nocx-4ff.9): latch native input —
