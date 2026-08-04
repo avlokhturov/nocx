@@ -55,6 +55,25 @@ export interface SSHProfileOptions {
   jumpAuthMode?: AuthMode // Jump server auth mode
   agentForward?: boolean
   canBeJumpServer?: boolean // Whether this profile can be used as a jump server
+  portDiscovery?: 'auto' | 'ask' | 'off'
+  /** Stored forwards, opened when the connection comes up (spec §8, D5). */
+  forwards?: ForwardSpec[]
+}
+
+/** The three forwarding strategies the tunnel model covers (spec D4). */
+export type ForwardDirection = 'local' | 'remote' | 'dynamic'
+
+/**
+ * One stored forward on a connection profile (spec §8): topology and policy
+ * only — never credentials. `bindHost` empty means 127.0.0.1 (the tunnel
+ * layer's default); `bindPort` 0 means an ephemeral port the OS allocates;
+ * `destination` is "host:port" for local/remote and absent for dynamic.
+ */
+export interface ForwardSpec {
+  direction: ForwardDirection
+  bindHost?: string
+  bindPort?: number
+  destination?: string
 }
 
 export interface SSHProfile extends Base {

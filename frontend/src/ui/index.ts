@@ -60,4 +60,5 @@ export {
   type ToastLevel,
   type ToastOptions,
 } from './toast'
+export { EditableRowList, type EditableRowListProps } from './row-list'
 export { CompletionDropdown, type CompletionDropdownCallbacks } from './completion-dropdown'
