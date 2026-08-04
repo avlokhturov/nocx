@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/shell.complete.schema.json",
+  "title": "ShellComplete",
+  "description": "Result of the shell.complete JSON-RPC method — completion candidates from the session's shell. For a local session this answers from the backend's own filesystem (identical to fs.complete); for an SSH session it runs a second shell on the remote host through the DiscoveryConn lane (ADR-0020) and returns what the remote shell's completion machinery produces — paths from the remote filesystem, command names, and command-specific completions from bash completion functions. Each candidate carries its source so the UI can distinguish an adapter answer from a local guess.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["entries", "truncated"],
+  "properties": {
+    "entries": {
+      "description": "The completion candidates, sorted by the shell's own ordering. Never null: no matches is [].",
+      "type": "array",
+      "items": { "$ref": "#/$defs/shellEntry" }
+    },
+    "truncated": {
+      "description": "True when the result hit a capture bound or the response was truncated — the list is not complete. The renderer may surface this as a soft indication; it is never an error.",
+      "type": "boolean"
+    },
+    "reason": {
+      "description": "A stated explanation when entries is empty. The product shows this instead of the generic 'no matches'. Empty/absent = no specific reason.",
+      "type": "string"
+    }
+  },
+  "$defs": {
+    "shellEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "source"],
+      "properties": {
+        "name": {
+          "description": "The candidate's display name — the last path segment for a file, the command name for a command, the completion word for a function answer.",
+          "type": "string"
+        },
+        "path": {
+          "description": "The absolute path of a path candidate. Absent for non-path candidates (commands, function completions).",
+          "type": "string"
+        },
+        "source": {
+          "description": "Where the answer came from: 'path' (compgen -f / compgen -d), 'command' (compgen -c), or 'function' (a bash completion function). The UI uses this to distinguish an adapter answer from a local guess and to show the appropriate evidence column.",
+          "type": "string",
+          "enum": ["path", "command", "function"]
+        },
+        "isDir": {
+          "description": "True when a path candidate is a directory. The renderer appends a trailing slash and treats directory acceptance as a step rather than a terminal close.",
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

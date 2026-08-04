@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/shady2k/nocx/internal/completion"
 	"github.com/shady2k/nocx/internal/connectfwd"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
@@ -115,6 +116,13 @@ type WSServer struct {
 	// Wired through WithRemoteLauncher; when nil, remote sessions open a
 	// plain shell and report reason none.
 	remoteLauncher ssh.RemoteLauncher
+
+	// localCompleter answers shell.complete for KindLocal sessions.
+	// When nil, the method returns a JSON-RPC error for local sessions.
+	localCompleter completion.Completer
+	// sshCompleter answers shell.complete for KindRemote sessions.
+	// When nil, the method returns a stated empty reason for SSH sessions.
+	sshCompleter completion.Completer
 
 	// Pending-capture registry: the backend-side holder of submitted
 	// credentials awaiting a save decision (internal/credential). Created
@@ -329,6 +337,18 @@ func WithSSHConfigResolver(resolver ssh.ConfigResolver, configPath string) WSSer
 // transport default.
 func WithRemoteLauncher(l ssh.RemoteLauncher) WSServerOption {
 	return func(s *WSServer) { s.remoteLauncher = l }
+}
+
+// WithCompleters attaches the completion sources for shell.complete
+// (nocx-w7h.15). local answers KindLocal sessions; ssh answers KindRemote
+// sessions through the DiscoveryConn lane. Either may be nil — the handler
+// then returns a stated empty reason for that session kind rather than
+// a JSON-RPC error.
+func WithCompleters(local, ssh completion.Completer) WSServerOption {
+	return func(s *WSServer) {
+		s.localCompleter = local
+		s.sshCompleter = ssh
+	}
 }
 
 // WithProbeResultStore attaches a probe result store for recording outcomes
@@ -914,6 +934,8 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.handleHistoryRecord(ctx, wconn, state, req)
 	case "fs.complete":
 		s.handleFsComplete(wconn, req)
+	case "shell.complete":
+		s.handleShellComplete(ctx, wconn, req)
 	case "shell.integrate":
 		s.handleShellIntegrate(wconn, req)
 	case "vault.status", "vault.setup", "vault.unseal", "vault.seal",

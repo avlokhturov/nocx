@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/shady2k/nocx/internal/completion"
 	"github.com/shady2k/nocx/internal/connection"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/contentkey"
@@ -352,6 +353,15 @@ func New(opts ...Option) (*App, error) {
 		// signatures are identical. Before this line the in-band plan was
 		// reachable from its own tests and nowhere else (AGENTS.md check 5).
 		transport.WithInBandBootstrapper(shint),
+		// The completion adapter (nocx-w7h.15): two completers wired at the
+		// composition root — the handler routes by session kind. The local
+		// completer answers from the backend's filesystem; the SSH completer
+		// runs a second shell on the remote host through DiscoveryConn, the
+		// same owned pooled lease the discovery ladder uses.
+		transport.WithCompleters(
+			completion.NewLocal(),
+			completion.NewSSH(sshExecConnProvider(sshClient)),
+		),
 
 		transport.WithProbeResultStore(probeResultStore),
 		transport.WithSSHConfigResolver(sshCfgResolver, sshConfigPath),
