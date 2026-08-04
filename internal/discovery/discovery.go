@@ -1,8 +1,11 @@
-// Package discovery finds the remote's listening ports over a second exec
-// channel on the pooled SSH connection (spec §3). The result is
-// backend-owned SSH metadata, never the interactive byte stream parsed
-// (AD-6); it works while a command is running; and it touches neither the
-// user's tty nor their history.
+// Package discovery finds a target's listening ports by running probe
+// commands over the exec seam (ExecConn): the same ladder, the same five
+// result states and the same three-valued process evidence describe an SSH
+// host (an owned lease on a pooled connection, adapted in ssh_adapter.go)
+// and the machine the app runs on (local.go). The result is backend-owned
+// metadata, never the interactive byte stream parsed (AD-6); it works while
+// a command is running; and it touches neither the user's tty nor their
+// history.
 //
 // The three things this package must not get wrong:
 //
@@ -99,9 +102,13 @@ type Sample struct {
 }
 
 // Connector acquires an owned lease on the pooled SSH connection for
-// discovery (spec §3). The Detector takes its OWN reference — never the
-// tab's — so closing the tab never kills an in-flight sample's connection
-// underneath it, and the interactive session stays fully usable.
+// discovery (spec §3) — the SSH-shaped half of the seam's acquisition,
+// kept at the composition boundary so *ssh.RealClient satisfies it without
+// an adapter, exactly like tunnel.Connector. The Detector takes the OWN
+// reference — never the tab's — so closing the tab never kills an
+// in-flight sample's connection underneath it, and the interactive session
+// stays fully usable. The local machine needs no acquisition: the scheduler
+// builds its native provider through the composition-root factory.
 type Connector interface {
 	DiscoveryConn(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.DiscoveryConn, error)
 }
@@ -151,11 +158,12 @@ type ladderState struct {
 	refusedWhy string
 }
 
-// Detector owns discovery for one authenticated target (one pooled
-// connection lease): the probe ladder selection (cached per connection), the
-// typed backoff, and the exactly-one-sample-in-flight guard (spec §4).
+// Detector owns discovery for one target over an exec seam (a pooled SSH
+// connection lease, or the local machine): the probe ladder selection
+// (cached per connection), the typed backoff, and the
+// exactly-one-sample-in-flight guard (spec §4).
 type Detector struct {
-	conn    ssh.DiscoveryConn
+	conn    ExecConn
 	logger  log.Logger
 	timeout time.Duration
 
@@ -183,11 +191,11 @@ func WithBackoffLevels(levels []time.Duration) DetectorOption {
 	return func(dd *Detector) { dd.backoff.levels = levels }
 }
 
-// NewDetector creates a detector over an owned lease. The caller owns the
-// lease: release it via Detector.Close when discovery stops. A fresh
+// NewDetector creates a detector over an exec seam. The caller owns the
+// seam: release it via Detector.Close when discovery stops. A fresh
 // detector is required after a reconnect — probe selection is once per
 // connection.
-func NewDetector(conn ssh.DiscoveryConn, logger log.Logger, opts ...DetectorOption) *Detector {
+func NewDetector(conn ExecConn, logger log.Logger, opts ...DetectorOption) *Detector {
 	d := &Detector{
 		conn:    conn,
 		logger:  logger,
@@ -269,8 +277,9 @@ func (d *Detector) Retry() {
 	d.mu.Unlock()
 }
 
-// Close releases the connection lease, stopping any exec still in flight.
-// The pooled connection stays open for every other reference.
+// Close releases the exec seam, stopping any exec still in flight. For the
+// ssh adapter the pooled connection stays open for every other reference;
+// for the local seam it stops in-flight probes.
 func (d *Detector) Close() error { return d.conn.Close() }
 
 func (d *Detector) canceled() Sample {
@@ -321,7 +330,7 @@ func (r probeResult) finish(dur time.Duration) Sample {
 func (r probeResult) state() State {
 	switch r.kind {
 	case outcomeValid:
-		return sampleState(r.listeners)
+		return SampleState(r.listeners)
 	case outcomeUnavailable:
 		return StateUnavailable
 	case outcomeRefused:
@@ -333,12 +342,14 @@ func (r probeResult) state() State {
 	}
 }
 
-// sampleState projects the listeners of a valid sample into a state: a
+// SampleState projects the listeners of a valid sample into a state: a
 // successful empty result means "no listeners observed" (available); when
 // every row's process evidence is degraded — the probe cannot provide it
 // (busybox netstat) or none was visible (ss as non-root on a fully owned
-// table) — the sample is available-limited.
-func sampleState(listeners []Listener) State {
+// table, or a local read whose owners were not visible) — the sample is
+// available-limited. The native local provider projects through this same
+// function, so both transports agree on what the evidence means.
+func SampleState(listeners []Listener) State {
 	if len(listeners) == 0 {
 		return StateAvailable
 	}
@@ -427,17 +438,18 @@ func (d *Detector) triedSoFar() []string {
 func (d *Detector) runStep(ctx context.Context, st *step) probeResult {
 	res, err := d.conn.Exec(ctx, st.cmd)
 	if err != nil {
+		var ee *ExecError
 		switch {
-		case errors.Is(err, ssh.ErrExecSessionRefused):
+		case errors.As(err, &ee) && ee.Kind == ExecErrSessionRefused:
 			return probeResult{kind: outcomeRefused, class: "additional sessions refused"}
-		case errors.Is(err, ssh.ErrExecProhibited):
+		case errors.As(err, &ee) && ee.Kind == ExecErrExecProhibited:
 			return probeResult{kind: outcomeRefused, class: "exec request refused"}
-		case errors.Is(err, ssh.ErrExecLost):
+		case errors.As(err, &ee) && ee.Kind == ExecErrConnectionLost:
 			return probeResult{kind: outcomeTransient, class: "connection lost"}
-		case errors.Is(err, ssh.ErrExecClosed):
-			// The lease was closed mid-sample (Detector.Close): the result
-			// is discarded, never promoted to the detector's state, and no
-			// backoff is scheduled (spec §7.3: discard late results).
+		case errors.As(err, &ee) && ee.Kind == ExecErrLeaseClosed:
+			// The exec surface was closed mid-sample (Detector.Close): the
+			// result is discarded, never promoted to the detector's state,
+			// and no backoff is scheduled (spec §7.3: discard late results).
 			return probeResult{kind: outcomeCanceled}
 		case errors.Is(err, context.Canceled):
 			return probeResult{kind: outcomeCanceled}

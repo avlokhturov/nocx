@@ -2,6 +2,7 @@ package discovery
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -29,11 +30,13 @@ import (
 //     loop instead of building a second scheduler that defeats it.
 //
 // Targets are keyed by profile id — the authenticated target, the unit the
-// spec's consent model names. Two tabs sharing a profile coalesce onto one
-// detector (one lease, one probe selection, one sample in flight). A target
-// is created on ConnectionUp and forgotten on ConnectionDown (the last tab
-// closed): the lease is released, so no poll outlives its consumer, and no
-// pooled SSH connection is held open for a profile nobody is using.
+// spec's consent model names — plus the reserved LocalTargetID for the
+// machine the app runs on. Two tabs sharing a profile coalesce onto one
+// detector (one lease, one probe selection, one sample in flight); every
+// local tab coalesces onto the single local target. A target is created on
+// ConnectionUp and forgotten on ConnectionDown (the last tab closed): the
+// lease is released, so no poll outlives its consumer, and no pooled SSH
+// connection is held open for a profile nobody is using.
 //
 // Connection loss: the lease's Done channel closes, the target is marked
 // conn-lost, and no further execs are attempted. ConnectionUp after a loss
@@ -41,7 +44,12 @@ import (
 // result from the old connection never applies after a reconnect.
 type Scheduler struct {
 	connector Connector
-	logger    log.Logger
+	// localProvider builds the local-machine sampling provider for
+	// LocalTargetID — one provider per target lifecycle. Wired at the
+	// composition root (AD-8) via WithLocalProvider; nil disables local
+	// discovery.
+	localProvider func(log.Logger) Provider
+	logger        log.Logger
 
 	settleDelay    time.Duration
 	promptDebounce time.Duration
@@ -105,7 +113,7 @@ type schedTarget struct {
 	host      string
 	opts      []ssh.ConnectOption
 
-	detector *Detector
+	provider Provider
 	conn     ssh.DiscoveryConn
 	connDead bool
 
@@ -130,10 +138,11 @@ type schedTarget struct {
 	periodT *time.Timer
 }
 
-// ConnectionUp is called when a remote session on the profile opens. It
-// creates the target and schedules the settle sample. On a reconnect (the
-// previous connection died) it resets the stale result — a result from the
-// old connection never applies after reconnect (spec §4).
+// ConnectionUp is called when a session on the target opens (an SSH session
+// on a profile, or a local tab for LocalTargetID). It creates the target
+// and schedules the settle sample. On a reconnect (the previous connection
+// died) it resets the stale result — a result from the old connection never
+// applies after reconnect (spec §4).
 func (s *Scheduler) ConnectionUp(profileID, host string, opts ...ssh.ConnectOption) {
 	s.mu.Lock()
 	if s.closed {
@@ -157,7 +166,7 @@ func (s *Scheduler) ConnectionUp(profileID, host string, opts ...ssh.ConnectOpti
 			// Fresh detector on the next sample: probe selection is once per
 			// connection, and the old lease is gone.
 			t.connDead = false
-			t.detector = nil
+			t.provider = nil
 			t.conn = nil
 			t.last = Sample{State: StatePending}
 			t.lastGood = time.Time{}
@@ -191,8 +200,8 @@ func (s *Scheduler) ConnectionDown(profileID string) {
 		close(t.done)
 	}
 	s.mu.Unlock()
-	if t != nil && t.detector != nil {
-		_ = t.detector.Close()
+	if t != nil && t.provider != nil {
+		_ = t.provider.Close()
 	}
 }
 
@@ -270,18 +279,18 @@ func (s *Scheduler) SampleNow(profileID string) Sample {
 		defer s.mu.Unlock()
 		return t.last
 	}
-	if t.detector != nil {
-		t.detector.Retry()
+	if t.provider != nil {
+		t.provider.Retry()
 	}
 	s.mu.Unlock()
 
-	d := s.acquireDetector(t)
-	if d == nil {
+	p := s.acquireProvider(t)
+	if p == nil {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		return t.last
 	}
-	smp := d.Sample(context.Background())
+	smp := p.Sample(context.Background())
 	s.mu.Lock()
 	t.last = smp
 	if smp.State == StateAvailable || smp.State == StateAvailableLimited {
@@ -340,8 +349,8 @@ func (s *Scheduler) Close() error {
 	s.targets = map[string]*schedTarget{}
 	s.mu.Unlock()
 	for _, t := range targets {
-		if t.detector != nil {
-			_ = t.detector.Close()
+		if t.provider != nil {
+			_ = t.provider.Close()
 		}
 	}
 	return nil
@@ -384,11 +393,11 @@ func (s *Scheduler) sampleTriggered(t *schedTarget) {
 	if !ok {
 		return
 	}
-	d := s.acquireDetector(t)
-	if d == nil {
+	p := s.acquireProvider(t)
+	if p == nil {
 		return
 	}
-	smp := d.Sample(context.Background())
+	smp := p.Sample(context.Background())
 
 	s.mu.Lock()
 	t.last = smp
@@ -396,7 +405,7 @@ func (s *Scheduler) sampleTriggered(t *schedTarget) {
 		// The lease died under the sample (connection loss). Nothing more
 		// runs until ConnectionUp builds a fresh detector.
 		t.connDead = true
-		t.detector = nil
+		t.provider = nil
 		t.conn = nil
 		t.stopTimersLocked()
 	} else if smp.State == StateAvailable || smp.State == StateAvailableLimited {
@@ -405,76 +414,102 @@ func (s *Scheduler) sampleTriggered(t *schedTarget) {
 	s.mu.Unlock()
 }
 
-// acquireDetector returns the target's detector, acquiring a fresh lease when
-// none exists. Runs OUTSIDE the scheduler lock: a slow or auth-blocked dial
-// must not stall ConnectionDown, Close, Status or the timers. The singleflight
-// guard ensures exactly one acquisition per target even when the sampler loop
-// and a manual SampleNow race. A nil return means the target cannot sample
-// right now; an acquisition failure is recorded as the last sample, never
-// surfaced as "no ports".
-func (s *Scheduler) acquireDetector(t *schedTarget) *Detector {
+// acquireProvider returns the target's sampling provider, building a fresh
+// one when none exists. Runs OUTSIDE the scheduler lock: a slow or
+// auth-blocked dial must not stall ConnectionDown, Close, Status or the
+// timers. The singleflight guard ensures exactly one build per target even
+// when the sampler loop and a manual SampleNow race. A nil return means the
+// target cannot sample right now; a build failure is recorded as the last
+// sample, never surfaced as "no ports".
+//
+// The local machine (LocalTargetID) has nothing to acquire: its provider is
+// built by the composition-root factory and there is no connection to
+// watch, so no lease is held and no watchConn runs.
+func (s *Scheduler) acquireProvider(t *schedTarget) Provider {
 	s.mu.Lock()
 	if s.closed || t.torn || t.connDead {
 		s.mu.Unlock()
 		return nil
 	}
-	if t.detector != nil {
-		d := t.detector
+	if t.provider != nil {
+		p := t.provider
 		s.mu.Unlock()
-		return d
+		return p
 	}
 	if t.acquiring {
 		ch := t.acquired
 		s.mu.Unlock()
 		<-ch
 		s.mu.Lock()
-		d := t.detector
+		p := t.provider
 		s.mu.Unlock()
-		return d
+		return p
 	}
 	t.acquiring = true
 	ch := make(chan struct{})
 	t.acquired = ch
 	host := t.host
 	opts := t.opts
+	isLocal := t.profileID == LocalTargetID
 	s.mu.Unlock()
 
-	acquireCtx, cancel := context.WithTimeout(context.Background(), acquireTimeout)
-	conn, err := s.connector.DiscoveryConn(acquireCtx, host, opts...)
-	cancel()
+	var p Provider
+	var lease ssh.DiscoveryConn // the connection-loss watcher's material; nil for local
+	var acquireErr error
+	if isLocal {
+		if s.localProvider == nil {
+			acquireErr = errors.New("local port discovery is not wired at the composition root")
+		} else {
+			p = s.localProvider(s.logger)
+		}
+	} else {
+		acquireCtx, cancel := context.WithTimeout(context.Background(), acquireTimeout)
+		conn, err := s.connector.DiscoveryConn(acquireCtx, host, opts...)
+		cancel()
+		if err != nil {
+			acquireErr = err
+		} else {
+			lease = conn
+			// The detector's hard timeout and transient backoff are
+			// mechanism parameters this scheduler names explicitly (the
+			// defaults it wants) — the constructors stay reachable from
+			// production, not test-only.
+			p = NewDetector(adaptSSH(conn), s.logger, WithSampleTimeout(s.sampleTimeout), WithBackoffLevels(defaultBackoffLevels))
+		}
+	}
 
 	s.mu.Lock()
 	t.acquiring = false
 	t.acquired = nil
 	close(ch)
-	if err != nil {
+	switch {
+	case acquireErr != nil:
 		// The connection is not up (or a sealed vault refuses the
-		// resolve); surface it as a transient state, never as "no
-		// ports" and never as a crash.
+		// resolve, or local discovery is not wired); surface it as a
+		// transient state, never as "no ports" and never as a crash.
 		t.last = Sample{
 			State:          StateFailedTransiently,
-			Classification: "discovery connection unavailable: " + err.Error(),
+			Classification: "discovery connection unavailable: " + acquireErr.Error(),
 		}
 		s.mu.Unlock()
 		return nil
-	}
-	// Re-check under the lock: the target may have been torn down while
-	// the lease was being acquired, and a lease nobody will release
-	// keeps a pooled connection open forever.
-	if t.torn || s.closed {
+	case t.torn || s.closed:
+		// Re-check under the lock: the target may have been torn down while
+		// the lease was being acquired, and a lease nobody will release
+		// keeps a pooled connection open forever.
 		s.mu.Unlock()
-		_ = conn.Close()
+		if lease != nil {
+			_ = lease.Close()
+		}
 		return nil
 	}
-	// The detector's hard timeout and transient backoff are mechanism
-	// parameters this scheduler names explicitly (the defaults it wants) —
-	// the constructors stay reachable from production, not test-only.
-	d := NewDetector(conn, s.logger, WithSampleTimeout(s.sampleTimeout), WithBackoffLevels(defaultBackoffLevels))
-	t.detector = d
-	t.conn = conn
-	go s.watchConn(t, conn)
+	t.provider = p
+	if lease != nil {
+		t.conn = lease
+		go s.watchConn(t, lease)
+	}
 	s.mu.Unlock()
-	return d
+	return p
 }
 
 // watchConn marks the target conn-lost when the lease's Done channel closes —
@@ -485,7 +520,7 @@ func (s *Scheduler) watchConn(t *schedTarget, conn ssh.DiscoveryConn) {
 	s.mu.Lock()
 	if t.conn == conn {
 		t.connDead = true
-		t.detector = nil
+		t.provider = nil
 		t.conn = nil
 		t.stopTimersLocked()
 	}

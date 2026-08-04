@@ -12,6 +12,7 @@ package transport
 
 import (
 	"encoding/json"
+	"os"
 	"sort"
 
 	"github.com/shady2k/nocx/internal/discovery"
@@ -238,6 +239,21 @@ func (s *WSServer) discoveryUp(profileID, host string, cfg *ssh.ConnectConfig) {
 	s.discoverySched.ConnectionUp(profileID, host, opts...)
 }
 
+// discoveryUpLocal schedules discovery for the machine the app runs on,
+// keyed by the reserved discovery.LocalTargetID — the wire identity for a
+// local tab, which has no profile. The machine is its own consent (there is
+// no remote host to ask); the cadence — settle, prompt debounce, hidden-tab
+// pause, user Pause — governs it exactly like a profile target, and the
+// target is torn down when the last local tab closes. Host is the machine's
+// hostname, display material only.
+func (s *WSServer) discoveryUpLocal() {
+	if s.discoverySched == nil {
+		return
+	}
+	host, _ := os.Hostname()
+	s.discoverySched.ConnectionUp(discovery.LocalTargetID, host)
+}
+
 // discoveryPromptHint is called after a command completes (history.record):
 // the listener set most likely changed, debounce a sample (spec §4). The
 // profile ids come from the tab's OWN sessions — the backend's registry —
@@ -253,6 +269,10 @@ func (s *WSServer) discoveryPromptHint(state *connState) {
 		}
 		if pid := sess.ProfileID(); pid != "" {
 			s.discoverySched.PromptHint(pid)
+		} else if sess.Kind() == session.KindLocal {
+			// A command completed in a local tab: the machine's listener
+			// set most likely changed, exactly as it does remotely.
+			s.discoverySched.PromptHint(discovery.LocalTargetID)
 		}
 	}
 }
@@ -261,14 +281,26 @@ func (s *WSServer) discoveryPromptHint(state *connState) {
 // closed session was the last one on its profile, the target is forgotten
 // and its lease released — a background poll never outlives its consumer.
 func (s *WSServer) discoverySessionClosed(sess session.Session) {
-	if s.discoverySched == nil || sess == nil || sess.ProfileID() == "" {
+	if s.discoverySched == nil || sess == nil {
 		return
 	}
-	pid := sess.ProfileID()
-	for _, other := range s.registry.List() {
-		if other.ProfileID() == pid {
-			return // still live
+	if pid := sess.ProfileID(); pid != "" {
+		for _, other := range s.registry.List() {
+			if other.ProfileID() == pid {
+				return // still live
+			}
 		}
+		s.discoverySched.ConnectionDown(pid)
+		return
 	}
-	s.discoverySched.ConnectionDown(pid)
+	if sess.Kind() == session.KindLocal {
+		for _, other := range s.registry.List() {
+			if other.Kind() == session.KindLocal {
+				return // still live
+			}
+		}
+		// The last local tab closed: the local target is forgotten — no
+		// background poll outlives its consumer, local or remote.
+		s.discoverySched.ConnectionDown(discovery.LocalTargetID)
+	}
 }

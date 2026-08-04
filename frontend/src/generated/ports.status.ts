@@ -10,15 +10,15 @@
  */
 
 /**
- * Result of the ports.status JSON-RPC method: the discovery state for one authenticated target plus every forward the backend currently tracks. The single declaration of this shape: the renderer's TypeScript type is generated from it and the Go transport is validated against it.
+ * Result of the ports.status JSON-RPC method: the discovery state for one target (an authenticated SSH host, or the reserved "local" machine) plus every forward the backend currently tracks. The single declaration of this shape: the renderer's TypeScript type is generated from it and the Go transport is validated against it.
  */
 export interface PortsStatusResult {
   /**
-   * The authenticated target the status belongs to — the id the renderer echoes to every other ports.* method.
+   * The target the status belongs to — the id the renderer echoes to every other ports.* method. A stored profile id, or the reserved value "local" for the machine the app runs on (a local tab has no profile; the renderer recognizes the identity by this exact value).
    */
   profileId: string
   /**
-   * Remote host the discovery runs against, as the session opened it. Empty before the first connection to the profile.
+   * Host the discovery runs against, as the session opened it — the machine's hostname for the reserved "local" target. Empty before the first connection to the target.
    */
   host: string
   /**
@@ -100,7 +100,7 @@ export interface PortsStatusResult {
     connLost: boolean
   }
   /**
-   * Every forward the backend currently tracks for the connection, running or stopped-by-transport-loss. Always an array, never null. User-stopped records leave the ledger at stop time — the renderer keeps those on its own side.
+   * Every forward the backend currently tracks for the connection, running or stopped-by-transport-loss. Always an array, never null. User-stopped records leave the ledger at stop time — the renderer keeps those on its own side. Always empty for the reserved "local" target: there is nothing to forward from the machine you are already on, and the renderer must not offer forwarding actions for it.
    */
   forwards: {
     /**

@@ -9,14 +9,13 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/ssh"
 )
 
 // ---------------------------------------------------------------------------
-// Scripted fake DiscoveryConn — the ladder and detector are protocol-level
+// Scripted fake exec seam — the ladder and detector are protocol-level
 // logic; only the lease/cancel semantics need a real connection (covered in
-// internal/ssh). Exec records the command it ran, waits on the block channel
-// when set, and then consumes the next canned response.
+// internal/ssh and local_test.go). Exec records the command it ran, waits on
+// the block channel when set, and then consumes the next canned response.
 // ---------------------------------------------------------------------------
 
 type fakeConn struct {
@@ -24,7 +23,6 @@ type fakeConn struct {
 	responses []fakeResponse
 	execs     []string
 	block     chan struct{} // when non-nil, Exec blocks until ctx done or this closes
-	done      chan struct{}
 	closed    bool
 	lost      bool
 	// autoValid answers every exec with a valid "normal host" sample,
@@ -33,15 +31,15 @@ type fakeConn struct {
 }
 
 type fakeResponse struct {
-	result *ssh.ExecResult
+	result *ExecResult
 	err    error
 }
 
 func newFakeConn() *fakeConn {
-	return &fakeConn{done: make(chan struct{})}
+	return &fakeConn{}
 }
 
-func (f *fakeConn) Exec(ctx context.Context, cmd string) (*ssh.ExecResult, error) {
+func (f *fakeConn) Exec(ctx context.Context, cmd string) (*ExecResult, error) {
 	f.mu.Lock()
 	f.execs = append(f.execs, cmd)
 	block := f.block
@@ -52,8 +50,6 @@ func (f *fakeConn) Exec(ctx context.Context, cmd string) (*ssh.ExecResult, error
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-block:
-		case <-f.done:
-			return nil, ssh.ErrExecLost
 		}
 	}
 
@@ -61,9 +57,9 @@ func (f *fakeConn) Exec(ctx context.Context, cmd string) (*ssh.ExecResult, error
 	defer f.mu.Unlock()
 	switch {
 	case f.closed:
-		return nil, ssh.ErrExecClosed
+		return nil, &ExecError{Kind: ExecErrLeaseClosed}
 	case f.lost:
-		return nil, ssh.ErrExecLost
+		return nil, &ExecError{Kind: ExecErrConnectionLost}
 	}
 	if f.autoValid {
 		return framed(knownRow), nil
@@ -76,8 +72,6 @@ func (f *fakeConn) Exec(ctx context.Context, cmd string) (*ssh.ExecResult, error
 	return resp.result, resp.err
 }
 
-func (f *fakeConn) Done() <-chan struct{} { return f.done }
-func (f *fakeConn) LostErr() error        { return nil }
 func (f *fakeConn) Close() error {
 	f.mu.Lock()
 	f.closed = true
@@ -100,11 +94,11 @@ func (f *fakeConn) queue(resps ...fakeResponse) {
 // framed builds a valid sentinel-framed probe response. A body that does not
 // end with a newline would fuse the trailing sentinel into the last row —
 // real probe output always newline-terminates its rows, so mirror that.
-func framed(body string) *ssh.ExecResult {
+func framed(body string) *ExecResult {
 	if body != "" && !strings.HasSuffix(body, "\n") {
 		body += "\n"
 	}
-	return &ssh.ExecResult{Stdout: []byte("NOCX-PD/1\n" + body + "NOCX-PD/1\n"), ExitStatus: 0}
+	return &ExecResult{Stdout: []byte("NOCX-PD/1\n" + body + "NOCX-PD/1\n"), ExitStatus: 0}
 }
 
 // knownRow is a single ss row with visible process evidence — a "normal
@@ -112,7 +106,7 @@ func framed(body string) *ssh.ExecResult {
 const knownRow = "LISTEN 0 511 0.0.0.0:6768 0.0.0.0:* users:((\"app\",pid=1,fd=1))\n"
 
 func absentTool() fakeResponse {
-	return fakeResponse{result: &ssh.ExecResult{
+	return fakeResponse{result: &ExecResult{
 		Stdout: []byte("NOCX-PD/1\nNOCX-PD/1\n"),
 		Stderr: []byte("sh: ss: not found\n"),
 		// ExitStatus 127 is the shell's command-not-found status.
@@ -271,7 +265,7 @@ func TestDetector_Exit127_AdvancesLadder(t *testing.T) {
 func TestDetector_NonzeroExit_WithStderr_CachesAndAdvances(t *testing.T) {
 	f := newFakeConn()
 	f.queue(
-		fakeResponse{result: &ssh.ExecResult{Stdout: []byte("NOCX-PD/1\nNOCX-PD/1\n"), Stderr: []byte("ss: invalid option -- 'H'\n"), ExitStatus: 1}},
+		fakeResponse{result: &ExecResult{Stdout: []byte("NOCX-PD/1\nNOCX-PD/1\n"), Stderr: []byte("ss: invalid option -- 'H'\n"), ExitStatus: 1}},
 		fakeResponse{result: framed("tcp 0 0 0.0.0.0:22 0.0.0.0:* LISTEN\n")},
 	)
 	d := newTestDetector(t, f)
@@ -306,7 +300,7 @@ func TestDetector_NoMatchExit_IsValidEmpty(t *testing.T) {
 	f.queue(
 		absentTool(),
 		absentTool(),
-		fakeResponse{result: &ssh.ExecResult{Stdout: []byte("NOCX-PD/1\nNOCX-PD/1\n"), ExitStatus: 1}},
+		fakeResponse{result: &ExecResult{Stdout: []byte("NOCX-PD/1\nNOCX-PD/1\n"), ExitStatus: 1}},
 	)
 	d := newTestDetector(t, f)
 
@@ -331,7 +325,7 @@ func TestDetector_NoMatchExit_IsValidEmpty(t *testing.T) {
 // treated as undiscoverable until Retry.
 func TestDetector_FramingViolation_RefusedWhole(t *testing.T) {
 	f := newFakeConn()
-	f.queue(fakeResponse{result: &ssh.ExecResult{
+	f.queue(fakeResponse{result: &ExecResult{
 		Stdout: []byte("Welcome to example.com\nss -lntp\n"),
 	}})
 	d := newTestDetector(t, f)
@@ -372,7 +366,7 @@ func TestDetector_FramingViolation_RefusedWhole(t *testing.T) {
 // state, never "no ports", and disables automatic discovery until Retry.
 func TestDetector_MaxSessions_Refused(t *testing.T) {
 	f := newFakeConn()
-	f.queue(fakeResponse{err: ssh.ErrExecSessionRefused})
+	f.queue(fakeResponse{err: &ExecError{Kind: ExecErrSessionRefused}})
 	d := newTestDetector(t, f)
 
 	s := d.Sample(context.Background())
@@ -403,7 +397,7 @@ func TestDetector_MaxSessions_Refused(t *testing.T) {
 // permission-or-policy-refused, distinct from tool absence.
 func TestDetector_ExecProhibited_Refused(t *testing.T) {
 	f := newFakeConn()
-	f.queue(fakeResponse{err: ssh.ErrExecProhibited})
+	f.queue(fakeResponse{err: &ExecError{Kind: ExecErrExecProhibited}})
 	d := newTestDetector(t, f)
 
 	s := d.Sample(context.Background())
@@ -551,7 +545,7 @@ func TestDetector_CloseMidSample_DiscardsLateResult(t *testing.T) {
 // failed-transiently, not a refusal and not "no ports".
 func TestDetector_ConnectionLost_Transient(t *testing.T) {
 	f := newFakeConn()
-	f.queue(fakeResponse{err: ssh.ErrExecLost})
+	f.queue(fakeResponse{err: &ExecError{Kind: ExecErrConnectionLost}})
 	d := newTestDetector(t, f)
 
 	s := d.Sample(context.Background())
@@ -567,7 +561,7 @@ func TestDetector_ConnectionLost_Transient(t *testing.T) {
 // trailing sentinel) must not surface as "no ports".
 func TestDetector_IncompleteOutput_Transient(t *testing.T) {
 	f := newFakeConn()
-	f.queue(fakeResponse{result: &ssh.ExecResult{
+	f.queue(fakeResponse{result: &ExecResult{
 		Stdout: []byte("NOCX-PD/1\nLISTEN 0 4096 127.0.0.1:53 0.0.0.0:*\n"),
 	}})
 	d := newTestDetector(t, f)
@@ -588,7 +582,7 @@ func TestDetector_AvailableLimited_Busybox(t *testing.T) {
 	f := newFakeConn()
 	f.queue(
 		absentTool(),
-		fakeResponse{result: &ssh.ExecResult{Stdout: []byte("NOCX-PD/1\nNOCX-PD/1\n"), Stderr: []byte("netstat: invalid option -- 'p'\n"), ExitStatus: 1}},
+		fakeResponse{result: &ExecResult{Stdout: []byte("NOCX-PD/1\nNOCX-PD/1\n"), Stderr: []byte("netstat: invalid option -- 'p'\n"), ExitStatus: 1}},
 		fakeResponse{result: framed(busyboxFixture)},
 	)
 	d := newTestDetector(t, f)

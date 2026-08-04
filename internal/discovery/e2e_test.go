@@ -36,7 +36,7 @@ func TestDetector_OverWire_NormalHost(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DiscoveryConn: %v", err)
 	}
-	d := NewDetector(conn, log.NewSlogAdapter(nil), WithSampleTimeout(5*time.Second))
+	d := NewDetector(adaptSSH(conn), log.NewSlogAdapter(nil), WithSampleTimeout(5*time.Second))
 	defer func() { _ = d.Close() }()
 
 	s := d.Sample(context.Background())
