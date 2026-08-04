@@ -161,8 +161,8 @@ func TestConnect_LauncherAccepted_StartUsesItsCommand(t *testing.T) {
 		t.Fatalf("launcher called %d times, want 1", n)
 	}
 	shell, opts := launcher.lastCall()
-	if shell != ShellBash {
-		t.Errorf("launcher received shell %q, want %q", shell, ShellBash)
+	if shell != ShellAuto {
+		t.Errorf("launcher received shell %q, want %q (no pin → the far host detects itself)", shell, ShellAuto)
 	}
 	if opts.SessionID != "sess-abc123" {
 		t.Errorf("launcher received SessionID %q, want sess-abc123", opts.SessionID)
@@ -172,6 +172,62 @@ func TestConnect_LauncherAccepted_StartUsesItsCommand(t *testing.T) {
 	}
 	if got := ch.ShellIntegrationReason(); got != ReasonNone {
 		t.Errorf("ShellIntegrationReason = %q, want %q", got, ReasonNone)
+	}
+}
+
+// TestConnect_ProfileShellPin_BeatsDetection: a profile that pins the far
+// shell must win over detection — the launcher receives the pinned kind,
+// not ShellAuto, and the user's knowledge of the host is never overridden
+// by what the dispatcher would conclude at the far end (nocx-6rj0).
+func TestConnect_ProfileShellPin_BeatsDetection(t *testing.T) {
+	srv := startTestSSHServer(t)
+	defer srv.close()
+
+	wantCmd := "exec zsh -l"
+	launcher := &fakeLauncher{cmd: wantCmd, reason: ReasonNone, ok: true}
+
+	ch := launcherConnect(
+		t, srv, []RealClientOption{WithConfigResolver(NewStubConfigResolver())},
+		WithRemoteLauncher(launcher),
+		WithShell(ShellZsh),
+		WithSessionID("sess-pin"),
+		WithEnhanced(),
+	)
+
+	assertUsable(t, srv, ch)
+
+	shell, opts := launcher.lastCall()
+	if shell != ShellZsh {
+		t.Errorf("launcher received shell %q, want the pinned %q", shell, ShellZsh)
+	}
+	if opts.SessionID != "sess-pin" {
+		t.Errorf("launcher received SessionID %q, want sess-pin", opts.SessionID)
+	}
+	if got := ch.ShellIntegrationReason(); got != ReasonNone {
+		t.Errorf("ShellIntegrationReason = %q, want %q", got, ReasonNone)
+	}
+}
+
+// TestConnect_UnknownPin_GoesToMinimalTier: a profile that pins ShellUnknown
+// ("this host is neither bash nor zsh") must reach the minimal tier
+// directly — the pin is a decision, not a request to detect.
+func TestConnect_UnknownPin_GoesToMinimalTier(t *testing.T) {
+	srv := startTestSSHServer(t)
+	defer srv.close()
+
+	launcher := &fakeLauncher{cmd: "exec /bin/sh -l", reason: ReasonNone, ok: true}
+
+	ch := launcherConnect(
+		t, srv, []RealClientOption{WithConfigResolver(NewStubConfigResolver())},
+		WithRemoteLauncher(launcher),
+		WithShell(ShellUnknown),
+	)
+
+	assertUsable(t, srv, ch)
+
+	shell, _ := launcher.lastCall()
+	if shell != ShellUnknown {
+		t.Errorf("launcher received shell %q, want the pinned %q", shell, ShellUnknown)
 	}
 }
 

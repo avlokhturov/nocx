@@ -59,11 +59,13 @@ export NOCX_POSIX_BOOTSTRAP="$d/env"
 ENV="$d/env" exec "${SHELL:-/bin/sh}" -l
 `
 
-// posixCommand builds the minimal-tier remote command for a shell that is
-// neither bash nor zsh (ShellUnknown). The outer form is the zsh launcher's
-// own — `/usr/bin/env -u BASH_ENV /bin/sh -c '<script>'` — so a
-// bash-as-/bin/sh host (macOS) cannot execute BASH_ENV code in the outer
-// sh (spec §4.3), and the payload is POSIX-only: never bash/zsh syntax.
+// posixArg builds the minimal-tier outer script for a shell that is neither
+// bash nor zsh (ShellUnknown, or the ShellAuto dispatcher's fallback arm).
+// The outer form is the zsh launcher's own — `/usr/bin/env -u BASH_ENV
+// /bin/sh -c '<script>'` — so a bash-as-/bin/sh host (macOS) cannot execute
+// BASH_ENV code in the outer sh (spec §4.3), and the payload is POSIX-only:
+// never bash/zsh syntax. It is the piece the ShellAuto dispatcher carries as
+// its third positional argument; posixCommand wraps it with shellQuote.
 //
 // The deliberate decision behind ShellUnknown → posix, rather than keeping
 // the old refusal: the spec (§6, D4) names `minimal` as a real, verified
@@ -71,17 +73,31 @@ ENV="$d/env" exec "${SHELL:-/bin/sh}" -l
 // neither bash nor zsh — and refusing them forever would strand every
 // sh-only remote at no integration, contradicting the design. Refusal now
 // means "no integration exists", and one does.
-func (remoteLauncher) posixCommand(opts LaunchOptions) (string, RefusalReason, bool) {
+func (remoteLauncher) posixArg(opts LaunchOptions) (string, bool) {
 	if opts.Enhanced && opts.SessionID == "" {
 		// Pinned contract: SessionID is never empty when Enhanced. The
 		// minimal tier has no ownership protocol to anchor, but the
 		// precondition is the caller's, enforced uniformly across tiers.
-		return "", ReasonUnsupportedShell, false
+		return "", false
 	}
 	env := strings.ReplaceAll(posixEnvFileTemplate, "@ENV@", launcherEnvBlock(opts))
 	env = strings.ReplaceAll(env, "@NOCX_POSIX@", posixScript)
 	outer := strings.ReplaceAll(posixOuterScript, "@POSIXENV@", printfBEscape(env))
-	cmd := "/usr/bin/env -u BASH_ENV /bin/sh -c " + shellQuote(outer)
+	// One physical line: a csh login shell splits multi-line quoted
+	// tokens, so the payload must survive that parse (see singleLine).
+	return singleLine(outer), true
+}
+
+// posixCommand builds the minimal-tier remote command, sent when the far
+// shell is already known to be neither bash nor zsh. The ShellAuto
+// dispatcher sends posixArg instead, wrapped by its own argv plumbing, so
+// the two paths share one payload.
+func (remoteLauncher) posixCommand(opts LaunchOptions) (string, RefusalReason, bool) {
+	arg, ok := remoteLauncher{}.posixArg(opts)
+	if !ok {
+		return "", ReasonUnsupportedShell, false
+	}
+	cmd := "/usr/bin/env -u BASH_ENV /bin/sh -c " + shellQuote(arg)
 	if len(cmd) > maxLauncherLen {
 		// Unreachable with the current embedded script (~3 KiB); a script
 		// that outgrows the cap must refuse rather than emit a command the

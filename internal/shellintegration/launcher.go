@@ -9,6 +9,11 @@ const (
 	ShellBash    ShellKind = "bash"
 	ShellZsh     ShellKind = "zsh"
 	ShellUnknown ShellKind = "unknown"
+	// ShellAuto means "the far host decides": the launcher emits a single
+	// strictly-POSIX dispatcher that detects the login shell at runtime and
+	// execs the matching tier (nocx-6rj0). It is a build-time intent, never
+	// a detected result — StartCommand never returns it as a claim.
+	ShellAuto ShellKind = "auto"
 )
 
 // RefusalReason is why integration did not happen, in a form the product
@@ -44,11 +49,14 @@ func NewRemoteLauncher() RemoteLauncher { return remoteLauncher{} }
 
 // StartCommand implements RemoteLauncher.
 //
-// Selection is deliberate per kind: bash and zsh get their launchers, and
+// Selection is deliberate per kind: bash and zsh get their launchers,
 // ShellUnknown gets the minimal tier — the posix launcher (spec §6: dash /
 // busybox ash / POSIX sh are a real tier, verified; refusing them forever
-// would contradict D4). The default arm is the tripwire for a future
-// ShellKind with no launcher: refuse loudly rather than guess.
+// would contradict D4) — and ShellAuto gets the dispatcher, which carries
+// all three tiers and lets the far login shell choose at runtime (the
+// only layer that knows which shell it is; nocx-6rj0). The default arm is
+// the tripwire for a future ShellKind with no launcher: refuse loudly
+// rather than guess.
 func (remoteLauncher) StartCommand(shell ShellKind, opts LaunchOptions) (string, RefusalReason, bool) {
 	switch shell {
 	case ShellBash:
@@ -57,6 +65,8 @@ func (remoteLauncher) StartCommand(shell ShellKind, opts LaunchOptions) (string,
 		return remoteLauncher{}.zshCommand(opts)
 	case ShellUnknown:
 		return remoteLauncher{}.posixCommand(opts)
+	case ShellAuto:
+		return remoteLauncher{}.autoCommand(opts)
 	default:
 		// Never a best-effort guess: an unmapped shell kind is refused
 		// outright and the caller falls back to a plain shell.
@@ -84,7 +94,7 @@ func launcherEnvBlock(opts LaunchOptions) string {
 	return b.String()
 }
 
-// maxLauncherLen caps the whole remote command well below a conservative
+// maxLauncherLen caps a single-tier remote command well below a conservative
 // remote ARG_MAX. Chosen 32 KiB because: Linux enforces MAX_ARG_STRLEN of
 // 128 KiB per single argument; macOS caps total argv+env at 256 KiB
 // (1 MiB on current releases); and the bash launcher's rcfile travels
@@ -96,6 +106,18 @@ func launcherEnvBlock(opts LaunchOptions) string {
 // makes StartCommand refuse instead of emitting a command the far host
 // cannot exec. A var, not a const, so tests can prove the refusal path.
 var maxLauncherLen = 32 * 1024
+
+// maxAutoLauncherLen caps the ShellAuto dispatcher command, which carries
+// the bash, zsh and posix payloads as three separate argv words (no double
+// escaping, so this is their plain sum plus a ~500-byte script). 64 KiB is
+// deliberate: Linux binds the per-argument size (MAX_ARG_STRLEN, 128 KiB)
+// and the largest single word here is the bash payload (~24 KiB); macOS
+// binds the whole argv+env block (256 KiB on older releases, 1 MiB current)
+// and the whole command is ~36 KiB. The bash tier's own 64 KiB
+// process-substitution-pipe limit still applies to the bash payload alone,
+// which the dispatcher leaves unchanged. A var, not a const, so tests can
+// prove the refusal path, matching maxLauncherLen.
+var maxAutoLauncherLen = 64 * 1024
 
 // shellQuote wraps s in single quotes, escaping embedded quotes with the
 // POSIX '\” idiom. This is a real escaper, not concatenation that happens
