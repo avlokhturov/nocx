@@ -31,6 +31,8 @@ import {
   SSHAliasQuickConnectProvider,
   type QuickConnectProvider,
 } from './quick-connect'
+import { createPortsPanelServices } from './ports'
+import { registerPortsKeybinding, registerPortsSurface } from './ports-surface'
 
 async function main() {
   log.info('nocx: main() called')
@@ -192,6 +194,14 @@ async function main() {
     },
   })
 
+  // Ports panel (nocx-wzc4.2): scoped to the ACTIVE tab's saved SSH
+  // profile. The factory resolves the profileId at build() time — the
+  // active tab can change between opens, so capturing it at registration
+  // would go stale. openPorts() no-ops when the active tab is not a
+  // saved-profile SSH tab (local shell, alias, Settings): the panel needs
+  // a profile to scope to.
+  const openPorts = registerPortsSurface(registry, createPortsPanelServices(dispatcher), tm)
+
   /**
    * Open (or focus) the Settings tab and hand back the instance that is
    * actually on screen.
@@ -287,6 +297,10 @@ async function main() {
       // itself owns the PROMPT_READY && trusted && owned gate and refuses
       // with a stated reason outside it.
       () => void tm.activeTerminalContent()?.integrateShell(),
+      // "Ports" (nocx-wzc4.2): the panel for the ACTIVE tab's saved SSH
+      // profile. openPorts() no-ops on tabs with no profile (local shell,
+      // alias, Settings) — the panel needs a profile to scope to.
+      () => void openPorts(),
     ),
     sshProvider,
     new SSHAliasQuickConnectProvider(profileClient, (host, user, port) =>
@@ -332,6 +346,13 @@ async function main() {
       tm.activeTerminalContent()?.integrateShell()
     }
   })
+
+  // Ctrl/Cmd+Shift+O — "pOrt": the ports panel for the active connection.
+  // The same entry the quick-connect palette lists, reachable without
+  // opening the picker. The chord and its "free elsewhere" behaviour are
+  // owned by ports-surface.ts (registerPortsKeybinding) so the listener is
+  // exercised by the same test that opens the panel.
+  registerPortsKeybinding(openPorts)
 
   void tm.openInitialTab()
 
