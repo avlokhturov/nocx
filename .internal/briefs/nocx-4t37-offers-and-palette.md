@@ -30,32 +30,86 @@ whole defect.
 
 ---
 
-## A — `nocx-4t37.1`: one palette, prefix-scoped
+## A — `nocx-4t37.1`: a spotlight, and a quick connect that stays a list
 
-`Ctrl/Cmd+Shift+P` opens **quick connect** (`main.tsx:361`), which carries
-"Local shell", "New connection" and until recently "Integrate this shell" and
-"Ports" beside SSH hosts and aliases. It is neither a host picker nor a command
-palette, and the owner noticed.
+**Rewritten after the owner's Raycast reference. If you were dispatched against
+the "prefix-scoped modes" framing, this replaces it — prefixes are not the
+model.**
 
-Build one surface with two modes, the model people already carry from VS Code:
-**a `>` prefix means commands, no prefix means hosts.** One implementation, one
-chord, and the mode is visible in the input rather than in the user's head.
+The owner: *"quick connect должен превратиться в некий спотлайт, как у raycast,
+там выбираешь что сделать и прямо в этом окне выбираешь сервер. А quick connect
+по стрелке вниз должен остаться в текущем виде со списком серверов — это быстрый
+способ подключиться."*
 
-- `Ctrl/Cmd+Shift+P` opens it in command mode with the prefix already present.
-  Clearing the prefix returns to hosts **in the same surface** — no second
-  dialog, no second component.
-- Every item in `ActionsQuickConnectProvider` becomes a command and stops
-  appearing in host results.
-- The host side keeps everything it earned: ad-hoc `user@host` still connects, a
-  saved profile still outranks the alias it covers, and a degraded `ssh -G`
-  still surfaces the condition instead of an empty list.
+Two surfaces, two jobs, and the second one already exists.
 
-Do not invent a second keybinding for hosts unless you can argue it; one entry
-point with a visible mode is the point.
+### The chevron keeps its list, untouched
 
-**Test what a user does**, not what renders: from the state a user starts in,
-the chord opens the palette, a command is reachable and runs, and clearing the
-prefix reaches a host.
+`tab-strip.tsx:143` and `:197` already call `onQuickConnect` from a
+`ChevronDownIcon`. That stays exactly as it is: a list of servers, one keystroke
+from connecting. Do not add search modes, type badges or commands to it. It is
+the fast path and its speed comes from having one job.
+
+### `Ctrl/Cmd+Shift+P` becomes the spotlight
+
+One field, **mixed results**, and the row tells you what kind of thing it is
+rather than making you remember a prefix — the Raycast shape:
+
+```
+conn|
+Results
+  Manage connections     Settings          Command
+  production-api         deploy@10.0.0.4   Host
+  Forward a port         ct-ziti-tunnel    Command
+```
+
+- The **type sits at the right of the row** (`Command`, `Host`, `Setting`), and
+  the **subtitle names the context** — which host a command would act on, which
+  user@host a row would connect to. Both are what let one list stay mixed
+  without becoming a soup.
+- A footer states the primary action for the highlighted row, with a secondary
+  key for the rest. Copy Raycast's ergonomics here; they are well tuned.
+- Prefixes may exist as an escape hatch for someone who wants to narrow to one
+  kind. They are not how a normal user reaches anything.
+
+### The part that matters most: choosing the server *without leaving the window*
+
+A command that needs a target **drills in inside the same surface**. "Forward a
+port" does not open a dialog and does not dead-end — the list becomes the list
+of servers, then the list of ports, with the chosen steps shown as breadcrumbs
+in the field. Backspace or Esc walks back out one step at a time; Esc at the top
+closes.
+
+This is the whole reason the owner pointed at Raycast, and it is the piece
+neither the earlier plan nor the review had. Build the surface so a command can
+declare "I need a host" (and later "I need a port", "I need a file") and get a
+picker for free. Two commands with hand-rolled second steps is how this becomes
+a mess.
+
+### Keep shell commands out
+
+The semantic command line is already the better palette for those: it has the
+cwd, the host, shell grammar, history and command existence. Two command lines,
+one of them stupider, is a worse product than one.
+
+### Also worth taking from the reference
+
+Provider failures must not be silently skipped. An unavailable `ssh -G` already
+surfaces as a typed condition inside its own provider; the spotlight must
+preserve that rather than rendering "no results" — a degraded source and an
+empty source are different facts.
+
+`QuickConnectProvider` is the wrong name for what this becomes and has already
+bent the design toward "everything is somehow a connection". Rename the model
+even if the visual shell is reused.
+
+### Test what a user does
+
+From the state a user starts in: the chord opens the spotlight; typing part of a
+command name finds it; running a command that needs a host narrows **in place**
+and reaches the client method with the host the user picked; Backspace returns
+to the command list with the query intact; and the chevron still opens the plain
+host list with no commands in it.
 
 ---
 
