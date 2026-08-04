@@ -27,7 +27,7 @@ func TestSeatbeltProbe_ReasonMapping(t *testing.T) {
 	})
 
 	t.Run("probe failure is not cached", func(t *testing.T) {
-		sandboxExecPath = "/bin/true" // exists, so the probe seam is reached
+		sandboxExecPath = "/usr/bin/true" // exists, so the probe seam is reached
 		calls := 0
 		sandboxExecProbe = func(_ context.Context, _ string) error {
 			calls++
@@ -46,7 +46,7 @@ func TestSeatbeltProbe_ReasonMapping(t *testing.T) {
 	})
 
 	t.Run("success cached for app lifetime", func(t *testing.T) {
-		sandboxExecPath = "/bin/true"
+		sandboxExecPath = "/usr/bin/true"
 		calls := 0
 		sandboxExecProbe = func(_ context.Context, _ string) error {
 			calls++

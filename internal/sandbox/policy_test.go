@@ -24,6 +24,15 @@ func fixture(t *testing.T) (workspace, runtimeRoot, pathDir string) {
 	return workspace, runtimeRoot, pathDir
 }
 
+func canonicalPath(t *testing.T, path string) string {
+	t.Helper()
+	canonical, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", path, err)
+	}
+	return canonical
+}
+
 func TestBuildPolicy_Roots(t *testing.T) {
 	workspace, runtimeRoot, pathDir := fixture(t)
 	shell := "/bin/sh"
@@ -38,9 +47,9 @@ func TestBuildPolicy_Roots(t *testing.T) {
 	}
 
 	// Writable roots in the fixed tooltip order: workspace, home, tmp.
-	home := filepath.Join(runtimeRoot, "home")
-	tmp := filepath.Join(runtimeRoot, "tmp")
-	wantRW := []string{workspace, home, tmp}
+	home := canonicalPath(t, filepath.Join(runtimeRoot, "home"))
+	tmp := canonicalPath(t, filepath.Join(runtimeRoot, "tmp"))
+	wantRW := []string{canonicalPath(t, workspace), home, tmp}
 	if len(p.WritableRoots) != len(wantRW) {
 		t.Fatalf("WritableRoots = %v, want %v", p.WritableRoots, wantRW)
 	}
@@ -85,7 +94,7 @@ func TestBuildPolicy_Roots(t *testing.T) {
 	if !roSet[pathCanon] {
 		t.Errorf("read-only roots missing PATH dir %q", pathCanon)
 	}
-	for _, forbidden := range []string{workspace, filepath.Join(runtimeRoot, "missing")} {
+	for _, forbidden := range []string{canonicalPath(t, workspace), filepath.Join(runtimeRoot, "missing")} {
 		if roSet[forbidden] {
 			t.Errorf("read-only roots must not contain %q (workspace is RW; missing skipped)", forbidden)
 		}
@@ -111,8 +120,8 @@ func TestBuildPolicy_CanonicalizesWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildPolicy via symlink: %v", err)
 	}
-	if p.Workspace != workspace {
-		t.Fatalf("Workspace = %q, want canonical %q", p.Workspace, workspace)
+	if p.Workspace != canonicalPath(t, workspace) {
+		t.Fatalf("Workspace = %q, want canonical %q", p.Workspace, canonicalPath(t, workspace))
 	}
 }
 
@@ -184,8 +193,8 @@ func TestGitCommonDir(t *testing.T) {
 			t.Fatalf("write .git: %v", err)
 		}
 		got, ok := gitCommonDir(workspace)
-		if !ok || got != common {
-			t.Fatalf("gitCommonDir = %q, %v; want %q, true", got, ok, common)
+		if want := canonicalPath(t, common); !ok || got != want {
+			t.Fatalf("gitCommonDir = %q, %v; want %q, true", got, ok, want)
 		}
 	})
 
@@ -198,8 +207,8 @@ func TestGitCommonDir(t *testing.T) {
 			t.Fatalf("write .git: %v", err)
 		}
 		got, ok := gitCommonDir(workspace)
-		if !ok || got != common2 {
-			t.Fatalf("gitCommonDir = %q, %v; want %q, true", got, ok, common2)
+		if want := canonicalPath(t, common2); !ok || got != want {
+			t.Fatalf("gitCommonDir = %q, %v; want %q, true", got, ok, want)
 		}
 	})
 
@@ -267,7 +276,12 @@ func TestBuildPolicy_GitCommonDirAppearsInWritableRoots(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildPolicy: %v", err)
 	}
-	want := []string{workspace, common, filepath.Join(base, "runtime", "home"), filepath.Join(base, "runtime", "tmp")}
+	want := []string{
+		canonicalPath(t, workspace),
+		canonicalPath(t, common),
+		canonicalPath(t, filepath.Join(base, "runtime", "home")),
+		canonicalPath(t, filepath.Join(base, "runtime", "tmp")),
+	}
 	if len(p.WritableRoots) != len(want) {
 		t.Fatalf("WritableRoots = %v, want %v", p.WritableRoots, want)
 	}

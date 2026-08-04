@@ -34,7 +34,7 @@ func (s *sandboxTestService) Prepare(_ context.Context, _ sandbox.Request, _ san
 		return nil, s.prepErr
 	}
 	// A real, short-lived payload: the PTY opens, the process exits.
-	cmd := exec.Command("/bin/true") //nolint:gosec // fixed test payload
+	cmd := exec.Command("/usr/bin/true") //nolint:gosec // fixed test payload
 	return &sandbox.PreparedCommand{Cmd: cmd, Backend: s.status.Backend, Policy: s.policy}, nil
 }
 
