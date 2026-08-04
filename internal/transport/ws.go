@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/shady2k/nocx/internal/connectfwd"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/discovery"
@@ -709,6 +710,15 @@ type openParams struct {
 	// overrides the resolved user.
 	Host string `json:"host,omitempty"`
 	User string `json:"user,omitempty"`
+	// Shell pins the far shell the launcher must target (nocx-pu4.1): a
+	// user who knows their host runs zsh can say so, and where detection
+	// is wrong they have an override. Empty means detect — the launcher
+	// receives ShellAuto and the far login shell decides (nocx-6rj0).
+	// Values: bash | zsh | unknown | auto; anything else is ignored with
+	// a warn, never honoured (detection is the safe degrade for a
+	// meaningless pin, and the launcher refuses unmapped kinds rather
+	// than guessing if one slips past).
+	Shell string `json:"shell,omitempty"`
 }
 
 // resizeParams is the payload of the "resize" RPC method.
@@ -1054,6 +1064,21 @@ func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connSta
 			_ = wconn.writeJSON(resp)
 			return
 		}
+		// Shell pin (nocx-pu4.1): the open may name the far shell the
+		// launcher must target. A pin beats auto-detection — a user who
+		// knows their host runs zsh can say so, and where detection is
+		// wrong they have an override. Anything else is ignored with a
+		// warn, never honoured: detection is the safe degrade for a
+		// meaningless pin, and the launcher refuses unmapped kinds rather
+		// than guessing if one slips past.
+		if params.Shell != "" {
+			switch ssh.ShellKind(params.Shell) {
+			case ssh.ShellBash, ssh.ShellZsh, ssh.ShellUnknown, ssh.ShellAuto:
+				remote.Shell = ssh.ShellKind(params.Shell)
+			default:
+				s.log.Warn("ignoring unknown shell pin", "profileId", params.ProfileID, "shell", params.Shell)
+			}
+		}
 	}
 
 	sess, err := s.registry.Open(ctx, cfg)
@@ -1118,6 +1143,15 @@ func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connSta
 	resp := newJSONRPCResult(req.ID, resultJSON)
 	_ = wconn.writeJSON(resp)
 
+	// Stored forwards (nocx-wzc4.5): replay the profile's configured
+	// forwards onto the connection. Deliberately ASYNC and only after the
+	// ack — a slow connector acquire must never delay the open result.
+	// The rows are connection-owned, not tab-owned (spec §7.3): closing
+	// this tab leaves them running.
+	if cfg.ProfileID != "" {
+		go s.replayStoredForwards(cfg.ProfileID, cfg.Host, cfg.Remote)
+	}
+
 	// Start the PTY → ring output pump only after the ack is sent.
 	// AD-7: the ack must precede the session's own traffic in both
 	// directions, otherwise the first prompt races the open result and
@@ -1132,6 +1166,72 @@ func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connSta
 
 	sidBytes, _ := session.IDToBytes(sess.ID())
 	go s.ringToConn(ctx, wconn, sidBytes, rx.ring, 0)
+}
+
+// replayStoredForwards opens the profile's stored forwards at connect time
+// (spec §8, D5; nocx-wzc4.5): the ports a user always forwards to a host
+// are configured once and are simply there when the connection comes up.
+// It runs on its own goroutine after the open ack — never before — so a
+// slow connector acquire cannot delay the ack.
+//
+// Every result with a tunnel record is registered in the transport ledger
+// WITHOUT a tab owner (spec §7.3): stored forwards are connection-owned
+// and must survive tab close. A row that failed to start is still
+// registered so ports.status shows it — the panel must not contradict a
+// forward the backend knows failed (AGENTS.md: a soft degrade must be
+// visible in the product, not only in a log). One row's failure never
+// stops another's; that contract lives in connectfwd.Replay, and this
+// loop never flattens a row's outcome into a generic failure.
+func (s *WSServer) replayStoredForwards(profileID, host string, cfg *ssh.ConnectConfig) {
+	if profileID == "" || cfg == nil || s.tunnelConnector == nil || s.profiles == nil {
+		return
+	}
+	profs, err := s.profiles.LoadProfiles()
+	if err != nil {
+		s.log.Warn("stored forwards not replayed: profile store read failed", "profileId", profileID, "error", err)
+		return
+	}
+	var forwards []profile.ForwardSpec
+	for i := range profs {
+		if profs[i].ID == profileID && profs[i].Options.Forwards != nil {
+			forwards = *profs[i].Options.Forwards
+			break
+		}
+	}
+	if len(forwards) == 0 {
+		return
+	}
+	// The forward's connection is the profile's own: the WHOLE resolved
+	// config — credentials, jump route, authorized endpoints — rides one
+	// option that copies it into the connector's ConnectConfig, so the
+	// forward is authorized and pool-keyed exactly like a tab (AD-4).
+	opts := []ssh.ConnectOption{func(dst *ssh.ConnectConfig) { *dst = *cfg }}
+	results := connectfwd.Replay(context.Background(), profileID, forwards, host, s.tunnelConnector, opts)
+	for _, r := range results {
+		if r.Tunnel == nil {
+			// tunnel.New rejected the spec — no record exists to register.
+			// The row's own failure is logged; there is nothing the panel
+			// could show for a row that was never a tunnel.
+			if r.Err != nil {
+				s.log.Warn("stored forward rejected", "profileId", profileID, "index", r.Index, "error", r.Err)
+			}
+			continue
+		}
+		s.trackTunnelConnectionOwned(r.Tunnel)
+		if r.Err != nil {
+			s.log.Warn("stored forward failed to start", "profileId", profileID, "index", r.Index, "tunnelId", r.Tunnel.ID, "error", r.Err)
+		}
+	}
+}
+
+// trackTunnelConnectionOwned registers a tunnel in the ledger WITHOUT a tab
+// owner (spec §7.3): a stored forward is the connection's, not the opening
+// tab's, so closing the tab must not stop it. It stays stoppable through
+// tunnel.stop and visible in ports.status for the life of the connection.
+func (s *WSServer) trackTunnelConnectionOwned(t *tunnel.Tunnel) {
+	s.tunnelMu.Lock()
+	s.tunnels[t.ID] = t
+	s.tunnelMu.Unlock()
 }
 
 func (s *WSServer) handleResize(wconn *wsConn, state *connState, req jsonrpcRequest) {

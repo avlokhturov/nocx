@@ -111,6 +111,61 @@ func TestRemoteSession_SessionIDMatchesAndLauncherWired(t *testing.T) {
 	}
 }
 
+// TestRemoteSession_ShellPin_ReachesConnect pins the regression the whole
+// seam exists for (nocx-pu4.1): a ConnectConfig.Shell must ride
+// sshOptionsFromConfig into the Connect options, or the pin dies before the
+// launcher and the far shell is detected instead of named. The launcher's
+// own mapping (empty → ShellAuto) is the ssh package's contract
+// (ssh_real.go), tested there; here the pin must simply arrive.
+func TestRemoteSession_ShellPin_ReachesConnect(t *testing.T) {
+	factory := &capturingSSHFactory{ch: &reasonChannel{reason: ssh.ReasonNone}}
+	reg := launcherReg().WithSSHFactory(factory)
+
+	sess, err := reg.Open(context.Background(), Config{
+		Kind:   KindRemote,
+		Host:   "example.com",
+		Remote: &ssh.ConnectConfig{Shell: ssh.ShellZsh},
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = reg.Close(sess.ID()) }()
+
+	cfg := &ssh.ConnectConfig{}
+	for _, o := range factory.opts {
+		o(cfg)
+	}
+	if cfg.Shell != ssh.ShellZsh {
+		t.Errorf("ConnectConfig.Shell = %q, want the pinned %q", cfg.Shell, ssh.ShellZsh)
+	}
+}
+
+// TestRemoteSession_NoShellPin_LeavesShellEmpty pins the other end of the
+// contract: an unpinned config must NOT invent a shell — the launcher's
+// empty → ShellAuto mapping is the detect default (nocx-6rj0).
+func TestRemoteSession_NoShellPin_LeavesShellEmpty(t *testing.T) {
+	factory := &capturingSSHFactory{ch: &reasonChannel{reason: ssh.ReasonNone}}
+	reg := launcherReg().WithSSHFactory(factory)
+
+	sess, err := reg.Open(context.Background(), Config{
+		Kind:   KindRemote,
+		Host:   "example.com",
+		Remote: &ssh.ConnectConfig{},
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = reg.Close(sess.ID()) }()
+
+	cfg := &ssh.ConnectConfig{}
+	for _, o := range factory.opts {
+		o(cfg)
+	}
+	if cfg.Shell != "" {
+		t.Errorf("ConnectConfig.Shell = %q, want empty (detect default)", cfg.Shell)
+	}
+}
+
 func TestRemoteSession_ConnectError_NoSessionRegistered(t *testing.T) {
 	factory := &capturingSSHFactory{err: io.ErrClosedPipe}
 	reg := launcherReg().WithSSHFactory(factory)
