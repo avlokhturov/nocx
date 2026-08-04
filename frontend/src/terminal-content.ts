@@ -1458,9 +1458,31 @@ export class TerminalContent extends BaseTabContent {
     this._updateCapability()
   }
 
+  /** The current input presentation, exposed for context menu and palette
+   *  (nocx-atyf.5). 'editor' means the nocx command editor is active;
+   *  'terminal' means conventional terminal input is in use. */
+  get presentation(): InputPresentation {
+    return this._presentation
+  }
+
   /** The observed shell state, exposed for the e2e and unit seams. */
   get shellState(): ShellState {
     return this._shellState
+  }
+
+  /** Switch to terminal input for this session (nocx-atyf.5). The escape
+   *  hatch — the editor hides, keys route raw, and the prompt is restored.
+   *  Session-scoped; a new session starts with the default. */
+  switchToTerminalInput(): void {
+    if (this.nativeMode) return
+    this.enterNativeMode()
+  }
+
+  /** Switch back to the nocx command editor (nocx-atyf.5). Only works when
+   *  the shell is integrated and the prompt is trusted. */
+  switchToEditorInput(): void {
+    if (!this.nativeMode) return
+    this._restoreEditor()
   }
 
   get policy(): ShellIntegrationPolicy {

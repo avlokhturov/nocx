@@ -1429,3 +1429,72 @@ describe('the command editor chrome pins the clock to the right edge without dis
     expect(time).toMatch(/margin-left\s*:\s*auto/)
   })
 })
+
+describe('terminal/editor input switching (nocx-atyf.5)', () => {
+  it('switching to terminal input hides the editor and is reversible', async () => {
+    const { content, teardown } = await mountTerminal(makeClipboard(), {
+      attachToDocument: true,
+    })
+    const renderer = rendererOf(content)
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoScrollIntoView = Element.prototype.scrollIntoView
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    try {
+      content.setVisible(true)
+
+      // Start with editor (integrated + trusted).
+      renderer._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
+      renderer._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
+      expect(content.presentation).toBe('editor')
+
+      // Switch to terminal input.
+      content.switchToTerminalInput()
+      expect(content.presentation).toBe('terminal')
+
+      // Switch back to editor.
+      content.switchToEditorInput()
+      expect(content.presentation).toBe('editor')
+    } finally {
+      Element.prototype.scrollTo = protoScrollTo
+      Element.prototype.scrollIntoView = protoScrollIntoView
+      teardown()
+    }
+  })
+
+  it('the choice is session-scoped — a new session is unaffected', async () => {
+    const { content: first, teardown: teardown1 } = await mountTerminal(makeClipboard(), {
+      attachToDocument: true,
+    })
+    try {
+      first.setVisible(true)
+      const renderer1 = rendererOf(first)
+      renderer1._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
+      renderer1._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
+
+      // Switch the first session to terminal input.
+      first.switchToTerminalInput()
+      expect(first.presentation).toBe('terminal')
+    } finally {
+      teardown1()
+    }
+
+    // A brand-new session starts with the default (editor, if integrated).
+    const { content: second, teardown: teardown2 } = await mountTerminal(makeClipboard(), {
+      attachToDocument: true,
+    })
+    try {
+      second.setVisible(true)
+      const renderer2 = rendererOf(second)
+      renderer2._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
+      renderer2._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
+
+      // The new session is unaffected — it starts in editor mode.
+      expect(second.presentation).toBe('editor')
+    } finally {
+      teardown2()
+    }
+  })
+})
