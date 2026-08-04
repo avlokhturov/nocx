@@ -12,9 +12,9 @@
   min-width: 0;
 }
 
-/* The row's single line: address, secondary, and its actions. A caveat about
-   the bind renders as a second line beneath it (MarkerList note), inside the
-   same row, so the divided list's hairline still bounds one record. */
+/* The row's main block: a text column and the actions beside it. A caveat
+   about the bind renders as a further line beneath (MarkerList note), inside
+   the same row, so the divided list's hairline still bounds one record. */
 .ports-row__main {
   display: flex;
   align-items: center;
@@ -23,17 +23,42 @@
   min-width: 0;
 }
 
-/* The address is the row's PRIMARY KEY — the thing the user came for — and
-   yields its own width only as a last resort: flex-basis 0 gives it a zero
-   shrink weight, so a tight row squeezes the secondary text and the process
-   chip first; the ellipsis is the floor, not the default (nocx-wzc4.9). */
+/* The text column stacks: address, then the process beneath it. One line was
+   the mistake — the address and the process were competing for 240px and both
+   lost, while each row spent its height on air. Stacking gives the address
+   the full width it needs (`127.0.0.53%lo:53` is 16 characters) and costs
+   nothing, because the vertical space was already being wasted
+   (nocx-wzc4.10). */
+.ports-row__text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* The address is the row's PRIMARY KEY — the thing the user came for. It now
+   owns its own line, so the ellipsis is a floor that should never be reached
+   at the rail's default width. */
 .ports-row__addr {
-  flex: 1 1 0;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
+}
+
+/* The process, on its own line in the quiet register. A name and a pid are a
+   label, not a caution, so they are text; the Badge stays for the evidence
+   states that ARE a caution (owners hidden, probe cannot say), where the tone
+   is the information. */
+.ports-row__proc {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-size-2xs);
+  color: var(--color-text-dim);
 }
 
 /* Secondary text (the forward's destination) yields before the address does:
@@ -49,13 +74,13 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* The process chip gets a bounded share of the row — placement only. The
-   ellipsis itself is the Badge's truncate variance; this rule only says how
-   much of the row the chip may claim before it has to yield (nocx-wzc4.9). */
-.ports-row__main > .ui-badge {
-  flex: 0 1 auto;
+/* A chip inside the text column gets the column's full width rather than a
+   share of the row — placement only. The ellipsis itself is the Badge's
+   truncate variance (nocx-wzc4.9). */
+.ports-row__text > .ui-badge {
+  align-self: flex-start;
+  max-width: 100%;
   min-width: 0;
-  max-width: 45%;
 }
 
 .ports-row__arrow {

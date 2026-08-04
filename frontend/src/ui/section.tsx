@@ -18,6 +18,8 @@ export interface SectionProps {
   title: string
   /** When true, forwards to the inner Stack to draw separators between children. */
   divided?: boolean
+  /** Forwards the Stack's dense rhythm — a scanned list rather than a read form. */
+  dense?: boolean
   children: JSX.Element
 }
 
@@ -25,7 +27,7 @@ export function Section(props: SectionProps) {
   return (
     <section id={props.id} class="ui-section">
       <h2>{props.title}</h2>
-      <Stack gap="default" divided={props.divided}>
+      <Stack gap="default" divided={props.divided} dense={props.dense}>
         {props.children}
       </Stack>
     </section>

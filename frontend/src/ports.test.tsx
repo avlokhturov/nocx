@@ -95,12 +95,18 @@ function fakeServices(over: Partial<PortsPanelServices> = {}): PortsPanelService
 /** The panel plus its shared Pause control — the seam the header action and
  *  the panel share in main.tsx (nocx-wzc4.9). */
 function renderPanel(services: PortsPanelServices, over: Partial<PortsPanelProps> = {}) {
+  // The control is created ONCE, outside the JSX. Solid wraps every prop
+  // expression in a getter, so `pause={createPortsPauseControl(...)}` builds a
+  // fresh control on every read — `sync` would write one instance while the
+  // view read another, and the panel could never show a pause it did not
+  // itself initiate (nocx-wzc4.10).
+  const pause = createPortsPauseControl(services, () => 'ssh:p1:1')
   return render(() => (
     <PortsPanel
       profileId={() => 'ssh:p1:1'}
       services={services}
       visible={() => true}
-      pause={createPortsPauseControl(services, () => 'ssh:p1:1')}
+      pause={pause}
       {...over}
     />
   ))
@@ -318,19 +324,41 @@ describe('PortsPanel — loading and refresh (nocx-wzc4.9)', () => {
     expect(screen.queryByTestId('ports-pause')).toBeNull()
   })
 
-  it('the sample age is micro-text, never a chip, and pause rides beside it', async () => {
+  it('shows no sample age at all, and says "paused" only while paused (nocx-wzc4.10)', async () => {
+    // The timestamp told the user nothing they could act on: the list
+    // refreshes itself, and a failed sample shows the failure instead of
+    // stale rows, so the rows on screen are never older than they look.
     const services = fakeServices({
-      status: vi
-        .fn()
-        .mockResolvedValue(
-          statusFixture({ state: 'available', lastSampleAt: '2026-08-04T12:00:00Z' }),
-        ),
+      status: vi.fn().mockResolvedValue(
+        statusFixture({
+          state: 'available',
+          listeners: [listenerFixture(6768)],
+          lastSampleAt: '2026-08-04T12:00:00Z',
+        }),
+      ),
+    })
+    renderPanel(services)
+    await waitFor(() => expect(screen.getByTestId('detected-row')).toBeTruthy())
+    expect(screen.queryByTestId('ports-meta')).toBeNull()
+    expect(document.body.textContent).not.toContain('last sample')
+  })
+
+  it('names the one state where the rows stop tracking the host', async () => {
+    const services = fakeServices({
+      status: vi.fn().mockResolvedValue(
+        statusFixture({
+          state: 'available',
+          paused: true,
+          listeners: [listenerFixture(6768)],
+          lastSampleAt: '2026-08-04T12:00:00Z',
+        }),
+      ),
     })
     renderPanel(services)
     await waitFor(() => expect(screen.getByTestId('ports-meta')).toBeTruthy())
     const meta = screen.getByTestId('ports-meta')
-    expect(meta.textContent).toContain('last sample')
-    expect(meta.classList.contains('ui-badge')).toBe(false)
+    expect(meta.textContent).toContain('paused')
+    expect(meta.textContent).not.toContain('last sample')
     expect(meta.querySelector('.ui-badge')).toBeNull()
   })
 })

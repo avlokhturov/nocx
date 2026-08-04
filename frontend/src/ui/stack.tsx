@@ -31,6 +31,13 @@ export interface StackProps {
    * stays correct when search filtering hides rows.
    */
   divided?: boolean
+  /**
+   * Dense rhythm for a scanned list rather than a read form: no gap between
+   * children and tighter row padding under `divided`. Control-to-control
+   * rhythm and record-to-record rhythm are different problems — a list of
+   * twenty rows in a 240px rail spends its whole height on air otherwise.
+   */
+  dense?: boolean
 }
 
 export function Stack(props: StackProps) {
@@ -40,6 +47,7 @@ export function Stack(props: StackProps) {
       class="ui-stack"
       data-gap={props.gap ?? 'default'}
       data-divided={props.divided ? 'true' : undefined}
+      data-dense={props.dense ? 'true' : undefined}
     >
       {props.children}
     </div>

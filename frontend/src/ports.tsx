@@ -296,14 +296,6 @@ export function PortsPanel(props: PortsPanelProps) {
   const runningForwards = () => [...forwards().values()].filter((f) => f.state === 'running')
   const stoppedForwards = () => [...forwards().values()].filter((f) => f.state === 'stopped')
 
-  const lastSample = (): string | null => {
-    const at = st()?.lastSampleAt
-    if (!at) return null
-    const d = new Date(at)
-    if (Number.isNaN(d.getTime())) return at
-    return d.toLocaleTimeString()
-  }
-
   const processLabel = (p: { evidence: string; name: string; pid: number }): string => {
     switch (p.evidence) {
       case 'known':
@@ -355,7 +347,7 @@ export function PortsPanel(props: PortsPanelProps) {
               />
             </Show>
             <Show when={!st()?.connLost}>
-              <Section title="Detected" divided>
+              <Section title="Detected" divided dense>
                 <Show when={st()?.state === 'unavailable'}>
                   <EmptyState
                     title="Could not determine what is listening"
@@ -397,21 +389,30 @@ export function PortsPanel(props: PortsPanelProps) {
                       {(l) => (
                         <div class="ports-row" data-testid="detected-row">
                           <div class="ports-row__main">
-                            <span class="ports-row__addr">
-                              {l.address}:{l.port}
-                            </span>
-                            <Badge
-                              truncate
-                              tone={
-                                l.process.evidence === 'known'
-                                  ? 'neutral'
-                                  : l.process.evidence === 'permission-denied'
-                                    ? 'warning'
-                                    : 'info'
-                              }
-                            >
-                              {processLabel(l.process)}
-                            </Badge>
+                            <div class="ports-row__text">
+                              <span class="ports-row__addr">
+                                {l.address}:{l.port}
+                              </span>
+                              {/* A name and a pid are a label and read as
+                                  quiet text; the states that are a caution
+                                  keep the chip, because there the tone IS the
+                                  information (nocx-wzc4.10). */}
+                              <Show
+                                when={l.process.evidence !== 'known'}
+                                fallback={
+                                  <span class="ports-row__proc">{processLabel(l.process)}</span>
+                                }
+                              >
+                                <Badge
+                                  truncate
+                                  tone={
+                                    l.process.evidence === 'permission-denied' ? 'warning' : 'info'
+                                  }
+                                >
+                                  {processLabel(l.process)}
+                                </Badge>
+                              </Show>
+                            </div>
                             <IconButton
                               data-testid="ports-forward"
                               size="xs"
@@ -430,7 +431,7 @@ export function PortsPanel(props: PortsPanelProps) {
               </Section>
 
               {/* ── Forwarded ─────────────────────────────────────── */}
-              <Section title="Forwarded" divided>
+              <Section title="Forwarded" divided dense>
                 <Show
                   when={runningForwards().length > 0}
                   fallback={
@@ -444,16 +445,17 @@ export function PortsPanel(props: PortsPanelProps) {
                     {(f) => (
                       <div class="ports-row" data-testid="forwarded-row">
                         <div class="ports-row__main">
-                          <span class="ports-row__addr">
-                            {f.actualBind.host}:{f.actualBind.port}
-                          </span>
-                          <span class="ports-row__dest">
-                            <span class="ports-row__arrow" aria-hidden="true">
-                              {' '}
-                              →{' '}
+                          <div class="ports-row__text">
+                            <span class="ports-row__addr">
+                              {f.actualBind.host}:{f.actualBind.port}
                             </span>
-                            {f.destination}
-                          </span>
+                            <span class="ports-row__dest">
+                              <span class="ports-row__arrow" aria-hidden="true">
+                                →{' '}
+                              </span>
+                              {f.destination}
+                            </span>
+                          </div>
                           <IconButton
                             data-testid="ports-copy"
                             size="xs"
@@ -497,21 +499,20 @@ export function PortsPanel(props: PortsPanelProps) {
 
               {/* ── Stopped (only when non-empty) ─────────────────── */}
               <Show when={stoppedForwards().length > 0}>
-                <Section title="Stopped" divided>
+                <Section title="Stopped" divided dense>
                   <For each={stoppedForwards()}>
                     {(f) => (
                       <div class="ports-row" data-testid="stopped-row">
                         <div class="ports-row__main">
-                          <span class="ports-row__addr">
-                            {f.destination}
-                            <span class="ports-row__arrow"> — </span>
-                            {f.stopReason ?? 'stopped'}
-                          </span>
-                          <Show when={f.error}>
-                            <Badge tone="danger" truncate>
-                              {f.error ?? ''}
-                            </Badge>
-                          </Show>
+                          <div class="ports-row__text">
+                            <span class="ports-row__addr">{f.destination}</span>
+                            <span class="ports-row__proc">{f.stopReason ?? 'stopped'}</span>
+                            <Show when={f.error}>
+                              <Badge tone="danger" truncate>
+                                {f.error ?? ''}
+                              </Badge>
+                            </Show>
+                          </div>
                           <Show
                             when={f.stopReason === 'error' || f.stopReason === 'connection lost'}
                           >
@@ -528,18 +529,15 @@ export function PortsPanel(props: PortsPanelProps) {
             </Show>
           </Show>
 
-          {/* The sample's age, in the quiet register: micro-text, never a chip
-              (nocx-wzc4.9). "paused" appears beside it while the header action
-              is on. */}
-          <Show when={st()?.lastSampleAt || paused()}>
+          {/* Only "paused" survives here (nocx-wzc4.10). The sample's age told
+              the user nothing they could act on: the list refreshes itself, and
+              when a sample fails we show the failure instead of stale rows —
+              so there is never a moment where the rows on screen are older
+              than they look. "Paused" is different: it is the one state where
+              the rows genuinely stop tracking the host, and it names why. */}
+          <Show when={paused()}>
             <p class="ports-meta" data-testid="ports-meta">
-              <Show when={lastSample()}>
-                <span>{`last sample ${lastSample()}`}</span>
-              </Show>
-              <Show when={paused()}>
-                <span aria-hidden="true"> · </span>
-                <span>paused</span>
-              </Show>
+              paused
             </p>
           </Show>
         </Show>
