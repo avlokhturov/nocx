@@ -112,16 +112,46 @@
    is revealed on hover, so without a highlight the icon appears with nothing
    naming the row it belongs to. Same mechanism and same value as the kit's
    collection row, so a list row looks like a list row everywhere
-   (nocx-wzc4.11). The row is padded by the divided Stack, so the highlight is
-   pulled out to the panel's edges and given the padding back — otherwise it
-   would be a stripe narrower than the row it marks. */
+   (nocx-wzc4.11).
+
+   The highlight is a PSEUDO-ELEMENT, and that is the whole point. The first
+   attempt painted the row itself and pulled it out to the panel edges with a
+   negative margin plus matching padding — which lost, because the divided
+   Stack owns its children's padding through
+   `.ui-stack[data-divided][data-dense] > *`, three class-level selectors
+   against this file's one. The padding was overridden to `space-2 0` and the
+   negative margin survived alone, so every row sat 12px left of its own
+   heading and 12px short of the right rail — addresses unindented, the copy
+   action stranded mid-panel (reported 2026-08-04).
+
+   A pseudo-element cannot be overridden by a rule about the row's box and
+   changes no layout at all: the row keeps exactly the geometry the Stack
+   gives it, and the highlight is painted around it. */
 .ports-row {
-  margin: 0 calc(-1 * var(--space-3));
-  padding: 0 var(--space-3);
-  border-radius: var(--border-radius-sm, 4px);
+  position: relative;
 }
 
-.ports-row:hover {
+.ports-row::before {
+  content: '';
+  position: absolute;
+  /* Bleed sideways so the highlight is a band with air around the text,
+     not a stripe that starts at the first glyph. */
+  inset: 0 calc(-1 * var(--space-2));
+  border-radius: var(--border-radius-sm, 4px);
+  pointer-events: none;
+}
+
+/* The content is lifted above the highlight rather than the highlight pushed
+   below it: `z-index: -1` on the pseudo-element would put it behind whatever
+   ancestor paints the panel background too, because a plain `position:
+   relative` opens no stacking context to trap it. */
+.ports-row > * {
+  position: relative;
+  z-index: 1;
+}
+
+.ports-row:hover::before,
+.ports-row:focus-within::before {
   background: color-mix(in srgb, white, transparent 97%);
 }
 
