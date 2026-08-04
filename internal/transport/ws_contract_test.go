@@ -10,6 +10,7 @@ import (
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
+	"github.com/shady2k/nocx/internal/completion"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
@@ -1260,6 +1261,149 @@ func TestFsComplete_OverTheWireConformsToContract(t *testing.T) {
 		resp := vaultCall(t, conn, "fs.complete", map[string]any{"text": "", "cwd": t.TempDir()}, 4)
 		if resp.Error == nil {
 			t.Fatal("empty text must be an invalid-params error, got success")
+		}
+		if resp.Error.Code != -32602 {
+			t.Errorf("error code = %d, want -32602", resp.Error.Code)
+		}
+	})
+}
+
+// ── shell.complete ──────────────────────────────────────────────────────
+
+func TestShellComplete_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "shell.complete.schema.json")
+
+	cases := map[string]shellCompleteResponse{
+		"populated": {
+			Entries: []shellCompleteEntry{
+				{Name: "src", Path: "/repo/src", Source: "path", IsDir: true},
+				{Name: "main.go", Path: "/repo/main.go", Source: "path", IsDir: false},
+				{Name: "git", Source: "command"},
+				{Name: "checkout", Source: "function"},
+			},
+			Truncated: false,
+		},
+		"empty": {
+			Entries:   []shellCompleteEntry{},
+			Truncated: false,
+		},
+		"truncated": {
+			Entries:   []shellCompleteEntry{},
+			Truncated: true,
+			Reason:    "output cap hit",
+		},
+	}
+
+	for name, resp := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(resp)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "shell.complete DTO")
+		})
+	}
+}
+
+// shell.complete over the wire with a real completer. The test opens a
+// local session and completes a known directory — the same motion as the
+// acceptance criterion "the local path completion still works exactly as
+// before".
+func TestShellComplete_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "shell.complete.schema.json")
+	ctx := context.Background()
+
+	ws := NewWSServer(
+		log.NewSlogAdapter(nil),
+		newRegWithStub(log.NewSlogAdapter(nil)),
+		WithCompleters(completion.NewLocal(), nil),
+	)
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+
+	conn := connectWS(t, ws)
+
+	// Open a local session so we have a session ID the handler can look up.
+	openResp := vaultCall(t, conn, "open", map[string]any{
+		"cols":   80,
+		"rows":   24,
+		"xpixel": 800,
+		"ypixel": 600,
+	}, 1)
+	if openResp.Error != nil {
+		t.Fatalf("open error: %+v", openResp.Error)
+	}
+	// Extract the server-assigned session ID from the open result.
+	var openResult struct {
+		SessionID string `json:"sessionId"`
+	}
+	if err := json.Unmarshal(openResp.Result, &openResult); err != nil {
+		t.Fatalf("unmarshal open result: %v", err)
+	}
+	sid := openResult.SessionID
+	if sid == "" {
+		t.Fatal("open returned empty sessionId")
+	}
+
+	t.Run("path completion over the wire", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "readme.md"), []byte("x"), 0o600); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+
+		resp := vaultCall(t, conn, "shell.complete", map[string]any{
+			"sessionId": sid,
+			"cwd":       dir,
+			"line":      "cat rea",
+			"pos":       7,
+		}, 2)
+		if resp.Error != nil {
+			t.Fatalf("unexpected error: %+v", resp.Error)
+		}
+		validateJSON(t, schema, resp.Result, "shell.complete result")
+
+		var got shellCompleteResponse
+		if err := json.Unmarshal(resp.Result, &got); err != nil {
+			t.Fatalf("unmarshal result: %v", err)
+		}
+		if len(got.Entries) != 1 || got.Entries[0].Name != "readme.md" {
+			t.Errorf("entries = %+v, want exactly [readme.md]", got.Entries)
+		}
+		if got.Entries[0].Source != "path" {
+			t.Errorf("source = %q, want 'path'", got.Entries[0].Source)
+		}
+	})
+
+	t.Run("empty result is [] never null", func(t *testing.T) {
+		dir := t.TempDir()
+		resp := vaultCall(t, conn, "shell.complete", map[string]any{
+			"sessionId": sid,
+			"cwd":       dir,
+			"line":      "cat zzz",
+			"pos":       7,
+		}, 3)
+		if resp.Error != nil {
+			t.Fatalf("unexpected error: %+v", resp.Error)
+		}
+		validateJSON(t, schema, resp.Result, "shell.complete result (empty)")
+
+		var got shellCompleteResponse
+		if err := json.Unmarshal(resp.Result, &got); err != nil {
+			t.Fatalf("unmarshal result: %v", err)
+		}
+		if got.Entries == nil || len(got.Entries) != 0 {
+			t.Errorf("entries = %v, want [] (never null)", got.Entries)
+		}
+	})
+
+	t.Run("missing content returns error", func(t *testing.T) {
+		resp := vaultCall(t, conn, "shell.complete", map[string]any{
+			"sessionId": sid,
+		}, 4)
+		if resp.Error == nil {
+			t.Fatal("missing required params must error, got success")
 		}
 		if resp.Error.Code != -32602 {
 			t.Errorf("error code = %d, want -32602", resp.Error.Code)

@@ -14,6 +14,7 @@
 import type { CommandSnapshotStore } from '../command-snapshot'
 import type { HistoryQuery } from '../generated/history.query'
 import type { FsComplete } from '../generated/fs.complete'
+import type { ShellComplete } from '../generated/shell.complete'
 import type { Candidate } from './candidate'
 import type { CompletionToken, TokenPosition } from './token'
 import { looksLikePath } from './token'
@@ -371,6 +372,106 @@ export function fsProvider(opts: {
   }
 }
 
+// ── shell: the remote completion adapter (nocx-w7h.15) ────────────────────
+//
+// The adapter asks the remote shell's own completion machinery — compgen for
+// paths and commands, bash completion functions for command-specific answers
+// like `git checkout`. This is what makes the mechanism worth building:
+// paths alone could have been faked. The candidate's source names the
+// adapter so the UI can distinguish an adapter answer from a local guess.
+//
+// Applicable only on a remote session — on a local session the fs provider
+// answers identically from the backend's own filesystem. The adapter REPLACES
+// the DIRECTORIES_ONLY table: the shell's compgen -d / compgen -f already
+// answer the right kind, so the table is not consulted and must not be
+// re-added.
+export function shellCompleteProvider(opts: {
+  complete: (params: {
+    sessionId: string
+    cwd: string
+    line: string
+    pos: number
+  }) => Promise<ShellComplete>
+  /** The session ID of the tab this provider answers for. */
+  sessionId: () => string
+}): SuggestionProvider {
+  return {
+    id: 'shell',
+    targetId: 'shell',
+    applicable: (ctx) => {
+      // The adapter is active on remote sessions only — on a local
+      // session the fs provider answers identically.
+      if (ctx.isLocal) return false
+      // Also active in command position for a bare word: the shell's
+      // compgen -c answers command names on the remote host.
+      if (ctx.position === 'command') return true
+      // In argument position: always active — the shell answers paths
+      // and command-specific completions.
+      return true
+    },
+    async suggest(ctx, signal) {
+      const sid = opts.sessionId()
+      if (!sid) return { candidates: [] }
+
+      const pos = ctx.token.to // caret position
+
+      const result = await opts.complete({
+        sessionId: sid,
+        cwd: ctx.cwd,
+        line: ctx.doc,
+        pos,
+      })
+      if (signal.aborted) return { candidates: [] }
+
+      if (result.entries.length === 0) {
+        // The adapter named a specific reason — surface it rather than
+        // the generic "no matches".
+        if (result.reason) {
+          // Map specific adapter reasons to the EmptyReason vocabulary.
+          if (result.reason === 'cancelled') return { candidates: [] }
+          // Surface the adapter's reason as the honest empty message.
+          return {
+            candidates: [],
+            emptyReason: {
+              kind: 'hosts-unavailable',
+              reason: 'shell completion',
+              detail: result.reason,
+            },
+          }
+        }
+        return { candidates: [] }
+      }
+
+      // The part of the token the user has already typed up to the last
+      // slash — same display logic as fsProvider.
+      const t = ctx.token.text
+      const lastSlash = t.lastIndexOf('/')
+      const tokenPrefix = t.slice(0, lastSlash + 1)
+
+      return {
+        candidates: result.entries.slice(0, MAX_PROVIDER_CANDIDATES).map((e): Candidate => {
+          const display = e.isDir ? e.name + '/' : e.name
+          const segPrefix = t.slice(lastSlash + 1)
+          const matchTo = Math.min(segPrefix.length, e.name.length)
+          return {
+            id: `${e.source}:${e.path ?? e.name}`,
+            targetId: 'shell',
+            providerId: 'shell',
+            displayText: display,
+            insertText: e.source === 'path' ? tokenPrefix + display : display,
+            replacement: { from: ctx.token.from, to: ctx.token.to },
+            matchRanges: matchTo > 0 ? [{ from: 0, to: matchTo }] : [],
+            source: e.source === 'command' ? 'command' : 'path',
+            kind: e.isDir ? 'directory' : undefined,
+            environment: { cwd: ctx.cwd, host: ctx.host, confidence: 'asserted' },
+            eligibleForGhostText: true,
+          }
+        }),
+      }
+    },
+  }
+}
+
 /**
  * The shell target's provider set, wired at the composition root. The host
  * provider is built HERE: it needs a ProfileClient, and the assembly it
@@ -384,6 +485,16 @@ export function createShellProviders(opts: {
   store: CommandSnapshotStore
   queryHistory: (cwd: string, host: string) => Promise<HistoryQuery>
   completeFs: (text: string, cwd: string) => Promise<FsComplete>
+  /** The shell.complete seam — the remote completion adapter (nocx-w7h.15).
+   *  Absent when no adapter is wired (tests, raw contexts). */
+  completeShell?: (params: {
+    sessionId: string
+    cwd: string
+    line: string
+    pos: number
+  }) => Promise<ShellComplete>
+  /** The session ID of the tab — only needed when completeShell is present. */
+  sessionId?: () => string
   /** Present when a ProfileClient is wired (the app); absent in tests and
    *  raw-mode contexts where no connection manager exists — a provider that
    *  can never answer is not registered. */
@@ -392,6 +503,14 @@ export function createShellProviders(opts: {
   return [
     commandProvider(opts.store),
     ...(opts.profileClient ? [hostProvider({ profileClient: opts.profileClient })] : []),
+    // The adapter (nocx-w7h.15) answers remote paths and command-specific
+    // completions — registered ABOVE fsProvider so it outranks the local
+    // path provider on remote sessions (its applicability gate ensures it
+    // is only consulted there). The stale-path check in historyProvider
+    // is skipped on remote sessions (ctx.isLocal gate), so no double-call.
+    ...(opts.completeShell && opts.sessionId
+      ? [shellCompleteProvider({ complete: opts.completeShell, sessionId: opts.sessionId })]
+      : []),
     // The fs.complete seam travels to history too: the stale-path demotion
     // (a history row whose trailing token no longer exists ranks last)
     // uses the same backend call the path provider makes.

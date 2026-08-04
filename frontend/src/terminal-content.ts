@@ -13,6 +13,7 @@ import { CompletionController } from './suggest/controller'
 import { createShellProviders } from './suggest/providers'
 import { CompletionDropdown } from './ui/completion-dropdown'
 import type { FsComplete } from './generated/fs.complete'
+import type { ShellComplete } from './generated/shell.complete'
 import { ShellInputTarget } from './input-target'
 import {
   submitCommand,
@@ -453,6 +454,13 @@ export class TerminalContent extends BaseTabContent {
           store: renderer.snapshotStore,
           queryHistory: (cwd, host) => queryHistory(this.client, 'directory', cwd, host),
           completeFs: (text, cwd) => this.client.call<FsComplete>('fs.complete', { text, cwd }),
+          // The remote completion adapter (nocx-w7h.15): active only on
+          // remote sessions, where it asks the remote shell's own
+          // completion machinery — paths from the remote filesystem,
+          // command names, and command-specific completions from bash
+          // completion functions.
+          completeShell: (params) => this.client.call<ShellComplete>('shell.complete', params),
+          sessionId: () => this.session?.sessionId ?? '',
           // The host provider is built inside createShellProviders (the
           // assembly it routes is plain code, not the DOM-bound quick-connect
           // module); this tab's ProfileClient is handed through, absent when

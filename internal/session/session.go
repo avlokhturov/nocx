@@ -56,6 +56,8 @@ type OutputHandler func(data []byte) error
 type Session interface {
 	ID() ID
 	Kind() Kind
+	// Host returns the session's remote hostname. Empty for a local session.
+	Host() string
 	// Cwd is where the session's shell was started. It is the tab's name
 	// until a program sets a title; it does NOT follow `cd`, which needs the
 	// OSC 7 events in nocx-5mn.2.
@@ -205,6 +207,7 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 	s := &realSession{
 		id:           id,
 		kind:         cfg.Kind,
+		host:         cfg.Host,
 		cwd:          resolveSessionCwd(cfg.Cwd),
 		profileID:    cfg.ProfileID,
 		credentialID: cfg.CredentialID,
@@ -387,6 +390,7 @@ func sshOptionsFromConfig(cfg *ssh.ConnectConfig) []ssh.ConnectOption {
 type realSession struct {
 	id           ID
 	kind         Kind
+	host         string // empty for local sessions; the remote hostname for SSH
 	cwd          string
 	profileID    string
 	credentialID string
@@ -400,6 +404,7 @@ type realSession struct {
 
 func (s *realSession) ID() ID               { return s.id }
 func (s *realSession) Kind() Kind           { return s.kind }
+func (s *realSession) Host() string         { return s.host }
 func (s *realSession) Cwd() string          { return s.cwd }
 func (s *realSession) ProfileID() string    { return s.profileID }
 func (s *realSession) CredentialID() string { return s.credentialID }
