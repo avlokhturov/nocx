@@ -5,10 +5,12 @@
 // while the command that opens it is being typed. The panel follows the
 // ACTIVE tab — profileId is a reactive accessor, never a capture — and
 // pauses when the view is not visible (collapsed sidebar counts as hidden).
-//
-// Discovery's own state — unavailable, limited, last sample, Pause, Retry —
-// lives in this same surface, because a degrade that is only in a log is
-// the failure AGENTS.md names.
+// Discovery's own state — unavailable, limited, last sample, Retry — lives
+// in this same surface, because a degrade that is only in a log is the
+// failure AGENTS.md names. Pause is a HEADER action (the view's
+// SidebarViewDescriptor.actions slot), shared with the panel through the
+// pause controller — the body offers no second vocabulary for it, and Retry
+// exists only inside the failure states that need it (nocx-wzc4.9).
 //
 // The ledger labels, it never claims causation (spec D6): a row says what the
 // remote listens on and why we know it, never "opened by <command>".
@@ -22,8 +24,11 @@ import type { TunnelStopResult } from './generated/tunnel.stop'
 import { Badge } from './ui/badge'
 import { Button } from './ui/button'
 import { EmptyState } from './ui/empty-state'
+import { IconButton } from './ui/icon-button'
+import { ArrowRightIcon, CopyIcon, ExternalLinkIcon, SquareIcon } from './ui/icons'
 import { MarkerList } from './ui/marker-list'
 import { Section } from './ui/section'
+import { Spinner } from './ui/spinner'
 import { Stack } from './ui/stack'
 import { showToast } from './ui/toast'
 
@@ -55,6 +60,42 @@ export function createPortsPanelServices(dispatcher: Dispatcher): PortsPanelServ
   }
 }
 
+// ── Pause controller ─────────────────────────────────────────────────────
+
+/** The Pause state, shared between the view's HEADER action and the panel
+ *  body: one signal, one backend call site. The header toggles it, the panel
+ *  feeds it the backend's truth on every status merge and forgets it on
+ *  re-scope. The controller closes over the reactive profile accessor, so
+ *  the header never carries a stale profile id. */
+export interface PortsPauseControl {
+  paused: () => boolean
+  /** Backend truth from a status merge. */
+  sync(paused: boolean): void
+  /** A profile switch forgets the previous connection's pause. */
+  reset(): void
+  /** Flip the backend's pause flag for the ACTIVE profile. */
+  toggle(): void
+}
+
+export function createPortsPauseControl(
+  services: Pick<PortsPanelServices, 'pause'>,
+  profileId: () => string | null,
+): PortsPauseControl {
+  const [paused, setPaused] = createSignal(false)
+  return {
+    paused,
+    sync: (p) => setPaused(p),
+    reset: () => setPaused(false),
+    toggle: () => {
+      const pid = profileId()
+      if (pid === null) return
+      const next = !paused()
+      setPaused(next)
+      void services.pause(pid, next).catch(() => {})
+    },
+  }
+}
+
 // ── Panel ─────────────────────────────────────────────────────────────────
 
 export const POLL_INTERVAL_MS = 5_000
@@ -69,6 +110,9 @@ export interface PortsPanelProps {
   /** Reactive visibility; false stops the status poll and tells the
    *  backend to pause sampling. A collapsed sidebar is not visible. */
   visible: () => boolean
+  /** The shared Pause control — the header action toggles it, the panel
+   *  reflects and syncs it (nocx-wzc4.9). */
+  pause: PortsPauseControl
 }
 
 type ForwardRecord = TunnelOpenResult | TunnelStopResult
@@ -76,9 +120,10 @@ type ForwardRecord = TunnelOpenResult | TunnelStopResult
 export function PortsPanel(props: PortsPanelProps) {
   const [status, setStatus] = createSignal<PortsStatusResult | null>(null)
   const [error, setError] = createSignal<string | null>(null)
-  const [busy, setBusy] = createSignal(true)
-  const [paused, setPaused] = createSignal(false)
   const [forwards, setForwards] = createSignal<Map<string, ForwardRecord>>(new Map())
+
+  /** The panel's view of the shared pause state. */
+  const paused = () => props.pause.paused()
 
   /** The panel's current scope — an alias for the reactive prop, read at
    *  call sites so every fetch and mutation targets the ACTIVE tab. */
@@ -90,7 +135,7 @@ export function PortsPanel(props: PortsPanelProps) {
   const applyStatus = (st: PortsStatusResult): void => {
     setStatus(st)
     setError(null)
-    setPaused(st.discovery.paused)
+    props.pause.sync(st.discovery.paused)
     setForwards((prev) => {
       const next = new Map(prev)
       for (const f of st.forwards) next.set(f.id, f)
@@ -113,8 +158,6 @@ export function PortsPanel(props: PortsPanelProps) {
     } catch (e) {
       if (profileId() !== pid) return
       setError(e instanceof Error ? e.message : String(e))
-    } finally {
-      if (profileId() === pid) setBusy(false)
     }
   }
 
@@ -125,8 +168,7 @@ export function PortsPanel(props: PortsPanelProps) {
     on(profileId, () => {
       setStatus(null)
       setError(null)
-      setBusy(true)
-      setPaused(false)
+      props.pause.reset()
       setForwards(new Map())
     }),
   )
@@ -151,13 +193,15 @@ export function PortsPanel(props: PortsPanelProps) {
   let poll: ReturnType<typeof setInterval> | undefined
   createEffect(() => {
     const pid = profileId()
-    if (pid === null) {
-      setBusy(false)
-      return
-    }
+    if (pid === null) return
     void refresh()
     if (!props.visible()) return
-    poll = setInterval(() => void refresh(), POLL_INTERVAL_MS)
+    // The interval survives pause; the refresh is what skips. Resuming reuses
+    // the same interval, and the optimistic toggle flips the flag the moment
+    // the header action is pressed (nocx-wzc4.9).
+    poll = setInterval(() => {
+      if (!props.pause.paused()) void refresh()
+    }, POLL_INTERVAL_MS)
     onCleanup(() => clearInterval(poll))
   })
 
@@ -221,11 +265,10 @@ export function PortsPanel(props: PortsPanelProps) {
     void forward(rec.destination, rec.requestedBind.port)
   }
 
-  /** The Retry button: force a fresh sample for the current profile. */
+  /** The Retry action inside failure states: force a fresh sample. */
   const sampleNow = async (): Promise<void> => {
     const pid = profileId()
     if (pid === null) return
-    setBusy(true)
     try {
       const st = await props.services.sample(pid)
       if (profileId() !== pid) return
@@ -233,17 +276,7 @@ export function PortsPanel(props: PortsPanelProps) {
     } catch (e) {
       if (profileId() !== pid) return
       setError(e instanceof Error ? e.message : String(e))
-    } finally {
-      if (profileId() === pid) setBusy(false)
     }
-  }
-
-  const togglePause = (): void => {
-    const pid = profileId()
-    if (pid === null) return
-    const next = !paused()
-    setPaused(next)
-    void props.services.pause(pid, next).catch(() => {})
   }
 
   const copyAddress = (addr: string): void => {
@@ -293,39 +326,18 @@ export function PortsPanel(props: PortsPanelProps) {
       }
     >
       <Stack gap="loose">
-        {/* Controls row — the panel's own header line inside the sidebar
-            body (the SidebarView header hosts the view's actions slot;
-            these need the panel's live state, so they live with it). */}
-        <Stack gap="default">
-          <Show when={lastSample()}>
-            <Badge tone="neutral">{`last sample ${lastSample()}`}</Badge>
-          </Show>
-          <Show when={paused()}>
-            <Badge tone="warning">paused</Badge>
-          </Show>
-          <Button
-            data-testid="ports-retry"
-            onClick={() => void sampleNow()}
-            disabled={busy() || st()?.connLost}
-          >
-            Retry
-          </Button>
-          <Button data-testid="ports-pause" onClick={togglePause}>
-            {paused() ? 'Resume' : 'Pause'}
-          </Button>
-        </Stack>
         <Show when={error()}>
           <Badge tone="danger">{error() ?? ''}</Badge>
         </Show>
 
         {/* ── Discovery state ─────────────────────────────────────── */}
         <Show
-          when={!busy() && st() !== undefined}
+          when={st() !== undefined}
           fallback={
-            <EmptyState
-              title="Contacting the backend…"
-              description="Reading discovery state for this connection."
-            />
+            <div class="ports-loading" data-testid="ports-loading">
+              <Spinner label="Reading ports" />
+              <span>Reading ports…</span>
+            </div>
           }
         >
           <Show when={!host() && st()?.state === 'pending'}>
@@ -343,7 +355,7 @@ export function PortsPanel(props: PortsPanelProps) {
               />
             </Show>
             <Show when={!st()?.connLost}>
-              <Section title={`Detected${host() ? ` — ${host()}` : ''}`} divided>
+              <Section title="Detected" divided>
                 <Show when={st()?.state === 'unavailable'}>
                   <EmptyState
                     title="Could not determine what is listening"
@@ -389,6 +401,7 @@ export function PortsPanel(props: PortsPanelProps) {
                               {l.address}:{l.port}
                             </span>
                             <Badge
+                              truncate
                               tone={
                                 l.process.evidence === 'known'
                                   ? 'neutral'
@@ -399,12 +412,15 @@ export function PortsPanel(props: PortsPanelProps) {
                             >
                               {processLabel(l.process)}
                             </Badge>
-                            <Button
+                            <IconButton
                               data-testid="ports-forward"
+                              size="xs"
+                              ariaLabel={`Forward ${destinationFor(l)}`}
+                              title={`Forward ${destinationFor(l)}`}
                               onClick={() => void forward(destinationFor(l), l.port)}
                             >
-                              Forward
-                            </Button>
+                              <ArrowRightIcon />
+                            </IconButton>
                           </div>
                         </div>
                       )}
@@ -430,24 +446,41 @@ export function PortsPanel(props: PortsPanelProps) {
                         <div class="ports-row__main">
                           <span class="ports-row__addr">
                             {f.actualBind.host}:{f.actualBind.port}
-                            <span class="ports-row__arrow"> → </span>
+                          </span>
+                          <span class="ports-row__dest">
+                            <span class="ports-row__arrow" aria-hidden="true">
+                              {' '}
+                              →{' '}
+                            </span>
                             {f.destination}
                           </span>
-                          <Button
+                          <IconButton
                             data-testid="ports-copy"
+                            size="xs"
+                            ariaLabel={`Copy ${f.actualBind.host}:${f.actualBind.port}`}
+                            title={`Copy ${f.actualBind.host}:${f.actualBind.port}`}
                             onClick={() => copyAddress(`${f.actualBind.host}:${f.actualBind.port}`)}
                           >
-                            Copy
-                          </Button>
-                          <Button
+                            <CopyIcon />
+                          </IconButton>
+                          <IconButton
                             data-testid="ports-open"
+                            size="xs"
+                            ariaLabel={`Open ${f.actualBind.host}:${f.actualBind.port}`}
+                            title={`Open ${f.actualBind.host}:${f.actualBind.port}`}
                             onClick={() => openAddress(`${f.actualBind.host}:${f.actualBind.port}`)}
                           >
-                            Open
-                          </Button>
-                          <Button data-testid="ports-stop" onClick={() => void stop(f.id)}>
-                            Stop
-                          </Button>
+                            <ExternalLinkIcon />
+                          </IconButton>
+                          <IconButton
+                            data-testid="ports-stop"
+                            size="xs"
+                            ariaLabel={`Stop forward ${f.destination}`}
+                            title={`Stop forward ${f.destination}`}
+                            onClick={() => void stop(f.id)}
+                          >
+                            <SquareIcon />
+                          </IconButton>
                         </div>
                         {/* A -R forward whose bind sshd silently replaced carries
                               Caveat() — render it as the kit's note (a caveat about
@@ -475,7 +508,9 @@ export function PortsPanel(props: PortsPanelProps) {
                             {f.stopReason ?? 'stopped'}
                           </span>
                           <Show when={f.error}>
-                            <Badge tone="danger">{f.error ?? ''}</Badge>
+                            <Badge tone="danger" truncate>
+                              {f.error ?? ''}
+                            </Badge>
                           </Show>
                           <Show
                             when={f.stopReason === 'error' || f.stopReason === 'connection lost'}
@@ -491,6 +526,21 @@ export function PortsPanel(props: PortsPanelProps) {
                 </Section>
               </Show>
             </Show>
+          </Show>
+
+          {/* The sample's age, in the quiet register: micro-text, never a chip
+              (nocx-wzc4.9). "paused" appears beside it while the header action
+              is on. */}
+          <Show when={st()?.lastSampleAt || paused()}>
+            <p class="ports-meta" data-testid="ports-meta">
+              <Show when={lastSample()}>
+                <span>{`last sample ${lastSample()}`}</span>
+              </Show>
+              <Show when={paused()}>
+                <span aria-hidden="true"> · </span>
+                <span>paused</span>
+              </Show>
+            </p>
           </Show>
         </Show>
       </Stack>

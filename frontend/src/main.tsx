@@ -19,7 +19,8 @@ import { SettingsContent, SURFACE_SETTINGS, SINGLETON_SETTINGS } from './setting
 import { HorizontalTabStrip, VerticalTabStrip } from './tab-strip'
 import { SurfaceRegistry, SURFACE_ID_SETTINGS } from './surface-registry'
 import { mountUpdateNotice } from './update-notice'
-import { SettingsIcon, PlugIcon } from './ui/icons'
+import { IconButton } from './ui/icon-button'
+import { PauseIcon, PlayIcon, PlugIcon, SettingsIcon } from './ui/icons'
 import { SettingsObserver } from './settings-observer'
 import { bootstrapTheme, reconcileThemeFromGo } from './renderers/theme-bootstrap'
 import { bootstrapPlatform } from './platform'
@@ -31,8 +32,7 @@ import {
   SSHAliasQuickConnectProvider,
   type QuickConnectProvider,
 } from './quick-connect'
-import { PortsPanel, createPortsPanelServices } from './ports'
-
+import { PortsPanel, createPortsPanelServices, createPortsPauseControl } from './ports'
 async function main() {
   log.info('nocx: main() called')
 
@@ -254,10 +254,29 @@ async function main() {
   // Connections has been removed from the activity bar — it is not a view
   // and not an action (see .internal/specs §2.4).  It is now a Settings
   // sub-page reachable from the Settings rail.
+  // Pause is a HEADER action, not body chrome (nocx-wzc4.9): one shared
+  // controller feeds both the header toggle and the panel's status merges,
+  // so the two can never disagree about the backend's flag.
+  const portsPause = createPortsPauseControl(portsServices, () => activeProfileId())
   const PORTS_VIEW: SidebarViewDescriptor = {
     id: 'ports',
     title: 'Ports',
     icon: PlugIcon,
+    actions: () => (
+      <IconButton
+        data-testid="ports-pause"
+        size="sm"
+        ariaLabel={portsPause.paused() ? 'Resume sampling' : 'Pause sampling'}
+        title={portsPause.paused() ? 'Resume sampling' : 'Pause sampling'}
+        selected={portsPause.paused()}
+        disabled={activeProfileId() === null}
+        onClick={() => portsPause.toggle()}
+      >
+        <Show when={portsPause.paused()} fallback={<PauseIcon />}>
+          <PlayIcon />
+        </Show>
+      </IconButton>
+    ),
     // The view receives the shell's view props: visible gates sampling,
     // activeProfileId re-scopes the panel to the tab in front.
     view: (props) => (
@@ -265,6 +284,7 @@ async function main() {
         profileId={props.activeProfileId}
         services={portsServices}
         visible={props.visible}
+        pause={portsPause}
       />
     ),
     order: 0,

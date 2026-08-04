@@ -1,17 +1,26 @@
 // @vitest-environment jsdom
-// PortsPanel tests (nocx-wzc4.2). Rule 1 of AGENTS.md: assert what a user can
-// do, not what the code renders — the panel is reachable from the state a
-// user starts in, the forward action on a detected row reaches the client
-// method, and the row moves to Forwarded afterwards; a hidden tab stops
-// sampling; a permission-denied probe renders the explanation; a probe-less
-// host says so.
+// PortsPanel tests (nocx-wzc4.2, nocx-wzc4.9). Rule 1 of AGENTS.md: assert
+// what a user can do, not what the code renders — the panel is reachable
+// from the state a user starts in, the forward action on a detected row
+// reaches the client method, and the row moves to Forwarded afterwards; a
+// hidden tab stops sampling; a permission-denied probe renders the
+// explanation; a probe-less host says so. Loading (nocx-wzc4.9): the view
+// shows it is loading before the first sample lands, a refresh never blanks
+// a populated list, a failure state offers exactly one Retry, and the body
+// carries no second vocabulary for Pause or Retry.
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, render, screen, fireEvent, waitFor } from '@solidjs/testing-library'
 import { createSignal } from 'solid-js'
 
 afterEach(cleanup)
-import { PortsPanel, POLL_INTERVAL_MS, type PortsPanelServices } from './ports'
+import {
+  PortsPanel,
+  POLL_INTERVAL_MS,
+  createPortsPauseControl,
+  type PortsPanelProps,
+  type PortsPanelServices,
+} from './ports'
 import type { PortsStatusResult } from './generated/ports.status'
 import type { TunnelOpenResult } from './generated/tunnel.open'
 
@@ -83,6 +92,20 @@ function fakeServices(over: Partial<PortsPanelServices> = {}): PortsPanelService
   }
 }
 
+/** The panel plus its shared Pause control — the seam the header action and
+ *  the panel share in main.tsx (nocx-wzc4.9). */
+function renderPanel(services: PortsPanelServices, over: Partial<PortsPanelProps> = {}) {
+  return render(() => (
+    <PortsPanel
+      profileId={() => 'ssh:p1:1'}
+      services={services}
+      visible={() => true}
+      pause={createPortsPauseControl(services, () => 'ssh:p1:1')}
+      {...over}
+    />
+  ))
+}
+
 // ── Detected → Forwarded in one action ───────────────────────────────────
 describe('PortsPanel — detected rows', () => {
   it('renders a permission-denied probe as an explanation, not a blank', async () => {
@@ -93,9 +116,7 @@ describe('PortsPanel — detected rows', () => {
           statusFixture({ listeners: [listenerFixture(22, 'permission-denied')] }),
         ),
     })
-    render(() => (
-      <PortsPanel profileId={() => 'ssh:p1:1'} services={services} visible={() => true} />
-    ))
+    renderPanel(services)
     await waitFor(() => expect(screen.getByText(/run as root to see owners/)).toBeTruthy())
     expect(screen.getByText('0.0.0.0:22')).toBeTruthy()
   })
@@ -109,9 +130,7 @@ describe('PortsPanel — detected rows', () => {
         }),
       ),
     })
-    render(() => (
-      <PortsPanel profileId={() => 'ssh:p1:1'} services={services} visible={() => true} />
-    ))
+    renderPanel(services)
     await waitFor(() =>
       expect(screen.getByText('Could not determine what is listening')).toBeTruthy(),
     )
@@ -122,9 +141,7 @@ describe('PortsPanel — detected rows', () => {
     const services = fakeServices({
       status: vi.fn().mockResolvedValue(statusFixture({ state: 'available' })),
     })
-    render(() => (
-      <PortsPanel profileId={() => 'ssh:p1:1'} services={services} visible={() => true} />
-    ))
+    renderPanel(services)
     await waitFor(() => expect(screen.getByText('Nothing is listening')).toBeTruthy())
   })
 
@@ -137,9 +154,7 @@ describe('PortsPanel — detected rows', () => {
         }),
       ),
     })
-    render(() => (
-      <PortsPanel profileId={() => 'ssh:p1:1'} services={services} visible={() => true} />
-    ))
+    renderPanel(services)
     await waitFor(() => expect(screen.getByText('Discovery refused on this host')).toBeTruthy())
     expect(screen.getByText('additional sessions refused')).toBeTruthy()
   })
@@ -150,9 +165,7 @@ describe('PortsPanel — detected rows', () => {
       status: vi.fn().mockResolvedValue(statusFixture({ listeners: [listenerFixture(6768)] })),
       openForward,
     })
-    render(() => (
-      <PortsPanel profileId={() => 'ssh:p1:1'} services={services} visible={() => true} />
-    ))
+    renderPanel(services)
     await waitFor(() => expect(screen.getByText('0.0.0.0:6768')).toBeTruthy())
 
     fireEvent.click(screen.getByTestId('ports-forward'))
@@ -181,9 +194,7 @@ describe('PortsPanel — detected rows', () => {
       status: vi.fn().mockResolvedValue(statusFixture({ listeners: [listenerFixture(6768)] })),
       openForward,
     })
-    render(() => (
-      <PortsPanel profileId={() => 'ssh:p1:1'} services={services} visible={() => true} />
-    ))
+    renderPanel(services)
     await waitFor(() => expect(screen.getByText('0.0.0.0:6768')).toBeTruthy())
 
     fireEvent.click(screen.getByTestId('ports-forward'))
@@ -196,6 +207,131 @@ describe('PortsPanel — detected rows', () => {
     )
     await waitFor(() => expect(screen.getByTestId('forwarded-row')).toBeTruthy())
     expect(screen.getByText(/127.0.0.1:43210/)).toBeTruthy()
+  })
+})
+
+// ── Loading and refresh (nocx-wzc4.9) ────────────────────────────────────
+
+describe('PortsPanel — loading and refresh (nocx-wzc4.9)', () => {
+  it('shows it is loading before the first sample lands', async () => {
+    let resolve!: (st: PortsStatusResult) => void
+    const services = fakeServices({
+      status: vi.fn(
+        () =>
+          new Promise<PortsStatusResult>((res) => {
+            resolve = res
+          }),
+      ),
+    })
+    renderPanel(services)
+
+    // First open, no data yet: the panel says it is working, not blank.
+    expect(screen.getByTestId('ports-loading')).toBeTruthy()
+
+    resolve(statusFixture({ state: 'available', listeners: [listenerFixture(22)] }))
+    await waitFor(() => expect(screen.getByText('0.0.0.0:22')).toBeTruthy())
+    expect(screen.queryByTestId('ports-loading')).toBeNull()
+  })
+
+  it('a refresh never blanks a populated list', async () => {
+    vi.useFakeTimers()
+    try {
+      let resolveSecond!: (st: PortsStatusResult) => void
+      const status = vi
+        .fn()
+        .mockResolvedValueOnce(
+          statusFixture({ state: 'available', listeners: [listenerFixture(22)] }),
+        )
+        .mockImplementationOnce(
+          () =>
+            new Promise<PortsStatusResult>((res) => {
+              resolveSecond = res
+            }),
+        )
+      const services = fakeServices({ status })
+      renderPanel(services)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(screen.getByText('0.0.0.0:22')).toBeTruthy()
+
+      // One poll interval later a refresh is in flight but unanswered — the
+      // populated list must not blank to a spinner; it is what the user is
+      // watching.
+      await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS)
+      expect(screen.getByText('0.0.0.0:22')).toBeTruthy()
+      expect(screen.queryByTestId('ports-loading')).toBeNull()
+
+      // The late answer swaps the row in place.
+      resolveSecond(statusFixture({ state: 'available', listeners: [listenerFixture(8080)] }))
+      await vi.advanceTimersByTimeAsync(0)
+      expect(screen.getByText('0.0.0.0:8080')).toBeTruthy()
+      expect(screen.queryByText('0.0.0.0:22')).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('pausing stops the status poll; resuming restarts it', async () => {
+    vi.useFakeTimers()
+    try {
+      const status = vi.fn().mockResolvedValue(statusFixture({ state: 'available' }))
+      const pauseSpy = vi.fn().mockResolvedValue({})
+      const services = fakeServices({ status, pause: pauseSpy })
+      const pause = createPortsPauseControl(services, () => 'ssh:p1:1')
+      renderPanel(services, { pause })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(status).toHaveBeenCalled()
+
+      pause.toggle() // exactly what the header action calls
+      await vi.advanceTimersByTimeAsync(0)
+      expect(pauseSpy).toHaveBeenCalledWith('ssh:p1:1', true)
+
+      // Two poll intervals in the dark — no further status calls while
+      // paused: pausing stops sampling, end to end.
+      const callsAfterPause = status.mock.calls.length
+      await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS * 2)
+      expect(status.mock.calls.length).toBe(callsAfterPause)
+
+      pause.toggle() // resume
+      await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS + 1)
+      expect(status.mock.calls.length).toBeGreaterThan(callsAfterPause)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a failure state offers exactly one Retry, and the body offers no toolbar copy', async () => {
+    const services = fakeServices({
+      status: vi.fn().mockResolvedValue(
+        statusFixture({
+          state: 'permission-or-policy-refused',
+          classification: 'additional sessions refused',
+        }),
+      ),
+    })
+    renderPanel(services)
+    await waitFor(() => expect(screen.getByText('Discovery refused on this host')).toBeTruthy())
+
+    // Retry exists exactly where it belongs: inside the failure state. The
+    // toolbar copy (ports-retry) and the body Pause button are gone.
+    expect(screen.getAllByText('Retry')).toHaveLength(1)
+    expect(screen.queryByTestId('ports-retry')).toBeNull()
+    expect(screen.queryByTestId('ports-pause')).toBeNull()
+  })
+
+  it('the sample age is micro-text, never a chip, and pause rides beside it', async () => {
+    const services = fakeServices({
+      status: vi
+        .fn()
+        .mockResolvedValue(
+          statusFixture({ state: 'available', lastSampleAt: '2026-08-04T12:00:00Z' }),
+        ),
+    })
+    renderPanel(services)
+    await waitFor(() => expect(screen.getByTestId('ports-meta')).toBeTruthy())
+    const meta = screen.getByTestId('ports-meta')
+    expect(meta.textContent).toContain('last sample')
+    expect(meta.classList.contains('ui-badge')).toBe(false)
+    expect(meta.querySelector('.ui-badge')).toBeNull()
   })
 })
 
@@ -214,9 +350,7 @@ describe('PortsPanel — forwards', () => {
       openForward: vi.fn().mockResolvedValue(runningRecord()),
       stopForward,
     })
-    render(() => (
-      <PortsPanel profileId={() => 'ssh:p1:1'} services={services} visible={() => true} />
-    ))
+    renderPanel(services)
     await waitFor(() => expect(screen.getByText('0.0.0.0:6768')).toBeTruthy())
     fireEvent.click(screen.getByTestId('ports-forward'))
     await waitFor(() => expect(screen.getByTestId('forwarded-row')).toBeTruthy())
@@ -244,9 +378,7 @@ describe('PortsPanel — forwards', () => {
         ),
       ),
     })
-    render(() => (
-      <PortsPanel profileId={() => 'ssh:p1:1'} services={services} visible={() => true} />
-    ))
+    renderPanel(services)
     await waitFor(() => expect(screen.getByTestId('stopped-row')).toBeTruthy())
     expect(screen.getByText(/connection lost/)).toBeTruthy()
     expect(screen.getByText('connection closed')).toBeTruthy()
@@ -271,9 +403,7 @@ describe('PortsPanel — forwards', () => {
         ),
       ),
     })
-    render(() => (
-      <PortsPanel profileId={() => 'ssh:p1:1'} services={services} visible={() => true} />
-    ))
+    renderPanel(services)
     await waitFor(() => expect(screen.getByTestId('stopped-row')).toBeTruthy())
     expect(screen.getByText(/user/)).toBeTruthy()
     expect(screen.queryByTestId('ports-retry-forward')).toBeNull()
@@ -301,9 +431,7 @@ describe('PortsPanel — forwards', () => {
         ),
       ),
     })
-    render(() => (
-      <PortsPanel profileId={() => 'ssh:p1:1'} services={services} visible={() => true} />
-    ))
+    renderPanel(services)
     await waitFor(() => expect(screen.getByTestId('forwarded-row')).toBeTruthy())
 
     // The caveat is the backend's Caveat() verbatim: the bind was requested and
@@ -316,19 +444,13 @@ describe('PortsPanel — forwards', () => {
   })
 
   it('a clean bind renders no caveat chrome', async () => {
-    const { container } = render(() => (
-      <PortsPanel
-        profileId={() => 'ssh:p1:1'}
-        services={fakeServices({
-          status: vi
-            .fn()
-            .mockResolvedValue(
-              statusFixture({}, { forwards: [runningRecord({ id: 'fwd-clean' })] }),
-            ),
-        })}
-        visible={() => true}
-      />
-    ))
+    const { container } = renderPanel(
+      fakeServices({
+        status: vi
+          .fn()
+          .mockResolvedValue(statusFixture({}, { forwards: [runningRecord({ id: 'fwd-clean' })] })),
+      }),
+    )
     await waitFor(() => expect(screen.getByTestId('forwarded-row')).toBeTruthy())
     expect(screen.queryByText(/not verified/)).toBeNull()
     expect(container.querySelector('.ui-marker-list')).toBeNull()
@@ -344,7 +466,7 @@ describe('PortsPanel — active-tab scope', () => {
       .mockResolvedValue(statusFixture({ state: 'available', listeners: [listenerFixture(22)] }))
     const services = fakeServices({ status })
     const [pid, setPid] = createSignal<string | null>('ssh:p1:1')
-    render(() => <PortsPanel profileId={pid} services={services} visible={() => true} />)
+    renderPanel(services, { profileId: pid })
     await waitFor(() => expect(screen.getByText('0.0.0.0:22')).toBeTruthy())
 
     setPid(null)
@@ -363,7 +485,7 @@ describe('PortsPanel — active-tab scope', () => {
       .mockResolvedValue(statusFixture({ state: 'available' }))
     const services = fakeServices({ status })
     const [pid, setPid] = createSignal<string | null>('ssh:p1:1')
-    render(() => <PortsPanel profileId={pid} services={services} visible={() => true} />)
+    renderPanel(services, { profileId: pid })
     await waitFor(() => expect(screen.getByText('0.0.0.0:22')).toBeTruthy())
 
     setPid('ssh:p2:2')
@@ -387,7 +509,7 @@ describe('PortsPanel — active-tab scope', () => {
       .mockResolvedValue(statusFixture({ state: 'available' }))
     const services = fakeServices({ status })
     const [pid, setPid] = createSignal<string | null>('ssh:p1:1')
-    render(() => <PortsPanel profileId={pid} services={services} visible={() => true} />)
+    renderPanel(services, { profileId: pid })
 
     setPid('ssh:p2:2')
     await waitFor(() => expect(status).toHaveBeenCalledWith('ssh:p2:2'))
@@ -403,7 +525,7 @@ describe('PortsPanel — active-tab scope', () => {
     const services = fakeServices({ visible })
     const [pid, setPid] = createSignal<string | null>('ssh:p1:1')
     const [vis, setVis] = createSignal(true)
-    render(() => <PortsPanel profileId={pid} services={services} visible={vis} />)
+    renderPanel(services, { profileId: pid, visible: vis })
 
     await waitFor(() => expect(visible).toHaveBeenCalledWith('ssh:p1:1', true))
     setVis(false)
@@ -424,7 +546,7 @@ describe('PortsPanel — active-tab scope', () => {
       const status = vi.fn().mockResolvedValue(statusFixture({ state: 'available' }))
       const services = fakeServices({ status })
       const [vis, setVis] = createSignal(true)
-      render(() => <PortsPanel profileId={() => 'ssh:p1:1'} services={services} visible={vis} />)
+      renderPanel(services, { visible: vis })
       await vi.advanceTimersByTimeAsync(0)
 
       setVis(false)
