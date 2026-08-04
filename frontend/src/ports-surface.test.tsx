@@ -60,6 +60,7 @@ const runningRecord = (over: Partial<TunnelOpenResult> = {}): TunnelOpenResult =
   requestedBind: { host: '127.0.0.1', port: 6768 },
   actualBind: { host: '127.0.0.1', port: 6768 },
   destination: 'host.example:6768',
+  caveat: '',
   scope: 'ports:ssh:p1:1',
   state: 'running',
   stopReason: null,

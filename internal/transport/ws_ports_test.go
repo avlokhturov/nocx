@@ -177,7 +177,7 @@ func TestPortsStatus_DTOConformsToContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	validateJSON(t, schema, raw, "populated status")
-	if string(raw) != `{"profileId":"ssh:p1:1","host":"host.example","discovery":{"state":"available","listeners":[{"family":"ipv4","address":"0.0.0.0","port":6768,"process":{"evidence":"known","name":"orca-ide","pid":871}},{"family":"ipv4","address":"0.0.0.0","port":22,"process":{"evidence":"permission-denied","name":"","pid":0}}],"probe":"ss","probesTried":["ss"],"classification":"","stderr":"","lastSampleAt":"2026-08-04T10:00:00Z","paused":false,"visible":false,"connLost":false},"forwards":[{"id":"fwd-1","direction":"local","requestedBind":{"host":"127.0.0.1","port":6768},"actualBind":{"host":"127.0.0.1","port":6768},"destination":"host.example:6768","scope":"ports:ssh:p1:1","state":"running","stopReason":null,"error":null}]}` {
+	if string(raw) != `{"profileId":"ssh:p1:1","host":"host.example","discovery":{"state":"available","listeners":[{"family":"ipv4","address":"0.0.0.0","port":6768,"process":{"evidence":"known","name":"orca-ide","pid":871}},{"family":"ipv4","address":"0.0.0.0","port":22,"process":{"evidence":"permission-denied","name":"","pid":0}}],"probe":"ss","probesTried":["ss"],"classification":"","stderr":"","lastSampleAt":"2026-08-04T10:00:00Z","paused":false,"visible":false,"connLost":false},"forwards":[{"id":"fwd-1","direction":"local","requestedBind":{"host":"127.0.0.1","port":6768},"actualBind":{"host":"127.0.0.1","port":6768},"destination":"host.example:6768","scope":"ports:ssh:p1:1","caveat":"","state":"running","stopReason":null,"error":null}]}` {
 		t.Fatalf("populated status JSON mismatch:\n%s", raw)
 	}
 }

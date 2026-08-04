@@ -26,6 +26,12 @@ type fakeLease struct {
 func (f *fakeLease) Dial(string) (net.Conn, error) {
 	return nil, errors.New("dial is not used by these tests")
 }
+
+// Listen is the remote-forward half of TunnelConn (nocx-wzc4.1). These tests
+// drive local forwards only, so it refuses rather than pretending to bind.
+func (f *fakeLease) Listen(string) (net.Listener, error) {
+	return nil, errors.New("listen is not used by these tests")
+}
 func (f *fakeLease) Done() <-chan struct{} { return f.done }
 func (f *fakeLease) LostErr() error        { return nil }
 func (f *fakeLease) Close() error {
@@ -230,15 +236,16 @@ func TestReplay_ConnectorRefusedReportsEveryRow(t *testing.T) {
 
 func TestReplay_PreservesAllThreeDirections(t *testing.T) {
 	// D4: all three directions are in the domain model from day one and
-	// nothing is thrown away between them. Remote and dynamic are not yet
-	// implemented by the tunnel layer, so their rows report that as the
-	// row's own outcome — never coerced to local, never dropped, never
-	// allowed to stop the local row.
+	// nothing is thrown away between them. Each row carries its own
+	// direction and its own outcome — never coerced to local, never
+	// dropped, and one row's failure never stops another's. The remote row
+	// fails here because this connector refuses to listen, which is the
+	// point: it is that row's outcome and nobody else's.
 	conn := &fakeConnector{}
 	forwards := []profile.ForwardSpec{
 		{Direction: "local", BindHost: "127.0.0.1", BindPort: 0, Destination: "db:5432"},
 		{Direction: "remote", BindHost: "0.0.0.0", BindPort: 9090, Destination: "127.0.0.1:3000"},
-		{Direction: "dynamic", BindHost: "127.0.0.1", BindPort: 1080},
+		{Direction: "dynamic", BindHost: "127.0.0.1", BindPort: 0},
 	}
 
 	results := Replay(context.Background(), "ssh:p1", forwards, "host.example", conn, nil)
@@ -251,13 +258,13 @@ func TestReplay_PreservesAllThreeDirections(t *testing.T) {
 		t.Fatalf("local row = %+v, want running with no error", results[0])
 	}
 	if results[1].Err == nil {
-		t.Error("remote row Err = nil, want the not-implemented outcome")
+		t.Error("remote row Err = nil, want the refusing connector's own outcome")
 	}
 	if results[1].Spec.Direction != "remote" {
 		t.Errorf("remote row direction = %q, want remote (never coerced)", results[1].Spec.Direction)
 	}
-	if results[2].Err == nil {
-		t.Error("dynamic row Err = nil, want the not-implemented outcome")
+	if results[2].Err != nil || results[2].Tunnel.State() != tunnel.StateRunning {
+		t.Fatalf("dynamic row = %+v, want running with no error", results[2])
 	}
 	if results[2].Spec.Direction != "dynamic" {
 		t.Errorf("dynamic row direction = %q, want dynamic (never coerced)", results[2].Spec.Direction)
