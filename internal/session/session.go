@@ -359,6 +359,14 @@ func sshOptionsFromConfig(cfg *ssh.ConnectConfig) []ssh.ConnectOption {
 	if cfg.RemoteLauncher != nil {
 		opts = append(opts, ssh.WithRemoteLauncher(cfg.RemoteLauncher))
 	}
+	// The shell pin rides the same path as the launcher: without this the
+	// pin dies here and the launcher always receives ShellAuto — a field
+	// that is carried and discarded is worse than one that is missing,
+	// because it looks configured (nocx-pu4.1). Empty means detect: the
+	// launcher maps "" to ShellAuto at the far end (nocx-6rj0).
+	if cfg.Shell != "" {
+		opts = append(opts, ssh.WithShell(cfg.Shell))
+	}
 	if cfg.RemoteInstaller != nil {
 		opts = append(opts, ssh.WithRemoteInstaller(cfg.RemoteInstaller))
 	}

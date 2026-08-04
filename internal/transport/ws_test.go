@@ -4,17 +4,22 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
+	"github.com/shady2k/nocx/internal/tunnel"
 )
 
 type stubPTYFactory struct{ stub *pty.Stub }
@@ -2338,3 +2343,288 @@ func TestWSServer_CreditDropAndReattachKeepsSequence(t *testing.T) {
 // see above for the actual test).
 // TestWSServer_FairnessTwoFloodingOneQuiet is above.
 // TestWSServer_CreditDropAndReattachKeepsSequence is above.
+
+// ---------------------------------------------------------------------------
+// Stored-forward replay (nocx-wzc4.5) and shell pin (nocx-pu4.1)
+// ---------------------------------------------------------------------------
+//
+// These drive the open RPC through the real socket and assert on what the
+// app does afterwards — forwards establishing, per-row failure isolation,
+// the pin riding the options the registry handed the SSH factory. Calling
+// connectfwd.Replay or ssh.WithShell directly would prove the function
+// works, not that connecting does it (AGENTS.md rule 2).
+
+// replayHarness wires a WSServer whose open path can succeed against the
+// in-process SSH server: a stub SSH factory for the session channel, the
+// real RealClient connector for tunnel leases, and a profile store carrying
+// the given stored forwards under a fixed profile id.
+type replayHarness struct {
+	ws   *WSServer
+	conn *websocket.Conn
+}
+
+func newReplayHarness(t *testing.T, forwards []profile.ForwardSpec) *replayHarness {
+	t.Helper()
+	srv := startTunnelTestSSHServer(t)
+	reg := newRegWithStub(log.NewSlogAdapter(nil))
+	reg.WithSSHFactory(&stubSSHFactory{
+		connectFn: func(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.Channel, error) {
+			return ssh.NewStubChannel(log.NewSlogAdapter(nil)), nil
+		},
+	})
+
+	ps := profile.NewJSONStore(filepath.Join(t.TempDir(), "p.json"))
+	fwds := forwards
+	if err := ps.CreateProfile(profile.SSHProfile{
+		Base:    profile.Base{ID: "ssh:replay:1", Type: "ssh", Name: "replay"},
+		Options: profile.StoredSSHProfileOptions{Forwards: &fwds},
+	}); err != nil {
+		t.Fatalf("CreateProfile: %v", err)
+	}
+
+	ws := NewWSServer(
+		log.NewSlogAdapter(nil), reg,
+		WithTunnelConnector(tunnelTestClient(t, srv)),
+		WithProfileResolver(&fixedProfileResolver{host: srv.addr, cfg: tunnelResolveConfig(srv)}),
+		WithProfileRepository(ps),
+	)
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	conn := connectWS(t, ws)
+	t.Cleanup(func() { _ = conn.Close() })
+	t.Cleanup(func() { _ = ws.Stop(ctx) })
+	return &replayHarness{ws: ws, conn: conn}
+}
+
+// openProfile opens the harness profile over the wire and fails the test on
+// an RPC error — the session itself must come up in every scenario here.
+func (h *replayHarness) openProfile(t *testing.T, extra map[string]any) {
+	t.Helper()
+	params := map[string]any{
+		"cols": 80, "rows": 24, "xpixel": 0, "ypixel": 0,
+		"kind": "ssh", "profileId": "ssh:replay:1",
+	}
+	for k, v := range extra {
+		params[k] = v
+	}
+	resp := jsonrpcCall(t, h.conn, "open", params)
+	var envelope struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal open response: %v", err)
+	}
+	if envelope.Error != nil {
+		t.Fatalf("open: %+v", envelope.Error)
+	}
+}
+
+// waitForTunnels polls the ledger until it holds exactly n rows. The replay
+// runs on its own goroutine after the ack, so every assertion waits for its
+// effect rather than assuming it.
+func (h *replayHarness) waitForTunnels(t *testing.T, n int) []*tunnel.Tunnel {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		h.ws.tunnelMu.Lock()
+		rows := make([]*tunnel.Tunnel, 0, len(h.ws.tunnels))
+		for _, tt := range h.ws.tunnels {
+			rows = append(rows, tt)
+		}
+		h.ws.tunnelMu.Unlock()
+		if len(rows) == n {
+			return rows
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("ledger holds %d forward(s) after 10s, want %d", len(rows), n)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func bindAddr(b tunnel.Bind) string {
+	return net.JoinHostPort(b.Host, strconv.Itoa(b.Port))
+}
+
+// TestOpen_ReplaysTwoStoredForwards is the happy path of spec §8 D5: a
+// profile with two stored forwards connects and both are simply there —
+// each established on its own leased connection, both carrying bytes.
+func TestOpen_ReplaysTwoStoredForwards(t *testing.T) {
+	h := newReplayHarness(t, []profile.ForwardSpec{
+		{Direction: "local", BindPort: 0, Destination: startEchoTarget(t)},
+		{Direction: "local", BindPort: 0, Destination: startEchoTarget(t)},
+	})
+	h.openProfile(t, nil)
+
+	rows := h.waitForTunnels(t, 2)
+	for _, r := range rows {
+		if r.State() != tunnel.StateRunning {
+			t.Errorf("stored forward %s state = %s, want running", r.ID, r.State())
+		}
+		roundTrip(t, bindAddr(r.Actual()))
+	}
+}
+
+// TestOpen_ReplayBusyPort_ReportsOwnRowAndLeavesSessionUsable: one stored
+// forward whose local port is taken must report that against its OWN row
+// (stopped with the bind error) while the session stays usable and the
+// other forward keeps forwarding — the failure never degrades anything
+// else. Both rows stay in the ledger, which is what ports.status reads.
+func TestOpen_ReplayBusyPort_ReportsOwnRowAndLeavesSessionUsable(t *testing.T) {
+	h := newReplayHarness(t, []profile.ForwardSpec{
+		{Direction: "local", BindPort: busyPort(t), Destination: startEchoTarget(t)},
+		{Direction: "local", BindPort: 0, Destination: startEchoTarget(t)},
+	})
+	h.openProfile(t, nil) // the session itself is usable
+
+	rows := h.waitForTunnels(t, 2)
+	live := 0
+	for _, r := range rows {
+		if r.Err() != nil {
+			if r.State() != tunnel.StateStopped {
+				t.Errorf("failed forward %s state = %s, want stopped", r.ID, r.State())
+			}
+			continue
+		}
+		live++
+		if r.State() != tunnel.StateRunning {
+			t.Errorf("live forward %s state = %s, want running", r.ID, r.State())
+		}
+		roundTrip(t, bindAddr(r.Actual()))
+	}
+	if live != 1 {
+		t.Errorf("live forwards = %d, want exactly 1", live)
+	}
+}
+
+// TestOpen_ReplayOneRowFailure_StopsNoOther: the failing row comes FIRST
+// and is rejected before it can become a tunnel at all; the row after it
+// must still establish. One row's failure never stops another's (spec
+// §10.11).
+func TestOpen_ReplayOneRowFailure_StopsNoOther(t *testing.T) {
+	h := newReplayHarness(t, []profile.ForwardSpec{
+		// A dynamic row must carry no destination; tunnel.New rejects this
+		// spec outright, so row 0 never becomes a tunnel.
+		{Direction: "dynamic", BindPort: 0, Destination: "db.internal:5432"},
+		{Direction: "local", BindPort: 0, Destination: startEchoTarget(t)},
+	})
+	h.openProfile(t, nil)
+
+	rows := h.waitForTunnels(t, 1)
+	if rows[0].State() != tunnel.StateRunning {
+		t.Errorf("surviving forward %s state = %s, want running", rows[0].ID, rows[0].State())
+	}
+	roundTrip(t, bindAddr(rows[0].Actual()))
+}
+
+// shellCaptureHarness wires a WSServer whose SSH factory records the
+// ConnectOptions the registry built — the seam where a pin either rides or
+// dies before the launcher.
+func shellCaptureHarness(t *testing.T) (*websocket.Conn, func() []ssh.ConnectOption) {
+	t.Helper()
+	reg := newRegWithStub(log.NewSlogAdapter(nil))
+	var mu sync.Mutex
+	var captured []ssh.ConnectOption
+	reg.WithSSHFactory(&stubSSHFactory{
+		connectFn: func(_ context.Context, _ string, opts ...ssh.ConnectOption) (ssh.Channel, error) {
+			mu.Lock()
+			captured = append([]ssh.ConnectOption{}, opts...)
+			mu.Unlock()
+			return ssh.NewStubChannel(log.NewSlogAdapter(nil)), nil
+		},
+	})
+	ws := NewWSServer(
+		log.NewSlogAdapter(nil), reg,
+		WithProfileResolver(&fakeResolver{
+			resolveFn: func(profileID string) (string, *ssh.ConnectConfig, error) {
+				return "host.example.com", &ssh.ConnectConfig{User: "test"}, nil
+			},
+		}),
+	)
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	conn := connectWS(t, ws)
+	t.Cleanup(func() { _ = conn.Close() })
+	t.Cleanup(func() { _ = ws.Stop(ctx) })
+	return conn, func() []ssh.ConnectOption {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]ssh.ConnectOption{}, captured...)
+	}
+}
+
+func openSSHWithShell(t *testing.T, conn *websocket.Conn, shell string) {
+	t.Helper()
+	params := map[string]any{
+		"cols": 80, "rows": 24, "xpixel": 0, "ypixel": 0,
+		"kind": "ssh", "profileId": "ssh:test:1",
+	}
+	if shell != "" {
+		params["shell"] = shell
+	}
+	resp := jsonrpcCall(t, conn, "open", params)
+	var envelope struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal open response: %v", err)
+	}
+	if envelope.Error != nil {
+		t.Fatalf("open: %+v", envelope.Error)
+	}
+}
+
+// TestOpen_ShellPin_ReachesConnectOptions is the pin's through-the-app
+// proof: the open RPC's shell field must land in the ConnectConfig the
+// registry turned into ConnectOptions — the exact seam that used to drop it
+// (sshOptionsFromConfig). The ssh package's own test proves the launcher
+// then receives a non-empty Shell (TestConnect_ProfileShellPin_BeatsDetection);
+// here the pin must simply arrive.
+func TestOpen_ShellPin_ReachesConnectOptions(t *testing.T) {
+	conn, captured := shellCaptureHarness(t)
+	openSSHWithShell(t, conn, string(ssh.ShellZsh))
+
+	cfg := &ssh.ConnectConfig{}
+	for _, o := range captured() {
+		o(cfg)
+	}
+	if cfg.Shell != ssh.ShellZsh {
+		t.Errorf("ConnectConfig.Shell = %q, want the pinned %q", cfg.Shell, ssh.ShellZsh)
+	}
+}
+
+// TestOpen_NoShellPin_LeavesDetectDefault: unpinned, the options must not
+// invent a shell — empty is the detect default the launcher maps to
+// ShellAuto at the far end (nocx-6rj0).
+func TestOpen_NoShellPin_LeavesDetectDefault(t *testing.T) {
+	conn, captured := shellCaptureHarness(t)
+	openSSHWithShell(t, conn, "")
+
+	cfg := &ssh.ConnectConfig{}
+	for _, o := range captured() {
+		o(cfg)
+	}
+	if cfg.Shell != "" {
+		t.Errorf("ConnectConfig.Shell = %q, want empty (launcher maps it to ShellAuto)", cfg.Shell)
+	}
+}
+
+// TestOpen_UnknownShellPin_IgnoredWithWarn: a pin that names no known shell
+// is dropped, never honoured — detection is the safe degrade for a
+// meaningless pin, and the session still opens.
+func TestOpen_UnknownShellPin_IgnoredWithWarn(t *testing.T) {
+	conn, captured := shellCaptureHarness(t)
+	openSSHWithShell(t, conn, "fish")
+
+	cfg := &ssh.ConnectConfig{}
+	for _, o := range captured() {
+		o(cfg)
+	}
+	if cfg.Shell != "" {
+		t.Errorf("ConnectConfig.Shell = %q, want empty for an unknown pin", cfg.Shell)
+	}
+}
