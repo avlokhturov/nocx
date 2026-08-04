@@ -64,7 +64,7 @@ test.describe('sandboxed shell action', () => {
     // The initial tab is the app's own cold start; a slow runner (headless
     // vite+devharness) can take longer than the 5s default, so the boot wait
     // gets a generous bound — the assertion still requires the tab.
-    await expect(page.locator('[role="tab"]')).toHaveCount(1, { timeout: 20000 })
+    await expect(page.getByRole('tab')).toHaveCount(1, { timeout: 20000 })
 
     // Deterministic start: the flag is OFF (the default; the e2e backend
     // persists settings across runs, so the previous state is not trusted).
@@ -78,16 +78,16 @@ test.describe('sandboxed shell action', () => {
     await expect(page.locator(SANDBOX_UNAVAILABLE)).toHaveCount(0)
 
     // Ordinary local tab still opens.
-    const before = await page.locator('[role="tab"]').count()
+    const before = await page.getByRole('tab').count()
     await page.keyboard.press('Enter')
-    await expect(page.locator('[role="tab"]')).toHaveCount(before + 1)
+    await expect(page.getByRole('tab')).toHaveCount(before + 1)
   })
 
   test('flag on: exactly one sandbox row renders (action or unavailable), and disabling hides it again', async ({
     page,
   }) => {
     await page.goto('/')
-    await expect(page.locator('[role="tab"]')).toHaveCount(1, { timeout: 20000 })
+    await expect(page.getByRole('tab')).toHaveCount(1, { timeout: 20000 })
 
     // Enable the experimental flag in Settings.
     await setSandboxFlag(page, true)
@@ -109,9 +109,9 @@ test.describe('sandboxed shell action', () => {
     }
 
     // Ordinary flows are untouched by the flag.
-    const before = await page.locator('[role="tab"]').count()
+    const before = await page.getByRole('tab').count()
     await page.keyboard.press('Enter')
-    await expect(page.locator('[role="tab"]')).toHaveCount(before + 1)
+    await expect(page.getByRole('tab')).toHaveCount(before + 1)
 
     // Disabling the flag removes the sandbox row from the next open.
     await setSandboxFlag(page, false)
