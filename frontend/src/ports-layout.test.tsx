@@ -99,7 +99,7 @@ describe('the detected row keeps the address first and primary (nocx-wzc4.9)', (
     document.body.append(root)
     // Created once, outside the JSX: Solid wraps prop expressions in getters,
     // so building it inline yields a fresh control on every read.
-    const pause = createPortsPauseControl(services, () => 'ssh:p1:1')
+    const pause = createPortsPauseControl()
     render(
       () => (
         <PortsPanel

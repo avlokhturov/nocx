@@ -74,26 +74,18 @@ export interface PortsPauseControl {
   sync(paused: boolean): void
   /** A profile switch forgets the previous connection's pause. */
   reset(): void
-  /** Flip the backend's pause flag for the ACTIVE profile. */
-  toggle(): void
 }
 
-export function createPortsPauseControl(
-  services: Pick<PortsPanelServices, 'pause'>,
-  profileId: () => string | null,
-): PortsPauseControl {
+// nocx-wzc4.11 replaced the Pause header action with Refresh, so nothing in
+// the renderer flips this any more: the control now only REFLECTS a pause the
+// backend reports. `ports.pause` consequently has no caller — nocx-wzc4.12
+// decides whether it gets one or goes.
+export function createPortsPauseControl(): PortsPauseControl {
   const [paused, setPaused] = createSignal(false)
   return {
     paused,
     sync: (p) => setPaused(p),
     reset: () => setPaused(false),
-    toggle: () => {
-      const pid = profileId()
-      if (pid === null) return
-      const next = !paused()
-      setPaused(next)
-      void services.pause(pid, next).catch(() => {})
-    },
   }
 }
 
@@ -305,6 +297,21 @@ export function PortsPanel(props: PortsPanelProps) {
   const st = () => status()?.discovery
   const host = () => status()?.host ?? ''
   const listeners = () => st()?.listeners ?? []
+  /** Reading, as opposed to having nothing to read. No status yet is always
+   *  loading; a connected target whose first sample has not landed is too —
+   *  that window is the settle delay plus a round trip, and showing nothing
+   *  through it reads as broken (nocx-wzc4.11). A profile with no session is
+   *  NOT loading: there is nothing to wait for. */
+  /** True when any listener's owner could not be named. The reason is the
+   *  probe's privilege, not the row's. */
+  const hiddenOwners = (): boolean => listeners().some((l) => l.process.evidence !== 'known')
+
+  const loading = (): boolean => {
+    if (st() === undefined) return true
+    if (st()?.state !== 'pending') return false
+    return isLocal() || !!host()
+  }
+
   const runningForwards = () => [...forwards().values()].filter((f) => f.state === 'running')
   const stoppedForwards = () => [...forwards().values()].filter((f) => f.state === 'stopped')
 
@@ -336,7 +343,7 @@ export function PortsPanel(props: PortsPanelProps) {
 
         {/* ── Discovery state ─────────────────────────────────────── */}
         <Show
-          when={st() !== undefined}
+          when={!loading()}
           fallback={
             <div class="ports-loading" data-testid="ports-loading">
               <Spinner label="Reading ports" />
@@ -344,21 +351,13 @@ export function PortsPanel(props: PortsPanelProps) {
             </div>
           }
         >
-          <Show when={!host() && st()?.state === 'pending'}>
-            <Show
-              when={isLocal()}
-              fallback={
-                <EmptyState
-                  title="No active connection"
-                  description="Open an SSH session to this profile first — the ports it listens on will appear here."
-                />
-              }
-            >
-              <EmptyState
-                title="Waiting for the first sample"
-                description="The settle sample runs shortly after this tab opens."
-              />
-            </Show>
+          {/* A profile with no session yet is not loading — there is nothing
+              to wait for until the user opens one. */}
+          <Show when={!host() && st()?.state === 'pending' && !isLocal()}>
+            <EmptyState
+              title="No active connection"
+              description="Open an SSH session to this profile first — the ports it listens on will appear here."
+            />
           </Show>
           <Show when={host() || (st()?.state ?? '') !== 'pending'}>
             <Show when={st()?.connLost}>
@@ -398,6 +397,12 @@ export function PortsPanel(props: PortsPanelProps) {
                   />
                 </Show>
                 <Show when={st()?.state === 'available' || st()?.state === 'available-limited'}>
+                  {/* Stated once, above the rows it applies to. */}
+                  <Show when={hiddenOwners()}>
+                    <p class="ports-note" data-testid="ports-owners-note">
+                      Some owners are hidden — run as root to see them.
+                    </p>
+                  </Show>
                   <Show
                     when={listeners().length > 0}
                     fallback={
@@ -419,20 +424,13 @@ export function PortsPanel(props: PortsPanelProps) {
                                   quiet text; the states that are a caution
                                   keep the chip, because there the tone IS the
                                   information (nocx-wzc4.10). */}
-                              <Show
-                                when={l.process.evidence !== 'known'}
-                                fallback={
-                                  <span class="ports-row__proc">{processLabel(l.process)}</span>
-                                }
-                              >
-                                <Badge
-                                  truncate
-                                  tone={
-                                    l.process.evidence === 'permission-denied' ? 'warning' : 'info'
-                                  }
-                                >
-                                  {processLabel(l.process)}
-                                </Badge>
+                              {/* Only a known owner earns a line. "Owners
+                                  hidden" is one fact about the probe, not a
+                                  banner repeated down every row where it does
+                                  not fit — it is stated once above the list
+                                  (nocx-wzc4.11). */}
+                              <Show when={l.process.evidence === 'known'}>
+                                <span class="ports-row__proc">{processLabel(l.process)}</span>
                               </Show>
                             </div>
                             <Show

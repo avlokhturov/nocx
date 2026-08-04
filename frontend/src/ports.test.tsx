@@ -97,11 +97,11 @@ function fakeServices(over: Partial<PortsPanelServices> = {}): PortsPanelService
  *  the panel share in main.tsx (nocx-wzc4.9). */
 function renderPanel(services: PortsPanelServices, over: Partial<PortsPanelProps> = {}) {
   // The control is created ONCE, outside the JSX. Solid wraps every prop
-  // expression in a getter, so `pause={createPortsPauseControl(...)}` builds a
+  // expression in a getter, so `pause={createPortsPauseControl()}` builds a
   // fresh control on every read — `sync` would write one instance while the
   // view read another, and the panel could never show a pause it did not
   // itself initiate (nocx-wzc4.10).
-  const pause = createPortsPauseControl(services, () => 'ssh:p1:1')
+  const pause = createPortsPauseControl()
   return render(() => (
     <PortsPanel
       profileId={() => 'ssh:p1:1'}
@@ -115,7 +115,7 @@ function renderPanel(services: PortsPanelServices, over: Partial<PortsPanelProps
 
 // ── Detected → Forwarded in one action ───────────────────────────────────
 describe('PortsPanel — detected rows', () => {
-  it('renders a permission-denied probe as an explanation, not a blank', async () => {
+  it('explains hidden owners once above the rows, not on every row', async () => {
     const services = fakeServices({
       status: vi
         .fn()
@@ -124,8 +124,12 @@ describe('PortsPanel — detected rows', () => {
         ),
     })
     renderPanel(services)
-    await waitFor(() => expect(screen.getByText(/run as root to see owners/)).toBeTruthy())
+    // The privilege is the probe's, not the row's — one statement above the
+    // list, never a banner repeated down a 240px rail (nocx-wzc4.11).
+    await waitFor(() => expect(screen.getByTestId('ports-owners-note')).toBeTruthy())
+    expect(screen.getByTestId('ports-owners-note').textContent).toMatch(/run as root/)
     expect(screen.getByText('0.0.0.0:22')).toBeTruthy()
+    expect(screen.queryAllByText(/run as root/)).toHaveLength(1)
   })
 
   it('a probe-less host says so — and never claims "nothing is listening"', async () => {
@@ -277,30 +281,21 @@ describe('PortsPanel — loading and refresh (nocx-wzc4.9)', () => {
     }
   })
 
-  it('pausing stops the status poll; resuming restarts it', async () => {
+  it('a backend-reported pause stops the status poll (nocx-wzc4.11)', async () => {
+    // The header action is Refresh now, so nothing in the renderer flips this;
+    // the control only REFLECTS a pause the backend reports, and the poll must
+    // still honour it.
     vi.useFakeTimers()
     try {
-      const status = vi.fn().mockResolvedValue(statusFixture({ state: 'available' }))
-      const pauseSpy = vi.fn().mockResolvedValue({})
-      const services = fakeServices({ status, pause: pauseSpy })
-      const pause = createPortsPauseControl(services, () => 'ssh:p1:1')
-      renderPanel(services, { pause })
+      const status = vi.fn().mockResolvedValue(statusFixture({ state: 'available', paused: true }))
+      const services = fakeServices({ status })
+      renderPanel(services)
       await vi.advanceTimersByTimeAsync(0)
-      expect(status).toHaveBeenCalled()
+      const callsAfterFirst = status.mock.calls.length
+      expect(callsAfterFirst).toBeGreaterThan(0)
 
-      pause.toggle() // exactly what the header action calls
-      await vi.advanceTimersByTimeAsync(0)
-      expect(pauseSpy).toHaveBeenCalledWith('ssh:p1:1', true)
-
-      // Two poll intervals in the dark — no further status calls while
-      // paused: pausing stops sampling, end to end.
-      const callsAfterPause = status.mock.calls.length
       await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS * 2)
-      expect(status.mock.calls.length).toBe(callsAfterPause)
-
-      pause.toggle() // resume
-      await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS + 1)
-      expect(status.mock.calls.length).toBeGreaterThan(callsAfterPause)
+      expect(status.mock.calls.length).toBe(callsAfterFirst)
     } finally {
       vi.useRealTimers()
     }
@@ -669,11 +664,11 @@ describe('PortsPanel — the local machine (nocx-wzc4.8)', () => {
     })
     renderPanel(services, { profileId: () => LOCAL_TARGET_ID })
 
-    // The same explanation as a remote row: a fact about privilege, not an
+    // The same explanation as a remote host: a fact about privilege, not an
     // error on the user's own machine.
-    await waitFor(() => expect(screen.getByText(/run as root to see owners/)).toBeTruthy())
+    await waitFor(() => expect(screen.getByTestId('ports-owners-note')).toBeTruthy())
+    expect(screen.getByTestId('ports-owners-note').textContent).toMatch(/run as root/)
     expect(screen.getByText('0.0.0.0:22')).toBeTruthy()
-    expect(screen.queryByTestId('ports-forward')).toBeNull()
   })
 
   it("a local tab pending before the first sample never says 'no connection'", async () => {
@@ -686,7 +681,9 @@ describe('PortsPanel — the local machine (nocx-wzc4.8)', () => {
     })
     renderPanel(services, { profileId: () => LOCAL_TARGET_ID })
 
-    await waitFor(() => expect(screen.getByText('Waiting for the first sample')).toBeTruthy())
+    // Connected-and-waiting is loading, not an empty state: the settle delay
+    // plus a round trip is exactly the window a spinner is for (nocx-wzc4.11).
+    await waitFor(() => expect(screen.getByTestId('ports-loading')).toBeTruthy())
     expect(screen.queryByText('No active connection')).toBeNull()
   })
 })

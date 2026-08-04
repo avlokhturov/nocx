@@ -20,7 +20,7 @@ import { HorizontalTabStrip, VerticalTabStrip } from './tab-strip'
 import { SurfaceRegistry, SURFACE_ID_SETTINGS } from './surface-registry'
 import { mountUpdateNotice } from './update-notice'
 import { IconButton } from './ui/icon-button'
-import { PauseIcon, PlayIcon, PlugIcon, SettingsIcon } from './ui/icons'
+import { PlugIcon, RefreshIcon, SettingsIcon } from './ui/icons'
 import { SettingsObserver } from './settings-observer'
 import { bootstrapTheme, reconcileThemeFromGo } from './renderers/theme-bootstrap'
 import { bootstrapPlatform } from './platform'
@@ -259,24 +259,24 @@ async function main() {
   // Pause is a HEADER action, not body chrome (nocx-wzc4.9): one shared
   // controller feeds both the header toggle and the panel's status merges,
   // so the two can never disagree about the backend's flag.
-  const portsPause = createPortsPauseControl(portsServices, () => portsTargetId())
+  const portsPause = createPortsPauseControl()
   const PORTS_VIEW: SidebarViewDescriptor = {
     id: 'ports',
     title: 'Ports',
     icon: PlugIcon,
+    // Refresh, not Pause (nocx-wzc4.11). One sample costs ~12ms, so there is
+    // nothing to protect a host from; what a user actually wants is to ask
+    // again after starting something.
     actions: () => (
       <IconButton
-        data-testid="ports-pause"
+        data-testid="ports-refresh"
         size="sm"
-        ariaLabel={portsPause.paused() ? 'Resume sampling' : 'Pause sampling'}
-        title={portsPause.paused() ? 'Resume sampling' : 'Pause sampling'}
-        selected={portsPause.paused()}
+        ariaLabel="Refresh ports"
+        title="Refresh ports"
         disabled={portsTargetId() === null}
-        onClick={() => portsPause.toggle()}
+        onClick={() => void portsServices.sample(portsTargetId() as string)}
       >
-        <Show when={portsPause.paused()} fallback={<PauseIcon />}>
-          <PlayIcon />
-        </Show>
+        <RefreshIcon />
       </IconButton>
     ),
     // The view receives the shell's view props: visible gates sampling,

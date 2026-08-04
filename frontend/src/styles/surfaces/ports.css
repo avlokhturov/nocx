@@ -87,15 +87,39 @@
   color: var(--color-text-dim);
 }
 
-/* First open, before the first sample lands: the kit Spinner plus a label —
-   the panel reads as working, never as broken (nocx-wzc4.9). */
+/* Before the first sample lands: the kit Spinner plus a label, centred in the
+   panel — the panel reads as working, never as broken (nocx-wzc4.9, centred
+   in nocx-wzc4.11). */
 .ports-loading {
   display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-4) var(--space-2);
+  justify-content: center;
+  gap: var(--space-3);
+  padding: var(--space-8) var(--space-2);
   color: var(--color-text-dim);
   font-size: var(--font-size-sm);
+}
+
+/* One statement about the probe, above the rows it governs. */
+.ports-note {
+  margin: 0;
+  font-size: var(--font-size-2xs);
+  color: var(--color-text-dim);
+}
+
+/* The row action is revealed by pointing at the row — a column of identical
+   icons down a narrow rail is noise, and the address is what the eye is
+   scanning. `:focus-within` keeps it reachable from the keyboard, where
+   hover does not exist (nocx-wzc4.11). */
+.ports-row__main > .ui-icon-button {
+  opacity: 0;
+  transition: opacity 100ms ease;
+}
+
+.ports-row:hover > .ports-row__main > .ui-icon-button,
+.ports-row:focus-within > .ports-row__main > .ui-icon-button {
+  opacity: 1;
 }
 
 /* The sample's age, in the quiet register: micro-text, never a chip. */

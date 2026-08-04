@@ -10,11 +10,11 @@
 // never mounts in a vacuum.
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup } from '@solidjs/testing-library'
-import { Show, createSignal } from 'solid-js'
+import { createSignal } from 'solid-js'
 import { PortsPanel, createPortsPauseControl, type PortsPanelServices } from './ports'
 import { mountSidebar, type SidebarHandle, type SidebarViewDescriptor } from './sidebar'
 import { IconButton } from './ui/icon-button'
-import { PauseIcon, PlayIcon, PlugIcon } from './ui/icons'
+import { PlugIcon, RefreshIcon } from './ui/icons'
 import {
   createRendererMock,
   makeClient,
@@ -94,24 +94,21 @@ function portsView(
   services: PortsPanelServices,
   portsTargetId: () => string | null,
 ): SidebarViewDescriptor {
-  const pause = createPortsPauseControl(services, portsTargetId)
+  const pause = createPortsPauseControl()
   return {
     id: PORTS_VIEW_ID,
     title: 'Ports',
     icon: PlugIcon,
     actions: () => (
       <IconButton
-        data-testid="ports-pause"
+        data-testid="ports-refresh"
         size="sm"
-        ariaLabel={pause.paused() ? 'Resume sampling' : 'Pause sampling'}
-        title={pause.paused() ? 'Resume sampling' : 'Pause sampling'}
-        selected={pause.paused()}
+        ariaLabel="Refresh ports"
+        title="Refresh ports"
         disabled={portsTargetId() === null}
-        onClick={() => pause.toggle()}
+        onClick={() => void services.sample(portsTargetId() as string)}
       >
-        <Show when={pause.paused()} fallback={<PauseIcon />}>
-          <PlayIcon />
-        </Show>
+        <RefreshIcon />
       </IconButton>
     ),
     view: (props) => (
@@ -324,30 +321,23 @@ describe('ports sidebar view', () => {
     document.removeEventListener('keydown', handler)
   })
 
-  it('pausing from the header stops sampling; resuming restarts it (nocx-wzc4.9)', async () => {
-    const pause = vi.fn().mockResolvedValue({})
+  it('refreshing from the header asks the active target again (nocx-wzc4.11)', async () => {
+    const sample = vi.fn().mockResolvedValue(statusFixture('ssh:p1:1'))
     const status = vi.fn().mockResolvedValue(statusFixture('ssh:p1:1'))
-    const services = fakeServices({ pause, status })
+    const services = fakeServices({ sample, status })
     const { panel } = await mountApp(services)
     await vi.waitFor(() => expect(status).toHaveBeenCalled())
 
     // The action lives in the view's HEADER (SidebarViewDescriptor.actions),
     // never in the body — the body carries no second vocabulary for it.
-    const pauseBtn = panel.querySelector<HTMLElement>('[data-testid="ports-pause"]')
-    expect(pauseBtn).not.toBeNull()
-    expect(pauseBtn?.closest('.ui-sidebar-view__header')).not.toBeNull()
-    expect(pauseBtn?.closest('.ui-sidebar-view__body')).toBeNull()
+    const refreshBtn = panel.querySelector<HTMLElement>('[data-testid="ports-refresh"]')
+    expect(refreshBtn).not.toBeNull()
+    expect(refreshBtn?.closest('.ui-sidebar-view__header')).not.toBeNull()
+    expect(refreshBtn?.closest('.ui-sidebar-view__body')).toBeNull()
 
-    // Pause: the flag reaches the backend (which stops sampling — the
-    // production-host traffic), and the header icon reflects the state.
-    pauseBtn!.click()
-    await vi.waitFor(() => expect(pause).toHaveBeenCalledWith('ssh:p1:1', true))
-    expect(pauseBtn?.getAttribute('aria-selected')).toBe('true')
-    expect(pauseBtn?.getAttribute('aria-label')).toBe('Resume sampling')
-
-    // Resume: sampling restarts.
-    pauseBtn!.click()
-    await vi.waitFor(() => expect(pause).toHaveBeenCalledWith('ssh:p1:1', false))
-    expect(pauseBtn?.getAttribute('aria-selected')).toBeNull()
+    // One sample costs ~12ms, so asking again is the useful control — not
+    // protecting the host from a poll it does not notice.
+    refreshBtn!.click()
+    await vi.waitFor(() => expect(sample).toHaveBeenCalledWith('ssh:p1:1'))
   })
 })

@@ -25,7 +25,7 @@ export interface SectionProps {
 
 export function Section(props: SectionProps) {
   return (
-    <section id={props.id} class="ui-section">
+    <section id={props.id} class="ui-section" data-dense={props.dense ? 'true' : undefined}>
       <h2>{props.title}</h2>
       <Stack gap="default" divided={props.divided} dense={props.dense}>
         {props.children}

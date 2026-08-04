@@ -38,3 +38,20 @@
   font-size: var(--font-size-sm);
   margin: 0 0 12px;
 }
+
+/* ── Dense variant ──────────────────────────────────────────────────────
+   A section heading in a 240px rail is a label, not a page title: the
+   generous gap that separates groups on a settings page reads as a hole
+   above the first row here (nocx-wzc4.11). The heading keeps its rule; only
+   the air around it goes. */
+
+.ui-section[data-dense='true'] {
+  gap: var(--space-2);
+  margin-bottom: var(--space-4);
+}
+
+.ui-section[data-dense='true'] h2 {
+  font-size: var(--font-size-sm);
+  margin: 0;
+  padding-bottom: var(--space-1);
+}
