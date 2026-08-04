@@ -58,7 +58,9 @@ function ClipboardBannerComponent(props: { onChoice: (choice: BannerChoice) => v
         <Button variant="primary" onClick={() => props.onChoice('allow')}>
           Allow clipboard writes
         </Button>
-        <Button onClick={() => props.onChoice('suppress')}>Don't show again</Button>
+        <Button variant="default" onClick={() => props.onChoice('suppress')}>
+          Don't show again
+        </Button>
         <IconButton ariaLabel="Dismiss" size="sm" onClick={() => props.onChoice('dismiss')}>
           ✕
         </IconButton>
