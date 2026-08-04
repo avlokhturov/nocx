@@ -205,6 +205,31 @@ how two agents ship two answers to one question.
 > hid it, and the deferral lived only in a code comment. **A `TODO` in source is not a task
 > — file the bead before you write the comment.**
 
+### The five checks gate the brief, not the diff
+
+If you are a coordinator writing a brief, a spec or a plan for somebody else to implement,
+**the checks above are yours and they apply before you write it.** The brief is where the
+architecture is decided; by the time a worker is editing files, the decision has already
+been made and the checks can only confirm it. "I am not touching code" is not an exemption —
+it is the moment the exemption costs the most.
+
+A brief that crosses a boundary **names the `AD`s and ADRs it touches and what they already
+decided, before it says what to build.** Checked by eye at review, like the commit-message
+rule.
+
+> 2026-08-04, one session, three times. The nocxify spec proposed `stty -echo`, parsing away
+> echoed regions, and inferring stdin ownership from the byte stream — the three techniques
+> ADR-0004 names and rejects, in that order, in one paragraph. Then a brief told a worker to
+> shell out to `ss`/`netstat` on the **local** machine, against "Interface-first + DI" and
+> against `internal/contentkey`, which is the same per-OS problem already solved in this
+> repo. Then a report to the owner claimed nocx deliberately never deploys a binary to a
+> remote host, while `architecture.md` defers a Tier-B remote helper, AD-2 names it a build
+> target, AD-1 reserved a msg-type for its feed, and `nocx-if6` phase B is that relay.
+>
+> One cause each time: writing from what the conversation remembered instead of reading the
+> binding document for the boundary being crossed. The owner caught all three. The third one
+> would have shipped a provider seam the relay had to be forked into.
+
 ## Before you investigate: two checks that beat reasoning
 
 **Search the memories before fighting the environment.** `bd memories <keyword>` costs
