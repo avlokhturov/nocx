@@ -53,6 +53,7 @@
             "readyTimeout",
             "jumpHost",
             "agentForward",
+            "portDiscovery",
             "canBeJumpServer",
             "behaviorOnSessionEnd",
             "shellIntegration"
@@ -71,6 +72,7 @@
               "readyTimeout",
               "jumpHost",
               "agentForward",
+              "portDiscovery",
               "canBeJumpServer",
               "behaviorOnSessionEnd",
               "shellIntegration"

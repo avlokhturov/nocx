@@ -1,0 +1,39 @@
+/* EditableRowList — repeating editable row list.
+   The kit owns the row rhythm, the separator and the two affordances; the
+   caller's fields live in __content and keep their own appearance. */
+
+.ui-row-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.ui-row-list__row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--color-divider);
+  border-radius: var(--radius-md);
+}
+
+.ui-row-list__content {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.ui-row-list__remove {
+  flex: 0 0 auto;
+}
+
+.ui-row-list__empty {
+  margin: 0;
+  color: var(--color-text-muted);
+}
+
+.ui-row-list__add {
+  align-self: flex-start;
+}

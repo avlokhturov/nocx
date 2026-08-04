@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, it, expect } from 'vitest'
-import { decideSaveRoute } from './connections'
-import type { SSHProfile } from './profiles'
+import { decideSaveRoute, validForwardDestination, firstForwardError } from './connections'
+import type { SSHProfile, ForwardSpec } from './profiles'
 
 // ── Stub profile ───────────────────────────────────────────────────────────
 
@@ -110,5 +110,56 @@ describe('revert does not materialise the inherited value', () => {
     // present key is what the presence-aware backend reads as "explicitly set".
     const wire = JSON.parse(JSON.stringify(updated)) as { options: Record<string, unknown> }
     expect(wire.options).not.toHaveProperty('port')
+  })
+})
+
+// ── Stored forward helpers (spec §8, D5) ─────────────────────────────────
+
+describe('validForwardDestination', () => {
+  it('accepts host:port with a numeric port', () => {
+    expect(validForwardDestination('db.internal:5432')).toBe(true)
+    expect(validForwardDestination('127.0.0.1:3000')).toBe(true)
+    expect(validForwardDestination('[::1]:8080')).toBe(true)
+  })
+
+  it('rejects a missing host, port or non-numeric port', () => {
+    expect(validForwardDestination('')).toBe(false)
+    expect(validForwardDestination(':5432')).toBe(false)
+    expect(validForwardDestination('db.internal:')).toBe(false)
+    expect(validForwardDestination('db.internal')).toBe(false)
+    expect(validForwardDestination('db.internal:ssh')).toBe(false)
+    expect(validForwardDestination('db.internal:0')).toBe(false)
+    expect(validForwardDestination('db.internal:70000')).toBe(false)
+  })
+})
+
+describe('firstForwardError', () => {
+  it('returns undefined for a usable list', () => {
+    const rows: ForwardSpec[] = [
+      { direction: 'local', bindPort: 8080, destination: 'db:5432' },
+      { direction: 'remote', bindHost: '0.0.0.0', bindPort: 9090, destination: '127.0.0.1:3000' },
+      { direction: 'dynamic', bindPort: 1080 },
+    ]
+    expect(firstForwardError(rows)).toBeUndefined()
+  })
+
+  it('names the first bad row', () => {
+    expect(
+      firstForwardError([
+        { direction: 'local', bindPort: 80 },
+        { direction: 'remote', destination: 'h:1' },
+      ]),
+    ).toContain('Forward 1')
+    expect(
+      firstForwardError([{ direction: 'tunnel' as ForwardSpec['direction'], destination: 'h:1' }]),
+    ).toContain('unknown direction')
+    expect(firstForwardError([{ direction: 'local', destination: 'nope' }])).toContain('host:port')
+    expect(firstForwardError([{ direction: 'local', bindPort: -1, destination: 'h:1' }])).toContain(
+      '0–65535',
+    )
+  })
+
+  it('returns undefined for an empty list', () => {
+    expect(firstForwardError([])).toBeUndefined()
   })
 })
