@@ -1,6 +1,6 @@
 import { test, expect } from './harness'
 
-const TAB = '.nocx-tab'
+const TAB = '[role="tab"]'
 const ACTIVITY = '.nocx-tab-indicator[data-activity="true"]'
 
 // A full-screen TUI repaints constantly in the alternate buffer, and those

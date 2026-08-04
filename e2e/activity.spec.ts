@@ -4,7 +4,7 @@ import { test, expect } from './harness'
 // methods together), so this exercises the real transport, PTY and renderer.
 // The activity indicator is invisible to jsdom — no layout, no GPU, no focus.
 
-const TAB = '.nocx-tab'
+const TAB = '[role="tab"]'
 const ACTIVITY = '.nocx-tab-indicator[data-activity="true"]'
 
 test('a background tab lights the activity indicator on normal-buffer output', async ({ page }) => {
@@ -30,7 +30,7 @@ test('a background tab lights the activity indicator on normal-buffer output', a
   for (const l of logs.filter((l) => l.includes('NOCXDBG'))) console.log(l)
 
   const state = await page.evaluate(() => {
-    const tabs = [...document.querySelectorAll('.nocx-tab')]
+    const tabs = [...document.querySelectorAll('[role="tab"]')]
     return tabs.map((t) => ({
       selected: t.getAttribute('aria-selected'),
       activity: t.querySelector('.nocx-tab-indicator')?.getAttribute('data-activity'),

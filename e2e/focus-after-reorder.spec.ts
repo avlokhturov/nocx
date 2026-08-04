@@ -34,8 +34,8 @@ async function switchPlacement(page: Page, value: 'horizontal' | 'vertical'): Pr
  * Caller must have exactly two tabs present before calling.
  */
 async function assertFocusSurvivesReorder(page: Page): Promise<void> {
-  const secondTab = page.locator('.nocx-tab').nth(1)
-  const firstTab = page.locator('.nocx-tab').first()
+  const secondTab = page.locator('[role="tab"]').nth(1)
+  const firstTab = page.locator('[role="tab"]').first()
   const tabIdSecond = await secondTab.getAttribute('data-tab-id')
   const tabIdFirst = await firstTab.getAttribute('data-tab-id')
   expect(tabIdFirst).not.toBeNull()
@@ -70,7 +70,7 @@ async function assertFocusSurvivesReorder(page: Page): Promise<void> {
 
   // Snapshot pre-reorder tab order for post-reorder comparison
   const preOrder = await page.evaluate(() => {
-    const tabs = document.querySelectorAll('.nocx-tab')
+    const tabs = document.querySelectorAll('[role="tab"]')
     return Array.from(tabs).map((t) => t.getAttribute('data-tab-id'))
   })
   expect(preOrder).toEqual([tabIdFirst, tabIdSecond])
@@ -81,7 +81,7 @@ async function assertFocusSurvivesReorder(page: Page): Promise<void> {
   await page.evaluate(
     ({ draggedId }: { draggedId: string }) => {
       const src = document.querySelector(`[data-tab-id="${draggedId}"]`) as HTMLElement | null
-      const targets = document.querySelectorAll('.nocx-tab')
+      const targets = document.querySelectorAll('[role="tab"]')
       const tgt = targets[0] as HTMLElement | null // drop on FIRST tab
       if (!src || !tgt) throw new Error('Source or target tab not found')
 
@@ -112,7 +112,7 @@ async function assertFocusSurvivesReorder(page: Page): Promise<void> {
     .poll(
       () =>
         page.evaluate(() =>
-          Array.from(document.querySelectorAll('.nocx-tab')).map((t) =>
+          Array.from(document.querySelectorAll('[role="tab"]')).map((t) =>
             t.getAttribute('data-tab-id'),
           ),
         ),
@@ -147,7 +147,7 @@ test.describe('focus survives tab reorder', () => {
   test('horizontal orientation: focus survives drag reorder', async ({ page }) => {
     // Add a second tab so there is something to reorder.
     await page.locator('[aria-label="New tab"]').click()
-    await expect(page.locator('.nocx-tab')).toHaveCount(2)
+    await expect(page.locator('[role="tab"]')).toHaveCount(2)
 
     await assertFocusSurvivesReorder(page)
   })
@@ -158,7 +158,7 @@ test.describe('focus survives tab reorder', () => {
 
     // Add a second tab in the vertical strip.
     await page.locator('[aria-label="New tab"]').click()
-    await expect(page.locator('.nocx-tab')).toHaveCount(2)
+    await expect(page.locator('[role="tab"]')).toHaveCount(2)
 
     await assertFocusSurvivesReorder(page)
   })

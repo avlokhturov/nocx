@@ -18,7 +18,7 @@ import { test, expect, promptReady } from './harness'
  */
 
 const TITLE = '.nocx-tab-title'
-const TAB = '.nocx-tab'
+const TAB = '[role="tab"]'
 const TAB_ADD = '[aria-label="New tab"]'
 
 /** The class of the focused element, scoped to nothing — focus is global. */

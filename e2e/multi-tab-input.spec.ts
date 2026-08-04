@@ -5,7 +5,7 @@ import { test, expect, promptReady } from './harness'
 // keystrokes when it is active, regardless of how many other tabs exist.
 
 const TITLE = '.nocx-tab-title'
-const TAB = '.nocx-tab'
+const TAB = '[role="tab"]'
 const TAB_ADD = '[aria-label="New tab"]'
 const PANE = '.pane.active'
 

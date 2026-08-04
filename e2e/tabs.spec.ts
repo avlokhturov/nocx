@@ -10,14 +10,14 @@ test('adding a second tab preserves layout with both tabs visible', async ({ pag
 
   // Wait for the initial tab to populate its title (session is ready).
   await expect(page.locator('.nocx-tab-title').first()).not.toHaveText('', { timeout: 10_000 })
-  await expect(page.locator('.nocx-tab')).toHaveCount(1)
+  await expect(page.locator('[role="tab"]')).toHaveCount(1)
 
   // Click the + button to add a second tab.
   await page.locator('[aria-label="New tab"]').click()
 
   // Both tabs must be present and visible.
-  await expect(page.locator('.nocx-tab')).toHaveCount(2)
-  const tabs = page.locator('.nocx-tab')
+  await expect(page.locator('[role="tab"]')).toHaveCount(2)
+  const tabs = page.locator('[role="tab"]')
   await expect(tabs.nth(0)).toBeVisible()
   await expect(tabs.nth(1)).toBeVisible()
 
@@ -36,7 +36,7 @@ test('adding a second tab preserves layout with both tabs visible', async ({ pag
 
 const PLACEMENT_ROW = '.ui-settings-row[data-key="tab.placement"]'
 const PLACEMENT_SELECT = `${PLACEMENT_ROW} select`
-const TAB = '.nocx-tab'
+const TAB = '[role="tab"]'
 const ACTIVITY = '.nocx-tab-indicator[data-activity="true"]'
 
 test.describe('vertical tab placement', () => {
