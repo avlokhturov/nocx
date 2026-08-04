@@ -22,7 +22,15 @@ echoes the command **and** the shell prints its `PS1` — the command appears
 twice and an unwanted prompt shows up. The naive fixes are all fragile:
 
 - `stty -echo`: readline/zle do their own redisplay; leaked termios state breaks
-  child processes.
+  child processes. **Scope, added 2026-08-04 (`nocx-ynsx`):** this rejects
+  `-echo` as the *editor's* echo mechanism — held across the user's session,
+  with readline live underneath it. It does not reject termios changes made by a
+  command the shell is running in the foreground, where readline is not active,
+  provided the exact prior state is captured with `stty -g` and restored on every
+  path before any user code runs. In-band shell integration delivers ~25 KB
+  through such a window; without `-echo` those bytes are printed to the user,
+  because GNU coreutils `stty raw` leaves `ECHO` set (measured: `Lflag 0x8A38`).
+  Persistence and readline are what the rejection is about, not the ioctl.
 - PTY-level mode manipulation: races the foreground process, which owns the
   terminal modes.
 - Parsing away the echoed region: breaks on wrapping, cursor motion, async
