@@ -374,4 +374,54 @@ describe('ports sidebar view', () => {
 
     expect(panel.querySelector('[data-testid="ports-loading"]')).not.toBeNull()
   })
+
+  // ── The Detected section is never blank (owner, 2026-08-04) ────────────
+  // A heading, a hairline and nothing under it. Whatever the discovery
+  // state is, the section says SOMETHING — rows, a reason, or a spinner.
+  const DISCOVERY_STATES = [
+    'available',
+    'available-limited',
+    'unavailable',
+    'failed-transiently',
+    'permission-or-policy-refused',
+    'pending',
+  ] as const
+
+  for (const state of DISCOVERY_STATES) {
+    it(`says something under Detected when discovery is ${state}`, async () => {
+      const fixture = statusFixture('ssh:p1:1')
+      fixture.discovery.state = state
+      fixture.discovery.listeners = []
+      const status = vi.fn().mockResolvedValue(fixture)
+      const { bar, panel } = await mountApp(fakeServices({ status }))
+      portsIcon(bar).click()
+      await vi.waitFor(() => expect(status).toHaveBeenCalled())
+
+      const heading = [...panel.querySelectorAll('h2')].find((h) => h.textContent === 'Detected')
+      const section = heading?.closest('section')
+      await vi.waitFor(() => {
+        const text = (section?.textContent ?? '').replace('Detected', '').trim()
+        const spinner = panel.querySelector('[data-testid="ports-loading"]')
+        expect(text.length > 0 || spinner !== null).toBe(true)
+      })
+    })
+  }
+  it('names an unknown discovery state instead of rendering nothing', async () => {
+    const fixture = statusFixture('ssh:p1:1')
+    // Deliberately off-contract: what the panel must do when the backend
+    // grows a state the renderer has not learned yet. A heading with a
+    // hairline and nothing under it is the shape a user reads as broken.
+    ;(fixture.discovery as unknown as { state: string }).state = 'settling'
+    fixture.discovery.listeners = []
+    const status = vi.fn().mockResolvedValue(fixture)
+    const { bar, panel } = await mountApp(fakeServices({ status }))
+    portsIcon(bar).click()
+    await vi.waitFor(() => expect(status).toHaveBeenCalled())
+
+    await vi.waitFor(() => {
+      const heading = [...panel.querySelectorAll('h2')].find((h) => h.textContent === 'Detected')
+      const section = heading?.closest('section')
+      expect(section?.textContent ?? '').toContain('settling')
+    })
+  })
 })

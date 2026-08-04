@@ -529,3 +529,40 @@ func TestPorts_LocalTarget_OverTheWire(t *testing.T) {
 		t.Fatalf("ssh state after local close = %q, want still available", st.Sample.State)
 	}
 }
+
+// The window the over-the-wire test above jumps straight over: it asks once
+// with no target at all, then waits for "available" before asking again, so
+// the state BETWEEN ConnectionUp and the first sample was never validated.
+// That is exactly where State went out as the zero string — accepted by no
+// enum in ports.status.schema.json, matched by no arm of the renderer's
+// switch, and drawn as a section with a heading and nothing under it
+// (owner, 2026-08-04).
+func TestPortsStatus_AfterConnectionUpBeforeSettle_OverTheWireConformsToContract(t *testing.T) {
+	statusSchema := loadSchema(t, "ports.status.schema.json")
+
+	connector := &portsFakeConnector{}
+	sched := discovery.NewScheduler(
+		connector, log.NewSlogAdapter(nil),
+		// Long enough that the settle sample cannot land during the call:
+		// the point of the test is the state before it does.
+		discovery.WithSettleDelay(time.Hour),
+		discovery.WithPromptDebounce(time.Hour),
+		discovery.WithSampleInterval(0),
+	)
+	ws, stop := newPortsHarness(t, sched)
+	defer stop()
+	conn := connectWS(t, ws)
+
+	sched.ConnectionUp("ssh:p1:1", "host.example", testPortsOption())
+
+	raw := portsCall(t, conn, "ports.status", map[string]any{"profileId": "ssh:p1:1"}, 1)
+	validateJSON(t, statusSchema, raw, "ports.status after ConnectionUp, before settle")
+
+	var st portsStatusResult
+	if err := json.Unmarshal(raw, &st); err != nil {
+		t.Fatal(err)
+	}
+	if st.Discovery.State != "pending" {
+		t.Fatalf("state = %q, want pending — a connection that has come up and not yet sampled is pending, not blank", st.Discovery.State)
+	}
+}

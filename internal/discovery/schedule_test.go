@@ -528,3 +528,23 @@ func testConnectOption() ssh.ConnectOption {
 		c.User = "test"
 	}
 }
+
+// A connection that has come up but not yet sampled is a state a user looks
+// at, and it went out on the wire as State "" — in no enum, matching no arm
+// of the renderer's switch, so the Ports panel drew a heading with nothing
+// under it (owner, 2026-08-04). The absent-target path had been guarded and
+// this one had not.
+func TestStatus_AfterConnectionUpBeforeFirstSample_IsPendingNotEmpty(t *testing.T) {
+	conn := &fakeConnector{}
+	s := testScheduler(t, conn, WithSettleDelay(time.Hour))
+
+	s.ConnectionUp("ssh:p1:1", "host.example")
+
+	got := s.Status("ssh:p1:1")
+	if got.Sample.State == "" {
+		t.Fatal("state is the zero string: the panel renders this as an empty section, not as a degrade")
+	}
+	if got.Sample.State != StatePending {
+		t.Fatalf("state = %q, want %q", got.Sample.State, StatePending)
+	}
+}

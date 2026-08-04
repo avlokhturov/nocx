@@ -312,6 +312,29 @@ export function PortsPanel(props: PortsPanelProps) {
     return isLocal() || !!host()
   }
 
+  /** Every discovery state the Detected section has an arm for. The section
+   *  renders exactly one thing, and this is what makes "exactly one" a fact
+   *  rather than a hope: a heading with a hairline and nothing under it is
+   *  the shape a user reads as broken, and it is what the owner saw on
+   *  2026-08-04. A state we do not know must NAME ITSELF rather than render
+   *  as absence — an unhandled case is information, and losing it is the
+   *  soft degrade AGENTS.md forbids. */
+  const DETECTED_ARMS = new Set([
+    'unavailable',
+    'failed-transiently',
+    'permission-or-policy-refused',
+    'pending',
+    'available',
+    'available-limited',
+  ])
+
+  /** The state string when no arm claims it — '' when one does. */
+  const unhandledState = (): string => {
+    const s = st()
+    if (!s || s.connLost) return ''
+    return DETECTED_ARMS.has(s.state) ? '' : s.state || '(empty)'
+  }
+
   const runningForwards = () => [...forwards().values()].filter((f) => f.state === 'running')
   const stoppedForwards = () => [...forwards().values()].filter((f) => f.state === 'stopped')
 
@@ -369,6 +392,13 @@ export function PortsPanel(props: PortsPanelProps) {
             </Show>
             <Show when={!st()?.connLost}>
               <Section title="Detected" divided dense>
+                <Show when={unhandledState()}>
+                  <EmptyState
+                    title="Discovery is in a state this panel does not know"
+                    description={`The backend reported "${unhandledState()}". This is a bug in nocx, not on the host.`}
+                    action={<Button onClick={() => void sampleNow()}>Retry</Button>}
+                  />
+                </Show>
                 <Show when={st()?.state === 'unavailable'}>
                   <EmptyState
                     title="Could not determine what is listening"

@@ -158,6 +158,14 @@ func (s *Scheduler) ConnectionUp(profileID, host string, opts ...ssh.ConnectOpti
 			opts:      opts,
 			trigger:   make(chan struct{}, 1),
 			done:      make(chan struct{}),
+			// The window between a connection coming up and its first sample
+			// landing is a real state a user looks at, and the zero Sample
+			// reports State "" — which is in no enum, satisfies no arm of the
+			// renderer's switch, and rendered as a section with a heading and
+			// nothing under it (owner, 2026-08-04). Status() already refused
+			// to return the zero string for an ABSENT target; the target that
+			// exists and has not yet sampled is the same fact and was missed.
+			last: Sample{State: StatePending},
 		}
 		s.targets[profileID] = t
 		go t.loop()
@@ -324,10 +332,19 @@ func (s *Scheduler) Status(profileID string) TargetStatus {
 		// never the zero string, which would render as an empty badge.
 		return TargetStatus{ProfileID: profileID, Sample: Sample{State: StatePending}}
 	}
+	// Belt and braces on the same invariant. Every construction site sets a
+	// state, and one of them did not, for weeks: the wire is where the cost
+	// lands, so the wire is where the guarantee belongs. State "" is in no
+	// enum and matches no arm of the renderer's switch, so it does not
+	// degrade the panel — it blanks it.
+	smp := t.last
+	if smp.State == "" {
+		smp.State = StatePending
+	}
 	return TargetStatus{
 		ProfileID:    profileID,
 		Host:         t.host,
-		Sample:       t.last,
+		Sample:       smp,
 		Paused:       t.paused,
 		Visible:      t.visible,
 		ConnLost:     t.connDead,
