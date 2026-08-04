@@ -395,3 +395,16 @@ select:focus-visible {
   line-height: 1.5;
   white-space: pre-wrap;
 }
+
+/* The capability rail (nocx-4t37.2): the pane-level bar above the pending
+   command. position: relative is the anchor the capability popover floats
+   above (the FloatingPanel's bottom: 100%); without it the panel's absolute
+   position resolves against the pane and lands under the tab bar. */
+.nocx-capability-rail {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  justify-content: flex-start;
+  align-items: center;
+  padding: 4px 0 2px;
+}

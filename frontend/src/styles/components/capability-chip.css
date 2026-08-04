@@ -1,0 +1,59 @@
+/* CapabilityChip — the capability statement at the pending command
+   (nocx-4t37.2). One base shape + data-variant tones, mirroring the Badge's
+   tone pattern. The chip is a small button: it states what is true and its
+   caret says it opens the action popover. */
+
+.ui-capability-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border: none;
+  border-radius: var(--control-radius-sm);
+  font-size: var(--font-size-2xs);
+  font-weight: 500;
+  line-height: 1.4;
+  cursor: pointer;
+  color: var(--color-text-dim);
+  background: var(--color-surface-raised);
+}
+
+.ui-capability-chip:hover:not(:disabled) {
+  color: var(--color-text);
+}
+
+.ui-capability-chip:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.ui-capability-chip__caret {
+  font-size: var(--font-size-2xs);
+  line-height: 1;
+}
+
+/* The four statements the surface can make. native = plain shell / latched
+   native input; blocks = nocx owns the trusted prompt; enhanced = the shell
+   speaks our protocol but input is not owned right now; degraded = the
+   environment became uncertain (integration declined, or markers stopped on
+   an integrated session). */
+
+.ui-capability-chip[data-variant='native'] {
+  background: var(--color-surface-raised);
+  color: var(--color-text-dim);
+}
+
+.ui-capability-chip[data-variant='blocks'] {
+  background: color-mix(in srgb, var(--color-success), transparent 82%);
+  color: var(--color-success);
+}
+
+.ui-capability-chip[data-variant='enhanced'] {
+  background: color-mix(in srgb, var(--color-accent), transparent 82%);
+  color: var(--color-accent);
+}
+
+.ui-capability-chip[data-variant='degraded'] {
+  background: color-mix(in srgb, var(--color-warning), transparent 82%);
+  color: var(--color-warning);
+}

@@ -533,29 +533,33 @@ func hashedPatternMatches(pattern, normalizedHost string) bool {
 //     refuses a command-line remote command alongside it ("Cannot execute
 //     command-line and remote command"), so the configured command runs
 //     as-is and no launcher or installer is consulted (spec §4.2).
-//  2. The launcher (nocx-xs1d) builds the integrated start command. A
-//     profile pin (cfg.Shell) wins outright — a user who says "this host
-//     runs zsh" knows something the detector cannot (nocx-6rj0). Unpinned,
-//     the launcher receives ShellAuto and emits a strictly-POSIX dispatcher
-//     that detects the far login shell at runtime — the only layer that
-//     knows which shell is at the far end — and execs the matching tier:
-//     bash → bash, zsh → zsh, anything else (dash, ash, ksh, csh, …) → the
-//     minimal tier. The dispatcher never guesses bash: an undetectable
-//     shell degrades to the minimal tier, whose fail-open starts an
-//     ordinary plain login shell (ADR-0004:60). A decline (or a
+//  2. The launcher (nocx-xs1d) builds the integrated start command, but
+//     ONLY when the launch policy allows it (nocx-4t37.2): a profile whose
+//     effective shellIntegration is ask or off opens a plain shell and
+//     leaves the explicit-request path to the renderer's capability
+//     control. A profile pin (cfg.Shell) wins outright — a user who says
+//     "this host runs zsh" knows something the detector cannot (nocx-6rj0).
+//     Unpinned, the launcher receives ShellAuto and emits a strictly-POSIX
+//     dispatcher that detects the far login shell at runtime — the only
+//     layer that knows which shell is at the far end — and execs the
+//     matching tier: bash → bash, zsh → zsh, anything else (dash, ash, ksh,
+//     csh, …) → the minimal tier. The dispatcher never guesses bash: an
+//     undetectable shell degrades to the minimal tier, whose fail-open
+//     starts an ordinary plain login shell (ADR-0004:60). A decline (or a
 //     contract-violating result) falls back to a plain shell with the
 //     reason: an ordinary, usable terminal with a visible native prompt is
 //     absolute, no failure path may suppress it.
 //  3. The legacy RemoteInstaller is an explicit opt-in only — never the
-//     default. It installs scripts via SFTP and returns its own start
-//     command; the later opt-in persistent-install task reworks it.
+//     default — and the same policy gate applies. It installs scripts via
+//     SFTP and returns its own start command; the later opt-in
+//     persistent-install task reworks it.
 //  4. Nothing wired: a plain shell, reason none.
 func (rc *RealClient) shellStartCommand(ctx context.Context, gclient *gossh.Client, resolved *resolvedConfig, cfg *ConnectConfig) (string, RefusalReason) {
 	if resolved.remoteCommand != "" {
 		return resolved.remoteCommand, ReasonRemoteCommand
 	}
 
-	if cfg.RemoteLauncher != nil {
+	if launchAllowed(cfg.LaunchPolicy) && cfg.RemoteLauncher != nil {
 		shell := cfg.Shell
 		if shell == "" {
 			shell = ShellAuto
@@ -576,7 +580,7 @@ func (rc *RealClient) shellStartCommand(ctx context.Context, gclient *gossh.Clie
 		return "", reason
 	}
 
-	if cfg.RemoteInstaller != nil {
+	if launchAllowed(cfg.LaunchPolicy) && cfg.RemoteInstaller != nil {
 		remoteHome, err := cfg.RemoteInstaller.GetRemoteHome(gclient)
 		if err != nil {
 			rc.log.Warn("ssh: could not determine remote home for shell integration",

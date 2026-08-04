@@ -27,6 +27,9 @@ export interface TabView {
   /** When true, the tab offers a save action (alias adoption). */
   readonly adoptable?: boolean
   readonly onAdopt?: (() => void) | null
+  /** The environment degraded or became uncertain (nocx-4t37.2): tab
+   *  chrome carries at most this warning mark, never a permanent badge. */
+  readonly warning?: boolean
   readonly paneId: string
   onDisplayChange: (() => void) | null
 }
@@ -42,6 +45,7 @@ interface TabDisplayRecord {
   tooltip: string
   subtitle: string
   adoptable: boolean
+  warning: boolean
   hasActivity: boolean
   agentStatus: AgentStatus | null
 }
@@ -159,6 +163,7 @@ abstract class TabStripBase implements TabStrip {
                   active={display.activeId === tab.id}
                   agentStatus={display.records[tab.id]?.agentStatus ?? null}
                   adoptable={display.records[tab.id]?.adoptable === true}
+                  warning={display.records[tab.id]?.warning === true}
                   onAdopt={tab.onAdopt ?? undefined}
                   title={display.records[tab.id]?.title ?? ''}
                   tooltip={display.records[tab.id]?.tooltip ?? ''}
@@ -217,6 +222,7 @@ abstract class TabStripBase implements TabStrip {
         tooltip: tab.tooltip,
         subtitle: tab.subtitle,
         adoptable: tab.adoptable,
+        warning: tab.warning,
         hasActivity: tab.hasActivity,
         agentStatus: tab.agentStatus,
       })
@@ -230,6 +236,7 @@ abstract class TabStripBase implements TabStrip {
       tooltip: tab.tooltip,
       subtitle: tab.subtitle,
       adoptable: tab.adoptable,
+      warning: tab.warning,
       hasActivity: tab.hasActivity,
       agentStatus: tab.agentStatus,
     })

@@ -47,6 +47,9 @@ export interface TabProps {
   adoptable?: boolean
   /** Triggered when the user clicks the save action. */
   onAdopt?: () => void
+  /** The environment degraded or became uncertain (nocx-4t37.2): renders
+   *  the small warning mark in the status line. */
+  warning?: boolean
   /** Called when the tab is clicked. */
   onActivate: () => void
   /** Called with the tab id when the tab is closed (middle-click or close button). */
@@ -110,6 +113,13 @@ export function Tab(props: TabProps) {
             centre. Wrapping the pair keeps the column at exactly two children. */}
         <span class="nocx-tab-line">
           <span class="nocx-tab-status" />
+          <Show when={props.warning === true}>
+            <span
+              class="nocx-tab-warning"
+              aria-label="Environment degraded"
+              title="Shell integration degraded or uncertain"
+            />
+          </Show>
           <span class="nocx-tab-title">{props.title}</span>
         </span>
         <Show when={props.orientation === 'vertical' && (props.subtitle ?? '') !== ''}>

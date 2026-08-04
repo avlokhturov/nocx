@@ -102,6 +102,8 @@ interface MountOpts {
    *  handler bails on a disconnected target, so tests that exercise it need
    *  the pane in the tree. Default false — the copy-on-select tests do not. */
   attachToDocument?: boolean
+  /** Mount an SSH tab (the capability rail is SSH-only, nocx-4t37.2). */
+  ssh?: { profileId: string; host: string }
 }
 
 /** Mount a real TerminalContent inside a Tab and return the live editor view. */
@@ -127,6 +129,7 @@ async function mountTerminal(
     makeBanner(),
     null,
     () => {},
+    opts.ssh,
   )
   const tab = new Tab(
     content,
@@ -673,7 +676,7 @@ describe('the live prompt says where Enter will land (nocx-3779)', () => {
   }> {
     const clientFake = makeClient({
       openSSHSessionByHost: vi.fn(() => Promise.resolve(makeSession())),
-    } as unknown as Partial<ClientFake>)
+    })
     const wsClient = clientFake as unknown as WSClient
     const content = new TerminalContent(
       wsClient,
@@ -826,12 +829,29 @@ describe('in-band integration (nocx-ynsx)', () => {
     return withSession.session.send
   }
 
-  it('refuses outside a trusted prompt and types nothing', async () => {
+  it('a markerless shell at rest is its own authorisation: the wrapper is typed', async () => {
     const { content, teardown } = await mountTerminal(makeClipboard(), {}, clientWithPlan())
     try {
       content.setVisible(true)
       const send = sessionSend(content)
-      // Fresh mount: RAW, untrusted, unowned.
+      // Fresh mount: RAW, markerless, normal buffer. The explicit call IS
+      // the consent for this path (nocx-4t37.2, ADR-0004 §1 note): the
+      // one-line wrapper is typed, and only READY lets the payload follow.
+      content.integrateShell()
+      await vi.waitFor(() => expect(send).toHaveBeenCalledWith(plan.wrapper + '\r'))
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a full-screen program (ALT_SCREEN) refuses even on a markerless shell', async () => {
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, clientWithPlan())
+    try {
+      content.setVisible(true)
+      // vim/less/htop take the alternate buffer — xterm reports it
+      // positively, so the one fact that matters is never inferred.
+      rendererOf(content)._fireBufferChange('alternate')
+      const send = sessionSend(content)
       content.integrateShell()
       expect(send).not.toHaveBeenCalled()
     } finally {
@@ -839,12 +859,13 @@ describe('in-band integration (nocx-ynsx)', () => {
     }
   })
 
-  it('a trusted but unowned prompt is refused too', async () => {
+  it('an integrated shell outside the trusted A→B window is refused too', async () => {
     const { content, teardown } = await mountTerminal(makeClipboard(), {}, clientWithPlan())
     try {
       content.setVisible(true)
       const renderer = rendererOf(content)
-      // A alone: PROMPT_READY, trusted, but NOT owned (ADR-0006 §4).
+      // A alone: PROMPT_READY, trusted, but NOT owned (ADR-0006 §4) — and
+      // markers have arrived, so the markerless path does not apply.
       renderer._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
       const send = sessionSend(content)
       content.integrateShell()
@@ -935,6 +956,122 @@ describe('in-band integration (nocx-ynsx)', () => {
       await vi.waitFor(() => expect(ed.isVisible).toBe(true))
       expect(send).not.toHaveBeenCalled()
       expect(ed.getDoc()).toBe(draft)
+    } finally {
+      teardown()
+    }
+  })
+})
+
+describe('the capability rail (nocx-4t37.2)', () => {
+  /** A client whose SSH open session carries the given launch policy. */
+  const clientWithPolicy = (
+    shellIntegration: 'auto' | 'ask' | 'off',
+    reason: SessionFake['shellIntegrationReason'] = '',
+  ): ClientFake =>
+    makeClient({
+      openSSHSession: vi.fn(() =>
+        Promise.resolve(makeSession({ shellIntegration, shellIntegrationReason: reason })),
+      ),
+    })
+
+  /** The rail is SSH-only: mount an SSH tab. */
+  const SSH = { profileId: 'ssh:test:1', host: 'test-host' }
+
+  const railOf = (tab: Tab): HTMLElement | null =>
+    tab.pane.querySelector<HTMLElement>('.nocx-capability-rail')
+
+  const chipLabel = (rail: HTMLElement): string =>
+    rail.querySelector('.ui-capability-chip__label')?.textContent ?? ''
+
+  it('renders the rail above the pending command with the observed statement', async () => {
+    const { content, tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { ssh: SSH },
+      clientWithPolicy('ask'),
+    )
+    try {
+      content.setVisible(true)
+      const rail = railOf(tab)
+      expect(rail, 'capability rail not mounted').not.toBeNull()
+      // A plain ask session has no markers yet: the statement is native input.
+      expect(chipLabel(rail!)).toBe('Native input')
+      // The rail sits ABOVE the editor root (above the pending command).
+      const editorRoot = tab.pane.querySelector<HTMLElement>('.nocx-editor')
+      expect(editorRoot).not.toBeNull()
+      expect(
+        rail!.compareDocumentPosition(editorRoot!) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ).not.toBe(0)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('the first marker promotes the statement to command blocks', async () => {
+    const { content, tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { ssh: SSH },
+      clientWithPolicy('auto'),
+    )
+    try {
+      content.setVisible(true)
+      const rail = railOf(tab)!
+      rendererOf(content)._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
+      rendererOf(content)._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
+      expect(chipLabel(rail)).toBe('Command blocks')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a launcher decline surfaces as a degrade and disables the offer', async () => {
+    const { content, tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { ssh: SSH },
+      clientWithPolicy('auto', 'unsupported-shell'),
+    )
+    try {
+      content.setVisible(true)
+      const rail = railOf(tab)!
+      // The reason reached the product (the mocked toast), and the chip
+      // reads degraded rather than inviting an integrate that would fail.
+      expect(content.policy).toBe('auto')
+      expect(rail.dataset).toBeDefined()
+      expect(rail.querySelector('.ui-capability-chip[data-variant="degraded"]')).not.toBeNull()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('off refuses integrateShell even at a trusted prompt — nothing is typed', async () => {
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, clientWithPolicy('off'))
+    try {
+      content.setVisible(true)
+      const renderer = rendererOf(content)
+      renderer._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
+      renderer._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
+      const withSession = content as unknown as { session: SessionFake }
+      const send = withSession.session.send
+      content.integrateShell()
+      expect(send).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('the popover offers Integrate this shell on a plain shell, and it runs the gated path', async () => {
+    const { content, tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { ssh: SSH },
+      clientWithPolicy('ask'),
+    )
+    try {
+      content.setVisible(true)
+      const rail = railOf(tab)!
+      const chip = rail.querySelector<HTMLButtonElement>('.ui-capability-chip')!
+      chip.click()
+      const panel = rail.querySelector<HTMLElement>('.ui-floating-panel')
+      expect(panel, 'capability popover did not open').not.toBeNull()
+      expect(panel!.textContent).toContain('Integrate this shell')
     } finally {
       teardown()
     }

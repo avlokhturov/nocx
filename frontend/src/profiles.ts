@@ -54,6 +54,11 @@ export interface SSHProfileOptions {
   jumpPassword?: string // Jump server password
   jumpAuthMode?: AuthMode // Jump server auth mode
   agentForward?: boolean
+  /** Launch policy for shell integration (auto|ask|off, nocx-p0ug): the
+   *  connection-scope default the tab's capability control starts from.
+   *  ask opens a plain shell and the tab control is the ask; off refuses
+   *  even the explicit path. */
+  shellIntegration?: 'auto' | 'ask' | 'off'
   canBeJumpServer?: boolean // Whether this profile can be used as a jump server
   portDiscovery?: 'auto' | 'ask' | 'off'
   /** Stored forwards, opened when the connection comes up (spec §8, D5). */

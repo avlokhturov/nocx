@@ -23,7 +23,7 @@ twice and an unwanted prompt shows up. The naive fixes are all fragile:
 
 - `stty -echo`: readline/zle do their own redisplay; leaked termios state breaks
   child processes. **Scope, added 2026-08-04 (`nocx-ynsx`):** this rejects
-  `-echo` as the *editor's* echo mechanism — held across the user's session,
+  `-echo` as the _editor's_ echo mechanism — held across the user's session,
   with readline live underneath it. It does not reject termios changes made by a
   command the shell is running in the foreground, where readline is not active,
   provided the exact prior state is captured with `stty -g` and restored on every
@@ -69,6 +69,19 @@ we are in `RUNNING_RAW` and keys pass through until the next prompt marker.
 malformed (unintegrated shell, nested SSH, `PS2` continuation on incomplete
 syntax), fall back to a conventional terminal. Never trap the user in the DOM
 editor.
+
+> **Scope note (2026-08-04, nocx-4t37.2):** the machine governs keyboard
+> OWNERSHIP — whether nocx traps the user in the DOM editor — and nothing
+> else. It is not the authorisation model for one-shot, user-initiated
+> delivery like the in-band bootstrap (`shell.integrate`): that path's
+> authorisation is the explicit user gesture (the capability control, the
+> chord), its only blind write is the one-line wrapper, and its verification
+> is the OSC 1337 READY handshake — if the wrapper is not read by a shell,
+> READY never returns and the attempt times out having typed nothing else.
+> ALT_SCREEN remains the one positive "a full-screen program owns the
+> screen" fact, and it stays a refusal. The `-echo` window in the wrapper is
+> the same single-foreground-command exception this file already records
+> below; the machine's fail-open invariant is untouched.
 
 ### 2. Prompt/echo handling via atomic handoff
 

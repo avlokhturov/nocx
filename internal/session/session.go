@@ -359,6 +359,13 @@ func sshOptionsFromConfig(cfg *ssh.ConnectConfig) []ssh.ConnectOption {
 	if cfg.RemoteLauncher != nil {
 		opts = append(opts, ssh.WithRemoteLauncher(cfg.RemoteLauncher))
 	}
+	// The launch policy rides the same path (nocx-4t37.2): without this the
+	// profile's effective shellIntegration dies here and every profile —
+	// ask or off included — would integrate at startup. A field that is
+	// carried and discarded is worse than one that is missing.
+	if cfg.LaunchPolicy != "" {
+		opts = append(opts, ssh.WithLaunchPolicy(cfg.LaunchPolicy))
+	}
 	// The shell pin rides the same path as the launcher: without this the
 	// pin dies here and the launcher always receives ShellAuto — a field
 	// that is carried and discarded is worse than one that is missing,

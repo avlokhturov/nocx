@@ -47,12 +47,15 @@ export const MIN_PANEL_WIDTH_PX: Record<FloatingPanelVariant, number> = {
   // footer (wider than the completion's glance) whose rows are short names
   // (narrower than recall's command lines).
   secret: 480,
+  // The capability popover (nocx-4t37.2) is an action menu of one or two
+  // short rows: narrower than the pickers, wider than a bare chip.
+  capability: 260,
 }
 
 /** The surfaces that float over the editor — one shell, one layout per
  *  surface. The secret picker joined the completion dropdown and the recall
  *  overlay as the third variant. */
-export type FloatingPanelVariant = 'completion' | 'recall' | 'secret'
+export type FloatingPanelVariant = 'completion' | 'recall' | 'secret' | 'capability'
 
 /** One row the kit draws. Deliberately a display subset of whatever the
  *  variant's domain object is: the variant maps candidates/entries to rows

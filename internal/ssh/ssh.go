@@ -32,6 +32,30 @@ type RemoteInstaller interface {
 	RemoteStartCommand() string
 }
 
+// LaunchPolicy controls whether the wired RemoteLauncher may build an
+// integrated start command when the session opens (nocx-4t37.2). The
+// profile cascade decides the policy (auto|ask|off, nocx-p0ug): Auto
+// integrates at startup, silently, in the interval nocx owns; Ask and Off
+// open a plain shell and leave the explicit-request path to the renderer's
+// capability control (shell.integrate, gated on the trusted prompt).
+// internal/ssh declares its own enum because it must not depend on
+// internal/profile — the same boundary that already duplicates ShellKind,
+// LaunchOptions and RefusalReason between the two packages.
+type LaunchPolicy string
+
+const (
+	LaunchPolicyAuto LaunchPolicy = "auto"
+	LaunchPolicyAsk  LaunchPolicy = "ask"
+	LaunchPolicyOff  LaunchPolicy = "off"
+)
+
+// launchAllowed reports whether the launcher (or the legacy installer) may
+// run at open. Empty means Auto: every caller that predates the field keeps
+// integrating at startup.
+func launchAllowed(p LaunchPolicy) bool {
+	return p == "" || p == LaunchPolicyAuto
+}
+
 // ---------------------------------------------------------------------------
 // Remote shell launcher — the pinned nocx-xs1d contract for bringing up an
 // integrated interactive shell on the far host.
@@ -115,6 +139,13 @@ type ConnectConfig struct {
 	// channel. The legacy RemoteInstaller is consulted only when no launcher
 	// is wired.
 	RemoteLauncher RemoteLauncher
+
+	// LaunchPolicy gates the launcher (and the legacy installer) at open
+	// (nocx-4t37.2). Auto (or empty — the pre-policy default) integrates at
+	// startup; Ask and Off open a plain shell, with the renderer's
+	// capability control as the explicit-request path. Set by the profile
+	// resolver from the effective shellIntegration field.
+	LaunchPolicy LaunchPolicy
 
 	// SessionID is the backend-assigned session ID (AD-7) for the session
 	// this connection serves. The launcher embeds it as NOCX_SESSION_ID;
@@ -295,6 +326,14 @@ func WithRemoteLauncher(l RemoteLauncher) ConnectOption {
 // connection; the launcher embeds it as NOCX_SESSION_ID.
 func WithSessionID(id string) ConnectOption {
 	return func(c *ConnectConfig) { c.SessionID = id }
+}
+
+// WithLaunchPolicy sets the open-time launch policy (nocx-4t37.2). Ask and
+// Off open a plain shell and leave the explicit-request path to the
+// renderer's capability control; empty/Auto integrate at startup whenever a
+// launcher is wired.
+func WithLaunchPolicy(p LaunchPolicy) ConnectOption {
+	return func(c *ConnectConfig) { c.LaunchPolicy = p }
 }
 
 // WithEnhanced requests the marker-only prompt mode (ADR-0006) for the

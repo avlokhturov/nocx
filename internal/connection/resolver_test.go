@@ -651,3 +651,44 @@ func TestResolver_KeySecretBinding(t *testing.T) {
 		t.Errorf("KeyFile = %q, want empty (key material replaces path)", cfg.KeyFile)
 	}
 }
+
+// TestResolver_LaunchPolicyFromEffectiveMode: the effective shellIntegration
+// field (profile > group > global > default) is stamped onto the
+// ConnectConfig as the launch policy — the value openShell gates on
+// (nocx-4t37.2). One row per mode, plus the unset default (auto).
+func TestResolver_LaunchPolicyFromEffectiveMode(t *testing.T) {
+	cases := []struct {
+		name string
+		mode *profile.ShellIntegrationMode
+		want string
+	}{
+		{name: "unset defaults to auto", want: "auto"},
+		{name: "auto", mode: profile.Ptr(profile.ShellIntegrationAuto), want: "auto"},
+		{name: "ask", mode: profile.Ptr(profile.ShellIntegrationAsk), want: "ask"},
+		{name: "off", mode: profile.Ptr(profile.ShellIntegrationOff), want: "off"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ps := newStubProfileStore()
+			ss := newStubSecretStore()
+
+			_ = ps.SaveProfile(profile.SSHProfile{
+				Base: profile.Base{ID: "profile:si:1", Name: "si-test"},
+				Options: profile.StoredSSHProfileOptions{
+					Host:             "si.example.com",
+					User:             profile.Ptr("deploy"),
+					ShellIntegration: tc.mode,
+				},
+			})
+
+			r := NewResolver(ps, ps, ss)
+			_, cfg, err := r.Resolve("profile:si:1")
+			if err != nil {
+				t.Fatalf("Resolve: %v", err)
+			}
+			if got := string(cfg.LaunchPolicy); got != tc.want {
+				t.Errorf("LaunchPolicy = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
