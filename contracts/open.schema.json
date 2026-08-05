@@ -5,7 +5,12 @@
   "description": "Result of the open JSON-RPC method: a session is created and acknowledged (AD-7 — the server assigns the authoritative session id, so the id is minted by the backend, never the renderer). cwd is the session's starting directory, the tab's name until a program sets a title. shellIntegrationReason reports why remote shell integration did not happen (nocx-r52q, nocx-xs1d): empty means integration succeeded or was never attempted, \"unsupported-shell\" and \"no-secure-temp\" are launcher refusals, \"remote-command\" a configured RemoteCommand, \"unknown\" a refusal the backend cannot classify (the adapter's fail-open for a reason its vocabulary does not yet know). The reason must reach the product, never only a log (AGENTS.md), so the field is always present and never omitted.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["sessionId", "cwd", "shellIntegrationReason", "shellIntegration"],
+  "required": [
+    "sessionId",
+    "cwd",
+    "shellIntegrationReason",
+    "desiredMode"
+  ],
   "properties": {
     "sessionId": {
       "description": "Backend-assigned session id (AD-7).",
@@ -18,12 +23,22 @@
     "shellIntegrationReason": {
       "description": "Why remote shell integration did not happen for this session; empty when it succeeded or was never attempted.",
       "type": "string",
-      "enum": ["", "unsupported-shell", "no-secure-temp", "remote-command", "unknown"]
+      "enum": [
+        "",
+        "unsupported-shell",
+        "no-secure-temp",
+        "remote-command",
+        "unknown"
+      ]
     },
-    "shellIntegration": {
-      "description": "The resolved launch policy for this session (nocx-4t37.2): the connection-scope default the tab's capability control starts from. auto integrates at startup in the interval nocx owns; ask and off open a plain shell and leave the explicit-request path to the renderer's capability control (shell.integrate). The policy is never proof that integration succeeded — shellIntegrationReason and the arrival of markers are what confirm or downgrade the tab's state.",
+    "desiredMode": {
+      "description": "The resolved destination mode for this session (nocx-mlm7): the connection-scope default the tab's capability control starts from. script (the default — N3) wraps and installs automatically, raw adds nothing, relay is consent-gated (inert until the relay lands). The mode is never proof that integration succeeded — shellIntegrationReason and the arrival of markers are what confirm or downgrade the tab's state.",
       "type": "string",
-      "enum": ["auto", "ask", "off"]
+      "enum": [
+        "raw",
+        "script",
+        "relay"
+      ]
     }
   }
 }

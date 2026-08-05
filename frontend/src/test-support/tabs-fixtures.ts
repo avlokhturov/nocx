@@ -21,6 +21,7 @@ import type { ClipboardAccess } from '../clipboard'
 import type { ClipboardGate } from '../clipboard'
 import type { ClipboardBanner } from '../banner'
 import type { TabManager } from '../tabs'
+import type { DesiredMode } from '../capability'
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Constants — every assertion must derive from these, never repeat the literal.
@@ -178,8 +179,8 @@ export function resetSessionCounter(): void {
 export interface SessionFake {
   sessionId: string
   cwd: string
-  /** The resolved launch policy from the open ack (nocx-4t37.2). */
-  shellIntegration: 'auto' | 'ask' | 'off'
+  /** The resolved destination mode from the open ack (nocx-mlm7). */
+  desiredMode: DesiredMode
   /** Why integration did not happen at open; empty = succeeded/never. */
   shellIntegrationReason: '' | 'unsupported-shell' | 'no-secure-temp' | 'remote-command' | 'unknown'
   send: ReturnType<typeof vi.fn>
@@ -204,7 +205,7 @@ export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
   return {
     sessionId: `mock-sid-${++sessionCounter}`,
     cwd: FIXTURE_CWD,
-    shellIntegration: 'auto',
+    desiredMode: 'script',
     shellIntegrationReason: '',
     send: vi.fn(),
     sendResize: vi.fn(),

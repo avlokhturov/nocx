@@ -61,6 +61,7 @@ import { ProfileClient } from './profiles'
 import type { WSClient } from './ipc'
 import { createCommandBlock } from './scrollback/blocks'
 import { CommandSnapshotStore } from './command-snapshot'
+import type { DesiredMode } from './capability'
 import type { ScrollbackController } from './scrollback/controller'
 import { pushOverlay, popOverlay } from './ui/overlay/stack'
 
@@ -965,14 +966,14 @@ describe('in-band integration (nocx-ynsx)', () => {
 })
 
 describe('the recovery action chip in editor chrome (nocx-atyf.2)', () => {
-  /** A client whose SSH open session carries the given launch policy. */
+  /** A client whose SSH open session carries the given destination mode. */
   const clientWithPolicy = (
-    shellIntegration: 'auto' | 'ask' | 'off',
+    desiredMode: DesiredMode,
     reason: SessionFake['shellIntegrationReason'] = '',
   ): ClientFake =>
     makeClient({
       openSSHSession: vi.fn(() =>
-        Promise.resolve(makeSession({ shellIntegration, shellIntegrationReason: reason })),
+        Promise.resolve(makeSession({ desiredMode, shellIntegrationReason: reason })),
       ),
     })
 
@@ -989,7 +990,7 @@ describe('the recovery action chip in editor chrome (nocx-atyf.2)', () => {
     const { content, teardown } = await mountTerminal(
       makeClipboard(),
       { ssh: SSH },
-      clientWithPolicy('auto'),
+      clientWithPolicy('script'),
     )
     try {
       content.setVisible(true)
@@ -1008,23 +1009,23 @@ describe('the recovery action chip in editor chrome (nocx-atyf.2)', () => {
     }
   })
 
-  it('a launcher decline on an auto profile shows the recovery action', async () => {
+  it('a launcher decline on a script profile shows the recovery action', async () => {
     const { content, teardown } = await mountTerminal(
       makeClipboard(),
       { ssh: SSH },
-      clientWithPolicy('auto', 'unsupported-shell'),
+      clientWithPolicy('script', 'unsupported-shell'),
     )
     try {
       content.setVisible(true)
-      // The degrade warning fires; policy is auto.
-      expect(content.policy).toBe('auto')
+      // The degrade warning fires; mode is script.
+      expect(content.policy).toBe('script')
     } finally {
       teardown()
     }
   })
 
-  it('off refuses integrateShell even at a trusted prompt — nothing is typed', async () => {
-    const { content, teardown } = await mountTerminal(makeClipboard(), {}, clientWithPolicy('off'))
+  it('raw refuses integrateShell even at a trusted prompt — nothing is typed', async () => {
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, clientWithPolicy('raw'))
     try {
       content.setVisible(true)
       const renderer = rendererOf(content)
@@ -1043,7 +1044,7 @@ describe('the recovery action chip in editor chrome (nocx-atyf.2)', () => {
     const { tab, content, teardown } = await mountTerminal(
       makeClipboard(),
       { ssh: SSH },
-      clientWithPolicy('ask'),
+      clientWithPolicy('script'),
     )
     try {
       content.setVisible(true)
@@ -1694,10 +1695,10 @@ describe('nocxify: ssh command rewrite (nocx-pu4.6)', () => {
     }
   })
 
-  it('does NOT rewrite when policy is off', async () => {
+  it('does NOT rewrite when mode is raw', async () => {
     const callMock = vi.fn()
     const client = makeClient({ call: callMock })
-    const session = makeSession({ shellIntegration: 'off' })
+    const session = makeSession({ desiredMode: 'raw' })
     client.openSession.mockResolvedValue(session)
 
     const { view, ed, content, teardown } = await mountTerminal(

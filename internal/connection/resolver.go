@@ -138,14 +138,18 @@ func (r *Resolver) buildConfig(prof *profile.SSHProfile, visited map[string]bool
 	}
 	cfg.AgentForward = eff.ResolvedOptions.AgentForward
 
-	// Launch policy (nocx-4t37.2): the effective shellIntegration field is
-	// the connection-scope default for whether the launcher may integrate
-	// at open. Auto (the default) integrates at startup, silently, in the
-	// interval nocx owns; ask and off open a plain shell and leave the
-	// explicit-request path to the renderer's capability control. The
-	// launcher is still attached by the transport — the policy gates
-	// whether openShell consults it.
-	cfg.LaunchPolicy = ssh.LaunchPolicy(eff.ResolvedOptions.ShellIntegration)
+	// Launch policy (nocx-mlm7): the effective desiredMode is the
+	// connection-scope default for whether the launcher may integrate at
+	// open. Script (the default — N3) integrates at startup, silently, in
+	// the interval nocx owns; raw refuses every rewrite and remote write;
+	// relay is inert this epic and behaves as raw until consent gating
+	// lands (P6/P7). The launcher is still attached by the transport — the
+	// policy gates whether openShell consults it.
+	cfg.LaunchPolicy = desiredModeToLaunchPolicy(eff.ResolvedOptions.DesiredMode)
+	// The resolved mode also rides the config verbatim so the open ack can
+	// report the AXIS value — relay must stay distinguishable from raw even
+	// though both gate the launcher off today.
+	cfg.DesiredMode = string(eff.ResolvedOptions.DesiredMode)
 
 	// Identity comes from the profile itself (ADR-0017): User and Auth are
 	// always inline, and the secret bindings are the references the profile
@@ -237,6 +241,23 @@ func (r *Resolver) buildConfig(prof *profile.SSHProfile, visited map[string]bool
 	}
 
 	return cfg, nil
+}
+
+// desiredModeToLaunchPolicy translates the resolved destination mode
+// (nocx-mlm7) into the open-time launch policy internal/ssh gates on.
+// Script wraps and installs automatically at open (N3); raw refuses every
+// rewrite and remote write; relay is inert in this epic and behaves as raw
+// until the relay binary and its consent gating land (P6/P7). An unknown
+// mode fails closed — it never integrates.
+func desiredModeToLaunchPolicy(m profile.DesiredMode) ssh.LaunchPolicy {
+	switch m {
+	case profile.DesiredScript:
+		return ssh.LaunchPolicyAuto
+	case profile.DesiredRaw, profile.DesiredRelay:
+		return ssh.LaunchPolicyOff
+	default:
+		return ssh.LaunchPolicyOff
+	}
 }
 
 // resolveProfileHost applies the ConfigResolver's HostName resolution to a

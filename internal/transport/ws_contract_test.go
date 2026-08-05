@@ -1481,10 +1481,11 @@ func TestVaultResolveLine_OverTheWireConformsToContract(t *testing.T) {
 // The DTO's own conformance: the four fields the open ack always carries.
 // shellIntegrationReason is present even when empty — a missing field would
 // read as "integration happened" to a renderer that defaults to that, which
-// is exactly the soft degrade AGENTS.md forbids. shellIntegration (the
-// resolved launch policy, nocx-4t37.2) is present for every session,
-// including local ones — a renderer that defaults a missing field to "auto"
-// would show an ask/off tab as silently integrated.
+// is exactly the soft degrade AGENTS.md forbids. desiredMode (the resolved
+// destination mode, nocx-mlm7) is present for every session, including
+// local ones — a renderer that defaults a missing field to "script" would
+// show a raw tab as silently integrated. Each of the three mode values
+// must marshal; the schema pins the enum.
 func TestOpen_DTOConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "open.schema.json")
 
@@ -1492,7 +1493,7 @@ func TestOpen_DTOConformsToContract(t *testing.T) {
 		"sessionId":              "0123456789abcdef0123456789abcdef",
 		"cwd":                    "~/work",
 		"shellIntegrationReason": "no-secure-temp",
-		"shellIntegration":       "auto",
+		"desiredMode":            "script",
 	})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -1503,23 +1504,23 @@ func TestOpen_DTOConformsToContract(t *testing.T) {
 		"sessionId":              "0123456789abcdef0123456789abcdef",
 		"cwd":                    "~/work",
 		"shellIntegrationReason": "",
-		"shellIntegration":       "ask",
+		"desiredMode":            "raw",
 	})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	validateJSON(t, schema, rawNone, "open DTO (integration never attempted — ask)")
+	validateJSON(t, schema, rawNone, "open DTO (integration never attempted — raw)")
 
 	rawUnknown, err := json.Marshal(map[string]string{
 		"sessionId":              "0123456789abcdef0123456789abcdef",
 		"cwd":                    "~/work",
 		"shellIntegrationReason": "unknown",
-		"shellIntegration":       "off",
+		"desiredMode":            "relay",
 	})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	validateJSON(t, schema, rawUnknown, "open DTO (unclassified refusal, off policy)")
+	validateJSON(t, schema, rawUnknown, "open DTO (unclassified refusal, relay mode)")
 }
 
 // openProfileResolver resolves every profile to a fixed host and a minimal
@@ -1602,10 +1603,9 @@ func TestOpen_OverTheWireConformsToContract(t *testing.T) {
 		t.Fatalf("open: %+v", envelope.Error)
 	}
 	validateJSON(t, schema, envelope.Result, "open result (real socket)")
-
 	var got struct {
 		ShellIntegrationReason string `json:"shellIntegrationReason"`
-		ShellIntegration       string `json:"shellIntegration"`
+		DesiredMode            string `json:"desiredMode"`
 	}
 	if err := json.Unmarshal(envelope.Result, &got); err != nil {
 		t.Fatalf("decode: %v", err)
@@ -1613,11 +1613,12 @@ func TestOpen_OverTheWireConformsToContract(t *testing.T) {
 	if got.ShellIntegrationReason != "no-secure-temp" {
 		t.Errorf("shellIntegrationReason = %q, want %q", got.ShellIntegrationReason, "no-secure-temp")
 	}
-	// The resolver stamped no policy (openProfileResolver builds a bare
-	// config), so the ack must report the default: auto. A direct-host or
-	// profile-less open integrates at startup whenever a launcher is wired.
-	if got.ShellIntegration != "auto" {
-		t.Errorf("shellIntegration = %q, want %q (default when the resolver stamps none)", got.ShellIntegration, "auto")
+	// The resolver stamped no mode (openProfileResolver builds a bare
+	// config), so the ack must report the default: script (N3 — wrap and
+	// install automatically). A direct-host or profile-less open gets the
+	// hardcoded default, exactly like a profile that resolves to nothing.
+	if got.DesiredMode != "script" {
+		t.Errorf("desiredMode = %q, want %q (default when the resolver stamps none)", got.DesiredMode, "script")
 	}
 
 	// The launcher the transport option attached must have reached the

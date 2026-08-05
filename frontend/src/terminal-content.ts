@@ -58,7 +58,7 @@ import {
   deriveShellState,
   type ShellState,
   type InputPresentation,
-  type ShellIntegrationPolicy,
+  type DesiredMode,
 } from './capability'
 import type { Open } from './generated/open'
 
@@ -229,11 +229,11 @@ export class TerminalContent extends BaseTabContent {
   /** In-flight alias-fetch counter — generation for stale-request gating. */
   private _aliasFetchId = 0
 
-  // ── Capability rail (nocx-4t37.2) ──────────────────────────────────
-  /** The resolved launch policy from the open ack (auto|ask|off): the
-   *  connection-scope default the capability control starts from. off
-   *  refuses even the explicit in-band path. */
-  private _policy: ShellIntegrationPolicy = 'auto'
+  // ── Capability rail (nocx-mlm7) ────────────────────────────────────
+  /** The resolved destination mode from the open ack (raw|script|relay):
+   *  the connection-scope default the capability control starts from. raw
+   *  refuses every rewrite and remote write; relay is consent-gated. */
+  private _policy: DesiredMode = 'script'
   /** Why integration did not happen at open; empty means it succeeded or
    *  was never attempted. A non-empty reason on an auto profile is the
    *  soft degrade AGENTS.md demands be visible in the product. */
@@ -601,7 +601,7 @@ export class TerminalContent extends BaseTabContent {
               // command and never run the ssh at all. It also excludes a
               // nested environment (the latch is cleared on entry): inside one
               // we do not know whose shell is reading.
-              if (this._policy !== 'off' && this._shellIntegrated && isInteractiveTransition(doc)) {
+              if (this._policy !== 'raw' && this._shellIntegrated && isInteractiveTransition(doc)) {
                 const dest = extractDestination(doc)
                 const sid = this.session?.sessionId
                 if (dest && sid) {
@@ -1175,7 +1175,7 @@ export class TerminalContent extends BaseTabContent {
       // reason (nocx-4t37.2): the capability control starts from the
       // backend's own resolution, never from a second fetch that could
       // disagree with it.
-      this._policy = session.shellIntegration ?? 'auto'
+      this._policy = session.desiredMode ?? 'script'
       this._openReason = session.shellIntegrationReason ?? ''
       if (this._openReason !== '') {
         // A launcher decline on an auto profile is the soft degrade
@@ -1578,11 +1578,14 @@ export class TerminalContent extends BaseTabContent {
   private _renderRecovery(): void {
     if (!this.editor) return
     const eligible = this.inputState.state !== 'ALT_SCREEN'
-    const authorized = this._policy !== 'off'
+    const authorized = this._policy !== 'raw'
     const actions = deriveActions({
       shellState: this._shellState,
       presentation: this._presentation,
-      delivery: this._shellIntegrated ? 'in-band' : 'launcher',
+      // The renderer cannot yet tell bootstrap from installed delivery —
+      // that needs the passport (P2); markers present means the launcher
+      // delivered by one of the script carriers.
+      observedDelivery: this._shellIntegrated ? 'installed-script' : 'none',
       authorized,
       eligible,
     })
@@ -1631,7 +1634,7 @@ export class TerminalContent extends BaseTabContent {
     this._restoreEditor()
   }
 
-  get policy(): ShellIntegrationPolicy {
+  get policy(): DesiredMode {
     return this._policy
   }
 
@@ -1676,16 +1679,16 @@ export class TerminalContent extends BaseTabContent {
    */
   integrateShell(): void {
     if (this._integrating) return
-    // The connection's launch policy (nocx-4t37.2): off refuses even the
-    // explicit path — the user chose "never", and every entry point (the
-    // rail, the chord, the palette) funnels through this one gate.
-    if (this._policy === 'off') {
+    // The connection's destination mode (nocx-mlm7): raw refuses every
+    // rewrite and remote write — even the explicit path. Every entry point
+    // (the rail, the chord, the palette) funnels through this one gate.
+    if (this._policy === 'raw') {
       showToast({
         level: 'warning',
-        message: 'This connection is set to never integrate (off)',
+        message: 'This connection is set to raw mode (no integration)',
         duration: 4000,
       })
-      log.warn('nocx: shell.integrate refused by off policy')
+      log.warn('nocx: shell.integrate refused by raw mode')
       return
     }
     const state = this.inputState.state

@@ -2267,19 +2267,19 @@ describe('portDiscovery', () => {
   })
 })
 
-// ── shellIntegration (nocx-p0ug, nocx-4t37.2) ────────────────────────────
+// ── desiredMode + relayConsent (spec §3.5, nocx-mlm7) ────────────────────
 
-describe('shellIntegration', () => {
-  it('saves an explicit choice on the profile through the patch route', async () => {
+describe('desiredMode', () => {
+  it('saves an explicit mode choice on the profile through the patch route', async () => {
     const { container, client } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
     await waitForProfiles(container, 1)
     await openProfileEditor(container, 'prod-web')
     selectProfileSection(container, 'Advanced')
 
-    const label = container.querySelector('label[for="shell-integration"]')
-    expect(label, 'Shell integration field not found').toBeTruthy()
+    const label = container.querySelector('label[for="desired-mode"]')
+    expect(label, 'Delivery mode field not found').toBeTruthy()
     const select = label!.closest('.ui-field')?.querySelector('.ui-select') as HTMLSelectElement
-    fireEvent.change(select, { target: { value: 'ask' } })
+    fireEvent.change(select, { target: { value: 'relay' } })
 
     const patchSpy = vi.spyOn(client, 'patchProfile').mockResolvedValue(MOCK_EFFECTIVE_CRED)
     const dialog = findDialogByTitleContaining(container, 'prod-web')!
@@ -2289,19 +2289,19 @@ describe('shellIntegration', () => {
       expect(patchSpy).toHaveBeenCalled()
     })
     const params = patchSpy.mock.calls[0][0] as { set?: Record<string, unknown> }
-    expect(params.set?.['options.shellIntegration']).toBe('ask')
+    expect(params.set?.['options.desiredMode']).toBe('relay')
   })
 
-  it('the group defaults editor offers shellIntegration as an inheritable default', async () => {
+  it('the group defaults editor offers desiredMode as an inheritable default', async () => {
     const { container, client } = mount({ profiles: MOCK_PROFILES, groups: MOCK_GROUPS })
     await waitForProfiles(container, 3)
     await openGroupEditorByName(container, 'Production')
     selectGroupSection(container, 'Advanced')
 
-    const label = container.querySelector('label[for="group-default-shellIntegration"]')
+    const label = container.querySelector('label[for="group-default-desiredMode"]')
     const select = label!.closest('.ui-field')?.querySelector('.ui-select') as HTMLSelectElement
-    expect(select, 'Group shell integration select not found').toBeTruthy()
-    fireEvent.change(select, { target: { value: 'off' } })
+    expect(select, 'Group delivery mode select not found').toBeTruthy()
+    fireEvent.change(select, { target: { value: 'raw' } })
 
     const applySpy = vi.spyOn(client, 'groupApply')
     const dialog = findDialogByTitle(container, 'Edit Group: Production')!
@@ -2311,6 +2311,40 @@ describe('shellIntegration', () => {
       expect(applySpy).toHaveBeenCalled()
     })
     const sent = applySpy.mock.calls[0][0]
-    expect(sent[0].defaults?.['shellIntegration']).toBe('off')
+    expect(sent[0].defaults?.['desiredMode']).toBe('raw')
+  })
+
+  it('a relay selection makes the consent state visible, and a grant saves per profile', async () => {
+    const { container, client } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    await waitForProfiles(container, 1)
+    await openProfileEditor(container, 'prod-web')
+    selectProfileSection(container, 'Advanced')
+
+    const modeLabel = container.querySelector('label[for="desired-mode"]')
+    const modeSelect = modeLabel!
+      .closest('.ui-field')
+      ?.querySelector('.ui-select') as HTMLSelectElement
+    fireEvent.change(modeSelect, { target: { value: 'relay' } })
+
+    // The consent control appears only for a relay selection — never
+    // silently pretending the relay is granted.
+    const consentLabel = container.querySelector('label[for="relay-consent"]')
+    expect(consentLabel, 'Relay consent field must appear for a relay selection').toBeTruthy()
+    const consentSelect = consentLabel!
+      .closest('.ui-field')
+      ?.querySelector('.ui-select') as HTMLSelectElement
+    expect(consentSelect.value, 'consent must start honest: unknown, not granted').toBe('unknown')
+    fireEvent.change(consentSelect, { target: { value: 'granted' } })
+
+    const patchSpy = vi.spyOn(client, 'patchProfile').mockResolvedValue(MOCK_EFFECTIVE_CRED)
+    const dialog = findDialogByTitleContaining(container, 'prod-web')!
+    clickButtonByText(container, 'Save Connection', dialog)
+
+    await vi.waitFor(() => {
+      expect(patchSpy).toHaveBeenCalled()
+    })
+    const params = patchSpy.mock.calls[0][0] as { set?: Record<string, unknown> }
+    expect(params.set?.['options.desiredMode']).toBe('relay')
+    expect(params.set?.['options.relayConsent']).toBe('granted')
   })
 })

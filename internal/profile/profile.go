@@ -35,26 +35,53 @@ const (
 	BehaviorClose     BehaviorOnSessionEnd = "close"
 )
 
-// ShellIntegrationMode controls whether an SSH connection attempts shell
-// integration (the nocxify launcher). ShellIntegrationAuto (the default)
-// integrates at startup, silently, in the interval nocx owns;
-// ShellIntegrationAsk integrates only on explicit request;
-// ShellIntegrationOff never integrates.
-type ShellIntegrationMode string
+// DesiredMode is the FIRST of the three delivery axes (spec §3.5, nocx-mlm7):
+// what the user wants nocx to do with this destination, resolved by the
+// existing cascade (profile → group → global → hardcoded default). It
+// replaces the old auto|ask|off launch policy outright (N1): raw adds
+// nothing, script runs the shell tiers we ship, relay deploys the Tier-B
+// binary. N3 makes script the default — wrap and install automatically,
+// consent asked only for the relay.
+type DesiredMode string
 
 const (
-	ShellIntegrationAuto ShellIntegrationMode = "auto"
-	ShellIntegrationAsk  ShellIntegrationMode = "ask"
-	ShellIntegrationOff  ShellIntegrationMode = "off"
+	DesiredRaw    DesiredMode = "raw"    // nothing added: no rewrite, no remote write
+	DesiredScript DesiredMode = "script" // the shell tiers we ship — no compiled artifact
+	DesiredRelay  DesiredMode = "relay"  // Tier B, a deployed binary — consent-gated
 )
 
-// validShellIntegration reports whether v is a value this build recognises.
+// validDesiredMode reports whether v is a value this build recognises.
 // An unrecognised stored value is not an error at decode time — it falls back
 // to the default at resolution (see ResolveEffectiveProfile) so an explicit
 // user choice never becomes a silent no-op.
-func validShellIntegration(v ShellIntegrationMode) bool {
+func validDesiredMode(v DesiredMode) bool {
 	switch v {
-	case ShellIntegrationAuto, ShellIntegrationAsk, ShellIntegrationOff:
+	case DesiredRaw, DesiredScript, DesiredRelay:
+		return true
+	default:
+		return false
+	}
+}
+
+// RelayConsent is the THIRD of the three delivery axes (spec §3.5): whether
+// the user has consented to nocx deploying the relay binary on this
+// destination. Persisted per destination and NEVER inherited — a group
+// cannot express consent, and script mode never reads it. Relay mode without
+// consent=granted behaves as raw.
+type RelayConsent string
+
+const (
+	ConsentUnknown RelayConsent = "unknown"
+	ConsentGranted RelayConsent = "granted"
+	ConsentDenied  RelayConsent = "denied"
+)
+
+// validRelayConsent reports whether v is a value this build recognises.
+// An unrecognised stored value falls back to unknown at resolution so it
+// never reaches the wire dressed as a real choice.
+func validRelayConsent(v RelayConsent) bool {
+	switch v {
+	case ConsentUnknown, ConsentGranted, ConsentDenied:
 		return true
 	default:
 		return false
@@ -65,7 +92,7 @@ func validShellIntegration(v ShellIntegrationMode) bool {
 // host's listening ports (spec D3). PortDiscoveryAuto (the default) samples
 // once the connection settles and on prompt debounce; PortDiscoveryAsk
 // probes nothing until accepted; PortDiscoveryOff never probes. It is its
-// own field — NOT folded into shellIntegration — because a user may trust
+// own field — NOT folded into desiredMode — because a user may trust
 // prompt hooks and not periodic remote exec, or the reverse (spec §6).
 type PortDiscoveryMode string
 
@@ -78,7 +105,7 @@ const (
 // validPortDiscovery reports whether v is a value this build recognises.
 // An unrecognised stored value is not an error at decode time — it falls
 // back to the default at resolution (see ResolveEffectiveProfile), exactly
-// like shellIntegration (nocx-p0ug): a user's explicit choice must never
+// like desiredMode (nocx-mlm7): a user's explicit choice must never
 // become a silent no-op.
 func validPortDiscovery(v PortDiscoveryMode) bool {
 	switch v {
@@ -178,18 +205,19 @@ type SSHProfileOptions struct {
 	KeyPassphraseSecret string `json:"keyPassphraseSecret,omitempty"`
 	// Inline fields. User and Auth are always the profile's own (ADR-0017);
 	// KeyPath is the file-based alternative to KeySecret.
-	KeyPath           string               `json:"keyPath,omitempty"`
-	User              string               `json:"user,omitempty"`
-	Auth              AuthMode             `json:"auth,omitempty"`
-	KeepaliveInterval int                  `json:"keepaliveInterval,omitempty"`
-	KeepaliveCountMax int                  `json:"keepaliveCountMax,omitempty"`
-	ReadyTimeout      int                  `json:"readyTimeout,omitempty"`
-	JumpHost          string               `json:"jumpHost,omitempty"` // Profile name or ID of the jump server
-	AgentForward      bool                 `json:"agentForward,omitempty"`
-	ShellIntegration  ShellIntegrationMode `json:"shellIntegration,omitempty"`
-	PortDiscovery     PortDiscoveryMode    `json:"portDiscovery,omitempty"`
-	Forwards          []ForwardSpec        `json:"forwards,omitempty"`
-	CanBeJumpServer   bool                 `json:"canBeJumpServer,omitempty"` // Whether this profile can be used as a jump server
+	KeyPath           string            `json:"keyPath,omitempty"`
+	User              string            `json:"user,omitempty"`
+	Auth              AuthMode          `json:"auth,omitempty"`
+	KeepaliveInterval int               `json:"keepaliveInterval,omitempty"`
+	KeepaliveCountMax int               `json:"keepaliveCountMax,omitempty"`
+	ReadyTimeout      int               `json:"readyTimeout,omitempty"`
+	JumpHost          string            `json:"jumpHost,omitempty"` // Profile name or ID of the jump server
+	AgentForward      bool              `json:"agentForward,omitempty"`
+	DesiredMode       DesiredMode       `json:"desiredMode,omitempty"`
+	RelayConsent      RelayConsent      `json:"relayConsent,omitempty"`
+	PortDiscovery     PortDiscoveryMode `json:"portDiscovery,omitempty"`
+	Forwards          []ForwardSpec     `json:"forwards,omitempty"`
+	CanBeJumpServer   bool              `json:"canBeJumpServer,omitempty"` // Whether this profile can be used as a jump server
 }
 
 // SSHProfile is a connection profile for an SSH host. It holds only
@@ -220,7 +248,8 @@ type StoredSSHProfileOptions struct {
 	KeyPath              *string               `json:"keyPath,omitempty"`
 	JumpHost             *string               `json:"jumpHost,omitempty"`
 	AgentForward         *bool                 `json:"agentForward,omitempty"`
-	ShellIntegration     *ShellIntegrationMode `json:"shellIntegration,omitempty"`
+	DesiredMode          *DesiredMode          `json:"desiredMode,omitempty"`
+	RelayConsent         *RelayConsent         `json:"relayConsent,omitempty"`
 	PortDiscovery        *PortDiscoveryMode    `json:"portDiscovery,omitempty"`
 	Forwards             *[]ForwardSpec        `json:"forwards,omitempty"` // nil = unset; &[] = explicitly none (omitempty drops an empty slice)
 	CanBeJumpServer      *bool                 `json:"canBeJumpServer,omitempty"`
@@ -271,8 +300,11 @@ func (s StoredSSHProfileOptions) ToDense() SSHProfileOptions {
 	if s.CanBeJumpServer != nil {
 		o.CanBeJumpServer = *s.CanBeJumpServer
 	}
-	if s.ShellIntegration != nil {
-		o.ShellIntegration = *s.ShellIntegration
+	if s.DesiredMode != nil {
+		o.DesiredMode = *s.DesiredMode
+	}
+	if s.RelayConsent != nil {
+		o.RelayConsent = *s.RelayConsent
 	}
 	if s.PortDiscovery != nil {
 		o.PortDiscovery = *s.PortDiscovery
@@ -338,9 +370,13 @@ func StoredOptionsFromDense(o SSHProfileOptions) StoredSSHProfileOptions {
 		v := true
 		s.CanBeJumpServer = &v
 	}
-	if o.ShellIntegration != "" {
-		v := o.ShellIntegration
-		s.ShellIntegration = &v
+	if o.DesiredMode != "" {
+		v := o.DesiredMode
+		s.DesiredMode = &v
+	}
+	if o.RelayConsent != "" {
+		v := o.RelayConsent
+		s.RelayConsent = &v
 	}
 	if o.PortDiscovery != "" {
 		v := o.PortDiscovery
@@ -382,7 +418,11 @@ func storedOptsToSparse(o StoredSSHProfileOptions) SparseSSHOptions {
 	s.KeepaliveCountMax = o.KeepaliveCountMax
 	s.ReadyTimeout = o.ReadyTimeout
 	s.AgentForward = o.AgentForward
-	s.ShellIntegration = o.ShellIntegration
+	s.DesiredMode = o.DesiredMode
+	// RelayConsent is deliberately NOT mapped into the sparse layer: consent
+	// is per-destination (spec §3.5), never inherited — merging consents
+	// across cascade layers would invent an owner that does not exist. It
+	// rides profile storage exactly like Forwards.
 	s.PortDiscovery = o.PortDiscovery
 	// Forwards are deliberately NOT mapped: a forward list is profile-owned
 	// (spec §8), never inherited — merging lists across cascade layers would
@@ -423,7 +463,7 @@ type SparseSSHOptions struct {
 	KeepaliveCountMax    *int                  `json:"keepaliveCountMax,omitempty"`
 	ReadyTimeout         *int                  `json:"readyTimeout,omitempty"`
 	AgentForward         *bool                 `json:"agentForward,omitempty"`
-	ShellIntegration     *ShellIntegrationMode `json:"shellIntegration,omitempty"`
+	DesiredMode          *DesiredMode          `json:"desiredMode,omitempty"`
 	PortDiscovery        *PortDiscoveryMode    `json:"portDiscovery,omitempty"`
 	BehaviorOnSessionEnd *BehaviorOnSessionEnd `json:"behaviorOnSessionEnd,omitempty"`
 }
@@ -454,7 +494,7 @@ var allowedFields = map[string]bool{
 	"readyTimeout":         true,
 	"agentForward":         true,
 	"portDiscovery":        true,
-	"shellIntegration":     true,
+	"desiredMode":          true,
 	"behaviorOnSessionEnd": true,
 }
 
@@ -533,13 +573,13 @@ func hardcodedDefaults() SparseSSHOptions {
 	port := 22
 	user := currentUser()
 	beh := BehaviorAuto
-	si := ShellIntegrationAuto
+	mode := DesiredScript
 	pd := PortDiscoveryAuto
 	return SparseSSHOptions{
 		Port:                 &port,
 		User:                 &user,
 		BehaviorOnSessionEnd: &beh,
-		ShellIntegration:     &si,
+		DesiredMode:          &mode,
 		PortDiscovery:        &pd,
 	}
 }
@@ -708,7 +748,7 @@ func ResolveEffectiveProfile(
 	source["port"] = FieldSourceDefault
 	source["user"] = FieldSourceDefault
 	source["behaviorOnSessionEnd"] = FieldSourceDefault
-	source["shellIntegration"] = FieldSourceDefault
+	source["desiredMode"] = FieldSourceDefault
 	source["portDiscovery"] = FieldSourceDefault
 
 	// Apply global defaults.
@@ -741,16 +781,23 @@ func ResolveEffectiveProfile(
 	// Apply profile's own options (highest priority).
 	applySparseLayer(&acc, &source, profileSparse, FieldSourceProfile)
 
-	// A shellIntegration value this build does not recognise falls back to
-	// the default (auto) rather than being treated as a silent no-op: auto
-	// is the safe behaviour for an unrecognised choice, and the provenance
-	// records "default" so the effective view shows the fallback instead of
-	// a value that never takes effect.
-	if acc.ShellIntegration != nil && !validShellIntegration(*acc.ShellIntegration) {
-		si := ShellIntegrationAuto
-		acc.ShellIntegration = &si
-		source["shellIntegration"] = FieldSourceDefault
+	// A desiredMode value this build does not recognise falls back to the
+	// default (script — N3 wraps and installs automatically) rather than
+	// being treated as a silent no-op: script is the safe behaviour for an
+	// unrecognised choice, and the provenance records "default" so the
+	// effective view shows the fallback instead of a value that never
+	// takes effect.
+	if acc.DesiredMode != nil && !validDesiredMode(*acc.DesiredMode) {
+		mode := DesiredScript
+		acc.DesiredMode = &mode
+		source["desiredMode"] = FieldSourceDefault
 	}
+
+	// RelayConsent never enters the cascade, so the same unrecognised-value
+	// rule applies to the profile's own stored options: an unknown consent
+	// falls back to unknown rather than reaching the wire dressed as a real
+	// choice. Normalised on `result` (below) so the effective profile and
+	// its DTO agree.
 
 	// The same rule for portDiscovery (spec D3): an unrecognised stored
 	// value falls back to auto with provenance "default" rather than being
@@ -761,8 +808,11 @@ func ResolveEffectiveProfile(
 		source["portDiscovery"] = FieldSourceDefault
 	}
 
-	// Build resolved dense options from the merged accumulator.
 	result := profile
+	if result.Options.RelayConsent != nil && !validRelayConsent(*result.Options.RelayConsent) {
+		c := ConsentUnknown
+		result.Options.RelayConsent = &c
+	}
 	resolvedOpts := sparseToOptions(acc)
 
 	// Apply BehaviorOnSessionEnd from accumulator to the result's Base.
@@ -825,9 +875,9 @@ func applySparseLayer(acc *SparseSSHOptions, source *map[string]FieldSource, src
 		acc.AgentForward = src.AgentForward
 		setSource(source, "agentForward", layer)
 	}
-	if src.ShellIntegration != nil {
-		acc.ShellIntegration = src.ShellIntegration
-		setSource(source, "shellIntegration", layer)
+	if src.DesiredMode != nil {
+		acc.DesiredMode = src.DesiredMode
+		setSource(source, "desiredMode", layer)
 	}
 	if src.PortDiscovery != nil {
 		acc.PortDiscovery = src.PortDiscovery
@@ -888,8 +938,8 @@ func sparseToOptions(s SparseSSHOptions) SSHProfileOptions {
 	if s.AgentForward != nil {
 		o.AgentForward = *s.AgentForward
 	}
-	if s.ShellIntegration != nil {
-		o.ShellIntegration = *s.ShellIntegration
+	if s.DesiredMode != nil {
+		o.DesiredMode = *s.DesiredMode
 	}
 	if s.PortDiscovery != nil {
 		o.PortDiscovery = *s.PortDiscovery
@@ -1103,8 +1153,9 @@ type FieldSourceDTO struct {
 
 // EffectiveProfileDTO is the per-profile wire representation.
 type EffectiveProfileDTO struct {
-	ID     string                       `json:"id"`
-	Fields map[string]EffectiveFieldDTO `json:"fields"`
+	ID           string                       `json:"id"`
+	Fields       map[string]EffectiveFieldDTO `json:"fields"`
+	RelayConsent RelayConsent                 `json:"relayConsent"`
 }
 
 // EffectiveBatchResponse is the response to profiles.effective.
@@ -1143,11 +1194,15 @@ func ToEffectiveDTO(eff EffectiveProfile, groupByID map[string]ProfileGroup) Eff
 	addField("jumpHost", p.JumpHost, eff.Source["jumpHost"])
 	addField("agentForward", p.AgentForward, eff.Source["agentForward"])
 	addField("canBeJumpServer", p.CanBeJumpServer, eff.Source["canBeJumpServer"])
-	addField("shellIntegration", string(p.ShellIntegration), eff.Source["shellIntegration"])
+	addField("desiredMode", string(p.DesiredMode), eff.Source["desiredMode"])
 	addField("portDiscovery", string(p.PortDiscovery), eff.Source["portDiscovery"])
 	addField("behaviorOnSessionEnd", string(eff.Profile.BehaviorOnSessionEnd), eff.Source["behaviorOnSessionEnd"])
 
-	return EffectiveProfileDTO{ID: eff.Profile.ID, Fields: fields}
+	consent := ConsentUnknown
+	if eff.Profile.Options.RelayConsent != nil {
+		consent = *eff.Profile.Options.RelayConsent
+	}
+	return EffectiveProfileDTO{ID: eff.Profile.ID, Fields: fields, RelayConsent: consent}
 }
 
 // parseFieldSource converts an internal FieldSource string into the closed-enum
@@ -1198,7 +1253,8 @@ const (
 	patchReadyTimeout         patchPath = "options.readyTimeout"
 	patchJumpHost             patchPath = "options.jumpHost"
 	patchAgentForward         patchPath = "options.agentForward"
-	patchShellIntegration     patchPath = "options.shellIntegration"
+	patchDesiredMode          patchPath = "options.desiredMode"
+	patchRelayConsent         patchPath = "options.relayConsent"
 	patchPortDiscovery        patchPath = "options.portDiscovery"
 	patchForwards             patchPath = "options.forwards"
 	patchCanBeJumpServer      patchPath = "options.canBeJumpServer"
@@ -1228,7 +1284,8 @@ func allowedPatchPaths() map[patchPath]bool {
 		patchReadyTimeout:         true,
 		patchJumpHost:             true,
 		patchAgentForward:         true,
-		patchShellIntegration:     true,
+		patchDesiredMode:          true,
+		patchRelayConsent:         true,
 		patchPortDiscovery:        true,
 		patchForwards:             true,
 		patchCanBeJumpServer:      true,
@@ -1276,10 +1333,14 @@ func ApplyPatchSet(opts *StoredSSHProfileOptions, path string, value any) bool {
 	case patchAgentForward:
 		v := toBool(value)
 		opts.AgentForward = &v
-	case patchShellIntegration:
+	case patchDesiredMode:
 		v := toString(value)
-		si := ShellIntegrationMode(v)
-		opts.ShellIntegration = &si
+		mode := DesiredMode(v)
+		opts.DesiredMode = &mode
+	case patchRelayConsent:
+		v := toString(value)
+		c := RelayConsent(v)
+		opts.RelayConsent = &c
 	case patchPortDiscovery:
 		v := toString(value)
 		pd := PortDiscoveryMode(v)
@@ -1330,8 +1391,10 @@ func ApplyPatchUnset(opts *StoredSSHProfileOptions, path string) bool {
 		opts.JumpHost = nil
 	case patchAgentForward:
 		opts.AgentForward = nil
-	case patchShellIntegration:
-		opts.ShellIntegration = nil
+	case patchDesiredMode:
+		opts.DesiredMode = nil
+	case patchRelayConsent:
+		opts.RelayConsent = nil
 	case patchPortDiscovery:
 		opts.PortDiscovery = nil
 	case patchForwards:

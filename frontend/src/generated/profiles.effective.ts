@@ -10,7 +10,7 @@
  */
 
 /**
- * Result of the profiles.effective JSON-RPC method — the batched effective profile resolution with per-field provenance. The single declaration of this shape: the renderer's TypeScript type is generated from it and the Go transport is validated against it. The fields map is a closed set: propertyNames pins the exact key set ToEffectiveDTO emits, so a field dropped from the wire (or a renderer depending on one the wire does not carry) fails the contract instead of looking like a working field.
+ * Result of the profiles.effective JSON-RPC method — the batched effective profile resolution with per-field provenance. The single declaration of this shape: the renderer's TypeScript type is generated from it and the Go transport is validated against it. The fields map is a closed set: propertyNames pins the exact key set ToEffectiveDTO emits, so a field dropped from the wire (or a renderer depending on one the wire does not carry) fails the contract instead of looking like a working field. The fields map carries the desiredMode axis (raw|script|relay); relayConsent is a required per-profile field beside id and fields because it is persisted per destination and never inherited.
  */
 export interface ProfilesEffectiveResponse {
   /**
@@ -33,6 +33,10 @@ export interface EffectiveProfile {
   fields: {
     [k: string]: EffectiveField
   }
+  /**
+   * The relay-consent axis (spec §3.5): whether the user has consented to nocx deploying the relay binary on this destination. Persisted per destination, never inherited; script mode never reads it. Always present — unknown is an honest state, never an absent field the renderer could silently read as granted.
+   */
+  relayConsent: 'unknown' | 'granted' | 'denied'
 }
 export interface EffectiveField {
   /**

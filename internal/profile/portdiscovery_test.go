@@ -124,7 +124,7 @@ func TestResolveEffectiveProfile_PortDiscoveryInvalidStoredFallsBackToDefault(t 
 	// (auto) rather than being treated as a silent no-op: auto is the safe
 	// behaviour for an unrecognised choice, and the provenance says "default"
 	// so the effective view shows the fallback instead of a value that never
-	// takes effect. Exactly the shellIntegration rule (nocx-p0ug).
+	// takes effect. Exactly the desiredMode rule (nocx-mlm7).
 	profile := SSHProfile{
 		Base: Base{ID: "p1", Type: "ssh", Name: "web", Group: "g1"},
 		Options: StoredSSHProfileOptions{

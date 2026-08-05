@@ -8,13 +8,38 @@
 // ELIGIBLE for integration without nocx being AUTHORISED to inject it. One
 // axis cannot say either thing.
 //
+// On 2026-08-05 (nocx-mlm7) the launch-policy enum (auto|ask|off) was
+// itself replaced by three never-collapsed axes (spec §3.5):
+//   - DesiredMode (raw|script|relay): what the user wants nocx to do with
+//     this destination, resolved by the profile cascade;
+//   - ObservedDelivery (none|bootstrap-script|installed-script|relay): what
+//     actually happened this session, read by the renderer from the markers;
+//   - RelayConsent (unknown|granted|denied): persisted per destination,
+//     consulted only for relay — script mode never reads it.
+//
 // The action set is derived ONLY after both authorisation and technical
 // eligibility are resolved — the invariant that kills the worst defect in
 // what was rejected: clicking an offered action never produces a
 // prerequisite-rejection message.
 
-/** How nocx delivered (or will deliver) its hooks onto the remote host. */
-export type Delivery = 'launcher' | 'in-band' | 'relay'
+/** What nocx observed about delivery this session — what actually happened,
+ *  never what was intended. The second of the three axes (spec §3.5):
+ *  'none' nothing arrived, 'bootstrap-script' the argv-staged launcher ran,
+ *  'installed-script' the committed ~/.nocx/launch generation ran, 'relay'
+ *  the Tier-B binary ran. Owned by the renderer, from the markers. */
+export type ObservedDelivery = 'none' | 'bootstrap-script' | 'installed-script' | 'relay'
+
+/** What the user wants nocx to do with this destination — the FIRST of the
+ *  three axes (spec §3.5), resolved by the profile cascade and carried by
+ *  the open ack. raw adds nothing (no rewrite, no remote write); script
+ *  (the default, N3) wraps and installs automatically; relay deploys the
+ *  Tier-B binary and is consent-gated. */
+export type DesiredMode = 'raw' | 'script' | 'relay'
+
+/** Relay consent for a destination — the THIRD of the three axes (spec
+ *  §3.5). Persisted per destination; script mode never reads it. Relay
+ *  without 'granted' behaves as raw. */
+export type RelayConsent = 'unknown' | 'granted' | 'denied'
 
 /** What nocx observes about the shell right now — semantic evidence, not
  *  keyboard ownership (that lives in input-state.ts). */
@@ -30,11 +55,10 @@ export type ShellState =
 /** What the user sees at the prompt. */
 export type InputPresentation = 'editor' | 'terminal'
 
-/** The connection-scope launch policy (nocx-4t37.2): the default the tab's
- *  integration control starts from. auto integrates at session open; ask
- *  and off open a plain shell and leave the explicit-request path to the
- *  renderer. off refuses even the explicit path. */
-export type ShellIntegrationPolicy = 'auto' | 'ask' | 'off'
+/** The connection-scope launch policy (nocx-4t37.2) was replaced by the
+ *  DesiredMode axis (nocx-mlm7): script integrates at session open; raw
+ *  refuses every rewrite and remote write; relay is consent-gated. There is
+ *  no 'ask' — N3 makes the script footprint automatic product behaviour. */
 
 /** One recovery action the UI may offer. Derived ONLY after both
  *  authorisation and technical eligibility are resolved — never disabled
@@ -51,7 +75,7 @@ export type RecoveryAction =
 export interface ActionFacts {
   shellState: ShellState
   presentation: InputPresentation
-  delivery: Delivery
+  observedDelivery: ObservedDelivery
   /** Has the user authorised nocx to own input at this destination? */
   authorized: boolean
   /** Is it technically safe for nocx to own input right now?

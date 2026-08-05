@@ -652,20 +652,23 @@ func TestResolver_KeySecretBinding(t *testing.T) {
 	}
 }
 
-// TestResolver_LaunchPolicyFromEffectiveMode: the effective shellIntegration
-// field (profile > group > global > default) is stamped onto the
-// ConnectConfig as the launch policy — the value openShell gates on
-// (nocx-4t37.2). One row per mode, plus the unset default (auto).
-func TestResolver_LaunchPolicyFromEffectiveMode(t *testing.T) {
+// TestResolver_ModeFromEffectiveProfile: the effective desiredMode field
+// (profile > group > global > default) is stamped onto the ConnectConfig in
+// two places (nocx-mlm7): the launch policy openShell gates on (script
+// integrates at startup; raw and relay open a plain shell — relay is inert
+// this epic) and the verbatim mode the open ack reports, which must keep
+// relay distinguishable from raw. One row per mode, plus the unset default.
+func TestResolver_ModeFromEffectiveProfile(t *testing.T) {
 	cases := []struct {
-		name string
-		mode *profile.ShellIntegrationMode
-		want string
+		name       string
+		mode       *profile.DesiredMode
+		wantPolicy string
+		wantMode   string
 	}{
-		{name: "unset defaults to auto", want: "auto"},
-		{name: "auto", mode: profile.Ptr(profile.ShellIntegrationAuto), want: "auto"},
-		{name: "ask", mode: profile.Ptr(profile.ShellIntegrationAsk), want: "ask"},
-		{name: "off", mode: profile.Ptr(profile.ShellIntegrationOff), want: "off"},
+		{name: "unset defaults to script", wantPolicy: "auto", wantMode: "script"},
+		{name: "script", mode: profile.Ptr(profile.DesiredScript), wantPolicy: "auto", wantMode: "script"},
+		{name: "raw", mode: profile.Ptr(profile.DesiredRaw), wantPolicy: "off", wantMode: "raw"},
+		{name: "relay", mode: profile.Ptr(profile.DesiredRelay), wantPolicy: "off", wantMode: "relay"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -675,9 +678,9 @@ func TestResolver_LaunchPolicyFromEffectiveMode(t *testing.T) {
 			_ = ps.SaveProfile(profile.SSHProfile{
 				Base: profile.Base{ID: "profile:si:1", Name: "si-test"},
 				Options: profile.StoredSSHProfileOptions{
-					Host:             "si.example.com",
-					User:             profile.Ptr("deploy"),
-					ShellIntegration: tc.mode,
+					Host:        "si.example.com",
+					User:        profile.Ptr("deploy"),
+					DesiredMode: tc.mode,
 				},
 			})
 
@@ -686,8 +689,11 @@ func TestResolver_LaunchPolicyFromEffectiveMode(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Resolve: %v", err)
 			}
-			if got := string(cfg.LaunchPolicy); got != tc.want {
-				t.Errorf("LaunchPolicy = %q, want %q", got, tc.want)
+			if got := string(cfg.LaunchPolicy); got != tc.wantPolicy {
+				t.Errorf("LaunchPolicy = %q, want %q", got, tc.wantPolicy)
+			}
+			if got := cfg.DesiredMode; got != tc.wantMode {
+				t.Errorf("DesiredMode = %q, want %q", got, tc.wantMode)
 			}
 		})
 	}

@@ -982,16 +982,23 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 
 // --- control-plane handlers -----------------------------------------------
 
-// launchPolicyForAck reports the resolved integration policy for the open
-// ack (nocx-4t37.2). The resolver stamps the policy on the ConnectConfig it
-// builds from the profile's effective shellIntegration; a direct-host open
-// (alias or ad-hoc — no profile to say otherwise) and a local session keep
-// the default: they integrate at startup whenever a launcher is wired.
-func launchPolicyForAck(remote *ssh.ConnectConfig) string {
-	if remote == nil || remote.LaunchPolicy == "" {
-		return string(ssh.LaunchPolicyAuto)
+// desiredModeForAck reports the resolved destination mode for the open ack
+// (nocx-mlm7). The resolver stamps the mode on the ConnectConfig it builds
+// from the profile's effective desiredMode; a direct-host open (alias or
+// ad-hoc — no profile to say otherwise) and a local session keep the
+// hardcoded default: script (N3 — wrap and install automatically). Unknown
+// values fall back to the same default so malformed profile data can never
+// violate the open schema over the real socket.
+func desiredModeForAck(remote *ssh.ConnectConfig) string {
+	if remote == nil || remote.DesiredMode == "" {
+		return string(profile.DesiredScript)
 	}
-	return string(remote.LaunchPolicy)
+	switch profile.DesiredMode(remote.DesiredMode) {
+	case profile.DesiredRaw, profile.DesiredScript, profile.DesiredRelay:
+		return remote.DesiredMode
+	default:
+		return string(profile.DesiredScript)
+	}
 }
 
 // handleOpen creates a new session and output ring.
@@ -1197,16 +1204,17 @@ func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connSta
 	// log-only (AGENTS.md), and the open ack is the one result every session
 	// produces before any of its traffic. ReasonNone means integration
 	// succeeded or was never attempted (nocx-r52q, nocx-xs1d).
-	// shellIntegration carries the RESOLVED launch policy (nocx-4t37.2): the
+	// desiredMode carries the RESOLVED destination mode (nocx-mlm7): the
 	// connection-scope default the tab's capability control starts from —
-	// auto integrates at startup, ask and off open a plain shell. It is the
-	// policy, never proof integration succeeded: the reason field and the
-	// arrival of markers are what confirm or downgrade the tab's state.
+	// script wraps and installs automatically, raw adds nothing, relay is
+	// consent-gated. It is the mode, never proof integration succeeded: the
+	// reason field and the arrival of markers are what confirm or downgrade
+	// the tab's state.
 	result := map[string]string{
 		"sessionId":              string(sess.ID()),
 		"cwd":                    sess.Cwd(),
 		"shellIntegrationReason": string(sess.ShellIntegrationReason()),
-		"shellIntegration":       launchPolicyForAck(cfg.Remote),
+		"desiredMode":            desiredModeForAck(cfg.Remote),
 	}
 	resultJSON, _ := json.Marshal(result)
 	resp := newJSONRPCResult(req.ID, resultJSON)

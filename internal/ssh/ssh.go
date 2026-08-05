@@ -147,6 +147,17 @@ type ConnectConfig struct {
 	// resolver from the effective shellIntegration field.
 	LaunchPolicy LaunchPolicy
 
+	// DesiredMode is the resolved destination mode (raw|script|relay,
+	// nocx-mlm7) stamped by the profile resolver and carried verbatim to
+	// the open ack. The ssh layer does not consume it yet — the launch
+	// policy above is the open-time translation of it — but the renderer
+	// needs the AXIS value (not the translated policy) to show consent
+	// state for relay and to gate submit-time rewrites, and translating it
+	// back from LaunchPolicy would collapse raw and relay into one value.
+	// Empty means unset (direct-host/local opens): the ack defaults it to
+	// script. P6/P7 rework this seam when the relay gates land.
+	DesiredMode string
+
 	// SessionID is the backend-assigned session ID (AD-7) for the session
 	// this connection serves. The launcher embeds it as NOCX_SESSION_ID;
 	// never empty when Enhanced is set.

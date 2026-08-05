@@ -26,7 +26,7 @@ export interface Open {
    */
   shellIntegrationReason: '' | 'unsupported-shell' | 'no-secure-temp' | 'remote-command' | 'unknown'
   /**
-   * The resolved launch policy for this session (nocx-4t37.2): the connection-scope default the tab's capability control starts from. auto integrates at startup in the interval nocx owns; ask and off open a plain shell and leave the explicit-request path to the renderer's capability control (shell.integrate). The policy is never proof that integration succeeded — shellIntegrationReason and the arrival of markers are what confirm or downgrade the tab's state.
+   * The resolved destination mode for this session (nocx-mlm7): the connection-scope default the tab's capability control starts from. script (the default — N3) wraps and installs automatically, raw adds nothing, relay is consent-gated (inert until the relay lands). The mode is never proof that integration succeeded — shellIntegrationReason and the arrival of markers are what confirm or downgrade the tab's state.
    */
-  shellIntegration: 'auto' | 'ask' | 'off'
+  desiredMode: 'raw' | 'script' | 'relay'
 }

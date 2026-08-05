@@ -68,6 +68,7 @@ import { log } from './log'
 import { showToast } from './ui/toast'
 import { VaultOperationCancelledError, type VaultController } from './vault'
 import type { InventoryEntry, VaultClient } from './vault-client'
+import type { DesiredMode, RelayConsent } from './capability'
 
 // ── Provenance helpers ───────────────────────────────────────────────────────
 
@@ -199,10 +200,22 @@ const FORWARD_DIRECTIONS: ForwardDirection[] = ['local', 'remote', 'dynamic']
 /** The closed portDiscovery modes, in display order (spec D3). */
 const PORT_DISCOVERY_MODES = ['auto', 'ask', 'off'] as const
 
-/** The closed shellIntegration launch policies, in display order
- *  (nocx-p0ug): auto integrates at startup, ask opens a plain shell whose
- *  tab control is the ask, off refuses even the explicit path. */
-const SHELL_INTEGRATION_MODES = ['auto', 'ask', 'off'] as const
+/** The closed desired modes, in display order (spec §3.5, nocx-mlm7), with
+ *  honest labels: raw adds nothing, script wraps and installs automatically
+ *  (N3), relay deploys the Tier-B binary and is consent-gated. */
+const DESIRED_MODES: { value: DesiredMode; label: string }[] = [
+  { value: 'raw', label: 'Raw — no integration' },
+  { value: 'script', label: 'Script — install automatically' },
+  { value: 'relay', label: 'Relay — requires consent' },
+]
+
+/** The closed relay-consent states (spec §3.5), in display order. Consent
+ *  is per destination and never inherited; script mode never reads it. */
+const RELAY_CONSENTS: { value: RelayConsent; label: string }[] = [
+  { value: 'unknown', label: 'Unknown — not asked' },
+  { value: 'granted', label: 'Granted' },
+  { value: 'denied', label: 'Denied' },
+]
 /**
  * Whether a stored forward's destination is a usable "host:port". The
  * backend's authority is net.SplitHostPort; this mirrors its acceptance
@@ -864,7 +877,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     { key: 'readyTimeout', label: 'Ready timeout (ms)' },
     { key: 'agentForward', label: 'Agent forward' },
     { key: 'portDiscovery', label: 'Port discovery' },
-    { key: 'shellIntegration', label: 'Shell integration' },
+    { key: 'desiredMode', label: 'Delivery mode' },
   ]
 
   /** Human-readable field labels for the impact summary. */
@@ -879,7 +892,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       readyTimeout: 'ready timeout',
       agentForward: 'agent forwarding',
       portDiscovery: 'port discovery',
-      shellIntegration: 'shell integration',
+      desiredMode: 'delivery mode',
     }
     return m[key] ?? key
   }
@@ -1009,14 +1022,14 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           </Field>
         )
       }
-      if (key === 'shellIntegration') {
+      if (key === 'desiredMode') {
         return (
           <Field for={`group-default-${key}`} label={label}>
             <div class="cm-field-row">
               <Select
                 value={(gv(key) as string) ?? ''}
                 onChange={(v) => setG(key, v || '')}
-                options={SHELL_INTEGRATION_MODES.map((m) => ({ value: m, label: m }))}
+                options={DESIRED_MODES.map((m) => ({ value: m.value, label: m.label }))}
                 placeholder="&mdash; Not set (inherit) &mdash;"
               />
             </div>
@@ -2314,16 +2327,32 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                       />
                     </div>
                   </Field>
-                  <Field for="shell-integration" label="Shell integration">
+                  <Field for="desired-mode" label="Delivery mode">
                     <div class="cm-field-row">
                       <Select
-                        value={fvStr('shellIntegration')}
-                        onChange={(v) => setOption('shellIntegration', v || undefined)}
-                        options={SHELL_INTEGRATION_MODES.map((m) => ({ value: m, label: m }))}
+                        value={fvStr('desiredMode')}
+                        onChange={(v) => setOption('desiredMode', v || undefined)}
+                        options={DESIRED_MODES.map((m) => ({ value: m.value, label: m.label }))}
                         placeholder="&mdash; Inherited &mdash;"
                       />
                     </div>
                   </Field>
+                  <Show when={fvStr('desiredMode') === 'relay'}>
+                    <Field for="relay-consent" label="Relay consent">
+                      <div class="cm-field-row">
+                        <Select
+                          value={fvStr('relayConsent') || 'unknown'}
+                          onChange={(v) => setOption('relayConsent', v || undefined)}
+                          options={RELAY_CONSENTS.map((m) => ({ value: m.value, label: m.label }))}
+                          placeholder="&mdash; Unknown &mdash;"
+                        />
+                      </div>
+                      <p class="cm-hint">
+                        The relay deploys a binary on the destination; that needs explicit consent
+                        per host, and a relay selection without granted consent behaves as raw.
+                      </p>
+                    </Field>
+                  </Show>
                   <div class="cm-check-group">
                     <Checkbox
                       label="Agent forward"

@@ -3,13 +3,13 @@ import { Dispatcher } from './dispatcher'
 import type { Open } from './generated/open'
 
 /** The open ack's wire shape (contracts/open.schema.json): the server
- *  assigns the session id (AD-7), and the resolved launch policy + refusal
- *  reason ride the same ack so the tab's capability control starts from the
- *  backend's own resolution (nocx-4t37.2). */
+ *  assigns the session id (AD-7), and the resolved destination mode +
+ *  refusal reason ride the same ack so the tab's capability control starts
+ *  from the backend's own resolution (nocx-mlm7). */
 type OpenResult = {
   sessionId?: string
   cwd?: string
-  shellIntegration?: Open['shellIntegration']
+  desiredMode?: Open['desiredMode']
   shellIntegrationReason?: Open['shellIntegrationReason']
 }
 
@@ -174,11 +174,11 @@ export class SessionHandle {
     /** Where the shell started, ~-abbreviated. Names the tab until a program
      *  sets a title; does not follow `cd` (that needs OSC 7, nocx-5mn.2). */
     readonly cwd: string,
-    /** The resolved launch policy the backend stamped at open
-     *  (nocx-4t37.2): the connection-scope default the tab's capability
+    /** The resolved destination mode the backend stamped at open
+     *  (nocx-mlm7): the connection-scope default the tab's capability
      *  control starts from. Never proof integration succeeded — the reason
      *  field and the arrival of markers confirm or downgrade it. */
-    readonly shellIntegration: 'auto' | 'ask' | 'off' = 'auto',
+    readonly desiredMode: Open['desiredMode'] = 'script',
     /** Why shell integration did not happen at open; empty means it
      *  succeeded or was never attempted (nocx-r52q, nocx-xs1d). */
     readonly shellIntegrationReason: Open['shellIntegrationReason'] = '',
@@ -418,7 +418,7 @@ export class WSClient {
       this,
       sid,
       result?.cwd ?? '',
-      result?.shellIntegration ?? 'auto',
+      result?.desiredMode ?? 'script',
       result?.shellIntegrationReason ?? '',
     )
   }

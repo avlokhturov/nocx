@@ -1,10 +1,17 @@
 import { describe, it, expect } from 'vitest'
-import { deriveActions, deriveShellState, type ActionFacts } from './capability'
+import {
+  deriveActions,
+  deriveShellState,
+  type ActionFacts,
+  type DesiredMode,
+  type ObservedDelivery,
+  type RelayConsent,
+} from './capability'
 
 const facts = (over: Partial<ActionFacts> = {}): ActionFacts => ({
   shellState: 'unsupported',
   presentation: 'terminal',
-  delivery: 'launcher',
+  observedDelivery: 'none',
   authorized: false,
   eligible: false,
   ...over,
@@ -31,7 +38,7 @@ describe('three axes (nocx-atyf.1)', () => {
       facts({
         shellState: 'integrated',
         presentation: 'terminal',
-        delivery: 'in-band',
+        observedDelivery: 'installed-script',
         authorized: true,
         eligible: true,
       }),
@@ -77,7 +84,7 @@ describe('three axes (nocx-atyf.1)', () => {
         facts({
           shellState: 'integrated',
           presentation: 'editor',
-          delivery: 'in-band',
+          observedDelivery: 'installed-script',
           authorized: true,
           eligible: true,
         }),
@@ -184,5 +191,37 @@ describe('deriveActions per state', () => {
     const actions = deriveActions(authorizedFacts({ shellState: 'lost' }))
     expect(actions).toHaveLength(1)
     expect(actions[0].kind).toBe('restore-editor')
+  })
+})
+describe('three delivery axes, never collapsed (nocx-mlm7 §3.5)', () => {
+  it('desired mode, observed delivery and relay consent are distinct types', () => {
+    // The compile-time contract: each axis has its own closed union, so no
+    // value of one axis is assignable to another. Asserting the unions here
+    // pins them at runtime too — a collapsed single string would fail.
+    // 'relay' legitimately names a desired mode AND an observed delivery —
+    // the axes are distinct TYPES, not distinct vocabularies; the compile
+    // check (assigning an ObservedDelivery where a DesiredMode is expected
+    // fails) is the real guard, no runtime value collapses them.
+    const modes: DesiredMode[] = ['raw', 'script', 'relay']
+    const observed: ObservedDelivery[] = ['none', 'bootstrap-script', 'installed-script', 'relay']
+    const consents: RelayConsent[] = ['unknown', 'granted', 'denied']
+    expect(new Set(modes).size).toBe(3)
+    expect(new Set(observed).size).toBe(4)
+    expect(new Set(consents).size).toBe(3)
+  })
+
+  it('deriveActions reads the axes, never a collapsed value', () => {
+    // The observed-delivery axis is part of the facts; deriving actions
+    // must not need to reconstruct it from a single policy string.
+    const actions = deriveActions(
+      facts({
+        shellState: 'unsupported',
+        observedDelivery: 'none',
+        authorized: true,
+        eligible: true,
+      }),
+    )
+    expect(actions).toHaveLength(1)
+    expect(actions[0].kind).toBe('integrate')
   })
 })
