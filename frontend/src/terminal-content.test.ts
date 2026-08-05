@@ -1609,6 +1609,9 @@ describe('nocxify: ssh command rewrite (nocx-pu4.6)', () => {
     try {
       content.setVisible(true)
       ed.show()
+      // An INTEGRATED local tab is the bead's precondition: a marker has
+      // arrived, so this shell speaks our protocol and its syntax is known.
+      rendererOf(content)._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
       ed.insertText('ssh testhost')
 
       view.contentDOM.dispatchEvent(
@@ -1644,6 +1647,47 @@ describe('nocxify: ssh command rewrite (nocx-pu4.6)', () => {
       expect(new TextEncoder().encode(pasted).byteLength).toBeLessThanOrEqual(4095)
       // And it names the launcher rather than carrying it.
       expect(pasted).not.toContain('BASH_ENV')
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
+
+  // The rewritten line is POSIX/bash/zsh syntax — `if …; then …; else …; fi`.
+  // Those are exactly the shells nocx ships integration scripts for, so an
+  // integrated tab is by construction one of them, and a tab with no markers
+  // may be anything: a fish or csh login shell would take `then` as a command
+  // and the ssh would never run at all. That is worse than not rewriting, so
+  // an unintegrated tab is not a tab we rewrite in. It is also the bead's own
+  // precondition — "in an integrated local tab".
+  it('does NOT rewrite in a tab that is not integrated', async () => {
+    const callMock = vi.fn()
+    callMock.mockResolvedValue({ launcherPath: LAUNCHER_PATH, reason: null })
+    const client = makeClient({ call: callMock })
+    const session = makeSession()
+    client.openSession.mockResolvedValue(session)
+
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restoreScroll = stubScroll()
+    try {
+      content.setVisible(true)
+      ed.show()
+      // No marker is ever fired: this shell does not speak our protocol and
+      // we do not know what its syntax is.
+      ed.insertText('ssh testhost')
+
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      for (let i = 0; i < 5; i++) await Promise.resolve()
+
+      expect(callMock).not.toHaveBeenCalledWith('shell.launcherCommand', expect.anything())
+      const renderer = rendererOf(content)
+      expect(renderer.paste).toHaveBeenCalledWith('ssh testhost')
     } finally {
       restoreScroll()
       teardown()
@@ -1783,6 +1827,9 @@ describe('nocxify: ssh command rewrite (nocx-pu4.6)', () => {
     try {
       content.setVisible(true)
       ed.show()
+      // An INTEGRATED local tab is the bead's precondition: a marker has
+      // arrived, so this shell speaks our protocol and its syntax is known.
+      rendererOf(content)._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
       ed.insertText('ssh testhost')
 
       const sendCallsBefore = session.send.mock.calls.length

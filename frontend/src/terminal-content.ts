@@ -592,7 +592,16 @@ export class TerminalContent extends BaseTabContent {
               // reference — the history entry and the block header show
               // the line the USER typed, while the wire carries the
               // expanded one (ADR-0004 §2).
-              if (this._policy !== 'off' && isInteractiveTransition(doc)) {
+              // `_shellIntegrated` is not a nicety here, it is what makes the
+              // rewrite safe to type. The line is `if …; then …; else …; fi` —
+              // POSIX/bash/zsh syntax, and those are precisely the shells nocx
+              // ships integration scripts for, so a tab that has emitted a
+              // marker is by construction one of them. A tab that has not may
+              // be a fish or csh login shell, which would read `then` as a
+              // command and never run the ssh at all. It also excludes a
+              // nested environment (the latch is cleared on entry): inside one
+              // we do not know whose shell is reading.
+              if (this._policy !== 'off' && this._shellIntegrated && isInteractiveTransition(doc)) {
                 const dest = extractDestination(doc)
                 const sid = this.session?.sessionId
                 if (dest && sid) {
