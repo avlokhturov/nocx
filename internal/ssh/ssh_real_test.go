@@ -46,6 +46,56 @@ type testSSHServer struct {
 	shellReadyDo sync.Once
 	// windowChanged carries one signal per processed window-change request.
 	windowChanged chan struct{}
+	// execCommands records every accepted "exec" request command
+	// (session.Start payloads). Buffered; tests drain after Connect returns.
+	execCommands chan string
+	// shellRequests counts answered "shell" requests (session.Shell calls).
+	shellRequests int
+	// execHandler, when set, answers every accepted exec request with its
+	// canned output, exit status and a channel close — the server side of a
+	// scripted remote probe (discovery tests). Nil keeps the default echo
+	// behavior. Read under s.mu; set via setExecHandler.
+	execHandler func(cmd string) (stdout, stderr string, exit int)
+	// maxSessions, when > 0, caps session channels per connection; further
+	// opens are rejected with ResourceShortage (OpenSSH's MaxSessions).
+	// Read under s.mu; set via setMaxSessions.
+	maxSessions int
+	// liveConns tracks established server-side SSH connections so a test can
+	// kill them to simulate transport loss. Guarded by liveMu (serveConn
+	// registers from the accept loop while a test may kill concurrently).
+	liveMu    sync.Mutex
+	liveConns map[*gossh.ServerConn]struct{}
+}
+
+// setExecHandler installs the scripted exec responder. Call before the
+// test's first connection.
+func (s *testSSHServer) setExecHandler(h func(cmd string) (stdout, stderr string, exit int)) {
+	s.mu.Lock()
+	s.execHandler = h
+	s.mu.Unlock()
+}
+
+// setMaxSessions caps session channels per connection (OpenSSH's
+// MaxSessions). Call before the test's first connection.
+func (s *testSSHServer) setMaxSessions(n int) {
+	s.mu.Lock()
+	s.maxSessions = n
+	s.mu.Unlock()
+}
+
+// killConns closes every established server-side connection, simulating
+// transport loss for the clients. Closing the server side makes the
+// client's transport fail, which is what a real network loss does.
+func (s *testSSHServer) killConns() {
+	s.liveMu.Lock()
+	conns := make([]*gossh.ServerConn, 0, len(s.liveConns))
+	for c := range s.liveConns {
+		conns = append(conns, c)
+	}
+	s.liveMu.Unlock()
+	for _, c := range conns {
+		_ = c.Close()
+	}
 }
 
 func startTestSSHServer(t *testing.T) *testSSHServer {
@@ -68,7 +118,6 @@ func startTestSSHServer(t *testing.T) *testSSHServer {
 	if err != nil {
 		t.Fatalf("test server listen: %v", err)
 	}
-
 	srv := &testSSHServer{
 		t:             t,
 		hostSigner:    hostKey,
@@ -77,6 +126,8 @@ func startTestSSHServer(t *testing.T) *testSSHServer {
 		addr:          listener.Addr().String(),
 		shellReady:    make(chan struct{}),
 		windowChanged: make(chan struct{}, 8),
+		execCommands:  make(chan string, 8),
+		liveConns:     make(map[*gossh.ServerConn]struct{}),
 	}
 
 	go srv.acceptLoop(config)
@@ -114,6 +165,8 @@ func startTestSSHServerWithUserKey(t *testing.T, userKey gossh.Signer) *testSSHS
 		addr:          listener.Addr().String(),
 		shellReady:    make(chan struct{}),
 		windowChanged: make(chan struct{}, 8),
+		execCommands:  make(chan string, 8),
+		liveConns:     make(map[*gossh.ServerConn]struct{}),
 	}
 
 	go srv.acceptLoop(config)
@@ -143,11 +196,29 @@ func (s *testSSHServer) serveConn(conn net.Conn, config *gossh.ServerConfig) {
 		_ = conn.Close()
 		return
 	}
+	s.liveMu.Lock()
+	s.liveConns[sshConn] = struct{}{}
+	s.liveMu.Unlock()
+	defer func() {
+		s.liveMu.Lock()
+		delete(s.liveConns, sshConn)
+		s.liveMu.Unlock()
+	}()
+
 	go gossh.DiscardRequests(reqs)
 
+	s.mu.Lock()
+	maxSessions := s.maxSessions
+	s.mu.Unlock()
+	sessions := 0
 	for newChan := range chans {
 		switch newChan.ChannelType() {
 		case "session":
+			if maxSessions > 0 && sessions >= maxSessions {
+				_ = newChan.Reject(gossh.ResourceShortage, "too many sessions")
+				continue
+			}
+			sessions++
 			ch, reqs, err := newChan.Accept()
 			if err != nil {
 				s.t.Logf("test server accept channel: %v", err)
@@ -165,7 +236,6 @@ func (s *testSSHServer) serveConn(conn net.Conn, config *gossh.ServerConfig) {
 			_ = newChan.Reject(gossh.UnknownChannelType, "unknown channel type")
 		}
 	}
-
 	_ = sshConn.Close()
 }
 
@@ -205,8 +275,34 @@ func (s *testSSHServer) handleSession(ch gossh.Channel, reqs <-chan *gossh.Reque
 				_ = req.Reply(true, nil)
 				s.mu.Lock()
 				s.shellCh = ch
+				s.shellRequests++
 				s.mu.Unlock()
 				s.shellReadyDo.Do(func() { close(s.shellReady) })
+
+			case "exec":
+				var m struct{ Command string }
+				if err := gossh.Unmarshal(req.Payload, &m); err != nil {
+					_ = req.Reply(false, nil)
+					continue
+				}
+				_ = req.Reply(true, nil)
+				s.mu.Lock()
+				s.shellCh = ch
+				s.execCommands <- m.Command
+				handler := s.execHandler
+				s.mu.Unlock()
+				s.shellReadyDo.Do(func() { close(s.shellReady) })
+				if handler != nil {
+					// Scripted exec: answer with the canned output, a real
+					// exit-status request, then close the channel the way
+					// sshd does — the client's Run returns only after all
+					// three.
+					stdout, stderr, exit := handler(m.Command)
+					_, _ = ch.Write([]byte(stdout))
+					_, _ = ch.Stderr().Write([]byte(stderr))
+					_, _ = ch.SendRequest("exit-status", false, gossh.Marshal(struct{ Status uint32 }{uint32(exit)})) //nolint:gosec // SSH exit statuses are 0-255
+					_ = ch.Close()
+				}
 
 			default:
 				_ = req.Reply(false, nil)

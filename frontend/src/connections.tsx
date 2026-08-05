@@ -12,11 +12,14 @@ import { Button } from './ui/button'
 import { TextField } from './ui/text-field'
 import { Checkbox } from './ui/checkbox'
 import { Select, type SelectOption } from './ui/select'
+import { EditableRowList } from './ui/row-list'
 import { Dialog, showConfirm } from './ui/dialog'
 import { Radio } from './ui/radio'
 import { Section } from './ui/section'
 import { Stack } from './ui/stack'
 import { Tabs } from './ui/tabs'
+import type { FootprintClient } from './footprint-client'
+import { FootprintSection } from './footprint-section'
 import { EmptyState } from './ui/empty-state'
 import { Field } from './ui/field'
 import { FileInput } from './ui/file-input'
@@ -56,6 +59,8 @@ import type {
   SSHConfigPathResult,
   ImportResult,
   TabbyPreviewResponse,
+  ForwardSpec,
+  ForwardDirection,
 } from './profiles'
 import { ProfileClient, buildGroupTree, parseQuickConnect } from './profiles'
 import { RpcError } from './dispatcher'
@@ -65,6 +70,7 @@ import { log } from './log'
 import { showToast } from './ui/toast'
 import { VaultOperationCancelledError, type VaultController } from './vault'
 import type { InventoryEntry, VaultClient } from './vault-client'
+import type { DesiredMode, RelayConsent } from './capability'
 
 // ── Provenance helpers ───────────────────────────────────────────────────────
 
@@ -184,7 +190,67 @@ export function decideSaveRoute(profile: SSHProfile, dirty: ReadonlySet<string>)
   for (const field of dirty) {
     patchSet[`options.${field}`] = profile.options[field as keyof typeof profile.options]
   }
+
   return { kind: 'patch', patchSet }
+}
+
+// ── Stored forwards helpers (spec §8, D5) ─────────────────────────────────
+
+/** The closed direction set a stored forward may carry (spec D4). */
+const FORWARD_DIRECTIONS: ForwardDirection[] = ['local', 'remote', 'dynamic']
+
+/** The closed portDiscovery modes, in display order (spec D3). */
+const PORT_DISCOVERY_MODES = ['auto', 'ask', 'off'] as const
+
+/** The closed desired modes, in display order (spec §3.5, nocx-mlm7), with
+ *  honest labels: raw adds nothing, script wraps and installs automatically
+ *  (N3), relay deploys the Tier-B binary and is consent-gated. */
+const DESIRED_MODES: { value: DesiredMode; label: string }[] = [
+  { value: 'raw', label: 'Raw — no integration' },
+  { value: 'script', label: 'Script — install automatically' },
+  { value: 'relay', label: 'Relay — requires consent' },
+]
+
+/** The closed relay-consent states (spec §3.5), in display order. Consent
+ *  is per destination and never inherited; script mode never reads it. */
+const RELAY_CONSENTS: { value: RelayConsent; label: string }[] = [
+  { value: 'unknown', label: 'Unknown — not asked' },
+  { value: 'granted', label: 'Granted' },
+  { value: 'denied', label: 'Denied' },
+]
+/**
+ * Whether a stored forward's destination is a usable "host:port". The
+ * backend's authority is net.SplitHostPort; this mirrors its acceptance
+ * (host, then a numeric port 1–65535) so the editor never lets a row save
+ * that the connect-time replay would reject.
+ */
+export function validForwardDestination(dest: string): boolean {
+  const idx = dest.lastIndexOf(':')
+  if (idx <= 0 || idx === dest.length - 1) return false
+  const p = Number(dest.slice(idx + 1))
+  return Number.isInteger(p) && p >= 1 && p <= 65535
+}
+
+/** The first invalid row in a forward list, or undefined when all rows are
+ *  usable. Mirrors the backend's ValidForwards so the editor and the replay
+ *  ask the same question. */
+export function firstForwardError(rows: ForwardSpec[]): string | undefined {
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i]
+    if (!FORWARD_DIRECTIONS.includes(r.direction)) {
+      return `Forward ${i + 1}: unknown direction`
+    }
+    if (r.direction === 'local' || r.direction === 'remote') {
+      if (!r.destination) return `Forward ${i + 1}: destination is required for ${r.direction}`
+      if (!validForwardDestination(r.destination)) {
+        return `Forward ${i + 1}: destination must be "host:port"`
+      }
+    }
+    if (r.bindPort != null && (r.bindPort < 0 || r.bindPort > 65535)) {
+      return `Forward ${i + 1}: bind port must be 0–65535`
+    }
+  }
+  return undefined
 }
 
 // ── Import sources ───────────────────────────────────────────────────────────
@@ -227,6 +293,13 @@ export interface ConnectionsViewProps {
    * hand.
    */
   dialogClient?: DialogClient
+  /**
+   * The remote-footprint surface (nocx-mlm7 P10): what nocx wrote on which
+   * host and the uninstall action. Absent in the dev-web harness and in
+   * tests; the section then renders nothing rather than offering an
+   * action that cannot run.
+   */
+  footprintClient?: FootprintClient
 }
 
 // ── Component ────────────────────────────────────────────────────────────────
@@ -812,6 +885,8 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     { key: 'keepaliveCountMax', label: 'Keepalive count max' },
     { key: 'readyTimeout', label: 'Ready timeout (ms)' },
     { key: 'agentForward', label: 'Agent forward' },
+    { key: 'portDiscovery', label: 'Port discovery' },
+    { key: 'desiredMode', label: 'Delivery mode' },
   ]
 
   /** Human-readable field labels for the impact summary. */
@@ -825,6 +900,8 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       keepaliveCountMax: 'keepalive count max',
       readyTimeout: 'ready timeout',
       agentForward: 'agent forwarding',
+      portDiscovery: 'port discovery',
+      desiredMode: 'delivery mode',
     }
     return m[key] ?? key
   }
@@ -938,6 +1015,34 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             checked={gv(key) === true}
             onChange={(v) => setG(key, v ? 'true' : '')}
           />
+        )
+      }
+      if (key === 'portDiscovery') {
+        return (
+          <Field for={`group-default-${key}`} label={label}>
+            <div class="cm-field-row">
+              <Select
+                value={(gv(key) as string) ?? ''}
+                onChange={(v) => setG(key, v || '')}
+                options={PORT_DISCOVERY_MODES.map((m) => ({ value: m, label: m }))}
+                placeholder="&mdash; Not set (inherit) &mdash;"
+              />
+            </div>
+          </Field>
+        )
+      }
+      if (key === 'desiredMode') {
+        return (
+          <Field for={`group-default-${key}`} label={label}>
+            <div class="cm-field-row">
+              <Select
+                value={(gv(key) as string) ?? ''}
+                onChange={(v) => setG(key, v || '')}
+                options={DESIRED_MODES.map((m) => ({ value: m.value, label: m.label }))}
+                placeholder="&mdash; Not set (inherit) &mdash;"
+              />
+            </div>
+          </Field>
         )
       }
       return (
@@ -1406,6 +1511,14 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       ),
     readyTimeout: () =>
       nonNegativeInteger('Ready timeout')(String(formProfile()?.options.readyTimeout ?? '')),
+    // The stored forwards must be a list the connect-time replay accepts —
+    // the editor and the backend ask the same question (firstForwardError
+    // mirrors ValidForwards). An invalid row blocks save, never ships.
+    forwards: () => {
+      const rows = formProfile()?.options.forwards
+      if (!rows || rows.length === 0) return undefined
+      return firstForwardError(rows)
+    },
   })
 
   function gate(validation: {
@@ -1823,6 +1936,73 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       })
     }
 
+    // ── Stored forwards (spec §8, D5) ──────────────────────────────────
+    // The list is a single options field: every row edit rewrites it and
+    // marks the field dirty, so the save route carries the whole list and
+    // the backend patch replaces it wholesale.
+    const forwards = (): ForwardSpec[] =>
+      (fieldValue('forwards') as ForwardSpec[] | undefined) ?? []
+
+    function updateForward(index: number, patch: Partial<ForwardSpec>) {
+      const rows = forwards().map((r, i) => (i === index ? { ...r, ...patch } : r))
+      setOption('forwards', rows)
+    }
+
+    function removeForward(index: number) {
+      setOption(
+        'forwards',
+        forwards().filter((_, i) => i !== index),
+      )
+    }
+
+    function addForward() {
+      setOption('forwards', [
+        ...forwards(),
+        { direction: 'local', bindHost: '', bindPort: 0, destination: '' },
+      ])
+    }
+
+    function renderForwardRow(row: ForwardSpec, index: number): JSX.Element {
+      return (
+        <div class="cm-forward-row">
+          <Field for={`forward-${index}-direction`} label="Direction">
+            <Select
+              value={row.direction}
+              onChange={(v) => updateForward(index, { direction: v as ForwardDirection })}
+              options={FORWARD_DIRECTIONS.map((d) => ({ value: d, label: d }))}
+            />
+          </Field>
+          <TextField
+            id={`forward-${index}-bindhost`}
+            label="Bind host"
+            value={row.bindHost ?? ''}
+            placeholder="127.0.0.1"
+            onInput={(v) => updateForward(index, { bindHost: v || undefined })}
+          />
+          <TextField
+            id={`forward-${index}-bindport`}
+            label="Bind port"
+            type="number"
+            min={0}
+            value={row.bindPort != null ? String(row.bindPort) : '0'}
+            onInput={(v) => {
+              const n = parseInt(v, 10)
+              updateForward(index, { bindPort: isNaN(n) ? 0 : n })
+            }}
+          />
+          <Show when={row.direction !== 'dynamic'}>
+            <TextField
+              id={`forward-${index}-destination`}
+              label="Destination"
+              value={row.destination ?? ''}
+              placeholder="host:port"
+              onInput={(v) => updateForward(index, { destination: v })}
+            />
+          </Show>
+        </div>
+      )
+    }
+
     function onNameChange(v: string) {
       const updated = { ...profile(), name: v }
       setEditing(updated)
@@ -2146,6 +2326,42 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                       />
                     </div>
                   </Field>
+                  <Field for="port-discovery" label="Port discovery">
+                    <div class="cm-field-row">
+                      <Select
+                        value={fvStr('portDiscovery')}
+                        onChange={(v) => setOption('portDiscovery', v || undefined)}
+                        options={PORT_DISCOVERY_MODES.map((m) => ({ value: m, label: m }))}
+                        placeholder="&mdash; Inherited &mdash;"
+                      />
+                    </div>
+                  </Field>
+                  <Field for="desired-mode" label="Delivery mode">
+                    <div class="cm-field-row">
+                      <Select
+                        value={fvStr('desiredMode')}
+                        onChange={(v) => setOption('desiredMode', v || undefined)}
+                        options={DESIRED_MODES.map((m) => ({ value: m.value, label: m.label }))}
+                        placeholder="&mdash; Inherited &mdash;"
+                      />
+                    </div>
+                  </Field>
+                  <Show when={fvStr('desiredMode') === 'relay'}>
+                    <Field for="relay-consent" label="Relay consent">
+                      <div class="cm-field-row">
+                        <Select
+                          value={fvStr('relayConsent') || 'unknown'}
+                          onChange={(v) => setOption('relayConsent', v || undefined)}
+                          options={RELAY_CONSENTS.map((m) => ({ value: m.value, label: m.label }))}
+                          placeholder="&mdash; Unknown &mdash;"
+                        />
+                      </div>
+                      <p class="cm-hint">
+                        The relay deploys a binary on the destination; that needs explicit consent
+                        per host, and a relay selection without granted consent behaves as raw.
+                      </p>
+                    </Field>
+                  </Show>
                   <div class="cm-check-group">
                     <Checkbox
                       label="Agent forward"
@@ -2158,6 +2374,34 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                       onChange={(v) => setOption('canBeJumpServer', v)}
                     />
                   </div>
+                </Stack>
+              ),
+            },
+            {
+              id: 'forwards',
+              label: 'Forwards',
+              content: () => (
+                <Stack>
+                  <p class="cm-hint">
+                    Forwards opened automatically when this connection comes up. A forward that
+                    fails — a busy local port, a refused acquire — fails its row only; the session
+                    and every other forward still establish.
+                  </p>
+                  <EditableRowList
+                    rows={forwards()}
+                    ariaLabel="Stored forwards"
+                    addLabel="Add forward"
+                    emptyLabel="No forwards — add one to open it automatically on connect."
+                    removeLabel={(i) => `Remove forward ${i + 1}`}
+                    onRemove={removeForward}
+                    onAdd={addForward}
+                    renderRow={(row, i) => renderForwardRow(row, i)}
+                  />
+                  <Show when={profileValidation.error('forwards')}>
+                    <p class="cm-forwards-error" role="alert">
+                      {profileValidation.error('forwards')}
+                    </p>
+                  </Show>
                 </Stack>
               ),
             },
@@ -2242,6 +2486,11 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           />
         </Show>
       </CollectionView>
+
+      {/* The remote footprint (nocx-mlm7 P10): hosts nocx has installed
+          shell integration on, and the uninstall action for the ones a
+          saved connection reaches. Placed here, never repainted. */}
+      <FootprintSection client={props.footprintClient} />
 
       {/* Editor Dialog */}
       <Show when={editing()}>

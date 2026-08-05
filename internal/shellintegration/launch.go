@@ -1,0 +1,125 @@
+package shellintegration
+
+import "strings"
+
+// The compact carrier ~/.nocx/launch (design §3.3): a stable POSIX sh
+// script, mode 0700, installed once and never rewritten by a generation
+// publish. It reads ONLY manifest.json — the activation pointer — and
+// re-proves the activation (every generation file exists with the recorded
+// hash) before exec'ing the integrated shell. Any refusal — a missing,
+// truncated, hash-mismatched or protocol-incompatible manifest — execs a
+// native login shell and emits no passport: the session is ordinary, and the
+// next connection bootstraps again (§3.2). An `ssh` that fails with 127 is a
+// bug in this design, never a user-visible outcome.
+//
+// The arguments are the environment id minted for this attempt and the
+// session id (AD-7); they are exported as NOCX_ENVIRONMENT_ID and
+// NOCX_SESSION_ID and validated by the shell scripts themselves — an
+// absent or malformed id means no passport and no tagged marker
+// (fail-open). The second argument is the nocx-mlm7 P7 amendment of the
+// 2026-08-05 delivery-modes design: the compact path carries the session
+// id exactly like the argv launchers do, so the ownership handshake is
+// not degraded on installed hosts.
+//
+// Unlike the argv launchers this is a FILE, so it is authored multi-line with
+// comments; only the three tier payloads (@BASH_ARG@ etc.) must stay free of
+// single quotes, because they are embedded single-quoted here and travel
+// through printf %b decoding inside the tier transports.
+
+const launchCarrierTemplate = `#!/bin/sh
+# nocx launch carrier — the compact activation entry point (design §3.3).
+# Reads manifest.json only; refuses an incomplete or protocol-incompatible
+# generation and in that case execs a native login shell with no passport.
+__nocx_root="${HOME}/.nocx"
+__nocx_manifest="$__nocx_root/manifest.json"
+__nocx_protocol_version="1"
+
+__nocx_native() { exec "${SHELL:-/bin/sh}" -l; }
+
+# --- the manifest must exist and parse as ours -------------------------------
+[ -f "$__nocx_manifest" ] || __nocx_native
+# Both writers' manifests are parsed: the Go publisher writes pretty-printed
+# JSON, the sh publish writes compact. Every manifest string value is a safe
+# name, a hex hash, an octal mode or an integer — none may contain whitespace
+# — so stripping all whitespace normalises either format to the same compact
+# text the extractions below match.
+__nocx_m=$(tr -d '[:space:]' < "$__nocx_manifest" 2>/dev/null)
+[ -n "$__nocx_m" ] || __nocx_native
+__nocx_protocol=$(printf '%s' "$__nocx_m" | grep -o '"protocol":[0-9][0-9]*' | head -n 1 | cut -d: -f2)
+[ "$__nocx_protocol" = "$__nocx_protocol_version" ] || __nocx_native
+__nocx_generation=$(printf '%s' "$__nocx_m" | grep -o '"generation":"[^"]*"' | head -n 1 | cut -d\" -f4)
+case "$__nocx_generation" in [A-Za-z0-9][A-Za-z0-9._-]*) ;; *) __nocx_native ;; esac
+[ "${#__nocx_generation}" -le 64 ] || __nocx_native
+
+# --- per-file proof: every manifest entry exists with the recorded hash ------
+__nocx_sha() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" 2>/dev/null | cut -d" " -f1
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" 2>/dev/null | cut -d" " -f1
+    fi
+}
+for __nocx_f in nocx.bash nocx.zsh nocx.posix; do
+    __nocx_expected=$(printf '%s' "$__nocx_m" | grep -o "\"$__nocx_f\":{\"hash\":\"[^\"]*\"" | head -n 1 | cut -d\" -f6)
+    [ -n "$__nocx_expected" ] || __nocx_native
+    __nocx_file="$__nocx_root/integration/$__nocx_generation/$__nocx_f"
+    [ -f "$__nocx_file" ] && [ ! -L "$__nocx_file" ] || __nocx_native
+    __nocx_actual=$(__nocx_sha "$__nocx_file")
+    [ -n "$__nocx_actual" ] || __nocx_native
+    [ "$__nocx_expected" = "sha256:$__nocx_actual" ] || __nocx_native
+done
+export NOCX_ENVIRONMENT_ID="${1-}"
+export NOCX_SESSION_ID="${2-}"
+export NOCX_GENERATION="$__nocx_generation"
+export NOCX_SHELL_INTEGRATION=1
+export NOCX_PROMPT_MODE=marker-only
+case "${SHELL:-/bin/sh}" in
+    */bash) exec /usr/bin/env -u BASH_ENV bash -c '@BASH_ARG@' ;;
+    */zsh)  exec /usr/bin/env -u BASH_ENV /bin/sh -c '@ZSH_ARG@' ;;
+    *)      exec /usr/bin/env -u BASH_ENV /bin/sh -c '@POSIX_ARG@' ;;
+esac
+`
+
+// launchSourceLine returns the line that sources one generation file: the
+// carrier knows the committed generation at runtime (NOCX_GENERATION, exported
+// above) and the rcfile templates place the source after the user's startup
+// files, so the user's rc still runs first and still wins. The POSIX dot is
+// deliberate: the minimal tier's ENV file is parsed by dash / busybox ash /
+// ksh, none of which know bash's `source`; `.` is understood by all of them
+// and by bash and zsh.
+func launchSourceLine(name string) string {
+	return `. "${HOME}/.nocx/integration/${NOCX_GENERATION}/` + name + `"`
+}
+
+// launchCarrier renders the compact carrier: the template with the three tier
+// payloads substituted. The payloads are the same pinned transports the argv
+// launchers use, but the rcfile bodies source the INSTALLED generation files
+// instead of embedding the scripts — a stable carrier over a changing bundle.
+func launchCarrier() string {
+	s := strings.ReplaceAll(launchCarrierTemplate, "@BASH_ARG@",
+		bashArgFor(bashRcfile("", launchSourceLine("nocx.bash"))))
+	s = strings.ReplaceAll(s, "@ZSH_ARG@",
+		zshArgFor(zshRcfile("", launchSourceLine("nocx.zsh"))))
+	s = strings.ReplaceAll(s, "@POSIX_ARG@",
+		posixArgFor(posixEnvFile("", launchSourceLine("nocx.posix"))))
+	return s
+}
+
+// launchBundle assembles the bundle descriptor both carriers publish (AD-8):
+// the three generation scripts (data, 0600) and the launch carrier (0700).
+// The version is the embedded scripts' own (scripts.go), so the manifest and
+// the passport generation field stay in lockstep with what the shells source.
+// validateBundle's constraints are the contract; a change here must satisfy
+// them and the bidirectional conformance tests.
+func launchBundle() Bundle {
+	return Bundle{
+		Protocol: ProtocolVersion,
+		Version:  version,
+		Files: []BundleFile{
+			{Name: "nocx.bash", Mode: 0o600, Data: []byte(bashScript)},
+			{Name: "nocx.zsh", Mode: 0o600, Data: []byte(zshScript)},
+			{Name: "nocx.posix", Mode: 0o600, Data: []byte(posixScript)},
+			{Name: launchName, Mode: 0o700, Data: []byte(launchCarrier())},
+		},
+	}
+}

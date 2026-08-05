@@ -1,31 +1,41 @@
-// The three shipped providers (design §8.4, §8.5) — command names from the
-// OSC 636 snapshot, history over the control plane, and local filesystem
-// paths. Applicability is part of the contract: a provider declares where it
-// applies and is not consulted outside it. In particular the local path
-// provider is inactive on a remote session (a local path must never
-// masquerade as a remote one) and in command position for a bare word (a
-// bare first word is a command name, not a path) — but in argument position
-// it answers ANY token, including the empty token, which lists the session
-// cwd (`cd ` + Tab is the case the dropdown exists for).
+// The shipped providers (design §8.4, §8.5) — command names from the
+// OSC 636 snapshot, history over the control plane, local filesystem
+// paths, and SSH hosts routed from the quick-connect assembly (host
+// candidates are built in host-provider.ts from the shared non-UI module
+// quick-connect-assembly.ts — see createShellProviders). Applicability is
+// part of the
+// contract: a provider declares where it applies and is not consulted
+// outside it. In particular the local path provider is inactive on a
+// remote session (a local path must never masquerade as a remote one) and
+// in command position for a bare word (a bare first word is a command
+// name, not a path) — but in argument position it answers ANY token,
+// including the empty token, which lists the session cwd (`cd ` + Tab is
+// the case the dropdown exists for).
 import type { CommandSnapshotStore } from '../command-snapshot'
 import type { HistoryQuery } from '../generated/history.query'
 import type { FsComplete } from '../generated/fs.complete'
+import type { ShellComplete } from '../generated/shell.complete'
 import type { Candidate } from './candidate'
 import type { CompletionToken, TokenPosition } from './token'
 import { looksLikePath } from './token'
+import { hostProvider } from './host-provider'
+import type { ProfileClient } from '../profiles'
 
 /** Per-provider cap on the candidates returned to the merge. */
 export const MAX_PROVIDER_CANDIDATES = 20
 
 /**
- * How many history rows argument position may return on a LOCAL session.
- * A history row replaces the whole line; a path candidate replaces one
- * token, and the token being typed is the more specific intent — so once
- * paths answer (which they always do there: see fsProvider's applicability),
- * history must never crowd them out. The owner once counted four directories
- * in his home and got none, because twenty whole-line history rows buried
- * them. Command position and remote sessions (where no path provider is in
- * play) keep the provider-wide cap.
+ * How many history rows argument position may return while the path
+ * provider is in play. A history row replaces the whole line; a path
+ * candidate replaces one token, and the token being typed is the more
+ * specific intent — so wherever paths answer, history must never crowd
+ * them out. The owner once counted four directories in his home and got
+ * none, because twenty whole-line history rows buried them. Paths answer
+ * only on a local session and only under a command that takes filesystem
+ * arguments (the NO_FS_CANDIDATES gate fsProvider applies) — under `ssh`,
+ * whose argument is a host, the path provider is silent, and history is
+ * the only useful thing on offer, so it keeps the provider-wide cap.
+ * Command position and remote sessions keep the provider-wide cap too.
  */
 export const MAX_HISTORY_IN_ARGUMENT_POSITION = 5
 
@@ -46,6 +56,11 @@ export type EmptyReason =
   /** The OSC 636 command snapshot has not arrived yet — command names
    *  cannot be offered, and pretending the shell has none would be a lie. */
   | { kind: 'snapshot-pending' }
+  /** The quick-connect alias resolver (`ssh -G`) could not answer — the
+   *  degraded condition the picker would surface is routed through, never
+   *  rebuilt: hosts cannot be offered, and naming WHY beats the generic
+   *  "no matches" (an empty list would read as "you have no hosts"). */
+  | { kind: 'hosts-unavailable'; reason: string; detail: string }
 
 /** What one provider answers to one query: candidates plus — when it
  *  answered nothing — the specific reason, so "no matches" is never
@@ -172,14 +187,16 @@ export function historyProvider(opts: {
     async suggest(ctx, signal) {
       const line = ctx.doc
       if (line === '') return { candidates: [] }
-      // In argument position on a local session the path provider always
-      // answers (see fsProvider), so history is a sidebar there — capped so
-      // a flood of whole-line rows can never bury the paths. Command
-      // position and remote sessions keep the provider-wide cap: nothing
-      // else answers there, so capping history would be losing rows, not
+      // In argument position where the path provider answers — a local
+      // session under a command that takes filesystem arguments, the same
+      // NO_FS_CANDIDATES gate fsProvider applies — history is a sidebar,
+      // capped so a flood of whole-line rows can never bury the paths.
+      // Where paths do not answer (command position, remote sessions, and
+      // a local `ssh`, whose argument is a host, not a path) history keeps
+      // the provider-wide cap: capping it there would be losing rows, not
       // making room.
       const cap =
-        ctx.position === 'argument' && ctx.isLocal
+        ctx.position === 'argument' && ctx.isLocal && !NO_FS_CANDIDATES[commandWord(ctx)]
           ? MAX_HISTORY_IN_ARGUMENT_POSITION
           : MAX_PROVIDER_CANDIDATES
       const result = await opts.query(ctx.cwd, ctx.host)
@@ -257,10 +274,22 @@ export function historyProvider(opts: {
  */
 const DIRECTORIES_ONLY: Record<string, true> = { cd: true, pushd: true, rmdir: true }
 
+/**
+ * Commands that take NO filesystem candidates at all — the argument is a
+ * destination in another namespace, and offering the local tree would be a
+ * category error. `ssh`'s argument is a host (the host provider owns it);
+ * offering Downloads/ above the host row is the bug this table kills. Grows
+ * by addition, like DIRECTORIES_ONLY — the default for an unknown command
+ * stays "both kinds".
+ */
+const NO_FS_CANDIDATES: Record<string, true> = { ssh: true }
+
 /** The command word the token completes under ('' in command position — a
  *  path invocation like `./run.sh` is not a command the table knows, so the
- *  default "both" applies). */
-function commandWord(ctx: SuggestContext): string {
+ *  default "both" applies). Also gates the host provider: hosts are offered
+ *  only under the `ssh` command, and this is the same derivation the path
+ *  provider uses for its dirs-only table. */
+export function commandWord(ctx: SuggestContext): string {
   if (ctx.position === 'command') return ''
   return ctx.doc.slice(0, ctx.token.from).trim().split(/\s+/)[0] ?? ''
 }
@@ -283,7 +312,7 @@ export function fsProvider(opts: {
     targetId: 'shell',
     applicable: (ctx) => {
       if (!ctx.isLocal) return false
-      if (ctx.position === 'argument') return true
+      if (ctx.position === 'argument') return !NO_FS_CANDIDATES[commandWord(ctx)]
       // Command position: only a path invocation (`./run.sh`) — never a
       // bare word.
       return looksLikePath(ctx.token.text)
@@ -358,14 +387,145 @@ export function fsProvider(opts: {
   }
 }
 
-/** The shell target's provider set, wired at the composition root. */
+// ── shell: the remote completion adapter (nocx-w7h.15) ────────────────────
+//
+// The adapter asks the remote shell's own completion machinery — compgen for
+// paths and commands, bash completion functions for command-specific answers
+// like `git checkout`. This is what makes the mechanism worth building:
+// paths alone could have been faked. The candidate's source names the
+// adapter so the UI can distinguish an adapter answer from a local guess.
+//
+// Applicable only on a remote session — on a local session the fs provider
+// answers identically from the backend's own filesystem. The adapter REPLACES
+// the DIRECTORIES_ONLY table: the shell's compgen -d / compgen -f already
+// answer the right kind, so the table is not consulted and must not be
+// re-added.
+export function shellCompleteProvider(opts: {
+  complete: (params: {
+    sessionId: string
+    cwd: string
+    line: string
+    pos: number
+  }) => Promise<ShellComplete>
+  /** The session ID of the tab this provider answers for. */
+  sessionId: () => string
+}): SuggestionProvider {
+  return {
+    id: 'shell',
+    targetId: 'shell',
+    applicable: (ctx) => {
+      // The adapter is active on remote sessions only — on a local
+      // session the fs provider answers identically.
+      if (ctx.isLocal) return false
+      // Also active in command position for a bare word: the shell's
+      // compgen -c answers command names on the remote host.
+      if (ctx.position === 'command') return true
+      // In argument position: always active — the shell answers paths
+      // and command-specific completions.
+      return true
+    },
+    async suggest(ctx, signal) {
+      const sid = opts.sessionId()
+      if (!sid) return { candidates: [] }
+
+      const pos = ctx.token.to // caret position
+
+      const result = await opts.complete({
+        sessionId: sid,
+        cwd: ctx.cwd,
+        line: ctx.doc,
+        pos,
+      })
+      if (signal.aborted) return { candidates: [] }
+
+      if (result.entries.length === 0) {
+        // The adapter named a specific reason — surface it rather than
+        // the generic "no matches".
+        if (result.reason) {
+          // Map specific adapter reasons to the EmptyReason vocabulary.
+          if (result.reason === 'cancelled') return { candidates: [] }
+          // Surface the adapter's reason as the honest empty message.
+          return {
+            candidates: [],
+            emptyReason: {
+              kind: 'hosts-unavailable',
+              reason: 'shell completion',
+              detail: result.reason,
+            },
+          }
+        }
+        return { candidates: [] }
+      }
+
+      // The part of the token the user has already typed up to the last
+      // slash — same display logic as fsProvider.
+      const t = ctx.token.text
+      const lastSlash = t.lastIndexOf('/')
+      const tokenPrefix = t.slice(0, lastSlash + 1)
+
+      return {
+        candidates: result.entries.slice(0, MAX_PROVIDER_CANDIDATES).map((e): Candidate => {
+          const display = e.isDir ? e.name + '/' : e.name
+          const segPrefix = t.slice(lastSlash + 1)
+          const matchTo = Math.min(segPrefix.length, e.name.length)
+          return {
+            id: `${e.source}:${e.path ?? e.name}`,
+            targetId: 'shell',
+            providerId: 'shell',
+            displayText: display,
+            insertText: e.source === 'path' ? tokenPrefix + display : display,
+            replacement: { from: ctx.token.from, to: ctx.token.to },
+            matchRanges: matchTo > 0 ? [{ from: 0, to: matchTo }] : [],
+            source: e.source === 'command' ? 'command' : 'path',
+            kind: e.isDir ? 'directory' : undefined,
+            environment: { cwd: ctx.cwd, host: ctx.host, confidence: 'asserted' },
+            eligibleForGhostText: true,
+          }
+        }),
+      }
+    },
+  }
+}
+
+/**
+ * The shell target's provider set, wired at the composition root. The host
+ * provider is built HERE: it needs a ProfileClient, and the assembly it
+ * routes (quick-connect-assembly.ts) is plain non-UI code, so providers.ts
+ * can import it — the DOM-bound quick-connect module never enters this
+ * chain. Registered ABOVE history: in `ssh` argument position hosts must
+ * outrank whole-line history rows (the rank rung enforces it; registration
+ * order only breaks the exact ties).
+ */
 export function createShellProviders(opts: {
   store: CommandSnapshotStore
   queryHistory: (cwd: string, host: string) => Promise<HistoryQuery>
   completeFs: (text: string, cwd: string) => Promise<FsComplete>
+  /** The shell.complete seam — the remote completion adapter (nocx-w7h.15).
+   *  Absent when no adapter is wired (tests, raw contexts). */
+  completeShell?: (params: {
+    sessionId: string
+    cwd: string
+    line: string
+    pos: number
+  }) => Promise<ShellComplete>
+  /** The session ID of the tab — only needed when completeShell is present. */
+  sessionId?: () => string
+  /** Present when a ProfileClient is wired (the app); absent in tests and
+   *  raw-mode contexts where no connection manager exists — a provider that
+   *  can never answer is not registered. */
+  profileClient?: ProfileClient
 }): SuggestionProvider[] {
   return [
     commandProvider(opts.store),
+    ...(opts.profileClient ? [hostProvider({ profileClient: opts.profileClient })] : []),
+    // The adapter (nocx-w7h.15) answers remote paths and command-specific
+    // completions — registered ABOVE fsProvider so it outranks the local
+    // path provider on remote sessions (its applicability gate ensures it
+    // is only consulted there). The stale-path check in historyProvider
+    // is skipped on remote sessions (ctx.isLocal gate), so no double-call.
+    ...(opts.completeShell && opts.sessionId
+      ? [shellCompleteProvider({ complete: opts.completeShell, sessionId: opts.sessionId })]
+      : []),
     // The fs.complete seam travels to history too: the stale-path demotion
     // (a history row whose trailing token no longer exists ranks last)
     // uses the same backend call the path provider makes.

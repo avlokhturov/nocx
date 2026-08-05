@@ -59,12 +59,13 @@ export function stripPastedIndent(text: string, atLineStart: boolean): string {
  *  both or neither. */
 const MAX_ROWS = 30
 
-export interface AliasSuggestion {
-  alias: string
-  hostName: string
-  user?: string
-  port?: number
-}
+/**
+ * What the location chip shows when the prompt's trust is lost (markers
+ * stopped): the last known host must not keep rendering as current beside
+ * an irreversible action (design §8.2). "unknown" alone could read as a
+ * host literally named unknown; "context unknown" cannot.
+ */
+export const LOCATION_UNKNOWN_LABEL = 'context unknown'
 
 export interface EditorActions {
   submit: (doc: string, plan?: SubmitPlan) => void
@@ -74,8 +75,8 @@ export interface EditorActions {
   // the next command.
   cancel: () => void
   /** Fired on every user-driven document change with the current value.
-   *  Use to drive external hint/filter logic without coupling the hint
-   *  data source to the editor. */
+   *  Use to drive external filter logic without coupling the data source
+   *  to the editor. */
   onInputChange?: (text: string) => void
   /**
    * Fired when the editor's own height changes, because that changes how much
@@ -83,10 +84,6 @@ export interface EditorActions {
    * or a future host — has nobody to tell.
    */
   resized?: () => void
-  /** Fired when the user accepts a hint suggestion (Enter/click on hint item).
-   *  Receives the suggested alias value. The editor replaces the partial `ssh ` line
-   *  with `ssh <alias>` before calling this hook. */
-  onAcceptHint?: (alias: string) => void
   /** Fired when the user presses Up with the caret already on the first line
    *  (or an empty draft): there is no further upward movement, so the caller
    *  may open recall instead of moving the caret (design §8.10 v6 — Up is
@@ -134,16 +131,25 @@ export class CommandEditor {
   readonly root: HTMLElement
   private view: EditorView
   private chrome: HTMLElement
+  /** Left chip group: the location + cwd chips sit together, the clock
+   *  keeps the right edge of the chrome row. */
+  private chromeLeft: HTMLElement
+  private locationChip: HTMLElement
   private cwdChip: HTMLElement
   private timeChip: HTMLElement
-  /** Hint dropdown — lives between the chrome and the editor surface. */
-  private hintContainer: HTMLElement
-  /** Current hint items (empty when hidden). */
-  private _hintItems: AliasSuggestion[] = []
-  /** Whether the user explicitly dismissed the hint this editor session. */
-  private _hintDismissed = false
-  /** Index of the currently highlighted item in _hintItems. */
-  private _hintSelectedIndex = 0
+  /** Recovery action chip — hidden in the healthy state, shows one action
+   *  label in an exception state. The chip IS the action: one click, no
+   *  popover (nocx-atyf.2). */
+  private recoveryChip: HTMLButtonElement
+  private _recoveryOnClick: (() => void) | null = null
+  /** Where the pending command would land: the SAME string the block header
+   *  shows (routed from locationLine, never derived a second way). Empty
+   *  for a local session, where the absence of a chip is the information. */
+  private _location = ''
+  /** Trust from the input-state machine (ADR-0006). False when markers
+   *  stopped or never started cleanly: the last known host must not keep
+   *  rendering as current (design §8.2). */
+  private _trusted = false
   /** The row count (capped at MAX_ROWS) the host was last told about. */
   private _lastRowCount = 1
   /** True while a programmatic document edit is in flight: such edits set the
@@ -207,8 +213,7 @@ export class CommandEditor {
    *
    * - onInputChange mirrors the old textarea `input` event, but only for
    *   user-driven changes: programmatic edits are flagged and must not fire it
-   *   (a paste or alias accept never fired `input` on the textarea, and firing
-   *   it would re-trigger the async alias fetch after the hints were accepted).
+   *   (a paste never fired `input` on the textarea).
    * - resized is the _grow() port: the host is told when the capped row count
    *   (1..MAX_ROWS) changes. The box's real height is CSS (max-height:
    *   ten lines, overflow-y: auto), so the row count is the trigger, exactly
@@ -250,20 +255,34 @@ export class CommandEditor {
     this.chrome = document.createElement('div')
     this.chrome.className = 'nocx-editor-chrome'
 
+    // Left group: location + cwd together, the clock keeps the right edge.
+    // Placement only — the chips carry their own appearance (ui/README).
+    this.chromeLeft = document.createElement('div')
+    this.chromeLeft.className = 'nocx-editor-chrome-left'
+
+    // Where the pending command would land: the same chip the block header
+    // shows (`nocx-chip nocx-chip-muted`), fed the same string. Hidden until
+    // setLocation receives a value — a local session grows NO chip.
+    this.locationChip = document.createElement('span')
+    this.locationChip.className = 'nocx-chip nocx-chip-muted nocx-editor-location'
+    this.locationChip.style.display = 'none'
+
     this.cwdChip = document.createElement('span')
     this.cwdChip.className = 'nocx-chip nocx-editor-cwd'
     this.cwdChip.textContent = '📁 ~'
 
     this.timeChip = document.createElement('span')
     this.timeChip.className = 'nocx-chip nocx-editor-time'
-    this.chrome.append(this.cwdChip, this.timeChip)
-    this.root.appendChild(this.chrome)
 
-    // ── Hint dropdown popup ─────────────────────────────────────────────
-    this.hintContainer = document.createElement('div')
-    this.hintContainer.className = 'nocx-editor-hint'
-    this.hintContainer.style.display = 'none'
-    this.root.appendChild(this.hintContainer)
+    this.recoveryChip = document.createElement('button')
+    this.recoveryChip.type = 'button'
+    this.recoveryChip.className = 'nocx-chip nocx-editor-recovery'
+    this.recoveryChip.style.display = 'none'
+    this.recoveryChip.addEventListener('click', () => this._recoveryOnClick?.())
+
+    this.chromeLeft.append(this.recoveryChip, this.locationChip, this.cwdChip)
+    this.chrome.append(this.chromeLeft, this.timeChip)
+    this.root.appendChild(this.chrome)
 
     // ── CodeMirror 6 surface (ADR-0010) ────────────────────────────────
     // The extension list is a constructor parameter: the editor must not
@@ -360,12 +379,65 @@ export class CommandEditor {
     container.appendChild(this.root)
   }
 
+  /** Set or clear the recovery action chip. `label` is the action text
+   *  the user reads ("Enable command editor", "Retry integration",
+   *  "Restore command editor"). Pass null to hide — the healthy state
+   *  shows nothing (nocx-atyf.2). */
+  setRecoveryAction(label: string | null, onClick: () => void): void {
+    this._recoveryOnClick = label === null ? null : onClick
+    if (label === null) {
+      this.recoveryChip.style.display = 'none'
+      this.recoveryChip.textContent = ''
+      return
+    }
+    this.recoveryChip.style.display = ''
+    this.recoveryChip.textContent = label
+  }
+
   /** Update the cwd chip text. Uses the same short directoryLabel shape. */
   setCwd(cwd: string): void {
     const path = cwd.trim().replace(/\/+$/, '') || '~'
     const parts = path.split('/').filter(Boolean)
     const label = path === '~' || parts.length === 0 ? path : parts.slice(-2).join('/')
     this.cwdChip.textContent = `📁 ${label}`
+  }
+
+  /**
+   * Where the pending command would land — the same string the block header
+   * shows, routed from the one locationLine derivation rather than computed
+   * a second way (two derivations of "which host" are how they start
+   * disagreeing). Empty for a local session: no chip, and the absence is
+   * the information.
+   */
+  setLocation(location: string): void {
+    this._location = location
+    this.renderLocation()
+  }
+
+  /**
+   * Trust from the input-state machine (ADR-0006). When markers stop, the
+   * machine clears trust and the chip must say the context is unknown
+   * immediately — never keep rendering the last trusted host as current
+   * (design §8.2). The unknown state is SHOWN, not hidden: an absent chip
+   * would read as "local", which is a different lie.
+   */
+  setTrusted(trusted: boolean): void {
+    this._trusted = trusted
+    this.renderLocation()
+  }
+
+  /** The chip is the machine's truth: hidden for a local session, the host
+   *  string while the prompt is trusted, the unknown label the moment it is
+   *  not. The block header's chip is a frozen record of where a command
+   *  RAN; this one is where the next Enter would land, so it tracks trust. */
+  private renderLocation(): void {
+    if (!this._location) {
+      this.locationChip.style.display = 'none'
+      this.locationChip.textContent = ''
+      return
+    }
+    this.locationChip.style.display = ''
+    this.locationChip.textContent = this._trusted ? this._location : LOCATION_UNKNOWN_LABEL
   }
 
   // ── keyboard ──────────────────────────────────────────────────────────
@@ -402,7 +474,6 @@ export class CommandEditor {
    *  handoff waits for the verdict — a reference line resolves first, a
    *  veto keeps the draft with the host's report already on screen. */
   submit(): void {
-    this.hideAliasHints()
     const doc = this.view.state.doc.toString()
     const hook = this.actions.beforeSubmit
     if (!hook) {
@@ -460,29 +531,6 @@ export class CommandEditor {
     else this.actions.submit(sendLine)
   }
 
-  /** Accept the currently highlighted hint, replacing `ssh <partial>` with the
-   *  chosen alias, then fire onAcceptHint so the caller can track the event. */
-  private acceptHint(): void {
-    const item = this._hintItems[this._hintSelectedIndex]
-    if (!item) return
-    const v = this.view.state.doc.toString()
-    const sshIdx = v.search(/\bssh\s+/)
-    if (sshIdx === -1) return
-    const before = v.slice(0, sshIdx + 4) // "ssh "
-    const after = v.slice(sshIdx).replace(/^ssh\s+\S*/, '')
-    const cmd = `${before}${item.alias}${after}`
-    this._programmatic = true
-    try {
-      this.view.dispatch({
-        changes: { from: 0, to: v.length, insert: cmd },
-      })
-    } finally {
-      this._programmatic = false
-    }
-    this.hideAliasHints()
-    this.actions.onAcceptHint?.(item.alias)
-  }
-
   private onKeydown = (e: KeyboardEvent): void => {
     // IME in progress: the composition owns the key stream, and CM6 handles
     // composition itself. Interpreting a composing Enter as submit or a
@@ -536,41 +584,9 @@ export class CommandEditor {
       return
     }
 
-    if (this._hintItems.length > 0) {
-      if (e.key === 'ArrowDown') {
-        e.preventDefault()
-        e.stopPropagation()
-        this._hintSelectedIndex = (this._hintSelectedIndex + 1) % this._hintItems.length
-        this._renderHints()
-        return
-      }
-      if (e.key === 'ArrowUp') {
-        e.preventDefault()
-        e.stopPropagation()
-        this._hintSelectedIndex =
-          (this._hintSelectedIndex - 1 + this._hintItems.length) % this._hintItems.length
-        this._renderHints()
-        return
-      }
-      if (e.key === 'Enter') {
-        e.preventDefault()
-        e.stopPropagation()
-        this.acceptHint()
-        return
-      }
-      if (e.key === 'Escape') {
-        e.preventDefault()
-        e.stopPropagation()
-        this._hintDismissed = true
-        this.hideAliasHints()
-        return
-      }
-    }
-
     // Up is caret movement first (design §8.10 v6): recall opens only when
     // there is no further upward movement — caret on the first line or an
     // empty draft. Otherwise the key falls through to CM6's caret handling.
-    // Hint navigation above has already had its turn with ArrowUp.
     //
     // And only from a SINGLE-LINE draft. Recall previews the selected command
     // over the draft, so on a multi-line draft one stray Up puts somebody
@@ -591,7 +607,7 @@ export class CommandEditor {
       return
     }
 
-    // Standard editor keys when no hint is active.
+    // Standard editor keys.
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       e.stopPropagation()
@@ -650,18 +666,13 @@ export class CommandEditor {
 
   /**
    * The Escape tail shared by the editor's own keydown and the host's
-   * document rescue: hint dismissal, then the clear. The keyboard arbiter
+   * document rescue: the clear. The keyboard arbiter
    * is NOT consulted here — the internal path already consulted it for the
    * whole key, and the external path consults it before calling, so an open
    * recall overlay dismisses itself (restoring its captured draft) instead
    * of having the draft cleared under it.
    */
   private escapeClear(): void {
-    if (this._hintItems.length > 0) {
-      this._hintDismissed = true
-      this.hideAliasHints()
-      return
-    }
     this.clearDoc()
   }
 
@@ -670,8 +681,8 @@ export class CommandEditor {
    * editor's own keydown: the editor is on screen but a click elsewhere
    * moved the focus out of its surface, so the key never traversed `root`
    * and onKeydown never saw it. The decision order mirrors the internal
-   * one — the keyboard arbiter gets first refusal, then hint dismissal,
-   * then the clear — and focus returns so the next keystroke lands in the
+   * one — the keyboard arbiter gets first refusal, then the clear — and
+   * focus returns so the next keystroke lands in the
    * prompt, exactly as the typing rescue promises. Returns true when the
    * key was consumed (the caller preventDefaults).
    */
@@ -681,66 +692,6 @@ export class CommandEditor {
     this.escapeClear()
     this.view.focus()
     return true
-  }
-
-  // ── hint management ───────────────────────────────────────────────────
-
-  /** Populate and show the alias hint dropdown with matching items.
-   *  Caller is responsible for filtering by the current partial text. */
-  showAliasHints(items: AliasSuggestion[]): void {
-    if (items.length === 0 || this._hintDismissed) {
-      this.hideAliasHints()
-      return
-    }
-    this._hintItems = items
-    this._hintSelectedIndex = 0
-    this._renderHints()
-    this.hintContainer.style.display = ''
-  }
-
-  /** Hide the hint dropdown and clear its items. */
-  hideAliasHints(): void {
-    this._hintItems = []
-    this._hintSelectedIndex = 0
-    this.hintContainer.style.display = 'none'
-    this.hintContainer.innerHTML = ''
-  }
-
-  /** Rebuild the hint dropdown DOM from _hintItems. */
-  private _renderHints(): void {
-    this.hintContainer.innerHTML = ''
-    for (let i = 0; i < this._hintItems.length; i++) {
-      const item = this._hintItems[i]
-      const el = document.createElement('div')
-      el.className = 'nocx-editor-hint__item'
-      if (i === this._hintSelectedIndex) {
-        el.classList.add('nocx-editor-hint__item--selected')
-      }
-      // Primary label: alias
-      const aliasSpan = document.createElement('span')
-      aliasSpan.className = 'nocx-editor-hint__alias'
-      aliasSpan.textContent = item.alias
-      el.appendChild(aliasSpan)
-      // Secondary label: resolved host + optional user
-      const detailParts: string[] = [item.hostName]
-      if (item.user) detailParts.unshift(`${item.user}@`)
-      if (item.port && item.port !== 22) detailParts.push(`:${item.port}`)
-      const detailSpan = document.createElement('span')
-      detailSpan.className = 'nocx-editor-hint__detail'
-      detailSpan.textContent = detailParts.join('')
-      el.appendChild(detailSpan)
-      // Click handler on the item (not on the label spans).
-      el.addEventListener('mouseenter', () => {
-        this._hintSelectedIndex = i
-        this._renderHints()
-      })
-      el.addEventListener('mousedown', (me) => {
-        me.preventDefault()
-        this._hintSelectedIndex = i
-        this.acceptHint()
-      })
-      this.hintContainer.appendChild(el)
-    }
   }
 
   // ── visibility ────────────────────────────────────────────────────────
@@ -759,7 +710,6 @@ export class CommandEditor {
    */
   show(): void {
     this.root.style.display = ''
-    this._hintDismissed = false
 
     // CLEARED, not set to 'visible'. An inactive pane is hidden with
     // `visibility: hidden` on purpose (base.css) so its renderer keeps measuring
@@ -902,7 +852,6 @@ export class CommandEditor {
     this.stopClock()
     this.view.contentDOM.blur()
     this.root.style.display = 'none'
-    this.hideAliasHints()
   }
 
   get isVisible(): boolean {

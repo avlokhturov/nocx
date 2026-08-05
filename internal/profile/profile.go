@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -32,6 +34,136 @@ const (
 	BehaviorReconnect BehaviorOnSessionEnd = "reconnect"
 	BehaviorClose     BehaviorOnSessionEnd = "close"
 )
+
+// DesiredMode is the FIRST of the three delivery axes (spec §3.5, nocx-mlm7):
+// what the user wants nocx to do with this destination, resolved by the
+// existing cascade (profile → group → global → hardcoded default). It
+// replaces the old auto|ask|off launch policy outright (N1): raw adds
+// nothing, script runs the shell tiers we ship, relay deploys the Tier-B
+// binary. N3 makes script the default — wrap and install automatically,
+// consent asked only for the relay.
+type DesiredMode string
+
+const (
+	DesiredRaw    DesiredMode = "raw"    // nothing added: no rewrite, no remote write
+	DesiredScript DesiredMode = "script" // the shell tiers we ship — no compiled artifact
+	DesiredRelay  DesiredMode = "relay"  // Tier B, a deployed binary — consent-gated
+)
+
+// validDesiredMode reports whether v is a value this build recognises.
+// An unrecognised stored value is not an error at decode time — it falls back
+// to the default at resolution (see ResolveEffectiveProfile) so an explicit
+// user choice never becomes a silent no-op.
+func validDesiredMode(v DesiredMode) bool {
+	switch v {
+	case DesiredRaw, DesiredScript, DesiredRelay:
+		return true
+	default:
+		return false
+	}
+}
+
+// RelayConsent is the THIRD of the three delivery axes (spec §3.5): whether
+// the user has consented to nocx deploying the relay binary on this
+// destination. Persisted per destination and NEVER inherited — a group
+// cannot express consent, and script mode never reads it. Relay mode without
+// consent=granted behaves as raw.
+type RelayConsent string
+
+const (
+	ConsentUnknown RelayConsent = "unknown"
+	ConsentGranted RelayConsent = "granted"
+	ConsentDenied  RelayConsent = "denied"
+)
+
+// validRelayConsent reports whether v is a value this build recognises.
+// An unrecognised stored value falls back to unknown at resolution so it
+// never reaches the wire dressed as a real choice.
+func validRelayConsent(v RelayConsent) bool {
+	switch v {
+	case ConsentUnknown, ConsentGranted, ConsentDenied:
+		return true
+	default:
+		return false
+	}
+}
+
+// PortDiscoveryMode controls whether nocx periodically samples the remote
+// host's listening ports (spec D3). PortDiscoveryAuto (the default) samples
+// once the connection settles and on prompt debounce; PortDiscoveryAsk
+// probes nothing until accepted; PortDiscoveryOff never probes. It is its
+// own field — NOT folded into desiredMode — because a user may trust
+// prompt hooks and not periodic remote exec, or the reverse (spec §6).
+type PortDiscoveryMode string
+
+const (
+	PortDiscoveryAuto PortDiscoveryMode = "auto"
+	PortDiscoveryAsk  PortDiscoveryMode = "ask"
+	PortDiscoveryOff  PortDiscoveryMode = "off"
+)
+
+// validPortDiscovery reports whether v is a value this build recognises.
+// An unrecognised stored value is not an error at decode time — it falls
+// back to the default at resolution (see ResolveEffectiveProfile), exactly
+// like desiredMode (nocx-mlm7): a user's explicit choice must never
+// become a silent no-op.
+func validPortDiscovery(v PortDiscoveryMode) bool {
+	switch v {
+	case PortDiscoveryAuto, PortDiscoveryAsk, PortDiscoveryOff:
+		return true
+	default:
+		return false
+	}
+}
+
+// ForwardSpec is one stored forward on a connection profile (spec §8, D5):
+// topology and policy only — never credentials. It mirrors the static half
+// of tunnel.Spec; the connect-time replay maps it onto the tunnel model.
+// All three directions are first-class from day one (spec D4): local is the
+// only implemented strategy today, and a stored remote or dynamic forward
+// is preserved, never dropped or coerced to local.
+type ForwardSpec struct {
+	Direction   string `json:"direction"`             // local | remote | dynamic
+	BindHost    string `json:"bindHost,omitempty"`    // "" = 127.0.0.1 (the tunnel layer's default)
+	BindPort    int    `json:"bindPort,omitempty"`    // 0 = ephemeral; the OS answers at start
+	Destination string `json:"destination,omitempty"` // "host:port"; empty for dynamic
+}
+
+// ValidForwards is the single validation authority for a stored forward
+// list. It mirrors what tunnel.New accepts — local/remote require a valid
+// "host:port" destination, dynamic carries none — with the destination port
+// required to be a number in range (a service name like "host:ssh" is not a
+// forward target) and the bind port in range, so a list that passes here
+// can always be replayed. The connection editor and any transport-side gate
+// ask the same question.
+func ValidForwards(fs []ForwardSpec) error {
+	for i, f := range fs {
+		switch f.Direction {
+		case "local", "remote":
+			if f.Destination == "" {
+				return fmt.Errorf("forward %d: %s destination is required", i, f.Direction)
+			}
+			_, portStr, err := net.SplitHostPort(f.Destination)
+			if err != nil {
+				return fmt.Errorf("forward %d: invalid %s destination %q: %w", i, f.Direction, f.Destination, err)
+			}
+			p, err := strconv.Atoi(portStr)
+			if err != nil || p < 1 || p > 65535 {
+				return fmt.Errorf("forward %d: %s destination port %q out of range", i, f.Direction, portStr)
+			}
+		case "dynamic":
+			// no destination
+		case "":
+			return fmt.Errorf("forward %d: direction is required", i)
+		default:
+			return fmt.Errorf("forward %d: unknown direction %q", i, f.Direction)
+		}
+		if f.BindPort < 0 || f.BindPort > 65535 {
+			return fmt.Errorf("forward %d: bind port %d out of range", i, f.BindPort)
+		}
+	}
+	return nil
+}
 
 // Base holds the generic profile fields shared by all profile types
 // (SSH now, future types later). Mirrors Tabby's Profile interface.
@@ -73,15 +205,19 @@ type SSHProfileOptions struct {
 	KeyPassphraseSecret string `json:"keyPassphraseSecret,omitempty"`
 	// Inline fields. User and Auth are always the profile's own (ADR-0017);
 	// KeyPath is the file-based alternative to KeySecret.
-	KeyPath           string   `json:"keyPath,omitempty"`
-	User              string   `json:"user,omitempty"`
-	Auth              AuthMode `json:"auth,omitempty"`
-	KeepaliveInterval int      `json:"keepaliveInterval,omitempty"`
-	KeepaliveCountMax int      `json:"keepaliveCountMax,omitempty"`
-	ReadyTimeout      int      `json:"readyTimeout,omitempty"`
-	JumpHost          string   `json:"jumpHost,omitempty"` // Profile name or ID of the jump server
-	AgentForward      bool     `json:"agentForward,omitempty"`
-	CanBeJumpServer   bool     `json:"canBeJumpServer,omitempty"` // Whether this profile can be used as a jump server
+	KeyPath           string            `json:"keyPath,omitempty"`
+	User              string            `json:"user,omitempty"`
+	Auth              AuthMode          `json:"auth,omitempty"`
+	KeepaliveInterval int               `json:"keepaliveInterval,omitempty"`
+	KeepaliveCountMax int               `json:"keepaliveCountMax,omitempty"`
+	ReadyTimeout      int               `json:"readyTimeout,omitempty"`
+	JumpHost          string            `json:"jumpHost,omitempty"` // Profile name or ID of the jump server
+	AgentForward      bool              `json:"agentForward,omitempty"`
+	DesiredMode       DesiredMode       `json:"desiredMode,omitempty"`
+	RelayConsent      RelayConsent      `json:"relayConsent,omitempty"`
+	PortDiscovery     PortDiscoveryMode `json:"portDiscovery,omitempty"`
+	Forwards          []ForwardSpec     `json:"forwards,omitempty"`
+	CanBeJumpServer   bool              `json:"canBeJumpServer,omitempty"` // Whether this profile can be used as a jump server
 }
 
 // SSHProfile is a connection profile for an SSH host. It holds only
@@ -112,6 +248,10 @@ type StoredSSHProfileOptions struct {
 	KeyPath              *string               `json:"keyPath,omitempty"`
 	JumpHost             *string               `json:"jumpHost,omitempty"`
 	AgentForward         *bool                 `json:"agentForward,omitempty"`
+	DesiredMode          *DesiredMode          `json:"desiredMode,omitempty"`
+	RelayConsent         *RelayConsent         `json:"relayConsent,omitempty"`
+	PortDiscovery        *PortDiscoveryMode    `json:"portDiscovery,omitempty"`
+	Forwards             *[]ForwardSpec        `json:"forwards,omitempty"` // nil = unset; &[] = explicitly none (omitempty drops an empty slice)
 	CanBeJumpServer      *bool                 `json:"canBeJumpServer,omitempty"`
 	BehaviorOnSessionEnd *BehaviorOnSessionEnd `json:"behaviorOnSessionEnd,omitempty"`
 }
@@ -159,6 +299,18 @@ func (s StoredSSHProfileOptions) ToDense() SSHProfileOptions {
 	}
 	if s.CanBeJumpServer != nil {
 		o.CanBeJumpServer = *s.CanBeJumpServer
+	}
+	if s.DesiredMode != nil {
+		o.DesiredMode = *s.DesiredMode
+	}
+	if s.RelayConsent != nil {
+		o.RelayConsent = *s.RelayConsent
+	}
+	if s.PortDiscovery != nil {
+		o.PortDiscovery = *s.PortDiscovery
+	}
+	if s.Forwards != nil {
+		o.Forwards = *s.Forwards
 	}
 	return o
 }
@@ -218,6 +370,22 @@ func StoredOptionsFromDense(o SSHProfileOptions) StoredSSHProfileOptions {
 		v := true
 		s.CanBeJumpServer = &v
 	}
+	if o.DesiredMode != "" {
+		v := o.DesiredMode
+		s.DesiredMode = &v
+	}
+	if o.RelayConsent != "" {
+		v := o.RelayConsent
+		s.RelayConsent = &v
+	}
+	if o.PortDiscovery != "" {
+		v := o.PortDiscovery
+		s.PortDiscovery = &v
+	}
+	if o.Forwards != nil {
+		fwds := o.Forwards
+		s.Forwards = &fwds
+	}
 	return s
 }
 
@@ -250,6 +418,15 @@ func storedOptsToSparse(o StoredSSHProfileOptions) SparseSSHOptions {
 	s.KeepaliveCountMax = o.KeepaliveCountMax
 	s.ReadyTimeout = o.ReadyTimeout
 	s.AgentForward = o.AgentForward
+	s.DesiredMode = o.DesiredMode
+	// RelayConsent is deliberately NOT mapped into the sparse layer: consent
+	// is per-destination (spec §3.5), never inherited — merging consents
+	// across cascade layers would invent an owner that does not exist. It
+	// rides profile storage exactly like Forwards.
+	s.PortDiscovery = o.PortDiscovery
+	// Forwards are deliberately NOT mapped: a forward list is profile-owned
+	// (spec §8), never inherited — merging lists across cascade layers would
+	// invent semantics nobody decided.
 	s.BehaviorOnSessionEnd = o.BehaviorOnSessionEnd
 	return s
 }
@@ -286,6 +463,8 @@ type SparseSSHOptions struct {
 	KeepaliveCountMax    *int                  `json:"keepaliveCountMax,omitempty"`
 	ReadyTimeout         *int                  `json:"readyTimeout,omitempty"`
 	AgentForward         *bool                 `json:"agentForward,omitempty"`
+	DesiredMode          *DesiredMode          `json:"desiredMode,omitempty"`
+	PortDiscovery        *PortDiscoveryMode    `json:"portDiscovery,omitempty"`
 	BehaviorOnSessionEnd *BehaviorOnSessionEnd `json:"behaviorOnSessionEnd,omitempty"`
 }
 
@@ -314,6 +493,8 @@ var allowedFields = map[string]bool{
 	"keepaliveCountMax":    true,
 	"readyTimeout":         true,
 	"agentForward":         true,
+	"portDiscovery":        true,
+	"desiredMode":          true,
 	"behaviorOnSessionEnd": true,
 }
 
@@ -392,16 +573,16 @@ func hardcodedDefaults() SparseSSHOptions {
 	port := 22
 	user := currentUser()
 	beh := BehaviorAuto
+	mode := DesiredScript
+	pd := PortDiscoveryAuto
 	return SparseSSHOptions{
 		Port:                 &port,
 		User:                 &user,
 		BehaviorOnSessionEnd: &beh,
+		DesiredMode:          &mode,
+		PortDiscovery:        &pd,
 	}
 }
-
-// ---------------------------------------------------------------------------
-// Effective profile — resolved inheritance with provenance
-// ---------------------------------------------------------------------------
 
 // FieldSource identifies where an effective field value came from.
 type FieldSource string
@@ -567,6 +748,8 @@ func ResolveEffectiveProfile(
 	source["port"] = FieldSourceDefault
 	source["user"] = FieldSourceDefault
 	source["behaviorOnSessionEnd"] = FieldSourceDefault
+	source["desiredMode"] = FieldSourceDefault
+	source["portDiscovery"] = FieldSourceDefault
 
 	// Apply global defaults.
 	applySparseLayer(&acc, &source, globalDefaults, FieldSourceGlobal)
@@ -598,8 +781,38 @@ func ResolveEffectiveProfile(
 	// Apply profile's own options (highest priority).
 	applySparseLayer(&acc, &source, profileSparse, FieldSourceProfile)
 
-	// Build resolved dense options from the merged accumulator.
+	// A desiredMode value this build does not recognise falls back to the
+	// default (script — N3 wraps and installs automatically) rather than
+	// being treated as a silent no-op: script is the safe behaviour for an
+	// unrecognised choice, and the provenance records "default" so the
+	// effective view shows the fallback instead of a value that never
+	// takes effect.
+	if acc.DesiredMode != nil && !validDesiredMode(*acc.DesiredMode) {
+		mode := DesiredScript
+		acc.DesiredMode = &mode
+		source["desiredMode"] = FieldSourceDefault
+	}
+
+	// RelayConsent never enters the cascade, so the same unrecognised-value
+	// rule applies to the profile's own stored options: an unknown consent
+	// falls back to unknown rather than reaching the wire dressed as a real
+	// choice. Normalised on `result` (below) so the effective profile and
+	// its DTO agree.
+
+	// The same rule for portDiscovery (spec D3): an unrecognised stored
+	// value falls back to auto with provenance "default" rather than being
+	// treated as a silent no-op.
+	if acc.PortDiscovery != nil && !validPortDiscovery(*acc.PortDiscovery) {
+		pd := PortDiscoveryAuto
+		acc.PortDiscovery = &pd
+		source["portDiscovery"] = FieldSourceDefault
+	}
+
 	result := profile
+	if result.Options.RelayConsent != nil && !validRelayConsent(*result.Options.RelayConsent) {
+		c := ConsentUnknown
+		result.Options.RelayConsent = &c
+	}
 	resolvedOpts := sparseToOptions(acc)
 
 	// Apply BehaviorOnSessionEnd from accumulator to the result's Base.
@@ -662,6 +875,14 @@ func applySparseLayer(acc *SparseSSHOptions, source *map[string]FieldSource, src
 		acc.AgentForward = src.AgentForward
 		setSource(source, "agentForward", layer)
 	}
+	if src.DesiredMode != nil {
+		acc.DesiredMode = src.DesiredMode
+		setSource(source, "desiredMode", layer)
+	}
+	if src.PortDiscovery != nil {
+		acc.PortDiscovery = src.PortDiscovery
+		setSource(source, "portDiscovery", layer)
+	}
 	if src.BehaviorOnSessionEnd != nil {
 		acc.BehaviorOnSessionEnd = src.BehaviorOnSessionEnd
 		setSource(source, "behaviorOnSessionEnd", layer)
@@ -716,6 +937,12 @@ func sparseToOptions(s SparseSSHOptions) SSHProfileOptions {
 	}
 	if s.AgentForward != nil {
 		o.AgentForward = *s.AgentForward
+	}
+	if s.DesiredMode != nil {
+		o.DesiredMode = *s.DesiredMode
+	}
+	if s.PortDiscovery != nil {
+		o.PortDiscovery = *s.PortDiscovery
 	}
 	return o
 }
@@ -926,8 +1153,9 @@ type FieldSourceDTO struct {
 
 // EffectiveProfileDTO is the per-profile wire representation.
 type EffectiveProfileDTO struct {
-	ID     string                       `json:"id"`
-	Fields map[string]EffectiveFieldDTO `json:"fields"`
+	ID           string                       `json:"id"`
+	Fields       map[string]EffectiveFieldDTO `json:"fields"`
+	RelayConsent RelayConsent                 `json:"relayConsent"`
 }
 
 // EffectiveBatchResponse is the response to profiles.effective.
@@ -966,9 +1194,15 @@ func ToEffectiveDTO(eff EffectiveProfile, groupByID map[string]ProfileGroup) Eff
 	addField("jumpHost", p.JumpHost, eff.Source["jumpHost"])
 	addField("agentForward", p.AgentForward, eff.Source["agentForward"])
 	addField("canBeJumpServer", p.CanBeJumpServer, eff.Source["canBeJumpServer"])
+	addField("desiredMode", string(p.DesiredMode), eff.Source["desiredMode"])
+	addField("portDiscovery", string(p.PortDiscovery), eff.Source["portDiscovery"])
 	addField("behaviorOnSessionEnd", string(eff.Profile.BehaviorOnSessionEnd), eff.Source["behaviorOnSessionEnd"])
 
-	return EffectiveProfileDTO{ID: eff.Profile.ID, Fields: fields}
+	consent := ConsentUnknown
+	if eff.Profile.Options.RelayConsent != nil {
+		consent = *eff.Profile.Options.RelayConsent
+	}
+	return EffectiveProfileDTO{ID: eff.Profile.ID, Fields: fields, RelayConsent: consent}
 }
 
 // parseFieldSource converts an internal FieldSource string into the closed-enum
@@ -1019,6 +1253,10 @@ const (
 	patchReadyTimeout         patchPath = "options.readyTimeout"
 	patchJumpHost             patchPath = "options.jumpHost"
 	patchAgentForward         patchPath = "options.agentForward"
+	patchDesiredMode          patchPath = "options.desiredMode"
+	patchRelayConsent         patchPath = "options.relayConsent"
+	patchPortDiscovery        patchPath = "options.portDiscovery"
+	patchForwards             patchPath = "options.forwards"
 	patchCanBeJumpServer      patchPath = "options.canBeJumpServer"
 	patchBehaviorOnSessionEnd patchPath = "options.behaviorOnSessionEnd"
 )
@@ -1046,6 +1284,10 @@ func allowedPatchPaths() map[patchPath]bool {
 		patchReadyTimeout:         true,
 		patchJumpHost:             true,
 		patchAgentForward:         true,
+		patchDesiredMode:          true,
+		patchRelayConsent:         true,
+		patchPortDiscovery:        true,
+		patchForwards:             true,
 		patchCanBeJumpServer:      true,
 		patchBehaviorOnSessionEnd: true,
 	}
@@ -1091,6 +1333,24 @@ func ApplyPatchSet(opts *StoredSSHProfileOptions, path string, value any) bool {
 	case patchAgentForward:
 		v := toBool(value)
 		opts.AgentForward = &v
+	case patchDesiredMode:
+		v := toString(value)
+		mode := DesiredMode(v)
+		opts.DesiredMode = &mode
+	case patchRelayConsent:
+		v := toString(value)
+		c := RelayConsent(v)
+		opts.RelayConsent = &c
+	case patchPortDiscovery:
+		v := toString(value)
+		pd := PortDiscoveryMode(v)
+		opts.PortDiscovery = &pd
+	case patchForwards:
+		fwds, ok := toForwardSpecs(value)
+		if !ok {
+			return false
+		}
+		opts.Forwards = &fwds
 	case patchCanBeJumpServer:
 		v := toBool(value)
 		opts.CanBeJumpServer = &v
@@ -1131,6 +1391,14 @@ func ApplyPatchUnset(opts *StoredSSHProfileOptions, path string) bool {
 		opts.JumpHost = nil
 	case patchAgentForward:
 		opts.AgentForward = nil
+	case patchDesiredMode:
+		opts.DesiredMode = nil
+	case patchRelayConsent:
+		opts.RelayConsent = nil
+	case patchPortDiscovery:
+		opts.PortDiscovery = nil
+	case patchForwards:
+		opts.Forwards = nil
 	case patchCanBeJumpServer:
 		opts.CanBeJumpServer = nil
 	case patchBehaviorOnSessionEnd:
@@ -1139,6 +1407,63 @@ func ApplyPatchUnset(opts *StoredSSHProfileOptions, path string) bool {
 		return false
 	}
 	return true
+}
+
+// toForwardSpecs decodes the JSON-decoded value of options.forwards — an
+// []any of map[string]any — into []ForwardSpec. The decode is strict on
+// purpose: a malformed row (wrong type, unknown key, invalid direction or
+// destination) is rejected whole, because a silently dropped patch value is
+// exactly the failure class that looks like a working field until a user's
+// forward stops sticking. ApplyPatchSet returns false and the stored value
+// stays untouched.
+func toForwardSpecs(v any) ([]ForwardSpec, bool) {
+	arr, ok := v.([]any)
+	if !ok {
+		return nil, false
+	}
+	fs := make([]ForwardSpec, 0, len(arr))
+	for _, row := range arr {
+		m, ok := row.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		var f ForwardSpec
+		for k, raw := range m {
+			switch k {
+			case "direction":
+				s, ok := raw.(string)
+				if !ok {
+					return nil, false
+				}
+				f.Direction = s
+			case "bindHost":
+				s, ok := raw.(string)
+				if !ok {
+					return nil, false
+				}
+				f.BindHost = s
+			case "bindPort":
+				n, ok := raw.(float64)
+				if !ok {
+					return nil, false
+				}
+				f.BindPort = int(n)
+			case "destination":
+				s, ok := raw.(string)
+				if !ok {
+					return nil, false
+				}
+				f.Destination = s
+			default:
+				return nil, false
+			}
+		}
+		fs = append(fs, f)
+	}
+	if err := ValidForwards(fs); err != nil {
+		return nil, false
+	}
+	return fs, true
 }
 
 // toInt converts a JSON number (float64) or int to int.

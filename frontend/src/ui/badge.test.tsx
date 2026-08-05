@@ -54,4 +54,14 @@ describe('Badge', () => {
     const el = screen.getByText('Customized')
     expect(el.tagName).toBe('SPAN')
   })
+
+  it('opts into truncation with data-truncate', () => {
+    subject({ truncate: true })
+    expect(screen.getByText('Customized').getAttribute('data-truncate')).toBe('true')
+  })
+
+  it('does not truncate by default', () => {
+    subject()
+    expect(screen.getByText('Customized').getAttribute('data-truncate')).toBeNull()
+  })
 })

@@ -343,3 +343,125 @@ func intPtr(v int) *int { return &v }
 
 // strPtr returns a pointer to v.
 func strPtr(v string) *string { return &v }
+
+// ── profiles.effective conformance (AGENTS.md rule 5) ─────────────────────
+
+// TestProfilesEffective_DTOConformsToContract marshals the actual
+// EffectiveProfileDTO struct and validates it against the schema. The
+// fields map is a closed set (propertyNames + required) and relayConsent is
+// a required top-level field, so a field dropped from the wire — or a
+// consent state that went missing — fails here instead of looking like a
+// working field.
+func TestProfilesEffective_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "profiles.effective.schema.json")
+
+	field := func(value any, kind profile.EffectiveSourceKind) profile.EffectiveFieldDTO {
+		return profile.EffectiveFieldDTO{
+			Value:  value,
+			Source: profile.FieldSourceDTO{Kind: kind},
+		}
+	}
+	fields := map[string]profile.EffectiveFieldDTO{
+		"host":                 field("h", profile.EffectiveSourceProfile),
+		"port":                 field(22, profile.EffectiveSourceDefault),
+		"passwordSecret":       field("", profile.EffectiveSourceDefault),
+		"keySecret":            field("", profile.EffectiveSourceDefault),
+		"keyPassphraseSecret":  field("", profile.EffectiveSourceDefault),
+		"user":                 field("dev", profile.EffectiveSourceDefault),
+		"auth":                 field("", profile.EffectiveSourceDefault),
+		"keepaliveInterval":    field(0, profile.EffectiveSourceDefault),
+		"keepaliveCountMax":    field(0, profile.EffectiveSourceDefault),
+		"readyTimeout":         field(0, profile.EffectiveSourceDefault),
+		"jumpHost":             field("", profile.EffectiveSourceDefault),
+		"agentForward":         field(false, profile.EffectiveSourceDefault),
+		"portDiscovery":        field("auto", profile.EffectiveSourceDefault),
+		"canBeJumpServer":      field(false, profile.EffectiveSourceDefault),
+		"behaviorOnSessionEnd": field("auto", profile.EffectiveSourceDefault),
+		"desiredMode":          field("relay", profile.EffectiveSourceProfile),
+	}
+
+	cases := map[string]profile.EffectiveProfileDTO{
+		"relay with consent granted": {
+			ID: "ssh:test:1", Fields: fields, RelayConsent: profile.ConsentGranted,
+		},
+		"script with consent unknown": {
+			ID: "ssh:test:2", Fields: fields, RelayConsent: profile.ConsentUnknown,
+		},
+	}
+	for name, dto := range cases {
+		raw, err := json.Marshal(struct {
+			Profiles []profile.EffectiveProfileDTO `json:"profiles"`
+		}{Profiles: []profile.EffectiveProfileDTO{dto}})
+		if err != nil {
+			t.Fatalf("%s: marshal: %v", name, err)
+		}
+		validateJSON(t, schema, raw, "profiles.effective DTO ("+name+")")
+	}
+}
+
+// TestProfilesEffective_OverTheWireConformsToContract runs the real method
+// off the real socket: a stored profile in relay mode with granted consent
+// must come back with desiredMode=relay in the closed fields map and
+// relayConsent=granted at the top level — the shape the connection UI
+// renders consent state from.
+func TestProfilesEffective_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "profiles.effective.schema.json")
+
+	dir := t.TempDir()
+	ps := profile.NewJSONStore(dir + "/p.json")
+	prof := profile.SSHProfile{
+		Base: profile.Base{ID: "ssh:relay:1", Type: "ssh", Name: "relay"},
+		Options: profile.StoredSSHProfileOptions{
+			Host:         "relay.example.com",
+			DesiredMode:  profile.Ptr(profile.DesiredRelay),
+			RelayConsent: profile.Ptr(profile.ConsentGranted),
+		},
+	}
+	if err := ps.CreateProfile(prof); err != nil {
+		t.Fatalf("CreateProfile: %v", err)
+	}
+
+	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithProfileRepository(ps), WithGroupRepository(ps),
+		WithCredentialStore(newTestStore()))
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = ws.Stop(ctx) })
+	conn := connectWS(t, ws)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	resp := jsonrpcCall(t, conn, "profiles.effective", map[string]any{
+		"ids": []string{"ssh:relay:1"},
+	})
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, string(resp))
+	}
+	if envelope.Error != nil {
+		t.Fatalf("profiles.effective: %+v", envelope.Error)
+	}
+	validateJSON(t, schema, envelope.Result, "profiles.effective result (real socket)")
+
+	var got struct {
+		Profiles []profile.EffectiveProfileDTO `json:"profiles"`
+	}
+	if err := json.Unmarshal(envelope.Result, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Profiles) != 1 {
+		t.Fatalf("got %d profiles, want 1", len(got.Profiles))
+	}
+	if got.Profiles[0].RelayConsent != profile.ConsentGranted {
+		t.Errorf("relayConsent = %q, want granted", got.Profiles[0].RelayConsent)
+	}
+	if f, ok := got.Profiles[0].Fields["desiredMode"]; !ok {
+		t.Error("fields missing desiredMode")
+	} else if f.Value != "relay" {
+		t.Errorf("desiredMode value = %v, want relay", f.Value)
+	}
+}

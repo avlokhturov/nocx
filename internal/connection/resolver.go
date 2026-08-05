@@ -25,18 +25,66 @@ type Resolver struct {
 	profiles profile.ProfileRepository
 	groups   profile.GroupRepository
 	secrets  credential.SecretStore
+	// unlockRequester is called by auth callbacks when a secret read
+	// fails because the vault is sealed. Behind a function so the ssh
+	// package never imports transport (AD-8).
+	unlockRequester func(ctx context.Context, reason string) error
 	// configResolver resolves ~/.ssh/config directives using ssh -G.
 	// Injected at the composition root, shared with the RealClient so both
 	// sides of the authorization comparison go through the same resolution.
 	// When nil, host resolution is a no-op (original host returned as-is).
 	configResolver ssh.ConfigResolver
+	// remoteInstaller publishes the integration bundle over SFTP for a
+	// saved connection in script mode (P8's carrier). Wired at the
+	// composition root; nil means no publish happens.
+	remoteInstaller ssh.RemoteInstaller
+	// asker is the transport's wire ask for a connection password. When
+	// nil, no password prompt is ever raised (direct-host opens, tests
+	// without the ask wired) and password-capable profiles behave as they
+	// did before.
+	asker func(ctx context.Context, req ssh.PasswordRequest) (ssh.PasswordAnswer, error)
+	// creator is the vault's named-create surface the remember path uses.
+	// When nil, a remember answer fails loudly instead of silently
+	// degrading to use-once.
+	creator SecretCreator
+}
+
+// WithRemoteInstaller attaches the SFTP carrier that publishes the
+// integration bundle on a saved connection (nocx-mlm7 P8). The composition
+// root adapts shellintegration.Impl through the ssh.RemoteInstaller
+// interface; this option is how every ConnectConfig the resolver builds for
+// a saved profile carries it. Direct-host opens (no profile) never receive
+// it — nocx owns the transport only on the saved-connection path.
+func WithRemoteInstaller(ri ssh.RemoteInstaller) ResolverOption {
+	return func(r *Resolver) { r.remoteInstaller = ri }
 }
 
 // ResolverOption configures the Resolver.
 type ResolverOption func(*Resolver)
 
+// WithPasswordAsker attaches the transport's connection-password ask: the
+// wire request/response that raises the prompt and blocks for the answer.
+// Wired from the transport at the composition root, the same way
+// WithUnlockRequester is. The Resolver wraps it with the remember logic.
+func WithPasswordAsker(fn func(ctx context.Context, req ssh.PasswordRequest) (ssh.PasswordAnswer, error)) ResolverOption {
+	return func(r *Resolver) { r.asker = fn }
+}
+
+// WithSecretCreator attaches the vault's named-create surface the remember
+// path uses to store an accepted password (ADR-0016 names, ADR-0017
+// references). The vault implements it; wired at the composition root.
+func WithSecretCreator(cr SecretCreator) ResolverOption {
+	return func(r *Resolver) { r.creator = cr }
+}
+
 func WithConfigResolver(resolver ssh.ConfigResolver) ResolverOption {
 	return func(r *Resolver) { r.configResolver = resolver }
+}
+
+// WithUnlockRequester sets the callback to request vault unlock from the
+// user. Wired from the transport at the composition root.
+func WithUnlockRequester(fn func(ctx context.Context, reason string) error) ResolverOption {
+	return func(r *Resolver) { r.unlockRequester = fn }
 }
 
 // NewResolver creates a Resolver backed by the given stores.
@@ -128,6 +176,18 @@ func (r *Resolver) buildConfig(prof *profile.SSHProfile, visited map[string]bool
 	}
 	cfg.AgentForward = eff.ResolvedOptions.AgentForward
 
+	// Desired mode (nocx-mlm7): the effective desiredMode is the
+	// connection-scope delivery axis (raw|script|relay) and rides the
+	// config verbatim; the ssh layer gates open-time integration on it
+	// directly (script publishes and integrates, raw and relay open a
+	// plain shell — relay is inert this epic).
+	cfg.DesiredMode = string(eff.ResolvedOptions.DesiredMode)
+
+	// A saved connection publishes the integration bundle over SFTP in
+	// script mode. The installer is attached here, on the profile path,
+	// so the publish happens only when nocx owns the transport.
+	cfg.RemoteInstaller = r.remoteInstaller
+
 	// Identity comes from the profile itself (ADR-0017): User and Auth are
 	// always inline, and the secret bindings are the references the profile
 	// authenticates with.
@@ -150,8 +210,20 @@ func (r *Resolver) buildConfig(prof *profile.SSHProfile, visited map[string]bool
 	// Wire SecretStore for late-bound password/passphrase/key resolution via
 	// opaque SecretID references (ADR-0011 §2). The bindings live on the
 	// effective profile, one per auth method (ADR-0017 §1).
+
+	// The connection-password ask (the prompt rung): wired whenever the
+	// transport ask is available, so the auth ladder for a password-capable
+	// profile never ends empty (tabby's model). ConnectionName is the
+	// profile's display name — the prompt names the connection it is asking
+	// about (nocx-s8jn). askerFor pins the profile id the remember path
+	// must update.
+	cfg.ConnectionName = prof.Name
+	if r.asker != nil {
+		cfg.PasswordRequester = r.askerFor(prof.ID)
+	}
 	if o.PasswordSecret != "" || o.KeySecret != "" || o.KeyPassphraseSecret != "" {
 		cfg.Secrets = r.secrets
+		cfg.UnlockRequester = r.unlockRequester
 	}
 	if o.PasswordSecret != "" {
 		cfg.SecretID = credential.SecretID(o.PasswordSecret)
@@ -205,6 +277,7 @@ func (r *Resolver) buildConfig(prof *profile.SSHProfile, visited map[string]bool
 			cfg.JumpSecrets = jumpCfg.Secrets
 			cfg.JumpSecretID = jumpCfg.SecretID
 			cfg.JumpPassphraseSecretID = jumpCfg.PassphraseSecretID
+			cfg.UnlockRequester = r.unlockRequester
 			// Authorized endpoint for the jump credential: resolved through
 			// ~/.ssh/config, same as the target credential.
 			jumpAuthHost := r.resolveProfileHost(jumpProf.Options.Host)

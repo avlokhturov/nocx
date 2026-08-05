@@ -1,12 +1,14 @@
 // @vitest-environment jsdom
-import { describe, expect, it, vi, afterEach, beforeEach } from 'vitest'
+import { describe, expect, it, vi, afterEach, beforeEach, type Mock } from 'vitest'
 import { cleanup } from '@solidjs/testing-library'
 import {
   ActionsQuickConnectProvider,
   SSHQuickConnectProvider,
   SSHAliasQuickConnectProvider,
+  AdHocQuickConnectProvider,
   QuickConnectController,
   type QuickConnectItem,
+  type DrillSelection,
   type QuickConnectProvider,
 } from './quick-connect'
 
@@ -17,16 +19,80 @@ afterEach(() => {
 /* ── Actions provider ───────────────────────────────────────────────── */
 
 describe('ActionsQuickConnectProvider', () => {
-  it('offers the local shell and the new-connection action, in that order', async () => {
-    const provider = new ActionsQuickConnectProvider(vi.fn(), vi.fn())
+  it('offers the local shell, new connection and integrate-this-shell, in that order', async () => {
+    const provider = new ActionsQuickConnectProvider(vi.fn(), vi.fn(), vi.fn())
     const items = await Promise.resolve(provider.getItems())
 
-    // The order is the contract, not an accident: these two are the palette's
-    // first group and the separator below them is drawn from the group boundary.
-    expect(items.map((i) => i.id)).toEqual(['__local__', '__new_connection__'])
+    // The order is the contract, not an accident: these are the palette's
+    // first group and the separator below them is drawn from the group
+    // boundary.
+    expect(items.map((i) => i.id)).toEqual([
+      '__local__',
+      '__new_connection__',
+      '__integrate_shell__',
+    ])
     expect(items[0].label).toBe('Local shell')
     expect(items[0].detail).toContain('local terminal')
     expect(items[1].label).toBe('New connection')
+    expect(items[2].label).toBe('Integrate this shell')
+  })
+
+  it('every item is typed Command — the palette badge vocabulary (nocx-4t37)', async () => {
+    const provider = new ActionsQuickConnectProvider(vi.fn(), vi.fn(), vi.fn())
+    const items = await Promise.resolve(provider.getItems())
+
+    expect(items.every((i) => i.kind === 'command')).toBe(true)
+  })
+
+  it('adds a target-needing command ("Forward a port") when one is provided', async () => {
+    const run = vi.fn()
+    const drillCommand = {
+      id: '__forward_port__',
+      label: 'Forward a port',
+      detail: 'Expose a port on this machine',
+      steps: [
+        { name: 'server', fetch: () => Promise.resolve([]) },
+        { name: 'port', fetch: () => Promise.resolve([]) },
+      ],
+      run,
+    }
+    const provider = new ActionsQuickConnectProvider(vi.fn(), vi.fn(), vi.fn(), drillCommand)
+
+    const items = await Promise.resolve(provider.getItems())
+    // Last, not first: the first row is what Enter activates on open, and
+    // that stays the muscle-memory "Local shell".
+    expect(items.map((i) => i.id)).toEqual([
+      '__local__',
+      '__new_connection__',
+      '__integrate_shell__',
+      '__forward_port__',
+    ])
+    expect(items[3].label).toBe('Forward a port')
+    expect(items[3].kind).toBe('command')
+    expect(items[3].drill).toBe(drillCommand)
+    // Activating the drill item never runs it directly — the surface walks
+    // the steps instead.
+    items[3].run()
+    expect(run).not.toHaveBeenCalled()
+  })
+
+  it('calls integrateShell when the integrate-this-shell item runs', () => {
+    const integrateShell = vi.fn()
+    const provider = new ActionsQuickConnectProvider(vi.fn(), vi.fn(), integrateShell)
+
+    provider.getItems()[2].run()
+
+    expect(integrateShell).toHaveBeenCalledOnce()
+  })
+
+  it('does not offer Ports in the palette — it is a sidebar view now (nocx-wzc4.7)', async () => {
+    const provider = new ActionsQuickConnectProvider(vi.fn(), vi.fn(), vi.fn())
+    const items = await Promise.resolve(provider.getItems())
+
+    // Ports is a surface you keep open beside the terminal, not a one-shot
+    // verb; the palette is for verbs. "Integrate this shell" above is the
+    // verb that stays.
+    expect(items.some((i) => i.label === 'Ports')).toBe(false)
   })
 
   it('calls newTab when the local-shell item runs', () => {
@@ -230,8 +296,8 @@ describe('QuickConnectController', () => {
         readonly label = 'Test'
         getItems(): QuickConnectItem[] {
           return [
-            { id: 'a', label: 'First', run: vi.fn() },
-            { id: 'b', label: 'Second', run: vi.fn() },
+            { id: 'a', kind: 'host', label: 'First', run: vi.fn() },
+            { id: 'b', kind: 'host', label: 'Second', run: vi.fn() },
           ]
         }
       })(),
@@ -259,7 +325,9 @@ describe('QuickConnectController', () => {
     const ctrl = makeController()
     const newTab = vi.fn()
     ctrl.mount(container, [new ActionsQuickConnectProvider(newTab, vi.fn())])
-    ctrl.show()
+    // The only provider here is a command provider, and commands live in the
+    // palette — open it (nocx-4t37).
+    ctrl.showPalette()
     await waitForItems()
 
     const dialog = container.querySelector<HTMLDialogElement>('dialog.nocx-dialog')
@@ -281,9 +349,9 @@ describe('QuickConnectController', () => {
         readonly label = 'Test'
         getItems(): QuickConnectItem[] {
           return [
-            { id: 'a', label: 'admin@server1', detail: 'Production', run: vi.fn() },
-            { id: 'b', label: 'root@server2', detail: 'Staging', run: vi.fn() },
-            { id: 'c', label: 'Local shell', run: vi.fn() },
+            { id: 'a', kind: 'host', label: 'admin@server1', detail: 'Production', run: vi.fn() },
+            { id: 'b', kind: 'host', label: 'root@server2', detail: 'Staging', run: vi.fn() },
+            { id: 'c', kind: 'host', label: 'Local shell', run: vi.fn() },
           ]
         }
       })(),
@@ -380,7 +448,7 @@ describe('QuickConnectController', () => {
     expect(resolvers.length).toBe(2)
 
     // Resolve the SECOND (current) load first.
-    resolvers[1]([{ id: 'fresh', label: 'Fresh Item', run: vi.fn() }])
+    resolvers[1]([{ id: 'fresh', kind: 'host', label: 'Fresh Item', run: vi.fn() }])
     await waitForItems()
 
     // The list shows the fresh item.
@@ -389,7 +457,7 @@ describe('QuickConnectController', () => {
     expect(items1[0].textContent).toContain('Fresh Item')
 
     // Now resolve the FIRST (stale) load.
-    resolvers[0]([{ id: 'stale', label: 'Stale Item', run: vi.fn() }])
+    resolvers[0]([{ id: 'stale', kind: 'host', label: 'Stale Item', run: vi.fn() }])
     await waitForItems()
 
     // List must NOT have changed — stale result discarded by generation guard.
@@ -405,9 +473,9 @@ describe('QuickConnectController', () => {
 describe('filtering behavior', () => {
   it('filter text narrows list items (case-insensitive)', () => {
     const items: QuickConnectItem[] = [
-      { id: 'a', label: 'admin@server1', detail: 'Production', run: vi.fn() },
-      { id: 'b', label: 'root@server2', detail: 'Staging', run: vi.fn() },
-      { id: 'c', label: 'Local shell', run: vi.fn() },
+      { id: 'a', kind: 'host', label: 'admin@server1', detail: 'Production', run: vi.fn() },
+      { id: 'b', kind: 'host', label: 'root@server2', detail: 'Staging', run: vi.fn() },
+      { id: 'c', kind: 'host', label: 'Local shell', run: vi.fn() },
     ]
 
     const q = 'prod'
@@ -423,8 +491,8 @@ describe('filtering behavior', () => {
 
   it('empty query returns all items', () => {
     const items: QuickConnectItem[] = [
-      { id: 'a', label: 'admin@server1', run: vi.fn() },
-      { id: 'b', label: 'root@server2', run: vi.fn() },
+      { id: 'a', kind: 'host', label: 'admin@server1', run: vi.fn() },
+      { id: 'b', kind: 'host', label: 'root@server2', run: vi.fn() },
     ]
 
     const filtered = items.filter((it) => it.label.toLowerCase().includes(''))
@@ -433,7 +501,7 @@ describe('filtering behavior', () => {
 
   it('matches on detail field', () => {
     const items: QuickConnectItem[] = [
-      { id: 'a', label: '192.168.1.1', detail: 'Production DB', run: vi.fn() },
+      { id: 'a', kind: 'host', label: '192.168.1.1', detail: 'Production DB', run: vi.fn() },
     ]
 
     const filtered = items.filter(
@@ -446,7 +514,9 @@ describe('filtering behavior', () => {
   })
 
   it('no match returns empty list', () => {
-    const items: QuickConnectItem[] = [{ id: 'a', label: 'admin@server1', run: vi.fn() }]
+    const items: QuickConnectItem[] = [
+      { id: 'a', kind: 'host', label: 'admin@server1', run: vi.fn() },
+    ]
 
     const q = 'zzzzz'
     const filtered = items.filter(
@@ -706,5 +776,501 @@ describe('SSHAliasQuickConnectProvider', () => {
     // Label uses alias directly, no user or port decoration
     expect(items[0].label).toBe('minimal')
     expect(items[0].detail).toBe('10.0.0.1')
+  })
+})
+/* ── Free-form (ad-hoc) connect provider ────────────────────────────── */
+
+describe('AdHocQuickConnectProvider', () => {
+  it('offers a Connect item for a bare host', () => {
+    const newTabByHost = vi.fn()
+    const provider = new AdHocQuickConnectProvider(newTabByHost)
+
+    const items = provider.getQueryItems('example.com')
+
+    expect(items).toHaveLength(1)
+    expect(items[0].id).toBe('__ad_hoc_connect__')
+    expect(items[0].label).toBe('Connect to example.com')
+    expect(items[0].system).toBe(true)
+    expect(items[0].badge).toBe('ad-hoc')
+
+    items[0].run()
+    expect(newTabByHost).toHaveBeenCalledWith('example.com', undefined, 22)
+  })
+
+  it('parses user@host:port into host, user and port', () => {
+    const newTabByHost = vi.fn()
+    const provider = new AdHocQuickConnectProvider(newTabByHost)
+
+    const items = provider.getQueryItems('deploy@example.com:2222')
+
+    expect(items).toHaveLength(1)
+    expect(items[0].label).toBe('Connect to deploy@example.com')
+    expect(items[0].detail).toBe('port 2222')
+
+    items[0].run()
+    expect(newTabByHost).toHaveBeenCalledWith('example.com', 'deploy', 2222)
+  })
+
+  it('accepts the ssh:// scheme', () => {
+    const newTabByHost = vi.fn()
+    const provider = new AdHocQuickConnectProvider(newTabByHost)
+
+    const items = provider.getQueryItems('ssh://deploy@10.0.0.1:2222')
+    items[0].run()
+    expect(newTabByHost).toHaveBeenCalledWith('10.0.0.1', 'deploy', 2222)
+  })
+
+  it('accepts a bracketed IPv6 literal', () => {
+    const newTabByHost = vi.fn()
+    const provider = new AdHocQuickConnectProvider(newTabByHost)
+
+    const items = provider.getQueryItems('[::1]:2222')
+    items[0].run()
+    expect(newTabByHost).toHaveBeenCalledWith('::1', undefined, 2222)
+  })
+
+  it('trims surrounding whitespace', () => {
+    const provider = new AdHocQuickConnectProvider(vi.fn())
+    expect(provider.getQueryItems('  example.com  ')).toHaveLength(1)
+  })
+
+  it('offers nothing for an empty query', () => {
+    const provider = new AdHocQuickConnectProvider(vi.fn())
+    expect(provider.getQueryItems('')).toHaveLength(0)
+    expect(provider.getQueryItems('   ')).toHaveLength(0)
+  })
+
+  it('offers nothing for a malformed string with no host', () => {
+    const provider = new AdHocQuickConnectProvider(vi.fn())
+    expect(provider.getQueryItems('user@')).toHaveLength(0)
+    expect(provider.getQueryItems(':2222')).toHaveLength(0)
+    expect(provider.getQueryItems('ssh://')).toHaveLength(0)
+  })
+
+  it('hides the default port from the detail line', () => {
+    const provider = new AdHocQuickConnectProvider(vi.fn())
+    expect(provider.getQueryItems('example.com:22')[0].detail).toBeUndefined()
+  })
+
+  it('contributes no static items', () => {
+    const provider = new AdHocQuickConnectProvider(vi.fn())
+    expect(provider.getItems()).toHaveLength(0)
+  })
+})
+
+/* ── Free-form connect entry in the picker ──────────────────────────── */
+
+describe('free-form connect entry', () => {
+  let container: HTMLDivElement
+
+  beforeEach(() => {
+    container = document.createElement('div')
+    document.body.append(container)
+  })
+
+  afterEach(() => {
+    container.remove()
+  })
+
+  /** Wait for microtasks (createEffect's async body) to settle. */
+  async function waitForItems(): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, 0))
+  }
+
+  function typeQuery(input: HTMLInputElement, value: string): void {
+    input.value = value
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+  }
+
+  function makePicker(newTabByHost: Mock): QuickConnectController {
+    const ctrl = new QuickConnectController()
+    afterEach(() => ctrl.destroy())
+    const providers: QuickConnectProvider[] = [
+      new ActionsQuickConnectProvider(vi.fn(), vi.fn()),
+      new SSHQuickConnectProvider(
+        { listProfiles: vi.fn().mockResolvedValue([]) } as never,
+        vi.fn(),
+      ),
+      new AdHocQuickConnectProvider(newTabByHost),
+    ]
+    ctrl.mount(container, providers)
+    ctrl.show()
+    return ctrl
+  }
+
+  it('offers Connect for a query matching nothing and connects via newTabByHost', async () => {
+    const newTabByHost = vi.fn()
+    makePicker(newTabByHost)
+    await waitForItems()
+
+    const input = container.querySelector<HTMLInputElement>('.quick-connect__search input')
+    expect(input).toBeTruthy()
+    typeQuery(input!, 'unknown-host')
+
+    const items = container.querySelectorAll('.quick-connect__item')
+    expect(items).toHaveLength(1)
+    expect(items[0].textContent).toContain('Connect to unknown-host')
+
+    // Reachable by keyboard alone: the row is selected and Enter activates it.
+    input!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+
+    expect(newTabByHost).toHaveBeenCalledWith('unknown-host', undefined, 22)
+    const dialog = container.querySelector<HTMLDialogElement>('dialog.nocx-dialog')
+    expect(dialog?.open).toBe(false)
+
+    // Nothing was persisted: the ad-hoc path only ever called newTabByHost —
+    // the picker's profile client has no write method on this path at all.
+    expect(newTabByHost).toHaveBeenCalledOnce()
+  })
+
+  it('ranks a matching saved profile above the ad-hoc entry — suppresses it', async () => {
+    const ctrl = new QuickConnectController()
+    afterEach(() => ctrl.destroy())
+    const providers: QuickConnectProvider[] = [
+      new ActionsQuickConnectProvider(vi.fn(), vi.fn()),
+      new SSHQuickConnectProvider(
+        {
+          listProfiles: vi.fn().mockResolvedValue([
+            {
+              id: 'ssh:custom:prod:uuid',
+              type: 'ssh' as const,
+              name: 'Production DB',
+              options: { host: 'example.com', port: 22, user: 'deploy' },
+            },
+          ]),
+        } as never,
+        vi.fn(),
+      ),
+      new AdHocQuickConnectProvider(vi.fn()),
+    ]
+    ctrl.mount(container, providers)
+    ctrl.show()
+    await waitForItems()
+
+    const input = container.querySelector<HTMLInputElement>('.quick-connect__search input')
+    expect(input).toBeTruthy()
+    typeQuery(input!, 'example.com')
+
+    const items = container.querySelectorAll('.quick-connect__item')
+    expect(items).toHaveLength(1)
+    expect(items[0].textContent).toContain('deploy@example.com')
+    expect(items[0].textContent).not.toContain('Connect to')
+  })
+
+  it('ranks a matching alias above the ad-hoc entry — suppresses it', async () => {
+    const ctrl = new QuickConnectController()
+    afterEach(() => ctrl.destroy())
+    const providers: QuickConnectProvider[] = [
+      new ActionsQuickConnectProvider(vi.fn(), vi.fn()),
+      new SSHQuickConnectProvider(
+        { listProfiles: vi.fn().mockResolvedValue([]) } as never,
+        vi.fn(),
+      ),
+      new SSHAliasQuickConnectProvider(
+        {
+          listProfiles: vi.fn().mockResolvedValue([]),
+          listSSHAliases: vi.fn().mockResolvedValue({
+            aliases: [{ alias: 'example.com', hostName: '10.0.0.1' }],
+            unavailable: null,
+          }),
+        } as never,
+        vi.fn(),
+      ),
+      new AdHocQuickConnectProvider(vi.fn()),
+    ]
+    ctrl.mount(container, providers)
+    ctrl.show()
+    await waitForItems()
+
+    const input = container.querySelector<HTMLInputElement>('.quick-connect__search input')
+    expect(input).toBeTruthy()
+    typeQuery(input!, 'example.com')
+
+    const items = container.querySelectorAll('.quick-connect__item')
+    expect(items).toHaveLength(1)
+    expect(items[0].textContent).toContain('example.com')
+    expect(items[0].textContent).toContain('alias')
+    expect(items[0].textContent).not.toContain('Connect to')
+  })
+
+  it('reports a malformed string instead of connecting', async () => {
+    const newTabByHost = vi.fn()
+    makePicker(newTabByHost)
+    await waitForItems()
+
+    const input = container.querySelector<HTMLInputElement>('.quick-connect__search input')
+    expect(input).toBeTruthy()
+    typeQuery(input!, 'user@')
+
+    expect(container.querySelectorAll('.quick-connect__item')).toHaveLength(0)
+    const empty = container.querySelector('.quick-connect__empty')
+    expect(empty?.textContent).toContain('Could not parse')
+    expect(empty?.textContent).toContain('user@host:port')
+
+    input!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    expect(newTabByHost).not.toHaveBeenCalled()
+  })
+})
+
+/* ── Palette and drill-in (nocx-4t37) ───────────────────────────────── */
+
+describe('palette and drill-in', () => {
+  let container: HTMLDivElement
+
+  beforeEach(() => {
+    container = document.createElement('div')
+    document.body.append(container)
+  })
+
+  afterEach(() => {
+    container.remove()
+  })
+
+  async function waitForItems(): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, 0))
+  }
+
+  function typeQuery(input: HTMLInputElement, value: string): void {
+    input.value = value
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+  }
+
+  /** The full picker: commands (with a drill), one saved profile, ad-hoc. */
+  function makePicker(run = vi.fn()): {
+    ctrl: QuickConnectController
+    run: Mock
+    newTabByHost: Mock
+  } {
+    const newTabByHost = vi.fn()
+    const ctrl = new QuickConnectController()
+    afterEach(() => ctrl.destroy())
+    const drillCommand = {
+      id: '__forward_port__',
+      label: 'Forward a port',
+      detail: 'Expose a port on this machine',
+      steps: [
+        {
+          name: 'server',
+          fetch: () =>
+            Promise.resolve([{ id: 'srv-1', label: 'deploy@example.com', detail: 'Prod' }]),
+        },
+        {
+          name: 'port',
+          fetch: () =>
+            Promise.resolve([
+              { id: 'port-8080', label: ':8080', detail: '10.0.0.1:8080', value: '10.0.0.1:8080' },
+            ]),
+        },
+      ],
+      run,
+    }
+    const providers: QuickConnectProvider[] = [
+      new ActionsQuickConnectProvider(vi.fn(), vi.fn(), vi.fn(), drillCommand),
+      new SSHQuickConnectProvider(
+        {
+          listProfiles: vi.fn().mockResolvedValue([
+            {
+              id: 'ssh:custom:prod:uuid',
+              type: 'ssh' as const,
+              name: 'Production DB',
+              options: { host: 'example.com', port: 22, user: 'deploy' },
+            },
+          ]),
+        } as never,
+        vi.fn(),
+      ),
+      new AdHocQuickConnectProvider(newTabByHost),
+    ]
+    ctrl.mount(container, providers)
+    return { ctrl, run, newTabByHost }
+  }
+
+  function labels(): string[] {
+    return Array.from(container.querySelectorAll('.quick-connect__item')).map((el) =>
+      (el.textContent ?? '').trim(),
+    )
+  }
+
+  it('the palette (showPalette) mixes commands and hosts, each row typed on the right', async () => {
+    const { ctrl } = makePicker()
+    ctrl.showPalette()
+    await waitForItems()
+
+    const shown = labels()
+    expect(shown.some((l) => l.includes('Local shell'))).toBe(true)
+    expect(shown.some((l) => l.includes('Forward a port'))).toBe(true)
+    expect(shown.some((l) => l.includes('deploy@example.com'))).toBe(true)
+
+    // The type badges: Command on commands, Host on hosts.
+    const kinds = Array.from(container.querySelectorAll('.quick-connect__item-kind')).map((el) =>
+      (el.textContent ?? '').trim(),
+    )
+    expect(kinds.some((k) => k === 'Command')).toBe(true)
+    expect(kinds.some((k) => k === 'Host')).toBe(true)
+  })
+
+  it('the caret (show) opens the plain server list: no commands, no type badges', async () => {
+    const { ctrl } = makePicker()
+    ctrl.show()
+    await waitForItems()
+
+    const shown = labels()
+    expect(shown.some((l) => l.includes('deploy@example.com'))).toBe(true)
+    expect(shown.some((l) => l.includes('Local shell'))).toBe(false)
+    expect(shown.some((l) => l.includes('Forward a port'))).toBe(false)
+    expect(container.querySelectorAll('.quick-connect__item-kind')).toHaveLength(0)
+  })
+
+  it('ad-hoc connect still works inside the palette', async () => {
+    const { ctrl, newTabByHost } = makePicker()
+    ctrl.showPalette()
+    await waitForItems()
+
+    const input = container.querySelector<HTMLInputElement>('.quick-connect__search input')
+    expect(input).toBeTruthy()
+    typeQuery(input!, 'unknown-host')
+
+    const items = container.querySelectorAll('.quick-connect__item')
+    expect(items).toHaveLength(1)
+    expect(items[0].textContent).toContain('Connect to unknown-host')
+    input!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    expect(newTabByHost).toHaveBeenCalledWith('unknown-host', undefined, 22)
+  })
+
+  it('a command that needs a target drills in: server, then port, then runs', async () => {
+    const { ctrl, run } = makePicker()
+    ctrl.showPalette()
+    await waitForItems()
+
+    const input = container.querySelector<HTMLInputElement>('.quick-connect__search input')
+    expect(input).toBeTruthy()
+    typeQuery(input!, 'forward')
+    input!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    await waitForItems()
+
+    // Drill mode: the breadcrumb names the command, the list is the servers.
+    const drill = container.querySelector('.quick-connect__drill')
+    expect(drill?.textContent).toContain('Forward a port')
+    expect(drill?.textContent).toContain('server')
+    const serverRows = container.querySelectorAll('.quick-connect__item')
+    expect(serverRows).toHaveLength(1)
+    expect(serverRows[0].textContent).toContain('deploy@example.com')
+
+    // Choose the server: the list becomes the ports, the trail gains it.
+    input!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    await waitForItems()
+
+    const drill2 = container.querySelector('.quick-connect__drill')
+    expect(drill2?.textContent).toContain('deploy@example.com')
+    expect(drill2?.textContent).toContain('port')
+    const portRows = container.querySelectorAll('.quick-connect__item')
+    expect(portRows).toHaveLength(1)
+    expect(portRows[0].textContent).toContain(':8080')
+
+    // Choose the port: the command runs with the completed selection.
+    input!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    await waitForItems()
+
+    expect(run).toHaveBeenCalledOnce()
+    const selections = run.mock.calls[0][0] as readonly DrillSelection[]
+    expect(selections.map((s) => s.stepName)).toEqual(['server', 'port'])
+    expect(selections[0].item.id).toBe('srv-1')
+    expect(selections[1].item.value).toBe('10.0.0.1:8080')
+
+    const dialog = container.querySelector<HTMLDialogElement>('dialog.nocx-dialog')
+    expect(dialog?.open).toBe(false)
+  })
+
+  it('Backspace on an empty filter walks the drill back one step at a time', async () => {
+    const { ctrl, run } = makePicker()
+    ctrl.showPalette()
+    await waitForItems()
+
+    const input = container.querySelector<HTMLInputElement>('.quick-connect__search input')
+    expect(input).toBeTruthy()
+    typeQuery(input!, 'forward')
+    input!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    await waitForItems()
+    input!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    await waitForItems()
+
+    // Two steps in: the trail shows the chosen server.
+    expect(container.querySelector('.quick-connect__drill')?.textContent).toContain(
+      'deploy@example.com',
+    )
+
+    // Backspace walks back to the server step; the trail loses the choice.
+    input!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true }))
+    await waitForItems()
+    expect(container.querySelector('.quick-connect__drill')?.textContent).not.toContain(
+      'deploy@example.com',
+    )
+
+    // One more Backspace exits the drill back to the palette; the dialog
+    // stays open.
+    input!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true }))
+    await waitForItems()
+    expect(container.querySelector('.quick-connect__drill')).toBeNull()
+    const dialog = container.querySelector<HTMLDialogElement>('dialog.nocx-dialog')
+    expect(dialog?.open).toBe(true)
+    expect(labels().some((l) => l.includes('Local shell'))).toBe(true)
+
+    expect(run).not.toHaveBeenCalled()
+  })
+
+  it('Escape walks the drill back and only closes at the palette root', async () => {
+    const { ctrl } = makePicker()
+    ctrl.showPalette()
+    await waitForItems()
+
+    const input = container.querySelector<HTMLInputElement>('.quick-connect__search input')
+    expect(input).toBeTruthy()
+    typeQuery(input!, 'forward')
+    input!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    await waitForItems()
+    input!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    await waitForItems()
+
+    // Escape at a drill step walks back — it does not close the dialog.
+    input!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await waitForItems()
+    expect(container.querySelector('.quick-connect__drill')).toBeTruthy()
+    let dialog = container.querySelector<HTMLDialogElement>('dialog.nocx-dialog')
+    expect(dialog?.open).toBe(true)
+
+    // Escape at the drill root exits the drill; the dialog stays open.
+    input!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await waitForItems()
+    expect(container.querySelector('.quick-connect__drill')).toBeNull()
+    dialog = container.querySelector<HTMLDialogElement>('dialog.nocx-dialog')
+    expect(dialog?.open).toBe(true)
+  })
+
+  it('a degraded ssh -G resolver renders as a row in both presentations — never as no results', async () => {
+    const ctrl = new QuickConnectController()
+    afterEach(() => ctrl.destroy())
+    const providers: QuickConnectProvider[] = [
+      new ActionsQuickConnectProvider(vi.fn(), vi.fn()),
+      new SSHAliasQuickConnectProvider(
+        {
+          listProfiles: vi.fn().mockResolvedValue([]),
+          listSSHAliases: vi.fn().mockResolvedValue({
+            aliases: [],
+            unavailable: { reason: 'no-ssh-binary', detail: 'ssh binary not found on PATH' },
+          }),
+        } as never,
+        vi.fn(),
+      ),
+    ]
+    ctrl.mount(container, providers)
+
+    ctrl.show()
+    await waitForItems()
+    expect(labels().some((l) => l.includes('SSH config: no-ssh-binary'))).toBe(true)
+
+    ctrl.showPalette()
+    await waitForItems()
+    expect(labels().some((l) => l.includes('SSH config: no-ssh-binary'))).toBe(true)
+    expect(labels().some((l) => l.includes('Local shell'))).toBe(true)
   })
 })

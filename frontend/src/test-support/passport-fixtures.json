@@ -1,0 +1,129 @@
+{
+  "_comment": "Shared golden fixture for the OSC 636 readiness passport and the nocx_env-tagged OSC 133 markers (spec 2026-08-05-nocxify, §5.2). Consumed by BOTH the Go exec tests (internal/shellintegration — asserts the real shells emit exactly these bytes) and the frontend tests (frontend/src/environment-passport.test.ts, frontend/src/renderers/xterm.test.ts — asserts the parser accepts exactly these bytes and yields the expected typed values). If a sequence changes here, both sides must change together; that is the point. Sequences are BEL-terminated, exactly as the scripts emit them. The overlong (>512-byte sequence) rejection is a parser bound and is constructed programmatically in the frontend tests.",
+  "protocolVersion": "1",
+  "scriptVersion": "11",
+  "environmentId": "env-ab12",
+  "parentEnvironmentId": "-",
+  "generation": "-",
+  "passports": {
+    "enhanced": {
+      "sequence": "\u001b]636;P;1;env-ab12;-;11;enhanced;-\u0007",
+      "expected": {
+        "protocolVersion": "1",
+        "environmentId": "env-ab12",
+        "parentEnvironmentId": "-",
+        "scriptVersion": "11",
+        "tier": "enhanced",
+        "generation": "-"
+      }
+    },
+    "minimal": {
+      "sequence": "\u001b]636;P;1;env-ab12;-;11;minimal;-\u0007",
+      "expected": {
+        "protocolVersion": "1",
+        "environmentId": "env-ab12",
+        "parentEnvironmentId": "-",
+        "scriptVersion": "11",
+        "tier": "minimal",
+        "generation": "-"
+      }
+    }
+  },
+  "markers": {
+    "A": {
+      "sequence": "\u001b]133;A;nocx_env=env-ab12\u0007",
+      "expected": { "kind": "A", "nocxEnv": "env-ab12" }
+    },
+    "B": {
+      "sequence": "\u001b]133;B;nocx_env=env-ab12\u0007",
+      "expected": { "kind": "B", "nocxEnv": "env-ab12" }
+    },
+    "C": {
+      "sequence": "\u001b]133;C;nocx_env=env-ab12\u0007",
+      "expected": { "kind": "C", "nocxEnv": "env-ab12" }
+    },
+    "D0": {
+      "sequence": "\u001b]133;D;0;nocx_env=env-ab12\u0007",
+      "expected": { "kind": "D", "exitCode": 0, "nocxEnv": "env-ab12" }
+    }
+  },
+  "invalid": {
+    "passports": [
+      {
+        "name": "not-a-passport",
+        "sequence": "\u001b]636;H;deadbeefdeadbeefdeadbeefdeadbeef\u0007",
+        "reason": "not-a-passport"
+      },
+      {
+        "name": "unknown-protocol",
+        "sequence": "\u001b]636;P;2;env-ab12;-;11;enhanced;-\u0007",
+        "reason": "unknown-protocol"
+      },
+      {
+        "name": "wrong-field-count",
+        "sequence": "\u001b]636;P;1;env-ab12;-;11;enhanced\u0007",
+        "reason": "malformed"
+      },
+      {
+        "name": "trailing-field",
+        "sequence": "\u001b]636;P;1;env-ab12;-;11;enhanced;-;extra\u0007",
+        "reason": "malformed"
+      },
+      {
+        "name": "space-in-environment-id",
+        "sequence": "\u001b]636;P;1;bad id!;-;11;enhanced;-\u0007",
+        "reason": "malformed"
+      },
+      {
+        "name": "empty-environment-id",
+        "sequence": "\u001b]636;P;1;;-;11;enhanced;-\u0007",
+        "reason": "malformed"
+      },
+      {
+        "name": "unknown-tier",
+        "sequence": "\u001b]636;P;1;env-ab12;-;11;turbo;-\u0007",
+        "reason": "malformed"
+      }
+    ],
+    "markers": [
+      {
+        "name": "empty-tag-value",
+        "sequence": "\u001b]133;A;nocx_env=\u0007"
+      },
+      {
+        "name": "space-in-tag-value",
+        "sequence": "\u001b]133;A;nocx_env=bad id\u0007"
+      },
+      {
+        "name": "tag-without-equals",
+        "sequence": "\u001b]133;B;nocx_env\u0007"
+      },
+      {
+        "name": "malformed-param",
+        "sequence": "\u001b]133;A;foo\u0007"
+      },
+      {
+        "name": "malformed-tag-on-D",
+        "sequence": "\u001b]133;D;0;nocx_env=\u0007"
+      }
+    ],
+    "environmentIds": [
+      {
+        "name": "space",
+        "value": "bad id!"
+      },
+      {
+        "name": "semicolon",
+        "value": "env;id"
+      },
+      {
+        "name": "overlong",
+        "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      {
+        "name": "empty",
+        "value": ""
+      }
+    ]
+  }
+}

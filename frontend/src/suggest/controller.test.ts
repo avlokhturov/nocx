@@ -7,15 +7,29 @@
 // open decision but an explicit Tab's open intent survives it, and ghost
 // text accepts only under every §8.7 precondition.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { EditorView } from '@codemirror/view'
 import {
   CompletionController,
+  ghostAcceptable,
   ghostTail,
   LATENCY_BUDGET_MS,
   type CompletionEditor,
 } from './controller'
+import { CommandEditor } from '../editor'
 import { CompletionDropdown } from '../ui/completion-dropdown'
 import type { Candidate } from './candidate'
 import type { SuggestionProvider, SuggestContext, EmptyReason } from './providers'
+import { setDecisionTracing } from '../log'
+
+/** The editor's internal CM6 view — reached only to seed selections and to
+ *  read rendered decorations (the ghost span), the way editor.test.ts does. */
+const viewOf = (ed: CommandEditor): EditorView => (ed as unknown as { view: EditorView }).view
+
+/** Dispatch a keydown exactly where a user's keystroke lands. */
+const keyOn = (view: EditorView, init: KeyboardEventInit) =>
+  view.contentDOM.dispatchEvent(
+    new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init }),
+  )
 
 // ── fakes ────────────────────────────────────────────────────────────────
 
@@ -830,6 +844,48 @@ describe('keyboard', () => {
   })
 })
 
+describe('ownsArrows — the bare-arrow ownership decision (nocx-mlm7)', () => {
+  const open = async (controller: CompletionController) => {
+    controller.open()
+    await flush()
+  }
+
+  it('answers true for a bare ArrowUp/ArrowDown while the dropdown is open with a selectable list', async () => {
+    const { controller } = rig({
+      providers: [instantProvider('a', () => [cand({ id: 'a1' }), cand({ id: 'a2' })])],
+    })
+    await open(controller)
+    expect(controller.ownsArrows(key('ArrowDown'))).toBe(true)
+    expect(controller.ownsArrows(key('ArrowUp'))).toBe(true)
+  })
+
+  it('answers false when the dropdown is closed, showing the empty row, or the key is modified', async () => {
+    const { controller } = rig({
+      providers: [instantProvider('a', () => [cand({ id: 'a1' }), cand({ id: 'a2' })])],
+    })
+    // Closed: recall's bare-Up gesture owns the key (up at the top of a
+    // single-line draft opens recall — the arbiter's tail).
+    expect(controller.ownsArrows(key('ArrowUp'))).toBe(false)
+
+    await open(controller)
+    // Modified arrows are not the dropdown's navigation keys (shift+Up is
+    // recall's widen; chorded arrows are editor shortcuts).
+    expect(controller.ownsArrows(key('ArrowUp', { shiftKey: true }))).toBe(false)
+    expect(controller.ownsArrows(key('ArrowUp', { ctrlKey: true }))).toBe(false)
+    // Other keys are not arrows.
+    expect(controller.ownsArrows(key('Enter'))).toBe(false)
+  })
+
+  it('answers false for the empty row — it owns nothing, by its own contract', async () => {
+    const { controller } = rig({
+      providers: [emptyProvider('a')],
+    })
+    await open(controller)
+    expect(controller.ownsArrows(key('ArrowDown'))).toBe(false)
+    expect(controller.ownsArrows(key('ArrowUp'))).toBe(false)
+  })
+})
+
 // ── ghost text ───────────────────────────────────────────────────────────
 
 // The ghost and the dropdown row are two renderings of ONE candidate, so the
@@ -1060,6 +1116,179 @@ describe('ghost text', () => {
     editor.getSelection = () => fakeSel
     expect(controller.handleKey(key('ArrowRight'))).toBe(false)
     editor.getSelection = origGet
+  })
+})
+
+describe('ghostAcceptable — the ONE rule behind draw and accept (nocx-mlm7)', () => {
+  const base = {
+    candidate: cand({
+      id: 'hist:git status',
+      insertText: 'git status',
+      replacement: { from: 0, to: 7 },
+    }),
+    boxQueryDoc: 'git sta',
+    queryDoc: 'git sta',
+    doc: 'git sta',
+    caret: 7,
+    selectionEmpty: true,
+  }
+
+  it('accepts when every §8.7 precondition holds', () => {
+    expect(ghostAcceptable(base)).toEqual({ ok: true })
+  })
+
+  it('the check the accept path alone used to make is IN the rule: a box matching the live doc but not the current query is refused (query-moved)', () => {
+    // The drift the render path had drifted away from: box.queryDoc ===
+    // view doc (the draw path's only revision check) while !== the
+    // controller's queryDoc (canAcceptGhost's extra check) — so a ghost was
+    // drawn that Right silently refused. One predicate puts the check in
+    // both paths; the draw path must refuse exactly where accept refuses.
+    expect(ghostAcceptable({ ...base, queryDoc: 'git status' })).toEqual({
+      ok: false,
+      condition: 'query-moved',
+    })
+  })
+
+  it('names every failing condition — the trace says WHY a ghost accept was refused', () => {
+    expect(ghostAcceptable({ ...base, candidate: null })).toEqual({
+      ok: false,
+      condition: 'no-candidate',
+    })
+    expect(
+      ghostAcceptable({ ...base, candidate: cand({ id: 's', eligibleForGhostText: false }) }),
+    ).toEqual({ ok: false, condition: 'not-ghost-eligible' })
+    expect(ghostAcceptable({ ...base, doc: 'git stax' })).toEqual({
+      ok: false,
+      condition: 'doc-changed',
+    })
+    expect(ghostAcceptable({ ...base, selectionEmpty: false })).toEqual({
+      ok: false,
+      condition: 'selection-nonempty',
+    })
+    expect(ghostAcceptable({ ...base, caret: 3 })).toEqual({
+      ok: false,
+      condition: 'caret-off-replacement',
+    })
+    // The whole line is the query doc; the caret sits at the token end,
+    // mid-line — Right would be a caret movement, never an accept.
+    expect(
+      ghostAcceptable({
+        ...base,
+        boxQueryDoc: 'git sta and more',
+        queryDoc: 'git sta and more',
+        doc: 'git sta and more',
+        caret: 7,
+      }),
+    ).toEqual({ ok: false, condition: 'mid-line' })
+  })
+})
+
+describe('ghost draw and accept are one rule (nocx-mlm7)', () => {
+  // The draw path needs a real CM6 view (the ghost ViewPlugin), so this
+  // harness mounts the controller's extensions into a real CommandEditor —
+  // the same shape editor.test.ts uses. The editor seam and the view are
+  // the SAME document here, which is what makes draw ⇔ accept comparable.
+  const rigView = () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const dropdown = new CompletionDropdown({ onHover: () => {}, onPick: () => {} })
+    const controller = new CompletionController({
+      providers: [
+        instantProvider('h', () => [
+          cand({
+            id: 'hist:git status',
+            insertText: 'git status',
+            replacement: { from: 0, to: 7 },
+          }),
+        ]),
+      ],
+      dropdown,
+      env: () => ({ isLocal: true, cwd: '/repo', host: '' }),
+      latencyBudgetMs: 0,
+      now: () => 1_750_000_000_000,
+    })
+    const ed = new CommandEditor(
+      { submit: vi.fn(), cancel: vi.fn(), onTab: () => controller.open() },
+      controller.extensions(),
+    )
+    ed.mount(container)
+    controller.attach(ed, container)
+    ed.setKeyArbiter((e) => controller.handleKey(e))
+    ed.show()
+    return { ed, controller, dropdown, container, view: viewOf(ed) }
+  }
+
+  it('a drawn ghost is exactly what Right accepts — the draw and accept paths consult the same predicate', async () => {
+    const { ed, controller, view } = rigView()
+    ed.insertText('git sta')
+    controller.onDocChanged()
+    await flush()
+    const ghost = () => view.contentDOM.querySelector('.nocx-editor-ghost')
+    expect(ghost()).not.toBeNull()
+    expect(ghost()?.textContent).toBe('tus')
+    // The key the ghost advertises takes exactly what is drawn.
+    keyOn(view, { key: 'ArrowRight' })
+    expect(ed.getDoc()).toBe('git status')
+  })
+
+  it('a ghost that Right/End would refuse is never drawn — the mid-line caret draws nothing and accepts nothing', async () => {
+    const { ed, controller, view } = rigView()
+    ed.insertText('git sta')
+    // The caret sits MID-LINE before the query: the shared predicate
+    // refuses (caret !== replacement.to), so nothing may draw and Right
+    // must fall through to the editor's caret movement, never insert.
+    view.dispatch({ selection: { anchor: 3 } })
+    controller.onDocChanged()
+    await flush()
+    expect(view.contentDOM.querySelector('.nocx-editor-ghost')).toBeNull()
+    keyOn(view, { key: 'ArrowRight' })
+    expect(ed.getDoc()).toBe('git sta')
+  })
+})
+
+describe('ghost refusal tracing (nocx-mlm7)', () => {
+  it('a refused ghost accept names the failing condition — and only when decision tracing is on', async () => {
+    const editor = new FakeEditor('git sta')
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const dropdown = new CompletionDropdown({ onHover: () => {}, onPick: () => {} })
+    const controller = new CompletionController({
+      providers: [
+        instantProvider('h', () => [
+          cand({
+            id: 'hist:git status',
+            insertText: 'git status',
+            replacement: { from: 0, to: 7 },
+          }),
+        ]),
+      ],
+      dropdown,
+      env: () => ({ isLocal: true, cwd: '/repo', host: '' }),
+      now: () => 1_750_000_000_000,
+    })
+    controller.attach(editor, container)
+    controller.onDocChanged()
+    await flush()
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => {})
+    try {
+      // Tracing is OFF by default: the refusal emits nothing at all — the
+      // per-keystroke hot-path guarantee.
+      editor.caret = 3
+      expect(controller.handleKey(key('ArrowRight'))).toBe(false)
+      expect(debug).not.toHaveBeenCalled()
+      // Tracing ON: the trace names the condition that refused the accept.
+      setDecisionTracing(true)
+      controller.handleKey(key('ArrowRight'))
+      const calls = debug.mock.calls.map((c) => c.join(' '))
+      expect(
+        calls.some(
+          (c) => c.includes('nocx:decide ghost-refused') && c.includes('caret-off-replacement'),
+        ),
+      ).toBe(true)
+    } finally {
+      setDecisionTracing(false)
+      debug.mockRestore()
+    }
   })
 })
 

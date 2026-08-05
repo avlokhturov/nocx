@@ -295,16 +295,35 @@ select:focus-visible {
   font-size: var(--font-size-sm);
   text-transform: uppercase;
   letter-spacing: 0.5px;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* The actions slot (SidebarViewDescriptor.actions) pins to the far edge with
+   its own auto margin — never `justify-content: space-between`, which is only
+   correct for exactly two children (nocx-a44m). One child (title only) and
+   two children (title + actions) both lay out correctly. */
+.ui-sidebar-view__actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
 }
 
 .ui-sidebar-view__filter {
   flex: 0 0 auto;
 }
 
+/* The body carries the SAME horizontal padding as the header. Content running
+   flush to the panel edge while the title is inset reads as a broken layout,
+   and it is the kit's job to get that right once rather than every view's job
+   to remember (nocx-wzc4.11). */
 .ui-sidebar-view__body {
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
+  padding: 0 16px;
 }
 
 /* ── Settings-specific fix: .st-container needs min-height: 0 ──────── */

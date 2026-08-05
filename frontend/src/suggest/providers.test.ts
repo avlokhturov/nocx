@@ -8,6 +8,7 @@ import {
   commandProvider,
   historyProvider,
   fsProvider,
+  createShellProviders,
   MAX_HISTORY_IN_ARGUMENT_POSITION,
   MAX_PROVIDER_CANDIDATES,
   type SuggestContext,
@@ -15,6 +16,10 @@ import {
 import { CommandSnapshotStore } from '../command-snapshot'
 import type { HistoryQuery } from '../generated/history.query'
 import type { FsComplete } from '../generated/fs.complete'
+import type { Candidate } from './candidate'
+import { ProfileClient } from '../profiles'
+import type { SSHProfile } from '../profiles'
+import { Dispatcher } from '../dispatcher'
 
 const ctx = (over: Partial<SuggestContext> = {}): SuggestContext => ({
   doc: 'git sta',
@@ -254,6 +259,38 @@ describe('historyProvider', () => {
     )
     expect(onRemote.candidates.length).toBe(MAX_PROVIDER_CANDIDATES)
   })
+  it('argument position under ssh keeps the full provider cap (paths do not answer there)', async () => {
+    const entries = Array.from({ length: MAX_PROVIDER_CANDIDATES + 5 }, (_, i) => ({
+      id: `ssh-${i}`,
+      command: `ssh myhost -- x${i}`,
+      cwd: '/repo',
+      host: '',
+      status: 'success' as const,
+      maskedCount: 0,
+      maskedKinds: [],
+      endedAt: 100 + i,
+    }))
+    const provider = historyProvider({
+      query: vi.fn((): Promise<HistoryQuery> =>
+        Promise.resolve({
+          scope: 'directory',
+          exhausted: true,
+          source: 'store',
+          coverage: null,
+          entries,
+        }),
+      ),
+    })
+    // Under `ssh` the fs provider is inactive (NO_FS_CANDIDATES), so
+    // history is the only answer in argument position — it keeps its full
+    // capacity rather than the sidebar cap, which exists to stop history
+    // crowding paths.
+    const got = await provider.suggest(
+      ctx({ doc: 'ssh myhost ', token: { text: '', from: 11, to: 11 } }),
+      new AbortController().signal,
+    )
+    expect(got.candidates.length).toBe(MAX_PROVIDER_CANDIDATES)
+  })
 
   it('a history row whose trailing token no longer exists is marked stalePath — demoted, never dropped', async () => {
     // The reported case: the user deleted the file, and the whole-line row
@@ -487,6 +524,30 @@ describe('fsProvider', () => {
     expect(provider.applicable(ctx({ token: { text: '', from: 4, to: 4 } }))).toBe(true)
   })
 
+  it('is NOT applicable in ssh argument position — a directory is not a destination (nocx-r35s)', () => {
+    // The bug: `ssh <TAB>` offered Downloads/, go/, orca/ and repos/ ABOVE the
+    // host row — the fs provider answered every argument position, including
+    // the one whose answer is a host. ssh's argument is a destination in the
+    // remote namespace; the local tree is never the answer there.
+    expect(provider.applicable(ctx({ doc: 'ssh ', token: { text: '', from: 4, to: 4 } }))).toBe(
+      false,
+    )
+    expect(
+      provider.applicable(ctx({ doc: 'ssh myh', token: { text: 'myh', from: 4, to: 7 } })),
+    ).toBe(false)
+    // A path FORM under ssh is still an ssh argument — a remote path, which a
+    // local path candidate would masquerade as.
+    expect(
+      provider.applicable(ctx({ doc: 'ssh ./x', token: { text: './x', from: 4, to: 8 } })),
+    ).toBe(false)
+    // The table grows by addition: a command it has never heard of keeps the
+    // default of "both kinds" (`scp`'s first argument IS a local file).
+    expect(provider.applicable(ctx({ doc: 'scp ', token: { text: '', from: 4, to: 4 } }))).toBe(
+      true,
+    )
+    expect(provider.applicable(ctx({ doc: 'ls ', token: { text: '', from: 3, to: 3 } }))).toBe(true)
+  })
+
   it('an empty token lists the session cwd (the wire refuses empty text, so it asks for ./)', async () => {
     const complete = vi.fn((text: string): Promise<FsComplete> =>
       Promise.resolve(
@@ -670,7 +731,6 @@ describe('fsProvider', () => {
     expect(c.matchRanges).toEqual([{ from: 0, to: 2 }])
     expect(c.insertText).toBe('repos/meshynet/graphify-out/')
   })
-
   it('answers nothing on a provider error', async () => {
     const failing = fsProvider({
       complete: vi.fn(() => Promise.reject(new Error('no such dir'))),
@@ -681,5 +741,81 @@ describe('fsProvider', () => {
         new AbortController().signal,
       ),
     ).rejects.toThrow('no such dir')
+  })
+})
+
+describe('createShellProviders under ssh (nocx-r35s)', () => {
+  const profile = (over: Partial<SSHProfile> = {}): SSHProfile => ({
+    id: 'p1',
+    type: 'ssh',
+    name: 'Prod',
+    options: { host: 'prod-db' },
+    ...over,
+  })
+  const client = (): ProfileClient => {
+    const pc = new ProfileClient(new Dispatcher())
+    vi.spyOn(pc, 'listProfiles').mockResolvedValue([profile()])
+    vi.spyOn(pc, 'listSSHAliases').mockResolvedValue({
+      aliases: [{ alias: 'staging-db', hostName: 'staging.example.com' }],
+      unavailable: null,
+    })
+    return pc
+  }
+  const sshCtx = (): SuggestContext =>
+    ctx({ doc: 'ssh ', token: { text: '', from: 4, to: 4 }, cwd: '/home/dev' })
+
+  it('`ssh <TAB>` produces no candidate of kind path — the rows are hosts and ssh history', async () => {
+    const providers = createShellProviders({
+      store: snapshotted([]),
+      queryHistory: () =>
+        Promise.resolve({
+          scope: 'directory',
+          exhausted: true,
+          source: 'store',
+          coverage: null,
+          entries: [
+            {
+              id: '1',
+              command: 'ssh prod-db',
+              cwd: '/home/dev',
+              host: '',
+              status: 'success',
+              maskedCount: 0,
+              maskedKinds: [],
+              endedAt: 100,
+            },
+          ],
+        }),
+      // The backend answers the local tree here — it must never be consulted
+      // for ssh, and the merged rows must prove it (a test that only checked
+      // ranking would pass with the paths still in the list, one keystroke
+      // from the bug).
+      completeFs: () =>
+        Promise.resolve({
+          entries: [
+            { name: 'Downloads', path: '/home/dev/Downloads', isDir: true },
+            { name: 'go', path: '/home/dev/go', isDir: true },
+          ],
+        }),
+      profileClient: client(),
+    })
+
+    const all: Candidate[] = []
+    for (const p of providers) {
+      if (!p.applicable(sshCtx())) continue
+      const batch = await p.suggest(sshCtx(), new AbortController().signal)
+      all.push(...batch.candidates)
+    }
+
+    // The user-visible contract: NOTHING of kind path under ssh. The rows
+    // that do appear are hosts (profiles + config aliases) and ssh history.
+    expect(all.some((c) => c.source === 'path')).toBe(false)
+    expect(all.filter((c) => c.source === 'host').map((c) => c.insertText)).toEqual([
+      'prod-db',
+      'staging-db',
+    ])
+    expect(all.filter((c) => c.source === 'history').map((c) => c.insertText)).toEqual([
+      'ssh prod-db',
+    ])
   })
 })

@@ -37,3 +37,17 @@
 .ui-stack[data-divided='true'] > :not(.st-vis-hidden) ~ :not(.st-vis-hidden) {
   border-top: 1px solid var(--color-divider);
 }
+
+/* ── Dense variant ──────────────────────────────────────────────────────
+   A list you scan, not a form you read: the gap goes away entirely and the
+   divided row padding halves. Control-to-control rhythm and record-to-record
+   rhythm are different problems, and applying the first to the second spends
+   a narrow rail's whole height on air (nocx-wzc4.10). */
+
+.ui-stack[data-dense='true'] {
+  gap: 0;
+}
+
+.ui-stack[data-divided='true'][data-dense='true'] > * {
+  padding: var(--space-2) 0;
+}

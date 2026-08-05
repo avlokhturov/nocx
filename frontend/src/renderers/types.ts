@@ -1,4 +1,5 @@
 import type { ITheme } from '@xterm/xterm'
+import type { PassportDisposition } from '../environment-passport'
 
 // Renderer-agnostic terminal contract. The backend (PTY over WS) is renderer-
 // agnostic, so any VT frontend just needs to satisfy this small surface:
@@ -30,6 +31,10 @@ export type CwdCallback = (event: CwdEvent) => void
 export interface CommandMarker {
   kind: 'A' | 'B' | 'C' | 'D'
   exitCode?: number
+  // nocxEnv is the OSC 133 `nocx_env=<id>` parameter carried by a marker
+  // tagged by an identified environment (spec §5.2). Untagged markers carry
+  // none and still drive block boundaries exactly as before.
+  nocxEnv?: string
 }
 
 // CommandMarkerEvent enriches the OSC 133 marker with a cursor snapshot
@@ -88,12 +93,32 @@ export interface TerminalRenderer {
   // tooltip.
   onCwd(cb: CwdCallback): void
 
+  // onEnvironmentPassport registers a callback that fires for every OSC 636
+  // P readiness-passport disposition (accepted / duplicate / unexpected /
+  // ignored). Parse-and-report only: the caller decides what an accepted
+  // passport means (spec §5.2, §5.3).
+  onEnvironmentPassport(cb: (disposition: PassportDisposition) => void): void
+
+  // setExpectedEnvironmentId registers the environment id minted for the
+  // attempt in flight — before the line reaches the pty. Only a passport
+  // carrying exactly this id can be accepted; any other id is ignored.
+  setExpectedEnvironmentId(id: string | null): void
+
   // onCommandMarker registers a callback that fires when the shell emits
   // OSC 133 command boundary markers (A/B/C/D). The VT frontend parses the
-  // OSC sequence and extracts the marker kind and optional exit code.
-
+  // OSC sequence and extracts the marker kind, optional exit code and the
+  // nocx_env tag when the marker is tagged.
   onCommandMarker(cb: CommandMarkerCallback): void
 
+  // onInBandReady registers a callback that fires when the shell emits the
+  // private OSC 1337 in-band READY handshake (\x1b]1337;NOCX_IB_READY\x07).
+  // The wrapper line emits it only after raw -echo mode is provably on, so
+  // this event is the go-ahead to stream the in-band payload (nocx-ynsx,
+  // spec §4.4). The renderer whitelists the exact payload; anything else is
+  // discarded. Returns an unsubscribe: the caller registers immediately
+  // before sending the wrapper and removes the listener on success, cancel,
+  // timeout and error, so a stale READY can never trigger a stream.
+  onInBandReady(cb: () => void): () => void
   // onBell registers a callback that fires when the terminal receives BEL
   // (\x07). Bell always deserves attention regardless of buffer, so the
   // tab bar always lights the activity indicator on bell.
@@ -194,6 +219,8 @@ export interface TerminalRenderer {
    * IBufferLine interface for length, getCell(), isWrapped.
    */
   getBufferLine(line: number): import('@xterm/xterm').IBufferLine | undefined
+  /** Absolute buffer line of the cursor — the line the next write lands on. */
+  cursorLine(): number
 
   /**
    * Clear the visible xterm viewport. Used after freezing a block to

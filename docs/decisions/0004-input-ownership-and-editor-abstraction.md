@@ -22,7 +22,15 @@ echoes the command **and** the shell prints its `PS1` — the command appears
 twice and an unwanted prompt shows up. The naive fixes are all fragile:
 
 - `stty -echo`: readline/zle do their own redisplay; leaked termios state breaks
-  child processes.
+  child processes. **Scope, added 2026-08-04 (`nocx-ynsx`):** this rejects
+  `-echo` as the _editor's_ echo mechanism — held across the user's session,
+  with readline live underneath it. It does not reject termios changes made by a
+  command the shell is running in the foreground, where readline is not active,
+  provided the exact prior state is captured with `stty -g` and restored on every
+  path before any user code runs. In-band shell integration delivers ~25 KB
+  through such a window; without `-echo` those bytes are printed to the user,
+  because GNU coreutils `stty raw` leaves `ECHO` set (measured: `Lflag 0x8A38`).
+  Persistence and readline are what the rejection is about, not the ioctl.
 - PTY-level mode manipulation: races the foreground process, which owns the
   terminal modes.
 - Parsing away the echoed region: breaks on wrapping, cursor motion, async
@@ -61,6 +69,31 @@ we are in `RUNNING_RAW` and keys pass through until the next prompt marker.
 malformed (unintegrated shell, nested SSH, `PS2` continuation on incomplete
 syntax), fall back to a conventional terminal. Never trap the user in the DOM
 editor.
+
+> **Scope note (2026-08-04, nocx-4t37.2):** the machine governs keyboard
+> OWNERSHIP — whether nocx traps the user in the DOM editor — and nothing
+> else. It is not the authorisation model for one-shot, user-initiated
+> delivery like the in-band bootstrap (`shell.integrate`): that path's
+> authorisation is the explicit user gesture (the capability control, the
+> chord), its only blind write is the one-line wrapper, and its verification
+> is the OSC 1337 READY handshake — if the wrapper is not read by a shell,
+> READY never returns and the attempt times out having typed nothing else.
+> ALT_SCREEN remains the one positive "a full-screen program owns the
+> screen" fact, and it stays a refusal. The `-echo` window in the wrapper is
+> the same single-foreground-command exception this file already records
+> below; the machine's fail-open invariant is untouched.
+>
+> **Extended 2026-08-04 (nocx-atyf.3):** when the user hand-types an
+> interactive `ssh host` into the command editor, the explicit Enter gesture
+> THAT SUBMITTED THE COMMAND is the authorisation for in-band delivery — the
+> user initiated both the transition and the integration in the same act.
+> Consent is asked once per destination (the resolved host), remembered for
+> the session, and honoured silently thereafter. This is the same principle
+> as the capability control's click: an explicit user gesture in the editor,
+> not silent injection. A global "automatically integrate shells reached from
+> the command editor" setting would extend this to a standing authorisation
+> rather than a per-destination one, and it is legitimate as an informed
+> opt-in — never as the default.
 
 ### 2. Prompt/echo handling via atomic handoff
 

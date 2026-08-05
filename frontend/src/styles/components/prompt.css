@@ -1,7 +1,11 @@
+/* The modal overlay must paint above app content: xterm's own layers run
+   up to z-index 10, and a top-sheet prompt floats over the terminal (the
+   vault unlock and the connection-password ask both do). A modal that the
+   terminal's canvas can intercept clicks on is not a modal. */
 .ui-prompt-overlay {
   position: fixed;
   inset: 0;
-  z-index: 1;
+  z-index: 20;
   display: flex;
   align-items: flex-start;
   justify-content: center;

@@ -2097,3 +2097,254 @@ describe('generated secret names', () => {
     expect(created.options.keyPassphraseSecret).toBe('secrow:pass-named')
   })
 })
+
+// ── Stored forwards editor (spec §8, D5) ─────────────────────────────────
+
+describe('stored forwards editor', () => {
+  it('adds, edits and removes rows, and what is saved comes back on the patch', async () => {
+    const { container, client } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    await waitForProfiles(container, 1)
+    await openProfileEditor(container, 'prod-web')
+    selectProfileSection(container, 'Forwards')
+
+    // The control exists and is enabled from the state a user starts in: no
+    // rows, but the add affordance is there.
+    const addBtn = await vi.waitFor(() => {
+      const btn = Array.from(container.querySelectorAll('.ui-button')).find(
+        (b) => b.textContent?.trim() === 'Add forward',
+      )
+      expect(btn, 'Add forward button not found').toBeTruthy()
+      return btn as HTMLElement
+    })
+    addBtn.click()
+
+    // One editable row with the direction, bind host, bind port and
+    // destination fields.
+    await vi.waitFor(() => {
+      expect(container.querySelectorAll('.ui-row-list__row').length).toBe(1)
+    })
+    const destination = container.querySelector('#forward-0-destination') as HTMLInputElement
+    expect(destination, 'destination field not found').toBeTruthy()
+    expect(container.querySelector('#forward-0-bindport'), 'bind port field not found').toBeTruthy()
+    expect(container.querySelector('#forward-0-bindhost'), 'bind host field not found').toBeTruthy()
+
+    fireEvent.input(destination, { target: { value: 'db.internal:5432' } })
+    // Re-query after the sibling edit: the destination keystroke re-renders
+    // the row, and a reference captured before it can be detached.
+    const bindPort = container.querySelector('#forward-0-bindport') as HTMLInputElement
+    fireEvent.input(bindPort, { target: { value: '8080' } })
+
+    const patchSpy = vi.spyOn(client, 'patchProfile').mockResolvedValue(MOCK_EFFECTIVE_CRED)
+    const dialog = findDialogByTitleContaining(container, 'prod-web')!
+    // A second row, then remove the fresh one — the per-row remove works
+    // and the edited row survives.
+    addBtn.click()
+    await vi.waitFor(() => {
+      expect(container.querySelectorAll('.ui-row-list__row').length).toBe(2)
+    })
+    const remove = Array.from(container.querySelectorAll('.ui-icon-button')).find(
+      (b) => b.getAttribute('aria-label') === 'Remove forward 2',
+    ) as HTMLElement
+    expect(remove, 'Remove forward 2 button not found').toBeTruthy()
+    remove.click()
+    await vi.waitFor(() => {
+      expect(container.querySelectorAll('.ui-row-list__row').length).toBe(1)
+    })
+
+    clickButtonByText(container, 'Save Connection', dialog)
+
+    // The saved list is the surviving row, whole — this is what the backend
+    // stores, and the backend tests prove it comes back from storage.
+    await vi.waitFor(() => {
+      expect(patchSpy).toHaveBeenCalled()
+    })
+    const params = patchSpy.mock.calls[0][0] as { set?: Record<string, unknown> }
+    expect(params.set?.['options.forwards']).toEqual([
+      { direction: 'local', bindHost: '', bindPort: 8080, destination: 'db.internal:5432' },
+    ])
+  })
+
+  it('renders stored forwards as editable rows when the profile carries them', async () => {
+    const withForwards: SSHProfile = {
+      ...MOCK_PROFILES[0],
+      options: {
+        ...MOCK_PROFILES[0].options,
+        forwards: [
+          { direction: 'local', bindHost: '', bindPort: 8080, destination: 'db.internal:5432' },
+        ],
+      },
+    }
+    const { container } = mount({ profiles: [withForwards] })
+    await waitForProfiles(container, 1)
+    await openProfileEditor(container, 'prod-web')
+    selectProfileSection(container, 'Forwards')
+
+    await vi.waitFor(() => {
+      expect(container.querySelectorAll('.ui-row-list__row').length).toBe(1)
+    })
+    const destination = container.querySelector('#forward-0-destination') as HTMLInputElement
+    const bindPort = container.querySelector('#forward-0-bindport') as HTMLInputElement
+    expect(destination.value).toBe('db.internal:5432')
+    expect(bindPort.value).toBe('8080')
+  })
+
+  it('a row without a destination blocks save and says why', async () => {
+    const { container, client } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    await waitForProfiles(container, 1)
+    await openProfileEditor(container, 'prod-web')
+    selectProfileSection(container, 'Forwards')
+
+    const addBtn = await vi.waitFor(() => {
+      const btn = Array.from(container.querySelectorAll('.ui-button')).find(
+        (b) => b.textContent?.trim() === 'Add forward',
+      )
+      expect(btn).toBeTruthy()
+      return btn as HTMLElement
+    })
+    addBtn.click()
+    await vi.waitFor(() => {
+      expect(container.querySelectorAll('.ui-row-list__row').length).toBe(1)
+    })
+
+    const patchSpy = vi.spyOn(client, 'patchProfile').mockResolvedValue(MOCK_EFFECTIVE_CRED)
+    const dialog = findDialogByTitleContaining(container, 'prod-web')!
+    clickButtonByText(container, 'Save Connection', dialog)
+
+    // The editor surfaces the row error and nothing is persisted.
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain('destination is required')
+    })
+    expect(patchSpy).not.toHaveBeenCalled()
+    expect(findDialogByTitleContaining(container, 'prod-web')).toBeTruthy()
+  })
+})
+
+// ── portDiscovery (spec D3) ──────────────────────────────────────────────
+
+describe('portDiscovery', () => {
+  it('saves an explicit choice on the profile through the patch route', async () => {
+    const { container, client } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    await waitForProfiles(container, 1)
+    await openProfileEditor(container, 'prod-web')
+    selectProfileSection(container, 'Advanced')
+
+    const label = container.querySelector('label[for="port-discovery"]')
+    expect(label, 'Port discovery field not found').toBeTruthy()
+    const select = label!.closest('.ui-field')?.querySelector('.ui-select') as HTMLSelectElement
+    fireEvent.change(select, { target: { value: 'off' } })
+
+    const patchSpy = vi.spyOn(client, 'patchProfile').mockResolvedValue(MOCK_EFFECTIVE_CRED)
+    const dialog = findDialogByTitleContaining(container, 'prod-web')!
+    clickButtonByText(container, 'Save Connection', dialog)
+
+    await vi.waitFor(() => {
+      expect(patchSpy).toHaveBeenCalled()
+    })
+    const params = patchSpy.mock.calls[0][0] as { set?: Record<string, unknown> }
+    expect(params.set?.['options.portDiscovery']).toBe('off')
+  })
+
+  it('the group defaults editor offers portDiscovery as an inheritable default', async () => {
+    const { container, client } = mount({ profiles: MOCK_PROFILES, groups: MOCK_GROUPS })
+    await waitForProfiles(container, 3)
+    await openGroupEditorByName(container, 'Production')
+    selectGroupSection(container, 'Advanced')
+
+    const label = container.querySelector('label[for="group-default-portDiscovery"]')
+    const select = label!.closest('.ui-field')?.querySelector('.ui-select') as HTMLSelectElement
+    expect(select, 'Group port discovery select not found').toBeTruthy()
+    fireEvent.change(select, { target: { value: 'ask' } })
+
+    const applySpy = vi.spyOn(client, 'groupApply')
+    const dialog = findDialogByTitle(container, 'Edit Group: Production')!
+    clickButtonByText(container, 'Save Group', dialog)
+
+    await vi.waitFor(() => {
+      expect(applySpy).toHaveBeenCalled()
+    })
+    const sent = applySpy.mock.calls[0][0]
+    expect(sent[0].defaults?.['portDiscovery']).toBe('ask')
+  })
+})
+
+// ── desiredMode + relayConsent (spec §3.5, nocx-mlm7) ────────────────────
+
+describe('desiredMode', () => {
+  it('saves an explicit mode choice on the profile through the patch route', async () => {
+    const { container, client } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    await waitForProfiles(container, 1)
+    await openProfileEditor(container, 'prod-web')
+    selectProfileSection(container, 'Advanced')
+
+    const label = container.querySelector('label[for="desired-mode"]')
+    expect(label, 'Delivery mode field not found').toBeTruthy()
+    const select = label!.closest('.ui-field')?.querySelector('.ui-select') as HTMLSelectElement
+    fireEvent.change(select, { target: { value: 'relay' } })
+
+    const patchSpy = vi.spyOn(client, 'patchProfile').mockResolvedValue(MOCK_EFFECTIVE_CRED)
+    const dialog = findDialogByTitleContaining(container, 'prod-web')!
+    clickButtonByText(container, 'Save Connection', dialog)
+
+    await vi.waitFor(() => {
+      expect(patchSpy).toHaveBeenCalled()
+    })
+    const params = patchSpy.mock.calls[0][0] as { set?: Record<string, unknown> }
+    expect(params.set?.['options.desiredMode']).toBe('relay')
+  })
+
+  it('the group defaults editor offers desiredMode as an inheritable default', async () => {
+    const { container, client } = mount({ profiles: MOCK_PROFILES, groups: MOCK_GROUPS })
+    await waitForProfiles(container, 3)
+    await openGroupEditorByName(container, 'Production')
+    selectGroupSection(container, 'Advanced')
+
+    const label = container.querySelector('label[for="group-default-desiredMode"]')
+    const select = label!.closest('.ui-field')?.querySelector('.ui-select') as HTMLSelectElement
+    expect(select, 'Group delivery mode select not found').toBeTruthy()
+    fireEvent.change(select, { target: { value: 'raw' } })
+
+    const applySpy = vi.spyOn(client, 'groupApply')
+    const dialog = findDialogByTitle(container, 'Edit Group: Production')!
+    clickButtonByText(container, 'Save Group', dialog)
+
+    await vi.waitFor(() => {
+      expect(applySpy).toHaveBeenCalled()
+    })
+    const sent = applySpy.mock.calls[0][0]
+    expect(sent[0].defaults?.['desiredMode']).toBe('raw')
+  })
+
+  it('a relay selection makes the consent state visible, and a grant saves per profile', async () => {
+    const { container, client } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    await waitForProfiles(container, 1)
+    await openProfileEditor(container, 'prod-web')
+    selectProfileSection(container, 'Advanced')
+
+    const modeLabel = container.querySelector('label[for="desired-mode"]')
+    const modeSelect = modeLabel!
+      .closest('.ui-field')
+      ?.querySelector('.ui-select') as HTMLSelectElement
+    fireEvent.change(modeSelect, { target: { value: 'relay' } })
+
+    // The consent control appears only for a relay selection — never
+    // silently pretending the relay is granted.
+    const consentLabel = container.querySelector('label[for="relay-consent"]')
+    expect(consentLabel, 'Relay consent field must appear for a relay selection').toBeTruthy()
+    const consentSelect = consentLabel!
+      .closest('.ui-field')
+      ?.querySelector('.ui-select') as HTMLSelectElement
+    expect(consentSelect.value, 'consent must start honest: unknown, not granted').toBe('unknown')
+    fireEvent.change(consentSelect, { target: { value: 'granted' } })
+
+    const patchSpy = vi.spyOn(client, 'patchProfile').mockResolvedValue(MOCK_EFFECTIVE_CRED)
+    const dialog = findDialogByTitleContaining(container, 'prod-web')!
+    clickButtonByText(container, 'Save Connection', dialog)
+
+    await vi.waitFor(() => {
+      expect(patchSpy).toHaveBeenCalled()
+    })
+    const params = patchSpy.mock.calls[0][0] as { set?: Record<string, unknown> }
+    expect(params.set?.['options.desiredMode']).toBe('relay')
+    expect(params.set?.['options.relayConsent']).toBe('granted')
+  })
+})

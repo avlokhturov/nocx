@@ -3,15 +3,20 @@ package app
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 
+	"github.com/shady2k/nocx/internal/completion"
 	"github.com/shady2k/nocx/internal/connection"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/contentkey"
 	"github.com/shady2k/nocx/internal/credential"
+	"github.com/shady2k/nocx/internal/discovery"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/nativeports"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/session"
@@ -37,10 +42,29 @@ type App struct {
 	Profiles         profile.ProfileRepository
 	Credentials      credential.SecretStore
 
+	// UnlockRequester lets backend code request a vault unlock from the
+	// user (the second direction, nocx-25k9.22). Behind an interface so
+	// app.New() never reaches into the transport directly (AD-8). Set
+	// from the transport after construction.
+	UnlockRequester transport.UnlockRequester
+
 	// vaultCloser releases the vault's background worker and seals it at
 	// shutdown. Held as a minimal interface rather than *vault.Vault so the
 	// composition root keeps depending on behaviour instead of a type.
 	vaultCloser interface{ Close() }
+
+	// discoverySched owns the port-discovery cadence (nocx-wzc4.2); closed
+	// at shutdown so no timer outlives the process.
+	discoverySched *discovery.Scheduler
+
+	// logFilePath is where the backend log file lives — the stable,
+	// findable copy of the log the delivery-path decisions are written
+	// to (the P0 that had to be diagnosed from a JSON file's mtime). ""
+	// means file logging is unavailable and only stderr carries the log.
+	logFilePath string
+	// logFile is the open append handle, closed at shutdown after the
+	// final line. nil when file logging is unavailable.
+	logFile *os.File
 }
 
 // contentCompactionFloor is the hysteresis fraction of the disk ceiling at
@@ -111,6 +135,10 @@ type optionSet struct {
 	// picks the ContentDB key's home (nocx-rtg0.14). Test-only: production
 	// probes the real system provider once at startup and logs the outcome.
 	keystoreProbe func(context.Context) bool
+	// logFilePath overrides where the backend log file lives. Test-only:
+	// without it New() resolves the profile's data directory, and a test
+	// must not write into the developer's real profile (nocx-ti8w).
+	logFilePath *string
 }
 
 // WithWSAddr pins the WebSocket listen address instead of the default
@@ -127,14 +155,61 @@ func WithKeystoreProbe(probe func(context.Context) bool) Option {
 	return func(o *optionSet) { o.keystoreProbe = probe }
 }
 
+// WithLogFilePath pins the backend log file path instead of the app-dir
+// default. Test-only: an empty path disables file logging (stderr only);
+// any other path must be under a disposable directory the test owns.
+func WithLogFilePath(path string) Option {
+	return func(o *optionSet) { o.logFilePath = &path }
+}
+
 func New(opts ...Option) (*App, error) {
 	var o optionSet
 	for _, opt := range opts {
 		opt(&o)
 	}
 
+	// Resolve the profile paths FIRST: the backend log file lives in the
+	// data directory of the profile THIS build owns (appdir.go's dev/release
+	// split is decided by the build tag), so the dev stand and the shipped
+	// app never write one file and a dev run never touches the shipped
+	// profile (nocx-ti8w).
+	paths, err := storage.NewAppPaths()
+	if err != nil {
+		return nil, fmt.Errorf("storage paths: %w", err)
+	}
+
+	logFilePath := filepath.Join(paths.DataDir(), "nocx.log")
+	if o.logFilePath != nil {
+		logFilePath = *o.logFilePath // test override; empty disables file logging
+	}
+	var logFile *os.File
 	slogger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	if logFilePath != "" {
+		if mkErr := os.MkdirAll(filepath.Dir(logFilePath), 0o700); mkErr != nil {
+			slogger.Warn("backend log file unavailable; logging to stderr only",
+				"path", logFilePath, "error", mkErr)
+			logFilePath = ""
+			// #nosec G304 — the path is the app data dir plus a fixed name,
+			// or a test override; never external input.
+		} else if f, openErr := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); openErr != nil {
+			slogger.Warn("backend log file unavailable; logging to stderr only",
+				"path", logFilePath, "error", openErr)
+			logFilePath = ""
+		} else {
+			// Keep stderr AND the file: the log must survive wherever the
+			// launcher redirected stderr (the P0 that landed in a temp dir
+			// nobody would look in), and still be visible on the console.
+			logFile = f
+			slogger = slog.New(slog.NewTextHandler(io.MultiWriter(os.Stderr, f),
+				&slog.HandlerOptions{Level: slog.LevelInfo}))
+		}
+	}
 	logger := log.NewSlogAdapter(slogger)
+	// The log names itself, first: a running session can say where the
+	// file is by reading its own first line.
+	if logFilePath != "" {
+		logger.Info("backend log file", "path", logFilePath)
+	}
 
 	shint := shellintegration.New(logger)
 	ptf := &localPTYFactory{log: logger, shint: shint}
@@ -158,13 +233,16 @@ func New(opts ...Option) (*App, error) {
 	// Vault (ADR-0011 as amended): owns provider routing, key material and
 	// the seal lifecycle. Two providers are compiled on every platform:
 	// system (OS keychain) and file (encrypted document).
-	paths, err := storage.NewAppPaths()
-	if err != nil {
-		return nil, fmt.Errorf("storage paths: %w", err)
-	}
 	docStore := storage.NewDocumentStore(paths.ConfigDir())
 	profileStore := profile.NewJSONStoreWithDocStore(docStore, "profiles.json")
 
+	// The installed fact (nocx-mlm7 P7, design §5.4): backend-owned,
+	// persisted across restarts, keyed by the resolved destination
+	// identity, written only from a passport the renderer accepted and
+	// invalidated when a connection that expected installed-script
+	// produces no passport. The delivery planner reads it to choose the
+	// compact installed line; without it every host bootstraps.
+	installedFacts := ssh.NewInstalledFactStore(logger, docStore, "installed-facts.json")
 	// ContentDB (ADR-0018, amended 2026-08-01): the one SQLite database for
 	// unbounded private content, encrypted at rest by the adiantum VFS
 	// (ncruces/go-sqlite3 — no cgo). The real store is constructed below,
@@ -268,18 +346,31 @@ func New(opts ...Option) (*App, error) {
 	// Profile usage tracker for the sessions.status RPC (nocx-uxs5.4).
 	usageStore := session.NewDocumentUsageStore(docStore)
 	sess = sess.WithProfileUsageTracker(usageStore)
+	// Port discovery (nocx-wzc4.2): cadence owner for discovery, keyed by
+	// profile. *ssh.RealClient satisfies discovery.Connector without an
+	// adapter — the same shape that satisfies tunnel.Connector. The local
+	// machine (nocx-wzc4.8) samples through the native kernel reader,
+	// wired here at the composition root (AD-8) behind the same Provider
+	// seam the remote ladder implements. The cadence timers are named
+	// here, at the composition root (spec §4): one settle sample 1 s after
+	// the connection comes up, prompt hints debounced 1 s, periodic
+	// sampling every 10 s while the panel is visible and nothing is
+	// paused.
+	discoverySched := discovery.NewScheduler(
+		sshClient, logger,
+		discovery.WithLocalProvider(func(l log.Logger) discovery.Provider {
+			return nativeports.NewProvider(l)
+		}),
+		discovery.WithSettleDelay(1*time.Second),
+		discovery.WithPromptDebounce(time.Second),
+		discovery.WithSampleInterval(10*time.Second),
+	)
 	// Probe result store: operational evidence for connections.test.
 	// Process-lifetime only (not persisted across restarts).
 	probeResultStore := transport.NewProbeResultStore()
 	// Profile service: single validated write path for profiles and groups.
 	// Used by the import handlers and version transitions.
 	profileSvc := profile.NewProfileService(profileStore)
-	// One resolver, one consumer family: connections.test probes and
-	// ordinary connects resolve identically.
-	resolver := connection.NewResolver(
-		profileStore, profileStore, v,
-		connection.WithConfigResolver(sshCfgResolver),
-	)
 
 	tpOpts := []transport.WSServerOption{
 		transport.WithProfileRepository(profileStore),
@@ -287,7 +378,6 @@ func New(opts ...Option) (*App, error) {
 		transport.WithCredentialStore(v),
 		transport.WithVaultLifecycle(v),
 		transport.WithVaultReset(vaultreset.New(v, profileStore, slogger)),
-		transport.WithProfileResolver(resolver),
 		transport.WithSettingsRegistry(settingsRegistry),
 		transport.WithProfileUsageStore(usageStore),
 		transport.WithExportPaths(paths),
@@ -300,6 +390,61 @@ func New(opts ...Option) (*App, error) {
 		transport.WithProber(&proberAdapter{client: sshClient}),
 		transport.WithProfileService(profileSvc),
 		transport.WithHostKeyTruster(&proberAdapter{client: sshClient}),
+		// The remote shell launcher (nocx-xs1d), adapted across the two
+		// identically-named declarations and wired into every ConnectConfig
+		// the transport builds. Before this line the launcher was reachable
+		// from its own tests and nowhere else (AGENTS.md check 5).
+		transport.WithRemoteLauncher(&remoteLauncherAdapter{inner: shellintegration.NewRemoteLauncher(), logger: logger}),
+		// Launcher staging for the hand-typed-ssh rewrite (nocx-pu4.6).
+		// The launcher is ~35 KB and a typed line has only the tty, whose
+		// canonical buffer is 4096 bytes, so the payload goes to a private
+		// file and the renderer types the path. The home directory is
+		// known here and nowhere below: the transport must not pick a
+		// filesystem location of its own.
+		transport.WithLauncherStager(shellintegration.NewLauncherStager(logger, home)),
+		// The installed fact (nocx-mlm7 P7, design §5.4): the persisted
+		// memory of which resolved destinations carry a committed
+		// integration. The delivery planner reads it to choose the compact
+		// installed line; the observation RPC writes and invalidates it.
+		transport.WithInstalledFactStore(installedFacts),
+		// The uninstall capability (nocx-mlm7 P10, design §9): *ssh.RealClient
+		// satisfies transport.RemoteUninstaller without an adapter — the
+		// signatures are identical. The capability owns the dial-and-call
+		// (acquire the pooled connection, ask the carrier for the remote
+		// home, run Publisher.Uninstall over SFTP); the raw SSH client
+		// never leaves internal/ssh. Wired beside the installer P8 added:
+		// a saved connection that publishes can also remove.
+		transport.WithRemoteUninstaller(sshClient),
+		// The tunnel connector (nocx-8gix): *ssh.RealClient satisfies
+		// tunnel.Connector without an adapter — the signatures are
+		// identical — so a forward acquires its OWN pooled connection
+		// lease through the same client a tab uses, authorized and
+		// pool-keyed exactly like a tab (spec §7.3, AD-4). Before this
+		// line the whole forward model was reachable from its own tests
+		// and nowhere else (AGENTS.md check 5).
+		transport.WithTunnelConnector(sshClient),
+		// Port discovery (nocx-wzc4.2): the scheduler owns the cadence
+		// (settle sample, prompt debounce, hidden-tab pause, one-in-flight
+		// — spec §4) and acquires its OWN pooled discovery lease per
+		// profile. *ssh.RealClient satisfies discovery.Connector without
+		// an adapter, the same way it satisfies tunnel.Connector. Before
+		// this line the whole discovery package was reachable from its own
+		// tests and nowhere else (AGENTS.md check 5).
+		transport.WithDiscoveryScheduler(discoverySched),
+		// The in-band bootstrap builder (nocx-ynsx): *shellintegration.Impl
+		// satisfies transport.InBandBootstrapper without an adapter — the
+		// signatures are identical. Before this line the in-band plan was
+		// reachable from its own tests and nowhere else (AGENTS.md check 5).
+		transport.WithInBandBootstrapper(shint),
+		// The completion adapter (nocx-w7h.15): two completers wired at the
+		// composition root — the handler routes by session kind. The local
+		// completer answers from the backend's filesystem; the SSH completer
+		// runs a second shell on the remote host through DiscoveryConn, the
+		// same owned pooled lease the discovery ladder uses.
+		transport.WithCompleters(
+			completion.NewLocal(),
+			completion.NewSSH(sshExecConnProvider(sshClient)),
+		),
 
 		transport.WithProbeResultStore(probeResultStore),
 		transport.WithSSHConfigResolver(sshCfgResolver, sshConfigPath),
@@ -314,6 +459,31 @@ func New(opts ...Option) (*App, error) {
 	}
 	tp := transport.NewWSServer(logger, sess, tpOpts...)
 
+	// One resolver, one consumer family: connections.test probes and
+	// ordinary connects resolve identically. Created after tp so the
+	// UnlockRequester (the second direction, nocx-25k9.22) can be wired
+	// into every ConnectConfig the resolver builds.
+	//
+	// The SFTP carrier (nocx-mlm7 P8) is wired here and nowhere else: the
+	// same shellintegration.Impl the in-band bootstrap uses satisfies
+	// ssh.RemoteInstaller without an adapter — the signatures are
+	// identical — and WithRemoteInstaller stamps it on every ConnectConfig
+	// the resolver builds for a SAVED profile. A saved connection in
+	// script mode therefore publishes the integration bundle over SFTP
+	// through P1's publisher before the session starts (design §4), while
+	// direct-host opens (no profile, no resolver) never publish. Before
+	// this line the carrier was reachable from its own tests and nowhere
+	// else (AGENTS.md check 5).
+	resolver := connection.NewResolver(
+		profileStore, profileStore, v,
+		connection.WithConfigResolver(sshCfgResolver),
+		connection.WithUnlockRequester(tp.RequestUnlock),
+		connection.WithPasswordAsker(tp.RequestConnectionPassword),
+		connection.WithSecretCreator(v),
+		connection.WithRemoteInstaller(shint),
+	)
+	tp.SetProfileResolver(resolver)
+
 	app := &App{
 		Logger:           logger,
 		Pty:              ptf,
@@ -323,6 +493,10 @@ func New(opts ...Option) (*App, error) {
 		Profiles:         profileStore,
 		Credentials:      v,
 		vaultCloser:      v,
+		discoverySched:   discoverySched,
+		UnlockRequester:  tp,
+		logFilePath:      logFilePath,
+		logFile:          logFile,
 	}
 
 	logger.Info("application initialized")
@@ -363,7 +537,25 @@ func (a *App) Shutdown(ctx context.Context) {
 	if a.vaultCloser != nil {
 		a.vaultCloser.Close()
 	}
+	// Discovery cadence last: every lease is released and every timer
+	// stopped, so no probe can outlive the process.
+	if a.discoverySched != nil {
+		_ = a.discoverySched.Close()
+	}
 	a.Logger.Info("application stopped")
+	// Close the log file last, after the final line: the stable copy of
+	// the log must not lose the stop record to a shutdown ordering.
+	if a.logFile != nil {
+		_ = a.logFile.Close()
+	}
+}
+
+// LogFilePath returns where this backend's log file lives, or "" when file
+// logging is unavailable (stderr only). A running session can say where the
+// log is instead of the P0's mtime archaeology — the desktop binding
+// (WailsApp) and the dev stand both reach it through this accessor.
+func (a *App) LogFilePath() string {
+	return a.logFilePath
 }
 
 func (a *App) WSPort() int {
@@ -399,4 +591,72 @@ func (a *proberAdapter) ProbeWithResult(ctx context.Context, host string, cfg *s
 
 func (a *proberAdapter) TrustHostKey(ctx context.Context, addr string, key []byte) (string, error) {
 	return a.client.TrustHostKey(addr, key)
+}
+
+// remoteLauncherAdapter adapts shellintegration.RemoteLauncher to
+// ssh.RemoteLauncher (nocx-ei04). internal/ssh and internal/shellintegration
+// declare their own identically-named ShellKind, LaunchOptions and
+// RefusalReason on purpose — internal/ssh must not depend on shellintegration
+// — and Go interface satisfaction needs identical named types, so the
+// composition root translates between the two declarations at wiring time.
+// Reasons map explicitly; a value the ssh vocabulary does not know degrades
+// to ssh.ReasonUnknown, a distinct "integration did not happen, and I cannot
+// say why", never to ssh.ReasonNone — the product renders ReasonNone as
+// "integration succeeded", which is how a soft degrade becomes invisible
+// (AGENTS.md). The original tripwire for an unmapped reason was a panic; a
+// crash in the composition root of a terminal backend is the most extreme
+// violation of ADR-0004's fail-open invariant, so the tripwire shouts into
+// the log and hands the caller a usable plain-shell fallback instead.
+type remoteLauncherAdapter struct {
+	inner  shellintegration.RemoteLauncher
+	logger log.Logger
+}
+
+func (a *remoteLauncherAdapter) StartCommand(shell ssh.ShellKind, opts ssh.LaunchOptions) (string, ssh.RefusalReason, bool) {
+	cmd, reason, ok := a.inner.StartCommand(
+		shellintegration.ShellKind(shell),
+		shellintegration.LaunchOptions{
+			SessionID:     opts.SessionID,
+			Enhanced:      opts.Enhanced,
+			EnvironmentID: opts.EnvironmentID,
+		},
+	)
+	if !ok {
+		return "", a.mapRefusalReason(reason), false
+	}
+	// Accepted: the pinned contract says ok=true means the shell was
+	// integrated, so the reason must be the empty "no refusal" value. A
+	// launcher that accepts while claiming a refusal contradicts itself; the
+	// ssh layer would drop the reason on an accept, so decline instead — the
+	// claimed reason stays visible on the product and the session falls back
+	// to a plain shell (ADR-0004:60) — and shout the contradiction into the
+	// log rather than killing the backend with a panic.
+	if reason != shellintegration.ReasonNone {
+		a.logger.Error("shellintegration launcher accepted while naming a refusal reason; treating as a decline",
+			"reason", reason, "shell", shell, "session_id", opts.SessionID)
+		return "", a.mapRefusalReason(reason), false
+	}
+	return cmd, ssh.ReasonNone, true
+}
+
+// mapRefusalReason translates a shellintegration refusal into the ssh
+// vocabulary. The switch is exhaustive over the declared set on purpose: the
+// production launcher only ever returns these three, so the default arm is a
+// tripwire for the next reason added to one package and forgotten in the
+// other. It degrades to the distinct ssh.ReasonUnknown — never a silent
+// ssh.ReasonNone — and shouts, keeping the tripwire while failing open
+// (ADR-0004:60) instead of crashing the terminal.
+func (a *remoteLauncherAdapter) mapRefusalReason(r shellintegration.RefusalReason) ssh.RefusalReason {
+	switch r {
+	case shellintegration.ReasonNone:
+		return ssh.ReasonNone
+	case shellintegration.ReasonUnsupportedShell:
+		return ssh.ReasonUnsupportedShell
+	case shellintegration.ReasonNoSecureTemp:
+		return ssh.ReasonNoSecureTemp
+	default:
+		a.logger.Error("shellintegration launcher returned unmapped refusal reason; add it to remoteLauncherAdapter",
+			"reason", r)
+		return ssh.ReasonUnknown
+	}
 }

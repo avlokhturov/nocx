@@ -1,5 +1,17 @@
 import { decodeFrame, encodeFrame, isSessionID } from './frame'
 import { Dispatcher } from './dispatcher'
+import type { Open } from './generated/open'
+
+/** The open ack's wire shape (contracts/open.schema.json): the server
+ *  assigns the session id (AD-7), and the resolved destination mode +
+ *  refusal reason ride the same ack so the tab's capability control starts
+ *  from the backend's own resolution (nocx-mlm7). */
+type OpenResult = {
+  sessionId?: string
+  cwd?: string
+  desiredMode?: Open['desiredMode']
+  shellIntegrationReason?: Open['shellIntegrationReason']
+}
 
 // Ack throttle: at most one ack per session per ~100 ms. Per-frame acks on
 // a fast-scrolling terminal would flood the control plane with thousands of
@@ -162,6 +174,14 @@ export class SessionHandle {
     /** Where the shell started, ~-abbreviated. Names the tab until a program
      *  sets a title; does not follow `cd` (that needs OSC 7, nocx-5mn.2). */
     readonly cwd: string,
+    /** The resolved destination mode the backend stamped at open
+     *  (nocx-mlm7): the connection-scope default the tab's capability
+     *  control starts from. Never proof integration succeeded — the reason
+     *  field and the arrival of markers confirm or downgrade it. */
+    readonly desiredMode: Open['desiredMode'] = 'script',
+    /** Why shell integration did not happen at open; empty means it
+     *  succeeded or was never attempted (nocx-r52q, nocx-xs1d). */
+    readonly shellIntegrationReason: Open['shellIntegrationReason'] = '',
   ) {}
 
   send(data: string): void {
@@ -331,28 +351,14 @@ export class WSClient {
   // prompt gap can occur (nocx-4ff.10).
   openSession(cols: number, rows: number, enhanced: boolean): Promise<SessionHandle> {
     return this.dispatcher
-      .call<{ sessionId?: string; cwd?: string }>('open', {
+      .call<OpenResult>('open', {
         cols,
         rows,
         xpixel: 0,
         ypixel: 0,
         enhanced,
       })
-      .then((result) => {
-        const sid = result?.sessionId
-        if (!sid || !isSessionID(sid)) {
-          throw new Error(`nocx: invalid session-id from server: ${sid}`)
-        }
-        this.sessions.set(sid, {
-          decoder: new UTF8StreamDecoder(),
-          offset: 0,
-          dataCallback: null,
-          pendingData: '',
-          exitCallback: null,
-          resetCallback: null,
-        })
-        return new SessionHandle(this, sid, result?.cwd ?? '')
-      })
+      .then((result) => this._registerHandle(result))
   }
 
   // openSSHSession opens an SSH session via a profile ID. The backend
@@ -360,7 +366,7 @@ export class WSClient {
   // Passwords are never sent over the wire.
   openSSHSession(cols: number, rows: number, profileId: string): Promise<SessionHandle> {
     return this.dispatcher
-      .call<{ sessionId?: string; cwd?: string }>('open', {
+      .call<OpenResult>('open', {
         cols,
         rows,
         xpixel: 0,
@@ -368,21 +374,7 @@ export class WSClient {
         kind: 'ssh',
         profileId,
       })
-      .then((result) => {
-        const sid = result?.sessionId
-        if (!sid || !isSessionID(sid)) {
-          throw new Error(`nocx: invalid session-id from server: ${sid}`)
-        }
-        this.sessions.set(sid, {
-          decoder: new UTF8StreamDecoder(),
-          offset: 0,
-          dataCallback: null,
-          pendingData: '',
-          exitCallback: null,
-          resetCallback: null,
-        })
-        return new SessionHandle(this, sid, result?.cwd ?? '')
-      })
+      .then((result) => this._registerHandle(result))
   }
 
   // openSSHSessionByHost opens a direct SSH session by hostname/alias,
@@ -394,7 +386,7 @@ export class WSClient {
     user?: string,
   ): Promise<SessionHandle> {
     return this.dispatcher
-      .call<{ sessionId?: string; cwd?: string }>('open', {
+      .call<OpenResult>('open', {
         cols,
         rows,
         xpixel: 0,
@@ -403,21 +395,32 @@ export class WSClient {
         host,
         user,
       })
-      .then((result) => {
-        const sid = result?.sessionId
-        if (!sid || !isSessionID(sid)) {
-          throw new Error(`nocx: invalid session-id from server: ${sid}`)
-        }
-        this.sessions.set(sid, {
-          decoder: new UTF8StreamDecoder(),
-          offset: 0,
-          dataCallback: null,
-          pendingData: '',
-          exitCallback: null,
-          resetCallback: null,
-        })
-        return new SessionHandle(this, sid, result?.cwd ?? '')
-      })
+      .then((result) => this._registerHandle(result))
+  }
+
+  /** The open ack's wire shape (contracts/open.schema.json). Every open —
+   *  local, profile SSH, direct-host SSH — carries the resolved launch
+   *  policy and the refusal reason alongside the id and cwd. */
+  private _registerHandle(result: OpenResult): SessionHandle {
+    const sid = result?.sessionId
+    if (!sid || !isSessionID(sid)) {
+      throw new Error(`nocx: invalid session-id from server: ${sid}`)
+    }
+    this.sessions.set(sid, {
+      decoder: new UTF8StreamDecoder(),
+      offset: 0,
+      dataCallback: null,
+      pendingData: '',
+      exitCallback: null,
+      resetCallback: null,
+    })
+    return new SessionHandle(
+      this,
+      sid,
+      result?.cwd ?? '',
+      result?.desiredMode ?? 'script',
+      result?.shellIntegrationReason ?? '',
+    )
   }
 
   // --- reattach -----------------------------------------------------------

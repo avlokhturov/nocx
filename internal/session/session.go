@@ -56,6 +56,8 @@ type OutputHandler func(data []byte) error
 type Session interface {
 	ID() ID
 	Kind() Kind
+	// Host returns the session's remote hostname. Empty for a local session.
+	Host() string
 	// Cwd is where the session's shell was started. It is the tab's name
 	// until a program sets a title; it does NOT follow `cd`, which needs the
 	// OSC 7 events in nocx-5mn.2.
@@ -74,6 +76,11 @@ type Session interface {
 	Close() error
 	Done() <-chan struct{}
 	StartOutput(ctx context.Context, onOutput OutputHandler) error
+	// ShellIntegrationReason reports why shell integration did not happen
+	// for this session (nocx-r52q). Remote sessions surface the refusal
+	// reason decided when the shell started; local sessions always return
+	// ReasonNone. The transport carries this value to the UI.
+	ShellIntegrationReason() ssh.RefusalReason
 }
 
 // ProfileUsageTracker records profile session activity (nocx-uxs5.4).
@@ -157,6 +164,12 @@ func (r *Reg) WithProfileUsageTracker(t ProfileUsageTracker) *Reg {
 }
 
 func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
+	// Mint the session ID BEFORE any connect: the remote launcher embeds it
+	// as NOCX_SESSION_ID in the start command (nocx-r52q), so the ID the
+	// session is later registered under must already exist while Connect
+	// runs. A failed connect registers nothing — the ID is simply unused.
+	id := NewID()
+
 	var ch Channel
 	var err error
 
@@ -167,7 +180,12 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 		if cfg.Remote == nil {
 			return nil, fmt.Errorf("remote session requires ConnectConfig")
 		}
-		ch, err = r.ssh.Connect(ctx, cfg.Host, sshOptionsFromConfig(cfg.Remote)...)
+		opts := sshOptionsFromConfig(cfg.Remote)
+		opts = append(opts, ssh.WithSessionID(string(id)))
+		if cfg.Enhanced {
+			opts = append(opts, ssh.WithEnhanced())
+		}
+		ch, err = r.ssh.Connect(ctx, cfg.Host, opts...)
 		if err != nil {
 			return nil, fmt.Errorf("ssh connect: %w", err)
 		}
@@ -186,11 +204,10 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 		ch = pt
 	}
 
-	id := NewID()
-
 	s := &realSession{
 		id:           id,
 		kind:         cfg.Kind,
+		host:         cfg.Host,
 		cwd:          resolveSessionCwd(cfg.Cwd),
 		profileID:    cfg.ProfileID,
 		credentialID: cfg.CredentialID,
@@ -335,12 +352,36 @@ func sshOptionsFromConfig(cfg *ssh.ConnectConfig) []ssh.ConnectOption {
 	if cfg.PassphraseSecretID != "" {
 		opts = append(opts, ssh.WithPassphraseSecretID(cfg.PassphraseSecretID))
 	}
+	if cfg.ConnectionName != "" {
+		opts = append(opts, ssh.WithConnectionName(cfg.ConnectionName))
+	}
+	if cfg.PasswordRequester != nil {
+		opts = append(opts, ssh.WithPasswordRequester(cfg.PasswordRequester))
+	}
 
 	if cfg.AuthorizedEndpoint != "" {
 		opts = append(opts, ssh.WithAuthorizedEndpoint(cfg.AuthorizedEndpoint))
 	}
 	if cfg.JumpAuthorizedEndpoint != "" {
 		opts = append(opts, ssh.WithJumpAuthorizedEndpoint(cfg.JumpAuthorizedEndpoint))
+	}
+	if cfg.RemoteLauncher != nil {
+		opts = append(opts, ssh.WithRemoteLauncher(cfg.RemoteLauncher))
+	}
+	// The resolved destination mode rides the same path (nocx-mlm7):
+	// without this the profile's effective desiredMode dies here and every
+	// profile — raw or relay included — would integrate at open. A field
+	// that is carried and discarded is worse than one that is missing.
+	if cfg.DesiredMode != "" {
+		opts = append(opts, ssh.WithDesiredMode(cfg.DesiredMode))
+	}
+	// The shell pin rides the same path as the launcher: without this the
+	// pin dies here and the launcher always receives ShellAuto — a field
+	// that is carried and discarded is worse than one that is missing,
+	// because it looks configured (nocx-pu4.1). Empty means detect: the
+	// launcher maps "" to ShellAuto at the far end (nocx-6rj0).
+	if cfg.Shell != "" {
+		opts = append(opts, ssh.WithShell(cfg.Shell))
 	}
 	if cfg.RemoteInstaller != nil {
 		opts = append(opts, ssh.WithRemoteInstaller(cfg.RemoteInstaller))
@@ -355,6 +396,7 @@ func sshOptionsFromConfig(cfg *ssh.ConnectConfig) []ssh.ConnectOption {
 type realSession struct {
 	id           ID
 	kind         Kind
+	host         string // empty for local sessions; the remote hostname for SSH
 	cwd          string
 	profileID    string
 	credentialID string
@@ -368,6 +410,7 @@ type realSession struct {
 
 func (s *realSession) ID() ID               { return s.id }
 func (s *realSession) Kind() Kind           { return s.kind }
+func (s *realSession) Host() string         { return s.host }
 func (s *realSession) Cwd() string          { return s.cwd }
 func (s *realSession) ProfileID() string    { return s.profileID }
 func (s *realSession) CredentialID() string { return s.credentialID }
@@ -391,6 +434,17 @@ func (s *realSession) Close() error {
 
 func (s *realSession) Done() <-chan struct{} {
 	return s.ch.Done()
+}
+
+// ShellIntegrationReason surfaces the connect-time refusal reason (nocx-r52q).
+// The unified Channel has no such method — local PTYs have nothing to report —
+// so this is an optional-method check: remote channels (ssh.Channel) carry it,
+// everything else is ReasonNone.
+func (s *realSession) ShellIntegrationReason() ssh.RefusalReason {
+	if rc, ok := s.ch.(interface{ ShellIntegrationReason() ssh.RefusalReason }); ok {
+		return rc.ShellIntegrationReason()
+	}
+	return ssh.ReasonNone
 }
 
 func (s *realSession) StartOutput(ctx context.Context, onOutput OutputHandler) error {

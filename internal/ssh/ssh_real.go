@@ -71,8 +71,39 @@ func NewReal(logger log.Logger, opts ...RealClientOption) (*RealClient, error) {
 	return rc, nil
 }
 
-// Connect implements SSH.Connect.
-func (rc *RealClient) Connect(ctx context.Context, host string, opts ...ConnectOption) (Channel, error) {
+// acquiredPooled bundles the result of resolving and acquiring a pooled
+// connection: the raw client, the pooled wrapper (for per-connection
+// features like agent forwarding), the handle owning this reference, and the
+// caller's effective config. Connect and TunnelConn share this path so a
+// forward is authorized and keyed exactly like a tab (AD-4) — a tunnel to a
+// host the credential is not bound to is the same authorization violation as
+// a tab to it.
+type acquiredPooled struct {
+	handle   *poolHandle
+	pconn    *pooledSSHConn
+	client   *gossh.Client
+	resolved *resolvedConfig
+	cfg      *ConnectConfig
+}
+
+// acquirePooled resolves the connection config, enforces credential
+// authorization, and acquires a pooled connection. On success the caller
+// owns the returned handle and MUST release it exactly once.
+//
+// Authorization is enforced BEFORE any dial. Only a linked credential
+// (Secrets != nil) carries an authorized endpoint to check; inline auth has
+// no stored secret to redirect.
+//
+// Resolve the authorized endpoint through ~/.ssh/config separately from the
+// dial target. The resolver stores the canonical (resolved) hostname, and
+// this pass re-resolves it through the current SSH config. If ~/.ssh/config
+// changed since the resolver ran (drift), the two resolutions yield different
+// results and the check fails. For binding tests that bypass the resolver,
+// this pass also resolves aliases set directly as AuthorizedEndpoint.
+//
+// The host parameter and cfg.AuthorizedEndpoint are separate inputs, so
+// comparing their resolved forms is not self-authorizing.
+func (rc *RealClient) acquirePooled(ctx context.Context, host string, opts []ConnectOption) (*acquiredPooled, error) {
 	cfg := &ConnectConfig{}
 	for _, o := range opts {
 		o(cfg)
@@ -82,19 +113,6 @@ func (rc *RealClient) Connect(ctx context.Context, host string, opts ...ConnectO
 	if err != nil {
 		return nil, fmt.Errorf("resolve config for %s: %w", host, err)
 	}
-	// Enforce computed authorization BEFORE any dial. Only a linked credential
-	// (Secrets != nil) carries an authorized endpoint to check; inline auth has
-	// no stored secret to redirect.
-	//
-	// Resolve the authorized endpoint through ~/.ssh/config separately from the
-	// dial target. The resolver stores the canonical (resolved) hostname, and
-	// this pass re-resolves it through the current SSH config. If ~/.ssh/config
-	// changed since the resolver ran (drift), the two resolutions yield different
-	// results and the check fails. For binding tests that bypass the resolver,
-	// this pass also resolves aliases set directly as AuthorizedEndpoint.
-	//
-	// The host parameter and cfg.AuthorizedEndpoint are separate inputs, so
-	// comparing their resolved forms is not self-authorizing.
 	if cfg.Secrets != nil {
 		resolvedAuthz := rc.resolveAuthzEndpoint(ctx, cfg.AuthorizedEndpoint)
 		if authErr := checkAuthorization(resolvedAuthz, resolved, string(cfg.SecretID), false); authErr != nil {
@@ -119,44 +137,51 @@ func (rc *RealClient) Connect(ctx context.Context, host string, opts ...ConnectO
 		rc.pool.Release(handle)
 		return nil, fmt.Errorf("internal: pooled client is not *gossh.Client (%T)", pconn.client)
 	}
+	return &acquiredPooled{handle: handle, pconn: pconn, client: gclient, resolved: resolved, cfg: cfg}, nil
+}
+
+// Connect implements SSH.Connect.
+func (rc *RealClient) Connect(ctx context.Context, host string, opts ...ConnectOption) (Channel, error) {
+	acq, err := rc.acquirePooled(ctx, host, opts)
+	if err != nil {
+		return nil, err
+	}
 
 	// Agent forwarding: register the per-connection channel handler once
 	// (initAgentForward is guarded by agentForwardOnce), then request it
 	// per-session inside openShell. Fail early if the user asked for
 	// forwarding but no agent is reachable.
-	if cfg.AgentForward {
+	if acq.cfg.AgentForward {
 		if !rc.agentAvailable() {
-			rc.pool.Release(handle)
+			rc.pool.Release(acq.handle)
 			return nil, fmt.Errorf("agent forwarding requested but no SSH agent available (SSH_AUTH_SOCK not set)")
 		}
-		if fwdErr := pconn.initAgentForward(gclient, os.Getenv("SSH_AUTH_SOCK")); fwdErr != nil {
-			rc.pool.Release(handle)
+		if fwdErr := acq.pconn.initAgentForward(acq.client, os.Getenv("SSH_AUTH_SOCK")); fwdErr != nil {
+			rc.pool.Release(acq.handle)
 			return nil, fmt.Errorf("agent-forward setup: %w", fwdErr)
 		}
 	}
 
-	ch, err := rc.openShell(ctx, gclient, resolved, cfg)
+	ch, err := rc.openShell(ctx, acq.client, acq.resolved, acq.cfg, func() { rc.pool.Release(acq.handle) })
 	if err != nil {
 		// Failed to open the shell — release our reference so the
 		// connection can close if we were the only tab. Without this the
 		// failed Connect path leaks a pooled ref (and a jump transport)
 		// for the process life.
-		rc.pool.Release(handle)
+		rc.pool.Release(acq.handle)
 		return nil, err
 	}
 
-	// Wire the channel's close to release our pool reference. RealChannel.Close
-	// runs closeCb exactly once (sync.Once), so the handle is released exactly
-	// once even if the session errors and the tab then closes. Releasing the
-	// handle drops the target refcount; when it hits zero the pooledSSHConn
-	// closes the gossh.Client AND releases the jump handle, which closes the
-	// bastion when its own refcount hits zero. One Close per channel, one
-	// Release per handle, no leak.
-	ch.releasePoolRef = func() { rc.pool.Release(handle) }
+	// openShell wired the channel's close to release our pool reference.
+	// RealChannel.Close runs closeCb exactly once (sync.Once), so the handle
+	// is released exactly once even if the session errors and the tab then
+	// closes. Releasing the handle drops the target refcount; when it hits
+	// zero the pooledSSHConn closes the gossh.Client AND releases the jump
+	// handle, which closes the bastion when its own refcount hits zero. One
+	// Close per channel, one Release per handle, no leak.
 	return ch, nil
 }
 
-// Probe attempts SSH authentication with only the supplied auth method,
 // BYPASSING the connection pool. It verifies the host key, authenticates
 // (sending exactly one auth method — the caller's responsibility to restrict),
 // and closes immediately without launching a shell or running a command.
@@ -501,19 +526,100 @@ func hashedPatternMatches(pattern, normalizedHost string) bool {
 	return hmac.Equal(mac.Sum(nil), want)
 }
 
-// openShell opens a session, requests a PTY, optionally requests agent
-// forwarding, and starts a shell.
-func (rc *RealClient) openShell(ctx context.Context, gclient *gossh.Client, resolved *resolvedConfig, cfg *ConnectConfig) (*RealChannel, error) {
+// shellStartCommand decides what the remote session runs and whether shell
+// integration happened. Precedence:
+//
+//  1. A RemoteCommand configured for the destination wins outright: OpenSSH
+//     refuses a command-line remote command alongside it ("Cannot execute
+//     command-line and remote command"), so the configured command runs
+//     as-is and no launcher or installer is consulted (spec §4.2).
+//  2. The desired mode (nocx-mlm7) gates everything else: raw publishes
+//     nothing and opens a plain shell; relay behaves as raw in this epic;
+//     script (or empty — the direct-host default) publishes and
+//     integrates.
+//  3. In script mode a saved connection publishes the bundle over SFTP
+//     first, through the RemoteInstaller (P8's carrier): the publisher's
+//     fail-open contract means the session still starts — transient-
+//     integrated via the launcher, or raw — when the publish fails, and
+//     the previous activation stays byte-identical.
+//  4. The launcher (nocx-xs1d) then builds the integrated start command. A
+//     profile pin (cfg.Shell) wins outright — a user who says "this host
+//     runs zsh" knows something the detector cannot (nocx-6rj0). Unpinned,
+//     the launcher receives ShellAuto and emits a strictly-POSIX
+//     dispatcher that detects the far login shell at runtime — the only
+//     layer that knows which shell is at the far end — and execs the
+//     matching tier: bash → bash, zsh → zsh, anything else (dash, ash, ksh,
+//     csh, …) → the minimal tier. The dispatcher never guesses bash: an
+//     undetectable shell degrades to the minimal tier, whose fail-open
+//     starts an ordinary plain login shell (ADR-0004:60). A decline (or a
+//     contract-violating result) falls back to a plain shell with the
+//     reason: an ordinary, usable terminal with a visible native prompt is
+//     absolute, no failure path may suppress it.
+//  5. No launcher wired: the installer's own start command (the §3.3
+//     far-side guard) when one is, else a plain shell, reason none.
+func (rc *RealClient) shellStartCommand(ctx context.Context, gclient *gossh.Client, resolved *resolvedConfig, cfg *ConnectConfig) (string, RefusalReason) {
+	if resolved.remoteCommand != "" {
+		return resolved.remoteCommand, ReasonRemoteCommand
+	}
+
+	// raw and relay publish nothing and integrate nothing (N1, §3.1; relay
+	// is inert this epic). Unknown modes fail closed.
+	if !modeAllowsIntegration(cfg.DesiredMode) {
+		return "", ReasonNone
+	}
+
+	// A saved connection publishes the bundle over SFTP before the session
+	// starts (design §4: the SFTP carrier hands the same descriptor to the
+	// same Publish). Best-effort: a publish failure is logged and the
+	// session still starts — fail-open (design §4.1).
 	if cfg.RemoteInstaller != nil {
 		remoteHome, err := cfg.RemoteInstaller.GetRemoteHome(gclient)
 		if err != nil {
 			rc.log.Warn("ssh: could not determine remote home for shell integration",
 				"host", resolved.hostName, "error", err)
 		} else if err := cfg.RemoteInstaller.EnsureInstalledRemote(ctx, gclient, remoteHome); err != nil {
-			rc.log.Warn("ssh: shell integration install failed",
+			rc.log.Warn("ssh: shell integration publish failed",
 				"host", resolved.hostName, "error", err)
 		}
 	}
+
+	if cfg.RemoteLauncher != nil {
+		shell := cfg.Shell
+		if shell == "" {
+			shell = ShellAuto
+		}
+		cmd, reason, ok := cfg.RemoteLauncher.StartCommand(shell, LaunchOptions{
+			SessionID: cfg.SessionID,
+			Enhanced:  cfg.Enhanced,
+		})
+		if ok && cmd != "" {
+			return cmd, ReasonNone
+		}
+		// Decline or degenerate result: fall back to a plain shell. Normalize
+		// a missing reason so the degrade stays visible in the product
+		// (AGENTS.md: a soft degrade must never be log-only).
+		if reason == "" {
+			reason = ReasonUnsupportedShell
+		}
+		return "", reason
+	}
+
+	if cfg.RemoteInstaller != nil {
+		return cfg.RemoteInstaller.RemoteStartCommand(), ReasonNone
+	}
+
+	return "", ReasonNone
+}
+
+// openShell opens a session, requests a PTY, optionally requests agent
+// forwarding, and starts a shell. releaseRef drops the caller's pooled
+// reference when the remote session ends; it is assigned to the channel
+// BEFORE the session watcher starts, so the watcher can never observe the
+// field unset (a race the old assign-after-openShell shape had: a session
+// dying in the window left Close reading a nil callback or racing the
+// write).
+func (rc *RealClient) openShell(ctx context.Context, gclient *gossh.Client, resolved *resolvedConfig, cfg *ConnectConfig, releaseRef func()) (*RealChannel, error) {
+	startCmd, reason := rc.shellStartCommand(ctx, gclient, resolved, cfg)
 
 	session, err := gclient.NewSession()
 	if err != nil {
@@ -555,8 +661,8 @@ func (rc *RealClient) openShell(ctx context.Context, gclient *gossh.Client, reso
 		return nil, fmt.Errorf("stdout pipe: %w", err)
 	}
 
-	if cfg.RemoteInstaller != nil {
-		if err := session.Start(cfg.RemoteInstaller.RemoteStartCommand()); err != nil {
+	if startCmd != "" {
+		if err := session.Start(startCmd); err != nil {
 			_ = session.Close()
 			return nil, fmt.Errorf("shell start: %w", err)
 		}
@@ -568,16 +674,20 @@ func (rc *RealClient) openShell(ctx context.Context, gclient *gossh.Client, reso
 	}
 
 	ch := &RealChannel{
-		log:     rc.log.With("remote", resolved.hostName),
-		session: session,
-		stdin:   stdin,
-		stdout:  stdout,
-		done:    make(chan struct{}),
+		log:                    rc.log.With("remote", resolved.hostName),
+		session:                session,
+		stdin:                  stdin,
+		stdout:                 stdout,
+		done:                   make(chan struct{}),
+		shellIntegrationReason: reason,
 		closeCb: func() {
 			_ = session.Close()
 		},
+		releasePoolRef: releaseRef,
 	}
 
+	// The watcher starts AFTER releasePoolRef is set (above), so a session
+	// that ends during the assignment window cannot race the field.
 	go func() {
 		_ = session.Wait()
 		// Remote session ended — release the pool reference. Close is

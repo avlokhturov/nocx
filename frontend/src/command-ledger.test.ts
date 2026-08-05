@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, beforeEach } from 'vitest'
-import { CommandLedger, type CommandRecord } from './command-ledger'
+import { CommandLedger, type CommandRecord, type CommandStatus } from './command-ledger'
 
 // Fake lineOf that returns the number we feed it. The ledger never caches
 // the result, so tests call this through the ledger's own API.
@@ -434,5 +434,300 @@ describe('CommandLedger onComplete seam (nocx-rtg0.13)', () => {
     l.onMarker('C')
     l.onMarker('D', 0)
     expect(rec.status).toBe('success')
+  })
+})
+
+describe('CommandLedger environment transitions (N6, nocx-y5v5)', () => {
+  // A hand-typed `ssh` that enters a remote environment leaves the running
+  // slot WITHOUT completing: it becomes a dormant transition record. The
+  // local D — delivered via completeTransition, never as a marker — is the
+  // only thing that completes it, exactly once, with the real exit code.
+
+  it('enter() makes the running ssh record a dormant transition record', () => {
+    const completed: CommandRecord[] = []
+    const l = new CommandLedger({ now: fixtureNow(500), onComplete: (r) => completed.push(r) })
+    const ssh = l.open('ssh pi@192.168.0.93', '/', '', fakeLineOf(0))
+    l.onMarker('A')
+    l.onMarker('B')
+    l.onMarker('C')
+    expect(ssh.status).toBe('running')
+
+    expect(l.enter(ssh.id)).toBe(true)
+    // Dormant: open, not running, invisible as a block, no completion.
+    expect(ssh.transition).toBe('entered')
+    expect(ssh.status).toBe('running') // the ssh process is still alive
+    expect(ssh.exitCode).toBeNull()
+    expect(ssh.endedAt).toBeNull()
+    expect(completed).toHaveLength(0)
+    expect(l.transitionRecord).toBe(ssh)
+
+    // The running slot is free: the remote prompt and a remote command can
+    // proceed without finalising or destroying the transition.
+    l.onMarker('A')
+    l.onMarker('B')
+    const remote = l.open('pwd', '/home/pi', 'pi@raspberrypi', fakeLineOf(1))
+    l.onMarker('C')
+    expect(remote.status).toBe('running')
+    expect(remote.trusted).toBe(true)
+    expect(ssh.endedAt).toBeNull()
+    expect(completed).toHaveLength(0)
+    expect(l.transitionRecord).toBe(ssh)
+  })
+
+  it('several remote commands run to completion while dormant, leaving the transition untouched', () => {
+    const completed: CommandRecord[] = []
+    const l = new CommandLedger({ now: fixtureNow(500), onComplete: (r) => completed.push(r) })
+    const ssh = l.open('ssh pi@192.168.0.93', '/', '', fakeLineOf(0))
+    l.onMarker('A')
+    l.onMarker('B')
+    l.onMarker('C')
+    expect(l.enter(ssh.id)).toBe(true)
+
+    for (const cmd of ['pwd', 'ls -la', 'git status']) {
+      l.onMarker('A')
+      l.onMarker('B')
+      const r = l.open(cmd, '/home/pi', 'pi@raspberrypi', fakeLineOf(1))
+      l.onMarker('C')
+      expect(r.status).toBe('running')
+      expect(r.trusted).toBe(true)
+      l.onMarker('D', 0)
+      expect(r.status).toBe('success')
+    }
+
+    // The transition record survived every cycle, still dormant.
+    expect(ssh.status).toBe('running')
+    expect(ssh.transition).toBe('entered')
+    expect(ssh.exitCode).toBeNull()
+    expect(ssh.endedAt).toBeNull()
+    expect(l.transitionRecord).toBe(ssh)
+    // Exactly the remote commands completed — the ssh never did.
+    expect(completed.map((c) => c.command)).toEqual(['pwd', 'ls -la', 'git status'])
+  })
+
+  it('disconnect: the running remote command is cut short with reason transition-lost, the transition takes the local D code', () => {
+    const completed: CommandRecord[] = []
+    const l = new CommandLedger({ now: fixtureNow(500), onComplete: (r) => completed.push(r) })
+    const ssh = l.open('ssh pi@192.168.0.93', '/', '', fakeLineOf(0))
+    l.onMarker('A')
+    l.onMarker('B')
+    l.onMarker('C')
+    l.enter(ssh.id)
+    l.onMarker('A')
+    l.onMarker('B')
+    const remote = l.open('top', '/home/pi', 'pi@raspberrypi', fakeLineOf(1))
+    l.onMarker('C')
+    expect(remote.status).toBe('running')
+    expect(remote.trusted).toBe(true)
+
+    const completedTrans = l.completeTransition(255)
+    expect(completedTrans).toBe(ssh)
+    expect(remote.status).toBe('interrupted')
+    expect(remote.reason).toBe('transition-lost')
+    expect(remote.exitCode).toBeNull() // the local D never becomes the remote command's code
+    expect(remote.endedAt).toBe(500)
+
+    expect(ssh.status).toBe('failure')
+    expect(ssh.exitCode).toBe(255)
+    expect(ssh.endedAt).toBe(500)
+    expect(ssh.transition).toBe('completed')
+    expect(l.transitionRecord).toBeNull()
+
+    // Each record completed exactly once: the interrupted command, then the
+    // transition. A second completeTransition is a no-op.
+    expect(completed.map((c) => c.command)).toEqual(['top', 'ssh pi@192.168.0.93'])
+    expect(completed.filter((c) => c === ssh)).toHaveLength(1)
+    expect(l.completeTransition(9)).toBeNull()
+    expect(completed).toHaveLength(2)
+  })
+
+  it('disconnect with an untrusted remote command finalizes it as unknown', () => {
+    const completed: CommandRecord[] = []
+    const l = new CommandLedger({ now: fixtureNow(500), onComplete: (r) => completed.push(r) })
+    const ssh = l.open('ssh host', '/', '', fakeLineOf(0))
+    l.onMarker('C') // orphan — the ssh command never saw a clean A→B
+    l.enter(ssh.id)
+    const remote = l.open('cmd', '/', 'host', fakeLineOf(1))
+    l.onMarker('C') // orphan — untrusted
+    expect(remote.trusted).toBe(false)
+
+    l.completeTransition(255)
+    expect(remote.status).toBe('unknown')
+    expect(remote.reason).toBe('transition-lost')
+    expect(ssh.status).toBe('failure')
+    expect(ssh.exitCode).toBe(255)
+    expect(completed).toHaveLength(2)
+  })
+
+  it('completeTransition stays exactly-once when the interrupted command\u2019s callback reenters', () => {
+    const completed: CommandRecord[] = []
+    const l = new CommandLedger({
+      now: fixtureNow(500),
+      onComplete: (r) => {
+        completed.push(r)
+        // The consumer of the interrupted remote command's completion calls
+        // completeTransition again — it must find nothing left to complete.
+        l.completeTransition(255)
+      },
+    })
+    const ssh = l.open('ssh host', '/', '', fakeLineOf(0))
+    l.onMarker('A')
+    l.onMarker('B')
+    l.onMarker('C')
+    l.enter(ssh.id)
+    l.onMarker('A')
+    l.onMarker('B')
+    l.open('top', '/', 'host', fakeLineOf(1))
+    l.onMarker('C')
+
+    l.completeTransition(255)
+    // The transition record reached onComplete exactly once despite the
+    // reentrant call inside the remote command's own completion.
+    expect(completed.filter((c) => c === ssh)).toHaveLength(1)
+    expect(completed.map((c) => c.command)).toEqual(['top', 'ssh host'])
+  })
+
+  it('ordinary exit: the exit command completes, then the local D completes the transition as success', () => {
+    const completed: CommandRecord[] = []
+    const l = new CommandLedger({ now: fixtureNow(500), onComplete: (r) => completed.push(r) })
+    const ssh = l.open('ssh pi@192.168.0.93', '/', '', fakeLineOf(0))
+    l.onMarker('A')
+    l.onMarker('B')
+    l.onMarker('C')
+    l.enter(ssh.id)
+    l.onMarker('A')
+    l.onMarker('B')
+    const exit = l.open('exit', '/home/pi', 'pi@raspberrypi', fakeLineOf(1))
+    l.onMarker('C')
+    l.onMarker('D', 0)
+    expect(exit.status).toBe('success')
+
+    const completedTrans = l.completeTransition(0)
+    expect(completedTrans).toBe(ssh)
+    expect(ssh.status).toBe('success')
+    expect(ssh.exitCode).toBe(0)
+    expect(ssh.transition).toBe('completed')
+    expect(completed.map((c) => c.command)).toEqual(['exit', 'ssh pi@192.168.0.93'])
+  })
+
+  it('Ctrl-D with no running remote block: the local D completes the transition and nothing else', () => {
+    const completed: CommandRecord[] = []
+    const l = new CommandLedger({ now: fixtureNow(500), onComplete: (r) => completed.push(r) })
+    const ssh = l.open('ssh pi@192.168.0.93', '/', '', fakeLineOf(0))
+    l.onMarker('A')
+    l.onMarker('B')
+    l.onMarker('C')
+    l.enter(ssh.id)
+    l.onMarker('A')
+    l.onMarker('B') // remote prompt, no command running
+
+    const completedTrans = l.completeTransition(0)
+    expect(completedTrans).toBe(ssh)
+    expect(ssh.status).toBe('success')
+    expect(ssh.exitCode).toBe(0)
+    expect(ssh.transition).toBe('completed')
+    expect(completed).toHaveLength(1)
+    expect(completed[0]).toBe(ssh)
+  })
+
+  it('a second ssh from inside is refused: no second dormant record, no nesting', () => {
+    const completed: CommandRecord[] = []
+    const l = new CommandLedger({ now: fixtureNow(500), onComplete: (r) => completed.push(r) })
+    const ssh1 = l.open('ssh host1', '/', '', fakeLineOf(0))
+    l.onMarker('A')
+    l.onMarker('B')
+    l.onMarker('C')
+    expect(l.enter(ssh1.id)).toBe(true)
+    expect(l.enter(ssh1.id)).toBe(false) // a record cannot enter twice
+
+    l.onMarker('A')
+    l.onMarker('B')
+    const ssh2 = l.open('ssh host2', '/home', 'host1', fakeLineOf(1))
+    l.onMarker('C')
+    expect(ssh2.status).toBe('running')
+
+    expect(l.enter(ssh2.id)).toBe(false) // refused, not nested
+    expect(ssh2.transition).toBeUndefined()
+    expect(ssh2.status).toBe('running') // still an ordinary running command
+    expect(l.transitionRecord).toBe(ssh1)
+    expect(ssh1.transition).toBe('entered')
+
+    // The refused command completes normally; the first transition is intact.
+    l.onMarker('D', 0)
+    expect(ssh2.status).toBe('success')
+    expect(completed.map((c) => c.command)).toEqual(['ssh host2'])
+    expect(ssh1.endedAt).toBeNull()
+  })
+
+  it('a record that never entered completes as an ordinary command — no transition, no extra completion', () => {
+    const completed: CommandRecord[] = []
+    const l = new CommandLedger({ now: fixtureNow(500), onComplete: (r) => completed.push(r) })
+    const ssh = l.open('ssh pi@192.168.0.93', '/', '', fakeLineOf(0))
+    l.onMarker('A')
+    l.onMarker('B')
+    l.onMarker('C')
+    l.onMarker('D', 255) // auth failed — the fail-open path, unchanged
+    expect(ssh.status).toBe('failure')
+    expect(ssh.exitCode).toBe(255)
+    expect(ssh.transition).toBeUndefined()
+    expect(completed).toHaveLength(1)
+    expect(completed[0]).toBe(ssh)
+    // There never was a transition to complete.
+    expect(l.completeTransition(255)).toBeNull()
+    expect(completed).toHaveLength(1)
+  })
+
+  it('completeTransition without a dormant transition is a safe no-op', () => {
+    const completed: CommandRecord[] = []
+    const l = new CommandLedger({ now: fixtureNow(500), onComplete: (r) => completed.push(r) })
+    expect(l.transitionRecord).toBeNull()
+    expect(l.completeTransition(0)).toBeNull()
+    expect(completed).toHaveLength(0)
+  })
+
+  it('enter() refuses a finished or unknown record, and a remote D never completes the transition', () => {
+    const completed: CommandRecord[] = []
+    const l = new CommandLedger({ now: fixtureNow(500), onComplete: (r) => completed.push(r) })
+    expect(l.enter(999)).toBe(false) // no such record
+
+    const done = l.open('ls', '/', '', fakeLineOf(0))
+    l.onMarker('A')
+    l.onMarker('B')
+    l.onMarker('C')
+    l.onMarker('D', 0)
+    expect(l.enter(done.id)).toBe(false) // already finished
+
+    const ssh = l.open('ssh host', '/', '', fakeLineOf(1))
+    l.onMarker('A')
+    l.onMarker('B')
+    l.onMarker('C')
+    l.enter(ssh.id)
+    l.onMarker('A')
+    l.onMarker('B')
+    const remote = l.open('pwd', '/', 'host', fakeLineOf(2))
+    l.onMarker('C')
+    l.onMarker('D', 0) // a REMOTE D closes the remote command only
+    expect(remote.status).toBe('success')
+    expect(ssh.transition).toBe('entered')
+    expect(ssh.endedAt).toBeNull()
+    expect(l.transitionRecord).toBe(ssh)
+  })
+
+  it('entered is a lifecycle state, never a CommandStatus (compile-time proof)', () => {
+    // The dormant record's status stays a real CommandStatus ('running' — the
+    // ssh process is alive until the local D), and the lifecycle flag is a
+    // separate type. The @ts-expect-error is the compile-time proof; tsc
+    // enforces it in the type gate. 'entered' must never reach persisted
+    // history, whose CommandStatus enum lives in contracts/history.query.schema.json.
+    const l = new CommandLedger({ now: fixtureNow(500) })
+    const rec = l.open('ssh host', '/', '', fakeLineOf(0))
+    l.onMarker('A')
+    l.onMarker('B')
+    l.onMarker('C')
+    l.enter(rec.id)
+    const s: CommandStatus = rec.status // still a CommandStatus while entered
+    expect(s).toBe('running')
+    // @ts-expect-error TransitionLifecycle is not a CommandStatus
+    const t: CommandStatus = rec.transition
+    void t
   })
 })

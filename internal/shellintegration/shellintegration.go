@@ -39,8 +39,10 @@ type ShellIntegration interface {
 	// VERSION matches. Best-effort: errors are logged, not fatal.
 	EnsureInstalled(home string) error
 
-	// EnsureInstalledRemote does the same on a remote host via SFTP.
-	// Best-effort: errors are logged, not fatal.
+	// EnsureInstalledRemote publishes the integration bundle on a remote
+	// host over SFTP through the same Publisher the self-installing
+	// launcher uses (design §4). No remote rc file is ever created or
+	// modified (N4). Best-effort: errors are logged, not fatal.
 	EnsureInstalledRemote(ctx context.Context, sshClient *gossh.Client, remoteHome string) error
 
 	// ActivationEnv returns env vars to set when starting a shell so the
@@ -48,8 +50,9 @@ type ShellIntegration interface {
 	// emits NOCX_PROMPT_MODE=marker-only and a unique NOCX_SESSION_ID.
 	ActivationEnv(enhanced bool) []string
 
-	// RemoteStartCommand returns the command to use for SSH session.Start()
-	// that sets the activation env var and execs the user's shell.
+	// RemoteStartCommand returns the installed-mode start command (design
+	// §3.3): the far-side guard that execs the compact carrier when a
+	// generation is committed, else a native login shell.
 	RemoteStartCommand() string
 }
 
@@ -212,12 +215,6 @@ func newSessionID() (string, bool) {
 		return "", false
 	}
 	return hex.EncodeToString(b[:]), true
-}
-
-func (s *Impl) RemoteStartCommand() string {
-	// Quote ${SHELL:-/bin/sh} so paths with spaces are handled as a single
-	// argument to exec. The expansion still happens on the remote host.
-	return activationEnvVar + `=1 exec "${SHELL:-/bin/sh}" -l`
 }
 
 func isLocalHost(host string) bool {

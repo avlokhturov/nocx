@@ -48,6 +48,7 @@ export class Tab implements TabHost {
   private _subtitle = ''
   private _adoptable = false
   private _onAdopt: (() => void) | null = null
+  private _warning = false
   private _disposed = false
   private _mountAbort = new AbortController()
   // ── B.5 geometry authority ──────────────────────────────────────────
@@ -125,6 +126,20 @@ export class Tab implements TabHost {
     this._adoptable = adoptable
     this._onAdopt = adoptable ? onAdopt : null
     this.onDisplayChange?.()
+  }
+
+  /** Mark the tab's environment degraded/uncertain (nocx-4t37.2): the one
+   *  signal tab chrome may carry — a small warning mark, never a permanent
+   *  product badge. The capability statement itself lives in the rail. */
+  setWarningState(warning: boolean): void {
+    if (this._disposed) return
+    if (warning === this._warning) return
+    this._warning = warning
+    this.onDisplayChange?.()
+  }
+
+  get warning(): boolean {
+    return this._warning
   }
 
   setActive(active: boolean): void {
@@ -339,6 +354,11 @@ export class TabManager {
   /** Called when the user performs a UI action that should reset the
    *  vault idle timer. Wired by main.tsx to vaultClient.activity(). */
   onActivity?: () => void
+  /** Called when the active tab changes — the seam for chrome that must
+   *  re-scope to the tab in front. The sidebar's ports view follows the
+   *  active tab through this (nocx-wzc4.7); wired by main.tsx to a Solid
+   *  signal. */
+  onActiveTabChange?: () => void
 
   constructor(
     bar: HTMLElement,
@@ -424,6 +444,8 @@ export class TabManager {
       undefined,
       {
         onSubtitleChange: (subtitle) => tabRef.current?.updateSubtitle(subtitle),
+        onWarningChange: (warning) => tabRef.current?.setWarningState(warning),
+        onPortsTargetChange: () => this.onActiveTabChange?.(),
         onSetupVault: this.onSetupVault,
         onCreateSecret: this.onCreateSecret,
       },
@@ -469,6 +491,8 @@ export class TabManager {
             tab.setAdoptState(false, () => {})
           }
         },
+        onWarningChange: (warning) => tabRef.current?.setWarningState(warning),
+        onPortsTargetChange: () => this.onActiveTabChange?.(),
         onVaultSealed: this.onVaultSealed,
         onSetupVault: this.onSetupVault,
         onCreateSecret: this.onCreateSecret,
@@ -511,6 +535,7 @@ export class TabManager {
         showToast({ level: 'danger', message: `Could not save: ${message}` })
       })
   }
+
   /**
    * Open a tab with the given content, deduplicating by singletonKey.
    * If a tab with the same singletonKey already exists, activates it.
@@ -656,9 +681,9 @@ export class TabManager {
     log.info('nocx: tab.setActive(true) called', {
       paneClasses: tab.pane.className,
     })
-
     await tab.start()
     tab.focus()
+    this.onActiveTabChange?.()
   }
 
   activateByIndex(index: number): void {
@@ -668,6 +693,29 @@ export class TabManager {
 
   closeActiveTab(): void {
     if (this.activeTab) this.closeTab(this.activeTab)
+  }
+
+  /** The active tab's terminal content, when the active tab is a terminal.
+   *  Global actions (the quick-connect "Integrate this shell" item,
+   *  nocx-ynsx) reach the shell at the current prompt through this; the
+   *  content itself owns the PROMPT_READY && trusted && owned gate. */
+  activeTerminalContent(): TerminalContent | null {
+    const content = this.activeTab?.content
+    return content instanceof TerminalContent ? content : null
+  }
+
+  /** The ports.* target the ACTIVE tab scopes to (nocx-wzc4.8): the
+   *  reserved "local" for a local shell, the saved-profile id for a
+   *  saved-profile SSH tab, null otherwise (alias tab, Settings, …): the
+   *  ports entry points are no-ops then. */
+  portsTargetId(): string | null {
+    return this.activeTerminalContent()?.portsTargetId ?? null
+  }
+
+  /** When portsTargetId is null because the pane walked into an environment
+   *  we cannot enumerate, this names it. '' otherwise (nocx-695k.3). */
+  portsUnavailableReason(): string {
+    return this.activeTerminalContent()?.portsUnavailableReason ?? ''
   }
 
   reorderTab(draggedId: number, targetId: number): void {

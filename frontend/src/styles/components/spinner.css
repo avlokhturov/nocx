@@ -1,0 +1,32 @@
+/* Spinner — the kit's loading indicator (nocx-wzc4.9). A bordered ring whose
+   top arc is the accent; rotation is the motion. The animation is gated on
+   prefers-reduced-motion like every other kit animation — the ring simply
+   sits still for a user who asked for less motion. */
+
+.ui-spinner {
+  display: inline-block;
+  box-sizing: border-box;
+  width: 16px;
+  height: 16px;
+  border: 2px solid color-mix(in srgb, var(--color-text-dim), transparent 72%);
+  border-top-color: var(--color-accent);
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+
+.ui-spinner[data-size='sm'] {
+  width: 12px;
+  height: 12px;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .ui-spinner {
+    animation: ui-spin 0.8s linear infinite;
+  }
+}
+
+@keyframes ui-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

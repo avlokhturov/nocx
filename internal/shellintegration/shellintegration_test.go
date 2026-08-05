@@ -104,14 +104,18 @@ func TestRemoteStartCommand(t *testing.T) {
 	s := New(testLogger())
 	cmd := s.RemoteStartCommand()
 
-	if !strings.Contains(cmd, "NOCX_SHELL_INTEGRATION=1") {
-		t.Errorf("RemoteStartCommand missing activation env: %q", cmd)
+	// The installed-mode start command is the §3.3 far-side guard: exec the
+	// compact carrier when a generation is committed, else a native login
+	// shell. The rc-gate activation command is retired (N4) — nothing in it
+	// may reference an rc file.
+	if !strings.Contains(cmd, `exec "$HOME/.nocx/launch"`) {
+		t.Errorf("RemoteStartCommand missing the carrier exec: %q", cmd)
 	}
-	if !strings.Contains(cmd, "exec") {
-		t.Errorf("RemoteStartCommand missing exec: %q", cmd)
+	if !strings.Contains(cmd, `exec "${SHELL:-/bin/sh}" -l`) {
+		t.Errorf("RemoteStartCommand missing the native-login-shell fallback: %q", cmd)
 	}
-	if !strings.Contains(cmd, `"${SHELL:-/bin/sh}"`) {
-		t.Errorf("RemoteStartCommand should quote SHELL expansion: %q", cmd)
+	if strings.Contains(cmd, ".bashrc") || strings.Contains(cmd, ".zshrc") {
+		t.Errorf("RemoteStartCommand references an rc file (N4): %q", cmd)
 	}
 }
 
@@ -233,20 +237,111 @@ func TestEnsureInstalled_PreservesExistingRcContent(t *testing.T) {
 	}
 }
 
-func TestScriptContent_ContainsMarkers(t *testing.T) {
-	markers := []string{
-		`\e]133;A`,
-		`\e]133;B`,
-		`\e]133;C`,
-		`\e]133;D`,
+// TestEnsureInstalled_RewritesOldVersion guards nocx-6b3x: an existing
+// install whose VERSION marker is stale must be rewritten — including the
+// scripts that the old version never shipped. Seeded with the real previous
+// version ("9") and an install that lacks the posix script entirely, the
+// way every installed ~/.nocx looked before nocx-518d.
+func TestEnsureInstalled_RewritesOldVersion(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, dirName)
+	// #nosec G306 — test fixture directory, intentionally created with restricted permissions.
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	// #nosec G306 — test fixture file, intentionally created with restricted permissions.
+	if err := os.WriteFile(filepath.Join(dir, versionFile), []byte("9\n"), 0o600); err != nil {
+		t.Fatalf("write stale VERSION: %v", err)
+	}
+	// #nosec G306 — test fixture file, intentionally created with restricted permissions.
+	if err := os.WriteFile(filepath.Join(dir, "shell-integration.bash"), []byte("stale bash script\n"), 0o600); err != nil {
+		t.Fatalf("write stale script: %v", err)
 	}
 
-	for name, content := range scripts {
-		for _, marker := range markers {
-			if !strings.Contains(content, marker) {
-				t.Errorf("script %s missing marker %q", name, marker)
-			}
+	s := New(testLogger())
+	if err := s.EnsureInstalled(home); err != nil {
+		t.Fatalf("EnsureInstalled: %v", err)
+	}
+
+	// #nosec G304 — test-only path built from t.TempDir + fixed constants.
+	vf, err := os.ReadFile(filepath.Join(dir, versionFile))
+	if err != nil {
+		t.Fatalf("read VERSION: %v", err)
+	}
+	if strings.TrimSpace(string(vf)) != version {
+		t.Errorf("VERSION = %q, want %q (stale install must be rewritten)", strings.TrimSpace(string(vf)), version)
+	}
+
+	for name := range scripts {
+		// #nosec G304 — test-only path built from t.TempDir + fixed constants.
+		data, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Errorf("script %s missing after rewrite: %v", name, err)
+			continue
 		}
+		if string(data) == "stale bash script\n" {
+			t.Errorf("script %s was not rewritten", name)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "shell-integration.posix")); err != nil {
+		t.Errorf("shell-integration.posix missing after rewrite: %v", err)
+	}
+}
+
+// scriptMarkers declares, per mapped script, the OSC 133 markers it must
+// emit. bash and zsh emit all four from preexec hooks (PROMPT_COMMAND/
+// DEBUG, precmd/preexec_functions). The posix script structurally cannot
+// emit C: POSIX sh has no preexec hook, and the absence is deliberate —
+// asserted at execution time by TestPosixIntegration_EmitsMarkersFromPS1.
+// Its escapes are \033 rather than \e, so its expectation is its own. The
+// expectation is per-script on purpose: adding a script to the map without
+// deciding its markers fails the map test below, and a bash script that
+// stops emitting C is a real defect, not a tolerated tier difference.
+var scriptMarkers = map[string][]string{
+	// bash/zsh emit A, C and D through the __nocx_marker helper (the literal
+	// kind is chosen at the call site); B is the literal escape in PS1. The
+	// call sites are the tripwire: a script that stops emitting C is a real
+	// defect, not a tolerated tier difference.
+	"shell-integration.bash":  {`__nocx_marker A`, `\e]133;B`, `__nocx_marker C`, `__nocx_marker D`},
+	"shell-integration.zsh":   {`__nocx_marker A`, `\e]133;B`, `__nocx_marker C`, `__nocx_marker D`},
+	"shell-integration.posix": {`\033]133;A`, `\033]133;B`, `\033]133;D`},
+}
+
+// missingScriptMarkers returns the declared markers for name that content
+// lacks. A script with no declared expectation reports itself as missing
+// its expectation — the tripwire that keeps every mapped script decided.
+func missingScriptMarkers(name, content string) []string {
+	want, ok := scriptMarkers[name]
+	if !ok {
+		return []string{"<no declared marker expectation — add one to scriptMarkers>"}
+	}
+	var missing []string
+	for _, marker := range want {
+		if !strings.Contains(content, marker) {
+			missing = append(missing, marker)
+		}
+	}
+	return missing
+}
+
+func TestScriptContent_ContainsMarkers(t *testing.T) {
+	for name, content := range scripts {
+		for _, marker := range missingScriptMarkers(name, content) {
+			t.Errorf("script %s missing marker %q", name, marker)
+		}
+	}
+}
+
+func TestScriptMarkerExpectation_RejectsBashWithoutC(t *testing.T) {
+	content := strings.ReplaceAll(bashScript, `__nocx_marker C`, "")
+	found := false
+	for _, m := range missingScriptMarkers("shell-integration.bash", content) {
+		if m == `__nocx_marker C` {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("bash script without C not flagged as missing %q", `__nocx_marker C`)
 	}
 }
 

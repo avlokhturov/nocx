@@ -1,0 +1,172 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/ports.sample.schema.json",
+  "title": "PortsSampleResult",
+  "description": "Result of the ports.sample JSON-RPC method — a manual retry that clears a terminal refusal and samples immediately: the discovery state for one target (an authenticated SSH host, or the reserved \"local\" machine) plus every forward the backend currently tracks. The single declaration of this shape: the renderer's TypeScript type is generated from it and the Go transport is validated against it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["profileId", "host", "discovery", "forwards"],
+  "properties": {
+    "profileId": {
+      "description": "The target the status belongs to — the id the renderer echoes to every other ports.* method. A stored profile id, or the reserved value \"local\" for the machine the app runs on (a local tab has no profile; the renderer recognizes the identity by this exact value).",
+      "type": "string"
+    },
+    "host": {
+      "description": "Host the discovery runs against, as the session opened it — the machine's hostname for the reserved \"local\" target. Empty before the first connection to the target.",
+      "type": "string"
+    },
+    "discovery": {
+      "description": "The discovery read path: what the remote listens on and why we know (or do not know) it. A successful empty listeners list means nothing is listening; every non-available state means could-not-determine and must never render as 'no ports'.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "listeners", "probe", "probesTried", "classification", "stderr", "lastSampleAt", "paused", "visible", "connLost"],
+      "properties": {
+        "state": {
+          "description": "Overall outcome of the last sample. pending is the state before the first sample completed; available with an empty listeners list means 'no listeners observed'.",
+          "type": "string",
+          "enum": ["available", "available-limited", "unavailable", "failed-transiently", "permission-or-policy-refused", "pending"]
+        },
+        "listeners": {
+          "description": "Remote listening TCP ports from the last successful sample. Always an array, never null: an empty list is the honest 'nothing is listening' and must only appear when that is true.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["family", "address", "port", "process"],
+            "properties": {
+              "family": {
+                "description": "IP family of the bind address.",
+                "type": "string",
+                "enum": ["ipv4", "ipv6"]
+              },
+              "address": {
+                "description": "Bind address as the probe reported it; may be a wildcard.",
+                "type": "string"
+              },
+              "port": {
+                "description": "The remote listening port.",
+                "type": "integer",
+                "minimum": 0
+              },
+              "process": {
+                "description": "Three-valued process evidence: known | permission-denied | unsupported. Never absent — 'nobody owns it' and 'I was not allowed to see' are different facts and must render differently.",
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["evidence", "name", "pid"],
+                "properties": {
+                  "evidence": {
+                    "type": "string",
+                    "enum": ["known", "permission-denied", "unsupported"]
+                  },
+                  "name": {
+                    "description": "Process name; empty unless evidence is known.",
+                    "type": "string"
+                  },
+                  "pid": {
+                    "description": "Process id; 0 unless evidence is known.",
+                    "type": "integer"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "probe": {
+          "description": "Dialect that produced the last sample; empty when none did.",
+          "type": "string"
+        },
+        "probesTried": {
+          "description": "Probes attempted for the last pass, in order. Always an array, never null.",
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "classification": {
+          "description": "Human-readable why: refusal detail, truncation, tool absence. Never an uncontrolled dump of remote output.",
+          "type": "string"
+        },
+        "stderr": {
+          "description": "Bounded excerpt of the probe's stderr, for diagnostics.",
+          "type": "string"
+        },
+        "lastSampleAt": {
+          "description": "ISO-8601 UTC time of the last successful sample; null before any has completed.",
+          "type": ["string", "null"]
+        },
+        "paused": {
+          "description": "The user's Pause state: when true, no automatic samples run (manual Retry still does).",
+          "type": "boolean"
+        },
+        "visible": {
+          "description": "Whether a watcher (the ports panel) is present and visible. Periodic sampling runs only while true.",
+          "type": "boolean"
+        },
+        "connLost": {
+          "description": "The underlying connection died; discovery stopped and nothing samples until the next connection. A fresh sample follows automatically.",
+          "type": "boolean"
+        }
+      }
+    },
+    "forwards": {
+      "description": "Every forward the backend currently tracks for the connection, running or stopped-by-transport-loss. Always an array, never null. User-stopped records leave the ledger at stop time — the renderer keeps those on its own side. Always empty for the reserved \"local\" target: there is nothing to forward from the machine you are already on, and the renderer must not offer forwarding actions for it.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "direction", "requestedBind", "actualBind", "destination", "scope", "state", "stopReason", "error"],
+        "properties": {
+          "id": {
+            "description": "Backend-assigned tunnel id. The renderer echoes it to tunnel.stop; nothing else can stop a forward.",
+            "type": "string"
+          },
+          "direction": {
+            "description": "Forwarding strategy.",
+            "type": "string",
+            "enum": ["local", "remote", "dynamic"]
+          },
+          "requestedBind": {
+            "description": "The bind the caller asked for. Port 0 means 'allocate' — the usable address is actualBind, never this.",
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["host", "port"],
+            "properties": {
+              "host": { "type": "string" },
+              "port": { "type": "integer", "minimum": 0 }
+            }
+          },
+          "actualBind": {
+            "description": "The address the listener really holds. Never the requested port when the request was 0.",
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["host", "port"],
+            "properties": {
+              "host": { "type": "string" },
+              "port": { "type": "integer", "minimum": 1 }
+            }
+          },
+          "destination": {
+            "description": "Remote target of the forward, host:port, as dialed over the SSH connection.",
+            "type": "string"
+          },
+          "scope": {
+            "description": "Owner label the renderer attached at open.",
+            "type": "string"
+          },
+          "state": {
+            "description": "Lifecycle state. A tracked record is running, or stopped by transport loss.",
+            "type": "string",
+            "enum": ["starting", "running", "stopped"]
+          },
+          "stopReason": {
+            "description": "Why the forward stopped. Null while running.",
+            "type": ["string", "null"],
+            "enum": ["user", "connection lost", "error", null]
+          },
+          "error": {
+            "description": "The error behind a stopped forward. Null while running or after a clean user stop.",
+            "type": ["string", "null"]
+          }
+        }
+      }
+    }
+  }
+}

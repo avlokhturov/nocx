@@ -152,3 +152,56 @@
   font-size: var(--font-size-sm);
   color: var(--color-text-dim);
 }
+
+/* ── Type badge (palette mode, nocx-4t37) ──────────────────────────── */
+
+/* The row's type — Command / Host / Setting — sits at the far right, pushed
+   there by the flex row's auto margin: in a mixed list the type is the
+   point, so it lives at the edge, not hidden next to the label. */
+.quick-connect__item-kind {
+  margin-left: auto;
+  flex: 0 0 auto;
+  font-size: var(--font-size-2xs);
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: var(--color-surface-hover);
+  color: var(--color-text-dim);
+}
+
+/* ── Drill-in breadcrumbs (nocx-4t37) ───────────────────────────────── */
+
+/* The command's path above the filter: command name › chosen steps › the
+   current step. Backspace or Escape walks it back one step at a time. */
+.quick-connect__drill {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-1);
+  margin-bottom: var(--space-2);
+  flex: 0 0 auto;
+  font-size: var(--font-size-sm);
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.quick-connect__drill-step {
+  color: var(--color-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The command name — the trail's origin — reads dimmer than the choices. */
+.quick-connect__drill-step:first-child {
+  color: var(--color-text-dim);
+}
+
+/* The step being picked right now. */
+.quick-connect__drill-step--current {
+  color: var(--color-accent);
+}
+
+.quick-connect__drill-sep {
+  flex: 0 0 auto;
+  color: var(--color-text-dim);
+}

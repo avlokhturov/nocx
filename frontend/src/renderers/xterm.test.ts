@@ -42,8 +42,6 @@ describe('XtermRenderer setReadOnly', () => {
 
     r.setReadOnly(false)
     expect(term!.options.disableStdin).toBe(false)
-
-    r.dispose()
   })
 
   it('uses the same word separator policy as the frozen block (parity by construction)', async () => {
@@ -183,6 +181,169 @@ describe('parseOsc133', () => {
   })
 })
 
+describe('parseOsc133 nocx_env tags', () => {
+  it('parses a tagged A marker exposing nocx_env', () => {
+    expect(parseOsc133('A;nocx_env=env-ab12')).toEqual({ kind: 'A', nocxEnv: 'env-ab12' })
+  })
+
+  it('parses tagged B and C markers', () => {
+    expect(parseOsc133('B;nocx_env=env-ab12')).toEqual({ kind: 'B', nocxEnv: 'env-ab12' })
+    expect(parseOsc133('C;nocx_env=env-ab12')).toEqual({ kind: 'C', nocxEnv: 'env-ab12' })
+  })
+
+  it('parses a tagged D with exit code and nocx_env', () => {
+    expect(parseOsc133('D;0;nocx_env=env-ab12')).toEqual({
+      kind: 'D',
+      exitCode: 0,
+      nocxEnv: 'env-ab12',
+    })
+  })
+
+  it('parses a tagged D without an exit code', () => {
+    // The first parameter is a key=value property, not a positional exit
+    // code, so it must not be swallowed.
+    expect(parseOsc133('D;nocx_env=env-ab12')).toEqual({ kind: 'D', nocxEnv: 'env-ab12' })
+  })
+
+  it('leaves unknown well-formed parameters untagged', () => {
+    expect(parseOsc133('A;Prompt=1')).toEqual({ kind: 'A' })
+    expect(parseOsc133('A;Prompt=1;nocx_env=env-ab12')).toEqual({ kind: 'A', nocxEnv: 'env-ab12' })
+  })
+
+  it('tolerates an empty parameter as today', () => {
+    expect(parseOsc133('A;')).toEqual({ kind: 'A' })
+  })
+
+  it('a marker whose tag is present but malformed is ignored entirely', () => {
+    // Present-but-malformed ≠ absent: an absent tag keeps the legacy
+    // untagged boundary, a malformed one must never be read as a marker.
+    expect(parseOsc133('A;nocx_env=')).toBeNull()
+    expect(parseOsc133('A;nocx_env=bad id')).toBeNull()
+    expect(parseOsc133('A;nocx_env')).toBeNull()
+    expect(parseOsc133('B;nocx_env=' + 'a'.repeat(65))).toBeNull()
+    expect(parseOsc133('D;0;nocx_env=')).toBeNull()
+    expect(parseOsc133('D;nocx_env=bad id')).toBeNull()
+  })
+})
+
+describe('onEnvironmentPassport fan-out', () => {
+  const stubBrowser = () => {
+    window.matchMedia = (query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addListener: () => {},
+      removeListener: () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      dispatchEvent: () => false,
+    })
+    ;(globalThis as Record<string, unknown>).ResizeObserver = class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+  }
+
+  async function mountRenderer(): Promise<XtermRenderer> {
+    stubBrowser()
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+    return r
+  }
+
+  it('accepts a passport matching the expected id through the real parser', async () => {
+    const r = await mountRenderer()
+    r.setExpectedEnvironmentId('env-ab12')
+
+    let resolveDone: () => void
+    const done = new Promise<void>((res) => {
+      resolveDone = res
+    })
+    let received: unknown
+    r.onEnvironmentPassport((d) => {
+      received = d
+      resolveDone()
+    })
+
+    r.write('\x1b]636;P;1;env-ab12;-;11;enhanced;-\x07')
+    await done
+
+    expect(received).toMatchObject({ status: 'accepted' })
+    r.dispose()
+  })
+
+  it('reports an unexpected id and never accepts it', async () => {
+    const r = await mountRenderer()
+    r.setExpectedEnvironmentId('env-minted-for-this-attempt')
+
+    let resolveDone: () => void
+    const done = new Promise<void>((res) => {
+      resolveDone = res
+    })
+    let received: unknown
+    r.onEnvironmentPassport((d) => {
+      received = d
+      resolveDone()
+    })
+
+    r.write('\x1b]636;P;1;env-ab12;-;11;enhanced;-\x07')
+    await done
+
+    expect(received).toMatchObject({ status: 'unexpected' })
+    r.dispose()
+  })
+
+  it('a duplicate passport for an accepted id is reported, never re-accepted', async () => {
+    const r = await mountRenderer()
+    r.setExpectedEnvironmentId('env-ab12')
+
+    const seen: string[] = []
+    let resolveFirst: () => void
+    const first = new Promise<void>((res) => {
+      resolveFirst = res
+    })
+    let resolveSecond: () => void
+    const second = new Promise<void>((res) => {
+      resolveSecond = res
+    })
+    r.onEnvironmentPassport((d) => {
+      seen.push(d.status)
+      if (seen.length === 1) resolveFirst()
+      else resolveSecond()
+    })
+
+    r.write('\x1b]636;P;1;env-ab12;-;11;enhanced;-\x07')
+    await first
+    r.write('\x1b]636;P;1;env-ab12;-;11;enhanced;-\x07')
+    await second
+
+    expect(seen).toEqual(['accepted', 'duplicate'])
+    r.dispose()
+  })
+
+  it('exposes a tagged marker through the real parser into the enriched event', async () => {
+    const r = await mountRenderer()
+    let resolveDone: () => void
+    const done = new Promise<void>((res) => {
+      resolveDone = res
+    })
+    let ev: CommandMarkerEvent | undefined
+    r.onCommandMarker((e) => {
+      ev = e
+      resolveDone()
+    })
+    r.write('\x1b]133;A;nocx_env=env-ab12\x07')
+    await done
+    expect(ev?.kind).toBe('A')
+    expect(ev?.nocxEnv).toBe('env-ab12')
+    r.dispose()
+  })
+})
+
 describe('onCommandMarker fan-out', () => {
   it('fans out one enriched event per marker to every subscriber', async () => {
     // jsdom lacks matchMedia and ResizeObserver, which xterm.js / our mount
@@ -230,6 +391,79 @@ describe('onCommandMarker fan-out', () => {
     expect(ev.buffer).toBe('normal')
     expect(typeof ev.line).toBe('number')
     expect(typeof ev.col).toBe('number')
+    r.dispose()
+  })
+})
+
+describe('OSC 1337 in-band READY (nocx-ynsx)', () => {
+  const stubBrowser = () => {
+    window.matchMedia = (query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addListener: () => {},
+      removeListener: () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      dispatchEvent: () => false,
+    })
+    ;(globalThis as Record<string, unknown>).ResizeObserver = class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+  }
+
+  it('fires the subscriber only on the exact NOCX_IB_READY payload, through the real parser', async () => {
+    stubBrowser()
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+
+    // A subscriber whose invocation resolves a promise — the write() path
+    // is async, so each step awaits the marker actually landing. Same
+    // stored-resolver shape the OSC 133 fan-out test above uses.
+    const fired = (): { promise: Promise<void>; sub: () => void } => {
+      let resolve!: () => void
+      const promise = new Promise<void>((res) => {
+        resolve = res
+      })
+      return { promise, sub: vi.fn(() => resolve()) }
+    }
+
+    const cb = vi.fn()
+    const first = fired()
+    r.onInBandReady(cb)
+    r.onInBandReady(first.sub)
+
+    // The wrapper's exact handshake: READY proves raw -echo is on.
+    r.write('\x1b]1337;NOCX_IB_READY\x07')
+    await first.promise
+    expect(cb).toHaveBeenCalledTimes(1)
+
+    // Any other 1337 content is discarded — a forged or stray payload must
+    // never be read as the go-ahead to stream.
+    r.write('\x1b]1337;NOCX_IB_READY2\x07')
+    r.write('\x1b]1337;\x07')
+    const second = fired()
+    r.onInBandReady(second.sub)
+    r.write('\x1b]1337;NOCX_IB_READY\x07')
+    await second.promise
+    expect(cb).toHaveBeenCalledTimes(2) // the two wrong payloads fired nobody
+
+    // Unsubscribe removes exactly that listener: a later READY reaches the
+    // remaining subscribers, not the removed one.
+    const gone = vi.fn()
+    const unsub = r.onInBandReady(gone)
+    unsub()
+    const third = fired()
+    r.onInBandReady(third.sub)
+    r.write('\x1b]1337;NOCX_IB_READY\x07')
+    await third.promise
+    expect(gone).not.toHaveBeenCalled()
+
     r.dispose()
   })
 })

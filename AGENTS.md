@@ -205,6 +205,31 @@ how two agents ship two answers to one question.
 > hid it, and the deferral lived only in a code comment. **A `TODO` in source is not a task
 > — file the bead before you write the comment.**
 
+### The five checks gate the brief, not the diff
+
+If you are a coordinator writing a brief, a spec or a plan for somebody else to implement,
+**the checks above are yours and they apply before you write it.** The brief is where the
+architecture is decided; by the time a worker is editing files, the decision has already
+been made and the checks can only confirm it. "I am not touching code" is not an exemption —
+it is the moment the exemption costs the most.
+
+A brief that crosses a boundary **names the `AD`s and ADRs it touches and what they already
+decided, before it says what to build.** Checked by eye at review, like the commit-message
+rule.
+
+> 2026-08-04, one session, three times. The nocxify spec proposed `stty -echo`, parsing away
+> echoed regions, and inferring stdin ownership from the byte stream — the three techniques
+> ADR-0004 names and rejects, in that order, in one paragraph. Then a brief told a worker to
+> shell out to `ss`/`netstat` on the **local** machine, against "Interface-first + DI" and
+> against `internal/contentkey`, which is the same per-OS problem already solved in this
+> repo. Then a report to the owner claimed nocx deliberately never deploys a binary to a
+> remote host, while `architecture.md` defers a Tier-B remote helper, AD-2 names it a build
+> target, AD-1 reserved a msg-type for its feed, and `nocx-if6` phase B is that relay.
+>
+> One cause each time: writing from what the conversation remembered instead of reading the
+> binding document for the boundary being crossed. The owner caught all three. The third one
+> would have shipped a provider seam the relay had to be forked into.
+
 ## Before you investigate: two checks that beat reasoning
 
 **Search the memories before fighting the environment.** `bd memories <keyword>` costs
@@ -370,6 +395,41 @@ Checked by eye at review. If that rots, file a `commit-msg` hook rather than dro
 - **Respect the spine.** Never wrap PTY bytes in JSON-RPC (AD-1); the backend never sniffs
   the byte stream (AD-6); session-id is server-authoritative (AD-7). If an `AD` is wrong,
   change it in `docs/architecture.md` deliberately rather than routing around it.
+
+### Look for the existing answer before you write a second one
+
+**Before you add logic, find out whether the codebase already answers that question, and
+extend that answer instead.** A second implementation of one concept is not duplication you
+can clean up later — it is a regression with a delay fuse, because the two agree everywhere
+you look and disagree somewhere you did not.
+
+This is AD-8 stated as a working habit rather than a module boundary: one owner per
+behaviour, and the owner is whoever already has it. It applies to a predicate, a derivation,
+a table or a surface just as much as to a package.
+
+Three questions, before the first line:
+
+1. **Does something already decide this?** `grep` for the concept, not your name for it —
+   "is this an ssh context", "which command is this token under", "may this be integrated".
+   The existing answer is often two words away under a different word.
+2. **Can it be extended?** A table that grows by addition, a parameter, one more variant.
+   Extending keeps one truth; adding keeps two and hopes they stay in step.
+3. **If it genuinely cannot**, say in the code why the existing one did not fit — the next
+   person needs to know it was considered, not guess that it was missed.
+
+**Two surfaces may never own the same input.** If a key, a position or a document state can
+be claimed by two components, that is the defect, whichever one wins by evaluation order:
+the loser goes on advertising what it can no longer deliver.
+
+> 2026-08-05. "Am I in an ssh context" had two derivations — `commandWord(ctx)` on the
+> completion side, and `/\bssh\s+/` in the editor. They agreed for every case anyone tried,
+> and disagreed on exactly one: `ssh` with no trailing space, which is the state a user is in
+> when they press Tab **instead of** the space. So the suppressed surface un-suppressed
+> itself at the only moment it mattered and inserted a saved host over the user's choice.
+> Underneath it, a whole second suggestion surface — its own list, keys, rendering and accept
+> path — had been kept alive beside the completion dropdown, which already rendered the same
+> candidates as a row and a ghost. The fix was to delete it, and the bug existed only because
+> it had been built rather than found.
 
 ### Before you build a UI component: read the kit
 

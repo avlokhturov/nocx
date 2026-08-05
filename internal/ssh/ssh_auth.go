@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 
 	"github.com/shady2k/nocx/internal/credential"
+	"github.com/shady2k/nocx/internal/vault"
 	gossh "golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 )
@@ -80,7 +81,10 @@ func (rc *RealClient) buildAuthChain(ctx context.Context, resolved *resolvedConf
 	}
 
 	if mode == "" || mode == "password" {
-		chain = append(chain, authChainEntry{kind: kindPromptPassword})
+		chain = append(chain, authChainEntry{
+			kind:   kindPromptPassword,
+			method: rc.promptPasswordMethod(ctx, cfg, resolved, hasStoredPasswordRung(chain)),
+		})
 	}
 
 	chain = append(chain, authChainEntry{kind: kindHostbased})
@@ -139,7 +143,7 @@ func (rc *RealClient) addPublicKeyMethods(ctx context.Context, chain *[]authChai
 // Any error — vault sealed, secret missing, malformed key material — is
 // propagated to the caller. There is no silent fallback to file-based keys.
 func (rc *RealClient) addVaultKeyMethod(ctx context.Context, chain *[]authChainEntry, cfg *ConnectConfig) error {
-	secret, err := cfg.Secrets.Get(ctx, cfg.KeySecretID)
+	secret, err := rc.getSecretWithUnlock(ctx, cfg, cfg.KeySecretID, "load the stored key")
 	if err != nil {
 		return err
 	}
@@ -166,7 +170,7 @@ func (rc *RealClient) addVaultKeyMethod(ctx context.Context, chain *[]authChainE
 		}
 
 		// Encrypted key: load the passphrase from the same store.
-		pwSecret, pwErr := rc.lookupKeyPassphrase(ctx, cfg.Secrets, cfg.PassphraseSecretID)
+		pwSecret, pwErr := rc.getSecretWithUnlock(ctx, cfg, cfg.PassphraseSecretID, "load the key passphrase")
 		if pwErr != nil {
 			return pwErr
 		}
@@ -215,7 +219,7 @@ func passwordCallbackFromSecret(s credential.Secret) gossh.AuthMethod {
 
 func (rc *RealClient) addPasswordMethods(ctx context.Context, chain *[]authChainEntry, cfg *ConnectConfig) {
 	if cfg.Secrets != nil && cfg.SecretID != "" {
-		if stored, err := cfg.Secrets.Get(ctx, cfg.SecretID); err == nil && !stored.IsEmpty() {
+		if stored, err := rc.getSecretWithUnlock(ctx, cfg, cfg.SecretID, "read the stored password"); err == nil && !stored.IsEmpty() {
 			*chain = append(*chain, authChainEntry{
 				kind:   kindSavedPassword,
 				method: passwordCallbackFromSecret(stored),
@@ -229,7 +233,7 @@ func (rc *RealClient) addPasswordMethods(ctx context.Context, chain *[]authChain
 
 func (rc *RealClient) addKeyboardInteractiveMethods(ctx context.Context, chain *[]authChainEntry, cfg *ConnectConfig) {
 	if cfg.Secrets != nil && cfg.SecretID != "" {
-		if stored, err := cfg.Secrets.Get(ctx, cfg.SecretID); err == nil && !stored.IsEmpty() {
+		if stored, err := rc.getSecretWithUnlock(ctx, cfg, cfg.SecretID, "read the stored secret"); err == nil && !stored.IsEmpty() {
 			*chain = append(*chain, authChainEntry{kind: kindKeyboardInteractive, secret: stored})
 		}
 	}
@@ -244,6 +248,28 @@ func (rc *RealClient) lookupKeyPassphrase(ctx context.Context, store credential.
 		return credential.Secret{}, nil
 	}
 	return store.Get(ctx, id)
+}
+
+// getSecretWithUnlock wraps Secrets.Get with an unlock+retry when the vault
+// is sealed. The reason describes what needs the secret (e.g. "read the
+// stored password") so the unlock prompt can say why it is asking.
+// When cfg.UnlockRequester is nil or the unlock is refused, the original
+// error (typically ErrVaultSealed) propagates unchanged — the foreground
+// RPC path catches it via dispatcher.onVaultSealed.
+func (rc *RealClient) getSecretWithUnlock(ctx context.Context, cfg *ConnectConfig, id credential.SecretID, reason string) (credential.Secret, error) {
+	sec, err := cfg.Secrets.Get(ctx, id)
+	if err == nil {
+		return sec, nil
+	}
+	// Only the sealed case is recoverable; every other error (not found,
+	// provider unavailable, corrupt material) propagates as-is.
+	if !errors.Is(err, vault.ErrVaultSealed) || cfg.UnlockRequester == nil {
+		return credential.Secret{}, err
+	}
+	if uerr := cfg.UnlockRequester(ctx, reason); uerr != nil {
+		return credential.Secret{}, fmt.Errorf("vault sealed and unlock refused: %w", uerr)
+	}
+	return cfg.Secrets.Get(ctx, id)
 }
 
 func authMethodsFromChain(chain []authChainEntry) []gossh.AuthMethod {

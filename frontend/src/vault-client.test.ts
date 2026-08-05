@@ -84,4 +84,16 @@ describe('VaultClient over the widened RPC seam', () => {
       },
     ])
   })
+
+  it('unlockResolved sends requestId and outcome', async () => {
+    const rpc = fakeRpc({})
+    const client = new VaultClient(rpc)
+    await client.unlockResolved({ requestId: 'abc123', outcome: 'unsealed' })
+    expect(rpc.calls).toEqual([
+      {
+        method: 'vault.unlockResolved',
+        params: { requestId: 'abc123', outcome: 'unsealed' },
+      },
+    ])
+  })
 })

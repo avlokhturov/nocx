@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/tunnel.open.schema.json",
+  "title": "TunnelOpenResult",
+  "description": "Result of the tunnel.open JSON-RPC method: the full record of the established forward. The single declaration of this shape: the renderer's TypeScript type is generated from it and the Go transport is validated against it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "direction", "requestedBind", "actualBind", "destination", "scope", "caveat", "state", "stopReason", "error"],
+  "properties": {
+    "id": {
+      "description": "Backend-assigned tunnel id. The renderer echoes it to tunnel.stop; nothing else can stop a forward.",
+      "type": "string"
+    },
+    "direction": {
+      "description": "Forwarding strategy. Only local (-L) is implemented; remote and dynamic land into this same record.",
+      "type": "string",
+      "enum": ["local", "remote", "dynamic"]
+    },
+    "requestedBind": {
+      "description": "The bind the caller asked for. Port 0 means 'allocate' — the usable address is actualBind, never this.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["host", "port"],
+      "properties": {
+        "host": {
+          "description": "Local bind host as requested; empty on the wire means the backend default 127.0.0.1.",
+          "type": "string"
+        },
+        "port": {
+          "description": "Local bind port as requested. 0 means the OS allocated an ephemeral port (see actualBind).",
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "actualBind": {
+      "description": "The address the listener really holds. Never the requested port when the request was 0 — reporting the request would be a lie.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["host", "port"],
+      "properties": {
+        "host": {
+          "type": "string"
+        },
+        "port": {
+          "description": "The bound port. Always the real value from the OS; nonzero once state is running.",
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "destination": {
+      "description": "Remote target of the forward, host:port, as dialed over the SSH connection.",
+      "type": "string"
+    },
+    "scope": {
+      "description": "Owner label the renderer attached at open (tab id or profile id). The backend tears the forward down when the tab that opened it disconnects, not by this label.",
+      "type": "string"
+    },
+    "caveat": {
+      "description": "Success-time bind caution, empty when none applies. Only remote (-R) forwards set it: the requested bind address is not verified — the server may have bound a different address (GatewayPorts) — so a URL built from this forward may only work on the server. Never an error: the forward is running.",
+      "type": "string"
+    },
+    "state": {
+      "description": "Lifecycle state. open returns running (the bind happened before the result); stop returns stopped.",
+      "type": "string",
+      "enum": ["starting", "running", "stopped"]
+    },
+    "stopReason": {
+      "description": "Why the forward stopped: user, connection lost, or error. Null while running.",
+      "type": ["string", "null"],
+      "enum": ["user", "connection lost", "error", null]
+    },
+    "error": {
+      "description": "The error behind a stopped forward (bind failure, connection loss). Null while running or after a clean user stop.",
+      "type": ["string", "null"]
+    }
+  }
+}

@@ -54,8 +54,10 @@
 @import './styles/components/toast.css';
 @import './styles/components/marker-list.css';
 @import './styles/components/code-block.css';
+@import './styles/components/spinner.css';
 @import './styles/components/collection-view.css';
 @import './styles/components/tab-strip.css';
+@import './styles/components/row-list.css';
 @import './styles/components/key-material-input.css';
 @import './styles/surfaces/banner.css';
 @import './styles/surfaces/update-notice.css';
@@ -63,6 +65,7 @@
 @import './styles/surfaces/export.css';
 @import './styles/surfaces/connections.css';
 @import './styles/surfaces/secrets.css';
+@import './styles/surfaces/ports.css';
 @import './styles/surfaces/vault.css';
 
 /* ── App body row: activity bar | sidebar | panes ────────────────────── */
@@ -117,13 +120,32 @@
 
 .nocx-editor-chrome {
   display: flex;
-  justify-content: space-between;
   align-items: center;
   margin-bottom: 8px;
   font-family: var(--font-family-ui);
   font-size: var(--font-size-2xs);
   -webkit-user-select: none;
   user-select: none;
+}
+
+/* Left chip group: the location + cwd chips sit together; the clock pins
+   the right edge of the chrome row with its own auto margin (below). The row
+   itself does NOT distribute (nocx-a44m): space-between is only correct for
+   exactly two children, and this row must not break if a third joins it.
+   Placement only — the chips carry their own appearance (ui/README: a
+   surface may place a kit component, never repaint it). */
+.nocx-editor-chrome-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* The clock is the chrome row's right-edge element: margin-left: auto pushes
+   it to the far right for any child count, the same mechanism as
+   .cmd-header-right. Margin is placement, not appearance. */
+.nocx-editor-time {
+  margin-left: auto;
 }
 
 /* ── Chip ────────────────────────────────────────────────────────────── */
@@ -510,9 +532,18 @@
   color: var(--color-text-dim);
 }
 
+/* Left-to-right: the chips that say WHERE (location, cwd) group at the start,
+   and the right-hand group is pushed out by its own auto margin.
+
+   This used to be `justify-content: space-between`, which is right for two
+   children and wrong for three. A local block has no location chip, so the row
+   was [cwd, right] and space-between put them at the two ends, exactly as
+   intended. An SSH block adds the location chip, and the same rule then spaced
+   three children evenly — parking the cwd chip in the dead centre of the
+   header. Nobody saw it until shell integration started producing blocks over
+   SSH at all. */
 .cmd-header-chips {
   display: flex;
-  justify-content: space-between;
   align-items: center;
   gap: 8px;
 }
@@ -522,6 +553,7 @@
   align-items: center;
   gap: 8px;
   flex: none;
+  margin-left: auto;
 }
 
 .cmd-header-text {

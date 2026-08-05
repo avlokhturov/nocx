@@ -21,6 +21,8 @@ import type { ClipboardAccess } from '../clipboard'
 import type { ClipboardGate } from '../clipboard'
 import type { ClipboardBanner } from '../banner'
 import type { TabManager } from '../tabs'
+import type { DesiredMode } from '../capability'
+import type { PassportDisposition } from '../environment-passport'
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Constants — every assertion must derive from these, never repeat the literal.
@@ -35,7 +37,6 @@ export const FIXTURE_DIRECTORY_LABEL = 'repos/nocx'
 // ═══════════════════════════════════════════════════════════════════════════
 // Renderer mock — factory called once per tab by createRenderer().
 // ═══════════════════════════════════════════════════════════════════════════
-
 export interface RendererMock extends TerminalRenderer {
   /** This tab's OSC 636 store — XtermRenderer owns one, so the mock must too. */
   snapshotStore: CommandSnapshotStore
@@ -45,6 +46,7 @@ export interface RendererMock extends TerminalRenderer {
     onTitle?: TitleCallback
     onCwd?: CwdCallback
     onCommandMarker?: CommandMarkerCallback
+    onInBandReady?: () => void
     onBell?: () => void
     onBufferChange?: (type: 'normal' | 'alternate') => void
     onSelectionChange?: (text: string) => void
@@ -54,11 +56,15 @@ export interface RendererMock extends TerminalRenderer {
   _fireTitle(title: string): void
   _fireCwd(host: string, path: string): void
   _fireCommandMarker(marker: Parameters<CommandMarkerCallback>[0]): void
+  /** Fire an OSC 1337 in-band READY (nocx-ynsx). */
+  _fireInBandReady(): void
   _fireBell(): void
   /** Fire a selection event — used by clipboard policy tests. */
   _fireSelectionChange(text: string): void
   /** Fire an OSC 52 write event — used by clipboard policy tests. */
   _fireClipboardWrite(text: string): void
+  /** Fire an OSC 636 P readiness-passport disposition (P2). */
+  _firePassport(d: PassportDisposition): void
 }
 
 /**
@@ -68,6 +74,7 @@ export interface RendererMock extends TerminalRenderer {
  */
 export function createRendererMock(): RendererMock {
   const cbs: RendererMock['_cbs'] = {}
+  const passportSubs: Array<(d: PassportDisposition) => void> = []
   const mock: Record<string, unknown> = {
     mount: vi.fn().mockResolvedValue(undefined),
     write: vi.fn(),
@@ -87,6 +94,16 @@ export function createRendererMock(): RendererMock {
     }),
     onCommandMarker: vi.fn((cb: CommandMarkerCallback) => {
       cbs.onCommandMarker = cb
+    }),
+    onEnvironmentPassport: vi.fn((cb: (d: PassportDisposition) => void) => {
+      passportSubs.push(cb)
+    }),
+    setExpectedEnvironmentId: vi.fn(),
+    onInBandReady: vi.fn((cb: () => void) => {
+      cbs.onInBandReady = cb
+      return () => {
+        cbs.onInBandReady = undefined
+      }
     }),
     onBell: vi.fn((cb: () => void) => {
       cbs.onBell = cb
@@ -112,6 +129,7 @@ export function createRendererMock(): RendererMock {
     onRender: vi.fn(),
     paneElement: document.createElement('div'),
     getBufferLine: vi.fn().mockReturnValue(undefined),
+    cursorLine: vi.fn().mockReturnValue(0),
     clearViewport: vi.fn(),
     // Zero means "cannot measure", which the caller treats as "keep the current
     // height" — so a fixture that does not care about live-region sizing gets
@@ -138,6 +156,9 @@ export function createRendererMock(): RendererMock {
     _fireCommandMarker(marker: Parameters<CommandMarkerCallback>[0]) {
       cbs.onCommandMarker?.(marker)
     },
+    _fireInBandReady() {
+      cbs.onInBandReady?.()
+    },
     _fireBell() {
       cbs.onBell?.()
     },
@@ -146,6 +167,9 @@ export function createRendererMock(): RendererMock {
     },
     _fireClipboardWrite(text: string) {
       cbs.onClipboardWrite?.(text)
+    },
+    _firePassport(d: PassportDisposition) {
+      for (const sub of passportSubs) sub(d)
     },
   }
   return mock as unknown as RendererMock
@@ -165,6 +189,10 @@ export function resetSessionCounter(): void {
 export interface SessionFake {
   sessionId: string
   cwd: string
+  /** The resolved destination mode from the open ack (nocx-mlm7). */
+  desiredMode: DesiredMode
+  /** Why integration did not happen at open; empty = succeeded/never. */
+  shellIntegrationReason: '' | 'unsupported-shell' | 'no-secure-temp' | 'remote-command' | 'unknown'
   send: ReturnType<typeof vi.fn>
   sendResize: ReturnType<typeof vi.fn>
   close: ReturnType<typeof vi.fn>
@@ -187,6 +215,8 @@ export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
   return {
     sessionId: `mock-sid-${++sessionCounter}`,
     cwd: FIXTURE_CWD,
+    desiredMode: 'script',
+    shellIntegrationReason: '',
     send: vi.fn(),
     sendResize: vi.fn(),
     close: vi.fn(),
@@ -205,10 +235,11 @@ export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
 // ═══════════════════════════════════════════════════════════════════════════
 // WSClient fake
 // ═══════════════════════════════════════════════════════════════════════════
-
 export interface ClientFake {
   connect: ReturnType<typeof vi.fn>
   openSession: ReturnType<typeof vi.fn>
+  openSSHSession: ReturnType<typeof vi.fn>
+  openSSHSessionByHost: ReturnType<typeof vi.fn>
   close: ReturnType<typeof vi.fn>
   sendToSession: ReturnType<typeof vi.fn>
   sendResize: ReturnType<typeof vi.fn>
@@ -224,20 +255,22 @@ export interface ClientFake {
   /** Sessions created by openSession calls, in order. */
   _sessions: SessionFake[]
 }
-
 /**
  * Create a fake WSClient whose openSession() returns a new makeSession()
  * on every call and records it in _sessions for test inspection.
  */
 export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
   const sessions: SessionFake[] = []
+  const newSession = (): SessionFake => {
+    const s = makeSession()
+    sessions.push(s)
+    return s
+  }
   const client: ClientFake = {
     connect: vi.fn().mockResolvedValue(undefined),
-    openSession: vi.fn(() => {
-      const s = makeSession()
-      sessions.push(s)
-      return Promise.resolve(s)
-    }),
+    openSession: vi.fn(() => Promise.resolve(newSession())),
+    openSSHSession: vi.fn(() => Promise.resolve(newSession())),
+    openSSHSessionByHost: vi.fn(() => Promise.resolve(newSession())),
     close: vi.fn(),
     sendToSession: vi.fn(),
     sendResize: vi.fn(),

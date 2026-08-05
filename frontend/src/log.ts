@@ -13,6 +13,9 @@ import { Log } from '../wailsjs/go/main/WailsApp'
 /** The Wails runtime augments `window` with a `go` bridge object. */
 interface WailsWindow extends Window {
   go?: { main?: { WailsApp?: { Log?: (message: string) => Promise<void> } } }
+  /** Devtools flip for decision tracing: `window.nocxDebug = true`. Read
+   *  live so it takes effect without a reload. */
+  nocxDebug?: unknown
 }
 
 type LogLevel = 'info' | 'warn' | 'error' | 'debug'
@@ -50,6 +53,41 @@ function write(level: LogLevel, msg: string, fields?: LogFields): void {
             : console.log
     fn(full)
   }
+}
+
+/**
+ * Decision tracing (the `nocx:decide` stream) is OFF by default. The
+ * arbiter-grant and ghost-refusal logs are per-keystroke when enabled, so
+ * nothing is emitted — and no fields are built — until a person opts in.
+ * Flip it from the devtools console with `window.nocxDebug = true`; the
+ * flag is read live, so it takes effect on the next keystroke.
+ */
+let decisionTracingEnabled = false
+
+/** Programmatic switch (tests, a future settings surface). */
+export function setDecisionTracing(enabled: boolean): void {
+  decisionTracingEnabled = enabled
+}
+
+/** Whether decision tracing is on: the programmatic flag OR the devtools
+ *  `window.nocxDebug` flag. Cheap enough to call on the hot path — it is
+ *  the gate that keeps per-keystroke tracing off when nobody asked for it. */
+export function isDecisionTracing(): boolean {
+  if (decisionTracingEnabled) return true
+  if (typeof window !== 'undefined' && (window as WailsWindow).nocxDebug === true) return true
+  return false
+}
+
+/** The stable prefix every decision trace carries — filter the devtools
+ *  console on exactly this string to see the whole decision stream. */
+export const DECISION_PREFIX = 'nocx:decide'
+
+/** Emit one decision trace through the existing seam (Wails FFI, or the
+ *  console when no runtime). No-op without even building the message while
+ *  decision tracing is off — the hot-path guarantee. */
+export function logDecision(msg: string, fields?: LogFields): void {
+  if (!isDecisionTracing()) return
+  write('debug', `${DECISION_PREFIX} ${msg}`, fields)
 }
 
 export const log = {

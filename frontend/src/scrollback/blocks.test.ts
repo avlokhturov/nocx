@@ -363,6 +363,7 @@ describe('freezeBlock', () => {
       () => container,
       noopSelect,
       freshStore(),
+      'success',
     )
     expect(parent.children.length).toBe(1)
     expect(parent.children[0]).toBe(frozen)
@@ -388,6 +389,7 @@ describe('freezeBlock', () => {
       () => container,
       noopSelect,
       freshStore(),
+      'success',
     )
     expect(frozen.querySelector('.cmd-overflow-btn')).not.toBeNull()
   })
@@ -1073,6 +1075,7 @@ describe('a vault reference in a block reads as a chip, not as its own syntax', 
       () => container,
       noopSelect,
       freshStore(),
+      'success',
     )
     const chip = el.querySelector('.ui-secret-chip')
     expect(chip).not.toBeNull()
@@ -1080,5 +1083,144 @@ describe('a vault reference in a block reads as a chip, not as its own syntax', 
     expect(el.querySelector('.cmd-header-text')?.textContent).not.toContain('{{secret:')
     // Copy still yields the command as typed — the chip is a label.
     expect(el.dataset.recordedCommand).toBe(command)
+  })
+})
+
+describe('freezeBlock entered presentation (N6, nocx-y5v5)', () => {
+  // When a hand-typed ssh enters a remote environment, its block freezes with
+  // NO exit code and is painted as neither success nor failure — the bug this
+  // must not inherit is freezeBlock deriving 'failure' from a null exit code.
+
+  it('freezeBlock with status entered renders neither success nor failure and no exit code', () => {
+    const parent = document.createElement('div')
+    const container = document.createElement('div')
+    const running = createRunningBlock(
+      1,
+      'ssh pi@192.168.0.93',
+      '~',
+      '',
+      () => container,
+      noopSelect,
+      freshStore(),
+    )
+    parent.appendChild(running)
+
+    const frozen = freezeBlock(
+      running,
+      1,
+      'ssh pi@192.168.0.93',
+      '~',
+      '',
+      '<span>host key prompt</span>',
+      3200,
+      null,
+      () => container,
+      noopSelect,
+      freshStore(),
+      'entered',
+    )
+    expect(frozen.querySelector('.cmd-header-exit')).toBeNull() // no exit code at all
+    expect(frozen.querySelector('.cmd-header-exit-ok')).toBeNull()
+    expect(frozen.querySelector('.cmd-header-exit-fail')).toBeNull()
+    expect(frozen.querySelector('.cmd-header-spinner')).toBeNull() // frozen, not running
+    expect(frozen.classList.contains('cmd-block-entered')).toBe(true)
+    expect(frozen.querySelector('.cmd-output')?.innerHTML).toContain('host key prompt')
+  })
+
+  it('freezeBlock with status entered never shows an exit chip even if a code were passed', () => {
+    const parent = document.createElement('div')
+    const container = document.createElement('div')
+    const running = createRunningBlock(
+      1,
+      'ssh host',
+      '~',
+      '',
+      () => container,
+      noopSelect,
+      freshStore(),
+    )
+    parent.appendChild(running)
+    const frozen = freezeBlock(
+      running,
+      1,
+      'ssh host',
+      '~',
+      '',
+      '',
+      100,
+      255,
+      () => container,
+      noopSelect,
+      freshStore(),
+      'entered',
+    )
+    expect(frozen.querySelector('.cmd-header-exit')).toBeNull()
+    expect(frozen.classList.contains('cmd-block-entered')).toBe(true)
+  })
+})
+
+describe('BlockManager entered freeze (N6, nocx-y5v5)', () => {
+  let manager: BlockManager
+  let inner: HTMLElement
+  let xtermContainer: HTMLElement
+
+  beforeEach(() => {
+    _resetThemeState()
+    inner = document.createElement('div')
+    xtermContainer = document.createElement('div')
+    inner.appendChild(xtermContainer)
+    document.body.appendChild(inner)
+    manager = new BlockManager(inner, xtermContainer, {
+      now: () => 1000,
+      snapshotStore: freshStore(),
+    })
+  })
+
+  it('freezeEntered freezes the running block as entered with no exit code', () => {
+    const rec = manager.startBlock('ssh pi@192.168.0.93', '~', 0)
+    const entered = manager.freezeEntered(() => undefined, 3)
+    expect(entered).not.toBeNull()
+    expect(entered!.id).toBe(rec.id)
+    expect(entered!.status).toBe('entered')
+    expect(entered!.exitCode).toBeNull()
+    expect(manager.runningBlock).toBeNull()
+    expect(manager.cmdStartTime).toBeNull()
+    // The frozen block paints neither success nor failure.
+    expect(entered!.el.querySelector('.cmd-header-exit')).toBeNull()
+    expect(entered!.el.querySelector('.cmd-header-spinner')).toBeNull()
+    expect(entered!.el.classList.contains('cmd-block-entered')).toBe(true)
+    // The running block element was replaced in the DOM.
+    expect(inner.querySelectorAll('.cmd-block-running').length).toBe(0)
+    expect(inner.querySelectorAll('.cmd-block-entered').length).toBe(1)
+  })
+
+  it('freezeEntered returns null when no block is running', () => {
+    expect(manager.freezeEntered(() => undefined, 0)).toBeNull()
+  })
+
+  it('after freezeEntered the next startBlock creates a new running block and leaves the entered one untouched', () => {
+    manager.startBlock('ssh pi@192.168.0.93', '~', 0)
+    const entered = manager.freezeEntered(() => undefined, 3)
+    expect(manager.runningBlock).toBeNull()
+
+    const remote = manager.startBlock('pwd', '~', 5)
+    expect(manager.runningBlock).toBe(remote)
+    expect(remote.status).toBe('running')
+    expect(entered!.status).toBe('entered') // not finalised by the new block
+    expect(entered!.exitCode).toBeNull()
+    expect(manager.blocks.length).toBe(2)
+    expect(inner.querySelectorAll('.cmd-block-running').length).toBe(1)
+    expect(inner.querySelectorAll('.cmd-block-entered').length).toBe(1)
+  })
+
+  it('a normal D freeze after an entered block still renders success/failure from the real code', () => {
+    manager.startBlock('ssh pi@192.168.0.93', '~', 0)
+    manager.freezeEntered(() => undefined, 3)
+    manager.startBlock('pwd', '~', 5)
+    const done = manager.freezeBlock(() => undefined, 8, 0)
+    expect(done!.status).toBe('success')
+    expect(done!.exitCode).toBe(0)
+    expect(done!.el.querySelector('.cmd-header-exit-ok')).not.toBeNull()
+    expect(manager.blocks[0].status).toBe('entered') // still untouched
   })
 })

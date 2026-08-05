@@ -4,6 +4,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { XtermRenderer } from './renderers/xterm'
+import { resolveSshProfileOverlay } from './quick-connect-assembly'
 import type { TerminalRenderer, MarkerAdapter } from './renderers/types'
 import { InputStateController } from './input-state'
 import { CommandEditor } from './editor'
@@ -13,6 +14,7 @@ import { CompletionController } from './suggest/controller'
 import { createShellProviders } from './suggest/providers'
 import { CompletionDropdown } from './ui/completion-dropdown'
 import type { FsComplete } from './generated/fs.complete'
+import type { ShellComplete } from './generated/shell.complete'
 import { ShellInputTarget } from './input-target'
 import {
   submitCommand,
@@ -32,22 +34,54 @@ import type { HistoryRecord } from './generated/history.record'
 import { renderRecordedCommand } from './scrollback/blocks'
 import { KIND_LABELS } from './secret-kind'
 import { shouldShowEditor, NATIVE_RESTORE } from './native-mode'
+import { environmentEntry, type EnvironmentEntry } from './environment-commands'
+import {
+  isInteractiveTransition,
+  extractDestination,
+  planSsh,
+  buildBootstrapRewrite,
+  buildInstalledRewrite,
+  typedDestinationParts,
+  applyProfile,
+} from './ssh-transition'
+import type { SshPlan } from './ssh-transition'
+import type { ShellLauncherCommandResult } from './generated/shell.launcherCommand'
+import type { ShellEnvironmentObservedResult } from './generated/shell.environmentObserved'
+import type { EnvironmentPassport } from './environment-passport'
+import type { CommandMarkerEvent } from './renderers/types'
 import { shouldCopy, type ClipboardAccess, type ClipboardGate } from './clipboard'
 import type { ClipboardBanner } from './banner'
 import { ScrollbackController } from './scrollback/controller'
 import type { BlockRecord } from './scrollback/blocks'
 import { CommandLedger } from './command-ledger'
 import { queryHistory, recordCommand } from './history-client'
-import { log } from './log'
+import { log, logDecision, isDecisionTracing } from './log'
 import type { WSClient, SessionHandle } from './ipc'
 import { showConfirm } from './ui/dialog'
 import { hasOpenOverlays } from './ui/overlay/stack'
 import { BaseTabContent, type TabHost, type ContentViewport } from './tab-content'
-import { type ProfileClient, type SSHAliasEntry } from './profiles'
+import { type ProfileClient } from './profiles'
 import { RpcError } from './dispatcher'
+import { FloatingPanel } from './ui/floating-panel'
+import { ShellClient } from './shell-client'
+import type { ShellIntegrateResult } from './generated/shell.integrate'
+import { LOCAL_TARGET_ID } from './ports-client'
+import {
+  deriveActions,
+  deriveShellState,
+  type ShellState,
+  type InputPresentation,
+  type DesiredMode,
+} from './capability'
+import type { Open } from './generated/open'
 
 // How long the grid must hold still before the PTY is told about it.
 const RESIZE_SETTLE_MS = 80
+
+// How long an in-band integration attempt may run before the lease is
+// released (spec §4.4). Generous on purpose: a slow shell startup or a busy
+// pty must never truncate a stream mid-delivery; the wrapper itself is fast.
+const IN_BAND_TIMEOUT_MS = 15_000
 
 /**
  * How long output is treated as the shell's answer to a resize rather than as
@@ -98,6 +132,14 @@ export interface TerminalContentHooks {
   /** The session is an alias (not a saved profile) and can be adopted as a
    *  nocx connection. True = adoptable, false = not. */
   onAdoptabilityChange?: (adoptable: boolean) => void
+  /** The environment degraded or became uncertain — integration declined at
+   *  open, or markers stopped on an integrated session (nested ssh, docker
+   *  exec). Tab chrome renders at most this small warning mark
+   *  (nocx-4t37.2); the capability statement itself lives in the rail. */
+  onWarningChange?: (warning: boolean) => void
+  /** The pane entered or left an environment, so the ports panel's target
+   *  changed without the active tab changing (nocx-695k.3). */
+  onPortsTargetChange?: () => void
   /** An SSH connection failed because the vault is sealed. */
   onVaultSealed?: () => void
   /** The reference picker's setup offer needs the setup dialog (no OS key):
@@ -107,6 +149,38 @@ export interface TerminalContentHooks {
   /** The reference picker's "Add a secret…" row: open the vault's own
    *  create dialog — wired by main.tsx to the Settings tab's Secrets page. */
   onCreateSecret?: (name: string) => void
+}
+
+/** The rewrite half of an ssh submit, carried from beforeSubmit to submit:
+ *  the environment id the backend minted for THIS attempt and the line to
+ *  send. Present only when the line was actually rewritten. */
+interface PendingSshAttempt {
+  environmentId: string
+  mode: 'bootstrap' | 'installed'
+  /** The environment this line enters — environmentEntry(recordLine). */
+  entry: EnvironmentEntry
+  /** The rewritten line to send. */
+  sendLine: string
+}
+
+/** The live ssh attempt, from submit to the local D. Entry counts only on
+ *  `expected passport → tagged A → B` (spec §5.3); the local D completes the
+ *  dormant transition record with the real code and reports the observation
+ *  (the accepted passport, or null when none arrived — §5.4). */
+interface SshAttempt {
+  environmentId: string
+  mode: 'bootstrap' | 'installed'
+  /** The ledger record of the ssh command; `enter()` makes it dormant. */
+  recId: number
+  entry: EnvironmentEntry
+  /** The passport the tracker accepted for this attempt, if any. */
+  acceptedPassport: EnvironmentPassport | null
+  /** A tagged A carrying our environment id was seen (entry needs A then B). */
+  sawTaggedA: boolean
+  /** The environment was entered (env stack pushed, block frozen). */
+  entered: boolean
+  /** shell.environmentObserved was already sent — first observation wins. */
+  reported: boolean
 }
 
 // No placeholder title — see the descriptor in tabs.ts for why. A tab with no
@@ -132,6 +206,16 @@ function directoryLabel(cwd: string): string {
 function cwdTooltip(cwd: string, fromOSC7: boolean): string {
   if (!cwd) return ''
   return fromOSC7 ? cwd : `${cwd} (initial cwd)`
+}
+
+/** The key as a person would write it (`ctrl+shift+P`), for the arbiter
+ *  trace. Built only when decision tracing is on — see the arbiter. */
+function keyLabel(e: KeyboardEvent): string {
+  const mods = [e.ctrlKey && 'ctrl', e.metaKey && 'meta', e.altKey && 'alt', e.shiftKey && 'shift']
+    .filter((m): m is string => Boolean(m))
+    .concat(e.key)
+    .join('+')
+  return mods
 }
 
 /**
@@ -195,10 +279,88 @@ export class TerminalContent extends BaseTabContent {
   /** Timestamp until which incoming data is the echo of a resize we sent. */
   private echoUntil = 0
   private host: TabHost | null = null
-  /** Whether the editor currently owns DOM keyboard input (owned from input-state). */
-  private _editorOwned = false
-  /** In-flight alias-fetch counter — generation for stale-request gating. */
-  private _aliasFetchId = 0
+
+  // ── Capability rail (nocx-mlm7) ────────────────────────────────────
+  /** The resolved destination mode from the open ack (raw|script|relay):
+   *  the connection-scope default the capability control starts from. raw
+   *  refuses every rewrite and remote write; relay is consent-gated. */
+  private _policy: DesiredMode = 'script'
+  /** Why integration did not happen at open; empty means it succeeded or
+   *  was never attempted. A non-empty reason on an auto profile is the
+   *  soft degrade AGENTS.md demands be visible in the product. */
+  private _openReason: Open['shellIntegrationReason'] = ''
+  /** The observed shell state (one of three independent axes). */
+  private _shellState: ShellState = 'unsupported'
+  /** The current input presentation. */
+  private _presentation: InputPresentation = 'terminal'
+  /** Whether an integration attempt failed. */
+  private _integrationFailed = false
+  /** Per-destination consent for in-band integration (nocx-atyf.3).
+   *  Session-scoped: a hand-typed ssh to a host the user consented to
+   *  integrates silently for the rest of this tab. */
+  /** The environment degraded or became uncertain — integration declined at
+   *  open, or markers stopped on an integrated session the user did not
+   *  latch native. Tab chrome renders at most this mark. */
+  private _degraded = false
+  /** Whether OSC 133 markers have arrived for the shell currently on stdin.
+   *  Environment-scoped: entering a nested environment (ssh, docker exec, …)
+   *  clears it; the D that ends that command restores what was true before.
+   *  Set by the marker handler only (AD-6), never by inference. */
+  private _shellIntegrated = false
+  /** Environments entered by commands we submitted, innermost last. Pushed
+   *  on submit, popped on the D that ends that command (nocx-695k.2). */
+  private _envStack: EnvironmentEntry[] = []
+  /** What the pane called itself before entering each environment, so
+   *  leaving restores it. Inside one we know the host and NOT the directory
+   *  (nocx-695k.2).
+   *
+   *  `programTitle` is the crux: it is whatever OSC 2 the running program
+   *  last sent, and the REMOTE shell sends one the moment you land
+   *  (`pi@raspberrypi: ~`). Nothing sends another on the way out — a local
+   *  bash has no reason to re-title an unchanged session — so the tab kept
+   *  the name of a machine it had left, for as long as the tab lived. A
+   *  title set by a program does not outlive that program. */
+  private _previousTitles: Array<{ cwd: string; programTitle: string; cwdTitle: string }> = []
+  /** Stack of _shellIntegrated values saved before entering a nested
+   *  environment. Pushed on submit when environmentEntry() names one;
+   *  popped on the D marker that ends the command. */
+  private _previousIntegrated: boolean[] = []
+
+  // ── The ssh environment boundary (nocx-mlm7 P9) ─────────────────────
+  /** The rewrite info a beforeSubmit produced, consumed by the submit that
+   *  follows it. The RPC is async, so the two halves of the attempt — the
+   *  minted environment id and the rewritten line — travel through this
+   *  field between the editor's beforeSubmit and submit callbacks. */
+  private _pendingAttempt: PendingSshAttempt | null = null
+  /** The live ssh attempt: bound to the ledger record at submit, advanced
+   *  by the passport and the tagged A→B, completed by the local D. One at
+   *  a time — a second editor submit cannot happen while the first ssh
+   *  still owns the running block. */
+  private _attempt: SshAttempt | null = null
+
+  // ── In-band integration (nocx-ynsx, spec §4.4) ─────────────────────
+  /** True while an in-band integration lease is held; rejects re-entry. */
+  private _integrating = false
+  /** The OSC 1337 READY listener of the in-flight attempt. */
+  private _inBandReadyUnsub: (() => void) | null = null
+  /** The editor draft (text, selection, scroll) captured at lease start;
+   *  restored byte-for-byte on completion, cancel, timeout and error. */
+  private _inBandDraft: { text: string; from: number; to: number; scrollTop: number } | null = null
+  /** Capture-phase keydown that swallows every key except Esc while the
+   *  lease is held — no user keystroke may interleave with the bootstrap. */
+  private _inBandKeySwallow: ((e: KeyboardEvent) => void) | null = null
+  /** The "Integrating this shell…" indicator (kit FloatingPanel). */
+  private _inBandPanel: FloatingPanel | null = null
+  /** Fires at the next OSC 133 A — the wrapper finished and the shell is
+   *  back at a prompt. */
+  private _inBandDone: (() => void) | null = null
+  /** The plan's terminator, known once the RPC answered. */
+  private _inBandTerminator: string | null = null
+  /** READY was received: the wrapper is inside sed and only the terminator
+   *  can unblock it. */
+  private _inBandReadySeen = false
+  /** Overall attempt deadline; Esc cancels before it. */
+  private _inBandTimer: number | undefined
 
   // ── Title composition ────────────────────────────────────────────────
   // Title = programTitle || cwdTitle (no placeholder — nocx-83a)
@@ -221,8 +383,9 @@ export class TerminalContent extends BaseTabContent {
     private readonly clipboard: ClipboardAccess,
     private readonly gate: ClipboardGate,
     private readonly banner: ClipboardBanner,
-    /** Live SSH config alias source for the editor hint (w7-hint). Null when
-     *  unavailable (tests, raw-mode-only contexts). */
+    /** The profile/alias source for the completion host provider and the
+     *  connection-offer flows. Null when unavailable (tests, raw-mode-only
+     *  contexts). */
     private readonly profileClient: ProfileClient | null,
     private readonly onTooltipChange: (tooltip: string) => void,
     private readonly sshOpts?: {
@@ -254,6 +417,28 @@ export class TerminalContent extends BaseTabContent {
     return this._readyPromise
   }
 
+  /** The ports.* target this tab's session scopes to (nocx-wzc4.8): the
+   *  reserved "local" for a local shell, the saved-profile id for a
+   *  saved-profile SSH tab, null for an alias tab — an alias has no
+   *  profile until it is adopted, so it has no valid ports scope. */
+  get portsTargetId(): string | null {
+    // Inside an environment we entered by hand there is nothing we can
+    // speak for: remote discovery needs a MANAGED connection (a second exec
+    // channel on a connection we own), and a hand-typed `ssh` is a child
+    // process of the local shell. Reporting the local target here is what
+    // put this machine's listeners under a tab sitting on a Pi.
+    if (this.currentEnvironment()) return null
+    if (this.sshOpts === undefined) return LOCAL_TARGET_ID
+    return this.sshOpts.profileId || null
+  }
+
+  /** Why portsTargetId is null, when it is null because the pane went
+   *  somewhere we cannot enumerate. '' when there is no such reason. */
+  get portsUnavailableReason(): string {
+    const env = this.currentEnvironment()
+    return env ? env.label : ''
+  }
+
   /** Push the composed title to the host: program title, else the cwd label. */
   private pushTitle(): void {
     if (!this.host) return
@@ -265,12 +450,252 @@ export class TerminalContent extends BaseTabContent {
     this.hooks.onSubtitleChange?.(this.programTitle ? this.locationLine() : '')
   }
 
-  /** Where this tab is: `user@host` for SSH, the working directory otherwise. */
+  /** Where this tab is: the nested environment if we are inside one, else
+   *  `user@host` for SSH, else the working directory.
+   *
+   *  The nested case is the one that was missing and it is the common one:
+   *  a user types `ssh pi@192.168.0.93` in a local tab, and every surface
+   *  that named a place went on naming the local machine — the tab title
+   *  kept whatever the remote shell's OSC 2 last set, the location chip
+   *  stayed hidden because a local session grows none, and the cwd chip
+   *  went on showing the local directory while the prompt was elsewhere
+   *  (owner, 2026-08-04, three times). We know the destination because we
+   *  submitted the line (ADR-0004 §2) — no integration, no sniffing. */
   private locationLine(): string {
+    const env = this.currentEnvironment()
+    if (env) return env.label
     if (this.sshOpts) {
       return this.sshOpts.user ? `${this.sshOpts.user}@${this.sshOpts.host}` : this.sshOpts.host
     }
     return this._cwd
+  }
+
+  /** The innermost environment entered by a command we submitted, or null
+   *  when the pane is in the environment its session started in. */
+  private currentEnvironment(): EnvironmentEntry | null {
+    return this._envStack.length > 0 ? this._envStack[this._envStack.length - 1] : null
+  }
+
+  /** Push every surface that names a place at the current environment. The
+   *  cwd is deliberately BLANK inside a nested environment: we know the
+   *  host and we do not know the directory until OSC 7 arrives, and a stale
+   *  local directory under a remote prompt is the lie this fixes. */
+  private syncLocation(): void {
+    const env = this.currentEnvironment()
+    const location = env ? env.label : this.sshOpts ? this.locationLine() : ''
+    this.scrollback?.blockManager.setLocation(location)
+    this.editor?.setLocation(location)
+    if (env) {
+      // No folder inside an environment we cannot see into. `ssh` was
+      // launched FROM the local directory, but printing that beside the
+      // remote host reads as "on the Pi, in home/dev" — a place that does
+      // not exist. The host is a true label for the whole block; the
+      // directory is not knowable until OSC 7 arrives (owner, 2026-08-04).
+      this._cwd = ''
+      this.editor?.setCwd('')
+      this.cwdTitle = env.label
+      this.programTitle = ''
+    }
+    this.pushTitle()
+  }
+
+  // ── The ssh environment boundary (nocx-mlm7 P9) ─────────────────────
+
+  /** Overlay the settings of the saved connection this line resolves to, when
+   *  exactly one does (nocx-pv3h): the key, the port and the jump host the
+   *  typed line does not spell. We offered that connection in the dropdown,
+   *  so honouring it here is what makes the offer mean something. Anything
+   *  that fails — no client, a listing error, no match, several matches —
+   *  returns the plan as parsed, which is the same line the user typed. */
+  private _withProfileOverlay(plan: SshPlan): SshPlan | Promise<SshPlan> {
+    const client = this.profileClient
+    if (!client) return plan
+    return client
+      .listProfiles()
+      .then((profiles) => {
+        const overlay = resolveSshProfileOverlay(profiles, typedDestinationParts(plan))
+        return overlay ? applyProfile(plan, overlay) : plan
+      })
+      .catch(() => plan)
+  }
+
+  /** Turn the planner's answer into a pending rewrite, or null when the
+   *  typed line must go out unchanged. A refused attempt (mode 'raw')
+   *  registers nothing: no launcher runs, so no passport can arrive and
+   *  there is no expectation to bind or observation to report. */
+  private _buildPendingAttempt(
+    plan: SshPlan,
+    result: ShellLauncherCommandResult,
+    sessionId: string,
+  ): PendingSshAttempt | null {
+    const entry = environmentEntry(plan.typedLine)
+    if (!entry) return null
+    if (result.mode === 'bootstrap' && result.launcherPath !== null) {
+      const line = buildBootstrapRewrite(plan, result.launcherPath)
+      if (line === null) return null
+      return { environmentId: result.environmentId, mode: 'bootstrap', entry, sendLine: line }
+    }
+    if (result.mode === 'installed') {
+      const line = buildInstalledRewrite(plan, result.environmentId, sessionId)
+      if (line === null) return null
+      return { environmentId: result.environmentId, mode: 'installed', entry, sendLine: line }
+    }
+    return null
+  }
+
+  /** Consume the pending rewrite info at submit start — the expected
+   *  passport id must be live before the bytes reach the pty (§5.3). */
+  private _takePendingAttempt(): PendingSshAttempt | null {
+    const p = this._pendingAttempt
+    this._pendingAttempt = null
+    return p
+  }
+
+  /** Classify a D marker for the ssh attempt. A D is LOCAL when it is
+   *  untagged (the local shell never tags) and the attempt has either
+   *  entered or produced no accepted passport yet — the exception is the
+   *  POSIX tier's orphan `D;0` (accepted passport, no tagged A seen): it is
+   *  emitted by the REMOTE tier before its first prompt and closes nothing.
+   */
+  private _classifyD(
+    marker: CommandMarkerEvent,
+    attempt: SshAttempt | null,
+  ): 'local' | 'orphan' | 'normal' {
+    if (marker.nocxEnv !== undefined) return 'normal'
+    if (attempt === null) return 'normal'
+    if (!attempt.entered && attempt.acceptedPassport !== null && !attempt.sawTaggedA)
+      return 'orphan'
+    return 'local'
+  }
+
+  /** Enter the environment at `expected passport → tagged A → B` (§5.3):
+   *  freeze the ssh block FIRST (while the block manager still carries the
+   *  LOCAL location and cwd — the defect the brief names is submit()
+   *  entering the environment before ledger.open/beginBlock), then push
+   *  every surface that names a place, then report the accepted passport.
+   */
+  private _enterEnvironment(marker: CommandMarkerEvent, attempt: SshAttempt): void {
+    attempt.entered = true
+    logDecision('entry entered', {
+      environmentId: attempt.environmentId,
+      mode: attempt.mode,
+    })
+    const getLine = (y: number) => this.renderer!.getBufferLine(y)
+    this.scrollback?.blockManager.freezeEntered(getLine, marker.line)
+    this.renderer?.clearViewport()
+    this._previousIntegrated.push(this._shellIntegrated)
+    this._envStack.push(attempt.entry)
+    this._previousTitles.push({
+      cwd: this._cwd,
+      programTitle: this.programTitle,
+      cwdTitle: this.cwdTitle,
+    })
+    this._updateCapability()
+    this.syncLocation()
+    this.hooks.onPortsTargetChange?.()
+    // The accepted passport crossed the control plane: report it (§5.4) —
+    // the installed fact is written from exactly this observation.
+    void this._reportObservation(attempt)
+    // The ssh block froze — the connection offer rides on that freeze
+    // (nocx-pu4.7), exactly as it rode the end-of-session D before.
+    void this._maybeOfferConnection()
+  }
+
+  /** The local D: the ssh process is gone. Complete the dormant transition
+   *  record with the real code (the ledger cuts any running remote command
+   *  short as transition-lost and never assigns it the local code), pop
+   *  every environment above the base, freeze any running remote block
+   *  with NO code, and report the observation — the accepted passport, or
+   *  null when the attempt produced none (which invalidates a stale
+   *  installed fact on the backend).
+   */
+  private _handleLocalD(marker: CommandMarkerEvent, attempt: SshAttempt): void {
+    logDecision(attempt.acceptedPassport === null ? 'entry no-passport' : 'entry ended', {
+      environmentId: attempt.environmentId,
+      mode: attempt.mode,
+      entered: attempt.entered,
+    })
+    const completed = this.ledger?.completeTransition(marker.exitCode ?? null)
+    // With no dormant transition (the fail-open path — auth failure, Ctrl-C
+    // at password:), the running record IS the ssh command and must still
+    // close with the real code, exactly as a plain D would. When the
+    // transition completed, completeTransition already reset the cycle and
+    // cut any remote command short — the local D is never delivered as a
+    // plain marker D onto a remote command.
+    if (completed === null) this.ledger?.onMarker('D', marker.exitCode)
+    // The connection is gone: every environment above the base died with
+    // it — the ssh environment and anything nested inside (sudo, docker).
+    while (this._envStack.length > 0) this._popEnvironment()
+    const getLine = (y: number) => this.renderer!.getBufferLine(y)
+    if (attempt.entered) {
+      // The running block is a REMOTE command cut short by the drop. It
+      // freezes with no exit code — 'entered' is the only no-code frozen
+      // paint blocks.ts offers, and the local code belongs to the ssh
+      // command, never to a remote one.
+      this.scrollback?.blockManager.freezeEntered(getLine, marker.line)
+    } else {
+      // No entry: the ssh block itself is still running (auth failure,
+      // Ctrl-C at password:, an aborted bootstrap). It gets the real exit
+      // status — the fail-open path, unchanged from today (§6.1).
+      this.scrollback?.onCommandEnd(getLine, marker.line, marker.exitCode ?? null)
+    }
+    this.renderer?.clearViewport()
+    void this._reportObservation(attempt)
+    void this._maybeOfferConnection()
+    this._attempt = null
+    // The attempt is over: no later passport may be judged against it.
+    this.renderer?.setExpectedEnvironmentId(null)
+  }
+
+  /** Restore one environment level: the marker fact, the stack, the titles
+   *  and the location. Extracted from the old D handler so both the legacy
+   *  non-ssh path and the ssh local D can use it. */
+  private _popEnvironment(): void {
+    if (this._previousIntegrated.length > 0) {
+      const popped = this._envStack[this._envStack.length - 1]
+      this._shellIntegrated = this._previousIntegrated.pop()!
+      this._envStack.pop()
+      logDecision('entry popped', { kind: popped?.kind })
+      const restored = this._previousTitles.pop()
+      if (restored !== undefined) {
+        this._cwd = restored.cwd
+        this.editor?.setCwd(restored.cwd)
+        // Both halves, and the program title especially: the remote
+        // shell's OSC 2 belongs to the remote shell, which is gone.
+        this.programTitle = restored.programTitle
+        this.cwdTitle = restored.cwd ? directoryLabel(restored.cwd) : restored.cwdTitle
+      }
+      this._updateCapability()
+      this.syncLocation()
+      this.hooks.onPortsTargetChange?.()
+    }
+  }
+
+  /** Report what the attempt produced to the backend (§5.4): the accepted
+   *  passport, or null when the attempt ended without one. The first
+   *  observation per attempt decides it — entry reports the accepted
+   *  passport, the local D reports whatever remains (null when none was
+   *  ever accepted). Best-effort by design.
+   */
+  private async _reportObservation(attempt: SshAttempt): Promise<void> {
+    if (attempt.reported) return
+    attempt.reported = true
+    try {
+      const res = await this.client.call<ShellEnvironmentObservedResult>(
+        'shell.environmentObserved',
+        {
+          environmentId: attempt.environmentId,
+          passport: attempt.acceptedPassport,
+        },
+      )
+      if (!res.processed) {
+        log.warn('nocx: shell.environmentObserved not processed', {
+          environmentId: attempt.environmentId,
+        })
+      }
+    } catch (err) {
+      log.warn('nocx: shell.environmentObserved failed', { error: String(err) })
+    }
   }
 
   // ── TabContent ──────────────────────────────────────────────────────────
@@ -368,6 +793,18 @@ export class TerminalContent extends BaseTabContent {
           store: renderer.snapshotStore,
           queryHistory: (cwd, host) => queryHistory(this.client, 'directory', cwd, host),
           completeFs: (text, cwd) => this.client.call<FsComplete>('fs.complete', { text, cwd }),
+          // The remote completion adapter (nocx-w7h.15): active only on
+          // remote sessions, where it asks the remote shell's own
+          // completion machinery — paths from the remote filesystem,
+          // command names, and command-specific completions from bash
+          // completion functions.
+          completeShell: (params) => this.client.call<ShellComplete>('shell.complete', params),
+          sessionId: () => this.session?.sessionId ?? '',
+          // The host provider is built inside createShellProviders (the
+          // assembly it routes is plain code, not the DOM-bound quick-connect
+          // module); this tab's ProfileClient is handed through, absent when
+          // no connection manager is wired.
+          profileClient: this.profileClient ?? undefined,
         }),
         dropdown: new CompletionDropdown({
           onHover: (index) => this.completion?.select(index),
@@ -409,7 +846,72 @@ export class TerminalContent extends BaseTabContent {
           beforeSubmit: (doc) => {
             if (this.promptVault?.openResolution()) return false
             const sync = planSubmitSync(doc)
-            if (sync) return sync
+            if (sync) {
+              // nocx-mlm7 P9: rewrite a hand-typed interactive ssh to ride
+              // the launcher. Policy off refuses; anything uncertain falls
+              // through to the original line (fail-open, ADR-0004 §1). The
+              // rewrite is the one path where the sendLine differs from the
+              // recordLine without a secret reference — the history entry
+              // and the block header show the line the USER typed, while
+              // the wire carries the expanded one (ADR-0004 §2).
+              // `_shellIntegrated` is not a nicety here, it is what makes the
+              // rewrite safe to type. The line is `if …; then …; else …; fi` —
+              // POSIX/bash/zsh syntax, and those are precisely the shells nocx
+              // ships integration scripts for, so a tab that has emitted a
+              // marker is by construction one of them. A tab that has not may
+              // be a fish or csh login shell, which would read `then` as a
+              // command and never run the ssh at all.
+              // planSsh replaces isInteractiveTransition here: it answers
+              // with the oracle argv (nocx-c5az) and refuses ANY line inside
+              // an environment (depth > 0 ⇒ raw, §6.1 row 5) — a local
+              // staged path must never be readable by a remote shell.
+              if (this._policy !== 'raw' && this._shellIntegrated) {
+                const transition = planSsh(doc, this._envStack.length > 0 ? 1 : 0)
+                if (transition.kind === 'plan') {
+                  const sid = this.session?.sessionId
+                  if (sid) {
+                    // A destination the user saved as a connection carries
+                    // settings the typed line does not spell (nocx-pv3h): the
+                    // key, the port, the jump host. We offered that connection
+                    // in the dropdown, so honouring it here is what makes the
+                    // offer mean something. Typed flags always win, and no
+                    // match leaves the plan exactly as parsed.
+                    const run = (planned: SshPlan) =>
+                      this.client
+                        .call<ShellLauncherCommandResult>('shell.launcherCommand', {
+                          sessionId: sid,
+                          oracleArgv: planned.oracleArgv,
+                        })
+                        .then((result) => {
+                          const pending = this._buildPendingAttempt(planned, result, sid)
+                          if (pending) {
+                            this._pendingAttempt = pending
+                            return {
+                              sendLine: pending.sendLine,
+                              recordLine: doc,
+                              refs: [],
+                            }
+                          }
+                          // Refused (raw, remote-command, cannot build): send
+                          // the original line unchanged.
+                          return sync
+                        })
+                        .catch(() => {
+                          // RPC failure → original line, and no half-registered
+                          // attempt (fail-open).
+                          this._pendingAttempt = null
+                          return sync
+                        })
+                    // No profile client, no listing to wait for: the sync path
+                    // keeps its no-gap handoff (ADR-0004 §2) rather than paying
+                    // a microtask for an overlay that cannot exist.
+                    const overlaid = this._withProfileOverlay(transition)
+                    return overlaid instanceof Promise ? overlaid.then(run) : run(overlaid)
+                  }
+                }
+              }
+              return sync
+            }
             return planSubmit(doc, (line) => vault.resolveLine(line)).then((verdict) => {
               if (isSubmitFailure(verdict)) {
                 this.reportSubmitFailure(verdict)
@@ -421,13 +923,80 @@ export class TerminalContent extends BaseTabContent {
           submit: (doc: string, plan?: SubmitPlan) => {
             const recordLine = plan?.recordLine ?? doc
             this._pendingCommand = recordLine
+            // Where the command RUNS, captured before anything below can
+            // change it. Entering an environment blanks `_cwd` (we know the
+            // host, not the remote directory), and the ledger and the block
+            // both read it further down — so `ssh pi@…` was recorded with no
+            // directory and vanished from a history scoped to "this
+            // directory". The command ran here, whatever it goes on to do.
+            const submitCwd = this._cwd
+            // The ssh attempt from beforeSubmit, consumed HERE: the expected
+            // passport id must be live in the tracker BEFORE the bytes reach
+            // the pty (spec §5.3). Consuming also clears it, so a submit
+            // that never got a plan cannot bind to a stale rewrite.
+            const pending = this._takePendingAttempt()
+            if (pending) {
+              this.renderer?.setExpectedEnvironmentId(pending.environmentId)
+            }
+            // Track environment entry (nocx-695k.1): if the submitted
+            // command enters a new shell environment, save the current
+            // marker fact and clear it — the pane is now on a different
+            // host whose markers we have not seen. The D that ends this
+            // command restores the prior value.
+            // The SSH arm is deliberately excluded (P9): ssh enters ONLY on
+            // `expected passport → tagged A → B` (§5.3), and the ssh block
+            // must carry the LOCAL host and cwd — so no environment is
+            // applied before ledger.open and beginBlock. The other
+            // environment-entry commands (docker, su, …) have no passport
+            // machinery in this epic and keep the submit-time heuristic.
+            const entered = environmentEntry(recordLine)
+            if (entered && entered.kind !== 'ssh') {
+              logDecision('entry heuristic-enter', { kind: entered.kind })
+              this._previousIntegrated.push(this._shellIntegrated)
+              this._shellIntegrated = false
+              this._envStack.push(entered)
+              this._previousTitles.push({
+                cwd: this._cwd,
+                programTitle: this.programTitle,
+                cwdTitle: this.cwdTitle,
+              })
+              this._updateCapability()
+              this.syncLocation()
+              this.hooks.onPortsTargetChange?.()
+            }
+            // marker to tell us the far shell is ready, because the far
+            // shell is exactly the one that emits none.
+            //
+            // So the offer is the CHIP, not a dialog, and the act is the
+            // user's click at a moment only they can see (nocx-atyf.3 as
+            // corrected by the owner, 2026-08-04). The consent map still
+            // decides whether the chip nags or waits quietly; it never
+            // decides to type.
+            // Proactive save for a hand-typed `ssh <target>` is nocx-pu4.4,
+            // NOT part of this task — the ad-hoc SSH tab's adopt affordance
+            // already covers the quick-connect path.
             // The previous command's receipt is deliberately LEFT alone.
             // Submitting again used to destroy its capture on the backend
             // and retire the receipt here, which meant that running one
             // more command before deciding lost the offer for good.
             if (this.ledger) {
               let markerLine: () => number | undefined = () => undefined
-              const rec = this.ledger.open(recordLine, this._cwd, this._host, () => markerLine())
+              const rec = this.ledger.open(recordLine, submitCwd, this._host, () => markerLine())
+              // Bind the live attempt to the ledger record BEFORE the bytes
+              // go out: the tagged A will call ledger.enter(recId), and the
+              // local D will complete the dormant record.
+              if (pending) {
+                this._attempt = {
+                  environmentId: pending.environmentId,
+                  mode: pending.mode,
+                  recId: rec.id,
+                  entry: pending.entry,
+                  acceptedPassport: null,
+                  sawTaggedA: false,
+                  entered: false,
+                  reported: false,
+                }
+              }
               const m = renderer.registerMarker()
               if (m) {
                 markerLine = () => m.line()
@@ -444,17 +1013,22 @@ export class TerminalContent extends BaseTabContent {
               focusGrid: () => renderer.focus(),
               sendDoc: (d) => void this.shellTarget!.submit(d),
             })
+            // App-owned start (nocx-atyf.4): mark the block as running
+            // immediately, before any OSC marker arrives. The start line
+            // is the cursor position at submit time; when C arrives (if
+            // it does), cReceived is set on the running block.
+            if (this.scrollback && this.renderer) {
+              this.scrollback.beginBlock(recordLine, submitCwd, this.renderer.cursorLine())
+            }
           },
           cancel: () => this.session?.send('\x03'),
           // A taller editor is a shorter scrollback. Keep the bottom of the
           // transcript where it belongs — just above the editor — instead of
           // letting it slide underneath.
           resized: () => this.scrollback?.scrollToBottom(),
-          /** Detect `ssh <partial>` pattern and show matching aliases, and
-           *  drive the vault surfaces (the candidate's detection, the
-           *  picker's passive filter). */
+          /** Drive the completion and vault surfaces (the candidate's
+           *  detection, the picker's passive filter). */
           onInputChange: (text) => {
-            this._onEditorInput(text)
             // A keystroke aborts the completion query in flight and starts a
             // fresh one (design §8.9.2); the ghost text re-anchors.
             this.completion?.onDocChanged()
@@ -472,8 +1046,6 @@ export class TerminalContent extends BaseTabContent {
             this.completion?.dismiss()
             this.promptVault?.onSecretPicker(triggerPos)
           },
-          /** Hint acceptance — no cache to invalidate. */
-          onAcceptHint: () => {},
           /** Up on the first line (or an empty draft): no further caret
            *  movement, so open the recall overlay (design §8.10 v6). */
           onUpAtTop: () => {
@@ -554,28 +1126,104 @@ export class TerminalContent extends BaseTabContent {
           ),
       })
       this.recall.mount(this.editor.root)
-      // ONE arbiter chain (design §8.9.4 — three surfaces, one keyboard):
-      // recall first, the vault picker second, completion last, the
-      // editor's own handling at the tail. Recall is the higher-priority
-      // surface and the surfaces never stack: opening any one closes the
-      // others — the completion dropdown is dismissed the moment recall or
-      // the picker opens, and the picker is dismissed the moment recall
-      // opens (a Ctrl/Cmd+R can land while the picker is up). Esc closes
-      // exactly one surface per press, in the same order.
+      // ONE arbiter chain (design §8.9.4 — three surfaces, one keyboard),
+      // and the OWNERSHIP it implements, stated as decisions rather than
+      // as an evaluation order (nocx-mlm7 — the third instance of two
+      // surfaces owning one input; the order alone reads as accident and
+      // regresses):
+      //
+      //   - The explicit recall shortcut (Ctrl/Cmd+R) opens recall from
+      //     anywhere — even under an open dropdown or picker — and while
+      //     recall is open, its keys (arrows, Enter, Esc, typing) belong
+      //     to it. Opening any surface closes the others: the surfaces
+      //     never stack.
+      //   - The vault picker, while open, owns its keys (arrows, Enter,
+      //     Tab, Esc): completion is dismissed under it.
+      //   - While the completion dropdown is open with a selectable list,
+      //     bare ArrowUp/ArrowDown belong to IT — its footer says
+      //     "↑ ↓ to navigate". Recall's bare-Up gesture (up at the top of a
+      //     single-line draft opens recall) therefore applies only when no
+      //     such dropdown is open; completion.ownsArrows is the same
+      //     decision in both places. The gesture is NOT removed, and the
+      //     dropdown is NOT closed early to make room for it — the keys
+      //     are the dropdown's while it is open.
+      //   - Esc closes exactly one surface per press, in the same order:
+      //     recall, picker, completion.
       this.editor.setKeyArbiter((e) => {
+        // Every decision here is traced (off by default — `window.nocxDebug
+        // = true` in devtools): which surface got the key and why is the
+        // diagnosis for "my key did the wrong thing", and the chain's
+        // evaluation order is the accident that reads as ownership unless
+        // the decision is stated. The gate is checked BEFORE any field is
+        // built: with tracing off, a keystroke costs nothing but the check.
+        // Recall first: the shortcut opens it from anywhere, and an open
+        // recall owns its keys. Opening it closes the other surfaces.
+        const recallWasOpen = this.recall!.isOpen
         const consumed = this.recall!.handleKey(e)
         if (this.recall!.isOpen) {
           this.completion?.dismiss()
           this.promptVault?.closePicker()
         }
-        if (consumed) return true
+        if (consumed) {
+          if (isDecisionTracing()) {
+            logDecision('arbiter', {
+              surface: 'recall',
+              key: keyLabel(e),
+              why: recallWasOpen ? 'recall is open; it owns its keys' : 'recall shortcut',
+            })
+          }
+          return true
+        }
         // The picker outranks completion: while it is open its keys
         // (arrows, Enter, Tab, Esc) belong to it, and a Right/End ghost
         // accept must never insert completion text into the line under the
         // picker.
         if (this.promptVault!.isPickerOpen) this.completion?.dismiss()
-        if (this.promptVault!.handleKey(e)) return true
-        return this.completion?.handleKey(e) ?? false
+        if (this.promptVault!.handleKey(e)) {
+          if (isDecisionTracing()) {
+            logDecision('arbiter', {
+              surface: 'picker',
+              key: keyLabel(e),
+              why: 'picker is open; it owns its keys',
+            })
+          }
+          return true
+        }
+        // The ownership decision above, applied: an open selectable
+        // dropdown owns bare ArrowUp/ArrowDown — its footer promises
+        // navigation — so they are routed to it explicitly and can never
+        // fall through to the editor's recall gesture. Everything else
+        // (Enter, Tab, Esc, Right/End, typing) still goes to the
+        // completion controller's ordinary handling.
+        if (this.completion!.ownsArrows(e)) {
+          if (isDecisionTracing()) {
+            logDecision('arbiter', {
+              surface: 'completion',
+              key: keyLabel(e),
+              why: 'dropdown is open; bare arrows belong to it',
+            })
+          }
+          return this.completion!.handleKey(e)
+        }
+        const handled = this.completion?.handleKey(e) ?? false
+        if (handled) {
+          if (isDecisionTracing()) {
+            logDecision('arbiter', {
+              surface: 'completion',
+              key: keyLabel(e),
+              why: 'completion consumed the key',
+            })
+          }
+          return true
+        }
+        if (isDecisionTracing()) {
+          logDecision('arbiter', {
+            surface: 'editor',
+            key: keyLabel(e),
+            why: 'no surface claimed the key',
+          })
+        }
+        return false
       })
 
       if (signal.aborted) {
@@ -591,26 +1239,148 @@ export class TerminalContent extends BaseTabContent {
         this._readyResolve(false)
         return
       }
-      // False until the first OSC 133 marker: a markerless session (plain
-      // SSH) keeps the terminal visible in the unstructured full-pane mode.
-      let shellIntegrated = false
-
+      // The marker latch (AD-6): any OSC 133 marker means the remote shell
+      // speaks our protocol. A markerless session (plain SSH) keeps the
+      // terminal visible in the unstructured full-pane mode.
+      const shellIntegrated = () => this._shellIntegrated
+      this._shellIntegrated = false
       renderer.onCommandMarker((marker) => {
         // Any OSC 133 marker means the remote shell has nocx integration:
         // from here the scrollback-block layout owns the presentation and
         // the unstructured full-pane mode is never used again.
-        shellIntegrated = true
+        this._shellIntegrated = true
         this.inputState.dispatch({ type: 'marker', kind: marker.kind })
+        // Completion of an in-band integration: the first A after the
+        // wrapper ran means the wrapper restored termios, sourced the
+        // hooks and returned — the shell is back at a prompt.
+        if (marker.kind === 'A' && this._inBandDone) {
+          const done = this._inBandDone
+          this._inBandDone = null
+          done()
+        }
         if (marker.kind === 'D' && marker.exitCode !== undefined) {
           this._lastExitCode = marker.exitCode
         }
+
+        const attempt = this._attempt
+        // Environment entry (spec §5.3): an attempt whose passport was
+        // accepted enters ONLY on the tagged A → B pair carrying our
+        // environment id. The ledger enters at the tagged A — BEFORE the
+        // marker reaches onMarker — because an A while the ssh record still
+        // occupies the running slot would interrupt it exactly as today
+        // (N6). The UI enters at the tagged B.
+        if (attempt && attempt.acceptedPassport !== null && !attempt.entered) {
+          if (marker.kind === 'A' && marker.nocxEnv === attempt.environmentId) {
+            attempt.sawTaggedA = true
+            this.ledger?.enter(attempt.recId)
+            logDecision('entry ledger-enter', {
+              environmentId: attempt.environmentId,
+              kind: 'A',
+            })
+          } else if (
+            marker.kind === 'B' &&
+            attempt.sawTaggedA &&
+            marker.nocxEnv === attempt.environmentId
+          ) {
+            this._enterEnvironment(marker, attempt)
+          } else if (
+            (marker.kind === 'A' || marker.kind === 'B') &&
+            marker.nocxEnv !== undefined &&
+            marker.nocxEnv !== attempt.environmentId
+          ) {
+            // A tagged A/B carrying someone else's id while this attempt
+            // awaits its own pair: no transition, and the reason is named —
+            // an integrated tmux, a nested ssh, a foreign tier.
+            logDecision('entry foreign-marker', {
+              kind: marker.kind,
+              nocxEnv: marker.nocxEnv,
+              expected: attempt.environmentId,
+            })
+          }
+        }
+
+        if (marker.kind === 'D') {
+          const dClass = this._classifyD(marker, attempt)
+          // The local D is delivered to completeTransition, NEVER to
+          // onMarker('D') — a marker D only closes a running command and
+          // must never assign the local code to a remote command (§7).
+          if (dClass === 'local') {
+            this._handleLocalD(marker, attempt!)
+            return
+          }
+          // The POSIX tier's orphan D;0 before its first A closes nothing
+          // and pops nothing — neither a block end nor the local D (§6.1).
+          if (dClass === 'orphan') {
+            logDecision('entry orphan-d', {
+              environmentId: attempt!.environmentId,
+              exitCode: marker.exitCode ?? null,
+            })
+            return
+          }
+        }
+
         this.ledger?.onMarker(marker.kind, marker.exitCode)
         if (marker.kind === 'C') {
-          this.scrollback?.onCommandStart(this._pendingCommand, this._cwd, marker.line)
+          // If a block was already started from the app-owned submit
+          // (nocx-atyf.4), mark C as received and update the start line.
+          if (this.scrollback?.blockManager.runningBlock) {
+            const rb = this.scrollback.blockManager.runningBlock
+            rb.cReceived = true
+            rb.startLine = marker.line
+          } else {
+            this.scrollback?.onCommandStart(this._pendingCommand, this._cwd, marker.line)
+          }
         } else if (marker.kind === 'D') {
+          // A tagged D (the entered environment, or a foreign id such as an
+          // integrated tmux) closes the remote command and never pops the
+          // environment. A legacy D with no ssh attempt pops the innermost
+          // NON-ssh environment (docker, su, …) as today — the ssh
+          // environment pops only on the local D.
+          const innermost = this.currentEnvironment()
+          if (innermost && innermost.kind !== 'ssh') {
+            this._popEnvironment()
+          }
           const getLine = (y: number) => renderer.getBufferLine(y)
           this.scrollback?.onCommandEnd(getLine, marker.line, marker.exitCode ?? null)
           renderer.clearViewport()
+          void this._maybeOfferConnection()
+        }
+      })
+      renderer.onEnvironmentPassport((disposition) => {
+        const attempt = this._attempt
+        if (disposition.status === 'accepted') {
+          // The tracker accepts only a passport carrying the expected id,
+          // which is by construction this attempt's id — so acceptance is
+          // the attempt's readiness passport, and nothing else can be.
+          if (attempt) attempt.acceptedPassport = disposition.passport
+          logDecision('passport accepted', {
+            environmentId: disposition.passport.environmentId,
+          })
+          // P0 (nocx-mlm7): a confirmed environment transition starts a clean
+          // input cycle. Without this, the remote's first A arrives while the
+          // machine is still RUNNING_RAW (submit never finishes for ssh), its
+          // B grants no ownership, and the marker-only remote prompt leaves
+          // the user with no input surface at all. The tracker fires this
+          // exactly once per attempt (duplicates are reported as `duplicate`,
+          // never accepted again) and only for the minted id, before the
+          // remote's first A — the event spec §5.3's `expected passport →
+          // tagged A → B` sequence was missing.
+          this.inputState.dispatch({ type: 'passport' })
+        } else if (disposition.status === 'duplicate') {
+          logDecision('passport duplicate', {
+            environmentId: disposition.passport.environmentId,
+          })
+        } else if (disposition.status === 'unexpected') {
+          // A passport whose id is not the one minted for the attempt in
+          // flight: ignored and logged (spec §5.2).
+          log.warn('nocx: unexpected environment passport', {
+            environmentId: disposition.passport.environmentId,
+          })
+          logDecision('passport unexpected', {
+            environmentId: disposition.passport.environmentId,
+          })
+        } else {
+          logDecision('passport ignored', { reason: disposition.reason })
         }
       })
 
@@ -619,7 +1389,7 @@ export class TerminalContent extends BaseTabContent {
         this.inputState.dispatch({ type: 'buffer', buffer: type })
         if (type === 'alternate') {
           this.scrollback?.enterFullscreen()
-        } else if (!shellIntegrated) {
+        } else if (!shellIntegrated()) {
           // A markerless session returning from an alt-screen program must
           // not collapse to the hidden idle layout: leave fullscreen first
           // (setUnstructured declines while an alt-screen program owns the
@@ -632,7 +1402,13 @@ export class TerminalContent extends BaseTabContent {
       })
       this.inputState.onChange((m) => {
         console.debug('nocx: input-state', m.state, 'trusted=', m.trusted, 'owned=', m.owned)
-        this._editorOwned = m.owned
+        // The location chip follows the machine's trust on EVERY transition,
+        // including while the editor is hidden: when markers stop, no later
+        // render may retain the last trusted host (design §8.2).
+        this.editor?.setTrusted(m.trusted)
+        // The capability statement is observed state: it follows the machine
+        // on every transition (nocx-4t37.2).
+        this._updateCapability()
         if (shouldShowEditor(m.owned, this.nativeMode)) {
           this.editor!.setTime(new Date())
           this.editor!.show()
@@ -649,7 +1425,7 @@ export class TerminalContent extends BaseTabContent {
           renderer.focus()
           // Markerless session (still no OSC 133): the terminal must stay
           // visible — the scrollback-block model never takes over.
-          if (!shellIntegrated) {
+          if (!shellIntegrated()) {
             this.scrollback?.setUnstructured()
           } else {
             this.scrollback?.setIdle()
@@ -855,11 +1631,38 @@ export class TerminalContent extends BaseTabContent {
       this.session = session
       log.info('nocx: session opened', { sid: session.sessionId, cwd: session.cwd || '' })
 
+      // The open ack carries the resolved launch policy and the refusal
+      // reason (nocx-4t37.2): the capability control starts from the
+      // backend's own resolution, never from a second fetch that could
+      // disagree with it.
+      this._policy = session.desiredMode ?? 'script'
+      this._openReason = session.shellIntegrationReason ?? ''
+      if (this._openReason !== '') {
+        // A launcher decline on an auto profile is the soft degrade
+        // AGENTS.md demands be visible in the product, never log-only.
+        showToast({
+          level: 'warning',
+          message: `Shell integration unavailable: ${this._openReason}`,
+          duration: 6000,
+        })
+      }
+      // The statement is OBSERVED: until the first marker arrives, an auto
+      // session honestly reads "Native input" — the launcher may be
+      // mid-start, and the first prompt flips it to command blocks.
+      this._updateCapability()
+
       this._cwd = session.cwd || ''
       this._host = this.sshOpts?.host || ''
       // The block header's `user@host`. Empty for a local shell, where the
       // machine is implied and printing it on every block would be noise.
-      this.scrollback?.blockManager.setLocation(this.sshOpts ? this.locationLine() : '')
+      // ONE derivation, routed to both chips — the block header's frozen
+      // record and the prompt's live destination must never disagree.
+      const location = this.sshOpts ? this.locationLine() : ''
+      this.scrollback?.blockManager.setLocation(location)
+      this.editor?.setLocation(location)
+      // Nothing has been verified yet at session open; the chip renders the
+      // machine's trust, which the first clean A→B promotes (design §8.2).
+      this.editor?.setTrusted(this.inputState.trusted)
       this.editor?.setCwd(session.cwd || '')
 
       // Push initial title + tooltip. Title composition lives here.
@@ -1012,10 +1815,7 @@ export class TerminalContent extends BaseTabContent {
         if (e.key === '.' && (e.metaKey || e.ctrlKey) && e.shiftKey) {
           e.preventDefault()
           e.stopPropagation()
-          this.nativeMode = true
-          this.editor?.hide()
-          this.renderer?.focus()
-          this.session?.send(NATIVE_RESTORE)
+          this.enterNativeMode()
         }
       })
 
@@ -1194,8 +1994,342 @@ export class TerminalContent extends BaseTabContent {
     this.renderer?.refreshAtlas()
   }
 
+  // ── Capability rail (nocx-4t37.2) ─────────────────────────────────────
+  // The pane-level rail above the pending command: one chip stating what is
+  // true right now (native input / command blocks / enhanced input), one
+  // popover of actions opened from it. The rail is NOT tab chrome — the
+  // capability changes several times INSIDE one tab (ssh from inside ssh,
+  // docker exec, sudo, a TUI), and it matters exactly where Enter is about
+  // to be pressed.
+
+  /** Derive the three axes, resolve authorisation + eligibility, and
+   *  update the editor's recovery chip (nocx-atyf.2). */
+  private _updateCapability(): void {
+    const shellState = deriveShellState({
+      integrated: this._shellIntegrated,
+      integrating: this._integrating,
+      integrationFailed: this._integrationFailed,
+      trusted: this.inputState.trusted,
+    })
+    const presentation: InputPresentation =
+      this.nativeMode || !this.inputState.owned ? 'terminal' : 'editor'
+    // A session whose markers stopped without the user latching native is
+    // a degrade (nested ssh, docker exec, a broken hook): the tab's small
+    // warning mark is the ONLY tab-chrome signal for it.
+    const degraded =
+      this._openReason !== '' ||
+      (this._shellIntegrated && !this.nativeMode && shellState === 'lost')
+    if (
+      shellState === this._shellState &&
+      presentation === this._presentation &&
+      degraded === this._degraded
+    )
+      return
+    this._shellState = shellState
+    this._presentation = presentation
+    this._degraded = degraded
+    this.hooks.onWarningChange?.(degraded)
+    this._renderRecovery()
+  }
+
+  /** Update the editor's recovery chip: the single action when one exists,
+   *  hidden when none apply. The chip IS the action — one click, no
+   *  popover (nocx-atyf.2). */
+  private _renderRecovery(): void {
+    if (!this.editor) return
+    const eligible = this.inputState.state !== 'ALT_SCREEN'
+    const authorized = this._policy !== 'raw'
+    const actions = deriveActions({
+      shellState: this._shellState,
+      presentation: this._presentation,
+      // The renderer cannot yet tell bootstrap from installed delivery —
+      // that needs the passport (P2); markers present means the launcher
+      // delivered by one of the script carriers.
+      observedDelivery: this._shellIntegrated ? 'installed-script' : 'none',
+      authorized,
+      eligible,
+    })
+    if (actions.length === 0) {
+      this.editor.setRecoveryAction(null, () => {})
+      return
+    }
+    const action = actions[0]
+    this.editor.setRecoveryAction(action.label, () => {
+      if (action.kind === 'integrate' || action.kind === 'retry-integration') this.integrateShell()
+      else if (action.kind === 'enable-editor' || action.kind === 'restore-editor')
+        this._restoreEditor()
+    })
+  }
+
+  /** Leave terminal input and return to the command editor. */
+  private _restoreEditor(): void {
+    this.nativeMode = false
+    this._updateCapability()
+  }
+
+  /** The current input presentation, exposed for context menu and palette
+   *  (nocx-atyf.5). 'editor' means the nocx command editor is active;
+   *  'terminal' means conventional terminal input is in use. */
+  get presentation(): InputPresentation {
+    return this._presentation
+  }
+
+  /** The observed shell state, exposed for the e2e and unit seams. */
+  get shellState(): ShellState {
+    return this._shellState
+  }
+
+  /** Switch to terminal input for this session (nocx-atyf.5). The escape
+   *  hatch — the editor hides, keys route raw, and the prompt is restored.
+   *  Session-scoped; a new session starts with the default. */
+  switchToTerminalInput(): void {
+    if (this.nativeMode) return
+    this.enterNativeMode()
+  }
+
+  /** Switch back to the nocx command editor (nocx-atyf.5). Only works when
+   *  the shell is integrated and the prompt is trusted. */
+  switchToEditorInput(): void {
+    if (!this.nativeMode) return
+    this._restoreEditor()
+  }
+
+  get policy(): DesiredMode {
+    return this._policy
+  }
+
+  /** Ask the user once whether to enable the command editor for this
+   *  destination (nocx-atyf.3). The answer is remembered per destination
+   *  so later transitions are silent. */
+
+  /** The native-mode escape (ADR-0004 §1, nocx-4ff.9): latch native input —
+   *  the editor never shows again this session, keys route raw, and the
+   *  remote prompt is restored to visible (the one-way guarantee that the
+   *  user is never trapped). This is the capability popover's "Use native
+   *  input" action AND the Ctrl/Cmd+Shift+. chord — one path, not two.
+   *
+   *  One-way on purpose: the remote marker-only prompt contract stops
+   *  emitting markers when it is unset (zsh removes its precmd hook; bash
+   *  stops the A marker), so a fresh integration — not a presentation
+   *  toggle — is what returns to command blocks. The capability chip still
+   *  states "Native input" and the popover offers nothing while latched. */
+  private enterNativeMode(): void {
+    this.nativeMode = true
+    this.editor?.hide()
+    this.renderer?.focus()
+    this.session?.send(NATIVE_RESTORE)
+    this._updateCapability()
+  }
+
+  // ── In-band integration (nocx-ynsx, spec §4.4) ─────────────────────────
+
+  /**
+   * Integrate the shell currently at the trusted prompt, in-band.
+   *
+   * Permitted ONLY while nocx holds a trusted A→B prompt from the current
+   * integrated shell (PROMPT_READY && trusted && owned): consent changes
+   * authorisation, not the identity of the foreground process — if the
+   * thing reading stdin is vim, the payload would be typed into the file.
+   * Anything else is refused with a stated reason rather than attempted.
+   *
+   * An input lease is taken before any byte goes out: the editor draft is
+   * captured byte-for-byte, the editor hides, every key except Esc is
+   * swallowed at document capture phase, and Esc cancels by sending the
+   * terminator. The wrapper is typed only once the lease is held.
+   */
+  integrateShell(): void {
+    if (this._integrating) return
+    // The connection's destination mode (nocx-mlm7): raw refuses every
+    // rewrite and remote write — even the explicit path. Every entry point
+    // (the rail, the chord, the palette) funnels through this one gate.
+    if (this._policy === 'raw') {
+      showToast({
+        level: 'warning',
+        message: 'This connection is set to raw mode (no integration)',
+        duration: 4000,
+      })
+      log.warn('nocx: shell.integrate refused by raw mode')
+      return
+    }
+    const state = this.inputState.state
+    // TWO named authorisations (nocx-4t37.2, coordinator decision). The
+    // gate for an integrated shell is UNCHANGED: permitted ONLY inside the
+    // trusted A→B window (PROMPT_READY && trusted && owned), which is the
+    // precondition the path was written for — nocx owns the keyboard, the
+    // editor is live, we know where the caret is. A markerless shell can
+    // never satisfy that and never will, so it gets its own path: the
+    // explicit user gesture IS the consent, ALT_SCREEN is the one negative
+    // fact xterm reports positively (vim/less/htop stay refused), and
+    // anything else that is not a shell is caught by the READY handshake —
+    // only the one-line wrapper is ever typed into an unknown foreground
+    // process, and if READY never returns the IN_BAND_TIMEOUT_MS fires and
+    // nothing further is sent (ADR-0004 §1 note, 2026-08-04).
+    const integratedPath =
+      state === 'PROMPT_READY' && this.inputState.trusted && this.inputState.owned
+    const markerlessPath = !this._shellIntegrated && state !== 'ALT_SCREEN'
+    if (!integratedPath && !markerlessPath) {
+      const why =
+        state === 'ALT_SCREEN'
+          ? 'Integrate this shell is not available while a full-screen program is running'
+          : state === 'PROMPT_READY'
+            ? 'Integrate this shell is only available from a trusted prompt'
+            : `Integrate this shell is only available at a trusted prompt, not while ${state}`
+      showToast({ level: 'warning', message: why, duration: 4000 })
+      log.warn('nocx: shell.integrate refused', {
+        state,
+        trusted: this.inputState.trusted,
+        owned: this.inputState.owned,
+        integrated: this._shellIntegrated,
+      })
+      return
+    }
+    void this._runIntegration()
+  }
+
+  private async _runIntegration(): Promise<void> {
+    const session = this.session
+    const renderer = this.renderer
+    const editor = this.editor
+    if (!session || !renderer || !editor) return
+
+    // The lease, taken BEFORE the plan is fetched: the user cannot type
+    // while the RPC is in flight, and the draft is exactly what it was
+    // when they asked.
+    const sel = editor.getSelection()
+    this._inBandDraft = {
+      text: editor.getDoc(),
+      from: sel.from,
+      to: sel.to,
+      scrollTop: editor.getScrollTop(),
+    }
+    this._integrating = true
+    editor.hide()
+    renderer.setReadOnly(true)
+    this._inBandKeySwallow = (e: KeyboardEvent) => {
+      // Keys aimed at another tab go to that tab's shell — they cannot
+      // reach this pty, so only this tab's keystrokes could interleave.
+      if (!this._active) return
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        e.stopPropagation()
+        this._cancelIntegration()
+        return
+      }
+      // Swallow everything else at capture phase: no keystroke may reach
+      // the shell while the wrapper runs raw.
+      e.preventDefault()
+      e.stopPropagation()
+    }
+    document.addEventListener('keydown', this._inBandKeySwallow, true)
+
+    // The indicator floats in the terminal itself — the editor, its usual
+    // host, is hidden for the lease.
+    const panel = new FloatingPanel({
+      variant: 'recall',
+      role: 'status',
+      ariaLabel: 'shell integration',
+    })
+    panel.mount(this.scrollback?.xtermLiveContainer ?? editor.root)
+    panel.showEmpty('Integrating this shell — Esc to cancel')
+    this._inBandPanel = panel
+
+    this._inBandTimer = setTimeout(() => {
+      if (this._inBandReadySeen) this._sendTerminator()
+      this._finishIntegration('timed out')
+    }, IN_BAND_TIMEOUT_MS)
+
+    let plan: ShellIntegrateResult
+    try {
+      plan = await new ShellClient(this.client).integrate(session.sessionId)
+    } catch {
+      // Nothing was typed yet — the wrapper never ran. Release the lease
+      // and report; the shell is untouched (fail-open).
+      this._finishIntegration('plan fetch failed')
+      showToast({
+        level: 'danger',
+        message: 'Could not fetch the integration plan',
+        duration: 4000,
+      })
+      return
+    }
+    if (!this._integrating) return // cancelled while the plan was in flight
+
+    this._inBandTerminator = plan.terminator
+    this._inBandReadyUnsub = renderer.onInBandReady(() => {
+      // READY proves `stty raw -echo` is on: the payload can be streamed
+      // without being printed to the user.
+      this._inBandReadyUnsub?.()
+      this._inBandReadyUnsub = null
+      this._inBandReadySeen = true
+      session.send(plan.payload + plan.terminator + '\n')
+      // Completion is the next A marker: the wrapper sourced the hooks
+      // and the shell is back at its prompt.
+      this._inBandDone = () => this._finishIntegration('done')
+    })
+    session.send(plan.wrapper + '\r')
+  }
+
+  /** The cancel shape the wrapper's sed recognises: a newline, the
+   *  terminator LINE and a newline (mirrors the pty-test cancel). */
+  private _sendTerminator(): void {
+    if (this._inBandTerminator === null) return
+    this.session?.send('\n' + this._inBandTerminator + '\n')
+  }
+
+  private _cancelIntegration(): void {
+    if (!this._integrating) return
+    this._inBandReadyUnsub?.()
+    this._inBandReadyUnsub = null
+    // If READY was seen, the wrapper is inside sed: the terminator is the
+    // only way to unblock it, and its own `stty "$saved"` restore then
+    // runs. If READY was never seen the wrapper already failed or returned
+    // on its own — sending a terminator would only print a stray line at
+    // the prompt (fail-open noise).
+    if (this._inBandReadySeen) this._sendTerminator()
+    this._finishIntegration('cancelled')
+  }
+
+  private _finishIntegration(reason: string): void {
+    if (!this._integrating) return
+    this._integrating = false
+    this._inBandReadyUnsub?.()
+    this._inBandReadyUnsub = null
+    this._inBandDone = null
+    if (this._inBandTimer !== undefined) {
+      clearTimeout(this._inBandTimer)
+      this._inBandTimer = undefined
+    }
+    if (this._inBandKeySwallow) {
+      document.removeEventListener('keydown', this._inBandKeySwallow, true)
+      this._inBandKeySwallow = null
+    }
+    this._inBandPanel?.destroy()
+    this._inBandPanel = null
+    // Restore the draft byte-for-byte. The machine re-shows the editor at
+    // the next B; when no marker followed (early cancel), restore the
+    // visibility the machine still declares.
+    const draft = this._inBandDraft
+    this._inBandDraft = null
+    if (draft && this.editor) {
+      this.editor.replaceDoc(draft.text, draft.from, draft.to)
+      this.editor.setScrollTop(draft.scrollTop)
+    }
+    this._inBandTerminator = null
+    this._inBandReadySeen = false
+    if (this.editor && shouldShowEditor(this.inputState.owned, this.nativeMode)) {
+      this.editor.show()
+      this.renderer?.setReadOnly(true)
+    }
+    log.info('nocx: in-band integration finished', { reason })
+  }
+
   dispose(): void {
     this._disposed = true
+    if (this._integrating) {
+      // Release the lease before the editor/renderer are torn down; the
+      // wrapper (if any was typed) still restores termios on its own.
+      this._finishIntegration('tab disposed')
+    }
     this.mountAbortController?.abort()
     if (this._globalKeydown) {
       document.removeEventListener('keydown', this._globalKeydown)
@@ -1220,63 +2354,6 @@ export class TerminalContent extends BaseTabContent {
   private _disposeAllMarkers(): void {
     for (const m of this._markers.values()) m.dispose()
     this._markers.clear()
-  }
-
-  // ── SSH alias hint support (w7-hint) ─────────────────────────────────
-
-  /** Called on every textarea input change. Detects `ssh <partial>` commands
-   *  and fetches matching aliases from the live ~/.ssh/config source.
-   *  No client-side caching — every activation fetches fresh (coordinator contract). */
-  private _onEditorInput(text: string): void {
-    // Only when the editor owns keyboard input (PROMPT_READY with owned=true).
-    if (!this._editorOwned || !this.profileClient) {
-      this.editor?.hideAliasHints()
-      return
-    }
-
-    // Detect `ssh <partial>` at the start of the line (possibly after whitespace).
-    const trimmed = text.trimStart()
-    const match = trimmed.match(/^ssh\s+(\S*)/)
-    if (!match) {
-      this.editor?.hideAliasHints()
-      return
-    }
-
-    const partial = match[1]
-    const fetchId = ++this._aliasFetchId
-
-    // Fetch fresh aliases on every activation. Guard against stale responses
-    // with a generation counter: a newer fetch invalidates an older one.
-    this.profileClient
-      .listSSHAliases()
-      .then((resp) => {
-        if (fetchId !== this._aliasFetchId) return // stale — newer text superseded this
-        if (resp.unavailable) {
-          this.editor?.hideAliasHints()
-          return
-        }
-        const filtered = this._filterAliases(resp.aliases, partial)
-        this.editor?.showAliasHints(filtered)
-      })
-      .catch(() => {
-        // Fetch failed (network, backend down). Silently hide hints — the
-        // feature degrades transparently rather than showing stale/flaky data.
-        this.editor?.hideAliasHints()
-      })
-  }
-
-  /** Filter SSH config aliases by case-insensitive prefix match.
-   *  Excludes wildcard patterns (Host * etc. are rules, not targets). */
-  private _filterAliases(aliases: SSHAliasEntry[], partial: string): SSHAliasEntry[] {
-    const lower = partial.toLowerCase()
-    return aliases.filter(
-      // No wildcard filter here on purpose. sshConfig.aliases already excludes
-      // patterns on the backend (internal/ssh/aliases.go, containsWildcard),
-      // and a second copy of that rule in the renderer is a rule that drifts —
-      // the two versions of it disagreed on '!' and on brackets before this
-      // line was removed.
-      (a) => a.alias.toLowerCase().startsWith(lower),
-    )
   }
 
   // ── the after-submit receipt (ADR-0021, the receipt round) ──────────────
@@ -1537,5 +2614,158 @@ export class TerminalContent extends BaseTabContent {
       level: 'danger',
       message: failure.message ?? 'Could not resolve the command. It was not sent.',
     })
+  }
+
+  // ── Connection offer on hand-typed ssh block (nocx-pu4.7) ─────────────
+
+  /** After a block freezes, offer to save the destination as a managed
+   *  connection — but only for an interactive ssh to a host that is NOT
+   *  already a saved profile and NOT previously dismissed. The receipt
+   *  follows the BlockReceipt contract: block-attached, non-modal, no
+   *  focus steal, no expiry. */
+  private async _maybeOfferConnection(): Promise<void> {
+    if (!this.profileClient) return
+    const blocks = this.scrollback?.blockManager.blocks
+    if (!blocks || blocks.length === 0) return
+
+    const last = blocks[blocks.length - 1]
+    if (!isInteractiveTransition(last.command)) return
+
+    const dest = extractDestination(last.command)
+    if (!dest) return
+
+    // Already a saved profile? No offer.
+    if (await this._isKnownProfile(dest)) return
+
+    // Already dismissed? No offer.
+    if (await this._isDismissed(dest)) return
+
+    // Already showing for this destination on another block? No duplicate.
+    for (const [, r] of this.receipts) {
+      if (r instanceof BlockReceipt) continue
+    }
+
+    const hostPart = dest.includes('@') ? dest.split('@')[1] : dest
+
+    const receipt = BlockReceipt.forConnection(dest, hostPart, {
+      onSave: (name) => void this._saveConnection(dest, name, last.el, receipt),
+      onDismiss: () => void this._dismissConnectionOffer(dest, last.el, receipt),
+    })
+
+    this.receipts.set(last.el, receipt)
+    this.receiptBlockEl = last.el
+    receipt.mount(last.el)
+  }
+
+  /** Check whether a destination already has a saved SSH profile. */
+  private async _isKnownProfile(dest: string): Promise<boolean> {
+    if (!this.profileClient) return false
+    try {
+      const profiles = await this.profileClient.listProfiles()
+      // A destination "user@host" matches a profile whose host equals the
+      // host part, or user@host equals host (quick-connect profiles).
+      const hostPart = dest.includes('@') ? dest.split('@')[1] : dest
+      return profiles.some(
+        (p) => p.type === 'ssh' && (p.options.host === dest || p.options.host === hostPart),
+      )
+    } catch {
+      // Fail-open: if we cannot list profiles, do not nag.
+      return true
+    }
+  }
+
+  // ── Dismissal persistence via settings (nocx-pu4.7) ──────────────────
+
+  private static readonly DISMISSED_KEY = 'nocx.connectionOffers.dismissed'
+  private _dismissedCache: Set<string> | null = null
+
+  /** Load dismissed destinations from settings. Cached per tab: a new tab
+   *  picks up the latest value at its first ssh. */
+  private async _loadDismissed(): Promise<Set<string>> {
+    if (this._dismissedCache) return this._dismissedCache
+    if (!this.profileClient) return new Set()
+    try {
+      const snap = await this.profileClient.getSnapshot()
+      const raw = snap.values[TerminalContent.DISMISSED_KEY]
+      if (typeof raw === 'string') {
+        this._dismissedCache = new Set(JSON.parse(raw) as string[])
+        return this._dismissedCache
+      }
+    } catch {
+      // Settings unavailable — no persisted dismissals, but the offer
+      // can still be made and dismissed for this session.
+    }
+    this._dismissedCache = new Set()
+    return this._dismissedCache
+  }
+
+  private async _isDismissed(dest: string): Promise<boolean> {
+    const dismissed = await this._loadDismissed()
+    return dismissed.has(dest)
+  }
+
+  private async _persistDismissal(dest: string): Promise<void> {
+    if (!this.profileClient) return
+    const dismissed = await this._loadDismissed()
+    dismissed.add(dest)
+    try {
+      await this.profileClient.setSetting(
+        TerminalContent.DISMISSED_KEY,
+        JSON.stringify([...dismissed]),
+      )
+    } catch {
+      // Settings write failed — the destination is still dismissed for
+      // this session, but will be offered again on restart.
+    }
+  }
+
+  private async _dismissConnectionOffer(
+    dest: string,
+    blockEl: HTMLElement,
+    receipt: BlockReceipt,
+  ): Promise<void> {
+    await this._persistDismissal(dest)
+    receipt.destroy()
+    this.receipts.delete(blockEl)
+    if (this.receiptBlockEl === blockEl) this.receiptBlockEl = null
+    showToast({
+      level: 'info',
+      message: `Dismissed — ${dest} will not be offered again as a connection.`,
+    })
+  }
+
+  private async _saveConnection(
+    dest: string,
+    name: string,
+    blockEl: HTMLElement,
+    receipt: BlockReceipt,
+  ): Promise<void> {
+    if (!this.profileClient) return
+    try {
+      const hostPart = dest.includes('@') ? dest.split('@')[1] : dest
+      const userPart = dest.includes('@') ? dest.split('@')[0] : undefined
+      const profile = await this.profileClient.createProfile({
+        id: '',
+        type: 'ssh',
+        name,
+        options: {
+          host: hostPart,
+          ...(userPart ? { user: userPart } : {}),
+        },
+      })
+      receipt.destroy()
+      this.receipts.delete(blockEl)
+      if (this.receiptBlockEl === blockEl) this.receiptBlockEl = null
+      showToast({
+        level: 'success',
+        message: `Saved "${profile.name}" as a connection.`,
+      })
+    } catch (err) {
+      showToast({
+        level: 'danger',
+        message: `Could not save connection: ${err instanceof Error ? err.message : String(err)}`,
+      })
+      receipt.markFailed(`conn-offer:${dest}`, 'could not save — try again')
+    }
   }
 }

@@ -112,6 +112,69 @@ describe('A→B ownership gate', () => {
   })
 })
 
+describe('environment transition (spec §5.3, nocx-mlm7 P0)', () => {
+  it('an accepted passport starts a clean cycle: the remote A→B owns input', () => {
+    // submit lands exactly in RUNNING_RAW — the state the P0 bug lived in.
+    const running = run([
+      { type: 'marker', kind: 'A' },
+      { type: 'marker', kind: 'B' },
+      { type: 'submit' },
+    ])
+    expect(running).toEqual({ state: 'RUNNING_RAW', trusted: true, owned: false })
+    // The accepted passport is the event the machine was missing: it resets
+    // to a clean cycle, so the remote's first A is a fresh prompt.
+    const confirmed = reduce(running, { type: 'passport' })
+    expect(confirmed).toEqual({ state: 'RAW', trusted: false, owned: false })
+    // The remote's following A is trusted through it…
+    const a = reduce(confirmed, { type: 'marker', kind: 'A' })
+    expect(a).toEqual({ state: 'PROMPT_READY', trusted: true, owned: false })
+    // …and its B completes ownership: the editor appears.
+    const b = reduce(a, { type: 'marker', kind: 'B' })
+    expect(b).toEqual({ state: 'PROMPT_READY', trusted: true, owned: true })
+  })
+
+  it('the passport itself grants no ownership — only the following A→B does', () => {
+    const confirmed = reduce(run([{ type: 'submit' }]), { type: 'passport' })
+    expect(confirmed).toEqual({ state: 'RAW', trusted: false, owned: false })
+    expect(shouldShowEditor(confirmed.owned, false)).toBe(false)
+    // A alone is not enough either (ADR-0006 §4).
+    expect(reduce(confirmed, { type: 'marker', kind: 'A' }).owned).toBe(false)
+  })
+
+  it('a passport from any state starts a clean cycle', () => {
+    expect(reduce(initialMachine(), { type: 'passport' })).toEqual({
+      state: 'RAW',
+      trusted: false,
+      owned: false,
+    })
+    const midCycle = run([
+      { type: 'marker', kind: 'A' },
+      { type: 'marker', kind: 'B' },
+    ])
+    expect(reduce(midCycle, { type: 'passport' }).owned).toBe(false)
+  })
+
+  it('the passport does not loosen the RUNNING_RAW rule for a nested or orphan prompt', () => {
+    const entered = run([
+      { type: 'marker', kind: 'A' },
+      { type: 'marker', kind: 'B' },
+      { type: 'submit' },
+      { type: 'passport' },
+      { type: 'marker', kind: 'A' },
+      { type: 'marker', kind: 'B' },
+    ])
+    expect(entered.owned).toBe(true)
+    // A command runs inside the entered environment…
+    const running = reduce(entered, { type: 'marker', kind: 'C' })
+    expect(running.state).toBe('RUNNING_RAW')
+    // …and a nested/orphan prompt interrupting it still stays untrusted:
+    // the passport's clean cycle is spent, and nothing loosened the A rule.
+    const nested = reduce(running, { type: 'marker', kind: 'A' })
+    expect(nested).toEqual({ state: 'PROMPT_READY', trusted: false, owned: false })
+    expect(reduce(nested, { type: 'marker', kind: 'B' }).owned).toBe(false)
+  })
+})
+
 describe('InputStateController', () => {
   it('tracks state and fires onChange only on real changes', () => {
     const c = new InputStateController()

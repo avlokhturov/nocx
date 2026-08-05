@@ -54,7 +54,35 @@ export interface SSHProfileOptions {
   jumpPassword?: string // Jump server password
   jumpAuthMode?: AuthMode // Jump server auth mode
   agentForward?: boolean
+  /** Desired destination mode (raw|script|relay, nocx-mlm7): the
+   *  connection-scope default the tab's capability control starts from.
+   *  script (the default — N3) wraps and installs automatically; raw adds
+   *  nothing; relay is consent-gated. */
+  desiredMode?: 'raw' | 'script' | 'relay'
+  /** Relay consent for this destination (unknown|granted|denied, spec
+   *  §3.5). Persisted per destination, never inherited; script mode never
+   *  reads it. Relay without granted behaves as raw. */
+  relayConsent?: 'unknown' | 'granted' | 'denied'
   canBeJumpServer?: boolean // Whether this profile can be used as a jump server
+  portDiscovery?: 'auto' | 'ask' | 'off'
+  /** Stored forwards, opened when the connection comes up (spec §8, D5). */
+  forwards?: ForwardSpec[]
+}
+
+/** The three forwarding strategies the tunnel model covers (spec D4). */
+export type ForwardDirection = 'local' | 'remote' | 'dynamic'
+
+/**
+ * One stored forward on a connection profile (spec §8): topology and policy
+ * only — never credentials. `bindHost` empty means 127.0.0.1 (the tunnel
+ * layer's default); `bindPort` 0 means an ephemeral port the OS allocates;
+ * `destination` is "host:port" for local/remote and absent for dynamic.
+ */
+export interface ForwardSpec {
+  direction: ForwardDirection
+  bindHost?: string
+  bindPort?: number
+  destination?: string
 }
 
 export interface SSHProfile extends Base {
@@ -414,6 +442,22 @@ export class ProfileClient {
    */
   trustHostKey(host: string, key: string): Promise<TrustHostKeyResult> {
     return this.call('connections.trustHostKey', { host, key })
+  }
+
+  /**
+   * connections.passwordResolved — answer a backend-raised connection-
+   * password prompt (connections.passwordRequest). outcome 'submitted'
+   * carries the typed password and whether the user asked to remember it;
+   * 'cancelled' dismisses the ask. The backend decides where and whether
+   * the password is stored — this call only reports the decision.
+   */
+  passwordResolved(params: {
+    requestId: string
+    outcome: 'submitted' | 'cancelled'
+    password?: string
+    remember?: boolean
+  }): Promise<Record<string, never>> {
+    return this.call('connections.passwordResolved', params)
   }
 
   // with per-field provenance. Batch: pass several IDs in one call.

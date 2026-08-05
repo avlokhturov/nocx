@@ -30,6 +30,10 @@ func main() {
 	// Machine-readable lines the runner greps for.
 	fmt.Printf("WSPORT=%d\n", a.WSPort())
 	fmt.Printf("WSTOKEN=%s\n", a.WSToken())
+	// Where the backend log file lives — the dev stand says it, so the
+	// log is found instead of hunted for (the P0 that was diagnosed from
+	// a JSON file's mtime).
+	fmt.Printf("LOGFILE=%s\n", a.LogFilePath())
 	_ = os.Stdout.Sync()
 
 	c := make(chan os.Signal, 1)

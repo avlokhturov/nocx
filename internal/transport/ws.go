@@ -16,8 +16,11 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/shady2k/nocx/internal/completion"
+	"github.com/shady2k/nocx/internal/connectfwd"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
+	"github.com/shady2k/nocx/internal/discovery"
 	"github.com/shady2k/nocx/internal/importer"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
@@ -26,6 +29,7 @@ import (
 	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/storage"
+	"github.com/shady2k/nocx/internal/tunnel"
 	"github.com/shady2k/nocx/internal/vault"
 	gossh "golang.org/x/crypto/ssh"
 )
@@ -107,6 +111,46 @@ type WSServer struct {
 	sshConfigResolver ssh.ConfigResolver
 	sshConfigPath     string
 
+	// remoteLauncher builds the start command for integrated remote shells
+	// (nocx-xs1d), adapted from shellintegration at the composition root.
+	// Wired through WithRemoteLauncher; when nil, remote sessions open a
+	// plain shell and report reason none.
+	remoteLauncher ssh.RemoteLauncher
+
+	// launcherStager puts a remote launcher where a LOCAL shell can read it,
+	// for the hand-typed-ssh rewrite (nocx-pu4.6). Wired through
+	// WithLauncherStager; when nil, shell.launcherCommand refuses and the
+	// renderer sends the line the user typed.
+	launcherStager LauncherStager
+
+	// installedFacts is the backend-owned, persisted memory of which
+	// resolved destinations carry a committed, protocol-compatible
+	// integration (§5.4). Wired through WithInstalledFactStore; when nil,
+	// every host bootstraps and observations are logged but never
+	// recorded.
+	installedFacts *ssh.InstalledFactStore
+
+	// remoteUninstaller removes the integration bundle on a remote host,
+	// owning the dial-and-call (P10). Wired through WithRemoteUninstaller;
+	// when nil, shell.footprint.uninstall answers an error and removes
+	// nothing — the status surface never offers the button without it.
+	remoteUninstaller RemoteUninstaller
+
+	// launcherAttempts is the idempotency registry binding a minted
+	// environment id to its resolved identity and expected delivery
+	// (§5.3). Guarded by launcherAttemptsMu; a passport can arrive
+	// immediately after the result, so registration and observation
+	// consumption are atomic with the registry.
+	launcherAttemptsMu sync.Mutex
+	launcherAttempts   map[string]*launchAttempt
+
+	// localCompleter answers shell.complete for KindLocal sessions.
+	// When nil, the method returns a JSON-RPC error for local sessions.
+	localCompleter completion.Completer
+	// sshCompleter answers shell.complete for KindRemote sessions.
+	// When nil, the method returns a stated empty reason for SSH sessions.
+	sshCompleter completion.Completer
+
 	// Pending-capture registry: the backend-side holder of submitted
 	// credentials awaiting a save decision (internal/credential). Created
 	// at construction; nil only when its fingerprint key could not be
@@ -152,9 +196,39 @@ type WSServer struct {
 	rx      map[session.ID]*sessionRx
 	stopped bool
 
+	// tunnelConnector acquires an owned pooled-connection lease for a
+	// forward (spec §7.3). *ssh.RealClient satisfies tunnel.Connector
+	// without an adapter. When nil, the tunnel.* methods return a JSON-RPC
+	// error; the transport never constructs an SSH client itself.
+	tunnelConnector tunnel.Connector
+
+	// discoverySched owns the port-discovery cadence (spec §4, nocx-wzc4.2):
+	// settle sample, prompt debounce, hidden-tab pause, one-in-flight. When
+	// nil, the ports.* methods return a JSON-RPC error and the cadence hooks
+	// are no-ops.
+	discoverySched *discovery.Scheduler
+	// inBand builds the in-band bootstrap plan for shell.integrate
+	// (nocx-ynsx). When nil, the method returns a JSON-RPC error; the
+	// transport never constructs the capability itself.
+	inBand InBandBootstrapper
+
+	// tunnelMu guards tunnels and ownerTunnels. tunnels is the backend
+	// id → tunnel map backing tunnel.stop; ownerTunnels scopes teardown to
+	// the tab that opened each forward (spec §7.3) — closing one tab never
+	// stops another tab's forward.
+	tunnelMu     sync.Mutex
+	tunnels      map[string]*tunnel.Tunnel
+	ownerTunnels map[*wsConn]map[string]struct{}
+
 	// connsMu protects conns. One entry per active WebSocket connection.
 	connsMu sync.Mutex
 	conns   map[*wsConn]struct{}
+
+	// asks is the shared backend→renderer ask machinery (unlock requests,
+	// connection-password prompts): a pending registry keyed by
+	// server-assigned opaque request id, one correlation mechanism for
+	// every ask (unlock_requester.go, password_requester.go).
+	asks askBroker
 
 	// planMu guards planStore. Plans are decrypted import plans keyed by
 	// opaque token, stored server-side so secrets never reach the renderer.
@@ -278,6 +352,14 @@ func WithProfileResolver(r ProfileResolver) WSServerOption {
 	return func(s *WSServer) { s.resolver = r; s.resolverOK = true }
 }
 
+// SetProfileResolver sets the profile resolver post-construction. Used when
+// the resolver depends on the transport (e.g. for UnlockRequester wiring)
+// and must be created after the transport exists.
+func (s *WSServer) SetProfileResolver(r ProfileResolver) {
+	s.resolver = r
+	s.resolverOK = true
+}
+
 // WithSSHConfigResolver attaches the SSH config resolver and config path
 // for the ssh.listAliases RPC. The resolver answers values via ssh -G;
 // the config path is used to enumerate Host patterns (see aliases.go for
@@ -285,6 +367,29 @@ func WithProfileResolver(r ProfileResolver) WSServerOption {
 // error.
 func WithSSHConfigResolver(resolver ssh.ConfigResolver, configPath string) WSServerOption {
 	return func(s *WSServer) { s.sshConfigResolver = resolver; s.sshConfigPath = configPath }
+}
+
+// WithRemoteLauncher attaches the remote shell launcher that builds the start
+// command for integrated remote shells (nocx-xs1d). The composition root
+// adapts shellintegration.NewRemoteLauncher through its own ssh.RemoteLauncher
+// adapter; this option is how the transport passes it into every ConnectConfig
+// it builds. When not wired, remote sessions fall back to a plain shell and
+// report reason none — the launcher is an opt-in per connection, never a
+// transport default.
+func WithRemoteLauncher(l ssh.RemoteLauncher) WSServerOption {
+	return func(s *WSServer) { s.remoteLauncher = l }
+}
+
+// WithCompleters attaches the completion sources for shell.complete
+// (nocx-w7h.15). local answers KindLocal sessions; ssh answers KindRemote
+// sessions through the DiscoveryConn lane. Either may be nil — the handler
+// then returns a stated empty reason for that session kind rather than
+// a JSON-RPC error.
+func WithCompleters(local, ssh completion.Completer) WSServerOption {
+	return func(s *WSServer) {
+		s.localCompleter = local
+		s.sshCompleter = ssh
+	}
 }
 
 // WithProbeResultStore attaches a probe result store for recording outcomes
@@ -381,9 +486,11 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 			// call handles origin/host policy before the upgrade.
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
-		rx:      make(map[session.ID]*sessionRx),
-		conns:   make(map[*wsConn]struct{}),
-		origins: LoopbackOriginPolicy{},
+		rx:           make(map[session.ID]*sessionRx),
+		conns:        make(map[*wsConn]struct{}),
+		tunnels:      make(map[string]*tunnel.Tunnel),
+		ownerTunnels: make(map[*wsConn]map[string]struct{}),
+		origins:      LoopbackOriginPolicy{},
 	}
 	if caps, err := credential.NewCaptureRegistry(); err != nil {
 		// No entropy for the fingerprint key: no offers are made and
@@ -664,6 +771,15 @@ type openParams struct {
 	// overrides the resolved user.
 	Host string `json:"host,omitempty"`
 	User string `json:"user,omitempty"`
+	// Shell pins the far shell the launcher must target (nocx-pu4.1): a
+	// user who knows their host runs zsh can say so, and where detection
+	// is wrong they have an override. Empty means detect — the launcher
+	// receives ShellAuto and the far login shell decides (nocx-6rj0).
+	// Values: bash | zsh | unknown | auto; anything else is ignored with
+	// a warn, never honoured (detection is the safe degrade for a
+	// meaningless pin, and the launcher refuses unmapped kinds rather
+	// than guessing if one slips past).
+	Shell string `json:"shell,omitempty"`
 }
 
 // resizeParams is the payload of the "resize" RPC method.
@@ -793,7 +909,16 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 
 	switch req.Method {
 	case "open":
-		s.handleOpen(ctx, wconn, state, req)
+		// handleOpen must NOT run on the read loop. Opening a saved
+		// connection can raise the connection-password ask (the prompt
+		// rung of the auth ladder) and block until the renderer answers —
+		// and the answer arrives over THIS websocket, which the read loop
+		// is what consumes. Running the dial on the read loop would make
+		// the resolution unreadable: the open would wait forever on a
+		// response the same loop is blocked from reading. The write mutex
+		// serializes the ack; connState is mutex-guarded, so the open can
+		// proceed beside the loop reading resize/close for OTHER sessions.
+		go s.handleOpen(ctx, wconn, state, req)
 	case "resize":
 		s.handleResize(wconn, state, req)
 	case "close":
@@ -845,20 +970,38 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.handleSSHConfigAliases(wconn, req)
 	case "sshConfig.path":
 		s.handleSSHConfigPath(wconn, req)
+	case "tunnel.open":
+		s.handleTunnelOpen(ctx, wconn, req)
+	case "tunnel.stop":
+		s.handleTunnelStop(wconn, req)
+	case "ports.status", "ports.sample", "ports.pause", "ports.visible":
+		s.handlePortsMethod(wconn, req)
+	case "dialog.openFile":
+		s.handleDialogOpenFile(wconn, req)
+	case "shell.environmentObserved":
+		s.handleShellEnvironmentObserved(wconn, req)
 	case "history.query":
 		s.handleHistoryQuery(ctx, wconn, req)
 	case "history.record":
 		s.handleHistoryRecord(ctx, wconn, state, req)
 	case "fs.complete":
 		s.handleFsComplete(wconn, req)
+	case "shell.footprint.status":
+		s.handleShellFootprintStatus(wconn, req)
+	case "shell.footprint.uninstall":
+		s.handleShellFootprintUninstall(wconn, req)
+	case "shell.complete":
+		s.handleShellComplete(ctx, wconn, req)
+	case "shell.integrate":
+		s.handleShellIntegrate(wconn, req)
+	case "shell.launcherCommand":
+		s.handleShellLauncherCommand(wconn, req)
 	case "vault.status", "vault.setup", "vault.unseal", "vault.seal",
 		"vault.changePassphrase", "vault.regenerateRecovery", "vault.setDefaultProvider",
 		"vault.setAutoSeal", "vault.activity", "vault.inventory",
 		"vault.createSecret", "vault.renameSecret", "vault.replaceSecret",
 		"vault.deleteSecret", "vault.resolveLine":
 		s.handleVaultMethod(wconn, req)
-	case "dialog.openFile":
-		s.handleDialogOpenFile(wconn, req)
 	// Not routed through handleVaultMethod: that gate refuses when the vault
 	// lifecycle is absent, and a reset must work on a vault that is broken or
 	// half-built — which is the only state it is ever wanted in.
@@ -866,6 +1009,10 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.handleVaultResetPreview(wconn, req)
 	case "vault.reset":
 		s.handleVaultReset(wconn, req)
+	case "vault.unlockResolved":
+		s.handleUnlockResolved(wconn, req)
+	case "connections.passwordResolved":
+		s.handlePasswordResolved(wconn, req)
 	default:
 		resp := newJSONRPCError(req.ID, -32601, "Method not found")
 		_ = wconn.writeJSON(resp)
@@ -873,6 +1020,25 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 }
 
 // --- control-plane handlers -----------------------------------------------
+
+// desiredModeForAck reports the resolved destination mode for the open ack
+// (nocx-mlm7). The resolver stamps the mode on the ConnectConfig it builds
+// from the profile's effective desiredMode; a direct-host open (alias or
+// ad-hoc — no profile to say otherwise) and a local session keep the
+// hardcoded default: script (N3 — wrap and install automatically). Unknown
+// values fall back to the same default so malformed profile data can never
+// violate the open schema over the real socket.
+func desiredModeForAck(remote *ssh.ConnectConfig) string {
+	if remote == nil || remote.DesiredMode == "" {
+		return string(profile.DesiredScript)
+	}
+	switch profile.DesiredMode(remote.DesiredMode) {
+	case profile.DesiredRaw, profile.DesiredScript, profile.DesiredRelay:
+		return remote.DesiredMode
+	default:
+		return string(profile.DesiredScript)
+	}
+}
 
 // handleOpen creates a new session and output ring.
 //
@@ -932,6 +1098,7 @@ func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connSta
 			remote.Rows = params.Rows
 			remote.XPixel = params.XPixel
 			remote.YPixel = params.YPixel
+			remote.RemoteLauncher = s.remoteLauncher
 
 			s.log.Info("SSH open via profile", "profileId", params.ProfileID, "host", host, "user", remote.User)
 
@@ -980,11 +1147,12 @@ func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connSta
 				keyFile = resolved.IdentityFile
 			}
 			remote = &ssh.ConnectConfig{
-				User:    user,
-				Port:    port,
-				KeyFile: keyFile,
-				Cols:    params.Cols,
-				Rows:    params.Rows,
+				User:           user,
+				Port:           port,
+				KeyFile:        keyFile,
+				Cols:           params.Cols,
+				Rows:           params.Rows,
+				RemoteLauncher: s.remoteLauncher,
 			}
 
 			s.log.Info("SSH open via direct host", "host", params.Host, "resolvedHost", remoteHost, "user", user)
@@ -998,6 +1166,21 @@ func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connSta
 			resp := newJSONRPCError(req.ID, -32602, "Invalid params: profileId or host required for ssh session")
 			_ = wconn.writeJSON(resp)
 			return
+		}
+		// Shell pin (nocx-pu4.1): the open may name the far shell the
+		// launcher must target. A pin beats auto-detection — a user who
+		// knows their host runs zsh can say so, and where detection is
+		// wrong they have an override. Anything else is ignored with a
+		// warn, never honoured: detection is the safe degrade for a
+		// meaningless pin, and the launcher refuses unmapped kinds rather
+		// than guessing if one slips past.
+		if params.Shell != "" {
+			switch ssh.ShellKind(params.Shell) {
+			case ssh.ShellBash, ssh.ShellZsh, ssh.ShellUnknown, ssh.ShellAuto:
+				remote.Shell = ssh.ShellKind(params.Shell)
+			default:
+				s.log.Warn("ignoring unknown shell pin", "profileId", params.ProfileID, "shell", params.Shell)
+			}
 		}
 	}
 
@@ -1038,16 +1221,52 @@ func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connSta
 	}
 	rx.setSubscriber(wconn, state)
 
+	// Port discovery (nocx-wzc4.2): only now, once the session is fully
+	// established (ring created, subscriber attached) is the target "up" —
+	// a session that failed its ring setup must not leave a discovery
+	// target behind with nobody to tear it down.
+	switch {
+	case cfg.ProfileID != "":
+		s.discoveryUp(cfg.ProfileID, cfg.Host, cfg.Remote)
+	case cfg.Kind == session.KindLocal:
+		// A local tab is a target too: the machine listens like any host,
+		// and the same ladder finds it (nocx-wzc4.8). Keyed by the
+		// reserved LocalTargetID, torn down when the last local tab closes.
+		s.discoveryUpLocal()
+	}
+
 	// cwd rides the open result so the tab has a name before any program sets
 	// a title (nocx-9vr). It is the starting directory only — following `cd`
 	// needs OSC 7 (nocx-5mn.2).
+	// shellIntegrationReason rides it too: a launcher decline (or a
+	// configured RemoteCommand) must be visible in the product, never
+	// log-only (AGENTS.md), and the open ack is the one result every session
+	// produces before any of its traffic. ReasonNone means integration
+	// succeeded or was never attempted (nocx-r52q, nocx-xs1d).
+	// desiredMode carries the RESOLVED destination mode (nocx-mlm7): the
+	// connection-scope default the tab's capability control starts from —
+	// script wraps and installs automatically, raw adds nothing, relay is
+	// consent-gated. It is the mode, never proof integration succeeded: the
+	// reason field and the arrival of markers are what confirm or downgrade
+	// the tab's state.
 	result := map[string]string{
-		"sessionId": string(sess.ID()),
-		"cwd":       sess.Cwd(),
+		"sessionId":              string(sess.ID()),
+		"cwd":                    sess.Cwd(),
+		"shellIntegrationReason": string(sess.ShellIntegrationReason()),
+		"desiredMode":            desiredModeForAck(cfg.Remote),
 	}
 	resultJSON, _ := json.Marshal(result)
 	resp := newJSONRPCResult(req.ID, resultJSON)
 	_ = wconn.writeJSON(resp)
+
+	// Stored forwards (nocx-wzc4.5): replay the profile's configured
+	// forwards onto the connection. Deliberately ASYNC and only after the
+	// ack — a slow connector acquire must never delay the open result.
+	// The rows are connection-owned, not tab-owned (spec §7.3): closing
+	// this tab leaves them running.
+	if cfg.ProfileID != "" {
+		go s.replayStoredForwards(cfg.ProfileID, cfg.Host, cfg.Remote)
+	}
 
 	// Start the PTY → ring output pump only after the ack is sent.
 	// AD-7: the ack must precede the session's own traffic in both
@@ -1063,6 +1282,72 @@ func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connSta
 
 	sidBytes, _ := session.IDToBytes(sess.ID())
 	go s.ringToConn(ctx, wconn, sidBytes, rx.ring, 0)
+}
+
+// replayStoredForwards opens the profile's stored forwards at connect time
+// (spec §8, D5; nocx-wzc4.5): the ports a user always forwards to a host
+// are configured once and are simply there when the connection comes up.
+// It runs on its own goroutine after the open ack — never before — so a
+// slow connector acquire cannot delay the ack.
+//
+// Every result with a tunnel record is registered in the transport ledger
+// WITHOUT a tab owner (spec §7.3): stored forwards are connection-owned
+// and must survive tab close. A row that failed to start is still
+// registered so ports.status shows it — the panel must not contradict a
+// forward the backend knows failed (AGENTS.md: a soft degrade must be
+// visible in the product, not only in a log). One row's failure never
+// stops another's; that contract lives in connectfwd.Replay, and this
+// loop never flattens a row's outcome into a generic failure.
+func (s *WSServer) replayStoredForwards(profileID, host string, cfg *ssh.ConnectConfig) {
+	if profileID == "" || cfg == nil || s.tunnelConnector == nil || s.profiles == nil {
+		return
+	}
+	profs, err := s.profiles.LoadProfiles()
+	if err != nil {
+		s.log.Warn("stored forwards not replayed: profile store read failed", "profileId", profileID, "error", err)
+		return
+	}
+	var forwards []profile.ForwardSpec
+	for i := range profs {
+		if profs[i].ID == profileID && profs[i].Options.Forwards != nil {
+			forwards = *profs[i].Options.Forwards
+			break
+		}
+	}
+	if len(forwards) == 0 {
+		return
+	}
+	// The forward's connection is the profile's own: the WHOLE resolved
+	// config — credentials, jump route, authorized endpoints — rides one
+	// option that copies it into the connector's ConnectConfig, so the
+	// forward is authorized and pool-keyed exactly like a tab (AD-4).
+	opts := []ssh.ConnectOption{func(dst *ssh.ConnectConfig) { *dst = *cfg }}
+	results := connectfwd.Replay(context.Background(), profileID, forwards, host, s.tunnelConnector, opts)
+	for _, r := range results {
+		if r.Tunnel == nil {
+			// tunnel.New rejected the spec — no record exists to register.
+			// The row's own failure is logged; there is nothing the panel
+			// could show for a row that was never a tunnel.
+			if r.Err != nil {
+				s.log.Warn("stored forward rejected", "profileId", profileID, "index", r.Index, "error", r.Err)
+			}
+			continue
+		}
+		s.trackTunnelConnectionOwned(r.Tunnel)
+		if r.Err != nil {
+			s.log.Warn("stored forward failed to start", "profileId", profileID, "index", r.Index, "tunnelId", r.Tunnel.ID, "error", r.Err)
+		}
+	}
+}
+
+// trackTunnelConnectionOwned registers a tunnel in the ledger WITHOUT a tab
+// owner (spec §7.3): a stored forward is the connection's, not the opening
+// tab's, so closing the tab must not stop it. It stays stoppable through
+// tunnel.stop and visible in ports.status for the life of the connection.
+func (s *WSServer) trackTunnelConnectionOwned(t *tunnel.Tunnel) {
+	s.tunnelMu.Lock()
+	s.tunnels[t.ID] = t
+	s.tunnelMu.Unlock()
 }
 
 func (s *WSServer) handleResize(wconn *wsConn, state *connState, req jsonrpcRequest) {
@@ -1348,6 +1633,10 @@ func (s *WSServer) monitorExit(rx *sessionRx, sess session.Session) {
 	s.removeRx(sess.ID())
 	_ = s.registry.Close(sess.ID())
 
+	// Port discovery (nocx-wzc4.2): if this was the last session on its
+	// profile, forget the target and release its lease.
+	s.discoverySessionClosed(sess)
+
 	if wconn == nil {
 		return
 	}
@@ -1373,12 +1662,16 @@ func (s *WSServer) monitorExit(rx *sessionRx, sess session.Session) {
 // instead of creating one — closing a session that has no ring is a no-op
 // for the ring path (DEFECT 6).
 func (s *WSServer) closeSession(sid session.ID) {
+	// The registry entry is needed after Close to decide the discovery
+	// target teardown, so read it first.
+	sess, _ := s.registry.Get(sid)
 	rx := s.getRx(sid)
 	if rx != nil {
 		rx.ring.close()
 	}
 	s.removeRx(sid)
 	_ = s.registry.Close(sid)
+	s.discoverySessionClosed(sess)
 }
 
 // --- profile/group control-plane handlers -------------------------------
@@ -2578,7 +2871,10 @@ func (s *WSServer) registerConn(wc *wsConn) {
 
 // unregisterConn removes a connection from the broadcast set and destroys
 // its pending captures: a transport disconnect and a tab closure are both
-// on the capture contract's destruction list.
+// on the capture contract's destruction list. It also stops the tunnels the
+// tab opened — tab-scoped teardown (spec §7.3): each forward holds its OWN
+// pooled reference, so stopping this tab's forwards never touches another
+// tab's on the same shared connection.
 func (s *WSServer) unregisterConn(wc *wsConn) {
 	s.connsMu.Lock()
 	delete(s.conns, wc)
@@ -2586,6 +2882,7 @@ func (s *WSServer) unregisterConn(wc *wsConn) {
 	if s.captures != nil {
 		s.captures.DestroyTab(strconv.FormatUint(wc.id, 10))
 	}
+	s.stopOwnerTunnels(wc)
 }
 
 // broadcastSettingsChanged sends a settings.changed notification to every

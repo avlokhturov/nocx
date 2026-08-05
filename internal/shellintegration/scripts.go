@@ -8,10 +8,15 @@ var zshScript string
 //go:embed scripts/nocx.bash
 var bashScript string
 
+//go:embed scripts/nocx.posix
+var posixScript string
+
 // version is the integration script version. Bump when scripts change;
 // EnsureInstalled/EnsureInstalledRemote compare this against the installed
-// VERSION file and rewrite scripts when they differ.
-const version = "9"
+// VERSION file and rewrite scripts when they differ. nocx-6b3x: an edited
+// script without a bump reaches no shell — every existing install keeps
+// sourcing the copy installed the last time the number changed.
+const version = "11"
 
 // promptModeEnvVar is the env var that selects the prompt mode.
 const promptModeEnvVar = "NOCX_PROMPT_MODE"
@@ -39,10 +44,14 @@ const gateLineZsh = `# nocx terminal shell integration
 const gateLineBash = `# nocx terminal shell integration
 [[ -n "$NOCX_SHELL_INTEGRATION" ]] && source "$HOME/.nocx/shell-integration.bash"`
 
-// scripts maps shell rc filename → embedded script content.
+// scripts maps installed filename → embedded script content. Every entry is
+// installed by EnsureInstalled and EnsureInstalledRemote; adding one means
+// deciding its markers (scriptMarkers) and bumping `version`, or existing
+// installs never receive it.
 var scripts = map[string]string{
-	"shell-integration.zsh":  zshScript,
-	"shell-integration.bash": bashScript,
+	"shell-integration.zsh":   zshScript,
+	"shell-integration.bash":  bashScript,
+	"shell-integration.posix": posixScript,
 }
 
 // rcGate maps rc filename → gate line to append.

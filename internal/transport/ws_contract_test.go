@@ -3,18 +3,27 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
+	"github.com/shady2k/nocx/internal/completion"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
+	"github.com/shady2k/nocx/internal/pty"
+	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/shellintegration"
 	"github.com/shady2k/nocx/internal/ssh"
+	"github.com/shady2k/nocx/internal/storage"
+	"github.com/shady2k/nocx/internal/tunnel"
 	"github.com/shady2k/nocx/internal/vault"
 	"github.com/shady2k/nocx/internal/vaultreset"
 )
@@ -1263,6 +1272,149 @@ func TestFsComplete_OverTheWireConformsToContract(t *testing.T) {
 	})
 }
 
+// ── shell.complete ──────────────────────────────────────────────────────
+
+func TestShellComplete_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "shell.complete.schema.json")
+
+	cases := map[string]shellCompleteResponse{
+		"populated": {
+			Entries: []shellCompleteEntry{
+				{Name: "src", Path: "/repo/src", Source: "path", IsDir: true},
+				{Name: "main.go", Path: "/repo/main.go", Source: "path", IsDir: false},
+				{Name: "git", Source: "command"},
+				{Name: "checkout", Source: "function"},
+			},
+			Truncated: false,
+		},
+		"empty": {
+			Entries:   []shellCompleteEntry{},
+			Truncated: false,
+		},
+		"truncated": {
+			Entries:   []shellCompleteEntry{},
+			Truncated: true,
+			Reason:    "output cap hit",
+		},
+	}
+
+	for name, resp := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(resp)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "shell.complete DTO")
+		})
+	}
+}
+
+// shell.complete over the wire with a real completer. The test opens a
+// local session and completes a known directory — the same motion as the
+// acceptance criterion "the local path completion still works exactly as
+// before".
+func TestShellComplete_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "shell.complete.schema.json")
+	ctx := context.Background()
+
+	ws := NewWSServer(
+		log.NewSlogAdapter(nil),
+		newRegWithStub(log.NewSlogAdapter(nil)),
+		WithCompleters(completion.NewLocal(), nil),
+	)
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+
+	conn := connectWS(t, ws)
+
+	// Open a local session so we have a session ID the handler can look up.
+	openResp := vaultCall(t, conn, "open", map[string]any{
+		"cols":   80,
+		"rows":   24,
+		"xpixel": 800,
+		"ypixel": 600,
+	}, 1)
+	if openResp.Error != nil {
+		t.Fatalf("open error: %+v", openResp.Error)
+	}
+	// Extract the server-assigned session ID from the open result.
+	var openResult struct {
+		SessionID string `json:"sessionId"`
+	}
+	if err := json.Unmarshal(openResp.Result, &openResult); err != nil {
+		t.Fatalf("unmarshal open result: %v", err)
+	}
+	sid := openResult.SessionID
+	if sid == "" {
+		t.Fatal("open returned empty sessionId")
+	}
+
+	t.Run("path completion over the wire", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "readme.md"), []byte("x"), 0o600); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+
+		resp := vaultCall(t, conn, "shell.complete", map[string]any{
+			"sessionId": sid,
+			"cwd":       dir,
+			"line":      "cat rea",
+			"pos":       7,
+		}, 2)
+		if resp.Error != nil {
+			t.Fatalf("unexpected error: %+v", resp.Error)
+		}
+		validateJSON(t, schema, resp.Result, "shell.complete result")
+
+		var got shellCompleteResponse
+		if err := json.Unmarshal(resp.Result, &got); err != nil {
+			t.Fatalf("unmarshal result: %v", err)
+		}
+		if len(got.Entries) != 1 || got.Entries[0].Name != "readme.md" {
+			t.Errorf("entries = %+v, want exactly [readme.md]", got.Entries)
+		}
+		if got.Entries[0].Source != "path" {
+			t.Errorf("source = %q, want 'path'", got.Entries[0].Source)
+		}
+	})
+
+	t.Run("empty result is [] never null", func(t *testing.T) {
+		dir := t.TempDir()
+		resp := vaultCall(t, conn, "shell.complete", map[string]any{
+			"sessionId": sid,
+			"cwd":       dir,
+			"line":      "cat zzz",
+			"pos":       7,
+		}, 3)
+		if resp.Error != nil {
+			t.Fatalf("unexpected error: %+v", resp.Error)
+		}
+		validateJSON(t, schema, resp.Result, "shell.complete result (empty)")
+
+		var got shellCompleteResponse
+		if err := json.Unmarshal(resp.Result, &got); err != nil {
+			t.Fatalf("unmarshal result: %v", err)
+		}
+		if got.Entries == nil || len(got.Entries) != 0 {
+			t.Errorf("entries = %v, want [] (never null)", got.Entries)
+		}
+	})
+
+	t.Run("missing content returns error", func(t *testing.T) {
+		resp := vaultCall(t, conn, "shell.complete", map[string]any{
+			"sessionId": sid,
+		}, 4)
+		if resp.Error == nil {
+			t.Fatal("missing required params must error, got success")
+		}
+		if resp.Error.Code != -32602 {
+			t.Errorf("error code = %d, want -32602", resp.Error.Code)
+		}
+	})
+}
+
 // ── vault.resolveLine ──────────────────────────────────────────────────────
 
 // The DTO's own conformance: field tags, the never-null refs slice, and the
@@ -1323,5 +1475,1211 @@ func TestVaultResolveLine_OverTheWireConformsToContract(t *testing.T) {
 	}
 	if got.Line != `curl -H "Authorization: Bearer sk-proj-abcdef1234567890" https://api` {
 		t.Errorf("line = %q, want the substituted line", got.Line)
+	}
+}
+
+// ── open ─────────────────────────────────────────────────────────────────
+
+// The DTO's own conformance: the four fields the open ack always carries.
+// shellIntegrationReason is present even when empty — a missing field would
+// read as "integration happened" to a renderer that defaults to that, which
+// is exactly the soft degrade AGENTS.md forbids. desiredMode (the resolved
+// destination mode, nocx-mlm7) is present for every session, including
+// local ones — a renderer that defaults a missing field to "script" would
+// show a raw tab as silently integrated. Each of the three mode values
+// must marshal; the schema pins the enum.
+func TestOpen_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "open.schema.json")
+
+	raw, err := json.Marshal(map[string]string{
+		"sessionId":              "0123456789abcdef0123456789abcdef",
+		"cwd":                    "~/work",
+		"shellIntegrationReason": "no-secure-temp",
+		"desiredMode":            "script",
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "open DTO (launcher refusal)")
+
+	rawNone, err := json.Marshal(map[string]string{
+		"sessionId":              "0123456789abcdef0123456789abcdef",
+		"cwd":                    "~/work",
+		"shellIntegrationReason": "",
+		"desiredMode":            "raw",
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, rawNone, "open DTO (integration never attempted — raw)")
+
+	rawUnknown, err := json.Marshal(map[string]string{
+		"sessionId":              "0123456789abcdef0123456789abcdef",
+		"cwd":                    "~/work",
+		"shellIntegrationReason": "unknown",
+		"desiredMode":            "relay",
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, rawUnknown, "open DTO (unclassified refusal, relay mode)")
+}
+
+// openProfileResolver resolves every profile to a fixed host and a minimal
+// ConnectConfig — the launcher wiring the transport adds is what the test
+// is about, so nothing else in the resolved config may interfere.
+type openProfileResolver struct {
+	host string
+}
+
+func (r *openProfileResolver) Resolve(_ string) (string, *ssh.ConnectConfig, error) {
+	return r.host, &ssh.ConnectConfig{User: "test"}, nil
+}
+
+// openSSHFactory is a session.SSHFactory that records the ConnectOptions the
+// registry built and returns a channel carrying a scripted refusal reason.
+type openSSHFactory struct {
+	channel ssh.Channel
+	host    string
+	opts    []ssh.ConnectOption
+}
+
+func (f *openSSHFactory) Connect(_ context.Context, host string, opts ...ssh.ConnectOption) (ssh.Channel, error) {
+	f.host = host
+	f.opts = append([]ssh.ConnectOption{}, opts...)
+	return f.channel, nil
+}
+
+// reasonChannel overrides the stub channel's reason so the wire actually
+// carries a non-empty refusal.
+type reasonChannel struct {
+	*ssh.StubChannel
+	reason ssh.RefusalReason
+}
+
+func (c *reasonChannel) ShellIntegrationReason() ssh.RefusalReason {
+	return c.reason
+}
+
+// The real method through the real socket: an SSH open with the launcher
+// wired, validated against the schema and asserted to carry the reason the
+// channel reports. Nothing here names a field, so nothing here can omit one;
+// additionalProperties:false plus required makes the key set exact in both
+// directions. It also proves the composition chain that was missing: the
+// transport option lands in the ConnectConfig the registry turns into
+// ConnectOptions (nocx-ei04).
+func TestOpen_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "open.schema.json")
+
+	reg := session.New(log.NewSlogAdapter(nil), &stubPTYFactory{stub: pty.NewStub(log.NewSlogAdapter(nil))})
+	factory := &openSSHFactory{
+		channel: &reasonChannel{StubChannel: ssh.NewStubChannel(log.NewSlogAdapter(nil)), reason: ssh.ReasonNoSecureTemp},
+	}
+	reg = reg.WithSSHFactory(factory)
+
+	ws := NewWSServer(
+		log.NewSlogAdapter(nil), reg,
+		WithProfileResolver(&openProfileResolver{host: "host.example.com"}),
+		WithRemoteLauncher(&fakeRemoteLauncher{}),
+	)
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	resp := jsonrpcCall(t, conn, "open", map[string]any{
+		"cols": 80, "rows": 24, "xpixel": 0, "ypixel": 0,
+		"kind": "ssh", "profileId": "ssh:test:1",
+	})
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, string(resp))
+	}
+	if envelope.Error != nil {
+		t.Fatalf("open: %+v", envelope.Error)
+	}
+	validateJSON(t, schema, envelope.Result, "open result (real socket)")
+	var got struct {
+		ShellIntegrationReason string `json:"shellIntegrationReason"`
+		DesiredMode            string `json:"desiredMode"`
+	}
+	if err := json.Unmarshal(envelope.Result, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.ShellIntegrationReason != "no-secure-temp" {
+		t.Errorf("shellIntegrationReason = %q, want %q", got.ShellIntegrationReason, "no-secure-temp")
+	}
+	// The resolver stamped no mode (openProfileResolver builds a bare
+	// config), so the ack must report the default: script (N3 — wrap and
+	// install automatically). A direct-host or profile-less open gets the
+	// hardcoded default, exactly like a profile that resolves to nothing.
+	if got.DesiredMode != "script" {
+		t.Errorf("desiredMode = %q, want %q (default when the resolver stamps none)", got.DesiredMode, "script")
+	}
+
+	// The launcher the transport option attached must have reached the
+	// registry's ConnectOptions — the exact chain that was dead before.
+	cfg := &ssh.ConnectConfig{}
+	for _, o := range factory.opts {
+		o(cfg)
+	}
+	if cfg.RemoteLauncher == nil {
+		t.Error("WithRemoteLauncher did not reach the ConnectConfig: RemoteLauncher is nil in the options the SSH factory received")
+	}
+}
+
+// fakeRemoteLauncher is the transport-side double: the transport must not
+// care which launcher it carries, only that it carries one.
+type fakeRemoteLauncher struct{}
+
+func (fakeRemoteLauncher) StartCommand(ssh.ShellKind, ssh.LaunchOptions) (string, ssh.RefusalReason, bool) {
+	return "", ssh.ReasonNone, false
+}
+
+// ── tunnel.open / tunnel.stop ──────────────────────────────────────────────
+
+// The DTO's own conformance: field tags, pointer-as-null for stopReason and
+// error, enum spelling. The cases that matter: the running record (both
+// nullable fields must marshal to null, never be omitted — the schema
+// requires them) and the stopped records (the reason and the error that
+// explain the stop).
+func TestTunnelOpen_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "tunnel.open.schema.json")
+
+	userStop := string(tunnel.StopReasonUser)
+	connLost := string(tunnel.StopReasonConnectionLost)
+	errMsg := "ssh: tunnel connection lost"
+
+	cases := map[string]tunnelRecord{
+		"running": {
+			ID:            "ab12",
+			Direction:     string(tunnel.DirectionLocal),
+			RequestedBind: tunnelBind{Host: "127.0.0.1", Port: 0},
+			ActualBind:    tunnelBind{Host: "127.0.0.1", Port: 43210},
+			Destination:   "db.internal:5432",
+			Scope:         "tab:1",
+			State:         string(tunnel.StateRunning),
+		},
+		"running-remote-with-caveat": {
+			ID:            "ab12",
+			Direction:     string(tunnel.DirectionRemote),
+			RequestedBind: tunnelBind{Host: "0.0.0.0", Port: 0},
+			ActualBind:    tunnelBind{Host: "0.0.0.0", Port: 43210},
+			Destination:   "db.internal:5432",
+			Scope:         "tab:1",
+			Caveat:        "bind address 0.0.0.0 requested but not verified: the server may have bound a different address (GatewayPorts), so a URL built from this forward may only work on the server",
+			State:         string(tunnel.StateRunning),
+		},
+		"stopped-user": {
+			ID:            "ab12",
+			Direction:     string(tunnel.DirectionLocal),
+			RequestedBind: tunnelBind{Host: "127.0.0.1", Port: 8080},
+			ActualBind:    tunnelBind{Host: "127.0.0.1", Port: 8080},
+			Destination:   "db.internal:5432",
+			Scope:         "tab:1",
+			State:         string(tunnel.StateStopped),
+			StopReason:    &userStop,
+		},
+		"stopped-connection-lost": {
+			ID:            "ab12",
+			Direction:     string(tunnel.DirectionLocal),
+			RequestedBind: tunnelBind{Host: "127.0.0.1", Port: 0},
+			ActualBind:    tunnelBind{Host: "127.0.0.1", Port: 43210},
+			Destination:   "db.internal:5432",
+			Scope:         "tab:1",
+			State:         string(tunnel.StateStopped),
+			StopReason:    &connLost,
+			Error:         &errMsg,
+		},
+	}
+
+	for name, rec := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(rec)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "tunnel.open DTO")
+		})
+	}
+}
+
+func TestTunnelStop_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "tunnel.stop.schema.json")
+	userStop := string(tunnel.StopReasonUser)
+	rec := tunnelRecord{
+		ID:            "ab12",
+		Direction:     string(tunnel.DirectionLocal),
+		RequestedBind: tunnelBind{Host: "127.0.0.1", Port: 0},
+		ActualBind:    tunnelBind{Host: "127.0.0.1", Port: 43210},
+		Destination:   "db.internal:5432",
+		Scope:         "tab:1",
+		Caveat:        "",
+		State:         string(tunnel.StateStopped),
+		StopReason:    &userStop,
+	}
+	raw, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "tunnel.stop DTO")
+}
+
+// The real methods through the real socket, with the real connector against
+// the in-process SSH server: the result bytes are the handler's own, and
+// nothing here names a field, so nothing here can omit one.
+func TestTunnel_OverTheWireConformsToContract(t *testing.T) {
+	openSchema := loadSchema(t, "tunnel.open.schema.json")
+	stopSchema := loadSchema(t, "tunnel.stop.schema.json")
+
+	h := newTunnelHarness(t, nil)
+	defer h.stop()
+	target := startEchoTarget(t)
+	conn := connectWS(t, h.ws)
+
+	openResp := tunnelCall(t, conn, "tunnel.open", map[string]any{
+		"profileId":   "ssh:p1:1",
+		"port":        0,
+		"destination": target,
+	}, 1)
+	if openResp.Error != nil {
+		t.Fatalf("tunnel.open: %+v", openResp.Error)
+	}
+	validateJSON(t, openSchema, openResp.Result, "tunnel.open result")
+
+	var rec tunnelRecord
+	if err := json.Unmarshal(openResp.Result, &rec); err != nil {
+		t.Fatalf("decode open result: %v", err)
+	}
+	// A local open carries no bind caveat — the field is present on the
+	// wire (the schema requires it) and empty. The remote strategy's
+	// non-empty caveat is covered by the DTO conformance case above.
+	if rec.Caveat != "" {
+		t.Fatalf("local tunnel caveat = %q, want empty", rec.Caveat)
+	}
+
+	stopResp := tunnelCall(t, conn, "tunnel.stop", map[string]any{"id": rec.ID}, 2)
+	if stopResp.Error != nil {
+		t.Fatalf("tunnel.stop: %+v", stopResp.Error)
+	}
+	validateJSON(t, stopSchema, stopResp.Result, "tunnel.stop result")
+}
+
+// ── shell.integrate ────────────────────────────────────────────────────────
+
+// The DTO's own conformance: field tags and wire names, so the Go struct
+// marshals to something the schema accepts.
+func TestShellIntegrate_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "shell.integrate.schema.json")
+	raw, err := json.Marshal(shellIntegrateResult{
+		Wrapper:    "saved=$(stty -g); NOCX_IB_SRC=$(mktemp \"${TMPDIR:-/tmp}/nocx-ib.XXXXXX\" 2>/dev/null) && stty raw -echo && printf '\\033]1337;NOCX_IB_READY\\a' && sed -n '/^NOCX_IB_EOF$/q;p' > \"$NOCX_IB_SRC\"; stty \"$saved\"; rm -f \"$NOCX_IB_SRC\" 2>/dev/null",
+		Payload:    "# nocx in-band integration — dispatcher (POSIX sh).\n# nocx-ib-complete\n",
+		Terminator: "NOCX_IB_EOF",
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "shell.integrate DTO")
+}
+
+// The real method through the real socket, backed by the REAL
+// *shellintegration.Impl — no fake, because the plan the renderer streams
+// must be the plan the product builds. Nothing here names a field, so
+// nothing here can omit one; the schema's additionalProperties:false plus
+// required makes the key set exact in both directions.
+func TestShellIntegrate_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "shell.integrate.schema.json")
+	ctx := context.Background()
+
+	ws := NewWSServer(
+		log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithInBandBootstrapper(shellintegration.New(nil)),
+	)
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	// Open a local session the way the renderer does: the id that comes
+	// back is the server-authoritative one (AD-7) shell.integrate must
+	// accept.
+	openResp := vaultCall(t, conn, "open", map[string]any{
+		"cols": 80, "rows": 24, "xpixel": 0, "ypixel": 0,
+	}, 1)
+	if openResp.Error != nil {
+		t.Fatalf("open: %+v", openResp.Error)
+	}
+	var opened struct {
+		SessionID string `json:"sessionId"`
+	}
+	if err := json.Unmarshal(openResp.Result, &opened); err != nil {
+		t.Fatalf("decode open result: %v", err)
+	}
+	if opened.SessionID == "" {
+		t.Fatal("open result carried no sessionId")
+	}
+
+	resp := vaultCall(t, conn, "shell.integrate", map[string]any{"sessionId": opened.SessionID}, 2)
+	if resp.Error != nil {
+		t.Fatalf("shell.integrate: %+v", resp.Error)
+	}
+	validateJSON(t, schema, resp.Result, "shell.integrate result (real socket)")
+
+	// The plan is the real plan: decode and name the parts the renderer
+	// executes, not fields the test built.
+	var got struct {
+		Wrapper    string `json:"wrapper"`
+		Payload    string `json:"payload"`
+		Terminator string `json:"terminator"`
+	}
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatalf("decode shell.integrate result: %v", err)
+	}
+	if !strings.Contains(got.Wrapper, "saved=$(stty -g)") || !strings.Contains(got.Wrapper, `stty "$saved"`) {
+		t.Errorf("wrapper lacks the exact save/restore fence: %q", got.Wrapper)
+	}
+	if !strings.Contains(got.Payload, "# nocx-ib-complete") {
+		t.Errorf("payload lacks the completion marker: %q", got.Payload)
+	}
+	if got.Terminator != "NOCX_IB_EOF" {
+		t.Errorf("terminator = %q, want NOCX_IB_EOF", got.Terminator)
+	}
+
+	// A well-formed session id the registry does not know is refused:
+	// session identity is server-authoritative (AD-7).
+	unknown := vaultCall(t, conn, "shell.integrate", map[string]any{
+		"sessionId": "0123456789abcdef0123456789abcdef",
+	}, 3)
+	if unknown.Error == nil || unknown.Error.Code != -32602 {
+		t.Fatalf("unknown sessionId: got %+v, want -32602", unknown.Error)
+	}
+
+	// Missing params are rejected before anything is built.
+	missing := vaultCall(t, conn, "shell.integrate", map[string]any{}, 4)
+	if missing.Error == nil || missing.Error.Code != -32602 {
+		t.Fatalf("missing sessionId: got %+v, want -32602", missing.Error)
+	}
+}
+
+// Not wired: shell.integrate must fail closed (-32603), never build a plan
+// without the capability.
+func TestShellIntegrate_NotWiredFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)))
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	openResp := vaultCall(t, conn, "open", map[string]any{
+		"cols": 80, "rows": 24, "xpixel": 0, "ypixel": 0,
+	}, 1)
+	if openResp.Error != nil {
+		t.Fatalf("open: %+v", openResp.Error)
+	}
+	var opened struct {
+		SessionID string `json:"sessionId"`
+	}
+	if err := json.Unmarshal(openResp.Result, &opened); err != nil {
+		t.Fatalf("decode open result: %v", err)
+	}
+
+	resp := vaultCall(t, conn, "shell.integrate", map[string]any{"sessionId": opened.SessionID}, 2)
+	if resp.Error == nil || resp.Error.Code != -32603 {
+		t.Fatalf("unwired shell.integrate: got %+v, want -32603", resp.Error)
+	}
+}
+
+// ── vault.unlockRequest notification contract ─────────────────────────
+// The notification is server→client, so there is no result shape — the
+// params ARE the contract. Validated against the schema both as a DTO and
+// off the real socket.
+
+func TestVaultUnlockRequest_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "vault.unlockRequest.schema.json")
+	raw, err := json.Marshal(map[string]any{
+		"requestId": "abc123",
+		"reason":    "history needs the content key",
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "vault.unlockRequest params DTO")
+}
+
+func TestVaultUnlockRequest_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "vault.unlockRequest.schema.json")
+	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithVaultLifecycle(newFakeVaultLifecycle()))
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+
+	conn := connectWS(t, ws)
+	defer conn.Close() //nolint:errcheck
+
+	// Verify connection is registered.
+	resp := vaultCall(t, conn, "vault.status", nil, 1)
+	if resp.Error != nil {
+		t.Fatalf("vault.status failed: %s", resp.Error.Message)
+	}
+
+	// Request an unlock; this sends the real notification over the socket.
+	go func() { _ = ws.RequestUnlock(ctx, "history needs the content key") }()
+
+	// Read the notification off the real socket.
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, data, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read notification: %v", err)
+	}
+
+	var notif struct {
+		JSONRPC string          `json:"jsonrpc"`
+		Method  string          `json:"method"`
+		Params  json.RawMessage `json:"params"`
+	}
+	if err := json.Unmarshal(data, &notif); err != nil {
+		t.Fatalf("unmarshal notification: %v", err)
+	}
+	if notif.Method != "vault.unlockRequest" {
+		t.Fatalf("expected vault.unlockRequest, got %q", notif.Method)
+	}
+	validateJSON(t, schema, notif.Params, "vault.unlockRequest params over the wire")
+}
+
+// ── connections.passwordRequest notification contract ─────────────────
+// Same shape as vault.unlockRequest: the notification is server→client,
+// so the params ARE the contract. The prompt must name which password it
+// is asking for (nocx-s8jn), so connection/user/host are required fields.
+
+func TestConnectionsPasswordRequest_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "connections.passwordRequest.schema.json")
+	raw, err := json.Marshal(map[string]any{
+		"requestId":  "abc123",
+		"connection": "prod-web",
+		"user":       "deploy",
+		"host":       "web.example.com",
+		"reason":     "no password is stored for this connection",
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "connections.passwordRequest params DTO")
+}
+
+func TestConnectionsPasswordRequest_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "connections.passwordRequest.schema.json")
+	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithVaultLifecycle(newFakeVaultLifecycle()))
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+
+	conn := connectWS(t, ws)
+	defer conn.Close() //nolint:errcheck
+
+	// Request a connection password; this sends the real notification over
+	// the socket.
+	done := make(chan error, 1)
+	go func() {
+		_, err := ws.RequestConnectionPassword(ctx, ssh.PasswordRequest{
+			Connection: "prod-web",
+			User:       "deploy",
+			Host:       "web.example.com",
+			Reason:     "no password is stored for this connection",
+		})
+		done <- err
+	}()
+
+	// Read the notification off the real socket.
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, data, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read notification: %v", err)
+	}
+
+	var notif struct {
+		JSONRPC string          `json:"jsonrpc"`
+		Method  string          `json:"method"`
+		Params  json.RawMessage `json:"params"`
+	}
+	if err := json.Unmarshal(data, &notif); err != nil {
+		t.Fatalf("unmarshal notification: %v", err)
+	}
+	if notif.Method != "connections.passwordRequest" {
+		t.Fatalf("expected connections.passwordRequest, got %q", notif.Method)
+	}
+	validateJSON(t, schema, notif.Params, "connections.passwordRequest params over the wire")
+
+	// Resolve so the asker does not leak a pending request.
+	var params struct {
+		RequestID string `json:"requestId"`
+	}
+	if err := json.Unmarshal(notif.Params, &params); err != nil {
+		t.Fatalf("unmarshal params: %v", err)
+	}
+	resp := vaultCall(t, conn, "connections.passwordResolved", map[string]any{
+		"requestId": params.RequestID,
+		"outcome":   "cancelled",
+	}, 2)
+	if resp.Error != nil {
+		t.Fatalf("passwordResolved error: %s", resp.Error.Message)
+	}
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrPasswordPromptCancelled) {
+			t.Fatalf("RequestConnectionPassword = %v, want ErrPasswordPromptCancelled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("RequestConnectionPassword did not resolve")
+	}
+}
+
+// ── shell.launcherCommand ──────────────────────────────────────────────────
+
+func TestShellLauncherCommand_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "shell.launcherCommand.schema.json")
+
+	// Bootstrap: a staged path returned, mode bootstrap, reason null.
+	path := "'/home/u/.nocx/run/launcher-123456'"
+	raw, err := json.Marshal(shellLauncherCommandResult{
+		Mode:          launcherModeBootstrap,
+		EnvironmentID: "env-abc-123",
+		LauncherPath:  &path,
+		Reason:        nil,
+	})
+	if err != nil {
+		t.Fatalf("marshal bootstrap: %v", err)
+	}
+	validateJSON(t, schema, raw, "shell.launcherCommand DTO (bootstrap)")
+
+	// Installed: compact form, no path, no reason.
+	raw, err = json.Marshal(shellLauncherCommandResult{
+		Mode:          launcherModeInstalled,
+		EnvironmentID: "env-def-456",
+		LauncherPath:  nil,
+		Reason:        nil,
+	})
+	if err != nil {
+		t.Fatalf("marshal installed: %v", err)
+	}
+	validateJSON(t, schema, raw, "shell.launcherCommand DTO (installed)")
+
+	// Every refusal the handler can state must satisfy the schema's enum;
+	// a reason the renderer receives and the contract rejects is a refusal
+	// that reaches the product as a decode failure.
+	for _, reason := range []string{"remote-command", "oracle-failed", "unsupported", "stage-failed"} {
+		r := reason
+		raw, err = json.Marshal(shellLauncherCommandResult{
+			Mode:          launcherModeRaw,
+			EnvironmentID: "env-ghi-789",
+			LauncherPath:  nil,
+			Reason:        &r,
+		})
+		if err != nil {
+			t.Fatalf("marshal refused %s: %v", reason, err)
+		}
+		validateJSON(t, schema, raw, "shell.launcherCommand DTO (refused: "+reason+")")
+	}
+}
+
+// OverTheWire: the real handler, the real RemoteLauncher, the real stager
+// and a stub resolver that records the oracle argv — the bytes the far shell
+// runs must be the bytes the product builds, and the typed line must be what
+// the oracle answers about (nocx-c5az).
+func TestShellLauncherCommand_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "shell.launcherCommand.schema.json")
+	ctx := context.Background()
+
+	home := t.TempDir()
+	resolver := newLauncherTestResolver()
+	ws := NewWSServer(
+		log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithRemoteLauncher(&realRemoteLauncher{}),
+		WithLauncherStager(shellintegration.NewLauncherStager(log.NewSlogAdapter(nil), home)),
+		WithSSHConfigResolver(resolver, "/nonexistent/config"),
+	)
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	sid := openSessionForLauncher(t, conn)
+	resp := vaultCall(t, conn, "shell.launcherCommand", map[string]any{
+		"sessionId":  sid,
+		"oracleArgv": []string{"ssh", "-G", "-p", "2222", "testhost"},
+	}, 2)
+	if resp.Error != nil {
+		t.Fatalf("shell.launcherCommand: %+v", resp.Error)
+	}
+	validateJSON(t, schema, resp.Result, "shell.launcherCommand result (real socket)")
+
+	var got shellLauncherCommandResult
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatalf("decode shell.launcherCommand result: %v", err)
+	}
+	if got.Mode != launcherModeBootstrap {
+		t.Errorf("mode = %q, want bootstrap (no installed fact on a fresh store)", got.Mode)
+	}
+	if got.LauncherPath == nil || *got.LauncherPath == "" {
+		t.Fatal("launcherPath is nil or empty; the real launcher must be staged and named")
+	}
+	if got.Reason != nil {
+		t.Errorf("reason = %q, want nil when a path is present", *got.Reason)
+	}
+	// The environment id is fresh per attempt and never the tab session id.
+	if got.EnvironmentID == "" {
+		t.Error("environmentId is empty; the planner must mint one per attempt")
+	}
+	if got.EnvironmentID == sid {
+		t.Error("environmentId equals the tab session id; two attempts would be indistinguishable")
+	}
+	// The path is shell-quoted: the renderer splices it into a shell line.
+	if !strings.HasPrefix(*got.LauncherPath, "'") || !strings.HasSuffix(*got.LauncherPath, "'") {
+		t.Errorf("launcherPath not shell-quoted: %q", *got.LauncherPath)
+	}
+
+	// The oracle saw the exact typed argv, options included.
+	if len(resolver.lastArgv) != 5 || resolver.lastArgv[0] != "ssh" || resolver.lastArgv[1] != "-G" ||
+		resolver.lastArgv[2] != "-p" || resolver.lastArgv[3] != "2222" || resolver.lastArgv[4] != "testhost" {
+		t.Errorf("oracle argv = %v, want [ssh -G -p 2222 testhost] as typed", resolver.lastArgv)
+	}
+
+	// The response carries a PATH, not a payload. This is the whole fix:
+	// the launcher is ~35 KB and the line the renderer types has only the
+	// tty, whose canonical buffer is 4096 bytes. A response that grew back
+	// into a payload would truncate on the wire into the shell again.
+	if n := len(resp.Result); n > 512 {
+		t.Errorf("result is %d bytes; shell.launcherCommand must return a path, not the launcher", n)
+	}
+
+	// And the file it names holds the real launcher, byte for byte, with
+	// the freshly minted environment id embedded (NOCX_ENVIRONMENT_ID).
+	staged := strings.Trim(*got.LauncherPath, "'")
+	body, err := os.ReadFile(staged) // #nosec G304 — path came from our own stager.
+	if err != nil {
+		t.Fatalf("read staged launcher at %s: %v", staged, err)
+	}
+	wantLauncher, _, ok := shellintegration.NewRemoteLauncher().StartCommand(
+		shellintegration.ShellAuto,
+		shellintegration.LaunchOptions{
+			SessionID:     sid,
+			Enhanced:      true,
+			EnvironmentID: got.EnvironmentID,
+		},
+	)
+	if !ok {
+		t.Fatal("the real RemoteLauncher refused ShellAuto")
+	}
+	if string(body) != wantLauncher {
+		t.Errorf("staged launcher differs from the product's: got %d bytes, want %d", len(body), len(wantLauncher))
+	}
+	// The equality above is the embed proof: a handler that passed a
+	// different or empty environment id to the launcher would produce a
+	// different command, and the comparison would fail.
+
+	// A second attempt mints a SECOND environment id: the renderer's
+	// tracker can tell a stale passport from a live one.
+	second := launcherCommandCall(t, conn, sid, 3)
+	if second.EnvironmentID == got.EnvironmentID {
+		t.Error("two attempts minted the same environmentId; a stale passport would be accepted")
+	}
+
+	// Unknown sessionId is refused (AD-7).
+	unknown := vaultCall(t, conn, "shell.launcherCommand", map[string]any{
+		"sessionId":  "0123456789abcdef0123456789abcdef",
+		"oracleArgv": []string{"ssh", "-G", "testhost"},
+	}, 4)
+	if unknown.Error == nil || unknown.Error.Code != -32602 {
+		t.Fatalf("unknown sessionId: got %+v, want -32602", unknown.Error)
+	}
+
+	// Missing or malformed params are rejected.
+	missing := vaultCall(t, conn, "shell.launcherCommand", map[string]any{}, 5)
+	if missing.Error == nil || missing.Error.Code != -32602 {
+		t.Fatalf("missing params: got %+v, want -32602", missing.Error)
+	}
+	badArgv := vaultCall(t, conn, "shell.launcherCommand", map[string]any{
+		"sessionId":  sid,
+		"oracleArgv": []string{"scp", "-G", "testhost"},
+	}, 6)
+	if badArgv.Error == nil || badArgv.Error.Code != -32602 {
+		t.Fatalf("malformed oracleArgv: got %+v, want -32602", badArgv.Error)
+	}
+}
+
+// ── shell.environmentObserved ───────────────────────────────────────────────
+
+func TestShellEnvironmentObserved_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "shell.environmentObserved.schema.json")
+
+	raw, err := json.Marshal(environmentObservedResult{Processed: true, FactUpdated: true})
+	if err != nil {
+		t.Fatalf("marshal recorded: %v", err)
+	}
+	validateJSON(t, schema, raw, "shell.environmentObserved DTO (recorded)")
+
+	raw, err = json.Marshal(environmentObservedResult{Processed: false, FactUpdated: false})
+	if err != nil {
+		t.Fatalf("marshal unknown: %v", err)
+	}
+	validateJSON(t, schema, raw, "shell.environmentObserved DTO (unknown id)")
+}
+
+// OverTheWire: the real handler, the real launcher and stager, a stub
+// resolver, and a real fact store — an accepted passport for a minted
+// attempt records the fact, and a duplicate report is a no-op.
+func TestShellEnvironmentObserved_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "shell.environmentObserved.schema.json")
+	ctx := context.Background()
+
+	ws := NewWSServer(
+		log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithRemoteLauncher(&realRemoteLauncher{}),
+		WithLauncherStager(shellintegration.NewLauncherStager(log.NewSlogAdapter(nil), t.TempDir())),
+		WithSSHConfigResolver(newLauncherTestResolver(), "/nonexistent/config"),
+		WithInstalledFactStore(ssh.NewInstalledFactStore(
+			log.NewSlogAdapter(nil), storage.NewDocumentStore(t.TempDir()), "installed-facts.json")),
+	)
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	sid := openSessionForLauncher(t, conn)
+	first := launcherCommandCall(t, conn, sid, 2)
+	if first.Mode != launcherModeBootstrap {
+		t.Fatalf("first attempt mode = %q, want bootstrap", first.Mode)
+	}
+
+	passport := map[string]any{
+		"protocolVersion":     "1",
+		"environmentId":       first.EnvironmentID,
+		"parentEnvironmentId": "-",
+		"scriptVersion":       "0.6.0",
+		"tier":                "enhanced",
+		"generation":          "v10",
+	}
+	resp := vaultCall(t, conn, "shell.environmentObserved", map[string]any{
+		"environmentId": first.EnvironmentID,
+		"passport":      passport,
+	}, 3)
+	if resp.Error != nil {
+		t.Fatalf("shell.environmentObserved: %+v", resp.Error)
+	}
+	validateJSON(t, schema, resp.Result, "shell.environmentObserved result (real socket)")
+	var got environmentObservedResult
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !got.Processed || !got.FactUpdated {
+		t.Errorf("first observation = %+v, want processed+factUpdated", got)
+	}
+
+	// The next launcherCommand takes the compact line: the fact was written.
+	second := launcherCommandCall(t, conn, sid, 4)
+	if second.Mode != launcherModeInstalled {
+		t.Errorf("second attempt mode = %q, want installed after the passport was accepted", second.Mode)
+	}
+
+	// A duplicate observation satisfies the schema and changes nothing.
+	dup := vaultCall(t, conn, "shell.environmentObserved", map[string]any{
+		"environmentId": first.EnvironmentID,
+		"passport":      passport,
+	}, 5)
+	if dup.Error != nil {
+		t.Fatalf("duplicate observation: %+v", dup.Error)
+	}
+	validateJSON(t, schema, dup.Result, "shell.environmentObserved duplicate (real socket)")
+
+	// An unknown id is processed=false, and still satisfies the schema.
+	unknown := vaultCall(t, conn, "shell.environmentObserved", map[string]any{
+		"environmentId": "00000000000000000000000000000000",
+		"passport":      nil,
+	}, 6)
+	if unknown.Error != nil {
+		t.Fatalf("unknown-id observation: %+v", unknown.Error)
+	}
+	validateJSON(t, schema, unknown.Result, "shell.environmentObserved unknown-id (real socket)")
+
+	// Missing params are rejected.
+	missing := vaultCall(t, conn, "shell.environmentObserved", map[string]any{}, 7)
+	if missing.Error == nil || missing.Error.Code != -32602 {
+		t.Fatalf("missing params: got %+v, want -32602", missing.Error)
+	}
+}
+
+// No resolver wired: the oracle is missing, so the rewrite is refused with
+// "oracle-failed" (nocx-qwhp) rather than a silent bypass — a rewrite built
+// without the oracle's answer is a guess. The renderer sends the original
+// line.
+func TestShellLauncherCommand_NoResolverRefuses(t *testing.T) {
+	ctx := context.Background()
+	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)))
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	sid := openSessionForLauncher(t, conn)
+	got := launcherCommandCall(t, conn, sid, 2)
+	if got.Mode != launcherModeRaw {
+		t.Errorf("mode = %q, want raw", got.Mode)
+	}
+	if got.LauncherPath != nil {
+		t.Errorf("launcherPath = %q, want nil when the oracle is missing", *got.LauncherPath)
+	}
+	if got.Reason == nil || *got.Reason != "oracle-failed" {
+		t.Errorf("reason = %v, want oracle-failed", got.Reason)
+	}
+}
+
+// Launcher and stager not wired: with a working oracle the bootstrap path
+// has nowhere to put the payload, so the handler refuses with "unsupported".
+func TestShellLauncherCommand_LauncherNotWiredRefuses(t *testing.T) {
+	ctx := context.Background()
+	ws := NewWSServer(
+		log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithSSHConfigResolver(newLauncherTestResolver(), "/nonexistent/config"),
+	)
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	sid := openSessionForLauncher(t, conn)
+	got := launcherCommandCall(t, conn, sid, 2)
+	if got.LauncherPath != nil {
+		t.Errorf("launcherPath = %q, want nil when not wired", *got.LauncherPath)
+	}
+	if got.Reason == nil || *got.Reason != "unsupported" {
+		t.Errorf("reason = %v, want unsupported", got.Reason)
+	}
+}
+
+// The launcher builds but cannot be staged: without a place the LOCAL shell
+// can read, there is no rewrite to make. The handler says so rather than
+// returning a path that does not exist, and the renderer sends the line the
+// user typed (ADR-0004 §1). This is the failure path that did not exist
+// while the payload travelled inline.
+func TestShellLauncherCommand_StageFailureRefuses(t *testing.T) {
+	ctx := context.Background()
+
+	// A regular file where the staging directory must go.
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, ".nocx"), []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("write blocker: %v", err)
+	}
+
+	ws := NewWSServer(
+		log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithRemoteLauncher(&realRemoteLauncher{}),
+		WithLauncherStager(shellintegration.NewLauncherStager(log.NewSlogAdapter(nil), home)),
+		WithSSHConfigResolver(newLauncherTestResolver(), "/nonexistent/config"),
+	)
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	sid := openSessionForLauncher(t, conn)
+	got := launcherCommandCall(t, conn, sid, 2)
+	if got.LauncherPath != nil {
+		t.Errorf("launcherPath = %q, want nil when staging failed", *got.LauncherPath)
+	}
+	if got.Reason == nil || *got.Reason != "stage-failed" {
+		t.Errorf("reason = %v, want stage-failed", got.Reason)
+	}
+}
+
+// A stager without a launcher, and a launcher without a stager, are both
+// "we cannot build a rewrite" — neither may answer with a path.
+func TestShellLauncherCommand_StagerWithoutLauncherRefuses(t *testing.T) {
+	ctx := context.Background()
+	ws := NewWSServer(
+		log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithLauncherStager(shellintegration.NewLauncherStager(log.NewSlogAdapter(nil), t.TempDir())),
+		WithSSHConfigResolver(newLauncherTestResolver(), "/nonexistent/config"),
+	)
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	sid := openSessionForLauncher(t, conn)
+	got := launcherCommandCall(t, conn, sid, 2)
+	if got.LauncherPath != nil {
+		t.Errorf("launcherPath = %q, want nil without a launcher", *got.LauncherPath)
+	}
+	if got.Reason == nil || *got.Reason != "unsupported" {
+		t.Errorf("reason = %v, want unsupported", got.Reason)
+	}
+}
+
+// openSessionForLauncher opens a local session and returns its id.
+func openSessionForLauncher(t *testing.T, conn *websocket.Conn) string {
+	t.Helper()
+	openResp := vaultCall(t, conn, "open", map[string]any{
+		"cols": 80, "rows": 24, "xpixel": 0, "ypixel": 0,
+	}, 1)
+	if openResp.Error != nil {
+		t.Fatalf("open: %+v", openResp.Error)
+	}
+	var opened struct {
+		SessionID string `json:"sessionId"`
+	}
+	if err := json.Unmarshal(openResp.Result, &opened); err != nil {
+		t.Fatalf("decode open result: %v", err)
+	}
+	return opened.SessionID
+}
+
+// launcherCommandCall makes one shell.launcherCommand call and decodes it.
+func launcherCommandCall(t *testing.T, conn *websocket.Conn, sid string, id int) shellLauncherCommandResult {
+	t.Helper()
+	resp := vaultCall(t, conn, "shell.launcherCommand", map[string]any{
+		"sessionId":  sid,
+		"oracleArgv": []string{"ssh", "-G", "testhost"},
+	}, id)
+	if resp.Error != nil {
+		t.Fatalf("shell.launcherCommand: %+v", resp.Error)
+	}
+	var got shellLauncherCommandResult
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	return got
+}
+
+// realRemoteLauncher is the production adapter in miniature: it returns
+// the real launcher command so the over-the-wire test exercises the real
+// payload the renderer will append.
+type realRemoteLauncher struct{}
+
+func (realRemoteLauncher) StartCommand(kind ssh.ShellKind, opts ssh.LaunchOptions) (string, ssh.RefusalReason, bool) {
+	// Use the real shellintegration launcher, adapted through the ssh types.
+	// The composition root adapts shellintegration.RemoteLauncher to
+	// ssh.RemoteLauncher; for the test we call the real one directly.
+	l := shellintegration.NewRemoteLauncher()
+	// Map the ssh ShellKind to the shellintegration ShellKind.
+	var sk shellintegration.ShellKind
+	switch kind {
+	case ssh.ShellBash:
+		sk = shellintegration.ShellBash
+	case ssh.ShellZsh:
+		sk = shellintegration.ShellZsh
+	case ssh.ShellUnknown:
+		sk = shellintegration.ShellUnknown
+	case ssh.ShellAuto:
+		sk = shellintegration.ShellAuto
+	default:
+		return "", ssh.ReasonUnsupportedShell, false
+	}
+	lo := shellintegration.LaunchOptions{
+		SessionID:     opts.SessionID,
+		Enhanced:      opts.Enhanced,
+		EnvironmentID: opts.EnvironmentID,
+	}
+	cmd, reason, ok := l.StartCommand(sk, lo)
+	return cmd, ssh.RefusalReason(reason), ok
+}
+
+// ── shell.footprint.status ────────────────────────────────────────────────
+
+func TestShellFootprintStatus_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "shell.footprint.status.schema.json")
+
+	removable := "p_01"
+	raw, err := json.Marshal(shellFootprintStatusResult{Destinations: []shellFootprintDestination{
+		{
+			Identity:           "pi@192.168.0.93:22",
+			Generation:         "v10",
+			Path:               footprintPath,
+			ProtocolVersion:    "1",
+			ScriptVersion:      "0.6.0",
+			LastObservedAt:     time.Date(2026, 8, 5, 10, 0, 0, 0, time.UTC),
+			RemovableProfileID: &removable,
+		},
+	}})
+	if err != nil {
+		t.Fatalf("marshal populated: %v", err)
+	}
+	validateJSON(t, schema, raw, "shell.footprint.status DTO (populated)")
+
+	// A destination with no saved connection: removableProfileId null.
+	raw, err = json.Marshal(shellFootprintStatusResult{Destinations: []shellFootprintDestination{
+		{
+			Identity:        "root@10.0.0.7:22",
+			Generation:      "v10",
+			Path:            footprintPath,
+			ProtocolVersion: "1",
+			ScriptVersion:   "0.6.0",
+			LastObservedAt:  time.Date(2026, 8, 5, 10, 0, 0, 0, time.UTC),
+		},
+	}})
+	if err != nil {
+		t.Fatalf("marshal non-removable: %v", err)
+	}
+	validateJSON(t, schema, raw, "shell.footprint.status DTO (no saved connection)")
+
+	// Empty: destinations must marshal as [] rather than null.
+	raw, err = json.Marshal(shellFootprintStatusResult{Destinations: []shellFootprintDestination{}})
+	if err != nil {
+		t.Fatalf("marshal empty: %v", err)
+	}
+	validateJSON(t, schema, raw, "shell.footprint.status DTO (empty)")
+}
+
+// OverTheWire: the real handler, a real fact store holding one
+// profile-removable fact and one direct-host fact, and the stub oracle that
+// resolves the saved profile to the first destination's identity.
+func TestShellFootprintStatus_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "shell.footprint.status.schema.json")
+	ctx := context.Background()
+
+	resolver := newLauncherTestResolver()
+	resolver.add("pi@192.168.0.93", ssh.HostConfig{User: "pi", HostName: "192.168.0.93", Port: 22})
+	facts := ssh.NewInstalledFactStore(
+		log.NewSlogAdapter(nil), storage.NewDocumentStore(t.TempDir()), "installed-facts.json")
+	if err := facts.Record(ssh.InstalledFact{
+		Identity: "pi@192.168.0.93:22", Protocol: "1", ScriptVersion: "0.6.0",
+		Generation: "v10", ObservedAt: time.Date(2026, 8, 5, 10, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	if err := facts.Record(ssh.InstalledFact{
+		Identity: "root@10.0.0.7:22", Protocol: "1", ScriptVersion: "0.5.2",
+		Generation: "v9", ObservedAt: time.Date(2026, 7, 30, 8, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	ws := NewWSServer(
+		log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithInstalledFactStore(facts),
+		WithSSHConfigResolver(resolver, "/nonexistent/config"),
+		WithProfileResolver(&openProfileResolver{host: "pi@192.168.0.93"}),
+		WithProfileRepository(&footprintTestProfileRepo{profiles: []profile.SSHProfile{{
+			Base:    profile.Base{ID: "p_01"},
+			Options: profile.StoredSSHProfileOptions{Host: "pi@192.168.0.93"},
+		}}}),
+	)
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	resp := vaultCall(t, conn, "shell.footprint.status", map[string]any{}, 2)
+	if resp.Error != nil {
+		t.Fatalf("shell.footprint.status: %+v", resp.Error)
+	}
+	validateJSON(t, schema, resp.Result, "shell.footprint.status result (real socket)")
+
+	var got shellFootprintStatusResult
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Destinations) != 2 {
+		t.Fatalf("destinations = %d, want 2", len(got.Destinations))
+	}
+	if got.Destinations[0].Identity != "pi@192.168.0.93:22" ||
+		got.Destinations[0].RemovableProfileID == nil ||
+		*got.Destinations[0].RemovableProfileID != "p_01" {
+		t.Errorf("profile destination = %+v, want identity pi@192.168.0.93:22 removable via p_01",
+			got.Destinations[0])
+	}
+	if got.Destinations[1].RemovableProfileID != nil {
+		t.Errorf("direct-host destination removableProfileId = %v, want null", *got.Destinations[1].RemovableProfileID)
+	}
+}
+
+// ── shell.footprint.uninstall ────────────────────────────────────────────
+
+func TestShellFootprintUninstall_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "shell.footprint.uninstall.schema.json")
+
+	raw, err := json.Marshal(shellFootprintUninstallResult{
+		Removed:   []string{"integration/v10/nocx.zsh", "integration/v10/nocx.posix", "manifest.json"},
+		Conflicts: []string{"integration/v10/nocx.bash"},
+	})
+	if err != nil {
+		t.Fatalf("marshal populated: %v", err)
+	}
+	validateJSON(t, schema, raw, "shell.footprint.uninstall DTO (populated)")
+
+	raw, err = json.Marshal(shellFootprintUninstallResult{Removed: []string{}, Conflicts: []string{}})
+	if err != nil {
+		t.Fatalf("marshal empty: %v", err)
+	}
+	validateJSON(t, schema, raw, "shell.footprint.uninstall DTO (nothing to do)")
+}
+
+// OverTheWire: the real handler drives a recording capability with the
+// resolved profile config and sends the real result off the real socket —
+// a conflict is reported as data, not swallowed as an error.
+func TestShellFootprintUninstall_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "shell.footprint.uninstall.schema.json")
+	ctx := context.Background()
+
+	rec := &recordingUninstaller{
+		removed:   []string{"integration/v10/nocx.zsh", "manifest.json"},
+		conflicts: []string{"integration/v10/nocx.bash"},
+	}
+	ws := NewWSServer(
+		log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithRemoteUninstaller(rec),
+		WithProfileResolver(&openProfileResolver{host: "pi@192.168.0.93"}),
+	)
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	resp := vaultCall(t, conn, "shell.footprint.uninstall", map[string]any{"profileId": "p_01"}, 3)
+	if resp.Error != nil {
+		t.Fatalf("shell.footprint.uninstall: %+v", resp.Error)
+	}
+	validateJSON(t, schema, resp.Result, "shell.footprint.uninstall result (real socket)")
+
+	var got shellFootprintUninstallResult
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Removed) != 2 || got.Removed[0] != "integration/v10/nocx.zsh" || got.Removed[1] != "manifest.json" {
+		t.Errorf("removed = %v, want the capability's list verbatim", got.Removed)
+	}
+	if len(got.Conflicts) != 1 || got.Conflicts[0] != "integration/v10/nocx.bash" {
+		t.Errorf("conflicts = %v, want the capability's list verbatim", got.Conflicts)
 	}
 }

@@ -48,6 +48,7 @@ const SOURCE_LABEL: Record<string, string> = {
   command: 'command',
   history: 'history',
   path: 'path',
+  host: 'host',
 }
 
 /** The type word for a path row — `Directory` / `File` (the owner's ask:

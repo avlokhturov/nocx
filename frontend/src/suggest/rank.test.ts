@@ -199,6 +199,31 @@ describe('rankCandidates', () => {
     expect(ids(ranked)).toEqual(['path', 'hist'])
   })
 
+  it('argument position: a host candidate outranks whole-line history, whatever its recency', () => {
+    const ranked = rankCandidates(
+      [
+        base({
+          id: 'hist',
+          providerId: 'history',
+          source: 'history',
+          insertText: 'ssh myhost -p 22',
+          freshness: NOW - 1, // as fresh as history gets
+        }),
+        base({
+          id: 'host',
+          providerId: 'host',
+          source: 'host',
+          insertText: 'myhost',
+        }),
+      ],
+      { query: 'ssh myh', now: NOW, position: 'argument' },
+    )
+    // `ssh <TAB>` must offer hosts, never the history rows that were never
+    // the answer: a host replaces one token, a history row the whole line —
+    // the same rung that keeps paths above history.
+    expect(ids(ranked)).toEqual(['host', 'hist'])
+  })
+
   it('the argument rung applies only in argument position — command position keeps the provider prior', () => {
     const ranked = rankCandidates(
       [

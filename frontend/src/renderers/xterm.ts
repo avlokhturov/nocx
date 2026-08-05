@@ -19,7 +19,7 @@ import { getCurrentTheme, subscribeThemeChanges } from './theme-adapter'
 import { WORD_SEPARATORS } from '../word-selection'
 import { decodeOsc52 } from '../clipboard'
 import { CommandSnapshotStore } from '../command-snapshot'
-
+import { EnvironmentPassportTracker, type PassportDisposition } from '../environment-passport'
 type BellCallback = () => void
 type SelectionCallback = (text: string) => void
 type ClipboardWriteCallback = (text: string) => void
@@ -87,27 +87,55 @@ export function parseOsc7(payload: string): { host: string; path: string } | nul
  * Parses an OSC 133 payload into a CommandMarker. Returns null for invalid
  * or unrecognized payloads.
  *
- * Format: 'A' | 'B' | 'C' | 'D' | 'D;<exitcode>'
+ * Format: 'A' | 'B' | 'C' | 'D' | 'D;<exitcode>', optionally followed by
+ * `;key=value` parameters — the parameter form OSC 133 already permits. A
+ * `nocx_env=<id>` parameter tags the marker (spec §5.2); an untagged marker
+ * keeps driving block boundaries exactly as before. A tag that is present
+ * but malformed makes the whole marker invalid (never guessed at), while an
+ * absent tag and unknown well-formed keys are tolerated.
  */
+const OSC133_TAG_KEY = 'nocx_env'
+const OSC133_TAG_VALUE_RE = /^[A-Za-z0-9._-]{1,64}$/
+
 export function parseOsc133(payload: string): CommandMarker | null {
   if (payload.length === 0) return null
   const kind = payload[0] as CommandMarker['kind']
   if (kind !== 'A' && kind !== 'B' && kind !== 'C' && kind !== 'D') return null
 
-  if (kind === 'D' && payload.length > 1 && payload[1] === ';') {
-    const codeStr = payload.slice(2)
-    // Strict: reject trailing junk, negatives, or out-of-range exit codes.
-    if (!/^\d+$/.test(codeStr)) {
-      return { kind: 'D' }
-    }
-    const code = parseInt(codeStr, 10)
-    if (code < 0 || code > 255) {
-      return { kind: 'D' }
-    }
-    return { kind: 'D', exitCode: code }
-  }
+  const marker: CommandMarker = { kind }
+  if (payload.length === 1) return marker
+  if (payload[1] !== ';') return marker // bare kind with trailing junk: unchanged
 
-  return { kind }
+  // Everything after the kind is `;`-separated parameters. D's first
+  // parameter is the positional exit code UNLESS it is itself a key=value
+  // property (`D;nocx_env=id` has no exit code).
+  const params = payload.slice(2).split(';')
+  let i = 0
+  if (kind === 'D' && params.length > 0 && params[0] !== '' && params[0].indexOf('=') === -1) {
+    const codeStr = params[0]
+    i = 1
+    // Strict: reject negatives or out-of-range exit codes, keeping the
+    // marker itself.
+    if (/^\d+$/.test(codeStr)) {
+      const code = parseInt(codeStr, 10)
+      if (code >= 0 && code <= 255) marker.exitCode = code
+    }
+  }
+  for (; i < params.length; i++) {
+    const param = params[i]
+    if (param === '') continue // empty parameter: tolerated (legacy `A;`)
+    const eq = param.indexOf('=')
+    if (eq === -1) return null // not key=value: malformed
+    const key = param.slice(0, eq)
+    const value = param.slice(eq + 1)
+    if (key === OSC133_TAG_KEY) {
+      if (!OSC133_TAG_VALUE_RE.test(value)) return null
+      marker.nocxEnv = value
+    }
+    // Well-formed unknown keys are ignored: foreign parameter forms must
+    // not break block boundaries.
+  }
+  return marker
 }
 
 export class XtermRenderer implements TerminalRenderer {
@@ -120,12 +148,19 @@ export class XtermRenderer implements TerminalRenderer {
   private refreshTimer: ReturnType<typeof setInterval> | null = null
   private commandMarkerSubs: CommandMarkerCallback[] = []
   private osc133Disposable?: { dispose(): void }
+  private inBandReadySubs: Array<() => void> = []
+  private inBandReadyDisposable?: { dispose(): void }
   private scrollSubs: Array<(viewportY: number) => void> = []
   private renderSubs: Array<(range: { start: number; end: number }) => void> = []
   private snapshotOscDisposable?: { dispose(): void }
   private scrollDisposable?: { dispose(): void }
   private renderDisposable?: { dispose(): void }
   private _cachedCellHeight: number | null = null
+  /** This tab's readiness-passport tracker (OSC 636 P). Per-renderer, like
+   *  the snapshot store — tab 2 is never judged against tab 1's expected id.
+   *  Parse-and-report only; the consumer decides what acceptance means. */
+  readonly passportTracker = new EnvironmentPassportTracker()
+  private passportSubs: Array<(d: PassportDisposition) => void> = []
   /** This tab's command-existence store (OSC 636). Created per renderer so
    *  two tabs never share a snapshot; the editor and frozen headers of this
    *  tab read the same instance this OSC handler feeds. */
@@ -195,14 +230,20 @@ export class XtermRenderer implements TerminalRenderer {
     // be missed). ADR-0013 §8, design spec §5.4.
     this._themeUnsub = subscribeThemeChanges((t: ITheme) => this.applyTheme(t))
 
-    // OSC 636 — command-existence snapshot (command-snapshot.ts). The store
-    // owns parse + policy (nonce handshake, caps, silent discard); the
-    // renderer is just the wire, exactly like OSC 7/52/133. Each renderer
-    // owns its own store, so tab 2 is never judged against tab 1's command
-    // set — the editor and frozen headers receive this same instance at the
-    // composition point (terminal-content.ts).
+    // OSC 636 — command-existence snapshot (command-snapshot.ts) and the
+    // readiness passport (environment-passport.ts). The stores own parse +
+    // policy; the renderer is just the wire, exactly like OSC 7/52/133. One
+    // handler feeds both: the snapshot store sees H/S, the passport tracker
+    // only P payloads. Each renderer owns its own stores, so tab 2 is never
+    // judged against tab 1's command set or expected id — the editor and
+    // frozen headers receive this same instance at the composition point
+    // (terminal-content.ts).
     this.snapshotOscDisposable = term.parser.registerOscHandler(636, (data: string) => {
       this.snapshotStore.ingest(data)
+      if (data.startsWith('P;')) {
+        const disposition = this.passportTracker.ingest(data)
+        for (const sub of this.passportSubs) sub(disposition)
+      }
       return false
     })
     this.applyTheme(getCurrentTheme())
@@ -338,6 +379,33 @@ export class XtermRenderer implements TerminalRenderer {
     })
   }
 
+  onEnvironmentPassport(cb: (disposition: PassportDisposition) => void): void {
+    this.passportSubs.push(cb)
+  }
+
+  setExpectedEnvironmentId(id: string | null): void {
+    this.passportTracker.setExpectedEnvironmentId(id)
+  }
+
+  onInBandReady(cb: () => void): () => void {
+    this.inBandReadySubs.push(cb)
+    if (!this.inBandReadyDisposable && this.term) {
+      this.inBandReadyDisposable = this.term.parser.registerOscHandler(1337, (data: string) => {
+        // Strict whitelist: the wrapper emits exactly this payload once raw
+        // -echo is on. Any other 1337 content (or a forged echo of the
+        // literal) is discarded — the ready signal must mean raw mode is
+        // provably active, or the payload would be printed to the user.
+        if (data !== 'NOCX_IB_READY') return false
+        for (const sub of this.inBandReadySubs) sub()
+        return false
+      })
+    }
+    return () => {
+      const i = this.inBandReadySubs.indexOf(cb)
+      if (i >= 0) this.inBandReadySubs.splice(i, 1)
+    }
+  }
+
   onBell(cb: BellCallback): void {
     this.term?.onBell(cb)
   }
@@ -412,6 +480,7 @@ export class XtermRenderer implements TerminalRenderer {
     this.osc133Disposable?.dispose()
     this.osc133Disposable = undefined
     this.commandMarkerSubs = []
+    this.passportSubs = []
     this.scrollDisposable?.dispose()
     this.scrollDisposable = undefined
     this.scrollSubs = []
@@ -530,6 +599,13 @@ export class XtermRenderer implements TerminalRenderer {
 
   getBufferLine(line: number): import('@xterm/xterm').IBufferLine | undefined {
     return this.term?.buffer.active.getLine(line)
+  }
+
+  /** Absolute buffer line of the cursor — the line the next write lands on. */
+  cursorLine(): number {
+    if (!this.term) return 0
+    const buf = this.term.buffer.active
+    return buf.baseY + buf.cursorY
   }
 
   clearViewport(): void {

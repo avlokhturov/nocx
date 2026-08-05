@@ -201,3 +201,63 @@ describe('BlockReceipt: the kit contract', () => {
     expect(receipt.removeRow('cap_2')).toBe(true)
   })
 })
+
+describe('forConnection variant (nocx-pu4.7)', () => {
+  it('renders a single-row receipt with SSH host kind', () => {
+    const onSave = vi.fn()
+    const onDismiss = vi.fn()
+    const receipt = BlockReceipt.forConnection('pi@raspberrypi', 'raspberrypi', {
+      onSave,
+      onDismiss,
+    })
+
+    const root = receipt.root
+    expect(root.className).toContain('ui-block-receipt')
+
+    // Kind badge says "SSH host"
+    const kind = root.querySelector<HTMLElement>('.ui-block-receipt__kind')
+    expect(kind?.textContent).toBe('SSH host')
+
+    // Masked value is the destination
+    const value = root.querySelector<HTMLElement>('.ui-block-receipt__value')
+    expect(value?.textContent).toBe('pi@raspberrypi')
+
+    // Name field is pre-filled
+    const input = root.querySelector<HTMLInputElement>('.ui-text-field__input')
+    expect(input?.value).toBe('raspberrypi')
+
+    // One primary action
+    const primary = root.querySelector<HTMLButtonElement>('.ui-block-receipt__primary')
+    expect(primary?.textContent).toBe('Save')
+
+    // Clicking Save calls onSave with the input value
+    primary?.click()
+    expect(onSave).toHaveBeenCalledWith('raspberrypi')
+
+    // Clicking Dismiss calls onDismiss
+    const dismiss = root.querySelector<HTMLButtonElement>('.ui-block-receipt__drop')
+    expect(dismiss?.textContent).toBe('Dismiss')
+    dismiss?.click()
+    expect(onDismiss).toHaveBeenCalled()
+  })
+
+  it('does not steal focus when mounted', () => {
+    const container = document.createElement('div')
+    const input = document.createElement('input')
+    container.appendChild(input)
+    document.body.appendChild(container)
+    input.focus()
+
+    const receipt = BlockReceipt.forConnection('host', 'host', {
+      onSave: () => {},
+      onDismiss: () => {},
+    })
+    receipt.mount(container)
+
+    // Focus stays where it was — not stolen by the receipt.
+    expect(document.activeElement).toBe(input)
+
+    receipt.destroy()
+    container.remove()
+  })
+})

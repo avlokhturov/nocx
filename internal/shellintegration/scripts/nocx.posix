@@ -1,0 +1,112 @@
+# nocx shell integration for POSIX sh (dash, busybox ash, any /bin/sh).
+# Activated when NOCX_SHELL_INTEGRATION is set.
+# Emits OSC 133 A, B and D (with the real exit status) and OSC 7 (cwd),
+# entirely from PS1 — the minimal tier for hosts without bash or zsh.
+#
+# bash/zsh emit a command-start (C) marker from a preexec hook
+# (PROMPT_COMMAND/DEBUG, precmd/preexec_functions). POSIX sh has neither,
+# so C is unreachable through portable prompt hooks and is deliberately
+# never emitted here: a block simply appears already finished, with no
+# running phase. Do not fake C.
+
+if [ -z "${NOCX_SHELL_INTEGRATION:-}" ]; then
+    return 2>/dev/null || exit 0
+fi
+
+if [ -n "${__nocx_loaded:-}" ]; then
+    return 2>/dev/null || exit 0
+fi
+__nocx_loaded=1
+
+# Environment identity — the readiness passport (OSC 636 ; P) and the
+# nocx_env= tag on every OSC 133 marker. NOCX_ENVIRONMENT_ID is minted by
+# the backend delivery planner per attempt and exported by the launcher;
+# a shell without it (transient-integrated, raw, or a child shell inside
+# tmux/sudo) emits no passport and no tagged marker — fail-open, exactly the
+# pre-passport behaviour. POSIX sh has no regex, so the charset check is a
+# case glob plus a length bound.
+__nocx_env_id="${NOCX_ENVIRONMENT_ID:-}"
+__nocx_parent_env_id="${NOCX_PARENT_ENVIRONMENT_ID:--}"
+__nocx_generation="${NOCX_GENERATION:--}"
+
+# 0/1 exit status: the value is a valid passport field ([A-Za-z0-9._-]{1,64}).
+__nocx_ok_field() {
+    case "$1" in
+        ''|*[!A-Za-z0-9._-]*) return 1 ;;
+    esac
+    [ "${#1}" -le 64 ]
+}
+
+__nocx_tagged=0
+if __nocx_ok_field "$__nocx_env_id"; then
+    __nocx_tagged=1
+fi
+
+# Readiness passport — OSC 636 ; P ; <protocolVersion> ; <environmentId> ;
+# <parentEnvironmentId> ; <scriptVersion> ; <tier> ; <generation> ST (spec
+# §5.2). Emitted ONCE, at source time, from the main shell — NOT from PS1,
+# which forks per prompt and would re-announce every prompt. Every field is
+# [A-Za-z0-9._-]{1,64}; when any env-provided field is absent or malformed
+# no passport is emitted (fail-open).
+__nocx_protocol_version=1
+__nocx_script_version=11
+__nocx_tier=minimal
+__nocx_passport_ok=0
+if [ "${__nocx_tagged:-0}" = 1 ] && __nocx_ok_field "$__nocx_parent_env_id" && __nocx_ok_field "$__nocx_generation"; then
+    __nocx_passport_ok=1
+fi
+__nocx_passport_emit() {
+    [ "${__nocx_passport_ok:-0}" = 1 ] || return 0
+    printf '\033]636;P;%s;%s;%s;%s;%s;%s\007' \
+        "$__nocx_protocol_version" "$__nocx_env_id" "$__nocx_parent_env_id" \
+        "$__nocx_script_version" "$__nocx_tier" "$__nocx_generation"
+}
+__nocx_passport_emit
+
+# URL-encode the bytes that would break the OSC 7 payload: space, tab,
+# newline — the same set as the bash script. POSIX sh has no
+# ${var//pat/repl}, and sed is line-based so it cannot see a newline, so tr
+# first maps the newline to a sentinel byte (SOH) that sed then rewrites.
+__nocx_encode_url() {
+    printf '%s' "$1" | tr '\n' '\001' | sed "s/ /%20/g; s/$(printf '\t')/%09/g; s/$(printf '\001')/%0a/g"
+}
+
+# The entire prompt. PS1 is re-expanded at every prompt and the command
+# substitution below forks during that expansion, so $? here is the
+# just-finished command's exit status. Capture it BEFORE the OSC 7
+# substitutions below — they would clobber it (nocx-586 is the same bug in
+# bash). The D marker therefore carries the real status on every prompt
+# after the first command.
+#
+# Unlike bash/zsh (whose hooks run in the main shell and carry
+# __nocx_first_prompt state across prompts), a POSIX prompt expansion runs
+# in a forked subshell with no way to write state back — verified against
+# dash and busybox ash. The first prompt therefore emits D;0, the status of
+# the source itself. Every frontend consumer ignores a D with no command
+# running (the ledger, the input machine and the scrollback block manager
+# all no-op), so this is a declared limitation, not a bug to paper over.
+__nocx_prompt() {
+    __nocx_exit=$?
+    __nocx_host=${HOSTNAME:-}
+    __nocx_host=${__nocx_host%%.*}
+    if [ "${__nocx_tagged:-0}" = 1 ]; then
+        printf '\033]133;D;%s;nocx_env=%s\007' "$__nocx_exit" "$__nocx_env_id"
+        printf '\033]133;A;nocx_env=%s\007' "$__nocx_env_id"
+    else
+        printf '\033]133;D;%s\007' "$__nocx_exit"
+        printf '\033]133;A\007'
+    fi
+    printf '\033]7;file://%s%s\007' \
+        "$(__nocx_encode_url "$__nocx_host")" \
+        "$(__nocx_encode_url "$PWD")"
+    if [ "${__nocx_tagged:-0}" = 1 ]; then
+        printf '\033]133;B;nocx_env=%s\007' "$__nocx_env_id"
+    else
+        printf '\033]133;B\007'
+    fi
+}
+# Single-quoted on purpose: double quotes would expand $? once, at install
+# time, and freeze that value into the prompt forever — a naive
+# implementation looks perfect on the first prompt. With single quotes the
+# whole string is re-expanded afresh at every prompt.
+PS1='$(__nocx_prompt)'
