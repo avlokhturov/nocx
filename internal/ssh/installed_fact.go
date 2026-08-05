@@ -2,6 +2,7 @@ package ssh
 
 import (
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -127,6 +128,22 @@ func (s *InstalledFactStore) Invalidate(identity string) error {
 	}
 	s.facts = next
 	return nil
+}
+
+// All returns every recorded fact, ordered by identity so a surface that
+// enumerates the footprint (P10) never depends on Go map iteration order.
+// Same fail-closed reading as Get: a missing, corrupt or unreadable
+// document is an empty list — nothing is claimed installed.
+func (s *InstalledFactStore) All() []InstalledFact {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.loadLocked()
+	out := make([]InstalledFact, 0, len(s.facts))
+	for _, f := range s.facts {
+		out = append(out, f)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Identity < out[j].Identity })
+	return out
 }
 
 // loadLocked reads the document once, on first use. Corruption of any kind

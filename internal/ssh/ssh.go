@@ -30,6 +30,12 @@ type RemoteInstaller interface {
 	EnsureInstalledRemote(ctx context.Context, sshClient *gossh.Client, remoteHome string) error
 	GetRemoteHome(sshClient *gossh.Client) (string, error)
 	RemoteStartCommand() string
+	// UninstallRemote removes the committed integration bundle on the host,
+	// over the SFTP carrier, and reports the two lists: root-relative paths
+	// removed and root-relative paths the user modified (left in place).
+	// Defined here with the other carrier methods so internal/ssh can own
+	// the dial-and-call (P10) without depending on shellintegration.
+	UninstallRemote(ctx context.Context, sshClient *gossh.Client, remoteHome string) (removed, conflicts []string, err error)
 }
 
 // modeAllowsIntegration reports whether the resolved destination mode

@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -600,4 +601,71 @@ func activationSnapshot(t *testing.T, root string) []byte {
 		t.Fatalf("snapshot %s: %v", root, err)
 	}
 	return b.Bytes()
+}
+
+// TestUninstallRemote_RemovesManifestOwnedFilesOverSFTP: after a publish,
+// UninstallRemote removes exactly the manifest-owned, unmodified files and
+// reports them; a file the user changed is reported as a conflict and stays;
+// ~/.nocx itself and the launch carrier are never removed recursively.
+func TestUninstallRemote_RemovesManifestOwnedFilesOverSFTP(t *testing.T) {
+	srv := startRemoteTestSSHServer(t)
+	defer srv.close()
+
+	remoteHome := t.TempDir()
+	srv.home = remoteHome
+	ctx := context.Background()
+	s := New(testLogger())
+
+	client := dialRemoteTestSSHClient(t, srv)
+	defer func() { _ = client.Close() }()
+
+	if err := s.EnsureInstalledRemote(ctx, client, remoteHome); err != nil {
+		t.Fatalf("EnsureInstalledRemote: %v", err)
+	}
+	root := filepath.Join(remoteHome, dirName)
+
+	// The user modified one generation file after the publish.
+	gen := filepath.Join(root, integrationDir, genDir(version))
+	if err := os.WriteFile(filepath.Join(gen, "nocx.bash"), []byte("user edit"), 0o600); err != nil {
+		t.Fatalf("user edit: %v", err)
+	}
+
+	removed, conflicts, err := s.UninstallRemote(ctx, client, remoteHome)
+	if err != nil {
+		t.Fatalf("UninstallRemote: %v", err)
+	}
+
+	if !slices.Contains(removed, "manifest.json") {
+		t.Errorf("removed = %v, want manifest.json among them", removed)
+	}
+	if !slices.Contains(removed, filepath.ToSlash(filepath.Join(integrationDir, genDir(version), "nocx.zsh"))) {
+		t.Errorf("removed = %v, want the unmodified generation files among them", removed)
+	}
+	if !slices.Contains(conflicts, filepath.ToSlash(filepath.Join(integrationDir, genDir(version), "nocx.bash"))) {
+		t.Errorf("conflicts = %v, want the user-modified nocx.bash reported", conflicts)
+	}
+
+	// The modified file stays; the root and the launch carrier stay; the
+	// manifest is gone, so nothing is active anymore.
+	if _, statErr := os.Stat(filepath.Join(gen, "nocx.bash")); statErr != nil {
+		t.Errorf("user-modified file was removed: %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(root, launchName)); statErr != nil {
+		t.Errorf("launch carrier removed: %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(root, manifestName)); !errors.Is(statErr, fs.ErrNotExist) {
+		t.Errorf("manifest still present after uninstall: %v", statErr)
+	}
+	if _, statErr := os.Stat(root); statErr != nil {
+		t.Errorf("~/.nocx removed recursively: %v", statErr)
+	}
+
+	// A second uninstall finds nothing to remove — idempotent, no error.
+	removed2, conflicts2, err := s.UninstallRemote(ctx, client, remoteHome)
+	if err != nil {
+		t.Fatalf("second UninstallRemote: %v", err)
+	}
+	if len(removed2) != 0 || len(conflicts2) != 0 {
+		t.Errorf("second uninstall = removed %v conflicts %v, want none", removed2, conflicts2)
+	}
 }

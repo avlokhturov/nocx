@@ -16,6 +16,7 @@ import { createVaultState, SetupDialog, UnlockDialog } from './vault'
 import { VaultObserver } from './vault-observer'
 import { Dispatcher } from './dispatcher'
 import { SettingsContent, SURFACE_SETTINGS, SINGLETON_SETTINGS } from './settings-content'
+import { FootprintClient } from './footprint-client'
 import { HorizontalTabStrip, VerticalTabStrip } from './tab-strip'
 import { SurfaceRegistry, SURFACE_ID_SETTINGS } from './surface-registry'
 import { mountUpdateNotice } from './update-notice'
@@ -88,6 +89,7 @@ async function main() {
   const profileClient = new ProfileClient(dispatcher)
   const vaultClient = new VaultClient(dispatcher)
   const dialogClient = new DialogClient(dispatcher)
+  const footprintClient = new FootprintClient(dispatcher)
   const vaultObserver = new VaultObserver(dispatcher)
   const vaultController = createVaultState(vaultClient)
   vaultObserver.start(() => {
@@ -185,6 +187,7 @@ async function main() {
         vaultController,
         vaultClient,
         dialogClient,
+        footprintClient,
       )
       content.onConnect = (profile) => {
         log.info('nocx: connect from Settings', { profileId: profile.id })

@@ -748,3 +748,6 @@ func (*recordingRemoteInstaller) EnsureInstalledRemote(context.Context, *gossh.C
 	return nil
 }
 func (*recordingRemoteInstaller) RemoteStartCommand() string { return "" }
+func (*recordingRemoteInstaller) UninstallRemote(context.Context, *gossh.Client, string) ([]string, []string, error) {
+	return nil, nil, nil
+}

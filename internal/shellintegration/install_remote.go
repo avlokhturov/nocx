@@ -155,6 +155,34 @@ func (s *Impl) EnsureInstalledRemote(ctx context.Context, sshClient *gossh.Clien
 	return nil
 }
 
+// UninstallRemote removes the committed integration bundle on a remote host
+// over SFTP through the same Publisher.Uninstall the product exposes (P10):
+// only manifest-owned, unmodified files are removed; anything the user
+// changed is reported as a conflict and left alone; ~/.nocx is never removed
+// recursively — launch, tmp and the root stay in place. The two lists are
+// root-relative paths, exactly as the publisher reports them, so the caller
+// can render "these went, these did not" without re-deriving the semantics.
+func (s *Impl) UninstallRemote(ctx context.Context, sshClient *gossh.Client, remoteHome string) (removed, conflicts []string, err error) {
+	if remoteHome == "" {
+		return nil, nil, fmt.Errorf("shellintegration: remote home directory is empty")
+	}
+
+	sftpClient, err := sftp.NewClient(sshClient)
+	if err != nil {
+		return nil, nil, fmt.Errorf("shellintegration: sftp client: %w", err)
+	}
+	defer func() { _ = sftpClient.Close() }()
+
+	root := path.Join(remoteHome, dirName)
+	res, err := NewPublisher(s.log, sftpFS{client: sftpClient}, root).Uninstall()
+	if err != nil {
+		return nil, nil, fmt.Errorf("shellintegration: remote uninstall: %w", err)
+	}
+	s.log.Info("shellintegration: remote bundle uninstalled",
+		"root", root, "removed", res.Removed, "conflicts", res.Conflicts)
+	return res.Removed, res.Conflicts, nil
+}
+
 // GetRemoteHome queries the remote host for the user's home directory.
 func (s *Impl) GetRemoteHome(sshClient *gossh.Client) (string, error) {
 	sess, err := sshClient.NewSession()

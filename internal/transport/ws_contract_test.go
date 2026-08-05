@@ -2419,3 +2419,176 @@ func (realRemoteLauncher) StartCommand(kind ssh.ShellKind, opts ssh.LaunchOption
 	cmd, reason, ok := l.StartCommand(sk, lo)
 	return cmd, ssh.RefusalReason(reason), ok
 }
+
+// ── shell.footprint.status ────────────────────────────────────────────────
+
+func TestShellFootprintStatus_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "shell.footprint.status.schema.json")
+
+	removable := "p_01"
+	raw, err := json.Marshal(shellFootprintStatusResult{Destinations: []shellFootprintDestination{
+		{
+			Identity:           "pi@192.168.0.93:22",
+			Generation:         "v10",
+			Path:               footprintPath,
+			ProtocolVersion:    "1",
+			ScriptVersion:      "0.6.0",
+			LastObservedAt:     time.Date(2026, 8, 5, 10, 0, 0, 0, time.UTC),
+			RemovableProfileID: &removable,
+		},
+	}})
+	if err != nil {
+		t.Fatalf("marshal populated: %v", err)
+	}
+	validateJSON(t, schema, raw, "shell.footprint.status DTO (populated)")
+
+	// A destination with no saved connection: removableProfileId null.
+	raw, err = json.Marshal(shellFootprintStatusResult{Destinations: []shellFootprintDestination{
+		{
+			Identity:        "root@10.0.0.7:22",
+			Generation:      "v10",
+			Path:            footprintPath,
+			ProtocolVersion: "1",
+			ScriptVersion:   "0.6.0",
+			LastObservedAt:  time.Date(2026, 8, 5, 10, 0, 0, 0, time.UTC),
+		},
+	}})
+	if err != nil {
+		t.Fatalf("marshal non-removable: %v", err)
+	}
+	validateJSON(t, schema, raw, "shell.footprint.status DTO (no saved connection)")
+
+	// Empty: destinations must marshal as [] rather than null.
+	raw, err = json.Marshal(shellFootprintStatusResult{Destinations: []shellFootprintDestination{}})
+	if err != nil {
+		t.Fatalf("marshal empty: %v", err)
+	}
+	validateJSON(t, schema, raw, "shell.footprint.status DTO (empty)")
+}
+
+// OverTheWire: the real handler, a real fact store holding one
+// profile-removable fact and one direct-host fact, and the stub oracle that
+// resolves the saved profile to the first destination's identity.
+func TestShellFootprintStatus_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "shell.footprint.status.schema.json")
+	ctx := context.Background()
+
+	resolver := newLauncherTestResolver()
+	resolver.add("pi@192.168.0.93", ssh.HostConfig{User: "pi", HostName: "192.168.0.93", Port: 22})
+	facts := ssh.NewInstalledFactStore(
+		log.NewSlogAdapter(nil), storage.NewDocumentStore(t.TempDir()), "installed-facts.json")
+	if err := facts.Record(ssh.InstalledFact{
+		Identity: "pi@192.168.0.93:22", Protocol: "1", ScriptVersion: "0.6.0",
+		Generation: "v10", ObservedAt: time.Date(2026, 8, 5, 10, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	if err := facts.Record(ssh.InstalledFact{
+		Identity: "root@10.0.0.7:22", Protocol: "1", ScriptVersion: "0.5.2",
+		Generation: "v9", ObservedAt: time.Date(2026, 7, 30, 8, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	ws := NewWSServer(
+		log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithInstalledFactStore(facts),
+		WithSSHConfigResolver(resolver, "/nonexistent/config"),
+		WithProfileResolver(&openProfileResolver{host: "pi@192.168.0.93"}),
+		WithProfileRepository(&footprintTestProfileRepo{profiles: []profile.SSHProfile{{
+			Base:    profile.Base{ID: "p_01"},
+			Options: profile.StoredSSHProfileOptions{Host: "pi@192.168.0.93"},
+		}}}),
+	)
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	resp := vaultCall(t, conn, "shell.footprint.status", map[string]any{}, 2)
+	if resp.Error != nil {
+		t.Fatalf("shell.footprint.status: %+v", resp.Error)
+	}
+	validateJSON(t, schema, resp.Result, "shell.footprint.status result (real socket)")
+
+	var got shellFootprintStatusResult
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Destinations) != 2 {
+		t.Fatalf("destinations = %d, want 2", len(got.Destinations))
+	}
+	if got.Destinations[0].Identity != "pi@192.168.0.93:22" ||
+		got.Destinations[0].RemovableProfileID == nil ||
+		*got.Destinations[0].RemovableProfileID != "p_01" {
+		t.Errorf("profile destination = %+v, want identity pi@192.168.0.93:22 removable via p_01",
+			got.Destinations[0])
+	}
+	if got.Destinations[1].RemovableProfileID != nil {
+		t.Errorf("direct-host destination removableProfileId = %v, want null", *got.Destinations[1].RemovableProfileID)
+	}
+}
+
+// ── shell.footprint.uninstall ────────────────────────────────────────────
+
+func TestShellFootprintUninstall_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "shell.footprint.uninstall.schema.json")
+
+	raw, err := json.Marshal(shellFootprintUninstallResult{
+		Removed:   []string{"integration/v10/nocx.zsh", "integration/v10/nocx.posix", "manifest.json"},
+		Conflicts: []string{"integration/v10/nocx.bash"},
+	})
+	if err != nil {
+		t.Fatalf("marshal populated: %v", err)
+	}
+	validateJSON(t, schema, raw, "shell.footprint.uninstall DTO (populated)")
+
+	raw, err = json.Marshal(shellFootprintUninstallResult{Removed: []string{}, Conflicts: []string{}})
+	if err != nil {
+		t.Fatalf("marshal empty: %v", err)
+	}
+	validateJSON(t, schema, raw, "shell.footprint.uninstall DTO (nothing to do)")
+}
+
+// OverTheWire: the real handler drives a recording capability with the
+// resolved profile config and sends the real result off the real socket —
+// a conflict is reported as data, not swallowed as an error.
+func TestShellFootprintUninstall_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "shell.footprint.uninstall.schema.json")
+	ctx := context.Background()
+
+	rec := &recordingUninstaller{
+		removed:   []string{"integration/v10/nocx.zsh", "manifest.json"},
+		conflicts: []string{"integration/v10/nocx.bash"},
+	}
+	ws := NewWSServer(
+		log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithRemoteUninstaller(rec),
+		WithProfileResolver(&openProfileResolver{host: "pi@192.168.0.93"}),
+	)
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	resp := vaultCall(t, conn, "shell.footprint.uninstall", map[string]any{"profileId": "p_01"}, 3)
+	if resp.Error != nil {
+		t.Fatalf("shell.footprint.uninstall: %+v", resp.Error)
+	}
+	validateJSON(t, schema, resp.Result, "shell.footprint.uninstall result (real socket)")
+
+	var got shellFootprintUninstallResult
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Removed) != 2 || got.Removed[0] != "integration/v10/nocx.zsh" || got.Removed[1] != "manifest.json" {
+		t.Errorf("removed = %v, want the capability's list verbatim", got.Removed)
+	}
+	if len(got.Conflicts) != 1 || got.Conflicts[0] != "integration/v10/nocx.bash" {
+		t.Errorf("conflicts = %v, want the capability's list verbatim", got.Conflicts)
+	}
+}

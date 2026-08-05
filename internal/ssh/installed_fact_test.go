@@ -190,3 +190,29 @@ func TestInstalledFactStore_DocumentShape(t *testing.T) {
 		t.Errorf("document facts = %+v, want pi@host:22 with generation v10", docOnDisk.Facts)
 	}
 }
+
+// TestInstalledFactStore_All: enumeration answers every recorded fact,
+// ordered by identity — a surface (P10) must never depend on Go map
+// iteration order — and a store with nothing recorded answers an empty list,
+// not nil.
+func TestInstalledFactStore_All(t *testing.T) {
+	store, _ := testFactStore(t)
+	if got := store.All(); len(got) != 0 {
+		t.Fatalf("empty store All() = %d facts, want 0", len(got))
+	}
+
+	for _, id := range []string{"zeta@h:22", "alpha@h:22", "mid@h:22"} {
+		if err := store.Record(testFact(id)); err != nil {
+			t.Fatalf("Record %s: %v", id, err)
+		}
+	}
+	got := store.All()
+	if len(got) != 3 {
+		t.Fatalf("All() = %d facts, want 3", len(got))
+	}
+	for i, want := range []string{"alpha@h:22", "mid@h:22", "zeta@h:22"} {
+		if got[i].Identity != want {
+			t.Errorf("All()[%d].Identity = %q, want %q (order must be deterministic)", i, got[i].Identity, want)
+		}
+	}
+}

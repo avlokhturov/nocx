@@ -330,7 +330,14 @@ func TestShPublish_InterruptedLeavesActivationAndConverges(t *testing.T) {
 			time.Sleep(d)
 			_ = cmd.Process.Kill()
 			_ = cmd.Wait()
-			assertManifestBytes(t, manifest, baseline)
+			// A wall-clock kill cannot know which boundary it landed on, and
+			// on slower hardware it lands after the commit — so requiring the
+			// baseline here fails for the one reason that is not a defect.
+			// The invariant that does hold at EVERY boundary is that the
+			// activation is one of exactly two whole states: the previous
+			// one, or the new one complete and verifying. A torn manifest,
+			// or one naming files that are absent or wrong, is the failure.
+			assertActivationWholeAfterKill(t, root, manifest, baseline)
 		})
 	}
 
@@ -354,5 +361,29 @@ func assertManifestBytes(t *testing.T, path string, want []byte) {
 	}
 	if string(got) != string(want) {
 		t.Errorf("manifest changed across an interrupted publish:\n got: %s\nwant: %s", got, want)
+	}
+}
+
+// assertActivationWholeAfterKill accepts either whole state an atomic publish
+// can be interrupted into and rejects everything between them. Killing at a
+// wall-clock offset is deliberately imprecise; this assertion is not.
+func assertActivationWholeAfterKill(t *testing.T, root, manifest string, baseline []byte) {
+	t.Helper()
+	got, err := os.ReadFile(manifest) // #nosec G304 — test-owned path.
+	if err != nil {
+		t.Fatalf("manifest missing after an interrupted publish: %v", err)
+	}
+	if string(got) == string(baseline) {
+		return // the commit had not happened yet
+	}
+	// The commit did happen before the kill: it must be complete, because a
+	// manifest is renamed into place only after every file it names exists
+	// with the recorded hash and mode.
+	vr, verr := NewPublisher(testLogger(), NewOSFS(), root).Verify()
+	if verr != nil {
+		t.Fatalf("manifest changed but does not verify: %v", verr)
+	}
+	if !vr.Installed {
+		t.Errorf("manifest changed but Verify reports nothing installed: %+v", vr)
 	}
 }

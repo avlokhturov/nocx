@@ -130,6 +130,12 @@ type WSServer struct {
 	// recorded.
 	installedFacts *ssh.InstalledFactStore
 
+	// remoteUninstaller removes the integration bundle on a remote host,
+	// owning the dial-and-call (P10). Wired through WithRemoteUninstaller;
+	// when nil, shell.footprint.uninstall answers an error and removes
+	// nothing — the status surface never offers the button without it.
+	remoteUninstaller RemoteUninstaller
+
 	// launcherAttempts is the idempotency registry binding a minted
 	// environment id to its resolved identity and expected delivery
 	// (§5.3). Guarded by launcherAttemptsMu; a passport can arrive
@@ -970,6 +976,10 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.handleHistoryRecord(ctx, wconn, state, req)
 	case "fs.complete":
 		s.handleFsComplete(wconn, req)
+	case "shell.footprint.status":
+		s.handleShellFootprintStatus(wconn, req)
+	case "shell.footprint.uninstall":
+		s.handleShellFootprintUninstall(wconn, req)
 	case "shell.complete":
 		s.handleShellComplete(ctx, wconn, req)
 	case "shell.integrate":

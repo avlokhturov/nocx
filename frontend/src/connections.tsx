@@ -18,6 +18,8 @@ import { Radio } from './ui/radio'
 import { Section } from './ui/section'
 import { Stack } from './ui/stack'
 import { Tabs } from './ui/tabs'
+import type { FootprintClient } from './footprint-client'
+import { FootprintSection } from './footprint-section'
 import { EmptyState } from './ui/empty-state'
 import { Field } from './ui/field'
 import { FileInput } from './ui/file-input'
@@ -291,6 +293,13 @@ export interface ConnectionsViewProps {
    * hand.
    */
   dialogClient?: DialogClient
+  /**
+   * The remote-footprint surface (nocx-mlm7 P10): what nocx wrote on which
+   * host and the uninstall action. Absent in the dev-web harness and in
+   * tests; the section then renders nothing rather than offering an
+   * action that cannot run.
+   */
+  footprintClient?: FootprintClient
 }
 
 // ── Component ────────────────────────────────────────────────────────────────
@@ -2477,6 +2486,11 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           />
         </Show>
       </CollectionView>
+
+      {/* The remote footprint (nocx-mlm7 P10): hosts nocx has installed
+          shell integration on, and the uninstall action for the ones a
+          saved connection reaches. Placed here, never repainted. */}
+      <FootprintSection client={props.footprintClient} />
 
       {/* Editor Dialog */}
       <Show when={editing()}>

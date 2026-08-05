@@ -17,6 +17,7 @@ import { For, Show, createSignal, createMemo, createEffect, onMount, onCleanup }
 import { createStore } from 'solid-js/store'
 import { ConnectionsView } from './connections'
 import { SecretsSection } from './secrets'
+import type { FootprintClient } from './footprint-client'
 import type { ProfileClient, SSHProfile } from './profiles'
 import type { DialogClient } from './dialog-client'
 import { SettingsObserver } from './settings-observer'
@@ -111,6 +112,9 @@ export interface SettingsComponentProps {
   vaultController?: import('./vault').VaultController
   vaultClient?: import('./vault-client').VaultClient
   dialogClient?: DialogClient
+  /** Remote footprint (nocx-mlm7 P10) for the Connections page. Absent in
+   *  the dev-web harness; the section then renders nothing. */
+  footprintClient?: FootprintClient
   ref?: { current: SettingsComponentHandle | null }
 }
 
@@ -331,6 +335,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
           vaultController={props.vaultController}
           vaultClient={props.vaultClient}
           dialogClient={props.dialogClient}
+          footprintClient={props.footprintClient}
           onConnect={props.onConnect}
           newProfileRequest={newConnectionRequest()}
           onNavigateToSecrets={() => setActiveComponentPage('secrets')}

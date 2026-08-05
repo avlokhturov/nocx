@@ -350,6 +350,14 @@ func New(opts ...Option) (*App, error) {
 		// integration. The delivery planner reads it to choose the compact
 		// installed line; the observation RPC writes and invalidates it.
 		transport.WithInstalledFactStore(installedFacts),
+		// The uninstall capability (nocx-mlm7 P10, design §9): *ssh.RealClient
+		// satisfies transport.RemoteUninstaller without an adapter — the
+		// signatures are identical. The capability owns the dial-and-call
+		// (acquire the pooled connection, ask the carrier for the remote
+		// home, run Publisher.Uninstall over SFTP); the raw SSH client
+		// never leaves internal/ssh. Wired beside the installer P8 added:
+		// a saved connection that publishes can also remove.
+		transport.WithRemoteUninstaller(sshClient),
 		// The tunnel connector (nocx-8gix): *ssh.RealClient satisfies
 		// tunnel.Connector without an adapter — the signatures are
 		// identical — so a forward acquires its OWN pooled connection

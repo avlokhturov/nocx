@@ -79,6 +79,10 @@ func (f *recordInstaller) RemoteStartCommand() string {
 	return f.cmd
 }
 
+func (f *recordInstaller) UninstallRemote(_ context.Context, _ *gossh.Client, _ string) ([]string, []string, error) {
+	return nil, nil, nil
+}
+
 // testSSHServer accessors for start-command observations.
 func (s *testSSHServer) lastExecCommand() string {
 	select {
