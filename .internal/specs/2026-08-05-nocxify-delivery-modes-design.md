@@ -178,9 +178,30 @@ The remote state is a **versioned immutable generation**, never a mutated workin
 - A read-only `$HOME` publishes nothing and records no installed fact; the session runs
   from argv as in §3.2, or raw.
 
-The SFTP carrier (saved connections, where nocx owns the transport) and the self-installing
-launcher **hand the same bundle descriptor to the same publisher**. One owner of the
-behaviour, two carriers (AD-8). Today neither is wired: `internal/app/app.go` constructs the
+### 4.0 Two writers, one contract — because one of them is not Go
+
+The first draft said the SFTP carrier and the self-installing launcher "hand the same bundle
+descriptor to the same publisher". That is impossible for half of it, and P6 caught it: the
+bootstrap launcher **is POSIX `sh` executing on the far host**, a machine our Go binary never
+reaches. Nothing Go-side can run there.
+
+So the contract is what is shared, not the code:
+
+- **Declared once, on the Go side**: the manifest schema, the directory layout, the modes,
+  the version comparison. Neither writer invents a field, a path or a mode.
+- **Two writers**: `Publisher.Publish` over the FS seam (used by SFTP, where nocx owns the
+  transport), and a POSIX `sh` publish embedded in the bootstrap launcher (used when the only
+  thing we have on that host is a shell).
+- **One verifier**: Go's `Verify()`, and the `launch` carrier's own manifest check.
+- **Conformance runs both ways, and is the acceptance criterion**: `sh` publishes into a
+  disposable `$HOME` and Go `Verify()` reports it active and complete; Go publishes and the
+  `sh` carrier accepts it and execs the integrated shell. Either direction failing is a
+  broken contract, not a test to relax.
+
+The `sh` writer keeps every refusal (symlink, foreign root, read-only `$HOME`, no-downgrade)
+and the `mkdir` lock — atomic in POSIX `sh`, which is why P1 chose that shape. What it cannot
+keep is `fsync`: its durability guarantee is process death and connection loss, not power
+loss, and the code says so where the Go side promises more. Today neither is wired: `internal/app/app.go` constructs the
 launcher and the local stager but no installer, and `internal/ssh/ssh_real.go` reaches the
 installer only when the launcher is absent — so this is new wiring, not the reuse of a
 working path.
