@@ -3,6 +3,7 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1957,6 +1958,96 @@ func TestVaultUnlockRequest_OverTheWireConformsToContract(t *testing.T) {
 		t.Fatalf("expected vault.unlockRequest, got %q", notif.Method)
 	}
 	validateJSON(t, schema, notif.Params, "vault.unlockRequest params over the wire")
+}
+
+// ── connections.passwordRequest notification contract ─────────────────
+// Same shape as vault.unlockRequest: the notification is server→client,
+// so the params ARE the contract. The prompt must name which password it
+// is asking for (nocx-s8jn), so connection/user/host are required fields.
+
+func TestConnectionsPasswordRequest_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "connections.passwordRequest.schema.json")
+	raw, err := json.Marshal(map[string]any{
+		"requestId":  "abc123",
+		"connection": "prod-web",
+		"user":       "deploy",
+		"host":       "web.example.com",
+		"reason":     "no password is stored for this connection",
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "connections.passwordRequest params DTO")
+}
+
+func TestConnectionsPasswordRequest_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "connections.passwordRequest.schema.json")
+	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithVaultLifecycle(newFakeVaultLifecycle()))
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+
+	conn := connectWS(t, ws)
+	defer conn.Close() //nolint:errcheck
+
+	// Request a connection password; this sends the real notification over
+	// the socket.
+	done := make(chan error, 1)
+	go func() {
+		_, err := ws.RequestConnectionPassword(ctx, ssh.PasswordRequest{
+			Connection: "prod-web",
+			User:       "deploy",
+			Host:       "web.example.com",
+			Reason:     "no password is stored for this connection",
+		})
+		done <- err
+	}()
+
+	// Read the notification off the real socket.
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, data, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read notification: %v", err)
+	}
+
+	var notif struct {
+		JSONRPC string          `json:"jsonrpc"`
+		Method  string          `json:"method"`
+		Params  json.RawMessage `json:"params"`
+	}
+	if err := json.Unmarshal(data, &notif); err != nil {
+		t.Fatalf("unmarshal notification: %v", err)
+	}
+	if notif.Method != "connections.passwordRequest" {
+		t.Fatalf("expected connections.passwordRequest, got %q", notif.Method)
+	}
+	validateJSON(t, schema, notif.Params, "connections.passwordRequest params over the wire")
+
+	// Resolve so the asker does not leak a pending request.
+	var params struct {
+		RequestID string `json:"requestId"`
+	}
+	if err := json.Unmarshal(notif.Params, &params); err != nil {
+		t.Fatalf("unmarshal params: %v", err)
+	}
+	resp := vaultCall(t, conn, "connections.passwordResolved", map[string]any{
+		"requestId": params.RequestID,
+		"outcome":   "cancelled",
+	}, 2)
+	if resp.Error != nil {
+		t.Fatalf("passwordResolved error: %s", resp.Error.Message)
+	}
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrPasswordPromptCancelled) {
+			t.Fatalf("RequestConnectionPassword = %v, want ErrPasswordPromptCancelled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("RequestConnectionPassword did not resolve")
+	}
 }
 
 // ── shell.launcherCommand ──────────────────────────────────────────────────

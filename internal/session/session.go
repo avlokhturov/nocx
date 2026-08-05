@@ -352,6 +352,12 @@ func sshOptionsFromConfig(cfg *ssh.ConnectConfig) []ssh.ConnectOption {
 	if cfg.PassphraseSecretID != "" {
 		opts = append(opts, ssh.WithPassphraseSecretID(cfg.PassphraseSecretID))
 	}
+	if cfg.ConnectionName != "" {
+		opts = append(opts, ssh.WithConnectionName(cfg.ConnectionName))
+	}
+	if cfg.PasswordRequester != nil {
+		opts = append(opts, ssh.WithPasswordRequester(cfg.PasswordRequester))
+	}
 
 	if cfg.AuthorizedEndpoint != "" {
 		opts = append(opts, ssh.WithAuthorizedEndpoint(cfg.AuthorizedEndpoint))

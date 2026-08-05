@@ -220,6 +220,21 @@ type ConnectConfig struct {
 	// RPCs; this field covers background goroutines like forward replay).
 	UnlockRequester func(ctx context.Context, reason string) error
 
+	// ConnectionName is the saved profile's display name, carried so a
+	// password prompt can name which connection it is asking about
+	// (nocx-s8jn). Empty for direct-host opens, which never raise prompts.
+	ConnectionName string
+
+	// PasswordRequester asks the user for a connection password when the
+	// server challenges and no stored material can answer. It powers the
+	// prompt-password rung of the auth ladder (tabby's model: the rung is
+	// always present for password-capable modes, so the ladder never ends
+	// empty); this field is what makes the rung live. When nil, the rung
+	// carries no method and password-capable connections with nothing
+	// stored behave as they did before. Wired at the composition root; the
+	// connection resolver implements it (wire ask + remember).
+	PasswordRequester ConnectionPasswordRequester
+
 	// PassphraseSecretID is the opaque reference to the stored key
 	// passphrase in the SecretStore.
 	PassphraseSecretID credential.SecretID
@@ -371,6 +386,22 @@ func WithRemoteInstaller(ri RemoteInstaller) ConnectOption {
 // restricts which auth buckets are attempted in the fallback chain.
 func WithAuthMode(mode string) ConnectOption {
 	return func(c *ConnectConfig) { c.AuthMode = mode }
+}
+
+// WithConnectionName sets the profile display name the connection was
+// opened from, carried so a password prompt can name which connection it
+// is asking about (nocx-s8jn). Empty for direct-host opens.
+func WithConnectionName(name string) ConnectOption {
+	return func(c *ConnectConfig) { c.ConnectionName = name }
+}
+
+// WithPasswordRequester wires the connection-password ask into the
+// connect-time config. The session path decomposes a resolver-built
+// ConnectConfig into options and rebuilds it, so without this option the
+// prompt rung of the auth ladder dies between the resolver and the dial —
+// a field that is carried and discarded is worse than one that is missing.
+func WithPasswordRequester(r ConnectionPasswordRequester) ConnectOption {
+	return func(c *ConnectConfig) { c.PasswordRequester = r }
 }
 
 // WithJumpHost sets the jump host configuration for SSH connection.

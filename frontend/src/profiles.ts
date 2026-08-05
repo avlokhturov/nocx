@@ -444,6 +444,22 @@ export class ProfileClient {
     return this.call('connections.trustHostKey', { host, key })
   }
 
+  /**
+   * connections.passwordResolved — answer a backend-raised connection-
+   * password prompt (connections.passwordRequest). outcome 'submitted'
+   * carries the typed password and whether the user asked to remember it;
+   * 'cancelled' dismisses the ask. The backend decides where and whether
+   * the password is stored — this call only reports the decision.
+   */
+  passwordResolved(params: {
+    requestId: string
+    outcome: 'submitted' | 'cancelled'
+    password?: string
+    remember?: boolean
+  }): Promise<Record<string, never>> {
+    return this.call('connections.passwordResolved', params)
+  }
+
   // with per-field provenance. Batch: pass several IDs in one call.
   loadEffective(ids: string[]): Promise<EffectiveBatchResponse> {
     return this.call('profiles.effective', { ids })

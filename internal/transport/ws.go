@@ -224,10 +224,11 @@ type WSServer struct {
 	connsMu sync.Mutex
 	conns   map[*wsConn]struct{}
 
-	// unlockMu protects pendingUnlocks. Pending backend-initiated unlock
-	// requests, keyed by server-assigned opaque request id.
-	unlockMu       sync.Mutex
-	pendingUnlocks map[string]*pendingUnlock
+	// asks is the shared backend→renderer ask machinery (unlock requests,
+	// connection-password prompts): a pending registry keyed by
+	// server-assigned opaque request id, one correlation mechanism for
+	// every ask (unlock_requester.go, password_requester.go).
+	asks askBroker
 
 	// planMu guards planStore. Plans are decrypted import plans keyed by
 	// opaque token, stored server-side so secrets never reach the renderer.
@@ -908,7 +909,16 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 
 	switch req.Method {
 	case "open":
-		s.handleOpen(ctx, wconn, state, req)
+		// handleOpen must NOT run on the read loop. Opening a saved
+		// connection can raise the connection-password ask (the prompt
+		// rung of the auth ladder) and block until the renderer answers —
+		// and the answer arrives over THIS websocket, which the read loop
+		// is what consumes. Running the dial on the read loop would make
+		// the resolution unreadable: the open would wait forever on a
+		// response the same loop is blocked from reading. The write mutex
+		// serializes the ack; connState is mutex-guarded, so the open can
+		// proceed beside the loop reading resize/close for OTHER sessions.
+		go s.handleOpen(ctx, wconn, state, req)
 	case "resize":
 		s.handleResize(wconn, state, req)
 	case "close":
@@ -1001,6 +1011,8 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.handleVaultReset(wconn, req)
 	case "vault.unlockResolved":
 		s.handleUnlockResolved(wconn, req)
+	case "connections.passwordResolved":
+		s.handlePasswordResolved(wconn, req)
 	default:
 		resp := newJSONRPCError(req.ID, -32601, "Method not found")
 		_ = wconn.writeJSON(resp)

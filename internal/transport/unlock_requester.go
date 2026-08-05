@@ -7,7 +7,109 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 )
+
+// askBroker is the shared backend→renderer ask machinery: a pending
+// registry keyed by server-assigned request id, a broadcast to every
+// connected client, and a blocking wait for the resolution RPC. The vault
+// unlock ask (UnlockRequester) and the connection-password ask
+// (RequestConnectionPassword) are both thin specializations over it — one
+// correlation mechanism, two meanings. A connection password is not the
+// vault passphrase, so the two asks keep their own methods, params and
+// error types; only the plumbing is shared.
+type askBroker struct {
+	mu      sync.Mutex
+	pending map[string]*pendingAsk
+}
+
+// pendingAsk tracks one in-flight ask.
+type pendingAsk struct {
+	ch chan askResolution
+}
+
+// askResolution is one answer to a pending ask: either a result payload
+// (the resolved answer) or an error (cancelled, no client, timeout,
+// unknown outcome).
+type askResolution struct {
+	result json.RawMessage // nil when err != nil
+	err    error
+}
+
+func (b *askBroker) init() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.pending == nil {
+		b.pending = make(map[string]*pendingAsk)
+	}
+}
+
+// register mints a request id and records the pending ask. The returned
+// channel receives exactly one askResolution (buffered, so the resolver
+// never blocks on the waiter).
+func (b *askBroker) register() (string, chan askResolution, error) {
+	b.init()
+	ridBytes := make([]byte, 8)
+	if _, err := rand.Read(ridBytes); err != nil {
+		return "", nil, fmt.Errorf("generate request id: %w", err)
+	}
+	rid := hex.EncodeToString(ridBytes)
+	ch := make(chan askResolution, 1)
+	b.mu.Lock()
+	b.pending[rid] = &pendingAsk{ch: ch}
+	b.mu.Unlock()
+	return rid, ch, nil
+}
+
+// consume removes and returns the pending ask for rid. Returns ok=false
+// for an unknown id — the renderer resolved something that was never
+// asked, or asked twice (the second resolution is the error).
+func (b *askBroker) consume(rid string) (*pendingAsk, bool) {
+	b.init()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	pa, ok := b.pending[rid]
+	if ok {
+		delete(b.pending, rid)
+	}
+	return pa, ok
+}
+
+// drop abandons the pending ask for rid (no client connected, context
+// done) so a late resolution cannot wake a waiter nobody is listening to.
+func (b *askBroker) drop(rid string) {
+	b.init()
+	b.mu.Lock()
+	delete(b.pending, rid)
+	b.mu.Unlock()
+}
+
+// broadcastAsk sends a notification to every connected client. noClientErr
+// is the error to return when no renderer is attached — each ask names its
+// own outcome ("unlock prompt" vs "connection password"), because the three
+// outcomes of an ask must be distinguishable by their message.
+func (s *WSServer) broadcastAsk(method string, params map[string]any, noClientErr error) error {
+	s.connsMu.Lock()
+	conns := make([]*wsConn, 0, len(s.conns))
+	for wc := range s.conns {
+		conns = append(conns, wc)
+	}
+	s.connsMu.Unlock()
+
+	if len(conns) == 0 {
+		return noClientErr
+	}
+
+	notif := map[string]any{
+		"jsonrpc": "2.0",
+		"method":  method,
+		"params":  params,
+	}
+	for _, wc := range conns {
+		_ = wc.writeJSON(notif)
+	}
+	return nil
+}
 
 // UnlockRequester lets backend code request a vault unlock from the user.
 // A single method, behind an interface (AD-8), wired at the one composition
@@ -33,78 +135,29 @@ var ErrNoClientConnected = errors.New("no client connected to show unlock prompt
 // the unlock dialog without unlocking.
 var ErrUnlockCancelled = errors.New("unlock cancelled by user")
 
-// pendingUnlock tracks one in-flight unlock request.
-type pendingUnlock struct {
-	ch     chan error // receives nil on unsealed, ErrUnlockCancelled on dismiss
-	reason string
-}
-
-// ── WSServer unlock-request implementation ─────────────────────────────
-
-func (s *WSServer) initUnlockRequester() {
-	s.unlockMu.Lock()
-	defer s.unlockMu.Unlock()
-	if s.pendingUnlocks == nil {
-		s.pendingUnlocks = make(map[string]*pendingUnlock)
-	}
-}
-
 // RequestUnlock sends a vault.unlockRequest notification to every connected
 // client and blocks until one responds via vault.unlockResolved, or the
 // context is done.
 func (s *WSServer) RequestUnlock(ctx context.Context, reason string) error {
-	s.initUnlockRequester()
-
-	// Assign a request id so the response can be correlated.
-	ridBytes := make([]byte, 8)
-	if _, err := rand.Read(ridBytes); err != nil {
-		return fmt.Errorf("generate request id: %w", err)
-	}
-	rid := hex.EncodeToString(ridBytes)
-
-	ch := make(chan error, 1)
-	pu := &pendingUnlock{ch: ch, reason: reason}
-
-	s.unlockMu.Lock()
-	s.pendingUnlocks[rid] = pu
-	s.unlockMu.Unlock()
-
-	// Send to every connected client; best-effort (one write failure does
-	// not prevent writes to others).
-	s.connsMu.Lock()
-	conns := make([]*wsConn, 0, len(s.conns))
-	for wc := range s.conns {
-		conns = append(conns, wc)
-	}
-	s.connsMu.Unlock()
-
-	if len(conns) == 0 {
-		s.unlockMu.Lock()
-		delete(s.pendingUnlocks, rid)
-		s.unlockMu.Unlock()
-		return ErrNoClientConnected
+	rid, ch, err := s.asks.register()
+	if err != nil {
+		return err
 	}
 
-	notif := map[string]any{
-		"jsonrpc": "2.0",
-		"method":  "vault.unlockRequest",
-		"params": map[string]any{
-			"requestId": rid,
-			"reason":    reason,
-		},
-	}
-	for _, wc := range conns {
-		_ = wc.writeJSON(notif)
+	if err := s.broadcastAsk("vault.unlockRequest", map[string]any{
+		"requestId": rid,
+		"reason":    reason,
+	}, ErrNoClientConnected); err != nil {
+		s.asks.drop(rid)
+		return err
 	}
 
 	// Wait for a response or context done.
 	select {
-	case err := <-ch:
-		return err
+	case res := <-ch:
+		return res.err
 	case <-ctx.Done():
-		s.unlockMu.Lock()
-		delete(s.pendingUnlocks, rid)
-		s.unlockMu.Unlock()
+		s.asks.drop(rid)
 		return ctx.Err()
 	}
 }
@@ -121,13 +174,7 @@ func (s *WSServer) handleUnlockResolved(wconn *wsConn, req jsonrpcRequest) {
 		return
 	}
 
-	s.unlockMu.Lock()
-	pu, ok := s.pendingUnlocks[params.RequestID]
-	if ok {
-		delete(s.pendingUnlocks, params.RequestID)
-	}
-	s.unlockMu.Unlock()
-
+	pa, ok := s.asks.consume(params.RequestID)
 	if !ok {
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Unknown request id"))
 		return
@@ -135,11 +182,11 @@ func (s *WSServer) handleUnlockResolved(wconn *wsConn, req jsonrpcRequest) {
 
 	switch params.Outcome {
 	case "unsealed":
-		pu.ch <- nil
+		pa.ch <- askResolution{}
 	case "cancelled":
-		pu.ch <- ErrUnlockCancelled
+		pa.ch <- askResolution{err: ErrUnlockCancelled}
 	default:
-		pu.ch <- fmt.Errorf("unlock resolved with unknown outcome: %q", params.Outcome)
+		pa.ch <- askResolution{err: fmt.Errorf("unlock resolved with unknown outcome: %q", params.Outcome)}
 	}
 
 	_ = wconn.writeJSON(newJSONRPCResult(req.ID, json.RawMessage("{}")))

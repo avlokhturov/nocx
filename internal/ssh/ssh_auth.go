@@ -81,7 +81,10 @@ func (rc *RealClient) buildAuthChain(ctx context.Context, resolved *resolvedConf
 	}
 
 	if mode == "" || mode == "password" {
-		chain = append(chain, authChainEntry{kind: kindPromptPassword})
+		chain = append(chain, authChainEntry{
+			kind:   kindPromptPassword,
+			method: rc.promptPasswordMethod(ctx, cfg, resolved, hasStoredPasswordRung(chain)),
+		})
 	}
 
 	chain = append(chain, authChainEntry{kind: kindHostbased})

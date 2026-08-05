@@ -38,6 +38,15 @@ type Resolver struct {
 	// saved connection in script mode (P8's carrier). Wired at the
 	// composition root; nil means no publish happens.
 	remoteInstaller ssh.RemoteInstaller
+	// asker is the transport's wire ask for a connection password. When
+	// nil, no password prompt is ever raised (direct-host opens, tests
+	// without the ask wired) and password-capable profiles behave as they
+	// did before.
+	asker func(ctx context.Context, req ssh.PasswordRequest) (ssh.PasswordAnswer, error)
+	// creator is the vault's named-create surface the remember path uses.
+	// When nil, a remember answer fails loudly instead of silently
+	// degrading to use-once.
+	creator SecretCreator
 }
 
 // WithRemoteInstaller attaches the SFTP carrier that publishes the
@@ -52,6 +61,21 @@ func WithRemoteInstaller(ri ssh.RemoteInstaller) ResolverOption {
 
 // ResolverOption configures the Resolver.
 type ResolverOption func(*Resolver)
+
+// WithPasswordAsker attaches the transport's connection-password ask: the
+// wire request/response that raises the prompt and blocks for the answer.
+// Wired from the transport at the composition root, the same way
+// WithUnlockRequester is. The Resolver wraps it with the remember logic.
+func WithPasswordAsker(fn func(ctx context.Context, req ssh.PasswordRequest) (ssh.PasswordAnswer, error)) ResolverOption {
+	return func(r *Resolver) { r.asker = fn }
+}
+
+// WithSecretCreator attaches the vault's named-create surface the remember
+// path uses to store an accepted password (ADR-0016 names, ADR-0017
+// references). The vault implements it; wired at the composition root.
+func WithSecretCreator(cr SecretCreator) ResolverOption {
+	return func(r *Resolver) { r.creator = cr }
+}
 
 func WithConfigResolver(resolver ssh.ConfigResolver) ResolverOption {
 	return func(r *Resolver) { r.configResolver = resolver }
@@ -186,6 +210,17 @@ func (r *Resolver) buildConfig(prof *profile.SSHProfile, visited map[string]bool
 	// Wire SecretStore for late-bound password/passphrase/key resolution via
 	// opaque SecretID references (ADR-0011 §2). The bindings live on the
 	// effective profile, one per auth method (ADR-0017 §1).
+
+	// The connection-password ask (the prompt rung): wired whenever the
+	// transport ask is available, so the auth ladder for a password-capable
+	// profile never ends empty (tabby's model). ConnectionName is the
+	// profile's display name — the prompt names the connection it is asking
+	// about (nocx-s8jn). askerFor pins the profile id the remember path
+	// must update.
+	cfg.ConnectionName = prof.Name
+	if r.asker != nil {
+		cfg.PasswordRequester = r.askerFor(prof.ID)
+	}
 	if o.PasswordSecret != "" || o.KeySecret != "" || o.KeyPassphraseSecret != "" {
 		cfg.Secrets = r.secrets
 		cfg.UnlockRequester = r.unlockRequester

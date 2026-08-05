@@ -478,6 +478,8 @@ func New(opts ...Option) (*App, error) {
 		profileStore, profileStore, v,
 		connection.WithConfigResolver(sshCfgResolver),
 		connection.WithUnlockRequester(tp.RequestUnlock),
+		connection.WithPasswordAsker(tp.RequestConnectionPassword),
+		connection.WithSecretCreator(v),
 		connection.WithRemoteInstaller(shint),
 	)
 	tp.SetProfileResolver(resolver)

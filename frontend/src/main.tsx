@@ -13,6 +13,8 @@ import { ProfileClient } from './profiles'
 import { VaultClient } from './vault-client'
 import { DialogClient } from './dialog-client'
 import { createVaultState, SetupDialog, UnlockDialog } from './vault'
+import { ConnectionPasswordPrompt } from './connection-password-prompt'
+import type { ConnectionsPasswordRequest } from './generated/connections.passwordRequest'
 import { VaultObserver } from './vault-observer'
 import { Dispatcher } from './dispatcher'
 import { SettingsContent, SURFACE_SETTINGS, SINGLETON_SETTINGS } from './settings-content'
@@ -108,6 +110,20 @@ async function main() {
     if (!p || !p.requestId) return
     pendingBackendUnlock = p.requestId
     vaultController.openUnlock(p.reason || 'The vault is locked.')
+  })
+
+  // ── Backend-initiated connection-password asks ─────────────────────
+  // The OTHER backend→renderer ask (same shape as the vault unlock above,
+  // different meaning): the auth ladder raised a prompt-password rung and
+  // the renderer must supply the connection password, naming which
+  // connection and account it is asking about (nocx-s8jn). One ask at a
+  // time — the ladder blocks until this is answered.
+  const [pendingConnectionPassword, setPendingConnectionPassword] =
+    createSignal<ConnectionsPasswordRequest | null>(null)
+  dispatcher.subscribe('connections.passwordRequest', (params) => {
+    const p = params as ConnectionsPasswordRequest
+    if (!p || !p.requestId) return
+    setPendingConnectionPassword(p)
   })
 
   // ── Vault activity signal (nocx-eg80) ──────────────────────────────
@@ -627,6 +643,18 @@ async function main() {
             vaultStatus={vaultController.status()}
             reason={vaultController.unlockReason()}
           />
+        </Show>
+        <Show when={pendingConnectionPassword()}>
+          {(ask) => (
+            <ConnectionPasswordPrompt
+              open
+              ask={ask()}
+              client={profileClient}
+              onDone={() => {
+                setPendingConnectionPassword(null)
+              }}
+            />
+          )}
         </Show>
       </>
     ),
