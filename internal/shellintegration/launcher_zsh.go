@@ -124,6 +124,26 @@ exec zsh -l
 // build time — so the failure is handled inside the remote script instead.
 // The umask is captured before the bootstrap and restored before every
 // exec: the session must inherit the user's umask, not the bootstrap's.
+// zshRcfile renders the generated .zshrc from its template: @ENV@ is the
+// session environment block and @NOCX_ZSH@ the nocx.zsh body (embedded for
+// the argv launchers, a source of the installed generation file for the
+// launch carrier).
+func zshRcfile(envBlock, scriptSource string) string {
+	rc := strings.ReplaceAll(zshRcfileTemplate, "@ENV@", envBlock)
+	return strings.ReplaceAll(rc, "@NOCX_ZSH@", scriptSource)
+}
+
+// zshArgFor wraps a rendered .zshrc in the zsh tier's pinned transport: the
+// POSIX outer script writes it into a transient ZDOTDIR and execs a login
+// zsh. The result is one physical line with no single quotes, so it can
+// travel inside the launch carrier and the argv launchers' shellQuote.
+func zshArgFor(rc string) string {
+	outer := strings.ReplaceAll(zshOuterScript, "@ZSHCRC@", printfBEscape(rc))
+	// One physical line: a csh login shell splits multi-line quoted
+	// tokens, so the payload must survive that parse (see singleLine).
+	return singleLine(outer)
+}
+
 func (remoteLauncher) zshArg(opts LaunchOptions) (string, bool) {
 	if opts.Enhanced && opts.SessionID == "" {
 		// Pinned contract: SessionID is never empty when Enhanced. Fail
@@ -131,12 +151,7 @@ func (remoteLauncher) zshArg(opts LaunchOptions) (string, bool) {
 		// ownership protocol — rather than emit one that half-works.
 		return "", false
 	}
-	rc := strings.ReplaceAll(zshRcfileTemplate, "@ENV@", launcherEnvBlock(opts))
-	rc = strings.ReplaceAll(rc, "@NOCX_ZSH@", zshScript)
-	outer := strings.ReplaceAll(zshOuterScript, "@ZSHCRC@", printfBEscape(rc))
-	// One physical line: a csh login shell splits multi-line quoted
-	// tokens, so the payload must survive that parse (see singleLine).
-	return singleLine(outer), true
+	return zshArgFor(zshRcfile(launcherEnvBlock(opts), zshScript)), true
 }
 
 // zshCommand builds the zsh remote command: the pinned single-tier form,
@@ -154,11 +169,11 @@ func (remoteLauncher) zshCommand(opts LaunchOptions) (string, RefusalReason, boo
 	if !ok {
 		return "", ReasonUnsupportedShell, false
 	}
-	cmd := "/usr/bin/env -u BASH_ENV /bin/sh -c " + shellQuote(arg)
-	if len(cmd) > maxLauncherLen {
-		// Unreachable with the current embedded script (~7 KiB); a script
-		// that outgrows the cap must refuse rather than emit a command the
-		// far host cannot exec.
+	cmd, ok := fullBootstrapLauncher(shExecTail, arg)
+	if !ok {
+		// The publish prelude carries the bundle; a bundle that outgrows
+		// the cap must refuse rather than emit a command the far host
+		// cannot exec.
 		return "", ReasonUnsupportedShell, false
 	}
 	return cmd, ReasonNone, true

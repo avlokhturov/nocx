@@ -103,6 +103,25 @@ unset __nocx_old_opts
 // Naming bash explicitly is the point: process substitution is a bashism,
 // and sshd hands the remote command to the user's login shell, which may be
 // dash, ash, csh or a restricted shell.
+// bashRcfile renders the bash rcfile from its template: @ENV@ is the session
+// environment block (launcherEnvBlock for the argv launchers, empty for the
+// launch carrier, which exports the stable variables itself before exec) and
+// @NOCX_BASH@ is the nocx.bash body — the embedded script for the argv
+// launchers, a source of the installed generation file for the carrier.
+func bashRcfile(envBlock, scriptSource string) string {
+	rc := strings.ReplaceAll(bashRcfileTemplate, "@ENV@", envBlock)
+	return strings.ReplaceAll(rc, "@NOCX_BASH@", scriptSource)
+}
+
+// bashArgFor wraps a rendered rcfile in the bash tier's pinned transport:
+// `exec bash --rcfile <(printf %b "<escaped>") -i`. It contains no single
+// quotes by construction (printfBEscape removes them), so it can travel
+// single-quoted inside the launch carrier as well as inside the argv
+// launchers' shellQuote.
+func bashArgFor(rc string) string {
+	return `exec bash --rcfile <(printf %b "` + printfBEscape(rc) + `") -i`
+}
+
 func (remoteLauncher) bashArg(opts LaunchOptions) (string, bool) {
 	if opts.Enhanced && opts.SessionID == "" {
 		// Pinned contract: SessionID is never empty when Enhanced. Fail
@@ -110,9 +129,7 @@ func (remoteLauncher) bashArg(opts LaunchOptions) (string, bool) {
 		// ownership protocol — rather than emit one that half-works.
 		return "", false
 	}
-	rc := strings.ReplaceAll(bashRcfileTemplate, "@ENV@", launcherEnvBlock(opts))
-	rc = strings.ReplaceAll(rc, "@NOCX_BASH@", bashScript)
-	return `exec bash --rcfile <(printf %b "` + printfBEscape(rc) + `") -i`, true
+	return bashArgFor(bashRcfile(launcherEnvBlock(opts), bashScript)), true
 }
 
 // bashCommand builds the bash remote command: the pinned single-tier form,
@@ -124,12 +141,11 @@ func (remoteLauncher) bashCommand(opts LaunchOptions) (string, RefusalReason, bo
 	if !ok {
 		return "", ReasonUnsupportedShell, false
 	}
-	cmd := "/usr/bin/env -u BASH_ENV bash -c " + shellQuote(arg)
-	if len(cmd) > maxLauncherLen {
-		// Unreachable with the current embedded script (~19 KiB); a script
-		// that outgrows the cap must refuse rather than emit a command the
-		// far host cannot exec. ReasonUnsupportedShell is the closest
-		// pinned reason: the shell cannot be integrated this way.
+	cmd, ok := fullBootstrapLauncher(bashExecTail, arg)
+	if !ok {
+		// The publish prelude carries the bundle; a bundle that outgrows
+		// the cap must refuse rather than emit a command the far host
+		// cannot exec.
 		return "", ReasonUnsupportedShell, false
 	}
 	return cmd, ReasonNone, true

@@ -163,12 +163,18 @@ func TestShellUnknownGetsPosixTier(t *testing.T) {
 	if !strings.Contains(cmd, "nocx-posix") {
 		t.Errorf("posix command missing transient dir marker: %q", cmd)
 	}
-	// The exec target is ${SHELL:-/bin/sh}, never a named bash/zsh binary —
-	// the far shell is unknown by definition, and the payload must stay
-	// POSIX-only (the embedded script's prose mentions bash/zsh, so a raw
-	// substring check on the whole command would be noise).
-	if strings.Contains(cmd, `exec bash`) || strings.Contains(cmd, `exec zsh`) {
-		t.Errorf("posix command must never exec a named bash/zsh binary: %q", cmd)
+	// The exec target is ${SHELL:-/bin/sh} inside a POSIX-only payload,
+	// never a named bash/zsh binary — the far shell is unknown by
+	// definition. The check is structural: the command's exec tail is the
+	// /bin/sh form, and the bash/zsh exec tails appear nowhere. A raw
+	// "exec bash" substring would be noise — the escaped bundle bytes in
+	// the publish prelude legitimately contain the bash and zsh tiers'
+	// text (including the launch carrier's bash dispatch arm).
+	if !strings.Contains(cmd, shExecTail) {
+		t.Errorf("posix command does not exec through /bin/sh: %q", cmd)
+	}
+	if strings.Contains(cmd, bashExecTail) || strings.Contains(cmd, autoExecTail) {
+		t.Errorf("posix command must never exec a named bash binary: %q", cmd)
 	}
 	if !strings.Contains(cmd, `exec "${SHELL:-/bin/sh}" -l`) {
 		t.Errorf("posix command does not exec the login shell via ${SHELL:-/bin/sh}: %q", cmd)
@@ -221,8 +227,8 @@ func TestLauncherCommandsHaveNoNul(t *testing.T) {
 	}
 }
 
-// TestLauncherCommandsUnderCap: both launchers sit well below the chosen
-// conservative ARG_MAX bound (see maxLauncherLen).
+// TestLauncherCommandsUnderCap: the full launchers sit well below the chosen
+// conservative ARG_MAX bound (see maxFullLauncherLen).
 func TestLauncherCommandsUnderCap(t *testing.T) {
 	l := NewRemoteLauncher()
 	for _, kind := range []ShellKind{ShellBash, ShellZsh, ShellUnknown} {
@@ -230,8 +236,8 @@ func TestLauncherCommandsUnderCap(t *testing.T) {
 		if !ok {
 			t.Fatalf("%s: refused", kind)
 		}
-		if len(cmd) > maxLauncherLen {
-			t.Errorf("%s: command is %d bytes, cap is %d", kind, len(cmd), maxLauncherLen)
+		if len(cmd) > maxFullLauncherLen {
+			t.Errorf("%s: command is %d bytes, cap is %d", kind, len(cmd), maxFullLauncherLen)
 		}
 	}
 }
@@ -240,9 +246,9 @@ func TestLauncherCommandsUnderCap(t *testing.T) {
 // launcher that would outgrow the remote ARG_MAX must refuse, not emit a
 // command the far host cannot exec.
 func TestLauncherRefusesOverCap(t *testing.T) {
-	old := maxLauncherLen
-	maxLauncherLen = 64
-	t.Cleanup(func() { maxLauncherLen = old })
+	old := maxFullLauncherLen
+	maxFullLauncherLen = 256
+	t.Cleanup(func() { maxFullLauncherLen = old })
 
 	l := NewRemoteLauncher()
 	for _, kind := range []ShellKind{ShellBash, ShellZsh, ShellUnknown} {
@@ -377,8 +383,31 @@ func TestBashLauncher_NoHomeWrites(t *testing.T) {
 		[]string{"HOME=" + home, "TMPDIR=" + tmp, "TERM=xterm"}, "echo hello", "exit")
 	after := snapshotTree(t, home)
 
-	if !equalSnapshots(before, after) {
-		t.Errorf("$HOME changed during the launcher session (checked a recursive listing of names, sizes and mtimes before and after):\n before: %v\n after:  %v\noutput: %q", before, after, out)
+	// The launcher now publishes the bundle under ~/.nocx by design
+	// (design §3.2); every OTHER byte of $HOME must be untouched. Drop the
+	// published subtree from the comparison and verify it is exactly the
+	// bundle the Go publisher verifies.
+	excludeNocx := func(s map[string]fileState) map[string]fileState {
+		out := map[string]fileState{}
+		for k, v := range s {
+			// The bundle subtree, and the home directory's own mtime —
+			// creating ~/.nocx legitimately touches the parent dir.
+			if k == "." || k == dirName || strings.HasPrefix(k, dirName+string(os.PathSeparator)) {
+				continue
+			}
+			out[k] = v
+		}
+		return out
+	}
+	if !equalSnapshots(excludeNocx(before), excludeNocx(after)) {
+		t.Errorf("$HOME changed outside the published bundle (checked a recursive listing of names, sizes and mtimes before and after):\n before: %v\n after:  %v\noutput: %q", before, after, out)
+	}
+	vr, err := NewPublisher(testLogger(), NewOSFS(), filepath.Join(home, dirName)).Verify()
+	if err != nil {
+		t.Fatalf("published state does not verify: %v", err)
+	}
+	if !vr.Installed {
+		t.Error("the launcher's publish was not recorded as installed")
 	}
 }
 

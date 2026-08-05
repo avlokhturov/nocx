@@ -73,6 +73,27 @@ ENV="$d/env" exec "${SHELL:-/bin/sh}" -l
 // neither bash nor zsh — and refusing them forever would strand every
 // sh-only remote at no integration, contradicting the design. Refusal now
 // means "no integration exists", and one does.
+// posixEnvFile renders the minimal tier's ENV file from its template:
+// @ENV@ is the session environment block and @NOCX_POSIX@ the nocx.posix
+// body (embedded for the argv launchers, a source of the installed
+// generation file for the launch carrier).
+func posixEnvFile(envBlock, scriptSource string) string {
+	env := strings.ReplaceAll(posixEnvFileTemplate, "@ENV@", envBlock)
+	return strings.ReplaceAll(env, "@NOCX_POSIX@", scriptSource)
+}
+
+// posixArgFor wraps a rendered ENV file in the minimal tier's pinned
+// transport: the POSIX outer script writes it into a transient directory,
+// points ENV at it and execs a login shell. The result is one physical line
+// with no single quotes, so it can travel inside the launch carrier and the
+// argv launchers' shellQuote.
+func posixArgFor(envFile string) string {
+	outer := strings.ReplaceAll(posixOuterScript, "@POSIXENV@", printfBEscape(envFile))
+	// One physical line: a csh login shell splits multi-line quoted
+	// tokens, so the payload must survive that parse (see singleLine).
+	return singleLine(outer)
+}
+
 func (remoteLauncher) posixArg(opts LaunchOptions) (string, bool) {
 	if opts.Enhanced && opts.SessionID == "" {
 		// Pinned contract: SessionID is never empty when Enhanced. The
@@ -80,12 +101,7 @@ func (remoteLauncher) posixArg(opts LaunchOptions) (string, bool) {
 		// precondition is the caller's, enforced uniformly across tiers.
 		return "", false
 	}
-	env := strings.ReplaceAll(posixEnvFileTemplate, "@ENV@", launcherEnvBlock(opts))
-	env = strings.ReplaceAll(env, "@NOCX_POSIX@", posixScript)
-	outer := strings.ReplaceAll(posixOuterScript, "@POSIXENV@", printfBEscape(env))
-	// One physical line: a csh login shell splits multi-line quoted
-	// tokens, so the payload must survive that parse (see singleLine).
-	return singleLine(outer), true
+	return posixArgFor(posixEnvFile(launcherEnvBlock(opts), posixScript)), true
 }
 
 // posixCommand builds the minimal-tier remote command, sent when the far
@@ -97,11 +113,11 @@ func (remoteLauncher) posixCommand(opts LaunchOptions) (string, RefusalReason, b
 	if !ok {
 		return "", ReasonUnsupportedShell, false
 	}
-	cmd := "/usr/bin/env -u BASH_ENV /bin/sh -c " + shellQuote(arg)
-	if len(cmd) > maxLauncherLen {
-		// Unreachable with the current embedded script (~3 KiB); a script
-		// that outgrows the cap must refuse rather than emit a command the
-		// far host cannot exec.
+	cmd, ok := fullBootstrapLauncher(shExecTail, arg)
+	if !ok {
+		// The publish prelude carries the bundle; a bundle that outgrows
+		// the cap must refuse rather than emit a command the far host
+		// cannot exec.
 		return "", ReasonUnsupportedShell, false
 	}
 	return cmd, ReasonNone, true

@@ -151,13 +151,14 @@ func TestAutoDispatcher_FailsOpenUnderNonPOSIXLoginShell(t *testing.T) {
 }
 
 // TestAutoCommand_CarriesTiersAsSingleQuotedArgvWords pins the csh-safety
-// invariant structurally: the outer command is four single-quoted segments
-// (dispatcher script, bash payload, zsh payload, posix payload) and nothing
-// else, so any login shell — including csh and fish, which cannot parse the
-// dispatcher's syntax — parses the command as four ordinary quoted
-// arguments and the payload words arrive intact. A single-quote count other
-// than eight means a payload gained a quote and the dispatcher must switch
-// to an escaping vehicle.
+// invariant structurally: the outer command is five single-quoted segments —
+// the publish prelude (with its exec tail), the dispatcher script, and the
+// three tier payloads — plus the unquoted "$0", and nothing else, so any
+// login shell — including csh and fish, which cannot parse the dispatcher's
+// syntax — parses the command as five ordinary quoted arguments and the
+// payload words arrive intact. A single-quote count other than ten means a
+// segment gained a quote and the dispatcher must switch to an escaping
+// vehicle.
 func TestAutoCommand_CarriesTiersAsSingleQuotedArgvWords(t *testing.T) {
 	cmd, _, ok := NewRemoteLauncher().StartCommand(ShellAuto, LaunchOptions{
 		Enhanced:  true,
@@ -166,8 +167,8 @@ func TestAutoCommand_CarriesTiersAsSingleQuotedArgvWords(t *testing.T) {
 	if !ok {
 		t.Fatal("ShellAuto launcher refused")
 	}
-	if got := strings.Count(cmd, "'"); got != 8 {
-		t.Errorf("single-quote count = %d, want 8 (four shellQuote'd segments); command:\n%s", got, cmd)
+	if got := strings.Count(cmd, "'"); got != 10 {
+		t.Errorf("single-quote count = %d, want 10 (five shellQuote'd segments); command:\n%s", got, cmd)
 	}
 	if !strings.Contains(cmd, ` "$0" `) {
 		t.Errorf("command does not pass the login shell's $0 through; command:\n%s", cmd)
@@ -178,16 +179,15 @@ func TestAutoCommand_CarriesTiersAsSingleQuotedArgvWords(t *testing.T) {
 	bashArg, _ := remoteLauncher{}.bashArg(LaunchOptions{Enhanced: true, SessionID: "auto-shape-test"})
 	zshArg, _ := remoteLauncher{}.zshArg(LaunchOptions{Enhanced: true, SessionID: "auto-shape-test"})
 	posixArg, _ := remoteLauncher{}.posixArg(LaunchOptions{Enhanced: true, SessionID: "auto-shape-test"})
-	for _, want := range []string{bashArg, zshArg, posixArg} {
+	for _, want := range []string{autoDispatcherScript, bashArg, zshArg, posixArg} {
 		if !strings.Contains(cmd, want) {
-			t.Errorf("auto command does not carry the tier payload verbatim (len %d); command:\n%s", len(want), cmd)
+			t.Errorf("auto command does not carry the segment verbatim (len %d); command:\n%s", len(want), cmd)
 		}
 	}
 }
 
-// TestAutoCommand_UnderCap: the combined command sits below the auto cap —
-// it is the sum of the three payloads plus a ~500-byte script, no double
-// escaping (see maxAutoLauncherLen).
+// TestAutoCommand_UnderCap: the combined command sits below the full launcher
+// cap — the publish prelude plus the three payloads, no double escaping.
 func TestAutoCommand_UnderCap(t *testing.T) {
 	cmd, _, ok := NewRemoteLauncher().StartCommand(ShellAuto, LaunchOptions{
 		Enhanced:  true,
@@ -196,18 +196,18 @@ func TestAutoCommand_UnderCap(t *testing.T) {
 	if !ok {
 		t.Fatal("ShellAuto launcher refused")
 	}
-	if len(cmd) > maxAutoLauncherLen {
-		t.Errorf("auto command len %d exceeds maxAutoLauncherLen %d", len(cmd), maxAutoLauncherLen)
+	if len(cmd) > maxFullLauncherLen {
+		t.Errorf("auto command len %d exceeds maxFullLauncherLen %d", len(cmd), maxFullLauncherLen)
 	}
 }
 
-// TestAutoCommand_RefusesOverCap lowers the auto cap to prove the refusal
-// path: a dispatcher that would outgrow the remote limits must refuse, not
-// emit a command the far host cannot exec.
+// TestAutoCommand_RefusesOverCap lowers the full launcher cap to prove the
+// refusal path: a launcher that would outgrow the remote limits must refuse,
+// not emit a command the far host cannot exec.
 func TestAutoCommand_RefusesOverCap(t *testing.T) {
-	old := maxAutoLauncherLen
-	maxAutoLauncherLen = 100
-	t.Cleanup(func() { maxAutoLauncherLen = old })
+	old := maxFullLauncherLen
+	maxFullLauncherLen = 256
+	t.Cleanup(func() { maxFullLauncherLen = old })
 
 	cmd, reason, ok := NewRemoteLauncher().StartCommand(ShellAuto, LaunchOptions{
 		Enhanced:  true,

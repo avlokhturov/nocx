@@ -30,6 +30,12 @@ const (
 type LaunchOptions struct {
 	SessionID string // NOCX_SESSION_ID for this session; never empty when Enhanced
 	Enhanced  bool   // request marker-only prompt mode (ADR-0006)
+	// EnvironmentID is the environment-transition id minted for this attempt
+	// (design §5.3). Exported as NOCX_ENVIRONMENT_ID; P2's scripts emit the
+	// readiness passport and tag their markers only when it is set and
+	// well-formed, so an empty value is the fail-open default (no passport,
+	// no tagged marker) rather than a refusal.
+	EnvironmentID string
 }
 
 // RemoteLauncher builds the command string passed to an SSH session's
@@ -74,11 +80,6 @@ func (remoteLauncher) StartCommand(shell ShellKind, opts LaunchOptions) (string,
 	}
 }
 
-// launcherEnvBlock returns the session-environment lines shared by the bash
-// rcfile and the generated zshrc. The vars are exported before the user's
-// rc runs — rc files that check for nocx (e.g. an installer-era gate) see
-// them, and nested shells inherit them. The session id is shell-quoted:
-// LaunchOptions allows any string, and these lines are shell source.
 func launcherEnvBlock(opts LaunchOptions) string {
 	var b strings.Builder
 	b.WriteString("NOCX_SHELL_INTEGRATION=1\n")
@@ -86,38 +87,22 @@ func launcherEnvBlock(opts LaunchOptions) string {
 		b.WriteString("NOCX_PROMPT_MODE=marker-only\n")
 		b.WriteString("NOCX_SESSION_ID=" + shellQuote(opts.SessionID) + "\n")
 	}
+	if opts.EnvironmentID != "" {
+		// Independent of Enhanced on purpose: the passport is gated on the
+		// environment id, never on the prompt mode (design §5.2), so a
+		// baseline session that carries an id still announces it.
+		b.WriteString("NOCX_ENVIRONMENT_ID=" + shellQuote(opts.EnvironmentID) + "\n")
+	}
 	b.WriteString("export NOCX_SHELL_INTEGRATION")
 	if opts.Enhanced {
 		b.WriteString(" NOCX_PROMPT_MODE NOCX_SESSION_ID")
 	}
+	if opts.EnvironmentID != "" {
+		b.WriteString(" NOCX_ENVIRONMENT_ID")
+	}
 	b.WriteString("\n")
 	return b.String()
 }
-
-// maxLauncherLen caps a single-tier remote command well below a conservative
-// remote ARG_MAX. Chosen 32 KiB because: Linux enforces MAX_ARG_STRLEN of
-// 128 KiB per single argument; macOS caps total argv+env at 256 KiB
-// (1 MiB on current releases); and the bash launcher's rcfile travels
-// through a process-substitution pipe, whose default buffer is 64 KiB on
-// Linux — a payload above that stalls the writer until the shell reads it
-// (harmless but unnecessary). 32 KiB is below all three and leaves the
-// current ~19 KiB bash launcher room to grow. The embedded scripts are the
-// only inputs that scale with this number; a script that outgrows the cap
-// makes StartCommand refuse instead of emitting a command the far host
-// cannot exec. A var, not a const, so tests can prove the refusal path.
-var maxLauncherLen = 32 * 1024
-
-// maxAutoLauncherLen caps the ShellAuto dispatcher command, which carries
-// the bash, zsh and posix payloads as three separate argv words (no double
-// escaping, so this is their plain sum plus a ~500-byte script). 64 KiB is
-// deliberate: Linux binds the per-argument size (MAX_ARG_STRLEN, 128 KiB)
-// and the largest single word here is the bash payload (~24 KiB); macOS
-// binds the whole argv+env block (256 KiB on older releases, 1 MiB current)
-// and the whole command is ~36 KiB. The bash tier's own 64 KiB
-// process-substitution-pipe limit still applies to the bash payload alone,
-// which the dispatcher leaves unchanged. A var, not a const, so tests can
-// prove the refusal path, matching maxLauncherLen.
-var maxAutoLauncherLen = 64 * 1024
 
 // shellQuote wraps s in single quotes, escaping embedded quotes with the
 // POSIX '\” idiom. This is a real escaper, not concatenation that happens
@@ -162,3 +147,17 @@ func printfBEscape(s string) string {
 	}
 	return b.String()
 }
+
+// maxFullLauncherLen caps the full bootstrap launcher: the publish prelude
+// (which carries the three generation scripts, the launch carrier and the
+// publish logic) plus the tier command. The whole remote command travels as
+// ONE argv word (the staged file is command-substituted into the ssh line),
+// so Linux's MAX_ARG_STRLEN of 128 KiB per argument is the binding bound —
+// macOS's per-argument cap is the whole 256 KiB block on older releases.
+// 112 KiB leaves headroom under both for the ShellAuto form, which carries
+// the bundle AND all three embedded tiers (~97 KiB today). The prelude's
+// embedded payloads are the only inputs that scale with this number; a
+// bundle that outgrows the cap must refuse rather than emit a command the
+// far host cannot exec. A var, not a const, so tests can prove the refusal
+// path.
+var maxFullLauncherLen = 112 * 1024

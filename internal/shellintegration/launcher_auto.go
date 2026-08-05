@@ -67,7 +67,8 @@ func singleLine(script string) string {
 //	env -u BASH_ENV /bin/sh -c '<dispatcher>' "$0" '<bash-arg>' '<zsh-arg>' '<posix-arg>'
 //
 // The payloads are the tier commands' inner arguments verbatim — no double
-// escaping, so the sizes add (~36 KiB today, under maxAutoLauncherLen).
+// escaping, so the sizes add (~38 KiB today); the full launcher's cap is
+// maxFullLauncherLen, which the publish prelude's embedded bundle dominates.
 // Each branch names its interpreter explicitly and passes the payload as a
 // single argument, so the `exec bash -c "$1"` chain is the same shape as
 // the pinned single-tier commands and carries the same BASH_ENV guard.
@@ -88,12 +89,11 @@ func (remoteLauncher) autoCommand(opts LaunchOptions) (string, RefusalReason, bo
 	if !ok {
 		return "", ReasonUnsupportedShell, false
 	}
-	cmd := "/usr/bin/env -u BASH_ENV /bin/sh -c " + shellQuote(autoDispatcherScript) +
-		` "$0" ` + shellQuote(bashArg) + " " + shellQuote(zshArg) + " " + shellQuote(posixArg)
-	if len(cmd) > maxAutoLauncherLen {
-		// The three embedded scripts are the only inputs that scale with
-		// this number; a script that outgrows the cap must refuse rather
-		// than emit a command the far host cannot exec.
+	cmd, ok := fullBootstrapLauncher(autoExecTail, autoDispatcherScript, bashArg, zshArg, posixArg)
+	if !ok {
+		// The publish prelude carries the bundle; a bundle that outgrows
+		// the cap must refuse rather than emit a command the far host
+		// cannot exec.
 		return "", ReasonUnsupportedShell, false
 	}
 	return cmd, ReasonNone, true
