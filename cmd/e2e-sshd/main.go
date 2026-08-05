@@ -1,20 +1,37 @@
 // Command e2e-sshd runs an in-process SSH server for the nocx e2e suite
-// (e2e/shell-mode.spec.ts) that executes REAL commands on a REAL PTY with
-// the REAL shell. The nocx integration path needs the far side to actually
-// run `exec bash --rcfile <(...) -i` (or a plain `bash -i` shell) and emit
-// OSC 133 markers — an echo server cannot. Hermetic and deterministic: keys
-// are minted at startup, the address is ephemeral, and everything the spec
-// needs is printed machine-readable.
+// (e2e/shell-mode.spec.ts, e2e/nocxify-journey.spec.ts) that executes REAL
+// commands on a REAL PTY with the REAL shell. The nocx integration path needs
+// the far side to actually run `exec bash --rcfile <(...) -i` (or a plain
+// `bash -i` shell) and emit OSC 133 markers — an echo server cannot. Hermetic
+// and deterministic: keys are minted at startup, the address is ephemeral,
+// and everything the spec needs is printed machine-readable.
 //
 // Dev-only; never shipped. Usage:
 //
-//	go run ./cmd/e2e-sshd
+//	go run ./cmd/e2e-sshd [-banner <text>] [-password <pass>]
+//
+// Flags:
+//
+//	-banner <text>     send an sshd banner before authentication (the
+//	                   journey's frozen local block must contain it)
+//	-password <pass>   require password auth: the fixture's own key is
+//	                   REFUSED, and the callback accepts only <pass>. This is
+//	                   what makes a hand-typed `ssh` prompt for a password;
+//	                   without it the server is public-key-only. A wrong
+//	                   password (or a mismatched <pass> on a second fixture)
+//	                   is the journey's authentication-failure host.
 //
 // Output:
 //
 //	ADDR=127.0.0.1:<port>
 //	USERKEY=<path to the user private key PEM>
 //	KNOWNHOSTS=<one known_hosts line for the host key>
+//	CONN=<client address>   printed once per client, when its first userauth
+//	                        attempt (the publickey offer) reaches the server:
+//	                        key exchange is done and the client is one
+//	                        response from rendering the password prompt. The
+//	                        journey waits for this line before typing the
+//	                        password, so the run is deterministic, not timed.
 //	READY
 package main
 
@@ -23,6 +40,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
+	"flag"
 	"fmt"
 	"io"
 	"net"
@@ -43,6 +61,10 @@ func main() {
 }
 
 func run() error {
+	banner := flag.String("banner", "", "sshd banner sent before authentication")
+	password := flag.String("password", "", "require password auth; accepts exactly this password and refuses every key")
+	flag.Parse()
+
 	hostSigner, _, _, err := signer()
 	if err != nil {
 		return err
@@ -51,19 +73,6 @@ func run() error {
 	if err != nil {
 		return err
 	}
-
-	config := &gossh.ServerConfig{
-		PublicKeyCallback: func(_ gossh.ConnMetadata, key gossh.PublicKey) (*gossh.Permissions, error) {
-			// Compare the wire blob (algorithm + key), not the raw key: the
-			// client sends key.Marshal(), which for ed25519 carries the
-			// algorithm string ahead of the 32-byte key.
-			if string(key.Marshal()) == string(userSigner.PublicKey().Marshal()) {
-				return nil, nil
-			}
-			return nil, fmt.Errorf("e2e-sshd: unknown public key")
-		},
-	}
-	config.AddHostKey(hostSigner)
 
 	userKeyPath, err := writeUserKey(userKey)
 	if err != nil {
@@ -87,8 +96,62 @@ func run() error {
 		if err != nil {
 			return nil // listener closed
 		}
+		// CONN= is per connection: printed when the client's first userauth
+		// attempt reaches the server — key exchange done, one response before
+		// the client renders the password prompt. The journey waits for it
+		// before typing the password; without it the run is timed, not
+		// deterministic.
+		var once sync.Once
+		config := buildConfig(userSigner, hostSigner, *banner, *password, func() {
+			once.Do(func() {
+				fmt.Printf("CONN=%s\n", conn.RemoteAddr().String())
+				_ = os.Stdout.Sync()
+			})
+		})
 		go serveConn(conn, config)
 	}
+}
+
+// buildConfig assembles the ServerConfig for one connection. onAuthAttempt
+// fires on the client's publickey offer — the first userauth message that
+// engages a callback (gossh answers "none" itself), after key exchange and
+// before the password prompt.
+func buildConfig(userSigner, hostSigner gossh.Signer, banner, password string, onAuthAttempt func()) *gossh.ServerConfig {
+	config := &gossh.ServerConfig{}
+	if password != "" {
+		// Password-auth fixture (the journey's hand-typed `ssh` must be
+		// prompted): the fixture's own key is REFUSED so the client has no
+		// publickey path, and the callback accepts exactly the one password.
+		// A wrong password is an auth failure with the client's own exit
+		// status — the journey's fail-open assertion.
+		config.PasswordCallback = func(_ gossh.ConnMetadata, pass []byte) (*gossh.Permissions, error) {
+			if string(pass) == password {
+				return nil, nil
+			}
+			return nil, fmt.Errorf("e2e-sshd: wrong password")
+		}
+		config.PublicKeyCallback = func(_ gossh.ConnMetadata, _ gossh.PublicKey) (*gossh.Permissions, error) {
+			onAuthAttempt()
+			return nil, fmt.Errorf("e2e-sshd: public key auth disabled")
+		}
+	} else {
+		config.PublicKeyCallback = func(_ gossh.ConnMetadata, key gossh.PublicKey) (*gossh.Permissions, error) {
+			onAuthAttempt()
+			// Compare the wire blob (algorithm + key), not the raw key: the
+			// client sends key.Marshal(), which for ed25519 carries the
+			// algorithm string ahead of the 32-byte key.
+			if string(key.Marshal()) == string(userSigner.PublicKey().Marshal()) {
+				return nil, nil
+			}
+			return nil, fmt.Errorf("e2e-sshd: unknown public key")
+		}
+	}
+	if banner != "" {
+		b := banner
+		config.BannerCallback = func(_ gossh.ConnMetadata) string { return b }
+	}
+	config.AddHostKey(hostSigner)
+	return config
 }
 
 func signer() (gossh.Signer, ed25519.PrivateKey, ed25519.PublicKey, error) {
@@ -281,7 +344,29 @@ func startCommand(ch gossh.Channel, st *sessionState, command string) {
 	go func() {
 		_, _ = io.Copy(ch, master)
 		_ = cmd.Wait()
+		// A real ssh client terminates only on an explicit exit-status
+		// followed by channel EOF (the journey's `exit` must end the remote
+		// session cleanly and hand the real code to the local shell). The
+		// shell's own `exit N` is the child's exit status; without this the
+		// server waits for the client to close the channel while the client
+		// waits for the server — a deadlock that looks like a hung ssh.
+		code := 0
+		if cmd.ProcessState != nil {
+			code = cmd.ProcessState.ExitCode()
+		}
+		// A negative code means the process was signalled; the wire field is
+		// unsigned, and the fixture only has to be faithful about ordinary
+		// exits, so a signal reports as 255 the way a shell would.
+		if code < 0 {
+			code = 255
+		}
+		_, _ = ch.SendRequest(
+			"exit-status",
+			false,
+			gossh.Marshal(struct{ Status uint32 }{Status: uint32(code)}), // #nosec G115 — clamped non-negative just above.
+		)
 		_ = master.Close()
+		_ = ch.Close()
 	}()
 	go func() {
 		_, _ = io.Copy(master, ch)
