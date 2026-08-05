@@ -396,6 +396,41 @@ Checked by eye at review. If that rots, file a `commit-msg` hook rather than dro
   the byte stream (AD-6); session-id is server-authoritative (AD-7). If an `AD` is wrong,
   change it in `docs/architecture.md` deliberately rather than routing around it.
 
+### Look for the existing answer before you write a second one
+
+**Before you add logic, find out whether the codebase already answers that question, and
+extend that answer instead.** A second implementation of one concept is not duplication you
+can clean up later — it is a regression with a delay fuse, because the two agree everywhere
+you look and disagree somewhere you did not.
+
+This is AD-8 stated as a working habit rather than a module boundary: one owner per
+behaviour, and the owner is whoever already has it. It applies to a predicate, a derivation,
+a table or a surface just as much as to a package.
+
+Three questions, before the first line:
+
+1. **Does something already decide this?** `grep` for the concept, not your name for it —
+   "is this an ssh context", "which command is this token under", "may this be integrated".
+   The existing answer is often two words away under a different word.
+2. **Can it be extended?** A table that grows by addition, a parameter, one more variant.
+   Extending keeps one truth; adding keeps two and hopes they stay in step.
+3. **If it genuinely cannot**, say in the code why the existing one did not fit — the next
+   person needs to know it was considered, not guess that it was missed.
+
+**Two surfaces may never own the same input.** If a key, a position or a document state can
+be claimed by two components, that is the defect, whichever one wins by evaluation order:
+the loser goes on advertising what it can no longer deliver.
+
+> 2026-08-05. "Am I in an ssh context" had two derivations — `commandWord(ctx)` on the
+> completion side, and `/\bssh\s+/` in the editor. They agreed for every case anyone tried,
+> and disagreed on exactly one: `ssh` with no trailing space, which is the state a user is in
+> when they press Tab **instead of** the space. So the suppressed surface un-suppressed
+> itself at the only moment it mattered and inserted a saved host over the user's choice.
+> Underneath it, a whole second suggestion surface — its own list, keys, rendering and accept
+> path — had been kept alive beside the completion dropdown, which already rendered the same
+> candidates as a row and a ghost. The fix was to delete it, and the bug existed only because
+> it had been built rather than found.
+
 ### Before you build a UI component: read the kit
 
 **Read [`frontend/src/ui/README.md`](frontend/src/ui/README.md) and list `frontend/src/ui/`
