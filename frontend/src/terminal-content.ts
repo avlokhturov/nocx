@@ -1104,15 +1104,32 @@ export class TerminalContent extends BaseTabContent {
           ),
       })
       this.recall.mount(this.editor.root)
-      // ONE arbiter chain (design §8.9.4 — three surfaces, one keyboard):
-      // recall first, the vault picker second, completion last, the
-      // editor's own handling at the tail. Recall is the higher-priority
-      // surface and the surfaces never stack: opening any one closes the
-      // others — the completion dropdown is dismissed the moment recall or
-      // the picker opens, and the picker is dismissed the moment recall
-      // opens (a Ctrl/Cmd+R can land while the picker is up). Esc closes
-      // exactly one surface per press, in the same order.
+      // ONE arbiter chain (design §8.9.4 — three surfaces, one keyboard),
+      // and the OWNERSHIP it implements, stated as decisions rather than
+      // as an evaluation order (nocx-mlm7 — the third instance of two
+      // surfaces owning one input; the order alone reads as accident and
+      // regresses):
+      //
+      //   - The explicit recall shortcut (Ctrl/Cmd+R) opens recall from
+      //     anywhere — even under an open dropdown or picker — and while
+      //     recall is open, its keys (arrows, Enter, Esc, typing) belong
+      //     to it. Opening any surface closes the others: the surfaces
+      //     never stack.
+      //   - The vault picker, while open, owns its keys (arrows, Enter,
+      //     Tab, Esc): completion is dismissed under it.
+      //   - While the completion dropdown is open with a selectable list,
+      //     bare ArrowUp/ArrowDown belong to IT — its footer says
+      //     "↑ ↓ to navigate". Recall's bare-Up gesture (up at the top of a
+      //     single-line draft opens recall) therefore applies only when no
+      //     such dropdown is open; completion.ownsArrows is the same
+      //     decision in both places. The gesture is NOT removed, and the
+      //     dropdown is NOT closed early to make room for it — the keys
+      //     are the dropdown's while it is open.
+      //   - Esc closes exactly one surface per press, in the same order:
+      //     recall, picker, completion.
       this.editor.setKeyArbiter((e) => {
+        // Recall first: the shortcut opens it from anywhere, and an open
+        // recall owns its keys. Opening it closes the other surfaces.
         const consumed = this.recall!.handleKey(e)
         if (this.recall!.isOpen) {
           this.completion?.dismiss()
@@ -1125,6 +1142,13 @@ export class TerminalContent extends BaseTabContent {
         // picker.
         if (this.promptVault!.isPickerOpen) this.completion?.dismiss()
         if (this.promptVault!.handleKey(e)) return true
+        // The ownership decision above, applied: an open selectable
+        // dropdown owns bare ArrowUp/ArrowDown — its footer promises
+        // navigation — so they are routed to it explicitly and can never
+        // fall through to the editor's recall gesture. Everything else
+        // (Enter, Tab, Esc, Right/End, typing) still goes to the
+        // completion controller's ordinary handling.
+        if (this.completion!.ownsArrows(e)) return this.completion!.handleKey(e)
         return this.completion?.handleKey(e) ?? false
       })
 

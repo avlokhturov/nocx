@@ -830,6 +830,48 @@ describe('keyboard', () => {
   })
 })
 
+describe('ownsArrows — the bare-arrow ownership decision (nocx-mlm7)', () => {
+  const open = async (controller: CompletionController) => {
+    controller.open()
+    await flush()
+  }
+
+  it('answers true for a bare ArrowUp/ArrowDown while the dropdown is open with a selectable list', async () => {
+    const { controller } = rig({
+      providers: [instantProvider('a', () => [cand({ id: 'a1' }), cand({ id: 'a2' })])],
+    })
+    await open(controller)
+    expect(controller.ownsArrows(key('ArrowDown'))).toBe(true)
+    expect(controller.ownsArrows(key('ArrowUp'))).toBe(true)
+  })
+
+  it('answers false when the dropdown is closed, showing the empty row, or the key is modified', async () => {
+    const { controller } = rig({
+      providers: [instantProvider('a', () => [cand({ id: 'a1' }), cand({ id: 'a2' })])],
+    })
+    // Closed: recall's bare-Up gesture owns the key (up at the top of a
+    // single-line draft opens recall — the arbiter's tail).
+    expect(controller.ownsArrows(key('ArrowUp'))).toBe(false)
+
+    await open(controller)
+    // Modified arrows are not the dropdown's navigation keys (shift+Up is
+    // recall's widen; chorded arrows are editor shortcuts).
+    expect(controller.ownsArrows(key('ArrowUp', { shiftKey: true }))).toBe(false)
+    expect(controller.ownsArrows(key('ArrowUp', { ctrlKey: true }))).toBe(false)
+    // Other keys are not arrows.
+    expect(controller.ownsArrows(key('Enter'))).toBe(false)
+  })
+
+  it('answers false for the empty row — it owns nothing, by its own contract', async () => {
+    const { controller } = rig({
+      providers: [emptyProvider('a')],
+    })
+    await open(controller)
+    expect(controller.ownsArrows(key('ArrowDown'))).toBe(false)
+    expect(controller.ownsArrows(key('ArrowUp'))).toBe(false)
+  })
+})
+
 // ── ghost text ───────────────────────────────────────────────────────────
 
 // The ghost and the dropdown row are two renderings of ONE candidate, so the

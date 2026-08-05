@@ -324,6 +324,28 @@ export class CompletionController {
     this.apply(c)
   }
 
+  /**
+   * THE OWNERSHIP DECISION for bare arrows, named so the arbiter chain can
+   * state it instead of implying it: while the dropdown is open with a
+   * selectable list (state 'open'), unmodified ArrowUp/ArrowDown belong to
+   * the dropdown — its footer says "↑ ↓ to navigate". This is what gates
+   * recall's bare-Up gesture (up at the top of a single-line draft opens
+   * recall): that gesture applies only when this answers false. The 'empty'
+   * row answers false too, by its own contract — it owns nothing.
+   */
+  ownsArrows(e: KeyboardEvent): boolean {
+    return (
+      !e.isComposing &&
+      e.keyCode !== 229 &&
+      (e.key === 'ArrowUp' || e.key === 'ArrowDown') &&
+      !e.shiftKey &&
+      !e.ctrlKey &&
+      !e.metaKey &&
+      !e.altKey &&
+      this.state.name === 'open'
+    )
+  }
+
   /** The keyboard arbiter (completion's turn, after recall's). Returns true
    *  when the key was consumed. While the dropdown is open, navigation,
    *  accept and dismiss belong to it; everything else falls through to the

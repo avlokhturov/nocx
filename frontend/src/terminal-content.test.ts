@@ -57,7 +57,8 @@ import { CommandEditor } from './editor'
 import { TerminalContent } from './terminal-content'
 import { Tab } from './tabs'
 import { SURFACE_TERMINAL } from './tab-content'
-import { ProfileClient } from './profiles'
+import { ProfileClient, type SSHProfile } from './profiles'
+import { Dispatcher } from './dispatcher'
 import type { WSClient } from './ipc'
 import { createCommandBlock } from './scrollback/blocks'
 import { CommandSnapshotStore } from './command-snapshot'
@@ -610,6 +611,144 @@ describe('recall overlay is actually wired (nocx-w7h.4)', () => {
     } finally {
       Element.prototype.scrollTo = protoScrollTo
       Element.prototype.scrollIntoView = protoScrollIntoView
+      teardown()
+    }
+  })
+})
+
+describe("the dropdown owns the arrows while it is open; recall's bare-Up gesture waits for it to close (nocx-mlm7)", () => {
+  /** A profile client whose quick-connect assembly answers two hosts. */
+  const hostsClient = (): ProfileClient => {
+    const pc = new ProfileClient(new Dispatcher())
+    vi.spyOn(pc, 'listProfiles').mockResolvedValue([
+      {
+        id: 'prof:ssh:pi',
+        type: 'ssh',
+        name: 'pi',
+        options: { host: 'raspberry.local', user: 'pi' },
+      },
+      {
+        id: 'prof:ssh:web',
+        type: 'ssh',
+        name: 'web-prod',
+        options: { host: 'web-prod.example.com' },
+      },
+    ] satisfies SSHProfile[])
+    vi.spyOn(pc, 'listSSHAliases').mockResolvedValue({ aliases: [], unavailable: null })
+    return pc
+  }
+
+  /** A client whose control plane answers history rows; everything else is
+   *  the no-store rejection, so no other path is accidentally fed. */
+  const historyClient = (): ClientFake => {
+    const client = makeClient()
+    // The real client's call() is async; this fake matches its signature and
+    // answers from constants, so it has nothing to await.
+    // eslint-disable-next-line @typescript-eslint/require-await
+    client.call.mockImplementation(async (method: string) => {
+      if (method === 'history.query') {
+        return {
+          entries: [
+            {
+              id: 'h1',
+              command: 'ssh pi@192.168.0.93',
+              cwd: FIXTURE_CWD,
+              host: '',
+              status: 'success',
+              exitCode: 0,
+              startedAt: 1_750_000_000_000,
+              endedAt: 1_750_000_000_100,
+              maskedCount: 0,
+              maskedKinds: [],
+            },
+            {
+              id: 'h2',
+              command: 'ssh prod',
+              cwd: FIXTURE_CWD,
+              host: '',
+              status: 'success',
+              exitCode: 0,
+              startedAt: 1_750_000_000_000,
+              endedAt: 1_750_000_000_100,
+              maskedCount: 0,
+              maskedKinds: [],
+            },
+          ],
+          scope: 'directory',
+          exhausted: true,
+          source: 'store',
+          coverage: null,
+        }
+      }
+      // fs.complete: the stale-path check answers "does not exist" — the
+      // history rows are demoted, never hidden, so they still render.
+      if (method === 'fs.complete') return { entries: [] }
+      throw new Error('no store wired (fake)')
+    })
+    return client
+  }
+
+  const selectedRow = (ed: CommandEditor): HTMLElement | null =>
+    ed.root.querySelector<HTMLElement>('.ui-floating-panel__row[data-selected="true"]')
+  const recallPanel = (ed: CommandEditor): HTMLElement | null =>
+    ed.root.querySelector<HTMLElement>('.ui-floating-panel[data-variant="recall"]')
+
+  it('with the dropdown open under `ssh `, ArrowDown and ArrowUp move the dropdown selection and never open recall', async () => {
+    const { view, ed, teardown } = await mountTerminal(
+      makeClipboard(),
+      {},
+      historyClient(),
+      hostsClient(),
+    )
+    try {
+      ed.show()
+      ed.insertText('ssh ')
+      // Tab opens the dropdown — the user's own path to the surface.
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }),
+      )
+      // Hosts and history land over the profile client and the control
+      // plane; the dropdown opens on its first results.
+      await vi.waitFor(() => expect(selectedRow(ed)).not.toBeNull())
+      const rows = () =>
+        [...ed.root.querySelectorAll<HTMLElement>('.ui-floating-panel__row')].map(
+          (r) => r.textContent ?? '',
+        )
+      expect(rows().length).toBeGreaterThanOrEqual(3) // hosts + history
+      const first = selectedRow(ed)!.textContent ?? ''
+      expect(recallPanel(ed)?.dataset.open).not.toBe('true')
+
+      // ArrowDown: the DROPDOWN's selection moves — recall stays closed.
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }),
+      )
+      expect(selectedRow(ed)?.textContent).not.toBe(first)
+      expect(recallPanel(ed)?.dataset.open).not.toBe('true')
+      expect(ed.getDoc()).toBe('ssh ')
+
+      // ArrowUp: the selection moves back; recall still closed. The
+      // editor's up-at-top gesture must not fire while the dropdown owns
+      // the key — this is the ownership this suite guards.
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true }),
+      )
+      expect(selectedRow(ed)?.textContent).toBe(first)
+      expect(recallPanel(ed)?.dataset.open).not.toBe('true')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('with no dropdown open, ArrowUp at the top of a single-line draft still opens recall', async () => {
+    const { view, ed, teardown } = await mountTerminal(makeClipboard())
+    try {
+      ed.show()
+      ed.insertText('echo kept')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true }),
+      )
+      expect(recallPanel(ed)?.dataset.open).toBe('true')
+    } finally {
       teardown()
     }
   })
