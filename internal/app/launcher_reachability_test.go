@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -242,6 +243,13 @@ func (reachResolver) ResolveHost(_ context.Context, host string) (string, error)
 
 func (reachResolver) ResolveConfig(_ context.Context, host string) (*ssh.HostConfig, error) {
 	return &ssh.HostConfig{HostName: host}, nil
+}
+
+func (reachResolver) ResolveArgv(_ context.Context, argv []string) (*ssh.HostConfig, error) {
+	if len(argv) == 0 {
+		return nil, errors.New("empty argv")
+	}
+	return &ssh.HostConfig{HostName: argv[len(argv)-1]}, nil
 }
 
 // reachProfileResolver stands in for the profile resolver the transport

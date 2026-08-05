@@ -493,7 +493,7 @@ export function buildBootstrapRewrite(plan: SshPlan, launcherPath: string): stri
  * The installed-host form of §3.3, generated when the bundle is committed on
  * the far side:
  *
- *     ssh -t <flags> <dest> 'if [ -x "$HOME/.nocx/launch" ]; then exec "$HOME/.nocx/launch" <environment-id>; else exec "${SHELL:-/bin/sh}" -l; fi'
+ *     ssh -t <flags> <dest> 'if [ -x "$HOME/.nocx/launch" ]; then exec "$HOME/.nocx/launch" <environment-id> <session-id>; else exec "${SHELL:-/bin/sh}" -l; fi'
  *
  * The guard travels inside the remote command because the only machine whose
  * `~/.nocx` is in question is the far one — a local `[ -x ~/.nocx/launch ]`
@@ -508,13 +508,22 @@ export function buildBootstrapRewrite(plan: SshPlan, launcherPath: string): stri
  * have provided without a command.
  *
  * `environmentId` must match the passport charset (§5.2); anything else is
- * refused by returning null.
+ * refused by returning null. `sessionId`, when given, becomes the carrier's
+ * second argument and is exported as NOCX_SESSION_ID on the far side (the
+ * nocx-mlm7 P7 amendment: the compact path carries the session id exactly
+ * like the argv launchers do). It is validated against the same charset.
  */
-export function buildInstalledRewrite(plan: SshPlan, environmentId: string): string | null {
+export function buildInstalledRewrite(
+  plan: SshPlan,
+  environmentId: string,
+  sessionId?: string,
+): string | null {
   if (!ENVIRONMENT_ID_RE.test(environmentId)) return null
+  if (sessionId !== undefined && !ENVIRONMENT_ID_RE.test(sessionId)) return null
   const integrated = integratedSsh(plan, rawAfterSsh(plan))
+  const launchArgs = sessionId ? `${environmentId} ${sessionId}` : environmentId
   const remote =
-    `if [ -x "$HOME/.nocx/launch" ]; then exec "$HOME/.nocx/launch" ${environmentId}; ` +
+    `if [ -x "$HOME/.nocx/launch" ]; then exec "$HOME/.nocx/launch" ${launchArgs}; ` +
     `else exec "\${SHELL:-/bin/sh}" -l; fi`
   const rewritten = `${integrated} '${remote}'`
 

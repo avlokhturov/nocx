@@ -506,6 +506,22 @@ describe('buildInstalledRewrite (nocx-nl6q §3.3 compact installed form)', () =>
     expect(buildInstalledRewrite(plan('ssh host'), 'x'.repeat(65))).toBeNull()
     expect(buildInstalledRewrite(plan('ssh host'), 'env_1.a-2')).not.toBeNull()
   })
+  it('carries the session id as the carrier second argument (P7 compact-path amendment)', () => {
+    const out = buildInstalledRewrite(plan('ssh pi@host'), 'env-1', 'sess-0123456789abcdef')!
+    expect(out).toContain('exec "$HOME/.nocx/launch" env-1 sess-0123456789abcdef')
+    expect(new TextEncoder().encode(out).byteLength).toBeLessThanOrEqual(4095)
+  })
+
+  it('omits the session id when not given — the two-argument call is unchanged', () => {
+    const without = buildInstalledRewrite(plan('ssh pi@host'), 'env-1')!
+    expect(without).toContain('exec "$HOME/.nocx/launch" env-1;')
+    expect(without).not.toContain('NOCX_SESSION_ID')
+  })
+
+  it('refuses a malformed session id like a malformed environment id', () => {
+    expect(buildInstalledRewrite(plan('ssh host'), 'env-1', 'has space')).toBeNull()
+    expect(buildInstalledRewrite(plan('ssh host'), 'env-1', '')).toBeNull()
+  })
 })
 
 describe('the generated wrapper, executed (real shell + fake ssh that records argv)', () => {

@@ -21,6 +21,7 @@ import (
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/shellintegration"
 	"github.com/shady2k/nocx/internal/ssh"
+	"github.com/shady2k/nocx/internal/storage"
 	"github.com/shady2k/nocx/internal/tunnel"
 	"github.com/shady2k/nocx/internal/vault"
 	"github.com/shady2k/nocx/internal/vaultreset"
@@ -1963,25 +1964,41 @@ func TestVaultUnlockRequest_OverTheWireConformsToContract(t *testing.T) {
 func TestShellLauncherCommand_DTOConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "shell.launcherCommand.schema.json")
 
-	// Populated: a staged path returned, reason null.
+	// Bootstrap: a staged path returned, mode bootstrap, reason null.
 	path := "'/home/u/.nocx/run/launcher-123456'"
 	raw, err := json.Marshal(shellLauncherCommandResult{
-		LauncherPath: &path,
-		Reason:       nil,
+		Mode:          launcherModeBootstrap,
+		EnvironmentID: "env-abc-123",
+		LauncherPath:  &path,
+		Reason:        nil,
 	})
 	if err != nil {
-		t.Fatalf("marshal populated: %v", err)
+		t.Fatalf("marshal bootstrap: %v", err)
 	}
-	validateJSON(t, schema, raw, "shell.launcherCommand DTO (populated)")
+	validateJSON(t, schema, raw, "shell.launcherCommand DTO (bootstrap)")
+
+	// Installed: compact form, no path, no reason.
+	raw, err = json.Marshal(shellLauncherCommandResult{
+		Mode:          launcherModeInstalled,
+		EnvironmentID: "env-def-456",
+		LauncherPath:  nil,
+		Reason:        nil,
+	})
+	if err != nil {
+		t.Fatalf("marshal installed: %v", err)
+	}
+	validateJSON(t, schema, raw, "shell.launcherCommand DTO (installed)")
 
 	// Every refusal the handler can state must satisfy the schema's enum;
 	// a reason the renderer receives and the contract rejects is a refusal
 	// that reaches the product as a decode failure.
-	for _, reason := range []string{"remote-command", "unsupported", "stage-failed"} {
+	for _, reason := range []string{"remote-command", "oracle-failed", "unsupported", "stage-failed"} {
 		r := reason
 		raw, err = json.Marshal(shellLauncherCommandResult{
-			LauncherPath: nil,
-			Reason:       &r,
+			Mode:          launcherModeRaw,
+			EnvironmentID: "env-ghi-789",
+			LauncherPath:  nil,
+			Reason:        &r,
 		})
 		if err != nil {
 			t.Fatalf("marshal refused %s: %v", reason, err)
@@ -1990,18 +2007,21 @@ func TestShellLauncherCommand_DTOConformsToContract(t *testing.T) {
 	}
 }
 
-// OverTheWire: the real handler, the real RemoteLauncher and the real stager —
-// no fake, because the bytes the far shell runs must be the bytes the product
-// builds, and the whole point of nocx-pu4.6 is WHERE they travel.
+// OverTheWire: the real handler, the real RemoteLauncher, the real stager
+// and a stub resolver that records the oracle argv — the bytes the far shell
+// runs must be the bytes the product builds, and the typed line must be what
+// the oracle answers about (nocx-c5az).
 func TestShellLauncherCommand_OverTheWireConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "shell.launcherCommand.schema.json")
 	ctx := context.Background()
 
 	home := t.TempDir()
+	resolver := newLauncherTestResolver()
 	ws := NewWSServer(
 		log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
 		WithRemoteLauncher(&realRemoteLauncher{}),
 		WithLauncherStager(shellintegration.NewLauncherStager(log.NewSlogAdapter(nil), home)),
+		WithSSHConfigResolver(resolver, "/nonexistent/config"),
 	)
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -2010,25 +2030,10 @@ func TestShellLauncherCommand_OverTheWireConformsToContract(t *testing.T) {
 	conn := connectWS(t, ws)
 	defer func() { _ = conn.Close() }()
 
-	openResp := vaultCall(t, conn, "open", map[string]any{
-		"cols": 80, "rows": 24, "xpixel": 0, "ypixel": 0,
-	}, 1)
-	if openResp.Error != nil {
-		t.Fatalf("open: %+v", openResp.Error)
-	}
-	var opened struct {
-		SessionID string `json:"sessionId"`
-	}
-	if err := json.Unmarshal(openResp.Result, &opened); err != nil {
-		t.Fatalf("decode open result: %v", err)
-	}
-	if opened.SessionID == "" {
-		t.Fatal("open result carried no sessionId")
-	}
-
+	sid := openSessionForLauncher(t, conn)
 	resp := vaultCall(t, conn, "shell.launcherCommand", map[string]any{
-		"destination": "testhost",
-		"sessionId":   opened.SessionID,
+		"sessionId":  sid,
+		"oracleArgv": []string{"ssh", "-G", "-p", "2222", "testhost"},
 	}, 2)
 	if resp.Error != nil {
 		t.Fatalf("shell.launcherCommand: %+v", resp.Error)
@@ -2039,15 +2044,31 @@ func TestShellLauncherCommand_OverTheWireConformsToContract(t *testing.T) {
 	if err := json.Unmarshal(resp.Result, &got); err != nil {
 		t.Fatalf("decode shell.launcherCommand result: %v", err)
 	}
+	if got.Mode != launcherModeBootstrap {
+		t.Errorf("mode = %q, want bootstrap (no installed fact on a fresh store)", got.Mode)
+	}
 	if got.LauncherPath == nil || *got.LauncherPath == "" {
 		t.Fatal("launcherPath is nil or empty; the real launcher must be staged and named")
 	}
 	if got.Reason != nil {
 		t.Errorf("reason = %q, want nil when a path is present", *got.Reason)
 	}
+	// The environment id is fresh per attempt and never the tab session id.
+	if got.EnvironmentID == "" {
+		t.Error("environmentId is empty; the planner must mint one per attempt")
+	}
+	if got.EnvironmentID == sid {
+		t.Error("environmentId equals the tab session id; two attempts would be indistinguishable")
+	}
 	// The path is shell-quoted: the renderer splices it into a shell line.
 	if !strings.HasPrefix(*got.LauncherPath, "'") || !strings.HasSuffix(*got.LauncherPath, "'") {
 		t.Errorf("launcherPath not shell-quoted: %q", *got.LauncherPath)
+	}
+
+	// The oracle saw the exact typed argv, options included.
+	if len(resolver.lastArgv) != 5 || resolver.lastArgv[0] != "ssh" || resolver.lastArgv[1] != "-G" ||
+		resolver.lastArgv[2] != "-p" || resolver.lastArgv[3] != "2222" || resolver.lastArgv[4] != "testhost" {
+		t.Errorf("oracle argv = %v, want [ssh -G -p 2222 testhost] as typed", resolver.lastArgv)
 	}
 
 	// The response carries a PATH, not a payload. This is the whole fix:
@@ -2058,7 +2079,8 @@ func TestShellLauncherCommand_OverTheWireConformsToContract(t *testing.T) {
 		t.Errorf("result is %d bytes; shell.launcherCommand must return a path, not the launcher", n)
 	}
 
-	// And the file it names holds the real launcher, byte for byte.
+	// And the file it names holds the real launcher, byte for byte, with
+	// the freshly minted environment id embedded (NOCX_ENVIRONMENT_ID).
 	staged := strings.Trim(*got.LauncherPath, "'")
 	body, err := os.ReadFile(staged) // #nosec G304 — path came from our own stager.
 	if err != nil {
@@ -2066,7 +2088,11 @@ func TestShellLauncherCommand_OverTheWireConformsToContract(t *testing.T) {
 	}
 	wantLauncher, _, ok := shellintegration.NewRemoteLauncher().StartCommand(
 		shellintegration.ShellAuto,
-		shellintegration.LaunchOptions{SessionID: opened.SessionID, Enhanced: true},
+		shellintegration.LaunchOptions{
+			SessionID:     sid,
+			Enhanced:      true,
+			EnvironmentID: got.EnvironmentID,
+		},
 	)
 	if !ok {
 		t.Fatal("the real RemoteLauncher refused ShellAuto")
@@ -2074,28 +2100,178 @@ func TestShellLauncherCommand_OverTheWireConformsToContract(t *testing.T) {
 	if string(body) != wantLauncher {
 		t.Errorf("staged launcher differs from the product's: got %d bytes, want %d", len(body), len(wantLauncher))
 	}
+	// The equality above is the embed proof: a handler that passed a
+	// different or empty environment id to the launcher would produce a
+	// different command, and the comparison would fail.
+
+	// A second attempt mints a SECOND environment id: the renderer's
+	// tracker can tell a stale passport from a live one.
+	second := launcherCommandCall(t, conn, sid, 3)
+	if second.EnvironmentID == got.EnvironmentID {
+		t.Error("two attempts minted the same environmentId; a stale passport would be accepted")
+	}
 
 	// Unknown sessionId is refused (AD-7).
 	unknown := vaultCall(t, conn, "shell.launcherCommand", map[string]any{
-		"destination": "testhost",
-		"sessionId":   "0123456789abcdef0123456789abcdef",
-	}, 3)
+		"sessionId":  "0123456789abcdef0123456789abcdef",
+		"oracleArgv": []string{"ssh", "-G", "testhost"},
+	}, 4)
 	if unknown.Error == nil || unknown.Error.Code != -32602 {
 		t.Fatalf("unknown sessionId: got %+v, want -32602", unknown.Error)
 	}
 
+	// Missing or malformed params are rejected.
+	missing := vaultCall(t, conn, "shell.launcherCommand", map[string]any{}, 5)
+	if missing.Error == nil || missing.Error.Code != -32602 {
+		t.Fatalf("missing params: got %+v, want -32602", missing.Error)
+	}
+	badArgv := vaultCall(t, conn, "shell.launcherCommand", map[string]any{
+		"sessionId":  sid,
+		"oracleArgv": []string{"scp", "-G", "testhost"},
+	}, 6)
+	if badArgv.Error == nil || badArgv.Error.Code != -32602 {
+		t.Fatalf("malformed oracleArgv: got %+v, want -32602", badArgv.Error)
+	}
+}
+
+// ── shell.environmentObserved ───────────────────────────────────────────────
+
+func TestShellEnvironmentObserved_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "shell.environmentObserved.schema.json")
+
+	raw, err := json.Marshal(environmentObservedResult{Processed: true, FactUpdated: true})
+	if err != nil {
+		t.Fatalf("marshal recorded: %v", err)
+	}
+	validateJSON(t, schema, raw, "shell.environmentObserved DTO (recorded)")
+
+	raw, err = json.Marshal(environmentObservedResult{Processed: false, FactUpdated: false})
+	if err != nil {
+		t.Fatalf("marshal unknown: %v", err)
+	}
+	validateJSON(t, schema, raw, "shell.environmentObserved DTO (unknown id)")
+}
+
+// OverTheWire: the real handler, the real launcher and stager, a stub
+// resolver, and a real fact store — an accepted passport for a minted
+// attempt records the fact, and a duplicate report is a no-op.
+func TestShellEnvironmentObserved_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "shell.environmentObserved.schema.json")
+	ctx := context.Background()
+
+	ws := NewWSServer(
+		log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithRemoteLauncher(&realRemoteLauncher{}),
+		WithLauncherStager(shellintegration.NewLauncherStager(log.NewSlogAdapter(nil), t.TempDir())),
+		WithSSHConfigResolver(newLauncherTestResolver(), "/nonexistent/config"),
+		WithInstalledFactStore(ssh.NewInstalledFactStore(
+			log.NewSlogAdapter(nil), storage.NewDocumentStore(t.TempDir()), "installed-facts.json")),
+	)
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	sid := openSessionForLauncher(t, conn)
+	first := launcherCommandCall(t, conn, sid, 2)
+	if first.Mode != launcherModeBootstrap {
+		t.Fatalf("first attempt mode = %q, want bootstrap", first.Mode)
+	}
+
+	passport := map[string]any{
+		"protocolVersion":     "1",
+		"environmentId":       first.EnvironmentID,
+		"parentEnvironmentId": "-",
+		"scriptVersion":       "0.6.0",
+		"tier":                "enhanced",
+		"generation":          "v10",
+	}
+	resp := vaultCall(t, conn, "shell.environmentObserved", map[string]any{
+		"environmentId": first.EnvironmentID,
+		"passport":      passport,
+	}, 3)
+	if resp.Error != nil {
+		t.Fatalf("shell.environmentObserved: %+v", resp.Error)
+	}
+	validateJSON(t, schema, resp.Result, "shell.environmentObserved result (real socket)")
+	var got environmentObservedResult
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !got.Processed || !got.FactUpdated {
+		t.Errorf("first observation = %+v, want processed+factUpdated", got)
+	}
+
+	// The next launcherCommand takes the compact line: the fact was written.
+	second := launcherCommandCall(t, conn, sid, 4)
+	if second.Mode != launcherModeInstalled {
+		t.Errorf("second attempt mode = %q, want installed after the passport was accepted", second.Mode)
+	}
+
+	// A duplicate observation satisfies the schema and changes nothing.
+	dup := vaultCall(t, conn, "shell.environmentObserved", map[string]any{
+		"environmentId": first.EnvironmentID,
+		"passport":      passport,
+	}, 5)
+	if dup.Error != nil {
+		t.Fatalf("duplicate observation: %+v", dup.Error)
+	}
+	validateJSON(t, schema, dup.Result, "shell.environmentObserved duplicate (real socket)")
+
+	// An unknown id is processed=false, and still satisfies the schema.
+	unknown := vaultCall(t, conn, "shell.environmentObserved", map[string]any{
+		"environmentId": "00000000000000000000000000000000",
+		"passport":      nil,
+	}, 6)
+	if unknown.Error != nil {
+		t.Fatalf("unknown-id observation: %+v", unknown.Error)
+	}
+	validateJSON(t, schema, unknown.Result, "shell.environmentObserved unknown-id (real socket)")
+
 	// Missing params are rejected.
-	missing := vaultCall(t, conn, "shell.launcherCommand", map[string]any{}, 4)
+	missing := vaultCall(t, conn, "shell.environmentObserved", map[string]any{}, 7)
 	if missing.Error == nil || missing.Error.Code != -32602 {
 		t.Fatalf("missing params: got %+v, want -32602", missing.Error)
 	}
 }
 
-// No launcher wired: the handler returns launcherPath null with reason
-// "unsupported" rather than an error. The renderer sends the original line.
-func TestShellLauncherCommand_NotWiredReturnsNull(t *testing.T) {
+// No resolver wired: the oracle is missing, so the rewrite is refused with
+// "oracle-failed" (nocx-qwhp) rather than a silent bypass — a rewrite built
+// without the oracle's answer is a guess. The renderer sends the original
+// line.
+func TestShellLauncherCommand_NoResolverRefuses(t *testing.T) {
 	ctx := context.Background()
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)))
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	sid := openSessionForLauncher(t, conn)
+	got := launcherCommandCall(t, conn, sid, 2)
+	if got.Mode != launcherModeRaw {
+		t.Errorf("mode = %q, want raw", got.Mode)
+	}
+	if got.LauncherPath != nil {
+		t.Errorf("launcherPath = %q, want nil when the oracle is missing", *got.LauncherPath)
+	}
+	if got.Reason == nil || *got.Reason != "oracle-failed" {
+		t.Errorf("reason = %v, want oracle-failed", got.Reason)
+	}
+}
+
+// Launcher and stager not wired: with a working oracle the bootstrap path
+// has nowhere to put the payload, so the handler refuses with "unsupported".
+func TestShellLauncherCommand_LauncherNotWiredRefuses(t *testing.T) {
+	ctx := context.Background()
+	ws := NewWSServer(
+		log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithSSHConfigResolver(newLauncherTestResolver(), "/nonexistent/config"),
+	)
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -2131,6 +2307,7 @@ func TestShellLauncherCommand_StageFailureRefuses(t *testing.T) {
 		log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
 		WithRemoteLauncher(&realRemoteLauncher{}),
 		WithLauncherStager(shellintegration.NewLauncherStager(log.NewSlogAdapter(nil), home)),
+		WithSSHConfigResolver(newLauncherTestResolver(), "/nonexistent/config"),
 	)
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -2156,6 +2333,7 @@ func TestShellLauncherCommand_StagerWithoutLauncherRefuses(t *testing.T) {
 	ws := NewWSServer(
 		log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
 		WithLauncherStager(shellintegration.NewLauncherStager(log.NewSlogAdapter(nil), t.TempDir())),
+		WithSSHConfigResolver(newLauncherTestResolver(), "/nonexistent/config"),
 	)
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -2196,8 +2374,8 @@ func openSessionForLauncher(t *testing.T, conn *websocket.Conn) string {
 func launcherCommandCall(t *testing.T, conn *websocket.Conn, sid string, id int) shellLauncherCommandResult {
 	t.Helper()
 	resp := vaultCall(t, conn, "shell.launcherCommand", map[string]any{
-		"destination": "testhost",
-		"sessionId":   sid,
+		"sessionId":  sid,
+		"oracleArgv": []string{"ssh", "-G", "testhost"},
 	}, id)
 	if resp.Error != nil {
 		t.Fatalf("shell.launcherCommand: %+v", resp.Error)
@@ -2234,8 +2412,9 @@ func (realRemoteLauncher) StartCommand(kind ssh.ShellKind, opts ssh.LaunchOption
 		return "", ssh.ReasonUnsupportedShell, false
 	}
 	lo := shellintegration.LaunchOptions{
-		SessionID: opts.SessionID,
-		Enhanced:  opts.Enhanced,
+		SessionID:     opts.SessionID,
+		Enhanced:      opts.Enhanced,
+		EnvironmentID: opts.EnvironmentID,
 	}
 	cmd, reason, ok := l.StartCommand(sk, lo)
 	return cmd, ssh.RefusalReason(reason), ok

@@ -123,6 +123,21 @@ type WSServer struct {
 	// renderer sends the line the user typed.
 	launcherStager LauncherStager
 
+	// installedFacts is the backend-owned, persisted memory of which
+	// resolved destinations carry a committed, protocol-compatible
+	// integration (§5.4). Wired through WithInstalledFactStore; when nil,
+	// every host bootstraps and observations are logged but never
+	// recorded.
+	installedFacts *ssh.InstalledFactStore
+
+	// launcherAttempts is the idempotency registry binding a minted
+	// environment id to its resolved identity and expected delivery
+	// (§5.3). Guarded by launcherAttemptsMu; a passport can arrive
+	// immediately after the result, so registration and observation
+	// consumption are atomic with the registry.
+	launcherAttemptsMu sync.Mutex
+	launcherAttempts   map[string]*launchAttempt
+
 	// localCompleter answers shell.complete for KindLocal sessions.
 	// When nil, the method returns a JSON-RPC error for local sessions.
 	localCompleter completion.Completer
@@ -947,6 +962,8 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.handlePortsMethod(wconn, req)
 	case "dialog.openFile":
 		s.handleDialogOpenFile(wconn, req)
+	case "shell.environmentObserved":
+		s.handleShellEnvironmentObserved(wconn, req)
 	case "history.query":
 		s.handleHistoryQuery(ctx, wconn, req)
 	case "history.record":

@@ -179,6 +179,13 @@ func New(opts ...Option) (*App, error) {
 	docStore := storage.NewDocumentStore(paths.ConfigDir())
 	profileStore := profile.NewJSONStoreWithDocStore(docStore, "profiles.json")
 
+	// The installed fact (nocx-mlm7 P7, design §5.4): backend-owned,
+	// persisted across restarts, keyed by the resolved destination
+	// identity, written only from a passport the renderer accepted and
+	// invalidated when a connection that expected installed-script
+	// produces no passport. The delivery planner reads it to choose the
+	// compact installed line; without it every host bootstraps.
+	installedFacts := ssh.NewInstalledFactStore(logger, docStore, "installed-facts.json")
 	// ContentDB (ADR-0018, amended 2026-08-01): the one SQLite database for
 	// unbounded private content, encrypted at rest by the adiantum VFS
 	// (ncruces/go-sqlite3 — no cgo). The real store is constructed below,
@@ -338,6 +345,11 @@ func New(opts ...Option) (*App, error) {
 		// known here and nowhere below: the transport must not pick a
 		// filesystem location of its own.
 		transport.WithLauncherStager(shellintegration.NewLauncherStager(logger, home)),
+		// The installed fact (nocx-mlm7 P7, design §5.4): the persisted
+		// memory of which resolved destinations carry a committed
+		// integration. The delivery planner reads it to choose the compact
+		// installed line; the observation RPC writes and invalidates it.
+		transport.WithInstalledFactStore(installedFacts),
 		// The tunnel connector (nocx-8gix): *ssh.RealClient satisfies
 		// tunnel.Connector without an adapter — the signatures are
 		// identical — so a forward acquires its OWN pooled connection
@@ -521,7 +533,11 @@ type remoteLauncherAdapter struct {
 func (a *remoteLauncherAdapter) StartCommand(shell ssh.ShellKind, opts ssh.LaunchOptions) (string, ssh.RefusalReason, bool) {
 	cmd, reason, ok := a.inner.StartCommand(
 		shellintegration.ShellKind(shell),
-		shellintegration.LaunchOptions{SessionID: opts.SessionID, Enhanced: opts.Enhanced},
+		shellintegration.LaunchOptions{
+			SessionID:     opts.SessionID,
+			Enhanced:      opts.Enhanced,
+			EnvironmentID: opts.EnvironmentID,
+		},
 	)
 	if !ok {
 		return "", a.mapRefusalReason(reason), false

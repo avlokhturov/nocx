@@ -1,25 +1,51 @@
 package transport
 
-// shell.launcherCommand — stages the remote launcher for rewriting a
-// hand-typed ssh invocation and returns its PATH (nocx-pu4.6). The renderer
-// detects an interactive ssh login at submit time, calls this method, and
-// builds a line whose LOCAL shell reads the file and hands the bytes to ssh
-// through argv. The original line is recorded in history; the rewritten line
-// goes to the PTY. Nothing is typed after submit (the whole in-band family's
-// unsolvable safety problem).
+// shell.launcherCommand — the delivery planner's decision, made once per
+// attempt, of which line to send for a hand-typed ssh invocation
+// (2026-08-05 delivery-modes design §3, §5.3). The renderer detects an
+// interactive ssh login at submit time, calls this method with the plan P4's
+// parser built, and drives P2's tracker with the minted environment id
+// BEFORE the bytes leave. Nothing is typed after submit.
 //
-// Why a path and not the launcher itself: the ShellAuto launcher is ~35 KB
-// because it carries the bash, zsh and POSIX tiers, and a hand-typed ssh can
-// only reach the shell through the tty, whose canonical line buffer is 4096
-// bytes. Sending it inline truncated the payload mid-script and the shell
-// executed the fragments. See internal/shellintegration/stage.go.
+// The planner mints a FRESH environment id per attempt — never the tab
+// session id, which is stable and would make two attempts from one tab
+// indistinguishable — and returns it in the result. The renderer registers
+// it as expected before the line reaches the pty; the launcher echoes it in
+// the passport; the tracker accepts only that id.
+//
+// Two forms of rewrite, decided here:
+//
+//   - "bootstrap" (§3.2): the host has no committed bundle. The launcher is
+//     staged in a local file (the canonical tty line is capped at 4096
+//     bytes; the payload cannot cross it) and the renderer builds a line
+//     whose local shell reads the file and hands the bytes to ssh through
+//     argv. The launcher embeds NOCX_ENVIRONMENT_ID (minted here) and
+//     NOCX_SESSION_ID (the session id, AD-7), publishes the bundle on the
+//     far host, and emits the passport.
+//   - "installed" (§3.3): the installed fact says the host has a committed,
+//     protocol-compatible generation. The renderer builds the compact
+//     guard-travelling line, passing the environment id (and the session id)
+//     as the launch carrier's arguments. No launcher is staged and nothing
+//     is written locally.
+//
+// Anything uncertain is "raw": launcherPath null, reason non-null, and the
+// renderer sends the line the user typed unchanged — fail-open is the
+// invariant (ADR-0004 §1). A failed or unavailable oracle refuses the
+// rewrite (nocx-qwhp); it never rewrites on a guess.
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/shellintegration"
 	"github.com/shady2k/nocx/internal/ssh"
 )
 
@@ -39,82 +65,197 @@ func WithLauncherStager(st LauncherStager) WSServerOption {
 	return func(s *WSServer) { s.launcherStager = st }
 }
 
+// WithInstalledFactStore attaches the backend-owned, persisted installed
+// fact (§5.4): the memory that makes the second connection to a host
+// cheaper than the first. When not wired, every host bootstraps and
+// observations are logged but never recorded.
+func WithInstalledFactStore(store *ssh.InstalledFactStore) WSServerOption {
+	return func(s *WSServer) { s.installedFacts = store }
+}
+
 // shellLauncherCommandResult is the result of shell.launcherCommand,
 // matching contracts/shell.launcherCommand.schema.json exactly.
 type shellLauncherCommandResult struct {
+	// Mode is the planner's decision: "bootstrap" (stage a launcher),
+	// "installed" (compact line, no staging) or "raw" (no rewrite).
+	Mode string `json:"mode"`
+	// EnvironmentID is the fresh id minted for THIS attempt — never the
+	// tab session id. The renderer registers it as expected before the
+	// line reaches the pty.
+	EnvironmentID string `json:"environmentId"`
+	// LauncherPath is the shell-quoted staged path; non-null only when
+	// mode is "bootstrap".
 	LauncherPath *string `json:"launcherPath"`
-	Reason       *string `json:"reason"`
+	// Reason is why the rewrite was refused; non-null only when mode is
+	// "raw".
+	Reason *string `json:"reason"`
+}
+
+const (
+	launcherModeBootstrap = "bootstrap"
+	launcherModeInstalled = "installed"
+	launcherModeRaw       = "raw"
+)
+
+// The expected delivery of a minted attempt, recorded so the observation
+// handler knows whether a missing passport must invalidate the installed
+// fact (§5.4): only a connection that expected installed-script does.
+const (
+	attemptExpectedBootstrap = "bootstrap-script"
+	attemptExpectedInstalled = "installed-script"
+	attemptExpectedRaw       = "raw"
+)
+
+// launchAttempt is the backend-side record for one minted environment id:
+// the binding between the id the renderer saw and the resolved identity and
+// expected delivery the observation handler needs. A passport can arrive
+// immediately after the result, so registration happens under the registry
+// lock and consumption is idempotent.
+type launchAttempt struct {
+	environmentID string
+	identity      string // resolved identity key (ssh.IdentityKey)
+	expected      string // attemptExpected* the rewritten line should produce
+	consumed      bool   // an observation already decided this attempt
+	mintedAt      time.Time
+}
+
+// maxLaunchAttempts bounds the idempotency registry. A dropped entry only
+// loses a no-passport invalidation for a very old attempt — the next
+// connection bootstraps, which is the safe direction.
+const maxLaunchAttempts = 1024
+
+// expectedInstalledProtocol is the manifest protocol the planner requires
+// of an installed fact before choosing the compact line: the current
+// protocol of the bundle this product ships, spelled the way the passport
+// carries it (a string, not an int — §5.2's wire form).
+var expectedInstalledProtocol = strconv.Itoa(shellintegration.ProtocolVersion)
+
+// mintEnvironmentID returns a fresh attempt id in the passport charset
+// [A-Za-z0-9._-]{1,64} (16 random bytes, hex). Entropy failure is
+// unrecoverable in practice; the caller refuses the rewrite.
+func mintEnvironmentID() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b[:]), nil
+}
+
+// validOracleArgv rejects a params oracleArgv that is not the ssh -G oracle
+// shape the renderer's plan builds: ["ssh", "-G", ...options, destination].
+// A violation is a renderer bug, refused loudly as a protocol error.
+func validOracleArgv(argv []string) bool {
+	return len(argv) >= 3 && filepath.Base(argv[0]) == "ssh" && argv[1] == "-G"
 }
 
 // handleShellLauncherCommand serves the shell.launcherCommand method.
 //
-//	--> {"jsonrpc":"2.0","id":1,"method":"shell.launcherCommand","params":{"destination":"pi@raspberrypi","sessionId":"0123456789abcdef0123456789abcdef"}}
-//	<-- {"jsonrpc":"2.0","id":1,"result":{"launcherPath":"'/home/u/.nocx/run/launcher-123'","reason":null}}
+//	--> {"jsonrpc":"2.0","id":1,"method":"shell.launcherCommand","params":{"sessionId":"0123…","oracleArgv":["ssh","-G","-p","2222","pi@host"]}}
+//	<-- {"jsonrpc":"2.0","id":1,"result":{"mode":"bootstrap","environmentId":"…","launcherPath":"'/home/u/.nocx/run/launcher-123'","reason":null}}
 //
-// The destination is whatever the renderer's ssh-transition parser
-// extracted: user@host, host, or an IPv4 address. The session id is
-// server-authoritative (AD-7): only a live session in the registry can
-// anchor NOCX_SESSION_ID in the launcher command.
+// oracleArgv is plan.oracleArgv verbatim — the complete argv of the oracle
+// for the line the user actually typed (P4's SshPlan), so the typed
+// -F/-o/-J/-l/-p reach ssh -G (nocx-c5az) and the installed-fact key is the
+// resolved identity of THAT argv, not of a bare hostname (ADR-0015
+// narrowed). sessionId is server-authoritative (AD-7): only a live session
+// in the registry can anchor NOCX_SESSION_ID in the launcher command.
 //
-// Refusal reasons (launcherPath null, reason non-null):
-//   - "remote-command": the destination's ssh config sets RemoteCommand
-//     (ADR-0015, ssh -G oracle); our rewrite would be refused by sshd.
+// Refusal reasons (mode "raw", reason non-null):
+//   - "oracle-failed": the ssh -G oracle is missing, timed out or failed —
+//     a rewrite built without the oracle's answer is a guess, and fail-open
+//     sends the typed bytes (nocx-qwhp).
+//   - "remote-command": the resolved config sets RemoteCommand (ADR-0015);
+//     our rewrite would be refused by sshd.
 //   - "unsupported": the launcher cannot build a command (unsupported
-//     shell, script too large, or no launcher wired).
+//     shell, script too large, no launcher or stager wired, or the
+//     environment id could not be minted).
 //   - "stage-failed": the launcher could not be written where the local
 //     shell can read it (no home, unwritable directory, full disk).
-//
-// Fail-open is the invariant (ADR-0004 §1): anything uncertain means
-// launcherPath is null and the renderer sends the original line unchanged.
 func (s *WSServer) handleShellLauncherCommand(wconn *wsConn, req jsonrpcRequest) {
 	var params struct {
-		Destination string `json:"destination"`
-		SessionID   string `json:"sessionId"`
+		SessionID  string   `json:"sessionId"`
+		OracleArgv []string `json:"oracleArgv"`
 	}
-	if err := json.Unmarshal(req.Params, &params); err != nil || params.Destination == "" || params.SessionID == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: destination and sessionId required"))
+	if err := json.Unmarshal(req.Params, &params); err != nil || params.SessionID == "" || !validOracleArgv(params.OracleArgv) {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: sessionId and a well-formed oracleArgv required"))
 		return
 	}
 
 	// Session id is server-authoritative (AD-7).
-	sid := session.ID(params.SessionID)
-	if _, err := s.registry.Get(sid); err != nil {
+	if _, err := s.registry.Get(session.ID(params.SessionID)); err != nil {
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId"))
 		return
 	}
 
-	// Both seams must be wired. Without either we cannot put a launcher
-	// where the shell can read it; the renderer sends the original line.
-	if s.remoteLauncher == nil || s.launcherStager == nil {
-		s.refuseLauncherCommand(wconn, req, "unsupported")
+	// A fresh environment id per attempt (§5.3). Minted before any
+	// decision so every result — including every refusal — carries one.
+	envID, err := mintEnvironmentID()
+	if err != nil {
+		s.log.Warn("shell.launcherCommand: could not mint an environment id; refusing the rewrite", "error", err)
+		s.refuseLauncherCommand(wconn, req, envID, "unsupported")
 		return
 	}
 
-	// Resolve the destination through ssh -G (ADR-0015): if the host's
-	// config sets RemoteCommand, OpenSSH refuses a command-line command
-	// alongside it, and our rewrite would be rejected. Ask the oracle;
-	// do not guess.
-	if s.sshConfigResolver != nil {
-		host, _ := splitUserHost(params.Destination)
-		hostCfg, err := s.sshConfigResolver.ResolveConfig(context.Background(), host)
-		if err == nil && hostCfg != nil && hostCfg.RemoteCommand != "" {
-			s.refuseLauncherCommand(wconn, req, "remote-command")
+	// The oracle is mandatory and its failure refuses the rewrite
+	// (nocx-qwhp). A missing resolver is a failed oracle, not a silent
+	// bypass: without ssh -G's answer there is no basis for a rewrite.
+	if s.sshConfigResolver == nil {
+		s.refuseLauncherCommand(wconn, req, envID, "oracle-failed")
+		return
+	}
+	cfg, err := s.sshConfigResolver.ResolveArgv(context.Background(), params.OracleArgv)
+	if err != nil {
+		s.log.Warn("shell.launcherCommand: oracle failed; refusing the rewrite",
+			"argv", params.OracleArgv, "error", err)
+		s.refuseLauncherCommand(wconn, req, envID, "oracle-failed")
+		return
+	}
+	// A RemoteCommand configured for the destination wins outright:
+	// OpenSSH refuses a command-line command alongside it, so no rewrite
+	// (ADR-0015).
+	if cfg.RemoteCommand != "" {
+		s.refuseLauncherCommand(wconn, req, envID, "remote-command")
+		return
+	}
+
+	identity := ssh.IdentityKey(cfg)
+
+	// The installed fact decides the form: the compact line only when the
+	// host has a committed, protocol-compatible generation; anything else
+	// bootstraps (§3.2/§3.3). The fact is keyed by the RESOLVED identity,
+	// so a host reached through two different argv spellings shares one
+	// memory.
+	if s.installedFacts != nil {
+		if fact, ok := s.installedFacts.Get(identity); ok && fact.Protocol == expectedInstalledProtocol {
+			s.registerAttempt(envID, identity, attemptExpectedInstalled)
+			_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(shellLauncherCommandResult{
+				Mode:          launcherModeInstalled,
+				EnvironmentID: envID,
+				LauncherPath:  nil,
+				Reason:        nil,
+			})))
 			return
 		}
 	}
 
-	// Build the launcher command for auto-detection: the dispatcher
-	// picks bash, zsh or POSIX on the far host (nocx-6rj0).
+	// Bootstrap: the launcher travels in argv (staged locally, consumed
+	// exactly once) and carries the fresh environment id — the far shell
+	// announces the passport only when NOCX_ENVIRONMENT_ID is set.
+	if s.remoteLauncher == nil || s.launcherStager == nil {
+		s.refuseLauncherCommand(wconn, req, envID, "unsupported")
+		return
+	}
 	launcher, reason, ok := s.remoteLauncher.StartCommand(ssh.ShellAuto, ssh.LaunchOptions{
-		SessionID: params.SessionID,
-		Enhanced:  true,
+		SessionID:     params.SessionID,
+		Enhanced:      true,
+		EnvironmentID: envID,
 	})
 	if !ok {
 		refusal := string(reason)
 		if refusal == "" {
 			refusal = "unsupported"
 		}
-		s.refuseLauncherCommand(wconn, req, refusal)
+		s.refuseLauncherCommand(wconn, req, envID, refusal)
 		return
 	}
 
@@ -123,9 +264,11 @@ func (s *WSServer) handleShellLauncherCommand(wconn *wsConn, req jsonrpcRequest)
 	path, err := s.launcherStager.Stage(launcher)
 	if err != nil {
 		s.log.Warn("shell.launcherCommand: could not stage launcher", "error", err)
-		s.refuseLauncherCommand(wconn, req, "stage-failed")
+		s.refuseLauncherCommand(wconn, req, envID, "stage-failed")
 		return
 	}
+
+	s.registerAttempt(envID, identity, attemptExpectedBootstrap)
 
 	// Shell-quote the path so the renderer can splice it into the line as
 	// a single word. The staging directory is ours and the names are
@@ -133,27 +276,203 @@ func (s *WSServer) handleShellLauncherCommand(wconn *wsConn, req jsonrpcRequest)
 	// ordinary thing and must not break the rewrite.
 	quoted := shellQuote(path)
 	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(shellLauncherCommandResult{
-		LauncherPath: &quoted,
-		Reason:       nil,
+		Mode:          launcherModeBootstrap,
+		EnvironmentID: envID,
+		LauncherPath:  &quoted,
+		Reason:        nil,
 	})))
 }
 
 // refuseLauncherCommand answers with a stated refusal: no path, a reason the
-// renderer can log, and an original line that goes to the pty unchanged.
-func (s *WSServer) refuseLauncherCommand(wconn *wsConn, req jsonrpcRequest, reason string) {
+// renderer can log, and an original line that goes to the pty unchanged. The
+// attempt is registered as raw so a later observation for its environment id
+// can never touch the installed fact.
+func (s *WSServer) refuseLauncherCommand(wconn *wsConn, req jsonrpcRequest, envID, reason string) {
+	s.registerAttempt(envID, "", attemptExpectedRaw)
 	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(shellLauncherCommandResult{
-		LauncherPath: nil,
-		Reason:       &reason,
+		Mode:          launcherModeRaw,
+		EnvironmentID: envID,
+		LauncherPath:  nil,
+		Reason:        &reason,
 	})))
 }
 
-// splitUserHost separates user@host into user and host. Returns the
-// original string as host when there is no @.
-func splitUserHost(dest string) (host, user string) {
-	if idx := strings.LastIndex(dest, "@"); idx >= 0 {
-		return dest[idx+1:], dest[:idx]
+// observedPassport is the passport the renderer accepted, crossing the
+// control plane as a typed observation (§5.4 — the AD-1 amendment this
+// needs is named in the P7 commit). The backend stays byte-blind (AD-6);
+// only the renderer parses OSC 636, and only an ACCEPTED passport — one
+// whose id is the id nocx minted for the attempt in flight — is reported.
+type observedPassport struct {
+	ProtocolVersion     string `json:"protocolVersion"`
+	EnvironmentID       string `json:"environmentId"`
+	ParentEnvironmentID string `json:"parentEnvironmentId"`
+	ScriptVersion       string `json:"scriptVersion"`
+	Tier                string `json:"tier"`
+	Generation          string `json:"generation"`
+}
+
+// environmentObservedResult is the result of shell.environmentObserved,
+// matching contracts/shell.environmentObserved.schema.json exactly.
+// processed=false means the environment id did not match any live minted
+// attempt (typically a report after a backend restart) — the renderer logs
+// it and nothing is written. factUpdated reports whether the durable fact
+// store changed.
+type environmentObservedResult struct {
+	Processed   bool `json:"processed"`
+	FactUpdated bool `json:"factUpdated"`
+}
+
+// handleShellEnvironmentObserved serves the shell.environmentObserved
+// method: the renderer reports what the attempt produced. passport non-null
+// is an accepted readiness passport (protocol, script version, generation
+// preserved verbatim); passport null is "the attempt ended with no accepted
+// passport". Only an attempt this backend minted can change state, and the
+// first observation per attempt decides it — duplicates are idempotent and
+// can never regress a written fact.
+func (s *WSServer) handleShellEnvironmentObserved(wconn *wsConn, req jsonrpcRequest) {
+	var params struct {
+		EnvironmentID string            `json:"environmentId"`
+		Passport      *observedPassport `json:"passport"`
 	}
-	return dest, ""
+	if err := json.Unmarshal(req.Params, &params); err != nil || params.EnvironmentID == "" {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: environmentId required"))
+		return
+	}
+	if params.Passport != nil && params.Passport.EnvironmentID != params.EnvironmentID {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: passport environmentId does not match"))
+		return
+	}
+	if !validPassport(params.Passport) {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: malformed passport"))
+		return
+	}
+	processed, updated := s.consumeObservation(params.EnvironmentID, params.Passport)
+	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(environmentObservedResult{
+		Processed:   processed,
+		FactUpdated: updated,
+	})))
+}
+
+// consumeObservation applies one observation to the attempt registry under
+// the registry lock: the report is matched to a live minted attempt (else
+// processed=false), the first observation per attempt decides it, and the
+// durable fact change happens BEFORE the attempt is marked consumed — a
+// failed write leaves the attempt consumable so a duplicate report can
+// retry, and Get keeps answering "not installed" in the meantime.
+func (s *WSServer) consumeObservation(envID string, p *observedPassport) (processed, factUpdated bool) {
+	s.launcherAttemptsMu.Lock()
+	defer s.launcherAttemptsMu.Unlock()
+
+	a, ok := s.launcherAttempts[envID]
+	if !ok {
+		return false, false
+	}
+	if a.consumed {
+		return true, false
+	}
+	if a.expected == attemptExpectedRaw {
+		a.consumed = true
+		return true, false
+	}
+
+	if p != nil {
+		fact := ssh.InstalledFact{
+			Identity:      a.identity,
+			Protocol:      p.ProtocolVersion,
+			ScriptVersion: p.ScriptVersion,
+			Generation:    p.Generation,
+			ObservedAt:    time.Now(),
+		}
+		if s.installedFacts == nil {
+			a.consumed = true
+			s.log.Warn("shell.environmentObserved: installed-fact store not wired; accepted passport not recorded",
+				"environmentId", envID)
+			return true, false
+		}
+		if err := s.installedFacts.Record(fact); err != nil {
+			s.log.Warn("shell.environmentObserved: could not record the installed fact",
+				"identity", a.identity, "error", err)
+			return true, false
+		}
+		a.consumed = true
+		return true, true
+	}
+
+	// No passport. Only a connection that expected installed-script
+	// invalidates the fact — that is how a host whose bundle rotted
+	// bootstraps again instead of failing forever (§3.3). Bootstrap and
+	// raw attempts recorded nothing, so there is nothing to invalidate.
+	if a.expected == attemptExpectedInstalled {
+		if s.installedFacts == nil {
+			a.consumed = true
+			return true, false
+		}
+		if err := s.installedFacts.Invalidate(a.identity); err != nil {
+			s.log.Warn("shell.environmentObserved: could not invalidate the installed fact",
+				"identity", a.identity, "error", err)
+			return true, false
+		}
+		a.consumed = true
+		return true, true
+	}
+	a.consumed = true
+	return true, false
+}
+
+// passportValueRe mirrors the wire rule of §5.2: every passport field is
+// restricted to [A-Za-z0-9._-]{1,64} — no escaping, because no field may
+// contain a separator. The renderer's parser enforces the same rule
+// (frontend/src/environment-passport.ts); the observation RPC re-checks
+// because it is the write boundary of the installed fact and must not
+// trust a partial or hostile typed payload.
+var passportValueRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+
+// validPassport reports whether an observed passport is well-formed enough
+// to write a fact from: the id matches the attempt (checked by the caller)
+// and every field satisfies the §5.2 charset and the tier enum.
+func validPassport(p *observedPassport) bool {
+	if p == nil {
+		return true // nil means "no passport arrived", the invalidation side
+	}
+	if !passportValueRe.MatchString(p.ProtocolVersion) ||
+		!passportValueRe.MatchString(p.EnvironmentID) ||
+		!passportValueRe.MatchString(p.ParentEnvironmentID) ||
+		!passportValueRe.MatchString(p.ScriptVersion) ||
+		!passportValueRe.MatchString(p.Generation) {
+		return false
+	}
+	switch p.Tier {
+	case "enhanced", "blocks", "minimal":
+		return true
+	default:
+		return false
+	}
+}
+
+// registerAttempt records a minted attempt under the registry lock. The
+// registry is bounded: the oldest entry is evicted when full.
+func (s *WSServer) registerAttempt(envID, identity, expected string) {
+	s.launcherAttemptsMu.Lock()
+	defer s.launcherAttemptsMu.Unlock()
+	if s.launcherAttempts == nil {
+		s.launcherAttempts = make(map[string]*launchAttempt)
+	}
+	if len(s.launcherAttempts) >= maxLaunchAttempts {
+		var oldestID string
+		var oldest *launchAttempt
+		for id, a := range s.launcherAttempts {
+			if oldest == nil || a.mintedAt.Before(oldest.mintedAt) {
+				oldest, oldestID = a, id
+			}
+		}
+		delete(s.launcherAttempts, oldestID)
+	}
+	s.launcherAttempts[envID] = &launchAttempt{
+		environmentID: envID,
+		identity:      identity,
+		expected:      expected,
+		mintedAt:      time.Now(),
+	}
 }
 
 // shellQuote wraps s in single quotes, escaping embedded quotes with the

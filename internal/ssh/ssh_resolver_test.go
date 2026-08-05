@@ -23,6 +23,9 @@ import (
 // An empty HostConfig for a host means "return defaults" (no alias).
 type StubConfigResolver struct {
 	Entries map[string]HostConfig
+	// LastArgv records the most recent ResolveArgv call's argv verbatim,
+	// so a test can prove the exact typed line reached the oracle.
+	LastArgv []string
 }
 
 func NewStubConfigResolver() *StubConfigResolver {
@@ -32,6 +35,21 @@ func NewStubConfigResolver() *StubConfigResolver {
 // AddEntry adds a config entry for the given host.
 func (s *StubConfigResolver) AddEntry(host string, cfg HostConfig) {
 	s.Entries[host] = cfg
+}
+
+// ResolveArgv resolves the LAST argv element as the host (the oracle argv
+// shape is ["ssh", "-G", ...options, destination]) and records the exact
+// argv. The typed options themselves are ignored for the answer — the stub
+// has no getopt semantics — but a caller that needs the options in the
+// resolution can seed an entry for the exact destination with the resolved
+// values.
+func (s *StubConfigResolver) ResolveArgv(_ context.Context, argv []string) (*HostConfig, error) {
+	s.LastArgv = append([]string(nil), argv...)
+	if len(argv) == 0 {
+		return &HostConfig{HostName: "", User: currentUser(), Port: 22}, errors.New("empty oracle argv")
+	}
+	host := argv[len(argv)-1]
+	return s.ResolveConfig(context.Background(), host)
 }
 
 func (s *StubConfigResolver) ResolveHost(_ context.Context, host string) (string, error) {
