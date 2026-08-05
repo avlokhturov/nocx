@@ -32,28 +32,14 @@ type RemoteInstaller interface {
 	RemoteStartCommand() string
 }
 
-// LaunchPolicy controls whether the wired RemoteLauncher may build an
-// integrated start command when the session opens (nocx-4t37.2). The
-// profile cascade decides the policy (auto|ask|off, nocx-p0ug): Auto
-// integrates at startup, silently, in the interval nocx owns; Ask and Off
-// open a plain shell and leave the explicit-request path to the renderer's
-// capability control (shell.integrate, gated on the trusted prompt).
-// internal/ssh declares its own enum because it must not depend on
-// internal/profile — the same boundary that already duplicates ShellKind,
-// LaunchOptions and RefusalReason between the two packages.
-type LaunchPolicy string
-
-const (
-	LaunchPolicyAuto LaunchPolicy = "auto"
-	LaunchPolicyAsk  LaunchPolicy = "ask"
-	LaunchPolicyOff  LaunchPolicy = "off"
-)
-
-// launchAllowed reports whether the launcher (or the legacy installer) may
-// run at open. Empty means Auto: every caller that predates the field keeps
-// integrating at startup.
-func launchAllowed(p LaunchPolicy) bool {
-	return p == "" || p == LaunchPolicyAuto
+// modeAllowsIntegration reports whether the resolved destination mode
+// (nocx-mlm7) permits open-time integration. Script (or empty — the
+// pre-mode default and the direct-host default) publishes the bundle and
+// integrates; raw publishes nothing and opens a plain shell; relay behaves
+// as raw in this epic (its consent gating lands with the relay binary).
+// An unknown mode fails closed — it never integrates.
+func modeAllowsIntegration(mode string) bool {
+	return mode == "" || mode == "script"
 }
 
 // ---------------------------------------------------------------------------
@@ -136,26 +122,18 @@ type ConnectConfig struct {
 	// (nocx-xs1d). openShell consults it unless the destination configures a
 	// RemoteCommand (which refuses a command-line remote command); when it
 	// declines, openShell starts a plain shell and surfaces the reason on the
-	// channel. The legacy RemoteInstaller is consulted only when no launcher
-	// is wired.
+	// channel. The RemoteInstaller is consulted before it in script mode so
+	// a saved connection publishes the bundle over SFTP.
 	RemoteLauncher RemoteLauncher
 
-	// LaunchPolicy gates the launcher (and the legacy installer) at open
-	// (nocx-4t37.2). Auto (or empty — the pre-policy default) integrates at
-	// startup; Ask and Off open a plain shell, with the renderer's
-	// capability control as the explicit-request path. Set by the profile
-	// resolver from the effective shellIntegration field.
-	LaunchPolicy LaunchPolicy
-
 	// DesiredMode is the resolved destination mode (raw|script|relay,
-	// nocx-mlm7) stamped by the profile resolver and carried verbatim to
-	// the open ack. The ssh layer does not consume it yet — the launch
-	// policy above is the open-time translation of it — but the renderer
-	// needs the AXIS value (not the translated policy) to show consent
-	// state for relay and to gate submit-time rewrites, and translating it
-	// back from LaunchPolicy would collapse raw and relay into one value.
-	// Empty means unset (direct-host/local opens): the ack defaults it to
-	// script. P6/P7 rework this seam when the relay gates land.
+	// nocx-mlm7) stamped by the profile resolver. It is the open-time gate:
+	// script (or empty — the direct-host default) publishes the bundle and
+	// integrates; raw publishes nothing and opens a plain shell; relay
+	// behaves as raw in this epic. The transport also carries it verbatim
+	// to the open ack so the renderer sees the AXIS value — relay must
+	// stay distinguishable from raw even though both gate integration off
+	// today.
 	DesiredMode string
 
 	// SessionID is the backend-assigned session ID (AD-7) for the session
@@ -347,12 +325,12 @@ func WithSessionID(id string) ConnectOption {
 	return func(c *ConnectConfig) { c.SessionID = id }
 }
 
-// WithLaunchPolicy sets the open-time launch policy (nocx-4t37.2). Ask and
-// Off open a plain shell and leave the explicit-request path to the
-// renderer's capability control; empty/Auto integrate at startup whenever a
-// launcher is wired.
-func WithLaunchPolicy(p LaunchPolicy) ConnectOption {
-	return func(c *ConnectConfig) { c.LaunchPolicy = p }
+// WithDesiredMode sets the resolved destination mode (raw|script|relay,
+// nocx-mlm7), the open-time gate shellStartCommand consults: script (or
+// empty — the pre-mode default) publishes and integrates; raw and relay
+// open a plain shell and publish nothing.
+func WithDesiredMode(mode string) ConnectOption {
+	return func(c *ConnectConfig) { c.DesiredMode = mode }
 }
 
 // WithEnhanced requests the marker-only prompt mode (ADR-0006) for the

@@ -386,10 +386,22 @@ func New(opts ...Option) (*App, error) {
 	// ordinary connects resolve identically. Created after tp so the
 	// UnlockRequester (the second direction, nocx-25k9.22) can be wired
 	// into every ConnectConfig the resolver builds.
+	//
+	// The SFTP carrier (nocx-mlm7 P8) is wired here and nowhere else: the
+	// same shellintegration.Impl the in-band bootstrap uses satisfies
+	// ssh.RemoteInstaller without an adapter — the signatures are
+	// identical — and WithRemoteInstaller stamps it on every ConnectConfig
+	// the resolver builds for a SAVED profile. A saved connection in
+	// script mode therefore publishes the integration bundle over SFTP
+	// through P1's publisher before the session starts (design §4), while
+	// direct-host opens (no profile, no resolver) never publish. Before
+	// this line the carrier was reachable from its own tests and nowhere
+	// else (AGENTS.md check 5).
 	resolver := connection.NewResolver(
 		profileStore, profileStore, v,
 		connection.WithConfigResolver(sshCfgResolver),
 		connection.WithUnlockRequester(tp.RequestUnlock),
+		connection.WithRemoteInstaller(shint),
 	)
 	tp.SetProfileResolver(resolver)
 

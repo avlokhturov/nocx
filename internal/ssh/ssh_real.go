@@ -533,13 +533,19 @@ func hashedPatternMatches(pattern, normalizedHost string) bool {
 //     refuses a command-line remote command alongside it ("Cannot execute
 //     command-line and remote command"), so the configured command runs
 //     as-is and no launcher or installer is consulted (spec §4.2).
-//  2. The launcher (nocx-xs1d) builds the integrated start command, but
-//     ONLY when the launch policy allows it (nocx-4t37.2): a profile whose
-//     effective shellIntegration is ask or off opens a plain shell and
-//     leaves the explicit-request path to the renderer's capability
-//     control. A profile pin (cfg.Shell) wins outright — a user who says
-//     "this host runs zsh" knows something the detector cannot (nocx-6rj0).
-//     Unpinned, the launcher receives ShellAuto and emits a strictly-POSIX
+//  2. The desired mode (nocx-mlm7) gates everything else: raw publishes
+//     nothing and opens a plain shell; relay behaves as raw in this epic;
+//     script (or empty — the direct-host default) publishes and
+//     integrates.
+//  3. In script mode a saved connection publishes the bundle over SFTP
+//     first, through the RemoteInstaller (P8's carrier): the publisher's
+//     fail-open contract means the session still starts — transient-
+//     integrated via the launcher, or raw — when the publish fails, and
+//     the previous activation stays byte-identical.
+//  4. The launcher (nocx-xs1d) then builds the integrated start command. A
+//     profile pin (cfg.Shell) wins outright — a user who says "this host
+//     runs zsh" knows something the detector cannot (nocx-6rj0). Unpinned,
+//     the launcher receives ShellAuto and emits a strictly-POSIX
 //     dispatcher that detects the far login shell at runtime — the only
 //     layer that knows which shell is at the far end — and execs the
 //     matching tier: bash → bash, zsh → zsh, anything else (dash, ash, ksh,
@@ -549,17 +555,35 @@ func hashedPatternMatches(pattern, normalizedHost string) bool {
 //     contract-violating result) falls back to a plain shell with the
 //     reason: an ordinary, usable terminal with a visible native prompt is
 //     absolute, no failure path may suppress it.
-//  3. The legacy RemoteInstaller is an explicit opt-in only — never the
-//     default — and the same policy gate applies. It installs scripts via
-//     SFTP and returns its own start command; the later opt-in
-//     persistent-install task reworks it.
-//  4. Nothing wired: a plain shell, reason none.
+//  5. No launcher wired: the installer's own start command (the §3.3
+//     far-side guard) when one is, else a plain shell, reason none.
 func (rc *RealClient) shellStartCommand(ctx context.Context, gclient *gossh.Client, resolved *resolvedConfig, cfg *ConnectConfig) (string, RefusalReason) {
 	if resolved.remoteCommand != "" {
 		return resolved.remoteCommand, ReasonRemoteCommand
 	}
 
-	if launchAllowed(cfg.LaunchPolicy) && cfg.RemoteLauncher != nil {
+	// raw and relay publish nothing and integrate nothing (N1, §3.1; relay
+	// is inert this epic). Unknown modes fail closed.
+	if !modeAllowsIntegration(cfg.DesiredMode) {
+		return "", ReasonNone
+	}
+
+	// A saved connection publishes the bundle over SFTP before the session
+	// starts (design §4: the SFTP carrier hands the same descriptor to the
+	// same Publish). Best-effort: a publish failure is logged and the
+	// session still starts — fail-open (design §4.1).
+	if cfg.RemoteInstaller != nil {
+		remoteHome, err := cfg.RemoteInstaller.GetRemoteHome(gclient)
+		if err != nil {
+			rc.log.Warn("ssh: could not determine remote home for shell integration",
+				"host", resolved.hostName, "error", err)
+		} else if err := cfg.RemoteInstaller.EnsureInstalledRemote(ctx, gclient, remoteHome); err != nil {
+			rc.log.Warn("ssh: shell integration publish failed",
+				"host", resolved.hostName, "error", err)
+		}
+	}
+
+	if cfg.RemoteLauncher != nil {
 		shell := cfg.Shell
 		if shell == "" {
 			shell = ShellAuto
@@ -580,15 +604,7 @@ func (rc *RealClient) shellStartCommand(ctx context.Context, gclient *gossh.Clie
 		return "", reason
 	}
 
-	if launchAllowed(cfg.LaunchPolicy) && cfg.RemoteInstaller != nil {
-		remoteHome, err := cfg.RemoteInstaller.GetRemoteHome(gclient)
-		if err != nil {
-			rc.log.Warn("ssh: could not determine remote home for shell integration",
-				"host", resolved.hostName, "error", err)
-		} else if err := cfg.RemoteInstaller.EnsureInstalledRemote(ctx, gclient, remoteHome); err != nil {
-			rc.log.Warn("ssh: shell integration install failed",
-				"host", resolved.hostName, "error", err)
-		}
+	if cfg.RemoteInstaller != nil {
 		return cfg.RemoteInstaller.RemoteStartCommand(), ReasonNone
 	}
 

@@ -45,26 +45,38 @@ func (f *fakeLauncher) lastCall() (ShellKind, LaunchOptions) {
 	return f.gotShell, f.gotOpts
 }
 
-// fakeInstaller is the legacy RemoteInstaller double. It fails the test if
-// consulted — the whole point of the launcher task is that the default path
-// never touches it.
-type fakeInstaller struct {
-	t *testing.T
+// recordInstaller is the RemoteInstaller double for the desired-mode
+// matrix (nocx-mlm7). It records every call so a test can assert the
+// publish happens under script and never under raw/relay, and returns a
+// canned home and start command.
+type recordInstaller struct {
+	mu           sync.Mutex
+	homeCalls    int
+	publishCalls int
+	cmdCalls     int
+	home         string
+	cmd          string
 }
 
-func (f *fakeInstaller) GetRemoteHome(_ *gossh.Client) (string, error) {
-	f.t.Fatal("GetRemoteHome called: installer must not run on the launcher path")
-	return "", nil
+func (f *recordInstaller) GetRemoteHome(_ *gossh.Client) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.homeCalls++
+	return f.home, nil
 }
 
-func (f *fakeInstaller) EnsureInstalledRemote(_ context.Context, _ *gossh.Client, _ string) error {
-	f.t.Fatal("EnsureInstalledRemote called: installer must not run on the launcher path")
+func (f *recordInstaller) EnsureInstalledRemote(_ context.Context, _ *gossh.Client, _ string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.publishCalls++
 	return nil
 }
 
-func (f *fakeInstaller) RemoteStartCommand() string {
-	f.t.Fatal("RemoteStartCommand called: installer must not run on the launcher path")
-	return ""
+func (f *recordInstaller) RemoteStartCommand() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.cmdCalls++
+	return f.cmd
 }
 
 // testSSHServer accessors for start-command observations.
@@ -175,32 +187,37 @@ func TestConnect_LauncherAccepted_StartUsesItsCommand(t *testing.T) {
 	}
 }
 
-// TestConnect_LaunchPolicyAsk_OpensPlainShell: a profile whose effective
-// shellIntegration is ask must open a plain shell — the launcher is wired
-// but NOT consulted, no exec command starts, and the reason stays none
-// (integration was never attempted, which is exactly what the renderer's
-// capability control needs to hear) (nocx-4t37.2).
-func TestConnect_LaunchPolicyAsk_OpensPlainShell(t *testing.T) {
+// TestConnect_DesiredModeRaw_OpensPlainShell: raw adds nothing (N1, §3.1) —
+// the launcher and the installer are wired but NOT consulted, no exec
+// command starts, no publish happens, and the reason stays none
+// (integration was never attempted).
+func TestConnect_DesiredModeRaw_OpensPlainShell(t *testing.T) {
 	srv := startTestSSHServer(t)
 	defer srv.close()
 
 	launcher := &fakeLauncher{cmd: "exec bash -i", reason: ReasonNone, ok: true}
+	installer := &recordInstaller{home: "/home/test", cmd: "exec bash -i"}
 
 	ch := launcherConnect(
 		t, srv, []RealClientOption{WithConfigResolver(NewStubConfigResolver())},
 		WithRemoteLauncher(launcher),
-		WithLaunchPolicy(LaunchPolicyAsk),
-		WithSessionID("sess-ask"),
+		WithRemoteInstaller(installer),
+		WithDesiredMode("raw"),
+		WithSessionID("sess-raw"),
 		WithEnhanced(),
 	)
 
 	assertUsable(t, srv, ch)
 
 	if n := launcher.callCount(); n != 0 {
-		t.Fatalf("launcher consulted %d times under ask, want 0 (plain shell at open)", n)
+		t.Fatalf("launcher consulted %d times under raw, want 0 (plain shell at open)", n)
+	}
+	if installer.homeCalls != 0 || installer.publishCalls != 0 {
+		t.Fatalf("installer consulted under raw (home=%d publish=%d), want 0 — raw publishes nothing",
+			installer.homeCalls, installer.publishCalls)
 	}
 	if got := srv.lastExecCommand(); got != "" {
-		t.Errorf("session.Start received %q under ask, want a plain shell request", got)
+		t.Errorf("session.Start received %q under raw, want a plain shell request", got)
 	}
 	if srv.shellRequestCount() != 1 {
 		t.Errorf("shell requests = %d, want 1 (the plain shell)", srv.shellRequestCount())
@@ -210,37 +227,43 @@ func TestConnect_LaunchPolicyAsk_OpensPlainShell(t *testing.T) {
 	}
 }
 
-// TestConnect_LaunchPolicyOff_OpensPlainShell: off behaves like ask at open —
-// no launcher, plain shell, reason none. The renderer's capability control
-// refuses even the explicit in-band path under off; the open-time gate is
-// the same as ask's.
-func TestConnect_LaunchPolicyOff_OpensPlainShell(t *testing.T) {
+// TestConnect_DesiredModeRelay_OpensPlainShell: relay behaves as raw in
+// this epic — no publish, no launcher, plain shell, reason none. Its
+// consent gating lands with the relay binary (design §3.4).
+func TestConnect_DesiredModeRelay_OpensPlainShell(t *testing.T) {
 	srv := startTestSSHServer(t)
 	defer srv.close()
 
 	launcher := &fakeLauncher{cmd: "exec bash -i", reason: ReasonNone, ok: true}
+	installer := &recordInstaller{home: "/home/test", cmd: "exec bash -i"}
 
 	ch := launcherConnect(
 		t, srv, []RealClientOption{WithConfigResolver(NewStubConfigResolver())},
 		WithRemoteLauncher(launcher),
-		WithLaunchPolicy(LaunchPolicyOff),
+		WithRemoteInstaller(installer),
+		WithDesiredMode("relay"),
 	)
 
 	assertUsable(t, srv, ch)
 
 	if n := launcher.callCount(); n != 0 {
-		t.Fatalf("launcher consulted %d times under off, want 0 (plain shell at open)", n)
+		t.Fatalf("launcher consulted %d times under relay, want 0 (plain shell at open)", n)
+	}
+	if installer.homeCalls != 0 || installer.publishCalls != 0 {
+		t.Fatalf("installer consulted under relay (home=%d publish=%d), want 0 — relay behaves as raw this epic",
+			installer.homeCalls, installer.publishCalls)
 	}
 	if got := ch.ShellIntegrationReason(); got != ReasonNone {
 		t.Errorf("ShellIntegrationReason = %q, want %q (never attempted)", got, ReasonNone)
 	}
 }
 
-// TestConnect_LaunchPolicyEmpty_IntegratesLikeAuto: an empty policy is the
-// pre-policy default — every existing caller without a policy keeps
-// integrating at startup. This pins the backwards-compatible reading of the
-// field, so adding it cannot silently change an unconfigured connection.
-func TestConnect_LaunchPolicyEmpty_IntegratesLikeAuto(t *testing.T) {
+// TestConnect_DesiredModeEmpty_IntegratesLikeScript: an empty mode is the
+// pre-mode default (and the direct-host default) — every existing caller
+// without a mode keeps integrating at startup. This pins the
+// backwards-compatible reading of the field, so adding it cannot silently
+// change an unconfigured connection.
+func TestConnect_DesiredModeEmpty_IntegratesLikeScript(t *testing.T) {
 	srv := startTestSSHServer(t)
 	defer srv.close()
 
@@ -249,13 +272,13 @@ func TestConnect_LaunchPolicyEmpty_IntegratesLikeAuto(t *testing.T) {
 	ch := launcherConnect(
 		t, srv, []RealClientOption{WithConfigResolver(NewStubConfigResolver())},
 		WithRemoteLauncher(launcher),
-		WithLaunchPolicy(""),
+		WithDesiredMode(""),
 	)
 
 	assertUsable(t, srv, ch)
 
 	if n := launcher.callCount(); n != 1 {
-		t.Fatalf("launcher consulted %d times with an empty policy, want 1 (auto default)", n)
+		t.Fatalf("launcher consulted %d times with an empty mode, want 1 (script default)", n)
 	}
 	if got := srv.lastExecCommand(); got != "exec bash -i" {
 		t.Errorf("session.Start received %q, want the launcher command", got)
@@ -323,12 +346,15 @@ func TestConnect_RemoteCommand_LauncherNeverCalled(t *testing.T) {
 	defer srv.close()
 
 	launcher := &fakeLauncher{cmd: "must not run", reason: ReasonNone, ok: true}
+	installer := &recordInstaller{home: "/home/test", cmd: "must not run"}
 	stub := NewStubConfigResolver()
 	stub.AddEntry(hostPortOnly(srv.addr), HostConfig{User: "test", RemoteCommand: "tmux attach -t work"})
 
 	ch := launcherConnect(
 		t, srv, []RealClientOption{WithConfigResolver(stub)},
 		WithRemoteLauncher(launcher),
+		WithRemoteInstaller(installer),
+		WithDesiredMode("script"),
 		WithSessionID("sess-xyz"),
 	)
 
@@ -336,6 +362,10 @@ func TestConnect_RemoteCommand_LauncherNeverCalled(t *testing.T) {
 
 	if n := launcher.callCount(); n != 0 {
 		t.Fatalf("launcher called %d times with a RemoteCommand configured, want 0", n)
+	}
+	if installer.homeCalls != 0 || installer.publishCalls != 0 {
+		t.Fatalf("installer consulted with a RemoteCommand configured (home=%d publish=%d), want 0 — the configured command wins outright",
+			installer.homeCalls, installer.publishCalls)
 	}
 	if got := srv.lastExecCommand(); got != "tmux attach -t work" {
 		t.Errorf("session.Start received %q, want the configured RemoteCommand", got)
@@ -413,23 +443,67 @@ func TestConnect_LauncherDegenerate_FallsBackToPlainShell(t *testing.T) {
 	}
 }
 
-func TestConnect_LauncherWired_InstallerNeverConsulted(t *testing.T) {
-	// The legacy installer is an explicit opt-in; when the launcher is wired
-	// (the new default), openShell must not silently SFTP-install anything.
+// TestConnect_DesiredModeScript_PublishesThenLaunches: script mode is the
+// N3 default — a saved connection publishes the bundle over SFTP before
+// the session starts, and the launcher's command is what runs. The old
+// "installer never consulted when the launcher is wired" precedence is
+// gone: the publish happens first, the launcher decides the command.
+func TestConnect_DesiredModeScript_PublishesThenLaunches(t *testing.T) {
 	srv := startTestSSHServer(t)
 	defer srv.close()
 
-	launcher := &fakeLauncher{cmd: "exec bash -i", reason: ReasonNone, ok: true}
-	installer := &fakeInstaller{t: t}
+	wantCmd := "exec bash -i"
+	launcher := &fakeLauncher{cmd: wantCmd, reason: ReasonNone, ok: true}
+	installer := &recordInstaller{home: "/home/test", cmd: "if [ -x \"$HOME/.nocx/launch\" ]; then exec \"$HOME/.nocx/launch\"; else exec \"${SHELL:-/bin/sh}\" -l; fi"}
 
 	ch := launcherConnect(
 		t, srv, []RealClientOption{WithConfigResolver(NewStubConfigResolver())},
 		WithRemoteLauncher(launcher),
 		WithRemoteInstaller(installer),
+		WithDesiredMode("script"),
 	)
 
 	assertUsable(t, srv, ch)
-	_ = ch
+
+	if n := launcher.callCount(); n != 1 {
+		t.Fatalf("launcher consulted %d times under script, want 1", n)
+	}
+	if installer.homeCalls != 1 || installer.publishCalls != 1 {
+		t.Errorf("publish under script: home=%d publish=%d, want 1 each",
+			installer.homeCalls, installer.publishCalls)
+	}
+	if got := srv.lastExecCommand(); got != wantCmd {
+		t.Errorf("session.Start received %q, want the launcher command %q", got, wantCmd)
+	}
+	if got := ch.ShellIntegrationReason(); got != ReasonNone {
+		t.Errorf("ShellIntegrationReason = %q, want %q", got, ReasonNone)
+	}
+}
+
+// TestConnect_DesiredModeScript_NoLauncher_UsesInstallerCommand: script
+// mode with only the carrier wired publishes and then runs the carrier's
+// own start command — the §3.3 far-side guard.
+func TestConnect_DesiredModeScript_NoLauncher_UsesInstallerCommand(t *testing.T) {
+	srv := startTestSSHServer(t)
+	defer srv.close()
+
+	wantCmd := "if [ -x \"$HOME/.nocx/launch\" ]; then exec \"$HOME/.nocx/launch\"; else exec \"${SHELL:-/bin/sh}\" -l; fi"
+	installer := &recordInstaller{home: "/home/test", cmd: wantCmd}
+
+	ch := launcherConnect(
+		t, srv, []RealClientOption{WithConfigResolver(NewStubConfigResolver())},
+		WithRemoteInstaller(installer),
+		WithDesiredMode("script"),
+	)
+
+	assertUsable(t, srv, ch)
+
+	if installer.publishCalls != 1 || installer.cmdCalls != 1 {
+		t.Errorf("carrier calls: publish=%d cmd=%d, want 1 each", installer.publishCalls, installer.cmdCalls)
+	}
+	if got := srv.lastExecCommand(); got != wantCmd {
+		t.Errorf("session.Start received %q, want the carrier's guard %q", got, wantCmd)
+	}
 }
 
 func TestConnect_NoLauncherNoRemoteCommand_PlainShellNoReason(t *testing.T) {

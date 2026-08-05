@@ -7,6 +7,7 @@ import (
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/vault"
+	gossh "golang.org/x/crypto/ssh"
 )
 
 // stubProfileStore implements profile.ProfileRepository in memory.
@@ -653,22 +654,23 @@ func TestResolver_KeySecretBinding(t *testing.T) {
 }
 
 // TestResolver_ModeFromEffectiveProfile: the effective desiredMode field
-// (profile > group > global > default) is stamped onto the ConnectConfig in
-// two places (nocx-mlm7): the launch policy openShell gates on (script
-// integrates at startup; raw and relay open a plain shell — relay is inert
-// this epic) and the verbatim mode the open ack reports, which must keep
-// relay distinguishable from raw. One row per mode, plus the unset default.
+// (profile > group > global > default) is stamped verbatim onto the
+// ConnectConfig (nocx-mlm7) — the ssh layer gates open-time integration on
+// it directly (script integrates at startup; raw and relay open a plain
+// shell — relay is inert this epic) and the open ack reports the same AXIS
+// value, which must keep relay distinguishable from raw. One row per mode,
+// plus the unset default. The LaunchPolicy translation is retired: the
+// resolver stamps the mode, and nothing else.
 func TestResolver_ModeFromEffectiveProfile(t *testing.T) {
 	cases := []struct {
-		name       string
-		mode       *profile.DesiredMode
-		wantPolicy string
-		wantMode   string
+		name     string
+		mode     *profile.DesiredMode
+		wantMode string
 	}{
-		{name: "unset defaults to script", wantPolicy: "auto", wantMode: "script"},
-		{name: "script", mode: profile.Ptr(profile.DesiredScript), wantPolicy: "auto", wantMode: "script"},
-		{name: "raw", mode: profile.Ptr(profile.DesiredRaw), wantPolicy: "off", wantMode: "raw"},
-		{name: "relay", mode: profile.Ptr(profile.DesiredRelay), wantPolicy: "off", wantMode: "relay"},
+		{name: "unset defaults to script", wantMode: "script"},
+		{name: "script", mode: profile.Ptr(profile.DesiredScript), wantMode: "script"},
+		{name: "raw", mode: profile.Ptr(profile.DesiredRaw), wantMode: "raw"},
+		{name: "relay", mode: profile.Ptr(profile.DesiredRelay), wantMode: "relay"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -689,12 +691,60 @@ func TestResolver_ModeFromEffectiveProfile(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Resolve: %v", err)
 			}
-			if got := string(cfg.LaunchPolicy); got != tc.wantPolicy {
-				t.Errorf("LaunchPolicy = %q, want %q", got, tc.wantPolicy)
-			}
 			if got := cfg.DesiredMode; got != tc.wantMode {
 				t.Errorf("DesiredMode = %q, want %q", got, tc.wantMode)
 			}
 		})
 	}
 }
+
+// TestResolver_SavedProfileCarriesRemoteInstaller: the SFTP carrier is
+// wired at the composition root and stamped on every ConnectConfig the
+// resolver builds for a saved profile (nocx-mlm7 P8). This is the
+// reachability proof: a saved connection reaches the installer through
+// Resolve → buildConfig → session.sshOptionsFromConfig →
+// ssh_real.go:shellStartCommand. Direct-host opens never see it — the
+// resolver is the only path that stamps it.
+func TestResolver_SavedProfileCarriesRemoteInstaller(t *testing.T) {
+	ps := newStubProfileStore()
+	ss := newStubSecretStore()
+
+	_ = ps.SaveProfile(profile.SSHProfile{
+		Base: profile.Base{ID: "profile:si:1", Name: "si-test"},
+		Options: profile.StoredSSHProfileOptions{
+			Host: "si.example.com",
+			User: profile.Ptr("deploy"),
+		},
+	})
+
+	installer := &recordingRemoteInstaller{}
+	r := NewResolver(ps, ps, ss, WithRemoteInstaller(installer))
+	_, cfg, err := r.Resolve("profile:si:1")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if cfg.RemoteInstaller == nil {
+		t.Fatal("saved profile ConnectConfig carries no RemoteInstaller — the SFTP carrier never publishes")
+	}
+
+	// A resolver without the option stamps none: the publish is opt-in per
+	// composition root, never a resolver default.
+	r2 := NewResolver(ps, ps, ss)
+	_, cfg2, err := r2.Resolve("profile:si:1")
+	if err != nil {
+		t.Fatalf("Resolve (no installer): %v", err)
+	}
+	if cfg2.RemoteInstaller != nil {
+		t.Error("resolver without WithRemoteInstaller stamped one anyway")
+	}
+}
+
+// recordingRemoteInstaller is the smallest ssh.RemoteInstaller double: the
+// resolver only stores the value, it never calls it.
+type recordingRemoteInstaller struct{}
+
+func (*recordingRemoteInstaller) GetRemoteHome(*gossh.Client) (string, error) { return "", nil }
+func (*recordingRemoteInstaller) EnsureInstalledRemote(context.Context, *gossh.Client, string) error {
+	return nil
+}
+func (*recordingRemoteInstaller) RemoteStartCommand() string { return "" }

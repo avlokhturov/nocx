@@ -104,14 +104,18 @@ func TestRemoteStartCommand(t *testing.T) {
 	s := New(testLogger())
 	cmd := s.RemoteStartCommand()
 
-	if !strings.Contains(cmd, "NOCX_SHELL_INTEGRATION=1") {
-		t.Errorf("RemoteStartCommand missing activation env: %q", cmd)
+	// The installed-mode start command is the §3.3 far-side guard: exec the
+	// compact carrier when a generation is committed, else a native login
+	// shell. The rc-gate activation command is retired (N4) — nothing in it
+	// may reference an rc file.
+	if !strings.Contains(cmd, `exec "$HOME/.nocx/launch"`) {
+		t.Errorf("RemoteStartCommand missing the carrier exec: %q", cmd)
 	}
-	if !strings.Contains(cmd, "exec") {
-		t.Errorf("RemoteStartCommand missing exec: %q", cmd)
+	if !strings.Contains(cmd, `exec "${SHELL:-/bin/sh}" -l`) {
+		t.Errorf("RemoteStartCommand missing the native-login-shell fallback: %q", cmd)
 	}
-	if !strings.Contains(cmd, `"${SHELL:-/bin/sh}"`) {
-		t.Errorf("RemoteStartCommand should quote SHELL expansion: %q", cmd)
+	if strings.Contains(cmd, ".bashrc") || strings.Contains(cmd, ".zshrc") {
+		t.Errorf("RemoteStartCommand references an rc file (N4): %q", cmd)
 	}
 }
 

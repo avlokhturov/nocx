@@ -34,6 +34,20 @@ type Resolver struct {
 	// sides of the authorization comparison go through the same resolution.
 	// When nil, host resolution is a no-op (original host returned as-is).
 	configResolver ssh.ConfigResolver
+	// remoteInstaller publishes the integration bundle over SFTP for a
+	// saved connection in script mode (P8's carrier). Wired at the
+	// composition root; nil means no publish happens.
+	remoteInstaller ssh.RemoteInstaller
+}
+
+// WithRemoteInstaller attaches the SFTP carrier that publishes the
+// integration bundle on a saved connection (nocx-mlm7 P8). The composition
+// root adapts shellintegration.Impl through the ssh.RemoteInstaller
+// interface; this option is how every ConnectConfig the resolver builds for
+// a saved profile carries it. Direct-host opens (no profile) never receive
+// it — nocx owns the transport only on the saved-connection path.
+func WithRemoteInstaller(ri ssh.RemoteInstaller) ResolverOption {
+	return func(r *Resolver) { r.remoteInstaller = ri }
 }
 
 // ResolverOption configures the Resolver.
@@ -138,18 +152,17 @@ func (r *Resolver) buildConfig(prof *profile.SSHProfile, visited map[string]bool
 	}
 	cfg.AgentForward = eff.ResolvedOptions.AgentForward
 
-	// Launch policy (nocx-mlm7): the effective desiredMode is the
-	// connection-scope default for whether the launcher may integrate at
-	// open. Script (the default — N3) integrates at startup, silently, in
-	// the interval nocx owns; raw refuses every rewrite and remote write;
-	// relay is inert this epic and behaves as raw until consent gating
-	// lands (P6/P7). The launcher is still attached by the transport — the
-	// policy gates whether openShell consults it.
-	cfg.LaunchPolicy = desiredModeToLaunchPolicy(eff.ResolvedOptions.DesiredMode)
-	// The resolved mode also rides the config verbatim so the open ack can
-	// report the AXIS value — relay must stay distinguishable from raw even
-	// though both gate the launcher off today.
+	// Desired mode (nocx-mlm7): the effective desiredMode is the
+	// connection-scope delivery axis (raw|script|relay) and rides the
+	// config verbatim; the ssh layer gates open-time integration on it
+	// directly (script publishes and integrates, raw and relay open a
+	// plain shell — relay is inert this epic).
 	cfg.DesiredMode = string(eff.ResolvedOptions.DesiredMode)
+
+	// A saved connection publishes the integration bundle over SFTP in
+	// script mode. The installer is attached here, on the profile path,
+	// so the publish happens only when nocx owns the transport.
+	cfg.RemoteInstaller = r.remoteInstaller
 
 	// Identity comes from the profile itself (ADR-0017): User and Auth are
 	// always inline, and the secret bindings are the references the profile
@@ -241,23 +254,6 @@ func (r *Resolver) buildConfig(prof *profile.SSHProfile, visited map[string]bool
 	}
 
 	return cfg, nil
-}
-
-// desiredModeToLaunchPolicy translates the resolved destination mode
-// (nocx-mlm7) into the open-time launch policy internal/ssh gates on.
-// Script wraps and installs automatically at open (N3); raw refuses every
-// rewrite and remote write; relay is inert in this epic and behaves as raw
-// until the relay binary and its consent gating land (P6/P7). An unknown
-// mode fails closed — it never integrates.
-func desiredModeToLaunchPolicy(m profile.DesiredMode) ssh.LaunchPolicy {
-	switch m {
-	case profile.DesiredScript:
-		return ssh.LaunchPolicyAuto
-	case profile.DesiredRaw, profile.DesiredRelay:
-		return ssh.LaunchPolicyOff
-	default:
-		return ssh.LaunchPolicyOff
-	}
 }
 
 // resolveProfileHost applies the ConfigResolver's HostName resolution to a
