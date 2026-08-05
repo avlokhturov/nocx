@@ -634,6 +634,12 @@ export class CommandEditor {
       return
     }
 
+    // The hint list's keys — reachable only while hints are LEGALLY open.
+    // Under ssh they never are: the completion dropdown owns ssh (the rule
+    // in showAliasHints), so this block can never eat a key the dropdown's
+    // footer advertises. The arbiter above already had first refusal.
+    // Everything else falls through to the editor's own handling and then
+    // to CM6.
     if (this._hintItems.length > 0) {
       if (e.key === 'ArrowDown') {
         e.preventDefault()
@@ -784,8 +790,26 @@ export class CommandEditor {
   // ── hint management ───────────────────────────────────────────────────
 
   /** Populate and show the alias hint dropdown with matching items.
-   *  Caller is responsible for filtering by the current partial text. */
+   *  Caller is responsible for filtering by the current partial text.
+   *
+   *  THE OWNERSHIP RULE (nocx-fijh): the completion dropdown owns ssh. Its
+   *  argument position is a host, and the host provider routes the same
+   *  quick-connect assembly this hint list used to read — the dropdown
+   *  covers what the hints were for, and more (hosts + ssh history + ghost
+   *  text). Two surfaces over one position, both claiming ArrowDown/Up,
+   *  Enter and Escape, is the defect: whichever wins by evaluation order,
+   *  the other advertises keys it will not receive. So the hint list does
+   *  not open under ssh AT ALL: the dropdown is the ssh surface, and its
+   *  footer is only honest because no competing surface can eat the keys
+   *  it advertises. What this costs: aliases no longer preview while
+   *  typing — Tab opens the dropdown, and typing re-filters it live.
+   *  `\bssh\s+` is the same derivation acceptHint uses below: one test for
+   *  "this document is an ssh context". */
   showAliasHints(items: AliasSuggestion[]): void {
+    if (/\bssh\s+/.test(this.view.state.doc.toString())) {
+      this.hideAliasHints()
+      return
+    }
     if (items.length === 0 || this._hintDismissed) {
       this.hideAliasHints()
       return

@@ -269,6 +269,16 @@ export function historyProvider(opts: {
  */
 const DIRECTORIES_ONLY: Record<string, true> = { cd: true, pushd: true, rmdir: true }
 
+/**
+ * Commands that take NO filesystem candidates at all — the argument is a
+ * destination in another namespace, and offering the local tree would be a
+ * category error. `ssh`'s argument is a host (the host provider owns it);
+ * offering Downloads/ above the host row is the bug this table kills. Grows
+ * by addition, like DIRECTORIES_ONLY — the default for an unknown command
+ * stays "both kinds".
+ */
+const NO_FS_CANDIDATES: Record<string, true> = { ssh: true }
+
 /** The command word the token completes under ('' in command position — a
  *  path invocation like `./run.sh` is not a command the table knows, so the
  *  default "both" applies). Also gates the host provider: hosts are offered
@@ -297,7 +307,7 @@ export function fsProvider(opts: {
     targetId: 'shell',
     applicable: (ctx) => {
       if (!ctx.isLocal) return false
-      if (ctx.position === 'argument') return true
+      if (ctx.position === 'argument') return !NO_FS_CANDIDATES[commandWord(ctx)]
       // Command position: only a path invocation (`./run.sh`) — never a
       // bare word.
       return looksLikePath(ctx.token.text)
