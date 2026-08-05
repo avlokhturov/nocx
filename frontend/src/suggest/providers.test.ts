@@ -259,6 +259,38 @@ describe('historyProvider', () => {
     )
     expect(onRemote.candidates.length).toBe(MAX_PROVIDER_CANDIDATES)
   })
+  it('argument position under ssh keeps the full provider cap (paths do not answer there)', async () => {
+    const entries = Array.from({ length: MAX_PROVIDER_CANDIDATES + 5 }, (_, i) => ({
+      id: `ssh-${i}`,
+      command: `ssh myhost -- x${i}`,
+      cwd: '/repo',
+      host: '',
+      status: 'success' as const,
+      maskedCount: 0,
+      maskedKinds: [],
+      endedAt: 100 + i,
+    }))
+    const provider = historyProvider({
+      query: vi.fn((): Promise<HistoryQuery> =>
+        Promise.resolve({
+          scope: 'directory',
+          exhausted: true,
+          source: 'store',
+          coverage: null,
+          entries,
+        }),
+      ),
+    })
+    // Under `ssh` the fs provider is inactive (NO_FS_CANDIDATES), so
+    // history is the only answer in argument position — it keeps its full
+    // capacity rather than the sidebar cap, which exists to stop history
+    // crowding paths.
+    const got = await provider.suggest(
+      ctx({ doc: 'ssh myhost ', token: { text: '', from: 11, to: 11 } }),
+      new AbortController().signal,
+    )
+    expect(got.candidates.length).toBe(MAX_PROVIDER_CANDIDATES)
+  })
 
   it('a history row whose trailing token no longer exists is marked stalePath — demoted, never dropped', async () => {
     // The reported case: the user deleted the file, and the whole-line row

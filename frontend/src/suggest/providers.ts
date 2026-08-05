@@ -25,14 +25,17 @@ import type { ProfileClient } from '../profiles'
 export const MAX_PROVIDER_CANDIDATES = 20
 
 /**
- * How many history rows argument position may return on a LOCAL session.
- * A history row replaces the whole line; a path candidate replaces one
- * token, and the token being typed is the more specific intent — so once
- * paths answer (which they always do there: see fsProvider's applicability),
- * history must never crowd them out. The owner once counted four directories
- * in his home and got none, because twenty whole-line history rows buried
- * them. Command position and remote sessions (where no path provider is in
- * play) keep the provider-wide cap.
+ * How many history rows argument position may return while the path
+ * provider is in play. A history row replaces the whole line; a path
+ * candidate replaces one token, and the token being typed is the more
+ * specific intent — so wherever paths answer, history must never crowd
+ * them out. The owner once counted four directories in his home and got
+ * none, because twenty whole-line history rows buried them. Paths answer
+ * only on a local session and only under a command that takes filesystem
+ * arguments (the NO_FS_CANDIDATES gate fsProvider applies) — under `ssh`,
+ * whose argument is a host, the path provider is silent, and history is
+ * the only useful thing on offer, so it keeps the provider-wide cap.
+ * Command position and remote sessions keep the provider-wide cap too.
  */
 export const MAX_HISTORY_IN_ARGUMENT_POSITION = 5
 
@@ -184,14 +187,16 @@ export function historyProvider(opts: {
     async suggest(ctx, signal) {
       const line = ctx.doc
       if (line === '') return { candidates: [] }
-      // In argument position on a local session the path provider always
-      // answers (see fsProvider), so history is a sidebar there — capped so
-      // a flood of whole-line rows can never bury the paths. Command
-      // position and remote sessions keep the provider-wide cap: nothing
-      // else answers there, so capping history would be losing rows, not
+      // In argument position where the path provider answers — a local
+      // session under a command that takes filesystem arguments, the same
+      // NO_FS_CANDIDATES gate fsProvider applies — history is a sidebar,
+      // capped so a flood of whole-line rows can never bury the paths.
+      // Where paths do not answer (command position, remote sessions, and
+      // a local `ssh`, whose argument is a host, not a path) history keeps
+      // the provider-wide cap: capping it there would be losing rows, not
       // making room.
       const cap =
-        ctx.position === 'argument' && ctx.isLocal
+        ctx.position === 'argument' && ctx.isLocal && !NO_FS_CANDIDATES[commandWord(ctx)]
           ? MAX_HISTORY_IN_ARGUMENT_POSITION
           : MAX_PROVIDER_CANDIDATES
       const result = await opts.query(ctx.cwd, ctx.host)
