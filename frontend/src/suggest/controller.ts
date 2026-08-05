@@ -48,6 +48,7 @@ import { rankCandidates } from './rank'
 import { tokenAt, positionOf } from './token'
 import type { SuggestionProvider, SuggestContext, SuggestBatch, EmptyReason } from './providers'
 import type { CompletionDropdown } from '../ui/completion-dropdown'
+import { logDecision, isDecisionTracing } from '../log'
 
 /** How long the dropdown waits for a first result before giving up on
  *  opening for that query (a slow provider is never waited for). */
@@ -169,31 +170,91 @@ export function ghostTail(insertText: string, typed: string, prevChar: string): 
   return tail === '' ? null : tail
 }
 
+/** Every §8.7 precondition for the ghost, as ONE rule. The draw path
+ *  (ghostDecorations) and the accept path (canAcceptGhost) both consult it,
+ *  so a ghost that Right/End would refuse is never drawn and a drawn ghost
+ *  is always acceptable. Two copies of this rule drifted apart once — the
+ *  accept path grew `box.queryDoc === controller.queryDoc` (`query-moved`)
+ *  while the render path did not, so a ghost could be drawn that Right
+ *  silently refused; a second copy is how the next drift starts.
+ *
+ *  The verdict names the FAILING CONDITION so the accept path can trace
+ *  why it refused without re-deriving the rule. The predicate itself is
+ *  silent: it runs on every editor update through the draw path, so only
+ *  the Right/End attempt may emit a refusal trace. */
+export type GhostRefusalCondition =
+  | 'no-candidate'
+  | 'not-ghost-eligible'
+  | 'query-moved'
+  | 'doc-changed'
+  | 'selection-nonempty'
+  | 'caret-off-replacement'
+  | 'mid-line'
+
+export interface GhostAcceptanceInput {
+  /** The candidate the ghost would draw / accept, or null. */
+  candidate: Candidate | null
+  /** The document the ghost was drawn against (ghostBox.queryDoc). */
+  boxQueryDoc: string
+  /** The document the current query was issued against (queryDoc). */
+  queryDoc: string
+  /** The live document right now (the view's / the editor seam's doc). */
+  doc: string
+  /** The caret (the selection head — equal to `from` when empty). */
+  caret: number
+  /** True when the selection is empty (from === to). */
+  selectionEmpty: boolean
+}
+
+export function ghostAcceptable(
+  input: GhostAcceptanceInput,
+): { ok: true } | { ok: false; condition: GhostRefusalCondition } {
+  const c = input.candidate
+  if (!c) return { ok: false, condition: 'no-candidate' }
+  if (!c.eligibleForGhostText) return { ok: false, condition: 'not-ghost-eligible' }
+  if (input.boxQueryDoc !== input.queryDoc) return { ok: false, condition: 'query-moved' }
+  if (input.boxQueryDoc !== input.doc) return { ok: false, condition: 'doc-changed' }
+  if (!input.selectionEmpty) return { ok: false, condition: 'selection-nonempty' }
+  if (input.caret !== c.replacement.to) return { ok: false, condition: 'caret-off-replacement' }
+  // Right and End both do nothing at the end of a line, so accepting there
+  // never steals a caret movement. Mid-line a ghost would have no key that
+  // takes it: the `Bearer |" \` curl edit that put `Downloads/` inside the
+  // header, where no keystroke could accept it and only retyping removed it.
+  if (input.caret < input.doc.length && input.doc[input.caret] !== '\n') {
+    return { ok: false, condition: 'mid-line' }
+  }
+  return { ok: true }
+}
+
 /** The inline ghost decoration: the completion tail at the caret, only when
- *  every §8.7 precondition holds at render time. */
-function ghostDecorations(view: EditorView, box: GhostBox): DecorationSet {
+ *  every §8.7 precondition holds at render time — the SAME rule the accept
+ *  path uses (ghostAcceptable), so a ghost that Right/End would refuse is
+ *  never drawn. The tail check below is the one render-form rule on top of
+ *  it: a candidate that rewrites the typed text has nothing honest to ghost
+ *  (ghostTail) and the dropdown carries it instead — accepting still
+ *  applies the full replacement, so the accept path must NOT require it. */
+function ghostDecorations(view: EditorView, box: GhostBox, queryDoc: string): DecorationSet {
   const c = box.candidate
-  if (!c || !c.eligibleForGhostText) return Decoration.none
-  if (view.state.doc.toString() !== box.queryDoc) return Decoration.none
+  if (!c) return Decoration.none
   const sel = view.state.selection.main
-  if (sel.from !== sel.to) return Decoration.none
-  const head = sel.head
-  if (head !== c.replacement.to) return Decoration.none
-  // Never draw a suggestion that cannot be taken. Right/End accept the ghost
-  // only at the end of a line (canAcceptGhost), so a ghost drawn mid-line is
-  // a suggestion with no key that takes it: editing `Bearer |" \` in the
-  // middle of a pasted curl put `Downloads/` inside the header, where no
-  // keystroke could accept it and nothing but retyping made it go away. The
-  // condition is deliberately the SAME one canAcceptGhost uses — two rules
-  // that must agree are one rule, and they drifted apart because the render
-  // path never asked whether the accept path would say yes.
-  if (head < view.state.doc.length && view.state.doc.sliceString(head, head + 1) !== '\n') {
+  const doc = view.state.doc.toString()
+  if (
+    !ghostAcceptable({
+      candidate: c,
+      boxQueryDoc: box.queryDoc,
+      queryDoc,
+      doc,
+      caret: sel.head,
+      selectionEmpty: sel.from === sel.to,
+    }).ok
+  ) {
     return Decoration.none
   }
+  const head = sel.head
   const tail = ghostTail(
     c.insertText,
-    view.state.doc.sliceString(c.replacement.from, head),
-    head > 0 ? view.state.doc.sliceString(head - 1, head) : '',
+    doc.slice(c.replacement.from, head),
+    head > 0 ? doc.slice(head - 1, head) : '',
   )
   if (tail === null) return Decoration.none
   return Decoration.set([Decoration.widget({ widget: new GhostWidget(tail), side: 1 }).range(head)])
@@ -244,6 +305,7 @@ export class CompletionController {
   // vanishes by revision check, and the stale open list is dismissed.
   extensions(): Extension[] {
     const box = this.ghostBox
+    const queryDoc = () => this.queryDoc
     return [
       EditorView.updateListener.of((u) => {
         if (!u.docChanged) return
@@ -254,7 +316,7 @@ export class CompletionController {
           decorations: DecorationSet
           constructor(view: EditorView) {
             box.view = view
-            this.decorations = ghostDecorations(view, box)
+            this.decorations = ghostDecorations(view, box, queryDoc())
           }
           update(update: ViewUpdate): void {
             if (
@@ -262,7 +324,7 @@ export class CompletionController {
               update.selectionSet ||
               update.transactions.some((t) => t.effects.some((e) => e.is(refreshGhost)))
             ) {
-              this.decorations = ghostDecorations(update.view, box)
+              this.decorations = ghostDecorations(update.view, box, queryDoc())
             }
           }
         },
@@ -803,25 +865,30 @@ export class CompletionController {
     return true
   }
 
-  /** Every §8.7 precondition for Right/End acceptance of the ghost. */
+  /** Every §8.7 precondition for Right/End acceptance of the ghost — the
+   *  SAME rule the draw path consults (ghostAcceptable), so what is on
+   *  screen is what the key takes. A refusal is traced with the failing
+   *  condition, named, when decision tracing is on. */
   private canAcceptGhost(): boolean {
     const editor = this.editor
-    const c = this.ghostBox.candidate
-    if (!editor || !c) return false
-    if (!c.eligibleForGhostText) return false
-    if (this.ghostBox.queryDoc !== this.queryDoc) return false
-    if (this.ghostBox.queryDoc !== editor.getDoc()) return false
+    if (!editor) return false
     const sel = editor.getSelection()
-    if (sel.from !== sel.to) return false
-    const doc = editor.getDoc()
-    if (sel.from !== c.replacement.to) return false
-    // The keystroke would not otherwise move the caret: the caret sits at
-    // the end of a line (Right and End both do nothing there).
-    const at = sel.from
-    if (at < doc.length && doc[at] !== '\n') return false
+    const verdict = ghostAcceptable({
+      candidate: this.ghostBox.candidate,
+      boxQueryDoc: this.ghostBox.queryDoc,
+      queryDoc: this.queryDoc,
+      doc: editor.getDoc(),
+      caret: sel.from,
+      selectionEmpty: sel.from === sel.to,
+    })
+    if (!verdict.ok) {
+      if (isDecisionTracing()) {
+        logDecision('ghost-refused', { condition: verdict.condition })
+      }
+      return false
+    }
     return true
   }
-
   private acceptGhost(): void {
     const c = this.ghostBox.candidate
     if (!c) return

@@ -55,7 +55,7 @@ import { ScrollbackController } from './scrollback/controller'
 import type { BlockRecord } from './scrollback/blocks'
 import { CommandLedger } from './command-ledger'
 import { queryHistory, recordCommand } from './history-client'
-import { log } from './log'
+import { log, logDecision, isDecisionTracing } from './log'
 import type { WSClient, SessionHandle } from './ipc'
 import { showConfirm } from './ui/dialog'
 import { hasOpenOverlays } from './ui/overlay/stack'
@@ -206,6 +206,16 @@ function directoryLabel(cwd: string): string {
 function cwdTooltip(cwd: string, fromOSC7: boolean): string {
   if (!cwd) return ''
   return fromOSC7 ? cwd : `${cwd} (initial cwd)`
+}
+
+/** The key as a person would write it (`ctrl+shift+P`), for the arbiter
+ *  trace. Built only when decision tracing is on — see the arbiter. */
+function keyLabel(e: KeyboardEvent): string {
+  const mods = [e.ctrlKey && 'ctrl', e.metaKey && 'meta', e.altKey && 'alt', e.shiftKey && 'shift']
+    .filter((m): m is string => Boolean(m))
+    .concat(e.key)
+    .join('+')
+  return mods
 }
 
 /**
@@ -566,6 +576,10 @@ export class TerminalContent extends BaseTabContent {
    */
   private _enterEnvironment(marker: CommandMarkerEvent, attempt: SshAttempt): void {
     attempt.entered = true
+    logDecision('entry entered', {
+      environmentId: attempt.environmentId,
+      mode: attempt.mode,
+    })
     const getLine = (y: number) => this.renderer!.getBufferLine(y)
     this.scrollback?.blockManager.freezeEntered(getLine, marker.line)
     this.renderer?.clearViewport()
@@ -596,6 +610,11 @@ export class TerminalContent extends BaseTabContent {
    *  installed fact on the backend).
    */
   private _handleLocalD(marker: CommandMarkerEvent, attempt: SshAttempt): void {
+    logDecision(attempt.acceptedPassport === null ? 'entry no-passport' : 'entry ended', {
+      environmentId: attempt.environmentId,
+      mode: attempt.mode,
+      entered: attempt.entered,
+    })
     const completed = this.ledger?.completeTransition(marker.exitCode ?? null)
     // With no dormant transition (the fail-open path — auth failure, Ctrl-C
     // at password:), the running record IS the ssh command and must still
@@ -633,8 +652,10 @@ export class TerminalContent extends BaseTabContent {
    *  non-ssh path and the ssh local D can use it. */
   private _popEnvironment(): void {
     if (this._previousIntegrated.length > 0) {
+      const popped = this._envStack[this._envStack.length - 1]
       this._shellIntegrated = this._previousIntegrated.pop()!
       this._envStack.pop()
+      logDecision('entry popped', { kind: popped?.kind })
       const restored = this._previousTitles.pop()
       if (restored !== undefined) {
         this._cwd = restored.cwd
@@ -930,6 +951,7 @@ export class TerminalContent extends BaseTabContent {
             // machinery in this epic and keep the submit-time heuristic.
             const entered = environmentEntry(recordLine)
             if (entered && entered.kind !== 'ssh') {
+              logDecision('entry heuristic-enter', { kind: entered.kind })
               this._previousIntegrated.push(this._shellIntegrated)
               this._shellIntegrated = false
               this._envStack.push(entered)
@@ -1128,28 +1150,80 @@ export class TerminalContent extends BaseTabContent {
       //   - Esc closes exactly one surface per press, in the same order:
       //     recall, picker, completion.
       this.editor.setKeyArbiter((e) => {
+        // Every decision here is traced (off by default — `window.nocxDebug
+        // = true` in devtools): which surface got the key and why is the
+        // diagnosis for "my key did the wrong thing", and the chain's
+        // evaluation order is the accident that reads as ownership unless
+        // the decision is stated. The gate is checked BEFORE any field is
+        // built: with tracing off, a keystroke costs nothing but the check.
         // Recall first: the shortcut opens it from anywhere, and an open
         // recall owns its keys. Opening it closes the other surfaces.
+        const recallWasOpen = this.recall!.isOpen
         const consumed = this.recall!.handleKey(e)
         if (this.recall!.isOpen) {
           this.completion?.dismiss()
           this.promptVault?.closePicker()
         }
-        if (consumed) return true
+        if (consumed) {
+          if (isDecisionTracing()) {
+            logDecision('arbiter', {
+              surface: 'recall',
+              key: keyLabel(e),
+              why: recallWasOpen ? 'recall is open; it owns its keys' : 'recall shortcut',
+            })
+          }
+          return true
+        }
         // The picker outranks completion: while it is open its keys
         // (arrows, Enter, Tab, Esc) belong to it, and a Right/End ghost
         // accept must never insert completion text into the line under the
         // picker.
         if (this.promptVault!.isPickerOpen) this.completion?.dismiss()
-        if (this.promptVault!.handleKey(e)) return true
+        if (this.promptVault!.handleKey(e)) {
+          if (isDecisionTracing()) {
+            logDecision('arbiter', {
+              surface: 'picker',
+              key: keyLabel(e),
+              why: 'picker is open; it owns its keys',
+            })
+          }
+          return true
+        }
         // The ownership decision above, applied: an open selectable
         // dropdown owns bare ArrowUp/ArrowDown — its footer promises
         // navigation — so they are routed to it explicitly and can never
         // fall through to the editor's recall gesture. Everything else
         // (Enter, Tab, Esc, Right/End, typing) still goes to the
         // completion controller's ordinary handling.
-        if (this.completion!.ownsArrows(e)) return this.completion!.handleKey(e)
-        return this.completion?.handleKey(e) ?? false
+        if (this.completion!.ownsArrows(e)) {
+          if (isDecisionTracing()) {
+            logDecision('arbiter', {
+              surface: 'completion',
+              key: keyLabel(e),
+              why: 'dropdown is open; bare arrows belong to it',
+            })
+          }
+          return this.completion!.handleKey(e)
+        }
+        const handled = this.completion?.handleKey(e) ?? false
+        if (handled) {
+          if (isDecisionTracing()) {
+            logDecision('arbiter', {
+              surface: 'completion',
+              key: keyLabel(e),
+              why: 'completion consumed the key',
+            })
+          }
+          return true
+        }
+        if (isDecisionTracing()) {
+          logDecision('arbiter', {
+            surface: 'editor',
+            key: keyLabel(e),
+            why: 'no surface claimed the key',
+          })
+        }
+        return false
       })
 
       if (signal.aborted) {
@@ -1199,12 +1273,29 @@ export class TerminalContent extends BaseTabContent {
           if (marker.kind === 'A' && marker.nocxEnv === attempt.environmentId) {
             attempt.sawTaggedA = true
             this.ledger?.enter(attempt.recId)
+            logDecision('entry ledger-enter', {
+              environmentId: attempt.environmentId,
+              kind: 'A',
+            })
           } else if (
             marker.kind === 'B' &&
             attempt.sawTaggedA &&
             marker.nocxEnv === attempt.environmentId
           ) {
             this._enterEnvironment(marker, attempt)
+          } else if (
+            (marker.kind === 'A' || marker.kind === 'B') &&
+            marker.nocxEnv !== undefined &&
+            marker.nocxEnv !== attempt.environmentId
+          ) {
+            // A tagged A/B carrying someone else's id while this attempt
+            // awaits its own pair: no transition, and the reason is named —
+            // an integrated tmux, a nested ssh, a foreign tier.
+            logDecision('entry foreign-marker', {
+              kind: marker.kind,
+              nocxEnv: marker.nocxEnv,
+              expected: attempt.environmentId,
+            })
           }
         }
 
@@ -1219,7 +1310,13 @@ export class TerminalContent extends BaseTabContent {
           }
           // The POSIX tier's orphan D;0 before its first A closes nothing
           // and pops nothing — neither a block end nor the local D (§6.1).
-          if (dClass === 'orphan') return
+          if (dClass === 'orphan') {
+            logDecision('entry orphan-d', {
+              environmentId: attempt!.environmentId,
+              exitCode: marker.exitCode ?? null,
+            })
+            return
+          }
         }
 
         this.ledger?.onMarker(marker.kind, marker.exitCode)
@@ -1256,6 +1353,9 @@ export class TerminalContent extends BaseTabContent {
           // which is by construction this attempt's id — so acceptance is
           // the attempt's readiness passport, and nothing else can be.
           if (attempt) attempt.acceptedPassport = disposition.passport
+          logDecision('passport accepted', {
+            environmentId: disposition.passport.environmentId,
+          })
           // P0 (nocx-mlm7): a confirmed environment transition starts a clean
           // input cycle. Without this, the remote's first A arrives while the
           // machine is still RUNNING_RAW (submit never finishes for ssh), its
@@ -1266,12 +1366,21 @@ export class TerminalContent extends BaseTabContent {
           // remote's first A — the event spec §5.3's `expected passport →
           // tagged A → B` sequence was missing.
           this.inputState.dispatch({ type: 'passport' })
+        } else if (disposition.status === 'duplicate') {
+          logDecision('passport duplicate', {
+            environmentId: disposition.passport.environmentId,
+          })
         } else if (disposition.status === 'unexpected') {
           // A passport whose id is not the one minted for the attempt in
           // flight: ignored and logged (spec §5.2).
           log.warn('nocx: unexpected environment passport', {
             environmentId: disposition.passport.environmentId,
           })
+          logDecision('passport unexpected', {
+            environmentId: disposition.passport.environmentId,
+          })
+        } else {
+          logDecision('passport ignored', { reason: disposition.reason })
         }
       })
 
