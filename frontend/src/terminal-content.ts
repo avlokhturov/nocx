@@ -34,8 +34,18 @@ import { renderRecordedCommand } from './scrollback/blocks'
 import { KIND_LABELS } from './secret-kind'
 import { shouldShowEditor, NATIVE_RESTORE } from './native-mode'
 import { environmentEntry, type EnvironmentEntry } from './environment-commands'
-import { isInteractiveTransition, extractDestination, buildRewrite } from './ssh-transition'
+import {
+  isInteractiveTransition,
+  extractDestination,
+  planSsh,
+  buildBootstrapRewrite,
+  buildInstalledRewrite,
+} from './ssh-transition'
+import type { SshPlan } from './ssh-transition'
 import type { ShellLauncherCommandResult } from './generated/shell.launcherCommand'
+import type { ShellEnvironmentObservedResult } from './generated/shell.environmentObserved'
+import type { EnvironmentPassport } from './environment-passport'
+import type { CommandMarkerEvent } from './renderers/types'
 import { shouldCopy, type ClipboardAccess, type ClipboardGate } from './clipboard'
 import type { ClipboardBanner } from './banner'
 import { ScrollbackController } from './scrollback/controller'
@@ -136,6 +146,38 @@ export interface TerminalContentHooks {
   /** The reference picker's "Add a secret…" row: open the vault's own
    *  create dialog — wired by main.tsx to the Settings tab's Secrets page. */
   onCreateSecret?: (name: string) => void
+}
+
+/** The rewrite half of an ssh submit, carried from beforeSubmit to submit:
+ *  the environment id the backend minted for THIS attempt and the line to
+ *  send. Present only when the line was actually rewritten. */
+interface PendingSshAttempt {
+  environmentId: string
+  mode: 'bootstrap' | 'installed'
+  /** The environment this line enters — environmentEntry(recordLine). */
+  entry: EnvironmentEntry
+  /** The rewritten line to send. */
+  sendLine: string
+}
+
+/** The live ssh attempt, from submit to the local D. Entry counts only on
+ *  `expected passport → tagged A → B` (spec §5.3); the local D completes the
+ *  dormant transition record with the real code and reports the observation
+ *  (the accepted passport, or null when none arrived — §5.4). */
+interface SshAttempt {
+  environmentId: string
+  mode: 'bootstrap' | 'installed'
+  /** The ledger record of the ssh command; `enter()` makes it dormant. */
+  recId: number
+  entry: EnvironmentEntry
+  /** The passport the tracker accepted for this attempt, if any. */
+  acceptedPassport: EnvironmentPassport | null
+  /** A tagged A carrying our environment id was seen (entry needs A then B). */
+  sawTaggedA: boolean
+  /** The environment was entered (env stack pushed, block frozen). */
+  entered: boolean
+  /** shell.environmentObserved was already sent — first observation wins. */
+  reported: boolean
 }
 
 // No placeholder title — see the descriptor in tabs.ts for why. A tab with no
@@ -274,6 +316,18 @@ export class TerminalContent extends BaseTabContent {
    *  environment. Pushed on submit when environmentEntry() names one;
    *  popped on the D marker that ends the command. */
   private _previousIntegrated: boolean[] = []
+
+  // ── The ssh environment boundary (nocx-mlm7 P9) ─────────────────────
+  /** The rewrite info a beforeSubmit produced, consumed by the submit that
+   *  follows it. The RPC is async, so the two halves of the attempt — the
+   *  minted environment id and the rewritten line — travel through this
+   *  field between the editor's beforeSubmit and submit callbacks. */
+  private _pendingAttempt: PendingSshAttempt | null = null
+  /** The live ssh attempt: bound to the ledger record at submit, advanced
+   *  by the passport and the tagged A→B, completed by the local D. One at
+   *  a time — a second editor submit cannot happen while the first ssh
+   *  still owns the running block. */
+  private _attempt: SshAttempt | null = null
 
   // ── In-band integration (nocx-ynsx, spec §4.4) ─────────────────────
   /** True while an in-band integration lease is held; rejects re-entry. */
@@ -435,6 +489,176 @@ export class TerminalContent extends BaseTabContent {
     this.pushTitle()
   }
 
+  // ── The ssh environment boundary (nocx-mlm7 P9) ─────────────────────
+
+  /** Turn the planner's answer into a pending rewrite, or null when the
+   *  typed line must go out unchanged. A refused attempt (mode 'raw')
+   *  registers nothing: no launcher runs, so no passport can arrive and
+   *  there is no expectation to bind or observation to report. */
+  private _buildPendingAttempt(
+    plan: SshPlan,
+    result: ShellLauncherCommandResult,
+    sessionId: string,
+  ): PendingSshAttempt | null {
+    const entry = environmentEntry(plan.typedLine)
+    if (!entry) return null
+    if (result.mode === 'bootstrap' && result.launcherPath !== null) {
+      const line = buildBootstrapRewrite(plan, result.launcherPath)
+      if (line === null) return null
+      return { environmentId: result.environmentId, mode: 'bootstrap', entry, sendLine: line }
+    }
+    if (result.mode === 'installed') {
+      const line = buildInstalledRewrite(plan, result.environmentId, sessionId)
+      if (line === null) return null
+      return { environmentId: result.environmentId, mode: 'installed', entry, sendLine: line }
+    }
+    return null
+  }
+
+  /** Consume the pending rewrite info at submit start — the expected
+   *  passport id must be live before the bytes reach the pty (§5.3). */
+  private _takePendingAttempt(): PendingSshAttempt | null {
+    const p = this._pendingAttempt
+    this._pendingAttempt = null
+    return p
+  }
+
+  /** Classify a D marker for the ssh attempt. A D is LOCAL when it is
+   *  untagged (the local shell never tags) and the attempt has either
+   *  entered or produced no accepted passport yet — the exception is the
+   *  POSIX tier's orphan `D;0` (accepted passport, no tagged A seen): it is
+   *  emitted by the REMOTE tier before its first prompt and closes nothing.
+   */
+  private _classifyD(
+    marker: CommandMarkerEvent,
+    attempt: SshAttempt | null,
+  ): 'local' | 'orphan' | 'normal' {
+    if (marker.nocxEnv !== undefined) return 'normal'
+    if (attempt === null) return 'normal'
+    if (!attempt.entered && attempt.acceptedPassport !== null && !attempt.sawTaggedA)
+      return 'orphan'
+    return 'local'
+  }
+
+  /** Enter the environment at `expected passport → tagged A → B` (§5.3):
+   *  freeze the ssh block FIRST (while the block manager still carries the
+   *  LOCAL location and cwd — the defect the brief names is submit()
+   *  entering the environment before ledger.open/beginBlock), then push
+   *  every surface that names a place, then report the accepted passport.
+   */
+  private _enterEnvironment(marker: CommandMarkerEvent, attempt: SshAttempt): void {
+    attempt.entered = true
+    const getLine = (y: number) => this.renderer!.getBufferLine(y)
+    this.scrollback?.blockManager.freezeEntered(getLine, marker.line)
+    this.renderer?.clearViewport()
+    this._previousIntegrated.push(this._shellIntegrated)
+    this._envStack.push(attempt.entry)
+    this._previousTitles.push({
+      cwd: this._cwd,
+      programTitle: this.programTitle,
+      cwdTitle: this.cwdTitle,
+    })
+    this._updateCapability()
+    this.syncLocation()
+    this.hooks.onPortsTargetChange?.()
+    // The accepted passport crossed the control plane: report it (§5.4) —
+    // the installed fact is written from exactly this observation.
+    void this._reportObservation(attempt)
+    // The ssh block froze — the connection offer rides on that freeze
+    // (nocx-pu4.7), exactly as it rode the end-of-session D before.
+    void this._maybeOfferConnection()
+  }
+
+  /** The local D: the ssh process is gone. Complete the dormant transition
+   *  record with the real code (the ledger cuts any running remote command
+   *  short as transition-lost and never assigns it the local code), pop
+   *  every environment above the base, freeze any running remote block
+   *  with NO code, and report the observation — the accepted passport, or
+   *  null when the attempt produced none (which invalidates a stale
+   *  installed fact on the backend).
+   */
+  private _handleLocalD(marker: CommandMarkerEvent, attempt: SshAttempt): void {
+    const completed = this.ledger?.completeTransition(marker.exitCode ?? null)
+    // With no dormant transition (the fail-open path — auth failure, Ctrl-C
+    // at password:), the running record IS the ssh command and must still
+    // close with the real code, exactly as a plain D would. When the
+    // transition completed, completeTransition already reset the cycle and
+    // cut any remote command short — the local D is never delivered as a
+    // plain marker D onto a remote command.
+    if (completed === null) this.ledger?.onMarker('D', marker.exitCode)
+    // The connection is gone: every environment above the base died with
+    // it — the ssh environment and anything nested inside (sudo, docker).
+    while (this._envStack.length > 0) this._popEnvironment()
+    const getLine = (y: number) => this.renderer!.getBufferLine(y)
+    if (attempt.entered) {
+      // The running block is a REMOTE command cut short by the drop. It
+      // freezes with no exit code — 'entered' is the only no-code frozen
+      // paint blocks.ts offers, and the local code belongs to the ssh
+      // command, never to a remote one.
+      this.scrollback?.blockManager.freezeEntered(getLine, marker.line)
+    } else {
+      // No entry: the ssh block itself is still running (auth failure,
+      // Ctrl-C at password:, an aborted bootstrap). It gets the real exit
+      // status — the fail-open path, unchanged from today (§6.1).
+      this.scrollback?.onCommandEnd(getLine, marker.line, marker.exitCode ?? null)
+    }
+    this.renderer?.clearViewport()
+    void this._reportObservation(attempt)
+    void this._maybeOfferConnection()
+    this._attempt = null
+    // The attempt is over: no later passport may be judged against it.
+    this.renderer?.setExpectedEnvironmentId(null)
+  }
+
+  /** Restore one environment level: the marker fact, the stack, the titles
+   *  and the location. Extracted from the old D handler so both the legacy
+   *  non-ssh path and the ssh local D can use it. */
+  private _popEnvironment(): void {
+    if (this._previousIntegrated.length > 0) {
+      this._shellIntegrated = this._previousIntegrated.pop()!
+      this._envStack.pop()
+      const restored = this._previousTitles.pop()
+      if (restored !== undefined) {
+        this._cwd = restored.cwd
+        this.editor?.setCwd(restored.cwd)
+        // Both halves, and the program title especially: the remote
+        // shell's OSC 2 belongs to the remote shell, which is gone.
+        this.programTitle = restored.programTitle
+        this.cwdTitle = restored.cwd ? directoryLabel(restored.cwd) : restored.cwdTitle
+      }
+      this._updateCapability()
+      this.syncLocation()
+      this.hooks.onPortsTargetChange?.()
+    }
+  }
+
+  /** Report what the attempt produced to the backend (§5.4): the accepted
+   *  passport, or null when the attempt ended without one. The first
+   *  observation per attempt decides it — entry reports the accepted
+   *  passport, the local D reports whatever remains (null when none was
+   *  ever accepted). Best-effort by design.
+   */
+  private async _reportObservation(attempt: SshAttempt): Promise<void> {
+    if (attempt.reported) return
+    attempt.reported = true
+    try {
+      const res = await this.client.call<ShellEnvironmentObservedResult>(
+        'shell.environmentObserved',
+        {
+          environmentId: attempt.environmentId,
+          passport: attempt.acceptedPassport,
+        },
+      )
+      if (!res.processed) {
+        log.warn('nocx: shell.environmentObserved not processed', {
+          environmentId: attempt.environmentId,
+        })
+      }
+    } catch (err) {
+      log.warn('nocx: shell.environmentObserved failed', { error: String(err) })
+    }
+  }
+
   // ── TabContent ──────────────────────────────────────────────────────────
 
   async mount(target: HTMLElement, host: TabHost, signal: AbortSignal): Promise<void> {
@@ -584,52 +808,55 @@ export class TerminalContent extends BaseTabContent {
             if (this.promptVault?.openResolution()) return false
             const sync = planSubmitSync(doc)
             if (sync) {
-              // nocx-pu4.6: rewrite a hand-typed interactive ssh to ride
-              // the remote launcher. Policy off refuses; anything
-              // uncertain falls through to the original line (fail-open,
-              // ADR-0004 §1). The rewrite is the one path where the
-              // sendLine differs from the recordLine without a secret
-              // reference — the history entry and the block header show
-              // the line the USER typed, while the wire carries the
-              // expanded one (ADR-0004 §2).
+              // nocx-mlm7 P9: rewrite a hand-typed interactive ssh to ride
+              // the launcher. Policy off refuses; anything uncertain falls
+              // through to the original line (fail-open, ADR-0004 §1). The
+              // rewrite is the one path where the sendLine differs from the
+              // recordLine without a secret reference — the history entry
+              // and the block header show the line the USER typed, while
+              // the wire carries the expanded one (ADR-0004 §2).
               // `_shellIntegrated` is not a nicety here, it is what makes the
               // rewrite safe to type. The line is `if …; then …; else …; fi` —
               // POSIX/bash/zsh syntax, and those are precisely the shells nocx
               // ships integration scripts for, so a tab that has emitted a
               // marker is by construction one of them. A tab that has not may
               // be a fish or csh login shell, which would read `then` as a
-              // command and never run the ssh at all. It also excludes a
-              // nested environment (the latch is cleared on entry): inside one
-              // we do not know whose shell is reading.
-              if (this._policy !== 'raw' && this._shellIntegrated && isInteractiveTransition(doc)) {
-                const dest = extractDestination(doc)
-                const sid = this.session?.sessionId
-                if (dest && sid) {
-                  return this.client
-                    .call<ShellLauncherCommandResult>('shell.launcherCommand', {
-                      destination: dest,
-                      sessionId: sid,
-                    })
-                    .then((result) => {
-                      // A PATH, not the launcher: the launcher is ~35 KB and
-                      // this line has only the tty, whose canonical buffer is
-                      // 4096 bytes. The local shell reads the staged file and
-                      // hands the bytes to ssh through argv (nocx-pu4.6).
-                      if (result.launcherPath) {
-                        const rewritten = buildRewrite(doc, result.launcherPath)
-                        if (rewritten) {
+              // command and never run the ssh at all.
+              // planSsh replaces isInteractiveTransition here: it answers
+              // with the oracle argv (nocx-c5az) and refuses ANY line inside
+              // an environment (depth > 0 ⇒ raw, §6.1 row 5) — a local
+              // staged path must never be readable by a remote shell.
+              if (this._policy !== 'raw' && this._shellIntegrated) {
+                const transition = planSsh(doc, this._envStack.length > 0 ? 1 : 0)
+                if (transition.kind === 'plan') {
+                  const sid = this.session?.sessionId
+                  if (sid) {
+                    return this.client
+                      .call<ShellLauncherCommandResult>('shell.launcherCommand', {
+                        sessionId: sid,
+                        oracleArgv: transition.oracleArgv,
+                      })
+                      .then((result) => {
+                        const pending = this._buildPendingAttempt(transition, result, sid)
+                        if (pending) {
+                          this._pendingAttempt = pending
                           return {
-                            sendLine: rewritten,
+                            sendLine: pending.sendLine,
                             recordLine: doc,
                             refs: [],
                           }
                         }
-                      }
-                      // Refused (remote-command, unsupported, or cannot
-                      // build): send the original line unchanged.
-                      return sync
-                    })
-                    .catch(() => sync) // RPC failure → original line (fail-open)
+                        // Refused (raw, remote-command, cannot build): send
+                        // the original line unchanged.
+                        return sync
+                      })
+                      .catch(() => {
+                        // RPC failure → original line, and no half-registered
+                        // attempt (fail-open).
+                        this._pendingAttempt = null
+                        return sync
+                      })
+                  }
                 }
               }
               return sync
@@ -652,13 +879,27 @@ export class TerminalContent extends BaseTabContent {
             // directory and vanished from a history scoped to "this
             // directory". The command ran here, whatever it goes on to do.
             const submitCwd = this._cwd
+            // The ssh attempt from beforeSubmit, consumed HERE: the expected
+            // passport id must be live in the tracker BEFORE the bytes reach
+            // the pty (spec §5.3). Consuming also clears it, so a submit
+            // that never got a plan cannot bind to a stale rewrite.
+            const pending = this._takePendingAttempt()
+            if (pending) {
+              this.renderer?.setExpectedEnvironmentId(pending.environmentId)
+            }
             // Track environment entry (nocx-695k.1): if the submitted
             // command enters a new shell environment, save the current
             // marker fact and clear it — the pane is now on a different
             // host whose markers we have not seen. The D that ends this
             // command restores the prior value.
+            // The SSH arm is deliberately excluded (P9): ssh enters ONLY on
+            // `expected passport → tagged A → B` (§5.3), and the ssh block
+            // must carry the LOCAL host and cwd — so no environment is
+            // applied before ledger.open and beginBlock. The other
+            // environment-entry commands (docker, su, …) have no passport
+            // machinery in this epic and keep the submit-time heuristic.
             const entered = environmentEntry(recordLine)
-            if (entered) {
+            if (entered && entered.kind !== 'ssh') {
               this._previousIntegrated.push(this._shellIntegrated)
               this._shellIntegrated = false
               this._envStack.push(entered)
@@ -671,11 +912,6 @@ export class TerminalContent extends BaseTabContent {
               this.syncLocation()
               this.hooks.onPortsTargetChange?.()
             }
-            // A hand-typed `ssh host` is NOT a moment at which we may act.
-            // Between the command and the remote prompt there can be a
-            // password prompt, a 2FA challenge or a host-key confirmation,
-            // and the in-band wrapper typed into any of those is sent as the
-            // secret — to the remote, and into its auth log. There is no
             // marker to tell us the far shell is ready, because the far
             // shell is exactly the one that emits none.
             //
@@ -694,6 +930,21 @@ export class TerminalContent extends BaseTabContent {
             if (this.ledger) {
               let markerLine: () => number | undefined = () => undefined
               const rec = this.ledger.open(recordLine, submitCwd, this._host, () => markerLine())
+              // Bind the live attempt to the ledger record BEFORE the bytes
+              // go out: the tagged A will call ledger.enter(recId), and the
+              // local D will complete the dormant record.
+              if (pending) {
+                this._attempt = {
+                  environmentId: pending.environmentId,
+                  mode: pending.mode,
+                  recId: rec.id,
+                  entry: pending.entry,
+                  acceptedPassport: null,
+                  sawTaggedA: false,
+                  entered: false,
+                  reported: false,
+                }
+              }
               const m = renderer.registerMarker()
               if (m) {
                 markerLine = () => m.line()
@@ -886,6 +1137,41 @@ export class TerminalContent extends BaseTabContent {
         if (marker.kind === 'D' && marker.exitCode !== undefined) {
           this._lastExitCode = marker.exitCode
         }
+
+        const attempt = this._attempt
+        // Environment entry (spec §5.3): an attempt whose passport was
+        // accepted enters ONLY on the tagged A → B pair carrying our
+        // environment id. The ledger enters at the tagged A — BEFORE the
+        // marker reaches onMarker — because an A while the ssh record still
+        // occupies the running slot would interrupt it exactly as today
+        // (N6). The UI enters at the tagged B.
+        if (attempt && attempt.acceptedPassport !== null && !attempt.entered) {
+          if (marker.kind === 'A' && marker.nocxEnv === attempt.environmentId) {
+            attempt.sawTaggedA = true
+            this.ledger?.enter(attempt.recId)
+          } else if (
+            marker.kind === 'B' &&
+            attempt.sawTaggedA &&
+            marker.nocxEnv === attempt.environmentId
+          ) {
+            this._enterEnvironment(marker, attempt)
+          }
+        }
+
+        if (marker.kind === 'D') {
+          const dClass = this._classifyD(marker, attempt)
+          // The local D is delivered to completeTransition, NEVER to
+          // onMarker('D') — a marker D only closes a running command and
+          // must never assign the local code to a remote command (§7).
+          if (dClass === 'local') {
+            this._handleLocalD(marker, attempt!)
+            return
+          }
+          // The POSIX tier's orphan D;0 before its first A closes nothing
+          // and pops nothing — neither a block end nor the local D (§6.1).
+          if (dClass === 'orphan') return
+        }
+
         this.ledger?.onMarker(marker.kind, marker.exitCode)
         if (marker.kind === 'C') {
           // If a block was already started from the app-owned submit
@@ -898,28 +1184,34 @@ export class TerminalContent extends BaseTabContent {
             this.scrollback?.onCommandStart(this._pendingCommand, this._cwd, marker.line)
           }
         } else if (marker.kind === 'D') {
-          // Leaving the environment the command entered (nocx-695k.1):
-          // restore the marker fact from before that command ran.
-          if (this._previousIntegrated.length > 0) {
-            this._shellIntegrated = this._previousIntegrated.pop()!
-            this._envStack.pop()
-            const restored = this._previousTitles.pop()
-            if (restored !== undefined) {
-              this._cwd = restored.cwd
-              this.editor?.setCwd(restored.cwd)
-              // Both halves, and the program title especially: the remote
-              // shell's OSC 2 belongs to the remote shell, which is gone.
-              this.programTitle = restored.programTitle
-              this.cwdTitle = restored.cwd ? directoryLabel(restored.cwd) : restored.cwdTitle
-            }
-            this._updateCapability()
-            this.syncLocation()
-            this.hooks.onPortsTargetChange?.()
+          // A tagged D (the entered environment, or a foreign id such as an
+          // integrated tmux) closes the remote command and never pops the
+          // environment. A legacy D with no ssh attempt pops the innermost
+          // NON-ssh environment (docker, su, …) as today — the ssh
+          // environment pops only on the local D.
+          const innermost = this.currentEnvironment()
+          if (innermost && innermost.kind !== 'ssh') {
+            this._popEnvironment()
           }
           const getLine = (y: number) => renderer.getBufferLine(y)
           this.scrollback?.onCommandEnd(getLine, marker.line, marker.exitCode ?? null)
           renderer.clearViewport()
           void this._maybeOfferConnection()
+        }
+      })
+      renderer.onEnvironmentPassport((disposition) => {
+        const attempt = this._attempt
+        if (disposition.status === 'accepted') {
+          // The tracker accepts only a passport carrying the expected id,
+          // which is by construction this attempt's id — so acceptance is
+          // the attempt's readiness passport, and nothing else can be.
+          if (attempt) attempt.acceptedPassport = disposition.passport
+        } else if (disposition.status === 'unexpected') {
+          // A passport whose id is not the one minted for the attempt in
+          // flight: ignored and logged (spec §5.2).
+          log.warn('nocx: unexpected environment passport', {
+            environmentId: disposition.passport.environmentId,
+          })
         }
       })
 

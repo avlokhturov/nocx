@@ -15,8 +15,7 @@
 // takes. The editor is reached through the same private-field escape hatch
 // editor.test.ts uses, and the selection is seeded through the CM6 view —
 // the same transaction a mouse drag produces.
-import { describe, expect, it, vi } from 'vitest'
-// The stylesheet contract assertion below reads the app CSS from disk. The
+import { describe, expect, it, vi, type Mock } from 'vitest'
 // node builtins are untyped here (@types/node is not installed), so the
 // imports sit behind @ts-expect-error and the calls behind a contained
 // no-unsafe disable — the same trade theme-catalogue.test.ts makes at file
@@ -50,22 +49,27 @@ import {
   type RendererMock,
   type SessionFake,
   type ClientFake,
+  FIXTURE_CWD,
 } from './test-support/tabs-fixtures'
 import { XtermRenderer } from './renderers/xterm'
 import { ClipboardGate } from './clipboard'
-import { CommandEditor } from './editor'
-import { Tab } from './tabs'
+import { CommandEditor, LOCATION_UNKNOWN_LABEL } from './editor'
 import { TerminalContent } from './terminal-content'
+import { Tab } from './tabs'
 import { SURFACE_TERMINAL } from './tab-content'
 import { ProfileClient } from './profiles'
 import type { WSClient } from './ipc'
 import { createCommandBlock } from './scrollback/blocks'
 import { CommandSnapshotStore } from './command-snapshot'
 import type { DesiredMode } from './capability'
+import { CommandLedger } from './command-ledger'
 import type { ScrollbackController } from './scrollback/controller'
 import { pushOverlay, popOverlay } from './ui/overlay/stack'
+import type { PassportDisposition, EnvironmentPassport } from './environment-passport'
 
 // Mock the XtermRenderer class before any imports use it (same as tabs.test.ts).
+// The shared fixture mock implements the full TerminalRenderer surface,
+// including P2's passport methods and the _firePassport test seam.
 vi.mock('./renderers/xterm', () => ({
   XtermRenderer: vi.fn(createRendererMock),
 }))
@@ -98,6 +102,55 @@ const viewOf = (ed: CommandEditor): EditorView => {
   const withView = ed as unknown as { view: EditorView }
   return withView.view
 }
+
+/** The passport surface added to the renderer mock in the vi.mock factory. */
+interface PassportRenderer {
+  setExpectedEnvironmentId: Mock<(id: string | null) => void>
+  _firePassport: (d: PassportDisposition) => void
+}
+
+const passportRendererOf = (content: TerminalContent): RendererMock & PassportRenderer =>
+  rendererOf(content) as unknown as RendererMock & PassportRenderer
+/** A valid readiness passport (spec §5.2), the shape the tracker accepts. */
+const PASSPORT = (environmentId: string): EnvironmentPassport => ({
+  protocolVersion: '1',
+  environmentId,
+  parentEnvironmentId: '-',
+  scriptVersion: '11',
+  tier: 'enhanced',
+  generation: '-',
+})
+
+/** Drive a full accepted entry: expected passport → tagged A → tagged B.
+ *  The renderer mock carries the passport surface (augmented in the mock
+ *  factory), so the cast is to the runtime shape, not a fabrication. */
+const enterEnvironment = (renderer: RendererMock, envId: string): void => {
+  const passport = renderer as unknown as PassportRenderer
+  passport._firePassport({ status: 'accepted', passport: PASSPORT(envId) })
+  renderer._fireCommandMarker({ kind: 'A', line: 1, col: 0, buffer: 'normal', nocxEnv: envId })
+  renderer._fireCommandMarker({ kind: 'B', line: 1, col: 0, buffer: 'normal', nocxEnv: envId })
+}
+
+/** A shell.launcherCommand result in the P7 shape (mode + fresh env id). */
+const LAUNCH = (
+  over: Partial<{
+    mode: 'bootstrap' | 'installed' | 'raw'
+    environmentId: string
+    launcherPath: string | null
+    reason: string | null
+  }> = {},
+): {
+  mode: 'bootstrap' | 'installed' | 'raw'
+  environmentId: string
+  launcherPath: string | null
+  reason: string | null
+} => ({
+  mode: 'bootstrap',
+  environmentId: 'env-ab12',
+  launcherPath: "'/home/u/.nocx/run/launcher-12345'",
+  reason: null,
+  ...over,
+})
 /** Mount options. */
 interface MountOpts {
   /** Append the tab's pane to document.body. The document-level keydown
@@ -1075,10 +1128,19 @@ describe('the environment stack (nocx-695k.1)', () => {
   // was whatever the remote shell's OSC 2 last set, the location chip stayed
   // hidden because a local session grows none, and the cwd chip went on
   // showing the local directory under a remote prompt.
+  // P9: the entry moved from submit-time to `expected passport → tagged
+  // A → B` (§5.3) — so the surfaces change only when the passport says the
+  // remote shell is nocx's own, and the local D brings them back.
   it('the tab title, the location chip and the ports target follow the environment', async () => {
-    const { ed, content, tab, teardown } = await mountTerminal(makeClipboard(), {
-      attachToDocument: true,
-    })
+    const callMock = vi.fn().mockResolvedValue(LAUNCH({ environmentId: 'env-ab12' }))
+    const client = makeClient({ call: callMock })
+    const session = makeSession()
+    client.openSession.mockResolvedValue(session)
+    const { ed, content, tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
     const renderer = rendererOf(content)
     /* eslint-disable @typescript-eslint/unbound-method */
     const protoScrollTo = Element.prototype.scrollTo
@@ -1099,23 +1161,69 @@ describe('the environment stack (nocx-695k.1)', () => {
       ed.root.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
       )
-      // The beforeSubmit may be async (ssh rewrite RPC); drain microtasks.
+      // The beforeSubmit is async (ssh rewrite RPC); drain microtasks.
       for (let i = 0; i < 5; i++) await Promise.resolve()
 
-      // Inside: the pane names the host we went to, and refuses to speak for
-      // its ports — there is no managed connection to a child ssh process.
+      // NOT yet inside: submit no longer enters the environment — the
+      // passport has not arrived, so every surface still names the local
+      // machine (§5.3: nothing changes until passport → tagged A → B).
       const loc = ed.root.querySelector('.nocx-editor-location')
-      expect(loc?.textContent).toBe('pi@192.168.0.93')
+      expect(loc?.textContent ?? '').not.toContain('pi@')
+      expect(content.portsTargetId).toBe('local')
+
+      enterEnvironment(renderer, 'env-ab12')
+
+      // Inside: the pane refuses to speak for its ports — there is no
+      // managed connection to a child ssh process — and the cwd is NOT
+      // invented: we know the host, not the directory. The block for the
+      // ssh command carries the destination and NO folder — `📁 home/dev`
+      // beside a remote host reads as a place that does not exist (owner,
+      // 2026-08-04).
       expect(content.portsTargetId).toBeNull()
       expect(content.portsUnavailableReason).toBe('pi@192.168.0.93')
-      // The cwd is NOT invented: we know the host, not the directory. The
-      // block for the ssh command carries the destination and NO folder —
-      // `📁 home/dev` beside a remote host reads as a place that does not
-      // exist (owner, 2026-08-04).
       const cwd = ed.root.querySelector('.nocx-editor-cwd')
       expect(cwd?.textContent ?? '').not.toContain('home')
+      // The first remote prompt is unowned (the local command is still
+      // "running" to the input-state machine), so the location chip
+      // honestly says the context is unknown until a clean remote cycle
+      // promotes trust.
+      const loc2 = ed.root.querySelector('.nocx-editor-location')
+      expect(loc2?.textContent).toBe(LOCATION_UNKNOWN_LABEL)
 
-      renderer._fireCommandMarker({ kind: 'C', line: 0, col: 0, buffer: 'normal' })
+      // A full tagged remote command cycle (C…D→A→B) promotes trust: the
+      // chip now names the host.
+      renderer._fireCommandMarker({
+        kind: 'C',
+        line: 0,
+        col: 0,
+        buffer: 'normal',
+        nocxEnv: 'env-ab12',
+      })
+      renderer._fireCommandMarker({
+        kind: 'D',
+        line: 0,
+        col: 0,
+        buffer: 'normal',
+        exitCode: 0,
+        nocxEnv: 'env-ab12',
+      })
+      renderer._fireCommandMarker({
+        kind: 'A',
+        line: 0,
+        col: 0,
+        buffer: 'normal',
+        nocxEnv: 'env-ab12',
+      })
+      renderer._fireCommandMarker({
+        kind: 'B',
+        line: 0,
+        col: 0,
+        buffer: 'normal',
+        nocxEnv: 'env-ab12',
+      })
+      const loc3 = ed.root.querySelector('.nocx-editor-location')
+      expect(loc3?.textContent).toBe('pi@192.168.0.93')
+
       // The REMOTE shell titles the tab the moment you land. This is the
       // one that outlived its program: nothing sends another OSC 2 on the
       // way out, so the tab kept naming a machine it had left, for as long
@@ -1123,10 +1231,10 @@ describe('the environment stack (nocx-695k.1)', () => {
       renderer._fireTitle('pi@raspberrypi: ~')
       expect(tab.title).toBe('pi@raspberrypi: ~')
 
+      // The local D: ssh exited — everything goes back, within one prompt —
+      // including the title, because a title set by a program does not
+      // outlive it.
       renderer._fireCommandMarker({ kind: 'D', line: 0, col: 0, buffer: 'normal', exitCode: 0 })
-
-      // Out again: everything goes back, within one prompt — including the
-      // title, because a title set by a program does not outlive it.
       expect(content.portsTargetId).toBe('local')
       expect(content.portsUnavailableReason).toBe('')
       expect(tab.title).not.toBe('pi@raspberrypi: ~')
@@ -1137,7 +1245,7 @@ describe('the environment stack (nocx-695k.1)', () => {
     }
   })
 
-  it('an environment-entry command clears _shellIntegrated and the D marker restores it', async () => {
+  it('a non-ssh environment entry still pushes at submit and the D marker restores it', async () => {
     const { ed, content, teardown } = await mountTerminal(makeClipboard(), {
       attachToDocument: true,
     })
@@ -1157,8 +1265,10 @@ describe('the environment stack (nocx-695k.1)', () => {
       expect(shellIntegrated(content)).toBe(true)
       expect(previousIntegrated(content)).toHaveLength(0)
 
-      // Submit an environment-entry command.
-      ed.insertText('ssh pi@192.168.0.93')
+      // Submit a NON-ssh environment-entry command: docker has no passport
+      // machinery in this epic, so it keeps the submit-time heuristic
+      // (nocx-695k.2) — pushed on submit, popped on the D.
+      ed.insertText('docker exec -it alpine sh')
       ed.root.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
       )
@@ -1219,7 +1329,7 @@ describe('the environment stack (nocx-695k.1)', () => {
     }
   })
 
-  it('nested environments push and pop correctly', async () => {
+  it('nested non-ssh environments push and pop correctly', async () => {
     const { ed, content, teardown } = await mountTerminal(makeClipboard(), {
       attachToDocument: true,
     })
@@ -1238,8 +1348,9 @@ describe('the environment stack (nocx-695k.1)', () => {
       renderer._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
       expect(shellIntegrated(content)).toBe(true)
 
-      // Enter host1 via ssh.
-      ed.insertText('ssh host1')
+      // Enter container a via docker exec (the legacy non-ssh path: push at
+      // submit, pop on the D).
+      ed.insertText('docker exec -it a sh')
       ed.root.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
       )
@@ -1251,13 +1362,13 @@ describe('the environment stack (nocx-695k.1)', () => {
       expect(shellIntegrated(content)).toBe(true)
       expect(previousIntegrated(content)).toHaveLength(0)
 
-      // Markers from host1 arrive — the shell there is integrated.
+      // Markers from container a arrive — the shell there is integrated.
       renderer._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
       renderer._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
       expect(shellIntegrated(content)).toBe(true)
 
-      // Now from host1, ssh to host2.
-      ed.insertText('ssh host2')
+      // Now inside a, docker exec into b.
+      ed.insertText('docker exec -it b sh')
       ed.root.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
       )
@@ -1596,7 +1707,7 @@ describe('nocxify: ssh command rewrite (nocx-pu4.6)', () => {
 
   it('rewrites an interactive ssh command at submit', async () => {
     const callMock = vi.fn()
-    callMock.mockResolvedValue({ launcherPath: LAUNCHER_PATH, reason: null })
+    callMock.mockResolvedValue(LAUNCH({ environmentId: 'env-ab12' }))
     const client = makeClient({ call: callMock })
     const session = makeSession()
     client.openSession.mockResolvedValue(session)
@@ -1626,14 +1737,21 @@ describe('nocxify: ssh command rewrite (nocx-pu4.6)', () => {
       // The rewrite is async (RPC call): drain microtasks.
       for (let i = 0; i < 5; i++) await Promise.resolve()
 
-      // The RPC was called with the right params.
+      // The RPC was called with the TYPED PLAN (nocx-c5az): the oracle argv
+      // is the complete `ssh -G` argv, so the typed -F/-o/-J/-l/-p reach the
+      // oracle — never a bare destination.
       expect(callMock).toHaveBeenCalledWith(
         'shell.launcherCommand',
         expect.objectContaining({
-          destination: 'testhost',
           sessionId: session.sessionId,
+          oracleArgv: ['ssh', '-G', 'testhost'],
         }),
       )
+
+      // The minted environment id was registered as expected BEFORE the
+      // line reached the pty (§5.3) — a passport carrying it can be
+      // accepted; nothing else can.
+      expect(passportRendererOf(content).setExpectedEnvironmentId).toHaveBeenCalledWith('env-ab12')
 
       // The paste received the REWRITTEN command, not the original.
       const renderer = rendererOf(content)
@@ -1644,10 +1762,59 @@ describe('nocxify: ssh command rewrite (nocx-pu4.6)', () => {
       // What reaches the pty is a line the pty can carry. This is the defect
       // the bead was reopened for: 35 KB went in and 27 KB arrived, so the
       // shell ran the fragments of a truncated script.
-      const pasted = (renderer.paste as unknown as { mock: { calls: string[][] } }).mock.calls[0][0]
+      // The paste mock is a vitest spy; read its recorded call arguments.
+      const pasteMock = renderer.paste as unknown as { mock: { calls: string[][] } }
+      const pasted = pasteMock.mock.calls[0][0]
       expect(new TextEncoder().encode(pasted).byteLength).toBeLessThanOrEqual(4095)
       // And it names the launcher rather than carrying it.
       expect(pasted).not.toContain('BASH_ENV')
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
+
+  it('mode installed sends the compact guard-travelling line with the environment id', async () => {
+    const callMock = vi.fn()
+    callMock.mockResolvedValue(
+      LAUNCH({ mode: 'installed', environmentId: 'env-zz99', launcherPath: null }),
+    )
+    const client = makeClient({ call: callMock })
+    const session = makeSession()
+    client.openSession.mockResolvedValue(session)
+
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restoreScroll = stubScroll()
+    try {
+      content.setVisible(true)
+      ed.show()
+      rendererOf(content)._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
+      ed.insertText('ssh testhost')
+
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          bubbles: true,
+          cancelable: true,
+        }),
+      )
+      for (let i = 0; i < 5; i++) await Promise.resolve()
+
+      // The compact line (§3.3): the guard travels to the far side, and the
+      // environment id reaches the carrier as its first argument.
+      const renderer = rendererOf(content)
+      expect(renderer.paste).toHaveBeenCalledWith(
+        expect.stringContaining('"$HOME/.nocx/launch" env-zz99'),
+      )
+      expect(renderer.paste).toHaveBeenCalledWith(expect.stringContaining('ssh -t testhost'))
+      // The session id rides along as the carrier's second argument.
+      expect(renderer.paste).toHaveBeenCalledWith(
+        expect.stringContaining(`env-zz99 ${session.sessionId}`),
+      )
     } finally {
       restoreScroll()
       teardown()
@@ -1663,7 +1830,7 @@ describe('nocxify: ssh command rewrite (nocx-pu4.6)', () => {
   // precondition — "in an integrated local tab".
   it('does NOT rewrite in a tab that is not integrated', async () => {
     const callMock = vi.fn()
-    callMock.mockResolvedValue({ launcherPath: LAUNCHER_PATH, reason: null })
+    callMock.mockResolvedValue(LAUNCH())
     const client = makeClient({ call: callMock })
     const session = makeSession()
     client.openSession.mockResolvedValue(session)
@@ -1736,10 +1903,9 @@ describe('nocxify: ssh command rewrite (nocx-pu4.6)', () => {
 
   it('does NOT rewrite when launcher is null (fail-open)', async () => {
     const callMock = vi.fn()
-    callMock.mockResolvedValue({
-      launcherPath: null,
-      reason: 'remote-command',
-    })
+    callMock.mockResolvedValue(
+      LAUNCH({ mode: 'raw', launcherPath: null, reason: 'remote-command' }),
+    )
     const client = makeClient({ call: callMock })
     const session = makeSession()
     client.openSession.mockResolvedValue(session)
@@ -1812,9 +1978,94 @@ describe('nocxify: ssh command rewrite (nocx-pu4.6)', () => {
     }
   })
 
+  it('does NOT rewrite inside an environment (depth > 0 ⇒ raw, §6.1)', async () => {
+    const callMock = vi.fn().mockResolvedValue(LAUNCH())
+    const client = makeClient({ call: callMock })
+    const session = makeSession()
+    client.openSession.mockResolvedValue(session)
+
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const renderer = rendererOf(content)
+    const restoreScroll = stubScroll()
+    try {
+      content.setVisible(true)
+      ed.show()
+      renderer._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
+      renderer._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
+
+      // Enter the environment the passport-gated way.
+      ed.insertText('ssh host1')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      for (let i = 0; i < 5; i++) await Promise.resolve()
+      enterEnvironment(renderer, 'env-ab12')
+
+      // Now inside the environment: a nested ssh must NOT be rewritten — a
+      // local staged path would be read by a remote shell (§3.1, §6.1).
+      // Entry leaves the first remote prompt unowned (the local command is
+      // still "running" to the input-state machine), so re-show the editor
+      // the way the other submit tests do before typing the nested line.
+      ed.show()
+      ed.insertText('ssh host2')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      for (let i = 0; i < 5; i++) await Promise.resolve()
+
+      // Only the FIRST ssh consulted the planner — the nested one was
+      // refused by depth before any RPC. (The environmentObserved report
+      // for the accepted passport is a separate, expected call.)
+      const launcherCalls = callMock.mock.calls.filter(([m]) => m === 'shell.launcherCommand')
+      expect(launcherCalls).toHaveLength(1)
+      expect(renderer.paste).toHaveBeenLastCalledWith('ssh host2')
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
+
+  it('does NOT rewrite a remote command like `ssh -t host tmux attach` (§6.1)', async () => {
+    const callMock = vi.fn().mockResolvedValue(LAUNCH())
+    const client = makeClient({ call: callMock })
+    const session = makeSession()
+    client.openSession.mockResolvedValue(session)
+
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restoreScroll = stubScroll()
+    try {
+      content.setVisible(true)
+      ed.show()
+      rendererOf(content)._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
+      ed.insertText('ssh -t host tmux attach')
+
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      for (let i = 0; i < 5; i++) await Promise.resolve()
+
+      // The parser refuses (a remote command, not a login); the planner is
+      // never consulted and the typed line goes out unchanged.
+      expect(callMock).not.toHaveBeenCalledWith('shell.launcherCommand', expect.anything())
+      const renderer = rendererOf(content)
+      expect(renderer.paste).toHaveBeenCalledWith('ssh -t host tmux attach')
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
+
   it('sends exactly one line — no write between submit and first marker (safety property)', async () => {
     const callMock = vi.fn()
-    callMock.mockResolvedValue({ launcherPath: LAUNCHER_PATH, reason: null })
+    callMock.mockResolvedValue(LAUNCH())
     const client = makeClient({ call: callMock })
     const session = makeSession()
     client.openSession.mockResolvedValue(session)
@@ -1866,12 +2117,7 @@ describe('nocxify: ssh command rewrite (nocx-pu4.6)', () => {
 })
 /* eslint-enable @typescript-eslint/unbound-method */
 
-// ── nocx-pu4.7: connection offer on hand-typed ssh block ────────────────
-
 describe('connection offer on ssh block (nocx-pu4.7)', () => {
-  // A staged launcher path, the shape shell.launcherCommand returns (nocx-pu4.6).
-  const LAUNCHER_PATH = "'/home/u/.nocx/run/launcher-12345'"
-
   /** jsdom does not implement scrollTo/scrollIntoView; the
    *  ScrollbackController calls both. */
   function stubScroll(): () => void {
@@ -1912,7 +2158,7 @@ describe('connection offer on ssh block (nocx-pu4.7)', () => {
 
   it('offers to save on block after ssh to unknown host', async () => {
     const callMock = vi.fn()
-    callMock.mockResolvedValue({ launcherPath: LAUNCHER_PATH, reason: null })
+    callMock.mockResolvedValue(LAUNCH({ environmentId: 'env-ab12' }))
     const client = makeClient({ call: callMock })
     const session = makeSession()
     client.openSession.mockResolvedValue(session)
@@ -1928,6 +2174,10 @@ describe('connection offer on ssh block (nocx-pu4.7)', () => {
     try {
       content.setVisible(true)
       ed.show()
+      // The rewrite gate requires an integrated local shell: a marker must
+      // have arrived before the planner is consulted.
+      rendererOf(content)._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
+      rendererOf(content)._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
 
       // Submit ssh to an UNKNOWN host.
       ed.insertText('ssh pi@newbox')
@@ -1941,20 +2191,10 @@ describe('connection offer on ssh block (nocx-pu4.7)', () => {
       for (let i = 0; i < 5; i++) await Promise.resolve()
 
       const renderer = rendererOf(content)
-      // Fire the C marker to create a running block, then D to freeze it.
-      renderer._fireCommandMarker({
-        kind: 'C',
-        line: 0,
-        col: 0,
-        buffer: 'normal',
-      })
-      renderer._fireCommandMarker({
-        kind: 'D',
-        line: 0,
-        col: 0,
-        buffer: 'normal',
-        exitCode: 0,
-      })
+      // Entry freezes the ssh block (passport → tagged A → B), and the
+      // connection offer rides on that freeze — exactly where the block
+      // used to end at the session's D.
+      enterEnvironment(renderer, 'env-ab12')
       // The offer is async (profile list + settings): drain.
       for (let i = 0; i < 5; i++) await Promise.resolve()
 
@@ -1980,7 +2220,7 @@ describe('connection offer on ssh block (nocx-pu4.7)', () => {
 
   it('does NOT offer when the destination is already a saved profile', async () => {
     const callMock = vi.fn()
-    callMock.mockResolvedValue({ launcherPath: LAUNCHER_PATH, reason: null })
+    callMock.mockResolvedValue(LAUNCH({ environmentId: 'env-ab12' }))
     const client = makeClient({ call: callMock })
     const session = makeSession()
     client.openSession.mockResolvedValue(session)
@@ -1997,6 +2237,8 @@ describe('connection offer on ssh block (nocx-pu4.7)', () => {
     try {
       content.setVisible(true)
       ed.show()
+      rendererOf(content)._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
+      rendererOf(content)._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
 
       ed.insertText('ssh pi@newbox')
       view.contentDOM.dispatchEvent(
@@ -2009,19 +2251,7 @@ describe('connection offer on ssh block (nocx-pu4.7)', () => {
       for (let i = 0; i < 5; i++) await Promise.resolve()
 
       const renderer = rendererOf(content)
-      renderer._fireCommandMarker({
-        kind: 'C',
-        line: 0,
-        col: 0,
-        buffer: 'normal',
-      })
-      renderer._fireCommandMarker({
-        kind: 'D',
-        line: 0,
-        col: 0,
-        buffer: 'normal',
-        exitCode: 0,
-      })
+      enterEnvironment(renderer, 'env-ab12')
       for (let i = 0; i < 5; i++) await Promise.resolve()
 
       // No receipt — the host is already a profile.
@@ -2095,7 +2325,7 @@ describe('connection offer on ssh block (nocx-pu4.7)', () => {
     } as unknown as ProfileClient
     const client = makeClient()
     const callMock = client.call
-    callMock.mockResolvedValue({ launcherPath: LAUNCHER_PATH, reason: null })
+    callMock.mockResolvedValue(LAUNCH({ environmentId: 'env-ab12' }))
 
     const { view, ed, content, tab, teardown } = await mountTerminal(
       makeClipboard(),
@@ -2107,6 +2337,8 @@ describe('connection offer on ssh block (nocx-pu4.7)', () => {
     try {
       content.setVisible(true)
       ed.show()
+      rendererOf(content)._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
+      rendererOf(content)._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
 
       ed.insertText('ssh box')
       view.contentDOM.dispatchEvent(
@@ -2119,19 +2351,7 @@ describe('connection offer on ssh block (nocx-pu4.7)', () => {
       for (let i = 0; i < 5; i++) await Promise.resolve()
 
       const renderer = rendererOf(content)
-      renderer._fireCommandMarker({
-        kind: 'C',
-        line: 0,
-        col: 0,
-        buffer: 'normal',
-      })
-      renderer._fireCommandMarker({
-        kind: 'D',
-        line: 0,
-        col: 0,
-        buffer: 'normal',
-        exitCode: 0,
-      })
+      enterEnvironment(renderer, 'env-ab12')
       for (let i = 0; i < 5; i++) await Promise.resolve()
 
       // Receipt appears.
@@ -2152,6 +2372,491 @@ describe('connection offer on ssh block (nocx-pu4.7)', () => {
 
       // Receipt is gone.
       expect(lastBlock?.querySelector('.ui-block-receipt')).toBeNull()
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
+})
+
+// ── nocx-mlm7 P9: the environment boundary (spec §6.1) ────────────────────
+
+describe('the environment boundary (nocx-mlm7 P9, spec §6.1)', () => {
+  /** Access the ledger through the private-field escape hatch. */
+  const ledgerOf = (content: TerminalContent): CommandLedger => {
+    const withLedger = content as unknown as { ledger: CommandLedger }
+    return withLedger.ledger
+  }
+
+  const envStackOf = (content: TerminalContent): unknown[] => {
+    const withStack = content as unknown as { _envStack: unknown[] }
+    return withStack._envStack
+  }
+
+  const attemptOf = (content: TerminalContent): unknown => {
+    const withAttempt = content as unknown as { _attempt: unknown }
+    return withAttempt._attempt
+  }
+
+  /** The scrollback block records — command, cwd and paint, oldest first. */
+  const blocksOf = (
+    content: TerminalContent,
+  ): Array<{
+    command: string
+    cwd: string
+    status: string
+    exitCode: number | null
+  }> => {
+    const withBlocks = content as unknown as {
+      scrollback: {
+        blockManager: {
+          blocks: Array<{
+            command: string
+            cwd: string
+            status: string
+            exitCode: number | null
+          }>
+        }
+      } | null
+    }
+    return withBlocks.scrollback?.blockManager.blocks ?? []
+  }
+
+  /** The shell.environmentObserved reports, in order. */
+  const observedCalls = (
+    callMock: Mock<(method: string, params: unknown) => Promise<unknown>>,
+  ): Array<{ environmentId: string; passport: unknown }> =>
+    callMock.mock.calls
+      .filter(([m]) => m === 'shell.environmentObserved')
+      .map(([, p]) => p as { environmentId: string; passport: unknown })
+
+  /** Submit a line through the editor's real keydown path. */
+  const submitLine = (view: EditorView, ed: CommandEditor, text: string): void => {
+    ed.insertText(text)
+    view.contentDOM.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+    )
+  }
+
+  /** jsdom does not implement scrollTo/scrollIntoView; the controller uses
+   *  both on every block start and freeze. */
+  function stubScroll(): () => void {
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const pst = Element.prototype.scrollTo
+    const psiv = Element.prototype.scrollIntoView
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    return () => {
+      Element.prototype.scrollTo = pst
+      Element.prototype.scrollIntoView = psiv
+    }
+  }
+
+  /** Mount an integrated local tab with a working planner, drive to a
+   *  trusted prompt, and submit `ssh host1` (bootstrap, env-ab12). */
+  async function mountWithSsh(
+    callMock: Mock<(method: string, params: unknown) => Promise<unknown>>,
+  ): Promise<{
+    view: EditorView
+    ed: CommandEditor
+    content: TerminalContent
+    tab: Tab
+    renderer: RendererMock
+    teardown: () => void
+  }> {
+    const restoreScroll = stubScroll()
+    try {
+      const client = makeClient({ call: callMock })
+      const session = makeSession()
+      client.openSession.mockResolvedValue(session)
+      const mounted = await mountTerminal(makeClipboard(), { attachToDocument: true }, client)
+      mounted.content.setVisible(true)
+      mounted.ed.show()
+      const renderer = rendererOf(mounted.content)
+      renderer._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
+      renderer._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
+      submitLine(mounted.view, mounted.ed, 'ssh host1')
+      for (let i = 0; i < 5; i++) await Promise.resolve()
+      return {
+        ...mounted,
+        renderer,
+        teardown: () => {
+          restoreScroll()
+          mounted.teardown()
+        },
+      }
+    } catch (err) {
+      restoreScroll()
+      throw err
+    }
+  }
+
+  it('row 1: auth fails / Ctrl-C at password: — no passport, the block runs to the local D with the real exit status', async () => {
+    const callMock = vi.fn().mockResolvedValue(LAUNCH({ environmentId: 'env-ab12' }))
+    const { content, tab, renderer, teardown } = await mountWithSsh(callMock)
+    const restoreScroll = stubScroll()
+    try {
+      // The local shell runs the ssh line: C starts it, and ssh dies at the
+      // password prompt (130 = Ctrl-C). No passport ever arrived.
+      renderer._fireCommandMarker({ kind: 'C', line: 0, col: 0, buffer: 'normal' })
+      renderer._fireCommandMarker({
+        kind: 'D',
+        line: 0,
+        col: 0,
+        buffer: 'normal',
+        exitCode: 130,
+      })
+      for (let i = 0; i < 5; i++) await Promise.resolve()
+
+      // The block lived to the local D and got the REAL exit status.
+      const exitChip = tab.pane.querySelector('.cmd-header-exit-fail')
+      expect(exitChip?.textContent).toBe('exit 130')
+      // No environment was entered, nothing was reported as accepted.
+      expect(envStackOf(content)).toHaveLength(0)
+      const observed = observedCalls(callMock)
+      expect(observed).toHaveLength(1)
+      expect(observed[0].passport).toBeNull()
+      // The ledger record closed with the real code too.
+      const rec = ledgerOf(content)
+        .records()
+        .find((r) => r.command === 'ssh host1')
+      expect(rec?.exitCode).toBe(130)
+      expect(rec?.status).toBe('failure')
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
+
+  it('row 2: banner before password: — everything up to the passport belongs to the running ssh block', async () => {
+    const callMock = vi.fn().mockResolvedValue(LAUNCH({ environmentId: 'env-ab12' }))
+    const { content, tab, renderer, teardown } = await mountWithSsh(callMock)
+    const restoreScroll = stubScroll()
+    try {
+      // While ssh is still connecting (banner, host-key prompt, password:,
+      // 2FA), the block is RUNNING — no marker froze it yet.
+      expect(tab.pane.querySelector('.cmd-block-running')).not.toBeNull()
+      expect(envStackOf(content)).toHaveLength(0)
+
+      // The passport arrives only after the password succeeded.
+      enterEnvironment(renderer, 'env-ab12')
+      expect(tab.pane.querySelector('.cmd-block-running')).toBeNull()
+      expect(tab.pane.querySelector('.cmd-block-entered')).not.toBeNull()
+      expect(envStackOf(content)).toHaveLength(1)
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
+
+  it('row 3: the POSIX tier orphan D;0 before its first A closes nothing and pops nothing', async () => {
+    const callMock = vi.fn().mockResolvedValue(LAUNCH({ environmentId: 'env-ab12' }))
+    const { content, tab, renderer, teardown } = await mountWithSsh(callMock)
+    const restoreScroll = stubScroll()
+    try {
+      // The launcher ran and the passport was accepted — then the remote
+      // tier's first emission is an orphan untagged D;0.
+      ;(renderer as unknown as PassportRenderer)._firePassport({
+        status: 'accepted',
+        passport: PASSPORT('env-ab12'),
+      })
+      renderer._fireCommandMarker({ kind: 'D', line: 0, col: 0, buffer: 'normal', exitCode: 0 })
+
+      // Closes nothing (the ssh block is still running), pops nothing, and
+      // the attempt is still alive with nothing reported.
+      expect(tab.pane.querySelector('.cmd-block-running')).not.toBeNull()
+      expect(envStackOf(content)).toHaveLength(0)
+      expect(attemptOf(content)).not.toBeNull()
+      expect(observedCalls(callMock)).toHaveLength(0)
+
+      // The tagged A→B that follows still enters normally.
+      renderer._fireCommandMarker({
+        kind: 'A',
+        line: 1,
+        col: 0,
+        buffer: 'normal',
+        nocxEnv: 'env-ab12',
+      })
+      renderer._fireCommandMarker({
+        kind: 'B',
+        line: 1,
+        col: 0,
+        buffer: 'normal',
+        nocxEnv: 'env-ab12',
+      })
+      expect(envStackOf(content)).toHaveLength(1)
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
+
+  it('row 4: markers from an integrated tmux carry no expected id and create no transition', async () => {
+    const callMock = vi.fn().mockResolvedValue(LAUNCH({ environmentId: 'env-ab12' }))
+    const { content, renderer, teardown } = await mountWithSsh(callMock)
+    const restoreScroll = stubScroll()
+    try {
+      // A tagged A→B carrying a FOREIGN id (an already-integrated tmux
+      // inside the connecting ssh) must not enter the environment.
+      renderer._fireCommandMarker({
+        kind: 'A',
+        line: 0,
+        col: 0,
+        buffer: 'normal',
+        nocxEnv: 'tmux-9',
+      })
+      renderer._fireCommandMarker({
+        kind: 'B',
+        line: 0,
+        col: 0,
+        buffer: 'normal',
+        nocxEnv: 'tmux-9',
+      })
+      expect(envStackOf(content)).toHaveLength(0)
+      expect(observedCalls(callMock)).toHaveLength(0)
+
+      // Our own passport + tagged A→B still enter.
+      enterEnvironment(renderer, 'env-ab12')
+      expect(envStackOf(content)).toHaveLength(1)
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
+
+  it('row 6: sudo -i on the remote is a raw child shell with no transition', async () => {
+    const callMock = vi.fn().mockResolvedValue(LAUNCH({ environmentId: 'env-ab12' }))
+    const { content, view, ed, renderer, teardown } = await mountWithSsh(callMock)
+    const restoreScroll = stubScroll()
+    try {
+      enterEnvironment(renderer, 'env-ab12')
+      ed.show()
+      submitLine(view, ed, 'sudo -i')
+      for (let i = 0; i < 5; i++) await Promise.resolve()
+
+      // The legacy heuristic still labels the raw child shell, and it is
+      // NOT an attempt: the dormant transition record is still the ssh's.
+      expect(envStackOf(content)).toHaveLength(2)
+      expect(ledgerOf(content).transitionRecord?.command).toBe('ssh host1')
+
+      // The sudo shell ends on the remote tier's tagged D; the sudo level
+      // pops, the ssh environment stays.
+      renderer._fireCommandMarker({
+        kind: 'D',
+        line: 0,
+        col: 0,
+        buffer: 'normal',
+        exitCode: 0,
+        nocxEnv: 'env-ab12',
+      })
+      expect(envStackOf(content)).toHaveLength(1)
+      expect(ledgerOf(content).transitionRecord?.command).toBe('ssh host1')
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
+
+  it('row 7: connection lost — the running remote command is interrupted/transition-lost; the transition record takes the local D code', async () => {
+    const callMock = vi.fn().mockResolvedValue(LAUNCH({ environmentId: 'env-ab12' }))
+    const { content, view, ed, renderer, teardown } = await mountWithSsh(callMock)
+    const restoreScroll = stubScroll()
+    try {
+      enterEnvironment(renderer, 'env-ab12')
+      ed.show()
+      submitLine(view, ed, 'top')
+      for (let i = 0; i < 5; i++) await Promise.resolve()
+      renderer._fireCommandMarker({
+        kind: 'C',
+        line: 0,
+        col: 0,
+        buffer: 'normal',
+        nocxEnv: 'env-ab12',
+      })
+
+      // The network drops: ssh exits 255 and the LOCAL shell emits its D.
+      renderer._fireCommandMarker({
+        kind: 'D',
+        line: 0,
+        col: 0,
+        buffer: 'normal',
+        exitCode: 255,
+      })
+      for (let i = 0; i < 5; i++) await Promise.resolve()
+
+      const records = ledgerOf(content).records()
+      const top = records.find((r) => r.command === 'top')
+      expect(top?.status).toBe('interrupted')
+      expect(top?.reason).toBe('transition-lost')
+      const ssh = records.find((r) => r.command === 'ssh host1')
+      expect(ssh?.transition).toBe('completed')
+      expect(ssh?.exitCode).toBe(255)
+      // The local D's code was never assigned to the remote command.
+      expect(top?.exitCode).toBeNull()
+      // The environment is gone with the connection.
+      expect(envStackOf(content)).toHaveLength(0)
+      // The observation was reported once, at entry, with the passport.
+      const observed = observedCalls(callMock)
+      expect(observed).toHaveLength(1)
+      expect(observed[0].passport).not.toBeNull()
+      // The running remote block froze with NO exit code.
+      const last = blocksOf(content)[blocksOf(content).length - 1]
+      expect(last?.status).toBe('entered')
+      expect(last?.exitCode).toBeNull()
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
+
+  it('row 8: Ctrl-D with no running remote block — the local D restores the parent environment and the editor', async () => {
+    const callMock = vi.fn().mockResolvedValue(LAUNCH({ environmentId: 'env-ab12' }))
+    const { content, ed, renderer, teardown } = await mountWithSsh(callMock)
+    const restoreScroll = stubScroll()
+    try {
+      enterEnvironment(renderer, 'env-ab12')
+      expect(envStackOf(content)).toHaveLength(1)
+
+      // Ctrl-D at the remote prompt: ssh exits cleanly, the local D arrives
+      // with no remote block running.
+      renderer._fireCommandMarker({ kind: 'D', line: 0, col: 0, buffer: 'normal', exitCode: 0 })
+      for (let i = 0; i < 5; i++) await Promise.resolve()
+
+      expect(envStackOf(content)).toHaveLength(0)
+      const ssh = ledgerOf(content)
+        .records()
+        .find((r) => r.command === 'ssh host1')
+      expect(ssh?.transition).toBe('completed')
+      expect(ssh?.exitCode).toBe(0)
+
+      // The local shell's next prompt restores the editor.
+      renderer._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
+      renderer._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
+      expect(ed.isVisible).toBe(true)
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
+
+  it('the ssh block carries the LOCAL host and cwd (entry happens after ledger.open and beginBlock)', async () => {
+    const callMock = vi.fn().mockResolvedValue(LAUNCH({ environmentId: 'env-ab12' }))
+    const { content, renderer, teardown } = await mountWithSsh(callMock)
+    const restoreScroll = stubScroll()
+    try {
+      enterEnvironment(renderer, 'env-ab12')
+      const block = blocksOf(content)[0]
+      expect(block.command).toBe('ssh host1')
+      // The block was started with the LOCAL cwd — the environment was not
+      // applied before beginBlock (that was the defect this epic fixes: the
+      // block carried the destination and no folder).
+      expect(block.cwd).toBe(FIXTURE_CWD)
+      expect(block.status).toBe('entered')
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
+
+  it('entry counts only on expected passport → tagged A → B', async () => {
+    const callMock = vi.fn().mockResolvedValue(LAUNCH({ environmentId: 'env-ab12' }))
+    const { content, renderer, teardown } = await mountWithSsh(callMock)
+    const restoreScroll = stubScroll()
+    try {
+      // A tagged A alone (passport not yet accepted): nothing.
+      renderer._fireCommandMarker({
+        kind: 'A',
+        line: 1,
+        col: 0,
+        buffer: 'normal',
+        nocxEnv: 'env-ab12',
+      })
+      expect(envStackOf(content)).toHaveLength(0)
+      // Passport accepted, then an UNTAGGED A→B: not the entry pair.
+      ;(renderer as unknown as PassportRenderer)._firePassport({
+        status: 'accepted',
+        passport: PASSPORT('env-ab12'),
+      })
+      renderer._fireCommandMarker({ kind: 'A', line: 1, col: 0, buffer: 'normal' })
+      renderer._fireCommandMarker({ kind: 'B', line: 1, col: 0, buffer: 'normal' })
+      expect(envStackOf(content)).toHaveLength(0)
+
+      // The tagged A→B pair completes entry.
+      renderer._fireCommandMarker({
+        kind: 'A',
+        line: 1,
+        col: 0,
+        buffer: 'normal',
+        nocxEnv: 'env-ab12',
+      })
+      renderer._fireCommandMarker({
+        kind: 'B',
+        line: 1,
+        col: 0,
+        buffer: 'normal',
+        nocxEnv: 'env-ab12',
+      })
+      expect(envStackOf(content)).toHaveLength(1)
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
+
+  it('a tagged remote D closes the remote command and never pops the environment', async () => {
+    const callMock = vi.fn().mockResolvedValue(LAUNCH({ environmentId: 'env-ab12' }))
+    const { content, view, ed, renderer, teardown } = await mountWithSsh(callMock)
+    const restoreScroll = stubScroll()
+    try {
+      enterEnvironment(renderer, 'env-ab12')
+      ed.show()
+      submitLine(view, ed, 'ls')
+      for (let i = 0; i < 5; i++) await Promise.resolve()
+      renderer._fireCommandMarker({
+        kind: 'C',
+        line: 0,
+        col: 0,
+        buffer: 'normal',
+        nocxEnv: 'env-ab12',
+      })
+      renderer._fireCommandMarker({
+        kind: 'D',
+        line: 0,
+        col: 0,
+        buffer: 'normal',
+        exitCode: 0,
+        nocxEnv: 'env-ab12',
+      })
+
+      // Still inside: the tagged D closed the remote command only.
+      expect(envStackOf(content)).toHaveLength(1)
+      const ls = ledgerOf(content)
+        .records()
+        .find((r) => r.command === 'ls')
+      expect(ls?.status).toBe('success')
+      expect(ledgerOf(content).transitionRecord?.command).toBe('ssh host1')
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
+
+  it('the observation is reported exactly once, with the accepted passport or null', async () => {
+    const callMock = vi.fn().mockResolvedValue(LAUNCH({ environmentId: 'env-ab12' }))
+    const { renderer, teardown } = await mountWithSsh(callMock)
+    const restoreScroll = stubScroll()
+    try {
+      enterEnvironment(renderer, 'env-ab12')
+      for (let i = 0; i < 5; i++) await Promise.resolve()
+      expect(observedCalls(callMock)).toHaveLength(1)
+      expect(observedCalls(callMock)[0].passport).not.toBeNull()
+
+      // The local D does not report a second time — the first observation
+      // per attempt decides it (§5.4).
+      renderer._fireCommandMarker({ kind: 'D', line: 0, col: 0, buffer: 'normal', exitCode: 0 })
+      for (let i = 0; i < 5; i++) await Promise.resolve()
+      expect(observedCalls(callMock)).toHaveLength(1)
     } finally {
       restoreScroll()
       teardown()

@@ -22,6 +22,7 @@ import type { ClipboardGate } from '../clipboard'
 import type { ClipboardBanner } from '../banner'
 import type { TabManager } from '../tabs'
 import type { DesiredMode } from '../capability'
+import type { PassportDisposition } from '../environment-passport'
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Constants — every assertion must derive from these, never repeat the literal.
@@ -36,7 +37,6 @@ export const FIXTURE_DIRECTORY_LABEL = 'repos/nocx'
 // ═══════════════════════════════════════════════════════════════════════════
 // Renderer mock — factory called once per tab by createRenderer().
 // ═══════════════════════════════════════════════════════════════════════════
-
 export interface RendererMock extends TerminalRenderer {
   /** This tab's OSC 636 store — XtermRenderer owns one, so the mock must too. */
   snapshotStore: CommandSnapshotStore
@@ -63,6 +63,8 @@ export interface RendererMock extends TerminalRenderer {
   _fireSelectionChange(text: string): void
   /** Fire an OSC 52 write event — used by clipboard policy tests. */
   _fireClipboardWrite(text: string): void
+  /** Fire an OSC 636 P readiness-passport disposition (P2). */
+  _firePassport(d: PassportDisposition): void
 }
 
 /**
@@ -72,6 +74,7 @@ export interface RendererMock extends TerminalRenderer {
  */
 export function createRendererMock(): RendererMock {
   const cbs: RendererMock['_cbs'] = {}
+  const passportSubs: Array<(d: PassportDisposition) => void> = []
   const mock: Record<string, unknown> = {
     mount: vi.fn().mockResolvedValue(undefined),
     write: vi.fn(),
@@ -92,6 +95,10 @@ export function createRendererMock(): RendererMock {
     onCommandMarker: vi.fn((cb: CommandMarkerCallback) => {
       cbs.onCommandMarker = cb
     }),
+    onEnvironmentPassport: vi.fn((cb: (d: PassportDisposition) => void) => {
+      passportSubs.push(cb)
+    }),
+    setExpectedEnvironmentId: vi.fn(),
     onInBandReady: vi.fn((cb: () => void) => {
       cbs.onInBandReady = cb
       return () => {
@@ -160,6 +167,9 @@ export function createRendererMock(): RendererMock {
     },
     _fireClipboardWrite(text: string) {
       cbs.onClipboardWrite?.(text)
+    },
+    _firePassport(d: PassportDisposition) {
+      for (const sub of passportSubs) sub(d)
     },
   }
   return mock as unknown as RendererMock
