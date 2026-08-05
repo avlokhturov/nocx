@@ -1575,7 +1575,10 @@ describe('terminal/editor input switching (nocx-atyf.5)', () => {
 
 /* eslint-disable @typescript-eslint/unbound-method */
 describe('nocxify: ssh command rewrite (nocx-pu4.6)', () => {
-  const LAUNCHER = "'/usr/bin/env -u BASH_ENV /bin/sh -c ...'"
+  // The backend answers with a staged PATH, never the launcher: the launcher
+  // is ~35 KB and the submitted line has only the tty, whose canonical buffer
+  // is 4096 bytes (nocx-pu4.6, reopened).
+  const LAUNCHER_PATH = "'/home/u/.nocx/run/launcher-12345'"
 
   /** jsdom does not implement scrollTo/scrollIntoView; the
    *  ScrollbackController calls both. */
@@ -1592,7 +1595,7 @@ describe('nocxify: ssh command rewrite (nocx-pu4.6)', () => {
 
   it('rewrites an interactive ssh command at submit', async () => {
     const callMock = vi.fn()
-    callMock.mockResolvedValue({ launcher: LAUNCHER, reason: null })
+    callMock.mockResolvedValue({ launcherPath: LAUNCHER_PATH, reason: null })
     const client = makeClient({ call: callMock })
     const session = makeSession()
     client.openSession.mockResolvedValue(session)
@@ -1630,9 +1633,17 @@ describe('nocxify: ssh command rewrite (nocx-pu4.6)', () => {
 
       // The paste received the REWRITTEN command, not the original.
       const renderer = rendererOf(content)
-      expect(renderer.paste).toHaveBeenCalledWith(expect.stringContaining(LAUNCHER))
+      expect(renderer.paste).toHaveBeenCalledWith(expect.stringContaining(LAUNCHER_PATH))
       expect(renderer.paste).toHaveBeenCalledWith(expect.stringContaining('-t'))
       expect(renderer.paste).toHaveBeenCalledWith(expect.stringContaining('ssh'))
+
+      // What reaches the pty is a line the pty can carry. This is the defect
+      // the bead was reopened for: 35 KB went in and 27 KB arrived, so the
+      // shell ran the fragments of a truncated script.
+      const pasted = (renderer.paste as unknown as { mock: { calls: string[][] } }).mock.calls[0][0]
+      expect(new TextEncoder().encode(pasted).byteLength).toBeLessThanOrEqual(4095)
+      // And it names the launcher rather than carrying it.
+      expect(pasted).not.toContain('BASH_ENV')
     } finally {
       restoreScroll()
       teardown()
@@ -1681,7 +1692,7 @@ describe('nocxify: ssh command rewrite (nocx-pu4.6)', () => {
   it('does NOT rewrite when launcher is null (fail-open)', async () => {
     const callMock = vi.fn()
     callMock.mockResolvedValue({
-      launcher: null,
+      launcherPath: null,
       reason: 'remote-command',
     })
     const client = makeClient({ call: callMock })
@@ -1758,7 +1769,7 @@ describe('nocxify: ssh command rewrite (nocx-pu4.6)', () => {
 
   it('sends exactly one line — no write between submit and first marker (safety property)', async () => {
     const callMock = vi.fn()
-    callMock.mockResolvedValue({ launcher: LAUNCHER, reason: null })
+    callMock.mockResolvedValue({ launcherPath: LAUNCHER_PATH, reason: null })
     const client = makeClient({ call: callMock })
     const session = makeSession()
     client.openSession.mockResolvedValue(session)
@@ -1794,7 +1805,7 @@ describe('nocxify: ssh command rewrite (nocx-pu4.6)', () => {
       // unknown foreground process.
       const renderer = rendererOf(content)
       expect(renderer.paste).toHaveBeenCalledTimes(1)
-      expect(renderer.paste).toHaveBeenCalledWith(expect.stringContaining(LAUNCHER))
+      expect(renderer.paste).toHaveBeenCalledWith(expect.stringContaining(LAUNCHER_PATH))
 
       // No additional deferred writes after submit — no in-band injection.
       const sendCallsAfter = session.send.mock.calls.length
@@ -1810,6 +1821,9 @@ describe('nocxify: ssh command rewrite (nocx-pu4.6)', () => {
 // ── nocx-pu4.7: connection offer on hand-typed ssh block ────────────────
 
 describe('connection offer on ssh block (nocx-pu4.7)', () => {
+  // A staged launcher path, the shape shell.launcherCommand returns (nocx-pu4.6).
+  const LAUNCHER_PATH = "'/home/u/.nocx/run/launcher-12345'"
+
   /** jsdom does not implement scrollTo/scrollIntoView; the
    *  ScrollbackController calls both. */
   function stubScroll(): () => void {
@@ -1848,11 +1862,9 @@ describe('connection offer on ssh block (nocx-pu4.7)', () => {
     } as unknown as ProfileClient
   }
 
-  const LAUNCHER = "'/usr/bin/env -u BASH_ENV /bin/sh -c ...'"
-
   it('offers to save on block after ssh to unknown host', async () => {
     const callMock = vi.fn()
-    callMock.mockResolvedValue({ launcher: LAUNCHER, reason: null })
+    callMock.mockResolvedValue({ launcherPath: LAUNCHER_PATH, reason: null })
     const client = makeClient({ call: callMock })
     const session = makeSession()
     client.openSession.mockResolvedValue(session)
@@ -1920,7 +1932,7 @@ describe('connection offer on ssh block (nocx-pu4.7)', () => {
 
   it('does NOT offer when the destination is already a saved profile', async () => {
     const callMock = vi.fn()
-    callMock.mockResolvedValue({ launcher: LAUNCHER, reason: null })
+    callMock.mockResolvedValue({ launcherPath: LAUNCHER_PATH, reason: null })
     const client = makeClient({ call: callMock })
     const session = makeSession()
     client.openSession.mockResolvedValue(session)
@@ -2035,7 +2047,7 @@ describe('connection offer on ssh block (nocx-pu4.7)', () => {
     } as unknown as ProfileClient
     const client = makeClient()
     const callMock = client.call
-    callMock.mockResolvedValue({ launcher: LAUNCHER, reason: null })
+    callMock.mockResolvedValue({ launcherPath: LAUNCHER_PATH, reason: null })
 
     const { view, ed, content, tab, teardown } = await mountTerminal(
       makeClipboard(),

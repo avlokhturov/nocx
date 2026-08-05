@@ -1,12 +1,18 @@
 package transport
 
-// shell.launcherCommand — returns the remote launcher for rewriting a
-// hand-typed ssh invocation (nocx-pu4.6). The renderer detects an
-// interactive ssh login at submit time, calls this method to get the
-// launcher command, and builds the rewritten `ssh -t host '<launcher>'`
-// line. The original line is recorded in history; the rewritten line goes
-// to the PTY. Nothing is typed after submit (the whole in-band family's
+// shell.launcherCommand — stages the remote launcher for rewriting a
+// hand-typed ssh invocation and returns its PATH (nocx-pu4.6). The renderer
+// detects an interactive ssh login at submit time, calls this method, and
+// builds a line whose LOCAL shell reads the file and hands the bytes to ssh
+// through argv. The original line is recorded in history; the rewritten line
+// goes to the PTY. Nothing is typed after submit (the whole in-band family's
 // unsolvable safety problem).
+//
+// Why a path and not the launcher itself: the ShellAuto launcher is ~35 KB
+// because it carries the bash, zsh and POSIX tiers, and a hand-typed ssh can
+// only reach the shell through the tty, whose canonical line buffer is 4096
+// bytes. Sending it inline truncated the payload mid-script and the shell
+// executed the fragments. See internal/shellintegration/stage.go.
 
 import (
 	"context"
@@ -17,31 +23,49 @@ import (
 	"github.com/shady2k/nocx/internal/ssh"
 )
 
+// LauncherStager puts the remote launcher where the LOCAL shell can read it
+// and returns its absolute path. *shellintegration.fileStager satisfies it
+// through shellintegration.NewLauncherStager — no adapter. When not wired,
+// the rewrite is refused and the renderer sends the line the user typed.
+type LauncherStager interface {
+	Stage(launcher string) (string, error)
+}
+
+// WithLauncherStager attaches the launcher staging seam behind the
+// shell.launcherCommand JSON-RPC method (nocx-pu4.6). Wired at the
+// composition root, which is the only layer that knows the user's home
+// directory; the transport never picks a filesystem location itself.
+func WithLauncherStager(st LauncherStager) WSServerOption {
+	return func(s *WSServer) { s.launcherStager = st }
+}
+
 // shellLauncherCommandResult is the result of shell.launcherCommand,
 // matching contracts/shell.launcherCommand.schema.json exactly.
 type shellLauncherCommandResult struct {
-	Launcher *string `json:"launcher"`
-	Reason   *string `json:"reason"`
+	LauncherPath *string `json:"launcherPath"`
+	Reason       *string `json:"reason"`
 }
 
 // handleShellLauncherCommand serves the shell.launcherCommand method.
 //
 //	--> {"jsonrpc":"2.0","id":1,"method":"shell.launcherCommand","params":{"destination":"pi@raspberrypi","sessionId":"0123456789abcdef0123456789abcdef"}}
-//	<-- {"jsonrpc":"2.0","id":1,"result":{"launcher":"'/usr/bin/env ...'","reason":null}}
+//	<-- {"jsonrpc":"2.0","id":1,"result":{"launcherPath":"'/home/u/.nocx/run/launcher-123'","reason":null}}
 //
 // The destination is whatever the renderer's ssh-transition parser
 // extracted: user@host, host, or an IPv4 address. The session id is
 // server-authoritative (AD-7): only a live session in the registry can
 // anchor NOCX_SESSION_ID in the launcher command.
 //
-// Refusal reasons (launcher null, reason non-null):
+// Refusal reasons (launcherPath null, reason non-null):
 //   - "remote-command": the destination's ssh config sets RemoteCommand
 //     (ADR-0015, ssh -G oracle); our rewrite would be refused by sshd.
 //   - "unsupported": the launcher cannot build a command (unsupported
 //     shell, script too large, or no launcher wired).
+//   - "stage-failed": the launcher could not be written where the local
+//     shell can read it (no home, unwritable directory, full disk).
 //
 // Fail-open is the invariant (ADR-0004 §1): anything uncertain means
-// launcher is null and the renderer sends the original line unchanged.
+// launcherPath is null and the renderer sends the original line unchanged.
 func (s *WSServer) handleShellLauncherCommand(wconn *wsConn, req jsonrpcRequest) {
 	var params struct {
 		Destination string `json:"destination"`
@@ -59,14 +83,10 @@ func (s *WSServer) handleShellLauncherCommand(wconn *wsConn, req jsonrpcRequest)
 		return
 	}
 
-	// The launcher must be wired. Without it we cannot build a command; the
-	// renderer sends the original line unchanged.
-	if s.remoteLauncher == nil {
-		reason := "unsupported"
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(shellLauncherCommandResult{
-			Launcher: nil,
-			Reason:   &reason,
-		})))
+	// Both seams must be wired. Without either we cannot put a launcher
+	// where the shell can read it; the renderer sends the original line.
+	if s.remoteLauncher == nil || s.launcherStager == nil {
+		s.refuseLauncherCommand(wconn, req, "unsupported")
 		return
 	}
 
@@ -78,11 +98,7 @@ func (s *WSServer) handleShellLauncherCommand(wconn *wsConn, req jsonrpcRequest)
 		host, _ := splitUserHost(params.Destination)
 		hostCfg, err := s.sshConfigResolver.ResolveConfig(context.Background(), host)
 		if err == nil && hostCfg != nil && hostCfg.RemoteCommand != "" {
-			reason := "remote-command"
-			_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(shellLauncherCommandResult{
-				Launcher: nil,
-				Reason:   &reason,
-			})))
+			s.refuseLauncherCommand(wconn, req, "remote-command")
 			return
 		}
 	}
@@ -98,21 +114,36 @@ func (s *WSServer) handleShellLauncherCommand(wconn *wsConn, req jsonrpcRequest)
 		if refusal == "" {
 			refusal = "unsupported"
 		}
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(shellLauncherCommandResult{
-			Launcher: nil,
-			Reason:   &refusal,
-		})))
+		s.refuseLauncherCommand(wconn, req, refusal)
 		return
 	}
 
-	// Shell-quote the launcher so the renderer can safely append it as a
-	// single argument to the ssh command. Even though the launcher strings
-	// are built quote-free by construction, shellQuote is correct for any
-	// future payload change that introduces a quote.
-	quoted := shellQuote(launcher)
+	// Stage it. The renderer never sees the payload — only where to find
+	// it — because the payload cannot cross the tty (stage.go).
+	path, err := s.launcherStager.Stage(launcher)
+	if err != nil {
+		s.log.Warn("shell.launcherCommand: could not stage launcher", "error", err)
+		s.refuseLauncherCommand(wconn, req, "stage-failed")
+		return
+	}
+
+	// Shell-quote the path so the renderer can splice it into the line as
+	// a single word. The staging directory is ours and the names are
+	// generated, but a home directory with a quote or a space in it is an
+	// ordinary thing and must not break the rewrite.
+	quoted := shellQuote(path)
 	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(shellLauncherCommandResult{
-		Launcher: &quoted,
-		Reason:   nil,
+		LauncherPath: &quoted,
+		Reason:       nil,
+	})))
+}
+
+// refuseLauncherCommand answers with a stated refusal: no path, a reason the
+// renderer can log, and an original line that goes to the pty unchanged.
+func (s *WSServer) refuseLauncherCommand(wconn *wsConn, req jsonrpcRequest, reason string) {
+	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(shellLauncherCommandResult{
+		LauncherPath: nil,
+		Reason:       &reason,
 	})))
 }
 
@@ -128,10 +159,9 @@ func splitUserHost(dest string) (host, user string) {
 // shellQuote wraps s in single quotes, escaping embedded quotes with the
 // POSIX '\” idiom — the same function in internal/shellintegration. We
 // duplicate it here to avoid adding a dependency on shellintegration from
-// the transport for a 4-line function. The launcher strings are built
-// quote-free by construction, so this is usually the identity; the
-// duplication exists because integration-testing the two copies is cheaper
-// than importing a package for one function that almost never fires.
+// the transport for a 4-line function. What it quotes here is a filesystem
+// path, where an embedded quote is rare but entirely legal, so the escaper
+// is load-bearing rather than defensive.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

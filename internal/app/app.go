@@ -331,6 +331,13 @@ func New(opts ...Option) (*App, error) {
 		// the transport builds. Before this line the launcher was reachable
 		// from its own tests and nowhere else (AGENTS.md check 5).
 		transport.WithRemoteLauncher(&remoteLauncherAdapter{inner: shellintegration.NewRemoteLauncher(), logger: logger}),
+		// Launcher staging for the hand-typed-ssh rewrite (nocx-pu4.6).
+		// The launcher is ~35 KB and a typed line has only the tty, whose
+		// canonical buffer is 4096 bytes, so the payload goes to a private
+		// file and the renderer types the path. The home directory is
+		// known here and nowhere below: the transport must not pick a
+		// filesystem location of its own.
+		transport.WithLauncherStager(shellintegration.NewLauncherStager(logger, home)),
 		// The tunnel connector (nocx-8gix): *ssh.RealClient satisfies
 		// tunnel.Connector without an adapter — the signatures are
 		// identical — so a forward acquires its OWN pooled connection

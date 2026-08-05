@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
 	"github.com/shady2k/nocx/internal/completion"
@@ -1961,38 +1962,45 @@ func TestVaultUnlockRequest_OverTheWireConformsToContract(t *testing.T) {
 func TestShellLauncherCommand_DTOConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "shell.launcherCommand.schema.json")
 
-	// Populated: launcher returned, reason null.
-	launcher := "'/usr/bin/env -u BASH_ENV /bin/sh -c ...'"
+	// Populated: a staged path returned, reason null.
+	path := "'/home/u/.nocx/run/launcher-123456'"
 	raw, err := json.Marshal(shellLauncherCommandResult{
-		Launcher: &launcher,
-		Reason:   nil,
+		LauncherPath: &path,
+		Reason:       nil,
 	})
 	if err != nil {
 		t.Fatalf("marshal populated: %v", err)
 	}
 	validateJSON(t, schema, raw, "shell.launcherCommand DTO (populated)")
 
-	// Refused: launcher null, reason set.
-	reason := "remote-command"
-	raw, err = json.Marshal(shellLauncherCommandResult{
-		Launcher: nil,
-		Reason:   &reason,
-	})
-	if err != nil {
-		t.Fatalf("marshal refused: %v", err)
+	// Every refusal the handler can state must satisfy the schema's enum;
+	// a reason the renderer receives and the contract rejects is a refusal
+	// that reaches the product as a decode failure.
+	for _, reason := range []string{"remote-command", "unsupported", "stage-failed"} {
+		r := reason
+		raw, err = json.Marshal(shellLauncherCommandResult{
+			LauncherPath: nil,
+			Reason:       &r,
+		})
+		if err != nil {
+			t.Fatalf("marshal refused %s: %v", reason, err)
+		}
+		validateJSON(t, schema, raw, "shell.launcherCommand DTO (refused: "+reason+")")
 	}
-	validateJSON(t, schema, raw, "shell.launcherCommand DTO (refused)")
 }
 
-// OverTheWire: the real handler, the real RemoteLauncher — no fake, because
-// the launcher the renderer appends must be the launcher the product builds.
+// OverTheWire: the real handler, the real RemoteLauncher and the real stager —
+// no fake, because the bytes the far shell runs must be the bytes the product
+// builds, and the whole point of nocx-pu4.6 is WHERE they travel.
 func TestShellLauncherCommand_OverTheWireConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "shell.launcherCommand.schema.json")
 	ctx := context.Background()
 
+	home := t.TempDir()
 	ws := NewWSServer(
 		log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
 		WithRemoteLauncher(&realRemoteLauncher{}),
+		WithLauncherStager(shellintegration.NewLauncherStager(log.NewSlogAdapter(nil), home)),
 	)
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -2030,15 +2038,40 @@ func TestShellLauncherCommand_OverTheWireConformsToContract(t *testing.T) {
 	if err := json.Unmarshal(resp.Result, &got); err != nil {
 		t.Fatalf("decode shell.launcherCommand result: %v", err)
 	}
-	if got.Launcher == nil || *got.Launcher == "" {
-		t.Error("launcher is nil or empty; the real launcher must return a non-empty command")
+	if got.LauncherPath == nil || *got.LauncherPath == "" {
+		t.Fatal("launcherPath is nil or empty; the real launcher must be staged and named")
 	}
 	if got.Reason != nil {
-		t.Errorf("reason = %q, want nil when launcher is present", *got.Reason)
+		t.Errorf("reason = %q, want nil when a path is present", *got.Reason)
 	}
-	// The launcher is shell-quoted: it must start and end with single quotes.
-	if !strings.HasPrefix(*got.Launcher, "'") || !strings.HasSuffix(*got.Launcher, "'") {
-		t.Errorf("launcher not shell-quoted: %q", *got.Launcher)
+	// The path is shell-quoted: the renderer splices it into a shell line.
+	if !strings.HasPrefix(*got.LauncherPath, "'") || !strings.HasSuffix(*got.LauncherPath, "'") {
+		t.Errorf("launcherPath not shell-quoted: %q", *got.LauncherPath)
+	}
+
+	// The response carries a PATH, not a payload. This is the whole fix:
+	// the launcher is ~35 KB and the line the renderer types has only the
+	// tty, whose canonical buffer is 4096 bytes. A response that grew back
+	// into a payload would truncate on the wire into the shell again.
+	if n := len(resp.Result); n > 512 {
+		t.Errorf("result is %d bytes; shell.launcherCommand must return a path, not the launcher", n)
+	}
+
+	// And the file it names holds the real launcher, byte for byte.
+	staged := strings.Trim(*got.LauncherPath, "'")
+	body, err := os.ReadFile(staged) // #nosec G304 — path came from our own stager.
+	if err != nil {
+		t.Fatalf("read staged launcher at %s: %v", staged, err)
+	}
+	wantLauncher, _, ok := shellintegration.NewRemoteLauncher().StartCommand(
+		shellintegration.ShellAuto,
+		shellintegration.LaunchOptions{SessionID: opened.SessionID, Enhanced: true},
+	)
+	if !ok {
+		t.Fatal("the real RemoteLauncher refused ShellAuto")
+	}
+	if string(body) != wantLauncher {
+		t.Errorf("staged launcher differs from the product's: got %d bytes, want %d", len(body), len(wantLauncher))
 	}
 
 	// Unknown sessionId is refused (AD-7).
@@ -2057,8 +2090,8 @@ func TestShellLauncherCommand_OverTheWireConformsToContract(t *testing.T) {
 	}
 }
 
-// No launcher wired: the handler returns launcher null with reason "unsupported"
-// rather than an error. The renderer sends the original line unchanged.
+// No launcher wired: the handler returns launcherPath null with reason
+// "unsupported" rather than an error. The renderer sends the original line.
 func TestShellLauncherCommand_NotWiredReturnsNull(t *testing.T) {
 	ctx := context.Background()
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)))
@@ -2069,6 +2102,80 @@ func TestShellLauncherCommand_NotWiredReturnsNull(t *testing.T) {
 	conn := connectWS(t, ws)
 	defer func() { _ = conn.Close() }()
 
+	sid := openSessionForLauncher(t, conn)
+	got := launcherCommandCall(t, conn, sid, 2)
+	if got.LauncherPath != nil {
+		t.Errorf("launcherPath = %q, want nil when not wired", *got.LauncherPath)
+	}
+	if got.Reason == nil || *got.Reason != "unsupported" {
+		t.Errorf("reason = %v, want unsupported", got.Reason)
+	}
+}
+
+// The launcher builds but cannot be staged: without a place the LOCAL shell
+// can read, there is no rewrite to make. The handler says so rather than
+// returning a path that does not exist, and the renderer sends the line the
+// user typed (ADR-0004 §1). This is the failure path that did not exist
+// while the payload travelled inline.
+func TestShellLauncherCommand_StageFailureRefuses(t *testing.T) {
+	ctx := context.Background()
+
+	// A regular file where the staging directory must go.
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, ".nocx"), []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("write blocker: %v", err)
+	}
+
+	ws := NewWSServer(
+		log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithRemoteLauncher(&realRemoteLauncher{}),
+		WithLauncherStager(shellintegration.NewLauncherStager(log.NewSlogAdapter(nil), home)),
+	)
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	sid := openSessionForLauncher(t, conn)
+	got := launcherCommandCall(t, conn, sid, 2)
+	if got.LauncherPath != nil {
+		t.Errorf("launcherPath = %q, want nil when staging failed", *got.LauncherPath)
+	}
+	if got.Reason == nil || *got.Reason != "stage-failed" {
+		t.Errorf("reason = %v, want stage-failed", got.Reason)
+	}
+}
+
+// A stager without a launcher, and a launcher without a stager, are both
+// "we cannot build a rewrite" — neither may answer with a path.
+func TestShellLauncherCommand_StagerWithoutLauncherRefuses(t *testing.T) {
+	ctx := context.Background()
+	ws := NewWSServer(
+		log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithLauncherStager(shellintegration.NewLauncherStager(log.NewSlogAdapter(nil), t.TempDir())),
+	)
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	sid := openSessionForLauncher(t, conn)
+	got := launcherCommandCall(t, conn, sid, 2)
+	if got.LauncherPath != nil {
+		t.Errorf("launcherPath = %q, want nil without a launcher", *got.LauncherPath)
+	}
+	if got.Reason == nil || *got.Reason != "unsupported" {
+		t.Errorf("reason = %v, want unsupported", got.Reason)
+	}
+}
+
+// openSessionForLauncher opens a local session and returns its id.
+func openSessionForLauncher(t *testing.T, conn *websocket.Conn) string {
+	t.Helper()
 	openResp := vaultCall(t, conn, "open", map[string]any{
 		"cols": 80, "rows": 24, "xpixel": 0, "ypixel": 0,
 	}, 1)
@@ -2081,11 +2188,16 @@ func TestShellLauncherCommand_NotWiredReturnsNull(t *testing.T) {
 	if err := json.Unmarshal(openResp.Result, &opened); err != nil {
 		t.Fatalf("decode open result: %v", err)
 	}
+	return opened.SessionID
+}
 
+// launcherCommandCall makes one shell.launcherCommand call and decodes it.
+func launcherCommandCall(t *testing.T, conn *websocket.Conn, sid string, id int) shellLauncherCommandResult {
+	t.Helper()
 	resp := vaultCall(t, conn, "shell.launcherCommand", map[string]any{
 		"destination": "testhost",
-		"sessionId":   opened.SessionID,
-	}, 2)
+		"sessionId":   sid,
+	}, id)
 	if resp.Error != nil {
 		t.Fatalf("shell.launcherCommand: %+v", resp.Error)
 	}
@@ -2093,12 +2205,7 @@ func TestShellLauncherCommand_NotWiredReturnsNull(t *testing.T) {
 	if err := json.Unmarshal(resp.Result, &got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if got.Launcher != nil {
-		t.Errorf("launcher = %q, want nil when not wired", *got.Launcher)
-	}
-	if got.Reason == nil || *got.Reason != "unsupported" {
-		t.Errorf("reason = %v, want unsupported", got.Reason)
-	}
+	return got
 }
 
 // realRemoteLauncher is the production adapter in miniature: it returns

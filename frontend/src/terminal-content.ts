@@ -602,8 +602,12 @@ export class TerminalContent extends BaseTabContent {
                       sessionId: sid,
                     })
                     .then((result) => {
-                      if (result.launcher) {
-                        const rewritten = buildRewrite(doc, result.launcher)
+                      // A PATH, not the launcher: the launcher is ~35 KB and
+                      // this line has only the tty, whose canonical buffer is
+                      // 4096 bytes. The local shell reads the staged file and
+                      // hands the bytes to ssh through argv (nocx-pu4.6).
+                      if (result.launcherPath) {
+                        const rewritten = buildRewrite(doc, result.launcherPath)
                         if (rewritten) {
                           return {
                             sendLine: rewritten,

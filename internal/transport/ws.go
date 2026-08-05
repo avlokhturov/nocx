@@ -117,6 +117,12 @@ type WSServer struct {
 	// plain shell and report reason none.
 	remoteLauncher ssh.RemoteLauncher
 
+	// launcherStager puts a remote launcher where a LOCAL shell can read it,
+	// for the hand-typed-ssh rewrite (nocx-pu4.6). Wired through
+	// WithLauncherStager; when nil, shell.launcherCommand refuses and the
+	// renderer sends the line the user typed.
+	launcherStager LauncherStager
+
 	// localCompleter answers shell.complete for KindLocal sessions.
 	// When nil, the method returns a JSON-RPC error for local sessions.
 	localCompleter completion.Completer

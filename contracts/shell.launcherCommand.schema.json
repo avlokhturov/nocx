@@ -2,19 +2,19 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "shell.launcherCommand.schema.json",
   "title": "shell.launcherCommand result",
-  "description": "The remote launcher command for rewriting a hand-typed ssh invocation (nocx-pu4.6).",
+  "description": "Where the remote launcher was staged for rewriting a hand-typed ssh invocation (nocx-pu4.6). The launcher itself is ~35 KB and cannot cross the tty — a canonical line buffer is 4096 bytes — so the backend writes it to a private file and the renderer types only the path.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["launcher", "reason"],
+  "required": ["launcherPath", "reason"],
   "properties": {
-    "launcher": {
-      "description": "The shell-quoted remote launcher command, ready to append to an ssh command line. Null when the rewrite is refused.",
+    "launcherPath": {
+      "description": "The shell-quoted absolute path of the staged launcher file, ready to splice into a shell line the local shell reads with `$(cat …)`. Null when the rewrite is refused.",
       "type": ["string", "null"]
     },
     "reason": {
-      "description": "Why the rewrite was refused. Null when launcher is non-null. 'remote-command' when the destination's ssh config sets RemoteCommand. 'policy-off' when the shell integration policy is off. 'unsupported' when the launcher cannot build a command for this shell.",
+      "description": "Why the rewrite was refused. Null when launcherPath is non-null. 'remote-command' when the destination's ssh config sets RemoteCommand. 'unsupported' when the launcher cannot build a command for this shell. 'stage-failed' when the launcher could not be written where the local shell can read it.",
       "type": ["string", "null"],
-      "enum": [null, "remote-command", "unsupported"]
+      "enum": [null, "remote-command", "unsupported", "stage-failed"]
     }
   }
 }

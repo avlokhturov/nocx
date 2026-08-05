@@ -97,16 +97,35 @@ export function extractDestination(line: string): string {
 /**
  * Build the rewritten ssh command for nocxify (nocx-pu4.6).
  *
- * Inserts `-t` (force PTY allocation) after `ssh` if not already present
- * and appends the pre-quoted launcher as the final argument. Returns null
- * when the rewrite is refused — `-T` (explicit no-PTY) or a line we cannot
- * confidently parse means the original line is sent unchanged.
+ * The launcher does NOT travel in this line. It is ~35 KB — it carries the
+ * bash, zsh and POSIX tiers so the far login shell can pick its own — and a
+ * hand-typed ssh reaches the shell only through the tty, whose canonical line
+ * buffer is 4096 bytes (N_TTY_BUF_SIZE). The first version appended the
+ * payload inline and the terminal cut it mid-script; the shell then executed
+ * the fragments. So the backend stages the launcher in a private file and
+ * this line names the path:
  *
- * Fail-open is the invariant (ADR-0004 §1): anything uncertain about the
- * rewrite means return null. The launcher must already be shell-quoted
- * (single quotes with embedded-quote escaping) by the backend.
+ *     if [ -s '<path>' ]; then ssh -t <flags> <dest> "$(cat '<path>')"; else <original>; fi
+ *
+ * The LOCAL shell reads the file at execution time and hands the bytes to ssh
+ * through argv, which is bounded by ARG_MAX (~2 MB). Command-substitution
+ * output is never re-scanned for expansion, so the literal `"$0"` inside the
+ * dispatcher still reaches the FAR login shell unexpanded — which is how it
+ * learns which shell it is.
+ *
+ * `-t` is required: a remote command otherwise gets no pty.
+ *
+ * Fail-open is the invariant (ADR-0004 §1), and it is stated twice. Here:
+ * `-T` (explicit no-PTY) or a line we cannot confidently parse returns null
+ * and the original goes to the pty. And in the line itself: `[ -s … ]` means
+ * a staged file that is missing, empty or unreadable runs exactly what the
+ * user typed. The `else` branch is deliberately not `||` — chaining off the
+ * exit status would open a SECOND connection every time the integrated ssh
+ * exited non-zero.
+ *
+ * `launcherPath` must already be shell-quoted by the backend.
  */
-export function buildRewrite(line: string, launcher: string): string | null {
+export function buildRewrite(line: string, launcherPath: string): string | null {
   const trimmed = line.trim()
   const tokens = tokenize(trimmed)
 
@@ -126,12 +145,26 @@ export function buildRewrite(line: string, launcher: string): string | null {
   // and the destination. The tokenizer strips quotes; using the original
   // text keeps them intact.
   const afterSsh = trimmed.slice(tokens[0].length).trimStart()
+  const integrated = hasT ? `ssh ${afterSsh}` : `ssh -t ${afterSsh}`
 
-  if (hasT) {
-    return `ssh ${afterSsh} ${launcher}`
-  }
-  return `ssh -t ${afterSsh} ${launcher}`
+  const rewritten = `if [ -s ${launcherPath} ]; then ${integrated} "$(cat ${launcherPath})"; else ${trimmed}; fi`
+
+  // The ceiling this whole design exists to respect, enforced rather than
+  // assumed. The line carries two copies of the path, and a path can be
+  // PATH_MAX (4096) by itself, so "it is only a path, it must be short" is
+  // not a property. If it would not survive the line discipline there is no
+  // rewrite to make.
+  if (new TextEncoder().encode(rewritten).byteLength > MAX_CANONICAL_LINE) return null
+
+  return rewritten
 }
+
+/**
+ * The largest line a canonical-mode tty carries intact. The kernel's buffer
+ * is N_TTY_BUF_SIZE = 4096; measured on a real Linux pty, 4095 bytes on one
+ * line survive and 8000 already lose data, so the usable ceiling is 4095.
+ */
+const MAX_CANONICAL_LINE = 4095
 
 /** Split a shell command line into tokens, respecting single and double
  *  quotes. Does NOT handle all shell quoting — just enough to find the

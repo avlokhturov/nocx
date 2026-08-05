@@ -10,15 +10,15 @@
  */
 
 /**
- * The remote launcher command for rewriting a hand-typed ssh invocation (nocx-pu4.6).
+ * Where the remote launcher was staged for rewriting a hand-typed ssh invocation (nocx-pu4.6). The launcher itself is ~35 KB and cannot cross the tty — a canonical line buffer is 4096 bytes — so the backend writes it to a private file and the renderer types only the path.
  */
 export interface ShellLauncherCommandResult {
   /**
-   * The shell-quoted remote launcher command, ready to append to an ssh command line. Null when the rewrite is refused.
+   * The shell-quoted absolute path of the staged launcher file, ready to splice into a shell line the local shell reads with `$(cat …)`. Null when the rewrite is refused.
    */
-  launcher: string | null
+  launcherPath: string | null
   /**
-   * Why the rewrite was refused. Null when launcher is non-null. 'remote-command' when the destination's ssh config sets RemoteCommand. 'policy-off' when the shell integration policy is off. 'unsupported' when the launcher cannot build a command for this shell.
+   * Why the rewrite was refused. Null when launcherPath is non-null. 'remote-command' when the destination's ssh config sets RemoteCommand. 'unsupported' when the launcher cannot build a command for this shell. 'stage-failed' when the launcher could not be written where the local shell can read it.
    */
-  reason: null | 'remote-command' | 'unsupported'
+  reason: null | 'remote-command' | 'unsupported' | 'stage-failed'
 }
