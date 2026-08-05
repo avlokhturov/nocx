@@ -76,23 +76,33 @@ Having started, the launcher **publishes the bundle** (§4) before exec'ing the 
 shell, and names the committed generation in its passport (§5). Nothing is asked; no rc
 file is touched.
 
+The staged payload is consumed exactly once, so that the rewritten line sitting in the local
+shell's own history does not bootstrap again when it is recalled (`nocx-sxdd`). The removal
+must not become the branch's exit status — `ssh …; rm -f P` reports `rm`'s success and
+destroys the 255 that a dropped connection is supposed to deliver. It goes inside the
+substitution, where its status is discarded and the payload has already been read:
+
+```
+if [ -s '<path>' ]; then ssh -t <flags> <dest> "$(cat '<path>'; rm -f '<path>')"; else <typed line>; fi
+```
+
 ### 3.3 script — installed
 
-The bundle is committed on that host. The submitted line carries the guard itself, because
-**fail-open cannot live inside the file whose absence is the failure**:
+The bundle is committed on that host. **The guard travels to the far side**, because that is
+the only machine whose `~/.nocx` is the one in question — a local `[ -x ~/.nocx/launch ]`
+test would ask this machine about that host, and on a developer's box it answers about
+nocx's own local staging directory:
 
 ```
-if [ -x ~/.nocx/launch ]; then ssh -t pi@192.168.0.93 '~/.nocx/launch <environment-id>'; else ssh pi@192.168.0.93; fi
+ssh -t pi@192.168.0.93 'if [ -x "$HOME/.nocx/launch" ]; then exec "$HOME/.nocx/launch" <environment-id>; else exec "${SHELL:-/bin/sh}" -l; fi'
 ```
 
-That first test runs on the **local** machine and only proves we believed the host was
-installed; the authoritative check is on the far side. `~/.nocx/launch` is a 0700 POSIX `sh`
-script (§4 fixes the modes): it reads `manifest.json`, refuses an incomplete or
-protocol-incompatible generation, and in that case `exec`s a native login shell and emits
-**no** passport. No passport means no environment transition, which downgrades the session
+`~/.nocx/launch` is a 0700 POSIX `sh` script (§4 fixes the modes): it reads `manifest.json`,
+refuses an incomplete or protocol-incompatible generation, and in that case `exec`s a native
+login shell and emits **no** passport. The `else` above covers the case the file cannot cover
+— its own absence. No passport means no environment transition, which downgrades the session
 to raw and invalidates the local installed fact, so the next connection bootstraps again
-(§3.2). An `ssh` that fails with `127` is a bug in this design, never a user-visible
-outcome.
+(§3.2). An `ssh` that fails with `127` is a bug in this design, never a user-visible outcome.
 
 **Why not a bare `ssh pi@host`.** The activation has to reach the far shell somehow. An rc
 gate conditional on `NOCX_SHELL_INTEGRATION` is never activated, because OpenSSH does not
