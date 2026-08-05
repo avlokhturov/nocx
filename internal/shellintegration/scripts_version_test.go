@@ -39,6 +39,7 @@ func TestScriptVersionTracksScriptContent(t *testing.T) {
 		"8":  "ca89bf20e58c0a4669ecfb0754173ce721e436273b0b06549c7e0162e9b06dc8",
 		"9":  "26ee0a75cf83df3a773c97ee39265c96912629c4bcdb629edea51ba5bcc5529d",
 		"10": "17c0fdf278e54cd6fea16aed814b9c96b0daaff6e5d54c6ced03ebd93fc111aa",
+		"11": "85b6105438f141628de8a87ecf013c7fad3df8053c81bd7b65975d26405c6a72",
 	}
 
 	h := sha256.New()

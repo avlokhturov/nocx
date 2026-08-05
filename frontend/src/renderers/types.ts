@@ -1,4 +1,5 @@
 import type { ITheme } from '@xterm/xterm'
+import type { PassportDisposition } from '../environment-passport'
 
 // Renderer-agnostic terminal contract. The backend (PTY over WS) is renderer-
 // agnostic, so any VT frontend just needs to satisfy this small surface:
@@ -30,6 +31,10 @@ export type CwdCallback = (event: CwdEvent) => void
 export interface CommandMarker {
   kind: 'A' | 'B' | 'C' | 'D'
   exitCode?: number
+  // nocxEnv is the OSC 133 `nocx_env=<id>` parameter carried by a marker
+  // tagged by an identified environment (spec §5.2). Untagged markers carry
+  // none and still drive block boundaries exactly as before.
+  nocxEnv?: string
 }
 
 // CommandMarkerEvent enriches the OSC 133 marker with a cursor snapshot
@@ -88,10 +93,21 @@ export interface TerminalRenderer {
   // tooltip.
   onCwd(cb: CwdCallback): void
 
+  // onEnvironmentPassport registers a callback that fires for every OSC 636
+  // P readiness-passport disposition (accepted / duplicate / unexpected /
+  // ignored). Parse-and-report only: the caller decides what an accepted
+  // passport means (spec §5.2, §5.3).
+  onEnvironmentPassport(cb: (disposition: PassportDisposition) => void): void
+
+  // setExpectedEnvironmentId registers the environment id minted for the
+  // attempt in flight — before the line reaches the pty. Only a passport
+  // carrying exactly this id can be accepted; any other id is ignored.
+  setExpectedEnvironmentId(id: string | null): void
+
   // onCommandMarker registers a callback that fires when the shell emits
   // OSC 133 command boundary markers (A/B/C/D). The VT frontend parses the
-  // OSC sequence and extracts the marker kind and optional exit code.
-
+  // OSC sequence and extracts the marker kind, optional exit code and the
+  // nocx_env tag when the marker is tagged.
   onCommandMarker(cb: CommandMarkerCallback): void
 
   // onInBandReady registers a callback that fires when the shell emits the

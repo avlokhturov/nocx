@@ -294,8 +294,12 @@ func TestEnsureInstalled_RewritesOldVersion(t *testing.T) {
 // deciding its markers fails the map test below, and a bash script that
 // stops emitting C is a real defect, not a tolerated tier difference.
 var scriptMarkers = map[string][]string{
-	"shell-integration.bash":  {`\e]133;A`, `\e]133;B`, `\e]133;C`, `\e]133;D`},
-	"shell-integration.zsh":   {`\e]133;A`, `\e]133;B`, `\e]133;C`, `\e]133;D`},
+	// bash/zsh emit A, C and D through the __nocx_marker helper (the literal
+	// kind is chosen at the call site); B is the literal escape in PS1. The
+	// call sites are the tripwire: a script that stops emitting C is a real
+	// defect, not a tolerated tier difference.
+	"shell-integration.bash":  {`__nocx_marker A`, `\e]133;B`, `__nocx_marker C`, `__nocx_marker D`},
+	"shell-integration.zsh":   {`__nocx_marker A`, `\e]133;B`, `__nocx_marker C`, `__nocx_marker D`},
 	"shell-integration.posix": {`\033]133;A`, `\033]133;B`, `\033]133;D`},
 }
 
@@ -324,19 +328,16 @@ func TestScriptContent_ContainsMarkers(t *testing.T) {
 	}
 }
 
-// TestScriptMarkerExpectation_RejectsBashWithoutC pins the per-script
-// structure's teeth: a bash script that stopped emitting C must fail the
-// expectation even though the posix script legitimately lacks C.
 func TestScriptMarkerExpectation_RejectsBashWithoutC(t *testing.T) {
-	content := strings.ReplaceAll(bashScript, `\e]133;C`, "")
+	content := strings.ReplaceAll(bashScript, `__nocx_marker C`, "")
 	found := false
 	for _, m := range missingScriptMarkers("shell-integration.bash", content) {
-		if m == `\e]133;C` {
+		if m == `__nocx_marker C` {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("bash script without C not flagged as missing %q", `\e]133;C`)
+		t.Errorf("bash script without C not flagged as missing %q", `__nocx_marker C`)
 	}
 }
 
