@@ -4,6 +4,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { XtermRenderer } from './renderers/xterm'
+import { resolveSshProfileOverlay } from './quick-connect-assembly'
 import type { TerminalRenderer, MarkerAdapter } from './renderers/types'
 import { InputStateController } from './input-state'
 import { CommandEditor } from './editor'
@@ -40,6 +41,8 @@ import {
   planSsh,
   buildBootstrapRewrite,
   buildInstalledRewrite,
+  typedDestinationParts,
+  applyProfile,
 } from './ssh-transition'
 import type { SshPlan } from './ssh-transition'
 import type { ShellLauncherCommandResult } from './generated/shell.launcherCommand'
@@ -488,6 +491,24 @@ export class TerminalContent extends BaseTabContent {
 
   // ── The ssh environment boundary (nocx-mlm7 P9) ─────────────────────
 
+  /** Overlay the settings of the saved connection this line resolves to, when
+   *  exactly one does (nocx-pv3h): the key, the port and the jump host the
+   *  typed line does not spell. We offered that connection in the dropdown,
+   *  so honouring it here is what makes the offer mean something. Anything
+   *  that fails — no client, a listing error, no match, several matches —
+   *  returns the plan as parsed, which is the same line the user typed. */
+  private _withProfileOverlay(plan: SshPlan): SshPlan | Promise<SshPlan> {
+    const client = this.profileClient
+    if (!client) return plan
+    return client
+      .listProfiles()
+      .then((profiles) => {
+        const overlay = resolveSshProfileOverlay(profiles, typedDestinationParts(plan))
+        return overlay ? applyProfile(plan, overlay) : plan
+      })
+      .catch(() => plan)
+  }
+
   /** Turn the planner's answer into a pending rewrite, or null when the
    *  typed line must go out unchanged. A refused attempt (mode 'raw')
    *  registers nothing: no launcher runs, so no passport can arrive and
@@ -828,31 +849,43 @@ export class TerminalContent extends BaseTabContent {
                 if (transition.kind === 'plan') {
                   const sid = this.session?.sessionId
                   if (sid) {
-                    return this.client
-                      .call<ShellLauncherCommandResult>('shell.launcherCommand', {
-                        sessionId: sid,
-                        oracleArgv: transition.oracleArgv,
-                      })
-                      .then((result) => {
-                        const pending = this._buildPendingAttempt(transition, result, sid)
-                        if (pending) {
-                          this._pendingAttempt = pending
-                          return {
-                            sendLine: pending.sendLine,
-                            recordLine: doc,
-                            refs: [],
+                    // A destination the user saved as a connection carries
+                    // settings the typed line does not spell (nocx-pv3h): the
+                    // key, the port, the jump host. We offered that connection
+                    // in the dropdown, so honouring it here is what makes the
+                    // offer mean something. Typed flags always win, and no
+                    // match leaves the plan exactly as parsed.
+                    const run = (planned: SshPlan) =>
+                      this.client
+                        .call<ShellLauncherCommandResult>('shell.launcherCommand', {
+                          sessionId: sid,
+                          oracleArgv: planned.oracleArgv,
+                        })
+                        .then((result) => {
+                          const pending = this._buildPendingAttempt(planned, result, sid)
+                          if (pending) {
+                            this._pendingAttempt = pending
+                            return {
+                              sendLine: pending.sendLine,
+                              recordLine: doc,
+                              refs: [],
+                            }
                           }
-                        }
-                        // Refused (raw, remote-command, cannot build): send
-                        // the original line unchanged.
-                        return sync
-                      })
-                      .catch(() => {
-                        // RPC failure → original line, and no half-registered
-                        // attempt (fail-open).
-                        this._pendingAttempt = null
-                        return sync
-                      })
+                          // Refused (raw, remote-command, cannot build): send
+                          // the original line unchanged.
+                          return sync
+                        })
+                        .catch(() => {
+                          // RPC failure → original line, and no half-registered
+                          // attempt (fail-open).
+                          this._pendingAttempt = null
+                          return sync
+                        })
+                    // No profile client, no listing to wait for: the sync path
+                    // keeps its no-gap handoff (ADR-0004 §2) rather than paying
+                    // a microtask for an overlay that cannot exist.
+                    const overlaid = this._withProfileOverlay(transition)
+                    return overlaid instanceof Promise ? overlaid.then(run) : run(overlaid)
                   }
                 }
               }

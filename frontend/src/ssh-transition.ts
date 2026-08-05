@@ -1,3 +1,5 @@
+import type { SshProfileOverlay } from './quick-connect-assembly'
+
 /**
  * Recognise simple interactive SSH transitions from the command line and
  * produce a typed plan for the backend (nocx-atyf.3, nocx-c5az, nocx-sxdd).
@@ -68,6 +70,11 @@ export interface SshPlan {
    *  typed; getopt parses clusters and attached values identically to the
    *  real ssh. */
   oracleArgv: string[]
+  /** Profile-sourced option words to splice into the REWRITTEN ssh
+   *  invocation only — never into oracleArgv (the oracle sees exactly what
+   *  the user typed) and never into the fail-open else branch (ADR-0004).
+   *  Present only after applyProfile matched a saved profile. */
+  profileFlags?: string[]
 }
 
 export interface SshRefusal {
@@ -226,6 +233,82 @@ export function planSsh(line: string, environmentDepth: number): SshTransition {
   oracleArgv.push(destination)
 
   return { kind: 'plan', typedLine: trimmed, destination, options, oracleArgv }
+}
+
+/**
+ * The destination a plan actually spells, for the saved-profile match
+ * (resolveSshProfileOverlay): the host part of the positional, plus the
+ * operative user. A typed -l is the operative user over a `user@` prefix —
+ * OpenSSH consumes options before the positional, so `ssh -l alice
+ * root@host` resolves user alice (measured against a real ssh -G); a -l
+ * typed after the destination is ignored by OpenSSH and counted here anyway,
+ * which only over-conservatively widens the match — the safe direction.
+ */
+export function typedDestinationParts(plan: SshPlan): { host: string; user?: string } {
+  const at = plan.destination.lastIndexOf('@')
+  const host = at >= 0 ? plan.destination.slice(at + 1) : plan.destination
+  let user =
+    at >= 0 && plan.destination.slice(0, at) !== '' ? plan.destination.slice(0, at) : undefined
+  for (const opt of plan.options) {
+    if (opt.letter === 'l' && opt.value !== null && opt.value !== '') user = opt.value
+  }
+  return user !== undefined ? { host, user } : { host }
+}
+
+/** The value-taking letters the typed line already carries — the profile
+ *  loses to each of these, exactly ("what the user typed always wins"). */
+function typedValueLetters(plan: SshPlan): Set<string> {
+  const letters = new Set<string>()
+  for (const opt of plan.options) {
+    if (
+      opt.value !== null &&
+      (opt.letter === 'l' || opt.letter === 'p' || opt.letter === 'i' || opt.letter === 'J')
+    ) {
+      letters.add(opt.letter)
+    }
+  }
+  return letters
+}
+
+/**
+ * Merge a saved profile's settings into an accepted plan (nocx-typed-ssh-
+ * profile): the profile's user, port, key path and jump host become -l -p -i
+ * -J words in the REWRITTEN ssh invocation, in that fixed order. The typed
+ * line wins everywhere — a typed -l/-p/-i/-J is never overridden — and the
+ * plan's typedLine, destination and oracleArgv are untouched, so the `ssh -G`
+ * oracle still answers about exactly what the user typed (ADR-0015 narrowed)
+ * and the fail-open else branch still runs the typed bytes (ADR-0004). All
+ * four flags are value options P4 already understands; no new refusal can
+ * appear from a profile. A profile with nothing to contribute returns the
+ * plan unchanged.
+ */
+export function applyProfile(plan: SshPlan, overlay: SshProfileOverlay): SshPlan {
+  const typed = typedValueLetters(plan)
+  const flags: string[] = []
+  if (
+    overlay.user !== undefined &&
+    overlay.user !== '' &&
+    !typed.has('l') &&
+    !plan.destination.includes('@')
+  ) {
+    flags.push('-l', overlay.user)
+  }
+  if (
+    overlay.port !== undefined &&
+    Number.isInteger(overlay.port) &&
+    overlay.port > 0 &&
+    !typed.has('p')
+  ) {
+    flags.push('-p', String(overlay.port))
+  }
+  if (overlay.keyPath !== undefined && overlay.keyPath !== '' && !typed.has('i')) {
+    flags.push('-i', overlay.keyPath)
+  }
+  if (overlay.jumpHost !== undefined && overlay.jumpHost !== '' && !typed.has('J')) {
+    flags.push('-J', overlay.jumpHost)
+  }
+  if (flags.length === 0) return plan
+  return { ...plan, profileFlags: flags }
 }
 
 interface ParsedArgs {
@@ -454,10 +537,28 @@ function rawAfterSsh(plan: SshPlan): string {
   return plan.typedLine.slice('ssh'.length).trimStart()
 }
 
-/** `ssh -t <raw>` unless the user already asked for a pty (-t, -tt, …). */
+/** `ssh -t <raw>` unless the user already asked for a pty (-t, -tt, …);
+ *  profile-sourced flags (applyProfile) ride between the head and the typed
+ *  tail, each quoted so the local shell re-parses it as one argv element. */
 function integratedSsh(plan: SshPlan, raw: string): string {
   const hasT = plan.options.some((o) => /^-t+$/.test(o.token))
-  return hasT ? `ssh ${raw}` : `ssh -t ${raw}`
+  const flags = profileFlagsLine(plan)
+  return hasT ? `ssh ${flags}${raw}` : `ssh -t ${flags}${raw}`
+}
+
+/** The profile-sourced flags as quoted shell words, trailing space when
+ *  present, so they splice between the head and the typed tail. */
+function profileFlagsLine(plan: SshPlan): string {
+  if (plan.profileFlags === undefined || plan.profileFlags.length === 0) return ''
+  return plan.profileFlags.map(shellQuote).join(' ') + ' '
+}
+
+/** POSIX single-quote wrapping for one argv word — the same idiom the
+ *  backend launcher path uses (internal/transport shellQuote). A value from
+ *  a profile is programmatic data, not user-typed shell text, so it must be
+ *  quoted before the local shell re-parses the wrapper. */
+function shellQuote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`
 }
 
 /**

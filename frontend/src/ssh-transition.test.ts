@@ -24,9 +24,14 @@ import {
   planSsh,
   buildBootstrapRewrite,
   buildInstalledRewrite,
+  applyProfile,
+  typedDestinationParts,
   type SshPlan,
   type SshRefusalReason,
 } from './ssh-transition'
+import { resolveSshProfileOverlay } from './quick-connect-assembly'
+import type { SshProfileOverlay } from './quick-connect-assembly'
+import type { SSHProfile } from './profiles'
 
 describe('planSsh — refusal table, a case per reason and a paired acceptance', () => {
   /** Assert the line is refused with exactly this reason. */
@@ -524,6 +529,95 @@ describe('buildInstalledRewrite (nocx-nl6q §3.3 compact installed form)', () =>
   })
 })
 
+describe('typedDestinationParts — the spelled destination the profile match keys on', () => {
+  const parts = (line: string) => typedDestinationParts(planSsh(line, 0) as SshPlan)
+
+  it('splits user@host and keeps a bare host whole', () => {
+    expect(parts('ssh root@prod')).toEqual({ host: 'prod', user: 'root' })
+    expect(parts('ssh prod')).toEqual({ host: 'prod' })
+  })
+
+  it('a typed -l is the operative user — OpenSSH consumes options before the positional (measured: ssh -G -l alice root@host resolves user alice)', () => {
+    expect(parts('ssh -l bob prod')).toEqual({ host: 'prod', user: 'bob' })
+    expect(parts('ssh -l bob root@prod')).toEqual({ host: 'prod', user: 'bob' })
+  })
+
+  it('an IPv6 destination with a zone survives whole', () => {
+    expect(parts('ssh user@[fe80::1]%eth0')).toEqual({ host: '[fe80::1]%eth0', user: 'user' })
+  })
+})
+
+describe("applyProfile — the saved profile's settings reach the plan, typed always wins", () => {
+  const overlay = (over: Partial<SshProfileOverlay> = {}): SshProfileOverlay => ({
+    profileId: 'p1',
+    identity: 'root@prod:2222',
+    user: 'root',
+    port: 2222,
+    keyPath: '~/.ssh/prod',
+    jumpHost: 'root@bastion:2200',
+    ...over,
+  })
+  const plan = (line: string) => planSsh(line, 0) as SshPlan
+
+  it('adds -l -p -i -J in that fixed order when the line spells none of them', () => {
+    expect(applyProfile(plan('ssh prod'), overlay()).profileFlags).toEqual([
+      '-l',
+      'root',
+      '-p',
+      '2222',
+      '-i',
+      '~/.ssh/prod',
+      '-J',
+      'root@bastion:2200',
+    ])
+  })
+
+  it('a user in the destination suppresses the profile user', () => {
+    expect(applyProfile(plan('ssh root@prod'), overlay()).profileFlags).toEqual([
+      '-p',
+      '2222',
+      '-i',
+      '~/.ssh/prod',
+      '-J',
+      'root@bastion:2200',
+    ])
+  })
+
+  it('a typed -l suppresses the profile user', () => {
+    expect(applyProfile(plan('ssh -l bob prod'), overlay()).profileFlags).not.toContain('-l')
+  })
+
+  it('a typed -p beats the profile port', () => {
+    const out = applyProfile(plan('ssh -p 2223 prod'), overlay())
+    expect(out.profileFlags).toEqual(['-l', 'root', '-i', '~/.ssh/prod', '-J', 'root@bastion:2200'])
+    expect(out.profileFlags).not.toContain('2222')
+  })
+
+  it('a typed -i beats the profile key', () => {
+    expect(applyProfile(plan('ssh -i /keys/other prod'), overlay()).profileFlags).not.toContain(
+      '-i',
+    )
+  })
+
+  it('a typed -J beats the profile jump', () => {
+    expect(applyProfile(plan('ssh -J other prod'), overlay()).profileFlags).not.toContain('-J')
+  })
+
+  it('an overlay with nothing to contribute leaves the plan untouched', () => {
+    const p = plan('ssh prod')
+    expect(applyProfile(p, { profileId: 'p1', identity: 'prod:22' })).toBe(p)
+    expect(p.profileFlags).toBeUndefined()
+  })
+
+  it('never touches oracleArgv, typedLine or the destination — the oracle sees only the typed argv', () => {
+    const p = plan('ssh -p 2223 root@prod')
+    const out = applyProfile(p, overlay())
+    expect(out.oracleArgv).toEqual(['ssh', '-G', '-p', '2223', 'root@prod'])
+    expect(out.typedLine).toBe('ssh -p 2223 root@prod')
+    expect(out.destination).toBe('root@prod')
+  })
+})
+
 describe('the generated wrapper, executed (real shell + fake ssh that records argv)', () => {
   // @ts-expect-error — @types/node not installed; vitest resolves at runtime
   const proc = process as unknown as { env: Record<string, string | undefined> }
@@ -708,6 +802,196 @@ describe('the generated wrapper, executed (real shell + fake ssh that records ar
       const shellLog = join(h.dir, 'shell.log')
       h.run(wrapper, { exec: true, execLog: shellLog, home: bareHome, shell: shellRecorder })
       expect(readArgv(shellLog)).toEqual([shellRecorder, '-l'])
+    } finally {
+      h.cleanup()
+    }
+  })
+
+  it("a saved profile's settings reach the rewritten argv — -i -p -J, with the fail-open else branch untouched", () => {
+    const h = fakeSshHarness()
+    try {
+      const profiles: SSHProfile[] = [
+        {
+          id: 'p1',
+          type: 'ssh',
+          name: 'Prod',
+          options: {
+            host: 'prod',
+            user: 'root',
+            port: 2222,
+            keyPath: '~/.ssh/prod',
+            jumpHost: 'bastion',
+          },
+        },
+        {
+          id: 'j1',
+          type: 'ssh',
+          name: 'bastion',
+          options: { host: 'bastion.example.com', user: 'root', port: 2200 },
+        },
+      ]
+      const plan = planSsh('ssh root@prod', 0) as SshPlan
+      const overlay = resolveSshProfileOverlay(profiles, typedDestinationParts(plan))
+      expect(overlay).not.toBeNull()
+      const enriched = applyProfile(plan, overlay!)
+      const launcherFile = join(h.dir, 'launcher-1')
+      writeFileSync(launcherFile, 'LAUNCHER_PAYLOAD')
+      const wrapper = buildBootstrapRewrite(enriched, `'${launcherFile}'`)!
+
+      // First execution: the profile's port, key and jump (resolved through
+      // the jump profile it names) ride in the rewritten ssh argv.
+      expect(h.run(wrapper)).toEqual([
+        'ssh',
+        '-t',
+        '-p',
+        '2222',
+        '-i',
+        '~/.ssh/prod',
+        '-J',
+        'root@bastion.example.com:2200',
+        'root@prod',
+        'LAUNCHER_PAYLOAD',
+      ])
+
+      // The fail-open else branch stays the exact typed line (ADR-0004): a
+      // recalled line runs byte-for-byte what the user typed.
+      expect(h.run(wrapper)).toEqual(['ssh', 'root@prod'])
+    } finally {
+      h.cleanup()
+    }
+  })
+
+  it('a typed flag beats the profile — -p 2223 stays, the profile port never appears', () => {
+    const h = fakeSshHarness()
+    try {
+      const profiles: SSHProfile[] = [
+        {
+          id: 'p1',
+          type: 'ssh',
+          name: 'Prod',
+          options: { host: 'prod', port: 2222, keyPath: '~/.ssh/prod' },
+        },
+      ]
+      const plan = planSsh('ssh -p 2223 root@prod', 0) as SshPlan
+      const overlay = resolveSshProfileOverlay(profiles, typedDestinationParts(plan))
+      expect(overlay).not.toBeNull()
+      const enriched = applyProfile(plan, overlay!)
+      const launcherFile = join(h.dir, 'launcher-1')
+      writeFileSync(launcherFile, 'LAUNCHER_PAYLOAD')
+      const wrapper = buildBootstrapRewrite(enriched, `'${launcherFile}'`)!
+      const argv = h.run(wrapper)
+      expect(argv).toEqual([
+        'ssh',
+        '-t',
+        '-i',
+        '~/.ssh/prod',
+        '-p',
+        '2223',
+        'root@prod',
+        'LAUNCHER_PAYLOAD',
+      ])
+      expect(argv).not.toContain('2222')
+    } finally {
+      h.cleanup()
+    }
+  })
+
+  it('no matching profile — the argv is exactly what the user typed, and the plan carries no profile flags', () => {
+    const h = fakeSshHarness()
+    try {
+      const plan = planSsh('ssh root@prod', 0) as SshPlan
+      const overlay = resolveSshProfileOverlay([], typedDestinationParts(plan))
+      expect(overlay).toBeNull()
+      expect(plan.profileFlags).toBeUndefined()
+      const launcherFile = join(h.dir, 'launcher-1')
+      writeFileSync(launcherFile, 'LAUNCHER_PAYLOAD')
+      const wrapper = buildBootstrapRewrite(plan, `'${launcherFile}'`)!
+      expect(h.run(wrapper)).toEqual(['ssh', '-t', 'root@prod', 'LAUNCHER_PAYLOAD'])
+    } finally {
+      h.cleanup()
+    }
+  })
+
+  it('the installed form carries the profile flags too', () => {
+    const h = fakeSshHarness()
+    try {
+      const profiles: SSHProfile[] = [
+        {
+          id: 'p1',
+          type: 'ssh',
+          name: 'Prod',
+          options: { host: 'prod', port: 2222, keyPath: '~/.ssh/prod' },
+        },
+      ]
+      const plan = planSsh('ssh root@prod', 0) as SshPlan
+      const overlay = resolveSshProfileOverlay(profiles, typedDestinationParts(plan))
+      const enriched = applyProfile(plan, overlay!)
+      const wrapper = buildInstalledRewrite(enriched, 'abc-123')!
+      const remote =
+        'if [ -x "$HOME/.nocx/launch" ]; then exec "$HOME/.nocx/launch" abc-123; else exec "${SHELL:-/bin/sh}" -l; fi'
+      expect(h.run(wrapper)).toEqual([
+        'ssh',
+        '-t',
+        '-p',
+        '2222',
+        '-i',
+        '~/.ssh/prod',
+        'root@prod',
+        remote,
+      ])
+    } finally {
+      h.cleanup()
+    }
+  })
+
+  it('a password-auth profile contributes no key and no password material — OpenSSH takes no password non-interactively', () => {
+    const h = fakeSshHarness()
+    try {
+      const profiles: SSHProfile[] = [
+        {
+          id: 'p1',
+          type: 'ssh',
+          name: 'Prod',
+          options: { host: 'prod', user: 'root', port: 2222, auth: 'password' },
+        },
+      ]
+      const plan = planSsh('ssh root@prod', 0) as SshPlan
+      const overlay = resolveSshProfileOverlay(profiles, typedDestinationParts(plan))
+      const enriched = applyProfile(plan, overlay!)
+      const launcherFile = join(h.dir, 'launcher-1')
+      writeFileSync(launcherFile, 'LAUNCHER_PAYLOAD')
+      const wrapper = buildBootstrapRewrite(enriched, `'${launcherFile}'`)!
+      expect(h.run(wrapper)).toEqual(['ssh', '-t', '-p', '2222', 'root@prod', 'LAUNCHER_PAYLOAD'])
+    } finally {
+      h.cleanup()
+    }
+  })
+
+  it('a key path containing a space survives the wrapper as one argv element', () => {
+    const h = fakeSshHarness()
+    try {
+      const profiles: SSHProfile[] = [
+        {
+          id: 'p1',
+          type: 'ssh',
+          name: 'Prod',
+          options: { host: 'prod', keyPath: '/Users/dev/My Keys/prod' },
+        },
+      ]
+      const plan = planSsh('ssh prod', 0) as SshPlan
+      const overlay = resolveSshProfileOverlay(profiles, typedDestinationParts(plan))
+      const enriched = applyProfile(plan, overlay!)
+      const launcherFile = join(h.dir, 'launcher-1')
+      writeFileSync(launcherFile, 'LAUNCHER_PAYLOAD')
+      const wrapper = buildBootstrapRewrite(enriched, `'${launcherFile}'`)!
+      expect(h.run(wrapper)).toEqual([
+        'ssh',
+        '-t',
+        '-i',
+        '/Users/dev/My Keys/prod',
+        'prod',
+        'LAUNCHER_PAYLOAD',
+      ])
     } finally {
       h.cleanup()
     }

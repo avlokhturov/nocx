@@ -2205,7 +2205,10 @@ describe('connection offer on ssh block (nocx-pu4.7)', () => {
           cancelable: true,
         }),
       )
-      for (let i = 0; i < 5; i++) await Promise.resolve()
+      // Submit drains one hop further when a profile client is wired: the
+      // saved-connection overlay lists profiles before the launcher call
+      // (nocx-pv3h). Without a client the path stays synchronous.
+      for (let i = 0; i < 8; i++) await Promise.resolve()
 
       const renderer = rendererOf(content)
       // Entry freezes the ssh block (passport → tagged A → B), and the
@@ -2365,7 +2368,9 @@ describe('connection offer on ssh block (nocx-pu4.7)', () => {
           cancelable: true,
         }),
       )
-      for (let i = 0; i < 5; i++) await Promise.resolve()
+      // One hop further with a profile client wired — see the note in the
+      // sibling test (nocx-pv3h).
+      for (let i = 0; i < 8; i++) await Promise.resolve()
 
       const renderer = rendererOf(content)
       enterEnvironment(renderer, 'env-ab12')
