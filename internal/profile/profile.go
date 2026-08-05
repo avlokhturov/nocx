@@ -495,6 +495,7 @@ var allowedFields = map[string]bool{
 	"agentForward":         true,
 	"portDiscovery":        true,
 	"desiredMode":          true,
+	"auth":                 true,
 	"behaviorOnSessionEnd": true,
 }
 

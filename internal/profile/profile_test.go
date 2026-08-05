@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -739,5 +740,92 @@ func TestSaveGroupRejectsUnknownDefaultKeys(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "someOldKey") {
 		t.Errorf("error should name the unknown key, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// nocx-jb20.6: "auth" must be an allowed group-defaults key
+// ---------------------------------------------------------------------------
+
+func TestProfileDefaultsAuthAllowedAndRoundTrips(t *testing.T) {
+	// "auth" is a real inheritable SparseSSHOptions field (json:"auth,omitempty")
+	// that applySparseLayer merges. allowedFields must list it, or
+	// UnmarshalJSON records it as unknown and Validate rejects the group.
+	data := []byte(`{"auth":"publicKey","port":2222}`)
+	var d ProfileDefaults
+	if err := d.UnmarshalJSON(data); err != nil {
+		t.Fatalf("UnmarshalJSON: %v", err)
+	}
+	if keys := d.UnknownKeys(); len(keys) != 0 {
+		t.Fatalf("auth should be a known key, got unknown keys: %v", keys)
+	}
+	if err := d.Validate(); err != nil {
+		t.Fatalf("Validate should accept auth, got: %v", err)
+	}
+	if d.Auth == nil || *d.Auth != AuthPublicKey {
+		t.Fatalf("Auth = %v, want publicKey", d.Auth)
+	}
+}
+
+func TestGroupAuthDefaultRoundTripsThroughCreateUpdateApply(t *testing.T) {
+	store := NewJSONStore(filepath.Join(t.TempDir(), "p.json"))
+
+	auth := AuthPublicKey
+	g := ProfileGroup{
+		ID:   "g1",
+		Name: "Prod",
+		Defaults: &ProfileDefaults{
+			SparseSSHOptions: SparseSSHOptions{Auth: &auth},
+		},
+	}
+
+	if err := store.CreateGroup(g); err != nil {
+		t.Fatalf("CreateGroup with auth default: %v", err)
+	}
+
+	// Update with a different auth value.
+	password := AuthPassword
+	g.Defaults.Auth = &password
+	if err := store.UpdateGroup(g); err != nil {
+		t.Fatalf("UpdateGroup with auth default: %v", err)
+	}
+
+	// Reload from disk and confirm the value survived the round trip.
+	loaded, err := store.LoadGroups()
+	if err != nil {
+		t.Fatalf("LoadGroups: %v", err)
+	}
+	if len(loaded) != 1 || loaded[0].ID != "g1" {
+		t.Fatalf("LoadGroups = %+v, want 1 group (g1)", loaded)
+	}
+	if loaded[0].Defaults == nil || loaded[0].Defaults.Auth == nil {
+		t.Fatal("reloaded group auth default is nil")
+	}
+	if *loaded[0].Defaults.Auth != AuthPassword {
+		t.Errorf("reloaded auth = %q, want %q", *loaded[0].Defaults.Auth, AuthPassword)
+	}
+
+	// ApplyGroups must also accept the auth default.
+	if err := store.ApplyGroups([]ProfileGroup{g}); err != nil {
+		t.Fatalf("ApplyGroups with auth default: %v", err)
+	}
+}
+
+func TestAllowedDefaultKeysMatchesSparseSSHOptionsTags(t *testing.T) {
+	// A drift guard: every json field tag on SparseSSHOptions must appear in
+	// allowedFields, so the next field added to the sparse struct cannot fall
+	// out of the allow-list the way "auth" did.
+	var s SparseSSHOptions
+	rt := reflect.TypeOf(s)
+	for i := range rt.NumField() {
+		f := rt.Field(i)
+		tag := f.Tag.Get("json")
+		name := strings.Split(tag, ",")[0]
+		if name == "" || name == "-" {
+			continue
+		}
+		if !allowedFields[name] {
+			t.Errorf("SparseSSHOptions field %q (json:%q) is missing from allowedFields", f.Name, name)
+		}
 	}
 }
