@@ -57,7 +57,7 @@ import type { WSClient, SessionHandle } from './ipc'
 import { showConfirm } from './ui/dialog'
 import { hasOpenOverlays } from './ui/overlay/stack'
 import { BaseTabContent, type TabHost, type ContentViewport } from './tab-content'
-import { type ProfileClient, type SSHAliasEntry } from './profiles'
+import { type ProfileClient } from './profiles'
 import { RpcError } from './dispatcher'
 import { FloatingPanel } from './ui/floating-panel'
 import { ShellClient } from './shell-client'
@@ -266,10 +266,6 @@ export class TerminalContent extends BaseTabContent {
   /** Timestamp until which incoming data is the echo of a resize we sent. */
   private echoUntil = 0
   private host: TabHost | null = null
-  /** Whether the editor currently owns DOM keyboard input (owned from input-state). */
-  private _editorOwned = false
-  /** In-flight alias-fetch counter — generation for stale-request gating. */
-  private _aliasFetchId = 0
 
   // ── Capability rail (nocx-mlm7) ────────────────────────────────────
   /** The resolved destination mode from the open ack (raw|script|relay):
@@ -374,8 +370,9 @@ export class TerminalContent extends BaseTabContent {
     private readonly clipboard: ClipboardAccess,
     private readonly gate: ClipboardGate,
     private readonly banner: ClipboardBanner,
-    /** Live SSH config alias source for the editor hint (w7-hint). Null when
-     *  unavailable (tests, raw-mode-only contexts). */
+    /** The profile/alias source for the completion host provider and the
+     *  connection-offer flows. Null when unavailable (tests, raw-mode-only
+     *  contexts). */
     private readonly profileClient: ProfileClient | null,
     private readonly onTooltipChange: (tooltip: string) => void,
     private readonly sshOpts?: {
@@ -974,11 +971,9 @@ export class TerminalContent extends BaseTabContent {
           // transcript where it belongs — just above the editor — instead of
           // letting it slide underneath.
           resized: () => this.scrollback?.scrollToBottom(),
-          /** Detect `ssh <partial>` pattern and show matching aliases, and
-           *  drive the vault surfaces (the candidate's detection, the
-           *  picker's passive filter). */
+          /** Drive the completion and vault surfaces (the candidate's
+           *  detection, the picker's passive filter). */
           onInputChange: (text) => {
-            this._onEditorInput(text)
             // A keystroke aborts the completion query in flight and starts a
             // fresh one (design §8.9.2); the ghost text re-anchors.
             this.completion?.onDocChanged()
@@ -996,8 +991,6 @@ export class TerminalContent extends BaseTabContent {
             this.completion?.dismiss()
             this.promptVault?.onSecretPicker(triggerPos)
           },
-          /** Hint acceptance — no cache to invalidate. */
-          onAcceptHint: () => {},
           /** Up on the first line (or an empty draft): no further caret
            *  movement, so open the recall overlay (design §8.10 v6). */
           onUpAtTop: () => {
@@ -1233,7 +1226,6 @@ export class TerminalContent extends BaseTabContent {
       })
       this.inputState.onChange((m) => {
         console.debug('nocx: input-state', m.state, 'trusted=', m.trusted, 'owned=', m.owned)
-        this._editorOwned = m.owned
         // The location chip follows the machine's trust on EVERY transition,
         // including while the editor is hidden: when markers stop, no later
         // render may retain the last trusted host (design §8.2).
@@ -2186,63 +2178,6 @@ export class TerminalContent extends BaseTabContent {
   private _disposeAllMarkers(): void {
     for (const m of this._markers.values()) m.dispose()
     this._markers.clear()
-  }
-
-  // ── SSH alias hint support (w7-hint) ─────────────────────────────────
-
-  /** Called on every textarea input change. Detects `ssh <partial>` commands
-   *  and fetches matching aliases from the live ~/.ssh/config source.
-   *  No client-side caching — every activation fetches fresh (coordinator contract). */
-  private _onEditorInput(text: string): void {
-    // Only when the editor owns keyboard input (PROMPT_READY with owned=true).
-    if (!this._editorOwned || !this.profileClient) {
-      this.editor?.hideAliasHints()
-      return
-    }
-
-    // Detect `ssh <partial>` at the start of the line (possibly after whitespace).
-    const trimmed = text.trimStart()
-    const match = trimmed.match(/^ssh\s+(\S*)/)
-    if (!match) {
-      this.editor?.hideAliasHints()
-      return
-    }
-
-    const partial = match[1]
-    const fetchId = ++this._aliasFetchId
-
-    // Fetch fresh aliases on every activation. Guard against stale responses
-    // with a generation counter: a newer fetch invalidates an older one.
-    this.profileClient
-      .listSSHAliases()
-      .then((resp) => {
-        if (fetchId !== this._aliasFetchId) return // stale — newer text superseded this
-        if (resp.unavailable) {
-          this.editor?.hideAliasHints()
-          return
-        }
-        const filtered = this._filterAliases(resp.aliases, partial)
-        this.editor?.showAliasHints(filtered)
-      })
-      .catch(() => {
-        // Fetch failed (network, backend down). Silently hide hints — the
-        // feature degrades transparently rather than showing stale/flaky data.
-        this.editor?.hideAliasHints()
-      })
-  }
-
-  /** Filter SSH config aliases by case-insensitive prefix match.
-   *  Excludes wildcard patterns (Host * etc. are rules, not targets). */
-  private _filterAliases(aliases: SSHAliasEntry[], partial: string): SSHAliasEntry[] {
-    const lower = partial.toLowerCase()
-    return aliases.filter(
-      // No wildcard filter here on purpose. sshConfig.aliases already excludes
-      // patterns on the backend (internal/ssh/aliases.go, containsWildcard),
-      // and a second copy of that rule in the renderer is a rule that drifts —
-      // the two versions of it disagreed on '!' and on brackets before this
-      // line was removed.
-      (a) => a.alias.toLowerCase().startsWith(lower),
-    )
   }
 
   // ── the after-submit receipt (ADR-0021, the receipt round) ──────────────

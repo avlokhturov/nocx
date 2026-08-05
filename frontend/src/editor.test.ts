@@ -10,7 +10,7 @@
 // (`viewOf` — the same transaction a mouse drag produces) and dispatch
 // keydown/mouseup on the view's contentDOM (where real events land). Almost
 // every outcome is then observed through the public callbacks — submit,
-// cancel, onInputChange, resized, onAcceptHint, focus,
+// cancel, onInputChange, resized, focus,
 // visibility. The document is read back directly in exactly three places
 // where no public channel exists and the assertion is state integrity
 // (cleared after a throwing submit; untouched by a no-op Ctrl-C).
@@ -486,129 +486,6 @@ describe('CommandEditor', () => {
   })
 })
 
-describe('alias hints', () => {
-  const HINT_ITEMS = [
-    { alias: 'prod-db', hostName: '10.0.0.1', user: 'deploy' },
-    { alias: 'prod-web', hostName: 'web.example.com', port: 2222 },
-    { alias: 'staging-db', hostName: 'staging.example.com' },
-  ]
-
-  const hintEl = (container: HTMLElement) =>
-    container.querySelector('.nocx-editor-hint') as HTMLElement
-
-  it('showAliasHints renders items; hideAliasHints clears them', () => {
-    const { ed, container } = setup()
-    expect(hintEl(container).style.display).toBe('none')
-
-    ed.showAliasHints(HINT_ITEMS)
-    expect(hintEl(container).style.display).not.toBe('none')
-    expect(container.querySelectorAll('.nocx-editor-hint__item').length).toBe(3)
-
-    ed.hideAliasHints()
-    expect(hintEl(container).style.display).toBe('none')
-    expect(container.querySelectorAll('.nocx-editor-hint__item').length).toBe(0)
-  })
-
-  it('showAliasHints with an empty list hides the dropdown', () => {
-    const { ed, container } = setup()
-    ed.show()
-    ed.showAliasHints([])
-    expect(hintEl(container).style.display).toBe('none')
-  })
-
-  it('under ssh the hint list does not open — the completion dropdown owns the position (nocx-fijh)', () => {
-    const { ed, container } = setup()
-    ed.show()
-    ed.insertText('ssh prod')
-    // The caller (the ssh alias fetch) still offers hints — the editor
-    // refuses: ssh's argument is the completion dropdown's position (the
-    // rule in showAliasHints), and a second surface claiming the same keys
-    // is the defect.
-    ed.showAliasHints(HINT_ITEMS)
-    expect(hintEl(container).style.display).toBe('none')
-    expect(container.querySelectorAll('.nocx-editor-hint__item').length).toBe(0)
-  })
-  it('showAliasHints highlights the first item by default', () => {
-    const { ed, container } = setup()
-    ed.show()
-    ed.showAliasHints(HINT_ITEMS)
-    const items = container.querySelectorAll('.nocx-editor-hint__item')
-    expect(items[0].classList.contains('nocx-editor-hint__item--selected')).toBe(true)
-    expect(items[1].classList.contains('nocx-editor-hint__item--selected')).toBe(false)
-  })
-
-  it('ArrowDown/ArrowUp navigates the hint list and wraps', () => {
-    const { ed, view, container } = setup()
-    ed.show()
-    ed.showAliasHints(HINT_ITEMS)
-    const items = () => container.querySelectorAll('.nocx-editor-hint__item')
-
-    expect(items()[0].classList.contains('nocx-editor-hint__item--selected')).toBe(true)
-
-    key(view, { key: 'ArrowDown' })
-    expect(items()[1].classList.contains('nocx-editor-hint__item--selected')).toBe(true)
-
-    key(view, { key: 'ArrowDown' })
-    expect(items()[2].classList.contains('nocx-editor-hint__item--selected')).toBe(true)
-
-    key(view, { key: 'ArrowDown' }) // wrap around
-    expect(items()[0].classList.contains('nocx-editor-hint__item--selected')).toBe(true)
-
-    key(view, { key: 'ArrowUp' }) // back up
-    expect(items()[2].classList.contains('nocx-editor-hint__item--selected')).toBe(true)
-  })
-
-  it('under ssh the hint list does not open — Enter submits the line (nocx-fijh)', () => {
-    const onAcceptHint = vi.fn()
-    const { ed, view, container, submit } = setup({ onAcceptHint })
-    ed.show()
-    ed.insertText('ssh prod')
-    ed.showAliasHints(HINT_ITEMS)
-    expect(hintEl(container).style.display).toBe('none')
-
-    enter(view)
-    expect(submit).toHaveBeenCalledWith('ssh prod')
-    expect(onAcceptHint).not.toHaveBeenCalled()
-  })
-  it('under ssh Escape clears the draft — the hint list never claimed it (nocx-fijh)', () => {
-    const { ed, view, container } = setup()
-    ed.show()
-    ed.insertText('ssh prod')
-    ed.showAliasHints(HINT_ITEMS)
-    expect(hintEl(container).style.display).toBe('none')
-
-    escape(view)
-    // With no hint surface open, Escape is the editor's clear — the key the
-    // hint list used to intercept is free again.
-    expect(view.state.doc.toString()).toBe('')
-    expect(hintEl(container).style.display).toBe('none')
-  })
-  it('hints are hidden after hide() is called', () => {
-    const { ed, container } = setup()
-    ed.show()
-    ed.showAliasHints(HINT_ITEMS)
-    expect(hintEl(container).style.display).not.toBe('none')
-    ed.hide()
-    expect(hintEl(container).style.display).toBe('none')
-  })
-
-  it('a dismissed hint set is forgotten on the next show()', () => {
-    // Machinery contract, outside ssh (where this surface never opens — the
-    // completion dropdown owns ssh): dismissal is per editor session.
-    const { ed, view, container } = setup()
-    ed.show()
-    ed.showAliasHints(HINT_ITEMS)
-    escape(view) // dismiss
-    expect(hintEl(container).style.display).toBe('none')
-
-    ed.hide()
-    ed.show()
-    ed.showAliasHints(HINT_ITEMS) // must render again — dismissal was per-session
-    expect(hintEl(container).style.display).not.toBe('none')
-    expect(container.querySelectorAll('.nocx-editor-hint__item').length).toBe(3)
-  })
-})
-
 describe('ssh key ownership: the completion dropdown owns the keys (nocx-fijh)', () => {
   /** A host-shaped provider for the ssh argument position — the dropdown's
    *  rows in the state the user is in (`ssh ` + Tab). */
@@ -643,10 +520,9 @@ describe('ssh key ownership: the completion dropdown owns the keys (nocx-fijh)',
       latencyBudgetMs: 0,
       now: () => 1_750_000_000_000,
     })
-    const onAcceptHint = vi.fn()
     const submit = vi.fn()
     const ed = new CommandEditor(
-      { submit, cancel: vi.fn(), onAcceptHint, onTab: () => controller.open() },
+      { submit, cancel: vi.fn(), onTab: () => controller.open() },
       controller.extensions(),
     )
     ed.mount(container)
@@ -657,12 +533,6 @@ describe('ssh key ownership: the completion dropdown owns the keys (nocx-fijh)',
     ed.show()
     ed.insertText('ssh ')
     const view = viewOf(ed)
-    const hintEl = (c: HTMLElement) => c.querySelector('.nocx-editor-hint') as HTMLElement
-
-    // Hints offered under ssh: refused (the rule in showAliasHints).
-    ed.showAliasHints([{ alias: 'prod-db', hostName: '10.0.0.1', user: 'deploy' }])
-    expect(hintEl(container).style.display).toBe('none')
-
     // The user's path to the surface: Tab opens the dropdown with hosts.
     key(view, { key: 'Tab' })
     // Flush the provider's already-resolved promise through the controller's
@@ -675,18 +545,15 @@ describe('ssh key ownership: the completion dropdown owns the keys (nocx-fijh)',
     expect(selected()?.textContent).toContain('alpha')
 
     // ArrowDown travels the editor seam and moves the DROPDOWN selection —
-    // the key the hint list used to swallow. The selection moved: that is
-    // the assertion, not that a handler was called.
+    // no other surface exists to claim the key. The selection moved: that
+    // is the assertion, not that a handler was called.
     key(view, { key: 'ArrowDown' })
     expect(selected()?.textContent).toContain('beta')
-    expect(hintEl(container).style.display).toBe('none')
 
-    // Enter accepts the dropdown's selection — the key the hint list used
-    // to claim. No hint accept fires; nothing is submitted.
+    // Enter accepts the dropdown's selection. Nothing is submitted.
     key(view, { key: 'Enter' })
     expect(ed.getDoc()).toBe('ssh beta')
     expect(dropdown.isOpen).toBe(false)
-    expect(onAcceptHint).not.toHaveBeenCalled()
     expect(submit).not.toHaveBeenCalled()
 
     // Escape with the dropdown open closes exactly the dropdown.
@@ -697,6 +564,72 @@ describe('ssh key ownership: the completion dropdown owns the keys (nocx-fijh)',
     key(view, { key: 'Escape' })
     expect(dropdown.isOpen).toBe(false)
     expect(ed.getDoc()).toBe('ssh beta')
+  })
+
+  it('at bare `ssh` with no space typed, Tab opens the completion dropdown with history rows and inserts nothing (nocx-v03i)', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const dropdown = new CompletionDropdown({ onHover: () => {}, onPick: () => {} })
+    // The shipped history provider's applicability: any non-empty line, and
+    // a row whose command starts with the line replaces the whole line.
+    const historyProvider: SuggestionProvider = {
+      id: 'history',
+      targetId: 'shell',
+      applicable: (c) => c.doc.trim() !== '',
+      suggest: (ctx) =>
+        Promise.resolve({
+          candidates: ['ssh pi@192.168.0.93', 'ssh pi@192.168.0.93 -p 22', 'ssh prod'].map(
+            (r): Candidate => ({
+              id: `hist:${r}`,
+              targetId: 'shell',
+              providerId: 'history',
+              displayText: r,
+              insertText: r,
+              replacement: { from: 0, to: ctx.doc.length },
+              matchRanges: [{ from: 0, to: ctx.doc.length }],
+              source: 'history',
+              scope: 'directory',
+              eligibleForGhostText: true,
+            }),
+          ),
+        }),
+    }
+    const controller = new CompletionController({
+      // The host provider is wired too. At bare `ssh` the token sits in
+      // COMMAND position, where the host provider is inapplicable — the
+      // composition must surface HISTORY here, not hosts.
+      providers: [sshHostProvider(['root@192.168.0.57']), historyProvider],
+      dropdown,
+      env: () => ({ isLocal: true, cwd: '/repo', host: '' }),
+      latencyBudgetMs: 0,
+      now: () => 1_750_000_000_000,
+    })
+    const submit = vi.fn()
+    const ed = new CommandEditor(
+      { submit, cancel: vi.fn(), onTab: () => controller.open() },
+      controller.extensions(),
+    )
+    ed.mount(container)
+    controller.attach(ed, container)
+    ed.setKeyArbiter((e) => controller.handleKey(e))
+    ed.show()
+    ed.insertText('ssh') // caret right after 'ssh' — no space typed yet
+    const view = viewOf(ed)
+
+    key(view, { key: 'Tab' })
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(dropdown.isOpen).toBe(true)
+    // Tab itself inserted nothing — the document is byte-identical.
+    expect(ed.getDoc()).toBe('ssh')
+    const rows = () =>
+      [...dropdown.root.querySelectorAll<HTMLElement>('.ui-floating-panel__row')].map(
+        (r) => r.textContent ?? '',
+      )
+    expect(rows().some((t) => t.includes('ssh pi@192.168.0.93'))).toBe(true)
+    // The host provider was not consulted: its row is nowhere on the list.
+    expect(rows().some((t) => t.includes('root@192.168.0.57'))).toBe(false)
+    expect(submit).not.toHaveBeenCalled()
   })
 })
 

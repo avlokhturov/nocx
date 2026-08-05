@@ -67,13 +67,6 @@ const MAX_ROWS = 30
  */
 export const LOCATION_UNKNOWN_LABEL = 'context unknown'
 
-export interface AliasSuggestion {
-  alias: string
-  hostName: string
-  user?: string
-  port?: number
-}
-
 export interface EditorActions {
   submit: (doc: string, plan?: SubmitPlan) => void
   // cancel discards the composed line the way Ctrl-C does at a shell prompt:
@@ -82,8 +75,8 @@ export interface EditorActions {
   // the next command.
   cancel: () => void
   /** Fired on every user-driven document change with the current value.
-   *  Use to drive external hint/filter logic without coupling the hint
-   *  data source to the editor. */
+   *  Use to drive external filter logic without coupling the data source
+   *  to the editor. */
   onInputChange?: (text: string) => void
   /**
    * Fired when the editor's own height changes, because that changes how much
@@ -91,10 +84,6 @@ export interface EditorActions {
    * or a future host — has nobody to tell.
    */
   resized?: () => void
-  /** Fired when the user accepts a hint suggestion (Enter/click on hint item).
-   *  Receives the suggested alias value. The editor replaces the partial `ssh ` line
-   *  with `ssh <alias>` before calling this hook. */
-  onAcceptHint?: (alias: string) => void
   /** Fired when the user presses Up with the caret already on the first line
    *  (or an empty draft): there is no further upward movement, so the caller
    *  may open recall instead of moving the caret (design §8.10 v6 — Up is
@@ -161,14 +150,6 @@ export class CommandEditor {
    *  stopped or never started cleanly: the last known host must not keep
    *  rendering as current (design §8.2). */
   private _trusted = false
-  /** Hint dropdown — lives between the chrome and the editor surface. */
-  private hintContainer: HTMLElement
-  /** Current hint items (empty when hidden). */
-  private _hintItems: AliasSuggestion[] = []
-  /** Whether the user explicitly dismissed the hint this editor session. */
-  private _hintDismissed = false
-  /** Index of the currently highlighted item in _hintItems. */
-  private _hintSelectedIndex = 0
   /** The row count (capped at MAX_ROWS) the host was last told about. */
   private _lastRowCount = 1
   /** True while a programmatic document edit is in flight: such edits set the
@@ -232,8 +213,7 @@ export class CommandEditor {
    *
    * - onInputChange mirrors the old textarea `input` event, but only for
    *   user-driven changes: programmatic edits are flagged and must not fire it
-   *   (a paste or alias accept never fired `input` on the textarea, and firing
-   *   it would re-trigger the async alias fetch after the hints were accepted).
+   *   (a paste never fired `input` on the textarea).
    * - resized is the _grow() port: the host is told when the capped row count
    *   (1..MAX_ROWS) changes. The box's real height is CSS (max-height:
    *   ten lines, overflow-y: auto), so the row count is the trigger, exactly
@@ -303,12 +283,6 @@ export class CommandEditor {
     this.chromeLeft.append(this.recoveryChip, this.locationChip, this.cwdChip)
     this.chrome.append(this.chromeLeft, this.timeChip)
     this.root.appendChild(this.chrome)
-
-    // ── Hint dropdown popup ─────────────────────────────────────────────
-    this.hintContainer = document.createElement('div')
-    this.hintContainer.className = 'nocx-editor-hint'
-    this.hintContainer.style.display = 'none'
-    this.root.appendChild(this.hintContainer)
 
     // ── CodeMirror 6 surface (ADR-0010) ────────────────────────────────
     // The extension list is a constructor parameter: the editor must not
@@ -500,7 +474,6 @@ export class CommandEditor {
    *  handoff waits for the verdict — a reference line resolves first, a
    *  veto keeps the draft with the host's report already on screen. */
   submit(): void {
-    this.hideAliasHints()
     const doc = this.view.state.doc.toString()
     const hook = this.actions.beforeSubmit
     if (!hook) {
@@ -558,29 +531,6 @@ export class CommandEditor {
     else this.actions.submit(sendLine)
   }
 
-  /** Accept the currently highlighted hint, replacing `ssh <partial>` with the
-   *  chosen alias, then fire onAcceptHint so the caller can track the event. */
-  private acceptHint(): void {
-    const item = this._hintItems[this._hintSelectedIndex]
-    if (!item) return
-    const v = this.view.state.doc.toString()
-    const sshIdx = v.search(/\bssh\s+/)
-    if (sshIdx === -1) return
-    const before = v.slice(0, sshIdx + 4) // "ssh "
-    const after = v.slice(sshIdx).replace(/^ssh\s+\S*/, '')
-    const cmd = `${before}${item.alias}${after}`
-    this._programmatic = true
-    try {
-      this.view.dispatch({
-        changes: { from: 0, to: v.length, insert: cmd },
-      })
-    } finally {
-      this._programmatic = false
-    }
-    this.hideAliasHints()
-    this.actions.onAcceptHint?.(item.alias)
-  }
-
   private onKeydown = (e: KeyboardEvent): void => {
     // IME in progress: the composition owns the key stream, and CM6 handles
     // composition itself. Interpreting a composing Enter as submit or a
@@ -634,47 +584,9 @@ export class CommandEditor {
       return
     }
 
-    // The hint list's keys — reachable only while hints are LEGALLY open.
-    // Under ssh they never are: the completion dropdown owns ssh (the rule
-    // in showAliasHints), so this block can never eat a key the dropdown's
-    // footer advertises. The arbiter above already had first refusal.
-    // Everything else falls through to the editor's own handling and then
-    // to CM6.
-    if (this._hintItems.length > 0) {
-      if (e.key === 'ArrowDown') {
-        e.preventDefault()
-        e.stopPropagation()
-        this._hintSelectedIndex = (this._hintSelectedIndex + 1) % this._hintItems.length
-        this._renderHints()
-        return
-      }
-      if (e.key === 'ArrowUp') {
-        e.preventDefault()
-        e.stopPropagation()
-        this._hintSelectedIndex =
-          (this._hintSelectedIndex - 1 + this._hintItems.length) % this._hintItems.length
-        this._renderHints()
-        return
-      }
-      if (e.key === 'Enter') {
-        e.preventDefault()
-        e.stopPropagation()
-        this.acceptHint()
-        return
-      }
-      if (e.key === 'Escape') {
-        e.preventDefault()
-        e.stopPropagation()
-        this._hintDismissed = true
-        this.hideAliasHints()
-        return
-      }
-    }
-
     // Up is caret movement first (design §8.10 v6): recall opens only when
     // there is no further upward movement — caret on the first line or an
     // empty draft. Otherwise the key falls through to CM6's caret handling.
-    // Hint navigation above has already had its turn with ArrowUp.
     //
     // And only from a SINGLE-LINE draft. Recall previews the selected command
     // over the draft, so on a multi-line draft one stray Up puts somebody
@@ -695,7 +607,7 @@ export class CommandEditor {
       return
     }
 
-    // Standard editor keys when no hint is active.
+    // Standard editor keys.
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       e.stopPropagation()
@@ -754,18 +666,13 @@ export class CommandEditor {
 
   /**
    * The Escape tail shared by the editor's own keydown and the host's
-   * document rescue: hint dismissal, then the clear. The keyboard arbiter
+   * document rescue: the clear. The keyboard arbiter
    * is NOT consulted here — the internal path already consulted it for the
    * whole key, and the external path consults it before calling, so an open
    * recall overlay dismisses itself (restoring its captured draft) instead
    * of having the draft cleared under it.
    */
   private escapeClear(): void {
-    if (this._hintItems.length > 0) {
-      this._hintDismissed = true
-      this.hideAliasHints()
-      return
-    }
     this.clearDoc()
   }
 
@@ -774,8 +681,8 @@ export class CommandEditor {
    * editor's own keydown: the editor is on screen but a click elsewhere
    * moved the focus out of its surface, so the key never traversed `root`
    * and onKeydown never saw it. The decision order mirrors the internal
-   * one — the keyboard arbiter gets first refusal, then hint dismissal,
-   * then the clear — and focus returns so the next keystroke lands in the
+   * one — the keyboard arbiter gets first refusal, then the clear — and
+   * focus returns so the next keystroke lands in the
    * prompt, exactly as the typing rescue promises. Returns true when the
    * key was consumed (the caller preventDefaults).
    */
@@ -785,84 +692,6 @@ export class CommandEditor {
     this.escapeClear()
     this.view.focus()
     return true
-  }
-
-  // ── hint management ───────────────────────────────────────────────────
-
-  /** Populate and show the alias hint dropdown with matching items.
-   *  Caller is responsible for filtering by the current partial text.
-   *
-   *  THE OWNERSHIP RULE (nocx-fijh): the completion dropdown owns ssh. Its
-   *  argument position is a host, and the host provider routes the same
-   *  quick-connect assembly this hint list used to read — the dropdown
-   *  covers what the hints were for, and more (hosts + ssh history + ghost
-   *  text). Two surfaces over one position, both claiming ArrowDown/Up,
-   *  Enter and Escape, is the defect: whichever wins by evaluation order,
-   *  the other advertises keys it will not receive. So the hint list does
-   *  not open under ssh AT ALL: the dropdown is the ssh surface, and its
-   *  footer is only honest because no competing surface can eat the keys
-   *  it advertises. What this costs: aliases no longer preview while
-   *  typing — Tab opens the dropdown, and typing re-filters it live.
-   *  `\bssh\s+` is the same derivation acceptHint uses below: one test for
-   *  "this document is an ssh context". */
-  showAliasHints(items: AliasSuggestion[]): void {
-    if (/\bssh\s+/.test(this.view.state.doc.toString())) {
-      this.hideAliasHints()
-      return
-    }
-    if (items.length === 0 || this._hintDismissed) {
-      this.hideAliasHints()
-      return
-    }
-    this._hintItems = items
-    this._hintSelectedIndex = 0
-    this._renderHints()
-    this.hintContainer.style.display = ''
-  }
-
-  /** Hide the hint dropdown and clear its items. */
-  hideAliasHints(): void {
-    this._hintItems = []
-    this._hintSelectedIndex = 0
-    this.hintContainer.style.display = 'none'
-    this.hintContainer.innerHTML = ''
-  }
-
-  /** Rebuild the hint dropdown DOM from _hintItems. */
-  private _renderHints(): void {
-    this.hintContainer.innerHTML = ''
-    for (let i = 0; i < this._hintItems.length; i++) {
-      const item = this._hintItems[i]
-      const el = document.createElement('div')
-      el.className = 'nocx-editor-hint__item'
-      if (i === this._hintSelectedIndex) {
-        el.classList.add('nocx-editor-hint__item--selected')
-      }
-      // Primary label: alias
-      const aliasSpan = document.createElement('span')
-      aliasSpan.className = 'nocx-editor-hint__alias'
-      aliasSpan.textContent = item.alias
-      el.appendChild(aliasSpan)
-      // Secondary label: resolved host + optional user
-      const detailParts: string[] = [item.hostName]
-      if (item.user) detailParts.unshift(`${item.user}@`)
-      if (item.port && item.port !== 22) detailParts.push(`:${item.port}`)
-      const detailSpan = document.createElement('span')
-      detailSpan.className = 'nocx-editor-hint__detail'
-      detailSpan.textContent = detailParts.join('')
-      el.appendChild(detailSpan)
-      // Click handler on the item (not on the label spans).
-      el.addEventListener('mouseenter', () => {
-        this._hintSelectedIndex = i
-        this._renderHints()
-      })
-      el.addEventListener('mousedown', (me) => {
-        me.preventDefault()
-        this._hintSelectedIndex = i
-        this.acceptHint()
-      })
-      this.hintContainer.appendChild(el)
-    }
   }
 
   // ── visibility ────────────────────────────────────────────────────────
@@ -881,7 +710,6 @@ export class CommandEditor {
    */
   show(): void {
     this.root.style.display = ''
-    this._hintDismissed = false
 
     // CLEARED, not set to 'visible'. An inactive pane is hidden with
     // `visibility: hidden` on purpose (base.css) so its renderer keeps measuring
@@ -1024,7 +852,6 @@ export class CommandEditor {
     this.stopClock()
     this.view.contentDOM.blur()
     this.root.style.display = 'none'
-    this.hideAliasHints()
   }
 
   get isVisible(): boolean {
