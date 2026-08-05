@@ -43,7 +43,10 @@ export interface BlockRecord {
   /** Duration in ms: C marker to D marker. */
   durationMs: number | null
   exitCode: number | null
-  status: 'running' | 'success' | 'failure'
+  /** Presentation state. 'entered' = frozen on environment entry (N6):
+   *  neither success nor failure, no exit code — the block the ssh command
+   *  froze into when the remote session began. */
+  status: 'running' | 'success' | 'failure' | 'entered'
   /** IMarker line for C boundary. */
   startLine: number
   /** IMarker line for D boundary (approx). */
@@ -145,7 +148,7 @@ function createHeader(
   location: string,
   durationMs: number | null,
   exitCode: number | null,
-  status: 'running' | 'success' | 'failure',
+  status: 'running' | 'success' | 'failure' | 'entered',
   store: CommandSnapshotStore,
 ): HTMLElement {
   const header = div('cmd-header')
@@ -196,7 +199,10 @@ function createHeader(
       right.appendChild(dur)
     }
 
-    if (exitCode !== null) {
+    // An 'entered' block froze on environment entry (N6): it carries no
+    // exit code and must never paint success or failure, whatever code the
+    // local D later delivers to the ledger.
+    if (status !== 'entered' && exitCode !== null) {
       const exit = document.createElement('span')
       exit.className =
         exitCode === 0
@@ -455,6 +461,8 @@ function wireBlockSelection(
 
 /**
  * Create a frozen command block DOM element with header + serialized output.
+ * `status` 'entered' (N6) is the block the ssh command froze into when the
+ * remote session began: painted as neither success nor failure, no exit code.
  */
 export function createCommandBlock(
   id: number,
@@ -464,13 +472,17 @@ export function createCommandBlock(
   outputHtml: string,
   durationMs: number | null,
   exitCode: number | null,
-  status: 'success' | 'failure',
+  status: 'success' | 'failure' | 'entered',
   getContainer: () => HTMLElement,
   onSelect: (id: number, selected: boolean) => void,
   store: CommandSnapshotStore,
 ): HTMLElement {
   const wrapper = document.createElement('div')
   wrapper.className = 'cmd-block'
+  // The entered block's own visual state (N6): frozen on environment entry,
+  // neither success nor failure. The hook a stylesheet styles; the header
+  // itself already refuses to paint an exit code or a failure for it.
+  if (status === 'entered') wrapper.classList.add('cmd-block-entered')
   // A command carrying a vault reference renders its references as chips,
   // so the header's own text no longer spells the command. Copy reads the
   // full text from here — the reference intact, which is what the user
@@ -567,6 +579,12 @@ export function createRunningBlock(
 
 /**
  * Freeze a running block: replace it with a frozen version.
+ *
+ * `status` is the presentation, never derived from the exit code: 'entered'
+ * (N6) freezes on environment entry — neither success nor failure, no exit
+ * code — and the old exitCode === null → 'failure' mapping is exactly the
+ * bug this must not inherit. The D path passes 'success'/'failure' from the
+ * real code; entry passes 'entered' with a null code.
  */
 export function freezeBlock(
   el: HTMLElement,
@@ -580,6 +598,7 @@ export function freezeBlock(
   getContainer: () => HTMLElement,
   onSelect: (id: number, selected: boolean) => void,
   store: CommandSnapshotStore,
+  status: 'success' | 'failure' | 'entered',
 ): HTMLElement {
   const newEl = createCommandBlock(
     id,
@@ -589,7 +608,7 @@ export function freezeBlock(
     outputHtml,
     durationMs,
     exitCode,
-    exitCode === 0 ? 'success' : 'failure',
+    status,
     getContainer,
     onSelect,
     store,
@@ -814,9 +833,30 @@ export class BlockManager {
   }
 
   /**
-   * Freeze the running block on OSC 133 D.
+   * Freeze the running block on OSC 133 D, painted success/failure from the
+   * real exit code. Signature unchanged: the scrollback controller drives it.
    */
   freezeBlock(getLine: GetLineFn, endLine: number, exitCode: number | null): BlockRecord | null {
+    return this._freeze(getLine, endLine, exitCode, exitCode === 0 ? 'success' : 'failure')
+  }
+
+  /**
+   * Freeze the running block on environment entry (N6): the ssh block freezes
+   * with NO exit code, painted as neither success nor failure, and the
+   * manager's running slot is freed for the remote commands that follow. The
+   * model-level completion (history.record) happens later, at the local D,
+   * via the ledger's completeTransition — this only paints the block.
+   */
+  freezeEntered(getLine: GetLineFn, endLine: number): BlockRecord | null {
+    return this._freeze(getLine, endLine, null, 'entered')
+  }
+
+  private _freeze(
+    getLine: GetLineFn,
+    endLine: number,
+    exitCode: number | null,
+    status: 'success' | 'failure' | 'entered',
+  ): BlockRecord | null {
     const rec = this._runningBlock
     if (!rec) return null
 
@@ -842,13 +882,14 @@ export class BlockManager {
         else this._onBlockDeselected(bid)
       },
       this._snapshotStore,
+      status,
     )
 
     this._stopTicker()
     rec.el = newEl
     rec.durationMs = durationMs
     rec.exitCode = exitCode
-    rec.status = exitCode === 0 ? 'success' : 'failure'
+    rec.status = status
     this._runningBlock = null
 
     return rec
