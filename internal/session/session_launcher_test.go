@@ -200,3 +200,52 @@ func TestLocalSession_ShellIntegrationReasonIsNone(t *testing.T) {
 		t.Errorf("local session ShellIntegrationReason = %q, want %q", got, ssh.ReasonNone)
 	}
 }
+
+// TestRemoteSession_JumpConfig_ReachesConnect pins the regression the whole
+// seam exists for (nocx-8b1v): a ConnectConfig.JumpConfig must ride
+// sshOptionsFromConfig into the Connect options, or the bastion's auth
+// material is dropped and the dial offers no methods. UnlockRequester must
+// ride the same path so a sealed vault prompts instead of failing.
+func TestRemoteSession_JumpConfig_ReachesConnect(t *testing.T) {
+	factory := &capturingSSHFactory{ch: &reasonChannel{reason: ssh.ReasonNone}}
+	reg := launcherReg().WithSSHFactory(factory)
+
+	jumpCfg := &ssh.ConnectConfig{
+		User:     "jumpuser",
+		Port:     2222,
+		AuthMode: "publicKey",
+		KeyFile:  "/home/user/.ssh/jump_key",
+	}
+	unlockFn := func(_ context.Context, _ string) error { return nil }
+
+	sess, err := reg.Open(context.Background(), Config{
+		Kind: KindRemote,
+		Host: "example.com",
+		Remote: &ssh.ConnectConfig{
+			JumpHost:        "bastion.example.com",
+			JumpConfig:      jumpCfg,
+			UnlockRequester: unlockFn,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = reg.Close(sess.ID()) }()
+
+	cfg := &ssh.ConnectConfig{}
+	for _, o := range factory.opts {
+		o(cfg)
+	}
+	if cfg.JumpConfig == nil {
+		t.Fatal("ConnectConfig.JumpConfig is nil: the recursive jump config was dropped at the session→ssh seam")
+	}
+	if cfg.JumpConfig.User != "jumpuser" {
+		t.Errorf("JumpConfig.User = %q, want jumpuser", cfg.JumpConfig.User)
+	}
+	if cfg.JumpConfig.KeyFile != "/home/user/.ssh/jump_key" {
+		t.Errorf("JumpConfig.KeyFile = %q, want the jump key path", cfg.JumpConfig.KeyFile)
+	}
+	if cfg.UnlockRequester == nil {
+		t.Error("ConnectConfig.UnlockRequester is nil: the vault unlock callback was dropped at the session→ssh seam")
+	}
+}
