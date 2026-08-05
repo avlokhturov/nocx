@@ -1199,6 +1199,16 @@ export class TerminalContent extends BaseTabContent {
           // which is by construction this attempt's id — so acceptance is
           // the attempt's readiness passport, and nothing else can be.
           if (attempt) attempt.acceptedPassport = disposition.passport
+          // P0 (nocx-mlm7): a confirmed environment transition starts a clean
+          // input cycle. Without this, the remote's first A arrives while the
+          // machine is still RUNNING_RAW (submit never finishes for ssh), its
+          // B grants no ownership, and the marker-only remote prompt leaves
+          // the user with no input surface at all. The tracker fires this
+          // exactly once per attempt (duplicates are reported as `duplicate`,
+          // never accepted again) and only for the minted id, before the
+          // remote's first A — the event spec §5.3's `expected passport →
+          // tagged A → B` sequence was missing.
+          this.inputState.dispatch({ type: 'passport' })
         } else if (disposition.status === 'unexpected') {
           // A passport whose id is not the one minted for the attempt in
           // flight: ignored and logged (spec §5.2).

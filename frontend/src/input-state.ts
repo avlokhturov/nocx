@@ -8,6 +8,12 @@ export type InputEvent =
   | { type: 'marker'; kind: 'A' | 'B' | 'C' | 'D' }
   | { type: 'buffer'; buffer: 'normal' | 'alternate' }
   | { type: 'submit' }
+  // A CONFIRMED environment transition (spec §5.3): the renderer accepted
+  // the readiness passport minted for the ssh attempt in flight. The
+  // transition starts a clean cycle — the remote's following A is the
+  // entered environment's first prompt, not an interruption of the local
+  // command — so that A may be trusted (nocx-mlm7 P0).
+  | { type: 'passport' }
   | { type: 'reset' }
   | { type: 'exit' }
 
@@ -70,6 +76,15 @@ export function reduce(m: Machine, e: InputEvent): Machine {
       return e.buffer === 'alternate'
         ? { state: 'ALT_SCREEN', trusted: false, owned: false }
         : { state: 'RAW', trusted: false, owned: false }
+    case 'passport':
+      // Accepted readiness passport (spec §5.3): a confirmed environment
+      // transition starts a clean cycle. The remote's following A is the
+      // entered environment's first prompt and is trusted through THIS one
+      // event — not by loosening the RUNNING_RAW rule for everyone, which
+      // still keeps a nested or orphan prompt from taking ownership
+      // (ADR-0006 §4). Trust itself is still earned: only the A→B that
+      // follows grants `owned`.
+      return { state: 'RAW', trusted: false, owned: false }
     case 'reset':
     case 'exit':
       return { state: 'RAW', trusted: false, owned: false }

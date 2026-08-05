@@ -53,7 +53,7 @@ import {
 } from './test-support/tabs-fixtures'
 import { XtermRenderer } from './renderers/xterm'
 import { ClipboardGate } from './clipboard'
-import { CommandEditor, LOCATION_UNKNOWN_LABEL } from './editor'
+import { CommandEditor } from './editor'
 import { TerminalContent } from './terminal-content'
 import { Tab } from './tabs'
 import { SURFACE_TERMINAL } from './tab-content'
@@ -1183,15 +1183,19 @@ describe('the environment stack (nocx-695k.1)', () => {
       expect(content.portsUnavailableReason).toBe('pi@192.168.0.93')
       const cwd = ed.root.querySelector('.nocx-editor-cwd')
       expect(cwd?.textContent ?? '').not.toContain('home')
-      // The first remote prompt is unowned (the local command is still
-      // "running" to the input-state machine), so the location chip
-      // honestly says the context is unknown until a clean remote cycle
-      // promotes trust.
+      // Entry (passport → tagged A → B) hands keyboard ownership to the
+      // editor immediately (spec §5.3: nothing changes until entry — at
+      // entry it changes): the editor is present and the chip names the
+      // host. Before the P0 fix the remote's first A arrived while the
+      // machine was still RUNNING_RAW, its B granted no ownership, and
+      // the marker-only remote prompt left no input surface at all.
+      expect(ed.isVisible).toBe(true)
       const loc2 = ed.root.querySelector('.nocx-editor-location')
-      expect(loc2?.textContent).toBe(LOCATION_UNKNOWN_LABEL)
+      expect(loc2?.textContent).toBe('pi@192.168.0.93')
 
-      // A full tagged remote command cycle (C…D→A→B) promotes trust: the
-      // chip now names the host.
+      // A full tagged remote command cycle (C…D→A→B) keeps the chip naming
+      // the host and re-grants ownership after the command.
+
       renderer._fireCommandMarker({
         kind: 'C',
         line: 0,
@@ -1423,15 +1427,15 @@ describe('the environment stack (nocx-695k.1)', () => {
   })
 })
 
-// One test asserting input-state.ts transitions are identical (nocx-695k.1
-// acceptance: "input-state.ts is unchanged — one test asserts the machine's
-// transitions are identical").
-describe('input-state.ts is unchanged (nocx-695k.1)', () => {
-  it('the state machine transitions are identical to the committed table', async () => {
+// Regression table for input-state.ts transitions (nocx-695k.1 acceptance,
+// extended by nocx-mlm7 P0). The environment stack in terminal-content.ts
+// reads input-state — it never writes to it. This table pins every
+// transition the machine is allowed to make, so a state or event change
+// must extend it deliberately.
+describe('input-state.ts transition table (nocx-695k.1 + nocx-mlm7 P0)', () => {
+  it('every allowed machine transition is pinned in the table', async () => {
     // The reducer table from input-state.test.ts, replicated here as a
-    // cross-check. The environment stack in terminal-content.ts reads
-    // input-state — it never writes to it. This test fails if a state,
-    // an event type or a transition is added to reduce().
+    // cross-check.
     const { reduce, initialMachine } = await import('./input-state')
 
     // A → PROMPT_READY (trusted from RAW)
@@ -1445,6 +1449,21 @@ describe('input-state.ts is unchanged (nocx-695k.1)', () => {
     // submit → RUNNING_RAW
     const s = reduce(b, { type: 'submit' })
     expect(s).toEqual({ state: 'RUNNING_RAW', trusted: true, owned: false })
+
+    // passport (accepted readiness passport, §5.3) → clean cycle from
+    // RUNNING_RAW: the remote's following A is trusted through it, and its
+    // B grants ownership (nocx-mlm7 P0).
+    const pp = reduce(s, { type: 'passport' })
+    expect(pp).toEqual({ state: 'RAW', trusted: false, owned: false })
+    const ppA = reduce(pp, { type: 'marker', kind: 'A' })
+    expect(ppA).toEqual({ state: 'PROMPT_READY', trusted: true, owned: false })
+    expect(reduce(ppA, { type: 'marker', kind: 'B' }).owned).toBe(true)
+    // The clean cycle is spent: a nested prompt mid-command stays untrusted.
+    const ppRunning = reduce(reduce(ppA, { type: 'marker', kind: 'B' }), {
+      type: 'marker',
+      kind: 'C',
+    })
+    expect(reduce(ppRunning, { type: 'marker', kind: 'A' }).trusted).toBe(false)
 
     // C → RUNNING_RAW (trusted from clean prompt)
     const c = reduce(b, { type: 'marker', kind: 'C' })
@@ -2007,10 +2026,8 @@ describe('nocxify: ssh command rewrite (nocx-pu4.6)', () => {
 
       // Now inside the environment: a nested ssh must NOT be rewritten — a
       // local staged path would be read by a remote shell (§3.1, §6.1).
-      // Entry leaves the first remote prompt unowned (the local command is
-      // still "running" to the input-state machine), so re-show the editor
-      // the way the other submit tests do before typing the nested line.
-      ed.show()
+      // Entry already handed input to the editor (P0), so the nested line
+      // is typed there without any manual re-show.
       ed.insertText('ssh host2')
       view.contentDOM.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
@@ -2798,6 +2815,65 @@ describe('the environment boundary (nocx-mlm7 P9, spec §6.1)', () => {
         nocxEnv: 'env-ab12',
       })
       expect(envStackOf(content)).toHaveLength(1)
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
+
+  it('P0: entry hands input to the editor and a typed command reaches the remote pty', async () => {
+    const callMock = vi.fn().mockResolvedValue(LAUNCH({ environmentId: 'env-ab12' }))
+    const { view, ed, content, renderer, teardown } = await mountWithSsh(callMock)
+    const restoreScroll = stubScroll()
+    try {
+      // NO manual ed.show(): after the accepted passport → tagged A → B the
+      // editor must be present on its own. Before the fix, the remote's
+      // first A arrived while the machine was still RUNNING_RAW (submit
+      // never finished for ssh), its B granted no ownership, and the
+      // marker-only remote prompt left no input surface at all.
+      enterEnvironment(renderer, 'env-ab12')
+      expect(ed.isVisible).toBe(true)
+      expect(content.presentation).toBe('editor')
+
+      // Type a command through that editor: it reaches the remote pty as
+      // the pasted document plus the raw CR accept (ADR-0004 §2 handoff).
+      const withSession = content as unknown as { session: SessionFake }
+      // unbound-method guards against calling a detached method with the
+      // wrong `this`. These are vi.fn() spies read for their call record and
+      // never invoked, which is the opposite concern.
+      /* eslint-disable @typescript-eslint/unbound-method */
+      const send = withSession.session.send
+      submitLine(view, ed, 'ls -la')
+      expect(renderer.paste).toHaveBeenLastCalledWith('ls -la')
+      expect(send).toHaveBeenCalledWith('\r')
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
+
+  it('P0: without an accepted passport, input stays native — no editor, writable grid', async () => {
+    const callMock = vi.fn().mockResolvedValue(LAUNCH({ environmentId: 'env-ab12' }))
+    const { ed, renderer, teardown } = await mountWithSsh(callMock)
+    const restoreScroll = stubScroll()
+    try {
+      // mountWithSsh already submitted `ssh host1`: the machine sits in
+      // RUNNING_RAW while ssh connects. The remote authenticates and runs
+      // a PLAIN shell — no passport ever arrives. The grid stays writable
+      // and the editor never appears: the remote shell's own visible
+      // prompt is the input surface.
+      expect(ed.isVisible).toBe(false)
+      expect(renderer.setReadOnly).toHaveBeenLastCalledWith(false)
+      /* eslint-enable @typescript-eslint/unbound-method */
+
+      // A foreign/untagged prompt while the ssh command runs (an orphan
+      // resync) must not take ownership either — the RUNNING_RAW rule is
+      // the nested/orphan protection the passport must not loosen.
+      renderer._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
+      renderer._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
+      expect(ed.isVisible).toBe(false)
+      /* eslint-disable-next-line @typescript-eslint/unbound-method */
+      expect(renderer.setReadOnly).toHaveBeenLastCalledWith(false)
     } finally {
       restoreScroll()
       teardown()
