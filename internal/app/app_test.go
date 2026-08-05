@@ -1,15 +1,18 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/settings"
 )
 
 func TestNew(t *testing.T) {
-	a, err := New()
+	a, err := New(WithLogFilePath(filepath.Join(t.TempDir(), "nocx.log")))
 	if err != nil {
 		t.Fatalf("New() returned error: %v", err)
 	}
@@ -19,7 +22,7 @@ func TestNew(t *testing.T) {
 }
 
 func TestNew_AllModulesInjected(t *testing.T) {
-	a, err := New()
+	a, err := New(WithLogFilePath(filepath.Join(t.TempDir(), "nocx.log")))
 	if err != nil {
 		t.Fatalf("New() returned error: %v", err)
 	}
@@ -42,7 +45,7 @@ func TestNew_AllModulesInjected(t *testing.T) {
 }
 
 func TestStartShutdown(t *testing.T) {
-	a, err := New()
+	a, err := New(WithLogFilePath(filepath.Join(t.TempDir(), "nocx.log")))
 	if err != nil {
 		t.Fatalf("New() returned error: %v", err)
 	}
@@ -59,7 +62,7 @@ func TestStartShutdown(t *testing.T) {
 }
 
 func TestWSPortBeforeStart(t *testing.T) {
-	a, err := New()
+	a, err := New(WithLogFilePath(filepath.Join(t.TempDir(), "nocx.log")))
 	if err != nil {
 		t.Fatalf("New() returned error: %v", err)
 	}
@@ -173,4 +176,63 @@ func (f *appFakeDoc) Write(name string, doc any) error {
 func (f *appFakeDoc) Delete(name string) error {
 	delete(f.data, name)
 	return nil
+}
+
+// TestNew_LogFile: a running session can say where the log lives. The
+// pinned path is reported by LogFilePath, the file exists, and its first
+// line names the path — a reader who finds the file learns where it is.
+func TestNew_LogFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nocx.log")
+	a, err := New(WithLogFilePath(path))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer a.Shutdown(context.Background())
+
+	if got := a.LogFilePath(); got != path {
+		t.Errorf("LogFilePath() = %q, want %q", got, path)
+	}
+	b, err := os.ReadFile(path) // #nosec G304 — the test's own temp path.
+	if err != nil {
+		t.Fatalf("log file was not written: %v", err)
+	}
+	if !bytes.Contains(b, []byte("backend log file")) || !bytes.Contains(b, []byte(path)) {
+		t.Errorf("log file does not name its own path; content:\n%s", b)
+	}
+	if !bytes.Contains(b, []byte("application initialized")) {
+		t.Errorf("log file missing the initialization line; content:\n%s", b)
+	}
+}
+
+// TestNew_LogFileDisabled: an empty pinned path disables file logging and
+// LogFilePath reports it — nothing is written anywhere unexpected.
+func TestNew_LogFileDisabled(t *testing.T) {
+	a, err := New(WithLogFilePath(""))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer a.Shutdown(context.Background())
+
+	if got := a.LogFilePath(); got != "" {
+		t.Errorf("LogFilePath() = %q, want \"\" when file logging is disabled", got)
+	}
+}
+
+// TestNew_LogFileStderrOnlyOnFailure: when the pinned directory cannot be
+// created, the app still starts — fail-open, stderr only — and says the
+// path is unavailable.
+func TestNew_LogFileUnavailableStartsAnyway(t *testing.T) {
+	// A path whose parent is a regular file cannot be a directory.
+	blocker := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write blocker: %v", err)
+	}
+	a, err := New(WithLogFilePath(filepath.Join(blocker, "nocx.log")))
+	if err != nil {
+		t.Fatalf("New must fail open when the log file cannot be opened: %v", err)
+	}
+	defer a.Shutdown(context.Background())
+	if got := a.LogFilePath(); got != "" {
+		t.Errorf("LogFilePath() = %q, want \"\" when the file could not be opened", got)
+	}
 }

@@ -148,6 +148,13 @@ func validOracleArgv(argv []string) bool {
 	return len(argv) >= 3 && filepath.Base(argv[0]) == "ssh" && argv[1] == "-G"
 }
 
+// oracleDestination is the destination positional of an oracle argv — the
+// last element. It is the ONLY user-derived text the delivery-path log
+// carries: no command, no options, no config values beyond the destination.
+func oracleDestination(argv []string) string {
+	return argv[len(argv)-1]
+}
+
 // handleShellLauncherCommand serves the shell.launcherCommand method.
 //
 //	--> {"jsonrpc":"2.0","id":1,"method":"shell.launcherCommand","params":{"sessionId":"0123…","oracleArgv":["ssh","-G","-p","2222","pi@host"]}}
@@ -191,34 +198,61 @@ func (s *WSServer) handleShellLauncherCommand(wconn *wsConn, req jsonrpcRequest)
 	// decision so every result — including every refusal — carries one.
 	envID, err := mintEnvironmentID()
 	if err != nil {
-		s.log.Warn("shell.launcherCommand: could not mint an environment id; refusing the rewrite", "error", err)
+		s.log.Info("shell.launcherCommand mode decided",
+			"destination", oracleDestination(params.OracleArgv),
+			"mode", launcherModeRaw, "reason", "unsupported")
 		s.refuseLauncherCommand(wconn, req, envID, "unsupported")
 		return
 	}
+	s.log.Info("shell.launcherCommand called",
+		"destination", oracleDestination(params.OracleArgv),
+		"environmentId", envID)
 
 	// The oracle is mandatory and its failure refuses the rewrite
 	// (nocx-qwhp). A missing resolver is a failed oracle, not a silent
 	// bypass: without ssh -G's answer there is no basis for a rewrite.
 	if s.sshConfigResolver == nil {
+		s.log.Info("shell.launcherCommand oracle verdict",
+			"destination", oracleDestination(params.OracleArgv),
+			"ok", false, "reason", "oracle-failed")
+		s.log.Info("shell.launcherCommand mode decided",
+			"destination", oracleDestination(params.OracleArgv),
+			"environmentId", envID, "mode", launcherModeRaw, "reason", "oracle-failed")
 		s.refuseLauncherCommand(wconn, req, envID, "oracle-failed")
 		return
 	}
 	cfg, err := s.sshConfigResolver.ResolveArgv(context.Background(), params.OracleArgv)
 	if err != nil {
-		s.log.Warn("shell.launcherCommand: oracle failed; refusing the rewrite",
-			"argv", params.OracleArgv, "error", err)
+		// The verdict is typed fields only: the refusal reason as a value,
+		// never the argv or the oracle's stderr — those can carry command
+		// and config text this log must not repeat.
+		s.log.Info("shell.launcherCommand oracle verdict",
+			"destination", oracleDestination(params.OracleArgv),
+			"ok", false, "reason", "oracle-failed")
+		s.log.Info("shell.launcherCommand mode decided",
+			"destination", oracleDestination(params.OracleArgv),
+			"environmentId", envID, "mode", launcherModeRaw, "reason", "oracle-failed")
 		s.refuseLauncherCommand(wconn, req, envID, "oracle-failed")
 		return
 	}
+	identity := ssh.IdentityKey(cfg)
+	s.log.Info("shell.launcherCommand oracle verdict",
+		"destination", oracleDestination(params.OracleArgv),
+		"ok", true,
+		"identity", identity,
+		"remoteCommand", cfg.RemoteCommand != "")
+
 	// A RemoteCommand configured for the destination wins outright:
 	// OpenSSH refuses a command-line command alongside it, so no rewrite
 	// (ADR-0015).
 	if cfg.RemoteCommand != "" {
+		s.log.Info("shell.launcherCommand mode decided",
+			"destination", oracleDestination(params.OracleArgv),
+			"environmentId", envID, "mode", launcherModeRaw, "reason", "remote-command",
+			"identity", identity)
 		s.refuseLauncherCommand(wconn, req, envID, "remote-command")
 		return
 	}
-
-	identity := ssh.IdentityKey(cfg)
 
 	// The installed fact decides the form: the compact line only when the
 	// host has a committed, protocol-compatible generation; anything else
@@ -227,6 +261,10 @@ func (s *WSServer) handleShellLauncherCommand(wconn *wsConn, req jsonrpcRequest)
 	// memory.
 	if s.installedFacts != nil {
 		if fact, ok := s.installedFacts.Get(identity); ok && fact.Protocol == expectedInstalledProtocol {
+			s.log.Info("shell.launcherCommand mode decided",
+				"destination", oracleDestination(params.OracleArgv),
+				"environmentId", envID, "mode", launcherModeInstalled, "reason", "installed-fact",
+				"identity", identity)
 			s.registerAttempt(envID, identity, attemptExpectedInstalled)
 			_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(shellLauncherCommandResult{
 				Mode:          launcherModeInstalled,
@@ -242,6 +280,10 @@ func (s *WSServer) handleShellLauncherCommand(wconn *wsConn, req jsonrpcRequest)
 	// exactly once) and carries the fresh environment id — the far shell
 	// announces the passport only when NOCX_ENVIRONMENT_ID is set.
 	if s.remoteLauncher == nil || s.launcherStager == nil {
+		s.log.Info("shell.launcherCommand mode decided",
+			"destination", oracleDestination(params.OracleArgv),
+			"environmentId", envID, "mode", launcherModeRaw, "reason", "unsupported",
+			"identity", identity)
 		s.refuseLauncherCommand(wconn, req, envID, "unsupported")
 		return
 	}
@@ -255,6 +297,10 @@ func (s *WSServer) handleShellLauncherCommand(wconn *wsConn, req jsonrpcRequest)
 		if refusal == "" {
 			refusal = "unsupported"
 		}
+		s.log.Info("shell.launcherCommand mode decided",
+			"destination", oracleDestination(params.OracleArgv),
+			"environmentId", envID, "mode", launcherModeRaw, "reason", refusal,
+			"identity", identity)
 		s.refuseLauncherCommand(wconn, req, envID, refusal)
 		return
 	}
@@ -263,11 +309,18 @@ func (s *WSServer) handleShellLauncherCommand(wconn *wsConn, req jsonrpcRequest)
 	// it — because the payload cannot cross the tty (stage.go).
 	path, err := s.launcherStager.Stage(launcher)
 	if err != nil {
-		s.log.Warn("shell.launcherCommand: could not stage launcher", "error", err)
+		s.log.Info("shell.launcherCommand mode decided",
+			"destination", oracleDestination(params.OracleArgv),
+			"environmentId", envID, "mode", launcherModeRaw, "reason", "stage-failed",
+			"identity", identity)
 		s.refuseLauncherCommand(wconn, req, envID, "stage-failed")
 		return
 	}
 
+	s.log.Info("shell.launcherCommand mode decided",
+		"destination", oracleDestination(params.OracleArgv),
+		"environmentId", envID, "mode", launcherModeBootstrap, "reason", "no-installed-fact",
+		"identity", identity)
 	s.registerAttempt(envID, identity, attemptExpectedBootstrap)
 
 	// Shell-quote the path so the renderer can splice it into the line as
@@ -365,13 +418,26 @@ func (s *WSServer) consumeObservation(envID string, p *observedPassport) (proces
 
 	a, ok := s.launcherAttempts[envID]
 	if !ok {
+		// No live minted attempt: a report for an id this backend never
+		// minted (typically after a restart) changes nothing.
+		s.log.Info("shell.environmentObserved",
+			"environmentId", envID, "status", "unexpected")
 		return false, false
 	}
 	if a.consumed {
+		// A duplicate report: the first observation decided the attempt,
+		// and a duplicate can never regress a written fact.
+		s.log.Info("shell.environmentObserved",
+			"environmentId", envID, "status", "ignored")
 		return true, false
 	}
 	if a.expected == attemptExpectedRaw {
+		// A raw attempt can never touch the installed fact, whatever the
+		// renderer observed.
 		a.consumed = true
+		s.log.Info("shell.environmentObserved",
+			"environmentId", envID, "status", "ignored",
+			"identity", a.identity)
 		return true, false
 	}
 
@@ -385,16 +451,29 @@ func (s *WSServer) consumeObservation(envID string, p *observedPassport) (proces
 		}
 		if s.installedFacts == nil {
 			a.consumed = true
+			s.log.Info("shell.environmentObserved",
+				"environmentId", envID, "status", "accepted",
+				"identity", a.identity)
 			s.log.Warn("shell.environmentObserved: installed-fact store not wired; accepted passport not recorded",
 				"environmentId", envID)
 			return true, false
 		}
 		if err := s.installedFacts.Record(fact); err != nil {
+			s.log.Info("shell.environmentObserved",
+				"environmentId", envID, "status", "accepted",
+				"identity", a.identity)
 			s.log.Warn("shell.environmentObserved: could not record the installed fact",
 				"identity", a.identity, "error", err)
 			return true, false
 		}
 		a.consumed = true
+		s.log.Info("shell.environmentObserved",
+			"environmentId", envID, "status", "accepted",
+			"identity", a.identity)
+		s.log.Info("installed fact recorded",
+			"identity", a.identity,
+			"protocol", p.ProtocolVersion,
+			"generation", p.Generation)
 		return true, true
 	}
 
@@ -405,17 +484,31 @@ func (s *WSServer) consumeObservation(envID string, p *observedPassport) (proces
 	if a.expected == attemptExpectedInstalled {
 		if s.installedFacts == nil {
 			a.consumed = true
+			s.log.Info("shell.environmentObserved",
+				"environmentId", envID, "status", "none",
+				"identity", a.identity)
 			return true, false
 		}
 		if err := s.installedFacts.Invalidate(a.identity); err != nil {
+			s.log.Info("shell.environmentObserved",
+				"environmentId", envID, "status", "none",
+				"identity", a.identity)
 			s.log.Warn("shell.environmentObserved: could not invalidate the installed fact",
 				"identity", a.identity, "error", err)
 			return true, false
 		}
 		a.consumed = true
+		s.log.Info("shell.environmentObserved",
+			"environmentId", envID, "status", "none",
+			"identity", a.identity)
+		s.log.Info("installed fact invalidated",
+			"identity", a.identity)
 		return true, true
 	}
 	a.consumed = true
+	s.log.Info("shell.environmentObserved",
+		"environmentId", envID, "status", "none",
+		"identity", a.identity)
 	return true, false
 }
 

@@ -147,6 +147,11 @@ func (s *Impl) EnsureInstalledRemote(ctx context.Context, sshClient *gossh.Clien
 	root := path.Join(remoteHome, dirName)
 	res, err := NewPublisher(s.log, sftpFS{client: sftpClient}, root).Publish(launchBundle())
 	if err != nil {
+		// The publish outcome is a delivery decision, logged at INFO with
+		// the refusal as a value — the fail-open side: the session still
+		// runs transient-integrated, and the log says why nothing stuck.
+		s.log.Info("remote bundle publish refused",
+			"root", root, "error", err)
 		return fmt.Errorf("shellintegration: remote publish: %w", err)
 	}
 	s.log.Info("shellintegration: remote bundle published",

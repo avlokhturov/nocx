@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -55,6 +56,15 @@ type App struct {
 	// discoverySched owns the port-discovery cadence (nocx-wzc4.2); closed
 	// at shutdown so no timer outlives the process.
 	discoverySched *discovery.Scheduler
+
+	// logFilePath is where the backend log file lives — the stable,
+	// findable copy of the log the delivery-path decisions are written
+	// to (the P0 that had to be diagnosed from a JSON file's mtime). ""
+	// means file logging is unavailable and only stderr carries the log.
+	logFilePath string
+	// logFile is the open append handle, closed at shutdown after the
+	// final line. nil when file logging is unavailable.
+	logFile *os.File
 }
 
 // contentCompactionFloor is the hysteresis fraction of the disk ceiling at
@@ -125,6 +135,10 @@ type optionSet struct {
 	// picks the ContentDB key's home (nocx-rtg0.14). Test-only: production
 	// probes the real system provider once at startup and logs the outcome.
 	keystoreProbe func(context.Context) bool
+	// logFilePath overrides where the backend log file lives. Test-only:
+	// without it New() resolves the profile's data directory, and a test
+	// must not write into the developer's real profile (nocx-ti8w).
+	logFilePath *string
 }
 
 // WithWSAddr pins the WebSocket listen address instead of the default
@@ -141,14 +155,61 @@ func WithKeystoreProbe(probe func(context.Context) bool) Option {
 	return func(o *optionSet) { o.keystoreProbe = probe }
 }
 
+// WithLogFilePath pins the backend log file path instead of the app-dir
+// default. Test-only: an empty path disables file logging (stderr only);
+// any other path must be under a disposable directory the test owns.
+func WithLogFilePath(path string) Option {
+	return func(o *optionSet) { o.logFilePath = &path }
+}
+
 func New(opts ...Option) (*App, error) {
 	var o optionSet
 	for _, opt := range opts {
 		opt(&o)
 	}
 
+	// Resolve the profile paths FIRST: the backend log file lives in the
+	// data directory of the profile THIS build owns (appdir.go's dev/release
+	// split is decided by the build tag), so the dev stand and the shipped
+	// app never write one file and a dev run never touches the shipped
+	// profile (nocx-ti8w).
+	paths, err := storage.NewAppPaths()
+	if err != nil {
+		return nil, fmt.Errorf("storage paths: %w", err)
+	}
+
+	logFilePath := filepath.Join(paths.DataDir(), "nocx.log")
+	if o.logFilePath != nil {
+		logFilePath = *o.logFilePath // test override; empty disables file logging
+	}
+	var logFile *os.File
 	slogger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	if logFilePath != "" {
+		if mkErr := os.MkdirAll(filepath.Dir(logFilePath), 0o700); mkErr != nil {
+			slogger.Warn("backend log file unavailable; logging to stderr only",
+				"path", logFilePath, "error", mkErr)
+			logFilePath = ""
+			// #nosec G304 — the path is the app data dir plus a fixed name,
+			// or a test override; never external input.
+		} else if f, openErr := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); openErr != nil {
+			slogger.Warn("backend log file unavailable; logging to stderr only",
+				"path", logFilePath, "error", openErr)
+			logFilePath = ""
+		} else {
+			// Keep stderr AND the file: the log must survive wherever the
+			// launcher redirected stderr (the P0 that landed in a temp dir
+			// nobody would look in), and still be visible on the console.
+			logFile = f
+			slogger = slog.New(slog.NewTextHandler(io.MultiWriter(os.Stderr, f),
+				&slog.HandlerOptions{Level: slog.LevelInfo}))
+		}
+	}
 	logger := log.NewSlogAdapter(slogger)
+	// The log names itself, first: a running session can say where the
+	// file is by reading its own first line.
+	if logFilePath != "" {
+		logger.Info("backend log file", "path", logFilePath)
+	}
 
 	shint := shellintegration.New(logger)
 	ptf := &localPTYFactory{log: logger, shint: shint}
@@ -172,10 +233,6 @@ func New(opts ...Option) (*App, error) {
 	// Vault (ADR-0011 as amended): owns provider routing, key material and
 	// the seal lifecycle. Two providers are compiled on every platform:
 	// system (OS keychain) and file (encrypted document).
-	paths, err := storage.NewAppPaths()
-	if err != nil {
-		return nil, fmt.Errorf("storage paths: %w", err)
-	}
 	docStore := storage.NewDocumentStore(paths.ConfigDir())
 	profileStore := profile.NewJSONStoreWithDocStore(docStore, "profiles.json")
 
@@ -436,6 +493,8 @@ func New(opts ...Option) (*App, error) {
 		vaultCloser:      v,
 		discoverySched:   discoverySched,
 		UnlockRequester:  tp,
+		logFilePath:      logFilePath,
+		logFile:          logFile,
 	}
 
 	logger.Info("application initialized")
@@ -482,6 +541,19 @@ func (a *App) Shutdown(ctx context.Context) {
 		_ = a.discoverySched.Close()
 	}
 	a.Logger.Info("application stopped")
+	// Close the log file last, after the final line: the stable copy of
+	// the log must not lose the stop record to a shutdown ordering.
+	if a.logFile != nil {
+		_ = a.logFile.Close()
+	}
+}
+
+// LogFilePath returns where this backend's log file lives, or "" when file
+// logging is unavailable (stderr only). A running session can say where the
+// log is instead of the P0's mtime archaeology — the desktop binding
+// (WailsApp) and the dev stand both reach it through this accessor.
+func (a *App) LogFilePath() string {
+	return a.logFilePath
 }
 
 func (a *App) WSPort() int {

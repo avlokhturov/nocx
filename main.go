@@ -91,6 +91,13 @@ func (w *WailsApp) Log(message string) {
 	w.backend.Log(message)
 }
 
+// LogFilePath reports where the backend log file lives, so a running
+// desktop session can say where its log is instead of it being guessed
+// from a file's mtime. "" means file logging is unavailable (stderr only).
+func (w *WailsApp) LogFilePath() string {
+	return w.backend.LogFilePath()
+}
+
 func (w *WailsApp) startup(ctx context.Context) {
 	w.ctx = ctx
 	w.backend.Logger.Info("Wails app starting up")
