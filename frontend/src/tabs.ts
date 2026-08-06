@@ -344,8 +344,9 @@ export class TabManager {
   /** Called when an SSH connection fails because the vault is sealed. */
   onVaultSealed?: () => void
   /** Called when an SSH connection fails because the host key is unknown
-   *  or changed. The renderer offers the accept-on-first-use dialog. */
-  onHostKeyError?: (evidence: HostKeyErrorEvidence) => void
+   *  or changed. Resolves true only after explicit trust; the content then
+   *  retries the same open. */
+  onHostKeyError?: (evidence: HostKeyErrorEvidence, signal: AbortSignal) => Promise<boolean>
   /** Called when the reference picker's setup offer is activated and the
    *  machine has no OS key: the vault layer owns the setup dialog, so the
    *  hook raises it (wired by main.tsx to vaultController.openSetup). */
@@ -498,6 +499,7 @@ export class TabManager {
         onPortsTargetChange: () => this.onActiveTabChange?.(),
         onVaultSealed: this.onVaultSealed,
         onHostKeyError: this.onHostKeyError,
+        onSetupVault: this.onSetupVault,
         onCreateSecret: this.onCreateSecret,
       },
     )

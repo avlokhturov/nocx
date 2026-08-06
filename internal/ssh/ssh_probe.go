@@ -62,12 +62,11 @@ func (rc *RealClient) probeConfig(ctx context.Context, host string, cfg *Connect
 		return "", fmt.Errorf("probe config: %w", err)
 	}
 
-	hostKeyCB, fp, err := rc.probeHostKeyCallback()
+	addr := net.JoinHostPort(resolved.hostName, fmt.Sprintf("%d", resolved.port))
+	hostKeyCB, fp, err := rc.probeHostKeyCallback(knownHostsTargetAddr(addr, cfg))
 	if err != nil {
 		return "", fmt.Errorf("probe config: %w", err)
 	}
-
-	addr := net.JoinHostPort(resolved.hostName, fmt.Sprintf("%d", resolved.port))
 	timeout := cfg.ReadyTimeout
 	if timeout <= 0 {
 		timeout = 30 * time.Second

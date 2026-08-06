@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha1" //nolint:gosec // known_hosts hashes host names with HMAC-SHA1; the file format fixes the algorithm.
+	"crypto/sha256"
+	"encoding/base32"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -244,50 +246,59 @@ func (rc *RealClient) Close() error {
 	return nil
 }
 
-// hostKeyCallback builds a HostKeyCallback from known_hosts.
+// hostKeyCallback builds a direct-route HostKeyCallback from known_hosts.
 func (rc *RealClient) hostKeyCallback() (gossh.HostKeyCallback, error) {
+	return rc.hostKeyCallbackFor("")
+}
+
+// hostKeyCallbackFor builds a HostKeyCallback whose lookup identity may differ
+// from the dial address. A jump target uses a stable route identity so its key
+// can coexist with the key presented by the same hostname on a direct route.
+// The error still names the real target address; KnownHostsAddr is the opaque
+// value the trust path must write back.
+func (rc *RealClient) hostKeyCallbackFor(knownHostsAddr string) (gossh.HostKeyCallback, error) {
 	cb, err := knownhosts.New(rc.knownHostsFile)
-	if err != nil {
-		return func(addr string, remote net.Addr, key gossh.PublicKey) error {
-			return &ErrUnknownHostKey{
-				Addr:        addr,
-				KeyAlgo:     key.Type(),
-				Fingerprint: gossh.FingerprintSHA256(key),
-				Key:         key.Marshal(),
-			}
-		}, nil
-	}
-
 	return func(addr string, remote net.Addr, key gossh.PublicKey) error {
-		err := cb(addr, remote, key)
-		if err == nil {
-			return nil
+		lookupAddr := knownHostsAddr
+		if lookupAddr == "" {
+			lookupAddr = addr
 		}
-
-		var keyErr *knownhosts.KeyError
-		if errors.As(err, &keyErr) {
-			if len(keyErr.Want) == 0 {
-				return &ErrUnknownHostKey{
-					Addr:        addr,
-					KeyAlgo:     key.Type(),
-					Fingerprint: gossh.FingerprintSHA256(key),
-					Key:         key.Marshal(),
-				}
+		if err != nil {
+			return unknownHostKeyError(addr, lookupAddr, key)
+		}
+		if checkErr := cb(lookupAddr, remote, key); checkErr != nil {
+			var keyErr *knownhosts.KeyError
+			if !errors.As(checkErr, &keyErr) {
+				return checkErr
 			}
-			var expected []string
+			if len(keyErr.Want) == 0 {
+				return unknownHostKeyError(addr, lookupAddr, key)
+			}
+			expected := make([]string, 0, len(keyErr.Want))
 			for _, k := range keyErr.Want {
 				expected = append(expected, gossh.FingerprintSHA256(k.Key))
 			}
 			return &ErrHostKeyMismatch{
-				Addr:        addr,
-				KeyAlgo:     key.Type(),
-				Fingerprint: gossh.FingerprintSHA256(key),
-				Expected:    strings.Join(expected, ","),
-				Key:         key.Marshal(),
+				Addr:           addr,
+				KnownHostsAddr: lookupAddr,
+				KeyAlgo:        key.Type(),
+				Fingerprint:    gossh.FingerprintSHA256(key),
+				Expected:       strings.Join(expected, ","),
+				Key:            key.Marshal(),
 			}
 		}
-		return err
+		return nil
 	}, nil
+}
+
+func unknownHostKeyError(addr, knownHostsAddr string, key gossh.PublicKey) error {
+	return &ErrUnknownHostKey{
+		Addr:           addr,
+		KnownHostsAddr: knownHostsAddr,
+		KeyAlgo:        key.Type(),
+		Fingerprint:    gossh.FingerprintSHA256(key),
+		Key:            key.Marshal(),
+	}
 }
 
 // probeHostKeyCallback returns a HostKeyCallback that captures the observed
@@ -301,53 +312,46 @@ func (rc *RealClient) hostKeyCallback() (gossh.HostKeyCallback, error) {
 // promotes it to the heap. The returned func owns the only reference, so
 // *capture is safe to read after the dial completes and before the closure is
 // collected.
-func (rc *RealClient) probeHostKeyCallback() (gossh.HostKeyCallback, *string, error) {
+func (rc *RealClient) probeHostKeyCallback(knownHostsAddr string) (gossh.HostKeyCallback, *string, error) {
 	var captured string
-	cb, err := knownhosts.New(rc.knownHostsFile)
+	cb, err := rc.hostKeyCallbackFor(knownHostsAddr)
 	if err != nil {
-		// known_hosts file missing or unreadable — treat every host as unknown.
-		return func(addr string, remote net.Addr, key gossh.PublicKey) error {
-			captured = gossh.FingerprintSHA256(key)
-			return &ErrUnknownHostKey{
-				Addr:        addr,
-				KeyAlgo:     key.Type(),
-				Fingerprint: captured,
-				Key:         key.Marshal(),
-			}
-		}, &captured, nil
+		return nil, nil, err
 	}
-
 	return func(addr string, remote net.Addr, key gossh.PublicKey) error {
 		captured = gossh.FingerprintSHA256(key)
-		err := cb(addr, remote, key)
-		if err == nil {
-			return nil
-		}
-
-		var keyErr *knownhosts.KeyError
-		if errors.As(err, &keyErr) {
-			if len(keyErr.Want) == 0 {
-				return &ErrUnknownHostKey{
-					Addr:        addr,
-					KeyAlgo:     key.Type(),
-					Fingerprint: captured,
-					Key:         key.Marshal(),
-				}
-			}
-			var expected []string
-			for _, k := range keyErr.Want {
-				expected = append(expected, gossh.FingerprintSHA256(k.Key))
-			}
-			return &ErrHostKeyMismatch{
-				Addr:        addr,
-				KeyAlgo:     key.Type(),
-				Fingerprint: captured,
-				Expected:    strings.Join(expected, ","),
-				Key:         key.Marshal(),
-			}
-		}
-		return err
+		return cb(addr, remote, key)
 	}, &captured, nil
+}
+
+// knownHostsTargetAddr returns the storage identity for a target's host key.
+// Direct routes keep the real OpenSSH-compatible address. Jump routes use a
+// hostname-safe SHA-256 digest of the target endpoint and every hop endpoint.
+// Authentication material and profile IDs are intentionally absent: changing
+// a credential must not invalidate trust in the same network route.
+func knownHostsTargetAddr(targetAddr string, cfg *ConnectConfig) string {
+	if cfg == nil || (cfg.JumpHost == "" && cfg.JumpConfig == nil) {
+		return targetAddr
+	}
+
+	hash := sha256.New()
+	_, _ = fmt.Fprintf(hash, "nocx-known-hosts-route-v1\ntarget=%s\n", knownhosts.Normalize(targetAddr))
+	for current := cfg; current != nil && (current.JumpHost != "" || current.JumpConfig != nil); {
+		port := current.JumpPort
+		if port <= 0 && current.JumpConfig != nil {
+			port = current.JumpConfig.Port
+		}
+		if port <= 0 {
+			port = 22
+		}
+		hopAddr := net.JoinHostPort(current.JumpHost, fmt.Sprintf("%d", port))
+		_, _ = fmt.Fprintf(hash, "jump=%s\n", knownhosts.Normalize(hopAddr))
+		current = current.JumpConfig
+	}
+
+	encoded := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(hash.Sum(nil))
+	routeHost := "nocx-v1-" + strings.ToLower(encoded)
+	return net.JoinHostPort(routeHost, "22")
 }
 
 // TrustHostKey records the offered public key for addr in known_hosts. It is
@@ -366,10 +370,11 @@ func (rc *RealClient) probeHostKeyCallback() (gossh.HostKeyCallback, *string, er
 // HashKnownHosts on) are matched by recomputing the HMAC, the same way
 // ssh-keygen -R finds them.
 //
-// A file with nothing to replace is appended to and never rewritten. A rewrite
-// goes through a temp file in the same directory and a rename, so an interrupt
-// cannot leave a half-written known_hosts. A missing file is created 0600; an
-// existing file keeps its own mode, which is the user's to choose.
+// A file with nothing to replace is appended to and never rewritten. A fresh
+// store creates its parent directories 0700 and the file 0600. A rewrite goes
+// through a temp file in the same directory and a rename, so an interrupt
+// cannot leave a half-written known_hosts. An existing file keeps its own mode,
+// which is the user's to choose.
 //
 // keyBlob is the wire-format marshalled public key (gossh.PublicKey.Marshal),
 // as carried by ErrUnknownHostKey.Key / ErrHostKeyMismatch.Key. addr is the
@@ -382,6 +387,11 @@ func (rc *RealClient) TrustHostKey(addr string, keyBlob []byte) (fingerprint str
 		return "", fmt.Errorf("trust host key: invalid public key: %w", parseErr)
 	}
 	line := knownhosts.Line([]string{addr}, key) + "\n"
+
+	dir := filepath.Dir(rc.knownHostsFile)
+	if mkdirErr := os.MkdirAll(dir, 0o700); mkdirErr != nil {
+		return "", fmt.Errorf("trust host key: create directory %s: %w", dir, mkdirErr)
+	}
 
 	existing, readErr := os.ReadFile(rc.knownHostsFile)
 	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {

@@ -28,13 +28,21 @@ export interface ConnectionTestResult {
    */
   detail?: string
   /**
-   * Host-key evidence, present only for the two host-key outcomes. Carries the offered key so the renderer can show its fingerprint and, for a changed key, the stored fingerprint; the renderer echoes host+key back to connections.trustHostKey to accept. A host key is public material (ADR-0011 §3): it may cross the wire and be displayed.
+   * Host-key evidence, present only for the two host-key outcomes. Carries the displayed target, the backend-issued known_hosts lookup identity, and the offered key so the renderer can show its fingerprint and echo knownHostsHost+key back to connections.trustHostKey. A host key is public material (ADR-0011 §3): it may cross the wire and be displayed.
    */
   hostKey?: {
     /**
      * Resolved address as probed (host, or host:port), the exact string known_hosts matching used. The trust call must use this same string or the appended line will not match the next probe.
      */
     host: string
+    /**
+     * Exact backend-issued storage identity used by known_hosts matching. It equals host for a direct route and is an opaque route-specific hostname for a target reached through jump hosts. The trust call must use this value, never derive it in the renderer.
+     */
+    knownHostsHost: string
+    /**
+     * True only when this route already has a stored key that differs from the offered key. The renderer uses this backend classification; it must not infer security state from human-readable error text.
+     */
+    changed: boolean
     /**
      * Key algorithm of the offered key, e.g. ssh-ed25519, ecdsa-sha2-nistp256.
      */

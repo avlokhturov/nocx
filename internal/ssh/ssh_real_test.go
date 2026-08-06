@@ -1412,12 +1412,27 @@ func TestProbe_ThroughJumpHost(t *testing.T) {
 	WithJumpHost(bastionHost, bastionPort, "jumpuser", "publicKey")(cfg)
 	cfg.JumpKeyFile = jumpKeyPath
 
-	// ProbeConfigWithResult through the bastion to the target.
-	fp, err := client.ProbeConfigWithResult(
-		context.Background(), target.addr, cfg,
-	)
+	// A direct-route target entry must not authorize this jump route, even
+	// though the server currently presents the same key on both paths.
+	_, err = client.ProbeConfigWithResult(context.Background(), target.addr, cfg)
+	var unknown *ErrUnknownHostKey
+	if !errors.As(err, &unknown) {
+		t.Fatalf("first jump probe = %T %v, want ErrUnknownHostKey", err, err)
+	}
+	routeAddr := knownHostsTargetAddr(target.addr, cfg)
+	if unknown.Addr != target.addr || unknown.KnownHostsAddr != routeAddr {
+		t.Fatalf("jump evidence = display %q lookup %q, want %q and %q",
+			unknown.Addr, unknown.KnownHostsAddr, target.addr, routeAddr)
+	}
+	if _, err = client.TrustHostKey(unknown.KnownHostsAddr, unknown.Key); err != nil {
+		t.Fatalf("trust target on jump route: %v", err)
+	}
+
+	// The next probe follows the same route identity and succeeds without
+	// replacing the target's direct-route entry.
+	fp, err := client.ProbeConfigWithResult(context.Background(), target.addr, cfg)
 	if err != nil {
-		t.Fatalf("ProbeConfigWithResult through jump: %v", err)
+		t.Fatalf("ProbeConfigWithResult through jump after trust: %v", err)
 	}
 
 	// The fingerprint must be the target's, not the bastion's.

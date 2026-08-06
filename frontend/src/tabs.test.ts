@@ -132,6 +132,30 @@ describe('TabManager', () => {
     expect(panes.querySelectorAll('.pane').length).toBe(2)
   })
 
+  it('forwards every SSH recovery hook without replacing its siblings', async () => {
+    const { manager } = await mountTabManager()
+    const onVaultSealed = vi.fn()
+    const onHostKeyError = vi.fn().mockResolvedValue(true)
+    const onSetupVault = vi.fn()
+    manager.onVaultSealed = onVaultSealed
+    manager.onHostKeyError = onHostKeyError
+    manager.onSetupVault = onSetupVault
+
+    manager.newSSHTab('ssh:test:1', 'host.example.com')
+    const content: unknown = manager.activeTerminalContent()
+    expect(content).not.toBeNull()
+    if (!content || typeof content !== 'object' || !('hooks' in content)) {
+      throw new Error('active TerminalContent has no hooks field')
+    }
+    const hooks = content.hooks
+    if (!hooks || typeof hooks !== 'object') {
+      throw new Error('TerminalContent hooks are not an object')
+    }
+    expect('onVaultSealed' in hooks ? hooks.onVaultSealed : undefined).toBe(onVaultSealed)
+    expect('onHostKeyError' in hooks ? hooks.onHostKeyError : undefined).toBe(onHostKeyError)
+    expect('onSetupVault' in hooks ? hooks.onSetupVault : undefined).toBe(onSetupVault)
+  })
+
   // ── closing closes the session and activates a neighbour ──────────────
 
   it('closes the session when the active tab is closed', async () => {
