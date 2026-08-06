@@ -436,14 +436,14 @@ boundaries, so quietly widening either here would widen that boundary too.
 
 ### 5.2 Wire — control plane, JSON-RPC (AD-1)
 
-| Method         | Params                             | Result                                                                                   |
-| -------------- | ---------------------------------- | ---------------------------------------------------------------------------------------- |
-| `files.open`   | `{sessionId, rootPath?}`           | `{bindingId, endpointId, root:{path,display,inferred,inferredReason}}`                   |
-| `files.list`   | `{bindingId, path, offset, limit}` | `{path, canonical, entries[], offset, total, hasMore, rev}` — or `tooLarge` / `timedOut` |
-| `files.read`   | `{bindingId, path, maxBytes}`      | `{path, canonical, text, size, modTime, truncated, binary, lossy, changed}`              |
-| `files.watch`  | `{bindingId, paths[]}`             | `{mode, degradedReason}` — replaces the watch set for this binding                       |
-| `files.close`  | `{bindingId}`                      | `{}`                                                                                     |
-| `files.reveal` | `{bindingId, path}`                | `{}` — local bindings only; errors on a remote one                                       |
+| Method         | Params                             | Result                                                                                                                          |
+| -------------- | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `files.open`   | `{sessionId, rootPath?}`           | `{bindingId, endpointId, root:{path,display,inferred,inferredReason}}`                                                          |
+| `files.list`   | `{bindingId, path, offset, limit}` | `{state:'ok', path, canonical, entries[], offset, total, hasMore, rev}`, or `{state:'tooLarge', …}`, or `{state:'timedOut', …}` |
+| `files.read`   | `{bindingId, path, maxBytes}`      | `{path, canonical, text, size, modTime, truncated, binary, lossy, changed}`                                                     |
+| `files.watch`  | `{bindingId, paths[]}`             | `{mode, degradedReason}` — replaces the watch set for this binding                                                              |
+| `files.close`  | `{bindingId}`                      | `{}`                                                                                                                            |
+| `files.reveal` | `{bindingId, path}`                | `{}` — local bindings only; errors on a remote one                                                                              |
 
 A change is announced by a **server-initiated notification**. Two existing mechanisms supply
 the two halves, and they must not be confused: `broadcastSettingsChanged` (`ws.go:2888`) is
@@ -485,6 +485,18 @@ client's own comparison after re-listing is what it falls back on when it is not
 cannot leak a watch: the client sends the set it currently wants and the backend diffs. The
 swap is atomic and idempotent — a newly-added watch that fails to establish must not take the
 healthy existing watches down with it.
+
+**`files.list` returns a discriminated union, and `state` is the discriminator.** The three
+outcomes of D14 are not an object with everything optional — that shape accepts all three at
+once and none of them precisely. So the schema is a `oneOf` of three closed branches and the
+normal one carries `state: 'ok'`, which the §5.2 table does not list because the table predates
+the decision.
+
+One consequence is worth stating because a gate can be fooled by it: **`additionalProperties:
+false` cannot sit at the top level of a `oneOf`.** With no top-level `properties` it would
+forbid every branch's fields and make the schema unsatisfiable, so the closure lives in each
+branch instead. Every accepted object is still closed — but a checker that inspects only the
+root object will not see it, and will report the schema as unguarded when it is not.
 
 #### The two guards on the wire
 

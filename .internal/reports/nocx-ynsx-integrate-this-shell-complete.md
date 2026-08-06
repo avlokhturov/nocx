@@ -61,7 +61,7 @@ to it (verified by experiment). So:
   before sending the wrapper and removes the listener on success/cancel/timeout/
   error (no stale READY can trigger a stream).
 - `terminal-content.ts`: `integrateShell()` — gate `PROMPT_READY && trusted &&
-  owned` with a stated refusal (toast + log); the input lease is taken BEFORE the
+owned` with a stated refusal (toast + log); the input lease is taken BEFORE the
   RPC: draft (text+selection+scroll) captured byte-for-byte, editor hidden, every
   key except Esc swallowed at document capture phase, kit FloatingPanel
   ("Integrating this shell — Esc to cancel") in the terminal; wrapper typed only

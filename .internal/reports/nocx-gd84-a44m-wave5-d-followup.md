@@ -23,11 +23,11 @@ committed Dockerfile (`.githooks/images/go-tests/Dockerfile`) that installs
 dash+zsh. The hook builds it before every run (`.githooks/containerized-tests.sh`).
 Why this over an apt-get in the run command — measured:
 
-| Option | Cost | Verdict |
-|---|---|---|
+| Option                                             | Cost                                                                                                                                                                       | Verdict                 |
+| -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------- |
 | `apt-get update && apt-get install zsh` per commit | **27.6s** per commit, needs Debian-mirror network on EVERY commit, breaks the warm-run-offline property (image + caches are what make a repeat commit run with no network) | rejected on the numbers |
-| Derived image, cold build (base cached) | 34.3s, one-time | chosen |
-| Derived image, warm build (BuildKit layer cache) | **0.29s** per commit | chosen |
+| Derived image, cold build (base cached)            | 34.3s, one-time                                                                                                                                                            | chosen                  |
+| Derived image, warm build (BuildKit layer cache)   | **0.29s** per commit                                                                                                                                                       | chosen                  |
 
 The build-every-run choice is deliberate and documented in the Dockerfile and
 the script: the Dockerfile is the source of truth — a package added there
@@ -93,12 +93,12 @@ suites (no termios seeding) cover the real shells cross-platform. Verified:
 
 **Hook (`go_test_containerized`, git-style argv0, on this box):**
 
-| State | Wall time | Notes |
-|---|---|---|
-| Warm, nothing changed | **0.9s** | 27/28 packages cached; includes 0.3s image build |
-| Warm, a Go package changed | ~11–25s | observed 11s (ssh re-ran) and 25.2s (shellintegration re-ran, ~24s of it); everything else cached |
-| Cold caches, image present | **~74–80s** | includes full -race compile + run |
-| True cold (fresh machine) | ~110s once | +34.3s image build |
+| State                      | Wall time   | Notes                                                                                             |
+| -------------------------- | ----------- | ------------------------------------------------------------------------------------------------- |
+| Warm, nothing changed      | **0.9s**    | 27/28 packages cached; includes 0.3s image build                                                  |
+| Warm, a Go package changed | ~11–25s     | observed 11s (ssh re-ran) and 25.2s (shellintegration re-ran, ~24s of it); everything else cached |
+| Cold caches, image present | **~74–80s** | includes full -race compile + run                                                                 |
+| True cold (fresh machine)  | ~110s once  | +34.3s image build                                                                                |
 
 **CI:** macOS backend job adds `brew install dash` (~5–15s on runner, zsh
 ships). ubuntu jobs unchanged. No CI-side cost from the image (the hook is

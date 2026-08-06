@@ -18,14 +18,14 @@ Escalations sent: `msg_c45e1d3f6f29` (escalation), `ask` thread `ee21ca7d5fad` (
 
 ## Fence verification (REAL pty tests — bash, zsh, dash; the harness uses one pump goroutine as the only reader; per-read goroutines were abandoned after they polluted observations)
 
-| Fence | Result |
-|---|---|
-| Exact prior termios restored after success | **VERIFIED** (`stty -g` capture → `stty "$saved"` restore; bit-exact, incl. Cc array) |
-| Exact termios restored on cancel (terminator sent, no payload) | **VERIFIED** — shell returns to a visible native prompt, no integration markers |
-| Fail-open absolute (no mktemp on PATH) | **VERIFIED** — termios untouched, visible prompt, shell usable |
-| Integration actually works end-to-end | **VERIFIED** — bash emits the 636 hello + A/B; zsh and dash emit A; echo works after |
-| Payload works for bash, zsh, POSIX sh (dispatcher) | **VERIFIED** |
-| **The shell at the prompt is never shown the payload bytes** | **FAILS — the conflict** |
+| Fence                                                          | Result                                                                                |
+| -------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| Exact prior termios restored after success                     | **VERIFIED** (`stty -g` capture → `stty "$saved"` restore; bit-exact, incl. Cc array) |
+| Exact termios restored on cancel (terminator sent, no payload) | **VERIFIED** — shell returns to a visible native prompt, no integration markers       |
+| Fail-open absolute (no mktemp on PATH)                         | **VERIFIED** — termios untouched, visible prompt, shell usable                        |
+| Integration actually works end-to-end                          | **VERIFIED** — bash emits the 636 hello + A/B; zsh and dash emit A; echo works after  |
+| Payload works for bash, zsh, POSIX sh (dispatcher)             | **VERIFIED**                                                                          |
+| **The shell at the prompt is never shown the payload bytes**   | **FAILS — the conflict**                                                              |
 
 ## The conflict (measured, not argued)
 

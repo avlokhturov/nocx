@@ -61,13 +61,13 @@ via the probe command and framing the discovery package actually ships
 (`internal/discovery/probes.go` / `parse.go`). Temporary Go test, deleted
 after capture; keypair removed, `~/.ssh` restored.
 
-| Phase | Mean |
-| --- | --- |
-| exec channel open (Start → accepted) | **0.35 ms** |
-| probe (`ss` + output transfer + exit status) | **11.5 ms** |
-| parse (framing + `parseSS`) | **0.03 ms** |
-| **one steady-state sample** | **≈ 11.9 ms** |
-| fresh dial + handshake (cold first sample only) | 32.1 ms |
+| Phase                                           | Mean          |
+| ----------------------------------------------- | ------------- |
+| exec channel open (Start → accepted)            | **0.35 ms**   |
+| probe (`ss` + output transfer + exit status)    | **11.5 ms**   |
+| parse (framing + `parseSS`)                     | **0.03 ms**   |
+| **one steady-state sample**                     | **≈ 11.9 ms** |
+| fresh dial + handshake (cold first sample only) | 32.1 ms       |
 
 11 listeners found in the sample. **Verdict: cheap.** At the 5 s cadence one
 sample is 0.24 % duty cycle; the cadence should run without asking. The

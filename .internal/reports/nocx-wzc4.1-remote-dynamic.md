@@ -22,8 +22,8 @@ Production (all within ownership: `internal/tunnel/`, `internal/ssh/ssh_tunnel.g
   10-byte request envelope); BIND/UDP ASSOCIATE answered `0x07`; CONNECT targets dialed as
   direct-tcpip channels with the domain form forwarded verbatim (far-end resolution); dial
   failures mapped `0x05` refused / `0x03` unreachable / `0x01` generic (syscall errno chain
-  + OpenSSH's "connect failed: …" rejection text); one refused CONNECT leaves the proxy
-  serving; handshake reads bounded by a 10 s deadline.
+  - OpenSSH's "connect failed: …" rejection text); one refused CONNECT leaves the proxy
+    serving; handshake reads bounded by a 10 s deadline.
 - **`internal/tunnel/tunnel.go`** — `strategyFor` wires remote/dynamic; `New` rejects a
   destination on a dynamic forward; direction docs updated.
 - Tests: `internal/tunnel/tunnel_test.go` (fake connector gained a `Listen` seam modeling

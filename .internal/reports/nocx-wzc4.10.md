@@ -56,7 +56,7 @@ One real trap hit mid-run: putting `LOCAL_TARGET_ID` in `terminal-content.ts`
 made `ports.tsx` import the terminal module graph, which changed the hoisted
 `vi.mock('./renderers/xterm')` evaluation order in `ports-view.test.tsx`
 (the mock factory references `createRendererMock`, which lives in a module
-evaluated *after* the new import edge, so the factory ran before its import
+evaluated _after_ the new import edge, so the factory ran before its import
 initialized: `Cannot access '__vi_import_7__' before initialization`). Moving
 the constant to the light `ports-client.ts` seam removed the edge and fixed
 it without touching the mock.

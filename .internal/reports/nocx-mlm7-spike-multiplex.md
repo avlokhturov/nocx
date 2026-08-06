@@ -57,11 +57,11 @@ verified sha256(pushed) == sha256(source).
 Yes, and no. Server-side proof, from the main sshd's verbose log during the 20
 runs:
 
-| event | count |
-|---|---|
-| TCP connections (`Connection from`) | 20 |
-| authentications (`Accepted publickey`) | 20 |
-| sessions (`Starting session`) | 40 |
+| event                                  | count |
+| -------------------------------------- | ----- |
+| TCP connections (`Connection from`)    | 20    |
+| authentications (`Accepted publickey`) | 20    |
+| sessions (`Starting session`)          | 40    |
 
 The server saw exactly one connection and one authentication per run, and two
 sessions per connection: `command … id 0` (the master's shell) and
@@ -70,18 +70,18 @@ the auth log. The identity check is per-run `sha=True` on all 20.
 
 ## 2. Timing, 20 runs, monotonic, milliseconds
 
-| interval | min | p25 | median | p75 | p90 | max |
-|---|---|---|---|---|---|---|
-| submit → mux answers `-O check` | 77.1 | 113.8 | 115.6 | 117.8 | 119.0 | 119.8 |
-| submit → remote command start | 77.1 | 115.8 | 116.4 | 118.1 | 118.5 | 119.5 |
-| submit → 35 KB on far FS | 86.2 | 124.1 | 126.7 | 127.5 | 128.6 | 129.1 |
-| submit → sftp exit | 86.2 | 124.1 | 126.7 | 127.5 | 128.6 | 129.1 |
-| submit → bootstrap done (`D`) | 93.7 | 126.3 | 132.0 | 133.7 | 135.5 | 136.0 |
-| mux → remote start (session setup) | −1.4 | −0.3 | 0.6 | 2.4 | 3.5 | 4.0 |
-| remote start → file present (the bootstrap wait) | 5.3 | 7.3 | 9.7 | 11.0 | 11.4 | 11.7 |
-| mux → sftp exit (push wall) | 9.1 | 9.2 | 9.4 | 10.5 | 12.0 | 13.5 |
-| file → `D` (bootstrap consumes) | 0.6 | 3.1 | 5.7 | 6.9 | 7.5 | 8.1 |
-| `D` → ssh exit | 0.2 | 1.6 | 4.1 | 8.3 | 8.6 | 8.7 |
+| interval                                         | min  | p25   | median | p75   | p90   | max   |
+| ------------------------------------------------ | ---- | ----- | ------ | ----- | ----- | ----- |
+| submit → mux answers `-O check`                  | 77.1 | 113.8 | 115.6  | 117.8 | 119.0 | 119.8 |
+| submit → remote command start                    | 77.1 | 115.8 | 116.4  | 118.1 | 118.5 | 119.5 |
+| submit → 35 KB on far FS                         | 86.2 | 124.1 | 126.7  | 127.5 | 128.6 | 129.1 |
+| submit → sftp exit                               | 86.2 | 124.1 | 126.7  | 127.5 | 128.6 | 129.1 |
+| submit → bootstrap done (`D`)                    | 93.7 | 126.3 | 132.0  | 133.7 | 135.5 | 136.0 |
+| mux → remote start (session setup)               | −1.4 | −0.3  | 0.6    | 2.4   | 3.5   | 4.0   |
+| remote start → file present (the bootstrap wait) | 5.3  | 7.3   | 9.7    | 11.0  | 11.4  | 11.7  |
+| mux → sftp exit (push wall)                      | 9.1  | 9.2   | 9.4    | 10.5  | 12.0  | 13.5  |
+| file → `D` (bootstrap consumes)                  | 0.6  | 3.1   | 5.7    | 6.9   | 7.5   | 8.1   |
+| `D` → ssh exit                                   | 0.2  | 1.6   | 4.1    | 8.3   | 8.6   | 8.7   |
 
 Notes. The socket answers before the remote command starts, by about a
 millisecond — the master binds the mux listener immediately after
@@ -100,22 +100,22 @@ and it is the push duration, not the connect time.
 
 ## 3. Failure modes
 
-| mode | observed behavior | fail-open reachable? |
-|---|---|---|
-| User config `ControlMaster no` + `ControlPath none` | Command-line `-o` wins: master created, `-O check` rc=0, payload pushed over the mux (subsystem session on the master's connection, no second auth) | n/a — works |
-| Same config, no CLI flags (baseline) | No socket ever appears; `-O check` rc=255 "No such file or directory" | n/a — control |
-| `ControlPath` > 107 bytes (190-char dir) | `ControlPath too long ('…' >= 108 bytes)`; ssh exits, no connection | **No — first connection dies** |
-| `%C` expansion | 40-char hash (`mux-<32hex>`), full path 74 bytes with a short prefix; bounded regardless of `$HOME`/hostname length | prevents the above |
-| Stale dead socket, `ControlMaster=auto` | Socket removed, ssh becomes master, `-O check` rc=0 | yes |
-| Regular file at the socket path, `auto` | Same: removed, master takes over, rc=0 | yes |
-| Stale dead socket, `ControlMaster=yes` (alternative) | `ControlSocket … already exists, disabling multiplexing`; ssh connects directly (full re-auth), rc=0 | yes, at the cost of a second auth |
-| Socket dir unwritable | `unix_listener: cannot bind …: Permission denied`, ssh exits | **No — first connection dies** |
-| Socket dir missing | `unix_listener: cannot bind …: No such file or directory`, ssh exits | **No — first connection dies** |
-| Server `MaxSessions 1` | Mux session request refused (`mux_client_request_session: session request failed: Session open refused by peer`); sftp falls back to its own direct connection — second authentication in the server log — and the payload still lands (35,243 bytes, server's `max1` log: two connections, two auths, one sftp subsystem each) | yes (delivery works, no-second-auth promise broken) |
-| Server without an sftp subsystem | `subsystem request failed on channel 0` + `Connection closed`, sftp rc=255; the master's session is unaffected | yes (bootstrap times out → login shell) |
-| ProxyJump (`-J`) | Works: master via jump, `-O check` and the push do **not** need `-J` (the mux destination is the final host); final sshd log: one connection, one auth, two sessions, sha-identical payload. Caveat: the jump leg ignores command-line `-o` flags and re-reads the config file — the master must use a `-F` config (or the user's own config must be sane) or the jump leg runs default host-key policy | yes (see 4c) |
-| Mismatched destination on a shared `ControlPath` | `-O check` answers rc=0 regardless of destination; an sftp with a different `-P` rode the master anyway (second `subsystem 'sftp'` session on the master's connection, no new auth, file written through the master's server) | n/a — security note (4b) |
-| Master never appears / push never lands | With the flag failures above (long path, bad dir) there is no session at all. With a live master but a failed push, the bounded bootstrap times out and hands to a login shell — observed `NOCX_TIMEOUT` marker then normal session continuation | yes (integration lost, session works) |
+| mode                                                 | observed behavior                                                                                                                                                                                                                                                                                                                                                                                       | fail-open reachable?                                |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
+| User config `ControlMaster no` + `ControlPath none`  | Command-line `-o` wins: master created, `-O check` rc=0, payload pushed over the mux (subsystem session on the master's connection, no second auth)                                                                                                                                                                                                                                                     | n/a — works                                         |
+| Same config, no CLI flags (baseline)                 | No socket ever appears; `-O check` rc=255 "No such file or directory"                                                                                                                                                                                                                                                                                                                                   | n/a — control                                       |
+| `ControlPath` > 107 bytes (190-char dir)             | `ControlPath too long ('…' >= 108 bytes)`; ssh exits, no connection                                                                                                                                                                                                                                                                                                                                     | **No — first connection dies**                      |
+| `%C` expansion                                       | 40-char hash (`mux-<32hex>`), full path 74 bytes with a short prefix; bounded regardless of `$HOME`/hostname length                                                                                                                                                                                                                                                                                     | prevents the above                                  |
+| Stale dead socket, `ControlMaster=auto`              | Socket removed, ssh becomes master, `-O check` rc=0                                                                                                                                                                                                                                                                                                                                                     | yes                                                 |
+| Regular file at the socket path, `auto`              | Same: removed, master takes over, rc=0                                                                                                                                                                                                                                                                                                                                                                  | yes                                                 |
+| Stale dead socket, `ControlMaster=yes` (alternative) | `ControlSocket … already exists, disabling multiplexing`; ssh connects directly (full re-auth), rc=0                                                                                                                                                                                                                                                                                                    | yes, at the cost of a second auth                   |
+| Socket dir unwritable                                | `unix_listener: cannot bind …: Permission denied`, ssh exits                                                                                                                                                                                                                                                                                                                                            | **No — first connection dies**                      |
+| Socket dir missing                                   | `unix_listener: cannot bind …: No such file or directory`, ssh exits                                                                                                                                                                                                                                                                                                                                    | **No — first connection dies**                      |
+| Server `MaxSessions 1`                               | Mux session request refused (`mux_client_request_session: session request failed: Session open refused by peer`); sftp falls back to its own direct connection — second authentication in the server log — and the payload still lands (35,243 bytes, server's `max1` log: two connections, two auths, one sftp subsystem each)                                                                         | yes (delivery works, no-second-auth promise broken) |
+| Server without an sftp subsystem                     | `subsystem request failed on channel 0` + `Connection closed`, sftp rc=255; the master's session is unaffected                                                                                                                                                                                                                                                                                          | yes (bootstrap times out → login shell)             |
+| ProxyJump (`-J`)                                     | Works: master via jump, `-O check` and the push do **not** need `-J` (the mux destination is the final host); final sshd log: one connection, one auth, two sessions, sha-identical payload. Caveat: the jump leg ignores command-line `-o` flags and re-reads the config file — the master must use a `-F` config (or the user's own config must be sane) or the jump leg runs default host-key policy | yes (see 4c)                                        |
+| Mismatched destination on a shared `ControlPath`     | `-O check` answers rc=0 regardless of destination; an sftp with a different `-P` rode the master anyway (second `subsystem 'sftp'` session on the master's connection, no new auth, file written through the master's server)                                                                                                                                                                           | n/a — security note (4b)                            |
+| Master never appears / push never lands              | With the flag failures above (long path, bad dir) there is no session at all. With a live master but a failed push, the bounded bootstrap times out and hands to a login shell — observed `NOCX_TIMEOUT` marker then normal session continuation                                                                                                                                                        | yes (integration lost, session works)               |
 
 ## 4. Findings that change the implementation
 
@@ -156,15 +156,15 @@ design already uses in §3.3) works and is what the timeout variant below uses.
 
 ## 5. Byte lengths
 
-| line | bytes |
-|---|---|
-| today's bootstrap rewrite (canonical path `/home/u/.nocx/run/launcher-12345`) | 189 |
-| today's bootstrap rewrite (realistic `/home/dev` path) | 207 |
-| proposed full line: `ssh -o ControlMaster=auto -o ControlPath=/tmp/nocx-mux/m -t pi@192.168.0.93 '<bootstrap>'` | 158 |
-| remote bootstrap alone, POSIX (sleep 1): `while [ ! -s /tmp/nocx-mux/launch ]; do sleep 1; done; exec /tmp/nocx-mux/launch` | 80 |
-| remote bootstrap, fractional sleep 0.1 (non-POSIX; faster poll) | 76 |
-| remote bootstrap + 30 s timeout + login-shell fallback, if/else form | 177 |
-| installed-mode line today (design §3.3, for reference) | 134 |
+| line                                                                                                                        | bytes |
+| --------------------------------------------------------------------------------------------------------------------------- | ----- |
+| today's bootstrap rewrite (canonical path `/home/u/.nocx/run/launcher-12345`)                                               | 189   |
+| today's bootstrap rewrite (realistic `/home/dev` path)                                                                      | 207   |
+| proposed full line: `ssh -o ControlMaster=auto -o ControlPath=/tmp/nocx-mux/m -t pi@192.168.0.93 '<bootstrap>'`             | 158   |
+| remote bootstrap alone, POSIX (sleep 1): `while [ ! -s /tmp/nocx-mux/launch ]; do sleep 1; done; exec /tmp/nocx-mux/launch` | 80    |
+| remote bootstrap, fractional sleep 0.1 (non-POSIX; faster poll)                                                             | 76    |
+| remote bootstrap + 30 s timeout + login-shell fallback, if/else form                                                        | 177   |
+| installed-mode line today (design §3.3, for reference)                                                                      | 134   |
 
 The canonical today's line was reproduced from `buildBootstrapRewrite`'s
 template with the test file's exact inputs (`'/home/u/.nocx/run/launcher-12345'`

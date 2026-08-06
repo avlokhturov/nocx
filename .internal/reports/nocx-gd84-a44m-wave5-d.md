@@ -17,7 +17,7 @@ testing rules exist to prevent.
 
 ### The choice: fail loudly, targeted, with the provisioning command named
 
-Rejected: *harness auto-provisions*. There is no credible in-test way to
+Rejected: _harness auto-provisions_. There is no credible in-test way to
 obtain a real dash or zsh without vendoring sources, network fetches, or a
 package-manager subprocess — each a new invisible dependency worse than the
 skip it replaces, and each would have made the tests depend on a machine
@@ -27,7 +27,7 @@ test behind a documented command (the busybox in-band tests run under
 `nix shell nixpkgs#busybox --command go test …`; the ssh conformance tests
 have a `make conformance` target).
 
-Chosen: *fail rather than skip*, scoped to the four named tests. New helper
+Chosen: _fail rather than skip_, scoped to the four named tests. New helper
 `requireIntegrationShell` (launcher_test.go) fatals with an actionable message
 naming the provisioning commands. Legacy skip semantics of the other tests
 (`requireShell` for bash in the launcher suite, the inband and posix tests,
@@ -44,7 +44,7 @@ Verified both directions on this machine (bash present, dash/zsh absent):
   in the package (10 pre-existing skips unchanged — inband, posix, tcsh,
   which are out of this brief's named scope).
 - Green path, `nix shell nixpkgs#dash nixpkgs#zsh --command go test
-  ./internal/shellintegration/ -count=1`: `ok … 23.4s`, exit 0 — all four
+./internal/shellintegration/ -count=1`: `ok … 23.4s`, exit 0 — all four
   pass (RunsUnderDash 1.4s, TransientDirFlow 1.4s, CleanupAfterEarlyExit
   0.6s, CleanupAfterSyntaxError 1.0s).
 
@@ -116,10 +116,10 @@ have caught the regression.
 - The contract assertion **catches the original bug**: run against
   `git show 30014e3^:frontend/src/style.css`, both halves fail —
   `justify-content: space-between` present on the container, `margin-left:
-  auto` absent on the right group.
+auto` absent on the right group.
 - The current tree passes: `vitest run src/terminal-content.test.ts
-  src/editor.test.ts` → 90/90 (3 new tests). `tsc --noEmit` clean, `eslint
-  --max-warnings 0` clean, `prettier --check` clean on the changed file.
+src/editor.test.ts` → 90/90 (3 new tests). `tsc --noEmit` clean, `eslint
+--max-warnings 0` clean, `prettier --check` clean on the changed file.
 
 ## Scoped gates run
 

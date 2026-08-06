@@ -45,7 +45,7 @@ on their own when the resolver is degraded).
 - `frontend/src/suggest/rank.test.ts` — golden case: a host outranks
   whole-line history in argument position whatever its recency.
 - `frontend/src/ui/completion-dropdown.ts` / `.test.ts` — `host` source badge
-  + badge test.
+  - badge test.
 - `frontend/src/terminal-content.ts` — constructs `hostProvider` at the
   composition root with this tab's ProfileClient (minimal edit, 7 lines).
 

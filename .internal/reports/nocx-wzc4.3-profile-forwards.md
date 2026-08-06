@@ -98,11 +98,11 @@ run it before the ack if you want the ledger populated for `ports.status`.
 
 ## Test counts (before → after)
 
-| Suite | Before | After |
-|---|---|---|
-| `go test -race ./internal/profile/...` | ~87 | **101** (12 portDiscovery + 7 forwards tests new) |
-| `go test -race ./internal/connectfwd/...` | — | **6** (new package) |
-| frontend full suite | 1825 baseline | **1825 passing, 104 files** (includes +7 row-list, +5 connections.behavior, +7 connections.test) |
+| Suite                                     | Before        | After                                                                                            |
+| ----------------------------------------- | ------------- | ------------------------------------------------------------------------------------------------ |
+| `go test -race ./internal/profile/...`    | ~87           | **101** (12 portDiscovery + 7 forwards tests new)                                                |
+| `go test -race ./internal/connectfwd/...` | —             | **6** (new package)                                                                              |
+| frontend full suite                       | 1825 baseline | **1825 passing, 104 files** (includes +7 row-list, +5 connections.behavior, +7 connections.test) |
 
 ## Gates (all run, real exit codes)
 

@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/files.reveal.schema.json",
+  "title": "FilesRevealResult",
+  "description": "Result of the files.reveal JSON-RPC method: the path was revealed in the platform's file manager (Finder/Explorer). Local bindings only — the backend refuses a remote binding rather than silently doing nothing, because a UI-only guard is one bug away from being no guard (§5.2). An empty result is still a contract: additionalProperties: false on an empty shape is what makes 'returns nothing' enforceable.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": []
+}

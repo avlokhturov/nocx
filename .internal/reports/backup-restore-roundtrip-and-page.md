@@ -92,7 +92,7 @@ Backup card ("Show Backup Paths" — a path listing, not a file; the copy step i
 the separate `.json` import input, and the "Import from ~/.ssh/config" button (that entry point
 already lives in the Connections dialog). The transport methods behind the removed controls still
 exist; the page no longer produces a format it cannot stand behind. No control whose backend did
-not exist was *removed* — the one found (portable import) was *fixed*.
+not exist was _removed_ — the one found (portable import) was _fixed_.
 
 `export.css` updated to match (the mode-card summary class is gone; `PageSection`'s description
 slot owns that line).
@@ -101,7 +101,7 @@ slot owns that line).
 
 - **Gates:** `gofumpt -l .` clean; `golangci-lint run` (export, settings, transport) clean;
   `go test -race ./...` clean (exit 0, 23 ok packages); frontend `npm run typecheck`, `npx
-  eslint .`, `npm test` (1457/1457), `npx prettier --check` (frontend), `npm run contracts:check`
+eslint .`, `npm test` (1457/1457), `npx prettier --check` (frontend), `npm run contracts:check`
   all clean.
 - **Browser (real Chromium from the Nix store, viewport 1365×768, deviceScaleFactor 1.25, dev
   stand on NOCX_WS_PORT=9882 / NOCX_WEB_PORT=5182, backend built from this tree):** the page
@@ -138,4 +138,4 @@ slot owns that line).
 - Contracts: `contracts/export.import.schema.json`, `contracts/export.importPortable.schema.json`,
   generated `frontend/src/generated/export.import.ts`, `export.importPortable.ts`
 - Frontend: `export-section.tsx`, `export-section.behavior.test.ts`, `profiles.ts` (RPC name fix
-  + generated type), `export-utils.ts` (dead `downloadJSON` removed), `styles/surfaces/export.css`
+  - generated type), `export-utils.ts` (dead `downloadJSON` removed), `styles/surfaces/export.css`

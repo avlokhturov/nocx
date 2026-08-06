@@ -78,7 +78,7 @@ The mixed-list model kept everything the host side had earned: ad-hoc
   the palette returns true while a drill is in progress. Zero change to the
   stack's semantics; `dialog.tsx` is the only kit file touched (+15 lines).
 - `QuickConnectItem` gained a **required `kind`** (`command | host |
-  setting`) — the type badge is the point of a mixed list, and the compiler
+setting`) — the type badge is the point of a mixed list, and the compiler
   enforces every row declares one.
 - Drill step choices are cached per depth, so Backspace restores a step
   without re-fetching (the port step would otherwise re-sample the server).

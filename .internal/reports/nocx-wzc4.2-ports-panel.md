@@ -66,7 +66,7 @@
   explanation, probe-less host ≠ "nothing is listening", stopped reasons/retry).
 - Gates: `go build ./...`, `go vet`, `golangci-lint run` (scoped packages), full
   `go test -race` on the three touched packages, gofmt clean. Frontend: `tsc
-  --noEmit`, full `eslint . --max-warnings 0`, `prettier --check src/`,
+--noEmit`, full `eslint . --max-warnings 0`, `prettier --check src/`,
   `contracts:check`, full vitest (103 files, 1808 tests) — all green.
 - Test counts before/after: transport full suite still green (no before count
   captured — the suite ran clean at 27.5 s; 1808 frontend tests pass).
@@ -97,11 +97,12 @@ main.tsx, internal/tunnel, internal/ssh/ssh_tunnel.go: **untouched**.
 
 ```ts
 import { PortsContent, createPortsPanelServices } from './ports'
-const services = createPortsPanelServices(dispatcher)   // dispatcher already exists
-const content = new PortsContent(profileId, services)   // profileId of the active tab
+const services = createPortsPanelServices(dispatcher) // dispatcher already exists
+const content = new PortsContent(profileId, services) // profileId of the active tab
 // then registry.register(...) with surfaceType 'nocx.ports', singletonKey null,
 // defaultTitle 'Ports'; open via tm.openTab(content, descriptor)
 ```
+
 The content's setVisible already reports visibility (hidden tab pauses sampling).
 
 ## What I could not verify

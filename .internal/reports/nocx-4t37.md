@@ -10,8 +10,8 @@ A **capability statement** above the pending command on SSH tabs — not a
 three-position selector, and the word "nocxify" appears nowhere in the UI
 (per the owner's correction). The rail chip states what is true right now:
 **Native input / Command blocks / Enhanced input** (labels from the
-correction), and its popover offers the two real transitions: *Integrate
-this shell* (from a plain shell) and *Use native input* (from an integrated
+correction), and its popover offers the two real transitions: _Integrate
+this shell_ (from a plain shell) and _Use native input_ (from an integrated
 one). `relay` exists in the model (`frontend/src/capability.ts`, the
 `ShellMode` axis `terminal | nocxify | relay`, mirroring `tunnel.Direction`'s
 third-value pattern) and is never rendered.
@@ -31,9 +31,9 @@ integrated at startup. Now:
 
 - `internal/ssh`: `ConnectConfig.LaunchPolicy` (own enum, same
   ssh-doesn't-depend-on-profile boundary that duplicates `ShellKind` etc.)
-  + `launchAllowed()` gate in `shellStartCommand` — ask/off open a plain
-  shell (launcher and legacy installer both gated); empty = auto (every
-  pre-existing caller unchanged).
+  - `launchAllowed()` gate in `shellStartCommand` — ask/off open a plain
+    shell (launcher and legacy installer both gated); empty = auto (every
+    pre-existing caller unchanged).
 - `internal/connection/resolver.go`: effective `shellIntegration` →
   `LaunchPolicy`; `internal/session` carries it through the option
   conversion (a field carried and discarded was the failure mode named in

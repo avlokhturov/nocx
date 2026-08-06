@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/files.read.schema.json",
+  "title": "FilesReadResult",
+  "description": "Result of the files.read JSON-RPC method: bounded, streamed content of one file. The provider reads at most the effective limit plus one byte and never the whole file, so the memory guard holds for a 40 GB file; maxBytes <= 0 means the server default and the parameter can only lower the 2 MiB ceiling. Canonical is the identity the viewer tab's singletonKey is built from — without it, two symlinks to one file would open two tabs claiming to be different files, which is D12 failing in exactly the case it exists for.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["path", "canonical", "text", "size", "modTime", "truncated", "binary", "lossy", "changed"],
+  "properties": {
+    "path": {
+      "description": "The lexical path the caller asked for — what the tab label shows, not necessarily what was read. Canonical is what was actually read.",
+      "type": "string"
+    },
+    "canonical": {
+      "description": "The provider-canonical identity of the object actually read — what singletonKey ('endpointId ?? local' + ':' + canonical) deduplicates viewer tabs on. A symlink and its target share a canonical.",
+      "type": "string"
+    },
+    "text": {
+      "description": "The content, always valid UTF-8. Empty when binary — the viewer says 'binary file, N bytes', never base64. When lossy, invalid sequences have been replaced.",
+      "type": "string"
+    },
+    "size": {
+      "description": "The size sampled at read start. The viewer renders this, and the read-end sample is what corroborates changed.",
+      "type": "integer"
+    },
+    "modTime": {
+      "description": "The modification time sampled at read start, ISO-8601 UTC. Sampled again at read end; a difference is part of what sets changed.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "truncated": {
+      "description": "True iff the effective limit (min(requested, 2 MiB)) was reached and the extra byte was readable — the result is a prefix, not the whole file.",
+      "type": "boolean"
+    },
+    "binary": {
+      "description": "A NUL byte among the bytes actually read. A heuristic and labelled as one: a binary whose first bytes are NUL-free reads as text, accepted.",
+      "type": "boolean"
+    },
+    "lossy": {
+      "description": "True when the bytes actually read were not valid UTF-8, so text is a lossy conversion with invalid sequences replaced. Distinct from binary: a NUL-free latin-1 file reads as lossy text, not as binary.",
+      "type": "boolean"
+    },
+    "changed": {
+      "description": "True when size or mtime differed between the before- and after-samples — the file changed while it was being read, and the viewer says 'this changed while I was reading it' instead of presenting an unknowable mixture.",
+      "type": "boolean"
+    }
+  }
+}

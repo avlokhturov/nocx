@@ -47,6 +47,7 @@
 ## RPC shapes (P9 must wire these)
 
 ### `shell.launcherCommand`
+
 ```json
 params:  { "sessionId": "<AD-7 session id>", "oracleArgv": ["ssh","-G","-p","2222","pi@host"] }
 result:  { "mode": "bootstrap"|"installed"|"raw",
@@ -54,6 +55,7 @@ result:  { "mode": "bootstrap"|"installed"|"raw",
            "launcherPath": "<shell-quoted staged path>"|null,   // bootstrap only
            "reason": null|"remote-command"|"oracle-failed"|"unsupported"|"stage-failed" }  // raw only
 ```
+
 Renderer contract: register `environmentId` with P2's tracker as expected
 **before** the line reaches the pty (bootstrap/installed only — a raw result
 must NOT be registered). Bootstrap → `buildBootstrapRewrite(plan,
@@ -61,12 +63,14 @@ launcherPath)`; installed → `buildInstalledRewrite(plan, environmentId,
 sessionId)`.
 
 ### `shell.environmentObserved` (new)
+
 ```json
 params:  { "environmentId": "<the minted id>",
            "passport": { "protocolVersion","environmentId","parentEnvironmentId",
                          "scriptVersion","tier","generation" } | null }  // null = no passport arrived
 result:  { "processed": bool, "factUpdated": bool }
 ```
+
 Renderer contract: send the **accepted** passport (tracker status
 `accepted`) mid-session, or `passport: null` at the local D when the
 attempt ended with none. `processed=false` means the id did not match a

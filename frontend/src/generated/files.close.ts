@@ -1,0 +1,15 @@
+/**
+ * GENERATED FILE — do not edit.
+ *
+ * Source: contracts/files.close.schema.json
+ * Regenerate: cd frontend && npm run contracts
+ *
+ * Editing this file is editing the wrong end of the contract. If the renderer
+ * needs a field the wire does not carry, the schema is what has to change, and
+ * then the Go transport has to satisfy it.
+ */
+
+/**
+ * Result of the files.close JSON-RPC method: the binding is closed — its provider released, its pooled SSH reference returned, its watches torn down. An empty result is still a contract: additionalProperties: false on an empty shape is what makes 'returns nothing' enforceable, and a renderer that wants a field here cannot be written. Closing a terminal closes its bindings; a viewer whose binding is gone keeps what it already has on screen and issues no further calls (§5.6).
+ */
+export interface FilesCloseResult {}
