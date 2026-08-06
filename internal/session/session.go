@@ -343,6 +343,13 @@ func sshOptionsFromConfig(cfg *ssh.ConnectConfig) []ssh.ConnectOption {
 	if cfg.JumpHost != "" {
 		opts = append(opts, ssh.WithJumpHost(cfg.JumpHost, cfg.JumpPort, cfg.JumpUser, cfg.JumpAuthMode))
 	}
+	// JumpConfig carries the full recursive jump configuration (Secrets,
+	// SecretID, KeyFile, AuthMode, nested JumpConfig) — without it the
+	// session→ssh seam drops the bastion's auth material and the dial
+	// offers no methods (nocx-8b1v).
+	if cfg.JumpConfig != nil {
+		opts = append(opts, ssh.WithJumpConfig(cfg.JumpConfig))
+	}
 	if cfg.JumpSecrets != nil {
 		opts = append(opts, ssh.WithJumpCredentials(cfg.JumpSecrets, cfg.JumpSecretID))
 	}
@@ -367,6 +374,9 @@ func sshOptionsFromConfig(cfg *ssh.ConnectConfig) []ssh.ConnectOption {
 	}
 	if cfg.PasswordRequester != nil {
 		opts = append(opts, ssh.WithPasswordRequester(cfg.PasswordRequester))
+	}
+	if cfg.UnlockRequester != nil {
+		opts = append(opts, ssh.WithUnlockRequester(cfg.UnlockRequester))
 	}
 
 	if cfg.AuthorizedEndpoint != "" {

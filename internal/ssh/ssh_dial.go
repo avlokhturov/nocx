@@ -238,6 +238,12 @@ func (rc *RealClient) dialJumpForConnect(ctx context.Context, host string, resol
 			return nil, fmt.Errorf("build jump host auth: %w", err)
 		}
 		jumpAuths := authMethodsFromChain(chain)
+		// Same guard as dialForConnect: an empty auth list means every real
+		// method fell out. Say that instead of dialing and letting the
+		// handshake report "attempted methods [none]" (nocx-8b1v).
+		if len(jumpAuths) == 0 {
+			return nil, &ErrNoAuthMethod{User: resolved.user, Host: resolved.hostName, Mode: cfg.AuthMode}
+		}
 		timeout := cfg.ReadyTimeout
 		if timeout <= 0 {
 			timeout = 30 * time.Second
