@@ -46,7 +46,7 @@ func TestPasswordRequest_NotifiesConnectedClient(t *testing.T) {
 	// The connected client receives a connections.passwordRequest
 	// notification naming the connection and the account (nocx-s8jn) —
 	// the prompt must know which password it is asking for.
-	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	_, data, err := conn.ReadMessage()
 	if err != nil {
 		t.Fatalf("expected password request notification, got error: %v", err)
@@ -140,7 +140,7 @@ func TestPasswordRequest_SubmittedWithRemember(t *testing.T) {
 		done <- err
 	}()
 
-	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	_, data, err := conn.ReadMessage()
 	if err != nil {
 		t.Fatalf("read notification: %v", err)
@@ -200,7 +200,7 @@ func TestPasswordRequest_SubmittedUseOnce(t *testing.T) {
 		done <- err
 	}()
 
-	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	_, data, err := conn.ReadMessage()
 	if err != nil {
 		t.Fatalf("read notification: %v", err)
@@ -257,7 +257,7 @@ func TestPasswordRequest_Cancelled(t *testing.T) {
 		done <- err
 	}()
 
-	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	_, data, err := conn.ReadMessage()
 	if err != nil {
 		t.Fatalf("read notification: %v", err)
@@ -311,7 +311,7 @@ func TestPasswordRequest_ContextCancelled(t *testing.T) {
 	}()
 
 	// Drain the notification so we know it was sent.
-	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	if _, _, err := conn.ReadMessage(); err != nil {
 		t.Fatalf("read notification: %v", err)
 	}

@@ -165,11 +165,19 @@ func (r *Resolver) buildConfig(prof *profile.SSHProfile, visited map[string]bool
 	// The profile stores MILLISECONDS; ConnectConfig fields are time.Duration.
 	if eff.ResolvedOptions.KeepaliveInterval > 0 {
 		cfg.KeepaliveInterval = time.Duration(eff.ResolvedOptions.KeepaliveInterval) * time.Millisecond
+	} else {
+		// Default keepalive: 30s interval, 3 failures to close. A silent
+		// NAT/firewall drop leaves a dead channel blocking forever without
+		// probes — the user sees a frozen tab and no error (nocx-o2le).
+		cfg.KeepaliveInterval = 30 * time.Second
+		cfg.KeepaliveCountMax = 3
 	}
 	if eff.ResolvedOptions.KeepaliveCountMax > 0 {
 		cfg.KeepaliveCountMax = eff.ResolvedOptions.KeepaliveCountMax
-	} else {
-		cfg.KeepaliveCountMax = -1 // default: single failure closes
+	} else if cfg.KeepaliveInterval > 0 && cfg.KeepaliveCountMax == 0 {
+		// KeepaliveCountMax was not set by the profile or the default
+		// block above; default to 3 consecutive failures.
+		cfg.KeepaliveCountMax = 3
 	}
 	if eff.ResolvedOptions.ReadyTimeout > 0 {
 		cfg.ReadyTimeout = time.Duration(eff.ResolvedOptions.ReadyTimeout) * time.Millisecond

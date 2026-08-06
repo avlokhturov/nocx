@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"io"
 	"sync"
+	"time"
 
 	"github.com/shady2k/nocx/internal/log"
 	gossh "golang.org/x/crypto/ssh"
@@ -36,8 +37,40 @@ func (c *RealChannel) Read(p []byte) (int, error) {
 	return c.stdout.Read(p)
 }
 
+// writeTimeout bounds a Write to a dead SSH channel. gossh's stdin pipe
+// has no deadline of its own, so without this a silent NAT/firewall drop
+// blocks the caller forever (nocx-o2le). The done channel is checked first
+// so a channel the watcher already saw exit returns immediately.
+const writeTimeout = 10 * time.Second
+
 func (c *RealChannel) Write(p []byte) (int, error) {
-	return c.stdin.Write(p)
+	select {
+	case <-c.done:
+		return 0, &ErrDisconnected{}
+	default:
+	}
+
+	type result struct {
+		n   int
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		n, err := c.stdin.Write(p)
+		ch <- result{n, err}
+	}()
+	select {
+	case <-c.done:
+		return 0, &ErrDisconnected{}
+	case r := <-ch:
+		return r.n, r.err
+	case <-time.After(writeTimeout):
+		// The channel is unresponsive. Close it so the watcher fires
+		// and the pool reference is released, rather than leaving a
+		// goroutine stuck in stdin.Write forever.
+		_ = c.Close()
+		return 0, &ErrDisconnected{}
+	}
 }
 
 func (c *RealChannel) Close() error {

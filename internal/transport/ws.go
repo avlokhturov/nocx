@@ -634,6 +634,13 @@ type wsConn struct {
 	id   uint64
 }
 
+// wsWriteDeadline bounds every WebSocket write. Without it, a slow/stuck
+// renderer (TCP buffer full, tab backgrounded) makes WriteMessage block
+// forever while holding wsConn.mu — and any control-frame response that
+// needs writeJSON blocks on the same mutex, stalling the readLoop and
+// freezing every tab (nocx-o2le).
+const wsWriteDeadline = 10 * time.Second
+
 func newWSConn(conn *websocket.Conn, id uint64) *wsConn {
 	return &wsConn{conn: conn, id: id}
 }
@@ -641,12 +648,14 @@ func newWSConn(conn *websocket.Conn, id uint64) *wsConn {
 func (w *wsConn) writeJSON(v any) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	_ = w.conn.SetWriteDeadline(time.Now().Add(wsWriteDeadline))
 	return w.conn.WriteJSON(v)
 }
 
 func (w *wsConn) writeMessage(msgType int, data []byte) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	_ = w.conn.SetWriteDeadline(time.Now().Add(wsWriteDeadline))
 	return w.conn.WriteMessage(msgType, data)
 }
 
@@ -929,86 +938,118 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.handleAck(req)
 	case "profiles.list", "profiles.create", "profiles.update", "profiles.delete",
 		"profiles.effective", "profiles.patch":
-		s.handleProfileMethod(wconn, req)
+		// Profile store I/O — reads/writes JSON files. Off the readLoop.
+		go s.handleProfileMethod(wconn, req)
 	case "profiles.importTabby":
-		s.handleImportTabby(wconn, req)
+		// Import parses YAML, resolves secrets, writes profiles — all I/O.
+		go s.handleImportTabby(wconn, req)
 	case "profiles.tabbyPreview":
-		s.handleTabbyPreview(wconn, req)
+		// Preview parses YAML and decrypts the vault section. Off the readLoop.
+		go s.handleTabbyPreview(wconn, req)
 	case "profiles.tabbyExecute":
-		s.handleTabbyExecute(wconn, req)
+		// Execute writes profiles, groups, and secrets. Off the readLoop.
+		go s.handleTabbyExecute(wconn, req)
 	case "profiles.moveImpact":
-		s.handleProfileMoveImpact(wconn, req)
+		// Reads profiles and groups to compute impact. Off the readLoop.
+		go s.handleProfileMoveImpact(wconn, req)
 	case "secrets.usage":
 		s.handleSecretUsageMethod(wconn, req)
 	case "secrets.savePassword", "secrets.saveKeyMaterial", "secrets.saveKeyPassphrase":
-		s.handleSecretMintMethod(wconn, req)
+		// Secret minting touches the vault store. Off the readLoop.
+		go s.handleSecretMintMethod(wconn, req)
 	case "secrets.detect":
-		s.handleSecretsDetect(wconn, req)
+		// Detection parses key material. Off the readLoop.
+		go s.handleSecretsDetect(wconn, req)
 	case "secrets.captureSave":
-		s.handleCaptureSave(wconn, req)
+		// Capture save mints a vault secret. Off the readLoop.
+		go s.handleCaptureSave(wconn, req)
 	case "secrets.captureDismiss":
 		s.handleCaptureDismiss(wconn, req)
 	case "groups.impact":
-		s.handleGroupImpact(wconn, req)
+		// Reads profiles and groups. Off the readLoop.
+		go s.handleGroupImpact(wconn, req)
 	case "groups.apply":
-		s.handleGroupApply(wconn, req)
+		// Loads, validates, and writes under a single lock. Off the readLoop.
+		go s.handleGroupApply(wconn, req)
 	case "groups.list", "groups.create", "groups.update", "groups.delete":
-		s.handleGroupMethod(wconn, req)
+		// Group store I/O. Off the readLoop.
+		go s.handleGroupMethod(wconn, req)
 	case "settings.describe", "settings.getSnapshot", "settings.set", "settings.reset",
 		"settings.secretSet", "settings.secretDelete", "settings.secretExists":
-		s.handleSettingsMethod(wconn, req)
+		// Settings may write to disk or the keychain. Off the readLoop.
+		go s.handleSettingsMethod(wconn, req)
 	case "sessions.status":
-		s.handleSessionsStatus(wconn, req)
+		// Reads the session registry — a mutex-guarded map scan, but under
+		// load with many sessions it is not instant. Off the readLoop.
+		go s.handleSessionsStatus(wconn, req)
 	case "export.manifest", "export.configExport", "export.portableEncrypted",
 		"export.backup", "export.import", "export.importPortable":
-		s.handleExportMethod(ctx, wconn, req)
+		// Export reads profiles, resolves secrets, and may write encrypted
+		// blobs — all I/O that can block. Off the readLoop (nocx-o2le).
+		go s.handleExportMethod(ctx, wconn, req)
 	case "connections.test":
-		s.handleConnectionsTest(wconn, req)
+		go s.handleConnectionsTest(wconn, req)
 	case "connections.trustHostKey":
-		s.handleConnectionsTrustHostKey(wconn, req)
+		go s.handleConnectionsTrustHostKey(wconn, req)
 	case "sshConfig.aliases":
-		s.handleSSHConfigAliases(wconn, req)
+		// Resolves each host pattern through ssh -G (10s timeout each) —
+		// network-bound I/O. Off the readLoop (nocx-o2le).
+		go s.handleSSHConfigAliases(wconn, req)
 	case "sshConfig.path":
 		s.handleSSHConfigPath(wconn, req)
 	case "tunnel.open":
-		s.handleTunnelOpen(ctx, wconn, req)
+		// Tunnel open dials a remote endpoint through the SSH connection —
+		// a network call that blocks for the dial timeout. Off the readLoop.
+		go s.handleTunnelOpen(ctx, wconn, req)
 	case "tunnel.stop":
 		s.handleTunnelStop(wconn, req)
 	case "ports.status", "ports.sample", "ports.pause", "ports.visible":
 		s.handlePortsMethod(wconn, req)
 	case "dialog.openFile":
-		s.handleDialogOpenFile(wconn, req)
+		// Native file dialog blocks until the user picks or cancels —
+		// indefinite. Off the readLoop (nocx-o2le).
+		go s.handleDialogOpenFile(wconn, req)
 	case "shell.environmentObserved":
 		s.handleShellEnvironmentObserved(wconn, req)
 	case "history.query":
-		s.handleHistoryQuery(ctx, wconn, req)
+		// ContentDB query — I/O that can block under load. Off the readLoop.
+		go s.handleHistoryQuery(ctx, wconn, req)
 	case "history.record":
-		s.handleHistoryRecord(ctx, wconn, state, req)
+		// ContentDB write. Off the readLoop.
+		go s.handleHistoryRecord(ctx, wconn, state, req)
 	case "fs.complete":
 		s.handleFsComplete(wconn, req)
 	case "shell.footprint.status":
 		s.handleShellFootprintStatus(wconn, req)
 	case "shell.footprint.uninstall":
-		s.handleShellFootprintUninstall(wconn, req)
+		// Writes to the filesystem. Off the readLoop.
+		go s.handleShellFootprintUninstall(wconn, req)
 	case "shell.complete":
-		s.handleShellComplete(ctx, wconn, req)
+		// Shell completion may invoke an external completer or the SSH
+		// discovery lane — a network call. Off the readLoop.
+		go s.handleShellComplete(ctx, wconn, req)
 	case "shell.integrate":
 		s.handleShellIntegrate(wconn, req)
 	case "shell.launcherCommand":
-		s.handleShellLauncherCommand(wconn, req)
+		// Writes a launcher script to the filesystem. Off the readLoop.
+		go s.handleShellLauncherCommand(wconn, req)
 	case "vault.status", "vault.setup", "vault.unseal", "vault.seal",
 		"vault.changePassphrase", "vault.regenerateRecovery", "vault.setDefaultProvider",
 		"vault.setAutoSeal", "vault.activity", "vault.inventory",
 		"vault.createSecret", "vault.renameSecret", "vault.replaceSecret",
 		"vault.deleteSecret", "vault.resolveLine":
-		s.handleVaultMethod(wconn, req)
+		// Vault operations touch the keychain and encrypted stores — I/O
+		// that can block, especially on a cold keychain. Off the readLoop.
+		go s.handleVaultMethod(wconn, req)
 	// Not routed through handleVaultMethod: that gate refuses when the vault
 	// lifecycle is absent, and a reset must work on a vault that is broken or
 	// half-built — which is the only state it is ever wanted in.
 	case "vault.resetPreview":
-		s.handleVaultResetPreview(wconn, req)
+		// Reset preview scans the vault store. Off the readLoop.
+		go s.handleVaultResetPreview(wconn, req)
 	case "vault.reset":
-		s.handleVaultReset(wconn, req)
+		// Reset wipes vault stores — heavy I/O. Off the readLoop.
+		go s.handleVaultReset(wconn, req)
 	case "vault.unlockResolved":
 		s.handleUnlockResolved(wconn, req)
 	case "connections.passwordResolved":
@@ -1541,8 +1582,17 @@ func (s *WSServer) handleDataFrame(state *connState, data []byte) {
 			s.log.Warn("data frame for unknown session", "session_id", string(sid))
 			return
 		}
-		if _, err := sess.Write(frame.Payload); err != nil {
-			s.log.Debug("session write error", "session_id", string(sid), "error", err)
+		// Enqueue the payload without blocking the readLoop. A dead SSH
+		// channel (NAT/firewall silent drop) makes ch.Write block for
+		// up to 10s (RealChannel watchdog), and the readLoop is the one
+		// goroutine feeding EVERY session on this connection. EnqueueWrite
+		// puts the frame on a bounded per-session queue (FIFO — the
+		// readLoop is the sole sender) and returns immediately; a full
+		// queue means the channel is backed up and the frame is dropped
+		// rather than stalling other sessions (nocx-o2le).
+		if !sess.EnqueueWrite(frame.Payload) {
+			s.log.Warn("session write queue full or closed, dropping frame",
+				"session_id", string(sid))
 		}
 	case MsgTypeMetadata:
 		s.log.Info("metadata frame received (reserved for Phase-2 — dropped)")

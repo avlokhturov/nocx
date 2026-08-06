@@ -4,11 +4,13 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/shady2k/nocx/internal/log"
@@ -17,6 +19,11 @@ import (
 )
 
 type ID string
+
+// ErrSessionClosed is returned by Write after Close has been called. A
+// closed session's write channel is drained and closed; further writes
+// are rejected rather than panicking on a send to a closed channel.
+var ErrSessionClosed = errors.New("session is closed")
 
 type Kind int
 
@@ -70,8 +77,18 @@ type Session interface {
 	// Empty for sessions with no linked credential (inline auth) and for
 	// local/ad-hoc sessions.
 	CredentialID() string
-
+	// Write sends p to the session's channel and returns the number of
+	// bytes written and any error. It blocks until the write completes
+	// (or the session dies); callers that must not block — the
+	// transport readLoop — use EnqueueWrite instead.
 	Write(p []byte) (int, error)
+	// EnqueueWrite submits p to the session's write queue without
+	// waiting for the channel write to complete. It preserves FIFO
+	// order relative to other EnqueueWrite calls from the same caller
+	// (the transport readLoop), and never blocks: if the queue is
+	// full the frame is dropped. Returns false if the session is
+	// closed or the queue is full.
+	EnqueueWrite(p []byte) bool
 	Resize(ctx context.Context, cols, rows, xpixel, ypixel uint16) error
 	Close() error
 	Done() <-chan struct{}
@@ -213,7 +230,9 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 		credentialID: cfg.CredentialID,
 		ch:           ch,
 		log:          r.log.With("session_id", string(id)),
+		writeCh:      make(chan writeJob, 64),
 	}
+	s.startWriteLoop()
 
 	r.mu.Lock()
 	r.sessions[id] = s
@@ -416,6 +435,30 @@ type realSession struct {
 	handler   OutputHandler
 	handlerMu sync.Mutex
 	closeOnce sync.Once
+	closed    atomic.Bool
+
+	// writeCh feeds a single write goroutine that serialises every Write
+	// in arrival order. The transport dispatches each data frame in its
+	// own goroutine (off the readLoop, nocx-o2le), so without ordered
+	// queuing two frames for the same session can race: "pwd\n" then
+	// "hostname\n" becomes "pwdhostname\n\n" or swaps order entirely.
+	// The channel is bounded so a dead channel does not accumulate
+	// unbounded write goroutines.
+	writeCh chan writeJob
+	writeWg sync.WaitGroup
+}
+
+// writeJob carries a payload and its result channel. The result is
+// best-effort: the transport logs errors and does not block on them,
+// but returning the error keeps the Write signature honest.
+type writeJob struct {
+	p   []byte
+	res chan writeResult
+}
+
+type writeResult struct {
+	n   int
+	err error
 }
 
 func (s *realSession) ID() ID               { return s.id }
@@ -426,7 +469,58 @@ func (s *realSession) ProfileID() string    { return s.profileID }
 func (s *realSession) CredentialID() string { return s.credentialID }
 
 func (s *realSession) Write(p []byte) (int, error) {
-	return s.ch.Write(p)
+	if s.closed.Load() {
+		return 0, ErrSessionClosed
+	}
+	res := make(chan writeResult, 1)
+	select {
+	case s.writeCh <- writeJob{p: p, res: res}:
+	case <-s.ch.Done():
+		return 0, ErrSessionClosed
+	}
+	select {
+	case r := <-res:
+		return r.n, r.err
+	case <-s.ch.Done():
+		return 0, ErrSessionClosed
+	}
+}
+
+// EnqueueWrite submits p to the write queue without blocking. The
+// transport readLoop calls this for every data frame: it must never
+// stall on one session (a dead SSH channel would freeze every other
+// tab). If the bounded queue is full the frame is dropped — a slow
+// channel should not be able to exhaust memory. Because the readLoop
+// is the sole EnqueueWrite caller, the queue preserves FIFO order:
+// frame N is enqueued before frame N+1. The result channel is nil —
+// the transport does not need the write result, and writeLoop skips
+// the send when res is nil.
+func (s *realSession) EnqueueWrite(p []byte) bool {
+	if s.closed.Load() {
+		return false
+	}
+	select {
+	case s.writeCh <- writeJob{p: p}:
+		return true
+	default:
+		return false
+	}
+}
+
+// startWriteLoop runs a single goroutine that drains writeCh in FIFO order.
+// It exits when Close is called or the channel is drained after a channel
+// error, so the goroutine never leaks.
+func (s *realSession) startWriteLoop() {
+	s.writeWg.Add(1)
+	go func() {
+		defer s.writeWg.Done()
+		for job := range s.writeCh {
+			n, err := s.ch.Write(job.p)
+			if job.res != nil {
+				job.res <- writeResult{n: n, err: err}
+			}
+		}
+	}()
 }
 
 func (s *realSession) Resize(ctx context.Context, cols, rows, xpixel, ypixel uint16) error {
@@ -436,7 +530,10 @@ func (s *realSession) Resize(ctx context.Context, cols, rows, xpixel, ypixel uin
 func (s *realSession) Close() error {
 	var err error
 	s.closeOnce.Do(func() {
+		s.closed.Store(true)
 		s.log.Debug("closing session")
+		close(s.writeCh)
+		s.writeWg.Wait()
 		err = s.ch.Close()
 	})
 	return err
