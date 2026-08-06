@@ -1,0 +1,59 @@
+/* FileViewer — the read-only file tab (fm-w7).
+   A surface, not a kit component: this file owns the .file-viewer family.
+   The Reload affordance is the kit's Button (ui-button) and is placed here
+   (flex gap on the notice bar) but never repainted. Colours resolve through
+   --color-* tokens (ADR-0013); the CM6 highlight classes are the tok-*
+   vocabulary already coloured in style.css. */
+
+.file-viewer {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  height: 100%;
+  background: var(--color-canvas);
+}
+
+/* The notice bar: one line per rendered state (binary, truncated, lossy,
+   changed, error, unavailable, loading). Each line carries data-state, and
+   the bar is hidden entirely for a clean read. */
+.file-viewer__notice {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-3);
+  border-bottom: 1px solid var(--color-surface-raised);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+.file-viewer__notice[hidden] {
+  display: none;
+}
+
+.file-viewer__line[data-tone='warning'] {
+  color: var(--color-warning);
+}
+
+.file-viewer__line[data-tone='danger'] {
+  color: var(--color-danger);
+}
+
+/* The CM6 host fills the remaining pane. Layout only — colours live in the
+   EditorView theme (viewerTheme) and the tok-* vocabulary. */
+.file-viewer__editor {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.file-viewer .cm-editor {
+  height: 100%;
+  font-size: var(--font-size-terminal);
+}
+
+.file-viewer .cm-scroller {
+  font-family: var(--font-family-mono);
+  line-height: 1.45;
+  overflow: auto;
+}

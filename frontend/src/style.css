@@ -60,6 +60,7 @@
 @import './styles/components/row-list.css';
 @import './styles/components/key-material-input.css';
 @import './styles/components/tree-row.css';
+@import './styles/components/file-viewer.css';
 @import './styles/surfaces/banner.css';
 @import './styles/surfaces/update-notice.css';
 @import './styles/surfaces/settings.css';
