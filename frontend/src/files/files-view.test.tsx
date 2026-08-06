@@ -333,8 +333,10 @@ describe('files sidebar view', () => {
     // The kit row carries the selection (data-selected lives on .ui-tree-row).
     const docsRow = rowNamed(panel, 'docs').querySelector('.ui-tree-row')
     expect(docsRow?.getAttribute('data-selected')).toBe('true')
-    // Selecting is not expanding: the target's children were never listed.
-    expect(list.mock.calls.filter(([, p]) => p === '/docs')).toHaveLength(0)
+    // The target is expanded too, so its children were listed: landing on
+    // a closed folder is not an answer to "where am I".
+    expect(list.mock.calls.filter(([, p]) => p === '/docs').length).toBeGreaterThan(0)
+    await vi.waitFor(() => expect(rowNamed(panel, 'notes.md')).not.toBeUndefined())
   })
 
   it('the reveal scrolls the selected row into view', async () => {
@@ -361,7 +363,7 @@ describe('files sidebar view', () => {
 
       setActiveOrigin({ ...LOCAL_ORIGIN, cwd: '/docs' })
       await vi.waitFor(() => expect(scrollIntoView).toHaveBeenCalled())
-      expect(scrollIntoView).toHaveBeenCalledWith({ block: 'nearest' })
+      expect(scrollIntoView).toHaveBeenCalledWith({ block: 'start' })
     } finally {
       Element.prototype.scrollIntoView = original
     }

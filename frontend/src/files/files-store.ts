@@ -40,7 +40,7 @@ import type { FilesListResult, FilesListEntry } from '../generated/files.list'
 import type { FilesChanged } from '../generated/files.changed'
 import type { FilesPanelServices } from './files-client'
 import type { ActiveOrigin } from '../tab-content'
-import type { TreeRowKind } from '../ui/tree-row'
+import { isExpandable, type TreeRowKind } from '../ui/tree-row-kind'
 
 /** The watch set for a tree: the root (its rows are always on screen) plus
  *  every EXPANDED directory — the panel's change surface is exactly what it
@@ -827,10 +827,10 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     const child = dir.children.find((c) => c.name === segments[i])
     if (child !== undefined) {
       // A non-directory cannot be descended into: the path ends here.
-      if (
-        child.kind !== 'dir' &&
-        !(child.kind === 'symlink' && child.linkKind === 'dir' && !child.cyclic)
-      ) {
+      // Asked of the kit, not re-derived: the row that draws a disclosure
+      // owns what "expandable" means, and a second copy here would agree
+      // everywhere anyone looked and disagree on the cyclic symlink.
+      if (!isExpandable(child.kind, child.linkKind, child.cyclic === true)) {
         endWalk(walk)
         return
       }
@@ -927,10 +927,40 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     )
   }
 
-  /** The walk reached the target: select it. bumpTree so the rows
-   *  recompute — the selection is derived from revealTarget, and a
-   *  referentially-unchanged rows array would not re-render the row. */
+  /** The walk reached the target: EXPAND it, then select it. Expanding is
+   *  the point — `cd` into a directory is a statement about what the user
+   *  is now looking at, and answering it with a closed folder they have to
+   *  click makes them do the work twice. Only a node expands: the root has
+   *  no row and is enumerated already, so `cd /` selects nothing, which is
+   *  the right answer. Listing goes through the walk's own path so the
+   *  append semantics and the walk-id guard still hold. */
   function finishReveal(dir: FilesRoot | FilesNode, walk: number): void {
+    if (walk !== revealWalkId) return
+    const node = 'expanded' in dir ? dir : null
+    if (
+      node !== null &&
+      !node.expanded &&
+      isExpandable(node.kind, node.linkKind, node.cyclic === true)
+    ) {
+      node.expanded = true
+      pushWatchSet()
+      // Mirrors toggle(): a directory listed once and collapsed re-opens
+      // instantly; anything else needs its first page.
+      if (node.state !== 'ok' || node.children.length === 0) {
+        const ctx = captureCtx()
+        if (ctx !== null) {
+          revealList(node, ctx, walk, () => completeReveal(dir, walk))
+          return
+        }
+      }
+    }
+    completeReveal(dir, walk)
+  }
+
+  /** Land the reveal: publish the target and release the walk. bumpTree so
+   *  the rows recompute — the selection is derived from revealTarget, and a
+   *  referentially-unchanged rows array would not re-render the row. */
+  function completeReveal(dir: FilesRoot | FilesNode, walk: number): void {
     if (walk !== revealWalkId) return
     pendingReveal = null
     revealing = false

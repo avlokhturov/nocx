@@ -279,10 +279,11 @@ describe('files tree store', () => {
     expect(open).toHaveBeenCalledTimes(1)
     expect(store.root()?.path).toBe('/')
     expect(store.revealTarget()).toBe('/home/alice')
-    // The chain / → home → alice is expanded (home is a row; alice is
-    // selected, NOT expanded — selecting is not expanding).
+    // The chain / → home → alice is expanded, INCLUDING the target: a cd
+    // says what the user is now looking at, so answering with a closed
+    // folder they must click makes them do the work twice.
     expect(nodeRows(store, 'home').expanded).toBe(true)
-    expect(nodeRows(store, 'alice').expanded).toBe(false)
+    expect(nodeRows(store, 'alice').expanded).toBe(true)
     // The walk listed the levels it had to descend through: / (to find
     // home — once more than the openScope listing, because the root's
     // first list was still in flight when the walk started) and /home.
@@ -387,7 +388,8 @@ describe('files tree store', () => {
     await settle()
 
     expect(store.revealTarget()).toBe('/target')
-    expect(nodeRows(store, 'target').expanded).toBe(false)
+    // The target is expanded, not merely selected.
+    expect(nodeRows(store, 'target').expanded).toBe(true)
   })
 
   it('a level that comes back tooLarge stops the reveal and is visible', async () => {
@@ -498,10 +500,12 @@ describe('files tree store', () => {
     // The selection is the NEW cwd, and the OLD walk never painted: its
     // continuation would have EXPANDED the old cwd's row on the way to
     // selecting it — the row exists (the new walk applied the listing)
-    // but stayed collapsed.
+    // but stayed collapsed. The NEW target is expanded, so its own child
+    // is a row: that is the reveal landing, not the dropped walk painting.
     expect(store.revealTarget()).toBe('/home/new')
     expect(nodeRows(store, 'old').expanded).toBe(false)
-    expect(store.rows().some((r) => r.kind === 'entry' && r.node.name === 'new.md')).toBe(false)
+    expect(nodeRows(store, 'new').expanded).toBe(true)
+    expect(store.rows().some((r) => r.kind === 'entry' && r.node.name === 'new.md')).toBe(true)
   })
 
   // ── Rule 2: the §0 test, at the store's level ──────────────────────────
@@ -944,9 +948,17 @@ describe('files tree store', () => {
     let bigLists = 0
     const list = vi.fn().mockImplementation((bindingId: string, path: string) => {
       if (path === '/') return rootList.promise
-      bigLists += 1
-      if (bigLists === 1) return page1.promise
-      return page2.promise
+      if (path === '/big') {
+        bigLists += 1
+        return bigLists === 1 ? page1.promise : page2.promise
+      }
+      // The revealed target is EXPANDED, so it is listed too — its own
+      // listing, which is why bigLists counts only its parent's pages.
+      return Promise.resolve(
+        listOk('C:/big/target', [
+          entry({ name: 'in-target.md', path: '/big/target/in-target.md' }),
+        ]),
+      )
     })
     let handler: ((p: FilesChanged) => void) | null = null
     const subscribeFilesChanged = vi.fn((h: (p: FilesChanged) => void) => {
@@ -991,7 +1003,7 @@ describe('files tree store', () => {
 
     expect(store.revealTarget()).toBe('/big/target')
     expect(nodeRows(store, 'f0001')).toBeDefined()
-    expect(nodeRows(store, 'target').expanded).toBe(false)
+    expect(nodeRows(store, 'target').expanded).toBe(true)
     expect(bigLists).toBe(2)
   })
 

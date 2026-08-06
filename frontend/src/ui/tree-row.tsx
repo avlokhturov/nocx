@@ -54,8 +54,13 @@ import {
   FolderOpenIcon,
   ServerIcon,
 } from './icons'
+import { isExpandable, type TreeRowKind } from './tree-row-kind'
 
-export type TreeRowKind = 'regular' | 'dir' | 'symlink' | 'other' | 'unreadable'
+// The entry vocabulary and the expandable predicate live in a non-component
+// module (tree-row-kind.ts) so plain logic can ask the same question without
+// pulling Solid's DOM delegation; re-exported here so the kit's surface is
+// unchanged and there is still exactly one owner.
+export { isExpandable, type TreeRowKind }
 
 export interface TreeRowProps {
   /** The entry's display name, shown in the row's text. */
@@ -79,21 +84,6 @@ export interface TreeRowProps {
   onToggle?: (e: MouseEvent) => void
   /** Optional trailing slot, e.g. a kit Badge. */
   badge?: JSX.Element
-}
-
-/** A row is expandable from its kind alone: dir, or a symlink into a dir
- *  that is not cyclic. A cyclic symlink is a leaf whatever the caller asks.
- *
- *  Exported because a surface needs the same answer to decide what a click on
- *  the ROW means — expand a directory, open a file — and a second copy of this
- *  predicate would be a defect with a delay fuse: the two would agree on
- *  every case anyone tried and disagree on the cyclic symlink, where the row
- *  renders a leaf and the surface would still try to expand it. One owner,
- *  and the owner is the component that already draws the disclosure. */
-export function isExpandable(kind: TreeRowKind, linkKind?: TreeRowKind, cyclic?: boolean): boolean {
-  if (kind === 'dir') return true
-  if (kind === 'symlink' && linkKind === 'dir') return !cyclic
-  return false
 }
 
 /** The type glyph for a row, decided here from the wire's kind vocabulary —

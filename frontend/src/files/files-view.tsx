@@ -121,7 +121,10 @@ function FilesPanel(props: FilesPanelProps) {
   // The reveal's SCROLL is the view's job — the store only says which
   // path the last completed reveal reached (revealTarget); this effect
   // watches that answer and scrolls the row into view when it lands.
-  // `nearest` so a row already on screen does not jump. The row renders
+  // `start` rather than `nearest`: under `/` the chain to a home directory
+  // is long, and a target that merely came into view sits at the bottom
+  // edge with its newly expanded children below the fold — the answer to
+  // "where am I" should be at the top with room under it. The row renders
   // in the same flush that sets the target (the walk's last expansion
   // bumps the tree before the target is set), so the DOM is current.
   let treeEl: HTMLDivElement | undefined
@@ -138,7 +141,7 @@ function FilesPanel(props: FilesPanelProps) {
           if (row.dataset.path === target) {
             // Optional: jsdom does not implement scrollIntoView, and a
             // scroll that cannot happen must not break the reveal.
-            row.scrollIntoView?.({ block: 'nearest' })
+            row.scrollIntoView?.({ block: 'start' })
             return
           }
         }
