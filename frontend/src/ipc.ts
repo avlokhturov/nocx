@@ -158,6 +158,11 @@ interface SessionState {
 
   exitCallback: ((sessionId: string) => void) | null
   resetCallback: (() => void) | null
+
+  // Fires when the backend reports that this session's write queue refused
+  // a frame — the channel has stopped accepting bytes and the keystrokes
+  // are being dropped. Once per stall, not once per key.
+  inputStalledCallback: (() => void) | null
 }
 
 // Per-session ack throttle state, tracked outside SessionState so the timer
@@ -209,6 +214,12 @@ export class SessionHandle {
   // renderer must clear its display before new data arrives.
   onReset(cb: () => void): void {
     this.client.onSessionReset(this.sessionId, cb)
+  }
+
+  // onInputStalled registers a callback for the backend's report that this
+  // session is dropping the input sent to it.
+  onInputStalled(cb: () => void): void {
+    this.client.onSessionInputStalled(this.sessionId, cb)
   }
 }
 
@@ -283,6 +294,15 @@ export class WSClient {
       this._flushAck(sid)
       this.sessions.get(sid)?.exitCallback?.(sid)
       this.sessions.delete(sid)
+    })
+
+    // The backend dropped input for a session: its write queue is full,
+    // so the channel underneath has stopped accepting bytes.
+    this.dispatcher.subscribe('inputStalled', (params: unknown) => {
+      if (!params || typeof params !== 'object') return
+      const sid = (params as Record<string, unknown>).sessionId
+      if (typeof sid !== 'string') return
+      this.sessions.get(sid)?.inputStalledCallback?.()
     })
   }
 
@@ -413,6 +433,7 @@ export class WSClient {
       pendingData: '',
       exitCallback: null,
       resetCallback: null,
+      inputStalledCallback: null,
     })
     return new SessionHandle(
       this,
@@ -490,6 +511,13 @@ export class WSClient {
     const state = this.sessions.get(sessionId)
     if (state) {
       state.resetCallback = cb
+    }
+  }
+
+  onSessionInputStalled(sessionId: string, cb: () => void): void {
+    const state = this.sessions.get(sessionId)
+    if (state) {
+      state.inputStalledCallback = cb
     }
   }
 

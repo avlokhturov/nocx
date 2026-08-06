@@ -140,6 +140,15 @@ func (r *Resolver) findProfile(id string) (profile.SSHProfile, error) {
 	return profile.SSHProfile{}, fmt.Errorf("profile %s: %w", id, ErrProfileNotFound)
 }
 
+// Keepalive defaults applied when a profile names none. Thirty seconds is
+// quiet enough to be invisible on a healthy link; three consecutive misses
+// before closing keeps a single dropped probe on a congested network from
+// tearing down a working session.
+const (
+	defaultKeepaliveInterval = 30 * time.Second
+	defaultKeepaliveCountMax = 3
+)
+
 // buildConfig constructs a ConnectConfig from a profile, handling credential
 // resolution, effective profile inheritance, and jump host recursion.
 func (r *Resolver) buildConfig(prof *profile.SSHProfile, visited map[string]bool) (*ssh.ConnectConfig, error) {
@@ -163,13 +172,21 @@ func (r *Resolver) buildConfig(prof *profile.SSHProfile, visited map[string]bool
 
 	// Copy keepalive/timeout/agentforward from effective profile.
 	// The profile stores MILLISECONDS; ConnectConfig fields are time.Duration.
+	// Keepalive is what notices a transport that died without saying so —
+	// the NAT or firewall that drops packets and sends no RST. Nothing else
+	// in the stack can: a write into that connection simply never returns,
+	// and the session's write queue can only report that it is stuck, not
+	// end it. So a profile that asks for no keepalive gets one anyway
+	// (nocx-o2le); leaving it off is choosing a tab that hangs forever.
 	if eff.ResolvedOptions.KeepaliveInterval > 0 {
 		cfg.KeepaliveInterval = time.Duration(eff.ResolvedOptions.KeepaliveInterval) * time.Millisecond
+	} else {
+		cfg.KeepaliveInterval = defaultKeepaliveInterval
 	}
 	if eff.ResolvedOptions.KeepaliveCountMax > 0 {
 		cfg.KeepaliveCountMax = eff.ResolvedOptions.KeepaliveCountMax
 	} else {
-		cfg.KeepaliveCountMax = -1 // default: single failure closes
+		cfg.KeepaliveCountMax = defaultKeepaliveCountMax
 	}
 	if eff.ResolvedOptions.ReadyTimeout > 0 {
 		cfg.ReadyTimeout = time.Duration(eff.ResolvedOptions.ReadyTimeout) * time.Millisecond

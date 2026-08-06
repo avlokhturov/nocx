@@ -1860,6 +1860,16 @@ export class TerminalContent extends BaseTabContent {
         this._disposeAllMarkers()
         host.requestClose()
       })
+      session.onInputStalled(() => {
+        // The backend is dropping what this tab sends. Say so: a terminal
+        // that swallows keystrokes in silence is indistinguishable from one
+        // that is simply ignoring the person at it (nocx-o2le).
+        log.warn('nocx: session input stalled', { sid: session.sessionId })
+        showToast({
+          level: 'danger',
+          message: 'This connection has stopped accepting input — keystrokes are being dropped.',
+        })
+      })
       session.onReset(() => {
         renderer.reset()
         this.inputState.dispatch({ type: 'reset' })

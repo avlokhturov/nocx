@@ -199,6 +199,7 @@ export interface SessionFake {
   onData: ReturnType<typeof vi.fn>
   onExit: ReturnType<typeof vi.fn>
   onReset: ReturnType<typeof vi.fn>
+  onInputStalled: ReturnType<typeof vi.fn>
   /** Fire the registered data callback. */
   fireData(data: string): void
 }
@@ -225,6 +226,7 @@ export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
     }),
     onExit: vi.fn(),
     onReset: vi.fn(),
+    onInputStalled: vi.fn(),
     fireData: (data: string) => {
       dataCb?.(data)
     },
