@@ -44,6 +44,30 @@ prints the exact command when it stops you. Do not work around it by unsetting
 `NOCX_WS_PORT`; the boundary is what keeps a run off your settings, your vault
 documents, your `~/.nocx` and your shell rc files.
 
+**That boundary does not cover the login keychain — so run e2e in the container.**
+
+```bash
+e2e/run-in-container.sh                        # whole suite, both browsers
+PW_PROJECTS=chromium e2e/run-in-container.sh e2e/sidebar.spec.ts
+```
+
+`$HOME` moves three things and the keystore is a fourth: `go-keyring` talks to
+the Keychain service, not to a directory, and `app.New` probes the system vault
+provider on **every** backend start — "a probe is a real keychain write", says
+the comment doing it. `wails dev` re-signs the binary each run, so macOS re-asks
+every time, and a suite that restarts the backend per spec asks continuously.
+The owner watched a dialog appear every two seconds during a local run
+(`nocx-o4hg`). A Linux container has no keychain to ask, and it runs the headless
+path — `cmd/devharness` plus vite — so it is also about fifteen times faster
+than a cold `wails dev` per spec.
+
+**Its failure set is not CI's, and CI is the source of truth.** The container
+runs Linux WebKit at a container-default viewport; the shipped app is macOS
+WKWebView. Layout-sensitive specs (scroll ownership, tab-strip roving, label
+centring) fail there and pass in CI. Use it to iterate, confirm in CI, and never
+"fix" a test that is only red in the container without checking which one is
+lying.
+
 ## Repository layout
 
 - `docs/` — `vision.md`, `architecture.md`, `decisions/` (ADRs).
