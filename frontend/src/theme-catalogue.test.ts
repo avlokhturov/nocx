@@ -6,8 +6,7 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment,
                       @typescript-eslint/no-unsafe-call,
                       @typescript-eslint/no-unsafe-member-access,
-                      @typescript-eslint/no-unsafe-argument,
-                      @typescript-eslint/no-unsafe-return */
+                      @typescript-eslint/no-unsafe-argument */
 /**
  * The theme catalogue gate.
  *
@@ -59,11 +58,8 @@
  */
 import { describe, it, expect } from 'vitest'
 import { KNOWN_THEME_IDS, DEFAULT_THEME_ID } from './renderers/theme-bootstrap'
-// @ts-expect-error — @types/node not installed; vitest resolves at runtime
 import { createRequire } from 'node:module'
-// @ts-expect-error — @types/node not installed; vitest resolves at runtime
 import { readFileSync, readdirSync } from 'node:fs'
-// @ts-expect-error — @types/node not installed; vitest resolves at runtime
 import { resolve } from 'node:path'
 
 const css = createRequire(import.meta.url)('css-tree')

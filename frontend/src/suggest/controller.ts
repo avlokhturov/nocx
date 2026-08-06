@@ -271,7 +271,7 @@ export class CompletionController {
    *  accept and ghost render is checked against. */
   private queryDoc = ''
   private abort: AbortController | null = null
-  private budgetTimer: number | undefined
+  private budgetTimer: ReturnType<typeof setTimeout> | undefined
   private gaveUp = false
   /** The id of the ghosted candidate carried into an open (Tab) query — the
    *  first Tab settles on it, whatever batch arrives first. Cleared when no

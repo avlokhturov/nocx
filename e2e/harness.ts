@@ -124,8 +124,8 @@ export const test = base.extend<object, { appReady: void }>({
 //   const { port: p2, token: t2 } = await backend.restart(secondPort)
 
 import { spawn, execSync, type ChildProcess } from 'node:child_process'
-import { existsSync, readFileSync, openSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { existsSync, readFileSync, openSync, mkdirSync, copyFileSync } from 'node:fs'
+import { resolve, basename } from 'node:path'
 
 import { createHomeIsolation, type HomeIsolation } from './home-isolation'
 
@@ -236,8 +236,43 @@ export class VaultBackend {
     throw new Error(`devharness did not print WSTOKEN within ${timeoutMs}ms`)
   }
 
+  /**
+   * Copy this backend's log where a failed CI run can actually read it.
+   *
+   * The log lives beside the disposable root — a mkdtemp nobody keeps and no
+   * artifact step collects — so when a spec failed on the runner, the one
+   * account of what the backend did was thrown away with the temp directory.
+   * Every diagnosis then had to be guessed from the DOM. test-results/ is
+   * already uploaded on failure (ci.yml), so that is where it goes.
+   *
+   * Best-effort by construction: a harness that throws while trying to explain
+   * a failure replaces the failure with its own.
+   */
+  private preserveLog(): void {
+    if (!this.logPath) return
+    try {
+      const dir = resolve(process.cwd(), 'test-results', 'devharness')
+      mkdirSync(dir, { recursive: true })
+      copyFileSync(this.logPath, resolve(dir, basename(this.logPath)))
+    } catch {
+      /* the log is a courtesy; never fail a run over it */
+    }
+  }
+
+  /** The backend's log so far, for a test that wants to say WHY it failed. */
+  logTail(maxBytes = 4000): string {
+    if (!this.logPath) return '(backend never started)'
+    try {
+      const all = readFileSync(this.logPath, 'utf8')
+      return all.length <= maxBytes ? all : `…${all.slice(-maxBytes)}`
+    } catch (err) {
+      return `(backend log unreadable: ${String(err)})`
+    }
+  }
+
   /** Stop the running devharness. */
   stop(): void {
+    this.preserveLog()
     if (!this.proc) return
     const p = this.proc
     this.proc = null

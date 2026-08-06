@@ -2,10 +2,7 @@
 // is not installed (the theme-catalogue.test.ts pattern); every call to them
 // touches an untyped value, so no-unsafe-* must be disabled at the file
 // level for this test.
-/* eslint-disable @typescript-eslint/no-unsafe-assignment,
-                      @typescript-eslint/no-unsafe-call,
-                      @typescript-eslint/no-unsafe-member-access,
-                      @typescript-eslint/no-unsafe-argument */
+
 // @vitest-environment jsdom
 // Report 2 — "the match highlight must stay readable": the highlighted
 // prefix (`re` in `repos/`) sat on a dark chip that blended into the
@@ -26,9 +23,7 @@
 //     and the row's text on the chip keeps the emphasized-text bar (3:1).
 //
 // The e2e suite asserts the same from computed styles in a real browser.
-// @ts-expect-error @types/node is not installed (see theme-catalogue.test.ts)
 import { readFileSync, readdirSync } from 'node:fs'
-// @ts-expect-error @types/node is not installed (see theme-catalogue.test.ts)
 import { resolve } from 'node:path'
 import { describe, it, expect } from 'vitest'
 

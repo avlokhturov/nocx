@@ -3,19 +3,11 @@
 // theme-catalogue.test.ts, which does the same for the same reason), so every
 // call through them is an untyped value and no-unsafe-* must be disabled at
 // the file level rather than at ~60 call sites.
-/* eslint-disable @typescript-eslint/no-unsafe-assignment,
-                  @typescript-eslint/no-unsafe-call,
-                  @typescript-eslint/no-unsafe-member-access,
-                  @typescript-eslint/no-unsafe-argument,
-                  @typescript-eslint/no-unsafe-return */
+
 import { describe, it, expect } from 'vitest'
-// @ts-expect-error — @types/node not installed; vitest resolves at runtime
 import { execFileSync } from 'node:child_process'
-// @ts-expect-error — @types/node not installed; vitest resolves at runtime
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-// @ts-expect-error — @types/node not installed; vitest resolves at runtime
 import { tmpdir } from 'node:os'
-// @ts-expect-error — @types/node not installed; vitest resolves at runtime
 import { join } from 'node:path'
 import {
   isInteractiveTransition,
@@ -619,7 +611,6 @@ describe("applyProfile — the saved profile's settings reach the plan, typed al
 })
 
 describe('the generated wrapper, executed (real shell + fake ssh that records argv)', () => {
-  // @ts-expect-error — @types/node not installed; vitest resolves at runtime
   const proc = process as unknown as { env: Record<string, string | undefined> }
 
   interface HarnessOpts {

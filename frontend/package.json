@@ -5,9 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "build": "tsc --noEmit -p tsconfig.json && vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",
     "lint": "eslint . --max-warnings 0 && node lint-fixtures/check-css-colors.mjs && node lint-fixtures/check-css-integrity.mjs",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",

@@ -20,24 +20,13 @@ import { describe, expect, it, vi, type Mock } from 'vitest'
 // imports sit behind @ts-expect-error and the calls behind a contained
 // no-unsafe disable — the same trade theme-catalogue.test.ts makes at file
 // level, confined to this setup instead.
-/* eslint-disable @typescript-eslint/no-unsafe-assignment,
-                      @typescript-eslint/no-unsafe-call */
-// @ts-expect-error — @types/node not installed; vitest resolves at runtime
-import { readFileSync } from 'node:fs'
-// @ts-expect-error — @types/node not installed; vitest resolves at runtime
-import { resolve } from 'node:path'
 
-declare global {
-  interface ImportMeta {
-    /** Present in the vitest/vite ESM runtime; the stylesheet read needs it. */
-    dirname?: string
-  }
-}
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 
 const srcDir = import.meta.dirname ?? resolve(new URL('.', import.meta.url).pathname)
 const STYLE_ENTRY = resolve(srcDir, 'style.css')
-/* eslint-enable @typescript-eslint/no-unsafe-assignment,
-                       @typescript-eslint/no-unsafe-call */
+
 import { EditorView } from '@codemirror/view'
 import {
   createRendererMock,
@@ -1736,7 +1725,6 @@ describe('the SSH block header keeps cwd left and duration/exit right (nocx-a44m
   })
 
   it('the stylesheet pushes the right group with its own auto margin, not space-between', () => {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-assignment
     const css: string = readFileSync(STYLE_ENTRY, 'utf8')
     const chips = stripComments(extractRuleBlock(css, 'cmd-header-chips') ?? '')
     const right = stripComments(extractRuleBlock(css, 'cmd-header-right') ?? '')
@@ -1760,7 +1748,6 @@ describe('the SSH block header keeps cwd left and duration/exit right (nocx-a44m
 // (nocx-a44m).
 describe('the command editor chrome pins the clock to the right edge without distributing (nocx-a44m)', () => {
   it('the stylesheet gives the clock its own auto margin, not space-between on the row', () => {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-assignment
     const css: string = readFileSync(STYLE_ENTRY, 'utf8')
     const chrome = stripComments(extractRuleBlock(css, 'nocx-editor-chrome') ?? '')
     const time = stripComments(extractRuleBlock(css, 'nocx-editor-time') ?? '')

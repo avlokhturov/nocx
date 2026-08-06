@@ -1,0 +1,20 @@
+{
+  // The test program: the same source, plus Node.
+  //
+  // Vitest tests read fixtures off disk (`node:fs`, `node:path`, `node:url`),
+  // which browser code must never do — so they cannot share one set of ambient
+  // types with the renderer. They used to carry `@ts-expect-error @types/node
+  // is not installed` on every such import, which made the whole arrangement
+  // depend on a package being ABSENT: the day anything installed it, those
+  // directives became errors of their own.
+  //
+  // Two programs instead. This one names Node deliberately; tsconfig.json names
+  // nothing. Production modules are pulled in here too, transitively, and that
+  // is correct — they have to hold up under the runtime Vitest gives them.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["node"]
+  },
+  "include": ["src/**/*.test.ts", "src/**/*.test.tsx", "vitest.config.ts"],
+  "exclude": ["node_modules"]
+}
