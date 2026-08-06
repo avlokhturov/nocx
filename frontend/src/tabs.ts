@@ -452,6 +452,7 @@ export class TabManager {
         onSubtitleChange: (subtitle) => tabRef.current?.updateSubtitle(subtitle),
         onWarningChange: (warning) => tabRef.current?.setWarningState(warning),
         onPortsTargetChange: () => this.onActiveTabChange?.(),
+        onActiveOriginChange: () => this.onActiveTabChange?.(),
         onSetupVault: this.onSetupVault,
         onCreateSecret: this.onCreateSecret,
       },
@@ -498,6 +499,7 @@ export class TabManager {
           }
         },
         onWarningChange: (warning) => tabRef.current?.setWarningState(warning),
+        onActiveOriginChange: () => this.onActiveTabChange?.(),
         onPortsTargetChange: () => this.onActiveTabChange?.(),
         onVaultSealed: this.onVaultSealed,
         onSetupVault: this.onSetupVault,

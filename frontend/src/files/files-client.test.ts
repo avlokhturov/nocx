@@ -107,21 +107,22 @@ const LOCAL_A: ActiveOrigin = {
   tabId: 1,
   sessionId: 'session-a',
   kind: 'local',
-  cwd: '/home/alice',
+  cwd: '/',
   cwdVerified: true,
+  cwdFollow: true,
   host: null,
 }
 
 const OPEN_RESULT = {
   bindingId: 'b1',
   endpointId: null,
-  root: { path: '/home/alice', display: '~/alice', inferred: false, inferredReason: '' },
+  root: { path: '/', display: '/', inferred: false, inferredReason: '' },
 }
 
 const LIST_OK: FilesListResult = {
   state: 'ok',
-  path: '/home/alice',
-  canonical: 'C:/home/alice',
+  path: '/',
+  canonical: 'C:/',
   entries: [],
   offset: 0,
   total: 0,
@@ -165,11 +166,11 @@ describe('files client over the real composition seam', () => {
 
     const wire = frames(socket)
     expect(wire[0]?.method).toBe('files.open')
-    expect(wire[0]?.params).toEqual({ sessionId: 'session-a', rootPath: '/home/alice' })
+    expect(wire[0]?.params).toEqual({ sessionId: 'session-a', rootPath: '/' })
     expect(wire.some((f) => f.method === 'files.list')).toBe(true)
     // The watching half rides the same seam: the initial set is the root.
     const watch = wire.find((f) => f.method === 'files.watch')
-    expect(watch?.params).toEqual({ bindingId: 'b1', paths: ['/home/alice'] })
+    expect(watch?.params).toEqual({ bindingId: 'b1', paths: ['/'] })
     expect(store.watchMode()).toBe('watching')
     store.dispose()
   })
@@ -209,7 +210,7 @@ describe('files client over the real composition seam', () => {
     socket.deliver({
       jsonrpc: '2.0',
       method: 'files.changed',
-      params: { bindingId: 'b1', path: '/home/alice' },
+      params: { bindingId: 'b1', path: '/' },
     })
     await settle()
     answer(socket, 'files.list', LIST_OK)

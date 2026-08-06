@@ -54,7 +54,7 @@ import {
 import { XtermRenderer } from './renderers/xterm'
 import { ClipboardGate } from './clipboard'
 import { CommandEditor } from './editor'
-import { TerminalContent } from './terminal-content'
+import { TerminalContent, type TerminalContentHooks } from './terminal-content'
 import { Tab } from './tabs'
 import { SURFACE_TERMINAL } from './tab-content'
 import { ProfileClient, type SSHProfile } from './profiles'
@@ -160,8 +160,9 @@ interface MountOpts {
   attachToDocument?: boolean
   /** Mount an SSH tab (the capability rail is SSH-only, nocx-4t37.2). */
   ssh?: { profileId: string; host: string }
+  /** Host callbacks handed to the TerminalContent (TerminalContentHooks). */
+  hooks?: Partial<TerminalContentHooks>
 }
-
 /** Mount a real TerminalContent inside a Tab and return the live editor view. */
 async function mountTerminal(
   clipboard: ClipboardFake = makeClipboard(),
@@ -187,6 +188,7 @@ async function mountTerminal(
     profileClient ?? null,
     () => {},
     opts.ssh,
+    opts.hooks,
   )
   const tab = new Tab(
     content,
@@ -3167,6 +3169,40 @@ describe('activeOrigin (B.9) — the machine the tab speaks for', () => {
       const after = content.activeOrigin()
       expect(after?.cwd).toBe('/srv/new/path')
       expect(after?.cwdVerified).toBe(true)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('fires onActiveOriginChange when the origin answer changes, not only on tab switch', async () => {
+    // The Files panel follows the ACTIVE tab's origin through this hook:
+    // an OSC 7 cwd, the session dying and an environment boundary all
+    // change the answer, and each must push the change (brief §1 — named
+    // onActiveOriginChange, not onCwdChange, for exactly this reason).
+    const onActiveOriginChange = vi.fn()
+    const session = makeSession()
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { hooks: { onActiveOriginChange } },
+      client,
+    )
+    const renderer = rendererOf(content)
+    try {
+      // The session open itself is an origin transition (null → origin).
+      expect(onActiveOriginChange).toHaveBeenCalledTimes(1)
+
+      // A verified OSC 7 cwd changes the answer.
+      renderer._fireCwd('host', '/srv/new/path')
+      expect(onActiveOriginChange).toHaveBeenCalledTimes(2)
+      expect(content.activeOrigin()?.cwd).toBe('/srv/new/path')
+
+      // The session dying changes it back to null.
+      const exitCb = session.onExit.mock.calls[0]?.[0] as (sid: string) => void
+      exitCb(session.sessionId)
+      expect(onActiveOriginChange).toHaveBeenCalledTimes(3)
+      expect(content.activeOrigin()).toBeNull()
     } finally {
       teardown()
     }

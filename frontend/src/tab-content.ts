@@ -54,6 +54,15 @@ export interface ActiveOrigin {
    *  cwd a composition layer may hand to `files.open` as `rootPath` (D2). A
    *  session-open cwd is the provider's fallback question, not a claim. */
   cwdVerified: boolean
+  /** Whether origin-following surfaces should follow this origin's cwd.
+   *  A terminal says yes — the shell's verified OSC 7 cwd is the panel's
+   *  reveal target. A viewer tab carries a FROZEN origin (the machine the
+   *  file was opened from) and explicitly has NO opinion about where we
+   *  are now: it says no, so activating a viewer never moves the panel —
+   *  and its frozen cwd is a snapshot, never a claim, so it must not be
+   *  treated as one. The store checks this before cwd, so the viewer's
+   *  stale cwd value is never consulted. */
+  cwdFollow: boolean
   /** Host label for the machine this origin speaks for, or null for a local
    *  session. Carried so provenance can ride a surface's output — the file
    *  viewer titles a remote file "host · name" and a local file by its

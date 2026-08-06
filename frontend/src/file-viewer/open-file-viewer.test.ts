@@ -73,6 +73,7 @@ function target(overrides: Partial<FileViewerTarget>): FileViewerTarget {
       kind: 'ssh',
       cwd: '/srv/etc',
       cwdVerified: false,
+      cwdFollow: false,
       host: 'srv-01',
     },
     ...overrides,

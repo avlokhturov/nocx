@@ -145,6 +145,14 @@ export interface TerminalContentHooks {
   /** The pane entered or left an environment, so the ports panel's target
    *  changed without the active tab changing (nocx-695k.3). */
   onPortsTargetChange?: () => void
+  /** The activeOrigin() answer changed without the active tab changing:
+   *  a verified OSC 7 cwd arrived, the pane entered or left an
+   *  environment, or the session died — each changes the machine the
+   *  tab speaks for, and origin-following surfaces (the Files panel's
+   *  reveal) must hear about it. Named onActiveOriginChange, not
+   *  onCwdChange: OSC 7 is one cause, and a cwd-only hook would
+   *  silently miss the other three. */
+  onActiveOriginChange?: () => void
   /** An SSH connection failed because the vault is sealed. */
   onVaultSealed?: () => void
   /** The reference picker's setup offer needs the setup dialog (no OS key):
@@ -482,6 +490,7 @@ export class TerminalContent extends BaseTabContent {
       // no cwd, or syncLocation's blank inside an environment we left).
       cwd: this._cwd === '' ? null : this._cwd,
       cwdVerified: this._cwdVerified,
+      cwdFollow: true,
       host: this.sshOpts?.host ?? null,
     }
   }
@@ -640,6 +649,7 @@ export class TerminalContent extends BaseTabContent {
     this._updateCapability()
     this.syncLocation()
     this.hooks.onPortsTargetChange?.()
+    this.hooks.onActiveOriginChange?.()
     // The accepted passport crossed the control plane: report it (§5.4) —
     // the installed fact is written from exactly this observation.
     void this._reportObservation(attempt)
@@ -716,6 +726,7 @@ export class TerminalContent extends BaseTabContent {
       this._updateCapability()
       this.syncLocation()
       this.hooks.onPortsTargetChange?.()
+      this.hooks.onActiveOriginChange?.()
     }
   }
 
@@ -1012,6 +1023,7 @@ export class TerminalContent extends BaseTabContent {
               this._updateCapability()
               this.syncLocation()
               this.hooks.onPortsTargetChange?.()
+              this.hooks.onActiveOriginChange?.()
             }
             // marker to tell us the far shell is ready, because the far
             // shell is exactly the one that emits none.
@@ -1704,6 +1716,11 @@ export class TerminalContent extends BaseTabContent {
       // nothing has been verified yet at session open (AD-5).
       this._cwdVerified = false
       this._host = this.sshOpts?.host || ''
+      // The origin answer changed from null to a live session: an
+      // already-active tab whose session (re)opens must push the change
+      // without a tab switch, the same as a cwd or an environment change.
+      // Fired after every field activeOrigin() reads is initialised.
+      this.hooks.onActiveOriginChange?.()
       // The block header's `user@host`. Empty for a local shell, where the
       // machine is implied and printing it on every block would be noise.
       // ONE derivation, routed to both chips — the block header's frozen
@@ -1756,6 +1773,7 @@ export class TerminalContent extends BaseTabContent {
         // The session is gone: an origin naming it would name a machine
         // that no longer exists (B.9).
         this._sessionExited = true
+        this.hooks.onActiveOriginChange?.()
         this.inputState.dispatch({ type: 'exit' })
         this.ledger?.finalizeOpen()
         this._disposeAllMarkers()
@@ -1781,6 +1799,10 @@ export class TerminalContent extends BaseTabContent {
         this.cwdTitle = directoryLabel(path)
         this.onTooltipChange(cwdTooltip(path, true))
         this.pushTitle()
+        // The verified cwd is the origin answer's most frequent change:
+        // origin-following surfaces (the Files panel's reveal) follow it
+        // live, not on the next tab switch.
+        this.hooks.onActiveOriginChange?.()
       })
 
       renderer.onBell(() => {

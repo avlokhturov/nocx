@@ -25,13 +25,15 @@ import type { Page } from '@playwright/test'
 // file's title is the basename alone — absence of the host marker is what
 // means "this machine".
 //
-// The root is made deterministic through the product's own seam: the shell
-// integration emits OSC 7 after `cd`, the frontend verifies it, and D2 lets
-// a verified cwd override the provider root. The tree must then root at the
-// fixture. To reach that state the tab must be switched away and back after
-// the cd — the origin the panel follows is the snapshot taken when the tab
-// became active (main.tsx feeds it on tab change only), which is itself the
-// behaviour under test.
+// The tree is rooted at the filesystem root `/` and stays there — the cwd
+// never re-roots it. The root is asserted from the panel's own state
+// (data-root), because the path left the header and "a row appeared" would
+// not tell a correct tree from a wrong machine's. A cd REVEALS instead:
+// the shell integration emits OSC 7, the frontend verifies it, and the
+// panel — open on Files from cold start — expands the chain from / down to
+// the new cwd and selects it. No tab switch is needed, which is itself the
+// behaviour under test: the origin-change notification pushes the cwd to
+// the panel (it used to be re-read only on tab change).
 
 // ── Fixture ────────────────────────────────────────────────────────────────
 
@@ -70,32 +72,33 @@ const TREE_ROW = '.ui-tree-row'
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 /** Make the active tab's origin the fixture: cd there (OSC 7 makes the cwd
- *  verified), then switch away and back so the origin signal the panel
- *  follows is refreshed from the live tab (main.tsx snapshots it on tab
- *  change). Then open the Files view. */
+ *  verified). The panel — open on Files from cold start — REVEALS the new
+ *  cwd through the origin-change notification: no tab switch, no click,
+ *  which is the behaviour under test. The fixture's own row lands selected;
+ *  expand it so its children (bigdir, notes.md) are rows the tests act on. */
 async function openFilesAtFixture(page: Page) {
   await page.goto('/')
   await promptReady(page)
   await page.keyboard.type(`cd ${fixtureRoot}`)
   await page.keyboard.press('Enter')
   // The tab title is directoryLabel(cwd): it updates only once the frontend
-  // processed the shell's OSC 7 report, i.e. exactly when cwdVerified turns
-  // true and files.open will be handed the fixture as rootPath.
+  // processed the shell's OSC 7 report, i.e. exactly when the verified cwd
+  // exists and the reveal has something to point at.
   await expect(page.locator(TAB_TITLE).first()).toContainText(fixtureBasename, {
     timeout: 20_000,
   })
-  await page.locator('[aria-label="New tab"]').click()
-  await expect(page.locator(TAB)).toHaveCount(2)
-  await page.locator(TAB).first().click()
   await expect(page.locator('[data-testid="files-panel"]')).toBeVisible()
-  // The root is asserted from the panel's own state rather than a header
-  // label: the path left the header (a header names the panel), and "a row
-  // appeared" would not tell a correct tree from a wrong machine's.
-  await expect(page.locator('[data-testid="files-panel"]')).toHaveAttribute(
-    'data-root',
-    fixtureRoot,
-    { timeout: 20_000 },
-  )
+  // The panel is rooted at the filesystem root, never at the cwd.
+  await expect(page.locator('[data-testid="files-panel"]')).toHaveAttribute('data-root', '/', {
+    timeout: 20_000,
+  })
+  // The reveal landed: the fixture's row is selected (the walk expanded
+  // the chain from / down to it).
+  const fixtureRow = page.locator(TREE_ROW, { hasText: fixtureBasename })
+  await expect(fixtureRow).toHaveAttribute('data-selected', 'true', { timeout: 20_000 })
+  // Expand the fixture so its children are rows the other tests click on.
+  await fixtureRow.getByRole('button', { name: `Expand ${fixtureBasename}` }).click()
+  await expect(page.locator('.ui-tree-row__name').filter({ hasText: 'bigdir' })).toBeVisible()
 }
 test('cold start: the Files icon is first in the activity bar, present and enabled; the panel is open on Files', async ({
   page,
@@ -117,7 +120,9 @@ test('cold start: the Files icon is first in the activity bar, present and enabl
   await expect(page.locator('#sidebar')).not.toHaveClass(/collapsed/)
   await expect(page.locator('[data-testid="files-panel"]')).toBeVisible()
 })
-test('the Files icon toggles the panel; open, the tree shows the origin root', async ({ page }) => {
+test('the Files icon toggles the panel; open, the tree shows the revealed fixture', async ({
+  page,
+}) => {
   await openFilesAtFixture(page)
 
   // The product's cold start is OPEN on Files, so §7's "clicking it opens
@@ -131,36 +136,71 @@ test('the Files icon toggles the panel; open, the tree shows the origin root', a
   await page.locator(FILES_BTN).click()
   await expect(page.locator('#sidebar')).not.toHaveClass(/collapsed/)
 
-  // The tree shows the fixture: the root header names it, and its two
-  // children are the depth-0 rows, the directory first (backend-owned
-  // ordering).
-  const rows = page.locator(`${TREE_ROW}[data-depth="0"]`)
-  await expect(rows).toHaveCount(2)
+  // The tree shows the fixture under the revealed chain from the
+  // filesystem root: the fixture's two children are visible rows, the
+  // directory first (backend-owned ordering). The panel never re-rooted —
+  // data-root stayed '/' (asserted inside openFilesAtFixture).
   await expect(page.locator('.ui-tree-row__name').filter({ hasText: 'bigdir' })).toBeVisible()
   await expect(page.locator('.ui-tree-row__name').filter({ hasText: 'notes.md' })).toBeVisible()
+})
+
+test('cd in the terminal reveals the directory in the tree — no click, no tab switch (acceptance)', async ({
+  page,
+}) => {
+  await page.goto('/')
+  await promptReady(page)
+  // The panel is rooted at the filesystem root, whatever the shell has or
+  // has not reported yet.
+  await expect(page.locator('[data-testid="files-panel"]')).toHaveAttribute('data-root', '/', {
+    timeout: 20_000,
+  })
+
+  await page.keyboard.type(`cd ${fixtureRoot}`)
+  await page.keyboard.press('Enter')
+  await expect(page.locator(TAB_TITLE).first()).toContainText(fixtureBasename, {
+    timeout: 20_000,
+  })
+
+  // The tree revealed it: the fixture's row is selected and its ancestors
+  // are expanded — with no click on the tree and no tab switch.
+  const fixtureRow = page.locator(TREE_ROW, { hasText: fixtureBasename })
+  await expect(fixtureRow).toHaveAttribute('data-selected', 'true', { timeout: 20_000 })
+  await expect(fixtureRow).toBeVisible()
+  // The panel still answers the filesystem root — the cd revealed, it did
+  // not re-root.
+  await expect(page.locator('[data-testid="files-panel"]')).toHaveAttribute('data-root', '/')
 })
 
 test('expanding a directory lists a page and "show next" reveals the rest', async ({ page }) => {
   await openFilesAtFixture(page)
 
   // Expand bigdir — the disclosure is the user's seam (aria-label from the
-  // kit row).
+  // kit row). The fixture sits under the revealed chain from / (its depth
+  // is its path's segment count minus the root), so bigdir's children sit
+  // one deeper than the fixture's row.
+  const childrenDepth = fixtureRoot.split('/').filter(Boolean).length + 1
   await page.locator('button[aria-label="Expand bigdir"]').click()
 
-  // A page of the directory: PAGE_SIZE depth-1 rows and a "show next"
+  // A page of the directory: PAGE_SIZE depth-N rows and a "show next"
   // button naming the remainder.
-  await expect(page.locator(`${TREE_ROW}[data-depth="1"]`)).toHaveCount(PAGE_SIZE)
-  const showMore = page.locator('[data-testid="files-show-more"]')
+  await expect(page.locator(`${TREE_ROW}[data-depth="${childrenDepth}"]`)).toHaveCount(PAGE_SIZE)
+  // The show-more button of the level being paged: the reveal expanded
+  // /tmp too, whose own show-more button would match an unscoped locator.
+  const showMore = page.locator(
+    `.files-row[data-depth="${childrenDepth}"] [data-testid="files-show-more"]`,
+  )
   await expect(showMore).toHaveText(`Show next ${BIGDIR_COUNT - PAGE_SIZE}`)
 
   // First "show next": another page lands, the remainder shrinks.
   await showMore.click()
-  await expect(page.locator(`${TREE_ROW}[data-depth="1"]`)).toHaveCount(PAGE_SIZE * 2)
+  await expect(page.locator(`${TREE_ROW}[data-depth="${childrenDepth}"]`)).toHaveCount(
+    PAGE_SIZE * 2,
+  )
   await expect(showMore).toHaveText(`Show next ${BIGDIR_COUNT - PAGE_SIZE * 2}`)
 
   // Second "show next": the rest lands and the button is gone.
   await showMore.click()
-  await expect(page.locator(`${TREE_ROW}[data-depth="1"]`)).toHaveCount(BIGDIR_COUNT)
+  await expect(page.locator(`${TREE_ROW}[data-depth="${childrenDepth}"]`)).toHaveCount(BIGDIR_COUNT)
   await expect(showMore).toHaveCount(0)
 
   // The whole directory is present, nothing duplicated or skipped (D10
@@ -209,9 +249,13 @@ test('right-clicking a row copies the relative and the absolute path', async ({
   await expect(menu.getByRole('menuitem', { name: 'Copy Absolute Path' })).toBeVisible()
   await expect(menu.getByRole('menuitem', { name: 'Show in Finder' })).toBeVisible()
 
-  // Relative: as spelled from the tree root — the file sits at depth 0.
+  // Relative: as spelled from the tree root — the tree is rooted at the
+  // filesystem root, so the fixture's file is spelled from / (no leading
+  // slash: "the path in this tree").
   await menu.getByRole('menuitem', { name: 'Copy Relative Path' }).click()
-  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('notes.md')
+  await expect
+    .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+    .toBe(join(fixtureRoot, 'notes.md').slice(1))
 
   // Absolute: the lexical absolute path of the row the user clicked.
   await page.locator('.files-row').filter({ hasText: 'notes.md' }).click({ button: 'right' })

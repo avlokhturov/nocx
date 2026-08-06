@@ -47,13 +47,13 @@ vi.mock('../renderers/xterm', () => ({
 const openFixture = (over: Partial<FilesOpenResult> = {}): FilesOpenResult => ({
   bindingId: 'b1',
   endpointId: null,
-  root: { path: '/home/dev', display: '~/dev', inferred: false, inferredReason: '' },
+  root: { path: '/', display: '/', inferred: false, inferredReason: '' },
   ...over,
 })
 
 const entryFixture = (over: Partial<FilesListEntry>): FilesListEntry => ({
   name: 'file',
-  path: '/home/dev/file',
+  path: '/file',
   kind: 'regular',
   size: 0,
   modTime: '2026-08-06T00:00:00Z',
@@ -67,7 +67,7 @@ const listFixture = (
   over: Partial<FilesListResult & { state: 'ok' }> = {},
 ): FilesListResult => ({
   state: 'ok',
-  path: '/home/dev',
+  path: '/',
   canonical,
   entries,
   offset: 0,
@@ -78,8 +78,8 @@ const listFixture = (
 })
 
 const readFixture = (over: Partial<FilesReadResult> = {}): FilesReadResult => ({
-  path: '/home/dev/notes.md',
-  canonical: 'C:/home/dev/notes.md',
+  path: '/notes.md',
+  canonical: 'C:/notes.md',
   text: 'hello',
   size: 5,
   modTime: '2026-08-06T00:00:00Z',
@@ -93,7 +93,7 @@ const readFixture = (over: Partial<FilesReadResult> = {}): FilesReadResult => ({
 function fakeServices(over: Partial<FilesPanelServices> = {}): FilesPanelServices {
   return {
     open: vi.fn().mockResolvedValue(openFixture()),
-    list: vi.fn().mockResolvedValue(listFixture('C:/home/dev', [])),
+    list: vi.fn().mockResolvedValue(listFixture('C:/', [])),
     read: vi.fn().mockResolvedValue(readFixture()),
     watch: vi.fn().mockResolvedValue({ mode: 'watching' }),
     reveal: vi.fn().mockResolvedValue({}),
@@ -112,8 +112,9 @@ const LOCAL_ORIGIN: ActiveOrigin = {
   tabId: 1,
   sessionId: 's-local',
   kind: 'local',
-  cwd: '~/dev',
+  cwd: '/',
   cwdVerified: true,
+  cwdFollow: true,
   host: null,
 }
 
@@ -123,6 +124,7 @@ const SSH_ORIGIN: ActiveOrigin = {
   kind: 'ssh',
   cwd: '/home/alice',
   cwdVerified: false,
+  cwdFollow: true,
   host: 'srv-01',
 }
 
@@ -228,10 +230,10 @@ describe('files sidebar view', () => {
 
     await vi.waitFor(() =>
       expect(panel.querySelector('[data-testid="files-panel"]')?.getAttribute('data-root')).toBe(
-        '/home/dev',
+        '/',
       ),
     )
-    await vi.waitFor(() => expect(open).toHaveBeenCalledWith('s-local', '~/dev'))
+    await vi.waitFor(() => expect(open).toHaveBeenCalledWith('s-local', '/'))
 
     // First in the view zone — before Ports.
     const viewButtons = bar.querySelectorAll<HTMLElement>('.activity-bar-top [data-view]')
@@ -247,9 +249,7 @@ describe('files sidebar view', () => {
     await vi.waitFor(() => expect(panel.classList.contains('collapsed')).toBe(true))
     icon.click()
     await vi.waitFor(() => expect(panel.classList.contains('collapsed')).toBe(false))
-    expect(panel.querySelector('[data-testid="files-panel"]')?.getAttribute('data-root')).toBe(
-      '/home/dev',
-    )
+    expect(panel.querySelector('[data-testid="files-panel"]')?.getAttribute('data-root')).toBe('/')
   })
 
   it('expanding a directory reaches files.list and the returned entries appear as rows', async () => {
@@ -257,13 +257,9 @@ describe('files sidebar view', () => {
       .fn()
       .mockImplementation((bindingId: string, path: string) =>
         Promise.resolve(
-          path === '/home/dev'
-            ? listFixture('C:/home/dev', [
-                entryFixture({ name: 'docs', path: '/home/dev/docs', kind: 'dir' }),
-              ])
-            : listFixture('C:/home/dev/docs', [
-                entryFixture({ name: 'notes.md', path: '/home/dev/docs/notes.md' }),
-              ]),
+          path === '/'
+            ? listFixture('C:/', [entryFixture({ name: 'docs', path: '/docs', kind: 'dir' })])
+            : listFixture('C:/docs', [entryFixture({ name: 'notes.md', path: '/docs/notes.md' })]),
         ),
       )
     const services = fakeServices({ list })
@@ -275,9 +271,7 @@ describe('files sidebar view', () => {
     expect(disclosure).not.toBeNull()
     disclosure!.click()
 
-    await vi.waitFor(() =>
-      expect(list).toHaveBeenCalledWith('b1', '/home/dev/docs', 0, expect.any(Number)),
-    )
+    await vi.waitFor(() => expect(list).toHaveBeenCalledWith('b1', '/docs', 0, expect.any(Number)))
     await vi.waitFor(() => expect(rowNamed(panel, 'notes.md')).not.toBeUndefined())
   })
 
@@ -286,13 +280,9 @@ describe('files sidebar view', () => {
       .fn()
       .mockImplementation((bindingId: string, path: string) =>
         Promise.resolve(
-          path === '/home/dev'
-            ? listFixture('C:/home/dev', [
-                entryFixture({ name: 'docs', path: '/home/dev/docs', kind: 'dir' }),
-              ])
-            : listFixture('C:/home/dev/docs', [
-                entryFixture({ name: 'notes.md', path: '/home/dev/docs/notes.md' }),
-              ]),
+          path === '/'
+            ? listFixture('C:/', [entryFixture({ name: 'docs', path: '/docs', kind: 'dir' })])
+            : listFixture('C:/docs', [entryFixture({ name: 'notes.md', path: '/docs/notes.md' })]),
         ),
       )
     const services = fakeServices({ list })
@@ -317,23 +307,130 @@ describe('files sidebar view', () => {
     await vi.waitFor(() => expect(rowNamed(panel, 'notes.md')).not.toBeUndefined())
   })
 
+  // ── The reveal (nocx-r3bz: the terminal owns "where am I"; the panel,
+  //    rooted at /, follows by revealing) ───────────────────────────────
+  it('a cd in the terminal reveals and selects the new directory, without a click or a tab switch', async () => {
+    const list = vi
+      .fn()
+      .mockImplementation((bindingId: string, path: string) =>
+        Promise.resolve(
+          path === '/'
+            ? listFixture('C:/', [entryFixture({ name: 'docs', path: '/docs', kind: 'dir' })])
+            : listFixture('C:/docs', [entryFixture({ name: 'notes.md', path: '/docs/notes.md' })]),
+        ),
+      )
+    const { panel, setActiveOrigin } = await mountApp(fakeServices({ list }))
+    await vi.waitFor(() => expect(rowNamed(panel, 'docs')).not.toBeUndefined())
+    // The origin's cwd was the root: nothing is selected.
+    expect(panel.querySelector('[data-selected="true"]')).toBeNull()
+
+    // The OSC 7 arrives: same session, new VERIFIED cwd. The reveal walks
+    // / → docs, selects the row — no click, no tab switch.
+    setActiveOrigin({ ...LOCAL_ORIGIN, cwd: '/docs' })
+    await vi.waitFor(() =>
+      expect(panel.querySelector('[data-selected="true"]')?.textContent).toContain('docs'),
+    )
+    // The kit row carries the selection (data-selected lives on .ui-tree-row).
+    const docsRow = rowNamed(panel, 'docs').querySelector('.ui-tree-row')
+    expect(docsRow?.getAttribute('data-selected')).toBe('true')
+    // Selecting is not expanding: the target's children were never listed.
+    expect(list.mock.calls.filter(([, p]) => p === '/docs')).toHaveLength(0)
+  })
+
+  it('the reveal scrolls the selected row into view', async () => {
+    const scrollIntoView = vi.fn()
+    /* eslint-disable @typescript-eslint/unbound-method -- the prototype
+       reads mirror the scroll-stub precedent in terminal-content.test.ts */
+    const original = Element.prototype.scrollIntoView
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollIntoView = scrollIntoView
+    try {
+      const list = vi
+        .fn()
+        .mockImplementation((bindingId: string, path: string) =>
+          Promise.resolve(
+            path === '/'
+              ? listFixture('C:/', [entryFixture({ name: 'docs', path: '/docs', kind: 'dir' })])
+              : listFixture('C:/docs', [
+                  entryFixture({ name: 'notes.md', path: '/docs/notes.md' }),
+                ]),
+          ),
+        )
+      const { panel, setActiveOrigin } = await mountApp(fakeServices({ list }))
+      await vi.waitFor(() => expect(rowNamed(panel, 'docs')).not.toBeUndefined())
+
+      setActiveOrigin({ ...LOCAL_ORIGIN, cwd: '/docs' })
+      await vi.waitFor(() => expect(scrollIntoView).toHaveBeenCalled())
+      expect(scrollIntoView).toHaveBeenCalledWith({ block: 'nearest' })
+    } finally {
+      Element.prototype.scrollIntoView = original
+    }
+  })
+
+  it('switching to a viewer tab moves nothing — a no-opinion origin never reveals', async () => {
+    const list = vi
+      .fn()
+      .mockImplementation((bindingId: string, path: string) =>
+        Promise.resolve(
+          path === '/'
+            ? listFixture('C:/', [entryFixture({ name: 'docs', path: '/docs', kind: 'dir' })])
+            : listFixture('C:/docs', [entryFixture({ name: 'notes.md', path: '/docs/notes.md' })]),
+        ),
+      )
+    const { panel, setActiveOrigin } = await mountApp(fakeServices({ list }))
+    await vi.waitFor(() => expect(rowNamed(panel, 'docs')).not.toBeUndefined())
+
+    // Reveal /docs first, so there IS a selection to move.
+    setActiveOrigin({ ...LOCAL_ORIGIN, cwd: '/docs' })
+    await vi.waitFor(() =>
+      expect(panel.querySelector('[data-selected="true"]')?.textContent).toContain('docs'),
+    )
+    const listsBefore = list.mock.calls.length
+
+    // A viewer answers the same session with NO opinion (cwdFollow false):
+    // the panel keeps its tree and binding, and nothing moves — not even
+    // towards the viewer's frozen cwd.
+    setActiveOrigin({ ...LOCAL_ORIGIN, tabId: 99, cwd: '/elsewhere', cwdFollow: false })
+    await new Promise((r) => setTimeout(r, 20))
+
+    expect(panel.querySelector('[data-selected="true"]')?.textContent).toContain('docs')
+    expect(list.mock.calls.length).toBe(listsBefore)
+    expect(list.mock.calls.filter(([, p]) => p === '/elsewhere')).toHaveLength(0)
+  })
+
+  it('an unverified cwd reveals nothing', async () => {
+    const list = vi
+      .fn()
+      .mockImplementation((bindingId: string, path: string) =>
+        Promise.resolve(
+          path === '/'
+            ? listFixture('C:/', [entryFixture({ name: 'docs', path: '/docs', kind: 'dir' })])
+            : listFixture('C:/docs', [entryFixture({ name: 'notes.md', path: '/docs/notes.md' })]),
+        ),
+      )
+    const { panel, setActiveOrigin } = await mountApp(fakeServices({ list }))
+    await vi.waitFor(() => expect(rowNamed(panel, 'docs')).not.toBeUndefined())
+
+    setActiveOrigin({ ...LOCAL_ORIGIN, cwd: '/docs', cwdVerified: false })
+    await new Promise((r) => setTimeout(r, 20))
+
+    expect(panel.querySelector('[data-selected="true"]')).toBeNull()
+    expect(list.mock.calls.filter(([, p]) => p === '/docs')).toHaveLength(0)
+  })
+
   it('"show next" reveals the rest of a paginated directory', async () => {
     const list = vi.fn().mockImplementation((bindingId: string, path: string, offset: number) =>
       Promise.resolve(
         offset === 0
-          ? listFixture('C:/home/dev', [entryFixture({ name: 'f1' })], {
+          ? listFixture('C:/', [entryFixture({ name: 'f1' })], {
               total: 3,
               hasMore: true,
             })
-          : listFixture(
-              'C:/home/dev',
-              [entryFixture({ name: 'f2' }), entryFixture({ name: 'f3' })],
-              {
-                offset: 1,
-                total: 3,
-                hasMore: false,
-              },
-            ),
+          : listFixture('C:/', [entryFixture({ name: 'f2' }), entryFixture({ name: 'f3' })], {
+              offset: 1,
+              total: 3,
+              hasMore: false,
+            }),
       ),
     )
     const services = fakeServices({ list })
@@ -345,9 +442,7 @@ describe('files sidebar view', () => {
     expect(moreBtn?.textContent).toContain('Show next 2')
     moreBtn!.click()
 
-    await vi.waitFor(() =>
-      expect(list).toHaveBeenCalledWith('b1', '/home/dev', 1, expect.any(Number)),
-    )
+    await vi.waitFor(() => expect(list).toHaveBeenCalledWith('b1', '/', 1, expect.any(Number)))
     await vi.waitFor(() => expect(rowNamed(panel, 'f2')).not.toBeUndefined())
     expect(rowNamed(panel, 'f3')).not.toBeUndefined()
     expect(panel.querySelector('[data-testid="files-show-more"]')).toBeNull()
@@ -360,9 +455,9 @@ describe('files sidebar view', () => {
       list: vi
         .fn()
         .mockResolvedValue(
-          listFixture('C:/home/dev', [
-            entryFixture({ name: 'notes.md', path: '/home/dev/notes.md' }),
-            entryFixture({ name: 'docs', path: '/home/dev/docs', kind: 'dir' }),
+          listFixture('C:/', [
+            entryFixture({ name: 'notes.md', path: '/notes.md' }),
+            entryFixture({ name: 'docs', path: '/docs', kind: 'dir' }),
           ]),
         ),
     })
@@ -371,12 +466,12 @@ describe('files sidebar view', () => {
 
     rowNamed(panel, 'notes.md').click()
     await vi.waitFor(() => expect(open).toHaveBeenCalledTimes(1))
-    expect(read).toHaveBeenCalledWith('b1', '/home/dev/notes.md', 0)
+    expect(read).toHaveBeenCalledWith('b1', '/notes.md', 0)
     expect(open).toHaveBeenCalledWith({
       bindingId: 'b1',
       endpointId: null,
-      path: '/home/dev/notes.md',
-      canonical: 'C:/home/dev/notes.md',
+      path: '/notes.md',
+      canonical: 'C:/notes.md',
       displayHost: null,
       name: 'notes.md',
       // The click-time scope minus the tabId — the viewer's activeOrigin
@@ -385,8 +480,11 @@ describe('files sidebar view', () => {
       origin: {
         sessionId: 's-local',
         kind: 'local',
-        cwd: '~/dev',
+        cwd: '/',
         cwdVerified: true,
+        // The viewer answers "where are we" with NO opinion — the frozen
+        // origin must never drive a reveal.
+        cwdFollow: false,
         host: null,
       },
     })
@@ -421,11 +519,7 @@ describe('files sidebar view', () => {
     await vi.waitFor(() => expect(rowNamed(panel, 'b-only.txt')).not.toBeUndefined())
 
     // A's listing finally lands — it must not paint A's machine into B's tree.
-    releaseRootA(
-      listFixture('C:/home/dev', [
-        entryFixture({ name: 'a-only.txt', path: '/home/dev/a-only.txt' }),
-      ]),
-    )
+    releaseRootA(listFixture('C:/', [entryFixture({ name: 'a-only.txt', path: '/a-only.txt' })]))
     await vi.waitFor(() => expect(list).toHaveBeenCalledTimes(2))
     expect(rowsOf(panel).map((r) => r.textContent)).not.toContain('a-only.txt')
     expect(rowNamed(panel, 'b-only.txt')).not.toBeUndefined()
@@ -434,17 +528,17 @@ describe('files sidebar view', () => {
   it('a directory symlink whose canonical matches an expanded ancestor renders cyclic with no children', async () => {
     const list = vi.fn().mockImplementation((bindingId: string, path: string) =>
       Promise.resolve(
-        path === '/home/dev'
-          ? listFixture('C:/home/dev', [
+        path === '/'
+          ? listFixture('C:/', [
               entryFixture({
                 name: 'loop',
-                path: '/home/dev/loop',
+                path: '/loop',
                 kind: 'symlink',
                 linkKind: 'dir',
                 linkTarget: '/',
               }),
             ])
-          : listFixture('C:/home/dev', [entryFixture({ name: 'leak.md' })]),
+          : listFixture('C:/', [entryFixture({ name: 'leak.md' })]),
       ),
     )
     const services = fakeServices({ list })
@@ -452,9 +546,7 @@ describe('files sidebar view', () => {
     await vi.waitFor(() => expect(rowNamed(panel, 'loop')).not.toBeUndefined())
 
     rowNamed(panel, 'loop').querySelector<HTMLElement>('.ui-tree-row__disclosure')!.click()
-    await vi.waitFor(() =>
-      expect(list).toHaveBeenCalledWith('b1', '/home/dev/loop', 0, expect.any(Number)),
-    )
+    await vi.waitFor(() => expect(list).toHaveBeenCalledWith('b1', '/loop', 0, expect.any(Number)))
 
     // Renders cyclic (a leaf — no disclosure), and no children were listed.
     // data-cyclic lives on the kit row (.ui-tree-row), not the surface
@@ -462,19 +554,19 @@ describe('files sidebar view', () => {
     await vi.waitFor(() => expect(panel.querySelector('[data-cyclic="true"]')).not.toBeNull())
     expect(rowNamed(panel, 'loop').querySelector('.ui-tree-row__disclosure')).toBeNull()
     expect(rowsOf(panel).map((r) => r.textContent)).not.toContain('leak.md')
-    expect(list.mock.calls.filter(([, p]) => p === '/home/dev/loop')).toHaveLength(1)
+    expect(list.mock.calls.filter(([, p]) => p === '/loop')).toHaveLength(1)
   })
 
   it('tooLarge and timedOut each render their own state', async () => {
     const list = vi.fn().mockImplementation((bindingId: string, path: string) => {
-      if (path === '/home/dev')
+      if (path === '/')
         return Promise.resolve(
-          listFixture('C:/home/dev', [
-            entryFixture({ name: 'big', path: '/home/dev/big', kind: 'dir' }),
-            entryFixture({ name: 'slow', path: '/home/dev/slow', kind: 'dir' }),
+          listFixture('C:/', [
+            entryFixture({ name: 'big', path: '/big', kind: 'dir' }),
+            entryFixture({ name: 'slow', path: '/slow', kind: 'dir' }),
           ]),
         )
-      if (path === '/home/dev/big')
+      if (path === '/big')
         return Promise.resolve({ state: 'tooLarge' as const, observedCount: 12_345, limit: 1_000 })
       return Promise.resolve({ state: 'timedOut' as const, timeout: 5_000 })
     })
@@ -504,19 +596,17 @@ describe('files sidebar view', () => {
     const retry = panel.querySelector<HTMLElement>('[data-testid="files-retry"]')
     expect(retry).not.toBeNull()
     list.mockImplementation((bindingId: string, path: string) => {
-      if (path === '/home/dev')
+      if (path === '/')
         return Promise.resolve(
-          listFixture('C:/home/dev', [
-            entryFixture({ name: 'big', path: '/home/dev/big', kind: 'dir' }),
-            entryFixture({ name: 'slow', path: '/home/dev/slow', kind: 'dir' }),
+          listFixture('C:/', [
+            entryFixture({ name: 'big', path: '/big', kind: 'dir' }),
+            entryFixture({ name: 'slow', path: '/slow', kind: 'dir' }),
           ]),
         )
-      if (path === '/home/dev/big')
+      if (path === '/big')
         return Promise.resolve({ state: 'tooLarge' as const, observedCount: 12_345, limit: 1_000 })
       return Promise.resolve(
-        listFixture('C:/home/dev/slow', [
-          entryFixture({ name: 'x.md', path: '/home/dev/slow/x.md' }),
-        ]),
+        listFixture('C:/slow', [entryFixture({ name: 'x.md', path: '/slow/x.md' })]),
       )
     })
     retry!.click()
@@ -528,7 +618,7 @@ describe('files sidebar view', () => {
     const { panel, setActiveOrigin } = await mountApp(services)
     await vi.waitFor(() =>
       expect(panel.querySelector('[data-testid="files-panel"]')?.getAttribute('data-root')).toBe(
-        '/home/dev',
+        '/',
       ),
     )
 
@@ -540,9 +630,7 @@ describe('files sidebar view', () => {
   })
 
   it('the header refresh re-lists the tree and the polling badge slot sits beside it', async () => {
-    const list = vi
-      .fn()
-      .mockResolvedValue(listFixture('C:/home/dev', [entryFixture({ name: 'a.txt' })]))
+    const list = vi.fn().mockResolvedValue(listFixture('C:/', [entryFixture({ name: 'a.txt' })]))
     const services = fakeServices({ list })
     const { panel } = await mountApp(services)
     await vi.waitFor(() => expect(rowNamed(panel, 'a.txt')).not.toBeUndefined())
@@ -566,9 +654,7 @@ describe('files sidebar view', () => {
       list: vi
         .fn()
         .mockResolvedValue(
-          listFixture('C:/home/dev', [
-            entryFixture({ name: 'notes.md', path: '/home/dev/notes.md' }),
-          ]),
+          listFixture('C:/', [entryFixture({ name: 'notes.md', path: '/notes.md' })]),
         ),
     })
     const { panel } = await mountApp(services)
@@ -595,13 +681,9 @@ describe('files sidebar view', () => {
       .fn()
       .mockImplementation((bindingId: string, path: string) =>
         Promise.resolve(
-          path === '/home/dev'
-            ? listFixture('C:/home/dev', [
-                entryFixture({ name: 'docs', path: '/home/dev/docs', kind: 'dir' }),
-              ])
-            : listFixture('C:/home/dev/docs', [
-                entryFixture({ name: 'notes.md', path: '/home/dev/docs/notes.md' }),
-              ]),
+          path === '/'
+            ? listFixture('C:/', [entryFixture({ name: 'docs', path: '/docs', kind: 'dir' })])
+            : listFixture('C:/docs', [entryFixture({ name: 'notes.md', path: '/docs/notes.md' })]),
         ),
       )
     const { panel } = await mountApp(fakeServices({ list }), clipboardFixture({ writeText }))
@@ -623,10 +705,10 @@ describe('files sidebar view', () => {
     const writeText = vi.fn().mockResolvedValue(undefined)
     const services = fakeServices({
       list: vi.fn().mockResolvedValue(
-        listFixture('C:/home/dev', [
+        listFixture('C:/', [
           entryFixture({
             name: 'link',
-            path: '/home/dev/link',
+            path: '/link',
             kind: 'symlink',
             linkKind: 'regular',
             linkTarget: '/elsewhere/real.txt',
@@ -644,7 +726,7 @@ describe('files sidebar view', () => {
     absolute!.click()
     // The link's own path, lexical — the canonical (which resolves symlinks)
     // is the deduplication identity, never the copy.
-    await vi.waitFor(() => expect(writeText).toHaveBeenCalledWith('/home/dev/link'))
+    await vi.waitFor(() => expect(writeText).toHaveBeenCalledWith('/link'))
     expect(writeText).not.toHaveBeenCalledWith('/elsewhere/real.txt')
   })
 
@@ -675,9 +757,7 @@ describe('files sidebar view', () => {
             ? listFixture('C:/home/alice', [
                 entryFixture({ name: 'remote.md', path: '/home/alice/remote.md' }),
               ])
-            : listFixture('C:/home/dev', [
-                entryFixture({ name: 'notes.md', path: '/home/dev/notes.md' }),
-              ]),
+            : listFixture('C:/', [entryFixture({ name: 'notes.md', path: '/notes.md' })]),
         ),
       )
     const { manager, panel, originFor } = await mountApp(fakeServices({ open, list }))
@@ -712,9 +792,7 @@ describe('files sidebar view', () => {
       list: vi
         .fn()
         .mockResolvedValue(
-          listFixture('C:/home/dev', [
-            entryFixture({ name: 'notes.md', path: '/home/dev/notes.md' }),
-          ]),
+          listFixture('C:/', [entryFixture({ name: 'notes.md', path: '/notes.md' })]),
         ),
     })
     const { panel } = await mountApp(services)
@@ -727,7 +805,7 @@ describe('files sidebar view', () => {
     expect(revealItem).not.toBeUndefined()
     revealItem!.click()
 
-    await vi.waitFor(() => expect(reveal).toHaveBeenCalledWith('b1', '/home/dev/notes.md'))
+    await vi.waitFor(() => expect(reveal).toHaveBeenCalledWith('b1', '/notes.md'))
     await vi.waitFor(() =>
       expect(document.querySelector('.ui-toast__message')?.textContent).toContain(
         'method not found',
@@ -741,9 +819,7 @@ describe('files sidebar view', () => {
       list: vi
         .fn()
         .mockResolvedValue(
-          listFixture('C:/home/dev', [
-            entryFixture({ name: 'notes.md', path: '/home/dev/notes.md' }),
-          ]),
+          listFixture('C:/', [entryFixture({ name: 'notes.md', path: '/notes.md' })]),
         ),
     })
     const { panel } = await mountApp(services, clipboardFixture({ writeText }))
@@ -772,9 +848,7 @@ describe('files sidebar view', () => {
       list: vi
         .fn()
         .mockResolvedValue(
-          listFixture('C:/home/dev', [
-            entryFixture({ name: 'notes.md', path: '/home/dev/notes.md' }),
-          ]),
+          listFixture('C:/', [entryFixture({ name: 'notes.md', path: '/notes.md' })]),
         ),
     })
     const { manager, panel, originFor } = await mountApp(services)
@@ -805,9 +879,7 @@ describe('files sidebar view', () => {
       list: vi
         .fn()
         .mockResolvedValue(
-          listFixture('C:/home/dev', [
-            entryFixture({ name: 'notes.md', path: '/home/dev/notes.md' }),
-          ]),
+          listFixture('C:/', [entryFixture({ name: 'notes.md', path: '/notes.md' })]),
         ),
     })
     const { panel } = await mountApp(services)

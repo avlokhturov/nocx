@@ -3,10 +3,13 @@
 //
 // The four rules that make it correct, each with the failure it stops:
 //
-// 1. ROOT COMES FROM files.open AND DOES NOT MOVE. A later `cd` (a new OSC 7
-//    cwd on the same session) must not re-root the tree, so rescope() is a
-//    no-op when the session scope is unchanged — only a different tab or a
-//    dead binding re-opens.
+// 1. THE ROOT COMES FROM files.open AND DOES NOT MOVE. The composition
+//    layer pins it to the FILESYSTEM ROOT `/` — a verified OSC 7 cwd is
+//    never handed to files.open, so a later `cd` (a new OSC 7 cwd on the
+//    same session) must not re-root the tree: rescope() is a no-op when
+//    the session scope is unchanged and REVEALS instead (walk the chain
+//    from the root down to the new cwd, expand, select — never collapse).
+//    Only a different tab or a dead binding re-opens.
 // 2. STALE RESPONSES ARE DROPPED, AND NOTHING CLIENT-MINTED GOES ON THE
 //    WIRE. Every request captures the {tabId, generation, bindingId} triple
 //    it was issued for; a response applies only if that triple still matches
@@ -68,6 +71,10 @@ function currentWatchPaths(root: FilesRoot): string[] {
  *  under it; the fallback spells the path as-is rather than inventing a
  *  relative form for a node that is not in the tree. */
 function relativePathOf(rootPath: string | null, nodePath: string): string {
+  // The filesystem root has no prefix: the path as spelled from / IS the
+  // path minus its leading slash. (rootPath + '/' would be '//' — a
+  // prefix no path has — so the general form cannot serve the root.)
+  if (rootPath === '/') return nodePath.startsWith('/') ? nodePath.slice(1) : nodePath
   if (rootPath !== null && nodePath.startsWith(rootPath + '/')) {
     return nodePath.slice(rootPath.length + 1)
   }
@@ -171,6 +178,22 @@ export interface FilesTreeStore {
   root(): FilesRoot | null
   /** The visible rows in display order (the flatten of the expanded tree). */
   rows(): FilesFlatRow[]
+  /** Walk from the root down to `path`, listing and expanding each level
+   *  that is not already expanded, then select the target (revealTarget).
+   *  NEVER collapses — a directory the user opened by hand stays open.
+   *  Idempotent: revealing the path already revealed (or a reveal to it
+   *  in flight) does nothing. Stops honestly: a level that comes back
+   *  tooLarge/timedOut/unreadable, or a path that does not exist under
+   *  the root, ends the walk with what was expanded left expanded and
+   *  the level's state row rendered — the reveal did not reach the
+   *  target and the tree says so where it stopped. */
+  revealPath(path: string): void
+  /** The path the last completed reveal selected, or null when nothing
+   *  has been revealed: no verified cwd yet, a viewer origin (no
+   *  opinion), or a fresh scope. The view renders the matching row
+   *  selected and scrolls it into view — the scroll belongs to the
+   *  view, never the store. */
+  revealTarget(): string | null
   /** Re-scope to the active tab's origin: opens a fresh binding when the
    *  session changed or the previous binding is gone; a no-op when the same
    *  session is still in front (the root does not move, rule 1). */
@@ -233,6 +256,29 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
   const [watchMode, setWatchMode] = createSignal<'watching' | 'polling' | null>(null)
   const [watchDegradedReason, setWatchDegradedReason] = createSignal<string | null>(null)
   const [watchFailed, setWatchFailed] = createSignal<string | null>(null)
+  /** The path the last completed reveal selected (see the interface doc).
+   *  Reset on every re-scope and dispose — a selection from a previous
+   *  machine must not linger. */
+  const [revealTarget, setRevealTarget] = createSignal<string | null>(null)
+  /** The reveal walk currently in flight, if any: the path it is walking.
+   *  A NEW path supersedes it (walkId drops the older walk's responses);
+   *  the SAME path while in flight is a no-op — the walk is already doing
+   *  exactly that work. Cleared when the walk ends, so a later reveal of
+   *  the same path walks again (and is still idempotent via revealTarget). */
+  let pendingReveal: string | null = null
+  /** True while a reveal walk is in flight. The change stream must not
+   *  refresh a directory the walk is paging: a files.changed issued
+   *  against the walk's first page would re-list `offset=0, limit=50`,
+   *  and if that response lands AFTER the walk's later pages it replaces
+   *  them — the accumulated rows shrink back to page 1 and the revealed
+   *  target vanishes. The walk's own pages are the freshest data for the
+   *  dirs it touches; the next poll's change (or the walk's re-sent watch
+   *  set) re-validates anything missed in the few milliseconds it runs. */
+  let revealing = false
+  /** The current reveal walk's identity. Every walk captures it; a step
+   *  applies only while it still matches — a reveal in flight when the
+   *  origin changes (or a newer reveal starts) must drop, never paint. */
+  let revealWalkId = 0
 
   const rows = createMemo<FilesFlatRow[]>(() => {
     treeVersion()
@@ -516,6 +562,12 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
    *  enumeration is already on the wire and its response is newer than
    *  this notification's knowledge. */
   function onFilesChanged(p: FilesChanged): void {
+    // A reveal walk is paging: a refresh here would re-list at the walk's
+    // first-page count and, landing late, replace the rows the walk has
+    // since accumulated — the reveal would collapse out from under the
+    // user (the files.changed-vs-pagination race, nocx-r3bz). The walk's
+    // own pages are the freshest data; the next poll re-validates.
+    if (revealing) return
     const b = untrack(binding)
     if (b === null || p.bindingId !== b.bindingId) return
     const r = untrack(root)
@@ -549,15 +601,22 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     setWatchMode(null)
     setWatchDegradedReason(null)
     setWatchFailed(null)
+    // A fresh scope starts with nothing revealed — a selection from a
+    // previous machine must not linger — and supersedes any walk still
+    // in flight from the previous scope: its responses must not paint,
+    // and its pending marker must not suppress this scope's reveal of
+    // the same path.
+    setRevealTarget(null)
+    pendingReveal = null
+    revealing = false
+    revealWalkId++
+    // The root is the FILESYSTEM ROOT, pinned here and never derived from
+    // the cwd: a verified OSC 7 cwd must not re-root the tree (it REVEALS
+    // instead), and the provider's fallback machinery is not reachable
+    // from the panel — the panel is a file manager from / whether or not
+    // the shell reports where it is.
     const ctx = { tabId: o.tabId, generation }
-    // D2: a verified OSC 7 cwd overrides the provider's root; anything else
-    // omits rootPath and lets the provider fall back (and say it did).
-    const rootPath = o.cwdVerified && o.cwd !== null ? o.cwd : undefined
-    // Omitting rootPath entirely — an explicit `undefined` is not the same
-    // as an absent parameter to the fake seam's call matchers, and the wire
-    // contract omits it.
-    const opening =
-      rootPath !== undefined ? services.open(o.sessionId, rootPath) : services.open(o.sessionId)
+    const opening = services.open(o.sessionId, '/')
     opening
       .then((res) => {
         if (!openCurrent(ctx)) return
@@ -584,6 +643,13 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
         // set starts with the root (the e2e clause: a file created outside
         // nocx in the root appears with nobody pressing anything).
         pushWatchSet()
+        // Reveal-on-open: land where the terminal is. Read the LIVE origin
+        // — the cwd may have moved while the open was in flight (an OSC 7
+        // that arrived mid-open), and the walk reads the committed root.
+        const live = untrack(origin)
+        if (live !== null && live.cwdVerified && live.cwd !== null && live.cwdFollow) {
+          revealPath(live.cwd)
+        }
       })
       .catch((e) => {
         if (!openCurrent(ctx)) return
@@ -609,6 +675,38 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
       prev.kind === next.kind &&
       prevBinding !== null
     ) {
+      // The stored origin stays CURRENT even though the scope does not
+      // re-open: openFile hands it to the viewer, and the reveal check
+      // reads the live cwd. A stale cwd here would reach the viewer.
+      setOrigin(next)
+      // Same scope: the tree does not move, but a VERIFIED cwd change on
+      // the origin the panel follows REVEALS — the chain from the root
+      // down to the new cwd is expanded and the target selected. This is
+      // the product rule: the terminal owns "where am I", and the panel,
+      // rooted at /, follows by revealing, never by re-rooting. An
+      // unverified or absent cwd reveals nothing (AD-5: no silent $HOME
+      // guess); an origin with no opinion — a viewer tab's frozen origin —
+      // reveals nothing either: it is "stay exactly as you are".
+      if (next.cwdVerified && next.cwd !== null && next.cwdFollow) {
+        revealPath(next.cwd)
+      }
+      return
+    }
+    // An open already in flight for the same session: re-opening would
+    // mint a second binding that supersedes the first (nocx-myts leaks
+    // it). The stored origin is STILL updated to the newest answer — the
+    // in-flight open reveals from the LIVE origin on success, and a
+    // stale cwd here would make it reveal the wrong path, or nothing at
+    // all: the unverified startup cwd is exactly what an early OSC 7
+    // races against.
+    if (
+      prev !== null &&
+      next !== null &&
+      prev.sessionId === next.sessionId &&
+      prev.kind === next.kind &&
+      phase() === 'opening'
+    ) {
+      setOrigin(next)
       return
     }
     closed = false
@@ -654,6 +752,200 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     }
     issueList(node, 0, FILES_PAGE_SIZE, ctx)
     pushWatchSet()
+  }
+
+  // ── Reveal (the product rule: the terminal owns "where am I"; the
+  //    panel, rooted at the filesystem root, follows by revealing) ─────
+
+  /** Reveal `targetPath`: walk from the root down to it, listing and
+   *  expanding each level that is not already expanded, then select the
+   *  target (revealTarget — the view scrolls it into view). NEVER
+   *  collapses: a directory the user opened by hand stays open. Stops
+   *  honestly: a level that comes back tooLarge/timedOut/unreadable, or
+   *  a path that does not exist under the root, ends the walk with what
+   *  was expanded left expanded and the level's state row rendered —
+   *  the reveal did not reach the target and the tree says so where it
+   *  stopped. Idempotent: the path already revealed (or a reveal to it
+   *  in flight) is a no-op. Every step rides the {tabId, generation,
+   *  bindingId} discipline (rules 2 and 3): a reveal in flight when the
+   *  origin changes must drop, never paint. */
+  function revealPath(targetPath: string): void {
+    const r = untrack(root)
+    if (r === null) return
+    if (targetPath === revealTarget() || targetPath === pendingReveal) return
+    const ctx = captureCtx()
+    if (ctx === null) return
+    // The target must sit under the root. The root is the filesystem
+    // root, so in practice every absolute cwd does; the guard is the
+    // walk's honesty about a path it cannot reach. (The '/' case below
+    // is the only one the panel reaches; the general form stays honest
+    // if a provider ever answers a different root.)
+    const under = r.path === '/' ? targetPath.startsWith('/') : targetPath.startsWith(r.path + '/')
+    if (targetPath !== r.path && !under) return
+    pendingReveal = targetPath
+    const walk = ++revealWalkId
+    revealing = true
+    // The path segments of the target below the root, in order; empty
+    // when the target IS the root (it has no row — selecting the root
+    // is selecting nothing, and that is the correct answer to `cd /`).
+    const rest = r.path === '/' ? targetPath.slice(1) : targetPath.slice(r.path.length + 1)
+    const segments = targetPath === r.path ? [] : rest.split('/').filter((s) => s !== '')
+    descend(r, segments, 0, walk)
+  }
+
+  /** One walk step. `dir` is the parent at level `i`; the child named by
+   *  `segments[i]` must be found (listing the parent if necessary,
+   *  paging exactly like "show next" when the child sits beyond the
+   *  loaded pages) and expanded, then the walk descends into it. When
+   *  `i` exhausts the segments, `dir` IS the target: select it. Every
+   *  entry re-checks the walk id and the scope — a superseded walk or a
+   *  changed origin drops without painting. */
+  function descend(dir: FilesRoot | FilesNode, segments: string[], i: number, walk: number): void {
+    if (walk !== revealWalkId) return
+    const ctx = captureCtx()
+    if (ctx === null || !scopeCurrent(ctx)) return
+    if (i >= segments.length) {
+      // The target: select it. Its own children are NOT listed —
+      // selecting is not expanding, and the user expands the target
+      // like any other directory.
+      finishReveal(dir, walk)
+      return
+    }
+    if (dir.state === 'tooLarge' || dir.state === 'timedOut' || dir.state === 'error') {
+      // Honest stop: the level's state row is the visible "the reveal
+      // did not reach the target". Nothing further is expanded.
+      endWalk(walk)
+      return
+    }
+    if (dir.state !== 'ok') {
+      // Not enumerated yet (the root's first list is in flight, or the
+      // directory was just expanded): list one page, then continue from
+      // the committed children.
+      revealList(dir, ctx, walk, () => descend(dir, segments, i, walk))
+      return
+    }
+    const child = dir.children.find((c) => c.name === segments[i])
+    if (child !== undefined) {
+      // A non-directory cannot be descended into: the path ends here.
+      if (
+        child.kind !== 'dir' &&
+        !(child.kind === 'symlink' && child.linkKind === 'dir' && !child.cyclic)
+      ) {
+        endWalk(walk)
+        return
+      }
+      if (i + 1 >= segments.length) {
+        // The child IS the target: select it without listing or expanding
+        // it — selecting is not expanding, and the user expands the
+        // target like any other directory.
+        finishReveal(child, walk)
+        return
+      }
+      // A level ON the way: expand it (never collapse — a directory the
+      // user opened by hand stays open), join its path to the watch set,
+      // and descend.
+      if (!child.expanded) {
+        child.expanded = true
+        bumpTree()
+        pushWatchSet()
+      }
+      descend(child, segments, i + 1, walk)
+      return
+    }
+    if (dir.hasMore) {
+      // The child sits beyond the loaded pages: fetch the next page and
+      // look again (D10 pagination applies to the walk too — the target
+      // can be the 200th entry of a level).
+      revealList(dir, ctx, walk, () => descend(dir, segments, i, walk))
+      return
+    }
+    // The level is fully listed and holds no child by that name: the
+    // target does not exist under the root.
+    endWalk(walk)
+  }
+  /** One listing step of a reveal walk: issue the page, apply it, and
+   *  continue the walk only when it is still the current walk. Pages
+   *  APPEND to the loaded children — the walk enumerates the directory
+   *  progressively, and a later page must never discard the rows an
+   *  earlier page already showed (applyListing's replace semantics are
+   *  for refreshes, whose limit covers the whole displayed window; a
+   *  page's limit covers only the page). The ordering guard still
+   *  applies: a response superseded by a newer cycle drops, and the walk
+   *  continues from whatever state the tree is in. */
+  function revealList(
+    dir: FilesRoot | FilesNode,
+    ctx: ListCtx,
+    walk: number,
+    onDone: () => void,
+  ): void {
+    dir.busy = true
+    bumpTree()
+    services.list(ctx.bindingId as string, dir.path, dir.nextOffset, FILES_PAGE_SIZE).then(
+      (res) => {
+        if (walk !== revealWalkId) return
+        if (ctx.generation < dir.appliedGeneration) {
+          dir.busy = false
+          bumpTree()
+          onDone()
+          return
+        }
+        if (res.state === 'ok') {
+          dir.state = 'ok'
+          dir.canonical = res.canonical
+          dir.rev = res.rev
+          dir.total = res.total
+          // Dedupe by path: a refresh that slipped in mid-walk (the
+          // manual header refresh supersedes by generation, but a change
+          // stream notification can race the same cycle) must not
+          // duplicate rows the walk already holds.
+          const known = new Set(dir.children.map((c) => c.path))
+          for (const e of res.entries) {
+            if (!known.has(e.path)) {
+              dir.children.push(entryToNode(e))
+              known.add(e.path)
+            }
+          }
+          dir.hasMore = res.hasMore
+          dir.nextOffset = res.offset + res.entries.length
+          dir.error = null
+          dir.appliedGeneration = ctx.generation
+          dir.busy = false
+          bumpTree()
+          onDone()
+          return
+        }
+        // tooLarge/timedOut: apply through the same path every other
+        // refusal rides, so the state row renders identically.
+        applyListing(dir, ctx, res)
+        onDone()
+      },
+      (e) => {
+        if (walk !== revealWalkId) return
+        applyListError(dir, ctx, e)
+        onDone()
+      },
+    )
+  }
+
+  /** The walk reached the target: select it. bumpTree so the rows
+   *  recompute — the selection is derived from revealTarget, and a
+   *  referentially-unchanged rows array would not re-render the row. */
+  function finishReveal(dir: FilesRoot | FilesNode, walk: number): void {
+    if (walk !== revealWalkId) return
+    pendingReveal = null
+    revealing = false
+    setRevealTarget(dir.path)
+    bumpTree()
+  }
+  /** The walk stopped before the target (a refused level, a missing
+   *  child, a superseding walk): release the pending marker. What was
+   *  expanded stays expanded; revealTarget stays at the last level the
+   *  walk actually reached. A SUPERSEDED walk does not clear the flag —
+   *  the newer walk is still revealing. */
+  function endWalk(walk: number): void {
+    if (walk !== revealWalkId) return
+    pendingReveal = null
+    revealing = false
   }
 
   function showMore(dir: FilesRoot | FilesNode): void {
@@ -771,6 +1063,13 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     setWatchMode(null)
     setWatchDegradedReason(null)
     setWatchFailed(null)
+    setRevealTarget(null)
+    // Supersede any walk still in flight: closed already drops its
+    // responses, and the pending marker must not suppress the next
+    // scope's reveal of the same path.
+    pendingReveal = null
+    revealing = false
+    revealWalkId++
     bumpTree()
     if (b !== null) void services.close(b.bindingId).catch(() => {})
     unsubChanged()
@@ -796,6 +1095,8 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     rows,
     rescope,
     toggle,
+    revealPath,
+    revealTarget,
     showMore,
     retry,
     refresh,

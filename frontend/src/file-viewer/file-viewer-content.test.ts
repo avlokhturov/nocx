@@ -92,6 +92,9 @@ const TARGET: FileViewerTarget = {
     kind: 'ssh',
     cwd: '/srv/etc',
     cwdVerified: false,
+    // A viewer has no opinion about where we are — the frozen origin
+    // must not drive the panel's reveal (brief §4).
+    cwdFollow: false,
     host: 'srv-01',
   },
 }
@@ -172,6 +175,9 @@ describe('FileViewerContent — the activeOrigin capability (design §5.4)', () 
       kind: 'ssh',
       cwd: '/srv/etc',
       cwdVerified: false,
+      // A viewer has no opinion about where we are: the frozen origin
+      // must never drive the panel's reveal (brief §4).
+      cwdFollow: false,
       host: 'srv-01',
     })
     content.dispose()

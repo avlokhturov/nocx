@@ -3,6 +3,13 @@
 // ordering (rule 2), canonical cycle detection before rendering (rule 3) and
 // the state discriminator (rule 4). The store is exercised directly with a
 // fake services seam — no DOM, no WebSocket.
+//
+// Rule 1 in its current form (the product rule, nocx-r3bz): the root is the
+// constant FILESYSTEM ROOT — the verified cwd is never handed to files.open —
+// and a verified cwd change on the same session REVEALS instead: the chain
+// from the root down to the new cwd is expanded and the target selected.
+// Nothing ever collapses; an unverified cwd reveals nothing; an origin with
+// no opinion (a viewer tab) reveals nothing.
 import { describe, expect, it, vi } from 'vitest'
 import type { FilesListEntry, FilesListResult } from '../generated/files.list'
 import type { FilesChanged } from '../generated/files.changed'
@@ -12,12 +19,17 @@ import type { ActiveOrigin } from '../tab-content'
 
 // ── Fixtures ──────────────────────────────────────────────────────────────
 
+/** The local terminal: rooted at the filesystem root, cwd VERIFIED but the
+ *  root itself — so the mount reveal selects the root (a no-op: the root
+ *  has no row) and no walk is issued. The reveal-specific tests use cwds
+ *  below the root. */
 const LOCAL_A: ActiveOrigin = {
   tabId: 1,
   sessionId: 'session-a',
   kind: 'local',
-  cwd: '/home/alice',
+  cwd: '/',
   cwdVerified: true,
+  cwdFollow: true,
   host: null,
 }
 
@@ -27,18 +39,19 @@ const SSH_B: ActiveOrigin = {
   kind: 'ssh',
   cwd: '/home/bob',
   cwdVerified: false,
+  cwdFollow: true,
   host: 'srv-b',
 }
 
 const OPEN_RESULT = {
   bindingId: 'b1',
   endpointId: null,
-  root: { path: '/home/alice', display: '~/alice', inferred: false, inferredReason: '' },
+  root: { path: '/', display: '/', inferred: false, inferredReason: '' },
 }
 
 const entry = (over: Partial<FilesListEntry>): FilesListEntry => ({
   name: 'file',
-  path: '/home/alice/file',
+  path: '/file',
   kind: 'regular',
   size: 0,
   modTime: '2026-08-06T00:00:00Z',
@@ -52,7 +65,7 @@ const listOk = (
   over: Partial<FilesListResult & { state: 'ok' }> = {},
 ): FilesListResult => ({
   state: 'ok',
-  path: '/home/alice',
+  path: '/',
   canonical,
   entries,
   offset: 0,
@@ -77,7 +90,7 @@ function deferred<T>(): Deferred<T> {
 function makeServices(over: Partial<FilesPanelServices> = {}): FilesPanelServices {
   return {
     open: vi.fn().mockResolvedValue(OPEN_RESULT),
-    list: vi.fn().mockResolvedValue(listOk('C:/home/alice', [])),
+    list: vi.fn().mockResolvedValue(listOk('C:/', [])),
     read: vi.fn().mockResolvedValue({}),
     watch: vi.fn().mockResolvedValue({ mode: 'watching' }),
     reveal: vi.fn().mockResolvedValue({}),
@@ -99,23 +112,40 @@ function nodeRows(store: FilesTreeStore, name: string) {
   return row.node
 }
 
+/** The canonical tree the reveal tests walk: / → home → alice → notes.md.
+ *  The directory named after the path IS the target's parent, so listing
+ *  it answers the walk's "find the child" question. */
+function revealTreeList(): (bindingId: string, path: string) => Promise<FilesListResult> {
+  return (bindingId: string, path: string) => {
+    if (path === '/')
+      return Promise.resolve(listOk('C:/', [entry({ name: 'home', path: '/home', kind: 'dir' })]))
+    if (path === '/home')
+      return Promise.resolve(
+        listOk('C:/home', [entry({ name: 'alice', path: '/home/alice', kind: 'dir' })]),
+      )
+    return Promise.resolve(
+      listOk('C:/home/alice', [entry({ name: 'notes.md', path: '/home/alice/notes.md' })]),
+    )
+  }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────
 
 describe('files tree store', () => {
-  it('opens a binding for the origin and lists the root', async () => {
+  it('opens a binding for the origin, pinned to the filesystem root, and lists the root', async () => {
     const open = vi.fn().mockResolvedValue(OPEN_RESULT)
     const list = vi
       .fn()
       .mockResolvedValue(
-        listOk('C:/home/alice', [entry({ name: 'a.txt' }), entry({ name: 'docs', kind: 'dir' })]),
+        listOk('C:/', [entry({ name: 'a.txt' }), entry({ name: 'docs', kind: 'dir' })]),
       )
     const store = createFilesTreeStore(makeServices({ open, list }))
     store.rescope(LOCAL_A)
     await settle()
 
     expect(store.phase()).toBe('ready')
-    expect(open).toHaveBeenCalledWith('session-a', '/home/alice')
-    expect(list).toHaveBeenCalledWith('b1', '/home/alice', 0, FILES_PAGE_SIZE)
+    expect(open).toHaveBeenCalledWith('session-a', '/')
+    expect(list).toHaveBeenCalledWith('b1', '/', 0, FILES_PAGE_SIZE)
     const names = store
       .rows()
       .filter((r) => r.kind === 'entry')
@@ -123,25 +153,12 @@ describe('files tree store', () => {
     expect(names).toEqual(['a.txt', 'docs'])
   })
 
-  it('omits rootPath when the cwd is not verified (D2)', async () => {
+  it('pins the root to the filesystem root even when the cwd is not verified (D2)', async () => {
     const open = vi.fn().mockResolvedValue(OPEN_RESULT)
     const store = createFilesTreeStore(makeServices({ open }))
     store.rescope({ ...LOCAL_A, cwdVerified: false })
     await settle()
-    expect(open).toHaveBeenCalledWith('session-a')
-  })
-
-  it('does not re-open or re-root when the same session re-scopes (rule 1)', async () => {
-    const open = vi.fn().mockResolvedValue(OPEN_RESULT)
-    const list = vi.fn().mockResolvedValue(listOk('C:/home/alice', [entry({ name: 'a.txt' })]))
-    const store = createFilesTreeStore(makeServices({ open, list }))
-    store.rescope(LOCAL_A)
-    await settle()
-
-    // A later OSC 7 cwd on the SAME session must not re-root the tree.
-    store.rescope({ ...LOCAL_A, cwd: '/home/alice/elsewhere' })
-    await settle()
-    expect(open).toHaveBeenCalledTimes(1)
+    expect(open).toHaveBeenCalledWith('session-a', '/')
   })
 
   it('a different tab re-scopes: old binding closed, new one opened', async () => {
@@ -154,7 +171,7 @@ describe('files tree store', () => {
     await settle()
 
     expect(open).toHaveBeenCalledTimes(2)
-    expect(open).toHaveBeenLastCalledWith('session-b')
+    expect(open).toHaveBeenLastCalledWith('session-b', '/')
     expect(close).toHaveBeenCalledWith('b1')
   })
 
@@ -183,13 +200,9 @@ describe('files tree store', () => {
       .fn()
       .mockImplementation((bindingId: string, path: string) =>
         Promise.resolve(
-          path === '/home/alice'
-            ? listOk('C:/home/alice', [
-                entry({ name: 'docs', path: '/home/alice/docs', kind: 'dir' }),
-              ])
-            : listOk('C:/home/alice/docs', [
-                entry({ name: 'notes.md', path: '/home/alice/docs/notes.md' }),
-              ]),
+          path === '/'
+            ? listOk('C:/', [entry({ name: 'docs', path: '/docs', kind: 'dir' })])
+            : listOk('C:/docs', [entry({ name: 'notes.md', path: '/docs/notes.md' })]),
         ),
       )
     const store = createFilesTreeStore(makeServices({ list }))
@@ -200,7 +213,7 @@ describe('files tree store', () => {
     store.toggle(docs)
     await settle()
 
-    expect(list).toHaveBeenCalledWith('b1', '/home/alice/docs', 0, FILES_PAGE_SIZE)
+    expect(list).toHaveBeenCalledWith('b1', '/docs', 0, FILES_PAGE_SIZE)
     const names = store
       .rows()
       .filter((r) => r.kind === 'entry')
@@ -213,18 +226,18 @@ describe('files tree store', () => {
     const list = vi.fn().mockImplementation((bindingId: string, path: string, offset: number) =>
       Promise.resolve(
         offset === 0
-          ? listOk('C:/home/alice', [first], {
+          ? listOk('C:/', [first], {
               total: 3,
               hasMore: true,
               rev: 'r1',
-              path: '/home/alice',
+              path: '/',
             })
-          : listOk('C:/home/alice', [entry({ name: 'f2' }), entry({ name: 'f3' })], {
+          : listOk('C:/', [entry({ name: 'f2' }), entry({ name: 'f3' })], {
               offset: 1,
               total: 3,
               hasMore: false,
               rev: 'r1',
-              path: '/home/alice',
+              path: '/',
             }),
       ),
     )
@@ -240,7 +253,7 @@ describe('files tree store', () => {
     store.showMore(more.dir)
     await settle()
 
-    expect(list).toHaveBeenCalledWith('b1', '/home/alice', 1, FILES_PAGE_SIZE)
+    expect(list).toHaveBeenCalledWith('b1', '/', 1, FILES_PAGE_SIZE)
     const names = store
       .rows()
       .filter((r) => r.kind === 'entry')
@@ -249,15 +262,255 @@ describe('files tree store', () => {
     expect(store.rows().some((r) => r.kind === 'more')).toBe(false)
   })
 
+  // ── Rule 1: the root does not move; a verified cwd REVEALS ──────────
+  it('a verified cwd change on the same session reveals and selects the target, without re-opening', async () => {
+    const open = vi.fn().mockResolvedValue(OPEN_RESULT)
+    const list = vi.fn().mockImplementation(revealTreeList())
+    const store = createFilesTreeStore(makeServices({ open, list }))
+    store.rescope(LOCAL_A)
+    await settle()
+    const listsBefore = list.mock.calls.length
+
+    // The cd: same session, new verified cwd. The tree must NOT re-open
+    // (rule 1 — the root never moves), and must reveal the new cwd.
+    store.rescope({ ...LOCAL_A, cwd: '/home/alice' })
+    await settle()
+
+    expect(open).toHaveBeenCalledTimes(1)
+    expect(store.root()?.path).toBe('/')
+    expect(store.revealTarget()).toBe('/home/alice')
+    // The chain / → home → alice is expanded (home is a row; alice is
+    // selected, NOT expanded — selecting is not expanding).
+    expect(nodeRows(store, 'home').expanded).toBe(true)
+    expect(nodeRows(store, 'alice').expanded).toBe(false)
+    // The walk listed the levels it had to descend through: / (to find
+    // home — once more than the openScope listing, because the root's
+    // first list was still in flight when the walk started) and /home.
+    expect(list).toHaveBeenCalledWith('b1', '/home', 0, FILES_PAGE_SIZE)
+    expect(list.mock.calls.length).toBeGreaterThan(listsBefore)
+  })
+
+  it('reveals once when the binding opens, landing where the terminal is', async () => {
+    const list = vi.fn().mockImplementation(revealTreeList())
+    const store = createFilesTreeStore(makeServices({ list }))
+    // A tab activated with its verified cwd already in place: the open
+    // itself must reveal — no second rescope needed.
+    store.rescope({ ...LOCAL_A, cwd: '/home/alice' })
+    await settle()
+
+    expect(store.phase()).toBe('ready')
+    expect(store.revealTarget()).toBe('/home/alice')
+    expect(nodeRows(store, 'home').expanded).toBe(true)
+  })
+
+  it('reveal never collapses a directory the user expanded', async () => {
+    const list = vi.fn().mockImplementation((bindingId: string, path: string) => {
+      if (path === '/')
+        return Promise.resolve(
+          listOk('C:/', [
+            entry({ name: 'home', path: '/home', kind: 'dir' }),
+            entry({ name: 'docs', path: '/docs', kind: 'dir' }),
+          ]),
+        )
+      if (path === '/docs')
+        return Promise.resolve(
+          listOk('C:/docs', [entry({ name: 'keep.md', path: '/docs/keep.md' })]),
+        )
+      if (path === '/home')
+        return Promise.resolve(
+          listOk('C:/home', [entry({ name: 'alice', path: '/home/alice', kind: 'dir' })]),
+        )
+      return Promise.resolve(
+        listOk('C:/home/alice', [entry({ name: 'notes.md', path: '/home/alice/notes.md' })]),
+      )
+    })
+    const store = createFilesTreeStore(makeServices({ list }))
+    store.rescope(LOCAL_A)
+    await settle()
+
+    // The user opened docs by hand.
+    const docs = nodeRows(store, 'docs')
+    store.toggle(docs)
+    await settle()
+    expect(docs.expanded).toBe(true)
+
+    // A cd elsewhere reveals — and leaves docs open.
+    store.rescope({ ...LOCAL_A, cwd: '/home/alice' })
+    await settle()
+
+    expect(docs.expanded).toBe(true)
+    expect(nodeRows(store, 'keep.md')).toBeDefined()
+    expect(store.revealTarget()).toBe('/home/alice')
+  })
+
+  it('reveal is idempotent: the same path again does no work and re-selects nothing new', async () => {
+    const list = vi.fn().mockImplementation(revealTreeList())
+    const store = createFilesTreeStore(makeServices({ list }))
+    store.rescope({ ...LOCAL_A, cwd: '/home/alice' })
+    await settle()
+    const listsAfterFirst = list.mock.calls.length
+    expect(store.revealTarget()).toBe('/home/alice')
+
+    // The same cwd again (an OSC 7 re-report, or a duplicate origin
+    // notification): no work, no new lists.
+    store.rescope({ ...LOCAL_A, cwd: '/home/alice' })
+    await settle()
+    expect(list.mock.calls.length).toBe(listsAfterFirst)
+    expect(store.revealTarget()).toBe('/home/alice')
+
+    // The public operation is idempotent the same way.
+    store.revealPath('/home/alice')
+    await settle()
+    expect(list.mock.calls.length).toBe(listsAfterFirst)
+    expect(store.revealTarget()).toBe('/home/alice')
+  })
+
+  it('the walk pages a level to find the target beyond the first page', async () => {
+    const first = entry({ name: 'f0001', path: '/f0001' })
+    const list = vi.fn().mockImplementation((bindingId: string, path: string, offset: number) => {
+      // The FIRST page of / holds the root's depth-0 rows; the walk pages
+      // the SAME path with a higher offset to find the target.
+      if (path === '/' && offset === 0)
+        return Promise.resolve(listOk('C:/', [first], { total: 60, hasMore: true, path: '/' }))
+      // Any later page holds the target directory.
+      return Promise.resolve(
+        listOk('C:/', [entry({ name: 'target', path: '/target', kind: 'dir' })], {
+          offset: 1,
+          total: 60,
+          hasMore: false,
+          path: '/',
+        }),
+      )
+    })
+    const store = createFilesTreeStore(makeServices({ list }))
+    store.rescope({ ...LOCAL_A, cwd: '/target' })
+    await settle()
+
+    expect(store.revealTarget()).toBe('/target')
+    expect(nodeRows(store, 'target').expanded).toBe(false)
+  })
+
+  it('a level that comes back tooLarge stops the reveal and is visible', async () => {
+    const list = vi
+      .fn()
+      .mockImplementation((bindingId: string, path: string) =>
+        Promise.resolve(
+          path === '/'
+            ? listOk('C:/', [entry({ name: 'big', path: '/big', kind: 'dir' })])
+            : { state: 'tooLarge' as const, observedCount: 12_345, limit: 1_000 },
+        ),
+      )
+    const store = createFilesTreeStore(makeServices({ list }))
+    store.rescope({ ...LOCAL_A, cwd: '/big/deeper' })
+    await settle()
+
+    // The walk expanded /big (the last reachable level) and stopped there
+    // honestly: the target was never selected, and the tooLarge state row
+    // is rendered where the reveal stopped.
+    expect(store.revealTarget()).toBeNull()
+    expect(nodeRows(store, 'big').expanded).toBe(true)
+    const stateRows = store.rows().filter((r) => r.kind === 'state')
+    expect(stateRows).toHaveLength(1)
+    if (stateRows[0]?.kind !== 'state') throw new Error('no state row')
+    expect(stateRows[0].dir.state).toBe('tooLarge')
+  })
+
+  it('a path that does not exist under the root stops the reveal honestly', async () => {
+    const list = vi.fn().mockImplementation(revealTreeList())
+    const store = createFilesTreeStore(makeServices({ list }))
+    store.rescope({ ...LOCAL_A, cwd: '/home/nobody' })
+    await settle()
+
+    expect(store.revealTarget()).toBeNull()
+    // /home is expanded (the walk descended it), nothing deeper.
+    expect(nodeRows(store, 'home').expanded).toBe(true)
+    expect(store.rows().some((r) => r.kind === 'entry' && r.node.name === 'nobody')).toBe(false)
+  })
+
+  it('switching to a viewer tab moves nothing', async () => {
+    const list = vi.fn().mockImplementation(revealTreeList())
+    const store = createFilesTreeStore(makeServices({ list }))
+    store.rescope(LOCAL_A)
+    await settle()
+    const listsBefore = list.mock.calls.length
+    expect(store.revealTarget()).toBe('/')
+
+    // A viewer tab answers the same session with NO opinion (cwdFollow
+    // false): the panel keeps its tree and binding, and nothing reveals.
+    store.rescope({ ...LOCAL_A, tabId: 99, cwdFollow: false, cwd: '/home/alice' })
+    await settle()
+
+    expect(list.mock.calls.length).toBe(listsBefore)
+    expect(store.revealTarget()).toBe('/')
+  })
+
+  it('an unverified cwd reveals nothing', async () => {
+    const list = vi.fn().mockImplementation(revealTreeList())
+    const store = createFilesTreeStore(makeServices({ list }))
+    store.rescope(LOCAL_A)
+    await settle()
+    const listsBefore = list.mock.calls.length
+
+    store.rescope({ ...LOCAL_A, cwd: '/home/alice', cwdVerified: false })
+    await settle()
+
+    expect(list.mock.calls.length).toBe(listsBefore)
+    expect(store.revealTarget()).toBe('/')
+    // The root listing's row is there — but nothing was EXPANDED: the
+    // reveal walked nothing (an unverified cwd reveals nothing, AD-5).
+    expect(store.rows().some((r) => r.kind === 'entry' && r.node.name === 'home')).toBe(true)
+    expect(nodeRows(store, 'home').expanded).toBe(false)
+  })
+
+  it('a reveal in flight when the cwd changes drops, not paints', async () => {
+    // The walk to /home/old hangs on the /home listing; the cwd changes
+    // to /home/new before it resolves. The old walk's continuation must
+    // not select a stale target — a reveal in flight when the origin
+    // changes must drop, not paint.
+    const rootList = deferred<FilesListResult>()
+    const homeList = deferred<FilesListResult>()
+    const list = vi.fn().mockImplementation((bindingId: string, path: string) => {
+      if (path === '/') return rootList.promise
+      if (path === '/home') return homeList.promise
+      return Promise.resolve(
+        listOk('C:/home/new', [entry({ name: 'new.md', path: '/home/new/new.md' })]),
+      )
+    })
+    const store = createFilesTreeStore(makeServices({ list }))
+    store.rescope({ ...LOCAL_A, cwd: '/home/old' })
+    await settle()
+    rootList.resolve(listOk('C:/', [entry({ name: 'home', path: '/home', kind: 'dir' })]))
+    await settle()
+
+    // The cwd moved while the walk to /home/old was still listing /home.
+    store.rescope({ ...LOCAL_A, cwd: '/home/new' })
+    await settle()
+    // The /home listing that resolves now serves the NEW walk: it holds
+    // the new target (and the old cwd as an ordinary row).
+    homeList.resolve(
+      listOk('C:/home', [
+        entry({ name: 'new', path: '/home/new', kind: 'dir' }),
+        entry({ name: 'old', path: '/home/old', kind: 'dir' }),
+      ]),
+    )
+    await settle()
+
+    // The selection is the NEW cwd, and the OLD walk never painted: its
+    // continuation would have EXPANDED the old cwd's row on the way to
+    // selecting it — the row exists (the new walk applied the listing)
+    // but stayed collapsed.
+    expect(store.revealTarget()).toBe('/home/new')
+    expect(nodeRows(store, 'old').expanded).toBe(false)
+    expect(store.rows().some((r) => r.kind === 'entry' && r.node.name === 'new.md')).toBe(false)
+  })
+
   // ── Rule 2: the §0 test, at the store's level ──────────────────────────
   it('drops a listing for tab A that resolves after the user activated tab B', async () => {
     const aRootList = deferred<FilesListResult>()
     const list = vi
       .fn()
       .mockResolvedValueOnce(aRootList.promise) // A's root listing, still in flight
-      .mockResolvedValueOnce(
-        listOk('C:/home/bob', [entry({ name: 'b-only.txt', path: '/home/bob/b-only.txt' })]),
-      )
+      .mockResolvedValueOnce(listOk('C:/', [entry({ name: 'b-only.txt', path: '/b-only.txt' })]))
     const store = createFilesTreeStore(makeServices({ list }))
     store.rescope(LOCAL_A)
     await settle() // A's binding opens; A's root list hangs
@@ -266,9 +519,7 @@ describe('files tree store', () => {
     await settle() // B's binding opens; B's root list applies
 
     // A's listing finally lands — it must not paint A's machine into B's tree.
-    aRootList.resolve(
-      listOk('C:/home/alice', [entry({ name: 'a-only.txt', path: '/home/alice/a-only.txt' })]),
-    )
+    aRootList.resolve(listOk('C:/', [entry({ name: 'a-only.txt', path: '/a-only.txt' })]))
     await settle()
 
     const names = store
@@ -282,10 +533,10 @@ describe('files tree store', () => {
   it('drops a response older than what has already been applied to the same node', async () => {
     const oldExpand = deferred<FilesListResult>()
     const refreshList = deferred<FilesListResult>()
-    const docsEntry = entry({ name: 'docs', path: '/home/alice/docs', kind: 'dir' })
+    const docsEntry = entry({ name: 'docs', path: '/docs', kind: 'dir' })
     let docsLists = 0
     const list = vi.fn().mockImplementation((bindingId: string, path: string) => {
-      if (path === '/home/alice') return Promise.resolve(listOk('C:/home/alice', [docsEntry]))
+      if (path === '/') return Promise.resolve(listOk('C:/', [docsEntry]))
       docsLists += 1
       // First docs list = the expand (gen 1, hangs); second = the refresh
       // re-list (gen 2, hangs) — refresh() also re-lists the root, so the
@@ -305,8 +556,8 @@ describe('files tree store', () => {
 
     // The NEWER response lands first and is applied...
     refreshList.resolve(
-      listOk('C:/home/alice/docs', [entry({ name: 'new.md', path: '/home/alice/docs/new.md' })], {
-        path: '/home/alice/docs',
+      listOk('C:/docs', [entry({ name: 'new.md', path: '/docs/new.md' })], {
+        path: '/docs',
       }),
     )
     await settle()
@@ -314,8 +565,8 @@ describe('files tree store', () => {
     // ...then the OLD expand lands: the generation is older than what was
     // applied, so its page must not overwrite the fresh listing.
     oldExpand.resolve(
-      listOk('C:/home/alice/docs', [entry({ name: 'old.md', path: '/home/alice/docs/old.md' })], {
-        path: '/home/alice/docs',
+      listOk('C:/docs', [entry({ name: 'old.md', path: '/docs/old.md' })], {
+        path: '/docs',
       }),
     )
     await settle()
@@ -332,17 +583,17 @@ describe('files tree store', () => {
   it('marks a symlink whose canonical matches an expanded ancestor cyclic and lists nothing', async () => {
     const list = vi.fn().mockImplementation((bindingId: string, path: string) =>
       Promise.resolve(
-        path === '/home/alice'
-          ? listOk('C:/home/alice', [
+        path === '/'
+          ? listOk('C:/', [
               entry({
                 name: 'loop',
-                path: '/home/alice/loop',
+                path: '/loop',
                 kind: 'symlink',
                 linkKind: 'dir',
                 linkTarget: '/',
               }),
             ])
-          : listOk('C:/home/alice', [entry({ name: 'leak.md', path: '/leak.md' })]),
+          : listOk('C:/', [entry({ name: 'leak.md', path: '/leak.md' })]),
       ),
     )
     const store = createFilesTreeStore(makeServices({ list }))
@@ -363,25 +614,25 @@ describe('files tree store', () => {
     expect(names).toEqual(['loop'])
 
     // It is never requested again.
-    const loopLists = list.mock.calls.filter(([, path]) => path === '/home/alice/loop')
+    const loopLists = list.mock.calls.filter(([, path]) => path === '/loop')
     expect(loopLists).toHaveLength(1)
     store.toggle(loop)
     await settle()
-    expect(list.mock.calls.filter(([, path]) => path === '/home/alice/loop')).toHaveLength(1)
+    expect(list.mock.calls.filter(([, path]) => path === '/loop')).toHaveLength(1)
   })
 
   it('detects a cycle against a non-parent ancestor (root) too', async () => {
     const list = vi.fn().mockImplementation((bindingId: string, path: string) => {
-      if (path === '/home/alice')
+      if (path === '/')
         return Promise.resolve(
-          listOk('C:root', [entry({ name: 'sub', path: '/home/alice/sub', kind: 'dir' })]),
+          listOk('C:root', [entry({ name: 'sub', path: '/sub', kind: 'dir' })]),
         )
-      if (path === '/home/alice/sub')
+      if (path === '/sub')
         return Promise.resolve(
           listOk('C:sub', [
             entry({
               name: 'up',
-              path: '/home/alice/sub/up',
+              path: '/sub/up',
               kind: 'symlink',
               linkKind: 'dir',
               linkTarget: '/',
@@ -419,10 +670,8 @@ describe('files tree store', () => {
       .fn()
       .mockImplementation((bindingId: string, path: string) =>
         Promise.resolve(
-          path === '/home/alice'
-            ? listOk('C:/home/alice', [
-                entry({ name: 'big', path: '/home/alice/big', kind: 'dir' }),
-              ])
+          path === '/'
+            ? listOk('C:/', [entry({ name: 'big', path: '/big', kind: 'dir' })])
             : { state: 'tooLarge' as const, observedCount: 12_345, limit: 1_000 },
         ),
       )
@@ -447,13 +696,11 @@ describe('files tree store', () => {
     let calls = 0
     const list = vi.fn().mockImplementation((bindingId: string, path: string) => {
       calls += 1
-      if (path === '/home/alice')
-        return Promise.resolve(
-          listOk('C:/home/alice', [entry({ name: 'slow', path: '/home/alice/slow', kind: 'dir' })]),
-        )
+      if (path === '/')
+        return Promise.resolve(listOk('C:/', [entry({ name: 'slow', path: '/slow', kind: 'dir' })]))
       return calls === 2
         ? Promise.resolve({ state: 'timedOut' as const, timeout: 5_000 })
-        : Promise.resolve(listOk('C:/home/alice/slow', [entry({ name: 'x.md' })]))
+        : Promise.resolve(listOk('C:/slow', [entry({ name: 'x.md' })]))
     })
     const store = createFilesTreeStore(makeServices({ list }))
     store.rescope(LOCAL_A)
@@ -483,10 +730,8 @@ describe('files tree store', () => {
       .fn()
       .mockImplementation((bindingId: string, path: string) =>
         Promise.resolve(
-          path === '/home/alice'
-            ? listOk('C:/home/alice', [
-                entry({ name: 'secret', path: '/home/alice/secret', kind: 'dir' }),
-              ])
+          path === '/'
+            ? listOk('C:/', [entry({ name: 'secret', path: '/secret', kind: 'dir' })])
             : Promise.reject(new Error('permission denied')),
         ),
       )
@@ -527,6 +772,7 @@ describe('files tree store', () => {
     expect(close).toHaveBeenCalledWith('b1')
     expect(store.phase()).toBe('no-origin')
     expect(store.rows()).toHaveLength(0)
+    expect(store.revealTarget()).toBeNull()
 
     store.rescope(SSH_B)
     await settle()
@@ -544,7 +790,7 @@ describe('files tree store', () => {
 
     // The root's rows are on screen from the first list, so the initial
     // watch set is the root alone (the e2e clause).
-    expect(watch).toHaveBeenLastCalledWith('b1', ['/home/alice'])
+    expect(watch).toHaveBeenLastCalledWith('b1', ['/'])
   })
 
   it('expanding a directory adds it to the watch set and collapsing removes it', async () => {
@@ -553,28 +799,36 @@ describe('files tree store', () => {
       .fn()
       .mockImplementation((bindingId: string, path: string) =>
         Promise.resolve(
-          path === '/home/alice'
-            ? listOk('C:/home/alice', [
-                entry({ name: 'docs', path: '/home/alice/docs', kind: 'dir' }),
-              ])
-            : listOk('C:/home/alice/docs', [
-                entry({ name: 'a.md', path: '/home/alice/docs/a.md' }),
-              ]),
+          path === '/'
+            ? listOk('C:/', [entry({ name: 'docs', path: '/docs', kind: 'dir' })])
+            : listOk('C:/docs', [entry({ name: 'a.md', path: '/docs/a.md' })]),
         ),
       )
     const store = createFilesTreeStore(makeServices({ watch, list }))
     store.rescope(LOCAL_A)
     await settle()
-    expect(watch).toHaveBeenLastCalledWith('b1', ['/home/alice'])
+    expect(watch).toHaveBeenLastCalledWith('b1', ['/'])
 
     const docs = nodeRows(store, 'docs')
     store.toggle(docs)
     await settle()
-    expect(watch).toHaveBeenLastCalledWith('b1', ['/home/alice', '/home/alice/docs'])
+    expect(watch).toHaveBeenLastCalledWith('b1', ['/', '/docs'])
 
     store.toggle(docs)
     await settle()
-    expect(watch).toHaveBeenLastCalledWith('b1', ['/home/alice'])
+    expect(watch).toHaveBeenLastCalledWith('b1', ['/'])
+  })
+
+  it('a reveal walk adds the expanded levels to the watch set', async () => {
+    const watch = vi.fn().mockResolvedValue({ mode: 'watching' })
+    const list = vi.fn().mockImplementation(revealTreeList())
+    const store = createFilesTreeStore(makeServices({ watch, list }))
+    store.rescope({ ...LOCAL_A, cwd: '/home/alice' })
+    await settle()
+
+    // The walk expanded /home: the change surface is root + every expanded
+    // directory, so /home joined the watch set.
+    expect(watch.mock.calls.some(([, paths]) => (paths as string[]).includes('/home'))).toBe(true)
   })
 
   it('a files.changed for a loaded path triggers exactly one re-list and expansion survives', async () => {
@@ -582,13 +836,9 @@ describe('files tree store', () => {
       .fn()
       .mockImplementation((bindingId: string, path: string) =>
         Promise.resolve(
-          path === '/home/alice'
-            ? listOk('C:/home/alice', [
-                entry({ name: 'docs', path: '/home/alice/docs', kind: 'dir' }),
-              ])
-            : listOk('C:/home/alice/docs', [
-                entry({ name: 'old.md', path: '/home/alice/docs/old.md' }),
-              ]),
+          path === '/'
+            ? listOk('C:/', [entry({ name: 'docs', path: '/docs', kind: 'dir' })])
+            : listOk('C:/docs', [entry({ name: 'old.md', path: '/docs/old.md' })]),
         ),
       )
     let handler: ((p: FilesChanged) => void) | null = null
@@ -602,13 +852,13 @@ describe('files tree store', () => {
     const docs = nodeRows(store, 'docs')
     store.toggle(docs)
     await settle()
-    expect(list.mock.calls.filter(([, p]) => p === '/home/alice/docs')).toHaveLength(1)
+    expect(list.mock.calls.filter(([, p]) => p === '/docs')).toHaveLength(1)
 
-    handler!({ bindingId: 'b1', path: '/home/alice/docs' })
+    handler!({ bindingId: 'b1', path: '/docs' })
     await settle()
 
     // Exactly ONE re-list, from the top of the displayed window.
-    const docsLists = list.mock.calls.filter(([, p]) => p === '/home/alice/docs')
+    const docsLists = list.mock.calls.filter(([, p]) => p === '/docs')
     expect(docsLists).toHaveLength(2)
     expect(docsLists[1]?.[2]).toBe(0)
     // Expansion state survives the re-list (mergeChildren keeps identity).
@@ -621,11 +871,9 @@ describe('files tree store', () => {
       .fn()
       .mockImplementation((bindingId: string, path: string) =>
         Promise.resolve(
-          path === '/home/alice'
-            ? listOk('C:/home/alice', [
-                entry({ name: 'docs', path: '/home/alice/docs', kind: 'dir' }),
-              ])
-            : listOk('C:/home/alice/docs', [entry({ name: 'a.md' })], { rev: 'r9' }),
+          path === '/'
+            ? listOk('C:/', [entry({ name: 'docs', path: '/docs', kind: 'dir' })])
+            : listOk('C:/docs', [entry({ name: 'a.md' })], { rev: 'r9' }),
         ),
       )
     let handler: ((p: FilesChanged) => void) | null = null
@@ -640,16 +888,16 @@ describe('files tree store', () => {
     store.toggle(docs)
     await settle()
 
-    handler!({ bindingId: 'b1', path: '/home/alice/docs', rev: 'r9' })
+    handler!({ bindingId: 'b1', path: '/docs', rev: 'r9' })
     await settle()
 
     // The notification's rev is what the applied listing already carries:
     // the change is on screen, nothing is re-listed.
-    expect(list.mock.calls.filter(([, p]) => p === '/home/alice/docs')).toHaveLength(1)
+    expect(list.mock.calls.filter(([, p]) => p === '/docs')).toHaveLength(1)
   })
 
   it('a files.changed for another binding is ignored', async () => {
-    const list = vi.fn().mockResolvedValue(listOk('C:/home/alice', [entry({ name: 'a.txt' })]))
+    const list = vi.fn().mockResolvedValue(listOk('C:/', [entry({ name: 'a.txt' })]))
     let handler: ((p: FilesChanged) => void) | null = null
     const subscribeFilesChanged = vi.fn((h: (p: FilesChanged) => void) => {
       handler = h
@@ -659,7 +907,7 @@ describe('files tree store', () => {
     store.rescope(LOCAL_A)
     await settle()
 
-    handler!({ bindingId: 'some-other-binding', path: '/home/alice' })
+    handler!({ bindingId: 'some-other-binding', path: '/' })
     await settle()
 
     // Just the open listing — the foreign notification repainted nothing.
@@ -667,7 +915,7 @@ describe('files tree store', () => {
   })
 
   it('a files.changed for a path that is not loaded is ignored', async () => {
-    const list = vi.fn().mockResolvedValue(listOk('C:/home/alice', [entry({ name: 'a.txt' })]))
+    const list = vi.fn().mockResolvedValue(listOk('C:/', [entry({ name: 'a.txt' })]))
     let handler: ((p: FilesChanged) => void) | null = null
     const subscribeFilesChanged = vi.fn((h: (p: FilesChanged) => void) => {
       handler = h
@@ -677,9 +925,74 @@ describe('files tree store', () => {
     store.rescope(LOCAL_A)
     await settle()
 
-    handler!({ bindingId: 'b1', path: '/home/alice/not-loaded' })
+    handler!({ bindingId: 'b1', path: '/not-loaded' })
     await settle()
     expect(list).toHaveBeenCalledTimes(1)
+  })
+
+  it('a files.changed during a reveal walk does not truncate the walk (nocx-r3bz)', async () => {
+    // The walk is paging a directory whose first page does not hold the
+    // target. A files.changed for that directory arrives mid-walk: a
+    // refresh issued now would re-list `offset=0, limit=<first-page
+    // count>` and, landing after the walk's later pages, replace them —
+    // the accumulated rows shrink back to page 1 and the revealed target
+    // vanishes. The change must wait for the walk (whose pages are the
+    // freshest data for the dir it is walking).
+    const rootList = deferred<FilesListResult>()
+    const page1 = deferred<FilesListResult>()
+    const page2 = deferred<FilesListResult>()
+    let bigLists = 0
+    const list = vi.fn().mockImplementation((bindingId: string, path: string) => {
+      if (path === '/') return rootList.promise
+      bigLists += 1
+      if (bigLists === 1) return page1.promise
+      return page2.promise
+    })
+    let handler: ((p: FilesChanged) => void) | null = null
+    const subscribeFilesChanged = vi.fn((h: (p: FilesChanged) => void) => {
+      handler = h
+      return () => {}
+    })
+    const store = createFilesTreeStore(makeServices({ list, subscribeFilesChanged }))
+    store.rescope({ ...LOCAL_A, cwd: '/big/target' })
+    await settle()
+    rootList.resolve(listOk('C:/', [entry({ name: 'big', path: '/big', kind: 'dir' })]))
+    await settle()
+    // The walk is now hanging on /big's first page (bigLists === 1).
+    expect(bigLists).toBe(1)
+
+    // A change for /big lands while the walk is mid-pagination. The
+    // refresh must NOT be issued: it would truncate the walk.
+    handler!({ bindingId: 'b1', path: '/big' })
+    await settle()
+    expect(bigLists).toBe(1)
+
+    // The walk's pages continue and complete; the target is selected and
+    // both pages' rows are present (nothing was replaced by a stale
+    // refresh response).
+    page1.resolve(
+      listOk('C:/big', [entry({ name: 'f0001', path: '/big/f0001' })], {
+        total: 60,
+        hasMore: true,
+        path: '/big',
+      }),
+    )
+    await settle()
+    expect(bigLists).toBe(2)
+    page2.resolve(
+      listOk('C:/big', [entry({ name: 'target', path: '/big/target', kind: 'dir' })], {
+        offset: 1,
+        total: 60,
+        hasMore: false,
+        path: '/big',
+      }),
+    )
+    await settle()
+
+    expect(store.revealTarget()).toBe('/big/target')
+    expect(nodeRows(store, 'f0001')).toBeDefined()
+    expect(nodeRows(store, 'target').expanded).toBe(false)
+    expect(bigLists).toBe(2)
   })
 
   it('reports the refresh mode and a degraded reason for a local fallback', async () => {
@@ -724,7 +1037,7 @@ describe('files tree store', () => {
     connHandler!()
     await settle()
     expect(watch.mock.calls.length).toBe(callsBefore + 1)
-    expect(watch).toHaveBeenLastCalledWith('b1', ['/home/alice'])
+    expect(watch).toHaveBeenLastCalledWith('b1', ['/'])
   })
 
   it('dispose unsubscribes from the change stream and the reconnect hook', async () => {

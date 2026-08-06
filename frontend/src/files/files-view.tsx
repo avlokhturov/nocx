@@ -8,10 +8,12 @@
 // FileOpener as a dependency (the seam agreed in advance; a no-op default
 // keeps the panel testable and runnable before the viewer lands).
 //
-// The header carries the root's display path (an inferred root is labelled —
-// AD-5 surfaces a fallback, never applies it silently), the refresh action,
-// and the polling badge slot: the badge itself belongs to the watching wave
-// (§5.5), so the slot is left here and nothing else invents a different one.
+// The header carries the panel's name, the refresh action and the polling
+// badge slot (the badge itself belongs to the watching wave, §5.5, so the
+// slot is left here and nothing else invents a different one). It carries no
+// path: the root is the filesystem root and never moves, so there is nothing
+// there to report. The root the panel is actually showing lives on the panel
+// element as data-root, which is what the checks read.
 
 import { createEffect, createSignal, For, on, onCleanup, Show } from 'solid-js'
 import type { Component } from 'solid-js'
@@ -116,6 +118,33 @@ function FilesPanel(props: FilesPanelProps) {
       (origin) => props.store.rescope(origin),
     ),
   )
+  // The reveal's SCROLL is the view's job — the store only says which
+  // path the last completed reveal reached (revealTarget); this effect
+  // watches that answer and scrolls the row into view when it lands.
+  // `nearest` so a row already on screen does not jump. The row renders
+  // in the same flush that sets the target (the walk's last expansion
+  // bumps the tree before the target is set), so the DOM is current.
+  let treeEl: HTMLDivElement | undefined
+  createEffect(
+    on(
+      () => props.store.revealTarget(),
+      (target) => {
+        if (target === null || treeEl === undefined) return
+        // The target row, found by comparing the row's own data-path —
+        // no selector escaping, so a path with quotes or brackets cannot
+        // break the lookup (CSS.escape is not even available in jsdom).
+        const rows = treeEl.querySelectorAll<HTMLElement>('[data-path]')
+        for (const row of rows) {
+          if (row.dataset.path === target) {
+            // Optional: jsdom does not implement scrollIntoView, and a
+            // scroll that cannot happen must not break the reveal.
+            row.scrollIntoView?.({ block: 'nearest' })
+            return
+          }
+        }
+      },
+    ),
+  )
   // The view unmounts when another view takes the panel; its binding closes
   // with it, and the next mount re-opens through the rescope above.
   onCleanup(() => props.store.dispose())
@@ -148,6 +177,11 @@ function FilesPanel(props: FilesPanelProps) {
           cwd: o.cwd,
           cwdVerified: o.cwdVerified,
           host: o.host,
+          // The viewer's answer to "where are we" is NO opinion — it
+          // carries the frozen origin for the machine, and this flag is
+          // what tells origin-following surfaces not to move (design
+          // §5.4, brief: a viewer must not cause a reveal).
+          cwdFollow: false,
         },
       })
     } catch (e) {
@@ -231,6 +265,7 @@ function FilesPanel(props: FilesPanelProps) {
         <div
           class="files-row"
           data-testid="files-row"
+          data-path={node.path}
           onClick={() => {
             if (openable(node)) {
               void openFile(node)
@@ -262,6 +297,10 @@ function FilesPanel(props: FilesPanelProps) {
             disabled={node.state === 'error'}
             busy={node.busy}
             expanded={node.expanded}
+            // The reveal's selection: the row whose path the last
+            // completed reveal reached. The kit row owns the rendering
+            // (data-selected); the panel only names the target.
+            selected={node.path === props.store.revealTarget()}
             onToggle={() => props.store.toggle(node)}
           />
         </div>
@@ -372,7 +411,7 @@ function FilesPanel(props: FilesPanelProps) {
             </Button>
           </div>
         </Show>
-        <div class="files-tree" role="tree" aria-label="Files">
+        <div class="files-tree" role="tree" aria-label="Files" ref={treeEl}>
           <For each={props.store.rows()}>{(row) => renderRow(row)}</For>
         </div>
       </Show>
@@ -425,15 +464,13 @@ export function createFilesView(deps: FilesViewDeps): SidebarViewDescriptor {
         {/* No root path here, and no badge about it either. A header names
               the panel; a path is neither a name nor an action.
 
-              AD-5's obligation — a root the provider had to guess is
-              surfaced, never silently applied — is NOT met here at the
-              moment, and that is tracked (nocx-r3bz). A badge was tried and
-              removed: on a local session with no OSC 7 the root is always
-              inferred, so it was lit for everyone always, which is the
-              Polling badge's mistake wearing different words. The state
-              worth telling a user about is that the panel does not know
-              where the terminal is — and that belongs with the work that
-              makes it follow, where it can be true only when it is true. */}
+              AD-5 binds CWD, not the panel root, and only reached this
+              panel because the old design derived the root from the cwd —
+              an unverifiable cwd substituted $HOME into the root, and the
+              rule demanded that substitution be surfaced. The root is now
+              the constant filesystem root: nothing is derived, nothing is
+              substituted, and there is nothing to surface. When the cwd is
+              unknown the panel shows / and highlights nothing, full stop. */}
         <IconButton
           data-testid="files-refresh"
           size="sm"
