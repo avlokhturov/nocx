@@ -26,6 +26,10 @@ export function Log(arg1) {
   return window['go']['main']['WailsApp']['Log'](arg1);
 }
 
+export function LogFilePath() {
+  return window['go']['main']['WailsApp']['LogFilePath']();
+}
+
 export function ReportHealthy() {
   return window['go']['main']['WailsApp']['ReportHealthy']();
 }

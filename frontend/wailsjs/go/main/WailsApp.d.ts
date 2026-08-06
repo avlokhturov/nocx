@@ -14,4 +14,6 @@ export function GetWSToken():Promise<string>;
 
 export function Log(arg1:string):Promise<void>;
 
+export function LogFilePath():Promise<string>;
+
 export function ReportHealthy():Promise<void>;
