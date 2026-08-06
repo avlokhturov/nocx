@@ -18,7 +18,12 @@
   --tree-row-indent: var(--space-4);
   display: flex;
   align-items: center;
-  gap: var(--space-2);
+  /* Tight on purpose. The row is three things that belong to each other —
+     disclosure, type glyph, name — and 8px between them read as three
+     separate columns once the glyph arrived; before it there were only two
+     items and the looser gap did not show. The indent step
+     (--tree-row-indent) is what carries hierarchy, not the gap. */
+  gap: var(--space-1);
   min-width: 0;
   min-height: var(--control-height-sm);
   padding-left: calc(var(--tree-row-depth) * var(--tree-row-indent));
@@ -62,7 +67,11 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: var(--control-height-sm);
+  /* Width is the glyph's, not a control's: a 24px box around a 16px chevron
+     put 4px of air on each side, which reads as indentation the tree did not
+     ask for. The full row height is kept so the hit area stays comfortable
+     vertically, where nothing is competing for the space. */
+  width: var(--space-4);
   height: var(--control-height-sm);
   margin: 0;
   padding: 0;
@@ -116,7 +125,7 @@
    and every name in the tree forms one column. The disclosure sits inside
    it, centred; a leaf's slot is simply empty. */
 .ui-tree-row__leading {
-  flex: 0 0 var(--control-height-sm);
+  flex: 0 0 var(--space-4);
   display: inline-flex;
   align-items: center;
   justify-content: center;

@@ -88,9 +88,14 @@ async function openFilesAtFixture(page: Page) {
   await expect(page.locator(TAB)).toHaveCount(2)
   await page.locator(TAB).first().click()
   await expect(page.locator('[data-testid="files-panel"]')).toBeVisible()
-  await expect(page.locator('[data-testid="files-root-path"]')).toContainText(fixtureBasename, {
-    timeout: 20_000,
-  })
+  // The root is asserted from the panel's own state rather than a header
+  // label: the path left the header (a header names the panel), and "a row
+  // appeared" would not tell a correct tree from a wrong machine's.
+  await expect(page.locator('[data-testid="files-panel"]')).toHaveAttribute(
+    'data-root',
+    fixtureRoot,
+    { timeout: 20_000 },
+  )
 }
 test('cold start: the Files icon is first in the activity bar, present and enabled; the panel is open on Files', async ({
   page,

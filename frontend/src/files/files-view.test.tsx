@@ -227,7 +227,9 @@ describe('files sidebar view', () => {
     const { bar, panel } = await mountApp(services)
 
     await vi.waitFor(() =>
-      expect(panel.querySelector('[data-testid="files-root-path"]')).not.toBeNull(),
+      expect(panel.querySelector('[data-testid="files-panel"]')?.getAttribute('data-root')).toBe(
+        '/home/dev',
+      ),
     )
     await vi.waitFor(() => expect(open).toHaveBeenCalledWith('s-local', '~/dev'))
 
@@ -245,7 +247,9 @@ describe('files sidebar view', () => {
     await vi.waitFor(() => expect(panel.classList.contains('collapsed')).toBe(true))
     icon.click()
     await vi.waitFor(() => expect(panel.classList.contains('collapsed')).toBe(false))
-    expect(panel.querySelector('[data-testid="files-root-path"]')).not.toBeNull()
+    expect(panel.querySelector('[data-testid="files-panel"]')?.getAttribute('data-root')).toBe(
+      '/home/dev',
+    )
   })
 
   it('expanding a directory reaches files.list and the returned entries appear as rows', async () => {
@@ -274,6 +278,42 @@ describe('files sidebar view', () => {
     await vi.waitFor(() =>
       expect(list).toHaveBeenCalledWith('b1', '/home/dev/docs', 0, expect.any(Number)),
     )
+    await vi.waitFor(() => expect(rowNamed(panel, 'notes.md')).not.toBeUndefined())
+  })
+
+  it('clicking a directory row anywhere expands it, and the disclosure toggles exactly once', async () => {
+    const list = vi
+      .fn()
+      .mockImplementation((bindingId: string, path: string) =>
+        Promise.resolve(
+          path === '/home/dev'
+            ? listFixture('C:/home/dev', [
+                entryFixture({ name: 'docs', path: '/home/dev/docs', kind: 'dir' }),
+              ])
+            : listFixture('C:/home/dev/docs', [
+                entryFixture({ name: 'notes.md', path: '/home/dev/docs/notes.md' }),
+              ]),
+        ),
+      )
+    const services = fakeServices({ list })
+    const { panel } = await mountApp(services)
+    await vi.waitFor(() => expect(rowNamed(panel, 'docs')).not.toBeUndefined())
+
+    // The row, not the 16px disclosure: this is the click a user makes.
+    rowNamed(panel, 'docs').click()
+    await vi.waitFor(() => expect(rowNamed(panel, 'notes.md')).not.toBeUndefined())
+
+    // And clicking it again collapses it — one click, one toggle.
+    rowNamed(panel, 'docs').click()
+    await vi.waitFor(() =>
+      expect(rowsOf(panel).find((r) => r.textContent?.includes('notes.md'))).toBeUndefined(),
+    )
+
+    // The disclosure is inside the row, so its click reaches the row's
+    // handler too unless the kit stops it. If it did, this would expand and
+    // immediately collapse, and the one control built for the job would be
+    // the only place in the row that does nothing.
+    rowNamed(panel, 'docs').querySelector<HTMLElement>('.ui-tree-row__disclosure')!.click()
     await vi.waitFor(() => expect(rowNamed(panel, 'notes.md')).not.toBeUndefined())
   })
 
@@ -487,12 +527,16 @@ describe('files sidebar view', () => {
     const services = fakeServices()
     const { panel, setActiveOrigin } = await mountApp(services)
     await vi.waitFor(() =>
-      expect(panel.querySelector('[data-testid="files-root-path"]')).not.toBeNull(),
+      expect(panel.querySelector('[data-testid="files-panel"]')?.getAttribute('data-root')).toBe(
+        '/home/dev',
+      ),
     )
 
     setActiveOrigin(null)
     await vi.waitFor(() => expect(panel.textContent).toContain('No files to show'))
-    expect(panel.querySelector('[data-testid="files-root-path"]')).toBeNull()
+    expect(
+      panel.querySelector('[data-testid="files-panel"]')?.getAttribute('data-root'),
+    ).toBeFalsy()
   })
 
   it('the header refresh re-lists the tree and the polling badge slot sits beside it', async () => {

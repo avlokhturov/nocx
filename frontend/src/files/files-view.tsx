@@ -26,7 +26,7 @@ import { IconButton } from '../ui/icon-button'
 import { RefreshIcon } from '../ui/icons'
 import { Spinner } from '../ui/spinner'
 import { showToast } from '../ui/toast'
-import { TreeRow } from '../ui/tree-row'
+import { isExpandable, TreeRow } from '../ui/tree-row'
 import type { FilesPanelServices } from './files-client'
 import {
   createFilesTreeStore,
@@ -232,7 +232,21 @@ function FilesPanel(props: FilesPanelProps) {
           class="files-row"
           data-testid="files-row"
           onClick={() => {
-            if (openable(node)) void openFile(node)
+            if (openable(node)) {
+              void openFile(node)
+              return
+            }
+            // A click anywhere on a directory row expands or collapses it —
+            // the disclosure is a 16px target and the row is the whole
+            // width, and every file manager the product is measured against
+            // behaves this way. Expandability is asked of the kit rather
+            // than re-derived here (AD-8): the row that draws the disclosure
+            // is the one that decides there is one. A busy or unreadable row
+            // is left alone, matching its disabled disclosure.
+            if (node.busy === true || node.state === 'error') return
+            if (isExpandable(node.kind, node.linkKind, node.cyclic)) {
+              props.store.toggle(node)
+            }
           }}
           onContextMenu={(e) => {
             e.preventDefault()
@@ -317,8 +331,13 @@ function FilesPanel(props: FilesPanelProps) {
     )
   }
 
+  // data-root carries the root the panel is actually showing. The path left
+  // the header — a header names the panel — but it is still the panel's
+  // central state, and something has to be able to say WHICH machine and
+  // directory this tree is: a check that waits on "a row appeared" cannot
+  // tell a correct tree from a wrong machine's.
   return (
-    <div class="files-panel" data-testid="files-panel">
+    <div class="files-panel" data-testid="files-panel" data-root={props.store.root()?.path}>
       <Show when={props.store.phase() === 'no-origin'}>
         <EmptyState
           icon={<FilesIcon />}
@@ -403,16 +422,18 @@ export function createFilesView(deps: FilesViewDeps): SidebarViewDescriptor {
             path at its first render (the Solid gate's silent-reactivity
             failure — the refresh button's disabled binding is reactive, the
             captured const is not). */}
-        <Show when={store.root() !== null}>
-          <span
-            class="files-header-path"
-            data-testid="files-root-path"
-            title={store.root()?.inferred ? store.root()?.inferredReason : undefined}
-          >
-            {store.root()?.display}
-            {store.root()?.inferred ? ' (inferred)' : ''}
-          </span>
-        </Show>
+        {/* No root path here, and no badge about it either. A header names
+              the panel; a path is neither a name nor an action.
+
+              AD-5's obligation — a root the provider had to guess is
+              surfaced, never silently applied — is NOT met here at the
+              moment, and that is tracked (nocx-r3bz). A badge was tried and
+              removed: on a local session with no OSC 7 the root is always
+              inferred, so it was lit for everyone always, which is the
+              Polling badge's mistake wearing different words. The state
+              worth telling a user about is that the panel does not know
+              where the terminal is — and that belongs with the work that
+              makes it follow, where it can be true only when it is true. */}
         <IconButton
           data-testid="files-refresh"
           size="sm"

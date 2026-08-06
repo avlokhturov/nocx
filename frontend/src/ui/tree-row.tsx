@@ -82,8 +82,15 @@ export interface TreeRowProps {
 }
 
 /** A row is expandable from its kind alone: dir, or a symlink into a dir
- *  that is not cyclic. A cyclic symlink is a leaf whatever the caller asks. */
-function isExpandable(kind: TreeRowKind, linkKind?: TreeRowKind, cyclic?: boolean): boolean {
+ *  that is not cyclic. A cyclic symlink is a leaf whatever the caller asks.
+ *
+ *  Exported because a surface needs the same answer to decide what a click on
+ *  the ROW means — expand a directory, open a file — and a second copy of this
+ *  predicate would be a defect with a delay fuse: the two would agree on
+ *  every case anyone tried and disagree on the cyclic symlink, where the row
+ *  renders a leaf and the surface would still try to expand it. One owner,
+ *  and the owner is the component that already draws the disclosure. */
+export function isExpandable(kind: TreeRowKind, linkKind?: TreeRowKind, cyclic?: boolean): boolean {
   if (kind === 'dir') return true
   if (kind === 'symlink' && linkKind === 'dir') return !cyclic
   return false
@@ -151,7 +158,14 @@ export function TreeRow(props: TreeRowProps) {
             aria-expanded={expanded() ? 'true' : 'false'}
             aria-label={expanded() ? `Collapse ${props.name}` : `Expand ${props.name}`}
             disabled={props.busy === true || props.disabled === true}
-            onClick={(e: MouseEvent) => props.onToggle?.(e)}
+            onClick={(e: MouseEvent) => {
+              // The disclosure owns this click. A surface that also toggles
+              // on the row (clicking a folder anywhere expands it) would
+              // otherwise see the same click twice and toggle back — the
+              // button would be the one place in the row that does nothing.
+              e.stopPropagation()
+              props.onToggle?.(e)
+            }}
           >
             <span class="ui-tree-row__disclosure-icon">
               <ChevronDownIcon />

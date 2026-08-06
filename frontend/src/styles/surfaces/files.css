@@ -1,8 +1,8 @@
 /* ── Files surface (design §5.4) ─────────────────────────────────────────
    Placement only, ADR-0014: what was inline in files-view.tsx moves here —
-   the header path's ellipsis and the non-entry rows' indentation. The kit's
-   TreeRow already owns the entry rows' indent (data-depth in tree-row.css),
-   so nothing below addresses .ui-tree-row.
+   the non-entry rows' indentation. The kit's TreeRow already owns the entry
+   rows' indent (data-depth in tree-row.css), so nothing below addresses
+   .ui-tree-row.
 
    Indentation mirrors the kit's rule — the depth NUMBER drives the step —
    with one difference forced by the layering: the kit sets --tree-row-depth
@@ -11,25 +11,6 @@
    depths a real tree reaches. A deeper tree clamps at the last step — a
    cosmetic floor in a case the panel cannot meaningfully display, and a
    deliberate alternative to per-row inline padding. */
-
-/* The header path: one line, ellipsis at the tail, never wrapping into the
-   refresh button beside it. */
-.files-header-path {
-  /* Shrinkable, not merely capped: 12rem is the width it would LIKE, and
-     `0 1 auto` + `min-width: 0` is what lets it give way when the panel is
-     narrower than that, rather than shouldering Refresh off the edge. */
-  flex: 0 1 auto;
-  min-width: 0;
-  max-width: 12rem;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  /* The kit's header uppercases its label, and a path is not a label: it is
-     content, and on a case-sensitive filesystem `/HOME/DEV` is a different
-     path from the one being shown. Cancel the inheritance here rather than
-     asking the kit to stop shouting its own titles. */
-  text-transform: none;
-}
 
 .files-row[data-depth='0'] {
   padding-left: calc(0 * var(--space-4));
