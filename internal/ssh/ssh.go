@@ -470,6 +470,25 @@ func WithJumpAuthorizedEndpoint(endpoint string) ConnectOption {
 	return func(c *ConnectConfig) { c.JumpAuthorizedEndpoint = endpoint }
 }
 
+// WithJumpConfig forwards the full recursive jump host configuration. The
+// resolver builds JumpConfig with the bastion's own Secrets, SecretID,
+// PassphraseSecretID, KeyFile, AuthMode and nested JumpConfig for the next
+// hop. Without this option the session→ssh seam drops it, and
+// acquireJumpHost falls back to flat fields that lack KeySecretID,
+// PasswordRequester and UnlockRequester — producing an empty auth chain
+// and "attempted methods [none]" (nocx-8b1v).
+func WithJumpConfig(jump *ConnectConfig) ConnectOption {
+	return func(c *ConnectConfig) { c.JumpConfig = jump }
+}
+
+// WithUnlockRequester forwards the vault-unlock callback so auth callbacks
+// can prompt for unlock when Secrets.Get returns ErrVaultSealed. Without
+// this, a sealed vault during a jump-host dial is reported as an auth
+// failure rather than prompting (nocx-8b1v).
+func WithUnlockRequester(r func(ctx context.Context, reason string) error) ConnectOption {
+	return func(c *ConnectConfig) { c.UnlockRequester = r }
+}
+
 type Stub struct {
 	log log.Logger
 }

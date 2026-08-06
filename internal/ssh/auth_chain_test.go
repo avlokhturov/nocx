@@ -836,3 +836,32 @@ func TestNoAuthMaterial_ProbeSaysTheSameThingAsConnect(t *testing.T) {
 		t.Fatalf("probe lost the mode: %+v", noAuth)
 	}
 }
+
+// TestNoAuthMaterial_JumpDialSaysWhichMethodHasNothing is the bastion-side
+// sibling of the two above. dialJumpForConnect builds its own auth chain and
+// dials the bastion directly, so it needs the same empty-chain guard: without
+// it the user is told the bastion "attempted methods [none]", which reads as a
+// server-side rejection and sends them to look at the wrong machine (nocx-8b1v).
+func TestNoAuthMaterial_JumpDialSaysWhichMethodHasNothing(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SSH_AUTH_SOCK", "")
+	rc := newTestRealClient(t)
+	resolved := &resolvedConfig{user: "bastionuser", hostName: "bastion.example.com", port: 22}
+	cfg := &ConnectConfig{AuthMode: "publicKey"}
+
+	dial := rc.dialJumpForConnect(context.Background(), "bastion.example.com", resolved, cfg)
+	_, err := dial(poolKey{})
+	if err == nil {
+		t.Fatal("expected a refusal when the bastion has nothing to authenticate with")
+	}
+	var noAuth *ErrNoAuthMethod
+	if !errors.As(err, &noAuth) {
+		t.Fatalf("expected ErrNoAuthMethod, got %T: %v", err, err)
+	}
+	if noAuth.Mode != "publicKey" || noAuth.User != "bastionuser" || noAuth.Host != "bastion.example.com" {
+		t.Fatalf("error lost the bastion's identity: %+v", noAuth)
+	}
+	if strings.Contains(err.Error(), "no supported methods remain") {
+		t.Fatalf("the handshake message leaked into the user's answer: %v", err)
+	}
+}
