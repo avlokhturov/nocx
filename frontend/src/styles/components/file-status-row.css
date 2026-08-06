@@ -1,0 +1,74 @@
+/* FileStatusRow — one line of a Git panel list (design §5.4), composed on
+   the kit CollectionRow. This file owns only what the row adds: the status
+   letter and its tone, the file-type glyph, and the dimmed directory prefix.
+   Everything about the row itself (density, selection, focus, activation)
+   is CollectionRow's and nothing here repaints it — a surface may place the
+   row and never touch its appearance. */
+
+/* There is no `.ui-file-status-row` element rule, and that is deliberate:
+   the component renders no wrapper. CollectionRow IS the row and carries
+   role="listitem", so a wrapper would orphan it from its role="list"; the
+   shrink this file used to ask for is already `.ui-collection-row__info`'s
+   `min-width: 0`. */
+
+/* The status letter: one character, a fixed column so every row's icon and
+   path start on the same line whatever the letter. The tone is this
+   component's decision (see file-status-row.tsx) — the surface passes the
+   wire's letter, never a colour. */
+.ui-file-status-row__status {
+  flex: 0 0 auto;
+  width: 1.5em;
+  text-align: center;
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+}
+
+.ui-file-status-row__status[data-tone='success'] {
+  color: var(--color-success);
+}
+
+.ui-file-status-row__status[data-tone='warning'] {
+  color: var(--color-warning);
+}
+
+.ui-file-status-row__status[data-tone='danger'] {
+  color: var(--color-danger);
+}
+
+.ui-file-status-row__status[data-tone='info'] {
+  color: var(--color-accent);
+}
+
+/* The file-type glyph: every record this row renders is a file path (design
+   §4: --untracked-files=all lists files, not directories), so the kit
+   renders the file glyph and a surface cannot supply one. Decorative. */
+.ui-file-status-row__type-icon {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1em;
+  height: 1em;
+  font-size: var(--font-size-md);
+  color: var(--color-text-dim);
+}
+
+.ui-file-status-row__type-icon svg {
+  width: 1em;
+  height: 1em;
+}
+
+/* The path: the directory prefix is dimmed, the name keeps the row's text
+   colour, and the whole thing ellipsises at the tail — the tail is where a
+   long path loses its least informative part. */
+.ui-file-status-row__path {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ui-file-status-row__dir {
+  color: var(--color-text-dim);
+}
