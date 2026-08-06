@@ -778,12 +778,24 @@ paired test that the ordinary path works — the `contentkey` lesson.
 
 **One user-reachable end-to-end assertion**, through the seam a person touches:
 
-> From a cold start with the panel collapsed, the Files icon is **first** in the activity
-> bar, present and enabled; clicking
-> it opens the panel; the tree shows the root; expanding a directory lists a page and "show
-> next" reveals the rest; clicking a file opens a tab whose content matches the file; its
-> title carries the host iff the origin is remote; writing to the file from outside nocx makes
-> the row update without anyone pressing anything.
+> From a cold start the Files icon is **first** in the activity bar, present and enabled, and
+> the panel is open on it; the tree shows the root; expanding a directory lists a page and
+> "show next" reveals the rest; clicking a file opens a tab whose content matches the file;
+> its title carries the host iff the origin is remote; writing to the file from outside nocx
+> makes the row update without anyone pressing anything.
+
+An earlier draft of that sentence began "from a cold start **with the panel collapsed**", and
+the acceptance run failed on it. The premise was stale, not the product: `mountSidebar`
+activates the first registered view and does not collapse, which `f1621f2` established long
+before this epic — checked against the commits rather than assumed, because the alternative
+reading was that this epic had regressed it. Both reference products also show the tree on
+launch. Clicking the icon while its own view is open **collapses** the panel, which is the
+existing toggle behaviour and is what the acceptance spec now asserts.
+
+The last clause — the row updating with nobody pressing anything — is the one this epic does
+not meet, deliberately: watching is `nocx-rkk9` and `Provider.Watch` returns a typed
+unavailable error rather than a channel that never fires. It is written here unmet rather than
+quietly removed, because a criterion edited to match what was built cannot fail.
 
 Headless via `cmd/devharness` plus the `NOCX_WS_PORT` shim — no wails, no GTK, no display.
 The e2e suite gets a disposable `$HOME` (`NOCX_E2E_HOME_DIR`).
