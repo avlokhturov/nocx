@@ -34,7 +34,7 @@ import {
 } from './key-material-input'
 import type { KeyInputMode } from './key-material-input'
 import type { DialogClient } from './dialog-client'
-import { CheckCircleIcon, PencilIcon, PlugIcon, TrashIcon } from './ui/icons'
+import { CheckCircleIcon, ChevronDownIcon, PencilIcon, PlugIcon, TrashIcon } from './ui/icons'
 import {
   createFormValidation,
   required,
@@ -363,6 +363,8 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   // ── Filter ─────────────────────────────────────────────────────────────
   const [searchQuery, setSearchQuery] = createSignal('')
 
+  // ── Group collapse (expand/collapse members per group) ─────────────
+  const [collapsedGroups, setCollapsedGroups] = createSignal<Set<string>>(new Set())
   // ── Quick-connect dialog (creation starts from one field) ─────────────
   const [quickConnectOpen, setQuickConnectOpen] = createSignal(false)
   const [quickConnectValue, setQuickConnectValue] = createSignal('')
@@ -1873,9 +1875,32 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     // active it is noise, so that is the only case that still hides it.
     if (searchQuery().trim() !== '' && !groupHasMatches(node)) return null
     const gp = groupProfiles(node.id)
+    const collapsed = () => collapsedGroups().has(node.id)
+    const toggleCollapse = () => {
+      setCollapsedGroups((prev) => {
+        const next = new Set(prev)
+        if (next.has(node.id)) next.delete(node.id)
+        else next.add(node.id)
+        return next
+      })
+    }
     return (
       <>
-        <div class="cm-group-header" role="heading" aria-level={2}>
+        <div
+          class="cm-group-header"
+          role="heading"
+          aria-level={2}
+          data-collapsed={collapsed() ? 'true' : 'false'}
+        >
+          <IconButton
+            size="sm"
+            title={collapsed() ? 'Expand group' : 'Collapse group'}
+            ariaLabel={`${collapsed() ? 'Expand' : 'Collapse'} group ${node.name}`}
+            aria-expanded={!collapsed()}
+            onClick={toggleCollapse}
+          >
+            <ChevronDownIcon />
+          </IconButton>
           <span class="cm-group-name">{node.name}</span>
           <span class="cm-group-actions">
             <IconButton
@@ -1896,17 +1921,19 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             </IconButton>
           </span>
         </div>
-        <Show when={gp.length === 0 && node.children.length === 0}>
-          <p class="cm-group-empty">
-            No connections here yet — pick this group in a connection&rsquo;s editor to move it in.
-          </p>
+        <Show when={!collapsed()}>
+          <Show when={gp.length === 0 && node.children.length === 0}>
+            <p class="cm-group-empty">
+              No connections here yet — pick this group in a connection&rsquo;s editor to move it
+              in.
+            </p>
+          </Show>
+          <For each={gp}>{(p) => renderRow(p)}</For>
+          <For each={node.children}>{(child) => renderGroupSection(child)}</For>
         </Show>
-        <For each={gp}>{(p) => renderRow(p)}</For>
-        <For each={node.children}>{(child) => renderGroupSection(child)}</For>
       </>
     )
   }
-
   // ── Dialog form (profile editor) ──────────────────────────────────────
 
   /**

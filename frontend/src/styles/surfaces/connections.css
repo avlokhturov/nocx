@@ -4,6 +4,8 @@
 .cm-root {
   display: flex;
   flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .cm-root > .ui-toolbar {
@@ -339,6 +341,15 @@
   justify-content: space-between;
 }
 
+/* Chevron rotation when the group is collapsed. The toggle is a kit
+   IconButton; the surface places it and reads the parent's data-collapsed
+   attribute to rotate the icon — no kit repaint. */
+.cm-group-header .ui-icon-button {
+  transition: transform 0.15s ease;
+}
+.cm-group-header[data-collapsed='true'] .ui-icon-button {
+  transform: rotate(-90deg);
+}
 .cm-group-name {
   font-weight: 500;
 }

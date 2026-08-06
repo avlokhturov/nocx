@@ -2350,3 +2350,45 @@ describe('desiredMode', () => {
     expect(params.set?.['options.relayConsent']).toBe('granted')
   })
 })
+
+// ── Group collapse (nocx-ukvn) ──────────────────────────────────────────
+
+describe('group collapse', () => {
+  it('toggles member visibility when the group header chevron is clicked', async () => {
+    const { container } = mount({ profiles: MOCK_PROFILES, groups: MOCK_GROUPS })
+    await waitForProfiles(container, 3)
+
+    // The group header has a toggle button with aria-expanded
+    const toggle = await vi.waitFor(() => {
+      const headers = container.querySelectorAll('.cm-group-header')
+      const prodHeader = Array.from(headers).find(
+        (h) => h.querySelector('.cm-group-name')?.textContent === 'Production',
+      )
+      expect(prodHeader, 'Production group header not found').toBeTruthy()
+      const btn = prodHeader!.querySelector('.ui-icon-button[aria-expanded]') as HTMLButtonElement
+      expect(btn, 'Group toggle button not found').toBeTruthy()
+      return btn
+    })
+
+    // Initially expanded — members are visible
+    expect(toggle.getAttribute('aria-expanded')).toBe('true')
+    expect(container.querySelector('[aria-label="Edit group Production"]')).toBeTruthy()
+    expect(container.textContent).toContain('prod-db')
+
+    // Collapse
+    fireEvent.click(toggle)
+    await vi.waitFor(() => {
+      expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    })
+    // Members are hidden, but the header (with edit/delete) stays
+    expect(container.textContent).not.toContain('prod-db')
+    expect(container.querySelector('[aria-label="Edit group Production"]')).toBeTruthy()
+
+    // Expand again
+    fireEvent.click(toggle)
+    await vi.waitFor(() => {
+      expect(toggle.getAttribute('aria-expanded')).toBe('true')
+    })
+    expect(container.textContent).toContain('prod-db')
+  })
+})
