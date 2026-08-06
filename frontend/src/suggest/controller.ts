@@ -758,6 +758,7 @@ export class CompletionController {
     // and a degraded ssh config resolver beat the generic "no matches".
     const priority: Record<EmptyReason['kind'], number> = {
       'dirs-only-empty': 0,
+      'empty-dir': 0,
       'snapshot-pending': 1,
       'hosts-unavailable': 1,
       'no-match': 2,
@@ -771,6 +772,10 @@ export class CompletionController {
         return this.bestReason.dir === ''
           ? 'No subdirectories in this folder'
           : `No subdirectories in ${this.bestReason.dir}`
+      case 'empty-dir':
+        return this.bestReason.dir === ''
+          ? 'This folder is empty'
+          : `${this.bestReason.dir} is empty`
       case 'snapshot-pending':
         return 'Command names are still loading — press Tab again in a moment'
       case 'hosts-unavailable':

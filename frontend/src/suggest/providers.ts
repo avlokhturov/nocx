@@ -53,6 +53,13 @@ export type EmptyReason =
    *  takes (`cd Downloads/` where Downloads holds only files). `dir` is the
    *  display name of the directory, '' when it is the session cwd. */
   | { kind: 'dirs-only-empty'; dir: string }
+  /** The directory being listed holds nothing at all. Distinct from
+   *  'no-match', which says the prefix matched nothing: here there is no
+   *  prefix — the token is empty or ends in `/` — so the listing succeeded
+   *  and the folder is simply empty. Telling a user "no matches" when they
+   *  typed no prefix blames them for the folder (nocx-azxe.5). `dir` is the
+   *  display name, '' when it is the session cwd. */
+  | { kind: 'empty-dir'; dir: string }
   /** The OSC 636 command snapshot has not arrived yet — command names
    *  cannot be offered, and pretending the shell has none would be a lie. */
   | { kind: 'snapshot-pending' }
@@ -343,6 +350,21 @@ export function fsProvider(opts: {
           return {
             candidates: [],
             emptyReason: { kind: 'dirs-only-empty', dir: listedDirName(ctx) },
+          }
+        }
+        // Nothing in the directory at all. Whether that is the user's doing
+        // depends on whether they typed a prefix: with one, nothing matched
+        // it; without one — an empty token, or a token ending in `/` — the
+        // listing succeeded and the folder is empty. Tab completing into an
+        // empty folder is the common way to arrive here, and "No matches"
+        // reads there as if the completion had failed when it had just
+        // succeeded (nocx-azxe.5).
+        const t = ctx.token.text
+        const typedPrefix = t.slice(t.lastIndexOf('/') + 1)
+        if (typedPrefix === '') {
+          return {
+            candidates: [],
+            emptyReason: { kind: 'empty-dir', dir: listedDirName(ctx) },
           }
         }
         return { candidates: [] }
