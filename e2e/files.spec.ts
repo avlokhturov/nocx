@@ -227,9 +227,12 @@ test('writing to the file from outside nocx makes the row update without anyone 
 
   // The change signal is the backend's digest-poll over the watch set. The
   // baseline is taken synchronously inside files.watch (ws_files.go), so
-  // the instant the watch response lands (the Polling badge), every change
-  // is delivered — no waiting out a poll interval.
-  await expect(page.locator('[data-testid="files-polling-badge"]')).toBeVisible()
+  // the instant the watch response lands every change is delivered — no
+  // waiting out a poll interval. Wait for the established mode, not for a
+  // badge: the badge is a WARNING about a degraded watch and is dark while
+  // polling is the designed mode, so a test that waited on it would be
+  // asserting a defect.
+  await expect(page.locator('[data-watch-mode="polling"]')).toBeAttached()
   await expect(page.locator(TREE_ROW).filter({ hasText: 'external.md' })).toHaveCount(0)
 
   // The change comes from the test process, not from the app: the panel's

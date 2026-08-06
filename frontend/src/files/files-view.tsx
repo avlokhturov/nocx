@@ -428,7 +428,16 @@ export function createFilesView(deps: FilesViewDeps): SidebarViewDescriptor {
               Refresh, hover carries the reason, cleared the instant
               watching recovers. A remote binding's designed-mode polling
               has no reason and warns about nothing. */}
-        <span data-testid="files-polling-badge-slot">
+        {/* The slot carries the established mode as a data attribute. It is
+              the only observable that says files.watch has RETURNED — the
+              tree rows say files.list returned, which is a different call —
+              and something has to say it, or a check that a change arrives
+              has no way to know watching had begun and races the baseline.
+              The badge below is the warning; this is the state. */}
+        <span
+          data-testid="files-polling-badge-slot"
+          data-watch-mode={store.watchMode() ?? undefined}
+        >
           <Show
             when={
               store.watchMode() === 'polling' &&

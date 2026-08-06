@@ -490,7 +490,17 @@ func (s *WSServer) handleFilesWatch(wconn *wsConn, state *connState, req jsonrpc
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, filesErrorCode(err), err.Error()))
 			return
 		}
-		mode = filesystem.WatchMode{Kind: filesystem.WatchPolling, DegradedReason: unavail.Error()}
+		// No reason: ErrWatchUnavailable says the watching wave (nocx-rkk9)
+		// has not landed, which is a build-time fact and not a degrade.
+		// Polling is the designed and only mode today, it delivers the
+		// change signal the user asked for, and the mechanism under it is
+		// not their business. A reason here lights the §5.5 badge for every
+		// user on every local binding forever — a warning that is always on
+		// warns about nothing and teaches the user to ignore the next one.
+		// When Live watching exists, a host that cannot have it will carry a
+		// reason from the provider and the badge lights for the first time
+		// meaningfully.
+		mode = filesystem.WatchMode{Kind: filesystem.WatchPolling}
 	}
 	if len(params.Paths) == 0 {
 		// The client wants no watches: the provider set is already empty

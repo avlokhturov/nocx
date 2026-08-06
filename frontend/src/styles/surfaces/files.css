@@ -15,10 +15,20 @@
 /* The header path: one line, ellipsis at the tail, never wrapping into the
    refresh button beside it. */
 .files-header-path {
+  /* Shrinkable, not merely capped: 12rem is the width it would LIKE, and
+     `0 1 auto` + `min-width: 0` is what lets it give way when the panel is
+     narrower than that, rather than shouldering Refresh off the edge. */
+  flex: 0 1 auto;
+  min-width: 0;
   max-width: 12rem;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  /* The kit's header uppercases its label, and a path is not a label: it is
+     content, and on a case-sensitive filesystem `/HOME/DEV` is a different
+     path from the one being shown. Cancel the inheritance here rather than
+     asking the kit to stop shouting its own titles. */
+  text-transform: none;
 }
 
 .files-row[data-depth='0'] {

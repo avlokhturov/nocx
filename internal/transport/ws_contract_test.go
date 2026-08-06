@@ -2978,8 +2978,9 @@ func TestFilesWatch_OverTheWireConformsToContract(t *testing.T) {
 	if err := json.Unmarshal(envelope.Result, &got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if got.Mode != "polling" || got.DegradedReason == "" {
-		t.Errorf("mode/degradedReason = %q/%q, want polling with a reason (watching not available yet)",
+	if got.Mode != "polling" || got.DegradedReason != "" {
+		t.Errorf("mode/degradedReason = %q/%q, want polling with NO reason: watching not being built"+
+			" yet is not a degrade, and a reason lights the §5.5 badge permanently",
 			got.Mode, got.DegradedReason)
 	}
 }

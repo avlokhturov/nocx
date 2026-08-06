@@ -809,8 +809,13 @@ func TestFilesWatch_DegradesToPollingHonestly(t *testing.T) {
 	if got.Mode != "polling" {
 		t.Errorf("mode = %q, want %q (watching is not available yet)", got.Mode, "polling")
 	}
-	if got.DegradedReason == "" {
-		t.Error("degradedReason is empty — the degradation must be visible, not silent")
+	// And NO reason: polling is the designed mode until the watching wave
+	// lands, so there is nothing to warn about. A reason here would light
+	// the §5.5 badge permanently, for everyone. The badge's premise is that
+	// watching normally works and this binding fell back from it — a premise
+	// that becomes true only when Live watching exists.
+	if got.DegradedReason != "" {
+		t.Errorf("degradedReason = %q, want empty — not-yet-built is not a degrade", got.DegradedReason)
 	}
 }
 

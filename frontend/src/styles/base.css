@@ -309,6 +309,19 @@ select:focus-visible {
   display: flex;
   align-items: center;
   gap: var(--space-1);
+  /* A flex item's floor is its content, not zero — so without this the
+     actions push themselves past the panel's right edge and get clipped
+     instead of shrinking. The sidebar is narrow and user-resizable, so
+     "it fits on my machine" is not a width the kit may assume. `min-width:
+     0` re-arms shrinking; what shrinks is each action's own decision (the
+     Files path ellipsises, buttons do not). */
+  min-width: 0;
+}
+
+/* The title never gives up room to an action — losing the panel's name is a
+   worse trade than truncating what sits beside it. */
+.ui-sidebar-view__header > h2 {
+  flex: 0 0 auto;
 }
 
 .ui-sidebar-view__filter {
