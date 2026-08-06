@@ -8,7 +8,21 @@
     "",
     "Machine-specific in one respect: build-tag-gated files (e.g.",
     "secretservice_linux.go) only appear on the OS they build for, so an entry",
-    "that vanishes on another platform is a free shrink, not a violation."
+    "that vanishes on another platform is a free shrink, not a violation.",
+    "",
+    "Two entries were added BY HAND on 2026-08-06 (nocx-708q), which the update",
+    "script refuses to do for you on purpose. Both are reasoned, not overlooked:",
+    "",
+    "  openability.go CanExpand \u2014 the expand half of the spec table. Its only",
+    "  callers are tests, which is the nocx-rtg0 shape and NOT acceptable long",
+    "  term: expansion is a UI act and the kit already decides it in",
+    "  ui/tree-row.tsx isExpandable, so the Go copy is a second answer to one",
+    "  question that will drift. Deleting it means rewriting three assertions in",
+    "  accepted packages, so it is filed rather than rushed.",
+    "",
+    "  ws.go WithFilesRevealer \u2014 the seam files.reveal needs from Wails, which",
+    "  does not exist yet; files.reveal answers -32601 until it does. Reachable",
+    "  the moment that wave lands."
   ],
   "violations": [
     {
@@ -28,12 +42,12 @@
       "func": "ImportConfiguration"
     },
     {
-      "file": "internal/importer/tabby.go",
-      "func": "DedupKey"
+      "file": "internal/filesystem/openability.go",
+      "func": "CanExpand"
     },
     {
       "file": "internal/importer/tabby.go",
-      "func": "dedupKeySet"
+      "func": "DedupKey"
     },
     {
       "file": "internal/importer/tabby.go",
@@ -48,20 +62,12 @@
       "func": "ImportTabbyWithService"
     },
     {
+      "file": "internal/importer/tabby.go",
+      "func": "dedupKeySet"
+    },
+    {
       "file": "internal/profile/profile.go",
       "func": "BuildGroupTree"
-    },
-    {
-      "file": "internal/profile/profile.go",
-      "func": "expandFromMap"
-    },
-    {
-      "file": "internal/profile/profile.go",
-      "func": "isNamespacedID"
-    },
-    {
-      "file": "internal/profile/profile.go",
-      "func": "parseNamespacedID"
     },
     {
       "file": "internal/profile/profile.go",
@@ -74,6 +80,18 @@
     {
       "file": "internal/profile/profile.go",
       "func": "StoredOptionsFromDense"
+    },
+    {
+      "file": "internal/profile/profile.go",
+      "func": "expandFromMap"
+    },
+    {
+      "file": "internal/profile/profile.go",
+      "func": "isNamespacedID"
+    },
+    {
+      "file": "internal/profile/profile.go",
+      "func": "parseNamespacedID"
     },
     {
       "file": "internal/profile/store.go",
@@ -164,10 +182,6 @@
       "func": "Publisher.verifyFile"
     },
     {
-      "file": "internal/ssh/ssh_real.go",
-      "func": "WithKnownHostsFile"
-    },
-    {
       "file": "internal/ssh/ssh.go",
       "func": "NewStub"
     },
@@ -193,10 +207,6 @@
     },
     {
       "file": "internal/ssh/ssh.go",
-      "func": "StubChannel.onceClose"
-    },
-    {
-      "file": "internal/ssh/ssh.go",
       "func": "StubChannel.Read"
     },
     {
@@ -210,6 +220,10 @@
     {
       "file": "internal/ssh/ssh.go",
       "func": "StubChannel.Write"
+    },
+    {
+      "file": "internal/ssh/ssh.go",
+      "func": "StubChannel.onceClose"
     },
     {
       "file": "internal/ssh/ssh.go",
@@ -228,6 +242,10 @@
       "func": "WithTimeout"
     },
     {
+      "file": "internal/ssh/ssh_real.go",
+      "func": "WithKnownHostsFile"
+    },
+    {
       "file": "internal/transport/transport.go",
       "func": "NewStub"
     },
@@ -238,6 +256,18 @@
     {
       "file": "internal/transport/transport.go",
       "func": "Stub.Stop"
+    },
+    {
+      "file": "internal/transport/ws.go",
+      "func": "WithCaptureRegistry"
+    },
+    {
+      "file": "internal/transport/ws.go",
+      "func": "WithFilesRevealer"
+    },
+    {
+      "file": "internal/transport/ws.go",
+      "func": "WithProfileResolver"
     },
     {
       "file": "internal/transport/ws_auth.go",
@@ -270,14 +300,6 @@
     {
       "file": "internal/transport/ws_test_helper.go",
       "func": "newTestStore"
-    },
-    {
-      "file": "internal/transport/ws.go",
-      "func": "WithCaptureRegistry"
-    },
-    {
-      "file": "internal/transport/ws.go",
-      "func": "WithProfileResolver"
     },
     {
       "file": "internal/vault/inventory.go",
@@ -341,11 +363,11 @@
     },
     {
       "file": "internal/vault/vaulttest/fake.go",
-      "func": "Fake.snapshot"
+      "func": "Fake.Status"
     },
     {
       "file": "internal/vault/vaulttest/fake.go",
-      "func": "Fake.Status"
+      "func": "Fake.snapshot"
     },
     {
       "file": "internal/vault/vaulttest/fake.go",

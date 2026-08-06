@@ -21,6 +21,7 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/discovery"
+	"github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/importer"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
@@ -188,6 +189,23 @@ type WSServer struct {
 	// it shows "this session only" instead of presenting the in-memory
 	// ledger as all history (contracts/history.query.schema.json).
 	contentDB content.ContentDB
+
+	// filesys is the binding registry backing the files.* control plane
+	// (fm-w8). When nil, those methods return -32601. The provider
+	// factories and the revealer ride separate options; the transport
+	// never constructs a provider itself (AD-8).
+	filesys           *filesystem.Registry
+	filesProviderFor  FilesystemProviderFactory
+	revealer          FilesRevealer
+	filesPollInterval time.Duration // transport-side digest-poll cadence (files.watch)
+
+	// filesMu guards filesBindings and filesBySession: the transport's own
+	// bookkeeping for bindings it issued (filesystem exposes neither a
+	// binding's session nor its endpoint attestation, and the notification
+	// addressing and files.reveal's local-only guard both need them).
+	filesMu        sync.Mutex
+	filesBindings  map[string]*filesBinding           // bindingID → bookkeeping
+	filesBySession map[session.ID]map[string]struct{} // sessionID → bindingIDs
 
 	// ringsMu protects rx and stopped. One sessionRx per session;
 	// keyed by session.ID. When stopped is true, getOrCreateRx returns nil
@@ -477,6 +495,32 @@ func WithVaultLifecycle(vl VaultLifecycle) WSServerOption {
 	return func(s *WSServer) { s.vaultLifecycle = vl }
 }
 
+// WithFilesystemRegistry attaches the binding registry backing the files.*
+// control plane (fm-w8). When absent, those methods return -32601. The
+// composition root constructs the registry (internal/app/app.go); without
+// this line the whole filesystem package is reachable from its own tests
+// and nowhere else (AGENTS.md check 5).
+func WithFilesystemRegistry(r *filesystem.Registry) WSServerOption {
+	return func(s *WSServer) { s.filesys = r }
+}
+
+// WithFilesystemProviderFactory attaches the provider builder files.open
+// uses. The composition root decides which sessions get which providers —
+// local.New for local sessions today, the SFTP provider with the SFTP wave
+// (design §6 step 4) — and the transport never constructs a provider
+// itself (AD-8). When absent, files.open returns an error.
+func WithFilesystemProviderFactory(f FilesystemProviderFactory) WSServerOption {
+	return func(s *WSServer) { s.filesProviderFor = f }
+}
+
+// WithFilesRevealer attaches the OS file-manager reveal capability
+// (files.reveal). When absent, files.reveal returns -32601: the dev-web
+// harness has no Wails runtime, and a reveal that did nothing would be a
+// silent lie (design §5.2).
+func WithFilesRevealer(r FilesRevealer) WSServerOption {
+	return func(s *WSServer) { s.revealer = r }
+}
+
 func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption) *WSServer {
 	s := &WSServer{
 		log:      logger,
@@ -486,11 +530,14 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 			// call handles origin/host policy before the upgrade.
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
-		rx:           make(map[session.ID]*sessionRx),
-		conns:        make(map[*wsConn]struct{}),
-		tunnels:      make(map[string]*tunnel.Tunnel),
-		ownerTunnels: make(map[*wsConn]map[string]struct{}),
-		origins:      LoopbackOriginPolicy{},
+		rx:                make(map[session.ID]*sessionRx),
+		conns:             make(map[*wsConn]struct{}),
+		tunnels:           make(map[string]*tunnel.Tunnel),
+		ownerTunnels:      make(map[*wsConn]map[string]struct{}),
+		origins:           LoopbackOriginPolicy{},
+		filesBindings:     make(map[string]*filesBinding),
+		filesBySession:    make(map[session.ID]map[string]struct{}),
+		filesPollInterval: defaultFilesPollInterval,
 	}
 	if caps, err := credential.NewCaptureRegistry(); err != nil {
 		// No entropy for the fingerprint key: no offers are made and
@@ -574,6 +621,9 @@ func (s *WSServer) Stop(ctx context.Context) error {
 
 	for _, sess := range s.registry.List() {
 		_ = s.registry.Close(sess.ID())
+		// Files (fm-w8): Stop closes every session, which closes its
+		// bindings (spec §5.1); the watcher goroutines stop with them.
+		s.filesSessionClosed(sess.ID())
 	}
 
 	// Application shutdown destroys every pending capture (the contract's
@@ -694,6 +744,13 @@ func (c *connState) has(id session.ID) bool {
 	_, ok := c.sessions[id]
 	return ok
 }
+
+// Owns reports whether this connection has opened or reattached to the
+// session — the exported form of has, added so connState satisfies
+// filesystem.Caller and Registry.Acquire re-checks ownership on every
+// files.* call (D15). One line of forwarding; the authorisation answer
+// still comes from the one place that already owns it.
+func (c *connState) Owns(id session.ID) bool { return c.has(id) }
 
 // --- JSON-RPC types -------------------------------------------------------
 
@@ -948,6 +1005,9 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.handleCaptureSave(wconn, req)
 	case "secrets.captureDismiss":
 		s.handleCaptureDismiss(wconn, req)
+	case "files.open", "files.list", "files.read", "files.watch",
+		"files.close", "files.reveal":
+		s.handleFilesMethod(wconn, state, req)
 	case "groups.impact":
 		s.handleGroupImpact(wconn, req)
 	case "groups.apply":
@@ -1484,6 +1544,14 @@ func (s *WSServer) handleAttach(ctx context.Context, wconn *wsConn, state *connS
 		_ = wconn.writeJSON(resp)
 	}
 
+	// Files (fm-w8): deliver the dirty paths the session's bindings
+	// accumulated while no connection was attached. Runs after the attach
+	// response — and after setSubscriber above, so the notifications
+	// resolve to THIS connection (spec §5.2: the destination is resolved
+	// at emit time, and a reconnect is exactly when the accumulation was
+	// made).
+	s.flushFilesChanged(sid, wconn)
+
 	sidBytes, _ := session.IDToBytes(sid)
 	go s.ringToConn(ctx, wconn, sidBytes, rx.ring, from)
 }
@@ -1637,6 +1705,11 @@ func (s *WSServer) monitorExit(rx *sessionRx, sess session.Session) {
 	// profile, forget the target and release its lease.
 	s.discoverySessionClosed(sess)
 
+	// Files (fm-w8): closing the terminal closes its bindings (spec
+	// §5.1). Idempotent — a session that reaches this twice cleans up
+	// once.
+	s.filesSessionClosed(sess.ID())
+
 	if wconn == nil {
 		return
 	}
@@ -1671,6 +1744,7 @@ func (s *WSServer) closeSession(sid session.ID) {
 	}
 	s.removeRx(sid)
 	_ = s.registry.Close(sid)
+	s.filesSessionClosed(sid)
 	s.discoverySessionClosed(sess)
 }
 

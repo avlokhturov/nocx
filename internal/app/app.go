@@ -2,6 +2,9 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -15,6 +18,9 @@ import (
 	"github.com/shady2k/nocx/internal/contentkey"
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/discovery"
+	"github.com/shady2k/nocx/internal/filesystem"
+	"github.com/shady2k/nocx/internal/filesystem/local"
+	"github.com/shady2k/nocx/internal/filesystem/sftp"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/nativeports"
 	"github.com/shady2k/nocx/internal/profile"
@@ -448,6 +454,21 @@ func New(opts ...Option) (*App, error) {
 
 		transport.WithProbeResultStore(probeResultStore),
 		transport.WithSSHConfigResolver(sshCfgResolver, sshConfigPath),
+
+		// The file-tree control plane (fm-w8): the binding registry is
+		// constructed here — without this line the whole filesystem
+		// package is reachable from its own tests and nowhere else
+		// (AGENTS.md check 5) — and the provider factory decides which
+		// sessions get which providers. Local sessions get a real local
+		// provider rooted at the caller's verified cwd when one is sent;
+		// remote sessions get the sftp provider over an ssh.FSConn lease
+		// acquired with the session's OWN connect options, so it resolves
+		// to the same destination the shell did (spec D3). The sftp
+		// provider and its lease were the last dead branch of fm-w8: this
+		// factory is the caller that makes the package reachable from
+		// main() (AGENTS.md check 5).
+		transport.WithFilesystemRegistry(filesystem.New()),
+		transport.WithFilesystemProviderFactory(filesystemProviderFactory(sshClient)),
 	}
 	// WithWSAddr set the field and nothing read it, so NOCX_WS_ADDR was accepted
 	// and ignored and the listener always took an ephemeral port. The dev stand
@@ -501,6 +522,168 @@ func New(opts ...Option) (*App, error) {
 
 	logger.Info("application initialized")
 	return app, nil
+}
+
+// ── the file-tree provider factory (fm-w8) ────────────────────────────────
+
+// fsLeaseProvider acquires the SFTP lease a remote provider is built on.
+// *ssh.RealClient satisfies it; the interface exists so the factory is
+// testable against a double without a live connection — the same reason
+// internal/filesystem/sftp declares its own narrow fsConn seam.
+type fsLeaseProvider interface {
+	FSConn(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.FSConn, error)
+}
+
+// filesystemProviderFactory is the composition root's answer to
+// transport.FilesystemProviderFactory: local sessions get a real local
+// provider rooted at the caller's verified cwd when one is sent; remote
+// sessions get the sftp provider over an ssh.FSConn lease acquired with the
+// session's OWN connect options, so the lease resolves to the same
+// destination the shell did (spec D3, AD-4). The context is deliberately
+// background: the factory has no caller context, and the lease's own
+// hard-timeout lane is the bound that keeps a silent server from hanging
+// files.open.
+// The three D14 bounds, named once, here, rather than as defaults buried in
+// two provider packages that would then be free to disagree. Spec §9 calls
+// them starting numbers to be tuned once the panel is in daily use, and a
+// number nobody can find is a number nobody tunes — so the composition root
+// is where they live and where a reviewer looks for them.
+//
+// The remote values are deliberately not the local ones. An enumeration is a
+// chain of round trips over SFTP, so its time bound is larger; and the entry
+// bound is smaller because the whole directory must be enumerated before any
+// page can be returned, which makes the cost of a huge remote directory a
+// network cost rather than a syscall one.
+const (
+	fsLocalEntryCap    = 10_000
+	fsLocalSizeCap     = 8 << 20 // 8 MiB
+	fsLocalListTimeout = 10 * time.Second
+
+	fsRemoteEntryCap    = 5_000
+	fsRemoteSizeCap     = 8 << 20 // 8 MiB
+	fsRemoteListTimeout = 30 * time.Second
+)
+
+func filesystemProviderFactory(client fsLeaseProvider) transport.FilesystemProviderFactory {
+	return func(sess session.Session, rootPath string) (filesystem.Provider, error) {
+		if sess.Kind() != session.KindRemote {
+			localOpts := []local.Option{
+				local.WithEntryCap(fsLocalEntryCap),
+				local.WithSizeCap(fsLocalSizeCap),
+				local.WithListTimeout(fsLocalListTimeout),
+			}
+			if rootPath != "" {
+				localOpts = append(localOpts, local.WithRoot(rootPath))
+			}
+			return local.New(localOpts...), nil
+		}
+		fs, err := client.FSConn(context.Background(), sess.Host(), sess.SSHOptions()...)
+		if err != nil {
+			return nil, fmt.Errorf("sftp provider for %s: %w", sess.Host(), err)
+		}
+		opts := []sftp.Option{
+			sftp.WithEntryCap(fsRemoteEntryCap),
+			sftp.WithSizeCap(fsRemoteSizeCap),
+			sftp.WithListTimeout(fsRemoteListTimeout),
+		}
+		if rootPath != "" {
+			opts = append(opts, sftp.WithRoot(rootPath))
+		}
+		return &endpointAttestedProvider{
+			Provider:   sftp.New(fs, opts...),
+			endpointID: endpointIDFor(sess),
+		}, nil
+	}
+}
+
+// endpointAttestedProvider wraps a remote provider with the endpoint
+// attestation (spec §5.1, D4/D6). The transport reads it through the
+// optional filesystemEndpointAttester seam; a local provider never carries
+// it, which is what makes files.reveal a local-only capability.
+type endpointAttestedProvider struct {
+	filesystem.Provider
+	endpointID string
+}
+
+func (p *endpointAttestedProvider) EndpointID() string { return p.endpointID }
+
+// ── endpointId v1 (spec §5.1) ─────────────────────────────────────────────
+
+// endpointIDFor assembles the v1 endpoint attestation for a session:
+// "v1:" + base64url(SHA-256(canonical encoding of the attestation)), the
+// attestation being the ordered hop record — bastions first, target last —
+// each hop with its address, port and effective principal. The version
+// prefix is load-bearing: a v2 (verified host identity) must fail to match
+// rather than accidentally match.
+//
+// The record is built from the session's OWN frozen state — Host() and the
+// connect options captured at open — never from the profile store or
+// ~/.ssh/config at call time: a profile edited, or a config file changed,
+// between the drop and the reconnect must not move the id, or Reload (D6)
+// would refuse a viewer for the same endpoint. That frozen-ness is also the
+// honest limit of v1, and it is written down rather than hidden: the values
+// internal/ssh actually dialed — the effective user when the config names
+// none, the effective port when it leaves the port unset, and the final
+// per-hop resolution through ~/.ssh/config — are computed inside
+// resolveConfig and discarded once the pool key is built; none are exposed.
+// So the id carries the configured values: an empty user or port 0 mean
+// "unset — the effective value was decided by resolution", and the address
+// is the host string the session was opened with (already ssh -G-resolved
+// by the transport for direct-host opens, ADR-0015). Host-key fingerprints
+// are deliberately absent (§5.1 records exactly what that loses).
+func endpointIDFor(sess session.Session) string {
+	cfg := &ssh.ConnectConfig{}
+	for _, o := range sess.SSHOptions() {
+		o(cfg)
+	}
+	hops := make([]endpointHop, 0, 2)
+	appendRouteHops(cfg, &hops)
+	hops = append(hops, endpointHop{Address: sess.Host(), Port: cfg.Port, User: cfg.User})
+	sum := sha256.Sum256([]byte(endpointAttestation{Hops: hops}.canonical()))
+	return "v1:" + base64.RawURLEncoding.EncodeToString(sum[:])
+}
+
+// endpointHop is one hop of the route the connection follows: the configured
+// address, port and user the dial would use for that hop. Port 0 and an
+// empty user mean the value was left unset — the effective value is decided
+// by resolution inside internal/ssh, which does not expose it.
+type endpointHop struct {
+	Address string `json:"address"`
+	Port    int    `json:"port"`
+	User    string `json:"user"`
+}
+
+// endpointAttestation is the pinned wire shape of the attestation record.
+type endpointAttestation struct {
+	Hops []endpointHop `json:"hops"`
+}
+
+// canonical serialises the attestation for hashing. encoding/json emits
+// struct fields in declaration order, so these bytes ARE the pinned
+// canonical serialisation (spec §5.1); a field added later changes every id
+// derived from it, which is exactly what the version prefix is for. A fixed
+// struct of plain fields cannot fail to marshal.
+func (a endpointAttestation) canonical() string {
+	b, _ := json.Marshal(a)
+	return string(b)
+}
+
+// appendRouteHops walks the jump chain in connection order — the first
+// bastion first, the target last — the same route the ssh package's dial
+// follows (jumpRouteKey walks the same chain for the pool key). Each hop
+// carries the configured user and port: the recursive JumpConfig when the
+// resolver populated it, the flat Jump* fields otherwise (ssh.ConnectConfig
+// documents both as populated for compatibility).
+func appendRouteHops(cfg *ssh.ConnectConfig, hops *[]endpointHop) {
+	if cfg == nil || cfg.JumpHost == "" {
+		return
+	}
+	hopCfg := cfg.JumpConfig
+	if hopCfg == nil {
+		hopCfg = &ssh.ConnectConfig{User: cfg.JumpUser, Port: cfg.JumpPort}
+	}
+	*hops = append(*hops, endpointHop{Address: cfg.JumpHost, Port: hopCfg.Port, User: hopCfg.User})
+	appendRouteHops(hopCfg, hops)
 }
 
 type localPTYFactory struct {

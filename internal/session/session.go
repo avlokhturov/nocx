@@ -81,6 +81,14 @@ type Session interface {
 	// reason decided when the shell started; local sessions always return
 	// ReasonNone. The transport carries this value to the UI.
 	ShellIntegrationReason() ssh.RefusalReason
+	// SSHOptions returns the connect options this session's SSH connection
+	// was opened with: exactly what Reg.Open handed to the SSH factory, in
+	// order. Nil for local sessions. The file manager's SFTP lease
+	// (ssh.FSConn) is acquired with these same options so it resolves to
+	// the same destination the shell did (fm-w8, spec D3) — the lease
+	// shares the tab's pooled connection (AD-4) only when the pool keys
+	// agree, and the options are what make them agree.
+	SSHOptions() []ssh.ConnectOption
 }
 
 // ProfileUsageTracker records profile session activity (nocx-uxs5.4).
@@ -172,6 +180,7 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 
 	var ch Channel
 	var err error
+	var opts []ssh.ConnectOption
 
 	if cfg.Kind == KindRemote {
 		if r.ssh == nil {
@@ -180,7 +189,7 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 		if cfg.Remote == nil {
 			return nil, fmt.Errorf("remote session requires ConnectConfig")
 		}
-		opts := sshOptionsFromConfig(cfg.Remote)
+		opts = sshOptionsFromConfig(cfg.Remote)
 		opts = append(opts, ssh.WithSessionID(string(id)))
 		if cfg.Enhanced {
 			opts = append(opts, ssh.WithEnhanced())
@@ -211,6 +220,7 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 		cwd:          resolveSessionCwd(cfg.Cwd),
 		profileID:    cfg.ProfileID,
 		credentialID: cfg.CredentialID,
+		sshOpts:      opts,
 		ch:           ch,
 		log:          r.log.With("session_id", string(id)),
 	}
@@ -400,6 +410,7 @@ type realSession struct {
 	cwd          string
 	profileID    string
 	credentialID string
+	sshOpts      []ssh.ConnectOption // the options the SSH connection was opened with; nil for local
 
 	ch        Channel
 	log       log.Logger
@@ -408,12 +419,13 @@ type realSession struct {
 	closeOnce sync.Once
 }
 
-func (s *realSession) ID() ID               { return s.id }
-func (s *realSession) Kind() Kind           { return s.kind }
-func (s *realSession) Host() string         { return s.host }
-func (s *realSession) Cwd() string          { return s.cwd }
-func (s *realSession) ProfileID() string    { return s.profileID }
-func (s *realSession) CredentialID() string { return s.credentialID }
+func (s *realSession) ID() ID                          { return s.id }
+func (s *realSession) Kind() Kind                      { return s.kind }
+func (s *realSession) Host() string                    { return s.host }
+func (s *realSession) Cwd() string                     { return s.cwd }
+func (s *realSession) ProfileID() string               { return s.profileID }
+func (s *realSession) CredentialID() string            { return s.credentialID }
+func (s *realSession) SSHOptions() []ssh.ConnectOption { return s.sshOpts }
 
 func (s *realSession) Write(p []byte) (int, error) {
 	return s.ch.Write(p)

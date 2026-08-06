@@ -411,6 +411,28 @@ func TestFSConn_Stat_Lstat_RealPath(t *testing.T) {
 		t.Errorf("Lstat(link) mode = %v, want symlink", lst.Mode())
 	}
 
+	tgt, err := fc.ReadLink("link")
+	if err != nil {
+		t.Fatalf("ReadLink: %v", err)
+	}
+	if tgt != "data.txt" {
+		t.Errorf("ReadLink = %q, want the stored link text %q", tgt, "data.txt")
+	}
+
+	// A broken symlink still returns its target text: ReadLink reads the
+	// link, not its resolution, which is what distinguishes "target
+	// missing" from "cannot read the link".
+	if err = os.Symlink(filepath.Join(srv.rootDir, "gone"), filepath.Join(srv.rootDir, "broken")); err != nil {
+		t.Fatalf("broken symlink: %v", err)
+	}
+	tgt, err = fc.ReadLink("broken")
+	if err != nil {
+		t.Fatalf("ReadLink(broken): %v", err)
+	}
+	if tgt != filepath.Join(srv.rootDir, "gone") {
+		t.Errorf("ReadLink(broken) = %q, want the stored target %q", tgt, filepath.Join(srv.rootDir, "gone"))
+	}
+
 	rp, err := fc.RealPath(".")
 	if err != nil {
 		t.Fatalf("RealPath: %v", err)
@@ -456,6 +478,58 @@ func TestFSConn_ReadFile_ContentAndTruncation(t *testing.T) {
 
 	if _, _, err := fc.ReadFile(context.Background(), "missing.txt", 10); err == nil {
 		t.Error("ReadFile(missing) = nil error, want the remote status error")
+	}
+}
+
+// TestFSConn_ReadFile_EmptyAndBoundaries pins the two outcomes ReadFull's
+// error vocabulary hides: an empty file is a successful zero-byte read (the
+// io.EOF fix), a file ending exactly at the bound is not truncated, and a
+// file one byte past the bound is.
+func TestFSConn_ReadFile_EmptyAndBoundaries(t *testing.T) {
+	srv := startFSTestServer(t, fsModeReal)
+	client := fsTestClient(t, srv)
+	fc, err := client.FSConn(context.Background(), srv.addr, fsConnectOpts(srv)...)
+	if err != nil {
+		t.Fatalf("FSConn: %v", err)
+	}
+	defer func() { _ = fc.Close() }()
+
+	// Empty file: a successful zero-byte read, never io.EOF.
+	if err = os.WriteFile(filepath.Join(srv.rootDir, "empty.txt"), nil, 0o600); err != nil {
+		t.Fatalf("write empty: %v", err)
+	}
+	data, truncated, err := fc.ReadFile(context.Background(), "empty.txt", 100)
+	if err != nil {
+		t.Fatalf("ReadFile(empty): %v", err)
+	}
+	if len(data) != 0 || truncated {
+		t.Errorf("ReadFile(empty) = %d bytes truncated=%v, want 0 bytes false", len(data), truncated)
+	}
+
+	// Exactly at the bound: the extra byte is not readable, so not
+	// truncated.
+	exact := bytes.Repeat([]byte("x"), 100)
+	if err = os.WriteFile(filepath.Join(srv.rootDir, "exact.txt"), exact, 0o600); err != nil {
+		t.Fatalf("write exact: %v", err)
+	}
+	data, truncated, err = fc.ReadFile(context.Background(), "exact.txt", 100)
+	if err != nil {
+		t.Fatalf("ReadFile(exact): %v", err)
+	}
+	if len(data) != 100 || truncated {
+		t.Errorf("ReadFile(exact) = %d bytes truncated=%v, want 100 bytes false", len(data), truncated)
+	}
+
+	// One past the bound: the extra byte IS readable, so truncated.
+	if err = os.WriteFile(filepath.Join(srv.rootDir, "over.txt"), append(exact, 'y'), 0o600); err != nil {
+		t.Fatalf("write over: %v", err)
+	}
+	data, truncated, err = fc.ReadFile(context.Background(), "over.txt", 100)
+	if err != nil {
+		t.Fatalf("ReadFile(over): %v", err)
+	}
+	if len(data) != 100 || !truncated {
+		t.Errorf("ReadFile(over) = %d bytes truncated=%v, want 100 bytes true", len(data), truncated)
 	}
 }
 
@@ -820,66 +894,101 @@ func TestFSConn_HardTimeout_PoisonsLease(t *testing.T) {
 func TestFSConn_Close_UnblocksNonContextCalls(t *testing.T) {
 	srv := startFSTestServer(t, fsModeNeverReply)
 	client := fsTestClient(t, srv)
-	fc, err := client.FSConn(context.Background(), srv.addr, fsConnectOpts(srv)...)
+
+	// The lease's lane caps concurrent in-flight non-context calls at
+	// fsLaneCap (4), so all five non-context calls cannot be wedged at
+	// once: the fifth would wait for a slot that never frees and its
+	// request would never reach the server. The proof therefore runs in
+	// two rounds of four, each round filling the lane, ReadLink joining
+	// round B — every call genuinely in flight before Close fires.
+	var fc FSConn
+	var err error
+
+	runRound := func(round string, calls []func(chan<- error)) {
+		n := len(calls)
+		outCh := make(chan error, n)
+		for _, c := range calls {
+			go c(outCh)
+		}
+		// All four requests must be in flight server-side before Close: a
+		// call that had not started would fail its state check, which
+		// proves nothing about close-to-cancel.
+		for i := range n {
+			select {
+			case <-srv.requestSeen:
+			case <-time.After(5 * time.Second):
+				t.Fatalf("round %s: server saw only %d/%d requests", round, i, n)
+			}
+		}
+		start := time.Now()
+		if err = fc.Close(); err != nil {
+			t.Fatalf("round %s: Close: %v", round, err)
+		}
+		for i := range n {
+			select {
+			case err = <-outCh:
+				if !errors.Is(err, ErrFSClosed) {
+					t.Errorf("round %s: call %d error = %v, want ErrFSClosed", round, i, err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatalf("round %s: call %d did not return after Close — closing the subsystem did not unblock it", round, i)
+			}
+		}
+		t.Logf("round %s: all %d non-context calls returned within %s of Close", round, n, time.Since(start))
+		waitPoolEmpty(t, client)
+	}
+
+	fc, err = client.FSConn(context.Background(), srv.addr, fsConnectOpts(srv)...)
 	if err != nil {
 		t.Fatalf("FSConn: %v", err)
 	}
-
 	baseline := runtime.NumGoroutine()
-	const nCalls = 4
-	outCh := make(chan error, nCalls)
-	calls := []func(){
-		func() {
-			_, err := fc.Stat("/wedged")
-			outCh <- err
+	runRound("A", []func(chan<- error){
+		func(outCh chan<- error) {
+			_, callErr := fc.Stat("/wedged")
+			outCh <- callErr
 		},
-		func() {
-			_, err := fc.Lstat("/wedged")
-			outCh <- err
+		func(outCh chan<- error) {
+			_, callErr := fc.Lstat("/wedged")
+			outCh <- callErr
 		},
-		func() {
-			_, err := fc.RealPath("/wedged")
-			outCh <- err
+		func(outCh chan<- error) {
+			_, callErr := fc.RealPath("/wedged")
+			outCh <- callErr
 		},
-		func() {
-			_, _, err := fc.ReadFile(context.Background(), "/wedged", 16)
-			outCh <- err
+		func(outCh chan<- error) {
+			_, _, callErr := fc.ReadFile(context.Background(), "/wedged", 16)
+			outCh <- callErr
 		},
-	}
-	for _, c := range calls {
-		go c()
-	}
-	// All four requests must be in flight server-side before Close: a call
-	// that had not started would fail its state check, which proves nothing
-	// about close-to-cancel.
-	for i := 0; i < nCalls; i++ {
-		select {
-		case <-srv.requestSeen:
-		case <-time.After(5 * time.Second):
-			t.Fatalf("server saw only %d/%d requests", i, nCalls)
-		}
-	}
+	})
 
-	start := time.Now()
-	if err := fc.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
+	fc, err = client.FSConn(context.Background(), srv.addr, fsConnectOpts(srv)...)
+	if err != nil {
+		t.Fatalf("FSConn round B: %v", err)
 	}
-	for i := 0; i < nCalls; i++ {
-		select {
-		case err := <-outCh:
-			if !errors.Is(err, ErrFSClosed) {
-				t.Errorf("call %d error = %v, want ErrFSClosed", i, err)
-			}
-		case <-time.After(5 * time.Second):
-			t.Fatalf("call %d did not return after Close — closing the subsystem did not unblock it", i)
-		}
-	}
-	t.Logf("all %d non-context calls returned within %s of Close", nCalls, time.Since(start))
+	runRound("B", []func(chan<- error){
+		func(outCh chan<- error) {
+			_, callErr := fc.ReadLink("/wedged")
+			outCh <- callErr
+		},
+		func(outCh chan<- error) {
+			_, callErr := fc.Stat("/wedged")
+			outCh <- callErr
+		},
+		func(outCh chan<- error) {
+			_, callErr := fc.Lstat("/wedged")
+			outCh <- callErr
+		},
+		func(outCh chan<- error) {
+			_, _, callErr := fc.ReadFile(context.Background(), "/wedged", 16)
+			outCh <- callErr
+		},
+	})
 
-	// No goroutine from this lease outlives Close: the lease was the only
-	// reference, so closing it reclaimed the connection and the loss
-	// watcher exited with it. The allowance of baseline+1 matches the
-	// discovery cancel test; the deadline loop tolerates the watcher's
+	// No goroutine from either lease outlives Close: the leases were the
+	// only references, so closing them reclaimed the connections and the
+	// loss watchers exited with them. The allowance of baseline+1 matches
+	// the discovery cancel test; the deadline loop tolerates the watchers'
 	// asynchronous exit.
 	deadline := time.Now().Add(5 * time.Second)
 	for runtime.NumGoroutine() > baseline+1 {

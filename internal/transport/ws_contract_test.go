@@ -16,6 +16,7 @@ import (
 	"github.com/shady2k/nocx/internal/completion"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
+	"github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/pty"
@@ -2681,5 +2682,479 @@ func TestShellFootprintUninstall_OverTheWireConformsToContract(t *testing.T) {
 	}
 	if len(got.Conflicts) != 1 || got.Conflicts[0] != "integration/v10/nocx.bash" {
 		t.Errorf("conflicts = %v, want the capability's list verbatim", got.Conflicts)
+	}
+}
+
+// ── files.* ──────────────────────────────────────────────────────────────
+//
+// The seven wire shapes of the file-tree control plane (fm-w8): six
+// methods plus the files.changed notification, which gets the same three
+// checks as a method because an unsolicited notification is exactly where
+// an addressing defect hides (spec §5.3).
+
+func TestFilesOpen_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.open.schema.json")
+
+	ep := "v1:attestation"
+	cases := map[string]filesOpenResult{
+		// The state every local tab is actually in: endpointId must be
+		// null — never absent, never "" — and the root carries the
+		// inferred label when the caller sent no rootPath.
+		"local": {
+			BindingID:  "ab12cd34",
+			EndpointID: nil,
+			Root: filesRootResult{
+				Path:           "/home/dev",
+				Display:        "~/",
+				Inferred:       true,
+				InferredReason: "no verified working directory — using home",
+			},
+		},
+		// A remote binding attests its resolved destination (D4); the
+		// SFTP wave stamps it here.
+		"remote": {
+			BindingID:  "ef56",
+			EndpointID: &ep,
+			Root: filesRootResult{
+				Path:    "/home/deploy",
+				Display: "/home/deploy",
+			},
+		},
+	}
+	for name, res := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(res)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "files.open DTO")
+		})
+	}
+}
+
+func TestFilesOpen_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.open.schema.json")
+	e := newFilesTestEnv(t)
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+
+	resp := jsonrpcCallWithID(t, e.conn, "files.open", map[string]any{
+		"sessionId": sid,
+		"rootPath":  dir,
+	}, 2)
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, resp)
+	}
+	if envelope.Error != nil {
+		t.Fatalf("files.open: %+v", envelope.Error)
+	}
+	validateJSON(t, schema, envelope.Result, "files.open result (real socket)")
+
+	var got filesOpenResult
+	if err := json.Unmarshal(envelope.Result, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.BindingID == "" {
+		t.Error("bindingId is empty")
+	}
+	if got.EndpointID != nil {
+		t.Errorf("endpointId = %v, want null for a local binding", *got.EndpointID)
+	}
+	if got.Root.Path != dir {
+		t.Errorf("root.path = %q, want %q", got.Root.Path, dir)
+	}
+	if got.Root.Inferred {
+		t.Error("root is inferred although rootPath was given and usable")
+	}
+}
+
+func TestFilesList_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.list.schema.json")
+
+	cases := map[string]any{
+		// The normal branch: an empty directory is [] and a symlink
+		// carries its target. The unreadable entry collapses to "other"
+		// (wireKind) — the schema's enum has no "unreadable", and its
+		// open/expand row is exactly "other"'s.
+		"ok": filesListOK{
+			State:     "ok",
+			Path:      "/tmp/panel",
+			Canonical: "/private/tmp/panel",
+			Entries: []filesListEntry{
+				{Name: "a.txt", Path: "/tmp/panel/a.txt", Kind: "regular", Size: 3, ModTime: "2026-08-06T10:00:00Z", Mode: 0o644},
+				{Name: "link", Path: "/tmp/panel/link", Kind: "symlink", LinkTarget: "a.txt", LinkKind: "regular", Size: 0, ModTime: "2026-08-06T10:00:00Z", Mode: 0o777},
+				{Name: "gone", Path: "/tmp/panel/gone", Kind: wireKind(filesystem.KindUnreadable), Size: 0, ModTime: "2026-08-06T10:00:00Z", Mode: 0},
+			},
+			Offset:  0,
+			Total:   3,
+			HasMore: false,
+			Rev:     "0123abcdef",
+		},
+		"empty directory": filesListOK{
+			State: "ok", Path: "/tmp/empty", Canonical: "/tmp/empty",
+			Entries: []filesListEntry{}, Offset: 0, Total: 0, HasMore: false, Rev: "rev",
+		},
+		"tooLarge": filesListTooLarge{
+			State: "tooLarge", ObservedCount: 12000, Limit: 10000,
+		},
+		"timedOut": filesListTimedOut{
+			State: "timedOut", Timeout: 10000,
+		},
+	}
+	for name, res := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(res)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "files.list DTO")
+		})
+	}
+}
+
+func TestFilesList_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.list.schema.json")
+	e := newFilesTestEnv(t)
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("hello"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, "sub"), 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	bid := e.openBinding(t, sid, dir, 2)
+
+	resp := jsonrpcCallWithID(t, e.conn, "files.list", map[string]any{
+		"bindingId": bid,
+		"path":      dir,
+		"offset":    0,
+		"limit":     10,
+	}, 3)
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if envelope.Error != nil {
+		t.Fatalf("files.list: %+v", envelope.Error)
+	}
+	validateJSON(t, schema, envelope.Result, "files.list result (real socket)")
+
+	var got filesListOK
+	if err := json.Unmarshal(envelope.Result, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.State != "ok" {
+		t.Fatalf("state = %q, want ok", got.State)
+	}
+	if got.Entries == nil {
+		t.Fatal("entries is null — an empty directory must be [], never null")
+	}
+	if len(got.Entries) != 2 {
+		t.Fatalf("entries = %d, want 2 (a.txt, sub)", len(got.Entries))
+	}
+	if got.Total != 2 || got.HasMore || got.Rev == "" {
+		t.Errorf("total/hasMore/rev = %d/%v/%q, want 2/false/non-empty", got.Total, got.HasMore, got.Rev)
+	}
+}
+
+func TestFilesRead_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.read.schema.json")
+	cases := map[string]filesReadResult{
+		"text": {
+			Path: "/tmp/a.txt", Canonical: "/private/tmp/a.txt",
+			Text: "hello", Size: 5, ModTime: "2026-08-06T10:00:00Z",
+			Truncated: false, Binary: false, Lossy: false, Changed: false,
+		},
+		// A file that changed while being read, and a truncated one: the
+		// booleans are the contract's honesty, each present.
+		"changed while read": {
+			Path: "/tmp/b.bin", Canonical: "/tmp/b.bin",
+			Size: 4096, ModTime: "2026-08-06T10:00:00Z",
+			Truncated: true, Binary: true, Lossy: false, Changed: true,
+		},
+	}
+	for name, res := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(res)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "files.read DTO")
+		})
+	}
+}
+
+func TestFilesRead_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.read.schema.json")
+	e := newFilesTestEnv(t)
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	content := "the quick brown fox"
+	if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte(content), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	bid := e.openBinding(t, sid, dir, 2)
+
+	resp := jsonrpcCallWithID(t, e.conn, "files.read", map[string]any{
+		"bindingId": bid,
+		"path":      filepath.Join(dir, "f.txt"),
+		"maxBytes":  0,
+	}, 3)
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if envelope.Error != nil {
+		t.Fatalf("files.read: %+v", envelope.Error)
+	}
+	validateJSON(t, schema, envelope.Result, "files.read result (real socket)")
+
+	var got filesReadResult
+	if err := json.Unmarshal(envelope.Result, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Text != content {
+		t.Errorf("text = %q, want %q", got.Text, content)
+	}
+	if got.Canonical == "" || got.Truncated || got.Binary || got.Lossy || got.Changed {
+		t.Errorf("canonical/truncated/binary/lossy/changed = %q/%v/%v/%v/%v, want non-empty/false×4",
+			got.Canonical, got.Truncated, got.Binary, got.Lossy, got.Changed)
+	}
+}
+
+func TestFilesWatch_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.watch.schema.json")
+	cases := map[string]filesWatchResult{
+		"watching":            {Mode: "watching"},
+		"designed polling":    {Mode: "polling"},
+		"degraded to polling": {Mode: "polling", DegradedReason: "fsnotify unavailable"},
+	}
+	for name, res := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(res)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "files.watch DTO")
+		})
+	}
+}
+
+func TestFilesWatch_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.watch.schema.json")
+	e := newFilesTestEnv(t)
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	bid := e.openBinding(t, sid, dir, 2)
+
+	resp := jsonrpcCallWithID(t, e.conn, "files.watch", map[string]any{
+		"bindingId": bid,
+		"paths":     []string{dir},
+	}, 3)
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if envelope.Error != nil {
+		t.Fatalf("files.watch: %+v", envelope.Error)
+	}
+	validateJSON(t, schema, envelope.Result, "files.watch result (real socket)")
+
+	var got filesWatchResult
+	if err := json.Unmarshal(envelope.Result, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Mode != "polling" || got.DegradedReason == "" {
+		t.Errorf("mode/degradedReason = %q/%q, want polling with a reason (watching not available yet)",
+			got.Mode, got.DegradedReason)
+	}
+}
+
+func TestFilesClose_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.close.schema.json")
+	raw, err := json.Marshal(struct{}{})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "files.close DTO")
+}
+
+func TestFilesClose_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.close.schema.json")
+	e := newFilesTestEnv(t)
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	bid := e.openBinding(t, sid, dir, 2)
+
+	resp := jsonrpcCallWithID(t, e.conn, "files.close", map[string]any{"bindingId": bid}, 3)
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if envelope.Error != nil {
+		t.Fatalf("files.close: %+v", envelope.Error)
+	}
+	validateJSON(t, schema, envelope.Result, "files.close result (real socket)")
+
+	// The binding is gone: a later call must refuse cleanly.
+	after := jsonrpcCallWithID(t, e.conn, "files.list", map[string]any{
+		"bindingId": bid, "path": dir, "offset": 0, "limit": 10,
+	}, 4)
+	var afterEnv struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(after, &afterEnv); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if afterEnv.Error == nil {
+		t.Fatal("files.list succeeded on a closed binding")
+	}
+}
+
+func TestFilesReveal_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.reveal.schema.json")
+	raw, err := json.Marshal(struct{}{})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "files.reveal DTO")
+}
+
+func TestFilesReveal_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.reveal.schema.json")
+	revealer := &stubRevealer{}
+	e := newFilesTestEnv(t, WithFilesRevealer(revealer))
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	bid := e.openBinding(t, sid, dir, 2)
+
+	resp := jsonrpcCallWithID(t, e.conn, "files.reveal", map[string]any{
+		"bindingId": bid,
+		"path":      filepath.Join(dir, "f.txt"),
+	}, 3)
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if envelope.Error != nil {
+		t.Fatalf("files.reveal: %+v", envelope.Error)
+	}
+	validateJSON(t, schema, envelope.Result, "files.reveal result (real socket)")
+	if got := revealer.revealed(); len(got) != 1 {
+		t.Errorf("revealed paths = %v, want exactly one", got)
+	}
+}
+
+func TestFilesChanged_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.changed.schema.json")
+	cases := map[string]filesChangedNotification{
+		// rev present: the backend already knew the new digest (SFTP
+		// polling necessarily computed it).
+		"with rev": {
+			JSONRPC: "2.0", Method: "files.changed",
+			Params: filesChangedParams{BindingID: "ab12", Path: "/tmp/dir", Rev: "0123abcdef"},
+		},
+		// rev absent: a local event where nothing has been re-listed.
+		"without rev": {
+			JSONRPC: "2.0", Method: "files.changed",
+			Params: filesChangedParams{BindingID: "ab12", Path: "/tmp/dir"},
+		},
+	}
+	for name, n := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(n)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			var frame struct {
+				Params json.RawMessage `json:"params"`
+			}
+			if err := json.Unmarshal(raw, &frame); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			validateJSON(t, schema, frame.Params, "files.changed DTO")
+		})
+	}
+}
+
+// The over-the-wire notification test: a real watch, a real change, the
+// real socket. This is the one that catches an addressing defect — the
+// notification must reach the connection that attached, and its params
+// must satisfy the schema.
+func TestFilesChanged_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.changed.schema.json")
+	e := newFilesTestEnv(t)
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	bid := e.openBinding(t, sid, dir, 2)
+	w := e.watchDir(t, bid, []string{dir}, 3)
+
+	waitFor(t, "watch baseline", 5*time.Second, func() bool {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		return w.paths[dir] != ""
+	})
+
+	// No subscriber, then a change: the same shape a drop leaves, made
+	// deterministic.
+	e.ws.getRx(session.ID(sid)).setSubscriber(nil, nil)
+	if err := os.WriteFile(filepath.Join(dir, "changed.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	waitFor(t, "dirty path", 5*time.Second, func() bool {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		_, ok := w.dirty[dir]
+		return ok
+	})
+
+	connB := connectWS(t, e.ws)
+	defer func() { _ = connB.Close() }()
+	at := jsonrpcCallWithID(t, connB, "attach", map[string]any{
+		"sessionId": sid,
+		"offset":    0,
+	}, 4)
+	var atEnv struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(at, &atEnv); err != nil {
+		t.Fatalf("attach: unmarshal: %v", err)
+	}
+	if atEnv.Error != nil {
+		t.Fatalf("attach: %+v", atEnv.Error)
+	}
+
+	raw := readNotification(t, connB, "files.changed", 5*time.Second)
+	validateJSON(t, schema, raw, "files.changed params (real socket)")
+
+	var params filesChangedParams
+	if err := json.Unmarshal(raw, &params); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if params.BindingID != bid || params.Path != dir {
+		t.Errorf("bindingId/path = %q/%q, want %q/%q", params.BindingID, params.Path, bid, dir)
+	}
+	if params.Rev == "" {
+		t.Error("rev is absent — the poll loop knew the new digest and must carry it")
 	}
 }

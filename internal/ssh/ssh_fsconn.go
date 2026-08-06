@@ -44,6 +44,14 @@ type FSConn interface {
 	Stat(path string) (os.FileInfo, error)
 	// Lstat returns the file info for path without following symlinks.
 	Lstat(path string) (os.FileInfo, error)
+	// ReadLink returns the target of the symbolic link at path — the link
+	// text as the server stores it, not the resolved path: a broken link
+	// still returns its target, which is what lets the file manager
+	// distinguish "target missing" from "cannot read the link".
+	// Non-context, like Stat/Lstat/RealPath: a call wedged against a
+	// silent server is unblocked by closing the lease, or killed by the
+	// lane's hard timeout (which poisons the lease).
+	ReadLink(path string) (string, error)
 	// RealPath resolves path to the server's canonical absolute form.
 	RealPath(path string) (string, error)
 	// ReadFile opens path and reads at most maxBytes bytes, reading one
@@ -470,6 +478,19 @@ func (c *fsConn) Lstat(path string) (os.FileInfo, error) {
 	return out, nil
 }
 
+func (c *fsConn) ReadLink(path string) (string, error) {
+	var out string
+	err := c.run(context.Background(), func() error {
+		var err error
+		out, err = c.sftp.ReadLink(path)
+		return err
+	})
+	if err != nil {
+		return "", c.classify(err)
+	}
+	return out, nil
+}
+
 func (c *fsConn) RealPath(path string) (string, error) {
 	var out string
 	err := c.run(context.Background(), func() error {
@@ -498,9 +519,11 @@ func (c *fsConn) ReadFile(ctx context.Context, path string, maxBytes int64) ([]b
 		// ReadFull loops until the buffer is full or EOF, so the bound is
 		// real even though a single File.Read may return short; the +1 byte
 		// is how truncation is learned without a second round trip.
+		// ReadFull returns io.EOF exactly when zero bytes were read — the
+		// empty file — which is a successful zero-byte read, not an error.
 		buf := make([]byte, maxBytes+1)
 		n, err := io.ReadFull(f, buf)
-		if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) {
+		if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
 			return err
 		}
 		truncated = int64(n) > maxBytes
