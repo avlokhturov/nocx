@@ -25,6 +25,7 @@ _bmad/core/config.yaml
 /bin/
 /build/*
 !/build/darwin/
+!/build/appicon.png
 /dist/
 /go/build/
 /tools/bin/
