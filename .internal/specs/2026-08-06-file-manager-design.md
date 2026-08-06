@@ -69,23 +69,23 @@ outlives the call". We extend that rather than write a second, worse answer — 
 
 ## 3. Decisions
 
-| #   | Decision                                                                                                                                                                                        | Rejected alternative, and why                                                                                                                                                                                |
-| --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| D1  | **A filesystem is addressed by a `bindingId` the backend issues** from a `sessionId`. Only `files.open` takes a `sessionId`                                                                     | Every call taking `sessionId`. It keeps the wrong pairing inexpressible (good) but spreads the authorisation check of D15 across every handler, where one that forgets it is a hole. One id, one choke point |
-| D2  | **The provider computes the root.** A verified OSC 7 cwd overrides it — chosen by the composition layer, so the SFTP provider never learns what OSC confidence is. An inferred root is labelled | The session's `Cwd()`. For an SSH session with no explicit cwd it is the **local** `os.UserHomeDir()`. AD-5 already requires a `$HOME` fallback to be "surfaced to the user, not applied silently"           |
-| D3  | **The SFTP lease is a sibling of `DiscoveryConn`**: its own pooled reference; listing cancelled by context, everything else by closing the subsystem                                            | A goroutine-per-call with a drain deadline. Unbounded stuck calls, and a deadline that unblocks nothing. Also the blanket claim "pkg/sftp is not cancellable" — one method is (§5.1)                         |
-| D4  | **Nothing client-minted crosses the wire.** The backend issues `{bindingId, endpointId}`; the client's `{tabId, generation}` is checked in the closure that issued the call and is never sent   | One `Origin` struct carrying both, or echoing a client token. `tabId` is a frontend integer the backend cannot attest; sending it adds a field to every schema to re-derive what the caller never forgot     |
-| D5  | **Refresh comes from the filesystem**: fsnotify locally, polling over SFTP, both behind one provider-side watch capability                                                                      | OSC 133 command-end (blind inside a long-running agent) and agent-activity heuristics (a file can be changed by anyone — cron, another session, another person)                                              |
-| D6  | **No automatic rebind after reconnect.** A stale viewer offers **Reload**, enabled only when a live session's `endpointId` matches                                                              | Silent rebind on endpoint match. Same identity check, but it moves content under a reader who did not ask. Rebinding by profile id — which the draft did — is worse still: a profile is editable             |
-| D7  | **The viewer is a snapshot plus an offer.** A file that changed is announced, never silently reloaded                                                                                           | Live-following content. A log you are reading scrolls out from under you                                                                                                                                     |
-| D8  | **Root is navigation scope, not a sandbox.** No `..` row; a symlink may leave the root and is rendered plainly                                                                                  | Enforcing containment. It would be security theatre: the real boundary is the account's own permissions, and pretending otherwise invites someone to rely on it                                              |
-| D9  | **Directory symlinks expand.** Every listing returns its own `canonical`; the controller compares it with the expanded ancestors it already holds and marks a match cyclic before rendering     | Refusing to expand them — hides half of every real tree. And computing cycles in `Entry`, where `List(path,page)` has no ancestor chain to compute from and canonicalising each child is N+1 round trips     |
-| D10 | **No row virtualisation.** A page of N children per directory plus an explicit "show next N"                                                                                                    | Virtualised rows — what Orca needed (`@tanstack/react-virtual`). Deferred to `nocx-goi0`. A cap without pagination is worse than either                                                                      |
-| D11 | **New methods live under `files.*`, not `fs.*`**                                                                                                                                                | Extending `fs.*`. `contracts/fs.complete.schema.json` declares that namespace **local-only** ("the provider is inactive on a remote session"). A remote-capable `fs.list` beside it invites a fatal misread  |
-| D12 | **One live viewer per `{endpointId, canonical path}`** via the existing `singletonKey`                                                                                                          | A tab per click. `tabs.ts:543` already deduplicates                                                                                                                                                          |
-| D13 | **File bytes never reach disk.** Tab restore does not exist yet; if and when it does, a viewer persists identity only                                                                           | Persisting the bytes — up to 2 MiB of possibly-secret remote content in unencrypted config storage. And describing a restart behaviour the app cannot perform (§5.4)                                         |
-| D14 | **A directory too large to enumerate is a state, not a wait**: an entry cap the user can reason about, an elapsed-time cap they cannot, and no polling for a capped directory                   | Listing whatever arrived. A complete-looking prefix of a directory is worse than an honest refusal                                                                                                           |
-| D15 | **`files.open` is authorised by `connState`, not by the global session registry**                                                                                                               | `registry.Get` alone. Any authenticated socket that learned another connection's session id could open that session's filesystem. `ws.go:652` exists for exactly this                                        |
+| #   | Decision                                                                                                                                                                                               | Rejected alternative, and why                                                                                                                                                                                                      |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| D1  | **A filesystem is addressed by a `bindingId` the backend issues** from a `sessionId`. Only `files.open` takes a `sessionId`, and every later call reaches its provider only through `Registry.Acquire` | Every call taking `sessionId`. It keeps the wrong pairing inexpressible (good) but spreads the authorisation check of D15 across every handler, where one that forgets it is a hole. The choke point is `Acquire`, not the handler |
+| D2  | **The provider computes the root.** A verified OSC 7 cwd overrides it — chosen by the composition layer, so the SFTP provider never learns what OSC confidence is. An inferred root is labelled        | The session's `Cwd()`. For an SSH session with no explicit cwd it is the **local** `os.UserHomeDir()`. AD-5 already requires a `$HOME` fallback to be "surfaced to the user, not applied silently"                                 |
+| D3  | **The SFTP lease is a sibling of `DiscoveryConn`**: its own pooled reference; listing cancelled by context, everything else by closing the subsystem                                                   | A goroutine-per-call with a drain deadline. Unbounded stuck calls, and a deadline that unblocks nothing. Also the blanket claim "pkg/sftp is not cancellable" — one method is (§5.1)                                               |
+| D4  | **No client-minted _identity_ crosses the wire.** The backend issues `{bindingId, endpointId}`; the client's `{tabId, generation}` is checked in the closure that issued the call and is never sent    | One `Origin` struct carrying both, or echoing a client token. `tabId` is a frontend integer the backend cannot attest; sending it adds a field to every schema to re-derive what the caller never forgot                           |
+| D5  | **Refresh comes from the filesystem**: fsnotify locally, polling over SFTP, both behind one provider-side watch capability                                                                             | OSC 133 command-end (blind inside a long-running agent) and agent-activity heuristics (a file can be changed by anyone — cron, another session, another person)                                                                    |
+| D6  | **No automatic rebind after reconnect.** A stale viewer offers **Reload**, enabled only when a live session's `endpointId` matches                                                                     | Silent rebind on endpoint match. Same identity check, but it moves content under a reader who did not ask. Rebinding by profile id — which the draft did — is worse still: a profile is editable                                   |
+| D7  | **The viewer is a snapshot plus an offer.** A file that changed is announced, never silently reloaded                                                                                                  | Live-following content. A log you are reading scrolls out from under you                                                                                                                                                           |
+| D8  | **Root is navigation scope, not a sandbox.** No `..` row; a symlink may leave the root and is rendered plainly                                                                                         | Enforcing containment. It would be security theatre: the real boundary is the account's own permissions, and pretending otherwise invites someone to rely on it                                                                    |
+| D9  | **Directory symlinks expand.** Every listing returns its own `canonical`; the controller compares it with the expanded ancestors it already holds and marks a match cyclic before rendering            | Refusing to expand them — hides half of every real tree. And computing cycles in `Entry`, where `List(path,page)` has no ancestor chain to compute from and canonicalising each child is N+1 round trips                           |
+| D10 | **No row virtualisation.** A page of N children per directory plus an explicit "show next N"                                                                                                           | Virtualised rows — what Orca needed (`@tanstack/react-virtual`). Deferred to `nocx-goi0`. A cap without pagination is worse than either                                                                                            |
+| D11 | **New methods live under `files.*`, not `fs.*`**                                                                                                                                                       | Extending `fs.*`. `contracts/fs.complete.schema.json` declares that namespace **local-only** ("the provider is inactive on a remote session"). A remote-capable `fs.list` beside it invites a fatal misread                        |
+| D12 | **One live viewer per `{endpointId, canonical path}`** via the existing `singletonKey`                                                                                                                 | A tab per click. `tabs.ts:543` already deduplicates                                                                                                                                                                                |
+| D13 | **File bytes never reach disk.** Tab restore does not exist yet; if and when it does, a viewer persists identity only                                                                                  | Persisting the bytes — up to 2 MiB of possibly-secret remote content in unencrypted config storage. And describing a restart behaviour the app cannot perform (§5.4)                                                               |
+| D14 | **A directory too large to enumerate is a state, not a wait**: an entry cap the user can reason about, an elapsed-time cap they cannot, and no polling for a capped directory                          | Listing whatever arrived. A complete-looking prefix of a directory is worse than an honest refusal                                                                                                                                 |
+| D15 | **`files.open` is authorised by `connState`, not by the global session registry**                                                                                                                      | `registry.Get` alone. Any authenticated socket that learned another connection's session id could open that session's filesystem. `ws.go:652` exists for exactly this                                                              |
 
 ### D11 in full: why a second directory lister is justified
 
@@ -321,12 +321,46 @@ keeps a binding alive across one handler call are three objects with three lifet
 #### Bindings
 
 ```go
+// Binding is opaque outside this package: its provider is unexported, so there
+// is no route to a filesystem that skips Acquire.
 type Binding struct {
-    ID         string    // backend-issued, opaque
-    EndpointID string    // attestation; empty for local
-    Provider   Provider
+    id         string
+    endpointID string   // attestation; empty for local
+    provider   Provider // unexported on purpose — see Acquire
 }
+
+func (b *Binding) ID() string         { return b.id }
+func (b *Binding) EndpointID() string { return b.endpointID }
+
+// Handle is the only thing that can reach a filesystem. It is what Acquire
+// returns, it holds the use-guard for its lifetime, and it is invalid after
+// release.
+type Handle interface {
+    Root(ctx context.Context) (Root, error)
+    List(ctx context.Context, path string, page Page) (Listing, error)
+    Read(ctx context.Context, path string, maxBytes int64) (Content, error)
+    Watch(ctx context.Context, paths []string) (WatchMode, error)
+}
+
+// Caller is who is asking. filesystem declares it and transport satisfies it —
+// the direction internal/discovery/discovery.go:113 already established, and the
+// only one available: connState and wsConn are unexported in transport, and a
+// filesystem that imported transport would point the dependency backwards.
+type Caller interface {
+    Owns(sessionID session.ID) bool
+}
+
+func (r *Registry) Acquire(id string, c Caller) (Handle, func(), error)
 ```
+
+`connState` does **not** satisfy `Caller` as it stands: Go matches interface methods by name,
+and its method is `has(sid)` (`ws.go:1361`). `transport` therefore adds an exported
+`Owns(session.ID) bool` that forwards to `has` — one line, no new state, and the authorisation
+answer still comes from the one place that already owns it.
+
+`Provider` stays exported because `local` and `sftp` implement it from their own packages.
+What is unreachable is a **bound** provider: nothing outside `filesystem` can get one out of a
+`Binding`, so "every handler must remember to check" is not a discipline anybody has to keep.
 
 A `Registry` maps `bindingId → Binding`. `files.open{sessionId}` resolves the session, builds
 the provider, takes the pooled reference, and returns the id. Every later call takes the id.
@@ -422,6 +456,7 @@ in scope when the binding is created.
 
 ```
 <-- {"jsonrpc":"2.0","method":"files.changed","params":{"bindingId":"…","path":"…","rev":"…"}}
+    // rev is optional — see below
 ```
 
 **The destination is resolved at emit time, never stored.** A binding records the `sessionId`
@@ -435,8 +470,16 @@ watch set. On re-attach the set is emitted once and cleared. Collapsing to a sin
 queueing every event would replay a burst that meant one change.
 
 The notification carries **no entries**: it is an invalidation, and the client re-lists through
-`files.list`, so exactly one code path renders a directory. `rev` lets a client skip a re-list
-it has already applied.
+`files.list`, so exactly one code path renders a directory.
+
+**`rev` is optional, and its absence is not a defect.** It is present exactly when the backend
+already knows it and costs nothing to include — SFTP polling necessarily computed the new
+digest, because computing it is how the change was detected at all. It is absent for a local
+`fsnotify` event, where the kernel said "something happened" and nothing has been re-listed.
+Making it required would force the backend to list a directory in order to announce that it
+should be listed, which is the same work done twice and a race besides. So `rev` is what lets
+a client skip a re-list it has already applied, when that shortcut is available, and the
+client's own comparison after re-listing is what it falls back on when it is not.
 
 `files.watch` **replaces** the watch set rather than adding to it, so collapsing a directory
 cannot leak a watch: the client sends the set it currently wants and the backend diffs. The
@@ -454,6 +497,22 @@ and had no way to say so.
 **`sessionId` appears exactly once**, on `files.open`. That is what keeps the wrong pairing
 inexpressible: no parameter can ask for the local filesystem of an SSH session, and no caller
 can name a filesystem the backend did not hand out.
+
+**A `bindingId` is not a bearer token, and is unguessable anyway.** Both, because either alone
+is a hole. The id is minted from `crypto/rand`, the way the per-launch capability token already
+is (`ws.go`, `nocx-hl3`), so it cannot be guessed or enumerated. And every later call re-checks
+that the binding's session is in the **requesting** connection's `connState` — one map lookup,
+and it is what holds if an id ever reaches a log, a screenshot or a crash report. Checking only
+at `files.open` would make every subsequent call trust a string.
+
+**There is still exactly one place that authorises, and it is not the handler.** The re-check
+lives inside a single `Registry.Acquire(bindingId, caller) (Handle, release, error)` — the same
+call that takes the use-guard of §5.1 — and **no handler may reach a filesystem by any other
+route.** That is what keeps D1's claim true: a handler cannot forget a check it never
+performs, and the alternative D1 rejected — `sessionId` on every call, checked by every
+handler — is rejected precisely because there the check is copied N times and the Nth copy is
+the hole. Enforced the way this repo enforces such things: the provider is unexported and
+`Acquire` is the only thing that returns one.
 
 **`files.open` succeeds only if `state.has(sessionId)` on the requesting connection.** This is
 the wire-level enforcement of §0 and it is not a new invention — `connState` exists for
@@ -561,9 +620,7 @@ the kit README. It is not built inside the surface. Where `CollectionView`'s row
 already fits, it is extended rather than forked.
 
 **Viewer tab.** A `ContentDescriptor` with `singletonKey = "${endpointId ?? 'local'}:${canonicalPath}"`
-(D12) and a `restoreDescriptor` of the new `{type:'file', endpointId, path, displayHost}`,
-shaped by the tab-restore ownership rule in `architecture.md:196` — backend-owned identity
-plus a frontend snapshot.
+(D12), and a `restoreDescriptor` of **`null`** — see below.
 
 **But tab restore does not exist yet, so the viewer's `restoreDescriptor` is `null`.**
 `restoreDescriptor` is written in four places — `tabs.ts:456` and `:504`, `main.tsx:226`,
@@ -770,8 +827,7 @@ bead.
 
 ## 10. Review history
 
-Three adversarial rounds against the code, each of which found something the round before it
-had not.
+Seven adversarial rounds, ending when one returned nothing.
 
 - **2026-08-01, round 1** — three breaches of §0 in the first draft: a response applied to the
   wrong tab, an action aimed at the active tab, a reconnect rebinding by profile id.
@@ -805,6 +861,20 @@ three of them:
   justification was not: SSH's host-key check answers "may I authenticate", not "is this the
   same filesystem". §5.1 now records the case v1 misses instead of claiming there is none.
 
-The pattern worth keeping from all three rounds is the same one: **every finding lived in the
+- **2026-08-06, rounds 4–7** — the document was then re-read against itself until a round
+  returned nothing. Each of these found less than the one before, which is what convergence
+  looks like: an OSC 7 override that D2 decided and no wire shape could express; a
+  `singletonKey` that needed a canonical file path `files.read` did not return; a `Binding`
+  whose exported `Provider` field contradicted, in the same document, the claim that `Acquire`
+  was the only route to a filesystem; an `Acquire` whose signature took two types that are
+  unexported in `transport`, which would have inverted the dependency; and finally a `Caller`
+  interface that `connState` was said to satisfy and does not, because Go matches interface
+  methods by name and its method is called `has`.
+
+  None of these is interesting on its own. Together they are the argument for the loop: **every
+  one was introduced by a fix to the round before it.** A document is not correct because its
+  last edit was correct.
+
+The pattern worth keeping from all seven rounds is the same one: **every finding lived in the
 gap between what the document asserted and what the code says.** Round 2 found it in the
 repository the draft had not read; round 3 found it in the document's own unread halves.
