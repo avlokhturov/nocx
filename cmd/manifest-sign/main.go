@@ -13,9 +13,15 @@
 //
 //	manifest-sign -keygen                       # print a fresh seed + public key
 //	manifest-sign -in manifest.json -out manifest.json.sig
+//	manifest-sign -verify -in manifest.json -sig manifest.json.sig
 //
 // In sign mode the seed is read from the RELEASE_SIGNING_KEY environment
 // variable (never a flag, so it stays out of process listings and CI logs).
+//
+// Verify mode takes no key: it uses the keyring compiled into this binary, so
+// running it in the release workflow answers the only question signing cannot —
+// whether the secret CI signed with and the public key the artefact ships with
+// are the same pair (nocx-1d54).
 package main
 
 import (
@@ -26,30 +32,83 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/shady2k/nocx/internal/update"
 )
 
 const seedEnv = "RELEASE_SIGNING_KEY"
 
 func main() {
 	keygen := flag.Bool("keygen", false, "generate a new ed25519 keypair and print the seed and public key")
-	in := flag.String("in", "", "path to the manifest to sign")
+	verifyMode := flag.Bool("verify", false, "verify -sig against -in using the compiled-in release keyring")
+	in := flag.String("in", "", "path to the manifest to sign or verify")
 	out := flag.String("out", "", "path to write the base64 signature to (default stdout)")
+	sig := flag.String("sig", "", "path to the detached signature to verify")
 	flag.Parse()
 
-	if err := run(*keygen, *in, *out); err != nil {
+	if err := run(*keygen, *verifyMode, *in, *out, *sig); err != nil {
 		fmt.Fprintln(os.Stderr, "manifest-sign:", err)
 		os.Exit(1)
 	}
 }
 
-func run(keygen bool, in, out string) error {
+func run(keygen, verifyMode bool, in, out, sig string) error {
 	if keygen {
 		return generate()
+	}
+	if verifyMode {
+		if in == "" || sig == "" {
+			return fmt.Errorf("-in and -sig are both required in verify mode")
+		}
+		keyring, err := update.ReleaseKeyring()
+		if err != nil {
+			return fmt.Errorf("compiled-in release keyring: %w", err)
+		}
+		return verify(in, sig, keyring)
 	}
 	if in == "" {
 		return fmt.Errorf("-in is required in sign mode")
 	}
 	return sign(in, out)
+}
+
+// verify checks a detached signature against the keyring the shipped binary
+// carries, and is the only thing that proves the two halves of the release
+// signing arrangement are a pair.
+//
+// Signing proves the CI secret is present and well-formed. It says nothing
+// about whether anybody can check the result: if RELEASE_SIGNING_KEY and
+// internal/update/keyring.go drift apart, every artefact still signs, still
+// publishes, and every user's update check then fails against a manifest no
+// key in their build validates. Both sides are individually green and the
+// release is dead — so the workflow runs this between signing and publishing,
+// against the keyring compiled from the same tree it is building (nocx-1d54).
+func verify(in, sigPath string, keyring []ed25519.PublicKey) error {
+	body, err := os.ReadFile(in) //nolint:gosec // in is an explicit CLI argument: the manifest path
+	if err != nil {
+		return fmt.Errorf("read manifest: %w", err)
+	}
+	raw, err := os.ReadFile(sigPath) //nolint:gosec // sigPath is an explicit CLI argument
+	if err != nil {
+		return fmt.Errorf("read signature: %w", err)
+	}
+	sig, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(raw)))
+	if err != nil {
+		return fmt.Errorf("signature is not valid base64: %w", err)
+	}
+	if len(keyring) == 0 {
+		return fmt.Errorf("the compiled-in release keyring is empty: " +
+			"this build can verify no update at all, whatever it publishes")
+	}
+	for _, key := range keyring {
+		if ed25519.Verify(key, body, sig) {
+			return nil
+		}
+	}
+	return fmt.Errorf("no key in the compiled-in keyring validates this signature: "+
+		"%s and internal/update/keyring.go are not a pair — "+
+		"either the secret was rotated without adding its public key, or the key was added without rotating the secret",
+		seedEnv)
 }
 
 // generate prints a fresh keypair. The seed goes into the RELEASE_SIGNING_KEY

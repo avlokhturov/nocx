@@ -305,10 +305,20 @@ func TestTunnelConn_DialAfterCloseFails(t *testing.T) {
 	}
 
 	// After loss: ErrTunnelConnLost.
+	// The first lease is spent, so the server must be down to nothing before
+	// the second is opened: otherwise the count below cannot tell the two
+	// apart, and killConns could close a connection this test already
+	// finished with while the one it means is still in the backlog.
+	srv.waitLiveConns(0)
+
 	lease2, err := client.TunnelConn(context.Background(), srv.addr, opts...)
 	if err != nil {
 		t.Fatalf("TunnelConn 2: %v", err)
 	}
+	// TunnelConn returns on the CLIENT's handshake; the server accepts
+	// sequentially and may not have this connection yet (nocx-zlvw).
+	srv.waitLiveConns(1)
+
 	srv.killConns()
 	select {
 	case <-lease2.Done():

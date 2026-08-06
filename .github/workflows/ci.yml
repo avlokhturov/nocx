@@ -116,11 +116,33 @@ jobs:
           go-version: '1.26'
           cache: true
 
-      - name: Install Secret Service & dbus-x11
-        if: matrix.with-keyring
+      # The same provisioning the macOS job needs, for the same reason: the
+      # launcher tests fail rather than skip when the shell they exist to prove
+      # is missing (nocx-gd84), and a skip there would hide the riskiest paths
+      # in the package. macOS was given dash because it ships zsh; ubuntu is the
+      # mirror image — it ships dash and no zsh — and never got the treatment,
+      # so five zsh launcher tests were failing on main (nocx-bbkh).
+      - name: Install zsh (shell integration tests)
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq gnome-keyring dbus-x11
+          sudo apt-get install -y -qq zsh
+          # ubuntu's zsh ships completion directories that are group-writable,
+          # so compinit refuses them and asks "Ignore insecure directories and
+          # continue [y] or abort compinit [n]?" — on a tty, interactively. Our
+          # launcher tests drive a real PTY and nothing answers, so every zsh
+          # test hangs until its own timeout and reports whatever it was waiting
+          # for instead of the question it was actually being asked.
+          #
+          # Fixed rather than suppressed: ZSH_DISABLE_COMPFIX=true would silence
+          # the prompt and leave CI running a zsh configured unlike any user's.
+          zsh -c 'autoload -Uz compaudit; compaudit 2>/dev/null || true' \
+            | while read -r d; do [ -n "$d" ] && sudo chmod -R go-w "$d"; done
+          echo "=== compaudit after fix (empty is correct) ==="
+          zsh -c 'autoload -Uz compaudit; compaudit 2>/dev/null || true'
+
+      - name: Install Secret Service & dbus-x11
+        if: matrix.with-keyring
+        run: sudo apt-get install -y -qq gnome-keyring dbus-x11
 
       - name: Build
         run: go build ./...
@@ -177,10 +199,36 @@ jobs:
   # No `wails dev` step here: playwright.config.ts starts and stops it, so a
   # clean checkout runs the suite with one command and nothing is left behind
   # (see the gracefulShutdown note there).
+  #
+  # Parallelism decision: shard across jobs, do NOT raise PW_WORKERS (nocx-qth1).
+  #
+  # The suite had grown from 40 tests to 109 while still running on the single
+  # worker playwright.config.ts:85 defaults to, and was being cancelled at the
+  # 20-minute cap without ever reporting a result — so every PR inherited a red
+  # check and main had not been green since 2026-07-26.
+  #
+  # PW_WORKERS is the smaller diff and the wrong one. Every worker in a run
+  # shares the ONE `wails dev` backend the webServer stanza starts, and
+  # internal/storage/appdir.go is explicit that the profile split separates
+  # development from release and NOT two development backends from each other:
+  # every DocumentStore consumer loads its document and writes the whole thing
+  # back (nocx-h2gf). Concurrent workers driving the vault, settings and
+  # connection surfaces would be racing on those documents, and the failures
+  # would arrive as flakes attributed to whatever spec lost.
+  #
+  # A shard is a separate job on a separate runner with its own backend and its
+  # own isolated HOME, so the isolation is a property of the arrangement rather
+  # than something the specs have to be trusted not to violate. Three shards put
+  # the slowest job around a third of the old wall clock, which is the headroom
+  # the bead asks for — margin, not a job that finishes at the cap.
   e2e:
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: macos-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@v7
 
@@ -210,12 +258,18 @@ jobs:
       # run, and installing only chromium would fail the run outright.
       - run: npx playwright install chromium webkit
 
-      - run: npx playwright test
+      # --shard splits by test FILE, deterministically, so a file's tests always
+      # stay together on one runner and a spec that relies on the order within
+      # its own file is unaffected.
+      - run: npx playwright test --shard=${{ matrix.shard }}/3
 
+      # One artefact name per shard: three jobs uploading "playwright-traces"
+      # would collide, and the traces from the failure you are chasing are the
+      # ones that lose.
       - name: Upload traces
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: playwright-traces
+          name: playwright-traces-shard-${{ matrix.shard }}
           path: test-results/
           retention-days: 7

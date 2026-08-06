@@ -361,6 +361,18 @@ jobs:
           RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
         run: go run ./cmd/manifest-sign -in dist/manifest.json -out dist/manifest.json.sig
 
+      # The only check that proves the two halves are a pair. Signing shows the
+      # secret is present and well-formed; it says nothing about whether the
+      # artefact we are about to publish can check the result. If
+      # RELEASE_SIGNING_KEY and internal/update/keyring.go drift apart, every
+      # step here still succeeds and every user's update check then fails
+      # against a manifest no key in their build validates.
+      #
+      # No secret in this step: it verifies against the keyring compiled from
+      # the same commit that produced the artefacts (nocx-1d54).
+      - name: Verify the signature against the keyring the release ships
+        run: go run ./cmd/manifest-sign -verify -in dist/manifest.json -sig dist/manifest.json.sig
+
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}

@@ -22,7 +22,17 @@
     "",
     "  ws.go WithFilesRevealer \u2014 the seam files.reveal needs from Wails, which",
     "  does not exist yet; files.reveal answers -32601 until it does. Reachable",
-    "  the moment that wave lands."
+    "  the moment that wave lands.",
+    "",
+    "A third entry added BY HAND on 2026-08-06, when release/v0.1.0 merged in:",
+    "",
+    "  storagetest.go Isolate \u2014 a test-only helper in a non-_test file, which is",
+    "  what makes it unreachable from main(). It has to live outside _test.go so",
+    "  packages other than internal/storage can call it, and eleven test files do",
+    "  (internal/app, internal/storage). Its whole purpose is nocx-8ax9: a test",
+    "  that forgets to isolate must not reach the developer's real profile \u2014",
+    "  paths.go names it in the panic it raises. Same category as the vaulttest",
+    "  package and ws_test_helper.go already below."
   ],
   "violations": [
     {
@@ -244,6 +254,10 @@
     {
       "file": "internal/ssh/ssh_real.go",
       "func": "WithKnownHostsFile"
+    },
+    {
+      "file": "internal/storage/storagetest/storagetest.go",
+      "func": "Isolate"
     },
     {
       "file": "internal/transport/transport.go",

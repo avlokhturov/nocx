@@ -7,6 +7,7 @@ package nativeports
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"strings"
@@ -136,6 +137,32 @@ func TestProvider_ListsPortOpenedByThisTest(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatalf("provider did not list the port this test opened (%d) — stale table or missing listener", port)
+		// Two very different failures used to arrive as one sentence, and the
+		// macOS runner has been failing here with no way to tell which
+		// (nocx-ou3e). An EMPTY table is a capability failure — the machine's
+		// listing tool told us nothing, and SampleState calls that
+		// "available" because a successful empty result is a legitimate
+		// answer, so the state assertion above passes and says nothing. A
+		// POPULATED table missing this one port is a parse or filter defect,
+		// and the sample is the evidence for which.
+		if len(s.Listeners) == 0 {
+			t.Fatalf("the provider returned an EMPTY table on this machine (state=%q classification=%q), "+
+				"so it cannot see the port this test opened (%d) or any other. "+
+				"That is the listing capability failing, not this port going missing: "+
+				"on darwin the provider shells out to %s, which lists nothing when it is absent, "+
+				"refused, or unable to read the network table for this user",
+				s.State, s.Classification, port, lsofPathForDiagnostics())
+		}
+		var sample []string
+		for i, l := range s.Listeners {
+			if i == 5 {
+				break
+			}
+			sample = append(sample, fmt.Sprintf("%s:%d(pid=%d,ev=%s)", l.Address, l.Port, l.Process.PID, l.Process.Evidence))
+		}
+		t.Fatalf("provider listed %d ports but not the one this test opened (%d) — "+
+			"the table is populated, so this is a parse or filter defect, not a missing capability; "+
+			"state=%q classification=%q first entries: %s",
+			len(s.Listeners), port, s.State, s.Classification, strings.Join(sample, " "))
 	}
 }

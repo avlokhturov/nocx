@@ -9,9 +9,11 @@ import (
 	"testing"
 
 	"github.com/shady2k/nocx/internal/settings"
+	"github.com/shady2k/nocx/internal/storage/storagetest"
 )
 
 func TestNew(t *testing.T) {
+	storagetest.Isolate(t)
 	a, err := New(WithLogFilePath(filepath.Join(t.TempDir(), "nocx.log")))
 	if err != nil {
 		t.Fatalf("New() returned error: %v", err)
@@ -22,6 +24,7 @@ func TestNew(t *testing.T) {
 }
 
 func TestNew_AllModulesInjected(t *testing.T) {
+	storagetest.Isolate(t)
 	a, err := New(WithLogFilePath(filepath.Join(t.TempDir(), "nocx.log")))
 	if err != nil {
 		t.Fatalf("New() returned error: %v", err)
@@ -45,6 +48,7 @@ func TestNew_AllModulesInjected(t *testing.T) {
 }
 
 func TestStartShutdown(t *testing.T) {
+	storagetest.Isolate(t)
 	a, err := New(WithLogFilePath(filepath.Join(t.TempDir(), "nocx.log")))
 	if err != nil {
 		t.Fatalf("New() returned error: %v", err)
@@ -62,6 +66,7 @@ func TestStartShutdown(t *testing.T) {
 }
 
 func TestWSPortBeforeStart(t *testing.T) {
+	storagetest.Isolate(t)
 	a, err := New(WithLogFilePath(filepath.Join(t.TempDir(), "nocx.log")))
 	if err != nil {
 		t.Fatalf("New() returned error: %v", err)
@@ -182,6 +187,7 @@ func (f *appFakeDoc) Delete(name string) error {
 // pinned path is reported by LogFilePath, the file exists, and its first
 // line names the path — a reader who finds the file learns where it is.
 func TestNew_LogFile(t *testing.T) {
+	storagetest.Isolate(t)
 	path := filepath.Join(t.TempDir(), "nocx.log")
 	a, err := New(WithLogFilePath(path))
 	if err != nil {
@@ -207,6 +213,7 @@ func TestNew_LogFile(t *testing.T) {
 // TestNew_LogFileDisabled: an empty pinned path disables file logging and
 // LogFilePath reports it — nothing is written anywhere unexpected.
 func TestNew_LogFileDisabled(t *testing.T) {
+	storagetest.Isolate(t)
 	a, err := New(WithLogFilePath(""))
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -222,6 +229,7 @@ func TestNew_LogFileDisabled(t *testing.T) {
 // created, the app still starts — fail-open, stderr only — and says the
 // path is unavailable.
 func TestNew_LogFileUnavailableStartsAnyway(t *testing.T) {
+	storagetest.Isolate(t)
 	// A path whose parent is a regular file cannot be a directory.
 	blocker := filepath.Join(t.TempDir(), "not-a-dir")
 	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
