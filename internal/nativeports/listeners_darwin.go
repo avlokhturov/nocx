@@ -22,7 +22,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"strconv"
 	"strings"
 	"time"
 
@@ -88,76 +87,15 @@ func listeners(ctx context.Context) ([]discovery.Listener, error) {
 		// degrades like a remote table cut short.
 		return nil, errors.New("lsof output exceeds the 1 MiB capture cap")
 	}
-	return parseLsofOutput(data), nil
-}
-
-// parseLsofOutput parses `lsof -nP -iTCP -sTCP:LISTEN`: columns COMMAND PID
-// USER FD TYPE DEVICE SIZE/OFF NODE NAME, where NAME ends in " (LISTEN)"
-// and carries the bind address ("*:22", "127.0.0.1:631", "[::1]:631").
-// Rows lsof prints always carry process evidence.
-func parseLsofOutput(data []byte) []discovery.Listener {
-	var out []discovery.Listener
-	for i, line := range strings.Split(string(data), "\n") {
-		if i == 0 {
-			continue // header
-		}
-		fields := strings.Fields(line)
-		if len(fields) < 9 {
-			continue
-		}
-		pid, err := strconv.Atoi(fields[1])
-		if err != nil {
-			continue
-		}
-		host, port, ok := splitHostPort(fields[len(fields)-1])
-		if !ok {
-			continue
-		}
-		out = append(out, discovery.Listener{
-			Family:  familyOf(host),
-			Address: host,
-			Port:    port,
-			Process: discovery.Process{Evidence: discovery.EvidenceKnown, Name: fields[0], PID: pid},
-		})
+	ls, ok := discovery.ParseLsof(data)
+	if !ok {
+		// The ladder's rung answers `false` with "advance"; here lsof is the
+		// only tool, so the honest answer is could-not-determine. Never an
+		// empty list — the module's contract is explicit that a table it
+		// failed to read must not render as "this machine has no ports".
+		return nil, errors.New("lsof output was not the expected -nP -iTCP -sTCP:LISTEN dialect")
 	}
-	return out
-}
-
-// splitHostPort and familyOf mirror the discovery domain's own helpers so
-// the addresses land on the wire in exactly the remote ladder's shapes
-// ("127.0.0.1", "::1", "*").
-func splitHostPort(s string) (host string, port int, ok bool) {
-	if strings.HasPrefix(s, "[") {
-		close := strings.IndexByte(s, ']')
-		if close < 0 {
-			return "", 0, false
-		}
-		rest := s[close+1:]
-		if !strings.HasPrefix(rest, ":") {
-			return "", 0, false
-		}
-		p, err := strconv.Atoi(rest[1:])
-		if err != nil || p < 0 || p > 65535 {
-			return "", 0, false
-		}
-		return s[1:close], p, true
-	}
-	i := strings.LastIndexByte(s, ':')
-	if i <= 0 || i == len(s)-1 {
-		return "", 0, false
-	}
-	p, err := strconv.Atoi(s[i+1:])
-	if err != nil || p < 0 || p > 65535 {
-		return "", 0, false
-	}
-	return s[:i], p, true
-}
-
-func familyOf(host string) discovery.AddressFamily {
-	if strings.Contains(host, ":") || strings.HasPrefix(host, "[") {
-		return discovery.FamilyIPv6
-	}
-	return discovery.FamilyIPv4
+	return ls, nil
 }
 
 // firstLines keeps an error message short enough to log and to read in a CI

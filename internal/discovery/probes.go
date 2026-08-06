@@ -47,7 +47,7 @@ var probeLadder = []*step{
 	{name: "ss", cmd: ssCmd, parse: parseSS},
 	{name: "netstat", cmd: netstatCmd, parse: parseNetstat},
 	{name: "busybox-netstat", cmd: busyboxNetstatCmd, parse: parseBusyboxNetstat},
-	{name: "lsof", cmd: lsofCmd, parse: parseLsof, noMatchExit: 1},
+	{name: "lsof", cmd: lsofCmd, parse: ParseLsof, noMatchExit: 1},
 	{name: "sockstat", cmd: sockstatCmd, parse: parseSockstat},
 }
 
