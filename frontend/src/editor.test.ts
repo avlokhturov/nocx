@@ -704,8 +704,10 @@ describe('shell syntax highlighting', () => {
 
   it('command name, flag, pipe and redirect target are distinguishable token classes', () => {
     const byClass = new Map<string, string[]>()
-    for (const [cls, text] of liveTokens('ls -la | grep foo > out.txt')) {
-      byClass.set(cls, [...(byClass.get(cls) ?? []), text])
+    for (const [classes, text] of liveTokens('ls -la | grep foo > out.txt')) {
+      for (const cls of classes.split(/\s+/)) {
+        byClass.set(cls, [...(byClass.get(cls) ?? []), text])
+      }
     }
     expect(byClass.get('tok-command')).toEqual(['ls', 'grep'])
     expect(byClass.get('tok-flag')).toEqual(['-la'])
