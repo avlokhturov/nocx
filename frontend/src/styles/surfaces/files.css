@@ -1,0 +1,70 @@
+/* ── Files surface (design §5.4) ─────────────────────────────────────────
+   Placement only, ADR-0014: what was inline in files-view.tsx moves here —
+   the header path's ellipsis and the non-entry rows' indentation. The kit's
+   TreeRow already owns the entry rows' indent (data-depth in tree-row.css),
+   so nothing below addresses .ui-tree-row.
+
+   Indentation mirrors the kit's rule — the depth NUMBER drives the step —
+   with one difference forced by the layering: the kit sets --tree-row-depth
+   inline (its own file may), a surface may not (ADR-0014), so the depth is
+   carried as a data-depth attribute and the step is enumerated for the
+   depths a real tree reaches. A deeper tree clamps at the last step — a
+   cosmetic floor in a case the panel cannot meaningfully display, and a
+   deliberate alternative to per-row inline padding. */
+
+/* The header path: one line, ellipsis at the tail, never wrapping into the
+   refresh button beside it. */
+.files-header-path {
+  max-width: 12rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.files-row[data-depth='0'] {
+  padding-left: calc(0 * var(--space-4));
+}
+
+.files-row[data-depth='1'] {
+  padding-left: calc(1 * var(--space-4));
+}
+
+.files-row[data-depth='2'] {
+  padding-left: calc(2 * var(--space-4));
+}
+
+.files-row[data-depth='3'] {
+  padding-left: calc(3 * var(--space-4));
+}
+
+.files-row[data-depth='4'] {
+  padding-left: calc(4 * var(--space-4));
+}
+
+.files-row[data-depth='5'] {
+  padding-left: calc(5 * var(--space-4));
+}
+
+.files-row[data-depth='6'] {
+  padding-left: calc(6 * var(--space-4));
+}
+
+.files-row[data-depth='7'] {
+  padding-left: calc(7 * var(--space-4));
+}
+
+.files-row[data-depth='8'] {
+  padding-left: calc(8 * var(--space-4));
+}
+
+.files-row[data-depth='9'] {
+  padding-left: calc(9 * var(--space-4));
+}
+
+.files-row[data-depth='10'] {
+  padding-left: calc(10 * var(--space-4));
+}
+
+.files-row[data-depth='11'] {
+  padding-left: calc(11 * var(--space-4));
+}

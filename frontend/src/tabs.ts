@@ -18,7 +18,13 @@ import { adoptAliasProfile } from './profiles'
 import { showToast } from './ui/toast'
 import { log } from './log'
 import type { TabStrip } from './tab-strip'
-import type { TabHost, TabContent, ContentDescriptor, ContentViewport } from './tab-content'
+import type {
+  TabHost,
+  TabContent,
+  ContentDescriptor,
+  ContentViewport,
+  ActiveOrigin,
+} from './tab-content'
 import { SURFACE_TERMINAL } from './tab-content'
 import { TerminalContent } from './terminal-content'
 
@@ -716,6 +722,20 @@ export class TabManager {
    *  we cannot enumerate, this names it. '' otherwise (nocx-695k.3). */
   portsUnavailableReason(): string {
     return this.activeTerminalContent()?.portsUnavailableReason ?? ''
+  }
+
+  /** The ACTIVE tab's origin for origin-following surfaces (the Files
+   *  panel, design §5.4): the tab id from the Tab, the session and kind
+   *  from the content's optional capability — never an instanceof branch,
+   *  because the seam exists so TabManager never learns which content
+   *  class replied (terminal content answers from its session; viewer
+   *  content answers from the binding it was opened with). Null when the
+   *  active tab has no origin or its content does not implement the
+   *  capability. */
+  activeOrigin(): ActiveOrigin | null {
+    const tab = this.activeTab
+    const origin = tab?.content.activeOrigin?.()
+    return tab && origin ? { tabId: tab.id, ...origin } : null
   }
 
   reorderTab(draggedId: number, targetId: number): void {

@@ -8,11 +8,14 @@
  *
  * Variance:
  * - `data-depth` — indentation, driven by the number, not by nested DOM.
- * - `data-kind` — `regular` | `dir` | `symlink` | `other`. These are the wire's
+ * - `data-kind` — `regular` | `dir` | `symlink` | `other` | `unreadable`. These
+ *   are the wire's
  *   words (design §5.1 `Kind`), deliberately: the panel passes an entry's kind
  *   straight through, so there is no mapping layer for a defect to live in.
  *   `other` is a FIFO, socket, device or procfs pseudo-file — it lists, and it
- *   is neither openable nor expandable.
+ *   is neither openable nor expandable. `unreadable` is not a kind of object
+ *   but a kind of failure: the entry exists and its metadata could not be
+ *   read. It renders, so a listing never silently omits what it saw.
  * - `data-link-kind` — the same vocabulary, on symlinks only: what the link
  *   resolves to, and `other` when it resolves to nothing.
  *
@@ -38,7 +41,7 @@
 import { Show, type JSX } from 'solid-js'
 import { ChevronDownIcon } from './icons'
 
-export type TreeRowKind = 'regular' | 'dir' | 'symlink' | 'other'
+export type TreeRowKind = 'regular' | 'dir' | 'symlink' | 'other' | 'unreadable'
 
 export interface TreeRowProps {
   /** The entry's display name, shown in the row's text. */

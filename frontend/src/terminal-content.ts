@@ -59,7 +59,12 @@ import { log, logDecision, isDecisionTracing } from './log'
 import type { WSClient, SessionHandle } from './ipc'
 import { showConfirm } from './ui/dialog'
 import { hasOpenOverlays } from './ui/overlay/stack'
-import { BaseTabContent, type TabHost, type ContentViewport } from './tab-content'
+import {
+  BaseTabContent,
+  type TabHost,
+  type ContentViewport,
+  type ActiveOrigin,
+} from './tab-content'
 import { type ProfileClient } from './profiles'
 import { RpcError } from './dispatcher'
 import { FloatingPanel } from './ui/floating-panel'
@@ -269,6 +274,13 @@ export class TerminalContent extends BaseTabContent {
   private _pendingCommand = ''
   private _globalKeydown: ((e: KeyboardEvent) => void) | null = null
   private _cwd = '~'
+  /** True only when _cwd came from a verified OSC 7 report (AD-5): the one
+   *  cwd a composition layer may hand to files.open as rootPath (D2). A
+   *  session-open cwd is the provider's fallback question, not a claim. */
+  private _cwdVerified = false
+  /** True once the session's exit was observed — the tab is closing, and an
+   *  origin that names this session would name a machine that is gone. */
+  private _sessionExited = false
   private _host = ''
   private _lastExitCode: number | null = null
   private _bufferType: 'normal' | 'alternate' = 'normal'
@@ -319,8 +331,16 @@ export class TerminalContent extends BaseTabContent {
    *  (`pi@raspberrypi: ~`). Nothing sends another on the way out — a local
    *  bash has no reason to re-title an unchanged session — so the tab kept
    *  the name of a machine it had left, for as long as the tab lived. A
-   *  title set by a program does not outlive that program. */
-  private _previousTitles: Array<{ cwd: string; programTitle: string; cwdTitle: string }> = []
+   *  title set by a program does not outlive that program.
+   *
+   *  `cwdVerified` rides along: a cwd restored on the way out is the same
+   *  cwd it was on the way in, verified or not. */
+  private _previousTitles: Array<{
+    cwd: string
+    programTitle: string
+    cwdTitle: string
+    cwdVerified: boolean
+  }> = []
   /** Stack of _shellIntegrated values saved before entering a nested
    *  environment. Pushed on submit when environmentEntry() names one;
    *  popped on the D marker that ends the command. */
@@ -438,7 +458,33 @@ export class TerminalContent extends BaseTabContent {
     const env = this.currentEnvironment()
     return env ? env.label : ''
   }
-
+  /** The machine this tab's content speaks for (B.9) — the session it was
+   *  opened with, answered only while that session is live and in front.
+   *
+   *  Null when there is no honest answer:
+   *  - no session yet, or a session that has exited;
+   *  - inside an environment entered by a command we submitted (a
+   *    hand-typed `ssh` is a child process of the local shell): naming the
+   *    local session there would show one machine's files while the user
+   *    acts on another's (§0), the same rule the ports target applies.
+   *
+   *  `kind` and `host` are how the session was opened, never inferred from
+   *  the cwd or the title. `cwd` is the verified-flag pair from _cwd /
+   *  _cwdVerified: the composition layer may hand a VERIFIED cwd to
+   *  files.open as rootPath (D2) and must surface an unverified one (AD-5). */
+  activeOrigin(): Omit<ActiveOrigin, 'tabId'> | null {
+    if (this.session === null || this._sessionExited) return null
+    if (this.currentEnvironment() !== null) return null
+    return {
+      sessionId: this.session.sessionId,
+      kind: this.sshOpts === undefined ? 'local' : 'ssh',
+      // '' is "no cwd yet" inside the live session (a session opened with
+      // no cwd, or syncLocation's blank inside an environment we left).
+      cwd: this._cwd === '' ? null : this._cwd,
+      cwdVerified: this._cwdVerified,
+      host: this.sshOpts?.host ?? null,
+    }
+  }
   /** Push the composed title to the host: program title, else the cwd label. */
   private pushTitle(): void {
     if (!this.host) return
@@ -589,6 +635,7 @@ export class TerminalContent extends BaseTabContent {
       cwd: this._cwd,
       programTitle: this.programTitle,
       cwdTitle: this.cwdTitle,
+      cwdVerified: this._cwdVerified,
     })
     this._updateCapability()
     this.syncLocation()
@@ -659,6 +706,7 @@ export class TerminalContent extends BaseTabContent {
       const restored = this._previousTitles.pop()
       if (restored !== undefined) {
         this._cwd = restored.cwd
+        this._cwdVerified = restored.cwdVerified
         this.editor?.setCwd(restored.cwd)
         // Both halves, and the program title especially: the remote
         // shell's OSC 2 belongs to the remote shell, which is gone.
@@ -959,6 +1007,7 @@ export class TerminalContent extends BaseTabContent {
                 cwd: this._cwd,
                 programTitle: this.programTitle,
                 cwdTitle: this.cwdTitle,
+                cwdVerified: this._cwdVerified,
               })
               this._updateCapability()
               this.syncLocation()
@@ -1650,8 +1699,10 @@ export class TerminalContent extends BaseTabContent {
       // session honestly reads "Native input" — the launcher may be
       // mid-start, and the first prompt flips it to command blocks.
       this._updateCapability()
-
       this._cwd = session.cwd || ''
+      // The open ack's cwd is the provider's guess, not a verified claim:
+      // nothing has been verified yet at session open (AD-5).
+      this._cwdVerified = false
       this._host = this.sshOpts?.host || ''
       // The block header's `user@host`. Empty for a local shell, where the
       // machine is implied and printing it on every block would be noise.
@@ -1702,6 +1753,9 @@ export class TerminalContent extends BaseTabContent {
       })
       session.onExit((sid: string) => {
         log.info('nocx: session exited', { sid })
+        // The session is gone: an origin naming it would name a machine
+        // that no longer exists (B.9).
+        this._sessionExited = true
         this.inputState.dispatch({ type: 'exit' })
         this.ledger?.finalizeOpen()
         this._disposeAllMarkers()
@@ -1719,7 +1773,10 @@ export class TerminalContent extends BaseTabContent {
         this.pushTitle()
       })
       renderer.onCwd(({ path }) => {
+        // An OSC 7 report is the shell's verified claim of where it is:
+        // the one cwd the composition layer may hand to files.open (D2).
         this._cwd = path
+        this._cwdVerified = true
         this.editor?.setCwd(path)
         this.cwdTitle = directoryLabel(path)
         this.onTooltipChange(cwdTooltip(path, true))

@@ -92,6 +92,16 @@ describe('TreeRow', () => {
     expect(row?.textContent).toContain('docker.sock')
   })
 
+  it("kind 'unreadable' renders and cannot be expanded", () => {
+    // Metadata that could not be read is a distinct wire kind, not `other` and
+    // not a broken symlink: a listing must never fabricate plausible empties.
+    const { container } = render(() => <TreeRow name="root-only" depth={1} kind="unreadable" />)
+    const row = container.querySelector('.ui-tree-row')
+    expect(row?.getAttribute('data-kind')).toBe('unreadable')
+    expect(container.querySelector('.ui-tree-row__disclosure')).toBeNull()
+    expect(row?.textContent).toContain('root-only')
+  })
+
   it('renders an unreadable row instead of nothing', () => {
     const { container } = render(() => (
       <TreeRow name="secret.key" depth={0} kind="regular" disabled />

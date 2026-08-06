@@ -3083,3 +3083,137 @@ describe('the environment boundary (nocx-mlm7 P9, spec §6.1)', () => {
     }
   })
 })
+
+describe('activeOrigin (B.9) — the machine the tab speaks for', () => {
+  it('a live local session yields an origin with kind local and its sessionId', async () => {
+    const session = makeSession()
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const origin = content.activeOrigin()
+      expect(origin).not.toBeNull()
+      expect(origin?.kind).toBe('local')
+      expect(origin?.sessionId).toBe(session.sessionId)
+      // The open ack's cwd is the provider's guess — unverified until an
+      // OSC 7 report arrives (AD-5).
+      expect(origin?.cwd).toBe(FIXTURE_CWD)
+      expect(origin?.cwdVerified).toBe(false)
+      expect(origin?.host).toBeNull()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('an ssh session answers kind ssh with the host the session was opened with', async () => {
+    const client = makeClient()
+    const session = makeSession()
+    client.openSSHSessionByHost.mockResolvedValue(session)
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { ssh: { profileId: '', host: 'srv-01' } },
+      client,
+    )
+    try {
+      const origin = content.activeOrigin()
+      expect(origin?.kind).toBe('ssh')
+      expect(origin?.sessionId).toBe(session.sessionId)
+      expect(origin?.host).toBe('srv-01')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('answers null when there is no session, and once the session has exited', async () => {
+    // Not mounted: no session yet, so there is no machine to name.
+    const wsClient = makeClient() as unknown as WSClient
+    const unmounted = new TerminalContent(
+      wsClient,
+      makeClipboard(),
+      new ClipboardGate(),
+      makeBanner(),
+      null,
+      () => {},
+    )
+    expect(unmounted.activeOrigin()).toBeNull()
+
+    // Mounted, then the session exits: the session is gone and the origin
+    // must not name a machine that no longer exists. The fake's onExit mock
+    // records the callback TerminalContent registered at mount.
+    const session = makeSession()
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      expect(content.activeOrigin()).not.toBeNull()
+      const exitCb = session.onExit.mock.calls[0]?.[0] as (sid: string) => void
+      expect(exitCb).toBeTypeOf('function')
+      exitCb(session.sessionId)
+      expect(content.activeOrigin()).toBeNull()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('cwdVerified is false for the session-open cwd and true after an OSC 7 report', async () => {
+    const session = makeSession()
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const renderer = rendererOf(content)
+    try {
+      expect(content.activeOrigin()?.cwdVerified).toBe(false)
+      renderer._fireCwd('host', '/srv/new/path')
+      const after = content.activeOrigin()
+      expect(after?.cwd).toBe('/srv/new/path')
+      expect(after?.cwdVerified).toBe(true)
+    } finally {
+      teardown()
+    }
+  })
+
+  // ── The §0 test ─────────────────────────────────────────────────────────
+  it('a local tab whose user entered an ssh session does not answer with the local sessionId', async () => {
+    const callMock = vi.fn().mockResolvedValue(LAUNCH({ environmentId: 'env-ab12' }))
+    const client = makeClient({ call: callMock })
+    const session = makeSession()
+    client.openSession.mockResolvedValue(session)
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const pst = Element.prototype.scrollTo
+    const psiv = Element.prototype.scrollIntoView
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    try {
+      const mounted = await mountTerminal(makeClipboard(), { attachToDocument: true }, client)
+      const { view, ed, content, teardown } = mounted
+      const renderer = rendererOf(content)
+      content.setVisible(true)
+      ed.show()
+      renderer._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
+      renderer._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
+      // The user types `ssh somewhere` inside the LOCAL tab.
+      ed.insertText('ssh pi@192.168.0.93')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      for (let i = 0; i < 5; i++) await Promise.resolve()
+
+      // NOT yet inside: the passport has not arrived, so the origin still
+      // honestly names the local machine (entry is passport → tagged A → B).
+      expect(content.activeOrigin()?.sessionId).toBe(session.sessionId)
+
+      enterEnvironment(renderer, 'env-ab12')
+
+      // Inside the ssh session the tab's session is STILL the local one;
+      // naming it would show one machine's files while the user acts on
+      // another's (§0). An empty panel is correct; the wrong machine's
+      // files are not.
+      expect(content.activeOrigin()).toBeNull()
+      teardown()
+    } finally {
+      Element.prototype.scrollTo = pst
+      Element.prototype.scrollIntoView = psiv
+    }
+  })
+})

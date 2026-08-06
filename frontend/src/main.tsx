@@ -39,6 +39,10 @@ import {
 import { PortsPanel, createPortsPanelServices, createPortsPauseControl } from './ports'
 import { profileRows } from './quick-connect-assembly'
 import { showToast } from './ui/toast'
+import { registerFileViewerSurface, openFileViewer } from './file-viewer'
+import { createFilesView, FILES_VIEW_ID } from './files/files-view'
+import { createFilesPanelServices, type FilesPanelServices } from './files/files-client'
+import type { ActiveOrigin } from './tab-content'
 import type { TunnelOpenResult } from './generated/tunnel.open'
 async function main() {
   log.info('nocx: main() called')
@@ -245,10 +249,64 @@ async function main() {
   // connection, so no second exec channel) — the panel says which host
   // rather than showing this machine's listeners under its tab (nocx-695k.3).
   const [portsUnavailable, setPortsUnavailable] = createSignal<string>(tm.portsUnavailableReason())
+  // The ACTIVE tab's origin for origin-following surfaces (the Files panel,
+  // design §5.4): a signal fed on tab change exactly like portsTargetId —
+  // TabManager.activeOrigin() reads a plain field, so the accessor must be
+  // this signal, never a direct call.
+  const [activeOrigin, setActiveOrigin] = createSignal<ActiveOrigin | null>(tm.activeOrigin())
   tm.onActiveTabChange = () => {
     setPortsTargetId(tm.portsTargetId())
     setPortsUnavailable(tm.portsUnavailableReason())
+    setActiveOrigin(tm.activeOrigin())
   }
+  // ── Files panel (fm-w10) and its viewer (fm-w7) ──────────────────────
+  // The panel's backend surface, wrapped so the composition root owns the
+  // binding lifecycle: a binding is live from the files.open that created
+  // it until files.close releases it, and the viewer (FileViewerDeps)
+  // asks this registry whether a binding may still be read. The wrapper
+  // marks dead the moment the store releases the binding, before the wire
+  // close resolves — the store issues no further reads either way, so the
+  // registry and the store cannot disagree about when it died.
+  const filesServices = createFilesPanelServices(dispatcher)
+  const filesBindings = new Map<string, Set<(live: boolean) => void>>()
+  const liveFilesBindings = new Set<string>()
+  const filesServicesTracked: FilesPanelServices = {
+    open: async (sessionId, rootPath) => {
+      const res = await filesServices.open(sessionId, rootPath)
+      liveFilesBindings.add(res.bindingId)
+      return res
+    },
+    list: (bindingId, path, offset, limit) => filesServices.list(bindingId, path, offset, limit),
+    read: (bindingId, path, maxBytes) => filesServices.read(bindingId, path, maxBytes),
+    close: async (bindingId) => {
+      liveFilesBindings.delete(bindingId)
+      const cbs = filesBindings.get(bindingId)
+      filesBindings.delete(bindingId)
+      if (cbs !== undefined) for (const cb of [...cbs]) cb(false)
+      return filesServices.close(bindingId)
+    },
+  }
+  const onFilesBindingLiveness = (bindingId: string, cb: (live: boolean) => void): (() => void) => {
+    const cbs = filesBindings.get(bindingId) ?? new Set()
+    cbs.add(cb)
+    filesBindings.set(bindingId, cbs)
+    // Synchronous first call with the current verdict — the viewer's mount
+    // decides whether to read at all from it (fm-w7).
+    cb(liveFilesBindings.has(bindingId))
+    return () => {
+      cbs.delete(cb)
+      if (cbs.size === 0) filesBindings.delete(bindingId)
+    }
+  }
+  registerFileViewerSurface(registry, tm, {
+    readFile: (params) => filesServicesTracked.read(params.bindingId, params.path, 0),
+    onBindingLiveness: onFilesBindingLiveness,
+  })
+  const filesView = createFilesView({
+    services: filesServicesTracked,
+    opener: { open: openFileViewer },
+    activeOrigin,
+  })
   /**
    * Open (or focus) the Settings tab and hand back the instance that is
    * actually on screen.
@@ -336,10 +394,19 @@ async function main() {
     ),
     order: 0,
   }
+  // The sidebar renders array order, so the views reach mountSidebar sorted
+  // by their order field — the field then means what it says, and a future
+  // view cannot slip in front by registration order. Files registers below
+  // Ports (FILES_VIEW_ORDER < 0) and must be the FIRST icon in the view
+  // zone — an owner requirement, asserted here and in files-view.test.tsx.
+  const sidebarViews = [filesView, PORTS_VIEW].sort((a, b) => a.order - b.order)
+  if (sidebarViews[0]?.id !== FILES_VIEW_ID) {
+    throw new Error('nocx: Files must be the first activity-bar view')
+  }
   const sidebar = mountSidebar(
     activityBar,
     sidebarPanel,
-    [PORTS_VIEW],
+    sidebarViews,
     /* actions */ [
       {
         id: 'settings',
@@ -352,11 +419,13 @@ async function main() {
       },
     ],
     undefined,
-    /* eslint-disable solid/reactivity -- mountSidebar consumes this accessor
-       reactively (SidebarViewProps.activeProfileId, fed with the ports
-       target); the reads happen inside the view's tracked scopes, and the
-       gate cannot see across the function boundary. */
+    /* eslint-disable solid/reactivity -- mountSidebar consumes these
+       accessors reactively (SidebarViewProps.activeProfileId and
+       .activeOrigin, fed with the ports target and the Files origin); the
+       reads happen inside the views' tracked scopes, and the gate cannot
+       see across the function boundary. */
     () => portsTargetId(),
+    () => activeOrigin(),
   )
 
   // Cmd/Ctrl+, opens or focuses the Settings tab.

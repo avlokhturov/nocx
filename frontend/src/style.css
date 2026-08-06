@@ -68,6 +68,7 @@
 @import './styles/surfaces/connections.css';
 @import './styles/surfaces/secrets.css';
 @import './styles/surfaces/ports.css';
+@import './styles/surfaces/files.css';
 @import './styles/surfaces/vault.css';
 
 /* ── App body row: activity bar | sidebar | panes ────────────────────── */

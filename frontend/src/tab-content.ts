@@ -28,6 +28,41 @@ export interface ContentViewport {
   devicePixelRatio: number
 }
 
+// ── Origin (B.9) ──────────────────────────────────────────────────────────
+
+/**
+ * The machine a tab's content speaks for — the scope of origin-following
+ * surfaces like the Files panel (design §5.4). Composed by TabManager, which
+ * owns the tab: the content answers the capability below with everything it
+ * knows about itself, and `tabId` is added by the one place that knows it —
+ * a content instance is constructed before the Tab that numbers it exists.
+ */
+export interface ActiveOrigin {
+  /** The tab that owns this origin — added by TabManager. */
+  tabId: number
+  /** The backend session this origin resolves to; `files.open` is the only
+   *  method that takes it, so the wrong pairing stays inexpressible (§5.2). */
+  sessionId: string
+  /** How the session was opened: 'ssh' for a session opened through the SSH
+   *  open path, 'local' otherwise. Never inferred from the cwd. */
+  kind: 'local' | 'ssh'
+  /** The shell's current working directory (provider syntax), or null when
+   *  unknown — no session cwd yet, or inside an environment whose directory
+   *  is not knowable. */
+  cwd: string | null
+  /** True only when `cwd` came from a verified OSC 7 report (AD-5): the one
+   *  cwd a composition layer may hand to `files.open` as `rootPath` (D2). A
+   *  session-open cwd is the provider's fallback question, not a claim. */
+  cwdVerified: boolean
+  /** Host label for the machine this origin speaks for, or null for a local
+   *  session. Carried so provenance can ride a surface's output — the file
+   *  viewer titles a remote file "host · name" and a local file by its
+   *  basename alone, and a null host on an ssh tab would make a remote file
+   *  look local (the marker asymmetry backwards). Never inferred from the
+   *  cwd; it is how the session was opened. */
+  host: string | null
+}
+
 // ── Host (B.4) ────────────────────────────────────────────────────────────
 
 /**
@@ -74,6 +109,20 @@ export interface TabContent {
    * extending BaseTabContent get the default impl that stores _target.
    */
   setTarget(target: HTMLElement): void
+  /**
+   * Optional capability: the machine this content speaks for, for surfaces
+   * that follow the ACTIVE tab (the Files panel, design §5.4). Terminal
+   * content answers from its session; viewer content answers from the
+   * binding it was opened with. `tabId` is deliberately absent — the
+   * content does not know its tab; TabManager adds it when it composes the
+   * `ActiveOrigin` for the accessor it hands the shell.
+   *
+   * Returns null when there is no answer: no session yet, a closed
+   * session, or an environment the content cannot speak for (a hand-typed
+   * `ssh` inside a local tab — naming the local session there would show
+   * one machine's files while the user acts on another's, §0).
+   */
+  activeOrigin?(): Omit<ActiveOrigin, 'tabId'> | null
 }
 
 /**

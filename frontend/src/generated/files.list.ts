@@ -82,17 +82,17 @@ export interface FilesListEntry {
    */
   path: string
   /**
-   * What the row is — a closed set, and the key of the open/expand table: regular opens, dir expands, symlink follows LinkKind, other (FIFO, device, procfs pseudo-file) does neither — a FIFO blocks forever on read. The backend enforces the table from metadata it reads at the time of the call, never from this field: a UI-supplied kind is a claim about the past.
+   * What the row is — a closed set, and the key of the open/expand table: regular opens, dir expands, symlink follows LinkKind, other (FIFO, device, procfs pseudo-file) does neither — a FIFO blocks forever on read. The backend enforces the table from metadata it reads at the time of the call, never from this field: a UI-supplied kind is a claim about the past. 'unreadable' is not a kind of object but a kind of failure: readdir saw the entry and its metadata could not be read — permission denied, or I/O. It exists so a listing never fabricates plausible empty metadata, and so it stays distinguishable from a genuinely broken symlink, which is a symlink whose target is missing.
    */
-  kind: 'regular' | 'dir' | 'symlink' | 'other'
+  kind: 'regular' | 'dir' | 'symlink' | 'other' | 'unreadable'
   /**
    * The symlink's target as the provider read it. Present only when kind is 'symlink' — a plain string with omitempty semantics, never null — and present even for a broken link, since the target string is what makes 'broken' knowable. Not a guard: a symlink can be retargeted between the list and the open.
    */
   linkTarget?: string
   /**
-   * What the symlink resolves to — regular, dir, symlink (a chain) or other when broken. Present only when kind is 'symlink' (omitempty, never null). The UI's expand decision uses it (dir expands, unless cyclic); the backend re-checks from fresh metadata at read time.
+   * What the symlink resolves to — regular, dir, symlink (a chain) or other when broken. Present only when kind is 'symlink' (omitempty, never null). The UI's expand decision uses it (dir expands, unless cyclic); the backend re-checks from fresh metadata at read time. 'unreadable' is not a kind of object but a kind of failure: readdir saw the entry and its metadata could not be read — permission denied, or I/O. It exists so a listing never fabricates plausible empty metadata, and so it stays distinguishable from a genuinely broken symlink, which is a symlink whose target is missing.
    */
-  linkKind?: 'regular' | 'dir' | 'symlink' | 'other'
+  linkKind?: 'regular' | 'dir' | 'symlink' | 'other' | 'unreadable'
   /**
    * Size in bytes as stat reported it. A directory's size is its own directory-entry size, not a count of children.
    */

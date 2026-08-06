@@ -28,6 +28,7 @@ import type { Component } from 'solid-js'
 import { SidebarView } from './ui/sidebar-view'
 import { createAppStore, type AppActions, type AppState } from './state'
 import { IconButton } from './ui/icon-button'
+import type { ActiveOrigin } from './tab-content'
 
 const STORAGE_KEY = 'nocx.sidebar.collapsed'
 
@@ -45,6 +46,12 @@ export interface SidebarViewProps {
    *  id, or the reserved "local" for a local shell (nocx-wzc4.8). Null when
    *  the active tab has no ports scope (alias tab, Settings). */
   activeProfileId: () => string | null
+  /** Reactive accessor for the ACTIVE tab's origin — the machine a
+   *  filesystem-scoped view speaks for (design §5.4): the backend session
+   *  and kind of the tab in front, or null when the tab has no origin
+   *  (Settings, a nested environment the content cannot speak for). Added
+   *  for the Files view; Ports reads only activeProfileId. */
+  activeOrigin: () => ActiveOrigin | null
 }
 
 /** A view whose content is rendered inside the sidebar panel. */
@@ -92,6 +99,7 @@ interface PanelRootProps {
   state: AppState
   views: readonly SidebarViewDescriptor[]
   getActiveProfileId: () => string | null
+  getActiveOrigin: () => ActiveOrigin | null
 }
 
 function PanelRoot(props: PanelRootProps) {
@@ -105,6 +113,7 @@ function PanelRoot(props: PanelRootProps) {
         desc={activeDesc()!}
         collapsed={() => props.state.sidebar.collapsed}
         getActiveProfileId={props.getActiveProfileId}
+        getActiveOrigin={props.getActiveOrigin}
       />
     </Show>
   )
@@ -122,6 +131,7 @@ function ActiveView(props: {
   desc: SidebarViewDescriptor
   collapsed: () => boolean
   getActiveProfileId: () => string | null
+  getActiveOrigin: () => ActiveOrigin | null
 }) {
   // Only the active view renders, so "visible" is exactly the panel's
   // expanded state — a collapsed sidebar is a hidden view (nocx-wzc4.7).
@@ -138,6 +148,7 @@ function ActiveView(props: {
         component={props.desc.view}
         visible={visible}
         activeProfileId={props.getActiveProfileId}
+        activeOrigin={props.getActiveOrigin}
       />
     </SidebarView>
   )
@@ -342,6 +353,10 @@ function SidebarSolid(props: SidebarSolidProps) {
  *                           saved-profile id, forwarded to every view
  *                           (see SidebarViewProps). Defaults to null —
  *                           views that need real scope provide one.
+ * @param getActiveOrigin    reactive accessor for the active tab's origin
+ *                           (see SidebarViewProps.activeOrigin). Defaults
+ *                           to null — views that need real scope provide
+ *                           one (the Files panel, design §5.4).
  */
 export function mountSidebar(
   bar: HTMLElement,
@@ -350,9 +365,11 @@ export function mountSidebar(
   actions: readonly SidebarAction[],
   storage?: SidebarStorage | null,
   getActiveProfileId?: () => string | null,
+  getActiveOrigin?: () => ActiveOrigin | null,
 ): SidebarHandle {
   const safeStorage = storage ?? safeLocalStorage()
   const activeProfileId = getActiveProfileId ?? (() => null)
+  const activeOrigin = getActiveOrigin ?? (() => null)
 
   const [state, storeActions] = createAppStore()
 
@@ -390,7 +407,14 @@ export function mountSidebar(
 
   // ── Render the panel content into `panel` (#sidebar host) ────────────
   const destroyPanel = render(
-    () => <PanelRoot state={state} views={views} getActiveProfileId={activeProfileId} />,
+    () => (
+      <PanelRoot
+        state={state}
+        views={views}
+        getActiveProfileId={activeProfileId}
+        getActiveOrigin={activeOrigin}
+      />
+    ),
     panel,
   )
 
