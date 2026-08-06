@@ -69,21 +69,23 @@ outlives the call". We extend that rather than write a second, worse answer — 
 
 ## 3. Decisions
 
-| #   | Decision                                                                                                                                                                                                  | Rejected alternative, and why                                                                                                                                                                               |
-| --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| D1  | **A filesystem is addressed by a `bindingId` the backend issues** from a `sessionId`. Only `files.open` takes a `sessionId`                                                                               | Every call taking `sessionId`. It makes the wrong pairing inexpressible (good) but ties every read to shell lifetime (fatal): `sessionId` is re-minted on every Open, so nothing survives a restart         |
-| D2  | **The provider computes the root**; a verified OSC 7 cwd overrides it when present. An inferred root is labelled                                                                                          | The session's `Cwd()`. For an SSH session with no explicit cwd it is the **local** `os.UserHomeDir()`. AD-5 already requires a `$HOME` fallback to be "surfaced to the user, not applied silently"          |
-| D3  | **The SFTP lease is a sibling of `DiscoveryConn`**: its own pooled reference, cancellation by closing the subsystem, `Close` waits for in-flight calls                                                    | A goroutine-per-call with a drain deadline. Unbounded stuck calls, and a deadline that unblocks nothing                                                                                                     |
-| D4  | **Two identities, two authorities.** A client `RequestToken {tabId, generation}` is echoed and never authorises; a backend `Binding {bindingId, endpointId}` authorises and is never minted by the client | One `Origin` struct carrying both. `tabId` is a frontend integer the backend cannot attest; mixing them invites authorising on a client-supplied value                                                      |
-| D5  | **Refresh comes from the filesystem**: fsnotify locally, polling over SFTP, both behind one provider-side watch capability                                                                                | OSC 133 command-end (blind inside a long-running agent) and agent-activity heuristics (a file can be changed by anyone — cron, another session, another person)                                             |
-| D6  | **No automatic rebind after reconnect.** A stale viewer offers **Reload**, enabled only when a live session's `endpointId` matches                                                                        | Silent rebind on endpoint match. Same identity check, but it moves content under a reader who did not ask. Rebinding by profile id — which the draft did — is worse still: a profile is editable            |
-| D7  | **The viewer is a snapshot plus an offer.** A file that changed is announced, never silently reloaded                                                                                                     | Live-following content. A log you are reading scrolls out from under you                                                                                                                                    |
-| D8  | **Root is navigation scope, not a sandbox.** No `..` row; a symlink may leave the root and is rendered plainly                                                                                            | Enforcing containment. It would be security theatre: the real boundary is the account's own permissions, and pretending otherwise invites someone to rely on it                                             |
-| D9  | **Directory symlinks expand; cycles are detected by canonical ancestry** and rendered as a non-expandable leaf                                                                                            | Refusing to expand directory symlinks. Common in real trees (`node_modules`, `/usr/local`); refusing hides half the filesystem to avoid ten lines of cycle check                                            |
-| D10 | **No row virtualisation.** A page of N children per directory plus an explicit "show next N"                                                                                                              | Virtualised rows — what Orca needed (`@tanstack/react-virtual`). Deferred to `nocx-goi0`. A cap without pagination is worse than either                                                                     |
-| D11 | **New methods live under `files.*`, not `fs.*`**                                                                                                                                                          | Extending `fs.*`. `contracts/fs.complete.schema.json` declares that namespace **local-only** ("the provider is inactive on a remote session"). A remote-capable `fs.list` beside it invites a fatal misread |
-| D12 | **One live viewer per `{endpointId, canonical path}`** via the existing `singletonKey`                                                                                                                    | A tab per click. `tabs.ts:543` already deduplicates                                                                                                                                                         |
-| D13 | **File bytes never reach disk.** A viewer restores as its identity and re-reads on demand                                                                                                                 | Persisting the bytes — up to 2 MiB of possibly-secret remote content in unencrypted config storage                                                                                                          |
+| #   | Decision                                                                                                                                                                                        | Rejected alternative, and why                                                                                                                                                                                |
+| --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| D1  | **A filesystem is addressed by a `bindingId` the backend issues** from a `sessionId`. Only `files.open` takes a `sessionId`                                                                     | Every call taking `sessionId`. It keeps the wrong pairing inexpressible (good) but spreads the authorisation check of D15 across every handler, where one that forgets it is a hole. One id, one choke point |
+| D2  | **The provider computes the root.** A verified OSC 7 cwd overrides it — chosen by the composition layer, so the SFTP provider never learns what OSC confidence is. An inferred root is labelled | The session's `Cwd()`. For an SSH session with no explicit cwd it is the **local** `os.UserHomeDir()`. AD-5 already requires a `$HOME` fallback to be "surfaced to the user, not applied silently"           |
+| D3  | **The SFTP lease is a sibling of `DiscoveryConn`**: its own pooled reference; listing cancelled by context, everything else by closing the subsystem                                            | A goroutine-per-call with a drain deadline. Unbounded stuck calls, and a deadline that unblocks nothing. Also the blanket claim "pkg/sftp is not cancellable" — one method is (§5.1)                         |
+| D4  | **Nothing client-minted crosses the wire.** The backend issues `{bindingId, endpointId}`; the client's `{tabId, generation}` is checked in the closure that issued the call and is never sent   | One `Origin` struct carrying both, or echoing a client token. `tabId` is a frontend integer the backend cannot attest; sending it adds a field to every schema to re-derive what the caller never forgot     |
+| D5  | **Refresh comes from the filesystem**: fsnotify locally, polling over SFTP, both behind one provider-side watch capability                                                                      | OSC 133 command-end (blind inside a long-running agent) and agent-activity heuristics (a file can be changed by anyone — cron, another session, another person)                                              |
+| D6  | **No automatic rebind after reconnect.** A stale viewer offers **Reload**, enabled only when a live session's `endpointId` matches                                                              | Silent rebind on endpoint match. Same identity check, but it moves content under a reader who did not ask. Rebinding by profile id — which the draft did — is worse still: a profile is editable             |
+| D7  | **The viewer is a snapshot plus an offer.** A file that changed is announced, never silently reloaded                                                                                           | Live-following content. A log you are reading scrolls out from under you                                                                                                                                     |
+| D8  | **Root is navigation scope, not a sandbox.** No `..` row; a symlink may leave the root and is rendered plainly                                                                                  | Enforcing containment. It would be security theatre: the real boundary is the account's own permissions, and pretending otherwise invites someone to rely on it                                              |
+| D9  | **Directory symlinks expand.** Every listing returns its own `canonical`; the controller compares it with the expanded ancestors it already holds and marks a match cyclic before rendering     | Refusing to expand them — hides half of every real tree. And computing cycles in `Entry`, where `List(path,page)` has no ancestor chain to compute from and canonicalising each child is N+1 round trips     |
+| D10 | **No row virtualisation.** A page of N children per directory plus an explicit "show next N"                                                                                                    | Virtualised rows — what Orca needed (`@tanstack/react-virtual`). Deferred to `nocx-goi0`. A cap without pagination is worse than either                                                                      |
+| D11 | **New methods live under `files.*`, not `fs.*`**                                                                                                                                                | Extending `fs.*`. `contracts/fs.complete.schema.json` declares that namespace **local-only** ("the provider is inactive on a remote session"). A remote-capable `fs.list` beside it invites a fatal misread  |
+| D12 | **One live viewer per `{endpointId, canonical path}`** via the existing `singletonKey`                                                                                                          | A tab per click. `tabs.ts:543` already deduplicates                                                                                                                                                          |
+| D13 | **File bytes never reach disk.** Tab restore does not exist yet; if and when it does, a viewer persists identity only                                                                           | Persisting the bytes — up to 2 MiB of possibly-secret remote content in unencrypted config storage. And describing a restart behaviour the app cannot perform (§5.4)                                         |
+| D14 | **A directory too large to enumerate is a state, not a wait**: an entry cap the user can reason about, an elapsed-time cap they cannot, and no polling for a capped directory                   | Listing whatever arrived. A complete-looking prefix of a directory is worse than an honest refusal                                                                                                           |
+| D15 | **`files.open` is authorised by `connState`, not by the global session registry**                                                                                                               | `registry.Get` alone. Any authenticated socket that learned another connection's session id could open that session's filesystem. `ws.go:652` exists for exactly this                                        |
 
 ### D11 in full: why a second directory lister is justified
 
@@ -111,7 +113,8 @@ would be the second implementation, not this one.
 - Copy path — relative to root, and absolute.
 - Show in the OS file manager — **local tabs only; absent, not disabled, on a remote tab.**
 - Both providers: local **and** SFTP. **The epic does not close until SFTP lands.**
-- Lifecycle: session close, connection loss, app restart (§5.6).
+- Lifecycle: session close, connection loss, WebSocket reconnect (§5.6). **Not app restart** —
+  tab restore has no reader today (§5.4).
 
 ### Out — each a refusal, not an omission
 
@@ -148,14 +151,21 @@ type Entry   struct {
     Kind       Kind   // regular | dir | symlink | other
     LinkTarget string // symlinks only
     LinkKind   Kind   // what the link resolves to; `other` when broken
-    Cycle      bool   // canonical path equals an ancestor's (D9)
     Size       int64
     ModTime    time.Time
     Mode       uint32
 }
-type Listing struct { Path string; Entries []Entry; Offset, Total int; HasMore bool; Rev string }
+type Listing struct {
+    Path      string
+    Canonical string // the provider-canonical identity of the directory listed (D9)
+    Entries   []Entry
+    Offset, Total int
+    HasMore   bool
+    Rev       string
+}
 type Content struct {
     Path      string
+    Canonical string // identity of the object actually read; what singletonKey uses
     Text      string // always valid UTF-8
     Size      int64
     ModTime   time.Time
@@ -172,9 +182,22 @@ changing the contract for both. It is a rule about symmetry, not a permanent ban
 epic adds mutating methods, and adds them to both.
 
 **`Kind` replaces the draft's `IsDir`/`IsSymlink` pair** because the two encode a lattice the
-product must not flatten: only `regular` may be opened. A FIFO blocks forever on read; a
-device or a procfs pseudo-file has no meaningful size and may produce unbounded or
-ever-changing content. Refusing them is a one-line check that removes a class of hang.
+product must not flatten. A FIFO blocks forever on read; a device or a procfs pseudo-file has
+no meaningful size and may produce unbounded or ever-changing content. What may be done with
+a row is a table, not a boolean:
+
+| `Kind`                         | Open                            | Expand                  |
+| ------------------------------ | ------------------------------- | ----------------------- |
+| `regular`                      | yes                             | —                       |
+| `symlink` → `LinkKind=regular` | yes, after canonical resolution | —                       |
+| `dir`                          | —                               | yes                     |
+| `symlink` → `LinkKind=dir`     | —                               | yes, unless cyclic (D9) |
+| broken symlink, `other`        | no                              | no                      |
+
+**The backend enforces this from metadata it reads at the time of the call**, never from the
+`LinkKind` the UI was handed. A symlink can be retargeted between the list and the read, so a
+UI-supplied kind is a claim about the past. This is the only guard between "open a file" and
+"block forever on a FIFO somebody swapped in".
 
 **Ordering is backend-owned and deterministic before pagination**: directories first, then
 files, each by the UTF-8 byte order of the name, case-sensitive. The frontend never re-sorts
@@ -182,11 +205,42 @@ files, each by the UTF-8 byte order of the name, case-sensitive. The frontend ne
 make "show next N" duplicate and skip rows. `Listing.Entries` is always non-nil: an empty
 directory marshals as `[]`, never `null`.
 
-**`Rev` is a cheap digest** of the listing (each entry's name, size, mtime, mode, kind). It
-is what the SFTP watcher compares, and what makes pagination safe: **when `Rev` changes, the
-loaded pages of that directory are re-listed from offset 0** up to the count already shown,
-under one new generation. Offset pagination over a mutating sorted list otherwise duplicates
-and skips silently.
+**`Rev` is a cheap digest** of the listing — each entry's name, size, mtime, mode, kind,
+**`LinkTarget` and `LinkKind`**. The last two are not decoration: a symlink retargeted to
+another file of the same kind and size would otherwise leave the digest unchanged while the
+rendered target and the expansion destination both changed.
+
+It is what the SFTP watcher compares, and what makes pagination safe. **When `Rev` changes,
+the directory is re-listed in ONE call** — `offset=0, limit=<count currently displayed>` —
+and every displayed row is replaced atomically. Re-fetching page 1, then page 2, then page 3
+and calling them one generation would be a lie: the directory can change between them, and a
+client-side generation orders responses without making several backend listings one snapshot.
+The page-size ceiling must therefore admit this refresh form.
+
+#### A directory can be too big to show, and that is a state
+
+`Total`, the global directories-first ordering and a whole-directory digest all require the
+provider to enumerate the **complete** directory before it can return any page. So remote
+work is proportional to directory size, not to the number of rows displayed — the opposite of
+what "poll the displayed pages only" sounds like. Two bounds, and they answer different
+questions:
+
+- **An entry-count cap** is the product limit, because it is the one a user can reason about:
+  _"this directory has more than N entries; nocx does not display directories this large"_.
+  Above it the directory is a `tooLarge {observedCount, limit}` state — no pagination offered,
+  and **polling disabled for that directory specifically**, since a capped directory would
+  otherwise re-enumerate on every tick to compute a digest it will refuse anyway. Manual retry
+  stays.
+- **An elapsed-time cap** is the operational limit: it is what stops a laggy or non-replying
+  server from holding an operation slot. It yields `timedOut {timeout}`. It is deliberately
+  _not_ the user-facing explanation, because the same directory would pass on one network and
+  fail on another.
+- A response-size ceiling guards memory, because equal entry counts do not cost equal bytes.
+
+Partial results are **discarded**, never rendered: an apparently complete prefix of a
+directory is worse than an honest refusal. And `tooLarge` reports `observedCount` only when a
+complete enumeration was actually paid for — otherwise it says "more than N" rather than
+inventing a total.
 
 **Path syntax belongs to the provider.** `local` uses `path/filepath`; `sftp` uses `path`,
 because SFTP specifies POSIX-style paths regardless of the OS nocx runs on. `filepath` must
@@ -195,6 +249,16 @@ not appear in transport or in code shared by both providers.
 **Three path kinds, never conflated.** _Display_ (`~`-abbreviated, for the header), _lexical_
 (from the root, for "copy relative path"), _canonical_ (provider-canonicalised, the identity
 used by `singletonKey` and by the D9 cycle check).
+
+**Canonical identity is returned by both reads.** `Listing.Canonical` comes back from every
+successful list, not only from symlinks, so the root and every ordinary ancestor speak the same
+identity vocabulary; `Content.Canonical` comes back from every read, because `Entry.Path` is
+lexical and `singletonKey` needs identity — without it two symlinks to one file open two tabs
+claiming to be different files, which is D12 failing in exactly the case it exists for. The provider resolves
+the canonical directory **and then lists that**, rather than canonicalising and listing
+independently — otherwise a symlink retargeted between the two calls returns the identity of
+A with the entries of B. That is not atomicity against remote mutation, which SFTP cannot
+offer; it is internal coherence of one operation, which it can.
 
 **Reading is bounded and streamed.** `maxBytes <= 0` means the server default; the effective
 limit is `min(requested, 2 MiB)` — the parameter can only lower the ceiling. The provider
@@ -216,8 +280,6 @@ rather than `Exec` — and is identical in the three properties that matter:
 
 - It owns **its own** pooled reference, never the tab's, so closing the terminal cannot drop
   the transport under an in-flight read.
-- **Cancellation is closing.** `pkg/sftp` calls are not context-cancellable; the lease closes
-  the subsystem to unblock them, then **waits** — no goroutine outlives the call.
 - `Done()` closes on connection loss and **not** on `Close()`, so an intentional stop is not
   read as a lost connection.
 
@@ -225,10 +287,36 @@ rather than `Exec` — and is identical in the three properties that matter:
 `internal/discovery/discovery.go:113` does. `ssh.SSH` (`ssh.go:113`) is **not** widened: it
 stays `Connect`/`Close`, and a feature that needs a lease depends on a lease interface.
 
-One SFTP client per binding multiplexes all its requests. A **bounded operation lane** caps
-concurrent in-flight calls per binding; when a call exceeds the hard timeout the client is
-closed and poisoned, its lease released, and the binding reports itself dead. A poisoned
-binding is a visible state, not a retry loop.
+#### Cancellation: measured, not assumed
+
+The superseded draft said "pkg/sftp calls are not context-cancellable" and built everything on
+it. Checked against the pinned module: of the 39 `*Client` methods in
+`pkg/sftp@v1.13.11/client.go`, exactly one public method takes a context. So the truth is
+split, and the design splits with it:
+
+- **Listing is natively cancellable.** `ReadDirContext` (`client.go:379`) issues repeated
+  `SSH_FXP_READDIR` packets and checks the context on each one. The elapsed-time cap above is
+  enforced there, properly, with no subsystem surgery — which matters because listing is the
+  operation most likely to be slow.
+- **Everything else is not.** `Stat`, `Lstat`, `Open`, `RealPath` and `File.Read` take no
+  context. For those, **cancellation is closing**: the lane closes the subsystem to unblock
+  the call, then waits.
+
+One SFTP client per binding multiplexes all its requests, so a **bounded operation lane** caps
+concurrent in-flight calls per binding. On a hard timeout the client is closed and poisoned,
+its pooled reference released, and the binding reports itself dead — a visible state, not a
+retry loop.
+
+**This is an acceptance condition, not a claim.** The implementation must demonstrate, against
+a server that accepts requests and never replies, that closing the SFTP subsystem does unblock
+each non-context call we make. Until that is shown, the design may promise **either** "no
+operation goroutine outlives close" **or** "close returns within a hard deadline", and not
+both — the superseded draft promised both, which is what made its deadline a word rather than
+a mechanism. If the demonstration fails, the choice must be made explicitly and written here.
+
+**Three different things are called a lease and must not share a name in code.** The _pooled
+SSH reference_ (`ssh.FSConn`), the _operation slot_ in the lane, and the _use-guard_ that
+keeps a binding alive across one handler call are three objects with three lifetimes.
 
 #### Bindings
 
@@ -241,51 +329,87 @@ type Binding struct {
 ```
 
 A `Registry` maps `bindingId → Binding`. `files.open{sessionId}` resolves the session, builds
-the provider, takes the lease, and returns the id. Every later call takes the id.
+the provider, takes the pooled reference, and returns the id. Every later call takes the id.
 
-**A binding does not outlive its session.** Closing the terminal closes its bindings: the
-lease exists to protect an in-flight read from a concurrent close, not to keep an SSH
-connection alive because a file viewer is open somewhere. A viewer whose binding is gone
-keeps what it already has on screen and says the source is unavailable (§5.6). The rejected
-alternative — a binding that survives its terminal — means closing your SSH tab leaves nocx
-connected, which no user would predict.
+**A binding is bounded by its session, not by its WebSocket.** Two different lifetimes, and
+conflating them breaks AD-9:
 
-**Close is a lease, not a lookup.** `Reg.Get` returns a session pointer that `Reg.Close` can
-invalidate immediately (`session.go:240`); a handler that resolved a binding and then called
-it can hit a closing provider. Handlers hold a lease for the call's duration; close waits for
-outstanding leases, bounded by the operation lane's timeout. Testing only "unknown binding
-id" does not cover this — the race is between lookup and use.
+- Closing the **terminal** closes its bindings. The pooled reference exists to protect an
+  in-flight read from a concurrent close, not to keep an SSH connection alive because a file
+  viewer is open somewhere. A viewer whose binding is gone keeps what it already has on
+  screen, says the source is unavailable, and **issues no further calls** (§5.6). The rejected
+  alternative — a binding that survives its terminal — means closing your SSH tab leaves nocx
+  connected, which no user would predict. If that capability is ever wanted it is an explicit
+  "keep the connection for open files", visibly owned, not a silent lease semantic.
+- Losing the **WebSocket** changes nothing. AD-9 keeps the backend session and its replay ring
+  alive, the old `*wsConn` is destroyed (`ws.go:831`), and `attach` installs a new one as the
+  session's subscriber. A binding that stored its originating `*wsConn` would spend the rest
+  of its life writing notifications to a closed socket.
+
+**Handlers hold a use-guard, not a lookup.** `Reg.Get` returns a session pointer that
+`Reg.Close` can invalidate immediately (`session.go:240`); a handler that resolved a binding
+and then called it can hit a closing provider. The guard is held for the call's duration and
+close waits on it, under the acceptance condition above. Testing only "unknown binding id"
+does not cover this — the race is between lookup and use.
 
 #### `endpointId` (D4, D6)
 
-The backend's attestation of what the transport actually reached, not of what was intended.
-A **versioned** canonical encoding, hashed:
+**v1 attests the resolved SSH destination and route. It does not attest the physical host.**
+That sentence is the honest claim and it is deliberately weaker than the draft's "what the
+transport actually reached".
 
 ```
-v1 ‖ resolved host ‖ port ‖ effective principal ‖ full resolved jump route ‖ host-key fingerprint per hop
+endpointId = "v1:" + base64url(SHA-256(canonical encoding of the attestation))
 ```
 
-The version prefix is load-bearing: changing the definition later must **fail** to match old
-restored viewers rather than accidentally matching them.
+The attestation is a **structured, ordered** record — hops as an array, each with resolved
+address, port and effective principal — with a pinned canonical serialisation. Not a
+concatenation with separators: `A→B→target` and `A→Btarget` must not be able to collide, and
+`‖`-joined fields collide unless every field is length-prefixed. The effective principal is
+the authenticated SSH username, not a credential id.
+
+**Host-key fingerprints are deliberately not in v1**, and this is a trade, not an oversight.
+The threat this feature named is a profile edited between the drop and the reconnect — host,
+user, port, jump route — and the fields above cover it completely. Fingerprints answer a
+different question, and answer it imperfectly: a legitimate key rotation changes one, a server
+with several trusted host keys can negotiate a different one on a later connection, and an SSH
+host certificate can renew while the trusted CA identity is unchanged. So a naive fingerprint
+would disable Reload after ordinary maintenance, with a message that reads like a security
+alert and is not one.
+
+What is genuinely lost is real and is recorded here rather than hidden: **`prod.example.com`
+rebuilt onto a new VM, the user accepting the changed host key, is a different filesystem that
+v1 will call the same endpoint.** SSH's host-key check answers "may I authenticate to this
+endpoint", not "is this the same filesystem that produced the open viewer" — the two are not
+the same question, and v1 answers only the first. A v2 should carry stable _verified_ host
+identity — the CA principal where certificates are in use, the accepted key otherwise — rather
+than hashing whichever key happened to be negotiated. **The version prefix is what makes
+deferring it safe**: v2 will not match v1, so a viewer restored across the change refuses
+rather than silently matching. The versioning earns its keep on its first use.
+
+The capture is also new plumbing whenever it lands: successful host-key verification currently
+delegates to a callback and discards the key, only `ProbeConfigWithResult` (`ssh_probe.go:36`)
+retains a fingerprint, jump hops verify through their own callback (`ssh_dial.go:230`), and a
+pooled reuse performs no handshake at all. So attestation must be captured **at first dial and
+stored on the pooled connection**, and read from there by every later lease — never
+reconstructed afterwards from current config or `known_hosts`, both of which may have changed.
 
 Neither existing key is this. `ssh.IdentityKey` (`ssh_resolver.go:272`) is the resolved
-`user@host:port` from the `ssh -G` answer — intent, and it omits the jump route and the host
-key. The pool key (`ssh_dial.go:43`) additionally separates the credential principal, which
-is closer, but it is an authorisation boundary for connection sharing, not a statement about
-the far end. Reusing either would be borrowing a value for a purpose it was not defined for —
-and both are documented as authorisation-boundary keys, so quietly widening them here would
-widen that boundary too.
+`user@host:port` from the `ssh -G` answer, and omits the jump route. The pool key
+(`ssh_dial.go:43`) additionally separates the credential principal, which is closer, but it is
+an authorisation boundary for connection sharing. Both are documented as authorisation
+boundaries, so quietly widening either here would widen that boundary too.
 
 ### 5.2 Wire — control plane, JSON-RPC (AD-1)
 
-| Method         | Params                             | Result                                                                 |
-| -------------- | ---------------------------------- | ---------------------------------------------------------------------- |
-| `files.open`   | `{sessionId}`                      | `{bindingId, endpointId, root:{path,display,inferred,inferredReason}}` |
-| `files.list`   | `{bindingId, path, offset, limit}` | `{path, entries[], offset, total, hasMore, rev}`                       |
-| `files.read`   | `{bindingId, path, maxBytes}`      | `{path, text, size, modTime, truncated, binary, lossy, changed}`       |
-| `files.watch`  | `{bindingId, paths[]}`             | `{mode, degradedReason}` — replaces the watch set for this binding     |
-| `files.close`  | `{bindingId}`                      | `{}`                                                                   |
-| `files.reveal` | `{bindingId, path}`                | `{}` — local bindings only; errors on a remote one                     |
+| Method         | Params                             | Result                                                                                   |
+| -------------- | ---------------------------------- | ---------------------------------------------------------------------------------------- |
+| `files.open`   | `{sessionId, rootPath?}`           | `{bindingId, endpointId, root:{path,display,inferred,inferredReason}}`                   |
+| `files.list`   | `{bindingId, path, offset, limit}` | `{path, canonical, entries[], offset, total, hasMore, rev}` — or `tooLarge` / `timedOut` |
+| `files.read`   | `{bindingId, path, maxBytes}`      | `{path, canonical, text, size, modTime, truncated, binary, lossy, changed}`              |
+| `files.watch`  | `{bindingId, paths[]}`             | `{mode, degradedReason}` — replaces the watch set for this binding                       |
+| `files.close`  | `{bindingId}`                      | `{}`                                                                                     |
+| `files.reveal` | `{bindingId, path}`                | `{}` — local bindings only; errors on a remote one                                       |
 
 A change is announced by a **server-initiated notification**. Two existing mechanisms supply
 the two halves, and they must not be confused: `broadcastSettingsChanged` (`ws.go:2888`) is
@@ -300,32 +424,62 @@ in scope when the binding is created.
 <-- {"jsonrpc":"2.0","method":"files.changed","params":{"bindingId":"…","path":"…","rev":"…"}}
 ```
 
-It is addressed to the **one connection that owns the binding**, not broadcast: a binding
-belongs to a session, and a second client has no business learning that a directory on
-somebody else's SSH connection changed. `rev` lets the client skip a re-list it has already
-applied. The notification carries **no entries** — it is an invalidation, and the client
-re-lists through `files.list`, so there is exactly one code path that renders a directory.
+**The destination is resolved at emit time, never stored.** A binding records the `sessionId`
+it belongs to; when it has something to announce, the backend asks that session for its
+**current** subscriber and writes only there. That is what survives an AD-9 reconnect: after
+`attach` installs a new `*wsConn`, notifications follow it without anything being transferred.
+When there is temporarily no subscriber, invalidations accumulate as a **set of dirty paths**,
+not a queue of events — naturally bounded, because a path can only be dirty if it is in the
+watch set. On re-attach the set is emitted once and cleared. Collapsing to a single
+`files.changed` would lose which directories moved and force a re-list of every expanded one;
+queueing every event would replay a burst that meant one change.
+
+The notification carries **no entries**: it is an invalidation, and the client re-lists through
+`files.list`, so exactly one code path renders a directory. `rev` lets a client skip a re-list
+it has already applied.
 
 `files.watch` **replaces** the watch set rather than adding to it, so collapsing a directory
-cannot leak a watch: the client sends the set it currently wants, and the backend diffs.
+cannot leak a watch: the client sends the set it currently wants and the backend diffs. The
+swap is atomic and idempotent — a newly-added watch that fails to establish must not take the
+healthy existing watches down with it.
+
+#### The two guards on the wire
+
+**`rootPath` is how D2's override reaches the backend.** The composition layer passes the
+verified OSC 7 cwd when it has one and omits the parameter otherwise; the provider interprets
+it by its own path rules and falls back to `Root()` when it is absent or unusable. Without the
+parameter the override was a decision with nowhere to happen — the frontend owns cwd (AD-5)
+and had no way to say so.
 
 **`sessionId` appears exactly once**, on `files.open`. That is what keeps the wrong pairing
-inexpressible: there is no parameter by which a caller can ask for the local filesystem of an
-SSH session, and no way to name a filesystem the backend did not hand out.
+inexpressible: no parameter can ask for the local filesystem of an SSH session, and no caller
+can name a filesystem the backend did not hand out.
+
+**`files.open` succeeds only if `state.has(sessionId)` on the requesting connection.** This is
+the wire-level enforcement of §0 and it is not a new invention — `connState` exists for
+exactly this and says so (`ws.go:652`: "gates data-frame/resize/close so a connection cannot
+touch a session it has not opened or reattached to"), and `handleResize` already does
+`if !state.has(sid)` before `registry.Get` (`ws.go:1361`). Resolving through the global
+`session.Registry` instead would let any authenticated WebSocket that learned another
+connection's session id open that session's filesystem. Tested with two live clients: B knows
+A's valid session id, and `files.open` on B fails.
 
 `files.reveal` **errors** on a remote binding rather than silently doing nothing. The UI does
-not offer it there at all; the backend refuses anyway, because a UI-only guard is one bug
-away from being no guard.
+not offer it there at all; the backend refuses anyway, because a UI-only guard is one bug away
+from being no guard.
 
-Guards, each with a test: the 2 MiB ceiling and the streamed read; only `regular` is
-readable; paths are absolute and cleaned by the **provider's** rules; permission denied is an
-explicit node state, never a silently empty directory; a dead SFTP channel is a rendered
-error.
+Further guards, each with a test: the 2 MiB ceiling and the streamed read; the openability
+table of §5.1 enforced from freshly-read metadata; paths absolute and cleaned by the
+**provider's** rules; permission denied an explicit node state, never a silently empty
+directory; a dead SFTP channel a rendered error.
 
 ### 5.3 Contracts
 
 Every method above gets a JSON Schema in `contracts/` **in the same commit** (`nocx-bt3w`),
-with `additionalProperties: false` and explicit `required`, and three checks each:
+with `additionalProperties: false` and explicit `required`, and three checks each.
+**`files.changed` is the seventh wire shape and gets the same three**, notification or not: it
+is unsolicited, it is the only shape whose addressing can be wrong, and an untested
+notification is exactly where an addressing defect hides.
 
 1. `npm run contracts:check` — the committed generated types match the schema.
 2. `…_DTOConformsToContract` — the Go struct marshals to something the schema accepts.
@@ -339,41 +493,62 @@ The renderer's types are generated and re-exported; the client declares nothing 
 **Files is one more sidebar view.** `frontend/src/main.tsx:295` already registers Ports as
 "the first real one" and names Explorer as future work; `sidebar.tsx:50` already defines
 `SidebarViewDescriptor {id,title,icon,view,actions,order}` and gives every view a reactive
-`visible()`. Files registers with a lower `order` than Ports. **Nothing about the shell is
-rebuilt or forked.**
+`visible()`. **Files is the first icon in the activity bar** — it registers with an `order`
+below Ports, so it sits at the top of the view zone, above every other view present or later
+added. That is a product requirement, not a consequence of a number somebody picked, and it
+gets an assertion: the first icon in the activity bar's view zone is Files. **Nothing about
+the shell is rebuilt or forked.**
 
-**`SidebarViewProps` needs a second accessor.** It exposes only `activeProfileId()`, which
-was designed for Ports and is not enough here: an alias tab has no profile, a profile is
-editable, and local is the synthetic string `"local"` (`ports-client.ts:11`). Files needs
-`activeOrigin(): {tabId, sessionId, kind, cwd, cwdVerified} | null`. This is an addition to
-the shared props, not a private copy inside the view — a private copy is exactly the pattern
-`nocx-ycet` exists to end.
+**`activeOrigin()` goes on the `TabContent` seam, and reaches the view through
+`SidebarViewProps`.** Today `SidebarViewProps` exposes only `activeProfileId()`, designed for
+Ports and not enough here: an alias tab has no profile, a profile is editable, and local is
+the synthetic string `"local"` (`ports-client.ts:11`). Files needs
+`activeOrigin(): {tabId, sessionId, kind, cwd, cwdVerified, binding} | null`.
 
-**Two identities, two authorities (D4).**
+`TabManager` must ask the **active tab** for it, not test what the active content is.
+`tabs.ts:698` currently derives the active scope by checking whether the content is
+`TerminalContent`; adding a second `instanceof FileViewerContent` branch there would make
+`TabManager` own a growing switch over content implementations, against the polymorphism the
+`TabContent` seam exists for (`tab-content.ts:1`). So the accessor is an optional capability
+on `TabContent`: terminal content answers from its session, viewer content answers from the
+binding it was opened with, and `TabManager` never learns which class replied.
+
+This is an addition to the shared seam, not a private copy inside the view — a private copy is
+exactly the pattern `nocx-ycet` exists to end.
+
+**Two authorities — and only one of them crosses the wire (D4).**
 
 ```ts
-interface RequestToken {
-  readonly tabId: number
-  readonly generation: number
-} // client, echoed
 interface Binding {
-  readonly bindingId: string
-  readonly endpointId: string | null
-} // backend
+  readonly bindingId: string // backend-issued
+  readonly endpointId: string | null // backend-attested; null for local
+}
 ```
 
-A response is applied only when its `RequestToken` matches the view's current one **and** its
-generation is not older than what has already been applied. That is what stops a
-`files.list` for tab A, still in flight when the user activates tab B, from painting A's
-remote listing into B's tree. Rows carry a compact node reference plus the binding — not a
-full copy of both identities per row, which was the draft's over-engineering.
+The client half is **not** a wire shape. The JSON-RPC request id already correlates a result
+with its exact request, and the code that issued the call already knows, in its own closure,
+which `{tabId, generation, bindingId}` it issued for. So the check happens where the promise
+resolves: apply the result only if that captured triple still matches the view's current
+state, and only if the generation is not older than what has been applied. That is what stops
+a `files.list` for tab A, still in flight when the user activates tab B, from painting A's
+remote listing into B's tree.
 
-**The backend never authorises on `tabId`.** It is a correlation token and nothing else.
+Echoing a client-minted token through the backend would have added a field to every params
+and result schema, every DTO and every handler, to re-derive something the caller never
+forgot. **No client-minted _identity_ crosses the wire** — paths, limits and watch sets
+obviously do, and are inputs rather than claims about who is asking. It removes the
+possibility of authorising on `tabId` by making `tabId` unavailable to authorise on.
+
+`files.changed` is the exception that proves it: being unsolicited, it has no request to
+correlate with, so it carries `{bindingId, path, rev}` — backend identity only — and the
+client maps `bindingId` to its current tree generation itself.
 
 **Panel focus.** The panel follows the active tab's origin. A viewer tab has no terminal
-session, so it carries the binding it was opened from and the panel keeps showing that
+session, so it answers with the binding it was opened from and the panel keeps showing that
 machine — **never a silent fall back to local**, which would breach §0 in the same gesture as
-the panel's own primary action.
+the panel's own primary action. But "keeps showing that machine" is about pixels, not calls:
+when the binding is dead the panel keeps the last tree **visible** and issues no `list`,
+`watch` or `read` against it.
 
 **Kit only.** `Toolbar`, `IconButton`, `EmptyState`, `Spinner` come from `ui/`. Neither
 reference product had an off-the-shelf tree to copy — Orca hand-writes ~41 files over
@@ -386,9 +561,23 @@ the kit README. It is not built inside the surface. Where `CollectionView`'s row
 already fits, it is extended rather than forked.
 
 **Viewer tab.** A `ContentDescriptor` with `singletonKey = "${endpointId ?? 'local'}:${canonicalPath}"`
-(D12) and a `restoreDescriptor` of the new `{type:'file', endpointId, path, displayHost}` —
-consistent with the tab-restore ownership rule in `architecture.md:196`, where the record is
-backend-owned identity plus a frontend snapshot. Content is CodeMirror 6 in read-only mode:
+(D12) and a `restoreDescriptor` of the new `{type:'file', endpointId, path, displayHost}`,
+shaped by the tab-restore ownership rule in `architecture.md:196` — backend-owned identity
+plus a frontend snapshot.
+
+**But tab restore does not exist yet, so the viewer's `restoreDescriptor` is `null`.**
+`restoreDescriptor` is written in four places — `tabs.ts:456` and `:504`, `main.tsx:226`,
+`state/tab-model.ts:255` — typed `unknown` (`tab-content.ts:143`), and **read nowhere**.
+Nothing serialises the tab list; nothing reconstructs a tab from a descriptor. That is a
+reachable write path with an unreachable read path: the defect AGENTS.md records this
+repository having shipped once already.
+
+Writing a fifth one and calling it free would be committing the same defect while quoting the
+rule against it. The `{type:'file', endpointId, path, displayHost}` shape above is what the
+restore bead should adopt when it supplies a reader; until then the viewer passes `null`, as
+`main.tsx:226` already does. The restart row leaves the lifecycle table for the same reason.
+
+Content is CodeMirror 6 in read-only mode:
 already a dependency, and it brings line numbers, selection and search for free. Syntax
 highlighting needs `@codemirror/language` plus language modes — a **small registry** of the
 formats that actually turn up in terminal work, with plain text as the correct fallback, not
@@ -413,16 +602,34 @@ learns which mechanism said so.
   dependency tree must not exhaust inotify watches or descriptors.
 
 **Remote — polling.** SFTP has no change notification, and this asymmetry is honest rather
-than a gap to be closed cleverly. Poll the **displayed pages of expanded directories only**,
-compare `Rev`, emit only on difference. Jittered interval, per-host concurrency limit,
-exponential slow-down on repeated failure, paused while `visible()` is false, and one
-immediate poll when the panel becomes visible again.
+than a gap to be closed cleverly. Poll the expanded directories, compare `Rev`, emit only on
+difference. Jittered interval, per-host concurrency limit, exponential slow-down on repeated
+failure, paused while `visible()` is false, and one immediate poll when the panel becomes
+visible again.
 
-**Degradation is a state, not a toast.** When a local watch cannot be established, the
-provider falls back to polling and reports `mode: 'polling', degradedReason` — and the panel
-header **shows** that it is polling for as long as it is true. A toast announces the
-transition; it cannot answer "why is this stale?" ten minutes later. A soft degrade the UI
-does not admit is how a feature that does not work survives a release.
+**A poll costs a whole directory, not a page** — see §5.1: `Total`, the ordering and the
+digest all need the complete enumeration. So the per-tick cost scales with how large the
+expanded directories are, not with how many rows are on screen, and a directory that hit the
+entry cap is **not polled at all**. Saying this here rather than discovering it in profiling
+is the difference between a poll interval chosen and one guessed.
+
+**Degradation is a state, not a toast — but it is a badge, not a banner.** Three levels, and
+the distinction between the first two is the whole point:
+
+- **Remote polling is the designed mode and warns about nothing.** SFTP has no notifications;
+  saying so permanently would be noise, and noise is what teaches a user to stop reading.
+- **A local watch that could not be established** falls back to polling and reports
+  `mode: 'polling', degradedReason`. That is a persistent **warning badge beside Refresh** —
+  "Polling", with the detail on hover: live watching is unavailable, we are checking
+  periodically. The transition still gets its toast; the badge is what answers "why is this
+  stale?" ten minutes later, when the toast is long gone. It clears the instant watching
+  recovers.
+- **Refresh that has actually stopped** — polling failing repeatedly — escalates to a sticky
+  inline banner with Retry, because that is materially worse than degraded-but-working and must
+  not look the same.
+
+A soft degrade the UI does not admit is how a feature that does not work survives a release.
+A permanent banner over a feature that _is_ working is how the admission stops being read.
 
 **Rejected, and why they stay rejected.** A shell hook emitting changes would observe only
 what passes through that shell — not the agent, not cron, not another session, not another
@@ -438,14 +645,17 @@ relay is the trap.
 
 Four different things get called "disconnected", and only two are ours.
 
-| State                             | Panel                              | Open viewer tabs                                                                     |
-| --------------------------------- | ---------------------------------- | ------------------------------------------------------------------------------------ |
-| WebSocket drop (frontend↔backend) | Unchanged — AD-9 replays by offset | Unchanged                                                                            |
-| SSH connection lost               | "Connection lost" banner; no poll  | Content stays; **Reload** disabled                                                   |
-| Originating terminal closed       | Follows the next active tab        | Content stays; "source unavailable"; **Reload** disabled                             |
-| Reconnected, `endpointId` matches | Rebinds; refresh resumes           | **Reload** enabled — user-invoked, never automatic (D6)                              |
-| Reconnected, `endpointId` differs | Rebinds to the new machine         | Stays stale; "reconnected to a different host or user"; **Reload** stays disabled    |
-| App restarted                     | Builds from the restored tab       | Restores identity, no bytes (D13); **Reload** enabled once a matching session exists |
+| State                             | Panel                              | Open viewer tabs                                                                  |
+| --------------------------------- | ---------------------------------- | --------------------------------------------------------------------------------- |
+| WebSocket drop (frontend↔backend) | Unchanged — AD-9 replays by offset | Unchanged; notifications follow the new subscriber after `attach`                 |
+| SSH connection lost               | "Connection lost" banner; no poll  | Content stays; **Reload** disabled                                                |
+| Originating terminal closed       | Follows the next active tab        | Content stays; "source unavailable"; **Reload** disabled; **no calls issued**     |
+| Reconnected, `endpointId` matches | Rebinds; refresh resumes           | **Reload** enabled — user-invoked, never automatic (D6)                           |
+| Reconnected, `endpointId` differs | Rebinds to the new machine         | Stays stale; "reconnected to a different host or user"; **Reload** stays disabled |
+
+The **app-restart** row is deliberately absent: tab restore does not exist (§5.4), so a row
+describing it would be a promise this epic cannot keep. D13 says only what is enforceable
+today — if and when restore lands, identity persists and bytes never do.
 
 D6 is the load-bearing line. A profile can be edited between the drop and the reconnect —
 host, user, port, jump route. Rebinding on profile id would refresh a viewer labelled
@@ -460,8 +670,8 @@ back. That is a dependency edge, filed, not an assumption.
 
 1. **ADR** recording §3. Required by `nocx-708q` before implementation.
 2. `internal/filesystem` + the `local` provider + `files.open/list/read/close` + contracts +
-   the binding registry and its close-lease.
-3. Files view + tree row in `ui/` + viewer tab + request-token plumbing + dedup.
+   the binding registry, its `connState` authorisation and its use-guard.
+3. Files view (first icon in the activity bar) + tree row in `ui/` + viewer tab + dedup.
 4. `ssh.FSConn` + the `sftp` provider + `endpointId` + the lifecycle of §5.6.
    **The epic does not close before this.**
 5. Watching: local fsnotify, then SFTP polling, then the degraded-mode indicator.
@@ -473,7 +683,8 @@ back. That is a dependency edge, filed, not an assumption.
 larger than one page; a file over 2 MiB; a binary; a NUL at byte 9000; invalid UTF-8; a file
 that changes size mid-read; a FIFO; a dead SFTP channel; a server that accepts and never
 replies; a session that dies between lookup and use; a symlink cycle; an inotify watch that
-cannot be established.
+cannot be established; a directory above the entry cap; an enumeration that exceeds the time
+cap; a symlink retargeted between the list and the read.
 
 **Falsifying §0** — the scenarios that would have caught the previous drafts:
 
@@ -481,7 +692,11 @@ cannot be established.
 - Close the originating terminal with a viewer open; assert the viewer reports the source
   unavailable and **never** re-reads through any other binding.
 - Reconnect to a **different** endpoint; assert Reload stays disabled and nothing refreshes.
-- Restart with a viewer open; assert no file bytes were written to config storage.
+- **Two live WebSocket clients: B knows A's valid `sessionId`; assert `files.open` on B fails.**
+  This is §0 enforced on the wire, and it is the test that would catch the whole rule being
+  routed around by resolving through the global registry.
+- Drop and re-attach the WebSocket with a watch active; assert `files.changed` reaches the NEW
+  connection — the assertion that fails if a binding stored its originating `*wsConn`.
 - Two out-of-order refresh responses; assert the older is dropped.
 - A remote path whose syntax differs from the local OS; assert the provider's rules were used.
 - An SSH session opened with no explicit cwd; assert the root came from the **remote** home,
@@ -494,7 +709,8 @@ paired test that the ordinary path works — the `contentkey` lesson.
 
 **One user-reachable end-to-end assertion**, through the seam a person touches:
 
-> From a cold start with the panel collapsed, the Files icon is present and enabled; clicking
+> From a cold start with the panel collapsed, the Files icon is **first** in the activity
+> bar, present and enabled; clicking
 > it opens the panel; the tree shows the root; expanding a directory lists a page and "show
 > next" reveals the rest; clicking a file opens a tab whose content matches the file; its
 > title carries the host iff the origin is remote; writing to the file from outside nocx makes
@@ -512,7 +728,8 @@ The e2e suite gets a disposable `$HOME` (`NOCX_E2E_HOME_DIR`).
 - From the moment a local watch fails until it is re-established or the view is closed, the
   header states that refresh is polling.
 
-**Contracts** — the three checks of §5.3, for all six methods.
+**Contracts** — the three checks of §5.3, for all six methods **and for the `files.changed`
+notification**.
 
 **Reachability** — `deadcode -filter 'nocx/internal/filesystem' ./...` is clean and
 `internal/app/app.go` wires the providers. Then the other direction: assert a caller for the
@@ -537,22 +754,57 @@ package is precisely what `nocx-rtg0` shipped.
 | new              | `SidebarViewProps.activeOrigin()`                                                                                                                                     | §5.4; `activeProfileId` cannot express an alias tab                                                            |
 | new              | `files.reveal` native seam (Wails)                                                                                                                                    | No such capability exists in the backend                                                                       |
 | new              | Insert path at the originating prompt + shell-escaped copy                                                                                                            | §4 Out; needs a dialect decision                                                                               |
+| new              | **Tab restore has no reader.** `restoreDescriptor` is written in four places and consumed nowhere; either implement restore or delete the field                       | §5.4; a write path with no read path — the `nocx-rtg0` shape, found again                                      |
+| new              | `endpointId` **v2**: verified host identity per hop, captured at first dial and stored on the pooled connection                                                       | §5.1 records exactly what v1 does not attest; the version prefix is what makes adding it safe                  |
 
 ## 9. Open questions
 
-None blocking. The page size (D10), the 2 MiB ceiling, the poll interval, the operation-lane
-timeout and the watched-directory ceiling are starting numbers, to be tuned once the panel is
-in daily use. Each is named in code with the reason it is a number rather than a constant
-somebody picked.
+None blocking. The page size (D10), the 2 MiB ceiling, the entry and time caps (D14), the poll
+interval, the operation-lane timeout and the watched-directory ceiling are starting numbers,
+to be tuned once the panel is in daily use. Each is named in code with the reason it is a
+number rather than a constant somebody picked.
+
+One item is deliberately deferred with its cost written down rather than left open: `endpointId`
+v1 does not attest the physical host (§5.1). The case it misses is named there, and v2 is a
+bead.
 
 ## 10. Review history
 
-- **2026-08-01** — first draft; adversarial review against the code found three breaches of
-  §0 (a response applied to the wrong tab, an action aimed at the active tab, a reconnect
-  rebinding by profile id) and they were fixed.
-- **2026-08-06** — a second review against the code found the five items in §2. Three of them
-  were things the repository had already solved or already contradicted, and the document had
-  neither read nor cited: `DiscoveryConn`, `main.tsx:295`, `resolveSessionCwd`. The pattern is
-  worth naming, because it is the same pattern both times: **the draft was written from what
-  the conversation remembered rather than from the binding document and the code for the
-  boundary being crossed.**
+Three adversarial rounds against the code, each of which found something the round before it
+had not.
+
+- **2026-08-01, round 1** — three breaches of §0 in the first draft: a response applied to the
+  wrong tab, an action aimed at the active tab, a reconnect rebinding by profile id.
+- **2026-08-06, round 2** — the five items in §2. Three were things the repository had already
+  solved or already contradicted and the document had neither read nor cited: `DiscoveryConn`,
+  `main.tsx:295`, `resolveSessionCwd`.
+- **2026-08-06, round 3** — against this document. Seven findings, of which two would have
+  shipped defects that no amount of later testing of _this_ feature would have surfaced:
+  **`files.open` resolving through the global session registry instead of `connState`**, which
+  is a cross-connection read of another session's filesystem; and **a binding storing its
+  originating `*wsConn`**, which sends every notification to a closed socket after an AD-9
+  reconnect that the lifecycle table promised was invisible. Three more were contradictions
+  inside the document — a `RequestToken` in §5.4 that appeared in no wire shape, a
+  `Provider.Canonical` with no method to reach it, "every method gets a contract" against "all
+  six methods" — and each would have been resolved by whoever wrote the handler, silently and
+  in one direction.
+
+Four of round 3's recommendations were argued rather than accepted, and the argument changed
+three of them:
+
+- **Session-bounded bindings** stand. A read-only viewer keeping an SSH transport alive after
+  the user closed the terminal is behaviour nobody would predict; the reviewer conceded, with
+  the correction — taken — that the bound is the _session_, not the WebSocket.
+- **`Provider.Root`** stands, because local and SFTP genuinely compute it differently. The
+  reviewer's refinement was taken: the OSC 7 override belongs to the composition layer.
+- **Expanding directory symlinks** stands. The reviewer's layer objection was right and was
+  taken — `Entry.Cycle` was uncomputable where it sat — but the fix here is cheaper than the
+  one offered: `Listing.canonical` on a call the client already makes, instead of a
+  `files.canonical` method and a round trip per expansion.
+- **Host-key fingerprints out of `endpointId` v1** stands, but the reviewer was right that the
+  justification was not: SSH's host-key check answers "may I authenticate", not "is this the
+  same filesystem". §5.1 now records the case v1 misses instead of claiming there is none.
+
+The pattern worth keeping from all three rounds is the same one: **every finding lived in the
+gap between what the document asserted and what the code says.** Round 2 found it in the
+repository the draft had not read; round 3 found it in the document's own unread halves.
