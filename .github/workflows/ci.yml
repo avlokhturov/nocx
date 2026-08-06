@@ -258,6 +258,28 @@ jobs:
       # run, and installing only chromium would fail the run outright.
       - run: npx playwright install chromium webkit
 
+      # Nine specs do not drive `wails dev` at all: they start their own backend
+      # through cmd/devharness (real Go backend, real PTY, no wails and no
+      # display) so they can restart it mid-test and prove a thing survived.
+      # e2e/harness.ts:177 refuses to construct a VaultBackend without the
+      # binary, so each of those specs failed outright with "devharness binary
+      # not found" — 9 files x 2 browsers, in every shard.
+      #
+      # Nothing built it. scripts/dev-web.sh does, for the local headless path,
+      # and CI never ran that. The failures were invisible while the whole e2e
+      # job was hitting its 20-minute cap without reporting; sharding made it
+      # report, and this is most of what it reported (nocx-bbkh).
+      #
+      # Three names, one binary. The specs name distinct paths for the same
+      # reason they name distinct ports — so two suites can run at once without
+      # one rebuilding the file the other is executing — and they are the same
+      # build, so copies are the honest way to satisfy that.
+      - name: Build devharness (specs that start their own backend)
+        run: |
+          go build -o /tmp/nocx-devharness ./cmd/devharness
+          cp /tmp/nocx-devharness /tmp/nocx-devharness-vault
+          cp /tmp/nocx-devharness /tmp/nocx-devharness-srch
+
       # --shard splits by test FILE, deterministically, so a file's tests always
       # stay together on one runner and a spec that relies on the order within
       # its own file is unaffected.
