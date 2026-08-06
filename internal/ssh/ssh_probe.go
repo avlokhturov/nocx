@@ -81,6 +81,18 @@ func (rc *RealClient) probeConfig(ctx context.Context, host string, cfg *Connect
 	}
 
 	d := &dialer{client: rc}
+	// When a jump host is configured, probe through the same jump path
+	// that open would use — otherwise the probe sees the direct-route
+	// host key while open sees the jump-route key, and they disagree
+	// (nocx-shat). dialViaJumpHost returns an sshClientConn (Close only).
+	if cfg.JumpHost != "" || cfg.JumpConfig != nil {
+		conn, dialErr := d.dialViaJumpHost(ctx, cfg, resolved, gcfg, addr)
+		if dialErr != nil {
+			return *fp, fmt.Errorf("probe config: %w", dialErr)
+		}
+		_ = conn.Close()
+		return *fp, nil
+	}
 	gclient, err := d.dialDirect(ctx, addr, gcfg, host, resolved.user)
 	if err != nil {
 		return *fp, fmt.Errorf("probe config: %w", err)

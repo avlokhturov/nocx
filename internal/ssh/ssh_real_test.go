@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1340,4 +1341,97 @@ func TestConnect_VaultSealed_ReturnsTypedError(t *testing.T) {
 	if !errors.Is(err, vault.ErrVaultSealed) {
 		t.Fatalf("expected ErrVaultSealed, got %T: %v", err, err)
 	}
+}
+
+// TestProbe_ThroughJumpHost verifies that ProbeConfigWithResult routes
+// through the jump host when one is configured, rather than dialling
+// the target directly (nocx-shat).
+func TestProbe_ThroughJumpHost(t *testing.T) {
+	// Bastion: a test SSH server with direct-tcpip support.
+	bastionPub, bastionPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate bastion key: %v", err)
+	}
+	bastionSigner, err := gossh.NewSignerFromKey(bastionPriv)
+	if err != nil {
+		t.Fatalf("create bastion signer: %v", err)
+	}
+	bastion := startTestSSHServerWithKey(t, bastionSigner)
+	defer bastion.close()
+
+	// Target: a separate test SSH server with its own key.
+	targetPub, targetPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate target key: %v", err)
+	}
+	targetSigner, err := gossh.NewSignerFromKey(targetPriv)
+	if err != nil {
+		t.Fatalf("create target signer: %v", err)
+	}
+	target := startTestSSHServerWithKey(t, targetSigner)
+	defer target.close()
+
+	// known_hosts: both bastion and target keys.
+	khPath := filepath.Join(t.TempDir(), "known_hosts")
+	khLines := []string{
+		knownhosts.Line([]string{bastion.addr}, bastion.hostSigner.PublicKey()),
+		knownhosts.Line([]string{target.addr}, target.hostSigner.PublicKey()),
+	}
+	wErr := os.WriteFile(khPath, []byte(strings.Join(khLines, "\n")+"\n"), 0o600)
+	if wErr != nil {
+		t.Fatalf("write known_hosts: %v", wErr)
+	}
+
+	// Write the bastion's private key to a temp file for jump auth.
+	jumpKeyPath := filepath.Join(t.TempDir(), "jump_key")
+	block, err := gossh.MarshalPrivateKey(bastionPriv, "")
+	if err != nil {
+		t.Fatalf("marshal private key: %v", err)
+	}
+	if err = os.WriteFile(jumpKeyPath, pem.EncodeToMemory(block), 0o600); err != nil {
+		t.Fatalf("write jump key: %v", err)
+	}
+
+	client, err := NewReal(
+		log.NewSlogAdapter(nil),
+		WithKnownHostsFile(khPath),
+	)
+	if err != nil {
+		t.Fatalf("NewReal: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	bastionHost, bastionPortStr, _ := net.SplitHostPort(bastion.addr)
+	bastionPort, _ := strconv.Atoi(bastionPortStr)
+
+	// Build the ConnectConfig the resolver would produce: jump host with
+	// key file, and auth for the target.
+	cfg := &ConnectConfig{}
+	cfg.AuthMethods = []gossh.AuthMethod{gossh.PublicKeys(targetSigner)}
+	WithAuthMode("publicKey")(cfg)
+	WithJumpHost(bastionHost, bastionPort, "jumpuser", "publicKey")(cfg)
+	cfg.JumpKeyFile = jumpKeyPath
+
+	// ProbeConfigWithResult through the bastion to the target.
+	fp, err := client.ProbeConfigWithResult(
+		context.Background(), target.addr, cfg,
+	)
+	if err != nil {
+		t.Fatalf("ProbeConfigWithResult through jump: %v", err)
+	}
+
+	// The fingerprint must be the target's, not the bastion's.
+	wantFp := gossh.FingerprintSHA256(target.hostSigner.PublicKey())
+	if fp != wantFp {
+		t.Errorf("fingerprint = %q, want target's %q", fp, wantFp)
+	}
+
+	// Pool must be empty — probe bypasses the pool.
+	if got := client.pool.Count(); got != 0 {
+		t.Fatalf("pool.Count()=%d, want 0 (probe bypasses pool)", got)
+	}
+
+	// Suppress unused — bastionPub/targetPub are for clarity.
+	_ = bastionPub
+	_ = targetPub
 }
