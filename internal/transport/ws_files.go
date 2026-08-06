@@ -106,7 +106,7 @@ type filesWatcher struct {
 	sessionID session.ID
 
 	mu      sync.Mutex
-	paths   map[string]string // path → last seen Rev ("" = never listed)
+	paths   map[string]string // path → last seen Rev ("" = watch-time baseline failed; first successful poll announces)
 	dirty   map[string]string // path → rev known when it went dirty ("" = unknown); awaiting a subscriber
 	handle  filesystem.Handle
 	release func()
@@ -454,7 +454,10 @@ func (s *WSServer) handleFilesRead(wconn *wsConn, state *connState, req jsonrpcR
 // swapped atomically by the registry; when the provider refuses (the
 // watching wave has not landed), the transport degrades to its own
 // digest-poll loop and reports the degradation — the persistent "Polling"
-// badge (spec §5.5) — rather than a silent lie.
+// badge (spec §5.5) — rather than a silent lie. The watch baseline is
+// taken synchronously inside the handler, before the response
+// (filesBaseline): from the instant the call returns every change is
+// delivered, and changes before it are not replayed — inotify semantics.
 func (s *WSServer) handleFilesWatch(wconn *wsConn, state *connState, req jsonrpcRequest) {
 	var params filesWatchParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.BindingID == "" {
@@ -506,6 +509,15 @@ func (s *WSServer) handleFilesWatch(wconn *wsConn, state *connState, req jsonrpc
 		return
 	}
 
+	// Take the baseline synchronously, before the response: from the
+	// instant files.watch returns, every change is delivered; changes
+	// before it are not (inotify semantics). The old first-poll-tick
+	// baseline left a 500 ms window where a change was folded into the
+	// baseline and never announced. The listing runs on this call's
+	// fresh handle, whose guard is held until the branch below releases
+	// it (filesBaseline documents the cost shape).
+	baseline := s.filesBaseline(h, params.Paths)
+
 	s.filesMu.Lock()
 	b = s.filesBindings[params.BindingID]
 	if b == nil {
@@ -519,13 +531,10 @@ func (s *WSServer) handleFilesWatch(wconn *wsConn, state *connState, req jsonrpc
 		w := &filesWatcher{
 			bindingID: params.BindingID,
 			sessionID: b.sessionID,
-			paths:     make(map[string]string, len(params.Paths)),
+			paths:     baseline,
 			dirty:     make(map[string]string),
 			stop:      make(chan struct{}),
 			done:      make(chan struct{}),
-		}
-		for _, p := range params.Paths {
-			w.paths[p] = "" // baseline: first listing establishes silently
 		}
 		w.mu.Lock()
 		w.handle = h
@@ -539,15 +548,13 @@ func (s *WSServer) handleFilesWatch(wconn *wsConn, state *connState, req jsonrpc
 		s.filesMu.Unlock()
 	} else {
 		// Replacement (spec §5.2): reset the poll baseline for the new
-		// set. The loop keeps its original handle — the guard is already
-		// taken — and this call's fresh handle is released, one guard in,
-		// one out.
+		// set — every path baselined NOW, since the replace path had the
+		// same first-tick gap. The loop keeps its original handle — the
+		// guard is already taken — and this call's fresh handle is
+		// released, one guard in, one out.
 		w := b.watcher
 		w.mu.Lock()
-		w.paths = make(map[string]string, len(params.Paths))
-		for _, p := range params.Paths {
-			w.paths[p] = ""
-		}
+		w.paths = baseline
 		w.mu.Unlock()
 		s.filesMu.Unlock()
 		release()
@@ -747,6 +754,39 @@ func (s *WSServer) filesPollLoop(w *filesWatcher) {
 	}
 }
 
+// filesBaseline takes the watch baseline synchronously: one listing per
+// path in the new set, inside files.watch, before the response. This is
+// the inotify install point — from the instant the call returns, every
+// change is delivered, and changes before it are not replayed (the
+// first-poll-tick baseline this replaces left a 500 ms blind spot). A path
+// whose listing fails is recorded as "" — unbaselined — and the first poll
+// that lists it successfully ANNOUNCES rather than folding the change into
+// a baseline nobody saw: the safe direction (a false positive re-lists the
+// directory; a false negative hides a change forever).
+//
+// Sequential, one listing per path, and deliberately so: each listing is
+// bounded by the D14 caps (entry cap, size cap, the provider's list
+// timeout) and, over SFTP, by the operation lane, so N paths cost at most
+// N bounded listings — the same per-tick cost the poll loop already pays,
+// moved earlier. The watch set is the expanded tree (one directory per
+// expand gesture), so N is small in practice, and the reachable provider
+// today is local (sub-ms listings); a bounded-concurrent baseline would add
+// machinery the loop itself does not have for a case the product does not
+// reach.
+func (s *WSServer) filesBaseline(h filesystem.Handle, paths []string) map[string]string {
+	base := make(map[string]string, len(paths))
+	for _, p := range paths {
+		listing, err := h.List(context.Background(), p, filesystem.Page{Offset: 0, Limit: 1})
+		if err != nil {
+			s.log.Debug("files watch baseline failed", "path", p, "error", err)
+			base[p] = "" // unbaselined: the first successful poll announces
+			continue
+		}
+		base[p] = listing.Rev
+	}
+	return base
+}
+
 // filesPollTick re-lists every watched path once. Returns false when the
 // loop must stop: the binding was closed underneath it (a defensive path —
 // the transport's own close paths stop the loop first).
@@ -770,10 +810,15 @@ func (s *WSServer) filesPollTick(w *filesWatcher) bool {
 }
 
 // filesPollPath re-lists one watched path and announces a change when the
-// listing digest moved. The first listing after a watch establishes the
-// baseline silently — inotify semantics: events before the watch was
-// installed are not replayed. Returns false when the binding is gone and
-// the loop must stop.
+// listing digest moved. The baseline is taken synchronously inside
+// files.watch (filesBaseline), so this loop only ever COMPARES: a change
+// after the call is announced, a change before it is not — inotify
+// semantics: events before the watch was installed are not replayed. A
+// path whose watch-time baseline failed carries "" and the first
+// successful listing here ANNOUNCES it (safe direction: a change made
+// while the path was unlistable must surface, not fold into a baseline
+// nobody saw). Returns false when the binding is gone and the loop must
+// stop.
 func (s *WSServer) filesPollPath(w *filesWatcher, h filesystem.Handle, path string) bool {
 	listing, err := h.List(context.Background(), path, filesystem.Page{Offset: 0, Limit: 1})
 	if err != nil {
@@ -807,7 +852,19 @@ func (s *WSServer) filesPollPath(w *filesWatcher, h filesystem.Handle, path stri
 		w.mu.Unlock()
 		return true
 	}
-	if prev == "" || listing.Rev == prev {
+	if prev == "" {
+		// The watch-time baseline failed (filesBaseline records "" for a
+		// path it could not list): the first successful listing
+		// ANNOUNCES, so a change made while the path was unlistable
+		// surfaces instead of folding into a baseline nobody saw — a
+		// false positive re-lists the directory; a false negative hides
+		// the change forever.
+		w.paths[path] = listing.Rev
+		w.mu.Unlock()
+		s.emitFilesChanged(w, path, listing.Rev)
+		return true
+	}
+	if listing.Rev == prev {
 		w.paths[path] = listing.Rev
 		w.mu.Unlock()
 		return true

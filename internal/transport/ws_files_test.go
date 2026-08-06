@@ -453,6 +453,120 @@ func TestFilesWatch_EmptySetStopsTheLoop(t *testing.T) {
 	}
 }
 
+// ── the watch baseline (fm-w14) ────────────────────────────────────────────
+
+// slowFilesPollInterval widens the digest-poll cadence for the two
+// "immediate change" tests below. The write must land strictly BEFORE the
+// first poll tick on the unfixed code, whose baseline IS that tick; a
+// 20 ms tick would leave the red proof hostage to a >20 ms CI scheduling
+// stall between the watch response and the write. 500 ms makes the gap
+// deterministic while the test itself still writes immediately and waits
+// for nothing — exactly the gesture the defect swallowed.
+const slowFilesPollInterval = 500 * time.Millisecond
+
+// TestFilesChanged_ChangeImmediatelyAfterWatchIsAnnounced is the regression
+// for the watch baseline blind spot: the baseline used to be taken on the
+// FIRST poll tick after files.watch, so a change landing in the gap between
+// the response and that tick was folded into the baseline and never
+// announced. The write here happens immediately — microseconds after the
+// watch response, a full interval before the first tick could establish the
+// old baseline — and must still be announced.
+func TestFilesChanged_ChangeImmediatelyAfterWatchIsAnnounced(t *testing.T) {
+	e := newFilesTestEnv(t)
+	// The first tick must not run before the write: widen the cadence so
+	// the write strictly precedes it (see slowFilesPollInterval).
+	e.ws.filesPollInterval = slowFilesPollInterval
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	bid := e.openBinding(t, sid, dir, 2)
+
+	// No wait for a baseline, no sleep: the write is the fast gesture the
+	// defect swallowed. If the baseline is taken synchronously inside
+	// files.watch, it is already done by the time the response arrives.
+	e.watchDir(t, bid, []string{dir}, 3)
+	if err := os.WriteFile(filepath.Join(dir, "boom.md"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	raw := readNotification(t, e.conn, "files.changed", 5*time.Second)
+	var params map[string]any
+	if err := json.Unmarshal(raw, &params); err != nil {
+		t.Fatalf("files.changed: unmarshal: %v", err)
+	}
+	if params["bindingId"] != bid {
+		t.Errorf("files.changed bindingId = %v, want %s", params["bindingId"], bid)
+	}
+	if params["path"] != dir {
+		t.Errorf("files.changed path = %v, want %s", params["path"], dir)
+	}
+	if rev, _ := params["rev"].(string); rev == "" {
+		t.Error("files.changed rev is empty — the listing was taken, the rev must be known")
+	}
+}
+
+// TestFilesChanged_ChangeImmediatelyAfterWatchReplacementIsAnnounced is the
+// set-replacement half of the same defect (spec §5.2): the replaced set's
+// baseline used to reset to "established silently by the first poll after",
+// so a change to a NEWLY added path inside that window was never announced.
+func TestFilesChanged_ChangeImmediatelyAfterWatchReplacementIsAnnounced(t *testing.T) {
+	e := newFilesTestEnv(t)
+	// The first tick after the replacement must not run before the write
+	// to the added path: same cadence widening as the new-watch test.
+	e.ws.filesPollInterval = slowFilesPollInterval
+	sid := e.openSession(t, 1)
+	root := t.TempDir()
+	dir1 := filepath.Join(root, "one")
+	dir2 := filepath.Join(root, "two")
+	if err := os.MkdirAll(dir1, 0o750); err != nil {
+		t.Fatalf("mkdir %s: %v", dir1, err)
+	}
+	if err := os.MkdirAll(dir2, 0o750); err != nil {
+		t.Fatalf("mkdir %s: %v", dir2, err)
+	}
+	bid := e.openBinding(t, sid, root, 2)
+	e.watchDir(t, bid, []string{dir1}, 3)
+
+	// Replace the set with dir2 added. Its baseline must be taken at
+	// replacement time, before the response — not by the first poll after.
+	e.watchDir(t, bid, []string{dir1, dir2}, 4)
+	if err := os.WriteFile(filepath.Join(dir2, "boom.md"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	raw := readNotification(t, e.conn, "files.changed", 5*time.Second)
+	var params map[string]any
+	if err := json.Unmarshal(raw, &params); err != nil {
+		t.Fatalf("files.changed: unmarshal: %v", err)
+	}
+	if params["bindingId"] != bid {
+		t.Errorf("files.changed bindingId = %v, want %s", params["bindingId"], bid)
+	}
+	if params["path"] != dir2 {
+		t.Errorf("files.changed path = %v, want %s", params["path"], dir2)
+	}
+}
+
+// TestFilesChanged_ChangeBeforeWatchIsNotReplayed is the other end of the
+// interval: a change that landed before files.watch must NOT be replayed —
+// inotify semantics, and the reason the fix is not "announce everything".
+// The baseline (taken inside files.watch) includes the pre-existing file,
+// so many poll intervals must pass silently.
+func TestFilesChanged_ChangeBeforeWatchIsNotReplayed(t *testing.T) {
+	e := newFilesTestEnv(t)
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "before.md"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	bid := e.openBinding(t, sid, dir, 2)
+	e.watchDir(t, bid, []string{dir}, 3)
+
+	// Ten poll intervals (20 ms each in tests) of silence.
+	if got := drainFilesChanged(t, e.conn, 200*time.Millisecond); len(got) != 0 {
+		t.Errorf("files.changed fired for a change that predates the watch: %v", got)
+	}
+}
+
 // ── failure paths ─────────────────────────────────────────────────────────
 
 // TestFilesOpen_UnknownSessionRefused: a sessionId that no connection

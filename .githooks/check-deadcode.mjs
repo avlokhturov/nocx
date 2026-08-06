@@ -68,7 +68,12 @@ export function collectDeadcodeViolations() {
     // picks up whenever npm has run. It is not our code and not ours to
     // ratchet — the baseline is defined over this repo's packages only, and
     // `go list ./...` on a machine without node_modules would say the same.
-    if (line.includes('/node_modules/')) continue
+    // Match a leading `node_modules/` too, not only `…/node_modules/`: the
+    // path deadcode prints is relative to ITS working directory, so running
+    // from frontend/ yields `node_modules/flatted/…` with no leading slash
+    // and a `/node_modules/` test silently stops filtering. That cost a
+    // worker a red gate and a paragraph of report on 2026-08-06.
+    if (line.includes('/node_modules/') || line.startsWith('node_modules/')) continue
     const m = UNREACHABLE_RE.exec(line)
     if (!m) {
       throw new Error(`unparseable deadcode output line: ${line}`)

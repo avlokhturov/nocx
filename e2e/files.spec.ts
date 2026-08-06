@@ -225,13 +225,11 @@ test('writing to the file from outside nocx makes the row update without anyone 
   await openFilesAtFixture(page)
   await expect(page.locator('.ui-tree-row__name').filter({ hasText: 'notes.md' })).toBeVisible()
 
-  // The change signal is the backend's digest-poll, and its baseline is the
-  // FIRST listing after files.watch (500 ms cadence) — a change before it
-  // is not replayed (inotify semantics, ws_files.go). So the write must
-  // land AFTER the baseline to be deterministic: wait for the watch
-  // response (the Polling badge) plus one full interval.
+  // The change signal is the backend's digest-poll over the watch set. The
+  // baseline is taken synchronously inside files.watch (ws_files.go), so
+  // the instant the watch response lands (the Polling badge), every change
+  // is delivered — no waiting out a poll interval.
   await expect(page.locator('[data-testid="files-polling-badge"]')).toBeVisible()
-  await page.waitForTimeout(600)
   await expect(page.locator(TREE_ROW).filter({ hasText: 'external.md' })).toHaveCount(0)
 
   // The change comes from the test process, not from the app: the panel's
