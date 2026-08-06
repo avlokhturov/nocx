@@ -15,8 +15,10 @@ package nativeports
 // The exec is bounded: a fixed absolute path (never shelled), a 5s timeout,
 // output capped at 1 MiB.
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -44,6 +46,15 @@ func listeners(ctx context.Context) ([]discovery.Listener, error) {
 	if err != nil {
 		return nil, err
 	}
+	// stderr is captured because exit status alone cannot tell "nothing is
+	// listening" from "I could not look". lsof exits 1 for both, and writes
+	// its reason — a refused /dev/kmem, an unreadable process, a warning it
+	// then gives up on — only to stderr. Discarding it made those identical,
+	// and the module's contract is explicit that they must never be: an empty
+	// result means no listeners were observed, and everything else means
+	// could-not-determine, never "no ports" (discovery.State).
+	var stderr bytes.Buffer
+	proc.Stderr = &stderr
 	if err := proc.Start(); err != nil {
 		if os.IsNotExist(err) {
 			return nil, ErrToolMissing
@@ -62,8 +73,12 @@ func listeners(ctx context.Context) ([]discovery.Listener, error) {
 	if waitErr != nil {
 		var ee *exec.ExitError
 		if errors.As(waitErr, &ee) && ee.ExitCode() == 1 {
-			// lsof exits 1 when nothing matches: a valid empty table,
-			// exactly like the remote ladder's lsof rung.
+			// Exit 1 with a silent stderr is the honest empty table: lsof
+			// looked and matched nothing, exactly like the remote ladder's
+			// lsof rung.
+			if msg := strings.TrimSpace(stderr.String()); msg != "" {
+				return nil, fmt.Errorf("lsof could not read the listener table: %s", firstLines(msg, 3))
+			}
 			return []discovery.Listener{}, nil
 		}
 		return nil, waitErr
@@ -143,4 +158,15 @@ func familyOf(host string) discovery.AddressFamily {
 		return discovery.FamilyIPv6
 	}
 	return discovery.FamilyIPv4
+}
+
+// firstLines keeps an error message short enough to log and to read in a CI
+// failure, without dropping the part that names the cause: lsof puts its
+// reason on the first line or two and can then repeat itself per process.
+func firstLines(s string, n int) string {
+	lines := strings.Split(s, "\n")
+	if len(lines) <= n {
+		return strings.Join(lines, "; ")
+	}
+	return strings.Join(lines[:n], "; ") + fmt.Sprintf(" (+%d more lines)", len(lines)-n)
 }
