@@ -125,7 +125,7 @@ export const test = base.extend<object, { appReady: void }>({
 
 import { spawn, execSync, type ChildProcess } from 'node:child_process'
 import { existsSync, readFileSync, openSync, mkdirSync, copyFileSync } from 'node:fs'
-import { resolve, basename } from 'node:path'
+import { resolve, basename, join } from 'node:path'
 
 import { createHomeIsolation, type HomeIsolation } from './home-isolation'
 
@@ -148,6 +148,35 @@ export interface DisposableRoot {
 export interface BackendEndpoint {
   port: number
   token: string
+}
+
+/**
+ * Where the backend keeps its documents — settings, profiles, the vault — under
+ * a given isolated home.
+ *
+ * A spec that seeds or reads one of those files has to resolve the same
+ * directory internal/storage does, and that directory is NOT the same shape on
+ * every platform: internal/storage/paths.go sends darwin to
+ * `~/Library/Application Support/<app>` via os.UserHomeDir(), and everything
+ * else to os.UserConfigDir(), which with the XDG variables stripped (as the
+ * home boundary strips them) is `~/.config/<app>`.
+ *
+ * connection-password.spec.ts hardcoded the `.config` form with a comment
+ * asserting the XDG reasoning, which is true on Linux and false on macOS. The
+ * spec passed in the bash container and failed on every Mac: it wrote a profile
+ * where nothing read it, the Connections page stayed empty, and the button it
+ * waited for never appeared. Exactly the split e2e/harness.ts's DisposableRoot
+ * comment already records for the vault specs — the second time this repo has
+ * paid for one directory being derived twice.
+ *
+ * The app name carries the `-dev` suffix because e2e never builds with
+ * `-tags release` (internal/storage/appdir_dev.go).
+ */
+export function documentDir(isolatedHome: string): string {
+  const app = 'nocx-dev'
+  return process.platform === 'darwin'
+    ? join(isolatedHome, 'Library', 'Application Support', app)
+    : join(isolatedHome, '.config', app)
 }
 
 /**

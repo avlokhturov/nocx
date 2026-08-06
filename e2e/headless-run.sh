@@ -36,6 +36,13 @@ vite_pid=""
 cleanup() {
   [ -n "$vite_pid" ] && kill "$vite_pid" 2>/dev/null || true
   [ -n "$backend_pid" ] && kill "$backend_pid" 2>/dev/null || true
+  # Wait for them to actually go before removing the directory they are writing
+  # into. Without this the rm races the backend's last writes and reports
+  # "Directory not empty" — observed on macOS, where the shell integration is
+  # still flushing into $HOME as the process dies. `wait` on a killed child
+  # returns non-zero, hence the guard.
+  [ -n "$vite_pid" ] && wait "$vite_pid" 2>/dev/null || true
+  [ -n "$backend_pid" ] && wait "$backend_pid" 2>/dev/null || true
   rm -rf "$work"
 }
 trap cleanup EXIT INT TERM
