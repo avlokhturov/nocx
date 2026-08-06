@@ -33,12 +33,12 @@ What does not exist is typing a host that is in **neither** the saved profiles
 
 The parser is already written. `parseQuickConnect` (`profiles.ts:120`) handles
 `user@host:port`, the `ssh://` scheme and bracketed IPv6. Its **only** caller is
-`connections.tsx:1304`, which uses it to prefill the *new profile form*. So
+`connections.tsx:1304`, which uses it to prefill the _new profile form_. So
 typing a connection string today means "define a connection", never "connect to
 it" — the parser for this feature exists and points at the wrong door.
 
-The owner asked for it in one line: *a quick connect without adding a
-connection*.
+The owner asked for it in one line: _a quick connect without adding a
+connection_.
 
 ## What to build
 

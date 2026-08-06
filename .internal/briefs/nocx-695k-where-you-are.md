@@ -15,8 +15,8 @@ Three reports from the owner on 2026-08-04, one root cause.
 Every surface that names a place reads a fact about the **tab's lifetime** — the session
 kind, the sticky integrated flag, a title the remote shell set once — when the thing it
 must describe is the **environment currently on stdin**. `terminal-content.ts`'s own
-`_mountRail` states the false premise out loud: *"a local shell's capability is static
-(always our own, always integrated)"*. The screenshot is its counterexample.
+`_mountRail` states the false premise out loud: _"a local shell's capability is static
+(always our own, always integrated)"_. The screenshot is its counterexample.
 
 ## The boundaries — what they already decided
 
@@ -51,7 +51,7 @@ offer is invisible and cheap, a wrong one is noise on every `sleep 5`.
 
 Today `integrateShell()` refuses this case from **both** named authorisations: the
 integrated path needs `PROMPT_READY` (we are `RUNNING_RAW`), and the markerless path needs
-`!_shellIntegrated`, which the *local* shell set true. Section A fixes the second.
+`!_shellIntegrated`, which the _local_ shell set true. Section A fixes the second.
 
 Then:
 

@@ -23,10 +23,10 @@ descriptions below are what they showed.
 
 ## A — `nocx-wzc4.8`: the local machine listens too, and we ask the kernel
 
-Owner: *"почему для локального шелл мы не показываем порты? Давай показывать."*
-Then, on reading the first version of this brief: *"Как мы узнаем порты в
+Owner: _"почему для локального шелл мы не показываем порты? Давай показывать."_
+Then, on reading the first version of this brief: _"Как мы узнаем порты в
 зависимости от ОС? У нас же есть абстракция? Нативные вызовы ОС должны идти
-отдельным модулем."* They are right, and the first version of this section was
+отдельным модулем."_ They are right, and the first version of this section was
 wrong. What follows replaces it.
 
 A local tab renders "No active connection". The machine you are sitting at

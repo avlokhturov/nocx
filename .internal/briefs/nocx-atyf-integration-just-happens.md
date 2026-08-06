@@ -15,8 +15,8 @@ label; the editor **already** has a chip row saying where you are (`nocx-editor-
 `nocx-editor-cwd` in `frontend/src/editor.ts`), so the capability chip is a second
 vocabulary for one question in a second place; its `FloatingPanel` popover renders as a
 full-width banner that pushes the pane down; on a tab with no editor it floats bottom-left
-over the terminal; and clicking "Integrate this shell" produced the toast *"only available
-from a trusted prompt"* — an offered action the gate refused.
+over the terminal; and clicking "Integrate this shell" produced the toast _"only available
+from a trusted prompt"_ — an offered action the gate refused.
 
 Codex reviewed it on 2026-08-04. Its diagnosis and its two findings are recorded in the
 epic and in `.1`, `.3` and `.4`. Read them; they are the design.

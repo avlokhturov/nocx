@@ -45,7 +45,7 @@ to it.
 
 The middle path, where neither instinct loses: a **distinct** reason value —
 `unknown`, or whatever you can defend — that is visible in the product, plus a
-loud log. That is *not* the silent `ReasonNone` fallback that was correctly
+loud log. That is _not_ the silent `ReasonNone` fallback that was correctly
 rejected; it says "integration did not happen and I cannot tell you why", which
 is true and useful, rather than "integration succeeded", which is false.
 

@@ -43,13 +43,13 @@ be the same story.
 `internal/ssh` declares **its own** `ShellKind`, `RefusalReason`,
 `LaunchOptions` and `RemoteLauncher`, following the `RemoteInstaller` precedent
 of declaring the interface at the consumer. `internal/shellintegration` declares
-its own set with the same names. Go interface satisfaction needs *identical*
+its own set with the same names. Go interface satisfaction needs _identical_
 named types, so `shellintegration.NewRemoteLauncher()` does **not** satisfy
 `ssh.RemoteLauncher`.
 
 **Write a small adapter at the composition root.** That is where wiring belongs
 (`AGENTS.md`: every module behind an interface, wired at one composition root),
-and it keeps `ReasonRemoteCommand` in the ssh layer where it is *discovered* —
+and it keeps `ReasonRemoteCommand` in the ssh layer where it is _discovered_ —
 from `ssh_config` — rather than pushing an ssh-config concern into the
 launcher's vocabulary. Do **not** "fix" this by making one package import the
 other's types; that was considered and rejected.

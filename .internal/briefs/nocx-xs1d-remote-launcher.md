@@ -81,7 +81,7 @@ type RemoteLauncher interface {
 
 The explicit `/bin/bash -c` is the point, and it was measured: `bash --rcfile
 <(...)` is a **bashism**. Under `dash` it dies with `Syntax error: "("
-unexpected`, and sshd hands a remote command to the user's *login* shell, which
+unexpected`, and sshd hands a remote command to the user's _login_ shell, which
 may be dash, ash, csh or a restricted shell. Never emit bare process
 substitution and hope.
 
@@ -95,13 +95,13 @@ substitution and hope.
 
 ## zsh — a transient directory, and it must erase itself
 
-zsh has no `--rcfile`. `ZDOTDIR` names a *directory* and cannot name a pipe, so
+zsh has no `--rcfile`. `ZDOTDIR` names a _directory_ and cannot name a pipe, so
 the transient directory is structural, not a shortcut. `umask 077`, `mkdir` it,
 write `.zshrc`, `export ZDOTDIR`, `exec -l zsh`.
 
 The generated `.zshrc` must, in this order: capture the bootstrap dir and the
 original `ZDOTDIR`; **remove its own file and directory before any user code
-runs**; restore `ZDOTDIR` — preserving the original *unset-versus-set* state,
+runs**; restore `ZDOTDIR` — preserving the original _unset-versus-set_ state,
 not merely its string value; source the user's real startup file from the
 original location; and only then install nocx's hooks. A trap must cover a
 partial startup.
@@ -114,7 +114,7 @@ background reading. The two that bite hardest:
 - **User startup wins.** If the user's rcfile `exec`s, `exit`s or returns early,
   nocx does not start a replacement shell and does not inject afterwards.
   Integration simply does not happen.
-- **nocx installs last.** ADR-0006 requires the prompt overlay to go in *after*
+- **nocx installs last.** ADR-0006 requires the prompt overlay to go in _after_
   prompt initialisation, or a framework regenerating `PS1` clobbers it.
 
 Do not promise bit-for-bit environment identity. Promise, and test, a declared

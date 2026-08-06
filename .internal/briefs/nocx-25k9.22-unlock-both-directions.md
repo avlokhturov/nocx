@@ -25,7 +25,7 @@ on the response path cannot reach that, because there is no response to patch.
 
 ## The shape
 
-A **second direction**, not a patch on the first: the backend must be able to *request* an
+A **second direction**, not a patch on the first: the backend must be able to _request_ an
 unlock — a server-to-client notification naming **why** it needs one — which the renderer
 turns into the **same dialog through the same code**. One dialog, one code path, two ways
 in. Then history at startup, and anything like it later, is covered by construction rather
@@ -40,7 +40,7 @@ than by remembering.
   into the transport directly.
 - **ADR-0011** (storage capabilities and secret references), **ADR-0016** (a secret owns
   its name), **ADR-0017** (a connection references a secret) — read them before you shape
-  the payload. The notification names *why* the unlock is needed; it does not carry secret
+  the payload. The notification names _why_ the unlock is needed; it does not carry secret
   material, a secret's value, or anything that would put one in a log.
 - **ADR-0021** — secrets in the prompt. Nothing in this path gets logged.
 - **The wire is a party to the contract** (AGENTS.md testing rule 5). A new server→client

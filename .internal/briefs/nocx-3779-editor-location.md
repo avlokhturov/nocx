@@ -59,7 +59,7 @@ bordered box. Nothing extra: the absence is the information.
 `.internal/specs/2026-08-03-nocxify-design.md` §8.2 is tracked and in this
 worktree. Read it. Its binding sentence:
 
-> when markers stop, the rail says *inner context unknown* immediately. It must
+> when markers stop, the rail says _inner context unknown_ immediately. It must
 > never keep rendering the last trusted cwd as though it were current.
 
 That is the whole point of the feature. A chip that keeps showing

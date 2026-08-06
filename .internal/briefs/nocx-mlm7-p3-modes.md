@@ -17,11 +17,11 @@ automatically, ask only for the relay binary** — makes the old middle value me
 
 Three axes, never collapsed:
 
-| axis | values | who owns it |
-|---|---|---|
-| desired mode | `raw` \| `script` \| `relay` | profile / group / global, through the existing cascade |
-| observed delivery | `none` \| `bootstrap-script` \| `installed-script` \| `relay` | the renderer, from what happened this session |
-| relay consent | `unknown` \| `granted` \| `denied` | persisted per destination; script mode never reads it |
+| axis              | values                                                        | who owns it                                            |
+| ----------------- | ------------------------------------------------------------- | ------------------------------------------------------ |
+| desired mode      | `raw` \| `script` \| `relay`                                  | profile / group / global, through the existing cascade |
+| observed delivery | `none` \| `bootstrap-script` \| `installed-script` \| `relay` | the renderer, from what happened this session          |
+| relay consent     | `unknown` \| `granted` \| `denied`                            | persisted per destination; script mode never reads it  |
 
 **Default is `script`.** `raw` refuses every rewrite and every remote write. `relay` is
 inert in this epic beyond needing consent to be `granted`.
@@ -36,7 +36,7 @@ setting, no "if the profile still says `ask`" branch anywhere. Delete the old en
 - `contracts/open.*`, `contracts/profiles.effective.*`, the generated TypeScript, and the
   conformance tests on both sides
 
-**One shared file, one small edit:** you may make the *minimal* adaptation inside
+**One shared file, one small edit:** you may make the _minimal_ adaptation inside
 `frontend/src/terminal-content.ts` needed to keep it compiling against the new enum — the
 policy check at submit. Nothing else in that file. After your change it belongs to P9 alone,
 so keep the edit small enough to describe in one sentence in your `worker_done`.

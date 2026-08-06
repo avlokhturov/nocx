@@ -37,10 +37,10 @@ bootstraps the shell currently at the prompt using the in-band fallback.
 
 ## The fences — these are the task
 
-**1. Only inside a window we already own.** Permitted *only* while nocx still
+**1. Only inside a window we already own.** Permitted _only_ while nocx still
 holds a **trusted A→B prompt from the current integrated shell**. Never after
 markers have already disappeared. The reason is exact and worth internalising:
-consent changes *authorisation*, not the *identity of the foreground process*.
+consent changes _authorisation_, not the _identity of the foreground process_.
 A user clicking "integrate" does not make the thing reading stdin a shell —
 if it is `vim`, we would type 10 KB into their file. `frontend/src/input-state.ts`
 already models this (`PROMPT_READY`, `trusted`); use it, and refuse otherwise
@@ -52,7 +52,7 @@ and let **Esc cancel**. No user keystroke and no bootstrap byte may interleave �
 that is how a half-typed command becomes a half-executed one.
 
 **3. `stty -g`, never `stty sane`.** Capture the exact prior termios and restore
-*that*. `stty sane` is not restoration: it overwrites the user's legitimate
+_that_. `stty sane` is not restoration: it overwrites the user's legitimate
 custom modes. Restoration must complete before any user startup file or
 input-reading command runs, and **every** cancellation path must continue the
 restore rather than abandon the stream — a user left typing blind, including

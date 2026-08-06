@@ -13,10 +13,10 @@ byte settle it.
 ADR-0004:24 rejects `stty -echo` for two named reasons, and the coordinator's
 reading is that neither reaches your window:
 
-- *"readline/zle do their own redisplay"* — readline is not running. The shell is
+- _"readline/zle do their own redisplay"_ — readline is not running. The shell is
   executing your wrapper as a foreground command; there is no line editor to
   fight.
-- *"leaked termios state breaks child processes"* — nothing leaks. `stty "$saved"`
+- _"leaked termios state breaks child processes"_ — nothing leaks. `stty "$saved"`
   restores the exact prior state before any user code runs, and your pty tests
   already prove it bit-exact on success, on cancel and on fail-open.
 
@@ -32,7 +32,7 @@ path exactly as you built it. Two things must not weaken:
 - **The restore is still `stty "$saved"`, never `stty sane`.** With `-echo` in the
   window, a restore that misses is no longer "a bit odd" — it is a terminal the
   user cannot see themselves typing into. Add an assertion that `ECHO` is set
-  again after the window on *every* path you already test, including the ones
+  again after the window on _every_ path you already test, including the ones
   where delivery fails.
 - **Fail-open still wins.** If `stty` itself is missing or errors, the correct
   outcome is an unintegrated but usable shell, not a half-configured terminal.

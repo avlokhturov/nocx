@@ -39,8 +39,8 @@ else `ssh -G` prints is read and thrown away.
 Two of the discarded directives now matter.
 
 **`RemoteCommand`.** When a destination sets it, OpenSSH refuses to also run a
-command-line remote command and aborts with *"Cannot execute command-line and
-remote command."* The upcoming shell-integration launcher **is** a command-line
+command-line remote command and aborts with _"Cannot execute command-line and
+remote command."_ The upcoming shell-integration launcher **is** a command-line
 remote command, so on such a host integration is structurally impossible. We must
 detect that before connecting, fall back to the configured behaviour, and report
 the reason — rather than break a connection that works fine today.

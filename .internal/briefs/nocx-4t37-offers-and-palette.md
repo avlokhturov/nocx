@@ -2,9 +2,9 @@
 
 Two workers. Ground rules first, then only your own section.
 
-The owner's words, 2026-08-04: *"зачем нам ручная интеграция? Вот warp когда
+The owner's words, 2026-08-04: _"зачем нам ручная интеграция? Вот warp когда
 входишь на сервер без warpify предлагает на него его поставить… В quick connect
-оно зачем? Это странно."*
+оно зачем? Это странно."_
 
 **The principle both sections serve: a palette answers what you know you want;
 an offer answers what you do not know exists.** Integration is the second kind —
@@ -36,10 +36,10 @@ whole defect.
 the "prefix-scoped modes" framing, this replaces it — prefixes are not the
 model.**
 
-The owner: *"quick connect должен превратиться в некий спотлайт, как у raycast,
+The owner: _"quick connect должен превратиться в некий спотлайт, как у raycast,
 там выбираешь что сделать и прямо в этом окне выбираешь сервер. А quick connect
 по стрелке вниз должен остаться в текущем виде со списком серверов — это быстрый
-способ подключиться."*
+способ подключиться."_
 
 Two surfaces, two jobs, and the second one already exists.
 
@@ -72,7 +72,7 @@ Results
 - Prefixes may exist as an escape hatch for someone who wants to narrow to one
   kind. They are not how a normal user reaches anything.
 
-### The part that matters most: choosing the server *without leaving the window*
+### The part that matters most: choosing the server _without leaving the window_
 
 A command that needs a target **drills in inside the same surface**. "Forward a
 port" does not open a dialog and does not dead-end — the list becomes the list
@@ -118,9 +118,9 @@ host list with no commands in it.
 **This section was rewritten after the owner's second reading. If you were
 dispatched against the earlier "offer" framing, this replaces it.**
 
-The owner: *"мы не оставляем следов на сервере сейчас, то есть это ничего не
+The owner: _"мы не оставляем следов на сервере сейчас, то есть это ничего не
 ломает на сервере. Может быть тогда просто сделать изменение режима (терминал
-или nocxify или relay)?"*
+или nocxify или relay)?"_
 
 That reframing is right, and the reason is worth stating because it is what
 makes the design choice: **the choice is cheap and reversible, so it is a
@@ -129,7 +129,7 @@ consequences you cannot undo. Turning integration on writes nothing that
 persists — the launcher hands bash an rc file through a pipe, zsh a transient
 `ZDOTDIR` directory erased before any user code runs, and in-band delivery a
 `mktemp` file removed by the same one-liner that sourced it. The legacy SFTP
-installer that *would* write rc gates is opt-in and wired nowhere at the
+installer that _would_ write rc gates is opt-in and wired nowhere at the
 composition root (`ssh_real.go:549`, `internal/app/app.go`). So there is nothing
 to warn about and nothing to regret.
 

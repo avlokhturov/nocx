@@ -37,12 +37,12 @@ The far shell is genuinely unknown before connecting, and the obvious shortcuts
 are barred. AD-6 forbids sniffing the byte stream. A probe over a second exec
 channel is the port-discovery mechanism, it costs a round trip, and it is not
 always available (MaxSessions, ForceCommand, restricted shells). `ssh -G` knows
-about the *client's* config and nothing about the remote login shell.
+about the _client's_ config and nothing about the remote login shell.
 
 ## The candidate that costs nothing, and its caveats
 
 sshd hands a remote command to the user's **login shell**. So the shell that
-executes our start command *is* the shell we are trying to identify, and it will
+executes our start command _is_ the shell we are trying to identify, and it will
 tell us for free: `$BASH_VERSION` is set when bash runs it, `$ZSH_VERSION` when
 zsh does, neither when dash/ash does. No probe, no round trip, no second channel.
 The in-band worker built exactly this dispatcher for a different delivery path —

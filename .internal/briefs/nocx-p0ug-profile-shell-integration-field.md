@@ -11,7 +11,7 @@ You are a supervised worker. Read this whole file before touching anything.
   formatting sweep. Formatting is a final single-worker wave.
 - **Do run** `go build ./...`, `go vet ./internal/profile/...`, and — because you
   touch generated frontend types — `cd frontend && ./node_modules/.bin/tsc
-  --noEmit`. The type-check is **not** a repo-wide gate for these purposes and is
+--noEmit`. The type-check is **not** a repo-wide gate for these purposes and is
   not optional: vitest transpiles without type-checking, so a suite can be green
   while your file does not compile. An error in a file you do not own: **report
   it, do not fix it**.
@@ -33,7 +33,7 @@ Read `.internal/specs/2026-08-03-nocxify-design.md` §5.1 — tracked, in this
 worktree. Short version: nocx is growing shell integration for SSH sessions, and
 "should this connection be integrated automatically, only on request, or never?"
 must be a property of the connection rather than a guess. This task adds and
-persists that field. It does not yet *do* anything — the launcher that consumes
+persists that field. It does not yet _do_ anything — the launcher that consumes
 it is a later task. Persisting and resolving it correctly is the whole job.
 
 ## What to build

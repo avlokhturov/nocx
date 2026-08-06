@@ -87,7 +87,7 @@ Assert at minimum:
 
 - under `dash`, a succeeding command yields A, B and D with status `0`;
 - a failing command yields D with the **real** nonzero status;
-- the status is still correct on the *third* prompt, not only the first (this is
+- the status is still correct on the _third_ prompt, not only the first (this is
   what catches the double-quote freeze);
 - OSC 7 carries an absolute path and follows a `cd`;
 - **no C marker is ever emitted** — asserting the absence is part of the contract,

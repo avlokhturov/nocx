@@ -24,7 +24,7 @@ the second connection cheaper than the first.
 1. **A fresh environment id per attempt.** Today `ws_shell_launcher.go` passes the tab's
    stable session id, so two `ssh` attempts from one tab are indistinguishable and P2's
    tracker cannot tell a stale passport from a live one. Mint it in the planner, return it in
-   the RPC result, and let the renderer register it as expected *before* the bytes leave.
+   the RPC result, and let the renderer register it as expected _before_ the bytes leave.
    P6 also reports that nothing in the product sets `NOCX_ENVIRONMENT_ID` yet, and that
    `NOCX_SESSION_ID` is not carried on the compact path — both are yours.
 
@@ -34,7 +34,7 @@ the second connection cheaper than the first.
    host, so **say in your commit that you are narrowing it and why**.
 
 3. **`nocx-qwhp`: a failed oracle must refuse.** `ws_shell_launcher.go` refuses only when
-   `ssh -G` succeeds *and* reports a `RemoteCommand`; when the oracle itself fails the code
+   `ssh -G` succeeds _and_ reports a `RemoteCommand`; when the oracle itself fails the code
    rewrites anyway. ADR-0004 §1 says the opposite. This is a two-line fix with a test that
    fails first.
 

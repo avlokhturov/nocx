@@ -50,7 +50,7 @@ The timers are yours to build and each exists for a reason:
 ## Render the states as facts, not as blanks
 
 `internal/discovery` returns five result states and three-valued process
-evidence, and the whole point was that the user learns *why*:
+evidence, and the whole point was that the user learns _why_:
 
 - `permission-denied` on the process column is **"run as root to see owners"**,
   not an empty cell. Measured on this machine: non-root `ss` named 3 of 9

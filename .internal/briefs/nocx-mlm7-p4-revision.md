@@ -38,7 +38,7 @@ You emit, faithfully following the spec as it was written:
 if [ -x ~/.nocx/launch ]; then ssh -t <dest> '~/.nocx/launch <id>'; else <typed>; fi
 ```
 
-That `[ -x ~/.nocx/launch ]` runs **locally**. It asks this machine whether *it* has a
+That `[ -x ~/.nocx/launch ]` runs **locally**. It asks this machine whether _it_ has a
 bundle, which is unrelated to the host being connected to — and on a developer's machine
 `~/.nocx` exists as nocx's own local staging directory, so the answer is not even reliably
 "no". The spec was wrong; it has been corrected and committed, so `git pull` is not needed

@@ -13,7 +13,7 @@ You are a supervised worker. Read this whole file before touching anything.
   on a file that does not compile.
 - You own `frontend/src/suggest/` and its tests. **Another worker is editing
   `frontend/src/quick-connect.tsx` and `frontend/src/profiles.ts` in a separate
-  worktree — do not edit those two.** You may *read* them; you will need to.
+  worktree — do not edit those two.** You may _read_ them; you will need to.
   If you both need `main.tsx`, keep your edit minimal and say so in your report.
 - Report **numbers, not adjectives**. Heartbeat at every phase change.
 
@@ -28,8 +28,8 @@ You are a supervised worker. Read this whole file before touching anything.
 asking for completion offers shell history and filesystem paths — the two things
 that are never the answer in that position.
 
-The owner asked for exactly this, and named the source: *completion for the ssh
-command, showing what quick connect shows*.
+The owner asked for exactly this, and named the source: _completion for the ssh
+command, showing what quick connect shows_.
 
 ## The data already exists — route it, do not rebuild it
 

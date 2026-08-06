@@ -37,7 +37,7 @@ Do not re-decide any of these. Read them before you design.
   Do not pretend the two environments are the same.
 - **ADR-0020** — the lane. A second execution channel that is not the user's terminal is
   an established primitive here, not something you are inventing.
-- **ADR-0015** — the precedent for the whole shape: when an authority exists, *ask it*
+- **ADR-0015** — the precedent for the whole shape: when an authority exists, _ask it_
   (`ssh -G`) rather than reimplement its rules. bash's completion machinery is that
   authority. There is no cheap oracle — checked 2026-08-02, `cd` has no completion
   spec at all and `rmdir`'s is `complete -F _comp_complete_longopt`, a function **name**

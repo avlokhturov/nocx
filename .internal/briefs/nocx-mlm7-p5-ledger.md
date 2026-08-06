@@ -49,7 +49,7 @@ and test it directly), `ssh-transition.ts` (P4), or `capability.ts` (P3).
 
 ## Deliberately not yours
 
-Deciding *when* entry happened — that is the passport (P2) consumed by P9. You expose
+Deciding _when_ entry happened — that is the passport (P2) consumed by P9. You expose
 `enter()`, `completeTransition(exitCode)` and whatever the state machine needs; your tests
 call them directly.
 

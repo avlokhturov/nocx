@@ -90,7 +90,7 @@ satisfy it. Do not stub the concrete implementation.
 3. **The `RemoteCommand` refusal.** `HostConfig` now carries `RemoteCommand`
    (landed in this epic as `nocx-difd`). When it is non-empty, OpenSSH refuses to
    also run a command-line remote command and aborts the connection with
-   *"Cannot execute command-line and remote command."* So: send **no** launcher,
+   _"Cannot execute command-line and remote command."_ So: send **no** launcher,
    run the configured behaviour, and report `ReasonRemoteCommand`. Note that
    `ssh -G` renders "unset" either as an absent line or as the literal `none`
    depending on version, and both already collapse to the empty string in

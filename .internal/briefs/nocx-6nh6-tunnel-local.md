@@ -52,7 +52,7 @@ implementation. The spec §7 lists the fields; carry all of them.
 5. **Own your pool handle.** `internal/ssh/pool.go` is ref-counted and the
    tab-owned reference is released when the shell channel closes
    (`ssh_real.go:148`, `pool.go:299`). A forward that borrows the shell's
-   reference dies when that tab closes — including when a *different* tab is
+   reference dies when that tab closes — including when a _different_ tab is
    using the tunnel. Take your own handle; release it when the forward stops.
 
 Default bind is **`127.0.0.1`**, never `0.0.0.0`. `localhost` is ambiguous

@@ -36,9 +36,9 @@ and `bd memories e2e` show how it is started. A real OpenSSH client and server, 
    - when does the control socket exist and answer `-O check`?
    - when does the remote command start relative to that?
    - how long does pushing 35 KB over the master take?
-   Run it 20 times and report the distribution, not one lucky number. The remote bootstrap
-   has to wait for the file; your numbers set that timeout and tell us how often it would
-   fire.
+     Run it 20 times and report the distribution, not one lucky number. The remote bootstrap
+     has to wait for the file; your numbers set that timeout and tell us how often it would
+     fire.
 
 3. **Failure modes**, each with the observed behaviour and whether fail-open is reachable:
    - `ControlMaster no` or `ControlPath none` in the user's own config — does our `-o`

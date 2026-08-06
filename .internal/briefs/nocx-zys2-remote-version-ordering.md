@@ -50,7 +50,7 @@ shape and its reasoning — do not invent a third pattern. Read
 Note that the two functions differ in how they report a partial failure (the
 local one logs a warning per file and carries a `gatesOK` flag). Keep the remote
 one's existing best-effort logging contract — errors are logged, not fatal — and
-change only *when* the marker is written.
+change only _when_ the marker is written.
 
 ## Test first
 

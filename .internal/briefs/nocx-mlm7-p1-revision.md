@@ -17,7 +17,7 @@ internal/shellintegration/publisher.go:208, 224, 237, 249 — shadow: declaratio
 ```
 
 `Publish` has **named return values** (`res PublishResult, err error`). Every `if err := …`
-inside it declares a *new* `err`, so the named one keeps whatever it had. If any cleanup or
+inside it declares a _new_ `err`, so the named one keeps whatever it had. If any cleanup or
 `defer` in that function reads or writes the named `err` — and a transactional publisher with
 a lock release is exactly the shape that does — then a failure can be reported as a
 successful publish, or a lock release error can overwrite the real cause.
