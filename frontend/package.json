@@ -36,6 +36,7 @@
   },
   "devDependencies": {
     "@solidjs/testing-library": "^0.8.10",
+    "@types/node": "26.1.2",
     "css-tree": "^3.2.1",
     "eslint": "^9.39.5",
     "eslint-config-prettier": "^9.1.2",
