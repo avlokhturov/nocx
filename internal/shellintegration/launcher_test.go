@@ -620,3 +620,56 @@ func assertNoTransientDir(t *testing.T, tmp string) {
 		t.Errorf("transient directories survived the session: %v", left)
 	}
 }
+
+// TestZshLauncher_TransientDirRemovedDespiteAForeignFile is the case the
+// cleanup used to get wrong, and the one CI found.
+//
+// The launcher points ZDOTDIR at a directory it created with mktemp. By the
+// time the generated .zshrc runs, zsh has already sourced /etc/zshenv,
+// /etc/zshrc and zshenv — and any of those may write into ZDOTDIR, because
+// that is what ZDOTDIR means. Debian and Ubuntu ship an /etc/zsh/zshrc that
+// runs compinit, and compinit's .zcompdump lands there.
+//
+// The old cleanup deleted the two files the launcher writes and then rmdir'd,
+// which fails on a non-empty directory: every session on those distributions
+// left a directory in TMPDIR and printed "could not remove transient dir" on
+// the user's terminal. The existing flow test cannot catch it — nothing writes
+// a stray file on a developer's machine, so it passes with the bug present.
+// This one plants the stray file, which is the whole condition.
+func TestZshLauncher_TransientDirRemovedDespiteAForeignFile(t *testing.T) {
+	zsh := requireShell(t, "zsh")
+
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, ".zshrc"), []byte("echo USER_RC_RAN\n"), 0o600); err != nil {
+		t.Fatalf("write user rc: %v", err)
+	}
+
+	// The name has to match the shape the launcher's own mktemp produces:
+	// the cleanup is guarded on it precisely so an unexpected path is left
+	// alone, and a test that used any other name would be asserting nothing.
+	bootstrap := filepath.Join(t.TempDir(), "nocx-zsh.AbC123")
+	if err := os.MkdirAll(bootstrap, 0o700); err != nil {
+		t.Fatalf("mkdir bootstrap: %v", err)
+	}
+	rc := zshRcfile(launcherEnvBlock(LaunchOptions{Enhanced: true, SessionID: "s1"}), zshScript)
+	if err := os.WriteFile(filepath.Join(bootstrap, ".zshrc"), []byte(rc), 0o600); err != nil {
+		t.Fatalf("write bootstrap rc: %v", err)
+	}
+	// Stand-in for compinit's dump: written by something that ran before the
+	// generated rc, which is the only thing that matters about it.
+	if err := os.WriteFile(filepath.Join(bootstrap, ".zcompdump"), []byte("# stray\n"), 0o600); err != nil {
+		t.Fatalf("write stray file: %v", err)
+	}
+
+	out := runLauncherOnPTY(t, zsh, "exec "+zsh+" -l",
+		[]string{"HOME=" + home, "ZDOTDIR=" + bootstrap, "TERM=xterm"},
+		"exit")
+
+	if _, err := os.Stat(bootstrap); !os.IsNotExist(err) {
+		t.Errorf("the transient dir survived because a foreign file was in it: %s (stat err %v); output:\n%s",
+			bootstrap, err, out)
+	}
+	if strings.Contains(out, "could not remove transient dir") {
+		t.Errorf("the launcher told the user it could not clean up after itself:\n%s", out)
+	}
+}

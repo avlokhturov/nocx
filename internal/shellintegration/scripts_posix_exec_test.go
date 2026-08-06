@@ -3,6 +3,7 @@ package shellintegration
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -20,8 +21,14 @@ import (
 // it is forbidden.
 func TestPosixIntegration_EmitsMarkersFromPS1(t *testing.T) {
 	script := writeScriptFile(t, "nocx.posix", posixScript)
-	dir1 := t.TempDir()
-	dir2 := t.TempDir()
+	// Resolved, because the shell reports the PHYSICAL directory and this test
+	// compares its OSC 7 against a path it built itself. On macOS t.TempDir()
+	// hands back /var/folders/..., which is a symlink to /private/var/folders/...
+	// — so the shell said /private/var and the test wanted /var, and the same
+	// assertion passed on linux where nothing redirects /var. Two derivations of
+	// one path, agreeing everywhere except the platform we ship (nocx-0ije).
+	dir1 := resolvedTempDir(t)
+	dir2 := resolvedTempDir(t)
 
 	cases := []struct {
 		name  string
@@ -265,4 +272,15 @@ exit
 			}
 		})
 	}
+}
+
+// resolvedTempDir is t.TempDir() with every symlink resolved, so a path this
+// test builds can be compared with a path a shell reports.
+func resolvedTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve temp dir: %v", err)
+	}
+	return dir
 }

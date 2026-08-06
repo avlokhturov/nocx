@@ -40,7 +40,7 @@ __nocx_bootstrap="${ZDOTDIR}"
 # reaches the removal below — a parse error in this very file, an exit
 # during /etc/zshenv or zshenv, anything. The user's rc may replace the
 # EXIT trap later; the directory is already gone by then.
-trap "rm -f \"$__nocx_bootstrap/.zshrc\" \"$__nocx_bootstrap/.zsh_history\" 2>/dev/null; rmdir \"$__nocx_bootstrap\" 2>/dev/null" EXIT
+trap "[[ \"$__nocx_bootstrap\" == */nocx-zsh.?????? ]] && rm -rf \"$__nocx_bootstrap\" 2>/dev/null" EXIT
 
 # Restore the original ZDOTDIR state (set vs unset), then drop the carrier
 # variables before any user code runs.
@@ -54,8 +54,23 @@ unset NOCX_ZDOTDIR_WAS_SET NOCX_ZDOTDIR_ORIG
 
 # Erase the transient directory before any user code runs (D1: the only
 # write the launcher makes, and it is gone before the user's rc).
-rm -f "$__nocx_bootstrap/.zshrc" "$__nocx_bootstrap/.zsh_history" 2>/dev/null
-rmdir "$__nocx_bootstrap" 2>/dev/null || print -u2 "nocx: could not remove transient dir $__nocx_bootstrap"
+#
+# Removed whole, not file by file. This used to delete the two files the
+# launcher writes and then rmdir, which assumed nothing else would ever be in
+# there — and something is: zsh has already run /etc/zshenv, /etc/zshrc and
+# zshenv by this point, and any of them may write to ZDOTDIR, which is exactly
+# where this transient directory is pointing. Debian and Ubuntu ship an
+# /etc/zsh/zshrc that runs compinit, whose .zcompdump lands here; rmdir then
+# failed and every session left a directory in TMPDIR and a complaint on the
+# user's terminal.
+#
+# The guard is the point, not the rm: the path came from the launcher's own
+# mktemp -d of "${TMPDIR:-/tmp}/nocx-zsh.XXXXXX", so matching that shape before
+# a recursive delete means an empty or unexpected variable removes nothing.
+if [[ "$__nocx_bootstrap" == */nocx-zsh.?????? ]]; then
+    rm -rf "$__nocx_bootstrap" 2>/dev/null \
+        || print -u2 "nocx: could not remove transient dir $__nocx_bootstrap"
+fi
 
 @ENV@
 

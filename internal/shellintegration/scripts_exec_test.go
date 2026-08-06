@@ -482,7 +482,20 @@ func TestBashSnapshotEmitsHelloThenSnapshot(t *testing.T) {
 	bash := requireShell(t, "bash")
 	script := writeScriptFile(t, "nocx.bash", bashScript)
 
+	// compgen is stubbed FAST, the mirror of what
+	// TestBashSnapshotFirstPromptBoundedWait does by stubbing it slow.
+	//
+	// What is asserted below is an ORDER — the snapshot lands inside the first
+	// prompt cycle — and that order only exists while the source-time job beats
+	// the 250 ms grace period the script grants it. Past that the product
+	// deliberately defers the snapshot to a later prompt, so on a machine where
+	// the real compgen is slow this test was measuring the runner rather than
+	// the hook, and it duly failed on CI while passing on every developer's
+	// laptop (nocx-0ije). Stubbing removes the machine from the question. The
+	// payload assertion still wants pwd, so the stub emits it.
 	prog := `
+enable -n compgen
+compgen() { builtin printf '%s\n' cd echo pwd true; }
 export NOCX_SHELL_INTEGRATION=1
 source "$1"
 __nocx_prompt_command
@@ -790,7 +803,17 @@ func TestBashSnapshotArrivesBeforeFirstPrompt(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(nocxDir, "shell-integration.bash"), []byte(bashScript), 0o600); err != nil {
 		t.Fatalf("write hook: %v", err)
 	}
-	gate := "# nocx terminal shell integration\n" +
+	// The stub goes in FIRST, before the gate line sources the integration, so
+	// the script's source-time snapshot job picks up the function rather than
+	// the builtin. Same reason as the sibling test: this case asserts that the
+	// snapshot reaches the terminal before the first prompt is usable, which is
+	// an ordering guarantee that only holds while compgen finishes inside the
+	// script's 250 ms grace period. A real compgen on a loaded runner does not,
+	// and the product is right to defer — so the assertion has to be freed from
+	// the machine to be about the hook at all (nocx-0ije).
+	gate := "compgen() { builtin printf '%s\\n' cd echo pwd true; }\n" +
+		"enable -n compgen\n" +
+		"# nocx terminal shell integration\n" +
 		`[[ -n "$NOCX_SHELL_INTEGRATION" ]] && source "$HOME/.nocx/shell-integration.bash"` + "\n"
 	if err := os.WriteFile(filepath.Join(home, ".bashrc"), []byte(gate), 0o600); err != nil {
 		t.Fatalf("write .bashrc: %v", err)
