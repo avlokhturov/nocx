@@ -44,6 +44,9 @@ import { createFilesView, FILES_VIEW_ID } from './files/files-view'
 import { createFilesPanelServices, type FilesPanelServices } from './files/files-client'
 import type { ActiveOrigin } from './tab-content'
 import type { TunnelOpenResult } from './generated/tunnel.open'
+import { HostKeyDialog } from './host-key-dialog'
+import { OpenHostKeyRequestQueue, type OpenHostKeyRequest } from './host-key-controller'
+
 async function main() {
   log.info('nocx: main() called')
 
@@ -130,6 +133,30 @@ async function main() {
     setPendingConnectionPassword(p)
   })
 
+  // Open-time host-key decisions share the same consent surface as
+  // Connections → Test. Requests are queued because restored tabs can fail
+  // concurrently; no tab may steal another tab's decision.
+  const [pendingOpenHostKey, setPendingOpenHostKey] = createSignal<OpenHostKeyRequest | null>(null)
+  const [openHostKeyBusy, setOpenHostKeyBusy] = createSignal(false)
+  const openHostKeys = new OpenHostKeyRequestQueue((request) => setPendingOpenHostKey(request))
+
+  const acceptOpenHostKey = async (request: OpenHostKeyRequest) => {
+    setOpenHostKeyBusy(true)
+    try {
+      await profileClient.trustHostKey(request.evidence.knownHostsHost, request.evidence.key)
+      openHostKeys.settleMatchingQueued(request)
+      openHostKeys.settle(request, true)
+    } catch (err) {
+      showToast({
+        level: 'danger',
+        message: `Could not trust the host key: ${err instanceof Error ? err.message : String(err)}`,
+        duration: 0,
+      })
+    } finally {
+      setOpenHostKeyBusy(false)
+    }
+  }
+
   // ── Vault activity signal (nocx-eg80) ──────────────────────────────
   // Throttled: at most one call every 3 seconds. Reports user activity
   // (keyboard, mouse, UI actions) so the vault can reset its idle timer.
@@ -190,6 +217,7 @@ async function main() {
     tabStrip,
   )
   tm.onVaultSealed = () => vaultController.openUnlock('open this connection')
+  tm.onHostKeyError = (evidence, signal) => openHostKeys.request(evidence, signal)
   tm.onSetupVault = () => vaultController.openSetup()
   tm.onCreateSecret = (name) => openSettingsTab().startNewSecret(name)
   tm.onActivity = reportActivity
@@ -730,6 +758,16 @@ async function main() {
               onDone={() => {
                 setPendingConnectionPassword(null)
               }}
+            />
+          )}
+        </Show>
+        <Show when={pendingOpenHostKey()} keyed>
+          {(request) => (
+            <HostKeyDialog
+              evidence={request.evidence}
+              busy={openHostKeyBusy()}
+              onAccept={() => void acceptOpenHostKey(request)}
+              onClose={() => openHostKeys.settle(request, false)}
             />
           )}
         </Show>

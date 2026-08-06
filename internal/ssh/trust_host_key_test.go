@@ -3,6 +3,7 @@ package ssh
 import (
 	"context"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -132,6 +133,122 @@ func TestTrustHostKey_ChangedKeyAccept_SecondProbeSucceeds(t *testing.T) {
 	}
 }
 
+// TestHostKeyCallback_JumpRouteCoexistsWithDirectRoute pins the storage
+// invariant behind jump host key trust: a target reached directly and the
+// same target reached through a bastion are two independently trusted
+// endpoints, even when they present different keys.
+func TestHostKeyCallback_JumpRouteCoexistsWithDirectRoute(t *testing.T) {
+	const targetAddr = "db.example.com:22"
+	directKey := generateSigner(t).PublicKey()
+	jumpKey := generateSigner(t).PublicKey()
+	khPath := filepath.Join(t.TempDir(), "known_hosts")
+	directLine := knownhosts.Line([]string{targetAddr}, directKey)
+	if err := os.WriteFile(khPath, []byte(directLine+"\n"), 0o600); err != nil {
+		t.Fatalf("write direct known_hosts entry: %v", err)
+	}
+	client := newTrustClient(t, khPath)
+	remote := &net.TCPAddr{IP: net.ParseIP("192.0.2.10"), Port: 22}
+
+	directCB, err := client.hostKeyCallback()
+	if err != nil {
+		t.Fatalf("direct host key callback: %v", err)
+	}
+	if err = directCB(targetAddr, remote, directKey); err != nil {
+		t.Fatalf("direct key should be trusted: %v", err)
+	}
+
+	jumpCfg := &ConnectConfig{JumpHost: "bastion.example.com", JumpPort: 22}
+	routeAddr := knownHostsTargetAddr(targetAddr, jumpCfg)
+	if routeAddr == targetAddr {
+		t.Fatal("jump route reused the direct known_hosts identity")
+	}
+	routeCB, err := client.hostKeyCallbackFor(routeAddr)
+	if err != nil {
+		t.Fatalf("jump-route host key callback: %v", err)
+	}
+	err = routeCB(targetAddr, remote, jumpKey)
+	var unknown *ErrUnknownHostKey
+	if !errors.As(err, &unknown) {
+		t.Fatalf("first jump-route key = %T %v, want ErrUnknownHostKey", err, err)
+	}
+	if unknown.Addr != targetAddr || unknown.KnownHostsAddr != routeAddr {
+		t.Fatalf("host-key evidence = display %q lookup %q, want %q and %q",
+			unknown.Addr, unknown.KnownHostsAddr, targetAddr, routeAddr)
+	}
+	if _, err = client.TrustHostKey(unknown.KnownHostsAddr, unknown.Key); err != nil {
+		t.Fatalf("trust jump-route key: %v", err)
+	}
+
+	// knownhosts.New snapshots the file, so rebuild both callbacks after the
+	// trust write, as the next real Connect/Probe does.
+	directCB, err = client.hostKeyCallback()
+	if err != nil {
+		t.Fatalf("direct callback after trust: %v", err)
+	}
+	routeCB, err = client.hostKeyCallbackFor(routeAddr)
+	if err != nil {
+		t.Fatalf("route callback after trust: %v", err)
+	}
+	if err := directCB(targetAddr, remote, directKey); err != nil {
+		t.Fatalf("direct key stopped working after route trust: %v", err)
+	}
+	if err := routeCB(targetAddr, remote, jumpKey); err != nil {
+		t.Fatalf("jump-route key not trusted after accept: %v", err)
+	}
+	if lines := knownHostsLinesFor(t, khPath, targetAddr); len(lines) != 1 {
+		t.Fatalf("direct route entries = %d, want 1", len(lines))
+	}
+	if lines := knownHostsLinesFor(t, khPath, routeAddr); len(lines) != 1 {
+		t.Fatalf("jump route entries = %d, want 1", len(lines))
+	}
+}
+
+func TestKnownHostsTargetAddr_DistinguishesRouteNotCredentials(t *testing.T) {
+	const targetAddr = "db.example.com:2222"
+	routeA := &ConnectConfig{
+		JumpHost: "edge.example.com",
+		JumpPort: 2201,
+		JumpUser: "alice",
+		JumpConfig: &ConnectConfig{
+			Port:     2201,
+			JumpHost: "core-a.example.com",
+			JumpPort: 2202,
+		},
+	}
+	sameRouteDifferentAuth := &ConnectConfig{
+		JumpHost: "edge.example.com",
+		JumpPort: 2201,
+		JumpUser: "bob",
+		JumpConfig: &ConnectConfig{
+			Port:         2201,
+			AuthMode:     "password",
+			JumpHost:     "core-a.example.com",
+			JumpPort:     2202,
+			JumpAuthMode: "agent",
+		},
+	}
+	routeB := &ConnectConfig{
+		JumpHost: "edge.example.com",
+		JumpPort: 2201,
+		JumpConfig: &ConnectConfig{
+			Port:     2201,
+			JumpHost: "core-b.example.com",
+			JumpPort: 2202,
+		},
+	}
+
+	gotA := knownHostsTargetAddr(targetAddr, routeA)
+	if got := knownHostsTargetAddr(targetAddr, sameRouteDifferentAuth); got != gotA {
+		t.Fatalf("credential-only change altered route identity: %q != %q", got, gotA)
+	}
+	if got := knownHostsTargetAddr(targetAddr, routeB); got == gotA {
+		t.Fatalf("different full jump chains share route identity %q", got)
+	}
+	if got := knownHostsTargetAddr(targetAddr, nil); got != targetAddr {
+		t.Fatalf("direct identity = %q, want %q", got, targetAddr)
+	}
+}
+
 // knownHostsLinesFor returns the non-comment lines that name addr, hashed or
 // not. It answers the question ssh-keygen -R answers: how many keys does this
 // file still trust for this host.
@@ -152,6 +269,29 @@ func knownHostsLinesFor(t *testing.T, path, addr string) []string {
 		}
 	}
 	return out
+}
+
+// TestTrustHostKey_CreatesMissingParent0700 covers a fresh home where ~/.ssh
+// does not exist yet. Accepting first contact must create the store, not turn
+// explicit user consent into a write error.
+func TestTrustHostKey_CreatesMissingParent0700(t *testing.T) {
+	srv := startTestSSHServer(t)
+	defer srv.close()
+
+	sshDir := filepath.Join(t.TempDir(), ".ssh")
+	khPath := filepath.Join(sshDir, "known_hosts")
+	client := newTrustClient(t, khPath)
+
+	if _, err := client.TrustHostKey(srv.addr, srv.hostSigner.PublicKey().Marshal()); err != nil {
+		t.Fatalf("TrustHostKey: %v", err)
+	}
+	info, err := os.Stat(sshDir)
+	if err != nil {
+		t.Fatalf("stat .ssh: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o700 {
+		t.Errorf("expected new .ssh mode 0700, got %o", perm)
+	}
 }
 
 // TestTrustHostKey_CreatesMissingFile0600 pins the mode of a new file.
