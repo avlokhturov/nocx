@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/git.unstageAll.schema.json",
+  "title": "GitUnstageAllResult",
+  "description": "Result of the git.unstageAll JSON-RPC method: the fresh post-mutation status. Unstage-all is bare git reset — no HEAD, no pathspec — which is what makes it work on an unborn branch, where git restore --staged fails on an unresolvable HEAD (design D19, measured; no special unborn path is needed or built). It is refused while any entry is conflicted: bare git reset during a conflicted merge deletes .git/MERGE_HEAD, silently aborting the merge. The refusal is a JSON-RPC error carrying git's domain words, which the panel renders as a visible refusal with the reason.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status"],
+  "properties": {
+    "status": {
+      "$ref": "git.status.schema.json#/$defs/status"
+    }
+  }
+}

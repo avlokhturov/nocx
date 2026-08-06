@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/git.diff.schema.json",
+  "title": "GitDiffResult",
+  "description": "Result of the git.diff JSON-RPC method: the unified diff of one file on one side, as git computed it (design D10 — git computes the diff, the frontend renders text; a second diff algorithm in the browser would disagree with git exactly where nobody looks). state is the discriminator: a row can be clicked in the same second an agent reverts the file, so empty and gone are states, not errors. The shape is deliberately extensible: a later split view adds oldText/newText as new optional fields, so the schema grows by addition (design §5.3).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["state", "text", "truncated"],
+  "properties": {
+    "state": {
+      "description": "The diff outcome. tooLarge is the only state the backend's byte-bound cut maps to (the cut itself stays private to the local implementation); text is then a prefix and says so through truncated.",
+      "type": "string",
+      "enum": ["ok", "binary", "tooLarge", "empty", "gone"]
+    },
+    "text": {
+      "description": "The unified diff text. Empty for binary (git said 'Binary files differ'; there is nothing to render) and for empty/gone. A prefix of the full diff when tooLarge.",
+      "type": "string"
+    },
+    "truncated": {
+      "description": "True exactly when state is tooLarge: the byte bound was reached and text is a prefix. A silently clipped diff is a worse lie than one that admits it.",
+      "type": "boolean"
+    }
+  }
+}

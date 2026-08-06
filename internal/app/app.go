@@ -21,6 +21,8 @@ import (
 	"github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/filesystem/local"
 	"github.com/shady2k/nocx/internal/filesystem/sftp"
+	"github.com/shady2k/nocx/internal/git"
+	gitlocal "github.com/shady2k/nocx/internal/git/local"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/nativeports"
 	"github.com/shady2k/nocx/internal/profile"
@@ -501,6 +503,15 @@ func New(opts ...Option) (*App, error) {
 		// main() (AGENTS.md check 5).
 		transport.WithFilesystemRegistry(filesystem.New()),
 		transport.WithFilesystemProviderFactory(filesystemProviderFactory(sshClient)),
+		// Git (spec §5.1). The registry is the only route to a bound
+		// repository; the factory is the local one, and it is what makes
+		// internal/git reachable from main() at all — until this line
+		// existed the whole package was unreachable, which is the state
+		// AGENTS.md check 5 exists to catch. There is no remote factory:
+		// git.open refuses an ssh session before it reaches this, and the
+		// remote case waits on the relay (spec D3).
+		transport.WithGitRegistry(git.New()),
+		transport.WithGitRepoFactory(gitlocal.NewFactory()),
 	}
 	// WithWSAddr set the field and nothing read it, so NOCX_WS_ADDR was accepted
 	// and ignored and the listener always took an ephemeral port. The dev stand

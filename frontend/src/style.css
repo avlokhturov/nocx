@@ -72,6 +72,7 @@
 @import './styles/surfaces/ports.css';
 @import './styles/surfaces/files.css';
 @import './styles/surfaces/vault.css';
+@import './styles/surfaces/git.css';
 
 /* ── App body row: activity bar | sidebar | panes ────────────────────── */
 

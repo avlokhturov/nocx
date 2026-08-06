@@ -42,6 +42,10 @@ import { showToast } from './ui/toast'
 import { registerFileViewerSurface, openFileViewer } from './file-viewer'
 import { createFilesView, FILES_VIEW_ID } from './files/files-view'
 import { createFilesPanelServices, type FilesPanelServices } from './files/files-client'
+import { createGitView } from './git/git-view'
+import { createGitPanelServices, type GitPanelServices } from './git/git-client'
+import { createGitStore } from './git/git-store'
+import { registerGitDiffSurface } from './git/git-diff/open-git-diff'
 import type { ActiveOrigin } from './tab-content'
 import type { TunnelOpenResult } from './generated/tunnel.open'
 async function main() {
@@ -315,6 +319,69 @@ async function main() {
     clipboard,
     activeOrigin,
   })
+
+  // ── Git panel (design §5.4) and its diff surface (worker G) ───────────
+  // The panel's backend surface, wrapped so the composition root owns the
+  // binding-liveness registry the diff surface reads: a binding is live
+  // from the git.open that created it until git.close releases it, and a
+  // session close is marked dead by the git.changed notification — no
+  // close crosses the seam on that path, so the notification is the only
+  // writer (worker G's GitDiffDeps.onBindingLiveness).
+  const gitServices = createGitPanelServices(dispatcher)
+  const gitBindings = new Map<string, Set<(live: boolean) => void>>()
+  const liveGitBindings = new Set<string>()
+  const gitServicesTracked: GitPanelServices = {
+    // Spread, then intercept: open and close are the two methods the
+    // composition root must watch (the binding-liveness registry), and
+    // everything else forwards by CONSTRUCTION — the same rule as the
+    // files wrapper above.
+    ...gitServices,
+    open: async (sessionId, cwd) => {
+      const res = await gitServices.open(sessionId, cwd)
+      if (res.state === 'ok' && res.bindingId !== undefined) {
+        liveGitBindings.add(res.bindingId)
+      }
+      return res
+    },
+    close: async (bindingId) => {
+      liveGitBindings.delete(bindingId)
+      const cbs = gitBindings.get(bindingId)
+      gitBindings.delete(bindingId)
+      if (cbs !== undefined) for (const cb of [...cbs]) cb(false)
+      return gitServices.close(bindingId)
+    },
+  }
+  const onGitBindingLiveness = (bindingId: string, cb: (live: boolean) => void): (() => void) => {
+    const cbs = gitBindings.get(bindingId) ?? new Set()
+    cbs.add(cb)
+    gitBindings.set(bindingId, cbs)
+    // Synchronous first call with the current verdict — the diff content's
+    // mount decides whether to read at all from it.
+    cb(liveGitBindings.has(bindingId))
+    return () => {
+      cbs.delete(cb)
+      if (cbs.size === 0) gitBindings.delete(bindingId)
+    }
+  }
+  gitServices.subscribeGitChanged((p) => {
+    liveGitBindings.delete(p.bindingId)
+    const cbs = gitBindings.get(p.bindingId)
+    gitBindings.delete(p.bindingId)
+    if (cbs !== undefined) for (const cb of [...cbs]) cb(false)
+  })
+  // The store is the panel's and the diff surface's shared state: the
+  // surface's Reload offer (onDiffStale) is fed by the store's poll.
+  const gitStore = createGitStore(gitServicesTracked)
+  registerGitDiffSurface(registry, tm, {
+    diff: (params) => gitServices.diff(params.bindingId, params.path, params.side, params.maxBytes),
+    onBindingLiveness: onGitBindingLiveness,
+    onDiffStale: (bindingId, path, side, cb) => gitStore.onDiffStale(bindingId, path, side, cb),
+  })
+  const gitView = createGitView({
+    services: gitServicesTracked,
+    store: gitStore,
+    activeOrigin,
+  })
   /**
    * Open (or focus) the Settings tab and hand back the instance that is
    * actually on screen.
@@ -402,15 +469,15 @@ async function main() {
     ),
     order: 0,
   }
+  const sidebarViews = [filesView, PORTS_VIEW, gitView].sort((a, b) => a.order - b.order)
+  if (sidebarViews[0]?.id !== FILES_VIEW_ID) {
+    throw new Error('nocx: Files must be the first activity-bar view')
+  }
   // The sidebar renders array order, so the views reach mountSidebar sorted
   // by their order field — the field then means what it says, and a future
   // view cannot slip in front by registration order. Files registers below
   // Ports (FILES_VIEW_ORDER < 0) and must be the FIRST icon in the view
   // zone — an owner requirement, asserted here and in files-view.test.tsx.
-  const sidebarViews = [filesView, PORTS_VIEW].sort((a, b) => a.order - b.order)
-  if (sidebarViews[0]?.id !== FILES_VIEW_ID) {
-    throw new Error('nocx: Files must be the first activity-bar view')
-  }
   const sidebar = mountSidebar(
     activityBar,
     sidebarPanel,

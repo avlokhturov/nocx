@@ -143,7 +143,13 @@ func TestTunnelOpen_ReportsActualPortAndRoundTripsBytes(t *testing.T) {
 	defer h.stop()
 	target := startEchoTarget(t)
 
-	rec, err := openTunnel(t, connectWS(t, h.ws), map[string]any{
+	conn := connectWS(t, h.ws)
+	// The connection is the tab: the forward's lifetime is tied to it, so
+	// it must outlive the round trip below. Keeping it referenced here also
+	// stops the GC finalizing it mid-test and closing the socket under the
+	// forward (tab-scoped teardown under concurrent load).
+	defer func() { _ = conn.Close() }()
+	rec, err := openTunnel(t, conn, map[string]any{
 		"profileId":   "ssh:p1:1",
 		"port":        0, // allocate
 		"destination": target,
@@ -198,6 +204,11 @@ func TestTunnelOpen_BusyLocalPortFailsSynchronously(t *testing.T) {
 	busy := busyPort(t)
 
 	conn := connectWS(t, h.ws)
+	// The connection is the tab; keep it referenced (and closed at the end)
+	// so the second forward below survives its round trip (see the teardown
+	// test for the GC-finalizer mechanism this guards against).
+	defer func() { _ = conn.Close() }()
+
 	resp := tunnelCall(t, conn, "tunnel.open", map[string]any{
 		"profileId":   "ssh:p1:1",
 		"port":        busy,
@@ -276,6 +287,13 @@ func TestTunnelTabTeardown_DoesNotStopOtherTabsForward(t *testing.T) {
 
 	connA := connectWS(t, h.ws)
 	connB := connectWS(t, h.ws)
+	// connB must outlive this test. It is not referenced again after the
+	// opens below, so without an explicit owner the GC can finalize it
+	// mid-test and close its socket (Go's netFD finalizer); the server
+	// then (correctly) tears down B's forward as a disconnected tab and
+	// the final roundTrip fails. The defer keeps the connection alive
+	// until the test returns (tab-scoped teardown under concurrent load).
+	defer func() { _ = connB.Close() }()
 
 	recA, err := openTunnel(t, connA, map[string]any{
 		"profileId":   "ssh:p1:1",

@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/git.unstage.schema.json",
+  "title": "GitUnstageResult",
+  "description": "Result of the git.unstage JSON-RPC method. This is the one mutation whose failure is a RESULT state rather than a transport error: individual unstaging on an unborn branch fails with git's own error (git reset with pathspecs resolves HEAD, which an unborn branch lacks — design D19 guarantees only unstage-ALL there, bare git reset). The panel must not offer per-file unstage on an unborn branch, and when the call is made anyway the failure must arrive as something it can render, not as an error that looks like a bug. The discriminator is the branch's unbornness re-read from the repository — never parsed from git's prose (D11). Both branches carry the fresh status so the panel repaints from reality.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["state", "status"],
+  "properties": {
+    "state": {
+      "description": "ok — the unstage (or the empty-paths no-op) succeeded and status is the fresh post-mutation status. unborn — the branch is unborn, per-file unstaging is impossible there, and status is a fresh read so the panel can repaint and stop offering the control.",
+      "type": "string",
+      "enum": ["ok", "unborn"]
+    },
+    "status": {
+      "$ref": "git.status.schema.json#/$defs/status"
+    }
+  }
+}

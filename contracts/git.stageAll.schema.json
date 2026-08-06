@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/git.stageAll.schema.json",
+  "title": "GitStageAllResult",
+  "description": "Result of the git.stageAll JSON-RPC method (git add -A, design D19): the fresh post-mutation status. Stage-all is refused while any entry is conflicted — measured, not reasoned: git add -A marks the conflict resolved using the marker-laden worktree file, and a commit follows silently. The refusal is a JSON-RPC error carrying git's domain words, which the panel renders as a visible refusal with the reason.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status"],
+  "properties": {
+    "status": {
+      "$ref": "git.status.schema.json#/$defs/status"
+    }
+  }
+}

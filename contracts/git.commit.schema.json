@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/git.commit.schema.json",
+  "title": "GitCommitResult",
+  "description": "Result of the git.commit JSON-RPC method (git commit -F - — the message rides stdin, never argv, design D8). state is the outcome: zero → ok with the new head; non-zero → failed carrying git's own stdout and stderr as far as the bound allowed. We do not classify why (D11): git exposes no machine-readable discriminator between a hook, a signing failure and an index lock, and parsing prose would be a second git-error classifier. A commit that happened but whose head/status reads failed still says ok — the panel must say 'committed', not 'failed' — with the head absent and statusStale naming the gap rather than letting a fabricated zero status render as a fresh one.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["state", "outputTruncated"],
+  "properties": {
+    "state": {
+      "type": "string",
+      "enum": ["ok", "failed"]
+    },
+    "head": {
+      "description": "Short hash of the new head; present when the post-commit head read succeeded (a failed read leaves the outcome ok with head absent — 'committed' with the head unknown).",
+      "type": "string"
+    },
+    "output": {
+      "description": "git's own account of a failed commit (stdout and stderr as far as the bound allowed). Present when failed. The commit surface shows it and the typed message stays in the form (D11).",
+      "type": "string"
+    },
+    "outputTruncated": {
+      "description": "True when the capture bound was reached — a silently clipped account is a worse lie than one that admits it.",
+      "type": "boolean"
+    },
+    "status": {
+      "description": "The fresh post-commit status (D12). Absent when the commit failed and when the post-commit status read failed — the two cases where there is no fresh status to show.",
+      "$ref": "git.status.schema.json#/$defs/status"
+    },
+    "statusStale": {
+      "description": "True when the commit happened but the post-commit status read failed: the panel must say the view is stale rather than render the last known lists as fresh.",
+      "type": "boolean"
+    }
+  }
+}

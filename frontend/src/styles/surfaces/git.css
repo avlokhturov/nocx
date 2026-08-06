@@ -1,0 +1,109 @@
+/* ── Git surface (design §5.4) ────────────────────────────────────────────
+   Placement only: kit components (Badge, IconButton, FileStatusRow,
+   Section, TextField, Checkbox, Button, StatusCard) are placed — flex, gap,
+   alignment, margins — never repainted (ADR-0014). The list rows are the
+   kit's FileStatusRow; the surface only separates the lists and states. */
+
+/* The panel body: a scrolling column with the header pinned to the top. */
+.git-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+}
+
+/* Header: branch chip, upstream, changed count — one line, in the quiet
+   register except the chip. */
+.git-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.git-header__upstream {
+  color: var(--color-text-dim);
+  font-size: var(--font-size-sm);
+}
+
+.git-header__count {
+  color: var(--color-text-dim);
+  font-size: var(--font-size-sm);
+  margin-left: auto;
+}
+
+/* The D9 cap banner: a traversal that could not be completed must not look
+   complete — the panel says which of the two answers it is. */
+.git-cap-banner {
+  color: var(--color-warning);
+  font-size: var(--font-size-sm);
+}
+
+/* A failed poll: the last good status stays on screen, marked stale, with
+   the refresh that recovers it. */
+.git-stale {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  color: var(--color-warning);
+  font-size: var(--font-size-sm);
+}
+
+/* A rejected mutation call: inline, never a toast that evaporates. */
+.git-mutation-error {
+  color: var(--color-danger);
+  font-size: var(--font-size-sm);
+}
+
+/* The whole-index controls sit above the lists; the refusal below them
+   carries the D19 reason. */
+.git-list-actions {
+  display: flex;
+  gap: var(--space-1);
+}
+
+.git-conflict-refusal {
+  color: var(--color-warning);
+  font-size: var(--font-size-sm);
+  margin: 0;
+}
+
+/* Lists are the kit's rows inside the kit's Section; nothing here but the
+   separation between the sections. */
+
+/* The degraded-environment warning (D6): shown before the first commit
+   because a hook that silently cannot find its tools is the exact failure
+   the decision exists to prevent. */
+.git-env-warning {
+  color: var(--color-warning);
+  font-size: var(--font-size-sm);
+}
+
+/* git's own account of a failed commit (D11), verbatim — a pre is the
+   honest container; the truncation mark admits the bound. */
+.git-commit-output pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: var(--font-size-sm);
+  max-height: 12rem;
+  overflow: auto;
+}
+
+.git-commit-output {
+  color: var(--color-danger);
+  font-size: var(--font-size-sm);
+}
+
+/* The opening interstitial and the failed-open retry, centred like the
+   files panel's. */
+.git-loading {
+  display: flex;
+  justify-content: center;
+  padding: var(--space-6) 0;
+}
+
+.git-error {
+  padding: var(--space-2) 0;
+}
