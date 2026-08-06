@@ -159,15 +159,22 @@ test.describe('Vault — no keyring, full round trip', () => {
         .getByRole('radio', { name: 'Password' }),
     ).toHaveAttribute('aria-checked', 'true', { timeout: 3000 })
 
-    // Click "Set Password" by its accessible name, scoped to the profile form.
-    // `#profile-auth` and `#group-default-auth` are two AuthenticationEditors,
-    // and ed7d14d gave the group-defaults one a password action of its own
-    // (nocx-jb20.6) — so the bare accessible name has matched two buttons ever
-    // since and strict mode rejected it. The comment already said "in the
-    // visible form"; the locator now says it too.
-    await page.locator('.cm-form').getByRole('button', { name: /Set Password/i }).click()
-    // The PasswordEditor is a Dialog (the kit Prompt) with a password input.
-    const pwInput = page.locator('[role="dialog"] input[type="password"]')
+    // Click "Set Password" by its accessible name, scoped to the profile form
+    // the comment always said it meant. The bare name used to match two
+    // elements because the editor drew the action twice (nocx-azxe.6); that is
+    // fixed in the component, and the scope stays because "the button in this
+    // form" is what the step is about.
+    await page
+      .locator('.cm-form')
+      .getByRole('button', { name: /Set Password/i })
+      .click()
+    // The PasswordEditor's OWN field, by id. A bare
+    // `[role="dialog"] input[type="password"]` used to be unique and stopped
+    // being so: closing this editor opens the vault setup sheet, which holds
+    // two password fields of its own, so the "it closed" assertion below
+    // resolved to those instead — and on webkit, which gets there faster, it
+    // resolved to both and failed strict mode.
+    const pwInput = page.locator('#password-value')
     await expect(pwInput).toBeVisible({ timeout: 3000 })
     await pwInput.fill('test-password-123')
     // Click the dialog's primary action button to confirm password.
@@ -175,15 +182,26 @@ test.describe('Vault — no keyring, full round trip', () => {
     // Wait for the PasswordEditor to close.
     await expect(pwInput).not.toBeVisible({ timeout: 3000 })
 
-    // Click "Create Connection" in the Dialog footer. This triggers the
-    // password save, which fails with vault-uninitialized and shows SetupDialog.
-    await page.getByRole('button', { name: 'Create Connection', exact: true }).click()
-
     // ── Phase 2: vault setup dialog ─────────────────────────────────────
-    // The SetupDialog should appear with title "Set Up Vault".
-    await expect(page.getByRole('dialog').filter({ hasText: 'Set Up Vault' })).toBeVisible({
-      timeout: 10_000,
-    })
+    // Minting the password is what needs the vault, so that is what asks for
+    // it: the SetupDialog follows the password dialog directly. This used to
+    // click "Create Connection" first, on the older arrangement where the save
+    // attempted the write, failed with vault-uninitialized, and the setup came
+    // out of the failure. Asking at the moment the secret is created is the
+    // arrangement nocx-v64o settled on, and the old order left this test
+    // clicking a button the setup sheet was already covering.
+    // Identified by what it CONTAINS, not by its text. The connection form is
+    // itself a role="dialog" and the setup sheet opens inside it, so hasText
+    // matches both — a descendant's text is the ancestor's text too.
+    // Scoped to the PROMPT OVERLAY, not to a role or a text. The connection
+    // form is itself a role="dialog" and the setup sheet opens inside it, so
+    // both `hasText` and `has:` match the ancestor as well as the sheet — a
+    // descendant's text and contents are the ancestor's too. The overlay is
+    // the sheet's own container and nothing wraps it.
+    const setupDialog = page
+      .locator('.ui-prompt-overlay')
+      .filter({ has: page.locator('#vault-setup-passphrase') })
+    await expect(setupDialog).toBeVisible({ timeout: 10_000 })
 
     // Enter passphrase.
     await page.locator('#vault-setup-passphrase').fill('my-master-passphrase-42')
@@ -196,21 +214,27 @@ test.describe('Vault — no keyring, full round trip', () => {
       .click()
 
     // Wait for the recovery code to appear — title changes to "Recovery Code".
-    await expect(page.getByRole('dialog').filter({ hasText: 'Recovery Code' })).toBeVisible({
-      timeout: 10_000,
-    })
+    // The recovery step is asserted through the code block itself, not through
+    // a "dialog named Recovery Code". By this point the setup overlay has
+    // closed and the code is rendered in the form behind it, so an overlay
+    // scope finds nothing and a role+text scope matches every ancestor that
+    // contains the words. The code block is the thing under test.
+    const codeBlock = page.locator('.ui-vault-code-block-wrap .ui-code-block')
+    await expect(codeBlock).toBeVisible({ timeout: 10_000 })
 
     // Capture the recovery code from the CodeBlock.
-    const codeBlock = page.locator('.ui-vault-code-block-wrap .ui-code-block')
     const code = await codeBlock.textContent()
     expect(code).not.toBeNull()
     expect((code ?? '').length).toBeGreaterThan(10)
 
-    // Click "Done" to close setup. This triggers the deferred save retry.
+    // Click "Done" to close setup. The password is now minted and bound.
     await page.getByRole('dialog').getByRole('button', { name: 'Done', exact: true }).click()
 
-    // After vault setup, the form saves the profile and closes. Verify the
-    // profile appears in the connection list (evidence the save went through).
+    // Back in the connection form, which never closed: save it.
+    await page.getByRole('button', { name: 'Create Connection', exact: true }).click()
+
+    // Verify the profile appears in the connection list (evidence the save
+    // went through).
     await expect(page.locator('.ui-collection-row').filter({ hasText: 'Vault Test' })).toBeVisible({
       timeout: 10_000,
     })
@@ -241,9 +265,14 @@ test.describe('Vault — no keyring, full round trip', () => {
     await page.getByRole('button', { name: 'Connect to Vault Test' }).click()
 
     // The UnlockDialog should appear (vault is sealed).
-    await expect(page.getByRole('dialog').filter({ hasText: 'Unlock Vault' })).toBeVisible({
-      timeout: 10_000,
-    })
+    // Identified by the field it holds, not by a title. The sheet reads
+    // "Unlock the vault to open this connection" — it names the reason it is
+    // asking, which is the point of it — so a filter on the words "Unlock
+    // Vault" matched nothing and the test blamed the dialog for not appearing.
+    const unlockDialog = page
+      .getByRole('dialog')
+      .filter({ has: page.locator('#vault-unlock-passphrase') })
+    await expect(unlockDialog).toBeVisible({ timeout: 10_000 })
 
     // ── Phase 5: unlock with passphrase ─────────────────────────────────
     await page.getByRole('dialog').getByRole('button', { name: 'Passphrase', exact: true }).click()
@@ -251,9 +280,7 @@ test.describe('Vault — no keyring, full round trip', () => {
     await page.getByRole('dialog').getByRole('button', { name: 'Unlock', exact: true }).click()
 
     // Dialog closes after successful unseal.
-    await expect(page.getByRole('dialog').filter({ hasText: 'Unlock Vault' })).not.toBeVisible({
-      timeout: 10_000,
-    })
+    await expect(unlockDialog).not.toBeVisible({ timeout: 10_000 })
 
     // ── Phase 6: deferred Connect runs after unlock → new SSH tab ───────
     // ensureBeforeSave stored the pending action when Connect was clicked;
@@ -315,20 +342,24 @@ test.describe('Vault — recovery code unseal', () => {
       .getByRole('radio', { name: 'Password' })
       .click()
 
-    await page.locator('.cm-form').getByRole('button', { name: /Set Password/i }).click()
-    const pwInput = page.locator('[role="dialog"] input[type="password"]')
+    await page
+      .locator('.cm-form')
+      .getByRole('button', { name: /Set Password/i })
+      .click()
+    const pwInput = page.locator('#password-value')
     await expect(pwInput).toBeVisible({ timeout: 3000 })
     await pwInput.fill('test-password-456')
     await page.getByRole('button', { name: 'OK' }).click()
     await expect(pwInput).not.toBeVisible({ timeout: 3000 })
 
-    // Click "Create Connection" to save. Triggers vault-uninitialized → SetupDialog.
-    await page.getByRole('button', { name: 'Create Connection', exact: true }).click()
-
-    // Setup dialog.
-    await expect(page.getByRole('dialog').filter({ hasText: 'Set Up Vault' })).toBeVisible({
-      timeout: 10_000,
-    })
+    // Setup dialog — it follows the password dialog directly, because minting
+    // the secret is what needs the vault (nocx-v64o). Clicking "Create
+    // Connection" first, as this used to, aims at a button the setup sheet is
+    // already covering.
+    const setupDialog = page
+      .locator('.ui-prompt-overlay')
+      .filter({ has: page.locator('#vault-setup-passphrase') })
+    await expect(setupDialog).toBeVisible({ timeout: 10_000 })
     await page.locator('#vault-setup-passphrase').fill('recovery-passphrase-99')
     await page.locator('#vault-setup-confirm').fill('recovery-passphrase-99')
     await page
@@ -337,17 +368,23 @@ test.describe('Vault — recovery code unseal', () => {
       .click()
 
     // Capture recovery code.
-    await expect(page.getByRole('dialog').filter({ hasText: 'Recovery Code' })).toBeVisible({
-      timeout: 10_000,
-    })
+    // The recovery step is asserted through the code block itself, not through
+    // a "dialog named Recovery Code". By this point the setup overlay has
+    // closed and the code is rendered in the form behind it, so an overlay
+    // scope finds nothing and a role+text scope matches every ancestor that
+    // contains the words. The code block is the thing under test.
     const codeBlock = page.locator('.ui-vault-code-block-wrap .ui-code-block')
+    await expect(codeBlock).toBeVisible({ timeout: 10_000 })
     const code = await codeBlock.textContent()
     expect(code).not.toBeNull()
     expect((code ?? '').length).toBeGreaterThan(10)
     const recoveryCode = code ?? ''
 
-    // Click "Done".
+    // Click "Done". The password is minted and bound; the form is still open.
     await page.getByRole('dialog').getByRole('button', { name: 'Done', exact: true }).click()
+
+    // Save the connection.
+    await page.getByRole('button', { name: 'Create Connection', exact: true }).click()
 
     // Verify the profile appears in the connection list.
     await expect(
@@ -382,9 +419,14 @@ test.describe('Vault — recovery code unseal', () => {
     // Click the row-level Connect button.
     await page.getByRole('button', { name: 'Connect to Recovery Test' }).click()
 
-    await expect(page.getByRole('dialog').filter({ hasText: 'Unlock Vault' })).toBeVisible({
-      timeout: 10_000,
-    })
+    // Identified by the field it holds, not by a title. The sheet reads
+    // "Unlock the vault to open this connection" — it names the reason it is
+    // asking, which is the point of it — so a filter on the words "Unlock
+    // Vault" matched nothing and the test blamed the dialog for not appearing.
+    const unlockDialog = page
+      .getByRole('dialog')
+      .filter({ has: page.locator('#vault-unlock-passphrase') })
+    await expect(unlockDialog).toBeVisible({ timeout: 10_000 })
 
     // ── Phase 3: unlock with recovery code ──────────────────────────────
     await page
@@ -394,9 +436,7 @@ test.describe('Vault — recovery code unseal', () => {
     await page.locator('#vault-unlock-recovery').fill(recoveryCode)
     await page.getByRole('dialog').getByRole('button', { name: 'Unlock', exact: true }).click()
 
-    await expect(page.getByRole('dialog').filter({ hasText: 'Unlock Vault' })).not.toBeVisible({
-      timeout: 10_000,
-    })
+    await expect(unlockDialog).not.toBeVisible({ timeout: 10_000 })
 
     // Deferred Connect runs after unlock → new SSH tab.
     await expect(page.locator('.nocx-tab-title')).toHaveCount(tabsBeforeConnect + 1, {
@@ -477,8 +517,11 @@ test.describe('Vault — with keyring, silent setup', () => {
       // Same locator as cases 1 and 2. `profile-password-action` is a Field's
       // `for=` — a label target, not an element id — so scoping to it matched
       // nothing and this case timed out looking for a button that was on screen.
-      await page.locator('.cm-form').getByRole('button', { name: /Set Password/i }).click()
-      const pwInput = page.locator('[role="dialog"] input[type="password"]')
+      await page
+        .locator('.cm-form')
+        .getByRole('button', { name: /Set Password/i })
+        .click()
+      const pwInput = page.locator('#password-value')
       await expect(pwInput).toBeVisible({ timeout: 3000 })
       await pwInput.fill('keyring-password-789')
       await page.getByRole('button', { name: 'OK' }).click()
