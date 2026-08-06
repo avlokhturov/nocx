@@ -102,10 +102,17 @@ jobs:
   # rather than two separate jobs. Rationale: common steps (checkout,
   # setup-go, build) appear once; GitHub auto-labels each variant; one job
   # ID for required checks.
+  #
+  # fail-fast is off for the reason these two variants exist at all: they are a
+  # comparison. The question a red run has to answer is WHICH of "with a Secret
+  # Service" and "without one" broke, and the default would cancel the survivor
+  # the moment the first one failed — leaving exactly one of the two readings
+  # the job was built to take.
   backend-linux:
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         with-keyring: [true, false]
     steps:
