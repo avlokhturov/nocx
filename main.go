@@ -111,11 +111,25 @@ func (w *WailsApp) startup(ctx context.Context) {
 	}
 	installPath := upgradeInstallPath(execPath)
 
+	// The trust root for every update this build will ever accept. It is
+	// compiled in (internal/update/keyring.go); the field used to be a literal
+	// nil with a comment claiming the release pipeline filled it via ldflags,
+	// which nothing did and nothing could, so every production update check
+	// failed on an empty keyring before it compared versions (nocx-nfu5.1).
+	//
+	// A keyring that will not decode costs the user their update check and
+	// nothing else: the app starts, and VerifyManifest then refuses every
+	// manifest, which is the direction to fail in.
+	keyring, err := update.ReleaseKeyring()
+	if err != nil {
+		w.backend.Logger.Error("release keyring unusable; updates cannot be verified on this build", "error", err)
+	}
+
 	// Wire the updater with the real install path and platform.
 	w.backend.Updater = update.NewUpdater(update.UpdaterConfig{
 		Platform:       update.NewPlatform(),
 		Fetcher:        update.NewGitHubManifestFetcher(nil),
-		Keyring:        nil, // populated by release pipeline via ldflags
+		Keyring:        keyring,
 		CurrentVersion: version.Version,
 		InstallPath:    installPath,
 		Logger:         w.backend.Logger,

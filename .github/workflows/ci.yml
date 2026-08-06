@@ -126,6 +126,19 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq zsh
+          # ubuntu's zsh ships completion directories that are group-writable,
+          # so compinit refuses them and asks "Ignore insecure directories and
+          # continue [y] or abort compinit [n]?" — on a tty, interactively. Our
+          # launcher tests drive a real PTY and nothing answers, so every zsh
+          # test hangs until its own timeout and reports whatever it was waiting
+          # for instead of the question it was actually being asked.
+          #
+          # Fixed rather than suppressed: ZSH_DISABLE_COMPFIX=true would silence
+          # the prompt and leave CI running a zsh configured unlike any user's.
+          zsh -c 'autoload -Uz compaudit; compaudit 2>/dev/null || true' \
+            | while read -r d; do [ -n "$d" ] && sudo chmod -R go-w "$d"; done
+          echo "=== compaudit after fix (empty is correct) ==="
+          zsh -c 'autoload -Uz compaudit; compaudit 2>/dev/null || true'
 
       - name: Install Secret Service & dbus-x11
         if: matrix.with-keyring
