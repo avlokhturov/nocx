@@ -488,14 +488,7 @@ source "$1"
 __nocx_prompt_command
 __nocx_prompt_command
 `
-	// The shipped 250 ms is a budget for a human's prompt, not for this
-	// assertion. What is under test is that the source-time job produces a
-	// snapshot and the first prompt emits it — and on a loaded runner compgen
-	// simply takes longer than a UX deadline, so the default turned a
-	// mechanism test into a machine-speed test (nocx-0ije). The budget is
-	// stated here instead, generously, because nothing in this test is about
-	// how long a user should wait.
-	out := runShellProgEnv(t, bash, prog, script, "NOCX_SNAPSHOT_WAIT_MS=15000")
+	out := runShellProg(t, bash, prog, script)
 
 	if got := strings.Count(out, "]636;H;"); got != 1 {
 		t.Errorf("expected exactly one OSC 636 hello; got %d in %q", got, out)
@@ -814,14 +807,6 @@ func TestBashSnapshotArrivesBeforeFirstPrompt(t *testing.T) {
 		"NOCX_SHELL_INTEGRATION=1",
 		"NOCX_PROMPT_MODE=marker-only",
 		"NOCX_SESSION_ID=ptytest",
-		// What this test asserts is an ORDER — the snapshot reaches the
-		// terminal before the first prompt is usable — not a speed. The
-		// shipped 250 ms is how long a human's prompt may be held, and on a
-		// loaded machine compgen outlasts it, at which point the product
-		// correctly degrades to a later prompt and the order under test
-		// stops existing. Stating a budget here keeps the assertion about
-		// ordering (nocx-0ije).
-		"NOCX_SNAPSHOT_WAIT_MS=5000",
 	)
 	ptmx, err := pty.Start(cmd)
 	if err != nil {
