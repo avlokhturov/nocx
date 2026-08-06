@@ -33,6 +33,18 @@ import "strings"
 const bashRcfileTemplate = `# nocx launcher rcfile — bash, interactive non-login.
 # Reproduces an ordinary interactive non-login bash startup, then installs
 # nocx's hooks last. See the Go source for the declared equivalence set.
+
+# Erase the transient rcfile before any user code runs — the same promise the
+# zsh tier makes about its transient ZDOTDIR. Unlinking a file bash has already
+# read is safe: bash slurps a regular rcfile whole before executing a line of
+# it, and an open fd outlives its directory entry regardless.
+#
+# The guard is the point, not the rm: the path came from the launcher's own
+# mktemp of "${TMPDIR:-/tmp}/nocx-bash.XXXXXX", so matching that shape means an
+# empty or unexpected BASH_SOURCE removes nothing.
+case "${BASH_SOURCE[0]:-}" in
+    */nocx-bash.??????) rm -f "${BASH_SOURCE[0]}" 2>/dev/null ;;
+esac
 @ENV@
 
 # User startup — first, and it wins.
@@ -73,15 +85,15 @@ case "${__nocx_old_opts}" in *x*) set -x;; esac
 unset __nocx_old_opts
 `
 
-// bashArg builds the script `bash -c` parses for the bash tier: exec the
-// interactive bash whose rcfile is the escaped payload delivered through
-// process substitution. It is the piece the ShellAuto dispatcher carries as
-// its first positional argument; bashCommand wraps it with shellQuote.
+// bashArg builds the script `bash -c` parses for the bash tier: write the
+// escaped payload to a transient rcfile, then exec the interactive bash that
+// reads it. It is the piece the ShellAuto dispatcher carries as its first
+// positional argument; bashCommand wraps it with shellQuote.
 // ok is false when the pinned Enhanced precondition fails.
 //
 // The pinned form of the full command is
 //
-//	env -u BASH_ENV bash -c 'exec bash --rcfile <(printf %b "<escaped-init>") -i'
+//	env -u BASH_ENV bash -c '<bashOuterScript with the escaped init>'
 //
 // with three deliberate choices, all documented:
 //   - `/usr/bin/env -u BASH_ENV` in front: the outer bash -c is
@@ -96,13 +108,15 @@ unset __nocx_old_opts
 //     machine this was written on, skipped every test of this launcher, which
 //     is the epic's primary path. `env` still guarantees the explicit
 //     interpreter; that guarantee never needed an absolute path.
-//   - the rcfile travels through `printf %b` with printfBEscape encoding,
-//     so the payload needs no remote write and contains no NUL (bEscape
-//     never emits one and the embedded script is text).
+//   - the rcfile travels through `printf %b` with printfBEscape encoding, so
+//     the payload rides inside the command itself and contains no NUL (bEscape
+//     never emits one and the embedded script is text). It lands in a mktemp
+//     file rather than a pipe — see bashOuterScript for the failure that
+//     bought that.
 //
-// Naming bash explicitly is the point: process substitution is a bashism,
-// and sshd hands the remote command to the user's login shell, which may be
-// dash, ash, csh or a restricted shell.
+// Naming bash explicitly is the point: sshd hands the remote command to the
+// user's login shell, which may be dash, ash, csh or a restricted shell, and
+// the rcfile this writes is bash's.
 // bashRcfile renders the bash rcfile from its template: @ENV@ is the session
 // environment block (launcherEnvBlock for the argv launchers, empty for the
 // launch carrier, which exports the stable variables itself before exec) and
@@ -113,13 +127,51 @@ func bashRcfile(envBlock, scriptSource string) string {
 	return strings.ReplaceAll(rc, "@NOCX_BASH@", scriptSource)
 }
 
-// bashArgFor wraps a rendered rcfile in the bash tier's pinned transport:
-// `exec bash --rcfile <(printf %b "<escaped>") -i`. It contains no single
-// quotes by construction (printfBEscape removes them), so it can travel
-// single-quoted inside the launch carrier as well as inside the argv
-// launchers' shellQuote.
+// bashOuterScript is the bash tier's transport: write the rcfile to a real
+// file, then exec the interactive bash that reads it. @RC@ is the
+// printfBEscape-encoded rcfile.
+//
+// A FILE, not a process substitution. The pinned form used to be
+//
+//	exec bash --rcfile <(printf %b "<escaped>") -i
+//
+// which is a pipe carrying the whole embedded nocx.bash (~21KB). bash reads a
+// regular rcfile in one go, but from a pipe it reads what is there, and a
+// reader that outpaces its writer gets a short one — so on the macOS CI runner
+// the rcfile arrived cut off mid-construct:
+//
+//	bash: /dev/fd/63: line 415: syntax error: unexpected end of file
+//
+// and everything past that line, which is the entire nocx install, never ran.
+// Scheduling, not syntax: identical bytes on an identical runner image ran
+// green before and red after, and it reproduces on demand simply by making the
+// payload larger than a pipe can hold. The user-visible defect is a busy
+// machine getting a shell with no integration and no error (nocx-azxe.1).
+//
+// The shape is launcher_zsh.go's, deliberately: that tier already delivered its
+// rc as a file through mktemp and removed it from inside, and this one had
+// forked a second answer to the same question.
+//
+// Fail-open is absolute (ADR-0004): a host without mktemp or without a writable
+// secure temp degrades to a plain interactive bash, never to a dead session.
+// The umask is captured before the bootstrap and restored before every exec —
+// the session must inherit the user's umask, not the bootstrap's.
+//
+// No single quote appears anywhere in it, by construction here and by
+// printfBEscape in the payload, so it still travels single-quoted inside the
+// launch carrier as well as inside the argv launchers' shellQuote.
+const bashOuterScript = `old_umask=$(umask)
+umask 077
+__nocx_rc=$(mktemp "${TMPDIR:-/tmp}/nocx-bash.XXXXXX") 2>/dev/null || { umask "$old_umask"; exec bash -i; }
+printf %b "@RC@" > "$__nocx_rc" 2>/dev/null || { umask "$old_umask"; rm -f "$__nocx_rc"; exec bash -i; }
+umask "$old_umask"
+exec bash --rcfile "$__nocx_rc" -i
+`
+
+// bashArgFor wraps a rendered rcfile in the bash tier's transport (see
+// bashOuterScript for why it is a file rather than a pipe).
 func bashArgFor(rc string) string {
-	return `exec bash --rcfile <(printf %b "` + printfBEscape(rc) + `") -i`
+	return strings.ReplaceAll(bashOuterScript, "@RC@", printfBEscape(rc))
 }
 
 func (remoteLauncher) bashArg(opts LaunchOptions) (string, bool) {

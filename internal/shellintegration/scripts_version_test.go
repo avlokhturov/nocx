@@ -40,6 +40,10 @@ func TestScriptVersionTracksScriptContent(t *testing.T) {
 		"9":  "26ee0a75cf83df3a773c97ee39265c96912629c4bcdb629edea51ba5bcc5529d",
 		"10": "17c0fdf278e54cd6fea16aed814b9c96b0daaff6e5d54c6ced03ebd93fc111aa",
 		"11": "85b6105438f141628de8a87ecf013c7fad3df8053c81bd7b65975d26405c6a72",
+		// v12: the first prompt's snapshot wait is bounded by elapsed time
+		// rather than by a count of sleeps whose real cost it could not see
+		// (nocx-0ije).
+		"12": "7cc1e5d1f4af02ffa13b8654804e94efc19c51627471668ee204e72605a52655",
 	}
 
 	h := sha256.New()
