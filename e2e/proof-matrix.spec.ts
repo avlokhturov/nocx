@@ -537,7 +537,13 @@ test.describe('5. Roving tabindex', () => {
       // Open a second tab so there is a tab to navigate to
       await page.locator('[aria-label="New tab"]').click()
       await expect(tabs).toHaveCount(2)
-      await page.waitForTimeout(100)
+      // Wait for the new tab to finish taking focus before competing with it.
+      // A fresh tab mounts an editor and focuses it, and it does so AFTER the
+      // tab button exists — so a fixed sleep here is a race against session
+      // startup that these tests were quietly winning. They stopped winning it
+      // the moment the launcher's timing changed, and reported it as a focus
+      // bug. promptReady is the app saying it is done moving focus.
+      await promptReady(page)
 
       // Read the first tab's data-tab-id from the locator, not activeElement
       const initialId = await tabs.first().getAttribute('data-tab-id')
@@ -570,7 +576,13 @@ test.describe('5. Roving tabindex', () => {
       // Open a second tab first so arrow navigation has room
       await page.locator('[aria-label="New tab"]').click()
       await expect(tabs).toHaveCount(2)
-      await page.waitForTimeout(100)
+      // Wait for the new tab to finish taking focus before competing with it.
+      // A fresh tab mounts an editor and focuses it, and it does so AFTER the
+      // tab button exists — so a fixed sleep here is a race against session
+      // startup that these tests were quietly winning. They stopped winning it
+      // the moment the launcher's timing changed, and reported it as a focus
+      // bug. promptReady is the app saying it is done moving focus.
+      await promptReady(page)
 
       // Focus the active tab (tabindex="0" — the second tab). Playwright's
       // .focus() works here because tabindex >= 0.
@@ -594,7 +606,13 @@ test.describe('5. Roving tabindex', () => {
       // Open a second tab so we can go right then Home
       await page.locator('[aria-label="New tab"]').click()
       await expect(tabs).toHaveCount(2)
-      await page.waitForTimeout(100)
+      // Wait for the new tab to finish taking focus before competing with it.
+      // A fresh tab mounts an editor and focuses it, and it does so AFTER the
+      // tab button exists — so a fixed sleep here is a race against session
+      // startup that these tests were quietly winning. They stopped winning it
+      // the moment the launcher's timing changed, and reported it as a focus
+      // bug. promptReady is the app saying it is done moving focus.
+      await promptReady(page)
 
       // Focus the first tab via evaluate (Playwright .focus() on tabindex="-1"
       // is redirected by the roving handler to the active tab)
