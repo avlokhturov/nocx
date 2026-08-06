@@ -29,6 +29,11 @@
  *   a disclosure; a file, a broken symlink and a cyclic symlink do not.
  * - `data-selected` / `data-focused` — the panel's focus and selection
  *   vocabulary; the row only renders them.
+ * - Every row opens with the same fixed-width leading slot (the disclosure's
+ *   own width) and a type glyph decided here from `kind` — folder closed,
+ *   folder open (by disclosure state), file, symlink, `other`, unreadable.
+ *   A leaf reserves the disclosure's width, so every name in the tree forms
+ *   one column. A surface never supplies a glyph, a colour or a class.
  * - `data-disabled="true"` — unreadable (permission denied is a real state
  *   that renders, never a silently empty row). Disables the disclosure too.
  * - `data-busy="true"` — a directory is loading; its disclosure is disabled.
@@ -38,8 +43,17 @@
  * button — reachable and operable with Enter/Space, `aria-expanded` included.
  * The name is a single line that ellipsises; it never clips a glyph.
  */
-import { Show, type JSX } from 'solid-js'
-import { ChevronDownIcon } from './icons'
+import { Dynamic } from 'solid-js/web'
+import { Show, type Component, type JSX } from 'solid-js'
+import {
+  ChevronDownIcon,
+  FileIcon,
+  FileSymlinkIcon,
+  FileXIcon,
+  FolderIcon,
+  FolderOpenIcon,
+  ServerIcon,
+} from './icons'
 
 export type TreeRowKind = 'regular' | 'dir' | 'symlink' | 'other' | 'unreadable'
 
@@ -75,10 +89,40 @@ function isExpandable(kind: TreeRowKind, linkKind?: TreeRowKind, cyclic?: boolea
   return false
 }
 
+/** The type glyph for a row, decided here from the wire's kind vocabulary —
+ *  a surface never supplies a glyph, a colour or a class. A symlink into a
+ *  directory IS a directory for the row's purposes (it expands and lists),
+ *  so it takes the folder glyph and follows the disclosure; every other
+ *  symlink — to a file, broken, or cyclic — keeps the symlink glyph. The
+ *  glyphs are decorative (aria-hidden), so a row keeps exactly one
+ *  accessible name, the entry name. */
+function kindGlyph(
+  kind: TreeRowKind,
+  linkKind: TreeRowKind | undefined,
+  expandable: boolean,
+  expanded: boolean,
+): Component {
+  if (kind === 'dir') return expanded ? FolderOpenIcon : FolderIcon
+  if (kind === 'symlink' && linkKind === 'dir' && expandable) {
+    return expanded ? FolderOpenIcon : FolderIcon
+  }
+  switch (kind) {
+    case 'regular':
+      return FileIcon
+    case 'symlink':
+      return FileSymlinkIcon
+    case 'other':
+      return ServerIcon
+    case 'unreadable':
+      return FileXIcon
+  }
+}
+
 export function TreeRow(props: TreeRowProps) {
   const expandable = () => isExpandable(props.kind, props.linkKind, props.cyclic)
   const expanded = () => expandable() && props.expanded === true
   const disclosure = () => (expandable() ? (expanded() ? 'expanded' : 'collapsed') : 'leaf')
+  const glyph = () => kindGlyph(props.kind, props.linkKind, expandable(), expanded())
 
   return (
     <div
@@ -99,20 +143,25 @@ export function TreeRow(props: TreeRowProps) {
       data-busy={props.busy === true ? 'true' : undefined}
       style={{ '--tree-row-depth': String(props.depth) }}
     >
-      <Show when={expandable()}>
-        <button
-          type="button"
-          class="ui-tree-row__disclosure"
-          aria-expanded={expanded() ? 'true' : 'false'}
-          aria-label={expanded() ? `Collapse ${props.name}` : `Expand ${props.name}`}
-          disabled={props.busy === true || props.disabled === true}
-          onClick={(e: MouseEvent) => props.onToggle?.(e)}
-        >
-          <span class="ui-tree-row__icon">
-            <ChevronDownIcon />
-          </span>
-        </button>
-      </Show>
+      <span class="ui-tree-row__leading">
+        <Show when={expandable()}>
+          <button
+            type="button"
+            class="ui-tree-row__disclosure"
+            aria-expanded={expanded() ? 'true' : 'false'}
+            aria-label={expanded() ? `Collapse ${props.name}` : `Expand ${props.name}`}
+            disabled={props.busy === true || props.disabled === true}
+            onClick={(e: MouseEvent) => props.onToggle?.(e)}
+          >
+            <span class="ui-tree-row__disclosure-icon">
+              <ChevronDownIcon />
+            </span>
+          </button>
+        </Show>
+      </span>
+      <span class="ui-tree-row__type-icon">
+        <Dynamic component={glyph()} />
+      </span>
       <span class="ui-tree-row__name" title={props.name}>
         {props.name}
       </span>

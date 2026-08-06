@@ -1,10 +1,28 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render } from '@solidjs/testing-library'
+import { cleanup, fireEvent, render, screen } from '@solidjs/testing-library'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { TreeRow } from './tree-row'
+import { TreeRow, type TreeRowKind } from './tree-row'
 
 afterEach(cleanup)
 
+/** Render one row and return the .ui-tree-row element, for glyph assertions. */
+function rowFor(props: {
+  name: string
+  kind: TreeRowKind
+  linkKind?: TreeRowKind
+  cyclic?: boolean
+  expanded?: boolean
+}): HTMLElement {
+  const { container } = render(() => <TreeRow depth={0} {...props} />)
+  return container.querySelector('.ui-tree-row') as HTMLElement
+}
+
+/** The type-icon glyph's inner SVG markup — the wire distinguishes kinds, the
+ *  kit decides the glyph, and this is how a jsdom test (no layout) tells them
+ *  apart. */
+function glyphOf(row: HTMLElement): string {
+  return row.querySelector('.ui-tree-row__type-icon svg')?.innerHTML ?? ''
+}
 describe('TreeRow', () => {
   it('renders a row at a depth with the name visible', () => {
     const { container } = render(() => (
@@ -140,5 +158,85 @@ describe('TreeRow', () => {
     expect(row?.getAttribute('data-selected')).toBe('true')
     expect(row?.getAttribute('data-focused')).toBe('true')
     expect(row?.getAttribute('aria-selected')).toBe('true')
+  })
+
+  describe('type icons', () => {
+    it('a file row renders the file glyph', () => {
+      expect(glyphOf(rowFor({ name: 'main.ts', kind: 'regular' }))).toContain(
+        'M6 22a2 2 0 0 1-2-2V4',
+      )
+    })
+
+    it('a directory follows the disclosure: closed folder collapsed, open folder expanded', () => {
+      const collapsed = rowFor({ name: 'src', kind: 'dir' })
+      const expanded = rowFor({ name: 'src', kind: 'dir', expanded: true })
+      expect(glyphOf(collapsed)).toContain('M20 20a2 2 0 0 0 2-2V8')
+      expect(glyphOf(expanded)).toContain('m6 14 1.5-2.9')
+      expect(glyphOf(expanded)).not.toBe(glyphOf(collapsed))
+    })
+
+    it('a symlink to a file renders the symlink glyph, distinct from a plain file', () => {
+      const link = rowFor({ name: 'notes.md', kind: 'symlink', linkKind: 'regular' })
+      expect(glyphOf(link)).toContain('m10 18 3-3-3-3')
+      expect(glyphOf(link)).not.toBe(glyphOf(rowFor({ name: 'notes.md', kind: 'regular' })))
+    })
+
+    it('a symlink into a directory is a folder, following the disclosure state', () => {
+      const collapsed = rowFor({ name: 'docs', kind: 'symlink', linkKind: 'dir' })
+      const expanded = rowFor({ name: 'docs', kind: 'symlink', linkKind: 'dir', expanded: true })
+      expect(glyphOf(collapsed)).toContain('M20 20a2 2 0 0 0 2-2V8')
+      expect(glyphOf(expanded)).toContain('m6 14 1.5-2.9')
+    })
+
+    it('a cyclic symlink renders a leaf glyph, not a folder', () => {
+      const loop = rowFor({ name: 'loop', kind: 'symlink', linkKind: 'dir', cyclic: true })
+      expect(glyphOf(loop)).toContain('m10 18 3-3-3-3')
+      expect(glyphOf(loop)).not.toContain('M20 20a2 2 0 0 0 2-2V8')
+    })
+
+    it('an `other` entry — FIFO, socket or device — gets its own glyph, not the file glyph', () => {
+      const other = rowFor({ name: 'docker.sock', kind: 'other' })
+      expect(glyphOf(other)).toContain('width="20" height="8" x="2" y="2"')
+      expect(glyphOf(other)).not.toBe(glyphOf(rowFor({ name: 'x', kind: 'regular' })))
+    })
+
+    it("an 'unreadable' entry renders the unreadable glyph, not a plain file", () => {
+      const unreadable = rowFor({ name: 'root-only', kind: 'unreadable' })
+      expect(glyphOf(unreadable)).toContain('m14.5 12.5-5 5')
+      expect(glyphOf(unreadable)).not.toBe(glyphOf(rowFor({ name: 'x', kind: 'regular' })))
+    })
+  })
+
+  describe('leading slot', () => {
+    it('a leaf row and a directory row at the same depth put their names at the same offset', () => {
+      // jsdom has no layout, so the alignment is asserted structurally: both
+      // rows carry the same leading slot, and in both the name is preceded by
+      // exactly the leading slot and the type icon. A file therefore starts
+      // where a directory's name starts, one disclosure-width in.
+      const { container } = render(() => (
+        <div>
+          <TreeRow name="main.ts" depth={0} kind="regular" />
+          <TreeRow name="src" depth={0} kind="dir" onToggle={() => undefined} />
+        </div>
+      ))
+      const rows = container.querySelectorAll('.ui-tree-row')
+      expect(rows.length).toBe(2)
+      for (const row of rows) {
+        const leading = row.querySelector('.ui-tree-row__leading')
+        const typeIcon = row.querySelector('.ui-tree-row__type-icon')
+        const name = row.querySelector('.ui-tree-row__name')
+        expect(leading).not.toBeNull()
+        expect(typeIcon).not.toBeNull()
+        expect(typeIcon?.previousElementSibling).toBe(leading)
+        expect(name?.previousElementSibling).toBe(typeIcon)
+      }
+    })
+  })
+
+  describe('accessibility', () => {
+    it('the icon is decorative: the row keeps one accessible name, the entry name', () => {
+      render(() => <TreeRow name="main.ts" depth={0} kind="regular" />)
+      expect(screen.getByRole('treeitem', { name: 'main.ts' })).toBeTruthy()
+    })
   })
 })

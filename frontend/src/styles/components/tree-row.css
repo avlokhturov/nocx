@@ -2,9 +2,12 @@
    Everything a row can look like lives here; a surface may place the row
    (flex, margin, width) and never repaint it. Variance is typed data-* on the
    row (see tree-row.tsx): depth, kind, disclosure, selection, focus, disabled,
-   busy. The disclosure is the kit's own part identity on a native button — the
-   same shape as ui-checkbox__control — so the row keeps one vocabulary and no
-   surface has to style a button it does not own.
+   busy. Every row opens with the leading slot — the disclosure's own width,
+   so a leaf reserves it and names align in one column — and the type icon,
+   the one glyph per kind the kit decides. The disclosure is the kit's own
+   part identity on a native button, the same shape as ui-checkbox__control,
+   so the row keeps one vocabulary and no surface has to style a button it
+   does not own.
 
    Indentation is driven by the depth number, not by nested DOM: the depth is
    set inline as --tree-row-depth and the indent step is this file's decision.
@@ -80,7 +83,7 @@
   cursor: default;
 }
 
-.ui-tree-row__icon {
+.ui-tree-row__disclosure-icon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -92,19 +95,49 @@
 /* The kit's chevron points down; a collapsed row turns it right. The rotation
    lives on the icon wrapper, never on the button, so the hit area and hover
    stay square. */
-.ui-tree-row[data-disclosure='collapsed'] .ui-tree-row__icon {
+.ui-tree-row[data-disclosure='collapsed'] .ui-tree-row__disclosure-icon {
   transform: rotate(-90deg);
 }
 
-.ui-tree-row__icon svg {
+.ui-tree-row__disclosure-icon svg {
   width: 1em;
   height: 1em;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .ui-tree-row__icon {
+  .ui-tree-row__disclosure-icon {
     transition: none;
   }
+}
+
+/* ── Leading slot ────────────────────────────────────────────────────────
+   Every row — expandable or leaf — opens with the same fixed-width slot, so
+   the disclosure's width is reserved on a file just as it is on a directory
+   and every name in the tree forms one column. The disclosure sits inside
+   it, centred; a leaf's slot is simply empty. */
+.ui-tree-row__leading {
+  flex: 0 0 var(--control-height-sm);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* The type glyph: one icon per kind (see tree-row.tsx — the kit decides,
+   never the surface), decorative and at the disclosure's size and tone. */
+.ui-tree-row__type-icon {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1em;
+  height: 1em;
+  font-size: var(--font-size-md);
+  color: var(--color-text-dim);
+}
+
+.ui-tree-row__type-icon svg {
+  width: 1em;
+  height: 1em;
 }
 
 /* ── Name ────────────────────────────────────────────────────────────────
