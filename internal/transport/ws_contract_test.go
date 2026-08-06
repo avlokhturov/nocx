@@ -1947,7 +1947,7 @@ func TestVaultUnlockRequest_OverTheWireConformsToContract(t *testing.T) {
 	go func() { _ = ws.RequestUnlock(ctx, "history needs the content key") }()
 
 	// Read the notification off the real socket.
-	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(wantWithin))
 	_, data, err := conn.ReadMessage()
 	if err != nil {
 		t.Fatalf("read notification: %v", err)
@@ -2014,7 +2014,7 @@ func TestConnectionsPasswordRequest_OverTheWireConformsToContract(t *testing.T) 
 	}()
 
 	// Read the notification off the real socket.
-	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(wantWithin))
 	_, data, err := conn.ReadMessage()
 	if err != nil {
 		t.Fatalf("read notification: %v", err)
@@ -2052,7 +2052,7 @@ func TestConnectionsPasswordRequest_OverTheWireConformsToContract(t *testing.T) 
 		if !errors.Is(err, ErrPasswordPromptCancelled) {
 			t.Fatalf("RequestConnectionPassword = %v, want ErrPasswordPromptCancelled", err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(wantWithin):
 		t.Fatal("RequestConnectionPassword did not resolve")
 	}
 }
