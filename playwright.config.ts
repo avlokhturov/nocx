@@ -58,6 +58,25 @@ export default defineConfig({
   testDir: './e2e',
   timeout: 60_000,
 
+  // Playwright's expect timeout is 5 seconds, which is a library default and
+  // was never a statement about this app on this hardware.
+  //
+  // Every spec opens by asserting the first tab exists, and on the CI runner
+  // that assertion was failing across the suite — 86 of 200 in run 31087876366
+  // — with "resolved to 0 elements" while the error-context snapshot captured
+  // moments later showed the tab present. So the tab arrives; it arrives after
+  // five seconds. Under `wails dev` each page.goto is a full reload: vite
+  // transforms modules on demand, the renderer re-establishes the WebSocket,
+  // and the backend spawns a PTY for the new session. That is seconds of real
+  // work on a shared macOS runner, and none of it is what the specs are about.
+  //
+  // The cost is bounded and paid only when something is genuinely wrong: an
+  // assertion that would fail still fails, 15 seconds later than it used to,
+  // and the per-test timeout above is unchanged so a hung test is still cut off
+  // at 60s. What this buys back is a suite whose failures mean something
+  // (nocx-qth1).
+  expect: { timeout: 20_000 },
+
   // Refuse to start when the disk is nearly full.
   //
   // Scope honestly: this is a floor on STARTING, not a bound on consumption. The
