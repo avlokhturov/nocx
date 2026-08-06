@@ -1,6 +1,6 @@
 import { test as base, expect as baseExpect, type Page } from '@playwright/test'
 
-import { BASE_URL } from './base-url'
+import { BASE_URL, HEADLESS } from './base-url'
 
 export { expect } from '@playwright/test'
 export type { Page } from '@playwright/test'
@@ -58,7 +58,7 @@ async function injectWailsShim(page: Page): Promise<void> {
   )
 }
 
-export const test = base.extend<Record<string, never>, { appReady: void }>({
+export const test = base.extend<object, { appReady: void }>({
   // The app answers on its port before it can serve a session, and the suite
   // used to treat those as the same moment.
   //
@@ -124,8 +124,8 @@ export const test = base.extend<Record<string, never>, { appReady: void }>({
 //   const { port: p2, token: t2 } = await backend.restart(secondPort)
 
 import { spawn, execSync, type ChildProcess } from 'node:child_process'
-import { existsSync, readFileSync, openSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { existsSync, readFileSync, openSync, mkdirSync, copyFileSync } from 'node:fs'
+import { resolve, basename, join } from 'node:path'
 
 import { createHomeIsolation, type HomeIsolation } from './home-isolation'
 
@@ -148,6 +148,108 @@ export interface DisposableRoot {
 export interface BackendEndpoint {
   port: number
   token: string
+}
+
+/**
+ * Where the backend keeps its documents — settings, profiles, the vault — under
+ * a given isolated home.
+ *
+ * A spec that seeds or reads one of those files has to resolve the same
+ * directory internal/storage does, and that directory is NOT the same shape on
+ * every platform: internal/storage/paths.go sends darwin to
+ * `~/Library/Application Support/<app>` via os.UserHomeDir(), and everything
+ * else to os.UserConfigDir(), which with the XDG variables stripped (as the
+ * home boundary strips them) is `~/.config/<app>`.
+ *
+ * connection-password.spec.ts hardcoded the `.config` form with a comment
+ * asserting the XDG reasoning, which is true on Linux and false on macOS. The
+ * spec passed in the bash container and failed on every Mac: it wrote a profile
+ * where nothing read it, the Connections page stayed empty, and the button it
+ * waited for never appeared. Exactly the split e2e/harness.ts's DisposableRoot
+ * comment already records for the vault specs — the second time this repo has
+ * paid for one directory being derived twice.
+ *
+ * The app name carries the `-dev` suffix because e2e never builds with
+ * `-tags release` (internal/storage/appdir_dev.go).
+ */
+export function documentDir(isolatedHome: string): string {
+  const app = 'nocx-dev'
+  return process.platform === 'darwin'
+    ? join(isolatedHome, 'Library', 'Application Support', app)
+    : join(isolatedHome, '.config', app)
+}
+
+/**
+ * Point the page at a backend THIS SPEC started, by supplying the two wails
+ * bindings the frontend reads at startup.
+ *
+ * Legal only on the headless path, and it refuses everywhere else. Under
+ * `wails dev` the HTML wails serves is:
+ *
+ *   <script src="/wails/ipc.js">                  <- classic
+ *   <script src="/wails/runtime.js">              <- classic
+ *   <script type="module" src="/@vite/client">
+ *   <script type="module" src="/src/main.tsx">
+ *
+ * Classic scripts run before any deferred module, so wails installs the REAL
+ * window.go after Playwright's init script and before main.tsx reads it — and
+ * wailsjs/go/main/WailsApp.js resolves window['go'] at CALL time, so by
+ * main.tsx:82 the stub is simply gone. The app then connects to the wails
+ * backend on 34115, the one every other spec shares.
+ *
+ * That is not a flake and not a race worth trying to win; it is the documented
+ * arrangement (wails discussion #4205: `wails dev` serves the app on 34115
+ * "with backend bindings included"). An override there is asking wails not to
+ * be wails. So the refusal is the contract, and it is an exception rather than
+ * a skip because a spec that quietly measures the wrong backend is the failure
+ * this exists to prevent: in CI run 31115207733 seven specs asserted vault
+ * setup, imports and password prompts against a backend they had never
+ * touched, while the devharness each of them started logged its port and never
+ * saw a single client (nocx-w4vy).
+ *
+ * The specs that need this need it because they RESTART their backend
+ * mid-test — vault surviving a restart is the thing under test — and `wails
+ * dev` owns exactly one backend whose lifecycle Playwright cannot touch. The
+ * requirement was never "override the bindings"; it was "run headless".
+ */
+export async function bindEndpoint(page: Page, endpoint: BackendEndpoint): Promise<void> {
+  if (!HEADLESS) {
+    throw new Error(
+      [
+        'bindEndpoint: refusing to override the wails bindings on the `wails dev` path.',
+        '',
+        'This spec starts its own devharness backend, which only works when the',
+        'page is served by vite alone. Under `wails dev` the injected window.go',
+        'is replaced by the real one before the app reads it, and the spec would',
+        'silently drive the shared backend on 34115 instead (nocx-w4vy).',
+        '',
+        'Run it on the headless path:',
+        '',
+        '  e2e/run-in-container.sh e2e/<this>.spec.ts    # or',
+        '  e2e/headless-run.sh e2e/<this>.spec.ts',
+        '',
+        'playwright.config.ts excludes these specs from the `wails dev` run, so',
+        'reaching this error means one was added back without being listed there.',
+      ].join('\n'),
+    )
+  }
+  await page.context().addInitScript(
+    (opts: { p: number; t: string }) => {
+      const w = window as unknown as { go?: Record<string, unknown> }
+      w.go = {
+        main: {
+          WailsApp: {
+            GetWSPort: () => Promise.resolve(opts.p),
+            GetWSToken: () => Promise.resolve(opts.t),
+            CheckForUpdate: () => Promise.resolve(null),
+            ReportHealthy: () => Promise.resolve(),
+            ApplyUpdate: () => Promise.resolve(),
+          },
+        },
+      }
+    },
+    { p: endpoint.port, t: endpoint.token },
+  )
 }
 
 export class VaultBackend {
@@ -187,6 +289,15 @@ export class VaultBackend {
     const overrideEnv: Record<string, string> = { NOCX_WS_ADDR: `127.0.0.1:${port}` }
     if (this.withoutSecretService) {
       overrideEnv.DBUS_SESSION_BUS_ADDRESS = 'unix:path=/nonexistent/nocx-e2e-no-secret-service'
+      // The portable half. The line above is a LINUX mechanism: on macOS
+      // go-keyring goes to the Security framework and ignores it entirely, so
+      // these cases were not arranging "no keystore" there at all — and with a
+      // disposable $HOME the framework found no login keychain under it and put
+      // a "Keychain not found" dialog on the developer's screen, once per
+      // backend start (nocx-o4hg). Both are set: the env var states the premise
+      // on every platform, and the dbus one keeps stating it for anything that
+      // reads the bus directly.
+      overrideEnv.NOCX_NO_SYSTEM_KEYSTORE = '1'
     }
 
     // The same boundary the default path gets from playwright.config.ts. Built
@@ -227,8 +338,43 @@ export class VaultBackend {
     throw new Error(`devharness did not print WSTOKEN within ${timeoutMs}ms`)
   }
 
+  /**
+   * Copy this backend's log where a failed CI run can actually read it.
+   *
+   * The log lives beside the disposable root — a mkdtemp nobody keeps and no
+   * artifact step collects — so when a spec failed on the runner, the one
+   * account of what the backend did was thrown away with the temp directory.
+   * Every diagnosis then had to be guessed from the DOM. test-results/ is
+   * already uploaded on failure (ci.yml), so that is where it goes.
+   *
+   * Best-effort by construction: a harness that throws while trying to explain
+   * a failure replaces the failure with its own.
+   */
+  private preserveLog(): void {
+    if (!this.logPath) return
+    try {
+      const dir = resolve(process.cwd(), 'test-results', 'devharness')
+      mkdirSync(dir, { recursive: true })
+      copyFileSync(this.logPath, resolve(dir, basename(this.logPath)))
+    } catch {
+      /* the log is a courtesy; never fail a run over it */
+    }
+  }
+
+  /** The backend's log so far, for a test that wants to say WHY it failed. */
+  logTail(maxBytes = 4000): string {
+    if (!this.logPath) return '(backend never started)'
+    try {
+      const all = readFileSync(this.logPath, 'utf8')
+      return all.length <= maxBytes ? all : `…${all.slice(-maxBytes)}`
+    } catch (err) {
+      return `(backend log unreadable: ${String(err)})`
+    }
+  }
+
   /** Stop the running devharness. */
   stop(): void {
+    this.preserveLog()
     if (!this.proc) return
     const p = this.proc
     this.proc = null

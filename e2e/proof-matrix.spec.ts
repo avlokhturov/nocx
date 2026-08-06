@@ -64,13 +64,20 @@ test.describe('1. Focus matrix', () => {
     test('shows focus ring on keyboard focus, not on pointer activation', async ({ page }) => {
       await expect(page.locator('[data-action="settings"]')).toBeAttached()
 
-      // Tab to the button — only the gear button has tabindex=0 (no views registered).
-      // The gear button may not be the first focusable element; tab repeatedly until focused.
+      // Reach the gear the way a keyboard user does. This used to Tab until the
+      // gear was focused, on the note that "only the gear button has tabindex=0
+      // (no views registered)" — true when it was written, false since Ports
+      // became a view (b26bb62). The bar is ONE Tab stop with a roving
+      // tabindex, so Tab lands on whichever button currently holds it and the
+      // rest are reached with arrows. Tabbing 15 times never arrived, so the
+      // test failed on a focus ring that was never asked for.
       const gear = page.locator('[data-action="settings"]')
-      for (let i = 0; i < 15; i++) {
+      await page.locator('[role="toolbar"] button[tabindex="0"]').focus()
+      const inBar = await page.locator('[role="toolbar"] button').count()
+      for (let i = 0; i < inBar; i++) {
         const isFocused = await gear.evaluate((el) => el === document.activeElement)
         if (isFocused) break
-        await page.keyboard.press('Tab')
+        await page.keyboard.press('ArrowDown')
       }
 
       // Assert the ring is present on keyboard focus.
@@ -374,8 +381,8 @@ test.describe('3. Theme with dialog open', () => {
 
     // Clean up: close the dialog
     await page.evaluate(() => {
-      const dialog = document.querySelector('dialog.nocx-dialog')
-      if (dialog) dialog.close()
+      const dialog = document.querySelector<HTMLDialogElement>('dialog.nocx-dialog')
+      dialog?.close()
     })
 
     // Switch theme back
@@ -530,7 +537,13 @@ test.describe('5. Roving tabindex', () => {
       // Open a second tab so there is a tab to navigate to
       await page.locator('[aria-label="New tab"]').click()
       await expect(tabs).toHaveCount(2)
-      await page.waitForTimeout(100)
+      // Wait for the new tab to finish taking focus before competing with it.
+      // A fresh tab mounts an editor and focuses it, and it does so AFTER the
+      // tab button exists — so a fixed sleep here is a race against session
+      // startup that these tests were quietly winning. They stopped winning it
+      // the moment the launcher's timing changed, and reported it as a focus
+      // bug. promptReady is the app saying it is done moving focus.
+      await promptReady(page)
 
       // Read the first tab's data-tab-id from the locator, not activeElement
       const initialId = await tabs.first().getAttribute('data-tab-id')
@@ -563,7 +576,13 @@ test.describe('5. Roving tabindex', () => {
       // Open a second tab first so arrow navigation has room
       await page.locator('[aria-label="New tab"]').click()
       await expect(tabs).toHaveCount(2)
-      await page.waitForTimeout(100)
+      // Wait for the new tab to finish taking focus before competing with it.
+      // A fresh tab mounts an editor and focuses it, and it does so AFTER the
+      // tab button exists — so a fixed sleep here is a race against session
+      // startup that these tests were quietly winning. They stopped winning it
+      // the moment the launcher's timing changed, and reported it as a focus
+      // bug. promptReady is the app saying it is done moving focus.
+      await promptReady(page)
 
       // Focus the active tab (tabindex="0" — the second tab). Playwright's
       // .focus() works here because tabindex >= 0.
@@ -587,7 +606,13 @@ test.describe('5. Roving tabindex', () => {
       // Open a second tab so we can go right then Home
       await page.locator('[aria-label="New tab"]').click()
       await expect(tabs).toHaveCount(2)
-      await page.waitForTimeout(100)
+      // Wait for the new tab to finish taking focus before competing with it.
+      // A fresh tab mounts an editor and focuses it, and it does so AFTER the
+      // tab button exists — so a fixed sleep here is a race against session
+      // startup that these tests were quietly winning. They stopped winning it
+      // the moment the launcher's timing changed, and reported it as a focus
+      // bug. promptReady is the app saying it is done moving focus.
+      await promptReady(page)
 
       // Focus the first tab via evaluate (Playwright .focus() on tabindex="-1"
       // is redirected by the roving handler to the active tab)
@@ -667,70 +692,62 @@ test.describe('5. Roving tabindex', () => {
       expect(zeroCount).toBe(1)
     })
 
+    // The two tests below used to name the gear as the answer, because the bar
+    // held exactly one button when they were written. Ports became a view
+    // (b26bb62) and the answers moved. They now name POSITIONS — next, first,
+    // last — which is what a roving tabindex actually promises and what stays
+    // true however many views are registered.
+    //
+    // The ArrowDown/ArrowUp one did not even go red: it hunted the gear with
+    // Tab, never found it once Tab started landing on Ports, and took its
+    // `test.skip` branch. A rotted test that skips reports nothing at all,
+    // which is worse than one that fails.
+
+    /** Identity of the focused toolbar button: its view id or its action id. */
+    const focusedId = (page: Page) =>
+      page.evaluate(() => {
+        const el = document.activeElement
+        if (!el || !el.closest('[role="toolbar"]')) return null
+        return el.getAttribute('data-view') ?? el.getAttribute('data-action')
+      })
+
+    /** The bar's buttons in DOM order, by the same identity. */
+    const barIds = (page: Page) =>
+      page
+        .locator('[role="toolbar"] button')
+        .evaluateAll((els) =>
+          els.map((el) => el.getAttribute('data-view') ?? el.getAttribute('data-action')),
+        )
+
     test('ArrowDown/ArrowUp moves focus in the activity bar', async ({ page }) => {
-      // Focus the toolbar by tabbing to it
-      await page.keyboard.press('Tab')
-      // Keep pressing Tab until we hit the activity bar gear button
-      let found = false
-      for (let i = 0; i < 15; i++) {
-        const isGear = await page.evaluate(() => {
-          const el = document.activeElement
-          return el?.getAttribute('data-action') === 'settings'
-        })
-        if (isGear) {
-          found = true
-          break
-        }
-        await page.keyboard.press('Tab')
-      }
+      // The bar is one Tab stop: focus goes to whichever button holds
+      // tabindex=0, and arrows move from there.
+      await page.locator('[role="toolbar"] button[tabindex="0"]').focus()
+      const ids = await barIds(page)
+      const start = await focusedId(page)
+      expect(start).not.toBeNull()
 
-      // If the gear is the only button, ArrowUp/Down shouldn't crash.
-      // With the current state (no views), there's only one action button.
-      // This test validates the structure works when multiple buttons exist.
-      if (found) {
-        // ArrowDown should not throw (even with single button, the handler wraps)
-        await page.keyboard.press('ArrowDown')
-        // The gear should still be focused (wraps back to itself)
-        const stillGear = await page.evaluate(() => {
-          const el = document.activeElement
-          return el?.getAttribute('data-action') === 'settings'
-        })
-        expect(stillGear).toBe(true)
+      // Down moves to the next button, wrapping at the end.
+      await page.keyboard.press('ArrowDown')
+      const afterDown = await focusedId(page)
+      expect(afterDown).toBe(ids[(ids.indexOf(start) + 1) % ids.length])
 
-        // ArrowUp should also work
-        await page.keyboard.press('ArrowUp')
-      } else {
-        test.skip(true, 'Gear button not reachable via Tab')
-      }
+      // Up returns. With a single button both are no-ops that must not throw,
+      // and the assertions above still hold because the wrap is to itself.
+      await page.keyboard.press('ArrowUp')
+      expect(await focusedId(page)).toBe(start)
     })
 
     test('Home/End work in the activity bar', async ({ page }) => {
-      // Tab to the toolbar
-      await page.keyboard.press('Tab')
-      for (let i = 0; i < 15; i++) {
-        const inToolbar = await page.evaluate(() => {
-          const el = document.activeElement
-          return el?.closest('[role="toolbar"]') !== null
-        })
-        if (inToolbar) break
-        await page.keyboard.press('Tab')
-      }
+      await page.locator('[role="toolbar"] button[tabindex="0"]').focus()
+      const ids = await barIds(page)
+      expect(ids.length).toBeGreaterThan(0)
 
-      // With only one button (gear), Home/End shouldn't crash
-      // Both should leave the gear focused
       await page.keyboard.press('Home')
-      const homeTarget = await page.evaluate(() => {
-        const el = document.activeElement
-        return el?.getAttribute('data-action')
-      })
-      expect(homeTarget).toBe('settings')
+      expect(await focusedId(page)).toBe(ids[0])
 
       await page.keyboard.press('End')
-      const endTarget = await page.evaluate(() => {
-        const el = document.activeElement
-        return el?.getAttribute('data-action')
-      })
-      expect(endTarget).toBe('settings')
+      expect(await focusedId(page)).toBe(ids[ids.length - 1])
     })
 
     test('Tab enters and leaves the toolbar as one stop', async ({ page }) => {

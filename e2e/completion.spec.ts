@@ -97,27 +97,39 @@ test.describe('tab completion', () => {
       await expect(page.locator('.nocx-tab')).toHaveCount(1)
       await promptReady(page)
 
-      // The probe is a DIRECTORY: `cd` takes directories only (the
+      // The probes are DIRECTORIES: `cd` takes directories only (the
       // dirs-only table), so a file would be filtered out of its completion
       // and this test would fail for the wrong reason.
+      //
+      // TWO of them, sharing a prefix. One would be a UNIQUE completion, and
+      // a unique completion is applied straight to the line without ever
+      // opening a dropdown (controller.applyUniqueCompletion) — so a
+      // single-probe fixture cannot see the list this test is about. It used
+      // to have one, and read the panel that opened afterwards on the newly
+      // entered (empty) directory as a failure of fs.complete.
       const run = Date.now().toString(36)
-      const probe = `zzz-e2e-cmp-${run}-probe`
+      const stem = `zzz-e2e-cmp-${run}`
+      const probe = `${stem}-probe`
       fs.mkdirSync(path.join(fixture, probe))
+      fs.mkdirSync(path.join(fixture, `${stem}-sibling`))
 
       await cdInto(page, fixture)
 
       // `cd ./zzz-e2e-cmp-<run>` + Tab: the local path provider asks the
-      // backend (fs.complete) and lists the probe. The typed prefix carries
-      // the run's own random, so a previous run's recorded history line can
+      // backend (fs.complete) and lists both. The typed prefix carries the
+      // run's own random, so a previous run's recorded history line can
       // never start with it — no cross-provider pollution.
-      await page.keyboard.type(`cd ./${probe}`)
+      await page.keyboard.type(`cd ./${stem}`)
       await page.keyboard.press('Tab')
       const dropdown = page.locator(DROPDOWN).first()
       await expect(dropdown).toBeVisible({ timeout: 5000 })
       await expect(dropdown).toContainText(probe, { timeout: 5000 })
+      await expect(dropdown).toContainText(`${stem}-sibling`, { timeout: 5000 })
 
       await page.keyboard.press('Enter')
-      // A directory keeps its trailing slash.
+      // A directory keeps its trailing slash. The rows are alphabetical and
+      // `-probe` precedes `-sibling`, so Enter on the opening selection takes
+      // the probe.
       await expect(page.locator(INPUT)).toHaveText(`cd ./${probe}/`, { timeout: 5000 })
     } finally {
       fs.rmSync(fixture, { recursive: true, force: true })
@@ -204,7 +216,12 @@ test.describe('tab completion', () => {
 
   test('erasing the line closes the panel entirely — no footer-only panel', async ({ page }) => {
     const fixture = fixtureDir()
+    // Two directories, not one. A single candidate is a UNIQUE completion and
+    // is applied straight to the line without opening a dropdown
+    // (controller.applyUniqueCompletion), so a one-directory fixture never
+    // reaches the state this test is about — the open panel it then erases.
     fs.mkdirSync(path.join(fixture, 'alpha'))
+    fs.mkdirSync(path.join(fixture, 'beta'))
     try {
       await page.goto('/')
       await expect(page.locator('.nocx-tab')).toHaveCount(1)
@@ -310,7 +327,12 @@ test.describe('tab completion', () => {
       // Enter accepts the cycled-to candidate; nothing was submitted.
       await page.keyboard.press('Enter')
       await expect(page.locator(INPUT)).toHaveText('cd beta/', { timeout: 5000 })
-      await expect(dropdown).not.toBeVisible()
+      // Accepting a DIRECTORY re-queries into it — the owner's "Tab jumps to
+      // the next folder" — so the panel stays up describing where the caret
+      // now is. beta/ is empty, and the panel says so rather than "No
+      // matches": nothing was typed for anything to fail to match, and the
+      // completion the user just made succeeded (nocx-azxe.5).
+      await expect(dropdown).toContainText('empty', { timeout: 5000 })
     } finally {
       fs.rmSync(fixture, { recursive: true, force: true })
     }
@@ -326,6 +348,11 @@ test.describe('tab completion', () => {
     fs.mkdirSync(path.join(fixture, 'repos', 'meshynet'), { recursive: true })
     fs.mkdirSync(path.join(fixture, 'repos', 'meshynet', 'bin'))
     fs.mkdirSync(path.join(fixture, 'repos', 'meshynet', 'graphify-output'))
+    // A sibling under the same `gr` prefix. Without it `gr` is a UNIQUE
+    // completion, applied straight to the line with no dropdown to read
+    // (controller.applyUniqueCompletion). Named to sort AFTER
+    // graphify-output so the row assertions below still name row 0.
+    fs.mkdirSync(path.join(fixture, 'repos', 'meshynet', 'grz-sibling'))
     try {
       await page.goto('/')
       await expect(page.locator('.nocx-tab')).toHaveCount(1)
@@ -342,9 +369,11 @@ test.describe('tab completion', () => {
       await expect(dropdown).toBeVisible({ timeout: 8000 })
       const rows = dropdown.locator('.ui-floating-panel__row')
       await expect(rows.first()).toBeVisible({ timeout: 5000 })
-      // A PARTIAL segment (`gr`) narrows the listing to the matching entry:
-      // one row, its last segment shown — never `repos/meshynet/…` repeated.
+      // A PARTIAL segment (`gr`) narrows the listing to the matching
+      // entries, each showing its LAST SEGMENT — never `repos/meshynet/…`
+      // repeated in every row.
       await expect(rows.nth(0)).toContainText('graphify-output/')
+      await expect(rows.nth(1)).toContainText('grz-sibling/')
       await expect(dropdown).not.toContainText('repos/meshynet/graphify-output')
       const box = await dropdown.boundingBox()
       expect(box).not.toBeNull()

@@ -22,13 +22,13 @@
  * One serial test: the second open MUST observe state the first open
  * installed, not an independent fixture.
  */
-import { test as base, expect, type Page } from '@playwright/test'
+import { test as base, expect } from '@playwright/test'
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { VaultBackend, type BackendEndpoint } from './harness'
+import { VaultBackend, bindEndpoint, documentDir } from './harness'
 
 const DEVHARNESS_BIN = process.env.NOCX_VAULT_BIN ?? '/tmp/nocx-devharness'
 const FIXTURE_PASSWORD = 'e2e-password-42'
@@ -42,18 +42,17 @@ const INPUT = '.pane.active .nocx-editor-input'
 const PROMPT = '.ui-prompt'
 const CONNECT_BTN = `[aria-label="Connect to ${PROFILE_NAME}"]`
 /** A disposable root the backend's whole home lives inside (the harness's
- *  DisposableRoot: createHomeIsolation places HOME at root/home and strips
- *  XDG vars, so the config dir resolves to ~/.config/nocx-dev). */
+ *  DisposableRoot: createHomeIsolation places HOME at root/home). */
 function createDisposableRoot(): string {
   return mkdtempSync(join(tmpdir(), 'nocx-connpw-'))
 }
 
 /** Seed the profile store with ONE password-mode profile and no binding —
- *  the state "saving a host" leaves behind. The store lives under the
- *  backend's isolated home (createHomeIsolation strips XDG vars, so the
- *  config dir resolves to ~/.config/nocx-dev). */
+ *  the state "saving a host" leaves behind. The directory comes from the
+ *  harness rather than from a literal: it is not the same on every platform,
+ *  and writing the Linux one on a Mac put the profile where nothing read it. */
 function seedProfile(isolatedHome: string, fixtureAddr: number): string {
-  const dir = join(isolatedHome, '.config', 'nocx-dev')
+  const dir = documentDir(isolatedHome)
   mkdirSync(dir, { recursive: true })
   const path = join(dir, 'profiles.json')
   writeFileSync(
@@ -77,7 +76,6 @@ function seedProfile(isolatedHome: string, fixtureAddr: number): string {
   )
   return path
 }
-
 
 /** The e2e-sshd fixture: built once, spawned per run with -password. */
 function startSshd(password: string): Promise<{
@@ -118,25 +116,6 @@ function startSshd(password: string): Promise<{
   })
   return promise
 }
-/** Inject Wails stubs pointing at the given backend endpoint. */
-async function bindEndpoint(page: Page, endpoint: BackendEndpoint): Promise<void> {
-  await page.context().addInitScript(
-    (opts: { p: number; t: string }) => {
-      ;(window as unknown as { go: unknown }).go = {
-        main: {
-          WailsApp: {
-            GetWSPort: () => Promise.resolve(opts.p),
-            GetWSToken: () => Promise.resolve(opts.t),
-            CheckForUpdate: () => Promise.resolve(null),
-            ReportHealthy: () => Promise.resolve(),
-            ApplyUpdate: () => Promise.resolve(),
-          },
-        },
-      }
-    },
-    { p: endpoint.port, t: endpoint.token },
-  )
-}
 
 const test = base
 
@@ -176,7 +155,10 @@ test.describe('connection password ask: first open prompts, remembered second op
     })
     await page.locator('#vault-setup-passphrase').fill('master-passphrase-7')
     await page.locator('#vault-setup-confirm').fill('master-passphrase-7')
-    await page.getByRole('dialog').getByRole('button', { name: /Set Up/i }).click()
+    await page
+      .getByRole('dialog')
+      .getByRole('button', { name: /Set Up/i })
+      .click()
     await expect(page.getByRole('dialog').filter({ hasText: 'Recovery Code' })).toBeVisible({
       timeout: 10_000,
     })
@@ -223,9 +205,12 @@ test.describe('connection password ask: first open prompts, remembered second op
     // The remember persisted: the profile now references a stored secret
     // (ADR-0017) — the closing event of the remember.
     await expect
-      .poll(() => JSON.parse(readFileSync(profilesPath, 'utf8')).profiles[0].options?.passwordSecret, {
-        timeout: 10_000,
-      })
+      .poll(
+        () => JSON.parse(readFileSync(profilesPath, 'utf8')).profiles[0].options?.passwordSecret,
+        {
+          timeout: 10_000,
+        },
+      )
       .toBeTruthy()
 
     // ── Phase 4: close the profile tab, SECOND open — silent ────────────
@@ -241,5 +226,5 @@ test.describe('connection password ask: first open prompts, remembered second op
     // nothing asked. Assert both halves.
     await expect(page.locator('.nocx-tab')).toHaveCount(3, { timeout: 20_000 })
     await expect(page.locator(PROMPT)).toHaveCount(0)
-})
+  })
 })

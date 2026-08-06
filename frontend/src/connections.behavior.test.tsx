@@ -505,16 +505,18 @@ describe('bound password secret', () => {
     await openProfileEditor(container, 'prod-web')
     selectProfileSection(container, 'Authentication')
 
-    // The Password action names the bound row, and the picker holds it as
-    // the current value — an empty credential is visible before Connect is
-    // pressed, not remembered by the user.
+    // A profile that already names a row opens on "Use existing secret", and
+    // the picker holds that row as its current value — the bound secret is
+    // visible before Connect is pressed, not remembered by the user (b5bu).
+    //
+    // This used to also assert the "Password: <row>" line and a "Change
+    // Password" button. Both belonged to a SECOND copy of the password action
+    // that AuthMethodEditor drew alongside this one, so the editor showed the
+    // control twice (nocx-azxe.6). The copy is gone; the row is still named,
+    // by the picker, which is the surface that owns the choice.
     await vi.waitFor(() => {
-      expect(container.textContent).toContain('Password: Password for prod-web')
+      expect(container.textContent).toContain('Password for prod-web')
     })
-    const changeBtn = Array.from(container.querySelectorAll('.ui-button')).find(
-      (b) => b.textContent?.trim() === 'Change Password',
-    )
-    expect(changeBtn, 'Change Password not found').toBeTruthy()
     const picker = container
       .querySelector('label[for="profile-auth-secret"]')!
       .closest('.ui-field')!

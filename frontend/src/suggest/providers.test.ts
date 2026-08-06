@@ -640,7 +640,7 @@ describe('fsProvider', () => {
     expect(got.emptyReason).toEqual({ kind: 'dirs-only-empty', dir: '' })
   })
 
-  it('a non-dirs command whose directory is empty says nothing specific (generic no-match)', async () => {
+  it('a directory listed with no prefix and holding nothing says so', async () => {
     const complete = vi.fn((): Promise<FsComplete> => Promise.resolve({ entries: [] }))
     const provider = fsProvider({ complete })
     const got = await provider.suggest(
@@ -648,6 +648,24 @@ describe('fsProvider', () => {
       new AbortController().signal,
     )
     expect(got.candidates).toEqual([])
+    // Not the generic no-match, which this used to assert. The token ends in
+    // `/`, so the user typed no prefix for anything to fail to match: the
+    // listing succeeded and the folder is empty. Tab completing INTO a folder
+    // is the common way to arrive here, and "No matches" reads there as if the
+    // completion had failed when it had just succeeded (nocx-azxe.5).
+    expect(got.emptyReason).toEqual({ kind: 'empty-dir', dir: 'empty' })
+  })
+
+  it('a prefix that matches nothing is still the generic no-match', async () => {
+    const complete = vi.fn((): Promise<FsComplete> => Promise.resolve({ entries: [] }))
+    const provider = fsProvider({ complete })
+    const got = await provider.suggest(
+      ctx({ doc: 'ls empty/zz', token: { text: 'empty/zz', from: 3, to: 11 } }),
+      new AbortController().signal,
+    )
+    expect(got.candidates).toEqual([])
+    // Here the user DID type a prefix, and nothing matched it. The two cases
+    // must stay distinguishable — that is the whole point of the new reason.
     expect(got.emptyReason).toBeUndefined()
   })
 

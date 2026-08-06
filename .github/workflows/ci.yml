@@ -102,10 +102,17 @@ jobs:
   # rather than two separate jobs. Rationale: common steps (checkout,
   # setup-go, build) appear once; GitHub auto-labels each variant; one job
   # ID for required checks.
+  #
+  # fail-fast is off for the reason these two variants exist at all: they are a
+  # comparison. The question a red run has to answer is WHICH of "with a Secret
+  # Service" and "without one" broke, and the default would cancel the survivor
+  # the moment the first one failed — leaving exactly one of the two readings
+  # the job was built to take.
   backend-linux:
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         with-keyring: [true, false]
     steps:
@@ -186,6 +193,20 @@ jobs:
       - run: npm test
       - run: npm run build
 
+      # The e2e suite is TypeScript too, and nothing was checking it. Two specs
+      # were dead on their first line for as long as anyone can measure —
+      # history-persistence imported a type harness.ts had stopped exporting,
+      # tabby-import read a field off a shape that had none — and both are
+      # compile errors that ran anyway, because the runner strips types rather
+      # than checking them. They surfaced as "argument must be of type string.
+      # Received undefined" from inside node:path, and only once CI began
+      # building the devharness those specs need (nocx-azxe.2).
+      - name: Typecheck the e2e suite
+        working-directory: .
+        run: |
+          npm ci
+          npm run typecheck
+
   # e2e — the checks that only exist in a real browser against the real app.
   #
   # Runner decision: macos-latest, for a different reason than the backend job.
@@ -258,6 +279,28 @@ jobs:
       # run, and installing only chromium would fail the run outright.
       - run: npx playwright install chromium webkit
 
+      # Nine specs do not drive `wails dev` at all: they start their own backend
+      # through cmd/devharness (real Go backend, real PTY, no wails and no
+      # display) so they can restart it mid-test and prove a thing survived.
+      # e2e/harness.ts:177 refuses to construct a VaultBackend without the
+      # binary, so each of those specs failed outright with "devharness binary
+      # not found" — 9 files x 2 browsers, in every shard.
+      #
+      # Nothing built it. scripts/dev-web.sh does, for the local headless path,
+      # and CI never ran that. The failures were invisible while the whole e2e
+      # job was hitting its 20-minute cap without reporting; sharding made it
+      # report, and this is most of what it reported (nocx-bbkh).
+      #
+      # Three names, one binary. The specs name distinct paths for the same
+      # reason they name distinct ports — so two suites can run at once without
+      # one rebuilding the file the other is executing — and they are the same
+      # build, so copies are the honest way to satisfy that.
+      - name: Build devharness (specs that start their own backend)
+        run: |
+          go build -o /tmp/nocx-devharness ./cmd/devharness
+          cp /tmp/nocx-devharness /tmp/nocx-devharness-vault
+          cp /tmp/nocx-devharness /tmp/nocx-devharness-srch
+
       # --shard splits by test FILE, deterministically, so a file's tests always
       # stay together on one runner and a spec that relies on the order within
       # its own file is unaffected.
@@ -271,5 +314,78 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: playwright-traces-shard-${{ matrix.shard }}
+          path: test-results/
+          retention-days: 7
+
+  # e2e-headless — the specs the job above cannot run.
+  #
+  # Seven specs start their own backend through cmd/devharness so they can
+  # RESTART it mid-test: a vault that survives a restart, an import that
+  # outlives the process, history that is still there next launch. `wails dev`
+  # owns exactly one backend whose lifecycle Playwright cannot touch, so those
+  # subjects are unreachable there — and the way they reached around it did not
+  # work either. Each pointed its page at its own backend by stubbing
+  # window.go, and under `wails dev` wails installs the real window.go after
+  # Playwright's init script and before the app reads it. All seven quietly
+  # drove the shared backend on 34115 and asserted vault setup against a
+  # process they had never touched, while the one they started logged its port
+  # and never saw a client (nocx-w4vy).
+  #
+  # So they run where the premise holds: vite serving the page alone, no wails
+  # runtime to overwrite anything. playwright.config.ts excludes them from the
+  # job above and harness.ts's bindEndpoint throws if one is added back without
+  # being listed, so "forgot to run them" fails loudly instead of silently.
+  #
+  # Runner decision: macos-latest, the same as the e2e job, even though this
+  # path needs no wails, no GTK and no display and would run on ubuntu. The
+  # reason is not the app — it is that AGENTS.md makes CI the source of truth
+  # for the failure set, and Linux WebKit at a container viewport has a
+  # different one. Newly-enforced specs are the worst place to introduce a
+  # second answer to "is this red for real". Cheap regardless: no Wails CLI, no
+  # `wails dev` compile, one job rather than three shards.
+  e2e-headless:
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
+
+      # Both installs, unlike the e2e job: nothing here runs `wails dev`, so
+      # nobody installs the frontend on our behalf and vite is started directly.
+      - run: npm ci
+      - run: cd frontend && npm ci
+      - run: npx playwright install chromium webkit
+
+      # The stack lives in the script, shared with e2e/run-in-container.sh so a
+      # developer iterating locally and this job run the same arrangement.
+      - name: Run the specs that start their own backend
+        run: |
+          e2e/headless-run.sh \
+            e2e/connection-password.spec.ts \
+            e2e/history-persistence.spec.ts \
+            e2e/prompt-vault.spec.ts \
+            e2e/recall-search.spec.ts \
+            e2e/tabby-import.spec.ts \
+            e2e/vault.spec.ts \
+            e2e/vault-settings.spec.ts
+
+      - name: Upload traces
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-traces-headless
           path: test-results/
           retention-days: 7

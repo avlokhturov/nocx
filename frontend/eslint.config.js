@@ -772,9 +772,12 @@ export default tseslint.config(
   {
     languageOptions: {
       parserOptions: {
-        // Both projects: tsconfig.json owns src/, tsconfig.node.json owns the
-        // Vite config. A file in neither is a file nobody type-checks.
-        project: ['./tsconfig.json', './tsconfig.node.json'],
+        // Every project, because a file in none of them is a file nobody
+        // type-checks — and eslint says so, loudly, rather than skipping it.
+        // tsconfig.json owns the browser sources, tsconfig.test.json the
+        // vitest files (they are the ones allowed Node's typings), and
+        // tsconfig.node.json the Vite config.
+        project: ['./tsconfig.json', './tsconfig.test.json', './tsconfig.node.json'],
         tsconfigRootDir: import.meta.dirname,
       },
     },

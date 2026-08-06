@@ -27,13 +27,15 @@ test('a new tab never displays "Terminal" in its title', async ({ page }) => {
   // instant each new tab button is inserted into the DOM. The observer
   // callback runs synchronously — before any async openSession response.
   await page.evaluate(() => {
-    ;(window as Record<string, unknown>).__nocxTitleSnapshots = [] as string[]
+    ;(window as unknown as { __nocxTitleSnapshots: string[] }).__nocxTitleSnapshots = []
     const observer = new MutationObserver((mutations) => {
       for (const m of mutations) {
         for (const node of m.addedNodes) {
           if (node instanceof HTMLElement && node.classList.contains('nocx-tab')) {
             const title = node.querySelector('.nocx-tab-title')
-            ;(window as Record<string, unknown>).__nocxTitleSnapshots.push(title?.textContent ?? '')
+            ;(window as unknown as { __nocxTitleSnapshots: string[] }).__nocxTitleSnapshots.push(
+              title?.textContent ?? '',
+            )
           }
         }
       }
@@ -49,7 +51,7 @@ test('a new tab never displays "Terminal" in its title', async ({ page }) => {
 
   // Read the snapshots collected by the observer.
   const snapshots: string[] = await page.evaluate(
-    () => (window as Record<string, unknown>).__nocxTitleSnapshots as string[],
+    () => (window as unknown as { __nocxTitleSnapshots: string[] }).__nocxTitleSnapshots,
   )
   expect(snapshots.length).toBeGreaterThanOrEqual(1)
   for (const s of snapshots) {

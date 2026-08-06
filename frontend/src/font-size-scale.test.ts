@@ -7,11 +7,8 @@
                       @typescript-eslint/no-unsafe-member-access */
 import { describe, it, expect } from 'vitest'
 import { FONT_SIZE } from './renderers/font'
-// @ts-expect-error — @types/node not installed; vitest resolves at runtime
 import { createRequire } from 'node:module'
-// @ts-expect-error — @types/node not installed; vitest resolves at runtime
 import { readFileSync } from 'node:fs'
-// @ts-expect-error — @types/node not installed; vitest resolves at runtime
 import { resolve } from 'node:path'
 
 const css = createRequire(import.meta.url)('css-tree')

@@ -14,23 +14,12 @@ import { cleanup, render, waitFor } from '@solidjs/testing-library'
 import { PortsPanel, createPortsPauseControl, type PortsPanelServices } from './ports'
 import type { PortsStatusResult } from './generated/ports.status'
 
-declare global {
-  interface ImportMeta {
-    dirname?: string
-  }
-}
-
 afterEach(() => cleanup())
 
-/* eslint-disable @typescript-eslint/no-unsafe-assignment,
-                      @typescript-eslint/no-unsafe-call */
-// @ts-expect-error — @types/node not installed; vitest resolves at runtime
 import { readFileSync } from 'node:fs'
-// @ts-expect-error — @types/node not installed; vitest resolves at runtime
 import { resolve } from 'node:path'
 const PORTS_CSS = resolve(import.meta.dirname ?? '.', 'styles/surfaces/ports.css')
-/* eslint-enable @typescript-eslint/no-unsafe-assignment,
-                       @typescript-eslint/no-unsafe-call */
+
 function extractRuleBlock(css: string, needle: string): string | null {
   const re = new RegExp(`\\.${needle}(?![\\w-])`)
   let i = 0
@@ -138,7 +127,6 @@ describe('the detected row keeps the address first and primary (nocx-wzc4.9)', (
   })
 
   it('the stylesheet stacks the column and leaves the address unbounded', () => {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-assignment
     const css: string = readFileSync(PORTS_CSS, 'utf8')
     const text = stripComments(extractRuleBlock(css, 'ports-row__text') ?? '')
     const addr = stripComments(extractRuleBlock(css, 'ports-row__addr') ?? '')

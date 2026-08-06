@@ -12,11 +12,8 @@
 // fixture from the Go package, and every call through them is an untyped
 // value — so no-unsafe-* is disabled at the file level, the way
 // theme-catalogue.test.ts does for the same reason.
-/* eslint-disable @typescript-eslint/no-unsafe-call,
-                  @typescript-eslint/no-unsafe-argument */
-// @ts-expect-error — node builtin, untyped in this project
+
 import { readFileSync } from 'node:fs'
-// @ts-expect-error — node builtin, untyped in this project
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import {

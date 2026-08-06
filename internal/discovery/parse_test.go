@@ -176,9 +176,9 @@ sshd      1234 root    3u  IPv4  12345      0t0 12345 TCP *:22 (LISTEN)
 node      4321 dev     11u  IPv6  54321      0t0 54321 TCP [::1]:3000 (LISTEN)`
 
 func TestParseLsof(t *testing.T) {
-	listeners, ok := parseLsof([]byte(lsofFixture))
+	listeners, ok := ParseLsof([]byte(lsofFixture))
 	if !ok {
-		t.Fatal("parseLsof rejected the fixture")
+		t.Fatal("ParseLsof rejected the fixture")
 	}
 	if len(listeners) != 2 {
 		t.Fatalf("listeners = %d, want 2", len(listeners))

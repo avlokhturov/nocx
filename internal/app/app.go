@@ -145,12 +145,36 @@ type optionSet struct {
 	// without it New() resolves the profile's data directory, and a test
 	// must not write into the developer's real profile (nocx-ti8w).
 	logFilePath *string
+	// noSystemKeystore builds the system vault provider over a keyring that
+	// is absent by construction. Dev-only, and the portable way to say what
+	// DBUS_SESSION_BUS_ADDRESS could only say on Linux — see
+	// WithoutSystemKeystore.
+	noSystemKeystore bool
 }
 
 // WithWSAddr pins the WebSocket listen address instead of the default
 // 127.0.0.1:0. Dev-only; shipped code should never set this.
 func WithWSAddr(addr string) Option {
 	return func(o *optionSet) { o.wsAddr = addr }
+}
+
+// WithoutSystemKeystore builds the vault's system provider over a keyring that
+// fails every operation, so the backend behaves exactly like one on a host with
+// no OS secret store.
+//
+// Dev-only, wired from cmd/devharness. It exists because the e2e cases that are
+// ABOUT the passphrase path had no portable way to state their premise: the
+// suite pointed DBUS_SESSION_BUS_ADDRESS at nothing, which is a Linux
+// mechanism, and on macOS go-keyring talks to the Security framework and
+// ignores it. Those cases were therefore not arranging "no keystore" on macOS
+// at all — and a backend given a disposable $HOME there put a "Keychain not
+// found" dialog in front of whoever was running the suite, once per start
+// (nocx-o4hg).
+//
+// It also skips the startup probe, because a probe is a real keystore call and
+// there is nothing here to call.
+func WithoutSystemKeystore() Option {
+	return func(o *optionSet) { o.noSystemKeystore = true }
 }
 
 // WithKeystoreProbe overrides the OS-keystore availability decision for the
@@ -260,6 +284,9 @@ func New(opts ...Option) (*App, error) {
 	var contentDB content.ContentDB = content.NewStub(logger)
 
 	sysProv := system.New()
+	if o.noSystemKeystore {
+		sysProv = system.New(system.WithKeyring(system.AbsentKeyring{}))
+	}
 	fileProv := file.New(docStore, "vault-file.json")
 	reg, err := vault.NewRegistry(sysProv, fileProv)
 	if err != nil {
@@ -274,9 +301,14 @@ func New(opts ...Option) (*App, error) {
 	// must not run on a host the test claims has no keystore.
 	probeStatus := vault.Status{}
 	systemReady := false
-	if o.keystoreProbe != nil {
+	switch {
+	case o.noSystemKeystore:
+		// Nothing to probe: the provider is absent by construction, and a
+		// probe is a real keystore call.
+		probeStatus = vault.Status{Reason: "no system keystore (dev override)"}
+	case o.keystoreProbe != nil:
 		systemReady = o.keystoreProbe(ctx)
-	} else {
+	default:
 		probeStatus = sysProv.Probe(ctx)
 		systemReady = probeStatus.Ready
 	}

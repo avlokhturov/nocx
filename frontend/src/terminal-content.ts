@@ -388,7 +388,7 @@ export class TerminalContent extends BaseTabContent {
    *  can unblock it. */
   private _inBandReadySeen = false
   /** Overall attempt deadline; Esc cancels before it. */
-  private _inBandTimer: number | undefined
+  private _inBandTimer: ReturnType<typeof setTimeout> | undefined
 
   // ── Title composition ────────────────────────────────────────────────
   // Title = programTitle || cwdTitle (no placeholder — nocx-83a)

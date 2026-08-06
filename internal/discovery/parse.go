@@ -164,13 +164,25 @@ func parseBusyboxNetstat(body []byte) ([]Listener, bool) {
 	return out, true
 }
 
-// parseLsof parses `lsof -nP -iTCP -sTCP:LISTEN` output: columns COMMAND PID
+// ParseLsof parses `lsof -nP -iTCP -sTCP:LISTEN` output: columns COMMAND PID
 // USER FD TYPE DEVICE SIZE/OFF NODE NAME, where NAME ends in " (LISTEN)" and
 // carries the bind address ("*:22", "127.0.0.1:631", "[::1]:631"). Rows lsof
 // prints always carry process evidence. NOTE: as non-root lsof only lists
 // sockets it may read, so other users' listeners can be absent from the rows
 // entirely — a row-visibility limit, not per-row evidence.
-func parseLsof(body []byte) ([]Listener, bool) {
+//
+// `ok` is false when the body is not this dialect at all. For the remote
+// ladder that means "advance to the next rung"; for a caller whose only tool
+// is lsof it means the table could not be read, which is never the same
+// answer as an empty one.
+//
+// Exported because it has two callers and must only ever have one
+// implementation: the ladder's lsof rung here, and internal/nativeports on
+// darwin, where lsof IS the local read. That package briefly kept a second
+// copy, which read the bind address out of the last whitespace-separated
+// field — lsof's last field is the state, so it rejected every row and every
+// Mac reported "no listening ports" (nocx-ou3e).
+func ParseLsof(body []byte) ([]Listener, bool) {
 	var out []Listener
 	for _, line := range splitLines(body) {
 		fields := strings.Fields(line)
