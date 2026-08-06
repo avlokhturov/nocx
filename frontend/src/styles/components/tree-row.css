@@ -1,0 +1,126 @@
+/* TreeRow — one line of a file tree.
+   Everything a row can look like lives here; a surface may place the row
+   (flex, margin, width) and never repaint it. Variance is typed data-* on the
+   row (see tree-row.tsx): depth, kind, disclosure, selection, focus, disabled,
+   busy. The disclosure is the kit's own part identity on a native button — the
+   same shape as ui-checkbox__control — so the row keeps one vocabulary and no
+   surface has to style a button it does not own.
+
+   Indentation is driven by the depth number, not by nested DOM: the depth is
+   set inline as --tree-row-depth and the indent step is this file's decision.
+   The default declaration keeps the var() resolved for the integrity gate. */
+
+.ui-tree-row {
+  --tree-row-depth: 0;
+  --tree-row-indent: var(--space-4);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  min-height: var(--control-height-sm);
+  padding-left: calc(var(--tree-row-depth) * var(--tree-row-indent));
+  padding-right: var(--space-2);
+  border-radius: var(--control-radius-sm);
+  cursor: default;
+  color: var(--color-text);
+}
+
+/* No font-size on the row on purpose: the name inherits its surroundings so a
+   tree beside a form matches the form. The disclosure sizes its own icon. */
+
+.ui-tree-row:hover {
+  background: var(--color-surface-hover);
+}
+
+/* Selection is the persistent choice, focus the current keyboard target — a
+   focused row reads stronger, and is ordered after so it wins at equal
+   specificity when a row is both. */
+.ui-tree-row[data-selected='true'] {
+  background: var(--color-surface-hover);
+}
+
+.ui-tree-row[data-focused='true'] {
+  background: var(--color-surface-active);
+}
+
+/* Permission denied is a real state: the row renders, dimmed, never silently
+   empty. The disclosure is disabled along with the row (kit rule: disabled
+   prevents interaction and reduces opacity). */
+.ui-tree-row[data-disabled='true'] .ui-tree-row__name {
+  color: var(--color-text-dim);
+}
+
+/* ── Disclosure ──────────────────────────────────────────────────────────
+   A native button: natively focusable and keyboard-operable (Enter/Space),
+   with aria-expanded and an action label. Present only on expandable rows —
+   a file, a broken symlink and a cyclic symlink render no button at all. */
+.ui-tree-row__disclosure {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--control-height-sm);
+  height: var(--control-height-sm);
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: var(--control-radius-sm);
+  background: transparent;
+  color: var(--color-text-dim);
+  font-size: var(--font-size-md);
+  cursor: pointer;
+}
+
+.ui-tree-row__disclosure:hover {
+  color: var(--color-text);
+}
+
+.ui-tree-row__disclosure:disabled {
+  color: var(--color-text-dim);
+  cursor: default;
+}
+
+.ui-tree-row__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1em;
+  height: 1em;
+  transition: transform 0.12s ease;
+}
+
+/* The kit's chevron points down; a collapsed row turns it right. The rotation
+   lives on the icon wrapper, never on the button, so the hit area and hover
+   stay square. */
+.ui-tree-row[data-disclosure='collapsed'] .ui-tree-row__icon {
+  transform: rotate(-90deg);
+}
+
+.ui-tree-row__icon svg {
+  width: 1em;
+  height: 1em;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ui-tree-row__icon {
+    transition: none;
+  }
+}
+
+/* ── Name ────────────────────────────────────────────────────────────────
+   One line, ellipsis at the tail — the tail is where a long name loses its
+   least informative part, and the ellipsis replaces the clipped glyph rather
+   than cutting it. */
+.ui-tree-row__name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The trailing slot: a kit Badge or nothing. The name's flex: 1 keeps it at
+   the row's trailing edge, always fully visible. */
+.ui-tree-row__badge {
+  flex: 0 0 auto;
+}
