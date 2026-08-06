@@ -75,26 +75,49 @@ func TestBashLauncher_RefusesNothingWhenTempIsUnusable(t *testing.T) {
 // TestBashLauncher_WholeRcfileExecutes drives the real transport on a real pty
 // with a payload past a pipe's capacity, and asserts the LAST line ran.
 //
-// The size is the point. A 21KB payload was enough to lose the tail on the CI
-// runner; 128KB is past the 64KB pipe buffer on both Linux and macOS, so the
-// writer must block for the reader at least once — the regime where the old
-// form was fragile. Under a file it is not a regime at all.
+// The size is squeezed between two real limits, so it is derived rather than
+// picked:
+//
+//   - ABOVE a pipe's capacity, 64 KiB on both Linux and macOS. That is the
+//     regime the old process-substitution form was fragile in — the writer must
+//     block for the reader at least once — and 21KB was already enough to lose
+//     the tail on the CI runner.
+//   - BELOW maxFullLauncherLen. The whole command travels as ONE argv word, and
+//     Linux caps a single argument at MAX_ARG_STRLEN = 128 KiB. A first draft of
+//     this test used a flat 128KB and died as `fork/exec /bin/sh: argument list
+//     too long` on the Linux runner — the exact failure launcher.go's cap exists
+//     to prevent, reproduced by a test that ignored it.
+//
+// Filler is plain ASCII so printfBEscape passes it through roughly 1:1 and the
+// two bounds stay comparable.
 func TestBashLauncher_WholeRcfileExecutes(t *testing.T) {
 	requireBinBash(t)
 	home := writeBashFixtureHome(t, "")
 	tmp := t.TempDir()
 
-	// Filler that is cheap to parse and carries no behaviour, then the marker
-	// as the last thing the script does.
+	const pipeCapacity = 64 * 1024
+	// Leave room for the template, the env block and the escaping overhead.
+	target := maxFullLauncherLen - 16*1024
+
 	var b strings.Builder
-	for i := 0; b.Len() < 128*1024; i++ {
-		fmt.Fprintf(&b, "# filler line %d — padding the rcfile past a pipe's capacity\n", i)
+	for i := 0; b.Len() < target; i++ {
+		fmt.Fprintf(&b, "# filler line %d: padding the rcfile past a pipe capacity\n", i)
 	}
 	b.WriteString("printf 'RCFILE_TAIL_RAN\\n'\n")
 
 	arg := bashArgFor(bashRcfile(launcherEnvBlock(LaunchOptions{
 		SessionID: "sess-tail", Enhanced: true, EnvironmentID: "tail-env",
 	}), b.String()))
+
+	// The two bounds, asserted rather than assumed: a payload that drifted
+	// under the pipe capacity would stop testing anything, and one that drifted
+	// over the argv cap would fail for a reason that is not the subject.
+	if len(arg) <= pipeCapacity {
+		t.Fatalf("payload is %d bytes, which a pipe holds in one go — the test no longer exercises the regime it exists for", len(arg))
+	}
+	if len(arg) > maxFullLauncherLen {
+		t.Fatalf("payload is %d bytes, past maxFullLauncherLen %d — Linux would refuse the argv word before bash ever ran", len(arg), maxFullLauncherLen)
+	}
 
 	out := runLauncherOnPTY(t, "/bin/sh", `exec /usr/bin/env -u BASH_ENV bash -c `+shellQuote(arg),
 		[]string{"HOME=" + home, "TMPDIR=" + tmp, "TERM=xterm"}, "exit")
