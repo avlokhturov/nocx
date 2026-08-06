@@ -31,10 +31,10 @@ import {
 export type { FileViewerDeps, FileViewerTarget }
 
 /** Stable surface id: the registry key for this surface. */
-export const SURFACE_ID_FILE_VIEWER = 'fileViewer'
+const SURFACE_ID_FILE_VIEWER = 'fileViewer'
 
 /** Stable surface type (B.7), used in restore descriptors and deep links. */
-export const SURFACE_FILE_VIEWER: SurfaceType = 'nocx.fileViewer' as SurfaceType
+const SURFACE_FILE_VIEWER: SurfaceType = 'nocx.fileViewer' as SurfaceType
 
 // ── Wiring (module-level, set once by the composition root) ────────────────
 

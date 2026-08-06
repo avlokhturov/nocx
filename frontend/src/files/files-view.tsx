@@ -40,7 +40,7 @@ import {
  *  tab itself. The canonical comes from files.read (the file's identity —
  *  what the viewer's singletonKey deduplicates on); displayHost is null for
  *  a local file. */
-export interface FileOpener {
+interface FileOpener {
   open(target: {
     bindingId: string
     endpointId: string | null
@@ -84,7 +84,7 @@ export const FILES_VIEW_ID = 'files'
  *  (the first icon is Files), asserted in files-view.test.tsx. */
 export const FILES_VIEW_ORDER = -1
 
-export interface FilesPanelProps {
+interface FilesPanelProps {
   store: FilesTreeStore
   services: FilesPanelServices
   opener: FileOpener
@@ -93,7 +93,7 @@ export interface FilesPanelProps {
   activeOrigin: () => ActiveOrigin | null
 }
 
-export function FilesPanel(props: FilesPanelProps) {
+function FilesPanel(props: FilesPanelProps) {
   // Re-scope on origin change: the panel follows the ACTIVE tab. The store
   // itself decides whether the change re-opens (different session) or is a
   // no-op (same session, rule 1). The accessor is read INSIDE the on()

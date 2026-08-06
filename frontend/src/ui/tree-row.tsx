@@ -69,7 +69,7 @@ export interface TreeRowProps {
 
 /** A row is expandable from its kind alone: dir, or a symlink into a dir
  *  that is not cyclic. A cyclic symlink is a leaf whatever the caller asks. */
-export function isExpandable(kind: TreeRowKind, linkKind?: TreeRowKind, cyclic?: boolean): boolean {
+function isExpandable(kind: TreeRowKind, linkKind?: TreeRowKind, cyclic?: boolean): boolean {
   if (kind === 'dir') return true
   if (kind === 'symlink' && linkKind === 'dir') return !cyclic
   return false

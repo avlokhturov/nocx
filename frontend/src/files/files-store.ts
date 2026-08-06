@@ -44,9 +44,9 @@ import type { TreeRowKind } from '../ui/tree-row'
  *  tune once the panel is in daily use — not a constant somebody picked. */
 export const FILES_PAGE_SIZE = 50
 
-export type FilesPanelPhase = 'no-origin' | 'opening' | 'ready' | 'failed'
+type FilesPanelPhase = 'no-origin' | 'opening' | 'ready' | 'failed'
 
-export type FilesListingState = 'ok' | 'tooLarge' | 'timedOut' | 'error'
+type FilesListingState = 'ok' | 'tooLarge' | 'timedOut' | 'error'
 
 /** The state of one expanded-or-attempted directory's enumeration. */
 interface DirListing {
@@ -109,7 +109,7 @@ export interface FilesNode extends DirListing {
 /** The root from files.open, plus its own listing state — the root is a
  *  directory like any other and can be tooLarge or timedOut too. It is never
  *  a row (no TreeRow); its children are the depth-0 rows. */
-export interface FilesRoot extends DirListing {
+interface FilesRoot extends DirListing {
   path: string
   display: string
   inferred: boolean
@@ -123,7 +123,7 @@ export type FilesFlatRow =
   | { kind: 'more'; dir: FilesRoot | FilesNode; depth: number }
   | { kind: 'state'; dir: FilesRoot | FilesNode; depth: number }
 
-export interface FilesBinding {
+interface FilesBinding {
   bindingId: string
   endpointId: string | null
 }

@@ -11,7 +11,7 @@ import type { FilesListResult } from '../generated/files.list'
 import type { FilesReadResult } from '../generated/files.read'
 import type { FilesCloseResult } from '../generated/files.close'
 
-export class FilesClient {
+class FilesClient {
   constructor(private dispatcher: Dispatcher) {}
 
   /** Open a binding for one session: the backend issues the bindingId every
