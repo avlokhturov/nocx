@@ -363,6 +363,8 @@ const UNKNOWN_KEY_RESULT: ConnectionTestResult = {
   detail: 'unknown host key for host.example.com:22: ssh-ed25519 SHA256:abc',
   hostKey: {
     host: 'host.example.com:22',
+    knownHostsHost: 'nocx-v1-route:22',
+    changed: false,
     algorithm: 'ssh-ed25519',
     fingerprint: 'SHA256:abc',
     key: 'a2V5',
@@ -374,6 +376,8 @@ const CHANGED_KEY_RESULT: ConnectionTestResult = {
   detail: 'host key mismatch for host.example.com:22: got SHA256:new, expected SHA256:stored',
   hostKey: {
     host: 'host.example.com:22',
+    knownHostsHost: 'nocx-v1-route:22',
+    changed: true,
     algorithm: 'ssh-ed25519',
     fingerprint: 'SHA256:new',
     storedFingerprint: 'SHA256:stored',
@@ -413,7 +417,7 @@ describe('host key accept', () => {
     clickButtonByText(container, 'Trust host key')
 
     await vi.waitFor(() => {
-      expect(trustHostKey).toHaveBeenCalledWith('host.example.com:22', 'a2V5')
+      expect(trustHostKey).toHaveBeenCalledWith('nocx-v1-route:22', 'a2V5')
     })
     // The next probe runs and succeeds.
     await vi.waitFor(() => {
@@ -479,7 +483,7 @@ describe('host key accept', () => {
     })
     clickButtonByText(container, 'Trust the new key')
     await vi.waitFor(() => {
-      expect(trustHostKey).toHaveBeenCalledWith('host.example.com:22', 'bmV3')
+      expect(trustHostKey).toHaveBeenCalledWith('nocx-v1-route:22', 'bmV3')
     })
   })
 })

@@ -436,12 +436,12 @@ export class ProfileClient {
   }
 
   /**
-   * connections.trustHostKey — append the offered host key to known_hosts
-   * (accept-on-first-use). host and key are echoed verbatim from the
-   * connections.test result's hostKey evidence; the write is backend-side.
+   * connections.trustHostKey — record the offered host key under the exact
+   * backend-issued known_hosts identity. knownHostsHost and key are echoed
+   * verbatim from hostKey evidence; the renderer never derives route identity.
    */
-  trustHostKey(host: string, key: string): Promise<TrustHostKeyResult> {
-    return this.call('connections.trustHostKey', { host, key })
+  trustHostKey(knownHostsHost: string, key: string): Promise<TrustHostKeyResult> {
+    return this.call('connections.trustHostKey', { host: knownHostsHost, key })
   }
 
   /**

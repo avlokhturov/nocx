@@ -64,6 +64,7 @@ import type {
 } from './profiles'
 import { ProfileClient, buildGroupTree, parseQuickConnect } from './profiles'
 import { RpcError } from './dispatcher'
+import { HostKeyDialog } from './host-key-dialog'
 import { PasswordEditor } from './password-editor'
 import { AuthenticationEditor } from './authentication-editor'
 import { log } from './log'
@@ -355,7 +356,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   const [pendingHostKey, setPendingHostKey] = createSignal<{
     profile: SSHProfile
     evidence: HostKeyEvidence
-    changed: boolean
   } | null>(null)
   const [hostKeyBusy, setHostKeyBusy] = createSignal(false)
   const [sessionStatuses, setSessionStatuses] = createSignal<Record<string, SessionStatus>>({})
@@ -1318,7 +1318,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         setPendingHostKey({
           profile,
           evidence: res.hostKey,
-          changed: res.outcome === 'host-key-changed',
         })
         return
       }
@@ -1351,7 +1350,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     if (!pending) return
     setHostKeyBusy(true)
     try {
-      await props.client.trustHostKey(pending.evidence.host, pending.evidence.key)
+      await props.client.trustHostKey(pending.evidence.knownHostsHost, pending.evidence.key)
       setPendingHostKey(null)
       await handleTest(pending.profile)
     } catch (err) {
@@ -2916,72 +2915,16 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           />
         )}
       </Show>
-      {/* Host-key decision — raised when a probe fails on the host key.
-          The unknown-host accept is routine and primary; a changed key is
-          a different question with a danger action that is never default,
-          naming both fingerprints so the user can judge (nocx-6v1p). */}
+      {/* Host-key decision — the same consent surface open-time failures use.
+          Unknown is routine; changed is dangerous and names both fingerprints. */}
       <Show when={pendingHostKey()} keyed>
         {(pending) => (
-          <Dialog
-            open
+          <HostKeyDialog
+            evidence={pending.evidence}
+            busy={hostKeyBusy()}
+            onAccept={() => void acceptPendingHostKey()}
             onClose={() => setPendingHostKey(null)}
-            title={pending.changed ? 'Host key changed' : 'Unknown host key'}
-            footer={
-              <>
-                <Button
-                  variant={pending.changed ? 'danger' : 'primary'}
-                  disabled={hostKeyBusy()}
-                  onClick={() => void acceptPendingHostKey()}
-                >
-                  {hostKeyBusy()
-                    ? 'Trusting…'
-                    : pending.changed
-                      ? 'Trust the new key'
-                      : 'Trust host key'}
-                </Button>
-                <Button
-                  variant="default"
-                  disabled={hostKeyBusy()}
-                  onClick={() => setPendingHostKey(null)}
-                  autofocus
-                >
-                  Cancel
-                </Button>
-              </>
-            }
-          >
-            <Stack>
-              <Show
-                when={pending.changed}
-                fallback={
-                  <p>
-                    This is the first time nocx has met this host. If you trust this machine, accept
-                    its key — it will be saved to ~/.ssh/known_hosts.
-                  </p>
-                }
-              >
-                <p>
-                  The host key offered by this server differs from the one nocx has seen before.
-                  That can mean the host&rsquo;s key was regenerated — or that someone is
-                  intercepting this connection. Do not continue unless you are sure this is the same
-                  machine. Accepting replaces the old key: it stops being trusted.
-                </p>
-              </Show>
-              <p>
-                {pending.changed ? 'Stored fingerprint' : 'Offered fingerprint'}:{' '}
-                <code>
-                  {pending.changed
-                    ? pending.evidence.storedFingerprint
-                    : pending.evidence.fingerprint}
-                </code>
-              </p>
-              <Show when={pending.changed}>
-                <p>
-                  Offered fingerprint: <code>{pending.evidence.fingerprint}</code>
-                </p>
-              </Show>
-            </Stack>
-          </Dialog>
+          />
         )}
       </Show>
     </div>

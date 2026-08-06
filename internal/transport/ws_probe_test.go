@@ -238,10 +238,11 @@ func TestConnectionsTest_Unreachable(t *testing.T) {
 
 func TestConnectionsTest_HostKeyUnknown(t *testing.T) {
 	probeErr := &ssh.ErrUnknownHostKey{
-		Addr:        "host.example.com:22",
-		KeyAlgo:     "ssh-ed25519",
-		Fingerprint: "SHA256:abc",
-		Key:         []byte("offered-key-blob"),
+		Addr:           "host.example.com:22",
+		KnownHostsAddr: "nocx-v1-route:22",
+		KeyAlgo:        "ssh-ed25519",
+		Fingerprint:    "SHA256:abc",
+		Key:            []byte("offered-key-blob"),
 	}
 	srv := newProbeTestServer(t, probeErr, &fakeResolver{
 		resolveFn: func(profileID string) (string, *ssh.ConnectConfig, error) {
@@ -271,6 +272,12 @@ func TestConnectionsTest_HostKeyUnknown(t *testing.T) {
 	if hk.Host != "host.example.com:22" {
 		t.Errorf("expected host host.example.com:22, got %q", hk.Host)
 	}
+	if hk.KnownHostsHost != "nocx-v1-route:22" {
+		t.Errorf("expected lookup host nocx-v1-route:22, got %q", hk.KnownHostsHost)
+	}
+	if hk.Changed {
+		t.Error("unknown key evidence was marked changed")
+	}
 	if hk.Algorithm != "ssh-ed25519" {
 		t.Errorf("expected algorithm ssh-ed25519, got %q", hk.Algorithm)
 	}
@@ -287,11 +294,12 @@ func TestConnectionsTest_HostKeyUnknown(t *testing.T) {
 
 func TestConnectionsTest_HostKeyChanged(t *testing.T) {
 	probeErr := &ssh.ErrHostKeyMismatch{
-		Addr:        "host.example.com:22",
-		Fingerprint: "SHA256:new",
-		Expected:    "SHA256:stored",
-		KeyAlgo:     "ecdsa-sha2-nistp256",
-		Key:         []byte("new-key-blob"),
+		Addr:           "host.example.com:22",
+		KnownHostsAddr: "nocx-v1-route:22",
+		Fingerprint:    "SHA256:new",
+		Expected:       "SHA256:stored",
+		KeyAlgo:        "ecdsa-sha2-nistp256",
+		Key:            []byte("new-key-blob"),
 	}
 	srv := newProbeTestServer(t, probeErr, &fakeResolver{
 		resolveFn: func(profileID string) (string, *ssh.ConnectConfig, error) {
@@ -320,6 +328,12 @@ func TestConnectionsTest_HostKeyChanged(t *testing.T) {
 	}
 	if hk.Fingerprint != "SHA256:new" {
 		t.Errorf("expected offered fingerprint SHA256:new, got %q", hk.Fingerprint)
+	}
+	if hk.KnownHostsHost != "nocx-v1-route:22" {
+		t.Errorf("expected lookup host nocx-v1-route:22, got %q", hk.KnownHostsHost)
+	}
+	if !hk.Changed {
+		t.Error("changed key evidence was not marked changed")
 	}
 	if hk.StoredFingerprint != "SHA256:stored" {
 		t.Errorf("expected stored fingerprint SHA256:stored, got %q", hk.StoredFingerprint)

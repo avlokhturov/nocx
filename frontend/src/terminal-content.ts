@@ -112,6 +112,59 @@ function isCaptureGone(err: unknown): boolean {
   return err instanceof RpcError && (err.code === -32010 || err.code === -32011)
 }
 
+/** Host key evidence from a failed open, mirroring the connections.test
+ *  hostKey shape. The renderer echoes host+key back to
+ *  connections.trustHostKey to accept. */
+export interface HostKeyErrorEvidence {
+  host: string
+  knownHostsHost: string
+  algorithm: string
+  fingerprint: string
+  storedFingerprint?: string
+  key: string
+  changed: boolean
+  profileId?: string
+}
+
+function hostKeyEvidenceFromOpenError(
+  err: unknown,
+  profileId?: string,
+): HostKeyErrorEvidence | null {
+  if (!(err instanceof RpcError)) return null
+  const data: unknown = err.data
+  if (
+    !data ||
+    typeof data !== 'object' ||
+    !('host' in data) ||
+    typeof data.host !== 'string' ||
+    !('knownHostsHost' in data) ||
+    typeof data.knownHostsHost !== 'string' ||
+    !('changed' in data) ||
+    typeof data.changed !== 'boolean' ||
+    !('algorithm' in data) ||
+    typeof data.algorithm !== 'string' ||
+    !('fingerprint' in data) ||
+    typeof data.fingerprint !== 'string' ||
+    !('key' in data) ||
+    typeof data.key !== 'string'
+  ) {
+    return null
+  }
+  return {
+    host: data.host,
+    knownHostsHost: data.knownHostsHost,
+    changed: data.changed,
+    algorithm: data.algorithm,
+    fingerprint: data.fingerprint,
+    storedFingerprint:
+      'storedFingerprint' in data && typeof data.storedFingerprint === 'string'
+        ? data.storedFingerprint
+        : undefined,
+    key: data.key,
+    profileId,
+  }
+}
+
 /**
  * Whether `el` is somewhere the user types on purpose.
  *
@@ -155,6 +208,11 @@ export interface TerminalContentHooks {
   onActiveOriginChange?: () => void
   /** An SSH connection failed because the vault is sealed. */
   onVaultSealed?: () => void
+  /** An SSH connection failed because the host key is unknown or changed.
+   *  The promise resolves true only after the user explicitly trusted the
+   *  backend-issued known_hosts identity; mount then retries the same open.
+   *  Abort closes a pending decision when the tab is closed. */
+  onHostKeyError?: (evidence: HostKeyErrorEvidence, signal: AbortSignal) => Promise<boolean>
   /** The reference picker's setup offer needs the setup dialog (no OS key):
    *  the vault layer owns it — wired by main.tsx to
    *  vaultController.openSetup. */
@@ -758,6 +816,41 @@ export class TerminalContent extends BaseTabContent {
   }
 
   // ── TabContent ──────────────────────────────────────────────────────────
+
+  private openRequestedSession(): Promise<SessionHandle> {
+    if (!this.sshOpts) {
+      return this.client.openSession(this.cols, this.rows, true)
+    }
+    if (this.sshOpts.profileId) {
+      return this.client.openSSHSession(this.cols, this.rows, this.sshOpts.profileId)
+    }
+    return this.client.openSSHSessionByHost(
+      this.cols,
+      this.rows,
+      this.sshOpts.host,
+      this.sshOpts.user,
+    )
+  }
+
+  private async openSessionWithHostKeyRecovery(signal: AbortSignal): Promise<SessionHandle> {
+    for (;;) {
+      try {
+        return await this.openRequestedSession()
+      } catch (err) {
+        const evidence = hostKeyEvidenceFromOpenError(err, this.sshOpts?.profileId)
+        if (!evidence || !this.hooks.onHostKeyError) {
+          throw err
+        }
+        const accepted = await this.hooks.onHostKeyError(evidence, signal)
+        if (!accepted) {
+          throw new Error(`Host key was not trusted for ${evidence.host}`)
+        }
+        if (signal.aborted) {
+          throw new Error('SSH open cancelled')
+        }
+      }
+    }
+  }
 
   async mount(target: HTMLElement, host: TabHost, signal: AbortSignal): Promise<void> {
     if (this._disposed) return
@@ -1666,19 +1759,7 @@ export class TerminalContent extends BaseTabContent {
         }
       })
 
-      // Alias tab: profileId is empty, open by host so the backend
-      // resolves through ~/.ssh/config (ssh -G). Saved-profile tabs
-      // use openSSHSession with the real profileId.
-      const session = this.sshOpts
-        ? this.sshOpts.profileId
-          ? await this.client.openSSHSession(this.cols, this.rows, this.sshOpts.profileId)
-          : await this.client.openSSHSessionByHost(
-              this.cols,
-              this.rows,
-              this.sshOpts.host,
-              this.sshOpts.user,
-            )
-        : await this.client.openSession(this.cols, this.rows, true)
+      const session = await this.openSessionWithHostKeyRecovery(signal)
 
       if (signal.aborted) {
         session.close()
