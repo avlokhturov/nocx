@@ -10,6 +10,14 @@
     "secretservice_linux.go) only appear on the OS they build for, so an entry",
     "that vanishes on another platform is a free shrink, not a violation.",
     "",
+    "That cuts both ways, and only one direction was written down. The twin the",
+    "other OS compiles is a *new* file path, so the first run on that OS reports",
+    "it as a new violation rather than a free shrink. A per-OS pair therefore",
+    "needs BOTH halves listed, and this file is the union across the platforms",
+    "the gate runs on, not a snapshot of whichever one generated it. The update",
+    "script cannot do this for you: it sees one OS at a time, so the half it did",
+    "not compile looks like a shrink and it removes it.",
+    "",
     "Two entries were added BY HAND on 2026-08-06 (nocx-708q), which the update",
     "script refuses to do for you on purpose. Both are reasoned, not overlooked:",
     "",
@@ -23,6 +31,14 @@
     "  ws.go WithFilesRevealer \u2014 the seam files.reveal needs from Wails, which",
     "  does not exist yet; files.reveal answers -32601 until it does. Reachable",
     "  the moment that wave lands.",
+    "",
+    "A fourth entry added BY HAND on 2026-08-07 (nocx-6lo9), the first time the",
+    "hook ran on macOS in this clone:",
+    "",
+    "  secretservice_other.go SecretServiceAvailable — the !linux half of the",
+    "  pair whose linux half is already listed below. Neither has a production",
+    "  caller on either OS; both are reached only from integration_test.go. The",
+    "  entry is the mirror image of an existing one, not a new concession.",
     "",
     "A third entry added BY HAND on 2026-08-06, when release/v0.1.0 merged in:",
     "",
@@ -325,6 +341,10 @@
     },
     {
       "file": "internal/vault/system/secretservice_linux.go",
+      "func": "SecretServiceAvailable"
+    },
+    {
+      "file": "internal/vault/system/secretservice_other.go",
       "func": "SecretServiceAvailable"
     },
     {

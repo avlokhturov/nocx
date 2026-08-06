@@ -1,0 +1,20 @@
+#!/bin/sh
+# pre-merge-commit — the same gate as pre-commit, on the commit git makes itself.
+#
+# Git does not run pre-commit for a clean automatic merge; it runs this hook
+# instead. Only for a *clean* one — a merge that stops on conflicts is finished
+# by an ordinary `git commit`, which does run pre-commit — so this is the one
+# path where a commit could otherwise reach main without any local gate at all.
+#
+# That path is not hypothetical and it is not the cheap case. Two branches can
+# each be green alone and red together: 3ef25b3 merged fix/ssh-jump-route-host-key,
+# whose HostKeyDecisionEvidence lost its last consumer in the merge and became a
+# dead export (nocx-d4lh); b07652e's filesystem tests were green in the container
+# and red on macOS (nocx-koki). A merge is where independently-verified work first
+# meets, which makes it the moment a gate is worth most, not least.
+#
+# Delegating rather than duplicating: pre-commit scopes its checks by what is
+# staged, and during a merge the index already holds the merge result while HEAD
+# is still the first parent — so `git diff --cached` names exactly the files the
+# merge brings in, and the scoping it drives is the scoping we want.
+exec "$(dirname "$0")/pre-commit" "$@"

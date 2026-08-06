@@ -209,8 +209,16 @@ fi
 # The .ts glob is needed for the solid/reactivity .ts fixture.
 eslint_json=$(npx eslint --no-ignore "${fixture_dir}/"*.tsx "${fixture_dir}/"*.ts --quiet --format json 2>/dev/null) || true
 
-# Collect every rule ID that fired
-fired_rules=$(echo "$eslint_json" | node -e "
+# Collect every rule ID that fired.
+#
+# printf '%s', never echo: /bin/sh's echo expands backslash escapes (macOS ships
+# bash with xpg_echo on for /bin/sh, and dash does the same), which turns every
+# \n inside the report's `source` field into a real newline and makes the JSON
+# unparseable. The node scripts below answer that with exit 2, `set -eu` turns
+# the failed assignment into an exit, and the gate dies here with no message of
+# its own — reported by the hook as "solid negative fixture gate", which is not
+# what broke (nocx-urfz).
+fired_rules=$(printf '%s' "$eslint_json" | node -e "
 let d='';
 process.stdin.resume();
 process.stdin.on('data',function(c){d+=c;});
@@ -238,7 +246,7 @@ if [ -n "$missing" ]; then
 fi
 
 # solid/reactivity must fire from a .ts file specifically
-ts_reactivity=$(echo "$eslint_json" | node -e "
+ts_reactivity=$(printf '%s' "$eslint_json" | node -e "
 let d='';
 process.stdin.resume();
 process.stdin.on('data',function(c){d+=c;});
