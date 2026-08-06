@@ -15,7 +15,7 @@
 // re-scope, staleness guard — is real.
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createSignal } from 'solid-js'
-import { cleanup } from '@solidjs/testing-library'
+import { cleanup, fireEvent, render } from '@solidjs/testing-library'
 import { FILES_VIEW_ID, FILES_VIEW_ORDER, createFilesView } from './files-view'
 import { mountSidebar, type SidebarHandle, type SidebarViewDescriptor } from '../sidebar'
 import { PlugIcon } from '../ui/icons'
@@ -25,6 +25,18 @@ import type { FilesOpenResult } from '../generated/files.open'
 import type { FilesReadResult } from '../generated/files.read'
 import type { FilesPanelServices } from './files-client'
 import type { ActiveOrigin, TabContent } from '../tab-content'
+import { ToastHost, clearToasts } from '../ui/toast'
+import type { ClipboardAccess } from '../clipboard'
+
+/** A clipboard fake: the seam's contract is writeText rejects when the
+ *  platform refused — tests that assert failure override it. */
+function clipboardFixture(over: Partial<ClipboardAccess> = {}): ClipboardAccess {
+  return {
+    readText: vi.fn().mockResolvedValue(''),
+    writeText: vi.fn().mockResolvedValue(undefined),
+    ...over,
+  }
+}
 
 vi.mock('../renderers/xterm', () => ({
   XtermRenderer: vi.fn(createRendererMock),
@@ -83,6 +95,10 @@ function fakeServices(over: Partial<FilesPanelServices> = {}): FilesPanelService
     open: vi.fn().mockResolvedValue(openFixture()),
     list: vi.fn().mockResolvedValue(listFixture('C:/home/dev', [])),
     read: vi.fn().mockResolvedValue(readFixture()),
+    watch: vi.fn().mockResolvedValue({ mode: 'watching' }),
+    reveal: vi.fn().mockResolvedValue({}),
+    subscribeFilesChanged: vi.fn().mockReturnValue(() => {}),
+    onConnect: vi.fn().mockReturnValue(() => {}),
     close: vi.fn().mockResolvedValue({}),
     ...over,
   }
@@ -112,11 +128,7 @@ const SSH_ORIGIN: ActiveOrigin = {
 
 const liveHandles: SidebarHandle[] = []
 
-/** Full composition: a real TabManager, an origin signal fed on tab change
- *  (exactly the wiring main.tsx must provide for the Files view), and the
- *  real sidebar mounting Files FIRST (views sorted by order — the
- *  arrangement the coordinator's registration must produce). */
-async function mountApp(services: FilesPanelServices) {
+async function mountApp(services: FilesPanelServices, clipboard?: ClipboardAccess) {
   const client = makeClient()
   const { manager } = await mountTabManager(client)
 
@@ -137,7 +149,7 @@ async function mountApp(services: FilesPanelServices) {
   // assertions call it detached from the object, and unbound-method exists
   // to catch exactly that detachment — the mock is the object's own.
   const open = vi.fn()
-  const files = createFilesView({ services, opener: { open }, activeOrigin })
+  const files = createFilesView({ services, opener: { open }, activeOrigin, clipboard })
   // Ports stands in at order 0 (main.tsx registers it there); the views
   // reach mountSidebar in order-sorted arrangement, which is what makes
   // Files the FIRST activity-bar icon (SidebarSolid renders array order).
@@ -170,6 +182,9 @@ async function mountApp(services: FilesPanelServices) {
     () => activeOrigin(),
   )
   /* eslint-enable solid/reactivity */
+  // A ToastHost so action outcomes (copies, refused reveals) are
+  // ASSERTABLE as rendered toasts, the way a user sees them.
+  render(() => <ToastHost />)
   liveHandles.push(handle)
   return { manager, bar, panel, handle, open, originFor, setActiveOrigin }
 }
@@ -191,6 +206,7 @@ function rowNamed(panel: HTMLElement, name: string): HTMLElement {
 }
 
 afterEach(() => {
+  clearToasts()
   for (const h of liveHandles) h.destroy()
   liveHandles.length = 0
   cleanup()
@@ -479,7 +495,7 @@ describe('files sidebar view', () => {
     expect(panel.querySelector('[data-testid="files-root-path"]')).toBeNull()
   })
 
-  it('the header refresh re-lists the tree and the polling badge slot waits for the watching wave', async () => {
+  it('the header refresh re-lists the tree and the polling badge slot sits beside it', async () => {
     const list = vi
       .fn()
       .mockResolvedValue(listFixture('C:/home/dev', [entryFixture({ name: 'a.txt' })]))
@@ -492,9 +508,279 @@ describe('files sidebar view', () => {
     refresh!.click()
     await vi.waitFor(() => expect(list.mock.calls.length).toBeGreaterThanOrEqual(2))
 
-    // The §5.5 slot is beside Refresh in the header, empty until the
-    // watching wave renders the degraded-mode badge into it.
+    // The §5.5 badge slot is beside Refresh in the header, and a healthy
+    // watch renders nothing into it.
     const slot = panel.querySelector<HTMLElement>('[data-testid="files-polling-badge-slot"]')
     expect(slot?.closest('.ui-sidebar-view__header')).not.toBeNull()
+    expect(panel.querySelector('[data-testid="files-polling-badge"]')).toBeNull()
+  })
+
+  // ── Row actions (fm-w13) ─────────────────────────────────────────────
+
+  it('right-clicking a row opens the menu with both copy entries and Show in Finder', async () => {
+    const services = fakeServices({
+      list: vi
+        .fn()
+        .mockResolvedValue(
+          listFixture('C:/home/dev', [
+            entryFixture({ name: 'notes.md', path: '/home/dev/notes.md' }),
+          ]),
+        ),
+    })
+    const { panel } = await mountApp(services)
+    await vi.waitFor(() => expect(rowNamed(panel, 'notes.md')).not.toBeUndefined())
+
+    fireEvent.contextMenu(rowNamed(panel, 'notes.md'), { clientX: 40, clientY: 60 })
+
+    const menu = document.querySelector('[data-testid="files-context-menu"]')
+    expect(menu).not.toBeNull()
+    const items = [...menu!.querySelectorAll<HTMLElement>('[role="menuitem"]')]
+    expect(items.map((i) => i.textContent)).toEqual([
+      'Copy Relative Path',
+      'Copy Absolute Path',
+      'Show in Finder',
+    ])
+    // Picking an item dismisses the menu.
+    items[0].click()
+    expect(document.querySelector('[data-testid="files-context-menu"]')).toBeNull()
+  })
+
+  it('copying the relative path puts the path as spelled from the root on the clipboard', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    const list = vi
+      .fn()
+      .mockImplementation((bindingId: string, path: string) =>
+        Promise.resolve(
+          path === '/home/dev'
+            ? listFixture('C:/home/dev', [
+                entryFixture({ name: 'docs', path: '/home/dev/docs', kind: 'dir' }),
+              ])
+            : listFixture('C:/home/dev/docs', [
+                entryFixture({ name: 'notes.md', path: '/home/dev/docs/notes.md' }),
+              ]),
+        ),
+      )
+    const { panel } = await mountApp(fakeServices({ list }), clipboardFixture({ writeText }))
+    await vi.waitFor(() => expect(rowNamed(panel, 'docs')).not.toBeUndefined())
+    rowNamed(panel, 'docs').querySelector<HTMLElement>('.ui-tree-row__disclosure')!.click()
+    await vi.waitFor(() => expect(rowNamed(panel, 'notes.md')).not.toBeUndefined())
+
+    // The row is inside an expanded subdirectory: the copy is docs/notes.md,
+    // not a depth-0 spelling and not the absolute path.
+    fireEvent.contextMenu(rowNamed(panel, 'notes.md'), { clientX: 10, clientY: 10 })
+    const relative = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
+      (i) => i.textContent === 'Copy Relative Path',
+    )
+    relative!.click()
+    await vi.waitFor(() => expect(writeText).toHaveBeenCalledWith('docs/notes.md'))
+  })
+
+  it("copying the absolute path puts the lexical path there — a symlink's own path, not its target", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    const services = fakeServices({
+      list: vi.fn().mockResolvedValue(
+        listFixture('C:/home/dev', [
+          entryFixture({
+            name: 'link',
+            path: '/home/dev/link',
+            kind: 'symlink',
+            linkKind: 'regular',
+            linkTarget: '/elsewhere/real.txt',
+          }),
+        ]),
+      ),
+    })
+    const { panel } = await mountApp(services, clipboardFixture({ writeText }))
+    await vi.waitFor(() => expect(rowNamed(panel, 'link')).not.toBeUndefined())
+
+    fireEvent.contextMenu(rowNamed(panel, 'link'), { clientX: 10, clientY: 10 })
+    const absolute = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
+      (i) => i.textContent === 'Copy Absolute Path',
+    )
+    absolute!.click()
+    // The link's own path, lexical — the canonical (which resolves symlinks)
+    // is the deduplication identity, never the copy.
+    await vi.waitFor(() => expect(writeText).toHaveBeenCalledWith('/home/dev/link'))
+    expect(writeText).not.toHaveBeenCalledWith('/elsewhere/real.txt')
+  })
+
+  it('"Show in Finder" is present on a local tab and ABSENT on a remote one', async () => {
+    // The two trees are distinguishable: the SSH binding lists a row that
+    // only exists on the remote machine, so the test waits for the RESCOPE
+    // to land, not for a row that both trees share.
+    const open = vi.fn().mockImplementation((sessionId: string) =>
+      Promise.resolve(
+        sessionId === 's-local'
+          ? openFixture()
+          : openFixture({
+              bindingId: 'b2',
+              root: {
+                path: '/home/alice',
+                display: '~/alice',
+                inferred: false,
+                inferredReason: '',
+              },
+            }),
+      ),
+    )
+    const list = vi
+      .fn()
+      .mockImplementation((bindingId: string, path: string) =>
+        Promise.resolve(
+          path === '/home/alice'
+            ? listFixture('C:/home/alice', [
+                entryFixture({ name: 'remote.md', path: '/home/alice/remote.md' }),
+              ])
+            : listFixture('C:/home/dev', [
+                entryFixture({ name: 'notes.md', path: '/home/dev/notes.md' }),
+              ]),
+        ),
+      )
+    const { manager, panel, originFor } = await mountApp(fakeServices({ open, list }))
+    await vi.waitFor(() => expect(rowNamed(panel, 'notes.md')).not.toBeUndefined())
+
+    const menuItems = () =>
+      [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].map((i) => i.textContent)
+
+    // Local: present.
+    fireEvent.contextMenu(rowNamed(panel, 'notes.md'), { clientX: 10, clientY: 10 })
+    expect(menuItems()).toContain('Show in Finder')
+    fireEvent.pointerDown(document.body)
+    await vi.waitFor(() =>
+      expect(document.querySelector('[data-testid="files-context-menu"]')).toBeNull(),
+    )
+
+    // Remote: the item is ABSENT — not disabled. Assert the absence
+    // explicitly; a test that only checks presence cannot catch the item
+    // leaking onto SSH tabs.
+    const sshTab = manager.newSSHTab('p1', 'host.example', 'alice')
+    originFor.set(sshTab.content, SSH_ORIGIN)
+    await vi.waitFor(() => expect(rowNamed(panel, 'remote.md')).not.toBeUndefined())
+    fireEvent.contextMenu(rowNamed(panel, 'remote.md'), { clientX: 10, clientY: 10 })
+    expect(menuItems()).toEqual(['Copy Relative Path', 'Copy Absolute Path'])
+    expect(menuItems()).not.toContain('Show in Finder')
+  })
+
+  it('a refused files.reveal is rendered as a toast, never swallowed', async () => {
+    const reveal = vi.fn().mockRejectedValue(new Error('method not found'))
+    const services = fakeServices({
+      reveal,
+      list: vi
+        .fn()
+        .mockResolvedValue(
+          listFixture('C:/home/dev', [
+            entryFixture({ name: 'notes.md', path: '/home/dev/notes.md' }),
+          ]),
+        ),
+    })
+    const { panel } = await mountApp(services)
+    await vi.waitFor(() => expect(rowNamed(panel, 'notes.md')).not.toBeUndefined())
+
+    fireEvent.contextMenu(rowNamed(panel, 'notes.md'), { clientX: 10, clientY: 10 })
+    const revealItem = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
+      (i) => i.textContent === 'Show in Finder',
+    )
+    expect(revealItem).not.toBeUndefined()
+    revealItem!.click()
+
+    await vi.waitFor(() => expect(reveal).toHaveBeenCalledWith('b1', '/home/dev/notes.md'))
+    await vi.waitFor(() =>
+      expect(document.querySelector('.ui-toast__message')?.textContent).toContain(
+        'method not found',
+      ),
+    )
+  })
+
+  it('a clipboard write that fails is reported to the user', async () => {
+    const writeText = vi.fn().mockRejectedValue(new Error('no clipboard backend available'))
+    const services = fakeServices({
+      list: vi
+        .fn()
+        .mockResolvedValue(
+          listFixture('C:/home/dev', [
+            entryFixture({ name: 'notes.md', path: '/home/dev/notes.md' }),
+          ]),
+        ),
+    })
+    const { panel } = await mountApp(services, clipboardFixture({ writeText }))
+    await vi.waitFor(() => expect(rowNamed(panel, 'notes.md')).not.toBeUndefined())
+
+    fireEvent.contextMenu(rowNamed(panel, 'notes.md'), { clientX: 10, clientY: 10 })
+    const relative = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
+      (i) => i.textContent === 'Copy Relative Path',
+    )
+    relative!.click()
+    await vi.waitFor(() =>
+      expect(document.querySelector('.ui-toast__message')?.textContent).toContain(
+        'no clipboard backend available',
+      ),
+    )
+  })
+
+  // ── Watching (fm-w13 part 2) ─────────────────────────────────────────
+
+  it('the Polling badge shows for a degraded LOCAL watch and nothing on a remote one', async () => {
+    const watch = vi
+      .fn()
+      .mockResolvedValue({ mode: 'polling', degradedReason: 'local watch unavailable' })
+    const services = fakeServices({
+      watch,
+      list: vi
+        .fn()
+        .mockResolvedValue(
+          listFixture('C:/home/dev', [
+            entryFixture({ name: 'notes.md', path: '/home/dev/notes.md' }),
+          ]),
+        ),
+    })
+    const { manager, panel, originFor } = await mountApp(services)
+    await vi.waitFor(() => expect(rowNamed(panel, 'notes.md')).not.toBeUndefined())
+
+    // Local + polling + a reason: the persistent badge, hover carries the
+    // reason.
+    await vi.waitFor(() =>
+      expect(panel.querySelector('[data-testid="files-polling-badge"]')).not.toBeNull(),
+    )
+    const badge = panel.querySelector('[data-testid="files-polling-badge"]')
+    expect(badge?.getAttribute('title')).toBe('local watch unavailable')
+
+    // Remote + polling (even WITH a reason — the kind check is the guard):
+    // nothing. The remote half is what stops the badge becoming wallpaper.
+    const sshTab = manager.newSSHTab('p1', 'host.example', 'alice')
+    originFor.set(sshTab.content, SSH_ORIGIN)
+    await vi.waitFor(() => expect(rowNamed(panel, 'notes.md')).not.toBeUndefined())
+    await vi.waitFor(() =>
+      expect(panel.querySelector('[data-testid="files-polling-badge"]')).toBeNull(),
+    )
+  })
+
+  it('a failed watch escalates to a sticky inline message with Retry', async () => {
+    const watch = vi.fn().mockRejectedValue(new Error('not connected'))
+    const services = fakeServices({
+      watch,
+      list: vi
+        .fn()
+        .mockResolvedValue(
+          listFixture('C:/home/dev', [
+            entryFixture({ name: 'notes.md', path: '/home/dev/notes.md' }),
+          ]),
+        ),
+    })
+    const { panel } = await mountApp(services)
+    await vi.waitFor(() => expect(rowNamed(panel, 'notes.md')).not.toBeUndefined())
+    await vi.waitFor(() =>
+      expect(panel.querySelector('[data-testid="files-watch-error"]')).not.toBeNull(),
+    )
+    expect(panel.querySelector('[data-testid="files-watch-error"]')?.textContent).toContain(
+      'not connected',
+    )
+
+    // Retry is the refresh cycle; the message clears the instant the watch
+    // recovers.
+    watch.mockResolvedValue({ mode: 'watching' })
+    panel.querySelector<HTMLElement>('[data-testid="files-watch-retry"]')!.click()
+    await vi.waitFor(() =>
+      expect(panel.querySelector('[data-testid="files-watch-error"]')).toBeNull(),
+    )
   })
 })

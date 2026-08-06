@@ -1,15 +1,19 @@
 // FilesClient — the files.* control-plane seam (design §5.2). One client,
-// four methods, every result a GENERATED type: the renderer declares nothing
-// of its own, because a hand-written type can want a field the wire does not
-// carry, which is the defect the whole contracts/ directory exists to prevent.
-// The panel consumes it through FilesPanelServices so tests can substitute a
-// fake without a WebSocket (the ports pattern, nocx-wzc4).
+// one method per wire call, every result a GENERATED type: the renderer
+// declares nothing of its own, because a hand-written type can want a field
+// the wire does not carry, which is the defect the whole contracts/
+// directory exists to prevent. The panel consumes it through
+// FilesPanelServices so tests can substitute a fake without a WebSocket
+// (the ports pattern, nocx-wzc4).
 
 import type { Dispatcher } from '../dispatcher'
 import type { FilesOpenResult } from '../generated/files.open'
 import type { FilesListResult } from '../generated/files.list'
 import type { FilesReadResult } from '../generated/files.read'
 import type { FilesCloseResult } from '../generated/files.close'
+import type { FilesWatchResult } from '../generated/files.watch'
+import type { FilesRevealResult } from '../generated/files.reveal'
+import type { FilesChanged } from '../generated/files.changed'
 
 class FilesClient {
   constructor(private dispatcher: Dispatcher) {}
@@ -38,6 +42,42 @@ class FilesClient {
     return this.dispatcher.call<FilesReadResult>('files.read', { bindingId, path, maxBytes })
   }
 
+  /** Replace the binding's watch set: the set the panel currently wants,
+   *  root and every expanded directory — the backend diffs, so collapsing
+   *  a directory cannot leak a watch. Answers the refresh mode now serving
+   *  the set (design §5.5), the only client-visible half of the watching
+   *  machinery (D14). */
+  watch(bindingId: string, paths: string[]): Promise<FilesWatchResult> {
+    return this.dispatcher.call<FilesWatchResult>('files.watch', { bindingId, paths })
+  }
+
+  /** Show a path in the OS file manager. The backend refuses a remote
+   *  binding rather than silently doing nothing (design §5.2); the panel
+   *  renders that refusal — and the -32601 an unwired revealer answers —
+   *  instead of stubbing either. */
+  reveal(bindingId: string, path: string): Promise<FilesRevealResult> {
+    return this.dispatcher.call<FilesRevealResult>('files.reveal', { bindingId, path })
+  }
+
+  /** Subscribe to the server-initiated files.changed notification (the
+   *  SettingsObserver pattern): an invalidation carrying a dirty path and
+   *  an optional rev — never entries, so exactly one code path re-renders
+   *  a directory. Returns the unsubscribe. */
+  subscribeFilesChanged(handler: (params: FilesChanged) => void): () => void {
+    return this.dispatcher.subscribe('files.changed', (params: unknown) => {
+      const p = params as FilesChanged
+      if (p && typeof p.bindingId === 'string' && typeof p.path === 'string') handler(p)
+    })
+  }
+
+  /** Reconnect hook: the watch set is re-sent so a WebSocket drop cannot
+   *  silently detach the panel from the change stream (the backend's dirty
+   *  set is flushed to the re-attached subscriber, and re-sending the set
+   *  re-establishes the baselines idempotently). */
+  onConnect(handler: () => void): () => void {
+    return this.dispatcher.onConnect(handler)
+  }
+
   /** Release the binding — its provider, its pooled SSH reference, its
    *  watches. An empty result is still the contract. */
   close(bindingId: string): Promise<FilesCloseResult> {
@@ -50,6 +90,10 @@ export interface FilesPanelServices {
   open(sessionId: string, rootPath?: string): Promise<FilesOpenResult>
   list(bindingId: string, path: string, offset: number, limit: number): Promise<FilesListResult>
   read(bindingId: string, path: string, maxBytes: number): Promise<FilesReadResult>
+  watch(bindingId: string, paths: string[]): Promise<FilesWatchResult>
+  reveal(bindingId: string, path: string): Promise<FilesRevealResult>
+  subscribeFilesChanged(handler: (params: FilesChanged) => void): () => void
+  onConnect(handler: () => void): () => void
   close(bindingId: string): Promise<FilesCloseResult>
 }
 
@@ -60,6 +104,10 @@ export function createFilesPanelServices(dispatcher: Dispatcher): FilesPanelServ
     open: (sessionId, rootPath) => client.open(sessionId, rootPath),
     list: (bindingId, path, offset, limit) => client.list(bindingId, path, offset, limit),
     read: (bindingId, path, maxBytes) => client.read(bindingId, path, maxBytes),
+    watch: (bindingId, paths) => client.watch(bindingId, paths),
+    reveal: (bindingId, path) => client.reveal(bindingId, path),
+    subscribeFilesChanged: (handler) => client.subscribeFilesChanged(handler),
+    onConnect: (handler) => client.onConnect(handler),
     close: (bindingId) => client.close(bindingId),
   }
 }

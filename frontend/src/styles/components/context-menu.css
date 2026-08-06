@@ -1,0 +1,49 @@
+/* ContextMenu — the kit's menu primitive (ui/README table): a small
+   non-modal popover of actions anchored at a point. One identity family:
+   ui-context-menu + __item. The position is set imperatively by the
+   component (left/top from the anchor, clamped to the viewport); this file
+   owns everything the menu looks like, and nothing else may paint it.
+
+   The shell is a raised surface with a hairline border and a soft shadow —
+   the same surface vocabulary as the prompt panel, so a menu floating over
+   the panel reads as chrome of the app, not of the tree. */
+
+.ui-context-menu {
+  position: fixed;
+  z-index: 30;
+  min-width: 11rem;
+  max-width: 22rem;
+  padding: var(--space-1);
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: var(--control-radius-md);
+  box-shadow: 0 12px 40px color-mix(in srgb, black, transparent 22%);
+  --wails-draggable: no-drag;
+}
+
+/* One action per row. A native button: natively focusable and operable
+   with Enter/Space, keyboard-navigated by the component (arrow keys move
+   focus between items). The label is one line that ellipsises — a path
+   must never wrap the menu wider than its ceiling. */
+.ui-context-menu__item {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  padding: var(--space-2) var(--space-3);
+  background: transparent;
+  border: 0;
+  border-radius: var(--control-radius-sm);
+  color: var(--color-text);
+  font: inherit;
+  font-size: var(--font-size-sm);
+  text-align: start;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ui-context-menu__item:hover,
+.ui-context-menu__item:focus-visible {
+  background: var(--color-surface-hover);
+  outline: none;
+}

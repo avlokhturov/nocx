@@ -17,11 +17,13 @@ import type { Page } from '@playwright/test'
 //   carries the host iff the origin is remote.
 //
 // The watching clause ("writing to the file from outside nocx makes the row
-// update") is NOT built: local.Watch returns a typed unavailable error on
-// purpose. It is deliberately not tested, not skipped. The remote half has
-// no SSH host in this suite, so the host assertion is exercised in its local
-// direction and asserted HARD: a local file's title is the basename alone —
-// absence of the host marker is what means "this machine".
+// update") is built through the transport's digest-poll loop (fm-w13): the
+// panel sends files.watch for the root, the loop detects the change and
+// emits files.changed, and the panel re-lists with nobody pressing
+// anything. The remote half has no SSH host in this suite, so the host
+// assertion is exercised in its local direction and asserted HARD: a local
+// file's title is the basename alone — absence of the host marker is what
+// means "this machine".
 //
 // The root is made deterministic through the product's own seam: the shell
 // integration emits OSC 7 after `cd`, the frontend verifies it, and D2 lets
@@ -182,4 +184,62 @@ test('clicking a file opens a tab whose content matches the file and whose title
   // The remote form would be "host · notes.md"; no tab may carry the
   // separator on a local origin.
   await expect(page.locator(TAB_TITLE).filter({ hasText: '·' })).toHaveCount(0)
+})
+
+test('right-clicking a row copies the relative and the absolute path', async ({
+  page,
+  context,
+}) => {
+  // The copy rides the app's clipboard seam, which on this headless path
+  // is navigator.clipboard — reading it back needs the read permission.
+  await context.grantPermissions(['clipboard-read', 'clipboard-write'])
+  await openFilesAtFixture(page)
+
+  // The user's seam is the right-click; the menu appears with both copy
+  // entries (and Show in Finder on this local tab).
+  await page.locator('.files-row').filter({ hasText: 'notes.md' }).click({ button: 'right' })
+  const menu = page.locator('[data-testid="files-context-menu"]')
+  await expect(menu).toBeVisible()
+  await expect(menu.getByRole('menuitem', { name: 'Copy Relative Path' })).toBeVisible()
+  await expect(menu.getByRole('menuitem', { name: 'Copy Absolute Path' })).toBeVisible()
+  await expect(menu.getByRole('menuitem', { name: 'Show in Finder' })).toBeVisible()
+
+  // Relative: as spelled from the tree root — the file sits at depth 0.
+  await menu.getByRole('menuitem', { name: 'Copy Relative Path' }).click()
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('notes.md')
+
+  // Absolute: the lexical absolute path of the row the user clicked.
+  await page.locator('.files-row').filter({ hasText: 'notes.md' }).click({ button: 'right' })
+  await page
+    .locator('[data-testid="files-context-menu"]')
+    .getByRole('menuitem', { name: 'Copy Absolute Path' })
+    .click()
+  await expect
+    .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+    .toBe(join(fixtureRoot, 'notes.md'))
+})
+
+test('writing to the file from outside nocx makes the row update without anyone pressing anything', async ({
+  page,
+}) => {
+  await openFilesAtFixture(page)
+  await expect(page.locator('.ui-tree-row__name').filter({ hasText: 'notes.md' })).toBeVisible()
+
+  // The change signal is the backend's digest-poll, and its baseline is the
+  // FIRST listing after files.watch (500 ms cadence) — a change before it
+  // is not replayed (inotify semantics, ws_files.go). So the write must
+  // land AFTER the baseline to be deterministic: wait for the watch
+  // response (the Polling badge) plus one full interval.
+  await expect(page.locator('[data-testid="files-polling-badge"]')).toBeVisible()
+  await page.waitForTimeout(600)
+  await expect(page.locator(TREE_ROW).filter({ hasText: 'external.md' })).toHaveCount(0)
+
+  // The change comes from the test process, not from the app: the panel's
+  // watch set covers the root, the backend notices the new file, and
+  // files.changed makes the panel re-list on its own.
+  writeFileSync(join(fixtureRoot, 'external.md'), 'created outside nocx\n')
+
+  await expect(page.locator('.ui-tree-row__name').filter({ hasText: 'external.md' })).toBeVisible({
+    timeout: 20_000,
+  })
 })

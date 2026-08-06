@@ -68,3 +68,15 @@
 .files-row[data-depth='11'] {
   padding-left: calc(11 * var(--space-4));
 }
+
+/* The sticky "refresh has stopped" message (watching wave §5.5): an inline
+   row above the tree with a Retry — a toast cannot answer "why is this
+   stale?" ten minutes later. Placement only: the message is the surface's
+   own text and the Retry is the kit's Button. */
+.files-watch-error {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin: var(--space-2) var(--space-4) 0;
+  padding: var(--space-2) var(--space-3);
+}

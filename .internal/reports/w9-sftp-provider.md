@@ -22,15 +22,15 @@ consumer seam declared in the package (the discovery.go:113 pattern).
 
 ## Numbers
 
-| Gate | Result |
-| --- | --- |
-| `go build ./internal/filesystem/...` | ok |
-| `go vet ./internal/filesystem/...` | ok |
-| `go test -race ./internal/filesystem/sftp/` | ok, 49 tests |
-| `golangci-lint run ./internal/filesystem/sftp/...` | 0 findings |
-| `go test ./internal/filesystem/...` (root + local + sftp) | ok |
-| `go test -race -run TestFSConn ./internal/ssh/` | ok, 177 tests in package |
-| `golangci-lint run ./internal/ssh/...` | 0 findings |
+| Gate                                                      | Result                   |
+| --------------------------------------------------------- | ------------------------ |
+| `go build ./internal/filesystem/...`                      | ok                       |
+| `go vet ./internal/filesystem/...`                        | ok                       |
+| `go test -race ./internal/filesystem/sftp/`               | ok, 49 tests             |
+| `golangci-lint run ./internal/filesystem/sftp/...`        | 0 findings               |
+| `go test ./internal/filesystem/...` (root + local + sftp) | ok                       |
+| `go test -race -run TestFSConn ./internal/ssh/`           | ok, 177 tests in package |
+| `golangci-lint run ./internal/ssh/...`                    | 0 findings               |
 
 Nothing committed or pushed; no beads touched.
 

@@ -271,13 +271,20 @@ async function main() {
   const filesBindings = new Map<string, Set<(live: boolean) => void>>()
   const liveFilesBindings = new Set<string>()
   const filesServicesTracked: FilesPanelServices = {
+    // Spread, then intercept: open and close are the two methods the
+    // composition root must watch (the binding-liveness registry), and
+    // everything else — list, read, watch, reveal, the change
+    // subscription — forwards by CONSTRUCTION. Do not turn this back
+    // into an enumeration: an object literal that lists the methods it
+    // forwards is a seam where the next method added to FilesClient
+    // disappears silently, in production only, while every test stays
+    // green because the tests substitute their own services object.
+    ...filesServices,
     open: async (sessionId, rootPath) => {
       const res = await filesServices.open(sessionId, rootPath)
       liveFilesBindings.add(res.bindingId)
       return res
     },
-    list: (bindingId, path, offset, limit) => filesServices.list(bindingId, path, offset, limit),
-    read: (bindingId, path, maxBytes) => filesServices.read(bindingId, path, maxBytes),
     close: async (bindingId) => {
       liveFilesBindings.delete(bindingId)
       const cbs = filesBindings.get(bindingId)
@@ -305,6 +312,7 @@ async function main() {
   const filesView = createFilesView({
     services: filesServicesTracked,
     opener: { open: openFileViewer },
+    clipboard,
     activeOrigin,
   })
   /**

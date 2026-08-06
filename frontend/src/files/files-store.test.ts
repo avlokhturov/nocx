@@ -5,6 +5,7 @@
 // fake services seam — no DOM, no WebSocket.
 import { describe, expect, it, vi } from 'vitest'
 import type { FilesListEntry, FilesListResult } from '../generated/files.list'
+import type { FilesChanged } from '../generated/files.changed'
 import type { FilesPanelServices } from './files-client'
 import { createFilesTreeStore, FILES_PAGE_SIZE, type FilesTreeStore } from './files-store'
 import type { ActiveOrigin } from '../tab-content'
@@ -78,6 +79,10 @@ function makeServices(over: Partial<FilesPanelServices> = {}): FilesPanelService
     open: vi.fn().mockResolvedValue(OPEN_RESULT),
     list: vi.fn().mockResolvedValue(listOk('C:/home/alice', [])),
     read: vi.fn().mockResolvedValue({}),
+    watch: vi.fn().mockResolvedValue({ mode: 'watching' }),
+    reveal: vi.fn().mockResolvedValue({}),
+    subscribeFilesChanged: vi.fn().mockReturnValue(() => {}),
+    onConnect: vi.fn().mockReturnValue(() => {}),
     close: vi.fn().mockResolvedValue({}),
     ...over,
   }
@@ -527,5 +532,212 @@ describe('files tree store', () => {
     await settle()
     expect(store.phase()).toBe('ready')
     expect(close).toHaveBeenCalledTimes(1)
+  })
+
+  // ── Watching (fm-w13 part 2) ─────────────────────────────────────────
+
+  it('sends files.watch with the root when the binding opens', async () => {
+    const watch = vi.fn().mockResolvedValue({ mode: 'watching' })
+    const store = createFilesTreeStore(makeServices({ watch }))
+    store.rescope(LOCAL_A)
+    await settle()
+
+    // The root's rows are on screen from the first list, so the initial
+    // watch set is the root alone (the e2e clause).
+    expect(watch).toHaveBeenLastCalledWith('b1', ['/home/alice'])
+  })
+
+  it('expanding a directory adds it to the watch set and collapsing removes it', async () => {
+    const watch = vi.fn().mockResolvedValue({ mode: 'watching' })
+    const list = vi
+      .fn()
+      .mockImplementation((bindingId: string, path: string) =>
+        Promise.resolve(
+          path === '/home/alice'
+            ? listOk('C:/home/alice', [
+                entry({ name: 'docs', path: '/home/alice/docs', kind: 'dir' }),
+              ])
+            : listOk('C:/home/alice/docs', [
+                entry({ name: 'a.md', path: '/home/alice/docs/a.md' }),
+              ]),
+        ),
+      )
+    const store = createFilesTreeStore(makeServices({ watch, list }))
+    store.rescope(LOCAL_A)
+    await settle()
+    expect(watch).toHaveBeenLastCalledWith('b1', ['/home/alice'])
+
+    const docs = nodeRows(store, 'docs')
+    store.toggle(docs)
+    await settle()
+    expect(watch).toHaveBeenLastCalledWith('b1', ['/home/alice', '/home/alice/docs'])
+
+    store.toggle(docs)
+    await settle()
+    expect(watch).toHaveBeenLastCalledWith('b1', ['/home/alice'])
+  })
+
+  it('a files.changed for a loaded path triggers exactly one re-list and expansion survives', async () => {
+    const list = vi
+      .fn()
+      .mockImplementation((bindingId: string, path: string) =>
+        Promise.resolve(
+          path === '/home/alice'
+            ? listOk('C:/home/alice', [
+                entry({ name: 'docs', path: '/home/alice/docs', kind: 'dir' }),
+              ])
+            : listOk('C:/home/alice/docs', [
+                entry({ name: 'old.md', path: '/home/alice/docs/old.md' }),
+              ]),
+        ),
+      )
+    let handler: ((p: FilesChanged) => void) | null = null
+    const subscribeFilesChanged = vi.fn((h: (p: FilesChanged) => void) => {
+      handler = h
+      return () => {}
+    })
+    const store = createFilesTreeStore(makeServices({ list, subscribeFilesChanged }))
+    store.rescope(LOCAL_A)
+    await settle()
+    const docs = nodeRows(store, 'docs')
+    store.toggle(docs)
+    await settle()
+    expect(list.mock.calls.filter(([, p]) => p === '/home/alice/docs')).toHaveLength(1)
+
+    handler!({ bindingId: 'b1', path: '/home/alice/docs' })
+    await settle()
+
+    // Exactly ONE re-list, from the top of the displayed window.
+    const docsLists = list.mock.calls.filter(([, p]) => p === '/home/alice/docs')
+    expect(docsLists).toHaveLength(2)
+    expect(docsLists[1]?.[2]).toBe(0)
+    // Expansion state survives the re-list (mergeChildren keeps identity).
+    expect(docs.expanded).toBe(true)
+    expect(store.rows().some((r) => r.kind === 'entry' && r.node.name === 'old.md')).toBe(true)
+  })
+
+  it('a files.changed whose rev matches the applied rev triggers no re-list', async () => {
+    const list = vi
+      .fn()
+      .mockImplementation((bindingId: string, path: string) =>
+        Promise.resolve(
+          path === '/home/alice'
+            ? listOk('C:/home/alice', [
+                entry({ name: 'docs', path: '/home/alice/docs', kind: 'dir' }),
+              ])
+            : listOk('C:/home/alice/docs', [entry({ name: 'a.md' })], { rev: 'r9' }),
+        ),
+      )
+    let handler: ((p: FilesChanged) => void) | null = null
+    const subscribeFilesChanged = vi.fn((h: (p: FilesChanged) => void) => {
+      handler = h
+      return () => {}
+    })
+    const store = createFilesTreeStore(makeServices({ list, subscribeFilesChanged }))
+    store.rescope(LOCAL_A)
+    await settle()
+    const docs = nodeRows(store, 'docs')
+    store.toggle(docs)
+    await settle()
+
+    handler!({ bindingId: 'b1', path: '/home/alice/docs', rev: 'r9' })
+    await settle()
+
+    // The notification's rev is what the applied listing already carries:
+    // the change is on screen, nothing is re-listed.
+    expect(list.mock.calls.filter(([, p]) => p === '/home/alice/docs')).toHaveLength(1)
+  })
+
+  it('a files.changed for another binding is ignored', async () => {
+    const list = vi.fn().mockResolvedValue(listOk('C:/home/alice', [entry({ name: 'a.txt' })]))
+    let handler: ((p: FilesChanged) => void) | null = null
+    const subscribeFilesChanged = vi.fn((h: (p: FilesChanged) => void) => {
+      handler = h
+      return () => {}
+    })
+    const store = createFilesTreeStore(makeServices({ list, subscribeFilesChanged }))
+    store.rescope(LOCAL_A)
+    await settle()
+
+    handler!({ bindingId: 'some-other-binding', path: '/home/alice' })
+    await settle()
+
+    // Just the open listing — the foreign notification repainted nothing.
+    expect(list).toHaveBeenCalledTimes(1)
+  })
+
+  it('a files.changed for a path that is not loaded is ignored', async () => {
+    const list = vi.fn().mockResolvedValue(listOk('C:/home/alice', [entry({ name: 'a.txt' })]))
+    let handler: ((p: FilesChanged) => void) | null = null
+    const subscribeFilesChanged = vi.fn((h: (p: FilesChanged) => void) => {
+      handler = h
+      return () => {}
+    })
+    const store = createFilesTreeStore(makeServices({ list, subscribeFilesChanged }))
+    store.rescope(LOCAL_A)
+    await settle()
+
+    handler!({ bindingId: 'b1', path: '/home/alice/not-loaded' })
+    await settle()
+    expect(list).toHaveBeenCalledTimes(1)
+  })
+
+  it('reports the refresh mode and a degraded reason for a local fallback', async () => {
+    const watch = vi.fn().mockResolvedValue({ mode: 'polling', degradedReason: 'no fsnotify' })
+    const store = createFilesTreeStore(makeServices({ watch }))
+    store.rescope(LOCAL_A)
+    await settle()
+
+    expect(store.watchMode()).toBe('polling')
+    expect(store.watchDegradedReason()).toBe('no fsnotify')
+    expect(store.watchFailed()).toBeNull()
+  })
+
+  it('a rejected files.watch is a sticky failure cleared by the refresh cycle', async () => {
+    const watch = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('not connected'))
+      .mockResolvedValue({ mode: 'watching' })
+    const store = createFilesTreeStore(makeServices({ watch }))
+    store.rescope(LOCAL_A)
+    await settle()
+    expect(store.watchFailed()).toContain('not connected')
+
+    store.refresh()
+    await settle()
+    expect(store.watchFailed()).toBeNull()
+    expect(store.watchMode()).toBe('watching')
+  })
+
+  it('re-sends the watch set when the connection re-establishes', async () => {
+    let connHandler: (() => void) | null = null
+    const onConnect = vi.fn((h: () => void) => {
+      connHandler = h
+      return () => {}
+    })
+    const watch = vi.fn().mockResolvedValue({ mode: 'watching' })
+    const store = createFilesTreeStore(makeServices({ onConnect, watch }))
+    store.rescope(LOCAL_A)
+    await settle()
+    const callsBefore = watch.mock.calls.length
+
+    connHandler!()
+    await settle()
+    expect(watch.mock.calls.length).toBe(callsBefore + 1)
+    expect(watch).toHaveBeenLastCalledWith('b1', ['/home/alice'])
+  })
+
+  it('dispose unsubscribes from the change stream and the reconnect hook', async () => {
+    const unsubChanged = vi.fn()
+    const unsubConnect = vi.fn()
+    const subscribeFilesChanged = vi.fn(() => unsubChanged)
+    const onConnect = vi.fn(() => unsubConnect)
+    const store = createFilesTreeStore(makeServices({ subscribeFilesChanged, onConnect }))
+    store.rescope(LOCAL_A)
+    await settle()
+
+    store.dispose()
+    expect(unsubChanged).toHaveBeenCalledTimes(1)
+    expect(unsubConnect).toHaveBeenCalledTimes(1)
   })
 })

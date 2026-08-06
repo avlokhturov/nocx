@@ -13,12 +13,14 @@
 // and the polling badge slot: the badge itself belongs to the watching wave
 // (§5.5), so the slot is left here and nothing else invents a different one.
 
-import { createEffect, For, on, onCleanup, Show } from 'solid-js'
+import { createEffect, createSignal, For, on, onCleanup, Show } from 'solid-js'
 import type { Component } from 'solid-js'
 import type { SidebarViewDescriptor } from '../sidebar'
 import type { ActiveOrigin } from '../tab-content'
+import { createClipboardAccess, type ClipboardAccess } from '../clipboard'
 import { Badge } from '../ui/badge'
 import { Button } from '../ui/button'
+import { ContextMenu, type ContextMenuItem } from '../ui/context-menu'
 import { EmptyState } from '../ui/empty-state'
 import { IconButton } from '../ui/icon-button'
 import { RefreshIcon } from '../ui/icons'
@@ -93,6 +95,10 @@ interface FilesPanelProps {
   store: FilesTreeStore
   services: FilesPanelServices
   opener: FileOpener
+  /** The clipboard seam (AD-8): the composition root injects its single
+   *  instance. Copying a path through the seam is what makes a refused
+   *  write a reported failure instead of a silent no-op. */
+  clipboard: ClipboardAccess
   /** The ACTIVE tab's origin — a reactive accessor, never a capture: the
    *  panel follows the tab in front. */
   activeOrigin: () => ActiveOrigin | null
@@ -149,6 +155,69 @@ function FilesPanel(props: FilesPanelProps) {
     }
   }
 
+  /** The open context menu: its anchor and the row it was opened for.
+   *  Null when closed. */
+  const [menu, setMenu] = createSignal<{ x: number; y: number; node: FilesNode } | null>(null)
+
+  /** Copy an entry's path through the clipboard SEAM — never the browser
+   *  API directly (AD-8). The seam rejects a write the platform refused
+   *  (and the degraded seam rejects everything), so a copy that did not
+   *  land reports it: a toast, exactly like the other refused actions. */
+  const copyPath = async (node: FilesNode, kind: 'relative' | 'absolute'): Promise<void> => {
+    const text = kind === 'relative' ? props.store.relativePath(node) : node.path
+    try {
+      await props.clipboard.writeText(text)
+      showToast({ level: 'success', message: `Copied ${kind} path` })
+    } catch (e) {
+      showToast({ level: 'danger', message: e instanceof Error ? e.message : String(e) })
+    }
+  }
+
+  /** Show in Finder: LOCAL tabs only — on a remote tab the item is not in
+   *  the menu at all (§4), and absence, not a greyed-out row, is what tells
+   *  the user the capability does not apply to that machine. The backend
+   *  method exists; on a local binding the Wails seam is a later wave, so
+   *  an honest refusal (-32601) is rendered like every other refused
+   *  action — never stubbed, never hidden, never a silent no-op. */
+  const revealInFinder = async (node: FilesNode): Promise<void> => {
+    const b = props.store.binding()
+    if (b === null) return
+    try {
+      await props.services.reveal(b.bindingId, node.path)
+    } catch (e) {
+      showToast({ level: 'danger', message: e instanceof Error ? e.message : String(e) })
+    }
+  }
+
+  /** The menu's items for the row it is open on. The two copy entries are
+   *  always there — they are two different answers, and both were asked
+   *  for. Show in Finder joins only on a LOCAL origin. */
+  const menuItems = (): ContextMenuItem[] => {
+    const m = menu()
+    if (m === null) return []
+    const items: ContextMenuItem[] = [
+      {
+        id: 'copy-relative',
+        label: 'Copy Relative Path',
+        onSelect: () => void copyPath(m.node, 'relative'),
+      },
+      {
+        id: 'copy-absolute',
+        label: 'Copy Absolute Path',
+        onSelect: () => void copyPath(m.node, 'absolute'),
+      },
+    ]
+    const o = props.store.origin()
+    if (o !== null && o.kind === 'local') {
+      items.push({
+        id: 'reveal',
+        label: 'Show in Finder',
+        onSelect: () => void revealInFinder(m.node),
+      })
+    }
+    return items
+  }
+
   /** What may be opened — the §5.1 table, kept in the renderer's words:
    *  regular opens, symlink→regular opens after canonical resolution,
    *  dir expands, other (FIFO, device) does neither. */
@@ -164,6 +233,10 @@ function FilesPanel(props: FilesPanelProps) {
           data-testid="files-row"
           onClick={() => {
             if (openable(node)) void openFile(node)
+          }}
+          onContextMenu={(e) => {
+            e.preventDefault()
+            setMenu({ x: e.clientX, y: e.clientY, node })
           }}
         >
           <TreeRow
@@ -267,15 +340,34 @@ function FilesPanel(props: FilesPanelProps) {
         </div>
       </Show>
       <Show when={props.store.phase() === 'ready'}>
+        {/* Refresh that has actually stopped (§5.5): a sticky INLINE
+            message with Retry — not a toast, because a toast cannot answer
+            "why is this stale?" ten minutes later. The Retry is the header
+            refresh cycle, which re-sends the watch set and clears the
+            failure the instant it recovers. */}
+        <Show when={props.store.watchFailed() !== null}>
+          <div class="files-watch-error" data-testid="files-watch-error">
+            <span>{props.store.watchFailed()}</span>
+            <Button size="sm" data-testid="files-watch-retry" onClick={() => props.store.refresh()}>
+              Retry
+            </Button>
+          </div>
+        </Show>
         <div class="files-tree" role="tree" aria-label="Files">
           <For each={props.store.rows()}>{(row) => renderRow(row)}</For>
         </div>
       </Show>
+      <ContextMenu
+        open={menu() !== null}
+        x={menu()?.x ?? 0}
+        y={menu()?.y ?? 0}
+        items={menuItems()}
+        data-testid="files-context-menu"
+        onClose={() => setMenu(null)}
+      />
     </div>
   )
 }
-
-// ── Registration ───────────────────────────────────────────────────────────
 
 export interface FilesViewDeps {
   /** The panel's backend surface (createFilesPanelServices(dispatcher)). */
@@ -283,6 +375,10 @@ export interface FilesViewDeps {
   /** The viewer-tab opener; a no-op default keeps the panel runnable before
    *  the viewer lands. */
   opener?: FileOpener
+  /** The clipboard seam (AD-8): the composition root injects its single
+   *  instance. The default exists so the panel runs standalone; main.tsx
+   *  owns the real one. */
+  clipboard?: ClipboardAccess
   /** Reactive accessor for the ACTIVE tab's origin — the coordinator wires
    *  it to TabManager.activeOrigin() through onActiveTabChange, exactly like
    *  the ports target id. */
@@ -294,6 +390,7 @@ export interface FilesViewDeps {
  *  body — one signal, one backend call site (the ports pause pattern). */
 export function createFilesView(deps: FilesViewDeps): SidebarViewDescriptor {
   const opener = deps.opener ?? NOOP_OPENER
+  const clipboard = deps.clipboard ?? createClipboardAccess()
   const store = createFilesTreeStore(deps.services)
   return {
     id: FILES_VIEW_ID,
@@ -326,10 +423,28 @@ export function createFilesView(deps: FilesViewDeps): SidebarViewDescriptor {
         >
           <RefreshIcon />
         </IconButton>
-        {/* Polling badge slot (§5.5): the watching wave renders the
-              degraded-mode badge here, beside Refresh. Intentionally empty
-              until then — do not invent a second slot. */}
-        <span data-testid="files-polling-badge-slot" />
+        {/* Polling badge (§5.5): 'polling' on a LOCAL binding with a
+              reason is a real degrade — the persistent badge beside
+              Refresh, hover carries the reason, cleared the instant
+              watching recovers. A remote binding's designed-mode polling
+              has no reason and warns about nothing. */}
+        <span data-testid="files-polling-badge-slot">
+          <Show
+            when={
+              store.watchMode() === 'polling' &&
+              store.watchDegradedReason() !== null &&
+              store.origin()?.kind === 'local'
+            }
+          >
+            <Badge
+              tone="warning"
+              data-testid="files-polling-badge"
+              title={store.watchDegradedReason() ?? undefined}
+            >
+              Polling
+            </Badge>
+          </Show>
+        </span>
       </>
     ),
     view: (props) => (
@@ -337,6 +452,7 @@ export function createFilesView(deps: FilesViewDeps): SidebarViewDescriptor {
         store={store}
         services={deps.services}
         opener={opener}
+        clipboard={clipboard}
         activeOrigin={props.activeOrigin}
       />
     ),

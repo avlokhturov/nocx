@@ -19,6 +19,9 @@ export interface BadgeProps {
    *  wrapping or pushing the row. The row places it (a bounded flex share);
    *  this variance is the ellipsis itself. */
   truncate?: boolean
+  /** Hover detail — the degraded-mode reason on the Polling badge (§5.5). */
+  title?: string
+  'data-testid'?: string
 }
 
 export function Badge(props: BadgeProps) {
@@ -27,6 +30,8 @@ export function Badge(props: BadgeProps) {
       class="ui-badge"
       data-tone={props.tone ?? 'neutral'}
       data-truncate={props.truncate === true ? 'true' : undefined}
+      title={props.title}
+      data-testid={props['data-testid']}
     >
       {props.children}
     </span>

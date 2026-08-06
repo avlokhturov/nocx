@@ -57,8 +57,7 @@ move the id (D6). The pinned serialisation is asserted byte-for-byte in a test.
 Fields I could NOT source, and why (each is computed inside `internal/ssh` at dial time and
 discarded after the pool key is built; none are exposed):
 
-1. **Effective port when `cfg.Port == 0`** — `resolveConfig` fills the config-file Port or
-   22. The id carries `0`, meaning "unset — the effective value was decided by resolution".
+1. **Effective port when `cfg.Port == 0`** — `resolveConfig` fills the config-file Port or 22. The id carries `0`, meaning "unset — the effective value was decided by resolution".
 2. **Effective user when `cfg.User == ""`** — `resolveConfig` fills the config-file User or
    `currentUser()`. The id carries `""` for the same reason.
 3. **The dial's final per-hop `~/.ssh/config` resolution** — the address is the host string

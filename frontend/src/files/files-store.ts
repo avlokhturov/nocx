@@ -34,9 +34,45 @@
 
 import { createMemo, createSignal, untrack } from 'solid-js'
 import type { FilesListResult, FilesListEntry } from '../generated/files.list'
+import type { FilesChanged } from '../generated/files.changed'
 import type { FilesPanelServices } from './files-client'
 import type { ActiveOrigin } from '../tab-content'
 import type { TreeRowKind } from '../ui/tree-row'
+
+/** The watch set for a tree: the root (its rows are always on screen) plus
+ *  every EXPANDED directory — the panel's change surface is exactly what it
+ *  renders (§5.2). The backend REPLACES the set on every files.watch, so the
+ *  client sends the whole set it currently wants and the backend diffs:
+ *  collapsing a directory removes it by construction and can never leak a
+ *  watch. The notification carries the same provider-syntax paths, so the
+ *  changed handler matches against this vocabulary. */
+function currentWatchPaths(root: FilesRoot): string[] {
+  const paths = [root.path]
+  const collect = (dir: FilesRoot | FilesNode): void => {
+    for (const child of dir.children) {
+      if (child.expanded) {
+        paths.push(child.path)
+        collect(child)
+      }
+    }
+  }
+  collect(root)
+  return paths
+}
+
+/** The entry's path relative to the display root, as spelled — lexical,
+ *  symlinks unresolved. That is what a person means by "the path in this
+ *  tree"; the D9 canonical is the deduplication identity and resolves
+ *  symlinks, so copying it would hand the user a path they did not click
+ *  on. The root is always the tree's own root, so every visible entry is
+ *  under it; the fallback spells the path as-is rather than inventing a
+ *  relative form for a node that is not in the tree. */
+function relativePathOf(rootPath: string | null, nodePath: string): string {
+  if (rootPath !== null && nodePath.startsWith(rootPath + '/')) {
+    return nodePath.slice(rootPath.length + 1)
+  }
+  return nodePath
+}
 
 /** One page of children per expanded directory (D10). A starting number,
  *  named in code because §9 of the design says so: the backend's ordering is
@@ -146,8 +182,24 @@ export interface FilesTreeStore {
   /** Re-issue the failed enumeration of a timedOut (or error) directory. */
   retry(dir: FilesRoot | FilesNode): void
   /** Re-list the root and every expanded directory in one cycle (the
-   *  header's refresh action); re-opens when the binding is gone. */
+   *  header's refresh action); re-opens when the binding is gone. Also
+   *  re-sends the watch set, so it is the Retry for a failed watch. */
   refresh(): void
+  /** The backend's reported refresh mode for the current watch set: null
+   *  until the first files.watch response (§5.5). */
+  watchMode(): 'watching' | 'polling' | null
+  /** Why refresh is degraded — non-null only for a LOCAL binding whose live
+   *  watch could not be established and which fell back to polling. The
+   *  persistent badge renders from this; a remote binding's designed-mode
+   *  polling has no reason and warns about nothing. */
+  watchDegradedReason(): string | null
+  /** A files.watch call failed — the change stream may be gone. Sticky
+   *  until the next successful watch (the header refresh re-establishes
+   *  it); rendered as an inline message with Retry, never a toast. */
+  watchFailed(): string | null
+  /** The entry's path relative to the display root, as spelled — lexical,
+   *  symlinks unresolved (the copy-path action's "path in this tree"). */
+  relativePath(node: FilesNode): string
   /** Close the binding and reset. Called when the view unmounts; the store
    *  is reusable — the next rescope re-opens. */
   dispose(): void
@@ -174,6 +226,13 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
   const bumpTree = (): void => {
     setTreeVersion((v) => v + 1)
   }
+  /** The §5.5 watching state: the backend's reported refresh mode for the
+   *  current watch set, the degraded-mode reason (local fallback to
+   *  polling), and a sticky failure — the inline "refresh stopped" state,
+   *  cleared by the next successful files.watch (the header refresh). */
+  const [watchMode, setWatchMode] = createSignal<'watching' | 'polling' | null>(null)
+  const [watchDegradedReason, setWatchDegradedReason] = createSignal<string | null>(null)
+  const [watchFailed, setWatchFailed] = createSignal<string | null>(null)
 
   const rows = createMemo<FilesFlatRow[]>(() => {
     treeVersion()
@@ -418,10 +477,78 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     issueList(dir, 0, limit, next)
   }
 
+  /** Send the watch set the panel currently wants — files.watch REPLACES
+   *  the set rather than adding to it, so this is the whole set, every
+   *  time: the backend diffs and collapsing a directory cannot leak a
+   *  watch. Called when the binding opens, when a directory expands or
+   *  collapses, on reconnect, and by refresh() — the Retry for a failed
+   *  watch. The response carries the refresh mode (§5.5): 'polling' with a
+   *  reason on a local binding is a real degrade and gets the persistent
+   *  badge; a rejection means the change stream may be gone and becomes
+   *  the sticky inline message. */
+  function pushWatchSet(): void {
+    const ctx = captureCtx()
+    const r = untrack(root)
+    if (ctx === null || r === null) return
+    services.watch(ctx.bindingId as string, currentWatchPaths(r)).then(
+      (res) => {
+        if (!scopeCurrent(ctx)) return
+        setWatchFailed(null)
+        setWatchMode(res.mode)
+        setWatchDegradedReason(res.degradedReason ?? null)
+      },
+      (e) => {
+        if (!scopeCurrent(ctx)) return
+        setWatchFailed(messageOf(e))
+      },
+    )
+  }
+
+  /** The server-initiated invalidation (SettingsObserver pattern). The
+   *  notification names one dirty path and carries no entries — re-listing
+   *  through refreshDir keeps exactly one code path rendering a directory.
+   *  Three filters, each for a different defect: a change for a binding
+   *  this tree does not follow is not this tree's business (a viewer's
+   *  binding, or a previous scope's); a directory whose rows are not
+   *  rendered (tooLarge/timedOut/error) keeps its state row until the user
+   *  retries; and a rev that already matches what is applied means the
+   *  change is already on screen. A busy directory is skipped too — an
+   *  enumeration is already on the wire and its response is newer than
+   *  this notification's knowledge. */
+  function onFilesChanged(p: FilesChanged): void {
+    const b = untrack(binding)
+    if (b === null || p.bindingId !== b.bindingId) return
+    const r = untrack(root)
+    if (r === null) return
+    const ctx = captureCtx()
+    if (ctx === null) return
+    let dir: FilesRoot | FilesNode | null = r.path === p.path ? r : null
+    if (dir === null) {
+      const find = (d: FilesRoot | FilesNode): void => {
+        for (const child of d.children) {
+          if (child.path === p.path) {
+            dir = child
+            return
+          }
+          if (child.expanded) find(child)
+        }
+      }
+      find(r)
+    }
+    if (dir === null || dir.state !== 'ok' || dir.busy) return
+    if (p.rev !== undefined && p.rev === dir.rev) return
+    refreshDir(dir, ctx)
+  }
+
   function openScope(o: ActiveOrigin): void {
     generation++
     setPhase('opening')
     setOpenError(null)
+    // A fresh binding has no watch state yet: the badge and the sticky
+    // message wait for this binding's first files.watch response.
+    setWatchMode(null)
+    setWatchDegradedReason(null)
+    setWatchFailed(null)
     const ctx = { tabId: o.tabId, generation }
     // D2: a verified OSC 7 cwd overrides the provider's root; anything else
     // omits rootPath and lets the provider fall back (and say it did).
@@ -453,6 +580,10 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
           const r = untrack(root)
           if (r !== null) issueList(r, 0, FILES_PAGE_SIZE, listCtx)
         }
+        // The root's rows are on screen from the first list, so the watch
+        // set starts with the root (the e2e clause: a file created outside
+        // nocx in the root appears with nobody pressing anything).
+        pushWatchSet()
       })
       .catch((e) => {
         if (!openCurrent(ctx)) return
@@ -501,6 +632,10 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     if (node.expanded) {
       node.expanded = false
       bumpTree()
+      // The collapsed directory leaves the watch set: the set is what the
+      // panel renders, and files.watch replaces it wholesale, so sending
+      // the set without the collapsed path is what stops the watch.
+      pushWatchSet()
       return
     }
     node.expanded = true
@@ -508,6 +643,7 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     // instant, and the header refresh is what re-validates it.
     if (node.state === 'ok' && node.children.length > 0) {
       bumpTree()
+      pushWatchSet()
       return
     }
     const ctx = captureCtx()
@@ -517,6 +653,7 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
       return
     }
     issueList(node, 0, FILES_PAGE_SIZE, ctx)
+    pushWatchSet()
   }
 
   function showMore(dir: FilesRoot | FilesNode): void {
@@ -617,6 +754,10 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     }
     collect(r)
     for (const node of expanded) refreshDir(node, ctx)
+    // The watch set rides the refresh cycle too: re-establishing it is
+    // what recovers a failed watch, and the header refresh is the sticky
+    // message's Retry. Success clears watchFailed inside pushWatchSet.
+    pushWatchSet()
   }
 
   function dispose(): void {
@@ -627,9 +768,24 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     setRoot(null)
     setPhase('no-origin')
     setOpenError(null)
+    setWatchMode(null)
+    setWatchDegradedReason(null)
+    setWatchFailed(null)
     bumpTree()
     if (b !== null) void services.close(b.bindingId).catch(() => {})
+    unsubChanged()
+    unsubConnect()
   }
+
+  /** The change stream, subscribed once for the store's whole life: the
+   *  handler filters by binding, so a notification for another binding —
+   *  a viewer's, or a previous scope's — is ignored. On reconnect the
+   *  watch set is re-sent: the backend's dirty set is flushed to the
+   *  re-attached subscriber, and re-sending the set is idempotent (the
+   *  backend diffs), so a dropped socket cannot silently detach the panel
+   *  from the change stream. Unsubscribed in dispose() with the binding. */
+  const unsubChanged = services.subscribeFilesChanged((p) => onFilesChanged(p))
+  const unsubConnect = services.onConnect(() => pushWatchSet())
 
   return {
     phase,
@@ -643,6 +799,10 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     showMore,
     retry,
     refresh,
+    watchMode,
+    watchDegradedReason,
+    watchFailed,
+    relativePath: (node) => relativePathOf(untrack(root)?.path ?? null, node.path),
     dispose,
   }
 }
