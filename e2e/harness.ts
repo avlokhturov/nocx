@@ -187,6 +187,15 @@ export class VaultBackend {
     const overrideEnv: Record<string, string> = { NOCX_WS_ADDR: `127.0.0.1:${port}` }
     if (this.withoutSecretService) {
       overrideEnv.DBUS_SESSION_BUS_ADDRESS = 'unix:path=/nonexistent/nocx-e2e-no-secret-service'
+      // The portable half. The line above is a LINUX mechanism: on macOS
+      // go-keyring goes to the Security framework and ignores it entirely, so
+      // these cases were not arranging "no keystore" there at all — and with a
+      // disposable $HOME the framework found no login keychain under it and put
+      // a "Keychain not found" dialog on the developer's screen, once per
+      // backend start (nocx-o4hg). Both are set: the env var states the premise
+      // on every platform, and the dbus one keeps stating it for anything that
+      // reads the bus directly.
+      overrideEnv.NOCX_NO_SYSTEM_KEYSTORE = '1'
     }
 
     // The same boundary the default path gets from playwright.config.ts. Built

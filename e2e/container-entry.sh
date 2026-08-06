@@ -47,6 +47,7 @@ echo "=== backend on 127.0.0.1:$WS_PORT ==="
 # out of the boundary.
 env -u XDG_CONFIG_HOME -u XDG_DATA_HOME -u XDG_CACHE_HOME -u ZDOTDIR -u BASH_ENV -u ENV \
   HOME="$NOCX_E2E_HOME_DIR" \
+  NOCX_NO_SYSTEM_KEYSTORE=1 \
   NOCX_WS_ADDR="127.0.0.1:$WS_PORT" \
   "$work/devharness" >"$work/backend.log" 2>&1 &
 backend_pid=$!

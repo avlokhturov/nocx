@@ -18,6 +18,14 @@ func main() {
 	if addr := os.Getenv("NOCX_WS_ADDR"); addr != "" {
 		opts = append(opts, app.WithWSAddr(addr))
 	}
+	// The e2e cases that are ABOUT the passphrase path say so here. Portable,
+	// unlike DBUS_SESSION_BUS_ADDRESS, which only means anything on Linux —
+	// on macOS the backend went to the real Security framework instead, and
+	// with a disposable $HOME that raised a "Keychain not found" dialog on the
+	// developer's own screen once per start (nocx-o4hg).
+	if os.Getenv("NOCX_NO_SYSTEM_KEYSTORE") == "1" {
+		opts = append(opts, app.WithoutSystemKeystore())
+	}
 	a, err := app.New(opts...)
 	if err != nil {
 		panic(err)
