@@ -150,15 +150,37 @@ __nocx_prompt_command() {
             __nocx_snapshot_emit
         elif [[ "${__nocx_snapshot_waiting:-0}" != "1" ]]; then
             __nocx_snapshot_waiting=1
-            local __nocx_waited=0
-            while (( __nocx_waited < __nocx_snapshot_wait_ms )); do
+            # The bound is on ELAPSED TIME, not on a number of iterations.
+            #
+            # This loop used to count: ten passes of `sleep 0.025`, adding 25 to
+            # a counter each time. That assumed a sleep costs what it asks for.
+            # `sleep` is not a builtin — every pass forks and execs — and on a
+            # loaded machine the fork dominates: CI measured a first prompt held
+            # for 1.161s by a "250 ms" bound. The user's prompt is what pays,
+            # which makes it a broken promise rather than a slow test.
+            if [[ -n "${EPOCHREALTIME:-}" ]]; then
+                # bash 5: a monotonic-enough clock with no fork. The substitution
+                # strips the decimal separator to get microseconds; the class
+                # covers locales where that separator is a comma.
+                local __nocx_deadline=$(( ${EPOCHREALTIME//[.,]/} + __nocx_snapshot_wait_ms * 1000 ))
+                while (( ${EPOCHREALTIME//[.,]/} < __nocx_deadline )); do
+                    if [[ -f "$__nocx_snap_file" ]]; then
+                        __nocx_snapshot_emit
+                        break
+                    fi
+                    sleep 0.025
+                done
+            else
+                # bash 3.2 — still /bin/bash on macOS — has no clock that does
+                # not cost a fork, so reading the time to bound the loop would
+                # spend the thing being bounded. Spend the whole budget in ONE
+                # sleep instead: less responsive than polling, and bounded by
+                # construction, which is the property that was missing.
+                sleep 0.25
                 if [[ -f "$__nocx_snap_file" ]]; then
                     __nocx_snapshot_emit
-                    break
                 fi
-                sleep 0.025
-                __nocx_waited=$(( __nocx_waited + 25 ))
-            done
+            fi
         fi
     fi
     __nocx_in_prompt_command=0
@@ -298,7 +320,19 @@ __nocx_snapshot_done=0
 # interactive shell, so every name it defines is a name the user no longer
 # has. A readonly one is worse — it cannot even be unset, so a collision
 # breaks their shell for the rest of the session with no way back.
-readonly __nocx_snapshot_wait_ms=250
+#
+# NOCX_SNAPSHOT_WAIT_MS overrides it, and exists for the tests. 250 ms is a
+# budget for a HUMAN's prompt, so a test that asserts the snapshot mechanism
+# works is really asserting that the machine finished compgen inside a UX
+# deadline — which a loaded CI runner does not, and a user's laptop does. The
+# override lets such a test state a budget of its own and go on testing the
+# mechanism. A non-numeric value falls back to the default rather than
+# breaking the arithmetic in someone's prompt.
+if [[ "${NOCX_SNAPSHOT_WAIT_MS:-}" =~ ^[0-9]+$ ]]; then
+    readonly __nocx_snapshot_wait_ms="$NOCX_SNAPSHOT_WAIT_MS"
+else
+    readonly __nocx_snapshot_wait_ms=250
+fi
 
 # Nothing may survive the shell: a session that exits before the snapshot was
 # emitted (the leak path) must leave no file behind. Kill the background

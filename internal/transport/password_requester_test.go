@@ -11,6 +11,22 @@ import (
 	"github.com/shady2k/nocx/internal/ssh"
 )
 
+// wantWithin is how long these tests wait for a notification or an answer that
+// the code under test hands over immediately.
+//
+// It is not a performance budget and must not be read as one. Nothing here
+// measures latency; every wait is for an event the implementation produces
+// without doing work, so the only question the deadline answers is "did it
+// arrive at all". The number therefore has to be large enough that a busy
+// machine cannot be mistaken for a broken one — the whole file used to say
+// 2 seconds, and the container gate duly failed at exactly 2.00s on a
+// notification that was merely late (nocx-yht3, the same family as nocx-zlvw).
+//
+// Thirty seconds still bounds a genuinely absent event well inside the
+// package's own runtime, and costs nothing when the event arrives, which is
+// every run where the code is correct.
+const wantWithin = 30 * time.Second
+
 // ── connection-password ask, server → client ────────────────────────────
 
 func TestPasswordRequest_NotifiesConnectedClient(t *testing.T) {
@@ -46,7 +62,7 @@ func TestPasswordRequest_NotifiesConnectedClient(t *testing.T) {
 	// The connected client receives a connections.passwordRequest
 	// notification naming the connection and the account (nocx-s8jn) —
 	// the prompt must know which password it is asking for.
-	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(wantWithin))
 	_, data, err := conn.ReadMessage()
 	if err != nil {
 		t.Fatalf("expected password request notification, got error: %v", err)
@@ -91,7 +107,7 @@ func TestPasswordRequest_NotifiesConnectedClient(t *testing.T) {
 		if !errors.Is(err, ErrPasswordPromptCancelled) {
 			t.Fatalf("RequestConnectionPassword = %v, want ErrPasswordPromptCancelled", err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(wantWithin):
 		t.Fatal("RequestConnectionPassword did not resolve")
 	}
 }
@@ -132,6 +148,12 @@ func TestPasswordRequest_SubmittedWithRemember(t *testing.T) {
 	conn := connectWS(t, ws)
 	defer conn.Close() //nolint:errcheck
 
+	// Same race as TestPasswordRequest_NotifiesConnectedClient documents: the
+	// dial returns before the server registers the connection, and a broadcast
+	// that finds no client is not retried, so the read below can only end at
+	// its deadline (nocx-yht3).
+	waitForConns(t, ws, 1)
+
 	done := make(chan error, 1)
 	var answer ssh.PasswordAnswer
 	go func() {
@@ -140,7 +162,7 @@ func TestPasswordRequest_SubmittedWithRemember(t *testing.T) {
 		done <- err
 	}()
 
-	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(wantWithin))
 	_, data, err := conn.ReadMessage()
 	if err != nil {
 		t.Fatalf("read notification: %v", err)
@@ -169,7 +191,7 @@ func TestPasswordRequest_SubmittedWithRemember(t *testing.T) {
 		if err != nil {
 			t.Fatalf("RequestConnectionPassword: %v", err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(wantWithin):
 		t.Fatal("RequestConnectionPassword did not resolve")
 	}
 	if answer.Password != "hunter2" || !answer.Remember {
@@ -192,6 +214,12 @@ func TestPasswordRequest_SubmittedUseOnce(t *testing.T) {
 	conn := connectWS(t, ws)
 	defer conn.Close() //nolint:errcheck
 
+	// Same race as TestPasswordRequest_NotifiesConnectedClient documents: the
+	// dial returns before the server registers the connection, and a broadcast
+	// that finds no client is not retried, so the read below can only end at
+	// its deadline (nocx-yht3).
+	waitForConns(t, ws, 1)
+
 	done := make(chan error, 1)
 	var answer ssh.PasswordAnswer
 	go func() {
@@ -200,7 +228,7 @@ func TestPasswordRequest_SubmittedUseOnce(t *testing.T) {
 		done <- err
 	}()
 
-	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(wantWithin))
 	_, data, err := conn.ReadMessage()
 	if err != nil {
 		t.Fatalf("read notification: %v", err)
@@ -229,7 +257,7 @@ func TestPasswordRequest_SubmittedUseOnce(t *testing.T) {
 		if err != nil {
 			t.Fatalf("RequestConnectionPassword: %v", err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(wantWithin):
 		t.Fatal("RequestConnectionPassword did not resolve")
 	}
 	if answer.Password != "once" || answer.Remember {
@@ -251,13 +279,19 @@ func TestPasswordRequest_Cancelled(t *testing.T) {
 	conn := connectWS(t, ws)
 	defer conn.Close() //nolint:errcheck
 
+	// Same race as TestPasswordRequest_NotifiesConnectedClient documents: the
+	// dial returns before the server registers the connection, and a broadcast
+	// that finds no client is not retried, so the read below can only end at
+	// its deadline (nocx-yht3).
+	waitForConns(t, ws, 1)
+
 	done := make(chan error, 1)
 	go func() {
 		_, err := ws.RequestConnectionPassword(ctx, ssh.PasswordRequest{Connection: "p", User: "u", Host: "h"})
 		done <- err
 	}()
 
-	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(wantWithin))
 	_, data, err := conn.ReadMessage()
 	if err != nil {
 		t.Fatalf("read notification: %v", err)
@@ -284,7 +318,7 @@ func TestPasswordRequest_Cancelled(t *testing.T) {
 		if !errors.Is(err, ErrPasswordPromptCancelled) {
 			t.Fatalf("expected ErrPasswordPromptCancelled, got %v", err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(wantWithin):
 		t.Fatal("RequestConnectionPassword did not resolve")
 	}
 }
@@ -303,6 +337,12 @@ func TestPasswordRequest_ContextCancelled(t *testing.T) {
 	conn := connectWS(t, ws)
 	defer conn.Close() //nolint:errcheck
 
+	// Same race as TestPasswordRequest_NotifiesConnectedClient documents: the
+	// dial returns before the server registers the connection, and a broadcast
+	// that finds no client is not retried, so the read below can only end at
+	// its deadline (nocx-yht3).
+	waitForConns(t, ws, 1)
+
 	cancelCtx, cancel := context.WithCancel(ctx)
 	done := make(chan error, 1)
 	go func() {
@@ -311,7 +351,7 @@ func TestPasswordRequest_ContextCancelled(t *testing.T) {
 	}()
 
 	// Drain the notification so we know it was sent.
-	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(wantWithin))
 	if _, _, err := conn.ReadMessage(); err != nil {
 		t.Fatalf("read notification: %v", err)
 	}
@@ -322,7 +362,7 @@ func TestPasswordRequest_ContextCancelled(t *testing.T) {
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("expected context.Canceled, got %v", err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(wantWithin):
 		t.Fatal("RequestConnectionPassword did not resolve after cancel")
 	}
 }
@@ -342,6 +382,12 @@ func TestPasswordResolved_UnknownRequestID(t *testing.T) {
 	conn := connectWS(t, ws)
 	defer conn.Close() //nolint:errcheck
 
+	// Same race as TestPasswordRequest_NotifiesConnectedClient documents: the
+	// dial returns before the server registers the connection, and a broadcast
+	// that finds no client is not retried, so the read below can only end at
+	// its deadline (nocx-yht3).
+	waitForConns(t, ws, 1)
+
 	resp := vaultCall(t, conn, "connections.passwordResolved", map[string]any{
 		"requestId": "nonexistent",
 		"outcome":   "cancelled",
@@ -355,7 +401,7 @@ func TestPasswordResolved_UnknownRequestID(t *testing.T) {
 // what broadcastAsk consults — a dial that has returned is not yet a client.
 func waitForConns(t *testing.T, ws *WSServer, n int) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(wantWithin)
 	for time.Now().Before(deadline) {
 		ws.connsMu.Lock()
 		got := len(ws.conns)

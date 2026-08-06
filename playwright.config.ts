@@ -1,6 +1,7 @@
 import { defineConfig, type Project } from '@playwright/test'
 import path from 'node:path'
 
+import { BASE_URL, HEADLESS, WAILS_URL } from './e2e/base-url'
 import { createHomeIsolation } from './e2e/home-isolation'
 
 // e2e drives the whole app, not the frontend alone: `wails dev` serves the
@@ -8,20 +9,9 @@ import { createHomeIsolation } from './e2e/home-isolation'
 // transport, the real PTY and the real renderer. That is the only place layout,
 // focus and GPU behaviour are observable — jsdom has none of them.
 //
-// The port is env-derived rather than a constant because it is a shared
-// resource. Two runs on one machine that both assume the same port do not merely
-// compete: the second attaches to the first one's app and reports results for a
-// tree it never built. See reuseExistingServer below.
-const WAILS_PORT = process.env.NOCX_WAILS_PORT ? Number(process.env.NOCX_WAILS_PORT) : 34115
-const WAILS_URL = `http://localhost:${WAILS_PORT}`
-
-// Headless path: when NOCX_WS_PORT is set, the runner has started devharness
-// (Go backend + WebSocket) and vite (frontend dev server) separately. No wails
-// or GTK required — Playwright drives a plain browser against the vite URL.
-// This path is also far cheaper: it skips the Go compile and frontend build that
-// `wails dev` performs on every cold start.
-const HEADLESS = !!process.env.NOCX_WS_PORT
-const BASE_URL = HEADLESS ? process.env.NOCX_BASE_URL || 'http://localhost:5173' : WAILS_URL
+// Ports and URLs live in e2e/base-url.ts: the harness needs the same answer for
+// the worker-scoped readiness page it opens itself, and a second copy here
+// would agree until someone changed one of them. See reuseExistingServer below.
 
 // Both browsers stay declared. WebKit is not redundant coverage: nocx-q18's
 // glyph corruption reproduces in WKWebView and not in Chromium, and WebKit is

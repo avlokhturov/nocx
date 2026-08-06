@@ -1,5 +1,7 @@
 import { test as base, expect as baseExpect, type Page } from '@playwright/test'
 
+import { BASE_URL } from './base-url'
+
 export { expect } from '@playwright/test'
 export type { Page } from '@playwright/test'
 
@@ -27,35 +29,80 @@ export async function promptReady(page: Page): Promise<void> {
 // Wails GetWSPort binding the frontend expects before any app code runs. Under
 // `wails dev` the real binding is present and NOCX_WS_PORT is unset, so this is
 // a no-op — the same specs run unchanged in CI.
-export const test = base.extend({
-  page: async ({ page }, use) => {
-    const port = process.env.NOCX_WS_PORT
-    const token = process.env.NOCX_WS_TOKEN
-    if (port) {
-      if (!token) {
-        throw new Error(
-          'NOCX_WS_PORT set but NOCX_WS_TOKEN is missing; ' +
-            'the token is the auth gate and an empty string is rejected. ' +
-            'Export both or use `wails dev`.',
-        )
-      }
-      await page.addInitScript(
-        (opts: { p: string; t: string }) => {
-          ;(window as unknown as { go: unknown }).go = {
-            main: {
-              WailsApp: {
-                GetWSPort: () => Promise.resolve(Number(opts.p)),
-                GetWSToken: () => Promise.resolve(opts.t),
-                CheckForUpdate: () => Promise.resolve(null),
-                ReportHealthy: () => Promise.resolve(),
-                ApplyUpdate: () => Promise.resolve(),
-              },
-            },
-          }
+async function injectWailsShim(page: Page): Promise<void> {
+  const port = process.env.NOCX_WS_PORT
+  const token = process.env.NOCX_WS_TOKEN
+  if (!port) return
+  if (!token) {
+    throw new Error(
+      'NOCX_WS_PORT set but NOCX_WS_TOKEN is missing; ' +
+        'the token is the auth gate and an empty string is rejected. ' +
+        'Export both or use `wails dev`.',
+    )
+  }
+  await page.addInitScript(
+    (opts: { p: string; t: string }) => {
+      ;(window as unknown as { go: unknown }).go = {
+        main: {
+          WailsApp: {
+            GetWSPort: () => Promise.resolve(Number(opts.p)),
+            GetWSToken: () => Promise.resolve(opts.t),
+            CheckForUpdate: () => Promise.resolve(null),
+            ReportHealthy: () => Promise.resolve(),
+            ApplyUpdate: () => Promise.resolve(),
+          },
         },
-        { p: port, t: token },
-      )
-    }
+      }
+    },
+    { p: port, t: token },
+  )
+}
+
+export const test = base.extend<Record<string, never>, { appReady: void }>({
+  // The app answers on its port before it can serve a session, and the suite
+  // used to treat those as the same moment.
+  //
+  // playwright.config.ts waits for the `wails dev` URL, which the webview
+  // serves as soon as vite is up. The BACKEND is not up then: app.New probes
+  // the OS keystore synchronously (internal/app/app.go:275), and on a macOS
+  // runner with no unlocked login keychain that probe runs to its full timeout
+  // — five seconds in CI run 31085068686 — before the WebSocket exists. The
+  // renderer cannot open a tab without it.
+  //
+  // Every spec opens with expect(TAB).toHaveCount(1) on the default 5s
+  // expect timeout, so all of them raced that startup and most lost: 33 of 74
+  // failed on shard 1, each reporting "resolved to 0 elements" while the
+  // error-context snapshot taken moments later showed the tab present. It
+  // reads as a broken product and is a harness that started measuring too
+  // early.
+  //
+  // So readiness is waited for ONCE per worker, on its own page, with a budget
+  // sized for a cold start rather than for an assertion. Raising every spec's
+  // expect timeout would have worked too and would have made every genuine
+  // failure in the suite slower to report.
+  //
+  // The startup stall itself is a product defect and is filed separately: a
+  // terminal should not wait on a secret store to show a prompt.
+  appReady: [
+    async ({ browser }, use) => {
+      // newPage() inherits nothing from `use`, so baseURL is passed
+      // explicitly — from the module the config reads, not a copy.
+      const context = await browser.newContext({ baseURL: BASE_URL })
+      const page = await context.newPage()
+      try {
+        await injectWailsShim(page)
+        await page.goto('/')
+        await baseExpect(page.locator('.nocx-tab')).toHaveCount(1, { timeout: 90_000 })
+      } finally {
+        await context.close()
+      }
+      await use()
+    },
+    { scope: 'worker', auto: true },
+  ],
+
+  page: async ({ page }, use) => {
+    await injectWailsShim(page)
     await use(page)
   },
 })
