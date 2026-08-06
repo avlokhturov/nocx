@@ -56,6 +56,37 @@ const isolatedEnv: Record<string, string> = Object.fromEntries(
 
 export default defineConfig({
   testDir: './e2e',
+
+  // The specs that start their OWN backend, and so can only run headless.
+  //
+  // They exist because their subject is the backend's lifecycle — a vault that
+  // survives a restart, an import that outlives the process, history that is
+  // still there next launch — and `wails dev` owns exactly one backend whose
+  // lifecycle Playwright cannot touch. Each therefore runs cmd/devharness
+  // itself and points the page at it through harness.ts's bindEndpoint, which
+  // only works where vite serves the page alone: under `wails dev` the real
+  // window.go replaces the stub before the app reads it, and the spec ends up
+  // driving the shared backend on 34115 instead (nocx-w4vy, and bindEndpoint's
+  // comment for the mechanism).
+  //
+  // Excluded here rather than skipped inside each spec, because there is no
+  // per-test condition to evaluate — the whole file is unrunnable on this path.
+  // The exclusion is only honest while something else runs them: that is the
+  // `e2e-headless` job in ci.yml, which is also where a new entry has to be
+  // added. bindEndpoint throws if one is not, so the failure mode of forgetting
+  // is a red run naming this list, not a spec that quietly measures nothing.
+  testIgnore: HEADLESS
+    ? []
+    : [
+        'connection-password.spec.ts',
+        'history-persistence.spec.ts',
+        'prompt-vault.spec.ts',
+        'recall-search.spec.ts',
+        'tabby-import.spec.ts',
+        'vault.spec.ts',
+        'vault-settings.spec.ts',
+      ],
+
   timeout: 60_000,
 
   // Playwright's expect timeout is 5 seconds, which is a library default and

@@ -8,11 +8,11 @@
  * Uses its own ports (19890/19891) as prescribed by the brief.
  */
 
-import { test as base, expect, type Page } from '@playwright/test'
+import { test as base, expect } from '@playwright/test'
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { VaultBackend, type BackendEndpoint, type DisposableRoot } from './harness'
+import { VaultBackend, bindEndpoint, type DisposableRoot } from './harness'
 
 const test = base
 
@@ -88,29 +88,6 @@ function asDisposableRoot(r: XdgDirsResult): DisposableRoot {
   return { root: r.root }
 }
 
-/**
- * Inject Wails stubs pointing at the given backend endpoint.
- * Must run before page.goto('/') so the bindings exist at app init.
- */
-async function injectWailsBindings(page: Page, endpoint: BackendEndpoint): Promise<void> {
-  await page.addInitScript(
-    (opts: { p: number; t: string }) => {
-      ;(window as unknown as { go: unknown }).go = {
-        main: {
-          WailsApp: {
-            GetWSPort: () => Promise.resolve(opts.p),
-            GetWSToken: () => Promise.resolve(opts.t),
-            CheckForUpdate: () => Promise.resolve(null),
-            ReportHealthy: () => Promise.resolve(),
-            ApplyUpdate: () => Promise.resolve(),
-          },
-        },
-      }
-    },
-    { p: endpoint.port, t: endpoint.token },
-  )
-}
-
 // ── Test ──────────────────────────────────────────────────────────────────
 
 test.describe('Tabby import preview + execute', () => {
@@ -141,7 +118,7 @@ test.describe('Tabby import preview + execute', () => {
     page,
   }) => {
     const ep = await backend.start(FIRST_PORT)
-    await injectWailsBindings(page, ep)
+    await bindEndpoint(page, ep)
     await page.goto('/')
 
     // Wait for the app to load (initial tab appears).

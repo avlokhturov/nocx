@@ -17,7 +17,7 @@ import { execSync } from 'node:child_process'
 import { mkdtempSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { VaultBackend, type BackendEndpoint, type DisposableRoot } from './harness'
+import { VaultBackend, bindEndpoint, type DisposableRoot } from './harness'
 
 const DEVHARNESS_BIN = process.env.NOCX_VAULT_BIN ?? '/tmp/nocx-devharness'
 
@@ -51,35 +51,6 @@ function createXdgDirs(): XdgDirsResult {
 
 function asDisposableRoot(r: XdgDirsResult): DisposableRoot {
   return { root: r.root }
-}
-
-/**
- * Inject Wails stubs pointing at the given backend endpoint.
- *
- * Uses context-level addInitScript so it runs after the harness fixture's
- * page-level init (which carries dummy env-var values). Each navigation
- * re-evaluates all registered scripts in order; the last one to set the
- * stubs wins.
- */
-async function bindEndpoint(page: Page, endpoint: BackendEndpoint): Promise<void> {
-  await page.context().addInitScript(
-    (opts: { p: number; t: string }) => {
-      // window.go is a wails-injected namespace not present in DOM types.
-      const w = window as unknown as { go?: Record<string, unknown> }
-      w.go = {
-        main: {
-          WailsApp: {
-            GetWSPort: () => Promise.resolve(opts.p),
-            GetWSToken: () => Promise.resolve(opts.t),
-            CheckForUpdate: () => Promise.resolve(null),
-            ReportHealthy: () => Promise.resolve(),
-            ApplyUpdate: () => Promise.resolve(),
-          },
-        },
-      }
-    },
-    { p: endpoint.port, t: endpoint.token },
-  )
 }
 
 /**

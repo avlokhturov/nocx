@@ -1,6 +1,6 @@
 import { test as base, expect as baseExpect, type Page } from '@playwright/test'
 
-import { BASE_URL } from './base-url'
+import { BASE_URL, HEADLESS } from './base-url'
 
 export { expect } from '@playwright/test'
 export type { Page } from '@playwright/test'
@@ -148,6 +148,79 @@ export interface DisposableRoot {
 export interface BackendEndpoint {
   port: number
   token: string
+}
+
+/**
+ * Point the page at a backend THIS SPEC started, by supplying the two wails
+ * bindings the frontend reads at startup.
+ *
+ * Legal only on the headless path, and it refuses everywhere else. Under
+ * `wails dev` the HTML wails serves is:
+ *
+ *   <script src="/wails/ipc.js">                  <- classic
+ *   <script src="/wails/runtime.js">              <- classic
+ *   <script type="module" src="/@vite/client">
+ *   <script type="module" src="/src/main.tsx">
+ *
+ * Classic scripts run before any deferred module, so wails installs the REAL
+ * window.go after Playwright's init script and before main.tsx reads it — and
+ * wailsjs/go/main/WailsApp.js resolves window['go'] at CALL time, so by
+ * main.tsx:82 the stub is simply gone. The app then connects to the wails
+ * backend on 34115, the one every other spec shares.
+ *
+ * That is not a flake and not a race worth trying to win; it is the documented
+ * arrangement (wails discussion #4205: `wails dev` serves the app on 34115
+ * "with backend bindings included"). An override there is asking wails not to
+ * be wails. So the refusal is the contract, and it is an exception rather than
+ * a skip because a spec that quietly measures the wrong backend is the failure
+ * this exists to prevent: in CI run 31115207733 seven specs asserted vault
+ * setup, imports and password prompts against a backend they had never
+ * touched, while the devharness each of them started logged its port and never
+ * saw a single client (nocx-w4vy).
+ *
+ * The specs that need this need it because they RESTART their backend
+ * mid-test — vault surviving a restart is the thing under test — and `wails
+ * dev` owns exactly one backend whose lifecycle Playwright cannot touch. The
+ * requirement was never "override the bindings"; it was "run headless".
+ */
+export async function bindEndpoint(page: Page, endpoint: BackendEndpoint): Promise<void> {
+  if (!HEADLESS) {
+    throw new Error(
+      [
+        'bindEndpoint: refusing to override the wails bindings on the `wails dev` path.',
+        '',
+        'This spec starts its own devharness backend, which only works when the',
+        'page is served by vite alone. Under `wails dev` the injected window.go',
+        'is replaced by the real one before the app reads it, and the spec would',
+        'silently drive the shared backend on 34115 instead (nocx-w4vy).',
+        '',
+        'Run it on the headless path:',
+        '',
+        '  e2e/run-in-container.sh e2e/<this>.spec.ts    # or',
+        '  e2e/headless-run.sh e2e/<this>.spec.ts',
+        '',
+        'playwright.config.ts excludes these specs from the `wails dev` run, so',
+        'reaching this error means one was added back without being listed there.',
+      ].join('\n'),
+    )
+  }
+  await page.context().addInitScript(
+    (opts: { p: number; t: string }) => {
+      const w = window as unknown as { go?: Record<string, unknown> }
+      w.go = {
+        main: {
+          WailsApp: {
+            GetWSPort: () => Promise.resolve(opts.p),
+            GetWSToken: () => Promise.resolve(opts.t),
+            CheckForUpdate: () => Promise.resolve(null),
+            ReportHealthy: () => Promise.resolve(),
+            ApplyUpdate: () => Promise.resolve(),
+          },
+        },
+      }
+    },
+    { p: endpoint.port, t: endpoint.token },
+  )
 }
 
 export class VaultBackend {

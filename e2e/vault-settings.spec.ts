@@ -16,7 +16,7 @@ import { test as base, expect, type Page } from '@playwright/test'
 import { mkdtempSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { VaultBackend, type BackendEndpoint, type DisposableRoot } from './harness'
+import { VaultBackend, bindEndpoint, type DisposableRoot } from './harness'
 
 const DEVHARNESS_BIN = process.env.NOCX_VAULT_BIN ?? '/tmp/nocx-devharness'
 
@@ -46,26 +46,6 @@ function createXdgDirs(): XdgDirsResult {
 
 function asDisposableRoot(r: XdgDirsResult): DisposableRoot {
   return { root: r.root }
-}
-
-async function bindEndpoint(page: Page, endpoint: BackendEndpoint): Promise<void> {
-  await page.context().addInitScript(
-    (opts: { p: number; t: string }) => {
-      const w = window as unknown as { go?: Record<string, unknown> }
-      w.go = {
-        main: {
-          WailsApp: {
-            GetWSPort: () => Promise.resolve(opts.p),
-            GetWSToken: () => Promise.resolve(opts.t),
-            CheckForUpdate: () => Promise.resolve(null),
-            ReportHealthy: () => Promise.resolve(),
-            ApplyUpdate: () => Promise.resolve(),
-          },
-        },
-      }
-    },
-    { p: endpoint.port, t: endpoint.token },
-  )
 }
 
 /**

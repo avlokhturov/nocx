@@ -22,13 +22,13 @@
  * One serial test: the second open MUST observe state the first open
  * installed, not an independent fixture.
  */
-import { test as base, expect, type Page } from '@playwright/test'
+import { test as base, expect } from '@playwright/test'
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { VaultBackend, type BackendEndpoint } from './harness'
+import { VaultBackend, bindEndpoint } from './harness'
 
 const DEVHARNESS_BIN = process.env.NOCX_VAULT_BIN ?? '/tmp/nocx-devharness'
 const FIXTURE_PASSWORD = 'e2e-password-42'
@@ -78,7 +78,6 @@ function seedProfile(isolatedHome: string, fixtureAddr: number): string {
   return path
 }
 
-
 /** The e2e-sshd fixture: built once, spawned per run with -password. */
 function startSshd(password: string): Promise<{
   proc: ChildProcess
@@ -117,25 +116,6 @@ function startSshd(password: string): Promise<{
     reject(new Error(`e2e-sshd exited (${code}): ${stdout}`))
   })
   return promise
-}
-/** Inject Wails stubs pointing at the given backend endpoint. */
-async function bindEndpoint(page: Page, endpoint: BackendEndpoint): Promise<void> {
-  await page.context().addInitScript(
-    (opts: { p: number; t: string }) => {
-      ;(window as unknown as { go: unknown }).go = {
-        main: {
-          WailsApp: {
-            GetWSPort: () => Promise.resolve(opts.p),
-            GetWSToken: () => Promise.resolve(opts.t),
-            CheckForUpdate: () => Promise.resolve(null),
-            ReportHealthy: () => Promise.resolve(),
-            ApplyUpdate: () => Promise.resolve(),
-          },
-        },
-      }
-    },
-    { p: endpoint.port, t: endpoint.token },
-  )
 }
 
 const test = base
@@ -176,7 +156,10 @@ test.describe('connection password ask: first open prompts, remembered second op
     })
     await page.locator('#vault-setup-passphrase').fill('master-passphrase-7')
     await page.locator('#vault-setup-confirm').fill('master-passphrase-7')
-    await page.getByRole('dialog').getByRole('button', { name: /Set Up/i }).click()
+    await page
+      .getByRole('dialog')
+      .getByRole('button', { name: /Set Up/i })
+      .click()
     await expect(page.getByRole('dialog').filter({ hasText: 'Recovery Code' })).toBeVisible({
       timeout: 10_000,
     })
@@ -223,9 +206,12 @@ test.describe('connection password ask: first open prompts, remembered second op
     // The remember persisted: the profile now references a stored secret
     // (ADR-0017) — the closing event of the remember.
     await expect
-      .poll(() => JSON.parse(readFileSync(profilesPath, 'utf8')).profiles[0].options?.passwordSecret, {
-        timeout: 10_000,
-      })
+      .poll(
+        () => JSON.parse(readFileSync(profilesPath, 'utf8')).profiles[0].options?.passwordSecret,
+        {
+          timeout: 10_000,
+        },
+      )
       .toBeTruthy()
 
     // ── Phase 4: close the profile tab, SECOND open — silent ────────────
@@ -241,5 +227,5 @@ test.describe('connection password ask: first open prompts, remembered second op
     // nothing asked. Assert both halves.
     await expect(page.locator('.nocx-tab')).toHaveCount(3, { timeout: 20_000 })
     await expect(page.locator(PROMPT)).toHaveCount(0)
-})
+  })
 })
