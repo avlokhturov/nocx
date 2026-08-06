@@ -130,7 +130,7 @@ async function setupVaultAndSavePassword(
   ).toHaveAttribute('aria-checked', 'true', { timeout: 3000 })
 
   // Click "Set Password".
-  await page.getByRole('button', { name: /Set Password/i }).click()
+  await page.locator('.cm-form').getByRole('button', { name: /Set Password/i }).click()
   const pwInput = page.locator('[role="dialog"] input[type="password"]')
   await expect(pwInput).toBeVisible({ timeout: 3000 })
   await pwInput.fill('test-password-123')

@@ -159,8 +159,13 @@ test.describe('Vault — no keyring, full round trip', () => {
         .getByRole('radio', { name: 'Password' }),
     ).toHaveAttribute('aria-checked', 'true', { timeout: 3000 })
 
-    // Click "Set Password" by its accessible name in the visible form.
-    await page.getByRole('button', { name: /Set Password/i }).click()
+    // Click "Set Password" by its accessible name, scoped to the profile form.
+    // `#profile-auth` and `#group-default-auth` are two AuthenticationEditors,
+    // and ed7d14d gave the group-defaults one a password action of its own
+    // (nocx-jb20.6) — so the bare accessible name has matched two buttons ever
+    // since and strict mode rejected it. The comment already said "in the
+    // visible form"; the locator now says it too.
+    await page.locator('.cm-form').getByRole('button', { name: /Set Password/i }).click()
     // The PasswordEditor is a Dialog (the kit Prompt) with a password input.
     const pwInput = page.locator('[role="dialog"] input[type="password"]')
     await expect(pwInput).toBeVisible({ timeout: 3000 })
@@ -310,7 +315,7 @@ test.describe('Vault — recovery code unseal', () => {
       .getByRole('radio', { name: 'Password' })
       .click()
 
-    await page.getByRole('button', { name: /Set Password/i }).click()
+    await page.locator('.cm-form').getByRole('button', { name: /Set Password/i }).click()
     const pwInput = page.locator('[role="dialog"] input[type="password"]')
     await expect(pwInput).toBeVisible({ timeout: 3000 })
     await pwInput.fill('test-password-456')
@@ -472,7 +477,7 @@ test.describe('Vault — with keyring, silent setup', () => {
       // Same locator as cases 1 and 2. `profile-password-action` is a Field's
       // `for=` — a label target, not an element id — so scoping to it matched
       // nothing and this case timed out looking for a button that was on screen.
-      await page.getByRole('button', { name: /Set Password/i }).click()
+      await page.locator('.cm-form').getByRole('button', { name: /Set Password/i }).click()
       const pwInput = page.locator('[role="dialog"] input[type="password"]')
       await expect(pwInput).toBeVisible({ timeout: 3000 })
       await pwInput.fill('keyring-password-789')

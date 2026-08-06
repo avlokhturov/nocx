@@ -49,7 +49,6 @@ export interface AuthMethodEditorProps {
   auth?: AuthMode
   onAuthChange: (value: AuthMode | undefined) => void
   inherit?: boolean
-  passwordAction?: JSX.Element
   publicKeyAction?: JSX.Element
   suffix?: JSX.Element
 }
@@ -78,7 +77,11 @@ export const AuthMethodEditor: Component<AuthMethodEditorProps> = (props) => {
         />
       </Field>
       {props.suffix}
-      <Show when={props.auth === 'password'}>{props.passwordAction}</Show>
+      {/* No password action here. AuthenticationEditor owns it, under the
+          "type a new one / use existing secret" choice — the newer surface,
+          and the only one that can offer a stored row. Drawing it here as
+          well put two identical "Set Password" buttons under two "Password"
+          labels in front of the user (nocx-azxe.6). */}
       <Show when={props.auth === 'publicKey'}>{props.publicKeyAction}</Show>
     </>
   )
@@ -142,7 +145,6 @@ export const AuthenticationEditor: Component<AuthenticationEditorProps> = (props
         auth={props.auth}
         onAuthChange={props.onAuthChange}
         inherit={props.inherit}
-        passwordAction={props.passwordAction}
         publicKeyAction={props.publicKeyAction}
         suffix={props.authSuffix}
       />

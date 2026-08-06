@@ -22,7 +22,15 @@ docker build -q -f "$repo_root/e2e/Dockerfile" -t "$image" "$repo_root/e2e" >/de
 # bind mount: the host's are macOS/arm64 artefacts and the container is Linux,
 # so sharing them produces "cannot execute binary file" at best and a silently
 # wrong build at worst.
+#
+# BOTH node_modules trees, not just the root one. The entry script runs `npm ci`
+# in frontend/ too, and with that directory bind-mounted the container's Linux
+# install landed on the host's — which npm then reported on the Mac as
+# "Cannot find module '@rollup/rollup-darwin-arm64'", because it was holding
+# @rollup/rollup-linux-arm64-gnu instead. `npm test` on the host broke after
+# every container run until this line existed.
 docker volume create nocx-e2e-node >/dev/null
+docker volume create nocx-e2e-fenode >/dev/null
 docker volume create nocx-e2e-gocache >/dev/null
 
 # -t only when there is a terminal to attach: the same script runs from a
@@ -35,6 +43,7 @@ tty_flag=()
 exec docker run --rm -i ${tty_flag[@]+"${tty_flag[@]}"} \
   -v "$repo_root:/work" \
   -v nocx-e2e-node:/work/node_modules \
+  -v nocx-e2e-fenode:/work/frontend/node_modules \
   -v nocx-e2e-gocache:/root/.cache/go-build \
   -e PW_PROJECTS="${PW_PROJECTS:-}" \
   -e PW_WORKERS="${PW_WORKERS:-}" \
