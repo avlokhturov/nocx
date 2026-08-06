@@ -45,7 +45,7 @@ type fakeFS struct {
 
 func newFakeFS(t *testing.T) *fakeFS {
 	t.Helper()
-	return &fakeFS{t: t, root: t.TempDir()}
+	return &fakeFS{t: t, root: tempDir(t)}
 }
 
 func (f *fakeFS) ReadDir(ctx context.Context, p string) ([]os.FileInfo, error) {
@@ -121,7 +121,7 @@ func (f *fakeFS) ReadFile(ctx context.Context, p string, maxBytes int64) ([]byte
 	if err := ctx.Err(); err != nil {
 		return nil, false, err
 	}
-	fh, err := os.Open(p) // #nosec G304 — the fake opens exactly the fixture path the test under it built from t.TempDir()
+	fh, err := os.Open(p) // #nosec G304 — the fake opens exactly the fixture path the test under it built from tempDir(t)
 	if err != nil {
 		return nil, false, err
 	}

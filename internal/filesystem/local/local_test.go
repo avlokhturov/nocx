@@ -16,6 +16,27 @@ import (
 	filesystem "github.com/shady2k/nocx/internal/filesystem"
 )
 
+// tempDir is t.TempDir() with its symlinks already resolved, and every test in
+// this file builds its paths on it.
+//
+// On macOS $TMPDIR lives under /var, which is a symlink to /private/var, so a
+// path joined lexically onto t.TempDir() is not the identity the provider
+// answers with: Canonical is the provider-canonical path (see Listing.Canonical
+// in filesystem.go), and the provider reaches it through filepath.EvalSymlinks.
+// Resolving once at the root keeps both halves of that distinction expressible
+// as plain joins — a canonical expectation and a lexical Entry.Path are still
+// different paths, they just share a resolved base — instead of resolving at
+// each assertion and getting it right in only some of them. Linux has no such
+// symlink, so this is a no-op there and the tests read identically on both.
+func tempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 func mustWrite(t *testing.T, path string, data []byte) {
 	t.Helper()
 	if err := os.WriteFile(path, data, 0o600); err != nil {
@@ -47,10 +68,9 @@ func skipIfRoot(t *testing.T) {
 }
 
 func TestListOrdinaryDirectory(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	mustMkdir(t, filepath.Join(dir, "zdir"))
 	mustMkdir(t, filepath.Join(dir, "Adir"))
-	mustWrite(t, filepath.Join(dir, "b.txt"), nil)
 	mustWrite(t, filepath.Join(dir, "a.txt"), nil)
 	mustWrite(t, filepath.Join(dir, "B.txt"), nil)
 
@@ -60,8 +80,14 @@ func TestListOrdinaryDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Directories first, then files, each by UTF-8 byte order, case-sensitive
-	// ("Adir" < "zdir" because 'A' = 0x41 < 'z' = 0x7a; "B.txt" < "a.txt").
-	want := []string{"Adir", "zdir", "B.txt", "a.txt", "b.txt"}
+	// ("Adir" < "zdir" because 'A' = 0x41 < 'z' = 0x7a; "B.txt" < "a.txt"
+	// because 'B' = 0x42 < 'a' = 0x61 — a case-insensitive sort would order
+	// those two the other way round, which is what makes the pair the whole
+	// assertion). There is deliberately no "b.txt" beside "B.txt": macOS ships
+	// a case-insensitive filesystem, where creating both leaves one file, and
+	// the case-sensitivity of the *ordering* cannot be stated with names that
+	// the filesystem refuses to keep apart.
+	want := []string{"Adir", "zdir", "B.txt", "a.txt"}
 	if len(l.Entries) != len(want) {
 		t.Fatalf("got %d entries, want %d: %v", len(l.Entries), len(want), l.Entries)
 	}
@@ -76,7 +102,7 @@ func TestListOrdinaryDirectory(t *testing.T) {
 	if l.Canonical != dir {
 		t.Errorf("Listing.Canonical = %q, want %q", l.Canonical, dir)
 	}
-	if l.Total != 5 || l.Offset != 0 || l.HasMore {
+	if l.Total != len(want) || l.Offset != 0 || l.HasMore {
 		t.Errorf("page metadata = %+v", l)
 	}
 	if l.Rev == "" {
@@ -92,7 +118,7 @@ func TestListOrdinaryDirectory(t *testing.T) {
 // TestListEmptyDirectoryIsEmptySlice pins "Listing.Entries is never nil": an
 // empty directory marshals as [], never null.
 func TestListEmptyDirectoryIsEmptySlice(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	l, err := New().List(context.Background(), dir, filesystem.Page{Offset: 0, Limit: 10})
 	if err != nil {
 		t.Fatal(err)
@@ -106,7 +132,7 @@ func TestListEmptyDirectoryIsEmptySlice(t *testing.T) {
 }
 
 func TestListNotFound(t *testing.T) {
-	_, err := New().List(context.Background(), filepath.Join(t.TempDir(), "missing"), filesystem.Page{Offset: 0, Limit: 10})
+	_, err := New().List(context.Background(), filepath.Join(tempDir(t), "missing"), filesystem.Page{Offset: 0, Limit: 10})
 	var nf *filesystem.ErrNotFound
 	if !errors.As(err, &nf) {
 		t.Fatalf("err = %v, want ErrNotFound", err)
@@ -118,7 +144,7 @@ func TestListNotFound(t *testing.T) {
 
 func TestListPermissionDenied(t *testing.T) {
 	skipIfRoot(t)
-	parent := t.TempDir()
+	parent := tempDir(t)
 	locked := filepath.Join(parent, "locked")
 	mustMkdir(t, locked)
 	if err := os.Chmod(locked, 0o000); err != nil {
@@ -134,7 +160,7 @@ func TestListPermissionDenied(t *testing.T) {
 }
 
 func TestListNotADirectory(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	f := filepath.Join(dir, "f.txt")
 	mustWrite(t, f, []byte("x"))
 	_, err := New().List(context.Background(), f, filesystem.Page{Offset: 0, Limit: 10})
@@ -145,7 +171,7 @@ func TestListNotADirectory(t *testing.T) {
 }
 
 func TestListBrokenSymlink(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	link := filepath.Join(dir, "broken")
 	mustSymlink(t, filepath.Join(dir, "nowhere"), link)
 	_, err := New().List(context.Background(), link, filesystem.Page{Offset: 0, Limit: 10})
@@ -160,7 +186,7 @@ func TestListBrokenSymlink(t *testing.T) {
 // cannot come from two different directories. Entry paths use the lexical
 // parent the caller asked about.
 func TestListSymlinkToDirResolvesCanonicalAndListsThat(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	real := filepath.Join(dir, "real")
 	mustMkdir(t, real)
 	mustWrite(t, filepath.Join(real, "inner.txt"), []byte("x"))
@@ -186,7 +212,7 @@ func TestListSymlinkToDirResolvesCanonicalAndListsThat(t *testing.T) {
 // identity AND the entries of the new target — never the identity of A with
 // the entries of B (spec §5.1).
 func TestListSymlinkRetargetedBetweenLists(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	a := filepath.Join(dir, "a")
 	b := filepath.Join(dir, "b")
 	mustMkdir(t, a)
@@ -219,7 +245,7 @@ func TestListSymlinkRetargetedBetweenLists(t *testing.T) {
 // TestSymlinkEntryMetadata: LinkTarget and LinkKind are populated for
 // symlinks — regular, dir, and broken (LinkKind other).
 func TestSymlinkEntryMetadata(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	file := filepath.Join(dir, "f.txt")
 	realDir := filepath.Join(dir, "d")
 	mustWrite(t, file, []byte("x"))
@@ -266,7 +292,7 @@ func TestSymlinkEntryMetadata(t *testing.T) {
 // TestListOrderingBeforePagination: pages come out of the same deterministic
 // order, so "show next N" can neither duplicate nor skip a row.
 func TestListOrderingBeforePagination(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	for _, name := range []string{"d", "c", "b", "a", "e"} {
 		mustWrite(t, filepath.Join(dir, name+".txt"), nil)
 	}
@@ -305,7 +331,7 @@ func TestListOrderingBeforePagination(t *testing.T) {
 }
 
 func TestListEntryCap(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	for i := 0; i < 3; i++ {
 		mustWrite(t, filepath.Join(dir, "f"+string(rune('a'+i))), nil)
 	}
@@ -328,7 +354,7 @@ func TestListEntryCap(t *testing.T) {
 }
 
 func TestListTimedOut(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	mustWrite(t, filepath.Join(dir, "f"), nil)
 	// A 1ns cap is exceeded by any real enumeration. Partial results are
 	// discarded — never returned as if complete.
@@ -346,7 +372,7 @@ func TestListTimedOut(t *testing.T) {
 }
 
 func TestListInvalidPage(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	for _, page := range []filesystem.Page{{Offset: -1, Limit: 10}, {Offset: 0, Limit: 0}, {Offset: 0, Limit: -5}} {
 		_, err := New().List(context.Background(), dir, page)
 		var ip *filesystem.ErrInvalidPage
@@ -357,7 +383,7 @@ func TestListInvalidPage(t *testing.T) {
 }
 
 func TestListInvalidPath(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	_, err := New().List(context.Background(), "relative/path", filesystem.Page{Offset: 0, Limit: 10})
 	var ixp *filesystem.ErrInvalidPath
 	if !errors.As(err, &ixp) {
@@ -391,7 +417,7 @@ func TestRootDefaultIsInferredHome(t *testing.T) {
 
 func TestRootWithOverride(t *testing.T) {
 	ctx := context.Background()
-	dir := t.TempDir()
+	dir := tempDir(t)
 	r, err := New(WithRoot(dir)).Root(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -401,7 +427,7 @@ func TestRootWithOverride(t *testing.T) {
 	}
 	// The override is checked at call time: an unusable root falls back,
 	// labelled — never silently served.
-	gone := filepath.Join(t.TempDir(), "gone")
+	gone := filepath.Join(tempDir(t), "gone")
 	r, err = New(WithRoot(gone)).Root(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -410,7 +436,7 @@ func TestRootWithOverride(t *testing.T) {
 		t.Errorf("unusable override not labelled inferred: %+v", r)
 	}
 	// A file is not a usable root.
-	f := filepath.Join(t.TempDir(), "f")
+	f := filepath.Join(tempDir(t), "f")
 	mustWrite(t, f, nil)
 	r, err = New(WithRoot(f)).Root(ctx)
 	if err != nil {
@@ -422,7 +448,7 @@ func TestRootWithOverride(t *testing.T) {
 }
 
 func TestReadOrdinaryFile(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	f := filepath.Join(dir, "f.txt")
 	body := []byte("hello world")
 	mustWrite(t, f, body)
@@ -453,7 +479,7 @@ func TestReadOrdinaryFile(t *testing.T) {
 
 // TestReadRespectsMaxBytes: the parameter can only lower the ceiling.
 func TestReadRespectsMaxBytes(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	big := filepath.Join(dir, "big.txt")
 	mustWrite(t, big, []byte(strings.Repeat("x", 200)))
 	c, err := New().Read(context.Background(), big, 100)
@@ -477,7 +503,7 @@ func TestReadRespectsMaxBytes(t *testing.T) {
 // TestReadDefaultLimitIs2MiB: maxBytes <= 0 means the 2 MiB server ceiling,
 // and the read is truncated at exactly it.
 func TestReadDefaultLimitIs2MiB(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	f := filepath.Join(dir, "big")
 	mustWrite(t, f, []byte(strings.Repeat("a", 2<<20+100)))
 	for _, maxBytes := range []int64{0, -1, 1 << 30} { // default, negative, huge → all 2 MiB
@@ -494,7 +520,7 @@ func TestReadDefaultLimitIs2MiB(t *testing.T) {
 // TestReadHugeFileNeverWhole: the memory guard holds for a file far larger
 // than the limit — the read must not pull the whole file.
 func TestReadHugeFileNeverWhole(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	f := filepath.Join(dir, "huge")
 	if err := os.WriteFile(f, nil, 0o600); err != nil {
 		t.Fatal(err)
@@ -516,7 +542,7 @@ func TestReadHugeFileNeverWhole(t *testing.T) {
 }
 
 func TestReadNotFound(t *testing.T) {
-	_, err := New().Read(context.Background(), filepath.Join(t.TempDir(), "missing"), 0)
+	_, err := New().Read(context.Background(), filepath.Join(tempDir(t), "missing"), 0)
 	var nf *filesystem.ErrNotFound
 	if !errors.As(err, &nf) {
 		t.Fatalf("err = %v, want ErrNotFound", err)
@@ -525,7 +551,7 @@ func TestReadNotFound(t *testing.T) {
 
 func TestReadPermissionDenied(t *testing.T) {
 	skipIfRoot(t)
-	dir := t.TempDir()
+	dir := tempDir(t)
 	f := filepath.Join(dir, "secret")
 	mustWrite(t, f, []byte("x"))
 	if err := os.Chmod(f, 0o000); err != nil {
@@ -542,7 +568,7 @@ func TestReadPermissionDenied(t *testing.T) {
 // TestReadDirectoryRefused pins the openability table enforced from call-time
 // metadata: a directory is not readable, whatever a previous list said.
 func TestReadDirectoryRefused(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	_, err := New().Read(context.Background(), dir, 0)
 	var nr *filesystem.ErrNotRegular
 	if !errors.As(err, &nr) {
@@ -556,7 +582,7 @@ func TestReadDirectoryRefused(t *testing.T) {
 // TestReadFIFORefused: a FIFO blocks forever on open — the only guard is the
 // openability check, and it must fire before the open.
 func TestReadFIFORefused(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	fifo := filepath.Join(dir, "pipe")
 	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
 		t.Fatal(err)
@@ -572,7 +598,7 @@ func TestReadFIFORefused(t *testing.T) {
 }
 
 func TestReadSymlinkResolves(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	target := filepath.Join(dir, "target.txt")
 	mustWrite(t, target, []byte("through the link"))
 	link := filepath.Join(dir, "link.txt")
@@ -590,7 +616,7 @@ func TestReadSymlinkResolves(t *testing.T) {
 }
 
 func TestReadBrokenSymlink(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	link := filepath.Join(dir, "broken")
 	mustSymlink(t, filepath.Join(dir, "gone"), link)
 	_, err := New().Read(context.Background(), link, 0)
@@ -603,7 +629,7 @@ func TestReadBrokenSymlink(t *testing.T) {
 // TestReadRetargetedSymlink: a symlink retargeted between the list and the
 // read is read at its NEW target — call-time metadata, never the listed kind.
 func TestReadRetargetedSymlink(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	a := filepath.Join(dir, "a.txt")
 	b := filepath.Join(dir, "b.txt")
 	mustWrite(t, a, []byte("AAA"))
@@ -641,7 +667,7 @@ func TestReadRetargetedSymlink(t *testing.T) {
 // the path is a FIFO when read. The openability check must be enforced from
 // metadata read at call time, and refuse — never block on the FIFO's open.
 func TestReadSwappedToFIFOAfterList(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	f := filepath.Join(dir, "f.txt")
 	mustWrite(t, f, []byte("innocent"))
 	p := New()
@@ -672,7 +698,7 @@ func TestReadSwappedToFIFOAfterList(t *testing.T) {
 
 // TestReadNULAtByte9000: the NUL heuristic is over the bytes actually read.
 func TestReadNULAtByte9000(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	f := filepath.Join(dir, "mixed")
 	mustWrite(t, f, append([]byte(strings.Repeat("a", 9000)), []byte{0, 'x'}...))
 	c, err := New().Read(context.Background(), f, 0)
@@ -690,7 +716,7 @@ func TestReadNULAtByte9000(t *testing.T) {
 // TestReadNULBeyondWindowIsText: "A binary whose first bytes are NUL-free
 // reads as text; accepted" — the heuristic is over what was read.
 func TestReadNULBeyondWindowIsText(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	f := filepath.Join(dir, "front-text")
 	mustWrite(t, f, append([]byte(strings.Repeat("a", 5000)), 0))
 	c, err := New().Read(context.Background(), f, 100)
@@ -706,7 +732,7 @@ func TestReadNULBeyondWindowIsText(t *testing.T) {
 }
 
 func TestReadInvalidUTF8IsLossy(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	f := filepath.Join(dir, "latin1")
 	mustWrite(t, f, []byte{'a', 0xFF, 0xFE, 'b'})
 	c, err := New().Read(context.Background(), f, 0)
@@ -727,7 +753,7 @@ func TestReadInvalidUTF8IsLossy(t *testing.T) {
 // TestReadLiteralReplacementCharIsNotLossy: a valid U+FFFD in the source is
 // not a replacement — Lossy means sequences were replaced.
 func TestReadLiteralReplacementCharIsNotLossy(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	f := filepath.Join(dir, "replacement")
 	mustWrite(t, f, []byte("\uFFFD literal"))
 	c, err := New().Read(context.Background(), f, 0)
@@ -747,12 +773,12 @@ func TestReadLiteralReplacementCharIsNotLossy(t *testing.T) {
 // between the read and the after-stat, so the growth is deterministic — no
 // timing window.
 func TestReadChangedOnMidReadGrowth(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	f := filepath.Join(dir, "growing.txt")
 	mustWrite(t, f, []byte("hello"))
 	p := New()
 	p.afterRead = func() {
-		// #nosec G304 — the seam appends to the exact fixture under test, a path built from t.TempDir()
+		// #nosec G304 — the seam appends to the exact fixture under test, a path built from tempDir(t)
 		fh, err := os.OpenFile(f, os.O_APPEND|os.O_WRONLY, 0)
 		if err != nil {
 			t.Errorf("append open: %v", err)
@@ -777,7 +803,7 @@ func TestReadChangedOnMidReadGrowth(t *testing.T) {
 
 // TestReadChangedOnMidReadMtime: the mtime leg of the same interval.
 func TestReadChangedOnMidReadMtime(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	f := filepath.Join(dir, "touched.txt")
 	mustWrite(t, f, []byte("steady"))
 	base := time.Now().Add(-time.Hour)
@@ -798,7 +824,7 @@ func TestReadChangedOnMidReadMtime(t *testing.T) {
 // TestReadNotChangedOnSteadyRead is the paired ordinary case: the same file,
 // untouched, reports Changed=false.
 func TestReadNotChangedOnSteadyRead(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	f := filepath.Join(dir, "steady.txt")
 	mustWrite(t, f, []byte("steady"))
 	c, err := New().Read(context.Background(), f, 0)
@@ -811,7 +837,7 @@ func TestReadNotChangedOnSteadyRead(t *testing.T) {
 }
 
 func TestWatchUnavailableUntilTheWatchingWave(t *testing.T) {
-	_, err := New().Watch(context.Background(), t.TempDir())
+	_, err := New().Watch(context.Background(), tempDir(t))
 	var wu *filesystem.ErrWatchUnavailable
 	if !errors.As(err, &wu) {
 		t.Fatalf("err = %v, want ErrWatchUnavailable", err)
@@ -819,7 +845,7 @@ func TestWatchUnavailableUntilTheWatchingWave(t *testing.T) {
 }
 
 func TestCanonicalMethod(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	real := filepath.Join(dir, "real")
 	mustMkdir(t, real)
 	link := filepath.Join(dir, "link")
@@ -847,7 +873,7 @@ func TestProviderClose(t *testing.T) {
 // unchanged directory keeps its Rev, and a symlink retargeted to a file of
 // the same size and kind still moves it.
 func TestRevChangesOnAnyChange(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	mustWrite(t, filepath.Join(dir, "f.txt"), []byte("AAAA"))
 	link := filepath.Join(dir, "link")
 	mustSymlink(t, filepath.Join(dir, "f.txt"), link)
@@ -884,7 +910,7 @@ func TestRevChangesOnAnyChange(t *testing.T) {
 // metadata work is slow; the in-loop deadline check refuses instead of
 // holding the slot for the full enumeration.
 func TestListTimesOutDuringEntryBuilding(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	for i := range 6 {
 		mustWrite(t, filepath.Join(dir, "f"+string(rune('a'+i))), nil)
 	}
@@ -909,7 +935,7 @@ func TestListTimesOutDuringEntryBuilding(t *testing.T) {
 // must not swap LinkTarget and LinkKind for entries that came from the old
 // target — Rev is computed over the mixture, so the mixture is the defect.
 func TestListKeepsCoherenceWhenParentRetargetedMidOperation(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	a := filepath.Join(dir, "a")
 	b := filepath.Join(dir, "b")
 	mustMkdir(t, a)
@@ -948,7 +974,7 @@ func TestListKeepsCoherenceWhenParentRetargetedMidOperation(t *testing.T) {
 // equal entry counts do not cost equal bytes. A few short names pass a small
 // cap; the same count of long names is refused.
 func TestListResponseSizeCeiling(t *testing.T) {
-	short := t.TempDir()
+	short := tempDir(t)
 	for i := range 3 {
 		mustWrite(t, filepath.Join(short, "f"+string(rune('a'+i))), nil)
 	}
@@ -956,7 +982,7 @@ func TestListResponseSizeCeiling(t *testing.T) {
 	if _, err := p.List(context.Background(), short, filesystem.Page{Offset: 0, Limit: 10}); err != nil {
 		t.Fatalf("small listing refused by the size cap: %v", err)
 	}
-	long := t.TempDir()
+	long := tempDir(t)
 	for i := range 5 {
 		mustWrite(t, filepath.Join(long, strings.Repeat("n", 150)+string(rune('a'+i))), nil)
 	}
@@ -979,7 +1005,7 @@ func TestListResponseSizeCeiling(t *testing.T) {
 // Offset wraps negative in the naive lo+Limit arithmetic and panics on the
 // slice bounds. The pagination must saturate.
 func TestListHugePageLimitDoesNotPanic(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	for _, n := range []string{"a", "b", "c"} {
 		mustWrite(t, filepath.Join(dir, n), nil)
 	}
@@ -1014,7 +1040,7 @@ func TestListHugePageLimitDoesNotPanic(t *testing.T) {
 // the open must refer to the same object: the swap lands before the open,
 // and the openability refusal must come back promptly, never a hang.
 func TestReadSwappedToFIFOBetweenCheckAndOpen(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	f := filepath.Join(dir, "f.txt")
 	mustWrite(t, f, []byte("innocent"))
 	p := New()
@@ -1076,7 +1102,7 @@ func TestEntryWithUnreadableMetadataIsDistinguishable(t *testing.T) {
 // genuinely broken link, which has no target at all.
 func TestSymlinkInaccessibleTargetIsNotBroken(t *testing.T) {
 	skipIfRoot(t)
-	dir := t.TempDir()
+	dir := tempDir(t)
 	locked := filepath.Join(dir, "locked")
 	mustMkdir(t, locked)
 	target := filepath.Join(locked, "target")
