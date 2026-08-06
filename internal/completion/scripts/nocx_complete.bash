@@ -66,12 +66,24 @@ n=0
 # ── Path completion ─────────────────────────────────────────────────────
 # Always applicable except for a bare command name.
 if [[ "$WORD" == */* ]] || [[ "$WORD" == .* ]] || [[ "$WORD" == ~* ]] || [[ $is_cmd_pos -eq 0 ]]; then
-  declare -A seen_paths
+  # Dedup across the two compgen passes below: a directory is listed by both
+  # `compgen -f` and `compgen -d`, so without this it would be offered twice.
+  #
+  # A DELIMITED STRING, not an associative array. `declare -A` is bash 4.0+,
+  # and macOS still ships bash 3.2 — where it does not merely misbehave, it
+  # aborts the script: "declare: -A: invalid option", exit 2, and the remote
+  # returns no candidates at all. Completing a path on any stock-bash host was
+  # therefore silently empty (nocx-smy9).
+  #
+  # The membership test quotes "$entry" INSIDE the pattern so a filename
+  # holding *, ? or [ is compared literally rather than glob-matched. The list
+  # is bounded by LIMIT, so the linear scan is bounded too.
+  seen_paths=""
   # compgen -f: files + dirs (always a bash builtin).
   while IFS= read -r entry; do
     [[ -z "$entry" ]] && continue
-    if [[ -z "${seen_paths[$entry]:-}" ]]; then
-      seen_paths[$entry]=1
+    if [[ "$seen_paths" != *"|$entry|"* ]]; then
+      seen_paths="$seen_paths|$entry|"
       abs=""
       if [[ "$entry" == /* ]]; then abs="$entry"
       elif [[ "$entry" == ~* ]]; then abs="${entry/#\~/$HOME}"
@@ -86,8 +98,8 @@ if [[ "$WORD" == */* ]] || [[ "$WORD" == .* ]] || [[ "$WORD" == ~* ]] || [[ $is_
   # compgen -d: directories only.
   while IFS= read -r entry; do
     [[ -z "$entry" ]] && continue
-    if [[ -z "${seen_paths[$entry]:-}" ]]; then
-      seen_paths[$entry]=1
+    if [[ "$seen_paths" != *"|$entry|"* ]]; then
+      seen_paths="$seen_paths|$entry|"
       abs=""
       if [[ "$entry" == /* ]]; then abs="$entry"
       elif [[ "$entry" == ~* ]]; then abs="${entry/#\~/$HOME}"
