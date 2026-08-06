@@ -82,8 +82,12 @@ async function openVaultSettings(page: Page): Promise<void> {
   })
   // Click "Vault" in the left rail using data-section attribute.
   await page.locator('.ui-settings-section-nav-item[data-section="Vault"]').click()
-  // Wait for the vault status section heading.
-  await expect(page.getByText('Status')).toBeVisible({ timeout: 5000 })
+  // Wait for a section the Vault page always has, in every vault state.
+  // This used to wait for a heading called "Status", which the page no longer
+  // has: it now opens with the protection state itself ("Protection is not set
+  // up yet" / the configured equivalent), so the wait never returned and every
+  // test using this helper failed before it had done anything.
+  await expect(page.getByText('Where it is stored')).toBeVisible({ timeout: 5000 })
 }
 
 /**
@@ -130,20 +134,32 @@ async function setupVaultAndSavePassword(
   ).toHaveAttribute('aria-checked', 'true', { timeout: 3000 })
 
   // Click "Set Password".
-  await page.locator('.cm-form').getByRole('button', { name: /Set Password/i }).click()
-  const pwInput = page.locator('[role="dialog"] input[type="password"]')
+  await page
+    .locator('.cm-form')
+    .getByRole('button', { name: /Set Password/i })
+    .click()
+  // The PasswordEditor's own field, by id: closing it opens a setup sheet that
+  // holds two password fields of its own, so a bare
+  // `[role="dialog"] input[type="password"]` stops being unique right here.
+  const pwInput = page.locator('#password-value')
   await expect(pwInput).toBeVisible({ timeout: 3000 })
   await pwInput.fill('test-password-123')
   await page.getByRole('button', { name: 'OK' }).click()
   await expect(pwInput).not.toBeVisible({ timeout: 3000 })
 
-  // Click "Create Connection" to trigger save → vault-uninitialized → SetupDialog.
-  await page.getByRole('button', { name: 'Create Connection', exact: true }).click()
-
   // ── Vault setup dialog ──────────────────────────────────────────────
-  await expect(page.getByRole('dialog').filter({ hasText: 'Set Up Vault' })).toBeVisible({
-    timeout: 10_000,
-  })
+  // It follows the password dialog directly: minting the secret is what needs
+  // the vault. This used to click "Create Connection" first, on the older
+  // arrangement where the save attempted the write and the setup came out of
+  // its failure — which now aims at a button the sheet is already covering.
+  //
+  // Scoped to the prompt overlay, because the connection form is itself a
+  // role="dialog" and the sheet opens inside it: both hasText and has: match
+  // the ancestor as well.
+  const setupDialog = page
+    .locator('.ui-prompt-overlay')
+    .filter({ has: page.locator('#vault-setup-passphrase') })
+  await expect(setupDialog).toBeVisible({ timeout: 10_000 })
 
   await page.locator('#vault-setup-passphrase').fill(passphrase)
   await page.locator('#vault-setup-confirm').fill(passphrase)
@@ -153,18 +169,19 @@ async function setupVaultAndSavePassword(
     .getByRole('button', { name: /Set Up/i })
     .click()
 
-  // Wait for recovery code display.
-  await expect(page.getByRole('dialog').filter({ hasText: 'Recovery Code' })).toBeVisible({
-    timeout: 10_000,
-  })
-
+  // The recovery step, asserted through the code block itself — by now the
+  // setup overlay has closed and the code renders in the form behind it.
   const codeBlock = page.locator('.ui-vault-code-block-wrap .ui-code-block')
+  await expect(codeBlock).toBeVisible({ timeout: 10_000 })
   const code = await codeBlock.textContent()
   expect(code).not.toBeNull()
   expect((code ?? '').length).toBeGreaterThan(10)
 
-  // Click "Done" to close setup and trigger deferred save.
+  // Click "Done" to close setup. The password is minted and bound.
   await page.getByRole('dialog').getByRole('button', { name: 'Done', exact: true }).click()
+
+  // Save the connection.
+  await page.getByRole('button', { name: 'Create Connection', exact: true }).click()
 
   // Verify profile was saved.
   await expect(page.locator('.ui-collection-row').filter({ hasText: profileName })).toBeVisible({
@@ -172,6 +189,21 @@ async function setupVaultAndSavePassword(
   })
 
   return code ?? ''
+}
+
+/**
+ * The unlock sheet, identified by the action every one of its tabs carries.
+ *
+ * Not by its title: it reads "Unlock the vault to open this connection", naming
+ * the reason it is asking, and a filter on "Unlock Vault" matched nothing. Not
+ * by #vault-unlock-passphrase either: that field belongs to ONE tab, so a
+ * "the sheet closed" assertion written against it also passes when the user has
+ * merely switched to Recovery code — true for the wrong reason.
+ */
+function unlockSheet(page: Page) {
+  return page
+    .getByRole('dialog')
+    .filter({ has: page.getByRole('button', { name: 'Unlock', exact: true }) })
 }
 
 const test = base
@@ -257,7 +289,7 @@ test.describe('Vault settings — change passphrase', () => {
     await page.getByRole('button', { name: 'Connect to change-pass-test' }).click()
 
     // Unlock vault dialog should appear.
-    await expect(page.getByRole('dialog').filter({ hasText: 'Unlock Vault' })).toBeVisible({
+    await expect(unlockSheet(page)).toBeVisible({
       timeout: 10_000,
     })
 
@@ -267,7 +299,7 @@ test.describe('Vault settings — change passphrase', () => {
     await page.getByRole('dialog').getByRole('button', { name: 'Unlock', exact: true }).click()
 
     // Dialog closes — vault unsealed.
-    await expect(page.getByRole('dialog').filter({ hasText: 'Unlock Vault' })).not.toBeVisible({
+    await expect(unlockSheet(page)).not.toBeVisible({
       timeout: 10_000,
     })
 
@@ -357,7 +389,7 @@ test.describe('Vault settings — reissue recovery code', () => {
 
     await page.getByRole('button', { name: 'Connect to recovery-test' }).click()
 
-    await expect(page.getByRole('dialog').filter({ hasText: 'Unlock Vault' })).toBeVisible({
+    await expect(unlockSheet(page)).toBeVisible({
       timeout: 10_000,
     })
 
@@ -369,7 +401,7 @@ test.describe('Vault settings — reissue recovery code', () => {
     await page.locator('#vault-unlock-recovery').fill(newCode ?? '')
     await page.getByRole('dialog').getByRole('button', { name: 'Unlock', exact: true }).click()
 
-    await expect(page.getByRole('dialog').filter({ hasText: 'Unlock Vault' })).not.toBeVisible({
+    await expect(unlockSheet(page)).not.toBeVisible({
       timeout: 10_000,
     })
 

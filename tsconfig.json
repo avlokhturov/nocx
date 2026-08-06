@@ -1,0 +1,30 @@
+{
+  // Type-checking for the e2e suite and the Playwright config.
+  //
+  // There was none, and it cost two specs. history-persistence.spec.ts imported
+  // `type XdgDirs` from ./harness after harness.ts had stopped exporting it,
+  // and tabby-import.spec.ts read `.root` off a shape with no such field. Both
+  // are compile errors; both ran anyway, because the test runner strips types
+  // rather than checking them. They then failed at run time inside node:path
+  // with "argument must be of type string. Received undefined" — a message that
+  // names nothing about the specs — and they failed there only once CI started
+  // building the devharness they need, having been dead on their first line for
+  // as long as anyone can measure (nocx-azxe.2).
+  //
+  // noEmit: this exists to be checked, never to build. `npm run typecheck`.
+  "compilerOptions": {
+    "target": "ES2024",
+    "lib": ["ES2024", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "types": ["node"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true
+  },
+  "include": ["e2e/**/*.ts", "playwright.config.ts"]
+}

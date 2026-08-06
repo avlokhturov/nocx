@@ -186,6 +186,20 @@ jobs:
       - run: npm test
       - run: npm run build
 
+      # The e2e suite is TypeScript too, and nothing was checking it. Two specs
+      # were dead on their first line for as long as anyone can measure —
+      # history-persistence imported a type harness.ts had stopped exporting,
+      # tabby-import read a field off a shape that had none — and both are
+      # compile errors that ran anyway, because the runner strips types rather
+      # than checking them. They surfaced as "argument must be of type string.
+      # Received undefined" from inside node:path, and only once CI began
+      # building the devharness those specs need (nocx-azxe.2).
+      - name: Typecheck the e2e suite
+        working-directory: .
+        run: |
+          npm ci
+          npm run typecheck
+
   # e2e — the checks that only exist in a real browser against the real app.
   #
   # Runner decision: macos-latest, for a different reason than the backend job.

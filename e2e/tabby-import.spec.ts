@@ -59,6 +59,13 @@ vault:
 // ── Helpers ───────────────────────────────────────────────────────────────
 
 interface XdgDirsResult {
+  /** The disposable directory the three below live in, and the one the backend
+   *  is actually given. It was missing here: asDisposableRoot read `r.root`
+   *  off a shape that had no such field, so the backend got `{ root:
+   *  undefined }` and the run died in path.join before a single assertion.
+   *  Nothing caught it because the spec could not run at all until CI built
+   *  the devharness it needs (nocx-azxe.2), and nothing type-checks e2e/. */
+  root: string
   data: string
   config: string
   cache: string
@@ -70,6 +77,7 @@ function createXdgDirs(): XdgDirsResult {
   mkdirSync(join(baseDir, 'config'), { recursive: true })
   mkdirSync(join(baseDir, 'cache'), { recursive: true })
   return {
+    root: baseDir,
     data: join(baseDir, 'data'),
     config: join(baseDir, 'config'),
     cache: join(baseDir, 'cache'),
@@ -189,24 +197,21 @@ test.describe('Tabby import preview + execute', () => {
     // Importing secrets needs a vault, and this backend has no OS keychain, so
     // the import correctly stops and asks for one. The preview dialog stays
     // open underneath: the import is deferred, not cancelled.
-    await expect(page.getByRole('dialog').filter({ hasText: 'Set Up Vault' })).toBeVisible({
-      timeout: 10_000,
-    })
+    // Scoped by what each sheet CONTAINS, not by its text. The preview dialog
+    // stays open underneath, and it is a role="dialog" too — so a text filter
+    // matches the ancestor as well as the sheet, which is the strict-mode
+    // violation this used to fail with. A descendant's text is the ancestor's.
+    const setupSheet = page
+      .locator('.ui-prompt-overlay')
+      .filter({ has: page.locator('#vault-setup-passphrase') })
+    await expect(setupSheet).toBeVisible({ timeout: 10_000 })
     await page.locator('#vault-setup-passphrase').fill('tabby-import-passphrase')
     await page.locator('#vault-setup-confirm').fill('tabby-import-passphrase')
-    await page
-      .getByRole('dialog')
-      .filter({ hasText: 'Set Up Vault' })
-      .getByRole('button', { name: /Set Up/i })
-      .click()
-    await expect(page.getByRole('dialog').filter({ hasText: 'Recovery Code' })).toBeVisible({
-      timeout: 10_000,
-    })
-    await page
-      .getByRole('dialog')
-      .filter({ hasText: 'Recovery Code' })
-      .getByRole('button', { name: 'Done', exact: true })
-      .click()
+    await setupSheet.getByRole('button', { name: /Set Up/i }).click()
+
+    const recoveryCode = page.locator('.ui-vault-code-block-wrap .ui-code-block')
+    await expect(recoveryCode).toBeVisible({ timeout: 10_000 })
+    await page.getByRole('button', { name: 'Done', exact: true }).click()
 
     // Setup done — the deferred import runs and the preview closes.
     await expect(

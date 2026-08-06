@@ -381,8 +381,8 @@ test.describe('3. Theme with dialog open', () => {
 
     // Clean up: close the dialog
     await page.evaluate(() => {
-      const dialog = document.querySelector('dialog.nocx-dialog')
-      if (dialog) dialog.close()
+      const dialog = document.querySelector<HTMLDialogElement>('dialog.nocx-dialog')
+      dialog?.close()
     })
 
     // Switch theme back

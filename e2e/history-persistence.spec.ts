@@ -34,7 +34,7 @@ import { test as base, expect, type Page } from '@playwright/test'
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { VaultBackend, type BackendEndpoint, type XdgDirs } from './harness'
+import { VaultBackend, type BackendEndpoint, type DisposableRoot } from './harness'
 
 const DEVHARNESS_BIN = process.env.NOCX_VAULT_BIN ?? '/tmp/nocx-devharness'
 
@@ -68,8 +68,18 @@ function createXdgDirs(): XdgDirsResult {
   }
 }
 
-function asXdgDirs(r: XdgDirsResult): XdgDirs {
-  return { data: r.data, config: r.config, cache: r.cache }
+// The backend is given the disposable ROOT, and derives the rest from it.
+//
+// This used to hand over { data, config, cache } as an `XdgDirs`, a type
+// harness.ts no longer has: the boundary moved from three XDG directories to
+// one disposable home, because XDG_CONFIG_HOME outranks $HOME and redirecting
+// only the former let a backend walk straight back out (nocx-ti8w). The spec
+// was never updated, `this.disposable.root` was undefined, and the run died in
+// path.resolve — invisible until CI built the devharness these specs need
+// (nocx-azxe.2), and invisible to the type checker because nothing type-checks
+// e2e/.
+function asDisposableRoot(r: XdgDirsResult): DisposableRoot {
+  return { root: r.root }
 }
 
 /** Inject Wails stubs pointing at the given backend endpoint (the same
@@ -120,7 +130,7 @@ test.describe('history: a command survives a restart and recall answers from the
     )
     // `true` = no Secret Service for this backend, regardless of the
     // session the suite runs in — the derived-key branch is the point.
-    backend = new VaultBackend(DEVHARNESS_BIN, asXdgDirs(xdg), true)
+    backend = new VaultBackend(DEVHARNESS_BIN, asDisposableRoot(xdg), true)
   })
 
   test.afterAll(() => {

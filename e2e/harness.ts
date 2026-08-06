@@ -58,7 +58,7 @@ async function injectWailsShim(page: Page): Promise<void> {
   )
 }
 
-export const test = base.extend<Record<string, never>, { appReady: void }>({
+export const test = base.extend<object, { appReady: void }>({
   // The app answers on its port before it can serve a session, and the suite
   // used to treat those as the same moment.
   //

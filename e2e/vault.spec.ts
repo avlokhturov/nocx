@@ -82,6 +82,21 @@ async function bindEndpoint(page: Page, endpoint: BackendEndpoint): Promise<void
   )
 }
 
+/**
+ * The unlock sheet, identified by the action every one of its tabs carries.
+ *
+ * Not by its title: it reads "Unlock the vault to open this connection", naming
+ * the reason it is asking, and a filter on "Unlock Vault" matched nothing. Not
+ * by #vault-unlock-passphrase either: that field belongs to ONE tab, so a
+ * "the sheet closed" assertion written against it also passes when the user has
+ * merely switched to Recovery code — true for the wrong reason.
+ */
+function unlockSheet(page: Page) {
+  return page
+    .getByRole('dialog')
+    .filter({ has: page.getByRole('button', { name: 'Unlock', exact: true }) })
+}
+
 const test = base
 
 // ── Case 1: No keyring — full round trip ──────────────────────────────────
@@ -269,9 +284,7 @@ test.describe('Vault — no keyring, full round trip', () => {
     // "Unlock the vault to open this connection" — it names the reason it is
     // asking, which is the point of it — so a filter on the words "Unlock
     // Vault" matched nothing and the test blamed the dialog for not appearing.
-    const unlockDialog = page
-      .getByRole('dialog')
-      .filter({ has: page.locator('#vault-unlock-passphrase') })
+    const unlockDialog = unlockSheet(page)
     await expect(unlockDialog).toBeVisible({ timeout: 10_000 })
 
     // ── Phase 5: unlock with passphrase ─────────────────────────────────
@@ -423,9 +436,7 @@ test.describe('Vault — recovery code unseal', () => {
     // "Unlock the vault to open this connection" — it names the reason it is
     // asking, which is the point of it — so a filter on the words "Unlock
     // Vault" matched nothing and the test blamed the dialog for not appearing.
-    const unlockDialog = page
-      .getByRole('dialog')
-      .filter({ has: page.locator('#vault-unlock-passphrase') })
+    const unlockDialog = unlockSheet(page)
     await expect(unlockDialog).toBeVisible({ timeout: 10_000 })
 
     // ── Phase 3: unlock with recovery code ──────────────────────────────
