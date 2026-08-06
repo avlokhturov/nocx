@@ -131,6 +131,7 @@ func TestPasswordRequest_SubmittedWithRemember(t *testing.T) {
 
 	conn := connectWS(t, ws)
 	defer conn.Close() //nolint:errcheck
+	waitForConns(t, ws, 1)
 
 	done := make(chan error, 1)
 	var answer ssh.PasswordAnswer
@@ -191,6 +192,7 @@ func TestPasswordRequest_SubmittedUseOnce(t *testing.T) {
 
 	conn := connectWS(t, ws)
 	defer conn.Close() //nolint:errcheck
+	waitForConns(t, ws, 1)
 
 	done := make(chan error, 1)
 	var answer ssh.PasswordAnswer
@@ -250,6 +252,7 @@ func TestPasswordRequest_Cancelled(t *testing.T) {
 
 	conn := connectWS(t, ws)
 	defer conn.Close() //nolint:errcheck
+	waitForConns(t, ws, 1)
 
 	done := make(chan error, 1)
 	go func() {
@@ -302,6 +305,7 @@ func TestPasswordRequest_ContextCancelled(t *testing.T) {
 
 	conn := connectWS(t, ws)
 	defer conn.Close() //nolint:errcheck
+	waitForConns(t, ws, 1)
 
 	cancelCtx, cancel := context.WithCancel(ctx)
 	done := make(chan error, 1)

@@ -148,6 +148,48 @@ func TestNewOSPaths_macOS(t *testing.T) {
 		}
 	})
 
+	t.Run("respects XDG overrides for test isolation", func(t *testing.T) {
+		t.Setenv("HOME", home)
+		t.Setenv("XDG_CONFIG_HOME", "/xdg/config")
+		t.Setenv("XDG_DATA_HOME", "/xdg/data")
+		t.Setenv("XDG_CACHE_HOME", "/xdg/cache")
+
+		p, err := newOSPaths("nocx")
+		if err != nil {
+			t.Fatalf("newOSPaths() error: %v", err)
+		}
+
+		if p.ConfigDir() != filepath.Join("/xdg/config", "nocx") {
+			t.Errorf("ConfigDir: got %q, want %q", p.ConfigDir(), filepath.Join("/xdg/config", "nocx"))
+		}
+		if p.DataDir() != filepath.Join("/xdg/data", "nocx") {
+			t.Errorf("DataDir: got %q, want %q", p.DataDir(), filepath.Join("/xdg/data", "nocx"))
+		}
+		if p.CacheDir() != filepath.Join("/xdg/cache", "nocx") {
+			t.Errorf("CacheDir: got %q, want %q", p.CacheDir(), filepath.Join("/xdg/cache", "nocx"))
+		}
+	})
+
+	t.Run("XDG_DATA_HOME splits config and data", func(t *testing.T) {
+		t.Setenv("HOME", home)
+		t.Setenv("XDG_CONFIG_HOME", "")
+		t.Setenv("XDG_DATA_HOME", "/xdg/data")
+		t.Setenv("XDG_CACHE_HOME", "")
+
+		p, err := newOSPaths("nocx")
+		if err != nil {
+			t.Fatalf("newOSPaths() error: %v", err)
+		}
+
+		wantCD := filepath.Join(home, "Library", "Application Support", "nocx")
+		if p.ConfigDir() != wantCD {
+			t.Errorf("ConfigDir: got %q, want %q", p.ConfigDir(), wantCD)
+		}
+		if p.DataDir() != filepath.Join("/xdg/data", "nocx") {
+			t.Errorf("DataDir: got %q, want %q", p.DataDir(), filepath.Join("/xdg/data", "nocx"))
+		}
+	})
+
 	t.Run("cache is under Caches", func(t *testing.T) {
 		t.Setenv("HOME", home)
 		p, err := newOSPaths("nocx")

@@ -93,13 +93,28 @@ func newDarwinPaths(appName string) (Paths, error) {
 		return nil, fmt.Errorf("storage: resolve home dir: %w", err)
 	}
 
-	appSupport := filepath.Join(home, "Library", "Application Support", appName)
-	caches := filepath.Join(home, "Library", "Caches", appName)
+	// On macOS the canonical locations are ~/Library/Application Support and
+	// ~/Library/Caches. XDG_* env vars are respected when set so that tests
+	// can isolate app dirs into t.TempDir() — the same env vars the Linux
+	// path already honours. In production on macOS nobody sets XDG_* vars,
+	// so the canonical locations are used (nocx-8ax9).
+	configDir := filepath.Join(home, "Library", "Application Support", appName)
+	if dir := os.Getenv("XDG_CONFIG_HOME"); dir != "" {
+		configDir = filepath.Join(dir, appName)
+	}
+	dataDir := configDir
+	if dir := os.Getenv("XDG_DATA_HOME"); dir != "" {
+		dataDir = filepath.Join(dir, appName)
+	}
+	cacheDir := filepath.Join(home, "Library", "Caches", appName)
+	if dir := os.Getenv("XDG_CACHE_HOME"); dir != "" {
+		cacheDir = filepath.Join(dir, appName)
+	}
 
 	return &osPaths{
-		configDir: appSupport,
-		dataDir:   appSupport,
-		cacheDir:  caches,
+		configDir: configDir,
+		dataDir:   dataDir,
+		cacheDir:  cacheDir,
 	}, nil
 }
 

@@ -66,34 +66,38 @@ n=0
 # ── Path completion ─────────────────────────────────────────────────────
 # Always applicable except for a bare command name.
 if [[ "$WORD" == */* ]] || [[ "$WORD" == .* ]] || [[ "$WORD" == ~* ]] || [[ $is_cmd_pos -eq 0 ]]; then
-  declare -A seen_paths
+  # Dedup compgen -f and -d entries. bash 3.2 (macOS default) has no
+  # associative arrays, so a plain array with a linear scan is used.
+  # The LIMIT cap keeps the scan bounded (typically < 50 entries).
+  seen_paths=()
+  _nocx_seen() {
+    local i
+    for i in "${seen_paths[@]}"; do [[ "$i" == "$1" ]] && return 0; done
+    return 1
+  }
+  _nocx_add_path() {
+    local entry="$1" isd="$2" abs=""
+    if [[ "$entry" == /* ]]; then abs="$entry"
+    elif [[ "$entry" == ~* ]]; then abs="${entry/#\~/$HOME}"
+    else abs="$PWD/$entry"; fi
+    printf '%s\t%s\t%s\t%d\n' "path" "$entry" "$abs" "$isd"
+    seen_paths+=("$entry")
+    n=$((n+1))
+  }
   # compgen -f: files + dirs (always a bash builtin).
   while IFS= read -r entry; do
     [[ -z "$entry" ]] && continue
-    if [[ -z "${seen_paths[$entry]:-}" ]]; then
-      seen_paths[$entry]=1
-      abs=""
-      if [[ "$entry" == /* ]]; then abs="$entry"
-      elif [[ "$entry" == ~* ]]; then abs="${entry/#\~/$HOME}"
-      else abs="$PWD/$entry"; fi
-      isd=0
-      if [[ -d "$entry" ]]; then isd=1; fi
-      printf '%s\t%s\t%s\t%d\n' "path" "$entry" "$abs" "$isd"
-      n=$((n+1))
+    if ! _nocx_seen "$entry"; then
+      isd=0; [[ -d "$entry" ]] && isd=1
+      _nocx_add_path "$entry" "$isd"
       if [[ $n -ge $LIMIT ]]; then break 2; fi
     fi
   done < <(compgen -f -- "$WORD" 2>/dev/null || true)
   # compgen -d: directories only.
   while IFS= read -r entry; do
     [[ -z "$entry" ]] && continue
-    if [[ -z "${seen_paths[$entry]:-}" ]]; then
-      seen_paths[$entry]=1
-      abs=""
-      if [[ "$entry" == /* ]]; then abs="$entry"
-      elif [[ "$entry" == ~* ]]; then abs="${entry/#\~/$HOME}"
-      else abs="$PWD/$entry"; fi
-      printf '%s\t%s\t%s\t%d\n' "path" "$entry" "$abs" 1
-      n=$((n+1))
+    if ! _nocx_seen "$entry"; then
+      _nocx_add_path "$entry" 1
       if [[ $n -ge $LIMIT ]]; then break 2; fi
     fi
   done < <(compgen -d -- "$WORD" 2>/dev/null || true)
@@ -120,13 +124,15 @@ if [[ $is_cmd_pos -eq 0 ]] && [[ -n "$CMD" ]] && type -t _completion_loader &>/d
     COMP_KEY=9
     # Build COMP_WORDS from LINE.
     COMP_WORDS=()
-    local w="$LINE"
-    while [[ -n "$w" ]]; do
-      w="${w#"${w%%[! ]*}"}"
-      if [[ -z "$w" ]]; then break; fi
-      local ew="${w%% *}"
-      COMP_WORDS+=("$ew")
-      w="${w#"$ew"}"
+    # "local" outside a function is an error in bash 3.2 (macOS default);
+    # plain assignment is safe — the script runs in a subshell.
+    _nocx_w="$LINE"
+    while [[ -n "$_nocx_w" ]]; do
+      _nocx_w="${_nocx_w#"${_nocx_w%%[! ]*}"}"
+      if [[ -z "$_nocx_w" ]]; then break; fi
+      _nocx_ew="${_nocx_w%% *}"
+      COMP_WORDS+=("$_nocx_ew")
+      _nocx_w="${_nocx_w#"$_nocx_ew"}"
     done
     COMP_CWORD=$((${#COMP_WORDS[@]} - 1))
     "$comp_func" "$CMD" "$WORD" "${WORD: -1}" 2>/dev/null || true

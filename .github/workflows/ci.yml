@@ -77,7 +77,8 @@ jobs:
       # they must prove is absent (nocx-gd84). macOS ships zsh but not dash;
       # TestBashLauncher_RunsUnderDash and TestPosixLauncher_EmitsMarkersFromPS1
       # both need dash, so a job that ran the suite as-is would fail them.
-      # ubuntu-latest ships both shells; this step is macOS-only.
+      # The backend-linux job installs both dash and zsh separately (ubuntu
+      # ships neither by default); this step is macOS-only.
       - name: Install dash (shell integration tests)
         run: brew install dash
 
@@ -110,6 +111,15 @@ jobs:
         with-keyring: [true, false]
     steps:
       - uses: actions/checkout@v7
+
+      # The shellintegration launcher tests fail, not skip, when the shell
+      # they must prove is absent (nocx-gd84). ubuntu-latest ships dash but
+      # NOT zsh, so the five zsh launcher tests (TestZshLauncher_*,
+      # TestLaunchCarrier_*Zsh*) die via t.Fatalf in 0.00s. The pre-commit
+      # test container (.githooks/images/go-tests/Dockerfile) already
+      # installs both; this mirrors it for CI. nocx-bbkh.
+      - name: Install dash and zsh (shell integration tests)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq dash zsh
 
       - uses: actions/setup-go@v7
         with:

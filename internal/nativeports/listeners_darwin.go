@@ -77,9 +77,11 @@ func listeners(ctx context.Context) ([]discovery.Listener, error) {
 }
 
 // parseLsofOutput parses `lsof -nP -iTCP -sTCP:LISTEN`: columns COMMAND PID
-// USER FD TYPE DEVICE SIZE/OFF NODE NAME, where NAME ends in " (LISTEN)"
-// and carries the bind address ("*:22", "127.0.0.1:631", "[::1]:631").
-// Rows lsof prints always carry process evidence.
+// USER FD TYPE DEVICE SIZE/OFF NODE NAME, where NAME is "TCP <addr> (LISTEN)"
+// — the protocol prefix and state suffix are part of the NAME column, so
+// taking the last field yields "(LISTEN)", not the address. Mirrors
+// internal/discovery/parse.go's parseLsof exactly so the addresses land on
+// the wire in the same shapes the remote ladder's lsof rung produces.
 func parseLsofOutput(data []byte) []discovery.Listener {
 	var out []discovery.Listener
 	for i, line := range strings.Split(string(data), "\n") {
@@ -90,12 +92,20 @@ func parseLsofOutput(data []byte) []discovery.Listener {
 		if len(fields) < 9 {
 			continue
 		}
-		pid, err := strconv.Atoi(fields[1])
-		if err != nil {
+		// NAME is everything from field 8 onward, joined: "TCP *:22 (LISTEN)".
+		name := strings.Join(fields[8:], " ")
+		addr, found := strings.CutSuffix(name, " (LISTEN)")
+		if !found {
 			continue
 		}
-		host, port, ok := splitHostPort(fields[len(fields)-1])
+		// Strip the "TCP " protocol prefix to get the bare address.
+		addr = strings.TrimPrefix(addr, "TCP ")
+		host, port, ok := splitHostPort(addr)
 		if !ok {
+			continue
+		}
+		pid, err := strconv.Atoi(fields[1])
+		if err != nil {
 			continue
 		}
 		out = append(out, discovery.Listener{

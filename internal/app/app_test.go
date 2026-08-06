@@ -11,7 +11,22 @@ import (
 	"github.com/shady2k/nocx/internal/settings"
 )
 
+// isolateAppDirs sets XDG_* env vars to temp dirs so New() resolves
+// config, data and cache into the test's own sandbox, not the real
+// profile. On macOS, newDarwinPaths honours XDG_* when set (nocx-8ax9);
+// without this, tests that call New() without WithKeystoreProbe would
+// mint a real content key into the macOS Keychain and create content.db
+// in ~/Library/Application Support, corrupting subsequent acceptance
+// tests that expect a clean profile.
+func isolateAppDirs(t *testing.T) {
+	t.Helper()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+}
+
 func TestNew(t *testing.T) {
+	isolateAppDirs(t)
 	a, err := New(WithLogFilePath(filepath.Join(t.TempDir(), "nocx.log")))
 	if err != nil {
 		t.Fatalf("New() returned error: %v", err)
@@ -22,6 +37,7 @@ func TestNew(t *testing.T) {
 }
 
 func TestNew_AllModulesInjected(t *testing.T) {
+	isolateAppDirs(t)
 	a, err := New(WithLogFilePath(filepath.Join(t.TempDir(), "nocx.log")))
 	if err != nil {
 		t.Fatalf("New() returned error: %v", err)
@@ -45,6 +61,7 @@ func TestNew_AllModulesInjected(t *testing.T) {
 }
 
 func TestStartShutdown(t *testing.T) {
+	isolateAppDirs(t)
 	a, err := New(WithLogFilePath(filepath.Join(t.TempDir(), "nocx.log")))
 	if err != nil {
 		t.Fatalf("New() returned error: %v", err)
@@ -62,6 +79,7 @@ func TestStartShutdown(t *testing.T) {
 }
 
 func TestWSPortBeforeStart(t *testing.T) {
+	isolateAppDirs(t)
 	a, err := New(WithLogFilePath(filepath.Join(t.TempDir(), "nocx.log")))
 	if err != nil {
 		t.Fatalf("New() returned error: %v", err)
@@ -182,6 +200,7 @@ func (f *appFakeDoc) Delete(name string) error {
 // pinned path is reported by LogFilePath, the file exists, and its first
 // line names the path — a reader who finds the file learns where it is.
 func TestNew_LogFile(t *testing.T) {
+	isolateAppDirs(t)
 	path := filepath.Join(t.TempDir(), "nocx.log")
 	a, err := New(WithLogFilePath(path))
 	if err != nil {
@@ -205,8 +224,8 @@ func TestNew_LogFile(t *testing.T) {
 }
 
 // TestNew_LogFileDisabled: an empty pinned path disables file logging and
-// LogFilePath reports it — nothing is written anywhere unexpected.
 func TestNew_LogFileDisabled(t *testing.T) {
+	isolateAppDirs(t)
 	a, err := New(WithLogFilePath(""))
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -220,8 +239,8 @@ func TestNew_LogFileDisabled(t *testing.T) {
 
 // TestNew_LogFileStderrOnlyOnFailure: when the pinned directory cannot be
 // created, the app still starts — fail-open, stderr only — and says the
-// path is unavailable.
 func TestNew_LogFileUnavailableStartsAnyway(t *testing.T) {
+	isolateAppDirs(t)
 	// A path whose parent is a regular file cannot be a directory.
 	blocker := filepath.Join(t.TempDir(), "not-a-dir")
 	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {

@@ -3,6 +3,7 @@ package shellintegration
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -85,11 +86,24 @@ exit
 			if len(osc7) != 5 {
 				t.Fatalf("OSC 7 payload count = %d, want 5; output:\n%s", len(osc7), out)
 			}
-			if osc7[0] != "file://testhost"+urlEncode(dir1) {
-				t.Errorf("first OSC 7 = %q, want file://testhost%s (absolute cwd at startup)", osc7[0], urlEncode(dir1))
+			// The shell's getcwd() resolves symlinks: on macOS, t.TempDir()
+			// returns a path under /var/folders/... (logical), but the shell
+			// reports the physical /private/var/folders/... path. Compare
+			// against the resolved path so the assertion holds on both
+			// platforms.
+			physDir1, err := filepath.EvalSymlinks(dir1)
+			if err != nil {
+				t.Fatalf("EvalSymlinks(%s): %v", dir1, err)
 			}
-			if osc7[len(osc7)-1] != "file://testhost"+urlEncode(dir2) {
-				t.Errorf("last OSC 7 = %q, want file://testhost%s (OSC 7 must follow the cd)", osc7[len(osc7)-1], urlEncode(dir2))
+			physDir2, err := filepath.EvalSymlinks(dir2)
+			if err != nil {
+				t.Fatalf("EvalSymlinks(%s): %v", dir2, err)
+			}
+			if osc7[0] != "file://testhost"+urlEncode(physDir1) {
+				t.Errorf("first OSC 7 = %q, want file://testhost%s (absolute cwd at startup, symlinks resolved)", osc7[0], urlEncode(physDir1))
+			}
+			if osc7[len(osc7)-1] != "file://testhost"+urlEncode(physDir2) {
+				t.Errorf("last OSC 7 = %q, want file://testhost%s (OSC 7 must follow the cd, symlinks resolved)", osc7[len(osc7)-1], urlEncode(physDir2))
 			}
 			for i, p := range osc7 {
 				if !strings.HasPrefix(p, "file://testhost/") {
