@@ -1,0 +1,359 @@
+{
+  "//": [
+    "DO NOT EDIT MANUALLY. Regenerate with `node .githooks/update-deadcode-baseline.mjs`.",
+    "",
+    "Every entry is a Go function `deadcode ./...` reports unreachable from main()",
+    "on this machine. It may only shrink. A function deadcode reports that is not",
+    "listed here is a new violation and fails the pre-commit hook.",
+    "",
+    "Machine-specific in one respect: build-tag-gated files (e.g.",
+    "secretservice_linux.go) only appear on the OS they build for, so an entry",
+    "that vanishes on another platform is a free shrink, not a violation."
+  ],
+  "violations": [
+    {
+      "file": "internal/app/app.go",
+      "func": "WithKeystoreProbe"
+    },
+    {
+      "file": "internal/app/app.go",
+      "func": "WithLogFilePath"
+    },
+    {
+      "file": "internal/completion/ssh.go",
+      "func": "NewSSHWithRand"
+    },
+    {
+      "file": "internal/export/import.go",
+      "func": "ImportConfiguration"
+    },
+    {
+      "file": "internal/importer/tabby.go",
+      "func": "DedupKey"
+    },
+    {
+      "file": "internal/importer/tabby.go",
+      "func": "dedupKeySet"
+    },
+    {
+      "file": "internal/importer/tabby.go",
+      "func": "ImportGroups"
+    },
+    {
+      "file": "internal/importer/tabby.go",
+      "func": "ImportProfiles"
+    },
+    {
+      "file": "internal/importer/tabby.go",
+      "func": "ImportTabbyWithService"
+    },
+    {
+      "file": "internal/profile/profile.go",
+      "func": "BuildGroupTree"
+    },
+    {
+      "file": "internal/profile/profile.go",
+      "func": "expandFromMap"
+    },
+    {
+      "file": "internal/profile/profile.go",
+      "func": "isNamespacedID"
+    },
+    {
+      "file": "internal/profile/profile.go",
+      "func": "parseNamespacedID"
+    },
+    {
+      "file": "internal/profile/profile.go",
+      "func": "Ptr"
+    },
+    {
+      "file": "internal/profile/profile.go",
+      "func": "ResolveGroupPath"
+    },
+    {
+      "file": "internal/profile/profile.go",
+      "func": "StoredOptionsFromDense"
+    },
+    {
+      "file": "internal/profile/store.go",
+      "func": "NewJSONStore"
+    },
+    {
+      "file": "internal/pty/pty.go",
+      "func": "NewStub"
+    },
+    {
+      "file": "internal/pty/pty.go",
+      "func": "Stub.Close"
+    },
+    {
+      "file": "internal/pty/pty.go",
+      "func": "Stub.Done"
+    },
+    {
+      "file": "internal/pty/pty.go",
+      "func": "Stub.Read"
+    },
+    {
+      "file": "internal/pty/pty.go",
+      "func": "Stub.Resize"
+    },
+    {
+      "file": "internal/pty/pty.go",
+      "func": "Stub.Write"
+    },
+    {
+      "file": "internal/secrets/secrets.go",
+      "func": "Mask"
+    },
+    {
+      "file": "internal/settings/settings.go",
+      "func": "Descriptors"
+    },
+    {
+      "file": "internal/settings/settings.go",
+      "func": "MustRegisterSecret"
+    },
+    {
+      "file": "internal/settings/settings.go",
+      "func": "MustRegisterString"
+    },
+    {
+      "file": "internal/shellintegration/publish_fs.go",
+      "func": "NewOSFS"
+    },
+    {
+      "file": "internal/shellintegration/publish_fs.go",
+      "func": "osFS.Create"
+    },
+    {
+      "file": "internal/shellintegration/publish_fs.go",
+      "func": "osFS.Lstat"
+    },
+    {
+      "file": "internal/shellintegration/publish_fs.go",
+      "func": "osFS.Mkdir"
+    },
+    {
+      "file": "internal/shellintegration/publish_fs.go",
+      "func": "osFS.ReadDir"
+    },
+    {
+      "file": "internal/shellintegration/publish_fs.go",
+      "func": "osFS.ReadFile"
+    },
+    {
+      "file": "internal/shellintegration/publish_fs.go",
+      "func": "osFS.Remove"
+    },
+    {
+      "file": "internal/shellintegration/publish_fs.go",
+      "func": "osFS.Rename"
+    },
+    {
+      "file": "internal/shellintegration/publish_fs.go",
+      "func": "osFS.SyncDir"
+    },
+    {
+      "file": "internal/shellintegration/publisher.go",
+      "func": "Publisher.Verify"
+    },
+    {
+      "file": "internal/shellintegration/publisher.go",
+      "func": "Publisher.verifyFile"
+    },
+    {
+      "file": "internal/ssh/ssh_real.go",
+      "func": "WithKnownHostsFile"
+    },
+    {
+      "file": "internal/ssh/ssh.go",
+      "func": "NewStub"
+    },
+    {
+      "file": "internal/ssh/ssh.go",
+      "func": "NewStubChannel"
+    },
+    {
+      "file": "internal/ssh/ssh.go",
+      "func": "Stub.Close"
+    },
+    {
+      "file": "internal/ssh/ssh.go",
+      "func": "Stub.Connect"
+    },
+    {
+      "file": "internal/ssh/ssh.go",
+      "func": "StubChannel.Close"
+    },
+    {
+      "file": "internal/ssh/ssh.go",
+      "func": "StubChannel.Done"
+    },
+    {
+      "file": "internal/ssh/ssh.go",
+      "func": "StubChannel.onceClose"
+    },
+    {
+      "file": "internal/ssh/ssh.go",
+      "func": "StubChannel.Read"
+    },
+    {
+      "file": "internal/ssh/ssh.go",
+      "func": "StubChannel.Resize"
+    },
+    {
+      "file": "internal/ssh/ssh.go",
+      "func": "StubChannel.ShellIntegrationReason"
+    },
+    {
+      "file": "internal/ssh/ssh.go",
+      "func": "StubChannel.Write"
+    },
+    {
+      "file": "internal/ssh/ssh.go",
+      "func": "WithAgentForward"
+    },
+    {
+      "file": "internal/ssh/ssh.go",
+      "func": "WithAuthMethods"
+    },
+    {
+      "file": "internal/ssh/ssh.go",
+      "func": "WithKeepalive"
+    },
+    {
+      "file": "internal/ssh/ssh.go",
+      "func": "WithTimeout"
+    },
+    {
+      "file": "internal/transport/transport.go",
+      "func": "NewStub"
+    },
+    {
+      "file": "internal/transport/transport.go",
+      "func": "Stub.Start"
+    },
+    {
+      "file": "internal/transport/transport.go",
+      "func": "Stub.Stop"
+    },
+    {
+      "file": "internal/transport/ws_auth.go",
+      "func": "PinnedOriginPolicy.Allow"
+    },
+    {
+      "file": "internal/transport/ws_auth.go",
+      "func": "WithOriginPolicy"
+    },
+    {
+      "file": "internal/transport/ws_auth.go",
+      "func": "WithTokenSource"
+    },
+    {
+      "file": "internal/transport/ws_test_helper.go",
+      "func": "memSecretStore.Create"
+    },
+    {
+      "file": "internal/transport/ws_test_helper.go",
+      "func": "memSecretStore.Delete"
+    },
+    {
+      "file": "internal/transport/ws_test_helper.go",
+      "func": "memSecretStore.Exists"
+    },
+    {
+      "file": "internal/transport/ws_test_helper.go",
+      "func": "memSecretStore.Get"
+    },
+    {
+      "file": "internal/transport/ws_test_helper.go",
+      "func": "newTestStore"
+    },
+    {
+      "file": "internal/transport/ws.go",
+      "func": "WithCaptureRegistry"
+    },
+    {
+      "file": "internal/transport/ws.go",
+      "func": "WithProfileResolver"
+    },
+    {
+      "file": "internal/vault/inventory.go",
+      "func": "ProviderOf"
+    },
+    {
+      "file": "internal/vault/keys.go",
+      "func": "newRecoveryCode"
+    },
+    {
+      "file": "internal/vault/system/secretservice_linux.go",
+      "func": "SecretServiceAvailable"
+    },
+    {
+      "file": "internal/vault/system/secretservice_linux.go",
+      "func": "secretServiceAvailableVia"
+    },
+    {
+      "file": "internal/vault/system/system.go",
+      "func": "WithKeyring"
+    },
+    {
+      "file": "internal/vault/system/system.go",
+      "func": "WithReasonProbe"
+    },
+    {
+      "file": "internal/vault/system/system.go",
+      "func": "WithTimeout"
+    },
+    {
+      "file": "internal/vault/testseam.go",
+      "func": "MintReferenceForTest"
+    },
+    {
+      "file": "internal/vault/vaulttest/contract.go",
+      "func": "RunProviderContract"
+    },
+    {
+      "file": "internal/vault/vaulttest/fake.go",
+      "func": "Fake.Delete"
+    },
+    {
+      "file": "internal/vault/vaulttest/fake.go",
+      "func": "Fake.Get"
+    },
+    {
+      "file": "internal/vault/vaulttest/fake.go",
+      "func": "Fake.ID"
+    },
+    {
+      "file": "internal/vault/vaulttest/fake.go",
+      "func": "Fake.Put"
+    },
+    {
+      "file": "internal/vault/vaulttest/fake.go",
+      "func": "Fake.SetDelay"
+    },
+    {
+      "file": "internal/vault/vaulttest/fake.go",
+      "func": "Fake.SetFailure"
+    },
+    {
+      "file": "internal/vault/vaulttest/fake.go",
+      "func": "Fake.snapshot"
+    },
+    {
+      "file": "internal/vault/vaulttest/fake.go",
+      "func": "Fake.Status"
+    },
+    {
+      "file": "internal/vault/vaulttest/fake.go",
+      "func": "NewFake"
+    },
+    {
+      "file": "internal/vault/vaulttest/fake.go",
+      "func": "NewFakeWithID"
+    }
+  ]
+}

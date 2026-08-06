@@ -23,6 +23,7 @@ check_cmd() {
 
 check_cmd gofumpt "go install mvdan.cc/gofumpt@latest"
 check_cmd golangci-lint "go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8"
+check_cmd deadcode "go install golang.org/x/tools/cmd/deadcode@latest"
 check_cmd go "install Go from https://go.dev/dl/"
 check_cmd node "install Node.js from https://nodejs.org/"
 check_cmd npm "install Node.js from https://nodejs.org/"
@@ -117,6 +118,16 @@ ok "gofumpt"
 
 # --- 3. golangci-lint (always: it is cached and effectively free) -----------
 host_gate "golangci-lint" golangci-lint run ./...
+
+# --- 3b. deadcode ratchet (Go changes only: ~4s and it loads the whole
+# module, so a commit that touches no Go must not pay for it; the committed
+# baseline in .githooks/deadcode-baseline.json is what makes a new unreachable
+# function fail rather than the 86 existing ones) ---------------------------
+if [ "$RUN_GO" = 1 ]; then
+    host_gate "deadcode ratchet" node .githooks/check-deadcode.mjs
+else
+    ok "deadcode ratchet — skipped (no Go changes staged)"
+fi
 
 # --- 4. prettier (always: it covers markdown and config the scoping misses) --
 host_gate "prettier --check" sh -c 'cd frontend && npm run format:check'

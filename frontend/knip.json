@@ -1,0 +1,25 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "entry": [
+    "index.html",
+    "src/main.tsx",
+    "vite.config.ts",
+    "vite.dev-view.config.ts",
+    "vitest.config.ts",
+    "vitest.setup.ts",
+    "eslint.config.js",
+    "scripts/*.mjs",
+    "lint-fixtures/*.mjs"
+  ],
+  "project": [
+    "src/**/*.{ts,tsx}",
+    "index.html",
+    "vite.config.ts",
+    "vite.dev-view.config.ts",
+    "vitest.config.ts",
+    "vitest.setup.ts",
+    "eslint.config.js",
+    "scripts/*.mjs",
+    "lint-fixtures/*.mjs"
+  ]
+}

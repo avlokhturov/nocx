@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "lint": "eslint . --max-warnings 0 && node lint-fixtures/check-css-colors.mjs && node lint-fixtures/check-css-integrity.mjs",
+    "lint:dead-exports": "node lint-fixtures/check-dead-exports.mjs",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
@@ -17,6 +18,7 @@
     "baseline:update": "node lint-fixtures/update-raw-controls-baseline.mjs",
     "baseline:color-update": "node lint-fixtures/update-color-literals-baseline.mjs",
     "baseline:inline-update": "node lint-fixtures/update-inline-markup-baseline.mjs",
+    "baseline:dead-exports-update": "node lint-fixtures/update-dead-exports-baseline.mjs",
     "contracts": "node scripts/gen-contracts.mjs",
     "contracts:check": "node scripts/gen-contracts.mjs --check"
   },
@@ -42,6 +44,7 @@
     "eslint-plugin-solid": "^0.14.5",
     "jsdom": "^29.1.1",
     "json-schema-to-typescript": "^15.0.4",
+    "knip": "^6.32.0",
     "prettier": "^3.9.6",
     "typescript": "^5.5.0",
     "typescript-eslint": "^8.65.0",
