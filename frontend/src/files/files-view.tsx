@@ -39,7 +39,11 @@ import {
  *  deliverable, so the panel calls this fixed contract and never builds a
  *  tab itself. The canonical comes from files.read (the file's identity —
  *  what the viewer's singletonKey deduplicates on); displayHost is null for
- *  a local file. */
+ *  a local file. `origin` is the scope the panel held at click time (minus
+ *  its tabId — a tab detail the viewer does not know): the viewer answers
+ *  the TabContent `activeOrigin` capability with it, so the origin-following
+ *  panel keeps showing this machine — and keeps the binding the viewer is
+ *  reading through — while the viewer tab is in front (design §5.4). */
 interface FileOpener {
   open(target: {
     bindingId: string
@@ -48,6 +52,7 @@ interface FileOpener {
     canonical: string // from files.read / files.list — the identity
     displayHost: string | null // null for local
     name: string
+    origin: Omit<ActiveOrigin, 'tabId'> | null
   }): void
 }
 
@@ -108,7 +113,6 @@ function FilesPanel(props: FilesPanelProps) {
   // The view unmounts when another view takes the panel; its binding closes
   // with it, and the next mount re-opens through the rescope above.
   onCleanup(() => props.store.dispose())
-
   /** The primary action: resolve the file's canonical (files.read — the
    *  only shape that carries identity for a file, D12) and hand the target
    *  to the opener. A refusal here is an action outcome: a toast, never a
@@ -129,6 +133,16 @@ function FilesPanel(props: FilesPanelProps) {
         // its basename alone — the asymmetry is carried, never invented.
         displayHost: o.host,
         name: node.name,
+        // The machine, minus the tab detail: the viewer answers the
+        // activeOrigin capability with this, so the panel does not churn
+        // its binding when the viewer tab it just opened takes focus.
+        origin: {
+          sessionId: o.sessionId,
+          kind: o.kind,
+          cwd: o.cwd,
+          cwdVerified: o.cwdVerified,
+          host: o.host,
+        },
       })
     } catch (e) {
       showToast({ level: 'danger', message: e instanceof Error ? e.message : String(e) })

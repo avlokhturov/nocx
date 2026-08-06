@@ -68,6 +68,13 @@ function target(overrides: Partial<FileViewerTarget>): FileViewerTarget {
     canonical: '/srv/etc/nginx.conf',
     displayHost: 'srv-01',
     name: 'nginx.conf',
+    origin: {
+      sessionId: 'sess-1',
+      kind: 'ssh',
+      cwd: '/srv/etc',
+      cwdVerified: false,
+      host: 'srv-01',
+    },
     ...overrides,
   }
 }

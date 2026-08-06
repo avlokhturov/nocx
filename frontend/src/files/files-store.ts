@@ -465,12 +465,15 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     const prev = origin()
     const prevBinding = binding()
     // Rule 1: the same session scope keeps its binding and its tree — a
-    // later OSC 7 cwd must not re-root the tree. A dead binding (dispose, or
-    // an origin that went null and came back) falls through and re-opens.
+    // later OSC 7 cwd must not re-root the tree, and neither may a viewer
+    // tab that answers the origin it was opened from (design §5.4): the
+    // viewer is the same machine with a different tabId, and re-opening
+    // there would close the very binding the viewer is reading through.
+    // Only a different session, a different kind, or a dead binding
+    // (dispose, or an origin that went null and came back) re-opens.
     if (
       prev !== null &&
       next !== null &&
-      prev.tabId === next.tabId &&
       prev.sessionId === next.sessionId &&
       prev.kind === next.kind &&
       prevBinding !== null

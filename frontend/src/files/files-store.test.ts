@@ -153,6 +153,26 @@ describe('files tree store', () => {
     expect(close).toHaveBeenCalledWith('b1')
   })
 
+  it('a viewer tab answering its source session keeps the binding (design §5.4)', async () => {
+    // TabManager composes the ACTIVE tab's id into the origin, so a viewer
+    // tab opened from tab A answers tab A's session with a NEW tabId. Same
+    // machine: the binding must stay open — closing it would kill the
+    // viewer's in-flight read and render "source unavailable" for a file
+    // that was read successfully (the fm-w12 defect).
+    const open = vi.fn().mockResolvedValue(OPEN_RESULT)
+    const close = vi.fn().mockResolvedValue({})
+    const store = createFilesTreeStore(makeServices({ open, close }))
+    store.rescope(LOCAL_A)
+    await settle()
+
+    store.rescope({ ...LOCAL_A, tabId: 99 })
+    await settle()
+
+    expect(open).toHaveBeenCalledTimes(1)
+    expect(close).not.toHaveBeenCalled()
+    expect(store.phase()).toBe('ready')
+  })
+
   it('expanding a directory reaches files.list and commits its entries', async () => {
     const list = vi
       .fn()

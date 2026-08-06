@@ -20,7 +20,7 @@ import { EditorView } from '@codemirror/view'
 import { render } from 'solid-js/web'
 import { Button } from '../ui'
 import type { FilesReadResult } from '../generated/files.read'
-import { BaseTabContent, type TabHost } from '../tab-content'
+import { BaseTabContent, type ActiveOrigin, type TabHost } from '../tab-content'
 import { languageForPath, viewerHighlighting } from './language-registry'
 
 // ── The seam (injected at registration; never imported) ────────────────────
@@ -39,6 +39,13 @@ export interface FileViewerTarget {
   readonly displayHost: string | null
   /** Basename, for the title. */
   readonly name: string
+  /** The machine this file came from — the origin the Files panel was
+   *  scoped to when the row was clicked (design §5.4). The viewer answers
+   *  `activeOrigin()` with it, so the origin-following panel treats a
+   *  viewer tab as the same machine and keeps its binding — and the
+   *  viewer's read — alive. `tabId` is deliberately absent: the viewer
+   *  does not know its tab; TabManager adds it. */
+  readonly origin: Omit<ActiveOrigin, 'tabId'> | null
 }
 
 /**
@@ -194,7 +201,16 @@ export class FileViewerContent extends BaseTabContent {
     })
     return Promise.resolve()
   }
-
+  /** The machine this viewer speaks for (design §5.4): the origin the
+   *  panel was scoped to when the file was opened. Answering it makes the
+   *  origin-following panel treat a viewer tab as the same machine — it
+   *  keeps its tree AND its binding, so the viewer's own read is never
+   *  closed out from under it by the tab activation it caused. Null only
+   *  when the opener had no origin to hand over (nothing should open a
+   *  viewer without one). */
+  activeOrigin(): Omit<ActiveOrigin, 'tabId'> | null {
+    return this.target.origin
+  }
   viewportChanged(): void {
     // The CM6 view measures itself; there is nothing to do here.
   }

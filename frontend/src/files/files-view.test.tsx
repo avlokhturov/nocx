@@ -323,6 +323,16 @@ describe('files sidebar view', () => {
       canonical: 'C:/home/dev/notes.md',
       displayHost: null,
       name: 'notes.md',
+      // The click-time scope minus the tabId — the viewer's activeOrigin
+      // answer, which keeps the panel on this machine while the viewer tab
+      // is in front (design §5.4).
+      origin: {
+        sessionId: 's-local',
+        kind: 'local',
+        cwd: '~/dev',
+        cwdVerified: true,
+        host: null,
+      },
     })
 
     // A directory row opens nothing.

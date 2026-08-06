@@ -87,6 +87,13 @@ const TARGET: FileViewerTarget = {
   canonical: '/srv/etc/nginx.conf',
   displayHost: 'srv-01',
   name: 'nginx.conf',
+  origin: {
+    sessionId: 'sess-1',
+    kind: 'ssh',
+    cwd: '/srv/etc',
+    cwdVerified: false,
+    host: 'srv-01',
+  },
 }
 
 // ── Mount helpers ─────────────────────────────────────────────────────────
@@ -154,6 +161,28 @@ describe('FileViewerContent — the read', () => {
     expect(line(host, 'unavailable')?.textContent).toContain('Source unavailable')
     expect(docText(host)).toBe('')
     content.dispose()
+  })
+})
+
+describe('FileViewerContent — the activeOrigin capability (design §5.4)', () => {
+  it('answers the origin the viewer was opened with, minus the tabId', async () => {
+    const { content } = await mount()
+    expect(content.activeOrigin()).toEqual({
+      sessionId: 'sess-1',
+      kind: 'ssh',
+      cwd: '/srv/etc',
+      cwdVerified: false,
+      host: 'srv-01',
+    })
+    content.dispose()
+  })
+
+  it('answers null when the opener had no origin to hand over', async () => {
+    const { content } = await mount()
+    content.dispose()
+    const bare = new FileViewerContent({ ...TARGET, origin: null }, new FakeBinding().deps)
+    expect(bare.activeOrigin()).toBeNull()
+    bare.dispose()
   })
 })
 
