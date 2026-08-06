@@ -29,17 +29,31 @@ func TestAppDirName_DevelopmentBuildDoesNotResolveTheShippedProfile(t *testing.T
 // through it and not only through the constant. Asserted separately because a
 // correct AppDirName reached by nobody is precisely the shape of defect the two
 // beads behind this change are about.
-func TestNewAppPaths_ResolvesTheDevelopmentProfile(t *testing.T) {
+//
+// Under test the guarantee is stronger than "not the shipped profile": an
+// isolated root is not the developer's profile either, and that is what a test
+// run must never touch (nocx-8ax9). Both are asserted here, because the weaker
+// one is the property production relies on and the stronger one is the property
+// this suite relies on — and neither implies the other.
+func TestNewAppPaths_UnderTestResolvesNeitherRealProfile(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv(TestAppDirEnv, root)
+
 	app, err := NewAppPaths()
 	if err != nil {
 		t.Fatalf("NewAppPaths(): %v", err)
 	}
-	shipped, err := newOSPaths(shippedAppDirName)
-	if err != nil {
-		t.Fatalf("newOSPaths(%q): %v", shippedAppDirName, err)
-	}
-	if app.ConfigDir() == shipped.ConfigDir() {
-		t.Errorf("NewAppPaths() resolves the shipped config dir %s in a development build", app.ConfigDir())
+	for _, name := range []string{shippedAppDirName, AppDirName} {
+		real, realErr := newOSPaths(name)
+		if realErr != nil {
+			t.Fatalf("newOSPaths(%q): %v", name, realErr)
+		}
+		if app.ConfigDir() == real.ConfigDir() {
+			t.Errorf("NewAppPaths() under test resolves the %q config dir %s", name, real.ConfigDir())
+		}
+		if app.DataDir() == real.DataDir() {
+			t.Errorf("NewAppPaths() under test resolves the %q data dir %s", name, real.DataDir())
+		}
 	}
 }
 

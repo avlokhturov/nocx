@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"testing"
 )
 
 // Paths resolves the OS locations nocx persists into, distinguishing roles.
@@ -42,8 +43,39 @@ func (p *osPaths) CacheDir() string  { return p.cacheDir }
 // That is the whole guarantee. A parameter would have to be got right in the
 // app, in cmd/devharness, and in whatever launches the e2e backend next, which
 // is the arrangement that produced nocx-ti8w in the first place.
+//
+// Under `go test` it resolves nothing until the test has named an isolated
+// root — see [TestAppDirEnv] and the refusal below.
 func NewAppPaths() (Paths, error) {
+	if testing.Testing() {
+		root := os.Getenv(TestAppDirEnv)
+		if root == "" {
+			return nil, fmt.Errorf(
+				"storage: this test has not isolated its profile directories; "+
+					"call storagetest.Isolate(t) before starting anything that persists, "+
+					"or set %s to a directory the test owns", TestAppDirEnv)
+		}
+		return newRootedPaths(root), nil
+	}
 	return newOSPaths(AppDirName)
+}
+
+// TestAppDirEnv names the directory a test has set aside for its own profile.
+// Exported for storagetest, which is the only thing that should write it.
+const TestAppDirEnv = "NOCX_TEST_APPDIR"
+
+// newRootedPaths lays the three roles out under one root the test owns.
+//
+// The roles stay distinct here for the same reason they are distinct on a real
+// machine: the content key's salt lives in the config dir so that a copy of the
+// data dir carries nothing that opens it (ADR-0011). A test root that collapsed
+// them would let that assertion pass without meaning anything.
+func newRootedPaths(root string) *osPaths {
+	return &osPaths{
+		configDir: filepath.Join(root, "config", AppDirName),
+		dataDir:   filepath.Join(root, "data", AppDirName),
+		cacheDir:  filepath.Join(root, "cache", AppDirName),
+	}
 }
 
 // newOSPaths resolves the three roles for appName on the current platform.
