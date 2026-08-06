@@ -36,8 +36,9 @@ import (
 // lives in a backup outside GitHub as well as in the RELEASE_SIGNING_KEY
 // secret.
 var releaseKeys = []string{
-	// v0.1.0, generated 2026-08-06. Private seed: RELEASE_SIGNING_KEY.
-	"YyYUXhiZ0O9vQKAgH7TANdh7HVtVTPtui41X1ziwOoc=",
+	// v0.1.0, generated 2026-08-06 by the maintainer. Private seed: the
+	// RELEASE_SIGNING_KEY repository secret, plus a backup outside GitHub.
+	"mApMKKml14qq2l/B/VGAE0BBWf7NEKFuId7jpZzo+eE=",
 }
 
 // ReleaseKeyring decodes the compiled-in public keys.
