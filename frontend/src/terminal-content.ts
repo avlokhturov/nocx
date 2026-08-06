@@ -107,6 +107,19 @@ function isCaptureGone(err: unknown): boolean {
   return err instanceof RpcError && (err.code === -32010 || err.code === -32011)
 }
 
+/** Host key evidence from a failed open, mirroring the connections.test
+ *  hostKey shape. The renderer echoes host+key back to
+ *  connections.trustHostKey to accept. */
+export interface HostKeyErrorEvidence {
+  host: string
+  algorithm: string
+  fingerprint: string
+  storedFingerprint?: string
+  key: string
+  changed: boolean
+  profileId?: string
+}
+
 /**
  * Whether `el` is somewhere the user types on purpose.
  *
@@ -142,6 +155,10 @@ export interface TerminalContentHooks {
   onPortsTargetChange?: () => void
   /** An SSH connection failed because the vault is sealed. */
   onVaultSealed?: () => void
+  /** An SSH connection failed because the host key is unknown or changed.
+   *  The renderer offers the accept-on-first-use dialog (the same one the
+   *  probe path raises in Settings). After accept, the caller retries open. */
+  onHostKeyError?: (evidence: HostKeyErrorEvidence) => void
   /** The reference picker's setup offer needs the setup dialog (no OS key):
    *  the vault layer owns it — wired by main.tsx to
    *  vaultController.openSetup. */
@@ -1839,6 +1856,31 @@ export class TerminalContent extends BaseTabContent {
         const data = err.data as { reason?: string } | undefined
         if (data?.reason === 'vault-sealed') {
           this.hooks.onVaultSealed?.()
+          this._readyResolve(false)
+          return
+        }
+        // Host-key errors carry evidence in data (attached by handleOpen
+        // so the renderer can offer the accept dialog — nocx-shat).
+        const hkData = err.data as
+          | {
+              host?: string
+              algorithm?: string
+              fingerprint?: string
+              storedFingerprint?: string
+              key?: string
+            }
+          | undefined
+        if (hkData?.host && hkData?.key) {
+          const changed = err.message.startsWith('host-key-changed')
+          this.hooks.onHostKeyError?.({
+            host: hkData.host,
+            algorithm: hkData.algorithm ?? '',
+            fingerprint: hkData.fingerprint ?? '',
+            storedFingerprint: hkData.storedFingerprint,
+            key: hkData.key,
+            changed,
+            profileId: this.sshOpts?.profileId,
+          })
           this._readyResolve(false)
           return
         }

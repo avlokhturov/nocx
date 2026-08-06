@@ -1205,6 +1205,13 @@ func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connSta
 			msg = err.Error() // unclassifiable — use the raw wrapped error
 		}
 		resp := newJSONRPCError(req.ID, -32603, msg)
+		// For host-key errors, attach the evidence so the renderer can
+		// offer the accept-on-first-use dialog (the same one the probe
+		// path raises). Without this, open shows "Terminal failed to
+		// start" and the user has no way to accept the key (nocx-shat).
+		if hk := hostKeyInfoFromError(err); hk != nil {
+			resp.Error.Data = hk
+		}
 		_ = wconn.writeJSON(resp)
 		return
 	}

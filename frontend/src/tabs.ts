@@ -20,7 +20,7 @@ import { log } from './log'
 import type { TabStrip } from './tab-strip'
 import type { TabHost, TabContent, ContentDescriptor, ContentViewport } from './tab-content'
 import { SURFACE_TERMINAL } from './tab-content'
-import { TerminalContent } from './terminal-content'
+import { TerminalContent, type HostKeyErrorEvidence } from './terminal-content'
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Tab — chrome and lifecycle, delegates content to TabContent
@@ -343,6 +343,9 @@ export class TabManager {
   private readonly recentTabIds: number[] = []
   /** Called when an SSH connection fails because the vault is sealed. */
   onVaultSealed?: () => void
+  /** Called when an SSH connection fails because the host key is unknown
+   *  or changed. The renderer offers the accept-on-first-use dialog. */
+  onHostKeyError?: (evidence: HostKeyErrorEvidence) => void
   /** Called when the reference picker's setup offer is activated and the
    *  machine has no OS key: the vault layer owns the setup dialog, so the
    *  hook raises it (wired by main.tsx to vaultController.openSetup). */
@@ -494,7 +497,7 @@ export class TabManager {
         onWarningChange: (warning) => tabRef.current?.setWarningState(warning),
         onPortsTargetChange: () => this.onActiveTabChange?.(),
         onVaultSealed: this.onVaultSealed,
-        onSetupVault: this.onSetupVault,
+        onHostKeyError: this.onHostKeyError,
         onCreateSecret: this.onCreateSecret,
       },
     )

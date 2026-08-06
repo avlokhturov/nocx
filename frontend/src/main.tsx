@@ -185,7 +185,27 @@ async function main() {
     profileClient,
     tabStrip,
   )
-  tm.onVaultSealed = () => vaultController.openUnlock('open this connection')
+  tm.onHostKeyError = (evidence) => {
+    // Unknown host key: accept-on-first-use is routine — auto-accept and
+    // let the user retry. Changed key: surface the mismatch and route the
+    // user to Settings → Connections → Test, where the accept dialog names
+    // both fingerprints (nocx-shat).
+    if (!evidence.changed) {
+      void profileClient.trustHostKey(evidence.host, evidence.key).then(() => {
+        showToast({
+          level: 'success',
+          message: `Host key accepted for ${evidence.host}. Retry the connection.`,
+        })
+      })
+    } else {
+      showToast({
+        level: 'danger',
+        message: `Host key changed for ${evidence.host}: got ${evidence.fingerprint}, expected ${evidence.storedFingerprint}. Open Settings → Connections → Test to accept the new key.`,
+        duration: 0,
+      })
+      openSettingsTab()
+    }
+  }
   tm.onSetupVault = () => vaultController.openSetup()
   tm.onCreateSecret = (name) => openSettingsTab().startNewSecret(name)
   tm.onActivity = reportActivity
