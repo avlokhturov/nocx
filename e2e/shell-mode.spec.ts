@@ -13,7 +13,16 @@ import type { Page } from './harness'
 // executes commands, so the in-band bootstrap runs for real and the OSC 133
 // markers are the shell's own.
 
-const E2E_HOME = path.resolve(__dirname, '..', '.e2e', 'home')
+// The home the BACKEND resolved, not a second guess at it. Asked of the
+// environment the way nocxify-journey.spec.ts:55 and files.spec.ts:49 already
+// ask, because the two answers disagree on every path that matters: on the
+// headless path NOCX_E2E_HOME_DIR is a temp directory the runner made, and
+// even under `wails dev` home-isolation.ts publishes the realpath of
+// .e2e/home, which is not what path.resolve returns through a symlink. A
+// known_hosts written to the wrong home is a host key the backend never sees —
+// "unknown host key", no SSH session, and a spec that fails asserting the
+// editor chrome (nocx-z9s9.6).
+const E2E_HOME = process.env.NOCX_E2E_HOME_DIR || path.resolve(__dirname, '..', '.e2e', 'home')
 
 interface Fixture {
   proc: ChildProcess
