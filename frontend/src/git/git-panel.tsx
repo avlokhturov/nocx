@@ -356,18 +356,28 @@ export function GitPanel(props: GitPanelProps) {
         <Match when={props.store.state() === 'ready' || props.store.state() === 'tooManyChanges'}>
           {/* ── Header: branch, upstream, changed count ───────────────── */}
           <Show when={status() !== null}>
+            {/* Two lines, the way orca reads: what I am on, then where it
+                tracks. On one line in a rail the upstream is the part that
+                gets squeezed, and `origin…` answers nothing — it is the
+                remote branch NAME that carries the information. */}
             <div class="git-header" data-testid="git-header">
-              <Badge tone="info" data-testid="git-branch">
-                {branchLabel()}
-              </Badge>
+              <div class="git-header__line">
+                <Badge tone="info" data-testid="git-branch">
+                  {branchLabel()}
+                </Badge>
+                <span class="git-header__count" data-testid="git-changed-count">
+                  {status()!.total} changed
+                </span>
+              </div>
               <Show when={upstreamLabel() !== ''}>
-                <span class="git-header__upstream" data-testid="git-upstream">
+                <span
+                  class="git-header__upstream"
+                  data-testid="git-upstream"
+                  title={upstreamLabel()}
+                >
                   {upstreamLabel()}
                 </span>
               </Show>
-              <span class="git-header__count" data-testid="git-changed-count">
-                {status()!.total} changed
-              </span>
             </div>
           </Show>
           {/* ── The D9 cap banner: a traversal that could not be completed
@@ -398,27 +408,30 @@ export function GitPanel(props: GitPanelProps) {
           {/* ── Whole-index controls. Refused, visibly, while any entry is
                conflicted (D19) — absent entirely on SSH (D14, the remote
                state never reaches this branch). ──────────────────────── */}
+          {/* Named, not glyphed. Two bare icons under the header read as
+              decoration — nothing on screen says which one stages and which
+              one throws the index away, and the second is the one a user
+              must not press by accident. Both reference products label
+              these. */}
           <div class="git-list-actions" data-testid="git-list-actions">
-            <IconButton
+            <Button
               data-testid="git-stage-all"
               size="sm"
-              ariaLabel="Stage all changes"
               title="Stage all changes"
               disabled={mutationBusy() || props.store.conflictsPresent()}
               onClick={() => props.store.stageAll()}
             >
-              <PlusIcon />
-            </IconButton>
-            <IconButton
+              Stage all
+            </Button>
+            <Button
               data-testid="git-unstage-all"
               size="sm"
-              ariaLabel="Unstage all changes"
               title="Unstage all changes"
               disabled={mutationBusy() || props.store.conflictsPresent()}
               onClick={() => props.store.unstageAll()}
             >
-              <ResetIcon />
-            </IconButton>
+              Unstage all
+            </Button>
           </div>
           <Show when={props.store.conflictsPresent()}>
             <p class="git-conflict-refusal" data-testid="git-conflict-refusal">

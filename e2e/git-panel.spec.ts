@@ -115,6 +115,63 @@ test('happy path: edit → unstaged row → diff tab → stage → commit emptie
   }
 })
 
+// ── Layout: the one property no other gate can see ────────────────────────
+
+// A row's geometry is invisible to every check we have. jsdom computes no
+// layout, so a component test asserting classes, roles and text passes on a
+// row whose parts have wrapped onto three lines; the specs above assert rows
+// are visible and clickable, and a wrapped row is both. This is the assertion
+// that fails on the broken row (nocx-uf0p) — the parts carried flex-item
+// declarations with no flex parent, so they laid out as inline content.
+test('a row is one line — letter, glyph, path — and a long path clips instead of overflowing', async ({
+  page,
+}) => {
+  const repo = createRepo()
+  try {
+    // A short name under a directory far too deep for the sidebar: the name
+    // must survive whole and the directory must be what gives way.
+    const dir = 'graphify-out/cache/ast/v0.9.3'
+    mkdirSync(path.join(repo.root, dir), { recursive: true })
+    writeFileSync(path.join(repo.root, `${dir}/chunk.json`), '{}\n')
+
+    await openGitPanelAt(page, repo.root, repo.basename)
+
+    const row = page.locator(UNSTAGED).locator(ROW, { hasText: 'chunk.json' })
+    await expect(row).toBeVisible({ timeout: 20_000 })
+
+    const nameEl = row.locator('.ui-file-status-row__name')
+    const letterBox = await row.locator('.ui-file-status-row__status').boundingBox()
+    const pathBox = await row.locator('.ui-file-status-row__path').boundingBox()
+    const rowBox = await row.boundingBox()
+    expect(letterBox).not.toBeNull()
+    expect(pathBox).not.toBeNull()
+    expect(rowBox).not.toBeNull()
+
+    // The file name is rendered IN FULL — the directory is what gets spent.
+    // This is the property the panel exists for: twelve files under one deep
+    // directory must be twelve distinguishable rows.
+    const clipped = await nameEl.evaluate((el) => el.scrollWidth > el.clientWidth + 1)
+    expect(clipped).toBe(false)
+    await expect(nameEl).toHaveText('chunk.json')
+
+    // Same line: the two centres agree within half a letter's height. A
+    // wrapped path sits a full line below and fails this by construction.
+    const letterMid = letterBox!.y + letterBox!.height / 2
+    const pathMid = pathBox!.y + pathBox!.height / 2
+    expect(Math.abs(letterMid - pathMid)).toBeLessThan(letterBox!.height / 2)
+
+    // And beside it, not under it.
+    expect(pathBox!.x).toBeGreaterThanOrEqual(letterBox!.x + letterBox!.width)
+
+    // The path is bounded by the row: it clips (and ellipsises) rather than
+    // running past the panel into the terminal, which is what the screenshot
+    // that opened this bug showed.
+    expect(pathBox!.x + pathBox!.width).toBeLessThanOrEqual(rowBox!.x + rowBox!.width + 1)
+  } finally {
+    cleanupRepo(repo)
+  }
+})
+
 // ── Amend (design §7) ──────────────────────────────────────────────────────
 
 test('amend: ticked with a commit on HEAD it prefills the form and commits once, not twice', async ({

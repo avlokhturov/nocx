@@ -5,11 +5,22 @@
    is CollectionRow's and nothing here repaints it — a surface may place the
    row and never touch its appearance. */
 
-/* There is no `.ui-file-status-row` element rule, and that is deliberate:
-   the component renders no wrapper. CollectionRow IS the row and carries
-   role="listitem", so a wrapper would orphan it from its role="list"; the
-   shrink this file used to ask for is already `.ui-collection-row__info`'s
-   `min-width: 0`. */
+/* The parts' own line. It sits INSIDE `.ui-collection-row__info`, never
+   around CollectionRow — outside, it would orphan role="listitem" from its
+   role="list". Inside, it is what makes the three parts a row at all: the
+   info slot is a plain block, and must stay one because Connections,
+   Secrets and Footprint stack a name over a meta line inside it, so the
+   flex context the parts need has to be declared here (nocx-uf0p). */
+.ui-file-status-row {
+  display: flex;
+  align-items: center;
+  /* One step, not two. At `--space-2` the letter, the glyph and the path
+     each sat in their own island and the row read as three columns of
+     mostly air in a rail that has none to spare. */
+  gap: var(--space-1);
+  min-width: 0;
+  font-size: var(--font-size-sm);
+}
 
 /* The status letter: one character, a fixed column so every row's icon and
    path start on the same line whatever the letter. The tone is this
@@ -17,9 +28,8 @@
    wire's letter, never a colour. */
 .ui-file-status-row__status {
   flex: 0 0 auto;
-  width: 1.5em;
+  width: 1.25em;
   text-align: center;
-  font-size: var(--font-size-sm);
   font-weight: 600;
 }
 
@@ -49,7 +59,6 @@
   justify-content: center;
   width: 1em;
   height: 1em;
-  font-size: var(--font-size-md);
   color: var(--color-text-dim);
 }
 
@@ -58,17 +67,40 @@
   height: 1em;
 }
 
-/* The path: the directory prefix is dimmed, the name keeps the row's text
-   colour, and the whole thing ellipsises at the tail — the tail is where a
-   long path loses its least informative part. */
+/* The path: the name first, then its directory, dimmed. The two shrink at
+   very different rates and that ordering is the point — a path rendered as
+   one string ellipsises at the tail, and the tail is the FILE NAME, so a
+   sidebar of twelve files under one deep directory becomes twelve identical
+   `graphify-out/cache/…` rows that answer nothing. The directory gives up
+   its width first (a shrink factor three orders of magnitude larger) and
+   disappears entirely before the name is touched. */
 .ui-file-status-row__path {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+/* The name does not shrink AT ALL — a shrink factor merely makes the
+   directory yield faster, and "faster" still spends some of the deficit on
+   the name, so both ended up clipped while a useless `f…` of directory
+   survived. `flex-shrink: 0` with `max-width: 100%` makes the priority
+   absolute: the directory is spent to nothing first, and only a name too
+   long for the row on its own ellipsises. */
+.ui-file-status-row__name {
+  flex: 0 0 auto;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .ui-file-status-row__dir {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   color: var(--color-text-dim);
 }

@@ -34,16 +34,39 @@ describe('FileStatusRow', () => {
     )
   })
 
-  it('splits a nested path into a dimmed directory prefix and a name', () => {
+  it('splits a nested path into a name and its dimmed directory', () => {
     const { container } = render(() => <FileStatusRow path="src/app/main.go" status="M" />)
-    expect(container.querySelector('.ui-file-status-row__dir')?.textContent).toBe('src/app/')
     expect(container.querySelector('.ui-file-status-row__name')?.textContent).toBe('main.go')
+    // No trailing slash: the directory follows the name, it does not prefix it.
+    expect(container.querySelector('.ui-file-status-row__dir')?.textContent).toBe('src/app')
   })
 
-  it('renders a root-level path with no directory prefix', () => {
+  it('the NAME comes first and the directory after it', () => {
+    // The order is the property, not a detail of it. A path rendered
+    // name-last ellipsises away the file name, and a list of files under one
+    // deep directory then reads as N identical rows (nocx-uf0p).
+    const { container } = render(() => <FileStatusRow path="src/app/main.go" status="M" />)
+    const parts = Array.from(
+      container.querySelectorAll('.ui-file-status-row__name, .ui-file-status-row__dir'),
+    ).map((el) => el.textContent)
+    expect(parts).toEqual(['main.go', 'src/app'])
+  })
+
+  it('renders a root-level path with no directory at all', () => {
     const { container } = render(() => <FileStatusRow path="main.go" status="M" />)
     expect(container.querySelector('.ui-file-status-row__dir')).toBeNull()
     expect(container.querySelector('.ui-file-status-row__name')?.textContent).toBe('main.go')
+  })
+
+  it('the whole path stays on the title, whatever the row can show', () => {
+    // The row gives up the directory before the name when it runs out of
+    // width, so the title is the only place the complete path survives.
+    const { container } = render(() => (
+      <FileStatusRow path="graphify-out/cache/ast/v0.9.3/chunk.json" status="?" />
+    ))
+    expect(container.querySelector('.ui-file-status-row__path')?.getAttribute('title')).toBe(
+      'graphify-out/cache/ast/v0.9.3/chunk.json',
+    )
   })
 
   it('composes the kit CollectionRow in its dense variant', () => {
@@ -102,7 +125,7 @@ describe('FileStatusRow', () => {
     // The row's text is the status letter and the path; the glyph contributes
     // nothing to the accessible tree.
     const row = screen.getByRole('listitem')
-    expect(row.textContent).toBe('Asrc/a.ts')
+    expect(row.textContent).toBe('Aa.tssrc')
   })
 
   it('the listitem is a DIRECT child of its list, so a surface can put rows in one', () => {

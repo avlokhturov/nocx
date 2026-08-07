@@ -48,7 +48,7 @@
    decision the row makes, never a surface repaint from outside. */
 .ui-collection-row[data-density='dense'] {
   gap: var(--space-2);
-  padding: var(--space-1) var(--space-2);
+  padding: var(--space-1);
 }
 
 .ui-collection-row:hover {

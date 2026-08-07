@@ -62,15 +62,19 @@ export interface FileStatusRowProps {
   actions?: JSX.Element
 }
 
-/** Split a repository path into the dimmed directory prefix and the name.
+/** Split a repository path into the name and its dimmed directory.
  *  A path ending in '/' (a directory row) has no name part and renders
- *  whole — a bare name at the root has no prefix at all. */
+ *  whole — a bare name at the root has no directory at all.
+ *
+ *  The directory carries no trailing slash because it is rendered AFTER
+ *  the name, not before it: `main.go` then `src/app`, which is how both
+ *  reference products read a path in a narrow list. */
 function splitPath(path: string): { dir: string; name: string } {
   const slash = path.lastIndexOf('/')
   if (slash < 0) return { dir: '', name: path }
   const name = path.slice(slash + 1)
   if (name === '') return { dir: '', name: path }
-  return { dir: path.slice(0, slash + 1), name }
+  return { dir: path.slice(0, slash), name }
 }
 
 export function FileStatusRow(props: FileStatusRowProps) {
@@ -78,13 +82,16 @@ export function FileStatusRow(props: FileStatusRowProps) {
   // inside JSX below is what registers the dependency — a row re-rendered
   // with a different path must re-split it.
   const parts = createMemo(() => splitPath(props.path))
-  // Rendered WITHOUT a wrapper element, deliberately. CollectionRow is the
-  // row: it carries role="listitem", and a surface places these inside a
-  // role="list" (connections.tsx:2470 is the existing example). A wrapping
-  // div would sit between the two and orphan the listitem, because ARIA
-  // requires a listitem to be owned by its list. The identity this component
-  // adds therefore lives on its parts, which are uniquely named, and on the
-  // row's own dense variant — not on a container that carries no appearance.
+  // The wrapper goes INSIDE the info slot, and that placement is the whole
+  // point (nocx-uf0p). It may not go outside CollectionRow: the row carries
+  // role="listitem", a surface places these inside a role="list", and an
+  // element between the two orphans the listitem, because ARIA requires a
+  // listitem to be owned by its list. But the three parts still need a flex
+  // container of their own — `.ui-collection-row__info` is a plain block and
+  // must stay one, since the surfaces that stack a name over a meta line
+  // inside it depend on that. Without this element the parts' flex-item
+  // declarations address no flex parent and they lay out as inline content,
+  // wrapping the path onto its own line and running it past the panel.
   return (
     <CollectionRow
       density="dense"
@@ -92,20 +99,27 @@ export function FileStatusRow(props: FileStatusRowProps) {
       focused={props.focused}
       onActivate={props.onActivate}
       info={
-        <>
+        <span class="ui-file-status-row">
           <span class="ui-file-status-row__status" data-tone={STATUS_TONE[props.status]}>
             {props.status}
           </span>
           <span class="ui-file-status-row__type-icon" aria-hidden="true">
             <FileIcon />
           </span>
+          {/* Name first, directory after it and dimmed — the order both
+              reference products use, and the one that survives a sidebar.
+              A path rendered as one string ellipsises at the tail, which
+              is the file name, so twelve rows under one deep directory
+              become twelve identical prefixes. Leading with the name means
+              the part that answers "which file is this" is the last part
+              to be given up. The whole path stays on the title. */}
           <span class="ui-file-status-row__path" title={props.path}>
+            <span class="ui-file-status-row__name">{parts().name}</span>
             <Show when={parts().dir}>
               <span class="ui-file-status-row__dir">{parts().dir}</span>
             </Show>
-            <span class="ui-file-status-row__name">{parts().name}</span>
           </span>
-        </>
+        </span>
       }
       actions={props.actions}
     />

@@ -4,32 +4,55 @@
    alignment, margins — never repainted (ADR-0014). The list rows are the
    kit's FileStatusRow; the surface only separates the lists and states. */
 
-/* The panel body: a scrolling column with the header pinned to the top. */
+/* The panel body: a scrolling column with the header pinned to the top.
+   The horizontal padding is the rail's only inset — the lists inside carry
+   none of their own, so a row's status letter starts one step from the
+   edge rather than three. */
 .git-panel {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
-  padding: var(--space-3);
+  gap: var(--space-3);
+  padding: var(--space-2);
 }
 
 /* Header: branch chip, upstream, changed count — one line, in the quiet
-   register except the chip. */
+   register except the chip.
+
+   Two lines, not one that wraps. Three parts never fit a rail, and a
+   wrapping flex row put the changed count on a line of its own with a hole
+   beside it; squeezing them onto one line instead ellipsised the upstream
+   down to `origin…`, which answers nothing — the remote BRANCH name is the
+   information. So the branch and its count take the first line and the
+   upstream takes the second, whole. */
 .git-header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.git-header__line {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  flex-wrap: wrap;
+  min-width: 0;
 }
 
 .git-header__upstream {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--color-text-dim);
   font-size: var(--font-size-sm);
 }
 
 .git-header__count {
+  flex: 0 0 auto;
+  margin-left: auto;
   color: var(--color-text-dim);
   font-size: var(--font-size-sm);
-  margin-left: auto;
+  white-space: nowrap;
 }
 
 /* The D9 cap banner: a traversal that could not be completed must not look
