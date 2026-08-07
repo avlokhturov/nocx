@@ -18,26 +18,18 @@
   padding: var(--space-2) 0;
 }
 
-/* Header: branch chip, upstream, changed count — one line, in the quiet
-   register except the chip.
+/* Header: branch, upstream, changed count — one line each, in that order.
 
-   Two lines, not one that wraps. Three parts never fit a rail, and a
-   wrapping flex row put the changed count on a line of its own with a hole
-   beside it; squeezing them onto one line instead ellipsised the upstream
-   down to `origin…`, which answers nothing — the remote BRANCH name is the
-   information. So the branch and its count take the first line and the
-   upstream takes the second, whole. */
+   It does not wrap and it does not share lines. Three parts never fit a
+   rail: wrapping put the count on a line of its own with a hole beside it,
+   and squeezing them onto one line ellipsised the upstream to `origin…`,
+   which names no branch. Pairing the branch with the count then cost the
+   branch a fixed ~80px column, so a 34-character branch clipped while its
+   own row was half empty. One line each is what fits all three whole. */
 .git-header {
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
-  min-width: 0;
-}
-
-.git-header__line {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
   min-width: 0;
 }
 
@@ -62,9 +54,10 @@
   font-size: var(--font-size-sm);
 }
 
+/* Its own line, under the branch and its upstream. Beside the branch it was
+   a fixed ~80px column taken from the one string in this header that has to
+   be read in full. */
 .git-header__count {
-  flex: 0 0 auto;
-  margin-left: auto;
   color: var(--color-text-dim);
   font-size: var(--font-size-sm);
   white-space: nowrap;
@@ -95,8 +88,7 @@
 }
 
 /* The whole-index controls sit above the lists; the refusal below them
-   carries the D19 reason. */
-/* The two whole-index actions split the rail between them. Sized to their
+   carries the D19 reason. The two actions split the rail between them. Sized to their
    labels they left a ragged block of dead space beside them; at full width
    they read as one control strip and each is an easier target. */
 .git-list-actions {
@@ -205,4 +197,22 @@
   margin: 0;
   color: var(--color-warning);
   font-size: var(--font-size-sm);
+}
+
+/* The commit form's own vertical rhythm. `Section dense` gives its Stack
+   `gap: 0` — correct for rows that carry their own padding, wrong for a
+   column of fields, a checkbox, a warning and a button, which arrived
+   touching one another. Placement, not repaint: the surface sets flow and
+   spacing and leaves every control's appearance to the kit. */
+.git-commit-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+/* The commit button spans the form, like the two whole-index actions above
+   it. A single action at the foot of a rail-width form reads as unfinished
+   when it is sized to the word "Commit". */
+.git-commit-form > .ui-button {
+  width: 100%;
 }

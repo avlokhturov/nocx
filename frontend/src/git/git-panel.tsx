@@ -414,23 +414,20 @@ export function GitPanel(props: GitPanelProps) {
                 tracks. On one line in a rail the upstream is the part that
                 gets squeezed, and `origin…` answers nothing — it is the
                 remote branch NAME that carries the information. */}
+            {/* One line each, in that order: the branch, its upstream, then
+                the count. The branch is TEXT, not a chip — a badge is a fixed
+                little shape for a short word, and a branch name is neither
+                short nor bounded, so `fix/e2e-files-reveal-and-container`
+                filled the header three lines deep before the kit was taught
+                that a chip is one line. And nothing shares the branch's line:
+                the count sitting beside it took a fixed 80px out of the one
+                string in this header that deserves the width, which is how a
+                branch clipped at `fix/e2e-files-revea…` while its own row was
+                half empty. */}
             <div class="git-header" data-testid="git-header">
-              <div class="git-header__line">
-                {/* The branch is TEXT, not a chip. A badge is a fixed little
-                    shape for a short word, and a branch name is neither
-                    short nor bounded — `fix/e2e-files-reveal-and-container`
-                    filled the header three lines deep before the kit was
-                    taught that a chip is one line, and even clipped it wastes
-                    the pill's padding on the one string in this header that
-                    deserves the width. orca renders the branch as plain
-                    text for the same reason. */}
-                <span class="git-header__branch" data-testid="git-branch" title={branchLabel()}>
-                  {branchLabel()}
-                </span>
-                <span class="git-header__count" data-testid="git-changed-count">
-                  {status()!.total} changed
-                </span>
-              </div>
+              <span class="git-header__branch" data-testid="git-branch" title={branchLabel()}>
+                {branchLabel()}
+              </span>
               <Show when={upstreamLabel() !== ''}>
                 <span
                   class="git-header__upstream"
@@ -440,6 +437,9 @@ export function GitPanel(props: GitPanelProps) {
                   {upstreamLabel()}
                 </span>
               </Show>
+              <span class="git-header__count" data-testid="git-changed-count">
+                {status()!.total} changed
+              </span>
             </div>
           </Show>
           {/* ── The D9 cap banner: a traversal that could not be completed
@@ -536,50 +536,57 @@ export function GitPanel(props: GitPanelProps) {
           </Show>
           {/* ── The commit form (design §5.4, D11, D6) ─────────────────── */}
           <Section title="Commit" dense>
-            <TextField
-              id="git-commit-subject"
-              label="Subject"
-              placeholder="Commit subject"
-              value={props.store.commitSubject()}
-              onInput={(v) => props.store.setCommitSubject(v)}
-            />
-            <TextField
-              id="git-commit-body"
-              label="Body"
-              multiline
-              placeholder="Commit body"
-              value={props.store.commitBody()}
-              onInput={(v) => props.store.setCommitBody(v)}
-            />
-            <Checkbox
-              checked={props.store.amend()}
-              onChange={() => props.store.toggleAmend()}
-              label="Amend last commit"
-            />
-            <Show when={props.store.envState() === 'degraded'}>
-              <div class="git-env-warning" data-testid="git-env-degraded">
-                Hooks will run in a degraded environment:{' '}
-                {props.store.envReason() ?? 'the shell environment could not be resolved'}
-              </div>
-            </Show>
-            <Show
-              when={props.store.commitState() === 'failed' && props.store.commitOutput() !== null}
-            >
-              <div class="git-commit-output" data-testid="git-commit-output">
-                <pre>{props.store.commitOutput()!.output}</pre>
-                <Show when={props.store.commitOutput()!.truncated}>
-                  <span data-testid="git-commit-output-truncated">(output truncated)</span>
-                </Show>
-              </div>
-            </Show>
-            <Button
-              variant="primary"
-              data-testid="git-commit"
-              disabled={commitDisabled()}
-              onClick={() => props.store.commit()}
-            >
-              Commit
-            </Button>
+            {/* The form is a form, not a list. `dense` gives Section's Stack
+                `gap: 0`, which is right for rows that carry their own padding
+                and wrong for a column of fields, a checkbox, a warning and a
+                button — they arrived touching each other. The surface owns
+                its own vertical rhythm here; it places, it does not repaint. */}
+            <div class="git-commit-form">
+              <TextField
+                id="git-commit-subject"
+                label="Subject"
+                placeholder="Commit subject"
+                value={props.store.commitSubject()}
+                onInput={(v) => props.store.setCommitSubject(v)}
+              />
+              <TextField
+                id="git-commit-body"
+                label="Body"
+                multiline
+                placeholder="Commit body"
+                value={props.store.commitBody()}
+                onInput={(v) => props.store.setCommitBody(v)}
+              />
+              <Checkbox
+                checked={props.store.amend()}
+                onChange={() => props.store.toggleAmend()}
+                label="Amend last commit"
+              />
+              <Show when={props.store.envState() === 'degraded'}>
+                <div class="git-env-warning" data-testid="git-env-degraded">
+                  Hooks will run in a degraded environment:{' '}
+                  {props.store.envReason() ?? 'the shell environment could not be resolved'}
+                </div>
+              </Show>
+              <Show
+                when={props.store.commitState() === 'failed' && props.store.commitOutput() !== null}
+              >
+                <div class="git-commit-output" data-testid="git-commit-output">
+                  <pre>{props.store.commitOutput()!.output}</pre>
+                  <Show when={props.store.commitOutput()!.truncated}>
+                    <span data-testid="git-commit-output-truncated">(output truncated)</span>
+                  </Show>
+                </div>
+              </Show>
+              <Button
+                variant="primary"
+                data-testid="git-commit"
+                disabled={commitDisabled()}
+                onClick={() => props.store.commit()}
+              >
+                Commit
+              </Button>
+            </div>
           </Section>
 
           {/* ── Commits (brief, git.log): what already happened, newest
