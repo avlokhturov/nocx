@@ -475,6 +475,19 @@ export class CommandEditor {
    *  veto keeps the draft with the host's report already on screen. */
   submit(): void {
     const doc = this.view.state.doc.toString()
+    // An empty prompt is not a command, and this is the only place that can
+    // say so before any state moves. CommandLedger.open already owns the rule
+    // — it refuses an empty string — but it is downstream of commit(), which
+    // clears and hides FIRST (the atomic handoff below). So an empty Enter
+    // threw out of onKeydown with the editor already hidden and no input-state
+    // transition to show it again: the prompt vanished for the rest of the
+    // session. Asking the question here keeps one answer to "is this a
+    // command" and keeps it on the side of the handoff that can still decline.
+    // Whitespace alone counts as empty for the same reason — it would open a
+    // block for a command nobody typed. Only the DECISION trims; what a real
+    // command sends is still the document byte-for-byte, so a leading-space
+    // line (` ls`, kept out of shell history on purpose) is untouched.
+    if (doc.trim() === '') return
     const hook = this.actions.beforeSubmit
     if (!hook) {
       this.commit(doc)

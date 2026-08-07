@@ -91,6 +91,37 @@ describe('CommandEditor', () => {
     expect(submit).toHaveBeenLastCalledWith('fresh')
   })
 
+  // An empty prompt is not a command. CommandLedger.open refuses an empty
+  // string by throwing, and commit() clears and hides BEFORE it calls submit
+  // — so an unguarded empty Enter threw out of the keydown with the editor
+  // already hidden, and nothing ever showed it again: the prompt was gone for
+  // the rest of the session (nocx-axqs, seen in CI as nocxify-journey's editor
+  // never returning). The two ends are asserted, not just the first: no submit
+  // AND the prompt is still there and still works.
+  it('Enter on an empty prompt is not a submit, and the prompt survives it', () => {
+    const { ed, view, submit } = setup()
+    ed.show()
+    enter(view)
+    expect(submit).not.toHaveBeenCalled()
+    expect(ed.isVisible).toBe(true)
+    ed.insertText('echo hi')
+    enter(view)
+    expect(submit).toHaveBeenCalledWith('echo hi')
+  })
+
+  // Whitespace alone is the same non-command: the ledger would accept it
+  // (it is truthy) and open a block for a command the user never typed.
+  // A LEADING space is not this case — ` ls` is a real command, and the
+  // trim decides only whether to submit, never what is sent.
+  it('a whitespace-only draft is not a command either', () => {
+    const { ed, view, submit } = setup()
+    ed.show()
+    ed.insertText('   ')
+    enter(view)
+    expect(submit).not.toHaveBeenCalled()
+    expect(ed.isVisible).toBe(true)
+  })
+
   it('submit receives the composed document byte-identical', () => {
     const { ed, view, submit } = setup()
     ed.show()

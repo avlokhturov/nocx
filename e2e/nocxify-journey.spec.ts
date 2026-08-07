@@ -485,8 +485,11 @@ test('a hand-typed ssh: frozen local block, remote blocks, compact second connec
     })
 
     // ── 2. command blocks on the REMOTE host from its first prompt ──
-    await page.keyboard.type('echo journey-1-ok')
-    await page.keyboard.press('Enter')
+    // Through the editor, like every other command this test submits: the
+    // remote prompt owns input here, and submitInEditor waits for the editor
+    // to be up before typing. Raw page.keyboard.type does not wait, so it
+    // raced the prompt's return — see the note at the second `exit` below.
+    await submitInEditor(page, 'echo journey-1-ok')
     const remote1 = pane(page).locator('.cmd-block', { hasText: 'journey-1-ok' })
     await expect(remote1).toBeVisible({ timeout: 30_000 })
     // The remote context is the TYPED destination (the env label), not an
@@ -497,8 +500,7 @@ test('a hand-typed ssh: frozen local block, remote blocks, compact second connec
     await expect(remote1.locator('.cmd-header-cwd')).toHaveCount(0)
 
     // ── 3. exit: the remote session ends, local blocks again, editor back ──
-    await page.keyboard.type('exit')
-    await page.keyboard.press('Enter')
+    await submitInEditor(page, 'exit')
     // The exit block (remote context) closes with "Connection … closed." and
     // freezes with NO code — the local D owns the ssh command's status.
     const exitBlock = pane(page).locator('.cmd-block', {
@@ -556,13 +558,18 @@ test('a hand-typed ssh: frozen local block, remote blocks, compact second connec
     await expect(enteredBlocks).toHaveCount(3, { timeout: 30_000 })
     await expect(enteredBlocks.nth(2)).toContainText(primaryBanner)
     await expect(enteredBlocks.nth(2)).toContainText('password:')
-    await page.keyboard.type('echo journey-2-ok')
-    await page.keyboard.press('Enter')
+    await submitInEditor(page, 'echo journey-2-ok')
     await expect(pane(page).locator('.cmd-block', { hasText: 'journey-2-ok' })).toBeVisible({
       timeout: 30_000,
     })
-    await page.keyboard.type('exit')
-    await page.keyboard.press('Enter')
+    // The block being visible means the OUTPUT arrived, not that the prompt is
+    // back and owns input again — the editor is still hidden for a moment
+    // after it. Typing raw into that gap sent `exit` nowhere, and the Enter
+    // then landed on the editor the instant it appeared, empty: that empty
+    // submit used to throw with the editor already hidden and strand it for
+    // the rest of the session (nocx-axqs). submitInEditor waits for the thing
+    // it needs — the editor — instead of betting on the machine.
+    await submitInEditor(page, 'exit')
     await expect(editor).toBeVisible({ timeout: 20_000 })
 
     // ── 5. authentication failure: ordinary terminal, real exit status ──
