@@ -1,4 +1,4 @@
-import { test, expect, type Page } from './harness'
+import { test, expect, promptReady, type Page } from './harness'
 
 // ── Placement helpers (shared with tabs.spec.ts conventions) ─────────────
 
@@ -21,6 +21,26 @@ async function switchPlacement(page: Page, value: 'horizontal' | 'vertical'): Pr
   } else {
     await expect(page.locator('#tabbar')).toHaveClass(/tabbar/, { timeout: 5000 })
   }
+}
+
+/**
+ * Wait until a freshly opened tab has finished taking focus for itself.
+ *
+ * A new tab's pane focuses its own prompt when the shell's first marker
+ * arrives: the input-state transition shows the editor and CommandEditor.show()
+ * focuses its CodeMirror view (terminal-content.ts:1568, editor.ts:711). That
+ * is correct product behaviour and it is asynchronous — it waits on the shell,
+ * not on the click.
+ *
+ * A test that puts focus somewhere deliberately before that has landed is
+ * racing the app for the same resource and will sometimes lose. It did, on CI:
+ * the poll below saw the tab button focused, and by the next evaluate the
+ * editor had taken focus, so document.activeElement carried no data-tab-id at
+ * all and the drag was never attempted (nocx-z9s9.11). Letting the app finish
+ * first makes the test's own focus the last word.
+ */
+async function settleNewTab(page: Page): Promise<void> {
+  await promptReady(page)
 }
 
 /**
@@ -148,6 +168,7 @@ test.describe('focus survives tab reorder', () => {
     // Add a second tab so there is something to reorder.
     await page.locator('[aria-label="New tab"]').click()
     await expect(page.locator('.nocx-tab')).toHaveCount(2)
+    await settleNewTab(page)
 
     await assertFocusSurvivesReorder(page)
   })
@@ -159,6 +180,7 @@ test.describe('focus survives tab reorder', () => {
     // Add a second tab in the vertical strip.
     await page.locator('[aria-label="New tab"]').click()
     await expect(page.locator('.nocx-tab')).toHaveCount(2)
+    await settleNewTab(page)
 
     await assertFocusSurvivesReorder(page)
   })
