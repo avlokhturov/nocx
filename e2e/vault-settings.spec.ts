@@ -23,9 +23,6 @@ import { readStand } from './stand'
  *  runs after Playwright has collected this file. */
 const devharnessBin = () => readStand().devharness
 
-const FIRST_PORT = 19880
-const SECOND_PORT = 19881
-
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 interface XdgDirsResult {
@@ -209,7 +206,7 @@ test.describe('Vault settings — change passphrase', () => {
   })
 
   test('change passphrase then unseal with new passphrase and connect', async ({ page }) => {
-    const ep = await backend.start(FIRST_PORT)
+    const ep = await backend.start()
     await bindEndpoint(page, ep)
 
     await page.goto('/')
@@ -248,7 +245,7 @@ test.describe('Vault settings — change passphrase', () => {
     const tabsBefore = await page.locator('.nocx-tab-title').count()
 
     // Phase 3: Restart backend (vault seals).
-    const ep2 = await backend.restart(SECOND_PORT)
+    const ep2 = await backend.restart()
     await bindEndpoint(page, ep2)
     await page.reload()
 
@@ -312,7 +309,7 @@ test.describe('Vault settings — reissue recovery code', () => {
   })
 
   test('reissue recovery code then unseal with new code and connect', async ({ page }) => {
-    const ep = await backend.start(FIRST_PORT)
+    const ep = await backend.start()
     await bindEndpoint(page, ep)
 
     await page.goto('/')
@@ -351,7 +348,7 @@ test.describe('Vault settings — reissue recovery code', () => {
 
     // Phase 3: Restart backend (vault seals).
     const tabsBefore = await page.locator('.nocx-tab-title').count()
-    const ep2 = await backend.restart(SECOND_PORT)
+    const ep2 = await backend.restart()
     await bindEndpoint(page, ep2)
     await page.reload()
 

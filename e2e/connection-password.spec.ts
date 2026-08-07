@@ -37,10 +37,8 @@ const devharnessBin = () => readStand().devharness
 const FIXTURE_PASSWORD = 'e2e-password-42'
 const PROFILE_NAME = 'Password Proof'
 const PROFILE_ID = 'ssh:password-proof'
-const FIXTURE_PORT = 19901
 const HOST_KEY_PROFILE_NAME = 'Host Key Proof'
 const HOST_KEY_PROFILE_ID = 'ssh:host-key-proof'
-const HOST_KEY_FIXTURE_PORT = 19902
 
 const TAB_TITLE = '.nocx-tab-title'
 const PROMPT = '.ui-prompt'
@@ -197,8 +195,8 @@ test.describe('connection password ask: first open prompts, remembered second op
   test('first open prompts and connects; after remembering, the second open does not prompt', async ({
     page,
   }) => {
-    const ep = await backend.start(FIXTURE_PORT)
-    const backendLog = join(root, `devharness-${FIXTURE_PORT}.log`)
+    const ep = await backend.start()
+    const backendLog = backend.logFile
     await bindEndpoint(page, ep)
     await page.goto('/')
     await expect(page.locator(TAB_TITLE).first()).not.toHaveText('', { timeout: 15_000 })
@@ -301,7 +299,7 @@ test.describe('open-time host key consent', () => {
   test('an unknown key asks once, records consent, and retries the failed open', async ({
     page,
   }) => {
-    const ep = await backend.start(HOST_KEY_FIXTURE_PORT)
+    const ep = await backend.start()
     seedPublicKeyProfile(backend.isolatedHome, fixture.addr, fixture.userKey)
     await bindEndpoint(page, ep)
     await page.goto('/')
@@ -314,7 +312,7 @@ test.describe('open-time host key consent', () => {
     const dialog = page.getByRole('dialog').filter({ hasText: 'Unknown host key' })
     await expect(dialog).toBeVisible({ timeout: 15_000 })
     await expect(dialog).toContainText('Offered fingerprint')
-    const backendLog = join(root, `devharness-${HOST_KEY_FIXTURE_PORT}.log`)
+    const backendLog = backend.logFile
     expect(readFileSync(backendLog, 'utf8')).not.toContain(`profile_id=${HOST_KEY_PROFILE_ID}`)
 
     await dialog.getByRole('button', { name: 'Trust host key' }).click()

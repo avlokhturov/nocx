@@ -48,7 +48,6 @@ const devharnessBin = () => readStand().devharness
 // Outside the ranges used by `wails dev` (34115), the e2e suite default
 // (9876), `dev-web.sh` (9880/5180), `npm run dev` (5173), and the other
 // history/vault specs (19876-19879), so the suites can run in parallel.
-const PORT = 19880
 
 const TITLE = '.nocx-tab-title'
 const INPUT = '.pane.active .nocx-editor-input'
@@ -118,7 +117,7 @@ test.describe('recall: typing narrows, and the panel states its coverage', () =>
     const gamma = `echo gamma-${marker}`
 
     // ── Phase 1: launch, run three commands ─────────────────────────────
-    const ep = await backend.start(PORT)
+    const ep = await backend.start()
     await bindEndpoint(page, ep)
     await page.goto('/')
     await expect(page.locator(TITLE).first()).not.toHaveText('', { timeout: 15_000 })

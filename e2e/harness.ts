@@ -118,9 +118,9 @@ export const test = base.extend<object, { appReady: void }>({
 // Usage:
 //   const backend = new VaultBackend('/tmp/nocx-devharness',
 //     { data: '/tmp/vt/data', config: '/tmp/vt/config', cache: '/tmp/vt/cache' })
-//   const { port, token } = await backend.start(firstPort)
+//   const { port, token } = await backend.start()
 //   // … test …
-//   const { port: p2, token: t2 } = await backend.restart(secondPort)
+//   const { port: p2, token: t2 } = await backend.restart()
 
 import { spawn, execSync, type ChildProcess } from 'node:child_process'
 import { existsSync, readFileSync, openSync, mkdirSync, copyFileSync } from 'node:fs'
@@ -243,6 +243,13 @@ export class VaultBackend {
   private proc: ChildProcess | null = null
   private logPath = ''
 
+  /** Where this backend is writing. A spec that wants to read the log asks for
+   *  it rather than rebuilding the name from a port it no longer chooses. */
+  get logFile(): string {
+    if (!this.logPath) throw new Error('backend has not been started yet')
+    return this.logPath
+  }
+
   /** The canonical home this backend was given, once it has been started. */
   private isolation: HomeIsolation | null = null
 
@@ -268,9 +275,20 @@ export class VaultBackend {
   }
 
   /** Start devharness on the given port, wait for WSPORT/WSTOKEN. */
-  async start(port: number): Promise<BackendEndpoint> {
+  /** Start the backend. The port defaults to 0, which asks the OS for a free
+   *  one and reads back what it got — devharness prints WSPORT either way.
+   *
+   *  It used to be required, and every spec picked a constant by hand. Three
+   *  pairs collided: vault-settings and recall-search both claimed 19880,
+   *  history-persistence and home-boundary-live both 19878, prompt-vault and
+   *  connection-password both 19901. In isolation each passed; in a full run
+   *  whichever went second could find the port still held and come up with no
+   *  backend at all, which surfaces as "no tab ever appeared" somewhere else
+   *  entirely. A port is a shared resource and hand-assignment does not scale
+   *  past the first person who forgets to check (nocx-z9s9.11). */
+  async start(port = 0): Promise<BackendEndpoint> {
     if (this.proc) throw new Error('backend already running; call stop() first')
-    this.logPath = resolve(this.disposable.root, `devharness-${port}.log`)
+    this.logPath = resolve(this.disposable.root, `devharness-${port || 'auto'}.log`)
     const logFd = openSync(this.logPath, 'w')
 
     const overrideEnv: Record<string, string> = { NOCX_WS_ADDR: `127.0.0.1:${port}` }
@@ -382,7 +400,8 @@ export class VaultBackend {
       /* fine */
     }
   }
-  async restart(port: number): Promise<BackendEndpoint> {
+  /** Restart with a fresh token. Same port policy as start(): 0 asks the OS. */
+  async restart(port = 0): Promise<BackendEndpoint> {
     this.stop()
     // Brief quiescent period so the OS releases the old listen socket.
     const { promise, resolve: wait } = Promise.withResolvers<void>()

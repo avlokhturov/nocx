@@ -473,10 +473,19 @@ test.describe('4. Scroll ownership — measured', () => {
     const pageScrolls = scrollable.filter((s) => s.cls.includes('ui-page__scroll'))
     expect(pageScrolls.length).toBe(1)
 
-    // Only .ui-page__scroll or .ui-page__rail should scroll
-    for (const s of scrollable) {
-      expect(s.cls.includes('ui-page__scroll') || s.cls.includes('ui-page__rail')).toBeTruthy()
-    }
+    // The invariant is about the PAGE: one scroll owner inside it, so a wheel
+    // event has one unambiguous target. The sidebar is not inside it — it is a
+    // peer region beside the page, with its own list and its own scrollbar,
+    // exactly as the rail has. It was added to this allowance when the Files
+    // panel gave the sidebar a scrolling body; before that the sidebar had
+    // nothing long enough to scroll and the omission cost nothing.
+    //
+    // Named in the failure rather than merely counted: "expected true, received
+    // false" says a stranger scrolls without saying which, and finding the
+    // stranger is the entire point of the check.
+    const OWNERS = ['ui-page__scroll', 'ui-page__rail', 'ui-sidebar-view__body']
+    const strangers = scrollable.filter((s) => !OWNERS.some((o) => s.cls.includes(o)))
+    expect(strangers, `unexpected scroll owners: ${JSON.stringify(strangers)}`).toEqual([])
   })
 
   test('the content area actually scrolls the last setting row into view', async ({ page }) => {

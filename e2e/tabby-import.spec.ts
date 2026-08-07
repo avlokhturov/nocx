@@ -20,7 +20,6 @@ const test = base
 /** Lazily, not at module scope: the stand is started by globalSetup, which
  *  runs after Playwright has collected this file. */
 const devharnessBin = () => readStand().devharness
-const FIRST_PORT = 19890
 
 // ── Encrypted vault fixture ──────────────────────────────────────────────
 //
@@ -120,7 +119,7 @@ test.describe('Tabby import preview + execute', () => {
   test('imports Tabby encrypted config via preview -> confirm -> execute, profile+secret appear', async ({
     page,
   }) => {
-    const ep = await backend.start(FIRST_PORT)
+    const ep = await backend.start()
     await bindEndpoint(page, ep)
     await page.goto('/')
 

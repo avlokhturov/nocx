@@ -44,8 +44,6 @@ const devharnessBin = () => readStand().devharness
 // TIME_WAIT. Both are outside the ranges used by the rest of the suite
 // (vault.spec 19876/19877, history-persistence 19878/19879, recall-search
 // 19880, wails 34115, the e2e default 9876).
-const FIRST_PORT = 19901
-const SECOND_PORT = 19902
 
 const TITLE = '.nocx-tab-title'
 const INPUT = '.nocx-editor-input'
@@ -99,7 +97,7 @@ test.describe('vault secrets in the prompt — the owner’s acceptance', () => 
     page,
   }) => {
     // ── Phase 1: set the vault up (Settings -> Secrets) ──────────────────
-    const ep = await backend.start(FIRST_PORT)
+    const ep = await backend.start()
     await bindEndpoint(page, ep)
     await page.goto('/')
     await expect(page.locator(TITLE).first()).not.toHaveText('', { timeout: 15_000 })
@@ -181,7 +179,7 @@ test.describe('vault secrets in the prompt — the owner’s acceptance', () => 
     await expect(receipt).toBeHidden({ timeout: 10_000 })
 
     // ── Phase 4: restart (the vault seals), Up, run again ────────────────
-    const ep2 = await backend.restart(SECOND_PORT)
+    const ep2 = await backend.restart()
     await bindEndpoint(page, ep2)
     await page.reload()
     await expect(page.locator(TITLE).first()).not.toHaveText('', { timeout: 15_000 })

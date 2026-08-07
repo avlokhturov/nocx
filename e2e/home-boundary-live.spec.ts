@@ -29,7 +29,6 @@ import { assertResolvedIsolatedHome, createHomeIsolation } from './home-isolatio
 /** Lazily, not at module scope: the stand is started by globalSetup, which
  *  runs after Playwright has collected this file. */
 const devharnessBin = () => readStand().devharness
-const PORT = 19878
 
 /** mtime of the real ~/.nocx, or null when it does not exist. */
 function realShellIntegrationStamp(): number | null {
@@ -54,7 +53,7 @@ test.describe('the e2e home boundary is obeyed, not just handed over', () => {
 
     const backend = new VaultBackend(devharnessBin(), { root }, true)
     try {
-      await backend.start(PORT)
+      await backend.start()
 
       // Resolved, not merely supplied.
       const installed = join(backend.isolatedHome, '.nocx')
