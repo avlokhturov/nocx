@@ -153,11 +153,25 @@ func printfBEscape(s string) string {
 // publish logic) plus the tier command. The whole remote command travels as
 // ONE argv word (the staged file is command-substituted into the ssh line),
 // so Linux's MAX_ARG_STRLEN of 128 KiB per argument is the binding bound —
-// macOS's per-argument cap is the whole 256 KiB block on older releases.
-// 112 KiB leaves headroom under both for the ShellAuto form, which carries
-// the bundle AND all three embedded tiers (~97 KiB today). The prelude's
-// embedded payloads are the only inputs that scale with this number; a
-// bundle that outgrows the cap must refuse rather than emit a command the
-// far host cannot exec. A var, not a const, so tests can prove the refusal
-// path.
-var maxFullLauncherLen = 112 * 1024
+// macOS's per-argument cap is the whole 256 KiB block on older releases. The
+// prelude's embedded payloads are the only inputs that scale with this
+// number; a bundle that outgrows the cap must refuse rather than emit a
+// command the far host cannot exec. A var, not a const, so tests can prove
+// the refusal path.
+//
+// 120 KiB, raised from 112 KiB on 2026-08-07 (nocx-z9s9.18). The old comment
+// said the ShellAuto form was "~97 KiB today", which had stopped being true
+// without anybody noticing: measured at the raise it was 112,676 bytes
+// against a 114,688-byte cap — 98.2% full, 2 KB of headroom for THREE
+// scripts. The intended margin had been eaten a few hundred bytes at a time,
+// and nothing failed until a script grew by 2 KB and every remote launch
+// refused at once. Adding a line of shell had become impossible, which is
+// not a state a limit should be able to reach quietly.
+//
+// So the number moved, and TestFullLauncherStaysUnderArgLimit now asserts the
+// MARGIN rather than the ceiling — erosion is the failure mode, and only a
+// test that watches the gap can report it while there is still room to act.
+// The real fix is smaller payloads: 62% of nocx.bash is comments, ~22 KB of
+// prose across the three scripts that the remote host is sent and never
+// reads (nocx-z9s9.17).
+var maxFullLauncherLen = 120 * 1024
