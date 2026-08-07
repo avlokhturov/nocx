@@ -189,6 +189,15 @@ export interface GitStore {
    *  form: adopting a new binding resets it (nocx-nak2). */
   sectionOpen(section: GitSection): boolean
   toggleSection(section: GitSection): void
+  /** The panel's path filter (nocx-52by). Same residence rule as the
+   *  sections: it lives HERE because the store outlives the panel, so a
+   *  filter survives a view switch, and it belongs to one repository —
+   *  adopting a new binding clears it, because a query typed against repo
+   *  A must never silently hide repo B's files. It is renderer-side only:
+   *  setFilter never issues a request, and a poll that lands while a
+   *  filter is typed keeps the filter (paths are a stable vocabulary). */
+  filter(): string
+  setFilter(v: string): void
   // ── The commit form — lives in the store PER BINDING (design §5.4): it
   // survives a view switch, never crosses to another repository, and is
   // never persisted. ─────────────────────────────────────────────────────
@@ -288,6 +297,10 @@ export function createGitStore(
   const [binding, setBinding] = createSignal<GitBinding | null>(null)
   const [status, setStatus] = createSignal<Status | null>(null)
   const [statusStale, setStatusStale] = createSignal(false)
+  /** The panel's path filter (nocx-52by): the one string that narrows both
+   *  lists. Lives per repository like the sections and the commit form —
+   *  resetRepositoryState clears it with them. */
+  const [filter, setFilter] = createSignal('')
   const [logState, setLogState] = createSignal<'idle' | 'loading' | 'loaded' | 'failed'>('idle')
   const [log, setLog] = createSignal<GitLogResult['log'] | null>(null)
   /** The collapsible sections' open state (nocx-nak2). A Record so one
@@ -662,14 +675,15 @@ export function createGitStore(
     setSectionsOpen((prev) => ({ ...prev, [section]: !prev[section] }))
   }
 
-  /** One repository context is gone or replaced: the commit draft and the
-   *  section collapses both belong to the repository the panel was showing,
-   *  and neither may leak into the next (design §5.4; nocx-nak2). NOT the
-   *  post-commit clear — that one only empties the form and calls
-   *  resetCommitForm directly. */
+  /** One repository context is gone or replaced: the commit draft, the
+   *  section collapses and the path filter all belong to the repository the
+   *  panel was showing, and none may leak into the next (design §5.4;
+   *  nocx-nak2; nocx-52by). NOT the post-commit clear — that one only
+   *  empties the form and calls resetCommitForm directly. */
   function resetRepositoryState(): void {
     resetCommitForm()
     setSectionsOpen({ staged: true, unstaged: true, commits: true })
+    setFilter('')
   }
 
   function rescope(next: ActiveOrigin | null): void {
@@ -1044,6 +1058,8 @@ export function createGitStore(
     conflictsPresent,
     sectionOpen,
     toggleSection,
+    filter,
+    setFilter,
     commitSubject,
     commitBody,
     setCommitSubject,
