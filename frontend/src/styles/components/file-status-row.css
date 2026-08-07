@@ -1,0 +1,137 @@
+/* FileStatusRow — one line of a Git panel list (design §5.4), composed on
+   the kit CollectionRow. This file owns only what the row adds: the status
+   letter and its tone, the file-type glyph, and the dimmed directory prefix.
+   Everything about the row itself (density, selection, focus, activation)
+   is CollectionRow's and nothing here repaints it — a surface may place the
+   row and never touch its appearance. */
+
+/* The parts' own line. It sits INSIDE `.ui-collection-row__info`, never
+   around CollectionRow — outside, it would orphan role="listitem" from its
+   role="list". Inside, it is what makes the three parts a row at all: the
+   info slot is a plain block, and must stay one because Connections,
+   Secrets and Footprint stack a name over a meta line inside it, so the
+   flex context the parts need has to be declared here (nocx-uf0p). */
+.ui-file-status-row {
+  display: flex;
+  align-items: center;
+  /* One step, not two. At `--space-2` the letter, the glyph and the path
+     each sat in their own island and the row read as three columns of
+     mostly air in a rail that has none to spare. */
+  gap: var(--space-1);
+  min-width: 0;
+  font-size: var(--font-size-sm);
+}
+
+/* The status letter: one character, a fixed column so every row's icon and
+   path start on the same line whatever the letter. The tone is this
+   component's decision (see file-status-row.tsx) — the surface passes the
+   wire's letter, never a colour. */
+.ui-file-status-row__status {
+  flex: 0 0 auto;
+  width: 1.25em;
+  text-align: center;
+  font-weight: 600;
+}
+
+.ui-file-status-row__status[data-tone='success'] {
+  color: var(--color-success);
+}
+
+.ui-file-status-row__status[data-tone='warning'] {
+  color: var(--color-warning);
+}
+
+.ui-file-status-row__status[data-tone='danger'] {
+  color: var(--color-danger);
+}
+
+.ui-file-status-row__status[data-tone='info'] {
+  color: var(--color-accent);
+}
+
+/* The line counts: +N −N, the answer to "how much did it change" (brief
+   nocx-i4ki). Rendered only when a count exists — an untracked, binary or
+   conflicted row, or one whose count read was bounded out (design D9), has
+   none and draws nothing, never +0 −0. The tones are fixed by meaning: an
+   addition is success, a removal danger; they never vary, so unlike the
+   status letter there is no tone table for a surface to name. Tabular
+   numerals keep a column of counts aligned as they change.
+
+   Last in the row and pushed to its trailing edge: the counts are a
+   fixed-width thing, and anywhere before the path that width is taken from
+   the file name, which is what the row exists to show (nocx-uf0p). The
+   auto margin also keeps them aligned down the list whatever each path
+   measures. */
+.ui-file-status-row__counts {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding-left: var(--space-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.ui-file-status-row__added {
+  color: var(--color-success);
+}
+
+.ui-file-status-row__deleted {
+  color: var(--color-danger);
+}
+
+/* The file-type glyph: every record this row renders is a file path (design
+   §4: --untracked-files=all lists files, not directories), so the kit
+   renders the file glyph and a surface cannot supply one. Decorative. */
+.ui-file-status-row__type-icon {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1em;
+  height: 1em;
+  color: var(--color-text-dim);
+}
+
+.ui-file-status-row__type-icon svg {
+  width: 1em;
+  height: 1em;
+}
+
+/* The path: the name first, then its directory, dimmed. The two shrink at
+   very different rates and that ordering is the point — a path rendered as
+   one string ellipsises at the tail, and the tail is the FILE NAME, so a
+   sidebar of twelve files under one deep directory becomes twelve identical
+   `graphify-out/cache/…` rows that answer nothing. The directory gives up
+   its width first (a shrink factor three orders of magnitude larger) and
+   disappears entirely before the name is touched. */
+.ui-file-status-row__path {
+  display: flex;
+  align-items: baseline;
+  /* One step between the name and its directory. The directory is the part
+     that shrinks to nothing, and at two steps the gap it leaves behind is
+     width the name could have used. */
+  gap: var(--space-1);
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+/* The name does not shrink AT ALL — a shrink factor merely makes the
+   directory yield faster, and "faster" still spends some of the deficit on
+   the name, so both ended up clipped while a useless `f…` of directory
+   survived. `flex-shrink: 0` with `max-width: 100%` makes the priority
+   absolute: the directory is spent to nothing first, and only a name too
+   long for the row on its own ellipsises. */
+.ui-file-status-row__name {
+  flex: 0 0 auto;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ui-file-status-row__dir {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--color-text-dim);
+}

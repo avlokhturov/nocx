@@ -380,6 +380,39 @@ describe('document-level keydown redirect with a block selected (W4)', () => {
   })
 })
 
+it('a focused interactive control keeps its keys — the typing rescue stands down (nocx-nak2)', async () => {
+  const { view, ed, content, teardown } = await mountTerminal(makeClipboard(), {
+    attachToDocument: true,
+  })
+  try {
+    content.setVisible(true)
+    ed.show()
+    expect(ed.isVisible).toBe(true)
+
+    // A button outside the terminal (the sidebar, say) has the focus —
+    // the state a user reaches by tabbing, where Space must activate the
+    // button, not type into the prompt.
+    const probe = document.createElement('button')
+    probe.textContent = 'probe'
+    document.body.appendChild(probe)
+    probe.focus()
+    expect(document.activeElement).toBe(probe)
+
+    const ev = new KeyboardEvent('keydown', { key: 'x', bubbles: true, cancelable: true })
+    document.body.dispatchEvent(ev)
+
+    // The rescue stood down: focus stayed on the button, nothing landed in
+    // the prompt, and nothing was preventDefaulted (the rescue is
+    // focus-only — the native insertion would not have been cancelled).
+    expect(document.activeElement).toBe(probe)
+    expect(view.state.doc.toString()).toBe('')
+    expect(ev.defaultPrevented).toBe(false)
+    probe.remove()
+  } finally {
+    teardown()
+  }
+})
+
 describe('Escape with the editor visible but unfocused (focus-loss rescue)', () => {
   /** Dispatch Escape where a user's keystroke lands after clicking away —
    *  on the body, not on the editor surface. */

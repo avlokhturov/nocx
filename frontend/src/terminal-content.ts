@@ -1712,6 +1712,29 @@ export class TerminalContent extends BaseTabContent {
         // the shell. Whitelisting the editor and the grid was not enough, because
         // any control OUTSIDE the terminal is equally not ours.
         if (isTextEntry(active)) return
+        // A control the user deliberately focused keeps its keys. The rescue
+        // is for a click on the pane followed by typing; a focusable control
+        // — something a user could have TABBED to — is the opposite of a pane
+        // click, and stealing its keys breaks the control: Space on a focused
+        // button must activate the button, never type into the prompt
+        // (nocx-nak2 — the Section disclosure's Space, and every button's,
+        // was being eaten; the disclosure is operable with Enter and Space
+        // only because this stands down).
+        // `[tabindex]:not([tabindex="-1"])` is this repository's existing
+        // spelling of "focusable by the user" — page.tsx, prompt.tsx and
+        // dialog.tsx all use it, and AD-8 says the concept gets one owner.
+        // A bare `[tabindex]` would also match tabindex="-1", which is
+        // programmatically focusable and NOT tabbable: the tab strip's
+        // roving items and CollectionRow's inactive rows carry it, and
+        // matching them would stand the rescue down exactly when a user
+        // clicked a tab and started typing — the case it exists for.
+        if (
+          active !== null &&
+          active.matches(
+            'button, select, a[href], [role="button"], [tabindex]:not([tabindex="-1"])',
+          )
+        )
+          return
         // Focus-only, deliberately. The keydown's target was fixed when it was
         // dispatched — this keystroke started outside the editor, so the event
         // never reaches the editor's own keydown listener. The design contract

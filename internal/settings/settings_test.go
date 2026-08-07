@@ -466,6 +466,64 @@ func TestNumberValidation(t *testing.T) {
 	}
 }
 
+// ── Sidebar width (nocx-qmcu) ──────────────────────────────────────────
+
+func TestSidebarWidthDeclaration(t *testing.T) {
+	reg := settings.New(&fakeDoc{}, &fakeSecretStore{})
+	n := findNumber(t, reg, "sidebar.width")
+
+	if n.Default() != float64(240) {
+		t.Errorf("default = %v, want 240 (the pre-drag width)", n.Default())
+	}
+	if n.Min() == nil || *n.Min() != 200 {
+		t.Errorf("min = %v, want 200 (the Git dense row's floor)", n.Min())
+	}
+	if n.Max() == nil || *n.Max() != 640 {
+		t.Errorf("max = %v, want 640 (the panel must not own the window)", n.Max())
+	}
+	if n.Section() != "Interface" {
+		t.Errorf("section = %q, want Interface", n.Section())
+	}
+}
+
+func TestSidebarWidthRoundTrip(t *testing.T) {
+	doc := &fakeDoc{}
+	reg := settings.New(doc, &fakeSecretStore{})
+	n := findNumber(t, reg, "sidebar.width")
+
+	// A fresh registry reports the default.
+	got, err := reg.GetNumber(n)
+	if err != nil {
+		t.Fatalf("GetNumber: %v", err)
+	}
+	if got != 240 {
+		t.Fatalf("fresh GetNumber = %v, want 240", got)
+	}
+
+	// Set within bounds, then a NEW registry over the same doc reads it
+	// back — the persistence that makes the width survive a restart.
+	if setErr := reg.SetNumber(n, 480); setErr != nil {
+		t.Fatalf("SetNumber: %v", setErr)
+	}
+	reloaded := settings.New(doc, &fakeSecretStore{})
+	got, err = reloaded.GetNumber(findNumber(t, reloaded, "sidebar.width"))
+	if err != nil {
+		t.Fatalf("reloaded GetNumber: %v", err)
+	}
+	if got != 480 {
+		t.Fatalf("reloaded GetNumber = %v, want 480", got)
+	}
+
+	// Out-of-bounds values are rejected at the seam, the same validation
+	// the drag handle's own clamp enforces on the other side.
+	if err := reg.SetNumber(n, 100); !errors.Is(err, settings.ErrValidation) {
+		t.Errorf("below-min SetNumber error = %v, want ErrValidation", err)
+	}
+	if err := reg.SetNumber(n, 900); !errors.Is(err, settings.ErrValidation) {
+		t.Errorf("above-max SetNumber error = %v, want ErrValidation", err)
+	}
+}
+
 // ── Select validation ──────────────────────────────────────────────────
 
 func TestSelectValidation(t *testing.T) {

@@ -44,6 +44,14 @@
   border-radius: var(--border-radius-sm, 4px);
 }
 
+/* Dense variant — the sidebar's row rhythm (the Git panel's lists). The
+   manager-page spacing is the row's baseline; density is a typed data-*
+   decision the row makes, never a surface repaint from outside. */
+.ui-collection-row[data-density='dense'] {
+  gap: var(--space-2);
+  padding: var(--space-1);
+}
+
 .ui-collection-row:hover {
   background: color-mix(in srgb, white, transparent 97%);
 }
@@ -52,6 +60,20 @@
    highlight lives with the component, not in a surface's rules. */
 .ui-collection-row[data-selected='true'] {
   background: var(--color-surface-hover);
+}
+
+/* Focused is the current keyboard target — ordered after selection so a row
+   that is both shows the stronger state, the same pairing as the tree row. */
+.ui-collection-row[data-focused='true'] {
+  background: var(--color-surface-active);
+}
+
+/* The visible keyboard target of an activatable row (onActivate → tabIndex
+   0). focus-visible only: a mouse click that happens to focus the row must
+   not paint a ring. */
+.ui-collection-row:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: -2px;
 }
 
 .ui-collection-row__info {

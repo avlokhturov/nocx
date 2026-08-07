@@ -1,0 +1,81 @@
+/* GitDiff — the read-only unified-diff tab (git-manager §5.4).
+   A surface, not a kit component: this file owns the .git-diff family.
+   The Reload affordance is the kit's Button (ui-button) and is placed here
+   (flex gap on the notice bar) but never repainted. Colours resolve through
+   --color-* tokens (ADR-0013); the diff line classes below are recoloured
+   with the theme like the tok-* vocabulary. Imported from git-diff-content
+   (vite bundles it; style.css is the composition root's import list). */
+
+.git-diff {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  height: 100%;
+  background: var(--color-canvas);
+}
+
+/* The notice bar: one line per rendered state (binary, tooLarge, empty,
+   gone, changed, error, unavailable, loading). Each line carries
+   data-state, and the bar is hidden entirely for a clean read. */
+.git-diff__notice {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-3);
+  border-bottom: 1px solid var(--color-surface-raised);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+.git-diff__notice[hidden] {
+  display: none;
+}
+
+.git-diff__line[data-tone='warning'] {
+  color: var(--color-warning);
+}
+
+.git-diff__line[data-tone='danger'] {
+  color: var(--color-danger);
+}
+
+/* The CM6 host fills the remaining pane. Layout only — colours live in the
+   editor base theme (ReadOnlyHost) and the classes below. */
+.git-diff__editor {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.git-diff .cm-editor {
+  height: 100%;
+  font-size: var(--font-size-terminal);
+}
+
+.git-diff .cm-scroller {
+  font-family: var(--font-family-mono);
+  line-height: 1.45;
+  overflow: auto;
+}
+
+/* Diff line decoration — one class per line kind, resolved through tokens
+   so a theme switch recolours the surface (ADR-0013). The diff carries no
+   syntax highlighting in this slice; these are the only colours. The add/del
+   washes mirror badge.css's token-wash pattern. */
+.git-diff .cm-line.git-diff-add {
+  background: color-mix(in srgb, var(--color-success), transparent 80%);
+}
+
+.git-diff .cm-line.git-diff-del {
+  background: color-mix(in srgb, var(--color-danger), transparent 80%);
+}
+
+.git-diff .cm-line.git-diff-hunk {
+  background: var(--color-surface-raised);
+  color: var(--color-text-dim);
+}
+
+.git-diff .cm-line.git-diff-file {
+  color: var(--color-text-dim);
+}

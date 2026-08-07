@@ -1,0 +1,234 @@
+/* ── Git surface (design §5.4) ────────────────────────────────────────────
+   Placement only: kit components (Badge, IconButton, FileStatusRow,
+   Section, TextField, Checkbox, Button, StatusCard) are placed — flex, gap,
+   alignment, margins — never repainted (ADR-0014). The list rows are the
+   kit's FileStatusRow; the surface only separates the lists and states. */
+
+/* The panel body: a scrolling column with the header pinned to the top.
+   The horizontal padding is the rail's only inset — the lists inside carry
+   none of their own, so a row's status letter starts one step from the
+   edge rather than three. */
+.git-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  /* Vertical only. The horizontal inset is the sidebar body's, and a
+     surface adding its own on top of the kit's doubled it — 24px of air
+     each side in a 250px rail, taken from the file names. */
+  padding: var(--space-2) 0;
+}
+
+/* Header: branch, upstream, changed count — one line each, in that order.
+
+   It does not wrap and it does not share lines. Three parts never fit a
+   rail: wrapping put the count on a line of its own with a hole beside it,
+   and squeezing them onto one line ellipsised the upstream to `origin…`,
+   which names no branch. Pairing the branch with the count then cost the
+   branch a fixed ~80px column, so a 34-character branch clipped while its
+   own row was half empty. One line each is what fits all three whole. */
+.git-header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+/* A text line and its trailing control (the branch and its copy button, the
+   upstream and its open-on-hosting link). The text ellipsises; the icon
+   never shrinks. */
+.git-header__line {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+/* The branch/upstream lines' trailing controls (copy branch, open on its
+   hosting): fixed-width icons that the ellipsising branch or upstream text
+   must never squeeze — placement only, the kit's own size rules stay. */
+.git-header__line .ui-icon-button {
+  flex: 0 0 auto;
+}
+/* The branch: the header's one piece of primary information, so it gets the
+   width and gives it up last. Clipped rather than wrapped — a header that
+   grows three lines tall pushes the lists off the screen. */
+.git-header__branch {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.git-header__upstream {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text-dim);
+  font-size: var(--font-size-sm);
+}
+
+/* Its own line, under the branch and its upstream. Beside the branch it was
+   a fixed ~80px column taken from the one string in this header that has to
+   be read in full. */
+.git-header__count {
+  color: var(--color-text-dim);
+  font-size: var(--font-size-sm);
+  white-space: nowrap;
+}
+
+/* The D9 cap banner: a traversal that could not be completed must not look
+   complete — the panel says which of the two answers it is. */
+.git-cap-banner {
+  color: var(--color-warning);
+  font-size: var(--font-size-sm);
+}
+
+/* A failed poll: the last good status stays on screen, marked stale, with
+   the refresh that recovers it. */
+.git-stale {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  color: var(--color-warning);
+  font-size: var(--font-size-sm);
+}
+
+/* A rejected mutation call: inline, never a toast that evaporates. */
+.git-mutation-error {
+  color: var(--color-danger);
+  font-size: var(--font-size-sm);
+}
+
+/* The whole-index controls sit above the lists; the refusal below them
+   carries the D19 reason. The two actions split the rail between them. Sized to their
+   labels they left a ragged block of dead space beside them; at full width
+   they read as one control strip and each is an easier target. */
+.git-list-actions {
+  display: flex;
+  gap: var(--space-1);
+}
+
+.git-list-actions > * {
+  flex: 1 1 0;
+}
+
+.git-conflict-refusal {
+  color: var(--color-warning);
+  font-size: var(--font-size-sm);
+  margin: 0;
+}
+
+/* Lists are the kit's rows inside the kit's Section; nothing here but the
+   separation between the sections. */
+
+/* The degraded-environment warning (D6): shown before the first commit
+   because a hook that silently cannot find its tools is the exact failure
+   the decision exists to prevent. */
+.git-env-warning {
+  color: var(--color-warning);
+  font-size: var(--font-size-sm);
+}
+
+/* git's own account of a failed commit (D11), verbatim — a pre is the
+   honest container; the truncation mark admits the bound. */
+.git-commit-output pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: var(--font-size-sm);
+  max-height: 12rem;
+  overflow: auto;
+}
+
+.git-commit-output {
+  color: var(--color-danger);
+  font-size: var(--font-size-sm);
+}
+
+/* The opening interstitial and the failed-open retry, centred like the
+   files panel's. */
+.git-loading {
+  display: flex;
+  justify-content: center;
+  padding: var(--space-6) 0;
+}
+
+.git-error {
+  padding: var(--space-2) 0;
+}
+
+/* ── Commits (brief, git.log) ─────────────────────────────────────────────
+   The commit row is the kit's CollectionRow in its dense variant; the row
+   body — subject over a meta line of short hash, relative time and ref
+   chips — is the surface's own element, and the chips are the kit's Badge,
+   placed, never repainted. */
+.git-log {
+  display: flex;
+  flex-direction: column;
+}
+
+.git-log-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.git-log-row__subject {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-log-row__meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+  color: var(--color-text-dim);
+  font-size: var(--font-size-sm);
+}
+
+.git-log-row__hash {
+  font-variant-numeric: tabular-nums;
+}
+
+.git-log-row__time {
+  white-space: nowrap;
+}
+
+/* The section's own states and the D9 cap notice — the log is bounded and
+   must say which of the two answers it is (brief, git.log). */
+.git-log__state {
+  margin: 0;
+  color: var(--color-text-dim);
+  font-size: var(--font-size-sm);
+}
+
+.git-log__cap {
+  margin: 0;
+  color: var(--color-warning);
+  font-size: var(--font-size-sm);
+}
+
+/* The commit form's own vertical rhythm. `Section dense` gives its Stack
+   `gap: 0` — correct for rows that carry their own padding, wrong for a
+   column of fields, a checkbox, a warning and a button, which arrived
+   touching one another. Placement, not repaint: the surface sets flow and
+   spacing and leaves every control's appearance to the kit. */
+.git-commit-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+/* The commit button spans the form, like the two whole-index actions above
+   it. A single action at the foot of a rail-width form reads as unfinished
+   when it is sized to the word "Commit". */
+.git-commit-form > .ui-button {
+  width: 100%;
+}

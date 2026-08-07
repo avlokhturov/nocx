@@ -143,6 +143,13 @@ func (w *WailsApp) startup(ctx context.Context) {
 	// itself unavailable and the surfaces fall back to typing paths.
 	w.backend.SetDialogService(&wailsDialogService{ctx: ctx})
 
+	// The native browser-open is the same control-plane shape as the file
+	// dialog: the renderer reaches the Wails runtime through shell.openUrl
+	// on the WebSocket, and this is the only place the Wails context exists
+	// to back it. Wired before Start; the dev-web harness never runs this,
+	// and the method then reports itself unavailable and the panel toasts.
+	w.backend.SetUrlOpener(&wailsUrlOpener{ctx: ctx})
+
 	// Settle any transaction in flight from a previous launch.
 	if err := w.backend.Updater.Reconcile(ctx); err != nil {
 		w.backend.Logger.Warn("update reconcile at startup failed", "error", err)
@@ -167,6 +174,20 @@ func (d *wailsDialogService) OpenFile(_ context.Context) (string, error) {
 			{DisplayName: "All files", Pattern: "*"},
 		},
 	})
+}
+
+// wailsUrlOpener opens a URL in the system browser through the Wails
+// runtime. The renderer never calls it directly; it is the backend of the
+// shell.openUrl control-plane method. runtime.BrowserOpenURL returns
+// nothing and cannot report failure, so an unwired opener is the only
+// failure this seam can surface — and that is the dev-web configuration.
+type wailsUrlOpener struct {
+	ctx context.Context
+}
+
+func (o *wailsUrlOpener) OpenURL(_ context.Context, url string) error {
+	runtime.BrowserOpenURL(o.ctx, url)
+	return nil
 }
 
 // upgradeInstallPath derives the path to the installed bundle from the

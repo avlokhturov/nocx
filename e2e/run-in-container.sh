@@ -69,8 +69,29 @@ tty_flag=()
 cpu_flag=()
 [ -n "${NOCX_E2E_CPUS:-}" ] && cpu_flag=(--cpus "$NOCX_E2E_CPUS")
 
+# A git worktree keeps no .git DIRECTORY — it keeps a .git FILE pointing at
+# `<main-repo>/.git/worktrees/<name>`, which is outside the bind mount. The
+# container then answers "fatal: not a git repository", and because
+# container-entry.sh builds devharness with `go build` — which stamps VCS
+# info, deliberately spelled the same way here as on CI — the run dies before
+# a single spec starts.
+#
+# So mount the common git dir at its own absolute path, which is where the
+# .git file's `gitdir:` line says to look. Nothing is written to it: read-only
+# says so, and the only reader is `go build` asking what commit this is.
+#
+# Empty for an ordinary checkout, whose .git is a directory already inside the
+# mount. This is what lets the suite run from an Orca-managed worktree, which
+# is where the git-manager epic was built.
+git_flag=()
+if [ -f "$repo_root/.git" ]; then
+  git_common="$(git -C "$repo_root" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+  [ -n "$git_common" ] && git_flag=(-v "$git_common:$git_common:ro")
+fi
+
 exec docker run --rm -i ${tty_flag[@]+"${tty_flag[@]}"} \
   ${cpu_flag[@]+"${cpu_flag[@]}"} \
+  ${git_flag[@]+"${git_flag[@]}"} \
   -v "$repo_root:/work" \
   -v nocx-e2e-node:/work/node_modules \
   -v nocx-e2e-fenode:/work/frontend/node_modules \

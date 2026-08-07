@@ -50,18 +50,21 @@ fi
 # also runs everything, because "nothing staged" is not evidence of safety.
 RUN_GO=1
 RUN_FE=1
+RUN_E2E=1
 CHANGED=$(git diff --cached --name-only 2>/dev/null || true)
 if [ -n "$CHANGED" ]; then
     RUN_GO=0
     RUN_FE=0
+    RUN_E2E=0
     while IFS= read -r f; do
         [ -n "$f" ] || continue
         case "$f" in
             # The hook and the build system decide how everything else is
             # checked, so a change to either invalidates the scoping itself.
-            .githooks/*|Makefile|.golangci.yml) RUN_GO=1; RUN_FE=1 ;;
+            .githooks/*|Makefile|.golangci.yml) RUN_GO=1; RUN_FE=1; RUN_E2E=1 ;;
             *.go|go.mod|go.sum)                 RUN_GO=1 ;;
             frontend/*)                         RUN_FE=1 ;;
+            e2e/*|playwright.config.ts)         RUN_E2E=1 ;;
         esac
     done <<CHANGED_EOF
 $CHANGED
@@ -129,8 +132,15 @@ else
     ok "deadcode ratchet — skipped (no Go changes staged)"
 fi
 
-# --- 4. prettier (always: it covers markdown and config the scoping misses) --
-host_gate "prettier --check" sh -c 'cd frontend && npm run format:check'
+# --- 4. prettier (always) ---------------------------------------------------
+# From the REPOSITORY ROOT, which is what the comment here always claimed and
+# `cd frontend` always made false: the root carries its own .prettierrc.json,
+# .prettierignore and format:check, and nothing ran them, so 16 files outside
+# frontend/ drifted unformatted — three specs, eleven contract schemas and two
+# ADRs — while a syntactically invalid e2e spec passed every gate in this file
+# (nocx-yv37, nocx-pvjj). The root run includes frontend/ as a subdirectory, so
+# this is one checker widened, not a second one added.
+host_gate "prettier --check" npm run format:check
 
 # --- 5. frontend-only host gates --------------------------------------------
 if [ "$RUN_FE" = 1 ]; then
@@ -140,6 +150,18 @@ if [ "$RUN_FE" = 1 ]; then
     host_gate "tsc --noEmit" sh -c 'cd frontend && npm run typecheck'
 else
     ok "eslint, fixture gate, tsc — skipped (no frontend/ changes staged)"
+fi
+
+# --- 5b. the e2e suite is TypeScript nobody was checking --------------------
+# The root tsconfig.json covers e2e/**/*.ts and playwright.config.ts, and it
+# exists BECAUSE two specs shipped as compile errors and ran anyway (the file's
+# own comment names nocx-azxe.2). Nothing invoked it: this hook only ever ran
+# `cd frontend && npm run typecheck`. A gate that exists and is never called is
+# the same defect as code on main that no caller reaches.
+if [ "$RUN_E2E" = 1 ]; then
+    host_gate "tsc --noEmit (e2e)" npm run typecheck
+else
+    ok "tsc --noEmit (e2e) — skipped (no e2e/ changes staged)"
 fi
 
 # --- 6. collect the container gates -----------------------------------------

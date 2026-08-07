@@ -1,6 +1,11 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
-import { normalizePlatform, platformFromUserAgent, bootstrapPlatform } from './platform'
+import {
+  normalizePlatform,
+  platformFromUserAgent,
+  bootstrapPlatform,
+  currentPlatform,
+} from './platform'
 
 vi.mock('../wailsjs/runtime/runtime', () => ({
   Environment: vi.fn(),
@@ -35,6 +40,35 @@ describe('platformFromUserAgent', () => {
     ['', 'no user agent at all'],
   ])('reports web for %s', (ua) => {
     expect(platformFromUserAgent(ua)).toBe('web')
+  })
+})
+
+describe('currentPlatform — the capability-facing fact', () => {
+  // Declared before the bootstrap tests on purpose: this is the module's
+  // initial state, and the first bootstrap call below overwrites it.
+  it('is web before the runtime has answered', () => {
+    expect(currentPlatform()).toBe('web')
+  })
+
+  it('is the GOOS the Wails runtime reports', async () => {
+    environmentMock.mockResolvedValue({ platform: 'darwin' })
+    await bootstrapPlatform(document.createElement('div'))
+    expect(currentPlatform()).toBe('darwin')
+  })
+
+  it('stays web when there is no runtime, even when the UA fallback says darwin', async () => {
+    // A macOS browser must keep the traffic-light chrome (data-platform
+    // darwin) while URL opening takes the web path — the browser has no
+    // Wails runtime to open a system browser with. The two facts are both
+    // platform.ts's; no consumer re-derives either (AD-8).
+    environmentMock.mockRejectedValue(new Error('no wails runtime'))
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15',
+    )
+    const root = document.createElement('div')
+    await expect(bootstrapPlatform(root)).resolves.toBe('darwin')
+    expect(root.getAttribute('data-platform')).toBe('darwin')
+    expect(currentPlatform()).toBe('web')
   })
 })
 

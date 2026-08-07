@@ -23,12 +23,19 @@
  */
 
 import { render, Dynamic } from 'solid-js/web'
-import { createEffect, createMemo, For, on, onCleanup, Show } from 'solid-js'
+import { createEffect, createMemo, createSignal, For, on, onCleanup, Show, untrack } from 'solid-js'
 import type { Component } from 'solid-js'
 import { SidebarView } from './ui/sidebar-view'
+import { ResizeHandle } from './ui/resize-handle'
 import { createAppStore, type AppActions, type AppState } from './state'
 import { IconButton } from './ui/icon-button'
 import type { ActiveOrigin } from './tab-content'
+import {
+  SIDEBAR_WIDTH_MAX,
+  SIDEBAR_WIDTH_MIN,
+  SIDEBAR_WIDTH_STEP,
+  type SidebarWidthController,
+} from './sidebar-width'
 
 const STORAGE_KEY = 'nocx.sidebar.collapsed'
 
@@ -100,12 +107,26 @@ interface PanelRootProps {
   views: readonly SidebarViewDescriptor[]
   getActiveProfileId: () => string | null
   getActiveOrigin: () => ActiveOrigin | null
+  /** The width controller (nocx-qmcu) — when present the panel renders the
+   *  kit ResizeHandle at its trailing edge and the drag resizes #sidebar. */
+  resize?: SidebarWidthController
 }
 
 function PanelRoot(props: PanelRootProps) {
   const activeDesc = createMemo(
     () => props.views.find((v) => v.id === props.state.sidebar.activeViewId) ?? null,
   )
+
+  // The handle's aria-valuenow is a projection of the controller's width —
+  // the controller is the single owner, the signal is pure display state.
+  // The initializer is a one-shot read (the controller is stable per mount),
+  // so it is untracked — the subscription effect below is the tracked path.
+  const [width, setWidth] = createSignal(untrack(() => props.resize?.width ?? 0))
+  createEffect(() => {
+    if (!props.resize) return
+    const unsub = props.resize.subscribe(setWidth)
+    onCleanup(unsub)
+  })
 
   return (
     <Show when={activeDesc()}>
@@ -115,6 +136,21 @@ function PanelRoot(props: PanelRootProps) {
         getActiveProfileId={props.getActiveProfileId}
         getActiveOrigin={props.getActiveOrigin}
       />
+      {/* The handle is the flex row's trailing slot (see #sidebar in
+          style.css): a real flex item, never an overlay, so it can neither
+          cover the view's scrollbar nor be covered by it. */}
+      <Show when={props.resize}>
+        <ResizeHandle
+          ariaLabel="Resize sidebar"
+          value={width()}
+          min={SIDEBAR_WIDTH_MIN}
+          max={SIDEBAR_WIDTH_MAX}
+          step={SIDEBAR_WIDTH_STEP}
+          onChange={(w) => props.resize!.apply(w)}
+          onCommit={(w) => props.resize!.apply(w, { persist: true })}
+          onDragStateChange={(dragging) => props.resize!.setDragging(dragging)}
+        />
+      </Show>
     </Show>
   )
 }
@@ -357,6 +393,10 @@ function SidebarSolid(props: SidebarSolidProps) {
  *                           (see SidebarViewProps.activeOrigin). Defaults
  *                           to null — views that need real scope provide
  *                           one (the Files panel, design §5.4).
+ * @param resize             the width controller (nocx-qmcu), created by
+ *                           the composition root from the `sidebar.width`
+ *                           setting. When present the panel renders the
+ *                           kit ResizeHandle and drags resize #sidebar.
  */
 export function mountSidebar(
   bar: HTMLElement,
@@ -366,6 +406,7 @@ export function mountSidebar(
   storage?: SidebarStorage | null,
   getActiveProfileId?: () => string | null,
   getActiveOrigin?: () => ActiveOrigin | null,
+  resize?: SidebarWidthController,
 ): SidebarHandle {
   const safeStorage = storage ?? safeLocalStorage()
   const activeProfileId = getActiveProfileId ?? (() => null)
@@ -404,8 +445,6 @@ export function mountSidebar(
     ),
     bar,
   )
-
-  // ── Render the panel content into `panel` (#sidebar host) ────────────
   const destroyPanel = render(
     () => (
       <PanelRoot
@@ -413,6 +452,7 @@ export function mountSidebar(
         views={views}
         getActiveProfileId={activeProfileId}
         getActiveOrigin={activeOrigin}
+        resize={resize}
       />
     ),
     panel,

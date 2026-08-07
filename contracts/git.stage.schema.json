@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/git.stage.schema.json",
+  "title": "GitStageResult",
+  "description": "Result of the git.stage JSON-RPC method: the fresh post-mutation status (design D12 — a mutation returns the fresh status, and D17's response-scope discipline is what makes that stick). paths[] never means 'all': an empty array is a no-op that still returns the current status, and 'all' is git.stageAll (D19). A staging failure is a JSON-RPC error — the panel repaints from its next poll — because there is no renderable refusal state for staging; git.unstage is the one operation with one (the unborn branch).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status"],
+  "properties": {
+    "status": {
+      "$ref": "git.status.schema.json#/$defs/status"
+    }
+  }
+}

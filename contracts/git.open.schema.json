@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/git.open.schema.json",
+  "title": "GitOpenResult",
+  "description": "Result of the git.open JSON-RPC method: the outcome table of resolving a repository for a session (design §5.1), plus the binding that names it for every later git.* call. sessionId appears exactly once on the wire — here — and the authorisation is connState's, not the global session registry's (D15): a connection that learned another connection's session id gets a refusal, not a repository. state is the discriminator: every outcome is a RESULT state, never a JSON-RPC error, because each one is something the panel can render (not a repository, git absent, git too old, no verified cwd, remote tab). The first status rides this result — otherwise every open is two round trips and a guaranteed frame of empty lists — and is present exactly when the inline read succeeded.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["state"],
+  "properties": {
+    "state": {
+      "description": "The open outcome. noCwd and remoteUnsupported are decided by the transport from the session's origin before the repo factory is invoked; the factory itself answers ok, notARepository, gitUnavailable or gitTooOld.",
+      "type": "string",
+      "enum": ["ok", "notARepository", "gitUnavailable", "gitTooOld", "noCwd", "remoteUnsupported"]
+    },
+    "bindingId": {
+      "description": "The backend-issued id every later git.* call echoes. Minted from crypto/rand so it cannot be guessed or enumerated; it is an address, not a bearer token — every later call re-checks that the binding's session is in the requesting connection's connState (Acquire performs that one check). Present iff state is ok.",
+      "type": "string"
+    },
+    "toplevel": {
+      "description": "The worktree root, as git rev-parse reported it. Part of the binding's identity: two linked worktrees of one repository are different working trees, so the panel keys its singleton tabs on this value. Present iff state is ok.",
+      "type": "string"
+    },
+    "gitVersion": {
+      "description": "The git version the capability probe found, when the probe ran (e.g. '2.55.0'). On gitTooOld this is what the panel compares against the floor.",
+      "type": "string"
+    },
+    "envState": {
+      "description": "Whether git will run in the environment resolved from the user's shell or in the degraded os.Environ() fallback (design D6). degraded also covers the brief window before the background resolution settles (nocx-6pz0): the panel must never claim resolved while the resolution is still running. The panel renders degraded before the first commit: a hook that silently could not find its tools is the exact failure the decision exists to prevent.",
+      "type": "string",
+      "enum": ["resolved", "degraded"]
+    },
+    "envReason": {
+      "description": "Why the environment is degraded; present exactly when envState is degraded.",
+      "type": "string"
+    },
+    "status": {
+      "description": "The first status, taken inline so an open is one round trip. Absent when the inline read failed — the binding is still live and the panel's first poll retries, so a failed inline read is not an open failure.",
+      "$ref": "git.status.schema.json#/$defs/status"
+    }
+  }
+}

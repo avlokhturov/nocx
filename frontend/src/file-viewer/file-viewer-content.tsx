@@ -15,8 +15,7 @@
 // registry and tells this content whether the binding may still be called.
 // ═══════════════════════════════════════════════════════════════════════════
 
-import { EditorState } from '@codemirror/state'
-import { EditorView } from '@codemirror/view'
+import { ReadOnlyHost } from '../read-only-host'
 import { render } from 'solid-js/web'
 import { Button } from '../ui'
 import type { FilesReadResult } from '../generated/files.read'
@@ -120,31 +119,10 @@ function linesForResult(result: FilesReadResult): NoticeLine[] {
 
 // ── Content ────────────────────────────────────────────────────────────────
 
-/** CM6 look: colours only, resolved through the app's --color-* tokens so a
- *  theme switch recolours the viewer (ADR-0013). Layout lives in CSS. */
-const viewerTheme = EditorView.theme({
-  '&': {
-    backgroundColor: 'var(--color-canvas)',
-    color: 'var(--color-text)',
-  },
-  '&.cm-focused': { outline: 'none' },
-  '.cm-content': { caretColor: 'transparent' },
-  '.cm-gutters': {
-    backgroundColor: 'var(--color-canvas)',
-    color: 'var(--color-text-dim)',
-    border: 'none',
-  },
-  '.cm-activeLine': { backgroundColor: 'var(--color-surface-hover)' },
-  '.cm-activeLineGutter': { backgroundColor: 'var(--color-surface-hover)' },
-  '.cm-selectionBackground, &.cm-focused .cm-selectionBackground': {
-    backgroundColor: 'var(--color-surface-active)',
-  },
-})
-
 export class FileViewerContent extends BaseTabContent {
   private root: HTMLElement | null = null
   private noticeEl: HTMLElement | null = null
-  private view: EditorView | null = null
+  private readonly host = new ReadOnlyHost()
   private noticeDispose: (() => void) | null = null
   private unsubscribeLiveness: (() => void) | null = null
 
@@ -178,19 +156,7 @@ export class FileViewerContent extends BaseTabContent {
     this.root.append(this.noticeEl, editorHost)
     target.append(this.root)
 
-    this.view = new EditorView({
-      state: EditorState.create({
-        doc: '',
-        extensions: [
-          EditorState.readOnly.of(true),
-          EditorView.editable.of(false),
-          viewerHighlighting,
-          languageForPath(this.target.path),
-          viewerTheme,
-        ],
-      }),
-      parent: editorHost,
-    })
+    this.host.mount(editorHost, signal, [viewerHighlighting, languageForPath(this.target.path)])
 
     signal.addEventListener('abort', () => this.dispose(), { once: true })
 
@@ -216,7 +182,7 @@ export class FileViewerContent extends BaseTabContent {
   }
 
   focus(): void {
-    this.view?.focus()
+    this.host.focus()
   }
 
   dispose(): void {
@@ -229,8 +195,7 @@ export class FileViewerContent extends BaseTabContent {
     this.unsubscribeLiveness = null
     this.noticeDispose?.()
     this.noticeDispose = null
-    this.view?.destroy()
-    this.view = null
+    this.host.dispose()
     this.root?.remove()
     this.root = null
     this.noticeEl = null
@@ -297,11 +262,7 @@ export class FileViewerContent extends BaseTabContent {
   /** Replace the whole document. Read-only is an input gate; the host may
    *  still paint content (the wire's bytes are the only writer). */
   private applyDoc(text: string): void {
-    const view = this.view
-    if (!view) return
-    view.dispatch({
-      changes: { from: 0, to: view.state.doc.length, insert: text },
-    })
+    this.host.setDoc(text)
   }
 
   // ── Notice bar ──────────────────────────────────────────────────────────

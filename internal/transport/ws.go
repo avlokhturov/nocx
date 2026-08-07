@@ -22,6 +22,7 @@ import (
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/discovery"
 	"github.com/shady2k/nocx/internal/filesystem"
+	"github.com/shady2k/nocx/internal/git"
 	"github.com/shady2k/nocx/internal/importer"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
@@ -98,6 +99,12 @@ type WSServer struct {
 	// handler may read it while startup assigns it.
 	dialogMu      sync.RWMutex
 	dialogService DialogService
+	// Native URL-open capability (shell.openUrl). When nil, the method
+	// returns -32601: the dev-web harness has no Wails runtime to open a
+	// browser with. Set post-construction from main.go's WailsApp.startup,
+	// guarded like the dialog service.
+	urlMu     sync.RWMutex
+	urlOpener UrlOpener
 
 	// Profile resolver maps profile IDs to SSH connect configs.
 	resolver ProfileResolver
@@ -212,6 +219,21 @@ type WSServer struct {
 	filesMu        sync.Mutex
 	filesBindings  map[string]*filesBinding           // bindingID → bookkeeping
 	filesBySession map[session.ID]map[string]struct{} // sessionID → bindingIDs
+
+	// git is the binding registry backing the git.* control plane (spec
+	// §5.1). When nil, those methods return -32601. The repo factory rides
+	// a separate option; the transport never constructs a repository
+	// itself (AD-8).
+	git        *git.Registry
+	gitFactory git.RepoFactory
+
+	// gitMu guards gitBindings and gitBySession: the transport's own
+	// bookkeeping for bindings it issued (internal/git exposes neither a
+	// binding's session nor anything else the notification addressing
+	// needs).
+	gitMu        sync.Mutex
+	gitBindings  map[string]*gitBinding             // bindingID → bookkeeping
+	gitBySession map[session.ID]map[string]struct{} // sessionID → bindingIDs
 
 	// ringsMu protects rx and stopped. One sessionRx per session;
 	// keyed by session.ID. When stopped is true, getOrCreateRx returns nil
@@ -519,6 +541,24 @@ func WithFilesystemProviderFactory(f FilesystemProviderFactory) WSServerOption {
 	return func(s *WSServer) { s.filesProviderFor = f }
 }
 
+// WithGitRegistry attaches the binding registry backing the git.* control
+// plane (spec §5.1). When absent, those methods return -32601. The
+// composition root constructs the registry (internal/app/app.go); without
+// this line the whole git package is reachable from its own tests and
+// nowhere else (AGENTS.md check 5).
+func WithGitRegistry(r *git.Registry) WSServerOption {
+	return func(s *WSServer) { s.git = r }
+}
+
+// WithGitRepoFactory attaches the repo factory git.open invokes. The
+// composition root wires the local factory (internal/git/local) for local
+// sessions; the transport never constructs one itself (AD-8, D16 — the
+// factory IS the local/remote seam). When absent, git.open answers an
+// error.
+func WithGitRepoFactory(f git.RepoFactory) WSServerOption {
+	return func(s *WSServer) { s.gitFactory = f }
+}
+
 // WithFilesRevealer attaches the OS file-manager reveal capability
 // (files.reveal). When absent, files.reveal returns -32601: the dev-web
 // harness has no Wails runtime, and a reveal that did nothing would be a
@@ -544,6 +584,8 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 		filesBindings:     make(map[string]*filesBinding),
 		filesBySession:    make(map[session.ID]map[string]struct{}),
 		filesPollInterval: defaultFilesPollInterval,
+		gitBindings:       make(map[string]*gitBinding),
+		gitBySession:      make(map[session.ID]map[string]struct{}),
 	}
 	if caps, err := credential.NewCaptureRegistry(); err != nil {
 		// No entropy for the fingerprint key: no offers are made and
@@ -630,6 +672,10 @@ func (s *WSServer) Stop(ctx context.Context) error {
 		// Files (fm-w8): Stop closes every session, which closes its
 		// bindings (spec §5.1); the watcher goroutines stop with them.
 		s.filesSessionClosed(sess.ID())
+		// Git (spec §5.5): Stop closes every session, which closes its git
+		// bindings too. No subscriber is attached at shutdown — nobody to
+		// notify, and gitSessionClosed's nil capture is exactly that case.
+		s.gitSessionClosed(sess.ID(), nil)
 	}
 
 	// Application shutdown destroys every pending capture (the contract's
@@ -1002,6 +1048,10 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 	case "profiles.list", "profiles.create", "profiles.update", "profiles.delete",
 		"profiles.effective", "profiles.patch":
 		s.handleProfileMethod(wconn, req)
+	case "git.open", "git.status", "git.diff", "git.stage", "git.unstage",
+		"git.stageAll", "git.unstageAll", "git.commit", "git.headMessage",
+		"git.log", "git.remote", "git.close":
+		s.handleGitMethod(wconn, state, req)
 	case "profiles.importTabby":
 		s.handleImportTabby(wconn, req)
 	case "profiles.tabbyPreview":
@@ -1055,6 +1105,8 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.handleDialogOpenFile(wconn, req)
 	case "shell.environmentObserved":
 		s.handleShellEnvironmentObserved(wconn, req)
+	case "shell.openUrl":
+		s.handleShellOpenUrl(wconn, req)
 	case "history.query":
 		s.handleHistoryQuery(ctx, wconn, req)
 	case "history.record":
@@ -1749,6 +1801,12 @@ func (s *WSServer) monitorExit(rx *sessionRx, sess session.Session) {
 	// once.
 	s.filesSessionClosed(sess.ID())
 
+	// Git (spec §5.5): the session's git bindings die with it, and their
+	// subscriber was captured above — the one deliverable moment, because
+	// removeRx already ran and an emit-time lookup would find nobody
+	// (spec §5.2, nocx-lzfb).
+	s.gitSessionClosed(sess.ID(), wconn)
+
 	if wconn == nil {
 		return
 	}
@@ -1812,13 +1870,20 @@ func (s *WSServer) closeSession(sid session.ID) {
 	// The registry entry is needed after Close to decide the discovery
 	// target teardown, so read it first.
 	sess, _ := s.registry.Get(sid)
+	// The subscriber is captured BEFORE removeRx — the git teardown below
+	// writes its notification to this capture, because at that moment an
+	// emit-time lookup finds nobody (spec §5.2, nocx-lzfb). monitorExit
+	// already captured; the explicit-close path captures nothing today.
+	var wconn *wsConn
 	rx := s.getRx(sid)
 	if rx != nil {
+		wconn, _ = rx.getSubscriber()
 		rx.ring.close()
 	}
 	s.removeRx(sid)
 	_ = s.registry.Close(sid)
 	s.filesSessionClosed(sid)
+	s.gitSessionClosed(sid, wconn)
 	s.discoverySessionClosed(sess)
 }
 

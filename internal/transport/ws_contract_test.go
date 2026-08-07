@@ -17,6 +17,7 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/filesystem"
+	"github.com/shady2k/nocx/internal/git"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/pty"
@@ -36,6 +37,35 @@ const contractDir = "../../contracts"
 
 func loadSchema(t *testing.T, name string) *jsonschema.Schema {
 	t.Helper()
+	c := jsonschema.NewCompiler()
+	// Cross-file $refs (e.g. git.stage → git.status#/$defs/status) resolve
+	// against the referenced schema's $id, so every contract is registered
+	// under its canonical $id URL before anything is compiled — otherwise
+	// the compiler would try to fetch https://nocx.local/... from the
+	// network. The schema under test keeps the plain-name convention every
+	// existing call site uses. The single shared declaration this enables
+	// is the point: one concept, one owner (contracts/README.md, AD-8).
+	entries, err := os.ReadDir(contractDir)
+	if err != nil {
+		t.Fatalf("read contracts dir: %v", err)
+	}
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".schema.json") {
+			continue
+		}
+		f, openErr := os.Open(filepath.Join(contractDir, e.Name())) //nolint:gosec // test-only path under contracts/
+		if openErr != nil {
+			t.Fatalf("open %s: %v", e.Name(), openErr)
+		}
+		doc, parseErr := jsonschema.UnmarshalJSON(f)
+		_ = f.Close()
+		if parseErr != nil {
+			t.Fatalf("parse %s: %v", e.Name(), parseErr)
+		}
+		if addErr := c.AddResource("https://nocx.local/contracts/"+e.Name(), doc); addErr != nil {
+			t.Fatalf("add %s: %v", e.Name(), addErr)
+		}
+	}
 	path := filepath.Join(contractDir, filepath.Base(name))
 	f, openErr := os.Open(path) //nolint:gosec // a test-only path under contracts/
 	if openErr != nil {
@@ -47,7 +77,6 @@ func loadSchema(t *testing.T, name string) *jsonschema.Schema {
 	if parseErr != nil {
 		t.Fatalf("parse %s: %v", path, parseErr)
 	}
-	c := jsonschema.NewCompiler()
 	if addErr := c.AddResource(name, doc); addErr != nil {
 		t.Fatalf("add %s: %v", name, addErr)
 	}
@@ -561,6 +590,45 @@ func TestDialogOpenFile_OverTheWireConformsToContract(t *testing.T) {
 		t.Fatalf("dialog.openFile: %+v", envelope.Error)
 	}
 	validateJSON(t, schema, envelope.Result, "dialog.openFile result")
+}
+
+// ── shell.openUrl (brief, nocx-hc0m) ────────────────────────────────────
+
+// The DTO's own conformance: the result is the empty object, exactly like
+// files.reveal — the browser either opened or the method failed.
+func TestShellOpenUrl_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "shell.openUrl.schema.json")
+	raw, err := json.Marshal(struct{}{})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "shell.openUrl DTO")
+}
+
+// The real method through the real socket, with the fake opener standing in
+// for the Wails runtime: the opener receives exactly the URL the renderer
+// asked to open, and the result satisfies the contract.
+func TestShellOpenUrl_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "shell.openUrl.schema.json")
+	h := newInventoryHarness(t)
+	opener := &fakeUrlOpener{}
+	h.ws.SetUrlOpener(opener)
+
+	resp := jsonrpcCall(t, h.conn, "shell.openUrl", map[string]any{"url": "https://github.com/shady2k/nocx"})
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, string(resp))
+	}
+	if envelope.Error != nil {
+		t.Fatalf("shell.openUrl: %+v", envelope.Error)
+	}
+	validateJSON(t, schema, envelope.Result, "shell.openUrl result (real socket)")
+	if got := opener.opened(); len(got) != 1 || got[0] != "https://github.com/shady2k/nocx" {
+		t.Fatalf("opener received %v, want the one URL", got)
+	}
 }
 
 // ── secrets.saveKeyMaterial ─────────────────────────────────────────────
@@ -3163,5 +3231,635 @@ func TestFilesChanged_OverTheWireConformsToContract(t *testing.T) {
 	}
 	if params.Rev == "" {
 		t.Error("rev is absent — the poll loop knew the new digest and must carry it")
+	}
+}
+
+// ── git.* ───────────────────────────────────────────────────────────────
+
+// The eleven wire shapes of the git-manager control plane (spec §5.2,
+// §5.3): ten methods plus the git.changed notification, which gets the
+// same three checks as a method because an unsolicited notification is
+// exactly where an addressing defect hides. status is declared ONCE in
+// contracts/git.status.schema.json and referenced with a cross-file $ref
+// from the six other results that carry it; the loader registers every
+// contract under its $id so those refs resolve.
+
+func TestGitStatus_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "git.status.schema.json")
+	three, one := 3, 1
+	populated := gitStatusWire{
+		Branch: "main", Detached: false, Unborn: false, Head: "abc1234",
+		Upstream: "origin/main", Ahead: 1, Behind: 2,
+		Staged:     []gitEntryWire{{Path: "staged.txt", X: "M", Y: "."}},
+		Unstaged:   []gitEntryWire{{Path: "unstaged.txt", X: ".", Y: "M", Added: &three, Deleted: &one}},
+		Conflicted: []gitEntryWire{},
+		Total:      2, Completeness: "complete",
+	}
+	cases := map[string]gitStatusPollResult{
+		"populated": {
+			Status: populated, EnvState: "resolved",
+		},
+		// The counts are the brief's acceptance shape: +3 −1 rides the
+		// entry, and its ABSENCE (untracked, binary, conflicted, bounded
+		// out) is the wire's "no count exists" — never a 0 the panel
+		// would have to second-guess.
+		"counts are optional": {
+			Status: gitStatusWire{
+				Branch: "main", Head: "abc1234",
+				Staged:     []gitEntryWire{{Path: "new.txt", X: "?", Y: "?"}},
+				Unstaged:   []gitEntryWire{},
+				Conflicted: []gitEntryWire{},
+				Total:      1, Completeness: "complete",
+			},
+			EnvState: "resolved",
+		},
+		"unborn": {
+			Status: gitStatusWire{
+				Branch: "master", Unborn: true,
+				Staged: []gitEntryWire{}, Unstaged: []gitEntryWire{}, Conflicted: []gitEntryWire{},
+				Total: 0, Completeness: "complete",
+			},
+			EnvState: "resolved",
+		},
+		"detached": {
+			Status: gitStatusWire{
+				Branch: "", Detached: true, Head: "abc1234",
+				Staged: []gitEntryWire{}, Unstaged: []gitEntryWire{}, Conflicted: []gitEntryWire{},
+				Total: 0, Completeness: "complete",
+			},
+			EnvState: "resolved",
+		},
+		// The degraded case is the one D6 exists for, and envReason rides
+		// exactly it — never a resolved result carrying a reason.
+		"degraded env": {
+			Status:    populated,
+			EnvState:  "degraded",
+			EnvReason: "the shell environment has not been resolved yet; the first commit will wait for it",
+		},
+	}
+	for name, r := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(r)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "git.status DTO")
+		})
+	}
+}
+
+func TestGitOpen_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "git.open.schema.json")
+	st := func() *gitStatusWire {
+		return &gitStatusWire{
+			Branch: "main", Head: "abc1234",
+			Staged: []gitEntryWire{}, Unstaged: []gitEntryWire{}, Conflicted: []gitEntryWire{},
+			Total: 0, Completeness: "complete",
+		}
+	}
+	cases := map[string]gitOpenResult{
+		"ok": {
+			State: "ok", BindingID: "ab12", Toplevel: "/tmp/repo",
+			GitVersion: "2.55.0", EnvState: "resolved", Status: st(),
+		},
+		"degraded env": {
+			State: "ok", BindingID: "ab12", Toplevel: "/tmp/repo",
+			GitVersion: "2.55.0", EnvState: "degraded",
+			EnvReason: "environment resolution failed: no login shell",
+			Status:    st(),
+		},
+		"inline status failed": {
+			State: "ok", BindingID: "ab12", Toplevel: "/tmp/repo",
+			GitVersion: "2.55.0", EnvState: "resolved",
+		},
+		"not a repository":   {State: "notARepository"},
+		"git unavailable":    {State: "gitUnavailable"},
+		"git too old":        {State: "gitTooOld", GitVersion: "2.20.1"},
+		"no cwd":             {State: "noCwd"},
+		"remote unsupported": {State: "remoteUnsupported"},
+	}
+	for name, r := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(r)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "git.open DTO")
+		})
+	}
+}
+
+func TestGitDiff_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "git.diff.schema.json")
+	cases := map[string]gitDiffResult{
+		"ok":       {State: "ok", Text: "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n"},
+		"tooLarge": {State: "tooLarge", Text: "--- a/x", Truncated: true},
+		"binary":   {State: "binary", Text: ""},
+		"empty":    {State: "empty", Text: ""},
+		"gone":     {State: "gone", Text: ""},
+	}
+	for name, r := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(r)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "git.diff DTO")
+		})
+	}
+}
+
+func TestGitStage_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "git.stage.schema.json")
+	raw, err := json.Marshal(gitStatusResult{Status: gitStatusWire{
+		Branch: "main", Head: "abc1234",
+		Staged:   []gitEntryWire{{Path: "a.txt", X: "M", Y: "."}},
+		Unstaged: []gitEntryWire{}, Conflicted: []gitEntryWire{},
+		Total: 1, Completeness: "complete",
+	}})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "git.stage DTO")
+}
+
+func TestGitUnstage_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "git.unstage.schema.json")
+	status := gitStatusWire{
+		Branch: "main", Head: "abc1234",
+		Staged: []gitEntryWire{}, Unstaged: []gitEntryWire{}, Conflicted: []gitEntryWire{},
+		Total: 0, Completeness: "complete",
+	}
+	unborn := status
+	unborn.Branch, unborn.Unborn, unborn.Head = "master", true, ""
+	cases := map[string]gitUnstageResult{
+		"ok":     {State: "ok", Status: status},
+		"unborn": {State: "unborn", Status: unborn},
+	}
+	for name, r := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(r)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "git.unstage DTO")
+		})
+	}
+}
+
+func TestGitStageAll_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "git.stageAll.schema.json")
+	raw, err := json.Marshal(gitStatusResult{Status: gitStatusWire{
+		Branch: "main", Head: "abc1234",
+		Staged: []gitEntryWire{}, Unstaged: []gitEntryWire{}, Conflicted: []gitEntryWire{},
+		Total: 0, Completeness: "complete",
+	}})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "git.stageAll DTO")
+}
+
+func TestGitUnstageAll_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "git.unstageAll.schema.json")
+	raw, err := json.Marshal(gitStatusResult{Status: gitStatusWire{
+		Branch: "main", Head: "abc1234",
+		Staged: []gitEntryWire{}, Unstaged: []gitEntryWire{}, Conflicted: []gitEntryWire{},
+		Total: 0, Completeness: "complete",
+	}})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "git.unstageAll DTO")
+}
+
+func TestGitCommit_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "git.commit.schema.json")
+	status := gitStatusWire{
+		Branch: "main", Head: "abc1234",
+		Staged: []gitEntryWire{}, Unstaged: []gitEntryWire{}, Conflicted: []gitEntryWire{},
+		Total: 0, Completeness: "complete",
+	}
+	cases := map[string]gitCommitResult{
+		"ok": {
+			State: "ok", Head: "abc1234", OutputTruncated: false, Status: &status,
+		},
+		"failed": {
+			State: "failed", Output: "pre-commit hook failed", OutputTruncated: false,
+		},
+		"failed truncated": {
+			State: "failed", Output: "…", OutputTruncated: true,
+		},
+		"committed but stale": {
+			State: "ok", Head: "abc1234", OutputTruncated: false, StatusStale: true,
+		},
+	}
+	for name, r := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(r)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "git.commit DTO")
+		})
+	}
+}
+
+func TestGitHeadMessage_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "git.headMessage.schema.json")
+	cases := map[string]gitHeadMessageResult{
+		"ok":   {State: "ok", Message: "subject\n\nbody"},
+		"none": {State: "none"},
+	}
+	for name, r := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(r)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "git.headMessage DTO")
+		})
+	}
+}
+
+func TestGitLog_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "git.log.schema.json")
+	cases := map[string]gitLogResult{
+		"populated": {
+			Log: gitLogWire{
+				Entries: []gitLogEntryWire{{
+					Hash:       "5738d62b66777a78af894c0708d3a7e8798a4d8d",
+					ShortHash:  "5738d62",
+					Subject:    "third",
+					AuthorName: "Test Author",
+					AuthoredAt: "2026-08-07T12:52:40+03:00",
+					Refs:       []string{"main", "v1.0"},
+				}},
+				Total:        1,
+				Completeness: "complete",
+			},
+		},
+		"empty": {
+			Log: gitLogWire{
+				Entries:      []gitLogEntryWire{},
+				Total:        0,
+				Completeness: "complete",
+			},
+		},
+		"capped": {
+			Log: gitLogWire{
+				Entries: []gitLogEntryWire{{
+					Hash: "aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111", ShortHash: "aaaa111",
+					Subject: "one", AuthorName: "A", AuthoredAt: "2026-08-07T12:52:40+03:00",
+					Refs: []string{},
+				}},
+				Total:        51,
+				Completeness: "capped",
+			},
+		},
+	}
+	for name, r := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(r)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "git.log DTO")
+		})
+	}
+}
+
+// git.remote (brief, nocx-hc0m): the DTO must marshal to a schema-valid
+// result in both states — ok with the remote's URL, and none, which is the
+// ordinary "nothing to open" answer and never an error.
+func TestGitRemote_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "git.remote.schema.json")
+	for name, dto := range map[string]gitRemoteResult{
+		"ok":   {State: "ok", URL: "git@github.com:shady2k/nocx.git"},
+		"none": {State: "none"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(dto)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "git.remote DTO ("+name+")")
+		})
+	}
+}
+
+// The real method through the real socket: a branch tracking a remote
+// answers the remote's own URL, and the none state stays a result.
+func TestGitRemote_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "git.remote.schema.json")
+	repo := newStubGitRepo()
+	e := gitContractEnv(t, repo)
+	sid := e.openSession(t, 1)
+	bid := e.openGitBinding(t, sid, "/tmp/repo", 2)
+	raw := gitWireCall(t, e, "git.remote", map[string]any{"bindingId": bid}, 3)
+	validateJSON(t, schema, raw, "git.remote result (real socket)")
+	var got struct {
+		State string `json:"state"`
+		URL   string `json:"url"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("git.remote: decode: %v", err)
+	}
+	if got.State != "ok" || got.URL != "git@github.com:shady2k/nocx.git" {
+		t.Fatalf("git.remote = %+v, want ok with the remote's URL", got)
+	}
+}
+
+// The none state over the real socket: the no-remote answer must arrive as
+// a RESULT the schema accepts, never a transport error.
+func TestGitRemote_NoneOverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "git.remote.schema.json")
+	repo := &stubGitRepo{status: stubStatus(), remoteErr: &git.ErrNoRemote{}}
+	e := gitContractEnv(t, repo)
+	sid := e.openSession(t, 1)
+	bid := e.openGitBinding(t, sid, "/tmp/repo", 2)
+	raw := gitWireCall(t, e, "git.remote", map[string]any{"bindingId": bid}, 3)
+	validateJSON(t, schema, raw, "git.remote none result (real socket)")
+}
+
+func TestGitClose_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "git.close.schema.json")
+	raw, err := json.Marshal(gitCloseResult{Closed: true})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "git.close DTO")
+}
+
+// TestGitChanged_DTOConformsToContract validates the notification's PARAMS
+// object only, exactly as files.changed's test does: an unsolicited
+// notification has no result shape to check, so the params are the
+// contract.
+func TestGitChanged_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "git.changed.schema.json")
+	n := gitChangedNotification{
+		JSONRPC: "2.0", Method: "git.changed",
+		Params: gitChangedParams{BindingID: "ab12", Reason: "sessionClosed"},
+	}
+	raw, err := json.Marshal(n)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var frame struct {
+		Params json.RawMessage `json:"params"`
+	}
+	if err := json.Unmarshal(raw, &frame); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	validateJSON(t, schema, frame.Params, "git.changed DTO")
+}
+
+// ── git.* over the wire ──────────────────────────────────────────────────
+
+// gitContractEnv boots the git test env with a stub factory whose repo
+// answers the given canned values.
+func gitContractEnv(t *testing.T, repo *stubGitRepo) *gitTestEnv {
+	t.Helper()
+	return newGitTestEnv(t, WithGitRepoFactory(&stubGitFactory{
+		mkRepo:  func() git.Repo { return repo },
+		outcome: stubOpenOutcome(),
+	}))
+}
+
+// gitWireCall drives a git.* method through the real socket and returns the
+// raw result, failing on any RPC error.
+func gitWireCall(t *testing.T, e *gitTestEnv, method string, params any, id int) json.RawMessage {
+	t.Helper()
+	resp := jsonrpcCallWithID(t, e.conn, method, params, id)
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("%s: unmarshal: %v\nraw: %s", method, err, resp)
+	}
+	if envelope.Error != nil {
+		t.Fatalf("%s: %+v", method, envelope.Error)
+	}
+	return envelope.Result
+}
+
+func TestGitOpen_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "git.open.schema.json")
+	e := gitContractEnv(t, newStubGitRepo())
+	sid := e.openSession(t, 1)
+
+	raw := gitWireCall(t, e, "git.open", map[string]any{"sessionId": sid, "cwd": "/tmp/repo"}, 2)
+	validateJSON(t, schema, raw, "git.open result (real socket)")
+}
+
+func TestGitStatus_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "git.status.schema.json")
+	e := gitContractEnv(t, newStubGitRepo())
+	sid := e.openSession(t, 1)
+	bid := e.openGitBinding(t, sid, "/tmp/repo", 2)
+	raw := gitWireCall(t, e, "git.status", map[string]any{"bindingId": bid}, 3)
+	validateJSON(t, schema, raw, "git.status result (real socket)")
+}
+
+// TestGitStatusEnvStateRepeats_OverTheWire is the interval's wire half
+// (nocx-69ey, AGENTS.md rule 3 — stated with both ends): the poll carries
+// the environment fact on EVERY response, so a warning shown for an open
+// that landed in the pre-settle window is withdrawn by a later poll that
+// carries the settled resolution — the same binding, no re-open. The stub
+// scripts the transition the real resolver performs; the schema's required
+// envState is what makes this test catch a server that never sends it.
+func TestGitStatusEnvStateRepeats_OverTheWire(t *testing.T) {
+	schema := loadSchema(t, "git.status.schema.json")
+	repo := newStubGitRepo()
+	repo.mu.Lock()
+	repo.envState = git.EnvDegraded
+	repo.envReason = "the shell environment has not been resolved yet; the first commit will wait for it"
+	repo.mu.Unlock()
+	e := newGitTestEnv(t, WithGitRepoFactory(&stubGitFactory{
+		mkRepo: func() git.Repo { return repo },
+		outcome: git.OpenOutcome{
+			State: git.OpenOK, Toplevel: "/tmp/repo", GitDir: "/tmp/repo/.git",
+			GitVersion: "2.55.0", EnvState: git.EnvDegraded, EnvReason: repo.envReason,
+		},
+	}))
+	sid := e.openSession(t, 1)
+	bid := e.openGitBinding(t, sid, "/tmp/repo", 2)
+
+	// First poll: the resolution has not settled — degraded, with the
+	// reason the panel renders.
+	raw := gitWireCall(t, e, "git.status", map[string]any{"bindingId": bid}, 3)
+	var first struct {
+		EnvState  string `json:"envState"`
+		EnvReason string `json:"envReason"`
+	}
+	if err := json.Unmarshal(raw, &first); err != nil {
+		t.Fatalf("first poll: unmarshal: %v", err)
+	}
+	if first.EnvState != "degraded" || first.EnvReason == "" {
+		t.Fatalf("first poll: envState=%q envReason=%q, want degraded with a reason", first.EnvState, first.EnvReason)
+	}
+	validateJSON(t, schema, raw, "git.status result, pre-settle (real socket)")
+
+	// The resolution settles; the NEXT poll carries resolved — same
+	// binding, nothing re-opened.
+	repo.mu.Lock()
+	repo.envState = git.EnvResolved
+	repo.envReason = ""
+	repo.mu.Unlock()
+	raw = gitWireCall(t, e, "git.status", map[string]any{"bindingId": bid}, 4)
+	var second struct {
+		EnvState  string `json:"envState"`
+		EnvReason string `json:"envReason"`
+	}
+	if err := json.Unmarshal(raw, &second); err != nil {
+		t.Fatalf("second poll: unmarshal: %v", err)
+	}
+	if second.EnvState != "resolved" {
+		t.Fatalf("second poll: envState=%q, want resolved — the warning must be withdrawable", second.EnvState)
+	}
+	if second.EnvReason != "" {
+		t.Fatalf("second poll: envReason=%q, want absent once resolved", second.EnvReason)
+	}
+	validateJSON(t, schema, raw, "git.status result, settled (real socket)")
+}
+
+func TestGitDiff_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "git.diff.schema.json")
+	e := gitContractEnv(t, newStubGitRepo())
+	sid := e.openSession(t, 1)
+	bid := e.openGitBinding(t, sid, "/tmp/repo", 2)
+	raw := gitWireCall(t, e, "git.diff", map[string]any{
+		"bindingId": bid, "path": "unstaged.txt", "side": "unstaged", "maxBytes": 1 << 20,
+	}, 3)
+	validateJSON(t, schema, raw, "git.diff result (real socket)")
+}
+
+func TestGitStage_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "git.stage.schema.json")
+	e := gitContractEnv(t, newStubGitRepo())
+	sid := e.openSession(t, 1)
+	bid := e.openGitBinding(t, sid, "/tmp/repo", 2)
+	raw := gitWireCall(t, e, "git.stage", map[string]any{
+		"bindingId": bid, "paths": []string{"unstaged.txt"},
+	}, 3)
+	validateJSON(t, schema, raw, "git.stage result (real socket)")
+}
+
+func TestGitUnstage_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "git.unstage.schema.json")
+	e := gitContractEnv(t, newStubGitRepo())
+	sid := e.openSession(t, 1)
+	bid := e.openGitBinding(t, sid, "/tmp/repo", 2)
+	raw := gitWireCall(t, e, "git.unstage", map[string]any{
+		"bindingId": bid, "paths": []string{"staged.txt"},
+	}, 3)
+	validateJSON(t, schema, raw, "git.unstage result (real socket)")
+}
+
+func TestGitStageAll_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "git.stageAll.schema.json")
+	e := gitContractEnv(t, newStubGitRepo())
+	sid := e.openSession(t, 1)
+	bid := e.openGitBinding(t, sid, "/tmp/repo", 2)
+	raw := gitWireCall(t, e, "git.stageAll", map[string]any{"bindingId": bid}, 3)
+	validateJSON(t, schema, raw, "git.stageAll result (real socket)")
+}
+
+func TestGitUnstageAll_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "git.unstageAll.schema.json")
+	e := gitContractEnv(t, newStubGitRepo())
+	sid := e.openSession(t, 1)
+	bid := e.openGitBinding(t, sid, "/tmp/repo", 2)
+	raw := gitWireCall(t, e, "git.unstageAll", map[string]any{"bindingId": bid}, 3)
+	validateJSON(t, schema, raw, "git.unstageAll result (real socket)")
+}
+
+func TestGitCommit_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "git.commit.schema.json")
+	for name, repo := range map[string]*stubGitRepo{
+		"ok": newStubGitRepo(),
+		"failed": {
+			status: stubStatus(),
+			commit: git.CommitOutcome{
+				State: git.CommitFailed, Output: "pre-commit hook failed", OutputTruncated: false,
+			},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := gitContractEnv(t, repo)
+			sid := e.openSession(t, 1)
+			bid := e.openGitBinding(t, sid, "/tmp/repo", 2)
+			raw := gitWireCall(t, e, "git.commit", map[string]any{
+				"bindingId": bid, "message": "subject\n\nbody", "amend": false,
+			}, 3)
+			validateJSON(t, schema, raw, "git.commit result (real socket)")
+		})
+	}
+}
+
+func TestGitHeadMessage_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "git.headMessage.schema.json")
+	e := gitContractEnv(t, newStubGitRepo())
+	sid := e.openSession(t, 1)
+	bid := e.openGitBinding(t, sid, "/tmp/repo", 2)
+	raw := gitWireCall(t, e, "git.headMessage", map[string]any{"bindingId": bid}, 3)
+	validateJSON(t, schema, raw, "git.headMessage result (real socket)")
+}
+
+func TestGitLog_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "git.log.schema.json")
+	e := gitContractEnv(t, newStubGitRepo())
+	sid := e.openSession(t, 1)
+	bid := e.openGitBinding(t, sid, "/tmp/repo", 2)
+	raw := gitWireCall(t, e, "git.log", map[string]any{"bindingId": bid}, 3)
+	validateJSON(t, schema, raw, "git.log result (real socket)")
+}
+
+func TestGitClose_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "git.close.schema.json")
+	e := gitContractEnv(t, newStubGitRepo())
+	sid := e.openSession(t, 1)
+	bid := e.openGitBinding(t, sid, "/tmp/repo", 2)
+	raw := gitWireCall(t, e, "git.close", map[string]any{"bindingId": bid}, 3)
+	validateJSON(t, schema, raw, "git.close result (real socket)")
+}
+
+// TestGitChanged_OverTheWireConformsToContract drives a real server
+// emission and asserts the addressing: closing a real session delivers the
+// notification to the closing connection, with the right bindingId and
+// reason, and the params satisfy the schema. The teardown path is exactly
+// where files.changed is undeliverable today (nocx-lzfb): both teardown
+// paths removed the session's receiver before cleaning up bindings, so an
+// emit-time lookup found nobody. The capture-first fix is what this test
+// watches.
+func TestGitChanged_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "git.changed.schema.json")
+	e := newGitTestEnv(t, WithGitRepoFactory(newStubGitFactory()))
+	sid := e.openSession(t, 1)
+	bid := e.openGitBinding(t, sid, "/tmp/repo", 2)
+
+	closeResp := jsonrpcCallWithID(t, e.conn, "close", map[string]string{"sessionId": sid}, 3)
+	var closeEnv struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(closeResp, &closeEnv); err != nil {
+		t.Fatalf("close: unmarshal: %v", err)
+	}
+	if closeEnv.Error != nil {
+		t.Fatalf("close: %+v", closeEnv.Error)
+	}
+
+	raw := readNotification(t, e.conn, "git.changed", 5*time.Second)
+	validateJSON(t, schema, raw, "git.changed params (real socket)")
+	var params gitChangedParams
+	if err := json.Unmarshal(raw, &params); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if params.BindingID != bid {
+		t.Errorf("bindingId = %q, want %q", params.BindingID, bid)
+	}
+	if params.Reason != "sessionClosed" {
+		t.Errorf("reason = %q, want sessionClosed", params.Reason)
 	}
 }

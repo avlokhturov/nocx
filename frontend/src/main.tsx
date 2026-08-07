@@ -42,7 +42,18 @@ import { showToast } from './ui/toast'
 import { registerFileViewerSurface, openFileViewer } from './file-viewer'
 import { createFilesView, FILES_VIEW_ID } from './files/files-view'
 import { createFilesPanelServices, type FilesPanelServices } from './files/files-client'
+import { createGitView } from './git/git-view'
+import { createGitPanelServices, type GitPanelServices } from './git/git-client'
+import { createGitStore } from './git/git-store'
+import { registerGitDiffSurface } from './git/git-diff/open-git-diff'
 import type { ActiveOrigin } from './tab-content'
+import {
+  SIDEBAR_WIDTH_KEY,
+  SIDEBAR_WIDTH_DEFAULT,
+  clampSidebarWidth,
+  createSidebarWidthController,
+  persistSidebarWidth,
+} from './sidebar-width'
 import type { TunnelOpenResult } from './generated/tunnel.open'
 import { HostKeyDialog } from './host-key-dialog'
 import { OpenHostKeyRequestQueue, type OpenHostKeyRequest } from './host-key-controller'
@@ -193,6 +204,10 @@ async function main() {
   const THEME_KEY = 'ui.theme'
 
   let placement: unknown = 'horizontal'
+  // The sidebar width from the same snapshot: the value that survives a
+  // restart. A fetch failure falls back to the declared default, which is
+  // also what the CSS paints before this bootstrap runs (style.css #sidebar).
+  let sidebarWidth = SIDEBAR_WIDTH_DEFAULT
   try {
     const snap = await profileClient.getSnapshot()
     placement = snap.values[PLACEMENT_KEY] ?? 'horizontal'
@@ -200,6 +215,10 @@ async function main() {
     // authoritative (ADR-0013 §8.1): the bootstrap cache covers the first
     // frame, but the persisted Go value wins on snapshot arrival.
     reconcileThemeFromGo(snap.values[THEME_KEY] as string | undefined, appliedThemeId)
+    const raw = snap.values[SIDEBAR_WIDTH_KEY]
+    if (typeof raw === 'number' && Number.isFinite(raw)) {
+      sidebarWidth = clampSidebarWidth(raw)
+    }
   } catch {
     // Backend may not be ready yet — safe fallback.
   }
@@ -343,6 +362,69 @@ async function main() {
     clipboard,
     activeOrigin,
   })
+
+  // ── Git panel (design §5.4) and its diff surface (worker G) ───────────
+  // The panel's backend surface, wrapped so the composition root owns the
+  // binding-liveness registry the diff surface reads: a binding is live
+  // from the git.open that created it until git.close releases it, and a
+  // session close is marked dead by the git.changed notification — no
+  // close crosses the seam on that path, so the notification is the only
+  // writer (worker G's GitDiffDeps.onBindingLiveness).
+  const gitServices = createGitPanelServices(dispatcher)
+  const gitBindings = new Map<string, Set<(live: boolean) => void>>()
+  const liveGitBindings = new Set<string>()
+  const gitServicesTracked: GitPanelServices = {
+    // Spread, then intercept: open and close are the two methods the
+    // composition root must watch (the binding-liveness registry), and
+    // everything else forwards by CONSTRUCTION — the same rule as the
+    // files wrapper above.
+    ...gitServices,
+    open: async (sessionId, cwd) => {
+      const res = await gitServices.open(sessionId, cwd)
+      if (res.state === 'ok' && res.bindingId !== undefined) {
+        liveGitBindings.add(res.bindingId)
+      }
+      return res
+    },
+    close: async (bindingId) => {
+      liveGitBindings.delete(bindingId)
+      const cbs = gitBindings.get(bindingId)
+      gitBindings.delete(bindingId)
+      if (cbs !== undefined) for (const cb of [...cbs]) cb(false)
+      return gitServices.close(bindingId)
+    },
+  }
+  const onGitBindingLiveness = (bindingId: string, cb: (live: boolean) => void): (() => void) => {
+    const cbs = gitBindings.get(bindingId) ?? new Set()
+    cbs.add(cb)
+    gitBindings.set(bindingId, cbs)
+    // Synchronous first call with the current verdict — the diff content's
+    // mount decides whether to read at all from it.
+    cb(liveGitBindings.has(bindingId))
+    return () => {
+      cbs.delete(cb)
+      if (cbs.size === 0) gitBindings.delete(bindingId)
+    }
+  }
+  gitServices.subscribeGitChanged((p) => {
+    liveGitBindings.delete(p.bindingId)
+    const cbs = gitBindings.get(p.bindingId)
+    gitBindings.delete(p.bindingId)
+    if (cbs !== undefined) for (const cb of [...cbs]) cb(false)
+  })
+  // The store is the panel's and the diff surface's shared state: the
+  // surface's Reload offer (onDiffStale) is fed by the store's poll.
+  const gitStore = createGitStore(gitServicesTracked)
+  registerGitDiffSurface(registry, tm, {
+    diff: (params) => gitServices.diff(params.bindingId, params.path, params.side, params.maxBytes),
+    onBindingLiveness: onGitBindingLiveness,
+    onDiffStale: (bindingId, path, side, cb) => gitStore.onDiffStale(bindingId, path, side, cb),
+  })
+  const gitView = createGitView({
+    services: gitServicesTracked,
+    store: gitStore,
+    activeOrigin,
+  })
   /**
    * Open (or focus) the Settings tab and hand back the instance that is
    * actually on screen.
@@ -360,6 +442,23 @@ async function main() {
     }
     return live
   }
+
+  // The sidebar width controller (nocx-qmcu): the single owner of the
+  // panel's width between the drag handle, the settings observer and the
+  // persistence seam. Created here at the composition root because all
+  // three consume it — the bootstrap value above, the observer below, and
+  // mountSidebar, which binds the kit ResizeHandle to it.
+  const sidebarWidthCtrl = createSidebarWidthController(sidebarPanel, sidebarWidth, (width) => {
+    // The persistence seam (persistSidebarWidth): fire-and-forget, and a
+    // failed write surfaces a warning instead of reverting the width or
+    // wedging the handle — the value stays applied, and the next commit
+    // retries. `setSetting` is a method, hence the closure.
+    persistSidebarWidth(
+      (key, value) => profileClient.setSetting(key, value),
+      (message) => showToast({ level: 'warning', message }),
+      width,
+    )
+  })
 
   // Live application through SettingsObserver: when any setting
   // changes, refetch the snapshot and act on relevant keys.
@@ -379,6 +478,15 @@ async function main() {
         }
         // Theme setting changed — reconcile against Go's value (ADR-0013 §8.1).
         reconcileThemeFromGo(snap.values[THEME_KEY] as string | undefined)
+        // Sidebar width changed — apply it unless the user is mid-drag: the
+        // live pointer position is the truth until the release commits it
+        // (nocx-qmcu).
+        if (!sidebarWidthCtrl.isDragging()) {
+          const raw = snap.values[SIDEBAR_WIDTH_KEY]
+          if (typeof raw === 'number' && Number.isFinite(raw)) {
+            sidebarWidthCtrl.apply(clampSidebarWidth(raw))
+          }
+        }
       } catch {
         // Silently ignore — a settings fetch failure is not actionable here.
       }
@@ -430,15 +538,15 @@ async function main() {
     ),
     order: 0,
   }
+  const sidebarViews = [filesView, PORTS_VIEW, gitView].sort((a, b) => a.order - b.order)
+  if (sidebarViews[0]?.id !== FILES_VIEW_ID) {
+    throw new Error('nocx: Files must be the first activity-bar view')
+  }
   // The sidebar renders array order, so the views reach mountSidebar sorted
   // by their order field — the field then means what it says, and a future
   // view cannot slip in front by registration order. Files registers below
   // Ports (FILES_VIEW_ORDER < 0) and must be the FIRST icon in the view
   // zone — an owner requirement, asserted here and in files-view.test.tsx.
-  const sidebarViews = [filesView, PORTS_VIEW].sort((a, b) => a.order - b.order)
-  if (sidebarViews[0]?.id !== FILES_VIEW_ID) {
-    throw new Error('nocx: Files must be the first activity-bar view')
-  }
   const sidebar = mountSidebar(
     activityBar,
     sidebarPanel,
@@ -462,6 +570,7 @@ async function main() {
        see across the function boundary. */
     () => portsTargetId(),
     () => activeOrigin(),
+    sidebarWidthCtrl,
   )
 
   // Cmd/Ctrl+, opens or focuses the Settings tab.
