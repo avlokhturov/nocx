@@ -142,9 +142,7 @@ async function rpc<T>(
   )
 }
 
-test('a plain SSH shell shows the capability, switching to nocxify produces blocks', async ({
-  page,
-}) => {
+test('an SSH connection comes up integrated and its commands become blocks', async ({ page }) => {
   test.setTimeout(90_000)
   const fixture = startSshd()
   try {
@@ -168,8 +166,7 @@ test('a plain SSH shell shows the capability, switching to nocxify produces bloc
     })
 
     // Seed the connection the way Settings would: a profile pointing at the
-    // fixture, with shellIntegration ask — the mode the epic's happy path
-    // starts from (plain shell, capability visible). The name is unique per
+    // fixture, on the default destination mode (script). The name is unique per
     // run: the devharness store persists across runs in this home, and a
     // stale profile from an earlier run would dial a dead fixture.
     const profileName = `e2e-fixture-${Date.now()}`
@@ -181,7 +178,6 @@ test('a plain SSH shell shows the capability, switching to nocxify produces bloc
         port: Number(fixture.addr.split(':')[1]),
         user: 'e2e',
         keyPath: fixture.userKey,
-        shellIntegration: 'ask',
       },
     })
 
@@ -195,16 +191,30 @@ test('a plain SSH shell shows the capability, switching to nocxify produces bloc
     await search.fill(profileName)
     await page.keyboard.press('Enter')
 
-    // The SSH tab opens; the plain shell (ask policy) shows the recovery
-    // action in the editor chrome: Integrate this shell.
+    // The SSH tab opens INTEGRATED, and the editor chrome offers nothing —
+    // which is the healthy state (capability.ts: integrated + editor yields no
+    // action at all).
+    //
+    // This is a deliberate change to what the spec proves, and the reason is a
+    // product change it never caught up with. The epic was written when a plain
+    // shell was where a user landed: the chip would read "Integrate this shell"
+    // and clicking it was the switch. Since `script` became the default
+    // destination mode (nocx-mlm7, contracts/open.schema.json — "script (the
+    // default — N3) wraps and installs automatically"), a fresh connection to a
+    // bash host arrives already integrated, so there is nothing to switch.
+    //
+    // The two states either side of it are both real and neither produces the
+    // old assertion: in `raw` the product deliberately offers nothing
+    // (terminal-content.ts:2211, authorized = policy !== 'raw'), and in
+    // `script` integration succeeds. "Plain shell WITH the offer" now needs
+    // script mode plus a shell the launcher refuses — a shellIntegrationReason
+    // case, and its own test.
+    //
+    // What survives here is the end of the epic's journey, which is the part
+    // that matters to a user: a real remote shell on a real PTY produces
+    // blocks. The switch path is not covered by anything now, and that is
+    // written down rather than papered over (nocx-z9s9.10).
     const recovery = page.locator('.pane.active .nocx-editor-recovery')
-    await expect(recovery).toBeVisible({ timeout: 20_000 })
-    await expect(recovery).toHaveText('Integrate this shell', { timeout: 20_000 })
-
-    // Click the recovery chip — it IS the action, no popover.
-    await recovery.click()
-    // The in-band bootstrap runs against the REAL shell; the shell's own
-    // hooks then emit OSC 133 markers. The healthy state shows nothing.
     await expect(recovery).not.toBeVisible({ timeout: 20_000 })
 
     // The user then runs a command through the nocx editor, and it becomes

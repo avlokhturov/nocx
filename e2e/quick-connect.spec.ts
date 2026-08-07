@@ -36,8 +36,14 @@ test.describe('quick-connect picker', () => {
     // Picker is closed.
     await expect(page.locator(QUICK_CONNECT_SEARCH)).not.toBeVisible()
 
-    // Focus returns to the caret (Dialog's overlay stack restores focus).
-    await expect(page.locator(CARET)).toBeFocused()
+    // Focus returns to WHERE IT WAS, which is the prompt — not to the caret.
+    // The overlay stack restores prevFocus, and prevFocus is whatever was
+    // active when the picker opened: clicking the caret does not take focus
+    // off the editor, so escaping a picker you did not want puts the cursor
+    // back where you were typing. Asserting the caret was asserting the
+    // mechanism's input rather than its result, and it was wrong about the
+    // input (nocx-z9s9.9).
+    await expect(page.locator('.pane.active .nocx-editor-input')).toBeFocused()
   })
 
   test('the chord opens the palette: commands and hosts mixed, rows typed', async ({ page }) => {
