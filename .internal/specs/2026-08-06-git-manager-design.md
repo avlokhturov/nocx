@@ -260,6 +260,27 @@ So:
 - **Window-focus gating of the poll** (D13). No such predicate exists; adding one is
   application state with its own owner.
 
+### Neither in nor out — what this section missed
+
+The two lists above are exhaustive about what was _considered_. They are not exhaustive
+about what the reference products do, and the difference cost a round.
+
+The owner opened the delivered panel beside orca's and asked where the commit list was,
+and where the per-file line counts were. Both are prominent in the screenshots that
+opened this design — orca gives the lower half of its panel to `COMMITS` and puts a green
+`+N` and a red `−N` on every row — and **neither appears anywhere above**. Not as a
+refusal, which is what this section is for; as an omission.
+
+That is a defect in the method, not only in the list. Every "Out" entry here was written
+by asking _what could this deliverable grow into_, and answering from the deliverable.
+Nothing asked _what does the thing I was shown do that this does not_, which is the only
+question that catches a gap between a design and its own reference. The acceptance
+criterion inherited the blind spot: the epic proved its happy path end to end and closed
+green while missing half of what the owner had pointed at.
+
+Both are now epics of their own — `nocx-i4ki` (line counts) and `nocx-6b15` (the commit
+list) — with the graph, commit selection and commit diffs deliberately out of the second.
+
 ## 5. Architecture
 
 ### 5.1 Backend — `internal/git`
@@ -1165,3 +1186,42 @@ the measurement is a task and not an opinion.
   as risks rather than defects. Across six rounds the review raised 49 findings: 45 accepted,
   3 argued down with evidence and withdrawn by the reviewer, and 1 corrected in the opposite
   direction by measurement.
+
+- **2026-08-07, after delivery** — the owner opened the shipped panel and made three
+  reports, none of which any gate could have made.
+
+  **The rows were broken in half.** Every row rendered its status letter and file glyph on
+  one line and the path on the next, long paths running past the panel into the terminal.
+  The three parts carry flex-item declarations and their parent was a plain block. The
+  wrapper that made them a row had been removed during acceptance — correctly, because it
+  had been placed _outside_ `CollectionRow`, where it orphaned `role="listitem"` from its
+  list; incorrectly, because it belonged _inside_ the info slot rather than nowhere. Ten
+  unit tests stayed green: jsdom computes no layout, so a component test cannot see a row
+  broken into three lines, and the e2e asserted rows are visible and clickable, which a
+  wrapped row is. **The suite now carries a geometric assertion** — bounding boxes, in a
+  real browser — because that is the only place this class of defect is visible.
+
+  Fixing the wrap exposed the reason the row exists at all: with the path rendered as one
+  string it ellipsises at the tail, and the tail is the file name, so twelve files under
+  one deep directory read as twelve identical `graphify-out/cache/…` rows. The panel's
+  whole job is to say _which file changed_. Name first, directory after it and dimmed, the
+  way both reference products read a path in a rail.
+
+  **Half of what the reference products show was missing** — see "Neither in nor out"
+  in §4, which records the omission and why the method allowed it.
+
+  **The panel took ~6 seconds to answer, including for a directory that is not a
+  repository.** git is not the cost: on the owner's own repository, with 761 untracked
+  files, `status --porcelain=v2 -z -uall` is 11 ms and `rev-parse` is 2 ms. `Factory.Open`
+  resolves the shell environment _first_, before probing git and before `rev-parse`, and
+  that resolution runs `shell -i -c "export -p"` with a 5 s timeout which on the owner's
+  machine expires — the panel's own "degraded environment: context deadline exceeded" is
+  that deadline. `envCache.resolve` deliberately does not cache a failure, so the full
+  timeout is paid on _every_ open. D6's reason for the resolved environment is real and
+  specific to the commit path; nothing in status, diff or log needs it. Filed P0 as
+  `nocx-6pz0`.
+
+  One shape under all three: **every criterion this design wrote was one the design could
+  check about itself.** Layout, parity with the artefact the owner supplied, and latency
+  are the three things a spec cannot assert and a suite did not — and all three were
+  found in the first minute the owner looked at the product.
