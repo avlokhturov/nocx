@@ -18,6 +18,7 @@ import type { GitOpenResult } from '../generated/git.open'
 import type { GitHeadMessageResult } from '../generated/git.headMessage'
 import type { GitCommitResult } from '../generated/git.commit'
 import type { GitPanelServices } from './git-client'
+import type { GitLogResult } from '../generated/git.log'
 import { createGitStore, type GitStore } from './git-store'
 
 // ── Fixtures ──────────────────────────────────────────────────────────────
@@ -92,6 +93,25 @@ const statusResult = (over: Partial<Status> = {}): { status: Status } => ({
   status: statusFixture(over),
 })
 
+const logFixture = (over: Partial<GitLogResult['log']> = {}): GitLogResult['log'] => ({
+  entries: [
+    {
+      hash: '5738d62b66777a78af894c0708d3a7e8798a4d8d',
+      shortHash: '5738d62',
+      subject: 'third',
+      authorName: 'Test Author',
+      authoredAt: '2026-08-07T12:52:40+03:00',
+      refs: ['main'],
+    },
+  ],
+  total: 1,
+  completeness: 'complete',
+  ...over,
+})
+
+const logResult = (over: Partial<GitLogResult['log']> = {}): GitLogResult => ({
+  log: logFixture(over),
+})
 type Deferred<T> = { promise: Promise<T>; resolve: (v: T) => void; reject: (e: unknown) => void }
 
 function deferred<T>(): Deferred<T> {
@@ -109,6 +129,7 @@ function makeServices(over: Partial<GitPanelServices> = {}): GitPanelServices {
     open: vi.fn().mockResolvedValue(openOk()),
     status: vi.fn().mockResolvedValue(statusResult()),
     diff: vi.fn().mockResolvedValue({ state: 'ok', text: '', truncated: false }),
+    log: vi.fn().mockResolvedValue(logResult()),
     stage: vi.fn().mockResolvedValue(statusResult()),
     unstage: vi.fn().mockResolvedValue(statusResult()),
     stageAll: vi.fn().mockResolvedValue(statusResult()),
@@ -702,5 +723,162 @@ describe("onDiffStale — the diff tab's Reload offer (D7)", () => {
     expect(untrackedStale).toHaveBeenCalledTimes(1)
     expect(unstagedStale).not.toHaveBeenCalled()
     expect(otherBindingStale).not.toHaveBeenCalled()
+  })
+})
+
+// ── The commits read (brief, git.log; D13) ────────────────────────────────
+
+describe('the commits read', () => {
+  it('reads once when the panel becomes visible — the D13 read, never a poll', async () => {
+    const { store, services } = await openStore()
+    const log = mockHandle(services, 'log')
+    store.setVisible(true)
+    await settle()
+    expect(log).toHaveBeenCalledTimes(1)
+    expect(log).toHaveBeenCalledWith('b1')
+    expect(store.logState()).toBe('loaded')
+    expect(store.log()?.entries[0]?.subject).toBe('third')
+  })
+
+  it('is read again on a manual refresh', async () => {
+    const { store, services } = await openStore()
+    store.setVisible(true)
+    await settle()
+    const log = mockHandle(services, 'log')
+    const before = log.mock.calls.length
+    store.refresh()
+    await settle()
+    expect(log.mock.calls.length).toBe(before + 1)
+  })
+
+  it('is read after a successful commit — the confirmation the section exists for', async () => {
+    const { store, services } = await openStore()
+    store.setVisible(true)
+    await settle()
+    const log = mockHandle(services, 'log')
+    const before = log.mock.calls.length
+    store.setCommitSubject('add second line')
+    store.commit()
+    await settle()
+    expect(log.mock.calls.length).toBe(before + 1)
+  })
+
+  it('is NOT read by the poll — history does not change under the user (D13)', async () => {
+    vi.useFakeTimers()
+    const { store, services } = await openStore(undefined, { pollIntervalMs: 5000 })
+    const status = mockHandle(services, 'status')
+    const log = mockHandle(services, 'log')
+    status.mockClear()
+    log.mockClear()
+    store.setVisible(true)
+    await settle()
+    // The open-of-the-view read fires once — that is the D13 read.
+    expect(log).toHaveBeenCalledTimes(1)
+    log.mockClear()
+    status.mockClear()
+    vi.advanceTimersByTime(60_000)
+    await settle()
+    expect(status.mock.calls.length).toBeGreaterThan(0) // the poll ran…
+    expect(log).not.toHaveBeenCalled() // …and never took the log with it
+  })
+
+  it('a failed read is failed, not silently absent, and retry re-reads', async () => {
+    const { store, services } = await openStore()
+    store.setVisible(true)
+    await settle()
+    const log = mockHandle(services, 'log')
+    log.mockRejectedValueOnce(new Error('git log: exit 128: fatal: bad object HEAD'))
+    store.refresh()
+    await settle()
+    expect(store.logState()).toBe('failed')
+    expect(store.logError()).toContain('bad object HEAD')
+    // The retry is a manual refresh.
+    store.refresh()
+    await settle()
+    expect(store.logState()).toBe('loaded')
+  })
+
+  it('an unknown-binding failure re-resolves through git.open', async () => {
+    const { store, services } = await openStore()
+    store.setVisible(true)
+    await settle()
+    const log = mockHandle(services, 'log')
+    log.mockRejectedValueOnce(new RpcError('git.log', -32602, 'unknown binding'))
+    const open = mockHandle(services, 'open')
+    const before = open.mock.calls.length
+    store.refresh()
+    await settle()
+    expect(open.mock.calls.length).toBe(before + 1)
+  })
+
+  it('a log that lands after the panel re-scoped is dropped (D17)', async () => {
+    const { store, services } = await openStore()
+    store.setVisible(true)
+    await settle()
+    const log = mockHandle(services, 'log')
+    log.mockClear()
+    const d = deferred<GitLogResult>()
+    log.mockReturnValueOnce(d.promise) // this read hangs…
+    store.refresh()
+    // …and the panel re-scopes to another repository before it lands.
+    mockHandle(services, 'open').mockResolvedValueOnce(
+      openOk({ bindingId: 'b2', toplevel: '/home/dev/other' }),
+    )
+    store.rescope(OTHER_ORIGIN)
+    await settle()
+    // The new scope's own read (the mock default) answers first.
+    d.resolve(logResult({ entries: [], total: 0 }))
+    await settle()
+    expect(log).toHaveBeenCalledWith('b2')
+    // The stale empty answer was dropped: the list still holds the new
+    // scope's read, never the superseded one.
+    expect(store.log()?.entries.length).toBe(1)
+  })
+
+  it('a log superseded while in flight keeps the last good log — never a stuck loading', async () => {
+    const { store, services } = await openStore()
+    store.setVisible(true)
+    await settle()
+    const log = mockHandle(services, 'log')
+    log.mockClear()
+    const d = deferred<GitLogResult>()
+    log.mockReturnValueOnce(d.promise) // this read hangs…
+    store.refresh()
+    // …and a mutation (never poll-gated) lands while it hangs, carrying a
+    // newer epoch that supersedes the hung read's.
+    store.setCommitSubject('add second line')
+    store.commit()
+    await settle()
+    d.resolve(logResult({ entries: [], total: 0 }))
+    await settle()
+    // The superseded answer was dropped; the last good log stays, and the
+    // section says loaded — never a loading state no read can end.
+    expect(store.logState()).toBe('loaded')
+    expect(store.log()?.entries.length).toBe(1)
+  })
+
+  it('re-binding clears the previous repository log and re-reads under the new binding', async () => {
+    const { store, services } = await openStore()
+    store.setVisible(true)
+    await settle()
+    const log = mockHandle(services, 'log')
+    log.mockClear()
+    mockHandle(services, 'open').mockResolvedValueOnce(
+      openOk({ bindingId: 'b2', toplevel: '/home/dev/other' }),
+    )
+    store.rescope(OTHER_ORIGIN)
+    await settle()
+    expect(log).toHaveBeenCalledWith('b2')
+    expect(store.log()).not.toBeNull()
+  })
+
+  it('dispose clears it', async () => {
+    const { store } = await openStore()
+    store.setVisible(true)
+    await settle()
+    expect(store.log()).not.toBeNull()
+    store.dispose()
+    expect(store.log()).toBeNull()
+    expect(store.logState()).toBe('idle')
   })
 })

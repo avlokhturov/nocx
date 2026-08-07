@@ -49,10 +49,10 @@ const SUBJECT = '#git-commit-subject'
 const BODY = '#git-commit-body'
 const COMMIT_OUTPUT = '[data-testid="git-commit-output"]'
 const CONFLICT_REFUSAL = '[data-testid="git-conflict-refusal"]'
+const LOG_ROW = '[data-testid="git-log-row"]'
 const ROW = '.ui-collection-row'
 const TAB = '.nocx-tab'
 const TAB_TITLE = '.nocx-tab-title'
-
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 /** Bring the app up, park the shell in `root` (OSC 7 makes the cwd verified
@@ -109,6 +109,39 @@ test('happy path: edit → unstaged row → diff tab → stage → commit emptie
     await expect(page.locator(UNSTAGED).locator(ROW)).toHaveCount(0)
     await expect(page.locator(COUNT)).toHaveText('0 changed')
     await expect(page.locator(BRANCH)).toHaveText('main')
+    expect(git(repo.root, 'log', '-1', '--format=%s').trim()).toBe('add second line')
+  } finally {
+    cleanupRepo(repo)
+  }
+})
+
+// ── Commits (brief, git.log) — the DONE WHEN ──────────────────────────────
+
+test('a commit made from the panel appears at the top of the Commits list', async ({ page }) => {
+  const repo = createRepo()
+  try {
+    await openGitPanelAt(page, repo.root, repo.basename)
+
+    // The Commits section already lists the fixture's initial commit.
+    await expect(page.locator(LOG_ROW).first()).toContainText('initial', { timeout: 20_000 })
+
+    // Edit, stage and commit — the mutation lane's post-commit log read.
+    appendFileSync(path.join(repo.root, repo.file), 'second line\n')
+    const unstagedRow = page.locator(UNSTAGED).locator(ROW, { hasText: repo.file })
+    await expect(unstagedRow).toBeVisible({ timeout: 20_000 })
+    await unstagedRow.getByTestId('git-row-stage').click()
+    await expect(page.locator(STAGED).locator(ROW, { hasText: repo.file })).toBeVisible({
+      timeout: 20_000,
+    })
+    await page.locator(SUBJECT).fill('add second line')
+    await page.locator(COMMIT).click()
+
+    // The fresh subject sits at the TOP of the list, above the initial one.
+    await expect(page.locator(LOG_ROW).first()).toContainText('add second line', {
+      timeout: 20_000,
+    })
+    await expect(page.locator(LOG_ROW).nth(1)).toContainText('initial')
+    // The backend agrees: the same log, off the real socket.
     expect(git(repo.root, 'log', '-1', '--format=%s').trim()).toBe('add second line')
   } finally {
     cleanupRepo(repo)

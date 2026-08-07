@@ -45,10 +45,23 @@ type stubGitRepo struct {
 	diffErr    error
 	mutateErr  error // Stage / StageAll / UnstageAll
 	unstageErr error // Unstage — the one operation with a renderable refusal state
+	log        git.Log
+	logErr     error
+	logMax     int // the bound the last Log call carried — policy check
 	commit     git.CommitOutcome
 	commitErr  error
 	headMsg    git.HeadMessage
 	headMsgErr error
+}
+
+func (r *stubGitRepo) Log(_ context.Context, max int) (git.Log, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return git.Log{}, errors.New("stub: repo closed")
+	}
+	r.logMax = max
+	return r.log, r.logErr
 }
 
 func (r *stubGitRepo) Status(_ context.Context) (git.Status, error) {
@@ -156,8 +169,24 @@ func newStubGitRepo() *stubGitRepo {
 	return &stubGitRepo{
 		status:  stubStatus(),
 		diff:    git.Diff{State: git.DiffOK, Text: "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n"},
+		log:     stubLog(),
 		commit:  git.CommitOutcome{State: git.CommitOK, Head: "abc1234", Status: stubStatus()},
 		headMsg: git.HeadMessage{State: git.HeadMessageOK, Message: "subject\n\nbody"},
+	}
+}
+
+func stubLog() git.Log {
+	return git.Log{
+		Entries: []git.LogEntry{{
+			Hash:       "5738d62b66777a78af894c0708d3a7e8798a4d8d",
+			ShortHash:  "5738d62",
+			Subject:    "third",
+			AuthorName: "Test Author",
+			AuthoredAt: time.Date(2026, 8, 7, 12, 52, 40, 0, time.FixedZone("", 3*60*60)),
+			Refs:       []string{"main"},
+		}},
+		Total:        1,
+		Completeness: git.CompletenessComplete,
 	}
 }
 
@@ -679,6 +708,71 @@ func TestGitUnstage_OrdinaryFailureIsATransportError(t *testing.T) {
 	}
 	if got.Error == nil {
 		t.Fatal("an ordinary unstage failure came back as a result, want a transport error")
+	}
+	if got.Error.Code != -32603 {
+		t.Errorf("error code = %d, want -32603", got.Error.Code)
+	}
+}
+
+// TestGitLog_UnknownBindingAnswersUnknownBinding — the same guard every
+// later git.* call re-checks (D15): a log on a binding the caller cannot
+// use answers the unknownBinding error, never a panic.
+func TestGitLog_UnknownBindingAnswersUnknownBinding(t *testing.T) {
+	e := newGitTestEnv(t, WithGitRepoFactory(newStubGitFactory()))
+	resp := jsonrpcCallWithID(t, e.conn, "git.log", map[string]any{"bindingId": "never-existed"}, 1)
+	var got struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &got); err != nil {
+		t.Fatalf("git.log: unmarshal: %v", err)
+	}
+	if got.Error == nil || got.Error.Code != -32602 {
+		t.Fatalf("git.log on an unknown binding: %+v, want -32602", got.Error)
+	}
+}
+
+// TestGitLog_BoundIsPolicy — the handler bounds the read by
+// git.MaxLogEntries (D9): the panel never asks for an unbounded log, and
+// the limit lives with the rest of the work ceilings, not on the wire.
+func TestGitLog_BoundIsPolicy(t *testing.T) {
+	repo := newStubGitRepo()
+	e := newGitTestEnv(t, WithGitRepoFactory(&stubGitFactory{
+		mkRepo: func() git.Repo { return repo }, outcome: stubOpenOutcome(),
+	}))
+	sid := e.openSession(t, 1)
+	bid := e.openGitBinding(t, sid, "/tmp/repo", 2)
+	gitWireCall(t, e, "git.log", map[string]any{"bindingId": bid}, 3)
+
+	repo.mu.Lock()
+	got := repo.logMax
+	repo.mu.Unlock()
+	if got != git.MaxLogEntries {
+		t.Fatalf("handler asked for max = %d, want git.MaxLogEntries (%d)", got, git.MaxLogEntries)
+	}
+}
+
+// TestGitLog_RepoFailureIsATransportError — a log that cannot be made or
+// completed is an error, never an empty list the panel renders as a
+// commitless branch.
+func TestGitLog_RepoFailureIsATransportError(t *testing.T) {
+	repo := &stubGitRepo{
+		status: stubStatus(),
+		logErr: errors.New("git log: exit 128: fatal: bad object HEAD"),
+	}
+	e := newGitTestEnv(t, WithGitRepoFactory(&stubGitFactory{
+		mkRepo: func() git.Repo { return repo }, outcome: stubOpenOutcome(),
+	}))
+	sid := e.openSession(t, 1)
+	bid := e.openGitBinding(t, sid, "/tmp/repo", 2)
+	resp := jsonrpcCallWithID(t, e.conn, "git.log", map[string]any{"bindingId": bid}, 3)
+	var got struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &got); err != nil {
+		t.Fatalf("git.log: unmarshal: %v", err)
+	}
+	if got.Error == nil {
+		t.Fatal("a failing log came back as a result, want a transport error")
 	}
 	if got.Error.Code != -32603 {
 		t.Errorf("error code = %d, want -32603", got.Error.Code)

@@ -36,9 +36,11 @@
 
 import { createEffect, createMemo, For, Match, on, onCleanup, Show, Switch } from 'solid-js'
 import type { ActiveOrigin } from '../tab-content'
+import { relativeTime } from '../recall'
 import { Badge } from '../ui/badge'
 import { Button } from '../ui/button'
 import { Checkbox } from '../ui/checkbox'
+import { CollectionRow } from '../ui/collection-view'
 import { EmptyState } from '../ui/empty-state'
 import { PlusIcon, ResetIcon } from '../ui/icons'
 import { IconButton } from '../ui/icon-button'
@@ -49,6 +51,7 @@ import { TextField } from '../ui/text-field'
 import type { FileStatus } from '../ui/file-status-row'
 import { FileStatusRow } from '../ui/file-status-row'
 import type { Entry } from '../generated/git.status'
+import type { LogEntry as GitLogEntry } from '../generated/git.log'
 import type { GitDiffSide } from './git-client'
 import type { GitDiffTarget } from './git-diff/open-git-diff'
 import type { GitStore } from './git-store'
@@ -280,6 +283,51 @@ export function GitPanel(props: GitPanelProps) {
       />
     )
   }
+  /** One commit of the Commits list (brief, git.log): the subject on the
+   *  primary line, then the short hash, the relative time and the refs
+   *  pointing at it. The row is the kit's CollectionRow in its dense
+   *  variant; the refs are the kit's Badge — the surface composes kit
+   *  parts and repaints none of them. A bare HEAD ref is a detached HEAD,
+   *  and the info tone is what says it out loud. */
+  const renderCommit = (entry: GitLogEntry) => (
+    <CollectionRow
+      density="dense"
+      actions={undefined}
+      info={
+        <div class="git-log-row" data-testid="git-log-row">
+          <span class="git-log-row__subject" title={entry.subject}>
+            {entry.subject}
+          </span>
+          <span class="git-log-row__meta">
+            <span class="git-log-row__hash">{entry.shortHash}</span>
+            <span class="git-log-row__time">
+              {/* The wall clock, like every timestamp this product renders:
+                  relativeTime is the recall overlay's one owner (AD-8). */}
+              {relativeTime(Date.parse(entry.authoredAt), Date.now())}
+            </span>
+            <For each={entry.refs}>
+              {(ref) => (
+                <Badge tone={ref === 'HEAD' ? 'info' : 'neutral'} data-testid="git-log-ref">
+                  {ref}
+                </Badge>
+              )}
+            </For>
+          </span>
+        </div>
+      }
+    />
+  )
+
+  /** The D9 half of the Commits section: a bounded log must say which of
+   *  the two answers it is. Capped means more commits exist than the list
+   *  holds (the extra record was the proof); cut means the read was
+   *  interrupted at the work ceiling and Total is a lower bound. */
+  const logCapBanner = createMemo(() => {
+    const lg = props.store.log()
+    if (lg === null || lg.completeness === 'complete') return null
+    if (lg.completeness === 'capped') return `More than ${lg.entries.length} commits`
+    return `More than ${lg.total} commits`
+  })
 
   const mutationBusy = () => props.store.mutationInFlight()
 
@@ -518,6 +566,49 @@ export function GitPanel(props: GitPanelProps) {
             >
               Commit
             </Button>
+          </Section>
+
+          {/* ── Commits (brief, git.log): what already happened, newest
+               first, so a user confirms the commit they just made without
+               leaving the panel. Read when the panel opens, on refresh and
+               after a commit — never on the poll (D13). ─────────────── */}
+          <Section title="Commits" dense>
+            <div class="git-log" role="list" aria-label="Recent commits" data-testid="git-log">
+              <Show when={props.store.logState() === 'loading'}>
+                <p class="git-log__state" data-testid="git-log-loading">
+                  Loading commits…
+                </p>
+              </Show>
+              <Show when={props.store.logState() === 'failed' && props.store.logError() !== null}>
+                <div class="git-log__state" data-testid="git-log-failed">
+                  <span>Couldn't load commits — {props.store.logError()}</span>
+                  <Button
+                    size="sm"
+                    data-testid="git-log-retry"
+                    onClick={() => props.store.refresh()}
+                  >
+                    Retry
+                  </Button>
+                </div>
+              </Show>
+              <Show when={props.store.log() !== null && logCapBanner() !== null}>
+                <p class="git-log__cap" data-testid="git-log-capped">
+                  {logCapBanner()}
+                </p>
+              </Show>
+              <Show
+                when={
+                  props.store.logState() === 'loaded' &&
+                  props.store.log() !== null &&
+                  props.store.log()!.entries.length === 0
+                }
+              >
+                <p class="git-log__state" data-testid="git-log-empty">
+                  No commits yet
+                </p>
+              </Show>
+              <For each={props.store.log()?.entries ?? []}>{(entry) => renderCommit(entry)}</For>
+            </div>
           </Section>
         </Match>
       </Switch>

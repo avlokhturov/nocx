@@ -38,3 +38,14 @@ func WithStatusCeilings(bytes int64, wall time.Duration) Option {
 		o.statusWall = wall
 	}
 }
+
+// WithLogCeilings overrides the log work ceilings — the byte bound on the
+// stream and the wall-clock bound on the traversal. The defaults are
+// git.MaxLogBytes and git.MaxLogWallClock. Tests use this to make a cut
+// (a stream interrupted mid-record) reachable with a small stream.
+func WithLogCeilings(bytes int64, wall time.Duration) Option {
+	return func(o *options) {
+		o.logBytes = bytes
+		o.logWall = wall
+	}
+}

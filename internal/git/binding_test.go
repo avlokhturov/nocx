@@ -46,6 +46,10 @@ func (s *stubRepo) Diff(ctx context.Context, path string, side Side, maxBytes in
 	return Diff{}, nil
 }
 
+func (s *stubRepo) Log(ctx context.Context, max int) (Log, error) {
+	return Log{Entries: []LogEntry{}}, nil
+}
+
 func (s *stubRepo) Stage(ctx context.Context, paths []string) (Status, error) {
 	return s.Status(ctx)
 }

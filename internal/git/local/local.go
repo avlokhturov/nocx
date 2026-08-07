@@ -46,6 +46,8 @@ type ceilings struct {
 	statusBytes   int64
 	statusWall    time.Duration
 	statusEntries int
+	logBytes      int64
+	logWall       time.Duration
 }
 
 // Close releases nothing: the local Repo owns no persistent resource — every

@@ -130,3 +130,57 @@
 .git-error {
   padding: var(--space-2) 0;
 }
+
+/* ── Commits (brief, git.log) ─────────────────────────────────────────────
+   The commit row is the kit's CollectionRow in its dense variant; the row
+   body — subject over a meta line of short hash, relative time and ref
+   chips — is the surface's own element, and the chips are the kit's Badge,
+   placed, never repainted. */
+.git-log {
+  display: flex;
+  flex-direction: column;
+}
+
+.git-log-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.git-log-row__subject {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-log-row__meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+  color: var(--color-text-dim);
+  font-size: var(--font-size-sm);
+}
+
+.git-log-row__hash {
+  font-variant-numeric: tabular-nums;
+}
+
+.git-log-row__time {
+  white-space: nowrap;
+}
+
+/* The section's own states and the D9 cap notice — the log is bounded and
+   must say which of the two answers it is (brief, git.log). */
+.git-log__state {
+  margin: 0;
+  color: var(--color-text-dim);
+  font-size: var(--font-size-sm);
+}
+
+.git-log__cap {
+  margin: 0;
+  color: var(--color-warning);
+  font-size: var(--font-size-sm);
+}

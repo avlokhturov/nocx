@@ -15,6 +15,7 @@ import type { GitStageAllResult } from '../generated/git.stageAll'
 import type { GitUnstageAllResult } from '../generated/git.unstageAll'
 import type { GitCommitResult } from '../generated/git.commit'
 import type { GitHeadMessageResult } from '../generated/git.headMessage'
+import type { GitLogResult } from '../generated/git.log'
 import type { GitCloseResult } from '../generated/git.close'
 import type { GitChangedNotification } from '../generated/git.changed'
 
@@ -98,6 +99,14 @@ class GitClient {
     return this.dispatcher.call<GitHeadMessageResult>('git.headMessage', { bindingId })
   }
 
+  /** The branch's recent commits, newest first, bounded by the backend's
+   *  policy (D9). History does not change under the user the way the
+   *  working tree does, so the panel reads it when it opens, on manual
+   *  refresh and after a commit — never on the poll (D13). */
+  log(bindingId: string): Promise<GitLogResult> {
+    return this.dispatcher.call<GitLogResult>('git.log', { bindingId })
+  }
+
   /** Release a binding. Also the repair for a stale open: a successful open
    *  the store has already superseded has registered a live repository on the
    *  backend, so dropping the response without this leaks it. */
@@ -124,6 +133,7 @@ export interface GitPanelServices {
   open(sessionId: string, cwd?: string): Promise<GitOpenResult>
   status(bindingId: string): Promise<GitStatusResult>
   diff(bindingId: string, path: string, side: GitDiffSide, maxBytes: number): Promise<GitDiffResult>
+  log(bindingId: string): Promise<GitLogResult>
   stage(bindingId: string, paths: string[]): Promise<GitStageResult>
   unstage(bindingId: string, paths: string[]): Promise<GitUnstageResult>
   stageAll(bindingId: string): Promise<GitStageAllResult>
@@ -144,6 +154,7 @@ export function createGitPanelServices(dispatcher: Dispatcher): GitPanelServices
     open: (sessionId, cwd) => client.open(sessionId, cwd),
     status: (bindingId) => client.status(bindingId),
     diff: (bindingId, path, side, maxBytes) => client.diff(bindingId, path, side, maxBytes),
+    log: (bindingId) => client.log(bindingId),
     stage: (bindingId, paths) => client.stage(bindingId, paths),
     unstage: (bindingId, paths) => client.unstage(bindingId, paths),
     stageAll: (bindingId) => client.stageAll(bindingId),

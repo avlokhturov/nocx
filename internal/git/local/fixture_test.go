@@ -139,8 +139,44 @@ case "$1" in
       *) echo "[main abc1234] msg" >&2; exit 0 ;;
     esac ;;
   log)
-    printf '%s' "${FAKE_LOG:-subject line\n\nbody text}"
-    exit 0 ;;
+    case "${FAKE_LOG_MODE:-message}" in
+      message) printf '%s' "${FAKE_LOG:-subject line\n\nbody text}" ;;
+      fail) echo "fatal: bad object HEAD" >&2; exit 128 ;;
+      unborn) echo "fatal: your current branch 'main' does not have any commits yet" >&2; exit 128 ;;
+      one)
+        printf '%s\0%s\0%s\0%s\0%s\0%s\0' \
+          "5738d62b66777a78af894c0708d3a7e8798a4d8d" "5738d62" "third" "Test Author" \
+          "2026-08-07T12:52:40+03:00" "main"
+        exit 0 ;;
+      two)
+        printf '%s\0%s\0%s\0%s\0%s\0%s\0' \
+          "5738d62b66777a78af894c0708d3a7e8798a4d8d" "5738d62" "third" "Test Author" \
+          "2026-08-07T12:52:40+03:00" "main"
+        printf '%s\0%s\0%s\0%s\0%s\0%s\0' \
+          "98c56f29de7a461cbbb7bc3a208a292972265b76" "98c56f2" "second" "Test Author" \
+          "2026-08-07T12:52:40+03:00" ""
+        exit 0 ;;
+      newline)
+        printf '%s\0%s\0%s\0%s\0%s\0%s\0' \
+          "0fad36f6e4252ff2d21171131319626e290adda5" "0fad36f" "sub	ject" "Test Author" \
+          "2026-08-07T12:52:40+03:00" "main"
+        exit 0 ;;
+      stream)
+        i=0
+        while true; do
+          printf '%s\0%s\0%s\0%s\0%s\0%s\0' \
+            "5738d62b66777a78af894c0708d3a7e8798a4d8d" "5738d62" "commit $i" "Test Author" \
+            "2026-08-07T12:52:40+03:00" "main"
+          i=$((i+1))
+        done ;;
+      truncated)
+        printf '%s\0%s\0%s\0%s\0%s\0%s\0' \
+          "5738d62b66777a78af894c0708d3a7e8798a4d8d" "5738d62" "third" "Test Author" \
+          "2026-08-07T12:52:40+03:00" "main"
+        printf '%s' "98c56f29de7a461cbbb7bc3a208a292972265b76"
+        exit 0 ;;
+      *) exit 0 ;;
+    esac ;;
   diff)
     case "${FAKE_DIFF:-none}" in
       sleep) sleep 1000 ;;

@@ -1029,7 +1029,7 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.handleProfileMethod(wconn, req)
 	case "git.open", "git.status", "git.diff", "git.stage", "git.unstage",
 		"git.stageAll", "git.unstageAll", "git.commit", "git.headMessage",
-		"git.close":
+		"git.log", "git.close":
 		s.handleGitMethod(wconn, state, req)
 	case "profiles.importTabby":
 		s.handleImportTabby(wconn, req)

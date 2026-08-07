@@ -68,6 +68,7 @@ import type { ActiveOrigin } from '../tab-content'
 import type { GitPanelServices, GitDiffSide } from './git-client'
 import type { GitOpenResult } from '../generated/git.open'
 import type { GitCommitResult } from '../generated/git.commit'
+import type { GitLogResult } from '../generated/git.log'
 import type { Status } from '../generated/git.status'
 
 /** The panel's phases — the interstitial and failure scaffolding around the
@@ -112,12 +113,22 @@ export interface GitStore {
    *  first (design §5.4). */
   state(): GitPanelState
   origin(): ActiveOrigin | null
+  /** The live binding: id + the resolved worktree root (D4). */
   binding(): GitBinding | null
   /** The last good status. Never cleared by a failed poll (rule 4). */
   status(): Status | null
   /** A poll or post-mutation status read failed after the last good one:
    *  the panel says the view is stale rather than rendering stale as fresh. */
   statusStale(): boolean
+  /** The commits read (D13): one of idle (never asked), loading, loaded or
+   *  failed — scoped by the same rule 1 triple and epoch as the status, so
+   *  a log that lands after the panel re-scoped never renders. */
+  logState(): 'idle' | 'loading' | 'loaded' | 'failed'
+  /** The branch's recent commits, newest first; null until the first log
+   *  read lands. */
+  log(): GitLogResult['log'] | null
+  /** Why the last log read failed; null unless logState() is 'failed'. */
+  logError(): string | null
   openError(): string | null
   /** The git version the capability probe found — the gitTooOld state
    *  renders it against the floor. */
@@ -253,6 +264,9 @@ export function createGitStore(
   const [binding, setBinding] = createSignal<GitBinding | null>(null)
   const [status, setStatus] = createSignal<Status | null>(null)
   const [statusStale, setStatusStale] = createSignal(false)
+  const [logState, setLogState] = createSignal<'idle' | 'loading' | 'loaded' | 'failed'>('idle')
+  const [log, setLog] = createSignal<GitLogResult['log'] | null>(null)
+  const [logError, setLogError] = createSignal<string | null>(null)
   const [openError, setOpenError] = createSignal<string | null>(null)
   const [gitVersion, setGitVersion] = createSignal<string | null>(null)
   const [envState, setEnvState] = createSignal<'resolved' | 'degraded' | null>(null)
@@ -389,6 +403,57 @@ export function createGitStore(
     setStatusStale(true)
   }
 
+  /** The log belongs to one repository, exactly like the commit form: a
+   *  re-bind, a refusal, a closed session or a dispose clears it, and the
+   *  next trigger re-reads under the new scope. */
+  function resetLog(): void {
+    setLogState('idle')
+    setLog(null)
+    setLogError(null)
+  }
+
+  /** One log read, scoped by rule 1 and ordered by the same epoch as the
+   *  status: D13's "history does not change under the user" is why it is
+   *  read on the open, on manual refresh and after a commit — never by the
+   *  poll — and the epoch is why a commit's log cannot be overwritten by a
+   *  refresh's log that was issued before the commit landed. */
+  function issueLog(): void {
+    const o = untrack(origin)
+    const b = untrack(binding)
+    if (o === null || b === null) return
+    epoch++
+    const ctx: ScopeCtx = { tabId: o.tabId, generation, bindingId: b.bindingId, epoch }
+    setLogState('loading')
+    services.log(b.bindingId).then(
+      (res) => {
+        if (!scopeCurrent(ctx) || ctx.epoch < lastAppliedEpoch) {
+          // Dropped by rule 1: a newer response superseded this read, and
+          // its answer can never land. Say what is true — the last good
+          // log, or idle when there was none (the next trigger re-reads)
+          // — never a stuck "loading".
+          setLogState(untrack(log) === null ? 'idle' : 'loaded')
+          return
+        }
+        lastAppliedEpoch = ctx.epoch
+        setLog(res.log)
+        setLogState('loaded')
+        setLogError(null)
+      },
+      (e) => {
+        if (!scopeCurrent(ctx) || ctx.epoch < lastAppliedEpoch) {
+          setLogState(untrack(log) === null ? 'idle' : 'loaded')
+          return
+        }
+        if (isUnknownBinding(e)) {
+          reResolve()
+          return
+        }
+        setLogState('failed')
+        setLogError(messageOf(e))
+      },
+    )
+  }
+
   function openScope(o: ActiveOrigin): void {
     const prev = untrack(binding)
     generation++
@@ -399,6 +464,7 @@ export function createGitStore(
     // bindingId null: the open is not scoped to a binding — its response
     // either establishes one or is stale by generation (rule 1, open half).
     const ctx: ScopeCtx = { tabId: o.tabId, generation, bindingId: null, epoch }
+    resetLog()
     services
       .open(o.sessionId, o.cwd ?? undefined)
       .then((res) => {
@@ -463,6 +529,10 @@ export function createGitStore(
         applyStatus(ctx, res.status)
         setPhase('ready')
         if (visible && res.status === undefined) issueStatus()
+        // D13: history does not change under the user the way the working
+        // tree does, so the log is read once per scope — here — and never
+        // by the poll.
+        if (visible) issueLog()
       })
       .catch((e) => {
         if (!openCurrent(ctx)) return
@@ -500,6 +570,7 @@ export function createGitStore(
       resetCommitForm()
       setOrigin(null)
       setPhase('no-origin')
+      resetLog()
       return
     }
     // The frontend's own guards, decided BEFORE any backend call (D3, D14):
@@ -514,6 +585,7 @@ export function createGitStore(
       resetCommitForm()
       setOrigin(next)
       setPhase('ready')
+      resetLog()
       return
     }
     // Same session AND same verified cwd AND a live binding: nothing moved —
@@ -559,6 +631,9 @@ export function createGitStore(
         !mutationInFlight()
       ) {
         issueStatus()
+        // The log rides the same "fresh the moment it is seen" read as the
+        // status — one-shot, never the timer (D13).
+        issueLog()
       }
       return
     }
@@ -567,7 +642,6 @@ export function createGitStore(
       pollTimer = null
     }
   }
-
   function refresh(): void {
     const o = untrack(origin)
     if (o === null) return
@@ -580,6 +654,7 @@ export function createGitStore(
     if (phase() === 'ready') {
       if (pollInFlight || mutationInFlight()) return
       issueStatus()
+      issueLog()
     }
   }
 
@@ -750,6 +825,7 @@ export function createGitStore(
       } else if (res.status !== undefined) {
         applyStatus(ctx, res.status)
       }
+      if (visible) issueLog()
       return
     }
     // failed — git's own account, shown in the panel, message stays (D11).
@@ -772,6 +848,7 @@ export function createGitStore(
     setStatus(null)
     setStatusStale(false)
     resetCommitForm()
+    resetLog()
   })
 
   // ── The D7 staleness seam (worker G's GitDiffDeps.onDiffStale) ────────
@@ -810,6 +887,7 @@ export function createGitStore(
     setStatus(null)
     setStatusStale(false)
     resetCommitForm()
+    resetLog()
   }
 
   return {
@@ -820,6 +898,9 @@ export function createGitStore(
     status,
     statusStale,
     openError,
+    logState,
+    log,
+    logError,
     gitVersion,
     envState,
     envReason,

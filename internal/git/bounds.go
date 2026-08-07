@@ -41,3 +41,25 @@ const MaxStderrBytes = 64 << 10
 // (D11), and a silently clipped account is a worse lie than one that admits
 // it, so the bound is reported rather than hidden.
 const MaxCommitOutputBytes = 64 << 10
+
+// MaxLogEntries is the retention cap for the log list: the parser retains
+// the first MaxLogEntries commits and keeps counting the rest, and the
+// invocation asks for one more than it will return — the extra record is
+// how the caller knows more exist (D9). The Commits section is a
+// confirmation surface — "the commit I just made is at the top" — so a
+// recent window is the product: 50 is large enough that a real branch's
+// recent history is never capped and small enough that the section stays a
+// list (the unmeasured constants of spec §9, recorded there as risks).
+const MaxLogEntries = 50
+
+// MaxLogBytes is the byte half of the log work ceiling. Subjects are short
+// and 50 records are small, so 1 MiB is far above any real answer; at the
+// ceiling the stream is cut and the result is Completeness: cut with a
+// lower bound, never a silently truncated list.
+const MaxLogBytes = 1 << 20
+
+// MaxLogWallClock is the wall-clock half of the log work ceiling. The byte
+// ceiling bounds what is read; this bounds a read that produces no output
+// — a stuck filesystem, a network share — so the child cannot be held open
+// silently (spec §9.1).
+const MaxLogWallClock = 30 * time.Second
