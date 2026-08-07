@@ -245,10 +245,16 @@ jobs:
           cp "$BIN" AppDir/usr/bin/nocx
 
           # .desktop file — required for linuxdeploy to recognise the app.
+          # `Icon` is not decoration: appimagetool refuses to package without
+          # one ("Icon entry not found in desktop file"), and the value must
+          # name an icon actually installed in the AppDir, which is why it is
+          # `nocx` and why --icon-filename below renames appicon.png to match
+          # (nocx-zvd7).
           cat > AppDir/nocx.desktop << 'DESKTOP'
           [Desktop Entry]
           Name=nocx
           Exec=nocx
+          Icon=nocx
           Type=Application
           Categories=Utility;TerminalEmulator;
           DESKTOP
@@ -276,7 +282,21 @@ jobs:
           chmod +x linuxdeploy-plugin-gtk.sh
 
           export LDAI_OUTPUT="${base}.AppImage"
-          ./linuxdeploy.AppImage --appdir AppDir --plugin gtk --output appimage
+          # --desktop-file and --icon-file are what INSTALL the two files
+          # linuxdeploy then links into the AppDir root; dropping the .desktop
+          # into AppDir/ by hand is not the same thing, and linuxdeploy said so
+          # ("Could not find desktop file in AppDir") right before appimagetool
+          # refused for want of an icon. --icon-filename renames appicon.png to
+          # `nocx` so it answers the desktop file's Icon= key — appimagetool
+          # resolves that name, not the path.
+          #
+          # build/appicon.png is in git precisely so a clean CI checkout has it
+          # (nocx-azxe.4); until now nothing on the Linux path used it, so even
+          # a successful AppImage would have carried no icon.
+          ./linuxdeploy.AppImage --appdir AppDir \
+            --desktop-file AppDir/nocx.desktop \
+            --icon-file build/appicon.png --icon-filename nocx \
+            --plugin gtk --output appimage
           mv "${base}.AppImage" dist/
 
           # ── Verify the result ────────────────────────────────────────
