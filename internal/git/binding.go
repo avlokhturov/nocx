@@ -44,6 +44,11 @@ func (b *Binding) SessionID() session.ID { return b.sessionID }
 // a running call.
 type Handle interface {
 	Status(ctx context.Context) (Status, error)
+	// EnvState is on the Handle, not only the Repo, because the transport
+	// reaches repositories exclusively through Acquire — a handler cannot
+	// ask a repo it was never given. The handle forwards to the bound
+	// repo, guarding the call like every other method (nocx-69ey).
+	EnvState() (EnvState, string)
 	Diff(ctx context.Context, path string, side Side, maxBytes int64) (Diff, error)
 	Log(ctx context.Context, max int) (Log, error)
 	Stage(ctx context.Context, paths []string) (Status, error)
@@ -226,6 +231,19 @@ func (h *handle) Status(ctx context.Context) (Status, error) {
 	}
 	defer release()
 	return h.b.repo.Status(ctx)
+}
+
+func (h *handle) EnvState() (EnvState, string) {
+	release, err := h.begin()
+	if err != nil {
+		// A released handle answers the conservative degraded, the same
+		// way known() reports the pre-settle window: the panel is about
+		// to hear unknownBinding anyway, and a "resolved" the binding
+		// no longer stands behind is the lie D6 exists to prevent.
+		return EnvDegraded, err.Error()
+	}
+	defer release()
+	return h.b.repo.EnvState()
 }
 
 func (h *handle) Diff(ctx context.Context, path string, side Side, maxBytes int64) (Diff, error) {

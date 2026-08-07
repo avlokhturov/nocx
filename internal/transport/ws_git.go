@@ -80,10 +80,26 @@ type gitStageParams struct {
 	Paths     []string `json:"paths"`
 }
 
-// gitStatusResult is the {status} shape git.status, git.stage, git.stageAll
-// and git.unstageAll answer with (spec §5.2).
+// gitStatusResult is the {status} shape git.stage, git.stageAll and
+// git.unstageAll answer with (spec §5.2). git.status answers with
+// gitStatusPollResult — the same status plus the environment fact, because
+// the poll is the repeating channel (nocx-69ey).
 type gitStatusResult struct {
 	Status gitStatusWire `json:"status"`
+}
+
+// gitStatusPollResult is git.status's shape: the status plus the current
+// environment fact (D6). Open reports the fact once; the poll repeats it
+// because Open's answer is provisional (nocx-6pz0) — it reports whatever
+// has settled by open, which in the pre-settle window is degraded — and a
+// one-shot fact the panel can never correct would warn about a degradation
+// that no longer exists, the exact inversion of D6's purpose (nocx-69ey).
+// envState is always present; envReason is present exactly when envState is
+// degraded.
+type gitStatusPollResult struct {
+	Status    gitStatusWire `json:"status"`
+	EnvState  string        `json:"envState"`            // "resolved" | "degraded" (D6)
+	EnvReason string        `json:"envReason,omitempty"` // why degraded; present when degraded
 }
 
 // gitUnstageResult is git.unstage's shape, which is a union where
@@ -442,7 +458,16 @@ func (s *WSServer) handleGitStatus(wconn *wsConn, state *connState, req jsonrpcR
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, gitErrorCode(err), err.Error()))
 		return
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(gitStatusResult{Status: wireGitStatus(status)})))
+	// The environment fact rides the poll (nocx-69ey): the panel switches
+	// on it, and only a repeating channel can withdraw a warning Open
+	// showed for the pre-settle window. The domain answers — never the
+	// shell (D16).
+	envState, envReason := h.EnvState()
+	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(gitStatusPollResult{
+		Status:    wireGitStatus(status),
+		EnvState:  string(envState),
+		EnvReason: envReason,
+	})))
 }
 
 // handleGitDiff diffs one file on one side. side is a closed enum — the

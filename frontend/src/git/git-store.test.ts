@@ -13,7 +13,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { RpcError } from '../dispatcher'
 import type { ActiveOrigin } from '../tab-content'
-import type { Status } from '../generated/git.status'
+import type { Status, GitStatusResult } from '../generated/git.status'
 import type { GitOpenResult } from '../generated/git.open'
 import type { GitHeadMessageResult } from '../generated/git.headMessage'
 import type { GitCommitResult } from '../generated/git.commit'
@@ -89,8 +89,16 @@ const openOk = (over: Partial<GitOpenResult & { state: 'ok' }> = {}): GitOpenRes
   ...over,
 })
 
-const statusResult = (over: Partial<Status> = {}): { status: Status } => ({
+/** A git.status result. envState defaults to resolved — a machine where
+ *  the resolution settled before open — and tests that script the
+ *  pre-settle window or a failure override it. */
+const statusResult = (
+  over: Partial<Status> = {},
+  env: Partial<Pick<GitStatusResult, 'envState' | 'envReason'>> = {},
+): GitStatusResult => ({
   status: statusFixture(over),
+  envState: 'resolved',
+  ...env,
 })
 
 const logFixture = (over: Partial<GitLogResult['log']> = {}): GitLogResult['log'] => ({
@@ -526,6 +534,61 @@ describe('polling', () => {
 
     mutation.resolve(statusResult())
     await settle()
+  })
+})
+
+// ── The environment warning (nocx-69ey) ─────────────────────────────────
+// The interval, stated with both ends (AGENTS.md rule 3): the warning
+// appears when the environment is known-degraded and disappears when it
+// becomes resolved — it is not "set at open". Open's answer is provisional
+// (nocx-6pz0), so the status poll must be able to withdraw it.
+
+describe('the environment warning', () => {
+  it('appears when the open landed in the pre-settle window (D6 still holds)', async () => {
+    const { store } = await openStore({
+      open: vi.fn().mockResolvedValue(
+        openOk({
+          envState: 'degraded',
+          envReason:
+            'the shell environment has not been resolved yet; the first commit will wait for it',
+        }),
+      ),
+    })
+    expect(store.envState()).toBe('degraded')
+    expect(store.envReason()).toBe(
+      'the shell environment has not been resolved yet; the first commit will wait for it',
+    )
+  })
+
+  it('is withdrawn by a poll carrying resolved — without re-opening the repository', async () => {
+    const { store, services } = await openStore({
+      open: vi.fn().mockResolvedValue(
+        openOk({
+          envState: 'degraded',
+          envReason:
+            'the shell environment has not been resolved yet; the first commit will wait for it',
+        }),
+      ),
+    })
+    expect(store.envState()).toBe('degraded')
+
+    // The background resolution settles; the NEXT poll carries it. The
+    // stale reason must go with it — a resolved state with a degraded
+    // reason text would be the same lie in a different costume.
+    mockHandle(services, 'status').mockResolvedValueOnce(statusResult({}, { envState: 'resolved' }))
+    store.refresh()
+    await settle()
+
+    expect(store.envState()).toBe('resolved')
+    expect(store.envReason()).toBeNull()
+    // The correction came through the poll channel: exactly one open.
+    expect(mockHandle(services, 'open')).toHaveBeenCalledTimes(1)
+  })
+
+  it('is never shown on a machine where the resolution settled before open — including the first frames', async () => {
+    const { store } = await openStore() // the default open result is resolved
+    expect(store.envState()).toBe('resolved')
+    expect(store.envReason()).toBeNull()
   })
 })
 

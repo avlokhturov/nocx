@@ -433,12 +433,32 @@ export function createGitStore(
       (res) => {
         pollInFlight = false
         applyStatus(ctx, res.status)
+        // The environment fact rides the poll (nocx-69ey): Open's answer
+        // is provisional (nocx-6pz0) — whatever settled by open, degraded
+        // in the pre-settle window — so the warning it may have shown must
+        // be withdrawable, and the poll is the repeating channel that
+        // carries the settled answer. Same rule 1 triple as the status.
+        applyEnv(ctx, res.envState, res.envReason)
       },
       (e) => {
         pollInFlight = false
         onStatusError(ctx, e)
       },
     )
+  }
+
+  /** The environment fact, applied from a status response. A poll that
+   *  landed after the panel re-scoped must not paint the wrong binding's
+   *  environment, so it is guarded exactly like the status (rule 1). */
+  function applyEnv(
+    ctx: ScopeCtx,
+    state: 'resolved' | 'degraded',
+    reason: string | undefined,
+  ): void {
+    if (!scopeCurrent(ctx)) return
+    if (ctx.epoch < lastAppliedEpoch) return
+    setEnvState(state)
+    setEnvReason(reason ?? null)
   }
 
   function onStatusError(ctx: ScopeCtx, e: unknown): void {
