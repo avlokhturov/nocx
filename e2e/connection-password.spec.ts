@@ -22,7 +22,7 @@
  * One serial test: the second open MUST observe state the first open
  * installed, not an independent fixture.
  */
-import { test as base, expect } from '@playwright/test'
+import { test as base, expect, type Page } from '@playwright/test'
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { mkdtempSync } from 'node:fs'
