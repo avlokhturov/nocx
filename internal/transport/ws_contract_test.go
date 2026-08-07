@@ -952,10 +952,12 @@ func TestConnectionsTest_DTOConformsToContract(t *testing.T) {
 				Outcome: OutcomeHostKeyUnknown,
 				Detail:  "unknown host key for h:22: ssh-ed25519 SHA256:abc",
 				HostKey: &connectionsTestHostKey{
-					Host:        "h:22",
-					Algorithm:   "ssh-ed25519",
-					Fingerprint: "SHA256:abc",
-					Key:         "a2V5",
+					Host:           "h:22",
+					KnownHostsHost: "nocx-v1-route:22",
+					Changed:        false,
+					Algorithm:      "ssh-ed25519",
+					Fingerprint:    "SHA256:abc",
+					Key:            "a2V5",
 				},
 			},
 			false,
@@ -968,6 +970,8 @@ func TestConnectionsTest_DTOConformsToContract(t *testing.T) {
 				Detail:  "host key mismatch for h:22: got SHA256:new, expected SHA256:old",
 				HostKey: &connectionsTestHostKey{
 					Host:              "h:22",
+					KnownHostsHost:    "nocx-v1-route:22",
+					Changed:           true,
 					Algorithm:         "ecdsa-sha2-nistp256",
 					Fingerprint:       "SHA256:new",
 					StoredFingerprint: "SHA256:old",
@@ -1010,20 +1014,22 @@ func TestConnectionsTest_OverTheWireConformsToContract(t *testing.T) {
 		{
 			"host-key-unknown",
 			&ssh.ErrUnknownHostKey{
-				Addr:        "host.example.com:22",
-				KeyAlgo:     "ssh-ed25519",
-				Fingerprint: "SHA256:abc",
-				Key:         []byte("offered-key-blob"),
+				Addr:           "host.example.com:22",
+				KnownHostsAddr: "nocx-v1-route:22",
+				KeyAlgo:        "ssh-ed25519",
+				Fingerprint:    "SHA256:abc",
+				Key:            []byte("offered-key-blob"),
 			},
 		},
 		{
 			"host-key-changed",
 			&ssh.ErrHostKeyMismatch{
-				Addr:        "host.example.com:22",
-				Fingerprint: "SHA256:new",
-				Expected:    "SHA256:old",
-				KeyAlgo:     "ecdsa-sha2-nistp256",
-				Key:         []byte("new-key-blob"),
+				Addr:           "host.example.com:22",
+				KnownHostsAddr: "nocx-v1-route:22",
+				Fingerprint:    "SHA256:new",
+				Expected:       "SHA256:old",
+				KeyAlgo:        "ecdsa-sha2-nistp256",
+				Key:            []byte("new-key-blob"),
 			},
 		},
 	}
@@ -2009,7 +2015,7 @@ func TestVaultUnlockRequest_OverTheWireConformsToContract(t *testing.T) {
 	go func() { _ = ws.RequestUnlock(ctx, "history needs the content key") }()
 
 	// Read the notification off the real socket.
-	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(wantWithin))
 	_, data, err := conn.ReadMessage()
 	if err != nil {
 		t.Fatalf("read notification: %v", err)
@@ -2076,7 +2082,7 @@ func TestConnectionsPasswordRequest_OverTheWireConformsToContract(t *testing.T) 
 	}()
 
 	// Read the notification off the real socket.
-	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(wantWithin))
 	_, data, err := conn.ReadMessage()
 	if err != nil {
 		t.Fatalf("read notification: %v", err)
@@ -2114,7 +2120,7 @@ func TestConnectionsPasswordRequest_OverTheWireConformsToContract(t *testing.T) 
 		if !errors.Is(err, ErrPasswordPromptCancelled) {
 			t.Fatalf("RequestConnectionPassword = %v, want ErrPasswordPromptCancelled", err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(wantWithin):
 		t.Fatal("RequestConnectionPassword did not resolve")
 	}
 }

@@ -13,11 +13,13 @@ import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { VaultBackend, bindEndpoint, type DisposableRoot } from './harness'
+import { readStand } from './stand'
 
 const test = base
 
-const DEVHARNESS_BIN = process.env.NOCX_VAULT_BIN ?? '/tmp/nocx-devharness'
-const FIRST_PORT = 19890
+/** Lazily, not at module scope: the stand is started by globalSetup, which
+ *  runs after Playwright has collected this file. */
+const devharnessBin = () => readStand().devharness
 
 // ── Encrypted vault fixture ──────────────────────────────────────────────
 //
@@ -99,7 +101,7 @@ test.describe('Tabby import preview + execute', () => {
 
   test.beforeAll(() => {
     xdg = createXdgDirs()
-    backend = new VaultBackend(DEVHARNESS_BIN, asDisposableRoot(xdg), true)
+    backend = new VaultBackend(devharnessBin(), asDisposableRoot(xdg), true)
     configPath = join(xdg.root, 'tabby-e2e-test.yml')
     writeFileSync(configPath, CONFIG_YAML, 'utf-8')
   })
@@ -117,7 +119,7 @@ test.describe('Tabby import preview + execute', () => {
   test('imports Tabby encrypted config via preview -> confirm -> execute, profile+secret appear', async ({
     page,
   }) => {
-    const ep = await backend.start(FIRST_PORT)
+    const ep = await backend.start()
     await bindEndpoint(page, ep)
     await page.goto('/')
 

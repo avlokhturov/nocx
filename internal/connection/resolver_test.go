@@ -3,6 +3,7 @@ package connection
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/profile"
@@ -750,4 +751,67 @@ func (*recordingRemoteInstaller) EnsureInstalledRemote(context.Context, *gossh.C
 func (*recordingRemoteInstaller) RemoteStartCommand() string { return "" }
 func (*recordingRemoteInstaller) UninstallRemote(context.Context, *gossh.Client, string) ([]string, []string, error) {
 	return nil, nil, nil
+}
+
+// TestResolver_KeepaliveDefaultsWhenTheProfileNamesNone pins the mechanism
+// that is now the only thing able to end a session whose transport died in
+// silence (nocx-o2le). A write into such a connection never returns and never
+// errors; the session's write queue can report that it is stuck but cannot
+// close it. If a profile that sets no keepalive resolves to no keepalive, that
+// tab hangs until the user kills it.
+func TestResolver_KeepaliveDefaultsWhenTheProfileNamesNone(t *testing.T) {
+	ps := newStubProfileStore()
+	ss := newStubSecretStore()
+
+	_ = ps.SaveProfile(profile.SSHProfile{
+		Base: profile.Base{ID: "profile:bare", Name: "bare"},
+		Options: profile.StoredSSHProfileOptions{
+			Host: "bare.example.com",
+			Port: profile.Ptr(22),
+			User: profile.Ptr("admin"),
+		},
+	})
+
+	r := NewResolver(ps, ps, ss)
+	_, cfg, err := r.Resolve("profile:bare")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if cfg.KeepaliveInterval != defaultKeepaliveInterval {
+		t.Errorf("KeepaliveInterval = %v, want %v — a profile with no keepalive would never notice a dead transport",
+			cfg.KeepaliveInterval, defaultKeepaliveInterval)
+	}
+	if cfg.KeepaliveCountMax != defaultKeepaliveCountMax {
+		t.Errorf("KeepaliveCountMax = %d, want %d", cfg.KeepaliveCountMax, defaultKeepaliveCountMax)
+	}
+}
+
+// TestResolver_KeepaliveFromTheProfileWins is the other end: the default must
+// not overwrite what the user asked for.
+func TestResolver_KeepaliveFromTheProfileWins(t *testing.T) {
+	ps := newStubProfileStore()
+	ss := newStubSecretStore()
+
+	_ = ps.SaveProfile(profile.SSHProfile{
+		Base: profile.Base{ID: "profile:tuned", Name: "tuned"},
+		Options: profile.StoredSSHProfileOptions{
+			Host:              "tuned.example.com",
+			Port:              profile.Ptr(22),
+			User:              profile.Ptr("admin"),
+			KeepaliveInterval: profile.Ptr(5000),
+			KeepaliveCountMax: profile.Ptr(9),
+		},
+	})
+
+	r := NewResolver(ps, ps, ss)
+	_, cfg, err := r.Resolve("profile:tuned")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if cfg.KeepaliveInterval != 5*time.Second {
+		t.Errorf("KeepaliveInterval = %v, want 5s (the profile's 5000ms)", cfg.KeepaliveInterval)
+	}
+	if cfg.KeepaliveCountMax != 9 {
+		t.Errorf("KeepaliveCountMax = %d, want 9", cfg.KeepaliveCountMax)
+	}
 }

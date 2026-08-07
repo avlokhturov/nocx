@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -17,6 +18,18 @@ import (
 )
 
 type ID string
+
+// ErrSessionClosed is returned by Write once Close has been called: the
+// write loop has stopped and nothing further will reach the channel.
+var ErrSessionClosed = errors.New("session is closed")
+
+// writeQueueDepth is how many data frames a session may have in flight
+// before the transport starts dropping them. It buys the write loop room
+// to fall behind a burst — a paste, a held key — without letting a channel
+// that has stopped accepting bytes grow the queue without bound. A session
+// that reaches this depth is not slow, it is stuck, and the transport says
+// so rather than buffering input the user will never see arrive.
+const writeQueueDepth = 64
 
 type Kind int
 
@@ -70,8 +83,18 @@ type Session interface {
 	// Empty for sessions with no linked credential (inline auth) and for
 	// local/ad-hoc sessions.
 	CredentialID() string
-
+	// Write sends p to the session's channel and returns the number of
+	// bytes written and any error. It blocks until the write completes
+	// (or the session dies); callers that must not block — the
+	// transport readLoop — use EnqueueWrite instead.
 	Write(p []byte) (int, error)
+	// EnqueueWrite submits p to the session's write queue without
+	// waiting for the channel write to complete. It preserves FIFO
+	// order relative to other EnqueueWrite calls from the same caller
+	// (the transport readLoop), and never blocks: if the queue is
+	// full the frame is dropped. Returns false if the session is
+	// closed or the queue is full.
+	EnqueueWrite(p []byte) bool
 	Resize(ctx context.Context, cols, rows, xpixel, ypixel uint16) error
 	Close() error
 	Done() <-chan struct{}
@@ -223,7 +246,10 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 		sshOpts:      opts,
 		ch:           ch,
 		log:          r.log.With("session_id", string(id)),
+		writeCh:      make(chan writeJob, writeQueueDepth),
+		writeDone:    make(chan struct{}),
 	}
+	s.startWriteLoop()
 
 	r.mu.Lock()
 	r.sessions[id] = s
@@ -343,6 +369,13 @@ func sshOptionsFromConfig(cfg *ssh.ConnectConfig) []ssh.ConnectOption {
 	if cfg.JumpHost != "" {
 		opts = append(opts, ssh.WithJumpHost(cfg.JumpHost, cfg.JumpPort, cfg.JumpUser, cfg.JumpAuthMode))
 	}
+	// JumpConfig carries the full recursive jump configuration (Secrets,
+	// SecretID, KeyFile, AuthMode, nested JumpConfig) — without it the
+	// session→ssh seam drops the bastion's auth material and the dial
+	// offers no methods (nocx-8b1v).
+	if cfg.JumpConfig != nil {
+		opts = append(opts, ssh.WithJumpConfig(cfg.JumpConfig))
+	}
 	if cfg.JumpSecrets != nil {
 		opts = append(opts, ssh.WithJumpCredentials(cfg.JumpSecrets, cfg.JumpSecretID))
 	}
@@ -367,6 +400,9 @@ func sshOptionsFromConfig(cfg *ssh.ConnectConfig) []ssh.ConnectOption {
 	}
 	if cfg.PasswordRequester != nil {
 		opts = append(opts, ssh.WithPasswordRequester(cfg.PasswordRequester))
+	}
+	if cfg.UnlockRequester != nil {
+		opts = append(opts, ssh.WithUnlockRequester(cfg.UnlockRequester))
 	}
 
 	if cfg.AuthorizedEndpoint != "" {
@@ -417,6 +453,34 @@ type realSession struct {
 	handler   OutputHandler
 	handlerMu sync.Mutex
 	closeOnce sync.Once
+
+	// writeCh feeds a single write goroutine that serialises every write in
+	// arrival order. The readLoop hands frames over without waiting, so
+	// ordering has to be the queue's job: two frames for one session —
+	// "pwd\n" then "hostname\n" — must reach the channel in that order or
+	// the user sees "pwdhostname". It is bounded so a channel that has
+	// stopped accepting bytes cannot grow it without limit.
+	//
+	// writeCh is NEVER closed. Closing it would race every sender: the
+	// readLoop can be inside EnqueueWrite, past any closed check, at the
+	// moment Close runs — and a send on a closed channel is a panic that
+	// takes the whole backend down, not one tab. writeDone is the stop
+	// signal instead; a send on an open channel is always safe.
+	writeCh   chan writeJob
+	writeDone chan struct{}
+}
+
+// writeJob carries a payload and its result channel. The result is
+// best-effort: the transport logs errors and does not block on them,
+// but returning the error keeps the Write signature honest.
+type writeJob struct {
+	p   []byte
+	res chan writeResult
+}
+
+type writeResult struct {
+	n   int
+	err error
 }
 
 func (s *realSession) ID() ID                          { return s.id }
@@ -428,7 +492,64 @@ func (s *realSession) CredentialID() string            { return s.credentialID }
 func (s *realSession) SSHOptions() []ssh.ConnectOption { return s.sshOpts }
 
 func (s *realSession) Write(p []byte) (int, error) {
-	return s.ch.Write(p)
+	res := make(chan writeResult, 1)
+	select {
+	case s.writeCh <- writeJob{p: p, res: res}:
+	case <-s.writeDone:
+		return 0, ErrSessionClosed
+	case <-s.ch.Done():
+		return 0, ErrSessionClosed
+	}
+	select {
+	case r := <-res:
+		return r.n, r.err
+	case <-s.writeDone:
+		return 0, ErrSessionClosed
+	case <-s.ch.Done():
+		return 0, ErrSessionClosed
+	}
+}
+
+// EnqueueWrite submits p to the write queue without blocking. The
+// transport readLoop calls this for every data frame: it must never
+// stall on one session (a dead SSH channel would freeze every other
+// tab). If the bounded queue is full the frame is dropped — a slow
+// channel should not be able to exhaust memory. Because the readLoop
+// is the sole EnqueueWrite caller, the queue preserves FIFO order:
+// frame N is enqueued before frame N+1. The result channel is nil —
+// the transport does not need the write result, and writeLoop skips
+// the send when res is nil.
+func (s *realSession) EnqueueWrite(p []byte) bool {
+	select {
+	case <-s.writeDone:
+		return false
+	default:
+	}
+	select {
+	case s.writeCh <- writeJob{p: p}:
+		return true
+	default:
+		return false
+	}
+}
+
+// startWriteLoop runs the single goroutine that drains writeCh in FIFO
+// order. It exits on writeDone, which Close closes, so it never leaks and
+// never observes a closed writeCh.
+func (s *realSession) startWriteLoop() {
+	go func() {
+		for {
+			select {
+			case <-s.writeDone:
+				return
+			case job := <-s.writeCh:
+				n, err := s.ch.Write(job.p)
+				if job.res != nil {
+					job.res <- writeResult{n: n, err: err}
+				}
+			}
+		}
+	}()
 }
 
 func (s *realSession) Resize(ctx context.Context, cols, rows, xpixel, ypixel uint16) error {
@@ -439,6 +560,13 @@ func (s *realSession) Close() error {
 	var err error
 	s.closeOnce.Do(func() {
 		s.log.Debug("closing session")
+		// Signal the write loop and close the channel without waiting for
+		// it. Waiting would hand a dead SSH channel the power to block
+		// Close for as long as its write blocks — and `close` is handled
+		// on the readLoop, so that would be the freeze this change exists
+		// to remove, arriving through the other door. ch.Close is what
+		// unblocks the in-flight write; the loop then sees writeDone.
+		close(s.writeDone)
 		err = s.ch.Close()
 	})
 	return err

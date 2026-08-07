@@ -777,7 +777,16 @@ export class CompletionController {
           ? 'This folder is empty'
           : `${this.bestReason.dir} is empty`
       case 'snapshot-pending':
-        return 'Command names are still loading — press Tab again in a moment'
+        // Not "press Tab again in a moment", which is what this said and could
+        // not deliver. The snapshot is written by the shell and only from a
+        // prompt; a shell idle in readline runs nothing on its own (measured
+        // on bash 5.2 and 5.3 — a raised signal's trap waits for the next
+        // submitted command). So on the rare occasion the source-time job
+        // misses the first prompt's grace, pressing Tab cannot advance it and
+        // the row was telling the user to do the one thing that does not work.
+        // Running anything produces the next prompt, which carries it
+        // (nocx-z9s9.16).
+        return 'Command names are still loading — they arrive after your next command'
       case 'hosts-unavailable':
         // The quick-connect vocabulary for the degraded `ssh -G` resolver —
         // the condition, never silence. The detail names the failure the

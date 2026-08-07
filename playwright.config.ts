@@ -1,17 +1,27 @@
 import { defineConfig, type Project } from '@playwright/test'
-import path from 'node:path'
 
-import { BASE_URL, HEADLESS, WAILS_URL } from './e2e/base-url'
-import { createHomeIsolation } from './e2e/home-isolation'
+import { BASE_URL } from './e2e/base-url'
 
-// e2e drives the whole app, not the frontend alone: `wails dev` serves the
-// built UI *and* the bound Go methods, so a test here exercises the real
-// transport, the real PTY and the real renderer. That is the only place layout,
-// focus and GPU behaviour are observable — jsdom has none of them.
+// e2e drives the whole app, not the frontend alone: the stand this config
+// starts is cmd/devharness — the real Go backend on a real PTY, the real
+// transport — with vite serving the real renderer. That is the only place
+// layout, focus and GPU behaviour are observable; jsdom has none of them.
+//
+// ONE arrangement. There used to be two — `wails dev` here and a shell script
+// that started devharness and set NOCX_WS_PORT — and seven specs could only
+// run on the second, kept off the first by a hand-written list. That is how
+// seven files failed on their first line while the shards stayed green
+// (nocx-azxe.2), and how "where is the home" became a question with two right
+// answers. e2e/stand.ts owns the lifecycle now and e2e/check-coverage.mjs is
+// the receipt that no spec file is left uncollected.
+//
+// wails is not started here. What the desktop host proves — the assets it
+// serves and the real window.go it injects — is its own subject, and it has
+// its own project rather than being the platform every spec pays for.
 //
 // Ports and URLs live in e2e/base-url.ts: the harness needs the same answer for
 // the worker-scoped readiness page it opens itself, and a second copy here
-// would agree until someone changed one of them. See reuseExistingServer below.
+// would agree until someone changed one of them.
 
 // Both browsers stay declared. WebKit is not redundant coverage: nocx-q18's
 // glyph corruption reproduces in WKWebView and not in Chromium, and WebKit is
@@ -37,56 +47,8 @@ if (wanted?.length && projects.length === 0) {
   )
 }
 
-// The disposable home every backend this config launches is given. A fixed path
-// under the repo rather than a fresh mkdtemp, for termic's reason: it survives
-// the run, so a failure can be inspected, and it does not depend on when
-// Playwright evaluates the config relative to globalSetup. `.e2e/` is ignored by
-// git. Runs already serialise on the app port, so sharing it costs nothing that
-// was not already shared.
-//
-// The env below is what stops a suite run rewriting the developer's settings,
-// reinstalling their shell hooks and reading their ~/.ssh/config (nocx-ti8w).
-// __dirname rather than import.meta.url: the root package.json has no
-// "type": "module", so Playwright loads this config as CommonJS.
-const E2E_ROOT = path.join(__dirname, '.e2e')
-const homeIsolation = createHomeIsolation({ inheritedEnv: process.env, root: E2E_ROOT })
-const isolatedEnv: Record<string, string> = Object.fromEntries(
-  Object.entries(homeIsolation.env).filter((e): e is [string, string] => e[1] !== undefined),
-)
-
 export default defineConfig({
   testDir: './e2e',
-
-  // The specs that start their OWN backend, and so can only run headless.
-  //
-  // They exist because their subject is the backend's lifecycle — a vault that
-  // survives a restart, an import that outlives the process, history that is
-  // still there next launch — and `wails dev` owns exactly one backend whose
-  // lifecycle Playwright cannot touch. Each therefore runs cmd/devharness
-  // itself and points the page at it through harness.ts's bindEndpoint, which
-  // only works where vite serves the page alone: under `wails dev` the real
-  // window.go replaces the stub before the app reads it, and the spec ends up
-  // driving the shared backend on 34115 instead (nocx-w4vy, and bindEndpoint's
-  // comment for the mechanism).
-  //
-  // Excluded here rather than skipped inside each spec, because there is no
-  // per-test condition to evaluate — the whole file is unrunnable on this path.
-  // The exclusion is only honest while something else runs them: that is the
-  // `e2e-headless` job in ci.yml, which is also where a new entry has to be
-  // added. bindEndpoint throws if one is not, so the failure mode of forgetting
-  // is a red run naming this list, not a spec that quietly measures nothing.
-  testIgnore: HEADLESS
-    ? []
-    : [
-        'connection-password.spec.ts',
-        'history-persistence.spec.ts',
-        'prompt-vault.spec.ts',
-        'recall-search.spec.ts',
-        'sidebar-resize.spec.ts',
-        'tabby-import.spec.ts',
-        'vault.spec.ts',
-        'vault-settings.spec.ts',
-      ],
 
   timeout: 60_000,
 
@@ -117,7 +79,11 @@ export default defineConfig({
   // can throttle. That is handled outside the repo by capping dump size. What
   // this guard buys is refusing to begin a run on a filesystem that is already
   // too full to survive one.
-  globalSetup: './e2e/preflight.ts',
+  // The stand — cmd/devharness plus vite — is brought up here and taken down
+  // in globalTeardown, so `npx playwright test` is the whole command on a
+  // developer's machine and in CI. preflight's disk floor runs first.
+  globalSetup: './e2e/global-setup.ts',
+  globalTeardown: './e2e/global-teardown.ts',
 
   // One worker by default, because the default must assume this process is NOT
   // alone on the machine. With one worker per run, total browsers equals the
@@ -130,44 +96,4 @@ export default defineConfig({
     trace: 'retain-on-failure',
   },
   projects,
-
-  // The suite starts its own app: a test that silently needs a `wails dev`
-  // someone remembered to launch is red on a clean machine for a reason that
-  // has nothing to do with the code under test, and green only by luck.
-  //
-  // reuseExistingServer is OPT-IN, not "anything but CI". Attaching to a server
-  // this run did not start is only safe when the operator knows it serves the
-  // same tree; otherwise the suite silently measures someone else's build and
-  // reports the answer as if it were about this one. A wrong green is worse than
-  // a slow start, so the default builds its own and PW_REUSE_SERVER=1 opts out.
-  //
-  // The timeout is sized for a cold `wails dev`, which compiles the Go binary
-  // and installs/builds the frontend before it ever listens.
-  //
-  // gracefulShutdown is load-bearing, not politeness. `wails dev` starts the
-  // frontend watcher in a process group of its own (Setpgid in the wails CLI),
-  // so no group kill aimed at wails can reach it; wails reaps it itself, from a
-  // SIGTERM handler, on the way out. Playwright's default is to SIGKILL the
-  // group — that handler never runs, vite is orphaned, and because it inherited
-  // the run's stdio the pipe never closes and the run hangs long after the last
-  // test. On a runner that is a job burning its timeout rather than failing.
-  //
-  // In headless mode the caller owns both processes; skip the webServer stanza.
-  ...(!HEADLESS
-    ? {
-        webServer: {
-          command: 'wails dev',
-          // The boundary. `wails dev` passes its environment to the backend it
-          // builds and runs, so this is the one place the default path can be
-          // isolated — there is no fixture between Playwright and the app.
-          env: isolatedEnv,
-          url: WAILS_URL,
-          reuseExistingServer: !!process.env.PW_REUSE_SERVER,
-          timeout: 240_000,
-          gracefulShutdown: { signal: 'SIGTERM', timeout: 15_000 },
-          stdout: 'pipe' as const,
-          stderr: 'pipe' as const,
-        },
-      }
-    : {}),
 })

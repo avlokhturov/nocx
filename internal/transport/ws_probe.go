@@ -111,6 +111,8 @@ type connectionsTestResult struct {
 // connections.trustHostKey as the accept payload.
 type connectionsTestHostKey struct {
 	Host              string `json:"host"`
+	KnownHostsHost    string `json:"knownHostsHost"`
+	Changed           bool   `json:"changed"`
 	Algorithm         string `json:"algorithm"`
 	Fingerprint       string `json:"fingerprint"`
 	StoredFingerprint string `json:"storedFingerprint,omitempty"`
@@ -194,16 +196,20 @@ func hostKeyInfoFromError(err error) *connectionsTestHostKey {
 	var unknownKey *ssh.ErrUnknownHostKey
 	if errors.As(err, &unknownKey) {
 		return &connectionsTestHostKey{
-			Host:        unknownKey.Addr,
-			Algorithm:   unknownKey.KeyAlgo,
-			Fingerprint: unknownKey.Fingerprint,
-			Key:         base64.StdEncoding.EncodeToString(unknownKey.Key),
+			Host:           unknownKey.Addr,
+			KnownHostsHost: knownHostsAddr(unknownKey.Addr, unknownKey.KnownHostsAddr),
+			Changed:        false,
+			Algorithm:      unknownKey.KeyAlgo,
+			Fingerprint:    unknownKey.Fingerprint,
+			Key:            base64.StdEncoding.EncodeToString(unknownKey.Key),
 		}
 	}
 	var keyMismatch *ssh.ErrHostKeyMismatch
 	if errors.As(err, &keyMismatch) {
 		return &connectionsTestHostKey{
 			Host:              keyMismatch.Addr,
+			KnownHostsHost:    knownHostsAddr(keyMismatch.Addr, keyMismatch.KnownHostsAddr),
+			Changed:           true,
 			Algorithm:         keyMismatch.KeyAlgo,
 			Fingerprint:       keyMismatch.Fingerprint,
 			StoredFingerprint: keyMismatch.Expected,
@@ -211,6 +217,13 @@ func hostKeyInfoFromError(err error) *connectionsTestHostKey {
 		}
 	}
 	return nil
+}
+
+func knownHostsAddr(displayAddr, lookupAddr string) string {
+	if lookupAddr != "" {
+		return lookupAddr
+	}
+	return displayAddr
 }
 
 // storeProbeResult builds a ProbeResultRecord from the probe output and

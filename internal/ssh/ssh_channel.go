@@ -36,7 +36,24 @@ func (c *RealChannel) Read(p []byte) (int, error) {
 	return c.stdout.Read(p)
 }
 
+// Write can block indefinitely, and that is deliberate. gossh's stdin pipe
+// carries no deadline, so bounding it here would mean a goroutine and a
+// timer per keystroke — and a write that "timed out" is not cancelled, it
+// is merely abandoned, free to land after the frames that followed it and
+// reorder the user's input. The blocking is contained instead of hidden:
+// only the session's own write loop waits here (nocx-o2le), so a channel
+// that has stopped accepting bytes costs that one tab, and a transport
+// that is actually dead is closed by the keepalive prober, which is the
+// component whose job that is.
+//
+// The done check is the one cheap thing worth doing: a channel the watcher
+// has already seen exit says so instead of writing into a dead pipe.
 func (c *RealChannel) Write(p []byte) (int, error) {
+	select {
+	case <-c.done:
+		return 0, &ErrDisconnected{}
+	default:
+	}
 	return c.stdin.Write(p)
 }
 

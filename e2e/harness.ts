@@ -1,6 +1,7 @@
 import { test as base, expect as baseExpect, type Page } from '@playwright/test'
 
-import { BASE_URL, HEADLESS } from './base-url'
+import { BASE_URL } from './base-url'
+import { readStand } from './stand'
 
 export { expect } from '@playwright/test'
 export type { Page } from '@playwright/test'
@@ -24,28 +25,52 @@ export async function promptReady(page: Page): Promise<void> {
   await baseExpect(input).toBeFocused({ timeout: 10_000 })
 }
 
-// Shared e2e harness. When the suite runs against the headless
-// vite + devharness shim (NOCX_WS_PORT set) instead of `wails dev`, inject the
-// Wails GetWSPort binding the frontend expects before any app code runs. Under
-// `wails dev` the real binding is present and NOCX_WS_PORT is unset, so this is
-// a no-op — the same specs run unchanged in CI.
+/**
+ * Click into the active pane's prompt editor.
+ *
+ * Six specs used to spell this `page.mouse.click(box.x + box.width / 2, box.y +
+ * box.height - 30)` on the pane, each with a comment saying what it meant —
+ * "near the bottom of the pane, where the editor lives". The 30 is a guess at
+ * how tall the editor is, and the editor's height follows the terminal font, so
+ * the guess is a claim about the host rather than about the product. Its
+ * sibling defect — a double-click at a fixed 120px — was landing on a space in
+ * the e2e container while passing on the author's Mac (nocx-z9s9.10).
+ *
+ * The pane centre is deliberately still avoided, and that reason is real: it
+ * lands on the xterm area whose hidden textarea takes focus, and the
+ * focus-bounce handler then bails because focus is already inside the xterm
+ * container. Clicking the editor itself reaches the editor's own
+ * click-to-focus handler, which is the path these specs are about. It also
+ * still reaches the pane's handlers — a contextmenu on the editor bubbles — so
+ * the right-click paste case keeps working through the same seam.
+ */
+export async function clickIntoEditor(
+  page: Page,
+  opts: { button?: 'left' | 'right' } = {},
+): Promise<void> {
+  await page.locator('.pane.active .nocx-editor-input').click({ button: opts.button ?? 'left' })
+}
+
+// vite serves the page alone, so nothing installs the wails runtime — the
+// frontend reads window.go at startup and would find nothing. This supplies it,
+// pointed at the stand Playwright started.
+//
+// Read from the stand's manifest rather than from environment variables. The
+// backend mints its token at startup, and a process cannot put a value back
+// into its parent's environment, so a token that travelled by env had to be
+// exported by whatever shell script started the backend — which is precisely
+// the second entry point this arrangement removed.
+//
+// A spec that needs its OWN backend overrides this afterwards with
+// bindEndpoint(); init scripts apply in order, so the later one wins.
 async function injectWailsShim(page: Page): Promise<void> {
-  const port = process.env.NOCX_WS_PORT
-  const token = process.env.NOCX_WS_TOKEN
-  if (!port) return
-  if (!token) {
-    throw new Error(
-      'NOCX_WS_PORT set but NOCX_WS_TOKEN is missing; ' +
-        'the token is the auth gate and an empty string is rejected. ' +
-        'Export both or use `wails dev`.',
-    )
-  }
+  const stand = readStand()
   await page.addInitScript(
-    (opts: { p: string; t: string }) => {
+    (opts: { p: number; t: string }) => {
       ;(window as unknown as { go: unknown }).go = {
         main: {
           WailsApp: {
-            GetWSPort: () => Promise.resolve(Number(opts.p)),
+            GetWSPort: () => Promise.resolve(opts.p),
             GetWSToken: () => Promise.resolve(opts.t),
             CheckForUpdate: () => Promise.resolve(null),
             ReportHealthy: () => Promise.resolve(),
@@ -54,7 +79,7 @@ async function injectWailsShim(page: Page): Promise<void> {
         },
       }
     },
-    { p: port, t: token },
+    { p: stand.port, t: stand.token },
   )
 }
 
@@ -119,9 +144,9 @@ export const test = base.extend<object, { appReady: void }>({
 // Usage:
 //   const backend = new VaultBackend('/tmp/nocx-devharness',
 //     { data: '/tmp/vt/data', config: '/tmp/vt/config', cache: '/tmp/vt/cache' })
-//   const { port, token } = await backend.start(firstPort)
+//   const { port, token } = await backend.start()
 //   // … test …
-//   const { port: p2, token: t2 } = await backend.restart(secondPort)
+//   const { port: p2, token: t2 } = await backend.restart()
 
 import { spawn, execSync, type ChildProcess } from 'node:child_process'
 import { existsSync, readFileSync, openSync, mkdirSync, copyFileSync } from 'node:fs'
@@ -207,32 +232,20 @@ export function documentDir(isolatedHome: string): string {
  * touched, while the devharness each of them started logged its port and never
  * saw a single client (nocx-w4vy).
  *
+ * That refusal used to live here as a thrown error, because the suite had a
+ * second arrangement this call was illegal on. It has one now — vite serves
+ * the page alone and nothing overwrites the stub — so the branch is gone
+ * rather than kept as a condition that can never be true. What remains true is
+ * the reason it existed: a spec that quietly measures the wrong backend is a
+ * green run about nothing, so a spec using this should assert, after binding,
+ * that the page reports the port it meant to reach.
+ *
  * The specs that need this need it because they RESTART their backend
  * mid-test — vault surviving a restart is the thing under test — and `wails
  * dev` owns exactly one backend whose lifecycle Playwright cannot touch. The
  * requirement was never "override the bindings"; it was "run headless".
  */
 export async function bindEndpoint(page: Page, endpoint: BackendEndpoint): Promise<void> {
-  if (!HEADLESS) {
-    throw new Error(
-      [
-        'bindEndpoint: refusing to override the wails bindings on the `wails dev` path.',
-        '',
-        'This spec starts its own devharness backend, which only works when the',
-        'page is served by vite alone. Under `wails dev` the injected window.go',
-        'is replaced by the real one before the app reads it, and the spec would',
-        'silently drive the shared backend on 34115 instead (nocx-w4vy).',
-        '',
-        'Run it on the headless path:',
-        '',
-        '  e2e/run-in-container.sh e2e/<this>.spec.ts    # or',
-        '  e2e/headless-run.sh e2e/<this>.spec.ts',
-        '',
-        'playwright.config.ts excludes these specs from the `wails dev` run, so',
-        'reaching this error means one was added back without being listed there.',
-      ].join('\n'),
-    )
-  }
   await page.context().addInitScript(
     (opts: { p: number; t: string }) => {
       const w = window as unknown as { go?: Record<string, unknown> }
@@ -255,6 +268,13 @@ export async function bindEndpoint(page: Page, endpoint: BackendEndpoint): Promi
 export class VaultBackend {
   private proc: ChildProcess | null = null
   private logPath = ''
+
+  /** Where this backend is writing. A spec that wants to read the log asks for
+   *  it rather than rebuilding the name from a port it no longer chooses. */
+  get logFile(): string {
+    if (!this.logPath) throw new Error('backend has not been started yet')
+    return this.logPath
+  }
 
   /** The canonical home this backend was given, once it has been started. */
   private isolation: HomeIsolation | null = null
@@ -281,9 +301,20 @@ export class VaultBackend {
   }
 
   /** Start devharness on the given port, wait for WSPORT/WSTOKEN. */
-  async start(port: number): Promise<BackendEndpoint> {
+  /** Start the backend. The port defaults to 0, which asks the OS for a free
+   *  one and reads back what it got — devharness prints WSPORT either way.
+   *
+   *  It used to be required, and every spec picked a constant by hand. Three
+   *  pairs collided: vault-settings and recall-search both claimed 19880,
+   *  history-persistence and home-boundary-live both 19878, prompt-vault and
+   *  connection-password both 19901. In isolation each passed; in a full run
+   *  whichever went second could find the port still held and come up with no
+   *  backend at all, which surfaces as "no tab ever appeared" somewhere else
+   *  entirely. A port is a shared resource and hand-assignment does not scale
+   *  past the first person who forgets to check (nocx-z9s9.11). */
+  async start(port = 0): Promise<BackendEndpoint> {
     if (this.proc) throw new Error('backend already running; call stop() first')
-    this.logPath = resolve(this.disposable.root, `devharness-${port}.log`)
+    this.logPath = resolve(this.disposable.root, `devharness-${port || 'auto'}.log`)
     const logFd = openSync(this.logPath, 'w')
 
     const overrideEnv: Record<string, string> = { NOCX_WS_ADDR: `127.0.0.1:${port}` }
@@ -395,7 +426,8 @@ export class VaultBackend {
       /* fine */
     }
   }
-  async restart(port: number): Promise<BackendEndpoint> {
+  /** Restart with a fresh token. Same port policy as start(): 0 asks the OS. */
+  async restart(port = 0): Promise<BackendEndpoint> {
     this.stop()
     // Brief quiescent period so the OS releases the old listen socket.
     const { promise, resolve: wait } = Promise.withResolvers<void>()

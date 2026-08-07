@@ -477,6 +477,37 @@ describe('exit notification', () => {
   })
 })
 
+describe('inputStalled notification', () => {
+  it('fires onInputStalled for this session', async () => {
+    const { session, ws } = await connectedSession()
+    let stalls = 0
+    session.onInputStalled(() => stalls++)
+
+    ws.deliverText({ jsonrpc: '2.0', method: 'inputStalled', params: { sessionId: SID } })
+    expect(stalls).toBe(1)
+  })
+
+  it('ignores a stall reported for another session', async () => {
+    const { session, ws } = await connectedSession()
+    let stalls = 0
+    session.onInputStalled(() => stalls++)
+
+    ws.deliverText({ jsonrpc: '2.0', method: 'inputStalled', params: { sessionId: OTHER_SID } })
+    expect(stalls).toBe(0)
+  })
+
+  // A stall is not an exit: the channel may start accepting bytes again, and
+  // the tab must still be able to send when it does.
+  it('leaves the session open and sendable', async () => {
+    const { session, ws } = await connectedSession()
+    session.onInputStalled(() => {})
+
+    ws.deliverText({ jsonrpc: '2.0', method: 'inputStalled', params: { sessionId: SID } })
+    session.send('still here\n')
+    expect(ws.binaryFrames()).toHaveLength(1)
+  })
+})
+
 describe('sendResize', () => {
   it('sends the new grid size for the open session', async () => {
     const { session, ws } = await connectedSession()

@@ -179,7 +179,9 @@ export interface FilesTreeStore {
   /** The visible rows in display order (the flatten of the expanded tree). */
   rows(): FilesFlatRow[]
   /** Walk from the root down to `path`, listing and expanding each level
-   *  that is not already expanded, then select the target (revealTarget).
+   *  that is not already expanded, then select the target (revealTarget)
+   *  and expand it too — arriving somewhere shows you what is there, so
+   *  the target ends OPEN with its first page listed (see finishReveal).
    *  NEVER collapses — a directory the user opened by hand stays open.
    *  Idempotent: revealing the path already revealed (or a reveal to it
    *  in flight) does nothing. Stops honestly: a level that comes back
@@ -805,9 +807,9 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     const ctx = captureCtx()
     if (ctx === null || !scopeCurrent(ctx)) return
     if (i >= segments.length) {
-      // The target: select it. Its own children are NOT listed —
-      // selecting is not expanding, and the user expands the target
-      // like any other directory.
+      // The target: hand it to finishReveal, which selects it AND opens
+      // it — arriving somewhere shows you what is there, so the target's
+      // first page is listed like any level on the way.
       finishReveal(dir, walk)
       return
     }
@@ -835,9 +837,8 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
         return
       }
       if (i + 1 >= segments.length) {
-        // The child IS the target: select it without listing or expanding
-        // it — selecting is not expanding, and the user expands the
-        // target like any other directory.
+        // The child IS the target: finishReveal selects it and opens it,
+        // the same landing as the branch above.
         finishReveal(child, walk)
         return
       }

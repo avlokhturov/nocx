@@ -363,6 +363,8 @@ const UNKNOWN_KEY_RESULT: ConnectionTestResult = {
   detail: 'unknown host key for host.example.com:22: ssh-ed25519 SHA256:abc',
   hostKey: {
     host: 'host.example.com:22',
+    knownHostsHost: 'nocx-v1-route:22',
+    changed: false,
     algorithm: 'ssh-ed25519',
     fingerprint: 'SHA256:abc',
     key: 'a2V5',
@@ -374,6 +376,8 @@ const CHANGED_KEY_RESULT: ConnectionTestResult = {
   detail: 'host key mismatch for host.example.com:22: got SHA256:new, expected SHA256:stored',
   hostKey: {
     host: 'host.example.com:22',
+    knownHostsHost: 'nocx-v1-route:22',
+    changed: true,
     algorithm: 'ssh-ed25519',
     fingerprint: 'SHA256:new',
     storedFingerprint: 'SHA256:stored',
@@ -413,7 +417,7 @@ describe('host key accept', () => {
     clickButtonByText(container, 'Trust host key')
 
     await vi.waitFor(() => {
-      expect(trustHostKey).toHaveBeenCalledWith('host.example.com:22', 'a2V5')
+      expect(trustHostKey).toHaveBeenCalledWith('nocx-v1-route:22', 'a2V5')
     })
     // The next probe runs and succeeds.
     await vi.waitFor(() => {
@@ -479,7 +483,7 @@ describe('host key accept', () => {
     })
     clickButtonByText(container, 'Trust the new key')
     await vi.waitFor(() => {
-      expect(trustHostKey).toHaveBeenCalledWith('host.example.com:22', 'bmV3')
+      expect(trustHostKey).toHaveBeenCalledWith('nocx-v1-route:22', 'bmV3')
     })
   })
 })
@@ -2348,5 +2352,47 @@ describe('desiredMode', () => {
     const params = patchSpy.mock.calls[0][0] as { set?: Record<string, unknown> }
     expect(params.set?.['options.desiredMode']).toBe('relay')
     expect(params.set?.['options.relayConsent']).toBe('granted')
+  })
+})
+
+// ── Group collapse (nocx-ukvn) ──────────────────────────────────────────
+
+describe('group collapse', () => {
+  it('toggles member visibility when the group header chevron is clicked', async () => {
+    const { container } = mount({ profiles: MOCK_PROFILES, groups: MOCK_GROUPS })
+    await waitForProfiles(container, 3)
+
+    // The group header has a toggle button with aria-expanded
+    const toggle = await vi.waitFor(() => {
+      const headers = container.querySelectorAll('.cm-group-header')
+      const prodHeader = Array.from(headers).find(
+        (h) => h.querySelector('.cm-group-name')?.textContent === 'Production',
+      )
+      expect(prodHeader, 'Production group header not found').toBeTruthy()
+      const btn = prodHeader!.querySelector('.ui-icon-button[aria-expanded]') as HTMLButtonElement
+      expect(btn, 'Group toggle button not found').toBeTruthy()
+      return btn
+    })
+
+    // Initially expanded — members are visible
+    expect(toggle.getAttribute('aria-expanded')).toBe('true')
+    expect(container.querySelector('[aria-label="Edit group Production"]')).toBeTruthy()
+    expect(container.textContent).toContain('prod-db')
+
+    // Collapse
+    fireEvent.click(toggle)
+    await vi.waitFor(() => {
+      expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    })
+    // Members are hidden, but the header (with edit/delete) stays
+    expect(container.textContent).not.toContain('prod-db')
+    expect(container.querySelector('[aria-label="Edit group Production"]')).toBeTruthy()
+
+    // Expand again
+    fireEvent.click(toggle)
+    await vi.waitFor(() => {
+      expect(toggle.getAttribute('aria-expanded')).toBe('true')
+    })
+    expect(container.textContent).toContain('prod-db')
   })
 })

@@ -29,9 +29,16 @@ import {
   promptReady,
   type DisposableRoot,
 } from './harness'
+import { readStand } from './stand'
 import { createRepo, cleanupRepo, type GitRepo } from './git-fixture'
 
-const DEVHARNESS_BIN = process.env.NOCX_VAULT_BIN ?? '/tmp/nocx-devharness'
+/** Lazily, not at module scope: the stand is started by globalSetup, which
+ *  runs after Playwright has collected this file. The path was hard-coded to
+ *  /tmp/nocx-devharness, which was true of the runner that built three copies
+ *  by hand and stopped being true when one stand took ownership of the
+ *  lifecycle — the spec then failed on its first line with 'devharness binary
+ *  not found'. The manifest is the one place that knows. */
+const devharnessBin = () => readStand().devharness
 
 // Distinct ports, outside the ranges used by `wails dev` (34115), the e2e
 // suite default (9876), and the other restart specs (19876-19879).
@@ -118,7 +125,7 @@ test.describe('sidebar resize (nocx-qmcu)', () => {
   test.beforeEach(() => {
     home = { root: mkdtempSync(join(tmpdir(), 'nocx-sidebar-resize-')) }
     // `true` = no Secret Service for this backend.
-    backend = new VaultBackend(DEVHARNESS_BIN, home, true)
+    backend = new VaultBackend(devharnessBin(), home, true)
   })
 
   test.afterEach(() => {

@@ -1,4 +1,5 @@
 import { test, expect } from './harness'
+import { readStand } from './stand'
 import { spawn, execFileSync } from 'node:child_process'
 import { mkdirSync, writeFileSync, existsSync } from 'node:fs'
 import path from 'node:path'
@@ -13,7 +14,12 @@ import type { Page } from './harness'
 // executes commands, so the in-band bootstrap runs for real and the OSC 133
 // markers are the shell's own.
 
-const E2E_HOME = path.resolve(__dirname, '..', '.e2e', 'home')
+// The home the BACKEND resolved, from the stand that started it — not a guess
+// at it. NOCX_E2E_HOME_DIR is set in the BACKEND's environment, not in
+// Playwright's, so reading it here answered undefined and fell back to a path
+// that is only sometimes right. A known_hosts written to the wrong home is a
+// host key the backend never sees (nocx-z9s9.6).
+const e2eHome = () => readStand().home
 
 interface Fixture {
   proc: ChildProcess
@@ -33,7 +39,28 @@ function startSshd(): Fixture {
       cwd: path.resolve(__dirname, '..'),
     })
   }
-  const proc = spawn(bin, [], { stdio: ['ignore', 'pipe', 'inherit'] })
+  // The fixture's HOME is the REMOTE host's home, separate from the backend's
+  // — the answer nocxify-journey.spec.ts already gives its own sshd.
+  //
+  // Without it the premise of this spec cannot be staged. The local backend
+  // installs ~/.nocx and the shell rc hooks into its HOME on every start, and
+  // an sshd sharing that HOME spawns a shell that sources them: the connection
+  // comes up ALREADY integrated, the chip offers "Enable command editor", and
+  // "a plain SSH shell" is a state this machine cannot be in. A real remote
+  // host has its own home; so does the fixture (nocx-z9s9.8).
+  const remoteHome = path.join(path.dirname(e2eHome()), 'shell-mode-remote-home')
+  mkdirSync(remoteHome, { recursive: true, mode: 0o700 })
+  const proc = spawn(bin, [], {
+    stdio: ['ignore', 'pipe', 'inherit'],
+    env: {
+      ...process.env,
+      HOME: remoteHome,
+      ZDOTDIR: remoteHome,
+      XDG_CONFIG_HOME: path.join(remoteHome, '.config'),
+      XDG_DATA_HOME: path.join(remoteHome, '.local', 'share'),
+      XDG_CACHE_HOME: path.join(remoteHome, '.cache'),
+    },
+  })
   const lines: string[] = []
   let addr = ''
   let userKey = ''
@@ -78,7 +105,7 @@ function startSshd(): Fixture {
  *  REPLACED, not appended: every fixture spawn mints fresh keys, and a stale
  *  line for a dead key makes the backend refuse the connection. */
 function trustHostKey(fixture: Fixture): void {
-  const sshDir = path.join(E2E_HOME, '.ssh')
+  const sshDir = path.join(e2eHome(), '.ssh')
   mkdirSync(sshDir, { recursive: true, mode: 0o700 })
   writeFileSync(path.join(sshDir, 'known_hosts'), fixture.knownHosts + '\n')
 }
@@ -115,11 +142,10 @@ async function rpc<T>(
   )
 }
 
-test('a plain SSH shell shows the capability, switching to nocxify produces blocks', async ({
-  page,
-}) => {
+test('an SSH connection comes up integrated and its commands become blocks', async ({ page }) => {
   test.setTimeout(90_000)
   const fixture = startSshd()
+  let createdId: string | null = null
   try {
     await (fixture as Fixture & { _wait: Promise<void> })._wait
     expect(fixture.addr).not.toBe('')
@@ -141,12 +167,11 @@ test('a plain SSH shell shows the capability, switching to nocxify produces bloc
     })
 
     // Seed the connection the way Settings would: a profile pointing at the
-    // fixture, with shellIntegration ask — the mode the epic's happy path
-    // starts from (plain shell, capability visible). The name is unique per
+    // fixture, on the default destination mode (script). The name is unique per
     // run: the devharness store persists across runs in this home, and a
     // stale profile from an earlier run would dial a dead fixture.
     const profileName = `e2e-fixture-${Date.now()}`
-    await rpc(page, wsInfo.port, wsInfo.token, 'profiles.create', {
+    const created = await rpc<{ id: string }>(page, wsInfo.port, wsInfo.token, 'profiles.create', {
       type: 'ssh',
       name: profileName,
       options: {
@@ -154,9 +179,9 @@ test('a plain SSH shell shows the capability, switching to nocxify produces bloc
         port: Number(fixture.addr.split(':')[1]),
         user: 'e2e',
         keyPath: fixture.userKey,
-        shellIntegration: 'ask',
       },
     })
+    createdId = created.id
 
     // Open the connection through quick connect: the palette's host search
     // reaches a saved profile and Enter opens it DIRECTLY (no vault
@@ -168,16 +193,30 @@ test('a plain SSH shell shows the capability, switching to nocxify produces bloc
     await search.fill(profileName)
     await page.keyboard.press('Enter')
 
-    // The SSH tab opens; the plain shell (ask policy) shows the recovery
-    // action in the editor chrome: Integrate this shell.
+    // The SSH tab opens INTEGRATED, and the editor chrome offers nothing —
+    // which is the healthy state (capability.ts: integrated + editor yields no
+    // action at all).
+    //
+    // This is a deliberate change to what the spec proves, and the reason is a
+    // product change it never caught up with. The epic was written when a plain
+    // shell was where a user landed: the chip would read "Integrate this shell"
+    // and clicking it was the switch. Since `script` became the default
+    // destination mode (nocx-mlm7, contracts/open.schema.json — "script (the
+    // default — N3) wraps and installs automatically"), a fresh connection to a
+    // bash host arrives already integrated, so there is nothing to switch.
+    //
+    // The two states either side of it are both real and neither produces the
+    // old assertion: in `raw` the product deliberately offers nothing
+    // (terminal-content.ts:2211, authorized = policy !== 'raw'), and in
+    // `script` integration succeeds. "Plain shell WITH the offer" now needs
+    // script mode plus a shell the launcher refuses — a shellIntegrationReason
+    // case, and its own test.
+    //
+    // What survives here is the end of the epic's journey, which is the part
+    // that matters to a user: a real remote shell on a real PTY produces
+    // blocks. The switch path is not covered by anything now, and that is
+    // written down rather than papered over (nocx-z9s9.10).
     const recovery = page.locator('.pane.active .nocx-editor-recovery')
-    await expect(recovery).toBeVisible({ timeout: 20_000 })
-    await expect(recovery).toHaveText('Integrate this shell', { timeout: 20_000 })
-
-    // Click the recovery chip — it IS the action, no popover.
-    await recovery.click()
-    // The in-band bootstrap runs against the REAL shell; the shell's own
-    // hooks then emit OSC 133 markers. The healthy state shows nothing.
     await expect(recovery).not.toBeVisible({ timeout: 20_000 })
 
     // The user then runs a command through the nocx editor, and it becomes
@@ -192,6 +231,25 @@ test('a plain SSH shell shows the capability, switching to nocxify produces bloc
     })
     await expect(block.first()).toBeVisible({ timeout: 30_000 })
   } finally {
+    // Take the profile back out. The stand's home is shared by every spec in
+    // the run AND by both browser projects, so a profile left here becomes the
+    // next spec's starting state — quick-connect's picker asserts the plain
+    // server list is EMPTY, and went red on this one across the project
+    // boundary, where nothing in either file points at the other (nocx-8rda).
+    try {
+      const info = await page.evaluate(async () => {
+        const w = window as unknown as Record<string, unknown>
+        const main = (w.go as Record<string, unknown>).main as Record<string, unknown>
+        const app = main.WailsApp as {
+          GetWSPort: () => Promise<number>
+          GetWSToken: () => Promise<string>
+        }
+        return { port: await app.GetWSPort(), token: await app.GetWSToken() }
+      })
+      if (createdId) await rpc(page, info.port, info.token, 'profiles.delete', { id: createdId })
+    } catch {
+      // A cleanup that throws would replace the real failure with its own.
+    }
     fixture.proc.kill('SIGKILL')
   }
 })

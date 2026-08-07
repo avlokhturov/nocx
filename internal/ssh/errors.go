@@ -68,9 +68,13 @@ func (e *ErrNoAuthMethod) Error() string {
 // ErrHostKeyMismatch is returned when the host key presented by the remote
 // does not match the one recorded in known_hosts.
 type ErrHostKeyMismatch struct {
-	Addr        string
-	KeyAlgo     string
-	Fingerprint string
+	Addr string
+	// KnownHostsAddr is the storage identity used for this route. It equals
+	// Addr for direct connections and is an opaque route identity for a
+	// target reached through one or more jump hosts.
+	KnownHostsAddr string
+	KeyAlgo        string
+	Fingerprint    string
 	// Expected holds the fingerprint(s) recorded in known_hosts. A host
 	// with several entries (key rotation) yields a comma-joined list.
 	Expected string
@@ -88,9 +92,13 @@ func (e *ErrHostKeyMismatch) Error() string {
 // ErrUnknownHostKey is returned when the remote host is not present in
 // known_hosts at all. The UI should prompt the user to accept and add it.
 type ErrUnknownHostKey struct {
-	Addr        string
-	KeyAlgo     string
-	Fingerprint string
+	Addr    string
+	KeyAlgo string
+	// KnownHostsAddr is the storage identity used for this route. It equals
+	// Addr for direct connections and is an opaque route identity for a
+	// target reached through one or more jump hosts.
+	KnownHostsAddr string
+	Fingerprint    string
 	// Key is the wire-format marshalled offered public key — public
 	// material, carried so the accept path can append it to known_hosts
 	// without re-probing.

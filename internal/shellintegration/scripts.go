@@ -16,7 +16,7 @@ var posixScript string
 // VERSION file and rewrite scripts when they differ. nocx-6b3x: an edited
 // script without a bump reaches no shell — every existing install keeps
 // sourcing the copy installed the last time the number changed.
-const version = "12"
+const version = "13"
 
 // promptModeEnvVar is the env var that selects the prompt mode.
 const promptModeEnvVar = "NOCX_PROMPT_MODE"

@@ -19,3 +19,8 @@ _bmad/
 # wrote and nothing in the repo reads.
 test-results/
 playwright-report/
+
+# The stand's disposable home. The e2e container runs as root, so this is
+# root-owned after a local run and a walker that enters it fails outright
+# rather than merely wasting time.
+.e2e/

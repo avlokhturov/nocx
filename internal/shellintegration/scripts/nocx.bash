@@ -380,6 +380,26 @@ trap '__nocx_exit_cleanup' EXIT
 # byte would double the payload for no safety.
 __nocx_encode_hex_into() {
     local s="$1" i c code hex LC_ALL=C
+    # Fast path: a name needing no escaping is appended whole.
+    #
+    # This is the difference between making the first prompt's grace and
+    # missing it. The loop below runs per CHARACTER with a `printf -v` in it,
+    # and a normal PATH is ~700 names of ~10 characters — about 7000 forks'
+    # worth of builtin work, measured at ~85ms of the ~104ms the whole
+    # snapshot pipeline took in the e2e container (compgen and sort together
+    # were 17ms). The grace is 250ms and there is no second chance at it: a
+    # shell idle in readline runs no traps, so a job that misses the window
+    # waits for a prompt a fresh tab never produces (nocx-z9s9.16).
+    #
+    # The test is a strict subset of what the loop passes through unchanged —
+    # printable ASCII under LC_ALL=C is 32..126, and the two bytes with
+    # meaning in the payload are excluded explicitly — so this cannot encode
+    # anything differently, only faster. Everything else still takes the loop:
+    # control bytes, DEL, 127..159, and UTF-8 (non-printable in C).
+    if [[ "$s" != *[![:print:]]* && "$s" != *'\'* && "$s" != *';'* ]]; then
+        __nocx_payload+="$s;"
+        return
+    fi
     for ((i = 0; i < ${#s}; i++)); do
         c="${s:i:1}"
         if [[ "$c" == '\' ]]; then
@@ -430,6 +450,13 @@ __nocx_snapshot_build() {
 # Emit the finished snapshot once and remove the staging files. Only ever
 # called from __nocx_prompt_command — the shell is the sole writer to the
 # tty there, so the payload cannot interleave with command output.
+#
+# It has to be a prompt, and that is a constraint rather than a preference:
+# a shell idle in readline runs no traps at all. Measured on bash 5.2 and
+# 5.3, a SIGUSR1 raised while the user is sitting at a prompt does not run
+# its handler until the next command is submitted, and SIGWINCH does not
+# flush it either — so there is no way for the shell to speak on its own
+# (nocx-z9s9.16).
 __nocx_snapshot_emit() {
     __nocx_snapshot_done=1
     __nocx_payload="$(< "$__nocx_snap_file")"
@@ -441,6 +468,11 @@ __nocx_snapshot_emit() {
 # so a freshly opened tab is marked before the user runs anything (see the
 # protocol comment above for why the late start was rejected). The first
 # prompt grants a bounded grace period (__nocx_snapshot_wait_ms).
+#
+# That grace is the ONLY automatic delivery point, which is why the encoder
+# above was made cheap: bash idle in readline runs no traps, so a job that
+# misses this window waits for a prompt a fresh tab may never produce
+# (nocx-z9s9.16).
 ( compgen -c 2>/dev/null | LC_ALL=C sort -u | __nocx_snapshot_build \
     >| "$__nocx_snap_staging" 2>/dev/null \
     && mv -f "$__nocx_snap_staging" "$__nocx_snap_file" ) &

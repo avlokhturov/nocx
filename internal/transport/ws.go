@@ -46,6 +46,12 @@ type sessionRx struct {
 	subscriber  *wsConn    // current attached connection (nil if none)
 	subState    *connState // subscriber's connection-scoped state
 	monitorOnce sync.Once
+	// inputStalled is true from the moment this session's write queue
+	// refuses a frame until it accepts one again. It exists to make the
+	// notification fire once per stall rather than once per keystroke:
+	// a person holding a key against a stuck channel would otherwise
+	// raise a hundred of them.
+	inputStalled atomic.Bool
 }
 
 func (rx *sessionRx) setSubscriber(wconn *wsConn, state *connState) {
@@ -730,6 +736,13 @@ type wsConn struct {
 	id   uint64
 }
 
+// wsWriteDeadline bounds every WebSocket write. Without it, a slow/stuck
+// renderer (TCP buffer full, tab backgrounded) makes WriteMessage block
+// forever while holding wsConn.mu — and any control-frame response that
+// needs writeJSON blocks on the same mutex, stalling the readLoop and
+// freezing every tab (nocx-o2le).
+const wsWriteDeadline = 10 * time.Second
+
 func newWSConn(conn *websocket.Conn, id uint64) *wsConn {
 	return &wsConn{conn: conn, id: id}
 }
@@ -737,12 +750,14 @@ func newWSConn(conn *websocket.Conn, id uint64) *wsConn {
 func (w *wsConn) writeJSON(v any) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	_ = w.conn.SetWriteDeadline(time.Now().Add(wsWriteDeadline))
 	return w.conn.WriteJSON(v)
 }
 
 func (w *wsConn) writeMessage(msgType int, data []byte) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	_ = w.conn.SetWriteDeadline(time.Now().Add(wsWriteDeadline))
 	return w.conn.WriteMessage(msgType, data)
 }
 
@@ -1317,6 +1332,13 @@ func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connSta
 			msg = err.Error() // unclassifiable — use the raw wrapped error
 		}
 		resp := newJSONRPCError(req.ID, -32603, msg)
+		// For host-key errors, attach the evidence so the renderer can
+		// offer the accept-on-first-use dialog (the same one the probe
+		// path raises). Without this, open shows "Terminal failed to
+		// start" and the user has no way to accept the key (nocx-shat).
+		if hk := hostKeyInfoFromError(err); hk != nil {
+			resp.Error.Data = hk
+		}
 		_ = wconn.writeJSON(resp)
 		return
 	}
@@ -1654,8 +1676,25 @@ func (s *WSServer) handleDataFrame(state *connState, data []byte) {
 			s.log.Warn("data frame for unknown session", "session_id", string(sid))
 			return
 		}
-		if _, err := sess.Write(frame.Payload); err != nil {
-			s.log.Debug("session write error", "session_id", string(sid), "error", err)
+		// Enqueue the payload without blocking the readLoop. A dead SSH
+		// channel (a NAT or firewall dropping silently, no RST) makes
+		// ch.Write block forever, and the readLoop is the one goroutine
+		// feeding EVERY session on this connection — so one dead tab
+		// froze all of them (nocx-o2le). EnqueueWrite puts the frame on
+		// a bounded per-session queue and returns immediately; the
+		// readLoop is its sole sender, which is what keeps the queue in
+		// the order the user typed.
+		//
+		// A full queue means the channel has stopped accepting bytes.
+		// The frame is dropped — and the tab is TOLD, because input
+		// that silently disappears is indistinguishable from a terminal
+		// that ignores you.
+		if !sess.EnqueueWrite(frame.Payload) {
+			s.log.Warn("session write queue full or closed, dropping frame",
+				"session_id", string(sid))
+			s.notifyInputStalled(sid)
+		} else if rx := s.getRx(sid); rx != nil {
+			rx.inputStalled.Store(false)
 		}
 	case MsgTypeMetadata:
 		s.log.Info("metadata frame received (reserved for Phase-2 — dropped)")
@@ -1786,6 +1825,41 @@ func (s *WSServer) monitorExit(rx *sessionRx, sess session.Session) {
 	}
 	if err := wconn.writeMessage(websocket.TextMessage, notifJSON); err != nil {
 		s.log.Debug("write exit notification", "error", err)
+	}
+}
+
+// notifyInputStalled tells the tab that its keystrokes are being dropped:
+// the session's write queue is full, which means the channel underneath it
+// has stopped accepting bytes. It fires once per stall — the flag clears on
+// the next frame the queue accepts.
+//
+// This exists because the alternative is a slog.Warn nobody reads while the
+// product goes on presenting a terminal that looks alive and ignores every
+// key. A degrade the UI contradicts is how a broken session survives a
+// release (nocx-o2le).
+func (s *WSServer) notifyInputStalled(sid session.ID) {
+	rx := s.getRx(sid)
+	if rx == nil || !rx.inputStalled.CompareAndSwap(false, true) {
+		return
+	}
+	wconn, _ := rx.getSubscriber()
+	if wconn == nil {
+		return
+	}
+	notif := map[string]any{
+		"jsonrpc": "2.0",
+		"method":  "inputStalled",
+		"params": map[string]string{
+			"sessionId": string(sid),
+		},
+	}
+	notifJSON, err := json.Marshal(notif)
+	if err != nil {
+		s.log.Error("marshal inputStalled notification", "error", err)
+		return
+	}
+	if err := wconn.writeMessage(websocket.TextMessage, notifJSON); err != nil {
+		s.log.Debug("write inputStalled notification", "error", err)
 	}
 }
 

@@ -171,7 +171,8 @@ func (rc *RealClient) jumpRouteKey(ctx context.Context, cfg *ConnectConfig) stri
 // re-dialing. The factory is invoked only on a cache miss.
 func (rc *RealClient) dialForConnect(ctx context.Context, host string, resolved *resolvedConfig, cfg *ConnectConfig) func(poolKey) (sshClientConn, error) {
 	return func(_ poolKey) (sshClientConn, error) {
-		hostKeyCB, err := rc.hostKeyCallback()
+		addr := net.JoinHostPort(resolved.hostName, strconv.Itoa(resolved.port))
+		hostKeyCB, err := rc.hostKeyCallbackFor(knownHostsTargetAddr(addr, cfg))
 		if err != nil {
 			return nil, fmt.Errorf("host key callback: %w", err)
 		}
@@ -194,7 +195,6 @@ func (rc *RealClient) dialForConnect(ctx context.Context, host string, resolved 
 			return nil, &ErrNoAuthMethod{User: resolved.user, Host: resolved.hostName, Mode: cfg.AuthMode}
 		}
 
-		addr := net.JoinHostPort(resolved.hostName, strconv.Itoa(resolved.port))
 		timeout := cfg.ReadyTimeout
 		if timeout <= 0 {
 			timeout = 30 * time.Second
@@ -229,7 +229,8 @@ func (rc *RealClient) dialForConnect(ctx context.Context, host string, resolved 
 // governed by its own pool entry's refcount).
 func (rc *RealClient) dialJumpForConnect(ctx context.Context, host string, resolved *resolvedConfig, cfg *ConnectConfig) func(poolKey) (sshClientConn, error) {
 	return func(_ poolKey) (sshClientConn, error) {
-		hostKeyCB, err := rc.hostKeyCallback()
+		jumpAddr := net.JoinHostPort(resolved.hostName, strconv.Itoa(resolved.port))
+		hostKeyCB, err := rc.hostKeyCallbackFor(knownHostsTargetAddr(jumpAddr, cfg))
 		if err != nil {
 			return nil, fmt.Errorf("jump host key callback: %w", err)
 		}
@@ -238,6 +239,12 @@ func (rc *RealClient) dialJumpForConnect(ctx context.Context, host string, resol
 			return nil, fmt.Errorf("build jump host auth: %w", err)
 		}
 		jumpAuths := authMethodsFromChain(chain)
+		// Same guard as dialForConnect: an empty auth list means every real
+		// method fell out. Say that instead of dialing and letting the
+		// handshake report "attempted methods [none]" (nocx-8b1v).
+		if len(jumpAuths) == 0 {
+			return nil, &ErrNoAuthMethod{User: resolved.user, Host: resolved.hostName, Mode: cfg.AuthMode}
+		}
 		timeout := cfg.ReadyTimeout
 		if timeout <= 0 {
 			timeout = 30 * time.Second
@@ -249,7 +256,6 @@ func (rc *RealClient) dialJumpForConnect(ctx context.Context, host string, resol
 			Timeout:         timeout,
 		}
 		d := &dialer{client: rc}
-		jumpAddr := net.JoinHostPort(resolved.hostName, strconv.Itoa(resolved.port))
 
 		// Multi-hop: if this jump host itself has a jump, use dialViaJumpHost
 		// to acquire the next hop through the pool, then extract the *gossh.Client

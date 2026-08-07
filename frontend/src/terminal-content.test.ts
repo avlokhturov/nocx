@@ -47,7 +47,7 @@ import { TerminalContent, type TerminalContentHooks } from './terminal-content'
 import { Tab } from './tabs'
 import { SURFACE_TERMINAL } from './tab-content'
 import { ProfileClient, type SSHProfile } from './profiles'
-import { Dispatcher } from './dispatcher'
+import { Dispatcher, RpcError } from './dispatcher'
 import type { WSClient } from './ipc'
 import { createCommandBlock } from './scrollback/blocks'
 import { CommandSnapshotStore } from './command-snapshot'
@@ -151,6 +151,9 @@ interface MountOpts {
   ssh?: { profileId: string; host: string }
   /** Host callbacks handed to the TerminalContent (TerminalContentHooks). */
   hooks?: Partial<TerminalContentHooks>
+  /** What `content.ready` must settle to. Default true — an open that is
+   *  expected to fail (the host-key refusal) sets it false. */
+  expectedReady?: boolean
 }
 /** Mount a real TerminalContent inside a Tab and return the live editor view. */
 async function mountTerminal(
@@ -194,7 +197,7 @@ async function mountTerminal(
   paneParent.append(tab.pane)
   if (opts.attachToDocument) document.body.append(paneParent)
   await tab.start()
-  await expect(content.ready).resolves.toBe(true)
+  await expect(content.ready).resolves.toBe(opts.expectedReady ?? true)
 
   const ed = editorOf(content)
   return {
@@ -209,6 +212,80 @@ async function mountTerminal(
     },
   }
 }
+
+describe('SSH open host-key recovery', () => {
+  const routeEvidence = {
+    host: 'db.example.com:22',
+    knownHostsHost: 'nocx-v1-route:22',
+    algorithm: 'ssh-ed25519',
+    fingerprint: 'SHA256:new',
+    key: 'a2V5',
+    changed: false,
+  }
+
+  it('waits for explicit trust and retries the exact failed open', async () => {
+    const openSSHSession = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new RpcError('host-key-unknown: unknown host key', -32603, routeEvidence),
+      )
+      .mockResolvedValueOnce(makeSession())
+    const onHostKeyError = vi.fn().mockResolvedValue(true)
+    const client = makeClient({ openSSHSession })
+
+    const { teardown } = await mountTerminal(
+      makeClipboard(),
+      {
+        ssh: { profileId: 'ssh:test:1', host: 'db.example.com' },
+        hooks: { onHostKeyError },
+      },
+      client,
+    )
+    try {
+      expect(onHostKeyError).toHaveBeenCalledWith(
+        {
+          ...routeEvidence,
+          storedFingerprint: undefined,
+          changed: false,
+          profileId: 'ssh:test:1',
+        },
+        expect.any(AbortSignal),
+      )
+      expect(openSSHSession).toHaveBeenCalledTimes(2)
+      expect(openSSHSession.mock.calls[0]).toEqual(openSSHSession.mock.calls[1])
+    } finally {
+      teardown()
+    }
+  })
+
+  it('does not trust or retry when the user declines', async () => {
+    const openSSHSession = vi.fn().mockRejectedValue(
+      new RpcError('host-key-changed: host key mismatch', -32603, {
+        ...routeEvidence,
+        changed: true,
+        storedFingerprint: 'SHA256:old',
+      }),
+    )
+    const onHostKeyError = vi.fn().mockResolvedValue(false)
+    const client = makeClient({ openSSHSession })
+
+    const { tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      {
+        ssh: { profileId: 'ssh:test:1', host: 'db.example.com' },
+        hooks: { onHostKeyError },
+        expectedReady: false,
+      },
+      client,
+    )
+    try {
+      expect(openSSHSession).toHaveBeenCalledTimes(1)
+      expect(tab.pane.textContent).toContain('Host key was not trusted for db.example.com:22')
+    } finally {
+      teardown()
+    }
+  })
+})
 
 /** Complete a mouse selection gesture over the editor surface. */
 const mouseupOn = (view: EditorView): void => {
