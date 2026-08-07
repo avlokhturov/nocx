@@ -17,6 +17,10 @@ type Factory struct {
 	probe    *capability
 	ceilings ceilings
 	fixedEnv []string // pinned environment (WithEnv); nil resolves from the shell
+	// prewarm cancels the background environment resolution and is non-nil
+	// exactly when fixedEnv is nil. The composition root calls Stop at
+	// shutdown; without it a hung rc file could outlive the process.
+	prewarm context.CancelFunc
 }
 
 // Option configures a Factory. Zero values select the package defaults.
@@ -32,8 +36,15 @@ type options struct {
 	statusEntries int
 }
 
-// NewFactory builds a local factory. The environment and the git probe are
-// resolved lazily, on the first Open, and cached from then on.
+// NewFactory builds a local factory. The environment is resolved once, in
+// the background, from construction; the git probe resolves on the first
+// Open; both are cached from then on. The environment is deliberately NOT on
+// Open's critical path (nocx-6pz0): resolving it lazily — at the first
+// commit — would leave the panel's one-shot open outcome unable to tell "not
+// resolved yet" from "resolution failed", so every healthy machine would
+// show the degraded warning before its first commit. Resolving from
+// construction settles the state before the panel can open; a hung rc file
+// costs the background attempt's deadline once, never an open.
 func NewFactory(opts ...Option) *Factory {
 	var o options
 	for _, opt := range opts {
@@ -53,12 +64,30 @@ func NewFactory(opts ...Option) *Factory {
 	if o.statusEntries > 0 {
 		c.statusEntries = o.statusEntries
 	}
-	return &Factory{
+	f := &Factory{
 		env:      newEnvCache(o.shell, o.envTimeout, o.envMaxOutput),
 		probe:    &capability{},
 		ceilings: c,
 		fixedEnv: o.fixedEnv,
 	}
+	if f.fixedEnv == nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		f.prewarm = cancel
+		go f.env.resolve(ctx)
+	}
+	return f
+}
+
+// Stop cancels the background environment resolution and waits for its
+// attempt to settle, so no resolution child can outlive the process. The
+// composition root calls it at shutdown; a no-op when the environment is
+// pinned (WithEnv) or the resolution already settled.
+func (f *Factory) Stop() {
+	if f.prewarm == nil {
+		return
+	}
+	f.prewarm()
+	f.env.waitSettled()
 }
 
 // Open resolves the repository cwd stands in. Every outcome other than ok is
@@ -74,7 +103,13 @@ func (f *Factory) Open(ctx context.Context, cwd string) (git.Repo, git.OpenOutco
 	}
 	env, envState, envReason := f.fixedEnv, git.EnvResolved, ""
 	if f.fixedEnv == nil {
-		env, envState, envReason = f.env.resolve(ctx)
+		// nocx-6pz0: the resolved environment lives off the open path. Open
+		// takes the settled answer — resolved, a remembered failure, or, in
+		// the window before the background attempt settles, a conservative
+		// degraded — and never waits: status, diff and log need a PATH that
+		// finds git, which the probe establishes, not the shell environment,
+		// which only the commit path needs (D6).
+		env, envState, envReason = f.env.known()
 	}
 	if ctx.Err() != nil {
 		return nil, git.OpenOutcome{}, ctx.Err()
@@ -106,12 +141,17 @@ func (f *Factory) Open(ctx context.Context, cwd string) (git.Repo, git.OpenOutco
 	outcome.State = git.OpenOK
 	outcome.Toplevel = toplevel
 	outcome.GitDir = gitDir
+	var resolver *envCache
+	if f.fixedEnv == nil {
+		resolver = f.env
+	}
 	repo := &Repo{
-		gitPath:  gitPath,
-		env:      env,
-		toplevel: toplevel,
-		gitDir:   gitDir,
-		ceilings: f.ceilings,
+		gitPath:   gitPath,
+		pinnedEnv: f.fixedEnv,
+		resolver:  resolver,
+		toplevel:  toplevel,
+		gitDir:    gitDir,
+		ceilings:  f.ceilings,
 	}
 	return repo, outcome, nil
 }

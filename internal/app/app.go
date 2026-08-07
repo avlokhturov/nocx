@@ -65,6 +65,10 @@ type App struct {
 	// at shutdown so no timer outlives the process.
 	discoverySched *discovery.Scheduler
 
+	// gitFactory owns the background git-environment resolution
+	// (nocx-6pz0); stopped at shutdown so no resolution child outlives
+	// the process.
+	gitFactory *gitlocal.Factory
 	// logFilePath is where the backend log file lives — the stable,
 	// findable copy of the log the delivery-path decisions are written
 	// to (the P0 that had to be diagnosed from a JSON file's mtime). ""
@@ -412,6 +416,13 @@ func New(opts ...Option) (*App, error) {
 	// Used by the import handlers and version transitions.
 	profileSvc := profile.NewProfileService(profileStore)
 
+	// Git factory (spec §5.1): probe capability, resolve the environment,
+	// run rev-parse — the local implementation, and the only route that
+	// makes internal/git reachable from main() at all. Retained on the App
+	// so shutdown can stop the background environment resolution
+	// (nocx-6pz0).
+	gitFactory := gitlocal.NewFactory()
+
 	tpOpts := []transport.WSServerOption{
 		transport.WithProfileRepository(profileStore),
 		transport.WithGroupRepository(profileStore),
@@ -511,7 +522,11 @@ func New(opts ...Option) (*App, error) {
 		// git.open refuses an ssh session before it reaches this, and the
 		// remote case waits on the relay (spec D3).
 		transport.WithGitRegistry(git.New()),
-		transport.WithGitRepoFactory(gitlocal.NewFactory()),
+		// The factory resolves the shell environment in the background from
+		// construction (nocx-6pz0) and is stopped at shutdown, so no
+		// resolution child can outlive the process; nothing after this point
+		// in New can fail, so the factory needs no earlier-return cleanup.
+		transport.WithGitRepoFactory(gitFactory),
 	}
 	// WithWSAddr set the field and nothing read it, so NOCX_WS_ADDR was accepted
 	// and ignored and the listener always took an ephemeral port. The dev stand
@@ -547,7 +562,6 @@ func New(opts ...Option) (*App, error) {
 		connection.WithRemoteInstaller(shint),
 	)
 	tp.SetProfileResolver(resolver)
-
 	app := &App{
 		Logger:           logger,
 		Pty:              ptf,
@@ -558,6 +572,7 @@ func New(opts ...Option) (*App, error) {
 		Credentials:      v,
 		vaultCloser:      v,
 		discoverySched:   discoverySched,
+		gitFactory:       gitFactory,
 		UnlockRequester:  tp,
 		logFilePath:      logFilePath,
 		logFile:          logFile,
@@ -767,6 +782,12 @@ func (a *App) Shutdown(ctx context.Context) {
 	// stopped, so no probe can outlive the process.
 	if a.discoverySched != nil {
 		_ = a.discoverySched.Close()
+	}
+	// The git environment resolution (nocx-6pz0) runs in the background
+	// from factory construction; cancel it so no resolution child can
+	// outlive the process.
+	if a.gitFactory != nil {
+		a.gitFactory.Stop()
 	}
 	a.Logger.Info("application stopped")
 	// Close the log file last, after the final line: the stable copy of

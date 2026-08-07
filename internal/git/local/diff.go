@@ -36,7 +36,7 @@ func (r *Repo) Diff(ctx context.Context, path string, side git.Side, maxBytes in
 	res := run(ctx, spec{
 		argv: append([]string{r.gitPath}, args...),
 		dir:  r.toplevel,
-		env:  r.env,
+		env:  r.envSettled(),
 		sink: sink,
 	})
 	if res.cancelled {

@@ -3,9 +3,12 @@ package local
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/shady2k/nocx/internal/git"
 )
@@ -261,4 +264,171 @@ func TestResolveGitScansEnvPath(t *testing.T) {
 
 func writeFileExec(path, content string) error {
 	return writeFile(path, content, 0o755)
+}
+
+// TestOpenDoesNotWaitForEnvResolution is nocx-6pz0's regression test: with an
+// environment probe that never returns, Open still answers — OpenNotARepository
+// for a non-repository and OpenOK for a repository — well inside the probe's
+// 5 s timeout. Before the fix, Open resolved the environment first and paid
+// the full timeout before answering either way.
+func TestOpenDoesNotWaitForEnvResolution(t *testing.T) {
+	dir := t.TempDir()
+	hang := filepath.Join(dir, "hang-shell")
+	if err := writeFileExec(hang, "#!/bin/sh\nsleep 1000\n"); err != nil {
+		t.Fatal(err)
+	}
+	f := NewFactory(WithShell(hang))
+	// The background attempt must stay in flight through the opens below —
+	// that is the "never returns" premise. Stop afterwards, and bound it:
+	// with a broken Stop this test hangs rather than ending with an orphan.
+	defer func() {
+		stopDone := make(chan struct{})
+		go func() { f.Stop(); close(stopDone) }()
+		select {
+		case <-stopDone:
+		case <-time.After(5 * time.Second):
+			t.Error("Stop did not cancel the hanging environment resolution")
+		}
+	}()
+
+	repoDir := newGitRepo(t) // the probe falls back to the process PATH
+	for _, c := range []struct {
+		name string
+		cwd  string
+		want git.OpenState
+	}{
+		{"non-repository", t.TempDir(), git.OpenNotARepository},
+		{"repository", repoDir, git.OpenOK},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			done := make(chan error, 1)
+			go func() {
+				repo, outcome, err := f.Open(context.Background(), c.cwd)
+				if err == nil && outcome.State != c.want {
+					err = fmt.Errorf("state = %s, want %s", outcome.State, c.want)
+				}
+				if err == nil && c.want == git.OpenOK && repo == nil {
+					err = errors.New("ok outcome with a nil repo")
+				}
+				done <- err
+			}()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("Open waited on the environment probe (probe timeout is 5 s)")
+			}
+		})
+	}
+}
+
+// TestOpenFailureNotReattemptedPerOpen: N opens against a failing environment
+// probe cost one attempt, not N. The resolution runs once, in the background
+// from construction; the remembered failure is served for the cooldown
+// instead of being re-attempted by every open (nocx-6pz0).
+func TestOpenFailureNotReattemptedPerOpen(t *testing.T) {
+	dir := t.TempDir()
+	shell := filepath.Join(dir, "fail-shell")
+	count := filepath.Join(dir, "count")
+	if err := writeFileExec(shell, "#!/bin/sh\nprintf x >> "+count+"\nexit 1\n"); err != nil {
+		t.Fatal(err)
+	}
+	f := NewFactory(WithShell(shell))
+	defer f.Stop()
+
+	// The background attempt must have run before we count; poll its marker.
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		// #nosec G304 — the count path is a test TempDir.
+		if b, err := os.ReadFile(count); err == nil && len(b) > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the background resolution never ran")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	for i := range 5 {
+		_, outcome, err := f.Open(context.Background(), t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if outcome.State != git.OpenNotARepository {
+			t.Fatalf("open %d: state = %s, want notARepository", i, outcome.State)
+		}
+		if outcome.EnvState != git.EnvDegraded {
+			t.Fatalf("open %d: EnvState = %s, want degraded (the failure is remembered)", i, outcome.EnvState)
+		}
+	}
+	// #nosec G304 — the count path is a test TempDir.
+	if b, _ := os.ReadFile(count); len(b) != 1 {
+		t.Fatalf("the failing probe ran %d times across 5 opens, want 1", len(b))
+	}
+}
+
+// TestCommitRunsWithResolvedEnvironment is D6's paired success test
+// (AGENTS.md rule 2): on an ordinary machine the environment IS resolved, and
+// the commit runs with it. Every behavior the commit path needs lives in the
+// SHELL's output — the fake git on PATH, FAKE_STATUS=staged so the preflight
+// sees staged work, FAKE_COMMIT=ok — so a CommitOK proves the resolved
+// environment reached the git child: under the fallback environment the
+// preflight would see nothing staged and refuse.
+func TestCommitRunsWithResolvedEnvironment(t *testing.T) {
+	fakeDir := writeFakeGit(t)
+	repo := t.TempDir()
+	shell := filepath.Join(t.TempDir(), "ok-shell")
+	// The resolver runs `shell -i -c "export -p"`; the script must PRINT
+	// the exports it sets, or the resolver sees an empty environment.
+	body := "#!/bin/sh\n" +
+		"export PATH=" + fakeDir + ":$PATH\n" +
+		"export FAKE_GIT_LOG=" + filepath.Join(fakeDir, "argv.log") + "\n" +
+		"export FAKE_TOPLEVEL=" + repo + "\n" +
+		"export FAKE_GITDIR=" + filepath.Join(repo, ".git") + "\n" +
+		"export FAKE_STATUS=staged\n" +
+		"export FAKE_COMMIT=ok\n" +
+		"export -p\n"
+	if err := writeFileExec(shell, body); err != nil {
+		t.Fatal(err)
+	}
+	f := NewFactory(WithShell(shell))
+	defer f.Stop()
+
+	// Join the background attempt: on an ordinary machine it resolves. If it
+	// did not, the commit below could not prove anything.
+	env, state, reason := f.env.resolve(context.Background())
+	if state != git.EnvResolved {
+		t.Fatalf("environment not resolved on an ordinary machine: %s (%s)", state, reason)
+	}
+
+	repo2, outcome, err := f.Open(context.Background(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.State != git.OpenOK {
+		t.Fatalf("State = %s", outcome.State)
+	}
+	if outcome.EnvState != git.EnvResolved {
+		t.Fatalf("EnvState = %s, want resolved", outcome.EnvState)
+	}
+
+	res, err := repo2.Commit(context.Background(), "subject", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.State != git.CommitOK {
+		t.Fatalf("Commit state = %s", res.State)
+	}
+
+	committed := false
+	for _, entry := range fakeGitLog(t, env) {
+		if len(entry) > 0 && entry[0] == "commit" {
+			committed = true
+		}
+	}
+	if !committed {
+		t.Fatal("the fake git never saw a commit invocation")
+	}
 }

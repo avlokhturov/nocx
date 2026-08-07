@@ -27,52 +27,154 @@ import (
 // forbids learning it from the stream. The panel says so, and a hook that
 // passes in the terminal but fails here is an explicable difference rather
 // than a mystery.
+//
+// Resolution is off Open's critical path (nocx-6pz0): the factory resolves
+// once, in the background from construction, and Open reads the settled
+// answer, so opening a repository costs what git costs and a hung rc file
+// never holds the panel. Only the commit path blocks on resolution, joining
+// the shared attempt or retrying a remembered failure after a cooldown, so
+// D6's guarantee — the commit runs with the resolved environment when one is
+// obtainable — still holds. The invocation below is unchanged (`-i`, 5 s
+// default): it is the only non-pty way to read the rc files the way the
+// pty's shell reads them, and the cost is now paid once in the background,
+// not on every open.
 type envCache struct {
-	mu      sync.Mutex
-	shell   string
-	timeout time.Duration
-	maxOut  int64
-	env     []string
-	ok      bool
+	mu       sync.Mutex
+	shell    string
+	timeout  time.Duration
+	maxOut   int64
+	cooldown time.Duration // pause after a failed attempt before retrying
+	env      []string
+	state    envState  // envUnknown, envResolved or envDegraded
+	reason   string    // why degraded; the panel's text
+	lastTry  time.Time // when the last attempt settled; zero: never attempted
+	inflight bool
+	done     chan struct{} // non-nil while an attempt runs; closed when it settles
 }
 
-// newEnvCache resolves the environment at most once, on the first open.
-// shell is the binary to interrogate ("" — detect, like the pty does).
+// envState is the resolver's own state machine, one step richer than the
+// wire's: unknown is the pre-attempt state the wire reports conservatively
+// as degraded, never as resolved.
+type envState int
+
+const (
+	envUnknown envState = iota
+	envResolved
+	envDegraded
+)
+
+// envRetryCooldown is the pause after a failed resolution attempt before the
+// next caller may retry. One failure is plausibly transient (a hung rc file,
+// a missing shell) and deserves a second chance; a permanently broken shell
+// must not turn every commit into a timeout, and a cooldown is the bound
+// that says so. Chosen well above the resolution deadline so a machine whose
+// shell always hangs retries at most a handful of times an hour, and well
+// below any realistic poll cadence so a recovery is picked up promptly.
+const envRetryCooldown = 30 * time.Second
+
+// newEnvCache builds the resolver: shell is the binary to interrogate
+// ("" — detect, like the pty does), timeout and maxOut bound one attempt.
+// A success is cached; a failure is remembered for the cooldown and retried
+// after it, so the cache resolves at most once per cooldown window.
 func newEnvCache(shell string, timeout time.Duration, maxOut int64) *envCache {
 	if shell == "" {
 		shell = detectShell()
 	}
+	// The 5 s default is deliberate (nocx-6pz0): it no longer holds a UI —
+	// resolution runs in the background and only a commit joins it — and a
+	// shorter bound would degrade slow-but-healthy shells (a large rc, a
+	// network mount), weakening D6's "when one is obtainable".
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
 	if maxOut <= 0 {
 		maxOut = 256 << 10
 	}
-	return &envCache{shell: shell, timeout: timeout, maxOut: maxOut}
+	return &envCache{shell: shell, timeout: timeout, maxOut: maxOut, cooldown: envRetryCooldown}
 }
 
-// resolve returns the cached environment, resolving it on the first call. A
-// completed resolution is cached for the process lifetime; a failed one is
-// not, so a transient failure (a hung rc file, a missing shell) degrades one
-// open and the next retries instead of poisoning the panel forever. The
-// degraded state is a product-visible fact, not a log line.
+// resolve returns the cached environment, resolving it on demand. A completed
+// resolution is cached for the process lifetime; a failed one is remembered
+// for the cooldown and retried after it, so a transient failure (a hung rc
+// file, a missing shell) degrades some opens and recovers — it neither
+// re-attempts on every call nor poisons the panel for the process lifetime.
+// Attempts are single-flight: a caller that arrives while one runs joins it
+// instead of starting a second shell.
 func (c *envCache) resolve(ctx context.Context) (env []string, state git.EnvState, reason string) {
-	c.mu.Lock()
-	if c.ok {
-		env, state, reason = c.env, git.EnvResolved, ""
+	for {
+		c.mu.Lock()
+		if c.state == envResolved {
+			env, state, reason = c.env, git.EnvResolved, ""
+			c.mu.Unlock()
+			return
+		}
+		if c.state == envDegraded && time.Since(c.lastTry) < c.cooldown {
+			env, state, reason = nil, git.EnvDegraded, c.reason
+			c.mu.Unlock()
+			return
+		}
+		if c.inflight {
+			done := c.done
+			c.mu.Unlock()
+			select {
+			case <-done:
+				continue // the attempt settled; re-read the answer
+			case <-ctx.Done():
+				return nil, git.EnvDegraded, ctx.Err().Error()
+			}
+		}
+		c.inflight = true
+		c.done = make(chan struct{})
 		c.mu.Unlock()
-		return
-	}
-	c.mu.Unlock()
 
-	env, err := resolveShellEnv(ctx, c.shell, c.timeout, c.maxOut)
-	if err != nil {
-		return nil, git.EnvDegraded, err.Error()
+		env, err := resolveShellEnv(ctx, c.shell, c.timeout, c.maxOut)
+		c.mu.Lock()
+		c.lastTry = time.Now()
+		c.inflight = false
+		close(c.done)
+		if err != nil {
+			c.state, c.reason = envDegraded, err.Error()
+			c.mu.Unlock()
+			return nil, git.EnvDegraded, err.Error()
+		}
+		c.env, c.state, c.reason = env, envResolved, ""
+		c.mu.Unlock()
+		return env, git.EnvResolved, ""
 	}
+}
+
+// known returns the current answer without attempting or waiting: the
+// resolved environment, a remembered failure, or — before the background
+// attempt settles — a conservative degraded. Open uses this: the repository
+// answer must not wait on the resolution (nocx-6pz0), and the panel must
+// never be shown a "resolved" the resolution has not earned.
+func (c *envCache) known() (env []string, state git.EnvState, reason string) {
 	c.mu.Lock()
-	c.env, c.ok = env, true
-	c.mu.Unlock()
-	return env, git.EnvResolved, ""
+	defer c.mu.Unlock()
+	switch c.state {
+	case envResolved:
+		return c.env, git.EnvResolved, ""
+	case envDegraded:
+		return nil, git.EnvDegraded, c.reason
+	default:
+		return nil, git.EnvDegraded, "the shell environment has not been resolved yet; the first commit will wait for it"
+	}
+}
+
+// waitSettled blocks until no resolution attempt is in flight. Factory.Stop
+// cancels the background attempt and calls this so no resolution child can
+// outlive the process.
+func (c *envCache) waitSettled() {
+	for {
+		c.mu.Lock()
+		if !c.inflight {
+			c.mu.Unlock()
+			return
+		}
+		done := c.done
+		c.mu.Unlock()
+		<-done
+	}
 }
 
 // resolveShellEnv runs the user's shell interactively — so it reads the rc
@@ -82,6 +184,14 @@ func (c *envCache) resolve(ctx context.Context) (env []string, state git.EnvStat
 // itself runs under: the deadline is the run spec's wall-clock ceiling and
 // the cap is the stdout sink's, so a hung rc file or a chatty one cannot
 // hold the resolver open.
+//
+// The invocation is deliberately unchanged by nocx-6pz0. The `-i` is what
+// makes the shell read its rc files the way the pty's shell does; a non-pty
+// reimplementation of rc loading (sourcing ~/.bashrc by hand) would be a
+// second answer that diverges from the pty's shell startup — the launcher
+// needed a real pty to get that right — and an interactive shell without a
+// tty hanging in an rc file is a bounded, remembered failure, no longer a
+// cost every open pays.
 func resolveShellEnv(ctx context.Context, shell string, timeout time.Duration, maxOut int64) ([]string, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()

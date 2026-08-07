@@ -153,22 +153,40 @@ func TestEnvCacheResolveAndFail(t *testing.T) {
 	}
 }
 
-func TestEnvCacheFailureNotCached(t *testing.T) {
+// TestEnvCacheFailureRememberedThenRetried: a failed resolution is remembered
+// — not re-attempted on every call, which is what turned one 5 s timeout into
+// a tax on every open (nocx-6pz0) — but only for the cooldown: once it has
+// passed, the next call retries, so a transient failure recovers instead of
+// poisoning the cache for the process lifetime.
+func TestEnvCacheFailureRememberedThenRetried(t *testing.T) {
 	dir := t.TempDir()
 	shell := filepath.Join(dir, "flaky-shell")
-	// First resolve fails (missing shell), then the shell appears and the
-	// second resolve succeeds — a failed resolution must not be cached.
-	_, state, _ := newEnvCache(filepath.Join(dir, "not-there"), time.Second, 64<<10).resolve(context.Background())
-	if state != git.EnvDegraded {
-		t.Fatalf("state = %s, want degraded", state)
+	count := filepath.Join(dir, "count")
+	// #nosec G306 — the script must be executable: the resolver execs it.
+	if err := os.WriteFile(shell, []byte("#!/bin/sh\nprintf x >> "+count+"\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
 	}
+	c := newEnvCache(shell, time.Second, 64<<10)
+
+	if _, state, _ := c.resolve(context.Background()); state != git.EnvDegraded {
+		t.Fatalf("first resolve: state = %s, want degraded", state)
+	}
+	// Within the cooldown the remembered failure is served without a retry.
+	if _, state, _ := c.resolve(context.Background()); state != git.EnvDegraded {
+		t.Fatalf("second resolve: state = %s, want degraded (remembered)", state)
+	}
+	// #nosec G304 — the count path is a test TempDir.
+	if b, _ := os.ReadFile(count); len(b) != 1 {
+		t.Fatalf("the failing probe ran %d times within the cooldown, want 1", len(b))
+	}
+	// Past the cooldown the next resolve retries — and a success is cached.
+	c.lastTry = time.Now().Add(-time.Hour)
 	// #nosec G306 — the script must be executable: the resolver execs it.
 	if err := os.WriteFile(shell, []byte("#!/bin/sh\necho 'export PATH=/usr/bin'\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	c := newEnvCache(shell, time.Second, 64<<10)
 	env, state, _ := c.resolve(context.Background())
 	if state != git.EnvResolved || !hasPATH(env) {
-		t.Fatalf("second resolve: state=%s env=%v", state, env)
+		t.Fatalf("retry resolve: state=%s env=%v, want resolved", state, env)
 	}
 }

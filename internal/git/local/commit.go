@@ -26,9 +26,19 @@ import (
 // There is no --no-verify in this design and no setting that adds one: hooks
 // always run.
 func (r *Repo) Commit(ctx context.Context, msg string, amend bool) (git.CommitOutcome, error) {
+	// D6: the commit runs with the environment resolved from the user's
+	// shell — a pre-commit hook must find the tools the terminal's shell
+	// provides. Resolution is off the open path (nocx-6pz0); this is where
+	// it is needed, so the first git invocation of the commit path acquires
+	// it: joining the background attempt, or retrying a remembered failure
+	// past its cooldown — never starting a second shell while one is in
+	// flight. The preflight Status runs with the SAME environment, so the
+	// state a commit checks is the state its hook sees.
+	env := r.envResolved(ctx)
+
 	// Refuse early, before running a hook that would then fail confusingly:
 	// nothing staged, or an amend with nothing to amend against.
-	st, err := r.Status(ctx)
+	st, err := r.statusWithEnv(ctx, env)
 	if err != nil {
 		return git.CommitOutcome{}, err
 	}
@@ -43,7 +53,7 @@ func (r *Repo) Commit(ctx context.Context, msg string, amend bool) (git.CommitOu
 	res := run(ctx, spec{
 		argv:      append([]string{r.gitPath}, spawn.CommitArgs(amend)...),
 		dir:       r.toplevel,
-		env:       r.env,
+		env:       env,
 		stdin:     strings.NewReader(msg),
 		sink:      sink,
 		stderrMax: git.MaxCommitOutputBytes,
@@ -79,14 +89,14 @@ func (r *Repo) Commit(ctx context.Context, msg string, amend bool) (git.CommitOu
 	hres := run(ctx, spec{
 		argv: append([]string{r.gitPath}, spawn.HeadArgs()...),
 		dir:  r.toplevel,
-		env:  r.env,
+		env:  env,
 		sink: headSink,
 	})
 	if hres.err == nil && !hres.cancelled && hres.exitCode == 0 {
 		head = strings.TrimSpace(string(headSink.buf))
 	}
 
-	st2, stErr := r.Status(ctx)
+	st2, stErr := r.statusWithEnv(ctx, env)
 	if stErr != nil {
 		return git.CommitOutcome{
 			State: git.CommitOK,
@@ -111,7 +121,7 @@ func (r *Repo) HeadMessage(ctx context.Context) (git.HeadMessage, error) {
 	res := run(ctx, spec{
 		argv: append([]string{r.gitPath}, spawn.HeadMessageArgs()...),
 		dir:  r.toplevel,
-		env:  r.env,
+		env:  r.envSettled(),
 		sink: sink,
 	})
 	if res.cancelled {
