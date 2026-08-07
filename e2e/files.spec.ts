@@ -74,8 +74,9 @@ const TREE_ROW = '.ui-tree-row'
 /** Make the active tab's origin the fixture: cd there (OSC 7 makes the cwd
  *  verified). The panel — open on Files from cold start — REVEALS the new
  *  cwd through the origin-change notification: no tab switch, no click,
- *  which is the behaviour under test. The fixture's own row lands selected;
- *  expand it so its children (bigdir, notes.md) are rows the tests act on. */
+ *  which is the behaviour under test. The fixture's own row lands selected
+ *  AND expanded, so its children (bigdir, notes.md) are already rows the
+ *  other tests act on — the reveal is what puts them there, not a click. */
 async function openFilesAtFixture(page: Page) {
   await page.goto('/')
   await promptReady(page)
@@ -93,11 +94,14 @@ async function openFilesAtFixture(page: Page) {
     timeout: 20_000,
   })
   // The reveal landed: the fixture's row is selected (the walk expanded
-  // the chain from / down to it).
+  // the chain from / down to it) and the target itself is OPEN — finishReveal
+  // expands it and lists its first page, so arriving somewhere shows you what
+  // is there. Asserted, not clicked: a click on `Expand <fixture>` waits for a
+  // control that never exists (the disclosure reads `Collapse <fixture>` from
+  // the moment the walk lands), which is a 60s timeout per spec (nocx-z9s9.1).
   const fixtureRow = page.locator(TREE_ROW, { hasText: fixtureBasename })
   await expect(fixtureRow).toHaveAttribute('data-selected', 'true', { timeout: 20_000 })
-  // Expand the fixture so its children are rows the other tests click on.
-  await fixtureRow.getByRole('button', { name: `Expand ${fixtureBasename}` }).click()
+  await expect(fixtureRow).toHaveAttribute('data-disclosure', 'expanded', { timeout: 20_000 })
   await expect(page.locator('.ui-tree-row__name').filter({ hasText: 'bigdir' })).toBeVisible()
 }
 test('cold start: the Files icon is first in the activity bar, present and enabled; the panel is open on Files', async ({
@@ -231,13 +235,16 @@ test('clicking a file opens a tab whose content matches the file and whose title
   await expect(page.locator(TAB_TITLE).filter({ hasText: '·' })).toHaveCount(0)
 })
 
-test('right-clicking a row copies the relative and the absolute path', async ({
-  page,
-  context,
-}) => {
-  // The copy rides the app's clipboard seam, which on this headless path
-  // is navigator.clipboard — reading it back needs the read permission.
-  await context.grantPermissions(['clipboard-read', 'clipboard-write'])
+// The right-click is split from the read-back on purpose. Reading the
+// clipboard needs the `clipboard-read`/`clipboard-write` permissions, and
+// WebKit knows neither — granting them THROWS ("Unknown permission:
+// clipboard-write") before the test does anything, which is what made this
+// spec red on webkit (nocx-z9s9.2). Skipping the whole thing would also stop
+// watching the menu on the engine the app actually ships in, and a context
+// menu is exactly the kind of surface that differs between engines. So the
+// menu is asserted on both, and only the read-back is Chromium-only —
+// the same guard, with the same stated reason, as clipboard.spec.ts:41.
+test('right-clicking a row offers both copy entries', async ({ page }) => {
   await openFilesAtFixture(page)
 
   // The user's seam is the right-click; the menu appears with both copy
@@ -248,24 +255,42 @@ test('right-clicking a row copies the relative and the absolute path', async ({
   await expect(menu.getByRole('menuitem', { name: 'Copy Relative Path' })).toBeVisible()
   await expect(menu.getByRole('menuitem', { name: 'Copy Absolute Path' })).toBeVisible()
   await expect(menu.getByRole('menuitem', { name: 'Show in Finder' })).toBeVisible()
+})
 
-  // Relative: as spelled from the tree root — the tree is rooted at the
-  // filesystem root, so the fixture's file is spelled from / (no leading
-  // slash: "the path in this tree").
-  await menu.getByRole('menuitem', { name: 'Copy Relative Path' }).click()
-  await expect
-    .poll(() => page.evaluate(() => navigator.clipboard.readText()))
-    .toBe(join(fixtureRoot, 'notes.md').slice(1))
+test.describe('the copy entries put the path on the clipboard', () => {
+  test.skip(
+    ({ browserName }) => browserName !== 'chromium',
+    'clipboard-read permission is Chromium-only; WebKit must be checked manually',
+  )
 
-  // Absolute: the lexical absolute path of the row the user clicked.
-  await page.locator('.files-row').filter({ hasText: 'notes.md' }).click({ button: 'right' })
-  await page
-    .locator('[data-testid="files-context-menu"]')
-    .getByRole('menuitem', { name: 'Copy Absolute Path' })
-    .click()
-  await expect
-    .poll(() => page.evaluate(() => navigator.clipboard.readText()))
-    .toBe(join(fixtureRoot, 'notes.md'))
+  test('relative and absolute', async ({ page, context }) => {
+    // The copy rides the app's clipboard seam, which on this headless path
+    // is navigator.clipboard — reading it back needs the read permission.
+    await context.grantPermissions(['clipboard-read', 'clipboard-write'])
+    await openFilesAtFixture(page)
+
+    await page.locator('.files-row').filter({ hasText: 'notes.md' }).click({ button: 'right' })
+    const menu = page.locator('[data-testid="files-context-menu"]')
+    await expect(menu).toBeVisible()
+
+    // Relative: as spelled from the tree root — the tree is rooted at the
+    // filesystem root, so the fixture's file is spelled from / (no leading
+    // slash: "the path in this tree").
+    await menu.getByRole('menuitem', { name: 'Copy Relative Path' }).click()
+    await expect
+      .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+      .toBe(join(fixtureRoot, 'notes.md').slice(1))
+
+    // Absolute: the lexical absolute path of the row the user clicked.
+    await page.locator('.files-row').filter({ hasText: 'notes.md' }).click({ button: 'right' })
+    await page
+      .locator('[data-testid="files-context-menu"]')
+      .getByRole('menuitem', { name: 'Copy Absolute Path' })
+      .click()
+    await expect
+      .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+      .toBe(join(fixtureRoot, 'notes.md'))
+  })
 })
 
 test('writing to the file from outside nocx makes the row update without anyone pressing anything', async ({
