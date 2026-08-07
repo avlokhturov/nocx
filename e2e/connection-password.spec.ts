@@ -81,7 +81,10 @@ function seedProfile(isolatedHome: string, fixtureAddr: number): string {
 /** Seed a key-auth profile, so a spec can reach the host-key gate without
  *  a password prompt standing in front of it. */
 function seedPublicKeyProfile(isolatedHome: string, fixtureAddr: number, keyPath: string): void {
-  const dir = join(isolatedHome, '.config', 'nocx-dev')
+  // documentDir, not a hand-spelled path: the store is under
+  // Library/Application Support on darwin and .config elsewhere, and the two
+  // spellings agree on every platform except the one CI runs (nocx-z9s9.3).
+  const dir = documentDir(isolatedHome)
   mkdirSync(dir, { recursive: true })
   writeFileSync(
     join(dir, 'profiles.json'),
