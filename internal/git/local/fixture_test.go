@@ -343,7 +343,7 @@ func gitEnv(t *testing.T) []string {
 // newGitRepo creates a real git repository (no commits) and returns its path.
 func newGitRepo(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
+	dir := canonicalTempDir(t)
 	cmd := exec.Command(realGitPath(t), "init", "-q", dir) // #nosec G204 — realGitPath is LookPath-resolved (skips if absent); args are fixed literals plus a t.TempDir() path
 	cmd.Env = gitEnv(t)
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -414,4 +414,22 @@ func writeFile(path, content string, mode os.FileMode) error {
 func summary(s git.Status) string {
 	return fmt.Sprintf("branch=%s head=%s staged=%d unstaged=%d conflicted=%d total=%d completeness=%s",
 		s.Branch, s.Head, len(s.Staged), len(s.Unstaged), len(s.Conflicted), s.Total, s.Completeness)
+}
+
+// canonicalTempDir is t.TempDir() with symlinks resolved.
+//
+// On macOS /var is a symlink to /private/var, and t.TempDir() hands back the
+// unresolved form while `git rev-parse --show-toplevel` resolves it — so a
+// test comparing the two directly passes on Linux and fails on macOS, which
+// is CI's backend job and the platform the app ships on. Resolving here means
+// the path a test calls "the repository" is the same string git will call it,
+// rather than every assertion learning to be lenient about a difference that
+// is not the subject of any of them.
+func canonicalTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolving the temp dir: %v", err)
+	}
+	return dir
 }

@@ -701,6 +701,11 @@ test('on an SSH tab the mutation controls are absent from the DOM, not merely di
 }) => {
   test.setTimeout(120_000)
   const fixture = startSshd()
+  // Captured for the teardown below: the stand is shared, so this spec must
+  // remove the profile it creates.
+  let createdProfileId: string | null = null
+  let wsPort: number | null = null
+  let wsToken: string | null = null
   try {
     await fixture._wait
     expect(fixture.addr).not.toBe('')
@@ -724,7 +729,9 @@ test('on an SSH tab the mutation controls are absent from the DOM, not merely di
     // Seed the connection the way Settings would. The name is unique per
     // run: the devharness store persists across runs in this home.
     const profileName = `e2e-git-remote-${Date.now()}`
-    await rpc(page, wsInfo.port, wsInfo.token, 'profiles.create', {
+    wsPort = wsInfo.port
+    wsToken = wsInfo.token
+    const created = await rpc<{ id?: string }>(page, wsInfo.port, wsInfo.token, 'profiles.create', {
       type: 'ssh',
       name: profileName,
       options: {
@@ -735,6 +742,7 @@ test('on an SSH tab the mutation controls are absent from the DOM, not merely di
         shellIntegration: 'ask',
       },
     })
+    createdProfileId = created?.id ?? null
 
     // Open the connection through quick connect: the palette's host search
     // reaches a saved profile and Enter opens it directly. Enter on an
@@ -771,6 +779,22 @@ test('on an SSH tab the mutation controls are absent from the DOM, not merely di
       await expect(page.locator(sel)).toHaveCount(0)
     }
   } finally {
+    // Delete the profile this spec created. The stand is SHARED by the whole
+    // run (e2e/stand.ts owns one backend, one home), so a profile left behind
+    // is not this spec's private mess — quick-connect.spec.ts asserts the
+    // picker says "No matches" on a stand with no profiles, and a leftover
+    // makes it show a row instead. It failed in CI and not here, because the
+    // shard that carries both is decided by the file list, and this branch
+    // changed the file list.
+    //
+    // Best effort inside the existing finally: a cleanup that throws would
+    // replace the real failure with its own, and the test result is what
+    // somebody is about to read.
+    if (createdProfileId !== null && wsPort !== null && wsToken !== null) {
+      await rpc(page, wsPort, wsToken, 'profiles.delete', { id: createdProfileId }).catch(
+        () => undefined,
+      )
+    }
     fixture.proc.kill('SIGKILL')
   }
 })

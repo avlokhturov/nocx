@@ -1085,7 +1085,21 @@ func TestGitChanged_NotDeliveredWithoutSubscriber(t *testing.T) {
 // the real local factory, and the whole wire — open returns the first
 // status inline, status reads it back, close releases it.
 func TestGitOpen_RealGitRoundTrip(t *testing.T) {
-	dir := t.TempDir()
+	// EvalSymlinks, because this test compares a path it chose against the
+	// path git reports. On macOS /var is a symlink to /private/var and
+	// t.TempDir() returns the unresolved form while `rev-parse
+	// --show-toplevel` resolves it — green on Linux, red on the platform the
+	// app ships on, which is exactly the disagreement CI exists to catch.
+	// In a closure so the error does not shadow the `err` this test uses
+	// throughout — govet's shadow check is on, and it is right that a second
+	// `err` in a long test is worth a second look.
+	dir := func() string {
+		d, evalErr := filepath.EvalSymlinks(t.TempDir())
+		if evalErr != nil {
+			t.Fatalf("resolving the temp dir: %v", evalErr)
+		}
+		return d
+	}()
 	initRealGitRepo(t, dir)
 	// The factory is constructed exactly as the composition root constructs
 	// it — no test-only option. That is deliberate: pinning the environment
