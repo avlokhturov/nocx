@@ -84,6 +84,21 @@ func (r *Repo) envResolved(ctx context.Context) []string {
 	return env
 }
 
+// EnvState is the current environment state, read without waiting: the
+// pinned environment is always resolved; the shared resolution answers
+// what known() holds — resolved, a remembered failure, or the conservative
+// degraded before the background attempt settles. The status poll carries
+// it so the panel can withdraw a warning Open showed for the pre-settle
+// window (nocx-69ey); it never resolves, so the poll cannot be held by a
+// hung rc file, and the commit path is unchanged — it still waits (D6).
+func (r *Repo) EnvState() (git.EnvState, string) {
+	if r.resolver == nil {
+		return git.EnvResolved, ""
+	}
+	_, state, reason := r.resolver.known()
+	return state, reason
+}
+
 // spec is one invocation of git. sink receives stdout; returning errEnough
 // from it stops the child deliberately. deadline is the wall-clock half of
 // the work ceiling (zero: none). stderrMax bounds captured stderr (zero:

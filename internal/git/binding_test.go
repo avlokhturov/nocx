@@ -42,6 +42,10 @@ func (s *stubRepo) Status(ctx context.Context) (Status, error) {
 	return Status{Staged: []Entry{}, Unstaged: []Entry{}, Conflicted: []Entry{}}, nil
 }
 
+func (s *stubRepo) EnvState() (EnvState, string) {
+	return EnvResolved, ""
+}
+
 func (s *stubRepo) Diff(ctx context.Context, path string, side Side, maxBytes int64) (Diff, error) {
 	return Diff{}, nil
 }

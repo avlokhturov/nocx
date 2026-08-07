@@ -10,10 +10,18 @@
  */
 
 /**
- * Result of the git.status JSON-RPC method: what changed in the bound repository, from one git status --porcelain=v2 -z --branch --untracked-files=all invocation (design D7). This file is also the single declaration of the shared status shape: the six other results that carry a status (git.open, git.stage, git.unstage, git.stageAll, git.unstageAll, git.commit) reference $defs.status here rather than declaring it again, so one concept has one owner (AD-8). The lists are never null — an empty set arrives as [], not null; that exact bug was found by the first contract schema this repository ever ran.
+ * Result of the git.status JSON-RPC method: what changed in the bound repository, from one git status --porcelain=v2 -z --branch --untracked-files=all invocation (design D7), plus the environment fact (D6). This file is also the single declaration of the shared status shape: the six other results that carry a status (git.open, git.stage, git.unstage, git.stageAll, git.unstageAll, git.commit) reference $defs.status here rather than declaring it again, so one concept has one owner (AD-8). The lists are never null — an empty set arrives as [], not null; that exact bug was found by the first contract schema this repository ever ran. envState is always present because the poll is the panel's repeating channel for a fact Open reports provisionally (nocx-6pz0): a warning shown for the pre-settle window must be withdrawable when the resolution settles, and a fact delivered once can never be corrected (nocx-69ey).
  */
 export interface GitStatusResult {
   status: Status
+  /**
+   * Whether git will run in the environment resolved from the user's shell or in the degraded os.Environ() fallback (design D6), AS OF NOW: the same non-waiting answer git.open reports, repeated on every poll. degraded also covers the brief window before the background resolution settles (nocx-6pz0); the panel must never be shown a resolved the resolution has not earned, and must never keep warning about a degradation the resolution has disproved (nocx-69ey).
+   */
+  envState: 'resolved' | 'degraded'
+  /**
+   * Why the environment is degraded; present exactly when envState is degraded.
+   */
+  envReason?: string
 }
 export interface Status {
   /**

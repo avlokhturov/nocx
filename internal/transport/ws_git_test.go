@@ -54,6 +54,8 @@ type stubGitRepo struct {
 	headMsgErr error
 	remoteURL  string
 	remoteErr  error
+	envState   git.EnvState // the scripted environment fact (nocx-69ey)
+	envReason  string
 }
 
 func (r *stubGitRepo) Log(_ context.Context, max int) (git.Log, error) {
@@ -73,6 +75,12 @@ func (r *stubGitRepo) Status(_ context.Context) (git.Status, error) {
 		return git.Status{}, errors.New("stub: repo closed")
 	}
 	return r.status, r.statusErr
+}
+
+func (r *stubGitRepo) EnvState() (git.EnvState, string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.envState, r.envReason
 }
 
 func (r *stubGitRepo) Diff(_ context.Context, _ string, _ git.Side, _ int64) (git.Diff, error) {
@@ -182,6 +190,7 @@ func newStubGitRepo() *stubGitRepo {
 		commit:    git.CommitOutcome{State: git.CommitOK, Head: "abc1234", Status: stubStatus()},
 		headMsg:   git.HeadMessage{State: git.HeadMessageOK, Message: "subject\n\nbody"},
 		remoteURL: "git@github.com:shady2k/nocx.git",
+		envState:  git.EnvResolved,
 	}
 }
 

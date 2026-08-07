@@ -3241,40 +3241,59 @@ func TestFilesChanged_OverTheWireConformsToContract(t *testing.T) {
 func TestGitStatus_DTOConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "git.status.schema.json")
 	three, one := 3, 1
-	cases := map[string]gitStatusWire{
+	populated := gitStatusWire{
+		Branch: "main", Detached: false, Unborn: false, Head: "abc1234",
+		Upstream: "origin/main", Ahead: 1, Behind: 2,
+		Staged:     []gitEntryWire{{Path: "staged.txt", X: "M", Y: "."}},
+		Unstaged:   []gitEntryWire{{Path: "unstaged.txt", X: ".", Y: "M", Added: &three, Deleted: &one}},
+		Conflicted: []gitEntryWire{},
+		Total:      2, Completeness: "complete",
+	}
+	cases := map[string]gitStatusPollResult{
 		"populated": {
-			Branch: "main", Detached: false, Unborn: false, Head: "abc1234",
-			Upstream: "origin/main", Ahead: 1, Behind: 2,
-			Staged:     []gitEntryWire{{Path: "staged.txt", X: "M", Y: "."}},
-			Unstaged:   []gitEntryWire{{Path: "unstaged.txt", X: ".", Y: "M", Added: &three, Deleted: &one}},
-			Conflicted: []gitEntryWire{},
-			Total:      2, Completeness: "complete",
+			Status: populated, EnvState: "resolved",
 		},
 		// The counts are the brief's acceptance shape: +3 −1 rides the
 		// entry, and its ABSENCE (untracked, binary, conflicted, bounded
 		// out) is the wire's "no count exists" — never a 0 the panel
 		// would have to second-guess.
 		"counts are optional": {
-			Branch: "main", Head: "abc1234",
-			Staged:     []gitEntryWire{{Path: "new.txt", X: "?", Y: "?"}},
-			Unstaged:   []gitEntryWire{},
-			Conflicted: []gitEntryWire{},
-			Total:      1, Completeness: "complete",
+			Status: gitStatusWire{
+				Branch: "main", Head: "abc1234",
+				Staged:     []gitEntryWire{{Path: "new.txt", X: "?", Y: "?"}},
+				Unstaged:   []gitEntryWire{},
+				Conflicted: []gitEntryWire{},
+				Total:      1, Completeness: "complete",
+			},
+			EnvState: "resolved",
 		},
 		"unborn": {
-			Branch: "master", Unborn: true,
-			Staged: []gitEntryWire{}, Unstaged: []gitEntryWire{}, Conflicted: []gitEntryWire{},
-			Total: 0, Completeness: "complete",
+			Status: gitStatusWire{
+				Branch: "master", Unborn: true,
+				Staged: []gitEntryWire{}, Unstaged: []gitEntryWire{}, Conflicted: []gitEntryWire{},
+				Total: 0, Completeness: "complete",
+			},
+			EnvState: "resolved",
 		},
 		"detached": {
-			Branch: "", Detached: true, Head: "abc1234",
-			Staged: []gitEntryWire{}, Unstaged: []gitEntryWire{}, Conflicted: []gitEntryWire{},
-			Total: 0, Completeness: "complete",
+			Status: gitStatusWire{
+				Branch: "", Detached: true, Head: "abc1234",
+				Staged: []gitEntryWire{}, Unstaged: []gitEntryWire{}, Conflicted: []gitEntryWire{},
+				Total: 0, Completeness: "complete",
+			},
+			EnvState: "resolved",
+		},
+		// The degraded case is the one D6 exists for, and envReason rides
+		// exactly it — never a resolved result carrying a reason.
+		"degraded env": {
+			Status:    populated,
+			EnvState:  "degraded",
+			EnvReason: "the shell environment has not been resolved yet; the first commit will wait for it",
 		},
 	}
-	for name, w := range cases {
+	for name, r := range cases {
 		t.Run(name, func(t *testing.T) {
-			raw, err := json.Marshal(gitStatusResult{Status: w})
+			raw, err := json.Marshal(r)
 			if err != nil {
 				t.Fatalf("marshal: %v", err)
 			}
@@ -3623,6 +3642,7 @@ func TestGitOpen_OverTheWireConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "git.open.schema.json")
 	e := gitContractEnv(t, newStubGitRepo())
 	sid := e.openSession(t, 1)
+
 	raw := gitWireCall(t, e, "git.open", map[string]any{"sessionId": sid, "cwd": "/tmp/repo"}, 2)
 	validateJSON(t, schema, raw, "git.open result (real socket)")
 }
@@ -3634,6 +3654,68 @@ func TestGitStatus_OverTheWireConformsToContract(t *testing.T) {
 	bid := e.openGitBinding(t, sid, "/tmp/repo", 2)
 	raw := gitWireCall(t, e, "git.status", map[string]any{"bindingId": bid}, 3)
 	validateJSON(t, schema, raw, "git.status result (real socket)")
+}
+
+// TestGitStatusEnvStateRepeats_OverTheWire is the interval's wire half
+// (nocx-69ey, AGENTS.md rule 3 — stated with both ends): the poll carries
+// the environment fact on EVERY response, so a warning shown for an open
+// that landed in the pre-settle window is withdrawn by a later poll that
+// carries the settled resolution — the same binding, no re-open. The stub
+// scripts the transition the real resolver performs; the schema's required
+// envState is what makes this test catch a server that never sends it.
+func TestGitStatusEnvStateRepeats_OverTheWire(t *testing.T) {
+	schema := loadSchema(t, "git.status.schema.json")
+	repo := newStubGitRepo()
+	repo.mu.Lock()
+	repo.envState = git.EnvDegraded
+	repo.envReason = "the shell environment has not been resolved yet; the first commit will wait for it"
+	repo.mu.Unlock()
+	e := newGitTestEnv(t, WithGitRepoFactory(&stubGitFactory{
+		mkRepo: func() git.Repo { return repo },
+		outcome: git.OpenOutcome{
+			State: git.OpenOK, Toplevel: "/tmp/repo", GitDir: "/tmp/repo/.git",
+			GitVersion: "2.55.0", EnvState: git.EnvDegraded, EnvReason: repo.envReason,
+		},
+	}))
+	sid := e.openSession(t, 1)
+	bid := e.openGitBinding(t, sid, "/tmp/repo", 2)
+
+	// First poll: the resolution has not settled — degraded, with the
+	// reason the panel renders.
+	raw := gitWireCall(t, e, "git.status", map[string]any{"bindingId": bid}, 3)
+	var first struct {
+		EnvState  string `json:"envState"`
+		EnvReason string `json:"envReason"`
+	}
+	if err := json.Unmarshal(raw, &first); err != nil {
+		t.Fatalf("first poll: unmarshal: %v", err)
+	}
+	if first.EnvState != "degraded" || first.EnvReason == "" {
+		t.Fatalf("first poll: envState=%q envReason=%q, want degraded with a reason", first.EnvState, first.EnvReason)
+	}
+	validateJSON(t, schema, raw, "git.status result, pre-settle (real socket)")
+
+	// The resolution settles; the NEXT poll carries resolved — same
+	// binding, nothing re-opened.
+	repo.mu.Lock()
+	repo.envState = git.EnvResolved
+	repo.envReason = ""
+	repo.mu.Unlock()
+	raw = gitWireCall(t, e, "git.status", map[string]any{"bindingId": bid}, 4)
+	var second struct {
+		EnvState  string `json:"envState"`
+		EnvReason string `json:"envReason"`
+	}
+	if err := json.Unmarshal(raw, &second); err != nil {
+		t.Fatalf("second poll: unmarshal: %v", err)
+	}
+	if second.EnvState != "resolved" {
+		t.Fatalf("second poll: envState=%q, want resolved — the warning must be withdrawable", second.EnvState)
+	}
+	if second.EnvReason != "" {
+		t.Fatalf("second poll: envReason=%q, want absent once resolved", second.EnvReason)
+	}
+	validateJSON(t, schema, raw, "git.status result, settled (real socket)")
 }
 
 func TestGitDiff_OverTheWireConformsToContract(t *testing.T) {

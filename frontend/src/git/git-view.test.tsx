@@ -108,7 +108,7 @@ const logFixture = (over: Partial<GitLogResult['log']> = {}): GitLogResult['log'
 function fakeServices(over: Partial<GitPanelServices> = {}): GitPanelServices {
   return {
     open: vi.fn().mockResolvedValue(openOk()),
-    status: vi.fn().mockResolvedValue({ status: statusFixture() }),
+    status: vi.fn().mockResolvedValue({ status: statusFixture(), envState: 'resolved' }),
     diff: vi.fn().mockResolvedValue({ state: 'ok', text: '', truncated: false }),
     log: vi.fn().mockResolvedValue({ log: logFixture() }),
     stage: vi.fn().mockResolvedValue({ status: statusFixture() }),
@@ -317,8 +317,8 @@ describe('the panel renders what the store says', () => {
       open: vi.fn().mockResolvedValue(openOk({ status: clean })),
       status: vi
         .fn()
-        .mockResolvedValueOnce({ status: conflicted })
-        .mockResolvedValue({ status: clean }),
+        .mockResolvedValueOnce({ status: conflicted, envState: 'resolved' })
+        .mockResolvedValue({ status: clean, envState: 'resolved' }),
     })
     const { panel, setActiveOrigin } = mountApp(services)
     setActiveOrigin(LOCAL_ORIGIN)
@@ -346,6 +346,36 @@ describe('the panel renders what the store says', () => {
     expect(panel.querySelector('[data-testid="git-stage-all"]')?.hasAttribute('disabled')).toBe(
       false,
     )
+  })
+
+  it('the degraded warning appears at open and is withdrawn by the poll that carries resolved (nocx-69ey)', async () => {
+    const reason =
+      'the shell environment has not been resolved yet; the first commit will wait for it'
+    const services = fakeServices({
+      open: vi.fn().mockResolvedValue(openOk({ envState: 'degraded', envReason: reason })),
+      status: vi
+        .fn()
+        .mockResolvedValueOnce({ status: statusFixture(), envState: 'degraded', envReason: reason })
+        .mockResolvedValue({ status: statusFixture(), envState: 'resolved' }),
+    })
+    const { panel, setActiveOrigin } = mountApp(services)
+    setActiveOrigin(LOCAL_ORIGIN)
+    await settle()
+
+    // The open landed in the pre-settle window: the warning is on screen.
+    const warning = panel.querySelector('[data-testid="git-env-degraded"]')
+    expect(warning?.textContent).toContain('degraded environment')
+
+    // A poll that still sees the in-flight resolution keeps it there.
+    panel.querySelector<HTMLElement>('[data-testid="git-refresh"]')?.click()
+    await settle()
+    expect(panel.querySelector('[data-testid="git-env-degraded"]')).not.toBeNull()
+
+    // The background resolution settles; a poll carries resolved and the
+    // warning is withdrawn — the same binding, no re-open.
+    panel.querySelector<HTMLElement>('[data-testid="git-refresh"]')?.click()
+    await settle()
+    expect(panel.querySelector('[data-testid="git-env-degraded"]')).toBeNull()
   })
 })
 

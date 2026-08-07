@@ -62,6 +62,15 @@ import (
 // owner (spec §5.1).
 type Repo interface {
 	Status(ctx context.Context) (Status, error)
+	// EnvState reports the environment git will run in right now — the
+	// non-waiting read. Open reports the same fact once (D6); the status
+	// poll repeats it because Open's answer is provisional (nocx-6pz0): it
+	// reports whatever has settled by open, which in the pre-settle window
+	// is degraded, and a fact the panel can never correct would warn about
+	// a degradation that no longer exists (nocx-69ey). It never resolves:
+	// only the commit path waits on resolution, and the panel must never be
+	// shown a "resolved" the resolution has not earned.
+	EnvState() (EnvState, string)
 	Diff(ctx context.Context, path string, side Side, maxBytes int64) (Diff, error)
 	Log(ctx context.Context, max int) (Log, error)
 	Stage(ctx context.Context, paths []string) (Status, error)

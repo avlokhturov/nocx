@@ -369,6 +369,70 @@ func TestOpenFailureNotReattemptedPerOpen(t *testing.T) {
 	}
 }
 
+// TestEnvStateSettlesResolvedWithoutReopen is the interval, both ends
+// (nocx-69ey, AGENTS.md rule 3): an open that lands while the background
+// resolution is still in flight reports degraded, and once the resolution
+// settles the SAME repo reports resolved — the panel can withdraw its
+// warning without re-opening. The shell is gated on marker files, so the
+// test never races the resolution: it cannot settle before the open, and
+// the test controls when it does.
+func TestEnvStateSettlesResolvedWithoutReopen(t *testing.T) {
+	repoDir := newGitRepo(t)
+	dir := t.TempDir()
+	started := filepath.Join(dir, "started")
+	release := filepath.Join(dir, "release")
+	shell := filepath.Join(dir, "gated-shell")
+	body := "#!/bin/sh\n" +
+		"printf started > " + started + "\n" +
+		"while [ ! -f " + release + " ]; do sleep 0.01; done\n" +
+		"export PATH=/usr/bin\n" +
+		"export -p\n"
+	if err := writeFileExec(shell, body); err != nil {
+		t.Fatal(err)
+	}
+	f := NewFactory(WithShell(shell))
+	defer f.Stop()
+
+	// The background attempt is in flight (gated): the resolution cannot
+	// settle until the test releases it, so the open below is guaranteed
+	// to land in the pre-settle window.
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		// #nosec G304 — the marker path is a test TempDir.
+		if _, err := os.Stat(started); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the background resolution never started")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	repo, outcome, err := f.Open(context.Background(), repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.State != git.OpenOK {
+		t.Fatalf("State = %s, want ok", outcome.State)
+	}
+	if outcome.EnvState != git.EnvDegraded {
+		t.Fatalf("open EnvState = %s, want degraded (the resolution is still in flight)", outcome.EnvState)
+	}
+
+	// Release the resolution; it settles to resolved.
+	// #nosec G306 — the marker path is a test TempDir.
+	if err := os.WriteFile(release, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.env.waitSettled()
+
+	// The SAME repo now reports resolved — no re-open (nocx-69ey).
+	state, reason := repo.EnvState()
+	if state != git.EnvResolved {
+		t.Fatalf("EnvState() = %s (%s), want resolved once the resolution settled", state, reason)
+	}
+}
+
 // TestCommitRunsWithResolvedEnvironment is D6's paired success test
 // (AGENTS.md rule 2): on an ordinary machine the environment IS resolved, and
 // the commit runs with it. Every behavior the commit path needs lives in the
