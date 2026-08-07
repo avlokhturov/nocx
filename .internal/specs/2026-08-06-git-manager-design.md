@@ -1225,3 +1225,50 @@ the measurement is a task and not an opinion.
   check about itself.** Layout, parity with the artefact the owner supplied, and latency
   are the three things a spec cannot assert and a suite did not — and all three were
   found in the first minute the owner looked at the product.
+
+- **2026-08-07, second wave** — the owner compared the delivered panel against orca side by
+  side, and the gap was not subtle. Seven changes came out of it, and the pattern under
+  them is worth more than the list.
+
+  **What was missing had been promised or shown.** The line counts and the commit list are
+  in the screenshots that opened this design; §4 recorded neither as an inclusion nor a
+  refusal (see "Neither in nor out"). The **filter box** is worse than an omission — the kit
+  table in §5.4 lists `Filter box → SearchField` and the panel simply never had one, so the
+  epic closed against a criterion that watched one file through the happy path, and one
+  file needs no filter. Both are now delivered, along with a resizable sidebar, collapsible
+  sections, branch copy, and hosting links for the branch and every commit.
+
+  **Two defects were in the kit, not the surface.** `.ui-badge` declared no `white-space`,
+  so a long value wrapped INSIDE the pill: a branch named `fix/e2e-files-reveal-and-container`
+  rendered as a three-line block and a commit's ref badges stacked four deep, tripling the
+  row. A badge is a chip — one line, whatever it holds — and it clips now. The branch then
+  stopped being a badge at all, because a branch name is neither short nor bounded and even
+  clipped it spent the pill's padding on the one string in that header that must be read in
+  full. And the sidebar's own inset was doubled by the panel adding its own on top: 48px of
+  air in a 240px rail, taken from the file names.
+
+  **The rail is 240px, and that was the real constraint.** Every CSS optimisation available
+  bought about 15px. `#sidebar { width: 240px }` was hard-coded, `--sidebar-width` was
+  declared and read by nothing, and `base.css` told the reader the sidebar was
+  "user-resizable" — false. A drag handle buys whatever the user wants, and now exists
+  (`role="separator"`, keyboard-operable, 200–640px, persisted).
+
+  **A gate that exists and is never invoked is the same defect as unreachable code.** A
+  botched conflict resolution left `e2e/git-panel.spec.ts` syntactically invalid, and it
+  passed every gate in the pre-commit hook — prettier ran under `cd frontend`, and the ROOT
+  `tsconfig.json` that covers `e2e/**/*.ts` was invoked by nothing. That tsconfig exists
+  BECAUSE two specs once shipped as compile errors and ran anyway. The e2e suite is where
+  several properties of this product are asserted at all, including the geometric assertion
+  that caught the broken row.
+
+  **And the latency fix regressed the thing it was fixing.** `nocx-6pz0` correctly stopped
+  `Open` waiting on the shell environment — but `envState` is delivered by `git.open` and by
+  nothing else, so a value that was final when Open waited became a snapshot that can never
+  be corrected. One open landing before the background resolution settles pins "degraded"
+  for the lifetime of the binding, while commits run with a perfectly good environment. That
+  is D6 inverted: the decision exists so a REAL degradation is visible, and a warning that
+  cannot be withdrawn teaches the user to ignore it. Filed as `nocx-69ey`.
+
+  The measurement that found it is the one worth keeping: `$SHELL -i -c 'export -p'` is
+  31 ms on that machine and the resolver returns `resolved` in 22 ms. Two rounds had been
+  spent theorising about a hanging shell.
