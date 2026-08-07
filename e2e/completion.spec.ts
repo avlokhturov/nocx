@@ -164,7 +164,18 @@ test.describe('tab completion', () => {
           }
           return text
         },
-        { timeout: 20_000, intervals: [1_000] },
+        // 45s, not the 20s default. What this waits for is not a render but a
+        // background pipeline in the shell — `compgen -c | sort -u`, whose
+        // arrival nocx-0ije already measured as slower than the script's own
+        // 250ms first-prompt wait on a cold machine. Run alone this spec takes
+        // under two seconds; run after two hundred others, with that many PTYs
+        // behind it, the snapshot lands past twenty and the row still honestly
+        // says "still loading" (nocx-z9s9.13).
+        //
+        // The cost is paid only when something is genuinely wrong: a snapshot
+        // that never arrives still fails, later. What it buys is a spec that
+        // does not report a missing feature because the machine was busy.
+        { timeout: 45_000, intervals: [1_000] },
       )
       .toContain('No matches')
 
@@ -174,7 +185,6 @@ test.describe('tab completion', () => {
     await expect(rows.first()).toHaveAttribute('data-empty', 'true')
     await expect(rows.first()).not.toHaveAttribute('aria-selected', 'true')
     await expect(page.locator(INPUT)).toHaveText('zzznocxe2enope')
-    await page.screenshot({ path: '/tmp/nocx-c3-no-matches.png' })
 
     // Enter falls through to the editor's submit — nothing was selected and
     // nothing blocked the key; the shell runs the line.

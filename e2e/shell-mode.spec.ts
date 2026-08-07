@@ -145,6 +145,7 @@ async function rpc<T>(
 test('an SSH connection comes up integrated and its commands become blocks', async ({ page }) => {
   test.setTimeout(90_000)
   const fixture = startSshd()
+  let createdId: string | null = null
   try {
     await (fixture as Fixture & { _wait: Promise<void> })._wait
     expect(fixture.addr).not.toBe('')
@@ -170,7 +171,7 @@ test('an SSH connection comes up integrated and its commands become blocks', asy
     // run: the devharness store persists across runs in this home, and a
     // stale profile from an earlier run would dial a dead fixture.
     const profileName = `e2e-fixture-${Date.now()}`
-    await rpc(page, wsInfo.port, wsInfo.token, 'profiles.create', {
+    const created = await rpc<{ id: string }>(page, wsInfo.port, wsInfo.token, 'profiles.create', {
       type: 'ssh',
       name: profileName,
       options: {
@@ -180,6 +181,7 @@ test('an SSH connection comes up integrated and its commands become blocks', asy
         keyPath: fixture.userKey,
       },
     })
+    createdId = created.id
 
     // Open the connection through quick connect: the palette's host search
     // reaches a saved profile and Enter opens it DIRECTLY (no vault
@@ -229,6 +231,25 @@ test('an SSH connection comes up integrated and its commands become blocks', asy
     })
     await expect(block.first()).toBeVisible({ timeout: 30_000 })
   } finally {
+    // Take the profile back out. The stand's home is shared by every spec in
+    // the run AND by both browser projects, so a profile left here becomes the
+    // next spec's starting state — quick-connect's picker asserts the plain
+    // server list is EMPTY, and went red on this one across the project
+    // boundary, where nothing in either file points at the other (nocx-8rda).
+    try {
+      const info = await page.evaluate(async () => {
+        const w = window as unknown as Record<string, unknown>
+        const main = (w.go as Record<string, unknown>).main as Record<string, unknown>
+        const app = main.WailsApp as {
+          GetWSPort: () => Promise<number>
+          GetWSToken: () => Promise<string>
+        }
+        return { port: await app.GetWSPort(), token: await app.GetWSToken() }
+      })
+      if (createdId) await rpc(page, info.port, info.token, 'profiles.delete', { id: createdId })
+    } catch {
+      // A cleanup that throws would replace the real failure with its own.
+    }
     fixture.proc.kill('SIGKILL')
   }
 })
