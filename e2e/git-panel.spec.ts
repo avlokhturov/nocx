@@ -117,9 +117,7 @@ test('happy path: edit → unstaged row → diff tab → stage → commit emptie
 
 // ── Every changed row says how much it changed (brief nocx-i4ki) ──────────
 
-test('a changed row reads +3 −1, and an untracked row reads nothing', async ({
-  page,
-}) => {
+test('a changed row reads +3 −1, and an untracked row reads nothing', async ({ page }) => {
   const repo = createRepo({
     file: 'notes.md',
     initialContent: 'a\nb\nc\nd\n',
@@ -152,6 +150,11 @@ test('a changed row reads +3 −1, and an untracked row reads nothing', async ({
     const untrackedRow = page.locator(UNSTAGED).locator(ROW, { hasText: 'fresh.txt' })
     await expect(untrackedRow).toBeVisible({ timeout: 20_000 })
     await expect(untrackedRow).not.toContainText('+')
+  } finally {
+    cleanupRepo(repo)
+  }
+})
+
 // ── Commits (brief, git.log) — the DONE WHEN ──────────────────────────────
 
 test('a commit made from the panel appears at the top of the Commits list', async ({ page }) => {
