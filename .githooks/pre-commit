@@ -133,21 +133,14 @@ else
 fi
 
 # --- 4. prettier (always) ---------------------------------------------------
-# The comment here used to say this "covers markdown and config the scoping
-# misses" while `cd frontend` made that false: the root's own
-# .prettierrc.json and format:check script had nothing running them, and 21
-# files outside frontend/ have been drifting unformatted (nocx-pvjj tracks
-# that backlog; formatting them inside an unrelated commit is how a diff
-# stops being reviewable). What is gated here is the part that was actively
-# broken — a syntactically invalid e2e spec passed every gate in this file
-# (nocx-yv37) — so the e2e suite is held to the bar now and the rest follows
-# in its own commit.
-host_gate "prettier --check" sh -c 'cd frontend && npm run format:check'
-if [ "$RUN_E2E" = 1 ]; then
-    host_gate "prettier --check (e2e)" npx prettier --check e2e playwright.config.ts
-else
-    ok "prettier --check (e2e) — skipped (no e2e/ changes staged)"
-fi
+# From the REPOSITORY ROOT, which is what the comment here always claimed and
+# `cd frontend` always made false: the root carries its own .prettierrc.json,
+# .prettierignore and format:check, and nothing ran them, so 16 files outside
+# frontend/ drifted unformatted — three specs, eleven contract schemas and two
+# ADRs — while a syntactically invalid e2e spec passed every gate in this file
+# (nocx-yv37, nocx-pvjj). The root run includes frontend/ as a subdirectory, so
+# this is one checker widened, not a second one added.
+host_gate "prettier --check" npm run format:check
 
 # --- 5. frontend-only host gates --------------------------------------------
 if [ "$RUN_FE" = 1 ]; then

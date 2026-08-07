@@ -33,7 +33,7 @@ shell never sources.
 reach baseline markers, never the editor.
 
 **Defect 3 — a failed gate strands the host permanently** (`nocx-zys2`).
-`install_remote.go:52` writes `VERSION` *before* the gate loop at `:57`, and
+`install_remote.go:52` writes `VERSION` _before_ the gate loop at `:57`, and
 `:31` early-returns on a version match. One failed append and every future
 connection skips the install. This is the remote twin of the local fix at
 `shellintegration.go:124`, which was never carried across.
@@ -73,8 +73,8 @@ and falls back when the destination sets a `RemoteCommand` (OpenSSH refuses both
 existing `ControlMaster` found via `ssh -G` + `ssh -O check`.
 
 **Delivery is by shell startup arguments.** bash gets
-`exec -a bash bash --rcfile <(echo '…')` with the in-binary comment *"we use the
---rcfile option so **no** startup files are evaluated"*; zsh gets a temp
+`exec -a bash bash --rcfile <(echo '…')` with the in-binary comment _"we use the
+--rcfile option so **no** startup files are evaluated"_; zsh gets a temp
 directory, `ZDOTDIR` pointed at it, `unsetopt ZLE; unset RCS; unset GLOBAL_RCS`,
 then `exec -l zsh`, with `WARP_SSH_RCFILES` holding the user's original
 `ZDOTDIR` so the real rcfiles are still sourced.
@@ -91,32 +91,32 @@ the file tree and AI features, not for markers.
 
 **Where it is genuinely weak, and we are not:**
 
-| | Warp | nocx |
-|---|---|---|
-| bootstrap grammar | `read -r -d ''` — a bashism | a POSIX `sh` tier is reachable (§6, verified) |
-| `ssh` interception | defines `ssh()` **in your shell**, shadowing yours; aliases collide | the editor owns the text; nothing is defined in the user's shell |
-| termios restore | `stty sane` — a blunt reset that discards custom modes | `stty -g` capture, exact restore (§4.4) |
-| footprint for richer features | 622 MB of retained binaries | Tier A stays scriptless; Tier B remains deferred |
+|                               | Warp                                                                | nocx                                                             |
+| ----------------------------- | ------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| bootstrap grammar             | `read -r -d ''` — a bashism                                         | a POSIX `sh` tier is reachable (§6, verified)                    |
+| `ssh` interception            | defines `ssh()` **in your shell**, shadowing yours; aliases collide | the editor owns the text; nothing is defined in the user's shell |
+| termios restore               | `stty sane` — a blunt reset that discards custom modes              | `stty -g` capture, exact restore (§4.4)                          |
+| footprint for richer features | 622 MB of retained binaries                                         | Tier A stays scriptless; Tier B remains deferred                 |
 
 ## 3. Decisions
 
-| # | Decision |
-|---|---|
-| D1 | **No _persistent_ remote footprint by default.** Revised from "zero writes": zsh startup integration structurally requires a transient `ZDOTDIR` directory. Any transient artifact is mode 700/600, carries no secret, is removed before user startup code runs, and a cleanup failure is reported in the product with its exact path. Persistent install remains an explicit opt-in with a diff and an uninstall. Today's silent SFTP path leaves the default. |
-| D2 | **Consent is a property of the connection.** `shellIntegration: auto \| ask \| off` on the profile, inheriting through group defaults and a global default. |
-| D3 | **Delivery is by shell startup arguments, not by typing into a tty.** In-band injection is demoted to an explicit-action fallback, permitted only inside an interval nocx owns (§4.4). |
-| D4 | **Three capability tiers**, including a POSIX-`sh` tier, each honestly named. |
-| D5 | **Ownership is granted by acknowledgement, never inferred.** The DOM editor takes input only after a launcher readiness message *and* a clean A→B. |
+| #   | Decision                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| D1  | **No _persistent_ remote footprint by default.** Revised from "zero writes": zsh startup integration structurally requires a transient `ZDOTDIR` directory. Any transient artifact is mode 700/600, carries no secret, is removed before user startup code runs, and a cleanup failure is reported in the product with its exact path. Persistent install remains an explicit opt-in with a diff and an uninstall. Today's silent SFTP path leaves the default. |
+| D2  | **Consent is a property of the connection.** `shellIntegration: auto \| ask \| off` on the profile, inheriting through group defaults and a global default.                                                                                                                                                                                                                                                                                                     |
+| D3  | **Delivery is by shell startup arguments, not by typing into a tty.** In-band injection is demoted to an explicit-action fallback, permitted only inside an interval nocx owns (§4.4).                                                                                                                                                                                                                                                                          |
+| D4  | **Three capability tiers**, including a POSIX-`sh` tier, each honestly named.                                                                                                                                                                                                                                                                                                                                                                                   |
+| D5  | **Ownership is granted by acknowledgement, never inferred.** The DOM editor takes input only after a launcher readiness message _and_ a clean A→B.                                                                                                                                                                                                                                                                                                              |
 
 **Withdrawn from revision 1**, because ADR-0004 already settled them:
 
-- The *probe* — a short line typed into the far end to learn whether a shell is
-  reading. ADR-0004:54: *"We do not try to infer 'a process is reading stdin'
-  from the byte stream or termios — that is unknowable."*
-- `stty -echo` around delivery. ADR-0004:24 rejects it: *"leaked termios state
-  breaks child processes."*
-- Renderer-side suppression of our own echo. ADR-0004:27 rejects it: *"breaks on
-  wrapping, cursor motion, async output, shell plugins, and multiline commands."*
+- The _probe_ — a short line typed into the far end to learn whether a shell is
+  reading. ADR-0004:54: _"We do not try to infer 'a process is reading stdin'
+  from the byte stream or termios — that is unknowable."_
+- `stty -echo` around delivery. ADR-0004:24 rejects it: _"leaked termios state
+  breaks child processes."_
+- Renderer-side suppression of our own echo. ADR-0004:27 rejects it: _"breaks on
+  wrapping, cursor motion, async output, shell plugins, and multiline commands."_
 
 ## 4. Delivery
 
@@ -165,15 +165,15 @@ checked; never a delivery mechanism.
 
 ### 4.2 Where the launcher must not be sent
 
-| condition | behaviour |
-|---|---|
+| condition                               | behaviour                                                                                                                                                                                          |
+| --------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `RemoteCommand` set for the destination | send no launcher; run the configured behaviour; report `integration: none`, reason `remote-command`. Needs `nocx-difd` — our `ssh -G` oracle currently discards it (`ssh_resolver.go:51`, `:284`). |
-| `ForceCommand` on the server | undiscoverable client-side. The absence of readiness must never enable ownership; the forced command receives no bootstrap remainder and stays usable. |
-| restricted shell | never bypassed by invoking `/bin/bash` directly — that defeats administrator policy. Start the server-selected shell natively. |
-| sh-only remote | start ordinary `sh`; offer the `minimal` tier only via a safe `sh` startup path. Never send bash/zsh syntax. |
-| read-only `$HOME` | bash unaffected (we never touch `$HOME`); zsh needs writable secure temp storage. |
-| no writable `/tmp` or `$TMPDIR` | bash works; zsh degrades to `blocks` or `none`. |
-| Windows / OpenSSH server, unknown shell | native session; explicit action only. |
+| `ForceCommand` on the server            | undiscoverable client-side. The absence of readiness must never enable ownership; the forced command receives no bootstrap remainder and stays usable.                                             |
+| restricted shell                        | never bypassed by invoking `/bin/bash` directly — that defeats administrator policy. Start the server-selected shell natively.                                                                     |
+| sh-only remote                          | start ordinary `sh`; offer the `minimal` tier only via a safe `sh` startup path. Never send bash/zsh syntax.                                                                                       |
+| read-only `$HOME`                       | bash unaffected (we never touch `$HOME`); zsh needs writable secure temp storage.                                                                                                                  |
+| no writable `/tmp` or `$TMPDIR`         | bash works; zsh degrades to `blocks` or `none`.                                                                                                                                                    |
+| Windows / OpenSSH server, unknown shell | native session; explicit action only.                                                                                                                                                              |
 
 ### 4.3 Startup equivalence is a declared contract, not a promise of identity
 
@@ -188,7 +188,7 @@ DEBUG/RETURN/EXIT traps and both `PROMPT_COMMAND` forms preserved (the existing
 script already wraps `PROMPT_COMMAND` and DEBUG, `nocx.bash:129`); history
 settings recorded without being changed.
 
-For **zsh**, additionally: the original *unset-versus-set* state of `ZDOTDIR`;
+For **zsh**, additionally: the original _unset-versus-set_ state of `ZDOTDIR`;
 the full `/etc/zshenv` → `.zshenv` → `/etc/zprofile` → `.zprofile` →
 `/etc/zshrc` → `.zshrc` → `/etc/zlogin` → `.zlogin` ordering for the selected
 mode; `RCS`/`GLOBAL_RCS` at each phase — disabling them to avoid recursion can
@@ -246,7 +246,7 @@ is stored against `environmentId` (`nocx-uahp`), not a host string.
 ### 5.3 Rewriting a command before it runs
 
 We hold the exact text before submit (`terminal-content.ts:421`), and ADR-0008:45
-already treats that text as authoritative — AD-6 constrains the *backend* from
+already treats that text as authoritative — AD-6 constrains the _backend_ from
 interpreting the byte stream and does not bar frontend policy over app-owned
 editor text. So `docker exec -it web bash` can become an invocation that carries
 the bootstrap itself, with no injection into an unknown tty at all.
@@ -261,7 +261,7 @@ falsifies the user's history.
 
 Therefore, bounded hard: never rewrite arbitrary text; recognise only a strictly
 parsed **simple command** with an allowlisted executable and a supported option
-grammar; require an explicit *Run with integration*; carry **both**
+grammar; require an explicit _Run with integration_; carry **both**
 `typedCommand` and `executedCommand` into the receipt and the ledger, visibly;
 `exec` the real command from the adapter so exit status and signals stay
 transparent; and on any parsing ambiguity, send the editor document unchanged.
@@ -270,11 +270,11 @@ transparent; and on any parsing ambiguity, send the editor document unchanged.
 
 ## 6. Capability tiers
 
-| tier | where | gives | lacks |
-|---|---|---|---|
-| `enhanced` | bash ≥ 4.0 / zsh, launcher acknowledged | blocks, cwd, DOM editor owns input, recall, OSC 636 snapshot | — |
-| `blocks` | bash/zsh without marker-only | blocks A/B/C/D, cwd, exit status; native input | editor, ghost-text |
-| `minimal` | dash / busybox ash / POSIX sh | A, B, D and OSC 7 via `PS1` | C ("running"), snapshot, editor |
+| tier       | where                                   | gives                                                        | lacks                           |
+| ---------- | --------------------------------------- | ------------------------------------------------------------ | ------------------------------- |
+| `enhanced` | bash ≥ 4.0 / zsh, launcher acknowledged | blocks, cwd, DOM editor owns input, recall, OSC 636 snapshot | —                               |
+| `blocks`   | bash/zsh without marker-only            | blocks A/B/C/D, cwd, exit status; native input               | editor, ghost-text              |
+| `minimal`  | dash / busybox ash / POSIX sh           | A, B, D and OSC 7 via `PS1`                                  | C ("running"), snapshot, editor |
 
 `minimal` is **verified, not assumed**. `docker run --rm -e 'PS1=<A>e=$? cwd=$PWD<B>'
 alpine:latest sh -c 'printf "true\nfalse\ntrue\nexit\n" | sh -i'` yields
@@ -284,8 +284,8 @@ assignment must be **single-quoted** or `$?` freezes at install time, and the
 exit status must be captured **before** any command substitution used to build
 OSC 7, which would otherwise clobber it.
 
-POSIX `sh` has no preexec hook, so C is out of reach *through portable prompt
-hooks* — a chosen portability boundary, not a theorem. A block therefore appears
+POSIX `sh` has no preexec hook, so C is out of reach _through portable prompt
+hooks_ — a chosen portability boundary, not a theorem. A block therefore appears
 already finished, with no running phase; the block state machine must model that
 transition explicitly rather than treating it as a lost marker.
 
@@ -309,7 +309,7 @@ It buys framing and accidental-spoof resistance. Revision 1 called it a security
 boundary; it is not.
 
 **The first-hello race is real.** `command-snapshot.ts:163` accepts the first
-hello and discards the rest — correct *today* because the script speaks before
+hello and discards the rest — correct _today_ because the script speaks before
 any user command can run (`command-snapshot.ts:21`). nocxify operates after
 arbitrary processes have run, which destroys that precondition and turns
 "accepted exactly once" into a weapon: an attacker who speaks first poisons the
@@ -365,8 +365,8 @@ after submitting — the user sees where Enter will land:
 `profile → jump route → endpoint · user/privilege · cwd · integration`. Almost
 entirely presentation: bind the editor document to the passport and the live
 OSC 7 state; no classification, no per-keystroke remote call. The hard
-requirement is the failure edge — when markers stop, the rail says *inner context
-unknown* immediately. It must never keep rendering the last trusted cwd as
+requirement is the failure edge — when markers stop, the rail says _inner context
+unknown_ immediately. It must never keep rendering the last trusted cwd as
 though it were current. That is exactly the false precision `nocx-uahp` exists to
 prevent.
 
@@ -411,10 +411,10 @@ needs, so nothing bespoke is built.
   environment, degradation below the expected tier, refusal, a cleanup failure,
   or an adapter rewrite. A clean automatic integration writes nothing to the
   scrollback; the chip flips and that is all. Expanded, it states the strategy,
-  the tier, what was written and removed, and offers *Install permanently* /
-  *Disable here*.
+  the tier, what was written and removed, and offers _Install permanently_ /
+  _Disable here_.
 - **The indicator popover** (`FloatingPanel`) carries the same facts for a
-  session with no receipt, plus *Restore native prompt*. The UI distinguishes
+  session with no receipt, plus _Restore native prompt_. The UI distinguishes
   **input returned** (ours to guarantee) from **prompt restored** (needs shell
   cooperation) — revision 1 conflated them.
 - **A bootstrap transcript**, payload excluded: strategy, start and end, shell
@@ -479,11 +479,11 @@ invariant is one (rule 3).
 14. **History truth.** After one nocxified command, live and persisted remote
     history hold exactly what the shell executed and the ledger exactly what the
     user typed; any difference is visible with its reason.
-15. **No silent rewrite** *(this epic: holds vacuously — nothing rewrites a
-    command yet, and the assertion is what keeps it that way)*. Aliases,
+15. **No silent rewrite** _(this epic: holds vacuously — nothing rewrites a
+    command yet, and the assertion is what keeps it that way)_. Aliases,
     functions, pipelines, redirections, multiline input, `--` and conflicting
     TTY flags all send the editor document unchanged.
-16. **Adapter transparency** *(owned by `nocx-eepi`, not asserted here)*. Per
+16. **Adapter transparency** _(owned by `nocx-eepi`, not asserted here)_. Per
     adapter: exit 0, nonzero, signal termination, Ctrl-C, Ctrl-Z, resize and
     disconnect match the unwrapped command.
 17. **Ownership interval.** Ownership begins only after readiness plus a clean
@@ -551,7 +551,7 @@ not supply and would otherwise hold this epic hostage:
 - **A cross-session operations palette** over three tabs' ledgers. Belongs with
   the ledger/environment epics; cramming it here turns shell bootstrap into
   workspace management.
-- **Environment-bound secret readiness** — does `{{secret:NAME}}` resolve *here*,
+- **Environment-bound secret readiness** — does `{{secret:NAME}}` resolve _here_,
   answered from metadata without sending the secret anywhere. A vault-policy
   feature; this epic only guarantees remote submissions travel the same
   vault-safe editor path.

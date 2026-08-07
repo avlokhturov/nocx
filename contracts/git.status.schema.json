@@ -15,7 +15,20 @@
     "status": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["branch", "detached", "unborn", "head", "upstream", "ahead", "behind", "staged", "unstaged", "conflicted", "total", "completeness"],
+      "required": [
+        "branch",
+        "detached",
+        "unborn",
+        "head",
+        "upstream",
+        "ahead",
+        "behind",
+        "staged",
+        "unstaged",
+        "conflicted",
+        "total",
+        "completeness"
+      ],
       "properties": {
         "branch": {
           "description": "The current branch name; empty when the HEAD is detached, in which case detached is true.",

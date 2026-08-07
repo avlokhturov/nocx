@@ -14,32 +14,32 @@
 description, and a Local/Remote/Dynamic control. It assumes you already know
 what to forward. Fast if you do; useless if you do not.
 
-**Orca / VS Code** — a PORTS panel with a **DETECTED** section and a *Forward*
+**Orca / VS Code** — a PORTS panel with a **DETECTED** section and a _Forward_
 button per row. This is the better half of the idea: you do not have to know the
 port, you are shown it. Measured limitation, reproduced locally: `ss -tlnp` as
 non-root named **3 of 9** listeners on this machine — `:53` (systemd-resolved)
 and `:5355` (avahi) come back bare because they belong to another user. That is
 exactly the owner's Orca screenshot, where 4 of 6 rows have no label. And one
-row that *is* named reads `MainThread`: the kernel knows the **process**, which
+row that _is_ named reads `MainThread`: the kernel knows the **process**, which
 is frequently useless.
 
 **Warp** — nothing.
 
-**The opening.** Orca detects ports but cannot say which of *your commands*
+**The opening.** Orca detects ports but cannot say which of _your commands_
 opened one. Tabby makes you type everything. Neither can label `MainThread` as
 `npm run dev`. We hold a command ledger, so we can — with a claim we can
 actually defend.
 
 ## 2. Decisions
 
-| # | Decision |
-|---|---|
-| D1 | **Discovery runs on a separate exec channel** on the existing SSH connection, never in the user's interactive shell. |
-| D2 | **Discovery is a consented capability with explicit states**, not a property of SSH. It is best-effort auxiliary exec and it fails in named ways. |
-| D3 | **Its own policy field**, `portDiscovery: auto \| ask \| off`, on the same profile cascade — **not** folded into `shellIntegration`. |
-| D4 | **All three directions are in the domain model from day one**; implementation is ordered `-L` → `-R` → `-D`, and nothing is thrown away between them. |
-| D5 | **Forwards can be stored on a connection profile** and established at connect time — forward in advance, without waiting to be asked. |
-| D6 | **The ledger labels; it never claims causation.** "Port 3000 appeared while `npm run dev` was running", with confidence — never "opened by" on timing alone. |
+| #   | Decision                                                                                                                                                     |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| D1  | **Discovery runs on a separate exec channel** on the existing SSH connection, never in the user's interactive shell.                                         |
+| D2  | **Discovery is a consented capability with explicit states**, not a property of SSH. It is best-effort auxiliary exec and it fails in named ways.            |
+| D3  | **Its own policy field**, `portDiscovery: auto \| ask \| off`, on the same profile cascade — **not** folded into `shellIntegration`.                         |
+| D4  | **All three directions are in the domain model from day one**; implementation is ordered `-L` → `-R` → `-D`, and nothing is thrown away between them.        |
+| D5  | **Forwards can be stored on a connection profile** and established at connect time — forward in advance, without waiting to be asked.                        |
+| D6  | **The ledger labels; it never claims causation.** "Port 3000 appeared while `npm run dev` was running", with confidence — never "opened by" on timing alone. |
 
 ## 3. Why a separate exec channel
 
@@ -52,7 +52,7 @@ connection is nearly free. That buys four things:
   payload, no nonce.
 - **It works while a command is running** — the common case. `npm run dev` lives
   for hours, and during it the interactive shell is busy: our integration only
-  executes at prompts, so it *cannot* run `ss` there at all.
+  executes at prompts, so it _cannot_ run `ss` there at all.
 - **Nothing is written to the user's tty**, their history, or their termios.
 - **It does not depend on shell integration.** Discovery works where nocxify was
   refused — busybox, restricted shells, `RemoteCommand` hosts.
@@ -61,13 +61,13 @@ connection is nearly free. That buys four things:
 
 The claim "works anywhere SSH works" is **false** and must not be made:
 
-| condition | behaviour |
-|---|---|
-| `MaxSessions 1` | the shell takes the only channel; the detector is refused → `discovery unavailable: additional sessions refused`. **Never** "no ports". |
-| `ForceCommand` | the exec may run the forced command instead, emitting arbitrary output, hanging, or causing side effects. Treated as undiscoverable, exactly as `nocx-pu4` treats it. |
-| restricted shell | often permits a shell and refuses exec. Discovery capability and forwarding capability are **separate**: forwarding may still work. |
-| `RemoteCommand` set | not a hard block, but a signal this is not an ordinary shell: automatic discovery defaults to off there and needs explicit consent. |
-| jump host | transparent — the exec runs on the target — but latency and failure probability compound through every hop. |
+| condition           | behaviour                                                                                                                                                             |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MaxSessions 1`     | the shell takes the only channel; the detector is refused → `discovery unavailable: additional sessions refused`. **Never** "no ports".                               |
+| `ForceCommand`      | the exec may run the forced command instead, emitting arbitrary output, hanging, or causing side effects. Treated as undiscoverable, exactly as `nocx-pu4` treats it. |
+| restricted shell    | often permits a shell and refuses exec. Discovery capability and forwarding capability are **separate**: forwarding may still work.                                   |
+| `RemoteCommand` set | not a hard block, but a signal this is not an ordinary shell: automatic discovery defaults to off there and needs explicit consent.                                   |
+| jump host           | transparent — the exec runs on the target — but latency and failure probability compound through every hop.                                                           |
 
 **Framing, not parsing.** A forced command, a login banner or a policy wrapper
 can prepend text. Valid output carries a fixed version sentinel; a sample
@@ -96,14 +96,14 @@ unacceptable on a regulated host.
 
 **Backoff is typed, not uniform:**
 
-| outcome | policy |
-|---|---|
-| success | normal cadence |
-| tool absent | cache for the connection lifetime; never retry per prompt |
-| extra session refused / exec prohibited / forced-command suspected | disable automatic discovery for this connection, expose **Retry** |
-| timeout or transport pressure | 10 s → 30 s → 2 min → 10 min, reset on success |
-| transport disconnected | cancel immediately; a result from the old connection never applies after reconnect |
-| parser/version mismatch | mark `unsupported output`, cache the failed strategy, try the next probe once |
+| outcome                                                            | policy                                                                             |
+| ------------------------------------------------------------------ | ---------------------------------------------------------------------------------- |
+| success                                                            | normal cadence                                                                     |
+| tool absent                                                        | cache for the connection lifetime; never retry per prompt                          |
+| extra session refused / exec prohibited / forced-command suspected | disable automatic discovery for this connection, expose **Retry**                  |
+| timeout or transport pressure                                      | 10 s → 30 s → 2 min → 10 min, reset on success                                     |
+| transport disconnected                                             | cancel immediately; a result from the old connection never applies after reconnect |
+| parser/version mismatch                                            | mark `unsupported output`, cache the failed strategy, try the next probe once      |
 
 ## 5. The probe ladder
 
@@ -220,8 +220,8 @@ borrow its pool reference.
 
 ## 8. Forwards stored on the connection (D5)
 
-The owner asked for it directly: *maybe add it to the connection itself, so you
-can forward in advance*.
+The owner asked for it directly: _maybe add it to the connection itself, so you
+can forward in advance_.
 
 A profile carries a list of tunnel definitions — topology and policy only,
 **never credentials**; authentication continues to come from the vault through
@@ -262,7 +262,7 @@ process ancestry.
 
 **Do not reuse `BlockReceipt`.** It is the vault's capture UI, with save
 semantics and its own accessibility text (`frontend/src/ui/block-receipt.ts`).
-Reuse the *interaction pattern* — attached to the block, non-modal, never
+Reuse the _interaction pattern_ — attached to the block, non-modal, never
 expiring — and add a generic block-attached offer to the kit, or a typed variant.
 
 **Detected → forwarded in one action.** A row shows the numeric remote
@@ -278,7 +278,7 @@ with **Copy** and **Open**.
    process labels where permissions allow and `permission-denied` where not —
    never a blank that reads as unowned.
 2. A host with `MaxSessions 1` reports `discovery unavailable: additional
-   sessions refused`, the interactive session stays fully usable, and **no**
+sessions refused`, the interactive session stays fully usable, and **no**
    empty port list is rendered.
 3. A host with no `ss`, no `netstat` and no `lsof` reports `unavailable` with the
    probes tried; the panel never shows "no ports".

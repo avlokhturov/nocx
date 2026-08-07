@@ -5,7 +5,18 @@
   "description": "Result of the tunnel.stop JSON-RPC method: the record of the stopped forward. Same shape as tunnel.open's result — the renderer updates the row in place with the returned state.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["id", "direction", "requestedBind", "actualBind", "destination", "scope", "caveat", "state", "stopReason", "error"],
+  "required": [
+    "id",
+    "direction",
+    "requestedBind",
+    "actualBind",
+    "destination",
+    "scope",
+    "caveat",
+    "state",
+    "stopReason",
+    "error"
+  ],
   "properties": {
     "id": {
       "description": "Backend-assigned tunnel id.",

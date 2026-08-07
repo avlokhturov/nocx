@@ -19,12 +19,30 @@
       "description": "The discovery read path: what the remote listens on and why we know (or do not know) it. A successful empty listeners list means nothing is listening; every non-available state means could-not-determine and must never render as 'no ports'.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["state", "listeners", "probe", "probesTried", "classification", "stderr", "lastSampleAt", "paused", "visible", "connLost"],
+      "required": [
+        "state",
+        "listeners",
+        "probe",
+        "probesTried",
+        "classification",
+        "stderr",
+        "lastSampleAt",
+        "paused",
+        "visible",
+        "connLost"
+      ],
       "properties": {
         "state": {
           "description": "Overall outcome of the last sample. pending is the state before the first sample completed; available with an empty listeners list means 'no listeners observed'.",
           "type": "string",
-          "enum": ["available", "available-limited", "unavailable", "failed-transiently", "permission-or-policy-refused", "pending"]
+          "enum": [
+            "available",
+            "available-limited",
+            "unavailable",
+            "failed-transiently",
+            "permission-or-policy-refused",
+            "pending"
+          ]
         },
         "listeners": {
           "description": "Remote listening TCP ports from the last successful sample. Always an array, never null: an empty list is the honest 'nothing is listening' and must only appear when that is true.",
@@ -112,7 +130,17 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "direction", "requestedBind", "actualBind", "destination", "scope", "state", "stopReason", "error"],
+        "required": [
+          "id",
+          "direction",
+          "requestedBind",
+          "actualBind",
+          "destination",
+          "scope",
+          "state",
+          "stopReason",
+          "error"
+        ],
         "properties": {
           "id": {
             "description": "Backend-assigned tunnel id. The renderer echoes it to tunnel.stop; nothing else can stop a forward.",

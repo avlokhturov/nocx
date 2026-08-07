@@ -5,9 +5,7 @@
   "description": "Result of the profiles.effective JSON-RPC method — the batched effective profile resolution with per-field provenance. The single declaration of this shape: the renderer's TypeScript type is generated from it and the Go transport is validated against it. The fields map is a closed set: propertyNames pins the exact key set ToEffectiveDTO emits, so a field dropped from the wire (or a renderer depending on one the wire does not carry) fails the contract instead of looking like a working field. The fields map carries the desiredMode axis (raw|script|relay); relayConsent is a required per-profile field beside id and fields because it is persisted per destination and never inherited.",
   "type": "object",
   "additionalProperties": false,
-  "required": [
-    "profiles"
-  ],
+  "required": ["profiles"],
   "properties": {
     "profiles": {
       "description": "One resolved profile per requested id, in request order. Never null: no matches is [].",
@@ -28,11 +26,7 @@
     "effectiveProfile": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "id",
-        "fields",
-        "relayConsent"
-      ],
+      "required": ["id", "fields", "relayConsent"],
       "properties": {
         "id": {
           "description": "The profile id this resolution belongs to.",
@@ -86,21 +80,14 @@
         "relayConsent": {
           "description": "The relay-consent axis (spec §3.5): whether the user has consented to nocx deploying the relay binary on this destination. Persisted per destination, never inherited; script mode never reads it. Always present — unknown is an honest state, never an absent field the renderer could silently read as granted.",
           "type": "string",
-          "enum": [
-            "unknown",
-            "granted",
-            "denied"
-          ]
+          "enum": ["unknown", "granted", "denied"]
         }
       }
     },
     "effectiveField": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "value",
-        "source"
-      ],
+      "required": ["value", "source"],
       "properties": {
         "value": {
           "description": "The resolved value for this field. Type varies by field: string for host/user/secrets/enums, integer for ports and timeouts, boolean for toggles. tsType is a json-schema-to-typescript hint: the schema is deliberately untyped (the value really is field-dependent), and the generator renders an unrestricted schema as an index signature, which would reject scalar values at the type level.",
@@ -114,21 +101,11 @@
     "fieldSource": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "kind",
-        "id",
-        "label"
-      ],
+      "required": ["kind", "id", "label"],
       "properties": {
         "kind": {
           "description": "Closed enum for the renderer to switch on — never parse id/label to guess the layer.",
-          "enum": [
-            "profile",
-            "group",
-            "sshConfig",
-            "global",
-            "default"
-          ]
+          "enum": ["profile", "group", "sshConfig", "global", "default"]
         },
         "id": {
           "description": "Group id when kind is group, empty otherwise.",
@@ -143,10 +120,7 @@
     "profileError": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "id",
-        "error"
-      ],
+      "required": ["id", "error"],
       "properties": {
         "id": {
           "type": "string"
