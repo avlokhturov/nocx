@@ -12,7 +12,10 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
-  padding: var(--space-2);
+  /* Vertical only. The horizontal inset is the sidebar body's, and a
+     surface adding its own on top of the kit's doubled it — 24px of air
+     each side in a 250px rail, taken from the file names. */
+  padding: var(--space-2) 0;
 }
 
 /* Header: branch chip, upstream, changed count — one line, in the quiet
@@ -93,9 +96,16 @@
 
 /* The whole-index controls sit above the lists; the refusal below them
    carries the D19 reason. */
+/* The two whole-index actions split the rail between them. Sized to their
+   labels they left a ragged block of dead space beside them; at full width
+   they read as one control strip and each is an easier target. */
 .git-list-actions {
   display: flex;
   gap: var(--space-1);
+}
+
+.git-list-actions > * {
+  flex: 1 1 0;
 }
 
 .git-conflict-refusal {
