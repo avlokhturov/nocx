@@ -10,7 +10,7 @@
 // origin), the commit path (button exists, enabled from the state a user
 // starts in, reaches the client), the row action owning its click, and the
 // D14 absence (mutation controls ABSENT from an SSH tab's DOM, not disabled).
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi, type Mock } from 'vitest'
 import { createSignal } from 'solid-js'
 import { cleanup, fireEvent, render } from '@solidjs/testing-library'
 import { mountSidebar, type SidebarHandle } from '../sidebar'
@@ -23,6 +23,7 @@ import type { GitOpenResult } from '../generated/git.open'
 import type { GitLogResult } from '../generated/git.log'
 import type { ActiveOrigin } from '../tab-content'
 import type { ClipboardAccess } from '../clipboard'
+import type { UrlOpener } from '../open-url'
 import { ToastHost, clearToasts } from '../ui/toast'
 
 // ── Fixtures ──────────────────────────────────────────────────────────────
@@ -155,6 +156,7 @@ function mountApp(
   services: GitPanelServices,
   shared?: SharedMount,
   clipboard?: ClipboardAccess,
+  urlOpener?: UrlOpener,
 ): Mounted {
   const open = vi.fn()
   const store = shared?.store ?? createGitStore(services)
@@ -165,7 +167,14 @@ function mountApp(
   const [activeOrigin, setActiveOrigin] =
     // eslint-disable-next-line solid/reactivity -- conditional destructure source
     shared === undefined ? createSignal<ActiveOrigin | null>(null) : shared.origin
-  const git = createGitView({ services, store, opener: { open }, activeOrigin, clipboard })
+  const git = createGitView({
+    services,
+    store,
+    opener: { open },
+    activeOrigin,
+    clipboard,
+    urlOpener,
+  })
   const bar = document.createElement('div')
   bar.id = 'activitybar'
   const panel = document.createElement('div')
@@ -758,10 +767,19 @@ describe('copy the branch and open on hosting (brief, nocx-hc0m)', () => {
     expect(panel.querySelector('[data-testid="git-copy-branch"]')).toBeNull()
   })
 
-  it('open branch: the link is drawn for a recognised remote and clicks through to the seam', async () => {
-    const openUrl = vi.fn().mockResolvedValue({})
-    const services = githubRemote({ openUrl })
-    const { panel, setActiveOrigin } = mountApp(services, undefined, recorderClipboard())
+  /** A recorder for the URL-open seam: calls are observable, and a
+   *  rejection is the failure path — exactly like the real capability
+   *  (open-url.ts), which the view defaults to. */
+  interface UrlOpenerRecorder extends UrlOpener {
+    open: Mock<(url: string) => Promise<void>>
+  }
+  function recorderUrlOpener(): UrlOpenerRecorder {
+    return { open: vi.fn<(url: string) => Promise<void>>().mockResolvedValue(undefined) }
+  }
+  it('open branch: the link is drawn for a recognised remote and hands the derived URL to the shared capability', async () => {
+    const urlOpener = recorderUrlOpener()
+    const services = githubRemote()
+    const { panel, setActiveOrigin } = mountApp(services, undefined, recorderClipboard(), urlOpener)
     setActiveOrigin(LOCAL_ORIGIN)
     await settle()
 
@@ -771,14 +789,14 @@ describe('copy the branch and open on hosting (brief, nocx-hc0m)', () => {
     await settle()
 
     // The URL the panel derived — git's own remote spelling, converted —
-    // is exactly what reaches the shell.openUrl seam.
-    expect(openUrl).toHaveBeenCalledWith('https://github.com/shady2k/nocx/tree/main')
+    // is exactly what reaches the shared URL opener.
+    expect(urlOpener.open).toHaveBeenCalledWith('https://github.com/shady2k/nocx/tree/main')
   })
 
   it('open commit: a commit row carries the link and it clicks through the same seam', async () => {
-    const openUrl = vi.fn().mockResolvedValue({})
-    const services = githubRemote({ openUrl })
-    const { panel, setActiveOrigin } = mountApp(services, undefined, recorderClipboard())
+    const urlOpener = recorderUrlOpener()
+    const services = githubRemote()
+    const { panel, setActiveOrigin } = mountApp(services, undefined, recorderClipboard(), urlOpener)
     setActiveOrigin(LOCAL_ORIGIN)
     await settle()
 
@@ -787,16 +805,16 @@ describe('copy the branch and open on hosting (brief, nocx-hc0m)', () => {
     open!.click()
     await settle()
 
-    expect(openUrl).toHaveBeenCalledWith(
+    expect(urlOpener.open).toHaveBeenCalledWith(
       'https://github.com/shady2k/nocx/commit/5738d62b66777a78af894c0708d3a7e8798a4d8d',
     )
   })
 
-  it('a shell open failure toasts the refusal, never a silent no-op', async () => {
-    const services = githubRemote({
-      openUrl: vi.fn().mockRejectedValue(new Error('unavailable')),
-    })
-    const { panel, setActiveOrigin } = mountApp(services, undefined, recorderClipboard())
+  it('a refused open toasts the refusal, never a silent no-op', async () => {
+    const urlOpener = recorderUrlOpener()
+    urlOpener.open.mockRejectedValue(new Error('unavailable'))
+    const services = githubRemote()
+    const { panel, setActiveOrigin } = mountApp(services, undefined, recorderClipboard(), urlOpener)
     setActiveOrigin(LOCAL_ORIGIN)
     await settle()
 
@@ -805,6 +823,35 @@ describe('copy the branch and open on hosting (brief, nocx-hc0m)', () => {
     expect(document.querySelector('.ui-toast__message')?.textContent).toContain(
       "Couldn't open the link in your browser",
     )
+  })
+
+  it('the web open happens synchronously in the click gesture — no await between click and window.open', async () => {
+    // The whole point of the capability's shape (open-url.ts): the panel
+    // must reach window.open in the same tick as the click, or popup
+    // blockers eat the gesture. This drives the REAL seam — the view's
+    // default opener over the services — with window.open recorded, and
+    // asserts the call lands before any promise microtask could have run.
+    // A future "tidy" that awaits before opening flips this test red.
+    const win = vi.spyOn(window, 'open').mockReturnValue({} as Window)
+    const services = githubRemote()
+    const { panel, setActiveOrigin } = mountApp(services)
+    setActiveOrigin(LOCAL_ORIGIN)
+    await settle()
+
+    let microtaskRan = false
+    void Promise.resolve().then(() => {
+      microtaskRan = true
+    })
+
+    panel.querySelector<HTMLElement>('[data-testid="git-open-branch"]')!.click()
+
+    expect(win).toHaveBeenCalledWith(
+      'https://github.com/shady2k/nocx/tree/main',
+      '_blank',
+      'noopener,noreferrer',
+    )
+    expect(microtaskRan).toBe(false)
+    win.mockRestore()
   })
 
   it('D14: with no recognised remote the open links are absent, never disabled', async () => {

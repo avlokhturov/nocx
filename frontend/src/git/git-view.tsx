@@ -18,6 +18,7 @@ import type { SidebarViewDescriptor } from '../sidebar'
 import { IconButton } from '../ui/icon-button'
 import { RefreshIcon } from '../ui/icons'
 import { createClipboardAccess, type ClipboardAccess } from '../clipboard'
+import { createUrlOpener, type UrlOpener } from '../open-url'
 import type { GitPanelServices } from './git-client'
 import { createGitStore, type GitStore } from './git-store'
 import { GitPanel, type GitDiffOpener } from './git-panel'
@@ -63,6 +64,10 @@ export interface GitViewDeps {
    *  Files view (AD-8 — one owner per behaviour). Tests substitute a
    *  recorder. */
   clipboard?: ClipboardAccess
+  /** The URL-open seam; defaults to the platform one over `services`,
+   *  exactly like the clipboard (AD-8 — one owner per behaviour). Tests
+   *  substitute a recorder. */
+  urlOpener?: UrlOpener
   /** Reactive accessor for the ACTIVE tab's origin — the coordinator wires
    *  it to TabManager.activeOrigin() through onActiveTabChange, exactly
    *  like the files view. */
@@ -96,7 +101,7 @@ export function createGitView(deps: GitViewDeps): SidebarViewDescriptor {
         store={store}
         opener={opener}
         clipboard={deps.clipboard ?? createClipboardAccess()}
-        openExternalUrl={(url) => deps.services.openUrl(url).then(() => undefined)}
+        urlOpener={deps.urlOpener ?? createUrlOpener(deps.services)}
         activeOrigin={props.activeOrigin}
         visible={props.visible}
       />

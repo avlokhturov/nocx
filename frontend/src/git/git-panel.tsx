@@ -54,6 +54,7 @@ import { FileStatusRow } from '../ui/file-status-row'
 import type { Entry } from '../generated/git.status'
 import type { LogEntry as GitLogEntry } from '../generated/git.log'
 import type { ClipboardAccess } from '../clipboard'
+import type { UrlOpener } from '../open-url'
 import { branchUrl, commitUrl } from './git-remote-url'
 import type { GitDiffSide } from './git-client'
 import type { GitDiffTarget } from './git-diff/open-git-diff'
@@ -76,10 +77,13 @@ export interface GitPanelProps {
    *  ClipboardAccess the Files panel copies with). The write rejects when
    *  the platform refused, and the panel says so; it never swallows. */
   clipboard: ClipboardAccess
-  /** The browser-open seam: the panel computes the URL and hands it over;
-   *  the view wires the shell.openUrl control-plane call. Rejects when no
-   *  native runtime exists (the dev-web harness) and the panel toasts. */
-  openExternalUrl: (url: string) => Promise<void>
+  /** The browser-open seam: the panel computes the URL and hands it to the
+   *  shared capability (open-url.ts — the same class of thing as the
+   *  clipboard seam, AD-8). The capability picks its platform path
+   *  synchronously inside the click: window.open on web, shell.openUrl
+   *  through the backend when native. It rejects when no browser could be
+   *  reached and the panel says so out loud. */
+  urlOpener: UrlOpener
   /** The ACTIVE tab's origin — a reactive accessor, never a capture. */
   activeOrigin: () => ActiveOrigin | null
   /** True while this view is on screen and the panel is expanded. */
@@ -236,10 +240,13 @@ export function GitPanel(props: GitPanelProps) {
 
   /** The one browser-open path: the URL is already derived and
    *  recognised (branchUrl/commitUrl returned it), so the only failure
-   *  left is the shell's — no Wails runtime in the dev-web harness, a
-   *  browser that refuses — and the panel says so out loud. */
+   *  left is the browser's — a popup blocked on web, the backend refusing
+   *  when native — and the panel says so out loud. The open itself is
+   *  synchronous inside this handler on the web path (open-url.ts: an
+   *  awaited open would lose the click's user gesture to popup blockers);
+   *  only the failure report is a promise. */
   const openExternal = (url: string): void => {
-    props.openExternalUrl(url).catch(() => {
+    props.urlOpener.open(url).catch(() => {
       showToast({ level: 'danger', message: "Couldn't open the link in your browser" })
     })
   }
