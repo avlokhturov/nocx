@@ -129,6 +129,16 @@ export interface GitStore {
   log(): GitLogResult['log'] | null
   /** Why the last log read failed; null unless logState() is 'failed'. */
   logError(): string | null
+  /** The tracking-remote fact (brief, nocx-hc0m): 'ok' with a URL to
+   *  convert, 'none' — the ordinary answer, never an error — meaning the
+   *  panel draws no open-link affordance (design D14), 'failed' meaning
+   *  the read failed and no link is drawn either. */
+  remoteState(): 'idle' | 'loading' | 'ok' | 'none' | 'failed'
+  /** The raw remote URL git reported, or null until an ok read lands. */
+  remoteUrl(): string | null
+  /** Why the last remote read failed; null unless remoteState() is
+   *  'failed'. */
+  remoteError(): string | null
   openError(): string | null
   /** The git version the capability probe found — the gitTooOld state
    *  renders it against the floor. */
@@ -267,6 +277,11 @@ export function createGitStore(
   const [logState, setLogState] = createSignal<'idle' | 'loading' | 'loaded' | 'failed'>('idle')
   const [log, setLog] = createSignal<GitLogResult['log'] | null>(null)
   const [logError, setLogError] = createSignal<string | null>(null)
+  const [remoteState, setRemoteState] = createSignal<'idle' | 'loading' | 'ok' | 'none' | 'failed'>(
+    'idle',
+  )
+  const [remoteUrl, setRemoteUrl] = createSignal<string | null>(null)
+  const [remoteError, setRemoteError] = createSignal<string | null>(null)
   const [openError, setOpenError] = createSignal<string | null>(null)
   const [gitVersion, setGitVersion] = createSignal<string | null>(null)
   const [envState, setEnvState] = createSignal<'resolved' | 'degraded' | null>(null)
@@ -412,6 +427,65 @@ export function createGitStore(
     setLogError(null)
   }
 
+  /** The remote belongs to one repository, exactly like the log and the
+   *  commit form: a re-bind, a refusal, a closed session or a dispose
+   *  clears it, and the next trigger re-reads under the new scope. */
+  function resetRemote(): void {
+    setRemoteState('idle')
+    setRemoteUrl(null)
+    setRemoteError(null)
+  }
+
+  /** One remote read (brief, nocx-hc0m), scoped by rule 1 and ordered by
+   *  the same epoch as the status and the log. The remote is the most
+   *  stable fact this panel holds — git remote add happens in the terminal
+   *  beside it, not every few seconds — so it is read on the open, on
+   *  manual refresh and when the panel becomes visible, never by the poll
+   *  (D13), exactly like the log. The none state is ordinary (detached
+   *  HEAD, no upstream, a local-path remote): the panel draws no link. */
+  function issueRemote(): void {
+    const o = untrack(origin)
+    const b = untrack(binding)
+    if (o === null || b === null) return
+    epoch++
+    const ctx: ScopeCtx = { tabId: o.tabId, generation, bindingId: b.bindingId, epoch }
+    setRemoteState('loading')
+    services.remote(b.bindingId).then(
+      (res) => {
+        if (!scopeCurrent(ctx) || ctx.epoch < lastAppliedEpoch) {
+          // Dropped by rule 1: never paint a stale remote onto a
+          // repository it did not come from.
+          setRemoteState(untrack(remoteUrl) === null ? 'idle' : 'ok')
+          return
+        }
+        lastAppliedEpoch = ctx.epoch
+        if (res.state === 'ok') {
+          setRemoteUrl(res.url ?? null)
+          setRemoteState('ok')
+          setRemoteError(null)
+          return
+        }
+        setRemoteUrl(null)
+        setRemoteState('none')
+        setRemoteError(null)
+      },
+      (e) => {
+        if (!scopeCurrent(ctx) || ctx.epoch < lastAppliedEpoch) {
+          setRemoteState(untrack(remoteUrl) === null ? 'idle' : 'ok')
+          return
+        }
+        if (isUnknownBinding(e)) {
+          reResolve()
+          return
+        }
+        // A failed read draws no link — the panel never opens a URL it
+        // could not derive — and the next trigger retries.
+        setRemoteState('failed')
+        setRemoteError(messageOf(e))
+      },
+    )
+  }
+
   /** One log read, scoped by rule 1 and ordered by the same epoch as the
    *  status: D13's "history does not change under the user" is why it is
    *  read on the open, on manual refresh and after a commit — never by the
@@ -465,6 +539,7 @@ export function createGitStore(
     // either establishes one or is stale by generation (rule 1, open half).
     const ctx: ScopeCtx = { tabId: o.tabId, generation, bindingId: null, epoch }
     resetLog()
+    resetRemote()
     services
       .open(o.sessionId, o.cwd ?? undefined)
       .then((res) => {
@@ -533,6 +608,7 @@ export function createGitStore(
         // tree does, so the log is read once per scope — here — and never
         // by the poll.
         if (visible) issueLog()
+        if (visible) issueRemote()
       })
       .catch((e) => {
         if (!openCurrent(ctx)) return
@@ -571,6 +647,7 @@ export function createGitStore(
       setOrigin(null)
       setPhase('no-origin')
       resetLog()
+      resetRemote()
       return
     }
     // The frontend's own guards, decided BEFORE any backend call (D3, D14):
@@ -586,6 +663,7 @@ export function createGitStore(
       setOrigin(next)
       setPhase('ready')
       resetLog()
+      resetRemote()
       return
     }
     // Same session AND same verified cwd AND a live binding: nothing moved —
@@ -634,6 +712,7 @@ export function createGitStore(
         // The log rides the same "fresh the moment it is seen" read as the
         // status — one-shot, never the timer (D13).
         issueLog()
+        issueRemote()
       }
       return
     }
@@ -655,6 +734,7 @@ export function createGitStore(
       if (pollInFlight || mutationInFlight()) return
       issueStatus()
       issueLog()
+      issueRemote()
     }
   }
 
@@ -849,6 +929,7 @@ export function createGitStore(
     setStatusStale(false)
     resetCommitForm()
     resetLog()
+    resetRemote()
   })
 
   // ── The D7 staleness seam (worker G's GitDiffDeps.onDiffStale) ────────
@@ -888,6 +969,7 @@ export function createGitStore(
     setStatusStale(false)
     resetCommitForm()
     resetLog()
+    resetRemote()
   }
 
   return {
@@ -901,6 +983,9 @@ export function createGitStore(
     logState,
     log,
     logError,
+    remoteState,
+    remoteUrl,
+    remoteError,
     gitVersion,
     envState,
     envReason,

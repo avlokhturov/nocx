@@ -96,6 +96,30 @@ func HeadMessageArgs() []string {
 	return []string{"log", "-1", "--format=%B"}
 }
 
+// SymbolicRefArgs names the current branch (git symbolic-ref --short HEAD).
+// A non-zero exit is data: on a detached HEAD git refuses to name a branch,
+// which is exactly the "nothing to open" answer RemoteURL needs.
+func SymbolicRefArgs() []string {
+	return []string{"symbolic-ref", "--short", "HEAD"}
+}
+
+// UpstreamRemoteArgs names the remote the branch tracks, via the
+// %(upstream:remotename) atom: git's own answer to "which remote is this
+// branch's upstream on" — never a client parse of the upstream ref, which
+// would mis-split a remote whose name contains a slash. The atom prints
+// empty for a branch with no upstream, and "." for a LOCAL upstream (a
+// branch set to track another local branch) — both are "no remote to open".
+func UpstreamRemoteArgs(branch string) []string {
+	return []string{"for-each-ref", "--format=%(upstream:remotename)", "refs/heads/" + branch}
+}
+
+// RemoteUrlArgs reads one remote's fetch URL (git remote get-url). A
+// non-zero exit is data: the tracked remote was deleted, and "no remote to
+// open" is the honest answer.
+func RemoteUrlArgs(remote string) []string {
+	return []string{"remote", "get-url", remote}
+}
+
 // LogArgs asks for the first max+1 commits of HEAD, newest first (brief,
 // git.log; D9's "ask for one more than you will return" — the extra record
 // is how the caller knows it was capped). -z and %x00 keep every field

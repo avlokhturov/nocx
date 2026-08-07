@@ -138,6 +138,8 @@ function makeServices(over: Partial<GitPanelServices> = {}): GitPanelServices {
       .fn()
       .mockResolvedValue({ state: 'ok', outputTruncated: false, status: statusFixture() }),
     headMessage: vi.fn().mockResolvedValue({ state: 'ok', message: 'subject\n\nbody' }),
+    remote: vi.fn().mockResolvedValue({ state: 'none' }),
+    openUrl: vi.fn().mockResolvedValue({}),
     close: vi.fn().mockResolvedValue({ closed: true }),
     subscribeGitChanged: vi.fn().mockReturnValue(() => {}),
     ...over,

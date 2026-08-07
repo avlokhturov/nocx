@@ -134,6 +134,15 @@ func (a *App) SetDialogService(ds transport.DialogService) {
 	a.Transport.SetDialogService(ds)
 }
 
+// SetUrlOpener attaches the native URL-open capability (shell.openUrl RPCs).
+// Like SetDialogService it is wired from main.go's WailsApp.startup — the
+// Wails context it needs only exists there, after the transport was built —
+// and must be called before Start, so no renderer request can observe the
+// unset state.
+func (a *App) SetUrlOpener(opener transport.UrlOpener) {
+	a.Transport.SetUrlOpener(opener)
+}
+
 // Log logs a message from the frontend.
 func (a *App) Log(message string) {
 	a.Logger.Info("frontend: " + message)

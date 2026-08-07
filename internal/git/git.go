@@ -70,6 +70,15 @@ type Repo interface {
 	UnstageAll(ctx context.Context) (Status, error)
 	Commit(ctx context.Context, msg string, amend bool) (CommitOutcome, error)
 	HeadMessage(ctx context.Context) (HeadMessage, error)
+	// RemoteURL is the URL of the remote the current branch tracks — the
+	// "open on its hosting" fact (brief, nocx-hc0m). It is derived with
+	// git, never guessed: symbolic-ref names the branch, the upstream
+	// atom names the remote it tracks, remote get-url reads that remote's
+	// URL. The branch is the question, so it is answered from HEAD, not
+	// from a client-supplied name. A detached HEAD, a branch with no
+	// upstream and a remote that no longer exists all answer ErrNoRemote —
+	// the ordinary "nothing to open" case, never an error.
+	RemoteURL(ctx context.Context) (string, error)
 	Close() error
 }
 

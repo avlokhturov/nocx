@@ -70,6 +70,10 @@ func (s *stubRepo) HeadMessage(ctx context.Context) (HeadMessage, error) {
 	return HeadMessage{State: HeadMessageOK}, nil
 }
 
+func (s *stubRepo) RemoteURL(ctx context.Context) (string, error) {
+	return "git@github.com:shady2k/nocx.git", nil
+}
+
 func (s *stubRepo) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

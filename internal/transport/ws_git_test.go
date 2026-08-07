@@ -52,6 +52,8 @@ type stubGitRepo struct {
 	commitErr  error
 	headMsg    git.HeadMessage
 	headMsgErr error
+	remoteURL  string
+	remoteErr  error
 }
 
 func (r *stubGitRepo) Log(_ context.Context, max int) (git.Log, error) {
@@ -127,6 +129,12 @@ func (r *stubGitRepo) HeadMessage(_ context.Context) (git.HeadMessage, error) {
 	return r.headMsg, r.headMsgErr
 }
 
+func (r *stubGitRepo) RemoteURL(_ context.Context) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.remoteURL, r.remoteErr
+}
+
 // Close is nil-receiver-safe on purpose: the Register-failure leak test
 // drives Register's typed-nil refusal through the wire, and the handler's
 // close-on-register-failure path must be able to call Close on it.
@@ -168,11 +176,12 @@ func stubOpenOutcome() git.OpenOutcome {
 // ok head message.
 func newStubGitRepo() *stubGitRepo {
 	return &stubGitRepo{
-		status:  stubStatus(),
-		diff:    git.Diff{State: git.DiffOK, Text: "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n"},
-		log:     stubLog(),
-		commit:  git.CommitOutcome{State: git.CommitOK, Head: "abc1234", Status: stubStatus()},
-		headMsg: git.HeadMessage{State: git.HeadMessageOK, Message: "subject\n\nbody"},
+		status:    stubStatus(),
+		diff:      git.Diff{State: git.DiffOK, Text: "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n"},
+		log:       stubLog(),
+		commit:    git.CommitOutcome{State: git.CommitOK, Head: "abc1234", Status: stubStatus()},
+		headMsg:   git.HeadMessage{State: git.HeadMessageOK, Message: "subject\n\nbody"},
+		remoteURL: "git@github.com:shady2k/nocx.git",
 	}
 }
 
@@ -777,6 +786,113 @@ func TestGitLog_RepoFailureIsATransportError(t *testing.T) {
 	}
 	if got.Error.Code != -32603 {
 		t.Errorf("error code = %d, want -32603", got.Error.Code)
+	}
+}
+
+// ── git.remote (brief, nocx-hc0m) ──────────────────────────────────────
+
+// TestGitRemote_OkAnswersTheRemoteURL — a branch tracking a remote answers
+// the remote's own URL, verbatim: the wire carries what git said, and the
+// conversion to a web page is the renderer's.
+func TestGitRemote_OkAnswersTheRemoteURL(t *testing.T) {
+	repo := newStubGitRepo()
+	e := newGitTestEnv(t, WithGitRepoFactory(&stubGitFactory{
+		mkRepo: func() git.Repo { return repo }, outcome: stubOpenOutcome(),
+	}))
+	sid := e.openSession(t, 1)
+	bid := e.openGitBinding(t, sid, "/tmp/repo", 2)
+	resp := jsonrpcCallWithID(t, e.conn, "git.remote", map[string]any{"bindingId": bid}, 3)
+	var got struct {
+		Result gitRemoteResult  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &got); err != nil {
+		t.Fatalf("git.remote: unmarshal: %v", err)
+	}
+	if got.Error != nil {
+		t.Fatalf("git.remote: %+v", got.Error)
+	}
+	if got.Result.State != "ok" || got.Result.URL != "git@github.com:shady2k/nocx.git" {
+		t.Fatalf("result = %+v, want ok with the remote's URL", got.Result)
+	}
+}
+
+// TestGitRemote_NoRemoteIsAResultState — detached HEAD, no upstream, a
+// deleted remote: the none RESULT state, never a transport error — the
+// panel draws no link (D14) instead of failing.
+func TestGitRemote_NoRemoteIsAResultState(t *testing.T) {
+	repo := &stubGitRepo{
+		status:    stubStatus(),
+		remoteErr: &git.ErrNoRemote{},
+	}
+	e := newGitTestEnv(t, WithGitRepoFactory(&stubGitFactory{
+		mkRepo: func() git.Repo { return repo }, outcome: stubOpenOutcome(),
+	}))
+	sid := e.openSession(t, 1)
+	bid := e.openGitBinding(t, sid, "/tmp/repo", 2)
+	resp := jsonrpcCallWithID(t, e.conn, "git.remote", map[string]any{"bindingId": bid}, 3)
+	var got struct {
+		Result gitRemoteResult  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &got); err != nil {
+		t.Fatalf("git.remote: unmarshal: %v", err)
+	}
+	if got.Error != nil {
+		t.Fatalf("no remote came back as an error: %+v", got.Error)
+	}
+	if got.Result.State != "none" || got.Result.URL != "" {
+		t.Fatalf("result = %+v, want the none state", got.Result)
+	}
+}
+
+// TestGitRemote_RepoFailureIsATransportError — an invocation that could
+// not be made or completed is an error, never a silent "no link".
+func TestGitRemote_RepoFailureIsATransportError(t *testing.T) {
+	repo := &stubGitRepo{
+		status:    stubStatus(),
+		remoteErr: errors.New("git for-each-ref: exit 1: fatal: bad revision"),
+	}
+	e := newGitTestEnv(t, WithGitRepoFactory(&stubGitFactory{
+		mkRepo: func() git.Repo { return repo }, outcome: stubOpenOutcome(),
+	}))
+	sid := e.openSession(t, 1)
+	bid := e.openGitBinding(t, sid, "/tmp/repo", 2)
+	resp := jsonrpcCallWithID(t, e.conn, "git.remote", map[string]any{"bindingId": bid}, 3)
+	var got struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &got); err != nil {
+		t.Fatalf("git.remote: unmarshal: %v", err)
+	}
+	if got.Error == nil {
+		t.Fatal("a failing remote read came back as a result, want a transport error")
+	}
+	if got.Error.Code != -32603 {
+		t.Errorf("error code = %d, want -32603", got.Error.Code)
+	}
+}
+
+// TestGitRemote_UnknownBindingAnswersUnknownBinding — the same guard every
+// later git.* call re-checks (D15): a remote read on a binding the caller
+// cannot use answers the unknownBinding error, never a panic.
+func TestGitRemote_UnknownBindingAnswersUnknownBinding(t *testing.T) {
+	e := newGitTestEnv(t, WithGitRepoFactory(newStubGitFactory()))
+	sid := e.openSession(t, 1)
+	bid := e.openGitBinding(t, sid, "/tmp/repo", 2)
+	_ = bid
+	resp := jsonrpcCallWithID(t, e.conn, "git.remote", map[string]any{"bindingId": "nope"}, 3)
+	var got struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &got); err != nil {
+		t.Fatalf("git.remote: unmarshal: %v", err)
+	}
+	if got.Error == nil {
+		t.Fatal("git.remote on an unknown binding succeeded")
+	}
+	if got.Error.Code != -32602 {
+		t.Errorf("error code = %d, want -32602", got.Error.Code)
 	}
 }
 

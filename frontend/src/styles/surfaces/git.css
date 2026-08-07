@@ -41,6 +41,13 @@
   min-width: 0;
 }
 
+/* The branch/upstream lines' trailing controls (copy branch, open on its
+   hosting): fixed-width icons that the ellipsising branch or upstream text
+   must never squeeze — placement only, the kit's own size rules stay. */
+.git-header__line .ui-icon-button {
+  flex: 0 0 auto;
+}
+
 /* The branch: the header's one piece of primary information, so it gets the
    width and gives it up last. Clipped rather than wrapped — a header that
    grows three lines tall pushes the lists off the screen. */

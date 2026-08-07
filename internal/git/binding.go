@@ -52,6 +52,7 @@ type Handle interface {
 	UnstageAll(ctx context.Context) (Status, error)
 	Commit(ctx context.Context, msg string, amend bool) (CommitOutcome, error)
 	HeadMessage(ctx context.Context) (HeadMessage, error)
+	RemoteURL(ctx context.Context) (string, error)
 }
 
 // Registry maps bindingId → Binding (spec §5.1 "Bindings"). It is where a
@@ -297,6 +298,15 @@ func (h *handle) HeadMessage(ctx context.Context) (HeadMessage, error) {
 	}
 	defer release()
 	return h.b.repo.HeadMessage(ctx)
+}
+
+func (h *handle) RemoteURL(ctx context.Context) (string, error) {
+	release, err := h.begin()
+	if err != nil {
+		return "", err
+	}
+	defer release()
+	return h.b.repo.RemoteURL(ctx)
 }
 
 // begin takes a use-guard for the duration of one call. The handle's own

@@ -33,6 +33,7 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -131,6 +132,15 @@ type gitHeadMessageResult struct {
 
 type gitCloseResult struct {
 	Closed bool `json:"closed"`
+}
+
+// gitRemoteResult is git.remote's shape (brief, nocx-hc0m): the URL of the
+// remote the current branch tracks, or the none state. none is the ordinary
+// answer — detached HEAD, no upstream, a deleted remote, a local-path
+// remote — and the panel draws no link (D14); it is never an error.
+type gitRemoteResult struct {
+	State string `json:"state"` // "ok" | "none"
+	URL   string `json:"url,omitempty"`
 }
 
 // gitChangedNotification is the server-initiated git.changed frame —
@@ -278,6 +288,8 @@ func (s *WSServer) handleGitMethod(wconn *wsConn, state *connState, req jsonrpcR
 		s.handleGitUnstageAll(wconn, state, req)
 	case "git.commit":
 		s.handleGitCommit(wconn, state, req)
+	case "git.remote":
+		s.handleGitRemote(wconn, state, req)
 	case "git.headMessage":
 		s.handleGitHeadMessage(wconn, state, req)
 	case "git.log":
@@ -676,6 +688,40 @@ func (s *WSServer) handleGitLog(wconn *wsConn, state *connState, req jsonrpcRequ
 		return
 	}
 	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(gitLogResult{Log: wireGitLog(lg)})))
+}
+
+// handleGitRemote answers "what URL does the branch I am on track"
+// (brief, nocx-hc0m): the raw remote URL, derived by Repo.RemoteURL from
+// HEAD and git's own upstream atom — never parsed from a client-supplied
+// branch. The none state is the ordinary answer — detached HEAD, no
+// upstream, a deleted remote, a local-path remote — and the panel draws no
+// link for it (D14); only an invocation that could not be made is an error.
+// The URL conversion to a host's web page is the renderer's, in one module
+// with its own tests: the wire carries what git said, not a URL the backend
+// invented for a host it may not know.
+func (s *WSServer) handleGitRemote(wconn *wsConn, state *connState, req jsonrpcRequest) {
+	var params gitBindingParams
+	if err := json.Unmarshal(req.Params, &params); err != nil || params.BindingID == "" {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: bindingId required"))
+		return
+	}
+	h, release, err := s.git.Acquire(params.BindingID, state)
+	if err != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, gitErrorCode(err), err.Error()))
+		return
+	}
+	defer release()
+	url, err := h.RemoteURL(context.Background())
+	if err != nil {
+		var noRemote *git.ErrNoRemote
+		if errors.As(err, &noRemote) {
+			_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(gitRemoteResult{State: "none"})))
+			return
+		}
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, gitErrorCode(err), err.Error()))
+		return
+	}
+	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(gitRemoteResult{State: "ok", URL: url})))
 }
 
 // handleGitClose closes the binding: its repository released, the use-guard
