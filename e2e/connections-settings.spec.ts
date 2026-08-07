@@ -39,6 +39,17 @@ test.describe('Connections inside Settings', () => {
     // own class and refuse one from a caller — so they are addressed by their
     // accessible name, which is what the user reads anyway (nocx-pp3y.1).
     await page.locator('[role="toolbar"]').getByRole('button', { name: '+ New connection' }).click()
+
+    // Creation starts from one field: the button opens the New Connection
+    // dialog, and the form appears only once quick-connect has parsed what was
+    // typed into it ("Parsed fields will be filled into the form", the dialog's
+    // own hint). Walking that route rather than waiting for a form the button
+    // stopped opening (nocx-z9s9.4).
+    const quickConnect = page.getByRole('dialog').filter({ hasText: 'New Connection' })
+    await expect(quickConnect).toBeVisible()
+    await page.locator('#quick-connect-input').fill('localhost')
+    await quickConnect.getByRole('button', { name: 'Next', exact: true }).click()
+
     await expect(page.locator('.cm-form')).toBeAttached()
 
     // Fill in the profile form (Name, Host, User).
@@ -52,23 +63,28 @@ test.describe('Connections inside Settings', () => {
     const inputs = page.locator('.cm-form input')
     await inputs.nth(0).fill('Test SSH')
     await inputs.nth(1).fill('localhost')
+
+    // User lives in the form's Authentication tab, and the kit Tabs renders
+    // only the active panel — so a user reaches that field by choosing the tab,
+    // and so does this test (nocx-z9s9.4).
+    await page.locator('.cm-form').getByRole('tab', { name: 'Authentication' }).click()
     await page.locator('#profile-auth-user').fill('tester')
 
-    // Save the profile first (calls createProfile), then Connect opens a tab.
-    await page
-      .locator('.cm-form-actions')
-      .getByRole('button', { name: 'Create', exact: true })
-      .click()
+    // The editor is a Dialog and its actions are the dialog's footer — the
+    // .cm-form-actions this spec addressed survives only as a CSS rule with no
+    // markup behind it, so the locator could never resolve. The primary action
+    // is named for what it does to a profile with no id yet.
+    const editor = page.getByRole('dialog').filter({ hasText: 'New Connection' })
+    await editor.getByRole('button', { name: 'Create Connection', exact: true }).click()
 
-    // Wait for the save to complete — the form should close and the profile
-    // list should update. The selected profile form opens again after save.
-    await expect(page.locator('.cm-form')).toBeAttached({ timeout: 5000 })
+    // Saving closes the dialog (saveProfile → closeDialog), so the form going
+    // away IS the save landing — the old "the form opens again after save" was
+    // describing a surface that no longer exists.
+    await expect(page.locator('.cm-form')).toHaveCount(0, { timeout: 5000 })
 
-    // Now click "Connect" to create an SSH tab.
-    await page
-      .locator('.cm-form-actions')
-      .getByRole('button', { name: 'Connect', exact: true })
-      .click()
+    // Connect from the row, which is where a user connects from — the form has
+    // no Connect action. Same control connection-password.spec.ts drives.
+    await page.locator('[aria-label="Connect to Test SSH"]').click()
 
     // A new SSH tab should have been created. Asserted with a retrying
     // expectation, not a bare count(): opening the tab is a round trip, so a
