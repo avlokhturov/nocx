@@ -10,6 +10,22 @@
   font-size: var(--font-size-2xs);
   font-weight: 500;
   line-height: 1.4;
+  /* A badge is a chip: ONE line, whatever it holds. Without this a long
+     value wraps inside the pill — a branch called
+     `fix/e2e-files-reveal-and-container` rendered as a three-line block in
+     the Git panel's header, and a commit's ref badges stacked four lines
+     deep and tripled the height of their row (nocx-uf0p). Wrapping is not a
+     graceful degrade here: the shape stops reading as a chip at all. It
+     clips to its container instead, and the caller keeps the full value on
+     a title where it needs one. */
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* inline-block + overflow:hidden aligns its overflow edge to the text
+     baseline, which drops the chip relative to neighbouring text; bottom
+     alignment keeps it sitting on the line it is part of. */
+  vertical-align: bottom;
 }
 
 /* `neutral` is the DEFAULT tone and it had no rule at all — three tones painted a

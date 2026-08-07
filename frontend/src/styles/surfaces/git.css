@@ -38,6 +38,18 @@
   min-width: 0;
 }
 
+/* The branch: the header's one piece of primary information, so it gets the
+   width and gives it up last. Clipped rather than wrapped — a header that
+   grows three lines tall pushes the lists off the screen. */
+.git-header__branch {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
 .git-header__upstream {
   min-width: 0;
   overflow: hidden;

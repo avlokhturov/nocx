@@ -416,9 +416,17 @@ export function GitPanel(props: GitPanelProps) {
                 remote branch NAME that carries the information. */}
             <div class="git-header" data-testid="git-header">
               <div class="git-header__line">
-                <Badge tone="info" data-testid="git-branch">
+                {/* The branch is TEXT, not a chip. A badge is a fixed little
+                    shape for a short word, and a branch name is neither
+                    short nor bounded — `fix/e2e-files-reveal-and-container`
+                    filled the header three lines deep before the kit was
+                    taught that a chip is one line, and even clipped it wastes
+                    the pill's padding on the one string in this header that
+                    deserves the width. orca renders the branch as plain
+                    text for the same reason. */}
+                <span class="git-header__branch" data-testid="git-branch" title={branchLabel()}>
                   {branchLabel()}
-                </Badge>
+                </span>
                 <span class="git-header__count" data-testid="git-changed-count">
                   {status()!.total} changed
                 </span>

@@ -105,7 +105,10 @@
 .ui-file-status-row__path {
   display: flex;
   align-items: baseline;
-  gap: var(--space-2);
+  /* One step between the name and its directory. The directory is the part
+     that shrinks to nothing, and at two steps the gap it leaves behind is
+     width the name could have used. */
+  gap: var(--space-1);
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
