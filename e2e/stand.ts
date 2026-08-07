@@ -111,6 +111,19 @@ export async function startStand(): Promise<StandManifest> {
   logDir = path.join(repoRoot, 'test-results', 'stand')
   mkdirSync(logDir, { recursive: true })
 
+  // A FRESH home every run. The home used to survive from one run to the next,
+  // so a spec's preconditions were whatever the last run happened to leave —
+  // an installed-facts document, a saved profile, a vault. That is half of
+  // nocx-8rda, and the half a run can fix for itself: a spec asserting "this
+  // machine has never done X" is only meaningful against a home where nothing
+  // has. What it does NOT fix is one spec's writes reaching the next spec
+  // WITHIN a run; that needs a home per test and a backend to match.
+  //
+  // The directory is still under the repo rather than a mkdtemp, so a failure
+  // can be inspected afterwards — it is removed on the way UP, not on the way
+  // down, which keeps the evidence of the run that just failed.
+  rmSync(path.join(root, 'home'), { recursive: true, force: true })
+
   // The boundary, from the one module that owns it — not a second hand-copied
   // list of variables to strip. NOCX_NO_SYSTEM_KEYSTORE is the switch that
   // stops app.New probing the OS keystore, which on macOS is a real keychain

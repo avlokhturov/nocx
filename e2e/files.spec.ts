@@ -2,6 +2,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test, expect } from './harness'
+import { readStand } from './stand'
 import { promptReady } from './harness'
 import type { Page } from '@playwright/test'
 //   From a cold start the Files icon is FIRST in the activity bar, present
@@ -46,7 +47,12 @@ let fixtureBasename: string
 test.beforeAll(() => {
   // Created by the test under the isolated HOME when the suite declares one
   // (headless path), else under the system tmp dir (wails path).
-  const base = process.env.NOCX_E2E_HOME_DIR ?? tmpdir()
+  // Under the stand's home, asked of the stand: NOCX_E2E_HOME_DIR is the
+  // backend's variable, not this process's, so reading it here answered
+  // undefined and the fixture landed in the system tmp dir — where a shared
+  // runner keeps everybody else's, which is what made a row count read 55
+  // instead of 50 (nocx-z9s9.5).
+  const base = readStand().home
   fixtureRoot = mkdtempSync(join(base, 'nocx-files-e2e-'))
   fixtureBasename = fixtureRoot.split('/').pop() as string
   writeFileSync(join(fixtureRoot, 'notes.md'), 'hello from the fixture\n')
@@ -182,14 +188,28 @@ test('expanding a directory lists a page and "show next" reveals the rest', asyn
   // kit row). The fixture sits under the revealed chain from / (its depth
   // is its path's segment count minus the root), so bigdir's children sit
   // one deeper than the fixture's row.
-  const childrenDepth = fixtureRoot.split('/').filter(Boolean).length + 1
   await page.locator('button[aria-label="Expand bigdir"]').click()
 
-  // A page of the directory: PAGE_SIZE depth-N rows and a "show next"
-  // button naming the remainder.
-  await expect(page.locator(`${TREE_ROW}[data-depth="${childrenDepth}"]`)).toHaveCount(PAGE_SIZE)
-  // The show-more button of the level being paged: the reveal expanded
-  // /tmp too, whose own show-more button would match an unscoped locator.
+  // Counted by PARENT, not by depth. A depth counts every row at that level in
+  // the whole tree, and the reveal walked here through directories with
+  // neighbours of their own — on macOS the fixture lives under
+  // /var/folders/<x>/<y>/T/, which a shared runner fills with other tests'
+  // fixtures. The count then reads 55 or 56 where the directory holds 50, and
+  // the number depends on who else is running (nocx-z9s9.5). A path prefix
+  // names the children of this directory and nothing else.
+  const bigdir = `${fixtureRoot}/bigdir`
+  const children = page.locator(`.files-row[data-path^="${bigdir}/"] ${TREE_ROW}`)
+
+  // A page of the directory: PAGE_SIZE rows and a "show next" button naming
+  // the remainder.
+  await expect(children).toHaveCount(PAGE_SIZE)
+  // The show-more button of the level being paged: the reveal expanded the
+  // fixture's parent too, whose own show-more would match an unscoped locator.
+  // The show-more row carries no data-path (files-view.tsx renders it with a
+  // depth and nothing else), so this one is scoped by depth — which is enough
+  // here for the reason the count was not: the fixture's PARENT was expanded
+  // too, and its own show-more sits one level shallower.
+  const childrenDepth = fixtureRoot.split('/').filter(Boolean).length + 1
   const showMore = page.locator(
     `.files-row[data-depth="${childrenDepth}"] [data-testid="files-show-more"]`,
   )
@@ -197,14 +217,12 @@ test('expanding a directory lists a page and "show next" reveals the rest', asyn
 
   // First "show next": another page lands, the remainder shrinks.
   await showMore.click()
-  await expect(page.locator(`${TREE_ROW}[data-depth="${childrenDepth}"]`)).toHaveCount(
-    PAGE_SIZE * 2,
-  )
+  await expect(children).toHaveCount(PAGE_SIZE * 2)
   await expect(showMore).toHaveText(`Show next ${BIGDIR_COUNT - PAGE_SIZE * 2}`)
 
   // Second "show next": the rest lands and the button is gone.
   await showMore.click()
-  await expect(page.locator(`${TREE_ROW}[data-depth="${childrenDepth}"]`)).toHaveCount(BIGDIR_COUNT)
+  await expect(children).toHaveCount(BIGDIR_COUNT)
   await expect(showMore).toHaveCount(0)
 
   // The whole directory is present, nothing duplicated or skipped (D10

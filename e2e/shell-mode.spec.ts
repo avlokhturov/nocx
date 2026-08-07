@@ -1,4 +1,5 @@
 import { test, expect } from './harness'
+import { readStand } from './stand'
 import { spawn, execFileSync } from 'node:child_process'
 import { mkdirSync, writeFileSync, existsSync } from 'node:fs'
 import path from 'node:path'
@@ -13,16 +14,12 @@ import type { Page } from './harness'
 // executes commands, so the in-band bootstrap runs for real and the OSC 133
 // markers are the shell's own.
 
-// The home the BACKEND resolved, not a second guess at it. Asked of the
-// environment the way nocxify-journey.spec.ts:55 and files.spec.ts:49 already
-// ask, because the two answers disagree on every path that matters: on the
-// headless path NOCX_E2E_HOME_DIR is a temp directory the runner made, and
-// even under `wails dev` home-isolation.ts publishes the realpath of
-// .e2e/home, which is not what path.resolve returns through a symlink. A
-// known_hosts written to the wrong home is a host key the backend never sees —
-// "unknown host key", no SSH session, and a spec that fails asserting the
-// editor chrome (nocx-z9s9.6).
-const E2E_HOME = process.env.NOCX_E2E_HOME_DIR || path.resolve(__dirname, '..', '.e2e', 'home')
+// The home the BACKEND resolved, from the stand that started it — not a guess
+// at it. NOCX_E2E_HOME_DIR is set in the BACKEND's environment, not in
+// Playwright's, so reading it here answered undefined and fell back to a path
+// that is only sometimes right. A known_hosts written to the wrong home is a
+// host key the backend never sees (nocx-z9s9.6).
+const e2eHome = () => readStand().home
 
 interface Fixture {
   proc: ChildProcess
@@ -42,7 +39,28 @@ function startSshd(): Fixture {
       cwd: path.resolve(__dirname, '..'),
     })
   }
-  const proc = spawn(bin, [], { stdio: ['ignore', 'pipe', 'inherit'] })
+  // The fixture's HOME is the REMOTE host's home, separate from the backend's
+  // — the answer nocxify-journey.spec.ts already gives its own sshd.
+  //
+  // Without it the premise of this spec cannot be staged. The local backend
+  // installs ~/.nocx and the shell rc hooks into its HOME on every start, and
+  // an sshd sharing that HOME spawns a shell that sources them: the connection
+  // comes up ALREADY integrated, the chip offers "Enable command editor", and
+  // "a plain SSH shell" is a state this machine cannot be in. A real remote
+  // host has its own home; so does the fixture (nocx-z9s9.8).
+  const remoteHome = path.join(path.dirname(e2eHome()), 'shell-mode-remote-home')
+  mkdirSync(remoteHome, { recursive: true, mode: 0o700 })
+  const proc = spawn(bin, [], {
+    stdio: ['ignore', 'pipe', 'inherit'],
+    env: {
+      ...process.env,
+      HOME: remoteHome,
+      ZDOTDIR: remoteHome,
+      XDG_CONFIG_HOME: path.join(remoteHome, '.config'),
+      XDG_DATA_HOME: path.join(remoteHome, '.local', 'share'),
+      XDG_CACHE_HOME: path.join(remoteHome, '.cache'),
+    },
+  })
   const lines: string[] = []
   let addr = ''
   let userKey = ''
@@ -87,7 +105,7 @@ function startSshd(): Fixture {
  *  REPLACED, not appended: every fixture spawn mints fresh keys, and a stale
  *  line for a dead key makes the backend refuse the connection. */
 function trustHostKey(fixture: Fixture): void {
-  const sshDir = path.join(E2E_HOME, '.ssh')
+  const sshDir = path.join(e2eHome(), '.ssh')
   mkdirSync(sshDir, { recursive: true, mode: 0o700 })
   writeFileSync(path.join(sshDir, 'known_hosts'), fixture.knownHosts + '\n')
 }

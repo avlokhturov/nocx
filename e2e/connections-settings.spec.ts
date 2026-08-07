@@ -140,6 +140,29 @@ test.describe('Connections inside Settings', () => {
     // no Connect action. Same control connection-password.spec.ts drives.
     await page.locator('[aria-label="Connect to Test SSH"]').click()
 
+    // Opening a connection needs somewhere to keep secrets, so the product asks
+    // for it before it opens anything: vaultController.ensureBeforeSave defers
+    // newSSHTab behind setup while the vault is uninitialized (vault.tsx:255).
+    // This spec used to click Connect and wait for a tab that was never coming —
+    // the console said "connect from Settings" and never "newSSHTab called",
+    // because the deferred callback was sitting behind this dialog (nocx-z9s9.4).
+    // Asked for only while the vault is uninitialized, so this is conditional
+    // rather than asserted: the two browser projects share one backend and one
+    // home, so whichever runs second finds the vault already set up and is
+    // never asked. Requiring the dialog would make this spec pass or fail on
+    // project order (nocx-8rda).
+    const setup = page.getByRole('dialog').filter({ hasText: 'Set Up Vault' })
+    if (await setup.isVisible().catch(() => false)) {
+      await page.locator('#vault-setup-passphrase').fill('master-passphrase-7')
+      await page.locator('#vault-setup-confirm').fill('master-passphrase-7')
+      await setup.getByRole('button', { name: /Set Up/i }).click()
+      await expect(page.getByRole('dialog').filter({ hasText: 'Recovery Code' })).toBeVisible({
+        timeout: 10_000,
+      })
+      await page.getByRole('dialog').getByRole('button', { name: 'Done', exact: true }).click()
+      await expect(setup).not.toBeVisible({ timeout: 10_000 })
+    }
+
     // A new SSH tab should have been created. Asserted with a retrying
     // expectation, not a bare count(): opening the tab is a round trip, so a
     // count read on the next line races it and answers for the DOM as it was.

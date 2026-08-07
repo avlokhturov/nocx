@@ -1,4 +1,6 @@
 import { test, expect } from './harness'
+import { documentDir } from './harness'
+import { readStand } from './stand'
 import { spawn, execFileSync } from 'node:child_process'
 import {
   existsSync,
@@ -52,8 +54,10 @@ import type { Page } from './harness'
 // is a separate home: the local app's ~/.nocx holds settings and staged
 // launchers, while the fixture's ~/.nocx is where the launcher publishes the
 // generation. Sharing them would mix two machines' state into one directory.
-const LOCAL_HOME = process.env.NOCX_E2E_HOME_DIR || path.resolve(__dirname, '..', '.e2e', 'home')
-const E2E_ROOT = path.dirname(LOCAL_HOME)
+// The stand's home, asked of the stand. Same reason as shell-mode.spec.ts:
+// NOCX_E2E_HOME_DIR lives in the backend's environment, not in this process's.
+const localHome = () => readStand().home
+const E2E_ROOT = path.dirname(localHome())
 const REMOTE_HOME = path.join(E2E_ROOT, 'remote-home')
 const REMOTE_ZDOT = path.join(REMOTE_HOME, 'zdot')
 
@@ -238,8 +242,14 @@ interface InstalledFactRecord {
 }
 
 function installedFactDoc(): { facts: Record<string, InstalledFactRecord> } | null {
-  const configRoot = path.join(E2E_ROOT, 'config')
-  const p = `${configRoot}/nocx-dev/installed-facts.json`
+  // documentDir, not a hand-spelled path. This looked in <root>/config/nocx-dev,
+  // which was where XDG_CONFIG_HOME used to point; the stand gives the backend a
+  // HOME and nothing else, so the documents are where the backend puts them —
+  // Library/Application Support on darwin, .config elsewhere. A spec that spells
+  // the path itself is right until the day it is not, and then it reports a
+  // missing document rather than a wrong lookup (nocx-z9s9.3 was the same
+  // shape).
+  const p = path.join(documentDir(readStand().home), 'installed-facts.json')
   if (existsSync(p)) {
     try {
       return JSON.parse(readFileSync(p, 'utf8')) as { facts: Record<string, InstalledFactRecord> }
@@ -442,7 +452,7 @@ test('a hand-typed ssh: frozen local block, remote blocks, compact second connec
     // The argv-borne bootstrap launcher was consumed: the staged run dir is
     // empty again. (The compact ~/.nocx/launch line replaces this path from
     // the second connection on.)
-    const runDir = path.join(LOCAL_HOME, '.nocx', 'run')
+    const runDir = path.join(localHome(), '.nocx', 'run')
     expect(readdirSync(runDir), 'staged bootstrap launcher consumed').toEqual([])
 
     // The password goes to the pty, not the editor: the command owns input.
