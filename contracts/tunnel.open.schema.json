@@ -5,7 +5,18 @@
   "description": "Result of the tunnel.open JSON-RPC method: the full record of the established forward. The single declaration of this shape: the renderer's TypeScript type is generated from it and the Go transport is validated against it.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["id", "direction", "requestedBind", "actualBind", "destination", "scope", "caveat", "state", "stopReason", "error"],
+  "required": [
+    "id",
+    "direction",
+    "requestedBind",
+    "actualBind",
+    "destination",
+    "scope",
+    "caveat",
+    "state",
+    "stopReason",
+    "error"
+  ],
   "properties": {
     "id": {
       "description": "Backend-assigned tunnel id. The renderer echoes it to tunnel.stop; nothing else can stop a forward.",

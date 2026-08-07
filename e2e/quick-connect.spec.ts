@@ -1,7 +1,6 @@
 import { test, expect } from './harness'
 
 const CARET = '[aria-label="Quick connect"]'
-const QUICK_CONNECT_LIST = '.quick-connect__list'
 const QUICK_CONNECT_ITEM = '.quick-connect__item'
 const QUICK_CONNECT_SEARCH = '.quick-connect__search input'
 const QUICK_CONNECT_EMPTY = '.quick-connect__empty'

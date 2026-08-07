@@ -24,7 +24,29 @@ echo "=== npm ci (root + frontend) ==="
 npm ci --silent
 (cd frontend && npm ci --silent)
 
+# Hand the run's output back to the host user before leaving.
+#
+# Everything below this runs as root on a bind mount, so .e2e/ and test-results/
+# would otherwise stay root-owned in the developer's checkout — and `eslint .`
+# and `prettier --check .` both die on EACCES while expanding the directory,
+# which broke the local gate every time the local suite ran (nocx-z9s9.8).
+#
+# In the EXIT trap, not after the run: the point is the FAILING run, whose
+# artefacts are the ones somebody is about to read. `|| true` because a
+# best-effort tidy must never be what a run reports — the test result is.
+handback() {
+  local status=$?
+  if [ -n "${NOCX_E2E_HOST_UID:-}" ] && [ -n "${NOCX_E2E_HOST_GID:-}" ]; then
+    chown -R "$NOCX_E2E_HOST_UID:$NOCX_E2E_HOST_GID" /work/.e2e /work/test-results 2>/dev/null || true
+  fi
+  return $status
+}
+trap handback EXIT
+
 # `npx playwright test` is the whole command — the same one a developer runs
 # and the same one CI runs. The stand (backend + vite) is Playwright's, so
 # nothing here starts or knows about it.
-exec npx playwright test "$@"
+#
+# Not `exec`: that would replace this shell and the trap above with it, and the
+# handback would never run.
+npx playwright test "$@"

@@ -1,4 +1,4 @@
-import { test, expect } from './harness'
+import { test, expect, clickIntoEditor } from './harness'
 
 // Regression guard for the layout regression fixed in 2314a2a: the gutter no
 // longer overrides pane.style.position, so multiple tabs don't collapse the
@@ -156,11 +156,10 @@ test.describe('vertical tab placement', () => {
   }) => {
     await switchPlacement(page, 'vertical')
 
-    // Click the pane to ensure keyboard focus lands on the terminal
-    // editor after the settings tab closes.  JS focus() alone may not
-    // route subsequent page.keyboard.type() to the PTY.
-    const paneBox = await page.locator('.pane.active').boundingBox()
-    await page.mouse.click(paneBox!.x + paneBox!.width / 2, paneBox!.y + paneBox!.height - 30)
+    // Click the editor to ensure keyboard focus lands on it after the settings
+    // tab closes.  JS focus() alone may not route subsequent
+    // page.keyboard.type() to the PTY.
+    await clickIntoEditor(page)
 
     await page.keyboard.type('sleep 3; echo PROBE')
     await page.keyboard.press('Enter')
@@ -211,8 +210,7 @@ test.describe('vertical tab placement', () => {
 
     // Give the tab a name of its own via OSC 0. Now the location is extra information
     // and earns its line.
-    const paneBox = await page.locator('.pane.active').boundingBox()
-    await page.mouse.click(paneBox!.x + paneBox!.width / 2, paneBox!.y + paneBox!.height - 30)
+    await clickIntoEditor(page)
     const marker = `NAME-${Date.now().toString(36)}`
     await page.keyboard.type(`printf '\\033]0;${marker}\\007'`)
     await page.keyboard.press('Enter')

@@ -25,6 +25,32 @@ export async function promptReady(page: Page): Promise<void> {
   await baseExpect(input).toBeFocused({ timeout: 10_000 })
 }
 
+/**
+ * Click into the active pane's prompt editor.
+ *
+ * Six specs used to spell this `page.mouse.click(box.x + box.width / 2, box.y +
+ * box.height - 30)` on the pane, each with a comment saying what it meant —
+ * "near the bottom of the pane, where the editor lives". The 30 is a guess at
+ * how tall the editor is, and the editor's height follows the terminal font, so
+ * the guess is a claim about the host rather than about the product. Its
+ * sibling defect — a double-click at a fixed 120px — was landing on a space in
+ * the e2e container while passing on the author's Mac (nocx-z9s9.10).
+ *
+ * The pane centre is deliberately still avoided, and that reason is real: it
+ * lands on the xterm area whose hidden textarea takes focus, and the
+ * focus-bounce handler then bails because focus is already inside the xterm
+ * container. Clicking the editor itself reaches the editor's own
+ * click-to-focus handler, which is the path these specs are about. It also
+ * still reaches the pane's handlers — a contextmenu on the editor bubbles — so
+ * the right-click paste case keeps working through the same seam.
+ */
+export async function clickIntoEditor(
+  page: Page,
+  opts: { button?: 'left' | 'right' } = {},
+): Promise<void> {
+  await page.locator('.pane.active .nocx-editor-input').click({ button: opts.button ?? 'left' })
+}
+
 // vite serves the page alone, so nothing installs the wails runtime — the
 // frontend reads window.go at startup and would find nothing. This supplies it,
 // pointed at the stand Playwright started.

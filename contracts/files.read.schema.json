@@ -5,7 +5,17 @@
   "description": "Result of the files.read JSON-RPC method: bounded, streamed content of one file. The provider reads at most the effective limit plus one byte and never the whole file, so the memory guard holds for a 40 GB file; maxBytes <= 0 means the server default and the parameter can only lower the 2 MiB ceiling. Canonical is the identity the viewer tab's singletonKey is built from — without it, two symlinks to one file would open two tabs claiming to be different files, which is D12 failing in exactly the case it exists for.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["path", "canonical", "text", "size", "modTime", "truncated", "binary", "lossy", "changed"],
+  "required": [
+    "path",
+    "canonical",
+    "text",
+    "size",
+    "modTime",
+    "truncated",
+    "binary",
+    "lossy",
+    "changed"
+  ],
   "properties": {
     "path": {
       "description": "The lexical path the caller asked for — what the tab label shows, not necessarily what was read. Canonical is what was actually read.",

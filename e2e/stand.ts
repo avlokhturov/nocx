@@ -84,6 +84,34 @@ export function readStand(): StandManifest {
   }
 }
 
+/**
+ * Take the host's login shell out of what the backend inherits.
+ *
+ * `internal/pty` reads `$SHELL` first and only goes looking when it is unset,
+ * so leaving it in means the suite drives whatever shell the developer happens
+ * to log in with — bash in the e2e container, zsh on a stock Mac. That is not a
+ * cosmetic difference: `nocx.bash` emits the OSC 636 command snapshot and
+ * `nocx.zsh` emits only the readiness passport, so the shell decides whether
+ * tab completion ever learns a command name. completion.spec.ts was green in
+ * the container and red on the macOS runner for exactly that reason, and it
+ * took a day and a trace download to find out (nocx-qduc, nocx-z9s9.9).
+ *
+ * Stripped rather than pinned to a path: there is no one path. `/bin/bash` is
+ * absent on NixOS, where bash lives under /run/current-system. What has to be
+ * the same on every host is the POLICY, and the backend already owns it —
+ * prefer bash, fall through a candidate list, /bin/sh as the last resort — and
+ * now logs which one it took.
+ *
+ * This is deliberately NOT in home-isolation's restricted list. That list is
+ * the home boundary, and overriding one of its keys raises. `$SHELL` cannot
+ * reach outside the boundary — whichever shell starts reads its rc files from
+ * the disposable home — so this is determinism, not containment, and the two
+ * should not share a mechanism that refuses.
+ */
+function withoutHostShell(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return Object.fromEntries(Object.entries(env).filter(([key]) => key !== 'SHELL'))
+}
+
 let backend: ChildProcess | null = null
 let vite: ChildProcess | null = null
 let logDir = ''
@@ -130,7 +158,7 @@ export async function startStand(): Promise<StandManifest> {
   // write and, under a disposable home with no login keychain, a dialog per
   // backend start (nocx-o4hg).
   const isolation = createHomeIsolation({
-    inheritedEnv: process.env,
+    inheritedEnv: withoutHostShell(process.env),
     overrideEnv: { NOCX_NO_SYSTEM_KEYSTORE: '1' },
     root,
   })

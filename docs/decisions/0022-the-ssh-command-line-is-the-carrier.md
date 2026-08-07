@@ -37,13 +37,13 @@ passed through a command line at all.
 
 Measured against a real OpenSSH 10.4 client and a real sshd, 20 runs:
 
-| | result |
-|---|---|
+|                                  | result                                                                                                |
+| -------------------------------- | ----------------------------------------------------------------------------------------------------- |
 | 35,243-byte push over the master | 20/20, **zero** extra server-side authentications (server log: 20 connections, 20 auths, 40 sessions) |
-| submit → usable master | median 115.6 ms |
-| submit → push complete | median 126.7 ms |
-| bootstrap wait for the file | median 9.7 ms, max 11.7 ms — a 3 s timeout is ~250× the worst case |
-| rewritten line | **158 bytes**, against 189–207 today |
+| submit → usable master           | median 115.6 ms                                                                                       |
+| submit → push complete           | median 126.7 ms                                                                                       |
+| bootstrap wait for the file      | median 9.7 ms, max 11.7 ms — a 3 s timeout is ~250× the worst case                                    |
+| rewritten line                   | **158 bytes**, against 189–207 today                                                                  |
 
 The last row is the one that decided it. The premise of the alternative was "a short line from
 the first connection", and there is no such prize: the payload never travelled in the line —

@@ -18,9 +18,9 @@ typed once lands in the encrypted store and is offered as a completion
 candidate tomorrow. We shipped the recording and never shipped the guard.
 This ADR settles what the guard is — and, just as important, what it is not.
 
-The threat model is the owner's, stated verbatim: *"у нас нет задачи защищать
+The threat model is the owner's, stated verbatim: _"у нас нет задачи защищать
 файл от процессов на этой же машине, лежит же история bash — и это никого не
-парит… Наша цель — защитить файлы от чтения напрямую."* We are protecting the
+парит… Наша цель — защитить файлы от чтения напрямую."_ We are protecting the
 durable files from direct reading, not the running process from the machine.
 
 ## Decision

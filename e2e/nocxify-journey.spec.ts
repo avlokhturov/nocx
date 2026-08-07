@@ -56,10 +56,18 @@ import type { Page } from './harness'
 // generation. Sharing them would mix two machines' state into one directory.
 // The stand's home, asked of the stand. Same reason as shell-mode.spec.ts:
 // NOCX_E2E_HOME_DIR lives in the backend's environment, not in this process's.
+// Resolved when a test asks, never at module load.
+//
+// `readStand()` reads a manifest the stand writes in globalSetup, so a module
+// that calls it while being IMPORTED demands a running backend just to be read.
+// `playwright test --list` imports every spec and starts nothing, which is
+// exactly what e2e/check-coverage.mjs runs — so a top-level call here took down
+// the receipt that proves no spec file is uncollected, and would have taken the
+// frontend job with it (nocx-z9s9.8).
 const localHome = () => readStand().home
-const E2E_ROOT = path.dirname(localHome())
-const REMOTE_HOME = path.join(E2E_ROOT, 'remote-home')
-const REMOTE_ZDOT = path.join(REMOTE_HOME, 'zdot')
+const e2eRoot = () => path.dirname(localHome())
+const remoteHome = () => path.join(e2eRoot(), 'remote-home')
+const remoteZdot = () => path.join(remoteHome(), 'zdot')
 
 const RC_FILES = ['.bashrc', '.bash_profile', '.profile', '.zshrc', 'zdot/.zshrc']
 
@@ -183,28 +191,28 @@ function startSshd(args: string[], env: NodeJS.ProcessEnv): Fixture & { _wait: P
 function remoteEnv(): NodeJS.ProcessEnv {
   return {
     ...process.env,
-    HOME: REMOTE_HOME,
-    ZDOTDIR: REMOTE_ZDOT,
+    HOME: remoteHome(),
+    ZDOTDIR: remoteZdot(),
     SSH_AUTH_SOCK: '', // a stray agent key must never shortcut the password path
-    XDG_CONFIG_HOME: path.join(E2E_ROOT, 'remote-config'),
-    XDG_DATA_HOME: path.join(E2E_ROOT, 'remote-data'),
-    XDG_CACHE_HOME: path.join(E2E_ROOT, 'remote-cache'),
+    XDG_CONFIG_HOME: path.join(e2eRoot(), 'remote-config'),
+    XDG_DATA_HOME: path.join(e2eRoot(), 'remote-data'),
+    XDG_CACHE_HOME: path.join(e2eRoot(), 'remote-cache'),
   }
 }
 
 /** Seed the remote host's rc files (the N4 byte-identical snapshot source). */
 function seedRemoteHome(): Record<string, Buffer> {
-  mkdirSync(REMOTE_ZDOT, { recursive: true, mode: 0o700 })
+  mkdirSync(remoteZdot(), { recursive: true, mode: 0o700 })
   const content: Record<string, string> = {
     '.bashrc': `# nocx e2e remote .bashrc (P11 N4 fixture)\nexport E2E_RC_FINGERPRINT=1\n`,
     '.bash_profile': `# nocx e2e remote .bash_profile (P11 N4 fixture)\n`,
     '.profile': `# nocx e2e remote .profile (P11 N4 fixture)\n`,
     '.zshrc': `# nocx e2e remote .zshrc (P11 N4 fixture)\n`,
-    'zdot/.zshrc': `# nocx e2e remote \$ZDOTDIR/.zshrc (P11 N4 fixture)\n`,
+    'zdot/.zshrc': `# nocx e2e remote $ZDOTDIR/.zshrc (P11 N4 fixture)\n`,
   }
   const snapshot: Record<string, Buffer> = {}
   for (const name of RC_FILES) {
-    const p = path.join(REMOTE_HOME, name)
+    const p = path.join(remoteHome(), name)
     writeFileSync(p, content[name], { mode: 0o600 })
     snapshot[name] = readFileSync(p)
   }
@@ -583,13 +591,13 @@ test('a hand-typed ssh: frozen local block, remote blocks, compact second connec
 
     // ── 6. the host's rc files are byte-identical after all of it ──
     for (const name of RC_FILES) {
-      const p = path.join(REMOTE_HOME, name)
+      const p = path.join(remoteHome(), name)
       expect(existsSync(p), `${name} still exists`).toBe(true)
       expect(readFileSync(p), name).toEqual(rcBefore[name])
     }
 
     // ── 7. ~/.nocx on the host: one active generation, manifest verifies ──
-    const root = path.join(REMOTE_HOME, '.nocx')
+    const root = path.join(remoteHome(), '.nocx')
     const manifest = verifyInstallation(root)
     const genDirs = readdirSync(path.join(root, 'integration')).filter((n) => n.startsWith('v'))
     expect(genDirs).toEqual([manifest.generation])

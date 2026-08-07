@@ -1,4 +1,4 @@
-import { test, expect, promptReady } from './harness'
+import { test, expect, promptReady, clickIntoEditor } from './harness'
 
 /**
  * nocx-4ff.29 — returning to a tab must hand input back to whatever owns it.
@@ -104,10 +104,9 @@ test.describe('focus after switching back to a tab (nocx-4ff.29)', () => {
 
     await page.locator(TAB).first().click()
 
-    // The click the user reported as not helping either. Aimed near the bottom
-    // of the pane, where the prompt editor sits.
-    const box = await page.locator('.pane.active').boundingBox()
-    await page.mouse.click(box!.x + box!.width / 2, box!.y + box!.height - 30)
+    // The click the user reported as not helping either — into the prompt
+    // editor of the tab just switched to.
+    await clickIntoEditor(page)
 
     await expect.poll(() => focusedClass(page), { timeout: 5000 }).toContain('nocx-editor-input')
 

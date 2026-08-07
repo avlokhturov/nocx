@@ -207,6 +207,22 @@ jobs:
           npm ci
           npm run typecheck
 
+      # The root lint and format, which until now ran ONLY in the pre-commit
+      # hook — and had not actually run there for some time. `eslint .` and
+      # `prettier --check .` walk the filesystem, and the e2e container leaves
+      # its disposable home root-owned, so both died on EACCES while expanding
+      # the directory, before examining a file. A crashing gate reports nothing,
+      # so nothing was reported: 19 lint errors and 15 unformatted files had
+      # accumulated behind it. The steps above check `frontend/`, which is a
+      # different eslint config and a different tree — it never covered this one
+      # (nocx-z9s9.8).
+      - name: Lint the repo root (e2e, hooks, config)
+        working-directory: .
+        run: npm run lint
+      - name: Check formatting at the repo root
+        working-directory: .
+        run: npm run format:check
+
       # The coverage receipt: every *.spec.ts on disk is collected by some
       # project. A hand-written exclusion list cannot report a file that is on
       # neither list, which is how seven specs once ran nowhere while the
@@ -215,61 +231,55 @@ jobs:
         working-directory: .
         run: node e2e/check-coverage.mjs
 
-  # e2e — the suite, run the way a developer runs it.
+  # e2e — the suite, in the same container a developer runs it in.
   #
-  # ONE command: `npx playwright test`. The stand it drives — cmd/devharness on
-  # a real PTY plus vite serving the renderer — is Playwright's own
-  # (e2e/stand.ts), so there is nothing here to keep in step with a local
-  # script. That mattered: the suite used to run two ways, seven specs could
-  # only run on one of them, and a hand-written exclusion list plus a second
-  # job was what held it together. When CI stopped building the binary those
-  # seven need they all failed on their first line and the shards stayed green
-  # (nocx-azxe.2). e2e/check-coverage.mjs is the receipt that no file is
-  # uncollected now, and it runs in the frontend job.
+  # ONE command: `e2e/run-in-container.sh`. Inside it, `npx playwright test`; the
+  # stand it drives — cmd/devharness on a real PTY plus vite serving the renderer
+  # — is Playwright's own (e2e/stand.ts). e2e/check-coverage.mjs is the receipt
+  # that no spec file is uncollected, and it runs in the frontend job.
   #
-  # Runner decision: macos-latest, and now for the only reason that survives —
-  # macOS is what ships. The engine argument never applied (Playwright drives
-  # its own Chromium and WebKit at a URL, never the app's webview), and the
-  # cost-of-machinery argument went with `wails dev`. What is left is that
-  # Darwin paths, Darwin PTY semantics and the shells macOS ships are only
-  # observable here, and every one of those has cost us a defect.
+  # Runner decision: the container, on ubuntu-latest — and the point is the
+  # container, not the runner. This job used to be macos-latest on the argument
+  # that macOS is what ships. What that produced was two stands wearing one name:
+  # a developer ran Linux/bash in the container and CI ran a macOS runner with
+  # whatever shell it had, and no command existed that predicted the other.
+  # Measured on 2026-08-07 at the same tree: the container reported 5 failures
+  # and macOS 18, the two sets overlapping in ONE test. Four macOS failures could
+  # not be reproduced locally at all, and two container failures were green on
+  # macOS. A gate nobody can reproduce is not a gate.
   #
-  # No shards. The whole suite, both browsers, one worker, measured at 9.7
-  # minutes; three shards each paid 96s of setup and 93s of `wails dev` cold
-  # start to save wall clock the suite no longer spends. workers stays at 1
-  # until each worker can be given its own backend and home — the DocumentStore
-  # consumers rewrite whole documents, so concurrency without that is a race
-  # (nocx-8rda).
+  # The image is what makes the two runs identical — not the OS. It pins the
+  # Playwright build, both browser builds, Go and the three shells the launcher
+  # tests drive. Running "ubuntu-latest plus npm ci" instead would move the
+  # divergence rather than remove it.
+  #
+  # What this gives up, checked rather than assumed: Darwin PTY semantics and
+  # Darwin paths are covered by `backend` on macos-latest (internal/pty,
+  # internal/storage, including the -tags release build), and both macOS shells
+  # by its 31 bash and 14 zsh tests in internal/shellintegration. WKWebView was
+  # never covered here on either runner — Playwright drives its own browser
+  # builds at a URL, never the app's webview. What is genuinely left uncovered is
+  # the whole stack end to end on Darwin, whose one known instance is nocx-qduc,
+  # already filed at P0. A macOS e2e job comes back when there is something for
+  # it to prove that these do not (nocx-z9s9.8).
+  #
+  # No shards, and workers stays at 1 until each worker can be given its own
+  # backend and home — the DocumentStore consumers rewrite whole documents, so
+  # concurrency without that is a race (nocx-8rda).
   e2e:
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
-    runs-on: macos-latest
-    timeout-minutes: 25
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v7
-        with:
-          go-version: '1.26'
-          cache: true
-
-      - uses: actions/setup-node@v7
-        with:
-          node-version: '24'
-          cache: 'npm'
-          cache-dependency-path: |
-            package-lock.json
-            frontend/package-lock.json
-
-      - run: npm ci
-      - run: cd frontend && npm ci
-      # Both engines the suite declares. WebKit is not a luxury: the app ships
-      # inside WKWebView, so WebKit is the closer of the two to what users run.
-      - run: npx playwright install chromium webkit
-
-      # The same command a developer runs. Nothing before it starts a backend:
-      # the stand is Playwright's, and a second one here would fight it for the
-      # port.
-      - run: npx playwright test
+      # Nothing else. No setup-go, no setup-node, no `playwright install`: every
+      # one of those would provision a second copy of something the image
+      # already pins, and the copy is where drift starts. A runner that needs
+      # provisioning for this job is a sign the image stopped being the whole
+      # answer.
+      - name: e2e (container)
+        run: e2e/run-in-container.sh
 
       - name: Upload traces
         if: always()

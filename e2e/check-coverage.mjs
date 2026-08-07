@@ -57,9 +57,11 @@ const listed = execFileSync('npx', ['playwright', 'test', '--list', '--reporter=
 
 const report = JSON.parse(listed)
 const collected = new Set()
+let cases = 0
 const walk = (suites) => {
   for (const s of suites ?? []) {
     if (s.file) collected.add(s.file)
+    cases += s.specs?.length ?? 0
     walk(s.suites)
   }
 }
@@ -82,5 +84,8 @@ if (missing.length > 0) {
   process.exit(1)
 }
 
-const total = report.stats?.expected ?? collected.size
-console.log(`COVERAGE OK — ${collected.size} spec files collected, ${total} tests`)
+// Counted from the listing, not from report.stats.expected: `--list` never runs
+// anything, so `expected` is 0 and the receipt read "36 spec files collected, 0
+// tests" — a line whose second half says the opposite of its first, on a gate
+// whose whole job is to be believed (nocx-z9s9.8).
+console.log(`COVERAGE OK — ${collected.size} spec files collected, ${cases} test cases`)

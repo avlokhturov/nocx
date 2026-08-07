@@ -1,4 +1,4 @@
-import { test, expect, promptReady } from './harness'
+import { test, expect, promptReady, clickIntoEditor } from './harness'
 
 // nocx-4ff.28: opening a second tab leaves the first unable to accept
 // keyboard input. The user-observable contract is that every tab accepts
@@ -7,7 +7,6 @@ import { test, expect, promptReady } from './harness'
 const TITLE = '.nocx-tab-title'
 const TAB = '.nocx-tab'
 const TAB_ADD = '[aria-label="New tab"]'
-const PANE = '.pane.active'
 
 test.describe('multi-tab input (nocx-4ff.28)', () => {
   test('first tab still accepts input after second tab is created', async ({ page }) => {
@@ -31,12 +30,11 @@ test.describe('multi-tab input (nocx-4ff.28)', () => {
     // Switch back to tab 1 by clicking its tab button.
     await page.locator(TAB).first().click()
 
-    // Click into the editor area of tab 1 to give it focus.
+    // Click into the editor of tab 1 to give it focus.
     // Post tab-switch the editor may not auto-focus (nocx-4ff.29); this
     // test must isolate nocx-4ff.28 (typing in an active tab with focus
     // in its editor), so we manually place focus first.
-    const box = await page.locator(PANE).boundingBox()
-    await page.mouse.click(box!.x + box!.width / 2, box!.y + box!.height - 30)
+    await clickIntoEditor(page)
     await expect
       .poll(() => page.evaluate(() => document.activeElement?.className ?? ''), { timeout: 5000 })
       .toContain('nocx-editor-input')
