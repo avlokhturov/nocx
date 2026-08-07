@@ -143,8 +143,20 @@ test.describe('tab completion', () => {
     await expect(page.locator('.nocx-tab')).toHaveCount(1)
     await promptReady(page)
 
-    // A prefix that matches no command, no history row and no path.
-    await page.keyboard.type('zzznocxe2enope')
+    // A prefix that matches no command, no history row and no path — and the
+    // nonce is what makes the third clause true.
+    //
+    // It used to be the fixed string 'zzznocxe2enope', and the last thing this
+    // test does is press Enter, which RUNS that line and records it in history.
+    // History lives in the stand's home, which every spec in a run shares and
+    // both browser projects share, so chromium's pass was what made webkit's
+    // premise false: the second project typed a prefix its own history now held,
+    // the panel correctly offered the history row, and the poll spent 45 seconds
+    // waiting for a "No matches" the product had no reason to say. Whichever
+    // project ran second lost, which is what made it look like a race
+    // (nocx-z9s9.6, and the nocx-8rda shape underneath it).
+    const nope = `zzznocxe2enope${Date.now().toString(36)}`
+    await page.keyboard.type(nope)
 
     // The command snapshot may still be loading on a slow machine — the
     // honest row names that ("command names are still loading"); retry Tab
@@ -184,7 +196,7 @@ test.describe('tab completion', () => {
     await expect(rows).toHaveCount(1)
     await expect(rows.first()).toHaveAttribute('data-empty', 'true')
     await expect(rows.first()).not.toHaveAttribute('aria-selected', 'true')
-    await expect(page.locator(INPUT)).toHaveText('zzznocxe2enope')
+    await expect(page.locator(INPUT)).toHaveText(nope)
 
     // Enter falls through to the editor's submit — nothing was selected and
     // nothing blocked the key; the shell runs the line.
