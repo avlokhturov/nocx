@@ -76,7 +76,11 @@ jobs:
             echo "release=false" >> "$GITHUB_OUTPUT"
           fi
 
-  build:
+  # Named for its platform, like build-linux. It was `build` back when macOS was
+  # the only target and the qualifier carried no information; once ADR-0007
+  # reversed D1 and added the AppImage, an unqualified `build` next to a
+  # `build-linux` read as "the build" and hid which platform had failed.
+  build-macos:
     needs: [ci, validate]
     runs-on: macos-15
     env:
@@ -210,7 +214,14 @@ jobs:
           LDFLAGS="-X github.com/shady2k/nocx/internal/version.Version=${VERSION}"
           LDFLAGS="${LDFLAGS} -X github.com/shady2k/nocx/internal/version.Commit=${GITHUB_SHA}"
           LDFLAGS="${LDFLAGS} -X github.com/shady2k/nocx/internal/version.Date=${BUILD_DATE}"
-          wails build -platform linux/amd64 -tags release -ldflags "$LDFLAGS"
+          # `webkit2_41` is not optional here, it is what makes the step above
+          # mean anything: Wails v2 defaults its cgo pkg-config to
+          # webkit2gtk-4.0, so a job that installs libwebkit2gtk-4.1-dev and
+          # says nothing else fails at "Package webkit2gtk-4.0 was not found"
+          # AFTER the whole CI gate has run. 4.1 is the decided target — ADR-0007
+          # and the README support envelope both name it — so the tag states the
+          # decision rather than the apt line implying it (nocx-xy9z).
+          wails build -platform linux/amd64 -tags release,webkit2_41 -ldflags "$LDFLAGS"
 
       - name: Smoke checks (binary)
         run: |
@@ -292,7 +303,7 @@ jobs:
   # Separate from build so the signing key is never present in a job that runs
   # build tooling (§5). Publishing is git/manifest work, so it runs on ubuntu.
   publish:
-    needs: [validate, build, build-linux]
+    needs: [validate, build-macos, build-linux]
     if: needs.validate.outputs.release == 'true'
     runs-on: ubuntu-latest
     permissions:
