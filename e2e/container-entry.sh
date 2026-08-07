@@ -10,6 +10,16 @@
 # one place and the two cannot drift.
 set -euo pipefail
 
+# The repo is bind-mounted from the host, so its files are owned by the host
+# user while this container runs as root. Git calls that "dubious ownership"
+# and refuses, and `go build` stamps VCS info by default — so the devharness
+# build died on "error obtaining VCS status: exit status 128" before a single
+# spec ran. Declaring the mount safe is the fix that leaves `go build` spelled
+# the same here as in headless-run.sh, on CI and on a developer's machine;
+# -buildvcs=false would have made this one path build something subtly
+# different from everywhere else.
+git config --global --add safe.directory /work
+
 echo "=== npm ci (root + frontend) ==="
 npm ci --silent
 (cd frontend && npm ci --silent)
