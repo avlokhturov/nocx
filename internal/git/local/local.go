@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os/exec"
 	"strings"
 	"sync"
@@ -391,11 +392,19 @@ func (s *byteSink) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// statusSink feeds the status stream into the parser and applies the byte
-// half of the work ceiling. The wall-clock half lives in run's deadline: it
-// must fire even when git produces no output.
+// streamParser is the sink contract shared by the two streaming parsers
+// (porcelain status and numstat): the sink feeds bytes and stops the
+// traversal at the byte half of the work ceiling (design D9). The
+// wall-clock half lives in run's deadline: it must fire even when git
+// produces no output.
+type streamParser interface {
+	Write(b []byte) error
+}
+
+// statusSink feeds a status or numstat stream into its parser and applies
+// the byte half of the work ceiling.
 type statusSink struct {
-	p        *spawn.Parser
+	p        streamParser
 	maxBytes int64
 	bytes    int64
 }
@@ -416,6 +425,15 @@ func (s *statusSink) Write(b []byte) (int, error) {
 // keeps counting the rest, so Total is exact unless the traversal hit a work
 // ceiling and was cut. A non-zero exit is a failure here — unlike diff,
 // status has no data-carrying exit codes.
+//
+// The entries then gain their line counts (brief nocx-i4ki) from two more
+// bounded reads — the index side and the worktree side — merged by
+// attachCounts. The counts are ALL-OR-NOTHING: a count read that was bounded
+// out or failed attaches no counts anywhere and demotes Completeness to cut,
+// the panel's one visible "the answer is incomplete" state. A status
+// traversal that was itself cut skips the count reads entirely: two more
+// full-repository diffs are exactly the work the ceiling exists to bound,
+// and counts on a lower-bound prefix would look authoritative.
 func (r *Repo) Status(ctx context.Context) (git.Status, error) {
 	p := spawn.NewParser(r.ceilings.statusEntries)
 	res := run(ctx, spec{
@@ -459,7 +477,97 @@ func (r *Repo) Status(ctx context.Context) (git.Status, error) {
 	if st.Total > r.ceilings.statusEntries {
 		st.Completeness = git.CompletenessCapped
 	}
+	if err := r.attachCounts(ctx, &st); err != nil {
+		return git.Status{}, err
+	}
 	return st, nil
+}
+
+// attachCounts enriches the status entries with their line counts (brief
+// nocx-i4ki): the index side from `git diff --cached --numstat -z`, the
+// worktree side from `git diff --numstat -z`. Both reads complete before any
+// entry carries a count, because a partial count set makes the rows past the
+// cut look like rows with nothing to count — the D9 lie. When either read is
+// bounded out or failed, no entry carries counts and Completeness becomes
+// cut, which is the panel's one visible "the answer is incomplete" state.
+//
+// Untracked files get no counts by design: a numstat per untracked file is
+// one git process per file, and the 761-file case is exactly what the work
+// ceiling exists for. They are absent from the numstat stream, which is the
+// same "no count exists" state a binary file occupies.
+//
+// Conflicted entries get no counts either: during a merge git diff reports
+// several diff pairs for one unmerged path (measured: two records for one
+// conflicted file), none of which is THE line count of the row the panel
+// names. The merge keys on the lists, so conflicted entries are untouched.
+func (r *Repo) attachCounts(ctx context.Context, st *git.Status) error {
+	cached, cachedDegraded, err := r.numstat(ctx, true)
+	if err != nil {
+		return err
+	}
+	worktree, worktreeDegraded, err := r.numstat(ctx, false)
+	if err != nil {
+		return err
+	}
+	if cachedDegraded || worktreeDegraded {
+		st.Completeness = git.CompletenessCut
+		return nil
+	}
+	apply := func(entries []git.Entry, counts map[string]spawn.NumstatCount) {
+		for i := range entries {
+			if c, ok := counts[entries[i].Path]; ok {
+				entries[i].Added = &c.Added
+				entries[i].Deleted = &c.Deleted
+			}
+		}
+	}
+	apply(st.Staged, cached)
+	apply(st.Unstaged, worktree)
+	return nil
+}
+
+// numstat runs one line-count read, bounded by the same budget as the status
+// read (design D9). degraded is true when the read could not produce a
+// complete answer — the work ceiling cut the stream, or git exited non-zero
+// — in which case the map is empty and the caller must attach no counts
+// (all-or-nothing). A non-zero exit here is not an error the caller should
+// fail the whole status on: the primary read succeeded, and degrading the
+// whole panel over an enrichment read is the worse lie. It IS logged, so
+// the degrade is never structural only.
+func (r *Repo) numstat(ctx context.Context, cached bool) (map[string]spawn.NumstatCount, bool, error) {
+	p := spawn.NewNumstatParser()
+	res := run(ctx, spec{
+		// GIT_OPTIONAL_LOCKS=0 carries StatusArgs' --no-optional-locks
+		// decision onto a command that rejects the flag: git diff refuses
+		// --no-optional-locks (measured), so the env var — the knob git
+		// documents for "take no optional locks" — is the honest form. The
+		// panel's reads must never rewrite .git/index under an agent
+		// working in the same repository.
+		argv:     append([]string{r.gitPath}, spawn.NumstatArgs(cached)...),
+		dir:      r.toplevel,
+		env:      append(append([]string{}, r.env...), "GIT_OPTIONAL_LOCKS=0"),
+		sink:     &statusSink{p: p, maxBytes: r.ceilings.statusBytes},
+		deadline: time.Now().Add(r.ceilings.statusWall),
+	})
+	if res.cancelled {
+		return nil, false, ctx.Err()
+	}
+	if res.err != nil {
+		return nil, false, res.err
+	}
+	if res.cut {
+		return nil, true, nil
+	}
+	parsed, err := p.Finish()
+	if err != nil {
+		return nil, false, fmt.Errorf("git: parse numstat: %w", err)
+	}
+	if res.exitCode != 0 {
+		slog.Warn("git: numstat read failed; no rows will carry counts",
+			"cached", cached, "exit", res.exitCode, "stderr", res.stderr)
+		return nil, true, nil
+	}
+	return parsed.Counts, false, nil
 }
 
 // Stage stages exactly the given paths — never "all": an empty slice is a

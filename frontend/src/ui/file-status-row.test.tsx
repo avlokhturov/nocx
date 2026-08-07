@@ -146,4 +146,46 @@ describe('FileStatusRow', () => {
       expect(item.parentElement).toBe(list)
     }
   })
+
+  it('a row with counts reads +3 −1, the way a source-control panel reads', () => {
+    render(() => <FileStatusRow path="f.txt" status="M" added={3} deleted={1} />)
+    const counts = document.querySelector('.ui-file-status-row__counts')
+    expect(counts?.getAttribute('data-counts')).toBe('present')
+    // U+2212 MINUS SIGN, the glyph the brief's acceptance reads.
+    expect(counts?.textContent).toBe('+3 \u22121')
+  })
+
+  it('absent counts render nothing at all, never +0 −0', () => {
+    render(() => <FileStatusRow path="new.txt" status="?" />)
+    expect(document.querySelector('.ui-file-status-row__counts')).toBeNull()
+    const row = screen.getByRole('listitem')
+    expect(row.textContent).not.toContain('+')
+    expect(row.textContent).not.toContain('0')
+  })
+
+  it("a lone count renders nothing — the pair is the wire's shape", () => {
+    // The wire sends added and deleted together (one numstat record); a
+    // caller that passes one without the other is broken, and rendering
+    // half a count would invent a number the read never produced.
+    render(() => <FileStatusRow path="f.txt" status="M" added={3} />)
+    expect(document.querySelector('.ui-file-status-row__counts')).toBeNull()
+  })
+
+  it('zero counts are present counts — a pure rename reads +0 −0', () => {
+    // git answers a rename with 0 added, 0 deleted: present counts whose
+    // value is zero, not the absence of a count.
+    render(() => <FileStatusRow path="new.txt" status="R" added={0} deleted={0} />)
+    const counts = document.querySelector('.ui-file-status-row__counts')
+    expect(counts?.textContent).toBe('+0 \u22120')
+  })
+
+  it("the counts' tones are the component's, and the classes carry them", () => {
+    // jsdom computes no colours; the contract is the classes, and the
+    // stylesheet paints them (added is success, deleted is danger — fixed
+    // by meaning, so there is no tone table for a surface to name).
+    render(() => <FileStatusRow path="f.txt" status="M" added={3} deleted={1} />)
+    expect(document.querySelector('.ui-file-status-row__added')).not.toBeNull()
+    expect(document.querySelector('.ui-file-status-row__deleted')).not.toBeNull()
+    expect(document.querySelector('.ui-file-status-row__counts')).not.toBeNull()
+  })
 })

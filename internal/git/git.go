@@ -186,8 +186,13 @@ const (
 	// CompletenessCapped — every record was observed; more existed than
 	// MaxStatusEntries, and only the first are in the lists. Total is exact.
 	CompletenessCapped Completeness = "capped"
-	// CompletenessCut — the traversal was stopped at the work ceiling before
-	// its end. Total is a lower bound and the lists hold a prefix.
+	// CompletenessCut — a bounded read was stopped at the work ceiling
+	// before its end. When the STATUS traversal was stopped, the lists hold
+	// a prefix and Total is a lower bound. When only the line-count read
+	// was stopped or failed, the lists are complete and Total is exact, but
+	// no entry carries counts — counts are all-or-nothing, because a
+	// partial count set makes the rows past the cut look like rows with
+	// nothing to count (brief nocx-i4ki).
 	CompletenessCut Completeness = "cut"
 )
 
@@ -200,6 +205,13 @@ type Entry struct {
 	Path string
 	X    byte
 	Y    byte
+
+	// Added and Deleted are the numstat line counts for this entry on its
+	// side, nil when no count exists — an untracked file, a binary file, a
+	// conflicted entry, or a count read that was bounded out (design D9,
+	// brief nocx-i4ki). They are always set or unset as a pair.
+	Added   *int
+	Deleted *int
 }
 
 // Side names which side of a file a diff asks about. It is a closed set.

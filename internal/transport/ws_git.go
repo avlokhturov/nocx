@@ -153,6 +153,14 @@ type gitEntryWire struct {
 	Path string `json:"path"`
 	X    string `json:"x"`
 	Y    string `json:"y"`
+	// Added and Deleted are the numstat line counts for this entry on its
+	// side, omitted when no count exists — an untracked file, a binary
+	// file, a conflicted entry, or a count read that was bounded out
+	// (design D9, brief nocx-i4ki). Omitted is NOT zero: a real 0/0 answer
+	// (a pure rename, an empty file) marshals as 0, so the wire uses
+	// pointers, never omitempty on an int.
+	Added   *int `json:"added,omitempty"`
+	Deleted *int `json:"deleted,omitempty"`
 }
 
 type gitStatusWire struct {
@@ -179,9 +187,11 @@ func wireGitStatus(st git.Status) gitStatusWire {
 		out := make([]gitEntryWire, 0, len(es))
 		for _, e := range es {
 			out = append(out, gitEntryWire{
-				Path: e.Path,
-				X:    string([]byte{e.X}),
-				Y:    string([]byte{e.Y}),
+				Path:    e.Path,
+				X:       string([]byte{e.X}),
+				Y:       string([]byte{e.Y}),
+				Added:   e.Added,
+				Deleted: e.Deleted,
 			})
 		}
 		return out

@@ -115,6 +115,48 @@ test('happy path: edit → unstaged row → diff tab → stage → commit emptie
   }
 })
 
+// ── Every changed row says how much it changed (brief nocx-i4ki) ──────────
+
+test('a changed row reads +3 −1, and an untracked row reads nothing', async ({
+  page,
+}) => {
+  const repo = createRepo({
+    file: 'notes.md',
+    initialContent: 'a\nb\nc\nd\n',
+  })
+  try {
+    await openGitPanelAt(page, repo.root, repo.basename)
+
+    // Edit the tracked file from outside nocx: gained three lines, lost
+    // one. The counts ride the polled status — the row must read +3 −1,
+    // never a bare M (U+2212 MINUS SIGN, the glyph the brief's acceptance
+    // reads).
+    writeFileSync(path.join(repo.root, repo.file), 'a\nx\nb\nc\ny\nz\n')
+    const unstagedRow = page.locator(UNSTAGED).locator(ROW, { hasText: repo.file })
+    await expect(unstagedRow).toBeVisible({ timeout: 20_000 })
+    await expect(unstagedRow).toContainText('+3 −1')
+
+    // Stage it → the staged row carries the same counts: the post-mutation
+    // status (D12) is the same answer the panel already scopes by epoch,
+    // and the counts were never fetched separately.
+    await unstagedRow.getByTestId('git-row-stage').click()
+    const stagedRow = page.locator(STAGED).locator(ROW, { hasText: repo.file })
+    await expect(stagedRow).toBeVisible({ timeout: 20_000 })
+    await expect(stagedRow).toContainText('+3 −1')
+
+    // An untracked file has no counts by design — a numstat per untracked
+    // file is one git process per file, which is exactly what the work
+    // ceiling exists for — so the row renders the status letter and
+    // nothing after it.
+    writeFileSync(path.join(repo.root, 'fresh.txt'), 'fresh\n')
+    const untrackedRow = page.locator(UNSTAGED).locator(ROW, { hasText: 'fresh.txt' })
+    await expect(untrackedRow).toBeVisible({ timeout: 20_000 })
+    await expect(untrackedRow).not.toContainText('+')
+  } finally {
+    cleanupRepo(repo)
+  }
+})
+
 // ── Layout: the one property no other gate can see ────────────────────────
 
 // A row's geometry is invisible to every check we have. jsdom computes no

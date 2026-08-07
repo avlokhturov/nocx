@@ -51,6 +51,14 @@ export interface FileStatusRowProps {
   path: string
   /** The wire's one-letter status. */
   status: FileStatus
+  /** Lines added to this file on this side (git diff --numstat). Absent
+   *  means no count exists — untracked, binary, conflicted, or a bounded
+   *  count read (design D9) — and renders nothing, never `+0 −0`. The two
+   *  arrive together or not at all; if one is absent both are treated as
+   *  absent. */
+  added?: number
+  /** Lines deleted from this file on this side. Absent renders nothing. */
+  deleted?: number
   /** The caller's selection vocabulary — rendered, not decided. */
   selected?: boolean
   /** The current keyboard target; reads stronger than selection. */
@@ -61,7 +69,6 @@ export interface FileStatusRowProps {
    *  it never activates the row. */
   actions?: JSX.Element
 }
-
 /** Split a repository path into the name and its dimmed directory.
  *  A path ending in '/' (a directory row) has no name part and renders
  *  whole — a bare name at the root has no directory at all.
@@ -82,6 +89,11 @@ export function FileStatusRow(props: FileStatusRowProps) {
   // inside JSX below is what registers the dependency — a row re-rendered
   // with a different path must re-split it.
   const parts = createMemo(() => splitPath(props.path))
+  // The counts are a pair or nothing: the wire sends added and deleted
+  // together (one numstat record), so a lone value is treated as absent —
+  // absent means "no count exists", and rendering half a count would
+  // invent a number the read never produced.
+  const hasCounts = createMemo(() => props.added !== undefined && props.deleted !== undefined)
   // The wrapper goes INSIDE the info slot, and that placement is the whole
   // point (nocx-uf0p). It may not go outside CollectionRow: the row carries
   // role="listitem", a surface places these inside a role="list", and an
@@ -103,6 +115,21 @@ export function FileStatusRow(props: FileStatusRowProps) {
           <span class="ui-file-status-row__status" data-tone={STATUS_TONE[props.status]}>
             {props.status}
           </span>
+          <Show when={hasCounts()}>
+            {/* The counts: +N −N, the answer to "how much did it change".
+                The minus is U+2212, the glyph the reference source-control
+                panels render; an ASCII hyphen reads as a dash in the same
+                row as the plus. The tones are fixed by meaning — an
+                addition is success, a removal danger — so unlike the
+                status letter there is no tone table for a caller to name;
+                the component owns it. The literal space keeps the two
+                numbers readable in the DOM (the css gap alone would leave
+                "+3−1" to a text assert). */}
+            <span class="ui-file-status-row__counts" data-counts="present">
+              <span class="ui-file-status-row__added">+{props.added}</span>{' '}
+              <span class="ui-file-status-row__deleted">−{props.deleted}</span>
+            </span>
+          </Show>
           <span class="ui-file-status-row__type-icon" aria-hidden="true">
             <FileIcon />
           </span>

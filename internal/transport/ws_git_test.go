@@ -128,11 +128,12 @@ func (r *stubGitRepo) Close() error {
 }
 
 func stubStatus() git.Status {
+	added, deleted := 3, 1
 	return git.Status{
 		Branch:       "main",
 		Head:         "abc1234",
 		Staged:       []git.Entry{{Path: "staged.txt", X: 'M', Y: '.'}},
-		Unstaged:     []git.Entry{{Path: "unstaged.txt", X: '.', Y: 'M'}},
+		Unstaged:     []git.Entry{{Path: "unstaged.txt", X: '.', Y: 'M', Added: &added, Deleted: &deleted}},
 		Conflicted:   []git.Entry{},
 		Total:        2,
 		Completeness: git.CompletenessComplete,
@@ -911,7 +912,6 @@ func TestGitOpen_RealGitRoundTrip(t *testing.T) {
 	} else if open.Result.Status.Branch == "" {
 		t.Error("status.branch is empty on a real repository")
 	}
-
 	statusResp := jsonrpcCallWithID(t, e.conn, "git.status", map[string]any{"bindingId": open.Result.BindingID}, 3)
 	var st struct {
 		Result struct {
@@ -932,7 +932,61 @@ func TestGitOpen_RealGitRoundTrip(t *testing.T) {
 		t.Error("status.head is empty after a commit")
 	}
 
-	closeResp := jsonrpcCallWithID(t, e.conn, "git.close", map[string]any{"bindingId": open.Result.BindingID}, 4)
+	// The counts are real git's answer, off the real socket: modify f.txt
+	// outside the app, poll status, and read +3 −1 back on the wire
+	// (brief nocx-i4ki). This is the assertion the DTO tests cannot make —
+	// they prove the struct is well-formed, not that the server sends it.
+	// #nosec G304 — f.txt is the fixture the test itself wrote above
+	// (initRealGitRepo); the join is a fixed test literal, and the whole
+	// call is the point of this assertion.
+	orig, err := os.ReadFile(filepath.Join(dir, "f.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	modified := strings.ReplaceAll(string(orig), "v1\n", "v1\nA\nB\nC\n")
+	if modified == string(orig) {
+		modified = string(orig) + "A\nB\nC\n"
+	}
+	if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte(modified), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	countsResp := jsonrpcCallWithID(t, e.conn, "git.status", map[string]any{"bindingId": open.Result.BindingID}, 4)
+	var cs struct {
+		Result struct {
+			Status struct {
+				Branch   string `json:"branch"`
+				Unstaged []struct {
+					Path    string `json:"path"`
+					Added   *int   `json:"added"`
+					Deleted *int   `json:"deleted"`
+				} `json:"unstaged"`
+			} `json:"status"`
+		} `json:"result"`
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(countsResp, &cs); err != nil {
+		t.Fatalf("git.status (counts): unmarshal: %v", err)
+	}
+	if cs.Error != nil {
+		t.Fatalf("git.status (counts): %+v", cs.Error)
+	}
+	if len(cs.Result.Status.Unstaged) != 1 || cs.Result.Status.Unstaged[0].Path != "f.txt" {
+		t.Fatalf("unstaged = %+v, want f.txt", cs.Result.Status.Unstaged)
+	}
+	entry := cs.Result.Status.Unstaged[0]
+	if entry.Added == nil || entry.Deleted == nil {
+		t.Fatalf("f.txt carries no counts off the real socket: %+v", entry)
+	}
+	if *entry.Added != 3 || *entry.Deleted != 0 {
+		t.Fatalf("counts = +%d −%d, want +3 −0", *entry.Added, *entry.Deleted)
+	}
+	// The counts ride the same status result as the branch — one answer,
+	// scoped by one epoch (D17): the counts were never fetched separately.
+	if cs.Result.Status.Branch != "master" {
+		t.Fatalf("branch = %q, want master", cs.Result.Status.Branch)
+	}
+
+	closeResp := jsonrpcCallWithID(t, e.conn, "git.close", map[string]any{"bindingId": open.Result.BindingID}, 5)
 	var cl struct {
 		Error *jsonrpcErrorObj `json:"error"`
 	}

@@ -24,11 +24,13 @@ import (
 //	FAKE_GITDIR       line 2
 //	FAKE_HEAD         rev-parse --short HEAD answer; "FAIL" exits 128
 //	FAKE_LOG          headMessage answer
-//	FAKE_STATUS       stream | finite | staged | staged_then_fail |
-//	                  sleep | sleep_stubborn | fail | flood
-//	FAKE_MUTATE       add/reset behavior: fail (default) | ok
-//	FAKE_COMMIT       fail | fail_flood | ok
 //	FAKE_DIFF         sleep | sleep_stubborn | fail
+//	FAKE_NUMSTAT      mode for `git diff --numstat`: fail | stream | otherwise
+//	                  the stream comes from FAKE_NUMSTAT_CACHED_FILE /
+//	                  FAKE_NUMSTAT_WORKTREE_FILE (absent: a valid numstat
+//	                  answer with no counts). The streams live in files
+//	                  because a numstat record is NUL-terminated and an env
+//	                  value may not contain a NUL.
 func writeFakeGit(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -142,6 +144,25 @@ case "$1" in
     printf '%s' "${FAKE_LOG:-subject line\n\nbody text}"
     exit 0 ;;
   diff)
+    if [ -n "${FAKE_NUMSTAT:-}" ] || [ -n "${FAKE_NUMSTAT_CACHED_FILE:-}" ] || [ -n "${FAKE_NUMSTAT_WORKTREE_FILE:-}" ]; then
+      case "${FAKE_NUMSTAT:-ok}" in
+        fail) echo "fatal: index corrupt" >&2; exit 128 ;;
+        stream) i=0; while true; do printf '1\t0\tf%06d\000' "$i"; i=$((i+1)); done ;;
+        *)
+          # The invocation environment is otherwise unobservable from the
+          # argv log; this line records the lock-safety knob (the env form
+          # of status' --no-optional-locks, which git diff rejects).
+          printf '%s\n' "${GIT_OPTIONAL_LOCKS:-unset}" >> "$FAKE_GIT_LOG_ENV"
+          # The streams ride in files, never env vars: an env value may not
+          # contain a NUL byte, and the numstat records are NUL-terminated.
+          if [ "$2" = "--cached" ]; then
+            if [ -n "${FAKE_NUMSTAT_CACHED_FILE:-}" ]; then cat "$FAKE_NUMSTAT_CACHED_FILE"; fi
+          else
+            if [ -n "${FAKE_NUMSTAT_WORKTREE_FILE:-}" ]; then cat "$FAKE_NUMSTAT_WORKTREE_FILE"; fi
+          fi
+          exit 0 ;;
+      esac
+    fi
     case "${FAKE_DIFF:-none}" in
       sleep) sleep 1000 ;;
       sleep_stubborn) trap '' INT TERM; sleep 1000 ;;
@@ -171,6 +192,7 @@ func fakeGitEnv(t *testing.T, behaviors map[string]string) []string {
 	env := []string{
 		"PATH=" + dir + ":" + os.Getenv("PATH"),
 		"FAKE_GIT_LOG=" + filepath.Join(dir, "argv.log"),
+		"FAKE_GIT_LOG_ENV=" + filepath.Join(dir, "env.log"),
 		"FAKE_GIT_COUNT=" + filepath.Join(dir, "count"),
 		"HOME=" + home,
 		"FAKE_TOPLEVEL=" + repo,
