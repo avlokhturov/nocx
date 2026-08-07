@@ -35,11 +35,12 @@ var errEnough = errors.New("git: enough output received")
 // facts about how to invoke git in this repository; the interface methods
 // each spawn a fresh child, so Repo itself owns no process.
 type Repo struct {
-	gitPath  string
-	env      []string // the resolved environment (or os.Environ() when degraded)
-	toplevel string   // the worktree root; every invocation runs here
-	gitDir   string
-	ceilings ceilings
+	gitPath   string
+	pinnedEnv []string  // WithEnv's pinned environment; nil when resolving from the shell
+	resolver  *envCache // the shared resolution; nil with a pinned environment
+	toplevel  string    // the worktree root; every invocation runs here
+	gitDir    string
+	ceilings  ceilings
 }
 
 type ceilings struct {
@@ -53,6 +54,32 @@ type ceilings struct {
 // Close — so closing is a no-op. The method exists so the relay
 // implementation has a teardown point at the seam.
 func (r *Repo) Close() error { return nil }
+
+// envSettled is the environment every non-commit invocation runs under: the
+// pinned one, or the current settled resolution — the fallback while the
+// resolution is pending or its failure is being remembered. It never
+// resolves: status, diff and log need a PATH that finds git, which the
+// capability probe established at open, not the shell environment, which
+// only the commit path needs (D6, nocx-6pz0).
+func (r *Repo) envSettled() []string {
+	if r.resolver != nil {
+		env, _, _ := r.resolver.known()
+		return env
+	}
+	return r.pinnedEnv
+}
+
+// envResolved is the environment the commit path runs under: the pinned one,
+// or the shared resolution — joining an in-flight attempt, or retrying a
+// remembered failure once its cooldown has passed. It is the only place that
+// blocks on resolution: the commit is where D6's guarantee matters.
+func (r *Repo) envResolved(ctx context.Context) []string {
+	if r.resolver == nil {
+		return r.pinnedEnv
+	}
+	env, _, _ := r.resolver.resolve(ctx)
+	return env
+}
 
 // spec is one invocation of git. sink receives stdout; returning errEnough
 // from it stops the child deliberately. deadline is the wall-clock half of
@@ -417,11 +444,19 @@ func (s *statusSink) Write(b []byte) (int, error) {
 // ceiling and was cut. A non-zero exit is a failure here — unlike diff,
 // status has no data-carrying exit codes.
 func (r *Repo) Status(ctx context.Context) (git.Status, error) {
+	return r.statusWithEnv(ctx, r.envSettled())
+}
+
+// statusWithEnv is Status with an explicit environment. The commit path runs
+// its preflight and post-commit reads with the SAME environment the commit
+// runs under: the state a commit checks and the state its hook sees cannot
+// disagree (D6, nocx-6pz0).
+func (r *Repo) statusWithEnv(ctx context.Context, env []string) (git.Status, error) {
 	p := spawn.NewParser(r.ceilings.statusEntries)
 	res := run(ctx, spec{
 		argv:     append([]string{r.gitPath}, spawn.StatusArgs()...),
 		dir:      r.toplevel,
-		env:      r.env,
+		env:      env,
 		sink:     &statusSink{p: p, maxBytes: r.ceilings.statusBytes},
 		deadline: time.Now().Add(r.ceilings.statusWall),
 	})
@@ -489,7 +524,7 @@ func (r *Repo) mutate(ctx context.Context, args []string, paths []string) (git.S
 	res := run(ctx, spec{
 		argv:  append([]string{r.gitPath}, args...),
 		dir:   r.toplevel,
-		env:   r.env,
+		env:   r.envSettled(),
 		stdin: strings.NewReader(stdin.String()),
 	})
 	if res.cancelled {
@@ -517,7 +552,7 @@ func (r *Repo) StageAll(ctx context.Context) (git.Status, error) {
 	res := run(ctx, spec{
 		argv: append([]string{r.gitPath}, spawn.AddAllArgs()...),
 		dir:  r.toplevel,
-		env:  r.env,
+		env:  r.envSettled(),
 	})
 	if res.cancelled {
 		return git.Status{}, ctx.Err()
@@ -544,7 +579,7 @@ func (r *Repo) UnstageAll(ctx context.Context) (git.Status, error) {
 	res := run(ctx, spec{
 		argv: append([]string{r.gitPath}, spawn.ResetAllArgs()...),
 		dir:  r.toplevel,
-		env:  r.env,
+		env:  r.envSettled(),
 	})
 	if res.cancelled {
 		return git.Status{}, ctx.Err()

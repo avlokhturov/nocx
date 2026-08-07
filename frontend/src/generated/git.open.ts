@@ -30,7 +30,7 @@ export interface GitOpenResult {
    */
   gitVersion?: string
   /**
-   * Whether git will run in the environment resolved from the user's shell or in the degraded os.Environ() fallback (design D6). The panel renders degraded before the first commit: a hook that silently could not find its tools is the exact failure the decision exists to prevent.
+   * Whether git will run in the environment resolved from the user's shell or in the degraded os.Environ() fallback (design D6). degraded also covers the brief window before the background resolution settles (nocx-6pz0): the panel must never claim resolved while the resolution is still running. The panel renders degraded before the first commit: a hook that silently could not find its tools is the exact failure the decision exists to prevent.
    */
   envState?: 'resolved' | 'degraded'
   /**

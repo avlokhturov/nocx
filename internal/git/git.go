@@ -137,7 +137,9 @@ type OpenOutcome struct {
 // EnvState reports whether git will run in the resolved environment or in the
 // degraded fallback (spec D6). The panel renders degraded before the first
 // commit: a hook that silently could not find its tools is the exact failure
-// the decision exists to prevent.
+// the decision exists to prevent. degraded is also reported for the brief
+// window before the background resolution settles (nocx-6pz0) — the panel
+// must never be shown a "resolved" the resolution has not earned.
 type EnvState string
 
 const (
