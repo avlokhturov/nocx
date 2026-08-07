@@ -46,6 +46,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 
 	"github.com/creack/pty"
@@ -330,6 +331,35 @@ func handleSession(ch gossh.Channel, reqs <-chan *gossh.Request) {
 // child alone holds the slave, so its exit propagates EOF to the master and
 // the channel closes. stderr of the child is echoed to the fixture's stderr
 // so a spawn failure is observable instead of a silent dead session.
+// sessionEnv is the environment a session gets, and SHELL is why it exists.
+//
+// A real sshd sets SHELL from the account's passwd entry, and nocx's installed
+// launcher carrier reads exactly that to choose its script:
+//
+//	case "${SHELL:-/bin/sh}" in */bash) … */zsh) … *) … posix
+//
+// This used to pass os.Environ() straight through, so SHELL was whatever had
+// leaked in from whoever started the fixture — and in the e2e container nothing
+// sets it. Every connection over the installed launcher therefore took the POSIX
+// fallback and reported `tier=minimal`, while the first connection's argv-borne
+// launcher — which the backend picks, not the remote — reported `tier=enhanced`.
+// One host, two answers to "which shell is this", depending only on which path
+// asked (nocx-z9s9.13).
+//
+// Set explicitly rather than inherited: this fixture already decides the login
+// shell by exec'ing bash, and a decision it makes is a decision it should
+// publish.
+func sessionEnv(shell string) []string {
+	env := make([]string, 0, len(os.Environ())+2)
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "SHELL=") || strings.HasPrefix(kv, "TERM=") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	return append(env, "SHELL="+shell, "TERM=xterm-256color")
+}
+
 func startCommand(ch gossh.Channel, st *sessionState, command string) {
 	st.mu.Lock()
 	if st.started {
@@ -359,7 +389,7 @@ func startCommand(ch gossh.Channel, st *sessionState, command string) {
 	}
 	//nolint:gosec // dev-only fixture: the command string is this binary's own contract.
 	cmd := exec.Command(bash, "-c", command)
-	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
+	cmd.Env = sessionEnv(bash)
 	cmd.Stdin = slave
 	cmd.Stdout = slave
 	cmd.Stderr = slave

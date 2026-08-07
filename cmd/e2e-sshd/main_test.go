@@ -6,6 +6,8 @@ import (
 	"encoding/pem"
 	"net"
 	"os"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -119,5 +121,53 @@ func TestConnSignal_FiresForAClientThatOffersNoPublicKey(t *testing.T) {
 	case <-fired:
 	case <-time.After(10 * time.Second):
 		t.Fatal("no CONN= signal for a client that authenticated by password")
+	}
+}
+
+// A real sshd tells the session which login shell it is, and the nocx launcher
+// carrier reads exactly that.
+//
+// The fixture did not. It handed the session `os.Environ()` plus TERM, so
+// $SHELL was whatever had leaked in from whoever started e2e-sshd — and inside
+// the e2e container nothing sets it at all. `~/.nocx/launch` selects its script
+// with
+//
+//	case "${SHELL:-/bin/sh}" in */bash) … */zsh) … *) … posix
+//
+// so an absent $SHELL sent every installed connection down the POSIX fallback
+// and the passport came back `tier=minimal` where the first, argv-borne
+// connection had produced `tier=enhanced`. The journey saw a second ssh block
+// that never entered an environment (nocx-z9s9.13).
+//
+// The fixture already decides the login shell — it execs bash. This asserts it
+// publishes that decision rather than leaving the far side to guess.
+func TestSessionEnv_NamesTheShellTheFixtureActuallyRuns(t *testing.T) {
+	const bashPath = "/some/where/bin/bash"
+
+	env := sessionEnv(bashPath)
+
+	var shell string
+	var seen int
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "SHELL=") {
+			shell = strings.TrimPrefix(kv, "SHELL=")
+			seen++
+		}
+	}
+	if seen == 0 {
+		t.Fatal("the session environment carries no SHELL; a real sshd always sets one")
+	}
+	// Exactly one: appending a second SHELL= would leave the winner up to the
+	// consumer, and `case "$SHELL"` reads whichever the shell resolved.
+	if seen != 1 {
+		t.Errorf("SHELL appears %d times, want exactly 1", seen)
+	}
+	if shell != bashPath {
+		t.Errorf("SHELL = %q, want %q — the shell the fixture execs", shell, bashPath)
+	}
+
+	// And it still carries a terminal, which the integration scripts need.
+	if !slices.Contains(env, "TERM=xterm-256color") {
+		t.Error("the session environment lost TERM")
 	}
 }
