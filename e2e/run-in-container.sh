@@ -8,6 +8,7 @@
 #   e2e/run-in-container.sh                       # whole suite, both browsers
 #   e2e/run-in-container.sh e2e/sidebar.spec.ts   # one spec
 #   PW_PROJECTS=chromium e2e/run-in-container.sh  # one browser
+#   NOCX_E2E_CPUS=4 e2e/run-in-container.sh       # at the CI runner's capacity
 #
 # Everything after the script name is passed to `playwright test`.
 set -euo pipefail
@@ -52,7 +53,24 @@ tty_flag=()
 #
 # Passed in rather than guessed inside: only out here is there a host user to
 # ask about.
+# A CPU cap, because the image is not the whole of "the same conditions".
+#
+# The container made the two runs identical in software and left them different
+# in capacity: this developer box has many cores, and ubuntu-latest gives four.
+# Measured 2026-08-07 at the same commit — the suite takes 6.3 minutes here and
+# 10.6 on the runner — and every failure that survived the move to the container
+# was a timing one that only appeared on the slower side: a bell racing a tab
+# open, a command snapshot arriving past its budget, a drag losing focus.
+#
+# So this exists to reproduce the runner rather than to out-run it. Unset by
+# default: an unconstrained run is faster and is what you want while iterating
+# on one spec. Reach for it when CI is red and the container is green, which is
+# now the only shape of disagreement left.
+cpu_flag=()
+[ -n "${NOCX_E2E_CPUS:-}" ] && cpu_flag=(--cpus "$NOCX_E2E_CPUS")
+
 exec docker run --rm -i ${tty_flag[@]+"${tty_flag[@]}"} \
+  ${cpu_flag[@]+"${cpu_flag[@]}"} \
   -v "$repo_root:/work" \
   -v nocx-e2e-node:/work/node_modules \
   -v nocx-e2e-fenode:/work/frontend/node_modules \
