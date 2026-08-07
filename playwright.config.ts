@@ -82,6 +82,7 @@ export default defineConfig({
         'history-persistence.spec.ts',
         'prompt-vault.spec.ts',
         'recall-search.spec.ts',
+        'sidebar-resize.spec.ts',
         'tabby-import.spec.ts',
         'vault.spec.ts',
         'vault-settings.spec.ts',

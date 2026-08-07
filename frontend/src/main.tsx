@@ -47,6 +47,13 @@ import { createGitPanelServices, type GitPanelServices } from './git/git-client'
 import { createGitStore } from './git/git-store'
 import { registerGitDiffSurface } from './git/git-diff/open-git-diff'
 import type { ActiveOrigin } from './tab-content'
+import {
+  SIDEBAR_WIDTH_KEY,
+  SIDEBAR_WIDTH_DEFAULT,
+  clampSidebarWidth,
+  createSidebarWidthController,
+  persistSidebarWidth,
+} from './sidebar-width'
 import type { TunnelOpenResult } from './generated/tunnel.open'
 async function main() {
   log.info('nocx: main() called')
@@ -170,6 +177,10 @@ async function main() {
   const THEME_KEY = 'ui.theme'
 
   let placement: unknown = 'horizontal'
+  // The sidebar width from the same snapshot: the value that survives a
+  // restart. A fetch failure falls back to the declared default, which is
+  // also what the CSS paints before this bootstrap runs (style.css #sidebar).
+  let sidebarWidth = SIDEBAR_WIDTH_DEFAULT
   try {
     const snap = await profileClient.getSnapshot()
     placement = snap.values[PLACEMENT_KEY] ?? 'horizontal'
@@ -177,6 +188,10 @@ async function main() {
     // authoritative (ADR-0013 §8.1): the bootstrap cache covers the first
     // frame, but the persisted Go value wins on snapshot arrival.
     reconcileThemeFromGo(snap.values[THEME_KEY] as string | undefined, appliedThemeId)
+    const raw = snap.values[SIDEBAR_WIDTH_KEY]
+    if (typeof raw === 'number' && Number.isFinite(raw)) {
+      sidebarWidth = clampSidebarWidth(raw)
+    }
   } catch {
     // Backend may not be ready yet — safe fallback.
   }
@@ -400,6 +415,23 @@ async function main() {
     return live
   }
 
+  // The sidebar width controller (nocx-qmcu): the single owner of the
+  // panel's width between the drag handle, the settings observer and the
+  // persistence seam. Created here at the composition root because all
+  // three consume it — the bootstrap value above, the observer below, and
+  // mountSidebar, which binds the kit ResizeHandle to it.
+  const sidebarWidthCtrl = createSidebarWidthController(sidebarPanel, sidebarWidth, (width) => {
+    // The persistence seam (persistSidebarWidth): fire-and-forget, and a
+    // failed write surfaces a warning instead of reverting the width or
+    // wedging the handle — the value stays applied, and the next commit
+    // retries. `setSetting` is a method, hence the closure.
+    persistSidebarWidth(
+      (key, value) => profileClient.setSetting(key, value),
+      (message) => showToast({ level: 'warning', message }),
+      width,
+    )
+  })
+
   // Live application through SettingsObserver: when any setting
   // changes, refetch the snapshot and act on relevant keys.
   const observer = new SettingsObserver(dispatcher)
@@ -418,6 +450,15 @@ async function main() {
         }
         // Theme setting changed — reconcile against Go's value (ADR-0013 §8.1).
         reconcileThemeFromGo(snap.values[THEME_KEY] as string | undefined)
+        // Sidebar width changed — apply it unless the user is mid-drag: the
+        // live pointer position is the truth until the release commits it
+        // (nocx-qmcu).
+        if (!sidebarWidthCtrl.isDragging()) {
+          const raw = snap.values[SIDEBAR_WIDTH_KEY]
+          if (typeof raw === 'number' && Number.isFinite(raw)) {
+            sidebarWidthCtrl.apply(clampSidebarWidth(raw))
+          }
+        }
       } catch {
         // Silently ignore — a settings fetch failure is not actionable here.
       }
@@ -501,6 +542,7 @@ async function main() {
        see across the function boundary. */
     () => portsTargetId(),
     () => activeOrigin(),
+    sidebarWidthCtrl,
   )
 
   // Cmd/Ctrl+, opens or focuses the Settings tab.

@@ -319,14 +319,15 @@ jobs:
 
   # e2e-headless — the specs the job above cannot run.
   #
-  # Seven specs start their own backend through cmd/devharness so they can
+  # Eight specs start their own backend through cmd/devharness so they can
   # RESTART it mid-test: a vault that survives a restart, an import that
-  # outlives the process, history that is still there next launch. `wails dev`
-  # owns exactly one backend whose lifecycle Playwright cannot touch, so those
+  # outlives the process, history that is still there next launch, a sidebar
+  # width that comes back after a restart. `wails dev` owns exactly one
+  # backend whose lifecycle Playwright cannot touch, so those
   # subjects are unreachable there — and the way they reached around it did not
   # work either. Each pointed its page at its own backend by stubbing
   # window.go, and under `wails dev` wails installs the real window.go after
-  # Playwright's init script and before the app reads it. All seven quietly
+  # Playwright's init script and before the app reads it. All eight quietly
   # drove the shared backend on 34115 and asserted vault setup against a
   # process they had never touched, while the one they started logged its port
   # and never saw a client (nocx-w4vy).
@@ -378,6 +379,7 @@ jobs:
             e2e/history-persistence.spec.ts \
             e2e/prompt-vault.spec.ts \
             e2e/recall-search.spec.ts \
+            e2e/sidebar-resize.spec.ts \
             e2e/tabby-import.spec.ts \
             e2e/vault.spec.ts \
             e2e/vault-settings.spec.ts

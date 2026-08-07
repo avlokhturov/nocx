@@ -1,0 +1,34 @@
+/* ResizeHandle — the kit's "drag to resize" separator (nocx-qmcu).
+   Owns the seam a user drags between two panes: the hit area, the
+   col-resize affordance, and the hover/drag accent. The width it controls
+   belongs to the caller — this file never sizes a pane. */
+
+.ui-resize-handle {
+  flex: 0 0 auto;
+  width: 6px;
+  align-self: stretch;
+  cursor: col-resize;
+  touch-action: none; /* the pointer is the drag, never a scroll gesture */
+  -webkit-user-select: none;
+  user-select: none;
+  position: relative;
+}
+
+/* The grab line: a hairline centred in the hit area, transparent at rest
+   (the pane border beside it is the visible seam) and accented while
+   hovered or dragged, so the affordance is discoverable without painting
+   a permanent second border. */
+.ui-resize-handle::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 2px;
+  width: 1px;
+  background: transparent;
+}
+
+.ui-resize-handle:hover::before,
+.ui-resize-handle[data-dragging='true']::before {
+  background: var(--color-accent);
+}

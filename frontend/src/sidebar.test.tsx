@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { fireEvent } from '@solidjs/testing-library'
 import { createEffect } from 'solid-js'
 import {
   mountSidebar,
@@ -7,6 +8,7 @@ import {
   type SidebarAction,
   type SidebarViewProps,
 } from './sidebar'
+import { createSidebarWidthController } from './sidebar-width'
 import type { Component } from 'solid-js'
 
 // VS Code-style shell sidebar: zones for views (top) and actions (bottom).
@@ -214,6 +216,68 @@ describe('sidebar', () => {
       // a real DOM node), not a Text node or a string fragment from innerHTML.
       expect(btn.firstChild?.nodeType).toBe(Node.ELEMENT_NODE)
     }
+  })
+
+  // ── Resize wiring (nocx-qmcu) ──────────────────────────────────────────
+
+  it('renders no resize handle without a controller, and one with it', () => {
+    const { bar, panel } = mount()
+    mountSidebar(bar, panel, TWO_VIEWS, [SETTINGS_ACTION])
+    expect(panel.querySelector('[role="separator"]')).toBeNull()
+
+    document.body.replaceChildren()
+    const withCtrl = mount()
+    const ctrl = createSidebarWidthController(withCtrl.panel, 240)
+    mountSidebar(
+      withCtrl.bar,
+      withCtrl.panel,
+      TWO_VIEWS,
+      [SETTINGS_ACTION],
+      undefined,
+      undefined,
+      undefined,
+      ctrl,
+    )
+    const sep = withCtrl.panel.querySelector('[role="separator"]')
+    expect(sep).not.toBeNull()
+    expect(sep?.getAttribute('aria-label')).toBe('Resize sidebar')
+    // The controller's initial width is applied to the panel host.
+    expect(withCtrl.panel.style.getPropertyValue('--sidebar-width')).toBe('240px')
+  })
+
+  it('a drag resizes the panel live and persists once on release', () => {
+    const { bar, panel } = mount()
+    const persist = vi.fn()
+    const ctrl = createSidebarWidthController(panel, 240, persist)
+    mountSidebar(bar, panel, TWO_VIEWS, [SETTINGS_ACTION], undefined, undefined, undefined, ctrl)
+
+    const sep = panel.querySelector('[role="separator"]') as HTMLElement
+    fireEvent.pointerDown(sep, { clientX: 100, pointerId: 1 })
+    expect(ctrl.isDragging()).toBe(true)
+    fireEvent.pointerMove(sep, { clientX: 200, pointerId: 1 })
+    expect(panel.style.getPropertyValue('--sidebar-width')).toBe('340px')
+    expect(persist).not.toHaveBeenCalled() // still dragging
+
+    fireEvent.pointerUp(sep, { clientX: 200, pointerId: 1 })
+    expect(ctrl.isDragging()).toBe(false)
+    expect(persist).toHaveBeenCalledWith(340)
+  })
+
+  it('keyboard resizing commits each step and clamps at the bounds', () => {
+    const { bar, panel } = mount()
+    const persist = vi.fn()
+    const ctrl = createSidebarWidthController(panel, 636, persist)
+    mountSidebar(bar, panel, TWO_VIEWS, [SETTINGS_ACTION], undefined, undefined, undefined, ctrl)
+
+    const sep = panel.querySelector('[role="separator"]') as HTMLElement
+    fireEvent.keyDown(sep, { key: 'ArrowRight' })
+    expect(panel.style.getPropertyValue('--sidebar-width')).toBe('640px')
+    expect(persist).toHaveBeenLastCalledWith(640)
+    fireEvent.keyDown(sep, { key: 'ArrowRight' }) // already at the ceiling
+    expect(persist).toHaveBeenCalledTimes(1)
+    fireEvent.keyDown(sep, { key: 'Home' })
+    expect(panel.style.getPropertyValue('--sidebar-width')).toBe('200px')
+    expect(persist).toHaveBeenLastCalledWith(200)
   })
 })
 
